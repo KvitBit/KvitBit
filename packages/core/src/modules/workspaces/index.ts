@@ -3,8 +3,8 @@
  * package entry point; until then everything is exported from here.
  *
  * `WorkspacesLive` requires CoreStore | IdGenerator | WorkspacesRepo | WorkspaceSeries |
- * UserDirectory | RegistryLookup | BlobStorage | InvitationDelivery | BrandingPreview |
- * BankAccountReferences. `RegistryLookup` is shared with `Contacts.fromIco` (W9), so it is
+ * UserDirectory | RegistryLookup | BlobStorage | InvitationDelivery | InvitationTokens |
+ * BrandingPreview | BankAccountReferences. `RegistryLookup` is shared with `Contacts.fromIco` (W9), so it is
  * required, never provided here.
  */
 import { Layer } from "effect";
@@ -14,6 +14,7 @@ import {
   BrandingPreviewFake,
   CaptureInvitationDelivery,
   type DirectoryUser,
+  InvitationTokensFake,
   UserDirectoryFake,
   WorkspaceSeriesMemory,
 } from "./ports";
@@ -48,6 +49,7 @@ export const WorkspacesTestLayer = (users: ReadonlyArray<DirectoryUser> = []) =>
     UserDirectoryFake.layer(users),
     RegistryLookup.layer,
     CaptureInvitationDelivery.layer,
+    InvitationTokensFake,
     BrandingPreviewFake,
     BankAccountReferencesFake.layer,
   );

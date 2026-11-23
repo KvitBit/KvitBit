@@ -24,11 +24,13 @@ import type {
 } from "@kvitbit/domain/contract";
 import { Conflict, Invalid } from "@kvitbit/domain/contract";
 import { Context, Effect, Layer, Ref, Schema, Stream } from "effect";
+import { sha256Hex } from "../../shared/hash";
 import type { IdGenerator } from "../../shared/ids";
 import { newId } from "../../shared/ids";
 import type { StoreUnavailable } from "../../store/CoreStore";
 import { defineCollection, MemoryTables } from "../../store/tables";
-import type { Branding, InvitationRole, IssuingEntity } from "./model";
+import type { Branding, IssuingEntity } from "./model";
+import { storeOnly } from "./rules";
 
 // UserDirectory -------------------------------------------------------------------------------
 
@@ -212,7 +214,7 @@ export const WorkspaceSeriesMemory: Layer.Layer<
       Effect.gen(function* () {
         for (const other of yield* ofWorkspace(workspaceId)) {
           if (other.kind === kind && other.id !== keep && other.isDefault) {
-            yield* Effect.orDie(rows.update({ ...other, isDefault: false }, other.revision));
+            yield* storeOnly(rows.update({ ...other, isDefault: false }, other.revision));
           }
         }
       });
@@ -226,7 +228,7 @@ export const WorkspaceSeriesMemory: Layer.Layer<
             const first = !all.some((s) => s.kind === input.kind);
             const isDefault = first || input.isDefault === true;
             const id = yield* Effect.provide(newId<NumberingSeriesId>(), ids);
-            const row = yield* Effect.orDie(
+            const row = yield* storeOnly(
               rows.insert({
                 id,
                 workspaceId,
@@ -253,7 +255,7 @@ export const WorkspaceSeriesMemory: Layer.Layer<
             return yield* patternInvalid({ reason: "below_used", minimum: String(used) });
           }
           const isDefault = current.isDefault || input.isDefault === true;
-          const next = yield* Effect.orDie(
+          const next = yield* storeOnly(
             rows.update(
               {
                 ...current,
@@ -279,7 +281,7 @@ export const WorkspaceSeriesMemory: Layer.Layer<
           for (const kind of kinds) {
             if (all.some((s) => s.kind === kind)) continue;
             const id = yield* Effect.provide(newId<NumberingSeriesId>(), ids);
-            yield* Effect.orDie(
+            yield* storeOnly(
               rows.insert({
                 id,
                 workspaceId,
@@ -299,16 +301,27 @@ export const WorkspaceSeriesMemory: Layer.Layer<
 
 // InvitationDelivery ---------------------------------------------------------------------------
 
+/** The `MemberInvitation` workflow payload: one execution per send epoch (invite = 0). */
 export interface InvitationSend {
   readonly workspaceId: WorkspaceId;
   readonly invitationId: InvitationId;
-  /** The raw token of this send epoch; only its hash is stored. */
-  readonly token: string;
-  readonly sendEpoch: number;
-  readonly email: string;
-  readonly role: InvitationRole;
-  readonly invitedBy: UserId;
+  readonly epoch: number;
 }
+
+/**
+ * Invitation tokens, derived per (invitation, epoch) with a server secret (HMAC in apps/server),
+ * so the workflow's send activity and `OutboxReconcile` rebuild the link from the payload alone.
+ * Core stores only the token's SHA-256; a resend bumps the epoch, which invalidates the old token.
+ */
+export class InvitationTokens extends Context.Service<
+  InvitationTokens,
+  { readonly token: (invitationId: InvitationId, epoch: number) => Effect.Effect<string> }
+>()("kvitbit/core/InvitationTokens") {}
+
+/** Deterministic test tokens (a fixed test secret; never use outside tests). */
+export const InvitationTokensFake: Layer.Layer<InvitationTokens> = Layer.succeed(InvitationTokens, {
+  token: (invitationId, epoch) => sha256Hex(`test-secret:${invitationId}:${epoch}`),
+});
 
 export class InvitationDelivery extends Context.Service<
   InvitationDelivery,

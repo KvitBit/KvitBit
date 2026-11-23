@@ -123,7 +123,22 @@ export const MAX_DUE_DAYS = 365;
 export const MAX_REMINDER_OFFSETS = 10;
 /** Invitations expire 7 days after their last send. */
 export const INVITATION_TTL_MILLIS = 7 * DAY_MILLIS;
+/** C6: `resendInvitation` sends no second email within this window. */
+export const RESEND_COOLDOWN_MILLIS = 60 * 1000;
 /** Expired invitations stay listed this long. */
 export const INVITATION_LIST_EXPIRED_MILLIS = 30 * DAY_MILLIS;
 /** A former slug redirects this long (W6). */
 export const SLUG_ALIAS_TTL_MILLIS = 90 * DAY_MILLIS;
+
+/**
+ * Keeps `StoreUnavailable` (it becomes `Unavailable{database}`) and turns every other failure into
+ * a defect: for store calls whose NotFound, Conflict or UniqueViolation cannot happen after a lock.
+ */
+export const storeOnly = <A, E extends { readonly _tag: string }, R>(
+  effect: Effect.Effect<A, E, R>,
+): Effect.Effect<A, Extract<E, { readonly _tag: "StoreUnavailable" }>, R> =>
+  Effect.catchIf(
+    effect,
+    (error) => error._tag !== "StoreUnavailable",
+    (error) => Effect.die(error),
+  ) as Effect.Effect<A, Extract<E, { readonly _tag: "StoreUnavailable" }>, R>;

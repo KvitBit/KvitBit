@@ -327,9 +327,7 @@ describe("bank accounts", () => {
         ]);
         // The only EUR account, unused: removable without a replacement.
         yield* remove(eur.id);
-        expect(yield* failure(remove(eur.id))).toEqual(
-          new NotFound({ entity: "BankAccount", id: eur.id }),
-        );
+        yield* remove(eur.id); // idempotent by state (C6)
         expect((yield* history(s.workspaceId)).at(-1)?.action).toBe("workspace.bankAccount.remove");
       }),
     ));
@@ -432,7 +430,8 @@ describe("branding images (W7) and preview", () => {
         expect(yield* failure(as(s.admin)(ws.brandingImage("logo")))).toEqual(
           new NotFound({ entity: "BrandingImage", id: "logo" }),
         );
-        expect((yield* Ref.get(blobs.blobs)).size).toBe(0);
+        // Content-addressed blobs are not deleted eagerly (housekeeping collects them).
+        expect((yield* Ref.get(blobs.blobs)).size).toBe(1);
       }),
     ));
 

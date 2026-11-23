@@ -15,6 +15,7 @@ import { TestClock } from "effect/testing";
 import {
   CaptureInvitationDelivery,
   type DirectoryUser,
+  InvitationTokens,
   WorkspacesTestLayer,
 } from "../../../src/modules/workspaces";
 import { CoreStore } from "../../../src/store/CoreStore";
@@ -78,7 +79,8 @@ export const lastToken = Effect.gen(function* () {
   const sent = yield* Ref.get(capture.sent);
   const last = sent[sent.length - 1];
   if (last === undefined) return yield* Effect.die("no invitation sent");
-  return last.token;
+  const tokens = yield* InvitationTokens;
+  return yield* tokens.token(last.invitationId, last.epoch);
 });
 
 export interface Seeded {

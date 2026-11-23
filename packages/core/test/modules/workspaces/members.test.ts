@@ -180,8 +180,8 @@ describe("invitations", () => {
           expiresAt: "2026-11-30T09:00:00.000Z",
         });
         const sent = yield* Ref.get(capture.sent);
-        expect(sent.map((x) => [x.invitationId, x.sendEpoch, x.email])).toEqual([
-          [invitation.id, 1, "Outsider@Example.cz"],
+        expect(sent).toEqual([
+          { workspaceId: owner.workspaceId, invitationId: invitation.id, epoch: 0 },
         ]);
         const t = token(yield* lastToken);
         expect(yield* as(invitationHolder(t))(ws.peekInvitation)).toEqual({
@@ -232,38 +232,74 @@ describe("invitations", () => {
       }),
     ));
 
-  test("expiry after 7 days; resend extends it with a new token; revoke ends it", () =>
+  test("resend: new epoch and token, 60 s cooldown, pending only; expiry after 7 days", () =>
     scenario(
       Effect.gen(function* () {
         const ws = yield* W;
+        const capture = yield* CaptureInvitationDelivery;
         const s = yield* seed();
         const invitation = yield* as(s.admin)(ws.invite("outsider@example.cz", "member"));
         const first = token(yield* lastToken);
-        yield* TestClock.adjust("8 days");
-        expect((yield* as(invitationHolder(first))(ws.peekInvitation)).status).toBe("expired");
-        expect(yield* failure(as(accountOf(OUTSIDER))(ws.acceptInvitation(first)))).toEqual(
-          new Conflict({ reason: "illegal_transition", detail: "invitation.not_pending" }),
-        );
-        expect((yield* as(s.admin)(ws.invitations)).map((i) => i.status)).toEqual(["expired"]);
+        const sent = () =>
+          Effect.map(Ref.get(capture.sent), (all) =>
+            all.filter((x) => x.invitationId === invitation.id),
+          );
+        // Within 60 s of the last send a resend is a no-op (C6).
         yield* as(s.admin)(ws.resendInvitation(invitation.id));
+        expect((yield* sent()).map((x) => x.epoch)).toEqual([0]);
+        yield* TestClock.adjust("2 minutes");
+        yield* as(s.admin)(ws.resendInvitation(invitation.id));
+        expect((yield* sent()).map((x) => x.epoch)).toEqual([0, 1]);
         const second = token(yield* lastToken);
         expect(second).not.toBe(first);
         expect(yield* failure(as(invitationHolder(first))(ws.peekInvitation))).toBeInstanceOf(
           NotFound,
         );
-        const renewed = yield* as(invitationHolder(second))(ws.peekInvitation);
-        expect(renewed).toMatchObject({ status: "pending", expiresAt: "2026-12-08T09:00:00.000Z" });
-        yield* as(s.admin)(ws.revokeInvitation(invitation.id));
-        yield* as(s.admin)(ws.revokeInvitation(invitation.id)); // idempotent
-        expect((yield* as(invitationHolder(second))(ws.peekInvitation)).status).toBe("revoked");
+        expect(yield* as(invitationHolder(second))(ws.peekInvitation)).toMatchObject({
+          status: "pending",
+          expiresAt: "2026-11-30T09:02:00.000Z",
+        });
+        // Expired after 7 days: no accept, no resend; inviting the email again renews it.
+        yield* TestClock.adjust("8 days");
+        expect((yield* as(invitationHolder(second))(ws.peekInvitation)).status).toBe("expired");
         expect(yield* failure(as(accountOf(OUTSIDER))(ws.acceptInvitation(second)))).toEqual(
           new Conflict({ reason: "illegal_transition", detail: "invitation.not_pending" }),
         );
         expect(yield* failure(as(s.admin)(ws.resendInvitation(invitation.id)))).toEqual(
           new Conflict({ reason: "illegal_transition", detail: "invitation.not_pending" }),
         );
-        const actions = (yield* history(s.workspaceId)).map((e) => e.action).slice(-3);
-        expect(actions).toEqual(["member.invite", "member.invite.resend", "member.invite.revoke"]);
+        expect((yield* as(s.admin)(ws.invitations)).map((i) => i.status)).toEqual(["expired"]);
+        const renewed = yield* as(s.admin)(ws.invite("outsider@example.cz", "member"));
+        expect(renewed).toMatchObject({ id: invitation.id, status: "pending" });
+        expect((yield* sent()).map((x) => x.epoch)).toEqual([0, 1, 2]);
+        const third = token(yield* lastToken);
+        yield* as(accountOf(OUTSIDER))(ws.acceptInvitation(third));
+        expect((yield* as(s.admin)(ws.members)).map((m) => m.userId)).toContain(OUTSIDER);
+      }),
+    ));
+
+  test("revoke ends a pending or expired invitation and is idempotent", () =>
+    scenario(
+      Effect.gen(function* () {
+        const ws = yield* W;
+        const s = yield* seed();
+        const invitation = yield* as(s.admin)(ws.invite("outsider@example.cz", "member"));
+        const t = token(yield* lastToken);
+        yield* as(s.admin)(ws.revokeInvitation(invitation.id));
+        yield* as(s.admin)(ws.revokeInvitation(invitation.id));
+        expect((yield* as(invitationHolder(t))(ws.peekInvitation)).status).toBe("revoked");
+        expect(yield* failure(as(accountOf(OUTSIDER))(ws.acceptInvitation(t)))).toEqual(
+          new Conflict({ reason: "illegal_transition", detail: "invitation.not_pending" }),
+        );
+        expect(yield* failure(as(s.admin)(ws.resendInvitation(invitation.id)))).toEqual(
+          new Conflict({ reason: "illegal_transition", detail: "invitation.not_pending" }),
+        );
+        const expiring = yield* as(s.admin)(ws.invite("late@example.cz", "member"));
+        yield* TestClock.adjust("8 days");
+        yield* as(s.admin)(ws.revokeInvitation(expiring.id));
+        expect(yield* as(s.admin)(ws.invitations)).toEqual([]);
+        const actions = (yield* history(s.workspaceId)).map((e) => e.action);
+        expect(actions.filter((a) => a === "member.invite.revoke").length).toBe(2);
       }),
     ));
 
@@ -325,11 +361,12 @@ describe("recordAccessEvent", () => {
   const event = (
     action: "apiKey.create" | "apiKey.revoke" | "grant.create" | "grant.revoke",
     onBehalfOf?: string,
+    id = "cred-1",
   ) => ({
     action,
     subject: {
       entity: action.startsWith("apiKey") ? ("ApiKey" as const) : ("McpGrant" as const),
-      id: "cred-1",
+      id,
       name: "CI",
     },
     ...(onBehalfOf === undefined ? {} : { onBehalfOf: onBehalfOf as never }),
@@ -360,14 +397,13 @@ describe("recordAccessEvent", () => {
         expect(
           yield* failure(as(s.member)(ws.recordAccessEvent(event("grant.revoke", ADMIN)))),
         ).toEqual(forbidden("grant.revoke.all"));
-        yield* as(s.admin)(ws.recordAccessEvent(event("grant.revoke", MEMBER)));
+        // Idempotent by subject and action (C6): the repeat writes nothing.
+        yield* as(s.member)(ws.recordAccessEvent(event("grant.revoke")));
         const grants = yield* history(s.workspaceId, { entity: "McpGrant", id: "cred-1" });
-        expect(grants.map((e) => e.action)).toEqual([
-          "grant.create",
-          "grant.revoke",
-          "grant.revoke",
-        ]);
-        expect(grants.at(-1)?.changes).toContainEqual({
+        expect(grants.map((e) => e.action)).toEqual(["grant.create", "grant.revoke"]);
+        yield* as(s.admin)(ws.recordAccessEvent(event("grant.revoke", MEMBER, "cred-2")));
+        const other = yield* history(s.workspaceId, { entity: "McpGrant", id: "cred-2" });
+        expect(other.at(-1)?.changes).toContainEqual({
           path: "onBehalfOf",
           before: null,
           after: MEMBER,

@@ -153,12 +153,14 @@ export const InvitationRow = Schema.Struct({
   email: Schema.String,
   emailLower: Schema.String,
   role: InvitationRole,
-  /** `expired` is derived from `expiresAt` at read time. */
-  status: Schema.Literals(["pending", "revoked", "accepted"]),
+  /** The workflow's expire step stores `expired`; reads also derive it from `expiresAt`. */
+  status: Schema.Literals(["pending", "expired", "revoked", "accepted"]),
   /** SHA-256 hex of the current token; the token itself is never stored. */
   tokenHash: Schema.String,
-  /** Bumped by every resend; each epoch has its own token and email. */
+  /** 0 on invite, + 1 per resend; each epoch has its own token and email. */
   sendEpoch: Schema.Int,
+  /** When the current epoch's email was requested (resend cooldown, C6). */
+  lastSentAt: Schema.String,
   invitedBy: UserId,
   createdAt: Schema.String,
   expiresAt: Schema.String,
@@ -225,7 +227,8 @@ export const SettingsPatchFields = Schema.Struct({
       pdfTemplate: Schema.optional(PdfTemplate),
       accentColor: Schema.optional(Schema.String),
       footerText: Schema.optional(Schema.NullOr(Schema.String)),
-      theme: Schema.optional(Schema.NullOr(ThemeSource)),
+      /** Checked by the module (theme.* issue codes), so it decodes as any value here. */
+      theme: Schema.optional(Schema.NullOr(Schema.Unknown)),
     }),
   ),
   defaults: Schema.optional(
