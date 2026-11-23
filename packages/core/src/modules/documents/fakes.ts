@@ -9,7 +9,7 @@ import type {
   PriceListItemId,
   WorkspaceId,
 } from "@kvitbit/domain/contract";
-import { NotFound } from "@kvitbit/domain/contract";
+import { CurrentCaller, NotFound } from "@kvitbit/domain/contract";
 import { Context, Effect, Layer, Ref } from "effect";
 import type {
   ContactForDocument,
@@ -106,12 +106,17 @@ const ports = Layer.mergeAll(
     DocumentIssuers,
     Effect.map(DocumentFixtures, (f) =>
       DocumentIssuers.of({
+        // As agreed in #418: only the current Member/System caller's Workspace is visible.
         forDocument: (workspaceId: WorkspaceId) =>
-          Effect.flatMap(Ref.get(f.issuers), (all) => {
-            const found = all.get(workspaceId);
-            return found
-              ? Effect.succeed(found)
-              : Effect.fail(new NotFound({ entity: "Workspace", id: workspaceId }));
+          Effect.gen(function* () {
+            const caller = yield* CurrentCaller;
+            const found = (yield* Ref.get(f.issuers)).get(workspaceId);
+            const own =
+              (caller._tag === "Member" || caller._tag === "System") &&
+              caller.workspaceId === workspaceId;
+            return found && own
+              ? found
+              : yield* new NotFound({ entity: "Workspace", id: workspaceId });
           }),
       }),
     ),

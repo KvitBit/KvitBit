@@ -105,10 +105,11 @@ export const pdf = (
   Effect.gen(function* () {
     const { workspaceId } = yield* authorizeInWorkspace("document.pdf");
     const row = yield* (yield* DocumentsRepo).get(workspaceId, id);
-    const view = yield* viewOf(row);
+    const language = opts?.language ?? row.language;
+    const view = yield* viewOf(row, { language });
     const bytes = yield* (yield* DocumentRenderer).render(view, {
       template: opts?.template ?? "classic",
-      language: opts?.language ?? row.language,
+      language,
     });
     return {
       filename: filenameOf(row.number, row.id),

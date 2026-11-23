@@ -6,7 +6,8 @@
  *
  * `DocumentContacts` and `DocumentPriceList` are structurally identical to core-identity's
  * `ContactSnapshots.forDocument` and `PriceListItems.forLine` (board agreement #402); the
- * Issuing Entity shape is the #407 proposal. Integration binds each with a one-line layer, e.g.
+ * Issuing Entity shape is #407 as accepted in #414 and amended in #418 (it reads
+ * `CurrentCaller`: a workspaceId other than the caller's is NotFound{Workspace}). Integration binds each with a one-line layer, e.g.
  * `Layer.effect(DocumentContacts, Effect.map(ContactSnapshots, (s) => DocumentContacts.of(s)))`.
  */
 import type {
@@ -15,6 +16,7 @@ import type {
   ContactId,
   ContactRole,
   CurrencyCode,
+  CurrentCaller,
   DocumentView,
   IsoDate,
   Locale,
@@ -128,7 +130,7 @@ export class DocumentIssuers extends Context.Service<
     readonly forDocument: (
       workspaceId: WorkspaceId,
       on: IsoDate,
-    ) => Effect.Effect<IssuerForDocument, NotFound | StoreUnavailable>;
+    ) => Effect.Effect<IssuerForDocument, NotFound | StoreUnavailable, CurrentCaller>;
   }
 >()("kvitbit/core/documents/DocumentIssuers") {}
 

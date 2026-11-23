@@ -10,7 +10,8 @@
  *               totals (VatBreakdown), fx + manual override, taxDocument, reminder choice as
  *               given (`remindersChoice`, `remindersOn`), links (DocumentRelation), paid totals
  *               (`paidAmount`, `payments`) with the stored `settlement`, cancel date, timestamps.
- * - repo.ts     `DocumentsRepo` port (get/getMany/getForUpdate/lock/insert/update/remove/search)
+ * - repo.ts     `DocumentsRepo` port (get/getMany/getForUpdate/lock/insert/update/remove/search,
+ *               linkSchedule for recurring issuance, board #450)
  *               + `DocumentsRepoMemory`.
  * - ports.ts    read ports `DocumentContacts`, `DocumentPriceList` (= core-identity #402),
  *               `DocumentIssuers` (#407) and `DocumentRenderer` (view -> PDF bytes);
@@ -81,7 +82,13 @@ export type {
   LineRecord,
   LinkRecord,
 } from "./record";
-export { DocumentRecord, DocumentsTable, isOverdue, NUMBER_PER_KIND } from "./record";
+export {
+  DocumentRecord,
+  DocumentsTable,
+  isOverdue,
+  NUMBER_PER_KIND,
+  SCHEDULE_OCCURRENCE,
+} from "./record";
 export type { DocumentPage, DocumentSearch } from "./repo";
 export { DocumentsRepo, DocumentsRepoMemory } from "./repo";
 export { DocumentSender, DocumentSenderStub } from "./sender";

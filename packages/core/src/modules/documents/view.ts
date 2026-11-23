@@ -15,6 +15,7 @@ import type {
   IsoDate,
   IssuerSnapshot,
   LineView,
+  Locale,
 } from "@kvitbit/domain/contract";
 import {
   ContactId,
@@ -99,6 +100,8 @@ export interface ViewContext {
   /** Stage 2 (share links, deliveries) fills these. */
   readonly share?: DocumentView["share"];
   readonly deliveries?: DocumentView["deliveries"];
+  /** Language of the printed texts (statutory notes); default the document's (pdf override). */
+  readonly language?: Locale;
 }
 
 export const toLineView = (line: DocumentRecord["lines"][number]): LineView =>
@@ -137,7 +140,7 @@ export const toView = (row: DocumentRecord, ctx: ViewContext): DocumentView => (
     regime: row.issuer.regime,
     treatments: new Set(row.lines.map((l) => l.treatment)),
     issuerRegisterEntry: row.issuer.registerEntry,
-    language: row.language,
+    language: ctx.language ?? row.language,
   }),
   // PaymentQr (rule D12) is not in the engines yet (src/engines/index.ts): null until it is.
   paymentQr: null,

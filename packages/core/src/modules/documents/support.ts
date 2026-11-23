@@ -7,7 +7,7 @@ import type { StoreUnavailable } from "../../store/CoreStore";
 import type { Composed } from "./compose";
 import type { DocumentRecord } from "./record";
 import { DocumentsRepo } from "./repo";
-import type { RelatedDocument } from "./view";
+import type { RelatedDocument, ViewContext } from "./view";
 import { toView } from "./view";
 
 /** Prague today and the current instant (ISO). */
@@ -37,6 +37,8 @@ export const newDraftRecord = (
   paidAmount: ZERO,
   payments: 0,
   settlement: "unpaid",
+  scheduleId: null,
+  occurrence: null,
   cancelledOn: null,
   createdAt: at,
   updatedAt: at,
@@ -67,11 +69,12 @@ export const relatedOf = (
 /** The full view of a stored record as of now. */
 export const viewOf = (
   row: DocumentRecord,
+  extra: Omit<ViewContext, "today" | "related"> = {},
 ): Effect.Effect<DocumentView, StoreUnavailable, DocumentsRepo> =>
   Effect.gen(function* () {
     const { today } = yield* now;
     const related = yield* relatedOf(row);
-    return toView(row, { today, related });
+    return toView(row, { ...extra, today, related });
   });
 
 /** For signatures without `Unavailable` (get, list, history, discardDraft): a store outage dies. */

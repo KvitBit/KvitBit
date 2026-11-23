@@ -8,10 +8,15 @@
  * P2's `issue` composes again at issue time (fresh party snapshots, today's date when
  * `issuedOn` was not given) and then allocates the number; P3 builds Credit Note and Final
  * Invoice specs (deduction lines carry `deducts`) and runs them through `compose` too.
+ *
+ * Floating defaults: a draft without an explicit `issuedOn` (or due date, currency, ...) takes
+ * today / the current Contact and Workspace defaults again on every recompute (each edit, and
+ * issue); only the caller's own values (`given`) persist. Issue pins the resolved values.
  */
 import type {
   BankAccountId,
   ContactId,
+  CurrentCaller,
   DocumentId,
   DocumentInput,
   DocumentKind,
@@ -127,6 +132,7 @@ export interface ComposeOptions {
 
 export type ComposeError = Invalid | NotFound | StoreUnavailable | RatesUnavailable;
 export type ComposeServices =
+  | CurrentCaller
   | DocumentContacts
   | DocumentIssuers
   | NumberingSeries
@@ -174,7 +180,10 @@ export const expandLines = (
           : yield* orMissing(missing, ["lines", i, "item"])(
               priceList.forLine(workspaceId, line.item),
             );
-      const description = line.description ?? item?.description ?? item?.name;
+      // Blank values fall back to the item (description, then name); a blank result is invalid.
+      const description = [line.description, item?.description, item?.name]
+        .map((d) => d?.trim())
+        .find((d) => d !== undefined && d !== "");
       const unitPrice = line.unitPrice ?? item?.unitPrice;
       if (description === undefined)
         issues.push(issue(["lines", i, "description"], "request.malformed"));
@@ -317,7 +326,10 @@ const EU = new Set([
   "SK",
 ]);
 
-const isDomestic = (contact: ContactForDocument) => contact.party.address.country === "CZ";
+const countryOf = (contact: ContactForDocument) =>
+  contact.party.address.country.trim().toUpperCase();
+const isDomestic = (contact: ContactForDocument) => countryOf(contact) === "CZ";
+const isOtherEu = (contact: ContactForDocument) => EU.has(countryOf(contact));
 const hasVatId = (contact: ContactForDocument) => (contact.party.dic ?? "").trim() !== "";
 
 /**
@@ -327,7 +339,7 @@ const hasVatId = (contact: ContactForDocument) => (contact.party.dic ?? "").trim
 export const defaultTreatment = (regime: TaxRegime, contact: ContactForDocument): VatTreatment => {
   if (regime !== "vat_payer") return "outside_scope";
   if (isDomestic(contact)) return "standard";
-  if (EU.has(contact.party.address.country) && hasVatId(contact)) return "reverse_charge";
+  if (isOtherEu(contact) && hasVatId(contact)) return "reverse_charge";
   return "outside_scope";
 };
 
@@ -340,8 +352,10 @@ const treatmentOf = (line: LineSpec, regime: TaxRegime, contact: ContactForDocum
 
 /**
  * Rule D9 checks: non_vat_payer (and identified_person on a domestic supply) accept only
- * outside_scope; identified_person never charges standard/reduced VAT; reverse_charge and
- * exempt_intra_eu_goods need the buyer's VAT ID.
+ * outside_scope; identified_person may otherwise use only reverse_charge (services to another
+ * EU state; interpretation to confirm with product/legal); exempt_intra_eu_goods (§64) is a
+ * vat_payer's supply to a buyer in another EU state; reverse_charge and exempt_intra_eu_goods
+ * need the buyer's VAT ID.
  */
 const regimeIssues = (
   regime: TaxRegime,
@@ -353,11 +367,11 @@ const regimeIssues = (
     const allowed =
       regime === "vat_payer" ||
       treatment === "outside_scope" ||
-      (regime === "identified_person" &&
-        !isDomestic(contact) &&
-        treatment !== "standard" &&
-        treatment !== "reduced");
+      (regime === "identified_person" && !isDomestic(contact) && treatment === "reverse_charge");
     if (!allowed) return [issue(path, "vat.not_allowed_for_regime", { regime, treatment })];
+    if (treatment === "exempt_intra_eu_goods" && !isOtherEu(contact)) {
+      return [issue(path, "vat.not_allowed_for_regime", { regime, treatment })];
+    }
     if (
       (treatment === "reverse_charge" || treatment === "exempt_intra_eu_goods") &&
       !hasVatId(contact)

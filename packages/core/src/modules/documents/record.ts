@@ -25,6 +25,7 @@ import {
   NumberingSeriesId,
   PaymentMethod,
   PriceListItemId,
+  ScheduleId,
   TaxRegime,
   VatBreakdown,
   VatTreatment,
@@ -189,6 +190,10 @@ export const DocumentRecord = Schema.Struct({
   /** Stored settlement, kept current by every write that changes payments or credits. */
   settlement: DocumentSettlement,
 
+  /** Recurring issuance link (board #450, `RecurringDocumentLink`); null otherwise. */
+  scheduleId: Schema.NullOr(ScheduleId),
+  occurrence: Schema.NullOr(IsoDate),
+
   cancelledOn: Schema.NullOr(IsoDate),
   createdAt: Schema.String,
   updatedAt: Schema.String,
@@ -199,6 +204,9 @@ export type DocumentRecord = typeof DocumentRecord.Type;
 /** Unique index: a number is taken once per (workspace, kind) among stored documents. */
 export const NUMBER_PER_KIND = "documents_number_per_kind";
 
+/** Unique index: one document per (schedule, occurrence) (board #450). */
+export const SCHEDULE_OCCURRENCE = "documents_schedule_occurrence_unique";
+
 export const DocumentsTable = defineCollection<DocumentRecord>({
   name: "documents",
   entity: "Document",
@@ -208,6 +216,14 @@ export const DocumentsTable = defineCollection<DocumentRecord>({
       name: NUMBER_PER_KIND,
       scope: "workspace",
       key: (row) => (row.number === null ? null : [row.kind, row.number]),
+    },
+    {
+      name: SCHEDULE_OCCURRENCE,
+      scope: "workspace",
+      key: (row) =>
+        row.scheduleId === null || row.occurrence === null
+          ? null
+          : [row.scheduleId, row.occurrence],
     },
   ],
 });

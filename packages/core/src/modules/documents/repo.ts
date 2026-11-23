@@ -12,6 +12,7 @@ import type {
   DocumentStatus,
   IsoDate,
   NotFound,
+  ScheduleId,
   WorkspaceId,
 } from "@kvitbit/domain/contract";
 import { Context, Effect, Layer } from "effect";
@@ -82,6 +83,16 @@ export class DocumentsRepo extends Context.Service<
       id: DocumentId,
       expectedRevision: number,
     ) => Effect.Effect<void, NotFound | Conflict | StoreUnavailable>;
+    /**
+     * Recurring issuance link (board #450): sets `scheduleId`/`occurrence` inside the caller's
+     * transaction; a second document for the same occurrence is
+     * `UniqueViolation{documents_schedule_occurrence_unique}`. Bumps the revision.
+     */
+    readonly linkSchedule: (
+      workspaceId: WorkspaceId,
+      id: DocumentId,
+      link: { readonly scheduleId: ScheduleId; readonly occurrence: IsoDate },
+    ) => Effect.Effect<void, NotFound | UniqueViolation | StoreUnavailable>;
     /** One page of `search` in list order, plus whether more rows follow. */
     readonly search: (
       workspaceId: WorkspaceId,
@@ -134,6 +145,14 @@ export const DocumentsRepoMemory: Layer.Layer<DocumentsRepo, never, MemoryTables
       update: table.update,
       remove: (workspaceId, id, expectedRevision) =>
         table.remove(workspaceId, id, expectedRevision),
+      linkSchedule: (workspaceId, id, link) =>
+        Effect.flatMap(table.lock(workspaceId, id), (row) =>
+          table.update({ ...row, ...link }, row.revision).pipe(
+            // The row is locked: its revision cannot have moved.
+            Effect.catchTag("Conflict", (e) => Effect.die(e)),
+            Effect.asVoid,
+          ),
+        ),
       search: (workspaceId, s, page) =>
         Effect.map(
           table.list(workspaceId, {
