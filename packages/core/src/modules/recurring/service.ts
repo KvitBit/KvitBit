@@ -28,7 +28,6 @@ import type {
 import {
   Conflict,
   type CurrentCaller,
-  DocumentId as DocumentIdSchema,
   DocumentPatch as DocumentPatchSchema,
   Documents,
   Forbidden,
@@ -37,7 +36,7 @@ import {
   TemplateInput as TemplateInputSchema,
   Templates,
 } from "@kvitbit/domain/contract";
-import { Clock, Effect, Layer, Option, Result, Schema } from "effect";
+import { BigDecimal, Clock, Effect, Layer, Option, Result, Schema } from "effect";
 import { pragueDate } from "../../engines/calendar";
 import { Schedules } from "../../engines/schedules";
 import { authorizeInWorkspace } from "../../policy/Policy";
@@ -97,6 +96,10 @@ export interface TemplatesImpl {
   >;
 }
 
+/**
+ * Interim code for a blank Template name: no domain IssueCode names it yet and packages/domain is
+ * read-only for core streams (board #430, same as numbering). Used for that case only.
+ */
 const malformed = (path: ReadonlyArray<string>, reason: string) =>
   new Invalid({ issues: [{ path: [...path], code: "request.malformed", params: { reason } }] });
 
@@ -108,7 +111,30 @@ const UsePayload = Schema.Struct({
   patch: Schema.optional(DocumentPatchSchema),
 });
 
-const UseResult = Schema.Struct({ id: DocumentIdSchema });
+/**
+ * The request-log result of `use` (C3: a replay returns the original result). DocumentView
+ * carries BigDecimal values the domain schema cannot JSON-encode, so the view is stored as JSON
+ * with each BigDecimal tagged by its exact (value, scale) and restored on replay.
+ */
+const ViewSnapshot = Schema.Struct({ json: Schema.String });
+const DECIMAL = "$kvitbit.decimal";
+const tagDecimals = (value: unknown): unknown => {
+  if (BigDecimal.isBigDecimal(value)) return { [DECIMAL]: [value.value.toString(), value.scale] };
+  if (Array.isArray(value)) return value.map(tagDecimals);
+  if (typeof value === "object" && value !== null) {
+    return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, tagDecimals(v)]));
+  }
+  return value;
+};
+const snapshotOf = (view: unknown): string => JSON.stringify(tagDecimals(view));
+const restoreSnapshot = (json: string): unknown =>
+  JSON.parse(json, (_key, value: unknown) => {
+    if (typeof value === "object" && value !== null && DECIMAL in value) {
+      const [digits, scale] = (value as Record<string, [string, number]>)[DECIMAL] ?? ["0", 0];
+      return BigDecimal.make(BigInt(digits), scale);
+    }
+    return value;
+  });
 
 const SavePayload = Schema.Struct({
   ...TemplateInputSchema.fields,
@@ -220,12 +246,14 @@ export const documentInputOf = (input: TemplateInput): DocumentInput => {
 const applyPatch = (
   base: DocumentInput,
   patch: DocumentPatch | undefined,
-): Result.Result<DocumentInput, Invalid> => {
+): Result.Result<DocumentInput, Conflict> => {
   if (patch === undefined) return Result.succeed(base);
   if (patch.number !== undefined)
-    return Result.fail(malformed(["patch", "number"], "not_applicable"));
+    // A number override exists only for an issued document (rule D4), not at creation.
+    return Result.fail(illegal());
   if (patch.refreshParties !== undefined) {
-    return Result.fail(malformed(["patch", "refreshParties"], "not_applicable"));
+    // A new document snapshots the parties anyway; refreshing is an edit of an existing one.
+    return Result.fail(illegal());
   }
   const next: Record<string, unknown> = { ...base };
   for (const field of PATCH_FIELDS) {
@@ -355,8 +383,14 @@ export const makeTemplates = Effect.gen(function* () {
             yield* audit(row, "template.create", inputChanges(null, row.input));
             return templateView(row, null);
           }
+          // An update without expectedRevision cannot be checked (C2): report the current
+          // revision as a revision conflict so the caller refetches and retries.
           if (expectedRevision === undefined) {
-            return yield* malformed(["expectedRevision"], "required");
+            const locked = yield* repo.lockTemplateState(workspaceId, id);
+            return yield* new Conflict({
+              reason: "revision_changed",
+              currentRevision: locked.revision,
+            });
           }
           const current = yield* repo.lockTemplate(workspaceId, id, expectedRevision);
           if (current.archivedAt !== null) return yield* illegal();
@@ -451,6 +485,12 @@ export const makeTemplates = Effect.gen(function* () {
             // Changes affect future occurrences only. An occurrence already due and not yet
             // processed stays next, so an edit never erases it; the new rule applies after it.
             // A cadence change otherwise restarts after the last issued occurrence.
+            if (before.nextOccurrence !== null && before.nextOccurrence <= day) {
+              // An occurrence is due and not processed yet (or the schedule paused on it).
+              // Changing the rule or settings now would issue or skip it under the new ones,
+              // so the edit waits: resume and let it issue, or detach and reattach.
+              return yield* illegal();
+            }
             const sameCadence =
               before.cadenceUnit === fields.cadenceUnit &&
               before.cadenceInterval === fields.cadenceInterval &&
@@ -536,7 +576,7 @@ export const makeTemplates = Effect.gen(function* () {
           key: opts?.requestKey,
           method: "Templates.use",
           payload: { schema: UsePayload as Schema.Codec<typeof payload, unknown>, value: payload },
-          result: UseResult,
+          result: ViewSnapshot,
         },
         Effect.gen(function* () {
           const row = yield* repo.getTemplate(workspaceId, templateId);
@@ -548,10 +588,10 @@ export const makeTemplates = Effect.gen(function* () {
             as === "issued"
               ? yield* documents.issue({ input: document })
               : yield* documents.createDraft(document);
-          return { id: view.id };
+          return { json: snapshotOf(view) };
         }),
       );
-      return yield* documents.get(created.id);
+      return restoreSnapshot(created.json) as DocumentView;
     }).pipe(provide, dieOnUnique, orUnavailable) as ReturnType<TemplatesImpl["use"]>;
 
   const get: TemplatesImpl["get"] = (id) =>
@@ -571,9 +611,8 @@ export const makeTemplates = Effect.gen(function* () {
     Effect.gen(function* () {
       const { workspaceId } = yield* authorizeInWorkspace("template.read");
       const limit = page?.limit ?? DEFAULT_PAGE;
-      if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
-        return yield* malformed(["limit"], "range");
-      }
+      // PageRequest bounds are enforced where the request is decoded; clamp defensively here.
+      const size = Math.min(100, Math.max(1, Math.trunc(limit)));
       const cursor = page?.cursor === undefined ? null : decodeCursor(page.cursor, templateId);
       if (page?.cursor !== undefined && cursor === null) {
         return yield* new Invalid({ issues: [{ path: ["cursor"], code: "page.cursor_mismatch" }] });
@@ -585,9 +624,9 @@ export const makeTemplates = Effect.gen(function* () {
           const rows = yield* repo.listRuns(workspaceId, {
             scheduleIds: schedules.map((s) => s.id),
             ...(cursor !== null ? { after: [cursor.occurrence, cursor.id] as const } : {}),
-            limit: limit + 1,
+            limit: size + 1,
           });
-          const items = rows.slice(0, limit);
+          const items = rows.slice(0, size);
           const statuses = yield* deliveries.statuses(
             workspaceId,
             items.flatMap((run) => (run.deliveryId === null ? [] : [run.deliveryId])),
@@ -596,7 +635,7 @@ export const makeTemplates = Effect.gen(function* () {
           return {
             items: items.map((run) => runView(run, statuses)),
             nextCursor:
-              rows.length > limit && last !== undefined
+              rows.length > size && last !== undefined
                 ? encodeCursor({ template: templateId, occurrence: last.occurrence, id: last.id })
                 : null,
           };

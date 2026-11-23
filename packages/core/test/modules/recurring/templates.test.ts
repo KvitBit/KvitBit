@@ -66,7 +66,9 @@ describe("Templates.save", () => {
     expect(stale).toEqual(
       Exit.fail(new Conflict({ reason: "revision_changed", currentRevision: 2 })),
     );
-    expect(Exit.isFailure(missing) && JSON.stringify(missing.cause)).toContain("expectedRevision");
+    expect(missing).toEqual(
+      Exit.fail(new Conflict({ reason: "revision_changed", currentRevision: 2 })),
+    );
   });
 
   test("rejects an empty name and a negative relative due", async () => {

@@ -8,13 +8,14 @@ import type {
 } from "@kvitbit/domain/contract";
 import {
   Conflict,
+  Documents,
   Forbidden,
   Invalid,
   NotFound,
   Templates,
   Unavailable,
 } from "@kvitbit/domain/contract";
-import { Cause, Context, Effect, Exit, Layer, Ref } from "effect";
+import { BigDecimal, Cause, Context, Effect, Exit, Layer, Ref } from "effect";
 import { TestClock } from "effect/testing";
 import type { TemplateViewValue } from "../../../src/modules/recurring";
 import {
@@ -663,7 +664,8 @@ describe("Templates.runs", () => {
     expect(r.foreign).toEqual(
       Exit.fail(new Invalid({ issues: [{ path: ["cursor"], code: "page.cursor_mismatch" }] })),
     );
-    expect(Exit.isFailure(r.badLimit)).toBe(true);
+    // Out-of-range limits are clamped (PageRequest bounds are checked at decode).
+    expect(Exit.isSuccess(r.badLimit)).toBe(true);
   });
 });
 
@@ -808,27 +810,33 @@ describe("review round 1 regressions", () => {
     expect(r.docs.map((x) => x.input.issuedOn)).toEqual([d("2026-11-23")]);
   });
 
-  test("an edit keeps an overdue occurrence; it issues on the next sweep", async () => {
+  test("an edit waits while an occurrence is due; settings-only edits keep the next date", async () => {
     const exit = await scenario(
       member("owner"),
       Effect.gen(function* () {
         const t = yield* Templates;
-        const { templateId } = yield* setup(MONTHLY);
-        yield* at("2026-11-24T09:00:00Z");
-        const sendOn = view(yield* t.schedule(templateId, { ...MONTHLY, autoSend: true }, 2));
-        const weekly = view(
-          yield* t.schedule(templateId, { ...MONTHLY, every: { weeks: 1 } }, sendOn.revision),
+        const weekly = { ...MONTHLY, every: { weeks: 1 } };
+        const { templateId } = yield* setup(weekly);
+        yield* at("2026-11-30T08:00:00Z");
+        const blocked = yield* Effect.exit(
+          t.schedule(templateId, { ...MONTHLY, issueAs: "proforma", autoSend: true }, 2),
         );
+        // The due backlog issues under the rule and settings it was due under.
         yield* sweep;
-        return { sendOn, weekly, docs: yield* documents, after: yield* getTemplate(templateId) };
+        yield* sweep;
+        const sendOn = view(yield* t.schedule(templateId, { ...weekly, autoSend: true }, 2));
+        return { blocked, sendOn, docs: yield* documents, sent: yield* deliveries };
       }),
     );
     const r = ok(exit);
-    expect(r.sendOn.schedule?.nextOccurrence).toBe(d("2026-11-23"));
-    expect(r.weekly.schedule?.nextOccurrence).toBe(d("2026-11-23"));
-    expect(r.docs.map((x) => x.input.issuedOn)).toEqual([d("2026-11-23")]);
-    // The new weekly rule applies after the kept occurrence.
-    expect(r.after.schedule?.nextOccurrence).toBe(d("2026-11-30"));
+    expect(r.blocked).toEqual(Exit.fail(new Conflict({ reason: "illegal_transition" })));
+    expect(r.docs.map((x) => [x.kind, x.input.issuedOn])).toEqual([
+      ["invoice", d("2026-11-23")],
+      ["invoice", d("2026-11-30")],
+    ]);
+    expect(r.sent).toHaveLength(0);
+    expect(r.sendOn.schedule?.nextOccurrence).toBe(d("2026-12-07"));
+    expect(r.sendOn.schedule?.autoSend).toBe(true);
   });
 
   test("a stale or foreign schedule call reports the revision or NotFound before Invalid", async () => {
@@ -854,25 +862,31 @@ describe("review round 1 regressions", () => {
     expect(r.foreign).toEqual(Exit.fail(new NotFound({ entity: "Template", id: r.id })));
   });
 
-  test("keyed use with decimal lines replays the same document; a different patch conflicts", async () => {
+  test("keyed use replays the original view, decimals and all, even after a discard", async () => {
     const KEY = "req-use-1" as never;
     const exit = await scenario(
       member("owner"),
       Effect.gen(function* () {
         const t = yield* Templates;
         const id = view(yield* t.save(templateInput())).id as TemplateId;
-        const first = yield* t.use(id, { as: "issued" }, { requestKey: KEY });
-        const replay = yield* t.use(id, { as: "issued" }, { requestKey: KEY });
+        const first = yield* t.use(id, {}, { requestKey: KEY });
+        const docs = yield* Documents;
+        yield* docs.discardDraft(first.id, first.revision);
+        const replay = yield* t.use(id, {}, { requestKey: KEY });
         const mismatch = yield* Effect.exit(
-          t.use(id, { as: "issued", patch: { note: "x" } }, { requestKey: KEY }),
+          t.use(id, { patch: { note: "x" } }, { requestKey: KEY }),
         );
-        return { first, replay, mismatch, docs: yield* documents };
+        return { first, replay, mismatch, left: yield* documents };
       }),
     );
     const r = ok(exit);
-    expect(r.replay.id).toBe(r.first.id);
-    expect(r.docs).toHaveLength(1);
-    expect(r.docs[0]?.input.lines[0]?.unitPrice).toBeDefined();
+    expect(r.replay).toEqual(r.first);
+    const line = (
+      r.replay as unknown as { lines: ReadonlyArray<{ unitPrice: BigDecimal.BigDecimal }> }
+    ).lines[0];
+    expect(BigDecimal.isBigDecimal(line?.unitPrice)).toBe(true);
+    expect(line?.unitPrice).toEqual(BigDecimal.fromStringUnsafe("1250.50"));
+    expect(r.left).toHaveLength(0);
     expect(r.mismatch).toEqual(Exit.fail(new Conflict({ reason: "idempotency_mismatch" })));
   });
 });

@@ -100,6 +100,7 @@ const viewOf = (row: StubDocument): DocumentView =>
     number: row.number,
     status: row.status,
     revision: row.revision,
+    lines: row.input.lines,
     dates: { issuedOn: row.issuedOn, taxableSupplyOn: row.issuedOn, dueOn: row.issuedOn },
   }) as unknown as DocumentView;
 
@@ -144,6 +145,13 @@ export const DocumentsStubLayer = Layer.effectContext(
       });
 
     const documents = {
+      discardDraft: (id: DocumentId, expectedRevision: number) =>
+        Effect.gen(function* () {
+          yield* authorize("document.draft");
+          const caller = yield* CurrentCaller;
+          const ws = (caller as { readonly workspaceId: WorkspaceId }).workspaceId;
+          yield* store.transaction(docs.remove(ws, id, expectedRevision));
+        }),
       get: (id: DocumentId) =>
         Effect.gen(function* () {
           yield* authorize("document.read");
