@@ -4,6 +4,7 @@ import { EmailSender } from "@kvitbit/domain/ports";
 import { Effect, Exit, Layer, Redacted } from "effect";
 import { FetchHttpClient } from "effect/http";
 import { message } from "./fixtures";
+import { selfSignedCert, selfSignedKey } from "./tls-fixture";
 
 /** A local port with nothing listening: the real clients fail before connecting. */
 const closedPort = async () => {
@@ -51,6 +52,36 @@ describe("real transports against a closed port", () => {
       }).pipe(Layer.provide(FetchHttpClient.layer)),
     );
     expect(failureTags(exit)).toEqual(["EmailNotAccepted"]);
+  });
+
+  test("nodemailer refusing an untrusted TLS certificate is EmailNotAccepted", async () => {
+    let received = "";
+    const server = Bun.listen({
+      hostname: "127.0.0.1",
+      port: 0,
+      tls: { cert: selfSignedCert, key: selfSignedKey },
+      socket: {
+        open(socket) {
+          socket.write("220 stub ESMTP\r\n");
+        },
+        data(socket, chunk) {
+          received += new TextDecoder().decode(chunk);
+          socket.write("250 ok\r\n");
+        },
+      },
+    });
+    try {
+      const exit = await sendWith(
+        layerSmtp(
+          { host: "127.0.0.1", port: server.port, secure: true, connectionTimeout: 2000 },
+          { from: "Kvitbit <noreply@kvitbit.cz>" },
+        ),
+      );
+      expect(failureTags(exit)).toEqual(["EmailNotAccepted"]);
+      expect(received).not.toContain("DATA");
+    } finally {
+      server.stop(true);
+    }
   });
 
   test.each([

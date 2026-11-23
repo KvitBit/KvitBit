@@ -109,13 +109,24 @@ const setupCodes = new Set([
   "EMAXLIMIT",
 ]);
 
-/** System codes nodemailer keeps as `originalCode` that mean no connection was made. */
+/** System codes nodemailer keeps as `originalCode` that mean no SMTP session was established. */
 const unconnectedCodes = new Set([
   "ECONNREFUSED",
   "ENOTFOUND",
   "EAI_AGAIN",
   "EHOSTUNREACH",
   "ENETUNREACH",
+  // TLS certificate verification fails during the handshake, before any SMTP command.
+  "CERT_HAS_EXPIRED",
+  "CERT_NOT_YET_VALID",
+  "CERT_REVOKED",
+  "DEPTH_ZERO_SELF_SIGNED_CERT",
+  "SELF_SIGNED_CERT_IN_CHAIN",
+  "UNABLE_TO_GET_ISSUER_CERT",
+  "UNABLE_TO_GET_ISSUER_CERT_LOCALLY",
+  "UNABLE_TO_VERIFY_LEAF_SIGNATURE",
+  "ERR_TLS_CERT_ALTNAME_INVALID",
+  "ERR_SSL_WRONG_VERSION_NUMBER",
 ]);
 
 const field = (error: unknown, name: string): unknown =>

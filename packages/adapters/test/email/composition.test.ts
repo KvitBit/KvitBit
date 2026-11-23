@@ -15,7 +15,7 @@ import {
   EmailSender,
   type OutboundEmail,
 } from "@kvitbit/domain/ports";
-import { Effect, Exit, Logger } from "effect";
+import { Effect, Exit, Fiber, Logger } from "effect";
 import { message } from "./fixtures";
 
 type SendError = EmailRejected | EmailNotAccepted | EmailOutcomeUnknown;
@@ -82,63 +82,110 @@ describe("FallbackEmailSender", () => {
 });
 
 describe("FallbackEmailSender pinning", () => {
-  const sequenced = (provider: string, outcomes: Array<"ok" | SendError>) => {
+  const opts = { idempotencyKey: "k1" };
+  type Step = "ok" | SendError | Promise<"ok" | SendError>;
+  const sequenced = (provider: string, steps: Array<Step>) => {
     const calls: Array<string> = [];
     const sender: EmailSenderService = {
       send: (_m, { idempotencyKey }) =>
         Effect.suspend(() => {
           calls.push(idempotencyKey);
-          const outcome = outcomes.shift() ?? "ok";
-          return outcome === "ok"
-            ? Effect.succeed({ provider, providerMessageId: `${provider}-id` })
-            : Effect.fail(outcome);
+          const step = steps.shift() ?? "ok";
+          return Effect.promise(() => Promise.resolve(step)).pipe(
+            Effect.flatMap((outcome) =>
+              outcome === "ok"
+                ? Effect.succeed({ provider, providerMessageId: `${provider}-id` })
+                : Effect.fail(outcome),
+            ),
+          );
         }),
     };
     return { sender, calls };
   };
+  const tags = (exit: Exit.Exit<unknown, SendError>) =>
+    Exit.isFailure(exit)
+      ? exit.cause.reasons.map((r) => ("error" in r ? (r.error._tag as string) : r._tag))
+      : ["success"];
 
-  test("a retry after OutcomeUnknown stays on the primary even if it is then refused", async () => {
-    const primary = sequenced("resend", [
-      new EmailOutcomeUnknown({}),
-      new EmailNotAccepted({ cause: { status: 503 } }),
-    ]);
+  test("a refused retry after OutcomeUnknown stays on the primary and stays unknown", async () => {
+    const primary = sequenced("resend", [new EmailOutcomeUnknown({}), new EmailNotAccepted({})]);
     const secondary = sequenced("smtp", []);
     const fallback = makeFallbackEmailSender(primary.sender, secondary.sender);
-    const first = await run(fallback.send(message(), { idempotencyKey: "k1" }));
-    const retry = await run(fallback.send(message(), { idempotencyKey: "k1" }));
-    const other = await run(fallback.send(message(), { idempotencyKey: "k2" }));
-    expect(Exit.isFailure(first) && Exit.isFailure(retry)).toBe(true);
-    expect(primary.calls).toEqual(["k1", "k1", "k2"]);
+    const first = await run(fallback.send(message(), opts));
+    const retry = await run(fallback.send(message(), opts));
+    expect(tags(first)).toEqual(["EmailOutcomeUnknown"]);
+    expect(tags(retry)).toEqual(["EmailOutcomeUnknown"]);
+    expect(primary.calls).toEqual(["k1", "k1"]);
     expect(secondary.calls).toEqual([]);
-    expect(Exit.isSuccess(other)).toBe(true);
+    const other = await run(fallback.send(message(), { idempotencyKey: "k2" }));
+    expect(tags(other)).toEqual(["success"]);
+  });
+
+  test("overlapping sends with one key run one at a time and never fail over", async () => {
+    const first = Promise.withResolvers<"ok" | SendError>();
+    const primary = sequenced("resend", [first.promise, new EmailNotAccepted({})]);
+    const secondary = sequenced("smtp", []);
+    const fallback = makeFallbackEmailSender(primary.sender, secondary.sender);
+    const a = run(fallback.send(message(), opts));
+    const b = run(fallback.send(message(), opts));
+    await Bun.sleep(5);
+    expect(primary.calls).toEqual(["k1"]);
+    first.resolve(new EmailOutcomeUnknown({}));
+    expect(tags(await a)).toEqual(["EmailOutcomeUnknown"]);
+    expect(tags(await b)).toEqual(["EmailOutcomeUnknown"]);
+    expect(secondary.calls).toEqual([]);
+  });
+
+  test("an interrupted send pins the key to its provider", async () => {
+    const pending = Promise.withResolvers<"ok" | SendError>();
+    const primary = sequenced("resend", [pending.promise, new EmailNotAccepted({})]);
+    const secondary = sequenced("smtp", []);
+    const fallback = makeFallbackEmailSender(primary.sender, secondary.sender);
+    const fiber = Effect.runFork(fallback.send(message(), opts));
+    await Bun.sleep(5);
+    await Effect.runPromise(Fiber.interrupt(fiber));
+    pending.resolve("ok");
+    const retry = await run(fallback.send(message(), opts));
+    expect(tags(retry)).toEqual(["EmailOutcomeUnknown"]);
+    expect(secondary.calls).toEqual([]);
   });
 
   test("a key that failed over stays on the secondary", async () => {
     const primary = sequenced("resend", [new EmailNotAccepted({})]);
     const secondary = sequenced("smtp", [new EmailOutcomeUnknown({}), "ok"]);
     const fallback = makeFallbackEmailSender(primary.sender, secondary.sender);
-    await run(fallback.send(message(), { idempotencyKey: "k1" }));
-    const retry = await run(fallback.send(message(), { idempotencyKey: "k1" }));
+    await run(fallback.send(message(), opts));
+    const retry = await run(fallback.send(message(), opts));
     expect(retry).toEqual(Exit.succeed({ provider: "smtp", providerMessageId: "smtp-id" }));
     expect(primary.calls).toEqual(["k1"]);
     expect(secondary.calls).toEqual(["k1", "k1"]);
   });
 
-  test("pins are bounded and evict the oldest key", async () => {
+  test("a key both providers refused may be tried from the primary again", async () => {
+    const primary = sequenced("resend", [new EmailNotAccepted({}), "ok"]);
+    const secondary = sequenced("smtp", [new EmailNotAccepted({})]);
+    const fallback = makeFallbackEmailSender(primary.sender, secondary.sender);
+    expect(tags(await run(fallback.send(message(), opts)))).toEqual(["EmailNotAccepted"]);
+    expect(tags(await run(fallback.send(message(), opts)))).toEqual(["success"]);
+  });
+
+  test("unknown keys are never evicted; only delivered keys are bounded", async () => {
     const primary = sequenced("resend", [
       new EmailOutcomeUnknown({}),
-      new EmailOutcomeUnknown({}),
+      "ok",
+      "ok",
       new EmailNotAccepted({}),
     ]);
     const secondary = sequenced("smtp", []);
     const fallback = makeFallbackEmailSender(primary.sender, secondary.sender, {
-      maxPinnedKeys: 1,
+      maxDeliveredKeys: 1,
     });
-    await run(fallback.send(message(), { idempotencyKey: "k1" }));
+    await run(fallback.send(message(), opts));
     await run(fallback.send(message(), { idempotencyKey: "k2" }));
-    const evicted = await run(fallback.send(message(), { idempotencyKey: "k1" }));
-    expect(evicted).toEqual(Exit.succeed({ provider: "smtp", providerMessageId: "smtp-id" }));
-    expect(primary.calls).toEqual(["k1", "k2", "k1"]);
+    await run(fallback.send(message(), { idempotencyKey: "k3" }));
+    const retry = await run(fallback.send(message(), opts));
+    expect(tags(retry)).toEqual(["EmailOutcomeUnknown"]);
+    expect(secondary.calls).toEqual([]);
   });
 });
 
@@ -256,6 +303,25 @@ describe("AllowlistEmailSender", () => {
     expect(inner.calls.map((c) => [c.message.to, c.message.cc])).toEqual([
       [["ops@kvitbit.cz"], []],
     ]);
+  });
+});
+
+describe("AllowlistEmailSender ordering", () => {
+  test("a failing capture stops a mixed send before anything is delivered", async () => {
+    const inner = scripted("resend", "ok");
+    const capture = scripted("capture", new EmailNotAccepted({}));
+    const sender = makeAllowlistEmailSender(inner.sender, {
+      allow: ["kvitbit.cz"],
+      capture: capture.sender,
+    });
+    const exit = await run(
+      sender.send(message({ to: ["jana@klient.cz", "qa@kvitbit.cz"], cc: [] }), {
+        idempotencyKey: "k1",
+      }),
+    );
+    expect(Exit.isFailure(exit)).toBe(true);
+    expect(capture.calls).toHaveLength(1);
+    expect(inner.calls).toHaveLength(0);
   });
 });
 
