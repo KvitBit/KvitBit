@@ -12,7 +12,8 @@ import type {
 import { EXTENDED_ROLES } from "@kvitbit/api-contract";
 import { type Text, text } from "../text";
 import { contrastRatio } from "./color/contrast";
-import { rgbFromHex } from "./color/utils";
+import { Hct } from "./color/hct";
+import { hexFromRgb, rgbFromHex } from "./color/utils";
 import { SCHEME_VARIANTS, type SchemeVariant } from "./scheme";
 
 /** WCAG 2.x AA: 4.5:1 for body text, 3:1 for large text and UI components (1.4.11). */
@@ -120,3 +121,18 @@ export const contrastIssueText = (issue: ContrastIssue): Text =>
     ratio: issue.ratio.toFixed(2),
     required: issue.required.toFixed(1),
   });
+
+/**
+ * `fg` itself when it already reaches `required` against `bg`; otherwise the nearest tone of
+ * `fg`'s hue and chroma, moving away from the background, that does (black or white at worst).
+ */
+export const withContrast = (fg: string, bg: string, required: number): string => {
+  if (ratioOf(fg, bg) >= required) return fg;
+  const own = Hct.fromRgb(rgbFromHex(fg));
+  const darker = Hct.fromRgb(rgbFromHex(bg)).tone >= 50;
+  for (let tone = own.tone; tone >= 0 && tone <= 100; tone += darker ? -1 : 1) {
+    const candidate = hexFromRgb(Hct.from(own.hue, own.chroma, tone).rgb);
+    if (ratioOf(candidate, bg) >= required) return candidate;
+  }
+  return darker ? "#000000" : "#FFFFFF";
+};

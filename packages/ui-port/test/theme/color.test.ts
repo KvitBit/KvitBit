@@ -71,6 +71,25 @@ describe("CAM16 / HCT against material-color-utilities reference values", () => 
     }
   });
 
+  test("non-finite and extreme input yields a valid colour", () => {
+    for (const [h, c, t] of [
+      [Number.NaN, 30, 50],
+      [120, Number.NaN, 50],
+      [120, 30, Number.NaN],
+      [120, Number.POSITIVE_INFINITY, 50],
+      [-720, 30, 150],
+      [1e6, 1e6, -5],
+    ] as const) {
+      const rgb = Hct.from(h, c, t).rgb;
+      expect(Number.isInteger(rgb) && rgb >= 0 && rgb <= 0xffffff).toBe(true);
+    }
+    expect(hexFromRgb(Hct.from(120, 30, 150).rgb)).toBe("#FFFFFF");
+  });
+
+  test("near-white and near-black tones keep their tone at the gamut edge", () => {
+    for (const t of [0.5, 1, 99, 99.5]) expect(Hct.from(300, 20, t).tone).toBeCloseTo(t, 0);
+  });
+
   test("out-of-gamut chroma is reduced, never the tone", () => {
     const hct = Hct.from(120, 200, 50);
     expect(hct.chroma).toBeLessThan(200);

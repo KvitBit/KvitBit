@@ -12,24 +12,29 @@ import {
   type ThemeSource,
   type ThemeStyle,
 } from "@kvitbit/api-contract";
-import type { Invalid } from "@kvitbit/domain/contract";
+import { Invalid } from "@kvitbit/domain/contract";
 import { Context, Effect, Layer, Option, Result } from "effect";
 import { isHex } from "./color/utils";
+import { CHECKED_ROLE_PAIRS, withContrast } from "./contrast-check";
 import { type ExtendedScheme, extendedScheme } from "./extended";
 import { resolveMaterialTheme } from "./material-theme-json";
 import { KvitbitDefaultTheme, resolvePreset, resolveSeed, seedRecipe } from "./resolve";
-import { type RoleMap, schemeRoles, variantOf } from "./scheme";
+import { type RoleMap, type SchemeVariant, schemeRoles, variantOf } from "./scheme";
 import { StyleTokens } from "./style-tokens";
 
 // Resolution ---------------------------------------------------------------------------------
 
-/** Any source to a `ResolvedTheme`; only a malformed Material Theme Builder file fails. */
+const seedInvalid = () => new Invalid({ issues: [{ path: ["seed"], code: "theme.seed_invalid" }] });
+
+/** Any source to a `ResolvedTheme`; a malformed seed or Theme Builder file fails with `Invalid`. */
 export const resolveSource = (source: ThemeSource): Result.Result<ResolvedTheme, Invalid> => {
   switch (source._tag) {
     case "Preset":
       return Result.succeed(resolvePreset(source.id));
     case "Seed":
-      return Result.succeed(resolveSeed(source.seed));
+      return isHex(source.seed)
+        ? Result.succeed(resolveSeed(source.seed))
+        : Result.fail(seedInvalid());
     case "MaterialThemeBuilder":
       return resolveMaterialTheme(source.json);
   }
@@ -79,22 +84,47 @@ const pickValid = (m: Partial<Record<M3ColorRole, string>>): Partial<Record<M3Co
 
 /**
  * Complete dynamic role maps. System roles win; roles the platform omits come from a scheme
- * generated from the system primary (or seed), so the palette stays coherent.
+ * generated from the system primary (or seed), so the palette stays coherent. A generated
+ * foreground whose system background was supplied is moved until it reaches AA against it.
+ * A malformed seed fails with `theme.seed_invalid`.
  */
-export const dynamicRoles = (input: DynamicColorInput): DynamicRoles => {
+export const dynamicRoles = (input: DynamicColorInput): Result.Result<DynamicRoles, Invalid> => {
   if (input._tag === "Seed") {
+    if (!isHex(input.seed)) return Result.fail(seedInvalid());
     const recipe = seedRecipe(input.seed);
-    return { light: schemeRoles(recipe, "light"), dark: schemeRoles(recipe, "dark") };
+    return Result.succeed({
+      light: schemeRoles(recipe, "light"),
+      dark: schemeRoles(recipe, "dark"),
+    });
   }
   const light = pickValid(input.light);
   const dark = pickValid(input.dark);
   const seed = light.primary ?? dark.primary ?? KvitbitDefaultTheme.schemes.light.roles.primary;
   const recipe = seedRecipe(seed);
-  return {
-    light: { ...schemeRoles(recipe, "light"), ...light },
-    dark: { ...schemeRoles(recipe, "dark"), ...dark },
+  const complete = (variant: "light" | "dark", system: Partial<Record<M3ColorRole, Hex>>) => {
+    const roles: Record<M3ColorRole, Hex> = { ...schemeRoles(recipe, variant), ...system };
+    for (const pair of CHECKED_ROLE_PAIRS)
+      if (system[pair.foreground] === undefined && system[pair.background] !== undefined)
+        roles[pair.foreground] = withContrast(
+          roles[pair.foreground],
+          roles[pair.background],
+          pair.required,
+        ) as Hex;
+    return roles;
   };
+  return Result.succeed({ light: complete("light", light), dark: complete("dark", dark) });
 };
+
+/**
+ * Roles for any variant of a dynamic scheme. The system supplies only standard light and dark;
+ * medium and high move each system colour by the tone step the generated scheme takes, keeping
+ * its hue and chroma.
+ */
+export const dynamicSchemeRoles = (dynamic: DynamicRoles, variant: SchemeVariant): RoleMap =>
+  schemeRoles(
+    { seed: dynamic.light.primary, overrides: { light: dynamic.light, dark: dynamic.dark } },
+    variant,
+  );
 
 // ThemeEngine seam -----------------------------------------------------------------------------
 
@@ -220,13 +250,14 @@ export const effectiveTheme = (state: ThemeState): EffectiveTheme => {
   const tokens = StyleTokens[style];
   const picked = pickThemeSource(state);
   if (picked.origin === "dynamic") {
-    const roles = picked.dynamic[scheme];
+    const variant = variantOf(scheme, contrast);
+    const roles = dynamicSchemeRoles(picked.dynamic, variant);
     return {
       scheme,
       contrast,
       origin: "dynamic",
       roles,
-      extended: extendedScheme(roles.primary, variantOf(scheme, contrast)),
+      extended: extendedScheme(roles.primary, variant),
       style,
       tokens,
       theme: Option.none(),

@@ -1,7 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { Effect, Exit, Option } from "effect";
+import { Effect, Exit, Option, Result } from "effect";
 import {
+  auditScheme,
+  contrastRatio,
   dynamicRoles,
+  dynamicSchemeRoles,
   effectiveTheme,
   harmonizeExtended,
   initialThemeState,
@@ -9,6 +12,7 @@ import {
   LocalThemeEngine,
   resolvePreset,
   resolveSeed,
+  rgbFromHex,
   StyleTokens,
   ThemeEngine,
   type ThemeState,
@@ -16,7 +20,7 @@ import {
 
 const account = resolvePreset("plum");
 const workspace = resolvePreset("forest");
-const dynamic = dynamicRoles({ _tag: "Seed", seed: "#B3261E" });
+const dynamic = Result.getOrThrow(dynamicRoles({ _tag: "Seed", seed: "#B3261E" }));
 
 const state = (patch: {
   preference?: Partial<ThemeState["preference"]>;
@@ -125,11 +129,13 @@ describe("effectiveTheme precedence (spec 4.1)", () => {
 
 describe("dynamic colour input", () => {
   test("a partial system role map is completed from its primary", () => {
-    const roles = dynamicRoles({
-      _tag: "Roles",
-      light: { primary: "#4a6b2f", onPrimary: "#ffffff", surface: "not-a-colour" },
-      dark: { primary: "#AFD38D" },
-    });
+    const roles = Result.getOrThrow(
+      dynamicRoles({
+        _tag: "Roles",
+        light: { primary: "#4a6b2f", onPrimary: "#ffffff", surface: "not-a-colour" },
+        dark: { primary: "#AFD38D" },
+      }),
+    );
     expect(roles.light.primary).toBe("#4A6B2F");
     expect(roles.light.onPrimary).toBe("#FFFFFF");
     expect(roles.light.surface).toMatch(/^#[0-9A-F]{6}$/);
@@ -137,6 +143,34 @@ describe("dynamic colour input", () => {
     expect(Object.keys(roles.dark)).toHaveLength(
       Object.keys(KvitbitDefaultTheme.schemes.dark.roles).length,
     );
+  });
+});
+
+describe("dynamic colour hardening", () => {
+  test("generated foregrounds reach AA against supplied system backgrounds", () => {
+    // A system that supplies a dark surface in its *light* map but no onSurface.
+    const roles = Result.getOrThrow(
+      dynamicRoles({ _tag: "Roles", light: { primary: "#4A6B2F", surface: "#1A1C18" }, dark: {} }),
+    );
+    expect(roles.light.surface).toBe("#1A1C18");
+    expect(
+      contrastRatio(rgbFromHex(roles.light.onSurface), rgbFromHex("#1A1C18")),
+    ).toBeGreaterThanOrEqual(4.5);
+  });
+
+  test("a malformed dynamic seed fails with theme.seed_invalid", () => {
+    const r = dynamicRoles({ _tag: "Seed", seed: "#12" });
+    expect(Result.isFailure(r) && r.failure.issues[0]?.code).toBe("theme.seed_invalid");
+  });
+
+  test("requested contrast changes dynamic roles, keeping system hues", () => {
+    const s = state({ system: { dynamic: Option.some(dynamic), highContrast: true } });
+    const e = effectiveTheme(s);
+    expect([e.origin, e.contrast]).toEqual(["dynamic", "medium"]);
+    expect(e.roles).toEqual(dynamicSchemeRoles(dynamic, "lightMedium"));
+    expect(e.roles.onSurfaceVariant).not.toBe(dynamic.light.onSurfaceVariant);
+    expect(auditScheme({ roles: e.roles, extended: e.extended }, "lightMedium")).toEqual([]);
+    expect(dynamicSchemeRoles(dynamic, "light")).toEqual(dynamic.light);
   });
 });
 
@@ -151,6 +185,11 @@ describe("ThemeEngine seam", () => {
   test("LocalThemeEngine resolves presets and seeds", () => {
     const exit = run(withEngine((e) => e.resolve({ _tag: "Preset", id: "sand" }, "standard")));
     expect(Exit.isSuccess(exit) && exit.value).toEqual(resolvePreset("sand"));
+  });
+
+  test("LocalThemeEngine rejects a malformed seed", () => {
+    const exit = run(withEngine((e) => e.resolve({ _tag: "Seed", seed: "teal" }, "standard")));
+    expect(Exit.isFailure(exit)).toBe(true);
   });
 
   test("LocalThemeEngine fails a bad Theme Builder file with Invalid", () => {

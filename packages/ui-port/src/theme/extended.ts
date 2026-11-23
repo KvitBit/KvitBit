@@ -13,7 +13,7 @@ import {
 import { harmonize } from "./color/blend";
 import { Hct } from "./color/hct";
 import { TonalPalette } from "./color/palette";
-import { hexFromRgb, type Rgb, rgbFromHex } from "./color/utils";
+import { hexFromRgb, isHex, type Rgb, rgbFromHex } from "./color/utils";
 import { ACCENT_TONES, contrastLevelOf, isDarkVariant, type SchemeVariant } from "./scheme";
 
 export type ExtendedScheme = ResolvedScheme["extended"];
@@ -33,6 +33,7 @@ export const EXTENDED_SOURCE_COLORS: Readonly<Record<ExtendedRole, Hex>> = {
 /** Below this chroma a primary has no meaningful hue to harmonize toward (Graphite Atelier). */
 export const HARMONIZE_MIN_PRIMARY_CHROMA = 8;
 
+/** Harmonize `color` toward `primary`; an achromatic primary leaves it unchanged. */
 export const harmonizeToward = (color: Rgb, primary: Rgb): Rgb =>
   Hct.fromRgb(primary).chroma < HARMONIZE_MIN_PRIMARY_CHROMA ? color : harmonize(color, primary);
 
@@ -75,11 +76,15 @@ export const extendedScheme = (
   variant: SchemeVariant,
   inputs: Partial<Record<ExtendedRole, ExtendedInput>> = {},
 ): ExtendedScheme => {
-  const p = rgbFromHex(primary);
+  // A malformed primary (e.g. from a platform API) harmonizes nothing rather than toward black.
+  const p = isHex(primary) ? rgbFromHex(primary) : undefined;
   const one = (role: ExtendedRole): ExtendedColor => {
     const input = inputs[role] ?? { color: EXTENDED_SOURCE_COLORS[role], harmonized: true };
     const key = rgbFromHex(input.color);
-    return extendedColorOf(input.harmonized ? harmonizeToward(key, p) : key, variant);
+    return extendedColorOf(
+      input.harmonized && p !== undefined ? harmonizeToward(key, p) : key,
+      variant,
+    );
   };
   const [paid, proforma, overdue, draft] = EXTENDED_ROLES.map(one) as [
     ExtendedColor,

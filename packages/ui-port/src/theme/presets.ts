@@ -30,6 +30,8 @@ const GRAPHITE_ATELIER_LIGHT: Partial<RoleMap> = {
   surfaceContainerLow: "#EFEFF1",
   surfaceContainer: "#E8E8EC",
   surfaceContainerHigh: "#DCDCE0",
+  // Not in DESIGN.md's table; zinc-300 keeps the container steps descending past "High".
+  surfaceContainerHighest: "#D4D4D8",
   onBackground: "#09090B",
   onSurface: "#09090B",
   onSurfaceVariant: "#52525B",

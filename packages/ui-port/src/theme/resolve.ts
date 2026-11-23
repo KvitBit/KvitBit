@@ -39,21 +39,29 @@ export const withContrastWarnings = (
 const harmonizationTarget = (recipe: ThemeRecipe): Hex =>
   hexFromRgb(palettesOf(recipe).primary.tone(40));
 
-/** All six schemes for a recipe; `rolesFor` lets a file supply its own role maps. */
+/**
+ * All six schemes for a recipe; `rolesFor` lets a file supply its own role maps. Extended
+ * colours harmonize toward the recipe's tone-40 primary, or toward a supplied scheme's own
+ * `primary` when the file provides that scheme.
+ */
 export const schemesOf = (
   recipe: ThemeRecipe,
   options: {
     readonly rolesFor?: (variant: SchemeVariant) => RoleMap | undefined;
     readonly extended?: Partial<Record<ExtendedRole, ExtendedInput>>;
+    /** Target for schemes the recipe generates (default: its tone-40 primary). */
     readonly harmonizeToward?: Hex;
   } = {},
 ): ResolvedSchemes => {
   const palettes = palettesOf(recipe);
   const target = options.harmonizeToward ?? harmonizationTarget(recipe);
-  const scheme = (variant: SchemeVariant): ResolvedScheme => ({
-    roles: options.rolesFor?.(variant) ?? schemeRoles(recipe, variant, palettes),
-    extended: extendedScheme(target, variant, options.extended),
-  });
+  const scheme = (variant: SchemeVariant): ResolvedScheme => {
+    const supplied = options.rolesFor?.(variant);
+    return {
+      roles: supplied ?? schemeRoles(recipe, variant, palettes),
+      extended: extendedScheme(supplied?.primary ?? target, variant, options.extended),
+    };
+  };
   const out = {} as Record<SchemeVariant, ResolvedScheme>;
   for (const v of SCHEME_VARIANTS) out[v] = scheme(v);
   return out;

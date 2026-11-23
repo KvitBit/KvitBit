@@ -166,6 +166,37 @@ describe("Graphite Atelier (KvitbitDefaultTheme)", () => {
     ]);
   });
 
+  test("more contrast never lowers contrast of DESIGN.md's exact pairs", () => {
+    const s = KvitbitDefaultTheme.schemes;
+    for (const side of ["light", "dark"] as const) {
+      const steps = [s[side], s[`${side}Medium`], s[`${side}High`]].map((x) => x.roles);
+      for (const [fg, bg] of [
+        ["onPrimary", "primary"],
+        ["onSurface", "surface"],
+        ["onSurfaceVariant", "surfaceContainerHigh"],
+        ["onErrorContainer", "errorContainer"],
+      ] as const) {
+        const r = steps.map((m) => ratio(m[fg], m[bg]));
+        expect(r[1] ?? 0).toBeGreaterThanOrEqual((r[0] ?? 0) - 0.01);
+        expect(r[2] ?? 0).toBeGreaterThanOrEqual((r[1] ?? 0) - 0.01);
+      }
+    }
+  });
+
+  test("light surface containers step down from lowest to highest", () => {
+    for (const v of ["light", "lightMedium", "lightHigh"] as const) {
+      const r = KvitbitDefaultTheme.schemes[v].roles;
+      const tones = [
+        r.surfaceContainerLowest,
+        r.surfaceContainerLow,
+        r.surfaceContainer,
+        r.surfaceContainerHigh,
+        r.surfaceContainerHighest,
+      ].map((h) => Hct.fromRgb(rgbFromHex(h)).tone);
+      for (let i = 1; i < tones.length; i++) expect(tones[i] ?? 0).toBeLessThan(tones[i - 1] ?? 0);
+    }
+  });
+
   test("extended colours are not pulled toward the achromatic primary", () => {
     const paid = Hct.fromRgb(rgbFromHex(KvitbitDefaultTheme.schemes.light.extended.paid.color));
     const source = Hct.fromRgb(rgbFromHex(EXTENDED_SOURCE_COLORS.paid));

@@ -231,7 +231,7 @@ export const resolveMaterialTheme = (json: unknown): Result.Result<ResolvedTheme
       schemesOf(seedRecipe(d.seed), {
         rolesFor: (v) => d.roles[v],
         extended: d.extended,
-        harmonizeToward: d.seed,
+        harmonizeToward: d.roles.light?.primary ?? d.seed,
       }),
     ),
   );

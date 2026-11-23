@@ -17,6 +17,7 @@ export {
   type ContrastIssue,
   contrastIssueText,
   type RolePair,
+  withContrast,
 } from "./contrast-check";
 export {
   contrastNameText,
@@ -29,6 +30,7 @@ export {
   type DynamicColorInput,
   type DynamicRoles,
   dynamicRoles,
+  dynamicSchemeRoles,
   type EffectiveTheme,
   type ExtendedPair,
   effectiveContrast,

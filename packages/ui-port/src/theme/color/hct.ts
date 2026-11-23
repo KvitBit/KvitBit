@@ -177,15 +177,17 @@ const linrgbInGamut = (lin: Vec3): boolean =>
   lin.every((c) => c >= -GAMUT_EPSILON && c <= 100 + GAMUT_EPSILON);
 
 /** The sRGB colour with `hue` and `tone` and the largest in-gamut chroma at or below `chroma`. */
-export const solveToRgb = (hue: number, chroma: number, tone: number): Rgb => {
-  if (chroma < 1e-4 || tone < 1e-4 || tone > 99.9999) return rgbFromLstar(tone);
-  const h = sanitizeDegrees(hue);
+export const solveToRgb = (hue: number, chroma: number, rawTone: number): Rgb => {
+  // Non-finite input never reaches the solver: NaN tone is black, NaN hue is 0, NaN chroma grey.
+  const tone = Number.isFinite(rawTone) ? clamp(0, 100, rawTone) : 0;
+  if (!(chroma >= 1e-4) || tone < 1e-4 || tone > 99.9999) return rgbFromLstar(tone);
+  const h = Number.isFinite(hue) ? sanitizeDegrees(hue) : 0;
   const targetY = yFromLstar(tone);
   const linAt = (c: number): Vec3 => matrixMultiply(solveJ(c, h, tone, targetY), XYZ_TO_SRGB);
-  const requested = linAt(chroma);
+  const requested = linAt(Number.isFinite(chroma) ? Math.min(chroma, 200) : 0);
   if (linrgbInGamut(requested)) return rgbFromLinrgb(requested);
   let lo = 0;
-  let hi = chroma;
+  let hi = Math.min(chroma, 200);
   let best: Vec3 | undefined;
   for (let i = 0; i < 18; i++) {
     const mid = (lo + hi) / 2;

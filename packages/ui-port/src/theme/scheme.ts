@@ -218,9 +218,42 @@ export const generateRoles = (p: SchemePalettes, variant: SchemeVariant): RoleMa
   return out;
 };
 
-/** Generated roles with the recipe's exact overrides applied. */
+/**
+ * Overrides for a medium / high variant derived from the standard variant's overrides: each
+ * overridden colour keeps its own hue and chroma and moves by the same tone step the generated
+ * role takes from standard to this variant. So an exact design value (Graphite Atelier's
+ * `#18181B` primary) never loses contrast when more contrast is requested.
+ */
+const derivedOverrides = (
+  recipe: ThemeRecipe,
+  variant: SchemeVariant,
+  p: SchemePalettes,
+): Partial<RoleMap> => {
+  const level = contrastLevelOf(variant);
+  if (level === 0) return {};
+  const base: SchemeVariant = isDarkVariant(variant) ? "dark" : "light";
+  const std = recipe.overrides?.[base] ?? {};
+  const out: Partial<Record<M3ColorRole, Hex>> = {};
+  for (const role of Object.keys(std) as M3ColorRole[]) {
+    const hex = std[role];
+    if (hex === undefined) continue;
+    const step = toneOf(role, variant, p) - toneOf(role, base, p);
+    const own = Hct.fromRgb(rgbFromHex(hex));
+    out[role] =
+      step === 0
+        ? hex
+        : hexFromRgb(Hct.from(own.hue, own.chroma, clamp(0, 100, own.tone + step)).rgb);
+  }
+  return out;
+};
+
+/** Generated roles with the recipe's exact overrides applied (derived ones for contrast variants). */
 export const schemeRoles = (
   recipe: ThemeRecipe,
   variant: SchemeVariant,
   palettes: SchemePalettes = palettesOf(recipe),
-): RoleMap => ({ ...generateRoles(palettes, variant), ...recipe.overrides?.[variant] });
+): RoleMap => ({
+  ...generateRoles(palettes, variant),
+  ...derivedOverrides(recipe, variant, palettes),
+  ...recipe.overrides?.[variant],
+});
