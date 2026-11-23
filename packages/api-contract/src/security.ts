@@ -4,12 +4,20 @@
  *
  * effect 4.1.4 takes `provides` and `requires` as type parameters of
  * `HttpApiMiddleware.Service<Self, { provides; requires }>()`, not as runtime options.
+ *
+ * Execution order. HttpApiBuilder wraps the handler with an endpoint's middleware in the order
+ * they were added, so the last one added runs first (outermost). `.middleware()` on a group or
+ * the API appends to the endpoints already added. Groups therefore add, innermost first,
+ * WorkspaceMember, SessionOnly, EdgeGuard, Authentication, and the API adds SchemaErrors
+ * last, giving SchemaErrors → Authentication → EdgeGuard → SessionOnly → WorkspaceMember →
+ * handler.
  */
 
 import {
   Channel,
   type CurrentCaller,
   Forbidden,
+  Invalid,
   Locale,
   NotFound,
   Scope,
@@ -57,24 +65,47 @@ export class CurrentPrincipal extends Context.Service<CurrentPrincipal, Principa
 ) {}
 
 /**
- * Session (cookie or bearer) or API Key. Provides the principal and an Account caller. Its
- * errors are the ones every authenticated endpoint can return (section 3.5 preamble).
+ * Request decode failures (params, query, headers, payload) as `Invalid` with code
+ * `request.malformed` (section 3.3), so typed clients see 422 in the endpoint error union.
+ * Declared API-wide and outermost. apps/server provides it with
+ * `HttpApiMiddleware.layerSchemaErrorTransform(SchemaErrors, ...)`, mapping request-side
+ * `HttpApiSchemaError` kinds to `Invalid` and leaving response encoding failures as defects.
+ */
+export class SchemaErrors extends HttpApiMiddleware.Service<SchemaErrors>()(
+  "kvitbit/edge/SchemaErrors",
+  { error: Invalid.schema },
+) {}
+
+/**
+ * Session (cookie or bearer) or API Key. Provides the principal and an Account caller. Fails
+ * only with Unauthorized; the other edge checks are EdgeGuard's.
  */
 export class Authentication extends HttpApiMiddleware.Service<
   Authentication,
   { provides: CurrentPrincipal | CurrentCaller }
 >()("kvitbit/edge/Authentication", {
-  error: [Unauthorized.schema, OriginRejected.schema, RateLimited.schema, PayloadTooLarge.schema],
+  error: Unauthorized.schema,
   security: {
     session: HttpApiSecurity.apiKey({ in: "cookie", key: SESSION_COOKIE }),
     bearer: HttpApiSecurity.bearer,
   },
 }) {}
 
+/**
+ * Edge checks every authenticated request passes after Authentication (section 3.5
+ * preamble): Origin on cookie sessions, per-principal rate limits, body size.
+ */
+export class EdgeGuard extends HttpApiMiddleware.Service<
+  EdgeGuard,
+  { requires: CurrentPrincipal }
+>()("kvitbit/edge/EdgeGuard", {
+  error: [OriginRejected.schema, RateLimited.schema, PayloadTooLarge.schema],
+}) {}
+
 /** Replaces CurrentCaller with the MemberCaller from Workspaces.enter. Needs Authentication. */
 export class WorkspaceMember extends HttpApiMiddleware.Service<
   WorkspaceMember,
-  { provides: CurrentCaller; requires: CurrentPrincipal }
+  { provides: CurrentCaller; requires: CurrentPrincipal | CurrentCaller }
 >()("kvitbit/edge/WorkspaceMember", {
   error: [NotFound.schema, Forbidden.schema],
 }) {}

@@ -26,6 +26,7 @@ import {
   Invalid,
   IsoDate,
   Money,
+  NotFound,
   Page,
   PaymentId,
   PaymentMethod,
@@ -43,7 +44,7 @@ import {
   Unavailable,
 } from "@kvitbit/domain/contract";
 import { Schema } from "effect";
-import { HttpApiEndpoint, HttpApiGroup } from "effect/http-api";
+import { HttpApiEndpoint, HttpApiGroup, OpenApi } from "effect/http-api";
 import { PayloadTooLarge, RateLimited, RevisionedEdgeErrors } from "../edge-errors";
 import {
   Accepted,
@@ -59,7 +60,7 @@ import {
   Revisioned,
   ZipBytes,
 } from "../http";
-import { Authentication, WorkspaceMember } from "../security";
+import { Authentication, EdgeGuard, WorkspaceMember } from "../security";
 import { CoreErrors, WorkspaceParams } from "./shared";
 
 // --- Contacts ----------------------------------------------------------------------------------
@@ -85,13 +86,16 @@ export class ContactsGroup extends HttpApiGroup.make("contacts")
       },
       success: Page(ContactView),
       error: Invalid.schema,
-    }),
+    }).annotate(OpenApi.Summary, "Search contacts"),
   )
   .add(
     HttpApiEndpoint.get("get", "/:contactId", {
       params: ContactParams,
       success: ContactView,
-    }).annotate(Revisioned, true),
+      error: [NotFound.schema],
+    })
+      .annotate(OpenApi.Summary, "Get a contact")
+      .annotate(Revisioned, true),
   )
   .add(
     HttpApiEndpoint.post("create", "/", {
@@ -99,8 +103,10 @@ export class ContactsGroup extends HttpApiGroup.make("contacts")
       headers: IdempotencyHeaders,
       payload: ContactInput,
       success: Created(ContactView),
-      error: [Invalid.schema, Conflict.schema],
-    }).annotate(Revisioned, true),
+      error: [Invalid.schema, Conflict.schema, NotFound.schema],
+    })
+      .annotate(OpenApi.Summary, "Create a contact")
+      .annotate(Revisioned, true),
   )
   .add(
     HttpApiEndpoint.put("update", "/:contactId", {
@@ -108,8 +114,10 @@ export class ContactsGroup extends HttpApiGroup.make("contacts")
       headers: IfMatchHeaders,
       payload: ContactInput,
       success: ContactView,
-      error: [Invalid.schema, Conflict.schema, ...RevisionedEdgeErrors],
-    }).annotate(Revisioned, true),
+      error: [Invalid.schema, Conflict.schema, ...RevisionedEdgeErrors, NotFound.schema],
+    })
+      .annotate(OpenApi.Summary, "Update a contact")
+      .annotate(Revisioned, true),
   )
   .add(
     HttpApiEndpoint.post("fromIco", "/from-ico", {
@@ -117,17 +125,21 @@ export class ContactsGroup extends HttpApiGroup.make("contacts")
       payload: FromIcoInput,
       success: ContactView,
       error: [Invalid.schema, Unavailable.schema, RateLimited.schema],
-    }).annotate(Revisioned, true),
+    })
+      .annotate(OpenApi.Summary, "Create or refresh a contact from the company registry")
+      .annotate(Revisioned, true),
   )
   .add(
     HttpApiEndpoint.post("archive", "/:contactId/archive", {
       params: ContactParams,
       success: NoContent,
-    }),
+      error: [NotFound.schema],
+    }).annotate(OpenApi.Summary, "Archive a contact"),
   )
   .prefix("/workspaces/:workspaceId/contacts")
-  .middleware(Authentication)
-  .middleware(WorkspaceMember) {}
+  .middleware(WorkspaceMember)
+  .middleware(EdgeGuard)
+  .middleware(Authentication) {}
 
 // --- Price List --------------------------------------------------------------------------------
 
@@ -142,7 +154,7 @@ export class PriceListGroup extends HttpApiGroup.make("priceList")
         includeArchived: Schema.optional(Schema.Boolean),
       },
       success: Schema.Array(PriceListItemView),
-    }),
+    }).annotate(OpenApi.Summary, "List price list items"),
   )
   .add(
     HttpApiEndpoint.post("create", "/", {
@@ -150,8 +162,10 @@ export class PriceListGroup extends HttpApiGroup.make("priceList")
       headers: IdempotencyHeaders,
       payload: PriceListItemInput,
       success: Created(PriceListItemView),
-      error: Invalid.schema,
-    }),
+      error: [Invalid.schema, NotFound.schema, Conflict.schema],
+    })
+      .annotate(OpenApi.Summary, "Create a price list item")
+      .annotate(Revisioned, true),
   )
   .add(
     HttpApiEndpoint.put("update", "/:itemId", {
@@ -159,15 +173,22 @@ export class PriceListGroup extends HttpApiGroup.make("priceList")
       headers: IfMatchHeaders,
       payload: PriceListItemInput,
       success: PriceListItemView,
-      error: [Invalid.schema, Conflict.schema, ...RevisionedEdgeErrors],
-    }).annotate(Revisioned, true),
+      error: [Invalid.schema, Conflict.schema, ...RevisionedEdgeErrors, NotFound.schema],
+    })
+      .annotate(OpenApi.Summary, "Update a price list item")
+      .annotate(Revisioned, true),
   )
   .add(
-    HttpApiEndpoint.post("archive", "/:itemId/archive", { params: ItemParams, success: NoContent }),
+    HttpApiEndpoint.post("archive", "/:itemId/archive", {
+      params: ItemParams,
+      success: NoContent,
+      error: [NotFound.schema],
+    }).annotate(OpenApi.Summary, "Archive a price list item"),
   )
   .prefix("/workspaces/:workspaceId/price-list-items")
-  .middleware(Authentication)
-  .middleware(WorkspaceMember) {}
+  .middleware(WorkspaceMember)
+  .middleware(EdgeGuard)
+  .middleware(Authentication) {}
 
 // --- Payments ----------------------------------------------------------------------------------
 
@@ -194,6 +215,10 @@ export const RecordPaymentResult = Schema.Struct({
 });
 export type RecordPaymentResult = typeof RecordPaymentResult.Type;
 
+/** `Payments.remove(id, reason)`: the reason lands in the audit trail. */
+export const RemovePaymentInput = Schema.Struct({ reason: Schema.NonEmptyString });
+export type RemovePaymentInput = typeof RemovePaymentInput.Type;
+
 export class PaymentsGroup extends HttpApiGroup.make("payments")
   .add(
     HttpApiEndpoint.post("record", "/payments", {
@@ -202,30 +227,34 @@ export class PaymentsGroup extends HttpApiGroup.make("payments")
       payload: RecordPaymentInput,
       success: Created(RecordPaymentResult),
       error: CoreErrors,
-    }),
+    }).annotate(OpenApi.Summary, "Record a payment"),
   )
   .add(
     HttpApiEndpoint.post("remove", "/payments/:paymentId/remove", {
       params: { ...WorkspaceParams, paymentId: PaymentId },
+      payload: RemovePaymentInput,
       success: NoContent,
-      error: Conflict.schema,
-    }),
+      error: [Conflict.schema, NotFound.schema, Invalid.schema],
+    }).annotate(OpenApi.Summary, "Remove a payment"),
   )
   .add(
     HttpApiEndpoint.get("listForDocument", "/documents/:documentId/payments", {
       params: { ...WorkspaceParams, documentId: DocumentId },
       success: Schema.Array(PaymentView),
-    }),
+      error: [NotFound.schema],
+    }).annotate(OpenApi.Summary, "List a document's payments"),
   )
   .add(
     HttpApiEndpoint.get("listForExpense", "/expenses/:expenseId/payments", {
       params: { ...WorkspaceParams, expenseId: ExpenseId },
       success: Schema.Array(PaymentView),
-    }),
+      error: [NotFound.schema],
+    }).annotate(OpenApi.Summary, "List an expense's payments"),
   )
   .prefix("/workspaces/:workspaceId")
-  .middleware(Authentication)
-  .middleware(WorkspaceMember) {}
+  .middleware(WorkspaceMember)
+  .middleware(EdgeGuard)
+  .middleware(Authentication) {}
 
 // --- Expenses ----------------------------------------------------------------------------------
 
@@ -248,7 +277,7 @@ export class ExpensesGroup extends HttpApiGroup.make("expenses")
       query: ExpenseListQuery,
       success: Page(ExpenseSummary),
       error: Invalid.schema,
-    }),
+    }).annotate(OpenApi.Summary, "List expenses"),
   )
   .add(
     HttpApiEndpoint.post("record", "/", {
@@ -256,14 +285,19 @@ export class ExpensesGroup extends HttpApiGroup.make("expenses")
       headers: IdempotencyHeaders,
       payload: ExpenseInput,
       success: Created(ExpenseView),
-      error: [Invalid.schema, Unavailable.schema],
-    }).annotate(Revisioned, true),
+      error: [Invalid.schema, Unavailable.schema, NotFound.schema, Conflict.schema],
+    })
+      .annotate(OpenApi.Summary, "Record an expense")
+      .annotate(Revisioned, true),
   )
   .add(
     HttpApiEndpoint.get("get", "/:expenseId", {
       params: ExpenseParams,
       success: ExpenseView,
-    }).annotate(Revisioned, true),
+      error: [NotFound.schema],
+    })
+      .annotate(OpenApi.Summary, "Get an expense")
+      .annotate(Revisioned, true),
   )
   .add(
     HttpApiEndpoint.patch("edit", "/:expenseId", {
@@ -271,42 +305,52 @@ export class ExpensesGroup extends HttpApiGroup.make("expenses")
       headers: IfMatchHeaders,
       payload: ExpensePatch,
       success: ExpenseView,
-      error: [Invalid.schema, Conflict.schema, Unavailable.schema, ...RevisionedEdgeErrors],
-    }).annotate(Revisioned, true),
+      error: [
+        Invalid.schema,
+        Conflict.schema,
+        Unavailable.schema,
+        ...RevisionedEdgeErrors,
+        NotFound.schema,
+      ],
+    })
+      .annotate(OpenApi.Summary, "Edit an expense")
+      .annotate(Revisioned, true),
   )
   .add(
     HttpApiEndpoint.delete("remove", "/:expenseId", {
       params: ExpenseParams,
       headers: IfMatchHeaders,
       success: NoContent,
-      error: [Conflict.schema, ...RevisionedEdgeErrors],
-    }),
+      error: [Conflict.schema, ...RevisionedEdgeErrors, NotFound.schema],
+    }).annotate(OpenApi.Summary, "Remove an expense"),
   )
   .add(
     HttpApiEndpoint.post("attach", "/:expenseId/attachments", {
       params: ExpenseParams,
       payload: AttachPayload,
       success: Created(AttachmentView),
-      error: [Invalid.schema, PayloadTooLarge.schema, Unavailable.schema],
-    }),
+      error: [Invalid.schema, PayloadTooLarge.schema, Unavailable.schema, NotFound.schema],
+    }).annotate(OpenApi.Summary, "Attach a file to an expense"),
   )
   .add(
     HttpApiEndpoint.get("attachment", "/:expenseId/attachments/:attachmentId", {
       params: AttachmentParams,
       query: { disposition: Schema.optional(Disposition) },
       success: AttachmentBytes,
-      error: Unavailable.schema,
-    }),
+      error: [Unavailable.schema, NotFound.schema],
+    }).annotate(OpenApi.Summary, "Download an expense attachment"),
   )
   .add(
     HttpApiEndpoint.delete("detach", "/:expenseId/attachments/:attachmentId", {
       params: AttachmentParams,
       success: NoContent,
-    }),
+      error: [NotFound.schema],
+    }).annotate(OpenApi.Summary, "Remove an expense attachment"),
   )
   .prefix("/workspaces/:workspaceId/expenses")
-  .middleware(Authentication)
-  .middleware(WorkspaceMember) {}
+  .middleware(WorkspaceMember)
+  .middleware(EdgeGuard)
+  .middleware(Authentication) {}
 
 // --- Templates ---------------------------------------------------------------------------------
 
@@ -331,13 +375,16 @@ export class TemplatesGroup extends HttpApiGroup.make("templates")
     HttpApiEndpoint.get("list", "/", {
       params: WorkspaceParams,
       success: Schema.Array(TemplateView),
-    }),
+    }).annotate(OpenApi.Summary, "List templates"),
   )
   .add(
     HttpApiEndpoint.get("get", "/:templateId", {
       params: TemplateParams,
       success: TemplateView,
-    }).annotate(Revisioned, true),
+      error: [NotFound.schema],
+    })
+      .annotate(OpenApi.Summary, "Get a template")
+      .annotate(Revisioned, true),
   )
   .add(
     HttpApiEndpoint.post("create", "/", {
@@ -345,8 +392,10 @@ export class TemplatesGroup extends HttpApiGroup.make("templates")
       headers: IdempotencyHeaders,
       payload: TemplateInput,
       success: Created(TemplateView),
-      error: Invalid.schema,
-    }).annotate(Revisioned, true),
+      error: [Invalid.schema, NotFound.schema, Conflict.schema],
+    })
+      .annotate(OpenApi.Summary, "Create a template")
+      .annotate(Revisioned, true),
   )
   .add(
     HttpApiEndpoint.put("update", "/:templateId", {
@@ -354,14 +403,17 @@ export class TemplatesGroup extends HttpApiGroup.make("templates")
       headers: IfMatchHeaders,
       payload: TemplateInput,
       success: TemplateView,
-      error: [Invalid.schema, Conflict.schema, ...RevisionedEdgeErrors],
-    }).annotate(Revisioned, true),
+      error: [Invalid.schema, Conflict.schema, ...RevisionedEdgeErrors, NotFound.schema],
+    })
+      .annotate(OpenApi.Summary, "Update a template")
+      .annotate(Revisioned, true),
   )
   .add(
     HttpApiEndpoint.post("archive", "/:templateId/archive", {
       params: TemplateParams,
       success: NoContent,
-    }),
+      error: [NotFound.schema],
+    }).annotate(OpenApi.Summary, "Archive a template"),
   )
   .add(
     HttpApiEndpoint.put("setSchedule", "/:templateId/schedule", {
@@ -369,31 +421,37 @@ export class TemplatesGroup extends HttpApiGroup.make("templates")
       headers: IfMatchHeaders,
       payload: ScheduleInput,
       success: TemplateView,
-      error: [Invalid.schema, Conflict.schema, ...RevisionedEdgeErrors],
-    }).annotate(Revisioned, true),
+      error: [Invalid.schema, Conflict.schema, ...RevisionedEdgeErrors, NotFound.schema],
+    })
+      .annotate(OpenApi.Summary, "Set a template's schedule")
+      .annotate(Revisioned, true),
   )
   .add(
     HttpApiEndpoint.delete("removeSchedule", "/:templateId/schedule", {
       params: TemplateParams,
       headers: IfMatchHeaders,
       success: TemplateView,
-      error: [Conflict.schema, ...RevisionedEdgeErrors],
-    }).annotate(Revisioned, true),
+      error: [Conflict.schema, ...RevisionedEdgeErrors, Invalid.schema, NotFound.schema],
+    })
+      .annotate(OpenApi.Summary, "Remove a template's schedule")
+      .annotate(Revisioned, true),
   )
   .add(
     HttpApiEndpoint.post("resume", "/:templateId/resume", {
       params: TemplateParams,
       success: TemplateView,
-      error: Conflict.schema,
-    }).annotate(Revisioned, true),
+      error: [Conflict.schema, NotFound.schema],
+    })
+      .annotate(OpenApi.Summary, "Resume a paused template schedule")
+      .annotate(Revisioned, true),
   )
   .add(
     HttpApiEndpoint.get("runs", "/:templateId/runs", {
       params: TemplateParams,
       query: PageQueryFields,
       success: Page(RecurringRunView),
-      error: Invalid.schema,
-    }),
+      error: [Invalid.schema, NotFound.schema],
+    }).annotate(OpenApi.Summary, "List a template's scheduled runs"),
   )
   .add(
     HttpApiEndpoint.post("use", "/:templateId/documents", {
@@ -402,11 +460,14 @@ export class TemplatesGroup extends HttpApiGroup.make("templates")
       payload: UseTemplateInput,
       success: Created(DocumentView),
       error: CoreErrors,
-    }).annotate(Revisioned, true),
+    })
+      .annotate(OpenApi.Summary, "Create a document from a template")
+      .annotate(Revisioned, true),
   )
   .prefix("/workspaces/:workspaceId/templates")
-  .middleware(Authentication)
-  .middleware(WorkspaceMember) {}
+  .middleware(WorkspaceMember)
+  .middleware(EdgeGuard)
+  .middleware(Authentication) {}
 
 // --- Reports -----------------------------------------------------------------------------------
 
@@ -427,7 +488,7 @@ export class ReportsGroup extends HttpApiGroup.make("reports")
       query: { from: IsoDate, to: IsoDate },
       success: DashboardView,
       error: Invalid.schema,
-    }),
+    }).annotate(OpenApi.Summary, "Get the dashboard"),
   )
   .add(
     HttpApiEndpoint.get("run", "/reports/:report", {
@@ -435,7 +496,7 @@ export class ReportsGroup extends HttpApiGroup.make("reports")
       query: ReportRange,
       success: ReportView,
       error: Invalid.schema,
-    }),
+    }).annotate(OpenApi.Summary, "Run a report"),
   )
   .add(
     HttpApiEndpoint.get("export", "/reports/:report/export", {
@@ -443,7 +504,7 @@ export class ReportsGroup extends HttpApiGroup.make("reports")
       query: { format: ExportFormat, ...ReportRange },
       success: ReportExportBytes,
       error: Invalid.schema,
-    }),
+    }).annotate(OpenApi.Summary, "Export a report"),
   )
   .add(
     HttpApiEndpoint.get("fxRate", "/fx-rates/:currency", {
@@ -451,28 +512,31 @@ export class ReportsGroup extends HttpApiGroup.make("reports")
       query: { on: IsoDate },
       success: FxRateView,
       error: [Invalid.schema, Unavailable.schema],
-    }),
+    }).annotate(OpenApi.Summary, "Get an exchange rate"),
   )
   .add(
     HttpApiEndpoint.post("startExport", "/exports", {
       params: WorkspaceParams,
       headers: IdempotencyHeaders,
       success: Accepted(ExportJobView),
-    }),
+      error: [Conflict.schema],
+    }).annotate(OpenApi.Summary, "Start a data export"),
   )
   .add(
     HttpApiEndpoint.get("getExport", "/exports/:exportId", {
       params: { ...WorkspaceParams, exportId: ExportId },
       success: ExportJobView,
-    }),
+      error: [NotFound.schema],
+    }).annotate(OpenApi.Summary, "Get a data export's status"),
   )
   .add(
     HttpApiEndpoint.get("exportFile", "/exports/:exportId/file", {
       params: { ...WorkspaceParams, exportId: ExportId },
       success: ZipBytes,
-      error: Conflict.schema, // illegal_transition while running
-    }),
+      error: [Conflict.schema, NotFound.schema, Unavailable.schema], // Conflict: still running
+    }).annotate(OpenApi.Summary, "Download a data export"),
   )
   .prefix("/workspaces/:workspaceId")
-  .middleware(Authentication)
-  .middleware(WorkspaceMember) {}
+  .middleware(WorkspaceMember)
+  .middleware(EdgeGuard)
+  .middleware(Authentication) {}

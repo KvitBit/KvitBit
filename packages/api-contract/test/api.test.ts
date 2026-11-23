@@ -5,6 +5,7 @@ import { HttpApi } from "effect/http-api";
 import {
   Api,
   Authentication,
+  EdgeGuard,
   InvalidBotProof,
   OriginRejected,
   PayloadTooLarge,
@@ -12,6 +13,7 @@ import {
   PreconditionRequired,
   RateLimited,
   Revisioned,
+  SchemaErrors,
   SessionOnly,
   ShareLinkVisitor,
   Unauthorized,
@@ -78,7 +80,7 @@ contacts update PUT {ws}/contacts/:contactId 200 ME
 contacts fromIco POST {ws}/contacts/from-ico 200 E
 contacts archive POST {ws}/contacts/:contactId/archive 204 -
 priceList list GET {ws}/price-list-items 200 -
-priceList create POST {ws}/price-list-items 201 I
+priceList create POST {ws}/price-list-items 201 IE
 priceList update PUT {ws}/price-list-items/:itemId 200 ME
 priceList archive POST {ws}/price-list-items/:itemId/archive 204 -
 documents list GET {ws}/documents 200 -
@@ -268,39 +270,54 @@ describe("Api definition integrity", () => {
     }
   });
 
-  test("middleware per group follows section 2.3 and 3.5", () => {
+  test("middleware runs SchemaErrors → Authentication → EdgeGuard → SessionOnly → WorkspaceMember", () => {
+    // HttpApiBuilder applies an endpoint's middleware in insertion order, each wrapping the
+    // previous result, so execution order is the reverse of the reflected (insertion) order.
+    const schema = SchemaErrors.key;
     const auth = Authentication.key;
+    const guard = EdgeGuard.key;
     const member = WorkspaceMember.key;
     const session = SessionOnly.key;
     const expectations: Record<string, ReadonlyArray<string>> = {
-      config: [],
-      botProtection: [],
-      publicShare: [ShareLinkVisitor.key],
-      me: [auth, session],
-      myWorkspaces: [auth, session],
-      oauthConsent: [auth, session],
-      registry: [auth],
-      themes: [auth],
-      apiKeys: [auth, session, member],
-      connectedApps: [auth, session, member],
+      config: [schema],
+      botProtection: [schema],
+      publicShare: [schema, ShareLinkVisitor.key],
+      me: [schema, auth, guard, session],
+      myWorkspaces: [schema, auth, guard, session],
+      oauthConsent: [schema, auth, guard, session],
+      registry: [schema, auth, guard],
+      themes: [schema, auth, guard],
+      apiKeys: [schema, auth, guard, session, member],
+      connectedApps: [schema, auth, guard, session, member],
     };
     for (const r of reflected) {
       const expected =
         r.group === "invitations"
           ? r.name === "accept"
-            ? [auth, session]
-            : []
-          : (expectations[r.group] ?? [auth, member]);
-      expect([`${r.group}.${r.name}`, [...r.middleware].sort()]).toEqual([
+            ? [schema, auth, guard, session]
+            : [schema]
+          : (expectations[r.group] ?? [schema, auth, guard, member]);
+      expect([`${r.group}.${r.name}`, [...r.middleware].reverse()]).toEqual([
         `${r.group}.${r.name}`,
-        [...expected].sort(),
+        [...expected],
       ]);
     }
   });
 
-  test("authenticated endpoints inherit the edge errors; Workspace ones also 404 and 403", () => {
+  test("every endpoint answers 422 Invalid for malformed requests (SchemaErrors)", () => {
+    const malformed = new Invalid({ issues: [{ path: [], code: "request.malformed" }] });
+    for (const r of reflected) {
+      expect([`${r.group}.${r.name}`, hasError(r, 422, malformed)]).toEqual([
+        `${r.group}.${r.name}`,
+        true,
+      ]);
+    }
+  });
+
+  test("authenticated endpoints inherit 401 from Authentication and 403/429/413 from EdgeGuard", () => {
     for (const r of reflected) {
       const authenticated = r.middleware.includes(Authentication.key);
+      expect(r.middleware.includes(EdgeGuard.key)).toBe(authenticated);
       expect(hasError(r, 401, new Unauthorized({ reason: "missing" }))).toBe(
         authenticated || (r.group === "invitations" && r.name === "accept"),
       );
@@ -312,6 +329,32 @@ describe("Api definition integrity", () => {
         expect(hasError(r, 404, new NotFound({ entity: "Workspace", id: "w" }))).toBe(true);
         expect(hasError(r, 403, new Forbidden({ action: "workspace.read" }))).toBe(true);
       }
+    }
+  });
+
+  test("Authentication fails only with Unauthorized; EdgeGuard owns the other edge checks", () => {
+    const accepts = (errors: ReadonlySet<Schema.Top>, sample: unknown) =>
+      [...errors].some((schema) => Schema.is(schema)(sample));
+    const edge = [
+      new OriginRejected({}),
+      new RateLimited({ retryAfterSeconds: 1 }),
+      new PayloadTooLarge({ limitBytes: 1 }),
+    ];
+    expect(Authentication.error.size).toBe(1);
+    expect(accepts(Authentication.error, new Unauthorized({ reason: "missing" }))).toBe(true);
+    expect(edge.some((e) => accepts(Authentication.error, e))).toBe(false);
+    expect(EdgeGuard.error.size).toBe(3);
+    expect(edge.every((e) => accepts(EdgeGuard.error, e))).toBe(true);
+  });
+
+  test("Idempotency-Key endpoints answer 409 idempotency_mismatch", () => {
+    const mismatch = new Conflict({ reason: "idempotency_mismatch" });
+    for (const r of reflected) {
+      if (!r.headers.includes("idempotency-key")) continue;
+      expect([`${r.group}.${r.name}`, hasError(r, 409, mismatch)]).toEqual([
+        `${r.group}.${r.name}`,
+        true,
+      ]);
     }
   });
 
@@ -327,6 +370,119 @@ describe("Api definition integrity", () => {
     expect(hasError(challenge, 429, new RateLimited({ retryAfterSeconds: 5 }))).toBe(true);
     expect(hasError(challenge, 503, new Unavailable({ dependency: "database" }))).toBe(true);
     expect(hasError(challenge, 400, new InvalidBotProof({}))).toBe(false);
+  });
+});
+
+/**
+ * Core error channel of the method each endpoint fronts (packages/domain/src/modules/*.ts),
+ * without Forbidden, which WorkspaceMember supplies. Endpoints without core errors are omitted.
+ */
+const CORE_ERRORS = `
+publicShare.open NotFound
+publicShare.pdf NotFound,Unavailable
+publicShare.logo NotFound,Unavailable
+invitations.peek NotFound
+invitations.accept NotFound,Conflict
+myWorkspaces.create Invalid,Unavailable
+oauthConsent.decide NotFound
+registry.lookupCompany Invalid,NotFound,Unavailable
+workspace.updateIssuingEntity Invalid,Conflict
+workspace.updateSettings Invalid,Conflict
+workspace.createBankAccount Invalid,NotFound,Conflict
+workspace.updateBankAccount Invalid,NotFound,Conflict
+workspace.removeBankAccount Invalid,NotFound,Conflict
+workspace.createSeries Invalid,NotFound,Conflict
+workspace.updateSeries Invalid,NotFound,Conflict
+workspace.close Invalid
+team.setRole NotFound,Conflict
+team.removeMember NotFound,Conflict
+team.leave Conflict
+team.invite Invalid,Conflict
+team.revokeInvitation NotFound
+team.resendInvitation NotFound,Conflict
+team.transferOwnership NotFound,Conflict
+branding.updateBranding Invalid,Conflict
+branding.previewPdf Invalid,Unavailable
+branding.putImage Invalid,Unavailable
+branding.getImage NotFound,Unavailable
+documents.list Invalid
+documents.preview Invalid,Unavailable
+documents.createDraft Invalid,NotFound,Unavailable
+documents.issueFromInput NotFound,Invalid,Conflict,Unavailable
+documents.get NotFound
+documents.edit NotFound,Invalid,Conflict,Unavailable
+documents.discardDraft NotFound,Conflict
+documents.issueDraft NotFound,Invalid,Conflict,Unavailable
+documents.lock NotFound,Conflict
+documents.unlock NotFound,Conflict
+documents.cancel NotFound,Invalid,Conflict,Unavailable
+documents.correct NotFound,Invalid,Conflict,Unavailable
+documents.issueFinalInvoice NotFound,Invalid,Conflict,Unavailable
+documents.send NotFound,Conflict,Invalid
+documents.pdf NotFound,Unavailable
+documents.history NotFound
+shareLinks.create NotFound,Conflict
+shareLinks.revoke NotFound
+shareLinks.views Invalid,NotFound
+contacts.get NotFound
+contacts.create Invalid,NotFound,Conflict
+contacts.update Invalid,NotFound,Conflict
+contacts.fromIco Invalid,Unavailable
+contacts.archive NotFound
+priceList.create Invalid,NotFound,Conflict
+priceList.update Invalid,NotFound,Conflict
+priceList.archive NotFound
+payments.record NotFound,Invalid,Conflict,Unavailable
+payments.remove NotFound,Conflict
+payments.listForDocument NotFound
+payments.listForExpense NotFound
+expenses.list Invalid
+expenses.record Invalid,NotFound,Unavailable
+expenses.get NotFound
+expenses.edit NotFound,Invalid,Conflict,Unavailable
+expenses.remove NotFound,Conflict
+expenses.attach NotFound,Invalid,Unavailable
+expenses.attachment NotFound,Unavailable
+expenses.detach NotFound
+templates.get NotFound
+templates.create Invalid,NotFound,Conflict
+templates.update Invalid,NotFound,Conflict
+templates.archive NotFound
+templates.setSchedule Invalid,NotFound,Conflict
+templates.removeSchedule Invalid,NotFound,Conflict
+templates.resume NotFound,Conflict
+templates.runs Invalid,NotFound
+templates.use NotFound,Invalid,Conflict,Unavailable
+reports.dashboard Invalid
+reports.run Invalid
+reports.export Invalid
+reports.fxRate Invalid,Unavailable
+reports.getExport NotFound
+reports.exportFile NotFound,Conflict,Unavailable
+`;
+
+describe("endpoints declare their core method's errors", () => {
+  const samples: Record<string, readonly [number, unknown]> = {
+    NotFound: [404, new NotFound({ entity: "Document", id: "d" })],
+    Invalid: [422, new Invalid({ issues: [{ path: [], code: "request.malformed" }] })],
+    Conflict: [409, new Conflict({ reason: "illegal_transition" })],
+    Unavailable: [503, new Unavailable({ dependency: "database" })],
+  };
+  const rows = CORE_ERRORS.trim()
+    .split("\n")
+    .map((line) => {
+      const [id = "", tags = ""] = line.split(" ");
+      return [id, tags.split(",")] as const;
+    });
+
+  test.each(rows)("%s", (id, tags) => {
+    const [group = "", name = ""] = id.split(".");
+    const r = find(group, name);
+    for (const tag of tags) {
+      const sample = samples[tag];
+      if (sample === undefined) throw new Error(`no sample for ${tag}`);
+      expect([tag, hasError(r, sample[0], sample[1])]).toEqual([tag, true]);
+    }
   });
 });
 

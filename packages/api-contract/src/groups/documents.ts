@@ -36,7 +36,7 @@ import {
   Revisioned,
   WriteHeaders,
 } from "../http";
-import { Authentication, WorkspaceMember } from "../security";
+import { Authentication, EdgeGuard, WorkspaceMember } from "../security";
 import { CoreErrors, WorkspaceParams } from "./shared";
 
 const DocParams = { ...WorkspaceParams, documentId: DocumentId };
@@ -105,7 +105,7 @@ export class DocumentsGroup extends HttpApiGroup.make("documents")
       query: { ...DocumentQuery.fields, ...PageQueryFields },
       success: Page(DocumentSummary),
       error: Invalid.schema,
-    }),
+    }).annotate(OpenApi.Summary, "List documents"),
   )
   .add(
     HttpApiEndpoint.post("preview", "/preview", {
@@ -113,7 +113,7 @@ export class DocumentsGroup extends HttpApiGroup.make("documents")
       payload: DocumentInput,
       success: DocumentView,
       error: [Invalid.schema, Unavailable.schema],
-    }),
+    }).annotate(OpenApi.Summary, "Preview a document without saving it"),
   )
   .add(
     HttpApiEndpoint.post("createDraft", "/", {
@@ -121,8 +121,10 @@ export class DocumentsGroup extends HttpApiGroup.make("documents")
       headers: IdempotencyHeaders,
       payload: DocumentInput,
       success: Created(DocumentView),
-      error: [Invalid.schema, NotFound.schema, Unavailable.schema],
-    }).annotate(Revisioned, true),
+      error: [Invalid.schema, NotFound.schema, Unavailable.schema, Conflict.schema],
+    })
+      .annotate(OpenApi.Summary, "Create a draft document")
+      .annotate(Revisioned, true),
   )
   .add(
     HttpApiEndpoint.post("issueFromInput", "/issue", {
@@ -131,13 +133,18 @@ export class DocumentsGroup extends HttpApiGroup.make("documents")
       payload: IssueFromInputPayload,
       success: Created(DocumentView),
       error: CoreErrors,
-    }).annotate(Revisioned, true),
+    })
+      .annotate(OpenApi.Summary, "Issue a document directly")
+      .annotate(Revisioned, true),
   )
   .add(
     HttpApiEndpoint.get("get", "/:documentId", {
       params: DocParams,
       success: DocumentView,
-    }).annotate(Revisioned, true),
+      error: [NotFound.schema],
+    })
+      .annotate(OpenApi.Summary, "Get a document")
+      .annotate(Revisioned, true),
   )
   .add(
     HttpApiEndpoint.patch("edit", "/:documentId", {
@@ -146,15 +153,17 @@ export class DocumentsGroup extends HttpApiGroup.make("documents")
       payload: DocumentPatch,
       success: DocumentView,
       error: [...CoreErrors, ...RevisionedEdgeErrors],
-    }).annotate(Revisioned, true),
+    })
+      .annotate(OpenApi.Summary, "Edit a document")
+      .annotate(Revisioned, true),
   )
   .add(
     HttpApiEndpoint.delete("discardDraft", "/:documentId", {
       params: DocParams,
       headers: IfMatchHeaders,
       success: NoContent,
-      error: [Conflict.schema, ...RevisionedEdgeErrors],
-    }),
+      error: [Conflict.schema, ...RevisionedEdgeErrors, NotFound.schema],
+    }).annotate(OpenApi.Summary, "Discard a draft"),
   )
   .add(
     HttpApiEndpoint.post("issueDraft", "/:documentId/issue", {
@@ -163,22 +172,28 @@ export class DocumentsGroup extends HttpApiGroup.make("documents")
       payload: IssueDraftPayload,
       success: DocumentView,
       error: [...CoreErrors, ...RevisionedEdgeErrors],
-    }).annotate(Revisioned, true),
+    })
+      .annotate(OpenApi.Summary, "Issue a draft")
+      .annotate(Revisioned, true),
   )
   .add(
     HttpApiEndpoint.post("lock", "/:documentId/lock", {
       params: DocParams,
       success: DocumentView,
-      error: Conflict.schema,
-    }).annotate(Revisioned, true),
+      error: [Conflict.schema, NotFound.schema],
+    })
+      .annotate(OpenApi.Summary, "Lock a document")
+      .annotate(Revisioned, true),
   )
   .add(
     HttpApiEndpoint.post("unlock", "/:documentId/unlock", {
       params: DocParams,
       payload: UnlockInput,
       success: DocumentView,
-      error: [Conflict.schema, Invalid.schema],
-    }).annotate(Revisioned, true),
+      error: [Conflict.schema, Invalid.schema, NotFound.schema],
+    })
+      .annotate(OpenApi.Summary, "Unlock a document")
+      .annotate(Revisioned, true),
   )
   .add(
     HttpApiEndpoint.post("cancel", "/:documentId/cancel", {
@@ -187,7 +202,7 @@ export class DocumentsGroup extends HttpApiGroup.make("documents")
       payload: CancelInput,
       success: CancelResult,
       error: CoreErrors,
-    }),
+    }).annotate(OpenApi.Summary, "Cancel a document"),
   )
   .add(
     HttpApiEndpoint.post("correct", "/:documentId/credit-notes", {
@@ -196,7 +211,9 @@ export class DocumentsGroup extends HttpApiGroup.make("documents")
       payload: CorrectionInput,
       success: Created(DocumentView),
       error: CoreErrors,
-    }).annotate(Revisioned, true),
+    })
+      .annotate(OpenApi.Summary, "Issue a credit note")
+      .annotate(Revisioned, true),
   )
   .add(
     HttpApiEndpoint.post("issueFinalInvoice", "/:documentId/final-invoice", {
@@ -205,7 +222,9 @@ export class DocumentsGroup extends HttpApiGroup.make("documents")
       payload: FinalInvoiceInput,
       success: Created(DocumentView),
       error: CoreErrors,
-    }).annotate(Revisioned, true),
+    })
+      .annotate(OpenApi.Summary, "Issue the final invoice for a proforma")
+      .annotate(Revisioned, true),
   )
   .add(
     HttpApiEndpoint.post("send", "/:documentId/deliveries", {
@@ -214,25 +233,27 @@ export class DocumentsGroup extends HttpApiGroup.make("documents")
       payload: SendInput,
       success: Accepted(DeliveryQueued),
       error: [NotFound.schema, Conflict.schema, Invalid.schema],
-    }),
+    }).annotate(OpenApi.Summary, "Send a document by email"),
   )
   .add(
     HttpApiEndpoint.get("pdf", "/:documentId/pdf", {
       params: DocParams,
       query: PdfQuery,
       success: PdfBytes,
-      error: Unavailable.schema,
-    }),
+      error: [Unavailable.schema, NotFound.schema],
+    }).annotate(OpenApi.Summary, "Download a document's PDF"),
   )
   .add(
     HttpApiEndpoint.get("history", "/:documentId/history", {
       params: DocParams,
       success: Schema.Array(AuditEntry),
-    }),
+      error: [NotFound.schema],
+    }).annotate(OpenApi.Summary, "Get a document's history"),
   )
   .prefix("/workspaces/:workspaceId/documents")
-  .middleware(Authentication)
   .middleware(WorkspaceMember)
+  .middleware(EdgeGuard)
+  .middleware(Authentication)
   .annotate(OpenApi.Description, "Invoices, Proformas, Payment Tax Documents and Credit Notes") {}
 
 export const ShareLinkCreated = Schema.Struct({ url: Schema.String });
@@ -243,17 +264,25 @@ export class ShareLinksGroup extends HttpApiGroup.make("shareLinks")
     HttpApiEndpoint.put("create", "/", {
       params: DocParams,
       success: ShareLinkCreated,
-      error: Conflict.schema,
-    }),
+      error: [Conflict.schema, NotFound.schema],
+    }).annotate(OpenApi.Summary, "Create or replace a share link"),
   )
-  .add(HttpApiEndpoint.delete("revoke", "/", { params: DocParams, success: NoContent }))
+  .add(
+    HttpApiEndpoint.delete("revoke", "/", {
+      params: DocParams,
+      success: NoContent,
+      error: [NotFound.schema],
+    }).annotate(OpenApi.Summary, "Revoke a share link"),
+  )
   .add(
     HttpApiEndpoint.get("views", "/views", {
       params: DocParams,
       query: PageQueryFields,
       success: Page(ShareViewEvent),
-    }),
+      error: [Invalid.schema, NotFound.schema],
+    }).annotate(OpenApi.Summary, "List share link views"),
   )
   .prefix("/workspaces/:workspaceId/documents/:documentId/share-link")
-  .middleware(Authentication)
-  .middleware(WorkspaceMember) {}
+  .middleware(WorkspaceMember)
+  .middleware(EdgeGuard)
+  .middleware(Authentication) {}

@@ -1,6 +1,7 @@
 /** Account groups (http-mcp-contracts section 3.5.2). */
 
 import {
+  Conflict,
   Forbidden,
   Invalid,
   NewWorkspace,
@@ -11,11 +12,11 @@ import {
   WorkspaceView,
 } from "@kvitbit/domain/contract";
 import { Schema } from "effect";
-import { HttpApiEndpoint, HttpApiGroup } from "effect/http-api";
+import { HttpApiEndpoint, HttpApiGroup, OpenApi } from "effect/http-api";
 import { ConsentDecision, ConsentResult, ConsentView } from "../edge";
 import { RateLimited, RevisionedEdgeErrors } from "../edge-errors";
 import { Created, IdempotencyHeaders, IfMatchHeaders, Revisioned } from "../http";
-import { Authentication, SessionOnly } from "../security";
+import { Authentication, EdgeGuard, SessionOnly } from "../security";
 import {
   AccountPreferences,
   AccountPreferencesPatch,
@@ -27,7 +28,9 @@ export class MeGroup extends HttpApiGroup.make("me")
   .add(
     HttpApiEndpoint.get("getPreferences", "/me/preferences", {
       success: AccountPreferences,
-    }).annotate(Revisioned, true),
+    })
+      .annotate(OpenApi.Summary, "Get account preferences")
+      .annotate(Revisioned, true),
   )
   .add(
     HttpApiEndpoint.patch("updatePreferences", "/me/preferences", {
@@ -35,23 +38,33 @@ export class MeGroup extends HttpApiGroup.make("me")
       payload: AccountPreferencesPatch,
       success: AccountPreferences,
       error: [Invalid.schema, ...RevisionedEdgeErrors],
-    }).annotate(Revisioned, true),
+    })
+      .annotate(OpenApi.Summary, "Update account preferences")
+      .annotate(Revisioned, true),
   )
-  .middleware(Authentication)
-  .middleware(SessionOnly) {}
+  .middleware(SessionOnly)
+  .middleware(EdgeGuard)
+  .middleware(Authentication) {}
 
 export class MyWorkspacesGroup extends HttpApiGroup.make("myWorkspaces")
-  .add(HttpApiEndpoint.get("listMine", "/workspaces", { success: Schema.Array(WorkspaceSummary) }))
+  .add(
+    HttpApiEndpoint.get("listMine", "/workspaces", {
+      success: Schema.Array(WorkspaceSummary),
+    }).annotate(OpenApi.Summary, "List my workspaces"),
+  )
   .add(
     HttpApiEndpoint.post("create", "/workspaces", {
       headers: IdempotencyHeaders,
       payload: NewWorkspace,
       success: Created(WorkspaceView),
-      error: [Invalid.schema, Unavailable.schema, Forbidden.schema],
-    }).annotate(Revisioned, true),
+      error: [Invalid.schema, Unavailable.schema, Forbidden.schema, Conflict.schema],
+    })
+      .annotate(OpenApi.Summary, "Create a workspace")
+      .annotate(Revisioned, true),
   )
-  .middleware(Authentication)
-  .middleware(SessionOnly) {}
+  .middleware(SessionOnly)
+  .middleware(EdgeGuard)
+  .middleware(Authentication) {}
 
 const ConsentParams = { consentId: Schema.NonEmptyString };
 
@@ -61,7 +74,7 @@ export class OAuthConsentGroup extends HttpApiGroup.make("oauthConsent")
       params: ConsentParams,
       success: ConsentView,
       error: NotFound.schema,
-    }),
+    }).annotate(OpenApi.Summary, "Get an OAuth consent request"),
   )
   .add(
     HttpApiEndpoint.post("decide", "/oauth/consents/:consentId", {
@@ -69,10 +82,11 @@ export class OAuthConsentGroup extends HttpApiGroup.make("oauthConsent")
       payload: ConsentDecision,
       success: ConsentResult,
       error: [NotFound.schema, Invalid.schema, Forbidden.schema],
-    }),
+    }).annotate(OpenApi.Summary, "Approve or deny an OAuth consent request"),
   )
-  .middleware(Authentication)
-  .middleware(SessionOnly) {}
+  .middleware(SessionOnly)
+  .middleware(EdgeGuard)
+  .middleware(Authentication) {}
 
 /** Pure lookup: any session or API Key (no SessionOnly). */
 export class RegistryGroup extends HttpApiGroup.make("registry")
@@ -81,8 +95,9 @@ export class RegistryGroup extends HttpApiGroup.make("registry")
       params: { ico: Schema.NonEmptyString }, // checksum is core's (Invalid{ico.checksum})
       success: RegistryResult,
       error: [Invalid.schema, NotFound.schema, Unavailable.schema, RateLimited.schema],
-    }),
+    }).annotate(OpenApi.Summary, "Look up a company by IČO"),
   )
+  .middleware(EdgeGuard)
   .middleware(Authentication) {}
 
 /** Pure lookup: any session or API Key (no SessionOnly). */
@@ -92,6 +107,7 @@ export class ThemesGroup extends HttpApiGroup.make("themes")
       payload: ThemeResolveRequest,
       success: ResolvedTheme,
       error: [Invalid.schema, RateLimited.schema],
-    }),
+    }).annotate(OpenApi.Summary, "Resolve a theme"),
   )
+  .middleware(EdgeGuard)
   .middleware(Authentication) {}

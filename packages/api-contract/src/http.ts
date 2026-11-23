@@ -71,7 +71,14 @@ export const BRANDING_IMAGE_MAX_BYTES = 2 * 1024 * 1024;
 export const BRANDING_IMAGE_TYPES = ["image/png", "image/jpeg"] as const;
 export const THEME_JSON_MAX_BYTES = 64 * 1024;
 
-/** Streamed binary success bodies: PDFs, attachments, exports (never buffered whole). */
+/**
+ * Streamed binary success bodies: PDFs, attachments, exports (never buffered whole).
+ *
+ * These schemas declare the content types for OpenAPI and typed clients. A handler whose MIME
+ * type varies per response (an attachment, a branding image, a CSV-or-PDF export) or that sets
+ * download headers (`Content-Disposition`, `Content-Length`) returns a raw
+ * `HttpServerResponse` from `effect/http` instead of a bare stream.
+ */
 export const PdfBytes = HttpApiSchema.StreamUint8Array({ contentType: "application/pdf" });
 export const ImageBytes = HttpApiSchema.StreamUint8Array({
   contentType: [...BRANDING_IMAGE_TYPES],

@@ -29,8 +29,12 @@ import {
   TeamGroup,
   WorkspaceGroup,
 } from "./groups/workspace";
+import { SchemaErrors } from "./security";
 
 export const API_PREFIX = "/api/v1";
+
+/** Parse options for request payloads and queries: unknown fields are rejected. */
+export const STRICT_REQUEST = { onExcessProperty: "error" } as const;
 
 export class Api extends HttpApi.make("kvitbit")
   // public
@@ -42,5 +46,11 @@ export class Api extends HttpApi.make("kvitbit")
   .add(ContactsGroup, PriceListGroup, DocumentsGroup, ShareLinksGroup)
   .add(PaymentsGroup, ExpensesGroup, TemplatesGroup, ReportsGroup)
   .prefix(API_PREFIX)
+  // Added last, so it wraps every endpoint outermost (see security.ts on execution order).
+  .middleware(SchemaErrors)
+  // Strict request bodies and query strings (section 3.2). Scoped to requests: headers keep
+  // Schema defaults (they carry undeclared transport headers) and responses are not affected.
+  .annotate(HttpApi.PayloadParseOptions, STRICT_REQUEST)
+  .annotate(HttpApi.QueryParseOptions, STRICT_REQUEST)
   .annotate(OpenApi.Title, "kvitbit API")
   .annotate(OpenApi.Version, "1.0.0") {}
