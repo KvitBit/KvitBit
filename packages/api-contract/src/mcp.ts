@@ -218,16 +218,23 @@ const CLOSED_ARGS = new WeakMap<Schema.Top, Schema.Top>();
  */
 const ListExpensesFields = Schema.Struct(ExpenseListQuery);
 const LIST_EXPENSES_KEYS: ReadonlySet<string> = new Set(Object.keys(ExpenseListQuery));
-const UnmodeledListExpensesKey = Schema.String.pipe(
+/** Keeps unmodeled keys (typed `unknown`) so the check below can see and reject them. */
+const ListExpensesWire = Schema.StructWithRest(ListExpensesFields, [
+  Schema.Record(Schema.String, Schema.Unknown),
+]).pipe(
   Schema.check(
-    Schema.makeFilter((key: string) => !LIST_EXPENSES_KEYS.has(key), {
-      expected: `none of ${[...LIST_EXPENSES_KEYS].join(", ")}`,
-    }),
+    Schema.makeFilter(
+      (args) => {
+        const unmodeled = Object.keys(args).filter((key) => !LIST_EXPENSES_KEYS.has(key));
+        return unmodeled.length === 0 || `unsupported argument: ${unmodeled.join(", ")}`;
+      },
+      { expected: `only ${[...LIST_EXPENSES_KEYS].join(", ")}` },
+    ),
   ),
 );
-export const ListExpensesArgs = Schema.StructWithRest(ListExpensesFields, [
-  Schema.Record(UnmodeledListExpensesKey, Schema.Never),
-]).pipe(Schema.decodeTo(ListExpensesFields, SchemaTransformation.passthroughSubtype()));
+export const ListExpensesArgs = ListExpensesWire.pipe(
+  Schema.decodeTo(ListExpensesFields, SchemaTransformation.passthroughSubtype()),
+);
 CLOSED_ARGS.set(ListExpensesArgs, ListExpensesFields);
 export const GetExpenseArgs = Schema.Struct({ expenseId: ExpenseId });
 export const ListContactsArgs = Schema.Struct({

@@ -361,6 +361,17 @@ describe("list_expenses arguments", () => {
     expect(Object.keys(ExpenseListQuery).sort()).toEqual(["cursor", "incomplete", "limit"]);
   });
 
+  test("typed decode and encode accept the modeled fields", () => {
+    const wire: typeof ListExpensesArgs.Encoded = { incomplete: true };
+    expect(Schema.decodeSync(ListExpensesArgs)(wire)).toEqual({ incomplete: true });
+    expect(Schema.decodeSync(ListExpensesArgs)({ incomplete: true, limit: 3 })).toEqual({
+      incomplete: true,
+      limit: 3,
+    });
+    const args: typeof ListExpensesArgs.Type = { cursor: "c1" };
+    expect(Schema.encodeSync(ListExpensesArgs)(args)).toEqual({ cursor: "c1" });
+  });
+
   test("decode the modeled fields and reject any other, with default options", () => {
     expect(decode({})).toEqual({});
     expect(decode({ incomplete: true, cursor: "c1", limit: 10 })).toEqual({
@@ -371,6 +382,8 @@ describe("list_expenses arguments", () => {
     expect(() => decode({ supplier: "demo" })).toThrow();
     expect(() => decode({ incomplete: true, contactId: "x" })).toThrow();
     expect(() => decode({ limit: 0 })).toThrow();
+    expect(() => decode({ incomplete: "yes" })).toThrow();
+    expect(() => decode(null)).toThrow();
   });
 
   test("the JSON Schema is closed", () => {
