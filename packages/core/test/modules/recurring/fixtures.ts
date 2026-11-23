@@ -144,6 +144,13 @@ export const DocumentsStubLayer = Layer.effectContext(
       });
 
     const documents = {
+      get: (id: DocumentId) =>
+        Effect.gen(function* () {
+          yield* authorize("document.read");
+          const caller = yield* CurrentCaller;
+          const ws = (caller as { readonly workspaceId: WorkspaceId }).workspaceId;
+          return viewOf(yield* store.transaction(docs.get(ws, id)));
+        }),
       createDraft: (input: DocumentInput) =>
         Effect.andThen(authorize("document.draft"), create(input, "draft")),
       issue: (from: { readonly input: DocumentInput } | { readonly draft: DocumentId }) =>

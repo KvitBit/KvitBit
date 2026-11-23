@@ -28,9 +28,9 @@ import type {
 import {
   Conflict,
   type CurrentCaller,
+  DocumentId as DocumentIdSchema,
   DocumentPatch as DocumentPatchSchema,
   Documents,
-  DocumentView as DocumentViewSchema,
   Forbidden,
   Invalid,
   TemplateId as TemplateIdSchema,
@@ -107,6 +107,8 @@ const UsePayload = Schema.Struct({
   as: Schema.Literals(["draft", "issued"]),
   patch: Schema.optional(DocumentPatchSchema),
 });
+
+const UseResult = Schema.Struct({ id: DocumentIdSchema });
 
 const SavePayload = Schema.Struct({
   ...TemplateInputSchema.fields,
@@ -286,6 +288,20 @@ export const makeTemplates = Effect.gen(function* () {
       found === null ? Effect.succeed(null) : repo.lockSchedule(workspaceId, found.id),
     );
 
+  /** The latest occurrence any schedule of the Template (detached ones too) issued. */
+  const lastIssuedOfTemplate = (workspaceId: WorkspaceId, templateId: TemplateId) =>
+    Effect.gen(function* () {
+      const schedules = yield* repo.schedulesOfTemplate(workspaceId, templateId);
+      let last: IsoDate | null = null;
+      for (const s of schedules) {
+        const run = yield* repo.lastIssuedRun(workspaceId, s.id);
+        if (Option.isSome(run) && (last === null || run.value.occurrence > last)) {
+          last = run.value.occurrence;
+        }
+      }
+      return last;
+    });
+
   const viewOf = (row: TemplateRow) =>
     Effect.map(attached(row.workspaceId, row.id), (schedule) => templateView(row, schedule));
 
@@ -382,11 +398,12 @@ export const makeTemplates = Effect.gen(function* () {
   const schedule: TemplatesImpl["schedule"] = (templateId, input, expectedRevision) =>
     Effect.gen(function* () {
       const { workspaceId } = yield* authorizeInWorkspace("schedule.write");
-      const valid = input === null ? null : yield* Effect.fromResult(validateSchedule(input));
       return yield* store.transaction(
         Effect.gen(function* () {
+          // Lock and revision check first (C2): a stale or foreign call never sees Invalid.
           const current = yield* repo.lockTemplate(workspaceId, templateId, expectedRevision);
           if (current.archivedAt !== null) return yield* illegal();
+          const valid = input === null ? null : yield* Effect.fromResult(validateSchedule(input));
           const before = yield* attachedLocked(workspaceId, templateId);
           if (valid === null) {
             if (before === null) return templateView(current, null);
@@ -411,6 +428,9 @@ export const makeTemplates = Effect.gen(function* () {
             issueAs: valid.issueAs,
             autoSend: valid.autoSend,
           };
+          // Never an occurrence any schedule of this Template already issued, so detaching and
+          // reattaching cannot bill a date twice.
+          const lastIssued = yield* lastIssuedOfTemplate(workspaceId, templateId);
           let next: ScheduleRow;
           if (before === null) {
             next = yield* repo.insertSchedule({
@@ -419,7 +439,7 @@ export const makeTemplates = Effect.gen(function* () {
               revision: 1,
               templateId,
               ...fields,
-              nextOccurrence: startingOccurrence(rule, day, null),
+              nextOccurrence: startingOccurrence(rule, day, lastIssued),
               pausedAt: null,
               pausedReason: null,
               pausedError: null,
@@ -428,17 +448,23 @@ export const makeTemplates = Effect.gen(function* () {
               createdAt: yield* nowIso,
             });
           } else {
-            // Changes affect future occurrences only: never one the schedule already issued.
-            const last = yield* repo.lastIssuedRun(workspaceId, before.id);
+            // Changes affect future occurrences only. An occurrence already due and not yet
+            // processed stays next, so an edit never erases it; the new rule applies after it.
+            // A cadence change otherwise restarts after the last issued occurrence.
+            const sameCadence =
+              before.cadenceUnit === fields.cadenceUnit &&
+              before.cadenceInterval === fields.cadenceInterval &&
+              before.startOn === fields.startOn &&
+              before.endOn === fields.endOn;
+            const outstanding = before.nextOccurrence !== null && before.nextOccurrence <= day;
             next = yield* repo.updateSchedule(
               {
                 ...before,
                 ...fields,
-                nextOccurrence: startingOccurrence(
-                  rule,
-                  day,
-                  Option.match(last, { onNone: () => null, onSome: (run) => run.occurrence }),
-                ),
+                nextOccurrence:
+                  sameCadence || outstanding
+                    ? before.nextOccurrence
+                    : startingOccurrence(rule, day, lastIssued),
               },
               before.revision,
             );
@@ -501,14 +527,16 @@ export const makeTemplates = Effect.gen(function* () {
         ...(input?.patch !== undefined ? { patch: input.patch } : {}),
       };
       // The request key is Templates': a retry with another template or patch is a mismatch.
-      // Documents runs nested in this transaction, without a key of its own.
-      return yield* withIdempotency(
+      // Documents runs nested in this transaction, without a key of its own. The request log
+      // stores the document id only (DocumentView's decimals have no JSON codec); the caller
+      // gets the document as it is now, on the first call and on a replay alike.
+      const created = yield* withIdempotency(
         {
           scope: { _tag: "Workspace", workspaceId },
           key: opts?.requestKey,
           method: "Templates.use",
           payload: { schema: UsePayload as Schema.Codec<typeof payload, unknown>, value: payload },
-          result: DocumentViewSchema as unknown as Schema.Codec<DocumentView, unknown>,
+          result: UseResult,
         },
         Effect.gen(function* () {
           const row = yield* repo.getTemplate(workspaceId, templateId);
@@ -516,11 +544,14 @@ export const makeTemplates = Effect.gen(function* () {
           const document = yield* Effect.fromResult(
             applyPatch(documentInputOf(row.input), input?.patch),
           );
-          return as === "issued"
-            ? yield* documents.issue({ input: document })
-            : yield* documents.createDraft(document);
+          const view =
+            as === "issued"
+              ? yield* documents.issue({ input: document })
+              : yield* documents.createDraft(document);
+          return { id: view.id };
         }),
       );
+      return yield* documents.get(created.id);
     }).pipe(provide, dieOnUnique, orUnavailable) as ReturnType<TemplatesImpl["use"]>;
 
   const get: TemplatesImpl["get"] = (id) =>

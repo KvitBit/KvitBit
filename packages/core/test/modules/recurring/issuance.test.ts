@@ -787,3 +787,92 @@ describe("council follow-ups", () => {
     expect(r.readToken).toEqual(Exit.fail(new Forbidden({ action: "document.issue" })));
   });
 });
+
+describe("review round 1 regressions", () => {
+  test("detaching and reattaching never bills an issued date twice", async () => {
+    const exit = await scenario(
+      member("owner"),
+      Effect.gen(function* () {
+        const t = yield* Templates;
+        const { templateId } = yield* setup(MONTHLY);
+        yield* sweep;
+        const detached = view(yield* t.schedule(templateId, null, 2));
+        const reattached = view(yield* t.schedule(templateId, MONTHLY, detached.revision));
+        const tick = yield* sweep;
+        return { reattached, tick, docs: yield* documents };
+      }),
+    );
+    const r = ok(exit);
+    expect(r.reattached.schedule?.nextOccurrence).toBe(d("2026-12-23"));
+    expect(r.tick).toEqual([]);
+    expect(r.docs.map((x) => x.input.issuedOn)).toEqual([d("2026-11-23")]);
+  });
+
+  test("an edit keeps an overdue occurrence; it issues on the next sweep", async () => {
+    const exit = await scenario(
+      member("owner"),
+      Effect.gen(function* () {
+        const t = yield* Templates;
+        const { templateId } = yield* setup(MONTHLY);
+        yield* at("2026-11-24T09:00:00Z");
+        const sendOn = view(yield* t.schedule(templateId, { ...MONTHLY, autoSend: true }, 2));
+        const weekly = view(
+          yield* t.schedule(templateId, { ...MONTHLY, every: { weeks: 1 } }, sendOn.revision),
+        );
+        yield* sweep;
+        return { sendOn, weekly, docs: yield* documents, after: yield* getTemplate(templateId) };
+      }),
+    );
+    const r = ok(exit);
+    expect(r.sendOn.schedule?.nextOccurrence).toBe(d("2026-11-23"));
+    expect(r.weekly.schedule?.nextOccurrence).toBe(d("2026-11-23"));
+    expect(r.docs.map((x) => x.input.issuedOn)).toEqual([d("2026-11-23")]);
+    // The new weekly rule applies after the kept occurrence.
+    expect(r.after.schedule?.nextOccurrence).toBe(d("2026-11-30"));
+  });
+
+  test("a stale or foreign schedule call reports the revision or NotFound before Invalid", async () => {
+    const exit = await scenario(
+      member("owner"),
+      Effect.gen(function* () {
+        const t = yield* Templates;
+        const id = view(yield* t.save(templateInput())).id as TemplateId;
+        const bad = { ...MONTHLY, every: { months: 0 } };
+        return {
+          id,
+          stale: yield* Effect.exit(t.schedule(id, bad, 7)),
+          foreign: yield* Effect.exit(
+            as(member("owner", { workspaceId: WORKSPACE_B }))(t.schedule(id, bad, 1)),
+          ),
+        };
+      }),
+    );
+    const r = ok(exit);
+    expect(r.stale).toEqual(
+      Exit.fail(new Conflict({ reason: "revision_changed", currentRevision: 1 })),
+    );
+    expect(r.foreign).toEqual(Exit.fail(new NotFound({ entity: "Template", id: r.id })));
+  });
+
+  test("keyed use with decimal lines replays the same document; a different patch conflicts", async () => {
+    const KEY = "req-use-1" as never;
+    const exit = await scenario(
+      member("owner"),
+      Effect.gen(function* () {
+        const t = yield* Templates;
+        const id = view(yield* t.save(templateInput())).id as TemplateId;
+        const first = yield* t.use(id, { as: "issued" }, { requestKey: KEY });
+        const replay = yield* t.use(id, { as: "issued" }, { requestKey: KEY });
+        const mismatch = yield* Effect.exit(
+          t.use(id, { as: "issued", patch: { note: "x" } }, { requestKey: KEY }),
+        );
+        return { first, replay, mismatch, docs: yield* documents };
+      }),
+    );
+    const r = ok(exit);
+    expect(r.replay.id).toBe(r.first.id);
+    expect(r.docs).toHaveLength(1);
+    expect(r.docs[0]?.input.lines[0]?.unitPrice).toBeDefined();
+    expect(r.mismatch).toEqual(Exit.fail(new Conflict({ reason: "idempotency_mismatch" })));
+  });
+});
