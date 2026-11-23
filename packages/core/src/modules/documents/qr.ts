@@ -5,6 +5,10 @@
  * account has an IBAN; otherwise null. Credit Notes, cancelled documents and documents with
  * nothing to pay (gross <= 0) never carry one.
  *
+ * Issue codes: the frozen IssueCode union has no qr.iban_invalid / variable-symbol code, so,
+ * like the rest of core (numbering, identity; board #430), field validation uses
+ * `request.malformed` with `params.reason` until the domain adds them.
+ *
  * Validation (5.3): an IBAN failing the ISO 13616 mod-97 check, an amount above the format's
  * maximum, or a variable symbol that is not 1-10 digits is `Invalid`; `compose` runs this on
  * every write and preview, so stored documents always encode. Optional texts (recipient name,
@@ -60,8 +64,55 @@ const truncate = (text: string, max: number) => {
 };
 
 /** ISO 13616: 2 letters, 2 check digits, up to 30 alphanumerics, mod 97 = 1. */
+/** IBAN length per SEPA country (SWIFT IBAN registry); SPAYD and EPC are SEPA-only. */
+const IBAN_LENGTH: Readonly<Record<string, number>> = {
+  AD: 24,
+  AT: 20,
+  BE: 16,
+  BG: 22,
+  CH: 21,
+  CY: 28,
+  CZ: 24,
+  DE: 22,
+  DK: 18,
+  EE: 20,
+  ES: 24,
+  FI: 18,
+  FR: 27,
+  GB: 22,
+  GI: 23,
+  GR: 27,
+  HR: 21,
+  HU: 28,
+  IE: 22,
+  IS: 26,
+  IT: 27,
+  LI: 21,
+  LT: 20,
+  LU: 20,
+  LV: 21,
+  MC: 27,
+  MT: 31,
+  NL: 18,
+  NO: 15,
+  PL: 28,
+  PT: 25,
+  RO: 24,
+  SE: 24,
+  SI: 19,
+  SK: 24,
+  SM: 27,
+  VA: 22,
+};
+/** Countries whose BBAN is all digits (CZ/SK: bank code, prefix, account number). */
+const NUMERIC_BBAN = new Set(["CZ", "SK"]);
+
+/** ISO 13616 for a SEPA IBAN: registered country and length, BBAN structure, mod 97 = 1. */
 export const isValidIban = (iban: string): boolean => {
-  if (!/^[A-Z]{2}\d{2}[A-Z0-9]{11,30}$/.test(iban)) return false;
+  if (!/^[A-Z]{2}\d{2}[A-Z0-9]+$/.test(iban)) return false;
+  const country = iban.slice(0, 2);
+  if (IBAN_LENGTH[country] !== iban.length) return false;
+  if (NUMERIC_BBAN.has(country) && !/^\d+$/.test(iban.slice(4))) return false;
   const rearranged = iban.slice(4) + iban.slice(0, 4);
   let remainder = 0;
   for (const ch of rearranged) {
@@ -84,11 +135,14 @@ export const forDocument = (doc: QrSource): Result.Result<PaymentQr | null, Inva
   if (doc.currency !== "CZK" && doc.currency !== "EUR") return Result.succeed(null);
   const gross = doc.totals.gross.amount;
   if (!BigDecimal.isPositive(gross)) return Result.succeed(null);
-  if (!isValidIban(iban)) return invalid(["bankAccount"], "request.malformed", { field: "iban" });
+  if (!isValidIban(iban))
+    return invalid(["bankAccount"], "request.malformed", { field: "iban", reason: "iban_invalid" });
   let vs: string | null = null;
   if (doc.variableSymbol !== null) {
     if (!isValidVariableSymbol(doc.variableSymbol)) {
-      return invalid(["variableSymbol"], "request.malformed");
+      return invalid(["variableSymbol"], "request.malformed", {
+        reason: "variable_symbol_invalid",
+      });
     }
     vs = doc.variableSymbol;
   } else {

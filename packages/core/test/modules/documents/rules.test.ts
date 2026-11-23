@@ -558,7 +558,16 @@ describe("review round 2 regressions (payment QR inputs)", () => {
     );
     expect(kept.paymentQr?.payload).toContain("*X-VS:0012345678*");
     for (const err of [tooLong, letters]) {
-      expect(err).toMatchObject({ _tag: "Invalid", issues: [{ path: ["variableSymbol"] }] });
+      expect(err).toMatchObject({
+        _tag: "Invalid",
+        issues: [
+          {
+            path: ["variableSymbol"],
+            code: "request.malformed",
+            params: { reason: "variable_symbol_invalid" },
+          },
+        ],
+      });
     }
   });
 
@@ -604,6 +613,37 @@ describe("review round 2 regressions (payment QR inputs)", () => {
       ),
     );
     expect(err).toMatchObject({ _tag: "Invalid", issues: [{ code: "qr.field_too_long" }] });
+  });
+});
+
+describe("review round 3 regressions", () => {
+  test("an IBAN of the wrong length for its country is Invalid even with a passing checksum", async () => {
+    const [err, listed] = ok(
+      await scenario(
+        Effect.gen(function* () {
+          const f = yield* DocumentFixtures;
+          const current = (yield* Ref.get(f.issuers)).get(WS);
+          if (!current) return yield* Effect.die("seed missing");
+          yield* f.putIssuer({
+            ...current,
+            bankAccounts: current.bankAccounts.map((a) => ({
+              ...a,
+              iban: "CZ18001000000000123456789",
+            })),
+          });
+          const docs = yield* Documents;
+          const err = yield* Effect.flip(docs.createDraft(invoiceInput()));
+          return [err, (yield* docs.list({})).items.length] as const;
+        }),
+      ),
+    );
+    expect(err).toMatchObject({
+      _tag: "Invalid",
+      issues: [
+        { path: ["bankAccount"], code: "request.malformed", params: { reason: "iban_invalid" } },
+      ],
+    });
+    expect(listed).toBe(0);
   });
 });
 

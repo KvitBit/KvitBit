@@ -168,9 +168,11 @@ export const expandLines = (
         .find((d) => d !== undefined && d !== "");
       const unitPrice = line.unitPrice ?? item?.unitPrice;
       if (description === undefined)
-        issues.push(issue(["lines", i, "description"], "request.malformed"));
+        issues.push(
+          issue(["lines", i, "description"], "request.malformed", { reason: "required" }),
+        );
       if (unitPrice === undefined)
-        issues.push(issue(["lines", i, "unitPrice"], "request.malformed"));
+        issues.push(issue(["lines", i, "unitPrice"], "request.malformed", { reason: "required" }));
       if (description === undefined || unitPrice === undefined) continue;
       out.push({
         id: null,
@@ -433,7 +435,7 @@ export const compose = (
         : addDays(issuedOn, defaults.dueDays);
     if (!isCalendarDate(dueOn) || dueOn > MAX_ISO_DATE) {
       // e.g. a huge `inDays`: the result must still be an IsoDate (four-digit year).
-      issues.push(issue(["due"], "request.malformed"));
+      issues.push(issue(["due"], "request.malformed", { reason: "out_of_range" }));
     } else if (dueOn < issuedOn) issues.push(issue(["due"], "document.due_before_issue"));
 
     const treatments = spec.lines.map((l) => treatmentOf(l, issuer.regime, contact));
@@ -443,13 +445,18 @@ export const compose = (
       // after an edit changes the document currency); else the caller gives a unitPrice.
       if (l.itemPrice !== null && l.itemPrice.currency !== currency) {
         issues.push(
-          issue(["lines", i, "unitPrice"], "request.malformed", { currency: l.itemPrice.currency }),
+          issue(["lines", i, "unitPrice"], "request.malformed", {
+            reason: "currency_mismatch",
+            currency: l.itemPrice.currency,
+          }),
         );
       }
     });
     if (spec.lines.length === 0) issues.push(issue(["lines"], "document.lines_required"));
     if (given.variableSymbol !== undefined && !isValidVariableSymbol(given.variableSymbol)) {
-      issues.push(issue(["variableSymbol"], "request.malformed"));
+      issues.push(
+        issue(["variableSymbol"], "request.malformed", { reason: "variable_symbol_invalid" }),
+      );
     }
     if (issues.length > 0) return yield* invalid(issues);
 
