@@ -117,6 +117,12 @@ describe("size limit vs type sniffing", () => {
           contentType: "image/heic",
           bytes,
         });
+        // Same layout with no HEIC brand anywhere: still too_large, not type_rejected.
+        const plain = ftyp("mif1", "mif1", "mif1", "mif1", "mif1");
+        const plainWhole = yield* Effect.exit(s.attach(id, file(Stream.make(plain))));
+        const plainSplit = yield* Effect.exit(
+          s.attach(id, file(Stream.make(plain.subarray(0, 28), plain.subarray(28)))),
+        );
         const whole = yield* Effect.exit(s.attach(id, file(Stream.make(box))));
         const split = yield* Effect.exit(
           s.attach(id, file(Stream.make(box.subarray(0, 28), box.subarray(28)))),
@@ -136,6 +142,8 @@ describe("size limit vs type sniffing", () => {
           }),
         );
         return {
+          plainWhole,
+          plainSplit,
           whole,
           split,
           spoofWhole: issuesCode(spoofWhole),
@@ -146,6 +154,8 @@ describe("size limit vs type sniffing", () => {
     );
     expect(exit).toEqual(
       Exit.succeed({
+        plainWhole: tooLarge,
+        plainSplit: tooLarge,
         whole: tooLarge,
         split: tooLarge,
         spoofWhole: "attachment.type_rejected",
