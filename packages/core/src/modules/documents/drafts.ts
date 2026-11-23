@@ -3,7 +3,7 @@
  * method shape of src/index.ts. Drafts audit only create and discard (issue is P2's).
  */
 import type { DocumentId, DocumentPatch, RequestOptions } from "@kvitbit/domain/contract";
-import { Conflict, DocumentInput, Invalid } from "@kvitbit/domain/contract";
+import { Conflict, DocumentInput } from "@kvitbit/domain/contract";
 import { Effect } from "effect";
 import { authorizeInWorkspace } from "../../policy/Policy";
 import { appendAudit } from "../../shared/audit";
@@ -14,23 +14,27 @@ import { CoreStore } from "../../store/CoreStore";
 import { applyPatch, compose, specFromInput, specFromRecord } from "./compose";
 import type { DocumentRecord } from "./record";
 import { DocumentsRepo } from "./repo";
-import { dieOnUnavailable, newDraftRecord, now, viewOf } from "./support";
+import { newDraftRecord, now, viewOf } from "./support";
 import { DocumentViewCodec, toView } from "./view";
 
-/** Live totals (rule D15): the createDraft code path, nothing stored, numbered or audited. */
+/**
+ * Live totals (rule D15): the createDraft code path and errors, inside a CoreStore transaction
+ * (the snapshot ports' contract, #402), with nothing stored, numbered, audited or logged.
+ */
 export const preview = (input: DocumentInput) =>
   Effect.gen(function* () {
     const { workspaceId } = yield* authorizeInWorkspace("document.draft");
-    const { today, at } = yield* now;
-    const spec = yield* specFromInput(workspaceId, input, "invalid");
-    const composed = yield* compose(workspaceId, spec, { today, missing: "invalid" });
-    const row = newDraftRecord(yield* newId<DocumentId>(), workspaceId, composed, at);
-    return toView(row, { today });
-  }).pipe(
-    // "invalid" mode reports every missing reference as Invalid; a NotFound here is a bug.
-    Effect.catchTag("NotFound", (e) => Effect.die(e)),
-    orUnavailable,
-  );
+    const store = yield* CoreStore;
+    return yield* store.transaction(
+      Effect.gen(function* () {
+        const { today, at } = yield* now;
+        const spec = yield* specFromInput(workspaceId, input);
+        const composed = yield* compose(workspaceId, spec, { today });
+        const row = newDraftRecord(yield* newId<DocumentId>(), workspaceId, composed, at);
+        return toView(row, { today });
+      }),
+    );
+  }).pipe(orUnavailable);
 
 export const createDraft = (input: DocumentInput, opts?: RequestOptions) =>
   Effect.gen(function* () {
@@ -46,8 +50,8 @@ export const createDraft = (input: DocumentInput, opts?: RequestOptions) =>
       Effect.gen(function* () {
         const repo = yield* DocumentsRepo;
         const { today, at } = yield* now;
-        const spec = yield* specFromInput(workspaceId, input, "notFound");
-        const composed = yield* compose(workspaceId, spec, { today, missing: "notFound" });
+        const spec = yield* specFromInput(workspaceId, input);
+        const composed = yield* compose(workspaceId, spec, { today });
         const row = yield* repo
           .insert(newDraftRecord(yield* newId<DocumentId>(), workspaceId, composed, at))
           // A draft has no number, so no unique index can break.
@@ -60,11 +64,6 @@ export const createDraft = (input: DocumentInput, opts?: RequestOptions) =>
         });
         return toView(row, { today });
       }),
-    ).pipe(
-      // The signature has no Conflict: a reused key with another payload is a malformed request.
-      Effect.catchTag("Conflict", () =>
-        Effect.fail(new Invalid({ issues: [{ path: ["requestKey"], code: "request.malformed" }] })),
-      ),
     );
   }).pipe(orUnavailable);
 
@@ -89,7 +88,7 @@ export const discardDraft = (id: DocumentId, expectedRevision: number) =>
         });
       }),
     );
-  }).pipe(dieOnUnavailable);
+  }).pipe(orUnavailable);
 
 /**
  * `edit` of a draft (locked row from `getForUpdate`): applies the patch and recomposes with
@@ -103,8 +102,8 @@ export const editDraft = (row: DocumentRecord, patch: DocumentPatch) =>
     }
     const repo = yield* DocumentsRepo;
     const { today, at } = yield* now;
-    const spec = yield* applyPatch(row.workspaceId, specFromRecord(row), patch, "notFound");
-    const composed = yield* compose(row.workspaceId, spec, { today, missing: "notFound" });
+    const spec = yield* applyPatch(row.workspaceId, specFromRecord(row), patch);
+    const composed = yield* compose(row.workspaceId, spec, { today });
     const next = yield* repo
       .update({ ...row, ...composed, updatedAt: at }, row.revision)
       .pipe(Effect.catchTag("UniqueViolation", (e) => Effect.die(e)));

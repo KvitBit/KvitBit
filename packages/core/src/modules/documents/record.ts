@@ -96,6 +96,8 @@ export const LineRecord = Schema.Struct({
   unit: Text,
   /** Document currency; excl. VAT unless the document's `pricesIncludeVat`. */
   unitPrice: Schema.BigDecimal,
+  /** The Price List Item's net price and currency when the price was copied from it. */
+  itemPrice: Schema.NullOr(Schema.Struct({ currency: CurrencyCode, net: Schema.BigDecimal })),
   /** The treatment the caller set (kept on recompute); null = from the defaults (rule D9). */
   vat: Schema.NullOr(VatTreatment),
   /** The Price List Item's treatment copied with the line (a vat_payer default). */
@@ -164,7 +166,7 @@ export const DocumentRecord = Schema.Struct({
   paymentMethod: PaymentMethod,
   note: Text,
   issuedOn: IsoDate,
-  /** null for a Proforma without an explicit tax point (never a tax document). */
+  /** Default issuedOn (DocumentInput); nullable for later kinds that carry none. */
   taxableSupplyOn: Schema.NullOr(IsoDate),
   dueOn: IsoDate,
   pricesIncludeVat: Schema.Boolean,

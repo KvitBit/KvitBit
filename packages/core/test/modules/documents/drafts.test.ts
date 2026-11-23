@@ -165,7 +165,7 @@ describe("createDraft", () => {
     expect(str(view.totals.gross.amount)).toBe("2856");
   });
 
-  test("a requestKey replays the first result; another payload is Invalid", async () => {
+  test("a requestKey replays the first result; another payload is Conflict", async () => {
     const key = "req-1" as RequestKey;
     const [first, second, mismatch, all] = ok(
       await scenario(
@@ -183,7 +183,7 @@ describe("createDraft", () => {
     const json = Schema.encodeSync(Schema.toCodecJson(DocumentViewData));
     expect(json(second as never)).toEqual(json(first as never));
     expect(all.items).toHaveLength(1);
-    expect(mismatch).toMatchObject({ _tag: "Invalid", issues: [{ path: ["requestKey"] }] });
+    expect(mismatch as unknown).toEqual(new Conflict({ reason: "idempotency_mismatch" }));
   });
 });
 
@@ -263,7 +263,7 @@ describe("authorization and tenancy", () => {
     expect(listed).toBe(0);
   });
 
-  test("preview reports an unknown Contact as Invalid and stores nothing", async () => {
+  test("preview reports an unknown Contact as NotFound and stores nothing", async () => {
     const [miss, view, listed] = ok(
       await scenario(
         Effect.gen(function* () {
@@ -276,7 +276,7 @@ describe("authorization and tenancy", () => {
         }),
       ),
     );
-    expect(miss).toMatchObject({ _tag: "Invalid", issues: [{ path: ["contact"] }] });
+    expect(miss as unknown).toEqual(new NotFound({ entity: "Contact", id: B_BUYER }));
     expect(view.number).toBeNull();
     expect(str(view.totals.gross.amount)).toBe("2980");
     expect(listed).toBe(0);
@@ -381,14 +381,14 @@ describe("VAT regimes (rule D9)", () => {
     expect(rejected).toMatchObject({ issues: [{ code: "vat.not_allowed_for_regime" }] });
   });
 
-  test("a Proforma is never a tax document and has no tax point by default", async () => {
+  test("a Proforma is never a tax document; its tax point defaults to issuedOn", async () => {
     const view = ok(
       await scenario(
         Effect.flatMap(Documents, (d) => d.createDraft(invoiceInput({ kind: "proforma" }))),
       ),
     );
     expect(view.taxDocument).toBe(false);
-    expect(view.dates.taxableSupplyOn).toBeNull();
+    expect(view.dates.taxableSupplyOn).toBe(view.dates.issuedOn);
     expect(codes(view)).toContain("proforma_not_tax_document");
   });
 });

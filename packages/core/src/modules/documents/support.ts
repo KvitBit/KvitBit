@@ -77,14 +77,6 @@ export const viewOf = (
     return toView(row, { ...extra, today, related });
   });
 
-/** For signatures without `Unavailable` (get, list, history, discardDraft): a store outage dies. */
-export const dieOnUnavailable = <A, E, R>(
-  effect: Effect.Effect<A, E | StoreUnavailable, R>,
-): Effect.Effect<A, Exclude<E, StoreUnavailable>, R> =>
-  Effect.catchTag(effect as Effect.Effect<A, StoreUnavailable, R>, "StoreUnavailable", (e) =>
-    Effect.die(e),
-  ) as Effect.Effect<A, Exclude<E, StoreUnavailable>, R>;
-
 /** A method of a later phase: dies with a clear defect until that phase lands. */
 export const notImplemented = (method: string, phase: string) =>
   Effect.die(new Error(`Documents.${method}: not implemented (${phase})`));

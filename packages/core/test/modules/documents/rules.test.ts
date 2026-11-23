@@ -25,7 +25,20 @@ import { NumberingSeries, NumberingTestLayer } from "../../../src/modules/number
 import { makeRequestOutcome } from "../../../src/shared/requestOutcome";
 import { CoreStore, UniqueViolation } from "../../../src/store/CoreStore";
 import { member, runTest } from "../../helpers";
-import { as, CZ_BUYER, DE_BUYER, dec, ITEM, invoiceInput, scenario, seed } from "./fixtures";
+import {
+  as,
+  CZ_BUYER,
+  contact,
+  DE_BUYER,
+  dec,
+  EUR,
+  fixing,
+  ITEM,
+  invoiceInput,
+  scenario,
+  seed,
+  str,
+} from "./fixtures";
 
 const ok = <A, E>(exit: Exit.Exit<A, E>): A => {
   if (Exit.isFailure(exit)) throw new Error(`expected success, got ${String(exit.cause)}`);
@@ -81,7 +94,7 @@ describe("idempotency (C3) and audit", () => {
 });
 
 describe("referenced records", () => {
-  test("preview reports missing item, bank account and series as Invalid at their path", async () => {
+  test("preview reports missing item, bank account and series as NotFound (same errors as createDraft)", async () => {
     const [item, bank, series] = ok(
       await scenario(
         Effect.gen(function* () {
@@ -94,9 +107,9 @@ describe("referenced records", () => {
         }),
       ),
     );
-    expect(item).toMatchObject({ _tag: "Invalid", issues: [{ path: ["lines", 0, "item"] }] });
-    expect(bank).toMatchObject({ _tag: "Invalid", issues: [{ path: ["bankAccount"] }] });
-    expect(series).toMatchObject({ _tag: "Invalid", issues: [{ path: ["series"] }] });
+    expect(item as unknown).toEqual(new NotFound({ entity: "PriceListItem", id: MISSING }));
+    expect(bank as unknown).toEqual(new NotFound({ entity: "BankAccount", id: MISSING }));
+    expect(series as unknown).toEqual(new NotFound({ entity: "NumberingSeries", id: MISSING }));
   });
 
   test("createDraft: missing series or bank account is NotFound; an explicit series is kept", async () => {
@@ -357,5 +370,173 @@ describe("seams", () => {
     expect([row.scheduleId, row.occurrence, row.revision]).toEqual([schedule, occurrence, 2]);
     expect(dup).toBeInstanceOf(UniqueViolation);
     expect((dup as UniqueViolation).constraint).toBe(SCHEDULE_OCCURRENCE);
+  });
+});
+
+describe("review round 1 regressions", () => {
+  const putItem = (vat: "standard" | null = "standard") =>
+    Effect.flatMap(DocumentFixtures, (f) =>
+      f.putItem(WS, {
+        id: ITEM,
+        name: "Licence",
+        description: null,
+        unit: null,
+        unitPrice: dec("100"),
+        currency: "CZK" as never,
+        vat,
+        archived: false,
+        revision: 1,
+      }),
+    );
+
+  test("a copied CZK price cannot silently become EUR on a currency edit", async () => {
+    const [created, edited] = ok(
+      await scenario(
+        Effect.gen(function* () {
+          yield* putItem();
+          const docs = yield* Documents;
+          const view = yield* docs.createDraft(invoiceInput({ lines: [{ item: ITEM }] }));
+          return [view, yield* Effect.flip(docs.edit(view.id, { currency: EUR }, 1))] as const;
+        }),
+        { fixings: [fixing("2026-11-20", "25")] },
+      ),
+    );
+    expect(str(created.totals.gross.amount)).toBe("121");
+    expect(edited).toMatchObject({
+      _tag: "Invalid",
+      issues: [{ path: ["lines", 0, "unitPrice"], params: { currency: "CZK" } }],
+    });
+  });
+
+  test("a net catalog price is grossed up when prices include VAT (100 net -> 121 gross)", async () => {
+    const [inclusive, toggled] = ok(
+      await scenario(
+        Effect.gen(function* () {
+          yield* putItem();
+          const docs = yield* Documents;
+          const inclusive = yield* docs.preview(
+            invoiceInput({ lines: [{ item: ITEM }], pricesIncludeVat: true }),
+          );
+          const draft = yield* docs.createDraft(invoiceInput({ lines: [{ item: ITEM }] }));
+          const toggled = yield* docs.edit(draft.id, { pricesIncludeVat: true }, 1);
+          return [inclusive, toggled] as const;
+        }),
+      ),
+    );
+    for (const view of [inclusive, toggled]) {
+      expect(str(view.totals.net.amount)).toBe("100");
+      expect(str(view.totals.vat.amount)).toBe("21");
+      expect(str(view.totals.gross.amount)).toBe("121");
+    }
+  });
+
+  test("an identified person's reverse charge needs a buyer in another EU state", async () => {
+    const err = ok(
+      await scenario(
+        Effect.gen(function* () {
+          const us = "01900000-0000-7000-8000-0000c00000u5".replace("u5", "05") as never;
+          yield* (yield* DocumentFixtures).putContact(
+            WS,
+            contact(us, { country: "US", dic: "12-3456789" }),
+          );
+          return yield* Effect.flip(
+            (yield* Documents).createDraft(
+              invoiceInput({
+                contact: us,
+                lines: [{ description: "x", unitPrice: dec("1"), vat: "reverse_charge" }],
+              }),
+            ),
+          );
+        }),
+        { regimeA: "identified_person" },
+      ),
+    );
+    expect(err).toMatchObject({ issues: [{ code: "vat.not_allowed_for_regime" }] });
+  });
+
+  test("a missing Issuing Entity is NotFound{Workspace}, not a defect", async () => {
+    const err = ok(
+      await scenario(
+        Effect.gen(function* () {
+          yield* Ref.update((yield* DocumentFixtures).issuers, () => new Map());
+          return yield* Effect.flip((yield* Documents).createDraft(invoiceInput()));
+        }),
+      ),
+    );
+    expect(err).toEqual(new NotFound({ entity: "Workspace", id: WS }));
+  });
+
+  test("a computed due date beyond 9999-12-31 is Invalid at due", async () => {
+    const err = ok(
+      await scenario(
+        Effect.flip(
+          Effect.flatMap(Documents, (d) =>
+            d.preview(invoiceInput({ due: { inDays: 10_000_000 } })),
+          ),
+        ),
+      ),
+    );
+    expect(err).toMatchObject({ _tag: "Invalid", issues: [{ path: ["due"] }] });
+  });
+
+  test("payment QR (rule D12): SPAYD for CZK with IBAN, EPC for EUR, none otherwise", async () => {
+    const [czk, eur, usd] = ok(
+      await scenario(
+        Effect.gen(function* () {
+          const docs = yield* Documents;
+          return [
+            yield* docs.createDraft(invoiceInput({ variableSymbol: "20260001" })),
+            yield* docs.createDraft(
+              invoiceInput({ currency: EUR, lines: [{ description: "x", unitPrice: dec("10") }] }),
+            ),
+            yield* docs.createDraft(
+              invoiceInput({
+                currency: "USD" as never,
+                fx: { manual: { rate: dec("23"), quantity: 1 } },
+              }),
+            ),
+          ] as const;
+        }),
+        { fixings: [fixing("2026-11-20", "25")] },
+      ),
+    );
+    expect(czk.paymentQr).toEqual({
+      format: "spayd",
+      payload:
+        "SPD*1.0*ACC:CZ6501000000000123456789*AM:2980.00*CC:CZK*DT:20261207*X-VS:20260001*RN:DODAVATEL S.R.O.",
+    });
+    expect(eur.paymentQr?.format).toBe("epc");
+    expect(eur.paymentQr?.payload.split("\n")).toEqual([
+      "BCD",
+      "002",
+      "1",
+      "SCT",
+      "KOMBCZPP",
+      "Dodavatel s.r.o.",
+      "CZ0201000000000987654321",
+      "EUR12.10",
+      "",
+      "",
+      "",
+    ]);
+    expect(usd.paymentQr).toBeNull();
+  });
+
+  test("admins and write-scoped members can draft", async () => {
+    const [admin, writer] = ok(
+      await scenario(
+        Effect.gen(function* () {
+          const docs = yield* Documents;
+          return [
+            (yield* as(member("admin"), docs.createDraft(invoiceInput()))).status,
+            (yield* as(
+              member("member", { scopes: ["documents:write"] }),
+              docs.createDraft(invoiceInput()),
+            )).status,
+          ] as const;
+        }),
+      ),
+    );
+    expect([admin, writer]).toEqual(["draft", "draft"]);
   });
 });

@@ -23,7 +23,7 @@
  *               VatMath totals. Every write and dry run goes through `compose`.
  * - view.ts     record -> DocumentView/DocumentSummary, concrete codecs for the domain
  *               placeholders (`DocumentViewCodec` is the C3 result codec).
- * - support.ts  `now`, `newDraftRecord`, `viewOf`/`relatedOf`, `dieOnUnavailable`,
+ * - support.ts  `now`, `newDraftRecord`, `viewOf`/`relatedOf`,
  *               `notImplemented`.
  * - drafts.ts   preview, createDraft, discardDraft, editDraft (P1).
  * - reads.ts    get, list, history, pdf (P1).
@@ -51,7 +51,7 @@ import { DocumentsRepoMemory } from "./repo";
 import { DocumentSenderStub } from "./sender";
 import { DocumentsLive } from "./service";
 
-export type { Composed, ComposeOptions, DocumentSpec, LineSpec, MissingAs } from "./compose";
+export type { Composed, ComposeOptions, DocumentSpec, LineSpec } from "./compose";
 export {
   applyPatch,
   compose,
@@ -95,7 +95,6 @@ export { DocumentSender, DocumentSenderStub } from "./sender";
 export type { DocumentsDeps } from "./service";
 export { DocumentsLive } from "./service";
 export {
-  dieOnUnavailable,
   newDraftRecord,
   notImplemented,
   now,

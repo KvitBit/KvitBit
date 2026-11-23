@@ -2,7 +2,7 @@
  * `DocumentsLive`: the domain `Documents` tag over the method files. Every dependency is
  * captured when the layer is built, so each method only needs `CurrentCaller`.
  */
-import type { CurrentCaller, DocumentId, DocumentPatch } from "@kvitbit/domain/contract";
+import type { CoreError, CurrentCaller, DocumentId, DocumentPatch } from "@kvitbit/domain/contract";
 import { Conflict, Documents } from "@kvitbit/domain/contract";
 import type { ExchangeRates } from "@kvitbit/domain/ports";
 import { Context, Effect, Layer } from "effect";
@@ -61,6 +61,14 @@ const edit = (id: DocumentId, patch: DocumentPatch, expectedRevision: number) =>
     );
   }).pipe(orUnavailable);
 
+type DocumentsShape = Documents["Service"];
+/** The domain shape with every method's error channel widened to `CoreError`. */
+type WideDocuments = {
+  readonly [K in keyof DocumentsShape]: (
+    ...args: Parameters<DocumentsShape[K]>
+  ) => Effect.Effect<Effect.Success<ReturnType<DocumentsShape[K]>>, CoreError, CurrentCaller>;
+};
+
 const make = Effect.gen(function* () {
   const context = yield* Effect.context<DocumentsDeps>();
   const sender = yield* DocumentSender;
@@ -73,7 +81,14 @@ const make = Effect.gen(function* () {
     Effect.flatMap(Effect.context<CurrentCaller>(), (callSite) =>
       Effect.provideContext(effect, Context.merge(context, callSite)),
     );
-  return Documents.of({
+  /**
+   * The one cast at the layer boundary (same approach as Contacts/Workspaces, board #341):
+   * methods keep their honest error types. Domain signature gaps, for a domain fix at
+   * integration: preview lacks NotFound (missing Contact/item/bank/series/Workspace);
+   * createDraft lacks Conflict{idempotency_mismatch} (C3); discardDraft, get, list and
+   * history lack Unavailable{database}.
+   */
+  const impl: WideDocuments = {
     preview: (input) => run(preview(input)),
     createDraft: (input, opts) => run(createDraft(input, opts)),
     discardDraft: (id, expectedRevision) => run(discardDraft(id, expectedRevision)),
@@ -95,7 +110,8 @@ const make = Effect.gen(function* () {
     previewCorrection: () => notImplemented("previewCorrection", "P3"),
     issueFinalInvoice: () => notImplemented("issueFinalInvoice", "P3"),
     previewFinalInvoice: () => notImplemented("previewFinalInvoice", "P3"),
-  });
+  };
+  return Documents.of(impl as unknown as Documents["Service"]);
 });
 
 export const DocumentsLive: Layer.Layer<Documents, never, DocumentsDeps> = Layer.effect(

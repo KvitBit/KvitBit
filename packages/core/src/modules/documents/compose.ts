@@ -35,7 +35,8 @@ import type {
 import { Invalid, NotFound } from "@kvitbit/domain/contract";
 import { ExchangeRates, type RatesUnavailable } from "@kvitbit/domain/ports";
 import { BigDecimal, Effect, Result } from "effect";
-import { addDays } from "../../engines/calendar";
+import { addDays, isCalendarDate, MAX_ISO_DATE } from "../../engines/calendar";
+import { HUNDRED } from "../../engines/decimal";
 import { Fx } from "../../engines/fx";
 import { VatMath } from "../../engines/vat";
 import { IdGenerator } from "../../shared/ids";
@@ -66,8 +67,11 @@ export interface LineSpec {
   readonly unitPrice: BigDecimal.BigDecimal;
   readonly vat: VatTreatment | null;
   readonly itemVat: VatTreatment | null;
-  /** Currency of a unit price copied from a Price List Item (must match the document's). */
-  readonly priceCurrency: string | null;
+  /**
+   * The Price List Item's net price when the line's price was copied from it (not given):
+   * recomputes re-derive `unitPrice` from it (currency check, VAT-inclusive gross-up).
+   */
+  readonly itemPrice: LineRecord["itemPrice"];
   readonly deducts: DocumentId | null;
 }
 
@@ -81,13 +85,6 @@ export interface DocumentSpec {
   readonly orderNumber: string | null;
   readonly fxOverride: FxOverride | null;
 }
-
-/**
- * How a missing referenced record (Contact, Price List Item, bank account, series) fails:
- * `NotFound` for stored writes, `Invalid` at the field's path for `preview` (whose signature
- * has no NotFound).
- */
-export type MissingAs = "notFound" | "invalid";
 
 /** The record fields `compose` produces. */
 export type Composed = Pick<
@@ -118,7 +115,6 @@ export type Composed = Pick<
 export interface ComposeOptions {
   /** Prague today (default for `issuedOn`). */
   readonly today: IsoDate;
-  readonly missing: MissingAs;
   /**
    * Printed particulars to keep instead of fresh snapshots (rule D10: an issued document keeps
    * them unless `refreshParties`). Defaults, regime and bank accounts still come from the
@@ -145,25 +141,12 @@ const issue = (path: Issue["path"], code: Issue["code"], params?: Record<string,
 const invalid = (issues: ReadonlyArray<Issue>) =>
   new Invalid({ issues: issues as [Issue, ...Array<Issue>] });
 
-/** Maps `NotFound` to `Invalid{request.malformed}` at `path` when `missing` is "invalid". */
-const orMissing =
-  (missing: MissingAs, path: Issue["path"]) =>
-  <A, E, R>(
-    effect: Effect.Effect<A, E | NotFound, R>,
-  ): Effect.Effect<A, E | NotFound | Invalid, R> =>
-    missing === "notFound"
-      ? effect
-      : (Effect.catchTag(effect as Effect.Effect<A, NotFound, R>, "NotFound", () =>
-          Effect.fail(invalid([issue(path, "request.malformed")])),
-        ) as Effect.Effect<A, E | Invalid, R>);
-
 // Specs -------------------------------------------------------------------------------------
 
 /** Expands `LineInput`s (Price List Item fill-in) into line specs. */
 export const expandLines = (
   workspaceId: WorkspaceId,
   lines: ReadonlyArray<LineInput>,
-  missing: MissingAs,
 ): Effect.Effect<
   ReadonlyArray<LineSpec>,
   Invalid | NotFound | StoreUnavailable,
@@ -175,11 +158,7 @@ export const expandLines = (
     const out: Array<LineSpec> = [];
     for (const [i, line] of lines.entries()) {
       const item =
-        line.item === undefined
-          ? null
-          : yield* orMissing(missing, ["lines", i, "item"])(
-              priceList.forLine(workspaceId, line.item),
-            );
+        line.item === undefined ? null : yield* priceList.forLine(workspaceId, line.item);
       // Blank values fall back to the item (description, then name); a blank result is invalid.
       const description = [line.description, item?.description, item?.name]
         .map((d) => d?.trim())
@@ -199,7 +178,10 @@ export const expandLines = (
         unitPrice,
         vat: line.vat ?? null,
         itemVat: item?.vat ?? null,
-        priceCurrency: line.unitPrice === undefined && item ? item.currency : null,
+        itemPrice:
+          line.unitPrice === undefined && item
+            ? { currency: item.currency, net: item.unitPrice }
+            : null,
         deducts: null,
       });
     }
@@ -211,9 +193,9 @@ const definedOnly = <A extends object>(value: A): A =>
   Object.fromEntries(Object.entries(value).filter(([, v]) => v !== undefined)) as A;
 
 /** The spec of a new document. */
-export const specFromInput = (workspaceId: WorkspaceId, input: DocumentInput, missing: MissingAs) =>
+export const specFromInput = (workspaceId: WorkspaceId, input: DocumentInput) =>
   Effect.map(
-    expandLines(workspaceId, input.lines, missing),
+    expandLines(workspaceId, input.lines),
     (lines): DocumentSpec => ({
       kind: input.kind,
       contactId: input.contact,
@@ -250,7 +232,7 @@ export const specFromRecord = (row: DocumentRecord): DocumentSpec => ({
     unitPrice: l.unitPrice,
     vat: l.vat,
     itemVat: l.itemVat,
-    priceCurrency: null,
+    itemPrice: l.itemPrice,
     deducts: l.deducts,
   })),
   pricesIncludeVat: row.pricesIncludeVat,
@@ -259,17 +241,10 @@ export const specFromRecord = (row: DocumentRecord): DocumentSpec => ({
 });
 
 /** The fields of `DocumentPatch` that `applyPatch` handles (number/refreshParties are P2's). */
-export const applyPatch = (
-  workspaceId: WorkspaceId,
-  spec: DocumentSpec,
-  patch: DocumentPatch,
-  missing: MissingAs,
-) =>
+export const applyPatch = (workspaceId: WorkspaceId, spec: DocumentSpec, patch: DocumentPatch) =>
   Effect.gen(function* () {
     const lines =
-      patch.lines === undefined
-        ? spec.lines
-        : yield* expandLines(workspaceId, patch.lines, missing);
+      patch.lines === undefined ? spec.lines : yield* expandLines(workspaceId, patch.lines);
     const given: GivenFields = definedOnly({
       ...spec.given,
       currency: patch.currency ?? spec.given.currency,
@@ -367,7 +342,7 @@ const regimeIssues = (
     const allowed =
       regime === "vat_payer" ||
       treatment === "outside_scope" ||
-      (regime === "identified_person" && !isDomestic(contact) && treatment === "reverse_charge");
+      (regime === "identified_person" && isOtherEu(contact) && treatment === "reverse_charge");
     if (!allowed) return [issue(path, "vat.not_allowed_for_regime", { regime, treatment })];
     if (treatment === "exempt_intra_eu_goods" && !isOtherEu(contact)) {
       return [issue(path, "vat.not_allowed_for_regime", { regime, treatment })];
@@ -425,20 +400,13 @@ export const compose = (
 ): Effect.Effect<Composed, ComposeError, ComposeServices> =>
   Effect.gen(function* () {
     const { given, kind } = spec;
-    const missing = options.missing;
-    const contact = yield* orMissing(missing, ["contact"])(
-      (yield* DocumentContacts).forDocument(workspaceId, spec.contactId),
-    );
+    const contact = yield* (yield* DocumentContacts).forDocument(workspaceId, spec.contactId);
     const issuedOn = given.issuedOn ?? options.today;
-    // A Proforma is never a tax document: no tax point unless the caller set one.
-    const taxableSupplyOn = given.taxableSupplyOn ?? (kind === "proforma" ? null : issuedOn);
-    const taxPoint = taxableSupplyOn ?? issuedOn;
-    // The caller's own Workspace always exists; a miss is a broken caller (defect).
-    const issuer = yield* Effect.catchTag(
-      (yield* DocumentIssuers).forDocument(workspaceId, taxPoint),
-      "NotFound",
-      (e) => Effect.die(e),
-    );
+    // DocumentInput: default issuedOn, for every kind; it drives the VAT rate and CNB fixing.
+    const taxableSupplyOn = given.taxableSupplyOn ?? issuedOn;
+    const taxPoint = taxableSupplyOn;
+    // NotFound{Workspace} (agreements #414/#418) passes through.
+    const issuer = yield* (yield* DocumentIssuers).forDocument(workspaceId, taxPoint);
 
     const defaults = resolveDocumentDefaults({
       kind,
@@ -460,14 +428,19 @@ export const compose = (
       given.due !== undefined && "on" in given.due
         ? given.due.on
         : addDays(issuedOn, defaults.dueDays);
-    if (dueOn < issuedOn) issues.push(issue(["due"], "document.due_before_issue"));
+    if (!isCalendarDate(dueOn) || dueOn > MAX_ISO_DATE) {
+      // e.g. a huge `inDays`: the result must still be an IsoDate (four-digit year).
+      issues.push(issue(["due"], "request.malformed"));
+    } else if (dueOn < issuedOn) issues.push(issue(["due"], "document.due_before_issue"));
 
     const treatments = spec.lines.map((l) => treatmentOf(l, issuer.regime, contact));
     issues.push(...regimeIssues(issuer.regime, contact, treatments));
     spec.lines.forEach((l, i) => {
-      if (l.priceCurrency !== null && l.priceCurrency !== currency) {
+      // A price copied from the Price List is in the item's currency: it must match (also
+      // after an edit changes the document currency); else the caller gives a unitPrice.
+      if (l.itemPrice !== null && l.itemPrice.currency !== currency) {
         issues.push(
-          issue(["lines", i, "unitPrice"], "request.malformed", { currency: l.priceCurrency }),
+          issue(["lines", i, "unitPrice"], "request.malformed", { currency: l.itemPrice.currency }),
         );
       }
     });
@@ -477,17 +450,13 @@ export const compose = (
     // Series: an explicit (Document or Contact) choice must be a series of this kind here.
     let seriesId: NumberingSeriesId | null = defaults.series;
     if (seriesId !== null && seriesId !== issuer.billing.seriesByKind[kind]) {
-      const series = yield* orMissing(missing, ["series"])(
-        (yield* NumberingSeries).resolve(workspaceId, kind, seriesId),
-      );
+      const series = yield* (yield* NumberingSeries).resolve(workspaceId, kind, seriesId);
       seriesId = series.id;
     }
 
     const account = pickBankAccount(issuer, currency, given.bankAccount);
     if (account === undefined) {
-      return yield* orMissing(missing, ["bankAccount"])(
-        Effect.fail(new NotFound({ entity: "BankAccount", id: given.bankAccount ?? "" })),
-      );
+      return yield* new NotFound({ entity: "BankAccount", id: given.bankAccount ?? "" });
     }
     const bankAccount: BankAccountRecord | null =
       account === null
@@ -509,10 +478,23 @@ export const compose = (
     if (Result.isFailure(fxResult)) return yield* fxResult.failure;
     const fx = fxResult.success;
 
+    // A Price List price is net (excl. VAT): with pricesIncludeVat it is grossed up at the
+    // line's rate, so the top-down math (§37(b)) sees a gross unit price.
+    const unitPrices = spec.lines.map((l, i) => {
+      if (l.itemPrice === null) return l.unitPrice;
+      if (!spec.pricesIncludeVat) return l.itemPrice.net;
+      const rate = VatMath.rateFor(treatments[i] ?? "outside_scope", taxPoint);
+      return BigDecimal.normalize(
+        BigDecimal.divideUnsafe(
+          BigDecimal.multiply(l.itemPrice.net, BigDecimal.sum(HUNDRED, rate)),
+          HUNDRED,
+        ),
+      );
+    });
     const totals = VatMath.calculate({
       lines: spec.lines.map((l, i) => ({
         quantity: l.quantity,
-        unitPrice: l.unitPrice,
+        unitPrice: unitPrices[i] ?? l.unitPrice,
         treatment: treatments[i] ?? "outside_scope",
       })),
       currency,
@@ -526,18 +508,20 @@ export const compose = (
     const lines: Array<LineRecord> = [];
     for (const [i, l] of spec.lines.entries()) {
       const treatment = treatments[i] ?? "outside_scope";
+      const unitPrice = unitPrices[i] ?? l.unitPrice;
       lines.push({
         id: l.id ?? ((yield* ids.next) as LineId),
         item: l.item,
         description: l.description,
         quantity: l.quantity,
         unit: l.unit,
-        unitPrice: l.unitPrice,
+        unitPrice,
+        itemPrice: l.itemPrice,
         vat: l.vat,
         itemVat: l.itemVat,
         treatment,
         ratePercent: VatMath.rateFor(treatment, taxPoint),
-        amount: BigDecimal.normalize(BigDecimal.multiply(l.quantity, l.unitPrice)),
+        amount: BigDecimal.normalize(BigDecimal.multiply(l.quantity, unitPrice)),
         deducts: l.deducts,
       });
     }

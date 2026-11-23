@@ -17,7 +17,7 @@ import { sha256Hex } from "../../shared/hash";
 import { CoreStore } from "../../store/CoreStore";
 import { DocumentRenderer } from "./ports";
 import { DocumentsRepo } from "./repo";
-import { dieOnUnavailable, now, viewOf } from "./support";
+import { now, viewOf } from "./support";
 import { toSummary } from "./view";
 
 export const get = (id: DocumentId) =>
@@ -25,7 +25,7 @@ export const get = (id: DocumentId) =>
     const { workspaceId } = yield* authorizeInWorkspace("document.read");
     const row = yield* (yield* DocumentsRepo).get(workspaceId, id);
     return yield* viewOf(row);
-  }).pipe(dieOnUnavailable);
+  }).pipe(orUnavailable);
 
 const DEFAULT_LIMIT = 50;
 
@@ -84,7 +84,7 @@ export const list = (q: DocumentQuery & PageRequest) =>
       items: rows.map((row) => toSummary(row, today)),
       nextCursor: more && last ? btoa(JSON.stringify([fingerprint, last.issuedOn, last.id])) : null,
     };
-  }).pipe(dieOnUnavailable);
+  }).pipe(orUnavailable);
 
 /** The document's audit entries in time order (drafts: create; issued: every change). */
 export const history = (id: DocumentId) =>
@@ -92,7 +92,7 @@ export const history = (id: DocumentId) =>
     const { workspaceId } = yield* authorizeInWorkspace("document.history");
     yield* (yield* DocumentsRepo).get(workspaceId, id);
     return yield* (yield* CoreStore).audit.history(workspaceId, { entity: "Document", id });
-  }).pipe(dieOnUnavailable);
+  }).pipe(orUnavailable);
 
 const filenameOf = (number: string | null, id: DocumentId) =>
   `${(number ?? `draft-${id}`).replace(/[^\p{L}\p{N}._-]+/gu, "-")}.pdf`;
