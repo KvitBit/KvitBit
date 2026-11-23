@@ -1,0 +1,309 @@
+/**
+ * Full data export jobs (core-ports 4.9, 7.2 DataExport, flow 9.7): the `exports` table, the
+ * `ExportWorkflow` starter port, and `ExportJobs`, the core-internal service the DataExport
+ * workflow and Housekeeping call (no authorize: the workflow runs as System, rule R5).
+ */
+
+import type {
+  Conflict,
+  ExportId,
+  ExportJobView,
+  IsoDate,
+  Locale,
+  NotFound,
+  WorkspaceId,
+} from "@kvitbit/domain/contract";
+import {
+  ExportId as ExportIdSchema,
+  NotFound as NotFoundError,
+  WorkspaceId as WorkspaceIdSchema,
+} from "@kvitbit/domain/contract";
+import type { BlobKey, BlobUnavailable } from "@kvitbit/domain/ports";
+import { BlobStorage } from "@kvitbit/domain/ports";
+import { Clock, Context, Effect, Layer, type Option, Ref, Schema } from "effect";
+import type { StoreUnavailable, UniqueViolation } from "../../store/CoreStore";
+import { CoreStore } from "../../store/CoreStore";
+import { defineCollection, MemoryTables } from "../../store/tables";
+import { CSV_CONTENT_TYPE, encodeCsv } from "./csv";
+import { ReportsSource } from "./source";
+import { documentsTable, expensesTable, paymentsTable } from "./tables";
+
+/** A ready export is kept 7 days after `readyAt`. */
+export const EXPORT_RETENTION_MILLIS = 7 * 24 * 60 * 60 * 1000;
+
+export const ExportRow = Schema.Struct({
+  id: ExportIdSchema,
+  workspaceId: WorkspaceIdSchema,
+  revision: Schema.Number,
+  status: Schema.Literals(["running", "ready", "failed"]),
+  createdAt: Schema.String,
+  readyAt: Schema.NullOr(Schema.String),
+  expiresAt: Schema.NullOr(Schema.String),
+  sizeBytes: Schema.NullOr(Schema.Int),
+});
+export type ExportRow = typeof ExportRow.Type;
+
+/** Unique index: one running export per Workspace. */
+export const ONE_RUNNING_EXPORT = "exports_one_running_per_workspace";
+
+export const ExportsTable = defineCollection<ExportRow>({
+  name: "exports",
+  entity: "Export",
+  schema: ExportRow as unknown as Schema.Codec<ExportRow, unknown>,
+  unique: [
+    {
+      name: ONE_RUNNING_EXPORT,
+      scope: "workspace",
+      key: (row) => (row.status === "running" ? [] : null),
+    },
+  ],
+});
+
+export const toExportJobView = (row: ExportRow): ExportJobView => ({
+  id: row.id,
+  status: row.status,
+  createdAt: row.createdAt,
+  readyAt: row.readyAt,
+  expiresAt: row.expiresAt,
+  sizeBytes: row.sizeBytes,
+});
+
+/** Deterministic, overwrite-safe ZIP key (7.2). */
+export const exportBlobKey = (workspaceId: WorkspaceId, id: ExportId): BlobKey =>
+  `exports/${workspaceId}/${id}.zip` as BlobKey;
+
+export class ExportsRepo extends Context.Service<
+  ExportsRepo,
+  {
+    readonly get: (
+      workspaceId: WorkspaceId,
+      id: ExportId,
+    ) => Effect.Effect<ExportRow, NotFound | StoreUnavailable>;
+    /** Row-lock without a revision (state-idempotent finish/fail, rule C6). */
+    readonly lock: (
+      workspaceId: WorkspaceId,
+      id: ExportId,
+    ) => Effect.Effect<ExportRow, NotFound | StoreUnavailable>;
+    readonly findRunning: (
+      workspaceId: WorkspaceId,
+    ) => Effect.Effect<Option.Option<ExportRow>, StoreUnavailable>;
+    readonly insert: (
+      row: ExportRow,
+    ) => Effect.Effect<ExportRow, UniqueViolation | StoreUnavailable>;
+    readonly update: (
+      next: ExportRow,
+      expectedRevision: number,
+    ) => Effect.Effect<ExportRow, NotFound | Conflict | UniqueViolation | StoreUnavailable>;
+    /** Every Workspace's rows past `expiresAt`, and failed rows created before `failedBefore` (Housekeeping). */
+    readonly listExpired: (
+      nowIso: string,
+      failedBefore: string,
+    ) => Effect.Effect<ReadonlyArray<ExportRow>, StoreUnavailable>;
+    readonly remove: (
+      workspaceId: WorkspaceId,
+      id: ExportId,
+      expectedRevision: number,
+    ) => Effect.Effect<void, NotFound | Conflict | StoreUnavailable>;
+  }
+>()("kvitbit/core/ExportsRepo") {}
+
+/** In-memory `ExportsRepo` on `MemoryTables` (tests). */
+export const ExportsRepoMemory: Layer.Layer<ExportsRepo, never, MemoryTables> = Layer.effect(
+  ExportsRepo,
+  Effect.map(MemoryTables, (tables) => {
+    const table = tables.collection(ExportsTable);
+    return {
+      get: (workspaceId, id) => table.get(workspaceId, id),
+      lock: (workspaceId, id) => table.lock(workspaceId, id),
+      findRunning: (workspaceId) => table.findUnique(ONE_RUNNING_EXPORT, [], workspaceId),
+      insert: table.insert,
+      update: table.update,
+      listExpired: (nowIso, failedBefore) =>
+        Effect.map(table.listGlobal(), (rows) =>
+          rows.filter(
+            (r) =>
+              (r.status === "ready" && r.expiresAt !== null && r.expiresAt <= nowIso) ||
+              (r.status === "failed" && r.createdAt < failedBefore),
+          ),
+        ),
+      remove: table.remove,
+    };
+  }),
+);
+
+// Workflow starter ----------------------------------------------------------------------------
+
+/**
+ * Starts the DataExport workflow (idempotency key = exportId). The composition root provides it
+ * from `DataExport.execute`; `Reports.startExport` calls it after commit.
+ */
+export class ExportWorkflow extends Context.Service<
+  ExportWorkflow,
+  {
+    readonly start: (job: {
+      readonly workspaceId: WorkspaceId;
+      readonly exportId: ExportId;
+    }) => Effect.Effect<void>;
+  }
+>()("kvitbit/core/ExportWorkflow") {}
+
+export class FakeExportWorkflow extends Context.Service<
+  FakeExportWorkflow,
+  {
+    readonly started: Ref.Ref<
+      ReadonlyArray<{ readonly workspaceId: WorkspaceId; readonly exportId: ExportId }>
+    >;
+  }
+>()("kvitbit/core/testing/FakeExportWorkflow") {
+  static readonly layer: Layer.Layer<ExportWorkflow | FakeExportWorkflow> = Layer.effect(
+    ExportWorkflow,
+    Effect.map(FakeExportWorkflow, (fake) => ({
+      start: (job: { readonly workspaceId: WorkspaceId; readonly exportId: ExportId }) =>
+        Ref.update(fake.started, (all) => [...all, job]),
+    })),
+  ).pipe(
+    Layer.provideMerge(
+      Layer.effect(
+        FakeExportWorkflow,
+        Effect.map(
+          Ref.make<
+            ReadonlyArray<{ readonly workspaceId: WorkspaceId; readonly exportId: ExportId }>
+          >([]),
+          (started) => ({ started }),
+        ),
+      ),
+    ),
+  );
+}
+
+// ExportJobs (DataExport workflow + Housekeeping) ---------------------------------------------
+
+export interface ExportFile {
+  readonly name: string;
+  readonly contentType: string;
+  readonly bytes: Uint8Array;
+}
+
+const ALL_TIME = { from: "0001-01-01" as IsoDate, to: "9999-12-31" as IsoDate };
+
+export interface ExportJobsShape {
+  /**
+   * Activity "build" input: one CSV per table Reports can read (documents, payments, expenses),
+   * rows sorted by id. Reads only. Document PDFs and Expense attachments are streamed by the
+   * workflow itself through the PDF cache and BlobStorage.
+   */
+  readonly tables: (
+    workspaceId: WorkspaceId,
+    locale: Locale,
+  ) => Effect.Effect<ReadonlyArray<ExportFile>, StoreUnavailable>;
+  /** Activity "finish": running -> ready (readyAt now, expiresAt +7 days). Other states unchanged. */
+  readonly finish: (
+    workspaceId: WorkspaceId,
+    id: ExportId,
+    sizeBytes: number,
+  ) => Effect.Effect<ExportJobView, NotFound | StoreUnavailable>;
+  /** running -> failed. Other states unchanged. */
+  readonly fail: (
+    workspaceId: WorkspaceId,
+    id: ExportId,
+  ) => Effect.Effect<ExportJobView, NotFound | StoreUnavailable>;
+  /** Housekeeping: deletes ready exports past expiresAt (row and ZIP) and failed ones older than 7 days. Returns how many. */
+  readonly purgeExpired: Effect.Effect<number, StoreUnavailable | BlobUnavailable>;
+}
+
+export class ExportJobs extends Context.Service<ExportJobs, ExportJobsShape>()(
+  "kvitbit/core/ExportJobs",
+) {}
+
+/** Under the row lock a revision conflict or a running-index clash is a bug, never a user error. */
+const orDieConflict = <A, R>(
+  effect: Effect.Effect<A, NotFound | Conflict | UniqueViolation | StoreUnavailable, R>,
+) => Effect.catchTag(effect, ["Conflict", "UniqueViolation"], (e) => Effect.die(e));
+
+export const ExportJobsLive: Layer.Layer<
+  ExportJobs,
+  never,
+  CoreStore | ExportsRepo | ReportsSource | BlobStorage
+> = Layer.effect(
+  ExportJobs,
+  Effect.gen(function* () {
+    const store = yield* CoreStore;
+    const repo = yield* ExportsRepo;
+    const source = yield* ReportsSource;
+    const blobs = yield* BlobStorage;
+
+    const transition = (
+      workspaceId: WorkspaceId,
+      id: ExportId,
+      next: (row: ExportRow, now: number) => ExportRow,
+    ) =>
+      store.transaction(
+        Effect.gen(function* () {
+          const row = yield* repo.lock(workspaceId, id);
+          if (row.status !== "running") return toExportJobView(row);
+          const now = yield* Clock.currentTimeMillis;
+          return toExportJobView(yield* orDieConflict(repo.update(next(row, now), row.revision)));
+        }),
+      );
+
+    const encoder = new TextEncoder();
+    const csv = (name: string, content: string): ExportFile => ({
+      name,
+      contentType: CSV_CONTENT_TYPE,
+      bytes: encoder.encode(content),
+    });
+
+    return {
+      tables: (workspaceId, locale) =>
+        store.transaction(
+          Effect.gen(function* () {
+            const documents = yield* source.documents(workspaceId, {
+              ...ALL_TIME,
+              field: "issuedOn",
+            });
+            const payments = yield* source.payments(workspaceId, ALL_TIME);
+            const expenses = yield* source.expenses(workspaceId, {
+              ...ALL_TIME,
+              field: "issuedOn",
+            });
+            return [
+              csv("documents.csv", encodeCsv(documentsTable(documents), locale)),
+              csv("payments.csv", encodeCsv(paymentsTable(payments), locale)),
+              csv("expenses.csv", encodeCsv(expensesTable(expenses), locale)),
+            ];
+          }),
+        ),
+      finish: (workspaceId, id, sizeBytes) =>
+        transition(workspaceId, id, (row, now) => ({
+          ...row,
+          status: "ready",
+          readyAt: new Date(now).toISOString(),
+          expiresAt: new Date(now + EXPORT_RETENTION_MILLIS).toISOString(),
+          sizeBytes,
+        })),
+      fail: (workspaceId, id) =>
+        transition(workspaceId, id, (row) => ({ ...row, status: "failed" })),
+      purgeExpired: Effect.gen(function* () {
+        const now = yield* Clock.currentTimeMillis;
+        const expired = yield* repo.listExpired(
+          new Date(now).toISOString(),
+          new Date(now - EXPORT_RETENTION_MILLIS).toISOString(),
+        );
+        for (const row of expired) {
+          // Blob first: a crash in between leaves the row, and the next run retries both.
+          yield* blobs.delete(exportBlobKey(row.workspaceId, row.id));
+          yield* store.transaction(
+            Effect.catchTag(
+              repo.remove(row.workspaceId, row.id, row.revision),
+              ["NotFound", "Conflict"],
+              () => Effect.void,
+            ),
+          );
+        }
+        return expired.length;
+      }),
+    };
+  }),
+);
+
+export const notFoundExport = (id: ExportId) => new NotFoundError({ entity: "Export", id });
