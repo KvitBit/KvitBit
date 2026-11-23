@@ -158,7 +158,9 @@ describe("RecurringIssuance: exactly once", () => {
       }),
     );
     const r = ok(exit);
-    expect(r.decisions.map((x) => [x.occurrence, x.action])).toEqual([["2026-11-23", "issue"]]);
+    expect<unknown>(r.decisions.map((x) => [x.occurrence, x.action])).toEqual([
+      ["2026-11-23", "issue"],
+    ]);
     expect(r.again).toEqual([]);
     expect(r.rerun.issue._tag).toBe("Issued");
     expect(r.rerun.issue._tag === "Issued" && r.rerun.issue.replayed).toBe(true);
@@ -341,7 +343,7 @@ describe("RecurringIssuance: failures pause the schedule", () => {
     expect(r.resumed.schedule?.paused).toBe(false);
     expect(r.resumed.revision).toBe(3);
     expect(r.docs.map((x) => x.input.issuedOn)).toEqual([d("2026-11-23")]);
-    expect(r.runs.items.map((x) => [x.occurrence, x.outcome, x.failure])).toEqual([
+    expect<unknown>(r.runs.items.map((x) => [x.occurrence, x.outcome, x.failure])).toEqual([
       ["2026-11-23", "issued", null],
     ]);
   });
@@ -449,12 +451,12 @@ describe("RecurringSweep: due occurrences on the Prague calendar", () => {
     expect(r.onTime.issue._tag).toBe("Issued");
     expect(r.capped._tag).toBe("Paused");
     expect(r.pausedView.schedule?.pausedReason).toBe("schedule.missed_occurrences");
-    expect(r.cappedRuns.items.map((x) => [x.occurrence, x.outcome, x.failure])).toEqual([
+    expect<unknown>(r.cappedRuns.items.map((x) => [x.occurrence, x.outcome, x.failure])).toEqual([
       ["2026-11-01", "skipped_missed", "schedule.missed_occurrences"],
     ]);
     // `late` (next 11-08, 15 days late on 11-23) pauses on the first tick; `missed` catches up.
     const first = r.ticks[0] ?? [];
-    expect(first.map((x) => [x.occurrence, x.action])).toEqual([
+    expect<unknown>(first.map((x) => [x.occurrence, x.action])).toEqual([
       ["2026-11-01", "issue"],
       ["2026-11-08", "pause_missed"],
     ]);
@@ -516,7 +518,10 @@ describe("RecurringSweep: due occurrences on the Prague calendar", () => {
       }),
     );
     expect(ok(exit).spring.map((x) => x.length)).toEqual([0, 1]);
-    expect(ok(autumn).map((x) => x.map((y) => y.occurrence))).toEqual([[], ["2026-10-25"]]);
+    expect<unknown>(ok(autumn).map((x) => x.map((y) => y.occurrence))).toEqual([
+      [],
+      ["2026-10-25"],
+    ]);
   });
 
   test("a monthly schedule from the 31st issues on month ends; endOn ends it", async () => {
@@ -641,9 +646,9 @@ describe("Templates.runs", () => {
       }),
     );
     const r = ok(exit);
-    expect(r.first.items.map((x) => x.occurrence)).toEqual(["2026-11-15", "2026-11-08"]);
+    expect<unknown>(r.first.items.map((x) => x.occurrence)).toEqual(["2026-11-15", "2026-11-08"]);
     expect(r.first.nextCursor).not.toBeNull();
-    expect(r.second.items.map((x) => x.occurrence)).toEqual(["2026-11-01"]);
+    expect<unknown>(r.second.items.map((x) => x.occurrence)).toEqual(["2026-11-01"]);
     expect(r.second.nextCursor).toBeNull();
     expect(r.foreign).toEqual(
       Exit.fail(new Invalid({ issues: [{ path: ["cursor"], code: "page.cursor_mismatch" }] })),

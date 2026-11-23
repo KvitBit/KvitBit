@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import type { RequestKey, TemplateId } from "@kvitbit/domain/contract";
+import type { IsoDate, RequestKey, TemplateId, TemplateSchedule } from "@kvitbit/domain/contract";
 import { Conflict, Forbidden, Invalid, NotFound, Templates } from "@kvitbit/domain/contract";
 import { BigDecimal, Effect, Exit } from "effect";
 import type { TemplateViewValue } from "../../../src/modules/recurring";
@@ -9,12 +9,12 @@ import { as, DocumentsStub, ok, scenario, templateInput } from "./fixtures";
 
 const KEY = "req-template-1" as RequestKey;
 const view = (v: unknown) => v as TemplateViewValue;
-const MONTHLY = {
+const MONTHLY: TemplateSchedule = {
   every: { months: 1 },
-  startOn: "2026-12-01",
+  startOn: "2026-12-01" as IsoDate,
   issueAs: "invoice",
   autoSend: false,
-} as const;
+};
 
 const create = Effect.flatMap(Templates, (t) => t.save(templateInput()));
 

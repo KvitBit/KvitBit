@@ -54,7 +54,7 @@ describe("decideDue", () => {
       ],
       today,
     );
-    expect(decisions.map((x) => [x.scheduleId, x.occurrence, x.action])).toEqual([
+    expect<unknown>(decisions.map((x) => [x.scheduleId, x.occurrence, x.action])).toEqual([
       [sid(8), "2026-10-01", "issue"],
       [sid(4), "2026-11-15", "pause_missed"],
       [sid(3), "2026-11-16", "issue"],
