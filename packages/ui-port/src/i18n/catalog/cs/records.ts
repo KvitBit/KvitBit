@@ -87,7 +87,7 @@ export const records = {
   "expenses.attachmentViewer.page": "Strana {page} z {pages}",
   "expenses.attachmentViewer.detach": "Odebrat přílohu",
   "expenses.attachmentViewer.detachTitle": "Odebrat tuto přílohu?",
-  "expenses.attachmentViewer.allowedTypes": "Povolené typy: PDF, JPEG, PNG, HEIC, WebP.",
+  "expenses.attachmentViewer.allowedTypes": "Povolené typy: {types}.",
 
   "contacts.list.title": "Kontakty",
   "contacts.list.new": "Nový kontakt",

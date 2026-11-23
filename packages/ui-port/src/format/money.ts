@@ -1,6 +1,6 @@
 import { type CurrencyCode, MoneyMath } from "@kvitbit/domain/contract";
 import type { Locale } from "../i18n/locale";
-import { type DecimalInput, numberFormat, type Sign, signOf, toDecimalString } from "./number";
+import { type DecimalInput, formatExact, type Sign, signOf } from "./number";
 
 export interface MoneyInput {
   readonly amount: DecimalInput;
@@ -16,8 +16,10 @@ export interface MoneyOptions {
 
 /**
  * Locale money text, Intl only: cs `1 234,50 Kč`, en `CZK 1,234.50`, en `€1,234.50`.
- * Grouping uses NBSP in cs. The scale is the display scale: amounts arrive already rounded per
- * bucket, so a wire value with more decimals is a server bug, not something to hide.
+ * Grouping uses NBSP in cs. Digits are exact for any decimal size (no float conversion). The
+ * scale is the display scale (the currency's minor-unit scale unless overridden): amounts arrive
+ * already rounded per bucket; a value with more decimals is rounded half away from zero for
+ * display only, the same rule Intl applies.
  */
 export const formatMoney = (
   locale: Locale,
@@ -27,15 +29,14 @@ export const formatMoney = (
   const currency = money.currency.toUpperCase();
   const scale = options.scale ?? MoneyMath.minorUnitScale(currency as CurrencyCode);
   const sign = signOf(money.amount);
-  const raw = toDecimalString(money.amount);
-  return numberFormat(locale, {
+  return formatExact(locale, money.amount, {
     style: "currency",
     currency,
     currencyDisplay: "symbol",
     minimumFractionDigits: scale,
     maximumFractionDigits: scale,
     signDisplay: options.signed === true && sign !== "zero" ? "always" : "auto",
-  }).format(sign === "zero" ? "0" : raw);
+  });
 };
 
 /** Render-ready money: the spec's `MoneyVM` shape (section 2.12). */

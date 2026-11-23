@@ -58,8 +58,24 @@ describe("money", () => {
     expect(moneyDisplay("en", { amount: 0, currency: "EUR" }).sign).toBe("zero");
   });
 
+  test("exact digits for exponent input, numbers and huge values (no float path)", () => {
+    expect(spaces(formatMoney("cs", { amount: "1.5e3", currency: "CZK" }))).toBe("1 500,00 Kč");
+    expect(spaces(formatMoney("en", { amount: "99999999999999999.99", currency: "EUR" }))).toBe(
+      "€99,999,999,999,999,999.99",
+    );
+    expect(formatNumber("en", "1e-7", { maxFractionDigits: 7 })).toBe("0.0000001");
+    expect(formatNumber("en", 1e21)).toBe("1,000,000,000,000,000,000,000");
+  });
+
+  test("display rounding is half away from zero with carry", () => {
+    expect(spaces(formatMoney("cs", { amount: "9.995", currency: "CZK" }))).toBe("10,00 Kč");
+    expect(spaces(formatMoney("cs", { amount: "-0.004", currency: "CZK" }))).toBe("0,00 Kč");
+    expect(spaces(formatMoney("en", { amount: "999.5", currency: "JPY" }))).toBe("JP¥1,000");
+  });
+
   test("rejects non-decimal input", () => {
-    expect(() => formatMoney("cs", { amount: "1e5", currency: "CZK" })).toThrow(RangeError);
+    expect(() => formatMoney("cs", { amount: "abc", currency: "CZK" })).toThrow(RangeError);
+    expect(() => formatMoney("cs", { amount: Number.NaN, currency: "CZK" })).toThrow(RangeError);
   });
 });
 

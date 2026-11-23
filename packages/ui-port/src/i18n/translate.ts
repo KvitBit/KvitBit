@@ -1,3 +1,4 @@
+import { formatExact } from "../format/number";
 import type { Text, TextParam } from "../text";
 import { catalogs, type EnCatalog, isMessageKey, type MessageKey } from "./catalog";
 import { FALLBACK_LOCALE, INTL_TAG, type Locale } from "./locale";
@@ -11,36 +12,56 @@ export type ParamsArg<K extends MessageKey> = [ParamNames<EnCatalog[K]>] extends
   ? []
   : [params: MessageParams<K>];
 
-const pluralRules = new Map<Locale, Intl.PluralRules>();
-const numberFormats = new Map<Locale, Intl.NumberFormat>();
+/** CLDR rules for the two UI locales, used where `Intl.PluralRules` is missing (older Hermes). */
+const fallbackPlural = (locale: Locale, n: number): Intl.LDMLPluralRule => {
+  if (!Number.isInteger(n)) return locale === "cs" ? "many" : "other";
+  if (n === 1) return "one";
+  if (locale === "cs" && n >= 2 && n <= 4) return "few";
+  return "other";
+};
 
-const rulesFor = (locale: Locale): Intl.PluralRules => {
+const pluralRules = new Map<Locale, Intl.PluralRules | null>();
+
+const rulesFor = (locale: Locale): Intl.PluralRules | null => {
   let rules = pluralRules.get(locale);
   if (rules === undefined) {
-    rules = new Intl.PluralRules(INTL_TAG[locale]);
+    rules = typeof Intl.PluralRules === "function" ? new Intl.PluralRules(INTL_TAG[locale]) : null;
     pluralRules.set(locale, rules);
   }
   return rules;
 };
 
-const numberFormatFor = (locale: Locale): Intl.NumberFormat => {
-  let format = numberFormats.get(locale);
-  if (format === undefined) {
-    format = new Intl.NumberFormat(INTL_TAG[locale], { maximumFractionDigits: 20 });
-    numberFormats.set(locale, format);
-  }
-  return format;
-};
+/** Fraction digits a number param is shown with; plurals select on the shown value. */
+const PARAM_FRACTION_DIGITS = 3;
+
+const shown = (n: number): number => Number(n.toFixed(PARAM_FRACTION_DIGITS));
 
 /** Plural category of `count` in `locale` (cs: one, few, many, other; en: one, other). */
-export const pluralCategory = (locale: Locale, count: number): Intl.LDMLPluralRule =>
-  rulesFor(locale).select(count);
+export const pluralCategory = (locale: Locale, count: number): Intl.LDMLPluralRule => {
+  const n = Math.abs(shown(count));
+  return rulesFor(locale)?.select(n) ?? fallbackPlural(locale, n);
+};
+
+/** Exported for tests: the fallback must agree with Intl where Intl exists. */
+export const fallbackPluralCategory = (locale: Locale, count: number): Intl.LDMLPluralRule =>
+  fallbackPlural(locale, Math.abs(shown(count)));
+
+/**
+ * Number params: exact digits, up to 3 decimals, grouped only from five digits so years and
+ * short counts stay compact (`2026`, `1234`, `12 345`), as Czech typography recommends.
+ */
+const formatParam = (locale: Locale, n: number): string =>
+  formatExact(locale, n, {
+    minimumFractionDigits: 0,
+    maximumFractionDigits: PARAM_FRACTION_DIGITS,
+    minGroupDigits: 2,
+  });
 
 const PLACEHOLDER = /\{([A-Za-z][A-Za-z0-9_]*)\}/g;
 
 /**
  * ICU-lite interpolation: replaces `{name}` with the param. Numbers are formatted for the
- * locale (`1 234` in cs); missing params leave the placeholder visible so gaps show in review.
+ * locale (see `formatParam`); missing params leave the placeholder visible so gaps show in review.
  */
 export const interpolate = (
   locale: Locale,
@@ -50,7 +71,7 @@ export const interpolate = (
   template.replace(PLACEHOLDER, (whole, name: string) => {
     const value = params?.[name];
     if (value === undefined) return whole;
-    return typeof value === "number" ? numberFormatFor(locale).format(value) : value;
+    return typeof value === "number" ? formatParam(locale, value) : value;
   });
 
 const selectForm = (

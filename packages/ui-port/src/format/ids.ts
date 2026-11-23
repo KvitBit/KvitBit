@@ -31,29 +31,14 @@ export const normalizeVatId = (input: string): string => {
   return c.startsWith("GR") ? `EL${c.slice(2)}` : c;
 };
 
-/** Rodné číslo used as DIČ: 10 digits divisible by 11 (or the pre-1985 remainder-10 rule). */
-const isValidBirthNumber = (digits: string): boolean => {
-  const n = BigInt(digits);
-  if (n % 11n === 0n) return true;
-  return BigInt(digits.slice(0, 9)) % 11n === 10n && digits[9] === "0";
-};
-
 /**
- * Czech DIČ: `CZ` + 8 digits (IČO with its checksum), 9 digits (older birth numbers and
- * special 6xx numbers) or 10 digits (birth number, mod 11). Fails with `form.dic_invalid`.
+ * Czech DIČ format: `CZ` + 8 digits (legal entities, from the IČO), 9 or 10 digits (natural
+ * persons, from the birth number or a special number). Only the format is checked: the tax
+ * office assigns DIČ, so no checksum is a reliable rule. Fails with `form.dic_invalid`.
  */
 export const validateCzechDic = (input: string): Result.Result<string, FormatIssue> => {
   const dic = normalizeVatId(input);
-  const m = /^CZ(\d{8,10})$/.exec(dic);
-  const digits = m?.[1];
-  if (digits === undefined) return Result.fail(issue("form.dic_invalid"));
-  if (digits.length === 8 && icoCheckDigit(digits) !== Number(digits[7])) {
-    return Result.fail(issue("form.dic_invalid"));
-  }
-  if (digits.length === 10 && !isValidBirthNumber(digits)) {
-    return Result.fail(issue("form.dic_invalid"));
-  }
-  return Result.succeed(dic);
+  return /^CZ\d{8,10}$/.test(dic) ? Result.succeed(dic) : Result.fail(issue("form.dic_invalid"));
 };
 
 /** VIES number formats after the two-letter prefix (EU member states plus XI). */
@@ -67,7 +52,7 @@ export const EU_VAT_FORMATS: Readonly<Record<string, RegExp>> = {
   DK: /^\d{8}$/,
   EE: /^\d{9}$/,
   EL: /^\d{9}$/,
-  ES: /^[A-Z0-9]\d{7}[A-Z0-9]$/,
+  ES: /^([A-Z]\d{7}[A-Z0-9]|\d{8}[A-Z])$/,
   FI: /^\d{8}$/,
   FR: /^[A-HJ-NP-Z0-9]{2}\d{9}$/,
   HR: /^\d{11}$/,
@@ -82,7 +67,7 @@ export const EU_VAT_FORMATS: Readonly<Record<string, RegExp>> = {
   PL: /^\d{10}$/,
   PT: /^\d{9}$/,
   RO: /^[1-9]\d{1,9}$/,
-  SE: /^\d{12}$/,
+  SE: /^\d{10}01$/,
   SI: /^\d{8}$/,
   SK: /^\d{10}$/,
   XI: /^(\d{9}|\d{12}|GD\d{3}|HA\d{3})$/,

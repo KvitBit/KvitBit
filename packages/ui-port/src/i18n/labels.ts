@@ -8,14 +8,18 @@ import type {
   DocumentStatus,
   EntityKind,
   ExpenseStatus,
+  ExportJobView,
   InvitationStatus as InvitationStatusSchema,
   Locale,
   PaymentMethod,
   PdfTemplate,
+  RecurringRunView,
   ReportKind,
+  ReportQuery,
   Role,
   ScopeArea,
   ScopeLevel,
+  ShareViewEvent,
   TaxRegime,
   ThemeContrast,
   ThemeMode,
@@ -70,14 +74,14 @@ export interface EnumLabels {
   readonly themeContrast: ThemeContrast;
   readonly locale: Locale;
   readonly reportKind: ReportKind;
-  readonly reportGroupBy: "month" | "contact" | "currency" | "category";
+  readonly reportGroupBy: NonNullable<ReportQuery["groupBy"]>;
   readonly exportFormat: "csv" | "pdf";
-  readonly exportStatus: "running" | "ready" | "failed";
+  readonly exportStatus: ExportJobView["status"];
   readonly pdfTemplate: PdfTemplate;
   readonly deliveryStatus: DeliveryStatus;
   readonly deliveryPurpose: DeliveryPurpose;
   readonly expenseStatus: ExpenseStatus;
-  readonly scheduleRunOutcome: "issued" | "failed" | "skipped_missed";
+  readonly scheduleRunOutcome: RecurringRunView["outcome"];
   readonly scheduleState: "active" | "paused" | "ended";
   readonly cadenceUnit: "weeks" | "months" | "years";
   readonly issueAs: "invoice" | "proforma";
@@ -86,8 +90,8 @@ export interface EnumLabels {
   readonly contactRole: "customer" | "supplier";
   readonly fxSource: "cnb" | "manual";
   readonly qrFormat: "spayd" | "epc";
-  readonly shareEvent: "view" | "download";
-  readonly device: "desktop" | "mobile" | "tablet" | "unknown";
+  readonly shareEvent: ShareViewEvent["kind"];
+  readonly device: ShareViewEvent["device"];
   readonly brandingImage: "logo" | "stamp";
   readonly entity: EntityKind;
   readonly documentTab:

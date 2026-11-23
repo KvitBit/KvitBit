@@ -140,8 +140,7 @@ export const documents = {
 
   "documents.issue.title": "Vystavit: {kind}",
   "documents.issue.numberPreview": "Doklad dostane číslo {number}.",
-  "documents.issue.irreversible":
-    "Vystavený doklad nelze smazat, pouze stornovat opravným daňovým dokladem.",
+  "documents.issue.irreversible": "Vystavený doklad nelze smazat, pouze stornovat.",
   "documents.issue.missingBankAccount":
     "Není nastaven bankovní účet. Doklad se vytiskne bez platebních údajů.",
   "documents.issue.checksPassed": "Vše je připraveno k vystavení.",

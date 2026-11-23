@@ -1,3 +1,4 @@
+import type { ThemeWarning, UnauthorizedReason } from "@kvitbit/api-contract";
 import type {
   ConflictReason,
   EntityKind,
@@ -66,6 +67,8 @@ const errorKeysCovered: Covered<
   | `error.conflict.${ConflictReason}`
   | `error.unavailable.${UnavailableDependency}`
   | `enum.entity.${EntityKind}`
+  | `error.unauthorized.${UnauthorizedReason}`
+  | `issue.${ThemeWarning}`
 > = true;
 void issueKeysCovered;
 void errorKeysCovered;

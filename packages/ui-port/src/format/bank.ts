@@ -37,6 +37,27 @@ const IBAN_LENGTHS: Readonly<Record<string, number>> = {
   UA: 29,
 };
 
+/** Countries whose BBAN is digits only (CZ and SK: bank code, prefix, number). */
+const NUMERIC_BBAN: ReadonlySet<string> = new Set([
+  "CZ",
+  "SK",
+  "DE",
+  "AT",
+  "PL",
+  "HU",
+  "SI",
+  "EE",
+  "LT",
+  "BE",
+  "DK",
+  "FI",
+  "NO",
+  "SE",
+  "ES",
+  "HR",
+  "PT",
+]);
+
 /** Uppercases and removes every whitespace character. */
 export const normalizeIban = (input: string): string => input.replace(/\s/g, "").toUpperCase();
 
@@ -57,6 +78,11 @@ export const validateIban = (input: string): Result.Result<string, FormatIssue> 
   if (!/^[A-Z]{2}\d{2}[A-Z0-9]{11,30}$/.test(iban)) return Result.fail(issue("form.iban_invalid"));
   const expected = IBAN_LENGTHS[iban.slice(0, 2)];
   if (expected !== undefined && iban.length !== expected) {
+    return Result.fail(issue("form.iban_invalid"));
+  }
+  const check = Number(iban.slice(2, 4));
+  if (check < 2 || check > 98) return Result.fail(issue("form.iban_invalid"));
+  if (NUMERIC_BBAN.has(iban.slice(0, 2)) && !/^\d+$/.test(iban.slice(4))) {
     return Result.fail(issue("form.iban_invalid"));
   }
   return mod97(iban) === 1 ? Result.succeed(iban) : Result.fail(issue("form.iban_invalid"));
@@ -112,10 +138,12 @@ export const czechAccountToIban = (account: CzechAccount): string => {
   return `CZ${String(check).padStart(2, "0")}${bban}`;
 };
 
-/** IBAN of a Czech bank back to the domestic form; undefined for non-CZ IBANs. */
+/** Valid Czech IBAN back to the domestic form; undefined for non-CZ or invalid IBANs. */
 export const ibanToCzechAccount = (input: string): CzechAccount | undefined => {
-  const iban = normalizeIban(input);
-  if (!/^CZ\d{22}$/.test(iban)) return undefined;
+  const valid = validateIban(input);
+  if (Result.isFailure(valid)) return undefined;
+  const iban = valid.success;
+  if (!iban.startsWith("CZ")) return undefined;
   const prefix = iban.slice(8, 14).replace(/^0+/, "");
   const number = iban.slice(14).replace(/^0+(?=\d{2})/, "");
   return { prefix, number, bankCode: iban.slice(4, 8) };

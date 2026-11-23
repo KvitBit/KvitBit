@@ -19,8 +19,7 @@ export const issues = {
   "issue.fx.manual_rate_invalid": "Zadejte kladný kurz a množství.",
   "issue.fx.manual_not_allowed_for_czk": "Pro CZK nelze zadat ruční kurz.",
   "issue.attachment.too_large": "Soubor je příliš velký.",
-  "issue.attachment.type_rejected":
-    "Tento typ souboru není podporován. Použijte PDF, JPEG, PNG, HEIC nebo WebP.",
+  "issue.attachment.type_rejected": "Tento typ souboru není podporován.",
   "issue.schedule.cadence_invalid": "Interval opakování není platný.",
   "issue.schedule.missed_occurrences": "Plán byl pozastaven, protože několik termínů neproběhlo.",
   "issue.workspace.slug_invalid": "Použijte pouze malá písmena bez diakritiky, číslice a pomlčky.",

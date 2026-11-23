@@ -80,7 +80,7 @@ export const records = {
   "expenses.attachmentViewer.page": "Page {page} of {pages}",
   "expenses.attachmentViewer.detach": "Remove attachment",
   "expenses.attachmentViewer.detachTitle": "Remove this attachment?",
-  "expenses.attachmentViewer.allowedTypes": "Allowed types: PDF, JPEG, PNG, HEIC, WebP.",
+  "expenses.attachmentViewer.allowedTypes": "Allowed types: {types}.",
 
   "contacts.list.title": "Contacts",
   "contacts.list.new": "New contact",

@@ -4,29 +4,69 @@ import { INTL_TAG, type Locale } from "../i18n/locale";
 /** A decimal value as the server sends it (string), a BigDecimal, or a JS number. */
 export type DecimalInput = BigDecimal.BigDecimal | string | number | bigint;
 
-type NumericLiteral = `${number}`;
+/** An exact decimal split into parts: sign, integer digits (no leading zeros), fraction digits. */
+interface Decimal {
+  readonly negative: boolean;
+  readonly integer: string;
+  readonly fraction: string;
+}
 
-/** Plain decimal string (no exponent) that `Intl.NumberFormat` formats without float loss. */
-export const toDecimalString = (value: DecimalInput): NumericLiteral => {
+const DECIMAL = /^([-+]?)(\d+)(?:\.(\d*))?(?:[eE]([-+]?\d+))?$/;
+
+/** Parses plain or exponent notation (`1.5e3`, `1e-7`) exactly, without going through floats. */
+const parseDecimal = (input: string): Decimal => {
+  const m = DECIMAL.exec(input.trim());
+  if (m === null) throw new RangeError(`Not a decimal: ${input}`);
+  const digits = (m[2] ?? "") + (m[3] ?? "");
+  const point = (m[2] ?? "").length + Number(m[4] ?? "0");
+  const padded = point <= 0 ? "0".repeat(1 - point) + digits : digits.padEnd(point, "0");
+  const at = point <= 0 ? 1 : point;
+  const integer = padded.slice(0, at).replace(/^0+(?=\d)/, "");
+  const fraction = padded.slice(at).replace(/0+$/, "");
+  const zero = /^0*$/.test(integer + fraction);
+  return { negative: m[1] === "-" && !zero, integer, fraction };
+};
+
+const toDecimal = (value: DecimalInput): Decimal => {
   if (typeof value === "number") {
     if (!Number.isFinite(value)) throw new RangeError(`Not a finite number: ${value}`);
-    return String(value) as NumericLiteral;
+    return parseDecimal(String(value));
   }
-  if (typeof value === "bigint") return value.toString() as NumericLiteral;
-  if (typeof value === "string") {
-    const trimmed = value.trim();
-    if (!/^[-+]?\d+(\.\d+)?$/.test(trimmed)) throw new RangeError(`Not a decimal string: ${value}`);
-    return trimmed as NumericLiteral;
-  }
-  return BigDecimal.format(value) as NumericLiteral;
+  if (typeof value === "bigint") return parseDecimal(value.toString());
+  if (typeof value === "string") return parseDecimal(value);
+  return parseDecimal(BigDecimal.format(value));
+};
+
+/** Plain decimal string (no exponent, no trailing zeros); `-0` becomes `0`. */
+export const toDecimalString = (value: DecimalInput): string => {
+  const d = toDecimal(value);
+  return `${d.negative ? "-" : ""}${d.integer}${d.fraction === "" ? "" : `.${d.fraction}`}`;
 };
 
 export type Sign = "positive" | "negative" | "zero";
 
 export const signOf = (value: DecimalInput): Sign => {
-  const s = toDecimalString(value);
-  if (/^[-+]?0+(\.0+)?$/.test(s)) return "zero";
-  return s.startsWith("-") ? "negative" : "positive";
+  const d = toDecimal(value);
+  if (/^0*$/.test(d.integer + d.fraction)) return "zero";
+  return d.negative ? "negative" : "positive";
+};
+
+/** Rounds half away from zero (Intl's default `halfExpand`) to `max` digits, pads to `min`. */
+const roundTo = (d: Decimal, min: number, max: number): Decimal => {
+  let integer = d.integer;
+  let fraction = d.fraction;
+  if (fraction.length > max) {
+    const up = Number(fraction[max]) >= 5;
+    fraction = fraction.slice(0, max);
+    if (up) {
+      const all = (BigInt(integer + fraction) + 1n).toString().padStart(integer.length + max, "0");
+      integer = all.slice(0, all.length - max) || "0";
+      fraction = all.slice(all.length - max);
+    }
+  }
+  fraction = fraction.replace(/0+$/, "").padEnd(min, "0");
+  const zero = /^0*$/.test(integer + fraction);
+  return { negative: d.negative && !zero, integer, fraction };
 };
 
 const cache = new Map<string, Intl.NumberFormat>();
@@ -45,9 +85,53 @@ export const numberFormat = (
   return format;
 };
 
-/** Zero is printed unsigned: `-0.00` from the wire never shows as "-0,00". */
-const unsignedZero = (s: NumericLiteral): NumericLiteral =>
-  /^[-+]?0+(\.0+)?$/.test(s) ? ("0" as NumericLiteral) : s;
+const groupDigits = (integer: string, separator: string, minGroupDigits: number): string =>
+  integer.length < 3 + minGroupDigits
+    ? integer
+    : integer.replace(/\B(?=(\d{3})+(?!\d))/g, separator);
+
+/**
+ * Exact locale formatting. `Intl` supplies only the layout (separators, currency symbol, sign
+ * position) via `formatToParts` on a sample number; the digits come from the decimal string.
+ * Intl string input is not exact on every engine (Hermes coerces to double), so this never
+ * passes the value itself to Intl.
+ */
+export const formatExact = (
+  locale: Locale,
+  value: DecimalInput,
+  options: Intl.NumberFormatOptions & { readonly minGroupDigits?: number },
+): string => {
+  const { minGroupDigits = 1, ...intl } = options;
+  const min = intl.minimumFractionDigits ?? 0;
+  const max = Math.max(min, intl.maximumFractionDigits ?? 3);
+  const d = roundTo(toDecimal(value), min, max);
+  const zero = /^0*$/.test(d.integer + d.fraction);
+  const format = numberFormat(locale, {
+    ...intl,
+    minimumFractionDigits: 1,
+    maximumFractionDigits: 1,
+  });
+  const sample = format.formatToParts(d.negative ? -1234567.5 : zero ? 0.5 : 1234567.5);
+  const group = sample.find((p) => p.type === "group")?.value ?? "";
+  let out = "";
+  let integerDone = false;
+  for (const part of sample) {
+    if (part.type === "integer") {
+      if (!integerDone)
+        out += groupDigits(d.integer, intl.useGrouping === false ? "" : group, minGroupDigits);
+      integerDone = true;
+    } else if (part.type === "group") {
+      // emitted with the integer digits
+    } else if (part.type === "decimal") {
+      if (d.fraction !== "") out += part.value;
+    } else if (part.type === "fraction") {
+      out += d.fraction;
+    } else {
+      out += part.value;
+    }
+  }
+  return out;
+};
 
 export interface NumberOptions {
   readonly minFractionDigits?: number;
@@ -56,19 +140,17 @@ export interface NumberOptions {
   readonly grouping?: boolean;
 }
 
-/** Locale number: cs `1 234,5` (NBSP grouping), en `1,234.5`. */
+/** Locale number: cs `1 234,5` (NBSP grouping), en `1,234.5`. Exact for any decimal input. */
 export const formatNumber = (
   locale: Locale,
   value: DecimalInput,
   options: NumberOptions = {},
-): string => {
-  const min = options.minFractionDigits ?? 0;
-  return numberFormat(locale, {
-    minimumFractionDigits: min,
-    maximumFractionDigits: Math.max(min, options.maxFractionDigits ?? 3),
+): string =>
+  formatExact(locale, value, {
+    minimumFractionDigits: options.minFractionDigits ?? 0,
+    maximumFractionDigits: options.maxFractionDigits ?? 3,
     useGrouping: options.grouping ?? true,
-  }).format(unsignedZero(toDecimalString(value)));
-};
+  });
 
 /** Quantity with an optional unit: cs `1,5 h`, en `1.5 h`. Up to 4 decimals, no padding. */
 export const formatQuantity = (locale: Locale, value: DecimalInput, unit?: string): string => {

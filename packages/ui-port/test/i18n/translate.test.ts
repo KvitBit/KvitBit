@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   enumText,
+  fallbackPluralCategory,
   interpolate,
   issueKey,
   issueText,
@@ -42,8 +43,23 @@ describe("plural rules", () => {
   });
 
   test("numbers in params use locale grouping", () => {
-    expect(t("cs", "common.state.resultsCount", { count: 1234 })).toBe("1 234 výsledků");
-    expect(t("en", "common.state.resultsCount", { count: 1234 })).toBe("1,234 results");
+    expect(t("cs", "common.state.resultsCount", { count: 12345 })).toBe("12\u00a0345 výsledků");
+    expect(t("en", "common.state.resultsCount", { count: 12345 })).toBe("12,345 results");
+    expect(t("cs", "common.state.resultsCount", { count: 1234 })).toBe("1234 výsledků");
+    expect(t("en", "public.footer.copyright", { year: 2026 })).toBe("© 2026 Kvitbit");
+  });
+
+  test("plural selection follows the displayed value", () => {
+    expect(t("cs", "common.time.days", { count: 1.0000001 })).toBe("1 den");
+    expect(t("en", "common.time.days", { count: 0.9999999 })).toBe("1 day");
+  });
+
+  test("the PluralRules fallback agrees with Intl for cs and en", () => {
+    for (const locale of ["cs", "en"] as const) {
+      for (const n of [0, 1, 2, 3, 4, 5, 11, 21, 22, 100, 101, 1.5, 0.5, 2.25]) {
+        expect(fallbackPluralCategory(locale, n)).toBe(pluralCategory(locale, n));
+      }
+    }
   });
 });
 

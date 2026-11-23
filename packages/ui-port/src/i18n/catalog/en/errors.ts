@@ -37,5 +37,5 @@ export const errors = {
   "error.unavailable.retryIn": "Try again in {seconds} s.",
   "error.staleRevision.title": "This page is out of date",
   "error.staleRevision.body":
-    "Someone else saved changes. Reload to continue from the latest version; your unsaved edits will be lost.",
+    "Someone else saved changes. Reload to continue from the latest version, then reapply your edits.",
 } as const satisfies EnSection;

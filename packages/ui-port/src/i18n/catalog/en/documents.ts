@@ -136,8 +136,7 @@ export const documents = {
 
   "documents.issue.title": "Issue {kind}",
   "documents.issue.numberPreview": "It will get number {number}.",
-  "documents.issue.irreversible":
-    "Once issued, the document cannot be deleted, only cancelled with a credit note.",
+  "documents.issue.irreversible": "Once issued, the document cannot be deleted, only cancelled.",
   "documents.issue.missingBankAccount":
     "No bank account is set. The document will print without payment details.",
   "documents.issue.checksPassed": "Everything is ready to issue.",

@@ -21,8 +21,7 @@ export const issues = {
   "issue.fx.manual_rate_invalid": "Enter a positive exchange rate and quantity.",
   "issue.fx.manual_not_allowed_for_czk": "A manual exchange rate cannot be set for CZK.",
   "issue.attachment.too_large": "The file is too large.",
-  "issue.attachment.type_rejected":
-    "This file type is not supported. Use PDF, JPEG, PNG, HEIC or WebP.",
+  "issue.attachment.type_rejected": "This file type is not supported.",
   "issue.schedule.cadence_invalid": "The repeat interval is not valid.",
   "issue.schedule.missed_occurrences":
     "The schedule was paused because several occurrences were missed.",

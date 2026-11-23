@@ -39,6 +39,7 @@ export {
   parseAcceptLanguage,
 } from "./locale";
 export {
+  fallbackPluralCategory,
   interpolate,
   type MessageParams,
   message,

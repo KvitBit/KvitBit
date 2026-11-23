@@ -36,7 +36,11 @@ const forms = (m: AnyMessage): ReadonlyArray<string> =>
 
 const placeholders = (m: AnyMessage): ReadonlyArray<string> =>
   [
-    ...new Set(forms(m).flatMap((f) => [...f.matchAll(/\{(\w+)\}/g)].map((x) => x[1] ?? ""))),
+    ...new Set(
+      forms(m).flatMap((f) =>
+        [...f.matchAll(/\{([A-Za-z][A-Za-z0-9_]*)\}/g)].map((x) => x[1] ?? ""),
+      ),
+    ),
   ].sort();
 
 const csRecord: Readonly<Record<string, AnyMessage>> = cs;
@@ -75,6 +79,15 @@ describe("catalog parity", () => {
       expect(Object.keys(c ?? {}).sort()).toEqual(["few", "many", "one", "other"]);
       for (const f of [...forms(e ?? ""), ...forms(c ?? "")]) expect(f).toContain("{count}");
     }
+  });
+
+  test("braces only appear as well-formed placeholders (types and runtime parse the same)", () => {
+    const stray = MESSAGE_KEYS.filter((k) =>
+      [...forms(enRecord[k] ?? ""), ...forms(csRecord[k] ?? "")].some((f) =>
+        /[{}]/.test(f.replace(/\{[A-Za-z][A-Za-z0-9_]*\}/g, "")),
+      ),
+    );
+    expect(stray).toEqual([]);
   });
 
   test("no empty copy and keys are dotted", () => {

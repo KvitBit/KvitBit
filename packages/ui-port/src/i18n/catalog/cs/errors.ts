@@ -38,5 +38,5 @@ export const errors = {
   "error.unavailable.retryIn": "Zkuste to znovu za {seconds} s.",
   "error.staleRevision.title": "Stránka není aktuální",
   "error.staleRevision.body":
-    "Někdo jiný uložil změny. Načtěte nejnovější verzi; vaše neuložené úpravy budou ztraceny.",
+    "Někdo jiný uložil změny. Načtěte nejnovější verzi a své úpravy proveďte znovu.",
 } as const satisfies CsSection<typeof en>;

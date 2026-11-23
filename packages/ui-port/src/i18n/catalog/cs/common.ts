@@ -163,8 +163,8 @@ export const common = {
 
   "common.toast.saved": "Změny uloženy",
   "common.toast.deleted": "Smazáno",
-  "common.toast.archived": "{name} archivováno",
-  "common.toast.restored": "{name} obnoveno",
+  "common.toast.archived": "Archivováno: {name}",
+  "common.toast.restored": "Obnoveno: {name}",
   "common.toast.copied": "Zkopírováno do schránky",
   "common.toast.linkCopied": "Odkaz zkopírován",
 
