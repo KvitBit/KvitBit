@@ -30,13 +30,13 @@
         "drizzle-orm": "1.0.0-rc.5",
         "effect": "4.1.4",
         "nodemailer": "10.6.1",
+        "playwright-core": "1.65.1",
         "qrcode": "1.5.4",
       },
       "devDependencies": {
         "@effect/sql-pglite": "4.1.4",
         "@electric-sql/pglite": "0.6.0",
         "@types/qrcode": "1.5.6",
-        "playwright-core": "1.65.1",
       },
     },
     "packages/api-contract": {
