@@ -39,7 +39,15 @@ describe("calendar", () => {
   });
 
   test("Prague midnight round-trips for historical dates (local mean time before 1891)", () => {
-    for (const date of ["0099-01-01", "1850-06-15", "1891-10-01", "1946-12-01", "2026-03-29"]) {
+    for (const date of [
+      "0000-06-15",
+      "0001-01-01",
+      "0099-01-01",
+      "1850-06-15",
+      "1891-10-01",
+      "1946-12-01",
+      "2026-03-29",
+    ]) {
       expect([date, pragueDate(pragueStartOfDay(D(date)))]).toEqual([date, D(date)]);
       expect([date, pragueDate(pragueStartOfDay(D(date)) - 1)]).toEqual([
         date,
@@ -165,6 +173,11 @@ describe("Reminders (D16)", () => {
       { step: 0, offsetDays: 3, date: D("2026-12-03") },
       { step: 1, offsetDays: 14, date: D("2026-12-14") },
     ]);
+  });
+  test("untilReminder in year 0000 waits until Prague midnight (LMT)", () => {
+    const midnight = pragueStartOfDay(D("0000-06-15"));
+    expect(new Date(midnight).toISOString()).toBe("0000-06-14T23:02:16.000Z");
+    expect(Reminders.untilReminder(D("0000-06-15"), 0, midnight - 1000)).toBe(1000);
   });
   test("untilReminder is the wait until Prague midnight (or hour) of the step date, never negative", () => {
     const now = Date.UTC(2026, 10, 23, 9);

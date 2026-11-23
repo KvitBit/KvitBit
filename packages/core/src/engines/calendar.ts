@@ -105,13 +105,18 @@ const pragueParts = new Intl.DateTimeFormat("en-CA", {
   minute: "2-digit",
   second: "2-digit",
   hourCycle: "h23",
+  era: "short",
 });
 
 const pragueFields = (epochMillis: number) => {
   const parts: Record<string, number> = {};
+  let beforeCommonEra = false;
   for (const p of pragueParts.formatToParts(new Date(epochMillis))) {
-    if (p.type !== "literal") parts[p.type] = Number(p.value);
+    if (p.type === "era") beforeCommonEra = p.value !== "AD";
+    else if (p.type !== "literal") parts[p.type] = Number(p.value);
   }
+  // The formatter gives a year of era (1 BC, 2 BC, ...); ISO years count 0, -1, ...
+  if (beforeCommonEra && parts.year !== undefined) parts.year = 1 - parts.year;
   return parts as Record<"year" | "month" | "day" | "hour" | "minute" | "second", number>;
 };
 

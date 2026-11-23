@@ -191,8 +191,9 @@ export const negate = (breakdown: VatBreakdown): VatBreakdown => ({
 
 /**
  * Splits a received advance across a Proforma's buckets by gross share (Payment Tax Document).
- * Largest-remainder allocation in the currency's minor units (the payment's own precision,
- * e.g. 3 decimals for BHD): each bucket gets floor(paid x gross / total),
+ * Largest-remainder allocation in units of the finest of the payment's own precision, the
+ * currency's minor unit (3 for BHD) and 2 decimals; the payment is never rounded. Each bucket
+ * gets floor(paid x gross / total),
  * then the leftover units go one each to the largest fractional parts (ties: bucket order), so
  * the shares sum to `paid` exactly and none flips sign. Within a share VAT is top-down
  * (rule 4, round2) at the rate in force on `taxPoint` (the receipt date, rule P2; default: the
@@ -205,7 +206,10 @@ export const splitAdvance = (
   options: { readonly fx?: VatInput["fx"]; readonly taxPoint?: IsoDate } = {},
 ): ReadonlyArray<VatBucket> => {
   const currency = proforma.gross.currency;
-  const shareScale = MoneyMath.minorUnitScale(currency);
+  // Never round the payment itself: shares carry the payment's own precision, at least the
+  // currency's minor unit and VAT_SCALE (a JPY proforma's gross can be 1.21).
+  const paidScale = Math.max(0, BigDecimal.normalize(paid).scale);
+  const shareScale = Math.max(MoneyMath.minorUnitScale(currency), VAT_SCALE, paidScale);
   const total = sumAll(proforma.buckets.map((b) => b.gross));
   if (BigDecimal.isZero(total)) {
     throw new Error("VatMath.splitAdvance: the proforma has no gross amount to split");

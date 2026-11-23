@@ -274,6 +274,14 @@ describe("VatMath.splitAdvance", () => {
     ).toEqual([["1.234", "0.21", "1.024"]]);
   });
 
+  test("a payment more precise than the minor unit is kept whole (JPY gross 1.21)", () => {
+    const jpy = calc([line("1", "1")], { currency: "JPY" as CurrencyCode });
+    expect(s(jpy.gross.amount)).toBe("1.21");
+    expect(
+      VatMath.splitAdvance(jpy, jpy.gross.amount).map((k) => [s(k.gross), s(k.vat), s(k.base)]),
+    ).toEqual([["1.21", "0.21", "1"]]);
+  });
+
   test("a proforma without gross cannot be split", () => {
     expect(() => VatMath.splitAdvance(calc([]), d("1"))).toThrow();
   });
