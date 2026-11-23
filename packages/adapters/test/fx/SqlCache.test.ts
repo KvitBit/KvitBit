@@ -152,12 +152,20 @@ describe("SqlCache", () => {
   });
 
   test("round-trips rates that BigDecimal formats in exponent notation", async () => {
-    const tiny = FixtureRates.fixing("2026-11-20", 225, { XAU: [1, "0.00000000000000001234"] });
-    const inner = counting(FixtureRates.make([tiny]));
+    const extreme = FixtureRates.fixing("2026-11-20", 225, {
+      XAU: [1, "0.00000000000000001234"], // formats as 1.234e-17
+      XAG: [1, "12000000000000000000"], // formats as 1.2e+19
+    });
+    const inner = counting(FixtureRates.make([extreme]));
     await withSqlCache(
       inner.layer,
       Effect.gen(function* () {
         const first = yield* fixing("2026-11-20");
+        const [row] = yield* rows;
+        expect(row?.rates).toEqual([
+          { code: "XAU", quantity: 1, rate: "1.234e-17" },
+          { code: "XAG", quantity: 1, rate: "1.2e+19" },
+        ]);
         const second = yield* fixing("2026-11-20");
         expect(plain(second)).toEqual(plain(first));
       }),
