@@ -26,6 +26,20 @@ describe("checkMembershipChange (R1c, R3)", () => {
     );
   });
 
+  test("a scoped owner without members:write is Forbidden before the R3 Conflict", () => {
+    expect(check(member("owner", { scopes: ["documents:write"] }), { _tag: "Leave" })).toEqual(
+      forbidden("member.leave"),
+    );
+    expect(check(member("owner", { scopes: ["members:write"] }), { _tag: "Leave" })).toEqual(
+      Exit.fail(
+        new Conflict({ reason: "illegal_transition", detail: "member.owner_cannot_leave" }),
+      ),
+    );
+    expect(check(member("member", { scopes: ["members:read"] }), { _tag: "Leave" })).toEqual(
+      forbidden("member.leave"),
+    );
+  });
+
   test("everyone else may leave", () => {
     for (const role of ["admin", "member", "accountant"] as const) {
       expect(check(member(role), { _tag: "Leave" })).toEqual(ok);

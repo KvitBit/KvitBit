@@ -9,7 +9,12 @@ const sealed = new WeakSet<object>();
 
 /** Builds the caller a workflow or cron acts as (rule R4). Core-internal. */
 export const systemCaller = (workspaceId: WorkspaceId, job: SystemJob): SystemCaller => {
-  const caller = Object.freeze({ _tag: "System" as const, workspaceId, job });
+  // Copy and freeze the job too, so a caller's permissions cannot change after it is sealed.
+  const caller = Object.freeze({
+    _tag: "System" as const,
+    workspaceId,
+    job: Object.freeze({ ...job }),
+  });
   sealed.add(caller);
   return caller as unknown as SystemCaller;
 };

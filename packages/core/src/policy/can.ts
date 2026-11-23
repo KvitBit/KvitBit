@@ -14,7 +14,8 @@ export const actionScope = (
   return { area: rule.area, level: rule.level };
 };
 
-const scopesAllow = (caller: MemberCaller, area: ScopeArea, level: ScopeLevel): boolean => {
+/** Whether a Member's scopes cover `area` at `level` (session callers hold every scope). */
+export const scopesAllow = (caller: MemberCaller, area: ScopeArea, level: ScopeLevel): boolean => {
   if (caller.scopes === "all") return true;
   return caller.scopes.some(
     (scope) => scope === `${area}:write` || (level === "read" && scope === `${area}:read`),

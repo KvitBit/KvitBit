@@ -14,9 +14,6 @@ import { Effect } from "effect";
 import type { StoreUnavailable } from "./CoreStore";
 import { CoreStore } from "./CoreStore";
 
-/** Hard stop for a corrupt series whose every candidate is reserved. */
-const MAX_SKIPS = 10_000;
-
 export const allocateNumber = (input: {
   readonly workspaceId: WorkspaceId;
   readonly seriesId: NumberingSeriesId;
@@ -37,9 +34,14 @@ export const allocateNumber = (input: {
       seriesId: input.seriesId,
       period: input.period,
     };
-    const first = yield* store.counters.lock(counter);
-    for (let sequence = first; sequence < first + MAX_SKIPS; sequence++) {
+    const seen = new Set<string>();
+    for (let sequence = yield* store.counters.lock(counter); ; sequence++) {
       const number = input.format(sequence);
+      // A format that maps two sequences to one number would loop forever on a taken number.
+      if (seen.has(number)) {
+        return yield* Effect.die(new Error(`allocateNumber: format repeats "${number}"`));
+      }
+      seen.add(number);
       const reserved = yield* store.reservations.tryReserve({
         workspaceId: input.workspaceId,
         kind: input.kind,
@@ -52,7 +54,6 @@ export const allocateNumber = (input: {
         return { sequence, number };
       }
     }
-    return yield* Effect.die(new Error(`allocateNumber: ${MAX_SKIPS} reserved numbers in a row`));
   });
 
 /**

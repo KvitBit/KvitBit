@@ -193,6 +193,33 @@ describe("withIdempotency (rule C3)", () => {
     expect(Exit.isFailure(exit) && Cause.hasDies(exit.cause)).toBe(true);
   });
 
+  test("a stored result that no longer decodes is a defect, never a miss", async () => {
+    const exit = await runTest(
+      member("owner"),
+      Effect.gen(function* () {
+        const runs = yield* Ref.make(0);
+        yield* call(runs, { amount: amount("1") });
+        const real = yield* CoreStore;
+        const corrupt: CoreStore["Service"] = {
+          ...real,
+          requestLog: {
+            ...real.requestLog,
+            claim: (scope, k, now) =>
+              Effect.map(real.requestLog.claim(scope, k, now), (claim) =>
+                claim._tag === "Existing"
+                  ? { _tag: "Existing", entry: { ...claim.entry, result: { id: 1 } } }
+                  : claim,
+              ),
+          },
+        };
+        return yield* call(runs, { amount: amount("1") }).pipe(
+          Effect.provideService(CoreStore, corrupt),
+        );
+      }),
+    );
+    expect(Exit.isFailure(exit) && Cause.hasDies(exit.cause)).toBe(true);
+  });
+
   test("concurrent first uses of a key run the body once", async () => {
     const exit = await runTest(
       member("owner"),

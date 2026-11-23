@@ -192,6 +192,73 @@ describe("can: scopes (R1)", () => {
   });
 });
 
+// Action -> scope area and level, written out independently of src/policy/table.ts.
+const SCOPES: Readonly<Record<Action, string>> = {
+  "workspace.read": "workspace:read",
+  "member.read": "members:read",
+  "contact.read": "contacts:read",
+  "priceList.read": "catalog:read",
+  "document.read": "documents:read",
+  "document.pdf": "documents:read",
+  "document.history": "documents:read",
+  "payment.read": "payments:read",
+  "expense.read": "expenses:read",
+  "expense.attachment.read": "expenses:read",
+  "template.read": "templates:read",
+  "share.read": "share:read",
+  "report.run": "reports:read",
+  "report.export": "reports:read",
+  "contact.write": "contacts:write",
+  "priceList.write": "catalog:write",
+  "template.write": "templates:write",
+  "schedule.write": "templates:write",
+  "expense.write": "expenses:write",
+  "document.draft": "documents:write",
+  "document.issue": "documents:write",
+  "document.edit": "documents:write",
+  "document.cancel": "documents:write",
+  "document.correct": "documents:write",
+  "document.finalInvoice": "documents:write",
+  "document.send": "documents:write",
+  "document.lock": "documents:write",
+  "share.write": "share:write",
+  "payment.write": "payments:write",
+  "document.unlock": "documents:write",
+  "document.overrideNumber": "documents:write",
+  "workspace.settings": "workspace:write",
+  "member.invite": "members:write",
+  "member.setRole": "members:write",
+  "invitation.read": "members:read",
+  "apiKey.manage": "members:write",
+  "grant.read.all": "members:read",
+  "grant.revoke.all": "members:write",
+  "member.manageAdmins": "members:write",
+  "workspace.transferOwnership": "workspace:write",
+  "workspace.close": "workspace:write",
+  "member.leave": "members:write",
+  "grant.create": "members:write",
+  "grant.read.own": "members:read",
+  "grant.revoke.own": "members:write",
+  "workspace.create": "workspace:write",
+  "workspace.listMine": "workspace:read",
+  "workspace.enter": "workspace:read",
+  "invitation.accept": "members:write",
+  "registry.lookup": "contacts:read",
+  "share.open": "share:read",
+  "share.pdf": "share:read",
+  "share.logo": "share:read",
+  "invitation.peek": "members:read",
+};
+
+describe("actionScope", () => {
+  for (const action of ACTIONS) {
+    test(action, () => {
+      const { area, level } = actionScope(action);
+      expect(`${area}:${level}`).toBe(SCOPES[action]);
+    });
+  }
+});
+
 describe("can: special rules", () => {
   test("R1c: only the owner manages admins", () => {
     expect(can(member("owner"), "member.manageAdmins")).toBe(true);
@@ -212,6 +279,16 @@ describe("can: special rules", () => {
     expect(can(exporter, "document.read")).toBe(true);
     expect(can(exporter, "document.issue")).toBe(false);
     expect(can(exporter, "document.send")).toBe(false);
+  });
+
+  test("a sealed System caller's job cannot be changed afterwards", () => {
+    const job = { _tag: "DataExport" as const, exportId: "e" as never };
+    const exporter = system(job);
+    (job as { _tag: string })._tag = "RecurringIssuance";
+    expect(() => {
+      (exporter.job as { _tag: string })._tag = "RecurringIssuance";
+    }).toThrow();
+    expect(can(exporter, "document.issue")).toBe(false);
   });
 
   test("an unsealed System caller is denied everything", () => {

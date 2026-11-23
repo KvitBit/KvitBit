@@ -7,7 +7,8 @@
  * Layout and conventions for module streams:
  * - src/policy/   `can` + the table of core-ports 2.3 (`table.ts`), `authorize` /
  *                 `authorizeInWorkspace` (first statement of every method, rule R1a), and
- *                 `checkMembershipChange` (R1c, R3).
+ *                 `checkMembershipChange` (R1c, R3; invite, setRole and leave authorize
+ *                 through it, not a preceding `authorize`).
  * - src/store/    `CoreStore` port (transaction + savepoints, afterCommit, counters, reservations,
  *                 request log, audit), `allocateNumber`/`reserveNumber` (S3), the in-memory store
  *                 and `MemoryTables` (tables.ts: row conventions every repository follows).

@@ -485,3 +485,147 @@ describe("in-memory CoreStore: numbering (S3)", () => {
     expect(exit).toEqual(Exit.succeed([1, 2, 3, 4, 5]));
   });
 });
+
+describe("in-memory CoreStore: council regressions", () => {
+  const key = { workspaceId: WORKSPACE_A, seriesId: "s9" as NumberingSeriesId, period: "all" };
+
+  test("an interrupted savepoint rolls back only its own writes", async () => {
+    const exit = await run(({ store, notes }) =>
+      Effect.gen(function* () {
+        yield* store.transaction(
+          Effect.gen(function* () {
+            yield* notes.insert(note("outer"));
+            const inner = yield* Effect.forkChild(
+              store.transaction(Effect.andThen(notes.insert(note("inner")), Effect.never)),
+            );
+            yield* Effect.yieldNow;
+            yield* Fiber.interrupt(inner);
+            yield* notes.insert(note("after"));
+          }),
+        );
+        return (yield* notes.list(WORKSPACE_A)).map((n) => n.id);
+      }),
+    );
+    expect(exit).toEqual(Exit.succeed(["after", "outer"]));
+  });
+
+  test("a transaction that ends with a savepoint still open dies and rolls back", async () => {
+    const exit = await run(({ store, notes }) =>
+      Effect.gen(function* () {
+        const release = yield* Ref.make(false);
+        const opened = yield* Ref.make(false);
+        const outer = yield* Effect.exit(
+          store.transaction(
+            Effect.gen(function* () {
+              yield* notes.insert(note("outer"));
+              const child = yield* Effect.forkDetach(
+                store.transaction(
+                  Effect.gen(function* () {
+                    yield* Ref.set(opened, true);
+                    while (!(yield* Ref.get(release))) yield* Effect.yieldNow;
+                    return yield* notes.insert(note("late"));
+                  }),
+                ),
+              );
+              while (!(yield* Ref.get(opened))) yield* Effect.yieldNow;
+              return child;
+            }),
+          ),
+        );
+        yield* Ref.set(release, true);
+        yield* Effect.yieldNow;
+        // A later transaction is unaffected by the dead savepoint finishing.
+        yield* store.transaction(notes.insert(note("next")));
+        return { outer: isDefect(outer), ids: (yield* notes.list(WORKSPACE_A)).map((n) => n.id) };
+      }),
+    );
+    expect(exit).toEqual(Exit.succeed({ outer: true, ids: ["next"] }));
+  });
+
+  test("concurrent child fibers updating one row: the stale writer gets revision_changed", async () => {
+    const exit = await run(({ store, notes }) =>
+      Effect.gen(function* () {
+        yield* store.transaction(notes.insert(note("1")));
+        return yield* store.transaction(
+          Effect.gen(function* () {
+            const row = yield* notes.lock(WORKSPACE_A, "1");
+            const results = yield* Effect.all(
+              ["a", "b"].map((title) => Effect.exit(notes.update({ ...row, title }, row.revision))),
+              { concurrency: "unbounded" },
+            );
+            return results.map((r) => (Exit.isSuccess(r) ? "ok" : "conflict"));
+          }),
+        );
+      }),
+    );
+    expect(exit).toEqual(Exit.succeed(["ok", "conflict"]));
+  });
+
+  test("counters.set needs counters.lock in the same transaction", async () => {
+    const exit = await run(({ store }) =>
+      Effect.gen(function* () {
+        yield* store.transaction(store.counters.lock(key));
+        return yield* store.transaction(store.counters.set(key, 2));
+      }),
+    );
+    expect(isDefect(exit)).toBe(true);
+  });
+
+  test("allocateNumber skips long occupied runs but stops on a repeating format", async () => {
+    const doc = "01900000-0000-7000-8000-0000000d0001" as DocumentId;
+    const exit = await run(({ store }) =>
+      Effect.gen(function* () {
+        yield* store.transaction(
+          Effect.forEach(
+            Array.from({ length: 50 }, (_, i) => `N-${i + 1}`),
+            (number) =>
+              store.reservations.tryReserve({
+                workspaceId: WORKSPACE_A,
+                kind: "invoice",
+                number,
+                seriesId: null,
+                documentId: doc,
+              }),
+          ),
+        );
+        const allocated = yield* store.transaction(
+          allocateNumber({ ...key, kind: "invoice", documentId: doc, format: (n) => `N-${n}` }),
+        );
+        const repeating = yield* Effect.exit(
+          store.transaction(
+            allocateNumber({ ...key, kind: "invoice", documentId: doc, format: () => "N-1" }),
+          ),
+        );
+        return { number: allocated.number, repeating: isDefect(repeating) };
+      }),
+    );
+    expect(exit).toEqual(Exit.succeed({ number: "N-51", repeating: true }));
+  });
+
+  test("audit history returns detached copies", async () => {
+    const exit = await run(({ store }) =>
+      Effect.gen(function* () {
+        const subject = { entity: "Document", id: "d" } as const;
+        const changes = [{ path: "note", before: { a: 1 }, after: null }];
+        yield* store.transaction(
+          store.audit.append(WORKSPACE_A, {
+            id: "01900000-0000-7000-8000-000000000001" as never,
+            at: "2026-11-23T09:00:00.000Z",
+            actor: { _tag: "System", job: { _tag: "DataExport", exportId: "e" as never } },
+            subject,
+            action: "document.edit",
+            revision: 2,
+            changes,
+            reason: null,
+          }),
+        );
+        (changes[0] as { before: { a: number } }).before.a = 99;
+        const first = yield* store.audit.history(WORKSPACE_A, subject);
+        (first[0]?.changes[0]?.before as { a: number }).a = 7;
+        const second = yield* store.audit.history(WORKSPACE_A, subject);
+        return second[0]?.changes[0]?.before;
+      }),
+    );
+    expect(exit).toEqual(Exit.succeed({ a: 1 }));
+  });
+});

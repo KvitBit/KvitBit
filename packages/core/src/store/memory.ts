@@ -6,10 +6,15 @@
  * - Each transaction or savepoint is a frame carried in the fiber Context, so child fibers share
  *   it. A frame snapshots the state when it opens and restores it if it fails, dies or is
  *   interrupted. Sibling savepoints of one frame run one at a time.
+ * - Every operation checks its frame and performs its reads and writes in one synchronous step,
+ *   so concurrent child fibers never interleave between a check and a write.
  * - Defects, matching what SQL would do silently wrong: a write outside a transaction (rule C1),
- *   any use of a frame that has ended, and any use of a frame while one of its savepoints is
- *   open (a SQL statement there would be rolled back with the savepoint).
- * Rows are treated as immutable values; never mutate a row after storing it.
+ *   any use of a frame that has ended (or whose ancestor has), any use of a frame while one of
+ *   its savepoints is open (a SQL statement there would be rolled back with the savepoint), and
+ *   a transaction that ends while a savepoint it started is still open (that transaction then
+ *   rolls back).
+ * Rows are treated as immutable values; never mutate a row after storing it. Audit entries are
+ * stored as JSON, as the SQL table stores them.
  */
 import type { AuditEntry, NotFound as NotFoundError, WorkspaceId } from "@kvitbit/domain/contract";
 import { Conflict, NotFound } from "@kvitbit/domain/contract";
@@ -34,6 +39,8 @@ interface Frame {
   children: number;
   readonly savepoints: Semaphore.Semaphore;
   readonly afterCommit: Array<Effect.Effect<void>>;
+  /** Counters locked in this transaction (kept on the outermost frame). */
+  readonly lockedCounters: Set<string>;
 }
 
 /** A request key claimed by the running transaction but not completed yet. */
@@ -46,7 +53,8 @@ interface State {
   readonly counters: Map<string, number>;
   readonly reservations: Map<string, Reservation>;
   readonly requestLog: Map<string, RequestLogEntry | PendingClaim>;
-  readonly audit: Array<{ readonly workspaceId: WorkspaceId; readonly entry: AuditEntry }>;
+  /** JSON-encoded entries, append-only. */
+  readonly audit: Array<{ readonly workspaceId: WorkspaceId; readonly json: string }>;
 }
 
 const emptyState = (): State => ({
@@ -80,6 +88,20 @@ const scopeKey = (scope: RequestScope) =>
 
 const defect = (message: string) => Effect.die(new Error(`CoreStore: ${message}`));
 
+const rootOf = (frame: Frame): Frame => (frame.parent === null ? frame : rootOf(frame.parent));
+
+/** Whether this frame and every ancestor are still open. */
+const chainOpen = (frame: Frame | null): boolean =>
+  frame === null || (frame.open && chainOpen(frame.parent));
+
+/** Why `frame` cannot run an operation right now, or undefined when it can. */
+const frameProblem = (frame: Frame): string | undefined =>
+  !chainOpen(frame)
+    ? "used after its transaction ended"
+    : frame.children > 0
+      ? "used from a transaction while one of its savepoints is open"
+      : undefined;
+
 let instances = 0;
 
 export interface MemoryStore {
@@ -95,80 +117,103 @@ export const makeMemoryStore: Effect.Effect<MemoryStore> = Effect.sync(() => {
     { defaultValue: () => null },
   );
 
-  const runFrame = <A, E, R>(parent: Frame | null, effect: Effect.Effect<A, E, R>) =>
-    Effect.suspend(() => {
-      const frame: Frame = {
-        parent,
-        open: true,
-        children: 0,
-        savepoints: Semaphore.makeUnsafe(1),
-        afterCommit: [],
-      };
-      if (parent !== null) parent.children += 1;
-      const snapshot = copyState(state);
-      return effect.pipe(
-        Effect.provideService(CurrentFrame, frame),
-        Effect.onExit((exit) =>
-          Effect.sync(() => {
+  /**
+   * Opens a frame under `parent`, runs `effect` in it and closes it. Setup and the closing
+   * bookkeeping are uninterruptible, so an interruption can never skip the rollback.
+   */
+  const runFrame = <A, E, R>(
+    parent: Frame | null,
+    effect: Effect.Effect<A, E, R>,
+  ): Effect.Effect<{ readonly value: A; readonly frame: Frame }, E, R> =>
+    Effect.uninterruptibleMask((restore) =>
+      Effect.suspend(() => {
+        const problem = parent === null ? undefined : frameProblem(parent);
+        if (problem !== undefined) return defect(problem);
+        const frame: Frame = {
+          parent,
+          open: true,
+          children: 0,
+          savepoints: Semaphore.makeUnsafe(1),
+          afterCommit: [],
+          lockedCounters: new Set(),
+        };
+        if (parent !== null) parent.children += 1;
+        const snapshot = copyState(state);
+        return Effect.flatMap(
+          Effect.exit(restore(Effect.provideService(effect, CurrentFrame, frame))),
+          (bodyExit) => {
+            let exit: Exit.Exit<A, E> = bodyExit;
+            if (Exit.isSuccess(exit) && frame.children > 0) {
+              exit = Exit.die(
+                new Error("CoreStore: transaction ended while one of its savepoints is open"),
+              );
+            }
+            const parentAlive = chainOpen(parent);
             frame.open = false;
             if (parent !== null) parent.children -= 1;
+            if (!parentAlive) {
+              // The enclosing transaction already ended (and rolled back): touch nothing.
+              return Exit.isSuccess(exit)
+                ? defect("savepoint outlived its transaction")
+                : Effect.failCause(exit.cause);
+            }
             if (Exit.isFailure(exit)) {
               state = snapshot;
-            } else if (parent !== null) {
+              return Effect.failCause(exit.cause);
+            }
+            if (parent !== null) {
               parent.afterCommit.push(...frame.afterCommit);
             } else {
               // A claim that was never completed is not committed.
               for (const [k, v] of state.requestLog) if (isPending(v)) state.requestLog.delete(k);
             }
-          }),
-        ),
-        Effect.map((value) => ({ value, frame })),
-      );
-    });
+            return Effect.succeed({ value: exit.value, frame });
+          },
+        );
+      }),
+    );
 
-  const unusable = (frame: Frame) =>
-    !frame.open
-      ? defect("used after its transaction ended")
-      : frame.children > 0
-        ? defect("used from a transaction while one of its savepoints is open")
-        : undefined;
+  const drainAfterCommit = (frame: Frame) =>
+    Effect.uninterruptible(
+      Effect.forEach(
+        frame.afterCommit,
+        (hook) =>
+          Effect.flatMap(Effect.exit(hook), (exit) =>
+            Exit.isFailure(exit)
+              ? Effect.logError("CoreStore.afterCommit failed", Cause.pretty(exit.cause))
+              : Effect.void,
+          ),
+        { discard: true },
+      ),
+    );
 
   const transaction: CoreStoreShape["transaction"] = (effect) =>
-    Effect.flatMap(CurrentFrame, (parent) => {
-      if (parent === null) {
-        return lock
-          .withPermits(1)(runFrame(null, effect))
-          .pipe(
-            Effect.tap(({ frame }) =>
-              Effect.forEach(
-                frame.afterCommit,
-                (hook) =>
-                  Effect.exit(hook).pipe(
-                    Effect.flatMap((exit) =>
-                      Exit.isFailure(exit)
-                        ? Effect.logError("CoreStore.afterCommit failed", Cause.pretty(exit.cause))
-                        : Effect.void,
-                    ),
-                  ),
-                { discard: true },
-              ),
-            ),
-            Effect.map(({ value }) => value),
-          );
-      }
-      return parent.savepoints
-        .withPermits(1)(Effect.suspend(() => unusable(parent) ?? runFrame(parent, effect)))
-        .pipe(Effect.map(({ value }) => value));
-    });
+    Effect.flatMap(CurrentFrame, (parent) =>
+      parent === null
+        ? Effect.flatMap(lock.withPermits(1)(runFrame(null, effect)), ({ value, frame }) =>
+            Effect.as(drainAfterCommit(frame), value),
+          )
+        : Effect.map(
+            parent.savepoints.withPermits(1)(runFrame(parent, effect)),
+            ({ value }) => value,
+          ),
+    );
 
-  /** Reads outside a transaction wait for the running one, so they never see its writes. */
+  /**
+   * Reads outside a transaction wait for the running one, so they never see its writes. `f`
+   * runs synchronously and returns an already-decided Effect.
+   */
   const read = <A, E>(f: () => Effect.Effect<A, E>): Effect.Effect<A, E> =>
     Effect.flatMap(CurrentFrame, (frame) =>
       frame === null
         ? lock.withPermits(1)(Effect.suspend(f))
-        : (unusable(frame) ?? Effect.suspend(f)),
+        : Effect.suspend(() => {
+            const problem = frameProblem(frame);
+            return problem === undefined ? f() : defect(problem);
+          }),
     );
 
+  /** A write: needs a usable frame; `f` checks and writes in one synchronous step. */
   const write = <A, E>(
     operation: string,
     f: (frame: Frame) => Effect.Effect<A, E>,
@@ -176,7 +221,10 @@ export const makeMemoryStore: Effect.Effect<MemoryStore> = Effect.sync(() => {
     Effect.flatMap(CurrentFrame, (frame) =>
       frame === null
         ? defect(`${operation} outside a transaction (rule C1)`)
-        : (unusable(frame) ?? Effect.suspend(() => f(frame))),
+        : Effect.suspend(() => {
+            const problem = frameProblem(frame);
+            return problem === undefined ? f(frame) : defect(problem);
+          }),
     );
 
   const table = (name: string): Map<string, Row> => {
@@ -195,73 +243,78 @@ export const makeMemoryStore: Effect.Effect<MemoryStore> = Effect.sync(() => {
       const row = rows().get(id);
       return row !== undefined && row.workspaceId === workspaceId ? row : undefined;
     };
-    const stale = (currentRevision: number) =>
-      Effect.fail(new Conflict({ reason: "revision_changed", currentRevision }));
-    const locked = (
+    /** The stored row at `expectedRevision` (when given), or the error to fail with. */
+    const locate = (
       workspaceId: WorkspaceId,
       id: string,
       expectedRevision: number | undefined,
-    ): Effect.Effect<A, NotFoundError | Conflict> => {
+    ): A | NotFoundError | Conflict => {
       const row = lookup(workspaceId, id);
-      if (row === undefined) return Effect.fail(notFound(id));
+      if (row === undefined) return notFound(id);
       if (expectedRevision !== undefined && row.revision !== expectedRevision) {
-        return stale(row.revision);
+        return new Conflict({ reason: "revision_changed", currentRevision: row.revision });
       }
-      return Effect.succeed(row);
+      return row;
     };
-    const checkUnique = (row: A): Effect.Effect<void, UniqueViolation> => {
+    const isError = (v: unknown): v is NotFoundError | Conflict =>
+      v instanceof NotFound || v instanceof Conflict;
+    const violation = (row: A): UniqueViolation | undefined => {
       for (const constraint of def.unique ?? []) {
         const key = uniqueKey(row, constraint);
         if (key === undefined) continue;
         for (const other of rows().values()) {
           if (other.id !== row.id && uniqueKey(other, constraint) === key) {
-            return Effect.fail(
-              new UniqueViolation({ collection: def.name, constraint: constraint.name }),
-            );
+            return new UniqueViolation({ collection: def.name, constraint: constraint.name });
           }
         }
       }
-      return Effect.void;
+      return undefined;
+    };
+    const fetch = (workspaceId: WorkspaceId, id: string): Effect.Effect<A, NotFoundError> => {
+      const row = lookup(workspaceId, id);
+      return row === undefined ? Effect.fail(notFound(id)) : Effect.succeed(row);
     };
 
     return {
-      get: (workspaceId, id) =>
-        read(() => locked(workspaceId, id, undefined) as Effect.Effect<A, NotFoundError>),
+      get: (workspaceId, id) => read(() => fetch(workspaceId, id)),
       find: (workspaceId, id) =>
         read(() => Effect.succeed(Option.fromUndefinedOr(lookup(workspaceId, id)))),
       getForUpdate: (workspaceId, id, expectedRevision) =>
-        write("getForUpdate", () => locked(workspaceId, id, expectedRevision)),
-      lock: (workspaceId, id) =>
-        write("lock", () => locked(workspaceId, id, undefined) as Effect.Effect<A, NotFoundError>),
+        write("getForUpdate", (): Effect.Effect<A, NotFoundError | Conflict> => {
+          const found = locate(workspaceId, id, expectedRevision);
+          return isError(found) ? Effect.fail(found) : Effect.succeed(found);
+        }),
+      lock: (workspaceId, id) => write("lock", () => fetch(workspaceId, id)),
       insert: (row) =>
-        write("insert", () => {
+        write("insert", (): Effect.Effect<A, UniqueViolation> => {
           if (rows().has(row.id)) {
             return Effect.fail(
               new UniqueViolation({ collection: def.name, constraint: "primary" }),
             );
           }
           const stored: A = { ...row, revision: 1 };
-          return Effect.as(
-            Effect.tap(checkUnique(stored), () => Effect.sync(() => rows().set(row.id, stored))),
-            stored,
-          );
+          const broken = violation(stored);
+          if (broken !== undefined) return Effect.fail(broken);
+          rows().set(row.id, stored);
+          return Effect.succeed(stored);
         }),
       update: (next, expectedRevision) =>
-        write("update", () =>
-          Effect.gen(function* () {
-            yield* locked(next.workspaceId, next.id, expectedRevision);
-            const stored: A = { ...next, revision: expectedRevision + 1 };
-            yield* checkUnique(stored);
-            rows().set(next.id, stored);
-            return stored;
-          }),
-        ),
+        write("update", (): Effect.Effect<A, NotFoundError | Conflict | UniqueViolation> => {
+          const found = locate(next.workspaceId, next.id, expectedRevision);
+          if (isError(found)) return Effect.fail(found);
+          const stored: A = { ...next, revision: expectedRevision + 1 };
+          const broken = violation(stored);
+          if (broken !== undefined) return Effect.fail(broken);
+          rows().set(next.id, stored);
+          return Effect.succeed(stored);
+        }),
       remove: (workspaceId, id, expectedRevision) =>
-        write("remove", () =>
-          Effect.map(locked(workspaceId, id, expectedRevision), () => {
-            rows().delete(id);
-          }),
-        ),
+        write("remove", (): Effect.Effect<void, NotFoundError | Conflict> => {
+          const found = locate(workspaceId, id, expectedRevision);
+          if (isError(found)) return Effect.fail(found);
+          rows().delete(id);
+          return Effect.void;
+        }),
       list: (workspaceId, query) =>
         read(() =>
           Effect.succeed(
@@ -298,53 +351,43 @@ export const makeMemoryStore: Effect.Effect<MemoryStore> = Effect.sync(() => {
   const store: CoreStoreShape = {
     transaction,
     afterCommit: (hook) =>
-      Effect.flatMap(CurrentFrame, (frame) =>
-        frame === null
-          ? defect("afterCommit outside a transaction")
-          : (unusable(frame) ??
-            Effect.sync(() => {
-              frame.afterCommit.push(hook);
-            })),
-      ),
+      write("afterCommit", (frame) => {
+        frame.afterCommit.push(hook);
+        return Effect.void;
+      }),
     counters: {
       lock: (key) =>
-        write("counters.lock", () =>
-          Effect.sync(() => {
-            const k = counterKey(key);
-            const next = state.counters.get(k);
-            if (next !== undefined) return next;
-            state.counters.set(k, 1);
-            return 1;
-          }),
-        ),
+        write("counters.lock", (frame) => {
+          const k = counterKey(key);
+          rootOf(frame).lockedCounters.add(k);
+          const next = state.counters.get(k);
+          if (next !== undefined) return Effect.succeed(next);
+          state.counters.set(k, 1);
+          return Effect.succeed(1);
+        }),
       peek: (key) => read(() => Effect.succeed(state.counters.get(counterKey(key)) ?? 1)),
       set: (key, next) =>
-        write("counters.set", () => {
+        write("counters.set", (frame) => {
           const k = counterKey(key);
           const current = state.counters.get(k);
-          if (current === undefined) return defect(`counters.set before counters.lock (${k})`);
+          if (current === undefined || !rootOf(frame).lockedCounters.has(k)) {
+            return defect(`counters.set without counters.lock in this transaction (${k})`);
+          }
           if (!Number.isInteger(next) || next < current) {
             return defect(`counter ${k} must grow (${current} -> ${next})`);
           }
-          return Effect.sync(() => {
-            state.counters.set(k, next);
-          });
+          state.counters.set(k, next);
+          return Effect.void;
         }),
     },
     reservations: {
       tryReserve: (reservation) =>
-        write("reservations.tryReserve", () =>
-          Effect.sync(() => {
-            const k = JSON.stringify([
-              reservation.workspaceId,
-              reservation.kind,
-              reservation.number,
-            ]);
-            if (state.reservations.has(k)) return false;
-            state.reservations.set(k, reservation);
-            return true;
-          }),
-        ),
+        write("reservations.tryReserve", () => {
+          const k = JSON.stringify([reservation.workspaceId, reservation.kind, reservation.number]);
+          if (state.reservations.has(k)) return Effect.succeed(false);
+          state.reservations.set(k, reservation);
+          return Effect.succeed(true);
+        }),
     },
     requestLog: {
       claim: (scope, key, now) =>
@@ -357,15 +400,14 @@ export const makeMemoryStore: Effect.Effect<MemoryStore> = Effect.sync(() => {
           const k = logKey(scope, key);
           const existing = state.requestLog.get(k);
           // Transactions are serialized, so a pending claim can only be this transaction's own.
-          if (isPending(existing))
+          if (isPending(existing)) {
             return defect(`request key ${k} claimed twice in one transaction`);
-          if (existing !== undefined && existing.expiresAt > now) {
-            return Effect.succeed({ _tag: "Existing" as const, entry: existing });
           }
-          return Effect.sync(() => {
-            state.requestLog.set(k, { _tag: "Pending" });
-            return { _tag: "Claimed" as const };
-          });
+          if (existing !== undefined && existing.expiresAt > now) {
+            return Effect.succeed({ _tag: "Existing", entry: existing });
+          }
+          state.requestLog.set(k, { _tag: "Pending" });
+          return Effect.succeed({ _tag: "Claimed" });
         }),
       complete: (entry) =>
         write("requestLog.complete", () => {
@@ -373,29 +415,23 @@ export const makeMemoryStore: Effect.Effect<MemoryStore> = Effect.sync(() => {
           if (!isPending(state.requestLog.get(k))) {
             return defect(`requestLog.complete without a claim (${k})`);
           }
-          return Effect.sync(() => {
-            state.requestLog.set(k, entry);
-          });
+          state.requestLog.set(k, entry);
+          return Effect.void;
         }),
     },
     audit: {
       append: (workspaceId, entry) =>
-        write("audit.append", () =>
-          Effect.sync(() => {
-            state.audit.push({ workspaceId, entry });
-          }),
-        ),
+        write("audit.append", () => {
+          state.audit.push({ workspaceId, json: JSON.stringify(entry) });
+          return Effect.void;
+        }),
       history: (workspaceId, subject) =>
         read(() =>
           Effect.succeed(
             state.audit
-              .filter(
-                (a) =>
-                  a.workspaceId === workspaceId &&
-                  a.entry.subject.entity === subject.entity &&
-                  a.entry.subject.id === subject.id,
-              )
-              .map((a) => a.entry)
+              .filter((a) => a.workspaceId === workspaceId)
+              .map((a) => JSON.parse(a.json) as AuditEntry)
+              .filter((e) => e.subject.entity === subject.entity && e.subject.id === subject.id)
               .sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : 0)),
           ),
         ),

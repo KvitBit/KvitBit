@@ -53,7 +53,7 @@ export class UniqueViolation extends Data.TaggedError("UniqueViolation")<{
 export interface CounterKey {
   readonly workspaceId: WorkspaceId;
   readonly seriesId: NumberingSeriesId;
-  /** Period bucket of the series, e.g. `"2026"` or `"2026-11"`; `""` for a never-resetting series. */
+  /** Period bucket of the series, e.g. `"2026"` or `"2026-11"`; `"all"` for a never-resetting series. */
   readonly period: string;
 }
 
