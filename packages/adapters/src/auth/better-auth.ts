@@ -280,26 +280,51 @@ export const oauthRegisterHook: BeforeHook = {
   }),
 };
 
-/** The cimd plugin's own document size limit (`MAX_RESPONSE_BYTES` in @better-auth/cimd). */
-export const CLIENT_METADATA_MAX_BYTES = 5120;
+/**
+ * Most the metadata guard reads of a body without `Content-Length`: the larger of the cimd
+ * plugin's 5 KiB document limit and the provider's 64 KiB JWKS limit, so every resource the
+ * shared transport serves fits and the consumers' own (smaller) limits still decide.
+ */
+export const CLIENT_METADATA_GUARD_MAX_BYTES = 64 * 1024;
 
 const refuseMetadata = (status: number, description: string) =>
   Response.json({ error: "invalid_client_metadata", error_description: description }, { status });
 
-/** Reads at most `limit` bytes; undefined (and the stream cancelled) when the body is longer. */
+const abortError = (signal: AbortSignal): unknown =>
+  signal.reason ?? new DOMException("The operation was aborted.", "AbortError");
+
+/**
+ * Reads at most `limit` bytes; undefined (stream cancelled) when the body is longer. Rejects
+ * with the abort reason when `signal` aborts before or during the read, never returning a
+ * partial body.
+ */
 const readBounded = async (
   body: ReadableStream<Uint8Array>,
   limit: number,
   signal: AbortSignal | null | undefined,
 ): Promise<Uint8Array | undefined> => {
+  if (signal?.aborted) {
+    await body.cancel(abortError(signal)).catch(() => undefined);
+    throw abortError(signal);
+  }
   const reader = body.getReader();
+  let rejectAbort: (reason: unknown) => void = () => undefined;
+  const aborted = new Promise<never>((_, reject) => {
+    rejectAbort = reject;
+  });
+  aborted.catch(() => undefined);
+  const onAbort = () => {
+    if (signal === null || signal === undefined) return;
+    rejectAbort(abortError(signal));
+    void reader.cancel(abortError(signal)).catch(() => undefined);
+  };
+  signal?.addEventListener("abort", onAbort, { once: true });
   const chunks: Array<Uint8Array> = [];
   let size = 0;
-  const onAbort = () => void reader.cancel().catch(() => undefined);
-  signal?.addEventListener("abort", onAbort, { once: true });
   try {
     for (;;) {
-      const { done, value } = await reader.read();
+      const { done, value } = await Promise.race([reader.read(), aborted]);
+      if (signal?.aborted) throw abortError(signal);
       if (done) break;
       size += value.byteLength;
       if (size > limit) {
@@ -327,25 +352,26 @@ const readBounded = async (
  * client creation and later revalidation fetch through this transport, so filtering here covers
  * both.
  *
- * The body is read with the plugin's own size limit: a declared `Content-Length` above it is
- * refused without reading, and a longer stream is cancelled as soon as it passes the limit.
- * The bytes read are handed on in a new response with the original status and headers, so the
- * plugin's own checks still run. Documents for other URLs (such as `jwks_uri`) and non-JSON
- * bodies pass on unchanged in content.
+ * Responses the consumers reject on their own pass through untouched, so their checks see the
+ * original: anything but a plain 200, a redirected response, and a body whose declared
+ * `Content-Length` exceeds `CLIENT_METADATA_GUARD_MAX_BYTES`. Other bodies are read up to that
+ * bound (a longer stream is cancelled and refused) and handed on as a new response with the
+ * original status and headers, so the plugin's 5 KiB document limit and the provider's JWKS
+ * limit still apply to them. Aborting the fetch signal aborts the read.
  */
 export const guardClientMetadataFetch =
   (inner: ClientMetadataResourceFetch): ClientMetadataResourceFetch =>
   async (input, init) => {
     const response = await inner(input, init);
-    if (response.status !== 200 || response.body === null) return response;
-    const tooLarge = `Metadata document exceeds ${CLIENT_METADATA_MAX_BYTES} bytes`;
-    const declared = Number.parseInt(response.headers.get("content-length") ?? "", 10);
-    if (Number.isFinite(declared) && declared > CLIENT_METADATA_MAX_BYTES) {
-      await response.body.cancel().catch(() => undefined);
-      return refuseMetadata(413, tooLarge);
+    if (response.status !== 200 || response.redirected || response.body === null) {
+      return response;
     }
-    const bytes = await readBounded(response.body, CLIENT_METADATA_MAX_BYTES, init?.signal);
-    if (bytes === undefined) return refuseMetadata(413, tooLarge);
+    const declared = Number.parseInt(response.headers.get("content-length") ?? "", 10);
+    if (Number.isFinite(declared) && declared > CLIENT_METADATA_GUARD_MAX_BYTES) return response;
+    const bytes = await readBounded(response.body, CLIENT_METADATA_GUARD_MAX_BYTES, init?.signal);
+    if (bytes === undefined) {
+      return refuseMetadata(413, `Response exceeds ${CLIENT_METADATA_GUARD_MAX_BYTES} bytes`);
+    }
     const passOn = () =>
       new Response(bytes, {
         status: response.status,

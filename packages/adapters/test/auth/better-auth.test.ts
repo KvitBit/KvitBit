@@ -10,6 +10,7 @@ import {
   API_KEY_PLUGIN_PATHS,
   type AuthConfig,
   authOptions,
+  CLIENT_METADATA_GUARD_MAX_BYTES,
   type EmailRateLimiter,
   guardClientMetadataFetch,
   makeAuth,
@@ -24,6 +25,15 @@ const MCP = `${BASE}/mcp`;
 const REDIRECT = "https://client.example/callback";
 const CIMD_CLIENT_ID = "https://client.example/oauth-client.json";
 const CIMD_JWT_CLIENT_ID = "https://jwt-client.example/oauth-client.json";
+const CIMD_BIG_CLIENT_ID = "https://big-client.example/oauth-client.json";
+/** A body delivered in one chunk, without Content-Length. */
+const stalledOnce = (text: string) =>
+  new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode(text));
+      controller.close();
+    },
+  });
 const cimdDocument = (clientId: string, extra: Record<string, unknown> = {}) => ({
   client_id: clientId,
   client_name: "Metadata document client",
@@ -38,6 +48,12 @@ const fetchClientMetadata = async (input: string | URL | Request) => {
   const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
   cimdFetches.push(url);
   if (url === CIMD_CLIENT_ID) return Response.json(cimdDocument(CIMD_CLIENT_ID));
+  if (url === CIMD_BIG_CLIENT_ID) {
+    const doc = cimdDocument(CIMD_BIG_CLIENT_ID, { client_name: "x".repeat(6000) });
+    return new Response(stalledOnce(JSON.stringify(doc)), {
+      headers: { "content-type": "application/json" },
+    });
+  }
   if (url === CIMD_JWT_CLIENT_ID) {
     return Response.json(
       cimdDocument(CIMD_JWT_CLIENT_ID, {
@@ -367,42 +383,106 @@ describe("OAuth 2.1 for MCP", () => {
     expect((await jwks("https://client.example/jwks.json")).status).toBe(200);
   });
 
-  test("the metadata guard bounds the body it reads", async () => {
-    // Declared too large: refused without reading the body.
-    let pulled = 0;
-    const endless = () =>
+  describe("metadata guard transport", () => {
+    const endless = (counter: { pulled: number }, chunk = 1024) =>
       new ReadableStream<Uint8Array>({
         pull(controller) {
-          pulled += 1;
-          controller.enqueue(new Uint8Array(1024).fill(32));
+          counter.pulled += 1;
+          controller.enqueue(new Uint8Array(chunk).fill(32));
         },
       });
-    const declared = guardClientMetadataFetch(
-      async () =>
-        new Response(endless(), {
-          headers: { "content-type": "application/json", "content-length": "1000000" },
-        }),
-    );
-    expect((await declared(CIMD_CLIENT_ID)).status).toBe(413);
-    expect(pulled).toBeLessThanOrEqual(2);
+    const stalled = (first?: Uint8Array) =>
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          if (first !== undefined) controller.enqueue(first);
+        },
+      });
+    const json = { "content-type": "application/json" };
 
-    // No Content-Length and an endless stream: cancelled just past the limit.
-    pulled = 0;
-    const streamed = guardClientMetadataFetch(
-      async () => new Response(endless(), { headers: { "content-type": "application/json" } }),
-    );
-    expect((await streamed(CIMD_CLIENT_ID)).status).toBe(413);
-    expect(pulled).toBeLessThanOrEqual(8);
+    test("a declared oversized body passes through unread for the consumer's own check", async () => {
+      const counter = { pulled: 0 };
+      const original = new Response(endless(counter), {
+        headers: { ...json, "content-length": "1000000" },
+      });
+      const guarded = guardClientMetadataFetch(async () => original);
+      expect(await guarded(CIMD_CLIENT_ID)).toBe(original);
+      expect(counter.pulled).toBeLessThanOrEqual(1);
+    });
 
-    // A small document passes on with its headers.
-    const small = guardClientMetadataFetch(async () =>
-      Response.json(cimdDocument(CIMD_CLIENT_ID), { headers: { "cache-control": "max-age=60" } }),
-    );
-    const passed = await small(CIMD_CLIENT_ID);
-    expect(passed.status).toBe(200);
-    expect(passed.headers.get("cache-control")).toBe("max-age=60");
-    expect(passed.headers.get("content-type")).toContain("application/json");
-    expect(await passed.json()).toMatchObject({ client_id: CIMD_CLIENT_ID });
+    test("an undeclared endless body is cancelled at the bound", async () => {
+      const counter = { pulled: 0 };
+      const guarded = guardClientMetadataFetch(
+        async () => new Response(endless(counter), { headers: json }),
+      );
+      expect((await guarded(CIMD_CLIENT_ID)).status).toBe(413);
+      expect(counter.pulled).toBeLessThanOrEqual(CLIENT_METADATA_GUARD_MAX_BYTES / 1024 + 2);
+    });
+
+    test("a 6 KiB JWKS passes intact", async () => {
+      const keys = Array.from({ length: 48 }, (_, n) => ({
+        kty: "oct",
+        kid: `k${n}`,
+        k: "x".repeat(120),
+      }));
+      const body = JSON.stringify({ keys });
+      expect(body.length).toBeGreaterThan(6 * 1024);
+      const guarded = guardClientMetadataFetch(
+        async () => new Response(stalledOnce(body), { headers: json }),
+      );
+      const response = await guarded("https://client.example/jwks.json");
+      expect(response.status).toBe(200);
+      expect(await response.text()).toBe(body);
+    });
+
+    test("a redirected response is returned as is", async () => {
+      const original = Response.json(cimdDocument(CIMD_CLIENT_ID));
+      Object.defineProperty(original, "redirected", { value: true });
+      const guarded = guardClientMetadataFetch(async () => original);
+      const response = await guarded(CIMD_CLIENT_ID);
+      expect(response).toBe(original);
+      expect(response.redirected).toBe(true);
+    });
+
+    test("an abort before the read rejects instead of hanging", async () => {
+      const controller = new AbortController();
+      controller.abort(new Error("timed out"));
+      const guarded = guardClientMetadataFetch(
+        async () => new Response(stalled(), { headers: json }),
+      );
+      await expect(guarded(CIMD_CLIENT_ID, { signal: controller.signal })).rejects.toThrow(
+        "timed out",
+      );
+    });
+
+    test("an abort during the read rejects instead of returning partial bytes", async () => {
+      const controller = new AbortController();
+      const guarded = guardClientMetadataFetch(
+        async () =>
+          new Response(stalled(new TextEncoder().encode('{"client_id":')), { headers: json }),
+      );
+      const pending = guarded(CIMD_CLIENT_ID, { signal: controller.signal });
+      setTimeout(() => controller.abort(new Error("timed out")), 10);
+      await expect(pending).rejects.toThrow("timed out");
+    });
+
+    test("an oversized metadata document still fails resolution", async () => {
+      const url = new URL(`${BASE}/api/auth/oauth2/authorize`);
+      for (const [k, v] of Object.entries({
+        response_type: "code",
+        client_id: CIMD_BIG_CLIENT_ID,
+        redirect_uri: REDIRECT,
+        scope: "kvitbit:read",
+        state: "big-state",
+        resource: MCP,
+        code_challenge: "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM",
+        code_challenge_method: "S256",
+      })) {
+        url.searchParams.set(k, v);
+      }
+      const response = await auth.handler(new Request(url.toString(), { redirect: "manual" }));
+      expect(cimdFetches).toContain(CIMD_BIG_CLIENT_ID);
+      expect(response.headers.get("location") ?? "").not.toContain("/sign-in");
+    });
   });
 
   test("registration refuses unadvertised client authentication methods", async () => {
