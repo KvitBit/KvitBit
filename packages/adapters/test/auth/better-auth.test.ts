@@ -26,6 +26,21 @@ const REDIRECT = "https://client.example/callback";
 const CIMD_CLIENT_ID = "https://client.example/oauth-client.json";
 const CIMD_JWT_CLIENT_ID = "https://jwt-client.example/oauth-client.json";
 const CIMD_BIG_CLIENT_ID = "https://big-client.example/oauth-client.json";
+const CIMD_SLOW_CLIENT_ID = "https://slow-client.example/oauth-client.json";
+/** A stream whose cancel never finishes, like a transport with slow cleanup. */
+const slowCleanup = (first?: Uint8Array, counter?: { pulled: number }) =>
+  new ReadableStream<Uint8Array>({
+    start(controller) {
+      if (first !== undefined) controller.enqueue(first);
+    },
+    pull(controller) {
+      if (counter === undefined) return new Promise(() => undefined);
+      counter.pulled += 1;
+      controller.enqueue(new Uint8Array(1024).fill(32));
+      return undefined;
+    },
+    cancel: () => new Promise<void>(() => undefined),
+  });
 /** A body delivered in one chunk, without Content-Length. */
 const stalledOnce = (text: string) =>
   new ReadableStream<Uint8Array>({
@@ -48,6 +63,12 @@ const fetchClientMetadata = async (input: string | URL | Request) => {
   const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
   cimdFetches.push(url);
   if (url === CIMD_CLIENT_ID) return Response.json(cimdDocument(CIMD_CLIENT_ID));
+  if (url === CIMD_SLOW_CLIENT_ID) {
+    // Declared too large, never delivers, and its cleanup never finishes.
+    return new Response(slowCleanup(), {
+      headers: { "content-type": "application/json", "content-length": String(6 * 1024) },
+    });
+  }
   if (url === CIMD_BIG_CLIENT_ID) {
     const doc = cimdDocument(CIMD_BIG_CLIENT_ID, { client_name: "x".repeat(6000) });
     return new Response(stalledOnce(JSON.stringify(doc)), {
@@ -398,27 +419,18 @@ describe("OAuth 2.1 for MCP", () => {
         },
       });
     const json = { "content-type": "application/json" };
-    /** A stream whose cancel never finishes, like a transport with slow cleanup. */
-    const slowCleanup = (first?: Uint8Array, counter?: { pulled: number }) =>
-      new ReadableStream<Uint8Array>({
-        start(controller) {
-          if (first !== undefined) controller.enqueue(first);
-        },
-        pull(controller) {
-          if (counter === undefined) return new Promise(() => undefined);
-          counter.pulled += 1;
-          controller.enqueue(new Uint8Array(1024).fill(32));
-          return undefined;
-        },
-        cancel: () => new Promise<void>(() => undefined),
-      });
 
     test("a metadata document declared above 5 KiB reaches the resolver unread", async () => {
-      const original = new Response(slowCleanup(), {
-        headers: { ...json, "content-length": String(6 * 1024) },
-      });
-      const guarded = guardClientMetadataFetch(async () => original);
-      expect(await guarded(CIMD_CLIENT_ID)).toBe(original);
+      const guarded = guardClientMetadataFetch(
+        async () =>
+          new Response(slowCleanup(), {
+            headers: { ...json, "content-length": String(6 * 1024) },
+          }),
+      );
+      const response = await guarded(CIMD_CLIENT_ID);
+      expect(response.headers.get("content-length")).toBe(String(6 * 1024));
+      // Cancelling settles at once although the transport's own cleanup never finishes.
+      await response.body?.cancel();
     });
 
     test("an abort settles even while stream cleanup is pending", async () => {
@@ -463,7 +475,8 @@ describe("OAuth 2.1 for MCP", () => {
         headers: { ...json, "content-length": "1000000" },
       });
       const guarded = guardClientMetadataFetch(async () => original);
-      expect(await guarded(CIMD_CLIENT_ID)).toBe(original);
+      const passed = await guarded(CIMD_CLIENT_ID);
+      expect(passed.headers.get("content-length")).toBe("1000000");
       expect(counter.pulled).toBeLessThanOrEqual(1);
     });
 
@@ -521,6 +534,29 @@ describe("OAuth 2.1 for MCP", () => {
       const pending = guarded(CIMD_CLIENT_ID, { signal: controller.signal });
       setTimeout(() => controller.abort(new Error("timed out")), 10);
       await expect(pending).rejects.toThrow("timed out");
+    });
+
+    test("first-time resolution of a declared oversized document fails promptly", async () => {
+      const url = new URL(`${BASE}/api/auth/oauth2/authorize`);
+      for (const [k, v] of Object.entries({
+        response_type: "code",
+        client_id: CIMD_SLOW_CLIENT_ID,
+        redirect_uri: REDIRECT,
+        scope: "kvitbit:read",
+        state: "slow-state",
+        resource: MCP,
+        code_challenge: "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM",
+        code_challenge_method: "S256",
+      })) {
+        url.searchParams.set(k, v);
+      }
+      const started = Date.now();
+      const response = await auth.handler(new Request(url.toString(), { redirect: "manual" }));
+      expect(Date.now() - started).toBeLessThan(2000);
+      expect(cimdFetches).toContain(CIMD_SLOW_CLIENT_ID);
+      expect(response.headers.get("location") ?? "").not.toContain("/sign-in");
+      const body = JSON.stringify(await response.json());
+      expect(body).toContain("size limit");
     });
 
     test("an oversized metadata document still fails resolution", async () => {

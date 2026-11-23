@@ -351,6 +351,36 @@ const readBounded = async (
 };
 
 /**
+ * The same response over a body whose `cancel()` returns at once while the original stream's
+ * cleanup runs detached. Consumers that `await body.cancel()` before rejecting (the cimd
+ * resolver's declared-size check) then settle even when a transport's cleanup stalls. Reads
+ * stay on demand.
+ */
+const withDetachedCleanup = (response: Response): Response => {
+  const original = response.body;
+  if (original === null) return response;
+  const reader = original.getReader();
+  const body = new ReadableStream<Uint8Array>(
+    {
+      async pull(controller) {
+        const { done, value } = await reader.read();
+        if (done) controller.close();
+        else controller.enqueue(value);
+      },
+      cancel(reason) {
+        void reader.cancel(reason).catch(() => undefined);
+      },
+    },
+    { highWaterMark: 0 },
+  );
+  return new Response(body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers: response.headers,
+  });
+};
+
+/**
  * Wraps the Client ID Metadata Document transport so a document asking for a client
  * authentication method outside `OAUTH_TOKEN_ENDPOINT_AUTH_METHODS` is refused. The cimd plugin
  * validates against the provider's built-in methods (which include `private_key_jwt`), and both
@@ -358,9 +388,10 @@ const readBounded = async (
  * both.
  *
  * Responses the consumers reject on their own pass through untouched, so their checks see the
- * original: anything but a plain 200, a redirected response, and a body whose declared
- * `Content-Length` exceeds `CLIENT_METADATA_MAX_BYTES` (the resolver refuses such a document
- * from the header alone; a JWKS reader applies its own larger limit). Other bodies are read up to that
+ * original: anything but a plain 200 and a redirected response (both refused without touching
+ * the body). A body whose declared `Content-Length` exceeds `CLIENT_METADATA_MAX_BYTES` goes on
+ * unread, over a body with detached cleanup: the resolver refuses such a document from the
+ * header alone, and a JWKS reader applies its own larger limit. Other bodies are read up to that
  * bound (a longer stream is cancelled and refused) and handed on as a new response with the
  * original status and headers, so the plugin's 5 KiB document limit and the provider's JWKS
  * limit still apply to them. Aborting the fetch signal aborts the read.
@@ -373,7 +404,9 @@ export const guardClientMetadataFetch =
       return response;
     }
     const declared = Number.parseInt(response.headers.get("content-length") ?? "", 10);
-    if (Number.isFinite(declared) && declared > CLIENT_METADATA_MAX_BYTES) return response;
+    if (Number.isFinite(declared) && declared > CLIENT_METADATA_MAX_BYTES) {
+      return withDetachedCleanup(response);
+    }
     const bytes = await readBounded(response.body, CLIENT_METADATA_GUARD_MAX_BYTES, init?.signal);
     if (bytes === undefined) {
       return refuseMetadata(413, `Response exceeds ${CLIENT_METADATA_GUARD_MAX_BYTES} bytes`);
