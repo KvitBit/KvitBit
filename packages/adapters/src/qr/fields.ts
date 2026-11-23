@@ -21,59 +21,101 @@ export const invalid = (
 /** Removes spaces and uppercases, so "cz65 2010 ..." and "CZ652010..." compare equal. */
 export const normalizeIban = (iban: string): string => iban.replace(/\s+/g, "").toUpperCase();
 
-/** IBAN length per country (SWIFT IBAN registry). An unlisted country is rejected. */
-const IBAN_LENGTHS: Readonly<Record<string, number>> = Object.fromEntries(
-  (
-    "AD24 AE23 AL28 AT20 AZ28 BA20 BE16 BG22 BH22 BI27 BR29 BY28 CH21 CR22 CY28 CZ24 DE22 DJ27 " +
-    "DK18 DO28 EE20 EG29 ES24 FI18 FK18 FO18 FR27 GB22 GE22 GI23 GL18 GR27 GT28 HN28 HR21 HU28 " +
-    "IE22 IL23 IQ23 IS26 IT27 JO30 KW30 KZ20 LB28 LC32 LI21 LT20 LU20 LV21 LY25 MC27 MD24 ME22 " +
-    "MK19 MN20 MR27 MT31 MU30 NI28 NL18 NO15 OM23 PK24 PL28 PS29 PT25 QA29 RO24 RS22 RU33 SA24 " +
-    "SC31 SD18 SE24 SI19 SK24 SM27 SO23 ST25 SV28 TL23 TN24 TR26 UA29 VA22 VG24 XK20 YE30"
-  )
-    .split(" ")
-    .map((e) => [e.slice(0, 2), Number(e.slice(2))]),
-);
-
 /**
- * Registered BBAN formats (SWIFT IBAN registry notation: n digits, a upper-case letters,
- * c alphanumerics) for the EEA plus CH, GB, MC and SM, the accounts Czech issuers invoice to.
- * Other registered countries are checked for length and alphanumerics only.
+ * Registered BBAN formats for every country in the SWIFT IBAN registry, in its notation
+ * (n digits, a upper-case letters, c alphanumerics). The IBAN length is 4 plus the BBAN length.
+ * A country not listed here is rejected.
  */
 const BBAN_FORMATS: Readonly<Record<string, string>> = {
+  AD: "8n12c",
+  AE: "19n",
+  AL: "8n16c",
   AT: "16n",
+  AZ: "4a20c",
+  BA: "16n",
   BE: "12n",
   BG: "4a6n8c",
+  BH: "4a14c",
+  BI: "23n",
+  BR: "23n1a1c",
+  BY: "4c4n16c",
   CH: "5n12c",
+  CR: "18n",
   CY: "8n16c",
   CZ: "20n",
   DE: "18n",
+  DJ: "23n",
   DK: "14n",
+  DO: "4c20n",
   EE: "16n",
+  EG: "25n",
   ES: "20n",
   FI: "14n",
+  FK: "2a12n",
+  FO: "14n",
   FR: "10n11c2n",
   GB: "4a14n",
+  GE: "2a16n",
+  GI: "4a15c",
+  GL: "14n",
   GR: "7n16c",
+  GT: "24c",
+  HN: "4a20n",
   HR: "17n",
   HU: "24n",
   IE: "4a14n",
+  IL: "19n",
+  IQ: "4a15n",
   IS: "22n",
   IT: "1a10n12c",
+  JO: "4a4n18c",
+  KW: "4a22c",
+  KZ: "3n13c",
+  LB: "4n20c",
+  LC: "4a24c",
   LI: "5n12c",
   LT: "16n",
   LU: "3n13c",
   LV: "4a13c",
+  LY: "21n",
   MC: "10n11c2n",
+  MD: "20c",
+  ME: "18n",
+  MK: "3n10c2n",
+  MN: "16n",
+  MR: "23n",
   MT: "4a5n18c",
+  MU: "4a19n3a",
+  NI: "4a20n",
   NL: "4a10n",
   NO: "11n",
+  OM: "3n16c",
+  PK: "4a16c",
   PL: "24n",
+  PS: "4a21c",
   PT: "21n",
+  QA: "4a21c",
   RO: "4a16c",
+  RS: "18n",
+  RU: "14n15c",
+  SA: "2n18c",
+  SC: "4a20n3a",
+  SD: "14n",
   SE: "20n",
   SI: "15n",
   SK: "20n",
   SM: "1a10n12c",
+  SO: "19n",
+  ST: "21n",
+  SV: "4a20n",
+  TL: "19n",
+  TN: "20n",
+  TR: "6n16c",
+  UA: "6n19c",
+  VA: "18n",
+  VG: "4a16n",
+  XK: "16n",
+  YE: "4a4n18c",
 };
 
 const CLASS: Readonly<Record<string, string>> = { n: "\\d", a: "[A-Z]", c: "[A-Z0-9]" };
@@ -93,13 +135,11 @@ export const EEA_COUNTRIES: ReadonlySet<string> = new Set(
   ),
 );
 
-/** ISO 13616: registered country length, BBAN shape, then the ISO 7064 mod 97-10 check digits. */
+/** ISO 13616: registered BBAN format (which fixes the length), then the mod 97-10 check digits. */
 export const isValidIban = (iban: string): boolean => {
   if (!/^[A-Z]{2}\d{2}[A-Z0-9]+$/.test(iban)) return false;
-  const country = iban.slice(0, 2);
-  if (IBAN_LENGTHS[country] !== iban.length) return false;
-  const bban = BBAN_PATTERNS.get(country);
-  if (bban !== undefined && !bban.test(iban.slice(4))) return false;
+  const bban = BBAN_PATTERNS.get(iban.slice(0, 2));
+  if (bban === undefined || !bban.test(iban.slice(4))) return false;
   const rearranged = iban.slice(4) + iban.slice(0, 4);
   let remainder = 0;
   for (const ch of rearranged) {
