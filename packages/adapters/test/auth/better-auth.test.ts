@@ -21,6 +21,21 @@ const UUID_V7 = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f
 const BASE = "http://localhost:3000";
 const MCP = `${BASE}/mcp`;
 const REDIRECT = "https://client.example/callback";
+const CIMD_CLIENT_ID = "https://client.example/oauth-client.json";
+const cimdFetches: Array<string> = [];
+const fetchClientMetadata = async (input: string | URL | Request) => {
+  const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+  cimdFetches.push(url);
+  if (url !== CIMD_CLIENT_ID) return new Response("not found", { status: 404 });
+  return Response.json({
+    client_id: CIMD_CLIENT_ID,
+    client_name: "Metadata document client",
+    redirect_uris: [REDIRECT],
+    token_endpoint_auth_method: "none",
+    grant_types: ["authorization_code", "refresh_token"],
+    response_types: ["code"],
+  });
+};
 
 let pg: PGlite;
 let botProtection: BotProtection["Service"];
@@ -51,6 +66,7 @@ const config = (): AuthConfig => ({
   mcpResource: MCP,
   botProtection,
   emailRateLimiter,
+  fetchClientMetadata,
   beforeHooks: [
     {
       matcher: (ctx) => ctx.path === "/sign-up/email",
@@ -116,6 +132,7 @@ describe("makeAuth configuration", () => {
       "bearer",
       "api-key",
       "oauth-provider",
+      "cimd",
       "kvitbit-edge-hooks",
     ]);
     const options = authOptions(config());
@@ -218,6 +235,7 @@ describe("OAuth 2.1 for MCP", () => {
     expect(metadata.grant_types_supported).toEqual(["authorization_code", "refresh_token"]);
     expect(metadata.token_endpoint_auth_methods_supported).toEqual(["none", "client_secret_basic"]);
     expect(metadata.code_challenge_methods_supported).toEqual(["S256"]);
+    expect(metadata.client_id_metadata_document_supported).toBe(true);
     expect(metadata.scopes_supported).toEqual(expect.arrayContaining([...OAUTH_SCOPES]));
   });
 
@@ -263,6 +281,26 @@ describe("OAuth 2.1 for MCP", () => {
     expect(noResource.status).toBe(400);
     const otherResource = await authorize({ state: "s3", resource: `${BASE}/api/v1` });
     expect(otherResource.status).toBe(400);
+  });
+
+  test("an HTTPS client_id resolves through its metadata document and reaches sign-in", async () => {
+    const url = new URL(`${BASE}/api/auth/oauth2/authorize`);
+    for (const [k, v] of Object.entries({
+      response_type: "code",
+      client_id: CIMD_CLIENT_ID,
+      redirect_uri: REDIRECT,
+      scope: "kvitbit:read",
+      state: "cimd-state",
+      resource: MCP,
+      code_challenge: "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM",
+      code_challenge_method: "S256",
+    })) {
+      url.searchParams.set(k, v);
+    }
+    const response = await auth.handler(new Request(url.toString(), { redirect: "manual" }));
+    expect([302, 303]).toContain(response.status);
+    expect(response.headers.get("location")).toContain("/sign-in");
+    expect(cimdFetches).toContain(CIMD_CLIENT_ID);
   });
 
   test("registration refuses unadvertised client authentication methods", async () => {

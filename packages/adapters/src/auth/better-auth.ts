@@ -8,13 +8,15 @@
  * `state` and `resource`, the `kvitbit:` scopes). Every row id is a UUIDv7. The bot-protected
  * endpoints of section 2.6 get an ALTCHA check, then a per-email rate limit, before anything else.
  *
- * Not wired yet, because their packages are not dependencies: the `expo` plugin (section 2.7)
- * and Client ID Metadata Documents (`@better-auth/cimd`, section 6.2 step 4). Discovery
- * therefore does not advertise `client_id_metadata_document_supported`, and dynamic client
- * registration is the only registration path.
+ * Clients register through a Client ID Metadata Document (an HTTPS `client_id`, the preferred
+ * path of section 6.2 step 4, `@better-auth/cimd`) or dynamic client registration.
+ *
+ * Not wired yet: the `expo` plugin of section 2.7 (`@better-auth/expo` is not a dependency).
  */
 import { apiKey } from "@better-auth/api-key";
-import { oauthProvider } from "@better-auth/oauth-provider";
+import { cimd } from "@better-auth/cimd";
+import { fetchClientMetadataResource } from "@better-auth/cimd/node";
+import { type ClientMetadataResourceFetch, oauthProvider } from "@better-auth/oauth-provider";
 import { passkey } from "@better-auth/passkey";
 import {
   type BotScope,
@@ -132,6 +134,11 @@ export interface AuthConfig {
   readonly oauthConsentPage: string;
   /** The MCP resource URL (`https://<host>/mcp`) every token is bound to (RFC 8707). */
   readonly mcpResource: string;
+  /**
+   * Transport for fetching Client ID Metadata Documents. Defaults to the cimd package's Node
+   * fetch, which resolves DNS once, refuses private addresses and never follows redirects.
+   */
+  readonly fetchClientMetadata?: ClientMetadataResourceFetch;
   /** Bot protection for `BOT_PROTECTED_PATHS`; a self-host opt-out passes `NoopBotProtection`. */
   readonly botProtection: BotProtection["Service"];
   /** Per-email limit for `BOT_PROTECTED_PATHS` (`makeEmailRateLimiter`). */
@@ -367,6 +374,10 @@ export const authOptions = (config: AuthConfig) => {
         refreshTokenExpiresIn: 30 * 24 * 60 * 60,
         // Seconds: parallel refreshes within 10 s get the same tokens (section 6.2 step 6).
         refreshTokenReuseInterval: 10,
+      }),
+      cimd({
+        fetchClientMetadataResource: config.fetchClientMetadata ?? fetchClientMetadataResource,
+        metadataProfile: "mcp-2026-07-28",
       }),
       extraHooks,
     ],

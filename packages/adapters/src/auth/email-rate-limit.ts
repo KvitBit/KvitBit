@@ -50,10 +50,12 @@ export const makeEmailRateLimiter = (
       sql
         .withTransaction(
           Effect.gen(function* () {
-            const now = yield* Clock.currentTimeMillis;
             const address = emailRateLimitKey(email);
             const prefix = `${address}#`;
             yield* sql`select pg_advisory_xact_lock(hashtextextended(${address}, 0))`;
+            // Read the clock only once the lock is held: a request that waited for it must see
+            // the admissions that expired meanwhile.
+            const now = yield* Clock.currentTimeMillis;
             yield* sql`
               delete from auth.rate_limit
               where starts_with(key, ${prefix}) and last_request <= ${now - windowMs}`;

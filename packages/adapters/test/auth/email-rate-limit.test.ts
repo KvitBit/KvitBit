@@ -1,8 +1,9 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import type { PGlite } from "@electric-sql/pglite";
-import { Effect, Layer } from "effect";
+import { Effect, Fiber, Layer } from "effect";
+import { SqlClient } from "effect/sql";
 import { TestClock } from "effect/testing";
-import { makeEmailRateLimiter } from "../../src/auth";
+import { emailRateLimitKey, makeEmailRateLimiter } from "../../src/auth";
 import { layerFromPglite, makeMigratedPglite } from "../../src/testing";
 
 let pg: PGlite;
@@ -139,5 +140,32 @@ describe("makeEmailRateLimiter", () => {
     );
     expect(admitted.slice(0, 10).every((a) => !a)).toBe(true);
     expect(admitted[10]).toBe(true);
+  });
+
+  test("a request that waited for the address lock sees admissions that expired meanwhile", async () => {
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        yield* TestClock.setTime(T0);
+        const sql = yield* SqlClient.SqlClient;
+        const limiter = yield* makeEmailRateLimiter();
+        for (let i = 0; i < 5; i++) yield* limiter.consume("wait@example.com");
+        // Another transaction holds the address lock until t = 61.
+        const holder = yield* sql
+          .withTransaction(
+            Effect.gen(function* () {
+              yield* sql`select pg_advisory_xact_lock(hashtextextended(${emailRateLimitKey("wait@example.com")}, 0))`;
+              yield* Effect.sleep("61 seconds");
+            }),
+          )
+          .pipe(Effect.forkChild);
+        yield* Effect.yieldNow;
+        const waiter = yield* limiter.consume("wait@example.com").pipe(Effect.forkChild);
+        yield* Effect.yieldNow;
+        yield* TestClock.adjust("61 seconds");
+        yield* Fiber.join(holder);
+        return yield* Fiber.join(waiter);
+      }).pipe(Effect.provide(Layer.merge(layerFromPglite(pg), TestClock.layer()))),
+    );
+    expect(result).toEqual({ allowed: true });
   });
 });
