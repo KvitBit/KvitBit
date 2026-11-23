@@ -16,14 +16,19 @@ const PAGING_KEYS = new Set(["cursor", "limit"]);
  * Filters with empty values and paging fields removed: `undefined`, `null` and blank strings mean
  * "no filter"; `cursor` and `limit` come only from the page request.
  */
-export const cleanFilters = <F extends object>(filters: F): F => {
+/** Filters after cleaning: every key may be absent at runtime, and none is null or a paging field. */
+export type CleanFilters<F> = {
+  readonly [K in Exclude<keyof F, "cursor" | "limit">]?: Exclude<F[K], null | undefined>;
+};
+
+export const cleanFilters = <F extends object>(filters: F): CleanFilters<F> => {
   const out: Record<string, FilterValue> = {};
   for (const [key, value] of Object.entries(filters) as Array<[string, FilterValue]>) {
     if (PAGING_KEYS.has(key) || value === undefined || value === null) continue;
     if (typeof value === "string" && value.trim() === "") continue;
     out[key] = value;
   }
-  return out as F;
+  return out as CleanFilters<F>;
 };
 
 /** Stable identity of a filter set (key order and empty values do not matter). */
@@ -44,10 +49,9 @@ export const pageQuery = <F extends object>(
   filters: F,
   cursor: string | null = null,
   limit: number = PAGE_LIMIT,
-): F & { readonly limit: number; readonly cursor?: string } => {
+): PageQuery<F> => {
   const base = { ...cleanFilters(filters), limit: clampLimit(limit) };
-  return (cursor === null ? base : { ...base, cursor }) as F & {
-    readonly limit: number;
-    readonly cursor?: string;
-  };
+  return (cursor === null ? base : { ...base, cursor }) as PageQuery<F>;
 };
+
+export type PageQuery<F> = CleanFilters<F> & { readonly limit: number; readonly cursor?: string };

@@ -109,7 +109,7 @@ describe("KvitbitApi round trips over a mock transport", () => {
     expect(req?.method).toBe("POST");
     expect(req?.headers.get("idempotency-key")).toBe("0193aaaa-bbbb-7ccc-8ddd-eeeeffff0000");
     expect(req?.headers.get("authorization")).toBe("Bearer kvb_key1_secret");
-    expect(req?.credentials).toBeUndefined();
+    expect(req?.credentials).toBe("omit"); // no same-origin session cookie beside the bearer
     expect(JSON.parse(req?.body ?? "{}")).toEqual({ name: "Acme s.r.o." });
   });
 

@@ -88,9 +88,32 @@ export const isWireError = (u: unknown): u is WireError =>
 
 const LOCAL_TAGS = new Set(["Offline", "Timeout", "Cancelled", "Unexpected"]);
 
+/**
+ * An `Invalid` built outside the HttpApi decoder: the AuthClient port reports Better Auth issues
+ * (`auth.*`, e.g. `auth.bot_proof_required`) with this shape, and those codes are not in the domain
+ * IssueCode enum, so they never decode into the `Invalid` class.
+ */
+const isPlainInvalid = (u: object): boolean => {
+  const candidate = u as { _tag?: unknown; issues?: unknown };
+  return (
+    candidate._tag === "Invalid" &&
+    Array.isArray(candidate.issues) &&
+    candidate.issues.length > 0 &&
+    candidate.issues.every(
+      (issue: unknown) =>
+        typeof issue === "object" &&
+        issue !== null &&
+        Array.isArray((issue as { path?: unknown }).path) &&
+        typeof (issue as { code?: unknown }).code === "string",
+    )
+  );
+};
+
 export const isUiError = (u: unknown): u is UiError =>
   isWireError(u) ||
-  (typeof u === "object" && u !== null && LOCAL_TAGS.has((u as { _tag?: unknown })._tag as string));
+  (typeof u === "object" &&
+    u !== null &&
+    (LOCAL_TAGS.has((u as { _tag?: unknown })._tag as string) || isPlainInvalid(u)));
 
 const fromHttpClientError = (error: HttpClientError.HttpClientError): UiError => {
   const reason = error.reason;

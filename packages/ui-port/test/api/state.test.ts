@@ -288,3 +288,12 @@ describe("council follow-ups", () => {
     expect(calls).toBe(1);
   });
 });
+
+describe("cleaned filters are optional in the type too", () => {
+  test("a blank required filter is absent at runtime and optional in the type", () => {
+    const query = pageQuery({ text: "  " as string });
+    const text: string | undefined = query.text;
+    expect(text).toBeUndefined();
+    expect("text" in query).toBe(false);
+  });
+});

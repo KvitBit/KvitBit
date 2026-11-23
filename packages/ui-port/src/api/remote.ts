@@ -6,7 +6,7 @@
 import type { Page } from "@kvitbit/domain/contract";
 import { Option } from "effect";
 import { isCursorMismatch, type UiError } from "./errors";
-import { filterHash, PAGE_LIMIT, pageQuery } from "./query";
+import { filterHash, PAGE_LIMIT, type PageQuery, pageQuery } from "./query";
 import type { ApiResult } from "./result";
 
 // --- Remote -------------------------------------------------------------------------------------
@@ -68,7 +68,7 @@ export interface Paged<A, Q> {
 /** A page request to send; the result goes back through `receive` with the same `seq`. */
 export interface PageFetch<Q> {
   readonly seq: number;
-  readonly query: Q & { readonly limit: number; readonly cursor?: string };
+  readonly query: PageQuery<Q>;
 }
 
 export interface PagedStep<A, Q> {

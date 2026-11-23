@@ -103,21 +103,24 @@ export const configureClient =
       recordResponse,
     );
     const credentials = config.credentials;
-    const authed =
+    // FetchHttpClient reads RequestInit from the requesting fiber, so set fetch credentials per
+    // request, keeping any options the adapter already set. Bearer mode omits cookies so a
+    // same-origin session cookie never rides along with an API Key or session token.
+    const fetchCredentials = credentials._tag === "Bearer" ? "omit" : "include";
+    const withBearer =
       credentials._tag === "Bearer"
         ? base.pipe(HttpClient.mapRequest(HttpClientRequest.bearerToken(credentials.token)))
-        : // FetchHttpClient reads RequestInit from the requesting fiber, so provide it per request,
-          // keeping any options the adapter already set.
-          base.pipe(
-            HttpClient.transformResponse((effect) =>
-              Effect.flatMap(Effect.serviceOption(FetchHttpClient.RequestInit), (init) =>
-                Effect.provideService(effect, FetchHttpClient.RequestInit, {
-                  ...Option.getOrElse(init, () => ({})),
-                  credentials: "include",
-                }),
-              ),
-            ),
-          );
+        : base;
+    const authed = withBearer.pipe(
+      HttpClient.transformResponse((effect) =>
+        Effect.flatMap(Effect.serviceOption(FetchHttpClient.RequestInit), (init) =>
+          Effect.provideService(effect, FetchHttpClient.RequestInit, {
+            ...Option.getOrElse(init, () => ({})),
+            credentials: fetchCredentials,
+          }),
+        ),
+      ),
+    );
     const acceptLanguage = config.acceptLanguage;
     return authed.pipe(
       HttpClient.mapRequest((request) =>

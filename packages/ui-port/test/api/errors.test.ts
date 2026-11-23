@@ -176,3 +176,13 @@ describe("council follow-ups", () => {
     expect(isAutoRetryable(UiError.offline)).toBe(true);
   });
 });
+
+describe("review follow-ups", () => {
+  test("an AuthClient Invalid with a Better Auth code survives toUiError", () => {
+    const fromAuth = { _tag: "Invalid", issues: [{ path: [], code: "auth.bot_proof_required" }] };
+    const error = toUiError(fromAuth);
+    expect(error).toBe(fromAuth as never);
+    expect(describeError(error).freshBotProof).toBe(true);
+    expect(toUiError({ _tag: "Invalid", issues: [] })._tag).toBe("Unexpected");
+  });
+});
