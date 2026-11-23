@@ -548,14 +548,16 @@ describe("review round 1 (service level)", () => {
       const first = yield* r.fxRate({ currency: EUR, on: "2026-11-22" as IsoDate });
       yield* Ref.set((yield* FixtureRates).unavailable, true);
       const cached = yield* r.fxRate({ currency: EUR, on: "2026-11-22" as IsoDate });
+      const friday = yield* r.fxRate({ currency: EUR, on: "2026-11-20" as IsoDate });
       const uncached = yield* Effect.exit(r.fxRate({ currency: EUR, on: "2026-11-21" as IsoDate }));
-      return { first: s(first.rate), cached: s(cached.rate), uncached };
+      return { first: s(first.rate), cached: s(cached.rate), friday: s(friday.rate), uncached };
     });
     const exit = await run(member("member"), body, fixings);
     expect(exit).toEqual(
       Exit.succeed({
         first: "25.115",
         cached: "25.115",
+        friday: "25.115",
         uncached: Exit.fail(new Unavailable({ dependency: "exchange_rates" })),
       }),
     );
@@ -599,6 +601,33 @@ describe("review round 1 (service level)", () => {
         input: [["2026-11", "400", "84"]],
         payable: "126",
       }),
+    );
+  });
+
+  test("today's lookup before publication is not cached: a later lookup sees the new fixing", async () => {
+    const fixings: ReadonlyArray<CnbFixing> = [
+      {
+        fixingDate: "2026-11-20" as IsoDate,
+        sequence: 225,
+        rates: [{ code: EUR, quantity: 1, rate: d("25.115") }],
+      },
+    ];
+    const body = Effect.gen(function* () {
+      const r = yield* reports;
+      const before = yield* r.fxRate({ currency: EUR, on: "2026-11-23" as IsoDate });
+      yield* Ref.update((yield* FixtureRates).fixings, (all) => [
+        ...all,
+        {
+          fixingDate: "2026-11-23" as IsoDate,
+          sequence: 226,
+          rates: [{ code: EUR, quantity: 1, rate: d("25.2") }],
+        },
+      ]);
+      const after = yield* r.fxRate({ currency: EUR, on: "2026-11-23" as IsoDate });
+      return [s(before.rate), String(before.fixingDate), s(after.rate), String(after.fixingDate)];
+    });
+    expect(await run(member("member"), body, fixings)).toEqual(
+      Exit.succeed(["25.115", "2026-11-20", "25.2", "2026-11-23"]),
     );
   });
 });

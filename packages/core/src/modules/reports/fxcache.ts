@@ -3,7 +3,8 @@
  * L1230, L1438), so a fixing once fetched stays readable while CNB is down. The port stores the
  * ANSWER for a requested date (the fixing valid on it, carried back over weekends and holidays);
  * the SQL adapter maps that onto fx_fixings (keyed by fixing date) plus the request-date
- * resolution. Only final answers are cached: a past date, or a date whose own fixing is out.
+ * resolution. Only final answers are cached: a fixing under its publication date, and a past
+ * requested date.
  */
 import type { IsoDate } from "@kvitbit/domain/contract";
 import type { CnbFixing, RatesUnavailable } from "@kvitbit/domain/ports";
@@ -32,8 +33,9 @@ export const FxFixingCacheMemory: Layer.Layer<FxFixingCache> = Layer.effect(
 );
 
 /**
- * The fixing valid on `on`: from the cache, else from `ExchangeRates` (then cached when final:
- * `on` is before `today`, or the fixing is `on`'s own).
+ * The fixing valid on `on`: from the cache, else from `ExchangeRates`. A fetched fixing is cached
+ * under its own publication date, and under `on` too when that answer is final (`on` before
+ * `today`; today's fixing may not be published yet).
  */
 export const cachedFixing = (
   on: IsoDate,
@@ -44,6 +46,8 @@ export const cachedFixing = (
     const hit = yield* cache.get(on);
     if (Option.isSome(hit)) return hit.value;
     const fixing = yield* (yield* ExchangeRates).fixing(on);
-    if (on < today || fixing.fixingDate === on) yield* cache.put(on, fixing);
+    // A fixing is always the final answer for its own publication date.
+    yield* cache.put(fixing.fixingDate, fixing);
+    if (on !== fixing.fixingDate && on < today) yield* cache.put(on, fixing);
     return fixing;
   });
