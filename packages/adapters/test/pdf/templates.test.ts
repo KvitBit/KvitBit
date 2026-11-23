@@ -1,7 +1,12 @@
 import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { brandAssets } from "@kvitbit/brand";
 import type { Locale, PdfTemplate } from "@kvitbit/domain";
 import { BigDecimal } from "effect";
 import { type DocumentRenderModel, renderDocumentHtml, renderReportHtml } from "../../src/pdf";
+import { HORIZONTAL_LOCKUP_LIGHT_SVG } from "../../src/pdf/lockup";
+import { SHEET_ZOOM } from "../../src/pdf/shell";
 import {
   bd,
   czkModel,
@@ -205,7 +210,7 @@ describe("payment QR", () => {
       readonly [PdfTemplate, string],
     ];
     expect(text(classic)).toContain("EPC QR (SEPA)");
-    expect(text(modern)).toContain("EPC QR · SEPA transfer");
+    expect(text(modern)).toContain("EPC QR (SEPA) · Bank transfer");
   });
 });
 
@@ -411,5 +416,53 @@ describe("council regressions", () => {
       expect(section(html, "fx")).toBe(
         "Converted at the CNB fixing of 02 Nov 2026: 1 EUR = 25.240 CZK.",
       );
+  });
+});
+
+describe("review regressions", () => {
+  test("a manual rate prints with every decimal it carries", () => {
+    const model = {
+      ...eurModel(),
+      fx: { rate: bd("0.0004"), quantity: 1, fixingDate: null, source: "manual" as const },
+    };
+    for (const [, html] of both(model)) expect(section(html, "fx")).toContain("1 EUR = 0,0004 Kč");
+    const cnb = {
+      ...eurModel(),
+      fx: { ...eurModel().fx, rate: bd("25.2") },
+    } as DocumentRenderModel;
+    for (const [, html] of both(cnb)) expect(section(html, "fx")).toContain("1 EUR = 25,200 Kč");
+  });
+
+  test("Modern Minimal always prints the payment method", () => {
+    const cash = {
+      ...czkModel(),
+      paymentMethod: "cash" as const,
+      bankAccount: null,
+      paymentQr: null,
+    };
+    expect(section(renderDocumentHtml(cash, "modern_minimal", "cs"), "payment-method")).toBe(
+      "Hotově",
+    );
+    expect(section(renderDocumentHtml(czkModel(), "modern_minimal", "cs"), "payment-method")).toBe(
+      "QR Platba · Bankovní převod",
+    );
+    expect(
+      section(renderDocumentHtml(czkModel("credit"), "modern_minimal", "en"), "payment-method"),
+    ).toBe("Bank transfer");
+  });
+
+  test("footers carry the committed horizontal lockup at the 5 mm print minimum with clear space", () => {
+    const committed = readFileSync(
+      fileURLToPath(new URL(`../../../../${brandAssets.lockup.horizontalLight}`, import.meta.url)),
+      "utf8",
+    );
+    expect(HORIZONTAL_LOCKUP_LIGHT_SVG).toBe(committed);
+    const zoomed = (mm: number) => `${(mm / SHEET_ZOOM).toFixed(3)}mm`;
+    const pages = [...both(czkModel()).map(([, h]) => h), renderReportHtml(reportModel(), "cs")];
+    for (const html of pages) {
+      expect(html).toMatch(/data-section="brand"><svg [^>]*viewBox="0.00 0.00 430.07 75.04"/);
+      expect(html).toContain(`.brand-lockup svg { display: block; height: ${zoomed(5)};`);
+      expect(html).toContain(`.brand-lockup { display: inline-block; padding: ${zoomed(2.5)};`);
+    }
   });
 });

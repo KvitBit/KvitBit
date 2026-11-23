@@ -132,10 +132,10 @@ export const renderModern = (model: DocumentRenderModel, p: Prepared): string =>
     .map((n) => `<span data-note="${e(n.code)}">${e(n.text)}</span>`)
     .join(" ");
   const accountLines = [p.meta.accountNumber, p.meta.ibanBic].filter((x) => x !== null);
-  const payCard =
-    p.qrSvg === null && accountLines.length === 0
-      ? ""
-      : `<div class="pay-card"${p.qrSvg === null ? "" : ' data-section="qr"'}>${p.qrSvg === null ? "" : `<div class="qr">${p.qrSvg}</div>`}<div><div class="title">${e(p.qrSvg === null ? p.meta.paymentMethod : p.qrCardTitle)}</div>${accountLines.map((a, i) => `<div class="mono"${i > 0 ? ' style="font-size:8px;"' : ""}>${e(a)}</div>`).join("")}</div></div>`;
+  // The payment method always prints (core-ports 1, PaymentMethod), with or without QR or account.
+  const payTitle =
+    p.qrSvg === null ? p.meta.paymentMethod : `${p.qrCaption} · ${p.meta.paymentMethod}`;
+  const payCard = `<div class="pay-card"${p.qrSvg === null ? "" : ' data-section="qr"'}>${p.qrSvg === null ? "" : `<div class="qr">${p.qrSvg}</div>`}<div><div class="title" data-section="payment-method">${e(payTitle)}</div>${accountLines.map((a, i) => `<div class="mono"${i > 0 ? ' style="font-size:8px;"' : ""}>${e(a)}</div>`).join("")}</div></div>`;
 
   const body = `${watermark(p.draft, t.watermark)}
 <article class="sheet tnum" data-template="modern_minimal" data-kind="${e(model.kind)}">
@@ -193,7 +193,7 @@ ${p.referenceText === null ? "" : `<div class="ref-pill" data-section="reference
 </section>
 <footer class="doc-footer">
   <span>${e(p.footer)}</span>
-  <span class="mono brand-mark">${p.brandMark}Kvitbit</span>
+  <span class="brand-lockup" data-section="brand">${p.brandMark}</span>
 </footer>
 </div>
 </article>`;

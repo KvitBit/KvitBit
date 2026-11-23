@@ -34,22 +34,57 @@ const IBAN_LENGTHS: Readonly<Record<string, number>> = Object.fromEntries(
     .map((e) => [e.slice(0, 2), Number(e.slice(2))]),
 );
 
-/** Countries whose BBAN is all digits; others are only checked as alphanumeric. */
-const NUMERIC_BBAN = new Set([
-  "AT",
-  "CZ",
-  "DE",
-  "DK",
-  "EE",
-  "ES",
-  "FI",
-  "HU",
-  "LT",
-  "PL",
-  "SE",
-  "SI",
-  "SK",
-]);
+/**
+ * Registered BBAN formats (SWIFT IBAN registry notation: n digits, a upper-case letters,
+ * c alphanumerics) for the EEA plus CH, GB, MC and SM, the accounts Czech issuers invoice to.
+ * Other registered countries are checked for length and alphanumerics only.
+ */
+const BBAN_FORMATS: Readonly<Record<string, string>> = {
+  AT: "16n",
+  BE: "12n",
+  BG: "4a6n8c",
+  CH: "5n12c",
+  CY: "8n16c",
+  CZ: "20n",
+  DE: "18n",
+  DK: "14n",
+  EE: "16n",
+  ES: "20n",
+  FI: "14n",
+  FR: "10n11c2n",
+  GB: "4a14n",
+  GR: "7n16c",
+  HR: "17n",
+  HU: "24n",
+  IE: "4a14n",
+  IS: "22n",
+  IT: "1a10n12c",
+  LI: "5n12c",
+  LT: "16n",
+  LU: "3n13c",
+  LV: "4a13c",
+  MC: "10n11c2n",
+  MT: "4a5n18c",
+  NL: "4a10n",
+  NO: "11n",
+  PL: "24n",
+  PT: "21n",
+  RO: "4a16c",
+  SE: "20n",
+  SI: "15n",
+  SK: "20n",
+  SM: "1a10n12c",
+};
+
+const CLASS: Readonly<Record<string, string>> = { n: "\\d", a: "[A-Z]", c: "[A-Z0-9]" };
+const BBAN_PATTERNS: ReadonlyMap<string, RegExp> = new Map(
+  Object.entries(BBAN_FORMATS).map(([country, format]) => [
+    country,
+    new RegExp(
+      `^${[...format.matchAll(/(\d+)([nac])/g)].map((m) => `${CLASS[m[2] ?? "c"]}{${m[1]}}`).join("")}$`,
+    ),
+  ]),
+);
 
 /** EEA countries, where EPC069-12 version 002 lets the BIC be omitted. */
 export const EEA_COUNTRIES: ReadonlySet<string> = new Set(
@@ -63,7 +98,8 @@ export const isValidIban = (iban: string): boolean => {
   if (!/^[A-Z]{2}\d{2}[A-Z0-9]+$/.test(iban)) return false;
   const country = iban.slice(0, 2);
   if (IBAN_LENGTHS[country] !== iban.length) return false;
-  if (NUMERIC_BBAN.has(country) && !/^\d+$/.test(iban.slice(4))) return false;
+  const bban = BBAN_PATTERNS.get(country);
+  if (bban !== undefined && !bban.test(iban.slice(4))) return false;
   const rearranged = iban.slice(4) + iban.slice(0, 4);
   let remainder = 0;
   for (const ch of rearranged) {

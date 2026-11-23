@@ -290,3 +290,13 @@ describe("council regressions", () => {
     );
   });
 });
+
+describe("review regressions", () => {
+  test("registered BBAN formats are enforced for supported countries", () => {
+    expect(isValidIban("NL7112345678901234")).toBe(false); // NL BBAN is 4 letters + 10 digits
+    expect(isValidIban("NL91ABNA0417164300")).toBe(true);
+    expect(isValidIban("GB82WEST12345698765432")).toBe(true);
+    expect(isValidIban(withCheckDigits("GB", "1234123456987654321"))).toBe(false);
+    expect(issue(spayd({ iban: "NL7112345678901234", amount: bd("1") }))?.path).toEqual(["iban"]);
+  });
+});

@@ -164,7 +164,7 @@ ${p.referenceText === null ? "" : `<div class="ref-banner" data-section="referen
 </section>
 <footer class="doc-footer">
   <span>${e(p.footer)}</span>
-  <span class="mono brand-mark">${p.brandMark}Kvitbit</span>
+  <span class="brand-lockup" data-section="brand">${p.brandMark}</span>
 </footer>
 </article>`;
 

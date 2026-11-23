@@ -78,7 +78,7 @@ ${
 }
 <footer class="doc-footer">
   <span>${e(footer)}</span>
-  <span class="mono brand-mark">${brand.brandMark}Kvitbit</span>
+  <span class="brand-lockup" data-section="brand">${brand.brandMark}</span>
 </footer>
 </div>
 </article>`;

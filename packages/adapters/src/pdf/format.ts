@@ -66,9 +66,10 @@ export const formatPercent = (p: BigDecimal.BigDecimal, lang: Locale): string =>
   return lang === "cs" ? `${n}${NBSP}%` : `${n}%`;
 };
 
-/** Exchange rates print with the CNB's three decimals. */
+/** Exchange rates print exactly as used, padded to the CNB's three decimals. */
 export const formatRate = (rate: BigDecimal.BigDecimal, lang: Locale): string =>
-  formatDecimal(rate, 3, lang);
+  // At least the CNB's three decimals, never fewer than the rate actually carries.
+  formatDecimal(rate, Math.max(3, BigDecimal.normalize(rate).scale), lang);
 
 const EN_MONTHS = [
   "Jan",

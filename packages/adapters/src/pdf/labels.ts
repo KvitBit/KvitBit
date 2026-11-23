@@ -48,8 +48,6 @@ export interface Labels {
   readonly grandRemainingShort: string;
   readonly qrSpayd: string;
   readonly qrEpc: string;
-  readonly qrSpaydCard: string;
-  readonly qrEpcCard: string;
   readonly watermark: string;
   readonly thanks: string;
   readonly cnb: string;
@@ -115,8 +113,6 @@ export const LABELS: Readonly<Record<Locale, Labels>> = {
     grandRemainingShort: "Zbývá k úhradě",
     qrSpayd: "QR Platba",
     qrEpc: "EPC QR (SEPA)",
-    qrSpaydCard: "QR Platba · Bankovní převod",
-    qrEpcCard: "EPC QR · SEPA převod",
     watermark: "Návrh",
     thanks: "Děkujeme za spolupráci",
     cnb: "ČNB",
@@ -201,8 +197,6 @@ export const LABELS: Readonly<Record<Locale, Labels>> = {
     grandRemainingShort: "Remaining balance",
     qrSpayd: "QR Platba",
     qrEpc: "EPC QR (SEPA)",
-    qrSpaydCard: "QR Platba · Bank transfer",
-    qrEpcCard: "EPC QR · SEPA transfer",
     watermark: "Draft",
     thanks: "Thank you for your business",
     cnb: "CNB",

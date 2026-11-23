@@ -28,7 +28,9 @@ body { color: #09090B; -webkit-print-color-adjust: exact; print-color-adjust: ex
 tr, .keep { break-inside: avoid; }
 .logo-img { max-height: 34px; max-width: 120px; object-fit: contain; display: block; }
 .stamp-img { max-height: 72px; max-width: 180px; object-fit: contain; display: block; margin-top: 6px; }
-.brand-mark svg { width: 9px; height: 9px; vertical-align: -1px; margin-right: 3px; }
+/* DESIGN.md: horizontal lockup at least 5 mm tall in print, clear space 2u (half the mark height) on every side; lengths are divided by the sheet zoom. */
+.brand-lockup { display: inline-block; padding: ${(2.5 / SHEET_ZOOM).toFixed(3)}mm; line-height: 0; }
+.brand-lockup svg { display: block; height: ${(5 / SHEET_ZOOM).toFixed(3)}mm; width: auto; }
 .qr svg { display: block; width: 100%; height: 100%; }
 `;
 

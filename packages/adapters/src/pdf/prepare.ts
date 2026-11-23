@@ -3,7 +3,6 @@
  * templates. Every string here is plain text: templates escape at interpolation.
  */
 
-import { markSvg } from "@kvitbit/brand";
 import type { Locale, VatTreatment } from "@kvitbit/domain";
 import { BigDecimal } from "effect";
 import { toSvg } from "../qr/svg";
@@ -17,6 +16,7 @@ import {
   groupIban,
 } from "./format";
 import { LABELS, type Labels } from "./labels";
+import { HORIZONTAL_LOCKUP_LIGHT_SVG } from "./lockup";
 import type { DocumentRenderModel, RenderBranding, RenderImage, RenderLine } from "./model";
 import { type PrintedNote, statutoryNotes, statutoryTitle } from "./statutory";
 
@@ -88,7 +88,6 @@ export interface Prepared {
   /** Trusted markup (generated SVG), never user text. */
   readonly qrSvg: string | null;
   readonly qrCaption: string;
-  readonly qrCardTitle: string;
   readonly accent: string;
   readonly tint: string;
   readonly logo: string | null;
@@ -147,7 +146,11 @@ export const brandingView = (branding: RenderBranding, issuerName: string): Bran
     tint: tintOf(accent),
     logo: imageTag(branding.logo, "logo-img", issuerName),
     initials: initialsOf(issuerName),
-    brandMark: markSvg({ master: "light", size: 9, title: "Kvitbit" }).replace(/\s*\n\s*/g, ""),
+    // The title id is made unique so the artwork never collides with page ids.
+    brandMark: HORIZONTAL_LOCKUP_LIGHT_SVG.replace(/\s*\n\s*/g, "").replace(
+      /"title"/g,
+      '"kvitbit-lockup-title"',
+    ),
   };
 };
 
@@ -365,7 +368,6 @@ export const prepare = (model: DocumentRenderModel, lang: Locale): Prepared => {
     customerIds: ids(model.customer, ": "),
     qrSvg: qr === null ? null : toSvg(qr.payload, { margin: 4, color: "#09090B" }),
     qrCaption: qr?.format === "epc" ? t.qrEpc : t.qrSpayd,
-    qrCardTitle: qr?.format === "epc" ? t.qrEpcCard : t.qrSpaydCard,
     accent: brand.accent,
     tint: brand.tint,
     logo: brand.logo,
