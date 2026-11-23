@@ -64,7 +64,7 @@ const fakeGcs = (overrides: Array<Override> = [], chunkFaults: Array<ChunkFault>
     const { method, url } = seenRequest;
     if (url.pathname !== "/upload/storage/v1/b/b/o") return undefined;
     if (method === "POST" && url.searchParams.get("uploadType") === "resumable") {
-      const id = `s${sessions.size + 1}`;
+      const id = `secret-session-${sessions.size + 1}`;
       sessions.set(id, {
         name: url.searchParams.get("name") ?? "",
         parts: [],
@@ -495,7 +495,7 @@ describe("GcsBlobStorage review fixes", () => {
     expect(error._tag).toBe("BlobUnavailable");
     const rendered = `${String(error)} ${String((error as { cause?: unknown }).cause)}`;
     expect(rendered).toContain("upload_id");
-    expect(rendered).not.toContain("upload_id=s1");
+    expect(rendered).not.toContain("secret-session");
   });
 
   test("a download that stalls mid-body dies after the idle timeout", async () => {
@@ -520,11 +520,19 @@ describe("GcsBlobStorage review fixes", () => {
 });
 
 describe("GcsBlobStorage error bodies", () => {
-  test("a session URI echoed in an error body is redacted from the cause", async () => {
+  test("a session id echoed anywhere in an error body never reaches the cause", async () => {
     const data = new Uint8Array(2 * quarterMiB + 1);
     const echo: Override = (seen) =>
       seen.url.searchParams.has("upload_id")
-        ? new Response(`bad request for ${seen.url.href}`, { status: 400 })
+        ? Response.json(
+            {
+              error: {
+                message: `bad chunk for ${seen.url.href}`,
+                session: seen.url.searchParams.get("upload_id"),
+              },
+            },
+            { status: 400 },
+          )
         : undefined;
     const fake = fakeGcs([echo, echo]);
     const error = await run(
@@ -535,7 +543,7 @@ describe("GcsBlobStorage error bodies", () => {
     );
     expect(error._tag).toBe("BlobUnavailable");
     const serialized = JSON.stringify(error);
-    expect(serialized).toContain("upload_id=<redacted>");
-    expect(serialized).not.toContain("upload_id=s1");
+    expect(error).toMatchObject({ cause: { operation: "session", status: 400 } });
+    expect(serialized).not.toContain("secret-session");
   });
 });

@@ -93,13 +93,19 @@ const make = (
     const drain = (response: HttpClientResponse.HttpClientResponse) =>
       Effect.ignore(Effect.timeout(response.arrayBuffer, timeout));
     /** What GCS answered, minus anything secret, for `BlobUnavailable.cause`. */
+    /**
+     * What GCS answered, for `BlobUnavailable.cause`: never a token, and for a resumable
+     * session no body at all, since GCS may echo the session URI (an upload credential) in any
+     * form.
+     */
     const statusCause = (operation: string, response: HttpClientResponse.HttpClientResponse) =>
-      Effect.map(bodyText(response), (body) => ({
-        operation,
-        status: response.status,
-        // A session URI is an upload credential; GCS may echo it in an error body.
-        body: body.replace(/upload_id=[^&\s"'<>]*/g, "upload_id=<redacted>").slice(0, 500),
-      }));
+      operation === "session"
+        ? Effect.as(drain(response), { operation, status: response.status })
+        : Effect.map(bodyText(response), (body) => ({
+            operation,
+            status: response.status,
+            body: body.slice(0, 500),
+          }));
     const refused = (operation: string, response: HttpClientResponse.HttpClientResponse) =>
       Effect.flatMap(statusCause(operation, response), (cause) =>
         Effect.fail(new BlobUnavailable({ cause })),
@@ -189,7 +195,7 @@ const make = (
 
     /** Frees an unfinished session; nothing was committed, so failures are ignored. */
     const cancelSession = (session: string) =>
-      Effect.ignore(attempt("put", HttpClientRequest.delete(session)));
+      Effect.ignore(attempt("session", HttpClientRequest.delete(session)));
 
     const answerOf = (
       response: HttpClientResponse.HttpClientResponse,
@@ -198,7 +204,7 @@ const make = (
         ? Effect.as(drain(response), { _tag: "Persisted", bytes: persistedBytes(response) })
         : response.status === 200 || response.status === 201
           ? Effect.as(drain(response), { _tag: "Done" })
-          : refused("put", response);
+          : refused("session", response);
 
     /**
      * Sends `data`, the bytes at `start`, to the session; `total` is set for the last chunk.
@@ -240,7 +246,7 @@ const make = (
         const range =
           rest.byteLength === 0 ? `bytes */${size}` : `bytes ${from}-${end - 1}/${size}`;
         return attempt(
-          "put",
+          "session",
           HttpClientRequest.put(session).pipe(
             HttpClientRequest.setHeader("Content-Range", range),
             HttpClientRequest.bodyUint8Array(rest),
@@ -252,7 +258,7 @@ const make = (
             failures + 1 > retries
               ? Effect.fail(new BlobUnavailable({ cause: error.cause }))
               : Effect.sleep(delayFor(failures + 1)).pipe(
-                  Effect.andThen(send("put", status)),
+                  Effect.andThen(send("session", status)),
                   Effect.flatMap(answerOf),
                   Effect.flatMap((answer) => settle(answer, failures + 1, true)),
                 ),

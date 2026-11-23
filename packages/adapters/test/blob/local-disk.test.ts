@@ -218,23 +218,27 @@ describe("LocalDiskBlobStorage on disk", () => {
     expect(readdirSync(join(root, ".partial"))).toEqual([]);
   });
 
-  test("a download cancelled before or while reading leaves no descriptor open", async () => {
-    const root = freshRoot();
-    const openFds = () => readdirSync("/proc/self/fd").length;
-    await withStore(root, (store) =>
-      store.put(key("ws/f"), chunked("a".repeat(100_000)), meta(10 ** 6)),
-    );
-    const before = openFds();
-    await withStore(root, (store) =>
-      Effect.gen(function* () {
-        for (let i = 0; i < 20; i++) {
-          const stream = yield* store.get(key("ws/f"));
-          yield* Stream.runCollect(Stream.take(stream, 1));
-          const fiber = yield* Effect.forkChild(Stream.runDrain(stream));
-          yield* Fiber.interrupt(fiber);
-        }
-      }),
-    );
-    expect(openFds()).toBeLessThanOrEqual(before);
-  });
+  // Counts descriptors through procfs; hosts without it (macOS) skip this check.
+  test.skipIf(!existsSync("/proc/self/fd"))(
+    "a download cancelled before or while reading leaves no descriptor open",
+    async () => {
+      const root = freshRoot();
+      const openFds = () => readdirSync("/proc/self/fd").length;
+      await withStore(root, (store) =>
+        store.put(key("ws/f"), chunked("a".repeat(100_000)), meta(10 ** 6)),
+      );
+      const before = openFds();
+      await withStore(root, (store) =>
+        Effect.gen(function* () {
+          for (let i = 0; i < 20; i++) {
+            const stream = yield* store.get(key("ws/f"));
+            yield* Stream.runCollect(Stream.take(stream, 1));
+            const fiber = yield* Effect.forkChild(Stream.runDrain(stream));
+            yield* Fiber.interrupt(fiber);
+          }
+        }),
+      );
+      expect(openFds()).toBeLessThanOrEqual(before);
+    },
+  );
 });
