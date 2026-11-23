@@ -367,6 +367,44 @@ describe("OAuth 2.1 for MCP", () => {
     expect((await jwks("https://client.example/jwks.json")).status).toBe(200);
   });
 
+  test("the metadata guard bounds the body it reads", async () => {
+    // Declared too large: refused without reading the body.
+    let pulled = 0;
+    const endless = () =>
+      new ReadableStream<Uint8Array>({
+        pull(controller) {
+          pulled += 1;
+          controller.enqueue(new Uint8Array(1024).fill(32));
+        },
+      });
+    const declared = guardClientMetadataFetch(
+      async () =>
+        new Response(endless(), {
+          headers: { "content-type": "application/json", "content-length": "1000000" },
+        }),
+    );
+    expect((await declared(CIMD_CLIENT_ID)).status).toBe(413);
+    expect(pulled).toBeLessThanOrEqual(2);
+
+    // No Content-Length and an endless stream: cancelled just past the limit.
+    pulled = 0;
+    const streamed = guardClientMetadataFetch(
+      async () => new Response(endless(), { headers: { "content-type": "application/json" } }),
+    );
+    expect((await streamed(CIMD_CLIENT_ID)).status).toBe(413);
+    expect(pulled).toBeLessThanOrEqual(8);
+
+    // A small document passes on with its headers.
+    const small = guardClientMetadataFetch(async () =>
+      Response.json(cimdDocument(CIMD_CLIENT_ID), { headers: { "cache-control": "max-age=60" } }),
+    );
+    const passed = await small(CIMD_CLIENT_ID);
+    expect(passed.status).toBe(200);
+    expect(passed.headers.get("cache-control")).toBe("max-age=60");
+    expect(passed.headers.get("content-type")).toContain("application/json");
+    expect(await passed.json()).toMatchObject({ client_id: CIMD_CLIENT_ID });
+  });
+
   test("registration refuses unadvertised client authentication methods", async () => {
     const response = await register({ token_endpoint_auth_method: "client_secret_post" });
     expect(response.status).toBe(400);
