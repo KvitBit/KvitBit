@@ -9,8 +9,10 @@ import type {
   ContactInput,
   ContactRole,
   CurrentCaller,
+  DocumentKind,
   Forbidden,
   Invalid,
+  NumberingSeriesId,
   Page,
   RegistryResult,
   RequestOptions,
@@ -26,8 +28,8 @@ import { orUnavailable } from "../../shared/errors";
 import { sha256Hex } from "../../shared/hash";
 import { withIdempotency } from "../../shared/idempotency";
 import { IdGenerator, newId } from "../../shared/ids";
-import type { StoreUnavailable, UniqueViolation } from "../../store/CoreStore";
-import { CoreStore } from "../../store/CoreStore";
+import type { UniqueViolation } from "../../store/CoreStore";
+import { CoreStore, StoreUnavailable } from "../../store/CoreStore";
 import { RegistryLookup, validateIco } from "../workspaces/registry";
 import { asTagService, decodeInput, foldText, invalidAt } from "./input";
 import type { ContactRow, ContactSaveFields, ContactViewData } from "./model";
@@ -40,9 +42,11 @@ import {
   uniqueRoles,
 } from "./model";
 import { CONTACTS_ACTIVE_ICO_UNIQUE, ContactsRepo } from "./repo";
+import { ContactSeriesLookup } from "./series";
 
-/** Page size of `search` (the domain query takes no limit; the ui-port default). */
+/** Default page size of `search`; `limit` ranges 1 to 100 (http-mcp-contracts 342). */
 export const CONTACT_PAGE_SIZE = 50;
+export const CONTACT_PAGE_MAX = 100;
 
 /**
  * The Contacts methods with the errors the spec gives them. The domain tag's signatures omit
@@ -71,6 +75,8 @@ export interface ContactsImpl {
     readonly text?: string;
     readonly role?: ContactRole;
     readonly cursor?: string;
+    /** 1 to 100, default 50 (http-mcp-contracts 342); the domain tag lacks it (domain fix). */
+    readonly limit?: number;
   }) => Effect.Effect<Page<ContactViewData>, Invalid | Forbidden | Unavailable, CurrentCaller>;
 }
 
@@ -159,21 +165,34 @@ const sameContent = (a: ContactRow, b: ContactRow): boolean => {
   return canonicalJson(strip(a)) === canonicalJson(strip(b));
 };
 
-// Search cursors: `<filter hash>.<id of the last row>`, opaque and bound to the filter they
-// came from (http-mcp-contracts 362); short whatever the names are (HTTP caps cursors at 512).
+// Search cursors: `<filter hash>.<name hash>.<id of the last row>`, opaque, bound to the filter
+// they came from (http-mcp-contracts 362) and short whatever the names are (HTTP caps cursors at
+// 512). The keyset boundary is the anchor row's (name, id); a renamed anchor would move it, so
+// the name hash detects that and the cursor is then stale (`page.cursor_mismatch`, which
+// ui-port treats as "reload from the first page").
+
+const shortHash = (value: unknown, length: number) =>
+  Effect.map(sha256Hex(canonicalJson(value)), (hex) => hex.slice(0, length));
 
 const filterHash = (text: string, role: ContactRole | undefined) =>
-  Effect.map(sha256Hex(canonicalJson([text, role ?? null])), (hex) => hex.slice(0, 16));
+  shortHash([text, role ?? null], 16);
 
-const parseCursor = (cursor: string): { readonly f: string; readonly i: string } | null => {
-  const match = /^([0-9a-f]{16})\.([0-9a-f-]{36})$/.exec(cursor);
-  return match?.[1] === undefined || match[2] === undefined ? null : { f: match[1], i: match[2] };
+const makeCursor = (filter: string, last: ContactRow) =>
+  Effect.map(shortHash(last.name, 8), (name) => `${filter}.${name}.${last.id}`);
+
+const parseCursor = (
+  cursor: string,
+): { readonly f: string; readonly n: string; readonly i: string } | null => {
+  const match = /^([0-9a-f]{16})\.([0-9a-f]{8})\.([0-9a-f-]{36})$/.exec(cursor);
+  return match?.[1] === undefined || match[2] === undefined || match[3] === undefined
+    ? null
+    : { f: match[1], n: match[2], i: match[3] };
 };
 
 export const makeContacts: Effect.Effect<
   ContactsImpl,
   never,
-  CoreStore | IdGenerator | ContactsRepo | RegistryLookup
+  CoreStore | IdGenerator | ContactsRepo | RegistryLookup | ContactSeriesLookup
 > = Effect.gen(function* () {
   const store = yield* CoreStore;
   const repo = yield* ContactsRepo;
@@ -183,6 +202,32 @@ export const makeContacts: Effect.Effect<
     Context.add(ContactsRepo, repo),
   );
   const registry = yield* RegistryLookup;
+  const seriesLookup = yield* ContactSeriesLookup;
+
+  /**
+   * Each `preferredSeriesByKind` entry must name a series of this Workspace that numbers that
+   * kind; anything else is `NotFound{NumberingSeries}` (rule R2: another Workspace's series is
+   * not revealed, and a series of another kind is not one the kind can use).
+   */
+  const checkSeries = (
+    workspaceId: WorkspaceId,
+    fields: ContactSaveFields,
+  ): Effect.Effect<void, NotFound | StoreUnavailable> =>
+    Effect.gen(function* () {
+      const wanted = Object.entries(fields.defaults?.preferredSeriesByKind ?? {}).filter(
+        (entry): entry is [DocumentKind, NumberingSeriesId] => entry[1] !== undefined,
+      );
+      if (wanted.length === 0) return;
+      const kinds = yield* seriesLookup.kindsOf(
+        workspaceId,
+        wanted.map(([, series]) => series),
+      );
+      for (const [kind, series] of wanted) {
+        if (kinds.get(series) !== kind) {
+          return yield* new NotFound({ entity: "NumberingSeries", id: series });
+        }
+      }
+    });
 
   /** Fails with `Conflict{duplicate}` when another active Contact holds `row.ico`. */
   const ensureIcoFree = (row: ContactRow): Effect.Effect<void, Conflict | StoreUnavailable> =>
@@ -325,7 +370,10 @@ export const makeContacts: Effect.Effect<
   > =>
     Effect.gen(function* () {
       if (attempt > UPSERT_ATTEMPTS) {
-        return yield* Effect.die(`fromIco: IČO ${result.ico} kept moving under concurrent writes`);
+        // Sustained contention is an expected outcome, not a bug: retryable Unavailable{database}.
+        return yield* new StoreUnavailable({
+          cause: `fromIco: IČO ${result.ico} kept moving under concurrent writes`,
+        });
       }
       const again = () => upsertByIco(workspaceId, result, role, attempt + 1);
       const now = yield* nowIso;
@@ -392,6 +440,7 @@ export const makeContacts: Effect.Effect<
             result: ContactViewSchema,
           },
           Effect.gen(function* () {
+            yield* checkSeries(workspaceId, fields);
             const saved =
               id === undefined
                 ? yield* create(workspaceId, fields)
@@ -428,6 +477,10 @@ export const makeContacts: Effect.Effect<
     search: (q) =>
       Effect.gen(function* () {
         const { workspaceId } = yield* authorizeInWorkspace("contact.read");
+        const limit = q.limit ?? CONTACT_PAGE_SIZE;
+        if (!Number.isInteger(limit) || limit < 1 || limit > CONTACT_PAGE_MAX) {
+          return yield* invalidAt(["limit"], "request.malformed");
+        }
         const text = q.text === undefined ? "" : foldText(q.text);
         const filter = yield* filterHash(text, q.role);
         let after: readonly [string, string] | undefined;
@@ -435,24 +488,25 @@ export const makeContacts: Effect.Effect<
           const cursor = parseCursor(q.cursor);
           const mismatch = invalidAt(["cursor"], "page.cursor_mismatch");
           if (cursor === null || cursor.f !== filter) return yield* mismatch;
-          // Keyset from the last row's current name (rows are archived, never deleted).
+          // Rows are archived, never deleted; a renamed anchor makes the cursor stale.
           const last = yield* repo
             .get(workspaceId, cursor.i as ContactId)
             .pipe(Effect.catchTag("NotFound", () => Effect.fail(mismatch)));
+          if ((yield* shortHash(last.name, 8)) !== cursor.n) return yield* mismatch;
           after = [last.name, last.id];
         }
         const rows = yield* repo.search(workspaceId, {
           ...(text !== "" ? { text } : {}),
           ...(q.role !== undefined ? { role: q.role } : {}),
           ...(after !== undefined ? { after } : {}),
-          limit: CONTACT_PAGE_SIZE + 1,
+          limit: limit + 1,
         });
-        const page = rows.slice(0, CONTACT_PAGE_SIZE);
+        const page = rows.slice(0, limit);
         const last = page.at(-1);
         return {
           items: page.map(toContactView),
           nextCursor:
-            rows.length > CONTACT_PAGE_SIZE && last !== undefined ? `${filter}.${last.id}` : null,
+            rows.length > limit && last !== undefined ? yield* makeCursor(filter, last) : null,
         };
       }).pipe(Effect.provide(context), orUnavailable),
   };
@@ -460,20 +514,21 @@ export const makeContacts: Effect.Effect<
 });
 
 /**
- * `Contacts` on CoreStore, IdGenerator, `ContactsRepo` and the process-wide `RegistryLookup`
- * (shared with `Workspaces.lookupCompany`, rule W9).
+ * `Contacts` on CoreStore, IdGenerator, `ContactsRepo`, the process-wide `RegistryLookup`
+ * (shared with `Workspaces.lookupCompany`, rule W9) and `ContactSeriesLookup` (from the
+ * numbering module at integration).
  *
  * The one cast in this module: the frozen domain tag omits errors the spec requires, so the
  * honest `ContactsImpl` is exposed as the tag's shape (agreed with ci-workspaces, board #341).
  * Gaps for a domain fix: `fromIco` lacks `NotFound` (no registry record); `search` lacks
- * `Invalid{page.cursor_mismatch}` (http-mcp-contracts 362); every method lacks
+ * `Invalid{page.cursor_mismatch}` (http-mcp-contracts 362) and its `limit`; every method lacks
  * `Unavailable{database}` (`fromIco` has `Unavailable` already); `save` decode failures are
  * `Invalid` (in the signature).
  */
 export const ContactsLive: Layer.Layer<
   Contacts,
   never,
-  CoreStore | IdGenerator | ContactsRepo | RegistryLookup
+  CoreStore | IdGenerator | ContactsRepo | RegistryLookup | ContactSeriesLookup
 > = Layer.effect(
   Contacts,
   Effect.map(makeContacts, (impl) =>
