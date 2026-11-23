@@ -159,6 +159,12 @@ describe("VatMath.calculate", () => {
     expect(s(huf.buckets[0]?.vatCzk ?? null)).toBe("136.75"); // 2100 x 6.512 / 100 = 136.752
   });
 
+  test("a foreign document without a rate yet (live preview) has unknown CZK VAT", () => {
+    const b = calc([line("1", "1000")], { currency: EUR, fx: null });
+    expect(b.buckets.map((k) => k.vatCzk)).toEqual([null]);
+    expect(b.vatCzk).toBeNull();
+  });
+
   test("CZK documents have no CZK VAT even when given a rate", () => {
     expect(calc([line("1", "10")], { fx: { rate: d("1"), quantity: 1 } }).vatCzk).toBeNull();
   });
@@ -216,7 +222,7 @@ describe("VatMath.splitAdvance", () => {
 
   test("fromBuckets sums a split back into a breakdown with CZK VAT", () => {
     const eur = calc([line("1", "1000")], { currency: EUR, fx: { rate: d("25"), quantity: 1 } });
-    const split = VatMath.splitAdvance(eur, d("121"), { rate: d("24"), quantity: 1 });
+    const split = VatMath.splitAdvance(eur, d("121"), { fx: { rate: d("24"), quantity: 1 } });
     const b = VatMath.fromBuckets(split, EUR);
     expect(view(b)).toMatchObject({
       net: "100 EUR",
@@ -224,6 +230,34 @@ describe("VatMath.splitAdvance", () => {
       gross: "121 EUR",
       vatCzk: "504 CZK",
     });
+  });
+
+  test("largest remainder: no share flips sign (4 equal buckets, 0.02 paid)", () => {
+    const four = {
+      ...proforma,
+      buckets: TREATMENTS.slice(0, 4).map((treatment) => ({
+        treatment,
+        ratePercent: d("0"),
+        base: d("25"),
+        vat: d("0"),
+        gross: d("25"),
+        vatCzk: null,
+      })),
+    };
+    expect(VatMath.splitAdvance(four, d("0.02")).map((k) => s(k.gross))).toEqual([
+      "0.01",
+      "0.01",
+      "0",
+      "0",
+    ]);
+  });
+
+  test("taxPoint re-reads the rate in force on the receipt date", () => {
+    const split = VatMath.splitAdvance(proforma, d("121"), { taxPoint: "2026-12-01" as IsoDate });
+    expect(split.map((k) => s(k.ratePercent))).toEqual(["21", "12"]);
+    expect(() =>
+      VatMath.splitAdvance(proforma, d("1"), { taxPoint: "2023-01-01" as IsoDate }),
+    ).toThrow();
   });
 
   test("a proforma without gross cannot be split", () => {

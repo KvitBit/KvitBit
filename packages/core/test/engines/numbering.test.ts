@@ -28,11 +28,17 @@ describe("Numbering.parsePattern", () => {
     expect(parse("YYMMNNN").reset).toBe("monthly");
     expect(parse("ZF-NNNNN").reset).toBe("never");
     expect(parse("N").tokens).toEqual([{ _tag: "Counter", width: 1 }]);
+    // Words with other letters are literal: Y, M and N inside them are not tokens.
+    expect(parse("INV-YYYY-NNNN").tokens[0]).toEqual({ _tag: "Literal", text: "INV-" });
+    expect(Numbering.format(parse("FAKTURA/YY/NNN"), D("2026-11-23"), 5)).toBe("FAKTURA/26/005");
+    expect(Numbering.format(parse("MONTHLY-NN"), D("2026-11-23"), 5)).toBe("MONTHLY-05");
   });
 
   test.each([
     ["", "empty"],
     ["FV-YYYY", "counter_missing"],
+    ["INV-YYYY", "counter_missing"],
+    ["NY-NNN", "year_run"],
     ["NN-YYYY-NN", "counter_repeated"],
     ["YYY-NNN", "year_run"],
     ["Y-NNN", "year_run"],

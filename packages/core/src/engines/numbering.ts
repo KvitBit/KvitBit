@@ -2,15 +2,20 @@
  * Numbering (core-ports 5.2): Numbering Series patterns.
  *
  * Grammar: a pattern is a sequence of tokens. `YYYY` (4-digit year), `YY` (2-digit year), `MM`
- * (2-digit month), a run of N (the counter, zero-padded to the run's width) and literal text
- * (any other printable characters). A run of Y must be 2 or 4 long and a run of M exactly 2;
- * other runs of those letters are invalid, so they cannot be literals.
+ * (2-digit month), a run of N (the counter, zero-padded to the run's width) and literal text.
+ * The pattern splits into words: maximal runs of ASCII letters. A word made only of the letters
+ * Y, M and N is tokens (`YYMMNNN`, `NNNN`); any other word is literal text (`INV`, `FAKTURA`,
+ * `MONTH`), as is everything that is not a letter (digits, `-`, `/`, ...). Inside a token word
+ * a run of Y must be 2 or 4 long and a run of M exactly 2.
  * Validity: exactly one counter run; MM needs a year token (else numbers would repeat across
  * years); rendered at the counter's width, the number is 1 to 20 characters; no whitespace at
  * the ends and no control characters.
  * Reset: the finest date token (MM -> monthly, YYYY/YY -> yearly, none -> never). Period keys:
  * "2026", "2026-11", "all".
- * A counter past its width renders with more digits (NNN, 1000 -> "1000"), never truncated.
+ * A counter past its width renders with more digits (NNN, 1000 -> "1000"), never truncated:
+ * the 20-character limit is checked at the pattern's width and for a configured next counter
+ * (`fitsLength`), while organic growth past the width widens the number rather than stopping
+ * issuance.
  */
 import type { IsoDate } from "@kvitbit/domain/contract";
 import { Invalid } from "@kvitbit/domain/contract";
@@ -74,24 +79,25 @@ export const parsePattern = (pattern: string): Result.Result<NumberPattern, Inva
     if (literal) tokens.push({ _tag: "Literal", text: literal });
     literal = "";
   };
-  for (let i = 0; i < pattern.length; ) {
-    const ch = pattern.charAt(i);
-    if (ch !== "Y" && ch !== "M" && ch !== "N") {
-      literal += ch;
-      i++;
+  for (const word of pattern.match(/[A-Za-z]+|[^A-Za-z]+/g) ?? []) {
+    if (!/^[YMN]+$/.test(word)) {
+      literal += word;
       continue;
     }
-    let run = 1;
-    while (pattern.charAt(i + run) === ch) run++;
     flush();
-    if (ch === "N") tokens.push({ _tag: "Counter", width: run });
-    else if (ch === "M") {
-      if (run !== 2) return Result.fail(patternInvalid("month_run"));
-      tokens.push({ _tag: "Month" });
-    } else if (run === 4) tokens.push({ _tag: "Year4" });
-    else if (run === 2) tokens.push({ _tag: "Year2" });
-    else return Result.fail(patternInvalid("year_run"));
-    i += run;
+    for (let i = 0; i < word.length; ) {
+      const ch = word.charAt(i);
+      let run = 1;
+      while (word.charAt(i + run) === ch) run++;
+      if (ch === "N") tokens.push({ _tag: "Counter", width: run });
+      else if (ch === "M") {
+        if (run !== 2) return Result.fail(patternInvalid("month_run"));
+        tokens.push({ _tag: "Month" });
+      } else if (run === 4) tokens.push({ _tag: "Year4" });
+      else if (run === 2) tokens.push({ _tag: "Year2" });
+      else return Result.fail(patternInvalid("year_run"));
+      i += run;
+    }
   }
   flush();
   const counters = tokens.filter((t) => t._tag === "Counter").length;
@@ -136,6 +142,10 @@ export const format = (pattern: NumberPattern, issuedOn: IsoDate, counter: numbe
     })
     .join("");
 };
+
+/** Whether the number for `counter` on `date` is at most 20 characters (configure-time check). */
+export const fitsLength = (pattern: NumberPattern, date: IsoDate, counter: number): boolean =>
+  format(pattern, date, counter).length <= MAX_NUMBER_LENGTH;
 
 /** Digits of the number, the last 10, for the variable symbol; null when it has no digits. */
 export const variableSymbol = (number: string): string | null => {
@@ -208,4 +218,5 @@ export const Numbering = {
   variableSymbol,
   checkNextCounter,
   checkManualNumber,
+  fitsLength,
 } as const;

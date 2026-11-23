@@ -1,12 +1,13 @@
 import { describe, expect, test } from "bun:test";
 import type { IsoDate, ScheduleRule } from "@kvitbit/domain/contract";
-import { Result } from "effect";
+import { Result, Schema } from "effect";
 import {
   addDays,
   addMonths,
   pragueDate,
   pragueStartOfDay,
   Reminders,
+  ScheduleRule as ScheduleRuleSchema,
   Schedules,
 } from "../../src/engines";
 import { rng, SEEDS } from "./random";
@@ -102,6 +103,11 @@ describe("Schedules.nextOccurrences", () => {
 });
 
 describe("Schedules.validate", () => {
+  test("the runtime ScheduleRule schema is exported from the engines", () => {
+    expect(
+      Schema.decodeUnknownSync(ScheduleRuleSchema)({ every: { months: 1 }, startOn: "2026-01-31" }),
+    ).toEqual(rule({ months: 1 }, "2026-01-31"));
+  });
   test("accepts positive integer steps within bounds and endOn >= startOn", () => {
     const ok = rule({ months: 1 }, "2026-01-31", "2026-01-31");
     expect(Schedules.validate(ok)).toEqual(Result.succeed(ok));

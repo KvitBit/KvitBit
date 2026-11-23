@@ -5,8 +5,8 @@
  * from `startOn`: a monthly rule from 31 Jan gives 31 Jan, 28 Feb, 31 Mar (day clamped to the
  * month's end, never drifting). Yearly from 29 Feb gives 28 Feb in common years.
  */
-import type { IsoDate, ScheduleRule } from "@kvitbit/domain/contract";
-import { Invalid } from "@kvitbit/domain/contract";
+import type { IsoDate } from "@kvitbit/domain/contract";
+import { Invalid, ScheduleRule } from "@kvitbit/domain/contract";
 import { Result } from "effect";
 import {
   addDays,
@@ -17,7 +17,7 @@ import {
   pragueStartOfDay,
 } from "./calendar";
 
-export type { ScheduleRule };
+export { ScheduleRule };
 
 /** Upper bounds for a cadence step (product limits). */
 export const MAX_EVERY = { weeks: 520, months: 120, years: 10 } as const;

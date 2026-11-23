@@ -39,7 +39,12 @@ export interface VatInput {
   readonly currency: CurrencyCode;
   readonly taxPoint: IsoDate;
   readonly pricesIncludeVat: boolean;
-  /** `quantity` units of `currency` = `rate` CZK; null for CZK (ignored when currency is CZK). */
+  /**
+   * `quantity` units of `currency` = `rate` CZK; ignored for CZK. null on a non-CZK document
+   * means the CZK VAT is not known yet (ui-port live preview before the rate arrives): every
+   * `vatCzk` is then null. Documents and Payments resolve the rate with `Fx.resolve` before
+   * persisting, so a stored foreign VAT document always has CZK VAT (rule D9).
+   */
   readonly fx: null | Pick<FxRate, "rate" | "quantity">;
   readonly paymentRounding: "none" | "whole_unit";
 }
@@ -181,15 +186,17 @@ export const negate = (breakdown: VatBreakdown): VatBreakdown => ({
 
 /**
  * Splits a received advance across a Proforma's buckets by gross share (Payment Tax Document).
- * Each share is round(paid x bucket gross / sum of bucket grosses); the largest bucket takes
- * the remainder so the shares sum to `paid` exactly. Within a share VAT is top-down (rule 4).
- * `fx` is the rate for the payment's tax point (the receipt date); omit it for CZK.
+ * Largest-remainder allocation in minor units: each bucket gets floor(paid x gross / total),
+ * then the leftover units go one each to the largest fractional parts (ties: bucket order), so
+ * the shares sum to `paid` exactly and none flips sign. Within a share VAT is top-down
+ * (rule 4) at the rate in force on `taxPoint` (the receipt date, rule P2; default: the
+ * Proforma's rates). `fx` is the rate for that tax point; null leaves CZK VAT unknown.
  * A Proforma whose buckets sum to zero gross cannot be split (defect).
  */
 export const splitAdvance = (
   proforma: VatBreakdown,
   paid: BigDecimal.BigDecimal,
-  fx: VatInput["fx"] = null,
+  options: { readonly fx?: VatInput["fx"]; readonly taxPoint?: IsoDate } = {},
 ): ReadonlyArray<VatBucket> => {
   const currency = proforma.gross.currency;
   const scale = MoneyMath.minorUnitScale(currency);
@@ -197,24 +204,35 @@ export const splitAdvance = (
   if (BigDecimal.isZero(total)) {
     throw new Error("VatMath.splitAdvance: the proforma has no gross amount to split");
   }
-  const amount = roundAt(paid, scale);
-  let largest = 0;
-  proforma.buckets.forEach((b, i) => {
-    const current = proforma.buckets[largest];
-    if (current && BigDecimal.isGreaterThan(BigDecimal.abs(b.gross), BigDecimal.abs(current.gross)))
-      largest = i;
+  const units = BigDecimal.scale(roundAt(paid, scale), scale).value;
+  // Exact share in minor units = units x gross / total, as floor + fractional remainder.
+  const raw = proforma.buckets.map((b) => {
+    const exact = BigDecimal.divideUnsafe(
+      BigDecimal.multiply(BigDecimal.fromBigInt(units), b.gross),
+      total,
+    );
+    const floor = BigDecimal.scale(BigDecimal.floor(exact, 0), 0).value;
+    return { floor, fraction: BigDecimal.subtract(exact, BigDecimal.fromBigInt(floor)) };
   });
-  const shares = proforma.buckets.map((b) =>
-    divideRound(BigDecimal.multiply(amount, b.gross), total, scale),
-  );
-  const others = sumAll(shares.filter((_, i) => i !== largest));
-  shares[largest] = BigDecimal.normalize(BigDecimal.subtract(amount, others));
+  let leftover = units - raw.reduce((acc, r) => acc + r.floor, 0n);
+  const order = raw
+    .map((r, i) => ({ i, fraction: r.fraction }))
+    .sort((a, b) => BigDecimal.Order(b.fraction, a.fraction) || a.i - b.i);
+  const shares = raw.map((r) => r.floor);
+  for (const { i } of order) {
+    if (leftover <= 0n) break;
+    shares[i] = (shares[i] ?? 0n) + 1n;
+    leftover--;
+  }
+  const fx = options.fx ?? null;
   return proforma.buckets.map((b, i) => {
-    const gross = shares[i] ?? ZERO;
-    const vat = vatOfGross(gross, b.ratePercent, scale);
+    const gross = BigDecimal.normalize(BigDecimal.make(shares[i] ?? 0n, scale));
+    const ratePercent =
+      options.taxPoint === undefined ? b.ratePercent : rateFor(b.treatment, options.taxPoint);
+    const vat = vatOfGross(gross, ratePercent, scale);
     return {
       treatment: b.treatment,
-      ratePercent: b.ratePercent,
+      ratePercent,
       base: BigDecimal.normalize(BigDecimal.subtract(gross, vat)),
       vat,
       gross,

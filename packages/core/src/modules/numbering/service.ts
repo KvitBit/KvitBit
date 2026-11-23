@@ -128,14 +128,6 @@ const storedPattern = (row: SeriesRow): NumberPattern =>
     return new Error(`numbering_series ${row.id}: stored pattern "${row.pattern}" is invalid`);
   });
 
-/** The default-per-kind index cannot break: defaults are demoted before one is promoted. */
-const uniqueIsDefect = <A, E, R>(effect: Effect.Effect<A, E | UniqueViolation, R>) =>
-  Effect.catchTag(effect, "UniqueViolation", (e) => Effect.die(e)) as Effect.Effect<
-    A,
-    Exclude<E, UniqueViolation>,
-    R
-  >;
-
 const illegal = () => new Conflict({ reason: "illegal_transition" });
 
 const nameInvalid = () =>
@@ -191,6 +183,26 @@ export const make = Effect.gen(function* () {
       );
     });
 
+  /**
+   * Runs a write that may promote a default in a savepoint. Under READ COMMITTED two
+   * transactions can both see the old default (or none) and race on the one-default index;
+   * the loser's savepoint rolls back and it retries against the now committed default. A
+   * revision conflict or miss on rows locked in this transaction is a defect.
+   */
+  const defaultSafe = <A>(
+    write: Effect.Effect<A, NotFound | ConflictType | UniqueViolation | StoreUnavailable>,
+  ): Effect.Effect<A, StoreUnavailable> => {
+    const attempt = (left: number): Effect.Effect<A, StoreUnavailable> =>
+      store.transaction(write).pipe(
+        Effect.catchTags({
+          NotFound: Effect.die,
+          Conflict: Effect.die,
+          UniqueViolation: (e) => (left > 0 ? attempt(left - 1) : Effect.die(e)),
+        }),
+      );
+    return attempt(3);
+  };
+
   const configure: NumberingSeriesShape["configure"] = (workspaceId, input, today) =>
     Effect.gen(function* () {
       const pattern = yield* Effect.fromResult(Numbering.parsePattern(input.pattern));
@@ -204,24 +216,34 @@ export const make = Effect.gen(function* () {
         if (input.isDefault === false && locked.isDefault) return yield* Effect.fail(illegal());
         before = yield* view(locked, today);
         const isDefault = locked.isDefault || input.isDefault === true;
-        if (isDefault && !locked.isDefault)
-          yield* demoteDefault(workspaceId, input.kind, locked.id);
-        row = yield* uniqueIsDefect(
-          repo.update({ ...locked, name, pattern: input.pattern, isDefault }, locked.revision),
+        row = yield* defaultSafe(
+          Effect.gen(function* () {
+            if (isDefault && !locked.isDefault) {
+              yield* demoteDefault(workspaceId, input.kind, locked.id);
+            }
+            return yield* repo.update(
+              { ...locked, name, pattern: input.pattern, isDefault },
+              locked.revision,
+            );
+          }),
         );
       } else {
-        const current = yield* repo.findDefault(workspaceId, input.kind);
-        const isDefault = Option.isNone(current) || input.isDefault === true;
-        if (isDefault) yield* demoteDefault(workspaceId, input.kind);
-        row = yield* uniqueIsDefect(
-          repo.insert({
-            id: (yield* ids.next) as NumberingSeriesId,
-            workspaceId,
-            revision: 1,
-            kind: input.kind,
-            name,
-            pattern: input.pattern,
-            isDefault,
+        const id = (yield* ids.next) as NumberingSeriesId;
+        row = yield* defaultSafe(
+          Effect.gen(function* () {
+            // Re-read on every attempt: a concurrent create may have committed a default.
+            const current = yield* repo.findDefault(workspaceId, input.kind);
+            const isDefault = Option.isNone(current) || input.isDefault === true;
+            if (isDefault) yield* demoteDefault(workspaceId, input.kind);
+            return yield* repo.insert({
+              id,
+              workspaceId,
+              revision: 1,
+              kind: input.kind,
+              name,
+              pattern: input.pattern,
+              isDefault,
+            });
           }),
         );
       }
@@ -231,6 +253,19 @@ export const make = Effect.gen(function* () {
         const requested = yield* Effect.fromResult(
           Numbering.checkNextCounter(currentNext, input.nextNumber),
         );
+        if (!Numbering.fitsLength(pattern, today, requested)) {
+          return yield* Effect.fail(
+            new Invalid({
+              issues: [
+                {
+                  path: ["nextNumber"],
+                  code: "numbering.pattern_invalid",
+                  params: { reason: "too_long" },
+                },
+              ],
+            }),
+          );
+        }
         if (requested > currentNext) yield* store.counters.set(key, requested);
       }
       return { view: yield* view(row, today), before };
@@ -247,17 +282,21 @@ export const make = Effect.gen(function* () {
       (kind) =>
         Effect.gen(function* () {
           if (Option.isSome(yield* repo.findDefault(workspaceId, kind))) return;
-          yield* uniqueIsDefect(
-            repo.insert({
-              id: (yield* ids.next) as NumberingSeriesId,
-              workspaceId,
-              revision: 1,
-              kind,
-              name: DEFAULT_SERIES_NAMES[kind],
-              pattern: DEFAULT_SERIES_PATTERNS[kind],
-              isDefault: true,
-            }),
-          );
+          const id = (yield* ids.next) as NumberingSeriesId;
+          // A concurrent creator that committed the default first wins; ours is not needed.
+          yield* store
+            .transaction(
+              repo.insert({
+                id,
+                workspaceId,
+                revision: 1,
+                kind,
+                name: DEFAULT_SERIES_NAMES[kind],
+                pattern: DEFAULT_SERIES_PATTERNS[kind],
+                isDefault: true,
+              }),
+            )
+            .pipe(Effect.catchTag("UniqueViolation", () => Effect.void));
         }),
       { discard: true },
     );

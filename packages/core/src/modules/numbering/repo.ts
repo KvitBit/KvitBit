@@ -32,7 +32,7 @@ export const SeriesRow = Schema.Struct({
 export type SeriesRow = typeof SeriesRow.Type;
 
 /** Unique index: one default series per (workspace, kind) (rule W3). */
-export const DEFAULT_PER_KIND = "numbering_series_default_per_kind";
+export const DEFAULT_PER_KIND = "numbering_series_one_default_per_kind";
 
 export const NumberingSeriesTable = defineCollection<SeriesRow>({
   name: "numbering_series",

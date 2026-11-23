@@ -117,6 +117,25 @@ describe("NumberingSeries.configure", () => {
     );
   });
 
+  test("a configured next number must render within 20 characters", async () => {
+    const exit = await scenario((s, tx) =>
+      tx(create(s, "ABCDEFGHIJ-YYYY-NNNN", { nextNumber: 10_000 })),
+    );
+    expect(exit).toEqual(
+      Exit.fail(
+        new Invalid({
+          issues: [
+            {
+              path: ["nextNumber"],
+              code: "numbering.pattern_invalid",
+              params: { reason: "too_long" },
+            },
+          ],
+        }),
+      ),
+    );
+  });
+
   test("isDefault: true demotes the old default; unsetting the default or changing kind is illegal", async () => {
     const exit = await scenario((s, tx) =>
       Effect.gen(function* () {
