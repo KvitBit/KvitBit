@@ -99,13 +99,14 @@ export const makeFallbackEmailSender = (
         Effect.flatMap(Clock.currentTimeMillis, (at) =>
           Effect.sync(() => {
             const key = opts.idempotencyKey;
-            const held = holders.get(key);
             if (Exit.isSuccess(exit)) return record(key, { provider, state: "delivered", at });
             const tags = exit.cause.reasons.map((reason) =>
               "error" in reason ? reason.error._tag : reason._tag,
             );
             if (tags.some((tag) => mayHaveSent.has(tag))) {
-              if (held?.state !== "delivered") record(key, { provider, state: "unknown", at });
+              // An attempt that may have sent pins the key with no expiry, even over an
+              // earlier delivery whose retention is running out.
+              record(key, { provider, state: "unknown", at });
             }
             // EmailNotAccepted and EmailRejected leave an earlier holder in place.
           }),

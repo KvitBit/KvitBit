@@ -188,7 +188,7 @@ describe("FallbackEmailSender pinning", () => {
   });
 
   test("an accepted key stays on its provider under heavy unrelated volume", async () => {
-    const others = Array.from({ length: 50 }, () => "ok" as const);
+    const others = Array.from({ length: 10_050 }, () => "ok" as const);
     const primary = sequenced("resend", ["ok", ...others, new EmailNotAccepted({})]);
     const secondary = sequenced("smtp", []);
     const fallback = makeFallbackEmailSender(primary.sender, secondary.sender);
@@ -196,6 +196,27 @@ describe("FallbackEmailSender pinning", () => {
     for (let n = 0; n < others.length; n++) {
       await run(fallback.send(message(), { idempotencyKey: `other-${n}` }));
     }
+    const retry = await run(fallback.send(message(), opts));
+    expect(tags(retry)).toEqual(["EmailOutcomeUnknown"]);
+    expect(secondary.calls).toEqual([]);
+  });
+
+  test("an unknown retry of a delivered key re-pins it with no expiry", async () => {
+    const primary = sequenced("resend", [
+      "ok",
+      new EmailOutcomeUnknown({}),
+      "ok",
+      new EmailNotAccepted({}),
+    ]);
+    const secondary = sequenced("smtp", []);
+    const fallback = makeFallbackEmailSender(primary.sender, secondary.sender, {
+      deliveredRetention: "1 millis",
+    });
+    await run(fallback.send(message(), opts));
+    await Bun.sleep(5);
+    expect(tags(await run(fallback.send(message(), opts)))).toEqual(["EmailOutcomeUnknown"]);
+    await Bun.sleep(5);
+    await run(fallback.send(message(), { idempotencyKey: "k2" }));
     const retry = await run(fallback.send(message(), opts));
     expect(tags(retry)).toEqual(["EmailOutcomeUnknown"]);
     expect(secondary.calls).toEqual([]);
