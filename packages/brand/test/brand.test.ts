@@ -47,9 +47,9 @@ describe("N2 mark masters", () => {
   });
 
   test("masters differ only by gap: 10 units light, 14 units dark", () => {
-    // Stem right edge (x=75/73) to chevron's leftmost vertex (x=85/87).
-    expect(markMasters.light.gap).toBe(85 - 75);
-    expect(markMasters.dark.gap).toBe(87 - 73);
+    // Stem right edge (x=84/82) to chevron's leftmost vertex (x=94/96).
+    expect(markMasters.light.gap).toBe(94 - 84);
+    expect(markMasters.dark.gap).toBe(96 - 82);
   });
 
   test("rejects paints and sizes that would corrupt the SVG", () => {

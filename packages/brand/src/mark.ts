@@ -16,6 +16,7 @@ export interface MarkMasterGeometry {
 
 /**
  * The two optical masters, copied verbatim from `assets/brand/kvitbit-mark-{light,dark}.svg`.
+ * Geometry A1: chevron arms at 34.5° from vertical (66:96), matching the Clash Display `K`.
  * `light`: dark ink on light surfaces, 10-unit gap. `dark`: light ink on dark surfaces, 14-unit gap
  * (light ink bleeds into gaps, so they are widened).
  */
@@ -23,17 +24,17 @@ export const markMasters: Readonly<Record<MarkMaster, MarkMasterGeometry>> = {
   light: {
     gap: 10,
     paths: [
-      "M27 32 H75 V106 H51 V150 H75 V224 H27 Z",
-      "M85 128 L181 32 H229 L133 128 L229 224 H181 Z",
-      "M185 106 H229 V150 H185 Z",
+      "M36 32 H84 V106 H60 V150 H84 V224 H36 Z",
+      "M94 128 L160 32 H208 L142 128 L208 224 H160 Z",
+      "M176 106 H220 V150 H176 Z",
     ],
   },
   dark: {
     gap: 14,
     paths: [
-      "M25 32 H73 V106 H49 V150 H73 V224 H25 Z",
-      "M87 128 L183 32 H231 L135 128 L231 224 H183 Z",
-      "M187 106 H231 V150 H187 Z",
+      "M34 32 H82 V106 H58 V150 H82 V224 H34 Z",
+      "M96 128 L162 32 H210 L144 128 L210 224 H162 Z",
+      "M178 106 H222 V150 H178 Z",
     ],
   },
 };

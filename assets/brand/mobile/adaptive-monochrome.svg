@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 108 108" width="108" height="108" role="img" aria-labelledby="title">
   <title id="title">Kvitbit</title>
   <g fill="#FFFFFF" transform="translate(27.333 27.333) scale(0.208333)">
-    <path d="M25 32 H73 V106 H49 V150 H73 V224 H25 Z"/><path d="M87 128 L183 32 H231 L135 128 L231 224 H183 Z"/><path d="M187 106 H231 V150 H187 Z"/>
+    <path d="M34 32 H82 V106 H58 V150 H82 V224 H34 Z"/><path d="M96 128 L162 32 H210 L144 128 L210 224 H162 Z"/><path d="M178 106 H222 V150 H178 Z"/>
   </g>
 </svg>
