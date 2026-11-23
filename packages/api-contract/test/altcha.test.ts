@@ -1,59 +1,78 @@
 import { describe, expect, test } from "bun:test";
 import { Schema } from "effect";
 import {
+  ALTCHA_HEADER_MAX_LENGTH,
   AltchaChallenge,
   AltchaHeaders,
   AltchaPayloadFromHeader,
-  BOT_PROTECTED_AUTH_PATHS,
   BotScope,
 } from "../src/index";
 
+// v2-like sample; the contract accepts any JSON object, so the field names are illustrative.
 const challenge = {
-  algorithm: "SHA-256" as const,
-  challenge: "4d6f6f6e",
-  maxnumber: 100000,
-  salt: "c0ffee?scope=sign_up&expires=1795000000",
+  parameters: { algorithm: "PBKDF2/SHA-256", nonce: "4d6f6f6e", expiresAt: 1795000000 },
   signature: "abcdef0123",
 };
-const payload = { ...challenge, number: 4242, took: 812 };
-const { maxnumber: _maxnumber, ...solved } = payload;
+const solved = { challenge, solution: { counter: 4242, time: 812 } };
+/** Drops the brand so decoded values compare against plain literals. */
+const plain = (value: unknown): unknown => value;
 
 describe("ALTCHA schemas", () => {
-  test("challenge decodes; bad algorithm, non-hex signature and negative maxnumber fail", () => {
+  test("challenge is a non-empty JSON object", () => {
     const decode = Schema.decodeUnknownSync(AltchaChallenge);
-    expect(decode(challenge)).toEqual(challenge);
-    expect(() => decode({ ...challenge, algorithm: "MD5" })).toThrow();
-    expect(() => decode({ ...challenge, signature: "XYZ" })).toThrow();
-    expect(() => decode({ ...challenge, maxnumber: -1 })).toThrow();
+    expect(plain(decode(challenge))).toEqual(challenge);
+    expect(() => decode({})).toThrow();
+    expect(() => decode([challenge])).toThrow();
+    expect(() => decode("challenge")).toThrow();
+    expect(() => decode(null)).toThrow();
   });
 
-  test("X-Altcha header is base64 JSON of the solved payload and round-trips", () => {
+  test("challenge values must be JSON values", () => {
+    const decode = Schema.decodeUnknownSync(AltchaChallenge);
+    expect(plain(decode({ a: [1, true, null], b: { c: "d" } }))).toEqual({
+      a: [1, true, null],
+      b: { c: "d" },
+    });
+    expect(() => decode({ a: undefined })).toThrow();
+    expect(() => decode({ a: () => 1 })).toThrow();
+    expect(() => decode({ a: 1n })).toThrow();
+  });
+
+  test("X-Altcha header is base64 JSON of an object and round-trips", () => {
     const header = btoa(JSON.stringify(solved));
     const decoded = Schema.decodeUnknownSync(AltchaPayloadFromHeader)(header);
-    expect(decoded).toEqual(solved);
+    expect(plain(decoded)).toEqual(solved);
     const encoded = Schema.encodeSync(AltchaPayloadFromHeader)(decoded);
     expect(JSON.parse(atob(encoded))).toEqual(solved);
-    expect(Schema.decodeUnknownSync(AltchaHeaders)({ "x-altcha": header })["x-altcha"]).toEqual(
-      solved,
-    );
+    expect(
+      plain(Schema.decodeUnknownSync(AltchaHeaders)({ "x-altcha": header })["x-altcha"]),
+    ).toEqual(solved);
   });
 
-  test("header rejects non-base64, non-JSON and payloads without a number", () => {
+  test("header rejects bad base64, non-JSON and JSON that is not an object", () => {
     const decode = Schema.decodeUnknownSync(AltchaPayloadFromHeader);
     expect(() => decode("%%%not-base64%%%")).toThrow();
     expect(() => decode(btoa("not json"))).toThrow();
-    const { number: _number, ...unsolved } = solved;
-    expect(() => decode(btoa(JSON.stringify(unsolved)))).toThrow();
+    for (const json of ["[1,2]", '"text"', "42", "null", "true"]) {
+      expect(() => decode(btoa(json))).toThrow();
+    }
     expect(() => Schema.decodeUnknownSync(AltchaHeaders)({})).toThrow();
   });
 
-  test("protected Better Auth paths map to fixed scopes", () => {
-    expect(BOT_PROTECTED_AUTH_PATHS).toEqual({
-      "/sign-up/email": "sign_up",
-      "/sign-in/email": "sign_in",
-      "/sign-in/magic-link": "magic_link",
-      "/request-password-reset": "password_reset",
-    });
+  test("header rejects values over the length bound", () => {
+    expect(ALTCHA_HEADER_MAX_LENGTH).toBe(8192);
+    const decode = Schema.decodeUnknownSync(AltchaPayloadFromHeader);
+    const fits = (n: number) => btoa(JSON.stringify({ pad: "x".repeat(n) }));
+    let n = 0;
+    while (fits(n + 3).length <= ALTCHA_HEADER_MAX_LENGTH) n += 3;
+    expect(fits(n).length).toBeLessThanOrEqual(ALTCHA_HEADER_MAX_LENGTH);
+    expect(plain(decode(fits(n)))).toEqual({ pad: "x".repeat(n) });
+    expect(fits(n + 3).length).toBeGreaterThan(ALTCHA_HEADER_MAX_LENGTH);
+    expect(() => decode(fits(n + 3))).toThrow();
+  });
+
+  test("bot scopes are the five signed scopes", () => {
+    expect(Schema.decodeUnknownSync(BotScope)("invitation_accept")).toBe("invitation_accept");
     expect(() => Schema.decodeUnknownSync(BotScope)("sign_out")).toThrow();
   });
 });

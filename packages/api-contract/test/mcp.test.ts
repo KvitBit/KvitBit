@@ -7,7 +7,10 @@ import {
   confirmationBoundArgs,
   confirmStep,
   DocumentResult,
+  ExpenseListQuery,
   IssueDocumentArgs,
+  ListContactsArgs,
+  ListExpensesArgs,
   MCP_RESOURCES,
   MCP_TOOLS,
   McpToolError,
@@ -18,6 +21,7 @@ import {
   SendDocumentArgs,
   toolJsonSchema,
   twoStepOutput,
+  UpsertContactArgs,
 } from "../src/index";
 
 /**
@@ -106,6 +110,18 @@ describe("MCP tool catalog", () => {
         t.name,
         "object",
         "object",
+      ]);
+    }
+  });
+
+  test("no tool input schema has a root anyOf, oneOf or allOf", () => {
+    for (const t of MCP_TOOLS) {
+      const root = toolJsonSchema(t.input);
+      expect([t.name, "anyOf" in root, "oneOf" in root, "allOf" in root]).toEqual([
+        t.name,
+        false,
+        false,
+        false,
       ]);
     }
   });
@@ -298,5 +314,89 @@ describe("MCP resources", () => {
     ]);
     for (const r of MCP_RESOURCES)
       if (r.action !== null) expect(Schema.is(Action)(r.action)).toBe(true);
+  });
+});
+
+describe("upsert_contact argument forms", () => {
+  const decode = Schema.decodeUnknownSync(UpsertContactArgs);
+  const contact = { name: "Acme s.r.o." };
+  const contactId = "01936f3e-7b4c-7d2a-9f1e-3c5a7b9d1e2f";
+
+  test("accepts ico, contact, and contactId with revision and contact", () => {
+    expect(decode({ ico: "12345678", role: "supplier" })).toEqual({
+      ico: "12345678",
+      role: "supplier",
+    });
+    expect(() => decode({ contact, idempotencyKey: "retry-key-1" })).not.toThrow();
+    expect(() => decode({ contactId, revision: 3, contact })).not.toThrow();
+  });
+
+  test.each([
+    ["empty", {}],
+    ["only an idempotency key", { idempotencyKey: "retry-key-1" }],
+    ["both ico and contact", { ico: "12345678", contact }],
+    ["contactId without revision", { contactId, contact }],
+    ["revision without contactId", { revision: 3, contact }],
+    ["contactId without contact", { contactId, revision: 3, ico: "12345678" }],
+    ["role without ico", { role: "customer", contact }],
+  ] as const)("rejects %s", (_, args) => {
+    expect(() => decode(args)).toThrow();
+  });
+
+  test("the JSON Schema describes the valid forms and the Contact revision", () => {
+    const schema = toolJsonSchema(UpsertContactArgs);
+    expect(String(schema.description)).toContain("{ contactId, revision, contact }");
+    const revision = JSON.stringify((schema.properties as Record<string, unknown>).revision);
+    expect(revision).toContain("Contact revision");
+    expect(revision).not.toContain("document revision");
+  });
+});
+
+describe("list_expenses arguments", () => {
+  const decode = Schema.decodeUnknownSync(ListExpensesArgs);
+
+  test("are incomplete plus paging, the same fields as the HTTP list query", () => {
+    const properties = Object.keys(toolJsonSchema(ListExpensesArgs).properties as object);
+    expect(properties.sort()).toEqual(["cursor", "incomplete", "limit"]);
+    expect(Object.keys(ExpenseListQuery).sort()).toEqual(["cursor", "incomplete", "limit"]);
+  });
+
+  test("typed decode and encode accept the modeled fields", () => {
+    const wire: typeof ListExpensesArgs.Encoded = { incomplete: true };
+    expect(Schema.decodeSync(ListExpensesArgs)(wire)).toEqual({ incomplete: true });
+    expect(Schema.decodeSync(ListExpensesArgs)({ incomplete: true, limit: 3 })).toEqual({
+      incomplete: true,
+      limit: 3,
+    });
+    const args: typeof ListExpensesArgs.Type = { cursor: "c1" };
+    expect(Schema.encodeSync(ListExpensesArgs)(args)).toEqual({ cursor: "c1" });
+  });
+
+  test("decode the modeled fields and reject any other, with default options", () => {
+    expect(decode({})).toEqual({});
+    expect(decode({ incomplete: true, cursor: "c1", limit: 10 })).toEqual({
+      incomplete: true,
+      cursor: "c1",
+      limit: 10,
+    });
+    expect(() => decode({ supplier: "demo" })).toThrow();
+    expect(() => decode({ incomplete: true, contactId: "x" })).toThrow();
+    expect(() => decode({ limit: 0 })).toThrow();
+    expect(() => decode({ incomplete: "yes" })).toThrow();
+    expect(() => decode(null)).toThrow();
+  });
+
+  test("the JSON Schema is closed", () => {
+    expect(toolJsonSchema(ListExpensesArgs).additionalProperties).toBe(false);
+  });
+
+  test("only list_expenses is closed so far; other inputs still drop extras", () => {
+    expect(MCP_TOOLS.filter((t) => t.closedInput).map((t) => t.name)).toEqual(["list_expenses"]);
+    const listExpenses = MCP_TOOLS.find((t) => t.name === "list_expenses");
+    expect(listExpenses?.input).toBe(ListExpensesArgs);
+    expect(Schema.decodeUnknownSync(ListContactsArgs)({ text: "Ada", extra: true })).toEqual({
+      text: "Ada",
+    });
+    expect(toolJsonSchema(ListContactsArgs).additionalProperties).toBe(true);
   });
 });

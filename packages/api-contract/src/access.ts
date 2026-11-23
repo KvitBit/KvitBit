@@ -7,6 +7,8 @@
 import { SCOPE_AREAS, Scope, ScopeArea, ScopeLevel } from "@kvitbit/domain/contract";
 import { Schema, SchemaTransformation } from "effect";
 
+export { SCOPE_AREAS, Scope, ScopeArea, ScopeLevel };
+
 export const AccessMode = Schema.Literals(["read", "read_write", "custom"]);
 export type AccessMode = typeof AccessMode.Type;
 
@@ -19,10 +21,6 @@ export const AccessRequest = Schema.Union([
   Schema.Struct({ access: Schema.Literal("custom"), scopes: Schema.NonEmptyArray(Scope) }),
 ]);
 export type AccessRequest = typeof AccessRequest.Type;
-
-/** What a stored credential carries: the mode as chosen plus the expanded list. */
-export const GrantedAccess = Schema.Struct({ access: AccessMode, scopes: Schema.Array(Scope) });
-export type GrantedAccess = typeof GrantedAccess.Type;
 
 const scopeOf = (area: ScopeArea, level: ScopeLevel): Scope => `${area}:${level}`;
 
@@ -43,6 +41,50 @@ export const normalizeScopes = (scopes: Iterable<Scope>): ReadonlyArray<Scope> =
   }
   return ALL_SCOPES.filter((scope) => wanted.has(scope));
 };
+
+const sameList = (a: ReadonlyArray<Scope>, b: ReadonlyArray<Scope>): boolean =>
+  a.length === b.length && a.every((scope, i) => scope === b[i]);
+
+/** Same members, no duplicates, any order. */
+const sameMembers = (a: ReadonlyArray<Scope>, b: ReadonlyArray<Scope>): boolean => {
+  const set = new Set(a);
+  return a.length === b.length && set.size === a.length && b.every((scope) => set.has(scope));
+};
+
+/**
+ * Consistency of a mode with its stored list: `read` is exactly the ten reads and `read_write`
+ * all twenty scopes (each once, any order); `custom` is a non-empty list in `normalizeScopes`
+ * form. Applies to every struct that
+ * spreads `GrantedAccess.fields`, since spreading fields drops struct-level checks.
+ */
+export const isGrantedAccessConsistent = Schema.makeFilter<{
+  readonly access: AccessMode;
+  readonly scopes: ReadonlyArray<Scope>;
+}>(
+  ({ access, scopes }) => {
+    switch (access) {
+      case "read":
+        return (
+          sameMembers(scopes, READ_SCOPES) || "read access carries exactly the ten <area>:read"
+        );
+      case "read_write":
+        return sameMembers(scopes, ALL_SCOPES) || "read_write access carries all twenty scopes";
+      case "custom":
+        return (
+          (scopes.length > 0 && sameList(scopes, normalizeScopes(scopes))) ||
+          "custom access carries a non-empty, normalized scope list"
+        );
+    }
+  },
+  { expected: "scopes consistent with the access mode" },
+);
+
+/** What a stored credential carries: the mode as chosen plus the expanded list. */
+export const GrantedAccess = Schema.Struct({
+  access: AccessMode,
+  scopes: Schema.Array(Scope),
+}).pipe(Schema.check(isGrantedAccessConsistent));
+export type GrantedAccess = typeof GrantedAccess.Type;
 
 /** Expands a request to the stored scope list (section 2.2). Role caps are the server's job. */
 export const expandAccess = (request: AccessRequest): GrantedAccess => {
@@ -69,8 +111,8 @@ export const ScopeFromOAuth = OAuthAreaScope.pipe(
   Schema.decodeTo(
     Scope,
     SchemaTransformation.transform<Scope, OAuthAreaScope>({
-      decode: (wire) => wire.slice(OAUTH_SCOPE_PREFIX.length) as Scope,
-      encode: (scope) => `${OAUTH_SCOPE_PREFIX}${scope}`,
+      decode: (wire) => coreScopeOf(wire),
+      encode: (scope) => wireScopeOf(scope),
     }),
   ),
 );
@@ -78,20 +120,29 @@ export const ScopeFromOAuth = OAuthAreaScope.pipe(
 export const OAuthPresetScope = Schema.Literals(["kvitbit:read", "kvitbit:write"]);
 export type OAuthPresetScope = typeof OAuthPresetScope.Type;
 
+/** A Kvitbit access scope on the wire: a preset or a per-area scope. Grants map to these. */
+export const OAuthAccessScope = Schema.Union([OAuthPresetScope, OAuthAreaScope]);
+export type OAuthAccessScope = typeof OAuthAccessScope.Type;
+
+/** The standard OIDC scope asking for a refresh token; it grants no Kvitbit access (6.3). */
+export const OAUTH_OFFLINE_ACCESS = "offline_access";
+export const OAuthOfflineAccessScope = Schema.Literal(OAUTH_OFFLINE_ACCESS);
+export type OAuthOfflineAccessScope = typeof OAuthOfflineAccessScope.Type;
+
 /** One token of the OAuth `scope` parameter that Kvitbit understands. */
-export const OAuthScopeToken = Schema.Union([
-  OAuthPresetScope,
-  OAuthAreaScope,
-  Schema.Literal("offline_access"),
-]);
+export const OAuthScopeToken = Schema.Union([OAuthAccessScope, OAuthOfflineAccessScope]);
 export type OAuthScopeToken = typeof OAuthScopeToken.Type;
+
+const isOAuthAreaScope = Schema.is(OAuthAreaScope);
+const coreScopeOf = (wire: OAuthAreaScope): Scope => wire.slice(OAUTH_SCOPE_PREFIX.length) as Scope;
+const wireScopeOf = (scope: Scope): OAuthAreaScope => `${OAUTH_SCOPE_PREFIX}${scope}`;
 
 /** `scopes_supported` of the protected resource metadata (section 6.2), in that order. */
 export const OAUTH_SCOPES_SUPPORTED: ReadonlyArray<OAuthScopeToken> = [
   "kvitbit:read",
   "kvitbit:write",
-  ...ALL_SCOPES.map((scope): OAuthAreaScope => `${OAUTH_SCOPE_PREFIX}${scope}`),
-  "offline_access",
+  ...ALL_SCOPES.map(wireScopeOf),
+  OAUTH_OFFLINE_ACCESS,
 ];
 
 /** A parsed OAuth scope request: the access it asks for and whether it wants a refresh token. */
@@ -101,46 +152,41 @@ export interface OAuthScopeRequest {
 }
 
 /**
- * Reads the tokens of an OAuth `scope` parameter. `kvitbit:write` wins over everything,
- * `kvitbit:read` alone is the read preset, per-area scopes on top of `kvitbit:read` widen it to
- * custom. Returns `undefined` when no Kvitbit scope is present.
+ * Reads the tokens of an OAuth `scope` parameter, keeping the form the client asked in (6.3):
+ * `kvitbit:write` wins over everything and is `read_write`; `kvitbit:read` without per-area
+ * scopes is `read`; any explicit per-area scope makes the request `custom` (on top of the ten
+ * reads when `kvitbit:read` is also present), even when the list equals a preset's expansion.
+ * Consent may still offer the user a preset. Returns `undefined` when no Kvitbit scope is present.
  */
 export const accessFromOAuthScopes = (
   tokens: ReadonlyArray<OAuthScopeToken>,
 ): OAuthScopeRequest | undefined => {
-  const offlineAccess = tokens.includes("offline_access");
+  const offlineAccess = tokens.includes(OAUTH_OFFLINE_ACCESS);
   if (tokens.includes("kvitbit:write")) {
     return { access: { access: "read_write", scopes: ALL_SCOPES }, offlineAccess };
   }
-  const areaScopes = tokens.flatMap(
-    (token): Array<Scope> =>
-      token.startsWith(OAUTH_SCOPE_PREFIX) && token !== "kvitbit:read"
-        ? [token.slice(OAUTH_SCOPE_PREFIX.length) as Scope]
-        : [],
-  );
   const wantsReadPreset = tokens.includes("kvitbit:read");
-  if (!wantsReadPreset && areaScopes.length === 0) return undefined;
-  const scopes = normalizeScopes(wantsReadPreset ? [...READ_SCOPES, ...areaScopes] : areaScopes);
-  if (scopes.length === ALL_SCOPES.length) {
-    return { access: { access: "read_write", scopes }, offlineAccess };
+  const areaScopes = tokens.filter(isOAuthAreaScope).map(coreScopeOf);
+  if (areaScopes.length > 0) {
+    const scopes = normalizeScopes(wantsReadPreset ? [...READ_SCOPES, ...areaScopes] : areaScopes);
+    return { access: { access: "custom", scopes }, offlineAccess };
   }
-  if (sameScopes(scopes, READ_SCOPES)) return { access: { access: "read", scopes }, offlineAccess };
-  return { access: { access: "custom", scopes }, offlineAccess };
+  if (wantsReadPreset) return { access: { access: "read", scopes: READ_SCOPES }, offlineAccess };
+  return undefined;
 };
 
-/** The token response `scope` for a grant: the preset name, or per-area wire scopes (6.3). */
-export const oauthScopesForGrant = (grant: GrantedAccess): ReadonlyArray<OAuthScopeToken> => {
+/**
+ * The Kvitbit part of the token response `scope` for a grant: the preset name, or per-area wire
+ * scopes (6.3). `offline_access` is not part of a grant; the server appends it when it issued a
+ * refresh token.
+ */
+export const oauthScopesForGrant = (grant: GrantedAccess): ReadonlyArray<OAuthAccessScope> => {
   switch (grant.access) {
     case "read":
       return ["kvitbit:read"];
     case "read_write":
       return ["kvitbit:write"];
     case "custom":
-      return normalizeScopes(grant.scopes).map(
-        (scope): OAuthAreaScope => `${OAUTH_SCOPE_PREFIX}${scope}`,
-      );
+      return normalizeScopes(grant.scopes).map(wireScopeOf);
   }
 };
-
-const sameScopes = (a: ReadonlyArray<Scope>, b: ReadonlyArray<Scope>): boolean =>
-  a.length === b.length && a.every((scope) => b.includes(scope));

@@ -14,8 +14,14 @@ import {
   WorkspaceId,
 } from "@kvitbit/domain/contract";
 import { Schema } from "effect";
-import { AccessMode, AccessPreset, AccessRequest, GrantedAccess } from "./access";
-import { ApiKeyId } from "./api-key";
+import {
+  AccessMode,
+  AccessPreset,
+  AccessRequest,
+  GrantedAccess,
+  isGrantedAccessConsistent,
+} from "./access";
+import { ApiKeyId, ApiKeyToken } from "./api-key";
 import { Hex, ResolvedTheme, ThemeSource } from "./theme";
 
 /** `GET /api/v1/config` (rule B5, section 3.4). */
@@ -59,11 +65,11 @@ export const ApiKeyView = Schema.Struct({
   createdAt: Schema.String,
   lastUsedAt: Schema.NullOr(Schema.String),
   expiresAt: Schema.NullOr(Schema.String),
-});
+}).pipe(Schema.check(isGrantedAccessConsistent));
 export type ApiKeyView = typeof ApiKeyView.Type;
 
 /** The secret is the full `kvb_<key id>_<secret>` bearer value, returned once. */
-export const ApiKeyCreated = Schema.Struct({ key: ApiKeyView, secret: Schema.String });
+export const ApiKeyCreated = Schema.Struct({ key: ApiKeyView, secret: ApiKeyToken });
 export type ApiKeyCreated = typeof ApiKeyCreated.Type;
 
 const ApiKeyFields = { name: Schema.NonEmptyString, expiresOn: Schema.optional(IsoDate) };
@@ -87,7 +93,7 @@ export const ConnectedAppView = Schema.Struct({
   ...GrantedAccess.fields,
   createdAt: Schema.String,
   lastUsedAt: Schema.NullOr(Schema.String),
-});
+}).pipe(Schema.check(isGrantedAccessConsistent));
 export type ConnectedAppView = typeof ConnectedAppView.Type;
 
 export const ConsentWorkspace = Schema.Struct({

@@ -47,10 +47,11 @@ import {
   TemplateView,
   WorkspaceView,
 } from "@kvitbit/domain/contract";
-import { Schema } from "effect";
+import { Schema, SchemaTransformation } from "effect";
 import { CorrectionLines, DeliveryQueued, SendInput } from "./groups/documents";
 import {
   ContactRole,
+  ExpenseListQuery,
   PaymentTarget,
   RecordPaymentInput,
   RecordPaymentResult,
@@ -201,10 +202,40 @@ export const GetDocumentPdfArgs = Schema.Struct({
   language: Schema.optional(Locale),
 });
 export const ListPaymentsArgs = Schema.Struct({ target: PaymentTarget });
-export const ListExpensesArgs = Schema.Struct({
-  incomplete: Schema.optional(Schema.Boolean),
-  ...PageArgs,
-});
+/**
+ * Argument schemas that reject unmodeled properties under any decoder options, mapped to the
+ * plain struct their JSON Schema is generated from (with `additionalProperties: false`). Keyed by
+ * identity: re-annotating a closed schema yields a new, open-looking one.
+ */
+const CLOSED_ARGS = new WeakMap<Schema.Top, Schema.Top>();
+
+/**
+ * Closed on purpose and equal to the HTTP list query (`ExpenseListQuery`): `incomplete` plus
+ * paging, nothing else, and any other property fails decoding instead of being dropped (a dropped
+ * filter would silently widen the list). Core's `ExpenseQuery` is an open struct, so supplier or
+ * contact filters (the UI's contact history) wait until core closes it; widen both surfaces
+ * together then.
+ */
+const ListExpensesFields = Schema.Struct(ExpenseListQuery);
+const LIST_EXPENSES_KEYS: ReadonlySet<string> = new Set(Object.keys(ExpenseListQuery));
+/** Keeps unmodeled keys (typed `unknown`) so the check below can see and reject them. */
+const ListExpensesWire = Schema.StructWithRest(ListExpensesFields, [
+  Schema.Record(Schema.String, Schema.Unknown),
+]).pipe(
+  Schema.check(
+    Schema.makeFilter(
+      (args) => {
+        const unmodeled = Object.keys(args).filter((key) => !LIST_EXPENSES_KEYS.has(key));
+        return unmodeled.length === 0 || `unsupported argument: ${unmodeled.join(", ")}`;
+      },
+      { expected: `only ${[...LIST_EXPENSES_KEYS].join(", ")}` },
+    ),
+  ),
+);
+export const ListExpensesArgs = ListExpensesWire.pipe(
+  Schema.decodeTo(ListExpensesFields, SchemaTransformation.passthroughSubtype()),
+);
+CLOSED_ARGS.set(ListExpensesArgs, ListExpensesFields);
 export const GetExpenseArgs = Schema.Struct({ expenseId: ExpenseId });
 export const ListContactsArgs = Schema.Struct({
   text: Schema.optional(Schema.String),
@@ -239,15 +270,56 @@ export const UpdateDraftArgs = Schema.Struct({
   revision: Revision,
   patch: DocumentPatch,
 });
-/** Either `ico` alone (Contacts.fromIco) or `contact` (Contacts.save, with id and revision to update). */
-export const UpsertContactArgs = Schema.Struct({
-  ico: Schema.optional(Schema.NonEmptyString),
-  role: Schema.optional(ContactRole),
-  contactId: Schema.optional(ContactId),
-  revision: Schema.optional(Revision),
-  contact: Schema.optional(ContactInput),
-  idempotencyKey: IdempotencyArg,
+const ContactRevision = Schema.Int.annotate({
+  description:
+    "The Contact revision you last read; only together with contactId. A stale value fails with Conflict revision_changed.",
 });
+
+const UPSERT_CONTACT_FORMS =
+  "Exactly one of three forms: { ico, role? } creates a Contact from ARES (Contacts.fromIco); " +
+  "{ contact } creates one from the given fields; { contactId, revision, contact } updates that " +
+  "Contact at that revision (Contacts.save). idempotencyKey may accompany any form.";
+
+/**
+ * `upsert_contact` arguments: one flat struct, so the tool's `inputSchema` stays a plain object,
+ * with the valid forms (see `UPSERT_CONTACT_FORMS`) enforced by a check on decode.
+ */
+export const UpsertContactArgs = Schema.Struct({
+  ico: Schema.optional(Schema.NonEmptyString).annotateKey({
+    description: "IČO to look up in ARES. Not with contact, contactId or revision.",
+  }),
+  role: Schema.optional(ContactRole).annotateKey({ description: "Only together with ico." }),
+  contactId: Schema.optional(ContactId).annotateKey({
+    description: "Contact to update. Requires revision and contact.",
+  }),
+  revision: Schema.optional(ContactRevision),
+  contact: Schema.optional(ContactInput).annotateKey({
+    description: "Contact fields to create, or to save over contactId. Not with ico.",
+  }),
+  idempotencyKey: IdempotencyArg,
+})
+  .annotate({ description: UPSERT_CONTACT_FORMS })
+  .pipe(
+    Schema.check(
+      Schema.makeFilter(
+        (args) => {
+          if (args.ico === undefined && args.contact === undefined) return "give ico or contact";
+          if (args.ico !== undefined && args.contact !== undefined) {
+            return "give ico or contact, not both";
+          }
+          if ((args.contactId === undefined) !== (args.revision === undefined)) {
+            return "contactId and revision go together";
+          }
+          if (args.contactId !== undefined && args.contact === undefined) {
+            return "contactId needs contact";
+          }
+          if (args.role !== undefined && args.ico === undefined) return "role needs ico";
+          return true;
+        },
+        { expected: UPSERT_CONTACT_FORMS },
+      ),
+    ),
+  );
 export const RecordExpenseArgs = Schema.Struct({
   expense: ExpenseInput,
   idempotencyKey: IdempotencyArg,
@@ -354,6 +426,8 @@ export interface McpToolDefinition {
   readonly annotations: ToolAnnotations;
   readonly input: Schema.Top;
   readonly output: Schema.Top;
+  /** `input` rejects unmodeled arguments instead of dropping them, and says so in its schema. */
+  readonly closedInput: boolean;
 }
 
 const hints = (flags: ReadonlyArray<"RO" | "D" | "I" | "O">): ToolAnnotations => ({
@@ -365,12 +439,12 @@ const hints = (flags: ReadonlyArray<"RO" | "D" | "I" | "O">): ToolAnnotations =>
 
 const tool = <const Name extends string>(
   name: Name,
-  definition: Omit<McpToolDefinition, "name" | "annotations"> & {
+  definition: Omit<McpToolDefinition, "name" | "annotations" | "closedInput"> & {
     readonly hints: ReadonlyArray<"RO" | "D" | "I" | "O">;
   },
 ): McpToolDefinition & { readonly name: Name } => {
   const { hints: flags, ...rest } = definition;
-  return { name, ...rest, annotations: hints(flags) };
+  return { name, ...rest, annotations: hints(flags), closedInput: CLOSED_ARGS.has(rest.input) };
 };
 
 /** The 28 curated tools of section 6.5, in table order. */
@@ -653,10 +727,15 @@ export const requiredActions = (
 
 /**
  * JSON Schema for a tool's `inputSchema` or `outputSchema`. MCP needs `type: "object"` at the
- * top, which a union of structs (`anyOf`) lacks, so it is added there.
+ * top, which a union of structs (`anyOf`) lacks, so it is added there. Closed argument schemas
+ * (`ListExpensesArgs`) come out with `additionalProperties: false`.
  */
 export const toolJsonSchema = (schema: Schema.Top): Record<string, unknown> => {
-  const document = Schema.toJsonSchemaDocument(schema);
+  const closed = CLOSED_ARGS.get(schema);
+  const document =
+    closed === undefined
+      ? Schema.toJsonSchemaDocument(schema)
+      : Schema.toJsonSchemaDocument(closed, { onExcessProperty: "error" });
   const root: Record<string, unknown> = { ...document.schema };
   if (Object.keys(document.definitions).length > 0) root.$defs = document.definitions;
   if (root.type === undefined && root.anyOf !== undefined) root.type = "object";

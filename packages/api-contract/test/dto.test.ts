@@ -4,6 +4,8 @@ import {
   AccountPreferences,
   AccountPreferencesPatch,
   ApiKeyCreate,
+  ApiKeyCreated,
+  ConnectedAppView,
   ConsentDecision,
   EdgeError,
   EntityTag,
@@ -17,6 +19,7 @@ import {
   PreconditionRequired,
   parseEntityTag,
   RateLimited,
+  READ_SCOPES,
   ResolvedScheme,
   ThemePresetId,
   ThemePresets,
@@ -171,5 +174,41 @@ describe("theme", () => {
         theme: { ...prefs.theme, source: { _tag: "Seed", seed: "#0F5D4" } },
       }),
     ).toThrow();
+  });
+});
+
+describe("stored grants on views", () => {
+  const key = {
+    id: "01JDX3K7M9",
+    name: "CI",
+    prefix: "kvb_01JDX3K7M9",
+    access: "read",
+    scopes: READ_SCOPES,
+    createdBy: { userId: "01936f3e-7b4c-7d2a-9f1e-3c5a7b9d1e2f", name: "Ada" },
+    createdAt: "2026-01-01T00:00:00Z",
+    lastUsedAt: null,
+    expiresAt: null,
+  };
+  const secret = `kvb_01JDX3K7M9_${"a".repeat(43)}`;
+  const decodeCreated = Schema.decodeUnknownSync(ApiKeyCreated);
+
+  test("ApiKeyCreated carries a kvb_ token as its secret", () => {
+    expect(String(decodeCreated({ key, secret }).secret)).toBe(secret);
+    expect(() => decodeCreated({ key, secret: "plain" })).toThrow();
+  });
+
+  test("views reject a mode that disagrees with its scopes", () => {
+    expect(() => decodeCreated({ key: { ...key, access: "read_write" }, secret })).toThrow();
+    const app = {
+      grantId: "g1",
+      client: { id: "c1", name: "App", redirectHost: "app.example" },
+      member: key.createdBy,
+      access: "custom",
+      scopes: [],
+      createdAt: key.createdAt,
+      lastUsedAt: null,
+    };
+    expect(Schema.is(ConnectedAppView)(app)).toBe(false);
+    expect(Schema.is(ConnectedAppView)({ ...app, scopes: ["documents:read"] })).toBe(true);
   });
 });
