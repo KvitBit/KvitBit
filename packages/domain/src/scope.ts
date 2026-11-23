@@ -28,6 +28,3 @@ export type ScopeLevel = typeof ScopeLevel.Type;
 /** e.g. "documents:write"; write implies read at grant time. */
 export const Scope = Schema.TemplateLiteral([ScopeArea, ":", ScopeLevel]);
 export type Scope = typeof Scope.Type;
-
-export const AccessMode = Schema.Literals(["read", "read_write", "custom"]);
-export type AccessMode = typeof AccessMode.Type;

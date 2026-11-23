@@ -13,29 +13,36 @@ export class CurrencyMismatch extends Data.TaggedError("CurrencyMismatch")<{
   readonly actual: CurrencyCode;
 }> {}
 
-/** ISO 4217 currencies whose minor unit has no decimals. Everything else uses 2. */
-const ZERO_DECIMAL_CURRENCIES: ReadonlySet<string> = new Set([
-  "BIF",
-  "CLP",
-  "DJF",
-  "GNF",
-  "ISK",
-  "JPY",
-  "KMF",
-  "KRW",
-  "PYG",
-  "RWF",
-  "UGX",
-  "VND",
-  "VUV",
-  "XAF",
-  "XOF",
-  "XPF",
+/**
+ * ISO 4217 minor-unit exponents that differ from 2. Any other three-letter code uses 2
+ * decimals: a product fallback, since CurrencyCode accepts any upper-case three-letter code.
+ */
+const MINOR_UNIT_EXCEPTIONS: ReadonlyMap<string, number> = new Map([
+  ...[
+    "BIF",
+    "CLP",
+    "DJF",
+    "GNF",
+    "ISK",
+    "JPY",
+    "KMF",
+    "KRW",
+    "PYG",
+    "RWF",
+    "UGX",
+    "VND",
+    "VUV",
+    "XAF",
+    "XOF",
+    "XPF",
+  ].map((c) => [c, 0] as const),
+  ...["BHD", "IQD", "JOD", "KWD", "LYD", "OMR", "TND"].map((c) => [c, 3] as const),
+  ...["CLF", "UYW"].map((c) => [c, 4] as const),
 ]);
 
 /** Number of decimals of the currency's minor unit (CZK and EUR: 2). */
 export const minorUnitScale = (currency: CurrencyCode): number =>
-  ZERO_DECIMAL_CURRENCIES.has(currency) ? 0 : 2;
+  MINOR_UNIT_EXCEPTIONS.get(currency) ?? 2;
 
 export const make = (amount: BigDecimal.BigDecimal, currency: CurrencyCode): Money => ({
   amount,

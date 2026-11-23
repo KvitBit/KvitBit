@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { BigDecimal, Result, Schema } from "effect";
-import { CurrencyCode, CurrencyMismatch, type Money, MoneyMath } from "../src/index";
+import { CurrencyCode, type Money, MoneyMath } from "../src/index";
 
 const cur = Schema.decodeUnknownSync(CurrencyCode);
 const CZK = cur("CZK");
@@ -30,6 +30,15 @@ describe("rounding", () => {
     expect(MoneyMath.minorUnitScale(JPY)).toBe(0);
     expect(MoneyMath.minorUnitScale(CZK)).toBe(2);
   });
+  test.each([
+    ["KWD", 3, "1.0005", "1.001"],
+    ["CLF", 4, "1.00005", "1.0001"],
+    ["XYZ", 2, "1.005", "1.01"], // unknown codes fall back to 2
+  ])("%s uses %p decimals", (code, scale, input, expected) => {
+    const c = cur(code);
+    expect(MoneyMath.minorUnitScale(c)).toBe(scale);
+    expect(str(MoneyMath.round(m(input, c)))).toBe(expected);
+  });
 });
 
 describe("minor units", () => {
@@ -53,7 +62,7 @@ describe("arithmetic", () => {
     const r = MoneyMath.add(m("1"), m("1", EUR));
     expect(Result.isFailure(r)).toBe(true);
     if (Result.isFailure(r)) {
-      expect(r.failure).toBeInstanceOf(CurrencyMismatch);
+      expect(r.failure).toBeInstanceOf(MoneyMath.CurrencyMismatch);
       expect(r.failure.expected).toBe(CZK);
       expect(r.failure.actual).toBe(EUR);
     }

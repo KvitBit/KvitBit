@@ -62,3 +62,13 @@ describe("unspecified contracts", () => {
     expect(forged).toBeDefined();
   });
 });
+
+describe("subpath exports", () => {
+  test("contract surface excludes driven ports", async () => {
+    const contract = await import("@kvitbit/domain/contract");
+    const ports = await import("@kvitbit/domain/ports");
+    expect("Documents" in contract).toBe(true);
+    expect("BlobStorage" in contract).toBe(false);
+    expect("BlobStorage" in ports).toBe(true);
+  });
+});

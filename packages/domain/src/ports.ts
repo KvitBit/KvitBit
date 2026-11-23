@@ -24,6 +24,8 @@ export interface RegistryRecord {
   readonly dic: string | null;
   readonly legalForm: string;
   readonly registerEntry: string | null;
+  /** Dissolution date; feeds RegistryResult.terminatedOn (core-ports 4.1). */
+  readonly terminatedOn: IsoDate | null;
 }
 
 export class RegistryUnavailable extends Data.TaggedError("RegistryUnavailable")<{
