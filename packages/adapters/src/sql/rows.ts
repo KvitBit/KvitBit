@@ -50,7 +50,7 @@ export const checkRevision = (
  * `lockRowForUpdate`; under READ COMMITTED a concurrent writer that committed first makes this
  * one fail with `RevisionConflict` carrying the new revision.
  *
- * Patch keys must be plain column names; `id`, `workspace_id`, `revision`, `created_at` and
+ * Patch keys must be columns of `table` in the Drizzle schema; `id`, `workspace_id`, `revision`, `created_at` and
  * `updated_at` are rejected as a defect, as are `undefined` values. JSON columns take an already
  * serialized value.
  */
@@ -64,7 +64,7 @@ export const updateWithRevision = (
   Effect.gen(function* () {
     const sql = yield* SqlClient.SqlClient;
     const scope = yield* Effect.sync(() => {
-      checkPatchColumns(patch);
+      checkPatchColumns(table, patch);
       return scopeColumn(table);
     });
     const assignments =

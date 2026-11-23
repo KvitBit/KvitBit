@@ -26,13 +26,23 @@ const counterWhere = (sql: SqlClient.SqlClient, key: CounterKey) =>
 /**
  * Upserts the counter row and locks it `FOR UPDATE` until the caller's transaction ends; returns
  * the next counter value (1 for a new period). Lock it after the document (core-ports.md S4). A
- * series outside the Workspace fails the insert's foreign key as a `SqlError`.
+ * series outside the Workspace is `RowNotFound`, whether or not its owner has a counter.
  */
 export const lockCounter = (
   key: CounterKey,
-): Effect.Effect<number, SqlError, SqlClient.SqlClient> =>
+): Effect.Effect<number, RowNotFound | SqlError, SqlClient.SqlClient> =>
   Effect.gen(function* () {
     const sql = yield* SqlClient.SqlClient;
+    const series = yield* sql`
+      select 1 from numbering_series
+      where workspace_id = ${key.workspaceId} and id = ${key.seriesId}`;
+    if (series.length === 0) {
+      return yield* new RowNotFound({
+        table: "numbering_series",
+        workspaceId: key.workspaceId,
+        id: key.seriesId,
+      });
+    }
     yield* sql`
       insert into numbering_counters (workspace_id, series_id, period)
       values (${key.workspaceId}, ${key.seriesId}, ${key.period})
@@ -60,8 +70,8 @@ export const peekCounter = (
   });
 
 /**
- * Moves the counter to `next`; it only grows, so a lower value is ignored. Call it after
- * `lockCounter` in the same transaction.
+ * Moves the counter to `next`. Counters only grow: a lower value, or a counter that does not
+ * exist, is a defect. Call it after `lockCounter` in the same transaction.
  */
 export const setCounter = (
   key: CounterKey,
@@ -69,9 +79,17 @@ export const setCounter = (
 ): Effect.Effect<void, SqlError, SqlClient.SqlClient> =>
   Effect.gen(function* () {
     const sql = yield* SqlClient.SqlClient;
-    yield* sql`
-      update numbering_counters set next_counter = greatest(next_counter, ${next})
-      where ${counterWhere(sql, key)}`;
+    const updated = yield* sql`
+      update numbering_counters set next_counter = ${next}
+      where ${counterWhere(sql, key)} and next_counter <= ${next}
+      returning next_counter`;
+    if (updated.length === 0) {
+      return yield* Effect.die(
+        new Error(
+          `sql: numbering counter ${key.seriesId}/${key.period} is missing or above ${next}`,
+        ),
+      );
+    }
   });
 
 export interface Reservation {
@@ -143,7 +161,7 @@ export interface AllocateNumberInput {
   /** Pure formatter, normally core's `Numbering.format`. */
   readonly format: (candidate: NumberCandidate) => string;
   readonly documentId?: string;
-  /** Reserved candidates to skip before failing with `NumberingExhausted`. Default 1000. */
+  /** Reserved candidates to skip before failing with `NumberingExhausted`. Default 10000. */
   readonly maxSkips?: number;
 }
 
@@ -173,7 +191,7 @@ export const allocateNumber = (
   Effect.gen(function* () {
     const sql = yield* SqlClient.SqlClient;
     const { workspaceId, seriesId } = input;
-    const maxSkips = input.maxSkips ?? 1000;
+    const maxSkips = input.maxSkips ?? 10_000;
 
     const rows = yield* sql<SeriesSnapshot>`
       select kind, pattern from numbering_series

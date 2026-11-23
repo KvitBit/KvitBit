@@ -4,10 +4,11 @@ import type { SqlError } from "effect/sql/SqlError";
 
 /**
  * Who a request key belongs to (core-ports.md C3). Workspace-scoped keys are unique per
- * Workspace; account-level calls without a Workspace use the user id.
+ * Workspace and stored without a user, so deleting a user never frees them; account-level calls
+ * without a Workspace use the user id.
  */
 export type RequestScope =
-  | { readonly workspaceId: string; readonly userId?: string }
+  | { readonly workspaceId: string; readonly userId?: undefined }
   | { readonly workspaceId?: undefined; readonly userId: string };
 
 /** A completed request: what a replay with the same key compares against and returns. */
@@ -37,7 +38,10 @@ export interface ClaimOptions {
   readonly ttlHours?: number;
 }
 
-/** Placeholder written by a claim; `completeRequest` replaces it. `method` is never empty. */
+/**
+ * A claim is a placeholder row: empty `method` (a completed `method` is never empty) and a
+ * `payload_hash` naming the claiming transaction, so only that transaction can complete it.
+ */
 const PENDING = "";
 
 interface LogRow {
@@ -46,7 +50,11 @@ interface LogRow {
   readonly result: unknown;
   readonly created_at: string;
   readonly expired: boolean;
+  readonly mine: boolean;
 }
+
+/** The claiming transaction's marker; `txid_current()` is the top-level id inside savepoints. */
+const OWNER = "'pending:' || txid_current()::text";
 
 const scopeWhere = (sql: SqlClient.SqlClient, scope: RequestScope, requestKey: string) =>
   scope.workspaceId !== undefined
@@ -61,12 +69,18 @@ const toEntry = (requestKey: string, row: LogRow): RequestLogEntry => ({
   createdAt: row.created_at,
 });
 
-const requireTransaction = (operation: string) =>
+const requireTransaction = (operation: string, outermost: boolean) =>
   Effect.gen(function* () {
     const sql = yield* SqlClient.SqlClient;
     const transaction = yield* Effect.serviceOption(sql.transactionService);
     if (Option.isNone(transaction)) {
       return yield* Effect.die(new Error(`sql: ${operation} must run inside a transaction`));
+    }
+    // The service holds [connection, depth]; depth 0 is the outermost transaction.
+    if (outermost && transaction.value[1] !== 0) {
+      return yield* Effect.die(
+        new Error(`sql: ${operation} must run in the outermost transaction`),
+      );
     }
   });
 
@@ -75,8 +89,8 @@ const requireTransaction = (operation: string) =>
  * key never both run. The claim is a placeholder row inside the caller's transaction: a
  * concurrent claim of the same key waits for that transaction, then sees the completed entry
  * (`Existing`) or, after a rollback, claims the key itself. An expired entry, or a placeholder
- * committed without `completeRequest`, is taken over. Run it in the outermost transaction; a
- * claim outside any transaction is a defect.
+ * committed without `completeRequest`, is taken over. Run it in the outermost transaction;
+ * anywhere else, or claiming one key twice in a transaction, is a defect.
  */
 export const claimRequest = (
   scope: RequestScope,
@@ -84,11 +98,13 @@ export const claimRequest = (
   options: ClaimOptions,
 ): Effect.Effect<ClaimOutcome, SqlError, SqlClient.SqlClient> =>
   Effect.gen(function* () {
-    yield* requireTransaction("claimRequest");
+    yield* requireTransaction("claimRequest", true);
     const sql = yield* SqlClient.SqlClient;
     const ttlSeconds = (options.ttlHours ?? 24) * 3600;
-    const values = sql`(${scope.workspaceId ?? null}, ${scope.userId ?? null}, ${requestKey},
-      ${PENDING}, ${PENDING}, 'null'::jsonb, ${options.now}::timestamptz)`;
+    const owner = sql.literal(OWNER);
+    const userId = scope.workspaceId !== undefined ? null : scope.userId;
+    const values = sql`(${scope.workspaceId ?? null}, ${userId}, ${requestKey},
+      ${PENDING}, ${owner}, 'null'::jsonb, ${options.now}::timestamptz)`;
     const conflict =
       scope.workspaceId !== undefined
         ? sql`(workspace_id, request_key) where workspace_id is not null`
@@ -107,17 +123,23 @@ export const claimRequest = (
 
       const rows = yield* sql<LogRow>`
         select method, payload_hash, result, to_json(created_at) #>> '{}' as created_at,
-          created_at <= ${options.now}::timestamptz - make_interval(secs => ${ttlSeconds}) as expired
+          created_at <= ${options.now}::timestamptz - make_interval(secs => ${ttlSeconds}) as expired,
+          payload_hash = ${owner} as mine
         from request_log where ${scopeWhere(sql, scope, requestKey)}
         for update`;
       const row = rows[0];
       if (row === undefined) continue;
+      if (row.method === PENDING && row.mine) {
+        return yield* Effect.die(
+          new Error(`sql: request key ${requestKey} is already claimed by this transaction`),
+        );
+      }
       if (row.method !== PENDING && !row.expired) {
         return { _tag: "Existing", entry: toEntry(requestKey, row) } as const;
       }
       yield* sql`
         update request_log
-        set method = ${PENDING}, payload_hash = ${PENDING}, result = 'null'::jsonb,
+        set method = ${PENDING}, payload_hash = ${owner}, result = 'null'::jsonb,
           created_at = ${options.now}::timestamptz
         where ${scopeWhere(sql, scope, requestKey)}`;
       return { _tag: "Claimed" } as const;
@@ -135,14 +157,14 @@ export interface RequestCompletion {
 
 /**
  * Stores the outcome under a key this transaction claimed, just before commit. Completing a key
- * that is not claimed by this transaction is a defect.
+ * this transaction did not claim, including an abandoned claim of another, is a defect.
  */
 export const completeRequest = (
   scope: RequestScope,
   completion: RequestCompletion,
 ): Effect.Effect<void, SqlError, SqlClient.SqlClient> =>
   Effect.gen(function* () {
-    yield* requireTransaction("completeRequest");
+    yield* requireTransaction("completeRequest", false);
     const sql = yield* SqlClient.SqlClient;
     const { requestKey, method, payloadHash } = completion;
     if (method === PENDING || completion.result === undefined) {
@@ -155,9 +177,12 @@ export const completeRequest = (
       set method = ${method}, payload_hash = ${payloadHash},
         result = ${JSON.stringify(completion.result)}::jsonb
       where ${scopeWhere(sql, scope, requestKey)} and method = ${PENDING}
+        and payload_hash = ${sql.literal(OWNER)}
       returning request_key`;
     if (updated.length === 0) {
-      return yield* Effect.die(new Error(`sql: request key ${requestKey} is not claimed`));
+      return yield* Effect.die(
+        new Error(`sql: request key ${requestKey} is not claimed by this transaction`),
+      );
     }
   });
 
@@ -173,7 +198,7 @@ export const lookupRequest = (
     const sql = yield* SqlClient.SqlClient;
     const rows = yield* sql<LogRow>`
       select method, payload_hash, result, to_json(created_at) #>> '{}' as created_at,
-        false as expired
+        false as expired, false as mine
       from request_log where ${scopeWhere(sql, scope, requestKey)} and method <> ${PENDING}`;
     const row = rows[0];
     return row === undefined ? Option.none() : Option.some(toEntry(requestKey, row));

@@ -152,6 +152,31 @@ describe.skipIf(databaseUrl === undefined)("contention on Postgres", () => {
     expect(second).toMatchObject({ number: "C0001", counter: 1 });
   }, 30_000);
 
+  test("a series pattern change waits for an open allocation", async () => {
+    const order = await runtime.runPromise(
+      Effect.gen(function* () {
+        const { workspaceId, seriesId } = yield* seedWorkspace;
+        const order: Array<string> = [];
+        const allocated = yield* Deferred.make<void>();
+        const first = yield* transaction(
+          allocateNumber({ workspaceId, seriesId, period: () => "2026", format }).pipe(
+            Effect.tap(() => Deferred.succeed(allocated, undefined)),
+            Effect.tap(() => Effect.sleep("300 millis")),
+            Effect.tap(() => Effect.sync(() => order.push("allocation commits"))),
+          ),
+        ).pipe(Effect.forkChild);
+        yield* Deferred.await(allocated);
+        yield* transaction(
+          updateWithRevision("numbering_series", workspaceId, seriesId, 1, { pattern: "X{NNNN}" }),
+        );
+        order.push("pattern updated");
+        yield* Fiber.join(first);
+        return order;
+      }).pipe(Effect.scoped),
+    );
+    expect(order).toEqual(["allocation commits", "pattern updated"]);
+  }, 30_000);
+
   const request = { requestKey: "k", method: "Documents.issue", payloadHash: "h" };
   const now = "2026-11-23T10:00:00Z";
 

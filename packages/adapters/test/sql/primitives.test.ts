@@ -10,6 +10,7 @@ import {
   type NumberCandidate,
   peekCounter,
   reserveNumber,
+  revisionedTableNames,
   setCounter,
   transactionWithRetry,
   tryReserveNumber,
@@ -123,6 +124,26 @@ describe("lockRowForUpdate", () => {
   });
 });
 
+describe("whitelist", () => {
+  test("every revisioned table has its scope, id, revision and updated_at columns", async () => {
+    const errors = await db.run(
+      Effect.gen(function* () {
+        const { workspaceId } = yield* seedWorkspace;
+        const missing = crypto.randomUUID();
+        return yield* Effect.forEach(revisionedTableNames, (table) =>
+          Effect.all([
+            failure(lockRowForUpdate(table, workspaceId, missing)),
+            failure(updateWithRevision(table, workspaceId, missing, 1, {})),
+          ]),
+        );
+      }),
+    );
+    for (const pair of errors) {
+      for (const error of pair) expect(error).toMatchObject({ _tag: "RowNotFound" });
+    }
+  });
+});
+
 describe("updateWithRevision", () => {
   test("applies the patch and bumps revision", async () => {
     const row = await db.run(
@@ -189,6 +210,7 @@ describe("updateWithRevision", () => {
       { workspace_id: "x" },
       { 'name" = 1; --': "x" },
       { name: undefined },
+      { column_typo: 1 },
     ]) {
       const run = db.run(
         Effect.gen(function* () {
@@ -263,6 +285,24 @@ describe("allocateNumber", () => {
       }),
     );
     expect(allocated).toMatchObject({ period: "2026", number: "FV20260001" });
+  });
+
+  test("the default skip budget gets past a long run of reserved numbers", async () => {
+    const allocated = await db.run(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient;
+        const { workspaceId, seriesId } = yield* seedWorkspace;
+        yield* sql`insert into number_reservations (workspace_id, kind, number)
+          select ${workspaceId}, 'invoice', 'C' || n from generate_series(1, 1001) as n`;
+        return yield* allocateNumber({
+          workspaceId,
+          seriesId,
+          period: () => "all",
+          format: ({ counter }) => `C${counter}`,
+        });
+      }),
+    );
+    expect(allocated).toMatchObject({ number: "C1002", counter: 1002 });
   });
 
   test("skips numbers reserved by an override and keeps the reservation", async () => {
@@ -391,8 +431,8 @@ describe("reserveNumber", () => {
 });
 
 describe("counters and reservations", () => {
-  test("lockCounter upserts at 1, setCounter only grows, peekCounter reads without creating", async () => {
-    const [unused, locked, grown, kept, created] = await db.run(
+  test("lockCounter upserts at 1, setCounter grows it, peekCounter reads without creating", async () => {
+    const [unused, locked, grown, same, created] = await db.run(
       Effect.gen(function* () {
         const { workspaceId, seriesId } = yield* seedWorkspace;
         const key = { workspaceId, seriesId, period: "2026-05" };
@@ -401,26 +441,48 @@ describe("counters and reservations", () => {
         const locked = yield* transaction(lockCounter(key));
         yield* setCounter(key, 7);
         const grown = yield* peekCounter(key);
-        yield* setCounter(key, 3);
-        const kept = yield* peekCounter(key);
-        return [unused, locked, grown, kept, created] as const;
+        yield* setCounter(key, 7);
+        const same = yield* peekCounter(key);
+        return [unused, locked, grown, same, created] as const;
       }),
     );
-    expect([unused, locked, grown, kept]).toEqual([1, 1, 7, 7]);
+    expect([unused, locked, grown, same]).toEqual([1, 1, 7, 7]);
     expect(created).toBeUndefined();
   });
 
-  test("lockCounter on another Workspace's series fails the foreign key", async () => {
-    const error = await db.run(
+  test("setCounter refuses to lower a counter or set a missing one", async () => {
+    const lower = db.run(
+      Effect.gen(function* () {
+        const { workspaceId, seriesId } = yield* seedWorkspace;
+        const key = { workspaceId, seriesId, period: "2026" };
+        yield* transaction(lockCounter(key).pipe(Effect.andThen(setCounter(key, 7))));
+        yield* setCounter(key, 3);
+      }),
+    );
+    await expect(lower).rejects.toThrow("is missing or above 3");
+    const missing = db.run(
+      Effect.gen(function* () {
+        const { workspaceId, seriesId } = yield* seedWorkspace;
+        yield* setCounter({ workspaceId, seriesId, period: "2030" }, 2);
+      }),
+    );
+    await expect(missing).rejects.toThrow("is missing or above 2");
+  });
+
+  test("lockCounter on another Workspace's series is RowNotFound, with or without its counter", async () => {
+    const [before, after] = await db.run(
       Effect.gen(function* () {
         const a = yield* seedWorkspace;
         const b = yield* seedWorkspace;
-        return yield* failure(
-          lockCounter({ workspaceId: b.workspaceId, seriesId: a.seriesId, period: "2026" }),
-        );
+        const foreign = { workspaceId: b.workspaceId, seriesId: a.seriesId, period: "2026" };
+        const before = yield* failure(lockCounter(foreign));
+        yield* lockCounter({ ...foreign, workspaceId: a.workspaceId });
+        const after = yield* failure(lockCounter(foreign));
+        return [before, after] as const;
       }),
     );
-    expect(error).toMatchObject({ _tag: "SqlError" });
+    expect(before).toMatchObject({ _tag: "RowNotFound", table: "numbering_series" });
+    expect(after).toMatchObject({ _tag: "RowNotFound", table: "numbering_series" });
   });
 
   test("tryReserveNumber reports a taken number without aborting the transaction", async () => {
@@ -559,6 +621,52 @@ describe("request log", () => {
     expect(outcomes.map((o) => o._tag)).toEqual(["Claimed", "Claimed", "Claimed", "Existing"]);
   });
 
+  test("a claim belongs to its outermost transaction", async () => {
+    const twice = db.run(
+      Effect.gen(function* () {
+        const { workspaceId } = yield* seedWorkspace;
+        return yield* transaction(
+          claimRequest({ workspaceId }, key, { now }).pipe(
+            Effect.andThen(claimRequest({ workspaceId }, key, { now })),
+          ),
+        );
+      }),
+    );
+    await expect(twice).rejects.toThrow("already claimed by this transaction");
+    const nested = db.run(
+      Effect.gen(function* () {
+        const { workspaceId } = yield* seedWorkspace;
+        return yield* transaction(transaction(claimRequest({ workspaceId }, key, { now })));
+      }),
+    );
+    await expect(nested).rejects.toThrow("outermost transaction");
+    const abandoned = db.run(
+      Effect.gen(function* () {
+        const { workspaceId } = yield* seedWorkspace;
+        yield* transaction(claimRequest({ workspaceId }, key, { now }));
+        return yield* transaction(completeRequest({ workspaceId }, { ...done, result: 1 }));
+      }),
+    );
+    await expect(abandoned).rejects.toThrow("not claimed by this transaction");
+  });
+
+  test("a Workspace claim stores no user", async () => {
+    const users = await db.run(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient;
+        const { workspaceId } = yield* seedWorkspace;
+        yield* transaction(
+          claimRequest({ workspaceId }, key, { now }).pipe(
+            Effect.tap(() => completeRequest({ workspaceId }, { ...done, result: 1 })),
+          ),
+        );
+        return yield* sql<{ user_id: string | null }>`
+          select user_id from request_log where workspace_id = ${workspaceId}`;
+      }),
+    );
+    expect(users).toEqual([{ user_id: null }]);
+  });
+
   test("claim and complete outside a transaction, or completing an unclaimed key, are defects", async () => {
     const scope = { workspaceId: crypto.randomUUID() };
     await expect(db.run(claimRequest(scope, key, { now }))).rejects.toThrow(
@@ -665,6 +773,20 @@ describe("transactionWithRetry", () => {
     expect(errors[0]).toBe("nope");
     expect(errors[1]).toMatchObject({ _tag: "SqlError" });
     expect(attempts).toBe(2);
+  });
+
+  test("runs READ COMMITTED even when the session default is stricter", async () => {
+    const level = await db.run(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient;
+        yield* sql`set default_transaction_isolation = 'repeatable read'`;
+        const rows = yield* transactionWithRetry(
+          sql<{ transaction_isolation: string }>`show transaction_isolation`,
+        ).pipe(Effect.ensuring(sql`reset default_transaction_isolation`.pipe(Effect.orDie)));
+        return rows[0]?.transaction_isolation;
+      }),
+    );
+    expect(level).toBe("read committed");
   });
 
   test("inside another transaction it is a defect", async () => {
