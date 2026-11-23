@@ -260,6 +260,10 @@ export const oauthConsent = authSchema.table(
       "oauth_consent_grant_complete",
       sql`(${t.workspaceId} is null) = (${t.access} is null) and (${t.workspaceId} is null) = (${t.grantedScopes} is null)`,
     ),
+    check(
+      "oauth_consent_grant_bound",
+      sql`${t.workspaceId} is null or (${t.userId} is not null and cardinality(${t.grantedScopes}) > 0)`,
+    ),
   ],
 );
 

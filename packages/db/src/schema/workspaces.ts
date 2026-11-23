@@ -24,6 +24,7 @@ import {
   updatedAt,
   workspaceIdColumn,
 } from "./columns";
+import { documents } from "./documents";
 import {
   documentKind,
   invitationRole,
@@ -52,6 +53,7 @@ export const workspaces = pgTable(
     defaultCurrency: currency("default_currency").notNull().default("CZK"),
     defaultLanguage: locale("default_language").notNull().default("cs"),
     defaultDueDays: integer("default_due_days").notNull().default(14),
+    defaultNote: text("default_note"),
     defaultPaymentMethod: paymentMethod("default_payment_method")
       .notNull()
       .default("bank_transfer"),
@@ -133,7 +135,7 @@ export const memberships = pgTable(
       .notNull()
       .references(() => user.id, { onDelete: "restrict" }),
     role: role("role").notNull(),
-    joinedAt: createdAt(),
+    joinedAt: createdAt("joined_at"),
   },
   (t) => [
     primaryKey({ columns: [t.workspaceId, t.userId] }),
@@ -266,7 +268,7 @@ export const numberReservations = pgTable(
     number: text("number").notNull(),
     seriesId: uuid("series_id"),
     documentId: uuid("document_id"),
-    reservedAt: createdAt(),
+    reservedAt: createdAt("reserved_at"),
   },
   (t) => [
     primaryKey({ columns: [t.workspaceId, t.kind, t.number] }),
@@ -275,19 +277,25 @@ export const numberReservations = pgTable(
       columns: [t.workspaceId, t.seriesId],
       foreignColumns: [numberingSeries.workspaceId, numberingSeries.id],
     }),
+    foreignKey({
+      name: "number_reservations_document_fk",
+      columns: [t.workspaceId, t.documentId],
+      foreignColumns: [documents.workspaceId, documents.id],
+    }),
   ],
 );
 
 /**
  * Account preferences, keyed by Better Auth user id with their own revision
  * (http-mcp-contracts.md T5, `ThemePreference` :655-661). `theme_source` null follows the
- * Workspace theme, then the `graphite_atelier` preset (T4).
+ * Workspace theme, then the `graphite_atelier` preset (T4). `locale` null falls back to the
+ * request's `Accept-Language` (core-ports.md:1467-1469).
  */
 export const userPreferences = pgTable("user_preferences", {
   userId: text("user_id")
     .primaryKey()
     .references(() => user.id, { onDelete: "cascade" }),
-  locale: locale("locale").notNull().default("cs"),
+  locale: locale("locale"),
   themeMode: themeMode("theme_mode").notNull().default("system"),
   themeStyle: themeStyle("theme_style").notNull().default("elegant"),
   themeContrast: themeContrast("theme_contrast").notNull().default("standard"),

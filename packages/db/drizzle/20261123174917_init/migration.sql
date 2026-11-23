@@ -143,7 +143,8 @@ CREATE TABLE "auth"."oauth_consent" (
 	"access" "access_mode",
 	"granted_scopes" text[],
 	"last_used_at" timestamp with time zone,
-	CONSTRAINT "oauth_consent_grant_complete" CHECK (("workspace_id" is null) = ("access" is null) and ("workspace_id" is null) = ("granted_scopes" is null))
+	CONSTRAINT "oauth_consent_grant_complete" CHECK (("workspace_id" is null) = ("access" is null) and ("workspace_id" is null) = ("granted_scopes" is null)),
+	CONSTRAINT "oauth_consent_grant_bound" CHECK ("workspace_id" is null or ("user_id" is not null and cardinality("granted_scopes") > 0))
 );
 --> statement-breakpoint
 CREATE TABLE "auth"."oauth_refresh_token" (
@@ -303,7 +304,10 @@ CREATE TABLE "document_lines" (
 	"unit" text,
 	"unit_price" numeric NOT NULL,
 	"vat" "vat_treatment" NOT NULL,
-	CONSTRAINT "document_lines_document_position_unique" UNIQUE("document_id","position")
+	"deducts_document_id" uuid,
+	"deducted_vat" numeric(18,2),
+	CONSTRAINT "document_lines_document_position_unique" UNIQUE("document_id","position"),
+	CONSTRAINT "document_lines_deducted_vat_on_deduction" CHECK ("deducted_vat" is null or "deducts_document_id" is not null)
 );
 --> statement-breakpoint
 CREATE TABLE "document_relations" (
@@ -352,6 +356,8 @@ CREATE TABLE "documents" (
 	"reminder_epoch" integer DEFAULT 0 NOT NULL,
 	"schedule_id" uuid,
 	"occurrence" date,
+	"correction_reason" text,
+	"cancellation_reason" text,
 	"issued_at" timestamp with time zone,
 	"cancelled_at" timestamp with time zone,
 	"revision" integer DEFAULT 1 NOT NULL,
@@ -406,7 +412,7 @@ CREATE TABLE "share_view_events" (
 	"kind" "share_event_kind" NOT NULL,
 	"device" "share_device" NOT NULL,
 	"visitor_hash" text NOT NULL,
-	"created_at" timestamp with time zone DEFAULT now() NOT NULL
+	"at" timestamp with time zone DEFAULT now() NOT NULL
 );
 --> statement-breakpoint
 CREATE TABLE "attachments" (
@@ -459,10 +465,9 @@ CREATE TABLE "schedule_runs" (
 	"schedule_id" uuid NOT NULL,
 	"occurrence" date NOT NULL,
 	"outcome" "recurring_outcome" NOT NULL,
-	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
+	"at" timestamp with time zone DEFAULT now() NOT NULL,
 	"document_id" uuid,
 	"delivery_id" uuid,
-	"delivery_status" "delivery_status",
 	"failure" text,
 	CONSTRAINT "schedule_runs_schedule_occurrence_unique" UNIQUE("schedule_id","occurrence")
 );
@@ -480,6 +485,7 @@ CREATE TABLE "schedules" (
 	"next_occurrence" date,
 	"paused_reason" text,
 	"paused_at" timestamp with time zone,
+	"detached_at" timestamp with time zone,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
 	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
 	CONSTRAINT "schedules_workspace_id_id_unique" UNIQUE("workspace_id","id"),
@@ -506,19 +512,20 @@ CREATE TABLE "altcha_replays" (
 	"challenge_digest" text PRIMARY KEY,
 	"scope" "bot_scope" NOT NULL,
 	"expires_at" timestamp with time zone NOT NULL,
-	"created_at" timestamp with time zone DEFAULT now() NOT NULL
+	"consumed_at" timestamp with time zone DEFAULT now() NOT NULL
 );
 --> statement-breakpoint
 CREATE TABLE "audit_entries" (
 	"id" uuid PRIMARY KEY,
 	"workspace_id" uuid NOT NULL,
-	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
+	"at" timestamp with time zone DEFAULT now() NOT NULL,
 	"actor_user_id" text,
 	"actor_channel" "channel",
 	"actor_client_kind" "client_kind",
 	"actor_client_id" text,
 	"actor_client_name" text,
 	"actor_system_job" "system_job",
+	"actor_job" jsonb,
 	"subject_entity" "entity_kind" NOT NULL,
 	"subject_id" text NOT NULL,
 	"subject_revision" integer,
@@ -526,6 +533,7 @@ CREATE TABLE "audit_entries" (
 	"changes" jsonb DEFAULT '[]' NOT NULL,
 	"reason" text,
 	CONSTRAINT "audit_entries_one_actor" CHECK (("actor_user_id" is not null and "actor_channel" is not null and "actor_system_job" is null) or ("actor_user_id" is null and "actor_channel" is null and "actor_system_job" is not null)),
+	CONSTRAINT "audit_entries_job_with_system_actor" CHECK (("actor_system_job" is null) = ("actor_job" is null)),
 	CONSTRAINT "audit_entries_client_complete" CHECK (("actor_client_kind" is null) = ("actor_client_id" is null) and ("actor_client_kind" is null) = ("actor_client_name" is null))
 );
 --> statement-breakpoint
@@ -617,7 +625,7 @@ CREATE TABLE "memberships" (
 	"workspace_id" uuid,
 	"user_id" text,
 	"role" "role" NOT NULL,
-	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
+	"joined_at" timestamp with time zone DEFAULT now() NOT NULL,
 	CONSTRAINT "memberships_pkey" PRIMARY KEY("workspace_id","user_id")
 );
 --> statement-breakpoint
@@ -627,7 +635,7 @@ CREATE TABLE "number_reservations" (
 	"number" text,
 	"series_id" uuid,
 	"document_id" uuid,
-	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
+	"reserved_at" timestamp with time zone DEFAULT now() NOT NULL,
 	CONSTRAINT "number_reservations_pkey" PRIMARY KEY("workspace_id","kind","number")
 );
 --> statement-breakpoint
@@ -665,7 +673,7 @@ CREATE TABLE "tax_regime_periods" (
 --> statement-breakpoint
 CREATE TABLE "user_preferences" (
 	"user_id" text PRIMARY KEY,
-	"locale" "locale" DEFAULT 'cs'::"locale" NOT NULL,
+	"locale" "locale",
 	"theme_mode" "theme_mode" DEFAULT 'system'::"theme_mode" NOT NULL,
 	"theme_style" "theme_style" DEFAULT 'elegant'::"theme_style" NOT NULL,
 	"theme_contrast" "theme_contrast" DEFAULT 'standard'::"theme_contrast" NOT NULL,
@@ -688,6 +696,7 @@ CREATE TABLE "workspaces" (
 	"default_currency" char(3) DEFAULT 'CZK' NOT NULL,
 	"default_language" "locale" DEFAULT 'cs'::"locale" NOT NULL,
 	"default_due_days" integer DEFAULT 14 NOT NULL,
+	"default_note" text,
 	"default_payment_method" "payment_method" DEFAULT 'bank_transfer'::"payment_method" NOT NULL,
 	"constant_symbol" text,
 	"payment_rounding" "payment_rounding" DEFAULT 'none'::"payment_rounding" NOT NULL,
@@ -744,6 +753,8 @@ CREATE INDEX "contacts_workspace_name_idx" ON "contacts" ("workspace_id","name")
 CREATE INDEX "deliveries_document_idx" ON "deliveries" ("document_id");--> statement-breakpoint
 CREATE INDEX "deliveries_pending_idx" ON "deliveries" ("status","workflow_started_at") WHERE "status" in ('queued', 'sending');--> statement-breakpoint
 CREATE INDEX "document_relations_to_idx" ON "document_relations" ("to_document_id");--> statement-breakpoint
+CREATE UNIQUE INDEX "document_relations_one_final_invoice_per_proforma" ON "document_relations" ("from_document_id") WHERE "relation" = 'final_invoice_for';--> statement-breakpoint
+CREATE UNIQUE INDEX "document_relations_final_invoice_one_proforma" ON "document_relations" ("to_document_id") WHERE "relation" = 'final_invoice_for';--> statement-breakpoint
 CREATE UNIQUE INDEX "documents_number_unique" ON "documents" ("workspace_id","kind","number") WHERE "number" is not null;--> statement-breakpoint
 CREATE UNIQUE INDEX "documents_schedule_occurrence_unique" ON "documents" ("schedule_id","occurrence") WHERE "schedule_id" is not null;--> statement-breakpoint
 CREATE INDEX "documents_workspace_status_idx" ON "documents" ("workspace_id","status","issued_on");--> statement-breakpoint
@@ -752,13 +763,13 @@ CREATE INDEX "payments_document_idx" ON "payments" ("document_id");--> statement
 CREATE INDEX "payments_expense_idx" ON "payments" ("expense_id");--> statement-breakpoint
 CREATE UNIQUE INDEX "share_links_token_hash_unique" ON "share_links" ("token_hash");--> statement-breakpoint
 CREATE UNIQUE INDEX "share_links_one_active_per_document" ON "share_links" ("document_id") WHERE "revoked_at" is null;--> statement-breakpoint
-CREATE INDEX "share_view_events_dedupe_idx" ON "share_view_events" ("share_link_id","visitor_hash","kind","created_at");--> statement-breakpoint
+CREATE INDEX "share_view_events_dedupe_idx" ON "share_view_events" ("share_link_id","visitor_hash","kind","at");--> statement-breakpoint
 CREATE INDEX "expenses_workspace_issued_idx" ON "expenses" ("workspace_id","issued_on");--> statement-breakpoint
 CREATE INDEX "expenses_supplier_document_idx" ON "expenses" ("workspace_id","supplier_ico","supplier_document_number");--> statement-breakpoint
-CREATE UNIQUE INDEX "schedules_template_unique" ON "schedules" ("template_id");--> statement-breakpoint
+CREATE UNIQUE INDEX "schedules_one_attached_per_template" ON "schedules" ("template_id") WHERE "detached_at" is null;--> statement-breakpoint
 CREATE INDEX "altcha_replays_expires_at_idx" ON "altcha_replays" ("expires_at");--> statement-breakpoint
-CREATE INDEX "audit_entries_subject_idx" ON "audit_entries" ("workspace_id","subject_entity","subject_id","created_at");--> statement-breakpoint
-CREATE INDEX "audit_entries_workspace_at_idx" ON "audit_entries" ("workspace_id","created_at");--> statement-breakpoint
+CREATE INDEX "audit_entries_subject_idx" ON "audit_entries" ("workspace_id","subject_entity","subject_id","at");--> statement-breakpoint
+CREATE INDEX "audit_entries_workspace_at_idx" ON "audit_entries" ("workspace_id","at");--> statement-breakpoint
 CREATE UNIQUE INDEX "exports_one_running_per_workspace" ON "exports" ("workspace_id") WHERE "status" = 'running';--> statement-breakpoint
 CREATE INDEX "exports_expires_at_idx" ON "exports" ("expires_at");--> statement-breakpoint
 CREATE UNIQUE INDEX "request_log_workspace_key_unique" ON "request_log" ("workspace_id","request_key") WHERE "workspace_id" is not null;--> statement-breakpoint
@@ -795,6 +806,7 @@ ALTER TABLE "contact_preferred_series" ADD CONSTRAINT "contact_preferred_series_
 ALTER TABLE "contacts" ADD CONSTRAINT "contacts_workspace_id_workspaces_id_fkey" FOREIGN KEY ("workspace_id") REFERENCES "workspaces"("id") ON DELETE CASCADE;--> statement-breakpoint
 ALTER TABLE "price_list_items" ADD CONSTRAINT "price_list_items_workspace_id_workspaces_id_fkey" FOREIGN KEY ("workspace_id") REFERENCES "workspaces"("id") ON DELETE CASCADE;--> statement-breakpoint
 ALTER TABLE "deliveries" ADD CONSTRAINT "deliveries_document_fk" FOREIGN KEY ("workspace_id","document_id") REFERENCES "documents"("workspace_id","id");--> statement-breakpoint
+ALTER TABLE "document_lines" ADD CONSTRAINT "document_lines_deducts_document_fk" FOREIGN KEY ("workspace_id","deducts_document_id") REFERENCES "documents"("workspace_id","id");--> statement-breakpoint
 ALTER TABLE "document_lines" ADD CONSTRAINT "document_lines_document_fk" FOREIGN KEY ("workspace_id","document_id") REFERENCES "documents"("workspace_id","id") ON DELETE CASCADE;--> statement-breakpoint
 ALTER TABLE "document_lines" ADD CONSTRAINT "document_lines_price_list_item_fk" FOREIGN KEY ("workspace_id","price_list_item_id") REFERENCES "price_list_items"("workspace_id","id");--> statement-breakpoint
 ALTER TABLE "document_relations" ADD CONSTRAINT "document_relations_from_fk" FOREIGN KEY ("workspace_id","from_document_id") REFERENCES "documents"("workspace_id","id") ON DELETE CASCADE;--> statement-breakpoint
@@ -816,6 +828,7 @@ ALTER TABLE "expenses" ADD CONSTRAINT "expenses_workspace_id_workspaces_id_fkey"
 ALTER TABLE "expenses" ADD CONSTRAINT "expenses_contact_fk" FOREIGN KEY ("workspace_id","contact_id") REFERENCES "contacts"("workspace_id","id");--> statement-breakpoint
 ALTER TABLE "schedule_runs" ADD CONSTRAINT "schedule_runs_schedule_fk" FOREIGN KEY ("workspace_id","schedule_id") REFERENCES "schedules"("workspace_id","id") ON DELETE CASCADE;--> statement-breakpoint
 ALTER TABLE "schedule_runs" ADD CONSTRAINT "schedule_runs_document_fk" FOREIGN KEY ("workspace_id","document_id") REFERENCES "documents"("workspace_id","id");--> statement-breakpoint
+ALTER TABLE "schedule_runs" ADD CONSTRAINT "schedule_runs_delivery_fk" FOREIGN KEY ("workspace_id","delivery_id") REFERENCES "deliveries"("workspace_id","id");--> statement-breakpoint
 ALTER TABLE "schedules" ADD CONSTRAINT "schedules_template_fk" FOREIGN KEY ("workspace_id","template_id") REFERENCES "templates"("workspace_id","id") ON DELETE CASCADE;--> statement-breakpoint
 ALTER TABLE "templates" ADD CONSTRAINT "templates_workspace_id_workspaces_id_fkey" FOREIGN KEY ("workspace_id") REFERENCES "workspaces"("id") ON DELETE CASCADE;--> statement-breakpoint
 ALTER TABLE "templates" ADD CONSTRAINT "templates_contact_fk" FOREIGN KEY ("workspace_id","contact_id") REFERENCES "contacts"("workspace_id","id");--> statement-breakpoint
@@ -832,6 +845,7 @@ ALTER TABLE "memberships" ADD CONSTRAINT "memberships_workspace_id_workspaces_id
 ALTER TABLE "memberships" ADD CONSTRAINT "memberships_user_id_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "auth"."user"("id") ON DELETE RESTRICT;--> statement-breakpoint
 ALTER TABLE "number_reservations" ADD CONSTRAINT "number_reservations_workspace_id_workspaces_id_fkey" FOREIGN KEY ("workspace_id") REFERENCES "workspaces"("id") ON DELETE CASCADE;--> statement-breakpoint
 ALTER TABLE "number_reservations" ADD CONSTRAINT "number_reservations_series_fk" FOREIGN KEY ("workspace_id","series_id") REFERENCES "numbering_series"("workspace_id","id");--> statement-breakpoint
+ALTER TABLE "number_reservations" ADD CONSTRAINT "number_reservations_document_fk" FOREIGN KEY ("workspace_id","document_id") REFERENCES "documents"("workspace_id","id");--> statement-breakpoint
 ALTER TABLE "numbering_counters" ADD CONSTRAINT "numbering_counters_series_fk" FOREIGN KEY ("workspace_id","series_id") REFERENCES "numbering_series"("workspace_id","id") ON DELETE CASCADE;--> statement-breakpoint
 ALTER TABLE "numbering_series" ADD CONSTRAINT "numbering_series_workspace_id_workspaces_id_fkey" FOREIGN KEY ("workspace_id") REFERENCES "workspaces"("id") ON DELETE CASCADE;--> statement-breakpoint
 ALTER TABLE "tax_regime_periods" ADD CONSTRAINT "tax_regime_periods_workspace_id_workspaces_id_fkey" FOREIGN KEY ("workspace_id") REFERENCES "workspaces"("id") ON DELETE CASCADE;--> statement-breakpoint

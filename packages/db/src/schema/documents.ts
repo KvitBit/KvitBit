@@ -90,6 +90,10 @@ export const documents = pgTable(
     reminderEpoch: integer("reminder_epoch").notNull().default(0),
     scheduleId: uuid("schedule_id"),
     occurrence: isoDate("occurrence"),
+    /** Credit Note reason (core-ports.md D7). */
+    correctionReason: text("correction_reason"),
+    /** Cancellation reason (core-ports.md:725). */
+    cancellationReason: text("cancellation_reason"),
     issuedAt: instant("issued_at"),
     cancelledAt: instant("cancelled_at"),
     revision: revision(),
@@ -156,9 +160,24 @@ export const documentLines = pgTable(
     unit: text("unit"),
     unitPrice: decimal("unit_price").notNull(),
     vat: vatTreatment("vat").notNull(),
+    /**
+     * Final Invoice deduction line (core-ports.md D8): the Payment Tax Document (or, outside
+     * `vat_payer`, the Proforma) it deducts, with the deducted VAT frozen at issue.
+     */
+    deductsDocumentId: uuid("deducts_document_id"),
+    deductedVat: money("deducted_vat"),
   },
   (t) => [
     unique("document_lines_document_position_unique").on(t.documentId, t.position),
+    foreignKey({
+      name: "document_lines_deducts_document_fk",
+      columns: [t.workspaceId, t.deductsDocumentId],
+      foreignColumns: [documents.workspaceId, documents.id],
+    }),
+    check(
+      "document_lines_deducted_vat_on_deduction",
+      sql`${t.deductedVat} is null or ${t.deductsDocumentId} is not null`,
+    ),
     foreignKey({
       name: "document_lines_document_fk",
       columns: [t.workspaceId, t.documentId],
@@ -174,7 +193,8 @@ export const documentLines = pgTable(
 
 /**
  * Links between documents (core-ports.md:700, :814-818). Stored in the forward direction only;
- * `corrected_by` is the read-side inverse of `corrects`.
+ * `corrected_by` is the read-side inverse of `corrects`. `final_invoice_for` goes from the
+ * Proforma to its Final Invoice (D8) and is unique on both ends: one Final Invoice per Proforma.
  */
 export const documentRelations = pgTable(
   "document_relations",
@@ -188,6 +208,12 @@ export const documentRelations = pgTable(
   (t) => [
     primaryKey({ columns: [t.fromDocumentId, t.toDocumentId, t.relation] }),
     index("document_relations_to_idx").on(t.toDocumentId),
+    uniqueIndex("document_relations_one_final_invoice_per_proforma")
+      .on(t.fromDocumentId)
+      .where(sql`${t.relation} = 'final_invoice_for'`),
+    uniqueIndex("document_relations_final_invoice_one_proforma")
+      .on(t.toDocumentId)
+      .where(sql`${t.relation} = 'final_invoice_for'`),
     foreignKey({
       name: "document_relations_from_fk",
       columns: [t.workspaceId, t.fromDocumentId],
@@ -332,7 +358,7 @@ export const shareViewEvents = pgTable(
     kind: shareEventKind("kind").notNull(),
     device: shareDevice("device").notNull(),
     visitorHash: text("visitor_hash").notNull(),
-    at: createdAt(),
+    at: createdAt("at"),
   },
   (t) => [
     index("share_view_events_dedupe_idx").on(t.shareLinkId, t.visitorHash, t.kind, t.at),

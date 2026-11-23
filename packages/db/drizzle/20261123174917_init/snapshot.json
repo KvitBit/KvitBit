@@ -1,7 +1,7 @@
 {
   "version": "8",
   "dialect": "postgres",
-  "id": "3450f376-6427-4590-b674-484159140a4e",
+  "id": "16af4ba8-25b1-4da1-a1d0-422badf10712",
   "prevIds": [
     "00000000-0000-0000-0000-000000000000"
   ],
@@ -3381,6 +3381,32 @@
     {
       "type": "uuid",
       "typeSchema": null,
+      "notNull": false,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "deducts_document_id",
+      "entityType": "columns",
+      "schema": "public",
+      "table": "document_lines"
+    },
+    {
+      "type": "numeric(18,2)",
+      "typeSchema": null,
+      "notNull": false,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "deducted_vat",
+      "entityType": "columns",
+      "schema": "public",
+      "table": "document_lines"
+    },
+    {
+      "type": "uuid",
+      "typeSchema": null,
       "notNull": true,
       "dimensions": 0,
       "default": null,
@@ -3899,6 +3925,32 @@
       "table": "documents"
     },
     {
+      "type": "text",
+      "typeSchema": null,
+      "notNull": false,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "correction_reason",
+      "entityType": "columns",
+      "schema": "public",
+      "table": "documents"
+    },
+    {
+      "type": "text",
+      "typeSchema": null,
+      "notNull": false,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "cancellation_reason",
+      "entityType": "columns",
+      "schema": "public",
+      "table": "documents"
+    },
+    {
       "type": "timestamp with time zone",
       "typeSchema": null,
       "notNull": false,
@@ -4348,7 +4400,7 @@
       "default": "now()",
       "generated": null,
       "identity": null,
-      "name": "created_at",
+      "name": "at",
       "entityType": "columns",
       "schema": "public",
       "table": "share_view_events"
@@ -4855,7 +4907,7 @@
       "default": "now()",
       "generated": null,
       "identity": null,
-      "name": "created_at",
+      "name": "at",
       "entityType": "columns",
       "schema": "public",
       "table": "schedule_runs"
@@ -4882,19 +4934,6 @@
       "generated": null,
       "identity": null,
       "name": "delivery_id",
-      "entityType": "columns",
-      "schema": "public",
-      "table": "schedule_runs"
-    },
-    {
-      "type": "delivery_status",
-      "typeSchema": "public",
-      "notNull": false,
-      "dimensions": 0,
-      "default": null,
-      "generated": null,
-      "identity": null,
-      "name": "delivery_status",
       "entityType": "columns",
       "schema": "public",
       "table": "schedule_runs"
@@ -5064,6 +5103,19 @@
       "generated": null,
       "identity": null,
       "name": "paused_at",
+      "entityType": "columns",
+      "schema": "public",
+      "table": "schedules"
+    },
+    {
+      "type": "timestamp with time zone",
+      "typeSchema": null,
+      "notNull": false,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "detached_at",
       "entityType": "columns",
       "schema": "public",
       "table": "schedules"
@@ -5284,7 +5336,7 @@
       "default": "now()",
       "generated": null,
       "identity": null,
-      "name": "created_at",
+      "name": "consumed_at",
       "entityType": "columns",
       "schema": "public",
       "table": "altcha_replays"
@@ -5323,7 +5375,7 @@
       "default": "now()",
       "generated": null,
       "identity": null,
-      "name": "created_at",
+      "name": "at",
       "entityType": "columns",
       "schema": "public",
       "table": "audit_entries"
@@ -5402,6 +5454,19 @@
       "generated": null,
       "identity": null,
       "name": "actor_system_job",
+      "entityType": "columns",
+      "schema": "public",
+      "table": "audit_entries"
+    },
+    {
+      "type": "jsonb",
+      "typeSchema": null,
+      "notNull": false,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "actor_job",
       "entityType": "columns",
       "schema": "public",
       "table": "audit_entries"
@@ -6337,7 +6402,7 @@
       "default": "now()",
       "generated": null,
       "identity": null,
-      "name": "created_at",
+      "name": "joined_at",
       "entityType": "columns",
       "schema": "public",
       "table": "memberships"
@@ -6415,7 +6480,7 @@
       "default": "now()",
       "generated": null,
       "identity": null,
-      "name": "created_at",
+      "name": "reserved_at",
       "entityType": "columns",
       "schema": "public",
       "table": "number_reservations"
@@ -6670,9 +6735,9 @@
     {
       "type": "locale",
       "typeSchema": "public",
-      "notNull": true,
+      "notNull": false,
       "dimensions": 0,
-      "default": "'cs'",
+      "default": null,
       "generated": null,
       "identity": null,
       "name": "locale",
@@ -6884,6 +6949,19 @@
       "generated": null,
       "identity": null,
       "name": "default_due_days",
+      "entityType": "columns",
+      "schema": "public",
+      "table": "workspaces"
+    },
+    {
+      "type": "text",
+      "typeSchema": null,
+      "notNull": false,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "default_note",
       "entityType": "columns",
       "schema": "public",
       "table": "workspaces"
@@ -7876,6 +7954,48 @@
       "nameExplicit": true,
       "columns": [
         {
+          "value": "from_document_id",
+          "isExpression": false,
+          "asc": true,
+          "nullsFirst": false,
+          "opclass": null
+        }
+      ],
+      "isUnique": true,
+      "where": "\"relation\" = 'final_invoice_for'",
+      "with": "",
+      "method": "btree",
+      "concurrently": false,
+      "name": "document_relations_one_final_invoice_per_proforma",
+      "entityType": "indexes",
+      "schema": "public",
+      "table": "document_relations"
+    },
+    {
+      "nameExplicit": true,
+      "columns": [
+        {
+          "value": "to_document_id",
+          "isExpression": false,
+          "asc": true,
+          "nullsFirst": false,
+          "opclass": null
+        }
+      ],
+      "isUnique": true,
+      "where": "\"relation\" = 'final_invoice_for'",
+      "with": "",
+      "method": "btree",
+      "concurrently": false,
+      "name": "document_relations_final_invoice_one_proforma",
+      "entityType": "indexes",
+      "schema": "public",
+      "table": "document_relations"
+    },
+    {
+      "nameExplicit": true,
+      "columns": [
+        {
           "value": "workspace_id",
           "isExpression": false,
           "asc": true,
@@ -8107,7 +8227,7 @@
           "opclass": null
         },
         {
-          "value": "created_at",
+          "value": "at",
           "isExpression": false,
           "asc": true,
           "nullsFirst": false,
@@ -8199,11 +8319,11 @@
         }
       ],
       "isUnique": true,
-      "where": null,
+      "where": "\"detached_at\" is null",
       "with": "",
       "method": "btree",
       "concurrently": false,
-      "name": "schedules_template_unique",
+      "name": "schedules_one_attached_per_template",
       "entityType": "indexes",
       "schema": "public",
       "table": "schedules"
@@ -8254,7 +8374,7 @@
           "opclass": null
         },
         {
-          "value": "created_at",
+          "value": "at",
           "isExpression": false,
           "asc": true,
           "nullsFirst": false,
@@ -8282,7 +8402,7 @@
           "opclass": null
         },
         {
-          "value": "created_at",
+          "value": "at",
           "isExpression": false,
           "asc": true,
           "nullsFirst": false,
@@ -9008,6 +9128,25 @@
       "nameExplicit": true,
       "columns": [
         "workspace_id",
+        "deducts_document_id"
+      ],
+      "schemaTo": "public",
+      "tableTo": "documents",
+      "columnsTo": [
+        "workspace_id",
+        "id"
+      ],
+      "onUpdate": "NO ACTION",
+      "onDelete": "NO ACTION",
+      "name": "document_lines_deducts_document_fk",
+      "entityType": "fks",
+      "schema": "public",
+      "table": "document_lines"
+    },
+    {
+      "nameExplicit": true,
+      "columns": [
+        "workspace_id",
         "document_id"
       ],
       "schemaTo": "public",
@@ -9399,6 +9538,25 @@
       "nameExplicit": true,
       "columns": [
         "workspace_id",
+        "delivery_id"
+      ],
+      "schemaTo": "public",
+      "tableTo": "deliveries",
+      "columnsTo": [
+        "workspace_id",
+        "id"
+      ],
+      "onUpdate": "NO ACTION",
+      "onDelete": "NO ACTION",
+      "name": "schedule_runs_delivery_fk",
+      "entityType": "fks",
+      "schema": "public",
+      "table": "schedule_runs"
+    },
+    {
+      "nameExplicit": true,
+      "columns": [
+        "workspace_id",
         "template_id"
       ],
       "schemaTo": "public",
@@ -9669,6 +9827,25 @@
       "onUpdate": "NO ACTION",
       "onDelete": "NO ACTION",
       "name": "number_reservations_series_fk",
+      "entityType": "fks",
+      "schema": "public",
+      "table": "number_reservations"
+    },
+    {
+      "nameExplicit": true,
+      "columns": [
+        "workspace_id",
+        "document_id"
+      ],
+      "schemaTo": "public",
+      "tableTo": "documents",
+      "columnsTo": [
+        "workspace_id",
+        "id"
+      ],
+      "onUpdate": "NO ACTION",
+      "onDelete": "NO ACTION",
+      "name": "number_reservations_document_fk",
       "entityType": "fks",
       "schema": "public",
       "table": "number_reservations"
@@ -10385,6 +10562,13 @@
       "table": "oauth_consent"
     },
     {
+      "value": "\"workspace_id\" is null or (\"user_id\" is not null and cardinality(\"granted_scopes\") > 0)",
+      "name": "oauth_consent_grant_bound",
+      "entityType": "checks",
+      "schema": "auth",
+      "table": "oauth_consent"
+    },
+    {
       "value": "(\"reminder_policy_mode\" = 'custom') = (\"reminder_offsets_days\" is not null)",
       "name": "contacts_reminder_offsets_match_mode",
       "entityType": "checks",
@@ -10418,6 +10602,13 @@
       "entityType": "checks",
       "schema": "public",
       "table": "deliveries"
+    },
+    {
+      "value": "\"deducted_vat\" is null or \"deducts_document_id\" is not null",
+      "name": "document_lines_deducted_vat_on_deduction",
+      "entityType": "checks",
+      "schema": "public",
+      "table": "document_lines"
     },
     {
       "value": "\"from_document_id\" <> \"to_document_id\"",
@@ -10513,6 +10704,13 @@
     {
       "value": "(\"actor_user_id\" is not null and \"actor_channel\" is not null and \"actor_system_job\" is null) or (\"actor_user_id\" is null and \"actor_channel\" is null and \"actor_system_job\" is not null)",
       "name": "audit_entries_one_actor",
+      "entityType": "checks",
+      "schema": "public",
+      "table": "audit_entries"
+    },
+    {
+      "value": "(\"actor_system_job\" is null) = (\"actor_job\" is null)",
+      "name": "audit_entries_job_with_system_actor",
       "entityType": "checks",
       "schema": "public",
       "table": "audit_entries"

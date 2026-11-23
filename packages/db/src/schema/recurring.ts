@@ -14,8 +14,8 @@ import {
 } from "drizzle-orm/pg-core";
 import { createdAt, id, instant, revision, updatedAt, workspaceIdColumn } from "./columns";
 import { contacts } from "./contacts";
-import { documents } from "./documents";
-import { cadenceUnit, deliveryStatus, draftableKind, recurringOutcome } from "./enums";
+import { deliveries, documents } from "./documents";
+import { cadenceUnit, draftableKind, recurringOutcome } from "./enums";
 import { workspaces } from "./workspaces";
 
 const isoDate = (name: string) => date(name, { mode: "string" });
@@ -52,7 +52,8 @@ export const templates = pgTable(
 /**
  * Recurring Schedules: at most one per Template (core-ports.md:939-954, §5.6). `every` is stored
  * as unit + interval. `next_occurrence` is advanced by compare-and-set (core-ports.md:1366).
- * Changes are made through the Template, whose revision covers the schedule.
+ * Changes are made through the Template, whose revision covers the schedule. Detaching sets
+ * `detached_at` instead of deleting, so issued documents and run history keep their schedule.
  */
 export const schedules = pgTable(
   "schedules",
@@ -69,12 +70,15 @@ export const schedules = pgTable(
     nextOccurrence: isoDate("next_occurrence"),
     pausedReason: text("paused_reason"),
     pausedAt: instant("paused_at"),
+    detachedAt: instant("detached_at"),
     createdAt: createdAt(),
     updatedAt: updatedAt(),
   },
   (t) => [
     unique("schedules_workspace_id_id_unique").on(t.workspaceId, t.id),
-    uniqueIndex("schedules_template_unique").on(t.templateId),
+    uniqueIndex("schedules_one_attached_per_template")
+      .on(t.templateId)
+      .where(sql`${t.detachedAt} is null`),
     foreignKey({
       name: "schedules_template_fk",
       columns: [t.workspaceId, t.templateId],
@@ -94,10 +98,9 @@ export const scheduleRuns = pgTable(
     scheduleId: uuid("schedule_id").notNull(),
     occurrence: isoDate("occurrence").notNull(),
     outcome: recurringOutcome("outcome").notNull(),
-    at: createdAt(),
+    at: createdAt("at"),
     documentId: uuid("document_id"),
     deliveryId: uuid("delivery_id"),
-    deliveryStatus: deliveryStatus("delivery_status"),
     failure: text("failure"),
   },
   (t) => [
@@ -111,6 +114,11 @@ export const scheduleRuns = pgTable(
       name: "schedule_runs_document_fk",
       columns: [t.workspaceId, t.documentId],
       foreignColumns: [documents.workspaceId, documents.id],
+    }),
+    foreignKey({
+      name: "schedule_runs_delivery_fk",
+      columns: [t.workspaceId, t.deliveryId],
+      foreignColumns: [deliveries.workspaceId, deliveries.id],
     }),
   ],
 );

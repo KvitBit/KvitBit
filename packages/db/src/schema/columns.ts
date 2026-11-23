@@ -14,7 +14,8 @@ export const workspaceIdColumn = () => uuid("workspace_id").notNull();
 
 export const instant = (name: string) => timestamp(name, { withTimezone: true, mode: "string" });
 
-export const createdAt = () => instant("created_at").defaultNow().notNull();
+/** Insert time; `name` defaults to `created_at`. */
+export const createdAt = (name = "created_at") => instant(name).defaultNow().notNull();
 
 export const updatedAt = () => instant("updated_at").defaultNow().notNull();
 

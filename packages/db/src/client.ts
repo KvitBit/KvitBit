@@ -24,8 +24,14 @@ export type PgLayer = Layer.Layer<
   Config.ConfigError | SqlError
 >;
 
-/** `PgClient` + `SqlClient` from `DATABASE_URL`. */
-export const layer: PgLayer = PgClient.layerConfig({ url: databaseUrl });
+/**
+ * `PgClient` + `SqlClient` from `DATABASE_URL`. Named prepared statements are off because the
+ * hosted URL is a transaction-mode pooler (core-ports.md S5).
+ */
+export const layer: PgLayer = PgClient.layerConfig({
+  url: databaseUrl,
+  prepare: Config.succeed(false),
+});
 
 /** `PgClient` + `SqlClient` from `DATABASE_URL_UNPOOLED`, else `DATABASE_URL`. */
 export const layerUnpooled: PgLayer = PgClient.layerConfig({ url: unpooledDatabaseUrl });

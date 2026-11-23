@@ -26,13 +26,15 @@ export const auditEntries = pgTable(
   {
     id: id(),
     workspaceId: workspaceIdColumn().references(() => workspaces.id, { onDelete: "cascade" }),
-    at: createdAt(),
+    at: createdAt("at"),
     actorUserId: text("actor_user_id"),
     actorChannel: channel("actor_channel"),
     actorClientKind: clientKind("actor_client_kind"),
     actorClientId: text("actor_client_id"),
     actorClientName: text("actor_client_name"),
     actorSystemJob: systemJob("actor_system_job"),
+    /** The System job's identifiers, e.g. `{ scheduleId, occurrence }` (core-ports.md:222-226). */
+    actorJob: jsonb("actor_job"),
     subjectEntity: entityKind("subject_entity").notNull(),
     subjectId: text("subject_id").notNull(),
     subjectRevision: integer("subject_revision"),
@@ -46,6 +48,10 @@ export const auditEntries = pgTable(
     check(
       "audit_entries_one_actor",
       sql`(${t.actorUserId} is not null and ${t.actorChannel} is not null and ${t.actorSystemJob} is null) or (${t.actorUserId} is null and ${t.actorChannel} is null and ${t.actorSystemJob} is not null)`,
+    ),
+    check(
+      "audit_entries_job_with_system_actor",
+      sql`(${t.actorSystemJob} is null) = (${t.actorJob} is null)`,
     ),
     check(
       "audit_entries_client_complete",
@@ -92,7 +98,7 @@ export const altchaReplays = pgTable(
     challengeDigest: text("challenge_digest").primaryKey(),
     scope: botScope("scope").notNull(),
     expiresAt: instant("expires_at").notNull(),
-    consumedAt: createdAt(),
+    consumedAt: createdAt("consumed_at"),
   },
   (t) => [index("altcha_replays_expires_at_idx").on(t.expiresAt)],
 );

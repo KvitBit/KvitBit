@@ -256,3 +256,155 @@ describe("constraints", () => {
     expect(prefs).toEqual({ theme_style: "elegant", theme_source: null, revision: 1 });
   });
 });
+
+describe("council follow-up constraints", () => {
+  const ws = "0190a000-0000-7000-8000-0000000000f0";
+  const other = "0190a000-0000-7000-8000-0000000000f9";
+  const contact = "0190a000-0000-7000-8000-0000000000f1";
+  const proforma = "0190a000-0000-7000-8000-0000000000f2";
+  const finalA = "0190a000-0000-7000-8000-0000000000f3";
+  const finalB = "0190a000-0000-7000-8000-0000000000f4";
+  const template = "0190a000-0000-7000-8000-0000000000f5";
+
+  beforeAll(async () => {
+    await client.exec(`
+      insert into auth."user" (id, name, email) values ('u9', 'Grantor', 'grantor@example.test');
+      insert into workspaces (id, slug, name) values ('${ws}', 'gamma', 'Gamma'), ('${other}', 'delta', 'Delta');
+      insert into contacts (id, workspace_id, name) values ('${contact}', '${ws}', 'C');
+      insert into documents (id, workspace_id, kind, status, number, contact_id, currency, language, payment_method) values
+        ('${proforma}', '${ws}', 'proforma', 'issued', 'P1', '${contact}', 'CZK', 'cs', 'bank_transfer'),
+        ('${finalA}', '${ws}', 'invoice', 'issued', 'F1', '${contact}', 'CZK', 'cs', 'bank_transfer'),
+        ('${finalB}', '${ws}', 'invoice', 'issued', 'F2', '${contact}', 'CZK', 'cs', 'bank_transfer');
+      insert into templates (id, workspace_id, name, kind, contact_id, body)
+        values ('${template}', '${ws}', 'Monthly', 'invoice', '${contact}', '{}');
+    `);
+  });
+
+  test("the expected workspace-scoped foreign keys exist", async () => {
+    const names = (
+      await rows<{ conname: string }>(`select conname from pg_constraint where contype = 'f'`)
+    ).map((r) => r.conname);
+    for (const fk of [
+      "documents_contact_fk",
+      "documents_series_fk",
+      "documents_bank_account_fk",
+      "documents_schedule_fk",
+      "document_lines_document_fk",
+      "document_lines_deducts_document_fk",
+      "document_relations_from_fk",
+      "document_relations_to_fk",
+      "payments_document_fk",
+      "payments_expense_fk",
+      "payments_tax_document_fk",
+      "deliveries_document_fk",
+      "share_links_document_fk",
+      "share_view_events_share_link_fk",
+      "attachments_expense_fk",
+      "templates_contact_fk",
+      "schedules_template_fk",
+      "schedule_runs_schedule_fk",
+      "schedule_runs_document_fk",
+      "schedule_runs_delivery_fk",
+      "numbering_counters_series_fk",
+      "number_reservations_series_fk",
+      "number_reservations_document_fk",
+      "contact_preferred_series_contact_fk",
+      "contact_preferred_series_series_fk",
+      "expenses_contact_fk",
+    ]) {
+      expect(names).toContain(fk);
+    }
+  });
+
+  test("a number reservation cannot point at another Workspace's document", async () => {
+    await expect(
+      client.query(
+        `insert into number_reservations (workspace_id, kind, number, document_id) values ($1, 'invoice', 'X1', $2)`,
+        [other, finalA],
+      ),
+    ).rejects.toThrow(/number_reservations_document_fk/);
+  });
+
+  test("a Proforma has at most one Final Invoice", async () => {
+    const link = (to: string) =>
+      client.query(
+        `insert into document_relations (workspace_id, from_document_id, to_document_id, relation)
+         values ($1, $2, $3, 'final_invoice_for')`,
+        [ws, proforma, to],
+      );
+    await link(finalA);
+    await expect(link(finalB)).rejects.toThrow(/document_relations_one_final_invoice_per_proforma/);
+  });
+
+  test("a deducted VAT amount needs the deducted document", async () => {
+    await expect(
+      client.query(
+        `insert into document_lines (id, workspace_id, document_id, position, description, unit_price, vat, deducted_vat)
+         values ('0190a000-0000-7000-8000-0000000000fa', $1, $2, 1, 'Advance', '-100', 'standard', '-21')`,
+        [ws, finalA],
+      ),
+    ).rejects.toThrow(/document_lines_deducted_vat_on_deduction/);
+  });
+
+  test("a detached schedule keeps its row while a new one attaches", async () => {
+    const attach = (id: string) =>
+      client.query(
+        `insert into schedules (id, workspace_id, template_id, cadence_unit, cadence_interval, start_on, issue_as)
+         values ($1, $2, $3, 'months', 1, '2026-01-01', 'invoice')`,
+        [id, ws, template],
+      );
+    await attach("0190a000-0000-7000-8000-0000000000fb");
+    await expect(attach("0190a000-0000-7000-8000-0000000000fc")).rejects.toThrow(
+      /schedules_one_attached_per_template/,
+    );
+    await client.query(`update schedules set detached_at = now() where id = $1`, [
+      "0190a000-0000-7000-8000-0000000000fb",
+    ]);
+    await attach("0190a000-0000-7000-8000-0000000000fc");
+  });
+
+  test("System audit entries carry the job identifiers", async () => {
+    const audit = (job: string | null) =>
+      client.query(
+        `insert into audit_entries (id, workspace_id, actor_system_job, actor_job, subject_entity, subject_id, action)
+         values (gen_random_uuid(), $1, 'DataExport', $2::jsonb, 'Export', 'e1', 'export.ready')`,
+        [ws, job],
+      );
+    await expect(audit(null)).rejects.toThrow(/audit_entries_job_with_system_actor/);
+    await audit('{"exportId":"e1"}');
+  });
+
+  test("a Workspace-bound MCP grant needs a user and scopes", async () => {
+    await client.query(
+      `insert into auth.oauth_client (id, client_id, redirect_uris) values ('c1', 'client-1', '{https://a.test/cb}')`,
+    );
+    const grant = (userId: string | null, scopes: string) =>
+      client.query(
+        `insert into auth.oauth_consent (id, client_id, user_id, scopes, workspace_id, access, granted_scopes)
+         values (gen_random_uuid()::text, 'client-1', $1, '{kvitbit:read}', $2, 'read', $3::text[])`,
+        [userId, ws, scopes],
+      );
+    await expect(grant(null, "{documents:read}")).rejects.toThrow(/oauth_consent_grant_bound/);
+    await expect(grant("u9", "{}")).rejects.toThrow(/oauth_consent_grant_bound/);
+    await grant("u9", "{documents:read}");
+  });
+
+  test("timestamp columns keep their own names", async () => {
+    const cols = (
+      await rows<{ name: string }>(
+        `select table_name || '.' || column_name as name from information_schema.columns
+         where table_schema = 'public' and column_name in ('joined_at', 'reserved_at', 'consumed_at', 'at')`,
+      )
+    ).map((c) => c.name);
+    for (const col of [
+      "memberships.joined_at",
+      "number_reservations.reserved_at",
+      "altcha_replays.consumed_at",
+      "audit_entries.at",
+      "schedule_runs.at",
+      "share_view_events.at",
+    ]) {
+      expect(cols).toContain(col);
+    }
+  });
+});
