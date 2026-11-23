@@ -125,4 +125,36 @@ describe("SqlCache", () => {
     );
     expect(inner.state.calls).toBe(2);
   });
+
+  test("a database failure inside a caller's transaction leaves that transaction usable", async () => {
+    const inner = counting(FixtureRates.make([friday]));
+    await withSqlCache(
+      inner.layer,
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient;
+        const after = yield* sql.withTransaction(
+          Effect.gen(function* () {
+            yield* sql`drop table fx_fixings`;
+            expect((yield* fixing("2026-11-20")).sequence).toBe(225);
+            return yield* sql<{ ok: number }>`select 1 as ok`;
+          }),
+        );
+        expect(after).toEqual([{ ok: 1 }]);
+      }),
+    );
+  });
+
+  test("round-trips rates that BigDecimal formats in exponent notation", async () => {
+    const tiny = FixtureRates.fixing("2026-11-20", 225, { XAU: [1, "0.00000000000000001234"] });
+    const inner = counting(FixtureRates.make([tiny]));
+    await withSqlCache(
+      inner.layer,
+      Effect.gen(function* () {
+        const first = yield* fixing("2026-11-20");
+        const second = yield* fixing("2026-11-20");
+        expect(plain(second)).toEqual(plain(first));
+      }),
+    );
+    expect(inner.state.calls).toBe(1);
+  });
 });

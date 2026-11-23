@@ -13,7 +13,9 @@
  *   does not record.
  * - The cache is best effort: a failed read, an unreadable row or a failed write is logged
  *   and the request goes to, or returns from, the inner adapter. Only the inner adapter's
- *   failure fails the request.
+ *   failure fails the request. Each statement runs in its own transaction, which becomes a
+ *   savepoint inside a caller's transaction, so a swallowed SQL error rolls back only the
+ *   cache statement and leaves the caller's transaction usable.
  *
  * `rates` is stored as `[{ code, quantity, rate }]` with `rate` as a decimal string.
  */
@@ -23,7 +25,14 @@ import { type CnbFixing, ExchangeRates } from "@kvitbit/domain/ports";
 import { BigDecimal, Effect, Layer, Option, Schema } from "effect";
 import { SqlClient } from "effect/sql";
 
-const DecimalString = Schema.String.pipe(Schema.check(Schema.isPattern(/^-?\d+(?:\.\d+)?$/)));
+/** What `BigDecimal.format` writes: plain digits, or exponent notation at 16+ digits of scale. */
+const DecimalString = Schema.String.pipe(
+  Schema.check(
+    Schema.makeFilter((s: string) => Option.isSome(BigDecimal.fromString(s)), {
+      expected: "a decimal string",
+    }),
+  ),
+);
 
 const StoredRates = Schema.Array(
   Schema.Struct({
@@ -55,6 +64,7 @@ export const make: Effect.Effect<
     sql<{ sequence: unknown; rates: unknown }>`
       select sequence, rates from fx_fixings where fixing_date = ${date}
     `.pipe(
+      sql.withTransaction,
       Effect.flatMap(([row]) =>
         row === undefined
           ? Effect.succeedNone
@@ -80,6 +90,7 @@ export const make: Effect.Effect<
       on conflict (fixing_date) do update
         set sequence = excluded.sequence, rates = excluded.rates, fetched_at = excluded.fetched_at
     `.pipe(
+      sql.withTransaction,
       Effect.asVoid,
       Effect.catch((cause) => Effect.logWarning("fx_fixings write failed", cause)),
     );
