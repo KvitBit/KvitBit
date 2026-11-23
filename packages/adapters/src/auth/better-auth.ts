@@ -280,6 +280,9 @@ export const oauthRegisterHook: BeforeHook = {
   }),
 };
 
+/** The cimd plugin's metadata document size limit (`MAX_RESPONSE_BYTES` in @better-auth/cimd). */
+export const CLIENT_METADATA_MAX_BYTES = 5120;
+
 /**
  * Most the metadata guard reads of a body without `Content-Length`: the larger of the cimd
  * plugin's 5 KiB document limit and the provider's 64 KiB JWKS limit, so every resource the
@@ -303,8 +306,10 @@ const readBounded = async (
   limit: number,
   signal: AbortSignal | null | undefined,
 ): Promise<Uint8Array | undefined> => {
+  // Cleanup is started, never awaited: a custom stream's cancel may take arbitrarily long,
+  // and the caller's deadline must not wait for it.
   if (signal?.aborted) {
-    await body.cancel(abortError(signal)).catch(() => undefined);
+    void body.cancel(abortError(signal)).catch(() => undefined);
     throw abortError(signal);
   }
   const reader = body.getReader();
@@ -328,7 +333,7 @@ const readBounded = async (
       if (done) break;
       size += value.byteLength;
       if (size > limit) {
-        await reader.cancel().catch(() => undefined);
+        void reader.cancel().catch(() => undefined);
         return undefined;
       }
       chunks.push(value);
@@ -354,7 +359,8 @@ const readBounded = async (
  *
  * Responses the consumers reject on their own pass through untouched, so their checks see the
  * original: anything but a plain 200, a redirected response, and a body whose declared
- * `Content-Length` exceeds `CLIENT_METADATA_GUARD_MAX_BYTES`. Other bodies are read up to that
+ * `Content-Length` exceeds `CLIENT_METADATA_MAX_BYTES` (the resolver refuses such a document
+ * from the header alone; a JWKS reader applies its own larger limit). Other bodies are read up to that
  * bound (a longer stream is cancelled and refused) and handed on as a new response with the
  * original status and headers, so the plugin's 5 KiB document limit and the provider's JWKS
  * limit still apply to them. Aborting the fetch signal aborts the read.
@@ -367,7 +373,7 @@ export const guardClientMetadataFetch =
       return response;
     }
     const declared = Number.parseInt(response.headers.get("content-length") ?? "", 10);
-    if (Number.isFinite(declared) && declared > CLIENT_METADATA_GUARD_MAX_BYTES) return response;
+    if (Number.isFinite(declared) && declared > CLIENT_METADATA_MAX_BYTES) return response;
     const bytes = await readBounded(response.body, CLIENT_METADATA_GUARD_MAX_BYTES, init?.signal);
     if (bytes === undefined) {
       return refuseMetadata(413, `Response exceeds ${CLIENT_METADATA_GUARD_MAX_BYTES} bytes`);

@@ -398,6 +398,64 @@ describe("OAuth 2.1 for MCP", () => {
         },
       });
     const json = { "content-type": "application/json" };
+    /** A stream whose cancel never finishes, like a transport with slow cleanup. */
+    const slowCleanup = (first?: Uint8Array, counter?: { pulled: number }) =>
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          if (first !== undefined) controller.enqueue(first);
+        },
+        pull(controller) {
+          if (counter === undefined) return new Promise(() => undefined);
+          counter.pulled += 1;
+          controller.enqueue(new Uint8Array(1024).fill(32));
+          return undefined;
+        },
+        cancel: () => new Promise<void>(() => undefined),
+      });
+
+    test("a metadata document declared above 5 KiB reaches the resolver unread", async () => {
+      const original = new Response(slowCleanup(), {
+        headers: { ...json, "content-length": String(6 * 1024) },
+      });
+      const guarded = guardClientMetadataFetch(async () => original);
+      expect(await guarded(CIMD_CLIENT_ID)).toBe(original);
+    });
+
+    test("an abort settles even while stream cleanup is pending", async () => {
+      const before = new AbortController();
+      before.abort(new Error("timed out"));
+      const pre = guardClientMetadataFetch(
+        async () => new Response(slowCleanup(), { headers: json }),
+      );
+      await expect(pre(CIMD_CLIENT_ID, { signal: before.signal })).rejects.toThrow("timed out");
+
+      const during = new AbortController();
+      const mid = guardClientMetadataFetch(
+        async () => new Response(slowCleanup(new TextEncoder().encode("{")), { headers: json }),
+      );
+      const pending = mid(CIMD_CLIENT_ID, { signal: during.signal });
+      setTimeout(() => during.abort(new Error("timed out")), 10);
+      await expect(pending).rejects.toThrow("timed out");
+    });
+
+    test("an overflow settles even while stream cleanup is pending", async () => {
+      const counter = { pulled: 0 };
+      const guarded = guardClientMetadataFetch(
+        async () => new Response(slowCleanup(undefined, counter), { headers: json }),
+      );
+      expect((await guarded(CIMD_CLIENT_ID)).status).toBe(413);
+    });
+
+    test("a small document passes on with its headers", async () => {
+      const guarded = guardClientMetadataFetch(async () =>
+        Response.json(cimdDocument(CIMD_CLIENT_ID), { headers: { "cache-control": "max-age=60" } }),
+      );
+      const passed = await guarded(CIMD_CLIENT_ID);
+      expect(passed.status).toBe(200);
+      expect(passed.headers.get("cache-control")).toBe("max-age=60");
+      expect(passed.headers.get("content-type")).toContain("application/json");
+      expect(await passed.json()).toMatchObject({ client_id: CIMD_CLIENT_ID });
+    });
 
     test("a declared oversized body passes through unread for the consumer's own check", async () => {
       const counter = { pulled: 0 };
