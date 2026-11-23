@@ -152,4 +152,39 @@ describe("test fakes", () => {
       }),
     );
   });
+
+  test("MemoryBlobStorage stops reading at the first chunk past maxBytes", async () => {
+    const key = "ws/a/big.bin" as BlobKey;
+    const exit = await runTest(
+      account(),
+      Effect.gen(function* () {
+        const blobs = yield* BlobStorage;
+        const body = Stream.concat(
+          Stream.make(new Uint8Array([1, 2, 3])),
+          Stream.die("the tail must not be read"),
+        );
+        return yield* Effect.flip(blobs.put(key, body, { contentType: "x", maxBytes: 2 }));
+      }),
+    );
+    expect(exit).toEqual(Exit.succeed(new BlobTooLarge({ maxBytes: 2 })));
+  });
+
+  test("MemoryBlobStorage returns detached copies", async () => {
+    const key = "ws/a/two.bin" as BlobKey;
+    const exit = await runTest(
+      account(),
+      Effect.gen(function* () {
+        const blobs = yield* BlobStorage;
+        const input = new Uint8Array([1, 2]);
+        yield* blobs.put(key, Stream.make(input), { contentType: "x", maxBytes: 10 });
+        input[0] = 7;
+        const first = yield* Effect.flatMap(blobs.get(key), Stream.runCollect);
+        const chunk = first[0];
+        if (chunk !== undefined) chunk[0] = 9;
+        const second = yield* Effect.flatMap(blobs.get(key), Stream.runCollect);
+        return second.map((c) => [...c]);
+      }),
+    );
+    expect(exit).toEqual(Exit.succeed([[1, 2]]));
+  });
 });

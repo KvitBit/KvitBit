@@ -12,6 +12,7 @@ import { IdGenerator, IdGeneratorLive } from "../src/shared/ids";
 import { makeRequestOutcome } from "../src/shared/requestOutcome";
 import { checkRevision } from "../src/shared/revision";
 import { CoreStore, StoreUnavailable } from "../src/store/CoreStore";
+import { CoreStoreMemory } from "../src/store/memory";
 import { account, member, runTest, system, TEST_NOW, WORKSPACE_A } from "./helpers";
 
 const Payload = Schema.Struct({ amount: Schema.BigDecimal, note: Schema.optional(Schema.String) });
@@ -68,6 +69,19 @@ describe("withIdempotency (rule C3)", () => {
       }),
     );
     expect(exit).toEqual(Exit.succeed({ same: true, total: "10.5", runs: 1, replayed: true }));
+  });
+
+  test("replay works without a RequestOutcome (MCP, workflows)", async () => {
+    const program = Effect.gen(function* () {
+      const runs = yield* Ref.make(0);
+      const first = yield* call(runs, { amount: amount("1") });
+      const second = yield* call(runs, { amount: amount("1") });
+      return { same: first.id === second.id, runs: yield* Ref.get(runs) };
+    });
+    const exit = await Effect.runPromiseExit(
+      program.pipe(Effect.provide(Layer.merge(CoreStoreMemory, TestClock.layer()))),
+    );
+    expect(exit).toEqual(Exit.succeed({ same: true, runs: 1 }));
   });
 
   test("the first call is not marked replayed", async () => {

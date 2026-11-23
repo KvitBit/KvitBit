@@ -210,9 +210,16 @@ export class MemoryBlobStorage extends Context.Service<
         ) =>
           Effect.gen(function* () {
             yield* guard;
-            const chunks = yield* Stream.runCollect(body);
-            const size = chunks.reduce((n, c) => n + c.byteLength, 0);
-            if (size > meta.maxBytes) return yield* new BlobTooLarge({ maxBytes: meta.maxBytes });
+            // Stop reading at the first chunk past the limit, like a streaming upload.
+            const chunks: Array<Uint8Array> = [];
+            let size = 0;
+            yield* Stream.runForEach(body, (chunk) => {
+              size += chunk.byteLength;
+              if (size > meta.maxBytes)
+                return Effect.fail(new BlobTooLarge({ maxBytes: meta.maxBytes }));
+              chunks.push(chunk.slice());
+              return Effect.void;
+            });
             const bytes = new Uint8Array(size);
             let offset = 0;
             for (const chunk of chunks) {
@@ -230,7 +237,7 @@ export class MemoryBlobStorage extends Context.Service<
             yield* guard;
             const blob = (yield* Ref.get(memory.blobs)).get(key);
             if (blob === undefined) return yield* new BlobMissing({ key });
-            return Stream.succeed(blob.bytes);
+            return Stream.succeed(blob.bytes.slice()); // detached copy
           }),
         delete: (key: BlobKey) =>
           Effect.andThen(

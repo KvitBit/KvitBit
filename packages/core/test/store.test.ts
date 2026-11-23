@@ -629,3 +629,33 @@ describe("in-memory CoreStore: council regressions", () => {
     expect(exit).toEqual(Exit.succeed({ a: 1 }));
   });
 });
+
+describe("in-memory CoreStore: review regressions", () => {
+  const key = { workspaceId: WORKSPACE_A, seriesId: "s7" as NumberingSeriesId, period: "all" };
+
+  test("a counter lock taken in a rolled-back savepoint does not authorize set", async () => {
+    const exit = await run(({ store }) =>
+      store.transaction(
+        Effect.gen(function* () {
+          yield* Effect.ignore(
+            store.transaction(Effect.andThen(store.counters.lock(key), Effect.fail("rollback"))),
+          );
+          return yield* Effect.exit(store.counters.set(key, 2));
+        }),
+      ),
+    );
+    expect(Exit.isSuccess(exit) && isDefect(exit.value)).toBe(true);
+  });
+
+  test("a counter lock taken in a committed savepoint carries to the enclosing transaction", async () => {
+    const exit = await run(({ store }) =>
+      Effect.gen(function* () {
+        yield* store.transaction(
+          Effect.andThen(store.transaction(store.counters.lock(key)), store.counters.set(key, 3)),
+        );
+        return yield* store.counters.peek(key);
+      }),
+    );
+    expect(exit).toEqual(Exit.succeed(3));
+  });
+});

@@ -39,7 +39,7 @@ interface Frame {
   children: number;
   readonly savepoints: Semaphore.Semaphore;
   readonly afterCommit: Array<Effect.Effect<void>>;
-  /** Counters locked in this transaction (kept on the outermost frame). */
+  /** Counters this frame locked; promoted to the parent when a savepoint commits. */
   readonly lockedCounters: Set<string>;
 }
 
@@ -88,7 +88,9 @@ const scopeKey = (scope: RequestScope) =>
 
 const defect = (message: string) => Effect.die(new Error(`CoreStore: ${message}`));
 
-const rootOf = (frame: Frame): Frame => (frame.parent === null ? frame : rootOf(frame.parent));
+/** Whether this frame or an enclosing one holds the counter lock. */
+const holdsCounter = (frame: Frame | null, key: string): boolean =>
+  frame !== null && (frame.lockedCounters.has(key) || holdsCounter(frame.parent, key));
 
 /** Whether this frame and every ancestor are still open. */
 const chainOpen = (frame: Frame | null): boolean =>
@@ -163,6 +165,7 @@ export const makeMemoryStore: Effect.Effect<MemoryStore> = Effect.sync(() => {
             }
             if (parent !== null) {
               parent.afterCommit.push(...frame.afterCommit);
+              for (const k of frame.lockedCounters) parent.lockedCounters.add(k);
             } else {
               // A claim that was never completed is not committed.
               for (const [k, v] of state.requestLog) if (isPending(v)) state.requestLog.delete(k);
@@ -359,7 +362,7 @@ export const makeMemoryStore: Effect.Effect<MemoryStore> = Effect.sync(() => {
       lock: (key) =>
         write("counters.lock", (frame) => {
           const k = counterKey(key);
-          rootOf(frame).lockedCounters.add(k);
+          frame.lockedCounters.add(k);
           const next = state.counters.get(k);
           if (next !== undefined) return Effect.succeed(next);
           state.counters.set(k, 1);
@@ -370,7 +373,7 @@ export const makeMemoryStore: Effect.Effect<MemoryStore> = Effect.sync(() => {
         write("counters.set", (frame) => {
           const k = counterKey(key);
           const current = state.counters.get(k);
-          if (current === undefined || !rootOf(frame).lockedCounters.has(k)) {
+          if (current === undefined || !holdsCounter(frame, k)) {
             return defect(`counters.set without counters.lock in this transaction (${k})`);
           }
           if (!Number.isInteger(next) || next < current) {
