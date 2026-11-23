@@ -1,7 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import { Invalid, Unavailable } from "@kvitbit/domain/contract";
 import type { RegistryRecord } from "@kvitbit/domain/ports";
-import { Duration, Effect, Exit, Layer, Ref } from "effect";
+import { CompanyRegistry } from "@kvitbit/domain/ports";
+import { Deferred, Duration, Effect, Exit, Fiber, Layer, Ref } from "effect";
 import { TestClock } from "effect/testing";
 import { isValidIco, RegistryLookup } from "../../../src/modules/workspaces/registry";
 import { FakeCompanyRegistry } from "../../../src/testing";
@@ -87,5 +88,36 @@ describe("RegistryLookup", () => {
     if (!Exit.isSuccess(exit)) return;
     expect(exit.value.error).toEqual(new Unavailable({ dependency: "company_registry" }));
     expect(exit.value.after?.name).toBe("Acme s.r.o.");
+  });
+
+  test("lookups are serialized: a second IČO waits until the first registry call returns", async () => {
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        const gate = yield* Deferred.make<void>();
+        const started = yield* Ref.make<ReadonlyArray<string>>([]);
+        const registry = Layer.succeed(CompanyRegistry, {
+          lookup: (ico: string) =>
+            Effect.gen(function* () {
+              yield* Ref.update(started, (all) => [...all, ico]);
+              if (ico === "27074358") yield* Deferred.await(gate);
+              return record;
+            }),
+        });
+        return yield* Effect.gen(function* () {
+          const lookup = yield* RegistryLookup;
+          const first = yield* Effect.forkChild(lookup.lookup("27074358"));
+          const second = yield* Effect.forkChild(lookup.lookup("25596641"));
+          yield* Effect.yieldNow;
+          yield* Effect.yieldNow;
+          const whileGated = yield* Ref.get(started);
+          yield* Deferred.succeed(gate, undefined);
+          yield* Fiber.join(first);
+          yield* Fiber.join(second);
+          return { whileGated, all: yield* Ref.get(started) };
+        }).pipe(Effect.provide(RegistryLookup.layer.pipe(Layer.provide(registry))));
+      }),
+    );
+    expect(result.whileGated).toEqual(["27074358"]);
+    expect(result.all).toEqual(["27074358", "25596641"]);
   });
 });

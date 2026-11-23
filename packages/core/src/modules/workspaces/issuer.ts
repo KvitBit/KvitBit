@@ -1,7 +1,9 @@
 /**
  * `IssuerSnapshots`: the issuer half of a document snapshot in the shape agreed with
  * core-documents (board #407, #414), derived from `WorkspaceSnapshots`. No policy check; runs
- * inside the caller's transaction. Another Workspace or a missing one is `NotFound{Workspace}`.
+ * inside the caller's transaction. The requested Workspace must be the current caller's own
+ * (Member or System caller, rule R2): any other Workspace, a missing one, or any other caller kind
+ * is `NotFound{Workspace}`, so a mis-scoped document operation never reads another issuer.
  */
 import type {
   BankAccountId,
@@ -11,6 +13,7 @@ import type {
   TaxRegime,
   WorkspaceId,
 } from "@kvitbit/domain/contract";
+import { CurrentCaller, NotFound as NotFoundError } from "@kvitbit/domain/contract";
 import { Context, Effect, Layer } from "effect";
 import type { WorkspaceBillingDefaults, WorkspaceReminderPolicy } from "../../shared/overrides";
 import type { StoreUnavailable } from "../../store/CoreStore";
@@ -73,41 +76,51 @@ export class IssuerSnapshots extends Context.Service<
     readonly forDocument: (
       workspaceId: WorkspaceId,
       on: IsoDate,
-    ) => Effect.Effect<IssuerForDocument, NotFound | StoreUnavailable>;
+    ) => Effect.Effect<IssuerForDocument, NotFound | StoreUnavailable, CurrentCaller>;
   }
 >()("kvitbit/core/IssuerSnapshots") {}
+
+/** Fails `NotFound{Workspace}` unless `workspaceId` is the current Member or System caller's. */
+const ownWorkspace = (workspaceId: WorkspaceId): Effect.Effect<void, NotFound, CurrentCaller> =>
+  Effect.flatMap(Effect.service(CurrentCaller), (caller) =>
+    (caller._tag === "Member" || caller._tag === "System") && caller.workspaceId === workspaceId
+      ? Effect.void
+      : Effect.fail(new NotFoundError({ entity: "Workspace", id: workspaceId })),
+  );
 
 export const IssuerSnapshotsLive: Layer.Layer<IssuerSnapshots, never, WorkspaceSnapshots> =
   Layer.effect(
     IssuerSnapshots,
     Effect.map(Effect.service(WorkspaceSnapshots), (snapshots) => ({
       forDocument: (workspaceId, on) =>
-        Effect.map(snapshots.get(workspaceId, on), (s) => ({
-          party: {
-            workspaceId: s.workspaceId,
-            name: s.issuingEntity.name,
-            ico: s.issuingEntity.ico,
-            dic: s.issuingEntity.dic,
-            address: { ...s.issuingEntity.address },
-            registerEntry: s.issuingEntity.registerEntry,
-            email: s.issuingEntity.email,
-            phone: s.issuingEntity.phone,
-            web: s.issuingEntity.web,
-          },
-          regime: s.taxRegime,
-          bankAccounts: s.bankAccounts.map((a) => ({
-            id: a.id,
-            name: a.name,
-            currency: a.currency,
-            accountNumber: czechAccountNumber(a.iban),
-            iban: a.iban,
-            bic: a.bic,
-            isDefault: a.isDefault,
+        Effect.andThen(ownWorkspace(workspaceId), snapshots.get(workspaceId, on)).pipe(
+          Effect.map((s) => ({
+            party: {
+              workspaceId: s.workspaceId,
+              name: s.issuingEntity.name,
+              ico: s.issuingEntity.ico,
+              dic: s.issuingEntity.dic,
+              address: { ...s.issuingEntity.address },
+              registerEntry: s.issuingEntity.registerEntry,
+              email: s.issuingEntity.email,
+              phone: s.issuingEntity.phone,
+              web: s.issuingEntity.web,
+            },
+            regime: s.taxRegime,
+            bankAccounts: s.bankAccounts.map((a) => ({
+              id: a.id,
+              name: a.name,
+              currency: a.currency,
+              accountNumber: czechAccountNumber(a.iban),
+              iban: a.iban,
+              bic: a.bic,
+              isDefault: a.isDefault,
+            })),
+            billing: s.billing,
+            reminders: s.reminders,
+            paymentRounding: s.paymentRounding,
+            revision: s.revision,
           })),
-          billing: s.billing,
-          reminders: s.reminders,
-          paymentRounding: s.paymentRounding,
-          revision: s.revision,
-        })),
+        ),
     })),
   );

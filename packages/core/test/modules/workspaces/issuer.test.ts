@@ -3,7 +3,8 @@ import type { IsoDate, WorkspaceId } from "@kvitbit/domain/contract";
 import { NotFound } from "@kvitbit/domain/contract";
 import { Effect } from "effect";
 import { czechAccountNumber, IssuerSnapshots } from "../../../src/modules/workspaces";
-import { as, failure, scenario, seed, W } from "./harness";
+import { system } from "../../helpers";
+import { accountOf, as, failure, OWNER, scenario, seed, W } from "./harness";
 
 describe("czechAccountNumber", () => {
   test("derives prefix-number/bank from a CZ IBAN and null otherwise", () => {
@@ -27,10 +28,9 @@ describe("IssuerSnapshots.forDocument", () => {
         yield* as(s.admin)(
           ws.saveBankAccount({ iban: "DE89370400440532013000", currency: "EUR" } as never),
         );
-        const issuer = yield* issuers.forDocument(
-          s.workspaceId as WorkspaceId,
-          "2026-11-23" as IsoDate,
-        );
+        const ws_ = s.workspaceId as WorkspaceId;
+        const today = "2026-11-23" as IsoDate;
+        const issuer = yield* as(s.member)(issuers.forDocument(ws_, today));
         expect(issuer.party).toMatchObject({ workspaceId: s.workspaceId, name: "Acme s.r.o." });
         expect(issuer.regime).toBe("non_vat_payer");
         expect(issuer.bankAccounts.map((a) => [a.currency, a.accountNumber, a.isDefault])).toEqual([
@@ -38,9 +38,24 @@ describe("IssuerSnapshots.forDocument", () => {
           ["EUR", null, true],
         ]);
         expect(issuer.billing.seriesByKind.invoice).toBeDefined();
-        const other = "019a0000-0000-7000-8000-000000000000" as WorkspaceId;
-        expect(yield* failure(issuers.forDocument(other, "2026-11-23" as IsoDate))).toEqual(
-          new NotFound({ entity: "Workspace", id: other }),
+        // A System caller of the same Workspace (e.g. recurring issuance) reads it too.
+        const sys = yield* as(system(undefined, ws_))(issuers.forDocument(ws_, today));
+        expect(sys.party.name).toBe("Acme s.r.o.");
+        // An existing other Workspace is NotFound for this caller, and vice versa (R2).
+        const b = yield* seed("Beta s.r.o.");
+        const wsB = b.workspaceId as WorkspaceId;
+        expect(yield* failure(as(s.member)(issuers.forDocument(wsB, today)))).toEqual(
+          new NotFound({ entity: "Workspace", id: wsB }),
+        );
+        expect(yield* failure(as(system(undefined, ws_))(issuers.forDocument(wsB, today)))).toEqual(
+          new NotFound({ entity: "Workspace", id: wsB }),
+        );
+        expect((yield* as(b.owner)(issuers.forDocument(wsB, today))).party.name).toBe(
+          "Beta s.r.o.",
+        );
+        // Callers without a Workspace never read one.
+        expect(yield* failure(as(accountOf(OWNER))(issuers.forDocument(ws_, today)))).toEqual(
+          new NotFound({ entity: "Workspace", id: ws_ }),
         );
       }),
     ));
