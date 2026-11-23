@@ -22,7 +22,7 @@ import {
   DocumentsRepoMemory,
   SCHEDULE_OCCURRENCE,
 } from "../../../src/modules/documents";
-import { isValidIban } from "../../../src/modules/documents/qr";
+import { isValidBic, isValidIban } from "../../../src/modules/documents/qr";
 import { NumberingSeries, NumberingTestLayer } from "../../../src/modules/numbering";
 import { makeRequestOutcome } from "../../../src/shared/requestOutcome";
 import { CoreStore, StoreUnavailable, UniqueViolation } from "../../../src/store/CoreStore";
@@ -831,5 +831,73 @@ describe("review round 4 regressions (IBAN structure per SEPA country)", () => {
     ];
     expect(valid.filter((iban) => !isValidIban(iban))).toEqual([]);
     expect(invalid.filter(isValidIban)).toEqual([]);
+  });
+});
+
+describe("review round 6 regressions (QR validation order, BIC country)", () => {
+  const withAccount = (iban: string, bic: string | null, price: string) =>
+    Effect.gen(function* () {
+      const f = yield* DocumentFixtures;
+      const current = (yield* Ref.get(f.issuers)).get(WS);
+      if (!current) return yield* Effect.die("seed missing");
+      yield* f.putIssuer({
+        ...current,
+        bankAccounts: current.bankAccounts.map((a) => ({ ...a, iban, bic })),
+      });
+      const docs = yield* Documents;
+      const result = yield* Effect.result(
+        docs.createDraft(
+          invoiceInput({
+            currency: EUR,
+            lines: [{ description: "x", unitPrice: dec(price), vat: "outside_scope" }],
+          }),
+        ),
+      );
+      return [result, (yield* docs.list({})).items.length] as const;
+    });
+  const fixings = [fixing("2026-11-20", "25")];
+
+  test("a BIC with an unassigned country code (SGSBJJTX) is Invalid and nothing is stored", async () => {
+    const [result, listed] = ok(
+      await scenario(withAccount("AL47212110090000000235698741", "SGSBJJTX", "10"), { fixings }),
+    );
+    expect(result._tag === "Failure" ? result.failure : null).toMatchObject({
+      issues: [{ params: { field: "bic", reason: "bic_invalid" } }],
+    });
+    expect(listed).toBe(0);
+  });
+
+  test("above the QR maximum the document is stored without a QR even with a bad BIC", async () => {
+    const [result, listed] = ok(
+      await scenario(withAccount("DE89370400440532013000", "BAD-BIC", "1000000000"), { fixings }),
+    );
+    if (result._tag !== "Success") throw new Error("expected a draft");
+    expect(result.success.paymentQr).toBeNull();
+    expect(listed).toBe(1);
+  });
+
+  test("an EPC payment needs the beneficiary (issuer) name", async () => {
+    const [result, listed] = ok(
+      await scenario(
+        Effect.gen(function* () {
+          const f = yield* DocumentFixtures;
+          const current = (yield* Ref.get(f.issuers)).get(WS);
+          if (!current) return yield* Effect.die("seed missing");
+          yield* f.putIssuer({ ...current, party: { ...current.party, name: "  " } });
+          return yield* withAccount("DE89370400440532013000", null, "10");
+        }),
+        { fixings },
+      ),
+    );
+    expect(result._tag === "Failure" ? result.failure : null).toMatchObject({
+      issues: [{ path: ["issuer"], params: { field: "name", reason: "required" } }],
+    });
+    expect(listed).toBe(0);
+  });
+
+  test("isValidBic checks structure and the ISO 3166 country", () => {
+    const good = ["KOMBCZPP", "SGSBALTX", "DEUTDEFF500", "NWBKGB2L"];
+    expect(good.filter((b) => !isValidBic(b))).toEqual([]);
+    expect(["SGSBJJTX", "BAD-BIC", "KOMBCZP", "1OMBCZPP"].filter(isValidBic)).toEqual([]);
   });
 });

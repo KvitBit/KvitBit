@@ -144,9 +144,27 @@ export const isValidIban = (iban: string): boolean => {
 /** A caller's variable symbol must be 1-10 digits (SPAYD X-VS). */
 export const isValidVariableSymbol = (vs: string): boolean => /^\d{1,10}$/.test(vs);
 
-/** ISO 9362 BIC: 4 letters (bank), 2 letters (country), 2 alphanumerics, optional 3 (branch). */
+/** ISO 3166-1 alpha-2 assigned codes, plus XK (Kosovo), which SWIFT assigns in BICs. */
+const COUNTRIES = new Set(
+  (
+    "AD AE AF AG AI AL AM AO AQ AR AS AT AU AW AX AZ BA BB BD BE BF BG BH BI BJ BL BM BN BO BQ " +
+    "BR BS BT BV BW BY BZ CA CC CD CF CG CH CI CK CL CM CN CO CR CU CV CW CX CY CZ DE DJ DK DM " +
+    "DO DZ EC EE EG EH ER ES ET FI FJ FK FM FO FR GA GB GD GE GF GG GH GI GL GM GN GP GQ GR GS " +
+    "GT GU GW GY HK HM HN HR HT HU ID IE IL IM IN IO IQ IR IS IT JE JM JO JP KE KG KH KI KM KN " +
+    "KP KR KW KY KZ LA LB LC LI LK LR LS LT LU LV LY MA MC MD ME MF MG MH MK ML MM MN MO MP MQ " +
+    "MR MS MT MU MV MW MX MY MZ NA NC NE NF NG NI NL NO NP NR NU NZ OM PA PE PF PG PH PK PL PM " +
+    "PN PR PS PT PW PY QA RE RO RS RU RW SA SB SC SD SE SG SH SI SJ SK SL SM SN SO SR SS ST SV " +
+    "SX SY SZ TC TD TF TG TH TJ TK TL TM TN TO TR TT TV TW TZ UA UG UM US UY UZ VA VC VE VG VI " +
+    "VN VU WF WS YE YT ZA ZM ZW XK"
+  ).split(" "),
+);
+
+/**
+ * ISO 9362 BIC: 4 letters (institution), an assigned 2-letter country code, 2 alphanumerics
+ * (location), optional 3 alphanumerics (branch).
+ */
 export const isValidBic = (bic: string): boolean =>
-  /^[A-Z]{4}[A-Z]{2}[A-Z0-9]{2}([A-Z0-9]{3})?$/.test(bic);
+  /^[A-Z]{4}[A-Z]{2}[A-Z0-9]{2}([A-Z0-9]{3})?$/.test(bic) && COUNTRIES.has(bic.slice(4, 6));
 
 /**
  * SEPA countries outside the EEA. EPC069-12 v002 makes the beneficiary BIC optional only
@@ -170,16 +188,37 @@ const SEPA_NON_EEA = new Set([
 const spaydValue = (value: string) => value.toUpperCase().replaceAll("*", "%2A");
 
 export const forDocument = (doc: QrSource): Result.Result<PaymentQr | null, Invalid> => {
+  // 1. Every "no QR applies" case first (D12 and the parent's amount exception), so nothing
+  //    below can make such a document invalid.
   if (doc.kind === "credit_note" || doc.status === "cancelled") return Result.succeed(null);
   const account = doc.issuer.bankAccount;
   const iban = account?.iban?.replace(/\s/g, "").toUpperCase();
   if (!account || !iban) return Result.succeed(null);
   if (doc.currency !== "CZK" && doc.currency !== "EUR") return Result.succeed(null);
+  const format = doc.currency === "CZK" ? "spayd" : "epc";
   const gross = doc.totals.gross.amount;
   if (!BigDecimal.isPositive(gross)) return Result.succeed(null);
-  if (!isValidIban(iban))
+  if (BigDecimal.isGreaterThan(gross, format === "spayd" ? MAX_SPAYD : MAX_EPC)) {
+    return Result.succeed(null);
+  }
+
+  // 2. A QR applies: its inputs must be valid (5.3).
+  if (!isValidIban(iban)) {
     return invalid(["bankAccount"], "request.malformed", { field: "iban", reason: "iban_invalid" });
-  let vs: string | null = null;
+  }
+  const bic = account.bic?.trim().toUpperCase() || null;
+  if (bic !== null && !isValidBic(bic)) {
+    return invalid(["bankAccount"], "request.malformed", { field: "bic", reason: "bic_invalid" });
+  }
+  if (format === "epc" && bic === null && SEPA_NON_EEA.has(iban.slice(0, 2))) {
+    return invalid(["bankAccount"], "request.malformed", { field: "bic", reason: "bic_required" });
+  }
+  const name = truncate(doc.issuer.name, format === "spayd" ? 35 : 70);
+  if (format === "epc" && name === "") {
+    // EPC069-12: the beneficiary name is mandatory.
+    return invalid(["issuer"], "request.malformed", { field: "name", reason: "required" });
+  }
+  let vs: string | null;
   if (doc.variableSymbol !== null) {
     if (!isValidVariableSymbol(doc.variableSymbol)) {
       return invalid(["variableSymbol"], "request.malformed", {
@@ -191,12 +230,9 @@ export const forDocument = (doc: QrSource): Result.Result<PaymentQr | null, Inva
     const digits = (doc.number ?? "").replace(/\D/g, "");
     vs = digits === "" ? null : digits.slice(-10);
   }
-  const bic = account.bic?.trim().toUpperCase() || null;
-  if (bic !== null && !isValidBic(bic)) {
-    return invalid(["bankAccount"], "request.malformed", { field: "bic", reason: "bic_invalid" });
-  }
-  if (doc.currency === "CZK") {
-    if (BigDecimal.isGreaterThan(gross, MAX_SPAYD)) return Result.succeed(null);
+
+  // 3. Encode.
+  if (format === "spayd") {
     const fields = [
       "SPD",
       "1.0",
@@ -206,13 +242,8 @@ export const forDocument = (doc: QrSource): Result.Result<PaymentQr | null, Inva
       `DT:${doc.dueOn.replaceAll("-", "")}`,
     ];
     if (vs !== null) fields.push(`X-VS:${vs}`);
-    const name = truncate(doc.issuer.name, 35);
     if (name !== "") fields.push(`RN:${spaydValue(name)}`);
-    return Result.succeed({ format: "spayd", payload: fields.join("*") });
-  }
-  if (BigDecimal.isGreaterThan(gross, MAX_EPC)) return Result.succeed(null);
-  if (bic === null && SEPA_NON_EEA.has(iban.slice(0, 2))) {
-    return invalid(["bankAccount"], "request.malformed", { field: "bic", reason: "bic_required" });
+    return Result.succeed({ format, payload: fields.join("*") });
   }
   const fields = [
     "BCD",
@@ -220,7 +251,7 @@ export const forDocument = (doc: QrSource): Result.Result<PaymentQr | null, Inva
     "1",
     "SCT",
     bic ?? "",
-    truncate(doc.issuer.name, 70),
+    name,
     iban,
     `EUR${amount2(gross)}`,
     "", // purpose
@@ -229,7 +260,7 @@ export const forDocument = (doc: QrSource): Result.Result<PaymentQr | null, Inva
   ];
   // EPC069-12 §2.2: the payload ends at its last populated field.
   while (fields.length > 0 && fields[fields.length - 1] === "") fields.pop();
-  return Result.succeed({ format: "epc", payload: fields.join("\n") });
+  return Result.succeed({ format, payload: fields.join("\n") });
 };
 
 /** The view's QR: stored documents passed `forDocument` when composed, so a failure is null. */
