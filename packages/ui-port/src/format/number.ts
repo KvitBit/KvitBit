@@ -69,6 +69,12 @@ const roundTo = (d: Decimal, min: number, max: number): Decimal => {
   return { negative: d.negative && !zero, integer, fraction };
 };
 
+/** The value as displayed with `min`..`max` fraction digits, as a plain decimal string. */
+export const roundedDecimal = (value: DecimalInput, min: number, max: number): string => {
+  const d = roundTo(toDecimal(value), min, Math.max(min, max));
+  return `${d.negative ? "-" : ""}${d.integer}${d.fraction === "" ? "" : `.${d.fraction}`}`;
+};
+
 const cache = new Map<string, Intl.NumberFormat>();
 
 /** Memoised `Intl.NumberFormat` (formatters are costly to build on Hermes). */
@@ -106,8 +112,11 @@ export const formatExact = (
   const max = Math.max(min, intl.maximumFractionDigits ?? 3);
   const d = roundTo(toDecimal(value), min, max);
   const zero = /^0*$/.test(d.integer + d.fraction);
+  // A value that rounds to zero is shown unsigned, whatever signDisplay asked for.
+  const signDisplay = zero && intl.signDisplay !== "never" ? "auto" : intl.signDisplay;
   const format = numberFormat(locale, {
     ...intl,
+    ...(signDisplay === undefined ? {} : { signDisplay }),
     minimumFractionDigits: 1,
     maximumFractionDigits: 1,
   });

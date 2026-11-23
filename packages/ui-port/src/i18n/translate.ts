@@ -1,4 +1,4 @@
-import { formatExact } from "../format/number";
+import { formatExact, roundedDecimal } from "../format/number";
 import type { Text, TextParam } from "../text";
 import { catalogs, type EnCatalog, isMessageKey, type MessageKey } from "./catalog";
 import { FALLBACK_LOCALE, INTL_TAG, type Locale } from "./locale";
@@ -34,7 +34,8 @@ const rulesFor = (locale: Locale): Intl.PluralRules | null => {
 /** Fraction digits a number param is shown with; plurals select on the shown value. */
 const PARAM_FRACTION_DIGITS = 3;
 
-const shown = (n: number): number => Number(n.toFixed(PARAM_FRACTION_DIGITS));
+const shown = (n: number): number =>
+  Number.isFinite(n) ? Number(roundedDecimal(n, 0, PARAM_FRACTION_DIGITS)) : n;
 
 /** Plural category of `count` in `locale` (cs: one, few, many, other; en: one, other). */
 export const pluralCategory = (locale: Locale, count: number): Intl.LDMLPluralRule => {

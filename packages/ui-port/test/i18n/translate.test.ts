@@ -52,6 +52,10 @@ describe("plural rules", () => {
   test("plural selection follows the displayed value", () => {
     expect(t("cs", "common.time.days", { count: 1.0000001 })).toBe("1 den");
     expect(t("en", "common.time.days", { count: 0.9999999 })).toBe("1 day");
+    expect(t("en", "common.time.days", { count: 1.0005 })).toBe("1.001 days");
+    expect(t("cs", "common.time.days", { count: 2.9995 })).toBe("3 dny");
+    expect(fallbackPluralCategory("cs", 2.9995)).toBe("few");
+    expect(fallbackPluralCategory("en", 1.0005)).toBe("other");
   });
 
   test("the PluralRules fallback agrees with Intl for cs and en", () => {

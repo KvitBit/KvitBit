@@ -138,7 +138,7 @@ export const czechAccountToIban = (account: CzechAccount): string => {
   return `CZ${String(check).padStart(2, "0")}${bban}`;
 };
 
-/** Valid Czech IBAN back to the domestic form; undefined for non-CZ or invalid IBANs. */
+/** Valid Czech IBAN back to the domestic form; undefined for non-CZ IBANs, or when the IBAN or its domestic account fails validation. */
 export const ibanToCzechAccount = (input: string): CzechAccount | undefined => {
   const valid = validateIban(input);
   if (Result.isFailure(valid)) return undefined;
@@ -146,5 +146,7 @@ export const ibanToCzechAccount = (input: string): CzechAccount | undefined => {
   if (!iban.startsWith("CZ")) return undefined;
   const prefix = iban.slice(8, 14).replace(/^0+/, "");
   const number = iban.slice(14).replace(/^0+(?=\d{2})/, "");
-  return { prefix, number, bankCode: iban.slice(4, 8) };
+  const account = { prefix, number, bankCode: iban.slice(4, 8) };
+  // mod 97 alone does not prove the domestic prefix/number mod-11 rule.
+  return Result.isSuccess(parseCzechAccount(formatCzechAccount(account))) ? account : undefined;
 };

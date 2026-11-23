@@ -1,6 +1,6 @@
 import { type CurrencyCode, MoneyMath } from "@kvitbit/domain/contract";
 import type { Locale } from "../i18n/locale";
-import { type DecimalInput, formatExact, type Sign, signOf } from "./number";
+import { type DecimalInput, formatExact, roundedDecimal, type Sign, signOf } from "./number";
 
 export interface MoneyInput {
   readonly amount: DecimalInput;
@@ -28,8 +28,9 @@ export const formatMoney = (
 ): string => {
   const currency = money.currency.toUpperCase();
   const scale = options.scale ?? MoneyMath.minorUnitScale(currency as CurrencyCode);
-  const sign = signOf(money.amount);
-  return formatExact(locale, money.amount, {
+  const shown = roundedDecimal(money.amount, scale, scale);
+  const sign = signOf(shown);
+  return formatExact(locale, shown, {
     style: "currency",
     currency,
     currencyDisplay: "symbol",
@@ -48,13 +49,20 @@ export interface MoneyDisplay {
   readonly currency: string;
 }
 
+/** Sign of the amount as displayed (an amount that rounds to zero is "zero"). */
+const displayedSign = (money: MoneyInput, options: MoneyOptions): Sign => {
+  const scale =
+    options.scale ?? MoneyMath.minorUnitScale(money.currency.toUpperCase() as CurrencyCode);
+  return signOf(roundedDecimal(money.amount, scale, scale));
+};
+
 export const moneyDisplay = (
   locale: Locale,
   money: MoneyInput,
   options: MoneyOptions = {},
 ): MoneyDisplay => ({
   text: formatMoney(locale, money, options),
-  sign: signOf(money.amount),
+  sign: displayedSign(money, options),
   tabular: true,
   currency: money.currency.toUpperCase(),
 });

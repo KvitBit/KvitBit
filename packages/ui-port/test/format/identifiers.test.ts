@@ -92,10 +92,17 @@ describe("bank accounts", () => {
     expect(formatIban("CZ6508000000192000145399")).toBe("CZ65 0800 0000 1920 0014 5399");
   });
 
-  test("IBAN rejects reserved check digits and letters in a Czech BBAN", () => {
-    // Same BBAN with check digits 00/01/99 can satisfy mod 97 only by accident; all are reserved.
-    expect(code(validateIban("CZ0108000000192000145399"))).toBe("form.iban_invalid");
-    expect(code(validateIban("CZ99080000001920001453AB"))).toBe("form.iban_invalid");
+  test("IBAN rejects reserved check digits and letters in a Czech BBAN (both pass mod 97)", () => {
+    // 01 is congruent to the true check digits 98, so mod 97 alone would accept it.
+    expect(ok(validateIban("CZ9808000000000000000013"))).toBe("CZ9808000000000000000013");
+    expect(code(validateIban("CZ0108000000000000000013"))).toBe("form.iban_invalid");
+    // Correct mod-97 check digits for a BBAN with letters.
+    expect(code(validateIban("CZ62080000001920001453AB"))).toBe("form.iban_invalid");
+  });
+
+  test("IBAN to Czech account also applies the domestic mod-11 rule", () => {
+    expect(ok(validateIban("CZ9208000000192000145398"))).toBe("CZ9208000000192000145398");
+    expect(ibanToCzechAccount("CZ9208000000192000145398")).toBeUndefined();
     expect(ibanToCzechAccount("CZ6508000000192000145398")).toBeUndefined();
   });
 

@@ -70,6 +70,15 @@ describe("money", () => {
   test("display rounding is half away from zero with carry", () => {
     expect(spaces(formatMoney("cs", { amount: "9.995", currency: "CZK" }))).toBe("10,00 Kč");
     expect(spaces(formatMoney("cs", { amount: "-0.004", currency: "CZK" }))).toBe("0,00 Kč");
+    expect(spaces(formatMoney("cs", { amount: "-0.004", currency: "CZK" }, { signed: true }))).toBe(
+      "0,00 Kč",
+    );
+    expect(moneyDisplay("cs", { amount: "-0.004", currency: "CZK" }, { signed: true }).sign).toBe(
+      "zero",
+    );
+    expect(spaces(formatMoney("cs", { amount: "-12.5", currency: "CZK" }, { signed: true }))).toBe(
+      "-12,50 Kč",
+    );
     expect(spaces(formatMoney("en", { amount: "999.5", currency: "JPY" }))).toBe("JP¥1,000");
   });
 
