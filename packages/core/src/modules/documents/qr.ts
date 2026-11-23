@@ -14,8 +14,8 @@
  * (SPAYD 9,999,999.99 CZK, EPC 999,999,999.99 EUR) gives no QR, so large invoices can still be
  * drafted and issued.
  *
- * Validation (5.3): an IBAN failing ISO 13616 (SEPA country length, CZ/SK numeric BBAN,
- * mod 97) or a variable symbol that is not 1-10 digits is `Invalid`; `compose` runs this on
+ * Validation (5.3): an IBAN failing ISO 13616 (SEPA country BBAN structure from the SWIFT
+ * registry, mod 97) or a variable symbol that is not 1-10 digits is `Invalid`; `compose` runs this on
  * every write and preview, so stored documents always encode. Optional texts (recipient name,
  * remittance) are truncated at a word boundary. A caller's variable symbol is kept exactly; one
  * derived from the document number takes its last ten digits.
@@ -68,56 +68,69 @@ const truncate = (text: string, max: number) => {
   return (space > 0 ? cut.slice(0, space) : clean.slice(0, max)).trim();
 };
 
-/** ISO 13616: 2 letters, 2 check digits, up to 30 alphanumerics, mod 97 = 1. */
-/** IBAN length per SEPA country (SWIFT IBAN registry); SPAYD and EPC are SEPA-only. */
-const IBAN_LENGTH: Readonly<Record<string, number>> = {
-  AD: 24,
-  AT: 20,
-  BE: 16,
-  BG: 22,
-  CH: 21,
-  CY: 28,
-  CZ: 24,
-  DE: 22,
-  DK: 18,
-  EE: 20,
-  ES: 24,
-  FI: 18,
-  FR: 27,
-  GB: 22,
-  GI: 23,
-  GR: 27,
-  HR: 21,
-  HU: 28,
-  IE: 22,
-  IS: 26,
-  IT: 27,
-  LI: 21,
-  LT: 20,
-  LU: 20,
-  LV: 21,
-  MC: 27,
-  MT: 31,
-  NL: 18,
-  NO: 15,
-  PL: 28,
-  PT: 25,
-  RO: 24,
-  SE: 24,
-  SI: 19,
-  SK: 24,
-  SM: 27,
-  VA: 22,
+/**
+ * BBAN structure per SEPA country, from the SWIFT IBAN registry (n digits, a upper-case letters,
+ * c upper-case alphanumerics). SPAYD and EPC are SEPA-only, so a non-SEPA IBAN is invalid here.
+ */
+const BBAN_FORMAT: Readonly<Record<string, string>> = {
+  AD: "4n4n12c",
+  AL: "8n16c",
+  AT: "16n",
+  BE: "12n",
+  BG: "4a4n2n8c",
+  CH: "5n12c",
+  CY: "3n5n16c",
+  CZ: "4n6n10n",
+  DE: "18n",
+  DK: "4n9n1n",
+  EE: "2n2n11n1n",
+  ES: "4n4n1n1n10n",
+  FI: "3n11n",
+  FR: "5n5n11c2n",
+  GB: "4a6n8n",
+  GI: "4a15c",
+  GR: "3n4n16c",
+  HR: "7n10n",
+  HU: "3n4n1n15n1n",
+  IE: "4a6n8n",
+  IS: "4n2n6n10n",
+  IT: "1a5n5n12c",
+  LI: "5n12c",
+  LT: "5n11n",
+  LU: "3n13c",
+  LV: "4a13c",
+  MC: "5n5n11c2n",
+  MD: "2c18c",
+  ME: "3n13n2n",
+  MK: "3n10c2n",
+  MT: "4a5n18c",
+  NL: "4a10n",
+  NO: "4n6n1n",
+  PL: "8n16n",
+  PT: "4n4n11n2n",
+  RO: "4a16c",
+  RS: "3n13n2n",
+  SE: "3n16n1n",
+  SI: "5n8n2n",
+  SK: "4n6n10n",
+  SM: "1a5n5n12c",
+  VA: "3n15n",
 };
-/** Countries whose BBAN is all digits (CZ/SK: bank code, prefix, account number). */
-const NUMERIC_BBAN = new Set(["CZ", "SK"]);
+const CLASS = { n: "[0-9]", a: "[A-Z]", c: "[A-Z0-9]" } as const;
+const BBAN_PATTERN: ReadonlyMap<string, RegExp> = new Map(
+  Object.entries(BBAN_FORMAT).map(([country, format]) => [
+    country,
+    new RegExp(
+      `^${Array.from(format.matchAll(/(\d+)([nac])/g), ([, n, k]) => `${CLASS[k as keyof typeof CLASS]}{${n}}`).join("")}$`,
+    ),
+  ]),
+);
 
-/** ISO 13616 for a SEPA IBAN: registered country and length, BBAN structure, mod 97 = 1. */
+/** ISO 13616 for a SEPA IBAN: registered country BBAN structure (length included), mod 97 = 1. */
 export const isValidIban = (iban: string): boolean => {
   if (!/^[A-Z]{2}\d{2}[A-Z0-9]+$/.test(iban)) return false;
-  const country = iban.slice(0, 2);
-  if (IBAN_LENGTH[country] !== iban.length) return false;
-  if (NUMERIC_BBAN.has(country) && !/^\d+$/.test(iban.slice(4))) return false;
+  const pattern = BBAN_PATTERN.get(iban.slice(0, 2));
+  if (pattern === undefined || !pattern.test(iban.slice(4))) return false;
   const rearranged = iban.slice(4) + iban.slice(0, 4);
   let remainder = 0;
   for (const ch of rearranged) {
