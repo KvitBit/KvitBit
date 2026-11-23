@@ -282,6 +282,16 @@ describe("VatMath.splitAdvance", () => {
     ).toEqual([["1.21", "0.21", "1"]]);
   });
 
+  test("shares carry the payment's own precision (1.005 JPY over two equal buckets)", () => {
+    const two = calc([line("1", "100", "reverse_charge"), line("1", "100", "outside_scope")], {
+      currency: "JPY" as CurrencyCode,
+    });
+    expect(VatMath.splitAdvance(two, d("1.005")).map((k) => s(k.gross))).toEqual([
+      "0.503",
+      "0.502",
+    ]);
+  });
+
   test("a proforma without gross cannot be split", () => {
     expect(() => VatMath.splitAdvance(calc([]), d("1"))).toThrow();
   });
