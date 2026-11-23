@@ -174,13 +174,23 @@ describe("GrantedAccess consistency", () => {
     expect(is(expandAccess({ access: "custom", scopes: ["payments:write"] }))).toBe(true);
   });
 
+  test("presets accept their exact scope set in any order", () => {
+    expect(is({ access: "read", scopes: [...READ_SCOPES].reverse() })).toBe(true);
+    expect(is({ access: "read_write", scopes: [...ALL_SCOPES].reverse() })).toBe(true);
+  });
+
   test("read must carry exactly the ten reads", () => {
     expect(is({ access: "read", scopes: READ_SCOPES.slice(1) })).toBe(false);
+    const [first, ...rest] = READ_SCOPES;
+    if (first === undefined) throw new Error("no read scopes");
+    expect(is({ access: "read", scopes: [first, first, ...rest.slice(1)] })).toBe(false);
+    expect(is({ access: "read", scopes: [...READ_SCOPES, first] })).toBe(false);
     expect(is({ access: "read", scopes: ALL_SCOPES })).toBe(false);
   });
 
   test("read_write must carry all twenty", () => {
     expect(is({ access: "read_write", scopes: READ_SCOPES })).toBe(false);
+    expect(is({ access: "read_write", scopes: ALL_SCOPES.slice(1) })).toBe(false);
   });
 
   test("custom must be non-empty and normalized", () => {

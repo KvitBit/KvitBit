@@ -3,9 +3,10 @@
  *
  * The spec names `AltchaChallenge` and the base64 `X-Altcha` payload without fields, and ADR
  * 0002 picks ALTCHA PoW v2 without pinning an `altcha-lib` 2.x release. Both shapes are therefore
- * open JSON objects here: the edge passes the challenge through from `BotProtection.issue` and
- * hands the decoded payload to `BotProtection.verify`, which owns the field-level checks. Narrow
- * them once the library version is pinned.
+ * open JSON objects here: the edge passes the challenge through from `BotProtection.issue`, and
+ * the server hands the raw header value to `BotProtection.verify`, which owns the field-level
+ * checks; `AltchaPayloadFromHeader` only bounds and shape-checks it at the boundary. Narrow both
+ * once the library version is pinned.
  *
  * Which Better Auth requests need a proof, and with which scope, is the server hook's decision:
  * sign-up alone can carry `sign_up` or `invitation_accept` (section 3.5.1), so no static path
@@ -23,17 +24,15 @@ export const BotScope = Schema.Literals([
 ]);
 export type BotScope = typeof BotScope.Type;
 
-const JsonObject = Schema.Record(Schema.String, Schema.Unknown);
-
 /** `GET /api/v1/bot-protection/challenges/{scope}` success body: a non-empty JSON object. */
-export const AltchaChallenge = JsonObject.pipe(
+export const AltchaChallenge = Schema.JsonObject.pipe(
   Schema.check(Schema.isMinProperties(1)),
   Schema.brand("AltchaChallenge"),
 );
 export type AltchaChallenge = typeof AltchaChallenge.Type;
 
 /** The solved challenge the widget produces, as a JSON object. */
-export const AltchaPayload = JsonObject.pipe(Schema.brand("AltchaPayload"));
+export const AltchaPayload = Schema.JsonObject.pipe(Schema.brand("AltchaPayload"));
 export type AltchaPayload = typeof AltchaPayload.Type;
 
 /** Upper bound on the `X-Altcha` header value, in characters of base64. */

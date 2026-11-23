@@ -47,7 +47,7 @@ import {
   TemplateView,
   WorkspaceView,
 } from "@kvitbit/domain/contract";
-import { Schema } from "effect";
+import { Schema, type SchemaAST } from "effect";
 import { CorrectionLines, DeliveryQueued, SendInput } from "./groups/documents";
 import {
   ContactRole,
@@ -242,6 +242,11 @@ export const UpdateDraftArgs = Schema.Struct({
   revision: Revision,
   patch: DocumentPatch,
 });
+const ContactRevision = Schema.Int.annotate({
+  description:
+    "The Contact revision you last read; only together with contactId. A stale value fails with Conflict revision_changed.",
+});
+
 const UPSERT_CONTACT_FORMS =
   "Exactly one of three forms: { ico, role? } creates a Contact from ARES (Contacts.fromIco); " +
   "{ contact } creates one from the given fields; { contactId, revision, contact } updates that " +
@@ -259,7 +264,7 @@ export const UpsertContactArgs = Schema.Struct({
   contactId: Schema.optional(ContactId).annotateKey({
     description: "Contact to update. Requires revision and contact.",
   }),
-  revision: Schema.optional(Revision).annotateKey({ description: "Only together with contactId." }),
+  revision: Schema.optional(ContactRevision),
   contact: Schema.optional(ContactInput).annotateKey({
     description: "Contact fields to create, or to save over contactId. Not with ico.",
   }),
@@ -393,6 +398,11 @@ export interface McpToolDefinition {
   readonly annotations: ToolAnnotations;
   readonly input: Schema.Top;
   readonly output: Schema.Top;
+  /**
+   * Arguments outside `input` are an error, not ignored: decode with `toolInputParseOptions` and
+   * advertise `toolInputJsonSchema`. Set where a dropped argument would silently widen a result.
+   */
+  readonly closedInput: boolean;
 }
 
 const hints = (flags: ReadonlyArray<"RO" | "D" | "I" | "O">): ToolAnnotations => ({
@@ -404,12 +414,13 @@ const hints = (flags: ReadonlyArray<"RO" | "D" | "I" | "O">): ToolAnnotations =>
 
 const tool = <const Name extends string>(
   name: Name,
-  definition: Omit<McpToolDefinition, "name" | "annotations"> & {
+  definition: Omit<McpToolDefinition, "name" | "annotations" | "closedInput"> & {
     readonly hints: ReadonlyArray<"RO" | "D" | "I" | "O">;
+    readonly closedInput?: true;
   },
 ): McpToolDefinition & { readonly name: Name } => {
-  const { hints: flags, ...rest } = definition;
-  return { name, ...rest, annotations: hints(flags) };
+  const { hints: flags, closedInput, ...rest } = definition;
+  return { name, ...rest, annotations: hints(flags), closedInput: closedInput === true };
 };
 
 /** The 28 curated tools of section 6.5, in table order. */
@@ -484,6 +495,7 @@ export const MCP_TOOLS = [
     mode: "single",
     hints: ["RO"],
     input: ListExpensesArgs,
+    closedInput: true,
     output: Page(ExpenseSummary),
   }),
   tool("get_expense", {
@@ -694,13 +706,25 @@ export const requiredActions = (
  * JSON Schema for a tool's `inputSchema` or `outputSchema`. MCP needs `type: "object"` at the
  * top, which a union of structs (`anyOf`) lacks, so it is added there.
  */
-export const toolJsonSchema = (schema: Schema.Top): Record<string, unknown> => {
-  const document = Schema.toJsonSchemaDocument(schema);
+export const toolJsonSchema = (
+  schema: Schema.Top,
+  options?: { readonly onExcessProperty?: "ignore" | "error" },
+): Record<string, unknown> => {
+  const document = Schema.toJsonSchemaDocument(schema, options);
   const root: Record<string, unknown> = { ...document.schema };
   if (Object.keys(document.definitions).length > 0) root.$defs = document.definitions;
   if (root.type === undefined && root.anyOf !== undefined) root.type = "object";
   return root;
 };
+
+/** Decoder options for a tool's arguments: closed inputs reject unmodeled properties. */
+export const toolInputParseOptions = (tool: McpToolDefinition): SchemaAST.ParseOptions => ({
+  onExcessProperty: tool.closedInput ? "error" : "ignore",
+});
+
+/** A tool's `inputSchema`; closed inputs advertise `additionalProperties: false`. */
+export const toolInputJsonSchema = (tool: McpToolDefinition): Record<string, unknown> =>
+  toolJsonSchema(tool.input, { onExcessProperty: tool.closedInput ? "error" : "ignore" });
 
 // --- Resources (section 6.7) -------------------------------------------------------------------
 

@@ -27,6 +27,17 @@ describe("ALTCHA schemas", () => {
     expect(() => decode(null)).toThrow();
   });
 
+  test("challenge values must be JSON values", () => {
+    const decode = Schema.decodeUnknownSync(AltchaChallenge);
+    expect(plain(decode({ a: [1, true, null], b: { c: "d" } }))).toEqual({
+      a: [1, true, null],
+      b: { c: "d" },
+    });
+    expect(() => decode({ a: undefined })).toThrow();
+    expect(() => decode({ a: () => 1 })).toThrow();
+    expect(() => decode({ a: 1n })).toThrow();
+  });
+
   test("X-Altcha header is base64 JSON of an object and round-trips", () => {
     const header = btoa(JSON.stringify(solved));
     const decoded = Schema.decodeUnknownSync(AltchaPayloadFromHeader)(header);

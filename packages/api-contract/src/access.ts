@@ -45,9 +45,16 @@ export const normalizeScopes = (scopes: Iterable<Scope>): ReadonlyArray<Scope> =
 const sameList = (a: ReadonlyArray<Scope>, b: ReadonlyArray<Scope>): boolean =>
   a.length === b.length && a.every((scope, i) => scope === b[i]);
 
+/** Same members, no duplicates, any order. */
+const sameMembers = (a: ReadonlyArray<Scope>, b: ReadonlyArray<Scope>): boolean => {
+  const set = new Set(a);
+  return a.length === b.length && set.size === a.length && b.every((scope) => set.has(scope));
+};
+
 /**
- * Consistency of a mode with its stored list: `read` is exactly the ten reads, `read_write` all
- * twenty scopes, `custom` a non-empty list in `normalizeScopes` form. Applies to every struct that
+ * Consistency of a mode with its stored list: `read` is exactly the ten reads and `read_write`
+ * all twenty scopes (each once, any order); `custom` is a non-empty list in `normalizeScopes`
+ * form. Applies to every struct that
  * spreads `GrantedAccess.fields`, since spreading fields drops struct-level checks.
  */
 export const isGrantedAccessConsistent = Schema.makeFilter<{
@@ -57,9 +64,11 @@ export const isGrantedAccessConsistent = Schema.makeFilter<{
   ({ access, scopes }) => {
     switch (access) {
       case "read":
-        return sameList(scopes, READ_SCOPES) || "read access carries exactly the ten <area>:read";
+        return (
+          sameMembers(scopes, READ_SCOPES) || "read access carries exactly the ten <area>:read"
+        );
       case "read_write":
-        return sameList(scopes, ALL_SCOPES) || "read_write access carries all twenty scopes";
+        return sameMembers(scopes, ALL_SCOPES) || "read_write access carries all twenty scopes";
       case "custom":
         return (
           (scopes.length > 0 && sameList(scopes, normalizeScopes(scopes))) ||
