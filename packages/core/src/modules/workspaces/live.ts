@@ -490,6 +490,22 @@ export const makeWorkspaces = Effect.gen(function* () {
     });
 
   /**
+   * Locks the Workspace for a revision-checked settings write. Closed state (W5) and the stored
+   * role (R1) are checked before the revision (C2), so a caller without access learns nothing
+   * from a `Conflict{revision_changed, currentRevision}`.
+   */
+  const lockForSettings = (caller: Caller, workspaceId: WorkspaceId, expectedRevision: number) =>
+    Effect.gen(function* () {
+      const row = yield* storeOnly(repo.lockWorkspace(workspaceId));
+      yield* requireOpen(row, "workspace.settings");
+      yield* recheck(caller, workspaceId, "workspace.settings");
+      if (row.revision !== expectedRevision) {
+        return yield* new Conflict({ reason: "revision_changed", currentRevision: row.revision });
+      }
+      return row;
+    });
+
+  /**
    * Before field validation and any request-log replay (W5, R1a, C3): a closed Workspace, or an
    * actor whose stored membership no longer allows `action`, gets no cached write result.
    * Returns the actor with its stored role; the locked write rechecks.
@@ -880,13 +896,7 @@ export const makeWorkspaces = Effect.gen(function* () {
           );
           return yield* store.transaction(
             Effect.gen(function* () {
-              const row = yield* Effect.catchTag(
-                repo.getWorkspaceForUpdate(workspaceId, expectedRevision),
-                "NotFound",
-                Effect.die,
-              );
-              yield* requireOpen(row, "workspace.settings");
-              yield* recheck(caller, workspaceId, "workspace.settings");
+              const row = yield* lockForSettings(caller, workspaceId, expectedRevision);
               const issues: Array<Issue> = [];
               if (fields.name !== undefined && fields.name.trim() === "") {
                 issues.push(issue(["name"], "request.malformed"));
@@ -956,13 +966,7 @@ export const makeWorkspaces = Effect.gen(function* () {
           const fields = yield* decodeInput(codec<SettingsPatch>(SettingsPatchFields), patch);
           return yield* store.transaction(
             Effect.gen(function* () {
-              const row = yield* Effect.catchTag(
-                repo.getWorkspaceForUpdate(workspaceId, expectedRevision),
-                "NotFound",
-                Effect.die,
-              );
-              yield* requireOpen(row, "workspace.settings");
-              yield* recheck(caller, workspaceId, "workspace.settings");
+              const row = yield* lockForSettings(caller, workspaceId, expectedRevision);
               const now = yield* nowIso;
               const date = yield* today;
               const issues: Array<Issue> = [];
@@ -1783,6 +1787,11 @@ export const makeWorkspaces = Effect.gen(function* () {
                 // C6: a retry of this caller's completed transfer to `to` succeeds; any other
                 // transfer by a non-owner stays Forbidden (R1).
                 if (yield* transferredBy(workspaceId, member.userId, to)) return;
+                return yield* new Forbidden({ action: "workspace.transferOwnership" });
+              }
+              // A new transfer needs the supplied caller's own role too (R1a): a request that
+              // entered as admin gains nothing from a promotion since.
+              if (!can(member, "workspace.transferOwnership")) {
                 return yield* new Forbidden({ action: "workspace.transferOwnership" });
               }
               if (to === member.userId)

@@ -718,3 +718,49 @@ describe("round 2: stale callers, closed precedence, safe counters, owned chunks
       }),
     ));
 });
+
+describe("round 3: transfer needs the caller's own role; access before revision", () => {
+  test("a request that entered as admin cannot transfer after being promoted to owner", () =>
+    scenario(
+      Effect.gen(function* () {
+        const ws = yield* W;
+        const s = yield* seed();
+        yield* as(s.owner)(ws.transferOwnership(ADMIN));
+        // s.admin entered as admin; ADMIN is the stored owner now.
+        expect(yield* failure(as(s.admin)(ws.transferOwnership(MEMBER)))).toEqual(
+          forbidden("workspace.transferOwnership"),
+        );
+        const roles = new Map(
+          (yield* as(s.member)(ws.members)).map((m) => [view(m).userId, view(m).role]),
+        );
+        expect(roles.get(ADMIN)).toBe("owner");
+        expect(roles.get(MEMBER)).toBe("member");
+        const transfers = (yield* history(s.workspaceId)).filter(
+          (e) => e.action === "workspace.transferOwnership",
+        );
+        expect(transfers.length).toBe(1);
+      }),
+    ));
+
+  test("a stale revision yields Forbidden after removal or closure, Conflict otherwise", () =>
+    scenario(
+      Effect.gen(function* () {
+        const ws = yield* W;
+        const s = yield* seed();
+        const settings = { dueDays: 30 } as never;
+        const entity = { name: "Acme a.s." } as never;
+        // An authorized caller with a stale revision still gets the C2 conflict.
+        yield* as(s.owner)(ws.updateSettings({ dueDays: 21 } as never, 1));
+        expect(yield* failure(as(s.admin)(ws.updateSettings(settings, 1)))).toEqual(
+          new Conflict({ reason: "revision_changed", currentRevision: 2 }),
+        );
+        yield* as(s.owner)(ws.setRole(ADMIN, null));
+        const denied = forbidden("workspace.settings");
+        expect(yield* failure(as(s.admin)(ws.updateSettings(settings, 1)))).toEqual(denied);
+        expect(yield* failure(as(s.admin)(ws.updateIssuingEntity(entity, 1)))).toEqual(denied);
+        yield* as(s.owner)(ws.close("Acme s.r.o."));
+        expect(yield* failure(as(s.owner)(ws.updateSettings(settings, 1)))).toEqual(denied);
+        expect(yield* failure(as(s.owner)(ws.updateIssuingEntity(entity, 1)))).toEqual(denied);
+      }),
+    ));
+});
