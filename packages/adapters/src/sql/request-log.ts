@@ -140,7 +140,7 @@ export const claimRequest = (
       yield* sql`
         update request_log
         set method = ${PENDING}, payload_hash = ${owner}, result = 'null'::jsonb,
-          created_at = ${options.now}::timestamptz
+          user_id = ${userId}, created_at = ${options.now}::timestamptz
         where ${scopeWhere(sql, scope, requestKey)}`;
       return { _tag: "Claimed" } as const;
     }

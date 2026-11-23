@@ -650,6 +650,31 @@ describe("request log", () => {
     await expect(abandoned).rejects.toThrow("not claimed by this transaction");
   });
 
+  test("taking over a Workspace row drops a stale user, so deleting that user keeps the entry", async () => {
+    const replay = await db.run(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient;
+        const { workspaceId } = yield* seedWorkspace;
+        const userId = `user-${crypto.randomUUID()}`;
+        yield* sql`insert into auth.user (id, name, email, email_verified)
+          values (${userId}, 'U', ${`${userId}@example.test`}, true)`;
+        yield* sql`insert into request_log
+            (workspace_id, user_id, request_key, method, payload_hash, result, created_at)
+          values (${workspaceId}, ${userId}, ${key}, 'Old.op', 'old', '1'::jsonb,
+            '2026-11-20T00:00:00Z')`;
+        const scope = { workspaceId };
+        yield* transaction(
+          claimRequest(scope, key, { now }).pipe(
+            Effect.tap(() => completeRequest(scope, { ...done, result: { id: "new" } })),
+          ),
+        );
+        yield* sql`delete from auth.user where id = ${userId}`;
+        return yield* transaction(claimRequest(scope, key, { now: "2026-11-23T11:00:00Z" }));
+      }),
+    );
+    expect(replay).toMatchObject({ _tag: "Existing", entry: { result: { id: "new" } } });
+  });
+
   test("a Workspace claim stores no user", async () => {
     const users = await db.run(
       Effect.gen(function* () {

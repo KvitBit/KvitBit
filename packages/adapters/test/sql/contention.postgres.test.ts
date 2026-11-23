@@ -240,11 +240,14 @@ describe.skipIf(databaseUrl === undefined)("contention on Postgres", () => {
               );
             }),
           );
-        return yield* Effect.all([lockThen(a, b, "from-a"), lockThen(b, a, "from-b")], {
+        const rows = yield* Effect.all([lockThen(a, b, "from-a"), lockThen(b, a, "from-b")], {
           concurrency: 2,
         });
+        return { rows, locks };
       }),
     );
-    expect(names.map((row) => row.name).sort()).toEqual(["from-a", "from-b"]);
+    expect(names.rows.map((row) => row.name).sort()).toEqual(["from-a", "from-b"]);
+    // Two first attempts plus at least one rerun of the deadlock victim's body.
+    expect(names.locks).toBeGreaterThanOrEqual(3);
   }, 30_000);
 });
