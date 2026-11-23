@@ -15,6 +15,7 @@ import {
   ExpensesRepoMemory,
   FakeExpenseSuppliers,
   FakeSupplierDirectory,
+  makeExpensesLive,
   matchesType,
 } from "../../../src/modules/expenses";
 import { CoreStore, StoreUnavailable } from "../../../src/store/CoreStore";
@@ -91,6 +92,71 @@ describe("HEIC brands and streaming", () => {
     expect(exit).toEqual(Exit.succeed({ bytes: 75, rejected: true }));
   });
 });
+
+describe("size limit vs type sniffing", () => {
+  test("a HEIC upload crossing the limit is too_large however it is chunked", async () => {
+    const layer = Layer.mergeAll(
+      makeExpensesLive({ maxAttachmentBytes: 24 }),
+      ExpensePayablesLive,
+      ExpenseRecordsLive,
+    ).pipe(Layer.provideMerge(FakeExpenseSuppliers), Layer.provideMerge(ExpensesRepoMemory));
+    // 32-byte ftyp box whose HEIC brand sits at bytes 28..31, past the 24-byte limit.
+    const box = ftyp("mif1", "mif1", "mif1", "mif1", "heic");
+    expect(box.length).toBe(32);
+    const tooLarge = Exit.fail(
+      new Invalid({
+        issues: [{ path: ["file"], code: "attachment.too_large", params: { maxBytes: "24" } }],
+      }),
+    );
+    const exit = await scenario(
+      Effect.gen(function* () {
+        const id = expenseId(yield* record({ status: "incomplete" }));
+        const s = yield* Expenses;
+        const file = (bytes: Stream.Stream<Uint8Array>) => ({
+          name: "i.heic",
+          contentType: "image/heic",
+          bytes,
+        });
+        const whole = yield* Effect.exit(s.attach(id, file(Stream.make(box))));
+        const split = yield* Effect.exit(
+          s.attach(id, file(Stream.make(box.subarray(0, 28), box.subarray(28)))),
+        );
+        // A mismatch proven within the limit stays a type rejection, whole or split.
+        const pdfLike = Uint8Array.from([
+          ...new TextEncoder().encode("%PDX-"),
+          ...new Uint8Array(27),
+        ]);
+        const spoofWhole = yield* Effect.exit(
+          s.attach(id, { ...file(Stream.make(pdfLike)), contentType: "application/pdf" }),
+        );
+        const spoofSplit = yield* Effect.exit(
+          s.attach(id, {
+            ...file(Stream.make(pdfLike.subarray(0, 3), pdfLike.subarray(3))),
+            contentType: "application/pdf",
+          }),
+        );
+        return {
+          whole,
+          split,
+          spoofWhole: issuesCode(spoofWhole),
+          spoofSplit: issuesCode(spoofSplit),
+        };
+      }),
+      { layer },
+    );
+    expect(exit).toEqual(
+      Exit.succeed({
+        whole: tooLarge,
+        split: tooLarge,
+        spoofWhole: "attachment.type_rejected",
+        spoofSplit: "attachment.type_rejected",
+      }),
+    );
+  });
+});
+
+const issuesCode = (exit: Exit.Exit<unknown, unknown>) =>
+  Exit.isFailure(exit) ? JSON.stringify(exit.cause).match(/attachment\.[a-z_]+/)?.[0] : "success";
 
 describe("list", () => {
   test("rows carry the currency; a cursor with a malformed id is request.malformed", async () => {

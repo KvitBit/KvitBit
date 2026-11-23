@@ -504,7 +504,7 @@ export const makeExpenses = (options: ExpensesOptions = {}) =>
           // Streamed before the transaction and committed with the row; a blob whose row never
           // commits is deleted here when the rollback is certain, else collected by housekeeping
           // after 24 h (core-ports 4.7). The prefix is sniffed while streaming.
-          const sniffed = sniffing(contentType, file.bytes);
+          const sniffed = sniffing(contentType, file.bytes, maxBytes);
           const put = yield* blobs
             .put(key, sniffed.stream, { contentType, maxBytes })
             .pipe(

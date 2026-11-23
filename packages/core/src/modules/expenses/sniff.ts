@@ -103,14 +103,26 @@ export const matchesType = (contentType: string, bytes: Uint8Array): boolean => 
 
 /**
  * Wraps `bytes` so the signature is checked while streaming: the stream ends early at the first
- * chunk that proves a mismatch, so a spoofed upload is not stored whole. Call `verdict()` after
- * the stream was consumed; an empty or short stream is decided on what arrived.
+ * chunk that proves a mismatch, so a spoofed upload is not stored whole. Only the first
+ * `maxBytes` bytes are sniffed, so the outcome never depends on how the upload is chunked: a
+ * mismatch proven within the limit is a type rejection, while a stream that crosses the limit
+ * undecided (or matching) passes on to storage, which fails it as too large. Call `verdict()`
+ * after the stream was consumed; an empty or short stream is decided on what arrived.
  */
-export const sniffing = (contentType: string, bytes: Stream.Stream<Uint8Array>) => {
+export const sniffing = (
+  contentType: string,
+  bytes: Stream.Stream<Uint8Array>,
+  maxBytes: number,
+) => {
   const sniffer = snifferFor(contentType);
   let decided: boolean | undefined;
+  let consumed = 0;
   const stream = Stream.takeWhile(bytes, (chunk: Uint8Array) => {
-    if (decided === undefined) decided = sniffer.feed(chunk);
+    if (decided === undefined && consumed < maxBytes) {
+      const allowed = chunk.subarray(0, Math.max(0, maxBytes - consumed));
+      decided = sniffer.feed(allowed);
+    }
+    consumed += chunk.length;
     return decided !== false;
   });
   return { stream, verdict: () => decided ?? sniffer.end() };
