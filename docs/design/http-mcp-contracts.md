@@ -4,7 +4,7 @@ Issue #19. Status: design for review. Builds on the accepted core spec in [core-
 
 This spec fixes everything `apps/server` exposes over the network: the edge routing table, how each credential becomes a core `Caller`, the Effect `HttpApi` contract in `packages/api-contract`, binary transfer, the Expo update and release routes, and the remote MCP server at `/mcp`. It adds no domain rules. Where a flow needs something core does not offer yet, section 9 lists it as a core gap instead of inventing behaviour at the edge.
 
-Effect spellings follow `effect@4.1.4` (`effect/unstable/httpapi` in the 4.x line; core-ports uses the same path). The endpoint shape `HttpApiEndpoint.get(name, path, { params, query, headers, payload, success, error })`, `HttpApiSchema.status`, `HttpApiSchema.NoContent`, `HttpApiSchema.asMultipartStream`, `HttpApiSchema.asUint8Array` and `HttpApiMiddleware.Service` were checked against Deskohub's Effect 4 source. Section 10 lists what still needs confirming on 4.1.4.
+Effect spellings follow `effect@4.1.4` (`effect/http-api` in the 4.x line; core-ports uses the same path). The endpoint shape `HttpApiEndpoint.get(name, path, { params, query, headers, payload, success, error })`, `HttpApiSchema.status`, `HttpApiSchema.NoContent`, `HttpApiSchema.asMultipartStream`, `HttpApiSchema.asUint8Array` and `HttpApiMiddleware.Service` were checked against Deskohub's Effect 4 source. Section 10 lists what still needs confirming on 4.1.4.
 
 ---
 
@@ -114,7 +114,7 @@ Two middlewares do all of it. `Authentication` turns a credential into a verifie
 ```ts
 // packages/api-contract/src/security.ts
 import { Context, Schema } from "effect"
-import { HttpApiMiddleware, HttpApiSecurity } from "effect/unstable/httpapi"
+import { HttpApiMiddleware, HttpApiSecurity } from "effect/http-api"
 import { Caller, CurrentCaller, UserId, WorkspaceId, Locale } from "@kvitbit/core/contract"
 import { Unauthorized } from "./edge-errors.js"
 
@@ -301,7 +301,7 @@ packages/api-contract/src/
 
 ```ts
 // packages/api-contract/src/index.ts
-import { HttpApi, OpenApi } from "effect/unstable/httpapi"
+import { HttpApi, OpenApi } from "effect/http-api"
 
 export class Api extends HttpApi.make("kvitbit")
   // public
@@ -322,15 +322,15 @@ export class Api extends HttpApi.make("kvitbit")
 ```ts
 // packages/api-contract/src/http.ts
 import { Context, Schema } from "effect"
-import { HttpApiSchema } from "effect/unstable/httpapi"
+import { HttpApiSchema } from "effect/http-api"
 
 /** Strong entity tag holding a revision: `"7"`. Weak tags (W/) and `*` are rejected. */
-export const EntityTag = Schema.String.pipe(Schema.pattern(/^"(0|[1-9]\d{0,9})"$/))
+export const EntityTag = Schema.String.pipe(Schema.check(Schema.isPattern(/^"(0|[1-9]\d{0,9})"$/)))
 export const parseEntityTag = (tag: string): number => Number(tag.slice(1, -1))
 export const entityTag = (revision: number): string => `"${revision}"`
 
 /** Client-chosen retry key. UUIDv7 recommended. Maps to RequestOptions.requestKey. */
-export const IdempotencyKey = Schema.String.pipe(Schema.pattern(/^[A-Za-z0-9_-]{8,128}$/))
+export const IdempotencyKey = Schema.String.pipe(Schema.check(Schema.isPattern(/^[A-Za-z0-9_-]{8,128}$/)))
 
 export const IfMatchHeaders = Schema.Struct({ "if-match": Schema.optional(EntityTag) })
 export const IdempotencyHeaders = Schema.Struct({ "idempotency-key": Schema.optional(IdempotencyKey) })
@@ -339,7 +339,7 @@ export const WriteHeaders = Schema.Struct({ ...IfMatchHeaders.fields, ...Idempot
 /** Query fields every paged list accepts, merged with the list's own filter fields. */
 export const PageQueryFields = {
   cursor: Schema.optional(Schema.String.pipe(Schema.maxLength(512))),
-  limit: Schema.optional(Schema.NumberFromString.pipe(Schema.int(), Schema.between(1, 100))), // default 50
+  limit: Schema.optional(Schema.NumberFromString.pipe(Schema.check(Schema.isInt(), Schema.isBetween({ minimum: 1, maximum: 100 })))), // default 50
 }
 
 /** Endpoint annotation: the success value has a `revision`, so the server sets `ETag` from it. */
@@ -636,8 +636,8 @@ Material 3 theme (agreement AG-HTTP-THEME, user requirement for custom palettes)
 // packages/api-contract/src/theme.ts
 // Hex, ThemePresetId and ThemeSource are defined in @kvitbit/core/contract (core-ports section 1)
 // and re-exported here; they are shown for reference.
-export const Hex = Schema.String.pipe(Schema.pattern(/^#[0-9A-Fa-f]{6}$/))
-export const ThemePresetId = Schema.Literals(["kvitbit", "forest", "ocean", "plum", "sand", "graphite"])
+export const Hex = Schema.String.pipe(Schema.check(Schema.isPattern(/^#[0-9A-Fa-f]{6}$/)))
+export const ThemePresetId = Schema.Literals(["graphite_atelier", "forest", "ocean", "plum", "sand", "graphite"])
 export const ThemePresets: Record<typeof ThemePresetId.Type, { readonly seed: string; readonly contrast?: "standard" | "medium" | "high" }>
 export const ThemeContrast = Schema.Literals(["standard", "medium", "high"])
 export const ThemeMode = Schema.Literals(["system", "light", "dark"])
@@ -682,7 +682,7 @@ Theme rules:
 - T1. `ThemeResolver` in apps/server uses `@material/material-color-utilities` (pinned, same version as the Expo offline engine). A `Seed` or `Preset` produces all six schemes. A `MaterialThemeBuilder` file must decode as Material Theme Builder JSON (`seed`, `coreColors`, `extendedColors`, `schemes`, `palettes`); its schemes are used as given, missing contrast schemes are generated from its seed, and its `extendedColors` named `paid`, `proforma`, `overdue` or `draft` replace Kvitbit's defaults (their `harmonize` flag is respected).
 - T2. Validation failures are `422 Invalid` with `theme.json_invalid`, `theme.too_large` or `theme.seed_invalid`. A file whose schemes fail the M3 contrast floor for `onPrimary`/`primary` and `onSurface`/`surface` (4.5:1) is accepted with a `theme.low_contrast` warning in the resolved view, not rejected.
 - T3. The stored value is the `ThemeSource` as sent. `ResolvedTheme` is computed on read and cached by content hash, so a library upgrade re-resolves every theme consistently.
-- T4. Precedence for app chrome: Android dynamic colour (when enabled and available), then the account `source`, then the Workspace theme, then the `kvitbit` preset. PDFs and the Public Share Link page use Workspace branding only.
+- T4. Precedence for app chrome: Android dynamic colour (when enabled and available), then the account `source`, then the Workspace theme, then the `graphite_atelier` preset (Graphite Atelier). PDFs and the Public Share Link page use Workspace branding only.
 - T5. Account preferences are not core data (auth never enters core). apps/server stores them in a `user_preferences` table keyed by Better Auth user id, with its own `revision`.
 
 #### 3.5.3 Workspace administration groups
@@ -926,7 +926,7 @@ The Documents group in full, as the pattern every domain group follows:
 ```ts
 // packages/api-contract/src/groups/documents.ts
 import { Schema } from "effect"
-import { HttpApiEndpoint, HttpApiGroup, HttpApiSchema, OpenApi } from "effect/unstable/httpapi"
+import { HttpApiEndpoint, HttpApiGroup, HttpApiSchema, OpenApi } from "effect/http-api"
 import {
   Conflict, DocumentId, DocumentInput, DocumentPatch, DocumentQuery, DocumentSummary, DocumentView,
   DeliveryId, Forbidden, Invalid, IsoDate, LineId, Locale, NotFound, Page, Unavailable, AuditEntry,
@@ -1114,7 +1114,7 @@ Domain group notes:
 - `documents.edit` on a document with recorded payments whose new total falls below them succeeds with a warning (decision Q3); the warning travels in the view as core decides (C4), not as an HTTP header.
 - `payments.record` is used for Proforma settlement (flow 3.8): when it auto-issues a Payment Tax Document, `issued` carries it and the response is still 201.
 - `reports.dashboard` is a separate path so the closed `ReportKind` union stays closed; it calls `Reports.dashboard` (G6, resolved).
-- Per-Contact billing overrides (core-ports section 4.2, screen 19) travel as `ContactInput.defaults` on `contacts.create` / `contacts.update` and come back on `ContactView.defaults`. The edge re-exports core's schema unchanged; it is shown here for reference. Every field is optional; an absent field falls back along `Document → Contact → Workspace`. `documents.createDraft`, `documents.issueFromInput` and the MCP `create_draft` / `issue_document` tools apply the fallback in core when the matching `DocumentInput` field (`currency`, `language`, `due`, `series`, `note`, `paymentMethod`) is omitted; a value sent on the Document always wins over the Contact's, and the Contact's over the Workspace default. `DocumentPatch` carries the same fields, so `documents.edit` and MCP `update_draft` can override `paymentMethod` on one Document, and `DocumentView.paymentMethod` returns the resolved value. `reminderPolicy` is applied when `documents.send` arms reminders and `SendInput.reminders` is absent (core rule D16).
+- Per-Contact billing overrides (core-ports section 4.2, screen 15) travel as `ContactInput.defaults` on `contacts.create` / `contacts.update` and come back on `ContactView.defaults`. The edge re-exports core's schema unchanged; it is shown here for reference. Every field is optional; an absent field falls back along `Document → Contact → Workspace`. `documents.createDraft`, `documents.issueFromInput` and the MCP `create_draft` / `issue_document` tools apply the fallback in core when the matching `DocumentInput` field (`currency`, `language`, `due`, `series`, `note`, `paymentMethod`) is omitted; a value sent on the Document always wins over the Contact's, and the Contact's over the Workspace default. `DocumentPatch` carries the same fields, so `documents.edit` and MCP `update_draft` can override `paymentMethod` on one Document, and `DocumentView.paymentMethod` returns the resolved value. `reminderPolicy` is applied when `documents.send` arms reminders and `SendInput.reminders` is absent (core rule D16).
 
 ```ts
 // re-exported from @kvitbit/core/contract (core-ports section 4.2); field names and types are core's
@@ -1354,7 +1354,7 @@ Input sketches (Effect schemas the JSON Schemas are generated from):
 ```ts
 // apps/server/src/mcp/tools.ts (excerpt)
 const Revision = Schema.Int.annotate({ description: "The document revision you last read. A stale value fails with Conflict revision_changed." })
-const IdempotencyArg = Schema.optional(Schema.String.pipe(Schema.pattern(/^[A-Za-z0-9_-]{8,128}$/)))
+const IdempotencyArg = Schema.optional(Schema.String.pipe(Schema.check(Schema.isPattern(/^[A-Za-z0-9_-]{8,128}$/))))
 const ConfirmArgs = {
   confirm: Schema.optional(Schema.Literal(true)),
   confirmationToken: Schema.optional(Schema.String),
@@ -1533,7 +1533,7 @@ The edge must not hold domain rules, so each item below is a request to the core
 
 None of these changes the contract; each needs a check against the pinned versions.
 
-- `effect@4.1.4`: module path `effect/unstable/httpapi` (core-ports uses the same); `HttpApiEndpoint.get(name, path, { params, query, headers, payload, success, error })` with `success` and `error` accepting arrays; `HttpApiGroup.prefix` and `.middleware`; endpoint-level `.middleware` for `invitations.accept`; `HttpApiMiddleware.Service<Self>()(id, { provides, error, requires, security })` with `provides` taking more than one service; `HttpApiSecurity.apiKey({ in: "cookie" })` and `HttpApiSecurity.bearer`; `HttpApiSchema.status(428)` with a numeric code; `HttpApiSchema.Empty(202)`; `HttpApiSchema.asMultipartStream` part limits; a streamed binary success body (`HttpApiSchema.StreamUint8Array`); `HttpApiMiddleware.layerSchemaErrorTransform` for the `request.malformed` mapping; `OpenApi.fromApi`, `HttpApiScalar.layer`; `JSONSchema.make` for MCP tool schemas.
+- `effect@4.1.4`: module path `effect/http-api` (core-ports uses the same); `HttpApiEndpoint.get(name, path, { params, query, headers, payload, success, error })` with `success` and `error` accepting arrays; `HttpApiGroup.prefix` and `.middleware`; endpoint-level `.middleware` for `invitations.accept`; `HttpApiMiddleware.Service<Self>()(id, { provides, error, requires, security })` with `provides` taking more than one service; `HttpApiSecurity.apiKey({ in: "cookie" })` and `HttpApiSecurity.bearer`; `HttpApiSchema.status(428)` with a numeric code; `HttpApiSchema.Empty(202)`; `HttpApiSchema.asMultipartStream` part limits; a streamed binary success body (`HttpApiSchema.StreamUint8Array`); `HttpApiMiddleware.layerSchemaErrorTransform` for the `request.malformed` mapping; `OpenApi.fromApi`, `HttpApiScalar.layer`; `JSONSchema.make` for MCP tool schemas.
 - How prefix path parameters (`:workspaceId`, `:token`) are declared and decoded for middleware, and `Context.Reference` as an endpoint annotation key.
 - Setting `ETag`, `Location` and `Idempotent-Replayed` response headers from a typed handler (a response-transforming middleware keyed on the `Revisioned` annotation, or a raw handler variant).
 - Better Auth endpoint names in section 2.7, the `bearer`, `expo`, `apiKey` and OAuth 2.1 provider plugin options, the `createAuthMiddleware` before-hook signature, consent page integration that lets Kvitbit store the Workspace and access on the grant, CIMD support, and the refresh token reuse window.

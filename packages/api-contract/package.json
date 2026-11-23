@@ -1,0 +1,17 @@
+{
+  "name": "@kvitbit/api-contract",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "bun test --pass-with-no-tests"
+  },
+  "dependencies": {
+    "@kvitbit/domain": "workspace:*",
+    "effect": "4.1.4"
+  }
+}

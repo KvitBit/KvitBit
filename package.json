@@ -1,0 +1,31 @@
+{
+  "name": "kvitbit",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "packages/*",
+    "apps/*",
+    "infra/*"
+  ],
+  "scripts": {
+    "lint": "biome check --error-on-warnings .",
+    "format": "biome format --write .",
+    "format:check": "biome format .",
+    "typecheck": "turbo run typecheck",
+    "test": "turbo run test",
+    "build": "turbo run build",
+    "db:generate": "turbo run db:generate --filter=@kvitbit/db"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.6.8",
+    "@types/bun": "1.4.5",
+    "effect": "4.1.4",
+    "turbo": "2.11.13",
+    "typescript": "6.0.2"
+  },
+  "overrides": {
+    "effect": "4.1.4"
+  },
+  "packageManager": "bun@1.4.2"
+}

@@ -11,7 +11,7 @@ Product rules fixed before this spec:
 - Facturoid-style permissive lifecycle: drafts are freely editable and deletable. Issued documents stay editable, with an audit trail and a unique number override, until someone locks them. Issued documents are never hard-deleted; they are cancelled or corrected with a Credit Note. Paying a Proforma of a `vat_payer` issues the Payment Tax Document automatically. The Final Invoice that deducts the advance is an explicit action.
 - Hosted: Neon Postgres, Cloud Run for HTTP, Compute Engine cluster runners. Self-hosted: one Postgres with `SingleRunner`.
 
-Terms follow CONTEXT.md. Effect APIs follow `effect@4.1.4` as checked in `docs/research/effect-cluster-workflow.md` and as used in Deskohub (`Context.Service`, `Schema.TaggedError`, `effect/unstable/httpapi`). Section 12 lists the spellings to confirm against 4.1.4 during implementation; none of them changes the design.
+Terms follow CONTEXT.md. Effect APIs follow `effect@4.1.4` as checked in `docs/research/effect-cluster-workflow.md` and as used in Deskohub (`Context.Service`, `Schema.TaggedError`, `effect/http-api`). Section 12 lists the spellings to confirm against 4.1.4 during implementation; none of them changes the design.
 
 ---
 
@@ -70,7 +70,7 @@ export const WorkspaceId = Schema.String.pipe(Schema.brand("WorkspaceId"))
 
 /** URL name of a Workspace: lowercase letters, digits and hyphens, 3 to 40 chars, unique across the install. */
 export const WorkspaceSlug = Schema.String.pipe(
-  Schema.pattern(/^[a-z0-9](?:[a-z0-9-]{1,38})[a-z0-9]$/), Schema.brand("WorkspaceSlug"))
+  Schema.check(Schema.isPattern(/^[a-z0-9](?:[a-z0-9-]{1,38})[a-z0-9]$/)), Schema.brand("WorkspaceSlug"))
 
 export const Role = Schema.Literals(["owner", "admin", "member", "accountant"])
 export const TaxRegime = Schema.Literals(["non_vat_payer", "vat_payer", "identified_person"])
@@ -78,9 +78,9 @@ export const Locale = Schema.Literals(["cs", "en"])
 export const DocumentKind = Schema.Literals(["invoice", "proforma", "payment_tax_document", "credit_note"])
 /** How the buyer is asked to pay; printed on the document and used as the default Payment method. */
 export const PaymentMethod = Schema.Literals(["bank_transfer", "cash", "card", "other"])
-export const CurrencyCode = Schema.String.pipe(Schema.pattern(/^[A-Z]{3}$/), Schema.brand("CurrencyCode"))
+export const CurrencyCode = Schema.String.pipe(Schema.check(Schema.isPattern(/^[A-Z]{3}$/)), Schema.brand("CurrencyCode"))
 /** Calendar date in Europe/Prague, YYYY-MM-DD. */
-export const IsoDate = Schema.String.pipe(Schema.pattern(/^\d{4}-\d{2}-\d{2}$/), Schema.brand("IsoDate"))
+export const IsoDate = Schema.String.pipe(Schema.check(Schema.isPattern(/^\d{4}-\d{2}-\d{2}$/)), Schema.brand("IsoDate"))
 
 export const Money = Schema.Struct({ amount: Schema.BigDecimal, currency: CurrencyCode })
 
@@ -110,7 +110,7 @@ export const Page = <A>(item: Schema.Schema<A>) =>
 /** Cursor paging input. limit 1 to 100, default 50. A cursor is bound to the filter it came from. */
 export const PageRequest = Schema.Struct({
   cursor: Schema.optional(Schema.String),
-  limit: Schema.optional(Schema.Int.pipe(Schema.between(1, 100))),
+  limit: Schema.optional(Schema.Int.pipe(Schema.check(Schema.isBetween({ minimum: 1, maximum: 100 })))),
 })
 
 /**
@@ -140,8 +140,8 @@ Theme types live in `/contract` too, because Workspace branding stores a theme (
 
 ```ts
 // @kvitbit/core/contract/theme.ts
-export const Hex = Schema.String.pipe(Schema.pattern(/^#[0-9A-Fa-f]{6}$/))
-export const ThemePresetId = Schema.Literals(["kvitbit", "forest", "ocean", "plum", "sand", "graphite"])
+export const Hex = Schema.String.pipe(Schema.check(Schema.isPattern(/^#[0-9A-Fa-f]{6}$/)))
+export const ThemePresetId = Schema.Literals(["graphite_atelier", "forest", "ocean", "plum", "sand", "graphite"])
 export const ThemeSource = Schema.Union([
   Schema.TaggedStruct("Preset", { id: ThemePresetId }),
   Schema.TaggedStruct("Seed", { seed: Hex }),
@@ -308,7 +308,7 @@ Five `Schema.TaggedError` classes cover every expected failure across all module
 ```ts
 // @kvitbit/core/contract/errors.ts
 import { Schema } from "effect"
-import { HttpApiSchema } from "effect/unstable/httpapi"
+import { HttpApiSchema } from "effect/http-api"
 
 export const EntityKind = Schema.Literals([
   "Workspace", "Member", "Invitation", "Contact", "PriceListItem", "Document", "Payment",
@@ -1542,8 +1542,8 @@ These do not change the design; confirm each during implementation.
 - `Schema.TaggedError`, `Schema.Literals`, `Schema.NonEmptyArray` and `HttpApiSchema.status("…")` as used in Deskohub on 4.1.4.
 - `Workflow.execute(..., { discard: true })` as the fire-and-forget start.
 - EPC069-12 field limits and the exact Czech statutory wording (section 5.3, 5.4).
-- `effect/unstable/httpapi` as the module path for `HttpApiSchema` (this spec earlier wrote `effect/http-api`).
-- `Schema.between(min, max)` on `Schema.Int` for `PageRequest.limit`, and `Effect.serviceOption` for the optional `RequestOutcome`.
+- `effect/http-api` as the module path for `HttpApi`, `HttpApiEndpoint`, `HttpApiSchema` and `HttpApiMiddleware`. Confirmed against the installed effect@4.1.4: the 4.0 betas exposed it as `effect/unstable/httpapi`; the 4.1 line exposes `effect/http-api` (likewise `effect/http`, `effect/sql`, `effect/cluster`, `effect/workflow`).
+- `Schema.check(Schema.isBetween({ minimum, maximum }))` on `Schema.Int` for `PageRequest.limit` and `Schema.check(Schema.isPattern(re))` for string patterns (confirmed in effect@4.1.4, which has no `Schema.between` or `Schema.pattern`), and `Effect.serviceOption` for the optional `RequestOutcome`.
 
 Not yet proven, each needing an integration check before relying on it in production:
 

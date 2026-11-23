@@ -163,7 +163,7 @@ export interface ResponseMeta {
 ```ts
 // @kvitbit/ui-port/api/KvitbitApi.ts
 import { Context, Effect } from "effect"
-import { HttpApiClient } from "effect/unstable/http-api"   // spelling to confirm, section 12
+import { HttpApiClient } from "effect/http-api"   // spelling to confirm, section 12
 import { Api } from "@kvitbit/api-contract"
 
 export class KvitbitApi extends Context.Service<
@@ -656,7 +656,7 @@ The parser is a Schema in ui-port, used for immediate feedback when a user impor
 
 ```ts
 // @kvitbit/ui-port/theme/MaterialThemeJson.ts
-const Hex = Schema.String.pipe(Schema.pattern(/^#[0-9A-Fa-f]{6}$/), Schema.brand("Hex"))
+const Hex = Schema.String.pipe(Schema.check(Schema.isPattern(/^#[0-9A-Fa-f]{6}$/)), Schema.brand("Hex"))
 const RoleScheme = Schema.Record(Schema.String, Hex)               // keys checked against M3ColorRole below
 
 export const MaterialThemeJson = Schema.Struct({
@@ -723,7 +723,7 @@ Dynamic colour is read by the `SystemTheme` port on Android (`@pchmn/expo-materi
 
 ### 4.5 Built-in presets
 
-`ThemePresetId` is a closed union in `@kvitbit/api-contract` (`kvitbit`, `forest`, `ocean`, `plum`, `sand`, `graphite`, matching core-ports). ui-port only references ids and shows swatches from `ThemePresets[id].seed`. The default theme constant is generated from the `kvitbit` preset at build time by calling the server resolver in a script, checked in as data, and guarded by a snapshot test that re-resolves it in CI, so client and server never disagree on the default.
+`ThemePresetId` is a closed union in `@kvitbit/api-contract` (`graphite_atelier`, `forest`, `ocean`, `plum`, `sand`, `graphite`, matching core-ports). ui-port only references ids and shows swatches from `ThemePresets[id].seed`. The default theme constant is generated from the `graphite_atelier` preset at build time by calling the server resolver in a script, checked in as data, and guarded by a snapshot test that re-resolves it in CI, so client and server never disagree on the default.
 
 ### 4.6 Applying the theme
 
@@ -732,7 +732,7 @@ Dynamic colour is read by the `SystemTheme` port on Android (`@pchmn/expo-materi
 | Roles | CSS custom properties `--md-sys-color-<role-kebab>` on `:root` (for example `--md-sys-color-surface-container-high`) | a `MaterialTheme` object (`colors.<role>`) in a React context, read by the M3 component kit and Kvitbit primitives |
 | Extended | `--kb-color-paid`, `--kb-color-on-paid`, `--kb-color-paid-container`, `--kb-color-on-paid-container`, same for `proforma`, `overdue`, `draft` | `extended.paid.color` etc. on the same object |
 | Light, dark, system | SSR inlines both light and dark variable sets; `mode: "system"` uses `@media (prefers-color-scheme: dark)`, explicit modes set `data-theme` on `<html>`. No flash on load. | `Appearance` / `useColorScheme` feeds `SystemTheme`; the theme object switches without remount |
-| Contrast | `data-contrast="standard|medium|high"` selects the variable set; `prefers-contrast: more` raises to at least medium | the matching scheme variant |
+| Contrast | `data-contrast="standard\|medium\|high"` selects the variable set; `prefers-contrast: more` raises to at least medium | the matching scheme variant |
 | Dynamic colour | not available | Android 12+ system roles plus `harmonizeExtended` |
 | Status badges | `BadgeVM.role` maps to role or extended variables | same mapping to the theme object |
 | Style | SSR sets `data-style="elegant\|cozy"` on `<html>` and inlines `--kb-font-display`, `--kb-font-body`, `--kb-font-mono`, `--kb-shape-panel`, `--kb-shape-control`, `--kb-shape-badge` from `EffectiveTheme.tokens`; only the active style's font files are preloaded, so a saved style paints on first load; a previewed style loads the other style's fonts and swaps the attribute and variables without reload | `fonts` and `roundness` on the theme object (and the M3 kit's `fonts` / `roundness`) from `EffectiveTheme.tokens`, fonts registered with `expo-font` before the first frame; a preview or save swaps the object without remount |
