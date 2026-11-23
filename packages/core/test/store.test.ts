@@ -635,14 +635,18 @@ describe("in-memory CoreStore: review regressions", () => {
 
   test("a counter lock taken in a rolled-back savepoint does not authorize set", async () => {
     const exit = await run(({ store }) =>
-      store.transaction(
-        Effect.gen(function* () {
-          yield* Effect.ignore(
-            store.transaction(Effect.andThen(store.counters.lock(key), Effect.fail("rollback"))),
-          );
-          return yield* Effect.exit(store.counters.set(key, 2));
-        }),
-      ),
+      Effect.gen(function* () {
+        // Seed the counter in its own committed transaction, so the rollback cannot remove it.
+        yield* store.transaction(store.counters.lock(key));
+        return yield* store.transaction(
+          Effect.gen(function* () {
+            yield* Effect.ignore(
+              store.transaction(Effect.andThen(store.counters.lock(key), Effect.fail("rollback"))),
+            );
+            return yield* Effect.exit(store.counters.set(key, 2));
+          }),
+        );
+      }),
     );
     expect(Exit.isSuccess(exit) && isDefect(exit.value)).toBe(true);
   });

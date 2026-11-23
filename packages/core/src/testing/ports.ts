@@ -217,7 +217,8 @@ export class MemoryBlobStorage extends Context.Service<
               size += chunk.byteLength;
               if (size > meta.maxBytes)
                 return Effect.fail(new BlobTooLarge({ maxBytes: meta.maxBytes }));
-              chunks.push(chunk.slice());
+              // Copy now: a producer may reuse its buffer (Buffer#slice shares memory).
+              chunks.push(new Uint8Array(chunk));
               return Effect.void;
             });
             const bytes = new Uint8Array(size);
@@ -237,7 +238,7 @@ export class MemoryBlobStorage extends Context.Service<
             yield* guard;
             const blob = (yield* Ref.get(memory.blobs)).get(key);
             if (blob === undefined) return yield* new BlobMissing({ key });
-            return Stream.succeed(blob.bytes.slice()); // detached copy
+            return Stream.succeed(new Uint8Array(blob.bytes)); // detached copy
           }),
         delete: (key: BlobKey) =>
           Effect.andThen(

@@ -13,6 +13,7 @@ import {
   RegistryUnavailable,
 } from "@kvitbit/domain/ports";
 import { BigDecimal, Effect, Exit, Ref, Stream } from "effect";
+import { sha256Hex } from "../src/shared/hash";
 import {
   CaptureEmailSender,
   FakeCompanyRegistry,
@@ -186,5 +187,36 @@ describe("test fakes", () => {
       }),
     );
     expect(exit).toEqual(Exit.succeed([[1, 2]]));
+  });
+
+  test("MemoryBlobStorage copies each chunk as it arrives (a reused Buffer)", async () => {
+    const key = "ws/a/reused.bin" as BlobKey;
+    const exit = await runTest(
+      account(),
+      Effect.gen(function* () {
+        const blobs = yield* BlobStorage;
+        const shared = Buffer.alloc(1);
+        const body = Stream.fromEffect(
+          Effect.sync(() => {
+            shared[0] = 1;
+            return shared as Uint8Array;
+          }),
+        ).pipe(
+          Stream.concat(
+            Stream.fromEffect(
+              Effect.sync(() => {
+                shared[0] = 2;
+                return shared as Uint8Array;
+              }),
+            ),
+          ),
+        );
+        const receipt = yield* blobs.put(key, body, { contentType: "x", maxBytes: 10 });
+        const read = yield* Effect.flatMap(blobs.get(key), Stream.runCollect);
+        const bytes = read.flatMap((c) => [...c]);
+        return { bytes, sha: receipt.sha256 === (yield* sha256Hex(new Uint8Array([1, 2]))) };
+      }),
+    );
+    expect(exit).toEqual(Exit.succeed({ bytes: [1, 2], sha: true }));
   });
 });
