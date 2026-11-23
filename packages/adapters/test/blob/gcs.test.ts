@@ -518,3 +518,24 @@ describe("GcsBlobStorage review fixes", () => {
     expect(defect).toMatchObject({ _tag: "BlobUnavailable", cause: { reason: "idle timeout" } });
   });
 });
+
+describe("GcsBlobStorage error bodies", () => {
+  test("a session URI echoed in an error body is redacted from the cause", async () => {
+    const data = new Uint8Array(2 * quarterMiB + 1);
+    const echo: Override = (seen) =>
+      seen.url.searchParams.has("upload_id")
+        ? new Response(`bad request for ${seen.url.href}`, { status: 400 })
+        : undefined;
+    const fake = fakeGcs([echo, echo]);
+    const error = await run(
+      layerFor(fake, { chunkSize: quarterMiB }),
+      withStore((store) =>
+        Effect.flip(store.put(key("ws/echo"), Stream.make(data), meta(10 ** 7))),
+      ),
+    );
+    expect(error._tag).toBe("BlobUnavailable");
+    const serialized = JSON.stringify(error);
+    expect(serialized).toContain("upload_id=<redacted>");
+    expect(serialized).not.toContain("upload_id=s1");
+  });
+});

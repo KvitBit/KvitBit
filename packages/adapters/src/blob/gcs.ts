@@ -2,7 +2,9 @@
  * BlobStorage on Google Cloud Storage for the hosted deployment (ADR 0003), over the JSON API
  * with no SDK.
  *
- * `put` holds one buffer of at most `chunkSize` bytes (default 8 MiB), reused per chunk. A body that ends
+ * `put` holds one buffer per upload, reused per chunk: 256 KiB at first, grown once to
+ * `chunkSize` (default 8 MiB), so a small body never pays for a full chunk. Adapter-owned payload
+ * peaks at `chunkSize` + 256 KiB, during that one growth copy. A body that ends
  * within one chunk goes up as a single media upload; a longer one opens a resumable session and
  * sends each full chunk as it fills, so memory per upload is bounded whatever `maxBytes` is.
  * Both paths can resend what they hold: the media upload is retried whole, a resumable chunk
@@ -34,7 +36,10 @@ export interface GcsBlobStorageOptions {
   readonly timeout?: Duration.Input | undefined;
   /** Longest wait for the next chunk of a download. Default 60 s. */
   readonly idleTimeout?: Duration.Input | undefined;
-  /** Bytes held per upload; a positive multiple of 256 KiB, as GCS requires. Default 8 MiB. */
+  /**
+   * Size of each resumable chunk and of the upload buffer once grown (peak `chunkSize` + 256 KiB
+   * during the single growth copy); a positive multiple of 256 KiB, as GCS requires. Default 8 MiB.
+   */
   readonly chunkSize?: number | undefined;
 }
 
@@ -92,7 +97,8 @@ const make = (
       Effect.map(bodyText(response), (body) => ({
         operation,
         status: response.status,
-        body: body.slice(0, 500),
+        // A session URI is an upload credential; GCS may echo it in an error body.
+        body: body.replace(/upload_id=[^&\s"'<>]*/g, "upload_id=<redacted>").slice(0, 500),
       }));
     const refused = (operation: string, response: HttpClientResponse.HttpClientResponse) =>
       Effect.flatMap(statusCause(operation, response), (cause) =>

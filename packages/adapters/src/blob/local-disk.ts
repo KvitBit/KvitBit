@@ -191,14 +191,21 @@ const make = (
           // Opened only when consumed, re-checking the path and refusing a symlinked file.
           // Rename-based writes mean the file is always complete; a read error mid-stream is a
           // defect, as the port's stream carries no error channel.
-          const open = attempt(async () => {
-            if (!(await ancestorsExist(dirs))) throw new Error(`gone: ${target}`);
-            const handle = await openNoFollow(target);
-            return handle.createReadStream({ autoClose: true });
-          });
+          // The handle is acquired uninterruptibly with its release registered on the stream's
+          // scope, so a consumer cancelled mid-open never leaks the descriptor.
+          const handle = Effect.acquireRelease(
+            attempt(async () => {
+              if (!(await ancestorsExist(dirs))) throw new Error(`gone: ${target}`);
+              return openNoFollow(target);
+            }),
+            (file) => Effect.promise(() => file.close().catch(() => undefined)),
+          );
           return Stream.unwrap(
-            Effect.map(open, (file) =>
-              Stream.fromAsyncIterable(file as AsyncIterable<Uint8Array>, unavailable),
+            Effect.map(handle, (file) =>
+              Stream.fromAsyncIterable(
+                file.createReadStream({ autoClose: false }) as AsyncIterable<Uint8Array>,
+                unavailable,
+              ),
             ),
           ).pipe(Stream.orDie);
         }),

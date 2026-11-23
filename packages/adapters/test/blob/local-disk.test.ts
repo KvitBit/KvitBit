@@ -12,7 +12,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BlobStorage } from "@kvitbit/domain/ports";
-import { Effect, Stream } from "effect";
+import { Effect, Fiber, Stream } from "effect";
 import { LocalDiskBlobStorage } from "../../src/blob/index";
 import { chunked, describeBlobStorageContract, endless, key, meta } from "./contract";
 
@@ -216,5 +216,25 @@ describe("LocalDiskBlobStorage on disk", () => {
     expect(error._tag).toBe("BlobUnavailable");
     expect(readFileSync(join(root, "ws/a/b"), "utf8")).toBe("child");
     expect(readdirSync(join(root, ".partial"))).toEqual([]);
+  });
+
+  test("a download cancelled before or while reading leaves no descriptor open", async () => {
+    const root = freshRoot();
+    const openFds = () => readdirSync("/proc/self/fd").length;
+    await withStore(root, (store) =>
+      store.put(key("ws/f"), chunked("a".repeat(100_000)), meta(10 ** 6)),
+    );
+    const before = openFds();
+    await withStore(root, (store) =>
+      Effect.gen(function* () {
+        for (let i = 0; i < 20; i++) {
+          const stream = yield* store.get(key("ws/f"));
+          yield* Stream.runCollect(Stream.take(stream, 1));
+          const fiber = yield* Effect.forkChild(Stream.runDrain(stream));
+          yield* Fiber.interrupt(fiber);
+        }
+      }),
+    );
+    expect(openFds()).toBeLessThanOrEqual(before);
   });
 });
