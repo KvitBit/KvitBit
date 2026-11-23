@@ -45,8 +45,8 @@ import {
   failureOf,
   history,
   registry,
-  UNKNOWN_ICO,
   successOf,
+  UNKNOWN_ICO,
 } from "./harness";
 
 const run = <A, E>(
