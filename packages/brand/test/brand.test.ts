@@ -59,6 +59,8 @@ describe("N2 mark masters", () => {
     expect(() => markSvg({ master: "light", fill: "#FF0000" })).toThrow(TypeError);
     // @ts-expect-error light master ink is never used for light-on-dark
     expect(() => markSvg({ master: "light", fill: "#FAFAFA" })).toThrow(TypeError);
+    // @ts-expect-error dark master ink is never used for dark-on-light
+    expect(() => markSvg({ master: "dark", fill: "#111111" })).toThrow(TypeError);
     expect(() => markSvg({ master: "light", size: 0 })).toThrow(RangeError);
     expect(markSvg({ master: "light", title: "<K&B>" })).toContain("&lt;K&amp;B&gt;");
   });
