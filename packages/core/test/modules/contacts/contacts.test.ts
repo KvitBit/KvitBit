@@ -179,6 +179,31 @@ describe("Contacts.save", () => {
     expectFailure(exit, { _tag: "Invalid", issues: [{ path: ["ico"], code: "ico.checksum" }] });
   });
 
+  test("unknown fields, malformed ids and revisions, and non-objects are Invalid before any write", async () => {
+    const save = (input: unknown) =>
+      run(
+        owner,
+        Effect.flatMap(Contacts, (c) => c.save(input as never)),
+      );
+    expectFailure(await save({ name: "Acme", nmae: "typo" }), {
+      _tag: "Invalid",
+      issues: [{ path: ["nmae"], code: "request.malformed" }],
+    });
+    expectFailure(await save({ name: "Acme", id: "not-a-uuid", expectedRevision: 1 }), {
+      issues: [{ path: ["id"], code: "request.malformed" }],
+    });
+    expectFailure(
+      await save({
+        name: "Acme",
+        id: "01900000-0000-7000-8000-000000000001",
+        expectedRevision: "1",
+      }),
+      { issues: [{ path: ["expectedRevision"], code: "request.malformed" }] },
+    );
+    expectFailure(await save([{ name: "Acme" }]), { _tag: "Invalid" });
+    expectFailure(await save(null), { _tag: "Invalid" });
+  });
+
   test("malformed open fields are Invalid{request.malformed} at their path", async () => {
     const noName = await run(
       owner,
@@ -458,6 +483,34 @@ describe("Contacts.fromIco", () => {
     expect(page.items).toEqual([]);
   });
 
+  test("registry names are trimmed; a registry without DIČ keeps the user's; fetch time recorded", async () => {
+    const exit = await run(
+      owner,
+      Effect.gen(function* () {
+        const contacts = yield* Contacts;
+        const fresh = view(yield* contacts.fromIco(CEZ_ICO));
+        yield* contacts.archive(fresh.id);
+        const manual = yield* saveAcme({
+          name: "Acme s.r.o.",
+          dic: "CZ27074358",
+          legalForm: "112",
+          address: { street: "Hlavní 1", city: "Praha", postalCode: "11000", country: "CZ" },
+        });
+        const refreshed = view(yield* contacts.fromIco(ACME_ICO));
+        const cezManual = yield* saveAcme({ name: "ČEZ", ico: CEZ_ICO, dic: "CZ45274649" });
+        const cez = view(yield* contacts.fromIco(CEZ_ICO));
+        return { fresh, manual, refreshed, cezManual, cez };
+      }),
+    );
+    const { fresh, manual, refreshed, cezManual, cez } = successOf(exit);
+    expect(fresh).toMatchObject({ name: "ČEZ, a. s.", dic: null });
+    // Same particulars as the registry: still records the fetch, as one audited write.
+    expect(manual.registryFetchedAt).toBeNull();
+    expect(refreshed).toMatchObject({ id: manual.id, revision: 2 });
+    expect(refreshed.registryFetchedAt).not.toBeNull();
+    expect(cez).toMatchObject({ id: cezManual.id, name: "ČEZ, a. s.", dic: "CZ45274649" });
+  });
+
   test("an IČO the registry does not know is NotFound", async () => {
     const exit = await run(
       owner,
@@ -587,6 +640,7 @@ describe("Contacts.search", () => {
     const { first, second, mismatch, garbage } = successOf(exit);
     expect(first.items).toHaveLength(50);
     expect(first.nextCursor).not.toBeNull();
+    expect(first.nextCursor?.length ?? 0).toBeLessThan(64);
     expect(second.items.map((c) => view(c).name)).toEqual(["Firma 50", "Firma 51"]);
     expect(second.nextCursor).toBeNull();
     for (const error of [mismatch, garbage]) {

@@ -110,6 +110,13 @@ export const ContactSaveFields = Schema.Struct({
 });
 export type ContactSaveFields = typeof ContactSaveFields.Type;
 
+/** The whole `save` input, decoded strictly (unknown fields are Invalid). */
+export const ContactSaveInput = Schema.Struct({
+  ...ContactSaveFields.fields,
+  id: Schema.optional(ContactIdSchema),
+  expectedRevision: Schema.optional(Schema.Int),
+});
+
 /** What `save` fingerprints for its request key (rule C3). */
 export const ContactSavePayload = Schema.Struct({
   fields: ContactSaveFields,

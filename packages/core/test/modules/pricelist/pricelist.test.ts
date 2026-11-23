@@ -76,6 +76,21 @@ describe("PriceList.save", () => {
       Effect.flatMap(PriceList, (p) => p.save(input({ name: "X", currency: "CZK" }))),
     );
     expectFailure(noPrice, { issues: [{ path: ["unitPrice"], code: "request.malformed" }] });
+    for (const unitPrice of ["", "1e3", " 12"]) {
+      expectFailure(await run(owner, saveHour({ unitPrice })), {
+        issues: [{ path: ["unitPrice"], code: "request.malformed" }],
+      });
+    }
+    expectFailure(await run(owner, saveHour({ colour: "red" })), {
+      issues: [{ path: ["colour"], code: "request.malformed" }],
+    });
+    expectFailure(
+      await run(
+        owner,
+        saveHour({ id: "01900000-0000-7000-8000-000000000001", expectedRevision: 1.5 }),
+      ),
+      { issues: [{ path: ["expectedRevision"], code: "request.malformed" }] },
+    );
     const badCurrency = await run(owner, saveHour({ currency: "czk" }));
     expectFailure(badCurrency, { issues: [{ path: ["currency"], code: "request.malformed" }] });
     const badVat = await run(owner, saveHour({ vat: "21" }));

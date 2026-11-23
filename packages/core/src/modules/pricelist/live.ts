@@ -17,11 +17,12 @@ import type {
 import { Conflict, PriceList } from "@kvitbit/domain/contract";
 import { BigDecimal, Clock, Context, Effect, Layer } from "effect";
 import { authorizeInWorkspace } from "../../policy/Policy";
+import { canonicalJson } from "../../shared/canonicalJson";
 import { orUnavailable } from "../../shared/errors";
 import { withIdempotency } from "../../shared/idempotency";
 import { IdGenerator, newId } from "../../shared/ids";
 import { CoreStore } from "../../store/CoreStore";
-import { decodeInput, invalidAt } from "../contacts/input";
+import { asTagService, decodeInput, invalidAt } from "../contacts/input";
 import type { PriceListItemRow, PriceListItemSaveFields, PriceListItemViewData } from "./model";
 import {
   PriceListItemSaveInput,
@@ -55,24 +56,6 @@ export interface PriceListImpl {
 
 const nowIso = Effect.map(Clock.currentTimeMillis, (millis) => new Date(millis).toISOString());
 
-/** Splits the open input into the target (`id`, `expectedRevision`) and the item fields. */
-const splitInput = (
-  input: unknown,
-): {
-  readonly id: PriceListItemId | undefined;
-  readonly expectedRevision: number | undefined;
-  readonly rest: unknown;
-} => {
-  if (typeof input !== "object" || input === null) {
-    return { id: undefined, expectedRevision: undefined, rest: input };
-  }
-  const { id, expectedRevision, ...rest } = input as {
-    readonly id?: PriceListItemId;
-    readonly expectedRevision?: number;
-  };
-  return { id, expectedRevision, rest };
-};
-
 const applyFields = (
   row: PriceListItemRow,
   fields: PriceListItemSaveFields,
@@ -91,7 +74,7 @@ const applyFields = (
 const sameContent = (a: PriceListItemRow, b: PriceListItemRow): boolean => {
   const strip = ({ revision, updatedAt, unitPrice, ...rest }: PriceListItemRow) => rest;
   return (
-    JSON.stringify(strip(a)) === JSON.stringify(strip(b)) &&
+    canonicalJson(strip(a)) === canonicalJson(strip(b)) &&
     BigDecimal.equals(a.unitPrice, b.unitPrice)
   );
 };
@@ -164,8 +147,11 @@ export const makePriceList: Effect.Effect<
     save: (input, opts) =>
       Effect.gen(function* () {
         const { workspaceId } = yield* authorizeInWorkspace("priceList.write");
-        const { id, expectedRevision, rest } = splitInput(input);
-        const fields: PriceListItemSaveFields = yield* decodeInput(PriceListItemSaveInput, rest);
+        // The whole input, strictly: unknown fields, a malformed id or revision are Invalid.
+        const { id, expectedRevision, ...fields } = yield* decodeInput(
+          PriceListItemSaveInput,
+          input,
+        );
         return yield* withIdempotency(
           {
             scope: { _tag: "Workspace", workspaceId },
@@ -228,9 +214,7 @@ export const makePriceList: Effect.Effect<
 export const PriceListLive: Layer.Layer<PriceList, never, CoreStore | IdGenerator | PriceListRepo> =
   Layer.effect(
     PriceList,
-    makePriceList as unknown as Effect.Effect<
-      PriceList["Service"],
-      never,
-      CoreStore | IdGenerator | PriceListRepo
-    >,
+    Effect.map(makePriceList, (impl) =>
+      asTagService<PriceList["Service"], PriceListImpl>(impl, (checked) => checked),
+    ),
   );

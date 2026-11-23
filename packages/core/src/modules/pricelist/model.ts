@@ -75,10 +75,21 @@ export const PriceListItemSaveFields = Schema.Struct({
 });
 export type PriceListItemSaveFields = typeof PriceListItemSaveFields.Type;
 
-/** What `save` decodes: as `PriceListItemSaveFields`, and `unitPrice` also as a decimal string. */
+/** A plain decimal string (`"1500"`, `"-12.50"`); `""` and exponents are rejected. */
+const DecimalString = Schema.String.pipe(
+  Schema.check(Schema.isPattern(/^-?\d+(\.\d+)?$/)),
+  Schema.decodeTo(Schema.BigDecimalFromString),
+);
+
+/**
+ * The whole `save` input, decoded strictly (unknown fields are Invalid): the fields, with
+ * `unitPrice` also as a decimal string, plus the target `id` and `expectedRevision`.
+ */
 export const PriceListItemSaveInput = Schema.Struct({
   ...PriceListItemSaveFields.fields,
-  unitPrice: Schema.optional(Schema.Union([Schema.BigDecimal, Schema.BigDecimalFromString])),
+  unitPrice: Schema.optional(Schema.Union([Schema.BigDecimal, DecimalString])),
+  id: Schema.optional(PriceListItemIdSchema),
+  expectedRevision: Schema.optional(Schema.Int),
 });
 
 /** What `save` fingerprints for its request key (rule C3). */

@@ -21,7 +21,17 @@ export const acmeRecord: RegistryRecord = {
   terminatedOn: null,
 };
 
-export const registry = { [ACME_ICO]: acmeRecord };
+/** Padded name and no DIČ, as registry data can come. */
+export const cezRecord: RegistryRecord = {
+  name: "  ČEZ, a. s. ",
+  address: { street: "Duhová 2/1444", city: "Praha", postalCode: "14000", country: "CZ" },
+  dic: null,
+  legalForm: "121",
+  registerEntry: null,
+  terminatedOn: null,
+};
+
+export const registry = { [ACME_ICO]: acmeRecord, [CEZ_ICO]: cezRecord };
 
 /** Runs `effect` as another caller inside one test. */
 export const as =

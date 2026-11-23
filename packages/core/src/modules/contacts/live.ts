@@ -21,16 +21,18 @@ import { Conflict, Contacts, NotFound } from "@kvitbit/domain/contract";
 import { Clock, Context, Effect, Layer, Option } from "effect";
 import { authorizeInWorkspace } from "../../policy/Policy";
 import { appendAudit } from "../../shared/audit";
+import { canonicalJson } from "../../shared/canonicalJson";
 import { orUnavailable } from "../../shared/errors";
+import { sha256Hex } from "../../shared/hash";
 import { withIdempotency } from "../../shared/idempotency";
 import { IdGenerator, newId } from "../../shared/ids";
 import type { StoreUnavailable, UniqueViolation } from "../../store/CoreStore";
 import { CoreStore } from "../../store/CoreStore";
 import { RegistryLookup, validateIco } from "../workspaces/registry";
-import { decodeInput, foldText, invalidAt } from "./input";
+import { asTagService, decodeInput, foldText, invalidAt } from "./input";
 import type { ContactRow, ContactSaveFields, ContactViewData } from "./model";
 import {
-  ContactSaveFields as ContactSaveFieldsSchema,
+  ContactSaveInput,
   ContactSavePayload,
   ContactViewSchema,
   normalizeDefaults,
@@ -90,7 +92,7 @@ const changesOf = (
   const keys = Object.keys(after) as Array<keyof ContactViewData>;
   return keys
     .filter((key) => key !== "id" && key !== "revision")
-    .filter((key) => before === null || JSON.stringify(before[key]) !== JSON.stringify(after[key]))
+    .filter((key) => before === null || canonicalJson(before[key]) !== canonicalJson(after[key]))
     .map((key) => ({ path: key, before: before === null ? null : before[key], after: after[key] }));
 };
 
@@ -140,7 +142,7 @@ const emptyOrNull = (value: string): string | null => (value.trim() === "" ? nul
 
 /** Particulars taken from the registry; VAT-payer status is not among them. */
 const registryParticulars = (result: RegistryResult) => ({
-  name: result.name,
+  name: result.name.trim(),
   dic: result.dic === null ? null : emptyOrNull(result.dic),
   legalForm: emptyOrNull(result.legalForm),
   address: {
@@ -154,45 +156,18 @@ const registryParticulars = (result: RegistryResult) => ({
 /** Whether two rows differ in anything but bookkeeping (timestamps, revision). */
 const sameContent = (a: ContactRow, b: ContactRow): boolean => {
   const strip = ({ revision, updatedAt, registryFetchedAt, ...rest }: ContactRow) => rest;
-  return JSON.stringify(strip(a)) === JSON.stringify(strip(b));
+  return canonicalJson(strip(a)) === canonicalJson(strip(b));
 };
 
-// Search cursors: opaque, bound to the filter they came from (http-mcp-contracts 362).
+// Search cursors: `<filter hash>.<id of the last row>`, opaque and bound to the filter they
+// came from (http-mcp-contracts 362); short whatever the names are (HTTP caps cursors at 512).
 
-interface CursorData {
-  readonly f: string;
-  readonly n: string;
-  readonly i: string;
-}
+const filterHash = (text: string, role: ContactRole | undefined) =>
+  Effect.map(sha256Hex(canonicalJson([text, role ?? null])), (hex) => hex.slice(0, 16));
 
-const encodeCursor = (data: CursorData): string =>
-  btoa(String.fromCharCode(...new TextEncoder().encode(JSON.stringify(data))))
-    .replaceAll("+", "-")
-    .replaceAll("/", "_")
-    .replace(/=+$/, "");
-
-const decodeCursor = (cursor: string): CursorData | null => {
-  try {
-    const binary = atob(cursor.replaceAll("-", "+").replaceAll("_", "/"));
-    const parsed: unknown = JSON.parse(
-      new TextDecoder().decode(Uint8Array.from(binary, (char) => char.charCodeAt(0))),
-    );
-    if (
-      typeof parsed === "object" &&
-      parsed !== null &&
-      "f" in parsed &&
-      "n" in parsed &&
-      "i" in parsed &&
-      typeof parsed.f === "string" &&
-      typeof parsed.n === "string" &&
-      typeof parsed.i === "string"
-    ) {
-      return { f: parsed.f, n: parsed.n, i: parsed.i };
-    }
-    return null;
-  } catch {
-    return null;
-  }
+const parseCursor = (cursor: string): { readonly f: string; readonly i: string } | null => {
+  const match = /^([0-9a-f]{16})\.([0-9a-f-]{36})$/.exec(cursor);
+  return match?.[1] === undefined || match[2] === undefined ? null : { f: match[1], i: match[2] };
 };
 
 export const makeContacts: Effect.Effect<
@@ -290,7 +265,11 @@ export const makeContacts: Effect.Effect<
       return updated;
     });
 
-  /** fromIco on an existing active Contact: refresh registry particulars, add the role. */
+  /**
+   * fromIco on an existing active Contact: refresh registry particulars, add the role. `None`
+   * when, once locked, the row is no longer the active holder of `ico` (a concurrent archive or
+   * IČO edit between the unlocked lookup and the lock); the caller then looks again.
+   */
   const refresh = (
     existing: ContactRow,
     result: RegistryResult,
@@ -298,21 +277,86 @@ export const makeContacts: Effect.Effect<
     now: string,
   ) =>
     Effect.gen(function* () {
-      const current = yield* repo.lock(existing.workspaceId, existing.id);
+      // Contacts are never deleted, so the row just found still exists.
+      const current = yield* repo
+        .lock(existing.workspaceId, existing.id)
+        .pipe(Effect.catchTag("NotFound", Effect.die));
+      if (current.archivedAt !== null || current.ico !== result.ico) {
+        return Option.none<ContactRow>();
+      }
+      const particulars = registryParticulars(result);
       const next: ContactRow = {
         ...current,
-        ...registryParticulars(result),
+        ...particulars,
+        // No DIČ in the registry does not erase one the user entered.
+        dic: particulars.dic ?? current.dic,
         roles: role === undefined ? current.roles : uniqueRoles([...current.roles, role]),
         registryFetchedAt: now,
         updatedAt: now,
       };
-      if (sameContent(current, next)) return current;
-      // The row is locked (no revision race) and the IČO does not change: both are bugs here.
-      const updated = yield* repo
-        .update(next, current.revision)
-        .pipe(Effect.catchTags({ UniqueViolation: Effect.die, Conflict: Effect.die }));
+      if (sameContent(current, next) && current.registryFetchedAt !== null) {
+        return Option.some(current);
+      }
+      // The row is locked (no revision race) and the IČO does not change: all bugs here.
+      const updated = yield* repo.update(next, current.revision).pipe(
+        Effect.catchTags({
+          NotFound: Effect.die,
+          UniqueViolation: Effect.die,
+          Conflict: Effect.die,
+        }),
+      );
       yield* audit(current, updated, "contact.save");
-      return updated;
+      return Option.some(updated);
+    });
+
+  /** Bounded retries of the upsert when concurrent writers move the IČO under it. */
+  const UPSERT_ATTEMPTS = 3;
+
+  /** Refreshes the active Contact holding the IČO, else inserts one (inside the transaction). */
+  const upsertByIco = (
+    workspaceId: WorkspaceId,
+    result: RegistryResult,
+    role: ContactRole | undefined,
+    attempt: number,
+  ): Effect.Effect<
+    ContactRow,
+    StoreUnavailable,
+    CoreStore | IdGenerator | ContactsRepo | CurrentCaller
+  > =>
+    Effect.gen(function* () {
+      if (attempt > UPSERT_ATTEMPTS) {
+        return yield* Effect.die(`fromIco: IČO ${result.ico} kept moving under concurrent writes`);
+      }
+      const again = () => upsertByIco(workspaceId, result, role, attempt + 1);
+      const now = yield* nowIso;
+      const existing = yield* repo.findActiveByIco(workspaceId, result.ico);
+      if (Option.isSome(existing)) {
+        const refreshed = yield* refresh(existing.value, result, role, now);
+        return Option.isSome(refreshed) ? refreshed.value : yield* again();
+      }
+      const fresh: ContactRow = {
+        id: yield* newId<ContactId>(),
+        workspaceId,
+        revision: 1,
+        roles: [role ?? "customer"],
+        ico: result.ico,
+        ...registryParticulars(result),
+        billingEmails: [],
+        phone: null,
+        note: null,
+        defaults: normalizeDefaults(undefined),
+        registryFetchedAt: now,
+        archivedAt: null,
+        createdAt: now,
+        updatedAt: now,
+      };
+      // Savepoint: a concurrent fromIco may insert the same IČO first; then look again.
+      return yield* store.transaction(repo.insert(fresh)).pipe(
+        Effect.tap((inserted) => audit(null, inserted, "contact.save")),
+        Effect.catchTag("UniqueViolation", (violation) =>
+          violation.constraint === CONTACTS_ACTIVE_ICO_UNIQUE ? again() : Effect.die(violation),
+        ),
+      );
     });
 
   const impl: ContactsImpl = {
@@ -322,49 +366,15 @@ export const makeContacts: Effect.Effect<
         // Checksum, cache and serialized registry call, outside the transaction.
         const result = yield* registry.lookup(ico);
         if (result === null) return yield* new NotFound({ entity: "Contact", id: ico });
-        const role = opts?.role;
-        const row = yield* store.transaction(
-          Effect.gen(function* () {
-            const now = yield* nowIso;
-            const existing = yield* repo.findActiveByIco(workspaceId, ico);
-            if (Option.isSome(existing)) return yield* refresh(existing.value, result, role, now);
-            const fresh: ContactRow = {
-              id: yield* newId<ContactId>(),
-              workspaceId,
-              revision: 1,
-              roles: [role ?? "customer"],
-              ico,
-              ...registryParticulars(result),
-              billingEmails: [],
-              phone: null,
-              note: null,
-              defaults: normalizeDefaults(undefined),
-              registryFetchedAt: now,
-              archivedAt: null,
-              createdAt: now,
-              updatedAt: now,
-            };
-            // Savepoint: a concurrent fromIco may insert the same IČO first; then refresh it.
-            return yield* store.transaction(repo.insert(fresh)).pipe(
-              Effect.tap((inserted) => audit(null, inserted, "contact.save")),
-              Effect.catchTag("UniqueViolation", (violation) =>
-                Effect.flatMap(repo.findActiveByIco(workspaceId, ico), (winner) =>
-                  Option.isSome(winner)
-                    ? refresh(winner.value, result, role, now)
-                    : Effect.die(violation),
-                ),
-              ),
-            );
-          }),
-        );
+        const row = yield* store.transaction(upsertByIco(workspaceId, result, opts?.role, 1));
         return toContactView(row);
       }).pipe(Effect.provide(context), orUnavailable),
 
     save: (input, opts) =>
       Effect.gen(function* () {
         const { workspaceId } = yield* authorizeInWorkspace("contact.write");
-        const { id, expectedRevision, ...rest } = input;
-        const fields = yield* decodeInput(ContactSaveFieldsSchema, rest);
+        // The whole input, strictly: unknown fields, a malformed id or revision are Invalid.
+        const { id, expectedRevision, ...fields } = yield* decodeInput(ContactSaveInput, input);
         yield* checkFields(fields);
         const row = yield* withIdempotency(
           {
@@ -419,14 +429,17 @@ export const makeContacts: Effect.Effect<
       Effect.gen(function* () {
         const { workspaceId } = yield* authorizeInWorkspace("contact.read");
         const text = q.text === undefined ? "" : foldText(q.text);
-        const filter = JSON.stringify([text, q.role ?? null]);
+        const filter = yield* filterHash(text, q.role);
         let after: readonly [string, string] | undefined;
         if (q.cursor !== undefined) {
-          const cursor = decodeCursor(q.cursor);
-          if (cursor === null || cursor.f !== filter) {
-            return yield* invalidAt(["cursor"], "page.cursor_mismatch");
-          }
-          after = [cursor.n, cursor.i];
+          const cursor = parseCursor(q.cursor);
+          const mismatch = invalidAt(["cursor"], "page.cursor_mismatch");
+          if (cursor === null || cursor.f !== filter) return yield* mismatch;
+          // Keyset from the last row's current name (rows are archived, never deleted).
+          const last = yield* repo
+            .get(workspaceId, cursor.i as ContactId)
+            .pipe(Effect.catchTag("NotFound", () => Effect.fail(mismatch)));
+          after = [last.name, last.id];
         }
         const rows = yield* repo.search(workspaceId, {
           ...(text !== "" ? { text } : {}),
@@ -439,9 +452,7 @@ export const makeContacts: Effect.Effect<
         return {
           items: page.map(toContactView),
           nextCursor:
-            rows.length > CONTACT_PAGE_SIZE && last !== undefined
-              ? encodeCursor({ f: filter, n: last.name, i: last.id })
-              : null,
+            rows.length > CONTACT_PAGE_SIZE && last !== undefined ? `${filter}.${last.id}` : null,
         };
       }).pipe(Effect.provide(context), orUnavailable),
   };
@@ -465,9 +476,7 @@ export const ContactsLive: Layer.Layer<
   CoreStore | IdGenerator | ContactsRepo | RegistryLookup
 > = Layer.effect(
   Contacts,
-  makeContacts as unknown as Effect.Effect<
-    Contacts["Service"],
-    never,
-    CoreStore | IdGenerator | ContactsRepo | RegistryLookup
-  >,
+  Effect.map(makeContacts, (impl) =>
+    asTagService<Contacts["Service"], ContactsImpl>(impl, (checked) => checked),
+  ),
 );
