@@ -1,4 +1,4 @@
-import { assertPaint, escapeXmlText } from "./svg";
+import { escapeXmlText } from "./svg";
 import { brandColors } from "./tokens";
 
 /** N2 Dual-Bit Notch mark grid: 256×256 with 32 units of built-in padding. */
@@ -44,18 +44,40 @@ export const markDefaultFill: Readonly<Record<MarkMaster, string>> = {
   dark: brandColors.inkOnDark,
 };
 
-export interface MarkSvgOptions {
-  readonly master: MarkMaster;
-  /** `currentColor` or a hex color. Defaults to the master's brand ink. */
-  readonly fill?: string;
+/**
+ * Inks each master ships in (DESIGN.md: never recolour the mark). `currentColor` inherits the
+ * surrounding text color for inline use.
+ */
+export const markFills = {
+  light: [brandColors.inkOnLight, brandColors.black, "currentColor"],
+  dark: [brandColors.inkOnDark, brandColors.white, "currentColor"],
+} as const satisfies Record<MarkMaster, readonly string[]>;
+
+export type MarkFill<M extends MarkMaster = MarkMaster> = (typeof markFills)[M][number];
+
+interface MarkSvgCommonOptions {
   /** Pixel width/height attributes. Defaults to 256. */
   readonly size?: number;
   readonly title?: string;
 }
 
+export type MarkSvgOptions = {
+  [M in MarkMaster]: MarkSvgCommonOptions & {
+    readonly master: M;
+    /** One of the master's shipped inks. Defaults to the master's brand ink. */
+    readonly fill?: MarkFill<M>;
+  };
+}[MarkMaster];
+
 /** Standalone mark SVG in the same shape as the committed `kvitbit-mark-*.svg` files. */
 export const markSvg = (options: MarkSvgOptions): string => {
-  const fill = assertPaint(options.fill ?? markDefaultFill[options.master]);
+  const fill = options.fill ?? markDefaultFill[options.master];
+  const allowed: readonly string[] = markFills[options.master];
+  if (!allowed.includes(fill)) {
+    throw new TypeError(
+      `Invalid fill "${fill}" for the ${options.master} master: expected one of ${allowed.join(", ")}`,
+    );
+  }
   const size = options.size ?? MARK_GRID_SIZE;
   if (!Number.isFinite(size) || size <= 0) {
     throw new RangeError(`Invalid mark size ${size}: expected a positive number`);

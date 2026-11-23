@@ -6,6 +6,7 @@ import {
   brandAssets,
   brandColors,
   MARK_VIEW_BOX,
+  type MarkSvgOptions,
   markMasters,
   markSvg,
   PATTERN_TILE_SIZE,
@@ -21,14 +22,14 @@ const pathData = (svg: string): string[] =>
 const viewBox = (svg: string): string | undefined => /viewBox="([^"]+)"/.exec(svg)?.[1];
 
 describe("N2 mark masters", () => {
-  const files = [
+  const files: ReadonlyArray<MarkSvgOptions & { readonly path: string }> = [
     { master: "light", fill: "#111111", path: brandAssets.mark.light },
     { master: "light", fill: "#000000", path: brandAssets.mark.black },
     { master: "light", fill: "currentColor", path: brandAssets.mark.currentLight },
     { master: "dark", fill: "#FAFAFA", path: brandAssets.mark.dark },
     { master: "dark", fill: "#FFFFFF", path: brandAssets.mark.white },
     { master: "dark", fill: "currentColor", path: brandAssets.mark.currentDark },
-  ] as const;
+  ];
 
   test.each(files)("$path path data and viewBox match the $master master", (file) => {
     const svg = read(file.path);
@@ -37,7 +38,7 @@ describe("N2 mark masters", () => {
   });
 
   test.each(files)("markSvg reproduces $path byte for byte", (file) => {
-    expect(markSvg({ master: file.master, fill: file.fill })).toBe(read(file.path));
+    expect(markSvg(file)).toBe(read(file.path));
   });
 
   test("default fills are the brand inks", () => {
@@ -52,7 +53,12 @@ describe("N2 mark masters", () => {
   });
 
   test("rejects paints and sizes that would corrupt the SVG", () => {
+    // @ts-expect-error not a shipped ink
     expect(() => markSvg({ master: "light", fill: '#111" onload="x' })).toThrow(TypeError);
+    // @ts-expect-error the mark is never recoloured
+    expect(() => markSvg({ master: "light", fill: "#FF0000" })).toThrow(TypeError);
+    // @ts-expect-error light master ink is never used for light-on-dark
+    expect(() => markSvg({ master: "light", fill: "#FAFAFA" })).toThrow(TypeError);
     expect(() => markSvg({ master: "light", size: 0 })).toThrow(RangeError);
     expect(markSvg({ master: "light", title: "<K&B>" })).toContain("&lt;K&amp;B&gt;");
   });
@@ -91,6 +97,23 @@ describe("T4 Micro-Glyph Graph pattern", () => {
   test("rejects unsafe inks and ids", () => {
     expect(() => t4PatternSvg({ ink: "red" })).toThrow(TypeError);
     expect(() => t4PatternDef({ id: 'a" x="', ink: "#fff" })).toThrow(TypeError);
+  });
+});
+
+describe("brand tokens", () => {
+  test("match DESIGN.md brand colors", () => {
+    expect(brandColors).toEqual({
+      inkOnLight: "#111111",
+      inkOnDark: "#FAFAFA",
+      iconTile: "#111111",
+      black: "#000000",
+      white: "#FFFFFF",
+      splashBackground: "#F4F4F5",
+    });
+  });
+
+  test("icon tile matches the committed adaptive background", () => {
+    expect(read(brandAssets.mobile.adaptiveBackground)).toContain(brandColors.iconTile);
   });
 });
 
