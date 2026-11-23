@@ -35,7 +35,11 @@ table.mo-items tr:last-child td { border-bottom: 1px solid #E4E4E7; }
 table.mo-items tr.deduct td { color: #15803D; }
 .mo-bottom { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 0.95fr); gap: 18px; align-items: end; break-inside: avoid; }
 .pay-card { display: flex; align-items: center; gap: 11px; padding: 9px 11px; border-radius: 7px; background: #FAFAFA; border: 1px solid #ECECEF; font-size: 9px; color: #52525B; line-height: 1.4; }
-.pay-card .qr { width: 54px; height: 54px; flex-shrink: 0; }
+.pay-card .qr { width: 70px; height: 70px; flex-shrink: 0; }
+table.mo-vat { width: 100%; border-collapse: collapse; font-size: 8.8px; margin-top: 9px; color: #52525B; }
+table.mo-vat th { font-size: 7.5px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; color: #71717A; text-align: right; padding: 0 4px 4px; border-bottom: 1px solid #ECECEF; }
+table.mo-vat th:first-child, table.mo-vat td:first-child { text-align: left; }
+table.mo-vat td { text-align: right; padding: 3px 4px; white-space: nowrap; border-bottom: 1px solid #F4F4F5; }
 .pay-card .title { font-weight: 600; color: #09090B; }
 .stat { font-size: 8.8px; color: #52525B; margin-top: 7px; }
 .doc-note { font-size: 8.8px; color: #52525B; margin-top: 7px; white-space: pre-line; }
@@ -112,6 +116,18 @@ export const renderModern = (model: DocumentRenderModel, p: Prepared): string =>
     }
   }
 
+  // §29(1): base and VAT per rate. The mockup's sum lines cover a single rate; a Final Invoice
+  // or several rates get the per-rate recap.
+  const recap =
+    p.showRecap && (p.final || p.recap.length > 1)
+      ? `<table class="mo-vat" data-section="vat-recap"><thead><tr><th>${e(t.vatRate)}</th><th>${e(t.vatBase)}</th><th>${e(t.vat)}</th><th>${e(t.vatGross)}</th></tr></thead><tbody>${p.recap
+          .map(
+            (r) =>
+              `<tr><td>${e(r.label)}</td><td>${e(r.base)}</td><td>${e(r.vat)}</td><td>${e(r.gross)}</td></tr>`,
+          )
+          .join("")}</tbody></table>`
+      : "";
+
   const statText = p.notes
     .map((n) => `<span data-note="${e(n.code)}">${e(n.text)}</span>`)
     .join(" ");
@@ -163,6 +179,7 @@ ${p.referenceText === null ? "" : `<div class="ref-pill" data-section="reference
 <section class="mo-bottom">
   <div>
     ${payCard}
+    ${recap}
     ${statText === "" ? "" : `<div class="stat" data-section="statutory">${statText}</div>`}
     ${p.fxNote === null ? "" : `<div class="stat" data-section="fx">${e(p.fxNote)}</div>`}
     ${model.note ? `<div class="doc-note">${e(model.note)}</div>` : ""}

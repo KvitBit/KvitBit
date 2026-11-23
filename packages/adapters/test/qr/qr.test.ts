@@ -240,3 +240,53 @@ describe("toSvg", () => {
     expect(isValidIban("CZ6508000000192000145398")).toBe(false);
   });
 });
+
+/** Builds an IBAN with correct mod-97 check digits for any BBAN, valid length or not. */
+const withCheckDigits = (country: string, bban: string): string => {
+  const digits = [...`${bban}${country}00`]
+    .map((ch) => (ch >= "A" && ch <= "Z" ? String(ch.charCodeAt(0) - 55) : ch))
+    .join("");
+  let r = 0;
+  for (const d of digits) r = (r * 10 + Number(d)) % 97;
+  return `${country}${String(98 - r).padStart(2, "0")}${bban}`;
+};
+
+describe("council regressions", () => {
+  test("checksum-valid IBANs of the wrong registered length or BBAN shape are rejected", () => {
+    const short = withCheckDigits("CZ", "0800000019200014539"); // 23 chars
+    const long = withCheckDigits("CZ", "080000001920001453999"); // 25 chars
+    const letters = withCheckDigits("CZ", "08000000192000145A99"); // CZ BBAN is numeric
+    const unknown = withCheckDigits("ZZ", "12345678901234567890");
+    for (const iban of [short, long, letters, unknown]) {
+      expect(isValidIban(iban)).toBe(false);
+      expect(issue(spayd({ iban, amount: bd("1") }))?.path).toEqual(["iban"]);
+      expect(
+        issue(epc({ iban, beneficiaryName: "X", amount: bd("1"), remittance: { text: "" } }))?.path,
+      ).toEqual(["iban"]);
+    }
+    expect(isValidIban(withCheckDigits("CZ", "08000000192000145399"))).toBe(true);
+  });
+
+  test("EPC requires a BIC outside the EEA and accepts it when given", () => {
+    for (const iban of ["CH9300762011623852957", "GB82WEST12345698765432"]) {
+      const input = { iban, beneficiaryName: "X", amount: bd("1"), remittance: { text: "t" } };
+      expect(issue(epc(input))).toEqual({
+        path: ["bic"],
+        code: "request.malformed",
+        params: { reason: "required_outside_eea" },
+      });
+      expect(ok(epc({ ...input, bic: "UBSWCHZH80A" })).split("\n")[4]).toBe("UBSWCHZH80A");
+    }
+  });
+
+  test("EPC rejects an empty or control-character structured reference", () => {
+    const base = { iban: CZ_IBAN, beneficiaryName: "X", amount: bd("1") };
+    expect(issue(epc({ ...base, remittance: { reference: "   " } }))?.path).toEqual([
+      "remittance",
+      "reference",
+    ]);
+    expect(issue(epc({ ...base, remittance: { reference: "RF18\u0007" } }))?.code).toBe(
+      "request.malformed",
+    );
+  });
+});

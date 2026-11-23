@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { Locale, PdfTemplate } from "@kvitbit/domain";
+import { BigDecimal } from "effect";
 import { type DocumentRenderModel, renderDocumentHtml, renderReportHtml } from "../../src/pdf";
 import {
   bd,
@@ -358,5 +359,57 @@ describe("report export (D11)", () => {
     expect(html).toContain("&lt;b&gt;VAT&lt;/b&gt; &amp; Cashflow");
     expect(text(html)).toContain("412,800.00 CZK");
     expect(text(html)).toMatch(/Generated 23 Nov 2026 14:20/);
+  });
+});
+
+describe("council regressions", () => {
+  test("Final Invoice subtotal excludes payment rounding, which prints once", () => {
+    for (const adj of ["0.4", "-0.4"]) {
+      const m = czkModel("final");
+      const gross = BigDecimal.sum(m.totals.gross.amount, bd(adj));
+      const model = {
+        ...m,
+        totals: {
+          ...m.totals,
+          roundingAdjustment: { ...m.totals.roundingAdjustment, amount: bd(adj) },
+          gross: { ...m.totals.gross, amount: gross },
+        },
+      };
+      for (const [, html] of both(model)) {
+        const t = text(html);
+        expect(t).toContain("Celkem za plnění 58 100,00 Kč");
+        expect(t.match(/Zaokrouhlení/g)).toHaveLength(1);
+        expect(t).toContain(adj === "0.4" ? "Zaokrouhlení 0,40 Kč" : "Zaokrouhlení −0,40 Kč");
+      }
+    }
+  });
+
+  test("Modern Minimal prints a per-rate VAT recap on Final Invoices and multi-rate tax documents", () => {
+    const expected = {
+      final: "21 % 25 471,07 Kč 5 348,93 Kč 30 820,00 Kč 12 % 6 500,00 Kč 780,00 Kč 7 280,00 Kč",
+      invoice: "21 % 42 000,00 Kč 8 820,00 Kč 50 820,00 Kč 12 % 6 500,00 Kč 780,00 Kč 7 280,00 Kč",
+    } as const;
+    for (const variant of ["final", "invoice"] as const) {
+      const html = renderDocumentHtml(czkModel(variant), "modern_minimal", "cs");
+      expect(section(html, "vat-recap")).toContain(expected[variant]);
+    }
+    const ptd = renderDocumentHtml(czkModel("ptd"), "modern_minimal", "cs");
+    expect(ptd).not.toContain('data-section="vat-recap"');
+  });
+
+  test("foreign-currency non-tax documents get the plain rate without VAT wording", () => {
+    const eurNonVat = { ...nonVatModel(), currency: eurModel().currency, fx: eurModel().fx };
+    const eurProforma = { ...eurRatedModel(), kind: "proforma" as const, taxDocument: false };
+    for (const model of [eurNonVat, eurProforma])
+      for (const [, html] of both(model)) {
+        expect(section(html, "fx")).toBe(
+          "Přepočet dle kurzu ČNB ze dne 02. 11. 2026: 1 EUR = 25,240 Kč.",
+        );
+        expect(html).toContain('data-section="czk-equivalent"');
+      }
+    for (const [, html] of both(eurNonVat, "en"))
+      expect(section(html, "fx")).toBe(
+        "Converted at the CNB fixing of 02 Nov 2026: 1 EUR = 25.240 CZK.",
+      );
   });
 });

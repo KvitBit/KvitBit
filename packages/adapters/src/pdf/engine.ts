@@ -52,9 +52,10 @@ export const makeChromiumPdfEngine = (options: ChromiumOptions = {}) =>
     const htmlToPdf = (html: string) =>
       Effect.tryPromise({
         try: async () => {
-          const context = await browser.newContext({ javaScriptEnabled: false });
+          const context = await browser.newContext({ javaScriptEnabled: false, offline: true });
           try {
             const page = await context.newPage();
+            page.setDefaultTimeout(timeout);
             await page.route("**/*", (route) =>
               route.request().url().startsWith("data:") ? route.continue() : route.abort(),
             );

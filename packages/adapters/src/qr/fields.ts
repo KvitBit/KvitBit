@@ -21,9 +21,49 @@ export const invalid = (
 /** Removes spaces and uppercases, so "cz65 2010 ..." and "CZ652010..." compare equal. */
 export const normalizeIban = (iban: string): string => iban.replace(/\s+/g, "").toUpperCase();
 
-/** ISO 13616 shape plus the ISO 7064 mod 97-10 check digits. */
+/** IBAN length per country (SWIFT IBAN registry). An unlisted country is rejected. */
+const IBAN_LENGTHS: Readonly<Record<string, number>> = Object.fromEntries(
+  (
+    "AD24 AE23 AL28 AT20 AZ28 BA20 BE16 BG22 BH22 BI27 BR29 BY28 CH21 CR22 CY28 CZ24 DE22 DJ27 " +
+    "DK18 DO28 EE20 EG29 ES24 FI18 FK18 FO18 FR27 GB22 GE22 GI23 GL18 GR27 GT28 HN28 HR21 HU28 " +
+    "IE22 IL23 IQ23 IS26 IT27 JO30 KW30 KZ20 LB28 LC32 LI21 LT20 LU20 LV21 LY25 MC27 MD24 ME22 " +
+    "MK19 MN20 MR27 MT31 MU30 NI28 NL18 NO15 OM23 PK24 PL28 PS29 PT25 QA29 RO24 RS22 RU33 SA24 " +
+    "SC31 SD18 SE24 SI19 SK24 SM27 SO23 ST25 SV28 TL23 TN24 TR26 UA29 VA22 VG24 XK20 YE30"
+  )
+    .split(" ")
+    .map((e) => [e.slice(0, 2), Number(e.slice(2))]),
+);
+
+/** Countries whose BBAN is all digits; others are only checked as alphanumeric. */
+const NUMERIC_BBAN = new Set([
+  "AT",
+  "CZ",
+  "DE",
+  "DK",
+  "EE",
+  "ES",
+  "FI",
+  "HU",
+  "LT",
+  "PL",
+  "SE",
+  "SI",
+  "SK",
+]);
+
+/** EEA countries, where EPC069-12 version 002 lets the BIC be omitted. */
+export const EEA_COUNTRIES: ReadonlySet<string> = new Set(
+  "AT BE BG HR CY CZ DK EE FI FR DE GR HU IE IT LV LT LU MT NL PL PT RO SK SI ES SE IS LI NO".split(
+    " ",
+  ),
+);
+
+/** ISO 13616: registered country length, BBAN shape, then the ISO 7064 mod 97-10 check digits. */
 export const isValidIban = (iban: string): boolean => {
-  if (!/^[A-Z]{2}\d{2}[A-Z0-9]{11,30}$/.test(iban)) return false;
+  if (!/^[A-Z]{2}\d{2}[A-Z0-9]+$/.test(iban)) return false;
+  const country = iban.slice(0, 2);
+  if (IBAN_LENGTHS[country] !== iban.length) return false;
+  if (NUMERIC_BBAN.has(country) && !/^\d+$/.test(iban.slice(4))) return false;
   const rearranged = iban.slice(4) + iban.slice(0, 4);
   let remainder = 0;
   for (const ch of rearranged) {

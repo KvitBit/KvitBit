@@ -10,7 +10,15 @@
  */
 import type { Invalid } from "@kvitbit/domain";
 import { type BigDecimal, Result } from "effect";
-import { invalid, singleLine, truncateAtWord, validAmount, validBic, validIban } from "./fields";
+import {
+  EEA_COUNTRIES,
+  invalid,
+  singleLine,
+  truncateAtWord,
+  validAmount,
+  validBic,
+  validIban,
+} from "./fields";
 
 export interface EpcInput {
   readonly iban: string;
@@ -31,6 +39,13 @@ export const epc = (input: EpcInput): Result.Result<string, Invalid> =>
   Result.gen(function* () {
     const iban = yield* validIban("iban", input.iban);
     const bic = yield* validBic("bic", input.bic);
+    // Version 002 allows omitting the BIC only within the EEA. Only the beneficiary side can be
+    // checked here; a payer PSP outside the EEA is the caller's concern.
+    if (bic === undefined && !EEA_COUNTRIES.has(iban.slice(0, 2))) {
+      return yield* Result.fail(
+        invalid("bic", "request.malformed", { reason: "required_outside_eea" }),
+      );
+    }
     const name = truncateAtWord(singleLine(input.beneficiaryName), EPC_LIMITS.name);
     if (name === "") return yield* Result.fail(invalid("beneficiaryName", "request.malformed"));
     const amount = yield* validAmount("amount", input.amount, "0.01", "999999999.99");
@@ -39,6 +54,10 @@ export const epc = (input: EpcInput): Result.Result<string, Invalid> =>
     let text = "";
     if ("reference" in input.remittance) {
       reference = input.remittance.reference.replace(/\s+/g, "");
+      // biome-ignore lint/suspicious/noControlCharactersInRegex: control characters are rejected
+      if (reference === "" || /[\u0000-\u001f\u007f]/.test(reference)) {
+        return yield* Result.fail(invalid(["remittance", "reference"], "request.malformed"));
+      }
       if (reference.length > EPC_LIMITS.reference) {
         return yield* Result.fail(
           invalid(["remittance", "reference"], "qr.field_too_long", {

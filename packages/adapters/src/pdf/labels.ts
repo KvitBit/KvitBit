@@ -63,6 +63,8 @@ export interface Labels {
   readonly refCorrection: (original: string, issuedOn: string, reason: string) => string;
   readonly refSettlement: (proformas: string, ptds: string) => string;
   readonly fxDisclosure: (fixingDate: string | null, pair: string) => string;
+  /** Non-tax documents: the conversion rate without VAT wording. */
+  readonly fxRate: (fixingDate: string | null, pair: string) => string;
 }
 
 export const LABELS: Readonly<Record<Locale, Labels>> = {
@@ -147,6 +149,10 @@ export const LABELS: Readonly<Record<Locale, Labels>> = {
       date === null
         ? `Přepočet pro účely DPH kurzem stanoveným dodavatelem: ${pair}.`
         : `Přepočet pro účely DPH dle kurzu ČNB ze dne ${date}: ${pair}.`,
+    fxRate: (date, pair) =>
+      date === null
+        ? `Přepočet kurzem stanoveným dodavatelem: ${pair}.`
+        : `Přepočet dle kurzu ČNB ze dne ${date}: ${pair}.`,
   },
   en: {
     supplier: "Supplier",
@@ -224,5 +230,9 @@ export const LABELS: Readonly<Record<Locale, Labels>> = {
       date === null
         ? `Converted for Czech VAT at the supplier's rate: ${pair}.`
         : `Converted for Czech VAT at the CNB fixing of ${date}: ${pair}.`,
+    fxRate: (date, pair) =>
+      date === null
+        ? `Converted at the supplier's rate: ${pair}.`
+        : `Converted at the CNB fixing of ${date}: ${pair}.`,
   },
 };

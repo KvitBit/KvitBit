@@ -27,7 +27,7 @@ const CSS = `
 .meta-kv > :last-child { text-align: right; }
 .meta-kv .accent { color: var(--p-accent); }
 .qr-frame { display: flex; flex-direction: column; align-items: center; gap: 2px; border: 1px solid #D4D4D8; background: #FFFFFF; padding: 4px 5px 3px; }
-.qr-frame .qr { width: 58px; height: 58px; }
+.qr-frame .qr { width: 76px; height: 76px; }
 .qr-cap { font-size: 7.5px; font-weight: 600; color: #18181B; }
 .ref-banner { padding: 6px 9px; margin-bottom: 10px; background: var(--p-tint); border-left: 3px solid var(--p-accent); font-size: 9.5px; color: #27272A; }
 table.items { width: 100%; border-collapse: collapse; margin-bottom: 12px; font-size: 10px; }

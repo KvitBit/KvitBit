@@ -216,7 +216,13 @@ export const prepare = (model: DocumentRenderModel, lang: Locale): Prepared => {
   if (final && deductions.length > 0) {
     subtotals.push({
       label: t.suppliesTotal,
-      value: money(BigDecimal.subtract(model.totals.gross.amount, deducted)),
+      // Gross already includes payment rounding, which prints as its own row below.
+      value: money(
+        BigDecimal.subtract(
+          BigDecimal.subtract(model.totals.gross.amount, model.totals.roundingAdjustment.amount),
+          deducted,
+        ),
+      ),
     });
     subtotals.push({ label: t.lessDeposit, value: money(deducted), tone: "deduction" });
   } else if (showVat) {
@@ -249,6 +255,8 @@ export const prepare = (model: DocumentRenderModel, lang: Locale): Prepared => {
     const pair = `${model.fx.quantity} ${cur} = ${formatRate(model.fx.rate, lang)} ${
       lang === "cs" ? "Kč" : "CZK"
     }`;
+    // VAT-specific wording and CZK VAT only on VAT tax documents; others get the plain rate.
+    const vatDisclosure = showVat && model.taxDocument;
     const perBucket = model.totals.buckets
       .filter((b) => b.vatCzk !== null)
       .map((b) => `${bucketLabel(b)}: ${czk(b.vatCzk ?? BigDecimal.fromBigInt(0n))}`);
@@ -257,14 +265,12 @@ export const prepare = (model: DocumentRenderModel, lang: Locale): Prepared => {
     if (totalVatCzk !== null && perBucket.length !== 1) {
       parts.push(perBucket.length === 0 ? totalVatCzk : `${t.vatSum} ${totalVatCzk}`);
     }
-    const vatLine = parts.length === 0 ? "" : ` ${t.vatInCzk}: ${parts.join("; ")}.`;
+    const vatLine =
+      !vatDisclosure || parts.length === 0 ? "" : ` ${t.vatInCzk}: ${parts.join("; ")}.`;
+    const fixingDate =
+      model.fx.source === "cnb" && model.fx.fixingDate !== null ? date(model.fx.fixingDate) : null;
     fxNote =
-      t.fxDisclosure(
-        model.fx.source === "cnb" && model.fx.fixingDate !== null
-          ? date(model.fx.fixingDate)
-          : null,
-        pair,
-      ) + vatLine;
+      (vatDisclosure ? t.fxDisclosure(fixingDate, pair) : t.fxRate(fixingDate, pair)) + vatLine;
   }
 
   const allNotes =
@@ -357,7 +363,7 @@ export const prepare = (model: DocumentRenderModel, lang: Locale): Prepared => {
     },
     issuerIds: ids(model.issuer, ": "),
     customerIds: ids(model.customer, ": "),
-    qrSvg: qr === null ? null : toSvg(qr.payload, { margin: 0, color: "#09090B" }),
+    qrSvg: qr === null ? null : toSvg(qr.payload, { margin: 4, color: "#09090B" }),
     qrCaption: qr?.format === "epc" ? t.qrEpc : t.qrSpayd,
     qrCardTitle: qr?.format === "epc" ? t.qrEpcCard : t.qrSpaydCard,
     accent: brand.accent,
