@@ -15,10 +15,11 @@ const MONDAY_MORNING = Date.UTC(2026, 10, 23, 9, 0);
 const withCache = <A, E>(
   inner: Layer.Layer<ExchangeRates>,
   body: Effect.Effect<A, E, ExchangeRates>,
+  now: number = MONDAY_MORNING,
 ) =>
   Effect.runPromise(
     Effect.gen(function* () {
-      yield* TestClock.setTime(MONDAY_MORNING);
+      yield* TestClock.setTime(now);
       return yield* body;
     }).pipe(
       Effect.provide(MemoryCache.layer.pipe(Layer.provide(inner))),
@@ -63,6 +64,20 @@ describe("MemoryCache", () => {
       }),
     );
     expect(inner.state.calls).toBe(2);
+  });
+
+  test("the day boundary is Prague's, not UTC's", async () => {
+    // 2026-11-22 23:30 UTC is already Monday 00:30 in Prague, so Sunday is over and final.
+    const inner = counting(FixtureRates.make([friday]));
+    await withCache(
+      inner.layer,
+      Effect.gen(function* () {
+        expect<unknown>((yield* fixing("2026-11-22")).fixingDate).toBe("2026-11-20");
+        expect<unknown>((yield* fixing("2026-11-22")).fixingDate).toBe("2026-11-20");
+      }),
+      Date.UTC(2026, 10, 22, 23, 30),
+    );
+    expect(inner.state.calls).toBe(1);
   });
 
   test("failures are not cached", async () => {

@@ -48,7 +48,9 @@ export const parseDailyTxt = (text: string): CnbFixing => {
       throw new MalformedFeed(`bad row: ${row}`);
     }
     const value = RATE.test(rate) ? BigDecimal.fromString(rate.replace(",", ".")) : Option.none();
-    if (Option.isNone(value)) throw new MalformedFeed(`bad rate: ${row}`);
+    if (Option.isNone(value) || !BigDecimal.isPositive(value.value)) {
+      throw new MalformedFeed(`bad rate: ${row}`);
+    }
     return { code, quantity: Number(quantity), rate: BigDecimal.normalize(value.value) };
   });
 

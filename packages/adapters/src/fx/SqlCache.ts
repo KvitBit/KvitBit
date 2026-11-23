@@ -25,13 +25,17 @@ import { type CnbFixing, ExchangeRates } from "@kvitbit/domain/ports";
 import { BigDecimal, Effect, Layer, Option, Schema } from "effect";
 import { SqlClient } from "effect/sql";
 
-/** What `BigDecimal.format` writes: plain digits, or exponent notation at 16+ digits of scale. */
+/**
+ * A positive rate as `BigDecimal.format` writes it: plain digits, or exponent notation at 16+
+ * digits of scale. The pattern comes first because `BigDecimal.fromString("")` is zero.
+ */
+const PLAIN_OR_EXPONENT = /^\d+(?:\.\d+)?(?:e[+-]?\d+)?$/;
+const isPositiveDecimal = (s: string): boolean =>
+  PLAIN_OR_EXPONENT.test(s) &&
+  Option.exists(BigDecimal.fromString(s), (d) => BigDecimal.isPositive(d));
+
 const DecimalString = Schema.String.pipe(
-  Schema.check(
-    Schema.makeFilter((s: string) => Option.isSome(BigDecimal.fromString(s)), {
-      expected: "a decimal string",
-    }),
-  ),
+  Schema.check(Schema.makeFilter(isPositiveDecimal, { expected: "a positive decimal string" })),
 );
 
 const StoredRates = Schema.Array(

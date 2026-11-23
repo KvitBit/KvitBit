@@ -49,6 +49,7 @@ describe("parseDailyTxt", () => {
     ["missing cell", `20.11.2026 #223\n${columns}\nEMU|euro|1|EUR`],
     ["decimal point", `20.11.2026 #223\n${columns}\nEMU|euro|1|EUR|24.335`],
     ["lowercase code", `20.11.2026 #223\n${columns}\nEMU|euro|1|eur|24,335`],
+    ["zero rate", `20.11.2026 #223\n${columns}\nEMU|euro|1|EUR|0,000`],
     ["zero quantity", `20.11.2026 #223\n${columns}\nEMU|euro|0|EUR|24,335`],
   ])("rejects %s", (_, text) => {
     expect(() => parseDailyTxt(text)).toThrow(MalformedFeed);

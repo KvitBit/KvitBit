@@ -86,17 +86,24 @@ describe("SqlCache", () => {
     expect(inner.state.calls).toBe(2);
   });
 
-  test("an unreadable row is treated as a miss and overwritten", async () => {
+  test.each([
+    ["a missing quantity", '[{"code":"EUR","rate":"24.335"}]'],
+    ["an empty rate", '[{"code":"EUR","quantity":1,"rate":""}]'],
+    ["a zero rate", '[{"code":"EUR","quantity":1,"rate":"0"}]'],
+    ["a numeric rate", '[{"code":"EUR","quantity":1,"rate":24.335}]'],
+  ])("a row with %s is a miss and is repaired", async (_, stored) => {
     const inner = counting(FixtureRates.make([friday]));
+    const eur = (f: CnbFixing) => plain(f).rates.find((r) => r.code === "EUR")?.rate;
     await withSqlCache(
       inner.layer,
       Effect.gen(function* () {
         const sql = yield* SqlClient.SqlClient;
         yield* sql`insert into fx_fixings (fixing_date, sequence, rates)
-                   values ('2026-11-20', 225, '[{"code":"EUR","rate":24.335}]'::jsonb)`;
-        expect((yield* fixing("2026-11-20")).rates).toHaveLength(2);
+                   values ('2026-11-20', 223, ${stored}::jsonb)`;
+        expect(eur(yield* fixing("2026-11-20"))).toBe("24.335");
         const [row] = yield* rows;
         expect(row?.rates).toHaveLength(2);
+        expect(eur(yield* fixing("2026-11-20"))).toBe("24.335");
       }),
     );
     expect(inner.state.calls).toBe(1);
