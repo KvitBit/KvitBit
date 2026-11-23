@@ -15,7 +15,8 @@
     "./pdf": "./src/pdf/index.ts",
     "./qr": "./src/qr/index.ts",
     "./jobs": "./src/jobs/index.ts",
-    "./testing": "./src/testing/index.ts"
+    "./testing": "./src/testing/index.ts",
+    "./sql": "./src/sql/index.ts"
   },
   "scripts": {
     "typecheck": "tsc -p tsconfig.json",
