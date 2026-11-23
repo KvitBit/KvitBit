@@ -315,9 +315,10 @@ describe("bank accounts", () => {
             issues: [{ path: ["replacement"], code: "bank_account.replacement_invalid" }],
           }),
         );
-        yield* Ref.set(refs.uses, new Map([[a.id as BankAccountId, 2]]));
+        yield* refs.set(s.workspaceId, a.id as BankAccountId, 2);
         yield* remove(a.id, b.id);
-        expect((yield* Ref.get(refs.uses)).get(b.id as BankAccountId)).toBe(2);
+        expect(yield* refs.get(s.workspaceId, b.id as BankAccountId)).toBe(2);
+        expect(yield* refs.get(s.workspaceId, a.id as BankAccountId)).toBe(0);
         const accounts = view(yield* as(s.admin)(ws.current)).bankAccounts;
         expect(
           accounts.map((x: { id: string; isDefault: boolean }) => [x.id, x.isDefault]),
@@ -325,9 +326,14 @@ describe("bank accounts", () => {
           [b.id, true],
           [eur.id, true],
         ]);
-        // The only EUR account, unused: removable without a replacement.
-        yield* remove(eur.id);
-        yield* remove(eur.id); // idempotent by state (C6)
+        // The only EUR account is the EUR default: still in use, so it needs a replacement (4.1).
+        expect(yield* failure(remove(eur.id))).toEqual(
+          new Conflict({ reason: "illegal_transition", detail: "bank_account.in_use" }),
+        );
+        // A non-default, unused account is removable without a replacement.
+        const c = yield* save({ iban: IBAN_CZ, currency: "CZK", name: "Třetí" });
+        yield* remove(c.id);
+        yield* remove(c.id); // idempotent by state (C6)
         expect((yield* history(s.workspaceId)).at(-1)?.action).toBe("workspace.bankAccount.remove");
       }),
     ));

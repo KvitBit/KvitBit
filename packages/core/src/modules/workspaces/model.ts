@@ -140,6 +140,11 @@ export const MembershipRow = Schema.Struct({
   userId: UserId,
   role: Role,
   joinedAt: Schema.String,
+  /**
+   * When the member was removed or left (soft delete), else null. A removed row is invisible to
+   * reads; it lets a repeated removal succeed (C6) and is reactivated when the user rejoins.
+   */
+  removedAt: Schema.NullOr(Schema.String),
 });
 export type MembershipRow = typeof MembershipRow.Type;
 
@@ -161,6 +166,8 @@ export const InvitationRow = Schema.Struct({
   sendEpoch: Schema.Int,
   /** When the current epoch's email was requested (resend cooldown, C6). */
   lastSentAt: Schema.String,
+  /** When delivery of the current epoch started successfully (J1); null on each new epoch. */
+  workflowStartedAt: Schema.NullOr(Schema.String),
   invitedBy: UserId,
   createdAt: Schema.String,
   expiresAt: Schema.String,

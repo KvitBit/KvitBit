@@ -2,7 +2,7 @@
 import { describe, expect, test } from "bun:test";
 import type { BankAccountId, RequestKey } from "@kvitbit/domain/contract";
 import { Conflict, Forbidden, Invalid, Unavailable } from "@kvitbit/domain/contract";
-import { Effect, Ref, Stream } from "effect";
+import { Effect, Stream } from "effect";
 import {
   BankAccountReferencesFake,
   makeWorkspaces,
@@ -57,8 +57,12 @@ describe("idempotent by state (C6)", () => {
       Effect.gen(function* () {
         const ws = yield* W;
         const s = yield* seed();
+        // The first CZK account is the currency default (always in use); remove the second.
+        yield* as(s.admin)(ws.saveBankAccount({ iban: IBAN, currency: "CZK" } as never));
         const account = view(
-          yield* as(s.admin)(ws.saveBankAccount({ iban: IBAN, currency: "CZK" } as never)),
+          yield* as(s.admin)(
+            ws.saveBankAccount({ iban: IBAN, currency: "CZK", name: "Druhý" } as never),
+          ),
         );
         yield* as(s.admin)(ws.removeBankAccount(account.id));
         yield* as(s.admin)(ws.removeBankAccount(account.id));
@@ -110,13 +114,13 @@ describe("idempotent by state (C6)", () => {
         const a = view(
           yield* as(s.admin)(ws.saveBankAccount({ iban: IBAN, currency: "CZK" } as never)),
         );
-        yield* Ref.set(refs.uses, new Map([[a.id as BankAccountId, 1]]));
+        yield* refs.set(s.workspaceId, a.id as BankAccountId, 1);
         expect(
           yield* failure(
             as(s.admin)(ws.saveBankAccount({ id: a.id, iban: IBAN, currency: "EUR" } as never)),
           ),
         ).toEqual(new Conflict({ reason: "illegal_transition", detail: "bank_account.in_use" }));
-        yield* Ref.set(refs.uses, new Map());
+        yield* refs.set(s.workspaceId, a.id as BankAccountId, 0);
         const moved = view(
           yield* as(s.admin)(
             ws.saveBankAccount({ id: a.id, iban: IBAN, currency: "EUR" } as never),

@@ -10,6 +10,7 @@
  */
 import type {
   AccessEvent,
+  Action,
   AuditEntry,
   BankAccountId,
   BankAccountView,
@@ -60,7 +61,7 @@ import {
 } from "@kvitbit/domain/contract";
 import type { BlobKey } from "@kvitbit/domain/ports";
 import { BlobStorage } from "@kvitbit/domain/ports";
-import { Effect, Layer, Option, Ref, Schema, Stream } from "effect";
+import { Effect, Layer, Option, Schema, Stream } from "effect";
 import { can } from "../../policy/can";
 import { checkMembershipChange } from "../../policy/membership";
 import { authorize, authorizeInWorkspace } from "../../policy/Policy";
@@ -96,7 +97,7 @@ import {
   WorkspaceSeries,
 } from "./ports";
 import { isValidIco, RegistryLookup } from "./registry";
-import { WorkspacesRepo } from "./repo";
+import { WORKSPACE_SLUG_UNIQUE, WorkspacesRepo } from "./repo";
 import {
   BRANDING_IMAGE_MAX_BYTES,
   BRANDING_IMAGE_TYPES,
@@ -193,6 +194,9 @@ const seriesKindsFor = (regime: TaxRegime): ReadonlyArray<DocumentKind> =>
 
 const brandingKey = (workspaceId: WorkspaceId, image: BrandingImage, sha256: string) =>
   `branding/${workspaceId}/${image}/${sha256}` as BlobKey;
+
+/** W6: generated-slug inserts retried on a concurrent unique violation before giving up. */
+const SLUG_INSERT_ATTEMPTS = 20;
 
 const EMPTY_ADDRESS = { street: "", city: "", postalCode: "", country: "CZ" };
 
@@ -405,7 +409,38 @@ export const makeWorkspaces = Effect.gen(function* () {
   /** Starts the invitation email for `row`'s current epoch once the transaction commits. */
   const sendAfterCommit = (row: InvitationRow) =>
     store.afterCommit(
-      delivery.start({ workspaceId: row.workspaceId, invitationId: row.id, epoch: row.sendEpoch }),
+      Effect.andThen(
+        delivery.start({
+          workspaceId: row.workspaceId,
+          invitationId: row.id,
+          epoch: row.sendEpoch,
+        }),
+        stampStarted(row),
+      ),
+    );
+
+  /**
+   * J1: records the successful start of `row`'s epoch. The epoch guard keeps a late start from
+   * stamping a newer resend. An unstamped epoch is restarted by reconciliation (idempotent per
+   * epoch), so a failed stamp is only logged.
+   */
+  const stampStarted = (row: InvitationRow) =>
+    Effect.provideContext(
+      store.transaction(
+        Effect.gen(function* () {
+          const current = yield* repo.lockInvitation(row.workspaceId, row.id);
+          if (current.sendEpoch !== row.sendEpoch || current.workflowStartedAt !== null) return;
+          yield* repo.updateInvitation(
+            { ...current, workflowStartedAt: yield* nowIso },
+            current.revision,
+          );
+        }),
+      ),
+      context,
+    ).pipe(
+      Effect.catchCause((cause) =>
+        Effect.logWarning("invitation workflow start not recorded", cause),
+      ),
     );
 
   const tokenHashOf = (invitationId: InvitationId, epoch: number) =>
@@ -418,6 +453,40 @@ export const makeWorkspaces = Effect.gen(function* () {
       if (Option.isNone(found)) return yield* new NotFound({ entity: "Invitation", id: "token" });
       return found.value;
     });
+
+  /**
+   * R1/R1c under the workspace lock: re-reads the actor's membership and re-runs `can` with the
+   * stored role, so a request admitted before a demotion, removal or transfer cannot commit a
+   * privileged change. Call after `repo.lockWorkspace`. Non-Member callers pass through.
+   */
+  const recheck = <C extends Caller>(caller: C, workspaceId: WorkspaceId, action: Action) =>
+    Effect.gen(function* () {
+      if (caller._tag !== "Member") return caller;
+      const stored = yield* repo.findMembership(workspaceId, caller.userId);
+      if (Option.isNone(stored)) return yield* new Forbidden({ action });
+      const actor = { ...caller, role: stored.value.role } as C;
+      if (!can(actor, action)) return yield* new Forbidden({ action });
+      return actor;
+    });
+
+  /** Whether the latest ownership transfer was `from` → `to` and `to` still owns the Workspace. */
+  const transferredBy = (workspaceId: WorkspaceId, from: UserId, to: UserId) =>
+    Effect.gen(function* () {
+      const target = yield* repo.findMembership(workspaceId, to);
+      if (Option.isNone(target) || target.value.role !== "owner") return false;
+      const history = yield* store.audit.history(workspaceId, {
+        entity: "Workspace",
+        id: workspaceId,
+      });
+      const last = history.filter((e) => e.action === "workspace.transferOwnership").at(-1);
+      if (last === undefined || last.actor._tag !== "Member" || last.actor.userId !== from)
+        return false;
+      return last.changes.some((c) => c.path === `members.${to}` && c.after === "owner");
+    });
+
+  /** W5 before a request-log replay (C3): a closed Workspace returns no cached write result. */
+  const requireOpenBeforeReplay = (workspaceId: WorkspaceId, action: Forbidden["action"]) =>
+    Effect.flatMap(storeOnly(repo.getWorkspace(workspaceId)), (row) => requireOpen(row, action));
 
   /** Owner/admin gate for invitations to the `admin` role (R1c). */
   const manageAdminsFor = (caller: Caller, role: InvitationRow["role"]) =>
@@ -435,9 +504,12 @@ export const makeWorkspaces = Effect.gen(function* () {
           if (caller._tag !== "Account")
             return yield* new Forbidden({ action: "workspace.create" });
           const fields = yield* decodeInput(codec<NewWorkspaceFields>(NewWorkspaceFields), input);
-          // Registry I/O stays outside the transaction (cached 24 h, so a replay costs nothing).
+          // Registry I/O stays outside the transaction. Its outcome is captured, not failed on:
+          // a replay returns the stored result before the body runs, so a registry outage
+          // cannot break the replay of a committed create (C3).
           const ico = fields.ico?.trim();
-          const record = ico === undefined || ico === "" ? null : yield* registry.lookup(ico);
+          const lookup =
+            ico === undefined || ico === "" ? null : yield* Effect.result(registry.lookup(ico));
           const created = yield* withIdempotency(
             {
               scope: { _tag: "User", userId: caller.userId },
@@ -449,10 +521,26 @@ export const makeWorkspaces = Effect.gen(function* () {
               result: codec<MemberCaller>(MemberCallerSchema),
             },
             Effect.gen(function* () {
+              const record =
+                lookup === null
+                  ? null
+                  : lookup._tag === "Failure"
+                    ? yield* Effect.fail(lookup.failure)
+                    : lookup.success;
               const name = (fields.name ?? record?.name ?? "").trim();
               if (name === "") return yield* invalid(["name"], "request.malformed");
               const now = yield* nowIso;
               const date = yield* today;
+              const base = slugify(name);
+              let suffix = 1;
+              /** The next free generated candidate after `suffix` (W6). */
+              const nextGenerated = Effect.gen(function* () {
+                for (;;) {
+                  const candidate = suffix === 1 ? base : withSuffix(base, suffix);
+                  suffix++;
+                  if (yield* slugFree(candidate, null, now)) return candidate;
+                }
+              });
               let slug: string;
               if (fields.slug !== undefined) {
                 if (!isValidSlug(fields.slug))
@@ -462,10 +550,7 @@ export const makeWorkspaces = Effect.gen(function* () {
                 }
                 slug = fields.slug;
               } else {
-                const base = slugify(name);
-                slug = base;
-                for (let n = 2; !(yield* slugFree(slug, null, now)); n++)
-                  slug = withSuffix(base, n);
+                slug = yield* nextGenerated;
               }
               const workspaceId = yield* newId<WorkspaceId>();
               const regime = fields.taxRegime ?? "non_vat_payer";
@@ -505,7 +590,22 @@ export const makeWorkspaces = Effect.gen(function* () {
                 reminders: DEFAULT_REMINDERS,
                 branding: DEFAULT_BRANDING,
               };
-              yield* slugRace(repo.insertWorkspace(row));
+              // W6: the insert runs in a savepoint, so a concurrent create that took a generated
+              // candidate first only costs a retry with the next suffix (bounded). An explicitly
+              // requested slug still fails `slug_taken`.
+              for (let attempt = 1; ; attempt++) {
+                const inserted = yield* Effect.result(
+                  store.transaction(repo.insertWorkspace({ ...row, slug: slug as WorkspaceSlug })),
+                );
+                if (inserted._tag === "Success") break;
+                const error = inserted.failure;
+                if (error._tag !== "UniqueViolation") return yield* Effect.fail(error);
+                // Another unique key (a duplicate fresh id) is a defect, as before.
+                if (error.constraint !== WORKSPACE_SLUG_UNIQUE) return yield* Effect.die(error);
+                if (fields.slug !== undefined || attempt >= SLUG_INSERT_ATTEMPTS)
+                  return yield* invalid(["slug"], "workspace.slug_taken");
+                slug = yield* nextGenerated;
+              }
               yield* storeOnly(
                 repo.insertMembership({
                   id: yield* newId<string>(),
@@ -514,6 +614,7 @@ export const makeWorkspaces = Effect.gen(function* () {
                   userId: caller.userId,
                   role: "owner",
                   joinedAt: now,
+                  removedAt: null,
                 }),
               );
               yield* series.ensureDefaults(workspaceId, seriesKindsFor(regime));
@@ -634,16 +735,28 @@ export const makeWorkspaces = Effect.gen(function* () {
               const existing = yield* repo.findMembership(workspace.id, caller.userId);
               const role: Role = Option.isSome(existing) ? existing.value.role : invitation.role;
               if (Option.isNone(existing)) {
-                yield* storeOnly(
-                  repo.insertMembership({
-                    id: yield* newId<string>(),
-                    workspaceId: workspace.id,
-                    revision: 1,
-                    userId: caller.userId,
-                    role,
-                    joinedAt: now,
-                  }),
-                );
+                // A removed membership is reactivated: the unique index is per (workspace, user).
+                const removed = yield* repo.findMembershipRecord(workspace.id, caller.userId);
+                if (Option.isSome(removed)) {
+                  yield* storeOnly(
+                    repo.updateMembership(
+                      { ...removed.value, role, joinedAt: now, removedAt: null },
+                      removed.value.revision,
+                    ),
+                  );
+                } else {
+                  yield* storeOnly(
+                    repo.insertMembership({
+                      id: yield* newId<string>(),
+                      workspaceId: workspace.id,
+                      revision: 1,
+                      userId: caller.userId,
+                      role,
+                      joinedAt: now,
+                      removedAt: null,
+                    }),
+                  );
+                }
               }
               yield* storeOnly(
                 repo.updateInvitation(
@@ -788,8 +901,10 @@ export const makeWorkspaces = Effect.gen(function* () {
                 last !== undefined &&
                 taxRegime.regime !== last.regime
               ) {
+                // W2: the first (baseline) period is never replaced, so tax points before a
+                // change keep the baseline even when the change takes effect on creation day.
                 taxRegimes =
-                  taxRegime.effectiveFrom === last.effectiveFrom
+                  row.taxRegimes.length > 1 && taxRegime.effectiveFrom === last.effectiveFrom
                     ? [...row.taxRegimes.slice(0, -1), taxRegime]
                     : [...row.taxRegimes, taxRegime];
               }
@@ -965,10 +1080,13 @@ export const makeWorkspaces = Effect.gen(function* () {
           if (!isValidIban(iban)) issues.push(issue(["iban"], "request.malformed"));
           if (bic !== null && !isValidBic(bic)) issues.push(issue(["bic"], "request.malformed"));
           yield* failIssues(issues);
+          yield* requireOpenBeforeReplay(workspaceId, "workspace.settings");
           const view = yield* withIdempotency(
             {
               scope: { _tag: "Workspace", workspaceId },
-              key: opts?.requestKey,
+              // C6: replacing an existing account is idempotent by state and applies to the
+              // current state; only a create (no id) is replayed from the request log.
+              key: fields.id === undefined ? opts?.requestKey : undefined,
               method: "Workspaces.saveBankAccount",
               payload: { schema: codec<BankAccountFields>(BankAccountFields), value: fields },
               result: codec<BankAccountViewFields>(BankAccountViewFields),
@@ -1080,19 +1198,23 @@ export const makeWorkspaces = Effect.gen(function* () {
               yield* requireOpen(workspace, "workspace.settings");
               const account = yield* repo.lockBankAccount(workspaceId, id);
               if (account.archived) return; // idempotent by state (C6)
-              const sameCurrency = (yield* activeAccounts(workspaceId)).filter(
-                (a) => a.currency === account.currency && a.id !== id,
-              );
               let substitute: BankAccountRow | undefined;
               if (replacement !== undefined) {
-                substitute = sameCurrency.find((a) => a.id === replacement);
-                if (substitute === undefined) {
+                // Scoped fetch first: a foreign or unknown id is NotFound (R2).
+                const candidate = yield* repo.getBankAccount(workspaceId, replacement);
+                if (
+                  candidate.archived ||
+                  candidate.id === id ||
+                  candidate.currency !== account.currency
+                ) {
                   return yield* invalid(["replacement"], "bank_account.replacement_invalid");
                 }
+                substitute = candidate;
               }
               const uses = yield* references.count(workspaceId, id);
               const isDefault = workspace.bankAccountByCurrency[account.currency] === id;
-              const inUse = uses > 0 || (isDefault && sameCurrency.length > 0);
+              // A currency default is always in use (4.1), even as its currency's only account.
+              const inUse = uses > 0 || isDefault;
               if (inUse && substitute === undefined) {
                 return yield* new Conflict({
                   reason: "illegal_transition",
@@ -1143,10 +1265,19 @@ export const makeWorkspaces = Effect.gen(function* () {
       run(
         Effect.gen(function* () {
           const { workspaceId } = yield* authorizeInWorkspace("workspace.settings");
+          // W3: the next counter is a positive integer (NumberingSeriesView.nextCounter is Int).
+          if (
+            input.nextNumber !== undefined &&
+            !(Number.isInteger(input.nextNumber) && input.nextNumber >= 1)
+          ) {
+            return yield* invalid(["nextNumber"], "request.malformed");
+          }
+          yield* requireOpenBeforeReplay(workspaceId, "workspace.settings");
           return yield* withIdempotency(
             {
               scope: { _tag: "Workspace", workspaceId },
-              key: opts?.requestKey,
+              // C6: as saveBankAccount, only a create (no id) uses the request log.
+              key: input.id === undefined ? opts?.requestKey : undefined,
               method: "Workspaces.configureSeries",
               payload: { schema: codec<typeof input>(SeriesInputSchema), value: input },
               result: codec<SeriesView>(NumberingSeriesView),
@@ -1187,29 +1318,41 @@ export const makeWorkspaces = Effect.gen(function* () {
           if (!(BRANDING_IMAGE_TYPES as ReadonlyArray<string>).includes(contentType)) {
             return yield* invalid(["contentType"], "branding.image_type_rejected");
           }
-          // Checked while streaming: the size cap aborts early, the signature is checked on the head.
-          const chunks = yield* Ref.make<{ size: number; parts: Array<Uint8Array> }>({
-            size: 0,
-            parts: [],
-          });
+          // Checked while streaming (W7): the size cap aborts early and the signature is checked
+          // as soon as the 8-byte header has arrived, before any further chunk is pulled.
+          const HEADER_BYTES = 8;
+          const parts: Array<Uint8Array> = [];
+          let size = 0;
+          let headerChecked = false;
+          const joined = (length: number) => {
+            const out = new Uint8Array(length);
+            let offset = 0;
+            for (const part of parts) {
+              if (offset >= length) break;
+              const take = part.subarray(0, length - offset);
+              out.set(take, offset);
+              offset += take.byteLength;
+            }
+            return out;
+          };
           yield* Stream.runForEach(file.bytes, (chunk) =>
             Effect.gen(function* () {
-              const state = yield* Ref.get(chunks);
-              const size = state.size + chunk.byteLength;
+              size += chunk.byteLength;
               if (size > BRANDING_IMAGE_MAX_BYTES) {
                 return yield* invalid(["file"], "branding.image_too_large");
               }
-              yield* Ref.set(chunks, { size, parts: [...state.parts, chunk.slice()] });
+              // Copied on arrival: the producer may reuse its buffer.
+              parts.push(chunk.slice());
+              if (!headerChecked && size >= HEADER_BYTES) {
+                headerChecked = true;
+                if (!matchesImageSignature(contentType, joined(HEADER_BYTES))) {
+                  return yield* invalid(["file"], "branding.image_type_rejected");
+                }
+              }
             }),
           );
-          const { size, parts } = yield* Ref.get(chunks);
-          const bytes = new Uint8Array(size);
-          let offset = 0;
-          for (const part of parts) {
-            bytes.set(part, offset);
-            offset += part.byteLength;
-          }
-          if (!matchesImageSignature(contentType, bytes)) {
+          const bytes = joined(size);
+          if (!headerChecked && !matchesImageSignature(contentType, bytes)) {
             return yield* invalid(["file"], "branding.image_type_rejected");
           }
           const sha256 = yield* sha256Hex(bytes);
@@ -1356,6 +1499,7 @@ export const makeWorkspaces = Effect.gen(function* () {
           const address = email.trim();
           if (!isValidEmail(address)) return yield* invalid(["email"], "request.malformed");
           const inviteRole = role as InvitationRow["role"];
+          yield* requireOpenBeforeReplay(workspaceId, "member.invite");
           return yield* withIdempotency(
             {
               scope: { _tag: "Workspace", workspaceId },
@@ -1367,6 +1511,8 @@ export const makeWorkspaces = Effect.gen(function* () {
             Effect.gen(function* () {
               const workspace = yield* storeOnly(repo.lockWorkspace(workspaceId));
               yield* requireOpen(workspace, "member.invite");
+              const actor = yield* recheck(member, workspaceId, "member.invite");
+              yield* checkMembershipChange(actor, { _tag: "Invite", role });
               const now = yield* nowIso;
               const emailLower = address.toLowerCase();
               const memberRows = yield* repo.listMembers(workspaceId);
@@ -1395,6 +1541,7 @@ export const makeWorkspaces = Effect.gen(function* () {
                       role: inviteRole,
                       tokenHash: yield* tokenHashOf(old.id, sendEpoch),
                       sendEpoch,
+                      workflowStartedAt: null,
                       invitedBy: member.userId,
                       createdAt: now,
                       lastSentAt: now,
@@ -1416,6 +1563,7 @@ export const makeWorkspaces = Effect.gen(function* () {
                     status: "pending",
                     tokenHash: yield* tokenHashOf(id, 0),
                     sendEpoch: 0,
+                    workflowStartedAt: null,
                     invitedBy: member.userId,
                     createdAt: now,
                     lastSentAt: now,
@@ -1442,8 +1590,9 @@ export const makeWorkspaces = Effect.gen(function* () {
             Effect.gen(function* () {
               const workspace = yield* storeOnly(repo.lockWorkspace(workspaceId));
               yield* requireOpen(workspace, "member.invite");
+              const actor = yield* recheck(caller, workspaceId, "member.invite");
               const invitation = yield* repo.lockInvitation(workspaceId, id);
-              yield* manageAdminsFor(caller, invitation.role);
+              yield* manageAdminsFor(actor, invitation.role);
               const now = yield* nowIso;
               // Pending invitations only; an expired one is renewed by inviting the email again.
               if (invitationStatus(invitation, now) !== "pending") return yield* notPending();
@@ -1457,6 +1606,7 @@ export const makeWorkspaces = Effect.gen(function* () {
                     ...invitation,
                     tokenHash: yield* tokenHashOf(invitation.id, sendEpoch),
                     sendEpoch,
+                    workflowStartedAt: null,
                     lastSentAt: now,
                     expiresAt: new Date(Date.parse(now) + INVITATION_TTL_MILLIS).toISOString(),
                   },
@@ -1484,8 +1634,9 @@ export const makeWorkspaces = Effect.gen(function* () {
             Effect.gen(function* () {
               const workspace = yield* storeOnly(repo.lockWorkspace(workspaceId));
               yield* requireOpen(workspace, "member.invite");
+              const actor = yield* recheck(caller, workspaceId, "member.invite");
               const invitation = yield* repo.lockInvitation(workspaceId, id);
-              yield* manageAdminsFor(caller, invitation.role);
+              yield* manageAdminsFor(actor, invitation.role);
               const status = invitationStatus(invitation, yield* nowIso);
               // Idempotent by state: revoked or accepted stays as it is; expired can be revoked.
               if (status !== "pending" && status !== "expired") return;
@@ -1508,12 +1659,23 @@ export const makeWorkspaces = Effect.gen(function* () {
             Effect.gen(function* () {
               const workspace = yield* storeOnly(repo.lockWorkspace(workspaceId));
               yield* requireOpen(workspace, "member.setRole");
+              const actor = yield* recheck(caller, workspaceId, "member.setRole");
               const found = yield* repo.findMembership(workspaceId, userId);
-              if (Option.isNone(found))
+              if (Option.isNone(found)) {
+                // C6: repeating a removal of a member removed from this Workspace succeeds; a
+                // user who never belonged here stays NotFound (R2).
+                const record = yield* repo.findMembershipRecord(workspaceId, userId);
+                if (role === null && Option.isSome(record)) {
+                  return yield* checkMembershipChange(actor, {
+                    _tag: "Remove",
+                    targetRole: record.value.role,
+                  });
+                }
                 return yield* new NotFound({ entity: "Member", id: userId });
+              }
               const target = found.value;
               yield* checkMembershipChange(
-                caller,
+                actor,
                 role === null
                   ? { _tag: "Remove", targetRole: target.role }
                   : { _tag: "SetRole", targetRole: target.role, role },
@@ -1521,7 +1683,7 @@ export const makeWorkspaces = Effect.gen(function* () {
               if (role === target.role) return;
               if (role === null) {
                 // W8: ends the membership; apps/server then revokes its keys and grants.
-                yield* storeOnly(repo.removeMembership(target));
+                yield* storeOnly(repo.removeMembership(target, yield* nowIso));
               } else {
                 yield* storeOnly(repo.updateMembership({ ...target, role }, target.revision));
               }
@@ -1554,7 +1716,7 @@ export const makeWorkspaces = Effect.gen(function* () {
                 detail: "member.owner_cannot_leave",
               });
             }
-            yield* storeOnly(repo.removeMembership(found.value));
+            yield* storeOnly(repo.removeMembership(found.value, yield* nowIso));
             yield* audit(member.workspaceId, "member.leave", workspace.revision, [
               { path: `members.${member.userId}`, before: found.value.role, after: null },
             ]);
@@ -1575,7 +1737,13 @@ export const makeWorkspaces = Effect.gen(function* () {
               const workspace = yield* storeOnly(repo.lockWorkspace(workspaceId));
               yield* requireOpen(workspace, "workspace.transferOwnership");
               const self = yield* repo.findMembership(workspaceId, member.userId);
-              if (Option.isNone(self) || self.value.role !== "owner") {
+              if (Option.isNone(self)) {
+                return yield* new Forbidden({ action: "workspace.transferOwnership" });
+              }
+              if (self.value.role !== "owner") {
+                // C6: a retry of this caller's completed transfer to `to` succeeds; any other
+                // transfer by a non-owner stays Forbidden (R1).
+                if (yield* transferredBy(workspaceId, member.userId, to)) return;
                 return yield* new Forbidden({ action: "workspace.transferOwnership" });
               }
               if (to === member.userId)
@@ -1602,10 +1770,11 @@ export const makeWorkspaces = Effect.gen(function* () {
     close: (confirmName) =>
       run(
         Effect.gen(function* () {
-          const { workspaceId } = yield* authorizeInWorkspace("workspace.close");
+          const { caller, workspaceId } = yield* authorizeInWorkspace("workspace.close");
           yield* store.transaction(
             Effect.gen(function* () {
               const row = yield* storeOnly(repo.lockWorkspace(workspaceId));
+              yield* recheck(caller, workspaceId, "workspace.close");
               if (row.closed) return; // idempotent by state (C6 wins over W5 here)
               if (confirmName.trim() !== row.name)
                 return yield* invalid(["confirmName"], "request.malformed");
@@ -1640,7 +1809,9 @@ export const makeWorkspaces = Effect.gen(function* () {
           if (event.subject.entity !== entity) return yield* new Forbidden({ action });
           yield* store.transaction(
             Effect.gen(function* () {
-              const row = yield* storeOnly(repo.getWorkspace(workspaceId));
+              // The workspace lock serializes duplicate hooks, so the history check below and the
+              // append are atomic at READ COMMITTED (C6).
+              const row = yield* storeOnly(repo.lockWorkspace(workspaceId));
               // W5: no new credentials on a closed Workspace; revocations stay possible.
               if (event.action.endsWith(".create")) yield* requireOpen(row, action);
               // Idempotent by subject and action (C6): a repeated hook writes no second entry.

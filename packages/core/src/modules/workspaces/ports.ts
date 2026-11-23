@@ -27,7 +27,7 @@ import { Context, Effect, Layer, Ref, Schema, Stream } from "effect";
 import { sha256Hex } from "../../shared/hash";
 import type { IdGenerator } from "../../shared/ids";
 import { newId } from "../../shared/ids";
-import type { StoreUnavailable } from "../../store/CoreStore";
+import { CoreStore, type StoreUnavailable } from "../../store/CoreStore";
 import { defineCollection, MemoryTables } from "../../store/tables";
 import type { Branding, IssuingEntity } from "./model";
 import { storeOnly } from "./rules";
@@ -222,6 +222,14 @@ export const WorkspaceSeriesMemory: Layer.Layer<
       configure: (workspaceId, input, today) =>
         Effect.gen(function* () {
           if (!PATTERN.test(input.pattern)) return yield* patternInvalid();
+          if (
+            input.nextNumber !== undefined &&
+            !(Number.isInteger(input.nextNumber) && input.nextNumber >= 1)
+          ) {
+            return yield* new Invalid({
+              issues: [{ path: ["nextNumber"], code: "request.malformed" }],
+            });
+          }
           const periodKey = periodKeyOf(input.pattern, today);
           const all = yield* ofWorkspace(workspaceId);
           if (input.id === undefined) {
@@ -396,27 +404,82 @@ export class BankAccountReferences extends Context.Service<
   }
 >()("kvitbit/core/BankAccountReferences") {}
 
-/** In-memory references with a writable count per account. */
+const FakeReferenceRow = Schema.Struct({
+  /** The bank account id. */
+  id: Schema.String,
+  workspaceId: Schema.String,
+  revision: Schema.Number,
+  uses: Schema.Number,
+});
+interface FakeReferenceRow {
+  readonly id: string;
+  readonly workspaceId: WorkspaceId;
+  readonly revision: number;
+  readonly uses: number;
+}
+
+const FakeReferences = defineCollection<FakeReferenceRow>({
+  name: "bank_account_references_fake",
+  entity: "BankAccount",
+  schema: FakeReferenceRow as unknown as Schema.Codec<FakeReferenceRow, unknown>,
+});
+
+/**
+ * In-memory references on `MemoryTables` (transactional, like `WorkspaceSeriesMemory`): a
+ * rolled-back `removeBankAccount` restores the counts (C1). The controls run their own
+ * transaction.
+ */
 export class BankAccountReferencesFake extends Context.Service<
   BankAccountReferencesFake,
-  { readonly uses: Ref.Ref<ReadonlyMap<BankAccountId, number>> }
+  {
+    /** Sets how many drafts and Templates use the account. */
+    readonly set: (
+      workspaceId: WorkspaceId,
+      id: BankAccountId,
+      uses: number,
+    ) => Effect.Effect<void, StoreUnavailable>;
+    readonly get: (
+      workspaceId: WorkspaceId,
+      id: BankAccountId,
+    ) => Effect.Effect<number, StoreUnavailable>;
+  }
 >()("kvitbit/core/testing/BankAccountReferencesFake") {
-  static readonly layer: Layer.Layer<BankAccountReferences | BankAccountReferencesFake> =
-    Layer.effectContext(
-      Effect.gen(function* () {
-        const uses = yield* Ref.make<ReadonlyMap<BankAccountId, number>>(new Map());
-        return Context.make(BankAccountReferencesFake, { uses }).pipe(
-          Context.add(BankAccountReferences, {
-            count: (_workspaceId, id) => Effect.map(Ref.get(uses), (all) => all.get(id) ?? 0),
-            reassign: (_workspaceId, from, to) =>
-              Ref.update(uses, (all) => {
-                const next = new Map(all);
-                next.set(to, (all.get(to) ?? 0) + (all.get(from) ?? 0));
-                next.delete(from);
-                return next;
-              }),
-          }),
-        );
-      }),
-    );
+  static readonly layer: Layer.Layer<
+    BankAccountReferences | BankAccountReferencesFake,
+    never,
+    MemoryTables | CoreStore
+  > = Layer.effectContext(
+    Effect.gen(function* () {
+      const tables = yield* MemoryTables;
+      const store = yield* CoreStore;
+      const rows = tables.collection(FakeReferences);
+      const count = (workspaceId: WorkspaceId, id: BankAccountId) =>
+        Effect.map(rows.find(workspaceId, id), (row) => (row._tag === "Some" ? row.value.uses : 0));
+      /** Upserts the count; inside the caller's transaction. */
+      const write = (workspaceId: WorkspaceId, id: BankAccountId, uses: number) =>
+        Effect.gen(function* () {
+          const current = yield* rows.find(workspaceId, id);
+          if (current._tag === "Some") {
+            yield* storeOnly(rows.update({ ...current.value, uses }, current.value.revision));
+          } else {
+            yield* storeOnly(rows.insert({ id, workspaceId, revision: 1, uses }));
+          }
+        });
+      return Context.make(BankAccountReferencesFake, {
+        set: (workspaceId, id, uses) => store.transaction(write(workspaceId, id, uses)),
+        get: (workspaceId, id) => store.transaction(count(workspaceId, id)),
+      }).pipe(
+        Context.add(BankAccountReferences, {
+          count,
+          reassign: (workspaceId, from, to) =>
+            Effect.gen(function* () {
+              const moved = yield* count(workspaceId, from);
+              const kept = yield* count(workspaceId, to);
+              yield* write(workspaceId, to, kept + moved);
+              yield* write(workspaceId, from, 0);
+            }),
+        }),
+      );
+    }),
+  );
 }

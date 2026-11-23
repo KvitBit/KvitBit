@@ -11,8 +11,7 @@ import type {
   UserId,
   WorkspaceId,
 } from "@kvitbit/domain/contract";
-import type { Option } from "effect";
-import { Context, Effect, Layer, type Schema } from "effect";
+import { Context, Effect, Layer, Option, type Schema } from "effect";
 import type { StoreUnavailable, UniqueViolation } from "../../store/CoreStore";
 import { defineCollection, MemoryTables } from "../../store/tables";
 import { BankAccountRow, InvitationRow, MembershipRow, SlugAliasRow, WorkspaceRow } from "./model";
@@ -57,7 +56,13 @@ export class WorkspacesRepo extends Context.Service<
     ) => Effect.Effect<SlugAliasRow, UniqueViolation | Fail>;
 
     // memberships
+    /** The live membership (removed rows are invisible). */
     readonly findMembership: (
+      workspaceId: WorkspaceId,
+      userId: UserId,
+    ) => Effect.Effect<Option.Option<MembershipRow>, Fail>;
+    /** The membership row including a removed one (`removedAt` set), for C6 and rejoining. */
+    readonly findMembershipRecord: (
       workspaceId: WorkspaceId,
       userId: UserId,
     ) => Effect.Effect<Option.Option<MembershipRow>, Fail>;
@@ -75,8 +80,10 @@ export class WorkspacesRepo extends Context.Service<
       next: MembershipRow,
       expectedRevision: number,
     ) => Effect.Effect<MembershipRow, NotFound | Conflict | UniqueViolation | Fail>;
+    /** Soft-deletes `row` (sets `removedAt`, bumps the revision). */
     readonly removeMembership: (
       row: MembershipRow,
+      removedAt: string,
     ) => Effect.Effect<void, NotFound | Conflict | Fail>;
 
     // invitations
@@ -128,6 +135,8 @@ export class WorkspacesRepo extends Context.Service<
     ) => Effect.Effect<BankAccountRow, NotFound | Conflict | UniqueViolation | Fail>;
   }
 >()("kvitbit/core/WorkspacesRepo") {}
+
+const live = (row: MembershipRow) => row.removedAt === null;
 
 /** Row schemas brand their ids; the collection reads them as plain codecs. */
 const codec = <A>(schema: unknown) => schema as Schema.Codec<A, unknown>;
@@ -197,12 +206,26 @@ export const WorkspacesRepoMemory: Layer.Layer<WorkspacesRepo, never, MemoryTabl
       insertSlugAlias: aliases.insert,
 
       findMembership: (workspaceId, userId) =>
+        Effect.map(
+          memberships.findUnique(MEMBERSHIP_USER_UNIQUE, [userId], workspaceId),
+          Option.filter(live),
+        ),
+      findMembershipRecord: (workspaceId, userId) =>
         memberships.findUnique(MEMBERSHIP_USER_UNIQUE, [userId], workspaceId),
-      listMembers: (workspaceId) => memberships.list(workspaceId, { orderBy: ["joinedAt"] }),
-      listMembershipsOfUser: (userId) => memberships.listGlobal({ where: { userId } }),
+      listMembers: (workspaceId) =>
+        Effect.map(memberships.list(workspaceId, { orderBy: ["joinedAt"] }), (rows) =>
+          rows.filter(live),
+        ),
+      listMembershipsOfUser: (userId) =>
+        Effect.map(memberships.listGlobal({ where: { userId } }), (rows) => rows.filter(live)),
       insertMembership: memberships.insert,
       updateMembership: memberships.update,
-      removeMembership: (row) => memberships.remove(row.workspaceId, row.id, row.revision),
+      removeMembership: (row, removedAt) =>
+        memberships.update({ ...row, removedAt }, row.revision).pipe(
+          Effect.asVoid,
+          // The per-Workspace user key is unchanged, so the unique index cannot fire.
+          Effect.catchTag("UniqueViolation", (e) => Effect.die(e)),
+        ),
 
       getInvitation: invitations.get,
       lockInvitation: invitations.lock,
