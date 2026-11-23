@@ -5,8 +5,13 @@
  */
 import { Api } from "@kvitbit/api-contract";
 import type { WorkspaceId } from "@kvitbit/domain/contract";
-import { Context, Effect, Layer, type Redacted } from "effect";
-import { FetchHttpClient, HttpClient, HttpClientRequest } from "effect/http";
+import { Context, Effect, Layer, Option, type Redacted } from "effect";
+import {
+  FetchHttpClient,
+  HttpClient,
+  HttpClientRequest,
+  type HttpClientResponse,
+} from "effect/http";
 import { HttpApiClient } from "effect/http-api";
 
 export type KvitbitApiClient = HttpApiClient.ForApi<typeof Api>;
@@ -40,13 +45,62 @@ export interface KvitbitApiConfig {
   readonly transformClient?: (client: HttpClient.HttpClient) => HttpClient.HttpClient;
 }
 
+/** What the last response of a call said, beyond its decoded body (ui-port-contracts 2.3). */
+export interface ObservedResponse {
+  readonly status: number;
+  readonly requestId: string | null;
+  /** Parsed from a strong `ETag: "<revision>"`. */
+  readonly etag: number | null;
+  /** `Idempotent-Replayed: true`: the server returned the stored result of this key. */
+  readonly replayed: boolean;
+}
+
+/**
+ * Per-call cell the client pipeline writes each response's headers into. `attempt` provides a
+ * fresh one per call; outside it nothing is recorded.
+ */
+export class ResponseObserver extends Context.Service<
+  ResponseObserver,
+  { current: ObservedResponse | null }
+>()("ui-port/ResponseObserver") {}
+
+const parseEtag = (value: string | undefined): number | null => {
+  const match = value === undefined ? null : /^"(0|[1-9]\d{0,9})"$/.exec(value);
+  return match?.[1] === undefined ? null : Number(match[1]);
+};
+
+export const observeResponse = (
+  response: HttpClientResponse.HttpClientResponse,
+): ObservedResponse => ({
+  status: response.status,
+  requestId: response.headers["x-request-id"] ?? null,
+  etag: parseEtag(response.headers.etag),
+  replayed: response.headers["idempotent-replayed"] === "true",
+});
+
+const recordResponse = HttpClient.transformResponse(
+  Effect.tap((response: HttpClientResponse.HttpClientResponse) =>
+    Effect.serviceOption(ResponseObserver).pipe(
+      Effect.flatMap((cell) =>
+        Option.isSome(cell)
+          ? Effect.sync(() => {
+              cell.value.current = observeResponse(response);
+            })
+          : Effect.void,
+      ),
+    ),
+  ),
+);
+
 const COOKIE_REQUEST_INIT: globalThis.RequestInit = { credentials: "include" };
 
 /** The request pipeline every KvitbitApi call goes through. */
 export const configureClient =
   (config: KvitbitApiConfig) =>
   (client: HttpClient.HttpClient): HttpClient.HttpClient => {
-    const base = config.transformClient ? config.transformClient(client) : client;
+    const base = (config.transformClient ? config.transformClient(client) : client).pipe(
+      recordResponse,
+    );
     const credentials = config.credentials;
     const authed =
       credentials._tag === "Bearer"

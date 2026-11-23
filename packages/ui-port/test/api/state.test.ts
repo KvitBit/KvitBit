@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test";
+import { RateLimited } from "@kvitbit/api-contract";
 import { Invalid, type Page } from "@kvitbit/domain/contract";
-import { Effect, Option, Random } from "effect";
+import { Effect, Fiber, Option, Random } from "effect";
+import { TestClock } from "effect/testing";
 import {
   type ApiResult,
   Connectivity,
@@ -81,6 +83,9 @@ describe("Paged", () => {
     const reloaded = Paged.receive(more, more.seq, err(mismatch));
     expect(reloaded.paged).toMatchObject({ status: "loading", error: Option.none(), seq: 3 });
     expect(reloaded.fetch?.query).toEqual({ limit: 50 });
+    const cancelled = Paged.receive(more, more.seq, err(UiError.cancelled));
+    expect(cancelled.paged.status).toBe("ready");
+    expect(Paged.loadMore(cancelled.paged).fetch).not.toBeNull();
     const failed = Paged.receive(more, more.seq, err(UiError.offline)).paged;
     expect(failed.status).toBe("failed");
     expect(failed.error).toEqual(Option.some(UiError.offline));
@@ -109,6 +114,23 @@ describe("optimistic updates", () => {
     const rolledBack = ops.rollback(locked.state, archived.seq);
     expect(rolledBack.value).toEqual([rows[0], rows[1], { id: "c", locked: true }] as never);
     expect(ops.isPending(rolledBack, "b")).toBe(false);
+  });
+
+  test("same-row ops answered out of order keep the later op", () => {
+    const lock = { _tag: "Replace", item: { id: "a", locked: true } } as const;
+    const unlock = { _tag: "Replace", item: { id: "a", locked: false } } as const;
+    const first = ops.apply(ops.init(rows), "a", lock);
+    const second = ops.apply(first.state, "a", unlock);
+    const confirmedSecond = ops.confirm(second.state, second.seq);
+    expect(confirmedSecond.value[0]?.locked).toBe(false);
+    expect(confirmedSecond.base).toBe(rows); // not folded until the first resolves
+    const done = ops.confirm(confirmedSecond, first.seq);
+    expect(done.pending).toEqual([]);
+    expect(done.base[0]?.locked).toBe(false);
+    expect(done.value).toEqual(done.base);
+    const firstRejected = ops.rollback(confirmedSecond, first.seq);
+    expect(firstRejected.pending).toEqual([]);
+    expect(firstRejected.value[0]?.locked).toBe(false);
   });
 
   test("confirm folds the op into the base; unknown seq is ignored", () => {
@@ -171,6 +193,29 @@ describe("retry and connectivity", () => {
     });
     await Effect.runPromise(Effect.exit(retryTransient(fatal, fast)));
     expect(calls).toBe(1);
+  });
+
+  test("retryTransient waits for Retry-After before retrying a 429", async () => {
+    let calls = 0;
+    const limited = Effect.suspend(() => {
+      calls++;
+      return calls === 1
+        ? Effect.fail(new RateLimited({ retryAfterSeconds: 30 }))
+        : Effect.succeed("ok");
+    });
+    const program = Effect.gen(function* () {
+      const fiber = yield* Effect.forkChild(retryTransient(limited));
+      yield* TestClock.adjust("29 seconds");
+      const early = calls;
+      yield* TestClock.adjust("1 second");
+      return [early, yield* Fiber.join(fiber)] as const;
+    });
+    const [early, result] = await Effect.runPromise(
+      program.pipe(Effect.provide(TestClock.layer())),
+    );
+    expect(early).toBe(1);
+    expect(result).toBe("ok");
+    expect(calls).toBe(2);
   });
 });
 

@@ -153,7 +153,12 @@ const receive = <A, Q extends object>(
       fetch: null,
     };
   }
-  if (result.error._tag === "Cancelled") return { paged, fetch: null };
+  if (result.error._tag === "Cancelled") {
+    // Not superseded (same seq) but abandoned: leave the busy state so the list is usable again.
+    return paged.status === "loading"
+      ? { paged: { ...paged, status: "failed", error: Option.some(result.error) }, fetch: null }
+      : { paged: { ...paged, status: "ready" }, fetch: null };
+  }
   if (isCursorMismatch(result.error)) return firstPage(paged, "loading", limit);
   return { paged: { ...paged, status: "failed", error: Option.some(result.error) }, fetch: null };
 };

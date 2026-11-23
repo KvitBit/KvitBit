@@ -118,10 +118,8 @@ describe("describeError covers every UiError", () => {
     const view = describeError(
       new Unavailable({ dependency: "company_registry", retryAfterSeconds: 5 }),
     );
-    expect(view.text).toEqual({
-      key: "error.unavailable.company_registry",
-      params: { seconds: 5 },
-    });
+    expect(view.text).toEqual({ key: "error.unavailable.company_registry" });
+    expect(view.retryText).toEqual({ key: "error.unavailable.retryIn", params: { seconds: 5 } });
     expect(view.retryAfterSeconds).toBe(5);
   });
 

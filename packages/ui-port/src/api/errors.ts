@@ -159,6 +159,8 @@ export interface UiErrorView {
   readonly clearRequestKey: boolean;
   /** ALTCHA screens must fetch and solve a fresh challenge. */
   readonly freshBotProof: boolean;
+  /** Countdown line under the banner (`error.unavailable.retryIn {seconds}`), when Retry-After is set. */
+  readonly retryText: Text | null;
 }
 
 export const issueText = (issue: Issue): Text =>
@@ -215,15 +217,15 @@ const view = (
   staleRevision: false,
   clearRequestKey: false,
   freshBotProof: false,
+  retryText: null,
   ...extra,
 });
 
-const unknownText = (status: number | null, requestId: string | null): Text => {
-  const params: Record<string, TextParam> = {};
-  if (requestId !== null) params.requestId = requestId;
-  if (status !== null) params.status = status;
-  return text("error.unknown", Object.keys(params).length === 0 ? undefined : params);
-};
+/** Generic error; with a request id for support when the server sent one (`error.unknownWithId`). */
+const unknownText = (status: number | null, requestId: string | null): Text =>
+  requestId !== null
+    ? text("error.unknownWithId", { requestId })
+    : text("error.unknown", status === null ? undefined : { status });
 
 /** The default UI model of an error (the table in ui-port-contracts section 2.6). */
 export const describeError = (error: UiError): UiErrorView => {
@@ -268,14 +270,12 @@ export const describeError = (error: UiError): UiErrorView => {
       // ui-port always sends If-Match: a client defect, shown as Unexpected.
       return view(error, "banner", unknownText(428, null));
     case "Unavailable":
-      return view(
-        error,
-        "banner",
-        text(
-          `error.unavailable.${error.dependency}`,
-          error.retryAfterSeconds === undefined ? undefined : { seconds: error.retryAfterSeconds },
-        ),
-      );
+      return view(error, "banner", text(`error.unavailable.${error.dependency}`), {
+        retryText:
+          error.retryAfterSeconds === undefined
+            ? null
+            : text("error.unavailable.retryIn", { seconds: error.retryAfterSeconds }),
+      });
     case "RateLimited":
       return view(
         error,

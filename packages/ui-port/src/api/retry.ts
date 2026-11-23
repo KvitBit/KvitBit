@@ -4,7 +4,7 @@
  * Effect-level retry for retryable failures, which keeps the same Idempotency-Key by construction
  * because it re-runs the same request.
  */
-import { Duration, Effect, Schedule } from "effect";
+import { Duration, Effect, Random } from "effect";
 import { isRetryable, retryAfterSeconds, toUiError, type UiError } from "./errors";
 
 export interface Backoff {
@@ -73,20 +73,27 @@ const canRetry = (state: RetryState, now: number): boolean =>
 const secondsLeft = (state: RetryState, now: number): number =>
   state.notBefore === null ? 0 : Math.max(0, Math.ceil((state.notBefore - now) / 1_000));
 
-/** Retries retryable failures with jittered exponential backoff; the last failure propagates. */
+/**
+ * Retries retryable failures with the same delays as `retryDelayMillis` (Retry-After first, else
+ * jittered exponential backoff); the last failure propagates.
+ */
 export const retryTransient = <A, E, R>(
   effect: Effect.Effect<A, E, R>,
   backoff: Backoff = DEFAULT_BACKOFF,
-): Effect.Effect<A, E, R> =>
-  effect.pipe(
-    Effect.retry({
-      schedule: Schedule.exponential(Duration.millis(backoff.baseMillis), backoff.factor).pipe(
-        Schedule.jittered,
+): Effect.Effect<A, E, R> => {
+  const loop = (attempt: number): Effect.Effect<A, E, R> =>
+    effect.pipe(
+      Effect.catch((error: E) =>
+        Effect.flatMap(Random.next, (jitter) => {
+          const delay = retryDelayMillis(toUiError(error), attempt, jitter, backoff);
+          return delay === null
+            ? Effect.fail(error)
+            : Effect.sleep(Duration.millis(delay)).pipe(Effect.andThen(loop(attempt + 1)));
+        }),
       ),
-      times: backoff.maxAttempts,
-      while: (error: E) => isRetryable(toUiError(error)),
-    }),
-  );
+    );
+  return loop(1);
+};
 
 // --- connectivity -------------------------------------------------------------------------------
 

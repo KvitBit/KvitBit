@@ -107,6 +107,19 @@ describe("KvitbitApi round trips over a mock transport", () => {
     expect(JSON.parse(req?.body ?? "{}")).toEqual({ name: "Acme s.r.o." });
   });
 
+  test("ApiResult meta carries ETag revision and Idempotent-Replayed", async () => {
+    const replay = mockFetch(() =>
+      json(201, contact, { etag: '"3"', "idempotent-replayed": "true" }),
+    );
+    const result = await run(attempt(create("key-00000001")), replay.fetch);
+    expect(result._tag === "Ok" && result.meta).toEqual({ etag: 3, replayed: true });
+    const fresh = await run(
+      attempt(create("key-00000002")),
+      mockFetch(() => json(201, contact)).fetch,
+    );
+    expect(fresh._tag === "Ok" && fresh.meta).toEqual({ etag: null, replayed: false });
+  });
+
   test("PUT sends If-Match with the strong entity tag", async () => {
     const mock = mockFetch(() => json(412, { _tag: "PreconditionFailed", currentRevision: 4 }));
     const result = await run(
@@ -192,20 +205,13 @@ describe("typed error decoding into UiError", () => {
     );
     expect(error).toEqual({ _tag: "Unexpected", status: 500, requestId: "req-1" });
     const view = describeError(error);
-    expect(view.text).toEqual({
-      key: "error.unknown",
-      params: { requestId: "req-1", status: 500 },
-    });
+    expect(view.text).toEqual({ key: "error.unknownWithId", params: { requestId: "req-1" } });
     expect(view.retryable).toBe(true);
   });
 
-  test("2xx body that does not decode -> Unexpected", async () => {
-    const error = await (async () => {
-      const mock = mockFetch(() => json(201, { nope: true }));
-      const result = await run(attempt(create("key-00000001")), mock.fetch);
-      return result._tag === "Err" ? result.error : null;
-    })();
-    expect(error?._tag).toBe("Unexpected");
+  test("2xx body that does not decode -> Unexpected keeping status and X-Request-Id", async () => {
+    const error = await failWith(201, { nope: true }, { "x-request-id": "req-2" });
+    expect(error).toEqual({ _tag: "Unexpected", status: 201, requestId: "req-2" });
   });
 
   test("transport failure -> Offline", async () => {
