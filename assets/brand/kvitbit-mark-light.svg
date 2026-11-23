@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" role="img" aria-labelledby="title">
+  <title id="title">Kvitbit</title>
+  <g fill="#111111">
+    <path d="M27 32 H75 V106 H51 V150 H75 V224 H27 Z"/>
+    <path d="M85 128 L181 32 H229 L133 128 L229 224 H181 Z"/>
+    <path d="M185 106 H229 V150 H185 Z"/>
+  </g>
+</svg>

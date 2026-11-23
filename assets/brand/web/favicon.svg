@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" role="img" aria-labelledby="title">
+  <title id="title">Kvitbit</title>
+  <style>.d{display:none}@media (prefers-color-scheme: dark){.l{display:none}.d{display:inline}}</style>
+  <g class="l" fill="#111111"><path d="M27 32 H75 V106 H51 V150 H75 V224 H27 Z"/><path d="M85 128 L181 32 H229 L133 128 L229 224 H181 Z"/><path d="M185 106 H229 V150 H185 Z"/></g>
+  <g class="d" fill="#FAFAFA"><path d="M25 32 H73 V106 H49 V150 H73 V224 H25 Z"/><path d="M87 128 L183 32 H231 L135 128 L231 224 H183 Z"/><path d="M187 106 H231 V150 H187 Z"/></g>
+</svg>
