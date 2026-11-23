@@ -7,7 +7,7 @@ import type { LineId } from "../ids";
 import { BankAccountId, ContactId, DeliveryId, DocumentId, NumberingSeriesId } from "../ids";
 import type { FileDownload } from "../shared";
 import { StatutoryNote, VatBreakdown } from "../shared";
-import type { Page, PdfTemplate, RequestOptions } from "../vocabulary";
+import type { Page, PageRequest, PdfTemplate, RequestOptions } from "../vocabulary";
 import {
   CurrencyCode,
   DeliveryPurpose,
@@ -300,8 +300,9 @@ export class Documents extends Context.Service<
     readonly get: (
       id: DocumentId,
     ) => Effect.Effect<DocumentView, NotFound | Forbidden, CurrentCaller>;
+    /** Filter plus paging (cursor, limit 1 to 100, default 50). */
     readonly list: (
-      q: DocumentQuery,
+      q: DocumentQuery & PageRequest,
     ) => Effect.Effect<Page<DocumentSummary>, Invalid | Forbidden, CurrentCaller>;
     readonly history: (
       id: DocumentId,

@@ -29,6 +29,7 @@ export type ExpensePatch = typeof ExpensePatch.Type;
 /** Carries `status: ExpenseStatus`. */
 export const ExpenseView = OpenStruct({
   status: ExpenseStatus,
+  revision: Schema.Int, // edit and remove take expectedRevision (rule C2)
 });
 export type ExpenseView = typeof ExpenseView.Type;
 /** Carries `status: ExpenseStatus`. */
@@ -98,8 +99,16 @@ export const TemplateInput = Schema.Struct({
   due: Schema.optional(Schema.Struct({ inDays: Schema.Int })),
 });
 export type TemplateInput = typeof TemplateInput.Type;
-/** Carries `schedule.pausedReason`. Fields not yet specified. */
-export const TemplateView = Schema.Unknown.pipe(Schema.brand("TemplateView"));
+/** Partly specified: revision and schedule.pausedReason (open). */
+export const TemplateView = OpenStruct({
+  revision: Schema.Int, // save (existing) and schedule take expectedRevision (rule C2)
+  /** The Recurring Schedule, null when none is attached. Other schedule fields are open. */
+  schedule: Schema.NullOr(
+    OpenStruct({
+      pausedReason: Schema.NullOr(IssueCode), // set when a failed occurrence paused the schedule
+    }),
+  ),
+});
 export type TemplateView = typeof TemplateView.Type;
 
 /** The `schedule` argument: a ScheduleRule plus issueAs and autoSend. */

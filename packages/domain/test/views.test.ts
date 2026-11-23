@@ -5,12 +5,16 @@ import {
   ContactView,
   DocumentQuery,
   DocumentSummary,
+  type Documents,
   DocumentView,
   type ExpenseInput,
   ExpenseQuery,
+  ExpenseView,
   Page,
+  PriceListItemView,
   SharedDocumentView,
   TemplateInput,
+  TemplateView,
   type WorkspaceView,
 } from "../src/index";
 
@@ -104,9 +108,13 @@ describe("partly specified types expose their specified fields", () => {
     const view = Schema.decodeUnknownSync(ContactView)({
       name: "Buyer",
       defaults: { dueDays: 30 },
+      revision: 2,
     });
     expect(view.defaults.dueDays).toBe(30);
     expect(view.name).toBe("Buyer");
+    const etag: number = view.revision;
+    expect(etag).toBe(2);
+    expect(Exit.isFailure(Schema.decodeUnknownExit(ContactView)({ defaults: {} }))).toBe(true);
   });
   test("an incomplete Expense can be recorded and listed", () => {
     const input: ExpenseInput = { status: "incomplete" };
@@ -116,11 +124,27 @@ describe("partly specified types expose their specified fields", () => {
     );
     expect(Exit.isFailure(Schema.decodeUnknownExit(ExpenseQuery)({ limit: 0 }))).toBe(true);
   });
-  test("SharedDocumentView carries viewerIsIssuer", () => {
+  test("revisioned views type their revision as a number", () => {
+    const expense = Schema.decodeUnknownSync(ExpenseView)({ status: "complete", revision: 5 });
+    const item = Schema.decodeUnknownSync(PriceListItemView)({ name: "Hosting", revision: 1 });
+    const revisions: ReadonlyArray<number> = [expense.revision, item.revision];
+    expect(revisions).toEqual([5, 1]);
+  });
+  test("TemplateView exposes the schedule pause reason", () => {
+    const view = Schema.decodeUnknownSync(TemplateView)({
+      name: "Monthly",
+      revision: 3,
+      schedule: { startOn: "2026-01-31", pausedReason: "schedule.missed_occurrences" },
+    });
+    expect(view.schedule?.pausedReason).toBe("schedule.missed_occurrences");
     expect(
-      Schema.decodeUnknownSync(SharedDocumentView)({ viewerIsIssuer: true }).viewerIsIssuer,
+      Schema.decodeUnknownSync(TemplateView)({ revision: 1, schedule: null }).schedule,
+    ).toBeNull();
+    expect(
+      Exit.isFailure(
+        Schema.decodeUnknownExit(TemplateView)({ revision: 1, schedule: { pausedReason: "oops" } }),
+      ),
     ).toBe(true);
-    expect(Exit.isFailure(Schema.decodeUnknownExit(SharedDocumentView)({}))).toBe(true);
   });
   test("WorkspaceView requires slug, branding and revision", () => {
     // @ts-expect-error slug, branding and revision are specified and required
@@ -140,6 +164,60 @@ describe("partly specified types expose their specified fields", () => {
       Exit.isFailure(Schema.decodeUnknownExit(TemplateInput)({ ...ok, due: { on: "2026-12-01" } })),
     ).toBe(true);
     expect("issuedOn" in TemplateInput.fields).toBe(false);
+  });
+});
+
+describe("SharedDocumentView is a closed recipient projection", () => {
+  const json = Schema.toCodecJson(SharedDocumentView);
+  const branding = {
+    pdfTemplate: "classic",
+    accentColor: "#1D4ED8",
+    footerText: null,
+    theme: null,
+    logo: null,
+    stamp: null,
+  };
+  const shared = {
+    kind: documentJson.kind,
+    number: documentJson.number,
+    status: documentJson.status,
+    settlement: documentJson.settlement,
+    taxDocument: documentJson.taxDocument,
+    dates: documentJson.dates,
+    issuer: documentJson.issuer,
+    branding,
+    contact: documentJson.contact,
+    lines: documentJson.lines,
+    totals: documentJson.totals,
+    statutoryNotes: documentJson.statutoryNotes,
+    paymentQr: documentJson.paymentQr,
+    pdfUrl: "https://kvitbit.example/s/v1.abc/pdf",
+    viewerIsIssuer: false,
+  };
+  test("encoding drops private fields", () => {
+    const view = Schema.decodeUnknownSync(json)({
+      ...shared,
+      deliveries: documentJson.deliveries,
+      internalNote: "chase hard",
+    });
+    expect(view.paymentQr?.payload).toBe(documentJson.paymentQr.payload);
+    const encoded = Schema.encodeSync(json)({
+      ...view,
+      deliveries: [{ to: ["buyer@example.cz"] }],
+      internalNote: "chase hard",
+    } as typeof view);
+    expect(encoded).toEqual(shared);
+    expect(encoded).not.toHaveProperty("deliveries");
+    expect(encoded).not.toHaveProperty("internalNote");
+  });
+});
+
+describe("Documents.list takes filter and paging", () => {
+  test("cursor and limit are part of the port input", () => {
+    type ListInput = Parameters<Documents["Service"]["list"]>[0];
+    const next: ListInput = { kind: "invoice", cursor: "c2", limit: 20 };
+    expect(next.cursor).toBe("c2");
+    expect(next.limit).toBe(20);
   });
 });
 

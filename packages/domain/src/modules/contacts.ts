@@ -15,6 +15,7 @@ export const ContactInput = OpenStruct({
 export type ContactInput = typeof ContactInput.Type;
 export const ContactView = OpenStruct({
   defaults: ContactDefaults, // views echo the stored overrides (rule C4)
+  revision: Schema.Int, // save (existing) takes expectedRevision (rule C2)
 });
 export type ContactView = typeof ContactView.Type;
 export type ContactRole = "customer" | "supplier";
@@ -45,7 +46,8 @@ export class Contacts extends Context.Service<
 
 export const PriceListItemInput = Schema.Unknown.pipe(Schema.brand("PriceListItemInput"));
 export type PriceListItemInput = typeof PriceListItemInput.Type;
-export const PriceListItemView = Schema.Unknown.pipe(Schema.brand("PriceListItemView"));
+/** Partly specified: only the revision used by save (existing) is fixed (open). */
+export const PriceListItemView = OpenStruct({ revision: Schema.Int });
 export type PriceListItemView = typeof PriceListItemView.Type;
 
 /** A Price List Item only supplies defaults; lines copy its values when a document is drafted. */

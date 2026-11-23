@@ -52,6 +52,9 @@ describe("CurrencyCode and IsoDate", () => {
   test("IsoDate is a real calendar day in YYYY-MM-DD", () => {
     expect(accepts(IsoDate, "2026-11-23")).toBe(true);
     expect(accepts(IsoDate, "2024-02-29")).toBe(true); // leap year
+    expect(accepts(IsoDate, "0099-12-31")).toBe(true); // years below 100 keep their value
+    expect(accepts(IsoDate, "0000-02-29")).toBe(true); // year 0 is a leap year (proleptic)
+    expect(accepts(IsoDate, "0100-02-29")).toBe(false);
     expect(accepts(IsoDate, "2026-02-29")).toBe(false);
     expect(accepts(IsoDate, "2026-02-30")).toBe(false);
     expect(accepts(IsoDate, "2026-13-01")).toBe(false);

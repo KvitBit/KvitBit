@@ -6,7 +6,7 @@ import type { Conflict, CoreError, Forbidden, Invalid, NotFound, Unavailable } f
 import type { DocumentId, ExpenseId, PaymentId } from "../ids";
 import { ShareViewId } from "../ids";
 import type { FileDownload } from "../shared";
-import { OpenStruct } from "../shared";
+import { StatutoryNote, VatBreakdown } from "../shared";
 import type {
   IsoDate,
   Locale,
@@ -16,7 +16,9 @@ import type {
   PaymentMethod,
   RequestOptions,
 } from "../vocabulary";
-import type { DocumentView } from "./documents";
+import { DocumentKind, DocumentSettlement, DocumentStatus } from "../vocabulary";
+import { ContactSnapshot, DocumentView, IssuerSnapshot, LineView } from "./documents";
+import { WorkspaceBranding } from "./workspaces";
 
 export const PaymentView = Schema.Unknown.pipe(Schema.brand("PaymentView"));
 export type PaymentView = typeof PaymentView.Type;
@@ -65,8 +67,28 @@ export const ShareViewEvent = Schema.Struct({
 });
 export type ShareViewEvent = typeof ShareViewEvent.Type;
 
-/** Narrowed recipient projection; only `viewerIsIssuer` is specified so far (open). */
-export const SharedDocumentView = OpenStruct({
+/**
+ * Narrowed recipient projection (core-ports 4.6): issuer branding, parties, lines, totals,
+ * statutory notes, payment QR, settlement and PDF link, plus `viewerIsIssuer`. Closed on
+ * purpose: encoding drops everything else (audit history, internal notes, deliveries).
+ * Field names follow DocumentView; `branding` and `pdfUrl` are this package's names for
+ * "issuer branding" and "PDF link".
+ */
+export const SharedDocumentView = Schema.Struct({
+  kind: DocumentKind,
+  number: Schema.String,
+  status: DocumentStatus, // a cancelled or credited document stays viewable and shows its state
+  settlement: DocumentSettlement,
+  taxDocument: Schema.Boolean,
+  dates: DocumentView.fields.dates,
+  issuer: IssuerSnapshot,
+  branding: WorkspaceBranding,
+  contact: ContactSnapshot,
+  lines: Schema.Array(LineView),
+  totals: VatBreakdown,
+  statutoryNotes: Schema.Array(StatutoryNote),
+  paymentQr: DocumentView.fields.paymentQr,
+  pdfUrl: Schema.String,
   viewerIsIssuer: Schema.Boolean, // signedInUser is a Member of the issuing Workspace
 });
 export type SharedDocumentView = typeof SharedDocumentView.Type;

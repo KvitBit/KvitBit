@@ -54,7 +54,8 @@ export type CurrencyCode = typeof CurrencyCode.Type;
 const isCalendarDate = (s: string): boolean => {
   const [y, m, d] = s.split("-").map(Number);
   if (y === undefined || m === undefined || d === undefined) return false;
-  const date = new Date(Date.UTC(y, m - 1, d));
+  const date = new Date(0);
+  date.setUTCFullYear(y, m - 1, d); // unlike Date.UTC, keeps years 0-99 as written
   return date.getUTCFullYear() === y && date.getUTCMonth() === m - 1 && date.getUTCDate() === d;
 };
 
