@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { BlobStorage } from "@kvitbit/domain/ports";
-import { Effect, Layer, Ref } from "effect";
+import { Effect, Layer, Ref, Stream } from "effect";
 import {
   HttpClient,
   HttpClientError,
@@ -17,6 +17,7 @@ import {
 import {
   bytesOf,
   chunked,
+  defectOf,
   describeBlobStorageContract,
   endless,
   key,
@@ -32,6 +33,7 @@ interface Seen {
   readonly authorization: string | undefined;
   readonly contentType: string | undefined;
   readonly body: Uint8Array | undefined;
+  readonly contentRange: string | undefined;
 }
 
 type Override = (seen: Seen) => Response | "transport-error" | undefined;
@@ -40,11 +42,81 @@ type Override = (seen: Seen) => Response | "transport-error" | undefined;
  * A GCS JSON API stand-in over an in-memory bucket "b". `overrides` answer requests in order
  * before the bucket does; an override returning `undefined` passes the request through.
  */
-const fakeGcs = (overrides: Array<Override> = []) => {
+/** Makes the next resumable chunk persist only `persist` bytes and answer `status`. */
+type ChunkFault = { readonly persist: number; readonly status: number };
+
+interface Session {
+  readonly name: string;
+  readonly parts: Array<Uint8Array>;
+  persisted: number;
+  done: boolean;
+}
+
+const quarterMiB = 256 * 1024;
+
+const fakeGcs = (overrides: Array<Override> = [], chunkFaults: Array<ChunkFault> = []) => {
   const objects = new Map<string, Uint8Array>();
   const seen: Array<Seen> = [];
+  const sessions = new Map<string, Session>();
+  const persistedHeader = (session: Session): Record<string, string> =>
+    session.persisted > 0 ? { range: `bytes=0-${session.persisted - 1}` } : {};
+  const resumable = (seenRequest: Seen): Response | undefined => {
+    const { method, url } = seenRequest;
+    if (url.pathname !== "/upload/storage/v1/b/b/o") return undefined;
+    if (method === "POST" && url.searchParams.get("uploadType") === "resumable") {
+      const id = `s${sessions.size + 1}`;
+      sessions.set(id, {
+        name: url.searchParams.get("name") ?? "",
+        parts: [],
+        persisted: 0,
+        done: false,
+      });
+      return new Response(null, {
+        status: 200,
+        headers: {
+          location: `https://storage.googleapis.com/upload/storage/v1/b/b/o?uploadType=resumable&upload_id=${id}`,
+        },
+      });
+    }
+    const id = url.searchParams.get("upload_id");
+    const session = id === null ? undefined : sessions.get(id);
+    if (id === null) return undefined;
+    if (session === undefined) return new Response("no session", { status: 404 });
+    if (method === "DELETE") {
+      sessions.delete(id);
+      return new Response(null, { status: 499 });
+    }
+    const range = seenRequest.contentRange ?? "";
+    const query = /^bytes \*\/(\*|\d+)$/.exec(range);
+    if (query) {
+      return session.done
+        ? Response.json({ name: session.name })
+        : new Response(null, { status: 308, headers: persistedHeader(session) });
+    }
+    const match = /^bytes (\d+)-(\d+)\/(\*|\d+)$/.exec(range);
+    const body = seenRequest.body ?? new Uint8Array();
+    if (!match || Number(match[1]) !== session.persisted) {
+      return new Response(`bad range ${range} at ${session.persisted}`, { status: 400 });
+    }
+    if (match[3] === "*" && body.byteLength % quarterMiB !== 0) {
+      return new Response("non-final chunk not a multiple of 256 KiB", { status: 400 });
+    }
+    const fault = chunkFaults.shift();
+    const kept = fault === undefined ? body : body.subarray(0, fault.persist);
+    session.parts.push(kept.slice());
+    session.persisted += kept.byteLength;
+    if (fault !== undefined) return new Response("flaky", { status: fault.status });
+    if (match[3] !== "*" && session.persisted === Number(match[3])) {
+      session.done = true;
+      objects.set(session.name, new Uint8Array(Buffer.concat(session.parts)));
+      return Response.json({ name: session.name });
+    }
+    return new Response(null, { status: 308, headers: persistedHeader(session) });
+  };
   const respond = (seenRequest: Seen): Response => {
     const { method, url } = seenRequest;
+    const fromSession = resumable(seenRequest);
+    if (fromSession !== undefined) return fromSession;
     if (method === "POST" && url.pathname === "/upload/storage/v1/b/b/o") {
       const name = url.searchParams.get("name") ?? "";
       objects.set(name, seenRequest.body ?? new Uint8Array());
@@ -71,6 +143,7 @@ const fakeGcs = (overrides: Array<Override> = []) => {
       method: request.method,
       url,
       authorization: request.headers.authorization,
+      contentRange: request.headers["content-range"],
       contentType: request.body._tag === "Uint8Array" ? request.body.contentType : undefined,
       body: request.body._tag === "Uint8Array" ? request.body.body : undefined,
     };
@@ -85,7 +158,7 @@ const fakeGcs = (overrides: Array<Override> = []) => {
     }
     return Effect.succeed(HttpClientResponse.fromWeb(request, override ?? respond(record)));
   });
-  return { objects, seen, client };
+  return { objects, seen, sessions, client };
 };
 
 const tokensFrom = (values: ReadonlyArray<string>, invalidated: Array<string>) =>
@@ -258,5 +331,142 @@ describe("GcsBlobStorage requests", () => {
     );
     expect(error._tag).toBe("BlobUnavailable");
     expect(fake.seen).toHaveLength(0);
+  });
+});
+
+describe("GcsBlobStorage resumable uploads", () => {
+  /** `size` bytes of a repeating pattern, emitted in `piece`-byte chunks. */
+  const pattern = (size: number) => Uint8Array.from({ length: size }, (_, i) => (i * 31) % 251);
+  const pieces = (data: Uint8Array, piece: number) =>
+    Stream.fromIterable(
+      Array.from({ length: Math.ceil(data.byteLength / piece) }, (_, i) =>
+        data.subarray(i * piece, (i + 1) * piece),
+      ),
+    );
+  const opts = { chunkSize: quarterMiB, retries: 2, retryBackoff: "1 millis" } as const;
+
+  test("a body larger than one chunk goes up in 256 KiB-aligned chunks", async () => {
+    const fake = fakeGcs();
+    const data = pattern(2 * quarterMiB + 1000);
+    const result = await run(
+      layerFor(fake, opts),
+      withStore((store) =>
+        store.put(key("exports/ws/e.zip"), pieces(data, 100_000), meta(10 ** 7)),
+      ),
+    );
+    expect(result).toEqual({
+      key: key("exports/ws/e.zip"),
+      bytes: data.byteLength,
+      sha256: sha256(data),
+    });
+    expect(fake.objects.get("exports/ws/e.zip")).toEqual(data);
+    expect(fake.seen.map((s) => s.contentRange ?? s.url.searchParams.get("uploadType"))).toEqual([
+      "resumable",
+      `bytes 0-${quarterMiB - 1}/*`,
+      `bytes ${quarterMiB}-${2 * quarterMiB - 1}/*`,
+      `bytes ${2 * quarterMiB}-${data.byteLength - 1}/${data.byteLength}`,
+    ]);
+  });
+
+  test("a body of exactly one chunk takes the single media upload", async () => {
+    const fake = fakeGcs();
+    await run(
+      layerFor(fake, opts),
+      withStore((store) =>
+        store.put(key("ws/one"), pieces(pattern(quarterMiB), 1000), meta(10 ** 7)),
+      ),
+    );
+    expect(fake.seen.map((s) => s.url.searchParams.get("uploadType"))).toEqual(["media"]);
+  });
+
+  test("after a chunk fails part-persisted, it resumes from the offset GCS reports", async () => {
+    const fake = fakeGcs([], [{ persist: quarterMiB, status: 503 }]);
+    const data = pattern(3 * quarterMiB + 5);
+    await run(
+      layerFor(fake, { ...opts, chunkSize: 2 * quarterMiB }),
+      withStore((store) => store.put(key("ws/flaky"), pieces(data, 65_536), meta(10 ** 7))),
+    );
+    expect(fake.objects.get("ws/flaky")).toEqual(data);
+    expect(fake.seen.map((s) => s.contentRange ?? s.url.searchParams.get("uploadType"))).toEqual([
+      "resumable",
+      `bytes 0-${2 * quarterMiB - 1}/*`,
+      "bytes */*",
+      `bytes ${quarterMiB}-${2 * quarterMiB - 1}/*`,
+      `bytes ${2 * quarterMiB}-${data.byteLength - 1}/${data.byteLength}`,
+    ]);
+  });
+
+  test("a body over the limit mid-upload cancels the session and creates no object", async () => {
+    const fake = fakeGcs();
+    const error = await run(
+      layerFor(fake, opts),
+      withStore((store) => Effect.flip(store.put(key("ws/huge"), endless(), meta(3 * quarterMiB)))),
+    );
+    expect(error._tag).toBe("BlobTooLarge");
+    expect(fake.objects.has("ws/huge")).toBe(false);
+    expect(fake.sessions.size).toBe(0);
+    expect(fake.seen.at(-1)?.method).toBe("DELETE");
+  });
+
+  test("a chunk that keeps failing is BlobUnavailable and cancels the session", async () => {
+    const fake = fakeGcs(
+      [],
+      [
+        { persist: 0, status: 503 },
+        { persist: 0, status: 503 },
+        { persist: 0, status: 503 },
+      ],
+    );
+    const error = await run(
+      layerFor(fake, opts),
+      withStore((store) =>
+        Effect.flip(
+          store.put(key("ws/down"), pieces(pattern(2 * quarterMiB), 65_536), meta(10 ** 7)),
+        ),
+      ),
+    );
+    expect(error._tag).toBe("BlobUnavailable");
+    expect(fake.sessions.size).toBe(0);
+  });
+
+  test("rejects a chunk size GCS would refuse", async () => {
+    const defect = await Effect.runPromise(
+      defectOf(
+        Effect.asVoid(Layer.build(layerFor(fakeGcs(), { chunkSize: 1000 })).pipe(Effect.scoped)),
+      ),
+    );
+    expect(defect).toBeInstanceOf(RangeError);
+  });
+});
+
+describe("GcsBlobStorage responses", () => {
+  test("a 401 whose refresh returns the same token is BlobUnavailable without a resend", async () => {
+    const fake = fakeGcs([() => new Response("expired", { status: 401 })]);
+    const error = await run(
+      layerFor(fake, { retries: 2 }),
+      withStore((store) => Effect.flip(store.delete(key("ws/a")))),
+    );
+    expect(error).toMatchObject({ _tag: "BlobUnavailable", cause: { status: 401 } });
+    expect(fake.seen).toHaveLength(1);
+  });
+
+  test("a 408 is retried", async () => {
+    const fake = fakeGcs([() => new Response("slow", { status: 408 })]);
+    await run(
+      layerFor(fake, { retries: 1 }),
+      withStore((store) => store.delete(key("ws/a"))),
+    );
+    expect(fake.seen).toHaveLength(2);
+  });
+
+  test("a 200 with no body for an empty object reads as an empty stream", async () => {
+    const fake = fakeGcs([
+      () => new Response(null, { status: 200, headers: { "content-length": "0" } }),
+    ]);
+    const data = await run(
+      layerFor(fake),
+      withStore((store) => Effect.flatMap(store.get(key("ws/empty")), readAll)),
+    );
+    expect(data.byteLength).toBe(0);
   });
 });

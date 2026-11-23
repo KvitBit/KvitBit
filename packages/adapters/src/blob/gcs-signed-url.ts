@@ -20,8 +20,11 @@ export interface GcsSignedUrlRequest {
   readonly credentials: GcsServiceAccountKey;
   /** 1 to 604800 (seven days), the V4 maximum. */
   readonly expiresInSeconds: number;
-  /** Default GET. */
-  readonly method?: "GET" | "HEAD" | "PUT" | "DELETE" | undefined;
+  /**
+   * Default GET. Read methods only: a signed PUT would bypass `maxBytes` and the sha256 the
+   * port reports.
+   */
+  readonly method?: "GET" | "HEAD" | undefined;
   /** Extra signed query parameters, e.g. `response-content-disposition`. */
   readonly queryParameters?: Readonly<Record<string, string>> | undefined;
   /** Default `storage.googleapis.com`. */

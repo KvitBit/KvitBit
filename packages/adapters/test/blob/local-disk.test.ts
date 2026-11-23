@@ -63,6 +63,17 @@ describe("LocalDiskBlobStorage on disk", () => {
     expect(errors.map((error) => error._tag)).toEqual(["BlobMissing", "BlobMissing"]);
   });
 
+  test("delete of a prefix that is only a directory is a no-op", async () => {
+    const root = freshRoot();
+    await withStore(root, (store) =>
+      Effect.gen(function* () {
+        yield* store.put(key("ws/dir/file"), chunked("x"), meta());
+        yield* store.delete(key("ws/dir"));
+      }),
+    );
+    expect(readFileSync(join(root, "ws/dir/file"), "utf8")).toBe("x");
+  });
+
   test("delete of a path under a file is a no-op", async () => {
     const root = freshRoot();
     await withStore(root, (store) =>

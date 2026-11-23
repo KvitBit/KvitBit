@@ -1,5 +1,5 @@
 /** In-process BlobStorage for tests (core-ports section 10, `TestCore`). */
-import { BlobMissing, BlobStorage } from "@kvitbit/domain/ports";
+import { BlobMissing, BlobStorage, BlobUnavailable } from "@kvitbit/domain/ports";
 import { Effect, Layer, Ref, Stream } from "effect";
 import { checkKey, collectBounded } from "./common";
 
@@ -15,8 +15,22 @@ const make: Effect.Effect<BlobStorage["Service"]> = Effect.gen(function* () {
       checkKey(key).pipe(
         Effect.andThen(collectBounded(body, meta.maxBytes)),
         Effect.tap(({ data }) =>
-          Ref.update(blobs, (map) =>
-            new Map(map).set(key, { data, contentType: meta.contentType }),
+          Ref.modify(blobs, (map) => {
+            const clash = [...map.keys()].find(
+              (other) => other.startsWith(`${key}/`) || key.startsWith(`${other}/`),
+            );
+            return clash === undefined
+              ? [undefined, new Map(map).set(key, { data, contentType: meta.contentType })]
+              : [clash, map];
+          }).pipe(
+            Effect.flatMap((clash) =>
+              clash === undefined
+                ? Effect.void
+                : // LocalDisk cannot hold both `a` and `a/b`; fail here as it would.
+                  Effect.fail(
+                    new BlobUnavailable({ cause: { reason: "key prefix clash", clash } }),
+                  ),
+            ),
           ),
         ),
         Effect.map(({ bytes, sha256 }) => ({ key, bytes, sha256 })),

@@ -122,6 +122,35 @@ export const describeBlobStorageContract = (
         }),
       ));
 
+    test("stores the emitted bytes even when the producer reuses its Buffer", () =>
+      run(
+        Effect.gen(function* () {
+          const store = yield* BlobStorage;
+          const reused = Buffer.from("abcd");
+          const body = Stream.concat(
+            Stream.make(reused),
+            Stream.suspend(() => {
+              reused.fill(0x7a);
+              return Stream.make(reused);
+            }),
+          );
+          const result = yield* store.put(key("ws-1/reused"), body, meta());
+          const read = yield* readAll(yield* store.get(key("ws-1/reused")));
+          expect(read.toString()).toBe("abcdzzzz");
+          expect(result.sha256).toBe(sha256(read));
+        }),
+      ));
+
+    test("accepts segments that merely start with dots", () =>
+      run(
+        Effect.gen(function* () {
+          const store = yield* BlobStorage;
+          const k = key("ws-1/..hidden/...x");
+          yield* store.put(k, chunked("dots"), meta());
+          expect((yield* readAll(yield* store.get(k))).toString()).toBe("dots");
+        }),
+      ));
+
     test("get of an unknown key fails with BlobMissing", () =>
       run(
         Effect.gen(function* () {
@@ -156,6 +185,7 @@ export const describeBlobStorageContract = (
       "ws-1/a\u0000b",
       ".partial/x",
       "x".repeat(1025),
+      "\u017e".repeat(513),
     ];
     for (const bad of badKeys) {
       test(`rejects key ${JSON.stringify(bad.slice(0, 20))} as a defect on every operation`, () =>

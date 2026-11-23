@@ -2,11 +2,15 @@
  * BlobStorage on the local filesystem for self-hosted installs (ADR 0003, core-ports section
  * 10). Each key maps to a file under `root`; writes go to `root/.partial/` and are renamed into
  * place, so a reader sees either the old or the new complete object, never a partial one.
+ *
+ * Keys must be prefix-free: `a` and `a/b` cannot both exist, as `a` would be both a file and a
+ * directory. Core keys end in a file name, so they never collide; MemoryBlobStorage enforces
+ * the same rule so tests catch a violation.
  */
 import { randomUUID } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { type FileHandle, mkdir, open, rename, stat, unlink } from "node:fs/promises";
-import { dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { type BlobKey, BlobMissing, BlobStorage, BlobUnavailable } from "@kvitbit/domain/ports";
 import { Config, Effect, Layer, Stream } from "effect";
 import { checkKey, consumeBounded, InvalidBlobKey, partialDir } from "./common";
@@ -54,7 +58,7 @@ const make = (
         Effect.flatMap((segments) => {
           const path = resolve(root, ...segments);
           const rel = relative(root, path);
-          return rel === "" || rel.startsWith("..") || isAbsolute(rel)
+          return rel === "" || rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel)
             ? Effect.die(new InvalidBlobKey({ key, reason: "escapes root" }))
             : Effect.succeed(path);
         }),
@@ -116,11 +120,19 @@ const make = (
       delete: (key) =>
         pathOf(key).pipe(
           Effect.flatMap((path) =>
-            Effect.tryPromise({ try: () => unlink(path), catch: (error) => error }).pipe(
-              Effect.catch((error) =>
-                isAbsent(error) ? Effect.void : Effect.fail(unavailable(error)),
-              ),
-            ),
+            attempt(async () => {
+              try {
+                await unlink(path);
+              } catch (error) {
+                if (isAbsent(error)) return;
+                // A directory holds other keys under this prefix, never an object of its own.
+                const isDirectory = await stat(path).then(
+                  (stats) => stats.isDirectory(),
+                  () => false,
+                );
+                if (!isDirectory) throw error;
+              }
+            }),
           ),
         ),
     });

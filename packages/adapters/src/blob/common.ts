@@ -25,7 +25,7 @@ export const partialDir = ".partial";
  */
 export const keyProblem = (key: string): string | undefined => {
   if (key.length === 0) return "empty";
-  if (key.length > 1024) return "longer than 1024 characters";
+  if (new TextEncoder().encode(key).byteLength > 1024) return "longer than 1024 UTF-8 bytes";
   if (key.startsWith("/")) return "absolute";
   // biome-ignore lint/suspicious/noControlCharactersInRegex: rejecting control characters is the point
   if (/[\u0000-\u001f\u007f\\]/.test(key)) return "control character or backslash";
@@ -43,6 +43,12 @@ export const checkKey = (key: BlobKey): Effect.Effect<ReadonlyArray<string>> => 
     ? Effect.succeed(key.split("/"))
     : Effect.die(new InvalidBlobKey({ key, reason }));
 };
+
+/**
+ * An owned copy of `chunk`: a producer may reuse its buffer after emitting it, and
+ * `Buffer#slice` would alias rather than copy.
+ */
+export const copyOf = (chunk: Uint8Array): Uint8Array => new Uint8Array(chunk);
 
 export interface Consumed {
   readonly bytes: number;
@@ -78,8 +84,7 @@ export const collectBounded = (
   Effect.suspend(() => {
     const chunks: Array<Uint8Array> = [];
     return consumeBounded(body, maxBytes, (chunk) =>
-      // Copy: a producer may reuse its buffer after the chunk is emitted.
-      Effect.sync(() => void chunks.push(chunk.slice())),
+      Effect.sync(() => void chunks.push(copyOf(chunk))),
     ).pipe(
       Effect.map((consumed) => {
         const data = new Uint8Array(consumed.bytes);
