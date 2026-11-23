@@ -6,6 +6,11 @@ import * as Enums from "../src/schema/enums";
 // them equal to the @kvitbit/domain literals so the two cannot drift.
 const pairs: ReadonlyArray<readonly [string, ReadonlyArray<unknown>, ReadonlyArray<unknown>]> = [
   ["Role", Enums.roleValues, Domain.Role.literals],
+  ["InvitationRole", Enums.invitationRoleValues, Domain.InvitationRole.literals],
+  ["InvitationStatus", Enums.invitationStatusValues, Domain.InvitationStatus.literals],
+  ["DeliveryStatus", Enums.deliveryStatusValues, Domain.DeliveryStatus.literals],
+  ["DocumentRelation", Enums.documentRelationValues, Domain.DocumentRelation.literals],
+  ["ExpenseStatus", Enums.expenseStatusValues, Domain.ExpenseStatus.literals],
   ["TaxRegime", Enums.taxRegimeValues, Domain.TaxRegime.literals],
   ["Locale", Enums.localeValues, Domain.Locale.literals],
   ["DocumentKind", Enums.documentKindValues, Domain.DocumentKind.literals],
