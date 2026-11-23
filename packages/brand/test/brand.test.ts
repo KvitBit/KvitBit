@@ -1,0 +1,145 @@
+import { describe, expect, test } from "bun:test";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { join, relative, resolve } from "node:path";
+import {
+  brandAssetPaths,
+  brandAssets,
+  brandColors,
+  MARK_VIEW_BOX,
+  type MarkSvgOptions,
+  markMasters,
+  markSvg,
+  PATTERN_TILE_SIZE,
+  t4PatternDef,
+  t4PatternSvg,
+} from "../src/index";
+
+const repoRoot = resolve(import.meta.dir, "../../..");
+const read = (repoPath: string): string => readFileSync(join(repoRoot, repoPath), "utf8");
+
+const pathData = (svg: string): string[] =>
+  [...svg.matchAll(/<path d="([^"]+)"/g)].map((match) => match[1] ?? "");
+const viewBox = (svg: string): string | undefined => /viewBox="([^"]+)"/.exec(svg)?.[1];
+
+describe("N2 mark masters", () => {
+  const files: ReadonlyArray<MarkSvgOptions & { readonly path: string }> = [
+    { master: "light", fill: "#111111", path: brandAssets.mark.light },
+    { master: "light", fill: "#000000", path: brandAssets.mark.black },
+    { master: "light", fill: "currentColor", path: brandAssets.mark.currentLight },
+    { master: "dark", fill: "#FAFAFA", path: brandAssets.mark.dark },
+    { master: "dark", fill: "#FFFFFF", path: brandAssets.mark.white },
+    { master: "dark", fill: "currentColor", path: brandAssets.mark.currentDark },
+  ];
+
+  test.each(files)("$path path data and viewBox match the $master master", (file) => {
+    const svg = read(file.path);
+    expect(pathData(svg)).toEqual([...markMasters[file.master].paths]);
+    expect(viewBox(svg)).toBe(MARK_VIEW_BOX);
+  });
+
+  test.each(files)("markSvg reproduces $path byte for byte", (file) => {
+    expect(markSvg(file)).toBe(read(file.path));
+  });
+
+  test("default fills are the brand inks", () => {
+    expect(markSvg({ master: "light" })).toBe(read(brandAssets.mark.light));
+    expect(markSvg({ master: "dark" })).toBe(read(brandAssets.mark.dark));
+  });
+
+  test("masters differ only by gap: 10 units light, 14 units dark", () => {
+    // Stem right edge (x=75/73) to chevron's leftmost vertex (x=85/87).
+    expect(markMasters.light.gap).toBe(85 - 75);
+    expect(markMasters.dark.gap).toBe(87 - 73);
+  });
+
+  test("rejects paints and sizes that would corrupt the SVG", () => {
+    // @ts-expect-error not a shipped ink
+    expect(() => markSvg({ master: "light", fill: '#111" onload="x' })).toThrow(TypeError);
+    // @ts-expect-error the mark is never recoloured
+    expect(() => markSvg({ master: "light", fill: "#FF0000" })).toThrow(TypeError);
+    // @ts-expect-error light master ink is never used for light-on-dark
+    expect(() => markSvg({ master: "light", fill: "#FAFAFA" })).toThrow(TypeError);
+    // @ts-expect-error dark master ink is never used for dark-on-light
+    expect(() => markSvg({ master: "dark", fill: "#111111" })).toThrow(TypeError);
+    expect(() => markSvg({ master: "light", size: 0 })).toThrow(RangeError);
+    expect(markSvg({ master: "light", title: "<K&B>" })).toContain("&lt;K&amp;B&gt;");
+  });
+});
+
+describe("T4 Micro-Glyph Graph pattern", () => {
+  test("default output is 96x96 and equals the committed currentColor tile", () => {
+    const svg = t4PatternSvg();
+    expect(PATTERN_TILE_SIZE).toBe(96);
+    expect(viewBox(svg)).toBe("0 0 96 96");
+    expect(svg).toContain('width="96" height="96"');
+    expect(svg).toBe(read(brandAssets.pattern.current));
+  });
+
+  test("brand inks reproduce the light and dark tiles", () => {
+    expect(t4PatternSvg({ ink: brandColors.inkOnLight })).toBe(read(brandAssets.pattern.light));
+    expect(t4PatternSvg({ ink: brandColors.inkOnDark })).toBe(read(brandAssets.pattern.dark));
+  });
+
+  test("pattern def carries the same geometry in a 96x96 userSpaceOnUse tile", () => {
+    const def = t4PatternDef({ id: "kb-t4", ink: "#123456" });
+    expect(def).toStartWith(
+      '<pattern id="kb-t4" patternUnits="userSpaceOnUse" width="96" height="96" viewBox="0 0 96 96">',
+    );
+    expect(def).toEndWith("</pattern>");
+    const committed = read(brandAssets.pattern.light).replaceAll("#111111", "#123456");
+    const body = (s: string): string =>
+      s
+        .split("\n")
+        .filter((line) => /^\s+<(?:path|g|rect|\/g)/.test(line))
+        .join("\n");
+    expect(body(def)).toBe(body(committed));
+    expect(body(def).length).toBeGreaterThan(0);
+  });
+
+  test("rejects unsafe inks and ids", () => {
+    expect(() => t4PatternSvg({ ink: "red" })).toThrow(TypeError);
+    expect(() => t4PatternDef({ id: 'a" x="', ink: "#fff" })).toThrow(TypeError);
+  });
+});
+
+describe("brand tokens", () => {
+  test("match DESIGN.md brand colors", () => {
+    expect(brandColors).toEqual({
+      inkOnLight: "#111111",
+      inkOnDark: "#FAFAFA",
+      iconTile: "#111111",
+      black: "#000000",
+      white: "#FFFFFF",
+      splashBackground: "#F4F4F5",
+    });
+  });
+
+  test("icon tile matches the committed adaptive background", () => {
+    expect(read(brandAssets.mobile.adaptiveBackground)).toContain(brandColors.iconTile);
+  });
+});
+
+describe("asset manifest", () => {
+  test.each([...brandAssetPaths])("%s exists", (path) => {
+    expect(path.startsWith("assets/brand/")).toBe(true);
+    expect(existsSync(join(repoRoot, path))).toBe(true);
+  });
+
+  test("covers every committed mark, pattern, web and mobile file", () => {
+    // Lockups are listed by path only; they may change on main independently.
+    const walk = (dir: string): string[] =>
+      readdirSync(dir).flatMap((name) => {
+        const full = join(dir, name);
+        return statSync(full).isDirectory() ? walk(full) : [relative(repoRoot, full)];
+      });
+    const onDisk = walk(join(repoRoot, "assets/brand")).filter(
+      (path) => !path.startsWith("assets/brand/lockup/"),
+    );
+    const listed = new Set<string>(brandAssetPaths);
+    expect(onDisk.filter((path) => !listed.has(path))).toEqual([]);
+  });
+
+  test("paths are unique", () => {
+    expect(new Set(brandAssetPaths).size).toBe(brandAssetPaths.length);
+  });
+});
