@@ -1,10 +1,17 @@
 import { describe, expect, test } from "bun:test";
 import type { DocumentId, IsoDate, NumberingSeriesId } from "@kvitbit/domain/contract";
 import { Conflict, Invalid, NotFound } from "@kvitbit/domain/contract";
-import { Effect, Exit } from "effect";
+import { Effect, Exit, Layer, Option } from "effect";
 import type { NumberingSeriesShape } from "../../../src/modules/numbering";
-import { NumberingSeries, NumberingTestLayer } from "../../../src/modules/numbering";
-import { CoreStore } from "../../../src/store/CoreStore";
+import {
+  DEFAULT_PER_KIND,
+  NumberingSeries,
+  NumberingSeriesLive,
+  NumberingSeriesRepo,
+  NumberingSeriesRepoMemory,
+  NumberingTestLayer,
+} from "../../../src/modules/numbering";
+import { CoreStore, UniqueViolation } from "../../../src/store/CoreStore";
 import { rng, SEEDS } from "../../engines/random";
 import { member, runTest, WORKSPACE_A, WORKSPACE_B } from "../../helpers";
 
@@ -18,6 +25,9 @@ const scenario = <A, E>(
     s: NumberingSeriesShape,
     tx: <B, F>(effect: Effect.Effect<B, F>) => Effect.Effect<B, F | unknown>,
   ) => Effect.Effect<A, E>,
+  layer:
+    | Layer.Layer<NumberingSeries, never, never>
+    | typeof NumberingTestLayer = NumberingTestLayer,
 ) =>
   runTest(
     member("owner"),
@@ -25,7 +35,35 @@ const scenario = <A, E>(
       const s = yield* NumberingSeries;
       const store = yield* CoreStore;
       return yield* body(s, store.transaction);
-    }).pipe(Effect.provide(NumberingTestLayer)),
+    }).pipe(Effect.provide(layer)),
+  );
+
+/** The memory repo with hooks, to replay READ COMMITTED interleavings the memory store serializes. */
+const hookedLayer = (hooks: {
+  findDefault?: (
+    real: Effect.Effect<Option.Option<unknown>, unknown>,
+  ) => Effect.Effect<Option.Option<unknown>, unknown>;
+  insert?: (row: unknown, real: Effect.Effect<unknown, unknown>) => Effect.Effect<unknown, unknown>;
+}) =>
+  NumberingSeriesLive.pipe(
+    Layer.provide(
+      Layer.effect(
+        NumberingSeriesRepo,
+        Effect.map(NumberingSeriesRepo, (repo) =>
+          NumberingSeriesRepo.of({
+            ...repo,
+            findDefault: (ws, kind) =>
+              (hooks.findDefault
+                ? hooks.findDefault(repo.findDefault(ws, kind))
+                : repo.findDefault(ws, kind)) as ReturnType<typeof repo.findDefault>,
+            insert: (row) =>
+              (hooks.insert ? hooks.insert(row, repo.insert(row)) : repo.insert(row)) as ReturnType<
+                typeof repo.insert
+              >,
+          }),
+        ),
+      ).pipe(Layer.provide(NumberingSeriesRepoMemory)),
+    ),
   );
 
 const create = (
@@ -221,7 +259,132 @@ describe("NumberingSeries.configure", () => {
   });
 });
 
+describe("default-series races (READ COMMITTED replays)", () => {
+  test("an implicit default never demotes an explicit default committed meanwhile", async () => {
+    // The create reads "no default" first; an explicit default B is already committed.
+    let stale = false;
+    const layer = hookedLayer({
+      findDefault: (real) => {
+        if (!stale) return real;
+        stale = false;
+        return Effect.succeed(Option.none());
+      },
+    });
+    const exit = await scenario(
+      (s, tx) =>
+        Effect.gen(function* () {
+          const b = yield* tx(create(s, "B-YYYY-NNNN"));
+          stale = true;
+          const c = yield* tx(create(s, "C-YYYY-NNNN", { isDefault: false }));
+          const views = yield* s.list(WORKSPACE_A, TODAY);
+          return [b.isDefault, c.isDefault, views.map((v) => [v.pattern, v.isDefault])];
+        }),
+      layer,
+    );
+    expect(exit).toEqual(
+      Exit.succeed([
+        true,
+        false,
+        [
+          ["B-YYYY-NNNN", true],
+          ["C-YYYY-NNNN", false],
+        ],
+      ]),
+    );
+  });
+
+  test("ensureDefaults fails instead of succeeding without the kind's default", async () => {
+    const layer = hookedLayer({
+      insert: () =>
+        Effect.fail(new UniqueViolation({ collection: "numbering_series", constraint: "primary" })),
+    });
+    const exit = await scenario((s, tx) => tx(s.ensureDefaults(WORKSPACE_A, ["invoice"])), layer);
+    expect(Exit.isFailure(exit)).toBe(true);
+  });
+
+  test("ensureDefaults accepts a default a concurrent creator committed first", async () => {
+    let raced = false;
+    const layer = hookedLayer({
+      findDefault: (real) => {
+        if (raced) return real;
+        raced = true;
+        return Effect.succeed(Option.none());
+      },
+      insert: (row, real) =>
+        (row as { isDefault: boolean }).isDefault
+          ? Effect.fail(
+              new UniqueViolation({ collection: "numbering_series", constraint: DEFAULT_PER_KIND }),
+            )
+          : real,
+    });
+    const exit = await scenario((s, tx) => tx(s.ensureDefaults(WORKSPACE_A, ["invoice"])), layer);
+    expect(exit).toEqual(Exit.succeed(undefined));
+  });
+});
+
 describe("NumberingSeries.allocate", () => {
+  test("a number past 20 characters is never reserved: the series is exhausted", async () => {
+    const exit = await scenario((s, tx) =>
+      Effect.gen(function* () {
+        const v = yield* tx(create(s, `${"A".repeat(18)}-N`, { nextNumber: 9 }));
+        const ninth = yield* tx(allocate(s, v.id, 1));
+        const tenth = yield* Effect.flip(tx(allocate(s, v.id, 2)));
+        return [ninth, tenth, (yield* s.list(WORKSPACE_A, TODAY))[0]?.nextCounter];
+      }),
+    );
+    expect(exit).toEqual(
+      Exit.succeed([
+        `${"A".repeat(18)}-9`,
+        new Conflict({ reason: "illegal_transition", detail: "numbering.pattern_invalid" }),
+        10,
+      ]),
+    );
+  });
+
+  test("skipping a reserved number cannot push the number past 20 characters", async () => {
+    const exit = await scenario((s, tx) =>
+      Effect.gen(function* () {
+        const v = yield* tx(create(s, `${"A".repeat(18)}-N`, { nextNumber: 9 }));
+        yield* tx(
+          s.override({
+            workspaceId: WORKSPACE_A,
+            kind: "invoice",
+            documentId: doc(9),
+            number: `${"A".repeat(18)}-9`,
+          }),
+        );
+        return yield* Effect.flip(tx(allocate(s, v.id, 1)));
+      }),
+    );
+    expect(exit).toEqual(
+      Exit.succeed(
+        new Conflict({ reason: "illegal_transition", detail: "numbering.pattern_invalid" }),
+      ),
+    );
+  });
+
+  test("a pattern edit must fit the counter it inherits", async () => {
+    const exit = await scenario((s, tx) =>
+      Effect.gen(function* () {
+        const v = yield* tx(create(s, "YYYY-NNN", { nextNumber: 100 }));
+        return yield* Effect.flip(tx(create(s, `${"A".repeat(13)}-YYYY-N`, { id: v.id })));
+      }),
+    );
+    expect(exit).toEqual(
+      Exit.succeed(
+        new Invalid({
+          issues: [
+            {
+              path: ["pattern"],
+              code: "numbering.pattern_invalid",
+              params: { reason: "too_long" },
+            },
+          ],
+        }),
+      ),
+    );
+  });
+
   test("monotonic per series and period; yearly and monthly resets", async () => {
     const exit = await scenario((s, tx) =>
       Effect.gen(function* () {

@@ -13,9 +13,9 @@
  * Reset: the finest date token (MM -> monthly, YYYY/YY -> yearly, none -> never). Period keys:
  * "2026", "2026-11", "all".
  * A counter past its width renders with more digits (NNN, 1000 -> "1000"), never truncated:
- * the 20-character limit is checked at the pattern's width and for a configured next counter
- * (`fitsLength`), while organic growth past the width widens the number rather than stopping
- * issuance.
+ * the 20-character limit is checked at the pattern's width, for a configured or inherited next
+ * counter, and for every candidate the allocator would reserve; a series whose next number
+ * would exceed it is exhausted (the owner edits the pattern).
  */
 import type { IsoDate } from "@kvitbit/domain/contract";
 import { Invalid } from "@kvitbit/domain/contract";
@@ -35,6 +35,12 @@ export interface NumberPattern {
 }
 
 export const MAX_NUMBER_LENGTH = 20;
+
+/**
+ * Highest counter a series may allocate or be set to: counters are Postgres `integer`s and an
+ * allocation stores `sequence + 1`, so the largest stored value is 2^31 - 1.
+ */
+export const MAX_COUNTER = 2_147_483_646;
 
 export type PatternError =
   | "empty"
@@ -176,6 +182,19 @@ export const checkNextCounter = (
       }),
     );
   }
+  if (requested > MAX_COUNTER) {
+    return Result.fail(
+      new Invalid({
+        issues: [
+          {
+            path: ["nextNumber"],
+            code: "numbering.pattern_invalid",
+            params: { reason: "too_large", maximum: String(MAX_COUNTER) },
+          },
+        ],
+      }),
+    );
+  }
   return requested < currentNext
     ? Result.fail(
         new Invalid({
@@ -219,4 +238,6 @@ export const Numbering = {
   checkNextCounter,
   checkManualNumber,
   fitsLength,
+  MAX_COUNTER,
+  MAX_NUMBER_LENGTH,
 } as const;

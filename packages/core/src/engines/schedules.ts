@@ -13,14 +13,12 @@ import {
   addMonths,
   daysBetween,
   isCalendarDate,
+  isInIsoRange,
   parseIsoDate,
   pragueStartOfDay,
 } from "./calendar";
 
 export { ScheduleRule };
-
-/** Upper bounds for a cadence step (product limits). */
-export const MAX_EVERY = { weeks: 520, months: 120, years: 10 } as const;
 
 const stepOf = (rule: ScheduleRule): { unit: "weeks" | "months" | "years"; n: number } =>
   "weeks" in rule.every
@@ -61,6 +59,8 @@ export const nextOccurrences = (
   const out: Array<IsoDate> = [];
   for (let k = firstCandidate(rule, from); out.length < n; k++) {
     const date = occurrence(rule, k);
+    // Past 9999-12-31 the date no longer fits IsoDate: the calendar ends there.
+    if (!isInIsoRange(date)) break;
     if (rule.endOn !== undefined && date > rule.endOn) break;
     if (date >= from) out.push(date);
   }
@@ -68,7 +68,7 @@ export const nextOccurrences = (
 };
 
 /**
- * `Invalid{schedule.cadence_invalid}` unless the step is an integer from 1 to `MAX_EVERY`, the
+ * `Invalid{schedule.cadence_invalid}` unless the step is a positive integer, the
  * dates are calendar dates and `endOn` (when set) is not before `startOn`.
  */
 export const validate = (rule: ScheduleRule): Result.Result<ScheduleRule, Invalid> => {
@@ -79,7 +79,7 @@ export const validate = (rule: ScheduleRule): Result.Result<ScheduleRule, Invali
       }),
     );
   const { unit, n } = stepOf(rule);
-  if (!Number.isInteger(n) || n < 1 || n > MAX_EVERY[unit]) return fail(["every", unit], "step");
+  if (!Number.isSafeInteger(n) || n < 1) return fail(["every", unit], "step");
   if (!isCalendarDate(rule.startOn)) return fail(["startOn"], "date");
   if (rule.endOn !== undefined) {
     if (!isCalendarDate(rule.endOn)) return fail(["endOn"], "date");

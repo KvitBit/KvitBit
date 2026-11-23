@@ -17,8 +17,22 @@ export interface CalendarDay {
 
 const pad = (n: number, width: number): string => String(n).padStart(width, "0");
 
+/**
+ * UTC milliseconds of a calendar day. `Date.UTC` maps years 0-99 to 1900-1999, so the year is
+ * set with `setUTCFullYear`, which takes it literally.
+ */
+const utcMillis = (year: number, month: number, day: number, hour = 0): number => {
+  const d = new Date(0);
+  d.setUTCFullYear(year, month - 1, day);
+  d.setUTCHours(hour, 0, 0, 0);
+  return d.getTime();
+};
+
 export const daysInMonth = (year: number, month: number): number =>
-  new Date(Date.UTC(year, month, 0)).getUTCDate();
+  new Date(utcMillis(year, month + 1, 0)).getUTCDate();
+
+/** The last date an `IsoDate` (four-digit year) can hold. */
+export const MAX_ISO_DATE = "9999-12-31" as IsoDate;
 
 /** Splits a date; an impossible date (2026-02-30) or a malformed string is a defect. */
 export const parseIsoDate = (date: string): CalendarDay => {
@@ -48,7 +62,7 @@ export const formatIsoDate = ({ year, month, day }: CalendarDay): IsoDate =>
 /** Day number since 1970-01-01. */
 export const toEpochDay = (date: IsoDate): number => {
   const { year, month, day } = parseIsoDate(date);
-  return Date.UTC(year, month - 1, day) / DAY_MS;
+  return utcMillis(year, month, day) / DAY_MS;
 };
 
 export const fromEpochDay = (epochDay: number): IsoDate => {
@@ -59,6 +73,9 @@ export const fromEpochDay = (epochDay: number): IsoDate => {
     day: d.getUTCDate(),
   });
 };
+
+/** Whether a computed date still fits `IsoDate` (years 0000-9999). */
+export const isInIsoRange = (date: string): boolean => /^\d{4}-/.test(date) && date.length === 10;
 
 export const addDays = (date: IsoDate, days: number): IsoDate =>
   fromEpochDay(toEpochDay(date) + days);
@@ -111,12 +128,12 @@ export const pragueDate = (epochMillis: number): IsoDate => {
  */
 export const pragueStartOfDay = (date: IsoDate, hour = 0): number => {
   const { year, month, day } = parseIsoDate(date);
-  const wall = Date.UTC(year, month - 1, day, hour);
+  const wall = utcMillis(year, month, day, hour);
   // Prague is UTC+1 or UTC+2: try both offsets and keep the one whose wall clock matches.
   for (const offsetHours of [1, 2]) {
     const candidate = wall - offsetHours * 3_600_000;
     const f = pragueFields(candidate);
-    if (Date.UTC(f.year, f.month - 1, f.day, f.hour, f.minute, f.second) === wall) {
+    if (utcMillis(f.year, f.month, f.day, f.hour) + f.minute * 60_000 + f.second * 1000 === wall) {
       return candidate;
     }
   }

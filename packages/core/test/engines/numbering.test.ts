@@ -105,6 +105,21 @@ describe("Numbering guards", () => {
       ),
     );
     expect(Result.isFailure(Numbering.checkNextCounter(1, 0))).toBe(true);
+    // The counter column is a Postgres integer and allocation stores sequence + 1.
+    expect(Result.isSuccess(Numbering.checkNextCounter(1, Numbering.MAX_COUNTER))).toBe(true);
+    expect(Numbering.checkNextCounter(1, Numbering.MAX_COUNTER + 1)).toEqual(
+      Result.fail(
+        new Invalid({
+          issues: [
+            {
+              path: ["nextNumber"],
+              code: "numbering.pattern_invalid",
+              params: { reason: "too_large", maximum: String(Numbering.MAX_COUNTER) },
+            },
+          ],
+        }),
+      ),
+    );
     expect(Result.isFailure(Numbering.checkNextCounter(1, 1.5))).toBe(true);
   });
 

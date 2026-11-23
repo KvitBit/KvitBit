@@ -8,7 +8,9 @@
  *    gross = base + vat.
  * 4. Top-down (§37(b), pricesIncludeVat): gross = round(sum of line grosses);
  *    vat = round(gross x rate / (100 + rate)); base = gross - vat.
- * 5. round = half away from zero at the document currency's minor unit (2 for CZK and EUR).
+ * 5. round = round2: half away from zero at 2 decimals, whatever the currency (spec 5.1 says
+ *    round2; for 0- or 3-decimal currencies amounts can carry more precision than the minor
+ *    unit, and the payment amount is the caller's to round).
  * 6. Foreign currency: bucket vatCzk = round2(vat x fx.rate / fx.quantity); the document's
  *    vatCzk is the sum of the bucket values (no second rounding). CZK documents: null.
  * 7. paymentRounding "whole_unit" rounds only the amount to pay to a whole unit (half away
@@ -48,6 +50,9 @@ export interface VatInput {
   readonly fx: null | Pick<FxRate, "rate" | "quantity">;
   readonly paymentRounding: "none" | "whole_unit";
 }
+
+/** Decimals of every rounded VatMath amount (rules 3-6: round2). */
+export const VAT_SCALE = 2;
 
 /** Bucket order: the `VatTreatment` literal order. */
 export const TREATMENTS: ReadonlyArray<VatTreatment> = [
@@ -120,7 +125,7 @@ const assemble = (
 };
 
 export const calculate = (input: VatInput): VatBreakdown => {
-  const scale = MoneyMath.minorUnitScale(input.currency);
+  const scale = VAT_SCALE;
   const foreign = input.currency !== "CZK" && input.fx !== null;
   const groups = new Map<VatTreatment, BigDecimal.BigDecimal>();
   for (const line of input.lines) {
@@ -199,7 +204,7 @@ export const splitAdvance = (
   options: { readonly fx?: VatInput["fx"]; readonly taxPoint?: IsoDate } = {},
 ): ReadonlyArray<VatBucket> => {
   const currency = proforma.gross.currency;
-  const scale = MoneyMath.minorUnitScale(currency);
+  const scale = VAT_SCALE;
   const total = sumAll(proforma.buckets.map((b) => b.gross));
   if (BigDecimal.isZero(total)) {
     throw new Error("VatMath.splitAdvance: the proforma has no gross amount to split");

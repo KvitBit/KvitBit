@@ -169,9 +169,12 @@ describe("VatMath.calculate", () => {
     expect(calc([line("1", "10")], { fx: { rate: d("1"), quantity: 1 } }).vatCzk).toBeNull();
   });
 
-  test("rounds at the currency minor unit (JPY: 0 decimals)", () => {
+  test("rounds to 2 decimals whatever the currency (JPY too, rule 3)", () => {
     const b = calc([line("1", "1001")], { currency: "JPY" as CurrencyCode });
-    expect(s(b.vat.amount)).toBe("210"); // 210.21
+    expect(s(b.vat.amount)).toBe("210.21");
+    expect(s(calc([line("1", "0.125")], { currency: "BHD" as CurrencyCode }).net.amount)).toBe(
+      "0.13",
+    );
   });
 
   test("no lines: empty buckets and zero totals", () => {

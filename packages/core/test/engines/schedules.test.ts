@@ -74,6 +74,23 @@ describe("Schedules.nextOccurrences", () => {
     ).toEqual([]);
   });
 
+  test("years 0000-0099 survive date arithmetic", () => {
+    expect(Schedules.nextOccurrences(rule({ weeks: 1 }, "0099-01-01"), D("0001-01-01"), 2)).toEqual(
+      ["0099-01-01", "0099-01-08"].map(D),
+    );
+    expect(addMonths(D("0000-12-31"), 2)).toBe(D("0001-02-28"));
+    expect(addDays(D("0100-01-01"), -1)).toBe(D("0099-12-31"));
+  });
+
+  test("enumeration stops at the end of the four-digit calendar", () => {
+    expect(Schedules.nextOccurrences(rule({ years: 1 }, "9999-12-31"), D("2026-01-01"), 3)).toEqual(
+      [D("9999-12-31")],
+    );
+    expect(Schedules.nextOccurrences(rule({ weeks: 1 }, "9999-12-25"), D("9999-12-26"), 3)).toEqual(
+      [],
+    );
+  });
+
   test("an invalid cadence is a defect", () => {
     expect(() =>
       Schedules.nextOccurrences(rule({ weeks: 0 }, "2026-01-01"), D("2027-01-01"), 1),
@@ -108,14 +125,16 @@ describe("Schedules.validate", () => {
       Schema.decodeUnknownSync(ScheduleRuleSchema)({ every: { months: 1 }, startOn: "2026-01-31" }),
     ).toEqual(rule({ months: 1 }, "2026-01-31"));
   });
-  test("accepts positive integer steps within bounds and endOn >= startOn", () => {
+  test("no product ceiling on the step (an 11-year cadence is valid)", () => {
+    expect(Result.isSuccess(Schedules.validate(rule({ years: 11 }, "2026-01-01")))).toBe(true);
+  });
+  test("accepts positive integer steps and endOn >= startOn", () => {
     const ok = rule({ months: 1 }, "2026-01-31", "2026-01-31");
     expect(Schedules.validate(ok)).toEqual(Result.succeed(ok));
   });
   test.each([
     [rule({ weeks: 0 }, "2026-01-01"), "step"],
     [rule({ months: 1.5 }, "2026-01-01"), "step"],
-    [rule({ years: 11 }, "2026-01-01"), "step"],
     [rule({ months: 1 }, "2026-02-30"), "date"],
     [rule({ months: 1 }, "2026-02-01", "2026-01-31"), "end_before_start"],
   ])("rejects %j (%s)", (r, reason) => {

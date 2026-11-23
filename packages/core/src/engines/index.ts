@@ -9,7 +9,7 @@ export { Fx } from "./fx";
 export type { NumberPattern, PatternError, PatternToken } from "./numbering";
 export { MAX_NUMBER_LENGTH, Numbering } from "./numbering";
 export type { ReminderStep } from "./schedules";
-export { MAX_EVERY, Reminders, ScheduleRule, Schedules } from "./schedules";
+export { Reminders, ScheduleRule, Schedules } from "./schedules";
 export type { StatutoryCodeValue, StatutoryNote } from "./statutory";
 export { STATUTORY_CODES, StatutoryText } from "./statutory";
 export type { VatBreakdown, VatBucket, VatInput, VatInputLine } from "./vat";
