@@ -8,6 +8,7 @@
  * required, never provided here.
  */
 import { Layer } from "effect";
+import { IssuerSnapshotsLive } from "./issuer";
 import { WorkspacesLive } from "./live";
 import {
   BankAccountReferencesFake,
@@ -22,6 +23,7 @@ import { RegistryLookup } from "./registry";
 import { WorkspacesRepoMemory } from "./repo";
 import { WorkspaceSnapshotsLive } from "./snapshots";
 
+export * from "./issuer";
 export type { WorkspacesImpl, WorkspacesRequirements } from "./live";
 export { MemberCallerSchema, makeWorkspaces, WorkspacesLive } from "./live";
 export * from "./model";
@@ -38,7 +40,7 @@ export { isValidIban, pragueDate, regimeOn, slugify } from "./rules";
 export * from "./snapshots";
 
 /**
- * `WorkspacesLive` + `WorkspaceSnapshotsLive` on in-memory repositories and fakes. Requires the
+ * `WorkspacesLive` + `WorkspaceSnapshotsLive` + `IssuerSnapshotsLive` on in-memory repositories and fakes. Requires the
  * ports of `InMemoryPortsLive` (CoreStore | MemoryTables | IdGenerator | CompanyRegistry |
  * BlobStorage); provides the fakes' controls too.
  */
@@ -53,5 +55,8 @@ export const WorkspacesTestLayer = (users: ReadonlyArray<DirectoryUser> = []) =>
     BrandingPreviewFake,
     BankAccountReferencesFake.layer,
   );
-  return Layer.mergeAll(WorkspacesLive, WorkspaceSnapshotsLive).pipe(Layer.provideMerge(deps));
+  return Layer.mergeAll(
+    WorkspacesLive,
+    IssuerSnapshotsLive.pipe(Layer.provideMerge(WorkspaceSnapshotsLive)),
+  ).pipe(Layer.provideMerge(deps));
 };
