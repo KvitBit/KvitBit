@@ -90,9 +90,10 @@ export interface AltchaOptions {
 }
 
 /**
- * Defaults. Not yet benchmarked on mid-range Android devices (ADR 0002 consequence): tune
- * `cost`, `memoryCost` and `keyPrefix` together once measured. With prefix "0" the client
- * derives 16 keys on average.
+ * Defaults. With prefix "0" the client derives 16 keys on average. The ADR 0002 solve-time
+ * benchmark on mid-range Android devices is deferred to the mobile client work (apps/mobile
+ * does not exist yet); until it runs these values are provisional, and `cost`, `memoryCost`
+ * and `keyPrefix` are tuned together from its measurements.
  */
 export const ALTCHA_DEFAULTS = {
   ttlSeconds: 300,

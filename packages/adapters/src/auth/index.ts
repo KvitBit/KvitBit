@@ -4,4 +4,5 @@
  */
 export * from "./api-key";
 export * from "./better-auth";
+export * from "./email-rate-limit";
 export * from "./ids";
