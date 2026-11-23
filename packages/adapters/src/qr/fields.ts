@@ -37,7 +37,7 @@ const BBAN_FORMATS: Readonly<Record<string, string>> = {
   BG: "4a6n8c",
   BH: "4a14c",
   BI: "23n",
-  BR: "23n1a1c",
+  BR: "8c15n2c",
   BY: "4c4n16c",
   CH: "5n12c",
   CR: "18n",
