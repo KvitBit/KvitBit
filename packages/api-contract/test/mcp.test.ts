@@ -19,8 +19,6 @@ import {
   reportKindFromMcp,
   requiredActions,
   SendDocumentArgs,
-  toolInputJsonSchema,
-  toolInputParseOptions,
   toolJsonSchema,
   twoStepOutput,
   UpsertContactArgs,
@@ -355,34 +353,37 @@ describe("upsert_contact argument forms", () => {
 });
 
 describe("list_expenses arguments", () => {
+  const decode = Schema.decodeUnknownSync(ListExpensesArgs);
+
   test("are incomplete plus paging, the same fields as the HTTP list query", () => {
-    expect(Object.keys(ListExpensesArgs.fields).sort()).toEqual(
-      ["cursor", "incomplete", "limit"].sort(),
-    );
-    expect(Object.keys(ListExpensesArgs.fields).sort()).toEqual(
-      Object.keys(ExpenseListQuery).sort(),
-    );
+    const properties = Object.keys(toolJsonSchema(ListExpensesArgs).properties as object);
+    expect(properties.sort()).toEqual(["cursor", "incomplete", "limit"]);
+    expect(Object.keys(ExpenseListQuery).sort()).toEqual(["cursor", "incomplete", "limit"]);
   });
 
-  test("is a closed input: unmodeled filters fail and the schema says so", () => {
-    const listExpenses = MCP_TOOLS.find((t) => t.name === "list_expenses");
-    if (listExpenses === undefined) throw new Error("list_expenses missing");
-    const decode = Schema.decodeUnknownSync(ListExpensesArgs);
-    const options = toolInputParseOptions(listExpenses);
-    expect(() => decode({ incomplete: true, supplier: "x" }, options)).toThrow();
-    expect(() => decode({ incomplete: true, limit: 10 }, options)).not.toThrow();
-    expect(toolInputJsonSchema(listExpenses).additionalProperties).toBe(false);
+  test("decode the modeled fields and reject any other, with default options", () => {
+    expect(decode({})).toEqual({});
+    expect(decode({ incomplete: true, cursor: "c1", limit: 10 })).toEqual({
+      incomplete: true,
+      cursor: "c1",
+      limit: 10,
+    });
+    expect(() => decode({ supplier: "demo" })).toThrow();
+    expect(() => decode({ incomplete: true, contactId: "x" })).toThrow();
+    expect(() => decode({ limit: 0 })).toThrow();
   });
 
-  test("only list_expenses is closed so far", () => {
+  test("the JSON Schema is closed", () => {
+    expect(toolJsonSchema(ListExpensesArgs).additionalProperties).toBe(false);
+  });
+
+  test("only list_expenses is closed so far; other inputs still drop extras", () => {
     expect(MCP_TOOLS.filter((t) => t.closedInput).map((t) => t.name)).toEqual(["list_expenses"]);
-    const listContacts = MCP_TOOLS.find((t) => t.name === "list_contacts");
-    if (listContacts === undefined) throw new Error("list_contacts missing");
-    const decoded = Schema.decodeUnknownSync(ListContactsArgs)(
-      { text: "Ada", extra: true },
-      toolInputParseOptions(listContacts),
-    );
-    expect(decoded).toEqual({ text: "Ada" });
-    expect(toolInputJsonSchema(listContacts).additionalProperties).toBe(true);
+    const listExpenses = MCP_TOOLS.find((t) => t.name === "list_expenses");
+    expect(listExpenses?.input).toBe(ListExpensesArgs);
+    expect(Schema.decodeUnknownSync(ListContactsArgs)({ text: "Ada", extra: true })).toEqual({
+      text: "Ada",
+    });
+    expect(toolJsonSchema(ListContactsArgs).additionalProperties).toBe(true);
   });
 });

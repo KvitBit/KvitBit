@@ -47,7 +47,7 @@ import {
   TemplateView,
   WorkspaceView,
 } from "@kvitbit/domain/contract";
-import { Schema, type SchemaAST } from "effect";
+import { Schema, SchemaTransformation } from "effect";
 import { CorrectionLines, DeliveryQueued, SendInput } from "./groups/documents";
 import {
   ContactRole,
@@ -203,11 +203,32 @@ export const GetDocumentPdfArgs = Schema.Struct({
 });
 export const ListPaymentsArgs = Schema.Struct({ target: PaymentTarget });
 /**
- * Closed on purpose and equal to the HTTP list query (`ExpenseListQuery`): `incomplete` plus
- * paging, nothing else. Core's `ExpenseQuery` is an open struct, so supplier or contact filters
- * (the UI's contact history) wait until core closes it; widen both surfaces together then.
+ * Argument schemas that reject unmodeled properties under any decoder options, mapped to the
+ * plain struct their JSON Schema is generated from (with `additionalProperties: false`). Keyed by
+ * identity: re-annotating a closed schema yields a new, open-looking one.
  */
-export const ListExpensesArgs = Schema.Struct(ExpenseListQuery);
+const CLOSED_ARGS = new WeakMap<Schema.Top, Schema.Top>();
+
+/**
+ * Closed on purpose and equal to the HTTP list query (`ExpenseListQuery`): `incomplete` plus
+ * paging, nothing else, and any other property fails decoding instead of being dropped (a dropped
+ * filter would silently widen the list). Core's `ExpenseQuery` is an open struct, so supplier or
+ * contact filters (the UI's contact history) wait until core closes it; widen both surfaces
+ * together then.
+ */
+const ListExpensesFields = Schema.Struct(ExpenseListQuery);
+const LIST_EXPENSES_KEYS: ReadonlySet<string> = new Set(Object.keys(ExpenseListQuery));
+const UnmodeledListExpensesKey = Schema.String.pipe(
+  Schema.check(
+    Schema.makeFilter((key: string) => !LIST_EXPENSES_KEYS.has(key), {
+      expected: `none of ${[...LIST_EXPENSES_KEYS].join(", ")}`,
+    }),
+  ),
+);
+export const ListExpensesArgs = Schema.StructWithRest(ListExpensesFields, [
+  Schema.Record(UnmodeledListExpensesKey, Schema.Never),
+]).pipe(Schema.decodeTo(ListExpensesFields, SchemaTransformation.passthroughSubtype()));
+CLOSED_ARGS.set(ListExpensesArgs, ListExpensesFields);
 export const GetExpenseArgs = Schema.Struct({ expenseId: ExpenseId });
 export const ListContactsArgs = Schema.Struct({
   text: Schema.optional(Schema.String),
@@ -398,10 +419,7 @@ export interface McpToolDefinition {
   readonly annotations: ToolAnnotations;
   readonly input: Schema.Top;
   readonly output: Schema.Top;
-  /**
-   * Arguments outside `input` are an error, not ignored: decode with `toolInputParseOptions` and
-   * advertise `toolInputJsonSchema`. Set where a dropped argument would silently widen a result.
-   */
+  /** `input` rejects unmodeled arguments instead of dropping them, and says so in its schema. */
   readonly closedInput: boolean;
 }
 
@@ -416,11 +434,10 @@ const tool = <const Name extends string>(
   name: Name,
   definition: Omit<McpToolDefinition, "name" | "annotations" | "closedInput"> & {
     readonly hints: ReadonlyArray<"RO" | "D" | "I" | "O">;
-    readonly closedInput?: true;
   },
 ): McpToolDefinition & { readonly name: Name } => {
-  const { hints: flags, closedInput, ...rest } = definition;
-  return { name, ...rest, annotations: hints(flags), closedInput: closedInput === true };
+  const { hints: flags, ...rest } = definition;
+  return { name, ...rest, annotations: hints(flags), closedInput: CLOSED_ARGS.has(rest.input) };
 };
 
 /** The 28 curated tools of section 6.5, in table order. */
@@ -495,7 +512,6 @@ export const MCP_TOOLS = [
     mode: "single",
     hints: ["RO"],
     input: ListExpensesArgs,
-    closedInput: true,
     output: Page(ExpenseSummary),
   }),
   tool("get_expense", {
@@ -704,27 +720,20 @@ export const requiredActions = (
 
 /**
  * JSON Schema for a tool's `inputSchema` or `outputSchema`. MCP needs `type: "object"` at the
- * top, which a union of structs (`anyOf`) lacks, so it is added there.
+ * top, which a union of structs (`anyOf`) lacks, so it is added there. Closed argument schemas
+ * (`ListExpensesArgs`) come out with `additionalProperties: false`.
  */
-export const toolJsonSchema = (
-  schema: Schema.Top,
-  options?: { readonly onExcessProperty?: "ignore" | "error" },
-): Record<string, unknown> => {
-  const document = Schema.toJsonSchemaDocument(schema, options);
+export const toolJsonSchema = (schema: Schema.Top): Record<string, unknown> => {
+  const closed = CLOSED_ARGS.get(schema);
+  const document =
+    closed === undefined
+      ? Schema.toJsonSchemaDocument(schema)
+      : Schema.toJsonSchemaDocument(closed, { onExcessProperty: "error" });
   const root: Record<string, unknown> = { ...document.schema };
   if (Object.keys(document.definitions).length > 0) root.$defs = document.definitions;
   if (root.type === undefined && root.anyOf !== undefined) root.type = "object";
   return root;
 };
-
-/** Decoder options for a tool's arguments: closed inputs reject unmodeled properties. */
-export const toolInputParseOptions = (tool: McpToolDefinition): SchemaAST.ParseOptions => ({
-  onExcessProperty: tool.closedInput ? "error" : "ignore",
-});
-
-/** A tool's `inputSchema`; closed inputs advertise `additionalProperties: false`. */
-export const toolInputJsonSchema = (tool: McpToolDefinition): Record<string, unknown> =>
-  toolJsonSchema(tool.input, { onExcessProperty: tool.closedInput ? "error" : "ignore" });
 
 // --- Resources (section 6.7) -------------------------------------------------------------------
 

@@ -60,6 +60,7 @@ describe("ALTCHA schemas", () => {
   });
 
   test("header rejects values over the length bound", () => {
+    expect(ALTCHA_HEADER_MAX_LENGTH).toBe(8192);
     const decode = Schema.decodeUnknownSync(AltchaPayloadFromHeader);
     const fits = (n: number) => btoa(JSON.stringify({ pad: "x".repeat(n) }));
     let n = 0;
