@@ -191,9 +191,46 @@ describe("SharedDocumentView is a closed recipient projection", () => {
     totals: documentJson.totals,
     statutoryNotes: documentJson.statutoryNotes,
     paymentQr: documentJson.paymentQr,
+    language: "cs",
+    amountDue: czk("1210"),
+    correctsNumber: null,
+    note: null,
+    updatedAt: null,
     pdfUrl: "https://kvitbit.example/s/v1.abc/pdf",
     viewerIsIssuer: false,
   };
+  const roundTrip = (input: unknown) =>
+    Schema.encodeSync(json)(Schema.decodeUnknownSync(json)(input));
+  test("a Credit Note carries the original number and its language", () => {
+    const creditNote = {
+      ...shared,
+      kind: "credit_note",
+      number: "2026-D0001",
+      settlement: "paid",
+      paymentQr: null,
+      language: "en",
+      amountDue: czk("0"),
+      correctsNumber: "2026-0001",
+    };
+    expect(roundTrip(creditNote)).toEqual(creditNote);
+    expect(roundTrip({ ...creditNote, correctsNumber: "2026-0002" })).not.toEqual(
+      roundTrip(creditNote),
+    );
+    expect(roundTrip({ ...creditNote, language: "cs" })).not.toEqual(roundTrip(creditNote));
+  });
+  test("a partially paid invoice without QR shows what remains", () => {
+    const partial = {
+      ...shared,
+      settlement: "partially_paid",
+      paymentQr: null,
+      amountDue: czk("210"),
+      note: "Thank you",
+      updatedAt: "2026-11-24T08:00:00Z",
+    };
+    const view = Schema.decodeUnknownSync(json)(partial);
+    expect(BigDecimal.format(view.amountDue.amount)).toBe("210");
+    expect(roundTrip(partial)).toEqual(partial);
+  });
   test("encoding drops private fields", () => {
     const view = Schema.decodeUnknownSync(json)({
       ...shared,

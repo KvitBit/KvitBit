@@ -7,16 +7,8 @@ import type { DocumentId, ExpenseId, PaymentId } from "../ids";
 import { ShareViewId } from "../ids";
 import type { FileDownload } from "../shared";
 import { StatutoryNote, VatBreakdown } from "../shared";
-import type {
-  IsoDate,
-  Locale,
-  Money,
-  Page,
-  PageRequest,
-  PaymentMethod,
-  RequestOptions,
-} from "../vocabulary";
-import { DocumentKind, DocumentSettlement, DocumentStatus } from "../vocabulary";
+import type { IsoDate, Page, PageRequest, PaymentMethod, RequestOptions } from "../vocabulary";
+import { DocumentKind, DocumentSettlement, DocumentStatus, Locale, Money } from "../vocabulary";
 import { ContactSnapshot, DocumentView, IssuerSnapshot, LineView } from "./documents";
 import { WorkspaceBranding } from "./workspaces";
 
@@ -69,7 +61,8 @@ export type ShareViewEvent = typeof ShareViewEvent.Type;
 
 /**
  * Narrowed recipient projection (core-ports 4.6): issuer branding, parties, lines, totals,
- * statutory notes, payment QR, settlement and PDF link, plus `viewerIsIssuer`. Closed on
+ * statutory notes, payment QR, settlement and PDF link, plus `viewerIsIssuer`, and the
+ * header and notes user-flows 8.2 shows (language, amount due, corrected number, note, update). Closed on
  * purpose: encoding drops everything else (audit history, internal notes, deliveries).
  * Field names follow DocumentView; `branding` and `pdfUrl` are this package's names for
  * "issuer branding" and "PDF link".
@@ -88,6 +81,11 @@ export const SharedDocumentView = Schema.Struct({
   totals: VatBreakdown,
   statutoryNotes: Schema.Array(StatutoryNote),
   paymentQr: DocumentView.fields.paymentQr,
+  language: Locale, // the page opens in the document's language (user-flows 8.2)
+  amountDue: Money, // outstanding amount shown in the header; zero when settled
+  correctsNumber: Schema.NullOr(Schema.String), // a Credit Note shows the original Invoice number
+  note: Schema.NullOr(Schema.String), // printed note, as on the PDF
+  updatedAt: Schema.NullOr(Schema.String), // ISO instant of the last edit after issue ("Updated on D")
   pdfUrl: Schema.String,
   viewerIsIssuer: Schema.Boolean, // signedInUser is a Member of the issuing Workspace
 });
