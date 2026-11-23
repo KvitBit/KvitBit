@@ -17,6 +17,7 @@ import {
   currency,
   decimal,
   id,
+  instant,
   money,
   revision,
   updatedAt,
@@ -56,6 +57,8 @@ export const expenses = pgTable(
     fxQuantity: integer("fx_quantity"),
     fxFixingDate: isoDate("fx_fixing_date"),
     fxSource: fxSource("fx_source"),
+    /** Removal marker: removed Expenses leave active use but keep their Payments (core-ports.md:926). */
+    removedAt: instant("removed_at"),
     revision: revision(),
     createdAt: createdAt(),
     updatedAt: updatedAt(),

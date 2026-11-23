@@ -52,7 +52,7 @@ CREATE TABLE "auth"."account" (
 --> statement-breakpoint
 CREATE TABLE "auth"."apikey" (
 	"id" text PRIMARY KEY,
-	"config_id" text,
+	"config_id" text DEFAULT 'default' NOT NULL,
 	"name" text,
 	"start" text,
 	"prefix" text,
@@ -93,18 +93,23 @@ CREATE TABLE "auth"."oauth_access_token" (
 	"scopes" text[] NOT NULL,
 	"expires_at" timestamp with time zone,
 	"created_at" timestamp with time zone,
-	"revoked" timestamp with time zone
+	"revoked" timestamp with time zone,
+	"authorization_code_id" text,
+	"requested_user_info_claims" text[],
+	"confirmation" jsonb
 );
 --> statement-breakpoint
 CREATE TABLE "auth"."oauth_client" (
 	"id" text PRIMARY KEY,
 	"client_id" text NOT NULL,
 	"client_secret" text,
+	"client_discovery_id" text,
 	"disabled" boolean DEFAULT false,
 	"skip_consent" boolean,
 	"enable_end_session" boolean,
 	"subject_type" text,
 	"scopes" text[],
+	"client_credentials_scopes" text[],
 	"user_id" text,
 	"created_at" timestamp with time zone,
 	"updated_at" timestamp with time zone,
@@ -119,6 +124,8 @@ CREATE TABLE "auth"."oauth_client" (
 	"software_statement" text,
 	"redirect_uris" text[] NOT NULL,
 	"post_logout_redirect_uris" text[],
+	"backchannel_logout_uri" text,
+	"backchannel_logout_session_required" boolean,
 	"token_endpoint_auth_method" text,
 	"application_type" text,
 	"jwks" text,
@@ -126,8 +133,22 @@ CREATE TABLE "auth"."oauth_client" (
 	"grant_types" text[],
 	"response_types" text[],
 	"require_pkce" boolean,
+	"dpop_bound_access_tokens" boolean DEFAULT false,
 	"reference_id" text,
 	"metadata" jsonb
+);
+--> statement-breakpoint
+CREATE TABLE "auth"."oauth_client_assertion" (
+	"id" text PRIMARY KEY,
+	"expires_at" timestamp with time zone NOT NULL
+);
+--> statement-breakpoint
+CREATE TABLE "auth"."oauth_client_resource" (
+	"id" text PRIMARY KEY,
+	"client_id" text NOT NULL,
+	"resource_id" text NOT NULL,
+	"metadata" jsonb,
+	"created_at" timestamp with time zone
 );
 --> statement-breakpoint
 CREATE TABLE "auth"."oauth_consent" (
@@ -136,6 +157,7 @@ CREATE TABLE "auth"."oauth_consent" (
 	"user_id" text,
 	"reference_id" text,
 	"resources" text[],
+	"requested_user_info_claims" text[],
 	"scopes" text[] NOT NULL,
 	"created_at" timestamp with time zone,
 	"updated_at" timestamp with time zone,
@@ -160,7 +182,31 @@ CREATE TABLE "auth"."oauth_refresh_token" (
 	"expires_at" timestamp with time zone,
 	"created_at" timestamp with time zone,
 	"revoked" timestamp with time zone,
+	"rotated_at" timestamp with time zone,
+	"rotation_replay_response" text,
+	"rotation_replay_expires_at" timestamp with time zone,
+	"authorization_code_id" text,
+	"requested_user_info_claims" text[],
+	"confirmation" jsonb,
 	"auth_time" timestamp with time zone
+);
+--> statement-breakpoint
+CREATE TABLE "auth"."oauth_resource" (
+	"id" text PRIMARY KEY,
+	"identifier" text NOT NULL,
+	"name" text NOT NULL,
+	"access_token_ttl" integer,
+	"refresh_token_ttl" integer,
+	"signing_algorithm" text,
+	"signing_key_id" text,
+	"allowed_scopes" text[],
+	"custom_claims" jsonb,
+	"dpop_bound_access_tokens_required" boolean DEFAULT false,
+	"disabled" boolean DEFAULT false,
+	"created_at" timestamp with time zone,
+	"updated_at" timestamp with time zone,
+	"policy_version" integer DEFAULT 1,
+	"metadata" jsonb
 );
 --> statement-breakpoint
 CREATE TABLE "auth"."passkey" (
@@ -202,7 +248,10 @@ CREATE TABLE "auth"."user" (
 	"email_verified" boolean DEFAULT false NOT NULL,
 	"image" text,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
-	"updated_at" timestamp with time zone DEFAULT now() NOT NULL
+	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
+	"deleted_at" timestamp with time zone,
+	"purge_after" timestamp with time zone,
+	CONSTRAINT "user_deletion_complete" CHECK (("deleted_at" is null) = ("purge_after" is null))
 );
 --> statement-breakpoint
 CREATE TABLE "auth"."verification" (
@@ -354,6 +403,7 @@ CREATE TABLE "documents" (
 	"reminders_choice" "reminders_choice" DEFAULT 'inherit'::"reminders_choice" NOT NULL,
 	"reminders_on" boolean DEFAULT false NOT NULL,
 	"reminder_epoch" integer DEFAULT 0 NOT NULL,
+	"reminder_offsets_days" integer[],
 	"schedule_id" uuid,
 	"occurrence" date,
 	"correction_reason" text,
@@ -452,6 +502,7 @@ CREATE TABLE "expenses" (
 	"fx_quantity" integer,
 	"fx_fixing_date" date,
 	"fx_source" "fx_source",
+	"removed_at" timestamp with time zone,
 	"revision" integer DEFAULT 1 NOT NULL,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
 	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
@@ -486,11 +537,28 @@ CREATE TABLE "schedules" (
 	"paused_reason" text,
 	"paused_at" timestamp with time zone,
 	"detached_at" timestamp with time zone,
+	"started_occurrence" date,
+	"workflow_started_at" timestamp with time zone,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
 	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
 	CONSTRAINT "schedules_workspace_id_id_unique" UNIQUE("workspace_id","id"),
+	CONSTRAINT "schedules_workflow_start_complete" CHECK (("started_occurrence" is null) = ("workflow_started_at" is null)),
 	CONSTRAINT "schedules_interval_positive" CHECK ("cadence_interval" > 0),
 	CONSTRAINT "schedules_end_after_start" CHECK ("end_on" is null or "end_on" >= "start_on")
+);
+--> statement-breakpoint
+CREATE TABLE "template_lines" (
+	"id" uuid PRIMARY KEY,
+	"workspace_id" uuid NOT NULL,
+	"template_id" uuid NOT NULL,
+	"position" integer NOT NULL,
+	"price_list_item_id" uuid,
+	"description" text,
+	"quantity" numeric,
+	"unit" text,
+	"unit_price" numeric,
+	"vat" "vat_treatment",
+	CONSTRAINT "template_lines_template_position_unique" UNIQUE("template_id","position")
 );
 --> statement-breakpoint
 CREATE TABLE "templates" (
@@ -499,6 +567,8 @@ CREATE TABLE "templates" (
 	"name" text NOT NULL,
 	"kind" "draftable_kind" NOT NULL,
 	"contact_id" uuid NOT NULL,
+	"series_id" uuid,
+	"bank_account_id" uuid,
 	"due_in_days" integer,
 	"body" jsonb NOT NULL,
 	"archived_at" timestamp with time zone,
@@ -731,6 +801,7 @@ CREATE INDEX "oauth_access_token_consent_id_idx" ON "auth"."oauth_access_token" 
 CREATE INDEX "oauth_access_token_refresh_id_idx" ON "auth"."oauth_access_token" ("refresh_id");--> statement-breakpoint
 CREATE UNIQUE INDEX "oauth_client_client_id_unique" ON "auth"."oauth_client" ("client_id");--> statement-breakpoint
 CREATE INDEX "oauth_client_user_id_idx" ON "auth"."oauth_client" ("user_id");--> statement-breakpoint
+CREATE UNIQUE INDEX "oauth_client_resource_pair_unique" ON "auth"."oauth_client_resource" ("client_id","resource_id");--> statement-breakpoint
 CREATE INDEX "oauth_consent_client_id_idx" ON "auth"."oauth_consent" ("client_id");--> statement-breakpoint
 CREATE INDEX "oauth_consent_user_id_idx" ON "auth"."oauth_consent" ("user_id");--> statement-breakpoint
 CREATE UNIQUE INDEX "oauth_consent_grant_unique" ON "auth"."oauth_consent" ("client_id","user_id","workspace_id");--> statement-breakpoint
@@ -739,6 +810,7 @@ CREATE UNIQUE INDEX "oauth_refresh_token_token_unique" ON "auth"."oauth_refresh_
 CREATE INDEX "oauth_refresh_token_client_id_idx" ON "auth"."oauth_refresh_token" ("client_id");--> statement-breakpoint
 CREATE INDEX "oauth_refresh_token_user_id_idx" ON "auth"."oauth_refresh_token" ("user_id");--> statement-breakpoint
 CREATE INDEX "oauth_refresh_token_consent_id_idx" ON "auth"."oauth_refresh_token" ("consent_id");--> statement-breakpoint
+CREATE UNIQUE INDEX "oauth_resource_identifier_unique" ON "auth"."oauth_resource" ("identifier");--> statement-breakpoint
 CREATE INDEX "passkey_user_id_idx" ON "auth"."passkey" ("user_id");--> statement-breakpoint
 CREATE UNIQUE INDEX "passkey_credential_id_unique" ON "auth"."passkey" ("credential_id");--> statement-breakpoint
 CREATE UNIQUE INDEX "rate_limit_key_unique" ON "auth"."rate_limit" ("key");--> statement-breakpoint
@@ -792,6 +864,8 @@ ALTER TABLE "auth"."oauth_access_token" ADD CONSTRAINT "oauth_access_token_user_
 ALTER TABLE "auth"."oauth_access_token" ADD CONSTRAINT "oauth_access_token_consent_id_oauth_consent_id_fkey" FOREIGN KEY ("consent_id") REFERENCES "auth"."oauth_consent"("id") ON DELETE CASCADE;--> statement-breakpoint
 ALTER TABLE "auth"."oauth_access_token" ADD CONSTRAINT "oauth_access_token_refresh_id_oauth_refresh_token_id_fkey" FOREIGN KEY ("refresh_id") REFERENCES "auth"."oauth_refresh_token"("id") ON DELETE CASCADE;--> statement-breakpoint
 ALTER TABLE "auth"."oauth_client" ADD CONSTRAINT "oauth_client_user_id_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "auth"."user"("id") ON DELETE CASCADE;--> statement-breakpoint
+ALTER TABLE "auth"."oauth_client_resource" ADD CONSTRAINT "oauth_client_resource_client_id_oauth_client_client_id_fkey" FOREIGN KEY ("client_id") REFERENCES "auth"."oauth_client"("client_id") ON DELETE CASCADE;--> statement-breakpoint
+ALTER TABLE "auth"."oauth_client_resource" ADD CONSTRAINT "oauth_client_resource_dn2L1gs9Dolm_fkey" FOREIGN KEY ("resource_id") REFERENCES "auth"."oauth_resource"("identifier") ON DELETE CASCADE;--> statement-breakpoint
 ALTER TABLE "auth"."oauth_consent" ADD CONSTRAINT "oauth_consent_client_id_oauth_client_client_id_fkey" FOREIGN KEY ("client_id") REFERENCES "auth"."oauth_client"("client_id") ON DELETE CASCADE;--> statement-breakpoint
 ALTER TABLE "auth"."oauth_consent" ADD CONSTRAINT "oauth_consent_user_id_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "auth"."user"("id") ON DELETE CASCADE;--> statement-breakpoint
 ALTER TABLE "auth"."oauth_consent" ADD CONSTRAINT "oauth_consent_workspace_id_workspaces_id_fkey" FOREIGN KEY ("workspace_id") REFERENCES "workspaces"("id") ON DELETE CASCADE;--> statement-breakpoint
@@ -830,8 +904,12 @@ ALTER TABLE "schedule_runs" ADD CONSTRAINT "schedule_runs_schedule_fk" FOREIGN K
 ALTER TABLE "schedule_runs" ADD CONSTRAINT "schedule_runs_document_fk" FOREIGN KEY ("workspace_id","document_id") REFERENCES "documents"("workspace_id","id");--> statement-breakpoint
 ALTER TABLE "schedule_runs" ADD CONSTRAINT "schedule_runs_delivery_fk" FOREIGN KEY ("workspace_id","delivery_id") REFERENCES "deliveries"("workspace_id","id");--> statement-breakpoint
 ALTER TABLE "schedules" ADD CONSTRAINT "schedules_template_fk" FOREIGN KEY ("workspace_id","template_id") REFERENCES "templates"("workspace_id","id") ON DELETE CASCADE;--> statement-breakpoint
+ALTER TABLE "template_lines" ADD CONSTRAINT "template_lines_template_fk" FOREIGN KEY ("workspace_id","template_id") REFERENCES "templates"("workspace_id","id") ON DELETE CASCADE;--> statement-breakpoint
+ALTER TABLE "template_lines" ADD CONSTRAINT "template_lines_price_list_item_fk" FOREIGN KEY ("workspace_id","price_list_item_id") REFERENCES "price_list_items"("workspace_id","id");--> statement-breakpoint
 ALTER TABLE "templates" ADD CONSTRAINT "templates_workspace_id_workspaces_id_fkey" FOREIGN KEY ("workspace_id") REFERENCES "workspaces"("id") ON DELETE CASCADE;--> statement-breakpoint
 ALTER TABLE "templates" ADD CONSTRAINT "templates_contact_fk" FOREIGN KEY ("workspace_id","contact_id") REFERENCES "contacts"("workspace_id","id");--> statement-breakpoint
+ALTER TABLE "templates" ADD CONSTRAINT "templates_series_fk" FOREIGN KEY ("workspace_id","series_id") REFERENCES "numbering_series"("workspace_id","id");--> statement-breakpoint
+ALTER TABLE "templates" ADD CONSTRAINT "templates_bank_account_fk" FOREIGN KEY ("workspace_id","bank_account_id") REFERENCES "bank_accounts"("workspace_id","id");--> statement-breakpoint
 ALTER TABLE "audit_entries" ADD CONSTRAINT "audit_entries_workspace_id_workspaces_id_fkey" FOREIGN KEY ("workspace_id") REFERENCES "workspaces"("id") ON DELETE CASCADE;--> statement-breakpoint
 ALTER TABLE "exports" ADD CONSTRAINT "exports_workspace_id_workspaces_id_fkey" FOREIGN KEY ("workspace_id") REFERENCES "workspaces"("id") ON DELETE CASCADE;--> statement-breakpoint
 ALTER TABLE "exports" ADD CONSTRAINT "exports_requested_by_user_id_fkey" FOREIGN KEY ("requested_by") REFERENCES "auth"."user"("id") ON DELETE SET NULL;--> statement-breakpoint

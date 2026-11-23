@@ -408,3 +408,87 @@ describe("council follow-up constraints", () => {
     }
   });
 });
+
+describe("review round 1 regressions", () => {
+  const ws = "0190a000-0000-7000-8000-0000000001a0";
+  const other = "0190a000-0000-7000-8000-0000000001b0";
+  const contact = "0190a000-0000-7000-8000-0000000001a1";
+  const foreignSeries = "0190a000-0000-7000-8000-0000000001b2";
+  const foreignAccount = "0190a000-0000-7000-8000-0000000001b3";
+  const foreignItem = "0190a000-0000-7000-8000-0000000001b4";
+  const template = "0190a000-0000-7000-8000-0000000001a5";
+
+  beforeAll(async () => {
+    await client.exec(`
+      insert into workspaces (id, slug, name) values ('${ws}', 'epsilon', 'Epsilon'), ('${other}', 'zeta', 'Zeta');
+      insert into contacts (id, workspace_id, name) values ('${contact}', '${ws}', 'C');
+      insert into numbering_series (id, workspace_id, kind, name, pattern) values ('${foreignSeries}', '${other}', 'invoice', 'S', 'NNNN');
+      insert into bank_accounts (id, workspace_id, currency, iban) values ('${foreignAccount}', '${other}', 'CZK', 'CZ6508000000192000145399');
+      insert into price_list_items (id, workspace_id, name, unit_price, currency) values ('${foreignItem}', '${other}', 'I', '10', 'CZK');
+      insert into templates (id, workspace_id, name, kind, contact_id, body) values ('${template}', '${ws}', 'T', 'invoice', '${contact}', '{}');
+    `);
+  });
+
+  test("a template cannot reference another Workspace's series, bank account or item", async () => {
+    const tpl = (column: string, value: string) =>
+      client.query(
+        `insert into templates (id, workspace_id, name, kind, contact_id, body, ${column})
+         values (gen_random_uuid(), $1, 'X', 'invoice', $2, '{}', $3)`,
+        [ws, contact, value],
+      );
+    await expect(tpl("series_id", foreignSeries)).rejects.toThrow(/templates_series_fk/);
+    await expect(tpl("bank_account_id", foreignAccount)).rejects.toThrow(
+      /templates_bank_account_fk/,
+    );
+    await expect(
+      client.query(
+        `insert into template_lines (id, workspace_id, template_id, position, price_list_item_id)
+         values (gen_random_uuid(), $1, $2, 1, $3)`,
+        [ws, template, foreignItem],
+      ),
+    ).rejects.toThrow(/template_lines_price_list_item_fk/);
+  });
+
+  test("schedule workflow starts record their occurrence", async () => {
+    await expect(
+      client.query(
+        `insert into schedules (id, workspace_id, template_id, cadence_unit, cadence_interval, start_on, issue_as, workflow_started_at)
+         values (gen_random_uuid(), $1, $2, 'weeks', 1, '2026-01-01', 'invoice', now())`,
+        [ws, template],
+      ),
+    ).rejects.toThrow(/schedules_workflow_start_complete/);
+  });
+
+  test("an account deletion tombstone carries its purge date", async () => {
+    await expect(
+      client.query(
+        `insert into auth."user" (id, name, email, deleted_at) values ('u-del', 'D', 'd@example.test', now())`,
+      ),
+    ).rejects.toThrow(/user_deletion_complete/);
+  });
+
+  test("reminder offsets, expense removal and OAuth provider columns exist", async () => {
+    const cols = (
+      await rows<{ name: string }>(
+        `select table_schema || '.' || table_name || '.' || column_name as name
+         from information_schema.columns where table_schema in ('public', 'auth')`,
+      )
+    ).map((c) => c.name);
+    for (const col of [
+      "public.documents.reminder_offsets_days",
+      "public.expenses.removed_at",
+      "auth.oauth_refresh_token.rotated_at",
+      "auth.oauth_refresh_token.rotation_replay_response",
+      "auth.oauth_refresh_token.rotation_replay_expires_at",
+      "auth.oauth_access_token.confirmation",
+      "auth.oauth_client.client_credentials_scopes",
+      "auth.oauth_resource.identifier",
+      "auth.oauth_client_resource.resource_id",
+      "auth.oauth_client_assertion.expires_at",
+      "auth.passkey.credential_id",
+      "auth.apikey.config_id",
+    ]) {
+      expect(cols).toContain(col);
+    }
+  });
+});

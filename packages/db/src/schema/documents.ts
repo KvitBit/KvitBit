@@ -88,6 +88,11 @@ export const documents = pgTable(
     remindersChoice: remindersChoice("reminders_choice").notNull().default("inherit"),
     remindersOn: boolean("reminders_on").notNull().default(false),
     reminderEpoch: integer("reminder_epoch").notNull().default(0),
+    /**
+     * Offsets resolved when `reminder_epoch` was armed, so recovery rebuilds the original
+     * `PaymentReminders` payload after later Contact or Workspace edits (core-ports.md:1333-1350).
+     */
+    reminderOffsetsDays: integer("reminder_offsets_days").array(),
     scheduleId: uuid("schedule_id"),
     occurrence: isoDate("occurrence"),
     /** Credit Note reason (core-ports.md D7). */

@@ -12,17 +12,19 @@ import {
   uniqueIndex,
   uuid,
 } from "drizzle-orm/pg-core";
-import { createdAt, id, instant, revision, updatedAt, workspaceIdColumn } from "./columns";
-import { contacts } from "./contacts";
+import { createdAt, decimal, id, instant, revision, updatedAt, workspaceIdColumn } from "./columns";
+import { contacts, priceListItems } from "./contacts";
 import { deliveries, documents } from "./documents";
-import { cadenceUnit, draftableKind, recurringOutcome } from "./enums";
-import { workspaces } from "./workspaces";
+import { cadenceUnit, draftableKind, recurringOutcome, vatTreatment } from "./enums";
+import { bankAccounts, numberingSeries, workspaces } from "./workspaces";
 
 const isoDate = (name: string) => date(name, { mode: "string" });
 
 /**
  * Invoice Templates (core-ports.md §4.8). `TemplateInput` = DocumentInput without the dates plus
- * a name and relative due; the remaining document fields are kept in `body`.
+ * a name and relative due. Every reference to another row (Contact, series, bank account, Price
+ * List Item) is a column with a workspace-scoped foreign key; `body` keeps only the remaining
+ * scalar document fields (currency, language, payment method, symbols, note, FX override).
  */
 export const templates = pgTable(
   "templates",
@@ -32,6 +34,8 @@ export const templates = pgTable(
     name: text("name").notNull(),
     kind: draftableKind("kind").notNull(),
     contactId: uuid("contact_id").notNull(),
+    seriesId: uuid("series_id"),
+    bankAccountId: uuid("bank_account_id"),
     dueInDays: integer("due_in_days"),
     body: jsonb("body").notNull(),
     archivedAt: instant("archived_at"),
@@ -45,6 +49,46 @@ export const templates = pgTable(
       name: "templates_contact_fk",
       columns: [t.workspaceId, t.contactId],
       foreignColumns: [contacts.workspaceId, contacts.id],
+    }),
+    foreignKey({
+      name: "templates_series_fk",
+      columns: [t.workspaceId, t.seriesId],
+      foreignColumns: [numberingSeries.workspaceId, numberingSeries.id],
+    }),
+    foreignKey({
+      name: "templates_bank_account_fk",
+      columns: [t.workspaceId, t.bankAccountId],
+      foreignColumns: [bankAccounts.workspaceId, bankAccounts.id],
+    }),
+  ],
+);
+
+/** Template lines, the `LineInput`s of a `TemplateInput` (core-ports.md:100-107, :958). */
+export const templateLines = pgTable(
+  "template_lines",
+  {
+    id: id(),
+    workspaceId: workspaceIdColumn(),
+    templateId: uuid("template_id").notNull(),
+    position: integer("position").notNull(),
+    priceListItemId: uuid("price_list_item_id"),
+    description: text("description"),
+    quantity: decimal("quantity"),
+    unit: text("unit"),
+    unitPrice: decimal("unit_price"),
+    vat: vatTreatment("vat"),
+  },
+  (t) => [
+    unique("template_lines_template_position_unique").on(t.templateId, t.position),
+    foreignKey({
+      name: "template_lines_template_fk",
+      columns: [t.workspaceId, t.templateId],
+      foreignColumns: [templates.workspaceId, templates.id],
+    }).onDelete("cascade"),
+    foreignKey({
+      name: "template_lines_price_list_item_fk",
+      columns: [t.workspaceId, t.priceListItemId],
+      foreignColumns: [priceListItems.workspaceId, priceListItems.id],
     }),
   ],
 );
@@ -71,6 +115,12 @@ export const schedules = pgTable(
     pausedReason: text("paused_reason"),
     pausedAt: instant("paused_at"),
     detachedAt: instant("detached_at"),
+    /**
+     * Outbox stamp (core-ports.md J1, :1296): the occurrence whose RecurringIssuance workflow was
+     * last started, and when. Reconcile restarts it under the same deterministic key.
+     */
+    startedOccurrence: isoDate("started_occurrence"),
+    workflowStartedAt: instant("workflow_started_at"),
     createdAt: createdAt(),
     updatedAt: updatedAt(),
   },
@@ -84,6 +134,10 @@ export const schedules = pgTable(
       columns: [t.workspaceId, t.templateId],
       foreignColumns: [templates.workspaceId, templates.id],
     }).onDelete("cascade"),
+    check(
+      "schedules_workflow_start_complete",
+      sql`(${t.startedOccurrence} is null) = (${t.workflowStartedAt} is null)`,
+    ),
     check("schedules_interval_positive", sql`${t.cadenceInterval} > 0`),
     check("schedules_end_after_start", sql`${t.endOn} is null or ${t.endOn} >= ${t.startOn}`),
   ],

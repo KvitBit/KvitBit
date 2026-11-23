@@ -19,8 +19,8 @@ import { workspaces } from "./workspaces";
  * Better Auth storage (http-mcp-contracts.md §2.6-2.7): core tables, passkey, apiKey and the
  * OAuth 2.1 provider. Kept in the `auth` Postgres schema because auth never enters core
  * (http-mcp-contracts.md T5) and because Better Auth's `account` is not the Kvitbit Account.
- * Ids are Better Auth's text ids. Column names follow Better Auth's model fields in snake_case;
- * apps/server maps them in its Better Auth Drizzle adapter config. Kvitbit-owned additions on
+ * Ids are Better Auth's text ids. Property names equal the Better Auth 1.7.27 model field names
+ * (the Drizzle adapter maps by property), and SQL columns are their snake_case forms. Kvitbit-owned additions on
  * `apikey` and `oauth_consent` (workspace_id, created_by, access, scopes) follow
  * http-mcp-contracts.md:853-858.
  */
@@ -38,8 +38,17 @@ export const user = authSchema.table(
     image: text("image"),
     createdAt: at("created_at").notNull().defaultNow(),
     updatedAt: at("updated_at").notNull().defaultNow(),
+    /**
+     * Account deletion tombstone (http-mcp-contracts.md G10, user-flows.md Q7): a deleted account
+     * is hidden at once and retained until `purge_after`.
+     */
+    deletedAt: at("deleted_at"),
+    purgeAfter: at("purge_after"),
   },
-  (t) => [uniqueIndex("user_email_unique").on(t.email)],
+  (t) => [
+    uniqueIndex("user_email_unique").on(t.email),
+    check("user_deletion_complete", sql`(${t.deletedAt} is null) = (${t.purgeAfter} is null)`),
+  ],
 );
 
 export const session = authSchema.table(
@@ -125,7 +134,7 @@ export const passkey = authSchema.table(
     userId: text("user_id")
       .notNull()
       .references(() => user.id, { onDelete: "cascade" }),
-    credentialId: text("credential_id").notNull(),
+    credentialID: text("credential_id").notNull(),
     counter: bigint("counter", { mode: "number" }).notNull(),
     deviceType: text("device_type").notNull(),
     backedUp: boolean("backed_up").notNull(),
@@ -135,7 +144,7 @@ export const passkey = authSchema.table(
   },
   (t) => [
     index("passkey_user_id_idx").on(t.userId),
-    uniqueIndex("passkey_credential_id_unique").on(t.credentialId),
+    uniqueIndex("passkey_credential_id_unique").on(t.credentialID),
   ],
 );
 
@@ -148,7 +157,7 @@ export const apikey = authSchema.table(
   "apikey",
   {
     id: text("id").primaryKey(),
-    configId: text("config_id"),
+    configId: text("config_id").notNull().default("default"),
     name: text("name"),
     start: text("start"),
     prefix: text("prefix"),
@@ -193,11 +202,13 @@ export const oauthClient = authSchema.table(
     id: text("id").primaryKey(),
     clientId: text("client_id").notNull(),
     clientSecret: text("client_secret"),
+    clientDiscoveryId: text("client_discovery_id"),
     disabled: boolean("disabled").default(false),
     skipConsent: boolean("skip_consent"),
     enableEndSession: boolean("enable_end_session"),
     subjectType: text("subject_type"),
     scopes: text("scopes").array(),
+    clientCredentialsScopes: text("client_credentials_scopes").array(),
     userId: text("user_id").references(() => user.id, { onDelete: "cascade" }),
     createdAt: at("created_at"),
     updatedAt: at("updated_at"),
@@ -212,13 +223,16 @@ export const oauthClient = authSchema.table(
     softwareStatement: text("software_statement"),
     redirectUris: text("redirect_uris").array().notNull(),
     postLogoutRedirectUris: text("post_logout_redirect_uris").array(),
+    backchannelLogoutUri: text("backchannel_logout_uri"),
+    backchannelLogoutSessionRequired: boolean("backchannel_logout_session_required"),
     tokenEndpointAuthMethod: text("token_endpoint_auth_method"),
     applicationType: text("application_type"),
     jwks: text("jwks"),
     jwksUri: text("jwks_uri"),
     grantTypes: text("grant_types").array(),
     responseTypes: text("response_types").array(),
-    requirePkce: boolean("require_pkce"),
+    requirePKCE: boolean("require_pkce"),
+    dpopBoundAccessTokens: boolean("dpop_bound_access_tokens").default(false),
     referenceId: text("reference_id"),
     metadata: jsonb("metadata"),
   },
@@ -243,6 +257,7 @@ export const oauthConsent = authSchema.table(
     userId: text("user_id").references(() => user.id, { onDelete: "cascade" }),
     referenceId: text("reference_id"),
     resources: text("resources").array(),
+    requestedUserInfoClaims: text("requested_user_info_claims").array(),
     scopes: text("scopes").array().notNull(),
     createdAt: at("created_at"),
     updatedAt: at("updated_at"),
@@ -287,6 +302,13 @@ export const oauthRefreshToken = authSchema.table(
     expiresAt: at("expires_at"),
     createdAt: at("created_at"),
     revoked: at("revoked"),
+    /** Refresh rotation replay window (http-mcp-contracts.md:1268): the first rotation's response. */
+    rotatedAt: at("rotated_at"),
+    rotationReplayResponse: text("rotation_replay_response"),
+    rotationReplayExpiresAt: at("rotation_replay_expires_at"),
+    authorizationCodeId: text("authorization_code_id"),
+    requestedUserInfoClaims: text("requested_user_info_claims").array(),
+    confirmation: jsonb("confirmation"),
     authTime: at("auth_time"),
   },
   (t) => [
@@ -316,6 +338,9 @@ export const oauthAccessToken = authSchema.table(
     expiresAt: at("expires_at"),
     createdAt: at("created_at"),
     revoked: at("revoked"),
+    authorizationCodeId: text("authorization_code_id"),
+    requestedUserInfoClaims: text("requested_user_info_claims").array(),
+    confirmation: jsonb("confirmation"),
   },
   (t) => [
     uniqueIndex("oauth_access_token_token_unique").on(t.token),
@@ -325,3 +350,49 @@ export const oauthAccessToken = authSchema.table(
     index("oauth_access_token_refresh_id_idx").on(t.refreshId),
   ],
 );
+
+/** Protected resources (the `/mcp` audience) and their token policy. */
+export const oauthResource = authSchema.table(
+  "oauth_resource",
+  {
+    id: text("id").primaryKey(),
+    identifier: text("identifier").notNull(),
+    name: text("name").notNull(),
+    accessTokenTtl: integer("access_token_ttl"),
+    refreshTokenTtl: integer("refresh_token_ttl"),
+    signingAlgorithm: text("signing_algorithm"),
+    signingKeyId: text("signing_key_id"),
+    allowedScopes: text("allowed_scopes").array(),
+    customClaims: jsonb("custom_claims"),
+    dpopBoundAccessTokensRequired: boolean("dpop_bound_access_tokens_required").default(false),
+    disabled: boolean("disabled").default(false),
+    createdAt: at("created_at"),
+    updatedAt: at("updated_at"),
+    policyVersion: integer("policy_version").default(1),
+    metadata: jsonb("metadata"),
+  },
+  (t) => [uniqueIndex("oauth_resource_identifier_unique").on(t.identifier)],
+);
+
+/** Which protected resources a client may request. */
+export const oauthClientResource = authSchema.table(
+  "oauth_client_resource",
+  {
+    id: text("id").primaryKey(),
+    clientId: text("client_id")
+      .notNull()
+      .references(() => oauthClient.clientId, { onDelete: "cascade" }),
+    resourceId: text("resource_id")
+      .notNull()
+      .references(() => oauthResource.identifier, { onDelete: "cascade" }),
+    metadata: jsonb("metadata"),
+    createdAt: at("created_at"),
+  },
+  (t) => [uniqueIndex("oauth_client_resource_pair_unique").on(t.clientId, t.resourceId)],
+);
+
+/** Single-use ids of client assertions (private_key_jwt), kept until they expire. */
+export const oauthClientAssertion = authSchema.table("oauth_client_assertion", {
+  id: text("id").primaryKey(),
+  expiresAt: at("expires_at").notNull(),
+});
