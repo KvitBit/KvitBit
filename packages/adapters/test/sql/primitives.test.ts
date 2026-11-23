@@ -3,11 +3,16 @@ import {
   allocateNumber,
   checkRevision,
   claimRequest,
+  completeRequest,
+  lockCounter,
   lockRowForUpdate,
   lookupRequest,
   type NumberCandidate,
+  peekCounter,
   reserveNumber,
+  setCounter,
   transactionWithRetry,
+  tryReserveNumber,
   updateWithRevision,
 } from "@kvitbit/adapters/sql";
 import { Effect, Option } from "effect";
@@ -178,15 +183,20 @@ describe("updateWithRevision", () => {
     expect(after).toMatchObject({ name: "Invoices", revision: 1 });
   });
 
-  test("protected or malformed patch columns are a defect", async () => {
-    for (const patch of [{ revision: 9 }, { workspace_id: "x" }, { 'name" = 1; --': "x" }]) {
+  test("protected, malformed or undefined patch columns are a defect", async () => {
+    for (const patch of [
+      { revision: 9 },
+      { workspace_id: "x" },
+      { 'name" = 1; --': "x" },
+      { name: undefined },
+    ]) {
       const run = db.run(
         Effect.gen(function* () {
           const { workspaceId, seriesId } = yield* seedWorkspace;
           return yield* updateWithRevision("numbering_series", workspaceId, seriesId, 1, patch);
         }),
       );
-      await expect(run).rejects.toThrow("is not allowed");
+      await expect(run).rejects.toThrow(/is not allowed|is undefined/);
     }
   });
 });
@@ -197,7 +207,7 @@ describe("allocateNumber", () => {
       Effect.gen(function* () {
         const { workspaceId, seriesId } = yield* seedWorkspace;
         const allocate = (period: string) =>
-          transaction(allocateNumber({ workspaceId, seriesId, period, format }));
+          transaction(allocateNumber({ workspaceId, seriesId, period: () => period, format }));
         const numbers = [
           yield* allocate("2026"),
           yield* allocate("2026"),
@@ -226,7 +236,7 @@ describe("allocateNumber", () => {
         yield* allocateNumber({
           workspaceId,
           seriesId,
-          period: "all",
+          period: () => "all",
           format: (candidate) => {
             seen.push(candidate);
             return format(candidate);
@@ -235,7 +245,24 @@ describe("allocateNumber", () => {
         return seen;
       }),
     );
-    expect(seen).toEqual([{ pattern: "FV{YYYY}{NNNN}", period: "all", counter: 1 }]);
+    expect(seen).toEqual([
+      { kind: "invoice", pattern: "FV{YYYY}{NNNN}", period: "all", counter: 1 },
+    ]);
+  });
+
+  test("derives the period from the series it read", async () => {
+    const allocated = await db.run(
+      Effect.gen(function* () {
+        const { workspaceId, seriesId } = yield* seedWorkspace;
+        return yield* allocateNumber({
+          workspaceId,
+          seriesId,
+          period: ({ pattern }) => (pattern.includes("{MM}") ? "2026-03" : "2026"),
+          format,
+        });
+      }),
+    );
+    expect(allocated).toMatchObject({ period: "2026", number: "FV20260001" });
   });
 
   test("skips numbers reserved by an override and keeps the reservation", async () => {
@@ -244,7 +271,12 @@ describe("allocateNumber", () => {
         const { workspaceId, seriesId } = yield* seedWorkspace;
         yield* reserveNumber({ workspaceId, kind: "invoice", number: "FV20260001" });
         yield* reserveNumber({ workspaceId, kind: "invoice", number: "FV20260002" });
-        const allocated = yield* allocateNumber({ workspaceId, seriesId, period: "2026", format });
+        const allocated = yield* allocateNumber({
+          workspaceId,
+          seriesId,
+          period: () => "2026",
+          format,
+        });
         return [allocated, yield* reservationsOf(workspaceId), yield* counterOf(seriesId, "2026")];
       }),
     );
@@ -259,14 +291,14 @@ describe("allocateNumber", () => {
         const { workspaceId, seriesId } = yield* seedWorkspace;
         const rolledBack = yield* failure(
           transaction(
-            allocateNumber({ workspaceId, seriesId, period: "2026", format }).pipe(
+            allocateNumber({ workspaceId, seriesId, period: () => "2026", format }).pipe(
               Effect.andThen(Effect.fail("issue failed" as const)),
             ),
           ),
         );
         const reserved = yield* reservationsOf(workspaceId);
         const retried = yield* transaction(
-          allocateNumber({ workspaceId, seriesId, period: "2026", format }),
+          allocateNumber({ workspaceId, seriesId, period: () => "2026", format }),
         );
         return [rolledBack, reserved, retried] as const;
       }),
@@ -285,7 +317,7 @@ describe("allocateNumber", () => {
           allocateNumber({
             workspaceId: b.workspaceId,
             seriesId: a.seriesId,
-            period: "2026",
+            period: () => "2026",
             format,
           }),
         );
@@ -303,7 +335,7 @@ describe("allocateNumber", () => {
           allocateNumber({
             workspaceId,
             seriesId,
-            period: "2026",
+            period: () => "2026",
             format: () => "CONST",
             maxSkips: 5,
           }),
@@ -345,7 +377,12 @@ describe("reserveNumber", () => {
     const error = await db.run(
       Effect.gen(function* () {
         const { workspaceId, seriesId } = yield* seedWorkspace;
-        const { number } = yield* allocateNumber({ workspaceId, seriesId, period: "2026", format });
+        const { number } = yield* allocateNumber({
+          workspaceId,
+          seriesId,
+          period: () => "2026",
+          format,
+        });
         return yield* failure(reserveNumber({ workspaceId, kind: "invoice", number }));
       }),
     );
@@ -353,54 +390,151 @@ describe("reserveNumber", () => {
   });
 });
 
-describe("request log", () => {
-  const request = { requestKey: "key-1", method: "Documents.issue", payloadHash: "h1" };
-
-  test("claims an unused key, then replays its result", async () => {
-    const [before, claimed, after, again] = await db.run(
+describe("counters and reservations", () => {
+  test("lockCounter upserts at 1, setCounter only grows, peekCounter reads without creating", async () => {
+    const [unused, locked, grown, kept, created] = await db.run(
       Effect.gen(function* () {
-        const { workspaceId } = yield* seedWorkspace;
-        const scope = { workspaceId };
-        const before = yield* lookupRequest(scope, request);
-        const claimed = yield* claimRequest(scope, { ...request, result: { id: "doc-1" } });
-        const after = yield* lookupRequest(scope, request);
-        const again = yield* claimRequest(scope, { ...request, result: { id: "doc-2" } });
-        return [before, claimed, after, again] as const;
+        const { workspaceId, seriesId } = yield* seedWorkspace;
+        const key = { workspaceId, seriesId, period: "2026-05" };
+        const unused = yield* peekCounter(key);
+        const created = yield* counterOf(seriesId, "2026-05");
+        const locked = yield* transaction(lockCounter(key));
+        yield* setCounter(key, 7);
+        const grown = yield* peekCounter(key);
+        yield* setCounter(key, 3);
+        const kept = yield* peekCounter(key);
+        return [unused, locked, grown, kept, created] as const;
       }),
     );
-    expect(Option.isNone(before)).toBe(true);
-    expect(claimed).toEqual({ _tag: "Claimed" });
-    expect(after).toEqual(Option.some({ id: "doc-1" }));
-    expect(again).toEqual({ _tag: "Replayed", result: { id: "doc-1" } });
+    expect([unused, locked, grown, kept]).toEqual([1, 1, 7, 7]);
+    expect(created).toBeUndefined();
   });
 
-  test("the same key with another payload or method is RequestKeyReused", async () => {
-    const [payload, method, claim] = await db.run(
+  test("lockCounter on another Workspace's series fails the foreign key", async () => {
+    const error = await db.run(
+      Effect.gen(function* () {
+        const a = yield* seedWorkspace;
+        const b = yield* seedWorkspace;
+        return yield* failure(
+          lockCounter({ workspaceId: b.workspaceId, seriesId: a.seriesId, period: "2026" }),
+        );
+      }),
+    );
+    expect(error).toMatchObject({ _tag: "SqlError" });
+  });
+
+  test("tryReserveNumber reports a taken number without aborting the transaction", async () => {
+    const [first, second, afterwards] = await db.run(
+      Effect.gen(function* () {
+        const { workspaceId } = yield* seedWorkspace;
+        const reservation = { workspaceId, kind: "invoice" as const, number: "X-1" };
+        return yield* transaction(
+          Effect.gen(function* () {
+            const first = yield* tryReserveNumber(reservation);
+            const second = yield* tryReserveNumber(reservation);
+            const afterwards = yield* tryReserveNumber({ ...reservation, number: "X-2" });
+            return [first, second, afterwards] as const;
+          }),
+        );
+      }),
+    );
+    expect([first, second, afterwards]).toEqual([true, false, true]);
+  });
+});
+
+describe("request log", () => {
+  const key = "key-1";
+  const done = { requestKey: key, method: "Documents.issue", payloadHash: "h1" };
+  const now = "2026-11-23T10:00:00.000Z";
+
+  test("claims an unused key; after completion a second claim sees the entry", async () => {
+    const [claimed, entry, again] = await db.run(
       Effect.gen(function* () {
         const { workspaceId } = yield* seedWorkspace;
         const scope = { workspaceId };
-        yield* claimRequest(scope, { ...request, result: null });
-        const payload = yield* failure(lookupRequest(scope, { ...request, payloadHash: "h2" }));
-        const method = yield* failure(
-          lookupRequest(scope, { ...request, method: "Payments.record" }),
+        const claimed = yield* transaction(
+          claimRequest(scope, key, { now }).pipe(
+            Effect.tap(() => completeRequest(scope, { ...done, result: { id: "doc-1" } })),
+          ),
         );
-        const claim = yield* failure(
-          claimRequest(scope, { ...request, payloadHash: "h2", result: null }),
-        );
-        return [payload, method, claim] as const;
+        const entry = yield* lookupRequest(scope, key);
+        const again = yield* transaction(claimRequest(scope, key, { now }));
+        return [claimed, entry, again] as const;
       }),
     );
-    expect(payload).toMatchObject({ _tag: "RequestKeyReused", payloadHashMatches: false });
-    expect(method).toMatchObject({
-      _tag: "RequestKeyReused",
-      storedMethod: "Documents.issue",
-      payloadHashMatches: true,
+    expect(claimed).toEqual({ _tag: "Claimed" });
+    expect(Option.getOrThrow(entry)).toMatchObject({ ...done, result: { id: "doc-1" } });
+    expect(Option.getOrThrow(entry).createdAt).toStartWith("2026-11-23T10:00:00");
+    expect(again).toMatchObject({
+      _tag: "Existing",
+      entry: { method: "Documents.issue", payloadHash: "h1", result: { id: "doc-1" } },
     });
-    expect(claim).toMatchObject({ _tag: "RequestKeyReused" });
+  });
+
+  test("a rolled back claim leaves the key free", async () => {
+    const [after, reclaimed] = await db.run(
+      Effect.gen(function* () {
+        const { workspaceId } = yield* seedWorkspace;
+        const scope = { workspaceId };
+        yield* failure(
+          transaction(
+            claimRequest(scope, key, { now }).pipe(
+              Effect.tap(() => completeRequest(scope, { ...done, result: "x" })),
+              Effect.andThen(Effect.fail("work failed" as const)),
+            ),
+          ),
+        );
+        const after = yield* lookupRequest(scope, key);
+        const reclaimed = yield* transaction(claimRequest(scope, key, { now }));
+        return [after, reclaimed] as const;
+      }),
+    );
+    expect(Option.isNone(after)).toBe(true);
+    expect(reclaimed._tag).toBe("Claimed");
+  });
+
+  test("an expired entry or a committed placeholder is taken over", async () => {
+    const [expired, pending, lookup] = await db.run(
+      Effect.gen(function* () {
+        const ws1 = yield* seedWorkspace;
+        const ws2 = yield* seedWorkspace;
+        const old = { workspaceId: ws1.workspaceId };
+        yield* transaction(
+          claimRequest(old, key, { now: "2026-11-22T09:00:00Z" }).pipe(
+            Effect.tap(() => completeRequest(old, { ...done, result: 1 })),
+          ),
+        );
+        const expired = yield* transaction(claimRequest(old, key, { now }));
+        const abandoned = { workspaceId: ws2.workspaceId };
+        yield* transaction(claimRequest(abandoned, key, { now }));
+        const lookup = yield* lookupRequest(abandoned, key);
+        const pending = yield* transaction(claimRequest(abandoned, key, { now }));
+        return [expired, pending, lookup] as const;
+      }),
+    );
+    expect(expired._tag).toBe("Claimed");
+    expect(pending._tag).toBe("Claimed");
+    expect(Option.isNone(lookup)).toBe(true);
+  });
+
+  test("an entry inside the TTL is not taken over", async () => {
+    const outcome = await db.run(
+      Effect.gen(function* () {
+        const { workspaceId } = yield* seedWorkspace;
+        const scope = { workspaceId };
+        yield* transaction(
+          claimRequest(scope, key, { now: "2026-11-22T11:00:00Z" }).pipe(
+            Effect.tap(() => completeRequest(scope, { ...done, result: 1 })),
+          ),
+        );
+        return yield* transaction(claimRequest(scope, key, { now }));
+      }),
+    );
+    expect(outcome._tag).toBe("Existing");
   });
 
   test("keys are scoped per Workspace and per user", async () => {
-    const [a, b, user, sameUser] = await db.run(
+    const outcomes = await db.run(
       Effect.gen(function* () {
         const sql = yield* SqlClient.SqlClient;
         const ws1 = yield* seedWorkspace;
@@ -408,36 +542,51 @@ describe("request log", () => {
         const userId = `user-${crypto.randomUUID()}`;
         yield* sql`insert into auth.user (id, name, email, email_verified)
           values (${userId}, 'U', ${`${userId}@example.test`}, true)`;
-        const a = yield* claimRequest({ workspaceId: ws1.workspaceId }, { ...request, result: 1 });
-        const b = yield* claimRequest({ workspaceId: ws2.workspaceId }, { ...request, result: 2 });
-        const user = yield* claimRequest({ userId }, { ...request, result: 3 });
-        const sameUser = yield* lookupRequest({ userId }, request);
-        return [a, b, user, sameUser] as const;
+        const claimDone = (scope: { workspaceId: string } | { userId: string }) =>
+          transaction(
+            claimRequest(scope, key, { now }).pipe(
+              Effect.tap(() => completeRequest(scope, { ...done, result: 1 })),
+            ),
+          );
+        return [
+          yield* claimDone({ workspaceId: ws1.workspaceId }),
+          yield* claimDone({ workspaceId: ws2.workspaceId }),
+          yield* claimDone({ userId }),
+          yield* transaction(claimRequest({ userId }, key, { now })),
+        ];
       }),
     );
-    expect(a._tag).toBe("Claimed");
-    expect(b._tag).toBe("Claimed");
-    expect(user._tag).toBe("Claimed");
-    expect(sameUser).toEqual(Option.some(3));
+    expect(outcomes.map((o) => o._tag)).toEqual(["Claimed", "Claimed", "Claimed", "Existing"]);
   });
 
-  test("a claim rolls back with the work it records", async () => {
-    const after = await db.run(
+  test("claim and complete outside a transaction, or completing an unclaimed key, are defects", async () => {
+    const scope = { workspaceId: crypto.randomUUID() };
+    await expect(db.run(claimRequest(scope, key, { now }))).rejects.toThrow(
+      "must run inside a transaction",
+    );
+    await expect(
+      db.run(transaction(completeRequest(scope, { ...done, result: 1 }))),
+    ).rejects.toThrow("is not claimed");
+    const undefinedResult = db.run(
       Effect.gen(function* () {
         const { workspaceId } = yield* seedWorkspace;
-        yield* failure(
-          transaction(
-            claimRequest({ workspaceId }, { ...request, result: "x" }).pipe(
-              Effect.andThen(Effect.fail("work failed" as const)),
-            ),
+        return yield* transaction(
+          claimRequest({ workspaceId }, key, { now }).pipe(
+            Effect.andThen(completeRequest({ workspaceId }, { ...done, result: undefined })),
           ),
         );
-        return yield* lookupRequest({ workspaceId }, request);
       }),
     );
-    expect(Option.isNone(after)).toBe(true);
+    await expect(undefinedResult).rejects.toThrow("defined result");
   });
 });
+
+/** Fails the current statement with SQLSTATE `code`, as Postgres does on a lock conflict. */
+const raise = (code: string) =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    yield* sql.unsafe(`do $$ begin raise exception 'simulated' using errcode = '${code}'; end $$`);
+  });
 
 describe("transactionWithRetry", () => {
   test("commits a successful transaction", async () => {
@@ -458,19 +607,69 @@ describe("transactionWithRetry", () => {
     expect(row).toMatchObject({ name: "Locked then updated", revision: 2 });
   });
 
-  test("does not retry domain failures", async () => {
+  test("reruns the transaction after a deadlock or serialization failure", async () => {
+    for (const code of ["40P01", "40001"]) {
+      let attempts = 0;
+      const result = await db.run(
+        transactionWithRetry(
+          Effect.suspend(() => {
+            attempts += 1;
+            return attempts < 3 ? raise(code).pipe(Effect.as("raised")) : Effect.succeed("done");
+          }),
+        ),
+      );
+      expect(result).toBe("done");
+      expect(attempts).toBe(3);
+    }
+  });
+
+  test("gives up after the retry budget with the SqlError", async () => {
     let attempts = 0;
     const error = await db.run(
       failure(
         transactionWithRetry(
           Effect.suspend(() => {
             attempts += 1;
-            return Effect.fail("nope" as const);
+            return raise("40001");
           }),
+          { retries: 2 },
         ),
       ),
     );
-    expect(error).toBe("nope");
-    expect(attempts).toBe(1);
+    expect(error).toMatchObject({ _tag: "SqlError", reason: { _tag: "SerializationError" } });
+    expect(attempts).toBe(3);
+  });
+
+  test("does not retry domain failures or other SQL errors", async () => {
+    let attempts = 0;
+    const errors = await db.run(
+      Effect.all([
+        failure(
+          transactionWithRetry(
+            Effect.suspend(() => {
+              attempts += 1;
+              return Effect.fail("nope" as const);
+            }),
+          ),
+        ),
+        failure(
+          transactionWithRetry(
+            Effect.suspend(() => {
+              attempts += 1;
+              return raise("23505");
+            }),
+          ),
+        ),
+      ]),
+    );
+    expect(errors[0]).toBe("nope");
+    expect(errors[1]).toMatchObject({ _tag: "SqlError" });
+    expect(attempts).toBe(2);
+  });
+
+  test("inside another transaction it is a defect", async () => {
+    await expect(db.run(transaction(transactionWithRetry(Effect.void)))).rejects.toThrow(
+      "outermost transaction",
+    );
   });
 });

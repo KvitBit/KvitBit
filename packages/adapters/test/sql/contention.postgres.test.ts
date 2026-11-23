@@ -10,8 +10,10 @@ import { PgClient } from "@effect/sql-pg";
 import {
   allocateNumber,
   claimRequest,
+  completeRequest,
   lockRowForUpdate,
   type NumberCandidate,
+  transactionWithRetry,
   updateWithRevision,
 } from "@kvitbit/adapters/sql";
 import { Deferred, Effect, Fiber, ManagedRuntime, Redacted } from "effect";
@@ -88,7 +90,7 @@ describe.skipIf(databaseUrl === undefined)("contention on Postgres", () => {
       Effect.gen(function* () {
         const { workspaceId, seriesId } = yield* seedWorkspace;
         const locked = yield* Deferred.make<void>();
-        const allocate = allocateNumber({ workspaceId, seriesId, period: "2026", format });
+        const allocate = allocateNumber({ workspaceId, seriesId, period: () => "2026", format });
         const first = yield* transaction(
           allocate.pipe(
             Effect.tap(() => Deferred.succeed(locked, undefined)),
@@ -128,26 +130,96 @@ describe.skipIf(databaseUrl === undefined)("contention on Postgres", () => {
     expect(second).toMatchObject({ _tag: "RevisionConflict", currentRevision: 2 });
   }, 30_000);
 
-  test("a concurrent claim of the same request key waits and replays", async () => {
-    const outcome = await runtime.runPromise(
+  test("a second issuer waiting on a counter lock that rolls back gets the same number", async () => {
+    const second = await runtime.runPromise(
+      Effect.gen(function* () {
+        const { workspaceId, seriesId } = yield* seedWorkspace;
+        const locked = yield* Deferred.make<void>();
+        const allocate = allocateNumber({ workspaceId, seriesId, period: () => "2026", format });
+        const first = yield* transaction(
+          allocate.pipe(
+            Effect.tap(() => Deferred.succeed(locked, undefined)),
+            Effect.tap(() => Effect.sleep("200 millis")),
+            Effect.andThen(Effect.fail("issue failed" as const)),
+          ),
+        ).pipe(Effect.flip, Effect.forkChild);
+        yield* Deferred.await(locked);
+        const second = yield* transaction(allocate);
+        expect(yield* Fiber.join(first)).toBe("issue failed");
+        return second;
+      }).pipe(Effect.scoped),
+    );
+    expect(second).toMatchObject({ number: "C0001", counter: 1 });
+  }, 30_000);
+
+  const request = { requestKey: "k", method: "Documents.issue", payloadHash: "h" };
+  const now = "2026-11-23T10:00:00Z";
+
+  const concurrentClaim = (ownerCommits: boolean) =>
+    runtime.runPromise(
       Effect.gen(function* () {
         const { workspaceId } = yield* seedWorkspace;
-        const request = { requestKey: "k", method: "Documents.issue", payloadHash: "h" };
+        const scope = { workspaceId };
         const claimed = yield* Deferred.make<void>();
         const first = yield* transaction(
-          claimRequest({ workspaceId }, { ...request, result: { id: "first" } }).pipe(
+          claimRequest(scope, "k", { now }).pipe(
             Effect.tap(() => Deferred.succeed(claimed, undefined)),
             Effect.tap(() => Effect.sleep("200 millis")),
+            Effect.tap(() => completeRequest(scope, { ...request, result: { id: "first" } })),
+            Effect.andThen(ownerCommits ? Effect.void : Effect.fail("owner failed" as const)),
           ),
-        ).pipe(Effect.forkChild);
+        ).pipe(Effect.exit, Effect.forkChild);
         yield* Deferred.await(claimed);
-        const second = yield* transaction(
-          claimRequest({ workspaceId }, { ...request, result: { id: "second" } }),
-        );
+        const second = yield* transaction(claimRequest(scope, "k", { now }));
         yield* Fiber.join(first);
         return second;
       }).pipe(Effect.scoped),
     );
-    expect(outcome).toEqual({ _tag: "Replayed", result: { id: "first" } });
+
+  test("a concurrent claim of the same key waits for the owner and sees its entry", async () => {
+    expect(await concurrentClaim(true)).toMatchObject({
+      _tag: "Existing",
+      entry: { ...request, result: { id: "first" } },
+    });
+  }, 30_000);
+
+  test("a concurrent claim takes the key when the owner rolls back", async () => {
+    expect(await concurrentClaim(false)).toEqual({ _tag: "Claimed" });
+  }, 30_000);
+
+  test("transactionWithRetry recovers both sides of a deadlock", async () => {
+    const names = await runtime.runPromise(
+      Effect.gen(function* () {
+        const a = yield* seedWorkspace;
+        const b = yield* seedWorkspace;
+        const bothLocked = yield* Deferred.make<void>();
+        let locks = 0;
+        const lockThen = (first: typeof a, second: typeof a, name: string) =>
+          transactionWithRetry(
+            Effect.gen(function* () {
+              yield* lockRowForUpdate("workspaces", first.workspaceId, first.workspaceId);
+              locks += 1;
+              if (locks === 2) yield* Deferred.succeed(bothLocked, undefined);
+              yield* Deferred.await(bothLocked).pipe(Effect.timeout("2 seconds"), Effect.ignore);
+              const row = yield* lockRowForUpdate(
+                "workspaces",
+                second.workspaceId,
+                second.workspaceId,
+              );
+              return yield* updateWithRevision(
+                "workspaces",
+                second.workspaceId,
+                second.workspaceId,
+                Number(row.revision),
+                { name },
+              );
+            }),
+          );
+        return yield* Effect.all([lockThen(a, b, "from-a"), lockThen(b, a, "from-b")], {
+          concurrency: 2,
+        });
+      }),
+    );
+    expect(names.map((row) => row.name).sort()).toEqual(["from-a", "from-b"]);
   }, 30_000);
 });

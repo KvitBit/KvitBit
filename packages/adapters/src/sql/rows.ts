@@ -51,7 +51,8 @@ export const checkRevision = (
  * one fail with `RevisionConflict` carrying the new revision.
  *
  * Patch keys must be plain column names; `id`, `workspace_id`, `revision`, `created_at` and
- * `updated_at` are rejected as a defect. JSON columns take an already serialized value.
+ * `updated_at` are rejected as a defect, as are `undefined` values. JSON columns take an already
+ * serialized value.
  */
 export const updateWithRevision = (
   table: RevisionedTable,

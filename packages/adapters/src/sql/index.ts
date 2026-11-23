@@ -1,30 +1,33 @@
 /**
  * SQL concurrency primitives over Effect `SqlClient` (core-ports.md section 8): Workspace-scoped
- * row locks, revision checks, gapless number allocation, insert-only number reservations and the
- * request-key log. They run inside the caller's transaction; a later SQL implementation of core's
- * store port builds on them.
+ * row locks, revision checks, counters and insert-only number reservations, gapless number
+ * allocation and the request-key log. They run inside the caller's transaction and follow the
+ * shape of core's `CoreStore` port (counters.lock/peek/set, reservations.tryReserve,
+ * requestLog.claim/complete), so its SQL implementation can delegate to them.
  */
-export {
-  NumberingExhausted,
-  NumberTaken,
-  RequestKeyReused,
-  RevisionConflict,
-  RowNotFound,
-} from "./errors";
+export { NumberingExhausted, NumberTaken, RevisionConflict, RowNotFound } from "./errors";
 export {
   type AllocatedNumber,
   type AllocateNumberInput,
   allocateNumber,
+  type CounterKey,
+  lockCounter,
   type NumberCandidate,
-  type ReserveNumberInput,
+  peekCounter,
+  type Reservation,
   reserveNumber,
+  type SeriesSnapshot,
+  setCounter,
+  tryReserveNumber,
 } from "./numbering";
 export {
+  type ClaimOptions,
   type ClaimOutcome,
   claimRequest,
+  completeRequest,
   lookupRequest,
-  type RequestClaim,
-  type RequestFingerprint,
+  type RequestCompletion,
+  type RequestLogEntry,
   type RequestScope,
 } from "./request-log";
 export { checkRevision, lockRowForUpdate, type Row, updateWithRevision } from "./rows";

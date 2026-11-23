@@ -39,11 +39,17 @@ const protectedColumns = new Set(["id", "workspace_id", "revision", "created_at"
 
 const columnName = /^[a-z][a-z0-9_]*$/;
 
-/** Rejects patch keys that are not plain snake_case column names or are protected. */
+/**
+ * Rejects patch keys that are not plain snake_case column names or are protected, and
+ * `undefined` values, which would bind as SQL NULL; pass `null` to clear a column.
+ */
 export const checkPatchColumns = (patch: Readonly<Record<string, unknown>>): void => {
-  for (const key of Object.keys(patch)) {
+  for (const [key, value] of Object.entries(patch)) {
     if (!columnName.test(key) || protectedColumns.has(key)) {
       throw new Error(`sql: patch column ${JSON.stringify(key)} is not allowed`);
+    }
+    if (value === undefined) {
+      throw new Error(`sql: patch column ${JSON.stringify(key)} is undefined; use null`);
     }
   }
 };

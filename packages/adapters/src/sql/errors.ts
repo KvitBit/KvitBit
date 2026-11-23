@@ -36,14 +36,3 @@ export class NumberingExhausted extends Data.TaggedError("NumberingExhausted")<{
   readonly firstCounter: number;
   readonly attempts: number;
 }> {}
-
-/**
- * The request key was used before with a different method or payload (core-ports.md C3); maps to
- * `Conflict{idempotency_mismatch}`.
- */
-export class RequestKeyReused extends Data.TaggedError("RequestKeyReused")<{
-  readonly requestKey: string;
-  readonly method: string;
-  readonly storedMethod: string;
-  readonly payloadHashMatches: boolean;
-}> {}

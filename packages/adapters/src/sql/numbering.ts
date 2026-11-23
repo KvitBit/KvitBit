@@ -13,11 +13,121 @@ const withSavepoint = <A, E, R>(
     return yield* sql.withTransaction(self);
   });
 
-/** What the formatter sees for one candidate number. */
-export interface NumberCandidate {
+/** One counter: a series and its period key (`YYYY`, `YYYY-MM` or `all`). */
+export interface CounterKey {
+  readonly workspaceId: string;
+  readonly seriesId: string;
+  readonly period: string;
+}
+
+const counterWhere = (sql: SqlClient.SqlClient, key: CounterKey) =>
+  sql`workspace_id = ${key.workspaceId} and series_id = ${key.seriesId} and period = ${key.period}`;
+
+/**
+ * Upserts the counter row and locks it `FOR UPDATE` until the caller's transaction ends; returns
+ * the next counter value (1 for a new period). Lock it after the document (core-ports.md S4). A
+ * series outside the Workspace fails the insert's foreign key as a `SqlError`.
+ */
+export const lockCounter = (
+  key: CounterKey,
+): Effect.Effect<number, SqlError, SqlClient.SqlClient> =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    yield* sql`
+      insert into numbering_counters (workspace_id, series_id, period)
+      values (${key.workspaceId}, ${key.seriesId}, ${key.period})
+      on conflict (series_id, period) do nothing`;
+    const rows = yield* sql<{ readonly next_counter: number }>`
+      select next_counter from numbering_counters where ${counterWhere(sql, key)} for update`;
+    const row = rows[0];
+    if (row === undefined) {
+      return yield* Effect.die(
+        new Error(`sql: numbering counter ${key.seriesId}/${key.period} vanished after upsert`),
+      );
+    }
+    return Number(row.next_counter);
+  });
+
+/** The next counter value without locking or creating the row (1 when the period is unused). */
+export const peekCounter = (
+  key: CounterKey,
+): Effect.Effect<number, SqlError, SqlClient.SqlClient> =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    const rows = yield* sql<{ readonly next_counter: number }>`
+      select next_counter from numbering_counters where ${counterWhere(sql, key)}`;
+    return Number(rows[0]?.next_counter ?? 1);
+  });
+
+/**
+ * Moves the counter to `next`; it only grows, so a lower value is ignored. Call it after
+ * `lockCounter` in the same transaction.
+ */
+export const setCounter = (
+  key: CounterKey,
+  next: number,
+): Effect.Effect<void, SqlError, SqlClient.SqlClient> =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    yield* sql`
+      update numbering_counters set next_counter = greatest(next_counter, ${next})
+      where ${counterWhere(sql, key)}`;
+  });
+
+export interface Reservation {
+  readonly workspaceId: string;
+  readonly kind: DocumentKind;
+  readonly number: string;
+  readonly seriesId?: string;
+  /** Document holding the number; it must exist in the same Workspace. */
+  readonly documentId?: string;
+}
+
+/**
+ * Reserves a number for a Workspace and kind (core-ports.md S3, rule D4). Insert-only: a
+ * reservation is never released. Returns `false` when the number is already reserved; that
+ * outcome never aborts the transaction (`ON CONFLICT DO NOTHING`).
+ */
+export const tryReserveNumber = (
+  reservation: Reservation,
+): Effect.Effect<boolean, SqlError, SqlClient.SqlClient> =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    const { workspaceId, kind, number } = reservation;
+    const inserted = yield* sql`
+      insert into number_reservations (workspace_id, kind, number, series_id, document_id)
+      values (${workspaceId}, ${kind}, ${number}, ${reservation.seriesId ?? null},
+        ${reservation.documentId ?? null})
+      on conflict (workspace_id, kind, number) do nothing
+      returning number`;
+    return inserted.length > 0;
+  });
+
+/** `tryReserveNumber` for a hand-picked number (an override): a taken number is `NumberTaken`. */
+export const reserveNumber = (
+  reservation: Reservation,
+): Effect.Effect<void, NumberTaken | SqlError, SqlClient.SqlClient> =>
+  Effect.flatMap(tryReserveNumber(reservation), (reserved) =>
+    reserved
+      ? Effect.void
+      : Effect.fail(
+          new NumberTaken({
+            workspaceId: reservation.workspaceId,
+            kind: reservation.kind,
+            number: reservation.number,
+          }),
+        ),
+  );
+
+/** The series as `allocateNumber` read it. */
+export interface SeriesSnapshot {
+  readonly kind: DocumentKind;
   /** `numbering_series.pattern`. */
   readonly pattern: string;
-  /** Counter period key: `YYYY`, `YYYY-MM` or `all`. */
+}
+
+/** What the formatter sees for one candidate number. */
+export interface NumberCandidate extends SeriesSnapshot {
   readonly period: string;
   readonly counter: number;
 }
@@ -25,10 +135,13 @@ export interface NumberCandidate {
 export interface AllocateNumberInput {
   readonly workspaceId: string;
   readonly seriesId: string;
-  readonly period: string;
+  /**
+   * Counter period for the series as read, e.g. from the issue date and the pattern's reset
+   * cadence. Taking the pattern from the same locked read keeps period and format consistent.
+   */
+  readonly period: (series: SeriesSnapshot) => string;
   /** Pure formatter, normally core's `Numbering.format`. */
   readonly format: (candidate: NumberCandidate) => string;
-  /** Document the number is issued to; it must exist in the same Workspace. */
   readonly documentId?: string;
   /** Reserved candidates to skip before failing with `NumberingExhausted`. Default 1000. */
   readonly maxSkips?: number;
@@ -37,19 +150,18 @@ export interface AllocateNumberInput {
 export interface AllocatedNumber {
   readonly number: string;
   readonly counter: number;
+  readonly period: string;
   readonly kind: DocumentKind;
 }
 
 /**
- * Allocates the next number of a series and period (core-ports.md S3): upserts and locks
- * `numbering_counters(series_id, period)` with `FOR UPDATE`, formats candidates from the counter,
- * skips numbers already in `number_reservations`, reserves the first free one and moves the
- * counter past it.
+ * Allocates the next number of a series (core-ports.md S3): reads the series `FOR SHARE` (its
+ * pattern cannot change until the caller commits), locks the period's counter, skips numbers
+ * already reserved, reserves the first free one and moves the counter past it.
  *
  * Run it inside the issue transaction, after locking the document (S4). It opens a savepoint of
- * its own, so a failure leaves nothing behind, and a rollback of the caller's transaction reverts
- * counter and reservation together: allocation never leaves a gap. The counter lock serializes
- * concurrent issuers of the same series and period until the caller commits.
+ * its own, so its failures leave nothing behind, and a rollback of the caller's transaction
+ * reverts counter and reservation together: allocation never leaves a gap.
  */
 export const allocateNumber = (
   input: AllocateNumberInput,
@@ -60,40 +172,35 @@ export const allocateNumber = (
 > =>
   Effect.gen(function* () {
     const sql = yield* SqlClient.SqlClient;
-    const { workspaceId, seriesId, period } = input;
+    const { workspaceId, seriesId } = input;
     const maxSkips = input.maxSkips ?? 1000;
 
-    const series = yield* sql<{ readonly kind: DocumentKind; readonly pattern: string }>`
+    const rows = yield* sql<SeriesSnapshot>`
       select kind, pattern from numbering_series
-      where workspace_id = ${workspaceId} and id = ${seriesId}`;
-    const found = series[0];
-    if (found === undefined) {
+      where workspace_id = ${workspaceId} and id = ${seriesId}
+      for share`;
+    const row = rows[0];
+    if (row === undefined) {
       return yield* new RowNotFound({ table: "numbering_series", workspaceId, id: seriesId });
     }
-
-    yield* sql`
-      insert into numbering_counters (workspace_id, series_id, period)
-      values (${workspaceId}, ${seriesId}, ${period})
-      on conflict (series_id, period) do nothing`;
-    const counters = yield* sql<{ readonly next_counter: number }>`
-      select next_counter from numbering_counters
-      where workspace_id = ${workspaceId} and series_id = ${seriesId} and period = ${period}
-      for update`;
-    const firstCounter = Number(counters[0]?.next_counter ?? 1);
+    const series: SeriesSnapshot = { kind: row.kind, pattern: row.pattern };
+    const period = input.period(series);
+    const key = { workspaceId, seriesId, period };
+    const firstCounter = yield* lockCounter(key);
 
     for (let attempt = 0; attempt <= maxSkips; attempt++) {
       const counter = firstCounter + attempt;
-      const number = input.format({ pattern: found.pattern, period, counter });
-      const reserved = yield* sql`
-        insert into number_reservations (workspace_id, kind, number, series_id, document_id)
-        values (${workspaceId}, ${found.kind}, ${number}, ${seriesId}, ${input.documentId ?? null})
-        on conflict (workspace_id, kind, number) do nothing
-        returning number`;
-      if (reserved.length > 0) {
-        yield* sql`
-          update numbering_counters set next_counter = ${counter + 1}
-          where workspace_id = ${workspaceId} and series_id = ${seriesId} and period = ${period}`;
-        return { number, counter, kind: found.kind };
+      const number = input.format({ ...series, period, counter });
+      const reserved = yield* tryReserveNumber({
+        workspaceId,
+        kind: series.kind,
+        number,
+        seriesId,
+        ...(input.documentId === undefined ? {} : { documentId: input.documentId }),
+      });
+      if (reserved) {
+        yield* setCounter(key, counter + 1);
+        return { number, counter, period, kind: series.kind };
       }
     }
     return yield* new NumberingExhausted({
@@ -103,30 +210,3 @@ export const allocateNumber = (
       attempts: maxSkips + 1,
     });
   }).pipe(withSavepoint);
-
-export interface ReserveNumberInput {
-  readonly workspaceId: string;
-  readonly kind: DocumentKind;
-  readonly number: string;
-  readonly seriesId?: string;
-  readonly documentId?: string;
-}
-
-/**
- * Reserves a number chosen by hand (an override, rule D4). Insert-only: a reservation is never
- * released, so a number moved away from stays taken. Fails with `NumberTaken` when the Workspace
- * already reserved this number for this kind.
- */
-export const reserveNumber = (
-  input: ReserveNumberInput,
-): Effect.Effect<void, NumberTaken | SqlError, SqlClient.SqlClient> =>
-  Effect.gen(function* () {
-    const sql = yield* SqlClient.SqlClient;
-    const { workspaceId, kind, number } = input;
-    const inserted = yield* sql`
-      insert into number_reservations (workspace_id, kind, number, series_id, document_id)
-      values (${workspaceId}, ${kind}, ${number}, ${input.seriesId ?? null}, ${input.documentId ?? null})
-      on conflict (workspace_id, kind, number) do nothing
-      returning number`;
-    if (inserted.length === 0) return yield* new NumberTaken({ workspaceId, kind, number });
-  });
