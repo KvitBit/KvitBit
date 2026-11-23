@@ -53,6 +53,11 @@ describe("IssuerSnapshots.forDocument", () => {
         expect((yield* as(b.owner)(issuers.forDocument(wsB, today))).party.name).toBe(
           "Beta s.r.o.",
         );
+        // A missing Workspace (caller scoped to it, no row) is NotFound, not a defect.
+        const missing = "019a0000-0000-7000-8000-000000000000" as WorkspaceId;
+        expect(
+          yield* failure(as(system(undefined, missing))(issuers.forDocument(missing, today))),
+        ).toEqual(new NotFound({ entity: "Workspace", id: missing }));
         // Callers without a Workspace never read one.
         expect(yield* failure(as(accountOf(OWNER))(issuers.forDocument(ws_, today)))).toEqual(
           new NotFound({ entity: "Workspace", id: ws_ }),
