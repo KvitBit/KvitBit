@@ -86,7 +86,10 @@ const make = Effect.gen(function* () {
    * methods keep their honest error types. Domain signature gaps, for a domain fix at
    * integration: preview lacks NotFound (missing Contact/item/bank/series/Workspace);
    * createDraft lacks Conflict{idempotency_mismatch} (C3); discardDraft, get, list and
-   * history lack Unavailable{database}.
+   * history lack Unavailable{database}. DocumentView lacks the resolved language, note and
+   * series that rule C4 asks views to echo: DEFERRED for P1 (parent ruling; board #430/#478),
+   * they stay on the record. No IssueCodes exist for IBAN / variable symbol / required-field
+   * validation: core-wide interim is `request.malformed` + `params.reason` (#430/#478).
    */
   const impl: WideDocuments = {
     preview: (input) => run(preview(input)),

@@ -598,21 +598,32 @@ describe("review round 2 regressions (payment QR inputs)", () => {
     expect(listed).toBe(0);
   });
 
-  test("an amount above the SPAYD maximum is Invalid", async () => {
-    const err = ok(
+  test("D12 exception: above the format maximum or nothing to pay gives no QR, not Invalid", async () => {
+    const [czkLarge, eurLarge, zero] = ok(
       await scenario(
-        Effect.flip(
-          Effect.flatMap(Documents, (d) =>
-            d.preview(
+        Effect.gen(function* () {
+          const docs = yield* Documents;
+          const big = (price: string) =>
+            [{ description: "x", unitPrice: dec(price), vat: "outside_scope" as const }] as const;
+          return [
+            yield* docs.createDraft(invoiceInput({ lines: big("10000000") })),
+            yield* docs.createDraft(invoiceInput({ currency: EUR, lines: big("1000000000") })),
+            yield* docs.createDraft(
               invoiceInput({
-                lines: [{ description: "x", unitPrice: dec("10000000"), vat: "outside_scope" }],
+                currency: EUR,
+                lines: [{ description: "Zdarma", unitPrice: dec("0") }],
               }),
             ),
-          ),
-        ),
+          ] as const;
+        }),
+        { fixings: [fixing("2026-11-20", "25")] },
       ),
     );
-    expect(err).toMatchObject({ _tag: "Invalid", issues: [{ code: "qr.field_too_long" }] });
+    expect(str(czkLarge.totals.gross.amount)).toBe("10000000");
+    for (const view of [czkLarge, eurLarge, zero]) {
+      expect(view.status).toBe("draft");
+      expect(view.paymentQr).toBeNull();
+    }
   });
 });
 

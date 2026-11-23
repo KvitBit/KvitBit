@@ -9,8 +9,13 @@
  * like the rest of core (numbering, identity; board #430), field validation uses
  * `request.malformed` with `params.reason` until the domain adds them.
  *
- * Validation (5.3): an IBAN failing the ISO 13616 mod-97 check, an amount above the format's
- * maximum, or a variable symbol that is not 1-10 digits is `Invalid`; `compose` runs this on
+ * D12 exception (parent cd-lifecycle ruling, P1): the amount never makes a document invalid.
+ * Nothing to pay (gross <= 0, credit notes included) or an amount above the format's maximum
+ * (SPAYD 9,999,999.99 CZK, EPC 999,999,999.99 EUR) gives no QR, so large invoices can still be
+ * drafted and issued.
+ *
+ * Validation (5.3): an IBAN failing ISO 13616 (SEPA country length, CZ/SK numeric BBAN,
+ * mod 97) or a variable symbol that is not 1-10 digits is `Invalid`; `compose` runs this on
  * every write and preview, so stored documents always encode. Optional texts (recipient name,
  * remittance) are truncated at a word boundary. A caller's variable symbol is kept exactly; one
  * derived from the document number takes its last ten digits.
@@ -151,9 +156,7 @@ export const forDocument = (doc: QrSource): Result.Result<PaymentQr | null, Inva
   }
   const bic = account.bic?.trim().toUpperCase() || null;
   if (doc.currency === "CZK") {
-    if (BigDecimal.isGreaterThan(gross, MAX_SPAYD)) {
-      return invalid(["lines"], "qr.field_too_long", { field: "AM", max: "9999999.99" });
-    }
+    if (BigDecimal.isGreaterThan(gross, MAX_SPAYD)) return Result.succeed(null);
     const fields = [
       "SPD",
       "1.0",
@@ -167,9 +170,7 @@ export const forDocument = (doc: QrSource): Result.Result<PaymentQr | null, Inva
     if (name !== "") fields.push(`RN:${spaydValue(name)}`);
     return Result.succeed({ format: "spayd", payload: fields.join("*") });
   }
-  if (BigDecimal.isGreaterThan(gross, MAX_EPC)) {
-    return invalid(["lines"], "qr.field_too_long", { field: "amount", max: "999999999.99" });
-  }
+  if (BigDecimal.isGreaterThan(gross, MAX_EPC)) return Result.succeed(null);
   const fields = [
     "BCD",
     "002",

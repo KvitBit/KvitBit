@@ -30,6 +30,11 @@
  * - service.ts  `DocumentsLive`: captures `DocumentsDeps`, wires the method files, dispatches
  *               `edit` by state, and stubs later-phase methods with `notImplemented`.
  *
+ * Known contract gaps (domain frozen; listed for phase2a-core in board #430/#478): C4 resolved
+ * language/note/series are on the record but not in DocumentView (deferred for P1); validation
+ * issues use `request.malformed` + `params.reason`; error channels are widened through one cast
+ * in service.ts (#341 approach). Payment QR amount exception: see qr.ts.
+ *
  * Extension points:
  * - P2 (issue, state machine): add lifecycle.ts with `issue` (recompose via `compose` with
  *   `today`, then `NumberingSeries.resolve` + `allocate` after the row lock, S4; fresh
