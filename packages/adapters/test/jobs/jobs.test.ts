@@ -1,7 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import * as PgliteClient from "@effect/sql-pglite/PgliteClient";
 import {
-  type CronHandlers,
   type CronJob,
   CurrentScheduledTime,
   cronJobs,
@@ -13,6 +12,8 @@ import {
   testRunnerLayer,
 } from "@kvitbit/adapters/jobs";
 import * as Cron from "effect/Cron";
+import * as SqlMessageStorage from "effect/cluster/SqlMessageStorage";
+import * as SqlRunnerStorage from "effect/cluster/SqlRunnerStorage";
 import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
@@ -20,6 +21,7 @@ import * as Layer from "effect/Layer";
 import * as Ref from "effect/Ref";
 import * as References from "effect/References";
 import * as Result from "effect/Result";
+import * as SqlClient from "effect/sql/SqlClient";
 import * as TestClock from "effect/testing/TestClock";
 
 const nextAfter = (job: CronJob, iso: string): string =>
@@ -109,10 +111,10 @@ describe("cron table", () => {
 describe("cron layers on the memory runner", () => {
   const START = Date.parse("2026-05-01T10:00:30Z");
 
-  const runWithClock = <A, E>(effect: Effect.Effect<A, E>) =>
+  const runWithClock = <A, E>(effect: Effect.Effect<A, E>, start = START) =>
     Effect.runPromise(
       Effect.gen(function* () {
-        yield* TestClock.setTime(START);
+        yield* TestClock.setTime(start);
         return yield* effect;
       }).pipe(
         Effect.provide(TestClock.layer()),
@@ -120,10 +122,11 @@ describe("cron layers on the memory runner", () => {
       ),
     );
 
-  const advance = (minutes: number) =>
+  const advance = (minutes: number, step: "10 seconds" | "1 minute" = "10 seconds") =>
     Effect.gen(function* () {
-      for (let i = 0; i < minutes * 6; i++) {
-        yield* TestClock.adjust("10 seconds");
+      const steps = step === "1 minute" ? minutes : minutes * 6;
+      for (let i = 0; i < steps; i++) {
+        yield* TestClock.adjust(step);
         yield* Effect.yieldNow;
       }
     });
@@ -151,34 +154,84 @@ describe("cron layers on the memory runner", () => {
   });
 
   test("cronsLayer registers every job; a failing handler does not stop the schedule", async () => {
+    // Mon 4 May 2026 (CEST): 03:29:30 Prague -> 14:46 Prague covers every job once at least.
     const counts = await runWithClock(
       Effect.gen(function* () {
         const hits = yield* Ref.make<Record<string, number>>({});
         const hit = (job: CronJob) => Ref.update(hits, (m) => ({ ...m, [job]: (m[job] ?? 0) + 1 }));
-        const handlers: CronHandlers<string> = {
+        // Handlers with different error types: cronsLayer infers the union.
+        const handlers = {
           recurringSweep: hit("recurringSweep"),
-          reminderSweep: hit("reminderSweep"),
+          reminderSweep: Effect.andThen(hit("reminderSweep"), Effect.fail(new Error("x"))),
           cnbFixing: hit("cnbFixing"),
-          outboxReconcile: Effect.andThen(hit("outboxReconcile"), Effect.fail("boom")),
-          housekeeping: hit("housekeeping"),
+          outboxReconcile: Effect.andThen(hit("outboxReconcile"), Effect.fail("boom" as const)),
+          housekeeping: Effect.andThen(hit("housekeeping"), Effect.die("defect")),
         };
         yield* Effect.scoped(
           Effect.gen(function* () {
             yield* Layer.build(cronsLayer(handlers).pipe(Layer.provide(testRunnerLayer)));
-            yield* advance(16);
+            yield* advance(11 * 60 + 17, "1 minute");
           }),
         );
         return yield* Ref.get(hits);
       }),
+      Date.parse("2026-05-04T01:29:30Z"),
     );
-    expect(counts.outboxReconcile).toBe(16); // 10:01 .. 10:16, once each despite failing
-    expect(counts.recurringSweep).toBe(1); // 10:15
-    expect(counts.reminderSweep).toBeUndefined();
-    expect(counts.cnbFixing).toBeUndefined();
-    expect(counts.housekeeping).toBeUndefined();
-  });
+    expect(counts).toEqual({
+      housekeeping: 1, // 03:30
+      reminderSweep: 1, // 08:00
+      cnbFixing: 1, // 14:45
+      recurringSweep: 46, // 03:30 .. 14:45 every 15 min
+      outboxReconcile: 11 * 60 + 17, // every minute 03:30 .. 14:46, once each despite failing
+    });
+  }, 60_000);
 
-  test("selfHostedRunnerLayer builds SQL storage on PGlite and fires a cron", async () => {
+  const runtimeRoleSql = Layer.effectDiscard(
+    Effect.gen(function* () {
+      // Owner applies the cluster migrations at deploy, then the process runs as a DML-only role.
+      const sql = yield* SqlClient.SqlClient;
+      yield* sql`CREATE ROLE jobs_runtime`;
+      yield* sql`GRANT USAGE ON SCHEMA public TO jobs_runtime`;
+      yield* sql`GRANT SELECT, INSERT, UPDATE, DELETE ON cluster_messages, cluster_replies, cluster_runners, cluster_locks TO jobs_runtime`;
+      yield* sql`GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO jobs_runtime`;
+      yield* sql`SET ROLE jobs_runtime`;
+      const [who] = yield* sql<{ readonly user: string }>`SELECT current_user AS user`;
+      if (who?.user !== "jobs_runtime") yield* Effect.die(`running as ${who?.user}`);
+    }),
+  ).pipe(
+    // Fresh layers, not the shared constant, so memoization cannot hide a second migration run.
+    Layer.provide(
+      Layer.merge(SqlMessageStorage.layerMigrations({}), SqlRunnerStorage.layerMigrations({})),
+    ),
+  );
+
+  const firesOnPglite = (runner: Layer.Layer<SqlClient.SqlClient>) =>
+    runWithClock(
+      Effect.gen(function* () {
+        const seen = yield* Ref.make(0);
+        yield* Effect.scoped(
+          Effect.gen(function* () {
+            yield* Layer.build(
+              cronLayer(
+                "outboxReconcile",
+                Ref.update(seen, (n) => n + 1),
+              ).pipe(Layer.provide(selfHostedRunnerLayer()), Layer.orDie, Layer.provide(runner)),
+            );
+            yield* advance(2);
+          }),
+        );
+        return yield* Ref.get(seen);
+      }),
+    );
+
+  test("selfHostedRunnerLayer runs as a DML-only role after deploy migrations (S5)", async () => {
+    const pglite = PgliteClient.layer().pipe(Layer.orDie);
+    const fired = await firesOnPglite(Layer.provideMerge(runtimeRoleSql, pglite).pipe(Layer.orDie));
+    expect(fired).toBe(2); // 10:01 and 10:02
+  }, 60_000);
+
+  test("selfHostedRunnerLayer with startup migrations fires on a fresh database", async () => {
+    const pglite = PgliteClient.layer().pipe(Layer.orDie);
     const fired = await runWithClock(
       Effect.gen(function* () {
         const seen = yield* Ref.make(0);
@@ -189,9 +242,9 @@ describe("cron layers on the memory runner", () => {
                 "outboxReconcile",
                 Ref.update(seen, (n) => n + 1),
               ).pipe(
-                Layer.provide(selfHostedRunnerLayer()),
-                Layer.provide(PgliteClient.layer()),
+                Layer.provide(selfHostedRunnerLayer({ migrations: "startup" })),
                 Layer.orDie,
+                Layer.provide(pglite),
               ),
             );
             yield* advance(2);
@@ -200,6 +253,6 @@ describe("cron layers on the memory runner", () => {
         return yield* Ref.get(seen);
       }),
     );
-    expect(fired).toBe(2); // 10:01 and 10:02
+    expect(fired).toBe(2);
   }, 60_000);
 });

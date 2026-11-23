@@ -6,8 +6,9 @@
  *   skipIfOlderThan);
  * - `cronLayer` / `cronsLayer`: ClusterCron layers built from injected handler Effects
  *   (core owns the handlers: sweep queries, workflow starts, rule D16 resolution);
- * - `selfHostedRunnerLayer`: SingleRunner with SQL runner and message storage plus
- *   ClusterWorkflowEngine, for the one-process self-hosted deployment;
+ * - `selfHostedRunnerLayer`: single-runner Sharding over DML-only SQL runner and message storage
+ *   plus ClusterWorkflowEngine, for the one-process self-hosted deployment, and
+ *   `clusterStorageMigrationsLayer` for the deploy step (rule S5);
  * - `testRunnerLayer`: the same engine over the in-memory TestRunner, for tests.
  */
 
@@ -16,10 +17,12 @@ import * as Cron from "effect/Cron";
 import * as ClusterCron from "effect/cluster/ClusterCron";
 import * as ClusterWorkflowEngine from "effect/cluster/ClusterWorkflowEngine";
 import type * as MessageStorage from "effect/cluster/MessageStorage";
-import type * as Runners from "effect/cluster/Runners";
-import type * as Sharding from "effect/cluster/Sharding";
-import type * as ShardingConfig from "effect/cluster/ShardingConfig";
-import * as SingleRunner from "effect/cluster/SingleRunner";
+import * as RunnerHealth from "effect/cluster/RunnerHealth";
+import * as Runners from "effect/cluster/Runners";
+import * as Sharding from "effect/cluster/Sharding";
+import * as ShardingConfig from "effect/cluster/ShardingConfig";
+import * as SqlMessageStorage from "effect/cluster/SqlMessageStorage";
+import * as SqlRunnerStorage from "effect/cluster/SqlRunnerStorage";
 import * as TestRunner from "effect/cluster/TestRunner";
 import * as Digest from "effect/crypto/Digest";
 import * as Duration from "effect/Duration";
@@ -152,13 +155,27 @@ export const cronLayer = <E, R>(
   });
 };
 
-/** Registers every cron in the table (core-ports.md 10, `CronsLive`). */
-export const cronsLayer = <E, R>(
-  handlers: CronHandlers<E, R>,
+/** Any complete handlers record; each handler may have its own error and service types. */
+export type AnyCronHandlers = { readonly [K in CronJob]: CronHandler<unknown, unknown> };
+
+/**
+ * Registers every cron in the table (core-ports.md 10, `CronsLive`). Error and service types are
+ * the unions over the record's handlers.
+ */
+export const cronsLayer = <H extends AnyCronHandlers>(
+  handlers: H,
   options?: CronLayerOptions,
-): Layer.Layer<never, never, CronRequirements<R>> =>
-  cronJobs.reduce<Layer.Layer<never, never, CronRequirements<R>>>(
-    (layer, job) => Layer.merge(layer, cronLayer(job, handlers[job], options)),
+): Layer.Layer<never, never, CronRequirements<Effect.Services<H[CronJob]>>> =>
+  cronJobs.reduce<Layer.Layer<never, never, CronRequirements<Effect.Services<H[CronJob]>>>>(
+    (layer, job) =>
+      Layer.merge(
+        layer,
+        cronLayer(
+          job,
+          handlers[job] as CronHandler<Effect.Error<H[CronJob]>, Effect.Services<H[CronJob]>>,
+          options,
+        ),
+      ),
     Layer.empty,
   );
 
@@ -172,22 +189,46 @@ export type RunnerServices =
 export interface SelfHostedRunnerOptions {
   /** Overrides on top of the `ShardingConfig` read from the environment. */
   readonly shardingConfig?: Partial<ShardingConfig.ShardingConfig["Service"]> | undefined;
+  /**
+   * Where the `cluster_*` table migrations run. "deploy" (default, rule S5): the runtime role is
+   * DML-only and the deploy step runs `clusterStorageMigrationsLayer` with the owner role.
+   * "startup": the runner applies them itself, which needs DDL rights (single-role installs).
+   */
+  readonly migrations?: "deploy" | "startup" | undefined;
 }
 
 /**
- * Self-hosted runner (core-ports.md 10, `SelfHosted`): one process, SingleRunner with SQL
- * runner and message storage, ClusterWorkflowEngine on top. Provide a `SqlClient` (PgClient).
+ * Cluster storage migrations (message and runner tables) for the deploy step, run with the owner
+ * role (rule S5). Provide a `SqlClient` on the direct endpoint.
+ */
+export const clusterStorageMigrationsLayer: Layer.Layer<never, never, SqlClient.SqlClient> =
+  Layer.merge(SqlMessageStorage.layerMigrations({}), SqlRunnerStorage.layerMigrations({}));
+
+/**
+ * Self-hosted runner (core-ports.md 10, `SelfHosted`; rule S6): one process acting as the single
+ * runner, with SQL message and runner storage and ClusterWorkflowEngine on top. This is
+ * `SingleRunner.layer({ runnerStorage: "sql" })` rebuilt over the DML-only storage layers, because
+ * 4.1.4's `SingleRunner.layer` always runs the cluster migrations at startup. Provide a
+ * `SqlClient` (PgClient, direct endpoint: runner storage holds session advisory locks).
  * Digest comes from Web Crypto.
  */
 export const selfHostedRunnerLayer = (
   options?: SelfHostedRunnerOptions,
-): Layer.Layer<RunnerServices, ConfigError, SqlClient.SqlClient> =>
-  ClusterWorkflowEngine.layer.pipe(
-    Layer.provideMerge(
-      SingleRunner.layer({ runnerStorage: "sql", shardingConfig: options?.shardingConfig }),
-    ),
-    Layer.provide(Digest.layerWebCrypto),
+): Layer.Layer<RunnerServices, ConfigError, SqlClient.SqlClient> => {
+  const storage = Layer.merge(
+    SqlMessageStorage.layerStorage({}),
+    SqlRunnerStorage.layerStorage({}),
+  ).pipe(
+    Layer.provide(options?.migrations === "startup" ? clusterStorageMigrationsLayer : Layer.empty),
   );
+  return ClusterWorkflowEngine.layer.pipe(
+    Layer.provideMerge(Sharding.layer),
+    Layer.provideMerge(Runners.layerNoop),
+    Layer.provideMerge(storage),
+    Layer.provide([RunnerHealth.layerNoop, Digest.layerWebCrypto]),
+    Layer.provide(ShardingConfig.layerFromEnv(options?.shardingConfig)),
+  );
+};
 
 /**
  * In-memory runner for tests: ClusterWorkflowEngine over `TestRunner.layer` (memory message and
