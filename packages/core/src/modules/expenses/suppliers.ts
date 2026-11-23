@@ -1,8 +1,10 @@
 /**
  * `ExpenseSuppliers`: the narrow port through which Expenses links a supplier Contact. The
  * integration implements it on the domain `Contacts` tag (`get` for a ContactId, `fromIco` with
- * role "supplier" for an IČO), mapping the ContactView to a `SupplierRecord`. Runs as the
- * current caller, so the Contacts policy applies.
+ * role "supplier" for an IČO), mapping the ContactView to a `SupplierRecord`. It runs as the
+ * current caller, so the Contacts policy applies on top of `expense.write`: a Contact id needs
+ * `contact.read`, an IČO (which may create the Contact) `contact.write`; a token scoped to
+ * expenses only links a supplier typed by hand. The fake enforces the same policy.
  */
 import type {
   ContactId,
@@ -13,6 +15,7 @@ import type {
 } from "@kvitbit/domain/contract";
 import { CurrentCaller, NotFound } from "@kvitbit/domain/contract";
 import { Context, Effect, Layer, Ref } from "effect";
+import { authorize } from "../../policy/Policy";
 import type { SupplierRecord } from "./model";
 import { invalid } from "./model";
 
@@ -51,15 +54,19 @@ export const FakeExpenseSuppliers: Layer.Layer<ExpenseSuppliers | FakeSupplierDi
   Layer.effect(
     ExpenseSuppliers,
     Effect.map(FakeSupplierDirectory, (dir) => {
-      const find = (match: (c: FakeSupplier) => boolean) =>
+      const find = (
+        action: "contact.read" | "contact.write",
+        match: (c: FakeSupplier) => boolean,
+      ) =>
         Effect.gen(function* () {
+          yield* authorize(action);
           const ws = yield* workspaceOf;
           return (yield* Ref.get(dir.contacts)).find((c) => c.workspaceId === ws && match(c));
         });
       return {
         contact: (id: ContactId) =>
           Effect.flatMap(
-            find((c) => c.contactId === id),
+            find("contact.read", (c) => c.contactId === id),
             (found) =>
               found === undefined
                 ? Effect.fail(new NotFound({ entity: "Contact", id }))
@@ -67,7 +74,7 @@ export const FakeExpenseSuppliers: Layer.Layer<ExpenseSuppliers | FakeSupplierDi
           ),
         fromIco: (ico: string) =>
           Effect.flatMap(
-            find((c) => c.ico === ico),
+            find("contact.write", (c) => c.ico === ico),
             (found) =>
               found === undefined
                 ? Effect.fail(invalid("ico.checksum", ["supplier", "ico"]))

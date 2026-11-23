@@ -155,6 +155,45 @@ describe("Expenses.record", () => {
   });
 });
 
+describe("input decoding", () => {
+  test("unknown keys and wrong types are request.malformed at their paths", async () => {
+    const exit = await scenario(record({ ...czkInput, total: 121, bogus: true }));
+    expect(issuesOf(exit).map((i) => [i.code, i.path.join(".")])).toEqual(
+      expect.arrayContaining([
+        ["request.malformed", "total"],
+        ["request.malformed", "bogus"],
+      ]),
+    );
+  });
+
+  test("open fields must be plain JSON", async () => {
+    const exit = await scenario(record({ ...czkInput, total: BigDecimal.fromStringUnsafe("121") }));
+    expect(issuesOf(exit).map((i) => [i.code, i.path.length])).toEqual([["request.malformed", 0]]);
+  });
+
+  test("a reused key with a changed payload conflicts even when the new payload is invalid", async () => {
+    const exit = await scenario(
+      Effect.gen(function* () {
+        yield* record(czkInput, "key-2");
+        return yield* Effect.exit(record({ ...czkInput, total: "nope" }, "key-2"));
+      }),
+    );
+    expect(exit as Exit.Exit<unknown, unknown>).toEqual(
+      Exit.succeed(Exit.fail(new Conflict({ reason: "idempotency_mismatch" }))),
+    );
+  });
+
+  test("an incomplete Expense shows its total before a currency is chosen", async () => {
+    const exit = await scenario(
+      Effect.map(record({ status: "incomplete", total: "99.90" }), fields),
+    );
+    expect(Exit.isSuccess(exit)).toBe(true);
+    if (!Exit.isSuccess(exit)) return;
+    expect(fmt(exit.value.total)).toBe("99.9");
+    expect(exit.value.currency).toBeNull();
+  });
+});
+
 describe("authorization and Workspace scoping", () => {
   test("accountants read but never write", async () => {
     const exit = await scenario(
@@ -235,6 +274,29 @@ describe("authorization and Workspace scoping", () => {
       expect(JSON.stringify(r)).toContain('"entity":"Expense"');
     }
     expect(exit.value.listed).toBe(0);
+  });
+
+  test("a token scoped to expenses links a typed supplier but needs contacts scopes for Contacts", async () => {
+    const token = member("member", { scopes: ["expenses:write", "expenses:read"] });
+    const exit = await scenario(
+      Effect.gen(function* () {
+        const byIco = yield* Effect.exit(
+          as(token, record({ ...czkInput, supplier: { ico: "27074358" } })),
+        );
+        const byContact = yield* Effect.exit(as(token, record(czkInput)));
+        const manual = yield* Effect.exit(
+          as(token, record({ ...czkInput, supplier: { manual: { name: "Shop" } } })),
+        );
+        return { byIco, byContact, manual: Exit.isSuccess(manual) };
+      }),
+    );
+    expect(exit).toEqual(
+      Exit.succeed({
+        byIco: Exit.fail(new Forbidden({ action: "contact.write" })),
+        byContact: Exit.fail(new Forbidden({ action: "contact.read" })),
+        manual: true,
+      }),
+    );
   });
 
   test("a supplier Contact of another Workspace is NotFound", async () => {
@@ -401,7 +463,7 @@ describe("deductibility, reverse charge and FX", () => {
     expect(fmt(v.deductibleVat?.amount)).toBe("174");
   });
 
-  test("selfAssessed is for reverse_charge lines only", async () => {
+  test("selfAssessed is only for self-assessed treatments", async () => {
     const exit = await scenario(
       record({
         ...czkInput,
@@ -409,7 +471,7 @@ describe("deductibility, reverse charge and FX", () => {
       }),
     );
     expect(issuesOf(exit).map((i) => [i.path.join("."), i.params?.reason])).toEqual([
-      ["vat.0.selfAssessed", "reverse_charge_only"],
+      ["vat.0.selfAssessed", "self_assessment_not_allowed"],
     ]);
   });
 
@@ -464,6 +526,63 @@ describe("deductibility, reverse charge and FX", () => {
         czkStillWorks: true,
       }),
     );
+  });
+});
+
+describe("FX stability and self-assessment scope", () => {
+  test("an unrelated edit keeps the stored fixing (no CNB call); a new tax point refetches", async () => {
+    const exit = await scenario(
+      Effect.gen(function* () {
+        const eur = { ...czkInput, currency: "EUR", taxableSupplyOn: "2026-11-22" };
+        const id = expenseId(yield* record(eur));
+        const s = yield* Expenses;
+        const rates = yield* FixtureRates;
+        yield* Ref.set(rates.unavailable, true);
+        const noted = fields(yield* s.edit(id, { note: "paid by card" }, 1));
+        const moved = yield* Effect.exit(s.edit(id, { taxableSupplyOn: "2026-11-21" }, 2));
+        return { fx: noted.fx?.fixingDate, czk: fmt(noted.totalCzk), moved };
+      }),
+    );
+    expect(exit).toEqual(
+      Exit.succeed({
+        fx: "2026-11-20" as IsoDate,
+        czk: "3040.13",
+        moved: Exit.fail(new Unavailable({ dependency: "exchange_rates" })),
+      }),
+    );
+  });
+
+  test("a currency change is audited with its new rate and CZK total", async () => {
+    const exit = await scenario(
+      Effect.gen(function* () {
+        const id = expenseId(yield* record({ ...czkInput, taxableSupplyOn: "2026-11-22" }));
+        const s = yield* Expenses;
+        yield* s.edit(id, { currency: "EUR" }, 1);
+        const store = yield* CoreStore;
+        const audit = yield* store.audit.history(WORKSPACE_A, { entity: "Expense", id });
+        return audit[1]?.changes.map((c) => c.path);
+      }),
+    );
+    expect(exit).toEqual(Exit.succeed(["currency", "fx", "totalCzk"]));
+  });
+
+  test("an intra-EU acquisition of goods is self-assessed like reverse charge", async () => {
+    const exit = await scenario(
+      Effect.map(
+        record({
+          ...czkInput,
+          total: "500.00",
+          vat: [{ treatment: "exempt_intra_eu_goods", base: "500.00", selfAssessed: "reduced" }],
+        }),
+        fields,
+      ),
+    );
+    expect(Exit.isSuccess(exit)).toBe(true);
+    if (!Exit.isSuccess(exit)) return;
+    expect(
+      exit.value.selfAssessed.map((b) => [b.treatment, fmt(b.ratePercent), fmt(b.vat)]),
+    ).toEqual([["exempt_intra_eu_goods", "12", "60"]]);
+    expect(fmt(exit.value.deductibleVat?.amount)).toBe("60");
   });
 });
 

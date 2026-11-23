@@ -3,9 +3,14 @@
  * `BlobStorage`, `ExchangeRates` and `ExpenseSuppliers`.
  *
  * Method shape (src/index.ts): authorize -> withIdempotency / transaction -> lock + revision ->
- * rules -> write -> appendAudit -> orUnavailable. The domain tag omits errors the spec and the
- * store require (`remove` has no Unavailable, `detach` neither Unavailable nor Conflict-free
- * storage); `ExpensesImpl` keeps them honest and `asTagService` is the one cast (board #340/#341).
+ * rules -> write -> appendAudit -> orUnavailable. `ExpensesImpl` declares each method's honest
+ * errors; where the frozen domain tag omits one (record: Conflict{idempotency_mismatch};
+ * remove, detach, get, list: Unavailable), `asTagService` is the one cast (board #340/#341).
+ *
+ * External calls (supplier lookup through Contacts/ARES, the CNB fixing) never run under the
+ * Expense row lock: `edit` prepares the next row from an unlocked read, then locks and re-checks
+ * the revision. `record` runs them inside its idempotent transaction, which holds only the
+ * request-log claim, so a reused key is matched (C3) before any input is judged.
  */
 import type {
   AttachmentId,
@@ -37,6 +42,7 @@ import type { BlobKey } from "@kvitbit/domain/ports";
 import { BlobStorage, ExchangeRates } from "@kvitbit/domain/ports";
 import type { Stream } from "effect";
 import { BigDecimal, Clock, Effect, Layer, Option, Result } from "effect";
+import type { FxRate } from "../../engines/fx";
 import { authorizeInWorkspace } from "../../policy/Policy";
 import { appendAudit } from "../../shared/audit";
 import { canonicalJson } from "../../shared/canonicalJson";
@@ -53,14 +59,17 @@ import {
   encodeSummary,
   encodeView,
   invalid,
+  isJsonValue,
   needsFixing,
   percentOf,
+  resolveFx,
   summaryFields,
   taxPointOf,
   validateComplete,
   viewFields,
 } from "./model";
 import { ExpensesRepo } from "./repo";
+import { SNIFFABLE_TYPES, sniffing } from "./sniff";
 import { ExpenseSuppliers } from "./suppliers";
 
 /** Upload limit and accepted types (http-mcp-contracts 3.4, `GET /api/v1/config`). */
@@ -74,6 +83,7 @@ export const ATTACHMENT_TYPES: ReadonlyArray<string> = [
 
 export interface ExpensesOptions {
   readonly maxAttachmentBytes?: number;
+  /** Subset of the sniffable types (PDF, JPEG, PNG, HEIC); others are never accepted. */
   readonly attachmentTypes?: ReadonlyArray<string>;
 }
 
@@ -87,23 +97,29 @@ export const attachmentKey = (
 
 const DEFAULT_LIMIT = 50;
 
-type Wide = NotFound | Invalid | Conflict | Unavailable | Forbidden;
-
-/** The honest service: every error the spec and the store can produce. */
+/** The honest service: each method's errors as the spec and the store produce them. */
 export interface ExpensesImpl {
   readonly record: (
     input: ExpenseInputType,
     opts?: RequestOptions,
-  ) => Effect.Effect<ExpenseView, Wide, CurrentCaller>;
+  ) => Effect.Effect<
+    ExpenseView,
+    Invalid | NotFound | Unavailable | Forbidden | Conflict,
+    CurrentCaller
+  >;
   readonly edit: (
     id: ExpenseId,
     patch: ExpensePatch,
     expectedRevision: number,
-  ) => Effect.Effect<ExpenseView, Wide, CurrentCaller>;
+  ) => Effect.Effect<
+    ExpenseView,
+    NotFound | Invalid | Conflict | Unavailable | Forbidden,
+    CurrentCaller
+  >;
   readonly remove: (
     id: ExpenseId,
     expectedRevision: number,
-  ) => Effect.Effect<void, Wide, CurrentCaller>;
+  ) => Effect.Effect<void, NotFound | Conflict | Forbidden | Unavailable, CurrentCaller>;
   readonly attach: (
     id: ExpenseId,
     file: {
@@ -111,17 +127,21 @@ export interface ExpensesImpl {
       readonly contentType: string;
       readonly bytes: Stream.Stream<Uint8Array>;
     },
-  ) => Effect.Effect<AttachmentView, Wide, CurrentCaller>;
+  ) => Effect.Effect<AttachmentView, NotFound | Invalid | Unavailable | Forbidden, CurrentCaller>;
   readonly detach: (
     id: ExpenseId,
     attachment: AttachmentId,
-  ) => Effect.Effect<void, Wide, CurrentCaller>;
+  ) => Effect.Effect<void, NotFound | Forbidden | Unavailable, CurrentCaller>;
   readonly attachment: (
     id: ExpenseId,
     attachment: AttachmentId,
-  ) => Effect.Effect<FileDownload, Wide, CurrentCaller>;
-  readonly get: (id: ExpenseId) => Effect.Effect<ExpenseView, Wide, CurrentCaller>;
-  readonly list: (q: ExpenseQuery) => Effect.Effect<Page<ExpenseSummary>, Wide, CurrentCaller>;
+  ) => Effect.Effect<FileDownload, NotFound | Unavailable | Forbidden, CurrentCaller>;
+  readonly get: (
+    id: ExpenseId,
+  ) => Effect.Effect<ExpenseView, NotFound | Forbidden | Unavailable, CurrentCaller>;
+  readonly list: (
+    q: ExpenseQuery,
+  ) => Effect.Effect<Page<ExpenseSummary>, Invalid | Forbidden | Unavailable, CurrentCaller>;
 }
 
 /** A service shape with every method's error channel erased; the rest stays checked. */
@@ -158,12 +178,19 @@ const AUDITED: ReadonlyArray<keyof ReturnType<typeof viewFields>> = [
   "currency",
   "total",
   "vat",
+  "fx",
+  "totalCzk",
   "deductibility",
   "category",
   "tags",
   "note",
 ];
 
+/**
+ * Cursor of `list`: the filter it came from and the last id. Order is id desc: ids are UUIDv7,
+ * so this is the order Expenses were received in (the contract's `receivedOn desc, id desc`;
+ * there is no separate receivedOn column).
+ */
 const encodeCursor = (filter: string, id: ExpenseId) => btoa(JSON.stringify([filter, id]));
 const decodeCursor = (cursor: string): readonly [string, ExpenseId] | null => {
   try {
@@ -179,10 +206,15 @@ const decodeCursor = (cursor: string): readonly [string, ExpenseId] | null => {
   }
 };
 
+/** Errors the transaction surely rolled back on; a store failure may hide a commit. */
+const surelyRolledBack = (e: { readonly _tag: string }) => e._tag !== "StoreUnavailable";
+
 export const makeExpenses = (options: ExpensesOptions = {}) =>
   Effect.gen(function* () {
     const maxBytes = options.maxAttachmentBytes ?? ATTACHMENT_MAX_BYTES;
-    const types = options.attachmentTypes ?? ATTACHMENT_TYPES;
+    const types = (options.attachmentTypes ?? ATTACHMENT_TYPES).filter((t) =>
+      SNIFFABLE_TYPES.includes(t),
+    );
     const store = yield* CoreStore;
     const repo = yield* ExpensesRepo;
     const blobs = yield* BlobStorage;
@@ -195,15 +227,11 @@ export const makeExpenses = (options: ExpensesOptions = {}) =>
     ): Effect.Effect<A, E, CurrentCaller> =>
       effect.pipe(Effect.provideService(CoreStore, store), Effect.provideService(IdGenerator, ids));
 
+    const live = (row: ExpenseRow) =>
+      row.removedAt === null ? Effect.succeed(row) : Effect.fail(notFound(row.id));
     /** A live Expense of the Workspace; removed or foreign is NotFound (R2). */
-    const getLive = (ws: WorkspaceId, id: ExpenseId) =>
-      Effect.flatMap(repo.get(ws, id), (row) =>
-        row.removedAt === null ? Effect.succeed(row) : Effect.fail(notFound(id)),
-      );
-    const lockLive = (ws: WorkspaceId, id: ExpenseId) =>
-      Effect.flatMap(repo.lock(ws, id), (row) =>
-        row.removedAt === null ? Effect.succeed(row) : Effect.fail(notFound(id)),
-      );
+    const getLive = (ws: WorkspaceId, id: ExpenseId) => Effect.flatMap(repo.get(ws, id), live);
+    const lockLive = (ws: WorkspaceId, id: ExpenseId) => Effect.flatMap(repo.lock(ws, id), live);
 
     const resolveSupplier = (ref: SupplierRef) =>
       "contact" in ref
@@ -240,7 +268,9 @@ export const makeExpenses = (options: ExpensesOptions = {}) =>
           total:
             fields.total === undefined
               ? base.total
-              : fields.total && BigDecimal.normalize(fields.total),
+              : fields.total === null
+                ? null
+                : BigDecimal.normalize(fields.total),
           vatLines:
             fields.vat === undefined
               ? base.vatLines
@@ -263,16 +293,34 @@ export const makeExpenses = (options: ExpensesOptions = {}) =>
         return next;
       });
 
+    /**
+     * The rate for a complete row: the previous row's stored rate when currency and tax point are
+     * unchanged (an unrelated edit never moves the CZK figures), else a fresh CNB fixing.
+     */
+    const rateFor = (row: ExpenseRow, previous: ExpenseRow | null) =>
+      Effect.gen(function* () {
+        if (!needsFixing(row)) return null;
+        const prior = previous?.figures?.fx ?? null;
+        if (
+          prior !== null &&
+          previous !== null &&
+          previous.currency === row.currency &&
+          taxPointOf(previous) === taxPointOf(row)
+        ) {
+          return prior as FxRate;
+        }
+        const fixing = yield* rates.fixing(taxPointOf(row) as IsoDate);
+        const fx = resolveFx(row, fixing);
+        return Result.isFailure(fx) ? yield* fx.failure : fx.success;
+      });
+
     /** Full validation and derived figures for a complete Expense; none for an incomplete one. */
-    const finish = (row: ExpenseRow) =>
+    const finish = (row: ExpenseRow, previous: ExpenseRow | null) =>
       Effect.gen(function* () {
         if (row.status === "incomplete") return { ...row, figures: null };
         const [first, ...rest] = validateComplete(row);
         if (first !== undefined) return yield* new Invalid({ issues: [first, ...rest] });
-        const fixing = needsFixing(row) ? yield* rates.fixing(taxPointOf(row) as IsoDate) : null;
-        const figures = computeFigures(row, fixing);
-        if (Result.isFailure(figures)) return yield* figures.failure;
-        return { ...row, figures: figures.success };
+        return { ...row, figures: computeFigures(row, yield* rateFor(row, previous)) };
       });
 
     const viewOf = (ws: WorkspaceId, row: ExpenseRow) =>
@@ -293,11 +341,15 @@ export const makeExpenses = (options: ExpensesOptions = {}) =>
 
     const subject = (id: ExpenseId) => ({ entity: "Expense" as const, id });
 
+    /** Open fields must be plain JSON (what the wire delivers) to be fingerprinted (C3). */
+    const requireJson = (value: unknown) =>
+      isJsonValue(value) ? Effect.void : Effect.fail(invalid("request.malformed", []));
+
     const record: ExpensesImpl["record"] = (input, opts) =>
       provide(
         Effect.gen(function* () {
           const { workspaceId } = yield* authorizeInWorkspace("expense.write");
-          const fields = yield* decodeFields(input);
+          yield* requireJson(input);
           return yield* withIdempotency(
             {
               scope: { _tag: "Workspace", workspaceId },
@@ -307,6 +359,7 @@ export const makeExpenses = (options: ExpensesOptions = {}) =>
               result: ExpenseViewSchema,
             },
             Effect.gen(function* () {
+              const fields = yield* decodeFields(input);
               const now = yield* nowIso;
               const empty: ExpenseRow = {
                 id: yield* newId<ExpenseId>(),
@@ -332,7 +385,7 @@ export const makeExpenses = (options: ExpensesOptions = {}) =>
                 createdAt: now,
                 updatedAt: now,
               };
-              const row = yield* finish(yield* applyFields(empty, fields));
+              const row = yield* finish(yield* applyFields(empty, fields), null);
               const saved = yield* repo.insert(row);
               yield* appendAudit({
                 workspaceId,
@@ -350,25 +403,31 @@ export const makeExpenses = (options: ExpensesOptions = {}) =>
       provide(
         Effect.gen(function* () {
           const { workspaceId } = yield* authorizeInWorkspace("expense.write");
+          yield* requireJson(patch);
           const fields = yield* decodeFields(patch);
+          // Prepare outside the lock: supplier lookup and CNB fixing may call out.
+          const seen = yield* checkRevision(yield* getLive(workspaceId, id), expectedRevision);
+          const prepared = yield* finish(
+            { ...(yield* applyFields(seen, fields)), updatedAt: yield* nowIso },
+            seen,
+          );
           return yield* store.transaction(
             Effect.gen(function* () {
+              // Same revision as `seen`, so `prepared` was derived from the row now locked.
               const current = yield* checkRevision(
                 yield* lockLive(workspaceId, id),
                 expectedRevision,
               );
-              const merged = yield* applyFields(current, fields);
               if (current.payments > 0) {
                 // A paid Expense keeps the currency its Payments are in (P1) and stays complete.
-                if (merged.currency !== current.currency) {
+                if (prepared.currency !== current.currency) {
                   return yield* invalid("payment.currency_mismatch", ["currency"]);
                 }
-                if (merged.status === "incomplete") {
+                if (prepared.status === "incomplete") {
                   return yield* invalid("expense.incomplete", ["status"]);
                 }
               }
-              const next = yield* finish({ ...merged, updatedAt: yield* nowIso });
-              const saved = yield* repo.update(next, current.revision);
+              const saved = yield* repo.update(prepared, current.revision);
               yield* appendAudit({
                 workspaceId,
                 subject: subject(id),
@@ -416,16 +475,18 @@ export const makeExpenses = (options: ExpensesOptions = {}) =>
         Effect.gen(function* () {
           const { workspaceId } = yield* authorizeInWorkspace("expense.write");
           const contentType = (file.contentType.split(";")[0] ?? "").trim().toLowerCase();
-          if (!types.includes(contentType)) {
-            return yield* invalid("attachment.type_rejected", ["file", "contentType"]);
-          }
+          const rejected = invalid("attachment.type_rejected", ["file", "contentType"]);
+          if (!types.includes(contentType)) return yield* rejected;
           yield* getLive(workspaceId, id);
           const attachmentId = yield* newId<AttachmentId>();
           const key = attachmentKey(workspaceId, id, attachmentId);
-          // Streamed before the transaction; a blob whose row never commits is collected by
-          // housekeeping after 24 h (core-ports 4.7), and deleted at once when we know.
+          const discard = blobs.delete(key).pipe(Effect.ignore);
+          // Streamed before the transaction and committed with the row; a blob whose row never
+          // commits is deleted here when the rollback is certain, else collected by housekeeping
+          // after 24 h (core-ports 4.7). The prefix is sniffed while streaming.
+          const sniffed = sniffing(contentType, file.bytes);
           const put = yield* blobs
-            .put(key, file.bytes, { contentType, maxBytes })
+            .put(key, sniffed.stream, { contentType, maxBytes })
             .pipe(
               Effect.catchTag("BlobTooLarge", (e) =>
                 Effect.fail(
@@ -433,17 +494,20 @@ export const makeExpenses = (options: ExpensesOptions = {}) =>
                 ),
               ),
             );
-          const discard = blobs.delete(key).pipe(Effect.ignore);
-          const view = yield* store
+          if (!sniffed.verdict()) {
+            yield* discard;
+            return yield* rejected;
+          }
+          const result = yield* store
             .transaction(
               Effect.gen(function* () {
                 const expense = yield* lockLive(workspaceId, id);
-                const existing = yield* repo.findAttachmentBySha(workspaceId, id, put.sha256);
                 // The Expense row lock serializes attaches, so the hash index cannot race here.
+                const existing = yield* repo.findAttachmentBySha(workspaceId, id, put.sha256);
                 if (Option.isSome(existing)) {
                   // Same content on this Expense: attach is idempotent by hash.
                   yield* store.afterCommit(discard);
-                  return existing.value;
+                  return { row: existing.value, expenseRevision: expense.revision };
                 }
                 const now = yield* nowIso;
                 const row = yield* repo.insertAttachment({
@@ -466,28 +530,35 @@ export const makeExpenses = (options: ExpensesOptions = {}) =>
                   revision: saved.revision,
                   changes: [{ path: "attachments", before: null, after: row.id }],
                 });
-                return row;
+                return { row, expenseRevision: saved.revision };
               }),
             )
-            .pipe(Effect.tapError(() => discard));
+            .pipe(Effect.tapError((e) => (surelyRolledBack(e) ? discard : Effect.void)));
+          const { row, expenseRevision } = result;
           return encodeAttachment({
-            id: view.id,
-            expenseId: view.expenseId,
-            name: view.name,
-            contentType: view.contentType,
-            bytes: view.bytes,
-            sha256: view.sha256,
-            createdAt: view.createdAt,
+            id: row.id,
+            expenseId: row.expenseId,
+            name: row.name,
+            contentType: row.contentType,
+            bytes: row.bytes,
+            sha256: row.sha256,
+            createdAt: row.createdAt,
+            expenseRevision,
           }) as unknown as AttachmentView;
-        }).pipe(orUnavailable, dieOnUnique),
+        }).pipe(
+          // The Expense row is locked in the transaction, so its update cannot race.
+          Effect.catchTag("Conflict", (e) => Effect.die(e)),
+          orUnavailable,
+          dieOnUnique,
+        ),
       );
 
-    /** The attachment of a live Expense; one of another Expense is NotFound. */
-    const attachmentOf = (ws: WorkspaceId, id: ExpenseId, attachment: AttachmentId) =>
-      Effect.flatMap(repo.getAttachment(ws, attachment), (row) =>
-        row.expenseId === id
-          ? Effect.succeed(row)
-          : Effect.fail(new NotFound({ entity: "Attachment", id: attachment })),
+    /** The attachment if it exists; one of another Expense is NotFound. */
+    const findAttachmentOf = (ws: WorkspaceId, id: ExpenseId, attachment: AttachmentId) =>
+      Effect.flatMap(repo.findAttachment(ws, attachment), (found) =>
+        Option.isSome(found) && found.value.expenseId !== id
+          ? Effect.fail(new NotFound({ entity: "Attachment", id: attachment }))
+          : Effect.succeed(found),
       );
 
     const detach: ExpensesImpl["detach"] = (id, attachment) =>
@@ -497,7 +568,10 @@ export const makeExpenses = (options: ExpensesOptions = {}) =>
           yield* store.transaction(
             Effect.gen(function* () {
               const expense = yield* lockLive(workspaceId, id);
-              const row = yield* attachmentOf(workspaceId, id, attachment);
+              const found = yield* findAttachmentOf(workspaceId, id, attachment);
+              // Idempotent by state (C6): an attachment already gone is detached; no audit.
+              if (Option.isNone(found)) return;
+              const row = found.value;
               yield* repo.removeAttachment(workspaceId, row.id, row.revision);
               const saved = yield* repo.update(
                 { ...expense, updatedAt: yield* nowIso },
@@ -513,7 +587,12 @@ export const makeExpenses = (options: ExpensesOptions = {}) =>
               yield* store.afterCommit(blobs.delete(row.blobKey as BlobKey).pipe(Effect.ignore));
             }),
           );
-        }).pipe(orUnavailable, dieOnUnique),
+        }).pipe(
+          // The attachment row is locked under the Expense lock, so its delete cannot race.
+          Effect.catchTag("Conflict", (e) => Effect.die(e)),
+          orUnavailable,
+          dieOnUnique,
+        ),
       );
 
     const attachmentRead: ExpensesImpl["attachment"] = (id, attachment) =>
@@ -521,7 +600,11 @@ export const makeExpenses = (options: ExpensesOptions = {}) =>
         Effect.gen(function* () {
           const { workspaceId } = yield* authorizeInWorkspace("expense.attachment.read");
           yield* getLive(workspaceId, id);
-          const row = yield* attachmentOf(workspaceId, id, attachment);
+          const found = yield* findAttachmentOf(workspaceId, id, attachment);
+          if (Option.isNone(found)) {
+            return yield* new NotFound({ entity: "Attachment", id: attachment });
+          }
+          const row = found.value;
           const bytes = yield* blobs.get(row.blobKey as BlobKey).pipe(
             // A row whose blob is gone is a storage fault, not a missing record.
             Effect.catchTag("BlobMissing", () =>

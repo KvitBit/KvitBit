@@ -36,7 +36,7 @@ export interface ExpenseRecord {
   readonly currency: CurrencyCode;
   /** Supplier figures; reverse_charge buckets at vat 0; a receipt with no VAT lines is one outside_scope bucket. */
   readonly totals: VatBreakdown;
-  /** reverse_charge buckets as the recipient self-assesses them. */
+  /** reverse_charge and exempt_intra_eu_goods buckets as the recipient self-assesses them. */
   readonly selfAssessed: ReadonlyArray<VatBucket>;
   readonly fx: FxRate | null;
   /** 0..100 share of input VAT the Workspace may claim. */

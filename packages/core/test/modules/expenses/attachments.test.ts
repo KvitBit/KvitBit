@@ -10,7 +10,7 @@ import {
 } from "@kvitbit/domain/contract";
 import type { BlobKey } from "@kvitbit/domain/ports";
 import { BigDecimal, Effect, Exit, Layer, Ref, Stream } from "effect";
-import type { AttachmentViewFields } from "../../../src/modules/expenses";
+import type { AttachResultFields } from "../../../src/modules/expenses";
 import {
   ExpensePayables,
   ExpensePayablesLive,
@@ -36,7 +36,10 @@ const sha256 = async (text: string) =>
     (b) => b.toString(16).padStart(2, "0"),
   ).join("");
 
-const attachmentFields = (view: unknown) => view as AttachmentViewFields;
+const attachmentFields = (view: unknown) => view as AttachResultFields;
+
+/** A HEIF header: box size, "ftyp", brand "heic". */
+const HEIC_HEAD = Uint8Array.from([0, 0, 0, 0x18, ...new TextEncoder().encode("ftypheic")]);
 
 const collect = (stream: Stream.Stream<Uint8Array>) =>
   Effect.map(Stream.runCollect(stream), (chunks) =>
@@ -111,7 +114,7 @@ describe("attachments", () => {
 
   test("a stream past maxBytes is attachment.too_large; a wrong type is attachment.type_rejected", async () => {
     const layer = Layer.mergeAll(
-      makeExpensesLive({ maxAttachmentBytes: 8 }),
+      makeExpensesLive({ maxAttachmentBytes: 12 }),
       ExpensePayablesLive,
       ExpenseRecordsLive,
     ).pipe(Layer.provideMerge(FakeExpenseSuppliers), Layer.provideMerge(ExpensesRepoMemory));
@@ -120,7 +123,10 @@ describe("attachments", () => {
         const id = expenseId(yield* record({ status: "incomplete" }));
         const s = yield* Expenses;
         const big = yield* Effect.exit(
-          s.attach(id, { ...pdf(), bytes: Stream.make(new Uint8Array(5), new Uint8Array(5)) }),
+          s.attach(id, {
+            ...pdf(),
+            bytes: Stream.make(new TextEncoder().encode("%PDF-"), new Uint8Array(10)),
+          }),
         );
         const exe = yield* Effect.exit(
           s.attach(id, {
@@ -133,7 +139,7 @@ describe("attachments", () => {
           yield* s.attach(id, {
             name: "IMG.HEIC",
             contentType: "Image/HEIC; charset=binary",
-            bytes: bytesOf("heic"),
+            bytes: Stream.make(HEIC_HEAD),
           }),
         );
         return {
@@ -149,7 +155,7 @@ describe("attachments", () => {
       Exit.succeed({
         big: Exit.fail(
           new Invalid({
-            issues: [{ path: ["file"], code: "attachment.too_large", params: { maxBytes: "8" } }],
+            issues: [{ path: ["file"], code: "attachment.too_large", params: { maxBytes: "12" } }],
           }),
         ),
         exe: Exit.fail(
@@ -161,6 +167,51 @@ describe("attachments", () => {
         attached: 1,
       }),
     );
+  });
+
+  test("magic bytes: a spoofed or empty upload is attachment.type_rejected and stores no blob", async () => {
+    const exit = await scenario(
+      Effect.gen(function* () {
+        const id = expenseId(yield* record({ status: "incomplete" }));
+        const s = yield* Expenses;
+        const png = Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0]);
+        const spoofed = yield* Effect.exit(s.attach(id, { ...pdf(), bytes: Stream.make(png) }));
+        const empty = yield* Effect.exit(s.attach(id, { ...pdf(), bytes: Stream.empty }));
+        const short = yield* Effect.exit(s.attach(id, { ...pdf(), bytes: bytesOf("%PD") }));
+        const realPng = attachmentFields(
+          yield* s.attach(id, { name: "p.png", contentType: "image/png", bytes: Stream.make(png) }),
+        );
+        const blobs = yield* Ref.get((yield* MemoryBlobStorage).blobs);
+        return { spoofed, empty, short, png: realPng.contentType, blobs: blobs.size };
+      }),
+    );
+    const rejected = Exit.fail(
+      new Invalid({
+        issues: [{ path: ["file", "contentType"], code: "attachment.type_rejected" }],
+      }),
+    );
+    expect(exit).toEqual(
+      Exit.succeed({
+        spoofed: rejected,
+        empty: rejected,
+        short: rejected,
+        png: "image/png",
+        blobs: 1,
+      }),
+    );
+  });
+
+  test("attach returns the Expense revision after it", async () => {
+    const exit = await scenario(
+      Effect.gen(function* () {
+        const id = expenseId(yield* record({ status: "incomplete" }));
+        const s = yield* Expenses;
+        const att = attachmentFields(yield* s.attach(id, pdf()));
+        const again = attachmentFields(yield* s.attach(id, pdf()));
+        return [att.expenseRevision, again.expenseRevision, fields(yield* s.get(id)).revision];
+      }),
+    );
+    expect(exit).toEqual(Exit.succeed([2, 2, 2]));
   });
 
   test("blob storage down is Unavailable{blob_storage} and leaves no attachment", async () => {
@@ -191,13 +242,18 @@ describe("attachments", () => {
         const wrongExpense = yield* Effect.exit(s.detach(b, att));
         const wrongRead = yield* Effect.exit(s.attachment(b, att));
         yield* s.detach(a, att);
+        // Detach is idempotent by state (C6): a retry succeeds, with no second audit entry.
         const again = yield* Effect.exit(s.detach(a, att));
+        const store = yield* CoreStore;
+        const audit = yield* store.audit.history(WORKSPACE_A, { entity: "Expense", id: a });
         const blobs = yield* Ref.get((yield* MemoryBlobStorage).blobs);
         const view = fields(yield* s.get(a));
         return {
           wrongExpense,
           wrongRead,
           again,
+          actions: audit.map((e) => e.action),
+          revision: view.revision,
           blobs: blobs.size,
           attached: view.attachments.length,
           att,
@@ -209,7 +265,9 @@ describe("attachments", () => {
     const nf = Exit.fail(new NotFound({ entity: "Attachment", id: exit.value.att }));
     expect(exit.value.wrongExpense).toEqual(nf);
     expect(exit.value.wrongRead).toEqual(nf);
-    expect(exit.value.again as Exit.Exit<unknown, unknown>).toEqual(nf);
+    expect(exit.value.again).toEqual(Exit.void);
+    expect(exit.value.actions).toEqual(["expense.record", "expense.attach", "expense.detach"]);
+    expect(exit.value.revision).toBe(3);
     expect(exit.value.blobs).toBe(0);
     expect(exit.value.attached).toBe(0);
   });

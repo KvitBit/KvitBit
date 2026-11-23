@@ -4,6 +4,12 @@
  * Payments does both (audit on the Expense subject). Payments' own rules on top: `record` on an
  * incomplete Expense is `Invalid{expense.incomplete}`; a currency other than `Payable.currency`
  * is `Invalid{payment.currency_mismatch}` (rule P1).
+ *
+ * `paid` / `payments` on the Expense row are a projection of the Payments ledger, not authority:
+ * Payments computes them from its own live (not removed) Payment rows, after `lock` and after its
+ * insert or soft delete, in the same transaction, so the projection is atomic with the ledger and
+ * can be rebuilt from it. Settlement is derived from the projection and the current total at read
+ * time (P1), so editing the total re-settles without a Payment change.
  */
 import type {
   CurrencyCode,

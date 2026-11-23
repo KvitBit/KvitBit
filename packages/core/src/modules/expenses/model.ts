@@ -5,7 +5,19 @@
  *
  * Open fields cross the domain tag in their JSON form (BigDecimal as string), because the domain
  * schemas declare them `Unknown` and HttpApi passes them through undecoded. `decodeFields`
- * decodes that form; `toView` / `toSummary` encode back to it.
+ * decodes that form; `encodeView` / `encodeSummary` encode back to it.
+ *
+ * Tax scope (the spec fixes none of this; ce-expenses decisions, reported as gaps):
+ * - Deductibility: "full" (default), "none" or `{ partial: 1..99 }` percent of the input VAT
+ *   (supplier VAT plus self-assessed VAT), rounded once per Expense. The Tax Regime exclusion
+ *   (non_vat_payer claims nothing) is applied by Reports, which knows the regime on the date.
+ * - Self-assessment: lines with treatment `reverse_charge` (§92a, §108(1)(c) services) or
+ *   `exempt_intra_eu_goods` (§25 acquisition of goods) carry the VAT the recipient self-assesses,
+ *   at `selfAssessed` ("standard" by default) in force on the tax point, rounded once per
+ *   (treatment, rate) bucket (#377). The supplier's own buckets stay at VAT 0 for these.
+ * - Payment rounding of cash receipts is not modelled; the supplier's gross is taken as entered.
+ * - Validation issues use `request.malformed` + `params.reason`: the frozen IssueCode union has
+ *   no expense codes (domain gap, same exception as core-identity, board #430).
  */
 import type { Issue, IssueCode, VatBreakdown, VatBucket } from "@kvitbit/domain/contract";
 import {
@@ -24,11 +36,11 @@ import {
   WorkspaceId,
 } from "@kvitbit/domain/contract";
 import type { CnbFixing } from "@kvitbit/domain/ports";
-import { BigDecimal, Effect, Result, Schema } from "effect";
+import { BigDecimal, Effect, type Result, Schema, SchemaIssue } from "effect";
 import { divideRound, HUNDRED, roundAt, sumAll, ZERO } from "../../engines/decimal";
 import type { FxRate } from "../../engines/fx";
 import { Fx } from "../../engines/fx";
-import { VAT_RATE_TABLE, VatMath } from "../../engines/vat";
+import { TREATMENTS, VAT_RATE_TABLE, VatMath } from "../../engines/vat";
 
 const CZK = "CZK" as CurrencyCode;
 
@@ -48,7 +60,7 @@ export const SupplierRef = Schema.Union([
 ]);
 export type SupplierRef = typeof SupplierRef.Type;
 
-/** The VAT treatment a reverse-charge line is self-assessed at (§108(1)(c)). */
+/** The rate a self-assessed line (reverse charge, intra-EU acquisition) is taxed at. */
 export const SelfAssessedTreatment = Schema.Literals(["standard", "reduced"]);
 export type SelfAssessedTreatment = typeof SelfAssessedTreatment.Type;
 
@@ -58,7 +70,7 @@ export const VatLineInput = Schema.Struct({
   base: Schema.BigDecimal,
   /** Supplier VAT. Must be 0 for non-rated treatments (reverse charge included). */
   vat: Schema.optional(Schema.BigDecimal),
-  /** reverse_charge only; default "standard". */
+  /** reverse_charge and exempt_intra_eu_goods only (self-assessed by the recipient); default "standard". */
   selfAssessed: Schema.optional(SelfAssessedTreatment),
 });
 export type VatLineInput = typeof VatLineInput.Type;
@@ -96,6 +108,7 @@ export const ExpenseFields = Schema.Struct({
 export type ExpenseFields = typeof ExpenseFields.Type;
 
 const ExpenseFieldsJson = Schema.toCodecJson(ExpenseFields);
+const formatIssues = SchemaIssue.makeFormatterStandardSchemaV1();
 
 export const invalid = (
   code: IssueCode,
@@ -109,11 +122,48 @@ const issue = (
   params?: Record<string, string>,
 ): Issue => ({ path: [...path], code, ...(params ? { params } : {}) });
 
-/** Decodes the open part of an `ExpenseInput` / `ExpensePatch`; wrong shapes are `request.malformed`. */
+const toSegment = (segment: PropertyKey | { readonly key: PropertyKey }): string | number => {
+  const key = typeof segment === "object" ? segment.key : segment;
+  return typeof key === "number" ? key : String(key);
+};
+
+/**
+ * Decodes the open part of an `ExpenseInput` / `ExpensePatch` strictly: unknown keys and wrong
+ * shapes are `request.malformed`, one issue per failing path.
+ */
 export const decodeFields = (input: unknown): Effect.Effect<ExpenseFields, Invalid> =>
-  Schema.decodeUnknownEffect(ExpenseFieldsJson)(input).pipe(
-    Effect.mapError(() => invalid("request.malformed", [])),
+  Schema.decodeUnknownEffect(ExpenseFieldsJson)(input, {
+    onExcessProperty: "error",
+    errors: "all",
+  }).pipe(
+    Effect.mapError((error) => {
+      const seen = new Set<string>();
+      const issues: Array<Issue> = [];
+      for (const i of formatIssues(error.issue).issues) {
+        const path = (i.path ?? []).map(toSegment);
+        const key = JSON.stringify(path);
+        if (seen.has(key)) continue;
+        seen.add(key);
+        issues.push(issue("request.malformed", path));
+      }
+      const [first, ...rest] = issues;
+      return new Invalid({ issues: [first ?? issue("request.malformed", []), ...rest] });
+    }),
   );
+
+/** Plain JSON data (what the wire delivers); anything else in an open field is malformed. */
+export const isJsonValue = (value: unknown): boolean => {
+  if (value === null || typeof value === "string" || typeof value === "boolean") return true;
+  if (typeof value === "number") return Number.isFinite(value);
+  if (Array.isArray(value)) return value.every(isJsonValue);
+  if (typeof value === "object") {
+    const proto = Object.getPrototypeOf(value);
+    return (
+      (proto === Object.prototype || proto === null) && Object.values(value).every(isJsonValue)
+    );
+  }
+  return false;
+};
 
 // Rows ---------------------------------------------------------------------------------------
 
@@ -145,7 +195,7 @@ export const ExpenseFigures = Schema.Struct({
   taxPoint: IsoDate,
   /** Supplier figures, one bucket per (treatment, ratePercent); vatCzk filled for non-CZK. */
   totals: VatBreakdownSchema,
-  /** reverse_charge buckets as the recipient self-assesses them. */
+  /** reverse_charge and exempt_intra_eu_goods buckets as the recipient self-assesses them. */
   selfAssessed: Schema.Array(VatBucketSchema),
   fx: Schema.NullOr(StoredFx),
   totalCzk: Schema.BigDecimal,
@@ -231,7 +281,11 @@ export const validateComplete = (row: ExpenseRow): ReadonlyArray<Issue> => {
   const taxPoint = taxPointOf(row) as IsoDate;
   const lines = row.vatLines ?? [];
   if (lines.length > 0 && taxPoint < (VAT_RATE_TABLE[0]?.from ?? taxPoint)) {
-    issues.push(issue("request.malformed", ["taxableSupplyOn"], { reason: "before_vat_table" }));
+    issues.push(
+      issue("request.malformed", [row.taxableSupplyOn === null ? "issuedOn" : "taxableSupplyOn"], {
+        reason: "before_vat_table",
+      }),
+    );
     return issues;
   }
   lines.forEach((line, i) => {
@@ -241,9 +295,11 @@ export const validateComplete = (row: ExpenseRow): ReadonlyArray<Issue> => {
     if (!rated && !BigDecimal.isZero(line.vat)) {
       issues.push(issue("request.malformed", ["vat", i, "vat"], { reason: "vat_not_allowed" }));
     }
-    if (line.selfAssessed !== null && line.treatment !== "reverse_charge") {
+    if (line.selfAssessed !== null && !SELF_ASSESSED.has(line.treatment)) {
       issues.push(
-        issue("request.malformed", ["vat", i, "selfAssessed"], { reason: "reverse_charge_only" }),
+        issue("request.malformed", ["vat", i, "selfAssessed"], {
+          reason: "self_assessment_not_allowed",
+        }),
       );
     }
   });
@@ -261,6 +317,15 @@ export const validateComplete = (row: ExpenseRow): ReadonlyArray<Issue> => {
   }
   return issues;
 };
+
+/** Treatments whose recipient self-assesses the VAT. */
+const SELF_ASSESSED: ReadonlySet<VatTreatment> = new Set([
+  "reverse_charge",
+  "exempt_intra_eu_goods",
+]);
+
+const byTreatment = <A>(entries: ReadonlyArray<readonly [VatTreatment, A]>) =>
+  [...entries].sort((a, b) => TREATMENTS.indexOf(a[0]) - TREATMENTS.indexOf(b[0]));
 
 const czkOf = (amount: BigDecimal.BigDecimal, fx: FxRate | null) =>
   fx === null ? amount : Fx.toCzk(amount, fx);
@@ -296,7 +361,7 @@ const supplierBuckets = (
       vat: BigDecimal.sum(g.vat, line.vat),
     });
   }
-  return [...groups].map(([treatment, g]) => ({
+  return byTreatment([...groups]).map(([treatment, g]) => ({
     treatment,
     ratePercent: VatMath.rateFor(treatment, taxPoint),
     base: BigDecimal.normalize(g.base),
@@ -306,23 +371,33 @@ const supplierBuckets = (
   }));
 };
 
-/** Reverse-charge self-assessment: VAT the recipient computes on the base, rounded once per bucket (#377). */
+/** Self-assessment: VAT the recipient computes on the base, rounded once per bucket (#377). */
 const selfAssessedBuckets = (
   lines: ReadonlyArray<StoredVatLine>,
   taxPoint: IsoDate,
   fx: FxRate | null,
 ): ReadonlyArray<VatBucket> => {
-  const groups = new Map<SelfAssessedTreatment, BigDecimal.BigDecimal>();
+  const groups = new Map<
+    string,
+    { treatment: VatTreatment; as: SelfAssessedTreatment; base: BigDecimal.BigDecimal }
+  >();
   for (const line of lines) {
-    if (line.treatment !== "reverse_charge") continue;
+    if (!SELF_ASSESSED.has(line.treatment)) continue;
     const as = line.selfAssessed ?? "standard";
-    groups.set(as, BigDecimal.sum(groups.get(as) ?? ZERO, line.base));
+    const key = `${line.treatment}/${as}`;
+    const g = groups.get(key) ?? { treatment: line.treatment, as, base: ZERO };
+    groups.set(key, { ...g, base: BigDecimal.sum(g.base, line.base) });
   }
-  return [...groups].map(([as, base]) => {
+  const ordered = [...groups.values()].sort(
+    (a, b) =>
+      TREATMENTS.indexOf(a.treatment) - TREATMENTS.indexOf(b.treatment) ||
+      (a.as === b.as ? 0 : a.as === "standard" ? -1 : 1),
+  );
+  return ordered.map(({ treatment, as, base }) => {
     const ratePercent = VatMath.rateFor(as, taxPoint);
     const vat = divideRound(BigDecimal.multiply(base, ratePercent), HUNDRED, 2);
     return {
-      treatment: "reverse_charge" as const,
+      treatment,
       ratePercent,
       base: BigDecimal.normalize(base),
       vat,
@@ -333,19 +408,21 @@ const selfAssessedBuckets = (
 };
 
 /**
- * Derived figures of a valid complete Expense. `fixing` is the CNB fixing for the tax point
- * (null for CZK); a currency CNB does not quote is `Invalid{fx.rate_missing}`.
+ * The Expense's rate: null for CZK, else the CNB fixing for the tax point (`fixing`, fetched with
+ * `ExchangeRates.fixing(taxPoint)`); a currency CNB does not quote is `Invalid{fx.rate_missing}`.
+ * Manual rates are not offered for Expenses (core-ports 4.7 stores the CNB fixing).
  */
-export const computeFigures = (
+export const resolveFx = (
   row: ExpenseRow,
   fixing: CnbFixing | null,
-): Result.Result<ExpenseFigures, Invalid> => {
+): Result.Result<FxRate | null, Invalid> =>
+  Fx.resolve({ currency: row.currency as CurrencyCode, override: null, fixing });
+
+/** Derived figures of a valid complete Expense at rate `fx` (null for CZK). */
+export const computeFigures = (row: ExpenseRow, fx: FxRate | null): ExpenseFigures => {
   const currency = row.currency as CurrencyCode;
   const total = row.total as BigDecimal.BigDecimal;
   const taxPoint = taxPointOf(row) as IsoDate;
-  const fxResult = Fx.resolve({ currency, override: null, fixing });
-  if (Result.isFailure(fxResult)) return Result.fail(fxResult.failure);
-  const fx = fxResult.success;
   const lines = row.vatLines ?? [];
   const totals = VatMath.fromBuckets(supplierBuckets(lines, total, taxPoint, fx), currency);
   const selfAssessed = selfAssessedBuckets(lines, taxPoint, fx);
@@ -363,7 +440,7 @@ export const computeFigures = (
       HUNDRED,
       2,
     );
-  return Result.succeed({
+  return {
     taxPoint,
     totals,
     selfAssessed,
@@ -371,7 +448,7 @@ export const computeFigures = (
     totalCzk: roundAt(czkOf(total, fx), 2),
     deductibleVat: share(claimable),
     deductibleVatCzk: share(claimableCzk),
-  });
+  };
 };
 
 /** Whether `computeFigures` needs a CNB fixing. */
@@ -413,7 +490,8 @@ export const ExpenseViewFields = Schema.Struct({
   taxableSupplyOn: Schema.NullOr(IsoDate),
   dueOn: Schema.NullOr(IsoDate),
   currency: Schema.NullOr(CurrencyCode),
-  total: NullableMoney,
+  /** As entered; shown even before a currency is chosen (incomplete). */
+  total: Schema.NullOr(Schema.BigDecimal),
   vat: Schema.NullOr(Schema.Array(StoredVatLine)),
   totals: Schema.NullOr(VatBreakdownSchema),
   selfAssessed: Schema.Array(VatBucketSchema),
@@ -444,7 +522,8 @@ export const ExpenseSummaryFields = Schema.Struct({
   supplierName: Schema.NullOr(Schema.String),
   supplierDocumentNumber: Schema.NullOr(Schema.String),
   issuedOn: Schema.NullOr(IsoDate),
-  total: NullableMoney,
+  /** As entered; shown even before a currency is chosen (incomplete). */
+  total: Schema.NullOr(Schema.BigDecimal),
   category: Schema.NullOr(Schema.String),
   tags: Schema.Array(Schema.String),
   attachments: Schema.Int,
@@ -480,7 +559,7 @@ export const viewFields = (
   taxableSupplyOn: row.taxableSupplyOn,
   dueOn: row.dueOn,
   currency: row.currency,
-  total: money(row.total, row.currency),
+  total: row.total,
   vat: row.vatLines,
   totals: row.figures?.totals ?? null,
   selfAssessed: row.figures?.selfAssessed ?? [],
@@ -509,7 +588,7 @@ export const summaryFields = (row: ExpenseRow, attachments: number): ExpenseSumm
   supplierName: row.supplier?.name ?? null,
   supplierDocumentNumber: row.supplierDocumentNumber,
   issuedOn: row.issuedOn,
-  total: money(row.total, row.currency),
+  total: row.total,
   category: row.category,
   tags: row.tags,
   attachments,
@@ -519,7 +598,13 @@ export const summaryFields = (row: ExpenseRow, attachments: number): ExpenseSumm
 /** JSON encoders for the open domain views (the domain schemas carry these fields as Unknown). */
 export const encodeView = Schema.encodeSync(Schema.toCodecJson(ExpenseViewFields));
 export const encodeSummary = Schema.encodeSync(Schema.toCodecJson(ExpenseSummaryFields));
-export const encodeAttachment = Schema.encodeSync(Schema.toCodecJson(AttachmentViewFields));
+/** `attach`'s result: the attachment plus the Expense revision after it (attach bumps it). */
+export const AttachResultFields = Schema.Struct({
+  ...AttachmentViewFields.fields,
+  expenseRevision: Schema.Int,
+});
+export type AttachResultFields = typeof AttachResultFields.Type;
+export const encodeAttachment = Schema.encodeSync(Schema.toCodecJson(AttachResultFields));
 /** Decoders for tests and in-process callers that read the open views back. */
 export const decodeView = Schema.decodeUnknownSync(Schema.toCodecJson(ExpenseViewFields));
 export const decodeSummary = Schema.decodeUnknownSync(Schema.toCodecJson(ExpenseSummaryFields));

@@ -13,6 +13,7 @@ import { FakeExpenseSuppliers } from "./suppliers";
 
 export type {
   AttachmentViewFields,
+  AttachResultFields,
   Deductibility,
   ExpenseFields,
   ExpenseFigures,
@@ -50,6 +51,7 @@ export {
   makeExpenses,
   makeExpensesLive,
 } from "./service";
+export { matchesType, SNIFFABLE_TYPES } from "./sniff";
 export type { FakeSupplier } from "./suppliers";
 export { ExpenseSuppliers, FakeExpenseSuppliers, FakeSupplierDirectory } from "./suppliers";
 

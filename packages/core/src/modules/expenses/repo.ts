@@ -83,6 +83,10 @@ export class ExpensesRepo extends Context.Service<
       workspaceId: WorkspaceId,
       id: AttachmentId,
     ) => Effect.Effect<AttachmentRow, NotFound | StoreUnavailable>;
+    readonly findAttachment: (
+      workspaceId: WorkspaceId,
+      id: AttachmentId,
+    ) => Effect.Effect<Option.Option<AttachmentRow>, StoreUnavailable>;
     readonly findAttachmentBySha: (
       workspaceId: WorkspaceId,
       expenseId: ExpenseId,
@@ -143,6 +147,7 @@ export const ExpensesRepoMemory: Layer.Layer<ExpensesRepo, never, MemoryTables> 
           .list(ws, { where: { status: "incomplete", removedAt: null } })
           .pipe(Effect.map((rows) => rows.length)),
       getAttachment: (ws, id) => attachments.get(ws, id),
+      findAttachment: (ws, id) => attachments.find(ws, id),
       findAttachmentBySha: (ws, expenseId, sha256) =>
         attachments.findUnique(ATTACHMENT_SHA_UNIQUE, [expenseId, sha256], ws),
       insertAttachment: attachments.insert,
