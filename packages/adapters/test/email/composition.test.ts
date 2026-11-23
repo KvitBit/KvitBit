@@ -169,23 +169,50 @@ describe("FallbackEmailSender pinning", () => {
     expect(tags(await run(fallback.send(message(), opts)))).toEqual(["success"]);
   });
 
-  test("unknown keys are never evicted; only delivered keys are bounded", async () => {
+  test("unknown keys are never forgotten, however old", async () => {
     const primary = sequenced("resend", [
       new EmailOutcomeUnknown({}),
-      "ok",
       "ok",
       new EmailNotAccepted({}),
     ]);
     const secondary = sequenced("smtp", []);
     const fallback = makeFallbackEmailSender(primary.sender, secondary.sender, {
-      maxDeliveredKeys: 1,
+      deliveredRetention: "1 millis",
     });
     await run(fallback.send(message(), opts));
+    await Bun.sleep(5);
     await run(fallback.send(message(), { idempotencyKey: "k2" }));
-    await run(fallback.send(message(), { idempotencyKey: "k3" }));
     const retry = await run(fallback.send(message(), opts));
     expect(tags(retry)).toEqual(["EmailOutcomeUnknown"]);
     expect(secondary.calls).toEqual([]);
+  });
+
+  test("an accepted key stays on its provider under heavy unrelated volume", async () => {
+    const others = Array.from({ length: 50 }, () => "ok" as const);
+    const primary = sequenced("resend", ["ok", ...others, new EmailNotAccepted({})]);
+    const secondary = sequenced("smtp", []);
+    const fallback = makeFallbackEmailSender(primary.sender, secondary.sender);
+    await run(fallback.send(message(), opts));
+    for (let n = 0; n < others.length; n++) {
+      await run(fallback.send(message(), { idempotencyKey: `other-${n}` }));
+    }
+    const retry = await run(fallback.send(message(), opts));
+    expect(tags(retry)).toEqual(["EmailOutcomeUnknown"]);
+    expect(secondary.calls).toEqual([]);
+  });
+
+  test("an accepted key is forgotten only after the retention window", async () => {
+    const primary = sequenced("resend", ["ok", "ok", new EmailNotAccepted({})]);
+    const secondary = sequenced("smtp", []);
+    const fallback = makeFallbackEmailSender(primary.sender, secondary.sender, {
+      deliveredRetention: "1 millis",
+    });
+    await run(fallback.send(message(), opts));
+    await Bun.sleep(5);
+    await run(fallback.send(message(), { idempotencyKey: "k2" }));
+    const late = await run(fallback.send(message(), opts));
+    expect(tags(late)).toEqual(["success"]);
+    expect(secondary.calls).toEqual(["k1"]);
   });
 });
 

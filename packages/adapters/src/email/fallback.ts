@@ -4,15 +4,17 @@ import {
   EmailSender,
   type OutboundEmail,
 } from "@kvitbit/domain/ports";
-import { Effect, Exit, Semaphore } from "effect";
+import { Clock, Duration, Effect, Exit, Semaphore } from "effect";
 import type { EmailSenderService } from "./shared";
 
 export interface FallbackOptions {
   /**
-   * Delivered keys remembered so a late retry stays on the provider that sent it; the oldest
-   * are forgotten first. Keys whose outcome is still unknown are never forgotten.
+   * How long a delivered key stays pinned to the provider that accepted it, so retries within
+   * this window never reach the other provider, however many other messages are sent. Keys
+   * whose outcome is still unknown are never forgotten. Defaults to 7 days; set it to at least
+   * the caller's retry window.
    */
-  readonly maxDeliveredKeys?: number;
+  readonly deliveredRetention?: Duration.Input;
 }
 
 type Provider = "primary" | "secondary";
@@ -23,7 +25,11 @@ type Provider = "primary" | "secondary";
  * - `delivered`: `provider` accepted it.
  * A key with no entry is held by no provider, so either may be tried.
  */
-type Holder = { readonly provider: Provider; readonly state: "unknown" | "delivered" };
+type Holder = {
+  readonly provider: Provider;
+  readonly state: "unknown" | "delivered";
+  readonly at: number;
+};
 
 /**
  * Sends through `primary` and fails over to `secondary`, with the same idempotency key, only
@@ -45,23 +51,24 @@ export const makeFallbackEmailSender = (
   secondary: EmailSenderService,
   options: FallbackOptions = {},
 ): EmailSenderService => {
-  const maxDeliveredKeys = options.maxDeliveredKeys ?? 10_000;
+  const retentionMillis = Duration.toMillis(
+    Duration.fromInputUnsafe(options.deliveredRetention ?? Duration.days(7)),
+  );
   const holders = new Map<string, Holder>();
   const locks = new Map<string, { readonly semaphore: Semaphore.Semaphore; users: number }>();
 
-  const record = (key: string, holder: Holder | undefined) => {
+  /**
+   * Sets a key's holder and forgets delivered keys older than the retention. Entries are kept
+   * in the order they were recorded, so the sweep stops at the first delivered key that is
+   * still fresh; unknown keys are skipped, never removed.
+   */
+  const record = (key: string, holder: Holder) => {
     holders.delete(key);
-    if (holder === undefined) return;
     holders.set(key, holder);
-    if (holder.state !== "delivered") return;
-    let delivered = 0;
-    for (const entry of holders.values()) if (entry.state === "delivered") delivered++;
     for (const [oldKey, entry] of holders) {
-      if (delivered <= maxDeliveredKeys) break;
-      if (entry.state === "delivered") {
-        holders.delete(oldKey);
-        delivered--;
-      }
+      if (entry.state !== "delivered") continue;
+      if (holder.at - entry.at < retentionMillis) break;
+      holders.delete(oldKey);
     }
   };
 
@@ -89,18 +96,20 @@ export const makeFallbackEmailSender = (
   const attempt = (provider: Provider, message: Message, opts: Opts) =>
     (provider === "primary" ? primary : secondary).send(message, opts).pipe(
       Effect.onExit((exit) =>
-        Effect.sync(() => {
-          const key = opts.idempotencyKey;
-          const held = holders.get(key);
-          if (Exit.isSuccess(exit)) return record(key, { provider, state: "delivered" });
-          const tags = exit.cause.reasons.map((reason) =>
-            "error" in reason ? reason.error._tag : reason._tag,
-          );
-          if (tags.some((tag) => mayHaveSent.has(tag))) {
-            if (held?.state !== "delivered") record(key, { provider, state: "unknown" });
-          }
-          // EmailNotAccepted and EmailRejected leave an earlier holder in place.
-        }),
+        Effect.flatMap(Clock.currentTimeMillis, (at) =>
+          Effect.sync(() => {
+            const key = opts.idempotencyKey;
+            const held = holders.get(key);
+            if (Exit.isSuccess(exit)) return record(key, { provider, state: "delivered", at });
+            const tags = exit.cause.reasons.map((reason) =>
+              "error" in reason ? reason.error._tag : reason._tag,
+            );
+            if (tags.some((tag) => mayHaveSent.has(tag))) {
+              if (held?.state !== "delivered") record(key, { provider, state: "unknown", at });
+            }
+            // EmailNotAccepted and EmailRejected leave an earlier holder in place.
+          }),
+        ),
       ),
     );
 
