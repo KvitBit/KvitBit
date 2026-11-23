@@ -313,6 +313,33 @@ describe("AresV3 address mapping", () => {
     ).toEqual({ street: "Dlouhá 5", city: "Praha", postalCode: "11000", country: "CZ" });
   });
 
+  test("without a structured house number the parsed street wins over the district", async () => {
+    expect(
+      await address({
+        nazevObce: "Praha",
+        nazevCastiObce: "Nové Město",
+        psc: 11000,
+        textovaAdresa: "Na Florenci 2116/15, Nové Město, 110 00 Praha 1",
+      }),
+    ).toEqual({ street: "Na Florenci 2116/15", city: "Praha", postalCode: "11000", country: "CZ" });
+    expect(
+      await address({
+        nazevObce: "Praha",
+        nazevUlice: "Na Florenci",
+        textovaAdresa: "Na Florenci 2116/15, Nové Město, 110 00 Praha 1",
+      }),
+    ).toEqual({ street: "Na Florenci 2116/15", city: "Praha", postalCode: "11000", country: "CZ" });
+  });
+
+  test("a street name alone, without number or text, is kept", async () => {
+    expect(await address({ nazevObce: "Praha", nazevUlice: "Na Florenci", psc: 11000 })).toEqual({
+      street: "Na Florenci",
+      city: "Praha",
+      postalCode: "11000",
+      country: "CZ",
+    });
+  });
+
   test("a missing sidlo gives an empty Czech address", async () => {
     const record = await expectRecord(
       lookup("10047514", () => json({ ico: "10047514", obchodniJmeno: "Firma s.r.o." })),
