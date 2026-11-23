@@ -18,13 +18,15 @@ type Reply = Effect.Effect<Response, HttpClientError.HttpClientError>;
 
 interface Recorded {
   readonly requests: Array<HttpClientRequest.HttpClientRequest>;
+  readonly signals: Array<AbortSignal>;
 }
 
 /** HttpClient that answers every request with `reply` and records the requests. */
 const fakeHttp = (reply: (request: HttpClientRequest.HttpClientRequest) => Reply) => {
-  const recorded: Recorded = { requests: [] };
-  const client = HttpClient.make((request) => {
+  const recorded: Recorded = { requests: [], signals: [] };
+  const client = HttpClient.make((request, _url, signal) => {
     recorded.requests.push(request);
+    recorded.signals.push(signal);
     return reply(request).pipe(
       Effect.map((response) => HttpClientResponse.fromWeb(request, response)),
     );
@@ -48,7 +50,7 @@ const lookup = (
     Effect.result,
     Effect.runPromise,
   );
-  return run.then((result) => ({ result, requests: http.recorded.requests }));
+  return run.then((result) => ({ result, ...http.recorded }));
 };
 
 const expectUnavailable = async (outcome: ReturnType<typeof lookup>) => {
@@ -169,6 +171,40 @@ describe("AresV3 lookup", () => {
     );
   });
 
+  test("a blank obchodniJmeno is RegistryUnavailable", async () => {
+    await expectUnavailable(lookup("10047514", () => json({ ...sro, obchodniJmeno: "   " })));
+  });
+
+  test("a pravniForma that is not three digits is RegistryUnavailable", async () => {
+    await expectUnavailable(lookup("10047514", () => json({ ...sro, pravniForma: "ABC" })));
+  });
+
+  test("a body that stalls after the headers times out as RegistryUnavailable", async () => {
+    const stalled = () =>
+      Effect.succeed(
+        new Response(
+          new ReadableStream({ start: (c) => c.enqueue(new TextEncoder().encode("{")) }),
+          {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          },
+        ),
+      );
+    const started = Date.now();
+    await expectUnavailable(lookup("10047514", stalled, { timeout: "30 millis" }));
+    expect(Date.now() - started).toBeLessThan(2000);
+  });
+
+  test("404 and 500 responses release the request when the lookup ends", async () => {
+    const openBody = (status: number) => () =>
+      Effect.succeed(new Response(new ReadableStream({}), { status }));
+    for (const status of [404, 500]) {
+      const { signals } = await lookup("10047514", openBody(status));
+      expect(signals).toHaveLength(1);
+      expect(signals[0]?.aborted).toBe(true);
+    }
+  });
+
   test("a subject for a different IČO is RegistryUnavailable", async () => {
     await expectUnavailable(lookup("10079190", () => json(sro)));
   });
@@ -248,6 +284,33 @@ describe("AresV3 address mapping", () => {
       postalCode: "10117",
       country: "DE",
     });
+  });
+
+  test("a street without a city keeps the structured street", async () => {
+    expect(
+      await address({
+        nazevUlice: "Dlouhá",
+        cisloDomovni: 5,
+        textovaAdresa: "Dlouhá 5, 70200 Ostrava",
+      }),
+    ).toEqual({ street: "Dlouhá 5", city: "Ostrava", postalCode: "70200", country: "CZ" });
+    expect(await address({ nazevUlice: "Dlouhá", cisloDomovni: 5 })).toEqual({
+      street: "Dlouhá 5",
+      city: "",
+      postalCode: "",
+      country: "CZ",
+    });
+  });
+
+  test("a missing psc is filled from textovaAdresa", async () => {
+    expect(
+      await address({
+        nazevObce: "Praha",
+        nazevUlice: "Dlouhá",
+        cisloDomovni: 5,
+        textovaAdresa: "Dlouhá 5, Staré Město, 110 00 Praha",
+      }),
+    ).toEqual({ street: "Dlouhá 5", city: "Praha", postalCode: "11000", country: "CZ" });
   });
 
   test("a missing sidlo gives an empty Czech address", async () => {

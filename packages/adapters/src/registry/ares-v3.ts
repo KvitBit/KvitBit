@@ -50,9 +50,11 @@ const AresExtra = Schema.Struct({
 /** Subset of ARES `EkonomickySubjekt`. */
 export const AresSubject = Schema.Struct({
   ico: Schema.String,
-  obchodniJmeno: Schema.String.check(Schema.isMinLength(1)),
+  obchodniJmeno: Schema.String.check(
+    Schema.makeFilter((name: string) => name.trim().length > 0, { expected: "a non-blank name" }),
+  ),
   sidlo: Schema.optionalKey(AresAddress),
-  pravniForma: OptionalString,
+  pravniForma: Schema.optionalKey(Schema.String.check(Schema.isPattern(/^\d{3}$/u))),
   dic: OptionalString,
   datumZaniku: Schema.optionalKey(IsoDate),
   dalsiUdaje: Schema.optionalKey(Schema.Array(AresExtra)),
@@ -79,14 +81,9 @@ const houseNumber = (address: AresAddress): string | undefined => {
   return orientation === undefined ? domovni : `${domovni}/${orientation}`;
 };
 
-const formatPsc = (address: AresAddress): string =>
-  address.psc !== undefined
-    ? String(address.psc).padStart(5, "0")
-    : (nonBlank(address.pscTxt) ?? "");
-
 /**
  * Splits ARES `textovaAdresa` ("Na Florenci 2116/15, Nové Město, 11000 Praha 1") into street,
- * postal code and city. Used only when the structured fields are missing.
+ * postal code and city. Fills only components the structured fields lack.
  */
 const parseTextAddress = (text: string): { street: string; city: string; postalCode: string } => {
   const parts = text
@@ -99,28 +96,36 @@ const parseTextAddress = (text: string): { street: string; city: string; postalC
   return { street: parts[0] ?? "", city: match[3] ?? "", postalCode: `${match[1]}${match[2]}` };
 };
 
+/**
+ * Each component comes from the structured fields when ARES supplies them, else from the
+ * parsed `textovaAdresa`, so a partial structured address keeps what ARES did send.
+ */
 const toAddress = (address: AresAddress | undefined): RegistryRecord["address"] => {
   const country = nonBlank(address?.kodStatu) ?? "CZ";
   if (address === undefined) return { street: "", city: "", postalCode: "", country };
+  const text = nonBlank(address.textovaAdresa);
+  const parsed = text === undefined ? undefined : parseTextAddress(text);
   const city = nonBlank(address.nazevObce);
   const number = houseNumber(address);
-  if (city !== undefined && (number !== undefined || nonBlank(address.nazevUlice) !== undefined)) {
-    // Villages without streets use the part of the municipality as the street line.
-    const streetName = nonBlank(address.nazevUlice) ?? nonBlank(address.nazevCastiObce) ?? city;
-    const street = number === undefined ? streetName : `${streetName} ${number}`;
-    return { street, city, postalCode: formatPsc(address), country };
-  }
-  const text = nonBlank(address.textovaAdresa);
-  if (text !== undefined) {
-    const parsed = parseTextAddress(text);
-    return {
-      street: parsed.street,
-      city: city ?? parsed.city,
-      postalCode: parsed.postalCode === "" ? formatPsc(address) : parsed.postalCode,
-      country,
-    };
-  }
-  return { street: "", city: city ?? "", postalCode: formatPsc(address), country };
+  // Villages without streets use the part of the municipality (or the municipality) instead.
+  const streetName =
+    nonBlank(address.nazevUlice) ??
+    nonBlank(address.nazevCastiObce) ??
+    (number === undefined ? undefined : city);
+  const structuredStreet =
+    streetName === undefined
+      ? undefined
+      : number === undefined
+        ? streetName
+        : `${streetName} ${number}`;
+  const psc =
+    address.psc !== undefined ? String(address.psc).padStart(5, "0") : nonBlank(address.pscTxt);
+  return {
+    street: structuredStreet ?? nonBlank(parsed?.street) ?? number ?? "",
+    city: city ?? nonBlank(parsed?.city) ?? "",
+    postalCode: psc ?? nonBlank(parsed?.postalCode) ?? "",
+    country,
+  };
 };
 
 /** Commercial register file mark (e.g. "C 12345/MSPH"), preferring the public-register source. */
@@ -189,6 +194,7 @@ const failureReason = (cause: unknown): string =>
 export const make = (config: AresV3Config = {}) =>
   Effect.gen(function* () {
     const client = yield* HttpClient.HttpClient;
+    const scopedClient = HttpClient.withScope(client);
     const timeout = config.timeout ?? defaultTimeout;
 
     const unavailable = (cause: unknown) =>
@@ -206,7 +212,8 @@ export const make = (config: AresV3Config = {}) =>
       const request = HttpClientRequest.get(`${aresBaseUrl}/ekonomicke-subjekty/${ico}`).pipe(
         HttpClientRequest.acceptJson,
       );
-      return yield* client.execute(request).pipe(
+      // withScope ties the response body to Effect.scoped, so every exit path releases it.
+      return yield* scopedClient.execute(request).pipe(
         Effect.flatMap((response) => readResponse(ico, response)),
         Effect.scoped,
         Effect.timeout(timeout),
