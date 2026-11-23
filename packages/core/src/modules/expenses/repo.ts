@@ -63,11 +63,22 @@ export class ExpensesRepo extends Context.Service<
       next: ExpenseRow,
       expectedRevision: number,
     ) => Effect.Effect<ExpenseRow, NotFound | Conflict | UniqueViolation | StoreUnavailable>;
-    /** Live (not removed) Expenses, newest first (id desc). */
+    /** Live (not removed) Expenses, newest first (id desc), with their attachment counts: one read. */
     readonly page: (
       workspaceId: WorkspaceId,
       request: ExpensePageRequest,
-    ) => Effect.Effect<ReadonlyArray<ExpenseRow>, StoreUnavailable>;
+    ) => Effect.Effect<
+      ReadonlyArray<{ readonly row: ExpenseRow; readonly attachments: number }>,
+      StoreUnavailable
+    >;
+    /** The row (removed included) with its attachments, oldest first: one read. */
+    readonly detail: (
+      workspaceId: WorkspaceId,
+      id: ExpenseId,
+    ) => Effect.Effect<
+      { readonly row: ExpenseRow; readonly attachments: ReadonlyArray<AttachmentRow> },
+      NotFound | StoreUnavailable
+    >;
     /** Live complete Expenses whose `field` falls in [from, to]. */
     readonly completeIn: (
       workspaceId: WorkspaceId,
@@ -115,6 +126,10 @@ export const ExpensesRepoMemory: Layer.Layer<ExpensesRepo, never, MemoryTables> 
     const expenses = tables.collection(ExpensesTable);
     const attachments = tables.collection(AttachmentsTable);
     const live = (rows: ReadonlyArray<ExpenseRow>) => rows.filter((r) => r.removedAt === null);
+    const attachmentsOf = (ws: WorkspaceId, expenseIds: ReadonlyArray<ExpenseId>) =>
+      expenseIds.length === 0
+        ? Effect.succeed<ReadonlyArray<AttachmentRow>>([])
+        : attachments.list(ws, { whereIn: { expenseId: [...expenseIds] }, orderBy: ["createdAt"] });
     return {
       get: (ws, id) => expenses.get(ws, id),
       lock: (ws, id) => expenses.lock(ws, id),
@@ -132,7 +147,26 @@ export const ExpensesRepoMemory: Layer.Layer<ExpensesRepo, never, MemoryTables> 
             direction: "desc",
             limit: request.limit,
           })
-          .pipe(Effect.map(live)),
+          .pipe(
+            Effect.map(live),
+            Effect.flatMap((rows) =>
+              Effect.map(
+                attachmentsOf(
+                  ws,
+                  rows.map((r) => r.id),
+                ),
+                (atts) => {
+                  const counts = new Map<string, number>();
+                  for (const a of atts) counts.set(a.expenseId, (counts.get(a.expenseId) ?? 0) + 1);
+                  return rows.map((row) => ({ row, attachments: counts.get(row.id) ?? 0 }));
+                },
+              ),
+            ),
+          ),
+      detail: (ws, id) =>
+        Effect.flatMap(expenses.get(ws, id), (row) =>
+          Effect.map(attachmentsOf(ws, [row.id]), (attachments) => ({ row, attachments })),
+        ),
       completeIn: (ws, range) =>
         expenses.list(ws, { where: { status: "complete", removedAt: null } }).pipe(
           Effect.map((rows) =>
@@ -152,13 +186,7 @@ export const ExpensesRepoMemory: Layer.Layer<ExpensesRepo, never, MemoryTables> 
         attachments.findUnique(ATTACHMENT_SHA_UNIQUE, [expenseId, sha256], ws),
       insertAttachment: attachments.insert,
       removeAttachment: (ws, id, rev) => attachments.remove(ws, id, rev),
-      attachmentsOf: (ws, expenseIds) =>
-        expenseIds.length === 0
-          ? Effect.succeed([])
-          : attachments.list(ws, {
-              whereIn: { expenseId: [...expenseIds] },
-              orderBy: ["createdAt"],
-            }),
+      attachmentsOf,
     };
   }),
 );

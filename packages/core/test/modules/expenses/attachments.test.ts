@@ -22,7 +22,17 @@ import {
 } from "../../../src/modules/expenses";
 import { CoreStore } from "../../../src/store/CoreStore";
 import { MemoryBlobStorage, WORKSPACE_A, WORKSPACE_B } from "../../helpers";
-import { as, bytesOf, czkInput, expenseId, fields, ownerB, record, scenario } from "./fixtures";
+import {
+  as,
+  bytesOf,
+  czkInput,
+  expenseId,
+  fields,
+  HEIC_HEAD,
+  ownerB,
+  record,
+  scenario,
+} from "./fixtures";
 
 const pdf = (text = "%PDF-1.7 receipt") => ({
   name: "receipt.pdf",
@@ -37,9 +47,6 @@ const sha256 = async (text: string) =>
   ).join("");
 
 const attachmentFields = (view: unknown) => view as AttachResultFields;
-
-/** A HEIF header: box size, "ftyp", brand "heic". */
-const HEIC_HEAD = Uint8Array.from([0, 0, 0, 0x18, ...new TextEncoder().encode("ftypheic")]);
 
 const collect = (stream: Stream.Stream<Uint8Array>) =>
   Effect.map(Stream.runCollect(stream), (chunks) =>
@@ -114,7 +121,7 @@ describe("attachments", () => {
 
   test("a stream past maxBytes is attachment.too_large; a wrong type is attachment.type_rejected", async () => {
     const layer = Layer.mergeAll(
-      makeExpensesLive({ maxAttachmentBytes: 12 }),
+      makeExpensesLive({ maxAttachmentBytes: 24 }),
       ExpensePayablesLive,
       ExpenseRecordsLive,
     ).pipe(Layer.provideMerge(FakeExpenseSuppliers), Layer.provideMerge(ExpensesRepoMemory));
@@ -125,7 +132,7 @@ describe("attachments", () => {
         const big = yield* Effect.exit(
           s.attach(id, {
             ...pdf(),
-            bytes: Stream.make(new TextEncoder().encode("%PDF-"), new Uint8Array(10)),
+            bytes: Stream.make(new TextEncoder().encode("%PDF-"), new Uint8Array(25)),
           }),
         );
         const exe = yield* Effect.exit(
@@ -155,7 +162,7 @@ describe("attachments", () => {
       Exit.succeed({
         big: Exit.fail(
           new Invalid({
-            issues: [{ path: ["file"], code: "attachment.too_large", params: { maxBytes: "12" } }],
+            issues: [{ path: ["file"], code: "attachment.too_large", params: { maxBytes: "24" } }],
           }),
         ),
         exe: Exit.fail(

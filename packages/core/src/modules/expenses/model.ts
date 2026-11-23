@@ -524,6 +524,7 @@ export const ExpenseSummaryFields = Schema.Struct({
   issuedOn: Schema.NullOr(IsoDate),
   /** As entered; shown even before a currency is chosen (incomplete). */
   total: Schema.NullOr(Schema.BigDecimal),
+  currency: Schema.NullOr(CurrencyCode),
   category: Schema.NullOr(Schema.String),
   tags: Schema.Array(Schema.String),
   attachments: Schema.Int,
@@ -589,6 +590,7 @@ export const summaryFields = (row: ExpenseRow, attachments: number): ExpenseSumm
   supplierDocumentNumber: row.supplierDocumentNumber,
   issuedOn: row.issuedOn,
   total: row.total,
+  currency: row.currency,
   category: row.category,
   tags: row.tags,
   attachments,

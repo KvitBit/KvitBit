@@ -5,22 +5,41 @@
  */
 import { Stream } from "effect";
 
-/** Bytes needed to decide every supported type (HEIC: `....ftypheic`). */
-const PREFIX = 12;
+/**
+ * Bytes buffered to decide (bounded): enough for the HEIF `ftyp` box with its compatible brands.
+ * A shorter upload is decided on what arrived.
+ */
+const PREFIX = 64;
 
 const startsWith = (bytes: Uint8Array, signature: ReadonlyArray<number>, offset = 0) =>
   bytes.length >= offset + signature.length && signature.every((b, i) => bytes[offset + i] === b);
 
 const ascii = (text: string) => [...text].map((c) => c.charCodeAt(0));
 
-const HEIF_BRANDS = ["heic", "heix", "heim", "heis", "hevc", "hevx", "mif1", "msf1"];
+/** HEIC still-image brands (IANA image/heic, ISO/IEC 23008-12 Annex B). */
+const HEIC_BRANDS = new Set(["heic", "heix"]);
+
+const brandAt = (b: Uint8Array, offset: number) =>
+  String.fromCharCode(b[offset] ?? 0, b[offset + 1] ?? 0, b[offset + 2] ?? 0, b[offset + 3] ?? 0);
+
+/**
+ * `image/heic`: an `ftyp` box first whose major or compatible brands include a HEIC still-image
+ * brand. Generic HEIF (`mif1` alone) and image sequences (`msf1`, `hevc`) are not HEIC.
+ */
+const isHeic = (b: Uint8Array) => {
+  if (b.length < 16 || !startsWith(b, ascii("ftyp"), 4)) return false;
+  const size = (((b[0] ?? 0) << 24) | ((b[1] ?? 0) << 16) | ((b[2] ?? 0) << 8) | (b[3] ?? 0)) >>> 0;
+  if (size < 16 || size % 4 !== 0) return false;
+  const brands = [brandAt(b, 8)];
+  for (let at = 16; at + 4 <= Math.min(size, b.length); at += 4) brands.push(brandAt(b, at));
+  return brands.some((brand) => HEIC_BRANDS.has(brand));
+};
 
 const SIGNATURES: Readonly<Record<string, (bytes: Uint8Array) => boolean>> = {
   "application/pdf": (b) => startsWith(b, ascii("%PDF-")),
   "image/jpeg": (b) => startsWith(b, [0xff, 0xd8, 0xff]),
   "image/png": (b) => startsWith(b, [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
-  "image/heic": (b) =>
-    startsWith(b, ascii("ftyp"), 4) && HEIF_BRANDS.some((brand) => startsWith(b, ascii(brand), 8)),
+  "image/heic": isHeic,
 };
 
 /** Whether `prefix` (the first bytes of the content) matches the declared `contentType`. */

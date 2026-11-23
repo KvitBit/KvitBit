@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import type { ExpenseId, IsoDate } from "@kvitbit/domain/contract";
+import type { AttachmentId, ExpenseId, IsoDate } from "@kvitbit/domain/contract";
 import {
   Conflict,
   Expenses,
@@ -225,8 +225,15 @@ describe("authorization and Workspace scoping", () => {
       Effect.gen(function* () {
         const id = expenseId(yield* record(czkInput));
         const s = yield* svc;
+        const att = (yield* s.attach(id, {
+          name: "a.pdf",
+          contentType: "application/pdf",
+          bytes: bytesOf("%PDF-1.7"),
+        })) as unknown as { readonly id: AttachmentId };
         yield* as(reader, s.get(id));
         yield* as(reader, s.list({}));
+        const download = yield* as(reader, s.attachment(id, att.id));
+        expect(download.filename).toBe("a.pdf");
         return yield* Effect.exit(
           as(
             reader,

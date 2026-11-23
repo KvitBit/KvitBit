@@ -101,3 +101,17 @@ export const record = (input: Record<string, unknown>, requestKey?: string) =>
 export const bytesOf = (text: string) => Stream.make(new TextEncoder().encode(text));
 
 export const expenseId = (view: ExpenseView) => fields(view).id as ExpenseId;
+
+/** A HEIC `ftyp` box: size 24, major brand mif1, compatible brands mif1 + heic. */
+export const HEIC_HEAD = Uint8Array.from([
+  0,
+  0,
+  0,
+  24,
+  ...new TextEncoder().encode("ftypmif1"),
+  0,
+  0,
+  0,
+  0,
+  ...new TextEncoder().encode("mif1heic"),
+]);

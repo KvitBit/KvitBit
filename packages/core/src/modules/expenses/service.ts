@@ -31,6 +31,7 @@ import type {
 } from "@kvitbit/domain/contract";
 import {
   Conflict,
+  ExpenseId as ExpenseIdSchema,
   ExpenseInput,
   Expenses,
   ExpenseView as ExpenseViewSchema,
@@ -41,7 +42,7 @@ import {
 import type { BlobKey } from "@kvitbit/domain/ports";
 import { BlobStorage, ExchangeRates } from "@kvitbit/domain/ports";
 import type { Stream } from "effect";
-import { BigDecimal, Clock, Effect, Layer, Option, Result } from "effect";
+import { BigDecimal, Clock, Effect, Layer, Option, Result, Schema } from "effect";
 import type { FxRate } from "../../engines/fx";
 import { authorizeInWorkspace } from "../../policy/Policy";
 import { appendAudit } from "../../shared/audit";
@@ -192,14 +193,15 @@ const AUDITED: ReadonlyArray<keyof ReturnType<typeof viewFields>> = [
  * there is no separate receivedOn column).
  */
 const encodeCursor = (filter: string, id: ExpenseId) => btoa(JSON.stringify([filter, id]));
+const isExpenseId = Schema.is(ExpenseIdSchema);
 const decodeCursor = (cursor: string): readonly [string, ExpenseId] | null => {
   try {
     const value: unknown = JSON.parse(atob(cursor));
     return Array.isArray(value) &&
       value.length === 2 &&
       typeof value[0] === "string" &&
-      typeof value[1] === "string"
-      ? [value[0], value[1] as ExpenseId]
+      isExpenseId(value[1])
+      ? [value[0], value[1]]
       : null;
   } catch {
     return null;
@@ -314,14 +316,25 @@ export const makeExpenses = (options: ExpensesOptions = {}) =>
         return Result.isFailure(fx) ? yield* fx.failure : fx.success;
       });
 
-    /** Full validation and derived figures for a complete Expense; none for an incomplete one. */
-    const finish = (row: ExpenseRow, previous: ExpenseRow | null) =>
-      Effect.gen(function* () {
-        if (row.status === "incomplete") return { ...row, figures: null };
-        const [first, ...rest] = validateComplete(row);
-        if (first !== undefined) return yield* new Invalid({ issues: [first, ...rest] });
-        return { ...row, figures: computeFigures(row, yield* rateFor(row, previous)) };
-      });
+    /** The complete-Expense checks; fails with every issue at once. */
+    const validate = (row: ExpenseRow) => {
+      const [first, ...rest] = validateComplete(row);
+      return first === undefined
+        ? Effect.void
+        : Effect.fail(new Invalid({ issues: [first, ...rest] }));
+    };
+
+    /** The rate `row` needs once valid: null for incomplete or CZK rows (no CNB call). */
+    const prepareRate = (row: ExpenseRow, previous: ExpenseRow | null) =>
+      row.status === "incomplete"
+        ? Effect.succeed(null)
+        : Effect.andThen(validate(row), rateFor(row, previous));
+
+    /** Full validation and derived figures at `fx`; none for an incomplete Expense. */
+    const finish = (row: ExpenseRow, fx: FxRate | null) =>
+      row.status === "incomplete"
+        ? Effect.succeed<ExpenseRow>({ ...row, figures: null })
+        : Effect.as(validate(row), { ...row, figures: computeFigures(row, fx) });
 
     const viewOf = (ws: WorkspaceId, row: ExpenseRow) =>
       Effect.map(
@@ -385,7 +398,8 @@ export const makeExpenses = (options: ExpensesOptions = {}) =>
                 createdAt: now,
                 updatedAt: now,
               };
-              const row = yield* finish(yield* applyFields(empty, fields), null);
+              const merged = yield* applyFields(empty, fields);
+              const row = yield* finish(merged, yield* prepareRate(merged, null));
               const saved = yield* repo.insert(row);
               yield* appendAudit({
                 workspaceId,
@@ -405,18 +419,24 @@ export const makeExpenses = (options: ExpensesOptions = {}) =>
           const { workspaceId } = yield* authorizeInWorkspace("expense.write");
           yield* requireJson(patch);
           const fields = yield* decodeFields(patch);
-          // Prepare outside the lock: supplier lookup and CNB fixing may call out.
+          // The CNB fixing (read-only, may call out) is fetched before the lock, from an unlocked
+          // read at the expected revision; the supplier is resolved inside the transaction because
+          // `fromIco` may upsert a Contact, which must roll back with a failed edit (C1).
           const seen = yield* checkRevision(yield* getLive(workspaceId, id), expectedRevision);
-          const prepared = yield* finish(
-            { ...(yield* applyFields(seen, fields)), updatedAt: yield* nowIso },
+          const fx = yield* prepareRate(
+            yield* applyFields(seen, { ...fields, supplier: undefined }),
             seen,
           );
           return yield* store.transaction(
             Effect.gen(function* () {
-              // Same revision as `seen`, so `prepared` was derived from the row now locked.
+              // Same revision as `seen`, so `fx` was derived from the row now locked.
               const current = yield* checkRevision(
                 yield* lockLive(workspaceId, id),
                 expectedRevision,
+              );
+              const prepared = yield* finish(
+                { ...(yield* applyFields(current, fields)), updatedAt: yield* nowIso },
+                fx,
               );
               if (current.payments > 0) {
                 // A paid Expense keeps the currency its Payments are in (P1) and stays complete.
@@ -619,7 +639,10 @@ export const makeExpenses = (options: ExpensesOptions = {}) =>
       provide(
         Effect.gen(function* () {
           const { workspaceId } = yield* authorizeInWorkspace("expense.read");
-          return yield* viewOf(workspaceId, yield* getLive(workspaceId, id));
+          // One snapshot for the row and its attachments, so the view matches its revision.
+          const { row, attachments } = yield* store.transaction(repo.detail(workspaceId, id));
+          if (row.removedAt !== null) return yield* notFound(id);
+          return encodeView(viewFields(row, attachments)) as unknown as ExpenseView;
         }).pipe(orUnavailable),
       );
 
@@ -639,26 +662,23 @@ export const makeExpenses = (options: ExpensesOptions = {}) =>
             if (cursor[0] !== filter) return yield* invalid("page.cursor_mismatch", ["cursor"]);
             beforeId = cursor[1];
           }
-          const rows = yield* repo.page(workspaceId, {
-            ...(filter === "incomplete" ? { status: "incomplete" as const } : {}),
-            ...(beforeId === undefined ? {} : { beforeId }),
-            limit: limit + 1,
-          });
-          const items = rows.slice(0, limit);
-          const atts = yield* repo.attachmentsOf(
-            workspaceId,
-            items.map((r) => r.id),
+          // Rows and attachment counts come from one snapshot (one repository read).
+          const rows = yield* store.transaction(
+            repo.page(workspaceId, {
+              ...(filter === "incomplete" ? { status: "incomplete" as const } : {}),
+              ...(beforeId === undefined ? {} : { beforeId }),
+              limit: limit + 1,
+            }),
           );
-          const counts = new Map<string, number>();
-          for (const a of atts) counts.set(a.expenseId, (counts.get(a.expenseId) ?? 0) + 1);
+          const items = rows.slice(0, limit);
           const last = items.at(-1);
           return {
             items: items.map(
               (r) =>
-                encodeSummary(summaryFields(r, counts.get(r.id) ?? 0)) as unknown as ExpenseSummary,
+                encodeSummary(summaryFields(r.row, r.attachments)) as unknown as ExpenseSummary,
             ),
             nextCursor:
-              rows.length > limit && last !== undefined ? encodeCursor(filter, last.id) : null,
+              rows.length > limit && last !== undefined ? encodeCursor(filter, last.row.id) : null,
           };
         }).pipe(orUnavailable),
       );
