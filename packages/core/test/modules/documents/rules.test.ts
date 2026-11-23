@@ -9,13 +9,14 @@ import type {
   RequestKey,
   ScheduleId,
 } from "@kvitbit/domain/contract";
-import { Documents, Forbidden, NotFound } from "@kvitbit/domain/contract";
+import { Documents, Forbidden, NotFound, Unavailable } from "@kvitbit/domain/contract";
 import { RequestOutcome } from "@kvitbit/domain/ports";
 import { Effect, Exit, Layer, Ref } from "effect";
 import {
   DocumentFakesLive,
   DocumentFixtures,
   DocumentSender,
+  DocumentSenderStub,
   DocumentsLive,
   DocumentsRepo,
   DocumentsRepoMemory,
@@ -23,7 +24,7 @@ import {
 } from "../../../src/modules/documents";
 import { NumberingSeries, NumberingTestLayer } from "../../../src/modules/numbering";
 import { makeRequestOutcome } from "../../../src/shared/requestOutcome";
-import { CoreStore, UniqueViolation } from "../../../src/store/CoreStore";
+import { CoreStore, StoreUnavailable, UniqueViolation } from "../../../src/store/CoreStore";
 import { member, runTest } from "../../helpers";
 import {
   as,
@@ -503,22 +504,22 @@ describe("review round 1 regressions", () => {
     expect(czk.paymentQr).toEqual({
       format: "spayd",
       payload:
-        "SPD*1.0*ACC:CZ6501000000000123456789*AM:2980.00*CC:CZK*DT:20261207*X-VS:20260001*RN:DODAVATEL S.R.O.",
+        "SPD*1.0*ACC:CZ1801000000000123456789*AM:2980.00*CC:CZK*DT:20261207*X-VS:20260001*RN:DODAVATEL S.R.O.",
     });
     expect(eur.paymentQr?.format).toBe("epc");
-    expect(eur.paymentQr?.payload.split("\n")).toEqual([
-      "BCD",
-      "002",
-      "1",
-      "SCT",
-      "KOMBCZPP",
-      "Dodavatel s.r.o.",
-      "CZ0201000000000987654321",
-      "EUR12.10",
-      "",
-      "",
-      "",
-    ]);
+    // EPC069-12 §2.2: an unnumbered draft's payload ends right after the amount.
+    expect(eur.paymentQr?.payload).toBe(
+      [
+        "BCD",
+        "002",
+        "1",
+        "SCT",
+        "KOMBCZPP",
+        "Dodavatel s.r.o.",
+        "CZ6701000000000987654321",
+        "EUR12.10",
+      ].join("\n"),
+    );
     expect(usd.paymentQr).toBeNull();
   });
 
@@ -538,5 +539,108 @@ describe("review round 1 regressions", () => {
       ),
     );
     expect([admin, writer]).toEqual(["draft", "draft"]);
+  });
+});
+
+describe("review round 2 regressions (payment QR inputs)", () => {
+  test("an explicit variable symbol is kept exactly; a non 1-10 digit one is Invalid", async () => {
+    const [kept, tooLong, letters] = ok(
+      await scenario(
+        Effect.gen(function* () {
+          const docs = yield* Documents;
+          return [
+            yield* docs.preview(invoiceInput({ variableSymbol: "0012345678" })),
+            yield* Effect.flip(docs.preview(invoiceInput({ variableSymbol: "12345678901" }))),
+            yield* Effect.flip(docs.createDraft(invoiceInput({ variableSymbol: "VS-1" }))),
+          ] as const;
+        }),
+      ),
+    );
+    expect(kept.paymentQr?.payload).toContain("*X-VS:0012345678*");
+    for (const err of [tooLong, letters]) {
+      expect(err).toMatchObject({ _tag: "Invalid", issues: [{ path: ["variableSymbol"] }] });
+    }
+  });
+
+  test("an IBAN failing mod-97 is Invalid and the draft is not stored", async () => {
+    const [err, listed] = ok(
+      await scenario(
+        Effect.gen(function* () {
+          const f = yield* DocumentFixtures;
+          const current = (yield* Ref.get(f.issuers)).get(WS);
+          if (!current) return yield* Effect.die("seed missing");
+          yield* f.putIssuer({
+            ...current,
+            bankAccounts: current.bankAccounts.map((a) => ({
+              ...a,
+              iban: "CZ6501000000000123456789",
+            })),
+          });
+          const docs = yield* Documents;
+          const err = yield* Effect.flip(docs.createDraft(invoiceInput()));
+          return [err, (yield* docs.list({})).items.length] as const;
+        }),
+      ),
+    );
+    expect(err).toMatchObject({
+      _tag: "Invalid",
+      issues: [{ path: ["bankAccount"], params: { field: "iban" } }],
+    });
+    expect(listed).toBe(0);
+  });
+
+  test("an amount above the SPAYD maximum is Invalid", async () => {
+    const err = ok(
+      await scenario(
+        Effect.flip(
+          Effect.flatMap(Documents, (d) =>
+            d.preview(
+              invoiceInput({
+                lines: [{ description: "x", unitPrice: dec("10000000"), vat: "outside_scope" }],
+              }),
+            ),
+          ),
+        ),
+      ),
+    );
+    expect(err).toMatchObject({ _tag: "Invalid", issues: [{ code: "qr.field_too_long" }] });
+  });
+});
+
+describe("store outages", () => {
+  test("a StoreUnavailable from the repo is Unavailable{database} on reads and discard", async () => {
+    const failing = Layer.effect(
+      DocumentsRepo,
+      Effect.map(DocumentsRepo, (repo) =>
+        DocumentsRepo.of({
+          ...repo,
+          get: () => Effect.fail(new StoreUnavailable({})),
+          getForUpdate: () => Effect.fail(new StoreUnavailable({})),
+          search: () => Effect.fail(new StoreUnavailable({})),
+        }),
+      ),
+    ).pipe(Layer.provide(DocumentsRepoMemory));
+    const layer = DocumentsLive.pipe(
+      Layer.provideMerge(
+        Layer.mergeAll(failing, NumberingTestLayer, DocumentFakesLive, DocumentSenderStub),
+      ),
+    );
+    const id = MISSING as DocumentId;
+    const exit = await runTest(
+      member("owner"),
+      Effect.gen(function* () {
+        yield* seed();
+        const docs = yield* Documents;
+        return [
+          yield* Effect.flip(docs.get(id)),
+          yield* Effect.flip(docs.list({})),
+          yield* Effect.flip(docs.history(id)),
+          yield* Effect.flip(docs.discardDraft(id, 1)),
+        ] as const;
+      }).pipe(Effect.provide(layer)),
+    );
+    for (const err of ok(exit)) {
+      expect(err as unknown).toEqual(new Unavailable({ dependency: "database" }));
+    }
   });
 });

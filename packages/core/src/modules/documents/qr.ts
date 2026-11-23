@@ -1,27 +1,54 @@
 /**
  * Payment QR for `DocumentView.paymentQr` (rule D12): the `forDocument` subset of core-ports
- * 5.3 PaymentQr, which src/engines does not provide yet. SPAYD (QR Platba, CBA 1.2) for CZK,
- * EPC069-12 v002 (SCT) for EUR, each only with an IBAN; otherwise null. Credit Notes and
- * cancelled documents never carry one. A document whose amount is outside the format's range
- * gets null rather than failing the view. Move to src/engines (PaymentQr) when it lands there.
+ * 5.3 PaymentQr, which src/engines does not provide yet (move it there when it lands).
+ * SPAYD (QR Platba, CBA 1.2) for CZK, EPC069-12 v002 (SCT) for EUR, each only when the bank
+ * account has an IBAN; otherwise null. Credit Notes, cancelled documents and documents with
+ * nothing to pay (gross <= 0) never carry one.
+ *
+ * Validation (5.3): an IBAN failing the ISO 13616 mod-97 check, an amount above the format's
+ * maximum, or a variable symbol that is not 1-10 digits is `Invalid`; `compose` runs this on
+ * every write and preview, so stored documents always encode. Optional texts (recipient name,
+ * remittance) are truncated at a word boundary. A caller's variable symbol is kept exactly; one
+ * derived from the document number takes its last ten digits.
  */
-import { BigDecimal } from "effect";
+import type {
+  CurrencyCode,
+  DocumentKind,
+  DocumentStatus,
+  IsoDate,
+  Issue,
+} from "@kvitbit/domain/contract";
+import { Invalid } from "@kvitbit/domain/contract";
+import { BigDecimal, Result } from "effect";
 import { roundAt } from "../../engines/decimal";
-import type { DocumentRecord } from "./record";
+import type { BankAccountRecord } from "./record";
+
+/** What `forDocument` reads; a `DocumentRecord` satisfies it. */
+export interface QrSource {
+  readonly kind: DocumentKind;
+  readonly status: DocumentStatus;
+  readonly currency: CurrencyCode;
+  readonly number: string | null;
+  readonly variableSymbol: string | null;
+  readonly dueOn: IsoDate;
+  readonly totals: { readonly gross: { readonly amount: BigDecimal.BigDecimal } };
+  readonly issuer: { readonly name: string; readonly bankAccount: BankAccountRecord | null };
+}
+
+export type PaymentQr = { readonly format: "spayd" | "epc"; readonly payload: string };
 
 const MAX_SPAYD = BigDecimal.fromStringUnsafe("9999999.99");
 const MAX_EPC = BigDecimal.fromStringUnsafe("999999999.99");
-const MIN = BigDecimal.fromStringUnsafe("0.01");
+
+const invalid = (path: Issue["path"], code: Issue["code"], params?: Record<string, string>) =>
+  Result.fail(new Invalid({ issues: [params ? { path, code, params } : { path, code }] }));
 
 /** Amount at 2 decimals, half away from zero, plain notation. */
 const amount2 = (value: BigDecimal.BigDecimal) => {
   const scaled = BigDecimal.scale(roundAt(value, 2), 2);
-  const digits = (scaled.value < 0n ? -scaled.value : scaled.value).toString().padStart(3, "0");
-  return `${scaled.value < 0n ? "-" : ""}${digits.slice(0, -2)}.${digits.slice(-2)}`;
+  const digits = scaled.value.toString().padStart(3, "0");
+  return `${digits.slice(0, -2)}.${digits.slice(-2)}`;
 };
-
-const inRange = (value: BigDecimal.BigDecimal, max: BigDecimal.BigDecimal) =>
-  BigDecimal.isGreaterThanOrEqualTo(value, MIN) && BigDecimal.isLessThanOrEqualTo(value, max);
 
 /** Cuts text to `max` characters at a word boundary (5.3: optional text is truncated). */
 const truncate = (text: string, max: number) => {
@@ -32,55 +59,81 @@ const truncate = (text: string, max: number) => {
   return (space > 0 ? cut.slice(0, space) : clean.slice(0, max)).trim();
 };
 
-const spaydValue = (value: string) => value.toUpperCase().replaceAll("*", "%2A");
-
-/** The variable symbol: the document's own, else the digits of its number (max 10). */
-const variableSymbolOf = (row: DocumentRecord): string | null => {
-  const vs = (row.variableSymbol ?? row.number ?? "").replace(/\D/g, "");
-  return vs === "" ? null : vs.slice(-10);
+/** ISO 13616: 2 letters, 2 check digits, up to 30 alphanumerics, mod 97 = 1. */
+export const isValidIban = (iban: string): boolean => {
+  if (!/^[A-Z]{2}\d{2}[A-Z0-9]{11,30}$/.test(iban)) return false;
+  const rearranged = iban.slice(4) + iban.slice(0, 4);
+  let remainder = 0;
+  for (const ch of rearranged) {
+    const digits = Number.parseInt(ch, 36).toString();
+    for (const d of digits) remainder = (remainder * 10 + Number(d)) % 97;
+  }
+  return remainder === 1;
 };
 
-export const paymentQrOf = (
-  row: DocumentRecord,
-): { readonly format: "spayd" | "epc"; readonly payload: string } | null => {
-  if (row.kind === "credit_note" || row.status === "cancelled") return null;
-  const account = row.issuer.bankAccount;
+/** A caller's variable symbol must be 1-10 digits (SPAYD X-VS). */
+export const isValidVariableSymbol = (vs: string): boolean => /^\d{1,10}$/.test(vs);
+
+const spaydValue = (value: string) => value.toUpperCase().replaceAll("*", "%2A");
+
+export const forDocument = (doc: QrSource): Result.Result<PaymentQr | null, Invalid> => {
+  if (doc.kind === "credit_note" || doc.status === "cancelled") return Result.succeed(null);
+  const account = doc.issuer.bankAccount;
   const iban = account?.iban?.replace(/\s/g, "").toUpperCase();
-  if (!account || !iban) return null;
-  const gross = row.totals.gross.amount;
-  if (row.currency === "CZK") {
-    if (!inRange(gross, MAX_SPAYD)) return null;
+  if (!account || !iban) return Result.succeed(null);
+  if (doc.currency !== "CZK" && doc.currency !== "EUR") return Result.succeed(null);
+  const gross = doc.totals.gross.amount;
+  if (!BigDecimal.isPositive(gross)) return Result.succeed(null);
+  if (!isValidIban(iban)) return invalid(["bankAccount"], "request.malformed", { field: "iban" });
+  let vs: string | null = null;
+  if (doc.variableSymbol !== null) {
+    if (!isValidVariableSymbol(doc.variableSymbol)) {
+      return invalid(["variableSymbol"], "request.malformed");
+    }
+    vs = doc.variableSymbol;
+  } else {
+    const digits = (doc.number ?? "").replace(/\D/g, "");
+    vs = digits === "" ? null : digits.slice(-10);
+  }
+  const bic = account.bic?.trim().toUpperCase() || null;
+  if (doc.currency === "CZK") {
+    if (BigDecimal.isGreaterThan(gross, MAX_SPAYD)) {
+      return invalid(["lines"], "qr.field_too_long", { field: "AM", max: "9999999.99" });
+    }
     const fields = [
       "SPD",
       "1.0",
-      `ACC:${iban}${account.bic ? `+${account.bic.toUpperCase()}` : ""}`,
+      `ACC:${iban}${bic ? `+${bic}` : ""}`,
       `AM:${amount2(gross)}`,
       "CC:CZK",
-      `DT:${row.dueOn.replaceAll("-", "")}`,
+      `DT:${doc.dueOn.replaceAll("-", "")}`,
     ];
-    const vs = variableSymbolOf(row);
     if (vs !== null) fields.push(`X-VS:${vs}`);
-    const name = truncate(row.issuer.name, 35);
+    const name = truncate(doc.issuer.name, 35);
     if (name !== "") fields.push(`RN:${spaydValue(name)}`);
-    return { format: "spayd", payload: fields.join("*") };
+    return Result.succeed({ format: "spayd", payload: fields.join("*") });
   }
-  if (row.currency === "EUR") {
-    if (!inRange(gross, MAX_EPC)) return null;
-    const remittance = row.number ? truncate(row.number, 140) : "";
-    const payload = [
-      "BCD",
-      "002",
-      "1",
-      "SCT",
-      account.bic?.toUpperCase() ?? "",
-      truncate(row.issuer.name, 70),
-      iban,
-      `EUR${amount2(gross)}`,
-      "",
-      "",
-      remittance,
-    ].join("\n");
-    return { format: "epc", payload };
+  if (BigDecimal.isGreaterThan(gross, MAX_EPC)) {
+    return invalid(["lines"], "qr.field_too_long", { field: "amount", max: "999999999.99" });
   }
-  return null;
+  const fields = [
+    "BCD",
+    "002",
+    "1",
+    "SCT",
+    bic ?? "",
+    truncate(doc.issuer.name, 70),
+    iban,
+    `EUR${amount2(gross)}`,
+    "", // purpose
+    "", // structured reference
+    doc.number ? truncate(doc.number, 140) : "", // unstructured remittance
+  ];
+  // EPC069-12 §2.2: the payload ends at its last populated field.
+  while (fields.length > 0 && fields[fields.length - 1] === "") fields.pop();
+  return Result.succeed({ format: "epc", payload: fields.join("\n") });
 };
+
+/** The view's QR: stored documents passed `forDocument` when composed, so a failure is null. */
+export const paymentQrOf = (doc: QrSource): PaymentQr | null =>
+  Result.getOrElse(forDocument(doc), () => null);

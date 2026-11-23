@@ -45,6 +45,7 @@ import type { StoreUnavailable } from "../../store/CoreStore";
 import { NumberingSeries } from "../numbering";
 import type { ContactForDocument, IssuerForDocument } from "./ports";
 import { DocumentContacts, DocumentIssuers, DocumentPriceList } from "./ports";
+import { forDocument, isValidVariableSymbol } from "./qr";
 import type {
   BankAccountRecord,
   ContactSnapshotRecord,
@@ -120,6 +121,8 @@ export interface ComposeOptions {
    * them unless `refreshParties`). Defaults, regime and bank accounts still come from the
    * current Contact and Workspace.
    */
+  /** The document's number, when it has one (P2 issue), for the payment QR check. */
+  readonly number?: string | null;
   readonly freeze?: {
     readonly contact: ContactSnapshotRecord;
     readonly issuer: IssuerSnapshotRecord;
@@ -445,6 +448,9 @@ export const compose = (
       }
     });
     if (spec.lines.length === 0) issues.push(issue(["lines"], "document.lines_required"));
+    if (given.variableSymbol !== undefined && !isValidVariableSymbol(given.variableSymbol)) {
+      issues.push(issue(["variableSymbol"], "request.malformed"));
+    }
     if (issues.length > 0) return yield* invalid(issues);
 
     // Series: an explicit (Document or Contact) choice must be a series of this kind here.
@@ -525,6 +531,20 @@ export const compose = (
         deducts: l.deducts,
       });
     }
+
+    // Rule D12 / 5.3: the payment QR must encode (IBAN, amount, variable symbol). P2's issue
+    // re-checks with the allocated number (`options.number`).
+    const qr = forDocument({
+      kind,
+      status: "draft",
+      currency,
+      number: options.number ?? null,
+      variableSymbol: given.variableSymbol ?? null,
+      dueOn,
+      totals,
+      issuer: { name: issuer.party.name, bankAccount },
+    });
+    if (Result.isFailure(qr)) return yield* qr.failure;
 
     return {
       kind,
