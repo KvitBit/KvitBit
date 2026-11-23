@@ -5,12 +5,17 @@
  * Strategy, kept deliberately simple:
  * - Lookup is by exact date: a row whose `fixing_date` equals the requested date. A row is a
  *   published fixing, so a hit is always the right answer for its own date.
- * - On a miss the inner adapter is asked and its fixing is upserted under its own
- *   `fixing_date`, which may be earlier than the requested date (carry-back).
- * - So a weekend or holiday request never hits and costs one inner request each time; put
- *   `MemoryCache` in front to absorb repeats within a process. Answering a later date from an
- *   older row would need proof that no fixing was published in between, which the table
- *   does not record.
+ * - On a miss the inner adapter is asked and its fixing is inserted under its own
+ *   `fixing_date`, which may be earlier than the requested date (carry-back). An existing row
+ *   is left alone (`on conflict do nothing`, which takes no row lock, so concurrent callers in
+ *   long transactions do not serialize on it). Only an unreadable row for the requested date
+ *   is overwritten, when the inner adapter returns that same date.
+ * - So a request that carries back (weekend, holiday, today before the 14:30 publication)
+ *   never hits and costs one inner request each time. `MemoryCache` in front absorbs repeats
+ *   only for finished days; carried-back answers for today are refetched on every request by
+ *   design, so the new publication is never hidden. Answering a later date from an older row
+ *   would need proof that no fixing was published in between, which the table does not
+ *   record.
  * - The cache is best effort: a failed read, an unreadable row or a failed write is logged
  *   and the request goes to, or returns from, the inner adapter. Only the inner adapter's
  *   failure fails the request. Each statement runs in its own transaction, which becomes a
@@ -44,7 +49,7 @@ const StoredRates = Schema.Array(
     quantity: Schema.Int.pipe(Schema.check(Schema.isGreaterThan(0))),
     rate: DecimalString,
   }),
-);
+).pipe(Schema.check(Schema.isMinLength(1)));
 
 const Row = Schema.Struct({ sequence: Schema.Int, rates: StoredRates });
 const decodeRow = Schema.decodeUnknownEffect(Row);
@@ -64,35 +69,54 @@ export const make: Effect.Effect<
   const inner = yield* ExchangeRates;
   const sql = yield* SqlClient.SqlClient;
 
-  const read = (date: IsoDate): Effect.Effect<Option.Option<CnbFixing>> =>
+  /** A hit, a miss, or a row for `date` that exists but does not decode. */
+  type Lookup =
+    | { readonly _tag: "Hit"; readonly fixing: CnbFixing }
+    | { readonly _tag: "Miss" }
+    | { readonly _tag: "Unreadable" };
+  const miss: Lookup = { _tag: "Miss" };
+
+  const read = (date: IsoDate): Effect.Effect<Lookup> =>
     sql<{ sequence: unknown; rates: unknown }>`
       select sequence, rates from fx_fixings where fixing_date = ${date}
     `.pipe(
       sql.withTransaction,
+      Effect.catch((cause) =>
+        Effect.as(Effect.logWarning("fx_fixings read failed", cause), [] as const),
+      ),
       Effect.flatMap(([row]) =>
         row === undefined
-          ? Effect.succeedNone
+          ? Effect.succeed(miss)
           : decodeRow(row).pipe(
-              Effect.map(({ sequence, rates }) =>
-                Option.some<CnbFixing>({
-                  fixingDate: date,
-                  sequence,
-                  rates: rates.map((r) => ({ ...r, rate: BigDecimal.fromStringUnsafe(r.rate) })),
+              Effect.map(
+                ({ sequence, rates }): Lookup => ({
+                  _tag: "Hit",
+                  fixing: {
+                    fixingDate: date,
+                    sequence,
+                    rates: rates.map((r) => ({ ...r, rate: BigDecimal.fromStringUnsafe(r.rate) })),
+                  },
                 }),
+              ),
+              Effect.catch((cause) =>
+                Effect.as(Effect.logWarning("fx_fixings row unreadable", cause), {
+                  _tag: "Unreadable",
+                } as const),
               ),
             ),
       ),
-      Effect.catch((cause) =>
-        Effect.as(Effect.logWarning("fx_fixings read failed", cause), Option.none()),
-      ),
     );
 
-  const write = (fixing: CnbFixing): Effect.Effect<void> =>
+  const write = (fixing: CnbFixing, repair: boolean): Effect.Effect<void> =>
     sql`
       insert into fx_fixings (fixing_date, sequence, rates, fetched_at)
       values (${fixing.fixingDate}, ${fixing.sequence}, ${JSON.stringify(toStored(fixing))}::jsonb, now())
-      on conflict (fixing_date) do update
-        set sequence = excluded.sequence, rates = excluded.rates, fetched_at = excluded.fetched_at
+      on conflict (fixing_date) ${
+        repair
+          ? sql`do update set sequence = excluded.sequence, rates = excluded.rates,
+                fetched_at = excluded.fetched_at`
+          : sql`do nothing`
+      }
     `.pipe(
       sql.withTransaction,
       Effect.asVoid,
@@ -102,11 +126,16 @@ export const make: Effect.Effect<
   return {
     fixing: (date) =>
       read(date).pipe(
-        Effect.flatMap(
-          Option.match({
-            onSome: Effect.succeed,
-            onNone: () => inner.fixing(date).pipe(Effect.tap(write)),
-          }),
+        Effect.flatMap((lookup) =>
+          lookup._tag === "Hit"
+            ? Effect.succeed(lookup.fixing)
+            : inner
+                .fixing(date)
+                .pipe(
+                  Effect.tap((fixing) =>
+                    write(fixing, lookup._tag === "Unreadable" && fixing.fixingDate === date),
+                  ),
+                ),
         ),
       ),
   };

@@ -91,6 +91,7 @@ describe("SqlCache", () => {
     ["an empty rate", '[{"code":"EUR","quantity":1,"rate":""}]'],
     ["a zero rate", '[{"code":"EUR","quantity":1,"rate":"0"}]'],
     ["a numeric rate", '[{"code":"EUR","quantity":1,"rate":24.335}]'],
+    ["an empty rates array", "[]"],
   ])("a row with %s is a miss and is repaired", async (_, stored) => {
     const inner = counting(FixtureRates.make([friday]));
     const eur = (f: CnbFixing) => plain(f).rates.find((r) => r.code === "EUR")?.rate;
@@ -107,6 +108,20 @@ describe("SqlCache", () => {
       }),
     );
     expect(inner.state.calls).toBe(1);
+  });
+
+  test("a carry-back miss leaves an existing row for the earlier date untouched", async () => {
+    const inner = counting(FixtureRates.make([friday]));
+    await withSqlCache(
+      inner.layer,
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient;
+        yield* sql`insert into fx_fixings (fixing_date, sequence, rates)
+                   values ('2026-11-20', 999, '[{"code":"EUR","quantity":1,"rate":"1"}]'::jsonb)`;
+        expect((yield* fixing("2026-11-22")).sequence).toBe(225);
+        expect((yield* rows).map((r) => r.sequence)).toEqual([999]);
+      }),
+    );
   });
 
   test("an inner failure fails the request and stores nothing", async () => {

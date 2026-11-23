@@ -41,12 +41,23 @@ export const parseDailyTxt = (text: string): CnbFixing => {
   if (columns !== COLUMNS) throw new MalformedFeed(`bad column header: ${columns}`);
   if (rows.length === 0) throw new MalformedFeed("no rates");
 
+  const sequence = Number(match[4]);
+  if (!Number.isSafeInteger(sequence)) throw new MalformedFeed(`bad header: ${header}`);
+
+  const seen = new Set<string>();
   const rates = rows.map((row) => {
     const cells = row.split("|");
     const [, , quantity = "", code = "", rate = ""] = cells;
-    if (cells.length !== 5 || !isCurrencyCode(code) || !QUANTITY.test(quantity)) {
+    if (
+      cells.length !== 5 ||
+      !isCurrencyCode(code) ||
+      !QUANTITY.test(quantity) ||
+      !Number.isSafeInteger(Number(quantity))
+    ) {
       throw new MalformedFeed(`bad row: ${row}`);
     }
+    if (seen.has(code)) throw new MalformedFeed(`duplicate currency: ${row}`);
+    seen.add(code);
     const value = RATE.test(rate) ? BigDecimal.fromString(rate.replace(",", ".")) : Option.none();
     if (Option.isNone(value) || !BigDecimal.isPositive(value.value)) {
       throw new MalformedFeed(`bad rate: ${row}`);
@@ -54,5 +65,5 @@ export const parseDailyTxt = (text: string): CnbFixing => {
     return { code, quantity: Number(quantity), rate: BigDecimal.normalize(value.value) };
   });
 
-  return { fixingDate, sequence: Number(match[4]), rates };
+  return { fixingDate, sequence, rates };
 };

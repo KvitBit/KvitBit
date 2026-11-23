@@ -50,6 +50,12 @@ describe("parseDailyTxt", () => {
     ["decimal point", `20.11.2026 #223\n${columns}\nEMU|euro|1|EUR|24.335`],
     ["lowercase code", `20.11.2026 #223\n${columns}\nEMU|euro|1|eur|24,335`],
     ["zero rate", `20.11.2026 #223\n${columns}\nEMU|euro|1|EUR|0,000`],
+    [
+      "duplicate currency",
+      `20.11.2026 #223\n${columns}\nEMU|euro|1|EUR|24,335\nEMU|euro|1|EUR|24,336`,
+    ],
+    ["unsafe quantity", `20.11.2026 #223\n${columns}\nEMU|euro|99999999999999999|EUR|24,335`],
+    ["unsafe sequence", `20.11.2026 #99999999999999999\n${columns}\nEMU|euro|1|EUR|24,335`],
     ["zero quantity", `20.11.2026 #223\n${columns}\nEMU|euro|0|EUR|24,335`],
   ])("rejects %s", (_, text) => {
     expect(() => parseDailyTxt(text)).toThrow(MalformedFeed);
