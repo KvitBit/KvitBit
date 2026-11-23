@@ -188,6 +188,18 @@ export interface ExportFile {
 
 const ALL_TIME = { from: "0000-01-01" as IsoDate, to: "9999-12-31" as IsoDate };
 
+/**
+ * Archive paths of `reportingTables`. They are reporting views (issued and cancelled documents,
+ * live payments, complete Expenses), NOT the tables: the canonical full-table CSVs of 7.2
+ * (`documents.csv` with drafts, `expenses.csv` with incomplete Expenses, every other table) are
+ * the DataExport workflow's, built from each table's owner.
+ */
+export const REPORTING_FILES = {
+  documents: "reports/issued-documents.csv",
+  payments: "reports/payments.csv",
+  expenses: "reports/complete-expenses.csv",
+} as const;
+
 export interface ExportJobsShape {
   /**
    * Part of activity "build": CSVs of the reporting rows ReportsSource can read (documents,
@@ -269,9 +281,9 @@ export const ExportJobsLive: Layer.Layer<
               field: "issuedOn",
             });
             return [
-              csv("documents.csv", documentsTable(documents), locale),
-              csv("payments.csv", paymentsTable(payments), locale),
-              csv("expenses.csv", expensesTable(expenses), locale),
+              csv(REPORTING_FILES.documents, documentsTable(documents), locale),
+              csv(REPORTING_FILES.payments, paymentsTable(payments), locale),
+              csv(REPORTING_FILES.expenses, expensesTable(expenses), locale),
             ];
           }),
         ),

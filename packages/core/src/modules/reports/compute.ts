@@ -171,8 +171,11 @@ const deductible = (vatCzk: BigDecimal.BigDecimal, percent: number) =>
       );
 
 /** Supplier buckets that carry claimable input VAT. */
-const claimsInputVat = (b: VatBucket) =>
-  b.treatment !== "outside_scope" && b.treatment !== "reverse_charge";
+/**
+ * Supplier buckets that carry claimable input VAT. Reverse-charge and intra-EU acquisition
+ * buckets carry none from the supplier: their VAT is the self-assessed bucket, counted once.
+ */
+const claimsInputVat = (b: VatBucket) => b.treatment === "standard" || b.treatment === "reduced";
 
 /**
  * VAT treatment of one Expense under the regime at its tax point: input VAT is deductible only
@@ -247,6 +250,11 @@ export const monthsBetween = (from: IsoDate, to: IsoDate): ReadonlyArray<string>
 interface GroupItem {
   readonly key: string;
   readonly label: string | null;
+  /**
+   * Picks the group label when rows disagree (a renamed contact): the highest rank wins, so the
+   * label is the latest snapshot whatever the source order (issue date, then id).
+   */
+  readonly labelRank: string;
   readonly net: BigDecimal.BigDecimal;
   readonly vat: BigDecimal.BigDecimal;
   /** Whole-unit payment rounding in CZK (outside the tax base, inside the amount to pay). */
@@ -259,9 +267,13 @@ const groupRows = (
   items: ReadonlyArray<GroupItem>,
   byCurrency: boolean,
 ): ReadonlyArray<AmountRow> => {
-  const groups = new Map<string, { label: string | null; items: Array<GroupItem> }>();
+  const groups = new Map<string, { label: string | null; rank: string; items: Array<GroupItem> }>();
   for (const item of items) {
-    const group = groups.get(item.key) ?? { label: item.label, items: [] };
+    const group = groups.get(item.key) ?? { label: item.label, rank: item.labelRank, items: [] };
+    if (item.labelRank > group.rank) {
+      group.label = item.label;
+      group.rank = item.labelRank;
+    }
     group.items.push(item);
     groups.set(item.key, group);
   }
@@ -322,6 +334,7 @@ export const revenue = (
       return {
         key,
         label: groupBy === "contact" ? d.contact.name : null,
+        labelRank: `${d.issuedOn}|${d.id}`,
         net,
         vat,
         adjustment: toCzk(d.totals.roundingAdjustment.amount, d.currency, d.fx),
@@ -363,6 +376,7 @@ export const expenses = (
       return {
         key,
         label,
+        labelRank: `${e.issuedOn}|${e.id}`,
         net,
         vat,
         adjustment: toCzk(e.totals.roundingAdjustment.amount, e.currency, e.fx),

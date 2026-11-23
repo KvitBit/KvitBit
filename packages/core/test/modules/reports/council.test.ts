@@ -1,7 +1,7 @@
 /** Regression cases from the council review of the Reports module. */
 import { describe, expect, test } from "bun:test";
 import type { CurrencyCode, IsoDate, TaxRegime, UserId } from "@kvitbit/domain/contract";
-import { CurrentCaller, Forbidden, Invalid, Reports } from "@kvitbit/domain/contract";
+import { CurrentCaller, Forbidden, Invalid, Reports, Unavailable } from "@kvitbit/domain/contract";
 import { Effect, Exit, Layer } from "effect";
 import type { ReportsImpl } from "../../../src/modules/reports";
 import {
@@ -10,6 +10,7 @@ import {
   encodeCsv,
   FakeExportWorkflow,
   FakeReportPdfRenderer,
+  FxFixingCacheMemory,
   ONE_RUNNING_EXPORT,
   paymentsTable,
   ReportCompute,
@@ -144,6 +145,45 @@ describe("Tax Regime eligibility", () => {
   });
 });
 
+describe("review round 1", () => {
+  test("an intra-EU acquisition counts its base once, at the self-assessed rate", () => {
+    const v = ReportCompute.vatSummary(
+      [],
+      [
+        expense(5, {
+          buckets: [bucket("exempt_intra_eu_goods", "0", "100", "0")],
+          selfAssessed: [bucket("standard", "21", "100", "21")],
+        }),
+      ],
+      PAYER,
+      NOV,
+    );
+    expect([vatTotals(v), v.input.map((l) => [l.treatment, s(l.base), s(l.vat)])]).toEqual([
+      [["standard", "100", "21"]],
+      [["standard", "100", "21"]],
+    ]);
+  });
+
+  test("a renamed contact keeps one label whatever the source order (latest issue date wins)", () => {
+    const docs = [
+      document(1, { issuedOn: "2026-11-02" as IsoDate, contact: { id: null, name: "x" } }),
+      document(2, {
+        issuedOn: "2026-11-02" as IsoDate,
+        contact: { id: document(9).contact.id, name: "Before" },
+      }),
+      document(3, {
+        issuedOn: "2026-11-20" as IsoDate,
+        contact: { id: document(9).contact.id, name: "After" },
+      }),
+    ];
+    const labels = (rows: typeof docs) =>
+      ReportCompute.revenue(rows, NOV, "contact").rows.map((r) => r.label);
+    expect(labels(docs)).toEqual(labels([...docs].reverse()));
+    expect(labels(docs)).toContain("After");
+    expect(labels(docs)).not.toContain("Before");
+  });
+});
+
 describe("dates", () => {
   test("months up to 9999-12 without stepping past the calendar", () => {
     expect(ReportCompute.monthsBetween("9999-11-15" as IsoDate, "9999-12-31" as IsoDate)).toEqual([
@@ -207,7 +247,7 @@ const impl = Effect.gen(function* () {
 });
 
 /** Reports on an ExportsRepo whose first insert loses a race to a job that already finished. */
-const racyLayer = (constraint: string) =>
+const racyLayer = (constraint: string, losses = 1) =>
   ReportsLive.pipe(
     Layer.provideMerge(
       Layer.mergeAll(
@@ -215,12 +255,12 @@ const racyLayer = (constraint: string) =>
           ExportsRepo,
           Effect.gen(function* () {
             const real = yield* ExportsRepo;
-            let lost = false;
+            let lost = 0;
             return {
               ...real,
               insert: (row: Parameters<typeof real.insert>[0]) => {
-                if (lost) return real.insert(row);
-                lost = true;
+                if (lost >= losses) return real.insert(row);
+                lost += 1;
                 return Effect.fail(new UniqueViolation({ collection: "exports", constraint }));
               },
             };
@@ -229,6 +269,7 @@ const racyLayer = (constraint: string) =>
         ReportsSourceMemory,
         FakeReportPdfRenderer.layer,
         FakeExportWorkflow.layer,
+        FxFixingCacheMemory,
       ),
     ),
   );
@@ -273,6 +314,16 @@ describe("export start", () => {
       "running",
       false,
     ]);
+  });
+
+  test("contention that outlives every retry is Unavailable{database}, not a defect", async () => {
+    const exit = await runTest(
+      member("owner"),
+      Effect.flatMap(impl, (r) => r.startExport()).pipe(
+        Effect.provide(racyLayer(ONE_RUNNING_EXPORT, 10)),
+      ),
+    );
+    expect(exit).toEqual(Exit.fail(new Unavailable({ dependency: "database" })));
   });
 
   test("any other unique violation is a defect, not a silent success", async () => {

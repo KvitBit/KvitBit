@@ -44,7 +44,7 @@ import { appendAudit } from "../../shared/audit";
 import { orUnavailable } from "../../shared/errors";
 import { withIdempotency } from "../../shared/idempotency";
 import { IdGenerator, newId } from "../../shared/ids";
-import { CoreStore, type StoreUnavailable } from "../../store/CoreStore";
+import { CoreStore, StoreUnavailable } from "../../store/CoreStore";
 import * as Compute from "./compute";
 import { CSV_CONTENT_TYPE, csvStream } from "./csv";
 import {
@@ -56,6 +56,7 @@ import {
   ONE_RUNNING_EXPORT,
   toExportJobView,
 } from "./exports";
+import { cachedFixing, FxFixingCache } from "./fxcache";
 import { ReportPdfRenderer } from "./renderer";
 import { ReportsSource } from "./source";
 import { reportTable } from "./tables";
@@ -146,6 +147,7 @@ export const makeReports = Effect.gen(function* () {
   const workflow = yield* ExportWorkflow;
   const blobs = yield* BlobStorage;
   const rates = yield* ExchangeRates;
+  const fxCache = yield* FxFixingCache;
   const renderer = yield* ReportPdfRenderer;
   const ids = yield* IdGenerator;
 
@@ -262,7 +264,12 @@ export const makeReports = Effect.gen(function* () {
       Effect.gen(function* () {
         yield* authorizeInWorkspace("report.run");
         if (!isIsoDate(q.on)) return yield* malformed(["on"], "date_invalid");
-        const fixing = yield* orUnavailable(rates.fixing(q.on));
+        const fixing = yield* orUnavailable(
+          cachedFixing(q.on, yield* today).pipe(
+            Effect.provideService(ExchangeRates, rates),
+            Effect.provideService(FxFixingCache, fxCache),
+          ),
+        );
         const rate = yield* Effect.fromResult(Fx.fromFixing(fixing, q.currency));
         return {
           currency: q.currency,
@@ -317,7 +324,11 @@ export const makeReports = Effect.gen(function* () {
               const winner = yield* repo.findRunning(workspaceId);
               if (Option.isSome(winner)) return toExportJobView(winner.value);
               // The winner already finished: start afresh (bounded; each round needs a new race).
-              if (round >= 3) return yield* Effect.die("export: start kept racing");
+              if (round >= 3) {
+                // Contention that outlives every retry: a retryable database failure
+                // (Unavailable{database}), never a defect.
+                return yield* new StoreUnavailable({ cause: "export start contention" });
+              }
               return yield* attempt(round + 1);
             }
             yield* appendAudit({
@@ -386,6 +397,7 @@ export const ReportsLive: Layer.Layer<
   | ExportWorkflow
   | BlobStorage
   | ExchangeRates
+  | FxFixingCache
   | ReportPdfRenderer
 > = Layer.effect(
   Reports,
@@ -399,6 +411,8 @@ export const ReportsLive: Layer.Layer<
     | ExportWorkflow
     | BlobStorage
     | ExchangeRates
+    | FxFixingCache
+    | FxFixingCache
     | ReportPdfRenderer
   >,
 );

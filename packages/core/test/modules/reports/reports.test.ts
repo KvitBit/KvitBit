@@ -33,6 +33,7 @@ import {
 } from "../../../src/modules/reports";
 import { CoreStore } from "../../../src/store/CoreStore";
 import type { InMemoryPortsLive } from "../../../src/testing";
+import { FixtureRates } from "../../../src/testing";
 import {
   account,
   member,
@@ -524,11 +525,80 @@ describe("export jobs", () => {
     const exit = await run(member("owner"), body);
     expect(exit).toEqual(
       Exit.succeed([
-        ["documents.csv", 3], // header + documents 1 and 3
-        ["payments.csv", 2],
-        ["expenses.csv", 2],
+        ["reports/issued-documents.csv", 3], // header + documents 1 and 3
+        ["reports/payments.csv", 2],
+        ["reports/complete-expenses.csv", 2],
       ]),
     );
     expect(docId(1) < docId(3)).toBe(true);
+  });
+});
+
+describe("review round 1 (service level)", () => {
+  test("fxRate reads through the cache: a fetched date stays readable while CNB is down", async () => {
+    const fixings: ReadonlyArray<CnbFixing> = [
+      {
+        fixingDate: "2026-11-20" as IsoDate,
+        sequence: 225,
+        rates: [{ code: EUR, quantity: 1, rate: d("25.115") }],
+      },
+    ];
+    const body = Effect.gen(function* () {
+      const r = yield* reports;
+      const first = yield* r.fxRate({ currency: EUR, on: "2026-11-22" as IsoDate });
+      yield* Ref.set((yield* FixtureRates).unavailable, true);
+      const cached = yield* r.fxRate({ currency: EUR, on: "2026-11-22" as IsoDate });
+      const uncached = yield* Effect.exit(r.fxRate({ currency: EUR, on: "2026-11-21" as IsoDate }));
+      return { first: s(first.rate), cached: s(cached.rate), uncached };
+    });
+    const exit = await run(member("member"), body, fixings);
+    expect(exit).toEqual(
+      Exit.succeed({
+        first: "25.115",
+        cached: "25.115",
+        uncached: Exit.fail(new Unavailable({ dependency: "exchange_rates" })),
+      }),
+    );
+  });
+
+  test("Reports.run vat_summary selects by tax point, not issue date", async () => {
+    const body = Effect.gen(function* () {
+      const fake = yield* ReportsSourceFake;
+      yield* fake.seed({
+        documents: [
+          // issued in December, tax point in November: in
+          document(1, { issuedOn: "2026-12-02" as IsoDate, taxPoint: "2026-11-28" as IsoDate }),
+          // issued in November, tax point in October: out
+          document(2, { issuedOn: "2026-11-02" as IsoDate, taxPoint: "2026-10-30" as IsoDate }),
+        ],
+        expenses: [
+          expense(1, { issuedOn: "2026-12-01" as IsoDate, taxPoint: "2026-11-29" as IsoDate }),
+        ],
+        taxRegimes: [
+          { workspaceId: WORKSPACE_A, effectiveFrom: "2024-01-01" as IsoDate, regime: "vat_payer" },
+        ],
+      });
+      const v = yield* (yield* reports).run({ report: "vat_summary", period: NOV });
+      if (v.report !== "vat_summary") throw new Error(v.report);
+      return {
+        output: v.output.map((l) => [
+          l.month,
+          l.treatment,
+          s(l.base),
+          s(l.vat),
+          l.documents.map((x) => x.id),
+        ]),
+        input: v.input.map((l) => [l.month, s(l.base), s(l.vat)]),
+        payable: s(v.totals.payable),
+      };
+    });
+    const exit = await run(member("accountant"), body);
+    expect(exit).toEqual(
+      Exit.succeed({
+        output: [["2026-11", "standard", "1000", "210", [docId(1)]]],
+        input: [["2026-11", "400", "84"]],
+        payable: "126",
+      }),
+    );
   });
 });
