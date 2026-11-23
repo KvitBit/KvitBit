@@ -124,6 +124,21 @@ describe("SqlCache", () => {
     );
   });
 
+  test("an unreadable row for the requested date does not license overwriting an earlier one", async () => {
+    const inner = counting(FixtureRates.make([friday]));
+    await withSqlCache(
+      inner.layer,
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient;
+        yield* sql`insert into fx_fixings (fixing_date, sequence, rates) values
+                   ('2026-11-20', 999, '[{"code":"EUR","quantity":1,"rate":"1"}]'::jsonb),
+                   ('2026-11-22', 1, '[]'::jsonb)`;
+        expect((yield* fixing("2026-11-22")).sequence).toBe(225);
+        expect((yield* rows).map((r) => r.sequence)).toEqual([999, 1]);
+      }),
+    );
+  });
+
   test("an inner failure fails the request and stores nothing", async () => {
     await withSqlCache(
       FixtureRates.layer([]),
