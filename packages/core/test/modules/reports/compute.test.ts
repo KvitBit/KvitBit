@@ -16,6 +16,7 @@ import {
 } from "./fixtures";
 
 const NOV = { from: "2026-11-01" as IsoDate, to: "2026-11-30" as IsoDate };
+const PAYER = [{ effectiveFrom: "2020-01-01" as IsoDate, regime: "vat_payer" as const }];
 
 const line = (l: {
   month: string;
@@ -23,14 +24,14 @@ const line = (l: {
   ratePercent: unknown;
   base: { amount: never } | unknown;
   vat: unknown;
-  documents: ReadonlyArray<string>;
+  documents: ReadonlyArray<{ readonly id: string }>;
 }) => ({
   month: l.month,
   treatment: l.treatment,
   rate: s(l.ratePercent as never),
   base: s(l.base as never),
   vat: s(l.vat as never),
-  documents: l.documents,
+  documents: l.documents.map((ref) => ref.id),
 });
 
 describe("vatSummary", () => {
@@ -94,7 +95,7 @@ describe("vatSummary", () => {
     expense(5, { taxPoint: "2026-10-31" as IsoDate }),
   ];
 
-  const view = ReportCompute.vatSummary(documents, expenses, NOV);
+  const view = ReportCompute.vatSummary(documents, expenses, PAYER, NOV);
 
   test("output VAT per rate bucket in CZK, credit notes and final-invoice advances netted", () => {
     expect(view.output.map(line)).toEqual([
@@ -162,6 +163,7 @@ describe("vatSummary", () => {
     const v = ReportCompute.vatSummary(
       [document(1), document(2, { taxPoint: "2026-10-31" as IsoDate })],
       [],
+      PAYER,
       q,
     );
     expect(v.output.map((l) => [l.month, s(l.vat)])).toEqual([
@@ -180,6 +182,7 @@ describe("vatSummary", () => {
         }),
       ],
       [],
+      PAYER,
       NOV,
     );
     // 2.1 x 24.5 = 51.45; base 245
@@ -193,6 +196,7 @@ describe("vatSummary", () => {
         document(2, { buckets: [bucket("reduced", "15", "100", "15")] }),
       ],
       [],
+      PAYER,
       NOV,
     );
     expect(v.output.map((l) => s(l.ratePercent))).toEqual(["15", "10"]);
@@ -340,7 +344,7 @@ describe("expenses and profit", () => {
       ["software", "software", "400"],
     ]);
     expect(byCategory.incomplete).toBe(2);
-    const p = ReportCompute.profit([document(1)], records, {
+    const p = ReportCompute.profit([document(1)], records, PAYER, {
       from: "2026-10-01" as IsoDate,
       to: "2026-11-30" as IsoDate,
     });
@@ -354,6 +358,7 @@ describe("expenses and profit", () => {
 describe("months", () => {
   test("twelve months ending at period.to, oldest first", () => {
     const w = ReportCompute.twelveMonthsEnding("2026-02-10" as IsoDate);
+    if (w === null) throw new Error("window");
     expect([w.from, w.months[0], w.months[11], w.months.length]).toEqual([
       "2025-03-01",
       "2025-03",

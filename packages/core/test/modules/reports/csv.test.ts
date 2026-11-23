@@ -107,6 +107,7 @@ describe("report tables", () => {
     const view = ReportCompute.vatSummary(
       [document(1, { buckets: [bucket("standard", "21", "1000", "210")] })],
       [],
+      [],
       nov,
     );
     expect(encodeCsv(reportTable(view), "en")).toBe(

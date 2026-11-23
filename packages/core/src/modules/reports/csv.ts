@@ -11,7 +11,8 @@
  *   CR) get a leading `'` (CSV injection, OWASP); number cells never do.
  * - Output is deterministic: rows come in the report's own order, no timestamps.
  */
-import type { Locale } from "@kvitbit/domain/contract";
+import type { CurrencyCode, Locale } from "@kvitbit/domain/contract";
+import { MoneyMath } from "@kvitbit/domain/contract";
 import { BigDecimal, Stream } from "effect";
 import { roundAt } from "../../engines/decimal";
 
@@ -24,7 +25,14 @@ export const text = (value: string | null): CsvCell => ({ _tag: "text", value })
 /** A decimal; `scale` fixes the decimals (money: 2), else the value's own digits. */
 export const num = (value: BigDecimal.BigDecimal, scale?: number): CsvCell =>
   scale === undefined ? { _tag: "number", value } : { _tag: "number", value, scale };
+/** A CZK report figure: always 2 decimals (VAT and FX results are round2). */
 export const money = (value: BigDecimal.BigDecimal): CsvCell => num(value, 2);
+/**
+ * An amount in its own currency: at least 2 decimals, the currency's minor-unit scale (3 for
+ * BHD) and any finer stored digits, so no stored precision is lost.
+ */
+export const amount = (value: BigDecimal.BigDecimal, currency: CurrencyCode): CsvCell =>
+  num(value, Math.max(2, MoneyMath.minorUnitScale(currency), BigDecimal.normalize(value).scale));
 export const int = (value: number): CsvCell => ({ _tag: "int", value });
 
 export interface CsvTable {
@@ -107,11 +115,22 @@ export const csvLines = (table: CsvTable, locale: Locale): ReadonlyArray<string>
 export const encodeCsv = (table: CsvTable, locale: Locale): string =>
   csvLines(table, locale).join("");
 
-/** UTF-8 byte stream, one chunk per record (exports stream rows). */
+/** UTF-8 byte stream, one chunk per record, each row encoded only when pulled (exports stream rows). */
 export const csvStream = (table: CsvTable, locale: Locale): Stream.Stream<Uint8Array> => {
+  const dialect = dialectFor(locale);
   const encoder = new TextEncoder();
-  return Stream.fromIterable(csvLines(table, locale)).pipe(
-    Stream.map((line) => encoder.encode(line)),
+  return Stream.concat(
+    Stream.sync(() => encoder.encode(BOM + encodeRecord(table.header, dialect))),
+    Stream.fromIterable(table.rows).pipe(
+      Stream.map((row) =>
+        encoder.encode(
+          encodeRecord(
+            row.map((c) => cellText(c, dialect)),
+            dialect,
+          ),
+        ),
+      ),
+    ),
   );
 };
 

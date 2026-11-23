@@ -79,6 +79,9 @@ const seedBoth = Effect.gen(function* () {
       payment(2, "in", "2026-11-10", "99", undefined, null, WORKSPACE_B),
     ],
     incompleteExpenses: [{ workspaceId: WORKSPACE_A, id: "x" as never }],
+    taxRegimes: [
+      { workspaceId: WORKSPACE_A, effectiveFrom: "2024-01-01" as IsoDate, regime: "vat_payer" },
+    ],
   });
 });
 
@@ -499,7 +502,7 @@ describe("export jobs", () => {
     expect(exit.value.distinct).toBe(true);
   });
 
-  test("ExportJobs.tables: one deterministic CSV per readable table, own Workspace only", async () => {
+  test("ExportJobs.reportingTables: one deterministic CSV per readable table, own Workspace only", async () => {
     const body = Effect.gen(function* () {
       yield* seedBoth;
       const fake = yield* ReportsSourceFake;
@@ -512,8 +515,11 @@ describe("export jobs", () => {
           }),
         ],
       });
-      const files = yield* (yield* ExportJobs).tables(WORKSPACE_A, "cs");
-      return files.map((f) => [f.name, new TextDecoder().decode(f.bytes).split("\r\n").length - 1]);
+      const files = yield* (yield* ExportJobs).reportingTables(WORKSPACE_A, "cs");
+      const out: Array<[string, number]> = [];
+      for (const f of files)
+        out.push([f.name, (yield* bodyText(f.bytes)).split("\r\n").length - 1]);
+      return out;
     });
     const exit = await run(member("owner"), body);
     expect(exit).toEqual(

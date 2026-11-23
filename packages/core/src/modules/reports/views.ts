@@ -115,6 +115,13 @@ export const ReceivablesView = Schema.Struct({
 });
 export type ReceivablesView = typeof ReceivablesView.Type;
 
+/** A drill-down reference: which entity a VAT figure comes from. */
+export const VatSource = Schema.Union([
+  Schema.TaggedStruct("Document", { id: DocumentId }),
+  Schema.TaggedStruct("Expense", { id: ExpenseId }),
+]);
+export type VatSource = typeof VatSource.Type;
+
 export const VatLine = Schema.Struct({
   /** Tax point month `YYYY-MM`. */
   month: Schema.String,
@@ -122,8 +129,8 @@ export const VatLine = Schema.Struct({
   ratePercent: Schema.BigDecimal,
   base: Money,
   vat: Money,
-  /** The documents behind the figure (drill-down), sorted. */
-  documents: Schema.Array(Schema.Union([DocumentId, ExpenseId])),
+  /** The documents and Expenses behind the figure (drill-down), sorted by kind then id. */
+  documents: Schema.Array(VatSource),
 });
 export type VatLine = typeof VatLine.Type;
 

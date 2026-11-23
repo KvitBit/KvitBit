@@ -85,6 +85,7 @@ export const document = (
     workspaceId: WORKSPACE_A,
     kind: "invoice",
     finalInvoice: false,
+    correctsKind: overrides.kind === "credit_note" ? "invoice" : null,
     status: "issued",
     number: `2026-${String(n).padStart(4, "0")}`,
     contact: { id: contactId(1), name: "Odběratel s.r.o." },

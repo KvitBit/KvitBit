@@ -4,7 +4,7 @@
  */
 
 import type { CsvTable } from "./csv";
-import { int, money, num, text } from "./csv";
+import { amount, int, money, num, text } from "./csv";
 import type { ReportDocument, ReportExpense, ReportPayment } from "./source";
 import type { AmountRow, ReportViewData } from "./views";
 
@@ -26,7 +26,7 @@ const amountTable = (rows: ReadonlyArray<AmountRow>, withOriginal: boolean): Csv
     money(r.vat.amount),
     money(r.gross.amount),
     ...(withOriginal && r.original !== null
-      ? [money(r.original.amount), text(r.original.currency)]
+      ? [amount(r.original.amount, r.original.currency), text(r.original.currency)]
       : []),
   ]),
 });
@@ -80,7 +80,7 @@ export const reportTable = (view: ReportViewData): CsvTable => {
             text(d.currency),
             text(d.dueOn),
             int(d.daysOverdue),
-            money(d.outstanding.amount),
+            amount(d.outstanding.amount, d.currency),
             money(d.outstandingCzk.amount),
           ]),
         ),
@@ -151,14 +151,14 @@ export const documentsTable = (rows: ReadonlyArray<ReportDocument>): CsvTable =>
     text(d.issuedOn),
     text(d.taxPoint),
     text(d.dueOn),
-    money(d.totals.net.amount),
-    money(d.totals.vat.amount),
-    money(d.totals.gross.amount),
+    amount(d.totals.net.amount, d.currency),
+    amount(d.totals.vat.amount, d.currency),
+    amount(d.totals.gross.amount, d.currency),
     d.totals.vatCzk === null ? text(null) : money(d.totals.vatCzk.amount),
     d.fx === null ? text(null) : num(d.fx.rate),
     d.fx === null ? text(null) : int(d.fx.quantity),
     text(d.settlement),
-    money(d.outstanding),
+    amount(d.outstanding, d.currency),
   ]),
 });
 
@@ -170,7 +170,7 @@ export const paymentsTable = (rows: ReadonlyArray<ReportPayment>): CsvTable => (
     text("document" in p.target ? p.target.document : null),
     text("expense" in p.target ? p.target.expense : null),
     text(p.paidOn),
-    money(p.amount.amount),
+    amount(p.amount.amount, p.amount.currency),
     text(p.amount.currency),
   ]),
 });
@@ -204,9 +204,9 @@ export const expensesTable = (rows: ReadonlyArray<ReportExpense>): CsvTable => (
     text(e.issuedOn),
     text(e.taxPoint),
     text(e.currency),
-    money(e.totals.net.amount),
-    money(e.totals.vat.amount),
-    money(e.totals.gross.amount),
+    amount(e.totals.net.amount, e.currency),
+    amount(e.totals.vat.amount, e.currency),
+    amount(e.totals.gross.amount, e.currency),
     e.totals.vatCzk === null ? text(null) : money(e.totals.vatCzk.amount),
     e.fx === null ? text(null) : num(e.fx.rate),
     e.fx === null ? text(null) : int(e.fx.quantity),

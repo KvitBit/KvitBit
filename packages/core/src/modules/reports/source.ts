@@ -14,6 +14,7 @@ import type {
   IsoDate,
   Money,
   PaymentId,
+  TaxRegime,
   VatBreakdown,
   VatBucket,
   WorkspaceId,
@@ -35,6 +36,8 @@ export interface ReportDocument {
   readonly kind: DocumentKind;
   /** An Invoice that settles a Proforma (rule D8). */
   readonly finalInvoice: boolean;
+  /** Credit Notes: the kind of the corrected document; null otherwise. */
+  readonly correctsKind: DocumentKind | null;
   readonly status: "issued" | "cancelled";
   readonly number: string | null;
   readonly contact: { readonly id: ContactId | null; readonly name: string };
@@ -43,11 +46,17 @@ export interface ReportDocument {
   /** DUZP; null for a Proforma (not a tax document). */
   readonly taxPoint: IsoDate | null;
   readonly dueOn: IsoDate | null;
-  /** Signed as stored: Credit Notes are negative (`VatMath.negate` convention). */
+  /**
+   * Signed as stored: Credit Notes are negative (`VatMath.negate` convention). A Final Invoice
+   * (and a Credit Note correcting one) carries the FULL supply, before advance deductions.
+   */
   readonly totals: VatBreakdown;
   /** The fixing stored on the document; null for CZK. */
   readonly fx: StoredFx | null;
-  /** Final Invoice only: the advance (Payment Tax Document) buckets it deducts, positive. */
+  /**
+   * Advance (Payment Tax Document) buckets the document deducts, in its own currency: positive
+   * on a Final Invoice, negative on a Credit Note reversing one; empty otherwise (#397, #477).
+   */
   readonly advanceDeductions: ReadonlyArray<VatBucket>;
   readonly settlement: DocumentSettlement;
   /** What the buyer still owes, in the document currency, >= 0. */
@@ -115,6 +124,15 @@ export interface ReportsSourceShape {
   readonly incompleteExpenses: (
     workspaceId: WorkspaceId,
   ) => Effect.Effect<number, StoreUnavailable>;
+  /** The Workspace's Tax Regime history, any order; the regime on a date is the latest `effectiveFrom <= date`. */
+  readonly taxRegimes: (
+    workspaceId: WorkspaceId,
+  ) => Effect.Effect<ReadonlyArray<TaxRegimePeriod>, StoreUnavailable>;
+}
+
+export interface TaxRegimePeriod {
+  readonly effectiveFrom: IsoDate;
+  readonly regime: TaxRegime;
 }
 
 export class ReportsSource extends Context.Service<ReportsSource, ReportsSourceShape>()(
@@ -131,6 +149,7 @@ export interface ReportsSourceData {
     readonly workspaceId: WorkspaceId;
     readonly id: ExpenseId;
   }>;
+  readonly taxRegimes: ReadonlyArray<TaxRegimePeriod & { readonly workspaceId: WorkspaceId }>;
 }
 
 const EMPTY: ReportsSourceData = {
@@ -138,6 +157,7 @@ const EMPTY: ReportsSourceData = {
   payments: [],
   expenses: [],
   incompleteExpenses: [],
+  taxRegimes: [],
 };
 
 const inRange = (date: IsoDate | null, range: DateRange) =>
@@ -166,6 +186,7 @@ const makeFake = Effect.gen(function* () {
         payments: [...d.payments, ...(rows.payments ?? [])],
         expenses: [...d.expenses, ...(rows.expenses ?? [])],
         incompleteExpenses: [...d.incompleteExpenses, ...(rows.incompleteExpenses ?? [])],
+        taxRegimes: [...d.taxRegimes, ...(rows.taxRegimes ?? [])],
       })),
   };
 });
@@ -209,6 +230,12 @@ export const ReportsSourceMemory: Layer.Layer<ReportsSource | ReportsSourceFake>
         ),
       incompleteExpenses: (workspaceId) =>
         read((d) => d.incompleteExpenses.filter((row) => row.workspaceId === workspaceId).length),
+      taxRegimes: (workspaceId) =>
+        read((d) =>
+          d.taxRegimes
+            .filter((row) => row.workspaceId === workspaceId)
+            .map(({ effectiveFrom, regime }) => ({ effectiveFrom, regime })),
+        ),
     };
   }),
 ).pipe(Layer.provideMerge(Layer.effect(ReportsSourceFake, makeFake)));

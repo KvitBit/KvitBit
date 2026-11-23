@@ -20,11 +20,13 @@ import {
 } from "@kvitbit/domain/contract";
 import type { BlobKey, BlobUnavailable } from "@kvitbit/domain/ports";
 import { BlobStorage } from "@kvitbit/domain/ports";
+import type { Stream } from "effect";
 import { Clock, Context, Effect, Layer, type Option, Ref, Schema } from "effect";
 import type { StoreUnavailable, UniqueViolation } from "../../store/CoreStore";
 import { CoreStore } from "../../store/CoreStore";
 import { defineCollection, MemoryTables } from "../../store/tables";
-import { CSV_CONTENT_TYPE, encodeCsv } from "./csv";
+import type { CsvTable } from "./csv";
+import { CSV_CONTENT_TYPE, csvStream } from "./csv";
 import { ReportsSource } from "./source";
 import { documentsTable, expensesTable, paymentsTable } from "./tables";
 
@@ -181,18 +183,19 @@ export class FakeExportWorkflow extends Context.Service<
 export interface ExportFile {
   readonly name: string;
   readonly contentType: string;
-  readonly bytes: Uint8Array;
+  readonly bytes: Stream.Stream<Uint8Array>;
 }
 
-const ALL_TIME = { from: "0001-01-01" as IsoDate, to: "9999-12-31" as IsoDate };
+const ALL_TIME = { from: "0000-01-01" as IsoDate, to: "9999-12-31" as IsoDate };
 
 export interface ExportJobsShape {
   /**
-   * Activity "build" input: one CSV per table Reports can read (documents, payments, expenses),
-   * rows sorted by id. Reads only. Document PDFs and Expense attachments are streamed by the
-   * workflow itself through the PDF cache and BlobStorage.
+   * Part of activity "build": CSVs of the reporting rows ReportsSource can read (documents,
+   * payments, Expenses), sorted by id, streamed row by row. Reads only. NOT the full table dump
+   * of 7.2: the workflow adds every other table's CSV, document PDFs (through the PDF cache) and
+   * Expense attachments from their owners.
    */
-  readonly tables: (
+  readonly reportingTables: (
     workspaceId: WorkspaceId,
     locale: Locale,
   ) => Effect.Effect<ReadonlyArray<ExportFile>, StoreUnavailable>;
@@ -246,15 +249,14 @@ export const ExportJobsLive: Layer.Layer<
         }),
       );
 
-    const encoder = new TextEncoder();
-    const csv = (name: string, content: string): ExportFile => ({
+    const csv = (name: string, table: CsvTable, locale: Locale): ExportFile => ({
       name,
       contentType: CSV_CONTENT_TYPE,
-      bytes: encoder.encode(content),
+      bytes: csvStream(table, locale),
     });
 
     return {
-      tables: (workspaceId, locale) =>
+      reportingTables: (workspaceId, locale) =>
         store.transaction(
           Effect.gen(function* () {
             const documents = yield* source.documents(workspaceId, {
@@ -267,9 +269,9 @@ export const ExportJobsLive: Layer.Layer<
               field: "issuedOn",
             });
             return [
-              csv("documents.csv", encodeCsv(documentsTable(documents), locale)),
-              csv("payments.csv", encodeCsv(paymentsTable(payments), locale)),
-              csv("expenses.csv", encodeCsv(expensesTable(expenses), locale)),
+              csv("documents.csv", documentsTable(documents), locale),
+              csv("payments.csv", paymentsTable(payments), locale),
+              csv("expenses.csv", expensesTable(expenses), locale),
             ];
           }),
         ),

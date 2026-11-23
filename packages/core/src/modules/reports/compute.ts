@@ -8,19 +8,24 @@ import type {
   CashflowPoint,
   CurrencyCode,
   DashboardView,
-  DocumentId,
-  ExpenseId,
   IsoDate,
   Money,
+  TaxRegime,
   VatBucket,
   VatTreatment,
 } from "@kvitbit/domain/contract";
 import { BigDecimal } from "effect";
-import { addMonths, daysBetween } from "../../engines/calendar";
+import { daysBetween } from "../../engines/calendar";
 import { HUNDRED, roundAt, sumAll, ZERO } from "../../engines/decimal";
 import { Fx } from "../../engines/fx";
 import { TREATMENTS } from "../../engines/vat";
-import type { ReportDocument, ReportExpense, ReportPayment, StoredFx } from "./source";
+import type {
+  ReportDocument,
+  ReportExpense,
+  ReportPayment,
+  StoredFx,
+  TaxRegimePeriod,
+} from "./source";
 import type {
   AgingBucket,
   AmountRow,
@@ -31,6 +36,7 @@ import type {
   ReceivablesView,
   RevenueView,
   VatLine,
+  VatSource,
   VatSummaryView,
 } from "./views";
 
@@ -69,16 +75,150 @@ const bucketBaseCzk = (b: VatBucket, currency: CurrencyCode, fx: StoredFx | null
 const bucketVatCzk = (b: VatBucket, currency: CurrencyCode, fx: StoredFx | null) =>
   currency === CZK ? roundAt(b.vat, 2) : (b.vatCzk ?? toCzk(b.vat, currency, fx));
 
-const documentNetVatCzk = (d: ReportDocument) => {
-  const net = sumAll(d.totals.buckets.map((b) => bucketBaseCzk(b, d.currency, d.fx)));
-  const vat = sumAll(d.totals.buckets.map((b) => bucketVatCzk(b, d.currency, d.fx)));
-  return { net, vat };
+/** A rate bucket's CZK figures. */
+interface CzkBucket {
+  readonly treatment: VatTreatment;
+  readonly ratePercent: BigDecimal.BigDecimal;
+  readonly base: BigDecimal.BigDecimal;
+  readonly vat: BigDecimal.BigDecimal;
+}
+
+const rateKey = (treatment: VatTreatment, rate: BigDecimal.BigDecimal) =>
+  `${treatment}|${BigDecimal.format(BigDecimal.normalize(rate))}`;
+
+/** The full supply per bucket in CZK (revenue, expenses: no advance netting). */
+const fullBucketsCzk = (
+  buckets: ReadonlyArray<VatBucket>,
+  currency: CurrencyCode,
+  fx: StoredFx | null,
+): ReadonlyArray<CzkBucket> =>
+  buckets.map((b) => ({
+    treatment: b.treatment,
+    ratePercent: b.ratePercent,
+    base: bucketBaseCzk(b, currency, fx),
+    vat: bucketVatCzk(b, currency, fx),
+  }));
+
+/**
+ * The document's taxable amounts per bucket in CZK after advance deductions. Without
+ * deductions each bucket keeps its stored `vatCzk`. With deductions (Final Invoice, or a Credit
+ * Note reversing one) base and VAT are netted per bucket in the document currency first, and the
+ * remainder is converted at the document's own fixing (the advances keep theirs on their PTDs).
+ */
+export const taxableBucketsCzk = (d: ReportDocument): ReadonlyArray<CzkBucket> => {
+  if (d.advanceDeductions.length === 0) return fullBucketsCzk(d.totals.buckets, d.currency, d.fx);
+  const net = new Map<
+    string,
+    {
+      treatment: VatTreatment;
+      ratePercent: BigDecimal.BigDecimal;
+      base: BigDecimal.BigDecimal;
+      vat: BigDecimal.BigDecimal;
+    }
+  >();
+  const add = (b: VatBucket, sign: 1 | -1) => {
+    const key = rateKey(b.treatment, b.ratePercent);
+    const slot = net.get(key) ?? {
+      treatment: b.treatment,
+      ratePercent: b.ratePercent,
+      base: ZERO,
+      vat: ZERO,
+    };
+    slot.base = BigDecimal.sum(slot.base, sign === 1 ? b.base : BigDecimal.negate(b.base));
+    slot.vat = BigDecimal.sum(slot.vat, sign === 1 ? b.vat : BigDecimal.negate(b.vat));
+    net.set(key, slot);
+  };
+  for (const b of d.totals.buckets) add(b, 1);
+  for (const b of d.advanceDeductions) add(b, -1);
+  return [...net.values()].map((b) => ({
+    treatment: b.treatment,
+    ratePercent: b.ratePercent,
+    base: toCzk(b.base, d.currency, d.fx),
+    vat: toCzk(b.vat, d.currency, d.fx),
+  }));
 };
 
-const expenseNetVatCzk = (e: ReportExpense) => {
-  const net = sumAll(e.totals.buckets.map((b) => bucketBaseCzk(b, e.currency, e.fx)));
-  const vat = sumAll(e.totals.buckets.map((b) => bucketVatCzk(b, e.currency, e.fx)));
-  return { net, vat };
+const sumCzk = (buckets: ReadonlyArray<CzkBucket>) => ({
+  net: sumAll(buckets.map((b) => b.base)),
+  vat: sumAll(buckets.map((b) => b.vat)),
+});
+
+// Tax Regime -----------------------------------------------------------------------------------
+
+/** The regime in force on `date`; before the first entry (or with none) the Workspace is a non-payer. */
+export const regimeOn = (periods: ReadonlyArray<TaxRegimePeriod>, date: IsoDate): TaxRegime => {
+  let best: TaxRegimePeriod | undefined;
+  for (const p of periods) {
+    if (p.effectiveFrom <= date && (best === undefined || p.effectiveFrom > best.effectiveFrom)) {
+      best = p;
+    }
+  }
+  return best?.regime ?? "non_vat_payer";
+};
+
+const deductible = (vatCzk: BigDecimal.BigDecimal, percent: number) =>
+  percent >= 100
+    ? vatCzk
+    : roundAt(
+        BigDecimal.divideUnsafe(
+          BigDecimal.multiply(
+            vatCzk,
+            BigDecimal.fromBigInt(BigInt(Math.max(0, Math.round(percent)))),
+          ),
+          HUNDRED,
+        ),
+        2,
+      );
+
+/** Supplier buckets that carry claimable input VAT. */
+const claimsInputVat = (b: VatBucket) =>
+  b.treatment !== "outside_scope" && b.treatment !== "reverse_charge";
+
+/**
+ * VAT treatment of one Expense under the regime at its tax point: input VAT is deductible only
+ * for a `vat_payer` (rounded once per bucket); self-assessed reverse charge is owed by a
+ * `vat_payer` or an `identified_person`, and deductible only by the former.
+ */
+export const expenseVat = (e: ReportExpense, regime: TaxRegime) => {
+  const input: Array<{
+    readonly bucket: VatBucket;
+    readonly base: BigDecimal.BigDecimal;
+    readonly vat: BigDecimal.BigDecimal;
+  }> = [];
+  const output: Array<{
+    readonly bucket: VatBucket;
+    readonly base: BigDecimal.BigDecimal;
+    readonly vat: BigDecimal.BigDecimal;
+  }> = [];
+  for (const b of e.totals.buckets) {
+    if (regime !== "vat_payer" || !claimsInputVat(b)) continue;
+    input.push({
+      bucket: b,
+      base: bucketBaseCzk(b, e.currency, e.fx),
+      vat: deductible(bucketVatCzk(b, e.currency, e.fx), e.deductiblePercent),
+    });
+  }
+  if (regime !== "non_vat_payer") {
+    for (const b of e.selfAssessed) {
+      const base = bucketBaseCzk(b, e.currency, e.fx);
+      const vat = bucketVatCzk(b, e.currency, e.fx);
+      output.push({ bucket: b, base, vat });
+      if (regime === "vat_payer") {
+        input.push({ bucket: b, base, vat: deductible(vat, e.deductiblePercent) });
+      }
+    }
+  }
+  return { input, output };
+};
+
+/** What the Expense costs the Workspace in CZK: gross, plus self-assessed VAT owed, minus deductible input VAT. */
+export const expenseCostCzk = (e: ReportExpense, regime: TaxRegime): BigDecimal.BigDecimal => {
+  const { input, output } = expenseVat(e, regime);
+  const full = sumCzk(fullBucketsCzk(e.totals.buckets, e.currency, e.fx));
+  return BigDecimal.subtract(
+    sumAll([full.net, full.vat, ...output.map((o) => o.vat)]),
+    sumAll(input.map((i) => i.vat)),
+  );
 };
 
 // Ordering helpers ----------------------------------------------------------------------------
@@ -88,92 +228,81 @@ export const compareStrings = (a: string, b: string): number => (a < b ? -1 : a 
 
 export const monthOf = (date: IsoDate): string => date.slice(0, 7);
 
-/** Every month `YYYY-MM` from `from`'s month to `to`'s month, oldest first. */
+/** Months counted from year 0: `year * 12 + month - 1`. */
+const monthIndex = (date: IsoDate | string): number =>
+  Number(date.slice(0, 4)) * 12 + Number(date.slice(5, 7)) - 1;
+
+const monthAt = (index: number): string =>
+  `${String(Math.floor(index / 12)).padStart(4, "0")}-${String((index % 12) + 1).padStart(2, "0")}`;
+
+/** Every month `YYYY-MM` from `from`'s month to `to`'s month, oldest first (no date arithmetic past 9999-12). */
 export const monthsBetween = (from: IsoDate, to: IsoDate): ReadonlyArray<string> => {
   const months: Array<string> = [];
-  let cursor = `${monthOf(from)}-01` as IsoDate;
-  const last = monthOf(to);
-  while (monthOf(cursor) <= last) {
-    months.push(monthOf(cursor));
-    cursor = addMonths(cursor, 1);
-  }
+  for (let i = monthIndex(from); i <= monthIndex(to); i++) months.push(monthAt(i));
   return months;
 };
 
 // Revenue and expenses ------------------------------------------------------------------------
 
-interface Grouped {
-  key: string;
-  label: string | null;
-  count: number;
-  net: Array<BigDecimal.BigDecimal>;
-  vat: Array<BigDecimal.BigDecimal>;
-  original: Array<BigDecimal.BigDecimal>;
+interface GroupItem {
+  readonly key: string;
+  readonly label: string | null;
+  readonly net: BigDecimal.BigDecimal;
+  readonly vat: BigDecimal.BigDecimal;
+  /** Whole-unit payment rounding in CZK (outside the tax base, inside the amount to pay). */
+  readonly adjustment: BigDecimal.BigDecimal;
+  /** The amount to pay in the original currency. */
+  readonly gross: BigDecimal.BigDecimal;
 }
 
 const groupRows = (
-  items: ReadonlyArray<{
-    readonly key: string;
-    readonly label: string | null;
-    readonly net: BigDecimal.BigDecimal;
-    readonly vat: BigDecimal.BigDecimal;
-    readonly gross: BigDecimal.BigDecimal;
-    readonly currency: CurrencyCode;
-  }>,
+  items: ReadonlyArray<GroupItem>,
   byCurrency: boolean,
 ): ReadonlyArray<AmountRow> => {
-  const groups = new Map<string, Grouped>();
+  const groups = new Map<string, { label: string | null; items: Array<GroupItem> }>();
   for (const item of items) {
-    const group = groups.get(item.key) ?? {
-      key: item.key,
-      label: item.label,
-      count: 0,
-      net: [],
-      vat: [],
-      original: [],
-    };
-    group.count += 1;
-    group.net.push(item.net);
-    group.vat.push(item.vat);
-    group.original.push(item.gross);
+    const group = groups.get(item.key) ?? { label: item.label, items: [] };
+    group.items.push(item);
     groups.set(item.key, group);
   }
-  return [...groups.values()]
-    .sort((a, b) => compareStrings(a.key, b.key))
-    .map((g) => {
-      const net = sumAll(g.net);
-      const vat = sumAll(g.vat);
+  return [...groups.entries()]
+    .sort(([a], [b]) => compareStrings(a, b))
+    .map(([key, g]) => {
+      const net = sumAll(g.items.map((i) => i.net));
+      const vat = sumAll(g.items.map((i) => i.vat));
+      const adjustment = sumAll(g.items.map((i) => i.adjustment));
       return {
-        key: g.key,
+        key,
         label: g.label,
-        count: g.count,
+        count: g.items.length,
         net: czk(net),
         vat: czk(vat),
-        gross: czk(BigDecimal.sum(net, vat)),
+        gross: czk(sumAll([net, vat, adjustment])),
         original: byCurrency
           ? {
-              amount: BigDecimal.normalize(sumAll(g.original)),
-              currency: g.key as CurrencyCode,
+              amount: BigDecimal.normalize(sumAll(g.items.map((i) => i.gross))),
+              currency: key as CurrencyCode,
             }
           : null,
       };
     });
 };
 
-const totalsOf = (rows: ReadonlyArray<AmountRow>) => {
-  const net = sumAll(rows.map((r) => r.net.amount));
-  const vat = sumAll(rows.map((r) => r.vat.amount));
-  return {
-    count: rows.reduce((n, r) => n + r.count, 0),
-    net: czk(net),
-    vat: czk(vat),
-    gross: czk(BigDecimal.sum(net, vat)),
-  };
-};
+const totalsOf = (rows: ReadonlyArray<AmountRow>) => ({
+  count: rows.reduce((n, r) => n + r.count, 0),
+  net: czk(sumAll(rows.map((r) => r.net.amount))),
+  vat: czk(sumAll(rows.map((r) => r.vat.amount))),
+  gross: czk(sumAll(rows.map((r) => r.gross.amount))),
+});
 
-/** Documents that count as revenue: issued Invoices (Final Invoices once, in full) and Credit Notes. */
+/**
+ * Documents that count as revenue: issued Invoices (a Final Invoice once, in full) and Credit
+ * Notes correcting them. Proformas, Payment Tax Documents and Credit Notes correcting those are
+ * advances, never revenue (flow 9.2).
+ */
 export const isRevenueDocument = (d: ReportDocument): boolean =>
-  d.status === "issued" && (d.kind === "invoice" || d.kind === "credit_note");
+  d.status === "issued" &&
+  (d.kind === "invoice" || (d.kind === "credit_note" && d.correctsKind === "invoice"));
 
 export const revenue = (
   documents: ReadonlyArray<ReportDocument>,
@@ -182,16 +311,22 @@ export const revenue = (
 ): RevenueView => {
   const items = documents
     .filter((d) => isRevenueDocument(d) && period.from <= d.issuedOn && d.issuedOn <= period.to)
-    .map((d) => {
-      const { net, vat } = documentNetVatCzk(d);
+    .map((d): GroupItem => {
+      const { net, vat } = sumCzk(fullBucketsCzk(d.totals.buckets, d.currency, d.fx));
       const key =
         groupBy === "month"
           ? monthOf(d.issuedOn)
           : groupBy === "currency"
             ? d.currency
             : (d.contact.id ?? `name:${d.contact.name}`);
-      const label = groupBy === "contact" ? d.contact.name : null;
-      return { key, label, net, vat, gross: d.totals.gross.amount, currency: d.currency };
+      return {
+        key,
+        label: groupBy === "contact" ? d.contact.name : null,
+        net,
+        vat,
+        adjustment: toCzk(d.totals.roundingAdjustment.amount, d.currency, d.fx),
+        gross: d.totals.gross.amount,
+      };
     });
   const rows = groupRows(items, groupBy === "currency");
   return { report: "revenue", period, groupBy, rows, totals: totalsOf(rows) };
@@ -205,8 +340,8 @@ export const expenses = (
 ): ExpensesView => {
   const items = records
     .filter((e) => period.from <= e.issuedOn && e.issuedOn <= period.to)
-    .map((e) => {
-      const { net, vat } = expenseNetVatCzk(e);
+    .map((e): GroupItem => {
+      const { net, vat } = sumCzk(fullBucketsCzk(e.totals.buckets, e.currency, e.fx));
       const supplierKey =
         e.supplier === null
           ? ""
@@ -225,28 +360,53 @@ export const expenses = (
           : groupBy === "category"
             ? e.category
             : null;
-      return { key, label, net, vat, gross: e.totals.gross.amount, currency: e.currency };
+      return {
+        key,
+        label,
+        net,
+        vat,
+        adjustment: toCzk(e.totals.roundingAdjustment.amount, e.currency, e.fx),
+        gross: e.totals.gross.amount,
+      };
     });
   const rows = groupRows(items, groupBy === "currency");
   return { report: "expenses", period, groupBy, rows, totals: totalsOf(rows), incomplete };
 };
 
+/** Expense cost per month (`expenseCostCzk` under the regime at each tax point). */
+const costByMonth = (
+  records: ReadonlyArray<ReportExpense>,
+  regimes: ReadonlyArray<TaxRegimePeriod>,
+  period: Period,
+) => {
+  const byMonth = new Map<string, Array<BigDecimal.BigDecimal>>();
+  for (const e of records) {
+    if (e.issuedOn < period.from || e.issuedOn > period.to) continue;
+    const month = monthOf(e.issuedOn);
+    const list = byMonth.get(month) ?? [];
+    list.push(expenseCostCzk(e, regimeOn(regimes, e.taxPoint)));
+    byMonth.set(month, list);
+  }
+  return new Map([...byMonth].map(([m, list]) => [m, sumAll(list)]));
+};
+
+/** Revenue net of VAT minus Expense cost (net of deductible VAT under the Tax Regime), per month. */
 export const profit = (
   documents: ReadonlyArray<ReportDocument>,
   records: ReadonlyArray<ReportExpense>,
+  regimes: ReadonlyArray<TaxRegimePeriod>,
   period: Period,
 ): ProfitView => {
   const rev = revenue(documents, period, "month");
-  const exp = expenses(records, period, "month", 0);
   const revByMonth = new Map(rev.rows.map((r) => [r.key, r.net.amount]));
-  const expByMonth = new Map(exp.rows.map((r) => [r.key, r.net.amount]));
+  const expByMonth = costByMonth(records, regimes, period);
   const rows = monthsBetween(period.from, period.to).map((month) => {
     const r = revByMonth.get(month) ?? ZERO;
     const e = expByMonth.get(month) ?? ZERO;
     return { month, revenue: czk(r), expenses: czk(e), profit: czk(BigDecimal.subtract(r, e)) };
   });
-  const r = rev.totals.net.amount;
-  const e = exp.totals.net.amount;
+  const r = sumAll(rows.map((row) => row.revenue.amount));
+  const e = sumAll(rows.map((row) => row.expenses.amount));
   return {
     report: "profit",
     period,
@@ -383,38 +543,35 @@ interface VatAccumulator {
   ratePercent: BigDecimal.BigDecimal;
   base: Array<BigDecimal.BigDecimal>;
   vat: Array<BigDecimal.BigDecimal>;
-  documents: Set<DocumentId | ExpenseId>;
+  sources: Map<string, VatSource>;
 }
-
-const bucketKey = (month: string, treatment: VatTreatment, rate: BigDecimal.BigDecimal) =>
-  `${month}|${treatment}|${BigDecimal.format(BigDecimal.normalize(rate))}`;
 
 const addLine = (
   lines: Map<string, VatAccumulator>,
   month: string,
-  b: VatBucket,
+  b: { readonly treatment: VatTreatment; readonly ratePercent: BigDecimal.BigDecimal },
   base: BigDecimal.BigDecimal,
   vat: BigDecimal.BigDecimal,
-  documentId: DocumentId | ExpenseId,
+  source: VatSource,
 ) => {
-  const key = bucketKey(month, b.treatment, b.ratePercent);
+  const key = `${month}|${rateKey(b.treatment, b.ratePercent)}`;
   const line = lines.get(key) ?? {
     month,
     treatment: b.treatment,
     ratePercent: BigDecimal.normalize(b.ratePercent),
     base: [],
     vat: [],
-    documents: new Set<DocumentId | ExpenseId>(),
+    sources: new Map<string, VatSource>(),
   };
   line.base.push(base);
   line.vat.push(vat);
-  line.documents.add(documentId);
+  line.sources.set(`${source._tag}:${source.id}`, source);
   lines.set(key, line);
 };
 
 const treatmentOrder = (t: VatTreatment) => TREATMENTS.indexOf(t);
 
-/** Month, then treatment in `TREATMENTS` order, then rate descending. */
+/** Month, then treatment in `TREATMENTS` order, then rate descending; sources by kind then id. */
 const finish = (lines: Map<string, VatAccumulator>): ReadonlyArray<VatLine> =>
   [...lines.values()]
     .sort(
@@ -433,28 +590,21 @@ const finish = (lines: Map<string, VatAccumulator>): ReadonlyArray<VatLine> =>
       ratePercent: l.ratePercent,
       base: czk(sumAll(l.base)),
       vat: czk(sumAll(l.vat)),
-      documents: [...l.documents].sort(compareStrings),
+      documents: [...l.sources.entries()]
+        .sort(([a], [b]) => compareStrings(a, b))
+        .map(([, source]) => source),
     }));
-
-const deductible = (vatCzk: BigDecimal.BigDecimal, percent: number) =>
-  percent >= 100
-    ? vatCzk
-    : roundAt(
-        BigDecimal.divideUnsafe(
-          BigDecimal.multiply(vatCzk, BigDecimal.fromBigInt(BigInt(Math.round(percent)))),
-          HUNDRED,
-        ),
-        2,
-      );
 
 /**
  * Output VAT per tax-point month and rate bucket from issued tax documents (Credit Notes signed
- * negative, Final Invoice advances netted) plus self-assessed reverse charge on Expenses; input
- * VAT from Expenses, deductible share rounded once per bucket.
+ * negative, advance deductions netted, `taxableBucketsCzk`) plus self-assessed reverse charge on
+ * Expenses; input VAT from Expenses, by the Tax Regime in force at each Expense's tax point
+ * (`expenseVat`).
  */
 export const vatSummary = (
   documents: ReadonlyArray<ReportDocument>,
   records: ReadonlyArray<ReportExpense>,
+  regimes: ReadonlyArray<TaxRegimePeriod>,
   period: Period,
 ): VatSummaryView => {
   const output = new Map<string, VatAccumulator>();
@@ -467,51 +617,18 @@ export const vatSummary = (
       continue;
     }
     const month = monthOf(d.taxPoint);
-    for (const b of d.totals.buckets) {
-      addLine(
-        output,
-        month,
-        b,
-        bucketBaseCzk(b, d.currency, d.fx),
-        bucketVatCzk(b, d.currency, d.fx),
-        d.id,
-      );
-    }
-    if (d.finalInvoice) {
-      for (const b of d.advanceDeductions) {
-        addLine(
-          output,
-          month,
-          b,
-          BigDecimal.negate(bucketBaseCzk(b, d.currency, d.fx)),
-          BigDecimal.negate(bucketVatCzk(b, d.currency, d.fx)),
-          d.id,
-        );
-      }
+    for (const b of taxableBucketsCzk(d)) {
+      addLine(output, month, b, b.base, b.vat, { _tag: "Document", id: d.id });
     }
   }
 
   for (const e of records) {
     if (!inPeriod(e.taxPoint)) continue;
     const month = monthOf(e.taxPoint);
-    for (const b of e.totals.buckets) {
-      if (b.treatment === "outside_scope" || b.treatment === "reverse_charge") continue;
-      const vat = bucketVatCzk(b, e.currency, e.fx);
-      addLine(
-        input,
-        month,
-        b,
-        bucketBaseCzk(b, e.currency, e.fx),
-        deductible(vat, e.deductiblePercent),
-        e.id,
-      );
-    }
-    for (const b of e.selfAssessed) {
-      const base = bucketBaseCzk(b, e.currency, e.fx);
-      const vat = bucketVatCzk(b, e.currency, e.fx);
-      addLine(output, month, b, base, vat, e.id);
-      addLine(input, month, b, base, deductible(vat, e.deductiblePercent), e.id);
-    }
+    const source: VatSource = { _tag: "Expense", id: e.id };
+    const vat = expenseVat(e, regimeOn(regimes, e.taxPoint));
+    for (const l of vat.output) addLine(output, month, l.bucket, l.base, l.vat, source);
+    for (const l of vat.input) addLine(input, month, l.bucket, l.base, l.vat, source);
   }
 
   const outputLines = finish(output);
@@ -539,25 +656,33 @@ export const dashboard = (input: {
   readonly issued: ReadonlyArray<ReportDocument>;
   readonly open: ReadonlyArray<ReportDocument>;
   readonly expenses: ReadonlyArray<ReportExpense>;
+  readonly regimes: ReadonlyArray<TaxRegimePeriod>;
   readonly incompleteExpenses: number;
   readonly payments: ReadonlyArray<ReportPayment>;
   readonly months: ReadonlyArray<string>;
 }): DashboardView => {
   const aging = receivables(input.open, input.period, input.today);
+  const cost = costByMonth(input.expenses, input.regimes, input.period);
   return {
     period: input.period,
     revenue: revenue(input.issued, input.period, "month").totals.net,
     unpaid: aging.total,
     overdue: aging.overdue,
-    expenses: expenses(input.expenses, input.period, "month", 0).totals.net,
+    expenses: czk(sumAll(cost.values())),
     incompleteExpenses: input.incompleteExpenses,
     cashflow: cashflowPoints(input.payments, input.months),
   };
 };
 
-/** The 12 months ending at `to`'s month, oldest first, and the date range they span. */
-export const twelveMonthsEnding = (to: IsoDate) => {
-  const first = addMonths(`${monthOf(to)}-01` as IsoDate, -11);
-  const months = monthsBetween(first, to);
-  return { months, from: first };
+/**
+ * The 12 months ending at `to`'s month, oldest first, and the first day they start on; null when
+ * they would start before year 0000.
+ */
+export const twelveMonthsEnding = (
+  to: IsoDate,
+): { readonly months: ReadonlyArray<string>; readonly from: IsoDate } | null => {
+  const first = monthIndex(to) - 11;
+  if (first < 0) return null;
+  const from = `${monthAt(first)}-01` as IsoDate;
+  return { months: monthsBetween(from, to), from };
 };

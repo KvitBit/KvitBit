@@ -30,6 +30,7 @@ import {
   Conflict,
   type CurrentCaller,
   ExportJobView as ExportJobViewSchema,
+  Forbidden as ForbiddenError,
   Invalid,
   IsoDate,
   Reports,
@@ -42,8 +43,8 @@ import { authorizeInWorkspace } from "../../policy/Policy";
 import { appendAudit } from "../../shared/audit";
 import { orUnavailable } from "../../shared/errors";
 import { withIdempotency } from "../../shared/idempotency";
-import { type IdGenerator, newId } from "../../shared/ids";
-import { CoreStore } from "../../store/CoreStore";
+import { IdGenerator, newId } from "../../shared/ids";
+import { CoreStore, type StoreUnavailable } from "../../store/CoreStore";
 import * as Compute from "./compute";
 import { CSV_CONTENT_TYPE, csvStream } from "./csv";
 import {
@@ -52,6 +53,7 @@ import {
   ExportWorkflow,
   exportBlobKey,
   notFoundExport,
+  ONE_RUNNING_EXPORT,
   toExportJobView,
 } from "./exports";
 import { ReportPdfRenderer } from "./renderer";
@@ -145,7 +147,7 @@ export const makeReports = Effect.gen(function* () {
   const blobs = yield* BlobStorage;
   const rates = yield* ExchangeRates;
   const renderer = yield* ReportPdfRenderer;
-  const services = yield* Effect.context<CoreStore | IdGenerator>();
+  const ids = yield* IdGenerator;
 
   const today = Effect.map(Clock.currentTimeMillis, pragueDate);
 
@@ -170,7 +172,8 @@ export const makeReports = Effect.gen(function* () {
             case "profit": {
               const docs = yield* source.documents(workspaceId, { ...period, field: "issuedOn" });
               const rows = yield* source.expenses(workspaceId, { ...period, field: "issuedOn" });
-              return Compute.profit(docs, rows, period);
+              const regimes = yield* source.taxRegimes(workspaceId);
+              return Compute.profit(docs, rows, regimes, period);
             }
             case "cashflow":
               return Compute.cashflow(yield* source.payments(workspaceId, period), period);
@@ -183,7 +186,8 @@ export const makeReports = Effect.gen(function* () {
             case "vat_summary": {
               const docs = yield* source.documents(workspaceId, { ...period, field: "taxPoint" });
               const rows = yield* source.expenses(workspaceId, { ...period, field: "taxPoint" });
-              return Compute.vatSummary(docs, rows, period);
+              const regimes = yield* source.taxRegimes(workspaceId);
+              return Compute.vatSummary(docs, rows, regimes, period);
             }
           }
         }),
@@ -234,6 +238,7 @@ export const makeReports = Effect.gen(function* () {
         const valid = yield* validatePeriod(period);
         const day = yield* today;
         const window = Compute.twelveMonthsEnding(valid.to);
+        if (window === null) return yield* malformed(["period", "to"], "too_early");
         return yield* orUnavailable(
           store.transaction(
             Effect.gen(function* () {
@@ -243,6 +248,7 @@ export const makeReports = Effect.gen(function* () {
                 issued: yield* source.documents(workspaceId, { ...valid, field: "issuedOn" }),
                 open: yield* source.openReceivables(workspaceId),
                 expenses: yield* source.expenses(workspaceId, { ...valid, field: "issuedOn" }),
+                regimes: yield* source.taxRegimes(workspaceId),
                 incompleteExpenses: yield* source.incompleteExpenses(workspaceId),
                 payments: yield* source.payments(workspaceId, { from: window.from, to: valid.to }),
                 months: window.months,
@@ -269,41 +275,61 @@ export const makeReports = Effect.gen(function* () {
 
     startExport: (opts) =>
       Effect.gen(function* () {
-        const { workspaceId } = yield* authorizeInWorkspace("report.export");
-        const body = Effect.gen(function* () {
-          const running = yield* repo.findRunning(workspaceId);
-          if (Option.isSome(running)) return toExportJobView(running.value);
-          const id = yield* newId<ExportId>();
-          const row: ExportRow = {
-            id,
-            workspaceId,
-            revision: 1,
-            status: "running",
-            createdAt: new Date(yield* Clock.currentTimeMillis).toISOString(),
-            readyAt: null,
-            expiresAt: null,
-            sizeBytes: null,
-          };
-          // A savepoint, so a concurrent start's unique-index clash leaves the outer
-          // transaction usable and the caller gets the job that won.
-          const inserted = yield* store.transaction(repo.insert(row)).pipe(
-            Effect.map(Option.some),
-            Effect.catchTag("UniqueViolation", () => Effect.succeed(Option.none<ExportRow>())),
-          );
-          if (Option.isNone(inserted)) {
-            const winner = yield* repo.findRunning(workspaceId);
-            if (Option.isNone(winner)) return yield* Effect.die("export: running job vanished");
-            return toExportJobView(winner.value);
-          }
-          yield* appendAudit({
-            workspaceId,
-            subject: { entity: "Export", id },
-            action: "report.export",
-            revision: inserted.value.revision,
+        const { caller, workspaceId } = yield* authorizeInWorkspace("report.export");
+        // R5: report.export is a read action, but starting a job writes; the DataExport job
+        // itself only reads, so it can never start (or restart) an export.
+        if (caller._tag === "System" && caller.job._tag === "DataExport") {
+          return yield* new ForbiddenError({ action: "report.export" });
+        }
+        const attempt = (
+          round: number,
+        ): Effect.Effect<
+          ExportJobView,
+          StoreUnavailable,
+          CoreStore | IdGenerator | CurrentCaller
+        > =>
+          Effect.gen(function* () {
+            const running = yield* repo.findRunning(workspaceId);
+            if (Option.isSome(running)) return toExportJobView(running.value);
+            const id = yield* newId<ExportId>();
+            const row: ExportRow = {
+              id,
+              workspaceId,
+              revision: 1,
+              status: "running",
+              createdAt: new Date(yield* Clock.currentTimeMillis).toISOString(),
+              readyAt: null,
+              expiresAt: null,
+              sizeBytes: null,
+            };
+            // A savepoint, so a concurrent start's clash on the one-running index leaves the
+            // outer transaction usable and the caller gets the job that won. Any other unique
+            // violation is a bug.
+            const inserted = yield* store.transaction(repo.insert(row)).pipe(
+              Effect.map(Option.some),
+              Effect.catchTag("UniqueViolation", (e) =>
+                e.constraint === ONE_RUNNING_EXPORT
+                  ? Effect.succeed(Option.none<ExportRow>())
+                  : Effect.die(e),
+              ),
+            );
+            if (Option.isNone(inserted)) {
+              const winner = yield* repo.findRunning(workspaceId);
+              if (Option.isSome(winner)) return toExportJobView(winner.value);
+              // The winner already finished: start afresh (bounded; each round needs a new race).
+              if (round >= 3) return yield* Effect.die("export: start kept racing");
+              return yield* attempt(round + 1);
+            }
+            yield* appendAudit({
+              workspaceId,
+              subject: { entity: "Export", id },
+              action: "report.export",
+              revision: inserted.value.revision,
+            });
+            yield* store.afterCommit(workflow.start({ workspaceId, exportId: id }));
+            return toExportJobView(inserted.value);
           });
-          yield* store.afterCommit(workflow.start({ workspaceId, exportId: id }));
-          return toExportJobView(inserted.value);
-        });
+        const body = attempt(1);
         return yield* orUnavailable(
           withIdempotency(
             {
@@ -315,7 +341,7 @@ export const makeReports = Effect.gen(function* () {
             },
             body,
           ),
-        ).pipe(Effect.provideContext(services));
+        ).pipe(Effect.provideService(CoreStore, store), Effect.provideService(IdGenerator, ids));
       }),
 
     getExport: (id) =>
