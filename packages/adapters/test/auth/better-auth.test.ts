@@ -5,7 +5,7 @@ import { deriveKey } from "altcha-lib/algorithms/pbkdf2";
 import { APIError, createAuthMiddleware } from "better-auth/api";
 import { drizzle } from "drizzle-orm/pglite";
 import { Effect, Redacted } from "effect";
-import { type BotProtection, makeAltchaBotProtection } from "../../src/altcha";
+import { type BotProtection, type BotScope, makeAltchaBotProtection } from "../../src/altcha";
 import {
   API_KEY_PLUGIN_PATHS,
   type AuthConfig,
@@ -84,7 +84,7 @@ afterAll(async () => {
   await pg.close();
 });
 
-const proof = async (scope: "sign_up" | "sign_in" = "sign_up") => {
+const proof = async (scope: BotScope = "sign_up") => {
   const challenge = await Effect.runPromise(botProtection.issue(scope));
   const solution = await solveChallenge({ challenge, deriveKey });
   return Buffer.from(JSON.stringify({ challenge, solution })).toString("base64");
@@ -176,17 +176,35 @@ describe("bot-protected endpoints", () => {
     expect(await blocked.json()).toMatchObject({ code: "InvitationLocked" });
   });
 
-  test("the sixth attempt per email within a minute is rate limited", async () => {
-    const attempt = () =>
-      post("/sign-in/email", { email: "Limit@Example.com ", password: "whatever-password" });
-    for (let i = 0; i < 5; i++) expect((await attempt()).status).toBe(400);
-    const limited = await attempt();
+  test("rejected proofs spend no email allowance; valid ones share it across routes", async () => {
+    const email = "Limit@Example.com";
+    const signIn = async (withProof: boolean) =>
+      post(
+        "/sign-in/email",
+        { email, password: "whatever-password" },
+        withProof ? { "x-altcha": await proof("sign_in") } : {},
+      );
+    // Bots without a proof cannot exhaust the address's quota.
+    for (let i = 0; i < 6; i++) expect((await signIn(false)).status).toBe(400);
+    // Four proven sign-ins (wrong password) and one proven reset use the five allowed.
+    for (let i = 0; i < 4; i++) expect((await signIn(true)).status).toBe(401);
+    const reset = await post(
+      "/request-password-reset",
+      { email: "limit@example.com" },
+      { "x-altcha": await proof("password_reset") },
+    );
+    expect(reset.status).toBe(200);
+    const limited = await signIn(true);
     expect(limited.status).toBe(429);
     expect(Number(limited.headers.get("retry-after"))).toBeGreaterThan(0);
     expect(await limited.json()).toMatchObject({ _tag: "RateLimited" });
     // Another address is unaffected.
-    const other = await post("/sign-in/email", { email: "other@example.com", password: "x" });
-    expect(other.status).toBe(400);
+    const other = await post(
+      "/sign-in/email",
+      { email: "other@example.com", password: "whatever-password" },
+      { "x-altcha": await proof("sign_in") },
+    );
+    expect(other.status).toBe(401);
   });
 });
 

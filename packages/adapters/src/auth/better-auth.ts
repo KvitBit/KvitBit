@@ -6,7 +6,7 @@
  * change and guarded account deletion, the `apiKey` plugin as storage for `kvb_` keys with none
  * of its routes exposed, and the OAuth 2.1 provider for MCP (opaque tokens, PKCE S256, required
  * `state` and `resource`, the `kvitbit:` scopes). Every row id is a UUIDv7. The bot-protected
- * endpoints of section 2.6 get a per-email rate limit and an ALTCHA check before anything else.
+ * endpoints of section 2.6 get an ALTCHA check, then a per-email rate limit, before anything else.
  *
  * Not wired yet, because their packages are not dependencies: the `expo` plugin (section 2.7)
  * and Client ID Metadata Documents (`@better-auth/cimd`, section 6.2 step 4). Discovery
@@ -190,13 +190,16 @@ const unavailable = (what: string) =>
 const isBotProtected = (ctx: { readonly path?: string }) =>
   ctx.path !== undefined && ctx.path in BOT_PROTECTED_PATHS;
 
-/** 5 per minute per email on the bot-protected paths; 429 `RateLimited` with `Retry-After`. */
+/**
+ * 5 per minute per email across the bot-protected paths, after the proof passed; 429
+ * `RateLimited` with `Retry-After`.
+ */
 export const emailRateLimitHook = (limiter: EmailRateLimiter): BeforeHook => ({
   matcher: isBotProtected,
   handler: createAuthMiddleware(async (ctx) => {
     const email: unknown = ctx.body?.email;
     if (typeof email !== "string" || email.length === 0) return;
-    const exit = await Effect.runPromiseExit(limiter.consume(ctx.path, email));
+    const exit = await Effect.runPromiseExit(limiter.consume(email));
     if (Exit.isFailure(exit)) throw unavailable("Rate limiting");
     if (exit.value.allowed) return;
     const seconds = exit.value.retryAfterSeconds;
@@ -278,8 +281,10 @@ export const authOptions = (config: AuthConfig) => {
     id: "kvitbit-edge-guards",
     hooks: {
       before: [
-        emailRateLimitHook(config.emailRateLimiter),
+        // Proof first: a request without a valid proof never touches the email allowance, so
+        // bots cannot spend a victim's quota (rule B2).
         botProtectionHook(config.botProtection),
+        emailRateLimitHook(config.emailRateLimiter),
         oauthAuthorizeHook(config.mcpResource),
         oauthRegisterHook,
       ],
