@@ -1,30 +1,49 @@
 /** Expenses (core-ports 4.7) and Templates (core-ports 4.8). Interfaces only. */
 import type { Effect, Stream } from "effect";
-import { Context, Schema } from "effect";
+import { Context, Schema, Struct } from "effect";
 import { IssueCode } from "../action";
 import type { CurrentCaller } from "../caller";
 import type { Conflict, CoreError, Forbidden, Invalid, NotFound, Unavailable } from "../errors";
 import type { AttachmentId, ExpenseId, TemplateId } from "../ids";
 import { DeliveryId, DocumentId } from "../ids";
-import type { FileDownload, ScheduleRule, Unspecified } from "../shared";
-import type { Page, PageRequest, RequestOptions } from "../vocabulary";
-import { IsoDate } from "../vocabulary";
+import type { FileDownload, ScheduleRule } from "../shared";
+import { OpenStruct } from "../shared";
+import type { Page, RequestOptions } from "../vocabulary";
+import { IsoDate, PageRequest } from "../vocabulary";
 import type { DocumentPatch, DocumentView } from "./documents";
+import { DocumentInput } from "./documents";
 
 export const ExpenseStatus = Schema.Literals(["complete", "incomplete"]);
 export type ExpenseStatus = typeof ExpenseStatus.Type;
 
 /** Supplier, dates, VAT breakdown, category, tags; `status?: ExpenseStatus` (default "complete"). */
-export type ExpenseInput = Unspecified<"ExpenseInput">;
+export const ExpenseInput = OpenStruct({
+  status: Schema.optional(ExpenseStatus), // default "complete"
+});
+export type ExpenseInput = typeof ExpenseInput.Type;
 /** `status?: ExpenseStatus`; "complete" runs the full validation. */
-export type ExpensePatch = Unspecified<"ExpensePatch">;
+export const ExpensePatch = OpenStruct({
+  status: Schema.optional(ExpenseStatus),
+});
+export type ExpensePatch = typeof ExpensePatch.Type;
 /** Carries `status: ExpenseStatus`. */
-export type ExpenseView = Unspecified<"ExpenseView">;
+export const ExpenseView = OpenStruct({
+  status: ExpenseStatus,
+});
+export type ExpenseView = typeof ExpenseView.Type;
 /** Carries `status: ExpenseStatus`. */
-export type ExpenseSummary = Unspecified<"ExpenseSummary">;
+export const ExpenseSummary = OpenStruct({
+  status: ExpenseStatus,
+});
+export type ExpenseSummary = typeof ExpenseSummary.Type;
 /** `incomplete?: boolean` plus cursor and limit (PageRequest). */
-export type ExpenseQuery = Unspecified<"ExpenseQuery">;
-export type AttachmentView = Unspecified<"AttachmentView">;
+export const ExpenseQuery = OpenStruct({
+  incomplete: Schema.optional(Schema.Boolean), // true lists only incomplete Expenses
+  ...PageRequest.fields,
+});
+export type ExpenseQuery = typeof ExpenseQuery.Type;
+export const AttachmentView = Schema.Unknown.pipe(Schema.brand("AttachmentView"));
+export type AttachmentView = typeof AttachmentView.Type;
 
 export class Expenses extends Context.Service<
   Expenses,
@@ -73,9 +92,15 @@ export class Expenses extends Context.Service<
 >()("kvitbit/Expenses") {}
 
 /** DocumentInput without issuedOn/taxableSupplyOn plus name and a relative due (inDays). */
-export type TemplateInput = Unspecified<"TemplateInput">;
+export const TemplateInput = Schema.Struct({
+  ...Struct.omit(DocumentInput.fields, ["issuedOn", "taxableSupplyOn", "due"]),
+  name: Schema.String,
+  due: Schema.optional(Schema.Struct({ inDays: Schema.Int })),
+});
+export type TemplateInput = typeof TemplateInput.Type;
 /** Carries `schedule.pausedReason`. Fields not yet specified. */
-export type TemplateView = Unspecified<"TemplateView">;
+export const TemplateView = Schema.Unknown.pipe(Schema.brand("TemplateView"));
+export type TemplateView = typeof TemplateView.Type;
 
 /** The `schedule` argument: a ScheduleRule plus issueAs and autoSend. */
 export interface TemplateSchedule extends ScheduleRule {

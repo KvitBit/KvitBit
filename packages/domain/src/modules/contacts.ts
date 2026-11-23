@@ -1,15 +1,22 @@
 /** Contacts (core-ports 4.2) and PriceList (core-ports 4.3). Interfaces only. */
 import type { Effect } from "effect";
-import { Context } from "effect";
+import { Context, Schema } from "effect";
 import type { CurrentCaller } from "../caller";
+import { ContactDefaults } from "../contact";
 import type { Conflict, Forbidden, Invalid, NotFound, Unavailable } from "../errors";
 import type { ContactId, PriceListItemId } from "../ids";
-import type { Unspecified } from "../shared";
+import { OpenStruct } from "../shared";
 import type { Page, RequestOptions } from "../vocabulary";
 
-/** Particulars, VAT IDs, invoicing emails and `defaults: ContactDefaults`. Fields not yet specified. */
-export type ContactInput = Unspecified<"ContactInput">;
-export type ContactView = Unspecified<"ContactView">;
+/** Partly specified: particulars, VAT IDs and invoicing emails are not yet defined (open). */
+export const ContactInput = OpenStruct({
+  defaults: Schema.optional(ContactDefaults), // billing overrides, Document → Contact → Workspace
+});
+export type ContactInput = typeof ContactInput.Type;
+export const ContactView = OpenStruct({
+  defaults: ContactDefaults, // views echo the stored overrides (rule C4)
+});
+export type ContactView = typeof ContactView.Type;
 export type ContactRole = "customer" | "supplier";
 
 export class Contacts extends Context.Service<
@@ -36,8 +43,10 @@ export class Contacts extends Context.Service<
   }
 >()("kvitbit/Contacts") {}
 
-export type PriceListItemInput = Unspecified<"PriceListItemInput">;
-export type PriceListItemView = Unspecified<"PriceListItemView">;
+export const PriceListItemInput = Schema.Unknown.pipe(Schema.brand("PriceListItemInput"));
+export type PriceListItemInput = typeof PriceListItemInput.Type;
+export const PriceListItemView = Schema.Unknown.pipe(Schema.brand("PriceListItemView"));
+export type PriceListItemView = typeof PriceListItemView.Type;
 
 /** A Price List Item only supplies defaults; lines copy its values when a document is drafted. */
 export class PriceList extends Context.Service<

@@ -4,12 +4,19 @@ import { Context, Schema } from "effect";
 import type { Channel, CurrentCaller, MemberCaller } from "../caller";
 import type { Conflict, Forbidden, Invalid, NotFound, Unavailable } from "../errors";
 import type { BankAccountId, InvitationId, InvitationToken, NumberingSeriesId } from "../ids";
-import { InvitationId as InvitationIdSchema, UserId, WorkspaceId } from "../ids";
-import type { FileDownload, Unspecified } from "../shared";
+import {
+  InvitationId as InvitationIdSchema,
+  NumberingSeriesId as NumberingSeriesIdSchema,
+  UserId,
+  WorkspaceId,
+} from "../ids";
+import type { FileDownload } from "../shared";
+import { OpenStruct } from "../shared";
 import { Hex, ThemeSource } from "../theme";
 import type { ClientRef, DocumentKind, RequestOptions } from "../vocabulary";
 import {
   type BrandingImage,
+  DocumentKind as DocumentKindSchema,
   ImageRef,
   IsoDate,
   type Locale,
@@ -48,16 +55,31 @@ export const BrandingPatch = Schema.Struct({
 });
 export type BrandingPatch = typeof BrandingPatch.Type;
 
-/** Issuing Entity, Tax Regime, defaults, bank accounts, revision, slug, branding. Fields not yet specified. */
-export type WorkspaceView = Unspecified<"WorkspaceView">;
-/** Onboarding input; known to carry `slug?: WorkspaceSlug`. Fields not yet specified. */
-export type NewWorkspace = Unspecified<"NewWorkspace">;
-export type IssuingEntityPatch = Unspecified<"IssuingEntityPatch">;
-/** Defaults, slug, reminder policy and `branding?: BrandingPatch`. Fields not yet specified. */
-export type WorkspaceSettingsPatch = Unspecified<"WorkspaceSettingsPatch">;
+/** Partly specified: also carries Issuing Entity, Tax Regime, defaults and bank accounts (open). */
+export const WorkspaceView = OpenStruct({
+  slug: WorkspaceSlug,
+  branding: WorkspaceBranding,
+  revision: Schema.Int,
+});
+export type WorkspaceView = typeof WorkspaceView.Type;
+/** Onboarding input; partly specified (open). */
+export const NewWorkspace = OpenStruct({
+  slug: Schema.optional(WorkspaceSlug), // default: derived from the name, made unique
+});
+export type NewWorkspace = typeof NewWorkspace.Type;
+export const IssuingEntityPatch = Schema.Unknown.pipe(Schema.brand("IssuingEntityPatch"));
+export type IssuingEntityPatch = typeof IssuingEntityPatch.Type;
+/** Also carries defaults and reminder policy, not yet specified (open). */
+export const WorkspaceSettingsPatch = OpenStruct({
+  slug: Schema.optional(WorkspaceSlug),
+  branding: Schema.optional(BrandingPatch),
+});
+export type WorkspaceSettingsPatch = typeof WorkspaceSettingsPatch.Type;
 /** IBAN, BIC, currency, default per currency (ui-port notes). Fields not yet specified. */
-export type BankAccountInput = Unspecified<"BankAccountInput">;
-export type BankAccountView = Unspecified<"BankAccountView">;
+export const BankAccountInput = Schema.Unknown.pipe(Schema.brand("BankAccountInput"));
+export type BankAccountInput = typeof BankAccountInput.Type;
+export const BankAccountView = Schema.Unknown.pipe(Schema.brand("BankAccountView"));
+export type BankAccountView = typeof BankAccountView.Type;
 
 export const InvitationRole = Schema.Literals(["admin", "member", "accountant"]);
 export const InvitationStatus = Schema.Literals(["pending", "expired", "revoked", "accepted"]);
@@ -108,16 +130,17 @@ export const RegistryResult = Schema.Struct({
 });
 export type RegistryResult = typeof RegistryResult.Type;
 
-export interface NumberingSeriesView {
-  readonly id: NumberingSeriesId;
-  readonly kind: DocumentKind;
-  readonly name: string;
-  readonly pattern: string;
-  readonly isDefault: boolean;
-  readonly periodKey: string; // Numbering.periodKey for today (Prague): "2026", "2026-11" or "all"
-  readonly nextCounter: number; // counter the next issue in periodKey will try
-  readonly nextNumber: string; // Numbering.format of nextCounter, for the issue dialog
-}
+export const NumberingSeriesView = Schema.Struct({
+  id: NumberingSeriesIdSchema,
+  kind: DocumentKindSchema,
+  name: Schema.String,
+  pattern: Schema.String,
+  isDefault: Schema.Boolean,
+  periodKey: Schema.String, // Numbering.periodKey for today (Prague): "2026", "2026-11" or "all"
+  nextCounter: Schema.Int, // counter the next issue in periodKey will try
+  nextNumber: Schema.String, // Numbering.format of nextCounter, for the issue dialog
+});
+export type NumberingSeriesView = typeof NumberingSeriesView.Type;
 
 export interface AccessEvent {
   readonly action: "apiKey.create" | "apiKey.revoke" | "grant.create" | "grant.revoke";

@@ -47,6 +47,11 @@ describe("minor units", () => {
     expect(MoneyMath.toMinorUnits(m("-0.005"))).toBe(-1n);
     expect(MoneyMath.equals(MoneyMath.fromMinorUnits(121050n, CZK), m("1210.50"))).toBe(true);
   });
+  test("UYI has no minor unit", () => {
+    const UYI = cur("UYI");
+    expect(MoneyMath.toMinorUnits(m("1", UYI))).toBe(1n);
+    expect(MoneyMath.equals(MoneyMath.fromMinorUnits(1n, UYI), m("1", UYI))).toBe(true);
+  });
   test("JPY has no minor unit", () => {
     expect(MoneyMath.toMinorUnits(m("1234", JPY))).toBe(1234n);
     expect(MoneyMath.equals(MoneyMath.fromMinorUnits(5n, JPY), m("5", JPY))).toBe(true);

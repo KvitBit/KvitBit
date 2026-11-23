@@ -5,7 +5,8 @@ import type { CurrentCaller } from "../caller";
 import type { Conflict, CoreError, Forbidden, Invalid, NotFound, Unavailable } from "../errors";
 import type { DocumentId, ExpenseId, PaymentId } from "../ids";
 import { ShareViewId } from "../ids";
-import type { FileDownload, Unspecified } from "../shared";
+import type { FileDownload } from "../shared";
+import { OpenStruct } from "../shared";
 import type {
   IsoDate,
   Locale,
@@ -17,7 +18,8 @@ import type {
 } from "../vocabulary";
 import type { DocumentView } from "./documents";
 
-export type PaymentView = Unspecified<"PaymentView">;
+export const PaymentView = Schema.Unknown.pipe(Schema.brand("PaymentView"));
+export type PaymentView = typeof PaymentView.Type;
 
 export type PaymentTarget = { readonly document: DocumentId } | { readonly expense: ExpenseId };
 
@@ -63,8 +65,11 @@ export const ShareViewEvent = Schema.Struct({
 });
 export type ShareViewEvent = typeof ShareViewEvent.Type;
 
-/** Narrowed recipient projection; adds `viewerIsIssuer: boolean`. Fields not yet specified. */
-export type SharedDocumentView = Unspecified<"SharedDocumentView">;
+/** Narrowed recipient projection; only `viewerIsIssuer` is specified so far (open). */
+export const SharedDocumentView = OpenStruct({
+  viewerIsIssuer: Schema.Boolean, // signedInUser is a Member of the issuing Workspace
+});
+export type SharedDocumentView = typeof SharedDocumentView.Type;
 
 /** Serves both sides of a Public Share Link: Members manage it, visitors open it. */
 export class PublicShareLinks extends Context.Service<

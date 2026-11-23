@@ -51,9 +51,19 @@ export const CurrencyCode = Schema.String.pipe(
 );
 export type CurrencyCode = typeof CurrencyCode.Type;
 
-/** Calendar date in Europe/Prague, YYYY-MM-DD. */
+const isCalendarDate = (s: string): boolean => {
+  const [y, m, d] = s.split("-").map(Number);
+  if (y === undefined || m === undefined || d === undefined) return false;
+  const date = new Date(Date.UTC(y, m - 1, d));
+  return date.getUTCFullYear() === y && date.getUTCMonth() === m - 1 && date.getUTCDate() === d;
+};
+
+/** Calendar date in Europe/Prague, YYYY-MM-DD. Impossible days (2026-02-30) are rejected. */
 export const IsoDate = Schema.String.pipe(
-  Schema.check(Schema.isPattern(/^\d{4}-\d{2}-\d{2}$/)),
+  Schema.check(
+    Schema.isPattern(/^\d{4}-\d{2}-\d{2}$/),
+    Schema.makeFilter(isCalendarDate, { expected: "a calendar date" }),
+  ),
   Schema.brand("IsoDate"),
 );
 export type IsoDate = typeof IsoDate.Type;

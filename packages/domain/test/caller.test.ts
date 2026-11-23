@@ -3,6 +3,7 @@ import { Effect, Schema } from "effect";
 import {
   Caller,
   CurrentCaller,
+  ExportId,
   InvitationToken,
   ShareToken,
   type SystemCaller,
@@ -31,7 +32,7 @@ const describeCaller = (caller: Caller): string => {
   }
 };
 
-const userId = Schema.decodeUnknownSync(UserId)("u1");
+const userId = Schema.decodeUnknownSync(UserId)("0192f0c4-1b2c-7d3e-8f40-0123456789ab");
 
 describe("Caller", () => {
   test("edge constructors stamp the tag", () => {
@@ -63,10 +64,14 @@ describe("Caller", () => {
 
   test("there is no System constructor and no literal satisfies SystemCaller", () => {
     expect(Object.keys(Caller).sort()).toEqual(["account", "invitationHolder", "shareLinkVisitor"]);
+    // Every public field is present and correctly typed, so only the seal makes this fail.
     const literal = {
-      _tag: "System",
-      workspaceId: Schema.decodeUnknownSync(WorkspaceId)("w"),
-      job: { _tag: "DataExport" },
+      _tag: "System" as const,
+      workspaceId: Schema.decodeUnknownSync(WorkspaceId)("0192f0c4-1b2c-7d3e-8f40-0123456789ac"),
+      job: {
+        _tag: "DataExport" as const,
+        exportId: Schema.decodeUnknownSync(ExportId)("0192f0c4-1b2c-7d3e-8f40-0123456789ad"),
+      },
     };
     // @ts-expect-error the seal key is not nameable outside caller.ts
     const forged: SystemCaller = literal;

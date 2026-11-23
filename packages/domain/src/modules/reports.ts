@@ -4,7 +4,7 @@ import { Context, Schema } from "effect";
 import type { CurrentCaller } from "../caller";
 import type { Conflict, Forbidden, Invalid, NotFound, Unavailable } from "../errors";
 import { ExportId } from "../ids";
-import type { FileDownload, Unspecified } from "../shared";
+import type { FileDownload } from "../shared";
 import type { RequestOptions } from "../vocabulary";
 import { CurrencyCode, IsoDate, Money } from "../vocabulary";
 
@@ -29,7 +29,8 @@ export interface ReportQuery {
   readonly groupBy?: "month" | "contact" | "currency" | "category";
 }
 
-export type ReportView = Unspecified<"ReportView">;
+export const ReportView = Schema.Unknown.pipe(Schema.brand("ReportView"));
+export type ReportView = typeof ReportView.Type;
 
 export const CashflowPoint = Schema.Struct({
   month: Schema.String, // YYYY-MM

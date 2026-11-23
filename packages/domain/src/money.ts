@@ -31,6 +31,7 @@ const MINOR_UNIT_EXCEPTIONS: ReadonlyMap<string, number> = new Map([
     "RWF",
     "UGX",
     "VND",
+    "UYI",
     "VUV",
     "XAF",
     "XOF",

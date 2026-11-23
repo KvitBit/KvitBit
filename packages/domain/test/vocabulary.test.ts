@@ -9,7 +9,9 @@ import {
   Money,
   PageRequest,
   ReminderPolicy,
+  RequestKey,
   resolveDefault,
+  ShareToken,
   TaxRegime,
   ThemePreference,
   ThemePresetId,
@@ -47,14 +49,30 @@ describe("CurrencyCode and IsoDate", () => {
     expect(accepts(CurrencyCode, "czk")).toBe(false);
     expect(accepts(CurrencyCode, "CZKK")).toBe(false);
   });
-  test("IsoDate is YYYY-MM-DD", () => {
+  test("IsoDate is a real calendar day in YYYY-MM-DD", () => {
     expect(accepts(IsoDate, "2026-11-23")).toBe(true);
+    expect(accepts(IsoDate, "2024-02-29")).toBe(true); // leap year
+    expect(accepts(IsoDate, "2026-02-29")).toBe(false);
+    expect(accepts(IsoDate, "2026-02-30")).toBe(false);
+    expect(accepts(IsoDate, "2026-13-01")).toBe(false);
+    expect(accepts(IsoDate, "2026-04-31")).toBe(false);
+    expect(accepts(IsoDate, "2026-00-10")).toBe(false);
     expect(accepts(IsoDate, "2026-1-23")).toBe(false);
     expect(accepts(IsoDate, "2026-11-23T00:00:00Z")).toBe(false);
   });
-  test("branded ids decode from strings only", () => {
+  test("entity ids are UUIDv7", () => {
     expect(accepts(WorkspaceId, "0192f0c4-0000-7000-8000-000000000000")).toBe(true);
+    expect(accepts(WorkspaceId, "0192F0C4-1B2C-7D3E-8F40-0123456789AB")).toBe(true);
+    expect(accepts(WorkspaceId, "")).toBe(false);
+    expect(accepts(WorkspaceId, "not-an-id")).toBe(false);
+    expect(accepts(WorkspaceId, "0192f0c4-1b2c-4d3e-8f40-0123456789ab")).toBe(false); // v4
+    expect(accepts(WorkspaceId, "0192f0c4-1b2c-7d3e-cf40-0123456789ab")).toBe(false); // variant
     expect(accepts(WorkspaceId, 42)).toBe(false);
+  });
+  test("tokens and retry keys keep their own formats but are non-empty", () => {
+    expect(accepts(ShareToken, "v1.abc_DEF-123")).toBe(true);
+    expect(accepts(RequestKey, "mcp:grant-1:retry-7")).toBe(true);
+    expect(accepts(ShareToken, "")).toBe(false);
   });
 });
 
@@ -97,6 +115,11 @@ describe("Money on the wire", () => {
     const decoded = Schema.decodeUnknownSync(json)(encoded);
     expect(BigDecimal.equals(decoded.amount, BigDecimal.fromStringUnsafe("1210.5"))).toBe(true);
   });
+  test("encoding fails for a value that is not a BigDecimal", () => {
+    expect(Exit.isFailure(Schema.encodeUnknownExit(json)({ amount: "1.5", currency: "CZK" }))).toBe(
+      true,
+    );
+  });
   test("rejects a non-decimal amount and a bad currency", () => {
     expect(accepts(json, { amount: "abc", currency: "CZK" })).toBe(false);
     expect(accepts(json, { amount: "1", currency: "czk" })).toBe(false);
@@ -110,7 +133,7 @@ describe("Contact overrides", () => {
       accepts(ContactDefaults, {
         currency: "EUR",
         dueDays: 14,
-        preferredSeriesByKind: { invoice: "series-1" },
+        preferredSeriesByKind: { invoice: "0192f0c4-1b2c-7d3e-8f40-0123456789ab" },
         reminderPolicy: { mode: "custom", offsetsDays: [3, 10] },
       }),
     ).toBe(true);

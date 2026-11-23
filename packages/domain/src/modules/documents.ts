@@ -3,19 +3,22 @@ import type { BigDecimal, Effect } from "effect";
 import { Context, Schema } from "effect";
 import type { CurrentCaller } from "../caller";
 import type { Conflict, CoreError, Forbidden, Invalid, NotFound, Unavailable } from "../errors";
-import type { DeliveryId, DocumentId, LineId } from "../ids";
-import { BankAccountId, ContactId, NumberingSeriesId } from "../ids";
-import type { FileDownload, StatutoryNote, Unspecified, VatBreakdown } from "../shared";
-import type {
+import type { LineId } from "../ids";
+import { BankAccountId, ContactId, DeliveryId, DocumentId, NumberingSeriesId } from "../ids";
+import type { FileDownload } from "../shared";
+import { StatutoryNote, VatBreakdown } from "../shared";
+import type { Page, PdfTemplate, RequestOptions } from "../vocabulary";
+import {
+  CurrencyCode,
   DeliveryPurpose,
   DocumentKind,
   DocumentSettlement,
   DocumentStatus,
-  Page,
-  PdfTemplate,
-  RequestOptions,
+  IsoDate,
+  LineInput,
+  Locale,
+  PaymentMethod,
 } from "../vocabulary";
-import { CurrencyCode, IsoDate, LineInput, Locale, PaymentMethod } from "../vocabulary";
 import type { AuditEntry } from "./audit";
 
 /** Manual exchange rate, decision Q4: `quantity` units of the document currency = `rate` CZK. */
@@ -72,71 +75,105 @@ export const DocumentPatch = Schema.Struct({
 export type DocumentPatch = typeof DocumentPatch.Type;
 
 /** Buyer particulars as printed. Fields not yet specified. */
-export type ContactSnapshot = Unspecified<"ContactSnapshot">;
+export const ContactSnapshot = Schema.Unknown.pipe(Schema.brand("ContactSnapshot"));
+export type ContactSnapshot = typeof ContactSnapshot.Type;
 /** Issuing Entity particulars, §435 register entry, bank account. Fields not yet specified. */
-export type IssuerSnapshot = Unspecified<"IssuerSnapshot">;
+export const IssuerSnapshot = Schema.Unknown.pipe(Schema.brand("IssuerSnapshot"));
+export type IssuerSnapshot = typeof IssuerSnapshot.Type;
 /** A line with its resolved VatTreatment and rate %. Fields not yet specified. */
-export type LineView = Unspecified<"LineView">;
-/** kind, status, settlement, overdue, contact, period, text (ui-port notes). Fields not yet specified. */
-export type DocumentQuery = Unspecified<"DocumentQuery">;
-export type DocumentSummary = Unspecified<"DocumentSummary">;
+export const LineView = Schema.Unknown.pipe(Schema.brand("LineView"));
+export type LineView = typeof LineView.Type;
+/** List row: number or draft, contact, dates, total, badges (ui-port notes). Fields not yet specified. */
+export const DocumentSummary = Schema.Unknown.pipe(Schema.brand("DocumentSummary"));
+export type DocumentSummary = typeof DocumentSummary.Type;
 
-export type DeliveryStatus = "queued" | "sending" | "sent" | "failed" | "skipped";
-export type DocumentRelation =
-  | "corrects"
-  | "corrected_by"
-  | "advance_of"
-  | "tax_document_for"
-  | "final_invoice_for"
-  | "deducts";
+/**
+ * List filter: kind, status, settlement, overdue, contact, period, text (ui-port 8.9). Flat so
+ * HTTP can spread `.fields` into a query string; the period is `from`/`to` (implementer choice,
+ * the spec names the filter but not its encoding). Paging (cursor, limit) is added by callers.
+ */
+export const DocumentQuery = Schema.Struct({
+  kind: Schema.optional(DocumentKind),
+  status: Schema.optional(DocumentStatus),
+  settlement: Schema.optional(DocumentSettlement),
+  overdue: Schema.optional(Schema.Boolean),
+  contact: Schema.optional(ContactId),
+  from: Schema.optional(IsoDate),
+  to: Schema.optional(IsoDate),
+  text: Schema.optional(Schema.String),
+});
+export type DocumentQuery = typeof DocumentQuery.Type;
 
-export interface DocumentView {
-  readonly id: DocumentId;
-  readonly kind: DocumentKind;
-  readonly number: string | null; // null while draft
-  readonly status: DocumentStatus;
-  readonly locked: boolean;
-  readonly settlement: DocumentSettlement; // derived at read
-  readonly overdue: boolean; // derived at read
-  readonly revision: number;
-  readonly taxDocument: boolean; // true when the document is a VAT tax document
-  readonly contact: ContactSnapshot;
-  readonly issuer: IssuerSnapshot;
-  readonly dates: {
-    readonly issuedOn: IsoDate;
-    readonly taxableSupplyOn: IsoDate | null;
-    readonly dueOn: IsoDate;
-  };
-  readonly paymentMethod: PaymentMethod; // resolved Document → Contact → Workspace
-  readonly lines: ReadonlyArray<LineView>;
-  readonly totals: VatBreakdown;
-  readonly fx: null | {
-    readonly rate: BigDecimal.BigDecimal;
-    readonly quantity: number;
-    readonly fixingDate: IsoDate | null; // null for manual
-    readonly source: "cnb" | "manual";
-  };
-  readonly statutoryNotes: ReadonlyArray<StatutoryNote>;
-  readonly paymentQr: null | { readonly format: "spayd" | "epc"; readonly payload: string };
-  readonly related: ReadonlyArray<{
-    readonly relation: DocumentRelation;
-    readonly id: DocumentId;
-    readonly kind: DocumentKind;
-    readonly number: string;
-  }>;
-  readonly share: null | {
-    readonly url: string;
-    readonly views: number;
-    readonly lastViewedAt: string | null;
-  };
-  readonly deliveries: ReadonlyArray<{
-    readonly id: DeliveryId;
-    readonly to: ReadonlyArray<string>;
-    readonly purpose: DeliveryPurpose;
-    readonly status: DeliveryStatus;
-    readonly at: string;
-  }>;
-}
+export const DeliveryStatus = Schema.Literals(["queued", "sending", "sent", "failed", "skipped"]);
+export type DeliveryStatus = typeof DeliveryStatus.Type;
+export const DocumentRelation = Schema.Literals([
+  "corrects",
+  "corrected_by",
+  "advance_of",
+  "tax_document_for",
+  "final_invoice_for",
+  "deducts",
+]);
+export type DocumentRelation = typeof DocumentRelation.Type;
+
+export const DocumentView = Schema.Struct({
+  id: DocumentId,
+  kind: DocumentKind,
+  number: Schema.NullOr(Schema.String), // null while draft
+  status: DocumentStatus,
+  locked: Schema.Boolean,
+  settlement: DocumentSettlement, // derived at read
+  overdue: Schema.Boolean, // derived at read
+  revision: Schema.Int,
+  taxDocument: Schema.Boolean, // true when the document is a VAT tax document
+  contact: ContactSnapshot,
+  issuer: IssuerSnapshot,
+  dates: Schema.Struct({
+    issuedOn: IsoDate,
+    taxableSupplyOn: Schema.NullOr(IsoDate),
+    dueOn: IsoDate,
+  }),
+  paymentMethod: PaymentMethod, // resolved Document → Contact → Workspace
+  lines: Schema.Array(LineView),
+  totals: VatBreakdown,
+  fx: Schema.NullOr(
+    Schema.Struct({
+      rate: Schema.BigDecimal,
+      quantity: Schema.Int,
+      fixingDate: Schema.NullOr(IsoDate), // null for manual
+      source: Schema.Literals(["cnb", "manual"]),
+    }),
+  ),
+  statutoryNotes: Schema.Array(StatutoryNote),
+  paymentQr: Schema.NullOr(
+    Schema.Struct({ format: Schema.Literals(["spayd", "epc"]), payload: Schema.String }),
+  ),
+  related: Schema.Array(
+    Schema.Struct({
+      relation: DocumentRelation,
+      id: DocumentId,
+      kind: DocumentKind,
+      number: Schema.String,
+    }),
+  ),
+  share: Schema.NullOr(
+    Schema.Struct({
+      url: Schema.String,
+      views: Schema.Int,
+      lastViewedAt: Schema.NullOr(Schema.String),
+    }),
+  ),
+  deliveries: Schema.Array(
+    Schema.Struct({
+      id: DeliveryId,
+      to: Schema.Array(Schema.String),
+      purpose: DeliveryPurpose,
+      status: DeliveryStatus,
+      at: Schema.String,
+    }),
+  ),
+});
+export type DocumentView = typeof DocumentView.Type;
 
 export interface CorrectionInput {
   readonly reason: string;

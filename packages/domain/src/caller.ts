@@ -1,18 +1,10 @@
 /** Caller context (core-ports section 2.1). */
 import { Context, Schema } from "effect";
-import type {
-  DeliveryId,
-  DocumentId,
-  ExportId,
-  InvitationToken,
-  ScheduleId,
-  ShareToken,
-  UserId,
-  VisitorHash,
-  WorkspaceId,
-} from "./ids";
+import type { InvitationToken, ShareToken, UserId, VisitorHash, WorkspaceId } from "./ids";
+import { DeliveryId, DocumentId, ExportId, ScheduleId } from "./ids";
 import type { Scope } from "./scope";
-import type { ClientRef, IsoDate, Locale, Role } from "./vocabulary";
+import type { ClientRef, Locale, Role } from "./vocabulary";
+import { IsoDate } from "./vocabulary";
 
 export const Channel = Schema.Literals(["web", "mobile", "api", "mcp"]);
 export type Channel = typeof Channel.Type;
@@ -66,15 +58,14 @@ export interface InvitationHolderCaller {
  */
 declare const SystemSeal: unique symbol;
 
-export type SystemJob =
-  | {
-      readonly _tag: "RecurringIssuance";
-      readonly scheduleId: ScheduleId;
-      readonly occurrence: IsoDate;
-    }
-  | { readonly _tag: "PaymentReminders"; readonly documentId: DocumentId }
-  | { readonly _tag: "DocumentDelivery"; readonly deliveryId: DeliveryId }
-  | { readonly _tag: "DataExport"; readonly exportId: ExportId };
+/** What a System caller is doing; also the audit attribution of workflow writes. */
+export const SystemJob = Schema.Union([
+  Schema.TaggedStruct("RecurringIssuance", { scheduleId: ScheduleId, occurrence: IsoDate }),
+  Schema.TaggedStruct("PaymentReminders", { documentId: DocumentId }),
+  Schema.TaggedStruct("DocumentDelivery", { deliveryId: DeliveryId }),
+  Schema.TaggedStruct("DataExport", { exportId: ExportId }),
+]);
+export type SystemJob = typeof SystemJob.Type;
 
 /** Workflows and crons. Constructible only inside the core. */
 export interface SystemCaller {
