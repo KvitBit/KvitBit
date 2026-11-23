@@ -1,6 +1,4 @@
 import { describe, expect, test } from "bun:test";
-import { CurrencyCode, IsoDate, type Locale, type Money } from "@kvitbit/domain/contract";
-import { BigDecimal, Schema } from "effect";
 import {
   type EmailTemplate,
   escapeHtml,
@@ -9,8 +7,11 @@ import {
   formatFileSize,
   formatMoney,
   NBSP,
+  render,
   renderEmail,
-} from "../../../src/templates/email/index";
+} from "@kvitbit/adapters/templates/email";
+import { CurrencyCode, IsoDate, type Locale, type Money } from "@kvitbit/domain/contract";
+import { BigDecimal, Schema } from "effect";
 
 const cur = Schema.decodeUnknownSync(CurrencyCode);
 const date = Schema.decodeUnknownSync(IsoDate);
@@ -234,11 +235,11 @@ const expected: Record<string, Record<Locale, readonly [string, ReadonlyArray<st
   },
   E08: {
     cs: [
-      "Vyžaduje pozornost: pravidelná fakturace selhala (Ateliér Kalný s.r.o.)",
+      "Vyžaduje pozornost: pravidelné vystavení dokladu selhalo (Ateliér Kalný s.r.o.)",
       ["[Vyžaduje pozornost]", nb("k datu 1._11._2026"), "Důvod chyby:\nKontakt nemá e-mail"],
     ],
     en: [
-      "Action needed: recurring invoice run failed (Ateliér Kalný s.r.o.)",
+      "Action needed: recurring document run failed (Ateliér Kalný s.r.o.)",
       ["[Needs attention]", nb("for 1_Nov_2026"), "Reason:"],
     ],
   },
@@ -504,5 +505,64 @@ describe("dark mode", () => {
     expect(ws).not.toContain('class="kb-on-accent"');
     const pill = renderEmail(fixtures.E08 as EmailTemplate, "en").html;
     expect(pill).toContain('class="kb-error"');
+  });
+});
+
+describe("review round 1 regressions", () => {
+  test("render is the public alias of renderEmail", () => {
+    expect(render(fixtures.E02 as EmailTemplate, "en")).toEqual(
+      renderEmail(fixtures.E02 as EmailTemplate, "en"),
+    );
+  });
+
+  test("initials keep astral letters whole and the HTML stays well-formed", () => {
+    const e04 = fixtures.E04 as Extract<EmailTemplate, { id: "E04" }>;
+    for (const name of ["𠮷田商店", "𠮷田 商店", "s.r.o."]) {
+      const html = renderEmail({ ...e04, workspace: { name } }, "cs").html;
+      // No lone surrogate (String#isWellFormed is outside this repo's TS lib).
+      expect(html).not.toMatch(
+        /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/,
+      );
+    }
+    expect(renderEmail({ ...e04, workspace: { name: "𠮷田 商店" } }, "cs").html).toContain(
+      ">𠮷商</div>",
+    );
+  });
+
+  test("long unbroken values may wrap inside the card", () => {
+    const html = renderEmail(
+      {
+        ...(fixtures.E02 as Extract<EmailTemplate, { id: "E02" }>),
+        email: `${"a".repeat(60)}@example.com`,
+      },
+      "en",
+    ).html;
+    expect(html).toContain("overflow-wrap:anywhere");
+    expect(html).toMatch(/word-break:break-all;">a{60}@example\.com/);
+  });
+
+  test("E08 wording does not assume an Invoice", () => {
+    for (const locale of ["cs", "en"] as const) {
+      const out = renderEmail(fixtures.E08 as EmailTemplate, locale);
+      expect(out.subject + out.text).not.toMatch(/faktur|invoice/i);
+    }
+  });
+
+  test("E06 uses the workspace reminder subject and message", () => {
+    const out = renderEmail(
+      {
+        ...(fixtures.E06 as Extract<EmailTemplate, { id: "E06" }>),
+        subject: "Custom reminder <2026-0042>",
+        message: "First custom paragraph.\n\nSecond & last.",
+      },
+      "en",
+    );
+    expect(out.subject).toBe("Custom reminder <2026-0042>");
+    expect(out.text).toContain("First custom paragraph.\n\nSecond & last.");
+    expect(out.text).not.toContain("We have not yet received payment");
+    expect(out.html).toContain("First custom paragraph.");
+    expect(out.html).toContain("Second &amp; last.");
+    expect(out.html).toContain("<title>Custom reminder &lt;2026-0042&gt;</title>");
+    expect(out.html).not.toContain("We have not yet received payment");
   });
 });

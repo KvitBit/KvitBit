@@ -97,6 +97,8 @@ const SANS = "-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial
 const SERIF = "Erode,Georgia,'Times New Roman',serif";
 const MONO = "'JetBrains Mono',ui-monospace,SFMono-Regular,Menlo,Consolas,monospace";
 const TNUM = "font-variant-numeric:lining-nums tabular-nums;";
+/** Long addresses, names and file names wrap inside the card instead of widening it. */
+const WRAP = "overflow-wrap:anywhere;word-break:break-word;";
 
 const HTML_ESCAPES: Readonly<Record<string, string>> = {
   "&": "&amp;",
@@ -132,7 +134,8 @@ const inlineHtml = (parts: ReadonlyArray<Inline>): string =>
     .map((p) => {
       if (typeof p === "string") return escapeMultiline(p);
       if ("strong" in p) return `<strong>${escapeHtml(p.strong)}</strong>`;
-      if ("mono" in p) return `<span style="font-family:${MONO};">${escapeHtml(p.mono)}</span>`;
+      if ("mono" in p)
+        return `<span style="font-family:${MONO};word-break:break-all;">${escapeHtml(p.mono)}</span>`;
       return "<br>";
     })
     .join("");
@@ -192,7 +195,7 @@ const blockHtml = (block: Block, brand: Brand): string => {
       return (
         `<div style="margin:0 0 10px;"><span class="kb-sub" style="display:inline-block;padding:5px 10px;border-radius:4px;` +
         `background:${palette.sub};border:1px solid ${palette.border};font-size:11.5px;">PDF · ` +
-        `<span style="font-family:${MONO};">${escapeHtml(block.filename)}</span> (${escapeHtml(block.size)})</span></div>`
+        `<span style="font-family:${MONO};word-break:break-all;">${escapeHtml(block.filename)}</span> (${escapeHtml(block.size)})</span></div>`
       );
     case "Button":
       return (
@@ -256,11 +259,11 @@ export const renderHtml = (content: EmailContent): string => {
     `<td class="kb-stage" align="center" style="padding:24px 12px;">` +
     `<table role="presentation" class="kb-container kb-card" width="600" cellpadding="0" cellspacing="0" border="0" ` +
     `style="width:100%;max-width:600px;background:${palette.card};border:1px solid ${palette.border};border-radius:5px;` +
-    `border-collapse:separate;overflow:hidden;color:${palette.fg};font-family:${SANS};${TNUM}"><tbody>` +
+    `border-collapse:separate;overflow:hidden;color:${palette.fg};font-family:${SANS};${TNUM}${WRAP}"><tbody>` +
     `<tr><td${accentClass(brand)} height="4" style="height:4px;line-height:4px;font-size:0;background:${brand.accent};">&nbsp;</td></tr>` +
-    `<tr><td class="kb-pad" style="padding:22px 24px 20px;font-size:13px;line-height:1.55;text-align:left;">${brandRow}${body}</td></tr>` +
+    `<tr><td class="kb-pad" style="padding:22px 24px 20px;font-size:13px;line-height:1.55;text-align:left;${WRAP}">${brandRow}${body}</td></tr>` +
     `<tr><td class="kb-foot kb-sub kb-muted kb-rule" style="padding:12px 24px;background:${palette.sub};border-top:1px solid ${palette.border};` +
-    `font-size:11px;line-height:1.45;color:${palette.muted};text-align:left;">${escapeHtml(content.footer.join(" · "))}</td></tr>` +
+    `font-size:11px;line-height:1.45;color:${palette.muted};text-align:left;${WRAP}">${escapeHtml(content.footer.join(" · "))}</td></tr>` +
     "</tbody></table></td></tr></tbody></table></body></html>"
   );
 };

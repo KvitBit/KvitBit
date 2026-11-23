@@ -41,3 +41,6 @@ export const renderEmail = (template: EmailTemplate, locale: Locale): RenderedEm
   const content = { ...built, subject: built.subject.replace(/\s*[\r\n]+\s*/g, " ").trim() };
   return { subject: content.subject, html: renderHtml(content), text: renderText(content) };
 };
+
+/** Alias of `renderEmail`. */
+export const render = renderEmail;

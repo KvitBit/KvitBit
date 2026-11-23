@@ -174,8 +174,10 @@ export const initialsOf = (name: string): string => {
     .split(/\s+/)
     .filter((w) => /^\p{L}/u.test(w) && !w.includes("."))
     .slice(0, 2);
-  const initials = words.map((w) => (w[0] ?? "").toLocaleUpperCase()).join("");
-  return initials.length > 0 ? initials : (name.trim()[0] ?? "K").toLocaleUpperCase();
+  // Array.from splits by code point, so astral letters (𠮷) stay whole.
+  const first = (w: string): string => Array.from(w)[0] ?? "";
+  const initials = words.map((w) => first(w).toLocaleUpperCase()).join("");
+  return initials.length > 0 ? initials : (first(name.trim()) || "K").toLocaleUpperCase();
 };
 
 const workspaceBrand = (ws: EmailWorkspace): Brand => {
@@ -809,8 +811,8 @@ const e08 = (t: E08NeedsAttention, locale: Locale): EmailContent => {
     brand: kvitbitBrand,
     subject: by(
       locale,
-      `Vyžaduje pozornost: pravidelná fakturace selhala (${t.workspaceName})`,
-      `Action needed: recurring invoice run failed (${t.workspaceName})`,
+      `Vyžaduje pozornost: pravidelné vystavení dokladu selhalo (${t.workspaceName})`,
+      `Action needed: recurring document run failed (${t.workspaceName})`,
     ),
     preheader: by(
       locale,
@@ -819,7 +821,7 @@ const e08 = (t: E08NeedsAttention, locale: Locale): EmailContent => {
     ),
     blocks: [
       { _tag: "Pill", tone: "error", text: by(locale, "Vyžaduje pozornost", "Needs attention") },
-      h(by(locale, "Pravidelná faktura nebyla vystavena", "Recurring invoice could not be issued")),
+      h(by(locale, "Pravidelný doklad nebyl vystaven", "Recurring document could not be issued")),
       by(
         locale,
         p(
