@@ -39,6 +39,8 @@ export interface Brand {
   readonly initials: string;
   readonly accent: string;
   readonly onAccent: string;
+  /** Brand ink: swaps to the dark-surface ink in dark mode so it stays visible on the dark card. */
+  readonly invertInDark?: boolean;
 }
 
 export interface EmailContent {
@@ -74,6 +76,11 @@ const palette = {
     fg: "#FAFAFA",
     muted: "#A1A1AA",
     border: "#27272A",
+    warnBg: "#32220F",
+    warnFg: "#FBBF24",
+    errBg: "#351517",
+    errFg: "#FECACA",
+    link: "#FAFAFA",
   },
 } as const;
 
@@ -83,6 +90,7 @@ export const kvitbitBrand: Brand = {
   initials: "K",
   accent: brandColors.iconTile,
   onAccent: brandColors.inkOnDark,
+  invertInDark: true,
 };
 
 const SANS = "-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif";
@@ -115,6 +123,10 @@ export const safeUrl = (url: string): string => (/^https?:\/\/[^\s]+$/i.test(url
 
 // HTML ---------------------------------------------------------------------------------------
 
+/** Dark-mode hook classes for elements painted with the brand accent (brand ink only). */
+const accentClass = (brand: Brand): string => (brand.invertInDark ? ' class="kb-accent"' : "");
+const onAccentClass = (brand: Brand): string => (brand.invertInDark ? ' class="kb-on-accent"' : "");
+
 const inlineHtml = (parts: ReadonlyArray<Inline>): string =>
   parts
     .map((p) => {
@@ -145,7 +157,7 @@ const blockHtml = (block: Block, brand: Brand): string => {
       const [bg, fg] =
         block.tone === "warn" ? [palette.warnBg, palette.warnFg] : [palette.errBg, palette.errFg];
       return (
-        `<div style="margin:0 0 8px;"><span style="display:inline-block;background:${bg};color:${fg};` +
+        `<div style="margin:0 0 8px;"><span class="kb-${block.tone}" style="display:inline-block;background:${bg};color:${fg};` +
         `font-size:10.5px;font-weight:600;padding:2px 7px;border-radius:3px;">${escapeHtml(block.text)}</span></div>`
       );
     }
@@ -185,15 +197,15 @@ const blockHtml = (block: Block, brand: Brand): string => {
     case "Button":
       return (
         `<table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin:4px 0 12px;"><tbody><tr>` +
-        `<td bgcolor="${brand.accent}" style="background:${brand.accent};border-radius:4px;">` +
-        `<a href="${escapeHtml(safeUrl(block.url))}" target="_blank" style="display:inline-block;padding:10px 18px;` +
+        `<td${accentClass(brand)} bgcolor="${brand.accent}" style="background:${brand.accent};border-radius:4px;">` +
+        `<a${onAccentClass(brand)} href="${escapeHtml(safeUrl(block.url))}" target="_blank" style="display:inline-block;padding:10px 18px;` +
         `font-family:${SANS};font-size:13px;font-weight:600;line-height:1.2;color:${brand.onAccent};text-decoration:none;` +
         `border-radius:4px;">${escapeHtml(block.label)}</a></td></tr></tbody></table>`
       );
     case "Link":
       return (
         `<p class="kb-muted" style="margin:0 0 12px;font-size:11.5px;color:${palette.muted};">` +
-        `<a href="${escapeHtml(safeUrl(block.url))}" target="_blank" style="color:${palette.fg};text-decoration:underline;">${escapeHtml(block.label)}</a></p>`
+        `<a class="kb-link" href="${escapeHtml(safeUrl(block.url))}" target="_blank" style="color:${palette.fg};text-decoration:underline;">${escapeHtml(block.label)}</a></p>`
       );
   }
 };
@@ -211,7 +223,12 @@ const HEAD_STYLE =
   `.kb-card{background:${palette.dark.card}!important;border-color:${palette.dark.border}!important;color:${palette.dark.fg}!important;}` +
   `.kb-sub{background:${palette.dark.sub}!important;border-color:${palette.dark.border}!important;}` +
   `.kb-muted{color:${palette.dark.muted}!important;}` +
-  `.kb-rule{border-color:${palette.dark.border}!important;}}`;
+  `.kb-rule{border-color:${palette.dark.border}!important;}` +
+  `.kb-link{color:${palette.dark.link}!important;}` +
+  `.kb-warn{background:${palette.dark.warnBg}!important;color:${palette.dark.warnFg}!important;}` +
+  `.kb-error{background:${palette.dark.errBg}!important;color:${palette.dark.errFg}!important;}` +
+  `.kb-accent{background:${brandColors.inkOnDark}!important;}` +
+  `.kb-on-accent{background:${brandColors.inkOnDark}!important;color:${brandColors.iconTile}!important;}}`;
 
 export const renderHtml = (content: EmailContent): string => {
   const { brand } = content;
@@ -220,7 +237,7 @@ export const renderHtml = (content: EmailContent): string => {
     `<table role="presentation" class="kb-rule" width="100%" cellpadding="0" cellspacing="0" border="0" ` +
     `style="margin:0 0 16px;border-bottom:1px solid ${palette.border};"><tbody><tr>` +
     `<td width="24" style="padding:0 8px 12px 0;width:24px;">` +
-    `<div style="width:24px;height:24px;line-height:24px;border-radius:4px;background:${brand.accent};` +
+    `<div${onAccentClass(brand)} style="width:24px;height:24px;line-height:24px;border-radius:4px;background:${brand.accent};` +
     `color:${brand.onAccent};text-align:center;font-family:${SERIF};font-weight:600;font-size:12px;">${escapeHtml(brand.initials)}</div></td>` +
     `<td style="padding:0 0 12px;font-size:13.5px;font-weight:700;">${escapeHtml(brand.name)}</td></tr></tbody></table>`;
   return (
@@ -238,9 +255,9 @@ export const renderHtml = (content: EmailContent): string => {
     `<table role="presentation" class="kb-canvas" width="100%" cellpadding="0" cellspacing="0" border="0" style="background:${palette.canvas};"><tbody><tr>` +
     `<td class="kb-stage" align="center" style="padding:24px 12px;">` +
     `<table role="presentation" class="kb-container kb-card" width="600" cellpadding="0" cellspacing="0" border="0" ` +
-    `style="width:600px;max-width:600px;background:${palette.card};border:1px solid ${palette.border};border-radius:5px;` +
+    `style="width:100%;max-width:600px;background:${palette.card};border:1px solid ${palette.border};border-radius:5px;` +
     `border-collapse:separate;overflow:hidden;color:${palette.fg};font-family:${SANS};${TNUM}"><tbody>` +
-    `<tr><td height="4" style="height:4px;line-height:4px;font-size:0;background:${brand.accent};">&nbsp;</td></tr>` +
+    `<tr><td${accentClass(brand)} height="4" style="height:4px;line-height:4px;font-size:0;background:${brand.accent};">&nbsp;</td></tr>` +
     `<tr><td class="kb-pad" style="padding:22px 24px 20px;font-size:13px;line-height:1.55;text-align:left;">${brandRow}${body}</td></tr>` +
     `<tr><td class="kb-foot kb-sub kb-muted kb-rule" style="padding:12px 24px;background:${palette.sub};border-top:1px solid ${palette.border};` +
     `font-size:11px;line-height:1.45;color:${palette.muted};text-align:left;">${escapeHtml(content.footer.join(" · "))}</td></tr>` +

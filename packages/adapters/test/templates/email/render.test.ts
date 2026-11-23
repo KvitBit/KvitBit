@@ -77,6 +77,7 @@ const fixtures: Record<string, EmailTemplate> = {
     variableSymbol: "20260042",
     bankAccount: "2101482910/2010",
     shareUrl: "https://kvitbit.app/i/tok",
+    paymentQr: "spayd",
     attachment: { filename: "faktura-2026-0042.pdf", sizeBytes: 65_000 },
     footer,
   },
@@ -90,6 +91,7 @@ const fixtures: Record<string, EmailTemplate> = {
     daysOverdue: 10,
     variableSymbol: "20260042",
     shareUrl: "https://kvitbit.app/i/tok",
+    paymentQr: "spayd",
     footer,
   },
   "E07 confirm_new": {
@@ -138,7 +140,11 @@ const expected: Record<string, Record<Locale, readonly [string, ReadonlyArray<st
   E02: {
     cs: [
       "Jednorázový odkaz pro přihlášení do Kvitbitu",
-      [nb("platí 15_minut."), "Praha, CZ (Chrome · Linux)", "filip@atelierkalny.cz"],
+      [
+        nb("platí 15_minut."),
+        "Místo požadavku: Praha, CZ (Chrome · Linux).",
+        "filip@atelierkalny.cz",
+      ],
     ],
     en: [
       "Your one-time sign-in link for Kvitbit",
@@ -158,7 +164,10 @@ const expected: Record<string, Record<Locale, readonly [string, ReadonlyArray<st
   E04: {
     cs: [
       "Filip Kalný vás zve do prostoru Ateliér Kalný s.r.o.",
-      ["v roli Člen (vystavování dokladů, náklady, kontakty)", nb("platí 7_dní (do 30._11._2026)")],
+      [
+        "Filip Kalný vás zve do prostoru Ateliér Kalný s.r.o. s rolí Člen (vystavování dokladů, náklady, kontakty)",
+        nb("platí 7_dní (do 30._11._2026)"),
+      ],
     ],
     en: [
       "Filip Kalný invited you to Ateliér Kalný s.r.o.",
@@ -408,16 +417,92 @@ describe("formatting", () => {
 });
 
 describe("document kinds in E05", () => {
-  const base = fixtures.E05 as Extract<EmailTemplate, { id: "E05" }>;
+  const { paymentQr: _qr, ...base } = fixtures.E05 as Extract<EmailTemplate, { id: "E05" }>;
   test.each([
     ["proforma", "cs", "Zálohová faktura 2026-0042", "Zobrazit zálohovou fakturu a QR kód"],
     ["payment_tax_document", "cs", "Daňový doklad k přijaté platbě 2026-0042", "Přijatá platba"],
     ["credit_note", "cs", "Opravný daňový doklad 2026-0042", "Zobrazit opravný daňový doklad:"],
     ["credit_note", "en", "Credit note 2026-0042", "Credit amount"],
   ] as const)("%s %s", (kind, locale, subjectStart, textFragment) => {
-    const out = renderEmail({ ...base, documentKind: kind }, locale);
+    const qr = kind === "proforma" ? { paymentQr: "spayd" as const } : {};
+    const out = renderEmail({ ...base, ...qr, documentKind: kind }, locale);
     expect(out.subject.startsWith(subjectStart)).toBe(true);
     expect(out.text).toContain(textFragment);
     if (kind !== "proforma") expect(out.text).not.toContain("QR");
+  });
+});
+
+describe("payment QR wording follows the document's actual QR", () => {
+  const e05 = fixtures.E05 as Extract<EmailTemplate, { id: "E05" }>;
+  const e06 = fixtures.E06 as Extract<EmailTemplate, { id: "E06" }>;
+  const { paymentQr: _a, ...e05NoQr } = e05;
+  const { paymentQr: _b, ...e06NoQr } = e06;
+
+  test("no QR: no QR promise in E05 or E06, cs and en", () => {
+    for (const locale of ["cs", "en"] as const)
+      for (const out of [
+        renderEmail(e05NoQr, locale),
+        renderEmail({ ...e05NoQr, amount: money("10", "USD") }, locale),
+        renderEmail(e06NoQr, locale),
+      ]) {
+        expect(out.text).not.toContain("QR");
+        expect(out.html).not.toContain("QR");
+      }
+    expect(renderEmail(e05NoQr, "cs").text).toContain("Online náhled s platebními údaji");
+    expect(renderEmail(e05NoQr, "en").text).toContain("view payment details online:");
+    expect(renderEmail(e06NoQr, "cs").text).toContain("Otevřít fakturu:\n");
+  });
+
+  test("EPC (EUR) says QR code, never the Czech QR Platba brand", () => {
+    const eur = { amount: money("1200", "EUR"), paymentQr: "epc" as const };
+    const cs05 = renderEmail({ ...e05, ...eur }, "cs").text;
+    expect(cs05).toContain("včetně QR kódu pro platbu");
+    expect(cs05).toContain("Zobrazit fakturu a QR kód:");
+    expect(cs05).not.toContain("QR Platb");
+    const cs06 = renderEmail({ ...e06, amountDue: eur.amount, paymentQr: "epc" }, "cs").text;
+    expect(cs06).toContain("Otevřít fakturu a QR kód:");
+    expect(cs06).not.toContain("QR Platb");
+    expect(renderEmail({ ...e05, ...eur }, "en").text).toContain("View invoice & QR code:");
+  });
+
+  test("SPAYD (CZK) uses QR Platba in cs", () => {
+    expect(renderEmail(e05, "cs").text).toContain("včetně QR Platby");
+    expect(renderEmail(e06, "cs").text).toContain("Otevřít fakturu a QR Platbu:");
+  });
+});
+
+describe("subjects and overrides", () => {
+  const e05 = fixtures.E05 as Extract<EmailTemplate, { id: "E05" }>;
+
+  test("line breaks in interpolated names and overrides collapse to one header line", () => {
+    const out = renderEmail({ ...e05, workspace: { name: "Ateliér\r\nKalný" } }, "cs");
+    expect(out.subject).toBe(nb("Faktura 2026-0042 — Ateliér Kalný (58_100,00_Kč)"));
+    expect(renderEmail({ ...e05, subject: " A\n\nB " }, "en").subject).toBe("A B");
+    const e04 = fixtures.E04 as Extract<EmailTemplate, { id: "E04" }>;
+    expect(renderEmail({ ...e04, inviterName: "Filip\nKalný" }, "en").subject).not.toMatch(
+      /[\r\n]/,
+    );
+  });
+
+  test("blank subject and message overrides fall back to the defaults", () => {
+    const out = renderEmail({ ...e05, subject: "  \n ", message: " \n\n " }, "cs");
+    expect(out.subject.startsWith("Faktura 2026-0042")).toBe(true);
+    expect(out.text).toContain("v příloze zasíláme fakturu 2026-0042");
+  });
+});
+
+describe("dark mode", () => {
+  test("Kvitbit ink accents carry the dark-mode swap; workspace accents do not", () => {
+    const account = renderEmail(fixtures.E03 as EmailTemplate, "cs").html;
+    expect(account).toContain(".kb-accent{background:#FAFAFA!important;}");
+    expect(account).toContain(".kb-link{color:#FAFAFA!important;}");
+    expect(account.match(/class="kb-accent"/g)?.length).toBe(2); // stripe and button cell
+    expect(account.match(/class="kb-on-accent"/g)?.length).toBe(2); // tile and button text
+    expect(account).toContain('class="kb-link"');
+    const ws = renderEmail(fixtures.E05 as EmailTemplate, "cs").html;
+    expect(ws).not.toContain('class="kb-accent"');
+    expect(ws).not.toContain('class="kb-on-accent"');
+    const pill = renderEmail(fixtures.E08 as EmailTemplate, "en").html;
+    expect(pill).toContain('class="kb-error"');
   });
 });

@@ -36,6 +36,8 @@ export interface RenderedEmail {
 }
 
 export const renderEmail = (template: EmailTemplate, locale: Locale): RenderedEmail => {
-  const content = emailContent(template, locale);
+  const built = emailContent(template, locale);
+  // A subject is one header line: line breaks from interpolated names or overrides collapse.
+  const content = { ...built, subject: built.subject.replace(/\s*[\r\n]+\s*/g, " ").trim() };
   return { subject: content.subject, html: renderHtml(content), text: renderText(content) };
 };

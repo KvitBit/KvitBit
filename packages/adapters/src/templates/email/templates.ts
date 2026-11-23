@@ -72,7 +72,8 @@ export interface E04Invitation {
   readonly workspace: EmailWorkspace;
   readonly inviterName: string;
   readonly inviteeEmail: string;
-  readonly role: Role;
+  /** Invitations grant admin, member or accountant; ownership moves only by transfer. */
+  readonly role: Exclude<Role, "owner">;
   readonly url: string;
   readonly validForDays: number;
   readonly expiresOn: IsoDate;
@@ -91,6 +92,8 @@ export interface E05DocumentDelivery {
   readonly bankAccount?: string;
   /** Public Share Link; the email always carries it. */
   readonly shareUrl: string;
+  /** Format of the document's payment QR (`DocumentView.paymentQr.format`); absent when it has none. */
+  readonly paymentQr?: "spayd" | "epc";
   readonly attachment?: { readonly filename: string; readonly sizeBytes: number };
   /** Workspace email text for this kind and language (flow 10.6), placeholders already resolved. */
   readonly subject?: string;
@@ -109,10 +112,12 @@ export interface E06OverdueReminder {
   readonly daysOverdue: number;
   readonly variableSymbol?: string;
   readonly shareUrl: string;
+  /** Format of the document's payment QR; absent when it has none. */
+  readonly paymentQr?: "spayd" | "epc";
   /** Workspace reminder text (flow 7.5), placeholders already resolved. */
   readonly subject?: string;
   readonly message?: string;
-  readonly footer: EmailIssuerFooter;
+  readonly footer: Pick<EmailIssuerFooter, "replyTo">;
 }
 
 /** E07 Confirm email change, sent to the new address (flow 1.8). */
@@ -183,6 +188,10 @@ const workspaceBrand = (ws: EmailWorkspace): Brand => {
     onAccent: valid ? accent.onColor : kvitbitBrand.onAccent,
   };
 };
+
+/** A caller override that is empty or whitespace counts as absent. */
+const nonBlank = (value: string | undefined): string | undefined =>
+  value === undefined || value.trim().length === 0 ? undefined : value;
 
 const by = <A>(locale: Locale, cs: A, en: A): A => (locale === "cs" ? cs : en);
 
@@ -423,11 +432,7 @@ const e02 = (t: E02MagicLink, locale: Locale): EmailContent => {
   const origin =
     t.requestedFrom === undefined
       ? ""
-      : by(
-          locale,
-          ` Požadavek přišel z ${t.requestedFrom}.`,
-          ` Requested from ${t.requestedFrom}.`,
-        );
+      : by(locale, ` Místo požadavku: ${t.requestedFrom}.`, ` Requested from ${t.requestedFrom}.`);
   return {
     locale,
     brand: kvitbitBrand,
@@ -524,9 +529,9 @@ const e04 = (t: E04Invitation, locale: Locale): EmailContent => {
         locale,
         p(
           strong(t.inviterName),
-          " vás pozval do prostoru ",
+          " vás zve do prostoru ",
           strong(t.workspace.name),
-          " v roli ",
+          " s rolí ",
           strong(role.name),
           ` (${role.scope}).`,
         ),
@@ -569,17 +574,23 @@ const e05 = (t: E05DocumentDelivery, locale: Locale): EmailContent => {
       "Dobrý den,",
       br,
       `${t.attachment === undefined ? "zasíláme" : "v příloze zasíláme"} ${kind.object} ${t.documentNumber}. ` +
-        (kind.payable
+        (t.paymentQr === "spayd"
           ? "Online náhled včetně QR Platby je dostupný na odkazu níže."
-          : "Online náhled je dostupný na odkazu níže."),
+          : t.paymentQr === "epc"
+            ? "Online náhled včetně QR kódu pro platbu je dostupný na odkazu níže."
+            : kind.payable
+              ? "Online náhled s platebními údaji je dostupný na odkazu níže."
+              : "Online náhled je dostupný na odkazu níže."),
     ),
     p(
       "Hello,",
       br,
       `${t.attachment === undefined ? "Here is your" : "Please find attached your"} ${kind.object} ${t.documentNumber}. ` +
-        (kind.payable
+        (t.paymentQr !== undefined
           ? "You can also view payment details and the QR code online:"
-          : "You can also view it online:"),
+          : kind.payable
+            ? "You can also view payment details online:"
+            : "You can also view it online:"),
     ),
   );
   const summary: Array<{ label: string; value: string; mono?: boolean; emphasis?: boolean }> = [
@@ -606,7 +617,8 @@ const e05 = (t: E05DocumentDelivery, locale: Locale): EmailContent => {
   return {
     locale,
     brand: workspaceBrand(t.workspace),
-    subject: t.subject ?? `${kind.name} ${t.documentNumber} — ${t.workspace.name} (${amount})`,
+    subject:
+      nonBlank(t.subject) ?? `${kind.name} ${t.documentNumber} — ${t.workspace.name} (${amount})`,
     preheader: `${kind.amountLabel}: ${amount}`,
     blocks: [
       h(
@@ -616,7 +628,7 @@ const e05 = (t: E05DocumentDelivery, locale: Locale): EmailContent => {
           `${kind.name} ${t.documentNumber}`,
         ),
       ),
-      ...(t.message === undefined ? [defaultMessage] : messageBlocks(t.message)),
+      ...(nonBlank(t.message) === undefined ? [defaultMessage] : messageBlocks(t.message ?? "")),
       { _tag: "Summary", items: summary },
       ...(t.attachment === undefined
         ? []
@@ -630,8 +642,8 @@ const e05 = (t: E05DocumentDelivery, locale: Locale): EmailContent => {
       button(
         by(
           locale,
-          `Zobrazit ${kind.object}${kind.payable ? " a QR kód" : ""}`,
-          `View ${kind.object}${kind.payable ? " & QR code" : ""}`,
+          `Zobrazit ${kind.object}${t.paymentQr === undefined ? "" : " a QR kód"}`,
+          `View ${kind.object}${t.paymentQr === undefined ? "" : " & QR code"}`,
         ),
         t.shareUrl,
       ),
@@ -670,7 +682,7 @@ const e06 = (t: E06OverdueReminder, locale: Locale): EmailContent => {
     locale,
     brand: workspaceBrand(t.workspace),
     subject:
-      t.subject ??
+      nonBlank(t.subject) ??
       by(
         locale,
         `Připomínka splatnosti ${kind.of} ${t.documentNumber} (${overdue})`,
@@ -686,7 +698,7 @@ const e06 = (t: E06OverdueReminder, locale: Locale): EmailContent => {
           `Payment reminder for ${t.documentNumber}`,
         ),
       ),
-      ...(t.message === undefined ? [defaultMessage] : messageBlocks(t.message)),
+      ...(nonBlank(t.message) === undefined ? [defaultMessage] : messageBlocks(t.message ?? "")),
       {
         _tag: "Summary",
         items: [
@@ -703,15 +715,15 @@ const e06 = (t: E06OverdueReminder, locale: Locale): EmailContent => {
         ],
       },
       button(
-        by(locale, `Otevřít ${kind.object} a QR Platbu`, `Open ${kind.object} & QR payment`),
+        by(
+          locale,
+          `Otevřít ${kind.object}${t.paymentQr === "spayd" ? " a QR Platbu" : t.paymentQr === "epc" ? " a QR kód" : ""}`,
+          `Open ${kind.object}${t.paymentQr === undefined ? "" : " & QR payment"}`,
+        ),
         t.shareUrl,
       ),
     ],
-    footer: issuerFooter(
-      locale,
-      t.workspace,
-      t.footer.replyTo === undefined ? {} : { replyTo: t.footer.replyTo },
-    ),
+    footer: issuerFooter(locale, t.workspace, t.footer),
   };
 };
 
