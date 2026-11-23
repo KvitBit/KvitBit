@@ -15,7 +15,8 @@
  * drafted and issued.
  *
  * Validation (5.3): an IBAN failing ISO 13616 (SEPA country BBAN structure from the SWIFT
- * registry, mod 97) or a variable symbol that is not 1-10 digits is `Invalid`; `compose` runs this on
+ * registry, mod 97), a malformed BIC, a missing BIC on an EPC payment to a non-EEA SEPA IBAN
+ * (EPC069-12 v002), or a variable symbol that is not 1-10 digits is `Invalid`; `compose` runs this on
  * every write and preview, so stored documents always encode. Optional texts (recipient name,
  * remittance) are truncated at a word boundary. A caller's variable symbol is kept exactly; one
  * derived from the document number takes its last ten digits.
@@ -143,6 +144,29 @@ export const isValidIban = (iban: string): boolean => {
 /** A caller's variable symbol must be 1-10 digits (SPAYD X-VS). */
 export const isValidVariableSymbol = (vs: string): boolean => /^\d{1,10}$/.test(vs);
 
+/** ISO 9362 BIC: 4 letters (bank), 2 letters (country), 2 alphanumerics, optional 3 (branch). */
+export const isValidBic = (bic: string): boolean =>
+  /^[A-Z]{4}[A-Z]{2}[A-Z0-9]{2}([A-Z0-9]{3})?$/.test(bic);
+
+/**
+ * SEPA countries outside the EEA. EPC069-12 v002 makes the beneficiary BIC optional only
+ * within the EEA, so an EPC payment to one of these IBANs needs a BIC.
+ */
+const SEPA_NON_EEA = new Set([
+  "AD",
+  "AL",
+  "CH",
+  "GB",
+  "GI",
+  "MC",
+  "MD",
+  "ME",
+  "MK",
+  "RS",
+  "SM",
+  "VA",
+]);
+
 const spaydValue = (value: string) => value.toUpperCase().replaceAll("*", "%2A");
 
 export const forDocument = (doc: QrSource): Result.Result<PaymentQr | null, Invalid> => {
@@ -168,6 +192,9 @@ export const forDocument = (doc: QrSource): Result.Result<PaymentQr | null, Inva
     vs = digits === "" ? null : digits.slice(-10);
   }
   const bic = account.bic?.trim().toUpperCase() || null;
+  if (bic !== null && !isValidBic(bic)) {
+    return invalid(["bankAccount"], "request.malformed", { field: "bic", reason: "bic_invalid" });
+  }
   if (doc.currency === "CZK") {
     if (BigDecimal.isGreaterThan(gross, MAX_SPAYD)) return Result.succeed(null);
     const fields = [
@@ -184,6 +211,9 @@ export const forDocument = (doc: QrSource): Result.Result<PaymentQr | null, Inva
     return Result.succeed({ format: "spayd", payload: fields.join("*") });
   }
   if (BigDecimal.isGreaterThan(gross, MAX_EPC)) return Result.succeed(null);
+  if (bic === null && SEPA_NON_EEA.has(iban.slice(0, 2))) {
+    return invalid(["bankAccount"], "request.malformed", { field: "bic", reason: "bic_required" });
+  }
   const fields = [
     "BCD",
     "002",

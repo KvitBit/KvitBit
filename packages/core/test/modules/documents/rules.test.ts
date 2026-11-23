@@ -699,14 +699,18 @@ describe("store outages", () => {
 
 describe("review round 4 regressions (IBAN structure per SEPA country)", () => {
   /** Seeds every Workspace A account with `iban`, then creates a EUR draft. */
-  const eurDraftWith = (iban: string) =>
+  const eurDraftWith = (iban: string, bic?: string | null) =>
     Effect.gen(function* () {
       const f = yield* DocumentFixtures;
       const current = (yield* Ref.get(f.issuers)).get(WS);
       if (!current) return yield* Effect.die("seed missing");
       yield* f.putIssuer({
         ...current,
-        bankAccounts: current.bankAccounts.map((a) => ({ ...a, iban })),
+        bankAccounts: current.bankAccounts.map((a) => ({
+          ...a,
+          iban,
+          ...(bic === undefined ? {} : { bic }),
+        })),
       });
       const docs = yield* Documents;
       const result = yield* Effect.result(
@@ -731,15 +735,47 @@ describe("review round 4 regressions (IBAN structure per SEPA country)", () => {
     expect(listed).toBe(0);
   });
 
-  test("a valid Albanian (SEPA) IBAN drafts with it in the EPC account field", async () => {
+  test("a valid Albanian (SEPA) IBAN drafts with it and its BIC in the EPC payload", async () => {
     const [result, listed] = ok(
-      await scenario(eurDraftWith("AL47212110090000000235698741"), {
+      await scenario(eurDraftWith("AL47212110090000000235698741", "SGSBALTX"), {
         fixings: [fixing("2026-11-20", "25")],
       }),
     );
     if (result._tag !== "Success") throw new Error("expected a draft");
-    expect(result.success.paymentQr?.payload.split("\n")[6]).toBe("AL47212110090000000235698741");
+    const fields = result.success.paymentQr?.payload.split("\n") ?? [];
+    expect([fields[4], fields[6]]).toEqual(["SGSBALTX", "AL47212110090000000235698741"]);
     expect(listed).toBe(1);
+  });
+
+  test("an EPC payment to a non-EEA SEPA IBAN without a BIC is Invalid and not stored", async () => {
+    const [result, listed] = ok(
+      await scenario(eurDraftWith("AL47212110090000000235698741", null), {
+        fixings: [fixing("2026-11-20", "25")],
+      }),
+    );
+    expect(result._tag === "Failure" ? result.failure : null).toMatchObject({
+      _tag: "Invalid",
+      issues: [{ path: ["bankAccount"], params: { field: "bic", reason: "bic_required" } }],
+    });
+    expect(listed).toBe(0);
+  });
+
+  test("an EEA IBAN without a BIC is fine; a malformed BIC is Invalid", async () => {
+    const [eea, malformed] = ok(
+      await scenario(
+        Effect.gen(function* () {
+          const a = yield* eurDraftWith("DE89370400440532013000", null);
+          const b = yield* eurDraftWith("DE89370400440532013000", "BAD-BIC");
+          return [a[0], b[0]] as const;
+        }),
+        { fixings: [fixing("2026-11-20", "25")] },
+      ),
+    );
+    if (eea._tag !== "Success") throw new Error("expected a draft");
+    expect(eea.success.paymentQr?.payload.split("\n")[4]).toBe("");
+    expect(malformed._tag === "Failure" ? malformed.failure : null).toMatchObject({
+      issues: [{ params: { field: "bic", reason: "bic_invalid" } }],
+    });
   });
 
   test("SWIFT registry examples validate for every SEPA country; malformed ones do not", () => {
