@@ -70,6 +70,11 @@ export const ScheduleRow = Schema.Struct({
   /** Why it paused; null when no IssueCode names the failure (NotFound, Forbidden). */
   pausedReason: Schema.NullOr(IssueCode),
   /**
+   * The error that paused it when no IssueCode names it, e.g. `NotFound:Contact`,
+   * `Forbidden:document.issue`, `Conflict:duplicate`. Not yet a column of packages/db `schedules`.
+   */
+  pausedError: Schema.NullOr(Schema.String),
+  /**
    * Set by `resume`: occurrences on or before this date are issued however late they are, so
    * resuming after the catch-up cap issues the missed ones (core-ports 4.8). Not yet a column
    * of packages/db `schedules`.
@@ -226,6 +231,13 @@ export class RecurringRepo extends Context.Service<
       workspaceId: WorkspaceId,
       scheduleId: ScheduleId,
     ) => Effect.Effect<Option.Option<RunRow>, StoreUnavailable>;
+    /**
+     * Cross-tenant (outbox reconcile, J1a): issued runs whose send is still `pending` and whose
+     * last step finished before `before` (ISO instant), oldest first.
+     */
+    readonly pendingSendRuns: (
+      before: string,
+    ) => Effect.Effect<ReadonlyArray<RunRow>, StoreUnavailable>;
     readonly insertRun: (row: RunRow) => Effect.Effect<RunRow, UniqueViolation | StoreUnavailable>;
     readonly updateRun: (
       next: RunRow,
@@ -277,6 +289,12 @@ export const RecurringRepoMemory: Layer.Layer<RecurringRepo, never, MemoryTables
           }),
           (rows) => Option.fromNullishOr(rows[0]),
         ),
+      pendingSendRuns: (before) =>
+        runs.listGlobal({
+          where: { outcome: "issued", send: "pending" },
+          range: { at: { lt: before } },
+          orderBy: ["at"],
+        }),
       insertRun: runs.insert,
       updateRun: runs.update,
       listRuns: (ws, query) =>

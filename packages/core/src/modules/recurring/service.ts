@@ -28,7 +28,9 @@ import type {
 import {
   Conflict,
   type CurrentCaller,
+  DocumentPatch as DocumentPatchSchema,
   Documents,
+  DocumentView as DocumentViewSchema,
   Forbidden,
   Invalid,
   TemplateId as TemplateIdSchema,
@@ -99,6 +101,12 @@ const malformed = (path: ReadonlyArray<string>, reason: string) =>
   new Invalid({ issues: [{ path: [...path], code: "request.malformed", params: { reason } }] });
 
 const illegal = () => new Conflict({ reason: "illegal_transition" });
+
+const UsePayload = Schema.Struct({
+  template: TemplateIdSchema,
+  as: Schema.Literals(["draft", "issued"]),
+  patch: Schema.optional(DocumentPatchSchema),
+});
 
 const SavePayload = Schema.Struct({
   ...TemplateInputSchema.fields,
@@ -269,6 +277,15 @@ export const makeTemplates = Effect.gen(function* () {
   const attached = (workspaceId: WorkspaceId, templateId: TemplateId) =>
     Effect.map(repo.attachedSchedule(workspaceId, templateId), Option.getOrNull);
 
+  /**
+   * The attached schedule, row-locked: the issuance steps change it under the same lock, so a
+   * concurrent advance or pause is never overwritten (lock order: Template, then schedule).
+   */
+  const attachedLocked = (workspaceId: WorkspaceId, templateId: TemplateId) =>
+    Effect.flatMap(attached(workspaceId, templateId), (found) =>
+      found === null ? Effect.succeed(null) : repo.lockSchedule(workspaceId, found.id),
+    );
+
   const viewOf = (row: TemplateRow) =>
     Effect.map(attached(row.workspaceId, row.id), (schedule) => templateView(row, schedule));
 
@@ -350,7 +367,7 @@ export const makeTemplates = Effect.gen(function* () {
         Effect.gen(function* () {
           const current = yield* repo.lockTemplateState(workspaceId, id);
           if (current.archivedAt !== null) return;
-          const schedule = yield* attached(workspaceId, id);
+          const schedule = yield* attachedLocked(workspaceId, id);
           if (schedule !== null) yield* detach(schedule);
           const at = yield* nowIso;
           const row = yield* repo.updateTemplate(
@@ -370,7 +387,7 @@ export const makeTemplates = Effect.gen(function* () {
         Effect.gen(function* () {
           const current = yield* repo.lockTemplate(workspaceId, templateId, expectedRevision);
           if (current.archivedAt !== null) return yield* illegal();
-          const before = yield* attached(workspaceId, templateId);
+          const before = yield* attachedLocked(workspaceId, templateId);
           if (valid === null) {
             if (before === null) return templateView(current, null);
             yield* detach(before);
@@ -405,6 +422,7 @@ export const makeTemplates = Effect.gen(function* () {
               nextOccurrence: startingOccurrence(rule, day, null),
               pausedAt: null,
               pausedReason: null,
+              pausedError: null,
               catchUpThrough: null,
               detachedAt: null,
               createdAt: yield* nowIso,
@@ -444,7 +462,7 @@ export const makeTemplates = Effect.gen(function* () {
       return yield* store.transaction(
         Effect.gen(function* () {
           const current = yield* repo.lockTemplateState(workspaceId, templateId);
-          const before = yield* attached(workspaceId, templateId);
+          const before = yield* attachedLocked(workspaceId, templateId);
           if (current.archivedAt !== null || before === null) return yield* illegal();
           // Idempotent by state (C6): resuming a running schedule changes nothing.
           if (before.pausedAt === null) return templateView(current, before);
@@ -453,6 +471,7 @@ export const makeTemplates = Effect.gen(function* () {
               ...before,
               pausedAt: null,
               pausedReason: null,
+              pausedError: null,
               // The missed occurrences up to today issue on the following sweeps.
               catchUpThrough: yield* today,
             },
@@ -472,16 +491,36 @@ export const makeTemplates = Effect.gen(function* () {
       const { caller, workspaceId } = yield* authorizeInWorkspace("template.read");
       const as = input?.as ?? "draft";
       const action: Action = as === "issued" ? "document.issue" : "document.draft";
+      // R1a: both permissions before any read or replay.
+      yield* authorizeInWorkspace(action);
       // Manual use only: a System caller issues through its RecurringIssuance job (R4, R5).
       if (caller._tag !== "Member") return yield* new Forbidden({ action });
-      const row = yield* store.transaction(repo.getTemplate(workspaceId, templateId));
-      if (row.archivedAt !== null) return yield* illegal();
-      const document = yield* Effect.fromResult(
-        applyPatch(documentInputOf(row.input), input?.patch),
+      const payload = {
+        template: templateId,
+        as,
+        ...(input?.patch !== undefined ? { patch: input.patch } : {}),
+      };
+      // The request key is Templates': a retry with another template or patch is a mismatch.
+      // Documents runs nested in this transaction, without a key of its own.
+      return yield* withIdempotency(
+        {
+          scope: { _tag: "Workspace", workspaceId },
+          key: opts?.requestKey,
+          method: "Templates.use",
+          payload: { schema: UsePayload as Schema.Codec<typeof payload, unknown>, value: payload },
+          result: DocumentViewSchema as unknown as Schema.Codec<DocumentView, unknown>,
+        },
+        Effect.gen(function* () {
+          const row = yield* repo.getTemplate(workspaceId, templateId);
+          if (row.archivedAt !== null) return yield* illegal();
+          const document = yield* Effect.fromResult(
+            applyPatch(documentInputOf(row.input), input?.patch),
+          );
+          return as === "issued"
+            ? yield* documents.issue({ input: document })
+            : yield* documents.createDraft(document);
+        }),
       );
-      return as === "issued"
-        ? yield* documents.issue({ input: document }, opts)
-        : yield* documents.createDraft(document, opts);
     }).pipe(provide, dieOnUnique, orUnavailable) as ReturnType<TemplatesImpl["use"]>;
 
   const get: TemplatesImpl["get"] = (id) =>

@@ -28,6 +28,7 @@ const row = (n: number, overrides: Partial<ScheduleRow> = {}): ScheduleRow => ({
   nextOccurrence: d("2026-11-23"),
   pausedAt: null,
   pausedReason: null,
+  pausedError: null,
   catchUpThrough: null,
   detachedAt: null,
   createdAt: "2026-01-01T00:00:00.000Z",

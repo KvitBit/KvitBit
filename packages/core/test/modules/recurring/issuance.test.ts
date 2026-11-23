@@ -6,12 +6,20 @@ import type {
   TemplateInput,
   TemplateSchedule,
 } from "@kvitbit/domain/contract";
-import { Forbidden, Invalid, NotFound, Templates, Unavailable } from "@kvitbit/domain/contract";
-import { Context, Effect, Exit, Layer, Ref } from "effect";
+import {
+  Conflict,
+  Forbidden,
+  Invalid,
+  NotFound,
+  Templates,
+  Unavailable,
+} from "@kvitbit/domain/contract";
+import { Cause, Context, Effect, Exit, Layer, Ref } from "effect";
 import { TestClock } from "effect/testing";
 import type { TemplateViewValue } from "../../../src/modules/recurring";
 import {
   FakeDeliveryStatuses,
+  FakeDocumentLinks,
   RecurringIssuance,
   RecurringIssuanceLive,
   RecurringRepo,
@@ -221,7 +229,9 @@ describe("RecurringIssuance: exactly once", () => {
       }),
     ).pipe(Layer.provide(RecurringRepoMemory));
     const layer = Layer.mergeAll(TemplatesLive, RecurringIssuanceLive).pipe(
-      Layer.provideMerge(Layer.merge(crashingRepo, FakeDeliveryStatuses.layer)),
+      Layer.provideMerge(
+        Layer.mergeAll(crashingRepo, FakeDeliveryStatuses.layer, FakeDocumentLinks.layer),
+      ),
       Layer.provideMerge(DocumentsStubLayer),
     );
     const exit = await runTest(
@@ -654,5 +664,126 @@ describe("Templates.runs", () => {
       Exit.fail(new Invalid({ issues: [{ path: ["cursor"], code: "page.cursor_mismatch" }] })),
     );
     expect(Exit.isFailure(r.badLimit)).toBe(true);
+  });
+});
+
+describe("council follow-ups", () => {
+  test("an issued document is linked to its schedule and occurrence", async () => {
+    const exit = await scenario(
+      member("owner"),
+      Effect.gen(function* () {
+        const { scheduleId } = yield* setup(MONTHLY);
+        yield* sweep;
+        const links = yield* Effect.flatMap(FakeDocumentLinks, (l) => l.all);
+        return { scheduleId, links, docs: yield* documents };
+      }),
+    );
+    const r = ok(exit);
+    expect(r.links).toEqual([
+      { document: r.docs[0]?.id as string, scheduleId: r.scheduleId, occurrence: d("2026-11-23") },
+    ]);
+  });
+
+  test("a run that starts past the catch-up cap pauses instead of issuing", async () => {
+    const exit = await scenario(
+      member("owner"),
+      Effect.gen(function* () {
+        yield* at("2026-11-01T09:00:00Z");
+        const { templateId, scheduleId } = yield* setup({ ...MONTHLY, startOn: d("2026-11-01") });
+        yield* at("2026-11-09T09:00:00Z");
+        const result = yield* runOccurrence(scheduleId, d("2026-11-01"));
+        return { result, template: yield* getTemplate(templateId), docs: yield* documents };
+      }),
+    );
+    const r = ok(exit);
+    expect(r.result.issue._tag).toBe("Paused");
+    expect(r.template.schedule?.pausedReason).toBe("schedule.missed_occurrences");
+    expect(r.docs).toHaveLength(0);
+  });
+
+  test("permanent Conflicts and NotFound pause with a visible error; a revision race retries", async () => {
+    const exit = await scenario(
+      member("owner"),
+      Effect.gen(function* () {
+        const stub = yield* DocumentsStub;
+        const a = yield* setup(MONTHLY);
+        yield* Ref.set(stub.failNextIssue, new Conflict({ reason: "duplicate" }));
+        yield* runOccurrence(a.scheduleId, d("2026-11-23"));
+        const b = yield* setup(MONTHLY, templateInput({ contact: MISSING_CONTACT }));
+        yield* runOccurrence(b.scheduleId, d("2026-11-23"));
+        const c = yield* setup(MONTHLY);
+        yield* Ref.set(
+          stub.failNextIssue,
+          new Conflict({ reason: "revision_changed", currentRevision: 2 }),
+        );
+        const race = yield* Effect.exit(runOccurrence(c.scheduleId, d("2026-11-23")));
+        return {
+          a: yield* getTemplate(a.templateId),
+          b: yield* getTemplate(b.templateId),
+          c: yield* getTemplate(c.templateId),
+          race,
+        };
+      }),
+    );
+    const r = ok(exit);
+    expect([r.a.schedule?.paused, r.a.schedule?.pausedError]).toEqual([true, "Conflict:duplicate"]);
+    expect([r.b.schedule?.paused, r.b.schedule?.pausedError]).toEqual([true, "NotFound:Contact"]);
+    expect(Exit.isFailure(r.race)).toBe(true);
+    expect(r.c.schedule?.paused).toBe(false);
+  });
+
+  test("pendingSends lists issued occurrences whose send is still pending", async () => {
+    const exit = await scenario(
+      member("owner"),
+      Effect.gen(function* () {
+        const { scheduleId } = yield* setup({ ...MONTHLY, autoSend: true });
+        const r = yield* RecurringIssuance;
+        yield* as(job(scheduleId, d("2026-11-23")))(r.issue(scheduleId, d("2026-11-23")));
+        const fresh = yield* r.pendingSends(60_000);
+        yield* TestClock.adjust(120_000);
+        const stale = yield* r.pendingSends(60_000);
+        yield* runOccurrence(scheduleId, d("2026-11-23"));
+        const after = yield* r.pendingSends(0);
+        return { scheduleId, fresh, stale, after };
+      }),
+    );
+    const r = ok(exit);
+    expect(r.fresh).toEqual([]);
+    expect(r.stale).toEqual([
+      { workspaceId: WORKSPACE_A, scheduleId: r.scheduleId, occurrence: d("2026-11-23") },
+    ]);
+    expect(r.after).toEqual([]);
+  });
+
+  test("an interrupted start stops the sweep tick instead of being logged", async () => {
+    const exit = await scenario(
+      member("owner"),
+      Effect.gen(function* () {
+        yield* setup(MONTHLY);
+        const r = yield* RecurringIssuance;
+        return yield* Effect.exit(r.sweep(() => Effect.interrupt));
+      }),
+    );
+    const result = ok(exit);
+    expect(Exit.isFailure(result) && Cause.hasInterrupts(result.cause)).toBe(true);
+  });
+
+  test("use authorizes the document action before reading the template", async () => {
+    const exit = await scenario(
+      member("owner"),
+      Effect.gen(function* () {
+        const t = yield* Templates;
+        const id = view(yield* t.save(templateInput())).id as TemplateId;
+        return {
+          accountant: yield* Effect.exit(as(member("accountant"))(t.use(id))),
+          readToken: yield* Effect.exit(
+            as(member("owner", { scopes: ["templates:read"] }))(t.use(id, { as: "issued" })),
+          ),
+        };
+      }),
+    );
+    const r = ok(exit);
+    expect(r.accountant).toEqual(Exit.fail(new Forbidden({ action: "document.draft" })));
+    expect(r.readToken).toEqual(Exit.fail(new Forbidden({ action: "document.issue" })));
   });
 });

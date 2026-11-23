@@ -31,6 +31,8 @@ export const ScheduleViewSchema = Schema.Struct({
   nextOccurrence: Schema.NullOr(IsoDateSchema),
   paused: Schema.Boolean,
   pausedReason: Schema.NullOr(IssueCode),
+  /** Set when no IssueCode names the pausing error, e.g. `NotFound:Contact`. */
+  pausedError: Schema.NullOr(Schema.String),
 });
 
 export const TemplateViewSchema = Schema.Struct({
@@ -61,6 +63,7 @@ export const scheduleView = (row: ScheduleRow): typeof ScheduleViewSchema.Type =
     nextOccurrence: row.nextOccurrence,
     paused: row.pausedAt !== null,
     pausedReason: row.pausedReason,
+    pausedError: row.pausedError,
   };
 };
 
@@ -76,6 +79,14 @@ export const templateView = (row: TemplateRow, schedule: ScheduleRow | null): Te
   return view as unknown as TemplateView;
 };
 
+/** A run's delivery always exists (FK `schedule_runs_delivery_fk`); a missing one is a bug. */
+const statusOf = (deliveries: ReadonlyMap<string, DeliveryStatus>, id: string): DeliveryStatus => {
+  const status = deliveries.get(id);
+  if (status === undefined) throw new Error(`schedule run delivery ${id} has no status`);
+  return status;
+};
+
+/** Throws (a defect inside Effect) when a run's delivery has no status. */
 export const runView = (
   row: RunRow,
   deliveries: ReadonlyMap<string, DeliveryStatus>,
@@ -88,6 +99,6 @@ export const runView = (
   delivery:
     row.deliveryId === null
       ? null
-      : { id: row.deliveryId, status: deliveries.get(row.deliveryId) ?? "queued" },
+      : { id: row.deliveryId, status: statusOf(deliveries, row.deliveryId) },
   failure: row.failure,
 });

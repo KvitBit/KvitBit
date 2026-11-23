@@ -11,6 +11,7 @@
 import { Layer } from "effect";
 import { FakeDeliveryStatuses } from "./deliveries";
 import { RecurringIssuanceLive } from "./issuance";
+import { FakeDocumentLinks } from "./links";
 import { RecurringRepoMemory } from "./repo";
 import { TemplatesLive } from "./service";
 
@@ -23,6 +24,8 @@ export {
   RecurringIssuance,
   RecurringIssuanceLive,
 } from "./issuance";
+export type { OccurrenceLink } from "./links";
+export { FakeDocumentLinks, RecurringDocumentLink } from "./links";
 export type { RunOutcome, RunSend, RunsQuery } from "./repo";
 export {
   CadenceUnit,
@@ -61,10 +64,12 @@ export {
 } from "./view";
 
 /**
- * `Templates` + `RecurringIssuance` on the in-memory repo and fake delivery statuses (also
- * exposed, with `FakeDeliveryStatuses` to set them). Needs `InMemoryPortsLive` (CoreStore,
+ * `Templates` + `RecurringIssuance` on the in-memory repo, fake delivery statuses and fake
+ * document links (also exposed: `FakeDeliveryStatuses`, `FakeDocumentLinks`). Needs `InMemoryPortsLive` (CoreStore,
  * MemoryTables, IdGenerator) and a `Documents` layer (a stub in tests).
  */
 export const RecurringTestLayer = Layer.mergeAll(TemplatesLive, RecurringIssuanceLive).pipe(
-  Layer.provideMerge(Layer.merge(RecurringRepoMemory, FakeDeliveryStatuses.layer)),
+  Layer.provideMerge(
+    Layer.mergeAll(RecurringRepoMemory, FakeDeliveryStatuses.layer, FakeDocumentLinks.layer),
+  ),
 );
