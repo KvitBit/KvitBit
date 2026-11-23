@@ -263,6 +263,17 @@ describe("VatMath.splitAdvance", () => {
     ).toThrow();
   });
 
+  test("shares keep the payment's minor units (BHD: 3 decimals); VAT stays round2", () => {
+    const bhd = calc([line("1", "100", "outside_scope")], { currency: "BHD" as CurrencyCode });
+    expect(VatMath.splitAdvance(bhd, d("1.234")).map((k) => s(k.gross))).toEqual(["1.234"]);
+    expect(VatMath.splitAdvance(bhd, d("0.001")).map((k) => s(k.gross))).toEqual(["0.001"]);
+    const std = calc([line("1", "100")], { currency: "BHD" as CurrencyCode });
+    // 1.234 x 21 / 121 = 0.21416... -> 0.21
+    expect(
+      VatMath.splitAdvance(std, d("1.234")).map((k) => [s(k.gross), s(k.vat), s(k.base)]),
+    ).toEqual([["1.234", "0.21", "1.024"]]);
+  });
+
   test("a proforma without gross cannot be split", () => {
     expect(() => VatMath.splitAdvance(calc([]), d("1"))).toThrow();
   });

@@ -191,10 +191,11 @@ export const negate = (breakdown: VatBreakdown): VatBreakdown => ({
 
 /**
  * Splits a received advance across a Proforma's buckets by gross share (Payment Tax Document).
- * Largest-remainder allocation in minor units: each bucket gets floor(paid x gross / total),
+ * Largest-remainder allocation in the currency's minor units (the payment's own precision,
+ * e.g. 3 decimals for BHD): each bucket gets floor(paid x gross / total),
  * then the leftover units go one each to the largest fractional parts (ties: bucket order), so
  * the shares sum to `paid` exactly and none flips sign. Within a share VAT is top-down
- * (rule 4) at the rate in force on `taxPoint` (the receipt date, rule P2; default: the
+ * (rule 4, round2) at the rate in force on `taxPoint` (the receipt date, rule P2; default: the
  * Proforma's rates). `fx` is the rate for that tax point; null leaves CZK VAT unknown.
  * A Proforma whose buckets sum to zero gross cannot be split (defect).
  */
@@ -204,12 +205,12 @@ export const splitAdvance = (
   options: { readonly fx?: VatInput["fx"]; readonly taxPoint?: IsoDate } = {},
 ): ReadonlyArray<VatBucket> => {
   const currency = proforma.gross.currency;
-  const scale = VAT_SCALE;
+  const shareScale = MoneyMath.minorUnitScale(currency);
   const total = sumAll(proforma.buckets.map((b) => b.gross));
   if (BigDecimal.isZero(total)) {
     throw new Error("VatMath.splitAdvance: the proforma has no gross amount to split");
   }
-  const units = BigDecimal.scale(roundAt(paid, scale), scale).value;
+  const units = BigDecimal.scale(roundAt(paid, shareScale), shareScale).value;
   // Exact share in minor units = units x gross / total, as floor + fractional remainder.
   const raw = proforma.buckets.map((b) => {
     const exact = BigDecimal.divideUnsafe(
@@ -231,10 +232,10 @@ export const splitAdvance = (
   }
   const fx = options.fx ?? null;
   return proforma.buckets.map((b, i) => {
-    const gross = BigDecimal.normalize(BigDecimal.make(shares[i] ?? 0n, scale));
+    const gross = BigDecimal.normalize(BigDecimal.make(shares[i] ?? 0n, shareScale));
     const ratePercent =
       options.taxPoint === undefined ? b.ratePercent : rateFor(b.treatment, options.taxPoint);
-    const vat = vatOfGross(gross, ratePercent, scale);
+    const vat = vatOfGross(gross, ratePercent, VAT_SCALE);
     return {
       treatment: b.treatment,
       ratePercent,

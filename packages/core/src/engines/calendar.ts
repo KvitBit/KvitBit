@@ -121,21 +121,24 @@ export const pragueDate = (epochMillis: number): IsoDate => {
   return formatIsoDate({ year: f.year, month: f.month, day: f.day });
 };
 
+/** Prague's UTC offset in milliseconds at an instant (a whole second; LMT +0:57:44 before 1891). */
+const pragueOffset = (epochMillis: number): number => {
+  const at = Math.floor(epochMillis / 1000) * 1000;
+  const f = pragueFields(at);
+  return utcMillis(f.year, f.month, f.day, f.hour) + f.minute * 60_000 + f.second * 1000 - at;
+};
+
 /**
- * The instant of `hour`:00 Prague time on `date` (default midnight). Prague changes clocks at
- * 02:00/03:00, so every whole hour except 02 on the spring-forward day exists exactly once;
- * that missing hour resolves to 03:00.
+ * The instant of `hour`:00 Prague time on `date` (default midnight), for any offset the zone
+ * has had (CET, CEST, local mean time). A wall time skipped by a spring-forward resolves to the
+ * first instant after the gap (02:00 -> 03:00 CEST); a repeated one (fall-back) to one of
+ * its two instants.
  */
 export const pragueStartOfDay = (date: IsoDate, hour = 0): number => {
   const { year, month, day } = parseIsoDate(date);
   const wall = utcMillis(year, month, day, hour);
-  // Prague is UTC+1 or UTC+2: try both offsets and keep the one whose wall clock matches.
-  for (const offsetHours of [1, 2]) {
-    const candidate = wall - offsetHours * 3_600_000;
-    const f = pragueFields(candidate);
-    if (utcMillis(f.year, f.month, f.day, f.hour) + f.minute * 60_000 + f.second * 1000 === wall) {
-      return candidate;
-    }
-  }
-  return wall - 3_600_000; // the skipped hour: 02:00 CET (= 03:00 CEST)
+  const early = wall - pragueOffset(wall);
+  const late = wall - pragueOffset(early);
+  const matches = [early, late].filter((c) => c + pragueOffset(c) === wall);
+  return matches.length > 0 ? Math.min(...matches) : Math.max(early, late);
 };

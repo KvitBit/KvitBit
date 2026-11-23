@@ -37,6 +37,16 @@ describe("calendar", () => {
     expect(pragueStartOfDay(D("2026-03-29"), 2)).toBe(Date.UTC(2026, 2, 29, 1)); // skipped hour -> 03:00
     expect(pragueStartOfDay(D("2026-10-25"), 9)).toBe(Date.UTC(2026, 9, 25, 8)); // after fall-back
   });
+
+  test("Prague midnight round-trips for historical dates (local mean time before 1891)", () => {
+    for (const date of ["0099-01-01", "1850-06-15", "1891-10-01", "1946-12-01", "2026-03-29"]) {
+      expect([date, pragueDate(pragueStartOfDay(D(date)))]).toEqual([date, D(date)]);
+      expect([date, pragueDate(pragueStartOfDay(D(date)) - 1)]).toEqual([
+        date,
+        addDays(D(date), -1),
+      ]);
+    }
+  });
 });
 
 describe("Schedules.nextOccurrences", () => {

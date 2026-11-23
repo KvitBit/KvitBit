@@ -341,6 +341,33 @@ describe("NumberingSeries.allocate", () => {
     );
   });
 
+  test("the last counter in range is issued; the next attempt fails before reserving", async () => {
+    const exit = await scenario((s, tx) =>
+      Effect.gen(function* () {
+        const v = yield* tx(create(s, "N", { nextNumber: 2_147_483_646 }));
+        const last = yield* tx(allocate(s, v.id, 1));
+        const after = yield* Effect.flip(tx(allocate(s, v.id, 2)));
+        // Nothing was reserved for doc 2: its number can still be chosen manually.
+        const manual = yield* tx(
+          s.override({
+            workspaceId: WORKSPACE_A,
+            kind: "invoice",
+            documentId: doc(2),
+            number: "2147483647",
+          }),
+        );
+        return [last, after, manual];
+      }),
+    );
+    expect(exit).toEqual(
+      Exit.succeed([
+        "2147483646",
+        new Conflict({ reason: "illegal_transition", detail: "numbering.pattern_invalid" }),
+        "2147483647",
+      ]),
+    );
+  });
+
   test("skipping a reserved number cannot push the number past 20 characters", async () => {
     const exit = await scenario((s, tx) =>
       Effect.gen(function* () {
