@@ -24,6 +24,7 @@
   },
   "dependencies": {
     "@better-auth/api-key": "1.7.27",
+    "@better-auth/cimd": "1.7.27",
     "@better-auth/oauth-provider": "1.7.27",
     "@better-auth/passkey": "1.7.27",
     "@effect/sql-pg": "4.1.4",
