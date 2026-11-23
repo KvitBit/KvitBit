@@ -1,9 +1,15 @@
 /**
  * ALTCHA bot protection at the edge (http-mcp-contracts section 2.6, ADR 0002).
  *
- * The spec names `AltchaChallenge` and the base64 `X-Altcha` payload without fields. The shapes
- * below follow the ALTCHA proof-of-work wire format (`altcha-lib` `createChallenge` output and
- * the widget's solved payload); confirm them against the pinned `altcha-lib` version.
+ * The spec names `AltchaChallenge` and the base64 `X-Altcha` payload without fields, and ADR
+ * 0002 picks ALTCHA PoW v2 without pinning an `altcha-lib` 2.x release. Both shapes are therefore
+ * open JSON objects here: the edge passes the challenge through from `BotProtection.issue` and
+ * hands the decoded payload to `BotProtection.verify`, which owns the field-level checks. Narrow
+ * them once the library version is pinned.
+ *
+ * Which Better Auth requests need a proof, and with which scope, is the server hook's decision:
+ * sign-up alone can carry `sign_up` or `invitation_accept` (section 3.5.1), so no static path
+ * map lives here.
  */
 import { Schema } from "effect";
 
@@ -17,36 +23,26 @@ export const BotScope = Schema.Literals([
 ]);
 export type BotScope = typeof BotScope.Type;
 
-export const AltchaAlgorithm = Schema.Literals(["SHA-256", "SHA-384", "SHA-512"]);
-export type AltchaAlgorithm = typeof AltchaAlgorithm.Type;
+const JsonObject = Schema.Record(Schema.String, Schema.Unknown);
 
-const HexString = Schema.String.pipe(Schema.check(Schema.isPattern(/^[0-9a-f]+$/)));
-const NonNegativeInt = Schema.Int.pipe(Schema.check(Schema.isGreaterThanOrEqualTo(0)));
-
-/** `GET /api/v1/bot-protection/challenges/{scope}` success body. */
-export const AltchaChallenge = Schema.Struct({
-  algorithm: AltchaAlgorithm,
-  challenge: HexString,
-  maxnumber: Schema.optional(NonNegativeInt),
-  /** Carries the signed scope and expiry as query parameters (`?scope=...&expires=...`). */
-  salt: Schema.NonEmptyString,
-  signature: HexString,
-});
+/** `GET /api/v1/bot-protection/challenges/{scope}` success body: a non-empty JSON object. */
+export const AltchaChallenge = JsonObject.pipe(
+  Schema.check(Schema.isMinProperties(1)),
+  Schema.brand("AltchaChallenge"),
+);
 export type AltchaChallenge = typeof AltchaChallenge.Type;
 
-/** The solved challenge the widget produces. */
-export const AltchaPayload = Schema.Struct({
-  algorithm: AltchaAlgorithm,
-  challenge: HexString,
-  number: NonNegativeInt,
-  salt: Schema.NonEmptyString,
-  signature: HexString,
-  took: Schema.optional(NonNegativeInt),
-});
+/** The solved challenge the widget produces, as a JSON object. */
+export const AltchaPayload = JsonObject.pipe(Schema.brand("AltchaPayload"));
 export type AltchaPayload = typeof AltchaPayload.Type;
 
-/** The `X-Altcha` header value: base64 of the JSON `AltchaPayload`. */
-export const AltchaPayloadFromHeader = Schema.StringFromBase64.pipe(
+/** Upper bound on the `X-Altcha` header value, in characters of base64. */
+export const ALTCHA_HEADER_MAX_LENGTH = 8 * 1024;
+
+/** The `X-Altcha` header value: bounded base64 that decodes to a JSON object. */
+export const AltchaPayloadFromHeader = Schema.String.pipe(
+  Schema.check(Schema.isMaxLength(ALTCHA_HEADER_MAX_LENGTH)),
+  Schema.decodeTo(Schema.StringFromBase64),
   Schema.decodeTo(Schema.fromJsonString(AltchaPayload)),
 );
 
@@ -54,11 +50,3 @@ export const ALTCHA_HEADER = "x-altcha";
 
 /** Headers of a protected request; the server verifies the payload before any side effect. */
 export const AltchaHeaders = Schema.Struct({ [ALTCHA_HEADER]: AltchaPayloadFromHeader });
-
-/** Better Auth paths (relative to `/api/auth`) guarded by the ALTCHA before-hook. */
-export const BOT_PROTECTED_AUTH_PATHS: Readonly<Record<string, BotScope>> = {
-  "/sign-up/email": "sign_up",
-  "/sign-in/email": "sign_in",
-  "/sign-in/magic-link": "magic_link",
-  "/request-password-reset": "password_reset",
-};

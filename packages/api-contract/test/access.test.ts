@@ -5,12 +5,17 @@ import {
   ALL_SCOPES,
   accessFromOAuthScopes,
   expandAccess,
+  GrantedAccess,
   normalizeScopes,
   OAUTH_SCOPES_SUPPORTED,
   OAuthScopeToken,
   oauthScopesForGrant,
   READ_SCOPES,
+  SCOPE_AREAS,
+  Scope,
+  ScopeArea,
   ScopeFromOAuth,
+  ScopeLevel,
 } from "../src/index";
 
 describe("scope wire codec (kvitbit:<area>:<level> <-> <area>:<level>)", () => {
@@ -123,9 +128,25 @@ describe("OAuth scope parameter", () => {
     });
   });
 
-  test("all ten reads requested per area collapse to the read preset", () => {
-    const tokens = READ_SCOPES.map((s) => `kvitbit:${s}` as const);
-    expect(accessFromOAuthScopes(tokens)?.access.access).toBe("read");
+  test("per-area scopes stay custom even when they equal a preset's expansion", () => {
+    const reads = READ_SCOPES.map((s) => `kvitbit:${s}` as const);
+    expect(accessFromOAuthScopes(reads)?.access).toEqual({ access: "custom", scopes: READ_SCOPES });
+    const all = ALL_SCOPES.map((s) => `kvitbit:${s}` as const);
+    expect(accessFromOAuthScopes(all)?.access).toEqual({ access: "custom", scopes: ALL_SCOPES });
+  });
+
+  test("kvitbit:read plus per-area scopes is custom on top of the ten reads", () => {
+    expect(accessFromOAuthScopes(["kvitbit:read", "kvitbit:documents:write"])?.access).toEqual({
+      access: "custom",
+      scopes: normalizeScopes([...READ_SCOPES, "documents:write"]),
+    });
+  });
+
+  test("kvitbit:write wins over per-area scopes", () => {
+    expect(accessFromOAuthScopes(["kvitbit:contacts:read", "kvitbit:write"])?.access).toEqual({
+      access: "read_write",
+      scopes: ALL_SCOPES,
+    });
   });
 
   test("no Kvitbit scope is undefined", () => {
@@ -141,5 +162,40 @@ describe("OAuth scope parameter", () => {
     expect(
       oauthScopesForGrant({ access: "custom", scopes: ["reports:read", "documents:read"] }),
     ).toEqual(["kvitbit:documents:read", "kvitbit:reports:read"]);
+  });
+});
+
+describe("GrantedAccess consistency", () => {
+  const is = Schema.is(GrantedAccess);
+
+  test("accepts what expandAccess produces", () => {
+    expect(is(expandAccess({ access: "read" }))).toBe(true);
+    expect(is(expandAccess({ access: "read_write" }))).toBe(true);
+    expect(is(expandAccess({ access: "custom", scopes: ["payments:write"] }))).toBe(true);
+  });
+
+  test("read must carry exactly the ten reads", () => {
+    expect(is({ access: "read", scopes: READ_SCOPES.slice(1) })).toBe(false);
+    expect(is({ access: "read", scopes: ALL_SCOPES })).toBe(false);
+  });
+
+  test("read_write must carry all twenty", () => {
+    expect(is({ access: "read_write", scopes: READ_SCOPES })).toBe(false);
+  });
+
+  test("custom must be non-empty and normalized", () => {
+    expect(is({ access: "custom", scopes: [] })).toBe(false);
+    expect(is({ access: "custom", scopes: ["payments:write"] })).toBe(false);
+    expect(is({ access: "custom", scopes: ["payments:read", "documents:read"] })).toBe(false);
+    expect(is({ access: "custom", scopes: ["documents:read", "documents:read"] })).toBe(false);
+  });
+});
+
+describe("domain scope re-exports", () => {
+  test("are the core schemas", () => {
+    expect(SCOPE_AREAS).toHaveLength(10);
+    expect(Schema.is(Scope)("documents:read")).toBe(true);
+    expect(Schema.is(ScopeArea)("documents")).toBe(true);
+    expect(Schema.is(ScopeLevel)("write")).toBe(true);
   });
 });

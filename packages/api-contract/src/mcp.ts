@@ -51,6 +51,7 @@ import { Schema } from "effect";
 import { CorrectionLines, DeliveryQueued, SendInput } from "./groups/documents";
 import {
   ContactRole,
+  ExpenseListQuery,
   PaymentTarget,
   RecordPaymentInput,
   RecordPaymentResult,
@@ -201,10 +202,12 @@ export const GetDocumentPdfArgs = Schema.Struct({
   language: Schema.optional(Locale),
 });
 export const ListPaymentsArgs = Schema.Struct({ target: PaymentTarget });
-export const ListExpensesArgs = Schema.Struct({
-  incomplete: Schema.optional(Schema.Boolean),
-  ...PageArgs,
-});
+/**
+ * Closed on purpose and equal to the HTTP list query (`ExpenseListQuery`): `incomplete` plus
+ * paging, nothing else. Core's `ExpenseQuery` is an open struct, so supplier or contact filters
+ * (the UI's contact history) wait until core closes it; widen both surfaces together then.
+ */
+export const ListExpensesArgs = Schema.Struct(ExpenseListQuery);
 export const GetExpenseArgs = Schema.Struct({ expenseId: ExpenseId });
 export const ListContactsArgs = Schema.Struct({
   text: Schema.optional(Schema.String),
@@ -239,15 +242,51 @@ export const UpdateDraftArgs = Schema.Struct({
   revision: Revision,
   patch: DocumentPatch,
 });
-/** Either `ico` alone (Contacts.fromIco) or `contact` (Contacts.save, with id and revision to update). */
+const UPSERT_CONTACT_FORMS =
+  "Exactly one of three forms: { ico, role? } creates a Contact from ARES (Contacts.fromIco); " +
+  "{ contact } creates one from the given fields; { contactId, revision, contact } updates that " +
+  "Contact at that revision (Contacts.save). idempotencyKey may accompany any form.";
+
+/**
+ * `upsert_contact` arguments: one flat struct, so the tool's `inputSchema` stays a plain object,
+ * with the valid forms (see `UPSERT_CONTACT_FORMS`) enforced by a check on decode.
+ */
 export const UpsertContactArgs = Schema.Struct({
-  ico: Schema.optional(Schema.NonEmptyString),
-  role: Schema.optional(ContactRole),
-  contactId: Schema.optional(ContactId),
-  revision: Schema.optional(Revision),
-  contact: Schema.optional(ContactInput),
+  ico: Schema.optional(Schema.NonEmptyString).annotateKey({
+    description: "IČO to look up in ARES. Not with contact, contactId or revision.",
+  }),
+  role: Schema.optional(ContactRole).annotateKey({ description: "Only together with ico." }),
+  contactId: Schema.optional(ContactId).annotateKey({
+    description: "Contact to update. Requires revision and contact.",
+  }),
+  revision: Schema.optional(Revision).annotateKey({ description: "Only together with contactId." }),
+  contact: Schema.optional(ContactInput).annotateKey({
+    description: "Contact fields to create, or to save over contactId. Not with ico.",
+  }),
   idempotencyKey: IdempotencyArg,
-});
+})
+  .annotate({ description: UPSERT_CONTACT_FORMS })
+  .pipe(
+    Schema.check(
+      Schema.makeFilter(
+        (args) => {
+          if (args.ico === undefined && args.contact === undefined) return "give ico or contact";
+          if (args.ico !== undefined && args.contact !== undefined) {
+            return "give ico or contact, not both";
+          }
+          if ((args.contactId === undefined) !== (args.revision === undefined)) {
+            return "contactId and revision go together";
+          }
+          if (args.contactId !== undefined && args.contact === undefined) {
+            return "contactId needs contact";
+          }
+          if (args.role !== undefined && args.ico === undefined) return "role needs ico";
+          return true;
+        },
+        { expected: UPSERT_CONTACT_FORMS },
+      ),
+    ),
+  );
 export const RecordExpenseArgs = Schema.Struct({
   expense: ExpenseInput,
   idempotencyKey: IdempotencyArg,

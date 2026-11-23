@@ -28,10 +28,20 @@ describe("kvb_ API key format", () => {
     );
   });
 
+  test("a hyphenated key id (a UUID) parses; _ stays the delimiter", () => {
+    const uuid = "01936f3e-7b4c-7d2a-9f1e-3c5a7b9d1e2f";
+    const token = formatApiKey({ keyId: ApiKeyId.make(uuid), secret });
+    expect(Option.map(parseApiKey(token), (p): string => p.keyId)).toEqual(Option.some(uuid));
+    expect(Schema.is(ApiKeyId)("abc_defgh")).toBe(false);
+    expect(Schema.is(ApiKeyId)("-------a")).toBe(true);
+  });
+
   test("rejects other prefixes, short ids, short secrets and junk", () => {
     for (const bad of [
       `kva_01JDX3K7M9_${secret}`,
       `kvb_short_${secret}`,
+      `kvb_${"a".repeat(65)}_${secret}`,
+      `kvb_01JDX3K7M9_${"a".repeat(129)}`,
       "kvb_01JDX3K7M9_tooShort",
       `kvb_01JDX3K7M9_${secret}!`,
       "kvb_",
