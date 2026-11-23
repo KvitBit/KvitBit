@@ -9,11 +9,17 @@ export const PAGE_LIMIT = PAGE_LIMIT_DEFAULT;
 
 export type FilterValue = string | number | boolean | null | undefined;
 
-/** Filters with empty values removed: `undefined`, `null` and blank strings mean "no filter". */
+/** Paging fields belong to the page request, never to the filters. */
+const PAGING_KEYS = new Set(["cursor", "limit"]);
+
+/**
+ * Filters with empty values and paging fields removed: `undefined`, `null` and blank strings mean
+ * "no filter"; `cursor` and `limit` come only from the page request.
+ */
 export const cleanFilters = <F extends object>(filters: F): F => {
   const out: Record<string, FilterValue> = {};
   for (const [key, value] of Object.entries(filters) as Array<[string, FilterValue]>) {
-    if (value === undefined || value === null) continue;
+    if (PAGING_KEYS.has(key) || value === undefined || value === null) continue;
     if (typeof value === "string" && value.trim() === "") continue;
     out[key] = value;
   }

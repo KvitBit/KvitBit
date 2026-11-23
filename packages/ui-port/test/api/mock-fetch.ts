@@ -5,6 +5,7 @@ export interface RecordedRequest {
   readonly headers: Headers;
   readonly body: string | null;
   readonly credentials: string | undefined;
+  readonly cache: string | undefined;
 }
 
 export type Responder = (request: RecordedRequest) => Response | Promise<Response>;
@@ -31,6 +32,7 @@ export const mockFetch = (respond: Responder) => {
       headers: new Headers(init?.headers),
       body,
       credentials: init?.credentials,
+      cache: init?.cache,
     };
     calls.push(recorded);
     return respond(recorded);

@@ -12,6 +12,7 @@ import { HttpClientError, HttpClientRequest } from "effect/http";
 import {
   describeError,
   fromCause,
+  isAutoRetryable,
   isRetryable,
   issuesAt,
   partitionIssues,
@@ -147,5 +148,31 @@ describe("describeError covers every UiError", () => {
     expect(split.fields).toHaveLength(1);
     expect(split.summary[0]?.text.key).toBe("issue.document.lines_required");
     expect(issuesAt(issues, ["lines", 0, "price"])).toHaveLength(1);
+  });
+});
+
+describe("council follow-ups", () => {
+  test("reauthentication_required asks for step-up inline, not sign-out", () => {
+    const view = describeError(new Unauthorized({ reason: "reauthentication_required" }));
+    expect(view.surface).toBe("inline");
+    expect(view.text.key).toBe("error.unauthorized.reauthentication_required");
+  });
+
+  test("small payload limits keep a readable megabyte figure", () => {
+    const view = describeError(new PayloadTooLarge({ limitBytes: 64 * 1024 }));
+    expect(view.text).toEqual({ key: "error.payloadTooLarge", params: { megabytes: 0.06 } });
+  });
+
+  test("manual vs automatic retry", () => {
+    const malformed2xx = UiError.unexpected(201, "r");
+    const mismatch = new Conflict({ reason: "idempotency_mismatch" });
+    expect(isRetryable(malformed2xx)).toBe(true);
+    expect(isAutoRetryable(malformed2xx)).toBe(false);
+    expect(isRetryable(mismatch)).toBe(true);
+    expect(describeError(mismatch).clearRequestKey).toBe(true);
+    expect(isAutoRetryable(mismatch)).toBe(false);
+    expect(isAutoRetryable(UiError.unexpected(null, null))).toBe(false);
+    expect(isAutoRetryable(UiError.unexpected(502, null))).toBe(true);
+    expect(isAutoRetryable(UiError.offline)).toBe(true);
   });
 });

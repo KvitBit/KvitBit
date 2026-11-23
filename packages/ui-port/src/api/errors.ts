@@ -176,7 +176,11 @@ const BOT_PROOF_CODES = new Set<string>(["auth.bot_proof_required"]);
 export const isCursorMismatch = (error: UiError): boolean =>
   error._tag === "Invalid" && error.issues.every((issue) => issue.code === "page.cursor_mismatch");
 
-/** Whether retrying the same request (same Idempotency-Key) can succeed. */
+/**
+ * Whether the screen offers Retry (a user action). `Conflict{idempotency_mismatch}` qualifies only
+ * after the key is cleared (`clearRequestKey`); a malformed 2xx may have been applied, which is why
+ * only the user, not `isAutoRetryable`, retries it.
+ */
 export const isRetryable = (error: UiError): boolean => {
   switch (error._tag) {
     case "Offline":
@@ -185,9 +189,28 @@ export const isRetryable = (error: UiError): boolean => {
     case "RateLimited":
       return true;
     case "Unexpected":
-      return error.status === null || error.status >= 500;
+      return error.status === null || error.status < 400 || error.status >= 500;
     case "Conflict":
       return error.reason === "idempotency_mismatch"; // retry with a fresh key
+    default:
+      return false;
+  }
+};
+
+/**
+ * Whether the client may replay the same request on its own: only when no response arrived, the
+ * server asked to come back later, or it failed with a 5xx. Never a pre-send defect (Unexpected
+ * without status), a malformed 2xx/3xx (the write may have happened) or an idempotency mismatch.
+ */
+export const isAutoRetryable = (error: UiError): boolean => {
+  switch (error._tag) {
+    case "Offline":
+    case "Timeout":
+    case "Unavailable":
+    case "RateLimited":
+      return true;
+    case "Unexpected":
+      return error.status !== null && error.status >= 500;
     default:
       return false;
   }
@@ -231,7 +254,12 @@ const unknownText = (status: number | null, requestId: string | null): Text =>
 export const describeError = (error: UiError): UiErrorView => {
   switch (error._tag) {
     case "Unauthorized":
-      return view(error, "session", text(`error.unauthorized.${error.reason}`));
+      // Step-up (passkey or password again) keeps the session; every other reason signs out.
+      return view(
+        error,
+        error.reason === "reauthentication_required" ? "inline" : "session",
+        text(`error.unauthorized.${error.reason}`),
+      );
     case "Forbidden":
       return view(error, "inline", text("error.forbidden"));
     case "NotFound":
@@ -286,7 +314,8 @@ export const describeError = (error: UiError): UiErrorView => {
         },
       );
     case "PayloadTooLarge": {
-      const megabytes = Math.floor(error.limitBytes / BYTES_PER_MEGABYTE);
+      // Two decimals so small limits (64 KiB theme files) do not read as 0 MB.
+      const megabytes = Math.round((error.limitBytes / BYTES_PER_MEGABYTE) * 100) / 100;
       return view(error, "fields", text("error.payloadTooLarge", { megabytes }), {
         issues: [{ path: ["file"], text: text("issue.attachment.too_large", { megabytes }) }],
       });

@@ -90,7 +90,8 @@ const firstPage = <A, Q extends object>(
   const next: Paged<A, Q> = {
     ...paged,
     items: status === "loading" ? [] : paged.items,
-    nextCursor: null,
+    // A refresh keeps the old cursor until the first page answers (a failed refresh keeps it).
+    nextCursor: status === "loading" ? null : paged.nextCursor,
     status,
     error: Option.none(),
     seq: paged.seq + 1,
@@ -159,7 +160,10 @@ const receive = <A, Q extends object>(
       ? { paged: { ...paged, status: "failed", error: Option.some(result.error) }, fetch: null }
       : { paged: { ...paged, status: "ready" }, fetch: null };
   }
-  if (isCursorMismatch(result.error)) return firstPage(paged, "loading", limit);
+  // Only a cursor fetch can be stale; a first-page mismatch would reload forever.
+  if (isCursorMismatch(result.error) && paged.status === "loading_more") {
+    return firstPage(paged, "loading", limit);
+  }
   return { paged: { ...paged, status: "failed", error: Option.some(result.error) }, fetch: null };
 };
 

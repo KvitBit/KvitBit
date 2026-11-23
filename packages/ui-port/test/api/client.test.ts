@@ -1,10 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import { ContactId, WorkspaceId } from "@kvitbit/domain/contract";
 import { Effect, Exit, Fiber, Option, Schema } from "effect";
-import { FetchHttpClient } from "effect/http";
+import { FetchHttpClient, HttpClient, HttpClientResponse } from "effect/http";
 import {
+  layer as apiLayer,
   attempt,
   bearer,
+  call,
   describeError,
   fromExit,
   idempotencyHeaders,
@@ -29,7 +31,11 @@ const cookieConfig: KvitbitApiConfig = {
   credentials: sessionCookie,
   acceptLanguage: () => "cs",
 };
-const bearerConfig: KvitbitApiConfig = { baseUrl: base, credentials: bearer("kvb_key1_secret") };
+const bearerConfig: KvitbitApiConfig = {
+  baseUrl: base,
+  credentials: bearer("kvb_key1_secret"),
+  acceptLanguage: () => "en",
+};
 
 const run = <A, E>(
   effect: Effect.Effect<A, E, KvitbitApi>,
@@ -240,5 +246,78 @@ describe("typed error decoding into UiError", () => {
     expect(fromExit(exit)).toEqual(Option.some({ _tag: "Cancelled" }));
     const inner = await Effect.runPromise(attempt(Effect.interrupt));
     expect(inner).toEqual({ _tag: "Err", error: { _tag: "Cancelled" } });
+  });
+});
+
+describe("client configuration", () => {
+  test("Accept-Language follows a locale switch between requests", async () => {
+    let locale = "cs";
+    const mock = mockFetch(() => json(200, { items: [], nextCursor: null }));
+    const config: KvitbitApiConfig = { ...cookieConfig, acceptLanguage: () => locale };
+    await run(search, mock.fetch, config);
+    locale = "en";
+    await run(search, mock.fetch, config);
+    expect(mock.calls.map((c) => c.headers.get("accept-language"))).toEqual(["cs", "en"]);
+  });
+
+  test("cookie mode keeps the adapter's RequestInit options", async () => {
+    const mock = mockFetch(() => json(200, { items: [], nextCursor: null }));
+    await run(
+      search.pipe(Effect.provideService(FetchHttpClient.RequestInit, { cache: "no-store" })),
+      mock.fetch,
+    );
+    expect(mock.calls[0]?.credentials).toBe("include");
+    expect(mock.calls[0]?.cache).toBe("no-store");
+  });
+
+  test("an injected HttpClient carries the request (no fetch)", async () => {
+    const seen: Array<string> = [];
+    const client = HttpClient.make((request) => {
+      seen.push(`${request.method} ${request.url} ${request.headers.authorization ?? ""}`);
+      seen.push(JSON.stringify(request.urlParams));
+      return Effect.succeed(
+        HttpClientResponse.fromWeb(
+          request,
+          new Response(JSON.stringify({ items: [], nextCursor: null }), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          }),
+        ),
+      );
+    });
+    const page = await Effect.runPromise(
+      search.pipe(
+        Effect.provide(apiLayer(bearerConfig)),
+        Effect.provideService(HttpClient.HttpClient, client),
+      ),
+    );
+    expect(page.items).toEqual([]);
+    expect(seen[1]).toContain("cur-1");
+    expect(seen.slice(0, 1)).toEqual([
+      `GET ${base}/api/v1/workspaces/${ws}/contacts Bearer kvb_key1_secret`,
+    ]);
+  });
+
+  test("call() ends in a Message, with a precomputed one for runner interruption (T2)", async () => {
+    const mock = mockFetch(() => json(200, { items: [], nextCursor: null }));
+    const command = call(
+      "contacts.search",
+      (api) => api.contacts.search({ params: inWorkspace(ws), query: pageQuery({}) }),
+      (result) => ({ _tag: "GotContacts" as const, result }),
+      { key: "contacts" },
+    );
+    expect(command.key).toBe("contacts");
+    expect(command.cancelled).toEqual({
+      _tag: "GotContacts",
+      result: { _tag: "Err", error: { _tag: "Cancelled" } },
+    });
+    const msg = await run(command.effect, mock.fetch);
+    expect(msg.result._tag).toBe("Ok");
+    const unkeyed = call(
+      "x",
+      () => Effect.succeed(1),
+      (r) => r,
+    );
+    expect("key" in unkeyed).toBe(false);
   });
 });

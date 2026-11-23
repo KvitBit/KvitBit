@@ -5,7 +5,7 @@
  * because it re-runs the same request.
  */
 import { Duration, Effect, Random } from "effect";
-import { isRetryable, retryAfterSeconds, toUiError, type UiError } from "./errors";
+import { isAutoRetryable, isRetryable, retryAfterSeconds, toUiError, type UiError } from "./errors";
 
 export interface Backoff {
   readonly baseMillis: number;
@@ -74,8 +74,10 @@ const secondsLeft = (state: RetryState, now: number): number =>
   state.notBefore === null ? 0 : Math.max(0, Math.ceil((state.notBefore - now) / 1_000));
 
 /**
- * Retries retryable failures with the same delays as `retryDelayMillis` (Retry-After first, else
- * jittered exponential backoff); the last failure propagates.
+ * Replays the request on auto-retryable failures (`isAutoRetryable`) with the delays of
+ * `retryDelayMillis`; a Retry-After longer than `maxMillis` stops instead, so the screen shows the
+ * countdown. The last failure propagates. Wrap it inside `attempt`: the call timeout then bounds all
+ * attempts together, and each replay keeps the request's Idempotency-Key.
  */
 export const retryTransient = <A, E, R>(
   effect: Effect.Effect<A, E, R>,
@@ -85,8 +87,11 @@ export const retryTransient = <A, E, R>(
     effect.pipe(
       Effect.catch((error: E) =>
         Effect.flatMap(Random.next, (jitter) => {
-          const delay = retryDelayMillis(toUiError(error), attempt, jitter, backoff);
-          return delay === null
+          const uiError = toUiError(error);
+          const delay = isAutoRetryable(uiError)
+            ? retryDelayMillis(uiError, attempt, jitter, backoff)
+            : null;
+          return delay === null || delay > backoff.maxMillis
             ? Effect.fail(error)
             : Effect.sleep(Duration.millis(delay)).pipe(Effect.andThen(loop(attempt + 1)));
         }),
@@ -123,6 +128,9 @@ const observe = (
     case "Timeout":
     case "Cancelled":
       return state;
+    case "Unexpected":
+      // Without a status no HTTP response arrived (a pre-send defect): it proves nothing.
+      return outcome.error.status === null ? state : online;
     default:
       return online;
   }

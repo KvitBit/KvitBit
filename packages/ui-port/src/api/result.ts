@@ -9,7 +9,9 @@ import {
   type ObservedResponse,
   ResponseObserver,
 } from "./client";
-import { fromCause, type UiError } from "./errors";
+import { fromCause, UiError } from "./errors";
+
+const cancelledError: UiError = UiError.cancelled;
 
 export interface ResponseMeta {
   /** Parsed from `ETag: "<revision>"`. */
@@ -70,8 +72,13 @@ const withResponse = (error: UiError, response: ObservedResponse | null): UiErro
 
 export interface ApiCommand<Msg> {
   readonly name: string;
-  readonly key: string | undefined;
+  readonly key?: string;
   readonly effect: Effect.Effect<Msg, never, KvitbitApi>;
+  /**
+   * The Message for this command when the runner interrupts it (superseded by key, screen left):
+   * an interrupted fiber cannot return a value, so the runner dispatches this instead (T2).
+   */
+  readonly cancelled: Msg;
 }
 
 /** The one way a presenter talks to the server. */
@@ -80,16 +87,19 @@ export const call = <A, E, Msg>(
   run: (api: KvitbitApiClient) => Effect.Effect<A, E>,
   toMsg: (result: ApiResult<A>) => Msg,
   options?: CallOptions,
-): ApiCommand<Msg> => ({
-  name,
-  key: options?.key,
-  effect: attempt(
-    Effect.gen(function* () {
-      return yield* run(yield* KvitbitApi);
-    }),
-    options,
-  ).pipe(Effect.map(toMsg)),
-});
+): ApiCommand<Msg> => {
+  const command = {
+    name,
+    effect: attempt(
+      Effect.gen(function* () {
+        return yield* run(yield* KvitbitApi);
+      }),
+      options,
+    ).pipe(Effect.map(toMsg)),
+    cancelled: toMsg(err(cancelledError)),
+  };
+  return options?.key === undefined ? command : { ...command, key: options.key };
+};
 
 export const matchResult = <A, B>(
   result: ApiResult<A>,

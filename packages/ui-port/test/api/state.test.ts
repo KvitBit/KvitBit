@@ -232,3 +232,59 @@ describe("request keys", () => {
     expect(keyAfter(kept, { _tag: "Ok" })).toEqual(Option.none());
   });
 });
+
+describe("council follow-ups", () => {
+  test("cleanFilters drops paging fields", () => {
+    expect(pageQuery({ text: "a", cursor: "x", limit: 3 } as { text: string }, null)).toEqual({
+      text: "a",
+      limit: 50,
+    });
+  });
+
+  test("a first-page cursor mismatch fails instead of reloading forever", () => {
+    const start = Paged.init<number, Q>({});
+    const mismatch = new Invalid({ issues: [{ path: ["cursor"], code: "page.cursor_mismatch" }] });
+    const step = Paged.receive(start.paged, start.paged.seq, err(mismatch));
+    expect(step.fetch).toBeNull();
+    expect(step.paged.status).toBe("failed");
+  });
+
+  test("a failed refresh keeps rows and the next cursor", () => {
+    const ready = Paged.receive(Paged.init<number, Q>({}).paged, 1, page([1], "c2")).paged;
+    const refreshing = Paged.refresh(ready);
+    expect(refreshing.paged.status).toBe("refreshing");
+    expect(refreshing.fetch?.query).toEqual({ limit: 50 });
+    const failed = Paged.receive(
+      refreshing.paged,
+      refreshing.paged.seq,
+      err(UiError.offline),
+    ).paged;
+    expect(failed.items).toEqual([1]);
+    expect(failed.nextCursor).toBe("c2");
+  });
+
+  test("an Unexpected without status says nothing about connectivity", () => {
+    const off = { _tag: "Offline", since: 1 } as const;
+    expect(
+      Connectivity.observe(off, { _tag: "Err", error: UiError.unexpected(null, null) }, 2),
+    ).toBe(off);
+  });
+
+  test("retryTransient never replays a malformed 2xx or a Retry-After beyond maxMillis", async () => {
+    let calls = 0;
+    const fast = { baseMillis: 1, factor: 1, maxMillis: 1_000, maxAttempts: 5 };
+    const malformed = Effect.suspend(() => {
+      calls++;
+      return Effect.fail(UiError.unexpected(201, null));
+    });
+    await Effect.runPromise(Effect.exit(retryTransient(malformed, fast)));
+    expect(calls).toBe(1);
+    calls = 0;
+    const longWait = Effect.suspend(() => {
+      calls++;
+      return Effect.fail(new RateLimited({ retryAfterSeconds: 60 }));
+    });
+    await Effect.runPromise(Effect.exit(retryTransient(longWait, fast)));
+    expect(calls).toBe(1);
+  });
+});

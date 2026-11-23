@@ -39,8 +39,11 @@ export interface KvitbitApiConfig {
   /** Origin the API is served from, e.g. `https://app.kvitbit.cz`. Paths carry `/api/v1`. */
   readonly baseUrl: string | URL;
   readonly credentials: Credentials;
-  /** Read per request, so a locale switch applies without rebuilding the layer. */
-  readonly acceptLanguage?: () => string | undefined;
+  /**
+   * `Accept-Language` for every request (`ctx.locale`). Read per request, so a locale switch
+   * applies without rebuilding the layer.
+   */
+  readonly acceptLanguage: () => string;
   /** Adapter hook (tracing, retries); applied before the auth and language headers. */
   readonly transformClient?: (client: HttpClient.HttpClient) => HttpClient.HttpClient;
 }
@@ -92,8 +95,6 @@ const recordResponse = HttpClient.transformResponse(
   ),
 );
 
-const COOKIE_REQUEST_INIT: globalThis.RequestInit = { credentials: "include" };
-
 /** The request pipeline every KvitbitApi call goes through. */
 export const configureClient =
   (config: KvitbitApiConfig) =>
@@ -105,23 +106,24 @@ export const configureClient =
     const authed =
       credentials._tag === "Bearer"
         ? base.pipe(HttpClient.mapRequest(HttpClientRequest.bearerToken(credentials.token)))
-        : // FetchHttpClient reads RequestInit from the requesting fiber, so provide it per request.
+        : // FetchHttpClient reads RequestInit from the requesting fiber, so provide it per request,
+          // keeping any options the adapter already set.
           base.pipe(
-            HttpClient.transformResponse(
-              Effect.provideService(FetchHttpClient.RequestInit, COOKIE_REQUEST_INIT),
+            HttpClient.transformResponse((effect) =>
+              Effect.flatMap(Effect.serviceOption(FetchHttpClient.RequestInit), (init) =>
+                Effect.provideService(effect, FetchHttpClient.RequestInit, {
+                  ...Option.getOrElse(init, () => ({})),
+                  credentials: "include",
+                }),
+              ),
             ),
           );
     const acceptLanguage = config.acceptLanguage;
-    return acceptLanguage === undefined
-      ? authed
-      : authed.pipe(
-          HttpClient.mapRequest((request) => {
-            const language = acceptLanguage();
-            return language === undefined
-              ? request
-              : HttpClientRequest.setHeader(request, "accept-language", language);
-          }),
-        );
+    return authed.pipe(
+      HttpClient.mapRequest((request) =>
+        HttpClientRequest.setHeader(request, "accept-language", acceptLanguage()),
+      ),
+    );
   };
 
 export const make = (
