@@ -46,6 +46,11 @@ const SAMPLES: ReadonlyArray<Route> = [
     {
       _tag: "Documents",
       ws: "acme",
+      query: { settlement: "partially_paid", overdue: true, from: "2026-01-01", to: "2026-03-31" },
+    },
+    {
+      _tag: "Documents",
+      ws: "acme",
       query: { text: "Nová faktura & co", status: "issued", kind: "proforma", contact: ID },
     },
     { _tag: "DocumentNew", ws: "acme", kind: "invoice" },

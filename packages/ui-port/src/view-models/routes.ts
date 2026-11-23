@@ -11,8 +11,10 @@ import {
   ContactId,
   DocumentId,
   DocumentKind,
+  DocumentSettlement,
   DocumentStatus,
   ExpenseId,
+  IsoDate,
   ReportKind,
   ShareToken,
   TemplateId,
@@ -22,11 +24,16 @@ import { Option, Schema } from "effect";
 
 // --- Vocabularies --------------------------------------------------------------------------------
 
+/** The filters of the domain `DocumentQuery` (documents list, `GET ws/documents`). */
 export const DocumentListQuery = Schema.Struct({
   text: Schema.optionalKey(Schema.String),
   status: Schema.optionalKey(DocumentStatus),
   kind: Schema.optionalKey(DocumentKind),
+  settlement: Schema.optionalKey(DocumentSettlement),
+  overdue: Schema.optionalKey(Schema.Boolean),
   contact: Schema.optionalKey(ContactId),
+  from: Schema.optionalKey(IsoDate),
+  to: Schema.optionalKey(IsoDate),
 });
 export type DocumentListQuery = typeof DocumentListQuery.Type;
 
@@ -239,7 +246,11 @@ const pathOf = (r: Route): string => {
         ["text", r.query.text],
         ["status", r.query.status],
         ["kind", r.query.kind],
+        ["settlement", r.query.settlement],
+        ["overdue", bool(r.query.overdue)],
         ["contact", r.query.contact],
+        ["from", r.query.from],
+        ["to", r.query.to],
       ]);
     case "DocumentNew":
       return withQuery(`${w}/documents/new/${r.kind}`, sourceQuery(r.from));
@@ -358,7 +369,10 @@ const rawRoute = (segments: ReadonlyArray<string>, q: Map<string, string>): unkn
         return {
           _tag: "Documents",
           ...base,
-          query: pick(q, ["text", "status", "kind", "contact"]),
+          query: withDefined({
+            ...pick(q, ["text", "status", "kind", "settlement", "contact", "from", "to"]),
+            overdue: parseBool(q.get("overdue")),
+          }),
         };
       }
       if (d === "new" && e !== undefined) {

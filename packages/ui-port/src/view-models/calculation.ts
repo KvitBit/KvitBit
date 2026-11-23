@@ -7,7 +7,7 @@
  * Rounding (core-ports 5.1): line amounts keep full precision; buckets group by
  * `(treatment, ratePercent)`; bottom-up base = round(sum of nets), VAT = round(base × rate / 100);
  * top-down (`pricesIncludeVat`) gross = round(sum of grosses), VAT = round(gross × rate /
- * (100 + rate)), base = gross − VAT; half away from zero at the currency's minor unit; CZK VAT per
+ * (100 + rate)), base = gross − VAT; half away from zero to 2 decimals (round2, whatever the currency's minor unit); CZK VAT per
  * bucket = round2(VAT × fx.rate / fx.quantity); `whole_unit` rounding only touches the amount to pay.
  */
 import {
@@ -25,7 +25,8 @@ import { BigDecimal, Data, Option, Result } from "effect";
 
 const ZERO = BigDecimal.fromBigInt(0n);
 const HUNDRED = BigDecimal.fromBigInt(100n);
-const CZK_SCALE = 2;
+/** core-ports 5.1 rounds every bucket amount with round2, for any document currency. */
+const SCALE = 2;
 
 const roundAt = (value: BigDecimal.BigDecimal, scale: number): BigDecimal.BigDecimal =>
   BigDecimal.normalize(BigDecimal.round(value, { scale, mode: "half-from-zero" }));
@@ -156,7 +157,6 @@ const isCzk = (currency: CurrencyCode): boolean => currency === "CZK";
 
 /** `VatMath.calculate` plus the per-line amounts the editor shows beside each line. */
 export const calculate = (input: PreviewInput): Result.Result<LivePreview, VatRateUnavailable> => {
-  const scale = MoneyMath.minorUnitScale(input.currency);
   const fx = isCzk(input.currency) ? null : input.fx;
   const lines: Array<LineAmounts> = [];
   const groups = new Map<string, Array<LineAmounts>>();
@@ -180,12 +180,12 @@ export const calculate = (input: PreviewInput): Result.Result<LivePreview, VatRa
     let vat: BigDecimal.BigDecimal;
     let gross: BigDecimal.BigDecimal;
     if (input.pricesIncludeVat) {
-      gross = roundAt(BigDecimal.sumAll(group.map((l) => l.gross)), scale);
-      vat = roundAt(divide(BigDecimal.multiply(gross, rate), BigDecimal.sum(HUNDRED, rate)), scale);
+      gross = roundAt(BigDecimal.sumAll(group.map((l) => l.gross)), SCALE);
+      vat = roundAt(divide(BigDecimal.multiply(gross, rate), BigDecimal.sum(HUNDRED, rate)), SCALE);
       base = BigDecimal.subtract(gross, vat);
     } else {
-      base = roundAt(BigDecimal.sumAll(group.map((l) => l.net)), scale);
-      vat = roundAt(divide(BigDecimal.multiply(base, rate), HUNDRED), scale);
+      base = roundAt(BigDecimal.sumAll(group.map((l) => l.net)), SCALE);
+      vat = roundAt(divide(BigDecimal.multiply(base, rate), HUNDRED), SCALE);
       gross = BigDecimal.sum(base, vat);
     }
     const vatCzk =
@@ -193,7 +193,7 @@ export const calculate = (input: PreviewInput): Result.Result<LivePreview, VatRa
         ? null
         : roundAt(
             divide(BigDecimal.multiply(vat, fx.rate), BigDecimal.fromBigInt(BigInt(fx.quantity))),
-            CZK_SCALE,
+            SCALE,
           );
     buckets.push({
       treatment: first.treatment,
@@ -231,11 +231,9 @@ export const calculate = (input: PreviewInput): Result.Result<LivePreview, VatRa
   });
 };
 
-/** Rounds a full-precision line amount for display (rule 1). */
-export const displayAmount = (
-  amount: BigDecimal.BigDecimal,
-  currency: CurrencyCode,
-): BigDecimal.BigDecimal => roundAt(amount, MoneyMath.minorUnitScale(currency));
+/** Rounds a full-precision line amount for display (rule 1: 2 decimals). */
+export const displayAmount = (amount: BigDecimal.BigDecimal): BigDecimal.BigDecimal =>
+  roundAt(amount, SCALE);
 
 // --- Instant preview vs server preview ------------------------------------------------------------
 

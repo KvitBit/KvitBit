@@ -269,6 +269,23 @@ describe("calculate: FX, credit notes, regimes, payment rounding", () => {
     expect(str(half.breakdown.buckets[0]?.gross ?? d("0"))).toBe("120.5");
   });
 
+  test("round2 for every currency (core-ports 5.1), not the ISO minor unit", () => {
+    const jpy = run({
+      currency: "JPY" as CurrencyCode,
+      fx: { rate: d("16.5"), quantity: 100 },
+      lines: [line("1", "100.125")],
+    });
+    expect(totals(jpy.breakdown)).toEqual({
+      net: "100.13",
+      vat: "21.03",
+      gross: "121.16",
+      adj: "0",
+      vatCzk: "3.47",
+    });
+    const kwd = run({ currency: "KWD" as CurrencyCode, lines: [line("1", "1.2345")] });
+    expect(totals(kwd.breakdown).net).toBe("1.23");
+  });
+
   test("an empty document is zero", () => {
     expect(totals(run({ lines: [] }).breakdown)).toEqual({
       net: "0",
