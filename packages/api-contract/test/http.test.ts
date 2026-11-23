@@ -165,7 +165,7 @@ describe("SchemaErrors middleware", () => {
   const run = (kind: HttpApiError.HttpApiSchemaError["kind"]) =>
     Effect.runSync(Effect.flip(schemaErrorToInvalid(schemaError(kind))));
 
-  test("request decode failures become Invalid request.malformed (422)", () => {
+  test("a root-level request decode failure keeps the slot as its path", () => {
     for (const kind of ["Params", "Query", "Headers", "Payload"] as const) {
       const error = run(kind);
       expect(error).toBeInstanceOf(Invalid);
@@ -173,6 +173,43 @@ describe("SchemaErrors middleware", () => {
         issues: [{ path: [kind.toLowerCase()], code: "request.malformed" }],
       });
     }
+  });
+
+  const decodeFailure = (
+    kind: HttpApiError.HttpApiSchemaError["kind"],
+    schema: Schema.Top,
+    input: unknown,
+  ) => {
+    const cause = Effect.runSync(
+      Effect.flip(
+        Schema.decodeUnknownEffect(schema as Schema.Top as Schema.Codec<unknown, unknown>)(input, {
+          errors: "all",
+        }),
+      ),
+    );
+    return Effect.runSync(
+      Effect.flip(schemaErrorToInvalid(new HttpApiError.HttpApiSchemaError({ kind, cause }))),
+    );
+  };
+
+  test("a nested payload failure reports the field name and array index", () => {
+    const [schema] =
+      Api.groups.documents.endpoints.send.payload.get("application/json")?.schemas ?? [];
+    if (schema === undefined) throw new Error("no JSON payload");
+    expect(decodeFailure("Payload", schema, { to: ["a@b.cz", 42] })).toMatchObject({
+      _tag: "Invalid",
+      issues: [{ path: ["to", 1], code: "request.malformed" }],
+    });
+  });
+
+  test("every failing field is reported; query paths start with the slot", () => {
+    const query = Api.groups.documents.endpoints.list.query;
+    if (query === undefined) throw new Error("no query");
+    const error = decodeFailure("Query", query, { limit: "0", overdue: "maybe" });
+    expect(error).toBeInstanceOf(Invalid);
+    const paths = error instanceof Invalid ? error.issues.map((issue) => issue.path) : [];
+    expect(paths).toContainEqual(["query", "limit"]);
+    expect(paths).toContainEqual(["query", "overdue"]);
   });
 
   test("response encoding failures pass through as HttpApiSchemaError", () => {

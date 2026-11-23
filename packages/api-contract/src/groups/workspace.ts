@@ -48,8 +48,8 @@ export const SeriesInput = Schema.Struct({
   kind: DocumentKind,
   name: Schema.NonEmptyString,
   pattern: Schema.NonEmptyString, // tokens: YYYY YY MM N…; e.g. "YYYY-NNNN"
-  nextNumber: Schema.optional(Schema.Int.pipe(Schema.check(Schema.isGreaterThanOrEqualTo(1)))),
-  isDefault: Schema.optional(Schema.Boolean),
+  nextNumber: Schema.optionalKey(Schema.Int.pipe(Schema.check(Schema.isGreaterThanOrEqualTo(1)))),
+  isDefault: Schema.optionalKey(Schema.Boolean),
 });
 export type SeriesInput = typeof SeriesInput.Type;
 

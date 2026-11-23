@@ -43,10 +43,10 @@ const DocParams = { ...WorkspaceParams, documentId: DocumentId };
 
 /** Core `SendOptions`; `purpose` defaults to "document" (G11). */
 export const SendInput = Schema.Struct({
-  to: Schema.optional(Schema.Array(Schema.String)),
-  language: Schema.optional(Locale),
-  reminders: Schema.optional(Schema.Boolean), // absent: Document → Contact → Workspace (rule D16)
-  purpose: Schema.optional(DeliveryPurpose),
+  to: Schema.optionalKey(Schema.Array(Schema.String)),
+  language: Schema.optionalKey(Locale),
+  reminders: Schema.optionalKey(Schema.Boolean), // absent: Document → Contact → Workspace (rule D16)
+  purpose: Schema.optionalKey(DeliveryPurpose),
 });
 export type SendInput = typeof SendInput.Type;
 
@@ -58,7 +58,7 @@ export const PdfQuery = {
 
 export const CancelInput = Schema.Struct({
   reason: Schema.NonEmptyString,
-  on: Schema.optional(IsoDate),
+  on: Schema.optionalKey(IsoDate),
 });
 export const CancelResult = Schema.Struct({
   document: DocumentView,
@@ -72,8 +72,8 @@ export const CorrectionLines = Schema.Union([
   Schema.Array(
     Schema.Struct({
       line: LineId,
-      quantity: Schema.optional(Schema.BigDecimal),
-      unitPrice: Schema.optional(Schema.BigDecimal),
+      quantity: Schema.optionalKey(Schema.BigDecimal),
+      unitPrice: Schema.optionalKey(Schema.BigDecimal),
     }),
   ),
 ]);
@@ -81,17 +81,17 @@ export const CorrectionLines = Schema.Union([
 export const CorrectionInput = Schema.Struct({
   reason: Schema.NonEmptyString,
   lines: CorrectionLines,
-  correctedOn: Schema.optional(IsoDate),
+  correctedOn: Schema.optionalKey(IsoDate),
 });
 export type CorrectionInput = typeof CorrectionInput.Type;
 
 export const IssueFromInputPayload = Schema.Struct({
   input: DocumentInput,
-  send: Schema.optional(SendInput),
+  send: Schema.optionalKey(SendInput),
 });
-export const IssueDraftPayload = Schema.Struct({ send: Schema.optional(SendInput) });
+export const IssueDraftPayload = Schema.Struct({ send: Schema.optionalKey(SendInput) });
 export const UnlockInput = Schema.Struct({ reason: Schema.NonEmptyString });
-export const FinalInvoiceInput = Schema.Struct({ patch: Schema.optional(DocumentPatch) });
+export const FinalInvoiceInput = Schema.Struct({ patch: Schema.optionalKey(DocumentPatch) });
 export const DeliveryQueued = Schema.Struct({
   deliveryId: DeliveryId,
   status: Schema.Literal("queued"),

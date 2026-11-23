@@ -69,7 +69,7 @@ export const ContactRole = Schema.Literals(["customer", "supplier"]);
 export type ContactRole = typeof ContactRole.Type;
 export const FromIcoInput = Schema.Struct({
   ico: Schema.NonEmptyString,
-  role: Schema.optional(ContactRole),
+  role: Schema.optionalKey(ContactRole),
 });
 export type FromIcoInput = typeof FromIcoInput.Type;
 
@@ -201,10 +201,10 @@ export type PaymentTarget = typeof PaymentTarget.Type;
 /** Core `RecordPaymentInput`. */
 export const RecordPaymentInput = Schema.Struct({
   target: PaymentTarget,
-  amount: Schema.optional(Money), // default: outstanding
-  paidOn: Schema.optional(IsoDate), // default: today (Prague)
-  method: Schema.optional(PaymentMethod),
-  note: Schema.optional(Schema.String),
+  amount: Schema.optionalKey(Money), // default: outstanding
+  paidOn: Schema.optionalKey(IsoDate), // default: today (Prague)
+  method: Schema.optionalKey(PaymentMethod),
+  note: Schema.optionalKey(Schema.String),
 });
 export type RecordPaymentInput = typeof RecordPaymentInput.Type;
 
@@ -363,8 +363,8 @@ export const ScheduleInput = Schema.Struct({
 export type ScheduleInput = typeof ScheduleInput.Type;
 
 export const UseTemplateInput = Schema.Struct({
-  as: Schema.optional(Schema.Literals(["draft", "issued"])),
-  patch: Schema.optional(DocumentPatch),
+  as: Schema.optionalKey(Schema.Literals(["draft", "issued"])),
+  patch: Schema.optionalKey(DocumentPatch),
 });
 export type UseTemplateInput = typeof UseTemplateInput.Type;
 

@@ -24,7 +24,7 @@ import {
   UserId,
   WorkspaceId,
 } from "@kvitbit/domain/contract";
-import { Context, Effect, Schema } from "effect";
+import { Context, Effect, Schema, SchemaIssue } from "effect";
 import { type HttpApiError, HttpApiMiddleware, HttpApiSecurity } from "effect/http-api";
 import { ApiKeyId } from "./api-key";
 import { OriginRejected, PayloadTooLarge, RateLimited, Unauthorized } from "./edge-errors";
@@ -78,17 +78,54 @@ export class SchemaErrors extends HttpApiMiddleware.Service<SchemaErrors>()(
 /** `HttpApiSchemaError` kinds raised while decoding the request; the others are response-side. */
 export const REQUEST_SCHEMA_ERROR_KINDS = ["Params", "Query", "Headers", "Payload"] as const;
 
+const formatIssues = SchemaIssue.makeFormatterStandardSchemaV1();
+
+type IssuePath = ReadonlyArray<string | number>;
+
+const toPathSegment = (segment: PropertyKey | { readonly key: PropertyKey }): string | number => {
+  const key = typeof segment === "object" ? segment.key : segment;
+  return typeof key === "number" ? key : String(key);
+};
+
+/**
+ * The failing paths of a request decode error. Payload paths are the body's own field names and
+ * array indices (what a form maps to its fields); params, query and headers paths start with the
+ * slot (`["query", "limit"]`). A failure at the root of a slot keeps the slot alone.
+ */
+export const requestIssuePaths = (
+  error: HttpApiError.HttpApiSchemaError,
+): readonly [IssuePath, ...Array<IssuePath>] => {
+  const slot = error.kind.toLowerCase();
+  const paths = formatIssues(error.cause.issue).issues.map((issue) =>
+    (issue.path ?? []).map(toPathSegment),
+  );
+  const prefixed = paths.map((path) =>
+    error.kind === "Payload" ? (path.length === 0 ? [slot] : path) : [slot, ...path],
+  );
+  const [first = [slot], ...rest] = [
+    ...new Map(prefixed.map((path) => [JSON.stringify(path), path] as const)).values(),
+  ];
+  return [first, ...rest];
+};
+
+const malformed = ([first, ...rest]: readonly [IssuePath, ...Array<IssuePath>]) => {
+  const issue = (path: IssuePath) => ({ path, code: "request.malformed" as const });
+  return [issue(first), ...rest.map(issue)] as const;
+};
+
 /**
  * The SchemaErrors transform for `layerSchemaErrorTransform`: request decode failures become
- * `Invalid` with code `request.malformed` (422); response encoding failures (`Body`,
- * `ResponseHeaders`) pass through unchanged and stay 500 defects.
+ * `Invalid` with one `request.malformed` issue per failing path (422, section 3.3); response
+ * encoding failures (`Body`, `ResponseHeaders`) pass through unchanged and stay 500 defects.
  */
 export const schemaErrorToInvalid = (
   error: HttpApiError.HttpApiSchemaError,
 ): Effect.Effect<never, Invalid | HttpApiError.HttpApiSchemaError> =>
   REQUEST_SCHEMA_ERROR_KINDS.some((kind) => kind === error.kind)
     ? Effect.fail(
-        new Invalid({ issues: [{ path: [error.kind.toLowerCase()], code: "request.malformed" }] }),
+        new Invalid({
+          issues: malformed(requestIssuePaths(error)),
+        }),
       )
     : Effect.fail(error);
 
