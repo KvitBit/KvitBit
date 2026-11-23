@@ -119,7 +119,7 @@ const fakeGcs = (overrides: Array<Override> = [], chunkFaults: Array<ChunkFault>
     if (fromSession !== undefined) return fromSession;
     if (method === "POST" && url.pathname === "/upload/storage/v1/b/b/o") {
       const name = url.searchParams.get("name") ?? "";
-      objects.set(name, seenRequest.body ?? new Uint8Array());
+      objects.set(name, (seenRequest.body ?? new Uint8Array()).slice());
       return Response.json({ name, bucket: "b" });
     }
     const match = /^\/storage\/v1\/b\/b\/o\/([^/]+)$/.exec(url.pathname);
@@ -468,5 +468,53 @@ describe("GcsBlobStorage responses", () => {
       withStore((store) => Effect.flatMap(store.get(key("ws/empty")), readAll)),
     );
     expect(data.byteLength).toBe(0);
+  });
+});
+
+describe("GcsBlobStorage review fixes", () => {
+  const data = Uint8Array.from({ length: 2 * quarterMiB + 10 }, (_, i) => i % 256);
+  const opts = { chunkSize: quarterMiB, retryBackoff: "1 millis" } as const;
+
+  test("one transient chunk failure costs one retry", async () => {
+    const fake = fakeGcs([], [{ persist: 0, status: 503 }]);
+    await run(
+      layerFor(fake, { ...opts, retries: 1 }),
+      withStore((store) => store.put(key("ws/once"), Stream.make(data), meta(10 ** 7))),
+    );
+    expect(fake.objects.get("ws/once")).toEqual(data);
+  });
+
+  test("errors never carry the resumable session id", async () => {
+    const fake = fakeGcs([() => undefined, () => "transport-error"]);
+    const error = await run(
+      layerFor(fake, { ...opts, retries: 0 }),
+      withStore((store) =>
+        Effect.flip(store.put(key("ws/secret"), Stream.make(data), meta(10 ** 7))),
+      ),
+    );
+    expect(error._tag).toBe("BlobUnavailable");
+    const rendered = `${String(error)} ${String((error as { cause?: unknown }).cause)}`;
+    expect(rendered).toContain("upload_id");
+    expect(rendered).not.toContain("upload_id=s1");
+  });
+
+  test("a download that stalls mid-body dies after the idle timeout", async () => {
+    let pulls = 0;
+    const stalled = new ReadableStream<Uint8Array>({
+      pull: (controller) => {
+        pulls += 1;
+        if (pulls === 1) controller.enqueue(new Uint8Array([1, 2, 3]));
+        return pulls === 1 ? undefined : new Promise<void>(() => {});
+      },
+    });
+    const fake = fakeGcs([() => new Response(stalled, { status: 200 })]);
+    const defect = await Effect.runPromise(
+      defectOf(
+        withStore((store) => Effect.flatMap(store.get(key("ws/slow")), readAll)).pipe(
+          Effect.provide(layerFor(fake, { idleTimeout: "30 millis" })),
+        ),
+      ),
+    );
+    expect(defect).toMatchObject({ _tag: "BlobUnavailable", cause: { reason: "idle timeout" } });
   });
 });

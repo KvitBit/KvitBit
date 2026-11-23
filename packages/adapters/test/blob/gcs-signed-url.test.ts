@@ -89,6 +89,9 @@ describe("GCS V4 signed URLs", () => {
   test("rejects bad keys and expiries", () => {
     expect(() => signGcsV4Url({ ...request, key: "../x" }, now)).toThrow(InvalidBlobKey);
     expect(() => signGcsV4Url({ ...request, expiresInSeconds: 0 }, now)).toThrow(RangeError);
+    // A JavaScript caller can pass any string; write methods are refused at runtime.
+    const put = { ...request, method: "PUT" } as unknown as GcsSignedUrlRequest;
+    expect(() => signGcsV4Url(put, now)).toThrow(RangeError);
     expect(() => signGcsV4Url({ ...request, expiresInSeconds: 604801 }, now)).toThrow(RangeError);
     expect(() => signGcsV4Url({ ...request, expiresInSeconds: 604800 }, now)).not.toThrow();
   });

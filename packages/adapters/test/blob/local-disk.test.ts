@@ -1,5 +1,14 @@
 import { afterAll, describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BlobStorage } from "@kvitbit/domain/ports";
@@ -119,5 +128,93 @@ describe("LocalDiskBlobStorage on disk", () => {
     );
     expect(exit._tag).toBe("Failure");
     expect(JSON.stringify(exit)).toContain("BlobUnavailable");
+  });
+
+  describe("symlinks below root are never followed", () => {
+    const setup = () => {
+      const root = freshRoot();
+      const outside = join(base, `outside-${roots}`);
+      mkdirSync(outside, { recursive: true });
+      mkdirSync(root, { recursive: true });
+      writeFileSync(join(outside, "secret"), "outside");
+      symlinkSync(outside, join(root, "ws"));
+      symlinkSync(join(outside, "secret"), join(root, "link"));
+      return { root, outside };
+    };
+
+    test("put, get and delete through a symlinked directory fail and touch nothing outside", async () => {
+      const { root, outside } = setup();
+      const errors = await withStore(root, (store) =>
+        Effect.gen(function* () {
+          return [
+            yield* Effect.flip(store.put(key("ws/new"), chunked("x"), meta())),
+            yield* Effect.flip(store.get(key("ws/secret"))),
+            yield* Effect.flip(store.delete(key("ws/secret"))),
+            yield* Effect.flip(store.put(key("ws/deeper/new"), chunked("x"), meta())),
+          ];
+        }),
+      );
+      expect(errors.map((error) => error._tag)).toEqual([
+        "BlobUnavailable",
+        "BlobUnavailable",
+        "BlobUnavailable",
+        "BlobUnavailable",
+      ]);
+      expect(readdirSync(outside).sort()).toEqual(["secret"]);
+      expect(readFileSync(join(outside, "secret"), "utf8")).toBe("outside");
+      expect(readdirSync(join(root, ".partial"))).toEqual([]);
+    });
+
+    test("a symlinked object is refused on get; delete removes only the link", async () => {
+      const { root, outside } = setup();
+      const error = await withStore(root, (store) => Effect.flip(store.get(key("link"))));
+      expect(error._tag).toBe("BlobUnavailable");
+      await withStore(root, (store) => store.delete(key("link")));
+      expect(existsSync(join(root, "link"))).toBe(false);
+      expect(readFileSync(join(outside, "secret"), "utf8")).toBe("outside");
+    });
+
+    test("a put over a symlinked object replaces the link, not its target", async () => {
+      const { root, outside } = setup();
+      await withStore(root, (store) => store.put(key("link"), chunked("mine"), meta()));
+      expect(readFileSync(join(root, "link"), "utf8")).toBe("mine");
+      expect(readFileSync(join(outside, "secret"), "utf8")).toBe("outside");
+    });
+
+    test("a symlinked staging directory fails the layer", async () => {
+      const root = freshRoot();
+      const outside = join(base, `staging-${roots}`);
+      mkdirSync(outside, { recursive: true });
+      mkdirSync(root, { recursive: true });
+      symlinkSync(outside, join(root, ".partial"));
+      const exit = await Effect.runPromise(
+        Effect.exit(
+          Effect.provide(Effect.asVoid(BlobStorage), LocalDiskBlobStorage.layer({ root })),
+        ),
+      );
+      expect(exit._tag).toBe("Failure");
+    });
+
+    test("a root that is itself a symlink works", async () => {
+      const real = freshRoot();
+      mkdirSync(real, { recursive: true });
+      const alias = join(base, `alias-${roots}`);
+      symlinkSync(real, alias);
+      await withStore(alias, (store) => store.put(key("ws/a"), chunked("via alias"), meta()));
+      expect(readFileSync(join(real, "ws/a"), "utf8")).toBe("via alias");
+    });
+  });
+
+  test("a prefix of a live key cannot be stored and the descendant survives", async () => {
+    const root = freshRoot();
+    const error = await withStore(root, (store) =>
+      Effect.gen(function* () {
+        yield* store.put(key("ws/a/b"), chunked("child"), meta());
+        return yield* Effect.flip(store.put(key("ws/a"), chunked("parent"), meta()));
+      }),
+    );
+    expect(error._tag).toBe("BlobUnavailable");
+    expect(readFileSync(join(root, "ws/a/b"), "utf8")).toBe("child");
+    expect(readdirSync(join(root, ".partial"))).toEqual([]);
   });
 });

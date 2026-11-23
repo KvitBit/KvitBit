@@ -151,6 +151,19 @@ export const describeBlobStorageContract = (
         }),
       ));
 
+    test("a key whose former descendants were all deleted can be stored", () =>
+      run(
+        Effect.gen(function* () {
+          const store = yield* BlobStorage;
+          yield* store.put(key("ws-1/p/q/r"), chunked("deep"), meta());
+          yield* store.put(key("ws-1/p/s"), chunked("near"), meta());
+          yield* store.delete(key("ws-1/p/q/r"));
+          yield* store.delete(key("ws-1/p/s"));
+          yield* store.put(key("ws-1/p"), chunked("now a file"), meta());
+          expect((yield* readAll(yield* store.get(key("ws-1/p")))).toString()).toBe("now a file");
+        }),
+      ));
+
     test("get of an unknown key fails with BlobMissing", () =>
       run(
         Effect.gen(function* () {

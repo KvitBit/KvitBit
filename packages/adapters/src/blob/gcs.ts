@@ -2,7 +2,7 @@
  * BlobStorage on Google Cloud Storage for the hosted deployment (ADR 0003), over the JSON API
  * with no SDK.
  *
- * `put` never holds more than `chunkSize` bytes of the body (default 8 MiB). A body that ends
+ * `put` holds one buffer of at most `chunkSize` bytes (default 8 MiB), reused per chunk. A body that ends
  * within one chunk goes up as a single media upload; a longer one opens a resumable session and
  * sends each full chunk as it fills, so memory per upload is bounded whatever `maxBytes` is.
  * Both paths can resend what they hold: the media upload is retried whole, a resumable chunk
@@ -12,8 +12,14 @@
  */
 import { type BlobKey, BlobMissing, BlobStorage, BlobUnavailable } from "@kvitbit/domain/ports";
 import { Config, Data, Duration, Effect, Layer, Schedule, Stream } from "effect";
-import { HttpClient, HttpClientRequest, type HttpClientResponse } from "effect/http";
-import { checkKey, consumeBounded, copyOf } from "./common";
+import {
+  Headers,
+  HttpClient,
+  HttpClientRequest,
+  type HttpClientResponse,
+  UrlParams,
+} from "effect/http";
+import { checkKey, consumeBounded } from "./common";
 import { GcsAccessToken } from "./gcs-access-token";
 
 export interface GcsBlobStorageOptions {
@@ -48,16 +54,6 @@ const persistedBytes = (response: HttpClientResponse.HttpClientResponse) => {
 type ChunkAnswer =
   | { readonly _tag: "Persisted"; readonly bytes: number }
   | { readonly _tag: "Done" };
-
-const concat = (chunks: ReadonlyArray<Uint8Array>, bytes: number) => {
-  const data = new Uint8Array(bytes);
-  let offset = 0;
-  for (const chunk of chunks) {
-    data.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
-  return data;
-};
 
 const make = (
   options: GcsBlobStorageOptions,
@@ -109,7 +105,18 @@ const make = (
       request: HttpClientRequest.HttpClientRequest,
       token: string,
     ) =>
-      client.execute(HttpClientRequest.bearerToken(request, token)).pipe(
+      Effect.gen(function* () {
+        // A resumable session URI is an upload credential: keep its id and the `Location`
+        // that carries it out of spans and rendered errors.
+        const urlNames = yield* UrlParams.CurrentRedactedNames;
+        const headerNames = yield* Headers.CurrentRedactedNames;
+        return yield* client
+          .execute(HttpClientRequest.bearerToken(request, token))
+          .pipe(
+            Effect.provideService(UrlParams.CurrentRedactedNames, [...urlNames, "upload_id"]),
+            Effect.provideService(Headers.CurrentRedactedNames, [...headerNames, "location"]),
+          );
+      }).pipe(
         Effect.timeoutOrElse({
           duration: timeout,
           orElse: () => Effect.fail({ operation, reason: "timeout" }),
@@ -206,7 +213,7 @@ const make = (
         if (failures > retries) {
           return Effect.fail(new BlobUnavailable({ cause: "resumable upload made no progress" }));
         }
-        const settle = (answer: ChunkAnswer, nextFailures: number) => {
+        const settle = (answer: ChunkAnswer, nextFailures: number, afterTransient: boolean) => {
           if (answer._tag === "Done") {
             return total === undefined
               ? Effect.fail(new BlobUnavailable({ cause: "GCS finalized the upload early" }))
@@ -218,8 +225,10 @@ const make = (
               new BlobUnavailable({ cause: { reason: "persisted offset out of range", answer } }),
             );
           }
-          // Partly persisted: resend the rest, counting a failure only when nothing advanced.
-          return loop(answer.bytes, answer.bytes > from ? nextFailures : nextFailures + 1);
+          // Resend the rest. A transient failure was already counted; a 308 that persisted
+          // nothing counts as one.
+          const progressed = afterTransient || answer.bytes > from;
+          return loop(answer.bytes, progressed ? nextFailures : nextFailures + 1);
         };
         const rest = data.subarray(from - start);
         const range =
@@ -232,14 +241,14 @@ const make = (
           ),
         ).pipe(
           Effect.flatMap(answerOf),
-          Effect.flatMap((answer) => settle(answer, failures)),
+          Effect.flatMap((answer) => settle(answer, failures, false)),
           Effect.catchTag("Transient", (error) =>
             failures + 1 > retries
               ? Effect.fail(new BlobUnavailable({ cause: error.cause }))
               : Effect.sleep(delayFor(failures + 1)).pipe(
                   Effect.andThen(send("put", status)),
                   Effect.flatMap(answerOf),
-                  Effect.flatMap((answer) => settle(answer, failures + 1)),
+                  Effect.flatMap((answer) => settle(answer, failures + 1, true)),
                 ),
           ),
         );
@@ -264,21 +273,31 @@ const make = (
       put: (key, body, meta) =>
         Effect.gen(function* () {
           yield* checkKey(key);
+          // One buffer per upload, reused for every chunk: it starts small so short bodies
+          // stay cheap and grows once, to `chunkSize`.
           const state: {
-            pending: Array<Uint8Array>;
-            pendingBytes: number;
+            buffer: Uint8Array;
+            filled: number;
             sent: number;
             session: string | undefined;
-          } = { pending: [], pendingBytes: 0, sent: 0, session: undefined };
-          /** Sends the full pending chunk, opening the session first if needed. */
+          } = {
+            buffer: new Uint8Array(Math.min(chunkSize, chunkGranularity)),
+            filled: 0,
+            sent: 0,
+            session: undefined,
+          };
+          /** Sends the full buffer, opening the session first if needed, then reuses it. */
           const flush = Effect.gen(function* () {
             const session = state.session ?? (yield* startSession(key, meta.contentType));
             state.session = session;
-            const data = concat(state.pending, state.pendingBytes);
-            state.pending = [];
-            state.pendingBytes = 0;
-            yield* sendChunk(session, data, state.sent, undefined);
-            state.sent += data.byteLength;
+            yield* sendChunk(
+              session,
+              state.buffer.subarray(0, state.filled),
+              state.sent,
+              undefined,
+            );
+            state.sent += state.filled;
+            state.filled = 0;
           });
           // A full chunk is sent only once more bytes arrive, so a body of at most one chunk
           // always takes the single-request path.
@@ -286,16 +305,22 @@ const make = (
             Effect.gen(function* () {
               let rest = chunk;
               while (rest.byteLength > 0) {
-                if (state.pendingBytes === chunkSize) yield* flush;
-                const take = Math.min(chunkSize - state.pendingBytes, rest.byteLength);
-                state.pending.push(copyOf(rest.subarray(0, take)));
-                state.pendingBytes += take;
+                if (state.filled === chunkSize) yield* flush;
+                if (state.filled === state.buffer.byteLength) {
+                  const grown = new Uint8Array(chunkSize);
+                  grown.set(state.buffer.subarray(0, state.filled));
+                  state.buffer = grown;
+                }
+                const take = Math.min(state.buffer.byteLength - state.filled, rest.byteLength);
+                // Copies, so a producer reusing its buffer cannot change what is sent.
+                state.buffer.set(rest.subarray(0, take), state.filled);
+                state.filled += take;
                 rest = rest.subarray(take);
               }
             });
           const upload = Effect.gen(function* () {
             const consumed = yield* consumeBounded(body, meta.maxBytes, onChunk);
-            const last = concat(state.pending, state.pendingBytes);
+            const last = state.buffer.subarray(0, state.filled);
             if (state.session === undefined) {
               yield* mediaUpload(key, last, meta.contentType);
             } else {

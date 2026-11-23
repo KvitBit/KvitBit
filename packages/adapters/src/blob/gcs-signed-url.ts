@@ -58,6 +58,11 @@ export const gcsV4CanonicalRequest = (request: GcsSignedUrlRequest, now: Date) =
   ) {
     throw new RangeError(`expiresInSeconds out of range: ${request.expiresInSeconds}`);
   }
+  const method = request.method ?? "GET";
+  // Checked at runtime too: a signed PUT would bypass `maxBytes` and the reported sha256.
+  if (method !== "GET" && method !== "HEAD") {
+    throw new RangeError(`only GET and HEAD URLs are signed, not ${String(method)}`);
+  }
   const host = request.host ?? "storage.googleapis.com";
   const { datetime, date } = timestamps(now);
   const scope = `${date}/auto/storage/goog4_request`;
@@ -75,14 +80,9 @@ export const gcsV4CanonicalRequest = (request: GcsSignedUrlRequest, now: Date) =
     .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
     .map(([name, value]) => `${name}=${value}`)
     .join("&");
-  const canonicalRequest = [
-    request.method ?? "GET",
-    path,
-    query,
-    `host:${host}\n`,
-    "host",
-    "UNSIGNED-PAYLOAD",
-  ].join("\n");
+  const canonicalRequest = [method, path, query, `host:${host}\n`, "host", "UNSIGNED-PAYLOAD"].join(
+    "\n",
+  );
   const stringToSign = ["GOOG4-RSA-SHA256", datetime, scope, sha256Hex(canonicalRequest)].join(
     "\n",
   );
