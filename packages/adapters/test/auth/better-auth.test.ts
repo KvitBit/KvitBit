@@ -11,6 +11,7 @@ import {
   type AuthConfig,
   authOptions,
   type EmailRateLimiter,
+  guardClientMetadataFetch,
   makeAuth,
   makeEmailRateLimiter,
   OAUTH_SCOPES,
@@ -22,19 +23,42 @@ const BASE = "http://localhost:3000";
 const MCP = `${BASE}/mcp`;
 const REDIRECT = "https://client.example/callback";
 const CIMD_CLIENT_ID = "https://client.example/oauth-client.json";
+const CIMD_JWT_CLIENT_ID = "https://jwt-client.example/oauth-client.json";
+const cimdDocument = (clientId: string, extra: Record<string, unknown> = {}) => ({
+  client_id: clientId,
+  client_name: "Metadata document client",
+  redirect_uris: [REDIRECT],
+  token_endpoint_auth_method: "none",
+  grant_types: ["authorization_code", "refresh_token"],
+  response_types: ["code"],
+  ...extra,
+});
 const cimdFetches: Array<string> = [];
 const fetchClientMetadata = async (input: string | URL | Request) => {
   const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
   cimdFetches.push(url);
-  if (url !== CIMD_CLIENT_ID) return new Response("not found", { status: 404 });
-  return Response.json({
-    client_id: CIMD_CLIENT_ID,
-    client_name: "Metadata document client",
-    redirect_uris: [REDIRECT],
-    token_endpoint_auth_method: "none",
-    grant_types: ["authorization_code", "refresh_token"],
-    response_types: ["code"],
-  });
+  if (url === CIMD_CLIENT_ID) return Response.json(cimdDocument(CIMD_CLIENT_ID));
+  if (url === CIMD_JWT_CLIENT_ID) {
+    return Response.json(
+      cimdDocument(CIMD_JWT_CLIENT_ID, {
+        token_endpoint_auth_method: "private_key_jwt",
+        jwks: {
+          keys: [
+            {
+              kty: "EC",
+              crv: "P-256",
+              x: "f83OJ3D2xF1Bg8vub9tLe1gHMzV76e8Tus9uPHvRVEU",
+              y: "x_FEzRu9m36HLN_tue659LNpXW6pCyStikYjKIWI5a0",
+              use: "sig",
+              alg: "ES256",
+              kid: "k1",
+            },
+          ],
+        },
+      }),
+    );
+  }
+  return new Response("not found", { status: 404 });
 };
 
 let pg: PGlite;
@@ -301,6 +325,46 @@ describe("OAuth 2.1 for MCP", () => {
     expect([302, 303]).toContain(response.status);
     expect(response.headers.get("location")).toContain("/sign-in");
     expect(cimdFetches).toContain(CIMD_CLIENT_ID);
+  });
+
+  test("a metadata document asking for private_key_jwt is refused", async () => {
+    const url = new URL(`${BASE}/api/auth/oauth2/authorize`);
+    for (const [k, v] of Object.entries({
+      response_type: "code",
+      client_id: CIMD_JWT_CLIENT_ID,
+      redirect_uri: REDIRECT,
+      scope: "kvitbit:read",
+      state: "jwt-state",
+      resource: MCP,
+      code_challenge: "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM",
+      code_challenge_method: "S256",
+    })) {
+      url.searchParams.set(k, v);
+    }
+    const response = await auth.handler(new Request(url.toString(), { redirect: "manual" }));
+    expect(cimdFetches).toContain(CIMD_JWT_CLIENT_ID);
+    expect(response.headers.get("location") ?? "").not.toContain("/sign-in");
+    expect(response.status).toBeGreaterThanOrEqual(400);
+    const stored = await pg.query("select 1 from auth.oauth_client where client_id = $1", [
+      CIMD_JWT_CLIENT_ID,
+    ]);
+    expect(stored.rows).toHaveLength(0);
+  });
+
+  test("the metadata guard refuses unadvertised methods on every fetch, including refresh", async () => {
+    let method = "none";
+    const guarded = guardClientMetadataFetch(async () =>
+      Response.json(cimdDocument(CIMD_CLIENT_ID, { token_endpoint_auth_method: method })),
+    );
+    expect((await guarded(CIMD_CLIENT_ID)).status).toBe(200);
+    // A later revalidation of the same document now asks for a confidential JWT method.
+    method = "private_key_jwt";
+    expect((await guarded(CIMD_CLIENT_ID)).status).toBe(400);
+    method = "client_secret_basic";
+    expect((await guarded(new URL(CIMD_CLIENT_ID))).status).toBe(200);
+    // Other resources pass through unchanged.
+    const jwks = guardClientMetadataFetch(async () => Response.json({ keys: [] }));
+    expect((await jwks("https://client.example/jwks.json")).status).toBe(200);
   });
 
   test("registration refuses unadvertised client authentication methods", async () => {

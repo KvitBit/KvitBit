@@ -280,6 +280,43 @@ export const oauthRegisterHook: BeforeHook = {
   }),
 };
 
+/**
+ * Wraps the Client ID Metadata Document transport so a document asking for a client
+ * authentication method outside `OAUTH_TOKEN_ENDPOINT_AUTH_METHODS` is refused. The cimd plugin
+ * validates against the provider's built-in methods (which include `private_key_jwt`), and both
+ * client creation and later revalidation fetch through this transport, so filtering here covers
+ * both. Other resources (such as `jwks_uri`) pass through untouched.
+ */
+export const guardClientMetadataFetch =
+  (inner: ClientMetadataResourceFetch): ClientMetadataResourceFetch =>
+  async (input, init) => {
+    const response = await inner(input, init);
+    if (!response.ok) return response;
+    const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+    let document: unknown;
+    try {
+      document = await response.clone().json();
+    } catch {
+      return response;
+    }
+    if (typeof document !== "object" || document === null) return response;
+    const { client_id: clientId, token_endpoint_auth_method: method } = document as Record<
+      string,
+      unknown
+    >;
+    if (clientId !== url || method === undefined) return response;
+    if ((OAUTH_TOKEN_ENDPOINT_AUTH_METHODS as ReadonlyArray<unknown>).includes(method)) {
+      return response;
+    }
+    return Response.json(
+      {
+        error: "invalid_client_metadata",
+        error_description: `token_endpoint_auth_method must be one of ${OAUTH_TOKEN_ENDPOINT_AUTH_METHODS.join(", ")}`,
+      },
+      { status: 400 },
+    );
+  };
+
 /** The Better Auth options `makeAuth` passes; exported for inspection in tests. */
 export const authOptions = (config: AuthConfig) => {
   const baseOrigin = new URL(config.baseURL).origin;
@@ -376,7 +413,9 @@ export const authOptions = (config: AuthConfig) => {
         refreshTokenReuseInterval: 10,
       }),
       cimd({
-        fetchClientMetadataResource: config.fetchClientMetadata ?? fetchClientMetadataResource,
+        fetchClientMetadataResource: guardClientMetadataFetch(
+          config.fetchClientMetadata ?? fetchClientMetadataResource,
+        ),
         metadataProfile: "mcp-2026-07-28",
       }),
       extraHooks,
