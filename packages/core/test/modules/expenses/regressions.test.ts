@@ -2,7 +2,7 @@
 import { describe, expect, test } from "bun:test";
 import type { ContactId, CurrencyCode, WorkspaceId } from "@kvitbit/domain/contract";
 import { CurrentCaller, Expenses, Invalid, MoneyMath } from "@kvitbit/domain/contract";
-import { BigDecimal, Effect, Exit, Layer, Ref, Schema } from "effect";
+import { BigDecimal, Effect, Exit, Layer, Ref, Schema, Stream } from "effect";
 import type { FakeSupplier } from "../../../src/modules/expenses";
 import {
   decodeSummary,
@@ -49,6 +49,46 @@ describe("HEIC sniffing", () => {
     const truncated = ftyp("mif1", "heic");
     truncated[3] = 16;
     expect(matchesType("image/heic", truncated)).toBe(false);
+  });
+});
+
+describe("HEIC brands and streaming", () => {
+  test("heim and heis are HEIC too, as major or compatible brand", () => {
+    for (const brand of ["heim", "heis"]) {
+      expect(matchesType("image/heic", ftyp(brand))).toBe(true);
+      expect(matchesType("image/heic", ftyp("mif1", "mif1", brand))).toBe(true);
+    }
+  });
+
+  test("a qualifying brand past the first 64 bytes of the ftyp box is found while streaming", async () => {
+    // 68-byte box: 13 non-HEIC compatible brands, then heix at offset 64.
+    const box = ftyp("mif1", ...Array.from({ length: 12 }, () => "mif1"), "heix");
+    expect(box.length).toBe(68);
+    const exit = await scenario(
+      Effect.gen(function* () {
+        const id = expenseId(yield* record({ status: "incomplete" }));
+        const s = yield* Expenses;
+        // Delivered in 5-byte chunks, plus image data after the box.
+        const bytes = Uint8Array.from([...box, 1, 2, 3, 4, 5, 6, 7]);
+        const chunks = Array.from({ length: Math.ceil(bytes.length / 5) }, (_, i) =>
+          bytes.subarray(i * 5, i * 5 + 5),
+        );
+        const att = yield* s.attach(id, {
+          name: "IMG.HEIC",
+          contentType: "image/heic",
+          bytes: Stream.fromIterable(chunks),
+        });
+        const notHeic = ftyp("mif1", ...Array.from({ length: 13 }, () => "mif1"));
+        const rejected = yield* Effect.exit(
+          s.attach(id, { name: "x.heic", contentType: "image/heic", bytes: Stream.make(notHeic) }),
+        );
+        return {
+          bytes: (att as unknown as { readonly bytes: number }).bytes,
+          rejected: Exit.isFailure(rejected),
+        };
+      }),
+    );
+    expect(exit).toEqual(Exit.succeed({ bytes: 75, rejected: true }));
   });
 });
 
