@@ -11,14 +11,18 @@ import { message } from "./fixtures";
 const smtpError = (fields: Record<string, unknown>) =>
   Object.assign(new Error(String(fields.code ?? "smtp")), fields);
 
-const run = (outcome: "ok" | Error, key = "delivery-1") => {
+const run = (
+  outcome: "ok" | Error,
+  key = "delivery-1",
+  recipients: { accepted?: Array<string>; rejected?: Array<string> } = {},
+) => {
   const sent: Array<SmtpMail> = [];
   const sender = makeSmtpEmailSender(
     {
       sendMail: async (mail) => {
         sent.push(mail);
         if (outcome !== "ok") throw outcome;
-        return { messageId: mail.messageId };
+        return { messageId: mail.messageId, ...recipients };
       },
     },
     { from: "Kvitbit <noreply@kvitbit.cz>" },
@@ -109,5 +113,18 @@ describe("SmtpEmailSender", () => {
   ])("%s fails with the right error", async (_name, fields, tag) => {
     const { exit } = await run(smtpError(fields));
     expect(failureTag(exit)).toEqual([tag]);
+  });
+
+  test("a partial recipient refusal still succeeds: some recipients have the message", async () => {
+    const { exit } = await run("ok", "delivery-1", {
+      accepted: ["jana@klient.cz"],
+      rejected: ["ucetni@klient.cz"],
+    });
+    expect(Exit.isSuccess(exit)).toBe(true);
+  });
+
+  test("a resolution with every recipient refused is a rejection", async () => {
+    const { exit } = await run("ok", "delivery-1", { accepted: [], rejected: ["jana@klient.cz"] });
+    expect(failureTag(exit)).toEqual(["EmailRejected"]);
   });
 });

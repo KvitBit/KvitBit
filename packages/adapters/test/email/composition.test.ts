@@ -81,6 +81,67 @@ describe("FallbackEmailSender", () => {
   });
 });
 
+describe("FallbackEmailSender pinning", () => {
+  const sequenced = (provider: string, outcomes: Array<"ok" | SendError>) => {
+    const calls: Array<string> = [];
+    const sender: EmailSenderService = {
+      send: (_m, { idempotencyKey }) =>
+        Effect.suspend(() => {
+          calls.push(idempotencyKey);
+          const outcome = outcomes.shift() ?? "ok";
+          return outcome === "ok"
+            ? Effect.succeed({ provider, providerMessageId: `${provider}-id` })
+            : Effect.fail(outcome);
+        }),
+    };
+    return { sender, calls };
+  };
+
+  test("a retry after OutcomeUnknown stays on the primary even if it is then refused", async () => {
+    const primary = sequenced("resend", [
+      new EmailOutcomeUnknown({}),
+      new EmailNotAccepted({ cause: { status: 503 } }),
+    ]);
+    const secondary = sequenced("smtp", []);
+    const fallback = makeFallbackEmailSender(primary.sender, secondary.sender);
+    const first = await run(fallback.send(message(), { idempotencyKey: "k1" }));
+    const retry = await run(fallback.send(message(), { idempotencyKey: "k1" }));
+    const other = await run(fallback.send(message(), { idempotencyKey: "k2" }));
+    expect(Exit.isFailure(first) && Exit.isFailure(retry)).toBe(true);
+    expect(primary.calls).toEqual(["k1", "k1", "k2"]);
+    expect(secondary.calls).toEqual([]);
+    expect(Exit.isSuccess(other)).toBe(true);
+  });
+
+  test("a key that failed over stays on the secondary", async () => {
+    const primary = sequenced("resend", [new EmailNotAccepted({})]);
+    const secondary = sequenced("smtp", [new EmailOutcomeUnknown({}), "ok"]);
+    const fallback = makeFallbackEmailSender(primary.sender, secondary.sender);
+    await run(fallback.send(message(), { idempotencyKey: "k1" }));
+    const retry = await run(fallback.send(message(), { idempotencyKey: "k1" }));
+    expect(retry).toEqual(Exit.succeed({ provider: "smtp", providerMessageId: "smtp-id" }));
+    expect(primary.calls).toEqual(["k1"]);
+    expect(secondary.calls).toEqual(["k1", "k1"]);
+  });
+
+  test("pins are bounded and evict the oldest key", async () => {
+    const primary = sequenced("resend", [
+      new EmailOutcomeUnknown({}),
+      new EmailOutcomeUnknown({}),
+      new EmailNotAccepted({}),
+    ]);
+    const secondary = sequenced("smtp", []);
+    const fallback = makeFallbackEmailSender(primary.sender, secondary.sender, {
+      maxPinnedKeys: 1,
+    });
+    await run(fallback.send(message(), { idempotencyKey: "k1" }));
+    await run(fallback.send(message(), { idempotencyKey: "k2" }));
+    const evicted = await run(fallback.send(message(), { idempotencyKey: "k1" }));
+    expect(evicted).toEqual(Exit.succeed({ provider: "smtp", providerMessageId: "smtp-id" }));
+    expect(primary.calls).toEqual(["k1", "k2", "k1"]);
+  });
+});
+
 describe("CaptureEmailSender", () => {
   test("records messages in order and dedupes by idempotency key", async () => {
     const result = await Effect.runPromise(
@@ -196,6 +257,45 @@ describe("AllowlistEmailSender", () => {
       [["ops@kvitbit.cz"], []],
     ]);
   });
+});
+
+describe("AllowlistEmailSender fails closed", () => {
+  test.each([
+    "jana@klient.cz, qa@kvitbit.cz",
+    "jana@klient.cz;qa@kvitbit.cz",
+    '"qa@kvitbit.cz" <jana@klient.cz>',
+    "qa@kvitbit.cz <jana@klient.cz>",
+    "Team: jana@klient.cz, qa@kvitbit.cz;",
+    "jana@klient.cz (qa@kvitbit.cz)",
+    "jana@klient.cz@kvitbit.cz",
+  ])("captures the ambiguous recipient %p", async (recipient) => {
+    const { inner, captured } = await Effect.runPromise(
+      Effect.gen(function* () {
+        const capture = yield* makeCaptureEmailSender;
+        const inner = scripted("resend", "ok");
+        const sender = makeAllowlistEmailSender(inner.sender, { allow: ["kvitbit.cz"], capture });
+        yield* sender.send(message({ to: [recipient], cc: [] }), { idempotencyKey: "k1" });
+        return { inner, captured: yield* capture.captured };
+      }),
+    );
+    expect(inner.calls).toHaveLength(0);
+    expect(captured).toHaveLength(1);
+  });
+
+  test.each(["qa@kvitbit.cz", "QA Tým <qa@kvitbit.cz>", "  Jana Nováková <qa@KVITBIT.cz>  "])(
+    "delivers the single mailbox %p",
+    async (recipient) => {
+      const inner = scripted("resend", "ok");
+      await Effect.runPromise(
+        Effect.gen(function* () {
+          const capture = yield* makeCaptureEmailSender;
+          const sender = makeAllowlistEmailSender(inner.sender, { allow: ["kvitbit.cz"], capture });
+          yield* sender.send(message({ to: [recipient], cc: [] }), { idempotencyKey: "k1" });
+        }),
+      );
+      expect(inner.calls).toHaveLength(1);
+    },
+  );
 });
 
 describe("ConsoleEmailSender", () => {

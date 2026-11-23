@@ -14,7 +14,7 @@ export {
   makeCaptureEmailSender,
 } from "./capture";
 export { CONSOLE_PROVIDER, layerConsole, makeConsoleEmailSender } from "./console";
-export { makeFallbackEmailSender } from "./fallback";
+export { type FallbackOptions, makeFallbackEmailSender } from "./fallback";
 export {
   classifyResendStatus,
   classifyResendTransport,
@@ -25,14 +25,16 @@ export {
   resendBody,
   resendIdempotencyKey,
 } from "./resend";
-export type { EmailSenderService } from "./shared";
+export { type EmailSenderService, singleMailbox } from "./shared";
 export {
   classifySmtpError,
   layerSmtp,
   makeSmtpEmailSender,
+  SMTP_DEFAULT_TIMEOUTS,
   SMTP_PROVIDER,
   type SmtpConfig,
   type SmtpMail,
+  type SmtpSendInfo,
   type SmtpTransport,
   type SmtpTransportOptions,
   smtpMail,

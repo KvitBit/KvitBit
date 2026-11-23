@@ -109,6 +109,9 @@ describe("ResendEmailSender", () => {
     [500, "EmailNotAccepted"],
     [503, "EmailNotAccepted"],
     [409, "EmailOutcomeUnknown"],
+    [408, "EmailOutcomeUnknown"],
+    [425, "EmailNotAccepted"],
+    [413, "EmailRejected"],
   ])("status %i fails with %s", async (status, tag) => {
     const { exit } = await send({ status, body: { name: "error" } });
     expect(failureTag(exit)).toEqual([tag]);
@@ -137,5 +140,17 @@ describe("ResendEmailSender", () => {
       transport: Object.assign(new Error("socket hang up"), { code: "ECONNRESET" }),
     });
     expect(failureTag(exit)).toEqual(["EmailOutcomeUnknown"]);
+  });
+
+  test("failure causes never retain the request or its Authorization header", async () => {
+    const { exit } = await send({
+      transport: Object.assign(new Error("reset"), { code: "ECONNRESET" }),
+    });
+    expect(Exit.isFailure(exit)).toBe(true);
+    const serialized = JSON.stringify(
+      Exit.isFailure(exit) ? exit.cause.reasons.map((r) => ("error" in r ? r.error : r)) : [],
+    );
+    expect(serialized).not.toContain("re_test");
+    expect(serialized).toContain("ECONNRESET");
   });
 });

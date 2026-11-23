@@ -73,6 +73,8 @@ type SendError = EmailRejected | EmailNotAccepted | EmailOutcomeUnknown;
  * | Status | Error | Why |
  * |---|---|---|
  * | 409 idempotency key in use or reused | OutcomeUnknown | an earlier attempt may have sent it |
+ * | 408 request timeout | OutcomeUnknown | the request body may have been read and processed |
+ * | 425 too early | NotAccepted | the server declined to process it |
  * | 401, 403, 404, 405 key, scope, endpoint | NotAccepted | provider-level; another provider can take it |
  * | 429 rate or quota limit | NotAccepted | |
  * | other 4xx (400, 422 validation, 413) | Rejected | the message itself is refused |
@@ -80,8 +82,8 @@ type SendError = EmailRejected | EmailNotAccepted | EmailOutcomeUnknown;
  */
 export const classifyResendStatus = (status: number): SendError => {
   const cause = { status };
-  if (status === 409) return new EmailOutcomeUnknown({ cause });
-  if ([401, 403, 404, 405, 429].includes(status)) return new EmailNotAccepted({ cause });
+  if (status === 409 || status === 408) return new EmailOutcomeUnknown({ cause });
+  if ([401, 403, 404, 405, 425, 429].includes(status)) return new EmailNotAccepted({ cause });
   if (status >= 400 && status < 500) return new EmailRejected({ cause });
   return new EmailNotAccepted({ cause });
 };
@@ -106,15 +108,34 @@ const preConnectCodes = new Set([
   "ERR_TLS_CERT_ALTNAME_INVALID",
 ]);
 
-const failedBeforeConnect = (cause: unknown): boolean => {
-  let current: unknown = cause;
-  for (let depth = 0; depth < 5 && typeof current === "object" && current !== null; depth++) {
+/** The `code` strings along a cause chain (and inside an AggregateError), outermost first. */
+const causeCodes = (cause: unknown): ReadonlyArray<string> => {
+  const codes: Array<string> = [];
+  const visit = (current: unknown, depth: number) => {
+    if (depth > 5 || typeof current !== "object" || current === null) return;
     const code = "code" in current ? current.code : undefined;
-    if (typeof code === "string" && preConnectCodes.has(code)) return true;
-    current = "cause" in current ? current.cause : undefined;
-  }
-  return false;
+    if (typeof code === "string") codes.push(code);
+    if ("errors" in current && Array.isArray(current.errors)) {
+      for (const inner of current.errors) visit(inner, depth + 1);
+    }
+    if ("cause" in current) visit(current.cause, depth + 1);
+  };
+  visit(cause, 0);
+  return codes;
 };
+
+/**
+ * What a failure keeps as its cause: the reason tag, description and error codes. Never the
+ * request itself, which carries the Authorization header.
+ */
+const safeCause = (reason: HttpClientError.HttpClientErrorReason) => ({
+  reason: reason._tag,
+  ...("description" in reason &&
+    reason.description !== undefined && {
+      description: reason.description,
+    }),
+  codes: causeCodes("cause" in reason ? reason.cause : undefined),
+});
 
 /**
  * A request that could not be built or connect never left; any other transport failure may
@@ -122,18 +143,19 @@ const failedBeforeConnect = (cause: unknown): boolean => {
  */
 export const classifyResendTransport = (error: HttpClientError.HttpClientError): SendError => {
   const reason = error.reason;
+  const cause = safeCause(reason);
   switch (reason._tag) {
     case "EncodeError":
     case "InvalidUrlError":
-      return new EmailNotAccepted({ cause: reason });
+      return new EmailNotAccepted({ cause });
     case "TransportError":
-      return failedBeforeConnect(reason.cause)
-        ? new EmailNotAccepted({ cause: reason })
-        : new EmailOutcomeUnknown({ cause: reason });
+      return cause.codes.some((code) => preConnectCodes.has(code))
+        ? new EmailNotAccepted({ cause })
+        : new EmailOutcomeUnknown({ cause });
     case "StatusCodeError":
       return classifyResendStatus(reason.response.status);
     default:
-      return new EmailOutcomeUnknown({ cause: reason });
+      return new EmailOutcomeUnknown({ cause });
   }
 };
 
@@ -142,7 +164,7 @@ const acceptedId = (
   response: HttpClientResponse.HttpClientResponse,
 ): Effect.Effect<string, EmailOutcomeUnknown> =>
   response.json.pipe(
-    Effect.mapError((cause) => new EmailOutcomeUnknown({ cause })),
+    Effect.mapError((error) => new EmailOutcomeUnknown({ cause: safeCause(error.reason) })),
     Effect.flatMap((body) =>
       typeof body === "object" &&
       body !== null &&
