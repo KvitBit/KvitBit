@@ -617,19 +617,38 @@ export interface ThemeState {
   readonly draft: Option.Option<ThemeDraft>                        // Appearance or Branding editor in progress (preview)
 }
 
+/** Typography and shape tokens per style; values are DESIGN.md "Selectable Styles". */
+export interface StyleTokens {
+  readonly font: {
+    readonly display: { readonly family: string; readonly weight: 600 }          // elegant "Erode", cozy "Chillax"
+    readonly body: { readonly family: string; readonly weights: readonly [400, 500, 600] } // elegant "Recia", cozy "Synonym"
+    readonly mono: { readonly family: "JetBrains Mono"; readonly weights: readonly [400, 500] }
+    readonly tabularNumerals: boolean                                             // elegant true (lnum, tnum on amounts); cozy false (lining by default)
+  }
+  readonly shape: {
+    readonly panel: number                                                        // px: elegant 4, cozy 12
+    readonly control: number                                                      // buttons, inputs, sheets: elegant 4, cozy 8
+    readonly badge: number                                                        // elegant 3, cozy 999 (pill)
+  }
+  readonly surface: "flat" | "tonal"                                              // elegant flat with 1px outlineVariant borders; cozy M3 tonal steps
+}
+export const StyleTokens: Record<ThemeStyle, StyleTokens>                         // constant in @kvitbit/ui-port/theme
+
 export interface EffectiveTheme {
   readonly scheme: "light" | "dark"
   readonly contrast: ThemeContrast
   readonly origin: "dynamic" | "account" | "workspace" | "default" | "draft"
   readonly roles: Record<M3ColorRole, Hex>
   readonly extended: ResolvedScheme["extended"]
+  readonly style: ThemeStyle                                                      // draft.style while Appearance previews, else preference.style
+  readonly tokens: StyleTokens                                                    // StyleTokens[style]
 }
 
 /** Pure. Adapters apply the result: CSS variables on web, a theme object on mobile. */
 export const effectiveTheme: (state: ThemeState) => EffectiveTheme
 ```
 
-`effectiveTheme` picks the source by precedence (a `draft` wins while an editor previews it), then the scheme (`mode`, falling back to `system.scheme` for `"system"`), then the contrast variant (`preference.contrast`, raised to at least `medium` when `system.highContrast`). It is a pure function, so first paint on both platforms is deterministic: web SSR computes it on the server from the account preferences and inlines the variables, and mobile computes it from the cached preferences before the first frame.
+`effectiveTheme` picks the source by precedence (a `draft` wins while an editor previews it), then the scheme (`mode`, falling back to `system.scheme` for `"system"`), then the contrast variant (`preference.contrast`, raised to at least `medium` when `system.highContrast`). Style is independent of the colour source: `style` is `draft.style` while the Appearance editor previews a draft, otherwise `preference.style` (default `"elegant"`); a Branding draft carries no style and never changes it, and Workspace branding has no style, so the share page and PDFs never follow a viewer's style. It is a pure function, so first paint on both platforms is deterministic: web SSR computes it on the server from the account preferences and inlines the variables, and mobile computes it from the cached preferences before the first frame.
 
 ### 4.3 Material Theme Builder JSON parser
 
@@ -711,11 +730,12 @@ Dynamic colour is read by the `SystemTheme` port on Android (`@pchmn/expo-materi
 | | Foldkit Web (`apps/web`) | Expo Mobile (`apps/mobile`, APK and PWA) |
 |---|---|---|
 | Roles | CSS custom properties `--md-sys-color-<role-kebab>` on `:root` (for example `--md-sys-color-surface-container-high`) | a `MaterialTheme` object (`colors.<role>`) in a React context, read by the M3 component kit and Kvitbit primitives |
-| Extended | `--inv-color-paid`, `--inv-color-on-paid`, `--inv-color-paid-container`, `--inv-color-on-paid-container`, same for `proforma`, `overdue`, `draft` | `extended.paid.color` etc. on the same object |
+| Extended | `--kb-color-paid`, `--kb-color-on-paid`, `--kb-color-paid-container`, `--kb-color-on-paid-container`, same for `proforma`, `overdue`, `draft` | `extended.paid.color` etc. on the same object |
 | Light, dark, system | SSR inlines both light and dark variable sets; `mode: "system"` uses `@media (prefers-color-scheme: dark)`, explicit modes set `data-theme` on `<html>`. No flash on load. | `Appearance` / `useColorScheme` feeds `SystemTheme`; the theme object switches without remount |
 | Contrast | `data-contrast="standard|medium|high"` selects the variable set; `prefers-contrast: more` raises to at least medium | the matching scheme variant |
 | Dynamic colour | not available | Android 12+ system roles plus `harmonizeExtended` |
 | Status badges | `BadgeVM.role` maps to role or extended variables | same mapping to the theme object |
+| Style | SSR sets `data-style="elegant\|cozy"` on `<html>` and inlines `--kb-font-display`, `--kb-font-body`, `--kb-font-mono`, `--kb-shape-panel`, `--kb-shape-control`, `--kb-shape-badge` from `EffectiveTheme.tokens`; only the active style's font files are preloaded, so a saved style paints on first load; a previewed style loads the other style's fonts and swaps the attribute and variables without reload | `fonts` and `roundness` on the theme object (and the M3 kit's `fonts` / `roundness`) from `EffectiveTheme.tokens`, fonts registered with `expo-font` before the first frame; a preview or save swaps the object without remount |
 
 WCAG 2.1 AA (PRODUCT.md) is checked in CI for every preset and for the default: `onX` against `X` and `onXContainer` against `XContainer` at 4.5:1 for text. A user-imported theme that fails contrast is accepted (it is their choice) but the Appearance screen shows a warning listing the failing pairs, computed in ui-port with a pure relative-luminance function.
 
@@ -1108,10 +1128,10 @@ export type ShareMsg =
 |---|---|
 | Presenters | `mcp.consent`, `invitation.landing` |
 | Routes | `McpConsent { consentId }`, `Invitation { token }` |
-| Model (consent) | `consent: Remote<ConsentView>` (client name, redirect host, `requestedAccess`, `requestedScopes`, Workspaces with `maxAccess` and `grantableScopes`), `workspace: Option<WorkspaceId>`, `scopes: ScopePickerState` (section 8.21, preselected from `requestedScopes`, capped by the chosen Workspace's `grantableScopes`), `decision: Submit` posting `Approve { workspace, grant: AccessRequest }` or `Deny` |
+| Model (consent) | `consent: Remote<ConsentView>` (client name, redirect host, `requestedAccess`, `requestedScopes`, Workspaces with `maxAccess`, `grantableScopes` and `offerableScopes`), `workspace: Option<WorkspaceId>`, `scopes: ScopePickerState` (section 8.21, `grantable` set to the chosen Workspace's `offerableScopes` = expanded `requestedScopes` ∩ `grantableScopes`; preselected with all of `offerableScopes`, in the requested preset mode when that preset's expansion fits, otherwise `custom`), `decision: Submit` posting `Approve { workspace, grant: AccessRequest }` or `Deny` |
 | Model (invitation) | `invitation: Remote<InvitationInfo>`, `sessionMatches: boolean` (signed-in email equals invited email) |
 | Commands | `GET/POST /api/v1/oauth/consents/{consentId}` then `ExternalLink.open(redirectTo)`; `GET /api/v1/invitations/{token}`, `POST /api/v1/invitations/{token}/accept` |
-| States | consent: not signed in routes to `SignIn { returnTo }`; no Workspace shows "Create a Workspace first"; accountant or read-only role limits the picker to the presets and areas in `grantableScopes` (the ten `<area>:read`); unknown redirect shows an error with no approve button (server refuses). Invitation: expired or revoked, already a member, different signed-in account ("Sign out and continue as x@y"), not signed in (sign up with the invitation prefilled, ALTCHA scope `invitation_accept`) |
+| States | consent: not signed in routes to `SignIn { returnTo }`; no Workspace shows "Create a Workspace first"; the picker never offers a scope the client did not request or the role cannot grant (presets whose expansion exceeds `offerableScopes` are disabled); an accountant keeps the requested subset of `<area>:read` scopes, with every `:write` checkbox disabled; a Workspace with empty `offerableScopes` shows "Your role here cannot grant what this app asks for" and disables approve; unknown redirect shows an error with no approve button (server refuses). Invitation: expired or revoked, already a member, different signed-in account ("Sign out and continue as x@y"), not signed in (sign up with the invitation prefilled, ALTCHA scope `invitation_accept`) |
 | Flows | 10.8, 2.5 |
 
 ### 8.6 Screen 06: App Shell, navigation and Workspace switcher
@@ -1231,7 +1251,7 @@ export type EditorMsg =
 |---|---|---|---|---|
 | `documents.detail` | `doc: Remote<DocumentView>`, `tab`, `pdf: PdfPreviewModel`, `payments: Remote<ReadonlyArray<PaymentView>>`; header badges, related documents, deliveries with bounce badge "Email bounced" and "Fix address and resend"; Lock toggle (optimistic), Unlock via `Confirm "document.unlock"` with `Reason` input; Duplicate | `GET ws/documents/{id}`, `PUT/DELETE ws/documents/{id}/lock`, `GET ws/payments?document=` | `document.read`, `document.lock`, `document.unlock` | 3.2 outcome, 3.5, 3.10, 8.6 |
 | `documents.issue` | validation summary for kind and regime, number preview (`Numbering.format` of the series' next counter), missing bank account warning, Confirm then issue; on success optional "Send now" | `POST ws/documents/{id}/issue` (Idempotency-Key) | `document.issue` | 3.2 |
-| `documents.send` | recipients (default Contact invoicing email), language, reminders toggle, purpose `document` or `reminder`, email copy preview (8.25) | `POST ws/documents/{id}/deliveries` (Idempotency-Key, AG-HTTP-ASKS) | `document.send` | 3.3, 7.4 |
+| `documents.send` | recipients (default Contact invoicing email), language, reminders toggle (default from `previewSend` `armsReminders`, i.e. the effective policy Document → Contact → Workspace; sending the untouched default omits `reminders`), purpose `document` or `reminder`, email copy preview (8.25) | `POST ws/documents/{id}/deliveries` (Idempotency-Key, AG-HTTP-ASKS) | `document.send` | 3.3, 7.4 |
 | `documents.payment` | amount (defaults to amount due), currency fixed to the document's (P1), date, method; shows the resulting settlement; for a `vat_payer` Proforma shows the PTD split from `VatMath.splitAdvance` and "A Payment Tax Document will be issued"; payment list with Remove (`Confirm` with `Reason`) | `POST ws/payments` (Idempotency-Key), `DELETE ws/payments/{id}` | `payment.write` | 7.1, 7.2 |
 | `documents.settlement` | Proforma settlement: payment state, issued PTDs, "Issue Final Invoice" with the deduction preview, optional patch | `POST ws/documents/{id}/final-invoice` (Idempotency-Key) | `document.finalInvoice` | 3.8 |
 | `documents.creditNote` | full or partial, required reason, line picker with quantities or unit prices, inherits original FX and VAT rate (Q5), totals via `VatMath` with negated lines, `credit_note.exceeds_original` | `POST ws/documents/{id}/credit-notes` (Idempotency-Key) | `document.correct` | 3.9 |
@@ -1302,7 +1322,7 @@ export interface ContactDefaults {                                       // ever
 }
 ```
 
-Each field in the "Billing defaults" section has a "Use Workspace default" state that clears the field and shows the Workspace value as a hint. `reminderPolicy` is a three-way choice (`inherit`, `disabled`, `custom`); `custom` reveals a day-offset list with the same editor as `settings.reminders`. `documents.editor` prefills currency, language, due date, series and note along `Document → Contact → Workspace` when a Contact is picked and leaves the server to apply the same fallback on save; a value the Member typed on the Document always wins.
+Each field in the "Billing defaults" section has a "Use Workspace default" state that clears the field and shows the Workspace value as a hint. `reminderPolicy` is a three-way choice (`inherit`, `disabled`, `custom`); `custom` reveals a day-offset list with the same editor as `settings.reminders`. `documents.editor` prefills currency, language, due date, payment method, series and note along `Document → Contact → Workspace` when a Contact is picked (series from `preferredSeriesByKind[kind]`, which may name any subset of kinds; a missing kind uses the Workspace default series), sends a changed payment method as `DocumentInput.paymentMethod` / `DocumentPatch.paymentMethod`, and leaves the server to apply the same fallback on save; a value the Member typed on the Document always wins.
 
 ### 8.16 Screen 16: Price List
 
@@ -1366,7 +1386,7 @@ API Key creation and MCP consent (screen 05) share one scope picker over the ten
 export interface ScopePickerState {
   readonly mode: AccessMode                      // "read" | "read_write" | "custom"; presets are quick picks
   readonly selected: ReadonlySet<Scope>          // used when mode is "custom"; checking <area>:write also checks <area>:read
-  readonly grantable: ReadonlySet<Scope>         // role cap (API Keys: creator's role; consent: Workspace grantableScopes)
+  readonly grantable: ReadonlySet<Scope>         // ceiling (API Keys: creator's role cap; consent: the Workspace's offerableScopes = request ∩ role cap)
 }
 /** Pure. Presets map to { access }; custom maps to { access: "custom", scopes }, None while empty (submit disabled).
  *  Scopes outside grantable cannot be checked; the server still answers Forbidden{grant.create} or Invalid if they arrive. */
@@ -1382,7 +1402,7 @@ The API key secret is held only in the dialog Model and is not encoded into any 
 | Presenter | Model and behaviour | Commands | Flows |
 |---|---|---|---|
 | `account.profile` | name, UI language (cs, en), email change (verification sent to the new address) | `auth/update-user`, `PATCH /api/v1/me/preferences { locale }`, `auth/change-email` | 1.8 |
-| `account.appearance` | theme mode, contrast, dynamic colour switch (Android only), source picker: presets grid, seed colour field with live preview, Material Theme Builder file import with parse result, warnings and contrast check; "Follow Workspace theme" (source null) | `GET/PATCH /api/v1/me/preferences` (If-Match), `POST /api/v1/themes/resolve` (debounced 300 ms) | 1.8 (theme requirement) |
+| `account.appearance` | theme mode, style (segmented control "Elegant" / "Cozy" with a sample card, button and badge per option; picking one sets `draft.style` and previews immediately through `effectiveTheme`; Save sends the full `theme` preference, including `style`, in the preferences PATCH), contrast, dynamic colour switch (Android only), source picker: presets grid, seed colour field with live preview, Material Theme Builder file import with parse result, warnings and contrast check; "Follow Workspace theme" (source null) | `GET/PATCH /api/v1/me/preferences` (If-Match), `POST /api/v1/themes/resolve` (debounced 300 ms) | 1.8 (theme requirement) |
 | `account.security` | passkeys list (add with name, rename, remove; removing the last sign-in method is blocked), change password with "sign out other sessions", sessions list with revoke | `AuthClient.passkey*`, `changePassword`, `sessions`, `revokeSession` | 1.5 (add), 1.8 |
 | `account.danger` | delete account (soft delete, Q7) with `TypeToConfirm`; blocked while the user is the only owner of a Workspace, with links to transfer or close | `auth/delete-user` | 1.9 |
 

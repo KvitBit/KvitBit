@@ -7,7 +7,7 @@ Terms follow [CONTEXT.md](../../CONTEXT.md) exactly. Two terms used here are not
 - Final Invoice. An Invoice issued after a Proforma that deducts the deposit already paid.
 - EPC QR. The European Payments Council SEPA credit transfer QR code, used on EUR documents. QR Platba covers CZK only, because the Czech standard v1.2 permits CZK only.
 
-Inputs: [ADR 0001](../adr/0001-foldkit-web-adapter.md), [ADR 0002](../adr/0002-altcha-pow-bot-protection.md), [ADR 0003](../adr/0003-alchemy-gcp-neon-cluster-and-nix-self-hosting.md), [Czech invoicing specs](../research/czech-invoicing-specs.md), and the command catalogue in [core-ports-opt-3.md](core-ports-opt-3.md).
+Inputs: [ADR 0001](../adr/0001-foldkit-web-adapter.md), [ADR 0002](../adr/0002-altcha-pow-bot-protection.md), [ADR 0003](../adr/0003-alchemy-gcp-neon-cluster-and-nix-self-hosting.md), [Czech invoicing specs](../research/czech-invoicing-specs.md), and the consolidated command catalogue in [core-ports.md section 4](core-ports.md#4-domain-modules).
 
 ## 1. Shared rules every flow assumes
 

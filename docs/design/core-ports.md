@@ -76,6 +76,8 @@ export const Role = Schema.Literals(["owner", "admin", "member", "accountant"])
 export const TaxRegime = Schema.Literals(["non_vat_payer", "vat_payer", "identified_person"])
 export const Locale = Schema.Literals(["cs", "en"])
 export const DocumentKind = Schema.Literals(["invoice", "proforma", "payment_tax_document", "credit_note"])
+/** How the buyer is asked to pay; printed on the document and used as the default Payment method. */
+export const PaymentMethod = Schema.Literals(["bank_transfer", "cash", "card", "other"])
 export const CurrencyCode = Schema.String.pipe(Schema.pattern(/^[A-Z]{3}$/), Schema.brand("CurrencyCode"))
 /** Calendar date in Europe/Prague, YYYY-MM-DD. */
 export const IsoDate = Schema.String.pipe(Schema.pattern(/^\d{4}-\d{2}-\d{2}$/), Schema.brand("IsoDate"))
@@ -599,7 +601,27 @@ export class Contacts extends Context.Service<Contacts, {
 
 Invariants: IČO is unique per Workspace among active Contacts (`Conflict{duplicate}`). The mod-11 checksum runs before any registry call. Registry results are cached 24 hours per IČO and never fanned out in parallel. VAT-payer status is never inferred from the presence of a DIČ. Contacts referenced by documents are archived, never deleted; issued documents keep their frozen party snapshot.
 
-Per-Contact billing overrides (`ContactInput.defaults`, all optional, falling back along `Document → Contact → Workspace`): `currency`, `language`, `dueDays`, `paymentMethod`, `preferredSeriesByKind` (optional map of `DocumentKind → NumberingSeriesId`), `defaultNote`, and `reminderPolicy` (`{ mode: "inherit" } | { mode: "disabled" } | { mode: "custom", offsetsDays: ReadonlyArray<number> }`).
+Per-Contact billing overrides (`ContactInput.defaults`, all optional, falling back along `Document → Contact → Workspace`). This is the source-of-truth schema; http-mcp-contracts section 3.5 and ui-port-contracts section 8.15 mirror it:
+
+```ts
+export const ReminderPolicy = Schema.Union([
+  Schema.Struct({ mode: Schema.Literal("inherit") }),                 // follow the Workspace reminder schedule
+  Schema.Struct({ mode: Schema.Literal("disabled") }),                // no automatic reminders for this Contact
+  Schema.Struct({ mode: Schema.Literal("custom"), offsetsDays: Schema.Array(Schema.Int) }), // days after due
+])
+export const ContactDefaults = Schema.Struct({
+  currency: Schema.optional(CurrencyCode),
+  language: Schema.optional(Locale),
+  dueDays: Schema.optional(Schema.Int),
+  paymentMethod: Schema.optional(PaymentMethod),
+  /** Partial map: any subset of kinds, including none. A kind left out uses the Workspace default series. */
+  preferredSeriesByKind: Schema.optional(Schema.Record(DocumentKind, Schema.optionalKey(NumberingSeriesId))),
+  defaultNote: Schema.optional(Schema.String),
+  reminderPolicy: Schema.optional(ReminderPolicy),                    // absent behaves as { mode: "inherit" }
+})
+```
+
+Each `DocumentInput` field that the Contact can override (`currency`, `language`, `due` from `dueDays`, `paymentMethod`, `series` from `preferredSeriesByKind[kind]`, `note` from `defaultNote`) resolves `Document → Contact → Workspace` in `createDraft`, `issue` from input and `preview`: a value on the Document wins, then the Contact's, then the Workspace default. `reminderPolicy` resolves when reminders are armed (rule D16).
 Audit: `save` and `archive`.
 
 ### 4.3 `PriceList`
@@ -641,6 +663,7 @@ export const DocumentInput = Schema.Struct({
   variableSymbol: Schema.optional(Schema.String),    // default: digits of the number
   orderNumber: Schema.optional(Schema.String),
   note: Schema.optional(Schema.String),           // default: Contact → Workspace
+  paymentMethod: Schema.optional(PaymentMethod),  // default: Contact → Workspace
   fx: Schema.optional(FxOverride),                // default: CNB fixing (rule D11); non-CZK only
 })
 
@@ -649,7 +672,7 @@ export const DocumentPatch = Schema.Struct({
   contact: Schema.optional(ContactId),
   lines: Schema.optional(Schema.NonEmptyArray(LineInput)),
   // currency, issuedOn, taxableSupplyOn, due, language, series (drafts only), bankAccount,
-  // pricesIncludeVat, variableSymbol, orderNumber, note: as in DocumentInput, all optional
+  // pricesIncludeVat, variableSymbol, orderNumber, note, paymentMethod: as in DocumentInput, all optional
   fx: Schema.optional(Schema.NullOr(FxOverride)),// null returns to the CNB fixing (rule D11)
   number: Schema.optional(Schema.String),         // issued only; owner/admin; unique (rule D4)
   refreshParties: Schema.optional(Schema.Boolean),// re-snapshot Contact and Issuing Entity (rule D10)
@@ -668,6 +691,7 @@ export interface DocumentView {
   readonly contact: ContactSnapshot                // buyer particulars as printed
   readonly issuer: IssuerSnapshot                  // Issuing Entity particulars, §435 register entry, bank account
   readonly dates: { readonly issuedOn: IsoDate; readonly taxableSupplyOn: IsoDate | null; readonly dueOn: IsoDate }
+  readonly paymentMethod: PaymentMethod             // resolved Document → Contact → Workspace
   readonly lines: ReadonlyArray<LineView>          // resolved VatTreatment and rate %
   readonly totals: VatBreakdown                    // from VatMath, section 5.1
   readonly fx: null | { readonly rate: BigDecimal.BigDecimal; readonly quantity: number; readonly fixingDate: IsoDate | null /* null for manual */; readonly source: "cnb" | "manual" }
@@ -740,7 +764,7 @@ export const DeliveryPurpose = Schema.Literals(["document", "reminder"])
 export interface SendOptions {
   readonly to?: ReadonlyArray<string>     // default: Contact invoicing email
   readonly language?: Locale
-  readonly reminders?: boolean            // default: Workspace reminder policy; ignored for purpose "reminder"
+  readonly reminders?: boolean            // default: effective reminder policy (rule D16); ignored for purpose "reminder"
   readonly purpose?: DeliveryPurpose      // default "document"
 }
 export interface SendPreview {
@@ -797,6 +821,7 @@ Invariants:
 - D13. **Ordering.** `send`, `share`, `lock`, `cancel`, `correct` and `issueFinalInvoice` on a draft fail with `Conflict{illegal_transition}`. `send` may repeat; each call creates a new delivery.
 - D14. **Manual reminder.** `send` with `purpose: "reminder"` needs an issued Invoice or Proforma that is not cancelled and not settled (`Conflict{illegal_transition}`, detail `reminder.document_settled`). It uses the reminder email template, ignores `reminders`, and never bumps `reminder_epoch`, so the automatic schedule is unchanged. Deliveries record their purpose.
 - D15. **Dry runs.** `preview`, `previewSend`, `previewFinalInvoice` and `previewCorrection` run the policy check of the real operation and the same validation code, then roll back: no number, no delivery, no audit, no request-log row. Their results may differ from the real call if state changes in between; the real call re-validates everything, and MCP passes the revision it previewed as `expectedRevision`.
+- D16. **Effective reminder policy.** When `send` with `purpose: "document"` arms reminders (and when a due date change or turning reminders back on re-arms them), core resolves the policy `Document → Contact → Workspace`: (1) `SendOptions.reminders: false` arms nothing; (2) otherwise the Contact's `reminderPolicy` applies: `disabled` arms nothing unless the send passed `reminders: true`, `custom` uses its `offsetsDays`; (3) `inherit` or absent uses the Workspace reminder policy (its enabled flag, its Proforma setting and its offsets). An explicit `reminders: true` with a Contact on `disabled` or `inherit` uses the Workspace offsets. Arming stores the outcome on the document (`documents.reminders_on`) and puts the resolved offsets in the `PaymentReminders` payload (section 7.2). Pending steps re-check `reminders_on`, so turning reminders off on the document stops them; later changes to the Contact's `reminderPolicy` or the Workspace schedule apply from the next arm or re-arm. `SendPreview.armsReminders` reports this resolution, and the send dialog uses it as the default of its reminders toggle.
 
 Idempotency: `createDraft`, `issue`, `cancel`, `correct`, `issueFinalInvoice` and `send` take `requestKey` (rule C3). An agent that retries `issue` never gets a second numbered Invoice. Without a `requestKey`, issuing a document that is already issued fails with `Conflict{illegal_transition}`, so a blind retry from a draft still cannot allocate a second number.
 Audit: everything on issued documents (issue, edit with diff, number override, lock, unlock with reason, cancel, correct, final invoice, send, share create and revoke). Drafts audit only create, discard and issue.
@@ -1305,19 +1330,22 @@ export const DocumentDelivery = Workflow.make("kvitbit/DocumentDelivery", {
 
 /** Payment reminders for one issued Invoice or Proforma and one reminder epoch. */
 export const PaymentReminders = Workflow.make("kvitbit/PaymentReminders", {
-  payload: { workspaceId: WorkspaceId, documentId: DocumentId, epoch: Schema.Int, dueOn: IsoDate },
+  payload: { workspaceId: WorkspaceId, documentId: DocumentId, epoch: Schema.Int, dueOn: IsoDate,
+             offsetsDays: Schema.Array(Schema.Int) },  // effective policy offsets resolved at arm time (rule D16)
   idempotencyKey: ({ documentId, epoch }) => `${documentId}:${epoch}`,
 })
 // documents.reminder_epoch is a counter bumped in the same transaction as any change that
 // re-arms reminders: the first send with reminders on, a due date change, or reminders turned
 // back on. A key built from the due date would collide when a date changes A → B → A, because
 // the execution id derives from the key (effect/workflow/Workflow.ts:345); the epoch never repeats.
-// For each step i of the Workspace reminder policy (e.g. due + 3 days, due + 14 days):
+// For each step i of payload.offsetsDays, the effective policy resolved Document → Contact →
+// Workspace when the epoch was armed (rule D16; e.g. Contact custom [7, 21], else Workspace [3, 14]):
 //   DurableClock.sleep({ name: `step-${i}`, duration: untilPrague(dueOn + offset_i) })
 //   Activity "enqueue-${i}": one transaction that inserts the delivery
 //     (id = uuidv5(`${documentId}:${epoch}:${i}`), snapshot as in J3) only if
 //     reminder_epoch = payload.epoch AND the document is unpaid, uncredited, not cancelled
-//     and reminders are on; ON CONFLICT DO NOTHING. No row inserted and none existing → end.
+//     and documents.reminders_on (set from the effective policy at arm time, rule D16);
+//     ON CONFLICT DO NOTHING. No row inserted and none existing → end.
 //   Then execute DocumentDelivery with that id (its "claim" re-checks eligibility).
 
 /** One occurrence of a Recurring Schedule. */

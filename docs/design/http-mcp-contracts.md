@@ -105,7 +105,7 @@ export const AccessRequest = Schema.Union([
 export const GrantedAccess = Schema.Struct({ access: AccessMode, scopes: Schema.Array(Scope) })
 ```
 
-Available scopes are capped at creation/consent by the creator's role (e.g. an `accountant` can only grant `<area>:read`, and only `owner` or `admin` can create API Keys at all). That cap is a convenience; core rule R1 enforces role ∩ scopes on every call regardless.
+Available scopes are capped at creation/consent by the creator's role (e.g. an `accountant` can only grant `<area>:read`, and only `owner` or `admin` can create API Keys at all). MCP consent is further capped by the client's request: the grant is a subset of `requestedScopes ∩ grantableScopes` (section 3.5.2). That cap is a convenience; core rule R1 enforces role ∩ scopes on every call regardless.
 
 ### 2.3 Middleware and Caller construction
 
@@ -597,6 +597,7 @@ export const ConsentView = Schema.Struct({
     id: WorkspaceId, name: Schema.String, role: Role,
     maxAccess: Schema.Literals(["read", "read_write"]), // accountant: read
     grantableScopes: Schema.Array(Scope),               // role cap per area; accountant: the ten <area>:read
+    offerableScopes: Schema.Array(Scope),               // requestedScopes ∩ grantableScopes; the picker's ceiling
   })),
 })
 export const ConsentDecision = Schema.Union([
@@ -625,7 +626,8 @@ export class ThemesGroup extends HttpApiGroup.make("themes")
 Consent rules (flow 10.8):
 
 - `getConsent` answers `NotFound` for an unknown, expired or already decided consent id, and for a client whose redirect URI did not match its registration (P16 shows an error and no approve button).
-- `decide` with `Approve` re-checks membership through `Workspaces.enter`, expands `grant` (section 2.2) and rejects any scope outside `grantableScopes` (`Forbidden{action: "grant.create"}`), stores the grant `(clientId, userId, workspaceId, access, scopes)`, and returns the redirect with the authorization code. `Deny` returns the redirect with `error=access_denied` and stores nothing.
+- The consent ceiling for a Workspace is `offerableScopes = requestedScopes ∩ grantableScopes`, both expanded (section 2.2). The user may keep or narrow the request, never widen it: a preset is offered only when its expansion fits inside `offerableScopes`, and otherwise the picker opens in `custom` mode preselected with `offerableScopes`. An accountant keeps whatever read subset the client asked for (a request for `kvitbit:<area>:read` on two areas stays two areas); only `:write` scopes are dropped by the role cap. A Workspace whose `offerableScopes` is empty is listed but cannot be approved.
+- `decide` with `Approve` re-checks membership through `Workspaces.enter`, expands `grant` (section 2.2), recomputes `offerableScopes` from the stored request and the current role, and rejects an empty expansion or any scope outside it (`Forbidden{action: "grant.create"}`), so the grant never exceeds what the client requested or what the role may grant. It then stores the grant `(clientId, userId, workspaceId, access, scopes)`, and returns the redirect with the authorization code. `Deny` returns the redirect with `error=access_denied` and stores nothing.
 - A Member of no Workspace gets `workspaces: []`; P16 tells them to create one first.
 
 Material 3 theme (agreement AG-HTTP-THEME, user requirement for custom palettes):
@@ -936,7 +938,7 @@ const CoreErrors = [NotFound.schema, Forbidden.schema, Invalid.schema, Conflict.
 export const SendInput = Schema.Struct({
   to: Schema.optional(Schema.Array(Schema.String)),
   language: Schema.optional(Locale),
-  reminders: Schema.optional(Schema.Boolean),
+  reminders: Schema.optional(Schema.Boolean),  // absent: effective policy Document → Contact → Workspace (core rule D16)
   purpose: Schema.optional(Schema.Literals(["document", "reminder"])), // G11; default "document"
 })
 export const PdfQuery = {
@@ -1112,21 +1114,22 @@ Domain group notes:
 - `documents.edit` on a document with recorded payments whose new total falls below them succeeds with a warning (decision Q3); the warning travels in the view as core decides (C4), not as an HTTP header.
 - `payments.record` is used for Proforma settlement (flow 3.8): when it auto-issues a Payment Tax Document, `issued` carries it and the response is still 201.
 - `reports.dashboard` is a separate path so the closed `ReportKind` union stays closed; it calls `Reports.dashboard` (G6, resolved).
-- Per-Contact billing overrides (core-ports section 4.2, screen 19) travel as `ContactInput.defaults` on `contacts.create` / `contacts.update` and come back on `ContactView.defaults`. The edge re-exports core's schema unchanged; it is shown here for reference. Every field is optional; an absent field falls back along `Document → Contact → Workspace`. `documents.createDraft`, `documents.issueFromInput` and the MCP `create_draft` / `issue_document` tools apply the fallback in core when the matching `DocumentInput` field (`currency`, `language`, `due`, `series`, `note`) is omitted.
+- Per-Contact billing overrides (core-ports section 4.2, screen 19) travel as `ContactInput.defaults` on `contacts.create` / `contacts.update` and come back on `ContactView.defaults`. The edge re-exports core's schema unchanged; it is shown here for reference. Every field is optional; an absent field falls back along `Document → Contact → Workspace`. `documents.createDraft`, `documents.issueFromInput` and the MCP `create_draft` / `issue_document` tools apply the fallback in core when the matching `DocumentInput` field (`currency`, `language`, `due`, `series`, `note`, `paymentMethod`) is omitted; a value sent on the Document always wins over the Contact's, and the Contact's over the Workspace default. `DocumentPatch` carries the same fields, so `documents.edit` and MCP `update_draft` can override `paymentMethod` on one Document, and `DocumentView.paymentMethod` returns the resolved value. `reminderPolicy` is applied when `documents.send` arms reminders and `SendInput.reminders` is absent (core rule D16).
 
 ```ts
 // re-exported from @kvitbit/core/contract (core-ports section 4.2); field names and types are core's
 const ReminderPolicy = Schema.Union([
   Schema.Struct({ mode: Schema.Literal("inherit") }),                 // follow the Workspace reminder schedule
   Schema.Struct({ mode: Schema.Literal("disabled") }),                // no automatic reminders for this Contact
-  Schema.Struct({ mode: Schema.Literal("custom"), offsetsDays: Schema.Array(Schema.Number) }),
+  Schema.Struct({ mode: Schema.Literal("custom"), offsetsDays: Schema.Array(Schema.Int) }), // days after due
 ])
 const ContactDefaults = Schema.Struct({
   currency: Schema.optional(CurrencyCode),
   language: Schema.optional(Locale),
   dueDays: Schema.optional(Schema.Int),
   paymentMethod: Schema.optional(PaymentMethod),
-  preferredSeriesByKind: Schema.optional(Schema.Record(DocumentKind, NumberingSeriesId)), // partial map
+  // partial map: any subset of kinds, including {}; each kind is an optional key
+  preferredSeriesByKind: Schema.optional(Schema.Record(DocumentKind, Schema.optionalKey(NumberingSeriesId))),
   defaultNote: Schema.optional(Schema.String),
   reminderPolicy: Schema.optional(ReminderPolicy),                    // absent behaves as { mode: "inherit" }
 })
@@ -1274,9 +1277,9 @@ Publishing updates and releases is a CI job with operator credentials writing to
 | `kvitbit:<area>:read`, `kvitbit:<area>:write` | "Custom", one checkbox per area and level | exactly `<area>:read` / `<area>:write` (write adds read); `<area>` is any of the ten `ScopeArea`s |
 | `offline_access` | "Stay connected" | none (refresh token only) |
 
-A client may request the presets or per-area scopes. On P16 the user can keep the request or narrow it to a custom per-area selection within `grantableScopes`; the token response `scope` then lists `kvitbit:read` or `kvitbit:write` for a preset grant and the per-area `kvitbit:<area>:<level>` strings for a custom one. `scopes_supported` lists the two presets, all twenty per-area scopes and `offline_access`.
+A client may request the presets or per-area scopes. On P16 the user can keep the request or narrow it to a custom per-area selection within `offerableScopes` (the expanded request ∩ `grantableScopes`, section 3.5.2), never widen it; the token response `scope` then lists `kvitbit:read` or `kvitbit:write` for a preset grant and the per-area `kvitbit:<area>:<level>` strings for a custom one. `scopes_supported` lists the two presets, all twenty per-area scopes and `offline_access`.
 
-A grant is `(grantId, clientId, clientName, userId, workspaceId, access, scopes, createdAt, lastUsedAt)`, with `access: AccessMode` and `scopes` the expanded `Scope[]` (section 2.2). One grant covers one client, one Member and one Workspace (flow 10.8). Consent caps `access` by role: an `accountant` sees only "Read only". A client that wants another Workspace runs the authorization flow again and gets a second grant.
+A grant is `(grantId, clientId, clientName, userId, workspaceId, access, scopes, createdAt, lastUsedAt)`, with `access: AccessMode` and `scopes` the expanded `Scope[]` (section 2.2). One grant covers one client, one Member and one Workspace (flow 10.8). Consent caps the grant by both the request and the role: an `accountant` can approve only `<area>:read` scopes the client asked for, as the `read` preset when the client asked for all ten reads (or `kvitbit:write`) and as the requested subset otherwise. A client that wants another Workspace runs the authorization flow again and gets a second grant.
 
 ### 6.4 Caller per request
 
@@ -1465,8 +1468,8 @@ The token is a capability for one exact action, held by the agent. The safety co
 
 An `accountant`, or any Member on a `read` grant, can never write through MCP. Four independent layers hold that:
 
-1. Consent caps access: accountants are offered "Read only" only, and `decide` rejects a higher `access` (section 3.5.2).
-2. The grant's scopes are the ten `<area>:read` scopes, and the token carries no `kvitbit:write`.
+1. Consent caps access: an accountant's `offerableScopes` holds only `<area>:read` scopes, and `decide` rejects any expanded scope outside it (section 3.5.2).
+2. The grant's scopes are a subset of the ten `<area>:read` scopes (the requested subset, or all ten for the `read` preset), and the token carries no `kvitbit:write` and no `kvitbit:<area>:write`.
 3. `tools/list` returns only tools for which `can(caller, action)` holds for every action the tool can need, so write tools are not even offered. A call to an unlisted tool still runs step 4 and gets the Forbidden text above.
 4. Core enforces role ∩ scopes inside every method (rule R1), whatever the adapter does. Demoting a Member to `accountant` takes effect on the next request without touching tokens.
 
