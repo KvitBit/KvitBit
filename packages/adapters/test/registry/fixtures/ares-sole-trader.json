@@ -1,0 +1,32 @@
+{
+  "ico": "10079190",
+  "obchodniJmeno": "Jana Ukázková",
+  "sidlo": {
+    "kodStatu": "CZ",
+    "nazevStatu": "Česká republika",
+    "kodKraje": 116,
+    "nazevKraje": "Jihomoravský kraj",
+    "kodObce": 582786,
+    "nazevObce": "Brno",
+    "nazevMestskeCastiObvodu": "Brno-střed",
+    "cisloDomovni": 12,
+    "nazevCastiObce": "Staré Brno",
+    "psc": 60200,
+    "nazevUlice": "Masarykova",
+    "textovaAdresa": "Masarykova 12, Staré Brno, 60200 Brno",
+    "standardizaceAdresy": true,
+    "typCisloDomovni": 1
+  },
+  "pravniForma": "101",
+  "datumVzniku": "2019-01-15",
+  "datumAktualizace": "2026-09-01",
+  "icoId": "10079190",
+  "seznamRegistraci": {
+    "stavZdrojeRes": "AKTIVNI",
+    "stavZdrojeRzp": "AKTIVNI",
+    "stavZdrojeDph": "NEEXISTUJICI"
+  },
+  "primarniZdroj": "rzp",
+  "dalsiUdaje": [{ "datovyZdroj": "res", "pravniForma": "101" }],
+  "czNace": ["74100"]
+}
