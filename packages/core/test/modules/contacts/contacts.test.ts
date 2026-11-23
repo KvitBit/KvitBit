@@ -735,7 +735,7 @@ describe("Contacts.search paging edges", () => {
     }
   });
 
-  test("a cursor whose anchor row was renamed is stale: Invalid{page.cursor_mismatch}", async () => {
+  test("a cursor whose anchor row changed is stale: Invalid{page.cursor_mismatch}", async () => {
     const exit = await run(
       owner,
       Effect.gen(function* () {
@@ -744,14 +744,27 @@ describe("Contacts.search paging edges", () => {
         const first = yield* contacts.search({ limit: 2 });
         const anchor = first.items[1];
         if (anchor === undefined || first.nextCursor === null) return yield* Effect.die("setup");
+        // Any write to the anchor invalidates the cursor: a rename, and an edit that keeps the name.
         yield* contacts.save(contactInput({ id: anchor.id, expectedRevision: 1, name: "ZZ" }));
-        return yield* Effect.flip(contacts.search({ limit: 2, cursor: first.nextCursor }));
+        const renamed = yield* Effect.flip(contacts.search({ limit: 2, cursor: first.nextCursor }));
+        const again = yield* contacts.search({ limit: 2 });
+        if (again.nextCursor === null) return yield* Effect.die("setup");
+        const anchor2 = again.items[1];
+        if (anchor2 === undefined) return yield* Effect.die("setup");
+        yield* contacts.save(
+          contactInput({ id: anchor2.id, expectedRevision: anchor2.revision, note: "x" }),
+        );
+        const touched = yield* Effect.flip(contacts.search({ limit: 2, cursor: again.nextCursor }));
+        return { renamed, touched };
       }),
     );
-    expect(successOf(exit)).toMatchObject({
-      _tag: "Invalid",
-      issues: [{ path: ["cursor"], code: "page.cursor_mismatch" }],
-    });
+    const { renamed, touched } = successOf(exit);
+    for (const error of [renamed, touched]) {
+      expect(error).toMatchObject({
+        _tag: "Invalid",
+        issues: [{ path: ["cursor"], code: "page.cursor_mismatch" }],
+      });
+    }
   });
 });
 
@@ -789,10 +802,26 @@ describe("Contact preferred series", () => {
             }),
           ),
         );
-        return { failures, ok, edit };
+        yield* contacts.save(contactInput({ id: ok.id, expectedRevision: 1, note: "rev 2" }));
+        // Stale revision wins over the series rule (C2): checked first.
+        const staleWithBadSeries = yield* Effect.flip(
+          contacts.save(
+            contactInput({
+              id: ok.id,
+              expectedRevision: 1,
+              defaults: { preferredSeriesByKind: { invoice: unknown } },
+            }),
+          ),
+        );
+        return { failures, ok, edit, staleWithBadSeries };
       }),
     );
-    const { failures, ok, edit } = successOf(exit);
+    const { failures, ok, edit, staleWithBadSeries } = successOf(exit);
+    expect(staleWithBadSeries).toMatchObject({
+      _tag: "Conflict",
+      reason: "revision_changed",
+      currentRevision: 2,
+    });
     expect(failures.unknown).toMatchObject({
       _tag: "NotFound",
       entity: "NumberingSeries",

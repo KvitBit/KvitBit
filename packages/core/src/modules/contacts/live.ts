@@ -165,28 +165,24 @@ const sameContent = (a: ContactRow, b: ContactRow): boolean => {
   return canonicalJson(strip(a)) === canonicalJson(strip(b));
 };
 
-// Search cursors: `<filter hash>.<name hash>.<id of the last row>`, opaque, bound to the filter
-// they came from (http-mcp-contracts 362) and short whatever the names are (HTTP caps cursors at
-// 512). The keyset boundary is the anchor row's (name, id); a renamed anchor would move it, so
-// the name hash detects that and the cursor is then stale (`page.cursor_mismatch`, which
-// ui-port treats as "reload from the first page").
-
-const shortHash = (value: unknown, length: number) =>
-  Effect.map(sha256Hex(canonicalJson(value)), (hex) => hex.slice(0, length));
+// Search cursors: `<filter hash>.<anchor revision>.<id of the last row>`, opaque, bound to the
+// filter they came from (http-mcp-contracts 362) and short whatever the names are (HTTP caps
+// cursors at 512). The keyset boundary is the anchor row's (name, id); any write to the anchor
+// bumps its revision and may move it, so a changed revision makes the cursor stale
+// (`page.cursor_mismatch`, which ui-port treats as "reload from the first page").
 
 const filterHash = (text: string, role: ContactRole | undefined) =>
-  shortHash([text, role ?? null], 16);
+  Effect.map(sha256Hex(canonicalJson([text, role ?? null])), (hex) => hex.slice(0, 16));
 
-const makeCursor = (filter: string, last: ContactRow) =>
-  Effect.map(shortHash(last.name, 8), (name) => `${filter}.${name}.${last.id}`);
+const makeCursor = (filter: string, last: ContactRow) => `${filter}.${last.revision}.${last.id}`;
 
 const parseCursor = (
   cursor: string,
-): { readonly f: string; readonly n: string; readonly i: string } | null => {
-  const match = /^([0-9a-f]{16})\.([0-9a-f]{8})\.([0-9a-f-]{36})$/.exec(cursor);
+): { readonly f: string; readonly r: number; readonly i: string } | null => {
+  const match = /^([0-9a-f]{16})\.([1-9][0-9]{0,15})\.([0-9a-f-]{36})$/.exec(cursor);
   return match?.[1] === undefined || match[2] === undefined || match[3] === undefined
     ? null
-    : { f: match[1], n: match[2], i: match[3] };
+    : { f: match[1], r: Number(match[2]), i: match[3] };
 };
 
 export const makeContacts: Effect.Effect<
@@ -276,6 +272,7 @@ export const makeContacts: Effect.Effect<
         createdAt: now,
         updatedAt: now,
       };
+      yield* checkSeries(workspaceId, fields);
       yield* ensureIcoFree(row);
       const inserted = yield* repo
         .insert(row)
@@ -300,6 +297,8 @@ export const makeContacts: Effect.Effect<
               ),
             )
           : yield* repo.getForUpdate(workspaceId, id, expectedRevision);
+      // Series are a state-dependent rule: checked after the revision (C2).
+      yield* checkSeries(workspaceId, fields);
       const next = applyFields(current, fields, yield* nowIso);
       if (sameContent(current, next)) return current;
       yield* ensureIcoFree(next);
@@ -440,7 +439,6 @@ export const makeContacts: Effect.Effect<
             result: ContactViewSchema,
           },
           Effect.gen(function* () {
-            yield* checkSeries(workspaceId, fields);
             const saved =
               id === undefined
                 ? yield* create(workspaceId, fields)
@@ -492,7 +490,7 @@ export const makeContacts: Effect.Effect<
           const last = yield* repo
             .get(workspaceId, cursor.i as ContactId)
             .pipe(Effect.catchTag("NotFound", () => Effect.fail(mismatch)));
-          if ((yield* shortHash(last.name, 8)) !== cursor.n) return yield* mismatch;
+          if (last.revision !== cursor.r) return yield* mismatch;
           after = [last.name, last.id];
         }
         const rows = yield* repo.search(workspaceId, {
@@ -505,8 +503,7 @@ export const makeContacts: Effect.Effect<
         const last = page.at(-1);
         return {
           items: page.map(toContactView),
-          nextCursor:
-            rows.length > limit && last !== undefined ? yield* makeCursor(filter, last) : null,
+          nextCursor: rows.length > limit && last !== undefined ? makeCursor(filter, last) : null,
         };
       }).pipe(Effect.provide(context), orUnavailable),
   };
