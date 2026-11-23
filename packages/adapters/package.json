@@ -27,6 +27,7 @@
     "@better-auth/oauth-provider": "1.7.27",
     "@better-auth/passkey": "1.7.27",
     "@effect/sql-pg": "4.1.4",
+    "@kvitbit/api-contract": "workspace:*",
     "@kvitbit/brand": "workspace:*",
     "@kvitbit/db": "workspace:*",
     "@kvitbit/domain": "workspace:*",
