@@ -201,13 +201,11 @@ describe("FallbackEmailSender pinning", () => {
     expect(secondary.calls).toEqual([]);
   });
 
-  test("an unknown retry of a delivered key re-pins it with no expiry", async () => {
-    const primary = sequenced("resend", [
-      "ok",
-      new EmailOutcomeUnknown({}),
-      "ok",
-      new EmailNotAccepted({}),
-    ]);
+  test.each([
+    ["unknown", new EmailOutcomeUnknown({})],
+    ["refused", new EmailNotAccepted({})],
+  ])("a %s retry of a delivered key re-pins it with no expiry", async (_name, retryError) => {
+    const primary = sequenced("resend", ["ok", retryError, "ok", new EmailNotAccepted({})]);
     const secondary = sequenced("smtp", []);
     const fallback = makeFallbackEmailSender(primary.sender, secondary.sender, {
       deliveredRetention: "1 millis",

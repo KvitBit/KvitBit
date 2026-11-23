@@ -128,6 +128,21 @@ export const makeFallbackEmailSender = (
           if (held !== undefined) {
             return attempt(held.provider, message, opts).pipe(
               Effect.catchTag("EmailNotAccepted", (error) => Effect.fail(stillUnknown(error))),
+              // Whatever made this send unknown, the caller will retry it: keep the key on its
+              // provider with no expiry, replacing an expiring `delivered` entry.
+              Effect.tapError((error) =>
+                error._tag === "EmailOutcomeUnknown"
+                  ? Effect.flatMap(Clock.currentTimeMillis, (at) =>
+                      Effect.sync(() =>
+                        record(opts.idempotencyKey, {
+                          provider: held.provider,
+                          state: "unknown",
+                          at,
+                        }),
+                      ),
+                    )
+                  : Effect.void,
+              ),
             );
           }
           return attempt("primary", message, opts).pipe(
