@@ -24,8 +24,8 @@ import {
   UserId,
   WorkspaceId,
 } from "@kvitbit/domain/contract";
-import { Context, Schema } from "effect";
-import { HttpApiMiddleware, HttpApiSecurity } from "effect/http-api";
+import { Context, Effect, Schema } from "effect";
+import { type HttpApiError, HttpApiMiddleware, HttpApiSecurity } from "effect/http-api";
 import { ApiKeyId } from "./api-key";
 import { OriginRejected, PayloadTooLarge, RateLimited, Unauthorized } from "./edge-errors";
 
@@ -68,13 +68,29 @@ export class CurrentPrincipal extends Context.Service<CurrentPrincipal, Principa
  * Request decode failures (params, query, headers, payload) as `Invalid` with code
  * `request.malformed` (section 3.3), so typed clients see 422 in the endpoint error union.
  * Declared API-wide and outermost. apps/server provides it with
- * `HttpApiMiddleware.layerSchemaErrorTransform(SchemaErrors, ...)`, mapping request-side
- * `HttpApiSchemaError` kinds to `Invalid` and leaving response encoding failures as defects.
+ * `HttpApiMiddleware.layerSchemaErrorTransform(SchemaErrors, schemaErrorToInvalid)`.
  */
 export class SchemaErrors extends HttpApiMiddleware.Service<SchemaErrors>()(
   "kvitbit/edge/SchemaErrors",
   { error: Invalid.schema },
 ) {}
+
+/** `HttpApiSchemaError` kinds raised while decoding the request; the others are response-side. */
+export const REQUEST_SCHEMA_ERROR_KINDS = ["Params", "Query", "Headers", "Payload"] as const;
+
+/**
+ * The SchemaErrors transform for `layerSchemaErrorTransform`: request decode failures become
+ * `Invalid` with code `request.malformed` (422); response encoding failures (`Body`,
+ * `ResponseHeaders`) pass through unchanged and stay 500 defects.
+ */
+export const schemaErrorToInvalid = (
+  error: HttpApiError.HttpApiSchemaError,
+): Effect.Effect<never, Invalid | HttpApiError.HttpApiSchemaError> =>
+  REQUEST_SCHEMA_ERROR_KINDS.some((kind) => kind === error.kind)
+    ? Effect.fail(
+        new Invalid({ issues: [{ path: [error.kind.toLowerCase()], code: "request.malformed" }] }),
+      )
+    : Effect.fail(error);
 
 /**
  * Session (cookie or bearer) or API Key. Provides the principal and an Account caller. Fails

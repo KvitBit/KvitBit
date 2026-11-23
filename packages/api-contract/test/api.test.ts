@@ -201,6 +201,19 @@ const find = (group: string, name: string): Reflected => {
   return hit;
 };
 
+/** Errors declared on the endpoint itself, without middleware-supplied ones. */
+const ownErrors = (group: string, name: string): ReadonlyArray<Schema.Top> => {
+  let found: ReadonlyArray<Schema.Top> | undefined;
+  HttpApi.reflect(Api, {
+    onGroup: () => {},
+    onEndpoint: ({ group: g, endpoint }) => {
+      if (g.identifier === group && endpoint.identifier === name) found = [...endpoint.error];
+    },
+  });
+  if (found === undefined) throw new Error(`missing ${group}.${name}`);
+  return found;
+};
+
 const hasError = (r: Reflected, status: number, sample: unknown): boolean =>
   (r.errors.get(status) ?? []).some((schema) => Schema.is(schema)(sample));
 
@@ -374,91 +387,115 @@ describe("Api definition integrity", () => {
 });
 
 /**
- * Core error channel of the method each endpoint fronts (packages/domain/src/modules/*.ts),
- * without Forbidden, which WorkspaceMember supplies. Endpoints without core errors are omitted.
+ * The core method each endpoint fronts (packages/domain/src/modules/*.ts) and that method's
+ * error channel. `-` marks edge-only endpoints (Better Auth, apps/server services). Forbidden is
+ * supplied by WorkspaceMember where it runs; elsewhere the endpoint declares it.
  */
 const CORE_ERRORS = `
-publicShare.open NotFound
-publicShare.pdf NotFound,Unavailable
-publicShare.logo NotFound,Unavailable
-invitations.peek NotFound
-invitations.accept NotFound,Conflict
-myWorkspaces.create Invalid,Unavailable
-oauthConsent.decide NotFound
-registry.lookupCompany Invalid,NotFound,Unavailable
-workspace.updateIssuingEntity Invalid,Conflict
-workspace.updateSettings Invalid,Conflict
-workspace.createBankAccount Invalid,NotFound,Conflict
-workspace.updateBankAccount Invalid,NotFound,Conflict
-workspace.removeBankAccount Invalid,NotFound,Conflict
-workspace.createSeries Invalid,NotFound,Conflict
-workspace.updateSeries Invalid,NotFound,Conflict
-workspace.close Invalid
-team.setRole NotFound,Conflict
-team.removeMember NotFound,Conflict
-team.leave Conflict
-team.invite Invalid,Conflict
-team.revokeInvitation NotFound
-team.resendInvitation NotFound,Conflict
-team.transferOwnership NotFound,Conflict
-branding.updateBranding Invalid,Conflict
-branding.previewPdf Invalid,Unavailable
-branding.putImage Invalid,Unavailable
-branding.getImage NotFound,Unavailable
-documents.list Invalid
-documents.preview Invalid,Unavailable
-documents.createDraft Invalid,NotFound,Unavailable
-documents.issueFromInput NotFound,Invalid,Conflict,Unavailable
-documents.get NotFound
-documents.edit NotFound,Invalid,Conflict,Unavailable
-documents.discardDraft NotFound,Conflict
-documents.issueDraft NotFound,Invalid,Conflict,Unavailable
-documents.lock NotFound,Conflict
-documents.unlock NotFound,Conflict
-documents.cancel NotFound,Invalid,Conflict,Unavailable
-documents.correct NotFound,Invalid,Conflict,Unavailable
-documents.issueFinalInvoice NotFound,Invalid,Conflict,Unavailable
-documents.send NotFound,Conflict,Invalid
-documents.pdf NotFound,Unavailable
-documents.history NotFound
-shareLinks.create NotFound,Conflict
-shareLinks.revoke NotFound
-shareLinks.views Invalid,NotFound
-contacts.get NotFound
-contacts.create Invalid,NotFound,Conflict
-contacts.update Invalid,NotFound,Conflict
-contacts.fromIco Invalid,Unavailable
-contacts.archive NotFound
-priceList.create Invalid,NotFound,Conflict
-priceList.update Invalid,NotFound,Conflict
-priceList.archive NotFound
-payments.record NotFound,Invalid,Conflict,Unavailable
-payments.remove NotFound,Conflict
-payments.listForDocument NotFound
-payments.listForExpense NotFound
-expenses.list Invalid
-expenses.record Invalid,NotFound,Unavailable
-expenses.get NotFound
-expenses.edit NotFound,Invalid,Conflict,Unavailable
-expenses.remove NotFound,Conflict
-expenses.attach NotFound,Invalid,Unavailable
-expenses.attachment NotFound,Unavailable
-expenses.detach NotFound
-templates.get NotFound
-templates.create Invalid,NotFound,Conflict
-templates.update Invalid,NotFound,Conflict
-templates.archive NotFound
-templates.setSchedule Invalid,NotFound,Conflict
-templates.removeSchedule Invalid,NotFound,Conflict
-templates.resume NotFound,Conflict
-templates.runs Invalid,NotFound
-templates.use NotFound,Invalid,Conflict,Unavailable
-reports.dashboard Invalid
-reports.run Invalid
-reports.export Invalid
-reports.fxRate Invalid,Unavailable
-reports.getExport NotFound
-reports.exportFile NotFound,Conflict,Unavailable
+config.getConfig -
+botProtection.issueChallenge -
+publicShare.open PublicShareLinks.open NotFound
+publicShare.pdf PublicShareLinks.pdf NotFound,Unavailable
+publicShare.logo PublicShareLinks.logo NotFound,Unavailable
+invitations.peek Workspaces.peekInvitation NotFound
+invitations.accept Workspaces.acceptInvitation NotFound,Conflict,Forbidden
+me.getPreferences -
+me.updatePreferences -
+myWorkspaces.listMine Workspaces.listMine Forbidden
+myWorkspaces.create Workspaces.create Invalid,Unavailable,Forbidden
+oauthConsent.getConsent Workspaces.listMine Forbidden
+oauthConsent.decide Workspaces.enter NotFound,Forbidden
+registry.lookupCompany Workspaces.lookupCompany Invalid,NotFound,Unavailable,Forbidden
+themes.resolve -
+workspace.current Workspaces.current Forbidden
+workspace.updateIssuingEntity Workspaces.updateIssuingEntity Invalid,Conflict,Forbidden
+workspace.updateSettings Workspaces.updateSettings Invalid,Conflict,Forbidden
+workspace.listBankAccounts Workspaces.current Forbidden
+workspace.createBankAccount Workspaces.saveBankAccount Invalid,NotFound,Conflict,Forbidden
+workspace.updateBankAccount Workspaces.saveBankAccount Invalid,NotFound,Conflict,Forbidden
+workspace.removeBankAccount Workspaces.removeBankAccount Invalid,NotFound,Conflict,Forbidden
+workspace.listSeries Workspaces.listSeries Forbidden
+workspace.createSeries Workspaces.configureSeries Invalid,NotFound,Conflict,Forbidden
+workspace.updateSeries Workspaces.configureSeries Invalid,NotFound,Conflict,Forbidden
+workspace.close Workspaces.close Invalid,Forbidden
+team.listMembers Workspaces.members Forbidden
+team.setRole Workspaces.setRole NotFound,Conflict,Forbidden
+team.removeMember Workspaces.setRole NotFound,Conflict,Forbidden
+team.leave Workspaces.leave Conflict,Forbidden
+team.listInvitations Workspaces.invitations Forbidden
+team.invite Workspaces.invite Invalid,Conflict,Forbidden
+team.revokeInvitation Workspaces.revokeInvitation NotFound,Forbidden
+team.resendInvitation Workspaces.resendInvitation NotFound,Conflict,Forbidden
+team.transferOwnership Workspaces.transferOwnership NotFound,Conflict,Forbidden
+branding.getBranding Workspaces.current Forbidden
+branding.updateBranding Workspaces.updateSettings Invalid,Conflict,Forbidden
+branding.previewPdf Workspaces.previewBranding Invalid,Unavailable,Forbidden
+branding.putImage Workspaces.setBrandingImage Invalid,Unavailable,Forbidden
+branding.getImage Workspaces.brandingImage NotFound,Unavailable,Forbidden
+branding.removeImage Workspaces.removeBrandingImage Forbidden
+apiKeys.listApiKeys -
+apiKeys.createApiKey -
+apiKeys.revokeApiKey -
+connectedApps.listConnectedApps -
+connectedApps.revokeConnectedApp -
+documents.list Documents.list Invalid,Forbidden
+documents.preview Documents.preview Invalid,Unavailable,Forbidden
+documents.createDraft Documents.createDraft Invalid,NotFound,Unavailable,Forbidden
+documents.issueFromInput Documents.issue NotFound,Forbidden,Invalid,Conflict,Unavailable
+documents.get Documents.get NotFound,Forbidden
+documents.edit Documents.edit NotFound,Forbidden,Invalid,Conflict,Unavailable
+documents.discardDraft Documents.discardDraft NotFound,Conflict,Forbidden
+documents.issueDraft Documents.issue NotFound,Forbidden,Invalid,Conflict,Unavailable
+documents.lock Documents.lock NotFound,Conflict,Forbidden
+documents.unlock Documents.unlock NotFound,Conflict,Forbidden
+documents.cancel Documents.cancel NotFound,Forbidden,Invalid,Conflict,Unavailable
+documents.correct Documents.correct NotFound,Forbidden,Invalid,Conflict,Unavailable
+documents.issueFinalInvoice Documents.issueFinalInvoice NotFound,Forbidden,Invalid,Conflict,Unavailable
+documents.send Documents.send NotFound,Conflict,Invalid,Forbidden
+documents.pdf Documents.pdf NotFound,Unavailable,Forbidden
+documents.history Documents.history NotFound,Forbidden
+shareLinks.create PublicShareLinks.create NotFound,Conflict,Forbidden
+shareLinks.revoke PublicShareLinks.revoke NotFound,Forbidden
+shareLinks.views PublicShareLinks.views Invalid,NotFound,Forbidden
+contacts.search Contacts.search Forbidden
+contacts.get Contacts.get NotFound,Forbidden
+contacts.create Contacts.save Invalid,NotFound,Conflict,Forbidden
+contacts.update Contacts.save Invalid,NotFound,Conflict,Forbidden
+contacts.fromIco Contacts.fromIco Invalid,Unavailable,Forbidden
+contacts.archive Contacts.archive NotFound,Forbidden
+priceList.list PriceList.list Forbidden
+priceList.create PriceList.save Invalid,NotFound,Conflict,Forbidden
+priceList.update PriceList.save Invalid,NotFound,Conflict,Forbidden
+priceList.archive PriceList.archive NotFound,Forbidden
+payments.record Payments.record NotFound,Forbidden,Invalid,Conflict,Unavailable
+payments.remove Payments.remove NotFound,Conflict,Forbidden
+payments.listForDocument Payments.listFor NotFound,Forbidden
+payments.listForExpense Payments.listFor NotFound,Forbidden
+expenses.list Expenses.list Invalid,Forbidden
+expenses.record Expenses.record Invalid,NotFound,Unavailable,Forbidden
+expenses.get Expenses.get NotFound,Forbidden
+expenses.edit Expenses.edit NotFound,Invalid,Conflict,Unavailable,Forbidden
+expenses.remove Expenses.remove NotFound,Conflict,Forbidden
+expenses.attach Expenses.attach NotFound,Invalid,Unavailable,Forbidden
+expenses.attachment Expenses.attachment NotFound,Unavailable,Forbidden
+expenses.detach Expenses.detach NotFound,Forbidden
+templates.list Templates.list Forbidden
+templates.get Templates.get NotFound,Forbidden
+templates.create Templates.save Invalid,NotFound,Conflict,Forbidden
+templates.update Templates.save Invalid,NotFound,Conflict,Forbidden
+templates.archive Templates.archive NotFound,Forbidden
+templates.setSchedule Templates.schedule Invalid,NotFound,Conflict,Forbidden
+templates.removeSchedule Templates.schedule Invalid,NotFound,Conflict,Forbidden
+templates.resume Templates.resume NotFound,Conflict,Forbidden
+templates.runs Templates.runs Invalid,NotFound,Forbidden
+templates.use Templates.use NotFound,Forbidden,Invalid,Conflict,Unavailable
+reports.dashboard Reports.dashboard Invalid,Forbidden
+reports.run Reports.run Invalid,Forbidden
+reports.export Reports.export Invalid,Forbidden
+reports.fxRate Reports.fxRate Invalid,Unavailable,Forbidden
+reports.startExport Reports.startExport Forbidden
+reports.getExport Reports.getExport NotFound,Forbidden
+reports.exportFile Reports.exportFile NotFound,Conflict,Unavailable,Forbidden
 `;
 
 describe("endpoints declare their core method's errors", () => {
@@ -467,21 +504,33 @@ describe("endpoints declare their core method's errors", () => {
     Invalid: [422, new Invalid({ issues: [{ path: [], code: "request.malformed" }] })],
     Conflict: [409, new Conflict({ reason: "illegal_transition" })],
     Unavailable: [503, new Unavailable({ dependency: "database" })],
+    Forbidden: [403, new Forbidden({ action: "workspace.read" })],
   };
   const rows = CORE_ERRORS.trim()
     .split("\n")
     .map((line) => {
-      const [id = "", tags = ""] = line.split(" ");
-      return [id, tags.split(",")] as const;
+      const [id = "", method = "", tags = ""] = line.split(" ");
+      return [id, method, tags === "" ? [] : tags.split(",")] as const;
     });
 
-  test.each(rows)("%s", (id, tags) => {
+  test("the table covers every endpoint", () => {
+    expect(rows.map(([id]) => id).sort()).toEqual(
+      reflected.map((r) => `${r.group}.${r.name}`).sort(),
+    );
+  });
+
+  test.each(rows)("%s (%s)", (id, _method, tags) => {
     const [group = "", name = ""] = id.split(".");
     const r = find(group, name);
+    const member = r.middleware.includes(WorkspaceMember.key);
+    const own = ownErrors(group, name);
     for (const tag of tags) {
+      if (tag === "Forbidden" && member) continue;
       const sample = samples[tag];
       if (sample === undefined) throw new Error(`no sample for ${tag}`);
-      expect([tag, hasError(r, sample[0], sample[1])]).toEqual([tag, true]);
+      const [status, value] = sample;
+      expect([tag, own.some((schema) => Schema.is(schema)(value))]).toEqual([tag, true]);
+      expect([tag, hasError(r, status, value)]).toEqual([tag, true]);
     }
   });
 });

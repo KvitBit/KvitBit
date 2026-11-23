@@ -11,6 +11,7 @@ import {
   HttpApi,
   HttpApiClient,
   type HttpApiEndpoint,
+  HttpApiError,
   HttpApiMiddleware,
   OpenApi,
 } from "effect/http-api";
@@ -21,6 +22,7 @@ import {
   BRANDING_IMAGE_MAX_BYTES,
   BRANDING_IMAGE_TYPES,
   SchemaErrors,
+  schemaErrorToInvalid,
 } from "../src/index";
 
 const WS = Schema.decodeSync(WorkspaceId)("01890a5d-ac96-774b-bcce-b302099a8057");
@@ -156,11 +158,35 @@ describe("strict request parsing (section 3.2)", () => {
 });
 
 describe("SchemaErrors middleware", () => {
-  test("is provided with layerSchemaErrorTransform and maps to Invalid request.malformed", () => {
-    const layer = HttpApiMiddleware.layerSchemaErrorTransform(SchemaErrors, (error) =>
-      Effect.fail(new Invalid({ issues: [{ path: [error.kind], code: "request.malformed" }] })),
-    );
-    expect(layer).toBeDefined();
+  const schemaError = (kind: HttpApiError.HttpApiSchemaError["kind"]) => {
+    const cause = Effect.runSync(Effect.flip(Schema.decodeUnknownEffect(Schema.String)(42)));
+    return new HttpApiError.HttpApiSchemaError({ kind, cause });
+  };
+  const run = (kind: HttpApiError.HttpApiSchemaError["kind"]) =>
+    Effect.runSync(Effect.flip(schemaErrorToInvalid(schemaError(kind))));
+
+  test("request decode failures become Invalid request.malformed (422)", () => {
+    for (const kind of ["Params", "Query", "Headers", "Payload"] as const) {
+      const error = run(kind);
+      expect(error).toBeInstanceOf(Invalid);
+      expect(error).toMatchObject({
+        issues: [{ path: [kind.toLowerCase()], code: "request.malformed" }],
+      });
+    }
+  });
+
+  test("response encoding failures pass through as HttpApiSchemaError", () => {
+    for (const kind of ["Body", "ResponseHeaders"] as const) {
+      const error = run(kind);
+      expect(HttpApiError.HttpApiSchemaError.is(error)).toBe(true);
+      expect(error).toMatchObject({ kind });
+    }
+  });
+
+  test("the transform fits layerSchemaErrorTransform for the SchemaErrors tag", () => {
+    expect(
+      HttpApiMiddleware.layerSchemaErrorTransform(SchemaErrors, schemaErrorToInvalid),
+    ).toBeDefined();
   });
 });
 

@@ -50,6 +50,9 @@ export class Api extends HttpApi.make("kvitbit")
   .middleware(SchemaErrors)
   // Strict request bodies and query strings (section 3.2). Scoped to requests: headers keep
   // Schema defaults (they carry undeclared transport headers) and responses are not affected.
+  // Limits: a payload whose domain schema is open (OpenStruct or a branded Unknown, such as
+  // ContactInput or PriceListItemInput) accepts unknown fields until domain closes it, and an
+  // endpoint without a query schema does not decode its query string at all.
   .annotate(HttpApi.PayloadParseOptions, STRICT_REQUEST)
   .annotate(HttpApi.QueryParseOptions, STRICT_REQUEST)
   .annotate(OpenApi.Title, "kvitbit API")

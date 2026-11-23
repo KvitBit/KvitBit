@@ -50,6 +50,7 @@ export class MyWorkspacesGroup extends HttpApiGroup.make("myWorkspaces")
   .add(
     HttpApiEndpoint.get("listMine", "/workspaces", {
       success: Schema.Array(WorkspaceSummary),
+      error: Forbidden.schema,
     }).annotate(OpenApi.Summary, "List my workspaces"),
   )
   .add(
@@ -73,7 +74,7 @@ export class OAuthConsentGroup extends HttpApiGroup.make("oauthConsent")
     HttpApiEndpoint.get("getConsent", "/oauth/consents/:consentId", {
       params: ConsentParams,
       success: ConsentView,
-      error: NotFound.schema,
+      error: [NotFound.schema, Forbidden.schema],
     }).annotate(OpenApi.Summary, "Get an OAuth consent request"),
   )
   .add(
@@ -94,7 +95,13 @@ export class RegistryGroup extends HttpApiGroup.make("registry")
     HttpApiEndpoint.get("lookupCompany", "/registry/companies/:ico", {
       params: { ico: Schema.NonEmptyString }, // checksum is core's (Invalid{ico.checksum})
       success: RegistryResult,
-      error: [Invalid.schema, NotFound.schema, Unavailable.schema, RateLimited.schema],
+      error: [
+        Invalid.schema,
+        NotFound.schema,
+        Unavailable.schema,
+        RateLimited.schema,
+        Forbidden.schema,
+      ],
     }).annotate(OpenApi.Summary, "Look up a company by IČO"),
   )
   .middleware(EdgeGuard)
