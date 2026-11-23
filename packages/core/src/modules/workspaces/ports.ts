@@ -224,7 +224,7 @@ export const WorkspaceSeriesMemory: Layer.Layer<
           if (!PATTERN.test(input.pattern)) return yield* patternInvalid();
           if (
             input.nextNumber !== undefined &&
-            !(Number.isInteger(input.nextNumber) && input.nextNumber >= 1)
+            !(Number.isSafeInteger(input.nextNumber) && input.nextNumber >= 1)
           ) {
             return yield* new Invalid({
               issues: [{ path: ["nextNumber"], code: "request.malformed" }],

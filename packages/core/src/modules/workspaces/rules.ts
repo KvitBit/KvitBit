@@ -106,6 +106,9 @@ export const isValidEmail = (email: string): boolean =>
 export const BRANDING_IMAGE_MAX_BYTES = 2 * 1024 * 1024;
 export const BRANDING_IMAGE_TYPES = ["image/png", "image/jpeg"] as const;
 
+/** How many leading bytes decide each type's signature (W7). */
+export const IMAGE_SIGNATURE_BYTES = { "image/png": 8, "image/jpeg": 3 } as const;
+
 /** Whether the first bytes match the declared type's signature. */
 export const matchesImageSignature = (contentType: string, head: Uint8Array): boolean => {
   if (contentType === "image/png") {

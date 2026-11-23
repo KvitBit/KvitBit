@@ -28,6 +28,7 @@ import type {
   MemberCaller,
   MemberView,
   NumberingSeriesId,
+  RegistryResult,
   Role,
   NumberingSeriesView as SeriesView,
   TaxRegime,
@@ -61,7 +62,7 @@ import {
 } from "@kvitbit/domain/contract";
 import type { BlobKey } from "@kvitbit/domain/ports";
 import { BlobStorage } from "@kvitbit/domain/ports";
-import { Effect, Layer, Option, Schema, Stream } from "effect";
+import { Data, Effect, Layer, Option, Schema, Stream } from "effect";
 import { can } from "../../policy/can";
 import { checkMembershipChange } from "../../policy/membership";
 import { authorize, authorizeInWorkspace } from "../../policy/Policy";
@@ -104,6 +105,7 @@ import {
   decodeInput,
   FOOTER_MAX_LENGTH,
   failIssues,
+  IMAGE_SIGNATURE_BYTES,
   INVITATION_LIST_EXPIRED_MILLIS,
   INVITATION_TTL_MILLIS,
   invalid,
@@ -194,6 +196,9 @@ const seriesKindsFor = (regime: TaxRegime): ReadonlyArray<DocumentKind> =>
 
 const brandingKey = (workspaceId: WorkspaceId, image: BrandingImage, sha256: string) =>
   `branding/${workspaceId}/${image}/${sha256}` as BlobKey;
+
+/** Internal: the create probe found no committed key, so the registry must be consulted. */
+class RegistryNeeded extends Data.TaggedError("RegistryNeeded") {}
 
 /** W6: generated-slug inserts retried on a concurrent unique violation before giving up. */
 const SLUG_INSERT_ATTEMPTS = 20;
@@ -484,9 +489,16 @@ export const makeWorkspaces = Effect.gen(function* () {
       return last.changes.some((c) => c.path === `members.${to}` && c.after === "owner");
     });
 
-  /** W5 before a request-log replay (C3): a closed Workspace returns no cached write result. */
-  const requireOpenBeforeReplay = (workspaceId: WorkspaceId, action: Forbidden["action"]) =>
-    Effect.flatMap(storeOnly(repo.getWorkspace(workspaceId)), (row) => requireOpen(row, action));
+  /**
+   * Before field validation and any request-log replay (W5, R1a, C3): a closed Workspace, or an
+   * actor whose stored membership no longer allows `action`, gets no cached write result.
+   * Returns the actor with its stored role; the locked write rechecks.
+   */
+  const preflight = <C extends Caller>(caller: C, workspaceId: WorkspaceId, action: Action) =>
+    Effect.gen(function* () {
+      yield* requireOpen(yield* storeOnly(repo.getWorkspace(workspaceId)), action);
+      return yield* recheck(caller, workspaceId, action);
+    });
 
   /** Owner/admin gate for invitations to the `admin` role (R1c). */
   const manageAdminsFor = (caller: Caller, role: InvitationRow["role"]) =>
@@ -504,29 +516,18 @@ export const makeWorkspaces = Effect.gen(function* () {
           if (caller._tag !== "Account")
             return yield* new Forbidden({ action: "workspace.create" });
           const fields = yield* decodeInput(codec<NewWorkspaceFields>(NewWorkspaceFields), input);
-          // Registry I/O stays outside the transaction. Its outcome is captured, not failed on:
-          // a replay returns the stored result before the body runs, so a registry outage
-          // cannot break the replay of a committed create (C3).
           const ico = fields.ico?.trim();
-          const lookup =
-            ico === undefined || ico === "" ? null : yield* Effect.result(registry.lookup(ico));
-          const created = yield* withIdempotency(
-            {
-              scope: { _tag: "User", userId: caller.userId },
-              key: opts?.requestKey,
-              method: "Workspaces.create",
-              // The decoded fields: the slug is a plain string here, so an invalid slug reaches
-              // the slug rule below instead of failing the fingerprint encoding.
-              payload: { schema: codec<NewWorkspaceFields>(NewWorkspaceFields), value: fields },
-              result: codec<MemberCaller>(MemberCallerSchema),
-            },
+          const idempotency = {
+            scope: { _tag: "User", userId: caller.userId } as const,
+            key: opts?.requestKey,
+            method: "Workspaces.create",
+            // The decoded fields: the slug is a plain string here, so an invalid slug reaches
+            // the slug rule below instead of failing the fingerprint encoding.
+            payload: { schema: codec<NewWorkspaceFields>(NewWorkspaceFields), value: fields },
+            result: codec<MemberCaller>(MemberCallerSchema),
+          };
+          const createBody = (record: RegistryResult | null) =>
             Effect.gen(function* () {
-              const record =
-                lookup === null
-                  ? null
-                  : lookup._tag === "Failure"
-                    ? yield* Effect.fail(lookup.failure)
-                    : lookup.success;
               const name = (fields.name ?? record?.name ?? "").trim();
               if (name === "") return yield* invalid(["name"], "request.malformed");
               const now = yield* nowIso;
@@ -645,8 +646,29 @@ export const makeWorkspaces = Effect.gen(function* () {
                 channel: caller.channel,
                 client: null,
               });
-            }),
-          );
+            });
+          let created: MemberCaller;
+          if (ico === undefined || ico === "") {
+            created = yield* withIdempotency(idempotency, createBody(null));
+          } else {
+            // C3: a committed key replays before any registry I/O. The probe claims the key and,
+            // on a miss, rolls back (releasing it); the lookup then runs outside any transaction.
+            const probe =
+              idempotency.key === undefined
+                ? null
+                : yield* Effect.result(
+                    withIdempotency(idempotency, Effect.fail(new RegistryNeeded())),
+                  );
+            if (probe !== null && probe._tag === "Success") {
+              created = probe.success;
+            } else {
+              if (probe !== null && probe.failure._tag !== "RegistryNeeded") {
+                return yield* Effect.fail(probe.failure);
+              }
+              const record = yield* registry.lookup(ico);
+              created = yield* withIdempotency(idempotency, createBody(record));
+            }
+          }
           // A replay returns the stored caller; rebuild it from the membership as it is now, so a
           // creator who left or was demoted since does not get a stale owner caller back (R1a).
           const membership = yield* repo.findMembership(created.workspaceId, caller.userId);
@@ -851,7 +873,7 @@ export const makeWorkspaces = Effect.gen(function* () {
     updateIssuingEntity: (patch: IssuingEntityPatch, expectedRevision) =>
       run(
         Effect.gen(function* () {
-          const { workspaceId } = yield* authorizeInWorkspace("workspace.settings");
+          const { caller, workspaceId } = yield* authorizeInWorkspace("workspace.settings");
           const fields = yield* decodeInput(
             codec<IssuingEntityPatchFields>(IssuingEntityPatchFields),
             patch,
@@ -864,6 +886,7 @@ export const makeWorkspaces = Effect.gen(function* () {
                 Effect.die,
               );
               yield* requireOpen(row, "workspace.settings");
+              yield* recheck(caller, workspaceId, "workspace.settings");
               const issues: Array<Issue> = [];
               if (fields.name !== undefined && fields.name.trim() === "") {
                 issues.push(issue(["name"], "request.malformed"));
@@ -929,7 +952,7 @@ export const makeWorkspaces = Effect.gen(function* () {
     updateSettings: (patch: WorkspaceSettingsPatch, expectedRevision) =>
       run(
         Effect.gen(function* () {
-          const { workspaceId } = yield* authorizeInWorkspace("workspace.settings");
+          const { caller, workspaceId } = yield* authorizeInWorkspace("workspace.settings");
           const fields = yield* decodeInput(codec<SettingsPatch>(SettingsPatchFields), patch);
           return yield* store.transaction(
             Effect.gen(function* () {
@@ -939,6 +962,7 @@ export const makeWorkspaces = Effect.gen(function* () {
                 Effect.die,
               );
               yield* requireOpen(row, "workspace.settings");
+              yield* recheck(caller, workspaceId, "workspace.settings");
               const now = yield* nowIso;
               const date = yield* today;
               const issues: Array<Issue> = [];
@@ -1069,7 +1093,8 @@ export const makeWorkspaces = Effect.gen(function* () {
     saveBankAccount: (input, opts) =>
       run(
         Effect.gen(function* () {
-          const { workspaceId } = yield* authorizeInWorkspace("workspace.settings");
+          const { caller, workspaceId } = yield* authorizeInWorkspace("workspace.settings");
+          yield* preflight(caller, workspaceId, "workspace.settings");
           const fields = yield* decodeInput(codec<BankAccountFields>(BankAccountFields), input);
           const iban = normalizeIban(fields.iban);
           const bic =
@@ -1080,7 +1105,6 @@ export const makeWorkspaces = Effect.gen(function* () {
           if (!isValidIban(iban)) issues.push(issue(["iban"], "request.malformed"));
           if (bic !== null && !isValidBic(bic)) issues.push(issue(["bic"], "request.malformed"));
           yield* failIssues(issues);
-          yield* requireOpenBeforeReplay(workspaceId, "workspace.settings");
           const view = yield* withIdempotency(
             {
               scope: { _tag: "Workspace", workspaceId },
@@ -1094,6 +1118,7 @@ export const makeWorkspaces = Effect.gen(function* () {
             Effect.gen(function* () {
               const workspace = yield* storeOnly(repo.lockWorkspace(workspaceId));
               yield* requireOpen(workspace, "workspace.settings");
+              yield* recheck(caller, workspaceId, "workspace.settings");
               const now = yield* nowIso;
               // Full replacement (C6): an omitted name or bic clears it.
               const name = fields.name?.trim() || null;
@@ -1191,11 +1216,12 @@ export const makeWorkspaces = Effect.gen(function* () {
     removeBankAccount: (id, replacement) =>
       run(
         Effect.gen(function* () {
-          const { workspaceId } = yield* authorizeInWorkspace("workspace.settings");
+          const { caller, workspaceId } = yield* authorizeInWorkspace("workspace.settings");
           yield* store.transaction(
             Effect.gen(function* () {
               const workspace = yield* storeOnly(repo.lockWorkspace(workspaceId));
               yield* requireOpen(workspace, "workspace.settings");
+              yield* recheck(caller, workspaceId, "workspace.settings");
               const account = yield* repo.lockBankAccount(workspaceId, id);
               if (account.archived) return; // idempotent by state (C6)
               let substitute: BankAccountRow | undefined;
@@ -1264,15 +1290,16 @@ export const makeWorkspaces = Effect.gen(function* () {
     configureSeries: (input, opts) =>
       run(
         Effect.gen(function* () {
-          const { workspaceId } = yield* authorizeInWorkspace("workspace.settings");
-          // W3: the next counter is a positive integer (NumberingSeriesView.nextCounter is Int).
+          const { caller, workspaceId } = yield* authorizeInWorkspace("workspace.settings");
+          yield* preflight(caller, workspaceId, "workspace.settings");
+          // W3: the next counter is a positive safe integer (NumberingSeriesView.nextCounter is
+          // Schema.Int).
           if (
             input.nextNumber !== undefined &&
-            !(Number.isInteger(input.nextNumber) && input.nextNumber >= 1)
+            !(Number.isSafeInteger(input.nextNumber) && input.nextNumber >= 1)
           ) {
             return yield* invalid(["nextNumber"], "request.malformed");
           }
-          yield* requireOpenBeforeReplay(workspaceId, "workspace.settings");
           return yield* withIdempotency(
             {
               scope: { _tag: "Workspace", workspaceId },
@@ -1285,6 +1312,7 @@ export const makeWorkspaces = Effect.gen(function* () {
             Effect.gen(function* () {
               const workspace = yield* storeOnly(repo.lockWorkspace(workspaceId));
               yield* requireOpen(workspace, "workspace.settings");
+              yield* recheck(caller, workspaceId, "workspace.settings");
               const { view, before } = yield* series.configure(workspaceId, input, yield* today);
               // A repeat with the same configuration changes nothing (C6 full replacement).
               if (before !== null && JSON.stringify(before) === JSON.stringify(view)) return view;
@@ -1309,18 +1337,17 @@ export const makeWorkspaces = Effect.gen(function* () {
     setBrandingImage: (image, file) =>
       run(
         Effect.gen(function* () {
-          const { workspaceId } = yield* authorizeInWorkspace("workspace.settings");
-          yield* requireOpen(
-            yield* storeOnly(repo.getWorkspace(workspaceId)),
-            "workspace.settings",
-          );
+          const { caller, workspaceId } = yield* authorizeInWorkspace("workspace.settings");
+          yield* preflight(caller, workspaceId, "workspace.settings");
           const contentType = file.contentType.toLowerCase();
           if (!(BRANDING_IMAGE_TYPES as ReadonlyArray<string>).includes(contentType)) {
             return yield* invalid(["contentType"], "branding.image_type_rejected");
           }
           // Checked while streaming (W7): the size cap aborts early and the signature is checked
-          // as soon as the 8-byte header has arrived, before any further chunk is pulled.
-          const HEADER_BYTES = 8;
+          // as soon as its signature's bytes have arrived (PNG 8, JPEG 3), before any further
+          // chunk is pulled.
+          const headerBytes =
+            IMAGE_SIGNATURE_BYTES[contentType as keyof typeof IMAGE_SIGNATURE_BYTES];
           const parts: Array<Uint8Array> = [];
           let size = 0;
           let headerChecked = false;
@@ -1341,11 +1368,12 @@ export const makeWorkspaces = Effect.gen(function* () {
               if (size > BRANDING_IMAGE_MAX_BYTES) {
                 return yield* invalid(["file"], "branding.image_too_large");
               }
-              // Copied on arrival: the producer may reuse its buffer.
-              parts.push(chunk.slice());
-              if (!headerChecked && size >= HEADER_BYTES) {
+              // An owned copy on arrival (`Buffer.slice` would alias): the producer may reuse
+              // its buffer, and these bytes are validated, hashed and stored.
+              parts.push(new Uint8Array(chunk));
+              if (!headerChecked && size >= headerBytes) {
                 headerChecked = true;
-                if (!matchesImageSignature(contentType, joined(HEADER_BYTES))) {
+                if (!matchesImageSignature(contentType, joined(headerBytes))) {
                   return yield* invalid(["file"], "branding.image_type_rejected");
                 }
               }
@@ -1370,6 +1398,7 @@ export const makeWorkspaces = Effect.gen(function* () {
             Effect.gen(function* () {
               const row = yield* storeOnly(repo.lockWorkspace(workspaceId));
               yield* requireOpen(row, "workspace.settings");
+              yield* recheck(caller, workspaceId, "workspace.settings");
               const previous = row.branding[image];
               // Idempotent by content hash (C6): the same image keeps its ref and the revision.
               if (
@@ -1421,11 +1450,12 @@ export const makeWorkspaces = Effect.gen(function* () {
     removeBrandingImage: (image) =>
       run(
         Effect.gen(function* () {
-          const { workspaceId } = yield* authorizeInWorkspace("workspace.settings");
+          const { caller, workspaceId } = yield* authorizeInWorkspace("workspace.settings");
           yield* store.transaction(
             Effect.gen(function* () {
               const row = yield* storeOnly(repo.lockWorkspace(workspaceId));
               yield* requireOpen(row, "workspace.settings");
+              yield* recheck(caller, workspaceId, "workspace.settings");
               const previous = row.branding[image];
               if (previous === null) return;
               const next = yield* storeOnly(
@@ -1496,10 +1526,14 @@ export const makeWorkspaces = Effect.gen(function* () {
           yield* checkMembershipChange(caller, { _tag: "Invite", role });
           const member = yield* memberWorkspace(caller, "member.invite");
           const workspaceId = member.workspaceId;
+          // The stored role must still allow this invitation before a replay is served (R1c).
+          yield* checkMembershipChange(yield* preflight(member, workspaceId, "member.invite"), {
+            _tag: "Invite",
+            role,
+          });
           const address = email.trim();
           if (!isValidEmail(address)) return yield* invalid(["email"], "request.malformed");
           const inviteRole = role as InvitationRow["role"];
-          yield* requireOpenBeforeReplay(workspaceId, "member.invite");
           return yield* withIdempotency(
             {
               scope: { _tag: "Workspace", workspaceId },
@@ -1728,10 +1762,15 @@ export const makeWorkspaces = Effect.gen(function* () {
     transferOwnership: (to) =>
       run(
         Effect.gen(function* () {
-          const { caller, workspaceId } = yield* authorizeInWorkspace(
-            "workspace.transferOwnership",
-          );
+          // The role gate is the stored owner role, checked under the lock below; here only the
+          // caller's kind and scopes must allow the action. A former owner who re-entered as
+          // admin thus reaches the exact-transfer check (C6).
+          const caller = yield* CurrentCaller;
           const member = yield* memberWorkspace(caller, "workspace.transferOwnership");
+          if (!can({ ...member, role: "owner" }, "workspace.transferOwnership")) {
+            return yield* new Forbidden({ action: "workspace.transferOwnership" });
+          }
+          const workspaceId = member.workspaceId;
           yield* store.transaction(
             Effect.gen(function* () {
               const workspace = yield* storeOnly(repo.lockWorkspace(workspaceId));

@@ -24,6 +24,7 @@ import {
   WorkspacesRepo,
 } from "../../../src/modules/workspaces";
 import { RegistryLookup } from "../../../src/modules/workspaces/registry";
+import { sha256Hex } from "../../../src/shared/hash";
 import { CoreStore } from "../../../src/store/CoreStore";
 import { FakeCompanyRegistry } from "../../../src/testing";
 import {
@@ -244,7 +245,10 @@ describe("C3: a committed create replays without the registry", () => {
         yield* Ref.set(registry.unavailable, true);
         // A fresh lookup cache, as on another server instance.
         const fresh = yield* makeWorkspaces.pipe(Effect.provide(Layer.fresh(RegistryLookup.layer)));
+        const lookups = (yield* Ref.get(registry.lookups)).length;
         const replay = yield* as(creator)(fresh.create({ ico: ICO } as never, key("c1")));
+        // The replay resolved before any registry call.
+        expect((yield* Ref.get(registry.lookups)).length).toBe(lookups);
         expect(replay).toEqual(first);
         expect(yield* failure(as(creator)(fresh.create({ ico: ICO } as never, key("c2"))))).toEqual(
           new Unavailable({ dependency: "company_registry" }),
@@ -544,6 +548,173 @@ describe("W7: the image signature is checked as soon as the header arrives", () 
           ws.setBrandingImage("logo", { contentType: "image/png", bytes }),
         );
         expect(ref).toMatchObject({ contentType: "image/png", bytes: 64 });
+      }),
+    ));
+});
+
+describe("round 2: stale callers, closed precedence, safe counters, owned chunks", () => {
+  test("R1c: a keyed invite replay is refused once the stored role no longer allows it", () =>
+    scenario(
+      Effect.gen(function* () {
+        const ws = yield* W;
+        const s = yield* seed();
+        const adminInvite = as(s.owner)(ws.invite("boss@example.com", "admin", key("a1")));
+        yield* adminInvite;
+        yield* as(s.owner)(ws.transferOwnership(ADMIN));
+        // The former owner is now admin: may not manage admins, even on a replay.
+        expect(yield* failure(adminInvite)).toEqual(forbidden("member.manageAdmins"));
+        // Still an admin: a member invitation (fresh key) is allowed.
+        yield* as(s.owner)(ws.invite("m@example.com", "member", key("m1")));
+      }),
+    ));
+
+  test("R1: a demoted admin's in-flight settings writes are Forbidden", () =>
+    scenario(
+      Effect.gen(function* () {
+        const ws = yield* W;
+        const s = yield* seed();
+        const bank = as(s.admin)(
+          ws.saveBankAccount({ iban: IBAN_CZ, currency: "CZK" } as never, key("b1")),
+        );
+        yield* bank;
+        yield* as(s.owner)(ws.setRole(ADMIN, "member"));
+        const revision = view(yield* as(s.owner)(ws.current)).revision as number;
+        const settings = forbidden("workspace.settings");
+        expect(yield* failure(bank)).toEqual(settings);
+        expect(
+          yield* failure(
+            as(s.admin)(ws.saveBankAccount({ iban: IBAN_DE, currency: "EUR" } as never)),
+          ),
+        ).toEqual(settings);
+        expect(
+          yield* failure(
+            as(s.admin)(ws.configureSeries({ kind: "invoice", name: "FV", pattern: "FV-NNN" })),
+          ),
+        ).toEqual(settings);
+        expect(
+          yield* failure(as(s.admin)(ws.updateSettings({ dueDays: 30 } as never, revision))),
+        ).toEqual(settings);
+      }),
+    ));
+
+  test("C6: a former owner who re-entered can retry the completed transfer", () =>
+    scenario(
+      Effect.gen(function* () {
+        const ws = yield* W;
+        const s = yield* seed();
+        yield* as(s.owner)(ws.transferOwnership(ADMIN));
+        const reentered = yield* as(accountOf(s.owner.userId))(
+          ws.enter(s.workspaceId, { scopes: "all", channel: "web" } as never),
+        );
+        expect(reentered.role).toBe("admin");
+        yield* as(reentered)(ws.transferOwnership(ADMIN));
+        expect(yield* failure(as(reentered)(ws.transferOwnership(MEMBER)))).toEqual(
+          forbidden("workspace.transferOwnership"),
+        );
+        expect(yield* failure(as(s.member)(ws.transferOwnership(MEMBER)))).toEqual(
+          forbidden("workspace.transferOwnership"),
+        );
+        const transfers = (yield* history(s.workspaceId)).filter(
+          (e) => e.action === "workspace.transferOwnership",
+        );
+        expect(transfers.length).toBe(1);
+      }),
+    ));
+
+  test("W5: a closed Workspace is Forbidden before field validation", () =>
+    scenario(
+      Effect.gen(function* () {
+        const ws = yield* W;
+        const s = yield* seed();
+        yield* as(s.owner)(ws.close("Acme s.r.o."));
+        expect(
+          yield* failure(
+            as(s.admin)(
+              ws.configureSeries({ kind: "invoice", name: "FV", pattern: "FV-NNN", nextNumber: 0 }),
+            ),
+          ),
+        ).toEqual(forbidden("workspace.settings"));
+        expect(
+          yield* failure(
+            as(s.admin)(ws.saveBankAccount({ iban: "nope", currency: "CZK" } as never)),
+          ),
+        ).toEqual(forbidden("workspace.settings"));
+        expect(yield* failure(as(s.admin)(ws.invite("not-an-email", "member")))).toEqual(
+          forbidden("member.invite"),
+        );
+      }),
+    ));
+
+  test("W3: an unsafe integer counter is Invalid", () =>
+    scenario(
+      Effect.gen(function* () {
+        const ws = yield* W;
+        const s = yield* seed();
+        const input = {
+          kind: "invoice" as const,
+          name: "FV",
+          pattern: "FV-NNN",
+          nextNumber: 2 ** 53,
+        };
+        const malformed = new Invalid({
+          issues: [{ path: ["nextNumber"], code: "request.malformed" }],
+        });
+        expect(yield* failure(as(s.admin)(ws.configureSeries(input)))).toEqual(malformed);
+        const port = yield* WorkspaceSeries;
+        const store = yield* CoreStore;
+        expect(
+          yield* failure(
+            store.transaction(port.configure(s.workspaceId, input, "2026-11-23" as IsoDate)),
+          ),
+        ).toEqual(malformed);
+      }),
+    ));
+
+  test("W7: a bad JPEG header is rejected after 3 bytes", () =>
+    scenario(
+      Effect.gen(function* () {
+        const ws = yield* W;
+        const s = yield* seed();
+        const bytes = Stream.concat(
+          Stream.succeed(new Uint8Array([0xff, 0xd8, 0x00])),
+          Stream.never,
+        );
+        expect(
+          yield* failure(
+            as(s.admin)(ws.setBrandingImage("logo", { contentType: "image/jpeg", bytes })),
+          ),
+        ).toEqual(
+          new Invalid({ issues: [{ path: ["file"], code: "branding.image_type_rejected" }] }),
+        );
+      }),
+    ));
+
+  test("W7: a producer that reuses its Buffer does not change the stored bytes", () =>
+    scenario(
+      Effect.gen(function* () {
+        const ws = yield* W;
+        const s = yield* seed();
+        const header = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+        const first = Buffer.alloc(16);
+        first.set(header);
+        const expected = new Uint8Array(32);
+        expected.set(first, 0);
+        expected.fill(0xaa, 16);
+        // Each chunk is produced lazily when pulled, into the same Buffer.
+        const buffer = Buffer.alloc(16);
+        const bytes = Stream.concat(
+          Stream.fromEffect(
+            Effect.sync(() => {
+              buffer.set(first);
+              return buffer;
+            }),
+          ),
+          Stream.fromEffect(Effect.sync(() => buffer.fill(0xaa))),
+        );
+        const ref = yield* as(s.admin)(
+          ws.setBrandingImage("logo", { contentType: "image/png", bytes }),
+        );
+        expect(ref).toMatchObject({ bytes: 32, sha256: yield* sha256Hex(expected) });
       }),
     ));
 });
