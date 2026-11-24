@@ -11,6 +11,9 @@ import { mergeBuckets } from "./compose";
 import { deductionBucketsOf, withRounding } from "./credit";
 import type { DocumentRecord } from "./record";
 
+const keyOf = (b: Pick<VatBucket, "treatment" | "ratePercent">) =>
+  `${b.treatment}|${BigDecimal.format(BigDecimal.normalize(b.ratePercent))}`;
+
 const neg = (v: BigDecimal.BigDecimal) => BigDecimal.normalize(BigDecimal.negate(v));
 
 const positive = (deducted: ReadonlyArray<VatBucket>): ReadonlyArray<VatBucket> =>
@@ -41,11 +44,15 @@ export const reportFigures = (
   row: Pick<DocumentRecord, "lines" | "totals" | "currency" | "pricesIncludeVat" | "fx">,
   deductsPtd: (target: DocumentId) => boolean,
 ): { readonly totals: VatBreakdown; readonly advanceDeductions: ReadonlyArray<VatBucket> } => {
-  const fx = row.fx;
+  const fx = row.currency === "CZK" ? null : row.fx;
+  // A bucket whose stored net has no CZK VAT gets none on its deductions either: the VAT report
+  // then converts the net VAT itself instead of reading a partial sum.
+  const storedCzk = new Map(row.totals.buckets.map((b) => [keyOf(b), b.vatCzk]));
   const atOwnFixing = (buckets: ReadonlyArray<VatBucket>): ReadonlyArray<VatBucket> =>
     buckets.map((b) => ({
       ...b,
-      vatCzk: row.currency === "CZK" || fx === null ? null : Fx.toCzk(b.vat, fx),
+      vatCzk:
+        fx === null || (storedCzk.get(keyOf(b)) ?? null) === null ? null : Fx.toCzk(b.vat, fx),
     }));
   const deducted = atOwnFixing(deductionBucketsOf(row));
   if (deducted.length === 0) return { totals: row.totals, advanceDeductions: [] };
@@ -60,9 +67,17 @@ export const reportFigures = (
   // The stored whole-unit adjustment is kept as is (never rounded a second time).
   const full = withRounding(
     VatMath.fromBuckets(
+      // A bucket closed in the document currency can keep a CZK residual (a closing Credit
+      // Note's exact CZK VAT against the deductions at its fixing): it stays, so the VAT report
+      // and revenue close exactly.
       mergeBuckets(row.totals.buckets, positive(deducted)).filter(
         (b) =>
-          !(BigDecimal.isZero(b.base) && BigDecimal.isZero(b.vat) && BigDecimal.isZero(b.gross)),
+          !(
+            BigDecimal.isZero(b.base) &&
+            BigDecimal.isZero(b.vat) &&
+            BigDecimal.isZero(b.gross) &&
+            (b.vatCzk === null || BigDecimal.isZero(b.vatCzk))
+          ),
       ),
       row.currency,
       "none",
