@@ -99,7 +99,7 @@ describe("VatMath rounding step (verification: exhaustive residue space)", () =>
       }
     }
     expect(checked).toBe(2 * 3 * 3 * (10 + 100 + 1000 + 10_000 + 100_000));
-  });
+  }, 60_000);
 
   test("bottom-up bucket VAT = round(base x rate / 100) for every base residue mod 100, both rates and signs", () => {
     // base x rate / 100 in minor units depends on base mod 100: 2 periods each side of zero

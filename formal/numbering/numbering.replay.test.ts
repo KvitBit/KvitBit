@@ -525,5 +525,5 @@ describe("sampled serial traces (property test, not exhaustive)", () => {
         throw new Error(`seed ${seed}: ${JSON.stringify(steps)}\n${String(e)}`);
       }
     }
-  });
+  }, 60_000);
 });

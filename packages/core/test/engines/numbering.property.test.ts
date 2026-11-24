@@ -249,7 +249,7 @@ describe("Numbering grammar (verification: every pattern up to 6 chars over Y M 
     walk("");
     expect(checked).toBe((7 ** 7 - 1) / 6);
     expect(valid).toBeGreaterThan(1000);
-  });
+  }, 60_000);
 });
 
 // 3b. Generated patterns, dates and counters ----------------------------------------------

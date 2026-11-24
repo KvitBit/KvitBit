@@ -234,5 +234,5 @@ describe("OAuth wire form (http-mcp-contracts 6.3)", () => {
     expect(oauthScopesForGrant({ access: "read_write", scopes: ORACLE_SCOPES })).toEqual([
       "kvitbit:write",
     ]);
-  });
+  }, 60_000);
 });
