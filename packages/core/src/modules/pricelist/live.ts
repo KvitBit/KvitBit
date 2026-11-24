@@ -22,7 +22,7 @@ import { orUnavailable } from "../../shared/errors";
 import { withIdempotency } from "../../shared/idempotency";
 import { IdGenerator, newId } from "../../shared/ids";
 import { CoreStore } from "../../store/CoreStore";
-import { asTagService, decodeInput, invalidAt } from "../contacts/input";
+import { decodeInput, invalidAt } from "../contacts/input";
 import type { PriceListItemRow, PriceListItemSaveFields, PriceListItemViewData } from "./model";
 import {
   PriceListItemSaveInput,
@@ -206,15 +206,6 @@ export const makePriceList: Effect.Effect<
   return impl;
 });
 
-/**
- * `PriceList` on CoreStore, IdGenerator and `PriceListRepo`. Like `ContactsLive`, one cast
- * exposes the honest `PriceListImpl` as the frozen tag's shape (board #341): the tag omits
- * `Unavailable{database}` on every method.
- */
+/** `PriceList` on CoreStore, IdGenerator and `PriceListRepo`. */
 export const PriceListLive: Layer.Layer<PriceList, never, CoreStore | IdGenerator | PriceListRepo> =
-  Layer.effect(
-    PriceList,
-    Effect.map(makePriceList, (impl) =>
-      asTagService<PriceList["Service"], PriceListImpl>(impl, (checked) => checked),
-    ),
-  );
+  Layer.effect(PriceList, makePriceList);

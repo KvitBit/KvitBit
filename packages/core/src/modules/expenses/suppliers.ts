@@ -25,11 +25,11 @@ export class ExpenseSuppliers extends Context.Service<
     /** A Contact of the caller's Workspace; another Workspace's is `NotFound{Contact}`. */
     readonly contact: (
       id: ContactId,
-    ) => Effect.Effect<SupplierRecord, NotFound | Forbidden, CurrentCaller>;
-    /** IČO -> saved supplier Contact (checksum, registry lookup, upsert by IČO). */
+    ) => Effect.Effect<SupplierRecord, NotFound | Unavailable | Forbidden, CurrentCaller>;
+    /** IČO -> saved supplier Contact (checksum, registry lookup, upsert by IČO); no record is `NotFound`. */
     readonly fromIco: (
       ico: string,
-    ) => Effect.Effect<SupplierRecord, Invalid | Unavailable | Forbidden, CurrentCaller>;
+    ) => Effect.Effect<SupplierRecord, Invalid | NotFound | Unavailable | Forbidden, CurrentCaller>;
   }
 >()("kvitbit/core/ExpenseSuppliers") {}
 

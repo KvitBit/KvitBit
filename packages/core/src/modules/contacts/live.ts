@@ -31,7 +31,7 @@ import { IdGenerator, newId } from "../../shared/ids";
 import type { UniqueViolation } from "../../store/CoreStore";
 import { CoreStore, StoreUnavailable } from "../../store/CoreStore";
 import { RegistryLookup, validateIco } from "../workspaces/registry";
-import { asTagService, decodeInput, foldText, invalidAt } from "./input";
+import { decodeInput, foldText, invalidAt } from "./input";
 import type { ContactRow, ContactSaveFields, ContactViewData } from "./model";
 import {
   ContactSaveInput,
@@ -48,10 +48,7 @@ import { ContactSeriesLookup } from "./series";
 export const CONTACT_PAGE_SIZE = 50;
 export const CONTACT_PAGE_MAX = 100;
 
-/**
- * The Contacts methods with the errors the spec gives them. The domain tag's signatures omit
- * some (see `ContactsLive`).
- */
+/** The Contacts methods with the errors the spec gives them, as the domain tag declares them. */
 export interface ContactsImpl {
   readonly fromIco: (
     ico: string,
@@ -75,7 +72,7 @@ export interface ContactsImpl {
     readonly text?: string;
     readonly role?: ContactRole;
     readonly cursor?: string;
-    /** 1 to 100, default 50 (http-mcp-contracts 342); the domain tag lacks it (domain fix). */
+    /** 1 to 100, default 50 (http-mcp-contracts 342). */
     readonly limit?: number;
   }) => Effect.Effect<Page<ContactViewData>, Invalid | Forbidden | Unavailable, CurrentCaller>;
 }
@@ -514,21 +511,9 @@ export const makeContacts: Effect.Effect<
  * `Contacts` on CoreStore, IdGenerator, `ContactsRepo`, the process-wide `RegistryLookup`
  * (shared with `Workspaces.lookupCompany`, rule W9) and `ContactSeriesLookup` (from the
  * numbering module at integration).
- *
- * The one cast in this module: the frozen domain tag omits errors the spec requires, so the
- * honest `ContactsImpl` is exposed as the tag's shape (agreed with ci-workspaces, board #341).
- * Gaps for a domain fix: `fromIco` lacks `NotFound` (no registry record); `search` lacks
- * `Invalid{page.cursor_mismatch}` (http-mcp-contracts 362) and its `limit`; every method lacks
- * `Unavailable{database}` (`fromIco` has `Unavailable` already); `save` decode failures are
- * `Invalid` (in the signature).
  */
 export const ContactsLive: Layer.Layer<
   Contacts,
   never,
   CoreStore | IdGenerator | ContactsRepo | RegistryLookup | ContactSeriesLookup
-> = Layer.effect(
-  Contacts,
-  Effect.map(makeContacts, (impl) =>
-    asTagService<Contacts["Service"], ContactsImpl>(impl, (checked) => checked),
-  ),
-);
+> = Layer.effect(Contacts, makeContacts);
