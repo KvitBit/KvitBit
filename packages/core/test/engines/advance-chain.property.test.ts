@@ -19,7 +19,7 @@ import type { DocumentId, DocumentView, IsoDate, LineId } from "@kvitbit/domain/
 import { Documents } from "@kvitbit/domain/contract";
 import { BigDecimal, Effect, Exit } from "effect";
 import { TestClock } from "effect/testing";
-import { DocumentPayments } from "../../src/modules/documents";
+import { DocumentPayments, DocumentsRepo, reportFigures } from "../../src/modules/documents";
 import { NumberingSeries } from "../../src/modules/numbering";
 import { ReportCompute } from "../../src/modules/reports";
 import { CoreStore } from "../../src/store/CoreStore";
@@ -195,6 +195,18 @@ const chain = (seed: number) => {
       ptds.push(ptd);
     }
     const fi = yield* docs.issueFinalInvoice(proforma.id);
+    // What the VAT report declares for the Final Invoice: its stored record through the real
+    // ReportsSource mapping (`reportFigures`, all deductions are PTDs) and `taxableBucketsCzk`.
+    const fiRecord = yield* Effect.flatMap(CoreStore, (store) =>
+      store.transaction(Effect.flatMap(DocumentsRepo, (repo) => repo.get(WS, fi.id))),
+    );
+    const figures = reportFigures(fiRecord, () => true);
+    const reported = ReportCompute.taxableBucketsCzk({
+      currency: fiRecord.currency,
+      fx: fiRecord.fx,
+      totals: figures.totals,
+      advanceDeductions: figures.advanceDeductions,
+    } as never);
     // Corrections run on a later day, where the CNB fixing differs from the Final Invoice's.
     if (creditDays > 0) yield* TestClock.adjust(`${creditDays} days`);
     const credits: Array<DocumentView> = [];
@@ -219,6 +231,7 @@ const chain = (seed: number) => {
       proforma,
       ptds,
       fi,
+      reported,
       credits,
       ptdCredits,
     };
@@ -431,27 +444,35 @@ describe("advance chain net-to-zero (property: seeded, 120 chains)", () => {
    * supply plus the deducted PTD buckets) nets in the document currency and converts the
    * remainder at the FI rate, i.e. round2(FI bucket VAT x FI rate), which is also the per-bucket
    * reading of Decision 2. They differ by about sum(PTD VAT) x (FI rate - PTD rate) whenever a
-   * PTD's fixing differs from the FI's. `test.failing` passes while the finding stands; when the
-   * code or the decision changes it turns red: then make it a plain test, or delete it and the
-   * D8 test above, as decided.
+   * PTD's fixing differs from the FI's. The report's own rule is a plain test above this one;
+   * the equality alone is `test.failing`: it passes while the finding stands and turns red once
+   * the document and the report agree. Then make it a plain test, and adjust the D8 test or the
+   * report test to the decided rule.
    */
-  test.failing("FINDING: the Final Invoice's stored CZK VAT equals what the VAT report declares for it", () => {
-    eachChain(({ currency, ptds, fi }) => {
+  test("the VAT report converts each Final Invoice bucket's VAT at the Final Invoice rate", () => {
+    eachChain(({ currency, fi, reported }) => {
       if (currency === "CZK" || fi.fx === null) return;
-      // The ReportDocument `reportFigures` builds: full supply = FI + deducted PTD buckets.
-      const deducted = ptds.flatMap((p) => p.totals.buckets);
-      const full = [...fi.totals.buckets, ...deducted];
-      const reported = ReportCompute.taxableBucketsCzk({
-        currency: fi.totals.gross.currency,
-        fx: fi.fx,
-        totals: { ...fi.totals, buckets: full },
-        advanceDeductions: deducted,
-      } as never);
+      for (const b of fi.totals.buckets) {
+        const report = reported.find((r) => keyOf(r) === keyOf(b));
+        const want = czkOf(units(b.vat, 2), fi.fx);
+        if (report === undefined || units(report.vat, 2) !== want) {
+          throw new Error(
+            `VAT report ${keyOf(b)}: ${report === undefined ? "none" : BigDecimal.format(report.vat)}, want round2(${BigDecimal.format(b.vat)} x ${BigDecimal.format(fi.fx.rate)}) = ${fmt(want)}`,
+          );
+        }
+      }
+    });
+  });
+
+  test.failing("FINDING: the Final Invoice's stored CZK VAT equals what the VAT report declares for it", () => {
+    // Only the document-vs-report equality: if either side changes to agree, this turns red.
+    eachChain(({ currency, fi, reported }) => {
+      if (currency === "CZK" || fi.fx === null) return;
       for (const b of fi.totals.buckets) {
         const report = reported.find((r) => keyOf(r) === keyOf(b));
         const stored = b.vatCzk === null ? null : units(b.vatCzk, 2);
         const declared = report === undefined ? null : units(report.vat, 2);
-        if (stored !== declared || declared !== czkOf(units(b.vat, 2), fi.fx)) {
+        if (stored !== declared) {
           throw new Error(
             `Final Invoice ${fi.number} ${keyOf(b)}: VAT ${BigDecimal.format(b.vat)} EUR, FI rate ${BigDecimal.format(fi.fx.rate)}; stored vatCzk ${stored === null ? "null" : fmt(stored)}, VAT report ${declared === null ? "none" : fmt(declared)}`,
           );

@@ -17,7 +17,7 @@ From the repo root (Bun 1.4.2 per `packageManager`; the checks were last run wit
 bun test --cwd packages/core test/engines/vat-rounding.property.test.ts test/engines/numbering.property.test.ts test/engines/advance-chain.property.test.ts
 ```
 
-Expected: 20 pass, 0 fail, about 4 s in total. One of the 20 is `test.failing` (the open finding below): it passes while the finding stands. One file at a time: `bun test --cwd packages/core test/engines/<file>`. The checks are also part of the normal `bun test` in `packages/core`.
+Expected: 21 pass, 0 fail, about 4 s in total. One of the 21 is `test.failing` (the open finding below): it passes while the finding stands. One file at a time: `bun test --cwd packages/core test/engines/<file>`. The checks are also part of the normal `bun test` in `packages/core`.
 
 The central coverage record is `formal/manifest.json`. `bun run verify:formal --check-digests` reports any covered file whose content changed since its entry was last confirmed. Both are maintained by the formal-verification foundation stream. If they are not on your branch yet, use the table below.
 
@@ -69,7 +69,7 @@ The Final Invoice document and the VAT report disagree on the Final Invoice's CZ
 - `compose.ts` (totals step after `VatMath.calculate`, rule D8) stores per bucket round2(supply VAT x FI rate) minus the PTDs' stored CZK VAT, which were converted at the PTDs' own rates.
 - The VAT report (`ReportCompute.taxableBucketsCzk` in `packages/core/src/modules/reports/compute.ts:108`, fed by `reportFigures` in `packages/core/src/modules/documents/reports.ts:34`) nets the buckets in the document currency and converts the remainder at the FI rate. That gives round2(FI bucket VAT x FI rate), which is also the per-bucket reading of Decision 2. The report tests pin this behavior (`packages/core/test/modules/reports/council.test.ts:76`).
 - Counterexample (seed 58256): an EUR Proforma, standard bucket VAT 5,057.28 EUR. PTDs were received 2026-11-18 at 24.974 (VAT 205.25), 2026-11-21 at 24.485 (VAT 984.10) and 2026-11-23 at 24.459 (VAT 1,532.91). The Final Invoice is at 24.459, standard VAT 2,335.02 EUR. The stored vatCzk is 56,980.96 CZK; the VAT report gives 57,112.25 CZK. The difference, 131.29 CZK, is 205.25 x (24.974 - 24.459) + 984.10 x (24.485 - 24.459).
-- In the suite: `test.failing("FINDING: ...")` in `advance-chain.property.test.ts`, next to the pinned D8 test. Which rule is right (D8 as composed, or per-bucket conversion as in the report) is Filip's decision. Once it is made, turn the FINDING test into a plain test and fix the code, or delete it and keep the D8 test. Either way, the document and the report must agree.
+- In the suite, in `advance-chain.property.test.ts`: the report side runs the stored Final Invoice record through the real `reportFigures` and `taxableBucketsCzk`. A plain test checks that the report converts each FI bucket's VAT at the FI rate. `test.failing("FINDING: ...")` checks only that the stored CZK VAT equals the report's, so it turns red as soon as the two agree, whichever side changes. The pinned D8 test sits next to them. Which rule is right (D8 as composed, or per-bucket conversion as in the report) is Filip's decision. Once it is made, turn the FINDING test into a plain test and fix the code, or delete it and keep the D8 test. Either way, the document and the report must agree.
 
 ## Bounds and assumptions
 
@@ -84,7 +84,7 @@ The Final Invoice document and the VAT report disagree on the Final Invoice's CZ
 ## Coverage record
 
 - Sync commit: `77a5bb7`. The checks describe the covered files as they are at this commit.
-- Able-to-fail gate, run on 2026-11-24 at `77a5bb7` (rows 7-10 came from review round 1, row 11 from the council; the chain breaks were rerun after the chain test was split into separate tests): each break below was applied to the real code, caught, reverted with `git checkout -- <file>`, and the file was green again.
+- Able-to-fail gate, run on 2026-11-24 at `77a5bb7` (rows 7-10 came from review round 1, row 11 from the council, rows 12-13 from review round 2; the chain breaks were rerun after the chain test was split into separate tests): each break below was applied to the real code, caught, reverted with `git checkout -- <file>`, and the file was green again.
 
 | Break | File | Caught by |
 |---|---|---|
@@ -98,6 +98,8 @@ The Final Invoice document and the VAT report disagree on the Final Invoice's CZ
 | Every PTD converted at the 2026-11-23 fixing | `src/modules/documents/payments.ts` (`issuePaymentTaxDocument`) | Check 4 (`PTD ... (received 2026-11-18): fx [...2026-11-23...], expected [...2026-11-18...]`) |
 | `MAX_NUMBER_LENGTH` raised to 21 | `src/engines/numbering.ts` | Checks 3b (oracle disagrees with `too_long`; boundary table) |
 | `parsePattern` rejects every pattern | `src/engines/numbering.ts` | Checks 3a and 3b (fail at once: `engine rejects "N"`) |
+| Scratch resolution of the finding: compose stores round2(FI bucket VAT x FI rate) | `src/modules/documents/compose.ts` (totals step) | The FINDING `test.failing` turns red (as it must), and so does the pinned D8 test |
+| VAT report adds advance deductions instead of netting them | `src/modules/reports/compute.ts` (`taxableBucketsCzk`) | Check 4 report test (`VAT report standard\|21: 190279.77, want ... = 57112.25`) |
 | `splitAdvance` leftovers ignore the remainders | `src/engines/vat.ts` (`splitAdvance`) | Check 4 split oracle (`PTD ... standard\|21: gross/vat/base 24062.47/..., oracle 24062.48/...`) |
 
 ## When a check fails
