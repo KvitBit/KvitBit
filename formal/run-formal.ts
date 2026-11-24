@@ -110,8 +110,10 @@ export const cfgTokens = (text: string): string[] => {
     const c = text[i] ?? "";
     const two = text.slice(i, i + 2);
     if (two === "\\*") {
-      const end = text.indexOf("\n", i);
-      i = end === -1 ? text.length : end + 1;
+      // TLC ends a line comment at CR or LF, so a bare CR starts a new line too.
+      let end = i + 2;
+      while (end < text.length && text[end] !== "\n" && text[end] !== "\r") end++;
+      i = end;
     } else if (two === "(*") {
       let depth = 1;
       i += 2;
@@ -890,6 +892,18 @@ export const selftest = async (tools: Pick<Toolchain, "jar" | "java">): Promise<
     { config: `${neg}/Counter_deadlock_comments.cfg` },
     /sets CHECK_DEADLOCK FALSE/,
   );
+  // Written at run time so no editor or git setting can normalise the bare CR (0x0D).
+  const crCfg = path.join(CACHE_DIR, "selftest-bare-cr.cfg");
+  writeFileSync(
+    crCfg,
+    "CONSTANTS Limit = 3 Bound = 3 Back = FALSE\nSPECIFICATION Spec\nINVARIANTS TypeOK WithinBound\nPROPERTY NoDecrease\n\\* comment\rCHECK_DEADLOCK FALSE\n",
+  );
+  rejects(
+    "CHECK_DEADLOCK FALSE after a line comment ended by a bare CR",
+    { config: rel(crCfg) },
+    /sets CHECK_DEADLOCK FALSE/,
+  );
+  rmSync(crCfg, { force: true });
   rejects(
     "CHECK_DEADLOCK FALSE even when the check allows deadlock",
     { config: `${neg}/Counter_nodeadlock.cfg`, deadlock: "allow" },
