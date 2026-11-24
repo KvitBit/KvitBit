@@ -37,8 +37,8 @@ Passes in about 5 seconds (72 tests, 1 skipped: the wide bound). A `CoreStore.af
 ### PR-time bound and nightly wide bound
 
 - PR time (the command above, and `bun run test`): every normalized grant (3^10) plus the session, every raw list over at most two areas (both orders), and the all-areas write-only list. It misses raw (unnormalized) lists over three or more areas, such as `contacts:write, documents:read, payments:write`.
-- Nightly and at every sync-commit move: the wide run below checks every raw list (4^10) and closes that gap. It is skipped unless `KVITBIT_FORMAL_WIDE=1` is set; the nightly workflow sets it.
-- Residual risk: such a list reaches `can()` only if the edge passes unnormalized scopes. `Workspaces.enter` (`packages/core/src/modules/workspaces/live.ts:745`) passes `opts.scopes` through unchanged, so a regression there in a list over three or more areas shows up only in the nightly run, not on the PR.
+- Nightly and at every sync-commit move: the wide run below checks `can()` on every raw list (4^10) and closes that gap. It is skipped unless `KVITBIT_FORMAL_WIDE=1` is set. Run the command below yourself whenever you need it now; scheduled nightly runs start only once the ADR-0005 foundation stream's nightly workflow (which sets the variable) is integrated. At sync commit 77a5bb7 the only workflow, `.github/workflows/ci.yml`, runs on pushes and pull requests and does not set it.
+- Residual risk: `Workspaces.enter` (`packages/core/src/modules/workspaces/live.ts:745`) passes `opts.scopes` through unchanged, which is why unnormalized lists can reach the policy at all. A `can()` regression that shows only on a raw list over three or more areas is caught by the wide run, not on the PR. The wide run builds its own Member callers and calls `can()` directly, so it does not check `Workspaces.enter` itself: if `enter` dropped or changed scopes while building the caller, no check in this skill would notice.
 
 Wide bound (accepted by the ADR-0005 orchestration as nightly/sync-time per its CI split), about 50 seconds:
 
