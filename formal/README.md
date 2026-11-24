@@ -9,6 +9,7 @@ Cross-package formal checks for kvitbit: TLA+ models run by TLC, trace-replay ha
 | `bun run verify:formal` | runner self-test, digest check, then every manifest check |
 | `bun run verify:formal --only <id>` | one check (repeatable); no self-test, no digest check |
 | `bun run verify:formal --wide` | TLC checks use their `wideConfig` (nightly) |
+| `KVITBIT_FORMAL_WIDE=1 bun run test` | property/exhaustive tests run their wider bounds (nightly) |
 | `bun run verify:formal --check-digests` | only compare `coveredFiles` sha256s with the working tree |
 | `bun run verify:formal --update-digests [--only <id>]` | only rewrite `coveredFiles` sha256s, for the named checks or every non-blocked check |
 | `bun run verify:formal --selftest` | only prove the runner reports failures |

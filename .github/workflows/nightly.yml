@@ -35,6 +35,10 @@ jobs:
           key: formal-toolchain-${{ hashFiles('formal/toolchain/toolchain.json') }}
       - run: bun install --frozen-lockfile
       - run: bun run verify:formal --wide
+      # Property/exhaustive tests gate their wider bounds on KVITBIT_FORMAL_WIDE=1 (ADR-0005).
+      - run: bun run test
+        env:
+          KVITBIT_FORMAL_WIDE: "1"
 
   # E2E SKELETONS. Each job passes with a notice while its app is absent and fails once the app
   # exists without a wired suite, so a Phase 3 app cannot land with its nightly E2E silently off.
