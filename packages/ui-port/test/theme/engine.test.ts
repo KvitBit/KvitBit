@@ -246,6 +246,35 @@ describe("dynamic colour hardening", () => {
     }
   });
 
+  test("a single supplied dark surfaceVariant survives and the effective dark scheme passes", () => {
+    const roles = Result.getOrThrow(
+      dynamicRoles({ _tag: "Roles", light: {}, dark: { surfaceVariant: "#777777" } }),
+    );
+    const e = effectiveTheme(state({ system: { scheme: "dark", dynamic: Option.some(roles) } }));
+    expect(e.roles.surfaceVariant).toBe("#777777");
+    expect(auditScheme({ roles: e.roles, extended: e.extended }, "dark")).toEqual([]);
+  });
+
+  test("any single supplied role leaves a passing standard scheme on both sides", () => {
+    const roles = Object.keys(KvitbitDefaultTheme.schemes.light.roles);
+    for (const role of roles)
+      for (const colour of ["#777777", "#FFD600", "#0000FF"])
+        for (const side of ["light", "dark"] as const) {
+          const input =
+            side === "light"
+              ? { light: { [role]: colour }, dark: {} }
+              : { light: {}, dark: { [role]: colour } };
+          const d = Result.getOrThrow(dynamicRoles({ _tag: "Roles", ...input }));
+          expect({ role, colour, side, failing: failingPairs(d[side]) }).toEqual({
+            role,
+            colour,
+            side,
+            failing: [],
+          });
+          expect(d[side][role as "primary"]).toBe(colour);
+        }
+  });
+
   test("a mid-grey system primary gets an onPrimary that reaches AA", () => {
     const roles = Result.getOrThrow(
       dynamicRoles({ _tag: "Roles", light: { primary: "#777774" }, dark: {} }),

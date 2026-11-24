@@ -166,14 +166,14 @@ export const withContrast = (fg: string, bg: string, required: number): string =
   nearestPassing(fg, [{ color: bg, required }]);
 
 /**
- * Make every checked pair of a role map pass, changing only roles outside `fixed` (colours the
+ * Constraint propagation pass of `repairContrast`, changing only roles outside `fixed` (colours the
  * platform supplied). Contrast is symmetric, so a role is solved against every pair it takes part
  * in, as foreground or background. Constraint propagation: failing pairs touching an already
  * settled role go first; a moved role is solved against all its partners when possible, else
  * against its settled partners, and is then settled itself. Each role moves at most once, so the
  * loop ends; a pair whose two roles are both supplied stays as the platform gave it.
  */
-export const repairContrast = (
+const propagate = (
   roles: Readonly<Record<M3ColorRole, string>>,
   fixed: ReadonlySet<M3ColorRole> = new Set(),
 ): Record<M3ColorRole, string> => {
@@ -213,6 +213,81 @@ export const repairContrast = (
       ]);
     settled.add(role);
   }
+};
+
+/**
+ * Relaxation: generated roles may move again on every pass. Each failing pair moves the first of
+ * its adjustable roles that can satisfy all its pairs, else the adjustable role solved against its
+ * fixed partners and this pair. Returns the best map seen.
+ */
+const relax = (
+  roles: Readonly<Record<M3ColorRole, string>>,
+  fixed: ReadonlySet<M3ColorRole>,
+): Record<M3ColorRole, string> => {
+  const out: Record<M3ColorRole, string> = { ...roles };
+  const pairsOf = new Map<M3ColorRole, RolePair[]>();
+  for (const pair of CHECKED_ROLE_PAIRS)
+    for (const role of [pair.foreground, pair.background])
+      pairsOf.set(role, [...(pairsOf.get(role) ?? []), pair]);
+  const other = (p: RolePair, role: M3ColorRole) =>
+    p.foreground === role ? p.background : p.foreground;
+  const partners = (role: M3ColorRole, onlyFixed: boolean) =>
+    (pairsOf.get(role) ?? [])
+      .filter((p) => !onlyFixed || fixed.has(other(p, role)))
+      .map((p) => ({ color: out[other(p, role)], required: p.required }));
+  const open = () => repairable(out, fixed);
+  let best = { ...out };
+  let bestCount = open().length;
+  for (let pass = 0; pass < 24 && bestCount > 0; pass++) {
+    for (const pair of open()) {
+      if (ratioOf(out[pair.foreground], out[pair.background]) >= pair.required) continue;
+      const movable = [pair.foreground, pair.background].filter((r) => !fixed.has(r));
+      const full = movable
+        .map((role) => ({ role, color: nearestPassing(out[role], partners(role, false)) }))
+        .find((c) => partners(c.role, false).every((p) => ratioOf(c.color, p.color) >= p.required));
+      const role = full?.role ?? movable[0];
+      if (role === undefined) continue;
+      out[role] =
+        full?.color ??
+        nearestPassing(out[role], [
+          ...partners(role, true),
+          { color: out[other(pair, role)], required: pair.required },
+        ]);
+    }
+    const count = open().length;
+    if (count < bestCount) {
+      best = { ...out };
+      bestCount = count;
+    }
+  }
+  return best;
+};
+
+/** Failing pairs with at least one role outside `fixed`. */
+const repairable = (
+  roles: Readonly<Record<M3ColorRole, string>>,
+  fixed: ReadonlySet<M3ColorRole>,
+): RolePair[] =>
+  failingPairs(roles).filter((p) => !(fixed.has(p.foreground) && fixed.has(p.background)));
+
+/**
+ * Make every checked pair of a role map pass, changing only roles outside `fixed` (colours the
+ * platform supplied). Runs constraint propagation (each role moves once), then relaxation from
+ * both the input and the propagated map (roles may move repeatedly), and returns the map with the
+ * fewest repairable failures; a pair whose two roles are both supplied stays as supplied.
+ */
+export const repairContrast = (
+  roles: Readonly<Record<M3ColorRole, string>>,
+  fixed: ReadonlySet<M3ColorRole> = new Set(),
+): Record<M3ColorRole, string> => {
+  if (repairable(roles, fixed).length === 0) return { ...roles };
+  const propagated = propagate(roles, fixed);
+  if (repairable(propagated, fixed).length === 0) return propagated;
+  const candidates = [propagated, relax(propagated, fixed), relax(roles, fixed)];
+  let best = propagated;
+  for (const c of candidates)
+    if (repairable(c, fixed).length < repairable(best, fixed).length) best = c;
+  return best;
 };
 
 /** Checked pairs of a role map below their requirement. */
