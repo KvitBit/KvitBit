@@ -247,21 +247,21 @@ export class PaymentsGroup extends HttpApiGroup.make("payments")
       params: { ...WorkspaceParams, paymentId: PaymentId },
       payload: RemovePaymentInput,
       success: NoContent,
-      error: [Conflict.schema, NotFound.schema, Invalid.schema],
+      error: [Conflict.schema, NotFound.schema, Invalid.schema, Unavailable.schema],
     }).annotate(OpenApi.Summary, "Remove a payment"),
   )
   .add(
     HttpApiEndpoint.get("listForDocument", "/documents/:documentId/payments", {
       params: { ...WorkspaceParams, documentId: DocumentId },
       success: Schema.Array(PaymentView),
-      error: [NotFound.schema],
+      error: [NotFound.schema, Unavailable.schema],
     }).annotate(OpenApi.Summary, "List a document's payments"),
   )
   .add(
     HttpApiEndpoint.get("listForExpense", "/expenses/:expenseId/payments", {
       params: { ...WorkspaceParams, expenseId: ExpenseId },
       success: Schema.Array(PaymentView),
-      error: [NotFound.schema],
+      error: [NotFound.schema, Unavailable.schema],
     }).annotate(OpenApi.Summary, "List an expense's payments"),
   )
   .prefix("/workspaces/:workspaceId")

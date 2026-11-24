@@ -100,12 +100,10 @@
  * removal. A PTD needs `vat_payer` on `paidOn` (else none); its prices are gross, so VAT is
  * top-down (rule 4) on issue and on partial correction.
  *
- * Known contract gaps (domain frozen; listed for phase2a-core in board #430/#478): C4 resolved
+ * Known contract gaps (listed for phase2a-core in board #430/#478): C4 resolved
  * language/note/series are on the record but not in DocumentView (deferred for P1); validation
- * issues use `request.malformed` + `params.reason`; error channels are widened through one cast
- * in service.ts (#341 approach); `unlock` validates its required reason with `Invalid`, which
- * its domain signature lacks. `DocumentView.paymentQr` is always null: rule D12 waits on the
- * PaymentQr engine (core-ports 5.3, src/engines; parent ruling, handoff in
+ * issues use `request.malformed` + `params.reason`. `DocumentView.paymentQr` is always null:
+ * rule D12 waits on the PaymentQr engine (core-ports 5.3, src/engines; parent ruling, handoff in
  * ~/.t3/orchestrator-state/cd-lifecycle-paymentqr-handoff/). When it lands, run it in `compose`
  * (validation, with the allocated number at issue) and in `toView`.
  */

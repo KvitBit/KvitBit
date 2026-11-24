@@ -2,7 +2,7 @@
  * `DocumentsLive`: the domain `Documents` tag over the method files. Every dependency is
  * captured when the layer is built, so each method only needs `CurrentCaller`.
  */
-import type { CoreError, DocumentId, DocumentPatch, DocumentView } from "@kvitbit/domain/contract";
+import type { DocumentId, DocumentPatch, DocumentView } from "@kvitbit/domain/contract";
 import { CurrentCaller, Documents } from "@kvitbit/domain/contract";
 import { Context, Effect, Layer } from "effect";
 import { can } from "../../policy/can";
@@ -61,14 +61,6 @@ const edit = (id: DocumentId, patch: DocumentPatch, expectedRevision: number) =>
     );
   }).pipe(orUnavailable);
 
-type DocumentsShape = Documents["Service"];
-/** The domain shape with every method's error channel widened to `CoreError`. */
-type WideDocuments = {
-  readonly [K in keyof DocumentsShape]: (
-    ...args: Parameters<DocumentsShape[K]>
-  ) => Effect.Effect<Effect.Success<ReturnType<DocumentsShape[K]>>, CoreError, CurrentCaller>;
-};
-
 /**
  * The owner-facing view of a read or dry run: `share` and `deliveries` added after the method.
  * Write results are never enriched (`share: null`, `deliveries: []`), so a keyed replay
@@ -111,16 +103,13 @@ const make = Effect.gen(function* () {
       Effect.provideContext(effect, Context.merge(context, callSite)),
     );
   /**
-   * The one cast at the layer boundary (same approach as Contacts/Workspaces, board #341):
-   * methods keep their honest error types. Domain signature gaps, for a domain fix at
-   * integration: preview lacks NotFound (missing Contact/item/bank/series/Workspace);
-   * createDraft lacks Conflict{idempotency_mismatch} (C3); discardDraft, get, list and
-   * history lack Unavailable{database}. DocumentView lacks the resolved language, note and
-   * series that rule C4 asks views to echo: DEFERRED for P1 (parent ruling; board #430/#478),
-   * they stay on the record. No IssueCodes exist for IBAN / variable symbol / required-field
-   * validation: core-wide interim is `request.malformed` + `params.reason` (#430/#478).
+   * Every method's honest error channel fits the domain signature, so there is no cast.
+   * DocumentView lacks the resolved language, note and series that rule C4 asks views to echo:
+   * DEFERRED for P1 (parent ruling; board #430/#478), they stay on the record. No IssueCodes
+   * exist for IBAN / variable symbol / required-field validation: core-wide interim is
+   * `request.malformed` + `params.reason` (#430/#478).
    */
-  const impl: WideDocuments = {
+  return Documents.of({
     preview: (input) => run(enriched(preview(input))),
     createDraft: (input, opts) => run(createDraft(input, opts)),
     discardDraft: (id, expectedRevision) => run(discardDraft(id, expectedRevision)),
@@ -140,8 +129,7 @@ const make = Effect.gen(function* () {
     previewCorrection: (id, input) => run(enriched(previewCorrection(id, input))),
     issueFinalInvoice: (proforma, input, opts) => run(issueFinalInvoice(proforma, input, opts)),
     previewFinalInvoice: (proforma, input) => run(enriched(previewFinalInvoice(proforma, input))),
-  };
-  return Documents.of(impl as unknown as Documents["Service"]);
+  });
 });
 
 export const DocumentsLive: Layer.Layer<Documents, never, DocumentsDeps> = Layer.effect(

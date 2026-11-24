@@ -601,7 +601,7 @@ describe("remove", () => {
     expect(before).toBe("paid");
     expect(after).toBe("unpaid");
     expect(Exit.isSuccess(again)).toBe(true);
-    // Invalid is missing from the domain `remove` signature (contract gap).
+    // A blank reason fails with Invalid.
     expect(blank as unknown).toEqual(malformed("reason", "required"));
     const removals = history.filter((e) => e.action === "payment.remove");
     expect(removals).toHaveLength(1);

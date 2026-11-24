@@ -395,9 +395,9 @@ describe("Api definition integrity", () => {
 const CORE_ERRORS = `
 config.getConfig -
 botProtection.issueChallenge -
-publicShare.open PublicShareLinks.open NotFound
-publicShare.pdf PublicShareLinks.pdf NotFound,Unavailable
-publicShare.logo PublicShareLinks.logo NotFound,Unavailable
+publicShare.open PublicShareLinks.open NotFound,Unavailable,Forbidden
+publicShare.pdf PublicShareLinks.pdf NotFound,Unavailable,Forbidden
+publicShare.logo PublicShareLinks.logo NotFound,Unavailable,Forbidden
 invitations.peek Workspaces.peekInvitation NotFound,Unavailable
 invitations.accept Workspaces.acceptInvitation NotFound,Conflict,Unavailable,Forbidden
 me.getPreferences -
@@ -439,25 +439,25 @@ apiKeys.createApiKey -
 apiKeys.revokeApiKey -
 connectedApps.listConnectedApps -
 connectedApps.revokeConnectedApp -
-documents.list Documents.list Invalid,Forbidden
-documents.preview Documents.preview Invalid,Unavailable,Forbidden
-documents.createDraft Documents.createDraft Invalid,NotFound,Unavailable,Forbidden
+documents.list Documents.list Invalid,Unavailable,Forbidden
+documents.preview Documents.preview Invalid,NotFound,Unavailable,Forbidden
+documents.createDraft Documents.createDraft Invalid,NotFound,Conflict,Unavailable,Forbidden
 documents.issueFromInput Documents.issue NotFound,Forbidden,Invalid,Conflict,Unavailable
-documents.get Documents.get NotFound,Forbidden
+documents.get Documents.get NotFound,Unavailable,Forbidden
 documents.edit Documents.edit NotFound,Forbidden,Invalid,Conflict,Unavailable
-documents.discardDraft Documents.discardDraft NotFound,Conflict,Forbidden
+documents.discardDraft Documents.discardDraft NotFound,Conflict,Unavailable,Forbidden
 documents.issueDraft Documents.issue NotFound,Forbidden,Invalid,Conflict,Unavailable
-documents.lock Documents.lock NotFound,Conflict,Forbidden
-documents.unlock Documents.unlock NotFound,Conflict,Forbidden
+documents.lock Documents.lock NotFound,Conflict,Unavailable,Forbidden
+documents.unlock Documents.unlock NotFound,Conflict,Invalid,Unavailable,Forbidden
 documents.cancel Documents.cancel NotFound,Forbidden,Invalid,Conflict,Unavailable
 documents.correct Documents.correct NotFound,Forbidden,Invalid,Conflict,Unavailable
 documents.issueFinalInvoice Documents.issueFinalInvoice NotFound,Forbidden,Invalid,Conflict,Unavailable
-documents.send Documents.send NotFound,Conflict,Invalid,Forbidden
+documents.send Documents.send NotFound,Conflict,Invalid,Unavailable,Forbidden
 documents.pdf Documents.pdf NotFound,Unavailable,Forbidden
-documents.history Documents.history NotFound,Forbidden
-shareLinks.create PublicShareLinks.create NotFound,Conflict,Forbidden
-shareLinks.revoke PublicShareLinks.revoke NotFound,Forbidden
-shareLinks.views PublicShareLinks.views Invalid,NotFound,Forbidden
+documents.history Documents.history NotFound,Unavailable,Forbidden
+shareLinks.create PublicShareLinks.create NotFound,Conflict,Unavailable,Forbidden
+shareLinks.revoke PublicShareLinks.revoke NotFound,Unavailable,Forbidden
+shareLinks.views PublicShareLinks.views Invalid,NotFound,Unavailable,Forbidden
 contacts.search Contacts.search Invalid,Unavailable,Forbidden
 contacts.get Contacts.get NotFound,Unavailable,Forbidden
 contacts.create Contacts.save Invalid,NotFound,Conflict,Unavailable,Forbidden
@@ -469,9 +469,9 @@ priceList.create PriceList.save Invalid,NotFound,Conflict,Unavailable,Forbidden
 priceList.update PriceList.save Invalid,NotFound,Conflict,Unavailable,Forbidden
 priceList.archive PriceList.archive NotFound,Unavailable,Forbidden
 payments.record Payments.record NotFound,Forbidden,Invalid,Conflict,Unavailable
-payments.remove Payments.remove NotFound,Conflict,Forbidden
-payments.listForDocument Payments.listFor NotFound,Forbidden
-payments.listForExpense Payments.listFor NotFound,Forbidden
+payments.remove Payments.remove NotFound,Conflict,Invalid,Unavailable,Forbidden
+payments.listForDocument Payments.listFor NotFound,Unavailable,Forbidden
+payments.listForExpense Payments.listFor NotFound,Unavailable,Forbidden
 expenses.list Expenses.list Invalid,Unavailable,Forbidden
 expenses.record Expenses.record Invalid,NotFound,Conflict,Unavailable,Forbidden
 expenses.get Expenses.get NotFound,Unavailable,Forbidden
