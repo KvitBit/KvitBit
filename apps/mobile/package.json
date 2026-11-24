@@ -4,6 +4,9 @@
   "private": true,
   "type": "module",
   "main": "./index.ts",
+  "exports": {
+    "./release/*": "./release/*.ts"
+  },
   "scripts": {
     "start": "expo start",
     "build": "bun run build:pwa",

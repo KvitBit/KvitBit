@@ -6,6 +6,7 @@ import { ApiProvider } from "../src/runtime/api-runtime";
 import { SessionProvider, useSession } from "../src/session/session-provider";
 import { ThemeProvider, useAppTheme } from "../src/theme/theme-provider";
 import { OverlayProvider } from "../src/ui/overlay";
+import { UpdateBanner } from "../src/updates";
 
 function Navigator() {
   const session = useSession();
@@ -22,6 +23,7 @@ function Navigator() {
             contentStyle: { backgroundColor: native.colors.surface },
           }}
         />
+        <UpdateBanner />
       </OverlayProvider>
     </ApiProvider>
   );
