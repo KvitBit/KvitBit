@@ -422,7 +422,7 @@ describe("Proformas: Payment Tax Documents (P2) and the Final Invoice (D8)", () 
   });
 
   test("auto-send skips are audited on the PTD; a refused send keeps the payment and its PTD", async () => {
-    const [token, refused, sent, tokenHistory, refusedHistory, list] = ok(
+    const [token, refused, illegal, sent, tokenHistory, refusedHistory, illegalHistory, list] = ok(
       await run(
         Effect.gen(function* () {
           const d = yield* Documents;
@@ -434,16 +434,22 @@ describe("Proformas: Payment Tax Documents (P2) and the Final Invoice (D8)", () 
             pay(pf.id, "100"),
           );
           yield* f.failSends(
-            new Invalid({ issues: [{ path: ["recipients"], code: "request.malformed" }] }),
+            new Invalid({
+              issues: [{ path: ["to"], code: "request.malformed", params: { reason: "required" } }],
+            }),
           );
           const refused = yield* pay(pf.id, "100");
+          yield* f.failSends(new Conflict({ reason: "illegal_transition" }));
+          const illegal = yield* pay(pf.id, "100");
           const ptdOf = (r: typeof token) => docId(r.issued[0] as DocumentView);
           return [
             token,
             refused,
+            illegal,
             yield* f.sent(WS),
             yield* d.history(ptdOf(token)),
             yield* d.history(ptdOf(refused)),
+            yield* d.history(ptdOf(illegal)),
             yield* (yield* Payments).listFor({ document: pf.id }),
           ] as const;
         }),
@@ -451,15 +457,17 @@ describe("Proformas: Payment Tax Documents (P2) and the Final Invoice (D8)", () 
     );
     const skip = (h: typeof tokenHistory) => h.find((e) => e.action === "payment.autoSendSkipped");
     expect(skip(tokenHistory)?.reason).toBe("caller_cannot_send");
-    expect(skip(refusedHistory)?.reason).toBe("Invalid:request.malformed");
+    expect(skip(refusedHistory)?.reason).toBe("Invalid:to:request.malformed");
+    expect(skip(illegalHistory)?.reason).toBe("Conflict:illegal_transition");
     expect(refused.issued).toHaveLength(1);
+    expect(illegal.issued).toHaveLength(1);
     expect(sent).toEqual([]);
-    expect(list).toHaveLength(2);
+    expect(list).toHaveLength(3);
     expect(token.settlement).toBe("partially_paid");
   });
 
   test("auto-send: an invariant failure of the sender rolls the whole payment back", async () => {
-    const [missing, stale, list, sent] = ok(
+    const [missing, stale, invalid, linesInvalid, list, sent] = ok(
       await run(
         Effect.gen(function* () {
           const f = yield* PaymentFixtures;
@@ -469,9 +477,20 @@ describe("Proformas: Payment Tax Documents (P2) and the Final Invoice (D8)", () 
           const missing = yield* Effect.flip(pay(pf.id, "100"));
           yield* f.failSends(new Conflict({ reason: "revision_changed", currentRevision: 9 }));
           const stale = yield* Effect.flip(pay(pf.id, "100"));
+          // An Invalid that is not (only) about recipients is a document failure, not a skip.
+          const linesInvalid = new Invalid({
+            issues: [
+              { path: ["to"], code: "request.malformed" },
+              { path: ["lines"], code: "document.lines_required" },
+            ],
+          });
+          yield* f.failSends(linesInvalid);
+          const invalid = yield* Effect.flip(pay(pf.id, "100"));
           return [
             missing,
             stale,
+            invalid,
+            linesInvalid,
             yield* (yield* Payments).listFor({ document: pf.id }),
             yield* f.sent(WS),
           ] as const;
@@ -480,6 +499,7 @@ describe("Proformas: Payment Tax Documents (P2) and the Final Invoice (D8)", () 
     );
     expect(missing).toBeInstanceOf(NotFound);
     expect(stale).toEqual(new Conflict({ reason: "revision_changed", currentRevision: 9 }));
+    expect(invalid).toEqual(linesInvalid);
     expect(list).toEqual([]);
     expect(sent).toEqual([]);
   });

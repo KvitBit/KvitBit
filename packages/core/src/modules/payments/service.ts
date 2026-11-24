@@ -164,6 +164,9 @@ const taxDocumentFor = (workspaceId: WorkspaceId, proforma: DocumentId, row: Pay
     return { row: linked, issued: [yield* autoSend(workspaceId, ptdId, ptd)] };
   });
 
+/** A send refusal about the recipients only (`SendOptions.to`, defaulted from the Contact). */
+const isRecipientIssue = (issue: Invalid["issues"][number]) => issue.path[0] === "to";
+
 /** A skipped auto-send, recorded on the PTD so the gap is visible in its history. */
 const skipped = (workspaceId: WorkspaceId, ptd: DocumentId, reason: string) =>
   appendAudit({
@@ -178,7 +181,7 @@ const skipped = (workspaceId: WorkspaceId, ptd: DocumentId, reason: string) =>
  * P2 auto-send (7.2) when `autoSendPaymentTaxDocument` is on, as the caller, in a savepoint of
  * the recording transaction. The payment and its PTD commit either way: a caller who may not
  * send (a token without documents:write) or a delivery precondition the sender refuses
- * (Conflict{illegal_transition}, Invalid: e.g. no recipient) skips the send with an audit entry
+ * (Conflict{illegal_transition}, an Invalid only about `to`: e.g. no recipient) skips the send with an audit entry
  * on the PTD, the savepoint dropping any partial delivery; NotFound, other Conflicts and
  * infrastructure failures roll the payment back. Returns the PTD view as of the send.
  */
@@ -193,18 +196,25 @@ const autoSend = (workspaceId: WorkspaceId, ptdId: DocumentId, ptd: DocumentView
     const sender = yield* DocumentSender;
     const sent = yield* store.transaction(sender.send(ptdId)).pipe(
       Effect.as(true),
-      // Recoverable delivery refusals only: the PTD's state (illegal_transition) or its
-      // recipients (Invalid). A missing PTD or a revision race is an invariant failure.
+      // Recoverable delivery refusals only: the PTD's state (illegal_transition) or an Invalid
+      // whose every issue is about the recipients (`to`, defaulted from the Contact). A missing
+      // PTD, a revision race or any other validation issue is an invariant failure.
       Effect.catchTags({
         Conflict: (e) =>
           e.reason === "illegal_transition"
             ? Effect.as(skipped(workspaceId, ptdId, `Conflict:${e.detail ?? e.reason}`), false)
             : Effect.fail(e),
         Invalid: (e) =>
-          Effect.as(
-            skipped(workspaceId, ptdId, `Invalid:${e.issues.map((i) => i.code).join(",")}`),
-            false,
-          ),
+          e.issues.length > 0 && e.issues.every(isRecipientIssue)
+            ? Effect.as(
+                skipped(
+                  workspaceId,
+                  ptdId,
+                  `Invalid:${e.issues.map((i) => `${i.path.join(".")}:${i.code}`).join(",")}`,
+                ),
+                false,
+              )
+            : Effect.fail(e),
       }),
     );
     if (!sent) return ptd;
