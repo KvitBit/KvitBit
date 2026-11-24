@@ -18,12 +18,7 @@ import {
   StartedDeliveries,
 } from "../../src/modules/documents";
 import { RecurringIssuance } from "../../src/modules/recurring";
-import {
-  ExportJobs,
-  FakeExportWorkflow,
-  FakeReportPdfRenderer,
-  ReportsSourceMemory,
-} from "../../src/modules/reports";
+import { ExportJobs, FakeExportWorkflow, FakeReportPdfRenderer } from "../../src/modules/reports";
 import { ShareLinkKeysTest, ShareWorkspacesFake } from "../../src/modules/sharelinks";
 import {
   BankAccountReferencesFake,
@@ -65,7 +60,6 @@ describe("CoreLive", () => {
       ShareLinkKeysTest,
       // PENDING seams, removed once bound in CoreLive.
       BankAccountReferencesFake.layer,
-      ReportsSourceMemory,
       ShareWorkspacesFake,
     ).pipe(Layer.provideMerge(InMemoryPortsLive()));
     const exit = await Effect.runPromiseExit(

@@ -83,6 +83,7 @@ import {
   RecurringDocumentLinkLive,
   WorkspaceSeriesLive,
 } from "./bindings";
+import { ReportsSourceLive } from "./reportsSource";
 
 /** One repository port per module, plus the FX fixing cache (the `fx_fixings` table). */
 export type CoreRepos =
@@ -132,6 +133,7 @@ const readSeams = Layer.mergeAll(
 );
 
 const identity = Layer.mergeAll(
+  ReportsSourceLive,
   WorkspaceSeriesLive,
   DocumentPriceListLive,
   DocumentContactsLive,
