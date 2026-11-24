@@ -134,3 +134,17 @@ export const fxFixings = pgTable("fx_fixings", {
   rates: jsonb("rates").notNull(),
   fetchedAt: instant("fetched_at").notNull().defaultNow(),
 });
+
+/**
+ * `FxFixingCache` answers by request date: a weekend or holiday request resolves to an earlier
+ * fixing. One row per requested date, naming the `fx_fixings` row that answered it; the cache
+ * writes both in one statement. No foreign key, so `fx_fixings` stays droppable on its own.
+ */
+export const fxFixingRequests = pgTable(
+  "fx_fixing_requests",
+  {
+    requestedOn: date("requested_on", { mode: "string" }).primaryKey(),
+    fixingDate: date("fixing_date", { mode: "string" }).notNull(),
+  },
+  (t) => [check("fx_fixing_requests_not_after_request", sql`${t.fixingDate} <= ${t.requestedOn}`)],
+);
