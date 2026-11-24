@@ -69,6 +69,190 @@
       "toolVersions": {
         "bun": "1.4.2"
       }
+    },
+    {
+      "id": "numbering.allocator",
+      "skill": "verify-numbering",
+      "tier": 1,
+      "kind": "tlc",
+      "syncCommit": "77a5bb7",
+      "spec": "formal/numbering/Numbering.tla",
+      "config": "formal/numbering/Numbering.cfg",
+      "wideConfig": "formal/numbering/Numbering_wide.cfg",
+      "mutants": [
+        {
+          "name": "no-reservation",
+          "config": "formal/numbering/Numbering_mutant_no_reservation.cfg",
+          "expect": "violation",
+          "violates": {
+            "kind": "invariant",
+            "name": "ReservedForever"
+          },
+          "description": "allocate formats the counter without reservations.tryReserve, so an overridden number is issued unreserved"
+        },
+        {
+          "name": "counter-kept-on-rollback",
+          "config": "formal/numbering/Numbering_mutant_counter_kept_on_rollback.cfg",
+          "expect": "violation",
+          "violates": {
+            "kind": "invariant",
+            "name": "Gapless"
+          },
+          "description": "counters.set survives the issue transaction's rollback, leaving a gap"
+        },
+        {
+          "name": "release-old-number",
+          "config": "formal/numbering/Numbering_mutant_release_old_number.cfg",
+          "expect": "violation",
+          "violates": {
+            "kind": "invariant",
+            "name": "ReservedForever"
+          },
+          "description": "an override frees the document's old number"
+        },
+        {
+          "name": "override-moves-counter",
+          "config": "formal/numbering/Numbering_mutant_override_moves_counter.cfg",
+          "expect": "violation",
+          "violates": {
+            "kind": "action",
+            "name": "OverrideKeepsCounter"
+          },
+          "description": "an override raises the series counter past the new number"
+        },
+        {
+          "name": "rollback-keeps-reservation",
+          "config": "formal/numbering/Numbering_mutant_rollback_keeps_reservation.cfg",
+          "expect": "violation",
+          "violates": {
+            "kind": "invariant",
+            "name": "NoOrphanReservation"
+          },
+          "description": "a rollback leaves its reservations behind as orphans"
+        }
+      ],
+      "timeoutSeconds": 120,
+      "wideTimeoutSeconds": 300,
+      "coveredFiles": [
+        {
+          "path": "packages/core/src/modules/numbering/service.ts",
+          "sha256": "faeefd7ed054889fad92997f447d7612f98a02b7de445da4724aefccbb7e89fb"
+        },
+        {
+          "path": "packages/core/src/store/numbering.ts",
+          "sha256": "b5f8672dba61c5f1318bf395de9a382a2e3bde0487565013d934cc479afb3c54"
+        },
+        {
+          "path": "packages/core/src/store/CoreStore.ts",
+          "sha256": "7971299fe86c8505f841c237ef8c103c1542b71174f6a530774c12e62c65fa03"
+        },
+        {
+          "path": "packages/core/src/modules/documents/lifecycle.ts",
+          "sha256": "52ca553c677840c31266401da33f1ed8da783a53deae187706d6d24f89a1285a"
+        },
+        {
+          "path": "packages/core/src/modules/documents/service.ts",
+          "sha256": "22d384d76b162172ee42625f2c85896ffad51634b73639f7ff6883d1571eb769"
+        },
+        {
+          "path": "packages/core/src/modules/documents/record.ts",
+          "sha256": "14ad42c41aa69a4ef1544ddf013f4484dc0f83e1e58bcb29663116ad4ea1c234"
+        },
+        {
+          "path": "packages/db/drizzle/20261123175822_init/migration.sql",
+          "sha256": "24d0444ee41ff55435024cba7e373ef8f89d2cfb82a2f13b218825614259832c"
+        }
+      ],
+      "guardedSymbols": [
+        "NumberingSeries.allocate",
+        "NumberingSeries.override",
+        "reserveNumber",
+        "allocateNumber",
+        "CoreStore.counters.lock",
+        "CoreStore.counters.set",
+        "CoreStore.reservations.tryReserve",
+        "numbered",
+        "issue",
+        "editIssued",
+        "Documents.edit",
+        "NUMBER_PER_KIND",
+        "number_reservations_pkey",
+        "number_reservations_document_fk",
+        "numbering_counters_pkey"
+      ],
+      "bounds": "base: 2 issues from stored drafts, 1 override, 2 periods, MaxSeq 3, 1 pre-issued document, a rollback at any statement that is not waiting, deadlock checked; 29,127 distinct states, exhaustive within the bound. wide: adds 1 issue from input; 324,673 distinct states. A second override is outside every bound (over 28.6 million states)",
+      "assumptions": [
+        "One Workspace, one DocumentKind, one YYYY-NNNN series: reservation keys include workspace and kind, and distinct sequences format to distinct numbers (Numbering.format, covered by verify-vat-numbering-math)",
+        "Steps are Postgres READ COMMITTED statements on the committed schema: counters.lock is SELECT ... FOR UPDATE on numbering_counters; reservations.tryReserve is INSERT ... ON CONFLICT DO NOTHING on number_reservations_pkey, which waits for an open inserter of the same key, and a free key for a document without a row fails number_reservations_document_fk (no Postgres CoreStore exists yet; the in-memory store serializes whole transactions and has no foreign keys)",
+        "A waiting transaction does not crash (no lock timeout), so a wait cycle is reported as a deadlock",
+        "Manual override numbers range over the series' own number space; numbers outside it cannot meet the allocator",
+        "Not modeled: configure(nextNumber) raising the counter (an intended gap, W3), pattern changes, Credit Note, Payment Tax Document and correction numbering"
+      ],
+      "toolVersions": {
+        "tla2tools": "1.7.4",
+        "java": "17"
+      }
+    },
+    {
+      "id": "numbering.replay",
+      "skill": "verify-numbering",
+      "tier": 1,
+      "kind": "replay",
+      "syncCommit": "77a5bb7",
+      "replay": ["formal/numbering/numbering.replay.test.ts"],
+      "timeoutSeconds": 120,
+      "coveredFiles": [
+        {
+          "path": "packages/core/src/modules/numbering/service.ts",
+          "sha256": "faeefd7ed054889fad92997f447d7612f98a02b7de445da4724aefccbb7e89fb"
+        },
+        {
+          "path": "packages/core/src/store/numbering.ts",
+          "sha256": "b5f8672dba61c5f1318bf395de9a382a2e3bde0487565013d934cc479afb3c54"
+        },
+        {
+          "path": "packages/core/src/store/memory.ts",
+          "sha256": "b12cacb2313336ffa34d3a9f28b13a4dcf9915bc7a00f68e9c0689a12c3a9eba"
+        },
+        {
+          "path": "packages/core/src/store/CoreStore.ts",
+          "sha256": "7971299fe86c8505f841c237ef8c103c1542b71174f6a530774c12e62c65fa03"
+        },
+        {
+          "path": "packages/core/src/modules/documents/lifecycle.ts",
+          "sha256": "52ca553c677840c31266401da33f1ed8da783a53deae187706d6d24f89a1285a"
+        },
+        {
+          "path": "packages/core/src/modules/documents/service.ts",
+          "sha256": "22d384d76b162172ee42625f2c85896ffad51634b73639f7ff6883d1571eb769"
+        },
+        {
+          "path": "packages/core/src/modules/documents/record.ts",
+          "sha256": "14ad42c41aa69a4ef1544ddf013f4484dc0f83e1e58bcb29663116ad4ea1c234"
+        }
+      ],
+      "guardedSymbols": [
+        "Documents.issue",
+        "Documents.edit",
+        "Documents.get",
+        "numbered",
+        "editIssued",
+        "NumberingSeries.allocate",
+        "NumberingSeries.override",
+        "NumberingSeries.view",
+        "reserveNumber",
+        "CoreStoreMemory.counters",
+        "CoreStoreMemory.reservations.tryReserve",
+        "CoreStoreMemory.transaction"
+      ],
+      "bounds": "11 hand-written serial traces (9 projections of Numbering.tla traces within the TLC bounds, 1 override of an override beyond them, 1 issue from input that commits only in memory) plus 100 seeded sampled traces of 6 steps checked against the model's serial transitions (property test, not exhaustive, not within a TLC bound)",
+      "assumptions": [
+        "In-memory store: one top-level transaction at a time and no foreign keys, so only serial projections of model traces replay, with the foreign-key check passing; statement interleaving and the number_reservations_document_fk failure under Postgres are left to the pg-contention job",
+        "Documents are read back through Documents.get after each step; reservations are probed with tryReserve in a transaction that always rolls back"
+      ],
+      "toolVersions": {
+        "bun": "1.4.2"
+      }
     }
   ]
 }
