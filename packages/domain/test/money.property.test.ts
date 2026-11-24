@@ -123,6 +123,7 @@ describe("round: half away from zero over the full residue space", () => {
               const money = moneyOf(value, scale + extra, currency);
               const expected = roundHalfAway(value, extra);
               const rounded = MoneyMath.round(money);
+              if (rounded.currency !== currency) wrong.push(`${currency} currency lost`);
               if (!BigDecimal.equals(rounded.amount, dec(expected, scale))) {
                 wrong.push(`${currency} round(${BigDecimal.format(money.amount)})`);
               }
@@ -146,6 +147,33 @@ describe("round: half away from zero over the full residue space", () => {
     // part past 2^53, so neither the grid nor the float-hostile case can shrink silently.
     expect(checked).toBe(53_280);
     expect(WHOLES.some((w) => w > BigInt(Number.MAX_SAFE_INTEGER))).toBe(true);
+    expect(wrong.slice(0, 5)).toEqual([]);
+  });
+
+  test("round at an explicit scale other than the currency's: every residue of 1 and 2 dropped digits", () => {
+    let checked = 0;
+    const wrong: Array<string> = [];
+    for (const target of [0, 1, 2, 3, 4, 6]) {
+      for (const extra of [1, 2]) {
+        const unit = 10n ** BigInt(extra);
+        for (const whole of [0n, 3n, 2n ** 60n + 7n]) {
+          for (let r = 0n; r < unit; r++) {
+            for (const sign of [1n, -1n]) {
+              checked++;
+              const value = sign * (whole * unit + r);
+              const rounded = MoneyMath.round(moneyOf(value, target + extra), target);
+              if (
+                rounded.currency !== CZK ||
+                !BigDecimal.equals(rounded.amount, dec(roundHalfAway(value, extra), target))
+              ) {
+                wrong.push(`round(${value}e-${target + extra}, ${target})`);
+              }
+            }
+          }
+        }
+      }
+    }
+    expect(checked).toBe(6 * 3 * (10 + 100) * 2);
     expect(wrong.slice(0, 5)).toEqual([]);
   });
 

@@ -5,7 +5,7 @@ description: Exhaustively check Money rounding and arithmetic (packages/domain/s
 
 # Verify Money and access scopes
 
-**Property (money).** Rounding is half away from zero at the currency's ISO 4217 minor unit for every residue, symmetric in sign, and add, subtract, negate, compare and sum are exact and never mix currencies.
+**Property (money).** Rounding is half away from zero at the currency's ISO 4217 minor unit (or an explicit scale) for every residue of one to three discarded digits, symmetric in sign, and add, subtract, negate, compare and sum are exact and never mix currencies.
 
 **Harm (money).** A wrong rounding or minor unit puts the wrong VAT or total on a legally binding tax document, and a silent currency mix adds euros to crowns.
 
@@ -29,20 +29,20 @@ If `git diff 77a5bb7 -- <those paths>` is non-empty, run the checks.
 ## Run
 
 ```sh
-bun test --cwd packages/domain test/money.property.test.ts
-bun test --cwd packages/api-contract test/access.property.test.ts
+bun test --cwd packages/domain ./test/money.property.test.ts ./test/money.test.ts
+bun test --cwd packages/api-contract ./test/access.property.test.ts ./test/access.test.ts
 ```
 
-About 0.6 seconds and 5 seconds. Tool: bun 1.4.2 (root `packageManager`; also confirmed on bun 1.4.4), effect 4.1.4. `bun run test` runs both with their packages.
+About 0.6 seconds and 5.5 seconds. The example files carry cases the enumeration relies on rather than repeats: empty and foreign-currency `sum`, inconsistent presets, reordered preset lists, and the OAuth precedence examples. Tool: bun 1.4.2 (root `packageManager`; also confirmed on bun 1.4.4), effect 4.1.4. `bun run test` runs both with their packages.
 
-The repo-wide coverage record is `formal/manifest.json`, kept centrally; `bun run verify:formal --check-digests` reports checks whose covered files changed since they were last confirmed. Update these entries there when you move the sync commit.
+The repo-wide coverage record is `formal/manifest.json`, kept centrally by the ADR-0005 formal runner (it lands with the integration of the ADR-0005 streams, not in this skill's commit); once present, `bun run verify:formal --check-digests` reports checks whose covered files changed since they were last confirmed. Update these entries there when you move the sync commit.
 
 ## Bounds (exact counts, asserted in the tests)
 
 Money (oracle: BigInt):
 
 - `minorUnitScale` on all 17,576 codes `AAA`..`ZZZ`; `fromMinorUnits`/`toMinorUnits` round trip on each code × 7 unit values (123,032).
-- Rounding: one currency per scale that occurs (JPY 0, CZK 2, KWD 3, CLF 4) × 1, 2 and 3 digits below the minor unit with every residue (10 + 100 + 1,000) × 6 whole parts (0, 1, 9, 10, 12,345, 2^60 + 7) × both signs: 53,280 amounts (a fixed count; the test also requires a whole part past 2^53), each checked for `round`, explicit-scale `round`, `toMinorUnits` and `round(-x) = -round(x)`. Amounts already at or coarser than the minor unit: 5,213, unchanged.
+- Rounding: one currency per scale that occurs (JPY 0, CZK 2, KWD 3, CLF 4) × 1, 2 and 3 digits below the minor unit with every residue (10 + 100 + 1,000) × 6 whole parts (0, 1, 9, 10, 12,345, 2^60 + 7) × both signs: 53,280 amounts (a fixed count; the test also requires a whole part past 2^53), each checked for the returned currency, for `round`, explicit-scale `round`, `toMinorUnits` and `round(-x) = -round(x)`. Explicit scales 0, 1, 2, 3, 4 and 6 on CZK × every residue of 1 and 2 dropped digits × 3 whole parts × both signs: 1,320. Amounts already at or coarser than the minor unit: 5,213, unchanged.
 - Arithmetic: every pair from the grid v / 10^s, v in -12..12, s in 0..3 (100 values, 10,000 pairs) for add, subtract, commutativity, a - b = a + (-b), compare, equals, and `isZero`/`isNegative` on every grid value; every triple from v in -4..4, s in {0, 3} (5,832) for associativity and `sum`; all 30 ordered pairs of 6 different currencies fail with `CurrencyMismatch{expected, actual}`.
 
 Access (oracle: 20-bit mask, bit 2i read and 2i + 1 write of area i):
@@ -50,13 +50,14 @@ Access (oracle: 20-bit mask, bit 2i read and 2i + 1 write of area i):
 - `normalizeScopes` on every subset of the 20 scopes (1,048,576): output is the closure in canonical order; idempotence follows because each closure is itself in the domain.
 - Order and duplicate insensitivity, and the plain-vs-Set input: every raw subset of the first five areas and of the last five (2,047).
 - `expandAccess` custom and `GrantedAccess` consistency: every closed set (3^10 - 1 non-empty, every storable custom grant) plus the 2,047 half-subsets (61,094 lists).
-- `accessFromOAuthScopes`: the 2,047 half-subsets × all 8 combinations of `kvitbit:read`, `kvitbit:write`, `offline_access` (16,376 requests); round trip `oauthScopesForGrant` → `accessFromOAuthScopes` on every storable custom grant (59,048). Wire codec on all 20 scopes; `Scope` rejects other areas and levels.
+- `accessFromOAuthScopes`: the 2,047 half-subsets × all 8 combinations of `kvitbit:read`, `kvitbit:write`, `offline_access` (16,376 requests); on every storable custom grant (59,048), `oauthScopesForGrant` emits exactly `kvitbit:<scope>` per stored scope in order, and `accessFromOAuthScopes` reads it back to the same grant. Wire codec on all 20 scopes; `Scope` rejects other areas and levels.
 
 ## Assumptions and what is not covered
 
 - Effect's `BigDecimal` is exact; the oracle compares with `BigDecimal.equals`, so scale (1.5 vs 1.50) is not checked.
 - Codes not in ISO 4217's list of non-2-decimal currencies use 2 decimals: a product fallback in `money.ts`, kept as is in the oracle.
-- `multiply` and the VAT engine are not covered here (see `verify-vat-numbering-math`).
+- `multiply` is not covered. `MoneyMath.round` is not the rounding the VAT engine and reports use: they call `roundAt` in `packages/core/src/engines/decimal.ts`, covered by the VAT engine check of the ADR-0005 streams (`verify-vat-numbering-math`, landing with their integration), not here.
+- Mixed OAuth requests follow the `accessFromOAuthScopes` docblock reading of 6.3: `kvitbit:write` wins over everything; `kvitbit:read` plus per-area scopes is custom on top of the ten reads. Requests mixing per-area scopes of both halves with the presets are covered only through the closed-set round trip.
 - The canonical order "per area, read before write, areas in `SCOPE_AREAS` order" comes from `access.ts` and the area list at http-mcp-contracts.md:95; the spec does not otherwise fix an order.
 - Schema-backed calls cost 15-40 µs each, so `GrantedAccess` and `accessFromOAuthScopes` run on the closed sets and half-subsets, not all 2^20 raw lists. The role cap on grants (accountant read-only) is server code and not covered.
 

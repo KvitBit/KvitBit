@@ -32,7 +32,7 @@ If `git diff 77a5bb7 -- <those paths>` is non-empty, run the check.
 bun test --cwd packages/core ./test/policy/can.property.test.ts ./test/store.test.ts ./test/modules/contacts/contacts.test.ts
 ```
 
-Passes in about 4 seconds (71 tests, 1 skipped: the wide bound). A `CoreStore.afterCommit failed` log line is an expected store test, not a failure.
+Passes in about 5 seconds (72 tests, 1 skipped: the wide bound). A `CoreStore.afterCommit failed` log line is an expected store test, not a failure.
 
 Wide bound (nightly, and every time you move the sync commit), about 50 seconds:
 
@@ -40,14 +40,15 @@ Wide bound (nightly, and every time you move the sync commit), about 50 seconds:
 KVITBIT_FORMAL_WIDE=1 bun test --cwd packages/core ./test/policy/can.property.test.ts -t wide
 ``` Tool: bun 1.4.2 (root `packageManager`; also confirmed on bun 1.4.4), effect 4.1.4. `bun run test` runs it with the rest of `@kvitbit/core`.
 
-The repo-wide coverage record is `formal/manifest.json`, kept centrally; `bun run verify:formal --check-digests` reports checks whose covered files changed since they were last confirmed. Update this skill's entry there when you move the sync commit.
+The repo-wide coverage record is `formal/manifest.json`, kept centrally by the ADR-0005 formal runner (it lands with the integration of the ADR-0005 streams, not in this skill's commit); once present, `bun run verify:formal --check-digests` reports checks whose covered files changed since they were last confirmed. Update this skill's entry there when you move the sync commit.
 
 ## Bounds (exact counts, asserted in the test)
 
 - 54 Actions, 4 roles, 10 scope areas, 20 scopes, 4 System jobs, 5 Caller kinds. Roles and jobs are compared with the `Role` and `SystemJob` schemas, and the Caller kinds with a compile-checked record of `Caller["_tag"]`, so a new role, job or caller kind fails the run (or typecheck) until the enumeration covers it.
 - `actionScope` equals the spec's area and level for each of the 39 Actions that scopes narrow (session-only and edge-holder Actions ignore scopes).
 - Member, normalized grants: every role × every grant where each area is none, read, or read and write (3^10 = 59,049) plus the session (`"all"`) × every Action: 12,754,800 `can` calls. Also checks that raising one area by one level never removes an Action and that no grant exceeds its role's session.
-- Member, raw scope lists: every role × every pair of areas (45) × all 16 raw states of the pair (none, read, write only, both; listed write first) × every Action: 155,520 calls. In the default run this is the only domain that catches a lost write ⇒ read rule, since normalized grants always carry the read.
+- Member, raw scope lists: every role × every pair of areas (45) × all 16 raw states of the pair (none, read, write only, both), each in two fixed orders (area i first with write before read, and that list reversed), plus the all-ten-areas write-only list in both orders, × every Action: 311,472 calls. In the default run this is the only domain that catches a lost write ⇒ read rule, since normalized grants always carry the read.
+- Member, channel and client: each role × session and all twenty scopes × 4 channels × session or MCP client × every Action (3,456 calls) give the same answer.
 - Wide (`KVITBIT_FORMAL_WIDE=1`): every role × every raw scope list, each area none, read, write only, or both (4^10 = 1,048,576 lists) × every Action: 226,492,416 `can` calls. This covers every scope combination; passed at the sync commit.
 - Non-Member callers: Account, ShareLinkVisitor (with and without `signedInUser`), InvitationHolder, sealed System for each of the 4 jobs, and an unsealed spread copy of each (12 callers) × every Action.
 - `authorizeInWorkspace`: 44 callers (each role with session, all twenty scopes and no scopes, each System job, in Workspace A and B, plus the 12 above) × every Action.
@@ -56,10 +57,12 @@ The repo-wide coverage record is `formal/manifest.json`, kept centrally; `bun ru
 ## Assumptions and what is not covered
 
 - `can` ignores caller fields other than `_tag`, `role`, `scopes` and the System `job` and seal; locale, channel, client and IDs take one value each.
-- The scope area of actions that the MCP table does not list comes from R1's area for the action's noun (`member`/`invitation` → `members`, `schedule` → `templates`, `priceList` → `catalog`), and the level from the table row (row 274 and `invitation.read` read, every other Workspace row writes). If the spec ever states a different area, update the oracle's `AREA_OF_NOUN`.
+- The scope area of actions that the MCP table does not list comes from R1's area for the action's noun. `member` → `members` and `priceList` → `catalog` follow R1's area names; `invitation` → `members` and `schedule` → `templates` are conventions, not spec statements. The level follows the table row (row 274 and `invitation.read` read, every other Workspace row writes).
+- Interpretations of the table: row 274's `*.read` means the actions it lists; `invitation.read` sits in the managers row (279), so it is managers only and not System. For an owner's Leave, a token without `members:write` is `Forbidden{member.leave}` before R3's `Conflict` (R1 first, as `membership.ts` documents). If the spec ever states a different area, update the oracle's `AREA_OF_NOUN`.
 - A raw write-only token is treated as holding read (core-ports.md:171 states write implies read at grant time; the oracle applies it at check time too).
 - When a membership change both touches the owner and needs `member.manageAdmins`, the spec does not fix which error comes first; the test accepts either `Conflict` or `Forbidden{member.manageAdmins}`.
-- The default run covers raw lists over at most two areas plus every normalized grant; raw lists over three or more areas are covered only by the wide run. Raw lists are in canonical order in the wide run; order and duplicates are varied only in the two-area domain.
+- The default run covers raw lists over at most two areas, the all-writes list, and every normalized grant; other raw lists over three or more areas are covered only by the wide run, which lists scopes in canonical order. Order is varied only as stated above; duplicate entries are not varied.
+- `systemCaller` is covered only as sealed versus an unsealed spread copy; the immutability of a sealed caller is tested in `test/policy.test.ts`, not here.
 - R2 (a foreign record is `NotFound`) lives in the store queries. The enumeration proves the policy hands every module the caller's own `workspaceId`; the store and Contacts example tests show a foreign row is `NotFound`. Other modules' use of that `workspaceId` is not covered here. Edge caps (accountant read-only grants, `Workspaces.enter` membership lookup) are outside it.
 
 ## Drift or bug?

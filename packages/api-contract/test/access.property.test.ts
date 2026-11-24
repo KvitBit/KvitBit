@@ -216,7 +216,11 @@ describe("OAuth wire form (http-mcp-contracts 6.3)", () => {
       if (mask === 0) continue;
       checked++;
       const grant = { access: "custom" as const, scopes: listOf(mask) };
-      const back = accessFromOAuthScopes(oauthScopesForGrant(grant));
+      const wire = oauthScopesForGrant(grant);
+      if (wire.join() !== grant.scopes.map((s) => `kvitbit:${s}`).join()) {
+        wrong.push(`token scopes ${grant.scopes.join(",")}`);
+      }
+      const back = accessFromOAuthScopes(wire);
       if (back?.access.access !== "custom" || back.access.scopes.join() !== grant.scopes.join()) {
         wrong.push(`round trip ${grant.scopes.join(",")}`);
         if (wrong.length >= 5) break;

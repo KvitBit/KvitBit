@@ -446,7 +446,15 @@ describe("can: exhaustive against core-ports 2.3", () => {
     const mismatches: Array<string> = [];
     let checked = 0;
     for (const role of ROLES) {
-      for (const scopes of sets) {
+      // Each pair in two orders (area i first, and fully reversed), plus every area write-only.
+      const allWrites = AREAS.map((area) => `${area}:write` as Scope);
+      const lists = [
+        ...sets,
+        ...sets.map((l) => [...l].reverse()),
+        allWrites,
+        [...allWrites].reverse(),
+      ];
+      for (const scopes of lists) {
         const caller = member(role, { scopes });
         const set = new Set(scopes);
         for (const action of ACTIONS) {
@@ -458,7 +466,7 @@ describe("can: exhaustive against core-ports 2.3", () => {
         }
       }
     }
-    expect(checked).toBe(ROLES.length * 720 * ACTIONS.length);
+    expect(checked).toBe(ROLES.length * (2 * 720 + 2) * ACTIONS.length);
     expect(mismatches.slice(0, 5)).toEqual([]);
   });
 
@@ -504,6 +512,35 @@ describe("can: exhaustive against core-ports 2.3", () => {
     },
     600_000,
   );
+
+  test("Member: channel and client never change the answer (2 scope sets × 4 channels × 2 clients)", () => {
+    const mismatches: Array<string> = [];
+    let checked = 0;
+    for (const role of ROLES) {
+      for (const scopes of ["all", ALL_SCOPES] as const) {
+        for (const channel of ["web", "mobile", "api", "mcp"] as const) {
+          for (const client of [null, { kind: "mcp", id: "g-1", name: "Client" }] as const) {
+            const caller = member(role, {
+              scopes,
+              channel,
+              client: client as MemberCaller["client"],
+            });
+            const set = scopes === "all" ? "all" : new Set(scopes);
+            for (const action of ACTIONS) {
+              checked++;
+              if (can(caller, action) !== specMember(role, set, action)) {
+                mismatches.push(
+                  `${role} ${channel} ${client === null ? "session" : "client"} ${action}`,
+                );
+              }
+            }
+          }
+        }
+      }
+    }
+    expect(checked).toBe(4 * 2 * 4 * 2 * ACTIONS.length);
+    expect(mismatches).toEqual([]);
+  });
 
   test("non-Member callers hold exactly their column; no caller kind escalates", () => {
     const mismatches: Array<string> = [];
