@@ -80,17 +80,26 @@ describe("credit notes and advances", () => {
           currency: EUR,
           fx: fx("25.5"),
           finalInvoice: true,
-          // stored vatCzk of the full bucket (42 x 25.5) must not be used for the remainder
+          // reportFigures: the deduction's CZK VAT at the Final Invoice's fixing (21 x 25.5),
+          // never at the PTD's; the full bucket is the stored net 535.5 plus that
           buckets: [bucket("standard", "21", "200", "42", "1071")],
-          advanceDeductions: [bucket("standard", "21", "100", "21", "525")],
+          advanceDeductions: [bucket("standard", "21", "100", "21", "535.5")],
+        }),
+        // without CZK VAT on the buckets the net VAT is converted at the document's fixing
+        document(31, {
+          currency: EUR,
+          fx: fx("25.5"),
+          finalInvoice: true,
+          buckets: [bucket("standard", "21", "200", "42")],
+          advanceDeductions: [bucket("standard", "21", "100", "21")],
         }),
       ],
       [],
       PAYER,
       NOV,
     );
-    // remainder 100 / 21 EUR at 25.5
-    expect(vatTotals(v)).toEqual([["standard", "2550", "535.5"]]);
+    // remainder 100 / 21 EUR at 25.5, twice
+    expect(vatTotals(v)).toEqual([["standard", "5100", "1071"]]);
   });
 });
 

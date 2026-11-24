@@ -663,6 +663,7 @@ describe("issueFinalInvoice (D8)", () => {
         totals: fi.totals,
         currency: fi.totals.gross.currency,
         pricesIncludeVat: false,
+        fx: null,
       },
       () => true,
     );
@@ -777,7 +778,7 @@ describe("issueFinalInvoice (D8)", () => {
 
   test("EUR advances at other fixings: the Final Invoice declares its net VAT at its own fixing, as the VAT report does (§37a)", async () => {
     // The advance-chain property test's seed-58256 counterexample (formal finding F1).
-    const [ptds, fi, cn, reported] = ok(
+    const [ptds, fi, cn, reported, full] = ok(
       await run(
         Effect.gen(function* () {
           const d = yield* docs;
@@ -805,7 +806,7 @@ describe("issueFinalInvoice (D8)", () => {
             advanceDeductions: figures.advanceDeductions,
           } as never);
           const cn = yield* d.correct(fi.id, { reason: "storno", lines: "full" });
-          return [ptds, fi, cn, reported] as const;
+          return [ptds, fi, cn, reported, figures.totals] as const;
         }),
         {
           fixings: [
@@ -827,7 +828,31 @@ describe("issueFinalInvoice (D8)", () => {
     ]);
     expect(str(fi.totals.vatCzk?.amount ?? dec("0"))).toBe("57112.25");
     expect(reported.map((b) => str(b.vat))).toEqual(["57112.25"]);
+    // Revenue's full supply: 5057.28 EUR at the Final Invoice's fixing, not the advances' fixings.
+    expect(full.buckets.map((b) => (b.vatCzk === null ? null : str(b.vatCzk)))).toEqual([
+      "123696.01",
+    ]);
     expect(cn.totals).toEqual(VatMath.negate(fi.totals));
+  });
+
+  test("a supply line of a prepaid EUR Final Invoice is credited at the Final Invoice's fixing, whatever the advance's", async () => {
+    const credit = ok(
+      await run(
+        Effect.gen(function* () {
+          const d = yield* docs;
+          const p = yield* issueProforma({
+            currency: EUR,
+            lines: [{ description: "Služba", unitPrice: dec("100") }],
+          });
+          yield* pay(p.id, "60.50", "2026-11-20" as IsoDate);
+          const fi = yield* d.issueFinalInvoice(p.id);
+          return yield* d.correct(fi.id, { reason: "sleva", lines: [{ line: lineOf(fi, 0) }] });
+        }),
+        { fixings: [fixing("2026-11-20", "24.000"), fixing("2026-11-23", "25.000")] },
+      ),
+    );
+    // 21 EUR VAT at 25: 525 CZK, within the Final Invoice's open supply (10.50 net + 10.50 deducted).
+    expect(buckets(credit)).toEqual([["standard", "21", "-100", "-21", "-121", "-525"]]);
   });
 
   test("checks: unpaid Proforma, not a Proforma, draft, cancelled", async () => {
@@ -977,6 +1002,7 @@ describe("council follow-ups", () => {
         totals: rest.totals,
         currency: rest.totals.gross.currency,
         pricesIncludeVat: false,
+        fx: null,
       },
       () => true,
     ).advanceDeductions;

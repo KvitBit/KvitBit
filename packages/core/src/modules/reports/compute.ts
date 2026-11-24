@@ -18,7 +18,7 @@ import { BigDecimal } from "effect";
 import { daysBetween } from "../../engines/calendar";
 import { HUNDRED, roundAt, sumAll, ZERO } from "../../engines/decimal";
 import { Fx } from "../../engines/fx";
-import { TREATMENTS, VatMath } from "../../engines/vat";
+import { TREATMENTS } from "../../engines/vat";
 import type {
   ReportDocument,
   ReportExpense,
@@ -102,25 +102,52 @@ const fullBucketsCzk = (
 /**
  * The document's taxable amounts per bucket in CZK after advance deductions. Without
  * deductions each bucket keeps its stored `vatCzk`. With deductions (Final Invoice, or a Credit
- * Note reversing one) base and VAT are netted per bucket in the document currency first, and the
- * remainder is converted at the document's own fixing (the advances keep theirs on their PTDs).
- * The netting is `VatMath.netDeductions` (rule 9), the same function Documents' compose stores
- * the Final Invoice's CZK VAT with, so the document and the report cannot disagree.
+ * Note reversing one) base, VAT and CZK VAT are netted per bucket: the deductions carry their
+ * CZK VAT at the document's own fixing (`reportFigures`), so the net CZK VAT is exactly the
+ * document's stored net CZK VAT, which Documents' compose converts once at that fixing
+ * (D8, VatMath rule 9; the advances keep theirs on their PTDs). Without CZK VAT on a bucket the
+ * net VAT is converted at the document's fixing.
  */
 export const taxableBucketsCzk = (d: ReportDocument): ReadonlyArray<CzkBucket> => {
   if (d.advanceDeductions.length === 0) return fullBucketsCzk(d.totals.buckets, d.currency, d.fx);
-  const deducted = d.advanceDeductions.map((b) => ({
-    ...b,
-    base: BigDecimal.negate(b.base),
-    vat: BigDecimal.negate(b.vat),
-    gross: BigDecimal.negate(b.gross),
-    vatCzk: null,
-  }));
-  return VatMath.netDeductions(d.totals.buckets, deducted, d.currency, d.fx).map((b) => ({
+  const net = new Map<
+    string,
+    {
+      treatment: VatTreatment;
+      ratePercent: BigDecimal.BigDecimal;
+      base: BigDecimal.BigDecimal;
+      vat: BigDecimal.BigDecimal;
+      vatCzk: BigDecimal.BigDecimal | null;
+    }
+  >();
+  const add = (b: VatBucket, sign: 1 | -1) => {
+    const key = rateKey(b.treatment, b.ratePercent);
+    const slot = net.get(key) ?? {
+      treatment: b.treatment,
+      ratePercent: b.ratePercent,
+      base: ZERO,
+      vat: ZERO,
+      vatCzk: ZERO,
+    };
+    const signed = (v: BigDecimal.BigDecimal) => (sign === 1 ? v : BigDecimal.negate(v));
+    slot.base = BigDecimal.sum(slot.base, signed(b.base));
+    slot.vat = BigDecimal.sum(slot.vat, signed(b.vat));
+    slot.vatCzk =
+      slot.vatCzk === null || b.vatCzk === null
+        ? null
+        : BigDecimal.sum(slot.vatCzk, signed(b.vatCzk));
+    net.set(key, slot);
+  };
+  for (const b of d.totals.buckets) add(b, 1);
+  for (const b of d.advanceDeductions) add(b, -1);
+  return [...net.values()].map((b) => ({
     treatment: b.treatment,
     ratePercent: b.ratePercent,
     base: toCzk(b.base, d.currency, d.fx),
-    vat: b.vatCzk ?? toCzk(b.vat, d.currency, d.fx),
+    vat:
+      d.currency === CZK || b.vatCzk === null
+        ? toCzk(b.vat, d.currency, d.fx)
+        : BigDecimal.normalize(b.vatCzk),
   }));
 };
 

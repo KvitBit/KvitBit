@@ -247,8 +247,15 @@ const plan = (
     const partial = yield* partialSpec(original, input.lines);
     // Partial credits touch supply lines only, so they are capped by the uncredited supply
     // (a Final Invoice's open deductions added back): a prepaid Final Invoice stays creditable.
+    // Its CZK VAT is that supply's VAT at the original's own fixing (D8, VatMath rule 9), as
+    // the partial credit converts it, never with the PTDs' CZK VAT at their fixings.
     const supply = deductionsOpen(original, earlier)
-      ? mergeBuckets(remaining, deductionBucketsOf(original).map(negateBucket))
+      ? VatMath.netDeductions(
+          remaining,
+          deductionBucketsOf(original).map(negateBucket),
+          original.currency,
+          original.fx,
+        )
       : remaining;
     if (!withinRemainder(supply, partial.totals.buckets)) {
       return yield* exceeds(supply, original.currency);
