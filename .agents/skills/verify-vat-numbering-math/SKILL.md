@@ -84,7 +84,7 @@ The Final Invoice document and the VAT report disagree on the Final Invoice's CZ
 ## Coverage record
 
 - Sync commit: `77a5bb7`. The checks describe the covered files as they are at this commit.
-- Able-to-fail gate, run on 2026-11-24 at `77a5bb7` (rows 7-10 came from review round 1, row 11 from the council, rows 12-13 from review round 2; the chain breaks were rerun after the chain test was split into separate tests): each break below was applied to the real code, caught, reverted with `git checkout -- <file>`, and the file was green again.
+- Able-to-fail gate, run on 2026-11-24 at `77a5bb7` (rows 7-10 came from review round 1, rows 11-12 from review round 2, row 13 from the council; the chain breaks were rerun after the chain test was split into separate tests): each break below was applied to the real code, caught, reverted with `git checkout -- <file>`, and the file was green again.
 
 | Break | File | Caught by |
 |---|---|---|
