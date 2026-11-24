@@ -19,8 +19,8 @@
  * 9. Advance deductions (D8, §37a ZDPH): a document that deducts advances nets base, VAT and
  *    gross per bucket in the document currency first, then converts each net bucket's VAT once
  *    at its own fixing (rule 6). The advances keep the CZK VAT declared on their PTDs; the
- *    Final Invoice declares only its remainder, exactly as the VAT report reads it
- *    (`netDeductions`, shared by Documents' compose and ReportCompute).
+ *    Final Invoice declares only its remainder (`netDeductions`, called by Documents' compose).
+ *    ReportCompute declares the net CZK VAT the document stores, so report and document agree.
  * Non-rated treatments (exempt_intra_eu_goods, reverse_charge, outside_scope) have rate 0 and
  * vat 0. Negative lines (discounts, credit notes) follow the same rules; because rounding is
  * symmetric, `calculate` of negated lines equals `negate` of the breakdown.
