@@ -4,12 +4,13 @@
  * interleaving (a crash between claim and the provider call). The test names give the model
  * actions they replay. Skill: .agents/skills/verify-outbox-recurring.
  *
- * Crash points use seams that exist at 77a5bb7: a RecurringRepo wrapper that dies inside the
+ * Crash points use seams that exist in the code: a RecurringRepo wrapper that dies inside the
  * send transaction, a DeliveryJobs whose start dies after commit, an EmailSender wrapper that
  * dies after the provider accepted, and a delivery step that is simply not run after `claim`.
- * Core has no OutboxReconcile query for queued/sending deliveries. The "FINDING H3" test shows
- * that a claimed delivery is then stranded at 77a5bb7; the other recovery tests play the
- * designed J1a cron by calling `deliver` with the delivery id (re-execution with the same key).
+ * ReconcileDelivery is the real `reconcileStaleDeliveries` pass (J1a) past its 2 min
+ * threshold; the job it restarts (Hook) is played by calling `deliver` for each delivery the
+ * pass started, keyed by the delivery id. The H3 test shows the recurring entry points do not
+ * recover a claimed delivery and the delivery reconcile does.
  * The job's sealed System caller comes from a RecurringSweep tick (sweep.ts provides it to
  * `start`), since the seal is not exported from any entry point.
  */
@@ -56,7 +57,7 @@ import { BigDecimal, Context, Effect, Exit, Layer, Ref } from "effect";
 import { TestClock } from "effect/testing";
 
 const { RecurringIssuance } = RecurringModule;
-const { claim, deliver, dispatch, giveUp } = DocumentsModule;
+const { claim, deliver, dispatch, giveUp, reconcileStaleDeliveries } = DocumentsModule;
 
 const TODAY = "2026-11-23" as IsoDate;
 const NOW = Date.UTC(2026, 10, 23, 9, 0, 0);
@@ -275,6 +276,32 @@ const pendingSends = Effect.andThen(
   Effect.flatMap(RecurringIssuance, (r) => r.pendingSends(120_000)),
 );
 
+/**
+ * ReconcileDelivery past the threshold (2 min, core-ports J1a): the real delivery reconcile
+ * pass, then Hook: each DocumentDelivery job it started runs `deliver`. `jobs` stands in for the
+ * scenario's DeliveryJobs (a restarted process whose start works again).
+ */
+const reconcileDeliveries = (jobs?: DeliveryJobs["Service"]) =>
+  Effect.gen(function* () {
+    yield* TestClock.adjust("3 minutes");
+    const before = (yield* started).length;
+    const pass = reconcileStaleDeliveries(120_000);
+    const restarted = yield* jobs === undefined
+      ? pass
+      : Effect.provideService(pass, DeliveryJobs, jobs);
+    const starts = (yield* started).slice(before);
+    const ends = yield* Effect.forEach(starts, (s) => deliver(s.workspaceId, s.deliveryId));
+    return { restarted, starts: starts.map((s) => s.deliveryId), ends };
+  });
+
+/** A DeliveryJobs that records its starts in StartedDeliveries (as DeliveryJobsMemory does). */
+const recordingJobs = Effect.map(StartedDeliveries, (ref) =>
+  DeliveryJobs.of({
+    start: (workspaceId, deliveryId) =>
+      Ref.update(ref, (all) => [...all, { workspaceId, deliveryId }]),
+  }),
+);
+
 /** The issued occurrence's queued delivery id (SweepStart, IssueCommit, SendCommit, Hook). */
 const queuedDelivery = (w: World) =>
   Effect.map(runOccurrence(w), (result) => {
@@ -439,69 +466,70 @@ test("CrashWorker before Hook, ReconcileDelivery: the committed delivery stays q
         const deliveryId = yield* queuedDelivery(w);
         const afterCrash = yield* status(w, deliveryId);
         const pending = yield* pendingSends;
-        // OutboxReconcile (J1a): re-execute DocumentDelivery with the same key.
-        const end = yield* deliver(w.workspaceId, deliveryId);
-        return { deliveryId, afterCrash, pending, end, provider: yield* provider };
+        // OutboxReconcile (J1a) restarts DocumentDelivery with the same key.
+        const reconcile = yield* reconcileDeliveries(yield* recordingJobs);
+        return { deliveryId, afterCrash, pending, reconcile, provider: yield* provider };
       }),
     { loseStart: true },
   );
   expect(r.afterCrash).toBe("queued");
   expect(r.pending).toHaveLength(0);
-  expect(r.end).toBe("sent");
+  expect(r.reconcile.restarted.map((d) => [d.deliveryId, d.status])).toEqual([
+    [r.deliveryId, "queued"],
+  ]);
+  expect(r.reconcile.starts).toEqual([r.deliveryId]);
+  expect(r.reconcile.ends).toEqual(["sent"]);
   expect(r.provider.sent.map((e) => e.idempotencyKey)).toEqual([r.deliveryId]);
 });
 
-test("FINDING H3 (77a5bb7): Claim, CrashDelivery(dispatch); core's own recovery never sends the claimed email", async () => {
-  // Pins the current gap: no entry point core has at 77a5bb7 recovers the claimed delivery.
-  // A future delivery reconcile is a new entry point this test does not call, so it will not
-  // turn red by itself: whoever adds the reconcile replaces this test with one that drives it
-  // (skill: Hypothesis H3).
+test("H3: Claim, CrashDelivery(dispatch), ReconcileRecurring, SweepStart, ReconcileDelivery, Claim(sending), Dispatch, Record: the claimed email is sent once", async () => {
+  // At 77a5bb7 no entry point recovered a claimed delivery (finding H3). The recurring entry
+  // points still find no work; the delivery reconcile restarts the job, which sends.
   const r = await scenario((w) =>
     Effect.gen(function* () {
       const deliveryId = yield* queuedDelivery(w);
       const startedBefore = (yield* started).length;
-      yield* claim(w.workspaceId, deliveryId);
+      const claimed = yield* claim(w.workspaceId, deliveryId);
       // The delivery job's process died here: claimed `sending`, provider never called.
-      // Everything core offers to recover: the recurring reconcile (twice, past the 2 min
-      // threshold), a rerun of the occurrence, and another sweep tick.
       const pending1 = yield* pendingSends;
       const pending2 = yield* pendingSends;
       const rerun = yield* runOccurrence(w);
       const tick = yield* sweep;
-      return {
-        pending: [...pending1, ...pending2],
-        rerun,
-        tick,
-        startedBefore,
+      const afterRecurring = {
         startedAfter: (yield* started).length,
         status: yield* status(w, deliveryId),
         provider: yield* provider,
       };
-    }),
-  );
-  expect(r.pending).toHaveLength(0);
-  expect(r.rerun.send).toMatchObject({ _tag: "Queued", replayed: true });
-  expect(r.tick).toHaveLength(0);
-  expect(r.startedAfter).toBe(r.startedBefore);
-  expect(r.status).toBe("sending");
-  expect(r.provider.attempts).toBe(0);
-});
-
-test("H3 with the designed J1a reconcile: Claim, CrashDelivery(dispatch), ReconcileDelivery, Claim(sending), Dispatch, Record: the claimed email is sent", async () => {
-  const r = await scenario((w) =>
-    Effect.gen(function* () {
-      const deliveryId = yield* queuedDelivery(w);
-      const claimed = yield* claim(w.workspaceId, deliveryId);
-      // The delivery job's process died here: claimed `sending`, provider never called.
-      const afterCrash = { status: yield* status(w, deliveryId), provider: yield* provider };
-      const end = yield* deliver(w.workspaceId, deliveryId);
-      return { deliveryId, claimed, afterCrash, end, provider: yield* provider };
+      const reconcile = yield* reconcileDeliveries();
+      const again = yield* reconcileDeliveries();
+      return {
+        deliveryId,
+        claimed,
+        pending: [...pending1, ...pending2],
+        rerun,
+        tick,
+        startedBefore,
+        afterRecurring,
+        reconcile,
+        again,
+        provider: yield* provider,
+      };
     }),
   );
   expect(r.claimed).toBe("sending");
-  expect(r.afterCrash.status).toBe("sending");
-  expect(r.afterCrash.provider.attempts).toBe(0);
-  expect(r.end).toBe("sent");
+  expect(r.pending).toHaveLength(0);
+  expect(r.rerun.send).toMatchObject({ _tag: "Queued", replayed: true });
+  expect(r.tick).toHaveLength(0);
+  expect(r.afterRecurring.startedAfter).toBe(r.startedBefore);
+  expect(r.afterRecurring.status).toBe("sending");
+  expect(r.afterRecurring.provider.attempts).toBe(0);
+  expect(r.reconcile.restarted.map((d) => [d.deliveryId, d.status])).toEqual([
+    [r.deliveryId, "sending"],
+  ]);
+  expect(r.reconcile.starts).toEqual([r.deliveryId]);
+  expect(r.reconcile.ends).toEqual(["sent"]);
+  // Terminal now: the next pass restarts nothing.
+  expect(r.again.restarted).toHaveLength(0);
   expect(r.provider.attempts).toBe(1);
   expect(r.provider.sent.map((e) => e.idempotencyKey)).toEqual([r.deliveryId]);
 });
@@ -524,13 +552,13 @@ test("CrashDelivery(record): the provider accepted, the process died; the resend
         Effect.provideService(dispatch(w.workspaceId, deliveryId), EmailSender, diesAfterAccept),
       );
       const afterCrash = yield* status(w, deliveryId);
-      const end = yield* deliver(w.workspaceId, deliveryId);
-      return { deliveryId, crashed, afterCrash, end, provider: yield* provider };
+      const { ends } = yield* reconcileDeliveries();
+      return { deliveryId, crashed, afterCrash, ends, provider: yield* provider };
     }),
   );
   expect(Exit.isFailure(r.crashed)).toBe(true);
   expect(r.afterCrash).toBe("sending");
-  expect(r.end).toBe("sent");
+  expect(r.ends).toEqual(["sent"]);
   // At least once: two provider calls with the delivery id as key (the fake dedupes them).
   expect(r.provider.attempts).toBe(2);
   expect(r.provider.sent.map((e) => e.idempotencyKey)).toEqual([r.deliveryId]);
@@ -578,13 +606,13 @@ test("Dispatch(not_accepted), Record, CrashDelivery(giveup), ReconcileDelivery: 
       const first = yield* Effect.exit(deliver(w.workspaceId, deliveryId));
       // Retries exhausted, the process died before giveUp ran: still sending.
       const afterCrash = yield* status(w, deliveryId);
-      const end = yield* deliver(w.workspaceId, deliveryId);
-      return { deliveryId, first, afterCrash, end, provider: yield* provider };
+      const { ends } = yield* reconcileDeliveries();
+      return { deliveryId, first, afterCrash, ends, provider: yield* provider };
     }),
   );
   expect(Exit.isFailure(r.first)).toBe(true);
   expect(r.afterCrash).toBe("sending");
-  expect(r.end).toBe("sent");
+  expect(r.ends).toEqual(["sent"]);
   expect(r.provider.attempts).toBe(2);
   expect(r.provider.sent.map((e) => e.idempotencyKey)).toEqual([r.deliveryId]);
 });
@@ -600,15 +628,23 @@ test("Dispatch(not_accepted) twice, Record, CrashDelivery(giveup), ReconcileDeli
       const afterFirst = yield* status(w, deliveryId);
       const second = yield* Effect.exit(dispatch(w.workspaceId, deliveryId));
       const afterSecond = yield* status(w, deliveryId);
-      const end = yield* deliver(w.workspaceId, deliveryId);
-      return { deliveryId, first, afterFirst, second, afterSecond, end, provider: yield* provider };
+      const { ends } = yield* reconcileDeliveries();
+      return {
+        deliveryId,
+        first,
+        afterFirst,
+        second,
+        afterSecond,
+        ends,
+        provider: yield* provider,
+      };
     }),
   );
   expect(Exit.isFailure(r.first)).toBe(true);
   expect(r.afterFirst).toBe("sending");
   expect(Exit.isFailure(r.second)).toBe(true);
   expect(r.afterSecond).toBe("sending");
-  expect(r.end).toBe("sent");
+  expect(r.ends).toEqual(["sent"]);
   expect(r.provider.attempts).toBe(3);
   expect(r.provider.sent.map((e) => e.idempotencyKey)).toEqual([r.deliveryId]);
 });

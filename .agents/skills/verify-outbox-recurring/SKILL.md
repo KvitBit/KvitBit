@@ -20,7 +20,7 @@ From the repo root (TLC 1.7.4 and JDK 17 come from `formal/toolchain/`; Bun 1.4.
 bun run verify:formal --only outbox.recurring --only outbox.replay
 ```
 
-Expected: `PASSED: 2 passed`, about 15 s. The base passes, all eleven mutants report a violation, and the replay gives 12 pass, 0 fail. One replay test, "FINDING H3", pins the open finding below: it passes while the finding stands. The base explores 9,281 distinct states; the TLC log's last line gives that count. The nightly wide bounds run with `bun run verify:formal --wide --only outbox.recurring` (about 3 minutes, 195,456 distinct states). To run one harness alone: `bun test ./formal/outbox/outbox.replay.test.ts`. TLC logs are in `formal/.cache/logs/outbox.recurring.*.log`.
+Expected: `PASSED: 2 passed`, about 40 s. The base passes, all eleven mutants report a violation, and the replay gives 11 pass, 0 fail. The base explores 9,281 distinct states; the TLC log's last line gives that count. The nightly wide bounds run with `bun run verify:formal --wide --only outbox.recurring` (about 3 minutes, 195,456 distinct states). To run one harness alone: `bun test ./formal/outbox/outbox.replay.test.ts`. TLC logs are in `formal/.cache/logs/outbox.recurring.*.log`.
 
 Read every TLC result, pass or counterexample, with the `/statechart` skill. Run it on `formal/outbox/OutboxRecurring.tla` with the config in question, from a scratch folder outside the repo. Its report gives the shortest path to each broken rule as steps in plain words. A view module that labels the states per occurrence ("email queued", "email claimed", "delivery job died") makes the paths readable. The base has more states than the chart budget, so `/statechart` draws only bug paths.
 
@@ -33,8 +33,8 @@ Yes, if the diff touches a file below, or anything that changes what one transac
 | `modules/recurring/issuance.ts` | `RecurringIssuance.issue` (239-312), `.send` (315-359), `.run` (363), `.pendingSends` (393), `.sweep` (410) |
 | `modules/recurring/repo.ts`, `sweep.ts` | `lockSchedule`, `updateSchedule` (CAS), `findRun`/`insertRun`/`updateRun`, `pendingSendRuns`, `issueEligibility`, `occurrenceAfter` |
 | `modules/documents/deliveries/send.ts` | the queued insert (210), `afterCommit(jobs.start(...))` (242) |
-| `modules/documents/deliveries/steps.ts` | `claim` (67), `dispatch` (84), the record transaction (122-143), `giveUp` (158), `deliver` (171) |
-| `modules/documents/deliveries/jobs.ts`, `repo.ts` | `DeliveryJobs.start`, `DeliveriesRepo.lock`/`update` |
+| `modules/documents/deliveries/steps.ts` | `claim` (73), `dispatch` (101), the record transaction (139-160), `giveUp` (175), `deliver` (188), `reconcileStaleDeliveries` (208) |
+| `modules/documents/deliveries/jobs.ts`, `repo.ts` | `DeliveryJobs.start`, `DeliveriesRepo.lock`/`update`/`findStaleQueuedOrSending` |
 | `modules/recurring/links.ts`, `modules/documents/record.ts` | `RecurringDocumentLink.link`, the `documents(schedule_id, occurrence)` unique key (`record.ts:241`) |
 | `store/memory.ts`, `store/CoreStore.ts` | `transaction` frames: rollback (162-165), hooks passed to the parent (166-168), `drainAfterCommit` after the outermost commit (180-197); `afterCommit` |
 
@@ -61,44 +61,42 @@ Model actions and the code they stand for. Each is one transaction or one extern
 - `SendCommit`: the send transaction. Under the lock, `Documents.send` (savepoint) inserts a `queued` delivery and registers `afterCommit(jobs.start)`, and the run records `queued`. A queued run replays.
 - `Hook`: the afterCommit drain starts DocumentDelivery, keyed by the delivery id. A start for a live execution attaches to it, so the model gives each delivery one execution slot.
 - `Claim`, `Dispatch(ok | not_accepted | unknown_sent | unknown_lost | rejected)`, `Record`, `GiveUp`: the delivery steps. `unknown_sent` and `unknown_lost` both report `outcome_unknown`; the provider took the message in the first and not in the second.
-- `ReconcileRecurring`: OutboxReconcile through `pendingSends`, which reruns `run`. `ReconcileDelivery`: OutboxReconcile (J1a) re-executes `deliver` for a `queued` or `sending` delivery whose execution is not live.
+- `ReconcileRecurring`: OutboxReconcile through `pendingSends`, which reruns `run`. `ReconcileDelivery`: `reconcileStaleDeliveries` (J1a) selects `queued` and `sending` rows through `findStaleQueuedOrSending` and calls `DeliveryJobs.start` with the delivery id; the restarted job runs `deliver`. A start for a live execution attaches to it, so the action fires only for a delivery whose execution is not live.
 - `CrashWorker`, `CrashDelivery`: a process dies. Open transactions roll back and pending afterCommit hooks are lost. The crash points are a recurring job (any step), and a delivery execution at `claim`, `dispatch` (claimed, before the provider call: H3), `record` (after the provider call) and `giveup`.
 
-## Hypothesis H3 (crash between claim and send)
+## Hypothesis H3 (crash between claim and send): fixed at 154383a
 
-- **Confirmed at core scope (77a5bb7):** core has no restart path for a claimed delivery. Nothing in core ever sends it again.
-- **Open in a deployed system:** permanent loss there depends on what integration adds: the J1a delivery reconcile, or a workflow engine that resumes the interrupted DocumentDelivery.
-- **Refuted, bounded, for code plus the designed J1a reconcile:** the base pass below.
+- **Confirmed at core scope (77a5bb7):** core had no restart path for a claimed delivery, and nothing in core ever sent it again.
+- **Fixed at 154383a:** `reconcileStaleDeliveries` (`steps.ts:208`) over `DeliveriesRepo.findStaleQueuedOrSending` (`repo.ts`) is the delivery half of OutboxReconcile (core-ports J1a). Integration runs it from the OutboxReconcile cron with a 2-minute threshold.
+- **Refuted, bounded, for the code at 154383a:** the base pass below.
 
-Open finding (reported, not fixed). When a delivery job dies after `claim` committed `sending` and before the provider call:
+The path at 77a5bb7. A delivery job dies after `claim` committed `sending` and before the provider call:
 
 1. A recurring run issues the occurrence; the send transaction queues the delivery and records the run `send: "queued"` (`issuance.ts:351-355`); the job starts after commit.
-2. The job's `claim` moves the delivery `queued -> sending` (`steps.ts:67-81`).
+2. The job's `claim` moves the delivery `queued -> sending` (`steps.ts:73-98`).
 3. The job's process dies before `dispatch` calls the provider.
 4. The recurring reconcile skips the run: `pendingSendRuns` selects only runs with `send: "pending"` (`recurring/repo.ts:300-305`). A rerun of the occurrence replays `Queued` without starting a job (`issuance.ts:326-328`). The sweep has nothing due.
-5. Core has no query for `queued` or `sending` deliveries. `DeliveriesRepo` (`modules/documents/deliveries/repo.ts:21-62`) has none, and no core code reads `deliveries_pending_idx` (`packages/db/drizzle/20261123175822_init/migration.sql:826`). The delivery stays `sending` and the provider gets no call.
+5. Core had no query for `queued` or `sending` deliveries, so the delivery stayed `sending` and the provider got no call. A crash between the send commit and the job start stranded the delivery `queued` in the same way.
 
-Evidence on real code: the replay test "FINDING H3 (77a5bb7)" runs steps 1-4 with two `pendingSends` calls past the 2-minute threshold, a rerun and a sweep tick. It finds no work, no new job start, the row `sending`, and 0 provider attempts. In the model, mutant `no-reconcile-h3` (the code's flags, crash only at `dispatch`) breaks `NoLostSend` in 6 steps ("email claimed (delivery job died)" forever). A crash between the send commit and the job start strands the delivery `queued` in the same way (mutant `no-reconcile-lost-start`; replay "CrashWorker before Hook").
+How the reconcile recovers it. A row is stale when its `updatedAt` is older than the threshold. `claim` and every recorded dispatch attempt advance `updatedAt`, so a job that is still working is selected only after it has been silent for the threshold, and its restart attaches to the live execution by key (J1). The restarted job runs `deliver`:
 
-What fixes it: the OutboxReconcile half for deliveries that core-ports J1a specifies (re-execute DocumentDelivery for `queued`/`sending` rows older than 2 minutes, with the delivery id as key). Workflows and crons are "defined later" (`issuance.ts:2-3`, `jobs.ts:3-4`). The base config turns that designed reconcile on (`DeliveryReconcile = TRUE`). Its bounded pass, with every placement of up to 2 crashes, shows that the code's steps recover once the cron exists:
+1. `claim` re-checks eligibility for a `queued` or `sending` row (J3, `steps.ts:79-81`): a queued row becomes `sending`, a `sending` row stays `sending`, and an ineligible row (document cancelled meanwhile) is `skipped` before any further provider call. A skipped `sending` row keeps `lastOutcome: outcome_unknown`, because the job may have died after the provider accepted it, so an automatic reminder's step stays taken (`record.ts` `isReleased`; test "a claimed reminder skipped on restart keeps its step" in `reminders.test.ts`). The model leaves J3 out (the document stays sendable), so it sees only the first two.
+2. `deliver` dispatches any non-terminal status (`steps.ts:188-191`).
+3. `dispatch` sends a `sending` row (`steps.ts:105`) with `idempotencyKey: row.id` (`steps.ts:132`).
 
-1. `claim` changes only `queued` rows (`steps.ts:73`), so a `sending` row stays `sending`.
-2. `deliver` dispatches any non-terminal status (`steps.ts:171-174`).
-3. `dispatch` sends a `sending` row (`steps.ts:88`) with `idempotencyKey: row.id` (`steps.ts:115`).
-
-The replay test "H3 with the designed J1a reconcile" shows this on the real steps. "FINDING H3" calls only the entry points core has today, so a new reconcile will not turn it red by itself. Whoever adds the reconcile replaces it with a test that drives the new entry point, and updates the base comment and this section.
+Evidence: the replay test "H3: Claim, CrashDelivery(dispatch), ReconcileRecurring, SweepStart, ReconcileDelivery, ..." runs steps 1-4, shows that two `pendingSends` passes, a rerun and a sweep tick still find no work, then runs the real reconcile pass: it restarts the delivery, the email goes out once with the delivery id as key, and a second pass restarts nothing. In the model, mutants `no-reconcile-h3` and `no-reconcile-lost-start` remove the reconcile and break `NoLostSend`. Product tests for the threshold, the cross-Workspace selection and a failing start are in `packages/core/test/modules/documents/deliveries/reconcile.test.ts`.
 
 ## Mutants (each must fail)
 
-All are `.cfg` files over the same spec. Each flips flags (constants). Most are a single break. `no-occurrence-guard` is a compound break (three guards at once; the single-guard runs in the coverage record show each guard alone suffices). The `no-reconcile-*` mutants remove the designed J1a precondition, which is the code as it is. Mutants run with 1 occurrence, 1 crash, 1 provider failure and 1 attempt unless noted.
+All are `.cfg` files over the same spec. Each flips flags (constants). Most are a single break. `no-occurrence-guard` is a compound break (three guards at once; the single-guard runs in the coverage record show each guard alone suffices). The `no-reconcile-*` mutants remove `reconcileStaleDeliveries` (the code before 154383a). Mutants run with 1 occurrence, 1 crash, 1 provider failure and 1 attempt unless noted.
 
 | Mutant | Break | Fails with |
 |---|---|---|
 | `no-occurrence-guard` | `LockSchedule`, `CasAdvance`, `UniqueLink` off (each alone keeps the invariant) | `OneDocumentPerOccurrence`: two runs read `next = 1`, both issue |
 | `no-replay-guard` | `ReplayGuard` off (`issuance.ts:246-248`) | `NoLostSend`: a crash after the issue commit; every rerun is Skipped `not_next`, so the send is never queued |
 | `start-before-commit` | `StartAfterCommit` off (`send.ts:242`) | `StartedOnlyCommitted`: the job starts, then the send transaction rolls back |
-| `no-reconcile-h3` | the code as is (`DeliveryReconcile` off), crash only at `dispatch` | `NoLostSend`: the H3 path above (deadlock allowed so TLC reports the liveness break) |
-| `no-reconcile-lost-start` | the code as is, crash only in a recurring job | `NoLostSend`: the afterCommit start is lost, the delivery stays `queued` |
+| `no-reconcile-h3` | `DeliveryReconcile` off (`steps.ts:208` removed), crash only at `dispatch` | `NoLostSend`: the H3 path above (deadlock allowed so TLC reports the liveness break) |
+| `no-reconcile-lost-start` | `DeliveryReconcile` off, crash only in a recurring job | `NoLostSend`: the afterCommit start is lost, the delivery stays `queued` |
 | `no-send-replay-guard` | `SendReplayGuard` off (`issuance.ts:326-332`: the queued replay and the pending-only check) | `OneDeliveryPerOccurrence`: a second run queues a second delivery |
 | `skip-occurrence` | `AdvanceBy = 2` (2 occurrences, no crash) | `NextFollowsIssued`: occurrence 2 is before `next` but never issued |
 | `skip-occurrence-liveness` | as `skip-occurrence`, liveness only (deadlock allowed) | `EveryOccurrenceIssued` |
@@ -116,9 +114,9 @@ Temporal mutants declare only the one liveness property they target under `PROPE
 - One execution slot per delivery: a re-start attaches to a live execution (J1, by key), so two overlapping dispatches of one delivery are not modelled. They could only add provider duplicates, which `NoLostSend` allows. The pg-contention list covers the overlap.
 - Each transaction is one atomic step, which holds because the schedule row lock serializes them and the memory store runs one transaction at a time (`memory.ts:196`). Postgres locking is not checked.
 - J3 re-checks (document cancelled, reminder no longer due), pauses on Documents failures, the catch-up cap, detach and edits are left out: the document stays sendable and the schedule active. Reminders and invitations are not modelled.
-- `DeliveryReconcile = TRUE` in the base is the designed J1a cron, not code at 77a5bb7 (see H3).
+- `DeliveryReconcile = TRUE` in the base is `reconcileStaleDeliveries`. The model has no clock: the staleness threshold only delays the action, so the model lets it fire at any time once the delivery's execution is not live. Whether integration schedules the cron is not checked.
 - The provider is assumed not to dedupe, so `smtp` counts every acceptance. The CaptureEmailSender fake does dedupe by key, and the replay asserts the key.
-- DocumentDelivery attach-by-key is modelled from J1, because no workflow is defined in core yet.
+- DocumentDelivery attach-by-key is modelled from J1, because no workflow is defined in core yet. `DeliveryJobs.start` must give a restart of a live execution no second execution, and must run `deliver` again when it finds a finished execution while the row is still `queued` or `sending` (a workflow that failed after `claim`; Effect's `Workflow.execute` would only return the stored exit). The model's `ReconcileDelivery` assumes both. Integration owns that binding (`jobs.ts` doc), and no core check covers it.
 
 ## Replay harness and seams
 
@@ -129,11 +127,12 @@ The replay tests use TestCore's `InMemoryCorePorts`, `CoreReposMemory` and `Test
 - An `EmailSender` wrapper that dies after the provider accepted.
 - For H3 and the crash before giveUp (after one, and after two retryable failures, the base's `MaxAttempts`), the next step is simply not run.
 
+`ReconcileDelivery` is the real `reconcileStaleDeliveries(120_000)` after `TestClock.adjust("3 minutes")`. TestCore's `DeliveryJobsMemory` only records starts, so the harness then runs `deliver` for each delivery the pass started (Hook). The lost-start test passes a recording `DeliveryJobs` to the pass, because its scenario's `DeliveryJobs` always dies.
+
 The job's sealed System caller is the one a RecurringSweep tick hands to its `start` callback (`issuance.ts:425`), so the harness needs no internal import.
 
 Seams that core lacks (do not patch product code for them; integration owns them):
 
-- No J1a query for `queued`/`sending` deliveries (the H3 finding). Recovery tests other than "FINDING H3" play the designed cron by calling `DocumentsModule.deliver(workspaceId, deliveryId)`.
 - No workflow engine in core, so attach-by-key and Activity retries are not exercised. The harness calls `deliver`, `dispatch` and `giveUp` itself.
 
 The pg-contention job (`*.contention.ts`) should later cover:
@@ -143,13 +142,13 @@ The pg-contention job (`*.contention.ts`) should later cover:
 - A `claim` row lock against a concurrent record transaction.
 - A reconcile re-dispatch that overlaps a live dispatch (two dispatches read `sending`).
 - afterCommit hooks firing only after the real COMMIT, never inside a savepoint.
-- `pendingSendRuns` and the future delivery reconcile query racing a committing send.
+- `pendingSendRuns` and `findStaleQueuedOrSending` racing a committing send.
 
 ## When a check fails
 
 - **Base violation (exit 12/13 on `OutboxRecurring.cfg`)**: read the path with `/statechart`, then replay it in `outbox.replay.test.ts` one step per action. If the real code does it too, it is a bug. Report the counterexample in the code's nouns and keep the property strict. If the real code does not, the model drifted from the code; fix the model and say which action was wrong.
 - **A mutant passes**: the model no longer depends on that guard, usually because an edit made the guard's action unreachable. Fix the model.
-- **"FINDING H3" fails**: an existing entry point (pendingSends, the rerun, the sweep) now recovers or starts a claimed delivery. Check that this is intended, then follow the H3 section.
+- **The H3 replay fails before its reconcile pass**: a recurring entry point (pendingSends, the rerun, the sweep) now starts a claimed delivery. Check that this is intended and update the test and the H3 section. If it fails after the pass, the delivery reconcile no longer recovers the delivery: treat it as a bug.
 - **A replay test fails**: compare its steps with the action list above. A deliberate behavior change (for example claim now skipping `sending` rows) is drift: update the model action, the replay and this skill in one change. Anything else is a bug.
 - **Digest drift only** (`--check-digests`): run `/maintain-formal-verification-skill` and classify the check as in sync, updated, bug or blocked.
 
@@ -162,27 +161,29 @@ The pg-contention job (`*.contention.ts`) should later cover:
 
 ## Coverage record
 
-- Sync commit: `77a5bb7` (product code unchanged at 611b68e). Tools: tla2tools 1.7.4, Java 17 (Temurin 17.0.21.1), Bun 1.4.4.
-- Runs on 2026-11-24 from the repo root, all exit 0 (council and review round 1 fixes):
+- Sync commit: `154383a` (the delivery reconcile; the recurring side is unchanged since `77a5bb7`). Tools: tla2tools 1.7.4, Java 17 (Temurin 17.0.21.1), Bun 1.4.4.
+- Runs on 2026-11-24 from the repo root at 154383a plus the verification update, all exit 0:
 
   | Command | Result |
   |---|---|
-  | `bun run verify:formal --only outbox.recurring --only outbox.replay` | 16.5 s. Base passed with 9,281 distinct states (4.1 s). Mutants: `no-occurrence-guard` -> `OneDocumentPerOccurrence`; `no-replay-guard` -> temporal; `start-before-commit` -> `StartedOnlyCommitted`; `no-reconcile-h3` -> temporal; `no-reconcile-lost-start` -> temporal; `no-send-replay-guard` -> `OneDeliveryPerOccurrence`; `skip-occurrence` -> `NextFollowsIssued`; `skip-occurrence-liveness` -> temporal; `claim-fails` -> `FailedOnlyAfterCall`; `record-unknown-as-sent` -> `SentImpliesAccepted`; `give-up-early` -> `FailedOnlyWhenJustified`. Replay: 12 pass. |
-  | `bun run verify:formal --wide --only outbox.recurring` | Wide base passed with 195,456 distinct states (132.1 s; 143.9 s with the mutants). |
+  | `bun run verify:formal --only outbox.recurring --only outbox.replay` | 37.9 s. Base passed with 9,281 distinct states (6.4 s). Mutants: `no-occurrence-guard` -> `OneDocumentPerOccurrence`; `no-replay-guard` -> temporal; `start-before-commit` -> `StartedOnlyCommitted`; `no-reconcile-h3` -> temporal; `no-reconcile-lost-start` -> temporal; `no-send-replay-guard` -> `OneDeliveryPerOccurrence`; `skip-occurrence` -> `NextFollowsIssued`; `skip-occurrence-liveness` -> temporal; `claim-fails` -> `FailedOnlyAfterCall`; `record-unknown-as-sent` -> `SentImpliesAccepted`; `give-up-early` -> `FailedOnlyWhenJustified`. Replay: 11 pass. |
+  | `bun run verify:formal --wide --only outbox.recurring` | Wide base passed with 195,456 distinct states (227.3 s; 254.1 s with the mutants). |
   | The no-occurrence-guard config with only one of `LockSchedule`, `CasAdvance`, `UniqueLink` on (three TLC runs, first revision) | Each passes every property: any one guard keeps one document per occurrence. |
 
 - `/statechart` paths (first revision; unchanged actions): `no-occurrence-guard`, 4 steps (two runs both issue #1); `no-replay-guard`, 8 steps, a loop where reconcile reruns and each rerun is Skipped; `start-before-commit`, 3 steps; `no-reconcile-h3`, 6 steps, "email claimed (delivery job died)" forever; `no-reconcile-lost-start`, 4 steps, "email queued (no delivery job)" forever.
-- Able-to-fail gate on the real code (scratch break, run `bun test ./formal/outbox/outbox.replay.test.ts`, `git checkout` the file, 12 pass again):
+- Able-to-fail gate on the real code (scratch break, run `bun test ./formal/outbox/outbox.replay.test.ts`, `git checkout` the file, all pass again). Rows marked (77a5bb7) ran against the 12-test harness before the reconcile and were not rerun; their "FINDING H3" and "H3 with the designed J1a reconcile" tests are now the one "H3: ..." test:
 
   | Break | File | Caught by |
   |---|---|---|
-  | Replay guard off: `if (false && Option.isSome(existing))` | `modules/recurring/issuance.ts:246` | 4 fail: "DupStart, IssueCommit(replay)...", "CrashWorker after IssueCommit...", "CrashWorker inside SendCommit...", "FINDING H3..." (the rerun is Skipped) |
-  | Delivery started inside the transaction: `yield* jobs.start(...)` without `afterCommit` | `modules/documents/deliveries/send.ts:242` | 2 fail: "CrashWorker inside SendCommit..." (`started` holds the rolled-back id), "CrashWorker before Hook..." |
-  | Reconcile recovery off: `claim` returns `skipped` for a `sending` row | `modules/documents/deliveries/steps.ts:73` | 3 fail: "H3 with the designed J1a reconcile...", "CrashDelivery(record)...", "...CrashDelivery(giveup)..." |
-  | Send guard off: the queued replay (`if (false && run.send === "queued" ...)`) and the pending-only check (`if (run.documentId === null)`) | `modules/recurring/issuance.ts:326-332` | 2 fail: "DupStart, IssueCommit(replay), SendCommit(replay)..." (3 delivery rows for the document, want 1), "FINDING H3..." |
-  | Advance skips an occurrence: `occurrenceAfter` applied twice | `modules/recurring/issuance.ts:305` | 1 fail: "SweepStart, IssueCommit, ..." (the schedule's next occurrence is not 2026-12-23) |
-  | `outcome_unknown` recorded as `sent` | `modules/documents/deliveries/steps.ts:125` | 1 fail: "Dispatch failures, ..." (the unknown attempt ends `sent` at once) |
-  | `claim` marks a queued delivery `failed` without sending | `modules/documents/deliveries/steps.ts:73` | 7 fail, including the happy path and every recovery test (run with 11 tests) |
-| `EmailNotAccepted` recorded `failed` like a rejection (no retry) | `modules/documents/deliveries/steps.ts:135` | 3 fail: "Dispatch failures, ..." and both crash-before-giveUp tests (the row is `failed` after the first attempt) |
+  | Replay guard off: `if (false && Option.isSome(existing))` (77a5bb7) | `modules/recurring/issuance.ts:246` | 4 fail: "DupStart, IssueCommit(replay)...", "CrashWorker after IssueCommit...", "CrashWorker inside SendCommit...", "FINDING H3..." (the rerun is Skipped) |
+  | Delivery started inside the transaction: `yield* jobs.start(...)` without `afterCommit` (77a5bb7) | `modules/documents/deliveries/send.ts:242` | 2 fail: "CrashWorker inside SendCommit..." (`started` holds the rolled-back id), "CrashWorker before Hook..." |
+  | Reconcile recovery off: `claim` returns `skipped` for a `sending` row (154383a) | `modules/documents/deliveries/steps.ts:79` | 4 fail: "H3: ...", "CrashDelivery(record)...", both "...CrashDelivery(giveup)..." |
+  | Reconcile query finds nothing: `findStaleQueuedOrSending` returns `[]` (154383a) | `modules/documents/deliveries/repo.ts` | 5 fail: "CrashWorker before Hook...", "H3: ...", "CrashDelivery(record)...", both "...CrashDelivery(giveup)..." (also all 5 tests of `reconcile.test.ts`) |
+  | Reconcile query skips `sending` rows: `whereIn: { status: ["queued"] }` (154383a) | `modules/documents/deliveries/repo.ts` | 4 fail: "H3: ...", "CrashDelivery(record)...", both "...CrashDelivery(giveup)..." |
+  | Send guard off: the queued replay (`if (false && run.send === "queued" ...)`) and the pending-only check (`if (run.documentId === null)`) (77a5bb7) | `modules/recurring/issuance.ts:326-332` | 2 fail: "DupStart, IssueCommit(replay), SendCommit(replay)..." (3 delivery rows for the document, want 1), "FINDING H3..." |
+  | Advance skips an occurrence: `occurrenceAfter` applied twice (77a5bb7) | `modules/recurring/issuance.ts:305` | 1 fail: "SweepStart, IssueCommit, ..." (the schedule's next occurrence is not 2026-12-23) |
+  | `outcome_unknown` recorded as `sent` (77a5bb7) | `modules/documents/deliveries/steps.ts:125` | 1 fail: "Dispatch failures, ..." (the unknown attempt ends `sent` at once) |
+  | `claim` marks a queued delivery `failed` without sending (77a5bb7) | `modules/documents/deliveries/steps.ts:73` | 7 fail, including the happy path and every recovery test (run with 11 tests) |
+| `EmailNotAccepted` recorded `failed` like a rejection (no retry) (77a5bb7) | `modules/documents/deliveries/steps.ts:135` | 3 fail: "Dispatch failures, ..." and both crash-before-giveUp tests (the row is `failed` after the first attempt) |
 
   The `documents(schedule_id, occurrence)` unique key is a backstop behind the schedule lock and the CAS, so removing it alone changes no replay (the lock serializes the runs). It is covered by the model (`no-occurrence-guard`, and the single-guard runs above) and by the digest check on `record.ts` and `links.ts`.
