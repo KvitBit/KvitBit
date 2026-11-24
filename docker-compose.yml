@@ -30,7 +30,33 @@ services:
         condition: service_healthy
     environment:
       # Owner-role credentials are scoped strictly to the one-shot migrate container (S5).
-      DATABASE_URL_UNPOOLED: ${DATABASE_MIGRATION_URL:-postgres://${POSTGRES_USER:-kvitbit}:${POSTGRES_PASSWORD:-kvitbit}@postgres:5432/${POSTGRES_DB:-kvitbit}}
+      # Prefer DATABASE_MIGRATION_URL, fall back to DATABASE_URL_UNPOOLED, and only default
+      # to bundled postgres when DATABASE_URL is not pointing at an external database.
+      DATABASE_URL_UNPOOLED: ${DATABASE_MIGRATION_URL:-${DATABASE_URL_UNPOOLED:-}}
+      KVITBIT_RUNTIME_DATABASE_URL: ${DATABASE_URL:-}
+      KVITBIT_BUNDLED_MIGRATION_URL: postgres://${POSTGRES_USER:-kvitbit}:${POSTGRES_PASSWORD:-kvitbit}@postgres:5432/${POSTGRES_DB:-kvitbit}
+
+  reconcile-roles:
+    image: postgres:17-alpine
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    entrypoint: ["/bin/sh", "/usr/local/bin/reconcile-app-role.sh"]
+    environment:
+      PGHOST: postgres
+      PGPORT: "5432"
+      PGPASSWORD: ${POSTGRES_PASSWORD:-kvitbit}
+      POSTGRES_USER: ${POSTGRES_USER:-kvitbit}
+      POSTGRES_DB: ${POSTGRES_DB:-kvitbit}
+      POSTGRES_APP_USER: ${POSTGRES_APP_USER:-kvitbit_app}
+      POSTGRES_APP_PASSWORD: ${POSTGRES_APP_PASSWORD:-kvitbit_app}
+      KVITBIT_RUNTIME_DATABASE_URL: ${DATABASE_URL:-}
+      DATABASE_URL_UNPOOLED: ${DATABASE_MIGRATION_URL:-${DATABASE_URL_UNPOOLED:-}}
+    volumes:
+      - ./docker/reconcile-app-role.sh:/usr/local/bin/reconcile-app-role.sh:ro
 
   kvitbit:
     build:
@@ -42,6 +68,8 @@ services:
       postgres:
         condition: service_healthy
       migrate:
+        condition: service_completed_successfully
+      reconcile-roles:
         condition: service_completed_successfully
     ports:
       - "${KVITBIT_PORT:-8080}:8080"

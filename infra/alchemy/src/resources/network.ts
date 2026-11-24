@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type {
   FirewallProps,
   InstanceProps,
@@ -11,9 +12,55 @@ import * as Output from "alchemy/Output";
 import * as Effect from "effect/Effect";
 import type { KvitbitStackConfig } from "../config";
 import { imageReference, resourceNames, serviceAccountEmail, stackLabels } from "../config";
-import { runnerPlainEnv, secretBindingsForWorkload } from "../env";
+import { type PlainEnvVar, runnerPlainEnv, secretBindingsForWorkload } from "../env";
 
 export const COS_STABLE_IMAGE = "projects/cos-cloud/global/images/family/cos-stable";
+
+export interface RunnerWorkerSecretSpec {
+  readonly environmentVariable: string;
+  readonly secretId: string;
+  readonly version: string;
+  readonly required: boolean;
+}
+
+export interface RunnerWorkerConfig {
+  readonly version: 1;
+  readonly projectId: string;
+  readonly registryHost: string;
+  readonly runnerCidr: string;
+  readonly runnerPort: number;
+  readonly plainEnv: ReadonlyArray<PlainEnvVar>;
+  readonly secrets: ReadonlyArray<RunnerWorkerSecretSpec>;
+}
+
+export const buildRunnerWorkerConfig = (
+  config: KvitbitStackConfig,
+  options?: { readonly blobsBucket?: string | undefined },
+): RunnerWorkerConfig => {
+  const blobsBucket = options?.blobsBucket ?? config.blobsBucket;
+  return {
+    version: 1,
+    projectId: config.projectId,
+    registryHost: `${config.region}-docker.pkg.dev`,
+    runnerCidr: config.runnerCidr,
+    runnerPort: config.runnerPort,
+    plainEnv: runnerPlainEnv(config, blobsBucket),
+    secrets: secretBindingsForWorkload(config, "runner").map((secret) => ({
+      environmentVariable: secret.environmentVariable,
+      secretId: secret.secretId,
+      version: secret.version,
+      required: secret.required,
+    })),
+  };
+};
+
+export const serializeRunnerWorkerConfig = (workerConfig: RunnerWorkerConfig): string =>
+  JSON.stringify(workerConfig, null, 2);
+
+export const runnerWorkerConfigSha = (workerConfig: RunnerWorkerConfig): string => {
+  const hash = createHash("sha256").update(serializeRunnerWorkerConfig(workerConfig)).digest("hex");
+  return `sha256:${hash}`;
+};
 
 export const networkProps = (config: KvitbitStackConfig): NetworkProps => ({
   networkName: resourceNames(config).networkName,
@@ -71,9 +118,13 @@ const shellQuote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
  * - HOST is resolved dynamically from the GCE metadata server's internal IP so
  *   NodeClusterHttp registers the exact reachable VPC RunnerAddress (HOST:34431).
  * - Opens COS host iptables idempotently for the private runner subnet on TCP 34431.
- * - Installs a systemd reconcile timer that watches GCE instance metadata (`kvitbit-image-ref`
- *   and `kvitbit-image-digest`) so in-place metadata updates deterministically pull the new
- *   digest, restart `kvitbit-worker.service`, and publish `guest-attributes/kvitbit/active-digest`.
+ * - COS mounts /var/lib/kvitbit noexec, so both systemd ExecStart and initial boot invoke
+ *   `/bin/bash /var/lib/kvitbit/reconcile-worker.sh` explicitly.
+ * - Installs a systemd reconcile timer that watches GCE instance metadata (`kvitbit-image-ref`,
+ *   `kvitbit-image-digest`, `kvitbit-worker-config`, and `kvitbit-worker-config-sha`) so in-place
+ *   metadata updates deterministically reconcile env, secrets, firewall, unit, and container
+ *   whenever EITHER the image digest OR the worker config SHA changes, publishing both
+ *   `guest-attributes/kvitbit/active-digest` and `guest-attributes/kvitbit/active-config-sha`.
  * - Retries transient metadata, Secret Manager, and Artifact Registry failures with bounded
  *   exponential backoff, and installs systemd units before initial reconciliation.
  */
@@ -82,24 +133,14 @@ export const buildRunnerStartupScript = (
   options?: {
     readonly blobsBucket?: string;
     readonly imageRef?: string;
+    readonly workerConfig?: RunnerWorkerConfig;
   },
 ): string => {
-  const blobsBucket = options?.blobsBucket ?? config.blobsBucket;
+  const workerConfig =
+    options?.workerConfig ?? buildRunnerWorkerConfig(config, { blobsBucket: options?.blobsBucket });
+  const workerConfigJson = serializeRunnerWorkerConfig(workerConfig);
+  const workerConfigSha = runnerWorkerConfigSha(workerConfig);
   const imageRef = options?.imageRef ?? imageReference(config);
-  const registryHost = `${config.region}-docker.pkg.dev`;
-  const plainEnv = runnerPlainEnv(config, blobsBucket);
-  const runnerSecrets = secretBindingsForWorkload(config, "runner");
-
-  const plainEnvLines = plainEnv
-    .map((entry) => `  printf '%s=%s\\n' ${shellQuote(entry.name)} ${shellQuote(entry.value)}`)
-    .join("\n");
-
-  const secretFetchLines = runnerSecrets
-    .map(
-      (secret) =>
-        `fetch_secret ${shellQuote(secret.environmentVariable)} ${shellQuote(secret.secretId)} ${shellQuote(secret.version)} ${secret.required ? "required" : "optional"}`,
-    )
-    .join("\n");
 
   return `#!/bin/bash
 set -euo pipefail
@@ -114,8 +155,8 @@ METADATA="http://metadata.google.internal/computeMetadata/v1"
 HEADER="Metadata-Flavor: Google"
 DEFAULT_IMAGE_REF=${shellQuote(imageRef)}
 DEFAULT_IMAGE_DIGEST=${shellQuote(config.imageDigest)}
-RUNNER_CIDR=${shellQuote(config.runnerCidr)}
-RUNNER_PORT=${shellQuote(String(config.runnerPort))}
+DEFAULT_CONFIG_SHA=${shellQuote(workerConfigSha)}
+DEFAULT_WORKER_CONFIG=${shellQuote(workerConfigJson)}
 
 retry_with_backoff() {
   local max_attempts="$1"
@@ -143,15 +184,108 @@ fetch_metadata() {
   curl -fsS --connect-timeout 5 --max-time 15 -H "$HEADER" "$METADATA/$path"
 }
 
-publish_active_digest() {
+publish_guest_attribute() {
+  local key="$1"
+  local value="$2"
+  curl -fsS --connect-timeout 5 --max-time 15 -X PUT -H "$HEADER" --data "$value" \
+    "$METADATA/instance/guest-attributes/kvitbit/$key" >/dev/null 2>&1 || true
+}
+
+publish_active_state() {
   local digest="$1"
-  curl -fsS --connect-timeout 5 --max-time 15 -X PUT -H "$HEADER" --data "$digest" \
-    "$METADATA/instance/guest-attributes/kvitbit/active-digest" >/dev/null 2>&1 || true
+  local config_sha="$2"
+  publish_guest_attribute "active-digest" "$digest"
+  publish_guest_attribute "active-config-sha" "$config_sha"
+}
+
+parse_worker_config() {
+  awk '
+    function json_str(line,    out, i, c, n) {
+      sub(/^[^:]*:[[:space:]]*"/, "", line)
+      sub(/"[[:space:]]*,?[[:space:]]*$/, "", line)
+      out = ""
+      n = length(line)
+      for (i = 1; i <= n; i++) {
+        c = substr(line, i, 1)
+        if (c == "\\\\" && i < n) {
+          i++
+          c = substr(line, i, 1)
+          if (c == "n") out = out "\\n"
+          else if (c == "t") out = out "\\t"
+          else if (c == "r") out = out "\\r"
+          else out = out c
+        } else {
+          out = out c
+        }
+      }
+      return out
+    }
+    function json_scalar(line) {
+      sub(/^[^:]*:[[:space:]]*/, "", line)
+      sub(/[[:space:]]*,?[[:space:]]*$/, "", line)
+      return line
+    }
+    BEGIN { section = "top" }
+    /^  "plainEnv": \\[\\],?$/ { section = "top"; next }
+    /^  "plainEnv": \\[$/ { section = "plainEnv"; next }
+    /^  "secrets": \\[\\],?$/ { section = "top"; next }
+    /^  "secrets": \\[$/ { section = "secrets"; next }
+    /^  \\],?$/ { section = "top"; next }
+    section == "top" && /^  "projectId":/ { printf "META\\tprojectId\\t%s\\n", json_str($0); next }
+    section == "top" && /^  "registryHost":/ { printf "META\\tregistryHost\\t%s\\n", json_str($0); next }
+    section == "top" && /^  "runnerCidr":/ { printf "META\\trunnerCidr\\t%s\\n", json_str($0); next }
+    section == "top" && /^  "runnerPort":/ { printf "META\\trunnerPort\\t%s\\n", json_scalar($0); next }
+    section == "plainEnv" && /^      "name":/ { env_name = json_str($0); next }
+    section == "plainEnv" && /^      "value":/ { printf "ENV\\t%s\\t%s\\n", env_name, json_str($0); next }
+    section == "secrets" && /^      "environmentVariable":/ { sec_env = json_str($0); next }
+    section == "secrets" && /^      "secretId":/ { sec_id = json_str($0); next }
+    section == "secrets" && /^      "version":/ { sec_ver = json_str($0); next }
+    section == "secrets" && /^      "required":/ {
+      req = (json_scalar($0) == "true") ? "required" : "optional"
+      printf "SECRET\\t%s\\t%s\\t%s\\t%s\\n", sec_env, sec_id, sec_ver, req
+      next
+    }
+  '
 }
 
 ensure_host_firewall() {
-  if ! iptables -C INPUT -s "$RUNNER_CIDR" -p tcp --dport "$RUNNER_PORT" -j ACCEPT 2>/dev/null; then
-    iptables -I INPUT -s "$RUNNER_CIDR" -p tcp --dport "$RUNNER_PORT" -j ACCEPT
+  local cidr="$1"
+  local port="$2"
+  if ! iptables -C INPUT -s "$cidr" -p tcp --dport "$port" -j ACCEPT 2>/dev/null; then
+    iptables -I INPUT -s "$cidr" -p tcp --dport "$port" -j ACCEPT
+  fi
+}
+
+ensure_worker_unit() {
+  local unit_path="/etc/systemd/system/kvitbit-worker.service"
+  local unit_tmp="/run/kvitbit/kvitbit-worker.service.tmp.$$"
+  cat <<'WORKER_UNIT' > "$unit_tmp"
+[Unit]
+Description=Kvitbit Effect Cluster Worker
+After=docker.service network-online.target
+Requires=docker.service
+
+[Service]
+Type=simple
+Restart=always
+RestartSec=5
+EnvironmentFile=/run/kvitbit/worker-target.env
+ExecStartPre=-/usr/bin/docker rm -f kvitbit-worker
+ExecStart=/usr/bin/docker run --rm --name kvitbit-worker --label kvitbit.target_digest=\${KVITBIT_WORKER_DIGEST} --label kvitbit.target_config_sha=\${KVITBIT_WORKER_CONFIG_SHA} --network host --shm-size=1g --env-file /run/kvitbit/worker.env \${KVITBIT_WORKER_IMAGE} worker
+ExecStop=/usr/bin/docker stop -t 30 kvitbit-worker
+
+[Install]
+WantedBy=multi-user.target
+WORKER_UNIT
+  if [ -d /etc/systemd/system ]; then
+    if [ ! -f "$unit_path" ] || ! cmp -s "$unit_tmp" "$unit_path"; then
+      mv -f "$unit_tmp" "$unit_path"
+      systemctl daemon-reload
+    else
+      rm -f "$unit_tmp"
+    fi
+  else
+    rm -f "$unit_tmp"
   fi
 }
 
@@ -166,17 +300,43 @@ fi
 
 TARGET_IMAGE_REF="$(fetch_metadata "instance/attributes/kvitbit-image-ref" 2>/dev/null || printf '%s' "$DEFAULT_IMAGE_REF")"
 TARGET_IMAGE_DIGEST="$(fetch_metadata "instance/attributes/kvitbit-image-digest" 2>/dev/null || printf '%s' "$DEFAULT_IMAGE_DIGEST")"
+TARGET_WORKER_CONFIG="$(fetch_metadata "instance/attributes/kvitbit-worker-config" 2>/dev/null || printf '%s' "$DEFAULT_WORKER_CONFIG")"
+TARGET_CONFIG_SHA="$(fetch_metadata "instance/attributes/kvitbit-worker-config-sha" 2>/dev/null || printf '%s' "$DEFAULT_CONFIG_SHA")"
 
-if [ -z "$TARGET_IMAGE_REF" ] || [ -z "$TARGET_IMAGE_DIGEST" ]; then
-  echo "Failed to resolve target worker image ref or digest" >&2
+if [ -z "$TARGET_IMAGE_REF" ] || [ -z "$TARGET_IMAGE_DIGEST" ] || [ -z "$TARGET_WORKER_CONFIG" ] || [ -z "$TARGET_CONFIG_SHA" ]; then
+  echo "Failed to resolve target worker image ref, digest, or worker config metadata" >&2
   exit 1
 fi
 
-ensure_host_firewall
+PARSED_CONFIG="$(printf '%s\\n' "$TARGET_WORKER_CONFIG" | parse_worker_config)"
+PROJECT_ID=""
+REGISTRY_HOST=""
+RUNNER_CIDR=""
+RUNNER_PORT=""
 
-RUNNING_STATE="$(docker inspect --format='{{.State.Running}}|{{index .Config.Labels "kvitbit.target_digest"}}' kvitbit-worker 2>/dev/null || true)"
-if [ "$RUNNING_STATE" = "true|$TARGET_IMAGE_DIGEST" ]; then
-  publish_active_digest "$TARGET_IMAGE_DIGEST"
+while IFS=$'\\t' read -r kind col1 col2 col3 col4; do
+  if [ "$kind" = "META" ]; then
+    case "$col1" in
+      projectId) PROJECT_ID="$col2" ;;
+      registryHost) REGISTRY_HOST="$col2" ;;
+      runnerCidr) RUNNER_CIDR="$col2" ;;
+      runnerPort) RUNNER_PORT="$col2" ;;
+    esac
+  fi
+done <<EOF_META
+$PARSED_CONFIG
+EOF_META
+
+if [ -z "$PROJECT_ID" ] || [ -z "$REGISTRY_HOST" ] || [ -z "$RUNNER_CIDR" ] || [ -z "$RUNNER_PORT" ]; then
+  echo "Parsed worker config is missing required metadata fields" >&2
+  exit 1
+fi
+
+ensure_host_firewall "$RUNNER_CIDR" "$RUNNER_PORT"
+
+RUNNING_STATE="$(docker inspect --format='{{.State.Running}}|{{index .Config.Labels "kvitbit.target_digest"}}|{{index .Config.Labels "kvitbit.target_config_sha"}}' kvitbit-worker 2>/dev/null || true)"
+if [ "$RUNNING_STATE" = "true|$TARGET_IMAGE_DIGEST|$TARGET_CONFIG_SHA" ]; then
+  publish_active_state "$TARGET_IMAGE_DIGEST" "$TARGET_CONFIG_SHA"
   exit 0
 fi
 
@@ -186,10 +346,7 @@ ENV_TMP="/run/kvitbit/worker.env.tmp.$$"
 TARGET_ENV_FILE="/run/kvitbit/worker-target.env"
 umask 0177
 
-{
-  printf 'HOST=%s\\n' "$INTERNAL_IP"
-${plainEnvLines}
-} > "$ENV_TMP"
+printf 'HOST=%s\\n' "$INTERNAL_IP" > "$ENV_TMP"
 
 fetch_secret_once() {
   local url="$1"
@@ -201,7 +358,7 @@ fetch_secret() {
   local secret_id="$2"
   local version="$3"
   local requirement="$4"
-  local url="https://secretmanager.googleapis.com/v1/projects/${config.projectId}/secrets/\${secret_id}/versions/\${version}:access"
+  local url="https://secretmanager.googleapis.com/v1/projects/\${PROJECT_ID}/secrets/\${secret_id}/versions/\${version}:access"
   local body
   if ! body="$(retry_with_backoff 6 fetch_secret_once "$url")"; then
     if [ "$requirement" = "required" ]; then
@@ -226,14 +383,22 @@ fetch_secret() {
   printf '%s=%s\\n' "$env_name" "$decoded" >> "$ENV_TMP"
 }
 
-${secretFetchLines}
+while IFS=$'\\t' read -r kind col1 col2 col3 col4; do
+  if [ "$kind" = "ENV" ]; then
+    printf '%s=%s\\n' "$col1" "$col2" >> "$ENV_TMP"
+  elif [ "$kind" = "SECRET" ]; then
+    fetch_secret "$col1" "$col2" "$col3" "$col4"
+  fi
+done <<EOF_VARS
+$PARSED_CONFIG
+EOF_VARS
 
 mv -f "$ENV_TMP" "$ENV_FILE"
 
 export DOCKER_CONFIG="/run/kvitbit/docker"
 install -d -m 0700 "$DOCKER_CONFIG"
 docker_login() {
-  printf '%s' "$ACCESS_TOKEN" | docker login -u oauth2accesstoken --password-stdin ${shellQuote(`https://${registryHost}`)}
+  printf '%s' "$ACCESS_TOKEN" | docker login -u oauth2accesstoken --password-stdin "https://$REGISTRY_HOST"
 }
 retry_with_backoff 6 docker_login
 retry_with_backoff 6 docker pull "$TARGET_IMAGE_REF"
@@ -241,20 +406,22 @@ retry_with_backoff 6 docker pull "$TARGET_IMAGE_REF"
 {
   printf 'KVITBIT_WORKER_IMAGE=%s\\n' "$TARGET_IMAGE_REF"
   printf 'KVITBIT_WORKER_DIGEST=%s\\n' "$TARGET_IMAGE_DIGEST"
+  printf 'KVITBIT_WORKER_CONFIG_SHA=%s\\n' "$TARGET_CONFIG_SHA"
 } > "$TARGET_ENV_FILE"
 
+ensure_worker_unit
 systemctl restart kvitbit-worker.service
 
 for _ in 1 2 3 4 5 6; do
-  CURRENT_STATE="$(docker inspect --format='{{.State.Running}}|{{index .Config.Labels "kvitbit.target_digest"}}' kvitbit-worker 2>/dev/null || true)"
-  if [ "$CURRENT_STATE" = "true|$TARGET_IMAGE_DIGEST" ]; then
-    publish_active_digest "$TARGET_IMAGE_DIGEST"
+  CURRENT_STATE="$(docker inspect --format='{{.State.Running}}|{{index .Config.Labels "kvitbit.target_digest"}}|{{index .Config.Labels "kvitbit.target_config_sha"}}' kvitbit-worker 2>/dev/null || true)"
+  if [ "$CURRENT_STATE" = "true|$TARGET_IMAGE_DIGEST|$TARGET_CONFIG_SHA" ]; then
+    publish_active_state "$TARGET_IMAGE_DIGEST" "$TARGET_CONFIG_SHA"
     exit 0
   fi
   sleep 2
 done
 
-echo "kvitbit-worker did not reach running state for digest $TARGET_IMAGE_DIGEST" >&2
+echo "kvitbit-worker did not reach running state for digest $TARGET_IMAGE_DIGEST and config $TARGET_CONFIG_SHA" >&2
 exit 1
 RECONCILE
 
@@ -272,7 +439,7 @@ Restart=always
 RestartSec=5
 EnvironmentFile=/run/kvitbit/worker-target.env
 ExecStartPre=-/usr/bin/docker rm -f kvitbit-worker
-ExecStart=/usr/bin/docker run --rm --name kvitbit-worker --label kvitbit.target_digest=\${KVITBIT_WORKER_DIGEST} --network host --shm-size=1g --env-file /run/kvitbit/worker.env \${KVITBIT_WORKER_IMAGE} worker
+ExecStart=/usr/bin/docker run --rm --name kvitbit-worker --label kvitbit.target_digest=\${KVITBIT_WORKER_DIGEST} --label kvitbit.target_config_sha=\${KVITBIT_WORKER_CONFIG_SHA} --network host --shm-size=1g --env-file /run/kvitbit/worker.env \${KVITBIT_WORKER_IMAGE} worker
 ExecStop=/usr/bin/docker stop -t 30 kvitbit-worker
 
 [Install]
@@ -281,18 +448,18 @@ UNIT
 
 cat <<'RECONCILE_UNIT' > /etc/systemd/system/kvitbit-worker-reconcile.service
 [Unit]
-Description=Reconcile Kvitbit Effect Cluster Worker image and secrets from GCE metadata
+Description=Reconcile Kvitbit Effect Cluster Worker image and config from GCE metadata
 After=docker.service network-online.target
 Requires=docker.service
 
 [Service]
 Type=oneshot
-ExecStart=/var/lib/kvitbit/reconcile-worker.sh
+ExecStart=/bin/bash /var/lib/kvitbit/reconcile-worker.sh
 RECONCILE_UNIT
 
 cat <<'RECONCILE_TIMER' > /etc/systemd/system/kvitbit-worker-reconcile.timer
 [Unit]
-Description=Poll GCE metadata for Kvitbit worker digest updates
+Description=Poll GCE metadata for Kvitbit worker image and config updates
 
 [Timer]
 OnBootSec=15s
@@ -307,7 +474,7 @@ RECONCILE_TIMER
 systemctl daemon-reload
 systemctl enable kvitbit-worker.service
 systemctl enable --now kvitbit-worker-reconcile.timer
-/var/lib/kvitbit/reconcile-worker.sh
+/bin/bash /var/lib/kvitbit/reconcile-worker.sh
 `;
 };
 
@@ -317,11 +484,17 @@ export const runnerInstanceProps = (
   deps: {
     readonly network: string;
     readonly subnetwork: string;
+    readonly blobsBucket?: string;
     readonly serviceAccountEmail?: string;
     readonly startupScript?: string;
+    readonly workerConfig?: RunnerWorkerConfig;
   },
 ): InstanceProps => {
   const names = resourceNames(config);
+  const workerConfig =
+    deps.workerConfig ?? buildRunnerWorkerConfig(config, { blobsBucket: deps.blobsBucket });
+  const workerConfigJson = serializeRunnerWorkerConfig(workerConfig);
+  const workerConfigSha = runnerWorkerConfigSha(workerConfig);
   return {
     instanceName: names.runnerInstanceName(index),
     zone: config.zone,
@@ -350,9 +523,11 @@ export const runnerInstanceProps = (
       enableIntegrityMonitoring: true,
     },
     metadata: {
-      "startup-script": deps.startupScript ?? buildRunnerStartupScript(config),
+      "startup-script": deps.startupScript ?? buildRunnerStartupScript(config, { workerConfig }),
       "kvitbit-image-ref": imageReference(config),
       "kvitbit-image-digest": config.imageDigest,
+      "kvitbit-worker-config": workerConfigJson,
+      "kvitbit-worker-config-sha": workerConfigSha,
       "enable-guest-attributes": "TRUE",
       "enable-oslogin": "TRUE",
     },
@@ -405,8 +580,13 @@ export const declareNetworkAndRunners = Effect.fn("KvitbitStack.declareNetworkAn
       network: networkLink,
     });
 
+    const workerConfig = buildRunnerWorkerConfig(config, {
+      blobsBucket: deps.blobsBucketName,
+    });
+    const workerConfigSha = runnerWorkerConfigSha(workerConfig);
     const startupScript = buildRunnerStartupScript(config, {
       blobsBucket: deps.blobsBucketName,
+      workerConfig,
     });
 
     const networkReadyDependencies = [
@@ -425,7 +605,9 @@ export const declareNetworkAndRunners = Effect.fn("KvitbitStack.declareNetworkAn
       const base = runnerInstanceProps(config, index, {
         network: "",
         subnetwork: "",
+        blobsBucket: deps.blobsBucketName,
         startupScript,
+        workerConfig,
       });
       const instance = yield* Compute.Instance(`KvitbitRunner${index}`, {
         ...base,
@@ -445,6 +627,7 @@ export const declareNetworkAndRunners = Effect.fn("KvitbitStack.declareNetworkAn
       firewallName: firewall.firewallName,
       networkReadyDependencies,
       runnerNames: runners.map((runner) => runner.instanceName),
+      runnerConfigSha: workerConfigSha,
     };
   },
 );

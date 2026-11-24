@@ -85,6 +85,31 @@ jobs:
               ;;
           esac
 
+          # Normalize optional secret boolean switches ONCE so preflight and Alchemy
+          # agree on canonical true/false values (accepting true/1/yes/on, false/0/no/off).
+          normalize_bool_var() {
+            local var_name="$1"
+            local raw="${!var_name:-}"
+            local trimmed
+            trimmed="$(printf '%s' "$raw" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | tr '[:upper:]' '[:lower:]')"
+            case "$trimmed" in
+              ""|false|0|no|off)
+                printf '%s=false\n' "$var_name" >> "$GITHUB_ENV"
+                ;;
+              true|1|yes|on)
+                printf '%s=true\n' "$var_name" >> "$GITHUB_ENV"
+                ;;
+              *)
+                echo "::error::Invalid boolean value for ${var_name}: '${raw}' (expected true/1/yes/on or false/0/no/off)"
+                exit 1
+                ;;
+            esac
+          }
+
+          normalize_bool_var KVITBIT_ENABLE_RESEND_SECRET
+          normalize_bool_var KVITBIT_ENABLE_SMTP_SECRET
+          normalize_bool_var KVITBIT_ENABLE_MOBILE_SIGNING_KEY_SECRET
+
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
@@ -121,6 +146,29 @@ jobs:
       - name: Set up gcloud
         uses: google-github-actions/setup-gcloud@v3
 
+      # Guard against accidentally running foundation-only bootstrap on a populated production
+      # environment (in addition to the in-stack Alchemy state guard in alchemy.run.ts).
+      - name: Guard bootstrap against populated production workloads
+        if: env.BOOTSTRAP_FOUNDATION == 'true'
+        run: |
+          set -euo pipefail
+          SERVICE_NAME="kvitbit-${KVITBIT_STAGE}-server"
+          if gcloud run services describe "$SERVICE_NAME" \
+            --project "$GCP_PROJECT_ID" \
+            --region "$GCP_REGION" >/dev/null 2>&1; then
+            echo "::error::Refusing bootstrap_foundation=true: Cloud Run service '${SERVICE_NAME}' already exists in ${GCP_PROJECT_ID}/${GCP_REGION}. Run a normal deploy instead."
+            exit 1
+          fi
+          EXISTING_RUNNERS="$(gcloud compute instances list \
+            --project "$GCP_PROJECT_ID" \
+            --zones "$GCP_ZONE" \
+            --filter="labels.app=kvitbit AND labels.stage=${KVITBIT_STAGE} AND labels.workload=runner" \
+            --format='value(name)' 2>/dev/null || true)"
+          if [ -n "$EXISTING_RUNNERS" ]; then
+            echo "::error::Refusing bootstrap_foundation=true: runner instance(s) already exist (${EXISTING_RUNNERS}). Run a normal deploy instead."
+            exit 1
+          fi
+
       # Fail fast before pushing images or running migrations if foundation resources
       # or required Secret Manager versions have not been bootstrapped yet.
       - name: Preflight Artifact Registry and Secret Manager versions
@@ -135,13 +183,13 @@ jobs:
           fi
 
           required_secrets="kvitbit-${KVITBIT_STAGE}-database-url kvitbit-${KVITBIT_STAGE}-runner-database-url-unpooled kvitbit-${KVITBIT_STAGE}-better-auth-secret"
-          if [ "${KVITBIT_ENABLE_RESEND_SECRET:-}" = "true" ]; then
+          if [ "${KVITBIT_ENABLE_RESEND_SECRET:-false}" = "true" ]; then
             required_secrets="${required_secrets} kvitbit-${KVITBIT_STAGE}-resend-api-key"
           fi
-          if [ "${KVITBIT_ENABLE_SMTP_SECRET:-}" = "true" ]; then
+          if [ "${KVITBIT_ENABLE_SMTP_SECRET:-false}" = "true" ]; then
             required_secrets="${required_secrets} kvitbit-${KVITBIT_STAGE}-smtp-url"
           fi
-          if [ "${KVITBIT_ENABLE_MOBILE_SIGNING_KEY_SECRET:-}" = "true" ]; then
+          if [ "${KVITBIT_ENABLE_MOBILE_SIGNING_KEY_SECRET:-false}" = "true" ]; then
             required_secrets="${required_secrets} kvitbit-${KVITBIT_STAGE}-mobile-updates-signing-key"
           fi
 
@@ -222,9 +270,9 @@ jobs:
           KVITBIT_EDGE_DOMAINS: ${{ vars.KVITBIT_EDGE_DOMAINS }}
           KVITBIT_RUNNER_COUNT: ${{ vars.KVITBIT_RUNNER_COUNT }}
           KVITBIT_ANDROID_ASSETLINKS_SHA256: ${{ vars.KVITBIT_ANDROID_ASSETLINKS_SHA256 }}
-          KVITBIT_ENABLE_RESEND_SECRET: ${{ vars.KVITBIT_ENABLE_RESEND_SECRET }}
-          KVITBIT_ENABLE_SMTP_SECRET: ${{ vars.KVITBIT_ENABLE_SMTP_SECRET }}
-          KVITBIT_ENABLE_MOBILE_SIGNING_KEY_SECRET: ${{ vars.KVITBIT_ENABLE_MOBILE_SIGNING_KEY_SECRET }}
+          KVITBIT_ENABLE_RESEND_SECRET: ${{ env.KVITBIT_ENABLE_RESEND_SECRET }}
+          KVITBIT_ENABLE_SMTP_SECRET: ${{ env.KVITBIT_ENABLE_SMTP_SECRET }}
+          KVITBIT_ENABLE_MOBILE_SIGNING_KEY_SECRET: ${{ env.KVITBIT_ENABLE_MOBILE_SIGNING_KEY_SECRET }}
         run: |
           set -euo pipefail
           if [ "$DRY_RUN" = "true" ]; then
@@ -233,7 +281,7 @@ jobs:
             bunx alchemy deploy --yes --stage "$KVITBIT_STAGE"
           fi
 
-      - name: Verify runner pool reconciled target digest
+      - name: Verify runner pool reconciled target digest and config
         if: env.DRY_RUN != 'true' && env.BOOTSTRAP_FOUNDATION != 'true'
         env:
           TARGET_DIGEST: ${{ steps.image.outputs.digest }}
@@ -248,25 +296,58 @@ jobs:
             echo "::error::No Kvitbit runner instances found in ${GCP_PROJECT_ID}/${GCP_ZONE}"
             exit 1
           fi
-          for runner in $RUNNERS; do
-            matched="false"
-            for attempt in $(seq 1 24); do
+
+          poll_runner_convergence() {
+            local runner="$1"
+            local expected_config_sha="$2"
+            local max_attempts="$3"
+            for attempt in $(seq 1 "$max_attempts"); do
               active_digest="$(gcloud compute instances get-guest-attributes "$runner" \
                 --project "$GCP_PROJECT_ID" \
                 --zone "$GCP_ZONE" \
                 --query-path="kvitbit/active-digest" \
-                --format='value(queryValue)' 2>/dev/null || true)"
-              if [ "$active_digest" = "$TARGET_DIGEST" ]; then
-                echo "Verified runner ${runner} is running ${TARGET_DIGEST}"
-                matched="true"
-                break
+                --format='value(value)' 2>/dev/null || true)"
+              active_config_sha="$(gcloud compute instances get-guest-attributes "$runner" \
+                --project "$GCP_PROJECT_ID" \
+                --zone "$GCP_ZONE" \
+                --query-path="kvitbit/active-config-sha" \
+                --format='value(value)' 2>/dev/null || true)"
+              if [ "$active_digest" = "$TARGET_DIGEST" ] && [ "$active_config_sha" = "$expected_config_sha" ]; then
+                echo "Verified runner ${runner} is running digest=${TARGET_DIGEST} config=${expected_config_sha}"
+                return 0
               fi
-              echo "Waiting for runner ${runner} to reconcile ${TARGET_DIGEST} (attempt ${attempt}/24, observed: ${active_digest:-none})"
+              echo "Waiting for runner ${runner} (attempt ${attempt}/${max_attempts}, observed digest=${active_digest:-none} config=${active_config_sha:-none})"
               sleep 10
             done
-            if [ "$matched" != "true" ]; then
-              echo "::error::Runner ${runner} did not reconcile target digest ${TARGET_DIGEST} in time"
+            return 1
+          }
+
+          for runner in $RUNNERS; do
+            metadata_json="$(gcloud compute instances describe "$runner" \
+              --project "$GCP_PROJECT_ID" \
+              --zone "$GCP_ZONE" \
+              --format='json(metadata.items)')"
+            expected_config_sha="$(printf '%s' "$metadata_json" | bun -e '
+              const data = JSON.parse(await new Response(Bun.stdin.stream()).text());
+              const items = data?.metadata?.items ?? [];
+              const hit = items.find((item) => item?.key === "kvitbit-worker-config-sha");
+              process.stdout.write(typeof hit?.value === "string" ? hit.value : "");
+            ')"
+            if [ -z "$expected_config_sha" ]; then
+              echo "::error::Runner ${runner} is missing kvitbit-worker-config-sha instance metadata"
               exit 1
+            fi
+
+            if ! poll_runner_convergence "$runner" "$expected_config_sha" 12; then
+              echo "Runner ${runner} did not converge via timer (possible legacy pre-timer VM); resetting instance once to apply startup script"
+              gcloud compute instances reset "$runner" \
+                --project "$GCP_PROJECT_ID" \
+                --zone "$GCP_ZONE" \
+                --quiet
+              if ! poll_runner_convergence "$runner" "$expected_config_sha" 18; then
+                echo "::error::Runner ${runner} did not reconcile target digest ${TARGET_DIGEST} and config ${expected_config_sha} in time"
+                exit 1
+              fi
             fi
           done
 

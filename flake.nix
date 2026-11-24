@@ -69,6 +69,7 @@
                 cp -R apps $out/lib/kvitbit/
               fi
               install -m 0755 docker/entrypoint.sh $out/lib/kvitbit/entrypoint.sh
+              install -m 0755 docker/reconcile-app-role.sh $out/lib/kvitbit/reconcile-app-role.sh
               makeWrapper $out/lib/kvitbit/entrypoint.sh $out/bin/kvitbit \
                 --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.bun pkgs.coreutils ]} \
                 --set KVITBIT_APP_ROOT $out/lib/kvitbit \
@@ -198,13 +199,13 @@
               environmentFile = lib.mkOption {
                 type = lib.types.nullOr lib.types.path;
                 default = null;
-                description = "Path to an EnvironmentFile containing DML-only runtime secrets for the kvitbit server unit (DATABASE_URL with DML-only app role, BETTER_AUTH_SECRET, RESEND_API_KEY, KVITBIT_SMTP_URL, KVITBIT_MOBILE_UPDATES_SIGNING_KEY). Never include migration owner credentials here.";
+                description = "Path to an EnvironmentFile containing DML-only runtime secrets for the kvitbit server unit (DATABASE_URL with a dedicated NOSUPERUSER NOCREATEDB NOCREATEROLE app role distinct from the migration owner, granted USAGE and SELECT/INSERT/UPDATE/DELETE plus sequence USAGE/SELECT on both public and auth schemas, BETTER_AUTH_SECRET, RESEND_API_KEY, KVITBIT_SMTP_URL, KVITBIT_MOBILE_UPDATES_SIGNING_KEY). Never include migration owner credentials here.";
               };
 
               migrationEnvironmentFile = lib.mkOption {
                 type = lib.types.nullOr lib.types.path;
                 default = null;
-                description = "Path to an EnvironmentFile containing owner-role migration credentials (DATABASE_URL_UNPOOLED) used exclusively by the kvitbit-migrate oneshot unit (core-ports.md S5). Never passed to the runtime kvitbit server unit.";
+                description = "Path to an EnvironmentFile containing owner-role migration credentials (DATABASE_URL_UNPOOLED) used exclusively by the kvitbit-migrate oneshot unit (core-ports.md S5). After running kvitbit-migrate on a new or upgraded database, reconcile DML-only grants on both public and auth schemas (see lib/kvitbit/reconcile-app-role.sh). Never passed to the runtime kvitbit server unit.";
               };
 
               stateDir = lib.mkOption {

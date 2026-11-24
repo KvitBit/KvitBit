@@ -275,15 +275,25 @@ const optionalBoolean = (
       return defaultValue;
     }
     const normalized = raw.toLowerCase();
-    if (normalized === "true" || normalized === "1" || normalized === "yes") {
+    if (
+      normalized === "true" ||
+      normalized === "1" ||
+      normalized === "yes" ||
+      normalized === "on"
+    ) {
       return true;
     }
-    if (normalized === "false" || normalized === "0" || normalized === "no") {
+    if (
+      normalized === "false" ||
+      normalized === "0" ||
+      normalized === "no" ||
+      normalized === "off"
+    ) {
       return false;
     }
     return yield* new InvalidStackConfig({
       field: name,
-      reason: `expected boolean ('true' or 'false'), got '${raw}'`,
+      reason: `expected boolean ('true'/'1'/'yes'/'on' or 'false'/'0'/'no'/'off'), got '${raw}'`,
     });
   });
 

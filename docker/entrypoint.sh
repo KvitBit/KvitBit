@@ -41,6 +41,21 @@ case "$cmd" in
     ;;
 
   migrate)
+    if [ -z "${DATABASE_URL_UNPOOLED:-}" ]; then
+      if [ -n "${KVITBIT_RUNTIME_DATABASE_URL:-}" ]; then
+        case "${KVITBIT_RUNTIME_DATABASE_URL}" in
+          *"@postgres:"*|*"@postgres/"*)
+            ;;
+          *)
+            echo "kvitbit: DATABASE_URL points to an external database, so DATABASE_MIGRATION_URL or DATABASE_URL_UNPOOLED must be set for migrations (refusing to silently migrate bundled postgres)" >&2
+            exit 64
+            ;;
+        esac
+      fi
+      if [ -n "${KVITBIT_BUNDLED_MIGRATION_URL:-}" ]; then
+        export DATABASE_URL_UNPOOLED="${KVITBIT_BUNDLED_MIGRATION_URL}"
+      fi
+    fi
     if [ -z "${DATABASE_URL_UNPOOLED:-}" ] && [ -z "${DATABASE_URL:-}" ]; then
       echo "kvitbit: migrate requires DATABASE_URL_UNPOOLED (preferred, owner role) or DATABASE_URL" >&2
       exit 64

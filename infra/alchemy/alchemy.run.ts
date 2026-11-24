@@ -1,16 +1,18 @@
 import * as GCP from "@alchemy.run/gcp";
 import * as Alchemy from "alchemy";
+import * as State from "alchemy/State";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import { declareKvitbitStack, KVITBIT_STACK_NAME } from "./src/bootstrap";
 import { loadStackConfig } from "./src/config";
-import { declareKvitbitEdge, declareTokenRouteLogExclusion } from "./src/resources/edge";
 import { EdgeBackendServiceProvider } from "./src/resources/edge-backend-service";
 import { EdgeSecurityPolicyProvider } from "./src/resources/edge-security-policy";
-import { declareFoundation } from "./src/resources/foundation";
-import { declareNetworkAndRunners } from "./src/resources/network";
-import { declareServerService } from "./src/resources/server";
 
 const stackConfig = loadStackConfig.pipe(Effect.orDie);
+
+const gcsStateLayer = Layer.unwrap(
+  stackConfig.pipe(Effect.map((config) => GCP.state({ bucketName: config.stateBucket }))),
+);
 
 /**
  * Pure-Alchemy GCP stack for Kvitbit (zero Terraform).
@@ -26,71 +28,31 @@ const stackConfig = loadStackConfig.pipe(Effect.orDie);
  * 4. Optional Edge (when `KVITBIT_EDGE_DOMAINS` is set, e.g. `kvitbit.cz,kvitbit.app`):
  *    External HTTPS Load Balancer, Serverless NEG, Cloud Armor WAF + auth rate limiting,
  *    Cloud CDN for immutable static assets, Managed SSL certificate, and token-route log exclusion.
+ *
+ * Safety: `KVITBIT_BOOTSTRAP_FOUNDATION=true` inspects the GCS Alchemy state before planning and
+ * hard-fails if any non-foundation workload exists, preventing accidental production deletions.
  */
 export default Alchemy.Stack(
-  "Kvitbit",
+  KVITBIT_STACK_NAME,
   {
     providers: Layer.mergeAll(EdgeBackendServiceProvider, EdgeSecurityPolicyProvider).pipe(
       Layer.provideMerge(GCP.providers()),
     ),
-    state: Layer.unwrap(
-      stackConfig.pipe(Effect.map((config) => GCP.state({ bucketName: config.stateBucket }))),
-    ),
+    state: gcsStateLayer,
   },
   Effect.gen(function* () {
     const config = yield* stackConfig;
 
-    const foundation = yield* declareFoundation(config);
-    const tokenRouteExclusion = yield* declareTokenRouteLogExclusion(config);
+    const inspectState = config.bootstrapFoundation
+      ? Effect.gen(function* () {
+          const stateEffect = yield* State.State;
+          return yield* stateEffect;
+        }).pipe(Effect.provide(GCP.state({ bucketName: config.stateBucket })))
+      : undefined;
 
-    if (config.bootstrapFoundation) {
-      return {
-        stage: config.stage,
-        bootstrapFoundation: true as const,
-        projectId: config.projectId,
-        region: config.region,
-        repository: foundation.repositoryName,
-        blobsBucket: foundation.blobsBucketName,
-        mobileAssetsBucket: foundation.mobileAssetsBucketName,
-        tokenRouteExclusion,
-      };
-    }
-
-    const network = yield* declareNetworkAndRunners(config, {
-      runnerServiceAccountEmail: foundation.runnerServiceAccountEmail,
-      blobsBucketName: config.blobsBucket,
-      runnerDependencies: foundation.runnerDependencies,
-    });
-
-    const server = yield* declareServerService(config, {
-      networkName: network.networkName,
-      subnetworkName: network.subnetworkName,
-      blobsBucketName: config.blobsBucket,
-      mobileAssetsBucketName: config.mobileAssetsBucket,
-      serverServiceAccountEmail: foundation.serverServiceAccountEmail,
-      serverDependencies: [...foundation.serverDependencies, ...network.networkReadyDependencies],
-    });
-
-    const edge =
-      config.edge === undefined
-        ? undefined
-        : yield* declareKvitbitEdge(config, config.edge, server.serviceId);
-
-    return {
-      stage: config.stage,
-      bootstrapFoundation: false as const,
-      projectId: config.projectId,
-      region: config.region,
-      repository: foundation.repositoryName,
-      blobsBucket: foundation.blobsBucketName,
-      mobileAssetsBucket: foundation.mobileAssetsBucketName,
-      network: network.networkName,
-      subnetwork: network.subnetworkName,
-      runners: network.runnerNames,
-      serverService: server.serviceName,
-      serverUri: server.serviceUri,
-      tokenRouteExclusion,
-      edge,
-    };
+    return yield* declareKvitbitStack(config, {
+      stackName: KVITBIT_STACK_NAME,
+      inspectState,
+    }).pipe(Effect.orDie);
   }),
 );
