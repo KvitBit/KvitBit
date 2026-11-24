@@ -94,6 +94,8 @@ interface Booked {
 class Lab {
   readonly payments: Array<Booked> = [];
   proforma: DocumentId | null = null;
+  /** A tax Final Invoice was cancelled by a full Credit Note (the model's fi.storno). */
+  finalStorno = false;
   constructor(
     readonly vat: boolean,
     readonly customer: ContactId,
@@ -180,7 +182,13 @@ class Lab {
   }
 
   cancel(id: DocumentId) {
-    return Effect.flatMap(Documents, (d) => d.cancel(id, { reason: "storno" }));
+    return Effect.flatMap(Documents, (d) => d.cancel(id, { reason: "storno" })).pipe(
+      Effect.tap((r) =>
+        Effect.sync(() => {
+          if (r.document.kind === "invoice" && r.creditNote !== null) this.finalStorno = true;
+        }),
+      ),
+    );
   }
 
   lock(id: DocumentId) {
@@ -244,11 +252,11 @@ class Lab {
         expect(fi).toBeNull();
         expect(p.locked).toBe(true);
       }
-      // CancelledFinalUnpaid, CancelledIsLocked
-      if (fi !== null && fi.status === "cancelled") {
+      // CancelledFinalUnpaid (status cancelled, or a tax Final Invoice's storno), CancelledIsLocked
+      if (fi !== null && (fi.status === "cancelled" || self.finalStorno)) {
         expect(liveOnFi).toHaveLength(0);
-        expect(fi.locked).toBe(true);
       }
+      if (fi !== null && fi.status === "cancelled") expect(fi.locked).toBe(true);
       // FinalInvoiceOfPaidProforma
       if (fi !== null) {
         expect(linesOf(fi).some((l) => l.deducts !== null)).toBe(true);
@@ -292,19 +300,19 @@ class Lab {
       if (fi !== null) {
         const supply = new Map<string, BigDecimal.BigDecimal>();
         for (const l of linesOf(fi).filter((l) => l.deducts === null)) {
-          supply.set(l.treatment, BigDecimal.sum(supply.get(l.treatment) ?? dec("0"), l.amount));
+          supply.set(bucketKey(l), BigDecimal.sum(supply.get(bucketKey(l)) ?? dec("0"), l.amount));
         }
         const credited = new Map<string, BigDecimal.BigDecimal>();
         for (const cnId of related(fi, "corrected_by")) {
           for (const l of linesOf(yield* docs.get(cnId)).filter((l) => l.deducts === null)) {
             credited.set(
-              l.treatment,
-              BigDecimal.sum(credited.get(l.treatment) ?? dec("0"), BigDecimal.negate(l.amount)),
+              bucketKey(l),
+              BigDecimal.sum(credited.get(bucketKey(l)) ?? dec("0"), BigDecimal.negate(l.amount)),
             );
           }
         }
-        for (const [treatment, c] of credited) {
-          expect(BigDecimal.isLessThanOrEqualTo(c, supply.get(treatment) ?? dec("0"))).toBe(true);
+        for (const [bucket, c] of credited) {
+          expect(BigDecimal.isLessThanOrEqualTo(c, supply.get(bucket) ?? dec("0"))).toBe(true);
         }
       }
       // RemovedPaymentReversed (which payments the Final Invoice deducted is the harness's
@@ -493,15 +501,25 @@ describe("Shortest path per model action", () => {
     );
   });
 
-  test("... -> FiStart..FiCommit -> RecordOnFinal, LockFinal, UnlockFinal", async () => {
+  test("... -> FiStart..FiCommit -> RecordOnFinal", async () => {
     await replay("vat_payer", (lab) =>
       Effect.gen(function* () {
         value(yield* lab.step(lab.issueProforma()));
         value(yield* lab.step(lab.pay()));
         const fi = value(yield* lab.step(lab.issueFinal()));
         value(yield* lab.step(lab.pay("100", fi.id as DocumentId)));
-        value(yield* lab.step(lab.lock(fi.id as DocumentId)));
-        value(yield* lab.step(lab.unlock(fi.id as DocumentId)));
+      }),
+    );
+  });
+
+  test("... -> FiStart..FiCommit -> LockFinal -> UnlockFinal", async () => {
+    await replay("vat_payer", (lab) =>
+      Effect.gen(function* () {
+        value(yield* lab.step(lab.issueProforma()));
+        value(yield* lab.step(lab.pay()));
+        const fi = value(yield* lab.step(lab.issueFinal()));
+        expect(value(yield* lab.step(lab.lock(fi.id as DocumentId))).locked).toBe(true);
+        expect(value(yield* lab.step(lab.unlock(fi.id as DocumentId))).locked).toBe(false);
       }),
     );
   });

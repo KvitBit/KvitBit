@@ -139,6 +139,66 @@
             "name": "CreditWithinOriginal"
           },
           "description": "Credit Notes skip the D7 per-bucket cap"
+        },
+        {
+          "name": "reissue-cancelled",
+          "config": "formal/lifecycle/DocumentLifecycle_mutant_reissue_cancelled.cfg",
+          "expect": "violation",
+          "violates": {
+            "kind": "action",
+            "name": "LegalTransitions"
+          },
+          "description": "issue accepts a cancelled Proforma"
+        },
+        {
+          "name": "edit-with-payments",
+          "config": "formal/lifecycle/DocumentLifecycle_mutant_edit_with_payments.cfg",
+          "expect": "violation",
+          "violates": {
+            "kind": "action",
+            "name": "FrozenWhenDepended"
+          },
+          "description": "lines edit ignores the Proforma's payments"
+        },
+        {
+          "name": "cancel-unlocked",
+          "config": "formal/lifecycle/DocumentLifecycle_mutant_cancel_unlocked.cfg",
+          "expect": "violation",
+          "violates": {
+            "kind": "invariant",
+            "name": "CancelledIsLocked"
+          },
+          "description": "cancel leaves the Proforma unlocked"
+        },
+        {
+          "name": "ptd-after-final",
+          "config": "formal/lifecycle/DocumentLifecycle_mutant_ptd_after_final.cfg",
+          "expect": "violation",
+          "violates": {
+            "kind": "invariant",
+            "name": "NoPtdAfterFinal"
+          },
+          "description": "a payment on the Proforma after its Final Invoice issues a PTD"
+        },
+        {
+          "name": "no-ptd",
+          "config": "formal/lifecycle/DocumentLifecycle_mutant_no_ptd.cfg",
+          "expect": "violation",
+          "violates": {
+            "kind": "invariant",
+            "name": "PtdPerPayment"
+          },
+          "description": "a vat_payer's payment on the Proforma issues no PTD"
+        },
+        {
+          "name": "final-unpaid",
+          "config": "formal/lifecycle/DocumentLifecycle_mutant_final_unpaid.cfg",
+          "expect": "violation",
+          "violates": {
+            "kind": "invariant",
+            "name": "FinalInvoiceOfPaidProforma"
+          },
+          "description": "issueFinalInvoice skips the payments check"
         }
       ],
       "timeoutSeconds": 120,
@@ -307,7 +367,7 @@
         "Documents.edit",
         "compose (Final Invoice deduction totals)"
       ],
-      "bounds": "29 traces on TestCore (vat_payer and non_vat_payer): the shortest path to each model action, guard traces, both serial orders of H2, the D7 cap for PTDs and the Final Invoice, four crash points (CNB fixing unavailable during PTD and Final Invoice issue; Credit Note and Final Invoice numbering exhausted); model invariants checked after every step",
+      "bounds": "30 traces on TestCore (vat_payer and non_vat_payer): the shortest path to each model action, guard traces, both serial orders of H2, the D7 cap for PTDs and the Final Invoice, four crash points (CNB fixing unavailable during PTD and Final Invoice issue; Credit Note and Final Invoice numbering exhausted); model invariants checked after every step",
       "assumptions": [
         "In-memory store: transactions run serially, so the H2 overlap itself is not replayed (pg-contention job)",
         "Crash points only where a seam exists: FixtureRates.unavailable and a numbering series at its last counter (Workspaces.configureSeries)"

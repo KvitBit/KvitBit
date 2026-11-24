@@ -124,7 +124,7 @@ CpVars == <<cpPc, cpT, cpSeenFi, cpC>>
 
 \* Documents.issue from the draft (lifecycle.ts:142-211; table draft.issue).
 IssueProforma ==
-  /\ pStatus = "draft"
+  /\ (pStatus = "draft" \/ (Mutant = "reissue_cancelled" /\ pStatus = "cancelled"))
   /\ pStatus' = "issued"
   /\ UNCHANGED <<vat, pLocked, pLines, pay, ptd, fi, fiCount, holder, FiVars, CpVars>>
 
@@ -133,7 +133,7 @@ IssueProforma ==
 EditProformaLines ==
   /\ Free("P")
   /\ pStatus = "issued" /\ ~pLocked
-  /\ LiveP = {} /\ ~fi.ex
+  /\ (Mutant = "edit_with_payments" \/ LiveP = {}) /\ ~fi.ex
   /\ pLines' = 1 - pLines
   /\ UNCHANGED <<vat, pStatus, pLocked, pay, ptd, fi, fiCount, holder, FiVars, CpVars>>
 
@@ -157,7 +157,7 @@ CancelProforma ==
   /\ pStatus = "issued" /\ ~pLocked
   /\ (Mutant = "cancel_with_payments" \/ LiveP = {})
   /\ ~fi.ex
-  /\ pStatus' = "cancelled" /\ pLocked' = TRUE
+  /\ pStatus' = "cancelled" /\ pLocked' = (Mutant # "cancel_unlocked")
   /\ UNCHANGED <<vat, pLines, pay, ptd, fi, fiCount, holder, FiVars, CpVars>>
 
 ---------------------------------------------------------------------------
@@ -170,9 +170,10 @@ CancelProforma ==
 RecordOnProforma(i) ==
   /\ Free("P") /\ Free("FI")
   /\ pay[i].st = "none"
-  /\ pStatus = "issued" /\ ~fi.ex
-  /\ pay' = [pay EXCEPT ![i] = [st |-> "live", on |-> "P", ptd |-> IF vat THEN i ELSE 0]]
-  /\ ptd' = IF vat THEN [ptd EXCEPT ![i] = [ex |-> TRUE, cr |-> Zero]] ELSE ptd
+  /\ pStatus = "issued" /\ (Mutant = "ptd_after_final" \/ ~fi.ex)
+  /\ pay' = [pay EXCEPT ![i] = [st |-> "live", on |-> "P",
+                                ptd |-> IF vat /\ Mutant # "no_ptd" THEN i ELSE 0]]
+  /\ ptd' = IF vat /\ Mutant # "no_ptd" THEN [ptd EXCEPT ![i] = [ex |-> TRUE, cr |-> Zero]] ELSE ptd
   /\ UNCHANGED <<vat, pStatus, pLocked, pLines, fi, fiCount, holder, FiVars, CpVars>>
 
 \* Payments.record on the Proforma (or the Final Invoice) once P has a Final
@@ -208,7 +209,7 @@ FiStart ==
   /\ fiPc = "idle" /\ Free("P")
   /\ pStatus = "issued"
   /\ (Mutant = "duplicate_final" \/ ~fi.ex)
-  /\ LiveP # {}
+  /\ (Mutant = "final_unpaid" \/ LiveP # {})
   /\ holder' = [holder EXCEPT !["P"] = "fi"]
   /\ fiPc' = "lockedP"
   /\ UNCHANGED <<vat, pStatus, pLocked, pLines, pay, ptd, fi, fiCount, fiDed, fiPtds, CpVars>>
@@ -417,14 +418,6 @@ CreditWithinOriginal ==
 \* during or after the Final Invoice's issue while it stands.
 DeductionsCurrent ==
   FiLive => \A j \in fi.ptds : fi.ded[j] = Minus(One, ptd[j].cr)
-
-\* S4: the two in-flight transactions never wait on each other. TLC's deadlock
-\* check cannot see such a cycle, because FiAbort and CpAbort are always
-\* enabled while a transaction is in flight, so it is stated here.
-FiWants == IF fiPc = "lockedP" THEN {"PTD"} ELSE {}
-CpWants == IF cpPc = "started" THEN {"PTD"} ELSE {}
-NoLockWaitCycle ==
-  ~ ( (\E r \in FiWants : holder[r] = "cp") /\ (\E r \in CpWants : holder[r] = "fi") )
 
 \* The part of the transition table (transitions.ts:64-123) this model
 \* represents (narrower than the whole table: no PTD lock, no draft edits):

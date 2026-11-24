@@ -17,7 +17,7 @@ From the repo root (Bun 1.4.2 per `packageManager`, last run with Bun 1.4.4; JDK
 bun run verify:formal --only lifecycle.model --only lifecycle.replay
 ```
 
-Expected: `PASSED: 2 passed`, about 15 s in total (model base 5 s and six mutants about 1-2 s each; replay 1 s, 29 tests). Nightly (`--wide`) runs `DocumentLifecycle_wide.cfg` (3 payment slots, 530,520 distinct states, about 50 s). The runner's per-run state count can show a TLC progress line rather than the final count; the final count is in the log's last `distinct states found` line. The replay alone: `bun test ./formal/lifecycle/lifecycle.replay.test.ts`.
+Expected: `PASSED: 2 passed`, about 16 s in total (model base 3 s and twelve mutants about 1 s each; replay 1 s, 30 tests). Nightly (`--wide`) runs `DocumentLifecycle_wide.cfg` (3 payment slots, 530,520 distinct states, about 50 s). The runner's per-run state count can show a TLC progress line rather than the final count; the final count is in the log's last `distinct states found` line. The replay alone: `bun test ./formal/lifecycle/lifecycle.replay.test.ts`.
 
 Read every TLC result, pass or violation, with the `/statechart` skill: it prints a violation's shortest path in plain words and charts a passing model. TLC logs land in `formal/.cache/logs/`.
 
@@ -33,7 +33,7 @@ The VAT, rounding and CZK amounts of these documents are `verify-vat-numbering-m
 
 ## What the checks promise
 
-Each property is an INVARIANT or PROPERTY of `DocumentLifecycle.cfg`. The replay's `Lab.check` asserts, on the real state after each step: `OneFinalInvoice`, `FinalInvoiceOfPaidProforma`, `PtdPerPayment` (real payment -> PTD links), `CancelledProformaUnpaid`, `CancelledFinalUnpaid`, `CancelledIsLocked`, `RemovedPaymentReversed` (which payments the Final Invoice deducted is harness bookkeeping), `CreditWithinOriginal` (PTDs and the Final Invoice's supply), `DeductionsCurrent`. It holds no history, so `LegalTransitions` and `FrozenWhenDepended` are replayed only as expected outcomes of single steps (a refused edit, a refused cancel); `NoPtdAfterFinal` only through `PtdPerPayment` (payments after the Final Invoice carry no PTD); `NoLockWaitCycle` not at all.
+Each property is an INVARIANT or PROPERTY of `DocumentLifecycle.cfg`. The replay's `Lab.check` asserts, on the real state after each step: `OneFinalInvoice`, `FinalInvoiceOfPaidProforma`, `PtdPerPayment` (real payment -> PTD links), `CancelledProformaUnpaid`, `CancelledFinalUnpaid` (status cancelled, or a storno the harness saw succeed), `CancelledIsLocked`, `RemovedPaymentReversed` (which payments the Final Invoice deducted is harness bookkeeping), `CreditWithinOriginal` (PTDs and the Final Invoice's supply), `DeductionsCurrent`. It holds no history, so `LegalTransitions` and `FrozenWhenDepended` are replayed only as expected outcomes of single steps (a refused edit, a refused cancel); `NoPtdAfterFinal` only through `PtdPerPayment` (payments after the Final Invoice carry no PTD).
 
 | Property | Promise | Harm if broken |
 |---|---|---|
@@ -45,7 +45,6 @@ Each property is an INVARIANT or PROPERTY of `DocumentLifecycle.cfg`. The replay
 | `RemovedPaymentReversed` | A removed advance has its PTD fully credited and the Final Invoice that deducted it reversed (P3). | VAT declared on a PTD, or deducted on a Final Invoice, for money that was never kept. |
 | `CreditWithinOriginal` | Cumulative Credit Notes never exceed the original per VAT bucket (D7). | A Credit Note refunds more VAT than was charged. |
 | `DeductionsCurrent` (H2) | While a Final Invoice deducts a PTD, the PTD's uncredited amount equals what the Final Invoice deducts (D8, §37a). | The advance's VAT is deducted on the Final Invoice and also reversed by a PTD Credit Note: the VAT return under-declares. |
-| `NoLockWaitCycle` | The in-flight Final Invoice issue and PTD correction never wait on each other's locks (S4). | Both requests hang until the database aborts one. |
 | `FrozenWhenDepended` (action) | The Proforma's lines change only while nothing depends on them (D3a). | PTDs and the Final Invoice no longer match the Proforma they follow. |
 
 ### Hypothesis H2: PTD correction interleaving with Final Invoice issue - REFUTED within the bounds
@@ -65,11 +64,11 @@ Mutant `no-proforma-lock` (the PTD's Proforma read without its lock) breaks `Ded
 - A failed transaction writes nothing and releases its locks (`FiAbort`, `CpAbort`; `store/memory.ts` restores the frame, Postgres rolls back).
 - Amounts: a payment and its PTD carry 1 unit per bucket; the Final Invoice's supply 1 unit per bucket; a Credit Note credits 0 or 1 unit per bucket, non-zero. PTD slot i belongs to payment slot i.
 - Not modelled: the Credit Note that a tax document's cancel issues beyond "the remainder is credited", the Document Lock of a PTD (it only disables `correct`/`cancel`, so it cannot break a safety property), edits other than the Proforma's lines, a Final Invoice patch, `send`/`share`/delivery, idempotent replays (`verify-idempotency-cas`), more than one Proforma, a regime change between payments, invoices that are not Final Invoices.
-- Deadlock: TLC's deadlock check is on, but it cannot see a lock cycle between in-flight transactions, because `FiAbort` and `CpAbort` are always enabled while one is in flight. `NoLockWaitCycle` states the absence of a wait cycle instead; no mutant breaks it (in this model the PTD correction takes its last lock and then only commits).
+- Deadlock: TLC's deadlock check is on, but it cannot see a lock cycle between in-flight transactions, because `FiAbort` and `CpAbort` are always enabled while one is in flight. Lock cycles are not checked by this model. The argument instead (S4, not verified): both split transactions take the Proforma lock first and the PTD lock second, and every other method takes the Proforma before the Final Invoice (`payments.ts:205-226`), so no two requests take locks in opposite orders.
 
 ### Replay harness
 
-29 tests, vat_payer and non_vat_payer, on a fresh `TestCore` each (`TestClock` at 2026-11-23T09:00Z, CNB fixings 2026-11-20 and 2026-11-23 at 25.000): the shortest path to each model action (`Shortest path per model action`), guard traces, both serial orders of H2, the D7 cap for PTDs and the Final Invoice, and four crash points. `Lab.check` asserts the invariants above after every step; for the Final Invoice the cap compares its Credit Notes' supply lines with its own supply lines per bucket.
+30 tests, vat_payer and non_vat_payer, on a fresh `TestCore` each (`TestClock` at 2026-11-23T09:00Z, CNB fixings 2026-11-20 and 2026-11-23 at 25.000): the shortest path to each model action (`Shortest path per model action`), guard traces, both serial orders of H2, the D7 cap for PTDs and the Final Invoice, and four crash points. `Lab.check` asserts the invariants above after every step; for the Final Invoice the cap compares its Credit Notes' supply lines with its own supply lines per bucket.
 - Crash points: `FixtureRates.unavailable` makes `Payments.record` on a EUR Proforma fail inside `issuePaymentTaxDocument` after the payment row and the settle were written, and makes `issueFinalInvoice` fail in `compose`. A numbering series at its last counter (`Workspaces.configureSeries` with `nextNumber: 2147483646`) makes a PTD Credit Note (`CpAbort`) and a Final Invoice (`FiAbort`) fail at allocation with `Conflict{illegal_transition, numbering.pattern_invalid}`. Each test asserts nothing was kept.
 - Required seam that does not exist (not added; product code is out of scope): a failure after a row is written and before commit, e.g. after `issueFinalInvoice` inserts the Final Invoice and before it links the Proforma (`final.ts:214-234`), or after `issueCreditNote` inserts the Credit Note and before it updates the original (`credit.ts:400-428`). Today those aborts are covered only by the model and the memory store's frame rollback.
 - Not covered by the replay: the in-flight overlaps themselves. The memory store runs transactions one at a time, so Postgres locking is assumed, not tested. A pg-contention test (`*.contention.ts`, Postgres 17) should cover: (1) `issueFinalInvoice` and `correct`/`cancel` of a PTD of the same Proforma started together: exactly one order wins and `DeductionsCurrent` holds; (2) `Payments.record` on the Proforma racing `issueFinalInvoice`: the payment lands on the Proforma with a PTD the Final Invoice deducts, or on the Final Invoice, never in between; (3) `Payments.remove` racing `issueFinalInvoice` and racing a full Credit Note of the Final Invoice; (4) two `issueFinalInvoice` calls: one `Conflict{duplicate}` (unique `document_relations_one_final_invoice_per_proforma`); (5) `cancel` of the Proforma racing `Payments.record`; (6) no `40P01` deadlock under S4 order in any of these.
@@ -102,8 +101,14 @@ Mutant `no-proforma-lock` (the PTD's Proforma read without its lock) breaks `Ded
 | `remove-with-deduction` | removal ignores a live Final Invoice | `RemovedPaymentReversed` |
 | `no-proforma-lock` | PTD correction without the Proforma lock (H2) | `DeductionsCurrent` |
 | `credit-over-cap` | no D7 per-bucket cap | `CreditWithinOriginal` |
+| `reissue-cancelled` | issue accepts a cancelled Proforma | `LegalTransitions` (action) |
+| `edit-with-payments` | lines edit ignores the Proforma's payments | `FrozenWhenDepended` (action) |
+| `cancel-unlocked` | cancel leaves the Proforma unlocked | `CancelledIsLocked` |
+| `ptd-after-final` | a payment on the Proforma after its Final Invoice issues a PTD | `NoPtdAfterFinal` |
+| `no-ptd` | a vat_payer's payment on the Proforma issues no PTD | `PtdPerPayment` |
+| `final-unpaid` | `issueFinalInvoice` skips the payments check | `FinalInvoiceOfPaidProforma` |
 
-- Able-to-fail gate on the real code (2026-11-24, at `77a5bb7`): each break was applied to the file, `bun test ./formal/lifecycle/lifecycle.replay.test.ts` failed as shown, `git checkout` restored the file, and the run was green again (29 pass). Rows 1-4 were rerun on the 29-test harness; row 7 came from review round 1, rows 5-6 from the diff council; the `deductedBy` row was rerun after `DeductionsCurrent` started summing signed deduction amounts.
+- Able-to-fail gate on the real code (2026-11-24, at `77a5bb7`): each break was applied to the file, `bun test ./formal/lifecycle/lifecycle.replay.test.ts` failed as shown, `git checkout` restored the file, and the run was green again (30 pass). Rows 1-4 were rerun on the 29-test harness and row 1 again on the 30-test one; row 7 came from review round 1, rows 5-6 from the diff council, rows 8-9 from review round 2; the `deductedBy` row was rerun after `DeductionsCurrent` started summing signed deduction amounts.
 
 | Break | File | Caught by |
 |---|---|---|
@@ -114,5 +119,7 @@ Mutant `no-proforma-lock` (the PTD's Proforma read without its lock) breaks `Ded
 | `hasDependents` ignores the Proforma's payments | `modules/documents/transitions.ts:161` | the expected `Conflict{illegal_transition}` of a lines edit on a paid Proforma (`FrozenWhenDepended` as a step outcome) |
 | `issuePaymentTaxDocument` returns no PTD for a vat_payer | `modules/documents/payments.ts:384` | `Lab.check` `PtdPerPayment` (a vat_payer's payment on the Proforma without its PTD) |
 | D7 cap skipped for Invoices (`withinRemainder` only when `kind !== "invoice"`) | `modules/documents/corrections.ts:253` | `Lab.check` `CreditWithinOriginal` for the Final Invoice (its supply line credited twice) |
+| `plan` payments check disabled (Final Invoice for an unpaid Proforma) | `modules/documents/final.ts:139` | `Lab.check` `FinalInvoiceOfPaidProforma` (a Final Invoice with no deduction line) |
+| A partial Credit Note line stored at the original rate + 1 | `modules/documents/corrections.ts:132-139` (`partialSpec`) | `Lab.check` `CreditWithinOriginal` for the Final Invoice (credited bucket the Final Invoice does not have), 3 tests |
 
-- Able-to-fail evidence per property. With a mutant: `CancelledProformaUnpaid`, `CancelledFinalUnpaid`, `OneFinalInvoice`, `RemovedPaymentReversed`, `DeductionsCurrent`, `CreditWithinOriginal`. With a real-code break only: `PtdPerPayment`, `FrozenWhenDepended` (as a step outcome). With neither (they hold, but no run has shown them failing): `LegalTransitions`, `NoPtdAfterFinal`, `FinalInvoiceOfPaidProforma`, `CancelledIsLocked`, `NoLockWaitCycle`, `TypeOK`. Add a mutant before relying on one of these to catch a change.
+- Able-to-fail evidence per property: every property in the base config has a mutant that violates it (table above). Real-code breaks also catch `CancelledProformaUnpaid`, `CancelledFinalUnpaid` (row 1, through the storno), `OneFinalInvoice`, `RemovedPaymentReversed`, `DeductionsCurrent`, `CreditWithinOriginal`, `PtdPerPayment`, `FinalInvoiceOfPaidProforma` and `FrozenWhenDepended` (as a step outcome). `TypeOK` is the model's type check, not a promise of the code.
