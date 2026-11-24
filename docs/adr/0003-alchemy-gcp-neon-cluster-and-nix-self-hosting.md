@@ -14,9 +14,9 @@ We deploy the hosted SaaS on **GCP via Alchemy** (`infra/alchemy`, Effect 4.1) u
 
 ## Provisioned bootstrap
 
-Bootstrapped on 2026-11-23 for GitHub repo `totalolage/invoicarr` (bootstrapped infra ID, kept), with no static GCP service account keys. The product is named Kvitbit; the infra IDs below predate the rename and are kept unchanged:
+Re-bootstrapped on 2026-11-24 for GitHub repo `totalolage/invoicarr` (repository ID `1467990305`, owner ID `41711263`), with no static GCP service account keys. The earlier empty `invoicarr-prod` project was deleted and replaced with `kvitbit-prod`:
 
-- **GCP**: project `invoicarr-prod` (`556342059394`; bootstrapped infra ID, kept), region `europe-west3`, zone `europe-west3-a`, Alchemy state bucket `alchemy-state-invoicarr-prod` (bootstrapped infra ID, kept; uniform access, public access prevention, versioning), WIF provider `projects/556342059394/locations/global/workloadIdentityPools/github/providers/github`, deployer `invoicarr-deployer@invoicarr-prod.iam.gserviceaccount.com` (bootstrapped infra ID, kept).
+- **GCP**: project `kvitbit-prod` (`449188423567`, display name `Kvitbit Prod`), region `europe-west3`, zone `europe-west3-a`, Alchemy state bucket `alchemy-state-kvitbit-prod` (uniform access, public access prevention, versioning), WIF provider `projects/449188423567/locations/global/workloadIdentityPools/github/providers/github` (bound to immutable `repository_id == '1467990305'` and `repository_owner_id == '41711263'`), deployer `kvitbit-deployer@kvitbit-prod.iam.gserviceaccount.com`.
 - **Neon**: project `hidden-hall-00717862` (display name `invoicarr`; bootstrapped infra ID, kept) in `aws-eu-central-1`, PostgreSQL 17, default branch `main`.
 - **GitHub Actions variables set**: `GCP_PROJECT_ID`, `GCP_PROJECT_NUMBER`, `GCP_REGION`, `GCP_ZONE`, `GCP_WORKLOAD_IDENTITY_PROVIDER`, `GCP_DEPLOYER_SERVICE_ACCOUNT`, `ALCHEMY_STATE_BUCKET`.
 - **GitHub Actions secrets set**: `DATABASE_URL` (pooled), `DATABASE_DIRECT_URL` (direct).
