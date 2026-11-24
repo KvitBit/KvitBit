@@ -69,8 +69,8 @@ describe("onboarding", () => {
     });
     expect(result.found.items.map((c) => c.id)).toEqual([contact.id]);
     expect(result.item).toMatchObject({ name: "Konzultace", unit: "h", vat: "standard" });
-    expect(str((result.item as { unitPrice: never }).unitPrice)).toBe("1500");
-    expect(result.items.map((i) => i.id)).toEqual([(result.item as { id: string }).id]);
+    expect(str(result.item.unitPrice as never)).toBe("1500");
+    expect(result.items.map((i) => i.id)).toEqual([result.item.id]);
   });
 });
 
@@ -227,7 +227,7 @@ describe("vat_payer advance flow", () => {
       purpose: "document",
       to: ["fakturace@odberatel.cz"],
     });
-    expect(started.map((s) => s.deliveryId)).toEqual([ptd.deliveries[0]?.id]);
+    expect(started.map((s) => s.deliveryId)).toEqual(ptd.deliveries.map((d) => d.id));
     // Final Invoice: the full supply less the advance; only the extra work remains due.
     expect(finalInvoice.kind).toBe("invoice");
     expect(finalInvoice.number).toBe("2026-0001");
