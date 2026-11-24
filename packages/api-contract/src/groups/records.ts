@@ -487,7 +487,7 @@ export class ReportsGroup extends HttpApiGroup.make("reports")
       params: WorkspaceParams,
       query: { from: IsoDate, to: IsoDate },
       success: DashboardView,
-      error: Invalid.schema,
+      error: [Invalid.schema, Unavailable.schema],
     }).annotate(OpenApi.Summary, "Get the dashboard"),
   )
   .add(
@@ -495,7 +495,7 @@ export class ReportsGroup extends HttpApiGroup.make("reports")
       params: { ...WorkspaceParams, report: ReportKind },
       query: ReportRange,
       success: ReportView,
-      error: Invalid.schema,
+      error: [Invalid.schema, Unavailable.schema],
     }).annotate(OpenApi.Summary, "Run a report"),
   )
   .add(
@@ -503,7 +503,7 @@ export class ReportsGroup extends HttpApiGroup.make("reports")
       params: { ...WorkspaceParams, report: ReportKind },
       query: { format: ExportFormat, ...ReportRange },
       success: ReportExportBytes,
-      error: Invalid.schema,
+      error: [Invalid.schema, Unavailable.schema],
     }).annotate(OpenApi.Summary, "Export a report"),
   )
   .add(
@@ -519,14 +519,14 @@ export class ReportsGroup extends HttpApiGroup.make("reports")
       params: WorkspaceParams,
       headers: IdempotencyHeaders,
       success: Accepted(ExportJobView),
-      error: [Conflict.schema],
+      error: [Conflict.schema, Unavailable.schema],
     }).annotate(OpenApi.Summary, "Start a data export"),
   )
   .add(
     HttpApiEndpoint.get("getExport", "/exports/:exportId", {
       params: { ...WorkspaceParams, exportId: ExportId },
       success: ExportJobView,
-      error: [NotFound.schema],
+      error: [NotFound.schema, Unavailable.schema],
     }).annotate(OpenApi.Summary, "Get a data export's status"),
   )
   .add(

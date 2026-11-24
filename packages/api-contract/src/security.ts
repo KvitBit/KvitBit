@@ -21,6 +21,7 @@ import {
   Locale,
   NotFound,
   Scope,
+  Unavailable,
   UserId,
   WorkspaceId,
 } from "@kvitbit/domain/contract";
@@ -160,7 +161,7 @@ export class WorkspaceMember extends HttpApiMiddleware.Service<
   WorkspaceMember,
   { provides: CurrentCaller; requires: CurrentPrincipal | CurrentCaller }
 >()("kvitbit/edge/WorkspaceMember", {
-  error: [NotFound.schema, Forbidden.schema],
+  error: [NotFound.schema, Unavailable.schema, Forbidden.schema],
 }) {}
 
 /** Session only: rejects API Keys on account endpoints (rule A4). */

@@ -160,8 +160,12 @@ export class Workspaces extends Context.Service<
     readonly create: (
       input: NewWorkspace,
       opts?: RequestOptions,
-    ) => Effect.Effect<MemberCaller, Invalid | Unavailable | Forbidden, CurrentCaller>;
-    readonly listMine: Effect.Effect<ReadonlyArray<WorkspaceSummary>, Forbidden, CurrentCaller>;
+    ) => Effect.Effect<MemberCaller, Invalid | Conflict | Unavailable | Forbidden, CurrentCaller>;
+    readonly listMine: Effect.Effect<
+      ReadonlyArray<WorkspaceSummary>,
+      Unavailable | Forbidden,
+      CurrentCaller
+    >;
     /** The only way to obtain a MemberCaller. NotFound when the user is not a Member. */
     readonly enter: (
       workspace: WorkspaceId,
@@ -170,10 +174,10 @@ export class Workspaces extends Context.Service<
         readonly channel: Channel;
         readonly client?: ClientRef; // verified API Key or MCP grant; copied into MemberCaller.client and audit
       },
-    ) => Effect.Effect<MemberCaller, NotFound | Forbidden, CurrentCaller>;
+    ) => Effect.Effect<MemberCaller, NotFound | Unavailable | Forbidden, CurrentCaller>;
     readonly acceptInvitation: (
       token: InvitationToken,
-    ) => Effect.Effect<MemberCaller, NotFound | Conflict | Forbidden, CurrentCaller>;
+    ) => Effect.Effect<MemberCaller, NotFound | Conflict | Unavailable | Forbidden, CurrentCaller>;
 
     // Account caller (registry.lookup) or Member caller (contact.read)
     /** Read-only CompanyRegistry lookup: checksum first, 24 h cache, nothing saved. NotFound when ARES has no record. */
@@ -183,23 +187,27 @@ export class Workspaces extends Context.Service<
 
     // InvitationHolder caller
     /** What the invitation page shows before sign-up. Unknown tokens are NotFound; others show their status. */
-    readonly peekInvitation: Effect.Effect<InvitationPeek, NotFound, CurrentCaller>;
+    readonly peekInvitation: Effect.Effect<InvitationPeek, NotFound | Unavailable, CurrentCaller>;
 
     // Member caller
-    readonly current: Effect.Effect<WorkspaceView, Forbidden, CurrentCaller>;
+    readonly current: Effect.Effect<WorkspaceView, Unavailable | Forbidden, CurrentCaller>;
     readonly updateIssuingEntity: (
       patch: IssuingEntityPatch,
       expectedRevision: number,
-    ) => Effect.Effect<WorkspaceView, Invalid | Conflict | Forbidden, CurrentCaller>;
+    ) => Effect.Effect<WorkspaceView, Invalid | Conflict | Unavailable | Forbidden, CurrentCaller>;
     /** Defaults, slug, reminder policy and branding (fields of WorkspaceSettingsPatch). */
     readonly updateSettings: (
       patch: WorkspaceSettingsPatch,
       expectedRevision: number,
-    ) => Effect.Effect<WorkspaceView, Invalid | Conflict | Forbidden, CurrentCaller>;
+    ) => Effect.Effect<WorkspaceView, Invalid | Conflict | Unavailable | Forbidden, CurrentCaller>;
     readonly saveBankAccount: (
       input: BankAccountInput & { readonly id?: BankAccountId },
       opts?: RequestOptions,
-    ) => Effect.Effect<BankAccountView, Invalid | NotFound | Conflict | Forbidden, CurrentCaller>;
+    ) => Effect.Effect<
+      BankAccountView,
+      Invalid | NotFound | Conflict | Unavailable | Forbidden,
+      CurrentCaller
+    >;
     /**
      * Archives the account. Issued documents keep their snapshot. When drafts, Templates or a
      * currency default use it, `replacement` (same currency) takes its place in the same
@@ -208,7 +216,11 @@ export class Workspaces extends Context.Service<
     readonly removeBankAccount: (
       id: BankAccountId,
       replacement?: BankAccountId,
-    ) => Effect.Effect<void, Invalid | NotFound | Conflict | Forbidden, CurrentCaller>;
+    ) => Effect.Effect<
+      void,
+      Invalid | NotFound | Conflict | Unavailable | Forbidden,
+      CurrentCaller
+    >;
     readonly configureSeries: (
       input: {
         readonly id?: NumberingSeriesId;
@@ -221,12 +233,12 @@ export class Workspaces extends Context.Service<
       opts?: RequestOptions,
     ) => Effect.Effect<
       NumberingSeriesView,
-      Invalid | NotFound | Conflict | Forbidden,
+      Invalid | NotFound | Conflict | Unavailable | Forbidden,
       CurrentCaller
     >;
     readonly listSeries: Effect.Effect<
       ReadonlyArray<NumberingSeriesView>,
-      Forbidden,
+      Unavailable | Forbidden,
       CurrentCaller
     >;
 
@@ -242,7 +254,7 @@ export class Workspaces extends Context.Service<
     ) => Effect.Effect<FileDownload, NotFound | Unavailable | Forbidden, CurrentCaller>;
     readonly removeBrandingImage: (
       image: BrandingImage,
-    ) => Effect.Effect<void, Forbidden, CurrentCaller>;
+    ) => Effect.Effect<void, Unavailable | Forbidden, CurrentCaller>;
     /**
      * Renders a fixed sample document of `kind` with the current branding merged with
      * `branding`, through PdfRenderer. Persists nothing, allocates no number, writes no audit entry.
@@ -253,35 +265,43 @@ export class Workspaces extends Context.Service<
       readonly language: Locale;
     }) => Effect.Effect<FileDownload, Invalid | Unavailable | Forbidden, CurrentCaller>;
 
-    readonly members: Effect.Effect<ReadonlyArray<MemberView>, Forbidden, CurrentCaller>;
+    readonly members: Effect.Effect<
+      ReadonlyArray<MemberView>,
+      Unavailable | Forbidden,
+      CurrentCaller
+    >;
     /** Pending and recently expired invitations (invitation.read). */
-    readonly invitations: Effect.Effect<ReadonlyArray<InvitationView>, Forbidden, CurrentCaller>;
+    readonly invitations: Effect.Effect<
+      ReadonlyArray<InvitationView>,
+      Unavailable | Forbidden,
+      CurrentCaller
+    >;
     readonly invite: (
       email: string,
       role: Exclude<Role, "owner">,
       opts?: RequestOptions,
-    ) => Effect.Effect<InvitationView, Invalid | Conflict | Forbidden, CurrentCaller>;
+    ) => Effect.Effect<InvitationView, Invalid | Conflict | Unavailable | Forbidden, CurrentCaller>;
     /** Sends the email again and extends expiry by 7 days. Pending invitations only. */
     readonly resendInvitation: (
       id: InvitationId,
-    ) => Effect.Effect<void, NotFound | Conflict | Forbidden, CurrentCaller>;
+    ) => Effect.Effect<void, NotFound | Conflict | Unavailable | Forbidden, CurrentCaller>;
     readonly revokeInvitation: (
       id: InvitationId,
-    ) => Effect.Effect<void, NotFound | Forbidden, CurrentCaller>;
+    ) => Effect.Effect<void, NotFound | Unavailable | Forbidden, CurrentCaller>;
     /** `null` removes the Member. */
     readonly setRole: (
       member: UserId,
       role: Exclude<Role, "owner"> | null,
-    ) => Effect.Effect<void, NotFound | Conflict | Forbidden, CurrentCaller>;
+    ) => Effect.Effect<void, NotFound | Conflict | Unavailable | Forbidden, CurrentCaller>;
     /** The caller leaves the Workspace. The owner must transfer ownership first (rule R3). */
-    readonly leave: Effect.Effect<void, Conflict | Forbidden, CurrentCaller>;
+    readonly leave: Effect.Effect<void, Conflict | Unavailable | Forbidden, CurrentCaller>;
     readonly transferOwnership: (
       to: UserId,
-    ) => Effect.Effect<void, NotFound | Conflict | Forbidden, CurrentCaller>;
+    ) => Effect.Effect<void, NotFound | Conflict | Unavailable | Forbidden, CurrentCaller>;
     /** Makes the Workspace read-only. Purging is an operator task because of statutory retention. */
     readonly close: (
       confirmName: string,
-    ) => Effect.Effect<void, Invalid | Forbidden, CurrentCaller>;
+    ) => Effect.Effect<void, Invalid | Unavailable | Forbidden, CurrentCaller>;
 
     /**
      * Audit hook for credentials apps/server owns. The edge calls it after it creates or revokes
@@ -289,6 +309,6 @@ export class Workspaces extends Context.Service<
      */
     readonly recordAccessEvent: (
       event: AccessEvent,
-    ) => Effect.Effect<void, Forbidden, CurrentCaller>;
+    ) => Effect.Effect<void, Unavailable | Forbidden, CurrentCaller>;
   }
 >()("kvitbit/Workspaces") {}

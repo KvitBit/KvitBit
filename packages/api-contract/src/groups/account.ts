@@ -50,7 +50,7 @@ export class MyWorkspacesGroup extends HttpApiGroup.make("myWorkspaces")
   .add(
     HttpApiEndpoint.get("listMine", "/workspaces", {
       success: Schema.Array(WorkspaceSummary),
-      error: Forbidden.schema,
+      error: [Unavailable.schema, Forbidden.schema],
     }).annotate(OpenApi.Summary, "List my workspaces"),
   )
   .add(
@@ -74,7 +74,7 @@ export class OAuthConsentGroup extends HttpApiGroup.make("oauthConsent")
     HttpApiEndpoint.get("getConsent", "/oauth/consents/:consentId", {
       params: ConsentParams,
       success: ConsentView,
-      error: [NotFound.schema, Forbidden.schema],
+      error: [NotFound.schema, Unavailable.schema, Forbidden.schema],
     }).annotate(OpenApi.Summary, "Get an OAuth consent request"),
   )
   .add(
@@ -82,7 +82,7 @@ export class OAuthConsentGroup extends HttpApiGroup.make("oauthConsent")
       params: ConsentParams,
       payload: ConsentDecision,
       success: ConsentResult,
-      error: [NotFound.schema, Invalid.schema, Forbidden.schema],
+      error: [NotFound.schema, Invalid.schema, Unavailable.schema, Forbidden.schema],
     }).annotate(OpenApi.Summary, "Approve or deny an OAuth consent request"),
   )
   .middleware(SessionOnly)

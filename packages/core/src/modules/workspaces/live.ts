@@ -3,10 +3,8 @@
  * `WorkspaceSeries`, `UserDirectory`, `RegistryLookup`, `BlobStorage` and the narrow ports in
  * ./ports.ts.
  *
- * Error channels: the domain tag omits `Unavailable` on most methods (and `Conflict` on
- * `create`, which `withIdempotency` raises on a key reused with another payload). Every method
- * here is typed honestly as `WorkspacesImpl` (domain errors plus those) and the layer exposes it
- * through the single cast in `WorkspacesLive`; the gaps are reported for a domain fix.
+ * Error channels: the domain tag states the errors the methods really raise (`Unavailable` on
+ * every method, `Conflict{idempotency_mismatch}` on `create`), so the layer needs no cast.
  */
 import type {
   AccessEvent,
@@ -128,19 +126,10 @@ import {
   withSuffix,
 } from "./rules";
 
-// Honest error channels -----------------------------------------------------------------------
-
-type Widen<F, X> = F extends (...args: infer A) => Effect.Effect<infer S, infer E, infer R>
-  ? (...args: A) => Effect.Effect<S, E | X, R>
-  : F extends Effect.Effect<infer S, infer E, infer R>
-    ? Effect.Effect<S, E | X, R>
-    : never;
 type Service = Workspaces["Service"];
 
-/** The domain interface with the errors the methods really raise. */
-export type WorkspacesImpl = {
-  readonly [K in Exclude<keyof Service, "create">]: Widen<Service[K], Unavailable>;
-} & { readonly create: Widen<Service["create"], Unavailable | Conflict> };
+/** The domain interface; kept as a named export for tests and callers of `makeWorkspaces`. */
+export type WorkspacesImpl = Service;
 
 /** Codec of the `MemberCaller` that `create` stores for request-key replay. */
 export const MemberCallerSchema = Schema.Struct({
@@ -1903,17 +1892,10 @@ export const makeWorkspaces = Effect.gen(function* () {
  * The live `Workspaces` service. Requires CoreStore | IdGenerator | WorkspacesRepo |
  * WorkspaceSeries | UserDirectory | RegistryLookup | BlobStorage | InvitationDelivery |
  * InvitationTokens | BrandingPreview | BankAccountReferences.
- *
- * The one cast: `WorkspacesImpl` widens the domain signatures with `Unavailable` (and
- * `Conflict{idempotency_mismatch}` on `create`); see the module header.
  */
 export const WorkspacesLive: Layer.Layer<Workspaces, never, WorkspacesRequirements> = Layer.effect(
   Workspaces,
-  makeWorkspaces as Effect.Effect<
-    WorkspacesImpl,
-    never,
-    WorkspacesRequirements
-  > as unknown as Effect.Effect<Workspaces["Service"], never, WorkspacesRequirements>,
+  makeWorkspaces,
 );
 
 export type WorkspacesRequirements =
