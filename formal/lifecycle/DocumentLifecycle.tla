@@ -12,11 +12,18 @@
 (*                                                                          *)
 (* Atomic steps. Every service method runs in one CoreStore transaction     *)
 (* (store/CoreStore.ts:1-12): the memory store serializes transactions      *)
-(* with one semaphore (store/memory.ts:4-8,193-200), Postgres uses SELECT   *)
-(* ... FOR UPDATE row locks at READ COMMITTED and S4's lock order. A method *)
-(* is modelled as one step when every row it decides on is row-locked      *)
-(* before it reads it. The two methods of hypothesis H2 read a row they     *)
-(* have not locked, so they are split at their lock acquisitions:          *)
+(* with one semaphore (store/memory.ts:4-8,193-200); the SQL adapter is      *)
+(* assumed to row-lock with SELECT ... FOR UPDATE at READ COMMITTED in S4    *)
+(* order, the Proforma first (core-ports.md:1445-1447). A method is one step *)
+(* when what it decides on cannot change under it: it holds the lock that   *)
+(* every writer of that row takes (Payments.remove reads the PTD unlocked,  *)
+(* but every PTD writer locks the Proforma first, which remove holds,       *)
+(* payments.ts:205-233,483-503), or the value it reads only moves one way   *)
+(* (a Final Invoice read unlocked by loadForCredit can only become          *)
+(* reversed, which only lifts a block). Correcting or cancelling the Final  *)
+(* Invoice locks only the Final Invoice (corrections.ts:202-205) and is one *)
+(* step. The two methods of hypothesis H2 are split at their lock           *)
+(* acquisitions, so the model can also run them without those locks:        *)
 (*   - Documents.issueFinalInvoice (final.ts:185-255): FiStart, FiLockPtds, *)
 (*     FiCommit;                                                            *)
 (*   - Documents.correct / Documents.cancel of a Payment Tax Document       *)
@@ -25,6 +32,14 @@
 (* Each may abort before its commit (FiAbort, CpAbort): a failed            *)
 (* transaction writes nothing and releases its locks (store/memory.ts:      *)
 (* 130-170 restores the frame; Postgres rolls back).                        *)
+(*                                                                          *)
+(* Scope: a bounded lifecycle and concurrency slice, not all of D5-D8/P2/P3. *)
+(* Abstractions: one Proforma; one unit per bucket per payment, PTD and     *)
+(* Final Invoice supply; PTD slot i belongs to payment slot i; one          *)
+(* issueFinalInvoice and one PTD correction in flight; the regime is fixed   *)
+(* per run (both are explored). Not modelled: a PTD's Document Lock (it only *)
+(* disables correct/cancel), the Credit Note a tax document's cancel issues  *)
+(* beyond "the remainder is credited", Final Invoice patches and edits.      *)
 (*                                                                          *)
 (* `Mutant` selects a broken variant for the mutant configs; the base       *)
 (* configs set it to "none".                                                *)
@@ -351,7 +366,8 @@ TypeOK ==
   /\ fiPc \in {"idle", "lockedP", "lockedPtds"}
   /\ cpPc \in {"idle", "started", "planned"} /\ cpT \in Slots
 
-\* D8: one Final Invoice per Proforma.
+\* D8: one Final Invoice per Proforma. fiCount counts issues; the model keeps
+\* one Final Invoice record, so a second issue overwrites it.
 OneFinalInvoice == fiCount <= 1
 
 \* D8: a Final Invoice deducts at least one payment of a paid Proforma.
@@ -359,6 +375,8 @@ FinalInvoiceOfPaidProforma == fi.ex => fi.deducted # {}
 
 \* P2: a vat_payer's payment on the Proforma issues exactly its own PTD;
 \* payments on the Final Invoice and a non_vat_payer's payments issue none.
+\* In the model this checks the slot mapping; the replay checks the real
+\* payment -> PTD links (Lab.check).
 PtdPerPayment ==
   /\ \A i \in Slots : pay[i].st # "none" =>
        pay[i].ptd = IF vat /\ pay[i].on = "P" THEN i ELSE 0
@@ -397,7 +415,8 @@ CreditWithinOriginal ==
 DeductionsCurrent ==
   FiLive => \A j \in fi.ptds : fi.ded[j] = Minus(One, ptd[j].cr)
 
-\* The transition table (transitions.ts:64-123) as it shows in this model:
+\* The part of the transition table (transitions.ts:64-123) this model
+\* represents (narrower than the whole table: no PTD lock, no draft edits):
 \* statuses move draft -> issued -> cancelled only, a Final Invoice never
 \* disappears, credits and reversals are sticky, payments go none -> live ->
 \* removed, and the lock of a cancelled document stays.

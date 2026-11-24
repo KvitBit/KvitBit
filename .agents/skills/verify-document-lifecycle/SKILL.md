@@ -59,10 +59,11 @@ Mutant `no-proforma-lock` (the PTD's Proforma read without its lock) breaks `Ded
 ## Model, bounds, assumptions
 
 - Bounds (base): 2 VAT buckets, 2 payment slots (and so up to 2 PTDs), one Final Invoice slot, at most one `issueFinalInvoice` and one PTD correction in flight, both regimes (vat_payer, non_vat_payer) from `Init`. 15,920 distinct states, depth 26. Wide: 3 payment slots.
-- Atomic steps: every method is one CoreStore transaction. The memory store serializes transactions (`store/memory.ts:4-8,193-200`); the SQL store row-locks with `SELECT ... FOR UPDATE` at READ COMMITTED (`store/CoreStore.ts:1-12`) in S4 order. Only `issueFinalInvoice` and a PTD's `correct`/`cancel` are split at their lock acquisitions, because they read rows they have not locked when they start; every other method locks each row it decides on (the Proforma first, `payments.ts:205-234`) before reading it. Correcting or cancelling the Final Invoice locks only the Final Invoice (`corrections.ts:202-205`) and is one step.
+- Scope: a bounded lifecycle and concurrency slice, not every clause of D5-D8, P2 and P3. `DeductionsCurrent` only bites on vat_payer traces (a non_vat_payer has no PTDs). `LegalTransitions` covers the part of the transition table the model represents. In the model `PtdPerPayment` checks the payment-slot-to-PTD-slot mapping; the replay checks the real payment -> PTD links. `duplicate-final` shows the count reacts to a second issue; the model keeps one Final Invoice record.
+- Atomic steps: every method is one CoreStore transaction. The memory store serializes transactions (`store/memory.ts:4-8,193-200`); the SQL adapter is assumed to row-lock with `SELECT ... FOR UPDATE` at READ COMMITTED (`store/CoreStore.ts:1-12`) in S4 order, the Proforma first (`docs/design/core-ports.md:1445-1447`). A method is one step when what it decides on cannot change under it. Either it holds the lock that every writer of that row takes: `Payments.remove` reads the PTD without a lock, but every PTD writer locks the Proforma first, which `remove` holds (`payments.ts:205-233,483-503`). Or the value only moves one way: `loadForCredit` reads the Final Invoice without a lock, but it can only become reversed, which only lifts a block. Correcting or cancelling the Final Invoice locks only the Final Invoice (`corrections.ts:202-205`) and is one step. The two H2 methods, `issueFinalInvoice` and a PTD's `correct`/`cancel`, are split at their lock acquisitions so the mutant can run them without the Proforma lock.
 - A failed transaction writes nothing and releases its locks (`FiAbort`, `CpAbort`; `store/memory.ts` restores the frame, Postgres rolls back).
 - Amounts: a payment and its PTD carry 1 unit per bucket; the Final Invoice's supply 1 unit per bucket; a Credit Note credits 0 or 1 unit per bucket, non-zero. PTD slot i belongs to payment slot i.
-- Not modelled: the Document Lock of a PTD (it only disables `correct`/`cancel`, so it cannot break a safety property), edits other than the Proforma's lines, a Final Invoice patch, `send`/`share`/delivery, idempotent replays (`verify-idempotency-cas`), more than one Proforma, a regime change between payments, invoices that are not Final Invoices.
+- Not modelled: the Credit Note that a tax document's cancel issues beyond "the remainder is credited", the Document Lock of a PTD (it only disables `correct`/`cancel`, so it cannot break a safety property), edits other than the Proforma's lines, a Final Invoice patch, `send`/`share`/delivery, idempotent replays (`verify-idempotency-cas`), more than one Proforma, a regime change between payments, invoices that are not Final Invoices.
 - Deadlock: checked. `Done` (no request in flight) is the only stutter, so a lock cycle between in-flight transactions would still be reported.
 
 ### Replay harness
@@ -95,7 +96,7 @@ Mutant `no-proforma-lock` (the PTD's Proforma read without its lock) breaks `Ded
 | Mutant | Break | Violates |
 |---|---|---|
 | `cancel-with-payments` | cancel ignores recorded payments | `CancelledProformaUnpaid` |
-| `duplicate-final` | no `hasFinalInvoice` check | `OneFinalInvoice` |
+| `duplicate-final` | no `hasFinalInvoice` check (the issue count reacts; one Final Invoice record is kept) | `OneFinalInvoice` |
 | `remove-with-deduction` | removal ignores a live Final Invoice | `RemovedPaymentReversed` |
 | `no-proforma-lock` | PTD correction without the Proforma lock (H2) | `DeductionsCurrent` |
 | `credit-over-cap` | no D7 per-bucket cap | `CreditWithinOriginal` |
