@@ -4,8 +4,7 @@
  *
  * Method shape (src/index.ts): authorize -> withIdempotency / transaction -> lock + revision ->
  * rules -> write -> appendAudit -> orUnavailable. `ExpensesImpl` declares each method's honest
- * errors; where the frozen domain tag omits one (record: Conflict{idempotency_mismatch};
- * remove, detach, get, list: Unavailable), `asTagService` is the one cast (board #340/#341).
+ * errors, as the domain tag declares them.
  *
  * External calls (supplier lookup through Contacts/ARES, the CNB fixing) never run under the
  * Expense row lock: `edit` prepares the next row from an unlocked read, then locks and re-checks
@@ -145,25 +144,6 @@ export interface ExpensesImpl {
     q: ExpenseQuery,
   ) => Effect.Effect<Page<ExpenseSummary>, Invalid | Forbidden | Unavailable, CurrentCaller>;
 }
-
-/** A service shape with every method's error channel erased; the rest stays checked. */
-type ErasedErrors<S> = {
-  readonly [K in keyof S]: S[K] extends (
-    ...args: infer A
-  ) => Effect.Effect<infer X, unknown, infer R>
-    ? (...args: A) => Effect.Effect<X, never, R>
-    : S[K];
-};
-
-/**
- * The one unchecked step between the honest implementation and the frozen domain tag:
- * arguments, success values and requirements must match (`checked` fails to compile
- * otherwise); only the error channels are cast.
- */
-const asTagService = <Tag, Impl>(
-  impl: Impl,
-  checked: (impl: ErasedErrors<Impl>) => ErasedErrors<Tag>,
-): Tag => checked(impl as unknown as ErasedErrors<Impl>) as unknown as Tag;
 
 const nowIso = Effect.map(Clock.currentTimeMillis, (ms) => new Date(ms).toISOString());
 
@@ -708,12 +688,7 @@ const dieOnUnique = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
 
 /** `Expenses` with configurable attachment limits. */
 export const makeExpensesLive = (options: ExpensesOptions = {}) =>
-  Layer.effect(
-    Expenses,
-    Effect.map(makeExpenses(options), (impl) =>
-      asTagService<Expenses["Service"], ExpensesImpl>(impl, (checked) => checked),
-    ),
-  );
+  Layer.effect(Expenses, makeExpenses(options));
 
 /** `Expenses` with the default limits (20 MB; PDF, JPEG, PNG, HEIC). */
 export const ExpensesLive = makeExpensesLive();

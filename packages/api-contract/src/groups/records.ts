@@ -85,14 +85,14 @@ export class ContactsGroup extends HttpApiGroup.make("contacts")
         ...PageQueryFields,
       },
       success: Page(ContactView),
-      error: Invalid.schema,
+      error: [Invalid.schema, Unavailable.schema],
     }).annotate(OpenApi.Summary, "Search contacts"),
   )
   .add(
     HttpApiEndpoint.get("get", "/:contactId", {
       params: ContactParams,
       success: ContactView,
-      error: [NotFound.schema],
+      error: [Unavailable.schema, NotFound.schema],
     })
       .annotate(OpenApi.Summary, "Get a contact")
       .annotate(Revisioned, true),
@@ -103,7 +103,7 @@ export class ContactsGroup extends HttpApiGroup.make("contacts")
       headers: IdempotencyHeaders,
       payload: ContactInput,
       success: Created(ContactView),
-      error: [Invalid.schema, Conflict.schema, NotFound.schema],
+      error: [Invalid.schema, Conflict.schema, Unavailable.schema, NotFound.schema],
     })
       .annotate(OpenApi.Summary, "Create a contact")
       .annotate(Revisioned, true),
@@ -114,7 +114,13 @@ export class ContactsGroup extends HttpApiGroup.make("contacts")
       headers: IfMatchHeaders,
       payload: ContactInput,
       success: ContactView,
-      error: [Invalid.schema, Conflict.schema, ...RevisionedEdgeErrors, NotFound.schema],
+      error: [
+        Invalid.schema,
+        Conflict.schema,
+        Unavailable.schema,
+        ...RevisionedEdgeErrors,
+        NotFound.schema,
+      ],
     })
       .annotate(OpenApi.Summary, "Update a contact")
       .annotate(Revisioned, true),
@@ -124,7 +130,7 @@ export class ContactsGroup extends HttpApiGroup.make("contacts")
       params: WorkspaceParams,
       payload: FromIcoInput,
       success: ContactView,
-      error: [Invalid.schema, Unavailable.schema, RateLimited.schema],
+      error: [Invalid.schema, Unavailable.schema, RateLimited.schema, NotFound.schema],
     })
       .annotate(OpenApi.Summary, "Create or refresh a contact from the company registry")
       .annotate(Revisioned, true),
@@ -133,7 +139,7 @@ export class ContactsGroup extends HttpApiGroup.make("contacts")
     HttpApiEndpoint.post("archive", "/:contactId/archive", {
       params: ContactParams,
       success: NoContent,
-      error: [NotFound.schema],
+      error: [Unavailable.schema, NotFound.schema],
     }).annotate(OpenApi.Summary, "Archive a contact"),
   )
   .prefix("/workspaces/:workspaceId/contacts")
@@ -154,6 +160,7 @@ export class PriceListGroup extends HttpApiGroup.make("priceList")
         includeArchived: Schema.optional(Schema.Boolean),
       },
       success: Schema.Array(PriceListItemView),
+      error: Unavailable.schema,
     }).annotate(OpenApi.Summary, "List price list items"),
   )
   .add(
@@ -162,7 +169,7 @@ export class PriceListGroup extends HttpApiGroup.make("priceList")
       headers: IdempotencyHeaders,
       payload: PriceListItemInput,
       success: Created(PriceListItemView),
-      error: [Invalid.schema, NotFound.schema, Conflict.schema],
+      error: [Invalid.schema, NotFound.schema, Conflict.schema, Unavailable.schema],
     })
       .annotate(OpenApi.Summary, "Create a price list item")
       .annotate(Revisioned, true),
@@ -173,7 +180,13 @@ export class PriceListGroup extends HttpApiGroup.make("priceList")
       headers: IfMatchHeaders,
       payload: PriceListItemInput,
       success: PriceListItemView,
-      error: [Invalid.schema, Conflict.schema, ...RevisionedEdgeErrors, NotFound.schema],
+      error: [
+        Invalid.schema,
+        Conflict.schema,
+        Unavailable.schema,
+        ...RevisionedEdgeErrors,
+        NotFound.schema,
+      ],
     })
       .annotate(OpenApi.Summary, "Update a price list item")
       .annotate(Revisioned, true),
@@ -182,7 +195,7 @@ export class PriceListGroup extends HttpApiGroup.make("priceList")
     HttpApiEndpoint.post("archive", "/:itemId/archive", {
       params: ItemParams,
       success: NoContent,
-      error: [NotFound.schema],
+      error: [Unavailable.schema, NotFound.schema],
     }).annotate(OpenApi.Summary, "Archive a price list item"),
   )
   .prefix("/workspaces/:workspaceId/price-list-items")
@@ -276,7 +289,7 @@ export class ExpensesGroup extends HttpApiGroup.make("expenses")
       params: WorkspaceParams,
       query: ExpenseListQuery,
       success: Page(ExpenseSummary),
-      error: Invalid.schema,
+      error: [Invalid.schema, Unavailable.schema],
     }).annotate(OpenApi.Summary, "List expenses"),
   )
   .add(
@@ -294,7 +307,7 @@ export class ExpensesGroup extends HttpApiGroup.make("expenses")
     HttpApiEndpoint.get("get", "/:expenseId", {
       params: ExpenseParams,
       success: ExpenseView,
-      error: [NotFound.schema],
+      error: [Unavailable.schema, NotFound.schema],
     })
       .annotate(OpenApi.Summary, "Get an expense")
       .annotate(Revisioned, true),
@@ -321,7 +334,7 @@ export class ExpensesGroup extends HttpApiGroup.make("expenses")
       params: ExpenseParams,
       headers: IfMatchHeaders,
       success: NoContent,
-      error: [Conflict.schema, ...RevisionedEdgeErrors, NotFound.schema],
+      error: [Conflict.schema, Unavailable.schema, ...RevisionedEdgeErrors, NotFound.schema],
     }).annotate(OpenApi.Summary, "Remove an expense"),
   )
   .add(
@@ -344,7 +357,7 @@ export class ExpensesGroup extends HttpApiGroup.make("expenses")
     HttpApiEndpoint.delete("detach", "/:expenseId/attachments/:attachmentId", {
       params: AttachmentParams,
       success: NoContent,
-      error: [NotFound.schema],
+      error: [Unavailable.schema, NotFound.schema],
     }).annotate(OpenApi.Summary, "Remove an expense attachment"),
   )
   .prefix("/workspaces/:workspaceId/expenses")
@@ -375,13 +388,14 @@ export class TemplatesGroup extends HttpApiGroup.make("templates")
     HttpApiEndpoint.get("list", "/", {
       params: WorkspaceParams,
       success: Schema.Array(TemplateView),
+      error: Unavailable.schema,
     }).annotate(OpenApi.Summary, "List templates"),
   )
   .add(
     HttpApiEndpoint.get("get", "/:templateId", {
       params: TemplateParams,
       success: TemplateView,
-      error: [NotFound.schema],
+      error: [Unavailable.schema, NotFound.schema],
     })
       .annotate(OpenApi.Summary, "Get a template")
       .annotate(Revisioned, true),
@@ -392,7 +406,7 @@ export class TemplatesGroup extends HttpApiGroup.make("templates")
       headers: IdempotencyHeaders,
       payload: TemplateInput,
       success: Created(TemplateView),
-      error: [Invalid.schema, NotFound.schema, Conflict.schema],
+      error: [Invalid.schema, NotFound.schema, Conflict.schema, Unavailable.schema],
     })
       .annotate(OpenApi.Summary, "Create a template")
       .annotate(Revisioned, true),
@@ -403,7 +417,13 @@ export class TemplatesGroup extends HttpApiGroup.make("templates")
       headers: IfMatchHeaders,
       payload: TemplateInput,
       success: TemplateView,
-      error: [Invalid.schema, Conflict.schema, ...RevisionedEdgeErrors, NotFound.schema],
+      error: [
+        Invalid.schema,
+        Conflict.schema,
+        Unavailable.schema,
+        ...RevisionedEdgeErrors,
+        NotFound.schema,
+      ],
     })
       .annotate(OpenApi.Summary, "Update a template")
       .annotate(Revisioned, true),
@@ -412,7 +432,7 @@ export class TemplatesGroup extends HttpApiGroup.make("templates")
     HttpApiEndpoint.post("archive", "/:templateId/archive", {
       params: TemplateParams,
       success: NoContent,
-      error: [NotFound.schema],
+      error: [Unavailable.schema, NotFound.schema],
     }).annotate(OpenApi.Summary, "Archive a template"),
   )
   .add(
@@ -421,7 +441,13 @@ export class TemplatesGroup extends HttpApiGroup.make("templates")
       headers: IfMatchHeaders,
       payload: ScheduleInput,
       success: TemplateView,
-      error: [Invalid.schema, Conflict.schema, ...RevisionedEdgeErrors, NotFound.schema],
+      error: [
+        Invalid.schema,
+        Conflict.schema,
+        Unavailable.schema,
+        ...RevisionedEdgeErrors,
+        NotFound.schema,
+      ],
     })
       .annotate(OpenApi.Summary, "Set a template's schedule")
       .annotate(Revisioned, true),
@@ -431,7 +457,13 @@ export class TemplatesGroup extends HttpApiGroup.make("templates")
       params: TemplateParams,
       headers: IfMatchHeaders,
       success: TemplateView,
-      error: [Conflict.schema, ...RevisionedEdgeErrors, Invalid.schema, NotFound.schema],
+      error: [
+        Conflict.schema,
+        ...RevisionedEdgeErrors,
+        Invalid.schema,
+        Unavailable.schema,
+        NotFound.schema,
+      ],
     })
       .annotate(OpenApi.Summary, "Remove a template's schedule")
       .annotate(Revisioned, true),
@@ -440,7 +472,7 @@ export class TemplatesGroup extends HttpApiGroup.make("templates")
     HttpApiEndpoint.post("resume", "/:templateId/resume", {
       params: TemplateParams,
       success: TemplateView,
-      error: [Conflict.schema, NotFound.schema],
+      error: [Conflict.schema, Unavailable.schema, NotFound.schema],
     })
       .annotate(OpenApi.Summary, "Resume a paused template schedule")
       .annotate(Revisioned, true),
@@ -450,7 +482,7 @@ export class TemplatesGroup extends HttpApiGroup.make("templates")
       params: TemplateParams,
       query: PageQueryFields,
       success: Page(RecurringRunView),
-      error: [Invalid.schema, NotFound.schema],
+      error: [Invalid.schema, Unavailable.schema, NotFound.schema],
     }).annotate(OpenApi.Summary, "List a template's scheduled runs"),
   )
   .add(

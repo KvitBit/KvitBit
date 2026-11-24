@@ -148,7 +148,7 @@ describe("Expenses.record", () => {
     if (!Exit.isSuccess(exit)) return;
     expect(exit.value.again).toEqual(exit.value.first);
     expect(exit.value.count).toBe(1);
-    // The domain tag's `record` omits Conflict; idempotency_mismatch is a domain signature gap.
+    // The same key with a different payload is Conflict{idempotency_mismatch} (rule C3).
     expect(exit.value.other as Exit.Exit<unknown, unknown>).toEqual(
       Exit.fail(new Conflict({ reason: "idempotency_mismatch" })),
     );

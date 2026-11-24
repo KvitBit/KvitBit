@@ -53,7 +53,11 @@ export class Expenses extends Context.Service<
     readonly record: (
       input: ExpenseInput,
       opts?: RequestOptions,
-    ) => Effect.Effect<ExpenseView, Invalid | NotFound | Unavailable | Forbidden, CurrentCaller>;
+    ) => Effect.Effect<
+      ExpenseView,
+      Invalid | NotFound | Conflict | Unavailable | Forbidden,
+      CurrentCaller
+    >;
     readonly edit: (
       id: ExpenseId,
       patch: ExpensePatch,
@@ -66,7 +70,7 @@ export class Expenses extends Context.Service<
     readonly remove: (
       id: ExpenseId,
       expectedRevision: number,
-    ) => Effect.Effect<void, NotFound | Conflict | Forbidden, CurrentCaller>;
+    ) => Effect.Effect<void, NotFound | Conflict | Unavailable | Forbidden, CurrentCaller>;
     readonly attach: (
       id: ExpenseId,
       file: {
@@ -78,17 +82,17 @@ export class Expenses extends Context.Service<
     readonly detach: (
       id: ExpenseId,
       attachment: AttachmentId,
-    ) => Effect.Effect<void, NotFound | Forbidden, CurrentCaller>;
+    ) => Effect.Effect<void, NotFound | Unavailable | Forbidden, CurrentCaller>;
     readonly attachment: (
       id: ExpenseId,
       attachment: AttachmentId,
     ) => Effect.Effect<FileDownload, NotFound | Unavailable | Forbidden, CurrentCaller>;
     readonly get: (
       id: ExpenseId,
-    ) => Effect.Effect<ExpenseView, NotFound | Forbidden, CurrentCaller>;
+    ) => Effect.Effect<ExpenseView, NotFound | Unavailable | Forbidden, CurrentCaller>;
     readonly list: (
       q: ExpenseQuery,
-    ) => Effect.Effect<Page<ExpenseSummary>, Invalid | Forbidden, CurrentCaller>;
+    ) => Effect.Effect<Page<ExpenseSummary>, Invalid | Unavailable | Forbidden, CurrentCaller>;
   }
 >()("kvitbit/Expenses") {}
 
@@ -139,18 +143,28 @@ export class Templates extends Context.Service<
     readonly save: (
       input: TemplateInput & { readonly id?: TemplateId; readonly expectedRevision?: number },
       opts?: RequestOptions,
-    ) => Effect.Effect<TemplateView, Invalid | NotFound | Conflict | Forbidden, CurrentCaller>;
-    readonly archive: (id: TemplateId) => Effect.Effect<void, NotFound | Forbidden, CurrentCaller>;
+    ) => Effect.Effect<
+      TemplateView,
+      Invalid | NotFound | Conflict | Unavailable | Forbidden,
+      CurrentCaller
+    >;
+    readonly archive: (
+      id: TemplateId,
+    ) => Effect.Effect<void, NotFound | Unavailable | Forbidden, CurrentCaller>;
     /** Attach, change, or detach (null) the Recurring Schedule. Durable once this returns. */
     readonly schedule: (
       template: TemplateId,
       schedule: TemplateSchedule | null,
       expectedRevision: number,
-    ) => Effect.Effect<TemplateView, Invalid | NotFound | Conflict | Forbidden, CurrentCaller>;
+    ) => Effect.Effect<
+      TemplateView,
+      Invalid | NotFound | Conflict | Unavailable | Forbidden,
+      CurrentCaller
+    >;
     /** Clears a failure pause; the next sweep issues due occurrences. */
     readonly resume: (
       template: TemplateId,
-    ) => Effect.Effect<TemplateView, NotFound | Conflict | Forbidden, CurrentCaller>;
+    ) => Effect.Effect<TemplateView, NotFound | Conflict | Unavailable | Forbidden, CurrentCaller>;
     /** Manual use: delegates to Documents.createDraft or Documents.issue with template values as defaults. */
     readonly use: (
       template: TemplateId,
@@ -159,12 +173,20 @@ export class Templates extends Context.Service<
     ) => Effect.Effect<DocumentView, CoreError, CurrentCaller>;
     readonly get: (
       id: TemplateId,
-    ) => Effect.Effect<TemplateView, NotFound | Forbidden, CurrentCaller>;
-    readonly list: Effect.Effect<ReadonlyArray<TemplateView>, Forbidden, CurrentCaller>;
+    ) => Effect.Effect<TemplateView, NotFound | Unavailable | Forbidden, CurrentCaller>;
+    readonly list: Effect.Effect<
+      ReadonlyArray<TemplateView>,
+      Unavailable | Forbidden,
+      CurrentCaller
+    >;
     /** Run history of the template's Recurring Schedule, newest occurrence first. */
     readonly runs: (
       template: TemplateId,
       page?: PageRequest,
-    ) => Effect.Effect<Page<RecurringRunView>, Invalid | NotFound | Forbidden, CurrentCaller>;
+    ) => Effect.Effect<
+      Page<RecurringRunView>,
+      Invalid | NotFound | Unavailable | Forbidden,
+      CurrentCaller
+    >;
   }
 >()("kvitbit/Templates") {}

@@ -27,20 +27,27 @@ export class Contacts extends Context.Service<
     readonly fromIco: (
       ico: string,
       opts?: { readonly role?: ContactRole },
-    ) => Effect.Effect<ContactView, Invalid | Unavailable | Forbidden, CurrentCaller>;
+    ) => Effect.Effect<ContactView, Invalid | NotFound | Unavailable | Forbidden, CurrentCaller>;
     readonly save: (
       input: ContactInput & { readonly id?: ContactId; readonly expectedRevision?: number },
       opts?: RequestOptions,
-    ) => Effect.Effect<ContactView, Invalid | NotFound | Conflict | Forbidden, CurrentCaller>;
-    readonly archive: (id: ContactId) => Effect.Effect<void, NotFound | Forbidden, CurrentCaller>;
+    ) => Effect.Effect<
+      ContactView,
+      Invalid | NotFound | Conflict | Unavailable | Forbidden,
+      CurrentCaller
+    >;
+    readonly archive: (
+      id: ContactId,
+    ) => Effect.Effect<void, NotFound | Unavailable | Forbidden, CurrentCaller>;
     readonly get: (
       id: ContactId,
-    ) => Effect.Effect<ContactView, NotFound | Forbidden, CurrentCaller>;
+    ) => Effect.Effect<ContactView, NotFound | Unavailable | Forbidden, CurrentCaller>;
     readonly search: (q: {
       readonly text?: string;
       readonly role?: ContactRole;
       readonly cursor?: string;
-    }) => Effect.Effect<Page<ContactView>, Forbidden, CurrentCaller>;
+      readonly limit?: number; // 1 to 100, default 50
+    }) => Effect.Effect<Page<ContactView>, Invalid | Unavailable | Forbidden, CurrentCaller>;
   }
 >()("kvitbit/Contacts") {}
 
@@ -60,13 +67,17 @@ export class PriceList extends Context.Service<
         readonly expectedRevision?: number;
       },
       opts?: RequestOptions,
-    ) => Effect.Effect<PriceListItemView, Invalid | NotFound | Conflict | Forbidden, CurrentCaller>;
+    ) => Effect.Effect<
+      PriceListItemView,
+      Invalid | NotFound | Conflict | Unavailable | Forbidden,
+      CurrentCaller
+    >;
     readonly archive: (
       id: PriceListItemId,
-    ) => Effect.Effect<void, NotFound | Forbidden, CurrentCaller>;
+    ) => Effect.Effect<void, NotFound | Unavailable | Forbidden, CurrentCaller>;
     readonly list: (q?: {
       readonly text?: string;
       readonly includeArchived?: boolean;
-    }) => Effect.Effect<ReadonlyArray<PriceListItemView>, Forbidden, CurrentCaller>;
+    }) => Effect.Effect<ReadonlyArray<PriceListItemView>, Unavailable | Forbidden, CurrentCaller>;
   }
 >()("kvitbit/PriceList") {}
