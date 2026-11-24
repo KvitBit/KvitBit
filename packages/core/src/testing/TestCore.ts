@@ -1,0 +1,100 @@
+/**
+ * `TestCore`: the real core composition (`CoreModulesLive`) on in-memory persistence and fakes
+ * for every external port, with the fakes' controls in its output:
+ *
+ * - `InMemoryPortsLive`: CoreStore + MemoryTables, deterministic IdGenerator, RequestOutcome,
+ *   `FakeCompanyRegistry` (registry fixtures), `FixtureRates` (CNB fixings), `CaptureEmailSender`,
+ *   `MemoryBlobStorage`;
+ * - `CoreReposMemory`: every module repository on MemoryTables, plus the in-memory FX cache;
+ * - `TestCoreFakes`: `UserDirectoryFake` (directory users), `CaptureInvitationDelivery`,
+ *   `InvitationTokensFake`, `BrandingPreviewFake`, `DocumentRendererFake` (renders in
+ *   `DocumentFixtures.renders`), `FakeReportPdfRenderer`, `DeliveryJobsMemory` (started jobs in
+ *   `StartedDeliveries`), `FakeExportWorkflow`, `ShareLinkKeysTest`.
+ *
+ * Pair it with `TestClock.layer()` (test/helpers `runCore` does, at TEST_NOW).
+ */
+import { Layer } from "effect";
+import { CoreModulesLive } from "../compose/CoreLive";
+import { ContactsRepoMemory } from "../modules/contacts";
+import {
+  DeliveriesRepoMemory,
+  DeliveryJobsMemory,
+  DocumentRendererFake,
+  DocumentsRepoMemory,
+} from "../modules/documents";
+import { ExpensesRepoMemory } from "../modules/expenses";
+import { NumberingSeriesRepoMemory } from "../modules/numbering";
+import { PaymentsRepoMemory } from "../modules/payments";
+import { PriceListRepoMemory } from "../modules/pricelist";
+import { RecurringRepoMemory } from "../modules/recurring";
+import {
+  ExportsRepoMemory,
+  FakeExportWorkflow,
+  FakeReportPdfRenderer,
+  FxFixingCacheMemory,
+  ReportsSourceMemory,
+} from "../modules/reports";
+import {
+  ShareLinkKeysTest,
+  ShareLinksRepoMemory,
+  ShareWorkspacesFake,
+} from "../modules/sharelinks";
+import {
+  BankAccountReferencesFake,
+  BrandingPreviewFake,
+  CaptureInvitationDelivery,
+  type DirectoryUser,
+  InvitationTokensFake,
+  UserDirectoryFake,
+  WorkspacesRepoMemory,
+} from "../modules/workspaces";
+import { InMemoryPortsLive, type InMemoryPortsOptions } from "./inMemoryPorts";
+
+/** Every `CoreRepos` port on MemoryTables (and the in-memory FX cache). */
+export const CoreReposMemory = Layer.mergeAll(
+  WorkspacesRepoMemory,
+  ContactsRepoMemory,
+  PriceListRepoMemory,
+  NumberingSeriesRepoMemory,
+  DocumentsRepoMemory,
+  DeliveriesRepoMemory,
+  PaymentsRepoMemory,
+  ShareLinksRepoMemory,
+  ExpensesRepoMemory,
+  RecurringRepoMemory,
+  ExportsRepoMemory,
+  FxFixingCacheMemory,
+);
+
+/** Fakes for the external ports apps/server implements, with their controls. */
+export const TestCoreFakes = (users: ReadonlyArray<DirectoryUser> = []) =>
+  Layer.mergeAll(
+    UserDirectoryFake.layer(users),
+    CaptureInvitationDelivery.layer,
+    InvitationTokensFake,
+    BrandingPreviewFake,
+    DocumentRendererFake,
+    FakeReportPdfRenderer.layer,
+    DeliveryJobsMemory,
+    FakeExportWorkflow.layer,
+    ShareLinkKeysTest,
+    // PENDING seams (bound for real once merged): ReportsSource, BankAccountReferences, ShareWorkspaces.
+    ReportsSourceMemory,
+    BankAccountReferencesFake.layer,
+    ShareWorkspacesFake,
+  );
+
+export interface TestCoreOptions extends InMemoryPortsOptions {
+  /** Users the fake `UserDirectory` knows (names and emails of Members). */
+  readonly users?: ReadonlyArray<DirectoryUser>;
+}
+
+/** The whole core on memory ports and fakes; a fresh, isolated world per build. */
+export const TestCore = (options: TestCoreOptions = {}) =>
+  CoreModulesLive.pipe(
+    Layer.provideMerge(Layer.merge(CoreReposMemory, TestCoreFakes(options.users))),
+    Layer.provideMerge(InMemoryPortsLive(options)),
+  );
+
+/** Everything a test can reach under `TestCore`: services, repositories, fakes and controls. */
+export type TestCoreServices = Layer.Success<ReturnType<typeof TestCore>>;

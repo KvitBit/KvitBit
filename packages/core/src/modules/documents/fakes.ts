@@ -73,6 +73,19 @@ const fixtures = Layer.effect(
   }),
 );
 
+const renderer = Layer.effect(
+  DocumentRenderer,
+  Effect.map(DocumentFixtures, (f) =>
+    DocumentRenderer.of({
+      render: (view, options) =>
+        Effect.as(
+          Ref.update(f.renders, (all) => [...all, { view, options }]),
+          fakePdfBytes(view, options),
+        ),
+    }),
+  ),
+);
+
 const ports = Layer.mergeAll(
   Layer.effect(
     DocumentContacts,
@@ -121,21 +134,15 @@ const ports = Layer.mergeAll(
       }),
     ),
   ),
-  Layer.effect(
-    DocumentRenderer,
-    Effect.map(DocumentFixtures, (f) =>
-      DocumentRenderer.of({
-        render: (view, options) =>
-          Effect.as(
-            Ref.update(f.renders, (all) => [...all, { view, options }]),
-            fakePdfBytes(view, options),
-          ),
-      }),
-    ),
-  ),
+  renderer,
 );
 
 /** All four fakes plus their `DocumentFixtures` control, empty. */
 export const DocumentFakesLive: Layer.Layer<
   DocumentFixtures | DocumentContacts | DocumentPriceList | DocumentIssuers | DocumentRenderer
 > = ports.pipe(Layer.provideMerge(fixtures));
+
+/** Only the recording renderer (renders in `DocumentFixtures.renders`), for compositions that bind the read ports for real. */
+export const DocumentRendererFake: Layer.Layer<DocumentFixtures | DocumentRenderer> = renderer.pipe(
+  Layer.provideMerge(fixtures),
+);

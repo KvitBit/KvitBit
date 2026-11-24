@@ -25,7 +25,11 @@
  *                 @kvitbit/domain as `<Name>Live`, a Layer requiring CoreStore | IdGenerator |
  *                 its repo | the driven ports it uses. Export it here.
  * - src/internal/ the System caller seal; never exported from an entry point.
- * - test/helpers/ `runTest(caller, effect, fixtures?)` over `InMemoryPortsLive` and a TestClock at
+ * - src/compose/ the composition (core-ports 10): `bindings.ts` binds each seam port to its owning
+ *                 module; `CoreLive` requires only `CoreStore | CoreRepos | CoreExternalPorts`.
+ *                 `TestCore` (./testing) is the same composition on memory ports and fakes.
+ * - test/helpers/ `runCore(caller, effect, options?)` over `TestCore`, and
+ *                 `runTest(caller, effect, fixtures?)` over `InMemoryPortsLive` and a TestClock at
  *                 TEST_NOW; caller builders `member(role, { scopes })`, `account()`,
  *                 `system(job)`, `shareVisitor()`, `invitationHolder()`.
  *
@@ -36,7 +40,76 @@
  * caller's Workspace; another Workspace's record is NotFound (R2). No Drizzle, SQL, HTTP or
  * filesystem imports anywhere in this package.
  */
+
+export * from "./compose/bindings";
+// Composition (core-ports 10) --------------------------------------------------------------
+export type {
+  CoreExternalPorts,
+  CoreLiveRequires,
+  CoreRepos,
+  CoreRequirements,
+  CoreServices,
+} from "./compose/CoreLive";
+export { CoreLive, CoreModulesLive } from "./compose/CoreLive";
 export * from "./contract";
+// Each module's full surface (row types, tables, job steps, pure helpers), namespaced -------
+export * as ContactsModule from "./modules/contacts";
+// Module layers, flat ---------------------------------------------------------------------
+// Ports the adapters and apps/server implement, flat --------------------------------------
+export { ContactSnapshotsLive, ContactsLive, ContactsRepo } from "./modules/contacts";
+export * as DocumentsModule from "./modules/documents";
+export {
+  DeliveriesRepo,
+  DeliveryJobs,
+  DocumentDeliveryReadsLive,
+  DocumentPaymentsLive,
+  DocumentRenderer,
+  DocumentSenderLive,
+  DocumentsLive,
+  DocumentsRepo,
+} from "./modules/documents";
+export * as ExpensesModule from "./modules/expenses";
+export {
+  ExpensePayablesLive,
+  ExpenseRecordsLive,
+  ExpensesLive,
+  ExpensesRepo,
+} from "./modules/expenses";
+export * as NumberingModule from "./modules/numbering";
+export { NumberingSeriesLive, NumberingSeriesRepo } from "./modules/numbering";
+export * as PaymentsModule from "./modules/payments";
+export { PaymentDocumentsLive, PaymentsLive, PaymentsRepo } from "./modules/payments";
+export * as PriceListModule from "./modules/pricelist";
+export { PriceListItemsLive, PriceListLive, PriceListRepo } from "./modules/pricelist";
+export * as RecurringModule from "./modules/recurring";
+export { RecurringIssuanceLive, RecurringRepo, TemplatesLive } from "./modules/recurring";
+export * as ReportsModule from "./modules/reports";
+export {
+  ExportJobsLive,
+  ExportsRepo,
+  ExportWorkflow,
+  FxFixingCache,
+  ReportPdfRenderer,
+  ReportsLive,
+} from "./modules/reports";
+export * as ShareLinksModule from "./modules/sharelinks";
+export {
+  PublicShareLinksLive,
+  ShareLinkKeys,
+  ShareLinksRepo,
+  ShareVisitorDevice,
+} from "./modules/sharelinks";
+export * as WorkspacesModule from "./modules/workspaces";
+export {
+  BrandingPreview,
+  InvitationDelivery,
+  InvitationTokens,
+  IssuerSnapshotsLive,
+  UserDirectory,
+  WorkspaceSnapshotsLive,
+  WorkspacesLive,
+  WorkspacesRepo,
+} from "./modules/workspaces";
 export * from "./ports";
 export { IdGenerator, IdGeneratorLive, newId } from "./shared/ids";
 export { makeRequestOutcome, RequestOutcomeLive } from "./shared/requestOutcome";

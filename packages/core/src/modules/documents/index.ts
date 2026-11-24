@@ -146,7 +146,7 @@ export * from "./deliveries";
 export type { DeliveryDocument } from "./delivery";
 export { DocumentDeliveryReads, DocumentDeliveryReadsLive } from "./delivery";
 export type { RenderCall } from "./fakes";
-export { DocumentFakesLive, DocumentFixtures, fakePdfBytes } from "./fakes";
+export { DocumentFakesLive, DocumentFixtures, DocumentRendererFake, fakePdfBytes } from "./fakes";
 export { issueFinalInvoice, previewFinalInvoice } from "./final";
 export type { CancelInput, CancelResult, IssueFrom } from "./lifecycle";
 export {
