@@ -196,18 +196,23 @@ const chain = (seed: number) => {
       ptds.push(ptd);
     }
     const fi = yield* docs.issueFinalInvoice(proforma.id);
-    // What the VAT report declares for the Final Invoice: its stored record through the real
+    // What the VAT report declares for a document: its stored record through the real
     // ReportsSource mapping (`reportFigures`, all deductions are PTDs) and `taxableBucketsCzk`.
-    const fiRecord = yield* Effect.flatMap(CoreStore, (store) =>
-      store.transaction(Effect.flatMap(DocumentsRepo, (repo) => repo.get(WS, fi.id))),
-    );
-    const figures = reportFigures(fiRecord, () => true);
-    const reported = ReportCompute.taxableBucketsCzk({
-      currency: fiRecord.currency,
-      fx: fiRecord.fx,
-      totals: figures.totals,
-      advanceDeductions: figures.advanceDeductions,
-    } as never);
+    const declare = (id: DocumentId) =>
+      Effect.gen(function* () {
+        const record = yield* Effect.flatMap(CoreStore, (store) =>
+          store.transaction(Effect.flatMap(DocumentsRepo, (repo) => repo.get(WS, id))),
+        );
+        const figures = reportFigures(record, () => true);
+        const declared = ReportCompute.taxableBucketsCzk({
+          currency: record.currency,
+          fx: record.fx,
+          totals: figures.totals,
+          advanceDeductions: figures.advanceDeductions,
+        } as never);
+        return { declared, full: figures.totals };
+      });
+    const { declared: reported, full: fullSupply } = yield* declare(fi.id);
     // Corrections run on a later day, where the CNB fixing differs from the Final Invoice's.
     if (creditDays > 0) yield* TestClock.adjust(`${creditDays} days`);
     const credits: Array<DocumentView> = [];
@@ -220,6 +225,8 @@ const chain = (seed: number) => {
       );
     }
     credits.push(yield* docs.correct(fi.id, { reason: "storno", lines: "full" }));
+    const creditsReported: Array<typeof reported> = [];
+    for (const cn of credits) creditsReported.push((yield* declare(cn.id)).declared);
     const ptdCredits: Array<DocumentView> = [];
     for (const ptd of ptds)
       ptdCredits.push(yield* docs.correct(ptd.id, { reason: "storno zálohy", lines: "full" }));
@@ -233,7 +240,9 @@ const chain = (seed: number) => {
       ptds,
       fi,
       reported,
+      fullSupply,
       credits,
+      creditsReported,
       ptdCredits,
     };
   });
@@ -471,17 +480,51 @@ describe("advance chain net-to-zero (property: seeded, 120 chains)", () => {
     });
   });
 
-  test("the Final Invoice's stored CZK VAT equals what the VAT report declares for it", () => {
-    eachChain(({ currency, fi, reported }) => {
+  test("revenue's full supply of a Final Invoice: CZK VAT within 0.01 of round2(Proforma VAT x the Final Invoice rate)", () => {
+    // reportFigures adds the deductions back at the Final Invoice's own fixing: stored net
+    // round2(N x r) + round2(D x r) per bucket, two roundings from round2((N + D) x r).
+    eachChain(({ currency, proforma, fi, fullSupply }) => {
       if (currency === "CZK" || fi.fx === null) return;
-      for (const b of fi.totals.buckets) {
-        const report = reported.find((r) => keyOf(r) === keyOf(b));
-        const stored = b.vatCzk === null ? null : units(b.vatCzk, 2);
-        const declared = report === undefined ? null : units(report.vat, 2);
-        if (stored !== declared) {
+      for (const b of proforma.totals.buckets) {
+        const full = fullSupply.buckets.find((x) => keyOf(x) === keyOf(b));
+        const got = full?.vatCzk == null ? null : units(full.vatCzk, 2);
+        const want = czkOf(units(b.vat, 2), fi.fx);
+        if (got === null || got - want > 1n || want - got > 1n)
           throw new Error(
-            `Final Invoice ${fi.number} ${keyOf(b)}: VAT ${BigDecimal.format(b.vat)} EUR, FI rate ${BigDecimal.format(fi.fx.rate)}; stored vatCzk ${stored === null ? "null" : fmt(stored)}, VAT report ${declared === null ? "none" : fmt(declared)}`,
+            `revenue ${keyOf(b)}: full-supply vatCzk ${got === null ? "none" : fmt(got)}, want ${fmt(want)} +- 0.01`,
           );
+      }
+    });
+  });
+
+  test("the Final Invoice and each of its Credit Notes: stored CZK VAT = what the VAT report declares", () => {
+    eachChain(({ currency, fi, reported, credits, creditsReported }) => {
+      if (currency === "CZK" || fi.fx === null) return;
+      const docs = [
+        { label: "Final Invoice", doc: fi, report: reported },
+        ...credits.map((doc, i) => ({
+          label: "Credit Note",
+          doc,
+          report: creditsReported[i] ?? [],
+        })),
+      ];
+      for (const { label, doc, report } of docs) {
+        const rate = doc.fx === null ? "none" : BigDecimal.format(doc.fx.rate);
+        for (const b of doc.totals.buckets) {
+          const r = report.find((x) => keyOf(x) === keyOf(b));
+          const stored = b.vatCzk === null ? null : units(b.vatCzk, 2);
+          const declared = r === undefined ? null : units(r.vat, 2);
+          if (stored !== declared) {
+            throw new Error(
+              `${label} ${doc.number} ${keyOf(b)}: VAT ${BigDecimal.format(b.vat)} EUR, rate ${rate}; stored vatCzk ${stored === null ? "null" : fmt(stored)}, VAT report ${declared === null ? "none" : fmt(declared)}`,
+            );
+          }
+        }
+        for (const r of report) {
+          if (!doc.totals.buckets.some((b) => keyOf(b) === keyOf(r)) && !BigDecimal.isZero(r.vat))
+            throw new Error(
+              `${label} ${doc.number}: VAT report ${keyOf(r)} ${BigDecimal.format(r.vat)} without a stored bucket`,
+            );
         }
       }
     });
