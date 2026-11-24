@@ -33,8 +33,19 @@ import { appendAudit } from "../../shared/audit";
 import { orUnavailable } from "../../shared/errors";
 import { withIdempotency } from "../../shared/idempotency";
 import { IdGenerator } from "../../shared/ids";
+import { mergeBuckets } from "./compose";
 import type { CreditLine, CreditSpec } from "./credit";
-import { creditNoteRecord, issueCreditNote, remainderSpec, remainingBuckets } from "./credit";
+import {
+  creditNoteRecord,
+  deductionBucketsOf,
+  deductionsOpen,
+  issueCreditNote,
+  negateBucket,
+  remainderSpec,
+  remainingBuckets,
+  roundingLeft,
+  withRounding,
+} from "./credit";
 import type { DocumentRecord, LineRecord } from "./record";
 import { DocumentsRepo } from "./repo";
 import { now, viewOf } from "./support";
@@ -46,8 +57,24 @@ const neg = (v: BigDecimal.BigDecimal) => BigDecimal.normalize(BigDecimal.negate
 const malformed = (path: Issue["path"], reason: string) =>
   new Invalid({ issues: [{ path, code: "request.malformed", params: { reason } }] });
 
-const exceeds = () =>
-  new Invalid({ issues: [{ path: ["lines"], code: "credit_note.exceeds_original" }] });
+/** D7, with what is left to credit (user-flows 3.9: "blocked with the remaining amount"). */
+const exceeds = (remaining: ReadonlyArray<VatBucket>, currency: string) =>
+  new Invalid({
+    issues: [
+      {
+        path: ["lines"],
+        code: "credit_note.exceeds_original",
+        params: {
+          remaining: BigDecimal.format(
+            BigDecimal.normalize(
+              remaining.reduce((sum, b) => BigDecimal.sum(sum, b.gross), BigDecimal.fromBigInt(0n)),
+            ),
+          ),
+          currency,
+        },
+      },
+    ],
+  });
 
 const bucketKey = (b: Pick<VatBucket, "treatment" | "ratePercent">) =>
   `${b.treatment}|${BigDecimal.format(BigDecimal.normalize(b.ratePercent))}`;
@@ -144,36 +171,108 @@ const withinRemainder = (
   };
   return credit.every((c) => {
     const r = byKey.get(bucketKey(c));
-    return fits(c.base, r?.base) && fits(c.vat, r?.vat) && fits(c.gross, r?.gross);
+    return (
+      fits(c.base, r?.base) &&
+      fits(c.vat, r?.vat) &&
+      fits(c.gross, r?.gross) &&
+      (c.vatCzk === null || fits(c.vatCzk, r?.vatCzk ?? undefined))
+    );
   });
 };
 
+const linksOf = (row: DocumentRecord, relation: DocumentRecord["links"][number]["relation"]) =>
+  row.links.filter((l) => l.relation === relation).map((l) => l.id);
+
 /**
- * The Credit Note `correct` would issue: state and kind checks (D5, D7, D13), the input
- * checks, the spec and D7's cap. `original` is the (locked, for `correct`) stored row.
+ * Loads (`lock`: row-locks) the document to credit, S4 order: a Payment Tax Document's
+ * Proforma first. Returns the Final Invoice that still deducts the PTD, if any.
  */
-const plan = (original: DocumentRecord, input: CorrectionInput, today: IsoDate) =>
+export const loadForCredit = (
+  workspaceId: DocumentRecord["workspaceId"],
+  id: DocumentId,
+  lock: boolean,
+) =>
+  Effect.gen(function* () {
+    const repo = yield* DocumentsRepo;
+    const read = (docId: DocumentId) =>
+      lock ? repo.lock(workspaceId, docId) : repo.get(workspaceId, docId);
+    const peek = yield* repo.get(workspaceId, id);
+    const proformaId =
+      peek.kind === "payment_tax_document" ? linksOf(peek, "advance_of")[0] : undefined;
+    const proforma = proformaId === undefined ? null : yield* read(proformaId);
+    const row = yield* read(id);
+    const finalId = proforma === null ? undefined : linksOf(proforma, "final_invoice_for")[0];
+    const finalInvoice = finalId === undefined ? null : yield* repo.get(workspaceId, finalId);
+    const deductedBy =
+      finalInvoice !== null &&
+      finalInvoice.status === "issued" &&
+      finalInvoice.settlement !== "credited" &&
+      finalInvoice.lines.some((l) => l.deducts === id)
+        ? finalInvoice
+        : null;
+    return { row, deductedBy };
+  });
+
+/**
+ * The Credit Note `correct` would issue: state and kind checks (D5, D7, D8, D13), the input
+ * checks, the spec and D7's cap. `original` is the (locked, for `correct`) stored row;
+ * `deductedBy` a live Final Invoice deducting it (a PTD), which must be reversed first.
+ */
+const plan = (
+  original: DocumentRecord,
+  deductedBy: DocumentRecord | null,
+  input: CorrectionInput,
+  today: IsoDate,
+) =>
   Effect.gen(function* () {
     yield* guard(original, "correct");
     if (original.kind !== "invoice" && original.kind !== "payment_tax_document") {
       return yield* new Conflict({ reason: "illegal_transition" });
     }
-    // Nothing is left to credit (D6/D7).
-    if (original.settlement === "credited") {
+    // Nothing is left to credit (D6/D7); a deducted PTD is corrected after its Final Invoice.
+    if (original.settlement === "credited" || deductedBy !== null) {
       return yield* new Conflict({ reason: "illegal_transition" });
     }
     const { reason, correctedOn } = yield* checkInput(original, input, today);
     const earlier = yield* (yield* DocumentsRepo).getMany(
       original.workspaceId,
-      original.links.filter((l) => l.relation === "corrected_by").map((l) => l.id),
+      linksOf(original, "corrected_by"),
     );
-    const credit =
-      input.lines === "full"
-        ? remainderSpec(original, earlier)
-        : yield* partialSpec(original, input.lines);
-    if (!withinRemainder(remainingBuckets(original, earlier), credit.totals.buckets)) {
-      return yield* exceeds();
+    const remaining = remainingBuckets(original, earlier);
+    if (input.lines === "full") {
+      return { reason, correctedOn, credit: remainderSpec(original, earlier) };
     }
+    const partial = yield* partialSpec(original, input.lines);
+    // Partial credits touch supply lines only, so they are capped by the uncredited supply
+    // (a Final Invoice's open deductions added back): a prepaid Final Invoice stays creditable.
+    const supply = deductionsOpen(original, earlier)
+      ? mergeBuckets(remaining, deductionBucketsOf(original).map(negateBucket))
+      : remaining;
+    if (!withinRemainder(supply, partial.totals.buckets)) {
+      return yield* exceeds(supply, original.currency);
+    }
+    if (
+      !partial.totals.buckets.some((b) => !BigDecimal.isZero(b.gross) || !BigDecimal.isZero(b.vat))
+    ) {
+      return yield* malformed(["lines"], "zero_effect");
+    }
+    // A partial credit that closes every bucket also closes the whole-unit rounding (rule 7).
+    const after = mergeBuckets(remaining, partial.totals.buckets);
+    const closes =
+      !deductionsOpen(original, earlier) &&
+      after.every(
+        (b) =>
+          BigDecimal.isZero(b.base) &&
+          BigDecimal.isZero(b.vat) &&
+          BigDecimal.isZero(b.gross) &&
+          (b.vatCzk === null || BigDecimal.isZero(b.vatCzk)),
+      );
+    const credit = closes
+      ? {
+          ...partial,
+          totals: withRounding(partial.totals, neg(roundingLeft([original, ...earlier]))),
+        }
+      : partial;
     return { reason, correctedOn, credit };
   });
 
@@ -214,10 +313,9 @@ export const correct = (id: DocumentId, input: CorrectionInput, opts?: RequestOp
         result: DocumentViewCodec,
       },
       Effect.gen(function* () {
-        const repo = yield* DocumentsRepo;
         const { today } = yield* now;
-        const original = yield* repo.lock(workspaceId, id);
-        const { reason, correctedOn, credit } = yield* plan(original, input, today);
+        const { row: original, deductedBy } = yield* loadForCredit(workspaceId, id, true);
+        const { reason, correctedOn, credit } = yield* plan(original, deductedBy, input, today);
         const { original: updated, creditNote } = yield* issueCreditNote(original, {
           reason,
           issuedOn: today,
@@ -244,11 +342,10 @@ export const correct = (id: DocumentId, input: CorrectionInput, opts?: RequestOp
 export const previewCorrection = (id: DocumentId, input: CorrectionInput) =>
   Effect.gen(function* () {
     const { workspaceId } = yield* authorizeInWorkspace("document.correct");
-    const repo = yield* DocumentsRepo;
     const ids = yield* IdGenerator;
     const { today, at } = yield* now;
-    const original = yield* repo.get(workspaceId, id);
-    const { reason, correctedOn, credit } = yield* plan(original, input, today);
+    const { row: original, deductedBy } = yield* loadForCredit(workspaceId, id, false);
+    const { reason, correctedOn, credit } = yield* plan(original, deductedBy, input, today);
     const lines: Array<LineRecord> = [];
     for (const l of credit.lines) lines.push({ ...l, id: (yield* ids.next) as LineRecord["id"] });
     const record = creditNoteRecord(

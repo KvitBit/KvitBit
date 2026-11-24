@@ -330,7 +330,9 @@ export const paymentTaxDocumentRecord = (
   issuedOn: input.today,
   taxableSupplyOn: input.paidOn,
   dueOn: input.today,
-  pricesIncludeVat: false,
+  // Gross prices: the PTD's VAT is top-down from the advance (rule 4), so a partial
+  // correction recomputes it on the same basis.
+  pricesIncludeVat: true,
   variableSymbol: proforma.variableSymbol ?? digitsOf(proforma.number),
   orderNumber: proforma.orderNumber,
   lines: input.lines,
@@ -369,12 +371,19 @@ const issuePaymentTaxDocument = (
     const proforma = yield* repo.lock(workspaceId, proformaId);
     yield* guard(proforma, "recordPayment");
     if (proforma.kind !== "proforma") return yield* new Conflict({ reason: "illegal_transition" });
+    // After the Final Invoice, receipts belong to it (D8): no further advance PTD.
+    if (linksOf(proforma, "final_invoice_for").length > 0) {
+      return yield* new Conflict({ reason: "illegal_transition" });
+    }
     if (!BigDecimal.isPositive(payment.amount)) return yield* malformed("amount", "out_of_range");
     const issuer = yield* (yield* DocumentIssuers).forDocument(workspaceId, payment.paidOn);
     if (issuer.regime !== "vat_payer") return null;
-    if (BigDecimal.isZero(proforma.totals.gross.amount)) {
-      return yield* malformed("amount", "out_of_range");
-    }
+    // splitAdvance divides by the buckets' gross (not the rounded total).
+    const bucketGross = proforma.totals.buckets.reduce(
+      (sum, b) => BigDecimal.sum(sum, b.gross),
+      ZERO,
+    );
+    if (!BigDecimal.isPositive(bucketGross)) return yield* malformed("amount", "out_of_range");
     // Non-CZK: the CNB fixing valid on the receipt date (carried back), rule P2.
     const fixing = Fx.needsFixing(proforma.currency, null)
       ? yield* (yield* ExchangeRates).fixing(payment.paidOn)
@@ -396,13 +405,13 @@ const issuePaymentTaxDocument = (
         description: `${label} ${proforma.number ?? ""}`.trim(),
         quantity: BigDecimal.fromBigInt(1n),
         unit: null,
-        unitPrice: b.base,
+        unitPrice: b.gross,
         itemPrice: null,
         vat: b.treatment,
         itemVat: null,
         treatment: b.treatment,
         ratePercent: b.ratePercent,
-        amount: b.base,
+        amount: b.gross,
         deducts: null,
         deductedVat: null,
         deductedVatCzk: null,
@@ -476,7 +485,10 @@ const removalBlocked = (
     if (finalId !== undefined) {
       // The Final Invoice deducted this advance (D8): it must be reversed first.
       const finalInvoice = yield* repo.get(workspaceId, finalId);
-      if (finalInvoice.settlement !== "credited") return "final_invoice_deducts";
+      // Reversed: fully credited (tax document) or cancelled (non-tax, D6).
+      if (finalInvoice.status === "issued" && finalInvoice.settlement !== "credited") {
+        return "final_invoice_deducts";
+      }
     }
     if (taxDocument !== null) {
       const ptd = yield* repo.get(workspaceId, taxDocument);

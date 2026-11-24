@@ -66,7 +66,9 @@ const deductionLines = (proforma: DocumentRecord, lock: boolean) =>
         : yield* repo.get(proforma.workspaceId, ptdId);
       const credits = yield* repo.getMany(proforma.workspaceId, linked(ptd, "corrected_by"));
       for (const b of remainingBuckets(ptd, credits)) {
-        if (!nonZero(b.base) && !nonZero(b.vat)) continue;
+        if (!nonZero(b.base) && !nonZero(b.vat) && (b.vatCzk === null || !nonZero(b.vatCzk))) {
+          continue;
+        }
         covered = BigDecimal.sum(covered, b.gross);
         lines.push({
           id: null,
@@ -125,6 +127,14 @@ const plan = (proforma: DocumentRecord, patch: DocumentPatch | undefined, lock: 
     yield* guard(proforma, "finalInvoice");
     if (proforma.kind !== "proforma") return yield* new Conflict({ reason: "illegal_transition" });
     if (hasFinalInvoice(proforma)) return yield* new Conflict({ reason: "duplicate" });
+    // The Final Invoice is numbered from its series (D1); an override comes later (D4).
+    if (patch?.number !== undefined) {
+      return yield* new Invalid({
+        issues: [
+          { path: ["number"], code: "request.malformed", params: { reason: "not_allowed" } },
+        ],
+      });
+    }
     if (proforma.payments === 0) {
       return yield* new Invalid({
         issues: [{ path: ["proforma"], code: "final_invoice.proforma_unpaid" }],

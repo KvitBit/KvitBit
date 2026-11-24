@@ -34,6 +34,7 @@ import { CoreStore } from "../../store/CoreStore";
 import { NumberingSeries } from "../numbering";
 import type { Composed } from "./compose";
 import { applyPatch, compose, specFromInput, specFromRecord } from "./compose";
+import { loadForCredit } from "./corrections";
 import { digitsOf, issueCreditNote, remainderSpec, settlementOf } from "./credit";
 import { DocumentIssuers } from "./ports";
 import type { DocumentRecord, GivenFields } from "./record";
@@ -592,8 +593,10 @@ export const cancel = (id: DocumentId, input: CancelInput, opts?: RequestOptions
       Effect.gen(function* () {
         const repo = yield* DocumentsRepo;
         const { today, at } = yield* now;
-        const row = yield* repo.lock(workspaceId, id);
+        // S4: a PTD's Proforma first; a PTD a live Final Invoice deducts waits for it (D8).
+        const { row, deductedBy } = yield* loadForCredit(workspaceId, id, true);
         yield* guard(row, "cancel");
+        if (deductedBy !== null) return yield* illegal();
         // A Credit Note is corrected by issuing another document, never cancelled.
         if (row.kind === "credit_note") return yield* illegal();
         if (paymentsBlockCancel(row)) return yield* illegal();
@@ -637,6 +640,8 @@ export const cancel = (id: DocumentId, input: CancelInput, opts?: RequestOptions
           } satisfies CancelResult;
         }
 
+        // A Credit Note already offsets part of it: cancelling would count that credit twice.
+        if (row.links.some((l) => l.relation === "corrected_by")) return yield* illegal();
         const next = yield* repo
           .update(
             {

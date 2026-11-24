@@ -61,24 +61,50 @@ export const remainingBuckets = (
 ): ReadonlyArray<VatBucket> =>
   mergeBuckets(original.totals.buckets, ...creditNotes.map((c) => c.totals.buckets));
 
+type Credited = Pick<DocumentRecord, "totals"> &
+  Partial<Pick<DocumentRecord, "lines" | "currency" | "pricesIncludeVat">>;
+
+const isOpenBucket = (b: VatBucket) =>
+  !(isZero(b.base) && isZero(b.vat) && isZero(b.gross) && (b.vatCzk === null || isZero(b.vatCzk)));
+
+/** The summed whole-unit rounding adjustment of the original and its Credit Notes. */
+export const roundingLeft = (docs: ReadonlyArray<Pick<DocumentRecord, "totals">>) =>
+  BigDecimal.normalize(
+    docs.reduce((sum, d) => BigDecimal.sum(sum, d.totals.roundingAdjustment.amount), ZERO),
+  );
+
+/**
+ * A Final Invoice's deductions (D8) still stand: its deduction buckets plus those its Credit
+ * Notes reversed (only a full remainder credit reverses them) are not all zero. Tracked
+ * apart from the net buckets, where a supply credit can offset a deduction to zero.
+ */
+export const deductionsOpen = (original: Credited, creditNotes: ReadonlyArray<Credited>) => {
+  if (original.lines === undefined || !original.lines.some((l) => l.deducts !== null)) {
+    return false;
+  }
+  const of = (d: Credited) =>
+    d.lines === undefined
+      ? []
+      : deductionBucketsOf({
+          lines: d.lines,
+          currency: d.currency ?? original.currency ?? ("CZK" as DocumentRecord["currency"]),
+          pricesIncludeVat: d.pricesIncludeVat ?? false,
+        });
+  return mergeBuckets(of(original), ...creditNotes.map(of)).some(isOpenBucket);
+};
+
 /**
  * Nothing of the original is left to credit: every bucket's base, VAT, gross and CZK VAT is
- * zero and so is the summed whole-unit rounding adjustment.
+ * zero, so is the summed whole-unit rounding adjustment, and a Final Invoice's deductions are
+ * reversed.
  */
 export const isFullyCredited = (
-  original: Pick<DocumentRecord, "totals">,
-  creditNotes: ReadonlyArray<Pick<DocumentRecord, "totals">>,
+  original: Credited,
+  creditNotes: ReadonlyArray<Credited>,
 ): boolean =>
-  remainingBuckets(original, creditNotes).every(
-    (b) =>
-      isZero(b.base) && isZero(b.vat) && isZero(b.gross) && (b.vatCzk === null || isZero(b.vatCzk)),
-  ) &&
-  isZero(
-    [original, ...creditNotes].reduce(
-      (sum, d) => BigDecimal.sum(sum, d.totals.roundingAdjustment.amount),
-      ZERO,
-    ),
-  );
+  !remainingBuckets(original, creditNotes).some(isOpenBucket) &&
+  isZero(roundingLeft([original, ...creditNotes])) &&
+  !deductionsOpen(original, creditNotes);
 
 const sumGross = (docs: ReadonlyArray<Pick<DocumentRecord, "totals">>) =>
   docs.reduce((sum, d) => BigDecimal.sum(sum, d.totals.gross.amount), ZERO);
@@ -114,8 +140,9 @@ export const outstandingOf = (
  * its advances is `paid` with no payments of its own).
  */
 export const settlementOf = (
-  row: Pick<DocumentRecord, "kind" | "settlement" | "payments" | "paidAmount" | "totals">,
-  creditNotes: ReadonlyArray<Pick<DocumentRecord, "totals">> = [],
+  row: Pick<DocumentRecord, "kind" | "settlement" | "payments" | "paidAmount" | "totals"> &
+    Partial<Pick<DocumentRecord, "lines" | "currency" | "pricesIncludeVat">>,
+  creditNotes: ReadonlyArray<Credited> = [],
 ): DocumentSettlement => {
   if (row.kind === "credit_note") return "unpaid";
   if (row.settlement === "credited") return "credited";
@@ -127,7 +154,7 @@ export const settlementOf = (
   return BigDecimal.equals(row.paidAmount, owed) ? "paid" : "overpaid";
 };
 
-const negateBucket = (b: VatBucket): VatBucket => ({
+export const negateBucket = (b: VatBucket): VatBucket => ({
   ...b,
   base: neg(b.base),
   vat: neg(b.vat),
@@ -167,7 +194,10 @@ export const deductionBucketsOf = (
   );
 
 /** Sets the whole-unit rounding adjustment (outside every bucket, §36(5)) and the gross. */
-const withRounding = (totals: VatBreakdown, adjustment: BigDecimal.BigDecimal): VatBreakdown => ({
+export const withRounding = (
+  totals: VatBreakdown,
+  adjustment: BigDecimal.BigDecimal,
+): VatBreakdown => ({
   ...totals,
   roundingAdjustment: { ...totals.roundingAdjustment, amount: BigDecimal.normalize(adjustment) },
   gross: {
@@ -211,16 +241,9 @@ export const remainderSpec = (
   const deductions = original.lines.filter((l) => l.deducts !== null);
   const deducted = deductionBucketsOf(original);
   const remaining = remainingBuckets(original, creditNotes);
-  const open = (b: VatBucket) =>
-    !(
-      isZero(b.base) &&
-      isZero(b.vat) &&
-      isZero(b.gross) &&
-      (b.vatCzk === null || isZero(b.vatCzk))
-    );
   const left = (
     deducted.length === 0 ? remaining : mergeBuckets(remaining, deducted.map(negateBucket))
-  ).filter(open);
+  ).filter(isOpenBucket);
   const label = original.language === "cs" ? "Oprava" : "Correction of";
   const reversed = deductions.map(({ id: _id, ...l }): CreditLine => {
     const base = deductionBase(original, l);
@@ -256,7 +279,7 @@ export const remainderSpec = (
   return {
     lines: [...supply, ...reversed],
     totals: withRounding(
-      VatMath.negate(VatMath.fromBuckets(remaining.filter(open), original.currency)),
+      VatMath.negate(VatMath.fromBuckets(remaining.filter(isOpenBucket), original.currency)),
       neg(
         [original, ...creditNotes].reduce(
           (sum, d) => BigDecimal.sum(sum, d.totals.roundingAdjustment.amount),

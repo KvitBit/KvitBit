@@ -138,7 +138,8 @@ export const toView = (row: DocumentRecord, ctx: ViewContext): DocumentView => (
   statutoryNotes: StatutoryText.notes({
     kind: row.kind,
     regime: row.issuer.regime,
-    treatments: new Set(row.lines.map((l) => l.treatment)),
+    // Deduction lines (D8) print the advance's treatment, not a supply of their own.
+    treatments: new Set(row.lines.filter((l) => l.deducts === null).map((l) => l.treatment)),
     issuerRegisterEntry: row.issuer.registerEntry,
     language: ctx.language ?? row.language,
   }),

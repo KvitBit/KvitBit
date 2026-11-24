@@ -7,7 +7,7 @@ import type { VatBreakdown, VatBucket } from "@kvitbit/domain/contract";
 import { BigDecimal } from "effect";
 import { VatMath } from "../../engines/vat";
 import { mergeBuckets } from "./compose";
-import { deductionBucketsOf } from "./credit";
+import { deductionBucketsOf, withRounding } from "./credit";
 import type { DocumentRecord } from "./record";
 
 const neg = (v: BigDecimal.BigDecimal) => BigDecimal.normalize(BigDecimal.negate(v));
@@ -18,10 +18,7 @@ const neg = (v: BigDecimal.BigDecimal) => BigDecimal.normalize(BigDecimal.negate
  * stored totals with the deductions added back (the full supply), unchanged without any.
  */
 export const reportFigures = (
-  row: Pick<
-    DocumentRecord,
-    "lines" | "totals" | "currency" | "pricesIncludeVat" | "paymentRounding"
-  >,
+  row: Pick<DocumentRecord, "lines" | "totals" | "currency" | "pricesIncludeVat">,
 ): { readonly totals: VatBreakdown; readonly advanceDeductions: ReadonlyArray<VatBucket> } => {
   const deducted = deductionBucketsOf(row);
   if (deducted.length === 0) return { totals: row.totals, advanceDeductions: [] };
@@ -32,12 +29,17 @@ export const reportFigures = (
     gross: neg(b.gross),
     vatCzk: b.vatCzk === null ? null : neg(b.vatCzk),
   }));
-  const full = VatMath.fromBuckets(
-    mergeBuckets(row.totals.buckets, advanceDeductions).filter(
-      (b) => !(BigDecimal.isZero(b.base) && BigDecimal.isZero(b.vat) && BigDecimal.isZero(b.gross)),
+  // The stored whole-unit adjustment is kept as is (never rounded a second time).
+  const full = withRounding(
+    VatMath.fromBuckets(
+      mergeBuckets(row.totals.buckets, advanceDeductions).filter(
+        (b) =>
+          !(BigDecimal.isZero(b.base) && BigDecimal.isZero(b.vat) && BigDecimal.isZero(b.gross)),
+      ),
+      row.currency,
+      "none",
     ),
-    row.currency,
-    row.paymentRounding,
+    row.totals.roundingAdjustment.amount,
   );
   return { totals: full, advanceDeductions };
 };

@@ -18,6 +18,7 @@ import { BigDecimal, Effect, Exit, Schema } from "effect";
 import { VatMath } from "../../../src/engines/vat";
 import {
   DocumentDeliveryReads,
+  DocumentFixtures,
   DocumentPayments,
   DocumentsRepo,
   DocumentViewData,
@@ -29,7 +30,7 @@ import { NumberingSeries } from "../../../src/modules/numbering";
 import { CoreStore } from "../../../src/store/CoreStore";
 import { member, WORKSPACE_A, WORKSPACE_B } from "../../helpers";
 import type { Services } from "./fixtures";
-import { as, CZ_BUYER, dec, EUR, fixing, invoiceInput, scenario, str } from "./fixtures";
+import { as, CZ_BUYER, dec, EUR, fixing, invoiceInput, issuer, scenario, str } from "./fixtures";
 
 const WS = WORKSPACE_A;
 const TODAY = "2026-11-23" as IsoDate;
@@ -42,9 +43,16 @@ const ok = <A, E>(exit: Exit.Exit<A, E>): A => {
 const illegal = new Conflict({ reason: "illegal_transition" });
 const malformed = (path: ReadonlyArray<string | number>, reason: string) =>
   new Invalid({ issues: [{ path, code: "request.malformed", params: { reason } }] });
-const exceeds = new Invalid({
-  issues: [{ path: ["lines"], code: "credit_note.exceeds_original" }],
-});
+const exceeds = (remaining: string) =>
+  new Invalid({
+    issues: [
+      {
+        path: ["lines"],
+        code: "credit_note.exceeds_original",
+        params: { remaining, currency: "CZK" },
+      },
+    ],
+  });
 
 const run = <A, E>(
   body: Effect.Effect<A, E, Services>,
@@ -197,7 +205,7 @@ describe("correct (D7)", () => {
       lines(first).map((l) => [str(l.quantity), str(l.unitPrice), str(l.ratePercent)]),
     ).toEqual([["-1", "1000", "21"]]);
     expect(amounts(priced)).toEqual({ net: "-100", vat: "-12", gross: "-112" });
-    expect(over).toEqual(exceeds);
+    expect(over).toEqual(exceeds("1658"));
     expect(amounts(rest)).toEqual({ net: "-1400", vat: "-258", gross: "-1658" });
     expect(after.settlement).toBe("credited");
     expect(after.related.map((r) => r.relation)).toEqual([
@@ -653,7 +661,6 @@ describe("issueFinalInvoice (D8)", () => {
       totals: fi.totals,
       currency: fi.totals.gross.currency,
       pricesIncludeVat: false,
-      paymentRounding: "none",
     });
     expect(str(figures.totals.gross.amount)).toBe("2980");
     expect(figures.advanceDeductions).toEqual(ptd.totals.buckets);
@@ -861,7 +868,7 @@ describe("council follow-ups", () => {
       ),
     );
     // Crediting only the discount raises what the buyer owes: the signed cap refuses it (D7).
-    expect(cn).toEqual(exceeds);
+    expect(cn).toEqual(exceeds("2178"));
     expect(zero).toEqual(malformed(["lines", 0, "unitPrice"], "out_of_range"));
   });
 
@@ -910,9 +917,159 @@ describe("council follow-ups", () => {
       totals: rest.totals,
       currency: rest.totals.gross.currency,
       pricesIncludeVat: false,
-      paymentRounding: "none",
     }).advanceDeductions;
     expect(deductions.map((b) => str(b.gross))).toEqual(["-812.08", "-187.92"]);
+  });
+});
+
+describe("diff council follow-ups", () => {
+  test("a prepaid Final Invoice can be credited partially and is credited only once its deductions are reversed", async () => {
+    const [partial, afterPartial, afterFull, removal] = ok(
+      await run(
+        Effect.gen(function* () {
+          const d = yield* docs;
+          const store = yield* CoreStore;
+          const seam = yield* DocumentPayments;
+          const p = yield* issueProforma();
+          const { ptd } = yield* pay(p.id, "2980");
+          const fi = yield* d.issueFinalInvoice(p.id);
+          const partial = yield* d.correct(fi.id, {
+            reason: "méně práce",
+            lines: [{ line: lineOf(fi, 0), quantity: dec("1") }],
+          });
+          const afterPartial = yield* d.get(fi.id);
+          yield* d.correct(fi.id, { reason: "storno", lines: "full" });
+          return [
+            partial,
+            afterPartial,
+            yield* d.get(fi.id),
+            yield* store.transaction(seam.removalBlocked(WS, p.id, (ptd as DocumentView).id)),
+          ] as const;
+        }),
+      ),
+    );
+    expect(amounts(partial)).toEqual({ net: "-1000", vat: "-210", gross: "-1210" });
+    expect(afterPartial.settlement).toBe("overpaid");
+    expect(afterFull.settlement).toBe("credited");
+    expect(removal).toBe("tax_document_open");
+  });
+
+  test("a PTD a live Final Invoice deducts cannot be corrected or cancelled; no PTD after the Final Invoice", async () => {
+    const results = ok(
+      await run(
+        Effect.gen(function* () {
+          const d = yield* docs;
+          const store = yield* CoreStore;
+          const seam = yield* DocumentPayments;
+          const p = yield* issueProforma();
+          const ptd = (yield* pay(p.id, "1000")).ptd as DocumentView;
+          yield* d.issueFinalInvoice(p.id);
+          return [
+            yield* Effect.flip(d.correct(ptd.id, { reason: "x", lines: "full" })),
+            yield* Effect.flip(d.previewCorrection(ptd.id, { reason: "x", lines: "full" })),
+            yield* Effect.flip(d.cancel(ptd.id, { reason: "x" })),
+            yield* Effect.flip(
+              store.transaction(
+                seam.issuePaymentTaxDocument(WS, p.id, { amount: dec("1"), paidOn: TODAY }),
+              ),
+            ),
+          ];
+        }),
+      ),
+    );
+    expect(results).toEqual([illegal, illegal, illegal, illegal]);
+  });
+
+  test("a partial PTD credit keeps the PTD's top-down VAT basis", async () => {
+    const cn = ok(
+      await run(
+        Effect.gen(function* () {
+          const d = yield* docs;
+          const p = yield* issueProforma();
+          const ptd = (yield* pay(p.id, "1000")).ptd as DocumentView;
+          return yield* d.correct(ptd.id, {
+            reason: "část zálohy vrácena",
+            lines: [{ line: lineOf(ptd, 0), quantity: dec("0.5") }],
+          });
+        }),
+      ),
+    );
+    expect(buckets(cn)).toEqual([["standard", "21", "-335.57", "-70.47", "-406.04", null]]);
+  });
+
+  test("a cancelled non-tax Final Invoice releases payment removal; cancel after a Credit Note is refused", async () => {
+    const [removal, cancelAfterCredit] = ok(
+      await run(
+        Effect.gen(function* () {
+          const d = yield* docs;
+          const store = yield* CoreStore;
+          const seam = yield* DocumentPayments;
+          const p = yield* issueProforma({
+            lines: [{ description: "Práce", unitPrice: dec("1000") }],
+          });
+          yield* pay(p.id, "300");
+          const fi = yield* d.issueFinalInvoice(p.id);
+          yield* d.cancel(fi.id, { reason: "chyba" });
+          const inv = yield* issueInvoice({
+            lines: [{ description: "Práce", unitPrice: dec("1000") }],
+          });
+          yield* d.correct(inv.id, {
+            reason: "sleva",
+            lines: [{ line: lineOf(inv, 0), unitPrice: dec("400") }],
+          });
+          return [
+            yield* store.transaction(seam.removalBlocked(WS, p.id, null)),
+            yield* Effect.flip(d.cancel(inv.id, { reason: "x" })),
+          ] as const;
+        }),
+        { regimeA: "non_vat_payer" },
+      ),
+    );
+    expect(removal).toBeNull();
+    expect(cancelAfterCredit).toEqual(illegal);
+  });
+
+  test("a partial credit that closes every bucket also closes the whole-unit rounding", async () => {
+    const [original, cn, after] = ok(
+      await run(
+        Effect.gen(function* () {
+          const d = yield* docs;
+          const f = yield* DocumentFixtures;
+          yield* f.putIssuer({
+            ...issuer(WS, "vat_payer", { seriesByKind: {} }),
+            paymentRounding: "whole_unit",
+          });
+          const original = yield* issueInvoice({
+            lines: [{ description: "Práce", unitPrice: dec("100.40") }],
+          });
+          const cn = yield* d.correct(original.id, {
+            reason: "vše",
+            lines: [{ line: lineOf(original, 0) }],
+          });
+          return [original, cn, yield* d.get(original.id)] as const;
+        }),
+      ),
+    );
+    expect(str(original.totals.gross.amount)).toBe("121");
+    expect(str(cn.totals.roundingAdjustment.amount)).toBe(
+      str(BigDecimal.negate(original.totals.roundingAdjustment.amount)),
+    );
+    expect(str(cn.totals.gross.amount)).toBe("-121");
+    expect(after.settlement).toBe("credited");
+  });
+
+  test("a Final Invoice refuses a number in its patch", async () => {
+    const error = ok(
+      await run(
+        Effect.gen(function* () {
+          const d = yield* docs;
+          const p = yield* issueProforma();
+          yield* pay(p.id, "100");
+          return yield* Effect.flip(d.issueFinalInvoice(p.id, { patch: { number: "X-1" } }));
+        }),
+      ),
+    );
+    expect(error).toEqual(malformed(["number"], "not_allowed"));
   });
 });
 

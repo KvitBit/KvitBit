@@ -78,12 +78,18 @@
  * (`settlementOf`); a Final Invoice covered by its advances is `paid` with no payments; a PTD
  * is `paid` until fully credited; a Proforma with a Final Invoice is never overdue and owes
  * nothing (`outstandingOf`), its later payments settle on the Final Invoice. A partial
- * correction credits magnitudes against the line's sign, zero effects are refused, and a
- * Final Invoice's deductions are reversed only by a full remainder credit. Final Invoice
+ * correction credits magnitudes against the line's sign, zero effects are refused, partial
+ * credits are capped by the uncredited supply (a prepaid Final Invoice stays creditable), CZK
+ * VAT included; a Final Invoice's deductions are reversed only by a full remainder credit and
+ * it is `credited` only then. A PTD that a live Final Invoice deducts is neither corrected nor
+ * cancelled (Proforma locked first, S4), and a Proforma with a Final Invoice gets no more
+ * PTDs. A non-tax document with a Credit Note is not cancelled (the credit would count twice). Final Invoice
  * deductions: each PTD's uncredited buckets as stored (own rate and CZK fixing, even when the
  * bucket goes negative: amount due below zero is allowed, user-flows 3.8), plus paid cash no
  * PTD covers as one `outside_scope` line. One Final Invoice per Proforma, also after it is
- * credited (unique `final_invoice_for`). A PTD needs `vat_payer` on `paidOn` (else none).
+ * credited or cancelled (unique `final_invoice_for`); a cancelled one releases payment
+ * removal. A PTD needs `vat_payer` on `paidOn` (else none); its prices are gross, so VAT is
+ * top-down (rule 4) on issue and on partial correction.
  *
  * Known contract gaps (domain frozen; listed for phase2a-core in board #430/#478): C4 resolved
  * language/note/series are on the record but not in DocumentView (deferred for P1); validation
@@ -114,11 +120,12 @@ export {
   specFromInput,
   specFromRecord,
 } from "./compose";
-export { correct, previewCorrection } from "./corrections";
+export { correct, loadForCredit, previewCorrection } from "./corrections";
 export type { CreditLine, CreditSpec, IssueCreditNoteInput } from "./credit";
 export {
   creditNoteRecord,
   deductionBucketsOf,
+  deductionsOpen,
   digitsOf,
   isFullyCredited,
   issueCreditNote,
@@ -126,7 +133,9 @@ export {
   owedOf,
   remainderSpec,
   remainingBuckets,
+  roundingLeft,
   settlementOf,
+  withRounding,
 } from "./credit";
 export type { DeliveryDocument } from "./delivery";
 export { DocumentDeliveryReads, DocumentDeliveryReadsLive } from "./delivery";
