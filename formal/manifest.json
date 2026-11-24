@@ -180,7 +180,7 @@
         "number_reservations_document_fk",
         "numbering_counters_pkey"
       ],
-      "bounds": "base: 2 issues from stored drafts, 1 override, 2 periods, MaxSeq 3, 1 pre-issued document, a rollback at any statement that is not waiting, deadlock checked; 28,289 distinct states, exhaustive within the bound. wide: adds 1 issue from input; 315,279 distinct states. A second override is outside every bound (over 28.6 million states)",
+      "bounds": "base: 2 issues from stored drafts, 1 override, 2 periods, MaxSeq 3, 1 pre-issued document, a rollback at any statement that is not waiting, deadlock checked; 29,127 distinct states, exhaustive within the bound. wide: adds 1 issue from input; 324,673 distinct states. A second override is outside every bound (over 28.6 million states)",
       "assumptions": [
         "One Workspace, one DocumentKind, one YYYY-NNNN series: reservation keys include workspace and kind, and distinct sequences format to distinct numbers (Numbering.format, covered by verify-vat-numbering-math)",
         "Steps are Postgres READ COMMITTED statements on the committed schema: counters.lock is SELECT ... FOR UPDATE on numbering_counters; reservations.tryReserve is INSERT ... ON CONFLICT DO NOTHING on number_reservations_pkey, which waits for an open inserter of the same key, and a free key for a document without a row fails number_reservations_document_fk (no Postgres CoreStore exists yet; the in-memory store serializes whole transactions and has no foreign keys)",
@@ -245,7 +245,7 @@
         "CoreStoreMemory.reservations.tryReserve",
         "CoreStoreMemory.transaction"
       ],
-      "bounds": "9 hand-extracted serial traces (8 projections of Numbering.tla traces, 1 override of an override beyond the TLC bounds) (incl. the H1 orders and the edit of a draft being issued) plus 100 seeded sampled traces of 6 steps (property test, not exhaustive)",
+      "bounds": "11 hand-written serial traces (9 projections of Numbering.tla traces within the TLC bounds, 1 override of an override beyond them, 1 issue from input that commits only in memory) plus 100 seeded sampled traces of 6 steps checked against the model's serial transitions (property test, not exhaustive, not within a TLC bound)",
       "assumptions": [
         "In-memory store: one top-level transaction at a time and no foreign keys, so only serial projections of model traces replay, with the foreign-key check passing; statement interleaving and the number_reservations_document_fk failure under Postgres are left to the pg-contention job",
         "Documents are read back through Documents.get after each step; reservations are probed with tryReserve in a transaction that always rolls back"

@@ -145,8 +145,20 @@ interface ModelState {
   counter: Record<Period, number>;
   resv: Set<string>;
   docNum: Map<string, string | null>;
-  revisionChanged: Set<string>;
+  /** documents.revision history per document (model docRev), the last one current. */
+  rev: Map<string, Array<number>>;
 }
+
+/** The revision the client sends: the current one, or the one before it when `stale`. */
+const expectedRevision = (m: ModelState, step: Step) => {
+  const history = m.rev.get(step.doc) ?? [];
+  const current = history.at(-1) ?? 1;
+  return step.op === "override" && step.stale ? (history.at(-2) ?? current) : current;
+};
+const bump = (m: ModelState, doc: string) => {
+  const history = m.rev.get(doc) ?? [];
+  m.rev.set(doc, [...history, (history.at(-1) ?? 0) + 1]);
+};
 
 /** Serial transitions of Numbering.tla with the foreign-key check passing (memory store). */
 const modelStep = (m: ModelState, step: Step): Outcome => {
@@ -159,18 +171,27 @@ const modelStep = (m: ModelState, step: Step): Outcome => {
     m.resv.add(n);
     m.counter[step.period] = seq + 1;
     m.docNum.set(step.doc, n);
+    if (step.from === "draft") bump(m, step.doc);
+    else m.rev.set(step.doc, [1]); // repo.insert stores revision 1
     return { kind: "committed", number: n };
   }
   const current = m.docNum.get(step.doc);
   if (current === undefined) throw new Error(`trace edits unknown ${step.doc}`);
-  if (step.stale && m.revisionChanged.has(step.doc)) return { kind: "revision_changed" };
+  // OLock: getForUpdate's revision check
+  if (expectedRevision(m, step) !== m.rev.get(step.doc)?.at(-1))
+    return { kind: "revision_changed" };
   if (current === null) return { kind: "illegal" }; // OLock: a draft
-  // editIssued: the same number is no override (the edit itself still commits).
-  if (current === step.number) return { kind: step.crash ? "aborted" : "unchanged" };
+  // editIssued: the same number reserves nothing, but the edit still commits (revision + 1).
+  if (current === step.number) {
+    if (step.crash) return { kind: "aborted" };
+    bump(m, step.doc);
+    return { kind: "unchanged" };
+  }
   if (m.resv.has(step.number)) return { kind: "conflict" }; // OReserve: taken
   if (step.crash) return { kind: "aborted" };
   m.resv.add(step.number);
   m.docNum.set(step.doc, step.number);
+  bump(m, step.doc);
   return { kind: "committed", number: step.number };
 };
 
@@ -192,7 +213,7 @@ const replay = (steps: ReadonlyArray<Step>) =>
       counter: { "2026": 1, "2027": 1 },
       resv: new Set(),
       docNum: new Map(),
-      revisionChanged: new Set(),
+      rev: new Map(),
     };
     /** Trace document -> real id; drafts are stored up front (model Init). */
     const ids = new Map<string, DocumentId>();
@@ -200,9 +221,9 @@ const replay = (steps: ReadonlyArray<Step>) =>
       if (s.op === "issue" && s.from === "draft" && !ids.has(s.doc)) {
         ids.set(s.doc, (yield* documents.createDraft(input(s.period))).id);
         model.docNum.set(s.doc, null);
+        model.rev.set(s.doc, [1]);
       }
     }
-    const revisions = new Map<string, Array<number>>();
 
     const counters = Effect.gen(function* () {
       const out = {} as Record<Period, number>;
@@ -235,19 +256,17 @@ const replay = (steps: ReadonlyArray<Step>) =>
         )
         .pipe(Effect.catchTag("Probe", (p) => Effect.succeed(!p.free)));
 
-    const run = (step: Step, unchangedBefore: boolean) => {
+    const run = (step: Step, unchangedBefore: boolean, expected: number) => {
       const id = ids.get(step.doc);
       const body =
         step.op === "issue"
           ? documents.issue(
               step.from === "draft" && id !== undefined
-                ? { draft: id, expectedRevision: revisions.get(step.doc)?.at(-1) ?? 1 }
+                ? { draft: id, expectedRevision: expected }
                 : { input: input(step.period) },
             )
           : Effect.suspend(() => {
               if (id === undefined) return Effect.die(`no document ${step.doc}`);
-              const history = revisions.get(step.doc) ?? [1];
-              const expected = (step.stale ? history.at(-2) : undefined) ?? history.at(-1) ?? 1;
               return documents.edit(id, { number: step.number }, expected);
             });
       const crash = Effect.fail({ _tag: "Crash" as const });
@@ -274,11 +293,6 @@ const replay = (steps: ReadonlyArray<Step>) =>
     const allocated = new Map<Period, Set<number>>(PERIODS.map((p) => [p, new Set<number>()]));
     const record = (rows: Map<string, { number: string | null; revision: number }>) => {
       for (const [doc, row] of rows) {
-        const history = revisions.get(doc) ?? [];
-        if (history.at(-1) !== row.revision) {
-          if (history.length > 0) model.revisionChanged.add(doc);
-          revisions.set(doc, [...history, row.revision]);
-        }
         if (row.number !== null)
           held.set(row.number, new Set([...(held.get(row.number) ?? []), doc]));
       }
@@ -288,15 +302,24 @@ const replay = (steps: ReadonlyArray<Step>) =>
     for (const [i, step] of steps.entries()) {
       const at = `step ${i} ${JSON.stringify(step)}`;
       const before = yield* counters;
+      const sent = expectedRevision(model, step);
       const expected = modelStep(model, step);
       const previous = step.op === "override" ? (yield* stored).get(step.doc)?.number : undefined;
-      const actual = yield* run(step, step.op === "override" && previous === step.number);
+      const actual = yield* run(step, step.op === "override" && previous === step.number, sent);
       expect({ at, outcome: actual }).toEqual({ at, outcome: expected });
       const rows = yield* stored;
       record(rows);
       if (step.op === "issue" && actual.kind === "committed") {
         allocated.get(step.period)?.add(seqOf(actual.number));
       }
+      // Stored revisions follow the model's docRev (an accepted edit bumps it once).
+      const storedRevisions = Object.fromEntries([...rows].map(([d, r]) => [d, r.revision]));
+      expect({ at, revisions: storedRevisions }).toEqual({
+        at,
+        revisions: Object.fromEntries(
+          [...model.rev].filter(([d]) => ids.has(d)).map(([d, h]) => [d, h.at(-1) ?? 0]),
+        ),
+      });
       // The stored rows, not the service's return values, carry the numbers.
       const storedNumbers = Object.fromEntries([...rows].map(([d, r]) => [d, r.number]));
       expect({ at, stored: storedNumbers }).toEqual({
@@ -398,12 +421,29 @@ describe("Numbering.tla traces on Documents.issue / Documents.edit (serial proje
 
   test("an edit of a draft being issued waits, then fails its revision check", async () => {
     // Model: i1 holds its draft's row lock (IDocLock); o1 read revision 1 and waits in OLock;
-    // i1 commits (revision 2); OLock -> revision_changed. Without the race: a draft is illegal.
+    // i1 commits (revision 2); OLock -> revision_changed.
+    const r = await runReplay([
+      D0,
+      { op: "issue", doc: "i1", from: "draft", period: "2026" },
+      { op: "override", doc: "i1", number: "2026-0003", stale: true },
+    ]);
+    expect(r.numbers).toEqual({ d0: "2026-0001", i1: "2026-0002" });
+  });
+
+  test("a number edit of a draft is refused (OLock: illegal)", async () => {
     const r = await runReplay([
       D0,
       { op: "override", doc: "i1", number: "2026-0003" },
       { op: "issue", doc: "i1", from: "draft", period: "2026" },
-      { op: "override", doc: "i1", number: "2026-0003", stale: true },
+    ]);
+    expect(r.numbers).toEqual({ d0: "2026-0001", i1: "2026-0002" });
+  });
+
+  test("an edit with the current number reserves nothing and commits one revision", async () => {
+    const r = await runReplay([
+      D0,
+      { op: "override", doc: "d0", number: "2026-0001" },
+      { op: "issue", doc: "i1", from: "draft", period: "2026" },
     ]);
     expect(r.numbers).toEqual({ d0: "2026-0001", i1: "2026-0002" });
   });
@@ -439,7 +479,7 @@ describe("Numbering.tla traces on Documents.issue / Documents.edit (serial proje
     expect(r.numbers).toEqual({ d0: "2027-0001", i1: "2027-0003" });
   });
 
-  test("wide bound: an issue from input (commits in memory; on Postgres it aborts on the FK)", async () => {
+  test("memory only: an issue from input commits (the wide model aborts it on the FK)", async () => {
     const r = await runReplay([
       D0,
       { op: "issue", doc: "i3", from: "input", period: "2026" },
@@ -457,6 +497,8 @@ const rng = (seed: number) => () => {
   return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
 };
 
+// Sampled traces mix issues from input (memory only) and several overrides (beyond the TLC
+// bounds): they check the code against the model's serial transitions, not a TLC bound.
 describe("sampled serial traces (property test, not exhaustive)", () => {
   test("100 seeded traces of 6 steps agree with the model and keep its invariants", async () => {
     for (let seed = 1; seed <= 100; seed++) {

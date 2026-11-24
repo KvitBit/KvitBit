@@ -33,7 +33,8 @@
 (*   OStart   the client reads the document and sends its revision         *)
 (*   OLock    repo.getForUpdate(id, expectedRevision): waits on the row    *)
 (*            lock, then a changed revision -> Conflict{revision_changed}; *)
-(*            a draft -> illegal; the same number -> no override           *)
+(*            a draft -> illegal; the same number -> no reservation, the  *)
+(*            edit still updates the row and its revision (OCommit)        *)
 (*   OReserve reservations.tryReserve(new number); taken -> Conflict       *)
 (*   OUpdate  repo.update with the new number (unique index, line 479)     *)
 (*   OCommit  commit; the old number's reservation stays (insert-only)     *)
@@ -297,7 +298,13 @@ OLock(o) ==
        ELSE IF docNum[od[o]] = None
        THEN Rollback(o, "illegal")          \* a draft: D4 refuses
        ELSE IF docNum[od[o]] = tgt[o]
-       THEN Rollback(o, "unchanged")        \* same number: no override
+       THEN \* same number: no reservation, but editIssued still updates the row
+            /\ docLock' = [docLock EXCEPT ![od[o]] = o]
+            /\ old' = [old EXCEPT ![o] = docNum[od[o]]]
+            /\ pend' = [pend EXCEPT ![o] = tgt[o]]
+            /\ pc' = [pc EXCEPT ![o] = "commit"]
+            /\ UNCHANGED <<per, seq, saved, tgt, od, seen, outcome, counter,
+                           ctrLock, resv, exists, docNum, docRev, held, allocated>>
        ELSE /\ docLock' = [docLock EXCEPT ![od[o]] = o]
             /\ old' = [old EXCEPT ![o] = docNum[od[o]]]
             /\ pc' = [pc EXCEPT ![o] = "reserve"]
@@ -348,7 +355,7 @@ OCommit(o) ==
     /\ docLock' = [docLock EXCEPT ![od[o]] = None]
     /\ pend' = [pend EXCEPT ![o] = None]
     /\ pc' = [pc EXCEPT ![o] = "done"]
-    /\ outcome' = [outcome EXCEPT ![o] = "committed"]
+    /\ outcome' = [outcome EXCEPT ![o] = IF old[o] = pend[o] THEN "unchanged" ELSE "committed"]
     /\ UNCHANGED <<per, seq, saved, tgt, od, seen, old, ctrLock, exists, allocated>>
 
 (* ---------------------------- crash ---------------------------------- *)

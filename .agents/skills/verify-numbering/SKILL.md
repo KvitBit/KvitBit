@@ -12,7 +12,7 @@ description: Model-check gapless document numbering (core-ports D1, S3, S4) and 
 Two checks, both in `formal/manifest.json`:
 
 - `numbering.allocator`: TLC model `formal/numbering/Numbering.tla`. A bounded model check: every state within the bounds below is explored. It describes the code, it does not run it.
-- `numbering.replay`: `formal/numbering/numbering.replay.test.ts` runs model traces on the real `Documents.issue` (from a stored draft or from input) and `Documents.edit` with `patch.number`, on `DocumentsTestLayer` over the in-memory store. After each step it reads the stored documents back through `Documents.get`, asserts that the outcome, stored numbers and counters equal an executable copy of the model's serial transitions (`modelStep`), and checks every invariant on the real store (document history comes from the stored rows read after each step). It is a serial in-memory projection, not a check of concurrent Postgres behaviour. 9 hand-extracted traces (one, the override of an override, is beyond the TLC bounds), plus 100 seeded traces of 6 steps (a sampled property test, not exhaustive).
+- `numbering.replay`: `formal/numbering/numbering.replay.test.ts` runs model traces on the real `Documents.issue` (from a stored draft or from input) and `Documents.edit` with `patch.number`, on `DocumentsTestLayer` over the in-memory store. After each step it reads the stored documents back through `Documents.get`, asserts that the outcome, stored numbers and counters equal an executable copy of the model's serial transitions (`modelStep`), and checks every invariant on the real store (document history comes from the stored rows read after each step). It is a serial in-memory projection, not a check of concurrent Postgres behaviour. 11 hand-written traces: 9 are serial projections of traces within the TLC bounds, 1 (an override of an override) is beyond them, and 1 (an issue from input that commits) holds only in memory, where there is no foreign key. Plus 100 seeded traces of 6 steps: a sampled property test, not exhaustive, that mixes issues from input and several overrides, so it checks the code against the model's serial transitions rather than against a TLC bound. The model's document revisions are tracked independently of the stored rows, and the stored revisions are asserted against them.
 
 ## Does my change touch it?
 
@@ -58,7 +58,7 @@ One model step is one SQL statement under Postgres READ COMMITTED on the committ
 | `ISet` | `store.counters.set(key, sequence + 1)` (`service.ts:377`) |
 | `IWrite` | `repo.update` (draft) / `repo.insert` (input) with the number; `NUMBER_PER_KIND` → `Conflict{duplicate}` |
 | `OStart` | the client reads the issued document and sends its revision as `expectedRevision` |
-| `OLock` | `repo.getForUpdate(id, expectedRevision)` in `Documents.edit` (`documents/service.ts:55`): waits on the row lock, then a changed revision → `Conflict{revision_changed}`, a draft → illegal, the same number → no override |
+| `OLock` | `repo.getForUpdate(id, expectedRevision)` in `Documents.edit` (`documents/service.ts:55`): waits on the row lock, then a changed revision → `Conflict{revision_changed}`, a draft → illegal, the same number → no reservation, but the edit still commits and the revision grows by one |
 | `OReserve` | `NumberingSeries.override` → `reserveNumber` → `tryReserve`; taken → `Conflict{duplicate}` |
 | `OUpdate` / `OCommit` | `repo.update` with the new number, commit; the old reservation stays |
 | `Crash` | a transaction that is not waiting fails; the store rolls back every write |
@@ -71,8 +71,8 @@ The in-memory store runs one top-level transaction at a time (`store/memory.ts` 
 
 ## Bounds
 
-- Base (`Numbering.cfg`): issues from stored drafts `{i1, i2}`, override `{o1}`, periods `{p1, p2}`, `MaxSeq = 3`, one document `d0` issued before the run as `<<p1, 1>>`. The override targets any stored document and any number of the series' number space, with the revision it read. 28,289 distinct states.
-- Wide (`Numbering_wide.cfg`, nightly): adds an issue from input `{i3}`. 315,279 distinct states, about 25 s. A second override (an override of an override) is outside every TLC bound: with `{o1, o2}` and `{i1, i2, i3}` TLC had 28.6 million distinct states and 0.8 million queued after 30 minutes, too large even for nightly. The replay covers that case as a serial trace only.
+- Base (`Numbering.cfg`): issues from stored drafts `{i1, i2}`, override `{o1}`, periods `{p1, p2}`, `MaxSeq = 3`, one document `d0` issued before the run as `<<p1, 1>>`. The override targets any stored document and any number of the series' number space, with the revision it read. 29,127 distinct states.
+- Wide (`Numbering_wide.cfg`, nightly): adds an issue from input `{i3}`. 324,673 distinct states, about 25 s. A second override (an override of an override) is outside every TLC bound: with `{o1, o2}` and `{i1, i2, i3}` TLC had 28.6 million distinct states and 0.8 million queued after 30 minutes, too large even for nightly. The replay covers that case as a serial trace only.
 - Deadlock is checked (see above).
 
 ## Assumptions and what is not covered
@@ -139,7 +139,7 @@ After an intended change:
 - Tools: tla2tools 1.7.4, Java 17, Bun 1.4.2 (pins in `formal/toolchain/toolchain.json`).
 - Covered files: `packages/core/src/modules/numbering/service.ts`, `packages/core/src/store/numbering.ts`, `packages/core/src/store/CoreStore.ts`, `packages/core/src/store/memory.ts` (replay), `packages/core/src/modules/documents/lifecycle.ts`, `packages/core/src/modules/documents/service.ts`, `packages/core/src/modules/documents/record.ts`, `packages/db/drizzle/20261123175822_init/migration.sql` (model). Digests are in the manifest.
 - Able-to-fail, recorded 2026-11-24, each reverted with `git checkout` and re-run green:
-  - `numbering/service.ts:376` `if (reserved)` → `if (reserved || !reserved)` (a taken candidate is used, not skipped): `--check-digests` names both checks; the replay fails 4 of 10, first at the outcome assert: after `d0` is overridden to `2026-0002`, the next issue is `Conflict{duplicate}` (the `NUMBER_PER_KIND` index) where the model issues `2026-0003`.
-  - `numbering/service.ts:377` `counters.set` removed (the counter never advances): the replay fails 10 of 10 at the counter assert (model `2026: 2`, real `nextCounter` 1).
-  - `documents/lifecycle.ts:421` the override's result discarded (the new number is reserved, the document keeps its old one): the replay fails 4 of 10; the stored document reads `2026-0001` where the model has the overridden number.
+  - `numbering/service.ts:376` `if (reserved)` → `if (reserved || !reserved)` (a taken candidate is used, not skipped): `--check-digests` names both checks; the replay fails 4 of 12, first at the outcome assert: after `d0` is overridden to `2026-0002`, the next issue is `Conflict{duplicate}` (the `NUMBER_PER_KIND` index) where the model issues `2026-0003`.
+  - `numbering/service.ts:377` `counters.set` removed (the counter never advances): the replay fails 12 of 12 at the counter assert (model `2026: 2`, real `nextCounter` 1).
+  - `documents/lifecycle.ts:421` the override's result discarded (the new number is reserved, the document keeps its old one): the replay fails 4 of 12; the stored document reads `2026-0001` where the model has the overridden number.
   - Model mutants: all five fail via `verify:formal` with their declared violations; a scratch copy whose `ICommit` keeps the counter lock fails with `Deadlock reached`.
