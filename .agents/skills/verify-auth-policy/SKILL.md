@@ -34,7 +34,13 @@ bun test --cwd packages/core ./test/policy/can.property.test.ts ./test/store.tes
 
 Passes in about 5 seconds (72 tests, 1 skipped: the wide bound). A `CoreStore.afterCommit failed` log line is an expected store test, not a failure.
 
-Wide bound (nightly, and every time you move the sync commit), about 50 seconds:
+### PR-time bound and nightly wide bound
+
+- PR time (the command above, and `bun run test`): every normalized grant (3^10) plus the session, every raw list over at most two areas (both orders), and the all-areas write-only list. It misses raw (unnormalized) lists over three or more areas, such as `contacts:write, documents:read, payments:write`.
+- Nightly and at every sync-commit move: the wide run below checks every raw list (4^10) and closes that gap. It is skipped unless `KVITBIT_FORMAL_WIDE=1` is set; the nightly workflow sets it.
+- Residual risk: such a list reaches `can()` only if the edge passes unnormalized scopes. `Workspaces.enter` (`packages/core/src/modules/workspaces/live.ts:745`) passes `opts.scopes` through unchanged, so a regression there in a list over three or more areas shows up only in the nightly run, not on the PR.
+
+Wide bound (accepted by the ADR-0005 orchestration as nightly/sync-time per its CI split), about 50 seconds:
 
 ```sh
 KVITBIT_FORMAL_WIDE=1 bun test --cwd packages/core ./test/policy/can.property.test.ts -t wide
