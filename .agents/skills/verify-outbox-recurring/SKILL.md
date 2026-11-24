@@ -36,7 +36,7 @@ Yes, if the diff touches a file below, or anything that changes what one transac
 | `modules/documents/deliveries/steps.ts` | `claim` (67), `dispatch` (84), the record transaction (122-143), `giveUp` (158), `deliver` (171) |
 | `modules/documents/deliveries/jobs.ts`, `repo.ts` | `DeliveryJobs.start`, `DeliveriesRepo.lock`/`update` |
 | `modules/recurring/links.ts`, `modules/documents/record.ts` | `RecurringDocumentLink.link`, the `documents(schedule_id, occurrence)` unique key (`record.ts:241`) |
-| `store/memory.ts`, `store/CoreStore.ts` | `transaction` frames: rollback (162-165), hooks passed to the parent (166-168), `drainAfterCommit` after the outermost commit (180-197); `afterCommit` |
+| `store/memory.ts`, `store/CoreStore.ts` | `transaction` frames: rollback (166-169), hooks passed to the parent (172-174), `drainAfterCommit` after the outermost commit (184-196); `afterCommit` |
 
 ## What it promises
 
@@ -114,7 +114,7 @@ Temporal mutants declare only the one liveness property they target under `PROPE
 - Fairness is per component: the sweep and the recurring reconcile get strong fairness (lock waits make them flicker), the delivery reconcile, each job execution and each delivery execution get weak fairness. Crashes, duplicate starts and provider failures get no fairness and are bounded.
 - Bundled steps: a start (sweep, duplicate or reconcile) is bundled with the job's entry into the issue transaction. Dispatch's row read, render and provider call are one step; a crash between the read and the call is the same state as a crash before the read. Neither split adds a state the model can tell apart.
 - One execution slot per delivery: a re-start attaches to a live execution (J1, by key), so two overlapping dispatches of one delivery are not modelled. They could only add provider duplicates, which `NoLostSend` allows. The pg-contention list covers the overlap.
-- Each transaction is one atomic step, which holds because the schedule row lock serializes them and the memory store runs one transaction at a time (`memory.ts:196`). Postgres locking is not checked.
+- Each transaction is one atomic step, which holds because the schedule row lock serializes them and the memory store runs one transaction at a time (`memory.ts:202`). Postgres locking is not checked.
 - J3 re-checks (document cancelled, reminder no longer due), pauses on Documents failures, the catch-up cap, detach and edits are left out: the document stays sendable and the schedule active. Reminders and invitations are not modelled.
 - `DeliveryReconcile = TRUE` in the base is the designed J1a cron, not code at 77a5bb7 (see H3).
 - The provider is assumed not to dedupe, so `smtp` counts every acceptance. The CaptureEmailSender fake does dedupe by key, and the replay asserts the key.

@@ -3,19 +3,20 @@
  * stored draft or from input) and `Documents.edit` with `patch.number` (D4), on
  * `DocumentsTestLayer` over the in-memory store.
  *
- * The in-memory store runs one top-level transaction at a time (store/memory.ts) and has no
- * foreign keys, so each model trace replays as its serial projection: a transaction that waits
- * in the model on another's lock or open reservation runs here after that one committed or
- * rolled back, and an issue from input commits (on the committed Postgres schema the model
- * aborts it on number_reservations_document_fk; see the verify-numbering skill). Postgres
- * statement interleaving is the pg-contention job's.
+ * The in-memory store runs one top-level transaction at a time (store/memory.ts), so each model
+ * trace replays as its serial projection: a transaction that waits in the model on another's
+ * lock or open reservation runs here after that one committed or rolled back. The store
+ * enforces number_reservations_document_fk like Postgres (a reservation for a document with no
+ * row is a defect), so an issue from input commits only because it inserts its draft row before
+ * it allocates (model IInsert). Postgres statement interleaving is the pg-contention job's.
  *
  * Each step runs on the real code and on an executable copy of the model's serial transitions
  * (`modelStep`). After every step the harness reads the stored documents back through
  * `Documents.get`, asserts that outcome, stored numbers and counters equal the model's, and
  * checks the model's invariants on the real store: NoDuplicateNumber, NoReuse,
  * ReservedForever, Gapless, CounterTracksIssue and OverrideKeepsCounter. A reservation is read
- * by probing `reservations.tryReserve` in a transaction that always rolls back.
+ * by probing `reservations.tryReserve` for a probe draft in a transaction that always rolls
+ * back.
  */
 import { describe, expect, test } from "bun:test";
 import { NumberingModule } from "@kvitbit/core";
@@ -160,7 +161,7 @@ const bump = (m: ModelState, doc: string) => {
   m.rev.set(doc, [...history, (history.at(-1) ?? 0) + 1]);
 };
 
-/** Serial transitions of Numbering.tla with the foreign-key check passing (memory store). */
+/** Serial transitions of Numbering.tla (the foreign-key check passes: IInsert runs first). */
 const modelStep = (m: ModelState, step: Step): Outcome => {
   if (step.op === "issue") {
     let seq = m.counter[step.period];
@@ -172,7 +173,7 @@ const modelStep = (m: ModelState, step: Step): Outcome => {
     m.counter[step.period] = seq + 1;
     m.docNum.set(step.doc, n);
     if (step.from === "draft") bump(m, step.doc);
-    else m.rev.set(step.doc, [1]); // repo.insert stores revision 1
+    else m.rev.set(step.doc, [2]); // IInsert stores the draft at revision 1, IWrite updates it
     return { kind: "committed", number: n };
   }
   const current = m.docNum.get(step.doc);
@@ -208,6 +209,8 @@ const replay = (steps: ReadonlyArray<Step>) =>
     yield* fixtures.putContact(WS, buyer);
     yield* numbering.ensureDefaults(WS, ["invoice"]);
     const series = yield* numbering.resolve(WS, "invoice");
+    // A draft row for the reservation probe (number_reservations_document_fk); never numbered.
+    const probe = (yield* documents.createDraft(input("2026"))).id;
 
     const model: ModelState = {
       counter: { "2026": 1, "2027": 1 },
@@ -249,7 +252,7 @@ const replay = (steps: ReadonlyArray<Step>) =>
               kind: "invoice",
               number,
               seriesId: null,
-              documentId: "01900000-0000-7000-8000-0000000000ff" as DocumentId,
+              documentId: probe,
             }),
             (free) => Effect.fail({ _tag: "Probe" as const, free }),
           ),
@@ -479,7 +482,7 @@ describe("Numbering.tla traces on Documents.issue / Documents.edit (serial proje
     expect(r.numbers).toEqual({ d0: "2027-0001", i1: "2027-0003" });
   });
 
-  test("memory only: an issue from input commits (the wide model aborts it on the FK)", async () => {
+  test("an issue from input commits: its draft row exists before the reservation (IInsert)", async () => {
     const r = await runReplay([
       D0,
       { op: "issue", doc: "i3", from: "input", period: "2026" },
@@ -497,7 +500,7 @@ const rng = (seed: number) => () => {
   return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
 };
 
-// Sampled traces mix issues from input (memory only) and several overrides (beyond the TLC
+// Sampled traces mix issues from drafts and from input and several overrides (beyond the TLC
 // bounds): they check the code against the model's serial transitions, not a TLC bound.
 describe("sampled serial traces (property test, not exhaustive)", () => {
   test("100 seeded traces of 6 steps agree with the model and keep its invariants", async () => {
