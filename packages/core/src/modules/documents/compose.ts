@@ -50,9 +50,11 @@ import type {
   BankAccountRecord,
   ContactSnapshotRecord,
   DocumentRecord,
+  FxRecord,
   GivenFields,
   IssuerSnapshotRecord,
   LineRecord,
+  PaymentRounding,
 } from "./record";
 
 const ONE = BigDecimal.fromBigInt(1n);
@@ -111,6 +113,7 @@ export type Composed = Pick<
   | "fx"
   | "fxOverride"
   | "taxDocument"
+  | "paymentRounding"
 >;
 
 export interface ComposeOptions {
@@ -127,6 +130,15 @@ export interface ComposeOptions {
     readonly issuer: IssuerSnapshotRecord;
     /** The frozen document's currency: its bank account (or none) is kept in it. */
     readonly currency: CurrencyCode;
+    /**
+     * The issued tax results, kept while their inputs are unchanged: the regime and the rate
+     * (`fx`) while the tax point, currency and manual rate are the same, and the whole-unit
+     * payment rounding always.
+     */
+    readonly taxableSupplyOn: IsoDate | null;
+    readonly fx: FxRecord | null;
+    readonly fxOverride: FxOverride | null;
+    readonly paymentRounding: PaymentRounding;
   };
 }
 
@@ -397,6 +409,11 @@ const contactSnapshot = (contact: ContactForDocument): ContactSnapshotRecord => 
   billingEmails: contact.billingEmails,
 });
 
+const sameOverride = (a: FxOverride | null, b: FxOverride | null) =>
+  a === null || b === null
+    ? a === b
+    : BigDecimal.equals(a.manual.rate, b.manual.rate) && a.manual.quantity === b.manual.quantity;
+
 const issuerSnapshot = (
   issuer: IssuerForDocument,
   bankAccount: BankAccountRecord | null,
@@ -416,6 +433,24 @@ export const compose = (
     const taxPoint = taxableSupplyOn;
     // NotFound{Workspace} (agreements #414/#418) passes through.
     const issuer = yield* (yield* DocumentIssuers).forDocument(workspaceId, taxPoint);
+    const frozen = options.freeze;
+    const samePoint = frozen !== undefined && frozen.taxableSupplyOn === taxPoint;
+    // D10: an issued document's tax results follow its frozen parties, not live changes.
+    const regime = samePoint ? frozen.issuer.regime : issuer.regime;
+    const buyer: ContactForDocument =
+      frozen?.contact === undefined
+        ? contact
+        : {
+            ...contact,
+            party: {
+              contactId: frozen.contact.contactId,
+              name: frozen.contact.name,
+              ico: frozen.contact.ico,
+              dic: frozen.contact.dic,
+              legalForm: frozen.contact.legalForm,
+              address: frozen.contact.address,
+            },
+          };
 
     const defaults = resolveDocumentDefaults({
       kind,
@@ -442,8 +477,8 @@ export const compose = (
       issues.push(issue(["due"], "request.malformed", { reason: "out_of_range" }));
     } else if (dueOn < issuedOn) issues.push(issue(["due"], "document.due_before_issue"));
 
-    const treatments = spec.lines.map((l) => treatmentOf(l, issuer.regime, contact));
-    issues.push(...regimeIssues(issuer.regime, contact, treatments));
+    const treatments = spec.lines.map((l) => treatmentOf(l, regime, buyer));
+    issues.push(...regimeIssues(regime, buyer, treatments));
     spec.lines.forEach((l, i) => {
       // A price copied from the Price List is in the item's currency: it must match (also
       // after an edit changes the document currency); else the caller gives a unitPrice.
@@ -471,7 +506,6 @@ export const compose = (
       seriesId = series.id;
     }
 
-    const frozen = options.freeze;
     const account =
       frozen !== undefined &&
       frozen.currency === currency &&
@@ -496,12 +530,22 @@ export const compose = (
           };
 
     // Rule D11: manual rate, else the CNB fixing valid on the tax point (carried back).
-    const fixing = Fx.needsFixing(currency, spec.fxOverride)
-      ? yield* (yield* ExchangeRates).fixing(taxPoint)
-      : null;
-    const fxResult = Fx.resolve({ currency, override: spec.fxOverride, fixing });
-    if (Result.isFailure(fxResult)) return yield* fxResult.failure;
-    const fx = fxResult.success;
+    let fx: FxRecord | null;
+    if (
+      samePoint &&
+      frozen.currency === currency &&
+      sameOverride(frozen.fxOverride, spec.fxOverride)
+    ) {
+      fx = frozen.fx;
+    } else {
+      const fixing = Fx.needsFixing(currency, spec.fxOverride)
+        ? yield* (yield* ExchangeRates).fixing(taxPoint)
+        : null;
+      const fxResult = Fx.resolve({ currency, override: spec.fxOverride, fixing });
+      if (Result.isFailure(fxResult)) return yield* fxResult.failure;
+      fx = fxResult.success;
+    }
+    const paymentRounding = frozen?.paymentRounding ?? issuer.paymentRounding;
 
     // A Price List price is net (excl. VAT): with pricesIncludeVat it is grossed up at the
     // line's rate, so the top-down math (§37(b)) sees a gross unit price.
@@ -526,7 +570,7 @@ export const compose = (
       taxPoint,
       pricesIncludeVat: spec.pricesIncludeVat,
       fx,
-      paymentRounding: issuer.paymentRounding,
+      paymentRounding,
     });
 
     const ids = yield* IdGenerator;
@@ -556,7 +600,7 @@ export const compose = (
       contactId: spec.contactId,
       contact: options.freeze?.contact ?? contactSnapshot(contact),
       issuer: options.freeze
-        ? { ...options.freeze.issuer, regime: issuer.regime, bankAccount }
+        ? { ...options.freeze.issuer, regime, bankAccount }
         : issuerSnapshot(issuer, bankAccount),
       given,
       seriesId,
@@ -574,6 +618,7 @@ export const compose = (
       totals,
       fx,
       fxOverride: spec.fxOverride,
-      taxDocument: isTaxDocument(kind, issuer.regime, treatments),
+      taxDocument: isTaxDocument(kind, regime, treatments),
+      paymentRounding,
     };
   });

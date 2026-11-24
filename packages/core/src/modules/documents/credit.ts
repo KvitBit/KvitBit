@@ -13,6 +13,7 @@ import type {
   DocumentId,
   IsoDate,
   LineId,
+  NumberingSeriesId,
   VatBreakdown,
   VatBucket,
   WorkspaceId,
@@ -83,9 +84,24 @@ export const remainingBuckets = (
   return [...byKey.values()];
 };
 
-/** Nothing of the original is left to credit (every bucket's base, VAT and gross is zero). */
-export const isFullyCredited = (buckets: ReadonlyArray<VatBucket>): boolean =>
-  buckets.every((b) => isZero(b.base) && isZero(b.vat) && isZero(b.gross));
+/**
+ * Nothing of the original is left to credit: every bucket's base, VAT, gross and CZK VAT is
+ * zero and so is the summed whole-unit rounding adjustment.
+ */
+export const isFullyCredited = (
+  original: Pick<DocumentRecord, "totals">,
+  creditNotes: ReadonlyArray<Pick<DocumentRecord, "totals">>,
+): boolean =>
+  remainingBuckets(original, creditNotes).every(
+    (b) =>
+      isZero(b.base) && isZero(b.vat) && isZero(b.gross) && (b.vatCzk === null || isZero(b.vatCzk)),
+  ) &&
+  isZero(
+    [original, ...creditNotes].reduce(
+      (sum, d) => BigDecimal.sum(sum, d.totals.roundingAdjustment.amount),
+      ZERO,
+    ),
+  );
 
 /** Sets the whole-unit rounding adjustment (outside every bucket, §36(5)) and the gross. */
 const withRounding = (totals: VatBreakdown, adjustment: BigDecimal.BigDecimal): VatBreakdown => ({
@@ -166,6 +182,75 @@ export interface IssueCreditNoteInput {
 }
 
 /**
+ * The Credit Note record (pure, no numbering or storage), for `issueCreditNote` and P3's
+ * `previewCorrection` (which passes a placeholder number).
+ */
+export const creditNoteRecord = (
+  original: DocumentRecord,
+  input: IssueCreditNoteInput,
+  number: {
+    readonly id: DocumentId;
+    readonly number: string | null;
+    readonly seriesId: NumberingSeriesId | null;
+    readonly lines: ReadonlyArray<LineRecord>;
+    readonly at: string;
+  },
+): DocumentRecord => ({
+  id: number.id,
+  workspaceId: original.workspaceId,
+  revision: 1,
+  kind: "credit_note",
+  status: "issued",
+  locked: false,
+  lockedAt: null,
+  number: number.number,
+  seriesId: number.seriesId,
+  contactId: original.contactId,
+  contact: original.contact,
+  issuer: original.issuer,
+  given: {
+    currency: original.currency,
+    issuedOn: input.issuedOn,
+    taxableSupplyOn: input.correctedOn,
+    due: { on: input.issuedOn },
+    language: original.language,
+    ...(number.seriesId === null ? {} : { series: number.seriesId }),
+    paymentMethod: original.paymentMethod,
+  },
+  currency: original.currency,
+  language: original.language,
+  paymentMethod: original.paymentMethod,
+  note: null,
+  issuedOn: input.issuedOn,
+  taxableSupplyOn: input.correctedOn,
+  dueOn: input.issuedOn,
+  pricesIncludeVat: input.credit.pricesIncludeVat,
+  // The refund's payment reference is the corrected document's.
+  variableSymbol: original.variableSymbol ?? digitsOf(original.number),
+  orderNumber: original.orderNumber,
+  lines: number.lines,
+  totals: input.credit.totals,
+  fx: original.fx,
+  fxOverride: original.fxOverride,
+  taxDocument: original.taxDocument,
+  paymentRounding: original.paymentRounding,
+  remindersChoice: "off",
+  remindersOn: false,
+  links: [{ relation: "corrects", id: original.id }],
+  paidAmount: ZERO,
+  payments: 0,
+  settlement: "unpaid",
+  scheduleId: null,
+  occurrence: null,
+  cancelledOn: null,
+  correctedNumber: original.number,
+  reason: input.reason,
+  createdAt: number.at,
+  updatedAt: number.at,
+  issuedAt: number.at,
+});
+
+/**
  * Issues a Credit Note against `original`, which the caller has row-locked (S4: the root
  * document first, then the credit_note counter): numbers it from the Workspace's default
  * credit_note series, links both documents (`corrects` / `corrected_by`), sets the original's
@@ -193,59 +278,15 @@ export const issueCreditNote = (original: DocumentRecord, input: IssueCreditNote
     for (const l of input.credit.lines) lines.push({ ...l, id: (yield* ids.next) as LineId });
 
     const creditNote = yield* repo
-      .insert({
-        id,
-        workspaceId,
-        revision: 1,
-        kind: "credit_note",
-        status: "issued",
-        locked: false,
-        lockedAt: null,
-        number: allocation.number,
-        seriesId: allocation.seriesId,
-        contactId: original.contactId,
-        contact: original.contact,
-        issuer: original.issuer,
-        given: {
-          currency: original.currency,
-          issuedOn: input.issuedOn,
-          taxableSupplyOn: input.correctedOn,
-          due: { on: input.issuedOn },
-          language: original.language,
-          series: allocation.seriesId,
-          paymentMethod: original.paymentMethod,
-        },
-        currency: original.currency,
-        language: original.language,
-        paymentMethod: original.paymentMethod,
-        note: null,
-        issuedOn: input.issuedOn,
-        taxableSupplyOn: input.correctedOn,
-        dueOn: input.issuedOn,
-        pricesIncludeVat: input.credit.pricesIncludeVat,
-        // The refund's payment reference is the corrected document's.
-        variableSymbol: original.variableSymbol ?? digitsOf(original.number),
-        orderNumber: original.orderNumber,
-        lines,
-        totals: input.credit.totals,
-        fx: original.fx,
-        fxOverride: original.fxOverride,
-        taxDocument: original.taxDocument,
-        remindersChoice: "off",
-        remindersOn: false,
-        links: [{ relation: "corrects", id: original.id }],
-        paidAmount: ZERO,
-        payments: 0,
-        settlement: "unpaid",
-        scheduleId: null,
-        occurrence: null,
-        cancelledOn: null,
-        correctedNumber: original.number,
-        reason: input.reason,
-        createdAt: at,
-        updatedAt: at,
-        issuedAt: at,
-      })
+      .insert(
+        creditNoteRecord(original, input, {
+          id,
+          number: allocation.number,
+          seriesId: allocation.seriesId,
+          lines,
+          at,
+        }),
+      )
       // The allocator reserved the number for this document, so the index cannot break.
       .pipe(Effect.catchTag("UniqueViolation", () => new Conflict({ reason: "duplicate" })));
 
@@ -253,7 +294,7 @@ export const issueCreditNote = (original: DocumentRecord, input: IssueCreditNote
       workspaceId,
       original.links.filter((l) => l.relation === "corrected_by").map((l) => l.id),
     );
-    const credited = isFullyCredited(remainingBuckets(original, [...earlier, creditNote]));
+    const credited = isFullyCredited(original, [...earlier, creditNote]);
     const updated = yield* repo
       .update(
         {

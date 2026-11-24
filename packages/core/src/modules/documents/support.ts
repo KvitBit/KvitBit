@@ -62,9 +62,9 @@ export const relatedOf = (
         const byId = new Map(linked.map((d) => [d.id, d]));
         return row.links.flatMap((l): ReadonlyArray<RelatedDocument> => {
           const d = byId.get(l.id);
-          return d?.number
-            ? [{ relation: l.relation, id: d.id, kind: d.kind, number: d.number }]
-            : [];
+          // A Credit Note prints the corrected number as it was at correction time (D7).
+          const number = l.relation === "corrects" ? (row.correctedNumber ?? d?.number) : d?.number;
+          return d && number ? [{ relation: l.relation, id: d.id, kind: d.kind, number }] : [];
         });
       });
 

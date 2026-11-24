@@ -136,6 +136,7 @@ export const FxRecord = Schema.Struct({
   source: Schema.Literals(["cnb", "manual"]),
 });
 export type FxRecord = typeof FxRecord.Type;
+export type PaymentRounding = "none" | "whole_unit";
 
 /** A link to another document (`DocumentView.related`); written by P3 (corrections, advances). */
 export const LinkRecord = Schema.Struct({ relation: DocumentRelation, id: DocumentId });
@@ -180,6 +181,8 @@ export const DocumentRecord = Schema.Struct({
   /** The manual rate as given (decision Q4); survives tax point changes (D11). */
   fxOverride: Schema.NullOr(FxOverride),
   taxDocument: Schema.Boolean,
+  /** The Workspace's whole-unit payment rounding when composed; kept after issue (D10). */
+  paymentRounding: Schema.Literals(["none", "whole_unit"]),
 
   /** What a `send` stored (rule D16), as given; computing schedules is stage 2's. */
   remindersChoice: Schema.Literals(["on", "off", "inherit"]),

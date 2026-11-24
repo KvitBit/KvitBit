@@ -20,6 +20,7 @@ import {
   Invalid,
   IsoDate as IsoDateSchema,
   Locale,
+  NotFound,
   VatBreakdown,
 } from "@kvitbit/domain/contract";
 import { Effect, Schema } from "effect";
@@ -34,6 +35,7 @@ import { NumberingSeries } from "../numbering";
 import type { Composed } from "./compose";
 import { applyPatch, compose, specFromInput, specFromRecord } from "./compose";
 import { digitsOf, issueCreditNote, remainderSpec } from "./credit";
+import { DocumentIssuers } from "./ports";
 import type { DocumentRecord, GivenFields } from "./record";
 import { DocumentRecord as DocumentRecordSchema } from "./record";
 import { DocumentsRepo } from "./repo";
@@ -205,6 +207,8 @@ export const issue = (from: IssueFrom, opts?: RequestOptions & { readonly send?:
         });
         if (opts?.send !== undefined) {
           yield* (yield* DocumentSender).send(row.id, opts.send);
+          // The sender may have written the document (reminder choice, revision).
+          row = yield* repo.get(workspaceId, row.id);
         }
         return yield* viewOf(row);
       }),
@@ -228,6 +232,7 @@ const LIGHT_FIELDS = new Set([
   "due",
   "issuedOn",
   "series",
+  "bankAccount",
 ]);
 
 /** Audited record fields, in diff order (D3: one entry with the field-level diff). */
@@ -288,9 +293,44 @@ const lightEdit = (row: DocumentRecord, patch: DocumentPatch, number: string | n
       ...(patch.variableSymbol === undefined ? {} : { variableSymbol: patch.variableSymbol }),
       ...(patch.due === undefined ? {} : { due: patch.due }),
       ...(patch.issuedOn === undefined ? {} : { issuedOn: patch.issuedOn }),
+      ...(patch.bankAccount === undefined ? {} : { bankAccount: patch.bankAccount }),
     };
     if (given.variableSymbol !== undefined && !/^\d{1,10}$/.test(given.variableSymbol)) {
       return yield* malformed("variableSymbol", "variable_symbol_invalid");
+    }
+    // Another account of the Workspace in the document currency; its particulars as of now.
+    let issuerSnapshot = row.issuer;
+    if (patch.bankAccount !== undefined && patch.bankAccount !== row.issuer.bankAccount?.id) {
+      const workspace = yield* (yield* DocumentIssuers).forDocument(
+        row.workspaceId,
+        row.taxableSupplyOn ?? row.issuedOn,
+      );
+      const account = workspace.bankAccounts.find((a) => a.id === patch.bankAccount);
+      if (account === undefined) {
+        return yield* new NotFound({ entity: "BankAccount", id: patch.bankAccount });
+      }
+      if (account.currency !== row.currency) {
+        return yield* new Invalid({
+          issues: [
+            {
+              path: ["bankAccount"],
+              code: "request.malformed",
+              params: { reason: "currency_mismatch", currency: account.currency },
+            },
+          ],
+        });
+      }
+      issuerSnapshot = {
+        ...row.issuer,
+        bankAccount: {
+          id: account.id,
+          name: account.name,
+          currency: account.currency,
+          accountNumber: account.accountNumber,
+          iban: account.iban,
+          bic: account.bic,
+        },
+      };
     }
     const issuedOn = given.issuedOn ?? row.issuedOn;
     let dueOn = row.dueOn;
@@ -308,6 +348,7 @@ const lightEdit = (row: DocumentRecord, patch: DocumentPatch, number: string | n
     return {
       ...row,
       given,
+      issuer: issuerSnapshot,
       note: patch.note ?? row.note,
       language: patch.language ?? row.language,
       paymentMethod: patch.paymentMethod ?? row.paymentMethod,
@@ -346,8 +387,13 @@ export const editIssued = (row: DocumentRecord, patch: DocumentPatch) =>
       dependents &&
       (patch.lines !== undefined ||
         (patch.currency !== undefined && patch.currency !== row.currency) ||
-        (patch.taxableSupplyOn !== undefined && patch.taxableSupplyOn !== row.taxableSupplyOn))
+        (patch.taxableSupplyOn !== undefined && patch.taxableSupplyOn !== row.taxableSupplyOn) ||
+        patch.fx !== undefined)
     ) {
+      return yield* illegal();
+    }
+    // Recorded payments are in the document currency.
+    if (row.payments > 0 && patch.currency !== undefined && patch.currency !== row.currency) {
       return yield* illegal();
     }
 
@@ -380,6 +426,10 @@ export const editIssued = (row: DocumentRecord, patch: DocumentPatch) =>
                 contact: spec.contactId === row.contactId ? row.contact : undefined,
                 issuer: row.issuer,
                 currency: row.currency,
+                taxableSupplyOn: row.taxableSupplyOn,
+                fx: row.fx,
+                fxOverride: row.fxOverride,
+                paymentRounding: row.paymentRounding,
               },
             }),
       });

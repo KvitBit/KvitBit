@@ -51,6 +51,9 @@
  * - P3 (corrections, final invoice, PTD, stage-2 seams): corrections.ts builds a `CreditSpec`
  *   (credit.ts; enforce D7's per-bucket cap against `remainingBuckets` before
  *   `issueCreditNote`); final.ts builds a `DocumentSpec` with `deducts` lines and runs `compose`;
+ *   `creditNoteRecord` is the pure builder for previewCorrection; `settlementOf` compares
+ *   payments with gross only, so make it credit-aware for partial credits; a Final Invoice
+ *   deducts PTD buckets as stored (never re-derive VAT from a deducted base);
  *   guard every method with `guard(row, action)` (transitions.ts); links go in
  *   `DocumentRecord.links`; payments.ts is the payments seam (lock Proforma first, S2-S4;
  *   write `paidAmount`/`payments`/`settlement`; PTD via VatMath.splitAdvance). Stage-2
@@ -76,6 +79,7 @@ export {
 } from "./compose";
 export type { CreditLine, CreditSpec, IssueCreditNoteInput } from "./credit";
 export {
+  creditNoteRecord,
   digitsOf,
   isFullyCredited,
   issueCreditNote,
@@ -141,6 +145,7 @@ export {
   LIFECYCLE_STATES,
   outcomeOf,
   paymentsBlockCancel,
+  settlementOf,
   stateOf,
   TRANSITIONS,
 } from "./transitions";

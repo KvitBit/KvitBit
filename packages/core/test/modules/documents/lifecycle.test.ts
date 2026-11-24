@@ -25,14 +25,25 @@ import {
   LIFECYCLE_ACTIONS,
   LIFECYCLE_STATES,
   remainderSpec,
-  remainingBuckets,
   TRANSITIONS,
 } from "../../../src/modules/documents";
 import { NumberingSeries } from "../../../src/modules/numbering";
 import { CoreStore } from "../../../src/store/CoreStore";
 import { member, WORKSPACE_A, WORKSPACE_B } from "../../helpers";
 import type { Services } from "./fixtures";
-import { as, CZ_BUYER, contact, dec, invoiceInput, issuer, scenario, str } from "./fixtures";
+import {
+  as,
+  CZ_BUYER,
+  CZK_ACCOUNT,
+  contact,
+  DE_BUYER,
+  dec,
+  EUR,
+  invoiceInput,
+  issuer,
+  scenario,
+  str,
+} from "./fixtures";
 
 const WS = WORKSPACE_A;
 const TODAY = "2026-11-23" as IsoDate;
@@ -748,9 +759,7 @@ describe("Credit Notes", () => {
             ),
           };
           const spec = remainderSpec(original, [partial]);
-          const closed = isFullyCredited(
-            remainingBuckets(original, [partial, { ...original, totals: spec.totals }]),
-          );
+          const closed = isFullyCredited(original, [partial, { ...original, totals: spec.totals }]);
           return [spec, closed] as const;
         }),
       ),
@@ -871,5 +880,102 @@ describe("council follow-ups", () => {
         issues: [{ path: ["on"], code: "request.malformed", params: { reason: "out_of_range" } }],
       }),
     );
+  });
+});
+
+describe("diff council follow-ups", () => {
+  test("recomputing edits keep the frozen buyer, regime and rounding (D10)", async () => {
+    const [reverse, regime] = ok(
+      await run(
+        Effect.gen(function* () {
+          const d = yield* docs;
+          const f = yield* DocumentFixtures;
+          const eu = yield* issueInvoice({
+            contact: DE_BUYER,
+            currency: EUR,
+            fx: { manual: { rate: dec("25"), quantity: 1 } },
+            lines: [{ description: "Služba", unitPrice: dec("100") }],
+          });
+          // The live Contact loses its VAT ID; the issued buyer still has it.
+          yield* f.putContact(WS, contact(DE_BUYER, { country: "DE", dic: null }));
+          const reverse = yield* d.edit(
+            eu.id,
+            { lines: [{ description: "Služba", unitPrice: dec("120") }] },
+            eu.revision,
+          );
+          const cz = yield* issueInvoice();
+          yield* f.putIssuer(issuer(WS, "non_vat_payer", { seriesByKind: {} }));
+          const regime = yield* d.edit(
+            cz.id,
+            { lines: [invoiceInput().lines[0]] as never },
+            cz.revision,
+          );
+          return [reverse, regime] as const;
+        }),
+      ),
+    );
+    expect(reverse.lines.map((l) => (l as unknown as { treatment: string }).treatment)).toEqual([
+      "reverse_charge",
+    ]);
+    expect(str(reverse.totals.gross.amount)).toBe("120");
+    expect(regime.taxDocument).toBe(true);
+    expect(str(regime.totals.vat.amount)).toBe("420");
+  });
+
+  test("a bank account edit keeps the amounts; payments freeze the currency; dependents the rate", async () => {
+    const [account, currency, rate] = ok(
+      await run(
+        Effect.gen(function* () {
+          const d = yield* docs;
+          const repo = yield* DocumentsRepo;
+          const store = yield* CoreStore;
+          const view = yield* issueInvoice();
+          const account = yield* Effect.flip(
+            d.edit(
+              view.id,
+              { bankAccount: "01900000-0000-7000-8000-0000ba000002" as never },
+              view.revision,
+            ),
+          );
+          const same = yield* d.edit(view.id, { bankAccount: CZK_ACCOUNT }, view.revision);
+          const row = yield* repo.get(WS, view.id);
+          const paid = yield* store.transaction(repo.update({ ...row, payments: 1 }, row.revision));
+          const currency = yield* Effect.flip(d.edit(view.id, { currency: EUR }, paid.revision));
+          const proforma = yield* issueProforma();
+          const pRow = yield* repo.get(WS, proforma.id);
+          const paidP = yield* store.transaction(
+            repo.update({ ...pRow, payments: 1 }, pRow.revision),
+          );
+          const rate = yield* Effect.flip(
+            d.edit(
+              proforma.id,
+              { fx: { manual: { rate: dec("25"), quantity: 1 } } },
+              paidP.revision,
+            ),
+          );
+          return [[account, same.revision], currency, rate] as const;
+        }),
+      ),
+    );
+    // The EUR account cannot take a CZK document.
+    expect(account[0]).toMatchObject({ _tag: "Invalid" });
+    expect(account[1]).toBe(2);
+    expect(currency).toEqual(illegal);
+    expect(rate).toEqual(illegal);
+  });
+
+  test("a Credit Note shows the corrected number as at correction time", async () => {
+    const related = ok(
+      await run(
+        Effect.gen(function* () {
+          const d = yield* docs;
+          const view = yield* issueInvoice();
+          const { document, creditNote } = yield* d.cancel(view.id, { reason: "x" });
+          yield* d.edit(view.id, { number: "2026-0500" }, document.revision);
+          return (yield* d.get((creditNote as DocumentView).id)).related;
+        }),
+      ),
+    );
+    expect(related.map((r) => [r.relation, r.number])).toEqual([["corrects", "2026-0001"]]);
   });
 });
