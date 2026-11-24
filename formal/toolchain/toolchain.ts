@@ -46,8 +46,9 @@ export const ensureJar = async (
   env: Record<string, string | undefined> = process.env,
   pin: { version: string; url: string; sha256: string } = pins.tla2tools,
 ): Promise<string> => {
-  const override = env.TLA2TOOLS;
-  if (override) {
+  if (env.TLA2TOOLS) {
+    // Absolute, so the file Java loads (TLC runs in each model's directory) is the one verified.
+    const override = path.resolve(env.TLA2TOOLS);
     if (!existsSync(override)) throw new ToolchainError(`TLA2TOOLS=${override} does not exist.`);
     verify(override, pin.sha256, "TLA2TOOLS");
     return override;

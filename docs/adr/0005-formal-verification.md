@@ -40,11 +40,11 @@ PR CI (`.github/workflows/ci.yml`):
 - `pg-contention`: a Postgres 17 service with two-connection contention tests (`*.contention.test.ts`), run only when numbering, revision CAS, request_log, payments/PTD, outbox claim or ALTCHA replay paths change. It starts as a skeleton that passes with no tests.
 - With Phase 3: production-layer composition and handler checks, PDF content checks, an in-Bun SSR render smoke, and contention tests on HTTP paths.
 
-Nightly plus `workflow_dispatch` (`.github/workflows/nightly.yml`): `verify:formal --wide` with each model's wider bounds and more property seeds, and the Playwright web, Expo, OAuth/provider and Cluster/PgBouncer E2E suites. Until Phase 3 apps exist the E2E jobs are skeletons; each fails once its app directory exists without a wired suite.
+Nightly plus `workflow_dispatch` (`.github/workflows/nightly.yml`): `verify:formal --wide` with each model's wider bounds, and the Playwright web, Expo, OAuth/provider and Cluster/PgBouncer E2E suites. Until Phase 3 apps exist the E2E jobs are skeletons; each fails once its app directory exists without a wired suite. A nightly run of the property tests with more seeds is planned, not wired: `--wide` skips property checks, so it needs its own job once the Tier 1 property tests define a seed setting.
 
 **Release gating: `main` deploys without waiting for E2E.** Filip accepted the exposure: a regression only E2E would catch can reach production between merge and the next nightly (or a manual `workflow_dispatch` run). A red nightly is fixed forward on `main`.
 
-**Budgets** are targets, measured before they are enforced: about 3 minutes for the `formal` job and about 5 extra PR minutes overall. The Wave 1 runner (self-test plus fixtures) takes about 12 seconds locally.
+**Budgets** are targets, measured before they are enforced: about 3 minutes for the `formal` job and about 5 extra PR minutes overall. The Wave 1 runner (self-test plus fixtures) takes about 14 seconds locally.
 
 ## Layout and toolchain
 
@@ -98,9 +98,25 @@ Tier 1, required as each Phase 2 subsystem lands on `main`:
 | Authorization: `can()` ∩ scopes equals the spec matrix; write implies read; a foreign Workspace reads as NotFound | exhaustive enumeration of the real function | the full finite matrix | tenant data leak, privilege escalation |
 | Outbox and recurring: each (schedule, occurrence) issues once; the schedule advances by CAS; the workflow starts after commit with a deterministic key; reconcile recovers after a crash; SMTP is at-least-once | TLC + replay | 2 sweeps, a crash between commit and start, 1 reconcile | missed or duplicated recurring invoices and emails |
 
-Tier 2, with Phase 3: MCP and ALTCHA handler order and single use under real SQL contention; HTTP and MCP precondition mapping; SPAYD 1.2 and EPC069-12 payloads with their null cases; Foldkit TEA `update` totality, keyed-command supersession and sequence guards; HCT/M3 contrast ≥ 4.5:1 across scheme variants; production-layer composition, PDF content and SSR smoke checks.
+Tier 2, with Phase 3. Bounds marked *to measure* are set when the first check is written.
 
-Tier 3, optional or nightly: wider TLC bounds and more property seeds; a justified Lean or Z3 proof such as the chain-wide conservation identity; Cluster and PgBouncer stress runs.
+| Property | Tool | Bound (indicative) | Harm if broken |
+|---|---|---|---|
+| MCP confirm and ALTCHA PoW: consumed before any auth side effect, replay rejected, fail closed | PG17 contention + handler-order checks | 2 concurrent redemptions per token or challenge | replayed confirmations, bot sign-ups past the PoW gate |
+| HTTP and MCP precondition mapping: missing `If-Match` is 428, stale ETag is 412, `Idempotency-Key` replays the stored response | handler checks over the production layer | every precondition case per mutating route | lost updates or duplicate effects through the API |
+| SPAYD 1.2 and EPC069-12 payloads: grammar, field limits, escaping, and no QR for another currency, no IBAN, a Credit Note or a cancelled document | generated inputs + round-trip oracle | *to measure* (seeded inputs per field class, every null case) | payments to the wrong account or amount, unscannable QR codes |
+| Foldkit TEA `update`: total over every Message, keyed commands superseded, late replies ignored by sequence guards | generated message sequences | *to measure* (sequence length and seeds) | stale data shown or saved, UI stuck in a state |
+| HCT/M3 contrast ≥ 4.5:1 | exhaustive over scheme variants × roles | six contrast variants × light and dark × every role pair | unreadable text, an accessibility failure |
+| Production-layer composition, PDF content, SSR render | composition checks, render-model-in/text-out checks, in-Bun SSR smoke | each production layer; each document kind; each SSR route | missing services at runtime, wrong statutory text on PDFs, broken first render |
+
+Tier 3, optional or nightly.
+
+| Property | Tool | Bound (indicative) | Harm if broken |
+|---|---|---|---|
+| Tier 1 models at wider constants | TLC `--wide` (nightly) | the `wideConfig` of each model, *to measure* against the nightly budget | rare interleavings missed by the PR bounds |
+| Tier 1 and 2 property tests with more seeds | property tests (planned nightly job) | *to measure* | rare inputs missed by the PR seeds |
+| Chain-wide conservation identity (net to zero) | Lean 4 or Z3, only if justified | unbounded | VAT or totals that do not reverse exactly |
+| Cluster runner and PgBouncer stress | nightly E2E | *to measure* | stuck or duplicated workflows under production pooling |
 
 ### Hypotheses pending Tier 1 models
 

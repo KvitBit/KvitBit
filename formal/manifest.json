@@ -23,16 +23,26 @@
             "name": "WithinBound"
           },
           "description": "Bound below Limit, so WithinBound must break"
+        },
+        {
+          "name": "frozen-action",
+          "config": "formal/selftest/Counter_mutant_action.cfg",
+          "expect": "violation",
+          "violates": {
+            "kind": "action",
+            "name": "Frozen"
+          },
+          "description": "Claims x never changes, so the action property Frozen must break"
         }
       ],
       "timeoutSeconds": 60,
       "coveredFiles": [
         {
           "path": "formal/selftest/Counter.tla",
-          "sha256": "5318a526f96b707956c18d8479e4d7af665cb24fd9ee422d2d484a9606cfab29"
+          "sha256": "f6dd956979a8fe2b2d07873404e5238e5e9664bd2a3b028850c4c05d821ab385"
         }
       ],
-      "guardedSymbols": ["Counter!WithinBound"],
+      "guardedSymbols": ["Counter!WithinBound", "Counter!Frozen"],
       "bounds": "Limit = 3 (4 distinct states); exhaustive within that bound",
       "assumptions": ["Runner fixture only; covers no product code"],
       "toolVersions": {

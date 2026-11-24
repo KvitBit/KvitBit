@@ -63,8 +63,11 @@ jobs:
     outputs:
       contention: ${{ steps.filter.outputs.contention }}
     steps:
+      # Full history: on push, paths-filter diffs against the previous SHA locally, and
+      # persist-credentials: false leaves it no way to fetch that commit later.
       - uses: actions/checkout@v4
         with:
+          fetch-depth: 0
           persist-credentials: false
       - uses: dorny/paths-filter@v3
         id: filter

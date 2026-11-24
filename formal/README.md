@@ -20,7 +20,7 @@ Exit status: 0 all passed, 1 a check, digest or self-test failed (or the toolcha
 ## Toolchain
 
 - `toolchain/toolchain.json` pins tla2tools 1.7.4 (URL and sha256) and the JDK major version (17, Temurin).
-- `toolchain/toolchain.ts` downloads the jar to `formal/.cache/` (gitignored), verifies the sha256 on every run, and refuses to run TLC on a mismatch. `TLA2TOOLS=/path/to/tla2tools.jar` replaces the download and is checksummed the same way. `FORMAL_JAVA=/path/to/java` replaces `java` on PATH; its major version must still be 17.
+- `toolchain/toolchain.ts` downloads the jar to `formal/.cache/` (gitignored), verifies the sha256 on every run, and refuses to run TLC on a mismatch. `TLA2TOOLS=/path/to/tla2tools.jar` replaces the download; a relative path is resolved against the current directory, then checksummed the same way, and TLC loads that absolute path. `FORMAL_JAVA=/path/to/java` replaces `java` on PATH; its major version must still be 17.
 - JDK 17 for development comes from the root `.mise.toml` (`mise trust && mise install`); CI uses `actions/setup-java` with Temurin 17. A Nix devShell may wrap the same pins later.
 - A toolchain bump changes `toolchain.json`, the manifest's `toolchain`, and every TLC check's `toolVersions.tla2tools` in one maintenance change, after rerunning every check.
 
@@ -47,13 +47,13 @@ Areas so far: `numbering`, `lifecycle`, `idempotency`, `outbox`, plus `selftest`
 - Command: `java -XX:+UseParallelGC -cp <jar> tlc2.TLC -workers 1 -fp 0 -lncheck final -cleanup [-deadlock] -metadir formal/.cache/tlc/<run> -config <cfg> <spec>`, run in the spec's directory so sibling modules resolve.
 - Deadlock is checked by default; set `"deadlock": "allow"` on the check or a mutant to pass `-deadlock` (terminal states that do not stutter).
 - The base (or `wideConfig` under `--wide`) passes only when TLC exits 0, prints `Model checking completed. No error has been found.` and leaves 0 states on the queue.
-- A mutant passes only on a genuine violation: exit 11 with `Deadlock reached`, 12 with `Invariant X is violated` or `Action property X is violated`, 13 with `Temporal properties were violated`, or 14 with `Assert evaluated to FALSE`. With `violates`, the kind and name must match too.
+- A mutant passes only on a genuine violation: exit 11 with `Deadlock reached`, 12 with `Invariant X is violated` or `Action property X is violated`, 13 with `Temporal properties were violated` or `Action property X is violated` (TLC 1.7.4 reports a broken `[][A]_v` property with the liveness exit code), or 14 with `Assert evaluated to FALSE`. With `violates`, the kind and name must match too.
 - Anything else fails the check, base or mutant: parse or semantic errors (exit 150), config errors (151), TLC exceptions (255), unknown flags, a missing marker, or the timeout (`timeoutSeconds`, default 300; the runner kills TLC and reports an incomplete search).
 - Every TLC check ships at least one mutant; the manifest is rejected without one.
 
 ### Replay checks
 
-The runner runs `bun test ./<path>...` from the repo root; exit 0 passes. Harnesses import real code by package name. `formal/tsconfig.json` maps `@kvitbit/*` to package sources, because Bun's isolated linker does not link workspace packages into the root `node_modules`. Bun and `tsc` both read those paths:
+The runner runs `bun test ./<path>` from the repo root, once per harness. A harness passes only with exit 0, at least one passing test, and no skipped or todo tests; an empty or skipped replay checks nothing. Harnesses import real code by package name. `formal/tsconfig.json` maps `@kvitbit/*` to package sources, because Bun's isolated linker does not link workspace packages into the root `node_modules`. Bun and `tsc` both read those paths:
 
 ```ts
 import { expect, test } from "bun:test";
@@ -126,4 +126,4 @@ Add an entry with empty `sha256` strings, then run `bun run verify:formal --upda
 
 ## Runner self-test
 
-`formal/selftest/` holds `Counter.tla` with a passing base and a violating mutant (manifest check `selftest.counter`) and `imports.replay.test.ts` (check `selftest.imports`). `negative/` holds fixtures the runner must report as failures on every default run: a mutant that passes, a base that violates, parse errors in a base and a mutant spec, a config naming an undefined invariant, a mutant breaking a different property than declared, a TLC timeout, and a failing replay harness. The self-test also proves the toolchain fails closed on a wrong checksum, for a `TLA2TOOLS` override and for a download.
+`formal/selftest/` holds `Counter.tla` with a passing base and two mutants, one breaking an invariant and one an action property (manifest check `selftest.counter`), and `imports.replay.test.ts` (check `selftest.imports`). `negative/` holds fixtures the runner must report as failures on every default run: a mutant that passes, a base that violates, parse errors in a base and a mutant spec, a config naming an undefined invariant, a mutant breaking a different property than declared, a TLC timeout, a failing replay harness, a replay that runs no test, and a replay that skips a step. Each case must fail for the reason it provokes, not for an unrelated error in the fixture. The self-test also runs TLC through a relative `TLA2TOOLS` override and proves the toolchain fails closed on a wrong checksum, for a `TLA2TOOLS` override and for a download.

@@ -228,7 +228,8 @@ export type TlcOutcome =
 const VIOLATION_EXIT: Record<number, ViolationKind[]> = {
   11: ["deadlock"],
   12: ["invariant", "action"],
-  13: ["temporal"],
+  // TLC 1.7.4 exits 13 (VIOLATION_LIVENESS) for a violated action property such as [][A]_v.
+  13: ["temporal", "action"],
   14: ["assert"],
 };
 
@@ -446,29 +447,43 @@ export const runTlcCheck = async (
   return { id: check.id, ok, seconds, lines };
 };
 
+/**
+ * Runs each replay harness in its own `bun test` so every file must execute at least one
+ * passing test: an empty or all-skipped harness would otherwise pass while checking nothing.
+ */
 export const runReplayCheck = async (check: Check): Promise<CheckResult> => {
-  const files = (check.replay ?? []).map((f) => `./${path.normalize(f)}`);
-  const res = await run(
-    process.execPath,
-    ["test", ...files],
-    REPO_ROOT,
-    check.timeoutSeconds ?? DEFAULT_TIMEOUT,
-  );
-  const ok = !res.timedOut && res.status === 0;
-  const summary = /^\s*(\d+) pass[\s\S]*?^\s*(\d+) fail/m.exec(res.output);
-  const counts = summary ? `${summary[1]} pass, ${summary[2]} fail` : "no test summary";
-  const lines = [
-    `${ok ? "ok  " : "FAIL"} bun test ${files.join(" ")}: ${res.timedOut ? `timeout after ${check.timeoutSeconds ?? DEFAULT_TIMEOUT}s` : `exit ${res.status}, ${counts}`} (${res.seconds.toFixed(1)}s)`,
-  ];
-  if (!ok)
+  const timeout = check.timeoutSeconds ?? DEFAULT_TIMEOUT;
+  const lines: string[] = [];
+  let ok = true;
+  let seconds = 0;
+  for (const f of check.replay ?? []) {
+    const file = `./${path.normalize(f)}`;
+    const res = await run(process.execPath, ["test", file], REPO_ROOT, timeout);
+    seconds += res.seconds;
+    const count = (word: string) =>
+      Number(new RegExp(`^\\s*(\\d+) ${word}$`, "m").exec(res.output)?.[1] ?? 0);
+    const [pass, fail, skip, todo] = [count("pass"), count("fail"), count("skip"), count("todo")];
+    let why = "";
+    if (res.timedOut) why = `timeout after ${timeout}s`;
+    else if (res.status !== 0) why = `exit ${res.status}`;
+    else if (pass === 0) why = "no test ran (an empty replay checks nothing)";
+    else if (skip + todo > 0)
+      why = `${skip + todo} skipped or todo tests (a replay runs every step)`;
+    const fileOk = why === "";
+    ok &&= fileOk;
     lines.push(
-      ...res.output
-        .trimEnd()
-        .split("\n")
-        .slice(-30)
-        .map((l) => `     | ${l}`),
+      `${fileOk ? "ok  " : "FAIL"} bun test ${file}: ${pass} pass, ${fail} fail, ${skip} skip, ${todo} todo${why ? ` -- ${why}` : ""} (${res.seconds.toFixed(1)}s)`,
     );
-  return { id: check.id, ok, seconds: res.seconds, lines };
+    if (!fileOk)
+      lines.push(
+        ...res.output
+          .trimEnd()
+          .split("\n")
+          .slice(-30)
+          .map((l) => `     | ${l}`),
+      );
+  }
+  return { id: check.id, ok, seconds, lines };
 };
 
 // ---------------------------------------------------------------------------------------------
@@ -538,19 +553,22 @@ export const selftest = async (tools: Pick<Toolchain, "jar" | "java">): Promise<
   const started = performance.now();
   const logDir = path.join(CACHE_DIR, "logs", "selftest");
   const neg = `${SELFTEST}/negative`;
-  const cases: { name: string; check: Check; kind?: "replay" }[] = [
+  const cases: { name: string; reason: RegExp; check: Check; kind?: "replay" }[] = [
     {
       name: "a mutant that passes",
+      reason: /mutant vacuous: passed/,
       check: selftestCheck({
         mutants: [{ name: "vacuous", config: `${neg}/Counter_vacuous.cfg`, expect: "violation" }],
       }),
     },
     {
       name: "a base config that violates",
+      reason: /base .*invariant violation of WithinBound/,
       check: selftestCheck({ config: `${SELFTEST}/Counter_mutant_bound.cfg` }),
     },
     {
       name: "a parse error in the mutant spec",
+      reason: /mutant parse: error: parse or semantic error/,
       check: selftestCheck({
         mutants: [
           {
@@ -564,16 +582,19 @@ export const selftest = async (tools: Pick<Toolchain, "jar" | "java">): Promise<
     },
     {
       name: "a parse error in the base spec",
+      reason: /base .*error: parse or semantic error/,
       check: selftestCheck({ spec: `${neg}/Broken.tla`, config: `${neg}/Broken.cfg` }),
     },
     {
       name: "a config naming an undefined invariant",
+      reason: /mutant config: error: config error/,
       check: selftestCheck({
         mutants: [{ name: "config", config: `${neg}/Counter_undefined.cfg`, expect: "violation" }],
       }),
     },
     {
       name: "a mutant that breaks a different property than declared",
+      reason: /expected invariant of TypeOK/,
       check: selftestCheck({
         mutants: [
           {
@@ -587,6 +608,7 @@ export const selftest = async (tools: Pick<Toolchain, "jar" | "java">): Promise<
     },
     {
       name: "a TLC timeout",
+      reason: /base .*timeout after 3s/,
       check: selftestCheck({
         spec: `${neg}/Slow.tla`,
         config: `${neg}/Slow.cfg`,
@@ -596,8 +618,21 @@ export const selftest = async (tools: Pick<Toolchain, "jar" | "java">): Promise<
     },
     {
       name: "a failing replay harness",
+      reason: /1 fail.* -- exit 1/,
       kind: "replay",
       check: selftestCheck({ kind: "replay", replay: [`${neg}/failing.replay-fixture.ts`] }),
+    },
+    {
+      name: "a replay harness that runs no test",
+      reason: /no test ran/,
+      kind: "replay",
+      check: selftestCheck({ kind: "replay", replay: [`${neg}/skipped-only.replay-fixture.ts`] }),
+    },
+    {
+      name: "a replay harness that skips a step",
+      reason: /skipped or todo/,
+      kind: "replay",
+      check: selftestCheck({ kind: "replay", replay: [`${neg}/partly-skipped.replay-fixture.ts`] }),
     },
   ];
   const lines: string[] = [];
@@ -607,10 +642,13 @@ export const selftest = async (tools: Pick<Toolchain, "jar" | "java">): Promise<
       c.kind === "replay"
         ? await runReplayCheck(c.check)
         : await runTlcCheck(c.check, tools, { wide: false, logDir });
-    const reported = !r.ok;
-    ok &&= reported;
     const detail = r.lines.find((l) => l.startsWith("FAIL"))?.slice(5) ?? "every run passed";
-    lines.push(`${reported ? "ok  " : "FAIL"} reports ${c.name} as a failure: ${detail}`);
+    // The failure must be the one the fixture provokes, not an unrelated error in the fixture.
+    const reported = !r.ok && c.reason.test(detail);
+    ok &&= reported;
+    lines.push(
+      `${reported ? "ok  " : "FAIL"} reports ${c.name} as a failure: ${detail}${reported ? "" : ` -- expected ${c.reason}`}`,
+    );
   }
   // Checksum mismatches fail closed, for an override and for a download.
   const fake = path.join(CACHE_DIR, "selftest-not-a-jar.jar");
@@ -644,6 +682,17 @@ export const selftest = async (tools: Pick<Toolchain, "jar" | "java">): Promise<
     path.join(CACHE_DIR, "tla2tools-selftest.jar"),
   );
   rmSync(fake, { force: true });
+  // A relative override is resolved before it is checksummed, so TLC loads the verified file.
+  const relative = path.relative(process.cwd(), tools.jar);
+  const viaRelative = await runTlcCheck(
+    selftestCheck({ id: "selftest.relative-override" }),
+    { java: tools.java, jar: await ensureJar({ TLA2TOOLS: relative }) },
+    { wide: false, logDir },
+  );
+  ok &&= viaRelative.ok;
+  lines.push(
+    `${viaRelative.ok ? "ok  " : "FAIL"} runs the verified jar from a relative TLA2TOOLS=${relative}${viaRelative.ok ? "" : `: ${viaRelative.lines.join("; ")}`}`,
+  );
   return { id: "runner self-test", ok, seconds: (performance.now() - started) / 1000, lines };
 };
 
