@@ -52,22 +52,3 @@ export const foldText = (text: string): string =>
     .replace(/\p{Diacritic}/gu, "")
     .toLowerCase()
     .trim();
-
-/** A service shape with every method's error channel erased; the rest stays checked. */
-export type ErasedErrors<S> = {
-  readonly [K in keyof S]: S[K] extends (
-    ...args: infer A
-  ) => Effect.Effect<infer X, unknown, infer R>
-    ? (...args: A) => Effect.Effect<X, never, R>
-    : S[K];
-};
-
-/**
- * The one unchecked step between an honest implementation and a frozen domain tag whose
- * signatures omit errors the spec requires: arguments, success values and requirements must
- * still match (`checked` fails to compile otherwise); only the error channels are cast.
- */
-export const asTagService = <Tag, Impl>(
-  impl: Impl,
-  checked: (impl: ErasedErrors<Impl>) => ErasedErrors<Tag>,
-): Tag => checked(impl as unknown as ErasedErrors<Impl>) as unknown as Tag;
