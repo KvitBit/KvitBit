@@ -46,7 +46,7 @@ export class ShareLinksRepo extends Context.Service<
       at: string,
     ) => Effect.Effect<void, NotFound | StoreUnavailable>;
     readonly recordEvent: (event: ShareViewEventRow) => Effect.Effect<void, StoreUnavailable>;
-    /** Whether the link has an event of `kind` by `visitor` at or after `since` (dedup). */
+    /** Whether the link has an event of `kind` by `visitor` strictly after `since` (dedup). */
     readonly hasEventSince: (
       workspaceId: WorkspaceId,
       link: ShareLinkId,
@@ -136,7 +136,7 @@ export const ShareLinksRepoMemory: Layer.Layer<ShareLinksRepo, never, MemoryTabl
         Effect.map(
           views.list(workspaceId, {
             where: { shareLinkId: link, visitorHash: visitor, kind },
-            range: { at: { gte: since } },
+            range: { at: { gt: since } },
             limit: 1,
           }),
           (rows) => rows.length > 0,

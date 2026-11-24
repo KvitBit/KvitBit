@@ -25,7 +25,7 @@ import type { ShareLink, ShareViewEventRow } from "./record";
 import { ShareLinksRepo } from "./repo";
 import { tokenVersion } from "./token";
 
-/** Views by the same visitor within this window count once. */
+/** A view counts again once this long has passed since the visitor's last counted view. */
 export const VIEW_DEDUP_MILLIS = 60 * 60 * 1000;
 
 /** The token is not echoed (it would reach logs); every miss looks the same. */

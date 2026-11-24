@@ -22,6 +22,7 @@ import {
   ShareLinksTestLayer,
   ShareVisitorDevice,
   shareLinkKeysTest,
+  tokenVersion,
 } from "../../../src/modules/sharelinks";
 import { CoreStore } from "../../../src/store/CoreStore";
 import { member, shareVisitor, system, WORKSPACE_A, WORKSPACE_B } from "../../helpers";
@@ -120,6 +121,38 @@ describe("create", () => {
     expect(derived).toBe(token);
     expect(JSON.stringify(link)).not.toContain(token.slice(3));
     expect(link.tokenHash).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  test("token derivation matches an independent HMAC-SHA256 vector (openssl)", async () => {
+    // printf '%s' <id> | openssl dgst -sha256 -hmac test-share-key-v1 -binary | base64url
+    const token = await Effect.runPromise(
+      deriveToken(
+        "01900000-0000-7000-8000-000000000001",
+        1,
+        new TextEncoder().encode("test-share-key-v1"),
+      ),
+    );
+    expect(String(token)).toBe("v1.jkBaEUzhzzYmP6ghkkLPXhDTxy4BILC_6W7A8RaHhDo");
+  });
+
+  test("token versions are non-negative int4 values", () => {
+    const mac = "A".repeat(43);
+    expect(tokenVersion(`v0.${mac}`)).toBe(0);
+    expect(tokenVersion(`v2147483647.${mac}`)).toBe(2_147_483_647);
+    expect(tokenVersion(`v2147483648.${mac}`)).toBeNull();
+    expect(tokenVersion(`v01.${mac}`)).toBeNull();
+    expect(tokenVersion(`v1.${mac}=`)).toBeNull();
+  });
+
+  test("a URL created under a large key version opens (generation and parsing agree)", async () => {
+    const exit = await run(
+      Effect.gen(function* () {
+        const doc = yield* issueInvoice;
+        const token = tokenOf((yield* share(doc.id)).url);
+        return yield* visit(token, open);
+      }).pipe(Effect.provideService(ShareLinkKeys, shareLinkKeysTest(2_147_483_647))),
+    );
+    expect(ok(exit).number).toBe("2026-0001");
   });
 
   test.each(["owner", "admin", "member"] as const)("%s may create", async (role) => {
@@ -300,6 +333,26 @@ describe("open", () => {
     expect(firstPage.items[0]?.at).toBe("2026-11-23T10:01:00.000Z");
     // The first view set viewedAt; later views did not move it.
     expect(link.viewedAt).toBe("2026-11-23T09:00:00.000Z");
+  });
+
+  test("the dedup window is one hour, exclusive: just before counts once, exactly at counts twice", async () => {
+    const page = ok(
+      await run(
+        Effect.gen(function* () {
+          const { doc, token } = yield* shared;
+          yield* visit(token, open); // 09:00:00.000
+          yield* TestClock.adjust("3599999 millis");
+          yield* visit(token, open); // 09:59:59.999: same hour, deduplicated
+          yield* TestClock.adjust("1 millis");
+          yield* visit(token, open); // 10:00:00.000: a new view
+          return yield* views(doc.id);
+        }),
+      ),
+    );
+    expect(page.items.map((e) => e.at)).toEqual([
+      "2026-11-23T10:00:00.000Z",
+      "2026-11-23T09:00:00.000Z",
+    ]);
   });
 
   test("concurrent opens by one visitor record one view", async () => {
