@@ -1025,6 +1025,351 @@
       "toolVersions": {
         "bun": "1.4.2"
       }
+    },
+    {
+      "id": "auth-policy.can",
+      "skill": "verify-auth-policy",
+      "tier": 1,
+      "kind": "exhaustive",
+      "syncCommit": "77a5bb7",
+      "command": "bun test --cwd packages/core ./test/policy/can.property.test.ts ./test/store.test.ts ./test/modules/contacts/contacts.test.ts",
+      "coveredFiles": [
+        {
+          "path": "packages/core/src/policy/can.ts",
+          "sha256": "1c101ab14e9fb1c58465cd1d0287fbd399b1e6b366498f583c3debadf13a0fc1"
+        },
+        {
+          "path": "packages/core/src/policy/table.ts",
+          "sha256": "c79d0a294591c2b67ac17213044f10011a1461c05b161b0b9f6d01f6a644ac44"
+        },
+        {
+          "path": "packages/core/src/policy/Policy.ts",
+          "sha256": "4a81f8d9a318d0499872c3c4df8d582c2473d911b42878f448f5d3f98807ceff"
+        },
+        {
+          "path": "packages/core/src/policy/membership.ts",
+          "sha256": "7535769e4429db6afd81cb8d838467bf1ebcd304396973f3fc9b8b5293f11684"
+        },
+        {
+          "path": "packages/core/src/internal/system.ts",
+          "sha256": "334083f965553dc7930236122db8bb42608be49acdf04a89afd9df4cba4fae26"
+        },
+        {
+          "path": "packages/domain/src/action.ts",
+          "sha256": "e941b7e0cf44c3d9a1e515453f3011630042f9bf141f984b316eb8100def6342"
+        },
+        {
+          "path": "packages/domain/src/scope.ts",
+          "sha256": "c42a40e2e7f4ab181f770c16d73efca3fc213a012e6aa0e25240c0256bb8bd8e"
+        },
+        {
+          "path": "packages/domain/src/caller.ts",
+          "sha256": "ba38f3a8ad1339ac17123b0ed7c60b3bba6e10b1e4fa091a22fe18c27146fac5"
+        },
+        {
+          "path": "packages/domain/src/vocabulary.ts",
+          "sha256": "874a5ac04149ea443ee3adfee546ea3a923e431dcf4dff41a1912b21acf7ab2c"
+        }
+      ],
+      "guardedSymbols": [
+        "can",
+        "scopesAllow",
+        "actionScope",
+        "POLICY",
+        "authorize",
+        "authorizeInWorkspace",
+        "checkMembershipChange",
+        "systemCaller",
+        "isSealedSystem"
+      ],
+      "bounds": "54 Actions x 4 roles x (3^10 normalized grants + session) = 12,754,800 calls; raw two-area lists in 2 orders + all-writes = 311,472; 12 non-Member callers; 44 callers x 54 Actions for Workspace scoping; 36 callers x 25 membership changes; wide (KVITBIT_FORMAL_WIDE=1, nightly): 4^10 raw lists x 4 x 54 = 226,492,416",
+      "assumptions": [
+        "oracle from core-ports.md 2.3 rows 274-287 and http-mcp-contracts.md 1319-1346",
+        "invitation->members and schedule->templates are conventions",
+        "R2 covered by store/Contacts example tests only"
+      ],
+      "toolVersions": {
+        "bun": "1.4.2",
+        "effect": "4.1.4"
+      }
+    },
+    {
+      "id": "money.rounding",
+      "skill": "verify-money-access",
+      "tier": 1,
+      "kind": "exhaustive",
+      "syncCommit": "77a5bb7",
+      "command": "bun test --cwd packages/domain ./test/money.property.test.ts ./test/money.test.ts",
+      "coveredFiles": [
+        {
+          "path": "packages/domain/src/money.ts",
+          "sha256": "30fbe9da53418e545689267d4485ca68161cecd031b6803ab7f77715990d1608"
+        },
+        {
+          "path": "packages/domain/src/vocabulary.ts",
+          "sha256": "874a5ac04149ea443ee3adfee546ea3a923e431dcf4dff41a1912b21acf7ab2c"
+        }
+      ],
+      "guardedSymbols": [
+        "round",
+        "toMinorUnits",
+        "fromMinorUnits",
+        "minorUnitScale",
+        "negate",
+        "add",
+        "subtract",
+        "sum",
+        "compare",
+        "equals",
+        "isZero",
+        "isNegative",
+        "zero",
+        "CurrencyMismatch"
+      ],
+      "bounds": "17,576 codes; 53,280 residue amounts (1-3 dropped digits, scales 0/2/3/4); 3,960 explicit-scale; 5,213 pre-rounded; 10,000 pairs; 5,832 triples; 30 currency pairs",
+      "assumptions": [
+        "BigInt oracle",
+        "ISO 4217 non-2 exponents",
+        "scale-insensitive equality",
+        "multiply and engines roundAt not covered"
+      ],
+      "toolVersions": {
+        "bun": "1.4.2",
+        "effect": "4.1.4"
+      }
+    },
+    {
+      "id": "access.scopes",
+      "skill": "verify-money-access",
+      "tier": 1,
+      "kind": "exhaustive",
+      "syncCommit": "77a5bb7",
+      "command": "bun test --cwd packages/api-contract ./test/access.property.test.ts ./test/access.test.ts",
+      "coveredFiles": [
+        {
+          "path": "packages/api-contract/src/access.ts",
+          "sha256": "3b3f466ec8a382c5881e2dc0e6d5bd9466f98c73e1f416e70b4f783e27c0096f"
+        },
+        {
+          "path": "packages/domain/src/scope.ts",
+          "sha256": "c42a40e2e7f4ab181f770c16d73efca3fc213a012e6aa0e25240c0256bb8bd8e"
+        }
+      ],
+      "guardedSymbols": [
+        "normalizeScopes",
+        "ALL_SCOPES",
+        "READ_SCOPES",
+        "expandAccess",
+        "GrantedAccess",
+        "isGrantedAccessConsistent",
+        "ScopeFromOAuth",
+        "accessFromOAuthScopes",
+        "oauthScopesForGrant",
+        "OAUTH_SCOPES_SUPPORTED"
+      ],
+      "bounds": "normalizeScopes on all 2^20 subsets; 61,094 expand/consistency lists; 16,376 OAuth requests; 59,048 custom-grant round trips",
+      "assumptions": [
+        "canonical order per access.ts and http-mcp-contracts.md:95",
+        "Schema-backed calls on closed sets + half-subsets only"
+      ],
+      "toolVersions": {
+        "bun": "1.4.2",
+        "effect": "4.1.4"
+      }
+    },
+    {
+      "id": "vat.rounding-residue",
+      "skill": "verify-vat-numbering-math",
+      "tier": 1,
+      "kind": "exhaustive",
+      "syncCommit": "77a5bb7",
+      "command": "bun test --cwd packages/core ./test/engines/vat-rounding.property.test.ts",
+      "coveredFiles": [
+        {
+          "path": "packages/core/src/engines/decimal.ts",
+          "sha256": "f52b9c0b112ab1eb8f4926416f9b279d6c21a7b4b708b7793a3534d024ea283e"
+        },
+        {
+          "path": "packages/core/src/engines/vat.ts",
+          "sha256": "d5a4b2d2e39074ef4753119f66bfdf53b847214b5726c5802496c856ed27544c"
+        },
+        {
+          "path": "packages/core/src/engines/fx.ts",
+          "sha256": "80584323cfb7b494a877224736972cabefb8bc4be4787f7255c04cd2b93ac7b4"
+        }
+      ],
+      "guardedSymbols": ["roundAt", "divideRound", "VatMath.calculate", "toCzk"],
+      "bounds": "roundAt: every sub-minor residue at scales 3-7 x cents {0,50,99} x int parts {0,7,123456789012345} x both signs = 1,999,980; bucket VAT every residue mod 100 (bottom-up) and mod 121/112 (top-down), both signs, 2 offsets; toCzk every residue for 3-decimal rates, quantity 1 and 100, both signs",
+      "assumptions": [
+        "rounding independent of integer part beyond the values tried",
+        "scales above 7 behave as 3-7",
+        "CNB quantity 1000 not enumerated"
+      ],
+      "toolVersions": {
+        "bun": "1.4.2",
+        "effect": "4.1.4"
+      }
+    },
+    {
+      "id": "vat.buckets-czk",
+      "skill": "verify-vat-numbering-math",
+      "tier": 1,
+      "kind": "property",
+      "syncCommit": "77a5bb7",
+      "command": "bun test --cwd packages/core ./test/engines/vat-rounding.property.test.ts",
+      "coveredFiles": [
+        {
+          "path": "packages/core/src/engines/vat.ts",
+          "sha256": "d5a4b2d2e39074ef4753119f66bfdf53b847214b5726c5802496c856ed27544c"
+        },
+        {
+          "path": "packages/core/src/engines/fx.ts",
+          "sha256": "80584323cfb7b494a877224736972cabefb8bc4be4787f7255c04cd2b93ac7b4"
+        },
+        {
+          "path": "packages/core/src/engines/decimal.ts",
+          "sha256": "f52b9c0b112ab1eb8f4926416f9b279d6c21a7b4b708b7793a3534d024ea283e"
+        },
+        {
+          "path": "packages/domain/src/vocabulary.ts",
+          "sha256": "874a5ac04149ea443ee3adfee546ea3a923e431dcf4dff41a1912b21acf7ab2c"
+        }
+      ],
+      "guardedSymbols": ["VatMath.calculate", "TREATMENTS", "rateFor", "toCzk"],
+      "bounds": "400 seeded inputs (BigInt oracle) + 400 seeded inputs (CZK residue <= 0.005 per bucket, document <= 0.005 x buckets); 0-10 lines, qty <=3 decimals, price <=4 decimals",
+      "assumptions": ["single VAT rate table entry", "whole-unit rounding sampled only"],
+      "toolVersions": {
+        "bun": "1.4.2",
+        "effect": "4.1.4"
+      }
+    },
+    {
+      "id": "numbering.grammar",
+      "skill": "verify-vat-numbering-math",
+      "tier": 1,
+      "kind": "exhaustive",
+      "syncCommit": "77a5bb7",
+      "command": "bun test --cwd packages/core ./test/engines/numbering.property.test.ts",
+      "coveredFiles": [
+        {
+          "path": "packages/core/src/engines/numbering.ts",
+          "sha256": "b46534ee44fd111a875069a302e411b678f9fe3dce9162c048544bd0b53de228"
+        }
+      ],
+      "guardedSymbols": ["parsePattern", "format"],
+      "bounds": "every string of length 0-6 over {Y,M,N,a,1,-,space} = 137,257 patterns; accepted ones rendered for counters 1, 10, 12345",
+      "assumptions": [
+        "longer patterns, control characters and too-long patterns covered only by the property entry"
+      ],
+      "toolVersions": {
+        "bun": "1.4.2",
+        "effect": "4.1.4"
+      }
+    },
+    {
+      "id": "numbering.format-periods",
+      "skill": "verify-vat-numbering-math",
+      "tier": 1,
+      "kind": "property",
+      "syncCommit": "77a5bb7",
+      "command": "bun test --cwd packages/core ./test/engines/numbering.property.test.ts",
+      "coveredFiles": [
+        {
+          "path": "packages/core/src/engines/numbering.ts",
+          "sha256": "b46534ee44fd111a875069a302e411b678f9fe3dce9162c048544bd0b53de228"
+        },
+        {
+          "path": "packages/core/src/engines/calendar.ts",
+          "sha256": "6ae73baf7bcad4d1a54a99a9041855428b2316b56e75fb7cc49a17d479fc090c"
+        }
+      ],
+      "guardedSymbols": [
+        "format",
+        "periodKey",
+        "fitsLength",
+        "checkNextCounter",
+        "MAX_NUMBER_LENGTH",
+        "MAX_COUNTER"
+      ],
+      "bounds": "2,000 generated patterns vs oracle; 500x20 round-trips; 500x30 same-period injectivity; 500x30 cross-period; boundary table 19/20/21 chars x widths 1-10; years 1900-2199",
+      "assumptions": [
+        "YY-only cross-period collisions harmless because the allocator skips numbers reserved per (workspace, kind)"
+      ],
+      "toolVersions": {
+        "bun": "1.4.2",
+        "effect": "4.1.4"
+      }
+    },
+    {
+      "id": "advance-chain.net-to-zero",
+      "skill": "verify-vat-numbering-math",
+      "tier": 1,
+      "kind": "property",
+      "syncCommit": "77a5bb7",
+      "command": "bun test --cwd packages/core ./test/engines/advance-chain.property.test.ts",
+      "coveredFiles": [
+        {
+          "path": "packages/core/src/engines/vat.ts",
+          "sha256": "d5a4b2d2e39074ef4753119f66bfdf53b847214b5726c5802496c856ed27544c"
+        },
+        {
+          "path": "packages/core/src/engines/fx.ts",
+          "sha256": "80584323cfb7b494a877224736972cabefb8bc4be4787f7255c04cd2b93ac7b4"
+        },
+        {
+          "path": "packages/core/src/modules/documents/final.ts",
+          "sha256": "1c7bddbbb513cb17930d6d0ed9eb325a67d7103cea9bdd8e7cd7bb3800a18531"
+        },
+        {
+          "path": "packages/core/src/modules/documents/credit.ts",
+          "sha256": "4c9758c878908e783ee53ca1776b1ab7f5111243d5174c630a3344e5be0c2d40"
+        },
+        {
+          "path": "packages/core/src/modules/documents/corrections.ts",
+          "sha256": "4689ee06d5e465875b469526dbab760ebea5c34d71d6e24c129732eebdf9917d"
+        },
+        {
+          "path": "packages/core/src/modules/documents/payments.ts",
+          "sha256": "0daa8da5b617412f35d66eb072b6d6d17913076e014140455e76f3e800cfe427"
+        },
+        {
+          "path": "packages/core/src/modules/documents/compose.ts",
+          "sha256": "545885ad5f31ca80cdf2ba21782f6db0e89557d7fb00141a7f17177fd1566f41"
+        },
+        {
+          "path": "packages/core/src/modules/documents/reports.ts",
+          "sha256": "76e5f034d58c7bfbdf7a081612ff6a7a36d0a70d93e4bd8a161a53d7753ac5e6"
+        },
+        {
+          "path": "packages/core/src/modules/reports/compute.ts",
+          "sha256": "74c634ca1106963d8dab6a8803eae50072fd1ef2be3f391b15887cbfeaebd085"
+        }
+      ],
+      "guardedSymbols": [
+        "VatMath.splitAdvance",
+        "VatMath.fromBuckets",
+        "VatMath.negate",
+        "deductionLines",
+        "issueFinalInvoice",
+        "remainderSpec",
+        "deductionBucketsOf",
+        "partialSpec",
+        "creditNoteRecord.fx",
+        "issuePaymentTaxDocument",
+        "mergeBuckets",
+        "reportFigures",
+        "ReportCompute.taxableBucketsCzk"
+      ],
+      "bounds": "120 seeded chains: EUR/CZK, gross or net prices, 1-4 lines, 1-3 partial or full payments on 2026-11-16..23, rising and falling fixings, optional partial credit, full credit 0-2 days later, PTD credits; includes 1 test.failing FINDING (stored FI CZK VAT vs VAT report)",
+      "assumptions": [
+        "vat_payer, CZ_BUYER, paymentRounding none, in-memory layers, TestClock 2026-11-23",
+        "single VAT rate table entry",
+        "no overpayment, patched Final Invoice or manual FX"
+      ],
+      "toolVersions": {
+        "bun": "1.4.2",
+        "effect": "4.1.4"
+      }
     }
   ]
 }
