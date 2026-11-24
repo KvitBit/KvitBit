@@ -33,6 +33,7 @@ import { appendAudit } from "../../shared/audit";
 import { orUnavailable } from "../../shared/errors";
 import { withIdempotency } from "../../shared/idempotency";
 import { IdGenerator } from "../../shared/ids";
+import { NumberingSeries } from "../numbering";
 import { mergeBuckets } from "./compose";
 import type { CreditLine, CreditSpec } from "./credit";
 import {
@@ -48,7 +49,7 @@ import {
 } from "./credit";
 import type { DocumentRecord, LineRecord } from "./record";
 import { DocumentsRepo } from "./repo";
-import { now, viewOf } from "./support";
+import { now, rolledBack, viewOf } from "./support";
 import { guard } from "./transitions";
 import { DocumentViewCodec } from "./view";
 
@@ -348,10 +349,25 @@ export const previewCorrection = (id: DocumentId, input: CorrectionInput) =>
     const { reason, correctedOn, credit } = yield* plan(original, deductedBy, input, today);
     const lines: Array<LineRecord> = [];
     for (const l of credit.lines) lines.push({ ...l, id: (yield* ids.next) as LineRecord["id"] });
+    const cnId = (yield* ids.next) as DocumentId;
+    // D15: allocate from the credit-note series like correct would, then roll it back.
+    yield* rolledBack(
+      Effect.gen(function* () {
+        const numbering = yield* NumberingSeries;
+        const series = yield* numbering.resolve(workspaceId, "credit_note");
+        yield* numbering.allocate({
+          workspaceId,
+          kind: "credit_note",
+          seriesId: series.id,
+          documentId: cnId,
+          issuedOn: today,
+        });
+      }),
+    );
     const record = creditNoteRecord(
       original,
       { reason, issuedOn: today, correctedOn, credit },
-      { id: (yield* ids.next) as DocumentId, number: null, seriesId: null, lines, at },
+      { id: cnId, number: null, seriesId: null, lines, at },
     );
     return yield* viewOf({ ...record, status: "draft", issuedAt: null });
   }).pipe(orUnavailable) satisfies Effect.Effect<DocumentView, unknown, unknown>;

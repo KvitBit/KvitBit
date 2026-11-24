@@ -32,7 +32,7 @@ import { ExchangeRates, type RatesUnavailable } from "@kvitbit/domain/ports";
 import { BigDecimal, Context, Effect, Layer, Result } from "effect";
 import { ZERO } from "../../engines/decimal";
 import { Fx } from "../../engines/fx";
-import { VatMath } from "../../engines/vat";
+import { VAT_RATE_TABLE, VatMath } from "../../engines/vat";
 import { appendAudit } from "../../shared/audit";
 import { IdGenerator, newId } from "../../shared/ids";
 import type { CoreStore, StoreUnavailable } from "../../store/CoreStore";
@@ -180,8 +180,11 @@ export const payableOf = (
     credited: money(BigDecimal.subtract(row.totals.gross.amount, owed), row.currency),
     owed: money(owed, row.currency),
     paid: money(row.paidAmount, row.currency),
+    // Cash owed back lives on the paid document (user-flows 3.9), never on a Credit Note's
+    // negative face value or a PTD.
     refundDue: money(
-      BigDecimal.isGreaterThan(row.paidAmount, owed)
+      (row.kind === "invoice" || row.kind === "proforma") &&
+        BigDecimal.isGreaterThan(row.paidAmount, owed)
         ? BigDecimal.subtract(row.paidAmount, owed)
         : ZERO,
       row.currency,
@@ -376,6 +379,10 @@ const issuePaymentTaxDocument = (
       return yield* new Conflict({ reason: "illegal_transition" });
     }
     if (!BigDecimal.isPositive(payment.amount)) return yield* malformed("amount", "out_of_range");
+    // The VAT rate table starts at its first entry; an earlier tax point has no rates.
+    if (payment.paidOn < (VAT_RATE_TABLE[0]?.from ?? payment.paidOn)) {
+      return yield* malformed("paidOn", "out_of_range");
+    }
     const issuer = yield* (yield* DocumentIssuers).forDocument(workspaceId, payment.paidOn);
     if (issuer.regime !== "vat_payer") return null;
     // splitAdvance divides by the buckets' gross (not the rounded total).

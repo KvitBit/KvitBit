@@ -743,7 +743,11 @@ export const compose = (
       totals,
       fx,
       fxOverride: spec.fxOverride,
-      taxDocument: isTaxDocument(kind, regime, supplyTreatments),
+      // D6: deducted advance VAT makes an identified_person document carry VAT too.
+      taxDocument: isTaxDocument(kind, regime, [
+        ...supplyTreatments,
+        ...deductions.filter((d) => !BigDecimal.isZero(d.vat)).map((d) => d.treatment),
+      ]),
       paymentRounding,
     };
   });

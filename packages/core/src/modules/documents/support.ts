@@ -1,9 +1,9 @@
 /** Helpers shared by the Documents method files. */
 import type { DocumentId, DocumentView, IsoDate, WorkspaceId } from "@kvitbit/domain/contract";
-import { Clock, Effect } from "effect";
+import { Clock, Data, Effect } from "effect";
 import { pragueDate } from "../../engines/calendar";
 import { ZERO } from "../../engines/decimal";
-import type { StoreUnavailable } from "../../store/CoreStore";
+import { CoreStore, type StoreUnavailable } from "../../store/CoreStore";
 import type { Composed } from "./compose";
 import type { DocumentRecord } from "./record";
 import { DocumentsRepo } from "./repo";
@@ -78,3 +78,16 @@ export const viewOf = (
     const related = yield* relatedOf(row);
     return toView(row, { ...extra, today, related });
   });
+
+class PreviewRollback extends Data.TaggedError("PreviewRollback")<{}> {}
+
+/**
+ * Runs `effect` (e.g. a number allocation) in a nested transaction that is always rolled back:
+ * a dry run fails exactly where the real call would (rule D15) and stores nothing.
+ */
+export const rolledBack = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
+  Effect.flatMap(CoreStore, (store) =>
+    store
+      .transaction(Effect.andThen(effect, Effect.fail(new PreviewRollback())))
+      .pipe(Effect.catchTag("PreviewRollback", () => Effect.void)),
+  );

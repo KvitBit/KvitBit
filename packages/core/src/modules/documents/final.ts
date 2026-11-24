@@ -36,7 +36,7 @@ import { remainingBuckets } from "./credit";
 import { numbered } from "./lifecycle";
 import type { DocumentRecord, LinkRecord } from "./record";
 import { DocumentsRepo } from "./repo";
-import { newDraftRecord, now, viewOf } from "./support";
+import { newDraftRecord, now, rolledBack, viewOf } from "./support";
 import { guard, hasFinalInvoice } from "./transitions";
 import { DocumentViewCodec } from "./view";
 
@@ -268,7 +268,10 @@ export const previewFinalInvoice = (
         const proforma = yield* repo.get(workspaceId, proformaId);
         const spec = yield* plan(proforma, input?.patch, false);
         const composed = yield* compose(workspaceId, spec, { today });
-        const row = newDraftRecord(yield* newId<DocumentId>(), workspaceId, composed, at);
+        const id = yield* newId<DocumentId>();
+        // D15: fails like issue would (series exhausted), then rolls the allocation back.
+        yield* rolledBack(numbered(workspaceId, id, composed));
+        const row = newDraftRecord(id, workspaceId, composed, at);
         return yield* viewOf(withSettlement({ ...row, links: finalLinks(proforma, spec) }));
       }),
     );

@@ -1073,6 +1073,191 @@ describe("diff council follow-ups", () => {
   });
 });
 
+describe("review round 1 follow-ups", () => {
+  const exhaust = (kind: "invoice" | "credit_note") =>
+    Effect.flatMap(CoreStore, (store) =>
+      Effect.flatMap(NumberingSeries, (n) =>
+        store.transaction(
+          n.configure(
+            WS,
+            {
+              kind,
+              name: "Krátká",
+              pattern: `${"A".repeat(18)}-N`,
+              nextNumber: 9,
+              isDefault: true,
+            },
+            TODAY,
+          ),
+        ),
+      ),
+    );
+  const exhausted = new Conflict({
+    reason: "illegal_transition",
+    detail: "numbering.pattern_invalid",
+  });
+
+  test("previews fail like issuing would on an exhausted series, and store nothing", async () => {
+    const [finalPreview, finalIssue, creditPreview, creditIssue] = ok(
+      await run(
+        Effect.gen(function* () {
+          const d = yield* docs;
+          yield* exhaust("invoice");
+          yield* exhaust("credit_note");
+          const first = yield* issueInvoice();
+          yield* d.correct(first.id, { reason: "x", lines: [{ line: lineOf(first, 1) }] });
+          const p = yield* issueProforma();
+          yield* pay(p.id, "100");
+          return [
+            yield* Effect.flip(d.previewFinalInvoice(p.id)),
+            yield* Effect.flip(d.issueFinalInvoice(p.id)),
+            yield* Effect.flip(
+              d.previewCorrection(first.id, { reason: "x", lines: [{ line: lineOf(first, 0) }] }),
+            ),
+            yield* Effect.flip(
+              d.correct(first.id, { reason: "x", lines: [{ line: lineOf(first, 0) }] }),
+            ),
+          ];
+        }),
+      ),
+    );
+    expect([finalPreview, finalIssue, creditPreview, creditIssue]).toEqual([
+      exhausted,
+      exhausted,
+      exhausted,
+      exhausted,
+    ]);
+  });
+
+  test("a preview's allocation is rolled back: the real call gets the same number", async () => {
+    const [preview, issued] = ok(
+      await run(
+        Effect.gen(function* () {
+          const d = yield* docs;
+          const inv = yield* issueInvoice();
+          const p = yield* issueProforma();
+          yield* pay(p.id, "100");
+          yield* d.previewFinalInvoice(p.id);
+          yield* d.previewCorrection(inv.id, { reason: "x", lines: "full" });
+          return [
+            (yield* d.issueFinalInvoice(p.id)).number,
+            (yield* d.correct(inv.id, { reason: "x", lines: "full" })).number,
+          ] as const;
+        }),
+      ),
+    );
+    expect([preview, issued]).toEqual(["2026-0002", "OD-2026-0001"]);
+  });
+
+  test("deducted advance VAT makes an identified_person Final Invoice a tax document (cancel credits it)", async () => {
+    const [fi, cancelled] = ok(
+      await run(
+        Effect.gen(function* () {
+          const d = yield* docs;
+          const f = yield* DocumentFixtures;
+          const p = yield* issueProforma({
+            lines: [{ description: "Práce", unitPrice: dec("100") }],
+          });
+          yield* pay(p.id, "121");
+          yield* f.putIssuer(issuer(WS, "identified_person", { seriesByKind: {} }));
+          const fi = yield* d.issueFinalInvoice(p.id, {
+            patch: {
+              lines: [{ description: "Práce", unitPrice: dec("200"), vat: "outside_scope" }],
+            },
+          });
+          return [fi, yield* d.cancel(fi.id, { reason: "chyba" })] as const;
+        }),
+      ),
+    );
+    expect(str(fi.totals.vat.amount)).toBe("-21");
+    expect(fi.taxDocument).toBe(true);
+    expect(cancelled.creditNote?.kind).toBe("credit_note");
+    expect(cancelled.document.settlement).toBe("credited");
+  });
+
+  test("refundDue is on the paid document, never on a Credit Note", async () => {
+    const [invoice, creditNote] = ok(
+      await run(
+        Effect.gen(function* () {
+          const d = yield* docs;
+          const store = yield* CoreStore;
+          const seam = yield* DocumentPayments;
+          const inv = yield* issueInvoice();
+          yield* pay(inv.id, "2980");
+          const cn = yield* d.correct(inv.id, { reason: "x", lines: [{ line: lineOf(inv, 1) }] });
+          return [
+            (yield* store.transaction(seam.lock(WS, inv.id))).requested,
+            (yield* store.transaction(seam.lock(WS, cn.id))).requested,
+          ] as const;
+        }),
+      ),
+    );
+    expect(str(invoice.refundDue.amount)).toBe("560");
+    expect(str(creditNote.refundDue.amount)).toBe("0");
+  });
+
+  test("a receipt before the VAT rate table is Invalid on paidOn", async () => {
+    const error = ok(
+      await run(
+        Effect.gen(function* () {
+          const store = yield* CoreStore;
+          const seam = yield* DocumentPayments;
+          const p = yield* issueProforma();
+          return yield* Effect.flip(
+            store.transaction(
+              seam.issuePaymentTaxDocument(WS, p.id, {
+                amount: dec("100"),
+                paidOn: "2023-12-31" as IsoDate,
+              }),
+            ),
+          );
+        }),
+      ),
+    );
+    expect(error).toEqual(malformed(["paidOn"], "out_of_range"));
+  });
+
+  test("a failed caller transaction rolls back the settlement, the PTD, its number and audit", async () => {
+    const [before, after, historyBefore, historyAfter, next] = ok(
+      await run(
+        Effect.gen(function* () {
+          const d = yield* docs;
+          const store = yield* CoreStore;
+          const seam = yield* DocumentPayments;
+          const p = yield* issueProforma();
+          const before = yield* d.get(p.id);
+          const historyBefore = yield* d.history(p.id);
+          yield* Effect.flip(
+            store.transaction(
+              Effect.gen(function* () {
+                yield* seam.lock(WS, p.id);
+                yield* seam.settle(
+                  WS,
+                  p.id,
+                  { amount: dec("100"), payments: 1 },
+                  { action: "payment.record" },
+                );
+                yield* seam.issuePaymentTaxDocument(WS, p.id, {
+                  amount: dec("100"),
+                  paidOn: TODAY,
+                });
+                return yield* Effect.fail("payment insert failed" as const);
+              }),
+            ),
+          );
+          const after = yield* d.get(p.id);
+          const historyAfter = yield* d.history(p.id);
+          const next = (yield* pay(p.id, "100")).ptd as DocumentView;
+          return [before, after, historyBefore, historyAfter, next] as const;
+        }),
+      ),
+    );
+    expect(json(after)).toEqual(json(before));
+    expect(historyAfter).toEqual(historyBefore);
+    expect(next.number).toBe("DD-2026-0001");
+  });
+});
+
 // Authorization, scoping, delivery reads ----------------------------------------------------
 
 describe("authorization and scoping", () => {
