@@ -14,13 +14,14 @@
  * - a Credit Note keeps the Final Invoice's FX (rate, quantity, fixing date) and VAT rates,
  *   even when issued on a later day with a different CNB fixing.
  */
-import { describe, expect, test } from "bun:test";
+import { beforeAll, describe, expect, test } from "bun:test";
 import type { DocumentId, DocumentView, IsoDate, LineId } from "@kvitbit/domain/contract";
 import { Documents } from "@kvitbit/domain/contract";
 import { BigDecimal, Effect, Exit } from "effect";
 import { TestClock } from "effect/testing";
 import { DocumentPayments } from "../../src/modules/documents";
 import { NumberingSeries } from "../../src/modules/numbering";
+import { ReportCompute } from "../../src/modules/reports";
 import { CoreStore } from "../../src/store/CoreStore";
 import { WORKSPACE_A } from "../helpers";
 import { CZK, EUR, fixing, invoiceInput, scenario } from "../modules/documents/fixtures";
@@ -29,7 +30,8 @@ import { rng } from "./random";
 const WS = WORKSPACE_A;
 /** TestClock start (runTest): 2026-11-23. Fixings differ every day around it. */
 const FIXINGS = Array.from({ length: 10 }, (_, i) =>
-  fixing(`2026-11-${String(16 + i).padStart(2, "0")}`, `24.${String(100 + i * 37)}`),
+  // Rates rise and fall from day to day (i x 437 mod 900 is distinct and not monotonic).
+  fixing(`2026-11-${String(16 + i).padStart(2, "0")}`, `24.${String(100 + ((i * 437) % 900))}`),
 );
 /** The fixture's EUR rate published on `day` (every day has its own fixing). */
 const fixtureRate = (day: string) => {
@@ -208,14 +210,75 @@ const chain = (seed: number) => {
     const ptdCredits: Array<DocumentView> = [];
     for (const ptd of ptds)
       ptdCredits.push(yield* docs.correct(ptd.id, { reason: "storno zálohy", lines: "full" }));
-    return { currency, pricesIncludeVat, days, proforma, ptds, fi, credits, ptdCredits };
+    return {
+      seed,
+      currency,
+      pricesIncludeVat,
+      days,
+      parts,
+      proforma,
+      ptds,
+      fi,
+      credits,
+      ptdCredits,
+    };
   });
 };
 
 const CHAINS = 120;
+type Chain = Effect.Success<ReturnType<typeof chain>>;
+const chains: Array<Chain> = [];
+
+beforeAll(async () => {
+  for (let i = 0; i < CHAINS; i++) {
+    const seed = 0xc4a1 + i * 7919;
+    const exit = await scenario(chain(seed), {
+      fixings: FIXINGS,
+      billingA: { seriesByKind: {} },
+    });
+    // Not harness drift by default: a service refusing a valid chain is a product regression too.
+    if (Exit.isFailure(exit))
+      throw new Error(`seed=${seed}: chain failed: ${JSON.stringify(exit.cause)}`);
+    chains.push(exit.value);
+  }
+}, 30_000);
+
+const eachChain = (body: (c: Chain) => void) => {
+  for (const c of chains) {
+    try {
+      body(c);
+    } catch (e) {
+      throw new Error(`seed=${c.seed}: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+};
+
+/**
+ * Independent `splitAdvance` oracle (largest remainder, VatMath header): each bucket gets
+ * floor(paid x gross / total) minor units, leftovers go to the largest remainders (ties: bucket
+ * order); VAT within a share is top-down at the bucket rate.
+ */
+const splitOracle = (proforma: DocumentView, paid: bigint) => {
+  const gross = proforma.totals.buckets.map((b) => units(b.gross, 2));
+  const total = gross.reduce((a, g) => a + g, 0n);
+  const raw = gross.map((g, i) => ({ i, floor: (paid * g) / total, rem: (paid * g) % total }));
+  let left = paid - raw.reduce((a, r) => a + r.floor, 0n);
+  const shares = raw.map((r) => r.floor);
+  for (const r of [...raw].sort((a, b) => (a.rem === b.rem ? a.i - b.i : a.rem > b.rem ? -1 : 1))) {
+    if (left <= 0n) break;
+    shares[r.i] = (shares[r.i] ?? 0n) + 1n;
+    left--;
+  }
+  return proforma.totals.buckets.map((b, i) => {
+    const share = shares[i] ?? 0n;
+    const rate = units(b.ratePercent, 0);
+    const vat = rate === 0n ? 0n : roundHalf(share * rate, 100n + rate);
+    return { key: keyOf(b), gross: share, vat, base: share - vat };
+  });
+};
 
 describe("advance chain net-to-zero (property: seeded, 120 chains)", () => {
-  test("per VAT bucket: exact in document currency, CZK residue <= 0.005, Credit Notes keep the Final Invoice FX and rates", async () => {
+  test("the generator reaches every chain shape", () => {
     const seen = {
       foreign: 0,
       multiplePtds: 0,
@@ -224,118 +287,178 @@ describe("advance chain net-to-zero (property: seeded, 120 chains)", () => {
       laterDay: 0,
       topDown: 0,
       bothRates: 0,
+      ptdRateAboveFi: 0,
+      ptdRateBelowFi: 0,
     };
-    for (let i = 0; i < CHAINS; i++) {
-      const seed = 0xc4a1 + i * 7919;
-      const exit = await scenario(chain(seed), {
-        fixings: FIXINGS,
-        billingA: { seriesByKind: {} },
-      });
-      if (Exit.isFailure(exit))
-        throw new Error(`seed=${seed}: chain failed: ${JSON.stringify(exit.cause)}`);
-      const { currency, pricesIncludeVat, days, proforma, ptds, fi, credits, ptdCredits } =
-        exit.value;
-      if (currency !== "CZK") seen.foreign++;
-      if (ptds.length > 1) seen.multiplePtds++;
-      if (!BigDecimal.isZero(fi.totals.gross.amount)) seen.partlyPaid++;
-      if (credits.length > 1) seen.partialCredit++;
-      if (credits.some((c) => c.dates.issuedOn > fi.dates.issuedOn)) seen.laterDay++;
-      if (pricesIncludeVat) seen.topDown++;
-      if (proforma.totals.buckets.length > 1) seen.bothRates++;
-      try {
-        // Proforma = PTDs + Final Invoice, exactly, per bucket (document currency).
-        expectZero(
-          "Proforma - PTDs - Final Invoice",
-          sub(bucketsOf(proforma), bucketsOf(...ptds, fi)),
-          false,
-        );
-        // Final Invoice + its Credit Notes; each PTD + its Credit Note (CZK VAT too).
-        expectZero("Final Invoice + Credit Notes", bucketsOf(fi, ...credits));
-        for (const [j, ptd] of ptds.entries()) {
-          const cn = ptdCredits[j];
-          if (cn === undefined) throw new Error("missing PTD credit");
-          expectZero(`PTD ${ptd.number} + Credit Note`, bucketsOf(ptd, cn));
-          sameFx(`PTD ${ptd.number} Credit Note`, cn.fx, ptd.fx);
-        }
-        expectZero("whole chain", bucketsOf(...ptds, fi, ...credits, ...ptdCredits));
-        for (const cn of credits) {
-          sameFx(`Credit Note ${cn.number}`, cn.fx, fi.fx);
-          const fiRates = new Map(
-            fi.totals.buckets.map((b) => [b.treatment, BigDecimal.format(b.ratePercent)]),
-          );
-          for (const b of cn.totals.buckets) {
-            if (fiRates.get(b.treatment) !== BigDecimal.format(b.ratePercent)) {
-              throw new Error(
-                `Credit Note ${cn.number} ${b.treatment} rate differs from the Final Invoice`,
-              );
-            }
-          }
-        }
-        if (currency !== "CZK") {
-          const fiFx = fi.fx;
-          if (fiFx === null) throw new Error("foreign Final Invoice without fx");
-          // The Final Invoice and each PTD use the fixing of their own tax point, taken from the
-          // fixture (not from the service's answer), and convert per bucket at it.
-          sameFx("Final Invoice", fiFx, {
-            rate: fixtureRate("2026-11-23"),
-            quantity: 1,
-            fixingDate: "2026-11-23" as IsoDate,
-            source: "cnb",
-          });
-          for (const [j, ptd] of ptds.entries()) {
-            const day = days[j] as IsoDate;
-            const expectedFx = {
-              rate: fixtureRate(day),
-              quantity: 1,
-              fixingDate: day,
-              source: "cnb" as const,
-            };
-            sameFx(`PTD ${ptd.number} (received ${day})`, ptd.fx, expectedFx);
-            for (const b of ptd.totals.buckets) {
-              const want = czkOf(units(b.vat, 2), expectedFx);
-              if (b.vatCzk === null || units(b.vatCzk, 2) !== want) {
-                throw new Error(
-                  `PTD ${ptd.number} ${b.treatment} vatCzk ${b.vatCzk && BigDecimal.format(b.vatCzk)}, want ${fmt(want)} at the ${day} fixing`,
-                );
-              }
-            }
-          }
-          // Partial Credit Notes convert at the Final Invoice rate.
-          for (const cn of credits.slice(0, -1)) {
-            for (const b of cn.totals.buckets) {
-              const want = czkOf(units(b.vat, 2), fiFx);
-              if (b.vatCzk === null || units(b.vatCzk, 2) !== want) {
-                throw new Error(
-                  `partial Credit Note ${b.treatment} vatCzk ${b.vatCzk && BigDecimal.format(b.vatCzk)}, want ${fmt(want)} at the Final Invoice rate`,
-                );
-              }
-            }
-          }
-          // Declared CZK VAT (PTDs + Final Invoice) per bucket = round2(Proforma VAT x the Final
-          // Invoice rate), so within 0.005 CZK of exact.
-          const declared = bucketsOf(...ptds, fi);
-          const d = 1000n * BigInt(fiFx.quantity);
-          for (const b of proforma.totals.buckets) {
-            const got = declared.get(keyOf(b))?.vatCzk ?? 0n;
-            const vat = units(b.vat, 2);
-            if (got !== czkOf(vat, fiFx)) {
-              throw new Error(
-                `${keyOf(b)} declared CZK VAT ${fmt(got)}, want ${fmt(czkOf(vat, fiFx))}`,
-              );
-            }
-            const err = got * d - vat * units(fiFx.rate, 3);
-            if (2n * (err < 0n ? -err : err) > d)
-              throw new Error(`${keyOf(b)} CZK residue above 0.005`);
-          }
-        }
-      } catch (e) {
-        throw new Error(`seed=${seed}: ${e instanceof Error ? e.message : String(e)}`);
-      }
+    // Final Invoice buckets left negative by per-PTD rounding (the
+    // negative case of §37a). The net-to-zero properties cover them; their CZK VAT is part of
+    // the FINDING below.
+    let negativeFiBuckets = 0;
+    const fiRate = Number(BigDecimal.format(fixtureRate("2026-11-23")));
+    for (const c of chains) {
+      if (c.currency !== "CZK") seen.foreign++;
+      if (c.ptds.length > 1) seen.multiplePtds++;
+      if (!BigDecimal.isZero(c.fi.totals.gross.amount)) seen.partlyPaid++;
+      if (c.credits.length > 1) seen.partialCredit++;
+      if (c.credits.some((cn) => cn.dates.issuedOn > c.fi.dates.issuedOn)) seen.laterDay++;
+      if (c.pricesIncludeVat) seen.topDown++;
+      if (c.proforma.totals.buckets.length > 1) seen.bothRates++;
+      const ptdRates = c.days.map((d) => Number(BigDecimal.format(fixtureRate(d))));
+      if (c.currency !== "CZK" && ptdRates.some((r) => r > fiRate)) seen.ptdRateAboveFi++;
+      if (c.currency !== "CZK" && ptdRates.some((r) => r < fiRate)) seen.ptdRateBelowFi++;
+      negativeFiBuckets += c.fi.totals.buckets.filter(
+        (b) => BigDecimal.isNegative(b.base) || BigDecimal.isNegative(b.vat),
+      ).length;
     }
-    // The generator reaches every shape the properties are about.
     for (const [shape, count] of Object.entries(seen))
       expect([shape, count > 5]).toEqual([shape, true]);
-  }, 30_000);
+    // The negative case is reached too (12 buckets at these seeds).
+    expect(negativeFiBuckets).toBeGreaterThan(0);
+  });
+
+  test("document currency, exact per bucket: Proforma = PTDs + Final Invoice; every credit nets to zero", () => {
+    eachChain(({ proforma, ptds, fi, credits, ptdCredits }) => {
+      expectZero(
+        "Proforma - PTDs - Final Invoice",
+        sub(bucketsOf(proforma), bucketsOf(...ptds, fi)),
+        false,
+      );
+      expectZero("Final Invoice + Credit Notes", bucketsOf(fi, ...credits));
+      for (const [j, ptd] of ptds.entries()) {
+        const cn = ptdCredits[j];
+        if (cn === undefined) throw new Error("missing PTD credit");
+        expectZero(`PTD ${ptd.number} + Credit Note`, bucketsOf(ptd, cn));
+        sameFx(`PTD ${ptd.number} Credit Note`, cn.fx, ptd.fx);
+      }
+      expectZero("whole chain", bucketsOf(...ptds, fi, ...credits, ...ptdCredits));
+    });
+  });
+
+  test("each PTD splits its payment like the largest-remainder oracle, VAT top-down per share", () => {
+    eachChain(({ proforma, ptds, parts }) => {
+      for (const [j, ptd] of ptds.entries()) {
+        const want = splitOracle(proforma, parts[j] ?? 0n);
+        const got = bucketsOf(ptd);
+        for (const w of want) {
+          const g = got.get(w.key) ?? { base: 0n, vat: 0n, gross: 0n, vatCzk: 0n };
+          if (g.gross !== w.gross || g.vat !== w.vat || g.base !== w.base) {
+            throw new Error(
+              `PTD ${ptd.number} ${w.key}: gross/vat/base ${fmt(g.gross)}/${fmt(g.vat)}/${fmt(g.base)}, oracle ${fmt(w.gross)}/${fmt(w.vat)}/${fmt(w.base)}`,
+            );
+          }
+        }
+      }
+    });
+  });
+
+  test("FX: PTDs and the Final Invoice use their own day's fixing; Credit Notes keep the original FX and rates", () => {
+    eachChain(({ currency, days, ptds, fi, credits }) => {
+      for (const cn of credits) {
+        sameFx(`Credit Note ${cn.number}`, cn.fx, fi.fx);
+        const fiRates = new Map(
+          fi.totals.buckets.map((b) => [b.treatment, BigDecimal.format(b.ratePercent)]),
+        );
+        for (const b of cn.totals.buckets) {
+          if (fiRates.get(b.treatment) !== BigDecimal.format(b.ratePercent)) {
+            throw new Error(
+              `Credit Note ${cn.number} ${b.treatment} rate differs from the Final Invoice`,
+            );
+          }
+        }
+      }
+      if (currency === "CZK") return;
+      const fiFx = fi.fx;
+      if (fiFx === null) throw new Error("foreign Final Invoice without fx");
+      // Expected fixings come from the fixture, not from the service's answer.
+      sameFx("Final Invoice", fiFx, {
+        rate: fixtureRate("2026-11-23"),
+        quantity: 1,
+        fixingDate: "2026-11-23" as IsoDate,
+        source: "cnb",
+      });
+      for (const [j, ptd] of ptds.entries()) {
+        const day = days[j] as IsoDate;
+        const expectedFx = {
+          rate: fixtureRate(day),
+          quantity: 1,
+          fixingDate: day,
+          source: "cnb" as const,
+        };
+        sameFx(`PTD ${ptd.number} (received ${day})`, ptd.fx, expectedFx);
+        for (const b of ptd.totals.buckets) {
+          const want = czkOf(units(b.vat, 2), expectedFx);
+          if (b.vatCzk === null || units(b.vatCzk, 2) !== want) {
+            throw new Error(
+              `PTD ${ptd.number} ${b.treatment} vatCzk ${b.vatCzk && BigDecimal.format(b.vatCzk)}, want ${fmt(want)} at the ${day} fixing`,
+            );
+          }
+        }
+      }
+      // Partial Credit Notes convert at the Final Invoice rate.
+      for (const cn of credits.slice(0, -1)) {
+        for (const b of cn.totals.buckets) {
+          const want = czkOf(units(b.vat, 2), fiFx);
+          if (b.vatCzk === null || units(b.vatCzk, 2) !== want) {
+            throw new Error(
+              `partial Credit Note ${b.treatment} vatCzk ${b.vatCzk && BigDecimal.format(b.vatCzk)}, want ${fmt(want)} at the Final Invoice rate`,
+            );
+          }
+        }
+      }
+    });
+  });
+
+  test("D8 as composed today: PTD CZK VAT + Final Invoice CZK VAT = round2(Proforma VAT x the Final Invoice rate)", () => {
+    // compose.ts adds the PTDs' stored CZK VAT to the full supply's conversion. This pins the
+    // current composition; see the FINDING test below for the per-bucket rule it departs from.
+    eachChain(({ currency, proforma, ptds, fi }) => {
+      if (currency === "CZK" || fi.fx === null) return;
+      const declared = bucketsOf(...ptds, fi);
+      for (const b of proforma.totals.buckets) {
+        const got = declared.get(keyOf(b))?.vatCzk ?? 0n;
+        const want = czkOf(units(b.vat, 2), fi.fx);
+        if (got !== want)
+          throw new Error(`${keyOf(b)} declared CZK VAT ${fmt(got)}, want ${fmt(want)}`);
+      }
+    });
+  });
+
+  /**
+   * FINDING (reported, not fixed: product code is out of scope). The Final Invoice document and
+   * the VAT report disagree on its CZK VAT. compose.ts (totals step, D8) stores per bucket
+   * round2(supply VAT x FI rate) - sum(PTD CZK VAT at the PTDs' own rates). The VAT report
+   * (reports/compute.ts `taxableBucketsCzk`, fed by documents/reports.ts `reportFigures`: the full
+   * supply plus the deducted PTD buckets) nets in the document currency and converts the
+   * remainder at the FI rate, i.e. round2(FI bucket VAT x FI rate), which is also the per-bucket
+   * reading of Decision 2. They differ by about sum(PTD VAT) x (FI rate - PTD rate) whenever a
+   * PTD's fixing differs from the FI's. `test.failing` passes while the finding stands; when the
+   * code or the decision changes it turns red: then make it a plain test, or delete it and the
+   * D8 test above, as decided.
+   */
+  test.failing("FINDING: the Final Invoice's stored CZK VAT equals what the VAT report declares for it", () => {
+    eachChain(({ currency, ptds, fi }) => {
+      if (currency === "CZK" || fi.fx === null) return;
+      // The ReportDocument `reportFigures` builds: full supply = FI + deducted PTD buckets.
+      const deducted = ptds.flatMap((p) => p.totals.buckets);
+      const full = [...fi.totals.buckets, ...deducted];
+      const reported = ReportCompute.taxableBucketsCzk({
+        currency: fi.totals.gross.currency,
+        fx: fi.fx,
+        totals: { ...fi.totals, buckets: full },
+        advanceDeductions: deducted,
+      } as never);
+      for (const b of fi.totals.buckets) {
+        const report = reported.find((r) => keyOf(r) === keyOf(b));
+        const stored = b.vatCzk === null ? null : units(b.vatCzk, 2);
+        const declared = report === undefined ? null : units(report.vat, 2);
+        if (stored !== declared || declared !== czkOf(units(b.vat, 2), fi.fx)) {
+          throw new Error(
+            `Final Invoice ${fi.number} ${keyOf(b)}: VAT ${BigDecimal.format(b.vat)} EUR, FI rate ${BigDecimal.format(fi.fx.rate)}; stored vatCzk ${stored === null ? "null" : fmt(stored)}, VAT report ${declared === null ? "none" : fmt(declared)}`,
+          );
+        }
+      }
+    });
+  });
 });
 
 test("chain fixtures: fixings differ by day, so a later-day Credit Note would see another rate", () => {

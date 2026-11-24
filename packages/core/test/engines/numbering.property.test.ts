@@ -285,6 +285,17 @@ describe("Numbering patterns (property: seeded)", () => {
         const back = decode(pattern.tokens, n);
         if (back.counter !== c)
           throw new Error(`${source}: ${n} reads back counter ${back.counter}, not ${c}`);
+        const fields = pattern.tokens.flatMap((t) =>
+          t._tag === "Year4"
+            ? [String(y).padStart(4, "0")]
+            : t._tag === "Year2"
+              ? [String(y % 100).padStart(2, "0")]
+              : t._tag === "Month"
+                ? [String(m).padStart(2, "0")]
+                : [],
+        );
+        if (back.fields.join("|") !== fields.join("|"))
+          throw new Error(`${source}: ${n} reads back date fields ${back.fields}, not ${fields}`);
         if (fitsLength(pattern, iso(y, m, d), c) !== n.length <= SPEC_MAX_LENGTH) {
           throw new Error(`${source}: fitsLength(${c}) disagrees with length ${n.length}`);
         }

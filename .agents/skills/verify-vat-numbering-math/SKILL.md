@@ -17,7 +17,7 @@ From the repo root (Bun 1.4.2 per `packageManager`; the checks were last run wit
 bun test --cwd packages/core test/engines/vat-rounding.property.test.ts test/engines/numbering.property.test.ts test/engines/advance-chain.property.test.ts
 ```
 
-Expected: 15 pass, 0 fail, about 4 s in total. One file at a time: `bun test --cwd packages/core test/engines/<file>`. The checks are also part of the normal `bun test` in `packages/core`.
+Expected: 20 pass, 0 fail, about 4 s in total. One of the 20 is `test.failing` (the open finding below): it passes while the finding stands. One file at a time: `bun test --cwd packages/core test/engines/<file>`. The checks are also part of the normal `bun test` in `packages/core`.
 
 The central coverage record is `formal/manifest.json`. `bun run verify:formal --check-digests` reports any covered file whose content changed since its entry was last confirmed. Both are maintained by the formal-verification foundation stream. If they are not on your branch yet, use the table below.
 
@@ -31,7 +31,7 @@ Yes, if the diff touches a file in the table, or anything those symbols call: `e
 | 2 Buckets and CZK (property) | `vat-rounding.property.test.ts` | `packages/core/src/engines/vat.ts`, `fx.ts`, `decimal.ts`; treatments from `packages/domain/src/vocabulary.ts` | `VatMath.calculate`, `TREATMENTS`, `rateFor`, `assemble` (via `calculate`), `toCzk` |
 | 3a Pattern grammar (verification) | `numbering.property.test.ts` | `packages/core/src/engines/numbering.ts` | `parsePattern`, `format` |
 | 3b Format, periods, limits (property) | `numbering.property.test.ts` | `packages/core/src/engines/numbering.ts`, `calendar.ts` | `format`, `periodKey`, `fitsLength`, `MAX_NUMBER_LENGTH`, `MAX_COUNTER` |
-| 4 Advance chain net to zero (property) | `advance-chain.property.test.ts` | `packages/core/src/engines/vat.ts`, `fx.ts`; `packages/core/src/modules/documents/{final,credit,corrections,payments,compose}.ts` | `VatMath.splitAdvance`, `VatMath.fromBuckets`, `VatMath.negate`, `deductionLines`, `issueFinalInvoice`, `remainderSpec`, `deductionBucketsOf`, `partialSpec`, `creditNoteRecord` field `fx`, `issuePaymentTaxDocument`, `mergeBuckets` |
+| 4 Advance chain net to zero (property) | `advance-chain.property.test.ts` | `packages/core/src/engines/vat.ts`, `fx.ts`; `packages/core/src/modules/documents/{final,credit,corrections,payments,compose}.ts` | `VatMath.splitAdvance`, `VatMath.fromBuckets`, `VatMath.negate`, `deductionLines`, `issueFinalInvoice`, `remainderSpec`, `deductionBucketsOf`, `partialSpec`, `creditNoteRecord` field `fx`, `issuePaymentTaxDocument`, `mergeBuckets`; finding cross-check: `ReportCompute.taxableBucketsCzk` (`packages/core/src/modules/reports/compute.ts`) |
 
 All test files are in `packages/core/test/engines/`.
 
@@ -53,27 +53,38 @@ All test files are in `packages/core/test/engines/`.
 - Space enumerated: every string of length 0 to 6 over `Y M N a 1 - space` (137,257 patterns), and every accepted one rendered for counters 1, 10 and 12345.
 
 **3b. Format, periods, limits (property: 2,000 patterns; 500 x 20; 500 x 30; 500 x 30; plus a boundary table).**
-- Property: numbers read back to their counter (never truncated); `fitsLength` agrees with the 20-character limit, which the test pins itself (20 passes, 21 fails, also when a counter outgrows its run), and so is the counter ceiling 2^31 - 2 (`MAX_COUNTER`, `checkNextCounter`); within one `periodKey` the same counter gives the same number and distinct counters give distinct numbers; across periods numbers collide only for patterns with `YY` but no `YYYY`, on years a multiple of 100 apart, with the same counter (and the same month for monthly patterns). Valid patterns are generated against the oracle with bounded retries, so an engine that rejects valid patterns fails at once with the pattern instead of hanging.
+- Property: numbers read back to their counter and date fields (never truncated); `fitsLength` agrees with the 20-character limit, which the test pins itself (20 passes, 21 fails, also when a counter outgrows its run), and so is the counter ceiling 2^31 - 2 (`MAX_COUNTER`, `checkNextCounter`); within one `periodKey` the same counter gives the same number and distinct counters give distinct numbers; across periods numbers collide only for patterns with `YY` but no `YYYY`, on years congruent modulo 100 (a multiple of 100 apart), with the same counter (and the same month for monthly patterns). Valid patterns are generated against the oracle with bounded retries, so an engine that rejects valid patterns fails at once with the pattern instead of hanging.
 - Harm if broken: two documents in a period get the same number, or a number changes when only the day changes.
 - Cross-period collisions: `YY-NNN` gives `26-001` for 2026 and 2126. This does not cause duplicates. Numbers are reserved per (workspace, kind) and the allocator skips reserved numbers (`packages/core/src/modules/numbering/service.ts`, the `tryReserve` loop), so the later century gets the next free counter.
 
 **4. Advance chain net to zero (property, 120 seeded chains).**
-- Property (Filip's decisions 2 and 3): per VAT bucket, document currency is exact: Proforma = Payment Tax Documents + Final Invoice; Final Invoice + its Credit Notes = 0; each Payment Tax Document + its Credit Note = 0. CZK VAT: each PTD uses the CNB fixing of its own receipt day and the Final Invoice that of its tax point, both checked against the fixture (not the service's answer), and each PTD bucket = round2(VAT x that rate). Final Invoice + PTDs = round2(Proforma VAT x the Final Invoice rate), within 0.005 CZK of exact (the documented residue). Credit Notes cancel CZK VAT exactly. A Credit Note keeps the original's FX (rate, quantity, fixing date, source) and VAT rates, even when it is issued on a later day with another CNB fixing.
+- Property (Filip's decisions 2 and 3), per VAT bucket. In document currency, exactly: Proforma = Payment Tax Documents + Final Invoice; Final Invoice + its Credit Notes = 0; each PTD + its Credit Note = 0. Each PTD splits its payment like an independent largest-remainder oracle, with VAT top-down per share. Each PTD uses the CNB fixing of its own receipt day, and the Final Invoice the fixing of its tax point. Both are checked against the fixture, not against the service's answer. Each PTD bucket's CZK VAT = round2(VAT x that rate). Partial Credit Notes convert at the Final Invoice rate. Credit Notes cancel CZK VAT exactly. A Credit Note keeps the original's FX (rate, quantity, fixing date, source) and VAT rates, even when it is issued on a later day with another CNB fixing.
 - Harm if broken: an advance and its Final Invoice declare more or less VAT than the supply, or a storno leaves VAT behind, so the VAT return is wrong.
-- Chains: EUR or CZK, prices with or without VAT, 1 to 4 standard or reduced lines, 1 to 3 payments on different receipt days covering all or part of the gross, a Final Invoice, an optional partial credit, a full credit 0 to 2 days later, then a full credit of every PTD. The test asserts that each shape occurs in more than 5 chains.
+- Pinned current behavior (D8 as composed, not a rounding residue): PTD CZK VAT + Final Invoice CZK VAT = round2(Proforma VAT x the Final Invoice rate) per bucket. `compose.ts` subtracts the PTDs' stored CZK VAT from the full supply's conversion.
+- Chains: EUR or CZK; prices with or without VAT; 1 to 4 standard or reduced lines, each with quantity 1-12 and a unit price up to 5,000 with 0-2 decimals; 1 to 3 payments in whole minor units on receipt days 2026-11-16..23, covering all or part of the gross (never more); a Final Invoice with no patch on 2026-11-23; an optional partial credit (1 unit of line 1); a full credit 0 to 2 days later; then a full credit of every PTD. Fixings rise and fall from day to day, so some PTD rates are above the Final Invoice rate and some below. The test asserts that each shape occurs in more than 5 chains, and that some Final Invoice buckets end negative after per-PTD rounding (12 at these seeds). Not generated: overpayment, a patched Final Invoice, manual FX overrides, whole-unit payment rounding.
+
+## Open finding (reported, not fixed)
+
+The Final Invoice document and the VAT report disagree on the Final Invoice's CZK VAT whenever a PTD's fixing differs from the Final Invoice's.
+- `compose.ts` (totals step after `VatMath.calculate`, rule D8) stores per bucket round2(supply VAT x FI rate) minus the PTDs' stored CZK VAT, which were converted at the PTDs' own rates.
+- The VAT report (`ReportCompute.taxableBucketsCzk` in `packages/core/src/modules/reports/compute.ts:108`, fed by `reportFigures` in `packages/core/src/modules/documents/reports.ts:34`) nets the buckets in the document currency and converts the remainder at the FI rate. That gives round2(FI bucket VAT x FI rate), which is also the per-bucket reading of Decision 2. The report tests pin this behavior (`packages/core/test/modules/reports/council.test.ts:76`).
+- Counterexample (seed 58256): an EUR Proforma, standard bucket VAT 5,057.28 EUR. PTDs were received 2026-11-18 at 24.974 (VAT 205.25), 2026-11-21 at 24.485 (VAT 984.10) and 2026-11-23 at 24.459 (VAT 1,532.91). The Final Invoice is at 24.459, standard VAT 2,335.02 EUR. The stored vatCzk is 56,980.96 CZK; the VAT report gives 57,112.25 CZK. The difference, 131.29 CZK, is 205.25 x (24.974 - 24.459) + 984.10 x (24.485 - 24.459).
+- In the suite: `test.failing("FINDING: ...")` in `advance-chain.property.test.ts`, next to the pinned D8 test. Which rule is right (D8 as composed, or per-bucket conversion as in the report) is Filip's decision. Once it is made, turn the FINDING test into a plain test and fix the code, or delete it and keep the D8 test. Either way, the document and the report must agree.
 
 ## Bounds and assumptions
 
 - Check 1 covers scales 3 to 7. The domain sets no limit on line decimals. Larger scales are covered only if `BigDecimal.round` depends on the dropped digits as it does up to scale 7. The integer part is assumed not to matter beyond the three values tried.
 - The VAT rate table (`VAT_RATE_TABLE`) has one entry (2024-01-01: 21 / 12), so no date gives a different rate. Check 4 shows the Credit Note keeps the original's `ratePercent`. It cannot show that a different later rate would be ignored. When a second table entry is added, add chains that cross it.
 - CNB rates are taken as 3 decimals with quantity 1 or 100 (check 1). Quantity 1000 is not enumerated.
+- Whole-unit payment rounding (scale 0) is only sampled (check 2), not enumerated.
+- Check 3a enumerates patterns up to 6 characters. Longer patterns, control characters and too-long patterns are only sampled (check 3b).
 - Check 4 runs the vat_payer regime only, with `CZ_BUYER` and `paymentRounding` `none`, on in-memory layers (`DocumentsTestLayer`) with the TestClock starting 2026-11-23. Postgres, concurrency and other regimes are out of scope.
 - Seeds are fixed. On failure the message starts with `seed=<n>`. Rerun the same file and the same seed fails again.
 
 ## Coverage record
 
 - Sync commit: `77a5bb7`. The checks describe the covered files as they are at this commit.
-- Able-to-fail gate, run on 2026-11-24 at `77a5bb7` (the last four breaks came from review round 1): each break below was applied to the real code, caught, reverted with `git checkout -- <file>`, and the file was green again.
+- Able-to-fail gate, run on 2026-11-24 at `77a5bb7` (rows 7-10 came from review round 1, row 11 from the council; the chain breaks were rerun after the chain test was split into separate tests): each break below was applied to the real code, caught, reverted with `git checkout -- <file>`, and the file was green again.
 
 | Break | File | Caught by |
 |---|---|---|
@@ -87,6 +98,7 @@ All test files are in `packages/core/test/engines/`.
 | Every PTD converted at the 2026-11-23 fixing | `src/modules/documents/payments.ts` (`issuePaymentTaxDocument`) | Check 4 (`PTD ... (received 2026-11-18): fx [...2026-11-23...], expected [...2026-11-18...]`) |
 | `MAX_NUMBER_LENGTH` raised to 21 | `src/engines/numbering.ts` | Checks 3b (oracle disagrees with `too_long`; boundary table) |
 | `parsePattern` rejects every pattern | `src/engines/numbering.ts` | Checks 3a and 3b (fail at once: `engine rejects "N"`) |
+| `splitAdvance` leftovers ignore the remainders | `src/engines/vat.ts` (`splitAdvance`) | Check 4 split oracle (`PTD ... standard\|21: gross/vat/base 24062.47/..., oracle 24062.48/...`) |
 
 ## When a check fails
 
@@ -94,7 +106,8 @@ Read the message. It names the seed, the document or input, the bucket, and the 
 
 - **Real bug**: the oracle states the rule from the file header (`vat.ts` rules 1-8, the `numbering.ts` grammar, D8 in `final.ts`, D6/D7 in `credit.ts`/`corrections.ts`) or from Filip's decisions, and the engine differs. Do not change the oracle to match. Report the counterexample in the code's words (inputs, expected vs actual, file:line), and fix product code only if that is your task.
 - **Drift (intended change)**: the change deliberately alters a rule, for example a new rounding mode, a new token, a new VAT treatment or a second rate-table entry. Update the oracle to the new rule in the same change, cite the rule's new wording in the commit, and rerun the able-to-fail gate for that check.
-- **Harness drift**: the chain test fails before its assertions (`chain failed: ...`) because a service signature, fixture or seam changed (`DocumentPayments`, `scenario`, `invoiceInput`). Fix the test harness. This is not a math finding.
+- **Harness drift**: the chain test fails before its assertions (`chain failed: <cause>`). First read the cause: a service that refuses a valid chain (an `Invalid`, `Conflict` or defect on an issue, payment, Final Invoice or correction) is a product regression. It is harness drift only when a service signature, fixture or seam changed (`DocumentPayments`, `scenario`, `invoiceInput`). Then fix the test harness.
+- **The FINDING test turns red**: the code or the decision changed. See Open finding.
 
 ## Updating
 
