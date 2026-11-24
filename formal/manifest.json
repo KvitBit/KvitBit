@@ -119,10 +119,20 @@
             "name": "OverrideKeepsCounter"
           },
           "description": "an override raises the series counter past the new number"
+        },
+        {
+          "name": "rollback-keeps-reservation",
+          "config": "formal/numbering/Numbering_mutant_rollback_keeps_reservation.cfg",
+          "expect": "violation",
+          "violates": {
+            "kind": "invariant",
+            "name": "NoOrphanReservation"
+          },
+          "description": "a rollback leaves its reservations behind as orphans"
         }
       ],
       "timeoutSeconds": 120,
-      "wideTimeoutSeconds": 600,
+      "wideTimeoutSeconds": 300,
       "coveredFiles": [
         {
           "path": "packages/core/src/modules/numbering/service.ts",
@@ -139,6 +149,10 @@
         {
           "path": "packages/core/src/modules/documents/lifecycle.ts",
           "sha256": "52ca553c677840c31266401da33f1ed8da783a53deae187706d6d24f89a1285a"
+        },
+        {
+          "path": "packages/core/src/modules/documents/service.ts",
+          "sha256": "22d384d76b162172ee42625f2c85896ffad51634b73639f7ff6883d1571eb769"
         },
         {
           "path": "packages/core/src/modules/documents/record.ts",
@@ -160,16 +174,19 @@
         "numbered",
         "issue",
         "editIssued",
+        "Documents.edit",
         "NUMBER_PER_KIND",
         "number_reservations_pkey",
+        "number_reservations_document_fk",
         "numbering_counters_pkey"
       ],
-      "bounds": "base: 2 issue transactions, 1 override, 2 periods, MaxSeq 3, 1 pre-issued document, a crash at any open statement; 21,225 distinct states, exhaustive within the bound. wide: 2 overrides; 1,708,647 distinct states",
+      "bounds": "base: 2 issues from stored drafts, 1 override, 2 periods, MaxSeq 3, 1 pre-issued document, a rollback at any statement that is not waiting, deadlock checked; 28,289 distinct states, exhaustive within the bound. wide: adds 1 issue from input; 315,279 distinct states. A second override is outside every bound (over 28.6 million states)",
       "assumptions": [
         "One Workspace, one DocumentKind, one YYYY-NNNN series: reservation keys include workspace and kind, and distinct sequences format to distinct numbers (Numbering.format, covered by verify-vat-numbering-math)",
-        "Steps are Postgres READ COMMITTED statements: counters.lock is SELECT ... FOR UPDATE on numbering_counters; reservations.tryReserve is INSERT ... ON CONFLICT DO NOTHING on number_reservations_pkey, which waits for an open inserter of the same key (no Postgres CoreStore exists yet; the in-memory store serializes whole transactions, a subset of these behaviours)",
+        "Steps are Postgres READ COMMITTED statements on the committed schema: counters.lock is SELECT ... FOR UPDATE on numbering_counters; reservations.tryReserve is INSERT ... ON CONFLICT DO NOTHING on number_reservations_pkey, which waits for an open inserter of the same key, and a free key for a document without a row fails number_reservations_document_fk (no Postgres CoreStore exists yet; the in-memory store serializes whole transactions and has no foreign keys)",
+        "A waiting transaction does not crash (no lock timeout), so a wait cycle is reported as a deadlock",
         "Manual override numbers range over the series' own number space; numbers outside it cannot meet the allocator",
-        "configure(nextNumber) raising the counter (an intended gap, W3) and series pattern changes are not modeled"
+        "Not modeled: configure(nextNumber) raising the counter (an intended gap, W3), pattern changes, Credit Note, Payment Tax Document and correction numbering"
       ],
       "toolVersions": {
         "tla2tools": "1.7.4",
@@ -200,9 +217,26 @@
         {
           "path": "packages/core/src/store/CoreStore.ts",
           "sha256": "7971299fe86c8505f841c237ef8c103c1542b71174f6a530774c12e62c65fa03"
+        },
+        {
+          "path": "packages/core/src/modules/documents/lifecycle.ts",
+          "sha256": "52ca553c677840c31266401da33f1ed8da783a53deae187706d6d24f89a1285a"
+        },
+        {
+          "path": "packages/core/src/modules/documents/service.ts",
+          "sha256": "22d384d76b162172ee42625f2c85896ffad51634b73639f7ff6883d1571eb769"
+        },
+        {
+          "path": "packages/core/src/modules/documents/record.ts",
+          "sha256": "14ad42c41aa69a4ef1544ddf013f4484dc0f83e1e58bcb29663116ad4ea1c234"
         }
       ],
       "guardedSymbols": [
+        "Documents.issue",
+        "Documents.edit",
+        "Documents.get",
+        "numbered",
+        "editIssued",
         "NumberingSeries.allocate",
         "NumberingSeries.override",
         "NumberingSeries.view",
@@ -211,10 +245,10 @@
         "CoreStoreMemory.reservations.tryReserve",
         "CoreStoreMemory.transaction"
       ],
-      "bounds": "8 hand-extracted serial projections of Numbering.tla traces (incl. the 3 H1 orders) plus 200 seeded sampled traces of 8 steps (property test, not exhaustive)",
+      "bounds": "9 hand-extracted serial traces (8 projections of Numbering.tla traces, 1 override of an override beyond the TLC bounds) (incl. the H1 orders and the edit of a draft being issued) plus 100 seeded sampled traces of 6 steps (property test, not exhaustive)",
       "assumptions": [
-        "In-memory store: one top-level transaction at a time, so only serial projections of model traces replay; statement interleaving under Postgres is left to the pg-contention job",
-        "Override is driven at the NumberingSeries level; Documents.edit's same-number shortcut (editIssued) is mirrored in the harness"
+        "In-memory store: one top-level transaction at a time and no foreign keys, so only serial projections of model traces replay, with the foreign-key check passing; statement interleaving and the number_reservations_document_fk failure under Postgres are left to the pg-contention job",
+        "Documents are read back through Documents.get after each step; reservations are probed with tryReserve in a transaction that always rolls back"
       ],
       "toolVersions": {
         "bun": "1.4.2"
