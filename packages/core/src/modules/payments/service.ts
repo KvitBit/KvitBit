@@ -12,6 +12,7 @@ import type {
   ExpenseId,
   Money,
   PaymentId,
+  PaymentMethod,
   PaymentTarget,
   RecordPaymentInput,
   RequestOptions,
@@ -27,7 +28,7 @@ import { withIdempotency } from "../../shared/idempotency";
 import type { IdGenerator } from "../../shared/ids";
 import { newId } from "../../shared/ids";
 import { CoreStore } from "../../store/CoreStore";
-import { DocumentPayments, DocumentSender, DocumentsRepo, now } from "../documents";
+import { DocumentPayments, DocumentSender, DocumentsRepo, now, viewOf } from "../documents";
 import { ExpensePayables, PaymentSettings } from "./ports";
 import type { PaymentRecord } from "./record";
 import { RecordPaymentInputSchema, RecordResultCodec, toView } from "./record";
@@ -65,7 +66,10 @@ const paidOf = (rows: ReadonlyArray<PaymentRecord>) => ({
   payments: rows.length,
 });
 
-/** The payment's particulars in its audit entry. */
+/**
+ * The payment's particulars in its audit entry. `payment.record` writes them before the PTD
+ * exists (settle precedes issuance), so the tax document is only named on removal.
+ */
 const particulars = (row: PaymentRecord) => ({
   id: row.id,
   amount: BigDecimal.format(BigDecimal.normalize(row.amount)),
@@ -73,7 +77,6 @@ const particulars = (row: PaymentRecord) => ({
   paidOn: row.paidOn,
   method: row.method,
   note: row.note,
-  taxDocument: row.taxDocumentId,
 });
 
 const asSettled = (settlement: string): Effect.Effect<Settled> =>
@@ -81,9 +84,13 @@ const asSettled = (settlement: string): Effect.Effect<Settled> =>
     ? Effect.succeed(settlement as Settled)
     : Effect.die(new Error(`Payments.record: settlement ${settlement} after a positive payment`));
 
+/** The `payments.amount` column: numeric(18,2). */
+const MAX_AMOUNT = BigDecimal.fromStringUnsafe("9999999999999999.99");
+
 /**
- * The amount to book: the given one (positive, in the target's currency, P1) or what is
- * outstanding; nothing outstanding and no amount is `Invalid{amount, required}`.
+ * The amount to book: the given one or what is outstanding. It must be positive, in the
+ * target's currency (P1), within the currency's minor unit and the column's range; nothing
+ * outstanding and no amount is `Invalid{amount, required}`.
  */
 const amountFor = (
   given: Money | undefined,
@@ -91,12 +98,21 @@ const amountFor = (
   outstanding: BigDecimal.BigDecimal,
 ) =>
   Effect.gen(function* () {
-    if (given !== undefined) {
-      if (given.currency !== currency) return yield* currencyMismatch(currency);
-      return BigDecimal.normalize(given.amount);
+    if (given === undefined && !BigDecimal.isPositive(outstanding)) {
+      return yield* malformed("amount", "required");
     }
-    if (!BigDecimal.isPositive(outstanding)) return yield* malformed("amount", "required");
-    return BigDecimal.normalize(outstanding);
+    const amount = BigDecimal.normalize(given?.amount ?? outstanding);
+    if (
+      !BigDecimal.isPositive(amount) ||
+      amount.scale > MoneyMath.minorUnitScale(currency) ||
+      BigDecimal.isGreaterThan(amount, MAX_AMOUNT)
+    ) {
+      return yield* malformed("amount", "out_of_range");
+    }
+    if (given !== undefined && given.currency !== currency) {
+      return yield* currencyMismatch(currency);
+    }
+    return amount;
   });
 
 const newRow = (
@@ -105,6 +121,7 @@ const newRow = (
   amount: BigDecimal.BigDecimal,
   currency: CurrencyCode,
   input: RecordPaymentInput,
+  defaultMethod: PaymentMethod,
 ) =>
   Effect.gen(function* () {
     const { today, at } = yield* now;
@@ -116,7 +133,7 @@ const newRow = (
       amount,
       currency,
       paidOn: input.paidOn ?? today,
-      method: input.method ?? "bank_transfer",
+      method: input.method ?? defaultMethod,
       note: input.note ?? null,
       taxDocumentId: null,
       removedAt: null,
@@ -142,16 +159,50 @@ const taxDocumentFor = (workspaceId: WorkspaceId, proforma: DocumentId, row: Pay
     const linked = yield* repo
       .update({ ...row, taxDocumentId: ptdId }, row.revision)
       .pipe(Effect.catchTags({ Conflict: Effect.die, UniqueViolation: Effect.die }));
-    // Auto-send (P2, 7.2) runs as the caller; a caller who may not send (a token without
-    // documents:write) still records the payment, and the PTD waits for a manual send.
-    const caller = yield* CurrentCaller;
-    if (
-      (yield* (yield* PaymentSettings).autoSendPaymentTaxDocument(workspaceId)) &&
-      can(caller, "document.send")
-    ) {
-      yield* (yield* DocumentSender).send(ptdId);
+    return { row: linked, issued: [yield* autoSend(workspaceId, ptdId, ptd)] };
+  });
+
+/** A skipped auto-send, recorded on the PTD so the gap is visible in its history. */
+const skipped = (workspaceId: WorkspaceId, ptd: DocumentId, reason: string) =>
+  appendAudit({
+    workspaceId,
+    subject: { entity: "Document", id: ptd },
+    action: "payment.autoSendSkipped",
+    revision: null,
+    reason,
+  });
+
+/**
+ * P2 auto-send (7.2) when `autoSendPaymentTaxDocument` is on, as the caller, in a savepoint of
+ * the recording transaction. The payment and its PTD commit either way: a caller who may not
+ * send (a token without documents:write) or a delivery precondition the sender refuses
+ * (NotFound, Conflict, Invalid: e.g. no recipient) skips the send with an audit entry on the
+ * PTD; infrastructure failures propagate. Returns the PTD view as of the send.
+ */
+const autoSend = (workspaceId: WorkspaceId, ptdId: DocumentId, ptd: DocumentView) =>
+  Effect.gen(function* () {
+    if (!(yield* (yield* PaymentSettings).autoSendPaymentTaxDocument(workspaceId))) return ptd;
+    if (!can(yield* CurrentCaller, "document.send")) {
+      yield* skipped(workspaceId, ptdId, "caller_cannot_send");
+      return ptd;
     }
-    return { row: linked, issued: [ptd] };
+    const store = yield* CoreStore;
+    const sender = yield* DocumentSender;
+    const sent = yield* store.transaction(sender.send(ptdId)).pipe(
+      Effect.as(true),
+      Effect.catchTags({
+        NotFound: (e) => Effect.as(skipped(workspaceId, ptdId, `NotFound:${e.entity}`), false),
+        Conflict: (e) =>
+          Effect.as(skipped(workspaceId, ptdId, `Conflict:${e.detail ?? e.reason}`), false),
+        Invalid: (e) =>
+          Effect.as(
+            skipped(workspaceId, ptdId, `Invalid:${e.issues.map((i) => i.code).join(",")}`),
+            false,
+          ),
+      }),
+    );
+    if (!sent) return ptd;
+    return yield* viewOf(yield* (yield* DocumentsRepo).get(workspaceId, ptdId));
   });
 
 const recordOnDocument = (workspaceId: WorkspaceId, id: DocumentId, input: RecordPaymentInput) =>
@@ -161,14 +212,26 @@ const recordOnDocument = (workspaceId: WorkspaceId, id: DocumentId, input: Recor
     // S4/P2a: the Proforma row first; a Proforma with a Final Invoice settles on it (D8).
     const targets = yield* seam.lock(workspaceId, id);
     const on = targets.settleOn;
+    // State before amounts: only issued Invoices and Proformas that are not fully credited take
+    // payments; a document lock does not matter (P4).
+    if (
+      on.status !== "issued" ||
+      on.settlement === "credited" ||
+      (on.kind !== "invoice" && on.kind !== "proforma")
+    ) {
+      return yield* new Conflict({ reason: "illegal_transition" });
+    }
     const outstanding = BigDecimal.subtract(on.owed.amount, on.paid.amount);
     const amount = yield* amountFor(input.amount, on.currency, outstanding);
+    // The method defaults to the one the document prints (C4).
+    const printed = (yield* (yield* DocumentsRepo).get(workspaceId, on.id)).paymentMethod;
     const inserted = yield* newRow(
       workspaceId,
       { documentId: on.id, expenseId: null },
       amount,
       on.currency,
       input,
+      printed,
     );
     const details: AuditEntry["changes"] = [
       { path: "payment", before: null, after: particulars(inserted) },
@@ -214,8 +277,8 @@ const auditExpense = (
     changes: [
       {
         path: "paidAmount",
-        before: BigDecimal.format(before.paid),
-        after: BigDecimal.format(after.paid),
+        before: BigDecimal.format(BigDecimal.normalize(before.paid)),
+        after: BigDecimal.format(BigDecimal.normalize(after.paid)),
       },
       { path: "payments", before: before.payments, after: after.payments },
       { path: "settlement", before: before.settlement, after: after.settlement },
@@ -244,6 +307,7 @@ const recordOnExpense = (workspaceId: WorkspaceId, id: ExpenseId, input: RecordP
       amount,
       expense.currency,
       input,
+      "bank_transfer",
     );
     const paid = paidOf(yield* repo.liveFor(workspaceId, { expense: id }));
     const settlement = yield* expenses.settle(workspaceId, id, {
@@ -269,9 +333,6 @@ const recordOnExpense = (workspaceId: WorkspaceId, id: ExpenseId, input: RecordP
 export const record = (input: RecordPaymentInput, opts?: RequestOptions) =>
   Effect.gen(function* () {
     const { workspaceId } = yield* authorizeInWorkspace("payment.write");
-    if (input.amount !== undefined && !BigDecimal.isPositive(input.amount.amount)) {
-      return yield* malformed("amount", "out_of_range");
-    }
     return yield* withIdempotency(
       {
         scope: { _tag: "Workspace", workspaceId },
@@ -328,7 +389,13 @@ export const remove = (id: PaymentId, reason: string) =>
             {
               action: "payment.remove",
               reason: why,
-              details: [{ path: "payment", before: particulars(row), after: null }],
+              details: [
+                {
+                  path: "payment",
+                  before: { ...particulars(row), taxDocument: row.taxDocumentId },
+                  after: null,
+                },
+              ],
             },
           );
           return;
@@ -352,7 +419,7 @@ export const remove = (id: PaymentId, reason: string) =>
           { ...expense, paid: expense.paid?.amount ?? ZERO },
           { ...paid, paid: paid.amount, settlement },
           "payment.remove",
-          { path: "payment", before: particulars(row), after: null },
+          { path: "payment", before: { ...particulars(row), taxDocument: null }, after: null },
           why,
         );
       }),

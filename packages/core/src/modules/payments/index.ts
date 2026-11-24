@@ -25,8 +25,10 @@
  *   (`DocumentPayments.lock`), then the Final Invoice, then the PTD counter. A payment on a
  *   Proforma that has a Final Invoice is stored against and settles the Final Invoice (D8).
  *   Amount defaults to what is outstanding (owed - paid, credit aware; nothing outstanding ->
- *   Invalid{amount, required}), paidOn to today (Prague), method to bank_transfer; a given
- *   amount must be positive and in the target's currency (P1, Invalid{payment.currency_mismatch}).
+ *   Invalid{amount, required}), paidOn to today (Prague), method to the document's printed one
+ *   (bank_transfer for expenses); the amount must be positive, within the currency's minor unit
+ *   and numeric(18,2), and in the target's currency (P1, Invalid{payment.currency_mismatch}).
+ *   Only issued, not fully credited Invoices and Proformas take payments, locked ones too (P4).
  *   The target's paid total is recomputed from its live rows; documents derives the settlement
  *   and writes the one audit entry on the Document (payment.record, with the payment's
  *   particulars). On a Proforma, P2 issues the Payment Tax Document (null unless vat_payer on
@@ -38,6 +40,8 @@
  *   target before the payment row; P3 via `DocumentPayments.removalBlocked` (reverse the Final
  *   Invoice first, then credit the PTD) -> Conflict{illegal_transition, payment.has_tax_document}.
  * - listFor: live payments of the target (for a Proforma: the advances it settled), oldest first.
+ * - Auto-send gap (P2): a caller without `document.send` gets the PTD unsent, audited on the PTD
+ *   as `payment.autoSendSkipped` (open for the design owner: a narrow automatic enqueue).
  * - Credit Notes take no payments (documents refuses with Conflict{illegal_transition}); refunds
  *   of an overpaid or credited document are `Payable.refundDue`, not payment rows, in v1.
  *

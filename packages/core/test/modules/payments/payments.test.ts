@@ -151,6 +151,59 @@ describe("record on documents", () => {
     expect(creditNote).toEqual(new Conflict({ reason: "illegal_transition" }));
   });
 
+  test("state before amounts: credited and cancelled targets conflict; a locked one takes payments (P4)", async () => {
+    const [credited, cancelled, locked] = ok(
+      await run(
+        Effect.gen(function* () {
+          const d = yield* Documents;
+          const a = yield* issueInvoice();
+          yield* d.correct(a.id, { reason: "storno", lines: "full" });
+          const b = yield* issueInvoice();
+          yield* d.cancel(b.id, { reason: "chyba" });
+          const c = yield* issueInvoice();
+          yield* d.lock(c.id);
+          return [
+            yield* Effect.flip(pay(a.id)),
+            yield* Effect.flip(pay(b.id, "10")),
+            yield* pay(c.id),
+          ] as const;
+        }),
+      ),
+    );
+    expect(credited).toEqual(new Conflict({ reason: "illegal_transition" }));
+    expect(cancelled).toEqual(new Conflict({ reason: "illegal_transition" }));
+    expect(locked.settlement).toBe("paid");
+  });
+
+  test("amount bounds: minor unit scale and the numeric(18,2) range, checked under the key", async () => {
+    const key = { requestKey: "bank-tx-2" as RequestKey };
+    const [fraction, huge, replayInvalid] = ok(
+      await run(
+        Effect.gen(function* () {
+          const p = yield* Payments;
+          const inv = yield* issueInvoice();
+          const fraction = yield* Effect.flip(pay(inv.id, "0.001"));
+          const huge = yield* Effect.flip(pay(inv.id, "10000000000000000"));
+          yield* p.record({ target: { document: inv.id }, amount: czk("10") }, key);
+          const replayInvalid = yield* Effect.flip(
+            p.record({ target: { document: inv.id }, amount: czk("0.001") }, key),
+          );
+          return [fraction, huge, replayInvalid] as const;
+        }),
+      ),
+    );
+    expect(fraction).toEqual(malformed("amount", "out_of_range"));
+    expect(huge).toEqual(malformed("amount", "out_of_range"));
+    expect(replayInvalid).toEqual(new Conflict({ reason: "idempotency_mismatch" }));
+  });
+
+  test("the method defaults to the document's printed payment method (C4)", async () => {
+    const result = ok(
+      await run(Effect.flatMap(issueInvoice({ paymentMethod: "cash" }), (inv) => pay(inv.id))),
+    );
+    expect(view(result.payment).method).toBe("cash");
+  });
+
   test("audit: one entry on the Document with the payment's particulars; revision bumps (C2)", async () => {
     const [history, stale, payment] = ok(
       await run(
@@ -175,7 +228,6 @@ describe("record on documents", () => {
         paidOn: TODAY,
         method: "bank_transfer",
         note: null,
-        taxDocument: null,
       },
     });
     expect(stale).toBeInstanceOf(Conflict);
@@ -289,15 +341,20 @@ describe("authorization and tenancy", () => {
 
 describe("Proformas: Payment Tax Documents (P2) and the Final Invoice (D8)", () => {
   test("a vat_payer Proforma payment issues a PTD in the same transaction, linked to the payment", async () => {
-    const [result, rows, sent] = ok(
+    const [result, rows, sent, history] = ok(
       await run(
         Effect.gen(function* () {
+          const d = yield* Documents;
           const pf = yield* issueProforma();
           const result = yield* pay(pf.id, "1000");
           const repo = yield* PaymentsRepo;
           const store = yield* CoreStore;
           const rows = yield* store.transaction(repo.liveFor(WS, { document: pf.id }));
-          return [result, rows, yield* (yield* PaymentFixtures).sent(WS)] as const;
+          const id = view(result.payment).id;
+          yield* d.correct(docId(result.issued[0] as DocumentView), { reason: "x", lines: "full" });
+          yield* (yield* Payments).remove(id, "chyba");
+          const history = yield* d.history(pf.id);
+          return [result, rows, yield* (yield* PaymentFixtures).sent(WS), history] as const;
         }),
       ),
     );
@@ -309,6 +366,11 @@ describe("Proformas: Payment Tax Documents (P2) and the Final Invoice (D8)", () 
     expect(result.settlement).toBe("partially_paid");
     // autoSendPaymentTaxDocument is off by default.
     expect(sent).toEqual([]);
+    // record's particulars precede the PTD; remove's name it.
+    const particularsOf = (action: string) =>
+      history.find((e) => e.action === action)?.changes.find((c) => c.path === "payment");
+    expect(particularsOf("payment.record")?.after).not.toHaveProperty("taxDocument");
+    expect(particularsOf("payment.remove")?.before).toMatchObject({ taxDocument: docId(ptd) });
   });
 
   test("auto-send: on, the PTD is sent in the transaction; a caller who may not send still records", async () => {
@@ -357,6 +419,41 @@ describe("Proformas: Payment Tax Documents (P2) and the Final Invoice (D8)", () 
     expect(failed).toEqual(new Unavailable({ dependency: "exchange_rates" }));
     expect(list).toEqual([]);
     expect(settlement).toBe("unpaid");
+  });
+
+  test("auto-send skips are audited on the PTD; a refused send keeps the payment and its PTD", async () => {
+    const [token, refused, sent, tokenHistory, refusedHistory, list] = ok(
+      await run(
+        Effect.gen(function* () {
+          const d = yield* Documents;
+          const f = yield* PaymentFixtures;
+          yield* f.setAutoSend(WS, true);
+          const pf = yield* issueProforma();
+          const token = yield* as(
+            member("member", { scopes: ["payments:write"] }),
+            pay(pf.id, "100"),
+          );
+          yield* f.failSends(new Conflict({ reason: "illegal_transition" }));
+          const refused = yield* pay(pf.id, "100");
+          const ptdOf = (r: typeof token) => docId(r.issued[0] as DocumentView);
+          return [
+            token,
+            refused,
+            yield* f.sent(WS),
+            yield* d.history(ptdOf(token)),
+            yield* d.history(ptdOf(refused)),
+            yield* (yield* Payments).listFor({ document: pf.id }),
+          ] as const;
+        }),
+      ),
+    );
+    const skip = (h: typeof tokenHistory) => h.find((e) => e.action === "payment.autoSendSkipped");
+    expect(skip(tokenHistory)?.reason).toBe("caller_cannot_send");
+    expect(skip(refusedHistory)?.reason).toBe("Conflict:illegal_transition");
+    expect(refused.issued).toHaveLength(1);
+    expect(sent).toEqual([]);
+    expect(list).toHaveLength(2);
+    expect(token.settlement).toBe("partially_paid");
   });
 
   test("non_vat_payer: no Payment Tax Document", async () => {

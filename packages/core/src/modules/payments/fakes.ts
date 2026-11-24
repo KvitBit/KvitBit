@@ -9,10 +9,12 @@
  *   records each send as a queued delivery row; `previewSend` dies.
  */
 import type {
+  Conflict,
   CurrencyCode,
   DeliveryId,
   DocumentId,
   ExpenseId,
+  Invalid,
   WorkspaceId,
 } from "@kvitbit/domain/contract";
 import { CurrencyCode as CurrencyCodeSchema, MoneyMath, NotFound } from "@kvitbit/domain/contract";
@@ -86,6 +88,8 @@ export class PaymentFixtures extends Context.Service<
       readonly settlement: ExpenseSettlement;
     }>;
     readonly setAutoSend: (workspaceId: WorkspaceId, on: boolean) => Effect.Effect<void>;
+    /** Makes every later `DocumentSender.send` fail with `error` (null: succeed again). */
+    readonly failSends: (error: Conflict | Invalid | NotFound | null) => Effect.Effect<void>;
     /** Documents sent through the fake `DocumentSender`, in order. */
     readonly sent: (workspaceId: WorkspaceId) => Effect.Effect<ReadonlyArray<DocumentId>>;
   }
@@ -103,6 +107,7 @@ export const PaymentFakesLive: Layer.Layer<
     const expenses = tables.collection(FakeExpensesTable);
     const deliveries = tables.collection(FakeDeliveriesTable);
     const autoSend = yield* Ref.make(new Map<WorkspaceId, boolean>());
+    const sendFailure = yield* Ref.make<Conflict | Invalid | NotFound | null>(null);
     const missing = (id: string) => new NotFound({ entity: "Expense", id });
 
     const payable = (row: FakeExpense) => ({
@@ -153,6 +158,8 @@ export const PaymentFakesLive: Layer.Layer<
           send: (id) =>
             Effect.gen(function* () {
               const { workspaceId } = yield* authorizeInWorkspace("document.send");
+              const failure = yield* Ref.get(sendFailure);
+              if (failure !== null) return yield* Effect.fail(failure);
               const deliveryId = yield* Effect.provideContext(newId<DeliveryId>(), idGen);
               yield* deliveries
                 .insert({ id: deliveryId, workspaceId, revision: 1, documentId: id })
@@ -189,6 +196,7 @@ export const PaymentFakesLive: Layer.Layer<
             })),
           setAutoSend: (workspaceId, on) =>
             Ref.update(autoSend, (m) => new Map(m).set(workspaceId, on)),
+          failSends: (error) => Ref.set(sendFailure, error),
           sent: (workspaceId) =>
             Effect.map(orDie(deliveries.list(workspaceId)), (rows) =>
               rows.map((r) => r.documentId as DocumentId),
