@@ -28,7 +28,7 @@ import type { ViewContext } from "./view";
 
 export interface DeliveryDocument {
   readonly record: DocumentRecord;
-  /** The view as of now, with the given share/deliveries context. */
+  /** The stored view as of now (`viewOf`: no share, no deliveries). */
   readonly view: DocumentView;
   readonly contactId: ContactId;
   readonly dueOn: IsoDate;
@@ -44,7 +44,7 @@ export class DocumentDeliveryReads extends Context.Service<
     readonly load: (
       workspaceId: WorkspaceId,
       id: DocumentId,
-      context?: Pick<ViewContext, "share" | "deliveries" | "language">,
+      context?: Pick<ViewContext, "language">,
     ) => Effect.Effect<DeliveryDocument, NotFound | StoreUnavailable, CurrentCaller>;
     /** `DocumentRenderer` passthrough (PDF attachment, share page download). */
     readonly render: (view: DocumentView, options: RenderOptions) => Effect.Effect<Uint8Array>;
@@ -54,7 +54,7 @@ export class DocumentDeliveryReads extends Context.Service<
 const load = (
   workspaceId: WorkspaceId,
   id: DocumentId,
-  context: Pick<ViewContext, "share" | "deliveries" | "language"> = {},
+  context: Pick<ViewContext, "language"> = {},
 ) =>
   Effect.gen(function* () {
     const record = yield* (yield* DocumentsRepo).get(workspaceId, id);
@@ -77,7 +77,9 @@ export const DocumentDeliveryReadsLive: Layer.Layer<
 > = Layer.effect(
   DocumentDeliveryReads,
   Effect.gen(function* () {
-    const context = yield* Effect.context<DocumentsRepo>();
+    // Only the build dependencies: the build-time context may hold a CurrentCaller, RequestOutcome
+    // or transaction frame, and providing them per call would override the caller's own.
+    const context = Context.pick(DocumentsRepo)(yield* Effect.context<DocumentsRepo>());
     const renderer = yield* DocumentRenderer;
     return DocumentDeliveryReads.of({
       // The call site's context wins (its transaction frame).

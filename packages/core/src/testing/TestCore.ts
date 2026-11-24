@@ -2,8 +2,8 @@
  * `TestCore`: the real core composition (`CoreModulesLive`) on in-memory persistence and fakes
  * for every external port, with the fakes' controls in its output:
  *
- * - `InMemoryPortsLive`: CoreStore + MemoryTables, deterministic IdGenerator, RequestOutcome,
- *   `FakeCompanyRegistry` (registry fixtures), `FixtureRates` (CNB fixings), `CaptureEmailSender`,
+ * - `InMemoryCorePorts`: CoreStore + MemoryTables, deterministic IdGenerator (no shared
+ *   `RequestOutcome`: provide one per request, as the edge does), `FakeCompanyRegistry` (registry fixtures), `FixtureRates` (CNB fixings), `CaptureEmailSender`,
  *   `MemoryBlobStorage`;
  * - `CoreReposMemory`: every module repository on MemoryTables, plus the in-memory FX cache;
  * - `TestCoreFakes`: `UserDirectoryFake` (directory users), `CaptureInvitationDelivery`,
@@ -42,7 +42,7 @@ import {
   UserDirectoryFake,
   WorkspacesRepoMemory,
 } from "../modules/workspaces";
-import { InMemoryPortsLive, type InMemoryPortsOptions } from "./inMemoryPorts";
+import { InMemoryCorePorts, type InMemoryPortsOptions } from "./inMemoryPorts";
 
 /** Every `CoreRepos` port on MemoryTables (and the in-memory FX cache). */
 export const CoreReposMemory = Layer.mergeAll(
@@ -83,7 +83,7 @@ export interface TestCoreOptions extends InMemoryPortsOptions {
 export const TestCore = (options: TestCoreOptions = {}) =>
   CoreModulesLive.pipe(
     Layer.provideMerge(Layer.merge(CoreReposMemory, TestCoreFakes(options.users))),
-    Layer.provideMerge(InMemoryPortsLive(options)),
+    Layer.provideMerge(InMemoryCorePorts(options)),
   );
 
 /** Everything a test can reach under `TestCore`: services, repositories, fakes and controls. */

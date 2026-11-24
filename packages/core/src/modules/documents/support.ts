@@ -1,6 +1,6 @@
 /** Helpers shared by the Documents method files. */
 import type { DocumentId, DocumentView, IsoDate, WorkspaceId } from "@kvitbit/domain/contract";
-import { Clock, Data, Effect, Option } from "effect";
+import { Clock, Data, Effect } from "effect";
 import { pragueDate } from "../../engines/calendar";
 import { ZERO } from "../../engines/decimal";
 import { CoreStore, type StoreUnavailable } from "../../store/CoreStore";
@@ -70,37 +70,38 @@ export const relatedOf = (
       });
 
 /**
- * `share` and `deliveries` from the optional `DocumentActivity` port; values in `extra` win.
- * Drafts are never shared or sent, so they skip the reads.
+ * The stored view of a record as of now: `share: null`, `deliveries: []`. It is what delivery
+ * snapshots, idempotency results, the renderer and share-link visitors get, so a bearer share
+ * URL or the delivery history never lands in stored or replayed data (core-ports.md 66-68).
+ * Owner-facing boundaries add them with `withActivity`.
  */
-const activityOf = (
-  row: DocumentRecord,
-  extra: Pick<ViewContext, "share" | "deliveries">,
-): Effect.Effect<Pick<ViewContext, "share" | "deliveries">, StoreUnavailable> =>
-  Effect.gen(function* () {
-    if (row.status === "draft") return {};
-    const port = yield* Effect.serviceOption(DocumentActivity);
-    if (Option.isNone(port)) return {};
-    const share =
-      extra.share !== undefined ? extra.share : yield* port.value.share(row.workspaceId, row.id);
-    const deliveries =
-      extra.deliveries !== undefined
-        ? extra.deliveries
-        : yield* port.value.deliveries(row.workspaceId, row.id);
-    return { share, deliveries };
-  });
-
-/** The full view of a stored record as of now. */
 export const viewOf = (
   row: DocumentRecord,
-  extra: Omit<ViewContext, "today" | "related"> = {},
+  extra: Pick<ViewContext, "language"> = {},
 ): Effect.Effect<DocumentView, StoreUnavailable, DocumentsRepo> =>
   Effect.gen(function* () {
     const { today } = yield* now;
     const related = yield* relatedOf(row);
-    const activity = yield* activityOf(row, extra);
-    return toView(row, { ...extra, ...activity, today, related });
+    return toView(row, { ...extra, today, related });
   });
+
+/**
+ * The owner-facing view: `share` (with its bearer URL) and `deliveries` from `DocumentActivity`.
+ * Apply it at a service boundary, after any idempotent body, never to a view that is stored.
+ * Drafts are never shared or sent, so they skip the reads.
+ */
+export const withActivity = (
+  workspaceId: WorkspaceId,
+  view: DocumentView,
+): Effect.Effect<DocumentView, StoreUnavailable, DocumentActivity> =>
+  view.status === "draft"
+    ? Effect.succeed(view)
+    : Effect.gen(function* () {
+        const activity = yield* DocumentActivity;
+        const share = yield* activity.share(workspaceId, view.id);
+        const deliveries = yield* activity.deliveries(workspaceId, view.id);
+        return { ...view, share, deliveries };
+      });
 
 class PreviewRollback extends Data.TaggedError("PreviewRollback") {}
 

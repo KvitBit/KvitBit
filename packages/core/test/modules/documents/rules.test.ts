@@ -13,6 +13,7 @@ import { Documents, Forbidden, NotFound, Unavailable } from "@kvitbit/domain/con
 import { RequestOutcome } from "@kvitbit/domain/ports";
 import { Effect, Exit, Layer, Ref } from "effect";
 import {
+  DocumentActivityNone,
   DocumentFakesLive,
   DocumentFixtures,
   DocumentSender,
@@ -326,7 +327,13 @@ describe("seams", () => {
     );
     const layer = DocumentsLive.pipe(
       Layer.provideMerge(
-        Layer.mergeAll(DocumentsRepoMemory, NumberingTestLayer, DocumentFakesLive, sender),
+        Layer.mergeAll(
+          DocumentsRepoMemory,
+          NumberingTestLayer,
+          DocumentFakesLive,
+          sender,
+          DocumentActivityNone,
+        ),
       ),
     );
     const id = MISSING as DocumentId;
@@ -514,7 +521,13 @@ describe("store outages", () => {
     ).pipe(Layer.provide(DocumentsRepoMemory));
     const layer = DocumentsLive.pipe(
       Layer.provideMerge(
-        Layer.mergeAll(failing, NumberingTestLayer, DocumentFakesLive, DocumentSenderStub),
+        Layer.mergeAll(
+          failing,
+          NumberingTestLayer,
+          DocumentFakesLive,
+          DocumentSenderStub,
+          DocumentActivityNone,
+        ),
       ),
     );
     const id = MISSING as DocumentId;

@@ -4,10 +4,9 @@
  * so integration binds it (compose/documentActivity.ts, from ShareLinksRepo + DeliveriesRepo)
  * without documents importing the share-links module (which imports documents).
  *
- * Optional, like `RequestOutcome`: `viewOf` reads it with `Effect.serviceOption`, so it never
- * appears in a method's `R`. Without it a view carries `share: null` and `deliveries: []`.
- * It reaches the methods through the context `DocumentsLive` (and the other documents layers)
- * captured when built, so provide it to those layers.
+ * Required by the owner-facing boundaries that return full views (`DocumentsLive`,
+ * `PaymentDocumentsLive`; `withActivity` in support.ts), so a composition without it does not
+ * compile. Stored, replayed, rendered and visitor views never carry it (`viewOf`).
  */
 import type { DocumentId, DocumentView, WorkspaceId } from "@kvitbit/domain/contract";
 import { Context, Effect, Layer } from "effect";

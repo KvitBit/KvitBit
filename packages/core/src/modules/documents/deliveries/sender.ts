@@ -4,13 +4,13 @@
  */
 import type { CoreError, CurrentCaller } from "@kvitbit/domain/contract";
 import { Context, Effect, Layer } from "effect";
-import type { IdGenerator } from "../../../shared/ids";
-import type { CoreStore } from "../../../store/CoreStore";
-import type { DocumentContacts, DocumentIssuers } from "../ports";
-import type { DocumentsRepo } from "../repo";
+import { IdGenerator } from "../../../shared/ids";
+import { CoreStore } from "../../../store/CoreStore";
+import { DocumentContacts, DocumentIssuers } from "../ports";
+import { DocumentsRepo } from "../repo";
 import { DocumentSender } from "../sender";
-import type { DeliveryJobs } from "./jobs";
-import type { DeliveriesRepo } from "./repo";
+import { DeliveryJobs } from "./jobs";
+import { DeliveriesRepo } from "./repo";
 import { previewSend, send } from "./send";
 
 /** Everything `DocumentSenderLive` requires. */
@@ -34,7 +34,17 @@ export const DocumentSenderLive: Layer.Layer<DocumentSender, never, DocumentSend
   Layer.effect(
     DocumentSender,
     Effect.gen(function* () {
-      const context = yield* Effect.context<DocumentSenderDeps>();
+      // Only the build dependencies: the build-time context may hold a CurrentCaller, RequestOutcome
+      // or transaction frame, and providing them per call would override the caller's own.
+      const context = Context.pick(
+        CoreStore,
+        IdGenerator,
+        DocumentsRepo,
+        DeliveriesRepo,
+        DocumentContacts,
+        DocumentIssuers,
+        DeliveryJobs,
+      )(yield* Effect.context<DocumentSenderDeps>());
       // The call site's context wins: caller, RequestOutcome and an enclosing transaction
       // frame (issue with send, recurring issuance), so nested sends are savepoints.
       const run = <A, E>(effect: Effect.Effect<A, E, DocumentSenderDeps | CurrentCaller>) =>

@@ -35,7 +35,7 @@ import { Fx } from "../../engines/fx";
 import { VAT_RATE_TABLE, VatMath } from "../../engines/vat";
 import { appendAudit } from "../../shared/audit";
 import { IdGenerator, newId } from "../../shared/ids";
-import type { CoreStore, StoreUnavailable } from "../../store/CoreStore";
+import { CoreStore, type StoreUnavailable } from "../../store/CoreStore";
 import { NumberingSeries } from "../numbering";
 import { digitsOf, isFullyCredited, owedOf, settlementOf } from "./credit";
 import { DocumentIssuers } from "./ports";
@@ -517,7 +517,16 @@ export const DocumentPaymentsLive: Layer.Layer<DocumentPayments, never, Document
   Layer.effect(
     DocumentPayments,
     Effect.gen(function* () {
-      const context = yield* Effect.context<DocumentPaymentsDeps>();
+      // Only the build dependencies: the build-time context may hold a CurrentCaller, RequestOutcome
+      // or transaction frame, and providing them per call would override the caller's own.
+      const context = Context.pick(
+        CoreStore,
+        IdGenerator,
+        DocumentsRepo,
+        NumberingSeries,
+        ExchangeRates,
+        DocumentIssuers,
+      )(yield* Effect.context<DocumentPaymentsDeps>());
       // The call site's context wins: its caller and CoreStore transaction frame.
       const run = <A, E>(effect: Effect.Effect<A, E, DocumentPaymentsDeps | CurrentCaller>) =>
         Effect.flatMap(Effect.context<CurrentCaller>(), (callSite) =>

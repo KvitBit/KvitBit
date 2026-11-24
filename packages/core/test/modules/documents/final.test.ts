@@ -1345,7 +1345,7 @@ describe("delivery read seam", () => {
         Effect.gen(function* () {
           const reads = yield* DocumentDeliveryReads;
           const inv = yield* issueInvoice();
-          const loaded = yield* reads.load(WS, inv.id, { deliveries: [] });
+          const loaded = yield* reads.load(WS, inv.id);
           const bytes = yield* reads.render(loaded.view, { template: "classic", language: "cs" });
           return [loaded, bytes, yield* Effect.flip(reads.load(WORKSPACE_B, inv.id))] as const;
         }),
