@@ -930,6 +930,20 @@ export const selftest = async (tools: Pick<Toolchain, "jar" | "java">): Promise<
   lines.push(
     `${initialOk ? "ok  " : "FAIL"} classifies an initial-state property violation: ${describe(initial.outcome)}`,
   );
+  // A progress line reports fewer states than the completion line; the final count must win.
+  const progressed = classifyTlc(
+    0,
+    [
+      "Progress(3) at 2026-01-01 00:00:00: 10 states generated (10 s/min), 7 distinct states found, 2 states left on queue.",
+      "Model checking completed. No error has been found.",
+      "25 states generated, 19 distinct states found, 0 states left on queue.",
+    ].join("\n"),
+  );
+  const progressedOk = progressed.verdict === "pass" && progressed.states === "19";
+  ok &&= progressedOk;
+  lines.push(
+    `${progressedOk ? "ok  " : "FAIL"} reports the final distinct-state count, not a progress line's: ${describe(progressed)}`,
+  );
   // Coloured bun output (FORCE_COLOR) still parses as a passing replay.
   const coloured = await runReplayCheck(
     selftestCheck({ kind: "replay", replay: [`${SELFTEST}/imports.replay.test.ts`] }),
