@@ -259,6 +259,11 @@ const DIFF_FIELDS = [
   "settlement",
 ] as const satisfies ReadonlyArray<keyof DocumentRecord>;
 
+/** Caller-given terms audited next to their resolved values (a due term can change alone). */
+const GIVEN_DIFF_FIELDS = ["due", "bankAccount"] as const satisfies ReadonlyArray<
+  keyof GivenFields
+>;
+
 const encodeRecord = Schema.encodeUnknownSync(Schema.toCodecJson(DocumentRecordSchema));
 const encodeTotals = (totals: DocumentRecord["totals"]) =>
   JSON.stringify(Schema.encodeUnknownSync(Schema.toCodecJson(VatBreakdown))(totals));
@@ -267,11 +272,20 @@ const encodeTotals = (totals: DocumentRecord["totals"]) =>
 export const diffRecords = (before: DocumentRecord, after: DocumentRecord) => {
   const a = encodeRecord(before) as Record<string, unknown>;
   const b = encodeRecord(after) as Record<string, unknown>;
-  return DIFF_FIELDS.flatMap((path) =>
-    JSON.stringify(a[path]) === JSON.stringify(b[path])
-      ? []
-      : [{ path, before: a[path] ?? null, after: b[path] ?? null }],
-  );
+  const ga = (a.given ?? {}) as Record<string, unknown>;
+  const gb = (b.given ?? {}) as Record<string, unknown>;
+  return [
+    ...DIFF_FIELDS.flatMap((path) =>
+      JSON.stringify(a[path]) === JSON.stringify(b[path])
+        ? []
+        : [{ path, before: a[path] ?? null, after: b[path] ?? null }],
+    ),
+    ...GIVEN_DIFF_FIELDS.flatMap((field) =>
+      JSON.stringify(ga[field]) === JSON.stringify(gb[field])
+        ? []
+        : [{ path: `given.${field}`, before: ga[field] ?? null, after: gb[field] ?? null }],
+    ),
+  ];
 };
 
 const patchKeys = (patch: DocumentPatch) =>
@@ -356,11 +370,7 @@ const lightEdit = (row: DocumentRecord, patch: DocumentPatch, number: string | n
       issuedOn,
       dueOn,
       number,
-      // A Credit Note keeps the corrected document's payment reference.
-      variableSymbol:
-        row.kind === "credit_note"
-          ? row.variableSymbol
-          : (given.variableSymbol ?? digitsOf(number)),
+      variableSymbol: given.variableSymbol ?? digitsOf(number),
     } satisfies DocumentRecord;
   });
 
@@ -419,19 +429,19 @@ export const editIssued = (row: DocumentRecord, patch: DocumentPatch) =>
       const refresh = patch.refreshParties === true;
       const composed = yield* compose(row.workspaceId, spec, {
         today,
-        ...(refresh
-          ? {}
-          : {
-              freeze: {
-                contact: spec.contactId === row.contactId ? row.contact : undefined,
-                issuer: row.issuer,
-                currency: row.currency,
-                taxableSupplyOn: row.taxableSupplyOn,
-                fx: row.fx,
-                fxOverride: row.fxOverride,
-                paymentRounding: row.paymentRounding,
-              },
-            }),
+        // Tax results stay frozen even when the parties are refreshed (D6 eligibility,
+        // amounts owed); only the printed particulars follow `refreshParties`.
+        freeze: {
+          contact: !refresh && spec.contactId === row.contactId ? row.contact : undefined,
+          issuer: refresh ? undefined : row.issuer,
+          bankAccount: refresh ? undefined : row.issuer.bankAccount,
+          currency: row.currency,
+          taxableSupplyOn: row.taxableSupplyOn,
+          regime: row.issuer.regime,
+          fx: row.fx,
+          fxOverride: row.fxOverride,
+          paymentRounding: row.paymentRounding,
+        },
       });
       // D3a: whatever moved them (prices incl. VAT, rate, Contact, refreshed regime), the
       // amounts another document relies on stay as issued.
@@ -582,8 +592,9 @@ export const cancel = (id: DocumentId, input: CancelInput, opts?: RequestOptions
           });
         }
 
+        // Fully credited: nothing is left to void (D6), whatever the classification.
+        if (row.settlement === "credited") return yield* illegal();
         if (row.taxDocument) {
-          if (row.settlement === "credited") return yield* illegal();
           const earlier = yield* repo.getMany(
             workspaceId,
             row.links.filter((l) => l.relation === "corrected_by").map((l) => l.id),

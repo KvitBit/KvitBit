@@ -9,7 +9,7 @@ import type {
   RequestKey,
 } from "@kvitbit/domain/contract";
 import { Conflict, Documents, Forbidden, Invalid } from "@kvitbit/domain/contract";
-import { Effect, Exit, Schema } from "effect";
+import { BigDecimal, Effect, Exit, Schema } from "effect";
 import { VatMath } from "../../../src/engines/vat";
 import type {
   ContactSnapshotRecord,
@@ -39,6 +39,7 @@ import {
   DE_BUYER,
   dec,
   EUR,
+  EUR_ACCOUNT,
   invoiceInput,
   issuer,
   scenario,
@@ -977,5 +978,156 @@ describe("diff council follow-ups", () => {
       ),
     );
     expect(related.map((r) => [r.relation, r.number])).toEqual([["corrects", "2026-0001"]]);
+  });
+});
+
+describe("review round 1 follow-ups", () => {
+  test("a credited document stays issued: refreshParties keeps its tax classification", async () => {
+    const [refreshed, again] = ok(
+      await run(
+        Effect.gen(function* () {
+          const d = yield* docs;
+          const f = yield* DocumentFixtures;
+          const view = yield* issueInvoice();
+          const { document } = yield* d.cancel(view.id, { reason: "x" });
+          yield* f.putIssuer(issuer(WS, "non_vat_payer", { seriesByKind: {} }));
+          const refreshed = yield* d.edit(view.id, { refreshParties: true }, document.revision);
+          return [refreshed, yield* Effect.flip(d.cancel(view.id, { reason: "y" }))] as const;
+        }),
+      ),
+    );
+    expect(refreshed.taxDocument).toBe(true);
+    expect(refreshed.status).toBe("issued");
+    expect(refreshed.settlement).toBe("credited");
+    expect(again).toEqual(illegal);
+  });
+
+  test("refreshParties keeps the issued rounding and amount owed", async () => {
+    const [before, after] = ok(
+      await run(
+        Effect.gen(function* () {
+          const d = yield* docs;
+          const f = yield* DocumentFixtures;
+          const view = yield* issueInvoice({
+            lines: [{ description: "Drobnost", unitPrice: dec("1.1") }],
+          });
+          yield* f.putIssuer({
+            ...issuer(WS, "vat_payer", { seriesByKind: {} }),
+            paymentRounding: "whole_unit",
+          });
+          return [view, yield* d.edit(view.id, { refreshParties: true }, view.revision)] as const;
+        }),
+      ),
+    );
+    expect(str(before.totals.gross.amount)).toBe("1.33");
+    expect(str(after.totals.gross.amount)).toBe("1.33");
+  });
+
+  test("a bank account in another currency is Invalid on both edit paths", async () => {
+    const [alone, withContact] = ok(
+      await run(
+        Effect.gen(function* () {
+          const d = yield* docs;
+          const view = yield* issueInvoice();
+          return [
+            yield* Effect.flip(d.edit(view.id, { bankAccount: EUR_ACCOUNT }, view.revision)),
+            yield* Effect.flip(
+              d.edit(view.id, { bankAccount: EUR_ACCOUNT, contact: CZ_BUYER }, view.revision),
+            ),
+          ] as const;
+        }),
+      ),
+    );
+    for (const e of [alone, withContact]) {
+      expect(e as unknown).toMatchObject({
+        _tag: "Invalid",
+        issues: [{ path: ["bankAccount"], params: { reason: "currency_mismatch" } }],
+      });
+    }
+  });
+
+  test("a renumbered Credit Note's variable symbol follows its number (D4)", async () => {
+    const [before, after] = ok(
+      await run(
+        Effect.gen(function* () {
+          const d = yield* docs;
+          const repo = yield* DocumentsRepo;
+          const { creditNote } = yield* d.cancel((yield* issueInvoice()).id, { reason: "x" });
+          const cn = creditNote as DocumentView;
+          const before = (yield* repo.get(WS, cn.id)).variableSymbol;
+          yield* d.edit(cn.id, { number: "OD-777" }, cn.revision);
+          return [before, (yield* repo.get(WS, cn.id)).variableSymbol] as const;
+        }),
+      ),
+    );
+    expect([before, after]).toEqual(["20260001", "777"]);
+  });
+
+  test("a changed due term is audited even when the due date stays", async () => {
+    const changes = ok(
+      await run(
+        Effect.gen(function* () {
+          const d = yield* docs;
+          const view = yield* issueInvoice();
+          yield* d.edit(view.id, { due: { on: "2026-12-07" as IsoDate } }, view.revision);
+          return (yield* d.history(view.id)).at(-1)?.changes;
+        }),
+      ),
+    );
+    expect(changes).toEqual([
+      { path: "given.due", before: { inDays: 14 }, after: { on: "2026-12-07" } },
+    ]);
+  });
+
+  test("a CZK VAT residual stays in the remainder until credited", () => {
+    const bucket = (base: string, vat: string, czk: string) => ({
+      treatment: "standard" as const,
+      ratePercent: dec("21"),
+      base: dec(base),
+      vat: dec(vat),
+      gross: BigDecimal.sum(dec(base), dec(vat)),
+      vatCzk: dec(czk),
+    });
+    const original = { totals: VatMath.fromBuckets([bucket("1", "0.21", "0.49")], EUR) };
+    const partial = { totals: VatMath.fromBuckets([bucket("-1", "-0.21", "-0.48")], EUR) };
+    const spec = remainderSpec(
+      {
+        ...original,
+        lines: [],
+        number: "2026-0001",
+        language: "cs",
+        currency: EUR,
+      } as never,
+      [partial as never],
+    );
+    expect(spec.totals.buckets.map((b) => b.vatCzk && str(b.vatCzk))).toEqual(["-0.01"]);
+    expect(isFullyCredited(original as never, [partial as never])).toBe(false);
+    expect(
+      isFullyCredited(original as never, [partial as never, { totals: spec.totals } as never]),
+    ).toBe(true);
+  });
+
+  test("issue with send rolls back numbering, audit and the request log when sending fails", async () => {
+    const [failed, draft, history, retried] = ok(
+      await run(
+        Effect.gen(function* () {
+          const d = yield* docs;
+          const key = { requestKey: "issue-send" as RequestKey };
+          const created = yield* d.createDraft(invoiceInput());
+          const from = { draft: created.id, expectedRevision: 1 };
+          // The sender stub dies (stage 2 delivers): everything since the row lock reverts.
+          const failed = yield* Effect.exit(d.issue(from, { ...key, send: {} }));
+          const draft = yield* d.get(created.id);
+          const history = (yield* d.history(created.id)).map((e) => e.action);
+          // Same key, other payload: no request-log row survived, so this runs fresh.
+          const retried = yield* d.issue(from, key);
+          return [Exit.isFailure(failed), draft, history, retried.number] as const;
+        }),
+      ),
+    );
+    expect(failed).toBe(true);
+    expect([draft.status, draft.number, draft.revision]).toEqual(["draft", null, 1]);
+    expect(history).toEqual(["document.create"]);
+    expect(retried).toBe("2026-0001");
   });
 });

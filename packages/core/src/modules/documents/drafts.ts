@@ -15,6 +15,7 @@ import { applyPatch, compose, specFromInput, specFromRecord } from "./compose";
 import type { DocumentRecord } from "./record";
 import { DocumentsRepo } from "./repo";
 import { newDraftRecord, now, viewOf } from "./support";
+import { guard } from "./transitions";
 import { DocumentViewCodec, toView } from "./view";
 
 /**
@@ -76,9 +77,7 @@ export const discardDraft = (id: DocumentId, expectedRevision: number) =>
     yield* store.transaction(
       Effect.gen(function* () {
         const row = yield* repo.getForUpdate(workspaceId, id, expectedRevision);
-        if (row.status !== "draft") {
-          return yield* new Conflict({ reason: "illegal_transition" });
-        }
+        yield* guard(row, "discard");
         yield* repo.remove(workspaceId, id, row.revision);
         yield* appendAudit({
           workspaceId,

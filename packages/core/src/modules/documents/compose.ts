@@ -120,22 +120,20 @@ export interface ComposeOptions {
   /** Prague today (default for `issuedOn`). */
   readonly today: IsoDate;
   /**
-   * Printed particulars to keep instead of fresh snapshots (rule D10: an issued document keeps
-   * them unless `refreshParties`). `contact` is left out when the edit changes the Contact.
-   * The frozen bank account (or its absence) is kept while the currency is unchanged and no
-   * other account is given; the regime and treatments still come from the current Workspace and Contact.
+   * An issued document's frozen values (rule D10). Printed particulars: `contact` / `issuer`
+   * snapshots are kept when given (left out for a new Contact or `refreshParties`); the bank
+   * account (`bankAccount`, null = none) is kept while the currency is unchanged and no other
+   * account is given (left out = pick afresh). Tax results are kept whatever the parties:
+   * the regime and the rate (`fx`) while the tax point, currency and manual rate are the same,
+   * and the whole-unit payment rounding always. VAT checks use the kept buyer.
    */
   readonly freeze?: {
     readonly contact?: ContactSnapshotRecord | undefined;
-    readonly issuer: IssuerSnapshotRecord;
-    /** The frozen document's currency: its bank account (or none) is kept in it. */
+    readonly issuer?: IssuerSnapshotRecord | undefined;
+    readonly bankAccount?: BankAccountRecord | null | undefined;
     readonly currency: CurrencyCode;
-    /**
-     * The issued tax results, kept while their inputs are unchanged: the regime and the rate
-     * (`fx`) while the tax point, currency and manual rate are the same, and the whole-unit
-     * payment rounding always.
-     */
     readonly taxableSupplyOn: IsoDate | null;
+    readonly regime: TaxRegime;
     readonly fx: FxRecord | null;
     readonly fxOverride: FxOverride | null;
     readonly paymentRounding: PaymentRounding;
@@ -414,11 +412,6 @@ const sameOverride = (a: FxOverride | null, b: FxOverride | null) =>
     ? a === b
     : BigDecimal.equals(a.manual.rate, b.manual.rate) && a.manual.quantity === b.manual.quantity;
 
-const issuerSnapshot = (
-  issuer: IssuerForDocument,
-  bankAccount: BankAccountRecord | null,
-): IssuerSnapshotRecord => ({ ...issuer.party, regime: issuer.regime, bankAccount });
-
 export const compose = (
   workspaceId: WorkspaceId,
   spec: DocumentSpec,
@@ -436,7 +429,7 @@ export const compose = (
     const frozen = options.freeze;
     const samePoint = frozen !== undefined && frozen.taxableSupplyOn === taxPoint;
     // D10: an issued document's tax results follow its frozen parties, not live changes.
-    const regime = samePoint ? frozen.issuer.regime : issuer.regime;
+    const regime = samePoint ? frozen.regime : issuer.regime;
     const buyer: ContactForDocument =
       frozen?.contact === undefined
         ? contact
@@ -506,16 +499,26 @@ export const compose = (
       seriesId = series.id;
     }
 
+    const kept = frozen?.bankAccount;
     const account =
-      frozen !== undefined &&
-      frozen.currency === currency &&
-      (given.bankAccount === undefined || given.bankAccount === frozen.issuer.bankAccount?.id)
-        ? frozen.issuer.bankAccount === null
+      kept !== undefined &&
+      frozen?.currency === currency &&
+      (given.bankAccount === undefined || given.bankAccount === kept?.id)
+        ? kept === null
           ? null
-          : { ...frozen.issuer.bankAccount, isDefault: false }
+          : { ...kept, isDefault: false }
         : pickBankAccount(issuer, currency, given.bankAccount);
     if (account === undefined) {
       return yield* new NotFound({ entity: "BankAccount", id: given.bankAccount ?? "" });
+    }
+    // Payments go to an account in the document currency.
+    if (account !== null && account.currency !== currency) {
+      return yield* invalid([
+        issue(["bankAccount"], "request.malformed", {
+          reason: "currency_mismatch",
+          currency: account.currency,
+        }),
+      ]);
     }
     const bankAccount: BankAccountRecord | null =
       account === null
@@ -599,9 +602,7 @@ export const compose = (
       kind,
       contactId: spec.contactId,
       contact: options.freeze?.contact ?? contactSnapshot(contact),
-      issuer: options.freeze
-        ? { ...options.freeze.issuer, regime, bankAccount }
-        : issuerSnapshot(issuer, bankAccount),
+      issuer: { ...(frozen?.issuer ?? issuer.party), regime, bankAccount },
       given,
       seriesId,
       currency,

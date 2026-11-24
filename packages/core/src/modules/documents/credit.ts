@@ -21,6 +21,7 @@ import type {
 import { Conflict } from "@kvitbit/domain/contract";
 import { BigDecimal, Effect } from "effect";
 import { ZERO } from "../../engines/decimal";
+import { Numbering } from "../../engines/numbering";
 import { VatMath } from "../../engines/vat";
 import { appendAudit } from "../../shared/audit";
 import { IdGenerator, newId } from "../../shared/ids";
@@ -44,10 +45,8 @@ export interface CreditSpec {
 }
 
 /** The `variableSymbol` default (core-ports 4.4): the digits of the number, at most 10. */
-export const digitsOf = (number: string | null): string | null => {
-  const digits = (number ?? "").replace(/\D/g, "").slice(-10);
-  return digits === "" ? null : digits;
-};
+export const digitsOf = (number: string | null): string | null =>
+  number === null ? null : Numbering.variableSymbol(number);
 
 const bucketKey = (b: Pick<VatBucket, "treatment" | "ratePercent">) =>
   `${b.treatment}|${BigDecimal.format(BigDecimal.normalize(b.ratePercent))}`;
@@ -141,7 +140,13 @@ export const remainderSpec = (
     };
   }
   const left = remainingBuckets(original, creditNotes).filter(
-    (b) => !(isZero(b.base) && isZero(b.vat) && isZero(b.gross)),
+    (b) =>
+      !(
+        isZero(b.base) &&
+        isZero(b.vat) &&
+        isZero(b.gross) &&
+        (b.vatCzk === null || isZero(b.vatCzk))
+      ),
   );
   const label = original.language === "cs" ? "Oprava" : "Correction of";
   return {
@@ -225,8 +230,8 @@ export const creditNoteRecord = (
   taxableSupplyOn: input.correctedOn,
   dueOn: input.issuedOn,
   pricesIncludeVat: input.credit.pricesIncludeVat,
-  // The refund's payment reference is the corrected document's.
-  variableSymbol: original.variableSymbol ?? digitsOf(original.number),
+  // D4 / core-ports 4.4: the digits of its own number (follows a later override).
+  variableSymbol: digitsOf(number.number),
   orderNumber: original.orderNumber,
   lines: number.lines,
   totals: input.credit.totals,
