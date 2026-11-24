@@ -260,24 +260,23 @@ const DIFF_FIELDS = [
 ] as const satisfies ReadonlyArray<keyof DocumentRecord>;
 
 /**
- * Every caller-given field and the resolved field it drives. A given value can change while
- * the resolved one stays (a due term with the same date, an explicit variable symbol equal to
- * the derived one): then the audit records `given.<field>`, so no accepted edit has an empty
- * diff and later behaviour (the date no longer follows issuedOn, the symbol no longer follows
- * the number) is traceable.
+ * Caller-given fields, audited as `given.<field>` whenever they change, next to the resolved
+ * fields they drive: the term itself decides later behaviour (a fixed due date no longer
+ * follows issuedOn, an explicit symbol no longer follows the number), even when the resolved
+ * value stays the same.
  */
-const GIVEN_DIFF_FIELDS = {
-  currency: "currency",
-  issuedOn: "issuedOn",
-  taxableSupplyOn: "taxableSupplyOn",
-  due: "dueOn",
-  language: "language",
-  series: "seriesId",
-  bankAccount: "issuer",
-  note: "note",
-  paymentMethod: "paymentMethod",
-  variableSymbol: "variableSymbol",
-} as const satisfies Record<keyof GivenFields, keyof DocumentRecord>;
+const GIVEN_DIFF_FIELDS = [
+  "currency",
+  "issuedOn",
+  "taxableSupplyOn",
+  "due",
+  "language",
+  "series",
+  "bankAccount",
+  "note",
+  "paymentMethod",
+  "variableSymbol",
+] as const satisfies ReadonlyArray<keyof GivenFields>;
 
 const encodeRecord = Schema.encodeUnknownSync(Schema.toCodecJson(DocumentRecordSchema));
 const encodeTotals = (totals: DocumentRecord["totals"]) =>
@@ -294,8 +293,8 @@ export const diffRecords = (before: DocumentRecord, after: DocumentRecord) => {
     ...DIFF_FIELDS.flatMap((path) =>
       same(a[path], b[path]) ? [] : [{ path, before: a[path] ?? null, after: b[path] ?? null }],
     ),
-    ...Object.entries(GIVEN_DIFF_FIELDS).flatMap(([field, resolved]) =>
-      same(ga[field], gb[field]) || !same(a[resolved], b[resolved])
+    ...GIVEN_DIFF_FIELDS.flatMap((field) =>
+      same(ga[field], gb[field])
         ? []
         : [{ path: `given.${field}`, before: ga[field] ?? null, after: gb[field] ?? null }],
     ),

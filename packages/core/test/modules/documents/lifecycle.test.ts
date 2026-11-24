@@ -255,7 +255,7 @@ describe("issue", () => {
       ["document.edit", 2],
       ["document.edit", 3],
     ]);
-    expect(history[1]?.changes.map((c) => c.path)).toEqual(["note"]);
+    expect(history[1]?.changes.map((c) => c.path)).toEqual(["note", "given.note"]);
     expect(history[2]?.changes.map((c) => c.path)).toEqual(["contact", "issuer"]);
   });
 });
@@ -1166,5 +1166,33 @@ describe("review round 2 follow-ups", () => {
       ),
     );
     expect(symbol).toBe("20260001");
+  });
+});
+
+describe("review round 3 follow-ups", () => {
+  test("a due term change is audited with the due date, so fixed and relative terms differ", async () => {
+    const [fixed, relative] = ok(
+      await run(
+        Effect.gen(function* () {
+          const d = yield* docs;
+          const a = yield* issueInvoice();
+          const b = yield* issueInvoice();
+          yield* d.edit(a.id, { due: { on: "2026-12-08" as IsoDate } }, a.revision);
+          yield* d.edit(b.id, { due: { inDays: 15 } }, b.revision);
+          return [
+            (yield* d.history(a.id)).at(-1)?.changes,
+            (yield* d.history(b.id)).at(-1)?.changes,
+          ] as const;
+        }),
+      ),
+    );
+    expect(fixed).toEqual([
+      { path: "dueOn", before: "2026-12-07", after: "2026-12-08" },
+      { path: "given.due", before: { inDays: 14 }, after: { on: "2026-12-08" } },
+    ]);
+    expect(relative).toEqual([
+      { path: "dueOn", before: "2026-12-07", after: "2026-12-08" },
+      { path: "given.due", before: { inDays: 14 }, after: { inDays: 15 } },
+    ]);
   });
 });
