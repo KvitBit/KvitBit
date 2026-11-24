@@ -13,6 +13,9 @@
  *   its savepoints is open (a SQL statement there would be rolled back with the savepoint), and
  *   a transaction that ends while a savepoint it started is still open (that transaction then
  *   rolls back).
+ * - The `number_reservations_document_fk` foreign key: `reservations.tryReserve` of a free
+ *   number for a document with no row, and removing a document a reservation references, are
+ *   defects, as Postgres aborts the transaction.
  * Rows are treated as immutable values; never mutate a row after storing it. Audit entries are
  * stored as JSON, as the SQL table stores them.
  */
@@ -85,6 +88,9 @@ const uniqueKey = <A extends Row>(row: A, constraint: UniqueConstraint<A>): stri
 
 const scopeKey = (scope: RequestScope) =>
   scope._tag === "Workspace" ? `w:${scope.workspaceId}` : `u:${scope.userId}`;
+
+/** The documents collection's name (`DocumentsTable` in modules/documents/record.ts). */
+const DOCUMENTS_TABLE = "documents";
 
 const defect = (message: string) => Effect.die(new Error(`CoreStore: ${message}`));
 
@@ -315,6 +321,15 @@ export const makeMemoryStore: Effect.Effect<MemoryStore> = Effect.sync(() => {
         write("remove", (): Effect.Effect<void, NotFoundError | Conflict> => {
           const found = locate(workspaceId, id, expectedRevision);
           if (isError(found)) return Effect.fail(found);
+          // `number_reservations_document_fk` (no ON DELETE): a reserved number keeps its row.
+          if (
+            def.name === DOCUMENTS_TABLE &&
+            [...state.reservations.values()].some(
+              (r) => r.workspaceId === workspaceId && r.documentId === id,
+            )
+          ) {
+            return defect(`number_reservations_document_fk: document ${id} has a reserved number`);
+          }
           rows().delete(id);
           return Effect.void;
         }),
@@ -388,6 +403,15 @@ export const makeMemoryStore: Effect.Effect<MemoryStore> = Effect.sync(() => {
         write("reservations.tryReserve", () => {
           const k = JSON.stringify([reservation.workspaceId, reservation.kind, reservation.number]);
           if (state.reservations.has(k)) return Effect.succeed(false);
+          // `number_reservations_document_fk` (not deferrable): a free key for a document whose
+          // row does not exist yet fails the statement, and Postgres aborts the transaction. A
+          // taken key inserts nothing, so no foreign key is checked.
+          const document = table(DOCUMENTS_TABLE).get(reservation.documentId);
+          if (document === undefined || document.workspaceId !== reservation.workspaceId) {
+            return defect(
+              `number_reservations_document_fk: ${reservation.number} reserved for document ${reservation.documentId}, which has no row`,
+            );
+          }
           state.reservations.set(k, reservation);
           return Effect.succeed(true);
         }),

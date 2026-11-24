@@ -377,8 +377,8 @@ describe("payments seam", () => {
     expect(result.settled.settlement).toBe("partially_paid");
     expect(proforma.settlement).toBe("partially_paid");
     expect(proforma.related.map((r) => [r.relation, r.id])).toEqual([["tax_document_for", ptd.id]]);
-    // settle and the PTD link each bump the Proforma's revision.
-    expect(proforma.revision).toBe(3);
+    // Issued from input at revision 2; settle and the PTD link each bump it.
+    expect(proforma.revision).toBe(4);
     expect(ptdHistory.map((e) => e.action)).toEqual(["document.issue"]);
     expect(pHistory.map((e) => e.action)).toEqual([
       "document.issue",

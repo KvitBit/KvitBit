@@ -719,6 +719,16 @@
             "name": "NoOrphanReservation"
           },
           "description": "a rollback leaves its reservations behind as orphans"
+        },
+        {
+          "name": "reserve-before-insert",
+          "config": "formal/numbering/Numbering_mutant_reserve_before_insert.cfg",
+          "expect": "violation",
+          "violates": {
+            "kind": "invariant",
+            "name": "NoFkAbort"
+          },
+          "description": "an issue from input reserves its number before its document row exists, so number_reservations_document_fk aborts it"
         }
       ],
       "timeoutSeconds": 120,
@@ -749,6 +759,10 @@
           "sha256": "14ad42c41aa69a4ef1544ddf013f4484dc0f83e1e58bcb29663116ad4ea1c234"
         },
         {
+          "path": "packages/core/src/modules/documents/support.ts",
+          "sha256": ""
+        },
+        {
           "path": "packages/db/drizzle/20261123175822_init/migration.sql",
           "sha256": "24d0444ee41ff55435024cba7e373ef8f89d2cfb82a2f13b218825614259832c"
         }
@@ -768,15 +782,17 @@
         "NUMBER_PER_KIND",
         "number_reservations_pkey",
         "number_reservations_document_fk",
-        "numbering_counters_pkey"
+        "numbering_counters_pkey",
+        "insertNumbered",
+        "withDraftRow"
       ],
-      "bounds": "base: 2 issues from stored drafts, 1 override, 2 periods, MaxSeq 3, 1 pre-issued document, a rollback at any statement that is not waiting, deadlock checked; 29,127 distinct states, exhaustive within the bound. wide: adds 1 issue from input; 324,673 distinct states. A second override is outside every bound (over 28.6 million states)",
+      "bounds": "base: 1 issue from a stored draft and 1 issue from input, 1 override, 2 periods, MaxSeq 3, 1 pre-issued document, a rollback at any statement that is not waiting, deadlock checked; 22,845 distinct states, exhaustive within the bound. wide: 2 issues from stored drafts and 1 issue from input; 527,834 distinct states. A second override is outside every bound (over 28.6 million states)",
       "assumptions": [
         "One Workspace, one DocumentKind, one YYYY-NNNN series: reservation keys include workspace and kind, and distinct sequences format to distinct numbers (Numbering.format, covered by verify-vat-numbering-math)",
-        "Steps are Postgres READ COMMITTED statements on the committed schema: counters.lock is SELECT ... FOR UPDATE on numbering_counters; reservations.tryReserve is INSERT ... ON CONFLICT DO NOTHING on number_reservations_pkey, which waits for an open inserter of the same key, and a free key for a document without a row fails number_reservations_document_fk (no Postgres CoreStore exists yet; the in-memory store serializes whole transactions and has no foreign keys)",
+        "Steps are Postgres READ COMMITTED statements on the committed schema: counters.lock is SELECT ... FOR UPDATE on numbering_counters; reservations.tryReserve is INSERT ... ON CONFLICT DO NOTHING on number_reservations_pkey, which waits for an open inserter of the same key, and a free key for a document without a row would fail number_reservations_document_fk; an issue from input inserts its draft row first (IInsert), so that abort is unreachable (NoFkAbort). No Postgres CoreStore exists yet; the in-memory store serializes whole transactions and enforces number_reservations_document_fk",
         "A waiting transaction does not crash (no lock timeout), so a wait cycle is reported as a deadlock",
         "Manual override numbers range over the series' own number space; numbers outside it cannot meet the allocator",
-        "Not modeled: configure(nextNumber) raising the counter (an intended gap, W3), pattern changes, Credit Note, Payment Tax Document and correction numbering"
+        "Not modeled: configure(nextNumber) raising the counter (an intended gap, W3), pattern changes, Credit Note, Payment Tax Document, Final Invoice and correction numbering (same allocate behind the same insertNumbered order; their statement order on the committed schema is checked by packages/core/test/numberReservationFk.pglite.test.ts)"
       ],
       "toolVersions": {
         "tla2tools": "1.7.4",
@@ -819,6 +835,10 @@
         {
           "path": "packages/core/src/modules/documents/record.ts",
           "sha256": "14ad42c41aa69a4ef1544ddf013f4484dc0f83e1e58bcb29663116ad4ea1c234"
+        },
+        {
+          "path": "packages/core/src/modules/documents/support.ts",
+          "sha256": ""
         }
       ],
       "guardedSymbols": [
@@ -833,12 +853,14 @@
         "reserveNumber",
         "CoreStoreMemory.counters",
         "CoreStoreMemory.reservations.tryReserve",
-        "CoreStoreMemory.transaction"
+        "CoreStoreMemory.transaction",
+        "insertNumbered",
+        "withDraftRow"
       ],
-      "bounds": "11 hand-written serial traces (9 projections of Numbering.tla traces within the TLC bounds, 1 override of an override beyond them, 1 issue from input that commits only in memory) plus 100 seeded sampled traces of 6 steps checked against the model's serial transitions (property test, not exhaustive, not within a TLC bound)",
+      "bounds": "11 hand-written serial traces (10 projections of Numbering.tla traces within the TLC bounds, including an issue from input, and 1 override of an override beyond them) plus 100 seeded sampled traces of 6 steps checked against the model's serial transitions (property test, not exhaustive, not within a TLC bound)",
       "assumptions": [
-        "In-memory store: one top-level transaction at a time and no foreign keys, so only serial projections of model traces replay, with the foreign-key check passing; statement interleaving and the number_reservations_document_fk failure under Postgres are left to the pg-contention job",
-        "Documents are read back through Documents.get after each step; reservations are probed with tryReserve in a transaction that always rolls back"
+        "In-memory store: one top-level transaction at a time, so only serial projections of model traces replay; it enforces number_reservations_document_fk (a reservation for a document with no row, or removing a reserved document, is a defect). Statement interleaving under Postgres is left to the pg-contention job",
+        "Documents are read back through Documents.get after each step; reservations are probed with tryReserve for a stored probe draft in a transaction that always rolls back"
       ],
       "toolVersions": {
         "bun": "1.4.2"

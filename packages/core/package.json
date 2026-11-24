@@ -17,5 +17,8 @@
   "dependencies": {
     "@kvitbit/domain": "workspace:*",
     "effect": "4.1.4"
+  },
+  "devDependencies": {
+    "@electric-sql/pglite": "0.6.0"
   }
 }

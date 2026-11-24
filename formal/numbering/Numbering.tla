@@ -15,19 +15,23 @@
 (* Issue (Documents.issue, packages/core/src/modules/documents/            *)
 (*   lifecycle.ts:143-200 -> numbered:89 -> NumberingSeries.allocate,      *)
 (*   numbering/service.ts:353-381):                                        *)
-(*   IDocLock repo.lock(draft) + revision check (lifecycle.ts:163); an     *)
-(*            issue from input has no row yet and locks nothing            *)
+(*   IDocLock repo.lock(draft) + revision check (lifecycle.ts:163)         *)
+(*   IInsert  issue from input: repo.insert of the unnumbered draft row    *)
+(*            (support.ts withDraftRow, via insertNumbered); the new row   *)
+(*            is the transaction's own until commit, like a row lock       *)
 (*   ILock    store.counters.lock(key)  service.ts:361 (FOR UPDATE)        *)
 (*   ITry     format + reservations.tryReserve service.ts:362-376; taken   *)
-(*            -> sequence++; past MAX_COUNTER -> exhausted. For an issue   *)
-(*            from input the document row does not exist yet, so a free    *)
-(*            key fails number_reservations_document_fk (migration.sql:926,*)
-(*            SQLSTATE 23503) and the transaction aborts                   *)
+(*            -> sequence++; past MAX_COUNTER -> exhausted. A free key for *)
+(*            a document with no row yet would fail                        *)
+(*            number_reservations_document_fk (migration.sql:926, SQLSTATE *)
+(*            23503) and abort the transaction; IInsert makes that         *)
+(*            unreachable (NoFkAbort, mutant reserve_before_insert)        *)
 (*   ISet     store.counters.set(key, seq + 1) service.ts:377              *)
-(*   IWrite   repo.update (draft) / repo.insert (input) with the number;   *)
+(*   IWrite   repo.update of the draft row with the number (both paths);   *)
 (*            documents unique index NUMBER_PER_KIND (record.ts:236) ->    *)
 (*            Conflict{duplicate} (lifecycle.ts:178, 194)                  *)
-(*   ICommit  commit (the document's revision grows)                       *)
+(*   ICommit  commit (a draft's revision grows by one; an issue from input *)
+(*            ends at revision 2: insert at 1, then the update)            *)
 (* Override (Documents.edit, documents/service.ts:46-60 -> editIssued,     *)
 (*   lifecycle.ts:389-480 -> NumberingSeries.override, service.ts:383-395):*)
 (*   OStart   the client reads the document and sends its revision         *)
@@ -74,7 +78,7 @@ ASSUME DraftIssuers \subseteq Issuers
 ASSUME P0 \in Periods /\ MaxSeq \in Nat \ {0}
 ASSUME Mutant \in {"none", "no_reservation", "counter_kept_on_rollback",
                    "release_old_number", "override_moves_counter",
-                   "rollback_keeps_reservation"}
+                   "rollback_keeps_reservation", "reserve_before_insert"}
 
 Txs  == Issuers \cup Overriders
 Docs == {D0} \cup Issuers
@@ -111,7 +115,7 @@ Outcomes == {"open", "committed", "aborted", "conflict", "exhausted", "illegal",
              "unchanged", "revision_changed", "fk_violation"}
 
 TypeOK ==
-    /\ pc \in [Txs -> {"start", "lockdoc", "lock", "try", "set", "write",
+    /\ pc \in [Txs -> {"start", "lockdoc", "insert", "lock", "try", "set", "write",
                        "commit", "reserve", "update", "done"}]
     /\ per \in [Txs -> Periods \cup {None}]
     /\ seq \in [Txs -> 0..(MaxSeq + 1)]
@@ -196,13 +200,25 @@ IStart(t) ==
     /\ pc[t] = "start"
     /\ \E p \in Periods :
          /\ per' = [per EXCEPT ![t] = p]
-         /\ pc' = [pc EXCEPT ![t] = IF t \in DraftIssuers THEN "lockdoc" ELSE "lock"]
+         /\ pc' = [pc EXCEPT ![t] =
+                      IF t \in DraftIssuers THEN "lockdoc"
+                      ELSE IF Mutant = "reserve_before_insert" THEN "lock"
+                      ELSE "insert"]
     /\ UNCHANGED <<seq, saved, tgt, od, seen, old, outcome, counter, ctrLock, resv,
                    exists, docNum, docRev, pend, docLock, held, allocated>>
 
 IDocLock(t) ==
     /\ pc[t] = "lockdoc"
     /\ docLock[t] = None
+    /\ docLock' = [docLock EXCEPT ![t] = t]
+    /\ pc' = [pc EXCEPT ![t] = "lock"]
+    /\ UNCHANGED <<per, seq, saved, tgt, od, seen, old, outcome, counter, ctrLock,
+                   resv, exists, docNum, docRev, pend, held, allocated>>
+
+(* Issue from input: insert the unnumbered draft row before any allocation. No
+   other transaction can see or lock the uncommitted row; the inserter holds it. *)
+IInsert(t) ==
+    /\ pc[t] = "insert"
     /\ docLock' = [docLock EXCEPT ![t] = t]
     /\ pc' = [pc EXCEPT ![t] = "lock"]
     /\ UNCHANGED <<per, seq, saved, tgt, od, seen, old, outcome, counter, ctrLock,
@@ -228,7 +244,7 @@ ITry(t) ==
                  /\ UNCHANGED <<per, seq, saved, tgt, od, seen, old, outcome,
                                 counter, ctrLock, resv, exists, docNum, docRev,
                                 pend, docLock, held, allocated>>
-            ELSE IF resv[n] = Free /\ ~exists[t]
+            ELSE IF resv[n] = Free /\ ~exists[t] /\ docLock[t] # t
             THEN Rollback(t, "fk_violation")   \* no documents row to reference yet
             ELSE IF resv[n] = Free
             THEN /\ resv' = [resv EXCEPT ![n] = t]
@@ -270,7 +286,7 @@ ICommit(t) ==
        /\ held' = [held EXCEPT ![n] = @ \cup {t}]
        /\ allocated' = allocated \cup {n}
     /\ exists' = [exists EXCEPT ![t] = TRUE]
-    /\ docRev' = [docRev EXCEPT ![t] = @ + 1]
+    /\ docRev' = [docRev EXCEPT ![t] = IF t \in DraftIssuers THEN @ + 1 ELSE 2]
     /\ ctrLock' = [ctrLock EXCEPT ![per[t]] = None]
     /\ docLock' = [d \in Docs |-> IF docLock[d] = t THEN None ELSE docLock[d]]
     /\ pend' = [pend EXCEPT ![t] = None]
@@ -368,7 +384,7 @@ Crash(t) ==
 Terminated == \A t \in Txs : pc[t] = "done"
 
 Next ==
-    \/ \E t \in Issuers : IStart(t) \/ IDocLock(t) \/ ILock(t) \/ ITry(t)
+    \/ \E t \in Issuers : IStart(t) \/ IDocLock(t) \/ IInsert(t) \/ ILock(t) \/ ITry(t)
                           \/ ISet(t) \/ IWrite(t) \/ ICommit(t)
     \/ \E o \in Overriders : OStart(o) \/ OLock(o) \/ OReserve(o) \/ OUpdate(o)
                              \/ OCommit(o)
@@ -415,6 +431,10 @@ NoOrphanReservation == \A n \in Nums : resv[n] = Committed => held[n] # {}
 (* The allocator never offers an issue a number another document carries, so the
    documents NUMBER_PER_KIND index never has to reject an issue. *)
 IssueNeverHitsIndex == \A t \in Issuers : outcome[t] # "conflict"
+
+(* tryReserve never aborts the transaction: every document has its row before its
+   number is reserved (number_reservations_document_fk, CoreStore.ts tryReserve). *)
+NoFkAbort == \A t \in Issuers : outcome[t] # "fk_violation"
 
 (* An override step never changes a counter (D4). *)
 OverrideKeepsCounter ==

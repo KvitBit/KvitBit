@@ -1,12 +1,13 @@
 /** Helpers shared by the Documents method files. */
 import type { DocumentId, DocumentView, IsoDate, WorkspaceId } from "@kvitbit/domain/contract";
+import { Conflict } from "@kvitbit/domain/contract";
 import { Clock, Data, Effect } from "effect";
 import { pragueDate } from "../../engines/calendar";
 import { ZERO } from "../../engines/decimal";
-import { CoreStore, type StoreUnavailable } from "../../store/CoreStore";
+import { CoreStore, type StoreUnavailable, type UniqueViolation } from "../../store/CoreStore";
 import { DocumentActivity } from "./activity";
 import type { Composed } from "./compose";
-import type { DocumentRecord } from "./record";
+import { type DocumentRecord, NUMBER_PER_KIND } from "./record";
 import { DocumentsRepo } from "./repo";
 import type { RelatedDocument, ViewContext } from "./view";
 import { toView } from "./view";
@@ -117,4 +118,59 @@ export const rolledBack = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
     store
       .transaction(Effect.andThen(effect, Effect.fail(new PreviewRollback())))
       .pipe(Effect.catchTag("PreviewRollback", () => Effect.void)),
+  );
+
+/** A new document as its unnumbered draft row: `status` draft, `number` and `issuedAt` null. */
+export const unnumbered = (row: DocumentRecord): DocumentRecord => ({
+  ...row,
+  status: "draft",
+  number: null,
+  issuedAt: null,
+});
+
+/** The numbered write hit `NUMBER_PER_KIND`: `Conflict{duplicate}`; any other index is a defect. */
+const numberTaken = (e: UniqueViolation) =>
+  e.constraint === NUMBER_PER_KIND
+    ? Effect.fail(new Conflict({ reason: "duplicate" }))
+    : Effect.die(e);
+
+/**
+ * Inserts a new document's unnumbered draft row (revision 1), then runs `effect` with it.
+ * `number_reservations_document_fk` is not deferrable, so a number for a new document can only
+ * be reserved after its row exists (rule D1); `effect` allocates for `row.id`, locking the
+ * counter after the row (S4). The row is new and unnumbered, so a unique violation of its insert
+ * is a defect.
+ */
+export const withDraftRow = <A, E, R>(
+  row: DocumentRecord,
+  effect: (draft: DocumentRecord) => Effect.Effect<A, E, R>,
+) =>
+  Effect.flatMap(DocumentsRepo, (repo) =>
+    repo.insert(unnumbered(row)).pipe(
+      Effect.catchTag("UniqueViolation", (e) => Effect.die(e)),
+      Effect.flatMap(effect),
+    ),
+  );
+
+/**
+ * Stores a new numbered document: inserts `row` unnumbered (`withDraftRow`), runs `numberIt`
+ * (allocate for `row.id`, return the issued record) and stores its result over the draft by
+ * compare-and-set, so the issued row is at revision 2. A `NUMBER_PER_KIND` violation is
+ * `Conflict{duplicate}`. The transaction inserted the row and holds it, so a missing row or a
+ * changed revision on the update is a defect.
+ */
+export const insertNumbered = <E, R>(
+  row: DocumentRecord,
+  numberIt: Effect.Effect<DocumentRecord, E, R>,
+) =>
+  withDraftRow(row, (draft) =>
+    Effect.gen(function* () {
+      const repo = yield* DocumentsRepo;
+      const issued = yield* numberIt;
+      return yield* repo.update(issued, draft.revision).pipe(
+        Effect.catchTag("NotFound", (e) => Effect.die(e)),
+        Effect.catchTag("Conflict", (e) => Effect.die(e)),
+        Effect.catchTag("UniqueViolation", numberTaken),
+      );
+    }),
   );
