@@ -11,8 +11,8 @@ import type {
   ThemeSource,
   ThemeWarning,
 } from "@kvitbit/api-contract";
-import { hexFromRgb } from "./color/utils";
 import { auditTheme } from "./contrast-check";
+import { DEFAULT_THEME_DATA } from "./default-theme.data";
 import { type ExtendedInput, extendedScheme } from "./extended";
 import { PresetDefinitions } from "./presets";
 import {
@@ -35,32 +35,22 @@ export const withContrastWarnings = (
   return warnings.length > 0 ? { source, schemes, warnings } : { source, schemes };
 };
 
-/** The primary extended colours harmonize toward: the recipe's tone-40 primary. */
-const harmonizationTarget = (recipe: ThemeRecipe): Hex =>
-  hexFromRgb(palettesOf(recipe).primary.tone(40));
-
 /**
- * All six schemes for a recipe; `rolesFor` lets a file supply its own role maps. Extended
- * colours harmonize toward the recipe's tone-40 primary, or toward a supplied scheme's own
- * `primary` when the file provides that scheme.
+ * All six schemes for a recipe; `rolesFor` lets a file supply its own role maps. Each scheme's
+ * extended colours harmonize toward that scheme's own `primary` (DESIGN.md: "harmonized against
+ * the active scheme's primary").
  */
 export const schemesOf = (
   recipe: ThemeRecipe,
   options: {
     readonly rolesFor?: (variant: SchemeVariant) => RoleMap | undefined;
     readonly extended?: Partial<Record<ExtendedRole, ExtendedInput>>;
-    /** Target for schemes the recipe generates (default: its tone-40 primary). */
-    readonly harmonizeToward?: Hex;
   } = {},
 ): ResolvedSchemes => {
   const palettes = palettesOf(recipe);
-  const target = options.harmonizeToward ?? harmonizationTarget(recipe);
   const scheme = (variant: SchemeVariant): ResolvedScheme => {
-    const supplied = options.rolesFor?.(variant);
-    return {
-      roles: supplied ?? schemeRoles(recipe, variant, palettes),
-      extended: extendedScheme(supplied?.primary ?? target, variant, options.extended),
-    };
+    const roles = options.rolesFor?.(variant) ?? schemeRoles(recipe, variant, palettes);
+    return { roles, extended: extendedScheme(roles.primary, variant, options.extended) };
   };
   const out = {} as Record<SchemeVariant, ResolvedScheme>;
   for (const v of SCHEME_VARIANTS) out[v] = scheme(v);
@@ -79,5 +69,10 @@ export const resolvePreset = (id: ThemePresetId): ResolvedTheme =>
 export const resolveSeed = (seed: Hex): ResolvedTheme =>
   resolveRecipe(seedRecipe(seed), { _tag: "Seed", seed });
 
-/** Kvitbit's default app theme: Graphite Atelier (spec 4.1 precedence step 4). */
-export const KvitbitDefaultTheme: ResolvedTheme = resolvePreset("graphite_atelier");
+/**
+ * Kvitbit's default app theme: Graphite Atelier (spec 4.1 precedence step 4). Checked in as
+ * generated data (spec 4.5) so first paint does no colour maths; a test re-resolves the preset
+ * and requires an exact match. Regenerate with
+ * `bun packages/ui-port/test/theme/generate-default-theme.ts`.
+ */
+export const KvitbitDefaultTheme: ResolvedTheme = DEFAULT_THEME_DATA;

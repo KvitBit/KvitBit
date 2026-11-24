@@ -55,6 +55,9 @@ export const MaterialThemeJson = Schema.Struct({
 });
 export type MaterialThemeJson = typeof MaterialThemeJson.Type;
 
+/** `uploads.themeJson.maxBytes` default (64 KB); callers pass the configured value. */
+export const MATERIAL_THEME_MAX_BYTES = 64 * 1024;
+
 export const MATERIAL_THEME_FILE_WARNINGS = [
   "missing_contrast_schemes",
   "unknown_roles_ignored",
@@ -224,17 +227,30 @@ export const parseMaterialThemeFile = (
  * schemes otherwise; extended colours from `extendedColors` (honouring `harmonized`) or the
  * built-in sources harmonized toward the file's seed.
  */
-export const resolveMaterialTheme = (json: unknown): Result.Result<ResolvedTheme, Invalid> =>
-  Result.map(decodeMaterialTheme(json), (d) =>
+export const resolveMaterialTheme = (
+  json: unknown,
+  maxBytes: number = MATERIAL_THEME_MAX_BYTES,
+): Result.Result<ResolvedTheme, Invalid> => {
+  // The structured path enforces the same encoded limit as the text parser (rule M1).
+  let encoded: string | undefined;
+  try {
+    encoded = JSON.stringify(json);
+  } catch {
+    return Result.fail(invalid(issue("theme.json_invalid")));
+  }
+  if (encoded === undefined) return Result.fail(invalid(issue("theme.json_invalid")));
+  if (utf8ByteLength(encoded) > maxBytes)
+    return Result.fail(invalid(issue("theme.too_large", [], { maxBytes: String(maxBytes) })));
+  return Result.map(decodeMaterialTheme(json), (d) =>
     withContrastWarnings(
       { _tag: "MaterialThemeBuilder", json },
       schemesOf(seedRecipe(d.seed), {
         rolesFor: (v) => d.roles[v],
         extended: d.extended,
-        harmonizeToward: d.roles.light?.primary ?? d.seed,
       }),
     ),
   );
+};
 
 /** Copy for a file warning (`theme.warning.<code>`). */
 export const fileWarningText = (

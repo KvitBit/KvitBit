@@ -13,13 +13,19 @@ import {
   type ThemeStyle,
 } from "@kvitbit/api-contract";
 import { Invalid } from "@kvitbit/domain/contract";
-import { Context, Effect, Layer, Option, Result } from "effect";
+import { Context, Effect, Layer, Option, Result, Schema } from "effect";
 import { isHex } from "./color/utils";
-import { CHECKED_ROLE_PAIRS, withContrast } from "./contrast-check";
+import { repairContrast } from "./contrast-check";
 import { type ExtendedScheme, extendedScheme } from "./extended";
 import { resolveMaterialTheme } from "./material-theme-json";
 import { KvitbitDefaultTheme, resolvePreset, resolveSeed, seedRecipe } from "./resolve";
-import { type RoleMap, type SchemeVariant, schemeRoles, variantOf } from "./scheme";
+import {
+  contrastLevelOf,
+  type RoleMap,
+  type SchemeVariant,
+  schemeRoles,
+  variantOf,
+} from "./scheme";
 import { StyleTokens } from "./style-tokens";
 
 // Resolution ---------------------------------------------------------------------------------
@@ -101,32 +107,40 @@ export const dynamicRoles = (input: DynamicColorInput): Result.Result<DynamicRol
   const dark = pickValid(input.dark);
   const seed = light.primary ?? dark.primary ?? KvitbitDefaultTheme.schemes.light.roles.primary;
   const recipe = seedRecipe(seed);
-  const complete = (variant: "light" | "dark", system: Partial<Record<M3ColorRole, Hex>>) => {
-    const roles: Record<M3ColorRole, Hex> = { ...schemeRoles(recipe, variant), ...system };
-    for (const pair of CHECKED_ROLE_PAIRS)
-      if (system[pair.foreground] === undefined && system[pair.background] !== undefined)
-        roles[pair.foreground] = withContrast(
-          roles[pair.foreground],
-          roles[pair.background],
-          pair.required,
-        ) as Hex;
-    return roles;
-  };
+  const complete = (variant: "light" | "dark", system: Partial<Record<M3ColorRole, Hex>>) =>
+    repairContrast(
+      { ...schemeRoles(recipe, variant), ...system },
+      new Set(Object.keys(system) as M3ColorRole[]),
+    ) as RoleMap;
   return Result.succeed({ light: complete("light", light), dark: complete("dark", dark) });
 };
 
 /**
  * Roles for any variant of a dynamic scheme. The system supplies only standard light and dark;
- * medium and high move each system colour by the tone step the generated scheme takes, keeping
- * its hue and chroma.
+ * medium and high move each colour by the tone step the generated scheme takes, keeping its hue
+ * and chroma, then repair any pair the shift left below AA.
  */
-export const dynamicSchemeRoles = (dynamic: DynamicRoles, variant: SchemeVariant): RoleMap =>
-  schemeRoles(
+export const dynamicSchemeRoles = (dynamic: DynamicRoles, variant: SchemeVariant): RoleMap => {
+  const roles = schemeRoles(
     { seed: dynamic.light.primary, overrides: { light: dynamic.light, dark: dynamic.dark } },
     variant,
   );
+  return contrastLevelOf(variant) === 0 ? roles : (repairContrast(roles) as RoleMap);
+};
 
 // ThemeEngine seam -----------------------------------------------------------------------------
+
+/**
+ * Transport failure of a non-local engine (offline, timeout, server error). Spec 4.4 types the
+ * port's error as ui-api's `UiError`, which is built concurrently; a remote layer carries it in
+ * `error` until integration narrows `ThemeEngineError` to `Invalid | UiError`.
+ */
+export class ThemeEngineUnavailable extends Schema.TaggedError<ThemeEngineUnavailable>()(
+  "ThemeEngineUnavailable",
+  { error: Schema.Unknown },
+) {}
+
+export type ThemeEngineError = Invalid | ThemeEngineUnavailable;
 
 /**
  * Spec 4.4 port. The default layer is the pure local engine; a server-backed layer
@@ -139,12 +153,12 @@ export class ThemeEngine extends Context.Service<
     readonly resolve: (
       source: ThemeSource,
       contrast: ThemeContrast,
-    ) => Effect.Effect<ResolvedTheme, Invalid>;
+    ) => Effect.Effect<ResolvedTheme, ThemeEngineError>;
     /** Harmonized extended colours against an arbitrary primary (Android dynamic colour). */
     readonly harmonizeExtended: (
       primary: { readonly light: Hex; readonly dark: Hex },
       contrast: ThemeContrast,
-    ) => Effect.Effect<ExtendedPair>;
+    ) => Effect.Effect<ExtendedPair, ThemeEngineError>;
   }
 >()("ui-port/ThemeEngine") {}
 

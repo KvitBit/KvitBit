@@ -9,7 +9,7 @@ import type {
   ResolvedScheme,
   ResolvedTheme,
 } from "@kvitbit/api-contract";
-import { EXTENDED_ROLES } from "@kvitbit/api-contract";
+import { EXTENDED_ROLES, M3_COLOR_ROLES } from "@kvitbit/api-contract";
 import { type Text, text } from "../text";
 import { contrastRatio } from "./color/contrast";
 import { Hct } from "./color/hct";
@@ -68,6 +68,12 @@ export const CHECKED_ROLE_PAIRS: ReadonlyArray<RolePair> = [
   text45("onSecondaryFixedVariant", "secondaryFixed"),
   text45("onTertiaryFixed", "tertiaryFixed"),
   text45("onTertiaryFixedVariant", "tertiaryFixed"),
+  text45("onPrimaryFixed", "primaryFixedDim"),
+  text45("onPrimaryFixedVariant", "primaryFixedDim"),
+  text45("onSecondaryFixed", "secondaryFixedDim"),
+  text45("onSecondaryFixedVariant", "secondaryFixedDim"),
+  text45("onTertiaryFixed", "tertiaryFixedDim"),
+  text45("onTertiaryFixedVariant", "tertiaryFixedDim"),
   { foreground: "primary", background: "surface", required: AA_UI },
   { foreground: "error", background: "surface", required: AA_UI },
 ];
@@ -123,16 +129,90 @@ export const contrastIssueText = (issue: ContrastIssue): Text =>
   });
 
 /**
- * `fg` itself when it already reaches `required` against `bg`; otherwise the nearest tone of
- * `fg`'s hue and chroma, moving away from the background, that does (black or white at worst).
+ * The colour of `color`'s hue and chroma (any tone 0..100, or black / white) closest in tone to
+ * `color` that reaches each requirement against its partner. When no candidate satisfies all of
+ * them, the one with the best worst-case margin.
  */
-export const withContrast = (fg: string, bg: string, required: number): string => {
-  if (ratioOf(fg, bg) >= required) return fg;
-  const own = Hct.fromRgb(rgbFromHex(fg));
-  const darker = Hct.fromRgb(rgbFromHex(bg)).tone >= 50;
-  for (let tone = own.tone; tone >= 0 && tone <= 100; tone += darker ? -1 : 1) {
-    const candidate = hexFromRgb(Hct.from(own.hue, own.chroma, tone).rgb);
-    if (ratioOf(candidate, bg) >= required) return candidate;
+export const nearestPassing = (
+  color: string,
+  partners: ReadonlyArray<{ readonly color: string; readonly required: number }>,
+): string => {
+  const margin = (c: string) => Math.min(...partners.map((p) => ratioOf(c, p.color) / p.required));
+  if (partners.length === 0 || margin(color) >= 1) return color;
+  const own = Hct.fromRgb(rgbFromHex(color));
+  const candidates: Array<{ hex: string; distance: number }> = [
+    { hex: "#000000", distance: own.tone },
+    { hex: "#FFFFFF", distance: 100 - own.tone },
+  ];
+  for (let tone = 0; tone <= 100; tone++)
+    candidates.push({
+      hex: hexFromRgb(Hct.from(own.hue, own.chroma, tone).rgb),
+      distance: Math.abs(tone - own.tone),
+    });
+  let best: { hex: string; distance: number; margin: number } | undefined;
+  for (const c of candidates) {
+    const m = margin(c.hex);
+    const better =
+      best === undefined ||
+      (m >= 1 && (best.margin < 1 || c.distance < best.distance)) ||
+      (m < 1 && best.margin < 1 && m > best.margin);
+    if (better) best = { ...c, margin: m };
   }
-  return darker ? "#000000" : "#FFFFFF";
+  return best?.hex ?? color;
+};
+
+/** `nearestPassing` against one background. */
+export const withContrast = (fg: string, bg: string, required: number): string =>
+  nearestPassing(fg, [{ color: bg, required }]);
+
+/**
+ * Make every checked pair of a role map pass, changing only roles outside `fixed` (colours the
+ * platform supplied). Each adjustable foreground is solved against all its backgrounds at once;
+ * when that is impossible it is solved against its fixed backgrounds and the adjustable
+ * backgrounds are then moved to it.
+ */
+export const repairContrast = (
+  roles: Readonly<Record<M3ColorRole, string>>,
+  fixed: ReadonlySet<M3ColorRole> = new Set(),
+): Record<M3ColorRole, string> => {
+  let out: Record<M3ColorRole, string> = { ...roles };
+  // Moving a background can unsettle a foreground solved earlier, so repeat until stable.
+  for (let pass = 0; pass < 4; pass++) {
+    const next = repairPass(out, fixed);
+    if (M3_COLOR_ROLES.every((r) => next[r] === out[r])) return next;
+    out = next;
+  }
+  return out;
+};
+
+const repairPass = (
+  roles: Readonly<Record<M3ColorRole, string>>,
+  fixed: ReadonlySet<M3ColorRole>,
+): Record<M3ColorRole, string> => {
+  const out: Record<M3ColorRole, string> = { ...roles };
+  const byForeground = new Map<M3ColorRole, RolePair[]>();
+  for (const pair of CHECKED_ROLE_PAIRS)
+    byForeground.set(pair.foreground, [...(byForeground.get(pair.foreground) ?? []), pair]);
+  for (const [fg, pairs] of byForeground) {
+    const partners = (ps: RolePair[]) =>
+      ps.map((p) => ({ color: out[p.background], required: p.required }));
+    const passes = (ps: RolePair[]) =>
+      ps.every((p) => ratioOf(out[fg], out[p.background]) >= p.required);
+    if (passes(pairs)) continue;
+    if (!fixed.has(fg)) {
+      const all = nearestPassing(out[fg], partners(pairs));
+      if (partners(pairs).every((p) => ratioOf(all, p.color) >= p.required)) {
+        out[fg] = all;
+        continue;
+      }
+      const pinned = pairs.filter((p) => fixed.has(p.background));
+      if (pinned.length > 0) out[fg] = nearestPassing(out[fg], partners(pinned));
+    }
+    for (const p of pairs)
+      if (!fixed.has(p.background) && ratioOf(out[fg], out[p.background]) < p.required)
+        out[p.background] = nearestPassing(out[p.background], [
+          { color: out[fg], required: p.required },
+        ]);
+  }
+  return out;
 };

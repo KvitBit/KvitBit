@@ -16,7 +16,9 @@ export {
   CHECKED_ROLE_PAIRS,
   type ContrastIssue,
   contrastIssueText,
+  nearestPassing,
   type RolePair,
+  repairContrast,
   withContrast,
 } from "./contrast-check";
 export {
@@ -42,6 +44,8 @@ export {
   resolveSource,
   type ThemeDraft,
   ThemeEngine,
+  type ThemeEngineError,
+  ThemeEngineUnavailable,
   type ThemeOrigin,
   type ThemeState,
 } from "./engine";
@@ -56,6 +60,7 @@ export {
   decodeMaterialTheme,
   fileWarningText,
   MATERIAL_THEME_FILE_WARNINGS,
+  MATERIAL_THEME_MAX_BYTES,
   type MaterialThemeFileWarning,
   MaterialThemeJson,
   type ParsedThemeFile,

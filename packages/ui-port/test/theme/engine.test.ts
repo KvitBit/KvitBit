@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { Effect, Exit, Option, Result } from "effect";
+import { Effect, Exit, Layer, Option, Result } from "effect";
 import {
   auditScheme,
   contrastRatio,
@@ -15,7 +15,9 @@ import {
   rgbFromHex,
   StyleTokens,
   ThemeEngine,
+  ThemeEngineUnavailable,
   type ThemeState,
+  variantOf,
 } from "../../src/theme";
 
 const account = resolvePreset("plum");
@@ -158,6 +160,34 @@ describe("dynamic colour hardening", () => {
     ).toBeGreaterThanOrEqual(4.5);
   });
 
+  test("a dark surface in a light system map yields an AA-clean effective scheme at every contrast", () => {
+    const roles = Result.getOrThrow(
+      dynamicRoles({ _tag: "Roles", light: { primary: "#4A6B2F", surface: "#1A1C18" }, dark: {} }),
+    );
+    for (const contrast of ["standard", "medium", "high"] as const) {
+      const e = effectiveTheme(
+        state({ preference: { contrast }, system: { dynamic: Option.some(roles) } }),
+      );
+      const failing = auditScheme(
+        { roles: e.roles, extended: e.extended },
+        variantOf("light", contrast),
+      )
+        // primary/surface are both system colours: the platform owns that pair.
+        .filter((i) => !(i.foreground === "primary" && i.background === "surface"));
+      expect({ contrast, failing }).toEqual({ contrast, failing: [] });
+      expect(e.roles.surface === "#1A1C18" || contrast !== "standard").toBe(true);
+    }
+  });
+
+  test("a mid-grey system primary gets an onPrimary that reaches AA", () => {
+    const roles = Result.getOrThrow(
+      dynamicRoles({ _tag: "Roles", light: { primary: "#777774" }, dark: {} }),
+    );
+    expect(
+      contrastRatio(rgbFromHex(roles.light.onPrimary), rgbFromHex("#777774")),
+    ).toBeGreaterThanOrEqual(4.5);
+  });
+
   test("a malformed dynamic seed fails with theme.seed_invalid", () => {
     const r = dynamicRoles({ _tag: "Seed", seed: "#12" });
     expect(Result.isFailure(r) && r.failure.issues[0]?.code).toBe("theme.seed_invalid");
@@ -200,13 +230,26 @@ describe("ThemeEngine seam", () => {
   });
 
   test("harmonizeExtended matches the seed-resolved theme's extended colours", () => {
-    const seed = resolveSeed("#1D4ED8");
-    const exit = run(
-      withEngine((e) => e.harmonizeExtended({ light: "#1D4ED8", dark: "#1D4ED8" }, "high")),
-    );
+    const seed = resolveSeed("#1D4ED8").schemes;
+    const primary = { light: seed.lightHigh.roles.primary, dark: seed.darkHigh.roles.primary };
+    const exit = run(withEngine((e) => e.harmonizeExtended(primary, "high")));
     expect(Exit.isSuccess(exit) && exit.value).toEqual({
-      light: seed.schemes.lightHigh.extended,
-      dark: seed.schemes.darkHigh.extended,
+      light: seed.lightHigh.extended,
+      dark: seed.darkHigh.extended,
     });
+  });
+
+  test("a remote layer can fail with ThemeEngineUnavailable", () => {
+    const Remote = Layer.succeed(ThemeEngine, {
+      resolve: () => Effect.fail(new ThemeEngineUnavailable({ error: { _tag: "Offline" } })),
+      harmonizeExtended: () => Effect.fail(new ThemeEngineUnavailable({ error: "timeout" })),
+    });
+    const exit = Effect.runSyncExit(
+      Effect.provide(
+        withEngine((e) => e.resolve({ _tag: "Preset", id: "plum" }, "standard")),
+        Remote,
+      ),
+    );
+    expect(Exit.isFailure(exit)).toBe(true);
   });
 });

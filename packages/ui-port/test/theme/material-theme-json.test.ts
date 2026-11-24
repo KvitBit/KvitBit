@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { Result } from "effect";
 import {
   auditTheme,
+  extendedScheme,
   fileWarningText,
   Hct,
   parseMaterialThemeFile,
@@ -10,6 +11,7 @@ import {
   resolvePreset,
   resolveSource,
   rgbFromHex,
+  SCHEME_VARIANTS,
 } from "../../src/theme";
 
 const MAX = 64 * 1024;
@@ -154,6 +156,42 @@ describe("resolveMaterialTheme", () => {
     expect(failing).toContain("light:onPrimary/primary");
     expect(failing).toContain("light:onSurface/surface");
     expect(failing.every((f) => f.startsWith("light:"))).toBe(true);
+  });
+
+  test("flags invisible text on a fixed-dim background", () => {
+    const light: RoleMap = {
+      ...ocean.light.roles,
+      primaryFixedDim: ocean.light.roles.onPrimaryFixed,
+    };
+    const r = resolveMaterialTheme(exportFile({ schemes: { ...exportFile().schemes, light } }));
+    if (!Result.isSuccess(r)) throw new Error("expected success");
+    expect(r.success.warnings).toEqual(["theme.low_contrast"]);
+    expect(auditTheme(r.success.schemes).map((i) => `${i.foreground}/${i.background}`)).toContain(
+      "onPrimaryFixed/primaryFixedDim",
+    );
+  });
+
+  test("generated contrast schemes harmonize toward their own primary", () => {
+    const blue = resolvePreset("sand").schemes;
+    const r = resolveMaterialTheme({
+      seed: "#FF0000",
+      coreColors: { primary: "#FF0000" },
+      schemes: { light: blue.light.roles, dark: blue.dark.roles },
+    });
+    if (!Result.isSuccess(r)) throw new Error("expected success");
+    for (const v of SCHEME_VARIANTS) {
+      const s = r.success.schemes[v];
+      expect(s.extended).toEqual(extendedScheme(s.roles.primary, v));
+    }
+  });
+
+  test("the structured path enforces the byte limit too", () => {
+    const big = exportFile({ description: "x".repeat(70 * 1024) });
+    expect(codes(resolveMaterialTheme(big))).toEqual(["theme.too_large"]);
+    expect(codes(resolveSource({ _tag: "MaterialThemeBuilder", json: big }))).toEqual([
+      "theme.too_large",
+    ]);
+    expect(codes(resolveMaterialTheme({ seed: 1n }))).toEqual(["theme.json_invalid"]);
   });
 
   test("resolveSource routes each source tag", () => {
