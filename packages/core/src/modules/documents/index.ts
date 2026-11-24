@@ -27,26 +27,31 @@
  *               `notImplemented`.
  * - drafts.ts   preview, createDraft, discardDraft, editDraft (P1).
  * - reads.ts    get, list, history, pdf (P1).
+ * - transitions.ts  the state machine: `TRANSITIONS` (lifecycle state x action -> ok | noop |
+ *               Conflict reason), `guard`, and the kind/payment/link guards (`hasDependents`,
+ *               `hasFinalInvoice`, `paymentsBlockCancel`). Every method checks state through it.
+ * - lifecycle.ts  issue (numbering after the row lock, fresh snapshots, pinned defaults),
+ *               editIssued (D3/D3a/D4/D10), lock, unlock, cancel (P2).
+ * - credit.ts   Credit Note issuance from a corrected record (`issueCreditNote`, the uncorrected
+ *               remainder `remainderSpec`, `remainingBuckets`/`isFullyCredited`); P3's
+ *               `correct` builds its own `CreditSpec` and reuses `issueCreditNote`.
  * - service.ts  `DocumentsLive`: captures `DocumentsDeps`, wires the method files, dispatches
  *               `edit` by state, and stubs later-phase methods with `notImplemented`.
  *
  * Known contract gaps (domain frozen; listed for phase2a-core in board #430/#478): C4 resolved
  * language/note/series are on the record but not in DocumentView (deferred for P1); validation
  * issues use `request.malformed` + `params.reason`; error channels are widened through one cast
- * in service.ts (#341 approach). `DocumentView.paymentQr` is always null: rule D12 waits on the
+ * in service.ts (#341 approach); `unlock` validates its required reason with `Invalid`, which
+ * its domain signature lacks. `DocumentView.paymentQr` is always null: rule D12 waits on the
  * PaymentQr engine (core-ports 5.3, src/engines; parent ruling, handoff in
  * ~/.t3/orchestrator-state/cd-lifecycle-paymentqr-handoff/). When it lands, run it in `compose`
  * (validation, with the allocated number at issue) and in `toView`.
  *
  * Extension points:
- * - P2 (issue, state machine): add lifecycle.ts with `issue` (recompose via `compose` with
- *   `today`, then `NumberingSeries.resolve` + `allocate` after the row lock, S4; fresh
- *   snapshots at issue, D10; audit "document.issue"), `lock`/`unlock`/`cancel`, and
- *   `editIssued` (D3/D3a/D4/D5/D10 via `compose`'s `freeze` option). Put the transition table
- *   (state x operation -> next state | Conflict{illegal_transition}) in transitions.ts and
- *   route `edit`'s "issued"/"cancelled" branches and the stubbed methods in service.ts to it.
- * - P3 (corrections, final invoice, PTD, stage-2 seams): corrections.ts / final.ts build
- *   `DocumentSpec`s (negated or deduction lines with `deducts`) and run `compose`; links go in
+ * - P3 (corrections, final invoice, PTD, stage-2 seams): corrections.ts builds a `CreditSpec`
+ *   (credit.ts; enforce D7's per-bucket cap against `remainingBuckets` before
+ *   `issueCreditNote`); final.ts builds a `DocumentSpec` with `deducts` lines and runs `compose`;
+ *   guard every method with `guard(row, action)` (transitions.ts); links go in
  *   `DocumentRecord.links`; payments.ts is the payments seam (lock Proforma first, S2-S4;
  *   write `paidAmount`/`payments`/`settlement`; PTD via VatMath.splitAdvance). Stage-2
  *   deliveries/share links read records through `DocumentsRepo` + `viewOf` and pass
@@ -69,8 +74,26 @@ export {
   specFromInput,
   specFromRecord,
 } from "./compose";
+export type { CreditLine, CreditSpec, IssueCreditNoteInput } from "./credit";
+export {
+  digitsOf,
+  isFullyCredited,
+  issueCreditNote,
+  remainderSpec,
+  remainingBuckets,
+} from "./credit";
 export type { RenderCall } from "./fakes";
 export { DocumentFakesLive, DocumentFixtures, fakePdfBytes } from "./fakes";
+export type { CancelInput, CancelResult, IssueFrom } from "./lifecycle";
+export {
+  CancelResultCodec,
+  cancel,
+  diffRecords,
+  editIssued,
+  issue,
+  lock,
+  unlock,
+} from "./lifecycle";
 export type {
   ContactForDocument,
   IssuerBankAccount,
@@ -109,6 +132,18 @@ export {
   relatedOf,
   viewOf,
 } from "./support";
+export type { LifecycleAction, LifecycleState, TransitionOutcome } from "./transitions";
+export {
+  guard,
+  hasDependents,
+  hasFinalInvoice,
+  LIFECYCLE_ACTIONS,
+  LIFECYCLE_STATES,
+  outcomeOf,
+  paymentsBlockCancel,
+  stateOf,
+  TRANSITIONS,
+} from "./transitions";
 export type { RelatedDocument, ViewContext } from "./view";
 export {
   DocumentSummaryCodec,

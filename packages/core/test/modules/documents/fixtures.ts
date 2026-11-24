@@ -146,7 +146,7 @@ export const seed = (
     yield* f.putContact(WORKSPACE_B, contact(B_BUYER));
   });
 
-type Services =
+export type Services =
   | Layer.Success<typeof DocumentsTestLayer>
   | Layer.Success<ReturnType<typeof InMemoryPortsLive>>
   | CurrentCaller;

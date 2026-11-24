@@ -3,7 +3,7 @@
  * captured when the layer is built, so each method only needs `CurrentCaller`.
  */
 import type { CoreError, CurrentCaller, DocumentId, DocumentPatch } from "@kvitbit/domain/contract";
-import { Conflict, Documents } from "@kvitbit/domain/contract";
+import { Documents } from "@kvitbit/domain/contract";
 import type { ExchangeRates } from "@kvitbit/domain/ports";
 import { Context, Effect, Layer } from "effect";
 import { authorizeInWorkspace } from "../../policy/Policy";
@@ -12,6 +12,7 @@ import type { IdGenerator } from "../../shared/ids";
 import { CoreStore } from "../../store/CoreStore";
 import type { NumberingSeries } from "../numbering";
 import { createDraft, discardDraft, editDraft, preview } from "./drafts";
+import { cancel, editIssued, issue, lock, unlock } from "./lifecycle";
 import type {
   DocumentContacts,
   DocumentIssuers,
@@ -22,6 +23,7 @@ import { get, history, list, pdf } from "./reads";
 import { DocumentsRepo } from "./repo";
 import { DocumentSender } from "./sender";
 import { notImplemented } from "./support";
+import { guard } from "./transitions";
 
 /** Everything `DocumentsLive` requires. */
 export type DocumentsDeps =
@@ -37,26 +39,24 @@ export type DocumentsDeps =
   | DocumentSender;
 
 /**
- * `edit` dispatches on the locked row's state: drafts here (P1); issued documents are P2's
- * (`editIssued`: D3 field diff audit, D3a freezes, D4 number, D5 lock, D10 refreshParties);
- * a cancelled document accepts no edits (D3a).
+ * `edit` dispatches on the locked row's state (transition table): drafts (P1's `editDraft`),
+ * issued documents (`editIssued`: D3 diff audit, D3a freezes, D4 number, D10 parties);
+ * locked documents fail with `document_locked` and cancelled ones with `illegal_transition`.
+ * A `number` needs `document.overrideNumber` (owner/admin, D4) on top of `document.edit`.
  */
 const edit = (id: DocumentId, patch: DocumentPatch, expectedRevision: number) =>
   Effect.gen(function* () {
     const { workspaceId } = yield* authorizeInWorkspace("document.edit");
+    if (patch.number !== undefined) yield* authorizeInWorkspace("document.overrideNumber");
     const store = yield* CoreStore;
     const repo = yield* DocumentsRepo;
     return yield* store.transaction(
       Effect.gen(function* () {
         const row = yield* repo.getForUpdate(workspaceId, id, expectedRevision);
-        switch (row.status) {
-          case "draft":
-            return yield* editDraft(row, patch);
-          case "cancelled":
-            return yield* new Conflict({ reason: "illegal_transition" });
-          case "issued":
-            return yield* notImplemented("edit (issued document)", "P2");
-        }
+        yield* guard(row, "edit");
+        return row.status === "draft"
+          ? yield* editDraft(row, patch)
+          : yield* editIssued(row, patch);
       }),
     );
   }).pipe(orUnavailable);
@@ -103,11 +103,10 @@ const make = Effect.gen(function* () {
     // Delivery seam (stage 2): delegated unchanged.
     send: (id, input, opts) => sender.send(id, input, opts),
     previewSend: (id, input) => sender.previewSend(id, input),
-    // P2: issue (numbering, snapshots), lock/unlock, cancel.
-    issue: () => notImplemented("issue", "P2"),
-    lock: () => notImplemented("lock", "P2"),
-    unlock: () => notImplemented("unlock", "P2"),
-    cancel: () => notImplemented("cancel", "P2"),
+    issue: (from, opts) => run(issue(from, opts)),
+    lock: (id) => run(lock(id)),
+    unlock: (id, reason) => run(unlock(id, reason)),
+    cancel: (id, input, opts) => run(cancel(id, input, opts)),
     // P3: corrections, Final Invoice.
     correct: () => notImplemented("correct", "P3"),
     previewCorrection: () => notImplemented("previewCorrection", "P3"),

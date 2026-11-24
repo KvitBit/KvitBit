@@ -617,15 +617,15 @@ describe("list and pdf", () => {
 });
 
 describe("later phases", () => {
-  test("issue dies with a clear not-implemented defect until P2", async () => {
+  test("correct dies with a clear not-implemented defect until P3", async () => {
     const exit = await scenario(
       Effect.flatMap(Documents, (d) =>
-        d.issue({
-          draft: "01900000-0000-7000-8000-000000000000" as DocumentId,
-          expectedRevision: 1,
+        d.correct("01900000-0000-7000-8000-000000000000" as DocumentId, {
+          reason: "x",
+          lines: "full",
         }),
       ),
     );
-    expect(Exit.isFailure(exit) && String(exit.cause)).toContain("not implemented (P2)");
+    expect(Exit.isFailure(exit) && String(exit.cause)).toContain("not implemented (P3)");
   });
 });

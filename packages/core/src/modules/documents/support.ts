@@ -40,6 +40,7 @@ export const newDraftRecord = (
   scheduleId: null,
   occurrence: null,
   cancelledOn: null,
+  reason: null,
   createdAt: at,
   updatedAt: at,
   issuedAt: null,

@@ -197,6 +197,8 @@ export const DocumentRecord = Schema.Struct({
   occurrence: Schema.NullOr(IsoDate),
 
   cancelledOn: Schema.NullOr(IsoDate),
+  /** Why: a Credit Note's correction reason (rule D7), a cancelled document's cancel reason (D6). */
+  reason: Text,
   createdAt: Schema.String,
   updatedAt: Schema.String,
   issuedAt: Text,
@@ -233,11 +235,16 @@ export const DocumentsTable = defineCollection<DocumentRecord>({
 /** Kinds `DocumentInput` can create (PTDs come from Payments, Credit Notes from correct/cancel). */
 export type DraftableKind = Extract<DocumentKindType, "invoice" | "proforma">;
 
-/** Issued, not settled and past due (`DocumentView.overdue`, list filter). */
+/**
+ * Issued, not settled and past due (`DocumentView.overdue`, list filter). Only Invoices and
+ * Proformas are ever overdue: a Payment Tax Document confirms a payment already received and a
+ * Credit Note is owed by the issuer, so neither is chased.
+ */
 export const isOverdue = (
-  row: Pick<DocumentRecord, "status" | "settlement" | "dueOn">,
+  row: Pick<DocumentRecord, "kind" | "status" | "settlement" | "dueOn">,
   today: string,
 ): boolean =>
+  (row.kind === "invoice" || row.kind === "proforma") &&
   row.status === "issued" &&
   (row.settlement === "unpaid" || row.settlement === "partially_paid") &&
   row.dueOn < today;

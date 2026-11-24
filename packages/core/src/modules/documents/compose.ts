@@ -117,11 +117,12 @@ export interface ComposeOptions {
   readonly today: IsoDate;
   /**
    * Printed particulars to keep instead of fresh snapshots (rule D10: an issued document keeps
-   * them unless `refreshParties`). Defaults, regime and bank accounts still come from the
-   * current Contact and Workspace.
+   * them unless `refreshParties`). `contact` is left out when the edit changes the Contact.
+   * The frozen bank account is kept while the currency is unchanged and no other account is
+   * given; the regime and treatments still come from the current Workspace and Contact.
    */
   readonly freeze?: {
-    readonly contact: ContactSnapshotRecord;
+    readonly contact?: ContactSnapshotRecord | undefined;
     readonly issuer: IssuerSnapshotRecord;
   };
 }
@@ -467,7 +468,13 @@ export const compose = (
       seriesId = series.id;
     }
 
-    const account = pickBankAccount(issuer, currency, given.bankAccount);
+    const frozenAccount = options.freeze?.issuer.bankAccount ?? null;
+    const account =
+      frozenAccount !== null &&
+      frozenAccount.currency === currency &&
+      (given.bankAccount === undefined || given.bankAccount === frozenAccount.id)
+        ? { ...frozenAccount, isDefault: false }
+        : pickBankAccount(issuer, currency, given.bankAccount);
     if (account === undefined) {
       return yield* new NotFound({ entity: "BankAccount", id: given.bankAccount ?? "" });
     }
