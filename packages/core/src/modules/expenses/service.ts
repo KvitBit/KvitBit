@@ -1,6 +1,6 @@
 /**
  * `ExpensesLive`: the domain `Expenses` tag (core-ports 4.7) on `ExpensesRepo`, `CoreStore`,
- * `BlobStorage`, `ExchangeRates` and `ExpenseSuppliers`.
+ * `BlobStorage`, `FxFixings` (CNB read through the fixing cache) and `ExpenseSuppliers`.
  *
  * Method shape (src/index.ts): authorize -> withIdempotency / transaction -> lock + revision ->
  * rules -> write -> appendAudit -> orUnavailable. `ExpensesImpl` declares each method's honest
@@ -40,7 +40,7 @@ import {
   Unavailable,
 } from "@kvitbit/domain/contract";
 import type { BlobKey } from "@kvitbit/domain/ports";
-import { BlobStorage, ExchangeRates } from "@kvitbit/domain/ports";
+import { BlobStorage } from "@kvitbit/domain/ports";
 import type { Stream } from "effect";
 import { BigDecimal, Clock, Effect, Layer, Option, Result, Schema } from "effect";
 import type { FxRate } from "../../engines/fx";
@@ -48,6 +48,7 @@ import { authorizeInWorkspace } from "../../policy/Policy";
 import { appendAudit } from "../../shared/audit";
 import { canonicalJson } from "../../shared/canonicalJson";
 import { orUnavailable } from "../../shared/errors";
+import { FxFixings } from "../../shared/fx";
 import { withIdempotency } from "../../shared/idempotency";
 import { IdGenerator, newId } from "../../shared/ids";
 import { checkRevision } from "../../shared/revision";
@@ -220,7 +221,7 @@ export const makeExpenses = (options: ExpensesOptions = {}) =>
     const store = yield* CoreStore;
     const repo = yield* ExpensesRepo;
     const blobs = yield* BlobStorage;
-    const rates = yield* ExchangeRates;
+    const rates = yield* FxFixings;
     const suppliers = yield* ExpenseSuppliers;
     const ids = yield* IdGenerator;
 

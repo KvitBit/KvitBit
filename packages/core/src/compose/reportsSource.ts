@@ -6,14 +6,17 @@
  *   documents' `reportFigures` (full supply + advance deductions) and `outstandingOf` (credit
  *   aware, against the row's `corrected_by` Credit Notes). A Final Invoice is an Invoice with an
  *   `advance_of` link; a Credit Note's `correctsKind` is the kind of its `corrects` target.
+ *   Advance deductions are the lines whose `deducts` target is a Payment Tax Document.
  * - payments: `PaymentsRepo.paidBetween` + payments' `reportPayment(row, fx)` with the TARGET's
  *   stored fixing (the document's `fx`, the Expense's `figures.fx`). A payment on a Proforma
  *   with a Final Invoice is already stored against the Final Invoice.
  * - expenses / incompleteExpenses: expenses' `ExpenseRecords` seam.
- * - taxRegimes: the Workspace row's regime history; an unknown Workspace has none.
+ * - taxRegimes: the Workspace row's regime history; an unknown Workspace has none (`[]`, like
+ *   every other Workspace-scoped read here; Reports only asks after authorizing the Workspace).
  *
  * Read-only, inside the caller's transaction. A row a stored reference points to but the
- * repository cannot find (a payment's target, never deleted) is a defect, not a failure.
+ * repository cannot find (a payment's target, a Credit Note's `corrects` / `corrected_by`, a
+ * deduction line's `deducts`; issued documents are never deleted) is a defect, not a failure.
  */
 import type { DocumentId, DocumentKind, ExpenseId, WorkspaceId } from "@kvitbit/domain/contract";
 import { BigDecimal, Effect, Layer } from "effect";
@@ -47,42 +50,65 @@ const storedFx = (
 const linked = (rows: ReadonlyArray<DocumentRecord>, relation: "corrected_by" | "corrects") =>
   rows.flatMap((row) => row.links.filter((l) => l.relation === relation).map((l) => l.id));
 
+/** The documents the rows' deduction lines deduct (PTDs, or a Proforma for uncovered cash). */
+const deducted = (rows: ReadonlyArray<DocumentRecord>) =>
+  rows.flatMap((row) => row.lines.flatMap((l) => (l.deducts === null ? [] : [l.deducts])));
+
 const unique = <A>(values: ReadonlyArray<A>): ReadonlyArray<A> => [...new Set(values)];
+
+/** A document a stored reference points to (issued documents are never deleted). */
+const relatedDocument = (
+  related: ReadonlyMap<DocumentId, DocumentRecord>,
+  row: DocumentRecord,
+  id: DocumentId,
+  reference: string,
+): Effect.Effect<DocumentRecord> => {
+  const found = related.get(id);
+  return found === undefined
+    ? Effect.die(new Error(`document ${row.id}: ${reference} target ${id} not found`))
+    : Effect.succeed(found);
+};
 
 const toReportDocument = (
   row: Reportable,
   related: ReadonlyMap<DocumentId, DocumentRecord>,
-): ReportDocument => {
-  const creditNotes = row.links.flatMap((l) => {
-    const cn = l.relation === "corrected_by" ? related.get(l.id) : undefined;
-    return cn === undefined ? [] : [cn];
+): Effect.Effect<ReportDocument> =>
+  Effect.gen(function* () {
+    const creditNotes = yield* Effect.forEach(
+      row.links.filter((l) => l.relation === "corrected_by"),
+      (l) => relatedDocument(related, row, l.id, "corrected_by"),
+    );
+    const corrects = row.links.find((l) => l.relation === "corrects");
+    const correctsKind: DocumentKind | null =
+      row.kind === "credit_note" && corrects !== undefined
+        ? (yield* relatedDocument(related, row, corrects.id, "corrects")).kind
+        : null;
+    const ptds = new Set<DocumentId>();
+    for (const target of unique(deducted([row]))) {
+      const doc = yield* relatedDocument(related, row, target, "deducts");
+      if (doc.kind === "payment_tax_document") ptds.add(target);
+    }
+    const { totals, advanceDeductions } = reportFigures(row, (target) => ptds.has(target));
+    return {
+      id: row.id,
+      workspaceId: row.workspaceId,
+      kind: row.kind,
+      finalInvoice: row.kind === "invoice" && row.links.some((l) => l.relation === "advance_of"),
+      correctsKind,
+      status: row.status,
+      number: row.number,
+      contact: { id: row.contactId, name: row.contact.name },
+      currency: row.currency,
+      issuedOn: row.issuedOn,
+      taxPoint: reportTaxPoint(row),
+      dueOn: row.dueOn,
+      totals,
+      fx: storedFx(row.fx),
+      advanceDeductions,
+      settlement: row.settlement,
+      outstanding: outstandingOf(row, creditNotes),
+    };
   });
-  const corrects = row.links.find((l) => l.relation === "corrects");
-  const correctsKind: DocumentKind | null =
-    row.kind === "credit_note" && corrects !== undefined
-      ? (related.get(corrects.id)?.kind ?? null)
-      : null;
-  const { totals, advanceDeductions } = reportFigures(row);
-  return {
-    id: row.id,
-    workspaceId: row.workspaceId,
-    kind: row.kind,
-    finalInvoice: row.kind === "invoice" && row.links.some((l) => l.relation === "advance_of"),
-    correctsKind,
-    status: row.status,
-    number: row.number,
-    contact: { id: row.contactId, name: row.contact.name },
-    currency: row.currency,
-    issuedOn: row.issuedOn,
-    taxPoint: reportTaxPoint(row),
-    dueOn: row.dueOn,
-    totals,
-    fx: storedFx(row.fx),
-    advanceDeductions,
-    settlement: row.settlement,
-    outstanding: outstandingOf(row, creditNotes),
-  };
-};
 
 const toReportExpense = (workspaceId: WorkspaceId, e: ExpenseRecord): ReportExpense => ({
   id: e.id,
@@ -114,20 +140,20 @@ export const ReportsSourceLive: Layer.Layer<
     const expenseRecords = yield* ExpenseRecords;
     const workspacesRepo = yield* WorkspacesRepo;
 
-    /** The rows' Credit Notes and corrected originals, by id (one read). */
+    /** The rows' Credit Notes, corrected originals and deducted documents, by id (one read). */
     const relatedOf = (workspaceId: WorkspaceId, rows: ReadonlyArray<DocumentRecord>) =>
       Effect.map(
         documentsRepo.getMany(
           workspaceId,
-          unique([...linked(rows, "corrected_by"), ...linked(rows, "corrects")]),
+          unique([...linked(rows, "corrected_by"), ...linked(rows, "corrects"), ...deducted(rows)]),
         ),
         (found) => new Map(found.map((d) => [d.id, d] as const)),
       );
 
     const toReportDocuments = (workspaceId: WorkspaceId, rows: ReadonlyArray<DocumentRecord>) => {
       const reportable = rows.filter(isReportable);
-      return Effect.map(relatedOf(workspaceId, reportable), (related) =>
-        reportable.map((row) => toReportDocument(row, related)),
+      return Effect.flatMap(relatedOf(workspaceId, reportable), (related) =>
+        Effect.forEach(reportable, (row) => toReportDocument(row, related)),
       );
     };
 

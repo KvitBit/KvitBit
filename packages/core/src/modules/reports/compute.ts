@@ -147,7 +147,7 @@ const sumCzk = (buckets: ReadonlyArray<CzkBucket>) => ({
 
 /**
  * The regime in force on `date` (W2), as Workspaces and Documents resolve it: the latest entry
- * effective on or before `date`; before the first entry, the earliest entry's regime (a Workspace
+ * effective on or before `date` (the last in stored order on a tie); before the first entry, the earliest entry's regime (a Workspace
  * has a regime from creation, so earlier tax points carry it); with none, non-payer.
  */
 export const regimeOn = (periods: ReadonlyArray<TaxRegimePeriod>, date: IsoDate): TaxRegime => {
@@ -155,7 +155,8 @@ export const regimeOn = (periods: ReadonlyArray<TaxRegimePeriod>, date: IsoDate)
   let earliest: TaxRegimePeriod | undefined;
   for (const p of periods) {
     if (earliest === undefined || p.effectiveFrom < earliest.effectiveFrom) earliest = p;
-    if (p.effectiveFrom <= date && (best === undefined || p.effectiveFrom > best.effectiveFrom)) {
+    // `>=`: of entries effective on the same day the last in stored order wins (Workspaces).
+    if (p.effectiveFrom <= date && (best === undefined || p.effectiveFrom >= best.effectiveFrom)) {
       best = p;
     }
   }

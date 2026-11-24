@@ -652,16 +652,19 @@ describe("issueFinalInvoice (D8)", () => {
     expect(plainLines(preview)).toEqual(plainLines(fi));
     expect(history.at(-1)).toMatchObject({ action: "document.finalInvoice" });
     // Reports: the full supply plus the deducted advance (#384).
-    const figures = reportFigures({
-      lines: lines(fi).map((l, i) => ({
-        ...(l as never as object),
-        deductedVat: i < 2 ? null : dec(i === 2 ? "-140.94" : "-20.13"),
-        deductedVatCzk: null,
-      })) as never,
-      totals: fi.totals,
-      currency: fi.totals.gross.currency,
-      pricesIncludeVat: false,
-    });
+    const figures = reportFigures(
+      {
+        lines: lines(fi).map((l, i) => ({
+          ...(l as never as object),
+          deductedVat: i < 2 ? null : dec(i === 2 ? "-140.94" : "-20.13"),
+          deductedVatCzk: null,
+        })) as never,
+        totals: fi.totals,
+        currency: fi.totals.gross.currency,
+        pricesIncludeVat: false,
+      },
+      () => true,
+    );
     expect(str(figures.totals.gross.amount)).toBe("2980");
     expect(figures.advanceDeductions).toEqual(ptd.totals.buckets);
   });
@@ -906,18 +909,21 @@ describe("council follow-ups", () => {
         ),
       );
     expect([sum("net"), sum("vat"), sum("gross")]).toEqual(["0", "0", "0"]);
-    const deductions = reportFigures({
-      ...(rest as never as object),
-      lines: lines(rest).map((l) => ({
-        ...l,
-        deductedVat:
-          l.deducts === null ? null : dec(str(l.unitPrice) === "671.14" ? "140.94" : "20.13"),
-        deductedVatCzk: null,
-      })) as never,
-      totals: rest.totals,
-      currency: rest.totals.gross.currency,
-      pricesIncludeVat: false,
-    }).advanceDeductions;
+    const deductions = reportFigures(
+      {
+        ...(rest as never as object),
+        lines: lines(rest).map((l) => ({
+          ...l,
+          deductedVat:
+            l.deducts === null ? null : dec(str(l.unitPrice) === "671.14" ? "140.94" : "20.13"),
+          deductedVatCzk: null,
+        })) as never,
+        totals: rest.totals,
+        currency: rest.totals.gross.currency,
+        pricesIncludeVat: false,
+      },
+      () => true,
+    ).advanceDeductions;
     expect(deductions.map((b) => str(b.gross))).toEqual(["-812.08", "-187.92"]);
   });
 });

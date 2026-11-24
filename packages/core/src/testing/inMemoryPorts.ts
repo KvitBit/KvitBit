@@ -1,5 +1,6 @@
 import type { CnbFixing, RegistryRecord } from "@kvitbit/domain/ports";
 import { Layer } from "effect";
+import { FxFixingsMemory } from "../shared/fx";
 import { IdGeneratorTest } from "../shared/ids";
 import { RequestOutcomeLive } from "../shared/requestOutcome";
 import { CoreStoreMemory } from "../store/memory";
@@ -12,9 +13,10 @@ export interface InMemoryPortsOptions {
 
 /**
  * Every process-wide port the core requires, in memory: CoreStore with its MemoryTables,
- * IdGenerator (deterministic), CompanyRegistry, ExchangeRates, EmailSender (capture) and
- * BlobStorage, plus their test controls. No `RequestOutcome`: it is per request (the edge
- * provides one per call; `withIdempotency` works without it), so `TestCore` uses this.
+ * IdGenerator (deterministic), CompanyRegistry, ExchangeRates (+ FxFixings over a private
+ * in-memory cache), EmailSender (capture) and BlobStorage, plus their test controls. No
+ * `RequestOutcome`: it is per request (the edge provides one per call; `withIdempotency` works
+ * without it), so `TestCore` uses this.
  * Pair it with `TestClock.layer()` for deterministic time.
  */
 export const InMemoryCorePorts = (options: InMemoryPortsOptions = {}) =>
@@ -22,7 +24,7 @@ export const InMemoryCorePorts = (options: InMemoryPortsOptions = {}) =>
     CoreStoreMemory,
     IdGeneratorTest,
     FakeCompanyRegistry.layer(options.registry),
-    FixtureRates.layer(options.fixings),
+    FxFixingsMemory.pipe(Layer.provideMerge(FixtureRates.layer(options.fixings))),
     CaptureEmailSender.layer,
     MemoryBlobStorage.layer,
   );

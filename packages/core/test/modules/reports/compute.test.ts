@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { IsoDate } from "@kvitbit/domain/contract";
 import { ReportCompute } from "../../../src/modules/reports";
+import { regimeOn as workspaceRegimeOn } from "../../../src/modules/workspaces";
 import {
   bucket,
   contactId,
@@ -378,5 +379,19 @@ describe("regimeOn (W2, same resolution as Workspaces)", () => {
     expect(ReportCompute.regimeOn(periods, "2026-12-31" as IsoDate)).toBe("vat_payer");
     expect(ReportCompute.regimeOn(periods, "2027-01-01" as IsoDate)).toBe("non_vat_payer");
     expect(ReportCompute.regimeOn([], "2026-11-01" as IsoDate)).toBe("non_vat_payer");
+  });
+  test("two entries effective the same day: the last in stored order wins, before and on it", () => {
+    // A regime changed on the Workspace's creation day keeps the creation baseline first.
+    const tie = [
+      { effectiveFrom: "2026-11-23" as IsoDate, regime: "non_vat_payer" as const },
+      { effectiveFrom: "2026-11-23" as IsoDate, regime: "vat_payer" as const },
+      { effectiveFrom: "2027-01-01" as IsoDate, regime: "identified_person" as const },
+    ];
+    for (const date of ["2026-11-01", "2026-11-23", "2026-12-31", "2027-01-01"] as IsoDate[]) {
+      expect(ReportCompute.regimeOn(tie, date)).toBe(workspaceRegimeOn(tie, date));
+    }
+    expect(ReportCompute.regimeOn(tie, "2026-11-23" as IsoDate)).toBe("vat_payer");
+    // Before the first day: the first stored entry's regime, as in Workspaces.
+    expect(ReportCompute.regimeOn(tie, "2026-11-01" as IsoDate)).toBe("non_vat_payer");
   });
 });

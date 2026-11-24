@@ -4,6 +4,7 @@
  * DataExport workflow and Housekeeping, `ExportWorkflow` starter port) and the pure builders.
  */
 import { Layer } from "effect";
+import { FxFixingsLive } from "../../shared/fx";
 import { ExportJobsLive, ExportsRepoMemory, FakeExportWorkflow } from "./exports";
 import { FxFixingCacheMemory } from "./fxcache";
 import { FakeReportPdfRenderer } from "./renderer";
@@ -67,7 +68,7 @@ export const ReportsTestLayer = Layer.mergeAll(ReportsLive, ExportJobsLive).pipe
       ReportsSourceMemory,
       FakeReportPdfRenderer.layer,
       FakeExportWorkflow.layer,
-      FxFixingCacheMemory,
+      FxFixingsLive.pipe(Layer.provideMerge(FxFixingCacheMemory)),
     ),
   ),
 );
