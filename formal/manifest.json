@@ -659,6 +659,372 @@
       "toolVersions": {
         "bun": "1.4.2"
       }
+    },
+    {
+      "id": "numbering.allocator",
+      "skill": "verify-numbering",
+      "tier": 1,
+      "kind": "tlc",
+      "syncCommit": "77a5bb7",
+      "spec": "formal/numbering/Numbering.tla",
+      "config": "formal/numbering/Numbering.cfg",
+      "wideConfig": "formal/numbering/Numbering_wide.cfg",
+      "mutants": [
+        {
+          "name": "no-reservation",
+          "config": "formal/numbering/Numbering_mutant_no_reservation.cfg",
+          "expect": "violation",
+          "violates": {
+            "kind": "invariant",
+            "name": "ReservedForever"
+          },
+          "description": "allocate formats the counter without reservations.tryReserve, so an overridden number is issued unreserved"
+        },
+        {
+          "name": "counter-kept-on-rollback",
+          "config": "formal/numbering/Numbering_mutant_counter_kept_on_rollback.cfg",
+          "expect": "violation",
+          "violates": {
+            "kind": "invariant",
+            "name": "Gapless"
+          },
+          "description": "counters.set survives the issue transaction's rollback, leaving a gap"
+        },
+        {
+          "name": "release-old-number",
+          "config": "formal/numbering/Numbering_mutant_release_old_number.cfg",
+          "expect": "violation",
+          "violates": {
+            "kind": "invariant",
+            "name": "ReservedForever"
+          },
+          "description": "an override frees the document's old number"
+        },
+        {
+          "name": "override-moves-counter",
+          "config": "formal/numbering/Numbering_mutant_override_moves_counter.cfg",
+          "expect": "violation",
+          "violates": {
+            "kind": "action",
+            "name": "OverrideKeepsCounter"
+          },
+          "description": "an override raises the series counter past the new number"
+        },
+        {
+          "name": "rollback-keeps-reservation",
+          "config": "formal/numbering/Numbering_mutant_rollback_keeps_reservation.cfg",
+          "expect": "violation",
+          "violates": {
+            "kind": "invariant",
+            "name": "NoOrphanReservation"
+          },
+          "description": "a rollback leaves its reservations behind as orphans"
+        }
+      ],
+      "timeoutSeconds": 120,
+      "wideTimeoutSeconds": 300,
+      "coveredFiles": [
+        {
+          "path": "packages/core/src/modules/numbering/service.ts",
+          "sha256": "faeefd7ed054889fad92997f447d7612f98a02b7de445da4724aefccbb7e89fb"
+        },
+        {
+          "path": "packages/core/src/store/numbering.ts",
+          "sha256": "b5f8672dba61c5f1318bf395de9a382a2e3bde0487565013d934cc479afb3c54"
+        },
+        {
+          "path": "packages/core/src/store/CoreStore.ts",
+          "sha256": "7971299fe86c8505f841c237ef8c103c1542b71174f6a530774c12e62c65fa03"
+        },
+        {
+          "path": "packages/core/src/modules/documents/lifecycle.ts",
+          "sha256": "52ca553c677840c31266401da33f1ed8da783a53deae187706d6d24f89a1285a"
+        },
+        {
+          "path": "packages/core/src/modules/documents/service.ts",
+          "sha256": "22d384d76b162172ee42625f2c85896ffad51634b73639f7ff6883d1571eb769"
+        },
+        {
+          "path": "packages/core/src/modules/documents/record.ts",
+          "sha256": "14ad42c41aa69a4ef1544ddf013f4484dc0f83e1e58bcb29663116ad4ea1c234"
+        },
+        {
+          "path": "packages/db/drizzle/20261123175822_init/migration.sql",
+          "sha256": "24d0444ee41ff55435024cba7e373ef8f89d2cfb82a2f13b218825614259832c"
+        }
+      ],
+      "guardedSymbols": [
+        "NumberingSeries.allocate",
+        "NumberingSeries.override",
+        "reserveNumber",
+        "allocateNumber",
+        "CoreStore.counters.lock",
+        "CoreStore.counters.set",
+        "CoreStore.reservations.tryReserve",
+        "numbered",
+        "issue",
+        "editIssued",
+        "Documents.edit",
+        "NUMBER_PER_KIND",
+        "number_reservations_pkey",
+        "number_reservations_document_fk",
+        "numbering_counters_pkey"
+      ],
+      "bounds": "base: 2 issues from stored drafts, 1 override, 2 periods, MaxSeq 3, 1 pre-issued document, a rollback at any statement that is not waiting, deadlock checked; 29,127 distinct states, exhaustive within the bound. wide: adds 1 issue from input; 324,673 distinct states. A second override is outside every bound (over 28.6 million states)",
+      "assumptions": [
+        "One Workspace, one DocumentKind, one YYYY-NNNN series: reservation keys include workspace and kind, and distinct sequences format to distinct numbers (Numbering.format, covered by verify-vat-numbering-math)",
+        "Steps are Postgres READ COMMITTED statements on the committed schema: counters.lock is SELECT ... FOR UPDATE on numbering_counters; reservations.tryReserve is INSERT ... ON CONFLICT DO NOTHING on number_reservations_pkey, which waits for an open inserter of the same key, and a free key for a document without a row fails number_reservations_document_fk (no Postgres CoreStore exists yet; the in-memory store serializes whole transactions and has no foreign keys)",
+        "A waiting transaction does not crash (no lock timeout), so a wait cycle is reported as a deadlock",
+        "Manual override numbers range over the series' own number space; numbers outside it cannot meet the allocator",
+        "Not modeled: configure(nextNumber) raising the counter (an intended gap, W3), pattern changes, Credit Note, Payment Tax Document and correction numbering"
+      ],
+      "toolVersions": {
+        "tla2tools": "1.7.4",
+        "java": "17"
+      }
+    },
+    {
+      "id": "numbering.replay",
+      "skill": "verify-numbering",
+      "tier": 1,
+      "kind": "replay",
+      "syncCommit": "77a5bb7",
+      "replay": ["formal/numbering/numbering.replay.test.ts"],
+      "timeoutSeconds": 120,
+      "coveredFiles": [
+        {
+          "path": "packages/core/src/modules/numbering/service.ts",
+          "sha256": "faeefd7ed054889fad92997f447d7612f98a02b7de445da4724aefccbb7e89fb"
+        },
+        {
+          "path": "packages/core/src/store/numbering.ts",
+          "sha256": "b5f8672dba61c5f1318bf395de9a382a2e3bde0487565013d934cc479afb3c54"
+        },
+        {
+          "path": "packages/core/src/store/memory.ts",
+          "sha256": "b12cacb2313336ffa34d3a9f28b13a4dcf9915bc7a00f68e9c0689a12c3a9eba"
+        },
+        {
+          "path": "packages/core/src/store/CoreStore.ts",
+          "sha256": "7971299fe86c8505f841c237ef8c103c1542b71174f6a530774c12e62c65fa03"
+        },
+        {
+          "path": "packages/core/src/modules/documents/lifecycle.ts",
+          "sha256": "52ca553c677840c31266401da33f1ed8da783a53deae187706d6d24f89a1285a"
+        },
+        {
+          "path": "packages/core/src/modules/documents/service.ts",
+          "sha256": "22d384d76b162172ee42625f2c85896ffad51634b73639f7ff6883d1571eb769"
+        },
+        {
+          "path": "packages/core/src/modules/documents/record.ts",
+          "sha256": "14ad42c41aa69a4ef1544ddf013f4484dc0f83e1e58bcb29663116ad4ea1c234"
+        }
+      ],
+      "guardedSymbols": [
+        "Documents.issue",
+        "Documents.edit",
+        "Documents.get",
+        "numbered",
+        "editIssued",
+        "NumberingSeries.allocate",
+        "NumberingSeries.override",
+        "NumberingSeries.view",
+        "reserveNumber",
+        "CoreStoreMemory.counters",
+        "CoreStoreMemory.reservations.tryReserve",
+        "CoreStoreMemory.transaction"
+      ],
+      "bounds": "11 hand-written serial traces (9 projections of Numbering.tla traces within the TLC bounds, 1 override of an override beyond them, 1 issue from input that commits only in memory) plus 100 seeded sampled traces of 6 steps checked against the model's serial transitions (property test, not exhaustive, not within a TLC bound)",
+      "assumptions": [
+        "In-memory store: one top-level transaction at a time and no foreign keys, so only serial projections of model traces replay, with the foreign-key check passing; statement interleaving and the number_reservations_document_fk failure under Postgres are left to the pg-contention job",
+        "Documents are read back through Documents.get after each step; reservations are probed with tryReserve in a transaction that always rolls back"
+      ],
+      "toolVersions": {
+        "bun": "1.4.2"
+      }
+    },
+    {
+      "id": "idempotency.request-log-cas",
+      "skill": "verify-idempotency-cas",
+      "tier": 1,
+      "kind": "tlc",
+      "syncCommit": "77a5bb7",
+      "spec": "formal/idempotency/RequestLogCas.tla",
+      "config": "formal/idempotency/RequestLogCas.cfg",
+      "wideConfig": "formal/idempotency/RequestLogCas_wide.cfg",
+      "mutants": [
+        {
+          "name": "accept-mismatch",
+          "config": "formal/idempotency/RequestLogCas_mutant_accept_mismatch.cfg",
+          "expect": "violation",
+          "violates": {
+            "kind": "invariant",
+            "name": "MismatchNeverReplayed"
+          },
+          "description": "The Existing branch skips the method/fingerprint compare, so a reused key with another payload gets the first result"
+        },
+        {
+          "name": "reject-matching",
+          "config": "formal/idempotency/RequestLogCas_mutant_reject_matching.cfg",
+          "expect": "violation",
+          "violates": {
+            "kind": "invariant",
+            "name": "MismatchOnlyForOtherPayload"
+          },
+          "description": "The Existing branch answers idempotency_mismatch to every retry, so a matching retry is rejected instead of replayed"
+        },
+        {
+          "name": "replay-live-row",
+          "config": "formal/idempotency/RequestLogCas_mutant_replay_live_row.cfg",
+          "expect": "violation",
+          "violates": {
+            "kind": "invariant",
+            "name": "ReplayReturnsStoredResult"
+          },
+          "description": "A replay of an edit returns the live row's revision instead of the stored result (a result enriched after the body), so a retry after a later edit sees that edit"
+        },
+        {
+          "name": "claim-no-wait",
+          "config": "formal/idempotency/RequestLogCas_mutant_claim_no_wait.cfg",
+          "expect": "violation",
+          "violates": {
+            "kind": "invariant",
+            "name": "AtMostOnceEffect"
+          },
+          "description": "requestLog.claim takes a key pending in another transaction instead of waiting, so overlapping creates both commit"
+        },
+        {
+          "name": "no-revision-check",
+          "config": "formal/idempotency/RequestLogCas_mutant_no_revision_check.cfg",
+          "expect": "violation",
+          "violates": {
+            "kind": "invariant",
+            "name": "NoLostUpdate"
+          },
+          "description": "getForUpdate ignores expectedRevision, so a stale edit overwrites a newer one"
+        },
+        {
+          "name": "keep-claim-on-rollback",
+          "config": "formal/idempotency/RequestLogCas_mutant_keep_claim_on_rollback.cfg",
+          "expect": "violation",
+          "violates": {
+            "kind": "deadlock"
+          },
+          "description": "A rolled-back transaction leaves its claim pending, so a retry of that key waits forever"
+        }
+      ],
+      "timeoutSeconds": 120,
+      "wideTimeoutSeconds": 900,
+      "coveredFiles": [
+        {
+          "path": "packages/core/src/shared/idempotency.ts",
+          "sha256": "1973965bead068f12e43020708e3e99a9b2932587aa813a6348bee1d835dd81b"
+        },
+        {
+          "path": "packages/core/src/shared/revision.ts",
+          "sha256": "9c445a1dbcfa1a6a6632865de4f2a006c6a4be8ee333d42f87d8a8fd0533b2bb"
+        },
+        {
+          "path": "packages/core/src/shared/requestOutcome.ts",
+          "sha256": "cb3cd76d8b708b4082659ae4468cbb0c6b6cf30633277cdcafaacfbe7572a0f8"
+        },
+        {
+          "path": "packages/core/src/store/CoreStore.ts",
+          "sha256": "7971299fe86c8505f841c237ef8c103c1542b71174f6a530774c12e62c65fa03"
+        },
+        {
+          "path": "packages/core/src/store/memory.ts",
+          "sha256": "b12cacb2313336ffa34d3a9f28b13a4dcf9915bc7a00f68e9c0689a12c3a9eba"
+        },
+        {
+          "path": "packages/core/src/store/tables.ts",
+          "sha256": "48c3753b7daa84f711c4bea51eb13bc548980e358461e2c5354cf251b089d477"
+        },
+        {
+          "path": "packages/core/src/modules/contacts/live.ts",
+          "sha256": "874c19db566641c6438b104d44cdd5667be256485d83d537559da6a1580659fa"
+        }
+      ],
+      "guardedSymbols": [
+        "withIdempotency",
+        "CoreStoreShape.requestLog.claim",
+        "CoreStoreShape.requestLog.complete",
+        "makeMemoryStore (requestLog, runFrame rollback)",
+        "Collection.getForUpdate",
+        "Collection.update",
+        "checkRevision",
+        "makeRequestOutcome",
+        "Contacts.save (create, edit)"
+      ],
+      "bounds": "5 requests (r1, r2 edit from revision 1 on one key with different payloads; r3 edits from revision 1 on its own key; r4 creates; r5 edits from revision 2 on r3's key), overlapping attempts per request 2,1,2,2,1 (8), any attempt may abort before COMMIT; wide: 2 attempts of every request (10)",
+      "assumptions": [
+        "One Contact row edited by Contacts.save stands for every Collection.getForUpdate/update and checkRevision caller; one create stands for every insert behind withIdempotency",
+        "CoreStore port semantics as documented in CoreStore.ts: a claim on a key pending in another transaction waits until that transaction ends; rollback drops the pending claim and row locks (memory.ts runFrame; a SQL adapter must match)",
+        "Body writes, requestLog.complete and the audit row are transaction-local until COMMIT, so they form one step; Abort models any failure, defect or interruption before COMMIT",
+        "Request-key TTL (24 h) never expires inside a run: replay after expiry re-runs the body by design and is not modelled; scopes other than one Workspace are not modelled",
+        "MCP preview -> confirm tokens are not modelled: core has no confirmation-token issuance or redemption yet (only api-contract helpers in packages/api-contract/src/mcp.ts)",
+        "Contacts.save's same-content no-op edit (returns the row unchanged, no revision bump) and IČO unique-index conflicts (ensureIcoFree, UniqueViolation) are not modelled"
+      ],
+      "toolVersions": {
+        "tla2tools": "1.7.4",
+        "java": "17"
+      }
+    },
+    {
+      "id": "idempotency.request-log-cas-replay",
+      "skill": "verify-idempotency-cas",
+      "tier": 1,
+      "kind": "replay",
+      "syncCommit": "77a5bb7",
+      "replay": ["formal/idempotency/requestLogCas.replay.test.ts"],
+      "timeoutSeconds": 120,
+      "coveredFiles": [
+        {
+          "path": "packages/core/src/shared/idempotency.ts",
+          "sha256": "1973965bead068f12e43020708e3e99a9b2932587aa813a6348bee1d835dd81b"
+        },
+        {
+          "path": "packages/core/src/shared/requestOutcome.ts",
+          "sha256": "cb3cd76d8b708b4082659ae4468cbb0c6b6cf30633277cdcafaacfbe7572a0f8"
+        },
+        {
+          "path": "packages/core/src/store/CoreStore.ts",
+          "sha256": "7971299fe86c8505f841c237ef8c103c1542b71174f6a530774c12e62c65fa03"
+        },
+        {
+          "path": "packages/core/src/store/memory.ts",
+          "sha256": "b12cacb2313336ffa34d3a9f28b13a4dcf9915bc7a00f68e9c0689a12c3a9eba"
+        },
+        {
+          "path": "packages/core/src/store/tables.ts",
+          "sha256": "48c3753b7daa84f711c4bea51eb13bc548980e358461e2c5354cf251b089d477"
+        },
+        {
+          "path": "packages/core/src/modules/contacts/live.ts",
+          "sha256": "874c19db566641c6438b104d44cdd5667be256485d83d537559da6a1580659fa"
+        }
+      ],
+      "guardedSymbols": [
+        "withIdempotency",
+        "CoreStoreShape.requestLog.claim",
+        "CoreStoreShape.requestLog.complete",
+        "makeMemoryStore (requestLog, runFrame rollback)",
+        "Collection.getForUpdate",
+        "Collection.update",
+        "makeRequestOutcome",
+        "Contacts.save (create, edit)"
+      ],
+      "bounds": "7 RequestLogCas traces on the in-memory CoreStore: replay; mismatch on a reused key; stale twice, the fresh edit r5 on the same key, then a replay after the row moved on; abort after Lock then retry; overlapping duplicate edit; overlapping duplicate create; overlapping competing edits. Executes getForUpdate/update, not checkRevision (Expenses is its only caller)",
+      "assumptions": [
+        "The in-memory store serializes whole transactions, so overlapping attempts interleave only between transactions; Postgres interleavings inside a transaction belong to the model and the pg-contention job",
+        "Request-key TTL (24 h) never expires inside a run: replay after expiry re-runs the body by design and is not modelled; scopes other than one Workspace are not modelled",
+        "MCP preview -> confirm tokens are not modelled: core has no confirmation-token issuance or redemption yet (only api-contract helpers in packages/api-contract/src/mcp.ts)",
+        "Contacts.save's same-content no-op edit (returns the row unchanged, no revision bump) and IČO unique-index conflicts (ensureIcoFree, UniqueViolation) are not modelled"
+      ],
+      "toolVersions": {
+        "bun": "1.4.2"
+      }
     }
   ]
 }
