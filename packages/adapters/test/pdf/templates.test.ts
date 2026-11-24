@@ -460,7 +460,7 @@ describe("review regressions", () => {
     const zoomed = (mm: number) => `${(mm / SHEET_ZOOM).toFixed(3)}mm`;
     const pages = [...both(czkModel()).map(([, h]) => h), renderReportHtml(reportModel(), "cs")];
     for (const html of pages) {
-      expect(html).toMatch(/data-section="brand"><svg [^>]*viewBox="0.00 0.00 430.07 75.04"/);
+      expect(html).toMatch(/data-section="brand"><svg [^>]*viewBox="0.00 0.00 366.01 75.04"/);
       expect(html).toContain(`.brand-lockup svg { display: block; height: ${zoomed(5)};`);
       expect(html).toContain(`.brand-lockup { display: inline-block; padding: ${zoomed(2.5)};`);
     }
