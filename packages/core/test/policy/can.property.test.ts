@@ -379,6 +379,7 @@ describe("can: exhaustive against core-ports 2.3", () => {
     }
   });
 
+  // 12.7M can() calls: well past bun's 5 s default on a loaded or single-CPU runner.
   test("Member: every role × every normalized grant and session × every Action equals role ∩ scopes; monotone in scopes", () => {
     // One bit per Action, split in two words; index role * (GRANTS + 1) + grant, grant GRANTS = "all".
     const lo = new Uint32Array(ROLES.length * (GRANTS + 1));
@@ -439,7 +440,7 @@ describe("can: exhaustive against core-ports 2.3", () => {
       }
     }
     expect(mismatches).toEqual([]);
-  });
+  }, 120_000);
 
   test("Member: every role × every raw two-area scope set (write-only and any order) × every Action equals role ∩ scopes", () => {
     const sets = rawScopeSets();
