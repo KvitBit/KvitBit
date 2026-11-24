@@ -10,6 +10,7 @@ import type { Locale } from "@kvitbit/domain/contract";
 import {
   BigDecimal,
   Effect,
+  Equal,
   Option,
   Result,
   Schema,
@@ -18,6 +19,7 @@ import {
   SchemaTransformation,
   type StandardSchema,
 } from "effect";
+import { isMessageKey } from "../i18n";
 
 /** Core paths joined with ".", e.g. "lines.2.unitPrice". */
 export type FieldPath = string;
@@ -78,6 +80,14 @@ const issueCode: SchemaIssue.LeafHook = (issue) => {
   return issue._tag === "MissingKey" ? "form.required" : "form.invalid";
 };
 
+/**
+ * A message that is not a known issue code becomes `form.invalid` (F1). Effect bypasses the leaf
+ * hook for some failures (an unannotated filter check, a literal choice), which then carry
+ * English "Expected ..." text; annotated codes pass through.
+ */
+const toIssueCode = (message: string): string =>
+  isMessageKey(`issue.${message}`) ? message : "form.invalid";
+
 const toFieldPath = (
   path: ReadonlyArray<PropertyKey | StandardSchema.StandardSchemaV1.PathSegment> | undefined,
 ): FieldPath =>
@@ -91,12 +101,33 @@ export const FormSpec = {
     readonly schema: (locale: Locale) => Schema.Codec<Input, Draft>;
     readonly refine?: (input: Input, ctx: Ctx) => ReadonlyArray<FieldIssue>;
   }): FormSpec<Draft, Input, Ctx> => {
-    const standard = (locale: Locale): StandardSchema.StandardSchemaV1<Draft, Input> =>
-      Schema.toStandardSchemaV1(options.schema(locale), {
+    const standard = (locale: Locale): StandardSchema.StandardSchemaV1<Draft, Input> => {
+      const base = Schema.toStandardSchemaV1(options.schema(locale), {
         leafHook: issueCode,
         // every field's issue at once, as a submit shows them all (F3)
         parseOptions: { errors: "all" },
       }) as StandardSchema.StandardSchemaV1<Draft, Input>;
+      const normalize = (
+        result: StandardSchema.StandardSchemaV1.Result<Input>,
+      ): StandardSchema.StandardSchemaV1.Result<Input> =>
+        result.issues === undefined
+          ? result
+          : {
+              issues: result.issues.map((issue) => ({
+                ...issue,
+                message: toIssueCode(issue.message),
+              })),
+            };
+      return {
+        "~standard": {
+          ...base["~standard"],
+          validate: (value) => {
+            const result = base["~standard"].validate(value);
+            return result instanceof Promise ? result.then(normalize) : normalize(result);
+          },
+        },
+      };
+    };
     return options.refine === undefined
       ? { schema: options.schema, standard }
       : { schema: options.schema, standard, refine: options.refine };
@@ -184,10 +215,12 @@ export const Form = {
   /**
    * Sets the raw value at `path` and clears server issues at or below it. A real edit also drops
    * the intent's Idempotency-Key (section 2.3): the changed payload is a new intent, so it must not
-   * replay or mismatch the old key. Setting the same value keeps it for an unchanged retry.
+   * replay or mismatch the old key. Setting a structurally equal value (a fresh array holding the
+   * same lines) keeps it for an unchanged retry. The key is dropped on the first real edit, so
+   * while it is kept the draft equals the one submitted under it.
    */
   change: <D, E>(form: Form<D, E>, path: FieldPath, value: unknown): Form<D, E> => {
-    const edited = !Object.is(getAt(form.draft, path), value);
+    const edited = !Equal.equals(getAt(form.draft, path), value);
     return {
       ...form,
       draft: edited

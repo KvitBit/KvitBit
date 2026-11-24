@@ -63,7 +63,7 @@ export interface ObservedResponse {
  * fresh one per call; outside it nothing is recorded.
  */
 export interface ResponseCell {
-  /** The latest response of the call. */
+  /** The response of the call's latest exchange; reset when a new request starts. */
   current: ObservedResponse | null;
   /**
    * The response whose body is still being decoded, or failed to decode. Cleared once the body
@@ -123,6 +123,38 @@ const markDecoded = <A, E, R>(decoded: Effect.Effect<A, E, R>): Effect.Effect<A,
     ),
   );
 
+/**
+ * Starts an exchange: forgets the previous response before this request encodes, so a failure
+ * before anything is sent (a header or payload that does not encode) reports null status and
+ * request id rather than an earlier, handled exchange's.
+ */
+const startExchange: Effect.Effect<void> = Effect.serviceOption(ResponseObserver).pipe(
+  Effect.flatMap((cell) =>
+    Option.isSome(cell)
+      ? Effect.sync(() => {
+          cell.value.current = null;
+          cell.value.undecoded = null;
+        })
+      : Effect.void,
+  ),
+);
+
+/** Runs `startExchange` before every endpoint call of a client (groups are nested records). */
+const startingExchanges = (client: object): object =>
+  Object.fromEntries(
+    Object.entries(client).map(([name, member]: [string, unknown]) => [
+      name,
+      typeof member === "function"
+        ? (...args: ReadonlyArray<unknown>) => {
+            const call: unknown = member(...args);
+            return Effect.isEffect(call) ? Effect.andThen(startExchange, call) : call;
+          }
+        : typeof member === "object" && member !== null
+          ? startingExchanges(member)
+          : member,
+    ]),
+  );
+
 /** The request pipeline every KvitbitApi call goes through. */
 export const configureClient =
   (config: KvitbitApiConfig) =>
@@ -160,11 +192,15 @@ export const configureClient =
 export const make = (
   config: KvitbitApiConfig,
 ): Effect.Effect<KvitbitApiClient, never, HttpClient.HttpClient> =>
-  HttpApiClient.make(Api, {
-    baseUrl: config.baseUrl,
-    transformClient: configureClient(config),
-    transformResponse: markDecoded,
-  });
+  Effect.map(
+    HttpApiClient.make(Api, {
+      baseUrl: config.baseUrl,
+      transformClient: configureClient(config),
+      transformResponse: markDecoded,
+    }),
+    // same shape, each endpoint now preceded by `startExchange`
+    (client) => startingExchanges(client) as KvitbitApiClient,
+  );
 
 /** KvitbitApi over the adapter's `HttpClient` (tests inject a mock transport here). */
 export const layer = (

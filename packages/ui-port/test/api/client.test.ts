@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { ContactId, WorkspaceId } from "@kvitbit/domain/contract";
-import { Effect, Exit, Fiber, Option, Schema } from "effect";
+import { Effect, Exit, Fiber, Option, Scheduler, Schema, Scope } from "effect";
 import { FetchHttpClient, HttpClient, HttpClientResponse } from "effect/http";
 import {
   layer as apiLayer,
@@ -13,6 +13,7 @@ import {
   ifMatchHeaders,
   inWorkspace,
   KvitbitApi,
+  type KvitbitApiClient,
   type KvitbitApiConfig,
   keyAfter,
   layerFetch,
@@ -445,6 +446,58 @@ describe("review round 1 regressions", () => {
       { _tag: "Invalid", issues: [] },
     ]) {
       expect(toUiError(bad)._tag).toBe("Unexpected");
+    }
+  });
+});
+
+describe("review round 2 regressions", () => {
+  test("a pre-send failure after a handled 401 carries no status or request id", async () => {
+    const mock = mockFetch(() =>
+      json(401, { _tag: "Unauthorized", reason: "expired" }, { "x-request-id": "first" }),
+    );
+    // the 401 is handled; "x" is no UUID, so the second request fails before anything is sent
+    const result = await run(
+      attempt(Effect.andThen(Effect.ignore(search), create("x"))),
+      mock.fetch,
+    );
+    expect(mock.calls).toHaveLength(1);
+    expect(result).toEqual({
+      _tag: "Err",
+      error: { _tag: "Unexpected", status: null, requestId: null },
+    });
+  });
+
+  test("runCommand: a runner interrupted between fork and observer still delivers the Message", async () => {
+    // The command interrupts its runner as it runs; with a small op budget the interrupt lands
+    // right after the fork. Every budget must still dispatch the command's own Message.
+    for (let budget = 2; budget <= 16; budget++) {
+      const delivered: Array<unknown> = [];
+      const scope = Scope.makeUnsafe();
+      Effect.runFork(
+        Effect.withFiber((runner) =>
+          runCommand(
+            {
+              name: "self-interrupt",
+              effect: Effect.sync(() => {
+                runner.interruptUnsafe();
+                return "done";
+              }),
+              cancelled: "cancelled",
+              failed: () => "defect",
+            },
+            (msg) => delivered.push(msg),
+          ),
+        ).pipe(
+          // the command never calls the API
+          Effect.provideService(KvitbitApi, {} as KvitbitApiClient),
+          Effect.provideService(Scope.Scope, scope),
+          Effect.provideService(Scheduler.MaxOpsBeforeYield, budget),
+        ),
+      );
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      await Effect.runPromise(Scope.close(scope, Exit.void));
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      expect({ budget, delivered }).toEqual({ budget, delivered: ["done"] });
     }
   });
 });

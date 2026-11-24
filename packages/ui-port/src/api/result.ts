@@ -104,18 +104,23 @@ export const runCommand = <Msg>(
   command: ApiCommand<Msg>,
   dispatch: (msg: Msg) => void,
 ): Effect.Effect<Fiber.Fiber<Msg>, never, KvitbitApi | Scope.Scope> =>
-  Effect.gen(function* () {
-    const fiber = yield* Effect.forkScoped(command.effect);
-    // Detached and uninterruptible: the observer outlives the scope just long enough to see the
-    // command's Exit, and it ends with it.
-    yield* Effect.forkDetach(
-      Effect.flatMap(Fiber.await(fiber), (exit) =>
-        Effect.sync(() => dispatch(messageFor(command, exit))),
-      ),
-      { startImmediately: true, uninterruptible: true },
-    );
-    return fiber;
-  });
+  // Fork and observer registration are one uninterruptible step: interrupting the runner between
+  // them would leave a forked command nobody dispatches for. Only the command itself is restored
+  // to interruptible, so superseding or closing the scope still cancels it.
+  Effect.uninterruptibleMask((restore) =>
+    Effect.gen(function* () {
+      const fiber = yield* Effect.forkScoped(restore(command.effect));
+      // Detached and uninterruptible: the observer outlives the scope just long enough to see the
+      // command's Exit, and it ends with it.
+      yield* Effect.forkDetach(
+        Effect.flatMap(Fiber.await(fiber), (exit) =>
+          Effect.sync(() => dispatch(messageFor(command, exit))),
+        ),
+        { startImmediately: true, uninterruptible: true },
+      );
+      return fiber;
+    }),
+  );
 
 /** The one way a presenter talks to the server. */
 export const call = <A, E, Msg>(

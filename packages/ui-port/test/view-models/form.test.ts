@@ -190,3 +190,62 @@ describe("parseDecimalText (F5)", () => {
     expect(parseDecimalText("  ", 2)).toEqual(Result.fail("form.required"));
   });
 });
+
+describe("Form: review round 2 regressions", () => {
+  test("replacing a field with a structurally equal value keeps the Idempotency-Key", () => {
+    const failed = Form.failed(
+      Form.submitting(Form.init<Draft, string>({ name: "a", lines: [{ qty: "1" }] }), "rk-1"),
+      "offline",
+    );
+    // a fresh array with the same lines is the same intent
+    const same = Form.change(failed, "lines", [{ qty: "1" }]);
+    expect(same.submit).toMatchObject({ _tag: "Failed", requestKey: Option.some("rk-1") });
+    // nested plain data, BigDecimal included, compares by value
+    const withAmount = Form.failed(
+      Form.submitting(
+        Form.init<{ readonly amount: { readonly value: BigDecimal.BigDecimal } }, string>({
+          amount: { value: BigDecimal.fromStringUnsafe("1.5") },
+        }),
+        "rk-2",
+      ),
+      "offline",
+    );
+    expect(
+      Form.change(withAmount, "amount", { value: BigDecimal.fromStringUnsafe("1.5") }).submit,
+    ).toMatchObject({ requestKey: Option.some("rk-2") });
+    // a different nested value is a new intent
+    const edited = Form.change(failed, "lines", [{ qty: "2" }]);
+    expect(edited.submit).toMatchObject({ _tag: "Failed", requestKey: Option.none() });
+    expect(edited.draft.lines).toEqual([{ qty: "2" }]);
+  });
+
+  test("an unannotated filter and an invalid literal report form.invalid, annotated codes stay", () => {
+    const cases = [
+      [
+        Schema.Struct({
+          name: Schema.String.check(Schema.makeFilter((s: string) => s.length > 0)),
+        }),
+        { name: "" },
+      ],
+      [Schema.Struct({ name: Schema.Literals(["red", "blue"]) }), { name: "green" }],
+    ] as const;
+    for (const [schema, value] of cases) {
+      const literalSpec = FormSpec.make<{ readonly name: string }, unknown>({
+        schema: () => schema as unknown as Schema.Codec<unknown, { readonly name: string }>,
+      });
+      const standard = literalSpec.standard("cs")["~standard"].validate(value);
+      if (standard instanceof Promise) throw new Error("expected sync validation");
+      expect(standard.issues?.map((i) => [i.path?.map(String).join("."), i.message])).toEqual([
+        ["name", "form.invalid"],
+      ]);
+      const validated = Form.validate(Form.init(value), literalSpec, { locale: "cs" });
+      expect(Result.isFailure(validated) && validated.failure.clientIssues).toEqual([
+        { path: "name", code: "form.invalid" },
+      ]);
+    }
+    // annotated codes and their paths pass through unchanged
+    expect(Form.validate(Form.init(empty), spec, ctx)).toMatchObject({
+      failure: { clientIssues: [{ path: "name", code: "form.required" }] },
+    });
+  });
+});
