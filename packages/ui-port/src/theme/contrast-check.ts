@@ -206,8 +206,10 @@ const feasibleColor = (
 ): string | undefined => {
   const passes = (rgb: number) =>
     partners.every((p) => contrastRatio(rgb, rgbFromHex(p.color)) >= p.required);
+  const ranges = feasibleLuminance(partners);
+  if (ranges.length === 0) return undefined;
   let best: { rgb: number; distance: number } | undefined;
-  for (const [lo, hi] of feasibleLuminance(partners)) {
+  for (const [lo, hi] of ranges) {
     const tone = lstarFromY(((lo + hi) / 2) * 100);
     for (const base of [Hct.from(own.hue, own.chroma, tone).rgb, Hct.from(0, 0, tone).rgb]) {
       const [r, g, b] = [(base >> 16) & 0xff, (base >> 8) & 0xff, base & 0xff];
@@ -237,16 +239,21 @@ const LINEAR = Array.from({ length: 256 }, (_, v) => linearized(v) / 100);
  * feasible luminance range (luminance grows with blue). Finds a passing 8-bit colour whenever one
  * exists; returns the one closest in tone to `own`.
  */
-const exhaustiveColor = (
+export const exhaustiveColor = (
   own: Hct,
   partners: ReadonlyArray<{ readonly color: string; readonly required: number }>,
+  /** Test probe: counts the red / green pairs visited. */
+  probe?: { visited: number },
 ): string | undefined => {
+  const ranges = feasibleLuminance(partners);
+  // No luminance can satisfy every partner: nothing to search.
+  if (ranges.length === 0) return undefined;
   const passes = (rgb: number) =>
     partners.every((p) => contrastRatio(rgb, rgbFromHex(p.color)) >= p.required);
-  const ranges = feasibleLuminance(partners);
   let best: { rgb: number; distance: number } | undefined;
   for (let r = 0; r < 256; r++)
     for (let g = 0; g < 256; g++) {
+      if (probe !== undefined) probe.visited++;
       const base = 0.2126 * (LINEAR[r] ?? 0) + 0.7152 * (LINEAR[g] ?? 0);
       for (const [lo, hi] of ranges) {
         const need = (lo - base) / 0.0722;

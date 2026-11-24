@@ -10,6 +10,7 @@ import {
   effectiveTheme,
   failingPairs,
   feasibleLuminance,
+  Hct,
   harmonizeExtended,
   initialThemeState,
   KvitbitDefaultTheme,
@@ -23,6 +24,7 @@ import {
   type ThemeState,
   variantOf,
 } from "../../src/theme";
+import { exhaustiveColor } from "../../src/theme/contrast-check";
 
 const account = resolvePreset("plum");
 const workspace = resolvePreset("forest");
@@ -281,6 +283,29 @@ describe("dynamic colour hardening", () => {
     const e = effectiveTheme(state({ system: { dynamic: Option.some(roles) } }));
     expect([e.roles.primaryFixed, e.roles.primaryFixedDim]).toEqual(["#000000", "#FBFDE2"]);
     expect(auditScheme({ roles: e.roles, extended: e.extended }, "light")).toEqual([]);
+  });
+
+  test("an infeasible pair (#000000 + #EEEEEE) skips the exhaustive search", () => {
+    const partners = [
+      { color: "#000000", required: 4.5 },
+      { color: "#EEEEEE", required: 4.5 },
+    ];
+    expect(feasibleLuminance(partners)).toEqual([]);
+    const probe = { visited: 0 };
+    expect(exhaustiveColor(Hct.fromRgb(0x757478), partners, probe)).toBeUndefined();
+    expect(probe.visited).toBe(0);
+    const feasible = { visited: 0 };
+    expect(
+      exhaustiveColor(
+        Hct.fromRgb(0x757478),
+        [
+          { color: "#000000", required: 4.5 },
+          { color: "#FBFDE2", required: 4.5 },
+        ],
+        feasible,
+      ),
+    ).toBeDefined();
+    expect(feasible.visited).toBe(65536);
   });
 
   test("two supplied backgrounds of one foreground pass whenever a feasible luminance exists", () => {
