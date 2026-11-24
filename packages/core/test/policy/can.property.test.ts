@@ -352,7 +352,10 @@ describe("can: exhaustive against core-ports 2.3", () => {
     expect([...ROLES]).toEqual([...RoleSchema.literals]);
     const jobTags = SystemJobSchema.members.map((m) => m.fields._tag.schema.literal);
     expect(JOBS.map((job) => job._tag)).toEqual(jobTags);
-    const kinds = new Set<string>([member("owner")._tag, ...otherCallers().map((c) => c.caller._tag)]);
+    const kinds = new Set<string>([
+      member("owner")._tag,
+      ...otherCallers().map((c) => c.caller._tag),
+    ]);
     expect(kinds).toEqual(new Set(Object.keys(CALLER_TAGS)));
     expect(AREAS.length).toBe(10);
     expect(ALL_SCOPES.length).toBe(20);
