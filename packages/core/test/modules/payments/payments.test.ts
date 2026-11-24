@@ -467,7 +467,7 @@ describe("Proformas: Payment Tax Documents (P2) and the Final Invoice (D8)", () 
   });
 
   test("auto-send: an invariant failure of the sender rolls the whole payment back", async () => {
-    const [missing, stale, invalid, linesInvalid, list, sent] = ok(
+    const [missing, stale, invalid, linesInvalid, list, sent, ptds] = ok(
       await run(
         Effect.gen(function* () {
           const f = yield* PaymentFixtures;
@@ -493,10 +493,13 @@ describe("Proformas: Payment Tax Documents (P2) and the Final Invoice (D8)", () 
             linesInvalid,
             yield* (yield* Payments).listFor({ document: pf.id }),
             yield* f.sent(WS),
+            yield* (yield* Documents).list({ kind: "payment_tax_document", limit: 10 }),
           ] as const;
         }),
       ),
     );
+    // No orphaned Payment Tax Document either.
+    expect(ptds.items).toEqual([]);
     expect(missing).toBeInstanceOf(NotFound);
     expect(stale).toEqual(new Conflict({ reason: "revision_changed", currentRevision: 9 }));
     expect(invalid).toEqual(linesInvalid);
