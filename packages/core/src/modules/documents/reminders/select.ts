@@ -25,6 +25,8 @@ export interface DueReminder {
   readonly step: number;
   readonly offsetDays: number;
   readonly date: IsoDate;
+  /** The arm the step belongs to (eligibility.ts). */
+  readonly armedBy: number;
 }
 
 const PAGE = 200;
@@ -36,7 +38,7 @@ export const dueReminderOf = (workspaceId: WorkspaceId, record: DocumentRecord, 
     if (state.block !== null) return null;
     const step = dueStep(record.dueOn, state.effective, today);
     if (step === null) return null;
-    const candidate = { dueOn: record.dueOn, offsetDays: step.offsetDays };
+    const candidate = { dueOn: record.dueOn, offsetDays: step.offsetDays, armedBy: state.arm };
     if (stepBlock(state, record, candidate, today) !== null) return null;
     return {
       documentId: record.id,
@@ -44,6 +46,7 @@ export const dueReminderOf = (workspaceId: WorkspaceId, record: DocumentRecord, 
       step: step.step,
       offsetDays: step.offsetDays,
       date: step.date,
+      armedBy: state.arm,
     } satisfies DueReminder;
   });
 
@@ -88,19 +91,22 @@ export const enqueueReminder = (workspaceId: WorkspaceId, reminder: DueReminder)
         if (
           current === null ||
           current.dueOn !== reminder.dueOn ||
-          current.offsetDays !== reminder.offsetDays
+          current.offsetDays !== reminder.offsetDays ||
+          current.armedBy !== reminder.armedBy
         ) {
           return null;
         }
         const issuer = yield* (yield* DocumentIssuers).forDocument(workspaceId, today);
-        // Recipients: those the document was last sent to, else the Contact's billing emails.
-        const sent = (yield* deliveries.byDocument(workspaceId, record.id)).filter(
-          (d) => d.purpose === "document",
-        );
+        // Recipients: those the document was last sent to while it had its current buyer, else
+        // the current Contact's billing emails (a buyer change never reuses the old buyer's).
+        const lastSend = (yield* deliveries.byDocument(workspaceId, record.id))
+          .filter((d) => d.purpose === "document")
+          .at(-1);
         const to =
-          sent.at(-1)?.to ??
-          (yield* (yield* DocumentContacts).forDocument(workspaceId, record.contactId))
-            .billingEmails;
+          lastSend !== undefined && lastSend.contactId === record.contactId
+            ? lastSend.to
+            : (yield* (yield* DocumentContacts).forDocument(workspaceId, record.contactId))
+                .billingEmails;
         if (to.length === 0) return null;
         const delivery = yield* queueDelivery(
           workspaceId,
@@ -113,7 +119,7 @@ export const enqueueReminder = (workspaceId: WorkspaceId, reminder: DueReminder)
             replyTo: issuer.party.email,
             attachment: attachmentOf(record),
           },
-          { dueOn: reminder.dueOn, offsetDays: reminder.offsetDays },
+          { dueOn: reminder.dueOn, offsetDays: reminder.offsetDays, armedBy: reminder.armedBy },
         );
         return delivery.id as DeliveryId | null;
       }),

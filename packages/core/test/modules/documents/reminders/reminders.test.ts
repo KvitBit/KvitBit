@@ -6,6 +6,7 @@ import { Effect, Exit, Ref } from "effect";
 import {
   claim,
   DeliveriesRepo,
+  DocumentFixtures,
   DocumentsRepo,
   deliver,
   dueStep,
@@ -23,7 +24,7 @@ import {
   setContactDefaults,
   setWorkspaceReminders,
 } from "../deliveries/helpers";
-import { as, invoiceInput } from "../fixtures";
+import { as, CZ_NO_DIC, contact, invoiceInput } from "../fixtures";
 
 const worker = system();
 const reminderJob = (documentId: DocumentId) => system({ _tag: "PaymentReminders", documentId });
@@ -98,6 +99,7 @@ describe("selection (D16, no stored schedule)", () => {
             documentId: sent,
             dueOn: "2026-12-07" as IsoDate,
             step: 0,
+            armedBy: 1,
             offsetDays: 3,
             date: "2026-12-10" as IsoDate,
           }),
@@ -200,7 +202,7 @@ describe("REQUIRED D16", () => {
           WORKSPACE_A,
           moved[0]?.deliveryId as DeliveryId,
         );
-        expect(row.reminder).toEqual({ dueOn: "2026-12-20" as IsoDate, offsetDays: 3 });
+        expect(row.reminder).toMatchObject({ dueOn: "2026-12-20" as IsoDate, offsetDays: 3 });
         // The Contact moves to custom [5]: the inherited choice follows it, explicit "on" too
         // (custom offsets apply to any choice but "off").
         yield* setContactDefaults({ reminderPolicy: { mode: "custom", offsetsDays: [5] } });
@@ -398,6 +400,75 @@ describe("latest send by sequence (council round)", () => {
         const [due] = yield* sweep("2026-12-17");
         const row = yield* (yield* DeliveriesRepo).get(WORKSPACE_A, due?.deliveryId as DeliveryId);
         expect(row.to).toEqual(["b@x.cz"]);
+      }),
+    );
+    expect(Exit.isSuccess(exit)).toBe(true);
+  });
+});
+
+describe("review round 1 regressions", () => {
+  test("after a buyer change, automatic reminders go to the new buyer, never the old one", async () => {
+    const exit = await deliveryScenario(
+      Effect.gen(function* () {
+        const d = yield* Documents;
+        const f = yield* DocumentFixtures;
+        yield* f.putContact(WORKSPACE_A, {
+          ...contact(CZ_NO_DIC, { dic: null }),
+          billingEmails: ["novy@kupec.cz"],
+        });
+        const id = yield* issueInvoice();
+        yield* d.send(id, { to: ["stary@odberatel.cz"] });
+        const view = yield* d.get(id);
+        yield* d.edit(id, { contact: CZ_NO_DIC }, view.revision);
+        const [due] = yield* sweep("2026-12-10");
+        const row = yield* (yield* DeliveriesRepo).get(WORKSPACE_A, due?.deliveryId as DeliveryId);
+        expect(row.to).toEqual(["novy@kupec.cz"]);
+      }),
+    );
+    expect(Exit.isSuccess(exit)).toBe(true);
+  });
+
+  test("a reminder queued before reminders were turned off and on again is not revived", async () => {
+    const exit = await deliveryScenario(
+      Effect.gen(function* () {
+        const d = yield* Documents;
+        const id = yield* issueInvoice();
+        yield* d.send(id, { to: ["stary@odberatel.cz"] });
+        const [old] = yield* sweep("2026-12-10");
+        yield* d.send(id, { reminders: false });
+        yield* d.send(id, { reminders: true, to: ["novy@odberatel.cz"] });
+        const [fresh] = yield* sweep("2026-12-10");
+        expect(fresh?.deliveryId).not.toBe(old?.deliveryId);
+        expect(yield* as(worker, claim(WORKSPACE_A, old?.deliveryId as DeliveryId))).toBe(
+          "skipped",
+        );
+        expect(
+          (yield* (yield* DeliveriesRepo).get(WORKSPACE_A, old?.deliveryId as DeliveryId)).failure,
+        ).toBe("reminder_rearmed");
+        expect(yield* as(worker, deliver(WORKSPACE_A, fresh?.deliveryId as DeliveryId))).toBe(
+          "sent",
+        );
+        const emails = yield* reminderEmails;
+        expect(emails.map((e) => e.message.to)).toEqual([["novy@odberatel.cz"]]);
+      }),
+    );
+    expect(Exit.isSuccess(exit)).toBe(true);
+  });
+
+  test("reminder dates past 9999-12-31 are never due", async () => {
+    const exit = await deliveryScenario(
+      Effect.gen(function* () {
+        const d = yield* Documents;
+        const id = yield* issueInvoice({ due: { on: "9999-12-31" as IsoDate } });
+        yield* d.send(id);
+        expect(yield* sweep("2026-12-10")).toEqual([]);
+        expect(
+          dueStep(
+            "9999-12-31" as IsoDate,
+            { arms: true, offsetsDays: [3, 10] },
+            "2026-12-10" as IsoDate,
+          ),
+        ).toBeNull();
       }),
     );
     expect(Exit.isSuccess(exit)).toBe(true);

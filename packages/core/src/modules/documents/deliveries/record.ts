@@ -4,6 +4,7 @@
  * current when it was queued), plus its status and dispatch outcome.
  */
 import {
+  ContactId,
   DeliveryId,
   DeliveryPurpose,
   DocumentId,
@@ -23,6 +24,8 @@ export type DeliveryStatus = typeof DeliveryStatus.Type;
 export const ReminderStepRecord = Schema.Struct({
   dueOn: IsoDate,
   offsetDays: Schema.Int,
+  /** `sequence` of the send that armed the reminders this step belongs to (0: none). */
+  armedBy: Schema.Int,
 });
 export type ReminderStepRecord = typeof ReminderStepRecord.Type;
 
@@ -48,6 +51,10 @@ export const DeliveryRecord = Schema.Struct({
     contentType: Schema.String,
     template: PdfTemplate,
   }),
+  /** The document's Contact when queued (recipients are reused only for the same buyer). */
+  contactId: ContactId,
+  /** This purpose "document" send armed reminders that were off (a new arm, D16). */
+  arms: Schema.Boolean,
   /** The document's due date when queued (a later change re-arms reminders, D16). */
   dueOn: IsoDate,
   /** Set for an automatic reminder (selection, reminders/); null for a send (manual or not). */
@@ -87,7 +94,7 @@ export const DeliveriesTable = defineCollection<DeliveryRecord>({
       key: (row) =>
         row.reminder === null || isReleased(row)
           ? null
-          : [row.documentId, row.reminder.dueOn, row.reminder.offsetDays],
+          : [row.documentId, row.reminder.dueOn, row.reminder.offsetDays, row.reminder.armedBy],
     },
   ],
 });

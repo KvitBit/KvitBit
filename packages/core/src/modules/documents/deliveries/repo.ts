@@ -50,6 +50,7 @@ export class DeliveriesRepo extends Context.Service<
         readonly documentId: DocumentId;
         readonly dueOn: IsoDate;
         readonly offsetDays: number;
+        readonly armedBy: number;
       },
     ) => Effect.Effect<Option.Option<DeliveryRecord>, StoreUnavailable>;
     /** Status per id (DeliveryStatusLookup, board #399); other-Workspace/unknown ids absent. */
@@ -75,7 +76,7 @@ export const DeliveriesRepoMemory: Layer.Layer<DeliveriesRepo, never, MemoryTabl
       reminderStep: (workspaceId, step) =>
         table.findUnique(
           REMINDER_STEP,
-          [step.documentId, step.dueOn, step.offsetDays],
+          [step.documentId, step.dueOn, step.offsetDays, step.armedBy],
           workspaceId,
         ),
       statuses: (workspaceId, ids) =>

@@ -7,6 +7,7 @@
  */
 import type { IsoDate, WorkspaceId } from "@kvitbit/domain/contract";
 import { Effect } from "effect";
+import { MAX_ISO_DATE } from "../../../engines/calendar";
 import { type ReminderStep, Reminders } from "../../../engines/schedules";
 import type { EffectiveReminders, RemindersChoice } from "../../../shared/overrides";
 import { resolveReminders } from "../../../shared/overrides";
@@ -69,7 +70,11 @@ export const dueStep = (
 ): ReminderStep | null => {
   let latest: ReminderStep | null = null;
   for (const step of scheduleOf(dueOn, effective)) {
+    if (!inRange(step.date)) continue;
     if (step.date <= today && (latest === null || step.date >= latest.date)) latest = step;
   }
   return latest;
 };
+
+/** A computed date the calendar supports (`addDays` past 9999-12-31 yields a 5-digit year). */
+export const inRange = (date: IsoDate): boolean => date.length === 10 && date <= MAX_ISO_DATE;

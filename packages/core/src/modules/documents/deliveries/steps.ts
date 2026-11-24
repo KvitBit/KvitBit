@@ -115,13 +115,14 @@ export const dispatch = (workspaceId: WorkspaceId, id: DeliveryId) =>
         { idempotencyKey: row.id },
       )
       .pipe(Effect.result);
-    // Counted from the locked row: overlapping attempts (a reconcile re-start) never lose one,
-    // and an attempt that finds the delivery already terminal leaves its status alone.
+    // Counted from the locked row: overlapping attempts (a reconcile re-start) never lose one.
+    // A confirmed acceptance is recorded even when retry exhaustion (giveUp) marked the row
+    // failed while this attempt was in flight: the email did go out. Otherwise an attempt that
+    // finds the delivery terminal leaves its status alone.
     const next = yield* store.transaction(
       transition(workspaceId, id, (current) => {
         const attempts = current.attempts + 1;
-        if (current.status !== "sending") return { attempts };
-        if (outcome._tag === "Success") {
+        if (outcome._tag === "Success" && current.status !== "sent") {
           return {
             status: "sent",
             attempts,
@@ -130,6 +131,7 @@ export const dispatch = (workspaceId: WorkspaceId, id: DeliveryId) =>
             providerMessageId: outcome.success.providerMessageId,
           };
         }
+        if (current.status !== "sending" || outcome._tag === "Success") return { attempts };
         return outcome.failure._tag === "EmailRejected"
           ? { status: "failed", attempts, failure: "rejected" }
           : {

@@ -529,4 +529,38 @@ describe("council round: ordering, language, overlapping attempts", () => {
     );
     expect(Exit.isSuccess(exit)).toBe(true);
   });
+
+  test("an accepted email in flight while retries were exhausted is recorded as sent", async () => {
+    const exit = await run(
+      Effect.gen(function* () {
+        const { deliveryId } = yield* queued;
+        expect(yield* as(worker, claim(WORKSPACE_A, deliveryId))).toBe("sending");
+        const reached = yield* Deferred.make<void>();
+        const gate = yield* Deferred.make<void>();
+        const slow = EmailSender.of({
+          send: () =>
+            Effect.andThen(
+              Effect.andThen(Deferred.succeed(reached, undefined), Deferred.await(gate)),
+              Effect.succeed({ provider: "slow", providerMessageId: "slow-1" }),
+            ),
+        });
+        const inFlight = yield* Effect.forkChild(
+          as(worker, dispatch(WORKSPACE_A, deliveryId)).pipe(
+            Effect.provideService(EmailSender, slow),
+          ),
+        );
+        yield* Deferred.await(reached);
+        expect(yield* as(worker, giveUp(WORKSPACE_A, deliveryId))).toBe("failed");
+        yield* Deferred.succeed(gate, undefined);
+        expect(yield* Fiber.join(inFlight)).toBe("sent");
+        expect(yield* delivery(deliveryId)).toMatchObject({
+          status: "sent",
+          failure: null,
+          provider: "slow",
+          providerMessageId: "slow-1",
+        });
+      }),
+    );
+    expect(Exit.isSuccess(exit)).toBe(true);
+  });
 });

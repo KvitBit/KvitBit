@@ -6,8 +6,11 @@
  *   resolves again, D16; no stored epoch, so the delivery snapshot's `dueOn` stands in);
  * - the CURRENT Contact and Workspace policies still arm the document (`remindable`);
  * - the step belongs to the current due date and offsets, is due, and no live reminder of the
- *   same due date already covers a step on or after its date (watermark: changed offsets
- *   never backfill an earlier reminder).
+ *   same due date and arm already covers a step on or after its date (watermark: changed
+ *   offsets never backfill an earlier reminder);
+ * - the step belongs to the current arm: the latest purpose "document" send that turned
+ *   reminders on (`arms`). Turning reminders off and on again starts a new arm, so a reminder
+ *   queued under the old one is skipped at claim and the new arm queues its own.
  */
 import type { DeliveryId, IsoDate, WorkspaceId } from "@kvitbit/domain/contract";
 import { Effect } from "effect";
@@ -17,19 +20,22 @@ import type { DeliveryRecord } from "../deliveries/record";
 import { isReleased } from "../deliveries/record";
 import { DeliveriesRepo } from "../deliveries/repo";
 import type { DocumentRecord } from "../record";
-import { effectiveReminders, remindable, stillOwed } from "./policy";
+import { effectiveReminders, inRange, remindable, stillOwed } from "./policy";
 
 export type ReminderBlock =
   | "document_settled"
   | "reminders_off"
   | "reminder_step_stale"
+  | "reminder_rearmed"
   | "reminder_superseded";
 
 export interface ReminderState {
   readonly effective: EffectiveReminders;
   /** Null when the document is remindable now. */
   readonly block: "document_settled" | "reminders_off" | null;
-  /** Live automatic reminders for the current due date (not released). */
+  /** `sequence` of the send that started the current arm (0: none). */
+  readonly arm: number;
+  /** Live automatic reminders for the current due date and arm (not released). */
   readonly live: ReadonlyArray<DeliveryRecord>;
 }
 
@@ -38,10 +44,17 @@ export const reminderState = (workspaceId: WorkspaceId, record: DocumentRecord, 
   Effect.gen(function* () {
     const effective = yield* effectiveReminders(workspaceId, record, today);
     const deliveries = yield* (yield* DeliveriesRepo).byDocument(workspaceId, record.id);
+    const arm = deliveries.filter((d) => d.arms).at(-1)?.sequence ?? 0;
     const live = deliveries.filter(
-      (d) => d.reminder !== null && d.reminder.dueOn === record.dueOn && !isReleased(d),
+      (d) =>
+        d.reminder !== null &&
+        d.reminder.dueOn === record.dueOn &&
+        d.reminder.armedBy === arm &&
+        !isReleased(d),
     );
-    if (!stillOwed(record)) return { effective, block: "document_settled", live } as const;
+    if (!stillOwed(record)) {
+      return { effective, arm, block: "document_settled", live } as const;
+    }
     const lastSend = deliveries.filter((d) => d.purpose === "document").at(-1);
     const armed =
       record.remindersOn ||
@@ -49,20 +62,27 @@ export const reminderState = (workspaceId: WorkspaceId, record: DocumentRecord, 
         record.remindersChoice !== "off" &&
         lastSend.dueOn !== record.dueOn);
     const on = remindable({ ...record, remindersOn: armed }, effective);
-    return { effective, block: on ? null : "reminders_off", live } as const satisfies ReminderState;
+    return {
+      effective,
+      arm,
+      block: on ? null : "reminders_off",
+      live,
+    } as const satisfies ReminderState;
   });
 
 /** Why `step` is not (or no longer) the reminder to send on `today`; null when it is. */
 export const stepBlock = (
   state: ReminderState,
   record: Pick<DocumentRecord, "dueOn">,
-  step: { readonly dueOn: IsoDate; readonly offsetDays: number },
+  step: { readonly dueOn: IsoDate; readonly offsetDays: number; readonly armedBy: number },
   today: IsoDate,
   self: DeliveryId | null = null,
 ): ReminderBlock | null => {
   if (state.block !== null) return state.block;
+  if (step.armedBy !== state.arm) return "reminder_rearmed";
   const date = addDays(step.dueOn, step.offsetDays);
   if (
+    !inRange(date) ||
     step.dueOn !== record.dueOn ||
     !state.effective.offsetsDays.includes(step.offsetDays) ||
     date > today

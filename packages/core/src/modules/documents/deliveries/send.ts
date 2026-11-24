@@ -166,6 +166,7 @@ export const queueDelivery = (
   p: Omit<SendPlan, "choice" | "armsReminders">,
   reminder: ReminderStepRecord | null,
   extraChanges: AuditEntry["changes"] = [],
+  arms = false,
 ) =>
   Effect.gen(function* () {
     const { at } = yield* now;
@@ -178,6 +179,8 @@ export const queueDelivery = (
       // Per-document order, assigned under the document row lock the caller holds.
       sequence: (yield* (yield* DeliveriesRepo).byDocument(workspaceId, p.record.id)).length + 1,
       documentRevision: p.record.revision,
+      contactId: p.record.contactId,
+      arms,
       dueOn: p.record.dueOn,
       purpose: p.purpose,
       status: "queued",
@@ -303,7 +306,14 @@ export const send = (id: DocumentId, input?: SendOptions, opts?: RequestOptions)
               .pipe(Effect.catchTag(["Conflict", "UniqueViolation"], (e) => Effect.die(e)));
           }
         }
-        const delivery = yield* queueDelivery(workspaceId, { ...p, record }, null, changes);
+        const delivery = yield* queueDelivery(
+          workspaceId,
+          { ...p, record },
+          null,
+          changes,
+          // A new arm (D16): reminders were off and this send turns them on.
+          p.armsReminders && !locked.remindersOn,
+        );
         return { deliveryId: delivery.id, status: "queued" as const };
       }),
     );
