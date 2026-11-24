@@ -13,7 +13,7 @@ description: Model-check request-key retry safety (withIdempotency over CoreStor
 
 **Harm (C2).** Two users editing one record at once silently lose one edit.
 
-Two checks: a bounded TLC model (`idempotency.request-log-cas`) of the port semantics with Postgres-style waiting, and a Bun trace replay (`idempotency.request-log-cas-replay`) that drives the real `Contacts.save` on the in-memory store along the model's shortest traces and asserts the same invariants on real state. A pass covers the model within its bounds and the replayed traces, not every interleaving of a real database.
+Two checks: a bounded TLC model (`idempotency.request-log-cas`) of the port semantics with Postgres-style waiting, and a Bun trace replay (`idempotency.request-log-cas-replay`) that drives the real `Contacts.save` on the in-memory store along selected traces reachable in the base model and asserts the same invariants on real state. A pass covers the model within its bounds and the replayed traces, not every interleaving of a real database.
 
 ## Does my change touch it?
 
@@ -60,7 +60,7 @@ Mutants (each must fail; `Bug` constant in the mutant config):
 | Mutant | Breaks | Must violate |
 |---|---|---|
 | `accept-mismatch` | `Existing` skips the method/fingerprint compare | `MismatchNeverReplayed` |
-| `replay-live-row` | a replay returns the live row instead of the stored result (a result enriched after the body) | `ReplayReturnsStoredResult` |
+| `replay-live-row` | a replay of an edit returns the live row's revision instead of the stored result (a result enriched after the body) | `ReplayReturnsStoredResult` |
 | `reject-matching` | `Existing` answers `idempotency_mismatch` to every retry | `MismatchOnlyForOtherPayload` |
 | `claim-no-wait` | `claim` takes a key pending in another transaction | `AtMostOnceEffect` (two creates commit) |
 | `no-revision-check` | `getForUpdate` ignores `expectedRevision` | `NoLostUpdate` |
@@ -100,4 +100,4 @@ When a change to the covered files is intended: re-read the changed code against
   - `idempotency.ts`: the method/fingerprint compare disabled (`if (false && (…))`) → 1 of 7 fails: "r1 commits; r2 (same key, other payload): Claim, Existing -> idempotency_mismatch" (the reused key got the stored result).
   - `idempotency.ts`: every existing entry treated as a mismatch (`if (true || …)`) → 4 of 7 fail: the replay, the replay after the row moved on, and both overlapping duplicates (a matching retry got `idempotency_mismatch`).
   - `memory.ts` `locate`: the `expectedRevision` check disabled → 2 of 7 fail: the stale trace and the overlapping competing edits (the stale edit committed over revision 2).
-- Mutants: all six fail with their declared violation under `bun run verify:formal --only idempotency.request-log-cas` (accept-mismatch after 740 distinct states, reject-matching 507, claim-no-wait 1,213, no-revision-check 96, keep-claim-on-rollback 1,446).
+- Mutants: all six fail with their declared violation under `bun run verify:formal --only idempotency.request-log-cas` (accept-mismatch after 740 distinct states, reject-matching 507, replay-live-row 8,783 (r1 and r5 commit, then r1's retry is replayed revision 3 for its stored 2), claim-no-wait 1,213, no-revision-check 96, keep-claim-on-rollback 1,446).

@@ -108,7 +108,8 @@ Existing(p) ==
           \/ Bug = "reject_matching"
        THEN [kind |-> "mismatch", result |-> 0]
        ELSE [kind |-> "replayed",
-             result |-> IF Bug = "replay_live_row" THEN rowRev ELSE e.result]]
+             result |-> IF Bug = "replay_live_row" /\ Req[p[1]].op = "edit"
+                       THEN rowRev ELSE e.result]]
   /\ pc' = [pc EXCEPT ![p] = "done"]
   /\ UNCHANGED <<log, rowRev, rowLock, history, inserts>>
 

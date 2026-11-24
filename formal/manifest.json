@@ -108,7 +108,7 @@
             "kind": "invariant",
             "name": "ReplayReturnsStoredResult"
           },
-          "description": "A replay returns the live row instead of the stored result (a result enriched after the body), so a retry after a later edit sees that edit"
+          "description": "A replay of an edit returns the live row's revision instead of the stored result (a result enriched after the body), so a retry after a later edit sees that edit"
         },
         {
           "name": "claim-no-wait",

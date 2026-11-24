@@ -1,7 +1,7 @@
 /**
  * Replays the RequestLogCas.tla traces on the real code: `Contacts.save` (withIdempotency over
  * requestLog.claim/complete, getForUpdate + update compare-and-set) on the in-memory CoreStore.
- * Each test is one shortest model trace; its name lists the model steps per attempt
+ * Each test is one selected trace reachable in the base model; its name lists the model steps per attempt
  * (Claim, Existing, Lock, Commit, Abort) and it asserts the model's invariants on real state:
  * AtMostOnceEffect, ReplayReturnsStoredResult, MismatchNeverReplayed, NoLostUpdate.
  *
