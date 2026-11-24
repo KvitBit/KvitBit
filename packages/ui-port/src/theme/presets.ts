@@ -1,7 +1,7 @@
 /**
  * Built-in presets: seed plus per-preset palette tuning. Ids are `ThemePresetId` from
- * @kvitbit/api-contract; the seeds here are the tuned design values (api-contract's
- * `ThemePresets` table still carries placeholders, see the preset test).
+ * @kvitbit/api-contract; the seeds here are the tuned design values, and api-contract's
+ * `ThemePresets` table carries the same seeds (the preset test keeps them equal).
  */
 import type { Hex, ThemePresetId } from "@kvitbit/api-contract";
 import type { RoleMap, ThemeRecipe } from "./scheme";

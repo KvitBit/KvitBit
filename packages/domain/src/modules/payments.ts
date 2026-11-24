@@ -44,10 +44,18 @@ export class Payments extends Context.Service<
     readonly remove: (
       id: PaymentId,
       reason: string,
-    ) => Effect.Effect<void, NotFound | Conflict | Forbidden, CurrentCaller>;
+    ) => Effect.Effect<
+      void,
+      NotFound | Conflict | Invalid | Unavailable | Forbidden,
+      CurrentCaller
+    >;
     readonly listFor: (
       target: PaymentTarget,
-    ) => Effect.Effect<ReadonlyArray<PaymentView>, NotFound | Forbidden, CurrentCaller>;
+    ) => Effect.Effect<
+      ReadonlyArray<PaymentView>,
+      NotFound | Unavailable | Forbidden,
+      CurrentCaller
+    >;
   }
 >()("kvitbit/Payments") {}
 
@@ -99,21 +107,35 @@ export class PublicShareLinks extends Context.Service<
     /** Idempotent: returns the active link if one exists. Issued documents only. */
     readonly create: (
       id: DocumentId,
-    ) => Effect.Effect<{ readonly url: string }, NotFound | Conflict | Forbidden, CurrentCaller>;
-    readonly revoke: (id: DocumentId) => Effect.Effect<void, NotFound | Forbidden, CurrentCaller>;
+    ) => Effect.Effect<
+      { readonly url: string },
+      NotFound | Conflict | Unavailable | Forbidden,
+      CurrentCaller
+    >;
+    readonly revoke: (
+      id: DocumentId,
+    ) => Effect.Effect<void, NotFound | Unavailable | Forbidden, CurrentCaller>;
     /** View and download events for the document's links, newest first (share.read). */
     readonly views: (
       id: DocumentId,
       page?: PageRequest,
-    ) => Effect.Effect<Page<ShareViewEvent>, Invalid | NotFound | Forbidden, CurrentCaller>;
+    ) => Effect.Effect<
+      Page<ShareViewEvent>,
+      Invalid | NotFound | Unavailable | Forbidden,
+      CurrentCaller
+    >;
     // ShareLinkVisitor caller (token comes from the caller)
     /** Records a view (deduplicated per visitor per hour) and returns the recipient view. */
-    readonly open: Effect.Effect<SharedDocumentView, NotFound, CurrentCaller>;
+    readonly open: Effect.Effect<
+      SharedDocumentView,
+      NotFound | Unavailable | Forbidden,
+      CurrentCaller
+    >;
     /** Records a download event. */
     readonly pdf: (opts?: {
       readonly language?: Locale;
-    }) => Effect.Effect<FileDownload, NotFound | Unavailable, CurrentCaller>;
+    }) => Effect.Effect<FileDownload, NotFound | Unavailable | Forbidden, CurrentCaller>;
     /** The issuing Workspace's logo for the page header; NotFound when it has none. */
-    readonly logo: Effect.Effect<FileDownload, NotFound | Unavailable, CurrentCaller>;
+    readonly logo: Effect.Effect<FileDownload, NotFound | Unavailable | Forbidden, CurrentCaller>;
   }
 >()("kvitbit/PublicShareLinks") {}

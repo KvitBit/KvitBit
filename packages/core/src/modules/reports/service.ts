@@ -4,11 +4,9 @@
  * first (R1a), reads through `ReportsSource` inside one `CoreStore` transaction (a consistent
  * snapshot), and maps port failures to `Unavailable`.
  *
- * Domain signature gaps (approach of board #340/#341): the frozen tag omits errors the spec and
- * the store require, so `ReportsImpl` states the honest error types and `ReportsLive` crosses to
- * the tag through ONE documented cast at the layer boundary. Gaps: `Unavailable` on run, export,
- * dashboard, startExport and getExport; `Conflict{idempotency_mismatch}` on startExport;
- * `ReportView` is an opaque placeholder (the concrete union is `ReportViewData`).
+ * The domain tag states the errors these methods raise. One gap remains (board #340/#341):
+ * `ReportView` is an opaque placeholder, so `ReportsImpl.run` returns the concrete
+ * `ReportViewData` and `ReportsLive` casts that one method's success type at the layer boundary.
  */
 import type {
   Conflict as ConflictError,
@@ -22,6 +20,7 @@ import type {
   Locale,
   NotFound,
   ReportQuery,
+  ReportView,
   RequestOptions,
   Unavailable,
   WorkspaceId,
@@ -378,8 +377,9 @@ export const makeReports = Effect.gen(function* () {
 });
 
 /**
- * The one cast at the layer boundary (board #340/#341): `ReportsImpl` is the tag's shape with
- * wider, honest error channels and the concrete `ReportViewData` for the opaque `ReportView`.
+ * The one cast at the layer boundary (board #340/#341): `run` yields the concrete
+ * `ReportViewData`, which the opaque branded `ReportView` does not accept, so only its success
+ * value is cast; the error channel is checked against the tag.
  */
 export const ReportsLive: Layer.Layer<
   Reports,
@@ -394,16 +394,10 @@ export const ReportsLive: Layer.Layer<
   | ReportPdfRenderer
 > = Layer.effect(
   Reports,
-  makeReports as unknown as Effect.Effect<
-    Reports["Service"],
-    never,
-    | CoreStore
-    | IdGenerator
-    | ReportsSource
-    | ExportsRepo
-    | ExportWorkflow
-    | BlobStorage
-    | FxFixings
-    | ReportPdfRenderer
-  >,
+  Effect.map(makeReports, (impl) =>
+    Reports.of({
+      ...impl,
+      run: (q) => Effect.map(impl.run(q), (view) => view as unknown as ReportView),
+    }),
+  ),
 );

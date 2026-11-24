@@ -4,6 +4,7 @@ import {
   check,
   date,
   foreignKey,
+  index,
   integer,
   jsonb,
   pgTable,
@@ -15,7 +16,13 @@ import {
 import { createdAt, decimal, id, instant, revision, updatedAt, workspaceIdColumn } from "./columns";
 import { contacts, priceListItems } from "./contacts";
 import { deliveries, documents } from "./documents";
-import { cadenceUnit, draftableKind, recurringOutcome, vatTreatment } from "./enums";
+import {
+  cadenceUnit,
+  draftableKind,
+  recurringOutcome,
+  recurringSendState,
+  vatTreatment,
+} from "./enums";
 import { bankAccounts, numberingSeries, workspaces } from "./workspaces";
 
 const isoDate = (name: string) => date(name, { mode: "string" });
@@ -96,7 +103,8 @@ export const templateLines = pgTable(
 /**
  * Recurring Schedules: at most one per Template (core-ports.md:939-954, §5.6). `every` is stored
  * as unit + interval. `next_occurrence` is advanced by compare-and-set (core-ports.md:1366).
- * Changes are made through the Template, whose revision covers the schedule. Detaching sets
+ * Issuance advances and pauses the schedule under its own `revision` (core `ScheduleRow`); user
+ * edits go through the Template, whose revision covers the schedule. Detaching sets
  * `detached_at` instead of deleting, so issued documents and run history keep their schedule.
  */
 export const schedules = pgTable(
@@ -114,6 +122,10 @@ export const schedules = pgTable(
     nextOccurrence: isoDate("next_occurrence"),
     pausedReason: text("paused_reason"),
     pausedAt: instant("paused_at"),
+    /** The error that paused the schedule when no IssueCode names it, e.g. `NotFound:Contact`. */
+    pausedError: text("paused_error"),
+    /** Set by resume: occurrences on or before this date are issued however late (core-ports 4.8). */
+    catchUpThrough: isoDate("catch_up_through"),
     detachedAt: instant("detached_at"),
     /**
      * Outbox stamp (core-ports.md J1, :1296): the occurrence whose RecurringIssuance workflow was
@@ -121,6 +133,7 @@ export const schedules = pgTable(
      */
     startedOccurrence: isoDate("started_occurrence"),
     workflowStartedAt: instant("workflow_started_at"),
+    revision: revision(),
     createdAt: createdAt(),
     updatedAt: updatedAt(),
   },
@@ -139,6 +152,10 @@ export const schedules = pgTable(
       sql`(${t.startedOccurrence} is null) = (${t.workflowStartedAt} is null)`,
     ),
     check("schedules_interval_positive", sql`${t.cadenceInterval} > 0`),
+    check(
+      "schedules_pause_fields_need_paused_at",
+      sql`${t.pausedAt} is not null or (${t.pausedReason} is null and ${t.pausedError} is null)`,
+    ),
     check("schedules_end_after_start", sql`${t.endOn} is null or ${t.endOn} >= ${t.startOn}`),
   ],
 );
@@ -155,10 +172,28 @@ export const scheduleRuns = pgTable(
     at: createdAt("at"),
     documentId: uuid("document_id"),
     deliveryId: uuid("delivery_id"),
+    /**
+     * The send half of an issued run. `pending` (autoSend was on, delivery not queued yet) is not
+     * derivable from `delivery_id` and `failure`, so it is stored.
+     */
+    sendState: recurringSendState("send_state").notNull().default("none"),
     failure: text("failure"),
+    revision: revision(),
   },
   (t) => [
     unique("schedule_runs_schedule_occurrence_unique").on(t.scheduleId, t.occurrence),
+    // RecurringIssuance recovery (`pendingSendRuns`): issued runs whose send is not queued yet.
+    index("schedule_runs_pending_send_idx")
+      .on(t.at)
+      .where(sql`${t.outcome} = 'issued' and ${t.sendState} = 'pending'`),
+    check(
+      "schedule_runs_send_needs_issued",
+      sql`${t.sendState} = 'none' or ${t.outcome} = 'issued'`,
+    ),
+    check(
+      "schedule_runs_queued_has_delivery",
+      sql`${t.sendState} <> 'queued' or ${t.deliveryId} is not null`,
+    ),
     foreignKey({
       name: "schedule_runs_schedule_fk",
       columns: [t.workspaceId, t.scheduleId],

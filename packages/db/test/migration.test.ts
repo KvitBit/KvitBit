@@ -79,6 +79,9 @@ describe("schema invariants", () => {
       "payments",
       "expenses",
       "templates",
+      "schedules",
+      "schedule_runs",
+      "memberships",
       "user_preferences",
     ]) {
       expect(names).toContain(table);
@@ -91,6 +94,7 @@ describe("schema invariants", () => {
       "user_preferences",
       "altcha_replays",
       "fx_fixings",
+      "fx_fixing_requests",
       "request_log",
       "__drizzle_migrations",
     ]);

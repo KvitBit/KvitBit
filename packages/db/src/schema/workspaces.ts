@@ -136,6 +136,9 @@ export const memberships = pgTable(
       .references(() => user.id, { onDelete: "restrict" }),
     role: role("role").notNull(),
     joinedAt: createdAt("joined_at"),
+    /** Soft delete: set when the member was removed or left; cleared when the user rejoins. */
+    removedAt: instant("removed_at"),
+    revision: revision(),
   },
   (t) => [
     primaryKey({ columns: [t.workspaceId, t.userId] }),

@@ -47,8 +47,8 @@
  * - Credit Notes take no payments (documents refuses with Conflict{illegal_transition}); refunds
  *   of an overpaid or credited document are `Payable.refundDue`, not payment rows, in v1.
  *
- * Known contract gaps (domain frozen): `remove` lacks Invalid and Unavailable, `listFor` lacks
- * Unavailable (one cast in service.ts). db gap: none (the row maps 1:1 onto `payments`).
+ * Known contract gaps: none (the domain signatures carry every error the methods yield). db gap:
+ * none (the row maps 1:1 onto `payments`).
  */
 import { Layer } from "effect";
 import { DocumentsTestLayer } from "../documents";

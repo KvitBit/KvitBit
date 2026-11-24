@@ -57,6 +57,14 @@ export const expenses = pgTable(
     fxQuantity: integer("fx_quantity"),
     fxFixingDate: isoDate("fx_fixing_date"),
     fxSource: fxSource("fx_source"),
+    /** Input VAT deductibility coefficient in percent (§76): 100 full, 0 none. */
+    deductiblePercent: integer("deductible_percent").notNull().default(100),
+    /**
+     * Sum of live Payments in `currency` and their count, kept by `ExpensePayables.settle`.
+     * Unbounded: each Payment fits `money`, their sum (overpayment allowed) may not.
+     */
+    paid: decimal("paid").notNull().default("0"),
+    payments: integer("payments").notNull().default(0),
     /** Removal marker: removed Expenses leave active use but keep their Payments (core-ports.md:926). */
     removedAt: instant("removed_at"),
     revision: revision(),
@@ -80,6 +88,8 @@ export const expenses = pgTable(
       "expenses_complete_required",
       sql`${t.status} = 'incomplete' or (${t.issuedOn} is not null and ${t.currency} is not null and ${t.totalGross} is not null)`,
     ),
+    check("expenses_deductible_percent_range", sql`${t.deductiblePercent} between 0 and 100`),
+    check("expenses_payments_nonnegative", sql`${t.payments} >= 0`),
   ],
 );
 

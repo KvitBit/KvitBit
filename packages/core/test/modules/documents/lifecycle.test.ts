@@ -414,7 +414,7 @@ describe("lock and unlock", () => {
     );
     expect(first.locked).toBe(true);
     expect(second).toEqual(first);
-    // Domain gap: unlock's signature lacks Invalid (missing reason); widened in service.ts.
+    // A missing reason fails with Invalid.
     expect(blank as unknown).toEqual(
       new Invalid({
         issues: [{ path: ["reason"], code: "request.malformed", params: { reason: "required" } }],

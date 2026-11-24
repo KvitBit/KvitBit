@@ -58,8 +58,7 @@ type CoreFailure = Invalid | Conflict | Forbidden | Unavailable;
 
 /**
  * The implementation's honest error types: every method can also fail with `Unavailable`
- * (a port failure), which the domain tag omits (board #340/#341). One documented cast at the
- * layer boundary below.
+ * (a port failure), as the domain tag declares.
  */
 export interface TemplatesImpl {
   readonly save: (
@@ -655,8 +654,4 @@ export const TemplatesLive: Layer.Layer<
   Templates,
   never,
   CoreStore | IdGenerator | RecurringRepo | DeliveryStatusLookup | Documents
-> = Layer.effect(
-  Templates,
-  // The one cast (board #340/#341): the domain tag omits `Unavailable` from most signatures.
-  Effect.map(makeTemplates, (impl) => Templates.of(impl as unknown as Templates["Service"])),
-);
+> = Layer.effect(Templates, makeTemplates);

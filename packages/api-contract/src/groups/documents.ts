@@ -104,7 +104,7 @@ export class DocumentsGroup extends HttpApiGroup.make("documents")
       params: WorkspaceParams,
       query: { ...DocumentQuery.fields, ...PageQueryFields },
       success: Page(DocumentSummary),
-      error: Invalid.schema,
+      error: [Invalid.schema, Unavailable.schema],
     }).annotate(OpenApi.Summary, "List documents"),
   )
   .add(
@@ -112,7 +112,7 @@ export class DocumentsGroup extends HttpApiGroup.make("documents")
       params: WorkspaceParams,
       payload: DocumentInput,
       success: DocumentView,
-      error: [Invalid.schema, Unavailable.schema],
+      error: [Invalid.schema, NotFound.schema, Unavailable.schema],
     }).annotate(OpenApi.Summary, "Preview a document without saving it"),
   )
   .add(
@@ -141,7 +141,7 @@ export class DocumentsGroup extends HttpApiGroup.make("documents")
     HttpApiEndpoint.get("get", "/:documentId", {
       params: DocParams,
       success: DocumentView,
-      error: [NotFound.schema],
+      error: [NotFound.schema, Unavailable.schema],
     })
       .annotate(OpenApi.Summary, "Get a document")
       .annotate(Revisioned, true),
@@ -162,7 +162,7 @@ export class DocumentsGroup extends HttpApiGroup.make("documents")
       params: DocParams,
       headers: IfMatchHeaders,
       success: NoContent,
-      error: [Conflict.schema, ...RevisionedEdgeErrors, NotFound.schema],
+      error: [Conflict.schema, ...RevisionedEdgeErrors, NotFound.schema, Unavailable.schema],
     }).annotate(OpenApi.Summary, "Discard a draft"),
   )
   .add(
@@ -180,7 +180,7 @@ export class DocumentsGroup extends HttpApiGroup.make("documents")
     HttpApiEndpoint.post("lock", "/:documentId/lock", {
       params: DocParams,
       success: DocumentView,
-      error: [Conflict.schema, NotFound.schema],
+      error: [Conflict.schema, NotFound.schema, Unavailable.schema],
     })
       .annotate(OpenApi.Summary, "Lock a document")
       .annotate(Revisioned, true),
@@ -190,7 +190,7 @@ export class DocumentsGroup extends HttpApiGroup.make("documents")
       params: DocParams,
       payload: UnlockInput,
       success: DocumentView,
-      error: [Conflict.schema, Invalid.schema, NotFound.schema],
+      error: [Conflict.schema, Invalid.schema, NotFound.schema, Unavailable.schema],
     })
       .annotate(OpenApi.Summary, "Unlock a document")
       .annotate(Revisioned, true),
@@ -232,7 +232,7 @@ export class DocumentsGroup extends HttpApiGroup.make("documents")
       headers: IdempotencyHeaders,
       payload: SendInput,
       success: Accepted(DeliveryQueued),
-      error: [NotFound.schema, Conflict.schema, Invalid.schema],
+      error: [NotFound.schema, Conflict.schema, Invalid.schema, Unavailable.schema],
     }).annotate(OpenApi.Summary, "Send a document by email"),
   )
   .add(
@@ -247,7 +247,7 @@ export class DocumentsGroup extends HttpApiGroup.make("documents")
     HttpApiEndpoint.get("history", "/:documentId/history", {
       params: DocParams,
       success: Schema.Array(AuditEntry),
-      error: [NotFound.schema],
+      error: [NotFound.schema, Unavailable.schema],
     }).annotate(OpenApi.Summary, "Get a document's history"),
   )
   .prefix("/workspaces/:workspaceId/documents")
@@ -264,14 +264,14 @@ export class ShareLinksGroup extends HttpApiGroup.make("shareLinks")
     HttpApiEndpoint.put("create", "/", {
       params: DocParams,
       success: ShareLinkCreated,
-      error: [Conflict.schema, NotFound.schema],
+      error: [Conflict.schema, NotFound.schema, Unavailable.schema],
     }).annotate(OpenApi.Summary, "Create or replace a share link"),
   )
   .add(
     HttpApiEndpoint.delete("revoke", "/", {
       params: DocParams,
       success: NoContent,
-      error: [NotFound.schema],
+      error: [NotFound.schema, Unavailable.schema],
     }).annotate(OpenApi.Summary, "Revoke a share link"),
   )
   .add(
@@ -279,7 +279,7 @@ export class ShareLinksGroup extends HttpApiGroup.make("shareLinks")
       params: DocParams,
       query: PageQueryFields,
       success: Page(ShareViewEvent),
-      error: [Invalid.schema, NotFound.schema],
+      error: [Invalid.schema, NotFound.schema, Unavailable.schema],
     }).annotate(OpenApi.Summary, "List share link views"),
   )
   .prefix("/workspaces/:workspaceId/documents/:documentId/share-link")

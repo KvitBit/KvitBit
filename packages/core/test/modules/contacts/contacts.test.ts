@@ -716,7 +716,7 @@ describe("Contacts.search paging edges", () => {
     const exit = await run(
       owner,
       Effect.gen(function* () {
-        const contacts = yield* Contacts as unknown as Effect.Effect<ContactsImpl>;
+        const contacts = yield* Contacts; // the public tag takes `limit`
         for (const name of ["A", "B", "C"]) yield* contacts.save(contactInput({ name }));
         const one = yield* contacts.search({ limit: 1 });
         const rest = yield* contacts.search({ limit: 2, cursor: one.nextCursor ?? "" });

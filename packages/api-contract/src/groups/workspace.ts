@@ -71,6 +71,7 @@ export class WorkspaceGroup extends HttpApiGroup.make("workspace")
     HttpApiEndpoint.get("current", "/", {
       params: WorkspaceParams,
       success: WorkspaceView,
+      error: Unavailable.schema,
     })
       .annotate(OpenApi.Summary, "Get the workspace")
       .annotate(Revisioned, true),
@@ -81,7 +82,7 @@ export class WorkspaceGroup extends HttpApiGroup.make("workspace")
       headers: IfMatchHeaders,
       payload: IssuingEntityPatch,
       success: WorkspaceView,
-      error: [Invalid.schema, Conflict.schema, ...RevisionedEdgeErrors],
+      error: [Invalid.schema, Conflict.schema, ...RevisionedEdgeErrors, Unavailable.schema],
     })
       .annotate(OpenApi.Summary, "Update the issuing entity")
       .annotate(Revisioned, true),
@@ -92,7 +93,7 @@ export class WorkspaceGroup extends HttpApiGroup.make("workspace")
       headers: IfMatchHeaders,
       payload: WorkspaceSettingsPatch,
       success: WorkspaceView,
-      error: [Invalid.schema, Conflict.schema, ...RevisionedEdgeErrors],
+      error: [Invalid.schema, Conflict.schema, ...RevisionedEdgeErrors, Unavailable.schema],
     })
       .annotate(OpenApi.Summary, "Update workspace settings")
       .annotate(Revisioned, true),
@@ -101,6 +102,7 @@ export class WorkspaceGroup extends HttpApiGroup.make("workspace")
     HttpApiEndpoint.get("listBankAccounts", "/bank-accounts", {
       params: WorkspaceParams,
       success: Schema.Array(BankAccountView),
+      error: Unavailable.schema,
     }).annotate(OpenApi.Summary, "List bank accounts"),
   )
   .add(
@@ -109,7 +111,7 @@ export class WorkspaceGroup extends HttpApiGroup.make("workspace")
       headers: IdempotencyHeaders,
       payload: BankAccountInput,
       success: Created(BankAccountView),
-      error: [Invalid.schema, NotFound.schema, Conflict.schema],
+      error: [Invalid.schema, NotFound.schema, Conflict.schema, Unavailable.schema],
     }).annotate(OpenApi.Summary, "Add a bank account"),
   )
   .add(
@@ -117,7 +119,7 @@ export class WorkspaceGroup extends HttpApiGroup.make("workspace")
       params: BankAccountParams,
       payload: BankAccountInput,
       success: BankAccountView,
-      error: [Invalid.schema, NotFound.schema, Conflict.schema],
+      error: [Invalid.schema, NotFound.schema, Conflict.schema, Unavailable.schema],
     }).annotate(OpenApi.Summary, "Update a bank account"),
   )
   .add(
@@ -125,13 +127,14 @@ export class WorkspaceGroup extends HttpApiGroup.make("workspace")
       params: BankAccountParams,
       query: { replacement: Schema.optional(BankAccountId) },
       success: NoContent,
-      error: [Conflict.schema, Invalid.schema, NotFound.schema],
+      error: [Conflict.schema, Invalid.schema, NotFound.schema, Unavailable.schema],
     }).annotate(OpenApi.Summary, "Remove a bank account"),
   )
   .add(
     HttpApiEndpoint.get("listSeries", "/numbering-series", {
       params: WorkspaceParams,
       success: Schema.Array(NumberingSeriesView),
+      error: Unavailable.schema,
     }).annotate(OpenApi.Summary, "List numbering series"),
   )
   .add(
@@ -140,7 +143,7 @@ export class WorkspaceGroup extends HttpApiGroup.make("workspace")
       headers: IdempotencyHeaders,
       payload: SeriesInput,
       success: Created(NumberingSeriesView),
-      error: [Invalid.schema, Conflict.schema, NotFound.schema],
+      error: [Invalid.schema, Conflict.schema, NotFound.schema, Unavailable.schema],
     }).annotate(OpenApi.Summary, "Create a numbering series"),
   )
   .add(
@@ -148,7 +151,7 @@ export class WorkspaceGroup extends HttpApiGroup.make("workspace")
       params: SeriesParams,
       payload: SeriesInput,
       success: NumberingSeriesView,
-      error: [Invalid.schema, Conflict.schema, NotFound.schema],
+      error: [Invalid.schema, Conflict.schema, NotFound.schema, Unavailable.schema],
     }).annotate(OpenApi.Summary, "Update a numbering series"),
   )
   .add(
@@ -156,7 +159,7 @@ export class WorkspaceGroup extends HttpApiGroup.make("workspace")
       params: WorkspaceParams,
       payload: CloseWorkspaceInput,
       success: NoContent,
-      error: [Invalid.schema, Unauthorized.schema], // fresh session required (rule A6)
+      error: [Invalid.schema, Unauthorized.schema, Unavailable.schema], // fresh session required (rule A6)
     }).annotate(OpenApi.Summary, "Close the workspace"),
   )
   .prefix("/workspaces/:workspaceId")
@@ -176,6 +179,7 @@ export class TeamGroup extends HttpApiGroup.make("team")
     HttpApiEndpoint.get("listMembers", "/members", {
       params: WorkspaceParams,
       success: Schema.Array(MemberView),
+      error: Unavailable.schema,
     }).annotate(OpenApi.Summary, "List members"),
   )
   .add(
@@ -183,27 +187,28 @@ export class TeamGroup extends HttpApiGroup.make("team")
       params: MemberParams,
       payload: SetRoleInput,
       success: NoContent,
-      error: [Conflict.schema, NotFound.schema],
+      error: [Conflict.schema, NotFound.schema, Unavailable.schema],
     }).annotate(OpenApi.Summary, "Change a member's role"),
   )
   .add(
     HttpApiEndpoint.delete("removeMember", "/members/:userId", {
       params: MemberParams,
       success: NoContent,
-      error: [Conflict.schema, NotFound.schema],
+      error: [Conflict.schema, NotFound.schema, Unavailable.schema],
     }).annotate(OpenApi.Summary, "Remove a member"),
   )
   .add(
     HttpApiEndpoint.post("leave", "/members/me/leave", {
       params: WorkspaceParams,
       success: NoContent,
-      error: Conflict.schema,
+      error: [Conflict.schema, Unavailable.schema],
     }).annotate(OpenApi.Summary, "Leave the workspace"),
   )
   .add(
     HttpApiEndpoint.get("listInvitations", "/invitations", {
       params: WorkspaceParams,
       success: Schema.Array(InvitationView),
+      error: Unavailable.schema,
     }).annotate(OpenApi.Summary, "List pending invitations"),
   )
   .add(
@@ -212,21 +217,21 @@ export class TeamGroup extends HttpApiGroup.make("team")
       headers: IdempotencyHeaders,
       payload: InviteInput,
       success: Created(InvitationView),
-      error: [Invalid.schema, Conflict.schema],
+      error: [Invalid.schema, Conflict.schema, Unavailable.schema],
     }).annotate(OpenApi.Summary, "Invite a member"),
   )
   .add(
     HttpApiEndpoint.delete("revokeInvitation", "/invitations/:invitationId", {
       params: InvitationParams,
       success: NoContent,
-      error: [NotFound.schema],
+      error: [NotFound.schema, Unavailable.schema],
     }).annotate(OpenApi.Summary, "Revoke an invitation"),
   )
   .add(
     HttpApiEndpoint.post("resendInvitation", "/invitations/:invitationId/resend", {
       params: InvitationParams,
       success: AcceptedEmpty,
-      error: [Conflict.schema, NotFound.schema],
+      error: [Conflict.schema, NotFound.schema, Unavailable.schema],
     }).annotate(OpenApi.Summary, "Resend an invitation"),
   )
   .add(
@@ -234,7 +239,7 @@ export class TeamGroup extends HttpApiGroup.make("team")
       params: WorkspaceParams,
       payload: TransferOwnershipInput,
       success: NoContent,
-      error: [Conflict.schema, Unauthorized.schema, NotFound.schema], // Unauthorized: fresh session (A6)
+      error: [Conflict.schema, Unauthorized.schema, NotFound.schema, Unavailable.schema], // Unauthorized: fresh session (A6)
     }).annotate(OpenApi.Summary, "Transfer workspace ownership"),
   )
   .prefix("/workspaces/:workspaceId")
@@ -249,6 +254,7 @@ export class BrandingGroup extends HttpApiGroup.make("branding")
     HttpApiEndpoint.get("getBranding", "/", {
       params: WorkspaceParams,
       success: BrandingView,
+      error: Unavailable.schema,
     })
       .annotate(OpenApi.Summary, "Get branding")
       .annotate(Revisioned, true),
@@ -259,7 +265,7 @@ export class BrandingGroup extends HttpApiGroup.make("branding")
       headers: IfMatchHeaders,
       payload: BrandingPatch,
       success: BrandingView,
-      error: [Invalid.schema, Conflict.schema, ...RevisionedEdgeErrors],
+      error: [Invalid.schema, Conflict.schema, ...RevisionedEdgeErrors, Unavailable.schema],
     })
       .annotate(OpenApi.Summary, "Update branding")
       .annotate(Revisioned, true),
@@ -291,6 +297,7 @@ export class BrandingGroup extends HttpApiGroup.make("branding")
     HttpApiEndpoint.delete("removeImage", "/:image", {
       params: ImageParams,
       success: NoContent,
+      error: Unavailable.schema,
     }).annotate(OpenApi.Summary, "Remove a branding image"),
   )
   .prefix("/workspaces/:workspaceId/branding")

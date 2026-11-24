@@ -341,6 +341,7 @@ describe("Api definition integrity", () => {
       if (r.middleware.includes(WorkspaceMember.key)) {
         expect(hasError(r, 404, new NotFound({ entity: "Workspace", id: "w" }))).toBe(true);
         expect(hasError(r, 403, new Forbidden({ action: "workspace.read" }))).toBe(true);
+        expect(hasError(r, 503, new Unavailable({ dependency: "database" }))).toBe(true);
       }
     }
   });
@@ -394,107 +395,107 @@ describe("Api definition integrity", () => {
 const CORE_ERRORS = `
 config.getConfig -
 botProtection.issueChallenge -
-publicShare.open PublicShareLinks.open NotFound
-publicShare.pdf PublicShareLinks.pdf NotFound,Unavailable
-publicShare.logo PublicShareLinks.logo NotFound,Unavailable
-invitations.peek Workspaces.peekInvitation NotFound
-invitations.accept Workspaces.acceptInvitation NotFound,Conflict,Forbidden
+publicShare.open PublicShareLinks.open NotFound,Unavailable,Forbidden
+publicShare.pdf PublicShareLinks.pdf NotFound,Unavailable,Forbidden
+publicShare.logo PublicShareLinks.logo NotFound,Unavailable,Forbidden
+invitations.peek Workspaces.peekInvitation NotFound,Unavailable
+invitations.accept Workspaces.acceptInvitation NotFound,Conflict,Unavailable,Forbidden
 me.getPreferences -
 me.updatePreferences -
-myWorkspaces.listMine Workspaces.listMine Forbidden
-myWorkspaces.create Workspaces.create Invalid,Unavailable,Forbidden
-oauthConsent.getConsent Workspaces.listMine Forbidden
-oauthConsent.decide Workspaces.enter NotFound,Forbidden
+myWorkspaces.listMine Workspaces.listMine Unavailable,Forbidden
+myWorkspaces.create Workspaces.create Invalid,Conflict,Unavailable,Forbidden
+oauthConsent.getConsent Workspaces.listMine Unavailable,Forbidden
+oauthConsent.decide Workspaces.enter NotFound,Unavailable,Forbidden
 registry.lookupCompany Workspaces.lookupCompany Invalid,NotFound,Unavailable,Forbidden
 themes.resolve -
-workspace.current Workspaces.current Forbidden
-workspace.updateIssuingEntity Workspaces.updateIssuingEntity Invalid,Conflict,Forbidden
-workspace.updateSettings Workspaces.updateSettings Invalid,Conflict,Forbidden
-workspace.listBankAccounts Workspaces.current Forbidden
-workspace.createBankAccount Workspaces.saveBankAccount Invalid,NotFound,Conflict,Forbidden
-workspace.updateBankAccount Workspaces.saveBankAccount Invalid,NotFound,Conflict,Forbidden
-workspace.removeBankAccount Workspaces.removeBankAccount Invalid,NotFound,Conflict,Forbidden
-workspace.listSeries Workspaces.listSeries Forbidden
-workspace.createSeries Workspaces.configureSeries Invalid,NotFound,Conflict,Forbidden
-workspace.updateSeries Workspaces.configureSeries Invalid,NotFound,Conflict,Forbidden
-workspace.close Workspaces.close Invalid,Forbidden
-team.listMembers Workspaces.members Forbidden
-team.setRole Workspaces.setRole NotFound,Conflict,Forbidden
-team.removeMember Workspaces.setRole NotFound,Conflict,Forbidden
-team.leave Workspaces.leave Conflict,Forbidden
-team.listInvitations Workspaces.invitations Forbidden
-team.invite Workspaces.invite Invalid,Conflict,Forbidden
-team.revokeInvitation Workspaces.revokeInvitation NotFound,Forbidden
-team.resendInvitation Workspaces.resendInvitation NotFound,Conflict,Forbidden
-team.transferOwnership Workspaces.transferOwnership NotFound,Conflict,Forbidden
-branding.getBranding Workspaces.current Forbidden
-branding.updateBranding Workspaces.updateSettings Invalid,Conflict,Forbidden
+workspace.current Workspaces.current Unavailable,Forbidden
+workspace.updateIssuingEntity Workspaces.updateIssuingEntity Invalid,Conflict,Unavailable,Forbidden
+workspace.updateSettings Workspaces.updateSettings Invalid,Conflict,Unavailable,Forbidden
+workspace.listBankAccounts Workspaces.current Unavailable,Forbidden
+workspace.createBankAccount Workspaces.saveBankAccount Invalid,NotFound,Conflict,Unavailable,Forbidden
+workspace.updateBankAccount Workspaces.saveBankAccount Invalid,NotFound,Conflict,Unavailable,Forbidden
+workspace.removeBankAccount Workspaces.removeBankAccount Invalid,NotFound,Conflict,Unavailable,Forbidden
+workspace.listSeries Workspaces.listSeries Unavailable,Forbidden
+workspace.createSeries Workspaces.configureSeries Invalid,NotFound,Conflict,Unavailable,Forbidden
+workspace.updateSeries Workspaces.configureSeries Invalid,NotFound,Conflict,Unavailable,Forbidden
+workspace.close Workspaces.close Invalid,Unavailable,Forbidden
+team.listMembers Workspaces.members Unavailable,Forbidden
+team.setRole Workspaces.setRole NotFound,Conflict,Unavailable,Forbidden
+team.removeMember Workspaces.setRole NotFound,Conflict,Unavailable,Forbidden
+team.leave Workspaces.leave Conflict,Unavailable,Forbidden
+team.listInvitations Workspaces.invitations Unavailable,Forbidden
+team.invite Workspaces.invite Invalid,Conflict,Unavailable,Forbidden
+team.revokeInvitation Workspaces.revokeInvitation NotFound,Unavailable,Forbidden
+team.resendInvitation Workspaces.resendInvitation NotFound,Conflict,Unavailable,Forbidden
+team.transferOwnership Workspaces.transferOwnership NotFound,Conflict,Unavailable,Forbidden
+branding.getBranding Workspaces.current Unavailable,Forbidden
+branding.updateBranding Workspaces.updateSettings Invalid,Conflict,Unavailable,Forbidden
 branding.previewPdf Workspaces.previewBranding Invalid,Unavailable,Forbidden
 branding.putImage Workspaces.setBrandingImage Invalid,Unavailable,Forbidden
 branding.getImage Workspaces.brandingImage NotFound,Unavailable,Forbidden
-branding.removeImage Workspaces.removeBrandingImage Forbidden
+branding.removeImage Workspaces.removeBrandingImage Unavailable,Forbidden
 apiKeys.listApiKeys -
 apiKeys.createApiKey -
 apiKeys.revokeApiKey -
 connectedApps.listConnectedApps -
 connectedApps.revokeConnectedApp -
-documents.list Documents.list Invalid,Forbidden
-documents.preview Documents.preview Invalid,Unavailable,Forbidden
-documents.createDraft Documents.createDraft Invalid,NotFound,Unavailable,Forbidden
+documents.list Documents.list Invalid,Unavailable,Forbidden
+documents.preview Documents.preview Invalid,NotFound,Unavailable,Forbidden
+documents.createDraft Documents.createDraft Invalid,NotFound,Conflict,Unavailable,Forbidden
 documents.issueFromInput Documents.issue NotFound,Forbidden,Invalid,Conflict,Unavailable
-documents.get Documents.get NotFound,Forbidden
+documents.get Documents.get NotFound,Unavailable,Forbidden
 documents.edit Documents.edit NotFound,Forbidden,Invalid,Conflict,Unavailable
-documents.discardDraft Documents.discardDraft NotFound,Conflict,Forbidden
+documents.discardDraft Documents.discardDraft NotFound,Conflict,Unavailable,Forbidden
 documents.issueDraft Documents.issue NotFound,Forbidden,Invalid,Conflict,Unavailable
-documents.lock Documents.lock NotFound,Conflict,Forbidden
-documents.unlock Documents.unlock NotFound,Conflict,Forbidden
+documents.lock Documents.lock NotFound,Conflict,Unavailable,Forbidden
+documents.unlock Documents.unlock NotFound,Conflict,Invalid,Unavailable,Forbidden
 documents.cancel Documents.cancel NotFound,Forbidden,Invalid,Conflict,Unavailable
 documents.correct Documents.correct NotFound,Forbidden,Invalid,Conflict,Unavailable
 documents.issueFinalInvoice Documents.issueFinalInvoice NotFound,Forbidden,Invalid,Conflict,Unavailable
-documents.send Documents.send NotFound,Conflict,Invalid,Forbidden
+documents.send Documents.send NotFound,Conflict,Invalid,Unavailable,Forbidden
 documents.pdf Documents.pdf NotFound,Unavailable,Forbidden
-documents.history Documents.history NotFound,Forbidden
-shareLinks.create PublicShareLinks.create NotFound,Conflict,Forbidden
-shareLinks.revoke PublicShareLinks.revoke NotFound,Forbidden
-shareLinks.views PublicShareLinks.views Invalid,NotFound,Forbidden
-contacts.search Contacts.search Forbidden
-contacts.get Contacts.get NotFound,Forbidden
-contacts.create Contacts.save Invalid,NotFound,Conflict,Forbidden
-contacts.update Contacts.save Invalid,NotFound,Conflict,Forbidden
-contacts.fromIco Contacts.fromIco Invalid,Unavailable,Forbidden
-contacts.archive Contacts.archive NotFound,Forbidden
-priceList.list PriceList.list Forbidden
-priceList.create PriceList.save Invalid,NotFound,Conflict,Forbidden
-priceList.update PriceList.save Invalid,NotFound,Conflict,Forbidden
-priceList.archive PriceList.archive NotFound,Forbidden
+documents.history Documents.history NotFound,Unavailable,Forbidden
+shareLinks.create PublicShareLinks.create NotFound,Conflict,Unavailable,Forbidden
+shareLinks.revoke PublicShareLinks.revoke NotFound,Unavailable,Forbidden
+shareLinks.views PublicShareLinks.views Invalid,NotFound,Unavailable,Forbidden
+contacts.search Contacts.search Invalid,Unavailable,Forbidden
+contacts.get Contacts.get NotFound,Unavailable,Forbidden
+contacts.create Contacts.save Invalid,NotFound,Conflict,Unavailable,Forbidden
+contacts.update Contacts.save Invalid,NotFound,Conflict,Unavailable,Forbidden
+contacts.fromIco Contacts.fromIco Invalid,NotFound,Unavailable,Forbidden
+contacts.archive Contacts.archive NotFound,Unavailable,Forbidden
+priceList.list PriceList.list Unavailable,Forbidden
+priceList.create PriceList.save Invalid,NotFound,Conflict,Unavailable,Forbidden
+priceList.update PriceList.save Invalid,NotFound,Conflict,Unavailable,Forbidden
+priceList.archive PriceList.archive NotFound,Unavailable,Forbidden
 payments.record Payments.record NotFound,Forbidden,Invalid,Conflict,Unavailable
-payments.remove Payments.remove NotFound,Conflict,Forbidden
-payments.listForDocument Payments.listFor NotFound,Forbidden
-payments.listForExpense Payments.listFor NotFound,Forbidden
-expenses.list Expenses.list Invalid,Forbidden
-expenses.record Expenses.record Invalid,NotFound,Unavailable,Forbidden
-expenses.get Expenses.get NotFound,Forbidden
+payments.remove Payments.remove NotFound,Conflict,Invalid,Unavailable,Forbidden
+payments.listForDocument Payments.listFor NotFound,Unavailable,Forbidden
+payments.listForExpense Payments.listFor NotFound,Unavailable,Forbidden
+expenses.list Expenses.list Invalid,Unavailable,Forbidden
+expenses.record Expenses.record Invalid,NotFound,Conflict,Unavailable,Forbidden
+expenses.get Expenses.get NotFound,Unavailable,Forbidden
 expenses.edit Expenses.edit NotFound,Invalid,Conflict,Unavailable,Forbidden
-expenses.remove Expenses.remove NotFound,Conflict,Forbidden
+expenses.remove Expenses.remove NotFound,Conflict,Unavailable,Forbidden
 expenses.attach Expenses.attach NotFound,Invalid,Unavailable,Forbidden
 expenses.attachment Expenses.attachment NotFound,Unavailable,Forbidden
-expenses.detach Expenses.detach NotFound,Forbidden
-templates.list Templates.list Forbidden
-templates.get Templates.get NotFound,Forbidden
-templates.create Templates.save Invalid,NotFound,Conflict,Forbidden
-templates.update Templates.save Invalid,NotFound,Conflict,Forbidden
-templates.archive Templates.archive NotFound,Forbidden
-templates.setSchedule Templates.schedule Invalid,NotFound,Conflict,Forbidden
-templates.removeSchedule Templates.schedule Invalid,NotFound,Conflict,Forbidden
-templates.resume Templates.resume NotFound,Conflict,Forbidden
-templates.runs Templates.runs Invalid,NotFound,Forbidden
+expenses.detach Expenses.detach NotFound,Unavailable,Forbidden
+templates.list Templates.list Unavailable,Forbidden
+templates.get Templates.get NotFound,Unavailable,Forbidden
+templates.create Templates.save Invalid,NotFound,Conflict,Unavailable,Forbidden
+templates.update Templates.save Invalid,NotFound,Conflict,Unavailable,Forbidden
+templates.archive Templates.archive NotFound,Unavailable,Forbidden
+templates.setSchedule Templates.schedule Invalid,NotFound,Conflict,Unavailable,Forbidden
+templates.removeSchedule Templates.schedule Invalid,NotFound,Conflict,Unavailable,Forbidden
+templates.resume Templates.resume NotFound,Conflict,Unavailable,Forbidden
+templates.runs Templates.runs Invalid,NotFound,Unavailable,Forbidden
 templates.use Templates.use NotFound,Forbidden,Invalid,Conflict,Unavailable
-reports.dashboard Reports.dashboard Invalid,Forbidden
-reports.run Reports.run Invalid,Forbidden
-reports.export Reports.export Invalid,Forbidden
+reports.dashboard Reports.dashboard Invalid,Unavailable,Forbidden
+reports.run Reports.run Invalid,Unavailable,Forbidden
+reports.export Reports.export Invalid,Unavailable,Forbidden
 reports.fxRate Reports.fxRate Invalid,Unavailable,Forbidden
-reports.startExport Reports.startExport Forbidden
-reports.getExport Reports.getExport NotFound,Forbidden
+reports.startExport Reports.startExport Conflict,Unavailable,Forbidden
+reports.getExport Reports.getExport NotFound,Unavailable,Forbidden
 reports.exportFile Reports.exportFile NotFound,Conflict,Unavailable,Forbidden
 `;
 

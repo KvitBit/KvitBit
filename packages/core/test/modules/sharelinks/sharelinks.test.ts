@@ -33,7 +33,7 @@ const WS = WORKSPACE_A;
 const OTHER_USER = "01900000-0000-7000-8000-00000000c009" as UserId;
 const tokenNotFound = new NotFound({ entity: "ShareLink", id: "token" });
 
-/** Exits are compared loosely: the domain signatures omit Forbidden/Unavailable (service.ts). */
+/** Exits are compared loosely, against any expected error value. */
 const fails = (exit: Exit.Exit<unknown, unknown> | undefined, error: unknown) =>
   expect(exit).toEqual(Exit.fail(error));
 

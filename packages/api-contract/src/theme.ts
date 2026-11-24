@@ -27,18 +27,19 @@ export {
 } from "@kvitbit/domain/contract";
 
 /**
- * Seed per built-in preset; ui-port shows swatches from `seed`. The spec fixes the ids but not
- * the seeds, so these values await design confirmation (graphite_atelier is the achromatic
- * brand ink, forest and ocean follow DESIGN.md's emerald and Prague blue seeds).
+ * Seed per built-in preset; ui-port shows swatches from `seed`. The spec fixes the ids, the seeds
+ * are ui-port's tuned design values (packages/ui-port/src/theme/presets.ts; its preset test
+ * keeps the two tables equal): graphite_atelier is the achromatic brand ink, forest is
+ * DESIGN.md's Banknote Emerald and sand is its Prague Ledger blue.
  */
 export const ThemePresets: Readonly<
   Record<ThemePresetId, { readonly seed: Hex; readonly contrast?: ThemeContrast }>
 > = {
   graphite_atelier: { seed: "#111111" },
   forest: { seed: "#0F5D42" },
-  ocean: { seed: "#1D4ED8" },
+  ocean: { seed: "#0E6B8C" },
   plum: { seed: "#6B2D5C" },
-  sand: { seed: "#8A6A3B" },
+  sand: { seed: "#1D4ED8" },
   graphite: { seed: "#4B5563" },
 };
 
