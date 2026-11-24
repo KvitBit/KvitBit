@@ -107,13 +107,17 @@ const toAddress = (address: AresAddress | undefined): RegistryRecord["address"] 
   const parsed = text === undefined ? undefined : parseTextAddress(text);
   const city = nonBlank(address.nazevObce);
   const number = houseNumber(address);
-  // Without a structured house number the parsed text line is the most complete street;
-  // villages without streets use the part of the municipality (or the municipality).
-  const streetName = nonBlank(address.nazevUlice);
+  // A structured street needs both a name and a number; otherwise the parsed text line is
+  // the most complete street. Villages without streets use the part of the municipality
+  // (or the municipality) as the name.
+  const streetName =
+    nonBlank(address.nazevUlice) ??
+    nonBlank(address.nazevCastiObce) ??
+    (number === undefined ? undefined : city);
   const street =
-    number === undefined
-      ? (nonBlank(parsed?.street) ?? streetName ?? nonBlank(address.nazevCastiObce) ?? "")
-      : `${streetName ?? nonBlank(address.nazevCastiObce) ?? city ?? ""} ${number}`.trim();
+    streetName !== undefined && number !== undefined
+      ? `${streetName} ${number}`
+      : (nonBlank(parsed?.street) ?? streetName ?? number ?? "");
   const psc =
     address.psc !== undefined ? String(address.psc).padStart(5, "0") : nonBlank(address.pscTxt);
   return {

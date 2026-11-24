@@ -331,6 +331,21 @@ describe("AresV3 address mapping", () => {
     ).toEqual({ street: "Na Florenci 2116/15", city: "Praha", postalCode: "11000", country: "CZ" });
   });
 
+  test("a house number without any name takes the street from textovaAdresa", async () => {
+    expect(await address({ cisloDomovni: 5, textovaAdresa: "Dlouhá 5, 110 00 Praha" })).toEqual({
+      street: "Dlouhá 5",
+      city: "Praha",
+      postalCode: "11000",
+      country: "CZ",
+    });
+    expect(await address({ cisloDomovni: 5 })).toEqual({
+      street: "5",
+      city: "",
+      postalCode: "",
+      country: "CZ",
+    });
+  });
+
   test("a street name alone, without number or text, is kept", async () => {
     expect(await address({ nazevObce: "Praha", nazevUlice: "Na Florenci", psc: 11000 })).toEqual({
       street: "Na Florenci",
