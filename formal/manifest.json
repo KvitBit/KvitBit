@@ -117,7 +117,7 @@
             "kind": "temporal"
           },
           "deadlock": "allow",
-          "description": "H3 without J1a: a crash between claim and the provider call leaves the delivery sending forever, NoLostSend breaks"
+          "description": "H3 on the code at 77a5bb7 (no J1a delivery reconcile in core): a crash between claim and the provider call leaves the delivery sending forever, NoLostSend breaks"
         },
         {
           "name": "no-reconcile-lost-start",
@@ -127,7 +127,57 @@
             "kind": "temporal"
           },
           "deadlock": "allow",
-          "description": "Without J1a: a crash before the afterCommit start leaves the delivery queued forever, NoLostSend breaks"
+          "description": "The code at 77a5bb7 (no J1a delivery reconcile): a crash before the afterCommit start leaves the delivery queued forever, NoLostSend breaks"
+        },
+        {
+          "name": "no-send-replay-guard",
+          "config": "formal/outbox/OutboxRecurring_mutant_no_send_replay_guard.cfg",
+          "expect": "violation",
+          "violates": {
+            "kind": "invariant",
+            "name": "OneDeliveryPerOccurrence"
+          },
+          "description": "send queues again for an already queued run (issuance.ts:326-328 dropped): two deliveries"
+        },
+        {
+          "name": "skip-occurrence",
+          "config": "formal/outbox/OutboxRecurring_mutant_skip_occurrence.cfg",
+          "expect": "violation",
+          "violates": {
+            "kind": "invariant",
+            "name": "NextFollowsIssued"
+          },
+          "description": "next_occurrence advances two occurrences per issue: one is never issued"
+        },
+        {
+          "name": "skip-occurrence-liveness",
+          "config": "formal/outbox/OutboxRecurring_mutant_skip_occurrence_liveness.cfg",
+          "expect": "violation",
+          "violates": {
+            "kind": "temporal"
+          },
+          "deadlock": "allow",
+          "description": "as skip-occurrence, liveness only: EveryOccurrenceIssued breaks"
+        },
+        {
+          "name": "claim-fails",
+          "config": "formal/outbox/OutboxRecurring_mutant_claim_fails.cfg",
+          "expect": "violation",
+          "violates": {
+            "kind": "invariant",
+            "name": "FailedOnlyAfterCall"
+          },
+          "description": "claim marks a queued delivery failed without a provider call (NoLostSend alone would pass)"
+        },
+        {
+          "name": "record-unknown-as-sent",
+          "config": "formal/outbox/OutboxRecurring_mutant_record_unknown_as_sent.cfg",
+          "expect": "violation",
+          "violates": {
+            "kind": "invariant",
+            "name": "SentImpliesAccepted"
+          },
+          "description": "record stores outcome_unknown as sent, also when the provider never took the message"
         }
       ],
       "timeoutSeconds": 120,
@@ -168,6 +218,14 @@
         {
           "path": "packages/core/src/store/CoreStore.ts",
           "sha256": "7971299fe86c8505f841c237ef8c103c1542b71174f6a530774c12e62c65fa03"
+        },
+        {
+          "path": "packages/core/src/modules/documents/record.ts",
+          "sha256": "14ad42c41aa69a4ef1544ddf013f4484dc0f83e1e58bcb29663116ad4ea1c234"
+        },
+        {
+          "path": "packages/core/src/modules/recurring/links.ts",
+          "sha256": "f01a9cfb357d2061b6eb2ec0c0bcb95efa9924f469a3c193378e77c8c04c70e9"
         }
       ],
       "guardedSymbols": [
@@ -185,13 +243,15 @@
         "giveUp",
         "deliver",
         "CoreStore.transaction",
-        "CoreStore.afterCommit"
+        "CoreStore.afterCommit",
+        "RecurringDocumentLink.link",
+        "documents(schedule_id, occurrence) unique key"
       ],
-      "bounds": "base: 1 occurrence, 2 recurring workers, 2 crashes at any crash point, 1 duplicate or stale start, 1 provider failure, 1 dispatch attempt per execution; wide (nightly): 2 occurrences, same budgets",
+      "bounds": "base: 1 occurrence, 2 recurring workers, 2 crashes at any crash point, 1 duplicate or stale start, 1 provider failure (5 outcomes incl. outcome_unknown sent/not sent), 1 dispatch attempt per execution; wide (nightly): 2 occurrences, same budgets; mutants: 1 occurrence (2 for skip-occurrence), 1 crash",
       "assumptions": [
         "Each transaction is one step: the schedule row lock (issuance.ts lockSchedule) and the memory store's serialized transactions make it atomic; Postgres locking is not checked here (pg-contention)",
         "DocumentDelivery runs keyed by the delivery id: a start for a live execution attaches to it (J1); modelled as one execution slot per delivery",
-        "J1a OutboxReconcile for queued/sending deliveries is modelled as designed (core-ports J1a); core at 77a5bb7 has no query selecting those rows",
+        "The base enables the designed J1a OutboxReconcile for queued/sending deliveries (core-ports J1a); core at 77a5bb7 has none, so H3 is CONFIRMED on the code (mutants no-reconcile-*, replay FINDING H3)",
         "J3 eligibility re-check, pauses, catch-up cap and detach are left out: the document stays sendable and the schedule active",
         "The provider may accept a message twice (no dedupe assumed); fairness per component: sweep, reconcile, each job execution"
       ],
@@ -244,6 +304,14 @@
         {
           "path": "packages/core/src/store/CoreStore.ts",
           "sha256": "7971299fe86c8505f841c237ef8c103c1542b71174f6a530774c12e62c65fa03"
+        },
+        {
+          "path": "packages/core/src/modules/documents/record.ts",
+          "sha256": "14ad42c41aa69a4ef1544ddf013f4484dc0f83e1e58bcb29663116ad4ea1c234"
+        },
+        {
+          "path": "packages/core/src/modules/recurring/links.ts",
+          "sha256": "f01a9cfb357d2061b6eb2ec0c0bcb95efa9924f469a3c193378e77c8c04c70e9"
         }
       ],
       "guardedSymbols": [
@@ -261,13 +329,16 @@
         "giveUp",
         "deliver",
         "CoreStore.transaction",
-        "CoreStore.afterCommit"
+        "CoreStore.afterCommit",
+        "RecurringDocumentLink.link",
+        "documents(schedule_id, occurrence) unique key"
       ],
-      "bounds": "one schedule, one or two occurrences, one delivery per run; each model action and crash point replayed once on TestCore",
+      "bounds": "one schedule, TODAY's occurrence, one delivery per run; replays: the happy path, duplicate/concurrent and repeated starts, a same-day second tick, crashes after issue commit, inside the send transaction, before the start hook, after claim (H3: stranded on core's own recovery; recovered by the designed J1a), after the provider accepted, and before giveUp; provider not_accepted / rejected / outcome_unknown",
       "assumptions": [
         "In-memory CoreStore (serialized transactions); Postgres row locks are the pg-contention job's",
-        "Crash points use existing seams: a RecurringRepo or EmailSender wrapper that dies, and not running the recorded DeliveryJobs start",
-        "The harness plays OutboxReconcile for deliveries by calling deliver; core has no cross-tenant query for queued/sending deliveries"
+        "Crash points use existing seams: a RecurringRepo or DeliveryJobs or EmailSender wrapper that dies, and not running the next step",
+        "Recovery tests other than FINDING H3 play the designed J1a delivery reconcile by calling deliver; core has no cross-tenant query for queued/sending deliveries",
+        "The sealed System caller is taken from a RecurringSweep tick (no export of the seal)"
       ],
       "toolVersions": {
         "bun": "1.4.2"

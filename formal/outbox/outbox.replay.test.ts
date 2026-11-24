@@ -7,8 +7,11 @@
  * Crash points use seams that exist at 77a5bb7: a RecurringRepo wrapper that dies inside the
  * send transaction, a DeliveryJobs whose start dies after commit, an EmailSender wrapper that
  * dies after the provider accepted, and a delivery step that is simply not run after `claim`.
- * Core has no OutboxReconcile query for queued/sending deliveries, so the harness plays that
- * cron by calling `deliver` with the delivery id (J1a re-executes with the same key).
+ * Core has no OutboxReconcile query for queued/sending deliveries. The "FINDING H3" test shows
+ * that a claimed delivery is then stranded at 77a5bb7; the other recovery tests play the
+ * designed J1a cron by calling `deliver` with the delivery id (re-execution with the same key).
+ * The job's sealed System caller comes from a RecurringSweep tick (sweep.ts provides it to
+ * `start`), since the seal is not exported from any entry point.
  */
 import { expect, test } from "bun:test";
 import {
@@ -34,17 +37,22 @@ import type {
   IsoDate,
   MemberCaller,
   ScheduleId,
+  SystemCaller,
   TemplateId,
   WorkspaceId,
 } from "@kvitbit/domain/contract";
-import { Caller, Contacts, CurrentCaller, Templates, Workspaces } from "@kvitbit/domain/contract";
+import {
+  Caller,
+  Contacts,
+  CurrentCaller,
+  Documents,
+  Templates,
+  Workspaces,
+} from "@kvitbit/domain/contract";
 import type { EmailSender as EmailSenderShape, RegistryRecord } from "@kvitbit/domain/ports";
 import { EmailSender } from "@kvitbit/domain/ports";
 import { BigDecimal, Context, Effect, Exit, Layer, Ref } from "effect";
 import { TestClock } from "effect/testing";
-// The System caller seal is internal to core (never exported from an entry point); the jobs'
-// steps refuse any other caller (R4), so the harness mints it the way core's own tests do.
-import { systemCaller } from "../../packages/core/src/internal/system";
 
 const { RecurringIssuance } = RecurringModule;
 const { claim, deliver, dispatch, giveUp } = DocumentsModule;
@@ -110,7 +118,29 @@ interface World {
   readonly workspaceId: WorkspaceId;
   readonly templateId: TemplateId;
   readonly scheduleId: ScheduleId;
+  /** The sealed System caller of TODAY's RecurringIssuance job, as the sweep hands it out. */
+  readonly job: SystemCaller;
 }
+
+/** One sweep tick that only records the caller it gives TODAY's start (it starts nothing). */
+const captureJobCaller = Effect.flatMap(RecurringIssuance, (r) =>
+  Effect.flatMap(Ref.make<SystemCaller | null>(null), (ref) =>
+    Effect.flatMap(
+      r.sweep((decision) =>
+        decision.occurrence !== TODAY
+          ? Effect.void
+          : Effect.gen(function* () {
+              yield* Ref.set(ref, (yield* CurrentCaller) as SystemCaller);
+            }),
+      ),
+      () =>
+        Effect.map(Ref.get(ref), (caller) => {
+          if (caller === null) throw new Error("the sweep did not start TODAY's occurrence");
+          return caller;
+        }),
+    ),
+  ),
+);
 
 type Services = Layer.Success<ReturnType<typeof core>> | CurrentCallerTag | CrashInSend;
 
@@ -167,6 +197,7 @@ const scenario = <A, E>(
             workspaceId: owner.workspaceId,
             templateId: created.id,
             scheduleId: scheduled.schedule.id,
+            job: yield* captureJobCaller,
           });
         }),
         CurrentCaller,
@@ -187,24 +218,21 @@ const scenario = <A, E>(
   );
 };
 
-/** Runs `effect` as the sealed System caller of the occurrence's RecurringIssuance job. */
-const asJob = <A, E, R>(w: World, occurrence: IsoDate, effect: Effect.Effect<A, E, R>) =>
-  Effect.provideService(
-    effect,
-    CurrentCaller,
-    systemCaller(w.workspaceId, {
-      _tag: "RecurringIssuance",
-      scheduleId: w.scheduleId,
-      occurrence,
-    }),
-  );
+/** Runs `effect` as the sealed System caller of TODAY's RecurringIssuance job. */
+const asJob = <A, E, R>(w: World, effect: Effect.Effect<A, E, R>) =>
+  Effect.provideService(effect, CurrentCaller, w.job);
 
-const runOccurrence = (w: World, occurrence: IsoDate = TODAY) =>
+const runOccurrence = (w: World) =>
   asJob(
     w,
-    occurrence,
-    Effect.flatMap(RecurringIssuance, (r) => r.run(w.scheduleId, occurrence)),
+    Effect.flatMap(RecurringIssuance, (r) => r.run(w.scheduleId, TODAY)),
   );
+
+/** Issued invoices in the Workspace (OneDocumentPerOccurrence counts documents, not runs). */
+const invoices = Effect.map(
+  Effect.flatMap(Documents, (d) => d.list({ kind: "invoice" } as never)),
+  (page) => page.items.length,
+);
 
 /** One RecurringSweep tick whose start runs the workflow body inline (as the sweep's caller). */
 const sweep = Effect.flatMap(RecurringIssuance, (r) =>
@@ -293,7 +321,13 @@ test("DupStart, IssueCommit(replay), SendCommit(replay): concurrent and repeated
     Effect.gen(function* () {
       const both = yield* Effect.all([runOccurrence(w), runOccurrence(w)], { concurrency: 2 });
       const again = yield* runOccurrence(w);
-      return { both, again, runs: yield* runs(w), started: yield* started };
+      return {
+        both,
+        again,
+        runs: yield* runs(w),
+        invoices: yield* invoices,
+        started: yield* started,
+      };
     }),
   );
   const issued = r.both.map((x) => x.issue._tag === "Issued" && x.issue.replayed);
@@ -302,20 +336,22 @@ test("DupStart, IssueCommit(replay), SendCommit(replay): concurrent and repeated
   expect(r.again.send).toMatchObject({ _tag: "Queued", replayed: true });
   // OneDocumentPerOccurrence, OneDeliveryPerOccurrence.
   expect(r.runs).toHaveLength(1);
+  expect(r.invoices).toBe(1);
   expect(r.started).toHaveLength(1);
   expect(r.started[0]?.deliveryId).toBe(r.runs[0]?.delivery?.id as DeliveryId);
 });
 
-test("DupStart(stale) after the advance: the next occurrence is not issued early", async () => {
+test("SweepStart after the advance: a second tick the same day starts nothing", async () => {
   const r = await scenario((w) =>
     Effect.gen(function* () {
       yield* runOccurrence(w);
-      const early = yield* runOccurrence(w, "2026-12-23" as IsoDate);
-      return { early, runs: yield* runs(w) };
+      const tick = yield* sweep;
+      return { tick, runs: yield* runs(w), invoices: yield* invoices };
     }),
   );
-  expect(r.early.issue).toMatchObject({ _tag: "Skipped", reason: "not_due" });
+  expect(r.tick).toHaveLength(0);
   expect(r.runs).toHaveLength(1);
+  expect(r.invoices).toBe(1);
 });
 
 // Crash points -----------------------------------------------------------------------------
@@ -326,7 +362,6 @@ test("CrashWorker after IssueCommit, ReconcileRecurring: pendingSends finds the 
       // The process died after the issue transaction committed, before the send step.
       const issued = yield* asJob(
         w,
-        TODAY,
         Effect.flatMap(RecurringIssuance, (ri) => ri.issue(w.scheduleId, TODAY)),
       );
       const startedBefore = yield* started;
@@ -399,7 +434,41 @@ test("CrashWorker before Hook, ReconcileDelivery: the committed delivery stays q
   expect(r.provider.sent.map((e) => e.idempotencyKey)).toEqual([r.deliveryId]);
 });
 
-test("H3: Claim, CrashDelivery(dispatch), ReconcileDelivery, Claim(sending), Dispatch, Record: the claimed email is sent", async () => {
+test("FINDING H3 (77a5bb7): Claim, CrashDelivery(dispatch); core's own recovery never sends the claimed email", async () => {
+  // Pins the current gap; when core gains the J1a delivery reconcile this test must turn red
+  // and be replaced by one that drives that reconcile (skill: Hypothesis H3).
+  const r = await scenario((w) =>
+    Effect.gen(function* () {
+      const deliveryId = yield* queuedDelivery(w);
+      const startedBefore = (yield* started).length;
+      yield* claim(w.workspaceId, deliveryId);
+      // The delivery job's process died here: claimed `sending`, provider never called.
+      // Everything core offers to recover: the recurring reconcile (twice, past the 2 min
+      // threshold), a rerun of the occurrence, and another sweep tick.
+      const pending1 = yield* pendingSends;
+      const pending2 = yield* pendingSends;
+      const rerun = yield* runOccurrence(w);
+      const tick = yield* sweep;
+      return {
+        pending: [...pending1, ...pending2],
+        rerun,
+        tick,
+        startedBefore,
+        startedAfter: (yield* started).length,
+        status: yield* status(w, deliveryId),
+        provider: yield* provider,
+      };
+    }),
+  );
+  expect(r.pending).toHaveLength(0);
+  expect(r.rerun.send).toMatchObject({ _tag: "Queued", replayed: true });
+  expect(r.tick).toHaveLength(0);
+  expect(r.startedAfter).toBe(r.startedBefore);
+  expect(r.status).toBe("sending");
+  expect(r.provider.attempts).toBe(0);
+});
+
+test("H3 with the designed J1a reconcile: Claim, CrashDelivery(dispatch), ReconcileDelivery, Claim(sending), Dispatch, Record: the claimed email is sent", async () => {
   const r = await scenario((w) =>
     Effect.gen(function* () {
       const deliveryId = yield* queuedDelivery(w);
@@ -480,4 +549,23 @@ test("Dispatch failures, Record, GiveUp: not accepted retries then gives up, rej
   expect(unknown.afterFirst).toBe("sending");
   expect(unknown.second).toBe("sent");
   expect(unknown.provider.sent).toHaveLength(1);
+});
+
+test("Dispatch(not_accepted), Record, CrashDelivery(giveup), ReconcileDelivery: the retried email is sent", async () => {
+  const r = await scenario((w) =>
+    Effect.gen(function* () {
+      const deliveryId = yield* queuedDelivery(w);
+      yield* CaptureEmailSender.failNext("not_accepted");
+      const first = yield* Effect.exit(deliver(w.workspaceId, deliveryId));
+      // Retries exhausted, the process died before giveUp ran: still sending.
+      const afterCrash = yield* status(w, deliveryId);
+      const end = yield* deliver(w.workspaceId, deliveryId);
+      return { deliveryId, first, afterCrash, end, provider: yield* provider };
+    }),
+  );
+  expect(Exit.isFailure(r.first)).toBe(true);
+  expect(r.afterCrash).toBe("sending");
+  expect(r.end).toBe("sent");
+  expect(r.provider.attempts).toBe(2);
+  expect(r.provider.sent.map((e) => e.idempotencyKey)).toEqual([r.deliveryId]);
 });

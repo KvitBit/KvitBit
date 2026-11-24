@@ -19,8 +19,10 @@
 (*   store/memory.ts   frames: afterCommit kept only on commit 162-168,     *)
 (*                     drained after the outermost commit 180-197          *)
 (*                                                                         *)
-(* The guard flags are TRUE in the base config (the code at 77a5bb7); each  *)
-(* mutant config turns guards off to show the properties can fail.         *)
+(* The flags in the base config describe the code at 77a5bb7, except       *)
+(* DeliveryReconcile: the J1a cron for deliveries is designed (core-ports   *)
+(* J1a) but not in core at 77a5bb7, so the base checks code + that design.  *)
+(* Each mutant config flips flags to show that a property can fail.         *)
 (***************************************************************************)
 EXTENDS Naturals, FiniteSets
 
@@ -41,11 +43,19 @@ CONSTANTS
   ReplayGuard,        \* issuance.ts:246-248 an issued run is returned, not re-issued
   StartAfterCommit,   \* send.ts:242 afterCommit(jobs.start), memory.ts:162-197
   DeliveryReconcile,  \* J1a OutboxReconcile for queued/sending deliveries (cron not in core)
-  RecurringReconcile  \* issuance.ts:393 pendingSends, rerun `run` (J1a)
+  RecurringReconcile, \* issuance.ts:393 pendingSends, rerun `run` (J1a)
+  SendReplayGuard,    \* issuance.ts:326-328 a queued run is replayed, not sent again
+  AdvanceBy,          \* occurrences next_occurrence moves per issue (occurrenceAfter: 1)
+  \* breaks (FALSE in the base)
+  ClaimFailsQueued,   \* claim marks a queued delivery failed without sending
+  RecordUnknownAsSent \* record stores outcome_unknown as sent
 
 Occs == 1..N
 NoOcc == 0
 Terminal == {"sent", "failed"}
+\* Provider outcomes. outcome_unknown hides whether the provider took the
+\* message, so both cases are explored behind the same reported result.
+Outcomes == {"ok", "not_accepted", "unknown_sent", "unknown_lost", "rejected"}
 
 VARIABLES
   next,       \* schedules.next_occurrence (N+1 = none left)
@@ -62,11 +72,12 @@ VARIABLES
   dout,       \* outcome of the in-flight provider call
   dtry,       \* failed dispatch attempts of the live execution
   smtp,       \* messages the provider accepted for o (duplicates allowed)
+  calls,      \* provider calls made for o's delivery
   started,    \* deliveries a DocumentDelivery start was issued for
   crashes, dupes, smtpFails
 
 recVars == <<next, rev, lock, docs, run, pc, occ, seenIssued, seenNext, seenRev>>
-delVars == <<dstatus, dcount, dpc, dout, dtry, smtp, started>>
+delVars == <<dstatus, dcount, dpc, dout, dtry, smtp, calls, started>>
 budgets == <<crashes, dupes, smtpFails>>
 vars == <<recVars, delVars, budgets>>
 
@@ -81,8 +92,9 @@ TypeOK ==
   /\ seenIssued \in [Workers -> BOOLEAN]
   /\ dstatus \in [Occs -> {"none", "queued", "sending", "sent", "failed"}]
   /\ dpc \in [Occs -> {"none", "claim", "dispatch", "record", "giveup", "done", "dead"}]
-  /\ dout \in [Occs -> {"none", "ok", "not_accepted", "unknown", "rejected"}]
+  /\ dout \in [Occs -> {"none"} \cup Outcomes]
   /\ smtp \in [Occs -> Nat]
+  /\ calls \in [Occs -> Nat]
   /\ started \subseteq Occs
 
 Init ==
@@ -100,6 +112,7 @@ Init ==
   /\ dout = [o \in Occs |-> "none"]
   /\ dtry = [o \in Occs |-> 0]
   /\ smtp = [o \in Occs |-> 0]
+  /\ calls = [o \in Occs |-> 0]
   /\ started = {}
   /\ crashes = 0 /\ dupes = 0 /\ smtpFails = 0
 
@@ -175,7 +188,7 @@ IssueCommit(w) ==
           \* pending, 303-307 advance next_occurrence (occurrenceAfter) with CAS
           /\ docs' = [docs EXCEPT ![o] = @ + 1]
           /\ run' = [run EXCEPT ![o] = "pending"]
-          /\ next' = o + 1
+          /\ next' = o + AdvanceBy
           /\ rev' = rev + 1
           /\ pc' = [pc EXCEPT ![w] = "send"]
   \* the read is used up: forget it (and the occurrence when the run ends)
@@ -193,7 +206,7 @@ IssueCommit(w) ==
 SendCommit(w) ==
   LET o == occ[w] IN
   /\ pc[w] = "send" /\ LockFree
-  /\ IF run[o] = "pending"
+  /\ IF run[o] = "pending" \/ (~SendReplayGuard /\ run[o] = "queued")
        THEN /\ run' = [run EXCEPT ![o] = "queued"]
             /\ dstatus' = [dstatus EXCEPT ![o] = "queued"]
             /\ dcount' = [dcount EXCEPT ![o] = @ + 1]
@@ -209,7 +222,7 @@ SendCommit(w) ==
             /\ UNCHANGED <<run, dstatus, dcount, dpc, started>>
   /\ occ' = [occ EXCEPT ![w] = IF pc'[w] = "idle" THEN NoOcc ELSE @]
   /\ UNCHANGED <<next, rev, lock, docs, seenIssued, seenNext, seenRev,
-                 dout, dtry, smtp, budgets>>
+                 dout, dtry, smtp, calls, budgets>>
 
 \* Mutant only: jobs.start ran inside the send transaction, then the
 \* transaction rolled back (a crash before commit). The rows are gone; the
@@ -225,7 +238,7 @@ SendStartThenRollback(w) ==
   /\ dpc' = [dpc EXCEPT ![o] = IF @ \in {"none", "dead", "done"} THEN "claim" ELSE @]
   /\ occ' = [occ EXCEPT ![w] = NoOcc]
   /\ UNCHANGED <<next, rev, lock, docs, run, seenIssued, seenNext, seenRev,
-                 dstatus, dcount, dout, dtry, smtp, dupes, smtpFails>>
+                 dstatus, dcount, dout, dtry, smtp, calls, dupes, smtpFails>>
 
 \* memory.ts:180-197 drainAfterCommit after the outermost commit: the
 \* DeliveryJobs start, Workflow.execute keyed by the delivery id (jobs.ts:3).
@@ -238,7 +251,7 @@ Hook(w) ==
   /\ dpc' = [dpc EXCEPT ![o] = IF @ \in {"none", "dead", "done"} THEN "claim" ELSE @]
   /\ occ' = [occ EXCEPT ![w] = NoOcc]
   /\ UNCHANGED <<next, rev, lock, docs, run, seenIssued, seenNext, seenRev,
-                 dstatus, dcount, dout, dtry, smtp, budgets>>
+                 dstatus, dcount, dout, dtry, smtp, calls, budgets>>
 
 \* The process running a recurring execution dies: the open transaction
 \* rolls back (its lock goes), a pending afterCommit hook is lost.
@@ -263,7 +276,10 @@ CrashWorker(w) ==
 \* dispatches any non-terminal status); a terminal row ends the execution.
 Claim(o) ==
   /\ dpc[o] = "claim"
-  /\ IF dstatus[o] = "queued"
+  /\ IF dstatus[o] = "queued" /\ ClaimFailsQueued
+       THEN /\ dstatus' = [dstatus EXCEPT ![o] = "failed"]
+            /\ dpc' = [dpc EXCEPT ![o] = "done"]
+     ELSE IF dstatus[o] = "queued"
        THEN /\ dstatus' = [dstatus EXCEPT ![o] = "sending"]
             /\ dpc' = [dpc EXCEPT ![o] = "dispatch"]
      ELSE IF dstatus[o] = "sending"
@@ -271,31 +287,33 @@ Claim(o) ==
             /\ UNCHANGED dstatus
      ELSE /\ dpc' = [dpc EXCEPT ![o] = "done"]   \* terminal, or NotFound
           /\ UNCHANGED dstatus
-  /\ UNCHANGED <<recVars, dcount, dout, dtry, smtp, started, budgets>>
+  /\ UNCHANGED <<recVars, dcount, dout, dtry, smtp, calls, started, budgets>>
 
 \* steps.ts:84-118 dispatch: reads the row (87); not sending -> returns;
 \* else EmailSender.send with idempotencyKey = delivery id (115). The
 \* provider accepts (ok), does not take it (not_accepted), rejects it, or
-\* times out after accepting it (unknown, counted as sent: worst case).
+\* reports outcome_unknown having taken it (unknown_sent) or not
+\* (unknown_lost).
 Dispatch(o, out) ==
   /\ dpc[o] = "dispatch"
   /\ IF dstatus[o] # "sending"
        THEN /\ dpc' = [dpc EXCEPT ![o] = "done"]
-            /\ UNCHANGED <<dout, smtp, smtpFails>>
+            /\ UNCHANGED <<dout, smtp, calls, smtpFails>>
        ELSE /\ out = "ok" \/ smtpFails < MaxSmtpFail
             /\ smtpFails' = IF out = "ok" THEN smtpFails ELSE smtpFails + 1
-            /\ smtp' = [smtp EXCEPT ![o] = IF out \in {"ok", "unknown"} THEN @ + 1 ELSE @]
+            /\ smtp' = [smtp EXCEPT ![o] = IF out \in {"ok", "unknown_sent"} THEN @ + 1 ELSE @]
+            /\ calls' = [calls EXCEPT ![o] = @ + 1]
             /\ dout' = [dout EXCEPT ![o] = out]
             /\ dpc' = [dpc EXCEPT ![o] = "record"]
   /\ UNCHANGED <<recVars, dstatus, dcount, dtry, started, crashes, dupes>>
 
 \* steps.ts:122-154: the record transaction. Success -> sent (also over a
-\* failed row); rejected -> failed; not_accepted/unknown leave it sending
+\* failed row); rejected -> failed; not_accepted/outcome_unknown leave it sending
 \* and DeliveryRetry makes the Activity retry dispatch, or giveUp.
 Record(o) ==
   /\ dpc[o] = "record"
   /\ dout' = [dout EXCEPT ![o] = "none"]
-  /\ IF dout[o] = "ok"
+  /\ IF dout[o] = "ok" \/ (RecordUnknownAsSent /\ dout[o] \in {"unknown_sent", "unknown_lost"})
        THEN /\ dstatus' = [dstatus EXCEPT ![o] = "sent"]
             /\ dpc' = [dpc EXCEPT ![o] = "done"]
             /\ dtry' = [dtry EXCEPT ![o] = 0]
@@ -309,7 +327,7 @@ Record(o) ==
      ELSE /\ dtry' = [dtry EXCEPT ![o] = @ + 1]
           /\ dpc' = [dpc EXCEPT ![o] = IF dtry[o] + 1 < MaxAttempts THEN "dispatch" ELSE "giveup"]
           /\ UNCHANGED dstatus
-  /\ UNCHANGED <<recVars, dcount, smtp, started, budgets>>
+  /\ UNCHANGED <<recVars, dcount, smtp, calls, started, budgets>>
 
 \* steps.ts:158-168 giveUp: sending -> failed once retries are exhausted.
 GiveUp(o) ==
@@ -317,7 +335,7 @@ GiveUp(o) ==
   /\ dstatus' = [dstatus EXCEPT ![o] = IF @ = "sending" THEN "failed" ELSE @]
   /\ dpc' = [dpc EXCEPT ![o] = "done"]
   /\ dtry' = [dtry EXCEPT ![o] = 0]
-  /\ UNCHANGED <<recVars, dcount, dout, smtp, started, budgets>>
+  /\ UNCHANGED <<recVars, dcount, dout, smtp, calls, started, budgets>>
 
 \* The process running the delivery execution dies. "dispatch" is the H3
 \* point (claimed sending, no provider call yet); "record" is after the
@@ -329,7 +347,7 @@ CrashDelivery(o) ==
   /\ dpc' = [dpc EXCEPT ![o] = "dead"]
   /\ dout' = [dout EXCEPT ![o] = "none"]
   /\ dtry' = [dtry EXCEPT ![o] = 0]
-  /\ UNCHANGED <<recVars, dstatus, dcount, smtp, started, dupes, smtpFails>>
+  /\ UNCHANGED <<recVars, dstatus, dcount, smtp, calls, started, dupes, smtpFails>>
 
 \* J1a OutboxReconcile (core-ports 1296-1297, 1419-1424): a queued or
 \* sending delivery whose execution is not live is re-executed with the same
@@ -342,7 +360,7 @@ ReconcileDelivery(o) ==
   /\ dpc' = [dpc EXCEPT ![o] = "claim"]
   /\ dtry' = [dtry EXCEPT ![o] = 0]
   /\ started' = started \cup {o}
-  /\ UNCHANGED <<recVars, dstatus, dcount, dout, smtp, budgets>>
+  /\ UNCHANGED <<recVars, dstatus, dcount, dout, smtp, calls, budgets>>
 
 \* Every occurrence issued and every delivery terminal, nothing in flight.
 Done ==
@@ -358,13 +376,13 @@ Next ==
        \/ \E o \in Occs : DupStart(w, o) \/ ReconcileRecurring(w, o)
   \/ \E o \in Occs :
        \/ Claim(o) \/ Record(o) \/ GiveUp(o) \/ CrashDelivery(o) \/ ReconcileDelivery(o)
-       \/ \E out \in {"ok", "not_accepted", "unknown", "rejected"} : Dispatch(o, out)
+       \/ \E out \in Outcomes : Dispatch(o, out)
   \/ Done
 
 \* One delivery execution's steps.
 DeliveryStep(o) ==
   \/ Claim(o) \/ Record(o) \/ GiveUp(o)
-  \/ \E out \in {"ok", "not_accepted", "unknown", "rejected"} : Dispatch(o, out)
+  \/ \E out \in Outcomes : Dispatch(o, out)
 
 \* Fairness per component that runs on its own in production: the
 \* RecurringSweep cron, the OutboxReconcile cron (both halves), each
@@ -400,6 +418,10 @@ StartedOnlyCommitted == \A o \in started : dstatus[o] # "none"
 
 \* A delivery is marked sent only after the provider accepted it.
 SentImpliesAccepted == \A o \in Occs : dstatus[o] = "sent" => smtp[o] >= 1
+
+\* A delivery is marked failed only after the provider was called (a
+\* rejection, or retryable failures until giveUp): never unsent and failed.
+FailedOnlyAfterCall == \A o \in Occs : dstatus[o] = "failed" => calls[o] >= 1
 
 (* Liveness, under Fairness and the crash / failure budgets *)
 
