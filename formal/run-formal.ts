@@ -97,15 +97,54 @@ const isObject = (v: unknown): v is Record<string, unknown> =>
 const isString = (v: unknown): v is string => typeof v === "string" && v.length > 0;
 const isStrings = (v: unknown): v is string[] => Array.isArray(v) && v.every(isString);
 
-/** Words in a TLC .cfg with comments stripped: the names it checks. Empty if unreadable. */
-const cfgWords = (file: string): string[] => {
-  if (!existsSync(file)) return [];
-  return readFileSync(file, "utf8")
-    .replace(/\(\*[\s\S]*?\*\)/g, " ")
-    .replace(/\\\*.*$/gm, " ")
-    .split(/\s+/)
-    .filter(Boolean);
+/**
+ * Tokens of a TLC .cfg, read the way TLC's lexer reads them: `\\*` comments run to the end
+ * of the line, `(* ... *)` comments nest, and a string literal is one token that never equals a
+ * name (it is returned with its quotes). Words are identifiers and numbers; other symbols are
+ * one-character tokens. Empty if the file is unreadable.
+ */
+export const cfgTokens = (text: string): string[] => {
+  const tokens: string[] = [];
+  let i = 0;
+  while (i < text.length) {
+    const c = text[i] ?? "";
+    const two = text.slice(i, i + 2);
+    if (two === "\\*") {
+      const end = text.indexOf("\n", i);
+      i = end === -1 ? text.length : end + 1;
+    } else if (two === "(*") {
+      let depth = 1;
+      i += 2;
+      while (i < text.length && depth > 0) {
+        const t = text.slice(i, i + 2);
+        if (t === "(*") {
+          depth++;
+          i += 2;
+        } else if (t === "*)") {
+          depth--;
+          i += 2;
+        } else i++;
+      }
+    } else if (c === '"') {
+      let j = i + 1;
+      while (j < text.length && text[j] !== '"') j += text[j] === "\\" ? 2 : 1;
+      tokens.push(text.slice(i, j + 1));
+      i = j + 1;
+    } else if (/\s/.test(c)) i++;
+    else if (/[\w!]/.test(c)) {
+      let j = i;
+      while (j < text.length && /[\w!]/.test(text[j] ?? "")) j++;
+      tokens.push(text.slice(i, j));
+      i = j;
+    } else {
+      tokens.push(c);
+      i++;
+    }
+  }
+  return tokens;
 };
+const cfgWords = (file: string): string[] =>
+  existsSync(file) ? cfgTokens(readFileSync(file, "utf8")) : [];
 const CFG_KEYWORDS = new Set([
   "CONSTANT",
   "CONSTANTS",
@@ -835,6 +874,21 @@ export const selftest = async (tools: Pick<Toolchain, "jar" | "java">): Promise<
     "a wide config that omits the mutant's property",
     { wideConfig: `${neg}/Counter_constraint.cfg` },
     /WithinBound is not declared under INVARIANT in .*Counter_constraint/,
+  );
+  rejects(
+    "a base config naming the mutant's invariant only inside a string",
+    { config: `${neg}/Counter_quoted.cfg` },
+    /WithinBound is not declared under INVARIANT/,
+  );
+  rejects(
+    "a base config naming the mutant's invariant only inside a nested comment",
+    { config: `${neg}/Counter_nested.cfg` },
+    /WithinBound is not declared under INVARIANT/,
+  );
+  rejects(
+    "CHECK_DEADLOCK FALSE between line comments that look like a block comment",
+    { config: `${neg}/Counter_deadlock_comments.cfg` },
+    /sets CHECK_DEADLOCK FALSE/,
   );
   rejects(
     "CHECK_DEADLOCK FALSE even when the check allows deadlock",
