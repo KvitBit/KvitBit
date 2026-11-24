@@ -70,14 +70,20 @@ export class InvitationsGroup extends HttpApiGroup.make("invitations")
     HttpApiEndpoint.get("peek", "/invitations/:token", {
       params: InvitationParams,
       success: InvitationPeek,
-      error: [NotFound.schema, RateLimited.schema],
+      error: [NotFound.schema, RateLimited.schema, Unavailable.schema],
     }).annotate(OpenApi.Summary, "Preview an invitation"),
   )
   .add(
     HttpApiEndpoint.post("accept", "/invitations/:token/accept", {
       params: InvitationParams,
       success: WorkspaceSummary,
-      error: [Unauthorized.schema, NotFound.schema, Conflict.schema, Forbidden.schema],
+      error: [
+        Unauthorized.schema,
+        NotFound.schema,
+        Conflict.schema,
+        Unavailable.schema,
+        Forbidden.schema,
+      ],
     })
       .annotate(OpenApi.Summary, "Accept an invitation")
       .middleware(SessionOnly)

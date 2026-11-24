@@ -341,6 +341,7 @@ describe("Api definition integrity", () => {
       if (r.middleware.includes(WorkspaceMember.key)) {
         expect(hasError(r, 404, new NotFound({ entity: "Workspace", id: "w" }))).toBe(true);
         expect(hasError(r, 403, new Forbidden({ action: "workspace.read" }))).toBe(true);
+        expect(hasError(r, 503, new Unavailable({ dependency: "database" }))).toBe(true);
       }
     }
   });
@@ -397,42 +398,42 @@ botProtection.issueChallenge -
 publicShare.open PublicShareLinks.open NotFound
 publicShare.pdf PublicShareLinks.pdf NotFound,Unavailable
 publicShare.logo PublicShareLinks.logo NotFound,Unavailable
-invitations.peek Workspaces.peekInvitation NotFound
-invitations.accept Workspaces.acceptInvitation NotFound,Conflict,Forbidden
+invitations.peek Workspaces.peekInvitation NotFound,Unavailable
+invitations.accept Workspaces.acceptInvitation NotFound,Conflict,Unavailable,Forbidden
 me.getPreferences -
 me.updatePreferences -
-myWorkspaces.listMine Workspaces.listMine Forbidden
-myWorkspaces.create Workspaces.create Invalid,Unavailable,Forbidden
-oauthConsent.getConsent Workspaces.listMine Forbidden
-oauthConsent.decide Workspaces.enter NotFound,Forbidden
+myWorkspaces.listMine Workspaces.listMine Unavailable,Forbidden
+myWorkspaces.create Workspaces.create Invalid,Conflict,Unavailable,Forbidden
+oauthConsent.getConsent Workspaces.listMine Unavailable,Forbidden
+oauthConsent.decide Workspaces.enter NotFound,Unavailable,Forbidden
 registry.lookupCompany Workspaces.lookupCompany Invalid,NotFound,Unavailable,Forbidden
 themes.resolve -
-workspace.current Workspaces.current Forbidden
-workspace.updateIssuingEntity Workspaces.updateIssuingEntity Invalid,Conflict,Forbidden
-workspace.updateSettings Workspaces.updateSettings Invalid,Conflict,Forbidden
-workspace.listBankAccounts Workspaces.current Forbidden
-workspace.createBankAccount Workspaces.saveBankAccount Invalid,NotFound,Conflict,Forbidden
-workspace.updateBankAccount Workspaces.saveBankAccount Invalid,NotFound,Conflict,Forbidden
-workspace.removeBankAccount Workspaces.removeBankAccount Invalid,NotFound,Conflict,Forbidden
-workspace.listSeries Workspaces.listSeries Forbidden
-workspace.createSeries Workspaces.configureSeries Invalid,NotFound,Conflict,Forbidden
-workspace.updateSeries Workspaces.configureSeries Invalid,NotFound,Conflict,Forbidden
-workspace.close Workspaces.close Invalid,Forbidden
-team.listMembers Workspaces.members Forbidden
-team.setRole Workspaces.setRole NotFound,Conflict,Forbidden
-team.removeMember Workspaces.setRole NotFound,Conflict,Forbidden
-team.leave Workspaces.leave Conflict,Forbidden
-team.listInvitations Workspaces.invitations Forbidden
-team.invite Workspaces.invite Invalid,Conflict,Forbidden
-team.revokeInvitation Workspaces.revokeInvitation NotFound,Forbidden
-team.resendInvitation Workspaces.resendInvitation NotFound,Conflict,Forbidden
-team.transferOwnership Workspaces.transferOwnership NotFound,Conflict,Forbidden
-branding.getBranding Workspaces.current Forbidden
-branding.updateBranding Workspaces.updateSettings Invalid,Conflict,Forbidden
+workspace.current Workspaces.current Unavailable,Forbidden
+workspace.updateIssuingEntity Workspaces.updateIssuingEntity Invalid,Conflict,Unavailable,Forbidden
+workspace.updateSettings Workspaces.updateSettings Invalid,Conflict,Unavailable,Forbidden
+workspace.listBankAccounts Workspaces.current Unavailable,Forbidden
+workspace.createBankAccount Workspaces.saveBankAccount Invalid,NotFound,Conflict,Unavailable,Forbidden
+workspace.updateBankAccount Workspaces.saveBankAccount Invalid,NotFound,Conflict,Unavailable,Forbidden
+workspace.removeBankAccount Workspaces.removeBankAccount Invalid,NotFound,Conflict,Unavailable,Forbidden
+workspace.listSeries Workspaces.listSeries Unavailable,Forbidden
+workspace.createSeries Workspaces.configureSeries Invalid,NotFound,Conflict,Unavailable,Forbidden
+workspace.updateSeries Workspaces.configureSeries Invalid,NotFound,Conflict,Unavailable,Forbidden
+workspace.close Workspaces.close Invalid,Unavailable,Forbidden
+team.listMembers Workspaces.members Unavailable,Forbidden
+team.setRole Workspaces.setRole NotFound,Conflict,Unavailable,Forbidden
+team.removeMember Workspaces.setRole NotFound,Conflict,Unavailable,Forbidden
+team.leave Workspaces.leave Conflict,Unavailable,Forbidden
+team.listInvitations Workspaces.invitations Unavailable,Forbidden
+team.invite Workspaces.invite Invalid,Conflict,Unavailable,Forbidden
+team.revokeInvitation Workspaces.revokeInvitation NotFound,Unavailable,Forbidden
+team.resendInvitation Workspaces.resendInvitation NotFound,Conflict,Unavailable,Forbidden
+team.transferOwnership Workspaces.transferOwnership NotFound,Conflict,Unavailable,Forbidden
+branding.getBranding Workspaces.current Unavailable,Forbidden
+branding.updateBranding Workspaces.updateSettings Invalid,Conflict,Unavailable,Forbidden
 branding.previewPdf Workspaces.previewBranding Invalid,Unavailable,Forbidden
 branding.putImage Workspaces.setBrandingImage Invalid,Unavailable,Forbidden
 branding.getImage Workspaces.brandingImage NotFound,Unavailable,Forbidden
-branding.removeImage Workspaces.removeBrandingImage Forbidden
+branding.removeImage Workspaces.removeBrandingImage Unavailable,Forbidden
 apiKeys.listApiKeys -
 apiKeys.createApiKey -
 apiKeys.revokeApiKey -
@@ -489,12 +490,12 @@ templates.removeSchedule Templates.schedule Invalid,NotFound,Conflict,Unavailabl
 templates.resume Templates.resume NotFound,Conflict,Unavailable,Forbidden
 templates.runs Templates.runs Invalid,NotFound,Unavailable,Forbidden
 templates.use Templates.use NotFound,Forbidden,Invalid,Conflict,Unavailable
-reports.dashboard Reports.dashboard Invalid,Forbidden
-reports.run Reports.run Invalid,Forbidden
-reports.export Reports.export Invalid,Forbidden
+reports.dashboard Reports.dashboard Invalid,Unavailable,Forbidden
+reports.run Reports.run Invalid,Unavailable,Forbidden
+reports.export Reports.export Invalid,Unavailable,Forbidden
 reports.fxRate Reports.fxRate Invalid,Unavailable,Forbidden
-reports.startExport Reports.startExport Forbidden
-reports.getExport Reports.getExport NotFound,Forbidden
+reports.startExport Reports.startExport Conflict,Unavailable,Forbidden
+reports.getExport Reports.getExport NotFound,Unavailable,Forbidden
 reports.exportFile Reports.exportFile NotFound,Conflict,Unavailable,Forbidden
 `;
 

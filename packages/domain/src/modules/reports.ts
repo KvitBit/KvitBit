@@ -73,15 +73,17 @@ export type ExportJobView = typeof ExportJobView.Type;
 export class Reports extends Context.Service<
   Reports,
   {
-    readonly run: (q: ReportQuery) => Effect.Effect<ReportView, Invalid | Forbidden, CurrentCaller>;
+    readonly run: (
+      q: ReportQuery,
+    ) => Effect.Effect<ReportView, Invalid | Unavailable | Forbidden, CurrentCaller>;
     readonly export: (
       q: ReportQuery,
       format: "csv" | "pdf",
-    ) => Effect.Effect<FileDownload, Invalid | Forbidden, CurrentCaller>;
+    ) => Effect.Effect<FileDownload, Invalid | Unavailable | Forbidden, CurrentCaller>;
     /** Dashboard tiles and a 12-month cashflow series ending at period.to (report.run). */
     readonly dashboard: (
       period: ReportPeriod,
-    ) => Effect.Effect<DashboardView, Invalid | Forbidden, CurrentCaller>;
+    ) => Effect.Effect<DashboardView, Invalid | Unavailable | Forbidden, CurrentCaller>;
     /** CNB fixing for a currency on a date, through the fx_fixings cache (report.run). */
     readonly fxRate: (q: {
       readonly currency: CurrencyCode;
@@ -92,10 +94,10 @@ export class Reports extends Context.Service<
     /** Starts the DataExport workflow. Returns the running job when one is already running. */
     readonly startExport: (
       opts?: RequestOptions,
-    ) => Effect.Effect<ExportJobView, Forbidden, CurrentCaller>;
+    ) => Effect.Effect<ExportJobView, Conflict | Unavailable | Forbidden, CurrentCaller>;
     readonly getExport: (
       id: ExportId,
-    ) => Effect.Effect<ExportJobView, NotFound | Forbidden, CurrentCaller>;
+    ) => Effect.Effect<ExportJobView, NotFound | Unavailable | Forbidden, CurrentCaller>;
     /** The ZIP. Conflict{illegal_transition, export.not_ready} while running or failed; NotFound after expiry. */
     readonly exportFile: (
       id: ExportId,
