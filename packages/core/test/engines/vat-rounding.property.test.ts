@@ -9,11 +9,12 @@
  * repeat an engine bug.
  */
 import { describe, expect, test } from "bun:test";
-import type { CurrencyCode, IsoDate, VatTreatment } from "@kvitbit/domain/contract";
+import type { CurrencyCode, IsoDate } from "@kvitbit/domain/contract";
+import { VatTreatment } from "@kvitbit/domain/contract";
 import { BigDecimal } from "effect";
 import { roundAt } from "../../src/engines/decimal";
 import { toCzk } from "../../src/engines/fx";
-import { TREATMENTS, type VatInput, VatMath } from "../../src/engines/vat";
+import { type VatInput, VatMath } from "../../src/engines/vat";
 import { rng } from "./random";
 
 const CZK = "CZK" as CurrencyCode;
@@ -36,6 +37,11 @@ const units = (x: BigDecimal.BigDecimal, scale: number): bigint => {
   return n.value * pow10(scale - n.scale);
 };
 const minor = (u: bigint) => BigDecimal.make(u, 2);
+/**
+ * Treatments and their order come from the domain contract (`VatTreatment` literals), not from
+ * the engine's `TREATMENTS`, so a treatment the engine drops is still generated.
+ */
+const ORACLE_TREATMENTS: ReadonlyArray<VatTreatment> = VatTreatment.literals;
 /** Rate the oracle expects on the 2026 tax point (the table's single entry, 2024-01-01). */
 const ORACLE_RATE: Record<VatTreatment, bigint> = {
   standard: 21n,
@@ -70,7 +76,7 @@ const same = (label: string, actual: BigDecimal.BigDecimal | null, expectedMinor
 describe("VatMath rounding step (verification: exhaustive residue space)", () => {
   test("roundAt(x, 2) = half away from zero for every sub-minor residue at scales 3-7, both signs", () => {
     // x = sign x (I + c/100 + r/10^s): every residue r of the dropped digits, cents that do and
-    // do not carry (0, 50, 99), a small and a 15-digit integer part. 66,660 inputs per sign.
+    // do not carry (0, 50, 99), a small and a 15-digit integer part. 999,990 inputs per sign.
     let checked = 0;
     for (let s = 3; s <= 7; s++) {
       const sub = pow10(s - 2);
@@ -192,7 +198,7 @@ const oracle = (input: VatInput) => {
     const prev = sums.get(key);
     sums.set(key, { treatment: l.treatment, rate, sum: (prev?.sum ?? 0n) + amount });
   }
-  const order = (t: VatTreatment) => TREATMENTS.indexOf(t);
+  const order = (t: VatTreatment) => ORACLE_TREATMENTS.indexOf(t);
   const groups = [...sums.values()].sort(
     (a, b) => order(a.treatment) - order(b.treatment) || Number(a.rate - b.rate),
   );
@@ -242,7 +248,7 @@ const generate = (seed: number): VatInput => {
   const lines = Array.from({ length: r.int(0, 10) }, () => ({
     quantity: BigDecimal.fromStringUnsafe(r.decimal(40, r.int(0, 3))),
     unitPrice: BigDecimal.fromStringUnsafe(r.decimal(20_000, r.int(0, 4), r.next() < 0.2)),
-    treatment: r.pick(TREATMENTS),
+    treatment: r.pick(ORACLE_TREATMENTS),
   }));
   const foreign = r.next() < 0.6;
   return {

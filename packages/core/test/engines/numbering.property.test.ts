@@ -9,6 +9,7 @@ import { describe, expect, test } from "bun:test";
 import type { IsoDate } from "@kvitbit/domain/contract";
 import { Result } from "effect";
 import {
+  checkNextCounter,
   fitsLength,
   format,
   MAX_COUNTER,
@@ -19,6 +20,11 @@ import {
   periodKey,
 } from "../../src/engines/numbering";
 import { rng } from "./random";
+
+/** The spec's limits (core-ports 5.2 / the numbering.ts header), pinned apart from the engine. */
+const SPEC_MAX_LENGTH = 20;
+/** Postgres integer counters store `sequence + 1`: the largest allocatable counter is 2^31 - 2. */
+const SPEC_MAX_COUNTER = 2 ** 31 - 2;
 
 // Oracle: a character-by-character scanner, written apart from the engine's regex split. ------
 
@@ -78,7 +84,7 @@ const oracleParse = (p: string): OracleResult => {
   const year = tokens.some((t) => t._tag === "Year2" || t._tag === "Year4");
   const month = tokens.some((t) => t._tag === "Month");
   if (month && !year) return { ok: false, reason: "month_without_year" };
-  if (oracleRender(tokens, 2026, 1, 1).length > MAX_NUMBER_LENGTH)
+  if (oracleRender(tokens, 2026, 1, 1).length > SPEC_MAX_LENGTH)
     return { ok: false, reason: "too_long" };
   return { ok: true, tokens, reset: month ? "monthly" : year ? "yearly" : "never" };
 };
@@ -183,12 +189,23 @@ const PIECES = [
 ];
 const genPattern = (r: ReturnType<typeof rng>) =>
   Array.from({ length: r.int(1, 6) }, () => r.pick(PIECES)).join("");
+/**
+ * A pattern the oracle accepts (bounded retries, never judged by the engine), then parsed by the
+ * engine: an engine rejection fails at once with the pattern.
+ */
 const genValid = (r: ReturnType<typeof rng>): { source: string; pattern: NumberPattern } => {
-  for (;;) {
+  for (let attempt = 0; attempt < 500; attempt++) {
     const source = genPattern(r);
+    if (!oracleParse(source).ok) continue;
     const parsed = parsePattern(source);
-    if (Result.isSuccess(parsed)) return { source, pattern: parsed.success };
+    if (Result.isFailure(parsed)) {
+      throw new Error(
+        `engine rejects ${JSON.stringify(source)}: ${JSON.stringify(engineParse(source))}`,
+      );
+    }
+    return { source, pattern: parsed.success };
   }
+  throw new Error("generator: no valid pattern in 500 attempts");
 };
 const genDate = (r: ReturnType<typeof rng>) => ({
   y: r.int(1900, 2199),
@@ -199,8 +216,8 @@ const genCounter = (r: ReturnType<typeof rng>) =>
   r.pick([
     () => r.int(1, 9),
     () => r.int(1, 99_999),
-    () => r.int(1, MAX_COUNTER),
-    () => MAX_COUNTER,
+    () => r.int(1, SPEC_MAX_COUNTER),
+    () => SPEC_MAX_COUNTER,
   ])();
 
 // 3a. Exhaustive grammar ----------------------------------------------------------------------
@@ -255,10 +272,10 @@ describe("Numbering patterns (property: seeded)", () => {
     forSeeds(500, 0x5f5f, (seed) => {
       const r = rng(seed);
       const { source, pattern } = genValid(r);
-      expect([
+      expect([source, oracleRender(pattern.tokens, 2026, 1, 1).length <= SPEC_MAX_LENGTH]).toEqual([
         source,
-        oracleRender(pattern.tokens, 2026, 1, 1).length <= MAX_NUMBER_LENGTH,
-      ]).toEqual([source, true]);
+        true,
+      ]);
       for (let k = 0; k < 20; k++) {
         const { y, m, d } = genDate(r);
         const c = genCounter(r);
@@ -268,7 +285,7 @@ describe("Numbering patterns (property: seeded)", () => {
         const back = decode(pattern.tokens, n);
         if (back.counter !== c)
           throw new Error(`${source}: ${n} reads back counter ${back.counter}, not ${c}`);
-        if (fitsLength(pattern, iso(y, m, d), c) !== n.length <= MAX_NUMBER_LENGTH) {
+        if (fitsLength(pattern, iso(y, m, d), c) !== n.length <= SPEC_MAX_LENGTH) {
           throw new Error(`${source}: fitsLength(${c}) disagrees with length ${n.length}`);
         }
       }
@@ -350,5 +367,34 @@ describe("Numbering patterns (property: seeded)", () => {
     expect(periodKey(pattern, "2026-01-05" as IsoDate)).not.toBe(
       periodKey(pattern, "2126-01-05" as IsoDate),
     );
+  });
+
+  test("field limits at the boundary: 20 characters pass, 21 fail, also when the counter outgrows its width", () => {
+    expect(MAX_NUMBER_LENGTH).toBe(SPEC_MAX_LENGTH);
+    expect(MAX_COUNTER).toBe(SPEC_MAX_COUNTER);
+    for (const length of [19, 20, 21]) {
+      for (let width = 1; width <= 10; width++) {
+        // Digits are literal text, so "1111NNN" is a literal and a 3-wide counter.
+        const source = `${"1".repeat(length - width)}${"N".repeat(width)}`;
+        const parsed = parsePattern(source);
+        expect([source, Result.isSuccess(parsed)]).toEqual([source, length <= SPEC_MAX_LENGTH]);
+        if (Result.isFailure(parsed)) {
+          expect([source, parsed.failure.issues[0]?.params?.reason]).toEqual([source, "too_long"]);
+          continue;
+        }
+        const date = "2026-05-01" as IsoDate;
+        const atWidth = 10 ** width - 1;
+        expect([source, fitsLength(parsed.success, date, atWidth)]).toEqual([source, true]);
+        // One more digit than the run: the number grows by one character, never truncated.
+        const grown = format(parsed.success, date, atWidth + 1);
+        expect([source, grown.length]).toEqual([source, length + 1]);
+        expect([source, fitsLength(parsed.success, date, atWidth + 1)]).toEqual([
+          source,
+          length + 1 <= SPEC_MAX_LENGTH,
+        ]);
+      }
+    }
+    expect(Result.isSuccess(checkNextCounter(1, SPEC_MAX_COUNTER))).toBe(true);
+    expect(Result.isFailure(checkNextCounter(1, SPEC_MAX_COUNTER + 1))).toBe(true);
   });
 });

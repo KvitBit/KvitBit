@@ -31,6 +31,13 @@ const WS = WORKSPACE_A;
 const FIXINGS = Array.from({ length: 10 }, (_, i) =>
   fixing(`2026-11-${String(16 + i).padStart(2, "0")}`, `24.${String(100 + i * 37)}`),
 );
+/** The fixture's EUR rate published on `day` (every day has its own fixing). */
+const fixtureRate = (day: string) => {
+  const f = FIXINGS.find((x) => x.fixingDate === day);
+  const rate = f?.rates[0]?.rate;
+  if (rate === undefined) throw new Error(`no fixture fixing on ${day}`);
+  return rate;
+};
 const RECEIPT_DAYS = ["2026-11-16", "2026-11-18", "2026-11-20", "2026-11-21", "2026-11-23"];
 
 // Oracle helpers (bigint, minor units) --------------------------------------------------------
@@ -201,7 +208,7 @@ const chain = (seed: number) => {
     const ptdCredits: Array<DocumentView> = [];
     for (const ptd of ptds)
       ptdCredits.push(yield* docs.correct(ptd.id, { reason: "storno zálohy", lines: "full" }));
-    return { currency, pricesIncludeVat, proforma, ptds, fi, credits, ptdCredits };
+    return { currency, pricesIncludeVat, days, proforma, ptds, fi, credits, ptdCredits };
   });
 };
 
@@ -226,7 +233,8 @@ describe("advance chain net-to-zero (property: seeded, 120 chains)", () => {
       });
       if (Exit.isFailure(exit))
         throw new Error(`seed=${seed}: chain failed: ${JSON.stringify(exit.cause)}`);
-      const { currency, pricesIncludeVat, proforma, ptds, fi, credits, ptdCredits } = exit.value;
+      const { currency, pricesIncludeVat, days, proforma, ptds, fi, credits, ptdCredits } =
+        exit.value;
       if (currency !== "CZK") seen.foreign++;
       if (ptds.length > 1) seen.multiplePtds++;
       if (!BigDecimal.isZero(fi.totals.gross.amount)) seen.partlyPaid++;
@@ -266,13 +274,28 @@ describe("advance chain net-to-zero (property: seeded, 120 chains)", () => {
         if (currency !== "CZK") {
           const fiFx = fi.fx;
           if (fiFx === null) throw new Error("foreign Final Invoice without fx");
-          for (const ptd of ptds) {
-            if (ptd.fx === null) throw new Error("foreign PTD without fx");
+          // The Final Invoice and each PTD use the fixing of their own tax point, taken from the
+          // fixture (not from the service's answer), and convert per bucket at it.
+          sameFx("Final Invoice", fiFx, {
+            rate: fixtureRate("2026-11-23"),
+            quantity: 1,
+            fixingDate: "2026-11-23" as IsoDate,
+            source: "cnb",
+          });
+          for (const [j, ptd] of ptds.entries()) {
+            const day = days[j] as IsoDate;
+            const expectedFx = {
+              rate: fixtureRate(day),
+              quantity: 1,
+              fixingDate: day,
+              source: "cnb" as const,
+            };
+            sameFx(`PTD ${ptd.number} (received ${day})`, ptd.fx, expectedFx);
             for (const b of ptd.totals.buckets) {
-              const want = czkOf(units(b.vat, 2), ptd.fx);
+              const want = czkOf(units(b.vat, 2), expectedFx);
               if (b.vatCzk === null || units(b.vatCzk, 2) !== want) {
                 throw new Error(
-                  `PTD ${ptd.number} ${b.treatment} vatCzk ${b.vatCzk && BigDecimal.format(b.vatCzk)}, want ${fmt(want)}`,
+                  `PTD ${ptd.number} ${b.treatment} vatCzk ${b.vatCzk && BigDecimal.format(b.vatCzk)}, want ${fmt(want)} at the ${day} fixing`,
                 );
               }
             }
