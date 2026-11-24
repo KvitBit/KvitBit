@@ -47,6 +47,7 @@ export const issues = {
   "issue.mcp.confirmation_required": "Tato akce vyžaduje vaše potvrzení.",
 
   "issue.form.required": "Toto pole je povinné.",
+  "issue.form.invalid": "Zkontrolujte tuto hodnotu.",
   "issue.form.decimal_invalid": "Zadejte číslo, např. 1 234,50.",
   "issue.form.integer_invalid": "Zadejte celé číslo.",
   "issue.form.email_invalid": "Zadejte platnou e-mailovou adresu.",
