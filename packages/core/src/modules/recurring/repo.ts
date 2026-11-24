@@ -11,6 +11,7 @@
  *   with outcome `issued` is the exactly-once record of that occurrence.
  */
 import type {
+  BankAccountId,
   Conflict,
   IsoDate,
   NotFound,
@@ -247,6 +248,13 @@ export class RecurringRepo extends Context.Service<
       workspaceId: WorkspaceId,
       query: RunsQuery,
     ) => Effect.Effect<ReadonlyArray<RunRow>, StoreUnavailable>;
+
+    // Bank account references (compose/bankAccounts.ts) --------------------------------------
+    /** Templates not archived whose saved input names the bank account, by name then id. */
+    readonly templatesUsingBankAccount: (
+      workspaceId: WorkspaceId,
+      bankAccountId: BankAccountId,
+    ) => Effect.Effect<ReadonlyArray<TemplateRow>, StoreUnavailable>;
   }
 >()("kvitbit/core/RecurringRepo") {}
 
@@ -305,6 +313,12 @@ export const RecurringRepoMemory: Layer.Layer<RecurringRepo, never, MemoryTables
           ...(query.after !== undefined ? { after: query.after as ReadonlyArray<Scalar> } : {}),
           limit: query.limit,
         }),
+
+      // Bank account references --------------------------------------------------------------
+      templatesUsingBankAccount: (ws, bankAccountId) =>
+        Effect.map(templates.list(ws, { where: { archivedAt: null }, orderBy: ["name"] }), (rows) =>
+          rows.filter((row) => row.input.bankAccount === bankAccountId),
+        ),
     });
   }),
 );
