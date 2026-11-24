@@ -24,6 +24,14 @@
       "name": "@kvitbit/brand",
       "version": "0.0.0",
     },
+    "packages/core": {
+      "name": "@kvitbit/core",
+      "version": "0.0.0",
+      "dependencies": {
+        "@kvitbit/domain": "workspace:*",
+        "effect": "4.1.4",
+      },
+    },
     "packages/db": {
       "name": "@kvitbit/db",
       "version": "0.0.0",
@@ -137,6 +145,8 @@
     "@kvitbit/api-contract": ["@kvitbit/api-contract@workspace:packages/api-contract"],
 
     "@kvitbit/brand": ["@kvitbit/brand@workspace:packages/brand"],
+
+    "@kvitbit/core": ["@kvitbit/core@workspace:packages/core"],
 
     "@kvitbit/db": ["@kvitbit/db@workspace:packages/db"],
 

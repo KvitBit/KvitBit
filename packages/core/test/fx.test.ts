@@ -1,0 +1,126 @@
+/**
+ * The shared FX read-through (src/shared/fx.ts): CNB down and a failing fixing cache stay
+ * distinct (`RatesUnavailable` vs `StoreUnavailable`); `orUnavailable` maps them to
+ * Unavailable{exchange_rates} and Unavailable{database}. A cache failure is never swallowed.
+ */
+import { describe, expect, test } from "bun:test";
+import type { CurrencyCode, IsoDate } from "@kvitbit/domain/contract";
+import { Unavailable } from "@kvitbit/domain/contract";
+import type { CnbFixing } from "@kvitbit/domain/ports";
+import { RatesUnavailable } from "@kvitbit/domain/ports";
+import { BigDecimal, Cause, Effect, Exit, Layer, Option, Ref } from "effect";
+import { TestClock } from "effect/testing";
+import * as CoreRoot from "../src";
+import { orUnavailable } from "../src/shared/errors";
+import { FxFixingCache, FxFixings, FxFixingsLive, fxDryRun } from "../src/shared/fx";
+import { StoreUnavailable } from "../src/store/CoreStore";
+import * as CoreTesting from "../src/testing";
+import { FixtureRates } from "../src/testing";
+import { TEST_NOW } from "./helpers";
+
+const FRIDAY: CnbFixing = {
+  fixingDate: "2026-11-20" as IsoDate,
+  sequence: 225,
+  rates: [
+    { code: "EUR" as CurrencyCode, quantity: 1, rate: BigDecimal.fromStringUnsafe("25.115") },
+  ],
+};
+const SATURDAY = "2026-11-21" as IsoDate;
+
+/** A cache whose reads or writes fail on demand, recording what was put. */
+const flakyCache = (fail: { readonly get?: boolean; readonly put?: boolean }) =>
+  Layer.effect(
+    FxFixingCache,
+    Effect.map(Ref.make<ReadonlyArray<IsoDate>>([]), (puts) =>
+      FxFixingCache.of({
+        get: () =>
+          fail.get === true ? Effect.fail(new StoreUnavailable({})) : Effect.succeed(Option.none()),
+        put: (on) =>
+          fail.put === true
+            ? Effect.fail(new StoreUnavailable({}))
+            : Ref.update(puts, (p) => [...p, on]),
+      }),
+    ),
+  );
+
+const fixingOn = (
+  on: IsoDate,
+  cache: Layer.Layer<FxFixingCache>,
+  {
+    ratesDown = false,
+    dryRun = false,
+  }: { readonly ratesDown?: boolean; readonly dryRun?: boolean } = {},
+) =>
+  Effect.runPromise(
+    Effect.gen(function* () {
+      yield* TestClock.setTime(TEST_NOW);
+      if (ratesDown) yield* Ref.set((yield* FixtureRates).unavailable, true);
+      const fx = yield* FxFixings;
+      const read = (e: ReturnType<typeof fx.fixing>) => (dryRun ? fxDryRun(e) : e);
+      return {
+        raw: yield* Effect.exit(read(fx.fixing(on))),
+        mapped: yield* Effect.exit(orUnavailable(read(fx.fixing(on)))),
+      };
+    }).pipe(
+      Effect.provide(
+        FxFixingsLive.pipe(
+          Layer.provideMerge(Layer.merge(cache, FixtureRates.layer([FRIDAY]))),
+          Layer.provideMerge(TestClock.layer()),
+        ),
+      ),
+    ),
+  );
+
+const database = Exit.fail(new Unavailable({ dependency: "database" }));
+
+describe("FxFixings (shared read-through)", () => {
+  test("a failing cache read is StoreUnavailable, even while CNB is also down", async () => {
+    const r = await fixingOn(SATURDAY, flakyCache({ get: true }), { ratesDown: true });
+    expect(r.raw).toEqual(Exit.fail(new StoreUnavailable({})));
+    expect(r.mapped).toEqual(database);
+  });
+
+  test("a failing cache write is StoreUnavailable, though CNB answered", async () => {
+    const r = await fixingOn(SATURDAY, flakyCache({ put: true }));
+    expect(r.raw).toEqual(Exit.fail(new StoreUnavailable({})));
+    expect(r.mapped).toEqual(database);
+  });
+
+  test("CNB down on an empty cache is RatesUnavailable", async () => {
+    const r = await fixingOn(SATURDAY, flakyCache({}), { ratesDown: true });
+    expect(Exit.isFailure(r.raw) ? Cause.squash(r.raw.cause) : null).toBeInstanceOf(
+      RatesUnavailable,
+    );
+    expect(r.mapped).toEqual(Exit.fail(new Unavailable({ dependency: "exchange_rates" })));
+  });
+
+  test("a dry run returns CNB's answer without writing the cache", async () => {
+    // A failing write would surface as StoreUnavailable; a dry run never writes.
+    const r = await fixingOn(SATURDAY, flakyCache({ put: true }), { dryRun: true });
+    expect(r.raw).toEqual(Exit.succeed(FRIDAY));
+    expect(r.mapped).toEqual(Exit.succeed(FRIDAY));
+  });
+
+  test("a working cache serves CNB's answer carried back", async () => {
+    const r = await fixingOn(SATURDAY, flakyCache({}));
+    expect(r.raw).toEqual(Exit.succeed(FRIDAY));
+  });
+});
+
+describe("FxFixings entry points", () => {
+  test("the package root and testing entry export the seam a standalone module layer needs", async () => {
+    expect(CoreRoot.FxFixings).toBe(FxFixings);
+    expect(CoreRoot.FxFixingsLive).toBe(FxFixingsLive);
+    const fixing = await Effect.runPromise(
+      Effect.flatMap(CoreRoot.FxFixings, (fx) => fx.fixing(SATURDAY)).pipe(
+        Effect.provide(
+          CoreTesting.FxFixingsMemory.pipe(
+            Layer.provideMerge(FixtureRates.layer([FRIDAY])),
+            Layer.provideMerge(TestClock.layer()),
+          ),
+        ),
+      ),
+    );
+    expect(fixing).toEqual(FRIDAY);
+  });
+});
