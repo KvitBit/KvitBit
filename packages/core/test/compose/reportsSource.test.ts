@@ -14,11 +14,16 @@ import type {
   PaymentId,
 } from "@kvitbit/domain/contract";
 import { Documents, MoneyMath, Payments, Workspaces } from "@kvitbit/domain/contract";
-import type { Exit } from "effect";
-import { BigDecimal, Effect, Layer, Ref } from "effect";
+import { BigDecimal, Cause, Effect, Exit, Layer, Ref } from "effect";
 import { TestClock } from "effect/testing";
 import { ReportsSourceLive } from "../../src/compose/reportsSource";
-import { DocumentFixtures, DocumentsRepoMemory } from "../../src/modules/documents";
+import {
+  DocumentFixtures,
+  DocumentPayments,
+  DocumentsRepo,
+  DocumentsRepoMemory,
+} from "../../src/modules/documents";
+import type { DocumentRecord } from "../../src/modules/documents/record";
 import {
   ExpenseRecordsLive,
   ExpensesRepoMemory,
@@ -27,7 +32,8 @@ import {
 } from "../../src/modules/expenses";
 import { NumberingSeries } from "../../src/modules/numbering";
 import { PaymentsRepo, PaymentsRepoMemory, PaymentsTestLayer } from "../../src/modules/payments";
-import type { DateRange, StoredFx } from "../../src/modules/reports/source";
+import { ReportCompute } from "../../src/modules/reports";
+import type { DateRange, ReportDocument, StoredFx } from "../../src/modules/reports/source";
 import { ReportsSource } from "../../src/modules/reports/source";
 import { WorkspacesTestLayer } from "../../src/modules/workspaces";
 import { WorkspacesRepoMemory } from "../../src/modules/workspaces/repo";
@@ -146,6 +152,45 @@ const pay = (document: DocumentId, amount: string, currency = "CZK" as CurrencyC
   );
 const recordExpense = (input: Record<string, unknown>) =>
   Effect.map(record(input), (v: ExpenseView) => fields(v).id as ExpenseId);
+
+const MISSING = "01900000-0000-7000-8000-00000000dead" as DocumentId;
+
+const grossOf = (buckets: ReadonlyArray<{ readonly gross: BigDecimal.BigDecimal }>) =>
+  str(buckets.reduce((sum, b) => BigDecimal.sum(sum, b.gross), BigDecimal.fromBigInt(0n)));
+
+/** A Proforma paid 1000 with a PTD plus 400 recorded without one (user-flows 3.8: unticked). */
+const finalInvoiceWithUncoveredCash = Effect.gen(function* () {
+  const d = yield* Documents;
+  const store = yield* CoreStore;
+  const seam = yield* DocumentPayments;
+  const proforma = yield* issue({ kind: "proforma" });
+  yield* pay(id(proforma), "1000");
+  yield* store.transaction(
+    Effect.andThen(seam.lock(WORKSPACE_A, id(proforma)), () =>
+      seam.settle(
+        WORKSPACE_A,
+        id(proforma),
+        { amount: dec("1400"), payments: 2 },
+        { action: "payment.record" },
+      ),
+    ),
+  );
+  const fi = yield* d.issueFinalInvoice(id(proforma));
+  const cn = yield* d.correct(id(fi), { reason: "storno", lines: "full" });
+  return { fi: id(fi), cn: id(cn) };
+});
+
+/** Rewrites a stored document inside a transaction (simulating a dangling reference). */
+const corrupt = (target: DocumentId, edit: (row: DocumentRecord) => DocumentRecord) =>
+  Effect.flatMap(CoreStore, (store) =>
+    store.transaction(
+      Effect.flatMap(DocumentsRepo, (repo) =>
+        Effect.flatMap(repo.get(WORKSPACE_A, target), (row) =>
+          repo.update(edit(row), row.revision),
+        ),
+      ),
+    ),
+  ).pipe(Effect.orDie);
 
 describe("ReportsSourceLive", () => {
   test("documents, receivables, payments and expenses from the module repositories", async () => {
@@ -328,6 +373,81 @@ describe("ReportsSourceLive", () => {
     // No Workspace row in this setup: no regime history.
     expect(r.regimes).toEqual([]);
   });
+
+  test("advance deductions are the PTD-backed lines only; the full supply adds back all", async () => {
+    const r = ok(
+      await run(
+        Effect.gen(function* () {
+          const ids = yield* finalInvoiceWithUncoveredCash;
+          const docs = yield* read((s) => s.documents(WORKSPACE_A, { ...NOV, field: "issuedOn" }));
+          const doc = (docId: DocumentId) => docs.find((x) => x.id === docId) as ReportDocument;
+          return { fi: doc(ids.fi), cn: doc(ids.cn) };
+        }),
+      ),
+    );
+    const treatments = (buckets: ReadonlyArray<{ readonly treatment: string }>) =>
+      buckets.map((b) => b.treatment);
+    // The Final Invoice deducts 1000 from its PTD and 400 of uncovered cash (outside_scope).
+    expect(r.fi.finalInvoice).toBe(true);
+    expect(str(r.fi.totals.gross.amount)).toBe("2980");
+    expect(treatments(r.fi.totals.buckets)).toEqual(["standard", "reduced"]);
+    expect(treatments(r.fi.advanceDeductions)).toEqual(["standard", "reduced"]);
+    expect(grossOf(r.fi.advanceDeductions)).toBe("1000");
+    // No negative outside_scope tax base: the cash deduction is not netted (it was never taxed).
+    const taxable = ReportCompute.taxableBucketsCzk(r.fi);
+    expect(treatments(taxable)).toEqual(["standard", "reduced"]);
+    // The Credit Note reversing it keeps the deducts targets, so it classifies the same way.
+    expect(r.cn.correctsKind).toBe("invoice");
+    expect(str(r.cn.totals.gross.amount)).toBe("-2980");
+    expect(treatments(r.cn.totals.buckets)).toEqual(["standard", "reduced"]);
+    expect(treatments(r.cn.advanceDeductions)).toEqual(["standard", "reduced"]);
+    expect(grossOf(r.cn.advanceDeductions)).toBe("-1000");
+  });
+
+  const dangling: ReadonlyArray<
+    readonly [string, (ids: { fi: DocumentId; cn: DocumentId }) => Effect.Effect<unknown>]
+  > = [
+    [
+      "corrects",
+      (ids) =>
+        corrupt(ids.cn, (row) => ({
+          ...row,
+          links: row.links.map((l) => (l.relation === "corrects" ? { ...l, id: MISSING } : l)),
+        })),
+    ],
+    [
+      "corrected_by",
+      (ids) =>
+        corrupt(ids.fi, (row) => ({
+          ...row,
+          links: [...row.links, { relation: "corrected_by", id: MISSING }],
+        })),
+    ],
+    [
+      "deducts",
+      (ids) =>
+        corrupt(ids.fi, (row) => ({
+          ...row,
+          lines: row.lines.map((l) => (l.deducts === null ? l : { ...l, deducts: MISSING })),
+        })),
+    ],
+  ];
+  for (const [reference, breakIt] of dangling) {
+    test(`a missing ${reference} target is a defect, not a silently dropped document`, async () => {
+      const exit = await run(
+        Effect.gen(function* () {
+          const ids = yield* finalInvoiceWithUncoveredCash;
+          yield* breakIt(ids);
+          return yield* read((s) => s.documents(WORKSPACE_A, { ...NOV, field: "issuedOn" }));
+        }),
+      );
+      expect(Exit.isFailure(exit)).toBe(true);
+      if (Exit.isFailure(exit)) {
+        expect(Cause.hasDies(exit.cause)).toBe(true);
+        expect(Cause.pretty(exit.cause)).toContain(`${reference} target ${MISSING} not found`);
+      }
+    });
+  }
 
   test("taxRegimes: the Workspace's regime history, Workspace-scoped", async () => {
     const reports = ReportsSourceLive.pipe(

@@ -56,6 +56,7 @@ export interface ReportDocument {
   /**
    * Advance (Payment Tax Document) buckets the document deducts, in its own currency: positive
    * on a Final Invoice, negative on a Credit Note reversing one; empty otherwise (#397, #477).
+   * A deduction of Proforma cash no PTD covers is not one (it was never taxed as an advance).
    */
   readonly advanceDeductions: ReadonlyArray<VatBucket>;
   readonly settlement: DocumentSettlement;
@@ -124,7 +125,11 @@ export interface ReportsSourceShape {
   readonly incompleteExpenses: (
     workspaceId: WorkspaceId,
   ) => Effect.Effect<number, StoreUnavailable>;
-  /** The Workspace's Tax Regime history, any order; the regime on a date is the latest `effectiveFrom <= date`. */
+  /**
+   * The Workspace's Tax Regime history in stored order; the regime on a date is the latest
+   * `effectiveFrom <= date`, the last in stored order on a tie. `[]` for an unknown Workspace
+   * (total over Workspace ids like every read here; Reports asks only after authorizing it).
+   */
   readonly taxRegimes: (
     workspaceId: WorkspaceId,
   ) => Effect.Effect<ReadonlyArray<TaxRegimePeriod>, StoreUnavailable>;
