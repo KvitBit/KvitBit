@@ -855,6 +855,51 @@ describe("issueFinalInvoice (D8)", () => {
     expect(buckets(credit)).toEqual([["standard", "21", "-100", "-21", "-121", "-525"]]);
   });
 
+  test("after the supply is credited, the remainder of a prepaid EUR Final Invoice reverses only its deductions", async () => {
+    const [fi, partial, rest, revenue] = ok(
+      await run(
+        Effect.gen(function* () {
+          const d = yield* docs;
+          const p = yield* issueProforma({
+            currency: EUR,
+            lines: [{ description: "Služba", unitPrice: dec("100") }],
+          });
+          yield* pay(p.id, "60.50", "2026-11-20" as IsoDate);
+          // Revenue's full-supply CZK VAT per document (ReportsSource mapping).
+          const fullCzk = (id: DocumentId) =>
+            Effect.map(
+              Effect.flatMap(CoreStore, (store) =>
+                store.transaction(Effect.flatMap(DocumentsRepo, (repo) => repo.get(WS, id))),
+              ),
+              (record) => str(reportFigures(record, () => true).totals.vatCzk?.amount ?? dec("0")),
+            );
+          const fi = yield* d.issueFinalInvoice(p.id);
+          const partial = yield* d.correct(fi.id, {
+            reason: "sleva",
+            lines: [{ line: lineOf(fi, 0) }],
+          });
+          const rest = yield* d.correct(fi.id, { reason: "storno", lines: "full" });
+          const revenue = [
+            yield* fullCzk(fi.id),
+            yield* fullCzk(partial.id),
+            yield* fullCzk(rest.id),
+          ];
+          return [fi, partial, rest, revenue] as const;
+        }),
+        { fixings: [fixing("2026-11-20", "24.000"), fixing("2026-11-23", "25.000")] },
+      ),
+    );
+    // No zero-value supply line for the CZK residual; the deduction is reversed as a line.
+    expect(lines(rest).map((l) => [str(l.quantity), str(l.unitPrice), l.deducts])).toEqual([
+      ["1", "50", lines(fi)[1]?.deducts ?? null],
+    ]);
+    // CZK VAT closes exactly: 262.5 (FI) - 525 (partial) + 262.5 (remainder) = 0.
+    expect(buckets(rest)).toEqual([["standard", "21", "50", "10.5", "60.5", "262.5"]]);
+    expect(buckets(partial)[0]?.[5]).toBe("-525");
+    // Revenue closes too: the full supply 525, its credit -525, the deduction reversal 0.
+    expect(revenue).toEqual(["525", "-525", "0"]);
+  });
+
   test("checks: unpaid Proforma, not a Proforma, draft, cancelled", async () => {
     const results = ok(
       await run(

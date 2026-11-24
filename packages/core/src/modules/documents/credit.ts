@@ -241,9 +241,12 @@ export const remainderSpec = (
   const deductions = original.lines.filter((l) => l.deducts !== null);
   const deducted = deductionBucketsOf(original);
   const remaining = remainingBuckets(original, creditNotes);
+  // Supply lines carry document-currency amounts only: a bucket whose base, VAT and gross are
+  // closed gets no line, even with a CZK residual (the deductions' CZK VAT is at the PTDs'
+  // fixings, the Final Invoice's at its own, D8); the totals below close the CZK VAT exactly.
   const left = (
     deducted.length === 0 ? remaining : mergeBuckets(remaining, deducted.map(negateBucket))
-  ).filter(isOpenBucket);
+  ).filter((b) => !(isZero(b.base) && isZero(b.vat) && isZero(b.gross)));
   const label = original.language === "cs" ? "Oprava" : "Correction of";
   const reversed = deductions.map(({ id: _id, ...l }): CreditLine => {
     const base = deductionBase(original, l);
