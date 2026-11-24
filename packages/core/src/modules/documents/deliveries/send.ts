@@ -205,7 +205,8 @@ export const queueDelivery = (
           ? Effect.die(e)
           : Effect.flatMap(
               repo.reminderStep(workspaceId, { documentId: p.record.id, ...reminder }),
-              (existing) => (Option.isSome(existing) ? Effect.succeed(existing.value) : Effect.die(e)),
+              (existing) =>
+                Option.isSome(existing) ? Effect.succeed(existing.value) : Effect.die(e),
             ),
       ),
     );
