@@ -1,0 +1,202 @@
+name: Deploy Kvitbit (GCP Alchemy)
+
+permissions:
+  contents: read
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - apps/**
+      - packages/**
+      - infra/alchemy/**
+      - Dockerfile
+      - docker/**
+      - .dockerignore
+      - .github/workflows/deploy.yml
+      - package.json
+      - bun.lock
+  workflow_dispatch:
+    inputs:
+      stage:
+        description: Target Alchemy stage
+        type: choice
+        default: prod
+        options:
+          - prod
+          - staging
+      dry_run:
+        description: Plan only (skip image push, DB migration, and live rollout)
+        type: boolean
+        default: false
+
+# Never cancel an active deployment or migration in progress.
+concurrency:
+  group: deploy-${{ inputs.stage || 'prod' }}
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy (${{ inputs.stage || 'prod' }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      KVITBIT_STAGE: ${{ inputs.stage || 'prod' }}
+      DRY_RUN: ${{ inputs.dry_run && 'true' || 'false' }}
+      GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+      GCP_PROJECT_NUMBER: ${{ vars.GCP_PROJECT_NUMBER }}
+      GCP_REGION: ${{ vars.GCP_REGION }}
+      GCP_ZONE: ${{ vars.GCP_ZONE }}
+      GCP_WORKLOAD_IDENTITY_PROVIDER: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+      GCP_DEPLOYER_SERVICE_ACCOUNT: ${{ vars.GCP_DEPLOYER_SERVICE_ACCOUNT }}
+      ALCHEMY_STATE_BUCKET: ${{ vars.ALCHEMY_STATE_BUCKET }}
+
+    steps:
+      - name: Validate GCP deployment variables
+        run: |
+          set -euo pipefail
+          for name in \
+            GCP_PROJECT_ID \
+            GCP_PROJECT_NUMBER \
+            GCP_REGION \
+            GCP_ZONE \
+            GCP_WORKLOAD_IDENTITY_PROVIDER \
+            GCP_DEPLOYER_SERVICE_ACCOUNT \
+            ALCHEMY_STATE_BUCKET; do
+            if [ -z "${!name}" ]; then
+              echo "::error::Missing required repository variable: ${name}"
+              exit 1
+            fi
+          done
+          case "$GCP_DEPLOYER_SERVICE_ACCOUNT" in
+            *"@${GCP_PROJECT_ID}.iam.gserviceaccount.com") ;;
+            *)
+              echo "::error::GCP_DEPLOYER_SERVICE_ACCOUNT must belong to ${GCP_PROJECT_ID}"
+              exit 1
+              ;;
+          esac
+
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      # Step 1: Federated credentials file for gcloud and Artifact Registry Docker push.
+      - name: Authenticate to Google Cloud (OIDC)
+        id: gcp-auth
+        uses: google-github-actions/auth@v3
+        with:
+          project_id: ${{ vars.GCP_PROJECT_ID }}
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_DEPLOYER_SERVICE_ACCOUNT }}
+
+      # Step 2: Alchemy 2.0.0-beta.87 reads GOOGLE_ACCESS_TOKEN + GOOGLE_PROJECT_ID
+      # rather than external_account federated credential files.
+      - name: Mint Alchemy OAuth access token
+        id: alchemy-auth
+        uses: google-github-actions/auth@v3
+        with:
+          project_id: ${{ vars.GCP_PROJECT_ID }}
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_DEPLOYER_SERVICE_ACCOUNT }}
+          token_format: access_token
+          access_token_lifetime: 3600s
+          create_credentials_file: false
+
+      - name: Set up gcloud
+        uses: google-github-actions/setup-gcloud@v3
+
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker "${GCP_REGION}-docker.pkg.dev" --quiet
+
+      - name: Build and push Kvitbit OCI image
+        id: image
+        run: |
+          set -euo pipefail
+          IMAGE_REPO="${GCP_REGION}-docker.pkg.dev/${GCP_PROJECT_ID}/kvitbit/kvitbit"
+          IMAGE_TAG="${GITHUB_SHA}"
+
+          docker build --file Dockerfile --tag "${IMAGE_REPO}:${IMAGE_TAG}" .
+
+          if [ "$DRY_RUN" = "true" ]; then
+            DIGEST="sha256:$(printf '%s' "${GITHUB_SHA}" | sha256sum | awk '{print $1}')"
+            echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
+            echo "Dry run: skipped docker push (synthetic plan digest ${DIGEST})"
+          else
+            docker push "${IMAGE_REPO}:${IMAGE_TAG}"
+            DIGEST="$(docker inspect --format='{{index .RepoDigests 0}}' "${IMAGE_REPO}:${IMAGE_TAG}" | awk -F'@' '{print $2}')"
+            if [ -z "$DIGEST" ]; then
+              echo "::error::Failed to resolve immutable image digest after push"
+              exit 1
+            fi
+            echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Explicit migration step BEFORE Cloud Run / runner pool rollout (rule S5, #878).
+      - name: Run database and cluster schema migrations
+        if: env.DRY_RUN != 'true'
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DATABASE_URL_UNPOOLED: ${{ secrets.DATABASE_DIRECT_URL }}
+        run: |
+          set -euo pipefail
+          if [ -z "$DATABASE_URL_UNPOOLED" ]; then
+            echo "::error::DATABASE_DIRECT_URL secret must be set for migrations"
+            exit 1
+          fi
+          if [ ! -f apps/server/src/migrate.ts ]; then
+            echo "::error::apps/server/src/migrate.ts is missing; cannot run production migrations"
+            exit 1
+          fi
+          bun apps/server/src/migrate.ts
+
+      - name: Run pure-Alchemy GCP stack (${{ inputs.dry_run && 'plan' || 'deploy' }})
+        working-directory: infra/alchemy
+        env:
+          GOOGLE_ACCESS_TOKEN: ${{ steps.alchemy-auth.outputs.access_token }}
+          GOOGLE_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+          KVITBIT_STAGE: ${{ env.KVITBIT_STAGE }}
+          KVITBIT_GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+          KVITBIT_GCP_PROJECT_NUMBER: ${{ vars.GCP_PROJECT_NUMBER }}
+          KVITBIT_GCP_REGION: ${{ vars.GCP_REGION }}
+          KVITBIT_GCP_ZONE: ${{ vars.GCP_ZONE }}
+          KVITBIT_ALCHEMY_STATE_BUCKET: ${{ vars.ALCHEMY_STATE_BUCKET }}
+          KVITBIT_IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
+          KVITBIT_APP_ORIGIN: ${{ vars.APP_ORIGIN }}
+          KVITBIT_EMAIL_FROM: ${{ vars.EMAIL_FROM }}
+          KVITBIT_EDGE_DOMAINS: ${{ vars.KVITBIT_EDGE_DOMAINS }}
+          KVITBIT_RUNNER_COUNT: ${{ vars.KVITBIT_RUNNER_COUNT }}
+          KVITBIT_ANDROID_ASSETLINKS_SHA256: ${{ vars.KVITBIT_ANDROID_ASSETLINKS_SHA256 }}
+        run: |
+          set -euo pipefail
+          if [ "$DRY_RUN" = "true" ]; then
+            bunx alchemy plan --stage "$KVITBIT_STAGE"
+          else
+            bunx alchemy deploy --stage "$KVITBIT_STAGE"
+          fi
+
+      - name: Verify Cloud Run /healthz and /readyz
+        if: env.DRY_RUN != 'true'
+        run: |
+          set -euo pipefail
+          SERVICE_NAME="kvitbit-${KVITBIT_STAGE}-server"
+          SERVICE_URL="$(gcloud run services describe "$SERVICE_NAME" \
+            --project "$GCP_PROJECT_ID" \
+            --region "$GCP_REGION" \
+            --format='value(status.url)')"
+          if [ -z "$SERVICE_URL" ]; then
+            echo "::error::Could not resolve Cloud Run URL for ${SERVICE_NAME}"
+            exit 1
+          fi
+          curl -fsS --retry 6 --retry-delay 5 "${SERVICE_URL}/healthz" > /dev/null
+          curl -fsS --retry 6 --retry-delay 5 "${SERVICE_URL}/readyz" > /dev/null
+          echo "Verified ${SERVICE_URL}/healthz and /readyz"
