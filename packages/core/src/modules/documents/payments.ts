@@ -42,7 +42,7 @@ import { digitsOf, isFullyCredited, owedOf, settlementOf } from "./credit";
 import { DocumentIssuers } from "./ports";
 import type { DocumentRecord, LineRecord } from "./record";
 import { DocumentsRepo } from "./repo";
-import { now, viewOf } from "./support";
+import { insertNumbered, now, viewOf } from "./support";
 import { guard } from "./transitions";
 
 /** A document as Payments sees it (amounts in the document currency). */
@@ -427,29 +427,32 @@ const issuePaymentTaxDocument = (
     }
     const id = yield* newId<DocumentId>();
     const series = yield* numbering.resolve(workspaceId, "payment_tax_document");
-    const allocation = yield* numbering.allocate({
-      workspaceId,
-      kind: "payment_tax_document",
-      seriesId: series.id,
-      documentId: id,
-      issuedOn: today,
-    });
-    const ptd = yield* repo
-      .insert(
-        paymentTaxDocumentRecord(proforma, {
-          id,
-          number: allocation.number,
-          seriesId: allocation.seriesId,
-          paidOn: payment.paidOn,
-          today,
-          at,
-          regime: issuer.regime,
-          fx,
-          lines,
-          totals,
+    const record = (number: string | null, seriesId: DocumentRecord["seriesId"]) =>
+      paymentTaxDocumentRecord(proforma, {
+        id,
+        number,
+        seriesId,
+        paidOn: payment.paidOn,
+        today,
+        at,
+        regime: issuer.regime,
+        fx,
+        lines,
+        totals,
+      });
+    const ptd = yield* insertNumbered(
+      record(null, series.id),
+      Effect.map(
+        numbering.allocate({
+          workspaceId,
+          kind: "payment_tax_document",
+          seriesId: series.id,
+          documentId: id,
+          issuedOn: today,
         }),
-      )
-      .pipe(Effect.catchTag("UniqueViolation", () => new Conflict({ reason: "duplicate" })));
+        (allocation) => record(allocation.number, allocation.seriesId),
+      ),
+    );
     const updated = yield* repo
       .update(
         {

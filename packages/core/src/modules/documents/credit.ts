@@ -19,7 +19,6 @@ import type {
   VatBucket,
   WorkspaceId,
 } from "@kvitbit/domain/contract";
-import { Conflict } from "@kvitbit/domain/contract";
 import { BigDecimal, Effect } from "effect";
 import { ZERO } from "../../engines/decimal";
 import { Numbering } from "../../engines/numbering";
@@ -30,7 +29,7 @@ import { NumberingSeries } from "../numbering";
 import { mergeBuckets } from "./compose";
 import type { DocumentRecord, LineRecord } from "./record";
 import { DocumentsRepo } from "./repo";
-import { now } from "./support";
+import { insertNumbered, now } from "./support";
 
 const neg = (v: BigDecimal.BigDecimal) => BigDecimal.normalize(BigDecimal.negate(v));
 const isZero = (v: BigDecimal.BigDecimal) => BigDecimal.isZero(v);
@@ -386,28 +385,24 @@ export const issueCreditNote = (original: DocumentRecord, input: IssueCreditNote
     const workspaceId: WorkspaceId = original.workspaceId;
     const id = yield* newId<DocumentId>();
     const series = yield* numbering.resolve(workspaceId, "credit_note");
-    const allocation = yield* numbering.allocate({
-      workspaceId,
-      kind: "credit_note",
-      seriesId: series.id,
-      documentId: id,
-      issuedOn: input.issuedOn,
-    });
     const lines: Array<LineRecord> = [];
     for (const l of input.credit.lines) lines.push({ ...l, id: (yield* ids.next) as LineId });
+    const record = (number: string | null, seriesId: NumberingSeriesId | null) =>
+      creditNoteRecord(original, input, { id, number, seriesId, lines, at });
 
-    const creditNote = yield* repo
-      .insert(
-        creditNoteRecord(original, input, {
-          id,
-          number: allocation.number,
-          seriesId: allocation.seriesId,
-          lines,
-          at,
+    const creditNote = yield* insertNumbered(
+      record(null, series.id),
+      Effect.map(
+        numbering.allocate({
+          workspaceId,
+          kind: "credit_note",
+          seriesId: series.id,
+          documentId: id,
+          issuedOn: input.issuedOn,
         }),
-      )
-      // The allocator reserved the number for this document, so the index cannot break.
-      .pipe(Effect.catchTag("UniqueViolation", () => new Conflict({ reason: "duplicate" })));
+        (allocation) => record(allocation.number, allocation.seriesId),
+      ),
+    );
 
     const earlier = yield* repo.getMany(
       workspaceId,

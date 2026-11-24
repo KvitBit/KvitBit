@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import type { DocumentId, IsoDate, NumberingSeriesId } from "@kvitbit/domain/contract";
+import type { DocumentId, IsoDate, NumberingSeriesId, WorkspaceId } from "@kvitbit/domain/contract";
 import { Conflict, Invalid, NotFound } from "@kvitbit/domain/contract";
 import { Effect, Exit, Layer, Option } from "effect";
 import type { NumberingSeriesShape } from "../../../src/modules/numbering";
@@ -12,8 +12,9 @@ import {
   NumberingTestLayer,
 } from "../../../src/modules/numbering";
 import { CoreStore, UniqueViolation } from "../../../src/store/CoreStore";
+import { MemoryTables } from "../../../src/store/tables";
 import { rng, SEEDS } from "../../engines/random";
-import { member, runTest, WORKSPACE_A, WORKSPACE_B } from "../../helpers";
+import { ensureDocumentRow, member, runTest, WORKSPACE_A, WORKSPACE_B } from "../../helpers";
 
 const TODAY = "2026-11-23" as IsoDate;
 const doc = (n: number) =>
@@ -32,8 +33,19 @@ const scenario = <A, E>(
   runTest(
     member("owner"),
     Effect.gen(function* () {
-      const s = yield* NumberingSeries;
+      const series = yield* NumberingSeries;
       const store = yield* CoreStore;
+      const tables = yield* MemoryTables;
+      // number_reservations_document_fk: the document row exists before its number is reserved.
+      const withRow = (workspaceId: WorkspaceId, documentId: DocumentId) =>
+        Effect.provideService(ensureDocumentRow(workspaceId, documentId), MemoryTables, tables);
+      const s: NumberingSeriesShape = {
+        ...series,
+        allocate: (input) =>
+          Effect.andThen(withRow(input.workspaceId, input.documentId), series.allocate(input)),
+        override: (input) =>
+          Effect.andThen(withRow(input.workspaceId, input.documentId), series.override(input)),
+      };
       return yield* body(s, store.transaction);
     }).pipe(Effect.provide(layer)),
   );

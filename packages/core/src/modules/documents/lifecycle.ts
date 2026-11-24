@@ -41,7 +41,7 @@ import type { DocumentRecord, GivenFields } from "./record";
 import { DocumentRecord as DocumentRecordSchema } from "./record";
 import { DocumentsRepo } from "./repo";
 import { DocumentSender } from "./sender";
-import { newDraftRecord, now, viewOf } from "./support";
+import { insertNumbered, newDraftRecord, now, viewOf } from "./support";
 import { guard, hasDependents, hasFinalInvoice, paymentsBlockCancel } from "./transitions";
 import { DocumentViewCodec } from "./view";
 
@@ -183,15 +183,16 @@ export const issue = (from: IssueFrom, opts?: RequestOptions & { readonly send?:
             yield* specFromInput(workspaceId, from.input),
             { today },
           );
-          const next = yield* numbered(workspaceId, id, composed);
-          row = yield* repo
-            .insert({
-              ...newDraftRecord(id, workspaceId, composed, at),
+          const draftRow = newDraftRecord(id, workspaceId, composed, at);
+          row = yield* insertNumbered(
+            draftRow,
+            Effect.map(numbered(workspaceId, id, composed), (next) => ({
+              ...draftRow,
               ...next,
-              status: "issued",
+              status: "issued" as const,
               issuedAt: at,
-            })
-            .pipe(Effect.catchTag("UniqueViolation", numberTaken));
+            })),
+          );
         }
         yield* appendAudit({
           workspaceId,

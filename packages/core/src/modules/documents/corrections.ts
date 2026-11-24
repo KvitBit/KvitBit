@@ -50,7 +50,7 @@ import {
 } from "./credit";
 import type { DocumentRecord, LineRecord } from "./record";
 import { DocumentsRepo } from "./repo";
-import { now, rolledBack, viewOf } from "./support";
+import { now, rolledBack, viewOf, withDraftRow } from "./support";
 import { guard } from "./transitions";
 import { DocumentViewCodec } from "./view";
 
@@ -351,24 +351,27 @@ export const previewCorrection = (id: DocumentId, input: CorrectionInput) =>
     const lines: Array<LineRecord> = [];
     for (const l of credit.lines) lines.push({ ...l, id: (yield* ids.next) as LineRecord["id"] });
     const cnId = (yield* ids.next) as DocumentId;
-    // D15: allocate from the credit-note series like correct would, then roll it back.
-    yield* rolledBack(
-      Effect.gen(function* () {
-        const numbering = yield* NumberingSeries;
-        const series = yield* numbering.resolve(workspaceId, "credit_note");
-        yield* numbering.allocate({
-          workspaceId,
-          kind: "credit_note",
-          seriesId: series.id,
-          documentId: cnId,
-          issuedOn: today,
-        });
-      }),
-    );
     const record = creditNoteRecord(
       original,
       { reason, issuedOn: today, correctedOn, credit },
       { id: cnId, number: null, seriesId: null, lines, at },
+    );
+    // D15: store the row and allocate from the credit-note series like correct would, then
+    // roll both back.
+    yield* rolledBack(
+      withDraftRow(record, () =>
+        Effect.gen(function* () {
+          const numbering = yield* NumberingSeries;
+          const series = yield* numbering.resolve(workspaceId, "credit_note");
+          yield* numbering.allocate({
+            workspaceId,
+            kind: "credit_note",
+            seriesId: series.id,
+            documentId: cnId,
+            issuedOn: today,
+          });
+        }),
+      ),
     );
     return yield* viewOf({ ...record, status: "draft", issuedAt: null });
   }).pipe(fxDryRun, orUnavailable) satisfies Effect.Effect<DocumentView, unknown, unknown>;

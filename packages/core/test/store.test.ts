@@ -6,7 +6,14 @@ import { CoreStore, UniqueViolation } from "../src/store/CoreStore";
 import { allocateNumber, reserveNumber } from "../src/store/numbering";
 import type { Collection } from "../src/store/tables";
 import { defineCollection, MemoryTables } from "../src/store/tables";
-import { member, runTest, WORKSPACE_A, WORKSPACE_B } from "./helpers";
+import {
+  ensureDocumentRow,
+  member,
+  runTest,
+  StubDocuments,
+  WORKSPACE_A,
+  WORKSPACE_B,
+} from "./helpers";
 
 const Note = Schema.Struct({
   id: Schema.String,
@@ -52,7 +59,7 @@ interface Env {
   readonly notes: Collection<Note>;
 }
 
-const run = <A, E>(f: (env: Env) => Effect.Effect<A, E, CoreStore>) =>
+const run = <A, E>(f: (env: Env) => Effect.Effect<A, E, CoreStore | MemoryTables>) =>
   runTest(
     member("owner"),
     Effect.gen(function* () {
@@ -406,24 +413,98 @@ describe("in-memory CoreStore: transactions", () => {
   });
 });
 
+describe("in-memory CoreStore: number_reservations_document_fk", () => {
+  const doc = "01900000-0000-7000-8000-0000000df001" as DocumentId;
+  const reservation = (workspaceId: WorkspaceId, number: string) => ({
+    workspaceId,
+    kind: "invoice" as const,
+    number,
+    seriesId: null,
+    documentId: doc,
+  });
+
+  test("a free number for a document with no row, or another Workspace's row, is a defect", async () => {
+    const missing = await run(({ store }) =>
+      store.transaction(store.reservations.tryReserve(reservation(WORKSPACE_A, "FK-1"))),
+    );
+    const otherWorkspace = await run(({ store }) =>
+      store.transaction(
+        Effect.andThen(
+          ensureDocumentRow(WORKSPACE_B, doc),
+          store.reservations.tryReserve(reservation(WORKSPACE_A, "FK-1")),
+        ),
+      ),
+    );
+    expect([isDefect(missing), isDefect(otherWorkspace)]).toEqual([true, true]);
+  });
+
+  test("a taken number inserts nothing, so it checks no foreign key", async () => {
+    const exit = await run(({ store }) =>
+      Effect.gen(function* () {
+        yield* store.transaction(
+          Effect.andThen(
+            ensureDocumentRow(WORKSPACE_A, doc),
+            store.reservations.tryReserve(reservation(WORKSPACE_A, "FK-1")),
+          ),
+        );
+        const other = "01900000-0000-7000-8000-0000000df002" as DocumentId;
+        return yield* store.transaction(
+          store.reservations.tryReserve({ ...reservation(WORKSPACE_A, "FK-1"), documentId: other }),
+        );
+      }),
+    );
+    expect(exit).toEqual(Exit.succeed(false));
+  });
+
+  test("a document a reservation references cannot be removed; an unreserved one can", async () => {
+    const exit = await run(({ store }) =>
+      Effect.gen(function* () {
+        const documents = (yield* MemoryTables).collection(StubDocuments);
+        const free = "01900000-0000-7000-8000-0000000df003" as DocumentId;
+        yield* store.transaction(
+          Effect.all([
+            ensureDocumentRow(WORKSPACE_A, doc),
+            ensureDocumentRow(WORKSPACE_A, free),
+            store.reservations.tryReserve(reservation(WORKSPACE_A, "FK-1")),
+          ]),
+        );
+        const removedFree = yield* Effect.exit(
+          store.transaction(documents.remove(WORKSPACE_A, free, 1)),
+        );
+        const removedReserved = yield* Effect.exit(
+          store.transaction(documents.remove(WORKSPACE_A, doc, 1)),
+        );
+        return [Exit.isSuccess(removedFree), isDefect(removedReserved)];
+      }),
+    );
+    expect(exit).toEqual(Exit.succeed([true, true]));
+  });
+});
+
 describe("in-memory CoreStore: numbering (S3)", () => {
   const key = { workspaceId: WORKSPACE_A, seriesId: "s1" as NumberingSeriesId, period: "2026" };
   const doc = (n: number) => `01900000-0000-7000-8000-0000000d000${n}` as DocumentId;
   const format = (n: number) => `2026-${String(n).padStart(4, "0")}`;
   const allocate = (n: number) =>
-    allocateNumber({ ...key, kind: "invoice", documentId: doc(n), format });
+    Effect.andThen(
+      ensureDocumentRow(WORKSPACE_A, doc(n)),
+      allocateNumber({ ...key, kind: "invoice", documentId: doc(n), format }),
+    );
   const reserve = (
     number: string,
     documentId: DocumentId,
     overrides: { readonly workspaceId?: WorkspaceId; readonly kind?: "invoice" | "proforma" } = {},
   ) =>
-    reserveNumber({
-      workspaceId: overrides.workspaceId ?? WORKSPACE_A,
-      kind: overrides.kind ?? "invoice",
-      number,
-      seriesId: null,
-      documentId,
-    });
+    Effect.andThen(
+      ensureDocumentRow(overrides.workspaceId ?? WORKSPACE_A, documentId),
+      reserveNumber({
+        workspaceId: overrides.workspaceId ?? WORKSPACE_A,
+        kind: overrides.kind ?? "invoice",
+        number,
+        seriesId: null,
+        documentId,
+      }),
+    );
 
   test("allocation is monotonic, skips reserved numbers and leaves no gap on rollback", async () => {
     const exit = await run(({ store }) =>
@@ -575,6 +656,7 @@ describe("in-memory CoreStore: council regressions", () => {
     const doc = "01900000-0000-7000-8000-0000000d0001" as DocumentId;
     const exit = await run(({ store }) =>
       Effect.gen(function* () {
+        yield* store.transaction(ensureDocumentRow(WORKSPACE_A, doc));
         yield* store.transaction(
           Effect.forEach(
             Array.from({ length: 50 }, (_, i) => `N-${i + 1}`),

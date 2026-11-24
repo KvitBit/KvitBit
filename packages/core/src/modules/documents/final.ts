@@ -37,7 +37,7 @@ import { remainingBuckets } from "./credit";
 import { numbered } from "./lifecycle";
 import type { DocumentRecord, LinkRecord } from "./record";
 import { DocumentsRepo } from "./repo";
-import { newDraftRecord, now, rolledBack, viewOf } from "./support";
+import { insertNumbered, newDraftRecord, now, rolledBack, viewOf, withDraftRow } from "./support";
 import { guard, hasFinalInvoice } from "./transitions";
 import { DocumentViewCodec } from "./view";
 
@@ -210,18 +210,14 @@ export const issueFinalInvoice = (
         const spec = yield* plan(proforma, input?.patch, true);
         const id = yield* newId<DocumentId>();
         const composed = yield* compose(workspaceId, spec, { today });
-        const next = yield* numbered(workspaceId, id, composed);
-        const saved = yield* repo
-          .insert(
-            withSettlement({
-              ...newDraftRecord(id, workspaceId, composed, at),
-              ...next,
-              status: "issued",
-              links: finalLinks(proforma, spec),
-              issuedAt: at,
-            }),
-          )
-          .pipe(Effect.catchTag("UniqueViolation", () => new Conflict({ reason: "duplicate" })));
+        const draftRow = newDraftRecord(id, workspaceId, composed, at);
+        const links = finalLinks(proforma, spec);
+        const saved = yield* insertNumbered(
+          { ...draftRow, links },
+          Effect.map(numbered(workspaceId, id, composed), (next) =>
+            withSettlement({ ...draftRow, ...next, status: "issued", links, issuedAt: at }),
+          ),
+        );
         const updated = yield* repo
           .update(
             {
@@ -270,9 +266,9 @@ export const previewFinalInvoice = (
         const spec = yield* plan(proforma, input?.patch, false);
         const composed = yield* compose(workspaceId, spec, { today });
         const id = yield* newId<DocumentId>();
-        // D15: fails like issue would (series exhausted), then rolls the allocation back.
-        yield* rolledBack(numbered(workspaceId, id, composed));
         const row = newDraftRecord(id, workspaceId, composed, at);
+        // D15: fails like issue would (series exhausted), then rolls the row and allocation back.
+        yield* rolledBack(withDraftRow(row, () => numbered(workspaceId, id, composed)));
         return yield* viewOf(withSettlement({ ...row, links: finalLinks(proforma, spec) }));
       }),
     );

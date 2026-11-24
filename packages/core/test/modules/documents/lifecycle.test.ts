@@ -250,10 +250,11 @@ describe("issue", () => {
     expect(afterEdit.dates.dueOn).toBe("2026-12-07" as IsoDate);
     expect(buyer(refreshed).name).toBe("Nový název a.s.");
     expect(seller(refreshed).name).toBe("Nová firma s.r.o.");
+    // An issue from input stores its draft row at revision 1 and numbers it at 2 (D1).
     expect(history.map((e) => [e.action, e.revision])).toEqual([
-      ["document.issue", 1],
-      ["document.edit", 2],
+      ["document.issue", 2],
       ["document.edit", 3],
+      ["document.edit", 4],
     ]);
     expect(history[1]?.changes.map((c) => c.path)).toEqual(["note", "given.note"]);
     expect(history[2]?.changes.map((c) => c.path)).toEqual(["contact", "issuer"]);
@@ -504,7 +505,7 @@ describe("edit of an issued document", () => {
     );
     expect(linesErr).toEqual(illegal);
     expect(taxPointErr).toEqual(illegal);
-    expect(note).toBe(3);
+    expect(note).toBe(4);
   });
 });
 
@@ -741,7 +742,8 @@ describe("Credit Notes", () => {
     );
     expect(linesErr).toEqual(illegal);
     expect(refreshErr).toEqual(illegal);
-    expect(noted.revision).toBe(2);
+    // Issued at revision 2 (draft row, then numbered), one edit.
+    expect(noted.revision).toBe(3);
     expect(str(noted.totals.gross.amount)).toBe("-2980");
   });
 
@@ -960,7 +962,7 @@ describe("diff council follow-ups", () => {
     );
     // The EUR account cannot take a CZK document.
     expect(account[0]).toMatchObject({ _tag: "Invalid" });
-    expect(account[1]).toBe(2);
+    expect(account[1]).toBe(3);
     expect(currency).toEqual(illegal);
     expect(rate).toEqual(illegal);
   });
