@@ -1,0 +1,20 @@
+{
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    "paths": {
+      "@kvitbit/core": ["../packages/core/src/index.ts"],
+      "@kvitbit/core/contract": ["../packages/core/src/contract.ts"],
+      "@kvitbit/core/engines": ["../packages/core/src/engines/index.ts"],
+      "@kvitbit/core/ports": ["../packages/core/src/ports.ts"],
+      "@kvitbit/core/testing": ["../packages/core/src/testing/index.ts"],
+      "@kvitbit/domain": ["../packages/domain/src/index.ts"],
+      "@kvitbit/domain/contract": ["../packages/domain/src/contract.ts"],
+      "@kvitbit/domain/ports": ["../packages/domain/src/ports.ts"],
+      "@kvitbit/api-contract": ["../packages/api-contract/src/index.ts"],
+      "@kvitbit/db": ["../packages/db/src/index.ts"],
+      "@kvitbit/db/schema": ["../packages/db/src/schema/index.ts"]
+    }
+  },
+  "include": ["**/*.ts"],
+  "exclude": [".cache/**"]
+}

@@ -1,0 +1,64 @@
+{
+  "schemaVersion": 1,
+  "syncCommit": "77a5bb7",
+  "toolchain": {
+    "tla2tools": "1.7.4",
+    "java": 17
+  },
+  "checks": [
+    {
+      "id": "selftest.counter",
+      "skill": "formal/README.md#runner-self-test",
+      "tier": 0,
+      "kind": "tlc",
+      "spec": "formal/selftest/Counter.tla",
+      "config": "formal/selftest/Counter.cfg",
+      "mutants": [
+        {
+          "name": "bound-below-limit",
+          "config": "formal/selftest/Counter_mutant_bound.cfg",
+          "expect": "violation",
+          "violates": {
+            "kind": "invariant",
+            "name": "WithinBound"
+          },
+          "description": "Bound below Limit, so WithinBound must break"
+        }
+      ],
+      "timeoutSeconds": 60,
+      "coveredFiles": [
+        {
+          "path": "formal/selftest/Counter.tla",
+          "sha256": "5318a526f96b707956c18d8479e4d7af665cb24fd9ee422d2d484a9606cfab29"
+        }
+      ],
+      "guardedSymbols": ["Counter!WithinBound"],
+      "bounds": "Limit = 3 (4 distinct states); exhaustive within that bound",
+      "assumptions": ["Runner fixture only; covers no product code"],
+      "toolVersions": {
+        "tla2tools": "1.7.4",
+        "java": "17"
+      }
+    },
+    {
+      "id": "selftest.imports",
+      "skill": "formal/README.md#runner-self-test",
+      "tier": 0,
+      "kind": "replay",
+      "replay": ["formal/selftest/imports.replay.test.ts"],
+      "timeoutSeconds": 120,
+      "coveredFiles": [
+        {
+          "path": "formal/selftest/imports.replay.test.ts",
+          "sha256": "dd39e8ec9207db056bad172aa5cf8ab3f990b77741b72a59875e4ea598040e98"
+        }
+      ],
+      "guardedSymbols": ["makeMemoryStore", "MoneyMath.fromMinorUnits", "MoneyMath.toMinorUnits"],
+      "bounds": "one sample value; proves only that harnesses under formal/ import real code",
+      "assumptions": ["Runner fixture only; not a property check"],
+      "toolVersions": {
+        "bun": "1.4.2"
+      }
+    }
+  ]
+}
