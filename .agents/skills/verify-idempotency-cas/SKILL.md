@@ -35,7 +35,7 @@ Other methods that wrap `withIdempotency` or take `expectedRevision` (expenses, 
 bun run verify:formal --only idempotency.request-log-cas --only idempotency.request-log-cas-replay
 ```
 
-Exit 0 means the base model passed, each of the five mutants failed with its declared violation, and the 7 replay tests passed. About 15 s (base about 7 s, mutants under 2 s each, replay under 1 s). The nightly `bun run verify:formal --wide` runs `RequestLogCas_wide.cfg`. Tools: tla2tools 1.7.4 and JDK 17 (pinned in `formal/toolchain/toolchain.json`), bun 1.4.2 (also confirmed on 1.4.4), effect 4.1.4. TLC logs land in `formal/.cache/logs/idempotency.request-log-cas.*.log`.
+Exit 0 means the base model passed, each of the six mutants failed with its declared violation, and the 7 replay tests passed. About 17 s on an idle machine (base about 7 s, six mutants about 1.5 s each, replay under 1 s); 28 s measured under a load average of 21 on 12 cores. The nightly `bun run verify:formal --wide` runs `RequestLogCas_wide.cfg`. Tools: tla2tools 1.7.4 and JDK 17 (pinned in `formal/toolchain/toolchain.json`), bun 1.4.2 (also confirmed on 1.4.4), effect 4.1.4. TLC logs land in `formal/.cache/logs/idempotency.request-log-cas.*.log`.
 
 Read every TLC result, passing or failing, with `/statechart`: it turns a violation into its shortest path in plain words and charts the passing model. Give it `formal/idempotency/RequestLogCas.tla` and the config the runner used.
 
@@ -53,13 +53,14 @@ Each process is one attempt of one request; attempts of the same request reuse i
 
 Requests: r1 and r2 edit the row from revision 1 with one key and different payloads; r3 edits it from revision 1 with its own key; r4 creates a Contact (no revision guards it, only the claim does); r5 edits from revision 2 on r3's key, the client's retry after `revision_changed` (a new payload on a key that stores nothing because its attempts failed).
 
-Invariants: `AtMostOnceEffect`, `ReplayReturnsStoredResult`, `MismatchNeverReplayed` (another payload never gets the stored result), `MismatchOnlyForOtherPayload` (a matching retry is never rejected), `NoLostUpdate`, `TypeOK`; deadlock is checked (a retry that waits forever on a claim no one holds).
+Invariants: `AtMostOnceEffect`, `ReplayReturnsStoredResult`, `MismatchNeverReplayed` (another payload never gets the stored result), `MismatchOnlyForOtherPayload` (a matching retry is never rejected), `NoLostUpdate`, `EntryHasCommittedOrigin` (every stored entry is the result an attempt of that key and payload committed and returned: failures store nothing), `TypeOK`; deadlock is checked (a retry that waits forever on a claim no one holds).
 
 Mutants (each must fail; `Bug` constant in the mutant config):
 
 | Mutant | Breaks | Must violate |
 |---|---|---|
 | `accept-mismatch` | `Existing` skips the method/fingerprint compare | `MismatchNeverReplayed` |
+| `replay-live-row` | a replay returns the live row instead of the stored result (a result enriched after the body) | `ReplayReturnsStoredResult` |
 | `reject-matching` | `Existing` answers `idempotency_mismatch` to every retry | `MismatchOnlyForOtherPayload` |
 | `claim-no-wait` | `claim` takes a key pending in another transaction | `AtMostOnceEffect` (two creates commit) |
 | `no-revision-check` | `getForUpdate` ignores `expectedRevision` | `NoLostUpdate` |
@@ -68,13 +69,14 @@ Mutants (each must fail; `Bug` constant in the mutant config):
 ## Bounds
 
 - Base (`RequestLogCas.cfg`): overlapping attempts per request r1..r5 = 2, 1, 2, 2, 1 (8 attempts), any attempt may abort before COMMIT: 120,320 distinct states, complete search. (The runner's summary line prints the first progress count, not the final one; the TLC log's last `distinct states found` line is the full count.)
-- Wide (`RequestLogCas_wide.cfg`, nightly): 2 attempts of every request (10 attempts), 2,774,656 distinct states, complete search, about 2.5 minutes. Three attempts of r1..r4 (12) passed 2 million distinct states with a growing queue within 10 minutes, so it is not a nightly bound.
+- Wide (`RequestLogCas_wide.cfg`, nightly): 2 attempts of every request (10 attempts), 2,774,656 distinct states, complete search, 2 min 40 s through the runner (timeout 900 s). Three attempts of r1..r4 (12) passed 2 million distinct states with a growing queue within 10 minutes, so it is not a nightly bound.
 - Replay: 7 traces on one seeded Contact at revision 1 (`requestLogCas.replay.test.ts`), each named by its model steps and reachable in the base model: replay after commit; mismatch on a reused key; r3 stale twice, r5 commits on the same key, then r1's retry replays r1's result while the row is at revision 3; abort after `Lock` then retry; overlapping duplicate edit; overlapping duplicate create; overlapping competing edits.
 
 ## Assumptions and what is not covered
 
 - Claim waiting and row locks follow the `CoreStore` port docblocks (Postgres semantics). Only the in-memory store exists in core today; it serializes whole transactions, so the replay interleaves attempts only between transactions. The SQL adapter's waits, `SELECT … FOR UPDATE`, unique-violation handling and serialization retries belong to the Postgres 17 contention job (`*.contention.ts`), not to this skill.
 - The request-key TTL (24 h) never passes inside a run: a replay after expiry runs the body again by design and is not modelled. One Workspace scope; User scopes behave the same and are not modelled.
+- `Contacts.save`'s same-content no-op edit (returns the row unchanged, no revision bump) and IČO unique-index conflicts (`ensureIcoFree`, `UniqueViolation`) are not modelled.
 - The model's payload stands for the whole fingerprint (`[method, encoded payload]`); a method that leaves an input out of its payload (rule in the `withIdempotency` docblock) is a per-method bug this model cannot see.
 - MCP preview → confirm tokens (single use, bound to revision and args, ADR-0005 table row) are not covered: core has no confirmation-token issuance or redemption yet, only the api-contract helpers `confirmStep`, `confirmationBoundArgs` and `mcpConfirmRequestKey` in `packages/api-contract/src/mcp.ts`. When the MCP edge lands, extend the model with a token issue/redeem step bound to the preview's revision and `confirmationBoundArgs` hash, and a mutant that redeems twice.
 
@@ -98,4 +100,4 @@ When a change to the covered files is intended: re-read the changed code against
   - `idempotency.ts`: the method/fingerprint compare disabled (`if (false && (…))`) → 1 of 7 fails: "r1 commits; r2 (same key, other payload): Claim, Existing -> idempotency_mismatch" (the reused key got the stored result).
   - `idempotency.ts`: every existing entry treated as a mismatch (`if (true || …)`) → 4 of 7 fail: the replay, the replay after the row moved on, and both overlapping duplicates (a matching retry got `idempotency_mismatch`).
   - `memory.ts` `locate`: the `expectedRevision` check disabled → 2 of 7 fail: the stale trace and the overlapping competing edits (the stale edit committed over revision 2).
-- Mutants: all five fail with their declared violation under `bun run verify:formal --only idempotency.request-log-cas` (accept-mismatch after 740 distinct states, reject-matching 507, claim-no-wait 1,213, no-revision-check 96, keep-claim-on-rollback 1,446).
+- Mutants: all six fail with their declared violation under `bun run verify:formal --only idempotency.request-log-cas` (accept-mismatch after 740 distinct states, reject-matching 507, claim-no-wait 1,213, no-revision-check 96, keep-claim-on-rollback 1,446).

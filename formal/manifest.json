@@ -101,6 +101,16 @@
           "description": "The Existing branch answers idempotency_mismatch to every retry, so a matching retry is rejected instead of replayed"
         },
         {
+          "name": "replay-live-row",
+          "config": "formal/idempotency/RequestLogCas_mutant_replay_live_row.cfg",
+          "expect": "violation",
+          "violates": {
+            "kind": "invariant",
+            "name": "ReplayReturnsStoredResult"
+          },
+          "description": "A replay returns the live row instead of the stored result (a result enriched after the body), so a retry after a later edit sees that edit"
+        },
+        {
           "name": "claim-no-wait",
           "config": "formal/idempotency/RequestLogCas_mutant_claim_no_wait.cfg",
           "expect": "violation",
@@ -179,7 +189,8 @@
         "CoreStore port semantics as documented in CoreStore.ts: a claim on a key pending in another transaction waits until that transaction ends; rollback drops the pending claim and row locks (memory.ts runFrame; a SQL adapter must match)",
         "Body writes, requestLog.complete and the audit row are transaction-local until COMMIT, so they form one step; Abort models any failure, defect or interruption before COMMIT",
         "Request-key TTL (24 h) never expires inside a run: replay after expiry re-runs the body by design and is not modelled; scopes other than one Workspace are not modelled",
-        "MCP preview -> confirm tokens are not modelled: core has no confirmation-token issuance or redemption yet (only api-contract helpers in packages/api-contract/src/mcp.ts)"
+        "MCP preview -> confirm tokens are not modelled: core has no confirmation-token issuance or redemption yet (only api-contract helpers in packages/api-contract/src/mcp.ts)",
+        "Contacts.save's same-content no-op edit (returns the row unchanged, no revision bump) and IČO unique-index conflicts (ensureIcoFree, UniqueViolation) are not modelled"
       ],
       "toolVersions": {
         "tla2tools": "1.7.4",
@@ -234,7 +245,8 @@
       "assumptions": [
         "The in-memory store serializes whole transactions, so overlapping attempts interleave only between transactions; Postgres interleavings inside a transaction belong to the model and the pg-contention job",
         "Request-key TTL (24 h) never expires inside a run: replay after expiry re-runs the body by design and is not modelled; scopes other than one Workspace are not modelled",
-        "MCP preview -> confirm tokens are not modelled: core has no confirmation-token issuance or redemption yet (only api-contract helpers in packages/api-contract/src/mcp.ts)"
+        "MCP preview -> confirm tokens are not modelled: core has no confirmation-token issuance or redemption yet (only api-contract helpers in packages/api-contract/src/mcp.ts)",
+        "Contacts.save's same-content no-op edit (returns the row unchanged, no revision bump) and IČO unique-index conflicts (ensureIcoFree, UniqueViolation) are not modelled"
       ],
       "toolVersions": {
         "bun": "1.4.2"

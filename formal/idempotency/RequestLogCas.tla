@@ -107,7 +107,8 @@ Existing(p) ==
        IF \/ e.payload # Req[p[1]].payload /\ Bug # "accept_mismatch"
           \/ Bug = "reject_matching"
        THEN [kind |-> "mismatch", result |-> 0]
-       ELSE [kind |-> "replayed", result |-> e.result]]
+       ELSE [kind |-> "replayed",
+             result |-> IF Bug = "replay_live_row" THEN rowRev ELSE e.result]]
   /\ pc' = [pc EXCEPT ![p] = "done"]
   /\ UNCHANGED <<log, rowRev, rowLock, history, inserts>>
 
@@ -202,6 +203,17 @@ MismatchOnlyForOtherPayload ==
     reply[p].kind = "mismatch" =>
       /\ log[KeyOf(p)].tag = "entry"
       /\ log[KeyOf(p)].payload # Req[p[1]].payload
+
+(* Every stored entry was written by an attempt of its key that committed *)
+(* and told its client that same result: failures store nothing.          *)
+EntryHasCommittedOrigin ==
+  \A k \in Keys :
+    log[k].tag = "entry" =>
+      \E p \in Procs :
+        /\ KeyOf(p) = k
+        /\ reply[p].kind = "ok"
+        /\ reply[p].result = log[k].result
+        /\ Req[p[1]].payload = log[k].payload
 
 (* No lost update: the n-th committed edit was made from revision n, and  *)
 (* the row is at 1 + the number of committed edits. A stale edit is        *)
