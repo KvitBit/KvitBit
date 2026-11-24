@@ -259,10 +259,25 @@ const DIFF_FIELDS = [
   "settlement",
 ] as const satisfies ReadonlyArray<keyof DocumentRecord>;
 
-/** Caller-given terms audited next to their resolved values (a due term can change alone). */
-const GIVEN_DIFF_FIELDS = ["due", "bankAccount"] as const satisfies ReadonlyArray<
-  keyof GivenFields
->;
+/**
+ * Every caller-given field and the resolved field it drives. A given value can change while
+ * the resolved one stays (a due term with the same date, an explicit variable symbol equal to
+ * the derived one): then the audit records `given.<field>`, so no accepted edit has an empty
+ * diff and later behaviour (the date no longer follows issuedOn, the symbol no longer follows
+ * the number) is traceable.
+ */
+const GIVEN_DIFF_FIELDS = {
+  currency: "currency",
+  issuedOn: "issuedOn",
+  taxableSupplyOn: "taxableSupplyOn",
+  due: "dueOn",
+  language: "language",
+  series: "seriesId",
+  bankAccount: "issuer",
+  note: "note",
+  paymentMethod: "paymentMethod",
+  variableSymbol: "variableSymbol",
+} as const satisfies Record<keyof GivenFields, keyof DocumentRecord>;
 
 const encodeRecord = Schema.encodeUnknownSync(Schema.toCodecJson(DocumentRecordSchema));
 const encodeTotals = (totals: DocumentRecord["totals"]) =>
@@ -274,14 +289,13 @@ export const diffRecords = (before: DocumentRecord, after: DocumentRecord) => {
   const b = encodeRecord(after) as Record<string, unknown>;
   const ga = (a.given ?? {}) as Record<string, unknown>;
   const gb = (b.given ?? {}) as Record<string, unknown>;
+  const same = (x: unknown, y: unknown) => JSON.stringify(x) === JSON.stringify(y);
   return [
     ...DIFF_FIELDS.flatMap((path) =>
-      JSON.stringify(a[path]) === JSON.stringify(b[path])
-        ? []
-        : [{ path, before: a[path] ?? null, after: b[path] ?? null }],
+      same(a[path], b[path]) ? [] : [{ path, before: a[path] ?? null, after: b[path] ?? null }],
     ),
-    ...GIVEN_DIFF_FIELDS.flatMap((field) =>
-      JSON.stringify(ga[field]) === JSON.stringify(gb[field])
+    ...Object.entries(GIVEN_DIFF_FIELDS).flatMap(([field, resolved]) =>
+      same(ga[field], gb[field]) || !same(a[resolved], b[resolved])
         ? []
         : [{ path: `given.${field}`, before: ga[field] ?? null, after: gb[field] ?? null }],
     ),

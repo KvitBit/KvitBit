@@ -1131,3 +1131,40 @@ describe("review round 1 follow-ups", () => {
     expect(retried).toBe("2026-0001");
   });
 });
+
+describe("review round 2 follow-ups", () => {
+  test("an explicit variable symbol equal to the derived one is audited and stops following", async () => {
+    const [changes, renumbered] = ok(
+      await run(
+        Effect.gen(function* () {
+          const d = yield* docs;
+          const view = yield* issueInvoice();
+          const pinned = yield* d.edit(view.id, { variableSymbol: "20260001" }, view.revision);
+          const changes = (yield* d.history(view.id)).at(-1)?.changes;
+          yield* d.edit(view.id, { number: "X-777" }, pinned.revision);
+          return [
+            changes,
+            (yield* (yield* DocumentsRepo).get(WS, view.id)).variableSymbol,
+          ] as const;
+        }),
+      ),
+    );
+    expect(changes).toEqual([{ path: "given.variableSymbol", before: null, after: "20260001" }]);
+    expect(renumbered).toBe("20260001");
+  });
+
+  test("a Credit Note never inherits the corrected document's variable symbol", async () => {
+    const symbol = ok(
+      await run(
+        Effect.gen(function* () {
+          const d = yield* docs;
+          const view = yield* issueInvoice({ variableSymbol: "555" });
+          const { creditNote } = yield* d.cancel(view.id, { reason: "x" });
+          return (yield* (yield* DocumentsRepo).get(WS, (creditNote as DocumentView).id))
+            .variableSymbol;
+        }),
+      ),
+    );
+    expect(symbol).toBe("20260001");
+  });
+});
