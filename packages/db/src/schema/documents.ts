@@ -171,6 +171,8 @@ export const documentLines = pgTable(
      */
     deductsDocumentId: uuid("deducts_document_id"),
     deductedVat: money("deducted_vat"),
+    /** `deducted_vat` in CZK at the deducted document's rate, frozen at issue. */
+    deductedVatCzk: money("deducted_vat_czk"),
   },
   (t) => [
     unique("document_lines_document_position_unique").on(t.documentId, t.position),
@@ -182,6 +184,10 @@ export const documentLines = pgTable(
     check(
       "document_lines_deducted_vat_on_deduction",
       sql`${t.deductedVat} is null or ${t.deductsDocumentId} is not null`,
+    ),
+    check(
+      "document_lines_deducted_vat_czk_on_deduction",
+      sql`${t.deductedVatCzk} is null or ${t.deductsDocumentId} is not null`,
     ),
     foreignKey({
       name: "document_lines_document_fk",
@@ -298,6 +304,9 @@ export const deliveries = pgTable(
     renderModel: jsonb("render_model").notNull(),
     reminderEpoch: integer("reminder_epoch"),
     failure: text("failure"),
+    /** The EmailSender that accepted the message and its message id, once sent. */
+    provider: text("provider"),
+    providerMessageId: text("provider_message_id"),
     workflowStartedAt: instant("workflow_started_at"),
     sentAt: instant("sent_at"),
     createdAt: createdAt(),

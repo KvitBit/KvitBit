@@ -72,6 +72,8 @@ export const expenseStatusValues = ["complete", "incomplete"] as const;
 export const cadenceUnitValues = ["weeks", "months", "years"] as const;
 /** core-ports.md:963-966 recurring run outcome. */
 export const recurringOutcomeValues = ["issued", "failed", "skipped_missed"] as const;
+/** The send half of an issued run, `RunSend` in packages/core/src/modules/recurring/repo.ts. */
+export const recurringSendStateValues = ["none", "pending", "queued", "failed"] as const;
 /** core-ports.md:1014-1018 export status. */
 export const exportStatusValues = ["running", "ready", "failed"] as const;
 /** core-ports.md:165 `Channel`. */
@@ -169,6 +171,7 @@ export const shareDevice = pgEnum("share_device", shareDeviceValues);
 export const expenseStatus = pgEnum("expense_status", expenseStatusValues);
 export const cadenceUnit = pgEnum("cadence_unit", cadenceUnitValues);
 export const recurringOutcome = pgEnum("recurring_outcome", recurringOutcomeValues);
+export const recurringSendState = pgEnum("recurring_send_state", recurringSendStateValues);
 export const exportStatus = pgEnum("export_status", exportStatusValues);
 export const channel = pgEnum("channel", channelValues);
 export const clientKind = pgEnum("client_kind", clientKindValues);
