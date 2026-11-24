@@ -1,0 +1,42 @@
+import { Stack } from "expo-router";
+import { StatusBar } from "expo-status-bar";
+import { SafeAreaProvider } from "react-native-safe-area-context";
+import { I18nProvider } from "../src/i18n/i18n-provider";
+import { ApiProvider } from "../src/runtime/api-runtime";
+import { SessionProvider, useSession } from "../src/session/session-provider";
+import { ThemeProvider, useAppTheme } from "../src/theme/theme-provider";
+import { OverlayProvider } from "../src/ui/overlay";
+
+function Navigator() {
+  const session = useSession();
+  const { native } = useAppTheme();
+  if (session.state.status === "restoring") return null;
+  const token = session.state.status === "signed-in" ? session.state.token : null;
+  return (
+    <ApiProvider token={token}>
+      <OverlayProvider>
+        <StatusBar style={native.dark ? "light" : "dark"} />
+        <Stack
+          screenOptions={{
+            headerShown: false,
+            contentStyle: { backgroundColor: native.colors.surface },
+          }}
+        />
+      </OverlayProvider>
+    </ApiProvider>
+  );
+}
+
+export default function RootLayout() {
+  return (
+    <SafeAreaProvider>
+      <I18nProvider>
+        <ThemeProvider>
+          <SessionProvider>
+            <Navigator />
+          </SessionProvider>
+        </ThemeProvider>
+      </I18nProvider>
+    </SafeAreaProvider>
+  );
+}

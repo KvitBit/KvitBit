@@ -1,0 +1,5 @@
+[test]
+preload = ["./src/testing/native-modules.preload.ts"]
+
+[loader]
+".png" = "file"
