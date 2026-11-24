@@ -1,9 +1,13 @@
 import { describe, expect, test } from "bun:test";
-import { BigDecimal, Option, Result } from "effect";
+import { Invalid, type Locale } from "@kvitbit/domain/contract";
+import { BigDecimal, Option, Result, Schema } from "effect";
+import { toUiError } from "../../src/api";
 import {
+  DecimalText,
   type FieldIssue,
   Form,
-  type FormSpec,
+  type FormContext,
+  FormSpec,
   mapServerIssues,
   parseDecimalText,
 } from "../../src/view-models";
@@ -14,28 +18,24 @@ interface Draft {
 }
 interface Input {
   readonly name: string;
-  readonly qty: ReadonlyArray<BigDecimal.BigDecimal>;
+  readonly lines: ReadonlyArray<{ readonly qty: BigDecimal.BigDecimal }>;
 }
+type Ctx = FormContext & { readonly maxLines: number };
 
-const spec: FormSpec<Draft, Input, { readonly maxLines: number }> = {
-  decode: (draft) => {
-    const issues: Array<FieldIssue> = [];
-    if (draft.name.trim() === "") issues.push({ path: "name", code: "form.required" });
-    const qty = draft.lines.map((l, i) =>
-      Result.match(parseDecimalText(l.qty, 4), {
-        onSuccess: (v) => v,
-        onFailure: (code) => {
-          issues.push({ path: `lines.${i}.qty`, code });
-          return BigDecimal.fromBigInt(0n);
-        },
-      }),
-    );
-    return issues.length > 0 ? Result.fail(issues) : Result.succeed({ name: draft.name, qty });
-  },
+const schema = (locale: Locale): Schema.Codec<Input, Draft> =>
+  Schema.Struct({
+    name: Schema.String.check(
+      Schema.makeFilter((s: string) => s.trim() !== "", { message: "form.required" }),
+    ),
+    lines: Schema.Array(Schema.Struct({ qty: DecimalText(locale, 4) })),
+  });
+
+const spec: FormSpec<Draft, Input, Ctx> = FormSpec.make({
+  schema,
   refine: (input, ctx) =>
-    input.qty.length > ctx.maxLines ? [{ path: "lines", code: "document.lines_required" }] : [],
-};
-const ctx = { maxLines: 2 };
+    input.lines.length > ctx.maxLines ? [{ path: "lines", code: "document.lines_required" }] : [],
+});
+const ctx: Ctx = { locale: "cs", maxLines: 2 };
 const empty: Draft = { name: "", lines: [{ qty: "1" }] };
 
 describe("Form", () => {
@@ -60,7 +60,7 @@ describe("Form", () => {
       spec,
       ctx,
     );
-    expect(Result.map(ok, (i) => i.qty.map((q) => BigDecimal.format(q)))).toEqual(
+    expect(Result.map(ok, (i) => i.lines.map((l) => BigDecimal.format(l.qty)))).toEqual(
       Result.succeed(["1234.5"]),
     );
   });
@@ -88,6 +88,75 @@ describe("Form", () => {
     f = Form.saved(f, 4);
     expect(f.baseRevision).toEqual(Option.some(4));
     expect(f.submit).toEqual({ _tag: "Idle" });
+  });
+});
+
+describe("Form: review round 1 regressions", () => {
+  test("editing a draft after a failed submit drops the Idempotency-Key; an unchanged retry keeps it", () => {
+    const sent = Form.submitting(Form.init<Draft, string>({ name: "a", lines: [] }), "rk-1");
+    const failed = Form.failed(sent, "offline");
+    expect(failed.submit).toMatchObject({ _tag: "Failed", requestKey: Option.some("rk-1") });
+    // unchanged retry: same value set again, key kept
+    const same = Form.change(failed, "name", "a");
+    expect(same.submit).toMatchObject({ requestKey: Option.some("rk-1") });
+    // a real edit: the next submit is a new intent
+    const edited = Form.change(failed, "name", "b");
+    expect(edited.submit).toMatchObject({ _tag: "Failed", requestKey: Option.none() });
+    // an edit while the request is in flight also keeps the old key off the retry
+    const midFlight = Form.failed(Form.change(sent, "name", "c"), "offline");
+    expect(midFlight.submit).toMatchObject({ _tag: "Failed", requestKey: Option.none() });
+  });
+
+  test("applyServer takes the decoded HTTP 422 Invalid directly", () => {
+    const body = {
+      _tag: "Invalid",
+      issues: [
+        { path: ["lines", 2, "unitPrice"], code: "document.lines_required" },
+        { path: ["dueOn"], code: "document.due_before_issue", params: { issuedOn: "2026-11-01" } },
+      ],
+    };
+    const error = toUiError(Schema.decodeUnknownSync(Invalid)(body));
+    const base = Form.init<Draft>({ name: "a", lines: [] });
+    if (error._tag !== "Invalid") throw new Error("expected Invalid");
+    const expected = [
+      { path: "lines.2.unitPrice", code: "document.lines_required" },
+      { path: "dueOn", code: "document.due_before_issue", params: { issuedOn: "2026-11-01" } },
+    ];
+    expect(Form.applyServer(base, error).serverIssues).toEqual(expected);
+    expect(Form.applyServer(base, error.issues).serverIssues).toEqual(expected);
+    // a Better Auth issue the AuthClient port reports keeps its auth.* code
+    const auth = toUiError({
+      _tag: "Invalid",
+      issues: [{ path: [], code: "auth.bot_proof_required" }],
+    });
+    if (auth._tag !== "Invalid") throw new Error("expected Invalid");
+    expect(auth.issues[0]?.code === "auth.bot_proof_required").toBe(true);
+    expect(Form.applyServer(base, auth).serverIssues).toEqual([
+      { path: "", code: "auth.bot_proof_required" },
+    ]);
+  });
+
+  test("schema and Standard Schema V1 validator come from the same locale-aware schema", () => {
+    const draft: Draft = { name: "", lines: [{ qty: "1,5x" }] };
+    const result = spec.standard("cs")["~standard"].validate(draft);
+    if (result instanceof Promise) throw new Error("expected sync validation");
+    expect(result.issues?.map((i) => [i.path?.map(String).join("."), i.message])).toEqual([
+      ["name", "form.required"],
+      ["lines.0.qty", "form.decimal_invalid"],
+    ]);
+    const ok = spec
+      .standard("en")
+      ["~standard"].validate({ name: "x", lines: [{ qty: "1 234,5" }] });
+    if (ok instanceof Promise || ok.issues !== undefined) throw new Error("expected success");
+    expect(BigDecimal.format(ok.value.lines[0]?.qty ?? BigDecimal.fromBigInt(0n))).toBe("1234.5");
+    // encoding back to draft text uses the locale's separator
+    const input: Input = { name: "x", lines: [{ qty: BigDecimal.fromStringUnsafe("1.5") }] };
+    expect(Schema.encodeSync(spec.schema("cs"))(input).lines[0]?.qty).toBe("1,5");
+    expect(Schema.encodeSync(spec.schema("en"))(input).lines[0]?.qty).toBe("1.5");
+    // a missing key is form.required
+    const missing = spec.standard("cs")["~standard"].validate({ lines: [] });
+    if (missing instanceof Promise) throw new Error("expected sync validation");
+    expect(missing.issues?.map((i) => i.message)).toEqual(["form.required"]);
   });
 });
 

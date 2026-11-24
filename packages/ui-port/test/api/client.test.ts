@@ -17,7 +17,9 @@ import {
   keyAfter,
   layerFetch,
   pageQuery,
+  runCommand,
   sessionCookie,
+  toUiError,
 } from "../../src/api";
 import { hangingFetch, json, mockFetch } from "./mock-fetch";
 
@@ -319,5 +321,130 @@ describe("client configuration", () => {
       (r) => r,
     );
     expect("key" in unkeyed).toBe(false);
+  });
+});
+
+describe("review round 1 regressions", () => {
+  test("a pre-send failure after a successful GET carries no status or request id", async () => {
+    const mock = mockFetch(() =>
+      json(200, { items: [], nextCursor: null }, { "x-request-id": "first" }),
+    );
+    // "x" is no UUID: the Idempotency-Key header fails to encode before anything is sent
+    const result = await run(attempt(Effect.andThen(search, create("x"))), mock.fetch);
+    expect(mock.calls).toHaveLength(1);
+    expect(result).toEqual({
+      _tag: "Err",
+      error: { _tag: "Unexpected", status: null, requestId: null },
+    });
+  });
+
+  test("a body that fails to decode after a good exchange keeps its own status and request id", async () => {
+    let n = 0;
+    const mock = mockFetch(() =>
+      n++ === 0
+        ? json(200, { items: [], nextCursor: null }, { "x-request-id": "first" })
+        : json(200, { nope: true }, { "x-request-id": "second" }),
+    );
+    const result = await run(attempt(Effect.andThen(search, search)), mock.fetch);
+    expect(result).toEqual({
+      _tag: "Err",
+      error: { _tag: "Unexpected", status: 200, requestId: "second" },
+    });
+  });
+
+  const probe = () =>
+    call(
+      "probe",
+      () => Effect.never,
+      (result) => ({ _tag: "Probe" as const, result }),
+    );
+  const cancelledMsg = { _tag: "Probe", result: { _tag: "Err", error: { _tag: "Cancelled" } } };
+
+  test("runCommand: interrupting a running command delivers exactly one cancelled Message", async () => {
+    const delivered: Array<unknown> = [];
+    await run(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const fiber = yield* runCommand(probe(), (msg) => delivered.push(msg));
+          yield* Effect.sleep("10 millis");
+          yield* Fiber.interrupt(fiber);
+          yield* Effect.sleep("5 millis");
+        }),
+      ),
+      hangingFetch(),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    expect(delivered).toEqual([cancelledMsg]);
+  });
+
+  test("runCommand: interrupted before it starts, or by closing the scope, still one Message", async () => {
+    const early: Array<unknown> = [];
+    const closed: Array<unknown> = [];
+    await run(
+      Effect.gen(function* () {
+        yield* Effect.scoped(
+          Effect.flatMap(
+            runCommand(probe(), (msg) => early.push(msg)),
+            Fiber.interrupt,
+          ),
+        );
+        yield* Effect.scoped(
+          Effect.andThen(
+            runCommand(probe(), (msg) => closed.push(msg)),
+            Effect.sleep("5 millis"),
+          ),
+        );
+      }),
+      hangingFetch(),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    expect(early).toEqual([cancelledMsg]);
+    expect(closed).toEqual([cancelledMsg]);
+  });
+
+  test("runCommand: success and failure results arrive once, as the command's own Message", async () => {
+    const delivered: Array<unknown> = [];
+    const mock = mockFetch(() => json(200, { items: [], nextCursor: null }));
+    const command = call(
+      "contacts.search",
+      (api) => api.contacts.search({ params: inWorkspace(ws), query: pageQuery({}) }),
+      (result) => result._tag,
+    );
+    const failing = call(
+      "boom",
+      () => Effect.fail("nope"),
+      (result) => (result._tag === "Err" ? result.error._tag : "Ok"),
+    );
+    await run(
+      Effect.scoped(
+        Effect.gen(function* () {
+          yield* Fiber.await(yield* runCommand(command, (msg) => delivered.push(msg)));
+          yield* Fiber.await(yield* runCommand(failing, (msg) => delivered.push(msg)));
+          yield* Effect.sleep("5 millis");
+        }),
+      ),
+      mock.fetch,
+    );
+    expect(delivered).toEqual(["Ok", "Unexpected"]);
+  });
+
+  test("a Better Auth Invalid is a typed UiError; malformed shapes are not", () => {
+    const error = toUiError({
+      _tag: "Invalid",
+      issues: [{ path: ["email"], code: "auth.bot_proof_required", params: { n: "1" } }],
+    });
+    expect(error._tag).toBe("Invalid");
+    if (error._tag !== "Invalid") return;
+    // compiles: the auth variant is part of UiError's type
+    expect(error.issues.some((issue) => issue.code === "auth.bot_proof_required")).toBe(true);
+    expect(describeError(error).freshBotProof).toBe(true);
+    for (const bad of [
+      { _tag: "Invalid", issues: [{ path: [{}], code: "auth.x" }] },
+      { _tag: "Invalid", issues: [{ path: [], code: "not.a_code" }] },
+      { _tag: "Invalid", issues: [{ path: [], code: "auth.x", params: { n: 1 } }] },
+      { _tag: "Invalid", issues: [] },
+    ]) {
+      expect(toUiError(bad)._tag).toBe("Unexpected");
+    }
   });
 });

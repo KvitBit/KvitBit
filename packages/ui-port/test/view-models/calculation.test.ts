@@ -30,6 +30,7 @@ const base: PreviewInput = {
   pricesIncludeVat: false,
   fx: null,
   paymentRounding: "none",
+  direction: "outgoing",
   taxRegime: "vat_payer",
 };
 
@@ -78,6 +79,22 @@ describe("rateFor", () => {
       ),
     ).toBe(true);
   });
+  test("coverage is checked before the treatment: non-rated treatments fail before the table too", () => {
+    for (const treatment of ["outside_scope", "reverse_charge", "exempt_intra_eu_goods"] as const) {
+      expect(Result.isFailure(rateFor(treatment, "2023-12-31" as IsoDate))).toBe(true);
+    }
+    // a non_vat_payer's document (every line outside_scope) is no exception
+    expect(
+      Result.isFailure(
+        calculate({
+          ...base,
+          taxRegime: "non_vat_payer",
+          taxPoint: "2023-12-31" as IsoDate,
+          lines: [line("1", "1", "outside_scope")],
+        }),
+      ),
+    ).toBe(true);
+  });
 });
 
 describe("calculate: bottom-up (prices excl. VAT)", () => {
@@ -108,7 +125,29 @@ describe("calculate: bottom-up (prices excl. VAT)", () => {
     });
   });
 
-  test("multiple rates make one bucket each, in first-seen order", () => {
+  test("buckets follow core's treatment order, not entry order", () => {
+    const p = run({
+      lines: [
+        line("1", "5", "outside_scope"),
+        line("1", "10", "reverse_charge"),
+        line("1", "50", "reduced"),
+        line("1", "7", "exempt_intra_eu_goods"),
+        line("1", "100"),
+      ],
+    });
+    expect(buckets(p.breakdown).map((b) => b.treatment)).toEqual([
+      "standard",
+      "reduced",
+      "exempt_intra_eu_goods",
+      "reverse_charge",
+      "outside_scope",
+    ]);
+    // outside_scope entered before standard (the reviewer's case)
+    const two = run({ lines: [line("1", "5", "outside_scope"), line("1", "100")] });
+    expect(buckets(two.breakdown).map((b) => b.treatment)).toEqual(["standard", "outside_scope"]);
+  });
+
+  test("multiple rates make one bucket each", () => {
     const p = run({
       lines: [line("2", "50"), line("1", "50", "reduced"), line("1", "10", "reverse_charge")],
     });
@@ -239,14 +278,29 @@ describe("calculate: FX, credit notes, regimes, payment rounding", () => {
     ).toBe("100");
   });
 
+  test("expenses keep the supplier's VAT whatever the receiver's regime", () => {
+    // A non-VAT payer receives a standard-rated receipt of net 100: the supplier charged 21 VAT.
+    for (const taxRegime of ["non_vat_payer", "identified_person", "vat_payer"] as const) {
+      const p = run({ direction: "incoming", taxRegime, lines: [line("1", "100")] });
+      expect(buckets(p.breakdown)).toEqual([
+        { treatment: "standard", rate: "21", base: "100", vat: "21", gross: "121", vatCzk: null },
+      ]);
+      expect(totals(p.breakdown).gross).toBe("121");
+    }
+    // the same lines issued by the non-VAT payer charge no VAT
+    expect(
+      totals(run({ taxRegime: "non_vat_payer", lines: [line("1", "100")] }).breakdown).gross,
+    ).toBe("100");
+  });
+
   test("identified_person: rated lines are outside_scope, reverse charge stays", () => {
     const p = run({
       taxRegime: "identified_person",
       lines: [line("1", "100"), line("1", "40", "reverse_charge")],
     });
     expect(buckets(p.breakdown).map((b) => [b.treatment, b.rate, b.vat])).toEqual([
-      ["outside_scope", "0", "0"],
       ["reverse_charge", "0", "0"],
+      ["outside_scope", "0", "0"],
     ]);
   });
 

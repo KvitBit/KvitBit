@@ -17,6 +17,7 @@ import {
   Forbidden,
   Invalid,
   type Issue,
+  IssueCode,
   NotFound,
   Unavailable,
 } from "@kvitbit/domain/contract";
@@ -55,7 +56,25 @@ export type WireError =
   | InvalidBotProof
   | OriginRejected;
 
-export type UiError = WireError | Offline | Timeout | Cancelled | Unexpected;
+/** A Better Auth issue code (`auth.bot_proof_required`, ...): not in the domain IssueCode enum. */
+export type AuthIssueCode = `auth.${string}`;
+
+export interface AuthIssue {
+  readonly path: ReadonlyArray<string | number>;
+  readonly code: AuthIssueCode | IssueCode;
+  readonly params?: Readonly<Record<string, string>>;
+}
+
+/**
+ * An `Invalid` built outside the HttpApi decoder: the AuthClient port reports Better Auth issues
+ * with this shape. A plain object, so it is told apart from the class by its codes, not by type.
+ */
+export interface AuthInvalid {
+  readonly _tag: "Invalid";
+  readonly issues: readonly [AuthIssue, ...Array<AuthIssue>];
+}
+
+export type UiError = WireError | AuthInvalid | Offline | Timeout | Cancelled | Unexpected;
 
 const offline: Offline = { _tag: "Offline" };
 const timeout: Timeout = { _tag: "Timeout" };
@@ -93,19 +112,31 @@ const LOCAL_TAGS = new Set(["Offline", "Timeout", "Cancelled", "Unexpected"]);
  * (`auth.*`, e.g. `auth.bot_proof_required`) with this shape, and those codes are not in the domain
  * IssueCode enum, so they never decode into the `Invalid` class.
  */
-const isPlainInvalid = (u: object): boolean => {
+const isIssueCode = Schema.is(IssueCode);
+
+const isAuthIssue = (u: unknown): u is AuthIssue => {
+  if (typeof u !== "object" || u === null) return false;
+  const { path, code, params } = u as { path?: unknown; code?: unknown; params?: unknown };
+  return (
+    Array.isArray(path) &&
+    path.every((segment) => typeof segment === "string" || typeof segment === "number") &&
+    typeof code === "string" &&
+    (code.startsWith("auth.") || isIssueCode(code)) &&
+    (params === undefined ||
+      (typeof params === "object" &&
+        params !== null &&
+        !Array.isArray(params) &&
+        Object.values(params).every((value) => typeof value === "string")))
+  );
+};
+
+const isPlainInvalid = (u: object): u is AuthInvalid => {
   const candidate = u as { _tag?: unknown; issues?: unknown };
   return (
     candidate._tag === "Invalid" &&
     Array.isArray(candidate.issues) &&
     candidate.issues.length > 0 &&
-    candidate.issues.every(
-      (issue: unknown) =>
-        typeof issue === "object" &&
-        issue !== null &&
-        Array.isArray((issue as { path?: unknown }).path) &&
-        typeof (issue as { code?: unknown }).code === "string",
-    )
+    candidate.issues.every(isAuthIssue)
   );
 };
 
@@ -186,10 +217,10 @@ export interface UiErrorView {
   readonly retryText: Text | null;
 }
 
-export const issueText = (issue: Issue): Text =>
+export const issueText = (issue: Issue | AuthIssue): Text =>
   text(`issue.${issue.code}`, issue.params as Readonly<Record<string, TextParam>> | undefined);
 
-export const fieldIssues = (issues: ReadonlyArray<Issue>): ReadonlyArray<FieldIssue> =>
+export const fieldIssues = (issues: ReadonlyArray<Issue | AuthIssue>): ReadonlyArray<FieldIssue> =>
   issues.map((issue) => ({ path: issue.path, text: issueText(issue) }));
 
 /** Better Auth issue code (via the AuthClient port, not the domain enum): solve ALTCHA first. */

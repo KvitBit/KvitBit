@@ -168,7 +168,7 @@ describe("Routes.fromDeepLink", () => {
     expect(Routes.fromDeepLink("https://kvitbit.cz/auth/magic/tok?x=1")).toEqual(
       Option.some({ _tag: "AuthLink", kind: "magic", token: "tok" }),
     );
-    expect(Routes.fromDeepLink("https://kvitbit.cz/app/invitations/abc")).toEqual(
+    expect(Routes.fromDeepLink("https://kvitbit.cz/app/invite/abc")).toEqual(
       Option.some({ _tag: "Invitation", token: "abc" }),
     );
     expect(Routes.fromDeepLink("kvitbit://s/v1.abc")).toEqual(
@@ -179,6 +179,37 @@ describe("Routes.fromDeepLink", () => {
     expect(Routes.fromDeepLink("https://kvitbit.cz/w/acme")).toEqual(Option.none());
     expect(Routes.fromDeepLink("https://kvitbit.cz")).toEqual(Option.none());
     expect(Routes.fromDeepLink("not a url")).toEqual(Option.none());
+  });
+});
+
+describe("published inbound URLs (http-mcp-contracts section 1)", () => {
+  test("share, invitation and consent URLs decode and are what Routes emits", () => {
+    const share = decode({ _tag: "Share", token: "v1.abc" });
+    const consent = decode({ _tag: "McpConsent", consentId: "c 1/2" });
+    const invitation = decode({ _tag: "Invitation", token: "inv" });
+    expect(Routes.fromPath("/i/v1.abc", "/")).toEqual(Option.some(share));
+    expect(Routes.fromPath("/invite/inv", "/")).toEqual(Option.some(invitation));
+    expect(Routes.fromPath("/oauth/consent?consent_id=c-1", "/")).toEqual(
+      Option.some(decode({ _tag: "McpConsent", consentId: "c-1" })),
+    );
+    expect(Routes.toPath(share, "/")).toBe("/i/v1.abc");
+    expect(Routes.toPath(invitation, "/")).toBe("/invite/inv");
+    expect(Routes.toPath(consent, "/")).toBe("/oauth/consent?consent_id=c%201%2F2");
+    expect(Routes.fromPath(Routes.toPath(consent, "/"), "/")).toEqual(Option.some(consent));
+    expect(Routes.fromDeepLink("https://kvitbit.cz/i/v1.abc")).toEqual(Option.some(share));
+    expect(Routes.fromDeepLink("https://kvitbit.cz/invite/inv")).toEqual(Option.some(invitation));
+  });
+  test("documented mobile aliases still decode", () => {
+    expect(Routes.fromDeepLink("kvitbit://s/v1.abc")).toEqual(
+      Option.some(decode({ _tag: "Share", token: "v1.abc" })),
+    );
+    expect(Routes.fromPath("/app/consent/c-1", "/app/")).toEqual(
+      Option.some(decode({ _tag: "McpConsent", consentId: "c-1" })),
+    );
+  });
+  test("a consent page without consent_id is no route", () => {
+    expect(Routes.fromPath("/oauth/consent", "/")).toEqual(Option.none());
+    expect(Routes.fromPath("/oauth/consent/c-1", "/")).toEqual(Option.none());
   });
 });
 

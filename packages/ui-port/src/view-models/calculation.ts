@@ -4,8 +4,8 @@
  * `@kvitbit/core/engines` can be imported (phase 2 decision 3); the result has the domain
  * `VatBreakdown` shape, so a server `preview` result replaces it one to one (see `PreviewSync`).
  *
- * Rounding (core-ports 5.1): line amounts keep full precision; buckets group by
- * `(treatment, ratePercent)`; bottom-up base = round(sum of nets), VAT = round(base × rate / 100);
+ * Rounding (core-ports 5.1): line amounts keep full precision; one bucket per treatment (one rate
+ * per treatment per tax point), in `TREATMENT_ORDER`; bottom-up base = round(sum of nets), VAT = round(base × rate / 100);
  * top-down (`pricesIncludeVat`) gross = round(sum of grosses), VAT = round(gross × rate /
  * (100 + rate)), base = gross − VAT; half away from zero to 2 decimals (round2, whatever the currency's minor unit); CZK VAT per
  * bucket = round2(VAT × fx.rate / fx.quantity); `whole_unit` rounding only touches the amount to pay.
@@ -63,10 +63,11 @@ export const rateFor = (
   treatment: VatTreatment,
   taxPoint: IsoDate,
 ): Result.Result<BigDecimal.BigDecimal, VatRateUnavailable> => {
-  if (!isRatedTreatment(treatment)) return Result.succeed(ZERO);
   let entry: RateTableEntry | undefined;
   for (const candidate of RATE_TABLE) if (candidate.from <= taxPoint) entry = candidate;
+  // Coverage first: core rejects a tax point before the table for every treatment.
   if (entry === undefined) return Result.fail(new VatRateUnavailable({ treatment, taxPoint }));
+  if (!isRatedTreatment(treatment)) return Result.succeed(ZERO);
   return Result.succeed(
     BigDecimal.fromBigInt(BigInt(treatment === "standard" ? entry.standard : entry.reduced)),
   );
@@ -75,10 +76,20 @@ export const rateFor = (
 /**
  * The treatment the math uses for the Issuing Entity's Tax Regime: a `non_vat_payer` charges no
  * VAT on anything, and an `identified_person` charges none on domestic supplies, so rated
- * treatments become `outside_scope` for both. Non-rated treatments are kept.
+ * treatments become `outside_scope` for both. Non-rated treatments are kept. Outgoing documents
+ * only: an expense keeps the supplier's treatment whatever the receiver's regime.
  */
 export const effectiveTreatment = (regime: TaxRegime, treatment: VatTreatment): VatTreatment =>
   regime !== "vat_payer" && isRatedTreatment(treatment) ? "outside_scope" : treatment;
+
+/** core-ports 5.1 bucket order. */
+export const TREATMENT_ORDER: ReadonlyArray<VatTreatment> = [
+  "standard",
+  "reduced",
+  "exempt_intra_eu_goods",
+  "reverse_charge",
+  "outside_scope",
+];
 
 // --- Input and output ----------------------------------------------------------------------------
 
@@ -108,6 +119,12 @@ export interface PreviewInput {
   /** null for CZK documents and while no rate is known yet. Ignored for CZK. */
   readonly fx: FxRate | null;
   readonly paymentRounding: "none" | "whole_unit";
+  /**
+   * `outgoing`: a document the Workspace issues, so `taxRegime` decides what it may charge.
+   * `incoming`: an expense, whose lines keep the treatment the supplier charged.
+   */
+  readonly direction: "outgoing" | "incoming";
+  /** The Workspace's Tax Regime; applied to `outgoing` documents only. */
   readonly taxRegime: TaxRegime;
   /** `credit_note` negates every line (a Credit Note reverses the corrected amounts). */
   readonly kind?: DocumentKind;
@@ -159,21 +176,25 @@ const isCzk = (currency: CurrencyCode): boolean => currency === "CZK";
 export const calculate = (input: PreviewInput): Result.Result<LivePreview, VatRateUnavailable> => {
   const fx = isCzk(input.currency) ? null : input.fx;
   const lines: Array<LineAmounts> = [];
-  const groups = new Map<string, Array<LineAmounts>>();
+  const groups = new Map<VatTreatment, Array<LineAmounts>>();
   for (const line of input.lines) {
-    const treatment = effectiveTreatment(input.taxRegime, line.treatment);
+    const treatment =
+      input.direction === "outgoing"
+        ? effectiveTreatment(input.taxRegime, line.treatment)
+        : line.treatment;
     const rate = rateFor(treatment, input.taxPoint);
     if (Result.isFailure(rate)) return Result.fail(rate.failure);
     const amounts = lineAmounts(line, treatment, rate.success, input);
     lines.push(amounts);
-    const key = `${treatment}|${BigDecimal.format(rate.success)}`;
-    const group = groups.get(key);
-    if (group === undefined) groups.set(key, [amounts]);
+    const group = groups.get(treatment);
+    if (group === undefined) groups.set(treatment, [amounts]);
     else group.push(amounts);
   }
 
   const buckets: Array<VatBucket> = [];
-  for (const group of groups.values()) {
+  for (const treatment of TREATMENT_ORDER) {
+    const group = groups.get(treatment);
+    if (group === undefined) continue;
     const first = group[0] as LineAmounts;
     const rate = first.ratePercent;
     let base: BigDecimal.BigDecimal;

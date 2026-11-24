@@ -222,12 +222,14 @@ const pathOf = (r: Route): string => {
       return withQuery("/reset-password", [["token", r.token]]);
     case "AndroidDownload":
       return "/android";
+    // Published inbound URLs (http-mcp-contracts section 1): emails, share links and the OAuth
+    // provider point here, so they are what Routes emits.
     case "Share":
-      return `/s/${enc(r.token)}`;
+      return `/i/${enc(r.token)}`;
     case "McpConsent":
-      return `/oauth/consent/${enc(r.consentId)}`;
+      return withQuery("/oauth/consent", [["consent_id", r.consentId]]);
     case "Invitation":
-      return `/invitations/${enc(r.token)}`;
+      return `/invite/${enc(r.token)}`;
     case "Error":
       return `/error/${kebab(r.kind)}`;
     case "Onboarding":
@@ -348,9 +350,15 @@ const rawRoute = (segments: ReadonlyArray<string>, q: Map<string, string>): unkn
     if (n === 3 && a === "auth") return { _tag: "AuthLink", kind: b, token: c };
     if (n === 1 && a === "reset-password") return { _tag: "ResetPassword", ...pick(q, ["token"]) };
     if (n === 1 && a === "android") return { _tag: "AndroidDownload" };
+    if (n === 2 && a === "i") return { _tag: "Share", token: b };
+    if (n === 2 && a === "oauth" && b === "consent") {
+      return { _tag: "McpConsent", consentId: q.get("consent_id") };
+    }
+    if (n === 2 && a === "invite") return { _tag: "Invitation", token: b };
+    // Documented mobile aliases: App Links for `/s/*` (DeepLinks port) and the expo-router
+    // `(public)/consent/[consentId]` screen (ui-port-contracts 2.10 tree).
     if (n === 2 && a === "s") return { _tag: "Share", token: b };
-    if (n === 3 && a === "oauth" && b === "consent") return { _tag: "McpConsent", consentId: c };
-    if (n === 2 && a === "invitations") return { _tag: "Invitation", token: b };
+    if (n === 2 && a === "consent") return { _tag: "McpConsent", consentId: b };
     if (n === 2 && a === "error") return { _tag: "Error", kind: unkebab(b ?? "", ERROR_KINDS) };
     if (n === 1 && a === "onboarding") {
       return withDefined({ _tag: "Onboarding", step: parseIntParam(q.get("step")) });

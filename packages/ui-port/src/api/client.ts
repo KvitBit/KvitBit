@@ -62,10 +62,22 @@ export interface ObservedResponse {
  * Per-call cell the client pipeline writes each response's headers into. `attempt` provides a
  * fresh one per call; outside it nothing is recorded.
  */
-export class ResponseObserver extends Context.Service<
-  ResponseObserver,
-  { current: ObservedResponse | null }
->()("ui-port/ResponseObserver") {}
+export interface ResponseCell {
+  /** The latest response of the call. */
+  current: ObservedResponse | null;
+  /**
+   * The response whose body is still being decoded, or failed to decode. Cleared once the body
+   * decodes, so a later failure that never reached the server (a payload that does not encode)
+   * cannot borrow an earlier exchange's status and request id.
+   */
+  undecoded: ObservedResponse | null;
+}
+
+export class ResponseObserver extends Context.Service<ResponseObserver, ResponseCell>()(
+  "ui-port/ResponseObserver",
+) {}
+
+export const emptyResponseCell = (): ResponseCell => ({ current: null, undecoded: null });
 
 const parseEtag = (value: string | undefined): number | null => {
   const match = value === undefined ? null : /^"(0|[1-9]\d{0,9})"$/.exec(value);
@@ -87,13 +99,29 @@ const recordResponse = HttpClient.transformResponse(
       Effect.flatMap((cell) =>
         Option.isSome(cell)
           ? Effect.sync(() => {
-              cell.value.current = observeResponse(response);
+              const observed = observeResponse(response);
+              cell.value.current = observed;
+              cell.value.undecoded = observed;
             })
           : Effect.void,
       ),
     ),
   ),
 );
+
+/** The body decoded: the exchange is complete and no longer explains a later failure. */
+const markDecoded = <A, E, R>(decoded: Effect.Effect<A, E, R>): Effect.Effect<A, E, R> =>
+  Effect.tap(decoded, () =>
+    Effect.serviceOption(ResponseObserver).pipe(
+      Effect.flatMap((cell) =>
+        Option.isSome(cell)
+          ? Effect.sync(() => {
+              cell.value.undecoded = null;
+            })
+          : Effect.void,
+      ),
+    ),
+  );
 
 /** The request pipeline every KvitbitApi call goes through. */
 export const configureClient =
@@ -132,7 +160,11 @@ export const configureClient =
 export const make = (
   config: KvitbitApiConfig,
 ): Effect.Effect<KvitbitApiClient, never, HttpClient.HttpClient> =>
-  HttpApiClient.make(Api, { baseUrl: config.baseUrl, transformClient: configureClient(config) });
+  HttpApiClient.make(Api, {
+    baseUrl: config.baseUrl,
+    transformClient: configureClient(config),
+    transformResponse: markDecoded,
+  });
 
 /** KvitbitApi over the adapter's `HttpClient` (tests inject a mock transport here). */
 export const layer = (
