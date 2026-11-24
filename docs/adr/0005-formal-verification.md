@@ -172,6 +172,6 @@ Every locking claim above rests on Postgres behaving as the `CoreStore` docblock
 
 ## Open items
 
-- Measure the PR budget in CI once Tier 1 checks land, then decide whether to enforce it.
+- Measure the PR budget in CI, then decide whether to enforce it. Locally, with all Tier 1 checks in place, `bun run verify:formal` took 75 s and 72 s on two runs at the integration commit; property and exhaustive checks add their time to `bun run test`.
 - Nix devShell for development (stay on mise until then).
 - Add `.cursor/rules` pointers only if Cursor is used on this repo.
