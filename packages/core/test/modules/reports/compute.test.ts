@@ -367,3 +367,16 @@ describe("months", () => {
     ]);
   });
 });
+
+describe("regimeOn (W2, same resolution as Workspaces)", () => {
+  const periods = [
+    { effectiveFrom: "2026-11-23" as IsoDate, regime: "vat_payer" as const },
+    { effectiveFrom: "2027-01-01" as IsoDate, regime: "non_vat_payer" as const },
+  ];
+  test("latest period on or before the date; before the first, the first period's regime", () => {
+    expect(ReportCompute.regimeOn(periods, "2026-11-01" as IsoDate)).toBe("vat_payer");
+    expect(ReportCompute.regimeOn(periods, "2026-12-31" as IsoDate)).toBe("vat_payer");
+    expect(ReportCompute.regimeOn(periods, "2027-01-01" as IsoDate)).toBe("non_vat_payer");
+    expect(ReportCompute.regimeOn([], "2026-11-01" as IsoDate)).toBe("non_vat_payer");
+  });
+});

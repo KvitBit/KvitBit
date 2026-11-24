@@ -145,15 +145,21 @@ const sumCzk = (buckets: ReadonlyArray<CzkBucket>) => ({
 
 // Tax Regime -----------------------------------------------------------------------------------
 
-/** The regime in force on `date`; before the first entry (or with none) the Workspace is a non-payer. */
+/**
+ * The regime in force on `date` (W2), as Workspaces and Documents resolve it: the latest entry
+ * effective on or before `date`; before the first entry, the earliest entry's regime (a Workspace
+ * has a regime from creation, so earlier tax points carry it); with none, non-payer.
+ */
 export const regimeOn = (periods: ReadonlyArray<TaxRegimePeriod>, date: IsoDate): TaxRegime => {
   let best: TaxRegimePeriod | undefined;
+  let earliest: TaxRegimePeriod | undefined;
   for (const p of periods) {
+    if (earliest === undefined || p.effectiveFrom < earliest.effectiveFrom) earliest = p;
     if (p.effectiveFrom <= date && (best === undefined || p.effectiveFrom > best.effectiveFrom)) {
       best = p;
     }
   }
-  return best?.regime ?? "non_vat_payer";
+  return (best ?? earliest)?.regime ?? "non_vat_payer";
 };
 
 const deductible = (vatCzk: BigDecimal.BigDecimal, percent: number) =>

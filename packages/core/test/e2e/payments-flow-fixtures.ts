@@ -143,9 +143,7 @@ export const payExpense = (expense: ExpenseId, amount?: string) =>
   );
 
 /**
- * A complete CZK Expense from `supplier`: 100 + 21 % VAT = 121 CZK, tax point TODAY. The
- * Workspace's vat_payer regime starts on its creation date (TODAY); Reports treats earlier tax
- * points as non_vat_payer, so an earlier Expense would claim no input VAT.
+ * A complete CZK Expense from `supplier`: 100 + 21 % VAT = 121 CZK, tax point TODAY.
  */
 export const expenseInput = (supplier: ContactId) => ({
   supplier: { contact: supplier },
