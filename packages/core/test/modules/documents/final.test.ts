@@ -411,7 +411,11 @@ describe("payments seam", () => {
             lines: [{ description: "Práce", unitPrice: dec("1000") }],
           });
           const first = yield* pay(p.id, "400");
-          const set = (amount: string, payments: number, action: string) =>
+          const set = (
+            amount: string,
+            payments: number,
+            action: "payment.record" | "payment.remove",
+          ) =>
             store.transaction(
               Effect.andThen(seam.lock(WS, p.id), () =>
                 seam.settle(
@@ -527,30 +531,61 @@ describe("payments seam", () => {
     expect(viaProforma.requested.finalInvoice).toBe(locks.fi);
   });
 
-  test("removalBlocked: an uncredited PTD or one a Final Invoice deducts", async () => {
+  test("removalBlocked: the Final Invoice must be reversed first, then the PTD credited", async () => {
     const results = ok(
       await run(
         Effect.gen(function* () {
           const d = yield* docs;
           const store = yield* CoreStore;
           const seam = yield* DocumentPayments;
-          const blocked = (id: DocumentId) => store.transaction(seam.removalBlocked(WS, id));
+          const blocked = (target: DocumentId, ptd: DocumentId | null) =>
+            store.transaction(seam.removalBlocked(WS, target, ptd));
           const a = yield* issueProforma();
           const ptdA = (yield* pay(a.id, "500")).ptd as DocumentView;
-          const before = yield* blocked(ptdA.id);
+          const before = yield* blocked(a.id, ptdA.id);
           yield* d.correct(ptdA.id, { reason: "chybná záloha", lines: "full" });
-          const credited = yield* blocked(ptdA.id);
+          const credited = yield* blocked(a.id, ptdA.id);
           const b = yield* issueProforma();
           const ptdB = (yield* pay(b.id, "500")).ptd as DocumentView;
           const fi = yield* d.issueFinalInvoice(b.id);
-          yield* d.correct(ptdB.id, { reason: "x", lines: "full" });
-          const deducted = yield* blocked(ptdB.id);
+          const deducted = yield* blocked(b.id, ptdB.id);
           yield* d.correct(fi.id, { reason: "x", lines: "full" });
-          return [before, credited, deducted, yield* blocked(ptdB.id)];
+          const reversed = yield* blocked(b.id, ptdB.id);
+          yield* d.correct(ptdB.id, { reason: "x", lines: "full" });
+          // A payment booked on the Final Invoice itself never waits for it.
+          const onInvoice = yield* blocked(fi.id, null);
+          return [before, credited, deducted, reversed, yield* blocked(b.id, ptdB.id), onInvoice];
         }),
       ),
     );
-    expect(results).toEqual([true, false, true, false]);
+    expect(results).toEqual([
+      "tax_document_open",
+      null,
+      "final_invoice_deducts",
+      "tax_document_open",
+      null,
+      null,
+    ]);
+  });
+
+  test("refundDue and overdue: a Proforma with a Final Invoice is chased through the Invoice", async () => {
+    const [targets, proforma] = ok(
+      await run(
+        Effect.gen(function* () {
+          const d = yield* docs;
+          const store = yield* CoreStore;
+          const seam = yield* DocumentPayments;
+          const p = yield* issueProforma({ due: { on: TODAY } });
+          yield* pay(p.id, "3000");
+          const fi = yield* d.issueFinalInvoice(p.id);
+          return [yield* store.transaction(seam.lock(WS, fi.id)), yield* d.get(p.id)] as const;
+        }),
+      ),
+    );
+    expect(str(targets.settleOn.owed.amount)).toBe("-20");
+    expect(str(targets.settleOn.refundDue.amount)).toBe("20");
+    expect(targets.settleOn.settlement).toBe("overpaid");
+    expect(proforma.overdue).toBe(false);
   });
 });
 
@@ -753,6 +788,131 @@ describe("issueFinalInvoice (D8)", () => {
       issues: [{ path: ["proforma"], code: "final_invoice.proforma_unpaid" }],
     });
     expect(results).toEqual([unpaid, unpaid, illegal, illegal, illegal]);
+  });
+});
+
+describe("council follow-ups", () => {
+  test("cash the PTDs do not cover is deducted as one outside_scope line without VAT", async () => {
+    const fi = ok(
+      await run(
+        Effect.gen(function* () {
+          const d = yield* docs;
+          const store = yield* CoreStore;
+          const seam = yield* DocumentPayments;
+          const p = yield* issueProforma();
+          yield* pay(p.id, "1000");
+          // A payment recorded without a PTD (user-flows 3.8: unticked).
+          yield* store.transaction(
+            Effect.andThen(seam.lock(WS, p.id), () =>
+              seam.settle(
+                WS,
+                p.id,
+                { amount: dec("1400"), payments: 2 },
+                { action: "payment.record" },
+              ),
+            ),
+          );
+          return yield* d.issueFinalInvoice(p.id);
+        }),
+      ),
+    );
+    expect(lines(fi).map((l) => [l.treatment, str(l.unitPrice), l.deducts !== null])).toEqual([
+      ["standard", "1000", false],
+      ["reduced", "500", false],
+      ["standard", "671.14", true],
+      ["reduced", "167.79", true],
+      ["outside_scope", "400", true],
+    ]);
+    expect(amounts(fi)).toEqual({ net: "1261.07", vat: "318.93", gross: "1580" });
+  });
+
+  test("a discount (negative) line is credited with a positive line; zero effects are refused", async () => {
+    const [cn, zero] = ok(
+      await run(
+        Effect.gen(function* () {
+          const d = yield* docs;
+          const inv = yield* issueInvoice({
+            lines: [
+              { description: "Práce", quantity: dec("2"), unitPrice: dec("1000") },
+              { description: "Sleva", quantity: dec("-1"), unitPrice: dec("200") },
+            ],
+          });
+          const cn = yield* Effect.flip(
+            d.correct(inv.id, { reason: "sleva neplatí", lines: [{ line: lineOf(inv, 1) }] }),
+          );
+          // With a work line the net effect is a credit: the discount line runs positive.
+          const both = yield* d.correct(inv.id, {
+            reason: "storno části",
+            lines: [{ line: lineOf(inv, 0), quantity: dec("1") }, { line: lineOf(inv, 1) }],
+          });
+          expect(lines(both).map((l) => [str(l.quantity), str(l.unitPrice)])).toEqual([
+            ["-1", "1000"],
+            ["1", "200"],
+          ]);
+          expect(amounts(both)).toEqual({ net: "-800", vat: "-168", gross: "-968" });
+          const zero = yield* Effect.flip(
+            d.correct(inv.id, {
+              reason: "x",
+              lines: [{ line: lineOf(inv, 0), unitPrice: dec("0") }],
+            }),
+          );
+          return [cn, zero] as const;
+        }),
+      ),
+    );
+    // Crediting only the discount raises what the buyer owes: the signed cap refuses it (D7).
+    expect(cn).toEqual(exceeds);
+    expect(zero).toEqual(malformed(["lines", 0, "unitPrice"], "out_of_range"));
+  });
+
+  test("after a partial credit, the full remainder of a Final Invoice reverses its deductions as lines", async () => {
+    const [fi, partial, rest] = ok(
+      await run(
+        Effect.gen(function* () {
+          const d = yield* docs;
+          const p = yield* issueProforma();
+          yield* pay(p.id, "1000");
+          const fi = yield* d.issueFinalInvoice(p.id);
+          const partial = yield* d.correct(fi.id, {
+            reason: "méně hodin",
+            lines: [{ line: lineOf(fi, 0), quantity: dec("1") }],
+          });
+          const rest = yield* d.correct(fi.id, { reason: "zbytek", lines: "full" });
+          return [yield* d.get(fi.id), partial, rest] as const;
+        }),
+      ),
+    );
+    expect(fi.settlement).toBe("credited");
+    expect(lines(rest).map((l) => [str(l.quantity), str(l.unitPrice), l.deducts !== null])).toEqual(
+      [
+        ["-1", "1000", false],
+        ["-1", "500", false],
+        ["1", "671.14", true],
+        ["1", "167.79", true],
+      ],
+    );
+    const sum = (k: "net" | "vat" | "gross") =>
+      str(
+        [fi, partial, rest].reduce(
+          (acc, v) => BigDecimal.sum(acc, v.totals[k].amount),
+          BigDecimal.fromBigInt(0n),
+        ),
+      );
+    expect([sum("net"), sum("vat"), sum("gross")]).toEqual(["0", "0", "0"]);
+    const deductions = reportFigures({
+      ...(rest as never as object),
+      lines: lines(rest).map((l) => ({
+        ...l,
+        deductedVat:
+          l.deducts === null ? null : dec(str(l.unitPrice) === "671.14" ? "140.94" : "20.13"),
+        deductedVatCzk: null,
+      })) as never,
+      totals: rest.totals,
+      currency: rest.totals.gross.currency,
+      pricesIncludeVat: false,
+      paymentRounding: "none",
+    }).advanceDeductions;
+    expect(deductions.map((b) => str(b.gross))).toEqual(["-812.08", "-187.92"]);
   });
 });
 

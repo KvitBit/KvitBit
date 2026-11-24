@@ -12,6 +12,7 @@
  * `issuePaymentTaxDocument` (the PTD series counter after the Proforma lock).
  */
 import type {
+  AuditEntry,
   CurrencyCode,
   CurrentCaller,
   DocumentId,
@@ -60,6 +61,8 @@ export interface Payable {
   /** gross - credited: what payments settle against. */
   readonly owed: Money;
   readonly paid: Money;
+  /** paid - owed when positive (an overpaid Invoice, a Final Invoice below its advances). */
+  readonly refundDue: Money;
   readonly payments: number;
   readonly settlement: DocumentSettlement;
   /** The Issuing Entity's Tax Regime at the document's tax point (snapshot). */
@@ -82,10 +85,19 @@ export interface PaymentTargets {
 }
 
 export interface SettleAudit {
-  /** e.g. `payment.record`, `payment.remove`. */
-  readonly action: string;
+  readonly action: "payment.record" | "payment.remove";
+  /** Required by Payments for `payment.remove` (core-ports 4.5). */
   readonly reason?: string | null;
+  /** The payment's own particulars (id, amount, paidOn, method), appended to the entry. */
+  readonly details?: AuditEntry["changes"];
 }
+
+/**
+ * Why a payment cannot be removed yet (P3), in the order to resolve: a Final Invoice that is
+ * not credited deducts the Proforma's advance (PTD or cash), or its Payment Tax Document is
+ * not fully credited.
+ */
+export type RemovalBlock = "final_invoice_deducts" | "tax_document_open";
 
 type SeamError = NotFound | StoreUnavailable;
 
@@ -125,11 +137,16 @@ export class DocumentPayments extends Context.Service<
       SeamError | Conflict | Invalid | RatesUnavailable,
       CurrentCaller
     >;
-    /** P3: the PTD is not fully credited, or a Final Invoice that is not credited deducts it. */
+    /**
+     * P3 for a payment booked on `target` that issued `taxDocument` (null: none): null when it
+     * may be removed. Payments maps a block to Conflict{illegal_transition} (detail
+     * `payment.has_tax_document`).
+     */
     readonly removalBlocked: (
       workspaceId: WorkspaceId,
-      taxDocument: DocumentId,
-    ) => Effect.Effect<boolean, SeamError, CurrentCaller>;
+      target: DocumentId,
+      taxDocument: DocumentId | null,
+    ) => Effect.Effect<RemovalBlock | null, SeamError, CurrentCaller>;
   }
 >()("kvitbit/core/documents/DocumentPayments") {}
 
@@ -163,6 +180,12 @@ export const payableOf = (
     credited: money(BigDecimal.subtract(row.totals.gross.amount, owed), row.currency),
     owed: money(owed, row.currency),
     paid: money(row.paidAmount, row.currency),
+    refundDue: money(
+      BigDecimal.isGreaterThan(row.paidAmount, owed)
+        ? BigDecimal.subtract(row.paidAmount, owed)
+        : ZERO,
+      row.currency,
+    ),
     payments: row.payments,
     settlement: row.settlement,
     regime: row.issuer.regime,
@@ -256,6 +279,7 @@ const settle = (
         },
         { path: "payments", before: row.payments, after: next.payments },
         { path: "settlement", before: row.settlement, after: next.settlement },
+        ...(audit.details ?? []),
       ],
       reason: audit.reason ?? null,
     });
@@ -439,22 +463,26 @@ const issuePaymentTaxDocument = (
     return yield* viewOf(ptd);
   });
 
-const removalBlocked = (workspaceId: WorkspaceId, taxDocument: DocumentId) =>
+const removalBlocked = (
+  workspaceId: WorkspaceId,
+  target: DocumentId,
+  taxDocument: DocumentId | null,
+): Effect.Effect<RemovalBlock | null, SeamError, DocumentsRepo> =>
   Effect.gen(function* () {
     const repo = yield* DocumentsRepo;
-    const ptd = yield* repo.get(workspaceId, taxDocument);
-    if (ptd.kind !== "payment_tax_document") return false;
-    if (!isFullyCredited(ptd, yield* creditsOf(ptd))) return true;
-    const proformaId = linksOf(ptd, "advance_of")[0];
-    if (proformaId === undefined) return false;
-    const proforma = yield* repo.get(workspaceId, proformaId);
-    const finalId = linksOf(proforma, "final_invoice_for")[0];
-    if (finalId === undefined) return false;
-    const finalInvoice = yield* repo.get(workspaceId, finalId);
-    return (
-      finalInvoice.settlement !== "credited" &&
-      finalInvoice.lines.some((l) => l.deducts === taxDocument)
-    );
+    const booked = yield* repo.get(workspaceId, target);
+    const finalId =
+      booked.kind === "proforma" ? linksOf(booked, "final_invoice_for")[0] : undefined;
+    if (finalId !== undefined) {
+      // The Final Invoice deducted this advance (D8): it must be reversed first.
+      const finalInvoice = yield* repo.get(workspaceId, finalId);
+      if (finalInvoice.settlement !== "credited") return "final_invoice_deducts";
+    }
+    if (taxDocument !== null) {
+      const ptd = yield* repo.get(workspaceId, taxDocument);
+      if (!isFullyCredited(ptd, yield* creditsOf(ptd))) return "tax_document_open";
+    }
+    return null;
   });
 
 /** Everything `DocumentPaymentsLive` requires. */
@@ -480,7 +508,7 @@ export const DocumentPaymentsLive: Layer.Layer<DocumentPayments, never, Document
         lock: (ws, id) => run(lock(ws, id)),
         settle: (ws, id, paid, audit) => run(settle(ws, id, paid, audit)),
         issuePaymentTaxDocument: (ws, id, payment) => run(issuePaymentTaxDocument(ws, id, payment)),
-        removalBlocked: (ws, id) => run(removalBlocked(ws, id)),
+        removalBlocked: (ws, target, taxDocument) => run(removalBlocked(ws, target, taxDocument)),
       });
     }),
   );

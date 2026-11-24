@@ -23,6 +23,7 @@ import {
   Invalid,
 } from "@kvitbit/domain/contract";
 import { BigDecimal, Effect, Schema } from "effect";
+import { ZERO } from "../../engines/decimal";
 import { authorizeInWorkspace } from "../../policy/Policy";
 import { appendAudit } from "../../shared/audit";
 import { orUnavailable } from "../../shared/errors";
@@ -46,38 +47,19 @@ const nonZero = (v: BigDecimal.BigDecimal) => !BigDecimal.isZero(v);
 const linked = (row: DocumentRecord, relation: LinkRecord["relation"]) =>
   row.links.filter((l) => l.relation === relation).map((l) => l.id);
 
-/** The deduction line specs (D8), from the Proforma's Payment Tax Documents or its payments. */
+/**
+ * The deduction line specs (D8). Each Payment Tax Document of the Proforma: one line per
+ * bucket it has left uncredited, its VAT as stored. Cash the PTDs do not cover (paid without
+ * a PTD: `non_vat_payer`, `identified_person`, a skipped or later PTD, user-flows 3.8): one
+ * `outside_scope` line for that amount with no VAT, since the Final Invoice declares its VAT.
+ */
 const deductionLines = (proforma: DocumentRecord, lock: boolean) =>
   Effect.gen(function* () {
     const repo = yield* DocumentsRepo;
     const label = proforma.language === "cs" ? "Odpočet zálohy" : "Advance deduction";
-    const ptdIds = linked(proforma, "tax_document_for");
-    if (ptdIds.length === 0) {
-      return [
-        {
-          id: null,
-          item: null,
-          description: `${label} ${proforma.number ?? ""}`.trim(),
-          quantity: MINUS_ONE,
-          unit: null,
-          unitPrice: proforma.paidAmount,
-          vat: "outside_scope",
-          itemVat: null,
-          itemPrice: null,
-          deducts: proforma.id,
-          deduction: {
-            currency: proforma.currency,
-            treatment: "outside_scope",
-            ratePercent: BigDecimal.fromBigInt(0n),
-            base: neg(proforma.paidAmount),
-            vat: BigDecimal.fromBigInt(0n),
-            vatCzk: null,
-          },
-        } satisfies LineSpec,
-      ];
-    }
     const lines: Array<LineSpec> = [];
-    for (const ptdId of ptdIds) {
+    let covered = ZERO;
+    for (const ptdId of linked(proforma, "tax_document_for")) {
       // S4: the root (Proforma) first, then its dependents.
       const ptd = lock
         ? yield* repo.lock(proforma.workspaceId, ptdId)
@@ -85,6 +67,7 @@ const deductionLines = (proforma: DocumentRecord, lock: boolean) =>
       const credits = yield* repo.getMany(proforma.workspaceId, linked(ptd, "corrected_by"));
       for (const b of remainingBuckets(ptd, credits)) {
         if (!nonZero(b.base) && !nonZero(b.vat)) continue;
+        covered = BigDecimal.sum(covered, b.gross);
         lines.push({
           id: null,
           item: null,
@@ -106,6 +89,29 @@ const deductionLines = (proforma: DocumentRecord, lock: boolean) =>
           },
         });
       }
+    }
+    const cash = BigDecimal.normalize(BigDecimal.subtract(proforma.paidAmount, covered));
+    if (BigDecimal.isPositive(cash)) {
+      lines.push({
+        id: null,
+        item: null,
+        description: `${label} ${proforma.number ?? ""}`.trim(),
+        quantity: MINUS_ONE,
+        unit: null,
+        unitPrice: cash,
+        vat: "outside_scope",
+        itemVat: null,
+        itemPrice: null,
+        deducts: proforma.id,
+        deduction: {
+          currency: proforma.currency,
+          treatment: "outside_scope",
+          ratePercent: ZERO,
+          base: neg(cash),
+          vat: ZERO,
+          vatCzk: null,
+        },
+      });
     }
     return lines;
   });

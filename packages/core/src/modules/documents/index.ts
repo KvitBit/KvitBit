@@ -48,12 +48,15 @@
  *               authorize, R = CurrentCaller, port failures raw (caller maps orUnavailable):
  *               lock(ws, id) -> PaymentTargets {requested, settleOn, proforma} (S4: the
  *                 Proforma first; a Proforma with a Final Invoice settles on the Invoice, D8);
- *               settle(ws, id, {amount, payments}, {action, reason?}) -> Payable (stores paid
- *                 total + count, credit-aware settlement, revision bump, one audit entry);
+ *               settle(ws, id, {amount, payments}, {action: payment.record|payment.remove,
+ *                 reason?, details?}) -> Payable (stores paid total + count, credit-aware
+ *                 settlement, revision bump, one audit entry on the Document); Payable carries
+ *                 gross/credited/owed/paid/refundDue, regime, finalInvoice/proforma/taxDocuments;
  *               issuePaymentTaxDocument(ws, proforma, {amount, paidOn}) -> DocumentView | null
  *                 (P2: null unless vat_payer on paidOn; VatMath.splitAdvance with the CNB
  *                 fixing for paidOn; PTD series counter after the Proforma lock);
- *               removalBlocked(ws, ptd) -> boolean (P3).
+ *               removalBlocked(ws, target, ptd | null) -> "final_invoice_deducts" |
+ *                 "tax_document_open" | null (P3: reverse the Final Invoice, then credit the PTD).
  * - delivery.ts DELIVERY READ SEAM (stage 2, cd-delivery and share links; board #529), tag
  *               `DocumentDeliveryReads` (`DocumentDeliveryReadsLive`): load(ws, id, ctx?) ->
  *               {record, view, contactId, dueOn, reminders {choice, on}, settlement, overdue};
@@ -63,10 +66,24 @@
  * - service.ts  `DocumentsLive`: captures `DocumentsDeps`, wires the method files, dispatches
  *               `edit` by state.
  *
- * Links (`DocumentRecord.links`, stored on both documents): Credit Note `corrects` original,
- * original `corrected_by` Credit Note; PTD and Final Invoice `advance_of` their Proforma;
- * Proforma `tax_document_for` each PTD and `final_invoice_for` its Final Invoice; Final
- * Invoice `deducts` each deducted PTD.
+ * Links (`DocumentRecord.links`). Canonical forward relations (the SQL `document_relations`
+ * rows): Credit Note `corrects` original; Proforma `final_invoice_for` its Final Invoice;
+ * PTD and Final Invoice `advance_of` their Proforma; Final Invoice `deducts` each deducted PTD.
+ * The record also stores the read-side inverses for navigation: original `corrected_by` its
+ * Credit Notes, Proforma `tax_document_for` each PTD (PTD -> Final Invoice goes through the
+ * Proforma).
+ *
+ * Rules P3 settles (council, design note /home/dev/.t3/orchestrator-state/cd-lc-final-design.md):
+ * settlement is a stored cache rebuilt under the row lock from paid totals and Credit Notes
+ * (`settlementOf`); a Final Invoice covered by its advances is `paid` with no payments; a PTD
+ * is `paid` until fully credited; a Proforma with a Final Invoice is never overdue and owes
+ * nothing (`outstandingOf`), its later payments settle on the Final Invoice. A partial
+ * correction credits magnitudes against the line's sign, zero effects are refused, and a
+ * Final Invoice's deductions are reversed only by a full remainder credit. Final Invoice
+ * deductions: each PTD's uncredited buckets as stored (own rate and CZK fixing, even when the
+ * bucket goes negative: amount due below zero is allowed, user-flows 3.8), plus paid cash no
+ * PTD covers as one `outside_scope` line. One Final Invoice per Proforma, also after it is
+ * credited (unique `final_invoice_for`). A PTD needs `vat_payer` on `paidOn` (else none).
  *
  * Known contract gaps (domain frozen; listed for phase2a-core in board #430/#478): C4 resolved
  * language/note/series are on the record but not in DocumentView (deferred for P1); validation
@@ -101,6 +118,7 @@ export { correct, previewCorrection } from "./corrections";
 export type { CreditLine, CreditSpec, IssueCreditNoteInput } from "./credit";
 export {
   creditNoteRecord,
+  deductionBucketsOf,
   digitsOf,
   isFullyCredited,
   issueCreditNote,
@@ -126,7 +144,7 @@ export {
   numbered,
   unlock,
 } from "./lifecycle";
-export type { Payable, PaymentTargets, SettleAudit } from "./payments";
+export type { Payable, PaymentTargets, RemovalBlock, SettleAudit } from "./payments";
 export {
   DocumentPayments,
   DocumentPaymentsLive,

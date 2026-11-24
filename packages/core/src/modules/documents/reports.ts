@@ -7,6 +7,7 @@ import type { VatBreakdown, VatBucket } from "@kvitbit/domain/contract";
 import { BigDecimal } from "effect";
 import { VatMath } from "../../engines/vat";
 import { mergeBuckets } from "./compose";
+import { deductionBucketsOf } from "./credit";
 import type { DocumentRecord } from "./record";
 
 const neg = (v: BigDecimal.BigDecimal) => BigDecimal.normalize(BigDecimal.negate(v));
@@ -22,29 +23,21 @@ export const reportFigures = (
     "lines" | "totals" | "currency" | "pricesIncludeVat" | "paymentRounding"
   >,
 ): { readonly totals: VatBreakdown; readonly advanceDeductions: ReadonlyArray<VatBucket> } => {
-  const deducted = row.lines.filter((l) => l.deducts !== null);
+  const deducted = deductionBucketsOf(row);
   if (deducted.length === 0) return { totals: row.totals, advanceDeductions: [] };
-  const buckets = mergeBuckets(
-    deducted.map((l) => {
-      const vat = l.deductedVat ?? BigDecimal.fromBigInt(0n);
-      const base = row.pricesIncludeVat ? BigDecimal.subtract(l.amount, vat) : l.amount;
-      // Stored negative on the Final Invoice: the deduction is the negation.
-      return {
-        treatment: l.treatment,
-        ratePercent: l.ratePercent,
-        base: neg(base),
-        vat: neg(vat),
-        gross: neg(BigDecimal.sum(base, vat)),
-        vatCzk: row.currency === "CZK" || l.deductedVatCzk === null ? null : neg(l.deductedVatCzk),
-      } satisfies VatBucket;
-    }),
-  );
+  const advanceDeductions = deducted.map((b) => ({
+    ...b,
+    base: neg(b.base),
+    vat: neg(b.vat),
+    gross: neg(b.gross),
+    vatCzk: b.vatCzk === null ? null : neg(b.vatCzk),
+  }));
   const full = VatMath.fromBuckets(
-    mergeBuckets(row.totals.buckets, buckets).filter(
+    mergeBuckets(row.totals.buckets, advanceDeductions).filter(
       (b) => !(BigDecimal.isZero(b.base) && BigDecimal.isZero(b.vat) && BigDecimal.isZero(b.gross)),
     ),
     row.currency,
     row.paymentRounding,
   );
-  return { totals: full, advanceDeductions: buckets };
+  return { totals: full, advanceDeductions };
 };

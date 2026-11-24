@@ -86,20 +86,26 @@ const partialSpec = (
       seen.add(pick.line);
       // A deduction is reversed only with its whole Final Invoice ("full").
       if (line.deducts !== null) return yield* malformed(["lines", i, "line"], "deduction_line");
-      const quantity = pick.quantity ?? line.quantity;
-      const unitPrice = pick.unitPrice ?? line.unitPrice;
+      // The credited delta: `quantity` units (default: all) at `unitPrice` (default: the
+      // line's), both given as magnitudes. The Credit Note line keeps the original price's
+      // sign and runs against the original quantity's, so it always offsets the line (a
+      // discount line is credited with a positive amount); a zero effect is refused.
+      const quantity = pick.quantity ?? BigDecimal.abs(line.quantity);
       if (!BigDecimal.isPositive(quantity)) {
         return yield* malformed(["lines", i, "quantity"], "out_of_range");
       }
-      if (BigDecimal.isNegative(unitPrice)) {
+      const magnitude = pick.unitPrice ?? BigDecimal.abs(line.unitPrice);
+      if (!BigDecimal.isPositive(magnitude) || BigDecimal.isZero(line.unitPrice)) {
         return yield* malformed(["lines", i, "unitPrice"], "out_of_range");
       }
+      const unitPrice = BigDecimal.isNegative(line.unitPrice) ? neg(magnitude) : magnitude;
+      const credited = BigDecimal.isNegative(line.quantity) ? quantity : neg(quantity);
       const { id: _id, ...rest } = line;
       lines.push({
         ...rest,
-        quantity: neg(quantity),
+        quantity: BigDecimal.normalize(credited),
         unitPrice: BigDecimal.normalize(unitPrice),
-        amount: neg(BigDecimal.multiply(quantity, unitPrice)),
+        amount: BigDecimal.normalize(BigDecimal.multiply(credited, unitPrice)),
         itemPrice: null,
       });
     }

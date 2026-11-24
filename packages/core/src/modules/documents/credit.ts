@@ -95,10 +95,12 @@ export const owedOf = (
 
 /** The open amount: owed minus paid, never below zero (ReportsSource `outstanding`). */
 export const outstandingOf = (
-  row: Pick<DocumentRecord, "totals" | "paidAmount" | "kind" | "status">,
+  row: Pick<DocumentRecord, "totals" | "paidAmount" | "kind" | "status" | "links">,
   creditNotes: ReadonlyArray<Pick<DocumentRecord, "totals">> = [],
 ): BigDecimal.BigDecimal => {
   if (row.status !== "issued" || (row.kind !== "invoice" && row.kind !== "proforma")) return ZERO;
+  // A Proforma with a Final Invoice is owed through the Final Invoice (D8).
+  if (row.links.some((l) => l.relation === "final_invoice_for")) return ZERO;
   const open = BigDecimal.subtract(owedOf(row, creditNotes), row.paidAmount);
   return BigDecimal.isNegative(open) ? ZERO : BigDecimal.normalize(open);
 };
@@ -124,6 +126,45 @@ export const settlementOf = (
   if (BigDecimal.isLessThan(row.paidAmount, owed)) return "partially_paid";
   return BigDecimal.equals(row.paidAmount, owed) ? "paid" : "overpaid";
 };
+
+const negateBucket = (b: VatBucket): VatBucket => ({
+  ...b,
+  base: neg(b.base),
+  vat: neg(b.vat),
+  gross: neg(b.gross),
+  vatCzk: b.vatCzk === null ? null : neg(b.vatCzk),
+});
+
+/** A deduction line's base (its stored amount is gross when prices include VAT). */
+const deductionBase = (row: Pick<DocumentRecord, "pricesIncludeVat">, line: CreditLine) =>
+  row.pricesIncludeVat
+    ? BigDecimal.normalize(BigDecimal.subtract(line.amount, line.deductedVat ?? ZERO))
+    : line.amount;
+
+/**
+ * The deduction buckets of a Final Invoice (rule D8) as stored on its lines (negative; a
+ * Credit Note reversing them carries them positive), merged per (treatment, rate); [] when the
+ * document has no deduction lines. CZK VAT only for a foreign currency.
+ */
+export const deductionBucketsOf = (
+  row: Pick<DocumentRecord, "lines" | "currency" | "pricesIncludeVat">,
+): ReadonlyArray<VatBucket> =>
+  mergeBuckets(
+    row.lines
+      .filter((l) => l.deducts !== null)
+      .map((l) => {
+        const vat = l.deductedVat ?? ZERO;
+        const base = deductionBase(row, l);
+        return {
+          treatment: l.treatment,
+          ratePercent: l.ratePercent,
+          base,
+          vat: BigDecimal.normalize(vat),
+          gross: BigDecimal.normalize(BigDecimal.sum(base, vat)),
+          vatCzk: row.currency === "CZK" ? null : l.deductedVatCzk,
+        };
+      }),
+  );
 
 /** Sets the whole-unit rounding adjustment (outside every bucket, §36(5)) and the gross. */
 const withRounding = (totals: VatBreakdown, adjustment: BigDecimal.BigDecimal): VatBreakdown => ({
@@ -165,35 +206,57 @@ export const remainderSpec = (
       pricesIncludeVat: original.pricesIncludeVat,
     };
   }
-  const left = remainingBuckets(original, creditNotes).filter(
-    (b) =>
-      !(
-        isZero(b.base) &&
-        isZero(b.vat) &&
-        isZero(b.gross) &&
-        (b.vatCzk === null || isZero(b.vatCzk))
-      ),
-  );
+  // A Final Invoice's deductions are never credited partially (corrections.ts), so they are
+  // all still open here: reverse them as their own lines and credit the supply remainder.
+  const deductions = original.lines.filter((l) => l.deducts !== null);
+  const deducted = deductionBucketsOf(original);
+  const remaining = remainingBuckets(original, creditNotes);
+  const open = (b: VatBucket) =>
+    !(
+      isZero(b.base) &&
+      isZero(b.vat) &&
+      isZero(b.gross) &&
+      (b.vatCzk === null || isZero(b.vatCzk))
+    );
+  const left = (
+    deducted.length === 0 ? remaining : mergeBuckets(remaining, deducted.map(negateBucket))
+  ).filter(open);
   const label = original.language === "cs" ? "Oprava" : "Correction of";
+  const reversed = deductions.map(({ id: _id, ...l }): CreditLine => {
+    const base = deductionBase(original, l);
+    return {
+      ...l,
+      quantity: BigDecimal.fromBigInt(1n),
+      unitPrice: neg(base),
+      amount: neg(base),
+      deductedVat: l.deductedVat === null ? null : neg(l.deductedVat),
+      deductedVatCzk: l.deductedVatCzk === null ? null : neg(l.deductedVatCzk),
+    };
+  });
+  const supply = left.flatMap(
+    (b): ReadonlyArray<CreditLine> => [
+      {
+        item: null,
+        description: `${label} ${original.number ?? ""}`.trim(),
+        quantity: BigDecimal.fromBigInt(-1n),
+        unit: null,
+        unitPrice: b.base,
+        itemPrice: null,
+        vat: b.treatment,
+        itemVat: null,
+        treatment: b.treatment,
+        ratePercent: b.ratePercent,
+        amount: neg(b.base),
+        deducts: null,
+        deductedVat: null,
+        deductedVatCzk: null,
+      },
+    ],
+  );
   return {
-    lines: left.map((b) => ({
-      item: null,
-      description: `${label} ${original.number ?? ""}`.trim(),
-      quantity: BigDecimal.fromBigInt(-1n),
-      unit: null,
-      unitPrice: b.base,
-      itemPrice: null,
-      vat: b.treatment,
-      itemVat: null,
-      treatment: b.treatment,
-      ratePercent: b.ratePercent,
-      amount: neg(b.base),
-      deducts: null,
-      deductedVat: null,
-      deductedVatCzk: null,
-    })),
+    lines: [...supply, ...reversed],
     totals: withRounding(
-      VatMath.negate(VatMath.fromBuckets(left, original.currency)),
+      VatMath.negate(VatMath.fromBuckets(remaining.filter(open), original.currency)),
       neg(
         [original, ...creditNotes].reduce(
           (sum, d) => BigDecimal.sum(sum, d.totals.roundingAdjustment.amount),

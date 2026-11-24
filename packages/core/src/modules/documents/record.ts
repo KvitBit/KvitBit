@@ -254,13 +254,15 @@ export type DraftableKind = Extract<DocumentKindType, "invoice" | "proforma">;
 /**
  * Issued, not settled and past due (`DocumentView.overdue`, list filter). Only Invoices and
  * Proformas are ever overdue: a Payment Tax Document confirms a payment already received and a
- * Credit Note is owed by the issuer, so neither is chased.
+ * Credit Note is owed by the issuer, so neither is chased. A Proforma with a Final Invoice is
+ * settled through it (D8): its Final Invoice is chased instead.
  */
 export const isOverdue = (
-  row: Pick<DocumentRecord, "kind" | "status" | "settlement" | "dueOn">,
+  row: Pick<DocumentRecord, "kind" | "status" | "settlement" | "dueOn" | "links">,
   today: string,
 ): boolean =>
-  (row.kind === "invoice" || row.kind === "proforma") &&
+  (row.kind === "invoice" ||
+    (row.kind === "proforma" && !row.links.some((l) => l.relation === "final_invoice_for"))) &&
   row.status === "issued" &&
   (row.settlement === "unpaid" || row.settlement === "partially_paid") &&
   row.dueOn < today;
