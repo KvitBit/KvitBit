@@ -45,7 +45,6 @@ import type { StoreUnavailable } from "../../store/CoreStore";
 import { NumberingSeries } from "../numbering";
 import type { ContactForDocument, IssuerForDocument } from "./ports";
 import { DocumentContacts, DocumentIssuers, DocumentPriceList } from "./ports";
-import { forDocument, isValidVariableSymbol } from "./qr";
 import type {
   BankAccountRecord,
   ContactSnapshotRecord,
@@ -121,8 +120,6 @@ export interface ComposeOptions {
    * them unless `refreshParties`). Defaults, regime and bank accounts still come from the
    * current Contact and Workspace.
    */
-  /** The document's number, when it has one (P2 issue), for the payment QR check. */
-  readonly number?: string | null;
   readonly freeze?: {
     readonly contact: ContactSnapshotRecord;
     readonly issuer: IssuerSnapshotRecord;
@@ -275,6 +272,9 @@ export const applyPatch = (workspaceId: WorkspaceId, spec: DocumentSpec, patch: 
   });
 
 // Rule D9 -----------------------------------------------------------------------------------
+
+/** A caller's variable symbol (Czech payment reference) must be 1-10 digits. */
+const isValidVariableSymbol = (vs: string): boolean => /^\d{1,10}$/.test(vs);
 
 /** EU member states (ISO 3166-1 alpha-2, Greece as GR) other than CZ. */
 const EU = new Set([
@@ -538,20 +538,6 @@ export const compose = (
         deducts: l.deducts,
       });
     }
-
-    // Rule D12 / 5.3: the payment QR must encode (IBAN, amount, variable symbol). P2's issue
-    // re-checks with the allocated number (`options.number`).
-    const qr = forDocument({
-      kind,
-      status: "draft",
-      currency,
-      number: options.number ?? null,
-      variableSymbol: given.variableSymbol ?? null,
-      dueOn,
-      totals,
-      issuer: { name: issuer.party.name, bankAccount },
-    });
-    if (Result.isFailure(qr)) return yield* qr.failure;
 
     return {
       kind,

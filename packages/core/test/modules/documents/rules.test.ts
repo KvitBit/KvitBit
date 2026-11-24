@@ -22,7 +22,6 @@ import {
   DocumentsRepoMemory,
   SCHEDULE_OCCURRENCE,
 } from "../../../src/modules/documents";
-import { isValidBic, isValidIban } from "../../../src/modules/documents/qr";
 import { NumberingSeries, NumberingTestLayer } from "../../../src/modules/numbering";
 import { makeRequestOutcome } from "../../../src/shared/requestOutcome";
 import { CoreStore, StoreUnavailable, UniqueViolation } from "../../../src/store/CoreStore";
@@ -481,49 +480,6 @@ describe("review round 1 regressions", () => {
     expect(err).toMatchObject({ _tag: "Invalid", issues: [{ path: ["due"] }] });
   });
 
-  test("payment QR (rule D12): SPAYD for CZK with IBAN, EPC for EUR, none otherwise", async () => {
-    const [czk, eur, usd] = ok(
-      await scenario(
-        Effect.gen(function* () {
-          const docs = yield* Documents;
-          return [
-            yield* docs.createDraft(invoiceInput({ variableSymbol: "20260001" })),
-            yield* docs.createDraft(
-              invoiceInput({ currency: EUR, lines: [{ description: "x", unitPrice: dec("10") }] }),
-            ),
-            yield* docs.createDraft(
-              invoiceInput({
-                currency: "USD" as never,
-                fx: { manual: { rate: dec("23"), quantity: 1 } },
-              }),
-            ),
-          ] as const;
-        }),
-        { fixings: [fixing("2026-11-20", "25")] },
-      ),
-    );
-    expect(czk.paymentQr).toEqual({
-      format: "spayd",
-      payload:
-        "SPD*1.0*ACC:CZ1801000000000123456789*AM:2980.00*CC:CZK*DT:20261207*X-VS:20260001*RN:DODAVATEL S.R.O.",
-    });
-    expect(eur.paymentQr?.format).toBe("epc");
-    // EPC069-12 §2.2: an unnumbered draft's payload ends right after the amount.
-    expect(eur.paymentQr?.payload).toBe(
-      [
-        "BCD",
-        "002",
-        "1",
-        "SCT",
-        "KOMBCZPP",
-        "Dodavatel s.r.o.",
-        "CZ6701000000000987654321",
-        "EUR12.10",
-      ].join("\n"),
-    );
-    expect(usd.paymentQr).toBeNull();
-  });
-
   test("admins and write-scoped members can draft", async () => {
     const [admin, writer] = ok(
       await scenario(
@@ -540,122 +496,6 @@ describe("review round 1 regressions", () => {
       ),
     );
     expect([admin, writer]).toEqual(["draft", "draft"]);
-  });
-});
-
-describe("review round 2 regressions (payment QR inputs)", () => {
-  test("an explicit variable symbol is kept exactly; a non 1-10 digit one is Invalid", async () => {
-    const [kept, tooLong, letters] = ok(
-      await scenario(
-        Effect.gen(function* () {
-          const docs = yield* Documents;
-          return [
-            yield* docs.preview(invoiceInput({ variableSymbol: "0012345678" })),
-            yield* Effect.flip(docs.preview(invoiceInput({ variableSymbol: "12345678901" }))),
-            yield* Effect.flip(docs.createDraft(invoiceInput({ variableSymbol: "VS-1" }))),
-          ] as const;
-        }),
-      ),
-    );
-    expect(kept.paymentQr?.payload).toContain("*X-VS:0012345678*");
-    for (const err of [tooLong, letters]) {
-      expect(err).toMatchObject({
-        _tag: "Invalid",
-        issues: [
-          {
-            path: ["variableSymbol"],
-            code: "request.malformed",
-            params: { reason: "variable_symbol_invalid" },
-          },
-        ],
-      });
-    }
-  });
-
-  test("an IBAN failing mod-97 is Invalid and the draft is not stored", async () => {
-    const [err, listed] = ok(
-      await scenario(
-        Effect.gen(function* () {
-          const f = yield* DocumentFixtures;
-          const current = (yield* Ref.get(f.issuers)).get(WS);
-          if (!current) return yield* Effect.die("seed missing");
-          yield* f.putIssuer({
-            ...current,
-            bankAccounts: current.bankAccounts.map((a) => ({
-              ...a,
-              iban: "CZ6501000000000123456789",
-            })),
-          });
-          const docs = yield* Documents;
-          const err = yield* Effect.flip(docs.createDraft(invoiceInput()));
-          return [err, (yield* docs.list({})).items.length] as const;
-        }),
-      ),
-    );
-    expect(err).toMatchObject({
-      _tag: "Invalid",
-      issues: [{ path: ["bankAccount"], params: { field: "iban" } }],
-    });
-    expect(listed).toBe(0);
-  });
-
-  test("D12 exception: above the format maximum or nothing to pay gives no QR, not Invalid", async () => {
-    const [czkLarge, eurLarge, zero] = ok(
-      await scenario(
-        Effect.gen(function* () {
-          const docs = yield* Documents;
-          const big = (price: string) =>
-            [{ description: "x", unitPrice: dec(price), vat: "outside_scope" as const }] as const;
-          return [
-            yield* docs.createDraft(invoiceInput({ lines: big("10000000") })),
-            yield* docs.createDraft(invoiceInput({ currency: EUR, lines: big("1000000000") })),
-            yield* docs.createDraft(
-              invoiceInput({
-                currency: EUR,
-                lines: [{ description: "Zdarma", unitPrice: dec("0") }],
-              }),
-            ),
-          ] as const;
-        }),
-        { fixings: [fixing("2026-11-20", "25")] },
-      ),
-    );
-    expect(str(czkLarge.totals.gross.amount)).toBe("10000000");
-    for (const view of [czkLarge, eurLarge, zero]) {
-      expect(view.status).toBe("draft");
-      expect(view.paymentQr).toBeNull();
-    }
-  });
-});
-
-describe("review round 3 regressions", () => {
-  test("an IBAN of the wrong length for its country is Invalid even with a passing checksum", async () => {
-    const [err, listed] = ok(
-      await scenario(
-        Effect.gen(function* () {
-          const f = yield* DocumentFixtures;
-          const current = (yield* Ref.get(f.issuers)).get(WS);
-          if (!current) return yield* Effect.die("seed missing");
-          yield* f.putIssuer({
-            ...current,
-            bankAccounts: current.bankAccounts.map((a) => ({
-              ...a,
-              iban: "CZ18001000000000123456789",
-            })),
-          });
-          const docs = yield* Documents;
-          const err = yield* Effect.flip(docs.createDraft(invoiceInput()));
-          return [err, (yield* docs.list({})).items.length] as const;
-        }),
-      ),
-    );
-    expect(err).toMatchObject({
-      _tag: "Invalid",
-      issues: [
-        { path: ["bankAccount"], code: "request.malformed", params: { reason: "iban_invalid" } },
-      ],
-    });
-    expect(listed).toBe(0);
   });
 });
 
@@ -697,207 +537,49 @@ describe("store outages", () => {
   });
 });
 
-describe("review round 4 regressions (IBAN structure per SEPA country)", () => {
-  /** Seeds every Workspace A account with `iban`, then creates a EUR draft. */
-  const eurDraftWith = (iban: string, bic?: string | null) =>
-    Effect.gen(function* () {
-      const f = yield* DocumentFixtures;
-      const current = (yield* Ref.get(f.issuers)).get(WS);
-      if (!current) return yield* Effect.die("seed missing");
-      yield* f.putIssuer({
-        ...current,
-        bankAccounts: current.bankAccounts.map((a) => ({
-          ...a,
-          iban,
-          ...(bic === undefined ? {} : { bic }),
-        })),
+describe("variable symbol and payment QR (P1 scope)", () => {
+  test("an explicit variable symbol must be 1-10 digits; it is stored exactly", async () => {
+    const [kept, tooLong, letters, listed] = ok(
+      await scenario(
+        Effect.gen(function* () {
+          const docs = yield* Documents;
+          const kept = yield* docs.createDraft(invoiceInput({ variableSymbol: "0012345678" }));
+          const tooLong = yield* Effect.flip(
+            docs.createDraft(invoiceInput({ variableSymbol: "12345678901" })),
+          );
+          const letters = yield* Effect.flip(
+            docs.preview(invoiceInput({ variableSymbol: "VS-1" })),
+          );
+          const row = yield* (yield* DocumentsRepo).get(WS, kept.id);
+          return [
+            row.variableSymbol,
+            tooLong,
+            letters,
+            (yield* docs.list({})).items.length,
+          ] as const;
+        }),
+      ),
+    );
+    expect(kept).toBe("0012345678");
+    for (const err of [tooLong, letters]) {
+      expect(err).toMatchObject({
+        _tag: "Invalid",
+        issues: [
+          {
+            path: ["variableSymbol"],
+            code: "request.malformed",
+            params: { reason: "variable_symbol_invalid" },
+          },
+        ],
       });
-      const docs = yield* Documents;
-      const result = yield* Effect.result(
-        docs.createDraft(
-          invoiceInput({ currency: EUR, lines: [{ description: "x", unitPrice: dec("10") }] }),
-        ),
-      );
-      return [result, (yield* docs.list({})).items.length] as const;
-    });
-
-  test("a German IBAN with a letter in its numeric BBAN is Invalid and nothing is stored", async () => {
-    const [result, listed] = ok(
-      await scenario(eurDraftWith("DE0537040044053201300A"), {
-        fixings: [fixing("2026-11-20", "25")],
-      }),
-    );
-    expect(result._tag).toBe("Failure");
-    expect(result._tag === "Failure" ? result.failure : null).toMatchObject({
-      _tag: "Invalid",
-      issues: [{ path: ["bankAccount"], params: { reason: "iban_invalid" } }],
-    });
-    expect(listed).toBe(0);
-  });
-
-  test("a valid Albanian (SEPA) IBAN drafts with it and its BIC in the EPC payload", async () => {
-    const [result, listed] = ok(
-      await scenario(eurDraftWith("AL47212110090000000235698741", "SGSBALTX"), {
-        fixings: [fixing("2026-11-20", "25")],
-      }),
-    );
-    if (result._tag !== "Success") throw new Error("expected a draft");
-    const fields = result.success.paymentQr?.payload.split("\n") ?? [];
-    expect([fields[4], fields[6]]).toEqual(["SGSBALTX", "AL47212110090000000235698741"]);
+    }
     expect(listed).toBe(1);
   });
 
-  test("an EPC payment to a non-EEA SEPA IBAN without a BIC is Invalid and not stored", async () => {
-    const [result, listed] = ok(
-      await scenario(eurDraftWith("AL47212110090000000235698741", null), {
-        fixings: [fixing("2026-11-20", "25")],
-      }),
+  test("paymentQr is null until the PaymentQr engine lands (rule D12 deferred)", async () => {
+    const view = ok(
+      await scenario(Effect.flatMap(Documents, (d) => d.createDraft(invoiceInput()))),
     );
-    expect(result._tag === "Failure" ? result.failure : null).toMatchObject({
-      _tag: "Invalid",
-      issues: [{ path: ["bankAccount"], params: { field: "bic", reason: "bic_required" } }],
-    });
-    expect(listed).toBe(0);
-  });
-
-  test("an EEA IBAN without a BIC is fine; a malformed BIC is Invalid", async () => {
-    const [eea, malformed] = ok(
-      await scenario(
-        Effect.gen(function* () {
-          const a = yield* eurDraftWith("DE89370400440532013000", null);
-          const b = yield* eurDraftWith("DE89370400440532013000", "BAD-BIC");
-          return [a[0], b[0]] as const;
-        }),
-        { fixings: [fixing("2026-11-20", "25")] },
-      ),
-    );
-    if (eea._tag !== "Success") throw new Error("expected a draft");
-    expect(eea.success.paymentQr?.payload.split("\n")[4]).toBe("");
-    expect(malformed._tag === "Failure" ? malformed.failure : null).toMatchObject({
-      issues: [{ params: { field: "bic", reason: "bic_invalid" } }],
-    });
-  });
-
-  test("SWIFT registry examples validate for every SEPA country; malformed ones do not", () => {
-    const valid = [
-      "AD1200012030200359100100",
-      "AL47212110090000000235698741",
-      "AT611904300234573201",
-      "BE68539007547034",
-      "BG80BNBG96611020345678",
-      "CH9300762011623852957",
-      "CY17002001280000001200527600",
-      "CZ6508000000192000145399",
-      "DE89370400440532013000",
-      "DK5000400440116243",
-      "EE382200221020145685",
-      "ES9121000418450200051332",
-      "FI2112345600000785",
-      "FR1420041010050500013M02606",
-      "GB29NWBK60161331926819",
-      "GI75NWBK000000007099453",
-      "GR1601101250000000012300695",
-      "HR1210010051863000160",
-      "HU42117730161111101800000000",
-      "IE29AIBK93115212345678",
-      "IS140159260076545510730339",
-      "IT60X0542811101000000123456",
-      "LI21088100002324013AA",
-      "LT121000011101001000",
-      "LU280019400644750000",
-      "LV80BANK0000435195001",
-      "MC5811222000010123456789030",
-      "MD24AG000225100013104168",
-      "ME25505000012345678951",
-      "MK07250120000058984",
-      "MT84MALT011000012345MTLCAST001S",
-      "NL91ABNA0417164300",
-      "NO9386011117947",
-      "PL61109010140000071219812874",
-      "PT50000201231234567890154",
-      "RO49AAAA1B31007593840000",
-      "RS35260005601001611379",
-      "SE4550000000058398257466",
-      "SI56263300012039086",
-      "SK3112000000198742637541",
-      "SM86U0322509800000000270100",
-      "VA59001123000012345678",
-    ];
-    const invalid = [
-      "DE0537040044053201300A", // letter in a numeric BBAN
-      "CZ18001000000000123456789", // wrong length for CZ
-      "CZ6501000000000123456789", // checksum
-      "US12345678901234567890", // not SEPA
-    ];
-    expect(valid.filter((iban) => !isValidIban(iban))).toEqual([]);
-    expect(invalid.filter(isValidIban)).toEqual([]);
-  });
-});
-
-describe("review round 6 regressions (QR validation order, BIC country)", () => {
-  const withAccount = (iban: string, bic: string | null, price: string) =>
-    Effect.gen(function* () {
-      const f = yield* DocumentFixtures;
-      const current = (yield* Ref.get(f.issuers)).get(WS);
-      if (!current) return yield* Effect.die("seed missing");
-      yield* f.putIssuer({
-        ...current,
-        bankAccounts: current.bankAccounts.map((a) => ({ ...a, iban, bic })),
-      });
-      const docs = yield* Documents;
-      const result = yield* Effect.result(
-        docs.createDraft(
-          invoiceInput({
-            currency: EUR,
-            lines: [{ description: "x", unitPrice: dec(price), vat: "outside_scope" }],
-          }),
-        ),
-      );
-      return [result, (yield* docs.list({})).items.length] as const;
-    });
-  const fixings = [fixing("2026-11-20", "25")];
-
-  test("a BIC with an unassigned country code (SGSBJJTX) is Invalid and nothing is stored", async () => {
-    const [result, listed] = ok(
-      await scenario(withAccount("AL47212110090000000235698741", "SGSBJJTX", "10"), { fixings }),
-    );
-    expect(result._tag === "Failure" ? result.failure : null).toMatchObject({
-      issues: [{ params: { field: "bic", reason: "bic_invalid" } }],
-    });
-    expect(listed).toBe(0);
-  });
-
-  test("above the QR maximum the document is stored without a QR even with a bad BIC", async () => {
-    const [result, listed] = ok(
-      await scenario(withAccount("DE89370400440532013000", "BAD-BIC", "1000000000"), { fixings }),
-    );
-    if (result._tag !== "Success") throw new Error("expected a draft");
-    expect(result.success.paymentQr).toBeNull();
-    expect(listed).toBe(1);
-  });
-
-  test("an EPC payment needs the beneficiary (issuer) name", async () => {
-    const [result, listed] = ok(
-      await scenario(
-        Effect.gen(function* () {
-          const f = yield* DocumentFixtures;
-          const current = (yield* Ref.get(f.issuers)).get(WS);
-          if (!current) return yield* Effect.die("seed missing");
-          yield* f.putIssuer({ ...current, party: { ...current.party, name: "  " } });
-          return yield* withAccount("DE89370400440532013000", null, "10");
-        }),
-        { fixings },
-      ),
-    );
-    expect(result._tag === "Failure" ? result.failure : null).toMatchObject({
-      issues: [{ path: ["issuer"], params: { field: "name", reason: "required" } }],
-    });
-    expect(listed).toBe(0);
-  });
-
-  test("isValidBic checks structure and the ISO 3166 country", () => {
-    const good = ["KOMBCZPP", "SGSBALTX", "DEUTDEFF500", "NWBKGB2L"];
-    expect(good.filter((b) => !isValidBic(b))).toEqual([]);
-    expect(["SGSBJJTX", "BAD-BIC", "KOMBCZP", "1OMBCZPP"].filter(isValidBic)).toEqual([]);
+    expect(view.paymentQr).toBeNull();
   });
 });

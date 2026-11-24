@@ -32,7 +32,6 @@ import {
 } from "@kvitbit/domain/contract";
 import { Schema } from "effect";
 import { StatutoryText } from "../../engines/statutory";
-import { paymentQrOf } from "./qr";
 import type { DocumentRecord } from "./record";
 import { ContactSnapshotRecord, IssuerSnapshotRecord, isOverdue } from "./record";
 
@@ -143,7 +142,8 @@ export const toView = (row: DocumentRecord, ctx: ViewContext): DocumentView => (
     issuerRegisterEntry: row.issuer.registerEntry,
     language: ctx.language ?? row.language,
   }),
-  paymentQr: paymentQrOf(row),
+  // Rule D12 waits on the PaymentQr engine (core-ports 5.3, src/engines): null until it lands.
+  paymentQr: null,
   related: ctx.related ?? [],
   share: ctx.share ?? null,
   deliveries: ctx.deliveries ?? [],
