@@ -22,7 +22,18 @@ import { BankAccountReferences, czechAccountNumber, WorkspacesRepo } from "../mo
 
 const nowIso = Effect.map(Clock.currentTimeMillis, (ms) => new Date(ms).toISOString());
 
-/** The rows are locked first, so a stale revision, a missing row or a unique clash is a bug. */
+/**
+ * The candidates are read unlocked, so a row can be deleted (`discardDraft`) or changed between
+ * that read and its lock: `relock` turns a missing row into `null` and the caller re-checks the
+ * locked row. Once a row is locked, a stale revision, a missing row or a unique clash is a bug.
+ */
+const relock = <A, E extends { readonly _tag: string }, R>(effect: Effect.Effect<A, E, R>) =>
+  Effect.catchIf(
+    effect,
+    (error): error is E & { readonly _tag: "NotFound" } => error._tag === "NotFound",
+    () => Effect.succeed(null),
+  );
+
 const locked = <A, E extends { readonly _tag: string }, R>(effect: Effect.Effect<A, E, R>) =>
   Effect.catchIf(
     effect,
@@ -90,14 +101,17 @@ export const BankAccountReferencesLive: Layer.Layer<
             bic: account.bic,
           };
           for (const draft of drafts) {
-            const row = yield* locked(documents.lock(workspaceId, draft.id));
-            // Issued between the read and the lock: it keeps its snapshot.
-            if (row.status !== "draft") continue;
+            const row = yield* relock(documents.lock(workspaceId, draft.id));
+            // Discarded, issued or moved off the account between the read and the lock: an
+            // issued document keeps its snapshot (D10), the others have nothing to move.
+            if (row === null || row.status !== "draft") continue;
+            if (row.given.bankAccount !== from && row.issuer.bankAccount?.id !== from) continue;
             yield* locked(documents.update(moved(row, from, snapshot, at), row.revision));
           }
           for (const template of templates) {
-            const row = yield* locked(recurring.lockTemplateState(workspaceId, template.id));
-            if (row.input.bankAccount !== from) continue;
+            const row = yield* relock(recurring.lockTemplateState(workspaceId, template.id));
+            // Gone, archived or moved off the account between the read and the lock.
+            if (row === null || row.archivedAt !== null || row.input.bankAccount !== from) continue;
             yield* locked(
               recurring.updateTemplate(
                 { ...row, input: { ...row.input, bankAccount: to }, updatedAt: at },

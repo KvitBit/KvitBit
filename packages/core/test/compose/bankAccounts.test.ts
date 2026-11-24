@@ -254,4 +254,90 @@ describe("BankAccountReferencesLive", () => {
     );
     expect(result.after).toEqual(result.before);
   });
+
+  test("reassign skips candidates discarded, moved off the account or archived after they were read", async () => {
+    const result = ok(
+      await scenario(
+        Effect.gen(function* () {
+          const f = yield* fixture;
+          const store = yield* CoreStore;
+          const docsRepo = yield* DocumentsRepo;
+          const recurring = yield* RecurringRepo;
+          yield* store.transaction(
+            recurring.insertTemplate(template("5", { bankAccount: CZK_ACCOUNT })),
+          );
+          // The candidates as read before the concurrent changes below.
+          const staleDrafts = yield* docsRepo.draftsUsingBankAccount(WORKSPACE_A, CZK_ACCOUNT);
+          const staleTemplates = yield* recurring.templatesUsingBankAccount(
+            WORKSPACE_A,
+            CZK_ACCOUNT,
+          );
+          // Concurrent changes: discard one draft, move the other off the account, archive T1.
+          const chosen = yield* record(f.chosen.id);
+          yield* Effect.flatMap(Documents, (d) => d.discardDraft(f.chosen.id, chosen.revision));
+          yield* store.transaction(
+            Effect.gen(function* () {
+              const row = yield* docsRepo.lock(WORKSPACE_A, f.defaulted.id);
+              yield* docsRepo.update(
+                { ...row, issuer: { ...row.issuer, bankAccount: null } },
+                row.revision,
+              );
+              const t1 = yield* recurring.lockTemplateState(WORKSPACE_A, template("1").id);
+              yield* recurring.updateTemplate({ ...t1, archivedAt: AT }, t1.revision);
+            }),
+          );
+          const defaulted = yield* record(f.defaulted.id);
+          // Fresh: the shared memo map would otherwise reuse the outer build over the real repos.
+          const stale = Layer.fresh(BankAccountReferencesLive).pipe(
+            Layer.provide(
+              Layer.mergeAll(
+                Layer.effect(
+                  DocumentsRepo,
+                  Effect.map(DocumentsRepo, (repo) =>
+                    DocumentsRepo.of({
+                      ...repo,
+                      draftsUsingBankAccount: () => Effect.succeed(staleDrafts),
+                    }),
+                  ),
+                ),
+                Layer.effect(
+                  RecurringRepo,
+                  Effect.map(RecurringRepo, (repo) =>
+                    RecurringRepo.of({
+                      ...repo,
+                      templatesUsingBankAccount: () => Effect.succeed(staleTemplates),
+                    }),
+                  ),
+                ),
+              ),
+            ),
+          );
+          yield* store.transaction(
+            Effect.flatMap(BankAccountReferences, (refs) =>
+              refs.reassign(WORKSPACE_A, CZK_ACCOUNT, NEW_ACCOUNT),
+            ).pipe(Effect.provide(stale)),
+          );
+          return {
+            staleIds: staleDrafts.map((d) => d.id),
+            discarded: yield* Effect.exit(record(f.chosen.id)),
+            defaultedBefore: defaulted,
+            defaulted: yield* record(f.defaulted.id),
+            t1: yield* recurring.getTemplate(WORKSPACE_A, template("1").id),
+            t5: yield* recurring.getTemplate(WORKSPACE_A, template("5").id),
+          };
+        }).pipe(Effect.provide(layer)),
+        OPTIONS,
+      ),
+    );
+    expect(result.staleIds).toContain(result.defaulted.id);
+    expect(Exit.isFailure(result.discarded)).toBe(true);
+    // Moved off the account: not rewritten (no revision bump, no snapshot of the new account).
+    expect(result.defaulted).toEqual(result.defaultedBefore);
+    // Archived after the read: keeps its account.
+    expect(result.t1.archivedAt).toBe(AT);
+    expect(result.t1.input.bankAccount).toBe(CZK_ACCOUNT);
+    expect(result.t1.revision).toBe(2);
+    // A candidate still on the account moves.
+    expect(result.t5.input.bankAccount).toBe(NEW_ACCOUNT);
+  });
 });

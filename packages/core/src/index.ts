@@ -41,6 +41,10 @@
  * filesystem imports anywhere in this package.
  */
 
+// Seam layers for a partial composition: the one-line bindings plus the four compose adapters
+// CoreModulesLive wires (bank-account references, document activity, reports source, share
+// workspaces), so an app can rebuild any slice of CoreLive from the root entry.
+export { BankAccountReferencesLive } from "./compose/bankAccounts";
 export * from "./compose/bindings";
 // Composition (core-ports 10) --------------------------------------------------------------
 export type {
@@ -51,6 +55,9 @@ export type {
   CoreServices,
 } from "./compose/CoreLive";
 export { CoreLive, CoreModulesLive } from "./compose/CoreLive";
+export { DocumentActivityLive } from "./compose/documentActivity";
+export { ReportsSourceLive } from "./compose/reportsSource";
+export { ShareWorkspacesLive } from "./compose/shareWorkspaces";
 export * from "./contract";
 // Each module's full surface (row types, tables, job steps, pure helpers), namespaced -------
 export * as ContactsModule from "./modules/contacts";
