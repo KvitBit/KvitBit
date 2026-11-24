@@ -253,7 +253,7 @@ describe("dynamic colour hardening", () => {
     const pick = () => Object.fromEntries(roles.filter(() => rnd() < 0.08).map((r) => [r, hex()]));
     return Array.from({ length: 20 }, () => ({ light: pick(), dark: pick() }));
   })();
-  const CONFLICTING_CHUNK = 4;
+  const CONFLICTING_CHUNK = 2;
   for (let from = 0; from < conflictingCases.length; from += CONFLICTING_CHUNK) {
     const chunk = conflictingCases.slice(from, from + CONFLICTING_CHUNK);
     test(
@@ -374,13 +374,13 @@ describe("dynamic colour hardening", () => {
     HEAVY_TIMEOUT,
   );
 
-  test(
-    "any single supplied role leaves a passing standard scheme on both sides",
-    () => {
-      const roles = Object.keys(KvitbitDefaultTheme.schemes.light.roles);
-      for (const role of roles)
-        for (const colour of ["#777777", "#FFD600", "#0000FF"])
-          for (const side of ["light", "dark"] as const) {
+  // one test per colour and side keeps each well under bun's default timeout on a loaded machine
+  for (const colour of ["#777777", "#FFD600", "#0000FF"])
+    for (const side of ["light", "dark"] as const)
+      test(
+        `any single supplied role leaves a passing standard scheme (${colour}, ${side})`,
+        () => {
+          for (const role of Object.keys(KvitbitDefaultTheme.schemes.light.roles)) {
             const input =
               side === "light"
                 ? { light: { [role]: colour }, dark: {} }
@@ -394,9 +394,9 @@ describe("dynamic colour hardening", () => {
             });
             expect(d[side][role as "primary"]).toBe(colour);
           }
-    },
-    HEAVY_TIMEOUT,
-  );
+        },
+        HEAVY_TIMEOUT,
+      );
 
   test("a mid-grey system primary gets an onPrimary that reaches AA", () => {
     const roles = Result.getOrThrow(
