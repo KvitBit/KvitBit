@@ -15,8 +15,10 @@
  * - service.ts  record, remove, listFor.
  *
  * Documents are reached only through documents' payments seam `DocumentPayments` (board
- * #554/#571; it runs inside this module's transaction and never authorizes), `DocumentsRepo.get`
- * (listFor's existence check) and `DocumentSender.send` (PTD auto-send).
+ * #554/#571; it runs inside this module's transaction and never authorizes), the narrow read
+ * port `PaymentDocuments` (documentReads.ts: exists, printed paymentMethod, view; bound by
+ * `PaymentDocumentsLive` to documents' exported `DocumentsRepo`/`viewOf`, board #386
+ * amendment) and `DocumentSender.send` (PTD auto-send).
  *
  * Rules:
  * - Authorization: `payment.write` for record/remove, `payment.read` for listFor, before the
@@ -27,7 +29,7 @@
  *   Amount defaults to what is outstanding (owed - paid, credit aware; nothing outstanding ->
  *   Invalid{amount, required}), paidOn to today (Prague), method to the document's printed one
  *   (bank_transfer for expenses); the amount must be positive, within the currency's minor unit
- *   and numeric(18,2), and in the target's currency (P1, Invalid{payment.currency_mismatch}).
+ *   and numeric(18,2) (scale <= 2 even for three-decimal currencies), and in the target's currency (P1, Invalid{payment.currency_mismatch}).
  *   Only issued, not fully credited Invoices and Proformas take payments, locked ones too (P4).
  *   The target's paid total is recomputed from its live rows; documents derives the settlement
  *   and writes the one audit entry on the Document (payment.record, with the payment's
@@ -50,10 +52,12 @@
  */
 import { Layer } from "effect";
 import { DocumentsTestLayer } from "../documents";
+import { PaymentDocumentsLive } from "./documentReads";
 import { PaymentFakesLive } from "./fakes";
 import { PaymentsRepoMemory } from "./repo";
 import { PaymentsLive } from "./service";
 
+export { PaymentDocuments, PaymentDocumentsLive } from "./documentReads";
 export type { SeedExpense } from "./fakes";
 export { PaymentFakesLive, PaymentFixtures } from "./fakes";
 export type { ExpensePayable, ExpenseSettlement } from "./ports";
@@ -81,5 +85,12 @@ export { listFor, PaymentsLive, record, remove } from "./service";
  * documents' stub), over `DocumentsTestLayer`. Requires `InMemoryPortsLive`.
  */
 export const PaymentsTestLayer = PaymentsLive.pipe(
-  Layer.provideMerge(Layer.mergeAll(DocumentsTestLayer, PaymentsRepoMemory, PaymentFakesLive)),
+  Layer.provideMerge(
+    Layer.mergeAll(
+      PaymentDocumentsLive.pipe(Layer.provide(DocumentsTestLayer)),
+      DocumentsTestLayer,
+      PaymentsRepoMemory,
+      PaymentFakesLive,
+    ),
+  ),
 );

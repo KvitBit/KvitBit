@@ -88,7 +88,10 @@ export class PaymentFixtures extends Context.Service<
       readonly settlement: ExpenseSettlement;
     }>;
     readonly setAutoSend: (workspaceId: WorkspaceId, on: boolean) => Effect.Effect<void>;
-    /** Makes every later `DocumentSender.send` fail with `error` (null: succeed again). */
+    /**
+     * Makes every later `DocumentSender.send` write its delivery row and then fail with `error`
+     * (null: succeed again).
+     */
     readonly failSends: (error: Conflict | Invalid | NotFound | null) => Effect.Effect<void>;
     /** Documents sent through the fake `DocumentSender`, in order. */
     readonly sent: (workspaceId: WorkspaceId) => Effect.Effect<ReadonlyArray<DocumentId>>;
@@ -158,12 +161,13 @@ export const PaymentFakesLive: Layer.Layer<
           send: (id) =>
             Effect.gen(function* () {
               const { workspaceId } = yield* authorizeInWorkspace("document.send");
-              const failure = yield* Ref.get(sendFailure);
-              if (failure !== null) return yield* Effect.fail(failure);
               const deliveryId = yield* Effect.provideContext(newId<DeliveryId>(), idGen);
               yield* deliveries
                 .insert({ id: deliveryId, workspaceId, revision: 1, documentId: id })
                 .pipe(Effect.orDie);
+              // A refusal after the delivery row is written: the caller's savepoint must drop it.
+              const failure = yield* Ref.get(sendFailure);
+              if (failure !== null) return yield* Effect.fail(failure);
               return { deliveryId, status: "queued" as const };
             }),
           previewSend: () => Effect.die(new Error("previewSend: not faked for Payments")),

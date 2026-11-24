@@ -28,7 +28,8 @@ import { withIdempotency } from "../../shared/idempotency";
 import type { IdGenerator } from "../../shared/ids";
 import { newId } from "../../shared/ids";
 import { CoreStore } from "../../store/CoreStore";
-import { DocumentPayments, DocumentSender, DocumentsRepo, now, viewOf } from "../documents";
+import { DocumentPayments, DocumentSender, now } from "../documents";
+import { PaymentDocuments } from "./documentReads";
 import { ExpensePayables, PaymentSettings } from "./ports";
 import type { PaymentRecord } from "./record";
 import { RecordPaymentInputSchema, RecordResultCodec, toView } from "./record";
@@ -40,7 +41,7 @@ export type PaymentsDeps =
   | IdGenerator
   | PaymentsRepo
   | DocumentPayments
-  | DocumentsRepo
+  | PaymentDocuments
   | DocumentSender
   | ExpensePayables
   | PaymentSettings;
@@ -86,6 +87,7 @@ const asSettled = (settlement: string): Effect.Effect<Settled> =>
 
 /** The `payments.amount` column: numeric(18,2). */
 const MAX_AMOUNT = BigDecimal.fromStringUnsafe("9999999999999999.99");
+const COLUMN_SCALE = 2;
 
 /**
  * The amount to book: the given one or what is outstanding. It must be positive, in the
@@ -104,7 +106,7 @@ const amountFor = (
     const amount = BigDecimal.normalize(given?.amount ?? outstanding);
     if (
       !BigDecimal.isPositive(amount) ||
-      amount.scale > MoneyMath.minorUnitScale(currency) ||
+      amount.scale > Math.min(MoneyMath.minorUnitScale(currency), COLUMN_SCALE) ||
       BigDecimal.isGreaterThan(amount, MAX_AMOUNT)
     ) {
       return yield* malformed("amount", "out_of_range");
@@ -176,8 +178,9 @@ const skipped = (workspaceId: WorkspaceId, ptd: DocumentId, reason: string) =>
  * P2 auto-send (7.2) when `autoSendPaymentTaxDocument` is on, as the caller, in a savepoint of
  * the recording transaction. The payment and its PTD commit either way: a caller who may not
  * send (a token without documents:write) or a delivery precondition the sender refuses
- * (NotFound, Conflict, Invalid: e.g. no recipient) skips the send with an audit entry on the
- * PTD; infrastructure failures propagate. Returns the PTD view as of the send.
+ * (Conflict{illegal_transition}, Invalid: e.g. no recipient) skips the send with an audit entry
+ * on the PTD, the savepoint dropping any partial delivery; NotFound, other Conflicts and
+ * infrastructure failures roll the payment back. Returns the PTD view as of the send.
  */
 const autoSend = (workspaceId: WorkspaceId, ptdId: DocumentId, ptd: DocumentView) =>
   Effect.gen(function* () {
@@ -190,10 +193,13 @@ const autoSend = (workspaceId: WorkspaceId, ptdId: DocumentId, ptd: DocumentView
     const sender = yield* DocumentSender;
     const sent = yield* store.transaction(sender.send(ptdId)).pipe(
       Effect.as(true),
+      // Recoverable delivery refusals only: the PTD's state (illegal_transition) or its
+      // recipients (Invalid). A missing PTD or a revision race is an invariant failure.
       Effect.catchTags({
-        NotFound: (e) => Effect.as(skipped(workspaceId, ptdId, `NotFound:${e.entity}`), false),
         Conflict: (e) =>
-          Effect.as(skipped(workspaceId, ptdId, `Conflict:${e.detail ?? e.reason}`), false),
+          e.reason === "illegal_transition"
+            ? Effect.as(skipped(workspaceId, ptdId, `Conflict:${e.detail ?? e.reason}`), false)
+            : Effect.fail(e),
         Invalid: (e) =>
           Effect.as(
             skipped(workspaceId, ptdId, `Invalid:${e.issues.map((i) => i.code).join(",")}`),
@@ -202,7 +208,7 @@ const autoSend = (workspaceId: WorkspaceId, ptdId: DocumentId, ptd: DocumentView
       }),
     );
     if (!sent) return ptd;
-    return yield* viewOf(yield* (yield* DocumentsRepo).get(workspaceId, ptdId));
+    return yield* (yield* PaymentDocuments).view(workspaceId, ptdId);
   });
 
 const recordOnDocument = (workspaceId: WorkspaceId, id: DocumentId, input: RecordPaymentInput) =>
@@ -224,7 +230,7 @@ const recordOnDocument = (workspaceId: WorkspaceId, id: DocumentId, input: Recor
     const outstanding = BigDecimal.subtract(on.owed.amount, on.paid.amount);
     const amount = yield* amountFor(input.amount, on.currency, outstanding);
     // The method defaults to the one the document prints (C4).
-    const printed = (yield* (yield* DocumentsRepo).get(workspaceId, on.id)).paymentMethod;
+    const printed = yield* (yield* PaymentDocuments).paymentMethod(workspaceId, on.id);
     const inserted = yield* newRow(
       workspaceId,
       { documentId: on.id, expenseId: null },
@@ -435,7 +441,7 @@ export const listFor = (target: PaymentTarget) =>
     return yield* store.transaction(
       Effect.gen(function* () {
         if ("document" in target) {
-          yield* (yield* DocumentsRepo).get(workspaceId, target.document);
+          yield* (yield* PaymentDocuments).exists(workspaceId, target.document);
           return (yield* repo.liveFor(workspaceId, target)).map(toView);
         }
         // ExpensePayables exposes no plain read; its row lock is the existence check.

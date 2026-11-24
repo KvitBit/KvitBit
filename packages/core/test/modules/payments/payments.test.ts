@@ -433,7 +433,9 @@ describe("Proformas: Payment Tax Documents (P2) and the Final Invoice (D8)", () 
             member("member", { scopes: ["payments:write"] }),
             pay(pf.id, "100"),
           );
-          yield* f.failSends(new Conflict({ reason: "illegal_transition" }));
+          yield* f.failSends(
+            new Invalid({ issues: [{ path: ["recipients"], code: "request.malformed" }] }),
+          );
           const refused = yield* pay(pf.id, "100");
           const ptdOf = (r: typeof token) => docId(r.issued[0] as DocumentView);
           return [
@@ -449,11 +451,59 @@ describe("Proformas: Payment Tax Documents (P2) and the Final Invoice (D8)", () 
     );
     const skip = (h: typeof tokenHistory) => h.find((e) => e.action === "payment.autoSendSkipped");
     expect(skip(tokenHistory)?.reason).toBe("caller_cannot_send");
-    expect(skip(refusedHistory)?.reason).toBe("Conflict:illegal_transition");
+    expect(skip(refusedHistory)?.reason).toBe("Invalid:request.malformed");
     expect(refused.issued).toHaveLength(1);
     expect(sent).toEqual([]);
     expect(list).toHaveLength(2);
     expect(token.settlement).toBe("partially_paid");
+  });
+
+  test("auto-send: an invariant failure of the sender rolls the whole payment back", async () => {
+    const [missing, stale, list, sent] = ok(
+      await run(
+        Effect.gen(function* () {
+          const f = yield* PaymentFixtures;
+          yield* f.setAutoSend(WS, true);
+          const pf = yield* issueProforma();
+          yield* f.failSends(new NotFound({ entity: "Document", id: pf.id }));
+          const missing = yield* Effect.flip(pay(pf.id, "100"));
+          yield* f.failSends(new Conflict({ reason: "revision_changed", currentRevision: 9 }));
+          const stale = yield* Effect.flip(pay(pf.id, "100"));
+          return [
+            missing,
+            stale,
+            yield* (yield* Payments).listFor({ document: pf.id }),
+            yield* f.sent(WS),
+          ] as const;
+        }),
+      ),
+    );
+    expect(missing).toBeInstanceOf(NotFound);
+    expect(stale).toEqual(new Conflict({ reason: "revision_changed", currentRevision: 9 }));
+    expect(list).toEqual([]);
+    expect(sent).toEqual([]);
+  });
+
+  test("a keyed replay on a vat_payer Proforma returns the same PTD and sends once", async () => {
+    const key = { requestKey: "bank-tx-3" as RequestKey };
+    const [first, replay, sent] = ok(
+      await run(
+        Effect.gen(function* () {
+          const f = yield* PaymentFixtures;
+          const p = yield* Payments;
+          yield* f.setAutoSend(WS, true);
+          const pf = yield* issueProforma();
+          const input = { target: { document: pf.id }, amount: czk("100") };
+          const first = yield* p.record(input, key);
+          const replay = yield* p.record(input, key);
+          return [first, replay, yield* f.sent(WS)] as const;
+        }),
+      ),
+    );
+    const ptd = docId(first.issued[0] as DocumentView);
+    expect(docId(replay.issued[0] as DocumentView)).toBe(ptd);
+    expect(view(replay.payment).taxDocument).toBe(ptd);
+    expect(sent).toEqual([ptd]);
   });
 
   test("non_vat_payer: no Payment Tax Document", async () => {
@@ -620,6 +670,24 @@ describe("expense targets", () => {
       "payment.remove",
     ]);
     expect(result.history[2]?.reason).toBe("wrong card");
+  });
+
+  test("amounts never exceed the column's two decimals, even for a three-decimal currency", async () => {
+    const KWD = "KWD" as CurrencyCode;
+    const [tooFine, ok2] = ok(
+      await run(
+        Effect.gen(function* () {
+          const p = yield* Payments;
+          const f = yield* PaymentFixtures;
+          yield* f.putExpense({ workspaceId: WS, id: EXPENSE, currency: KWD, gross: dec("10") });
+          const record = (amount: string) =>
+            p.record({ target: { expense: EXPENSE }, amount: MoneyMath.make(dec(amount), KWD) });
+          return [yield* Effect.flip(record("1.001")), yield* record("1.01")] as const;
+        }),
+      ),
+    );
+    expect(tooFine).toEqual(malformed("amount", "out_of_range"));
+    expect(ok2.settlement).toBe("partially_paid");
   });
 
   test("incomplete -> expense.incomplete; currency mismatch -> payment.currency_mismatch", async () => {
