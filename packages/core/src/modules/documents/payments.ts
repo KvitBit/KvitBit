@@ -379,12 +379,12 @@ const issuePaymentTaxDocument = (
       return yield* new Conflict({ reason: "illegal_transition" });
     }
     if (!BigDecimal.isPositive(payment.amount)) return yield* malformed("amount", "out_of_range");
+    const issuer = yield* (yield* DocumentIssuers).forDocument(workspaceId, payment.paidOn);
+    if (issuer.regime !== "vat_payer") return null;
     // The VAT rate table starts at its first entry; an earlier tax point has no rates.
     if (payment.paidOn < (VAT_RATE_TABLE[0]?.from ?? payment.paidOn)) {
       return yield* malformed("paidOn", "out_of_range");
     }
-    const issuer = yield* (yield* DocumentIssuers).forDocument(workspaceId, payment.paidOn);
-    if (issuer.regime !== "vat_payer") return null;
     // splitAdvance divides by the buckets' gross (not the rounded total).
     const bucketGross = proforma.totals.buckets.reduce(
       (sum, b) => BigDecimal.sum(sum, b.gross),

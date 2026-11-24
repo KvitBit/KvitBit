@@ -1196,6 +1196,24 @@ describe("review round 1 follow-ups", () => {
     expect(str(creditNote.refundDue.amount)).toBe("0");
   });
 
+  test("outside vat_payer a pre-2024 receipt settles with no PTD", async () => {
+    for (const regime of ["non_vat_payer", "identified_person"] as const) {
+      const result = ok(
+        await run(
+          Effect.gen(function* () {
+            const p = yield* issueProforma({
+              lines: [{ description: "Práce", unitPrice: dec("1000"), vat: "outside_scope" }],
+            });
+            return yield* pay(p.id, "100", "2023-12-31" as IsoDate);
+          }),
+          { regimeA: regime },
+        ),
+      );
+      expect(result.ptd).toBeNull();
+      expect(result.settled.settlement).toBe("partially_paid");
+    }
+  });
+
   test("a receipt before the VAT rate table is Invalid on paidOn", async () => {
     const error = ok(
       await run(
@@ -1227,7 +1245,7 @@ describe("review round 1 follow-ups", () => {
           const p = yield* issueProforma();
           const before = yield* d.get(p.id);
           const historyBefore = yield* d.history(p.id);
-          yield* Effect.flip(
+          const failure = yield* Effect.flip(
             store.transaction(
               Effect.gen(function* () {
                 yield* seam.lock(WS, p.id);
@@ -1237,14 +1255,17 @@ describe("review round 1 follow-ups", () => {
                   { amount: dec("100"), payments: 1 },
                   { action: "payment.record" },
                 );
-                yield* seam.issuePaymentTaxDocument(WS, p.id, {
+                const ptd = yield* seam.issuePaymentTaxDocument(WS, p.id, {
                   amount: dec("100"),
                   paidOn: TODAY,
                 });
+                expect(ptd?.number).toBe("DD-2026-0001");
                 return yield* Effect.fail("payment insert failed" as const);
               }),
             ),
           );
+          // The transaction failed where intended: after the PTD was issued.
+          expect(failure).toBe("payment insert failed");
           const after = yield* d.get(p.id);
           const historyAfter = yield* d.history(p.id);
           const next = (yield* pay(p.id, "100")).ptd as DocumentView;
