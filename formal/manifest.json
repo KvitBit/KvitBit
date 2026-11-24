@@ -69,6 +69,312 @@
       "toolVersions": {
         "bun": "1.4.2"
       }
+    },
+    {
+      "id": "lifecycle.model",
+      "skill": "verify-document-lifecycle",
+      "tier": 1,
+      "kind": "tlc",
+      "syncCommit": "77a5bb7",
+      "spec": "formal/lifecycle/DocumentLifecycle.tla",
+      "config": "formal/lifecycle/DocumentLifecycle.cfg",
+      "wideConfig": "formal/lifecycle/DocumentLifecycle_wide.cfg",
+      "mutants": [
+        {
+          "name": "cancel-with-payments",
+          "config": "formal/lifecycle/DocumentLifecycle_mutant_cancel_with_payments.cfg",
+          "expect": "violation",
+          "violates": {
+            "kind": "invariant",
+            "name": "CancelledProformaUnpaid"
+          },
+          "description": "cancel ignores the Proforma's recorded payments"
+        },
+        {
+          "name": "cancel-final-with-payments",
+          "config": "formal/lifecycle/DocumentLifecycle_mutant_cancel_final_with_payments.cfg",
+          "expect": "violation",
+          "violates": {
+            "kind": "invariant",
+            "name": "CancelledFinalUnpaid"
+          },
+          "description": "storno of a tax Final Invoice ignores its own payments"
+        },
+        {
+          "name": "duplicate-final",
+          "config": "formal/lifecycle/DocumentLifecycle_mutant_duplicate_final.cfg",
+          "expect": "violation",
+          "violates": {
+            "kind": "invariant",
+            "name": "OneFinalInvoice"
+          },
+          "description": "issueFinalInvoice skips the hasFinalInvoice check"
+        },
+        {
+          "name": "remove-with-deduction",
+          "config": "formal/lifecycle/DocumentLifecycle_mutant_remove_with_deduction.cfg",
+          "expect": "violation",
+          "violates": {
+            "kind": "invariant",
+            "name": "RemovedPaymentReversed"
+          },
+          "description": "Payments.remove ignores a live Final Invoice that deducts the advance"
+        },
+        {
+          "name": "no-proforma-lock",
+          "config": "formal/lifecycle/DocumentLifecycle_mutant_no_proforma_lock.cfg",
+          "expect": "violation",
+          "violates": {
+            "kind": "invariant",
+            "name": "DeductionsCurrent"
+          },
+          "description": "PTD correction reads the Proforma without its row lock (H2)"
+        },
+        {
+          "name": "credit-over-cap",
+          "config": "formal/lifecycle/DocumentLifecycle_mutant_credit_over_cap.cfg",
+          "expect": "violation",
+          "violates": {
+            "kind": "invariant",
+            "name": "CreditWithinOriginal"
+          },
+          "description": "Credit Notes skip the D7 per-bucket cap"
+        },
+        {
+          "name": "reissue-cancelled",
+          "config": "formal/lifecycle/DocumentLifecycle_mutant_reissue_cancelled.cfg",
+          "expect": "violation",
+          "violates": {
+            "kind": "action",
+            "name": "LegalTransitions"
+          },
+          "description": "issue accepts a cancelled Proforma"
+        },
+        {
+          "name": "edit-with-payments",
+          "config": "formal/lifecycle/DocumentLifecycle_mutant_edit_with_payments.cfg",
+          "expect": "violation",
+          "violates": {
+            "kind": "action",
+            "name": "FrozenWhenDepended"
+          },
+          "description": "lines edit ignores the Proforma's payments"
+        },
+        {
+          "name": "cancel-unlocked",
+          "config": "formal/lifecycle/DocumentLifecycle_mutant_cancel_unlocked.cfg",
+          "expect": "violation",
+          "violates": {
+            "kind": "invariant",
+            "name": "CancelledIsLocked"
+          },
+          "description": "cancel leaves the Proforma unlocked"
+        },
+        {
+          "name": "ptd-after-final",
+          "config": "formal/lifecycle/DocumentLifecycle_mutant_ptd_after_final.cfg",
+          "expect": "violation",
+          "violates": {
+            "kind": "invariant",
+            "name": "NoPtdAfterFinal"
+          },
+          "description": "a payment on the Proforma after its Final Invoice issues a PTD"
+        },
+        {
+          "name": "no-ptd",
+          "config": "formal/lifecycle/DocumentLifecycle_mutant_no_ptd.cfg",
+          "expect": "violation",
+          "violates": {
+            "kind": "invariant",
+            "name": "PtdPerPayment"
+          },
+          "description": "a vat_payer's payment on the Proforma issues no PTD"
+        },
+        {
+          "name": "final-unpaid",
+          "config": "formal/lifecycle/DocumentLifecycle_mutant_final_unpaid.cfg",
+          "expect": "violation",
+          "violates": {
+            "kind": "invariant",
+            "name": "FinalInvoiceOfPaidProforma"
+          },
+          "description": "issueFinalInvoice skips the payments check"
+        }
+      ],
+      "timeoutSeconds": 120,
+      "wideTimeoutSeconds": 300,
+      "coveredFiles": [
+        {
+          "path": "packages/core/src/modules/documents/transitions.ts",
+          "sha256": "cbcdf32386c7735f0f77ff090dff2d06fce8f5778b8c69e5d1913b567ccb694b"
+        },
+        {
+          "path": "packages/core/src/modules/documents/lifecycle.ts",
+          "sha256": "52ca553c677840c31266401da33f1ed8da783a53deae187706d6d24f89a1285a"
+        },
+        {
+          "path": "packages/core/src/modules/documents/final.ts",
+          "sha256": "1c7bddbbb513cb17930d6d0ed9eb325a67d7103cea9bdd8e7cd7bb3800a18531"
+        },
+        {
+          "path": "packages/core/src/modules/documents/corrections.ts",
+          "sha256": "4689ee06d5e465875b469526dbab760ebea5c34d71d6e24c129732eebdf9917d"
+        },
+        {
+          "path": "packages/core/src/modules/documents/credit.ts",
+          "sha256": "4c9758c878908e783ee53ca1776b1ab7f5111243d5174c630a3344e5be0c2d40"
+        },
+        {
+          "path": "packages/core/src/modules/documents/payments.ts",
+          "sha256": "0daa8da5b617412f35d66eb072b6d6d17913076e014140455e76f3e800cfe427"
+        },
+        {
+          "path": "packages/core/src/modules/payments/service.ts",
+          "sha256": "88ffd41bc39bde7a526a104aadf2ef9a48c512bf57211a7fe4dc75c23b39f5fc"
+        },
+        {
+          "path": "packages/core/src/store/memory.ts",
+          "sha256": "b12cacb2313336ffa34d3a9f28b13a4dcf9915bc7a00f68e9c0689a12c3a9eba"
+        },
+        {
+          "path": "packages/core/src/modules/documents/service.ts",
+          "sha256": "22d384d76b162172ee42625f2c85896ffad51634b73639f7ff6883d1571eb769"
+        },
+        {
+          "path": "packages/core/src/modules/documents/compose.ts",
+          "sha256": "545885ad5f31ca80cdf2ba21782f6db0e89557d7fb00141a7f17177fd1566f41"
+        }
+      ],
+      "guardedSymbols": [
+        "TRANSITIONS",
+        "guard",
+        "paymentsBlockCancel",
+        "hasFinalInvoice",
+        "hasDependents",
+        "cancel",
+        "lock",
+        "unlock",
+        "editIssued",
+        "issueFinalInvoice",
+        "deductionLines",
+        "plan (final.ts)",
+        "loadForCredit",
+        "plan (corrections.ts)",
+        "correct",
+        "withinRemainder",
+        "issueCreditNote",
+        "settlementOf",
+        "isFullyCredited",
+        "DocumentPayments.lock",
+        "DocumentPayments.settle",
+        "issuePaymentTaxDocument",
+        "removalBlocked",
+        "Payments.record (recordOnDocument)",
+        "Payments.remove",
+        "Documents.edit"
+      ],
+      "bounds": "base: 2 VAT buckets, 2 payment/PTD slots, 1 Final Invoice slot, one issueFinalInvoice and one PTD correction in flight, both regimes (24,800 distinct states); wide: 3 slots",
+      "assumptions": [
+        "Every service method is one CoreStore transaction; the memory store serializes transactions and Postgres row-locks with SELECT ... FOR UPDATE at READ COMMITTED in S4 order (Proforma first)",
+        "Only issueFinalInvoice and correct/cancel of a PTD are split at their row-lock acquisitions; every other method is one step because what it decides on cannot change under it: it holds the lock every writer of that row takes (Payments.remove reads the PTD unlocked, every PTD writer locks the Proforma first) or the value only moves one way (loadForCredit's unlocked Final Invoice read can only become reversed)",
+        "A failed transaction writes nothing and releases its locks",
+        "Amounts are abstract units per VAT bucket; VAT, rounding and CZK math belong to verify-vat-numbering-math",
+        "Document Lock is modelled on the Proforma and the Final Invoice only; on a PTD it only disables correct/cancel",
+        "The Issuing Entity's regime is fixed for a run (both regimes are explored)",
+        "Regimes vat_payer and non_vat_payer only; identified_person is out of scope"
+      ],
+      "toolVersions": {
+        "tla2tools": "1.7.4",
+        "java": "17"
+      }
+    },
+    {
+      "id": "lifecycle.replay",
+      "skill": "verify-document-lifecycle",
+      "tier": 1,
+      "kind": "replay",
+      "syncCommit": "77a5bb7",
+      "replay": ["formal/lifecycle/lifecycle.replay.test.ts"],
+      "timeoutSeconds": 120,
+      "coveredFiles": [
+        {
+          "path": "packages/core/src/modules/documents/transitions.ts",
+          "sha256": "cbcdf32386c7735f0f77ff090dff2d06fce8f5778b8c69e5d1913b567ccb694b"
+        },
+        {
+          "path": "packages/core/src/modules/documents/lifecycle.ts",
+          "sha256": "52ca553c677840c31266401da33f1ed8da783a53deae187706d6d24f89a1285a"
+        },
+        {
+          "path": "packages/core/src/modules/documents/final.ts",
+          "sha256": "1c7bddbbb513cb17930d6d0ed9eb325a67d7103cea9bdd8e7cd7bb3800a18531"
+        },
+        {
+          "path": "packages/core/src/modules/documents/corrections.ts",
+          "sha256": "4689ee06d5e465875b469526dbab760ebea5c34d71d6e24c129732eebdf9917d"
+        },
+        {
+          "path": "packages/core/src/modules/documents/credit.ts",
+          "sha256": "4c9758c878908e783ee53ca1776b1ab7f5111243d5174c630a3344e5be0c2d40"
+        },
+        {
+          "path": "packages/core/src/modules/documents/payments.ts",
+          "sha256": "0daa8da5b617412f35d66eb072b6d6d17913076e014140455e76f3e800cfe427"
+        },
+        {
+          "path": "packages/core/src/modules/payments/service.ts",
+          "sha256": "88ffd41bc39bde7a526a104aadf2ef9a48c512bf57211a7fe4dc75c23b39f5fc"
+        },
+        {
+          "path": "packages/core/src/store/memory.ts",
+          "sha256": "b12cacb2313336ffa34d3a9f28b13a4dcf9915bc7a00f68e9c0689a12c3a9eba"
+        },
+        {
+          "path": "packages/core/src/modules/documents/service.ts",
+          "sha256": "22d384d76b162172ee42625f2c85896ffad51634b73639f7ff6883d1571eb769"
+        },
+        {
+          "path": "packages/core/src/modules/documents/compose.ts",
+          "sha256": "545885ad5f31ca80cdf2ba21782f6db0e89557d7fb00141a7f17177fd1566f41"
+        }
+      ],
+      "guardedSymbols": [
+        "TRANSITIONS",
+        "guard",
+        "paymentsBlockCancel",
+        "hasFinalInvoice",
+        "hasDependents",
+        "cancel",
+        "lock",
+        "unlock",
+        "editIssued",
+        "issueFinalInvoice",
+        "deductionLines",
+        "plan (final.ts)",
+        "loadForCredit",
+        "plan (corrections.ts)",
+        "correct",
+        "withinRemainder",
+        "issueCreditNote",
+        "settlementOf",
+        "isFullyCredited",
+        "DocumentPayments.lock",
+        "DocumentPayments.settle",
+        "issuePaymentTaxDocument",
+        "removalBlocked",
+        "Payments.record (recordOnDocument)",
+        "Payments.remove",
+        "Documents.edit",
+        "compose (Final Invoice deduction totals)"
+      ],
+      "bounds": "30 traces on TestCore (vat_payer and non_vat_payer): the shortest path to each model action, guard traces, both serial orders of H2, the D7 cap for PTDs and the Final Invoice, four crash points (CNB fixing unavailable during PTD and Final Invoice issue; Credit Note and Final Invoice numbering exhausted); model invariants checked after every step",
+      "assumptions": [
+        "In-memory store: transactions run serially, so the H2 overlap itself is not replayed (pg-contention job)",
+        "Crash points only where a seam exists: FixtureRates.unavailable and a numbering series at its last counter (Workspaces.configureSeries)"
+      ],
+      "toolVersions": {
+        "bun": "1.4.2"
+      }
     }
   ]
 }
