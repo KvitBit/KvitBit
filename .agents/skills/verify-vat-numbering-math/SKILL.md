@@ -19,7 +19,7 @@ bun test --cwd packages/core test/engines/vat-rounding.property.test.ts test/eng
 
 Expected: 21 pass, 0 fail, about 4 s in total. One of the 21 is `test.failing` (the open finding below): it passes while the finding stands. One file at a time: `bun test --cwd packages/core test/engines/<file>`. The checks are also part of the normal `bun test` in `packages/core`.
 
-The central coverage record is `formal/manifest.json`. `bun run verify:formal --check-digests` reports any covered file whose content changed since its entry was last confirmed. Both are maintained by the formal-verification foundation stream. If they are not on your branch yet, use the table below.
+The central coverage record is `formal/manifest.json`; this skill's entries are `vat.rounding-residue`, `vat.buckets-czk`, `numbering.grammar`, `numbering.format-periods` and `advance-chain.net-to-zero`. `bun run verify:formal --check-digests` reports any covered file whose content changed since its entry was last confirmed. The table below lists the same coverage per check.
 
 ## Does my change touch this?
 

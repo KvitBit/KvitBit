@@ -37,7 +37,7 @@ Passes in about 5 seconds (72 tests, 1 skipped: the wide bound). A `CoreStore.af
 ### PR-time bound and nightly wide bound
 
 - PR time (the command above, and `bun run test`): every normalized grant (3^10) plus the session, every raw list over at most two areas (both orders), and the all-areas write-only list. It misses raw (unnormalized) lists over three or more areas, such as `contacts:write, documents:read, payments:write`.
-- Nightly and at every sync-commit move: the wide run below checks `can()` on every raw list (4^10) and closes that gap. It is skipped unless `KVITBIT_FORMAL_WIDE=1` is set. Run the command below at each sync-commit move. Scheduled coverage begins once a nightly job invokes this test with `KVITBIT_FORMAL_WIDE=1`; `bun run verify:formal --wide` alone does not set it. At sync commit 77a5bb7 the only workflow, `.github/workflows/ci.yml`, runs on pushes and pull requests and does not set it.
+- Nightly and at every sync-commit move: the wide run below checks `can()` on every raw list (4^10) and closes that gap. It is skipped unless `KVITBIT_FORMAL_WIDE=1` is set. Run the command below at each sync-commit move. `.github/workflows/nightly.yml` runs `bun run test` with `KVITBIT_FORMAL_WIDE=1`, and `turbo.json` lists the variable in the test task's `env` so turbo passes it through and keys its cache on it; `bun run verify:formal --wide` alone does not set it.
 - Residual risk: `Workspaces.enter` (`packages/core/src/modules/workspaces/live.ts:745`) passes `opts.scopes` through unchanged, which is why unnormalized lists can reach the policy at all. A `can()` regression that shows only on a raw list over three or more areas is caught by the wide run, not on the PR. The wide run builds its own Member callers and calls `can()` directly, so it does not check `Workspaces.enter` itself: if `enter` dropped or changed scopes while building the caller, no check in this skill would notice.
 
 Wide bound (accepted by the ADR-0005 orchestration as nightly/sync-time per its CI split), about 50 seconds:
@@ -48,7 +48,7 @@ KVITBIT_FORMAL_WIDE=1 bun test --cwd packages/core ./test/policy/can.property.te
 
 Tool: bun 1.4.2 (root `packageManager`; also confirmed on bun 1.4.4), effect 4.1.4. `bun run test` runs it with the rest of `@kvitbit/core`.
 
-The repo-wide coverage record is `formal/manifest.json`, kept centrally by the ADR-0005 formal runner (it lands with the integration of the ADR-0005 streams, not in this skill's commit); once present, `bun run verify:formal --check-digests` reports checks whose covered files changed since they were last confirmed. Update this skill's entry there when you move the sync commit.
+The repo-wide coverage record is `formal/manifest.json`; this skill's entry is `auth-policy.can`. `bun run verify:formal --check-digests` reports checks whose covered files changed since they were last confirmed. Update the entry there when you move the sync commit (`bun run verify:formal --update-digests --only auth-policy.can`).
 
 ## Bounds (exact counts, asserted in the test)
 

@@ -35,7 +35,7 @@ bun test --cwd packages/api-contract ./test/access.property.test.ts ./test/acces
 
 About 0.6 seconds and 5.5 seconds. The example files carry cases the enumeration relies on rather than repeats: empty and foreign-currency `sum`, inconsistent presets, reordered preset lists, and the OAuth precedence examples. Tool: bun 1.4.2 (root `packageManager`; also confirmed on bun 1.4.4), effect 4.1.4. `bun run test` runs both with their packages.
 
-The repo-wide coverage record is `formal/manifest.json`, kept centrally by the ADR-0005 formal runner (it lands with the integration of the ADR-0005 streams, not in this skill's commit); once present, `bun run verify:formal --check-digests` reports checks whose covered files changed since they were last confirmed. Update these entries there when you move the sync commit.
+The repo-wide coverage record is `formal/manifest.json`; this skill's entries are `money.rounding` and `access.scopes`. `bun run verify:formal --check-digests` reports checks whose covered files changed since they were last confirmed. Update these entries there when you move the sync commit (`bun run verify:formal --update-digests --only money.rounding --only access.scopes`).
 
 ## Bounds (exact counts, asserted in the tests)
 
@@ -56,7 +56,7 @@ Access (oracle: 20-bit mask, bit 2i read and 2i + 1 write of area i):
 
 - Effect's `BigDecimal` is exact; the oracle compares with `BigDecimal.equals`, so scale (1.5 vs 1.50) is not checked.
 - Codes not in ISO 4217's list of non-2-decimal currencies use 2 decimals: a product fallback in `money.ts`, kept as is in the oracle.
-- `multiply` is not covered. `MoneyMath.round` is not the rounding the VAT engine and reports use: they call `roundAt` in `packages/core/src/engines/decimal.ts`, covered by the VAT engine check of the ADR-0005 streams (`verify-vat-numbering-math`, landing with their integration), not here.
+- `multiply` is not covered. `MoneyMath.round` is not the rounding the VAT engine and reports use: they call `roundAt` in `packages/core/src/engines/decimal.ts`, covered by the VAT engine check of the ADR-0005 streams (`verify-vat-numbering-math`), not here.
 - Mixed OAuth requests follow the `accessFromOAuthScopes` docblock reading of 6.3: `kvitbit:write` wins over everything; `kvitbit:read` plus per-area scopes is custom on top of the ten reads. Requests mixing per-area scopes of both halves with the presets are covered only through the closed-set round trip.
 - The canonical order "per area, read before write, areas in `SCOPE_AREAS` order" comes from `access.ts` and the area list at http-mcp-contracts.md:95; the spec does not otherwise fix an order.
 - Schema-backed calls cost 15-40 µs each, so `GrantedAccess` and `accessFromOAuthScopes` run on the closed sets and half-subsets, not all 2^20 raw lists. The role cap on grants (accountant read-only) is server code and not covered.

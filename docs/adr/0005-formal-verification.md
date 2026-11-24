@@ -118,12 +118,39 @@ Tier 3, optional or nightly.
 | Chain-wide conservation identity (net to zero) | Lean 4 or Z3, only if justified | unbounded | VAT or totals that do not reverse exactly |
 | Cluster runner and PgBouncer stress | nightly E2E | *to measure* | stuck or duplicated workflows under production pooling |
 
-### Hypotheses pending Tier 1 models
+### Hypotheses and their verdicts
 
-None of these is a confirmed bug; the first models confirm or refute them.
-- **H1:** a number override racing allocation under the S3 locking order.
-- **H2:** a PTD correction interleaving with Final Invoice finalization.
-- **H3:** outbox claim or reconcile recovery after a crash between claim and send.
+The council listed three hypotheses before any model existed. The Tier 1 models settled them at sync commit `77a5bb7`. A refutation holds only within the stated bounds and for the protocol as modelled; there is no Postgres `CoreStore` yet, so Postgres locking is assumed from the `CoreStore` port docblocks. Paths without a package prefix are under `packages/core/src/`.
+
+- **H1, a number override racing allocation under the S3 locking order: refuted within bounds** (`verify-numbering`, `numbering.allocator` and `numbering.replay`). An issue locks the draft row first (`modules/documents/lifecycle.ts:163`), then the counter row (`modules/numbering/service.ts:361`). Issue and override reserve through the same `tryReserve` primary key (`service.ts:369` and `:386`, `store/numbering.ts:63-70`, `number_reservations` in `packages/db/drizzle/20261123175822_init/migration.sql:709`). An issue skips a number an override already holds (`service.ts:376-377`), and an override never moves the counter (`service.ts:383-395`). The `documents` unique number index (`modules/documents/record.ts:236`) backs this up. The second of two overrides was checked only by serial replay (R3).
+- **H2, a PTD correction interleaving with Final Invoice finalization: refuted within bounds** (`verify-document-lifecycle`, `lifecycle.model` and `lifecycle.replay`). Both paths lock the Proforma first (`modules/documents/final.ts:209`, `corrections.ts:204`, `lifecycle.ts:597`). A PTD the Final Invoice already deducted cannot be credited (`corrections.ts:206-214` and `:235`, `lifecycle.ts:599`), and the Final Invoice reads the PTD Credit Notes only after taking the lock (`final.ts:65-69`). The mutant without the Proforma lock finds an 8-step counterexample.
+- **H3, outbox recovery after a crash between claim and send: confirmed at core scope** (`verify-outbox-recurring`, `outbox.recurring` and `outbox.replay`). No query in core finds deliveries left `queued` or `sending`: `pendingSendRuns` lists only issued schedule runs whose send is still `pending` (`modules/recurring/repo.ts:300`), `DeliveriesRepo` has no such query (`modules/documents/deliveries/repo.ts:21-62`), and nothing reads the `deliveries_pending_idx` index. After the crash the delivery stays `sending` with zero provider attempts. The model passes only with the planned J1a delivery reconcile added; that reconcile is not in core yet. This is finding F3 below.
+
+## Findings
+
+The checks found these in the product code at `77a5bb7`. They are reported for separate product commits. The properties stay strict: no check was weakened to make them pass, and no product code changed in this work.
+
+- **F1, Final Invoice CZK VAT disagrees with the VAT report** (`verify-vat-numbering-math`). The Final Invoice stores its CZK VAT as the whole Proforma's VAT converted at the Final Invoice rate minus the CZK VAT stored on its PTDs (rule D8, `modules/documents/compose.ts` around lines 673-700). The VAT report instead converts the net per VAT bucket in document currency at the Final Invoice rate (`modules/reports/compute.ts:108`, used by `modules/documents/reports.ts:34`). With seed 58256 the two differ by 131.29 CZK. The check is held as a marked `test.failing` in `packages/core/test/engines/advance-chain.property.test.ts`; it turns red when either side changes. Which rule is correct is an open product decision.
+- **F2, issuing reserves a number before its document row exists, which Postgres rejects** (`verify-numbering`). `number_reservations_document_fk` (`migration.sql:926`) is not deferrable, but these paths call `tryReserve` for a document they have not inserted yet: `Documents.issue({input})` (`lifecycle.ts:186` before the insert at `:188`), Credit Notes (`credit.ts:389` before `:400`) and PTDs (`payments.ts:430` before `:438`). The correction preview (`corrections.ts:359`) reserves for a document it never inserts. On Postgres the insert fails and aborts the transaction, which breaks the `tryReserve` promise not to abort (`store/CoreStore.ts:121-125`). A PGlite run reproduces it; the in-memory store has no foreign keys, so the core tests pass.
+- **F3, a delivery whose worker crashed between claim and provider call is never sent** (`verify-outbox-recurring`; this is H3). The delivery stays `sending` and nothing picks it up again.
+- **F4, a crash between the send commit and the afterCommit workflow start leaves the delivery `queued` forever** (`verify-outbox-recurring`). The cause is the same missing reconcile. The mutant `no-reconcile-lost-start` and the replay case "CrashWorker before Hook" show it.
+
+## Residual risks
+
+Each skill lists its exact assumptions and gaps; this is the summary.
+
+- **R1, authorization** (`verify-auth-policy`). On PRs `can()` is checked on every normalized grant and on raw scope lists of up to two areas. Raw lists of three or more areas, which `Workspaces.enter` can pass unnormalized (`modules/workspaces/live.ts:745`), are checked only by the nightly run with `KVITBIT_FORMAL_WIDE=1` (about 49 s). No check covers how `Workspaces.enter` builds the caller's scopes.
+- **R2, VAT** (`verify-vat-numbering-math`). The VAT rate table has a single entry, so the checks show that a Credit Note inherits the original rate but not that it ignores a later, different rate. The chain check runs only the VAT payer regime with `CZ_BUYER` and `paymentRounding` `none`, on the in-memory store.
+- **R3, numbering** (`verify-numbering`, `verify-idempotency-cas`). The wide run with two overrides did not finish (28.6 million states in 30 minutes), so the second override is covered by serial replay only. MCP preview and confirm tokens are not in core (only helpers in `packages/api-contract/src/mcp.ts`), so the request_log check does not cover them.
+- **R4, lifecycle and outbox** (`verify-document-lifecycle`, `verify-outbox-recurring`). Core has no seam to crash before commit inside `final.ts:214-234` or `credit.ts:400-428`, no J1a reconcile query, no workflow engine, and the sealed System caller is not exported. The in-memory store runs one transaction at a time, so every replay interleaves only between transactions.
+
+### Postgres 17 contention backlog
+
+Every locking claim above rests on Postgres behaving as the `CoreStore` docblocks say. The path-filtered Postgres 17 job (`*.contention.ts`) has to check it once a Postgres `CoreStore` exists. Each skill holds the detailed list:
+- numbering (`verify-numbering`): issue against override and against draft edits on the row lock, counter serialization per period, rollback restoring the counter, `tryReserve` as `ON CONFLICT DO NOTHING`, the S4 lock order and its retries, and F2;
+- request_log and revision CAS (`verify-idempotency-cas`): claim waits, `SELECT … FOR UPDATE`, unique-violation handling and serialization retries in the SQL adapter;
+- lifecycle (`verify-document-lifecycle`): `issueFinalInvoice` against a PTD correction or cancellation of the same Proforma, and `Payments.record` against `issueFinalInvoice`;
+- outbox and recurring (`verify-outbox-recurring`): competing `issue` and `send` on one schedule, the schedule revision CAS and the occurrence unique indexes, `claim` against a record transaction, overlapping dispatches, afterCommit firing only after the real COMMIT, and the reconcile query racing a committing send.
 
 ## Considered Options
 
