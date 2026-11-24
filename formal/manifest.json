@@ -137,7 +137,7 @@
             "kind": "invariant",
             "name": "OneDeliveryPerOccurrence"
           },
-          "description": "send queues again for an already queued run (issuance.ts:326-328 dropped): two deliveries"
+          "description": "send sends again for an already queued run (issuance.ts:326-332, the queued replay and the pending-only check, dropped): two deliveries"
         },
         {
           "name": "skip-occurrence",
@@ -247,7 +247,7 @@
         "RecurringDocumentLink.link",
         "documents(schedule_id, occurrence) unique key"
       ],
-      "bounds": "base: 1 occurrence, 2 recurring workers, 2 crashes at any crash point, 1 duplicate or stale start, 1 provider failure (5 outcomes incl. outcome_unknown sent/not sent), 1 dispatch attempt per execution; wide (nightly): 2 occurrences, same budgets; mutants: 1 occurrence (2 for skip-occurrence), 1 crash",
+      "bounds": "base: 1 occurrence, 2 recurring workers, 2 crashes at any crash point, 1 duplicate or stale start, 2 provider failures (5 outcomes incl. outcome_unknown sent/not sent), 2 dispatch attempts per execution; wide (nightly): 2 occurrences, 1 provider failure, 2 attempts; mutants: 1 occurrence (2 for skip-occurrence), 1 crash",
       "assumptions": [
         "Each transaction is one step: the schedule row lock (issuance.ts lockSchedule) and the memory store's serialized transactions make it atomic; Postgres locking is not checked here (pg-contention)",
         "DocumentDelivery runs keyed by the delivery id: a start for a live execution attaches to it (J1); modelled as one execution slot per delivery",

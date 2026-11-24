@@ -34,6 +34,7 @@ import type {
   ContactId,
   CurrentCaller as CurrentCallerTag,
   DeliveryId,
+  DocumentId,
   IsoDate,
   MemberCaller,
   ScheduleId,
@@ -321,15 +322,21 @@ test("DupStart, IssueCommit(replay), SendCommit(replay): concurrent and repeated
     Effect.gen(function* () {
       const both = yield* Effect.all([runOccurrence(w), runOccurrence(w)], { concurrency: 2 });
       const again = yield* runOccurrence(w);
+      const all = yield* runs(w);
       return {
         both,
         again,
-        runs: yield* runs(w),
+        runs: all,
         invoices: yield* invoices,
+        rows: yield* Effect.flatMap(DeliveriesRepo, (repo) =>
+          repo.byDocument(w.workspaceId, all[0]?.document?.id as DocumentId),
+        ),
         started: yield* started,
       };
     }),
   );
+  // OneDeliveryPerOccurrence: one delivery row for the occurrence's document.
+  expect(r.rows).toHaveLength(1);
   const issued = r.both.map((x) => x.issue._tag === "Issued" && x.issue.replayed);
   expect(issued.sort()).toEqual([false, true]);
   expect(r.again.issue).toMatchObject({ _tag: "Issued", replayed: true });
@@ -392,7 +399,16 @@ test("CrashWorker inside SendCommit: the delivery rolls back and no workflow sta
       Effect.gen(function* () {
         yield* Ref.set(yield* CrashInSend, true);
         const crashed = yield* Effect.exit(runOccurrence(w));
-        const afterCrash = { runs: yield* runs(w), started: yield* started };
+        const crashedRuns = yield* runs(w);
+        const documentId = crashedRuns[0]?.document?.id as DocumentId;
+        const afterCrash = {
+          runs: crashedRuns,
+          // The delivery row itself is gone, not only the run's link to it.
+          rows: yield* Effect.flatMap(DeliveriesRepo, (repo) =>
+            repo.byDocument(w.workspaceId, documentId),
+          ),
+          started: yield* started,
+        };
         const pending = yield* pendingSends;
         const rerun = yield* runOccurrence(w);
         return {
@@ -408,6 +424,7 @@ test("CrashWorker inside SendCommit: the delivery rolls back and no workflow sta
   );
   expect(Exit.isFailure(r.crashed)).toBe(true);
   expect(r.afterCrash.runs[0]?.delivery ?? null).toBeNull();
+  expect(r.afterCrash.rows).toHaveLength(0);
   expect(r.afterCrash.started).toHaveLength(0);
   expect(r.pending.map((p) => p.occurrence)).toEqual([TODAY]);
   expect(r.rerun.send).toMatchObject({ _tag: "Queued", replayed: false });
@@ -435,8 +452,10 @@ test("CrashWorker before Hook, ReconcileDelivery: the committed delivery stays q
 });
 
 test("FINDING H3 (77a5bb7): Claim, CrashDelivery(dispatch); core's own recovery never sends the claimed email", async () => {
-  // Pins the current gap; when core gains the J1a delivery reconcile this test must turn red
-  // and be replaced by one that drives that reconcile (skill: Hypothesis H3).
+  // Pins the current gap: no entry point core has at 77a5bb7 recovers the claimed delivery.
+  // A future delivery reconcile is a new entry point this test does not call, so it will not
+  // turn red by itself: whoever adds the reconcile replaces this test with one that drives it
+  // (skill: Hypothesis H3).
   const r = await scenario((w) =>
     Effect.gen(function* () {
       const deliveryId = yield* queuedDelivery(w);

@@ -44,7 +44,7 @@ CONSTANTS
   StartAfterCommit,   \* send.ts:242 afterCommit(jobs.start), memory.ts:162-197
   DeliveryReconcile,  \* J1a OutboxReconcile for queued/sending deliveries (cron not in core)
   RecurringReconcile, \* issuance.ts:393 pendingSends, rerun `run` (J1a)
-  SendReplayGuard,    \* issuance.ts:326-328 a queued run is replayed, not sent again
+  SendReplayGuard,    \* issuance.ts:326-332 only a pending run sends; a queued one replays
   AdvanceBy,          \* occurrences next_occurrence moves per issue (occurrenceAfter: 1)
   \* breaks (FALSE in the base)
   ClaimFailsQueued,   \* claim marks a queued delivery failed without sending

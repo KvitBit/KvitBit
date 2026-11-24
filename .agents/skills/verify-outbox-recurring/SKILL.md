@@ -20,7 +20,7 @@ From the repo root (TLC 1.7.4 and JDK 17 come from `formal/toolchain/`; Bun 1.4.
 bun run verify:formal --only outbox.recurring --only outbox.replay
 ```
 
-Expected: `PASSED: 2 passed`, about 13 s. The base passes, all ten mutants report a violation, and the replay gives 11 pass, 0 fail. One replay test, "FINDING H3", pins the open finding below: it passes while the finding stands. The base explores 2,827 distinct states; the TLC log's last line gives that count. The runner prints the count from TLC's first progress line, so it can show fewer. The nightly wide bounds run with `bun run verify:formal --wide --only outbox.recurring` (about 2 minutes, 153,589 distinct states). To run one harness alone: `bun test ./formal/outbox/outbox.replay.test.ts`. TLC logs are in `formal/.cache/logs/outbox.recurring.*.log`.
+Expected: `PASSED: 2 passed`, about 15 s. The base passes, all ten mutants report a violation, and the replay gives 11 pass, 0 fail. One replay test, "FINDING H3", pins the open finding below: it passes while the finding stands. The base explores 8,895 distinct states; the TLC log's last line gives that count. The runner prints the count from TLC's first progress line, so it can show fewer. The nightly wide bounds run with `bun run verify:formal --wide --only outbox.recurring` (about 3 minutes, 195,456 distinct states). To run one harness alone: `bun test ./formal/outbox/outbox.replay.test.ts`. TLC logs are in `formal/.cache/logs/outbox.recurring.*.log`.
 
 Read every TLC result, pass or counterexample, with the `/statechart` skill. Run it on `formal/outbox/OutboxRecurring.tla` with the config in question, from a scratch folder outside the repo. Its report gives the shortest path to each broken rule as steps in plain words. A view module that labels the states per occurrence ("email queued", "email claimed", "delivery job died") makes the paths readable. The base has more states than the chart budget, so `/statechart` draws only bug paths.
 
@@ -63,9 +63,13 @@ Model actions and the code they stand for. Each is one transaction or one extern
 - `ReconcileRecurring`: OutboxReconcile through `pendingSends`, which reruns `run`. `ReconcileDelivery`: OutboxReconcile (J1a) re-executes `deliver` for a `queued` or `sending` delivery whose execution is not live.
 - `CrashWorker`, `CrashDelivery`: a process dies. Open transactions roll back and pending afterCommit hooks are lost. The crash points are a recurring job (any step), and a delivery execution at `claim`, `dispatch` (claimed, before the provider call: H3), `record` (after the provider call) and `giveup`.
 
-## Hypothesis H3 (crash between claim and send): CONFIRMED at 77a5bb7
+## Hypothesis H3 (crash between claim and send)
 
-Open finding (reported, not fixed). When a delivery job dies after `claim` committed `sending` and before the provider call, nothing in core ever sends that email:
+- **Confirmed at core scope (77a5bb7):** core has no restart path for a claimed delivery. Nothing in core ever sends it again.
+- **Open in a deployed system:** permanent loss there depends on what integration adds: the J1a delivery reconcile, or a workflow engine that resumes the interrupted DocumentDelivery.
+- **Refuted, bounded, for code plus the designed J1a reconcile:** the base pass below.
+
+Open finding (reported, not fixed). When a delivery job dies after `claim` committed `sending` and before the provider call:
 
 1. A recurring run issues the occurrence; the send transaction queues the delivery and records the run `send: "queued"` (`issuance.ts:351-355`); the job starts after commit.
 2. The job's `claim` moves the delivery `queued -> sending` (`steps.ts:67-81`).
@@ -81,11 +85,11 @@ What fixes it: the OutboxReconcile half for deliveries that core-ports J1a speci
 2. `deliver` dispatches any non-terminal status (`steps.ts:171-174`).
 3. `dispatch` sends a `sending` row (`steps.ts:88`) with `idempotencyKey: row.id` (`steps.ts:115`).
 
-The replay test "H3 with the designed J1a reconcile" shows this on the real steps. When core gains that reconcile, "FINDING H3" turns red. Replace it with a test that drives the new reconcile, and set the base comment and this section to match.
+The replay test "H3 with the designed J1a reconcile" shows this on the real steps. "FINDING H3" calls only the entry points core has today, so a new reconcile will not turn it red by itself. Whoever adds the reconcile replaces it with a test that drives the new entry point, and updates the base comment and this section.
 
 ## Mutants (each must fail)
 
-All are `.cfg` files over the same spec. Each flips flags (constants), so every mutant is one break. Mutants run with 1 occurrence and 1 crash unless noted.
+All are `.cfg` files over the same spec. Each flips flags (constants). Most are a single break. `no-occurrence-guard` is a compound break (three guards at once; the single-guard runs in the coverage record show each guard alone suffices). The `no-reconcile-*` mutants remove the designed J1a precondition, which is the code as it is. Mutants run with 1 occurrence and 1 crash unless noted.
 
 | Mutant | Break | Fails with |
 |---|---|---|
@@ -94,7 +98,7 @@ All are `.cfg` files over the same spec. Each flips flags (constants), so every 
 | `start-before-commit` | `StartAfterCommit` off (`send.ts:242`) | `StartedOnlyCommitted`: the job starts, then the send transaction rolls back |
 | `no-reconcile-h3` | the code as is (`DeliveryReconcile` off), crash only at `dispatch` | `NoLostSend`: the H3 path above (deadlock allowed so TLC reports the liveness break) |
 | `no-reconcile-lost-start` | the code as is, crash only in a recurring job | `NoLostSend`: the afterCommit start is lost, the delivery stays `queued` |
-| `no-send-replay-guard` | `SendReplayGuard` off (`issuance.ts:326-328`) | `OneDeliveryPerOccurrence`: a second run queues a second delivery |
+| `no-send-replay-guard` | `SendReplayGuard` off (`issuance.ts:326-332`: the queued replay and the pending-only check) | `OneDeliveryPerOccurrence`: a second run queues a second delivery |
 | `skip-occurrence` | `AdvanceBy = 2` (2 occurrences, no crash) | `NextFollowsIssued`: occurrence 2 is before `next` but never issued |
 | `skip-occurrence-liveness` | as `skip-occurrence`, liveness only (deadlock allowed) | `EveryOccurrenceIssued` |
 | `claim-fails` | `ClaimFailsQueued`: claim marks a queued delivery `failed` | `FailedOnlyAfterCall` (the reviewer's case: `NoLostSend` alone passes it) |
@@ -104,8 +108,10 @@ Temporal mutants declare only the one liveness property they target under `PROPE
 
 ## Bounds and assumptions
 
-- Base: 1 occurrence, 2 recurring workers, 2 crashes at any crash point, 1 duplicate or stale start, 1 provider failure (any of the 4 failure outcomes), and 1 dispatch attempt per execution (so one retryable failure leads to giveUp). Wide (nightly): 2 occurrences, same budgets.
+- Base: 1 occurrence, 2 recurring workers, 2 crashes at any crash point, 1 duplicate or stale start, 2 provider failures (any of the 4 failure outcomes), and 2 dispatch attempts per execution, so both a retry and a giveUp are reachable. Wide (nightly): 2 occurrences, 1 provider failure, 2 attempts.
 - Fairness is per component: the sweep and the recurring reconcile get strong fairness (lock waits make them flicker), the delivery reconcile, each job execution and each delivery execution get weak fairness. Crashes, duplicate starts and provider failures get no fairness and are bounded.
+- Bundled steps: a start (sweep, duplicate or reconcile) is bundled with the job's entry into the issue transaction. Dispatch's row read, render and provider call are one step; a crash between the read and the call is the same state as a crash before the read. Neither split adds a state the model can tell apart.
+- One execution slot per delivery: a re-start attaches to a live execution (J1, by key), so two overlapping dispatches of one delivery are not modelled. They could only add provider duplicates, which `NoLostSend` allows. The pg-contention list covers the overlap.
 - Each transaction is one atomic step, which holds because the schedule row lock serializes them and the memory store runs one transaction at a time (`memory.ts:196`). Postgres locking is not checked.
 - J3 re-checks (document cancelled, reminder no longer due), pauses on Documents failures, the catch-up cap, detach and edits are left out: the document stays sendable and the schedule active. Reminders and invitations are not modelled.
 - `DeliveryReconcile = TRUE` in the base is the designed J1a cron, not code at 77a5bb7 (see H3).
@@ -141,7 +147,7 @@ The pg-contention job (`*.contention.ts`) should later cover:
 
 - **Base violation (exit 12/13 on `OutboxRecurring.cfg`)**: read the path with `/statechart`, then replay it in `outbox.replay.test.ts` one step per action. If the real code does it too, it is a bug. Report the counterexample in the code's nouns and keep the property strict. If the real code does not, the model drifted from the code; fix the model and say which action was wrong.
 - **A mutant passes**: the model no longer depends on that guard, usually because an edit made the guard's action unreachable. Fix the model.
-- **"FINDING H3" fails**: core probably gained the delivery reconcile. Confirm, then follow the H3 section.
+- **"FINDING H3" fails**: an existing entry point (pendingSends, the rerun, the sweep) now recovers or starts a claimed delivery. Check that this is intended, then follow the H3 section.
 - **A replay test fails**: compare its steps with the action list above. A deliberate behavior change (for example claim now skipping `sending` rows) is drift: update the model action, the replay and this skill in one change. Anything else is a bug.
 - **Digest drift only** (`--check-digests`): run `/maintain-formal-verification-skill` and classify the check as in sync, updated, bug or blocked.
 
@@ -155,12 +161,12 @@ The pg-contention job (`*.contention.ts`) should later cover:
 ## Coverage record
 
 - Sync commit: `77a5bb7` (product code unchanged at 611b68e). Tools: tla2tools 1.7.4, Java 17 (Temurin 17.0.21.1), Bun 1.4.4.
-- Runs on 2026-11-24 from the repo root, all exit 0 (review round 2 revision):
+- Runs on 2026-11-24 from the repo root, all exit 0 (council and review round 1 fixes):
 
   | Command | Result |
   |---|---|
-  | `bun run verify:formal --only outbox.recurring --only outbox.replay` | 13.3 s. Base passed with 2,827 distinct states. Mutants: `no-occurrence-guard` -> `OneDocumentPerOccurrence`; `no-replay-guard` -> temporal; `start-before-commit` -> `StartedOnlyCommitted`; `no-reconcile-h3` -> temporal; `no-reconcile-lost-start` -> temporal; `no-send-replay-guard` -> `OneDeliveryPerOccurrence`; `skip-occurrence` -> `NextFollowsIssued`; `skip-occurrence-liveness` -> temporal; `claim-fails` -> `FailedOnlyAfterCall`; `record-unknown-as-sent` -> `SentImpliesAccepted`. Replay: 11 pass. |
-  | `bun run verify:formal --wide --only outbox.recurring` | Wide base passed with 153,589 distinct states (108.6 s; 120.0 s with the mutants). |
+  | `bun run verify:formal --only outbox.recurring --only outbox.replay` | 14.6 s. Base passed with 8,895 distinct states (3.7 s). Mutants: `no-occurrence-guard` -> `OneDocumentPerOccurrence`; `no-replay-guard` -> temporal; `start-before-commit` -> `StartedOnlyCommitted`; `no-reconcile-h3` -> temporal; `no-reconcile-lost-start` -> temporal; `no-send-replay-guard` -> `OneDeliveryPerOccurrence`; `skip-occurrence` -> `NextFollowsIssued`; `skip-occurrence-liveness` -> temporal; `claim-fails` -> `FailedOnlyAfterCall`; `record-unknown-as-sent` -> `SentImpliesAccepted`. Replay: 11 pass. |
+  | `bun run verify:formal --wide --only outbox.recurring` | Wide base passed with 195,456 distinct states (163.4 s; 173.8 s with the mutants). |
   | The no-occurrence-guard config with only one of `LockSchedule`, `CasAdvance`, `UniqueLink` on (three TLC runs, first revision) | Each passes every property: any one guard keeps one document per occurrence. |
 
 - `/statechart` paths (first revision; unchanged actions): `no-occurrence-guard`, 4 steps (two runs both issue #1); `no-replay-guard`, 8 steps, a loop where reconcile reruns and each rerun is Skipped; `start-before-commit`, 3 steps; `no-reconcile-h3`, 6 steps, "email claimed (delivery job died)" forever; `no-reconcile-lost-start`, 4 steps, "email queued (no delivery job)" forever.
@@ -171,7 +177,7 @@ The pg-contention job (`*.contention.ts`) should later cover:
   | Replay guard off: `if (false && Option.isSome(existing))` | `modules/recurring/issuance.ts:246` | 4 fail: "DupStart, IssueCommit(replay)...", "CrashWorker after IssueCommit...", "CrashWorker inside SendCommit...", "FINDING H3..." (the rerun is Skipped) |
   | Delivery started inside the transaction: `yield* jobs.start(...)` without `afterCommit` | `modules/documents/deliveries/send.ts:242` | 2 fail: "CrashWorker inside SendCommit..." (`started` holds the rolled-back id), "CrashWorker before Hook..." |
   | Reconcile recovery off: `claim` returns `skipped` for a `sending` row | `modules/documents/deliveries/steps.ts:73` | 3 fail: "H3 with the designed J1a reconcile...", "CrashDelivery(record)...", "...CrashDelivery(giveup)..." |
-  | Send replay guard off: `if (false && run.send === "queued" ...)` | `modules/recurring/issuance.ts:326` | 2 fail: "DupStart, IssueCommit(replay), SendCommit(replay)..." (a second delivery), "FINDING H3..." |
+  | Send guard off: the queued replay (`if (false && run.send === "queued" ...)`) and the pending-only check (`if (run.documentId === null)`) | `modules/recurring/issuance.ts:326-332` | 2 fail: "DupStart, IssueCommit(replay), SendCommit(replay)..." (3 delivery rows for the document, want 1), "FINDING H3..." |
   | Advance skips an occurrence: `occurrenceAfter` applied twice | `modules/recurring/issuance.ts:305` | 1 fail: "SweepStart, IssueCommit, ..." (the schedule's next occurrence is not 2026-12-23) |
   | `outcome_unknown` recorded as `sent` | `modules/documents/deliveries/steps.ts:125` | 1 fail: "Dispatch failures, ..." (the unknown attempt ends `sent` at once) |
   | `claim` marks a queued delivery `failed` without sending | `modules/documents/deliveries/steps.ts:73` | 7 fail, including the happy path and every recovery test |
