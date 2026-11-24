@@ -63,6 +63,10 @@
  *               render(view, options) (DocumentRenderer). send/previewSend stay `DocumentSender`.
  * - reports.ts  `reportFigures(record)` for the ReportsSource adapter (#384): full totals and
  *               the advance deduction buckets of a Final Invoice (or its Credit Note).
+ * - deliveries/ `DocumentSenderLive` (send/previewSend), `DeliveriesRepo`, `DeliveryJobs` and the
+ *               DocumentDelivery job steps (claim/dispatch/giveUp); its index.ts maps the files.
+ * - reminders/  rule D16 at selection time (`effectiveReminders`, `selectDueReminders`,
+ *               `enqueueReminder`); no stored schedule, dates follow the due date.
  * - service.ts  `DocumentsLive`: captures `DocumentsDeps`, wires the method files, dispatches
  *               `edit` by state.
  *
@@ -102,6 +106,7 @@
  */
 import { Layer } from "effect";
 import { NumberingTestLayer } from "../numbering";
+import { DeliveriesRepoMemory, DeliveryJobsMemory, DocumentSenderLive } from "./deliveries";
 import { DocumentDeliveryReadsLive } from "./delivery";
 import { DocumentFakesLive } from "./fakes";
 import { DocumentPaymentsLive } from "./payments";
@@ -137,6 +142,7 @@ export {
   settlementOf,
   withRounding,
 } from "./credit";
+export * from "./deliveries";
 export type { DeliveryDocument } from "./delivery";
 export { DocumentDeliveryReads, DocumentDeliveryReadsLive } from "./delivery";
 export type { RenderCall } from "./fakes";
@@ -186,6 +192,7 @@ export {
   NUMBER_PER_KIND,
   SCHEDULE_OCCURRENCE,
 } from "./record";
+export * from "./reminders";
 export type { DocumentPage, DocumentSearch } from "./repo";
 export { DocumentsRepo, DocumentsRepoMemory } from "./repo";
 export { reportFigures } from "./reports";
@@ -235,5 +242,27 @@ export const DocumentsTestLayer = Layer.mergeAll(
 ).pipe(
   Layer.provideMerge(
     Layer.mergeAll(DocumentsRepoMemory, NumberingTestLayer, DocumentFakesLive, DocumentSenderStub),
+  ),
+);
+
+/**
+ * `DocumentsTestLayer` with the real `DocumentSenderLive` instead of the stub, plus the memory
+ * `DeliveriesRepo` and `DeliveryJobs`; exposes `DeliveriesRepo` and `StartedDeliveries`.
+ * Requires `InMemoryPortsLive` (also EmailSender via CaptureEmailSender).
+ */
+export const DocumentsDeliveryTestLayer = Layer.mergeAll(
+  DocumentsLive,
+  DocumentPaymentsLive,
+  DocumentDeliveryReadsLive,
+).pipe(
+  Layer.provideMerge(DocumentSenderLive),
+  Layer.provideMerge(
+    Layer.mergeAll(
+      DocumentsRepoMemory,
+      NumberingTestLayer,
+      DocumentFakesLive,
+      DeliveriesRepoMemory,
+      DeliveryJobsMemory,
+    ),
   ),
 );
