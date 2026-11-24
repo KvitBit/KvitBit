@@ -16,6 +16,11 @@
  * 7. paymentRounding "whole_unit" rounds only the amount to pay to a whole unit (half away
  *    from zero); the difference is `roundingAdjustment`, outside every bucket (§36(5)).
  * 8. Rates come from an effective-dated table; a tax point before its first entry is a defect.
+ * 9. Advance deductions (D8, §37a ZDPH): a document that deducts advances nets base, VAT and
+ *    gross per bucket in the document currency first, then converts each net bucket's VAT once
+ *    at its own fixing (rule 6). The advances keep the CZK VAT declared on their PTDs; the
+ *    Final Invoice declares only its remainder, exactly as the VAT report reads it
+ *    (`netDeductions`, shared by Documents' compose and ReportCompute).
  * Non-rated treatments (exempt_intra_eu_goods, reverse_charge, outside_scope) have rate 0 and
  * vat 0. Negative lines (discounts, credit notes) follow the same rules; because rounding is
  * symmetric, `calculate` of negated lines equals `negate` of the breakdown.
@@ -251,6 +256,37 @@ export const splitAdvance = (
   });
 };
 
+/**
+ * Rule 9: `supply` net of `deducted` (signed amounts: a Final Invoice deducts negative
+ * buckets), summed per (treatment, ratePercent) in first-seen order. Each net bucket's `vatCzk`
+ * is its own VAT converted at `fx` (null for CZK or without a fixing), never the sum of the
+ * inputs' stored CZK VAT.
+ */
+export const netDeductions = (
+  supply: ReadonlyArray<VatBucket>,
+  deducted: ReadonlyArray<VatBucket>,
+  currency: CurrencyCode,
+  fx: VatInput["fx"],
+): ReadonlyArray<VatBucket> => {
+  const byKey = new Map<string, VatBucket>();
+  for (const b of [...supply, ...deducted]) {
+    const key = `${b.treatment}|${BigDecimal.format(BigDecimal.normalize(b.ratePercent))}`;
+    const prev = byKey.get(key);
+    byKey.set(
+      key,
+      prev === undefined
+        ? b
+        : {
+            ...prev,
+            base: BigDecimal.normalize(BigDecimal.sum(prev.base, b.base)),
+            vat: BigDecimal.normalize(BigDecimal.sum(prev.vat, b.vat)),
+            gross: BigDecimal.normalize(BigDecimal.sum(prev.gross, b.gross)),
+          },
+    );
+  }
+  return [...byKey.values()].map((b) => ({ ...b, vatCzk: czkOrNull(b.vat, currency, fx) }));
+};
+
 /** Sums buckets back into a breakdown (e.g. a Payment Tax Document from `splitAdvance`). */
 export const fromBuckets = (
   buckets: ReadonlyArray<VatBucket>,
@@ -264,4 +300,11 @@ export const fromBuckets = (
     currency !== "CZK" && buckets.some((b) => b.vatCzk !== null),
   );
 
-export const VatMath = { rateFor, calculate, negate, splitAdvance, fromBuckets } as const;
+export const VatMath = {
+  rateFor,
+  calculate,
+  negate,
+  splitAdvance,
+  fromBuckets,
+  netDeductions,
+} as const;

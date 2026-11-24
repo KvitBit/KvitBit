@@ -57,6 +57,8 @@ export interface ReportDocument {
    * Advance (Payment Tax Document) buckets the document deducts, in its own currency: positive
    * on a Final Invoice, negative on a Credit Note reversing one; empty otherwise (#397, #477).
    * A deduction of Proforma cash no PTD covers is not one (it was never taxed as an advance).
+   * Bucket `vatCzk` is at this document's own fixing (not the PTD's), so `totals` minus these
+   * gives back the document's stored net CZK VAT exactly (D8).
    */
   readonly advanceDeductions: ReadonlyArray<VatBucket>;
   readonly settlement: DocumentSettlement;

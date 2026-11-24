@@ -102,8 +102,11 @@ const fullBucketsCzk = (
 /**
  * The document's taxable amounts per bucket in CZK after advance deductions. Without
  * deductions each bucket keeps its stored `vatCzk`. With deductions (Final Invoice, or a Credit
- * Note reversing one) base and VAT are netted per bucket in the document currency first, and the
- * remainder is converted at the document's own fixing (the advances keep theirs on their PTDs).
+ * Note reversing one) base, VAT and CZK VAT are netted per bucket: the deductions carry their
+ * CZK VAT at the document's own fixing (`reportFigures`), so the net CZK VAT is exactly the
+ * document's stored net CZK VAT, which Documents' compose converts once at that fixing
+ * (D8, VatMath rule 9; the advances keep theirs on their PTDs). Without CZK VAT on a bucket the
+ * net VAT is converted at the document's fixing.
  */
 export const taxableBucketsCzk = (d: ReportDocument): ReadonlyArray<CzkBucket> => {
   if (d.advanceDeductions.length === 0) return fullBucketsCzk(d.totals.buckets, d.currency, d.fx);
@@ -114,6 +117,7 @@ export const taxableBucketsCzk = (d: ReportDocument): ReadonlyArray<CzkBucket> =
       ratePercent: BigDecimal.BigDecimal;
       base: BigDecimal.BigDecimal;
       vat: BigDecimal.BigDecimal;
+      vatCzk: BigDecimal.BigDecimal | null;
     }
   >();
   const add = (b: VatBucket, sign: 1 | -1) => {
@@ -123,9 +127,15 @@ export const taxableBucketsCzk = (d: ReportDocument): ReadonlyArray<CzkBucket> =
       ratePercent: b.ratePercent,
       base: ZERO,
       vat: ZERO,
+      vatCzk: ZERO,
     };
-    slot.base = BigDecimal.sum(slot.base, sign === 1 ? b.base : BigDecimal.negate(b.base));
-    slot.vat = BigDecimal.sum(slot.vat, sign === 1 ? b.vat : BigDecimal.negate(b.vat));
+    const signed = (v: BigDecimal.BigDecimal) => (sign === 1 ? v : BigDecimal.negate(v));
+    slot.base = BigDecimal.sum(slot.base, signed(b.base));
+    slot.vat = BigDecimal.sum(slot.vat, signed(b.vat));
+    slot.vatCzk =
+      slot.vatCzk === null || b.vatCzk === null
+        ? null
+        : BigDecimal.sum(slot.vatCzk, signed(b.vatCzk));
     net.set(key, slot);
   };
   for (const b of d.totals.buckets) add(b, 1);
@@ -134,7 +144,10 @@ export const taxableBucketsCzk = (d: ReportDocument): ReadonlyArray<CzkBucket> =
     treatment: b.treatment,
     ratePercent: b.ratePercent,
     base: toCzk(b.base, d.currency, d.fx),
-    vat: toCzk(b.vat, d.currency, d.fx),
+    vat:
+      d.currency === CZK || b.vatCzk === null
+        ? toCzk(b.vat, d.currency, d.fx)
+        : BigDecimal.normalize(b.vatCzk),
   }));
 };
 

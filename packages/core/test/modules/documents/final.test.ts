@@ -27,6 +27,7 @@ import {
   reportFigures,
 } from "../../../src/modules/documents";
 import { NumberingSeries } from "../../../src/modules/numbering";
+import { ReportCompute } from "../../../src/modules/reports";
 import { CoreStore } from "../../../src/store/CoreStore";
 import { member, WORKSPACE_A, WORKSPACE_B } from "../../helpers";
 import type { Services } from "./fixtures";
@@ -662,6 +663,7 @@ describe("issueFinalInvoice (D8)", () => {
         totals: fi.totals,
         currency: fi.totals.gross.currency,
         pricesIncludeVat: false,
+        fx: null,
       },
       () => true,
     );
@@ -772,6 +774,228 @@ describe("issueFinalInvoice (D8)", () => {
       }),
     );
     expect(ok(partial)).toEqual(malformed(["lines", 0, "line"], "deduction_line"));
+  });
+
+  test("EUR advances at other fixings: the Final Invoice declares its net VAT at its own fixing, as the VAT report does (§37a)", async () => {
+    // The advance-chain property test's seed-58256 counterexample (formal finding F1).
+    const [ptds, fi, cn, reported, full, unknown] = ok(
+      await run(
+        Effect.gen(function* () {
+          const d = yield* docs;
+          const p = yield* issueProforma({
+            currency: EUR,
+            lines: [{ description: "Služba", unitPrice: dec("24082.29") }],
+          });
+          const ptds: Array<DocumentView> = [];
+          for (const [amount, on] of [
+            ["1182.63", "2026-11-18"],
+            ["5670.29", "2026-11-21"],
+            ["8832.48", "2026-11-23"],
+          ] as const) {
+            ptds.push((yield* pay(p.id, amount, on as IsoDate)).ptd as DocumentView);
+          }
+          const fi = yield* d.issueFinalInvoice(p.id);
+          const record = yield* Effect.flatMap(CoreStore, (store) =>
+            store.transaction(Effect.flatMap(DocumentsRepo, (repo) => repo.get(WS, fi.id))),
+          );
+          const declare = (r: typeof record) => {
+            const f = reportFigures(r, () => true);
+            return {
+              full: f.totals,
+              vat: ReportCompute.taxableBucketsCzk({
+                currency: r.currency,
+                fx: r.fx,
+                totals: f.totals,
+                advanceDeductions: f.advanceDeductions,
+              } as never),
+            };
+          };
+          const { full, vat: reported } = declare(record);
+          // A stored net bucket without CZK VAT: the report converts the net VAT, never reads 0.
+          const unknown = declare({
+            ...record,
+            totals: {
+              ...record.totals,
+              buckets: record.totals.buckets.map((b) => ({ ...b, vatCzk: null })),
+            },
+          });
+          const cn = yield* d.correct(fi.id, { reason: "storno", lines: "full" });
+          return [ptds, fi, cn, reported, full, unknown] as const;
+        }),
+        {
+          fixings: [
+            fixing("2026-11-18", "24.974"),
+            fixing("2026-11-21", "24.485"),
+            fixing("2026-11-23", "24.459"),
+          ],
+        },
+      ),
+    );
+    expect(ptds.map((t) => buckets(t)[0]?.slice(3))).toEqual([
+      ["205.25", "1182.63", "5125.91"],
+      ["984.1", "5670.29", "24095.69"],
+      ["1532.91", "8832.48", "37493.45"],
+    ]);
+    // round2(2335.02 x 24.459), not round2(5057.28 x 24.459) - PTDs' CZK VAT = 56980.96.
+    expect(buckets(fi)).toEqual([
+      ["standard", "21", "11119.15", "2335.02", "13454.17", "57112.25"],
+    ]);
+    expect(str(fi.totals.vatCzk?.amount ?? dec("0"))).toBe("57112.25");
+    expect(reported.map((b) => str(b.vat))).toEqual(["57112.25"]);
+    // Revenue's full supply: 5057.28 EUR at the Final Invoice's fixing, not the advances' fixings.
+    expect(full.buckets.map((b) => (b.vatCzk === null ? null : str(b.vatCzk)))).toEqual([
+      "123696.01",
+    ]);
+    expect(unknown.vat.map((b) => str(b.vat))).toEqual(["57112.25"]);
+    expect(unknown.full.buckets.map((b) => b.vatCzk)).toEqual([null]);
+    expect(cn.totals).toEqual(VatMath.negate(fi.totals));
+  });
+
+  test("a supply line of a prepaid EUR Final Invoice is credited at the Final Invoice's fixing, whatever the advance's", async () => {
+    const credit = ok(
+      await run(
+        Effect.gen(function* () {
+          const d = yield* docs;
+          const p = yield* issueProforma({
+            currency: EUR,
+            lines: [{ description: "Služba", unitPrice: dec("100") }],
+          });
+          yield* pay(p.id, "60.50", "2026-11-20" as IsoDate);
+          const fi = yield* d.issueFinalInvoice(p.id);
+          return yield* d.correct(fi.id, { reason: "sleva", lines: [{ line: lineOf(fi, 0) }] });
+        }),
+        { fixings: [fixing("2026-11-20", "24.000"), fixing("2026-11-23", "25.000")] },
+      ),
+    );
+    // 21 EUR VAT at 25: 525 CZK, within the Final Invoice's open supply (10.50 net + 10.50 deducted).
+    expect(buckets(credit)).toEqual([["standard", "21", "-100", "-21", "-121", "-525"]]);
+  });
+
+  test("after the supply is credited, the remainder of a prepaid EUR Final Invoice reverses only its deductions", async () => {
+    const [fi, partial, rest, revenue] = ok(
+      await run(
+        Effect.gen(function* () {
+          const d = yield* docs;
+          const p = yield* issueProforma({
+            currency: EUR,
+            lines: [{ description: "Služba", unitPrice: dec("100") }],
+          });
+          yield* pay(p.id, "60.50", "2026-11-20" as IsoDate);
+          // Revenue's full-supply CZK VAT per document (ReportsSource mapping).
+          const fullCzk = (id: DocumentId) =>
+            Effect.map(
+              Effect.flatMap(CoreStore, (store) =>
+                store.transaction(Effect.flatMap(DocumentsRepo, (repo) => repo.get(WS, id))),
+              ),
+              (record) => str(reportFigures(record, () => true).totals.vatCzk?.amount ?? dec("0")),
+            );
+          const fi = yield* d.issueFinalInvoice(p.id);
+          const partial = yield* d.correct(fi.id, {
+            reason: "sleva",
+            lines: [{ line: lineOf(fi, 0) }],
+          });
+          const rest = yield* d.correct(fi.id, { reason: "storno", lines: "full" });
+          const revenue = [
+            yield* fullCzk(fi.id),
+            yield* fullCzk(partial.id),
+            yield* fullCzk(rest.id),
+          ];
+          return [fi, partial, rest, revenue] as const;
+        }),
+        { fixings: [fixing("2026-11-20", "24.000"), fixing("2026-11-23", "25.000")] },
+      ),
+    );
+    // No zero-value supply line for the CZK residual; the deduction is reversed as a line.
+    expect(lines(rest).map((l) => [str(l.quantity), str(l.unitPrice), l.deducts])).toEqual([
+      ["1", "50", lines(fi)[1]?.deducts ?? null],
+    ]);
+    // CZK VAT closes exactly: 262.5 (FI) - 525 (partial) + 262.5 (remainder) = 0.
+    expect(buckets(rest)).toEqual([["standard", "21", "50", "10.5", "60.5", "262.5"]]);
+    expect(buckets(partial)[0]?.[5]).toBe("-525");
+    // Revenue closes too: the full supply 525, its credit -525, the deduction reversal 0.
+    expect(revenue).toEqual(["525", "-525", "0"]);
+  });
+
+  test("a closing Credit Note's CZK residual is declared as stored; VAT report and revenue close (FI at 24.450)", async () => {
+    const [stored, declared, revenue] = ok(
+      await run(
+        Effect.gen(function* () {
+          const d = yield* docs;
+          const p = yield* issueProforma({
+            currency: EUR,
+            lines: [{ description: "Služba", unitPrice: dec("100") }],
+          });
+          yield* pay(p.id, "60.50", "2026-11-20" as IsoDate);
+          const fi = yield* d.issueFinalInvoice(p.id);
+          const partial = yield* d.correct(fi.id, {
+            reason: "sleva",
+            lines: [{ line: lineOf(fi, 0) }],
+          });
+          const rest = yield* d.correct(fi.id, { reason: "storno", lines: "full" });
+          const figures = (id: DocumentId) =>
+            Effect.map(
+              Effect.flatMap(CoreStore, (store) =>
+                store.transaction(Effect.flatMap(DocumentsRepo, (repo) => repo.get(WS, id))),
+              ),
+              (record) => {
+                const f = reportFigures(record, () => true);
+                const vat = ReportCompute.taxableBucketsCzk({
+                  currency: record.currency,
+                  fx: record.fx,
+                  totals: f.totals,
+                  advanceDeductions: f.advanceDeductions,
+                } as never);
+                return {
+                  declared: str(vat.reduce((a, b) => BigDecimal.sum(a, b.vat), dec("0"))),
+                  revenue: str(f.totals.vatCzk?.amount ?? dec("0")),
+                };
+              },
+            );
+          const all = [yield* figures(fi.id), yield* figures(partial.id), yield* figures(rest.id)];
+          return [
+            [fi, partial, rest].map((v) => str(v.totals.vatCzk?.amount ?? dec("0"))),
+            all.map((f) => f.declared),
+            all.map((f) => f.revenue),
+          ] as const;
+        }),
+        { fixings: [fixing("2026-11-20", "24.000"), fixing("2026-11-23", "24.450")] },
+      ),
+    );
+    // FI round2(10.50 x 24.45) = 256.73; supply credit round2(-21 x 24.45) = -513.45; the
+    // closing note clears the rest exactly: 256.72, not round2(10.50 x 24.45).
+    expect(stored).toEqual(["256.73", "-513.45", "256.72"]);
+    expect(declared).toEqual(stored);
+    // Revenue: full supply 256.73 + 256.73, its credit, the closing residual -0.01: sums to 0.
+    expect(revenue).toEqual(["513.46", "-513.45", "-0.01"]);
+  });
+
+  test("line credits of a prepaid EUR Final Invoice stay within the supply's CZK VAT (D7), as for any invoice", async () => {
+    const [first, second, rest, fi] = ok(
+      await run(
+        Effect.gen(function* () {
+          const d = yield* docs;
+          const p = yield* issueProforma({
+            currency: EUR,
+            lines: [{ description: "Služba", quantity: dec("2"), unitPrice: dec("50") }],
+          });
+          yield* pay(p.id, "24.20", "2026-11-20" as IsoDate);
+          const fi = yield* d.issueFinalInvoice(p.id);
+          const unit = { line: lineOf(fi, 0), quantity: dec("1") };
+          const first = yield* d.correct(fi.id, { reason: "sleva", lines: [unit] });
+          const second = yield* Effect.flip(d.correct(fi.id, { reason: "sleva", lines: [unit] }));
+          const rest = yield* d.correct(fi.id, { reason: "storno", lines: "full" });
+          return [first, second, rest, fi] as const;
+        }),
+        { fixings: [fixing("2026-11-20", "24.000"), fixing("2026-11-23", "24.450")] },
+      ),
+    );
+    // Supply VAT 21 EUR = 513.45 CZK at 24.45; one unit credits round2(-10.50 x 24.45) = -256.73,
+    // so a second unit (another -256.73) would credit 513.46: refused, the remainder closes it.
+    expect(buckets(first)[0]?.[5]).toBe("-256.73");
+    expect(second).toBeInstanceOf(Invalid);
+    expect((second as Invalid).issues[0]?.code).toBe("credit_note.exceeds_original");
+    const czk = (v: DocumentView) => BigDecimal.normalize(v.totals.vatCzk?.amount ?? dec("0"));
+    expect(str(BigDecimal.sum(BigDecimal.sum(czk(fi), czk(first)), czk(rest)))).toBe("0");
   });
 
   test("checks: unpaid Proforma, not a Proforma, draft, cancelled", async () => {
@@ -921,6 +1145,7 @@ describe("council follow-ups", () => {
         totals: rest.totals,
         currency: rest.totals.gross.currency,
         pricesIncludeVat: false,
+        fx: null,
       },
       () => true,
     ).advanceDeductions;
