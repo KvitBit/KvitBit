@@ -1,0 +1,48 @@
+{
+  "name": "@kvitbit/adapters",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./altcha": "./src/altcha/index.ts",
+    "./auth": "./src/auth/index.ts",
+    "./registry": "./src/registry/index.ts",
+    "./fx": "./src/fx/index.ts",
+    "./blob": "./src/blob/index.ts",
+    "./email": "./src/email/index.ts",
+    "./templates/email": "./src/templates/email/index.ts",
+    "./pdf": "./src/pdf/index.ts",
+    "./qr": "./src/qr/index.ts",
+    "./jobs": "./src/jobs/index.ts",
+    "./testing": "./src/testing/index.ts",
+    "./sql": "./src/sql/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "bun test --pass-with-no-tests"
+  },
+  "dependencies": {
+    "@better-auth/api-key": "1.7.27",
+    "@better-auth/cimd": "1.7.27",
+    "@better-auth/oauth-provider": "1.7.27",
+    "@better-auth/passkey": "1.7.27",
+    "@effect/sql-pglite": "4.1.4",
+    "@electric-sql/pglite": "0.6.0",
+    "@kvitbit/api-contract": "workspace:*",
+    "@kvitbit/brand": "workspace:*",
+    "@kvitbit/db": "workspace:*",
+    "@kvitbit/domain": "workspace:*",
+    "altcha-lib": "2.10.0",
+    "better-auth": "1.7.27",
+    "drizzle-orm": "1.0.0-rc.5",
+    "effect": "4.1.4",
+    "nodemailer": "10.6.1",
+    "playwright-core": "1.65.1",
+    "qrcode": "1.5.4"
+  },
+  "devDependencies": {
+    "@effect/sql-pg": "4.1.4",
+    "@types/qrcode": "1.5.6"
+  }
+}

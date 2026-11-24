@@ -1,0 +1,27 @@
+{
+  "ico": "10087109",
+  "obchodniJmeno": "Zaniklá Firma a.s. v likvidaci",
+  "sidlo": {
+    "kodStatu": "CZ",
+    "nazevObce": "Ostrava",
+    "nazevCastiObce": "Moravská Ostrava",
+    "nazevUlice": "Dlouhá",
+    "cisloDomovni": 5,
+    "psc": 70200,
+    "textovaAdresa": "Dlouhá 5, Moravská Ostrava, 70200 Ostrava",
+    "typCisloDomovni": 1
+  },
+  "pravniForma": "121",
+  "datumVzniku": "2001-05-10",
+  "datumZaniku": "2024-06-30",
+  "datumAktualizace": "2024-07-02",
+  "dic": "CZ10087109",
+  "icoId": "10087109",
+  "seznamRegistraci": {
+    "stavZdrojeVr": "HISTORICKY",
+    "stavZdrojeRes": "HISTORICKY",
+    "stavZdrojeDph": "HISTORICKY"
+  },
+  "primarniZdroj": "vr",
+  "dalsiUdaje": [{ "spisovaZnacka": "B 9876/KSOS", "datovyZdroj": "vr", "pravniForma": "121" }]
+}
