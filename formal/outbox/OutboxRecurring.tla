@@ -1,7 +1,7 @@
 --------------------------- MODULE OutboxRecurring ---------------------------
 (***************************************************************************)
 (* Recurring issuance and its delivery outbox (core-ports 7.2, 7.3, J1-J4), *)
-(* at sync commit 77a5bb7.                                                  *)
+(* at sync commit 154383a.                                                  *)
 (*                                                                         *)
 (* One schedule with autoSend, occurrences 1..N, all due. Recurring job    *)
 (* executions run on Workers; each delivery has one workflow execution     *)
@@ -14,14 +14,15 @@
 (*                                   pendingSends 393, sweep 410          *)
 (*   modules/documents/deliveries/send.ts   insert queued row 210,         *)
 (*                                   afterCommit(jobs.start) 242          *)
-(*   modules/documents/deliveries/steps.ts  claim 67, dispatch 84,          *)
-(*                                   record 122-143, giveUp 158, deliver 171 *)
+(*   modules/documents/deliveries/steps.ts  claim 73, dispatch 101,         *)
+(*                                   record 139-160, giveUp 175, deliver 188 *)
+(*                                   reconcileStaleDeliveries 208          *)
 (*   store/memory.ts   frames: afterCommit kept only on commit 162-168,     *)
 (*                     drained after the outermost commit 180-197          *)
 (*                                                                         *)
-(* The flags in the base config describe the code at 77a5bb7, except       *)
-(* DeliveryReconcile: the J1a cron for deliveries is designed (core-ports   *)
-(* J1a) but not in core at 77a5bb7, so the base checks code + that design.  *)
+(* The flags in the base config describe the code at 154383a, including    *)
+(* DeliveryReconcile (reconcileStaleDeliveries, J1a); before 154383a core   *)
+(* had no delivery reconcile (finding H3, the no-reconcile-* mutants).     *)
 (* Each mutant config flips flags to show that a property can fail.         *)
 (***************************************************************************)
 EXTENDS Naturals, FiniteSets
@@ -36,13 +37,13 @@ CONSTANTS
   MaxDupes,     \* extra (duplicate or stale) starts of an occurrence
   MaxSmtpFail,  \* provider failures (not accepted, unknown, rejected)
   MaxAttempts,  \* dispatch attempts per execution before giveUp
-  \* guards of the real code (TRUE = present at 77a5bb7)
+  \* guards of the real code (TRUE = present at 154383a)
   LockSchedule,       \* issuance.ts:244/320 repo.lockSchedule row lock
   CasAdvance,         \* issuance.ts:303-307 updateSchedule(.., schedule.revision)
   UniqueLink,         \* issuance.ts:268-273 links.link, unique documents(schedule_id, occurrence)
   ReplayGuard,        \* issuance.ts:246-248 an issued run is returned, not re-issued
   StartAfterCommit,   \* send.ts:242 afterCommit(jobs.start), memory.ts:162-197
-  DeliveryReconcile,  \* J1a OutboxReconcile for queued/sending deliveries (cron not in core)
+  DeliveryReconcile,  \* steps.ts:208 reconcileStaleDeliveries, restart queued/sending (J1a)
   RecurringReconcile, \* issuance.ts:393 pendingSends, rerun `run` (J1a)
   SendReplayGuard,    \* issuance.ts:326-332 only a pending run sends; a queued one replays
   AdvanceBy,          \* occurrences next_occurrence moves per issue (occurrenceAfter: 1)
@@ -272,12 +273,12 @@ CrashWorker(w) ==
 
 (***************************************************************************)
 (* DocumentDelivery execution of o's delivery: deliver = claim then        *)
-(* dispatch (steps.ts:171), retries, giveUp.                              *)
+(* dispatch (steps.ts:188), retries, giveUp.                              *)
 (***************************************************************************)
-\* steps.ts:67-81 claim: one transaction under the row lock. queued ->
-\* sending (J3 eligibility holds in this model); a sending row stays
-\* sending and is dispatched again (73: only queued is changed, deliver
-\* dispatches any non-terminal status); a terminal row ends the execution.
+\* steps.ts:73-98 claim: one transaction under the row lock. queued ->
+\* sending; a sending row stays sending and is dispatched again (79-81:
+\* both are re-checked for J3, which holds in this model; deliver dispatches
+\* any non-terminal status); a terminal row ends the execution.
 Claim(o) ==
   /\ dpc[o] = "claim"
   /\ IF dstatus[o] = "queued" /\ ClaimFailsQueued
@@ -293,8 +294,8 @@ Claim(o) ==
           /\ UNCHANGED dstatus
   /\ UNCHANGED <<recVars, dcount, dout, dtry, smtp, calls, fwhy, started, budgets>>
 
-\* steps.ts:84-118 dispatch: reads the row (87); not sending -> returns;
-\* else EmailSender.send with idempotencyKey = delivery id (115). The
+\* steps.ts:101-135 dispatch: reads the row (104); not sending -> returns;
+\* else EmailSender.send with idempotencyKey = delivery id (117). The
 \* provider accepts (ok), does not take it (not_accepted), rejects it, or
 \* reports outcome_unknown having taken it (unknown_sent) or not
 \* (unknown_lost).
@@ -311,7 +312,7 @@ Dispatch(o, out) ==
             /\ dpc' = [dpc EXCEPT ![o] = "record"]
   /\ UNCHANGED <<recVars, dstatus, dcount, dtry, fwhy, started, crashes, dupes>>
 
-\* steps.ts:122-154: the record transaction. Success -> sent (also over a
+\* steps.ts:139-171: the record transaction. Success -> sent (also over a
 \* failed row); rejected -> failed; not_accepted/outcome_unknown leave it sending
 \* and DeliveryRetry makes the Activity retry dispatch, or giveUp.
 Record(o) ==
@@ -336,7 +337,7 @@ Record(o) ==
          IF dout[o] = "rejected" /\ dstatus[o] = "sending" THEN "rejected" ELSE @]
   /\ UNCHANGED <<recVars, dcount, smtp, calls, started, budgets>>
 
-\* steps.ts:158-168 giveUp: sending -> failed once retries are exhausted.
+\* steps.ts:175-185 giveUp: sending -> failed once retries are exhausted.
 GiveUp(o) ==
   /\ dpc[o] = "giveup"
   /\ dstatus' = [dstatus EXCEPT ![o] = IF @ = "sending" THEN "failed" ELSE @]
@@ -360,10 +361,14 @@ CrashDelivery(o) ==
   /\ dtry' = [dtry EXCEPT ![o] = 0]
   /\ UNCHANGED <<recVars, dstatus, dcount, smtp, calls, fwhy, started, dupes, smtpFails>>
 
-\* J1a OutboxReconcile (core-ports 1296-1297, 1419-1424): a queued or
-\* sending delivery whose execution is not live is re-executed with the same
-\* key, whatever workflow_started_at says. The selection query is not in
-\* core at 77a5bb7 (see the skill); the restarted body is steps.ts deliver.
+\* J1a OutboxReconcile, steps.ts:208 reconcileStaleDeliveries: the cron
+\* selects queued and sending rows (repo.ts findStaleQueuedOrSending) and
+\* calls DeliveryJobs.start with the delivery id; the restarted body is
+\* steps.ts deliver. A start for a live execution attaches to it (J1), so
+\* only a delivery whose execution is not live gets a new one; a finished
+\* execution of a non-terminal row runs deliver again (jobs.ts contract). The staleness
+\* threshold (updatedAt older than 2 min) only delays the action; the model
+\* has no clock and lets it fire at any time.
 ReconcileDelivery(o) ==
   /\ DeliveryReconcile
   /\ dstatus[o] \in {"queued", "sending"}

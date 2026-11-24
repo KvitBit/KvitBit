@@ -2,15 +2,19 @@
 import { describe, expect, test } from "bun:test";
 import type { DeliveryId, DocumentId, IsoDate } from "@kvitbit/domain/contract";
 import { Documents } from "@kvitbit/domain/contract";
+import { EmailSender } from "@kvitbit/domain/ports";
 import { Effect, Exit, Ref } from "effect";
+import { TestClock } from "effect/testing";
 import {
   claim,
   DeliveriesRepo,
   DocumentFixtures,
   DocumentsRepo,
   deliver,
+  dispatch,
   dueStep,
   enqueueReminder,
+  reconcileStaleDeliveries,
   selectDueReminders,
 } from "../../../../src/modules/documents";
 import { resolveReminders } from "../../../../src/shared/overrides";
@@ -491,6 +495,47 @@ describe("review round 2 regression", () => {
         yield* d.send(id);
         expect(yield* sweep("2026-12-17")).toEqual([]);
         expect(yield* reminderEmails).toHaveLength(1);
+      }),
+    );
+    expect(Exit.isSuccess(exit)).toBe(true);
+  });
+});
+
+describe("reconcile of a claimed reminder (J1a, J3, D16)", () => {
+  test("a claimed reminder skipped on restart keeps its step: restored eligibility sends no second one", async () => {
+    const exit = await deliveryScenario(
+      Effect.gen(function* () {
+        const id = yield* issueInvoice();
+        yield* (yield* Documents).send(id);
+        const [first] = yield* sweep("2026-12-10");
+        const a = first?.deliveryId as DeliveryId;
+        yield* as(worker, claim(WORKSPACE_A, a));
+        // The provider accepts, then the job dies before the attempt is recorded.
+        const real = yield* EmailSender;
+        const crash = yield* Effect.exit(
+          as(worker, dispatch(WORKSPACE_A, a)).pipe(
+            Effect.provideService(EmailSender, {
+              ...real,
+              send: (message, opts) =>
+                Effect.andThen(real.send(message, opts), Effect.die("crash after accept")),
+            }),
+          ),
+        );
+        expect(Exit.isFailure(crash)).toBe(true);
+        // The step is no longer due when the job is restarted: claim skips the row.
+        yield* setWorkspaceReminders({ enabled: true, proformas: false, offsetsDays: [10] });
+        yield* TestClock.adjust("3 minutes");
+        expect((yield* reconcileStaleDeliveries(120_000)).map((r) => r.deliveryId)).toContain(a);
+        expect(yield* as(worker, deliver(WORKSPACE_A, a))).toBe("skipped");
+        const repo = yield* DeliveriesRepo;
+        expect(yield* repo.get(WORKSPACE_A, a)).toMatchObject({
+          attempts: 0,
+          lastOutcome: "outcome_unknown",
+        });
+        // The step is due again: the provider may already have the reminder, so it stays taken.
+        yield* setWorkspaceReminders({ enabled: true, proformas: false, offsetsDays: [3, 10] });
+        expect(yield* sweep("2026-12-11")).toEqual([]);
+        expect((yield* reminderEmails).map((e) => e.idempotencyKey)).toEqual([a]);
       }),
     );
     expect(Exit.isSuccess(exit)).toBe(true);

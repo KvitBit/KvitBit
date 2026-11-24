@@ -11,6 +11,10 @@
  *   `DocumentFixtures.renders`), `FakeReportPdfRenderer`, `DeliveryJobsMemory` (started jobs in
  *   `StartedDeliveries`), `FakeExportWorkflow`, `ShareLinkKeysTest`.
  *
+ * The delivery steps and the delivery reconcile (`deliver`, `reconcileStaleDeliveries`, J1a)
+ * run on this context as they do on CoreLive's: `DeliveriesRepoMemory` answers the reconcile's
+ * stale query, and its restarts land in `StartedDeliveries`.
+ *
  * Pair it with `TestClock.layer()` (test/helpers `runCore` does, at TEST_NOW).
  */
 import { Layer } from "effect";

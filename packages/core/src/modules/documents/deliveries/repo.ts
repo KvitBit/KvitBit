@@ -58,6 +58,13 @@ export class DeliveriesRepo extends Context.Service<
       workspaceId: WorkspaceId,
       ids: ReadonlyArray<DeliveryId>,
     ) => Effect.Effect<ReadonlyMap<DeliveryId, DeliveryStatus>, StoreUnavailable>;
+    /**
+     * Cross-tenant (OutboxReconcile, J1a): deliveries still `queued` or `sending` whose
+     * `updatedAt` is before `before` (ISO instant), oldest first.
+     */
+    readonly findStaleQueuedOrSending: (
+      before: string,
+    ) => Effect.Effect<ReadonlyArray<DeliveryRecord>, StoreUnavailable>;
   }
 >()("kvitbit/core/DeliveriesRepo") {}
 
@@ -86,6 +93,12 @@ export const DeliveriesRepoMemory: Layer.Layer<DeliveriesRepo, never, MemoryTabl
               table.list(workspaceId, { whereIn: { id: ids } }),
               (rows) => new Map(rows.map((row) => [row.id, row.status] as const)),
             ),
+      findStaleQueuedOrSending: (before) =>
+        table.listGlobal({
+          whereIn: { status: ["queued", "sending"] },
+          range: { updatedAt: { lt: before } },
+          orderBy: ["updatedAt"],
+        }),
     });
   }),
 );

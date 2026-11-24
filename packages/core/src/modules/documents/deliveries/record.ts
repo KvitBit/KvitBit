@@ -99,9 +99,14 @@ export const DeliveriesTable = defineCollection<DeliveryRecord>({
   ],
 });
 
-/** Skipped before any dispatch attempt: its reminder step no longer counts as taken. */
-export const isReleased = (row: Pick<DeliveryRecord, "status" | "attempts">): boolean =>
-  row.status === "skipped" && row.attempts === 0;
+/**
+ * Skipped before any dispatch attempt could reach the provider: its reminder step no longer
+ * counts as taken. A row skipped after `claim` (a restarted job) carries `outcome_unknown`,
+ * because the job may have died after the provider accepted it, so its step stays taken.
+ */
+export const isReleased = (
+  row: Pick<DeliveryRecord, "status" | "attempts" | "lastOutcome">,
+): boolean => row.status === "skipped" && row.attempts === 0 && row.lastOutcome === null;
 
 /** Statuses no job step changes again. */
 export const isTerminal = (status: DeliveryStatus): boolean =>

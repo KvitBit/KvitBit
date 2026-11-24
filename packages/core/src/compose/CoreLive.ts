@@ -10,6 +10,11 @@
  *   BrandingPreview, DocumentRenderer, ReportPdfRenderer, DeliveryJobs, ExportWorkflow,
  *   ShareLinkKeys).
  *
+ * The DocumentDelivery steps and the delivery half of OutboxReconcile (`deliver`, `claim`,
+ * `dispatch`, `giveUp`, `reconcileStaleDeliveries` in modules/documents/deliveries, J1-J1a) are
+ * not layers: apps/server runs them from its workflow and cron with the same `CoreStore`,
+ * `DeliveriesRepo`, `DeliveryJobs` and `EmailSender` it builds CoreLive from.
+ *
  * `RequestOutcome` is not bound: the edge provides one per request and `withIdempotency` reads
  * it optionally from the call site. `ShareVisitorDevice` is a `Context.Reference` the share
  * route sets per request.

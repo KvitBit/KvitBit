@@ -8,7 +8,8 @@
  * - jobs.ts    `DeliveryJobs` (start after commit, J1; integration binds Workflow.execute) +
  *              `DeliveryJobsMemory` / `StartedDeliveries` for tests.
  * - send.ts    send, previewSend, the shared `plan`, `queueDelivery`.
- * - steps.ts   job steps claim / dispatch / giveUp / deliver, `DeliveryRetry`.
+ * - steps.ts   job steps claim / dispatch / giveUp / deliver, `DeliveryRetry`, and
+ *              `reconcileStaleDeliveries` (OutboxReconcile for queued/sending rows, J1a).
  * - sender.ts  `DocumentSenderLive` (the `DocumentSender` seam's real layer).
  */
 
@@ -36,4 +37,11 @@ export {
 } from "./send";
 export type { DocumentSenderDeps } from "./sender";
 export { DocumentSenderLive } from "./sender";
-export { claim, DeliveryRetry, deliver, dispatch, giveUp } from "./steps";
+export {
+  claim,
+  DeliveryRetry,
+  deliver,
+  dispatch,
+  giveUp,
+  reconcileStaleDeliveries,
+} from "./steps";

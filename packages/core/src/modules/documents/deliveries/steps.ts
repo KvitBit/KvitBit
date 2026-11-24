@@ -3,22 +3,25 @@
  * this phase). Each runs as the workflow's System caller in its own transaction and is
  * idempotent by the delivery's status, so a replayed Activity or a reconcile re-start (J1a)
  * is harmless:
- * - `claim`: queued -> sending when still eligible (J3 re-check), else skipped;
+ * - `claim`: queued -> sending when still eligible (J3 re-check), else skipped; a sending row
+ *   (a restarted job) is re-checked too and stays sending or is skipped;
  * - `dispatch`: sending -> sent, or failed on `EmailRejected` (never retried); the retryable
  *   outcomes leave it sending and fail with `DeliveryRetry` for the Activity's retry policy;
  *   the EmailSender key is always the delivery id (J2);
  * - `giveUp`: sending -> failed once retries are exhausted.
- * `deliver` runs claim then dispatch.
+ * `deliver` runs claim then dispatch. `reconcileStaleDeliveries` is the delivery half of
+ * OutboxReconcile (J1a): it restarts the job of a delivery left `queued` or `sending`.
  */
 import type { DeliveryId, WorkspaceId } from "@kvitbit/domain/contract";
 import { EmailSender } from "@kvitbit/domain/ports";
-import { Data, Effect } from "effect";
+import { Cause, Clock, Data, Effect } from "effect";
 import { CoreStore } from "../../../store/CoreStore";
 import { DocumentDeliveryReads } from "../delivery";
 import { reminderState, stepBlock } from "../reminders/eligibility";
 import { stillOwed } from "../reminders/policy";
 import { DocumentsRepo } from "../repo";
 import { now } from "../support";
+import { DeliveryJobs } from "./jobs";
 import type { DeliveryRecord } from "./record";
 import { isTerminal } from "./record";
 import { DeliveriesRepo } from "./repo";
@@ -63,17 +66,31 @@ const transition = (
       .pipe(Effect.catchTag("Conflict", (e) => Effect.die(e)));
   });
 
-/** queued -> sending | skipped. A sending row stays sending (re-dispatch); terminal rows stay. */
+/**
+ * queued -> sending | skipped. A sending row (a restarted job, J1a) is re-checked as well: it
+ * stays sending (re-dispatch) or is skipped before any further provider call. Terminal rows stay.
+ */
 export const claim = (workspaceId: WorkspaceId, id: DeliveryId) =>
   Effect.flatMap(CoreStore, (store) =>
     store.transaction(
       Effect.gen(function* () {
         const repo = yield* DeliveriesRepo;
         const row = yield* repo.lock(workspaceId, id);
-        if (row.status !== "queued") return row.status;
+        if (isTerminal(row.status)) return row.status;
         const reason = yield* ineligible(workspaceId, row);
+        if (row.status === "sending" && reason === null) return row.status;
+        // A sending row may have reached the provider (a job that died before recording the
+        // attempt), so skipping it keeps that uncertainty and its reminder step (isReleased).
         const next = yield* transition(workspaceId, id, () =>
-          reason === null ? { status: "sending" } : { status: "skipped", failure: reason },
+          reason === null
+            ? { status: "sending" }
+            : row.status === "sending"
+              ? {
+                  status: "skipped",
+                  failure: reason,
+                  lastOutcome: row.lastOutcome ?? "outcome_unknown",
+                }
+              : { status: "skipped", failure: reason },
         );
         return next.status;
       }),
@@ -172,5 +189,48 @@ export const deliver = (workspaceId: WorkspaceId, id: DeliveryId) =>
   Effect.flatMap(claim(workspaceId, id), (status) =>
     isTerminal(status) ? Effect.succeed(status) : dispatch(workspaceId, id),
   );
+
+/**
+ * OutboxReconcile for deliveries (J1a, cross-tenant; integration runs it from a cron). Restarts
+ * the DocumentDelivery job, keyed by the delivery id, for every delivery still `queued` or
+ * `sending` whose `updatedAt` is more than `olderThanMillis` old: the job start was lost after
+ * the queueing commit, or the job died after `claim` (before or after the provider call).
+ *
+ * `claim` and every recorded dispatch attempt advance `updatedAt`, so a job that is still
+ * working is selected only after it has been silent for the threshold. Even then the start
+ * attaches to its live execution by key (J1, `DeliveryJobs`); a start that overlaps a running
+ * dispatch anyway can only send again with the same provider key (J2, at least once), and
+ * `dispatch` counts attempts from the locked row. The restarted job runs `deliver`: `claim`
+ * re-checks eligibility for a queued row (J3), a sending row is dispatched again. One start's
+ * failure is logged and does not stop the others. Returns every delivery it tried to restart,
+ * including those whose start failed (see the log).
+ */
+export const reconcileStaleDeliveries = (olderThanMillis: number) =>
+  Effect.gen(function* () {
+    const store = yield* CoreStore;
+    const repo = yield* DeliveriesRepo;
+    const jobs = yield* DeliveryJobs;
+    const before = new Date((yield* Clock.currentTimeMillis) - olderThanMillis).toISOString();
+    const rows = yield* store.transaction(repo.findStaleQueuedOrSending(before));
+    const restarted = rows.map((row) => ({
+      workspaceId: row.workspaceId,
+      deliveryId: row.id,
+      status: row.status,
+    }));
+    yield* Effect.forEach(
+      restarted,
+      (delivery) =>
+        jobs.start(delivery.workspaceId, delivery.deliveryId).pipe(
+          // Interruption (shutdown, cron cancel) stops the pass; other failures are logged.
+          Effect.catchCause((cause) =>
+            Cause.hasInterrupts(cause)
+              ? Effect.interrupt
+              : Effect.logWarning("OutboxReconcile: delivery start failed", delivery, cause),
+          ),
+        ),
+      { discard: true },
+    );
+    return restarted;
+  });
 
 const escapeHtml = (s: string) => s.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
