@@ -13,9 +13,10 @@ import {
   type ThemeStyle,
 } from "@kvitbit/api-contract";
 import { Invalid } from "@kvitbit/domain/contract";
-import { Context, Effect, Layer, Option, Result, Schema } from "effect";
+import { Context, Effect, Layer, Option, Result } from "effect";
+import type { UiError } from "../api/errors";
 import { isHex } from "./color/utils";
-import { repairContrast } from "./contrast-check";
+import { failingPairs, repairContrast } from "./contrast-check";
 import { type ExtendedScheme, extendedScheme } from "./extended";
 import { resolveMaterialTheme } from "./material-theme-json";
 import { KvitbitDefaultTheme, resolvePreset, resolveSeed, seedRecipe } from "./resolve";
@@ -118,29 +119,27 @@ export const dynamicRoles = (input: DynamicColorInput): Result.Result<DynamicRol
 /**
  * Roles for any variant of a dynamic scheme. The system supplies only standard light and dark;
  * medium and high move each colour by the tone step the generated scheme takes, keeping its hue
- * and chroma, then repair any pair the shift left below AA.
+ * and chroma, then repair any pair the shift left below AA. Standard variants are the system's own
+ * (completed) maps: a pair whose colours the platform supplied both stays as supplied.
  */
 export const dynamicSchemeRoles = (dynamic: DynamicRoles, variant: SchemeVariant): RoleMap => {
   const roles = schemeRoles(
     { seed: dynamic.light.primary, overrides: { light: dynamic.light, dark: dynamic.dark } },
     variant,
   );
-  return contrastLevelOf(variant) === 0 ? roles : (repairContrast(roles) as RoleMap);
+  if (contrastLevelOf(variant) === 0) return roles;
+  const repaired = repairContrast(roles) as RoleMap;
+  // A contrast variant must never read worse than its generated counterpart: if the system's
+  // colours cannot be shifted into a passing map, use the scheme generated from its primary.
+  return failingPairs(repaired).length === 0
+    ? repaired
+    : schemeRoles(seedRecipe(dynamic.light.primary), variant);
 };
 
 // ThemeEngine seam -----------------------------------------------------------------------------
 
-/**
- * Transport failure of a non-local engine (offline, timeout, server error). Spec 4.4 types the
- * port's error as ui-api's `UiError`, which is built concurrently; a remote layer carries it in
- * `error` until integration narrows `ThemeEngineError` to `Invalid | UiError`.
- */
-export class ThemeEngineUnavailable extends Schema.TaggedError<ThemeEngineUnavailable>()(
-  "ThemeEngineUnavailable",
-  { error: Schema.Unknown },
-) {}
-
-export type ThemeEngineError = Invalid | ThemeEngineUnavailable;
+/** Spec 4.4: the port fails with ui-api's `UiError`; the local engine only ever fails `Invalid`. */
+export type ThemeEngineError = UiError;
 
 /**
  * Spec 4.4 port. The default layer is the pure local engine; a server-backed layer

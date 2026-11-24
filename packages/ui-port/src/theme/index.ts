@@ -16,6 +16,7 @@ export {
   CHECKED_ROLE_PAIRS,
   type ContrastIssue,
   contrastIssueText,
+  failingPairs,
   nearestPassing,
   type RolePair,
   repairContrast,
@@ -45,7 +46,6 @@ export {
   type ThemeDraft,
   ThemeEngine,
   type ThemeEngineError,
-  ThemeEngineUnavailable,
   type ThemeOrigin,
   type ThemeState,
 } from "./engine";

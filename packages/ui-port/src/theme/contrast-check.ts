@@ -9,7 +9,7 @@ import type {
   ResolvedScheme,
   ResolvedTheme,
 } from "@kvitbit/api-contract";
-import { EXTENDED_ROLES, M3_COLOR_ROLES } from "@kvitbit/api-contract";
+import { EXTENDED_ROLES } from "@kvitbit/api-contract";
 import { type Text, text } from "../text";
 import { contrastRatio } from "./color/contrast";
 import { Hct } from "./color/hct";
@@ -167,52 +167,54 @@ export const withContrast = (fg: string, bg: string, required: number): string =
 
 /**
  * Make every checked pair of a role map pass, changing only roles outside `fixed` (colours the
- * platform supplied). Each adjustable foreground is solved against all its backgrounds at once;
- * when that is impossible it is solved against its fixed backgrounds and the adjustable
- * backgrounds are then moved to it.
+ * platform supplied). Contrast is symmetric, so a role is solved against every pair it takes part
+ * in, as foreground or background. Constraint propagation: failing pairs touching an already
+ * settled role go first; a moved role is solved against all its partners when possible, else
+ * against its settled partners, and is then settled itself. Each role moves at most once, so the
+ * loop ends; a pair whose two roles are both supplied stays as the platform gave it.
  */
 export const repairContrast = (
   roles: Readonly<Record<M3ColorRole, string>>,
   fixed: ReadonlySet<M3ColorRole> = new Set(),
 ): Record<M3ColorRole, string> => {
-  let out: Record<M3ColorRole, string> = { ...roles };
-  // Moving a background can unsettle a foreground solved earlier, so repeat until stable.
-  for (let pass = 0; pass < 4; pass++) {
-    const next = repairPass(out, fixed);
-    if (M3_COLOR_ROLES.every((r) => next[r] === out[r])) return next;
-    out = next;
+  const out: Record<M3ColorRole, string> = { ...roles };
+  const settled = new Set<M3ColorRole>(fixed);
+  const pairsOf = new Map<M3ColorRole, RolePair[]>();
+  for (const pair of CHECKED_ROLE_PAIRS)
+    for (const role of [pair.foreground, pair.background])
+      pairsOf.set(role, [...(pairsOf.get(role) ?? []), pair]);
+  const other = (p: RolePair, role: M3ColorRole) =>
+    p.foreground === role ? p.background : p.foreground;
+  const partners = (role: M3ColorRole, onlySettled: boolean) =>
+    (pairsOf.get(role) ?? [])
+      .filter((p) => !onlySettled || settled.has(other(p, role)))
+      .map((p) => ({ color: out[other(p, role)], required: p.required }));
+  const passes = (color: string, ps: ReturnType<typeof partners>) =>
+    ps.every((p) => ratioOf(color, p.color) >= p.required);
+  const failing = (p: RolePair) => ratioOf(out[p.foreground], out[p.background]) < p.required;
+  for (;;) {
+    const open = CHECKED_ROLE_PAIRS.filter(
+      (p) => failing(p) && !(settled.has(p.foreground) && settled.has(p.background)),
+    );
+    const pair =
+      open.find((p) => settled.has(p.foreground) || settled.has(p.background)) ?? open[0];
+    if (pair === undefined) return out;
+    const movable = [pair.foreground, pair.background].filter((r) => !settled.has(r));
+    const full = movable
+      .map((role) => ({ role, color: nearestPassing(out[role], partners(role, false)) }))
+      .find((c) => passes(c.color, partners(c.role, false)));
+    const role = full?.role ?? movable[0];
+    if (role === undefined) return out;
+    out[role] =
+      full?.color ??
+      nearestPassing(out[role], [
+        ...partners(role, true),
+        { color: out[other(pair, role)], required: pair.required },
+      ]);
+    settled.add(role);
   }
-  return out;
 };
 
-const repairPass = (
-  roles: Readonly<Record<M3ColorRole, string>>,
-  fixed: ReadonlySet<M3ColorRole>,
-): Record<M3ColorRole, string> => {
-  const out: Record<M3ColorRole, string> = { ...roles };
-  const byForeground = new Map<M3ColorRole, RolePair[]>();
-  for (const pair of CHECKED_ROLE_PAIRS)
-    byForeground.set(pair.foreground, [...(byForeground.get(pair.foreground) ?? []), pair]);
-  for (const [fg, pairs] of byForeground) {
-    const partners = (ps: RolePair[]) =>
-      ps.map((p) => ({ color: out[p.background], required: p.required }));
-    const passes = (ps: RolePair[]) =>
-      ps.every((p) => ratioOf(out[fg], out[p.background]) >= p.required);
-    if (passes(pairs)) continue;
-    if (!fixed.has(fg)) {
-      const all = nearestPassing(out[fg], partners(pairs));
-      if (partners(pairs).every((p) => ratioOf(all, p.color) >= p.required)) {
-        out[fg] = all;
-        continue;
-      }
-      const pinned = pairs.filter((p) => fixed.has(p.background));
-      if (pinned.length > 0) out[fg] = nearestPassing(out[fg], partners(pinned));
-    }
-    for (const p of pairs)
-      if (!fixed.has(p.background) && ratioOf(out[fg], out[p.background]) < p.required)
-        out[p.background] = nearestPassing(out[p.background], [
-          { color: out[fg], required: p.required },
-        ]);
-  }
-  return out;
-};
+/** Checked pairs of a role map below their requirement. */
+export const failingPairs = (roles: Readonly<Record<M3ColorRole, string>>): RolePair[] =>
+  CHECKED_ROLE_PAIRS.filter((p) => ratioOf(roles[p.foreground], roles[p.background]) < p.required);

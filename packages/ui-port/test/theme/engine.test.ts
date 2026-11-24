@@ -1,11 +1,13 @@
 import { describe, expect, test } from "bun:test";
 import { Effect, Exit, Layer, Option, Result } from "effect";
+import { UiError } from "../../src/api/errors";
 import {
   auditScheme,
   contrastRatio,
   dynamicRoles,
   dynamicSchemeRoles,
   effectiveTheme,
+  failingPairs,
   harmonizeExtended,
   initialThemeState,
   KvitbitDefaultTheme,
@@ -13,9 +15,9 @@ import {
   resolvePreset,
   resolveSeed,
   rgbFromHex,
+  SCHEME_VARIANTS,
   StyleTokens,
   ThemeEngine,
-  ThemeEngineUnavailable,
   type ThemeState,
   variantOf,
 } from "../../src/theme";
@@ -179,6 +181,71 @@ describe("dynamic colour hardening", () => {
     }
   });
 
+  test("a supplied dark onPrimary keeps its pairs AA after repair", () => {
+    const roles = Result.getOrThrow(
+      dynamicRoles({ _tag: "Roles", light: {}, dark: { onPrimary: "#777777" } }),
+    );
+    expect(roles.dark.onPrimary).toBe("#777777");
+    for (const contrast of ["standard", "medium", "high"] as const) {
+      const e = effectiveTheme(
+        state({
+          preference: { contrast },
+          system: { scheme: "dark", dynamic: Option.some(roles) },
+        }),
+      );
+      const variant = variantOf("dark", contrast);
+      expect({
+        contrast,
+        failing: auditScheme({ roles: e.roles, extended: e.extended }, variant),
+      }).toEqual({
+        contrast,
+        failing: [],
+      });
+    }
+  });
+
+  test("fuzz: realistic partial system maps resolve AA-clean in all six variants", () => {
+    let state = 11;
+    const rnd = () => {
+      state = (state * 1103515245 + 12345) & 0x7fffffff;
+      return state / 0x7fffffff;
+    };
+    const hex = () =>
+      `#${Math.floor(rnd() * 0xffffff)
+        .toString(16)
+        .padStart(6, "0")
+        .toUpperCase()}`;
+    const drop = (m: Record<string, string>) =>
+      Object.fromEntries(Object.entries(m).filter(() => rnd() > 0.3));
+    for (let i = 0; i < 20; i++) {
+      const sys = resolveSeed(hex()).schemes;
+      const d = Result.getOrThrow(
+        dynamicRoles({ _tag: "Roles", light: drop(sys.light.roles), dark: drop(sys.dark.roles) }),
+      );
+      for (const v of SCHEME_VARIANTS) expect(failingPairs(dynamicSchemeRoles(d, v))).toEqual([]);
+    }
+  });
+
+  test("fuzz: medium and high never fail, even for conflicting system colours", () => {
+    let state = 7;
+    const rnd = () => {
+      state = (state * 1103515245 + 12345) & 0x7fffffff;
+      return state / 0x7fffffff;
+    };
+    const hex = () =>
+      `#${Math.floor(rnd() * 0xffffff)
+        .toString(16)
+        .padStart(6, "0")
+        .toUpperCase()}`;
+    const roles = Object.keys(KvitbitDefaultTheme.schemes.light.roles);
+    const pick = () => Object.fromEntries(roles.filter(() => rnd() < 0.08).map((r) => [r, hex()]));
+    for (let i = 0; i < 20; i++) {
+      const d = Result.getOrThrow(dynamicRoles({ _tag: "Roles", light: pick(), dark: pick() }));
+      for (const v of ["lightMedium", "lightHigh", "darkMedium", "darkHigh"] as const)
+        expect(failingPairs(dynamicSchemeRoles(d, v))).toEqual([]);
+    }
+  });
+
   test("a mid-grey system primary gets an onPrimary that reaches AA", () => {
     const roles = Result.getOrThrow(
       dynamicRoles({ _tag: "Roles", light: { primary: "#777774" }, dark: {} }),
@@ -239,17 +306,21 @@ describe("ThemeEngine seam", () => {
     });
   });
 
-  test("a remote layer can fail with ThemeEngineUnavailable", () => {
+  test("a remote layer can fail with UiError, and callers handle Offline directly", () => {
     const Remote = Layer.succeed(ThemeEngine, {
-      resolve: () => Effect.fail(new ThemeEngineUnavailable({ error: { _tag: "Offline" } })),
-      harmonizeExtended: () => Effect.fail(new ThemeEngineUnavailable({ error: "timeout" })),
+      resolve: () => Effect.fail(UiError.offline),
+      harmonizeExtended: () => Effect.fail(UiError.timeout),
     });
-    const exit = Effect.runSyncExit(
+    const handled = Effect.runSync(
       Effect.provide(
-        withEngine((e) => e.resolve({ _tag: "Preset", id: "plum" }, "standard")),
+        withEngine((e) => e.resolve({ _tag: "Preset", id: "plum" }, "standard")).pipe(
+          Effect.map(() => "resolved"),
+          Effect.catchTag("Offline", () => Effect.succeed("offline")),
+          Effect.catch(() => Effect.succeed("other")),
+        ),
         Remote,
       ),
     );
-    expect(Exit.isFailure(exit)).toBe(true);
+    expect(handled).toBe("offline");
   });
 });
