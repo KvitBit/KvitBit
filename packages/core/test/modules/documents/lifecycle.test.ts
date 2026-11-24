@@ -32,7 +32,7 @@ import { NumberingSeries } from "../../../src/modules/numbering";
 import { CoreStore } from "../../../src/store/CoreStore";
 import { member, WORKSPACE_A, WORKSPACE_B } from "../../helpers";
 import type { Services } from "./fixtures";
-import { as, CZ_BUYER, contact, invoiceInput, issuer, scenario, str } from "./fixtures";
+import { as, CZ_BUYER, contact, dec, invoiceInput, issuer, scenario, str } from "./fixtures";
 
 const WS = WORKSPACE_A;
 const TODAY = "2026-11-23" as IsoDate;
@@ -543,7 +543,7 @@ describe("cancel", () => {
           const view = yield* issueProforma();
           const result = yield* d.cancel(view.id, {
             reason: "duplicita",
-            on: "2026-11-24" as IsoDate,
+            on: "2026-11-23" as IsoDate,
           });
           return [result, yield* d.history(view.id)] as const;
         }),
@@ -761,5 +761,115 @@ describe("Credit Notes", () => {
     expect(str(spec.totals.vat.amount)).toBe("-60");
     expect(str(spec.totals.gross.amount)).toBe("-560");
     expect(closed).toBe(true);
+  });
+});
+
+describe("council follow-ups", () => {
+  test("unrelated edits keep the issued amounts and a pinned null note", async () => {
+    const [before, edited, refreshed] = ok(
+      await run(
+        Effect.gen(function* () {
+          const d = yield* docs;
+          const f = yield* DocumentFixtures;
+          const view = yield* issueInvoice();
+          // The Workspace stops being a VAT payer and gains a default note.
+          yield* f.putIssuer(
+            issuer(WS, "non_vat_payer", { seriesByKind: {}, defaultNote: "Nová" }),
+          );
+          const edited = yield* d.edit(view.id, { orderNumber: "PO-1" }, view.revision);
+          const refreshed = yield* d.edit(
+            view.id,
+            { paymentMethod: "cash", issuedOn: "2026-11-22" as IsoDate },
+            edited.revision,
+          );
+          return [view, edited, refreshed] as const;
+        }),
+      ),
+    );
+    expect((json(edited) as { totals: unknown }).totals).toEqual(
+      (json(before) as { totals: unknown }).totals,
+    );
+    expect(edited.taxDocument).toBe(true);
+    expect(refreshed.paymentMethod).toBe("cash");
+    expect(refreshed.dates).toEqual({
+      issuedOn: "2026-11-22" as IsoDate,
+      taxableSupplyOn: TODAY,
+      dueOn: "2026-12-06" as IsoDate,
+    });
+    expect((json(refreshed) as { totals: unknown }).totals).toEqual(
+      (json(before) as { totals: unknown }).totals,
+    );
+  });
+
+  test("D3a amount guard and settlement follow-up", async () => {
+    const [guarded, settlement] = ok(
+      await run(
+        Effect.gen(function* () {
+          const d = yield* docs;
+          const repo = yield* DocumentsRepo;
+          const store = yield* CoreStore;
+          const proforma = yield* issueProforma();
+          const pRow = yield* repo.get(WS, proforma.id);
+          const paidP = yield* store.transaction(
+            repo.update({ ...pRow, payments: 1 }, pRow.revision),
+          );
+          const guarded = yield* Effect.flip(
+            d.edit(proforma.id, { pricesIncludeVat: true }, paidP.revision),
+          );
+          const invoice = yield* issueInvoice();
+          const iRow = yield* repo.get(WS, invoice.id);
+          const paidI = yield* store.transaction(
+            repo.update(
+              { ...iRow, payments: 1, paidAmount: dec("2980"), settlement: "paid" },
+              iRow.revision,
+            ),
+          );
+          const cheaper = yield* d.edit(
+            invoice.id,
+            { lines: [invoiceInput().lines[0]] as never },
+            paidI.revision,
+          );
+          return [guarded, cheaper.settlement] as const;
+        }),
+      ),
+    );
+    expect(guarded).toEqual(illegal);
+    expect(settlement).toBe("overpaid");
+  });
+
+  test("Credit Note dates, no cancel of a Credit Note, no future correction date", async () => {
+    const [cn, cancelCn, future] = ok(
+      await run(
+        Effect.gen(function* () {
+          const d = yield* docs;
+          const view = yield* issueInvoice({ issuedOn: "2026-11-20" as IsoDate });
+          const future = yield* Effect.flip(
+            d.cancel(view.id, { reason: "x", on: "2026-11-24" as IsoDate }),
+          );
+          const { creditNote } = yield* d.cancel(view.id, {
+            reason: "x",
+            on: "2026-11-21" as IsoDate,
+          });
+          const cn = creditNote as DocumentView;
+          const row = yield* (yield* DocumentsRepo).get(WS, cn.id);
+          return [
+            { dates: cn.dates, correctedNumber: row.correctedNumber, reason: row.reason },
+            yield* Effect.flip(d.cancel(cn.id, { reason: "x" })),
+            future,
+          ] as const;
+        }),
+      ),
+    );
+    expect(cn).toEqual({
+      dates: { issuedOn: TODAY, taxableSupplyOn: "2026-11-21" as IsoDate, dueOn: TODAY },
+      correctedNumber: "2026-0001",
+      reason: "x",
+    });
+    expect(cancelCn).toEqual(illegal);
+    expect(future).toEqual(
+      new Invalid({
+        issues: [{ path: ["on"], code: "request.malformed", params: { reason: "out_of_range" } }],
+      }),
+    );
   });
 });

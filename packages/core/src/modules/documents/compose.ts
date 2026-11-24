@@ -16,6 +16,7 @@
 import type {
   BankAccountId,
   ContactId,
+  CurrencyCode,
   CurrentCaller,
   DocumentId,
   DocumentInput,
@@ -118,12 +119,14 @@ export interface ComposeOptions {
   /**
    * Printed particulars to keep instead of fresh snapshots (rule D10: an issued document keeps
    * them unless `refreshParties`). `contact` is left out when the edit changes the Contact.
-   * The frozen bank account is kept while the currency is unchanged and no other account is
-   * given; the regime and treatments still come from the current Workspace and Contact.
+   * The frozen bank account (or its absence) is kept while the currency is unchanged and no
+   * other account is given; the regime and treatments still come from the current Workspace and Contact.
    */
   readonly freeze?: {
     readonly contact?: ContactSnapshotRecord | undefined;
     readonly issuer: IssuerSnapshotRecord;
+    /** The frozen document's currency: its bank account (or none) is kept in it. */
+    readonly currency: CurrencyCode;
   };
 }
 
@@ -422,7 +425,7 @@ export const compose = (
         dueDays: given.due !== undefined && "inDays" in given.due ? given.due.inDays : undefined,
         paymentMethod: given.paymentMethod,
         series: given.series,
-        note: given.note,
+        note: given.note ?? undefined,
       },
       contact: contact.defaults,
       workspace: issuer.billing,
@@ -468,12 +471,14 @@ export const compose = (
       seriesId = series.id;
     }
 
-    const frozenAccount = options.freeze?.issuer.bankAccount ?? null;
+    const frozen = options.freeze;
     const account =
-      frozenAccount !== null &&
-      frozenAccount.currency === currency &&
-      (given.bankAccount === undefined || given.bankAccount === frozenAccount.id)
-        ? { ...frozenAccount, isDefault: false }
+      frozen !== undefined &&
+      frozen.currency === currency &&
+      (given.bankAccount === undefined || given.bankAccount === frozen.issuer.bankAccount?.id)
+        ? frozen.issuer.bankAccount === null
+          ? null
+          : { ...frozen.issuer.bankAccount, isDefault: false }
         : pickBankAccount(issuer, currency, given.bankAccount);
     if (account === undefined) {
       return yield* new NotFound({ entity: "BankAccount", id: given.bankAccount ?? "" });
@@ -558,7 +563,7 @@ export const compose = (
       currency,
       language: defaults.language,
       paymentMethod: defaults.paymentMethod,
-      note: defaults.note,
+      note: given.note === null ? null : defaults.note,
       issuedOn,
       taxableSupplyOn,
       dueOn,

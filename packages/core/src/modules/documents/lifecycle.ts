@@ -20,8 +20,10 @@ import {
   Invalid,
   IsoDate as IsoDateSchema,
   Locale,
+  VatBreakdown,
 } from "@kvitbit/domain/contract";
 import { Effect, Schema } from "effect";
+import { addDays, isCalendarDate, MAX_ISO_DATE } from "../../engines/calendar";
 import { authorizeInWorkspace } from "../../policy/Policy";
 import { appendAudit } from "../../shared/audit";
 import { orUnavailable } from "../../shared/errors";
@@ -37,7 +39,13 @@ import { DocumentRecord as DocumentRecordSchema } from "./record";
 import { DocumentsRepo } from "./repo";
 import { DocumentSender } from "./sender";
 import { newDraftRecord, now, viewOf } from "./support";
-import { guard, hasDependents, hasFinalInvoice, paymentsBlockCancel } from "./transitions";
+import {
+  guard,
+  hasDependents,
+  hasFinalInvoice,
+  paymentsBlockCancel,
+  settlementOf,
+} from "./transitions";
 import { DocumentViewCodec } from "./view";
 
 const illegal = () => new Conflict({ reason: "illegal_transition" });
@@ -72,7 +80,7 @@ const pinDefaults = (c: Composed): GivenFields => ({
   due: c.given.due ?? { inDays: daysBetween(c.issuedOn, c.dueOn) },
   language: c.language,
   ...(c.seriesId === null ? {} : { series: c.seriesId }),
-  ...(c.note === null ? {} : { note: c.note }),
+  note: c.note,
   paymentMethod: c.paymentMethod,
 });
 
@@ -137,6 +145,8 @@ const numberTaken = () => new Conflict({ reason: "duplicate" });
 export const issue = (from: IssueFrom, opts?: RequestOptions & { readonly send?: SendOptions }) =>
   Effect.gen(function* () {
     const { workspaceId } = yield* authorizeInWorkspace("document.issue");
+    // R1a: every policy check runs before a replay (`send` queues a delivery).
+    if (opts?.send !== undefined) yield* authorizeInWorkspace("document.send");
     return yield* withIdempotency(
       {
         scope: { _tag: "Workspace", workspaceId },
@@ -206,6 +216,20 @@ export const issue = (from: IssueFrom, opts?: RequestOptions & { readonly send?:
 /** Fields a Payment Tax Document or Credit Note accepts (D3a: their amounts are bound). */
 const TEXT_FIELDS = new Set(["note", "orderNumber", "language", "number"]);
 
+/**
+ * Fields an edit applies to the stored record without recomputing (no Contact, Workspace, rate
+ * or FX lookup), so an unrelated edit never moves the issued amounts. `series` passes only
+ * unchanged (checked first).
+ */
+const LIGHT_FIELDS = new Set([
+  ...TEXT_FIELDS,
+  "paymentMethod",
+  "variableSymbol",
+  "due",
+  "issuedOn",
+  "series",
+]);
+
 /** Audited record fields, in diff order (D3: one entry with the field-level diff). */
 const DIFF_FIELDS = [
   "number",
@@ -227,9 +251,12 @@ const DIFF_FIELDS = [
   "fx",
   "fxOverride",
   "taxDocument",
+  "settlement",
 ] as const satisfies ReadonlyArray<keyof DocumentRecord>;
 
 const encodeRecord = Schema.encodeUnknownSync(Schema.toCodecJson(DocumentRecordSchema));
+const encodeTotals = (totals: DocumentRecord["totals"]) =>
+  JSON.stringify(Schema.encodeUnknownSync(Schema.toCodecJson(VatBreakdown))(totals));
 
 /** The field-level diff of two versions of a record, values in their JSON encoding. */
 export const diffRecords = (before: DocumentRecord, after: DocumentRecord) => {
@@ -247,11 +274,63 @@ const patchKeys = (patch: DocumentPatch) =>
     .filter(([k, v]) => v !== undefined && !(k === "refreshParties" && v === false))
     .map(([k]) => k);
 
+const malformed = (path: string, reason: string) =>
+  new Invalid({ issues: [{ path: [path], code: "request.malformed", params: { reason } }] });
+
+/** The light path: text, dates and payment fields on the stored record; amounts untouched. */
+const lightEdit = (row: DocumentRecord, patch: DocumentPatch, number: string | null) =>
+  Effect.gen(function* () {
+    const given: GivenFields = {
+      ...row.given,
+      ...(patch.note === undefined ? {} : { note: patch.note }),
+      ...(patch.language === undefined ? {} : { language: patch.language }),
+      ...(patch.paymentMethod === undefined ? {} : { paymentMethod: patch.paymentMethod }),
+      ...(patch.variableSymbol === undefined ? {} : { variableSymbol: patch.variableSymbol }),
+      ...(patch.due === undefined ? {} : { due: patch.due }),
+      ...(patch.issuedOn === undefined ? {} : { issuedOn: patch.issuedOn }),
+    };
+    if (given.variableSymbol !== undefined && !/^\d{1,10}$/.test(given.variableSymbol)) {
+      return yield* malformed("variableSymbol", "variable_symbol_invalid");
+    }
+    const issuedOn = given.issuedOn ?? row.issuedOn;
+    let dueOn = row.dueOn;
+    if (patch.due !== undefined || patch.issuedOn !== undefined) {
+      const due = given.due ?? { inDays: daysBetween(row.issuedOn, row.dueOn) };
+      dueOn = ("on" in due ? due.on : addDays(issuedOn, due.inDays)) as IsoDate;
+      if (!isCalendarDate(dueOn) || dueOn > MAX_ISO_DATE)
+        return yield* malformed("due", "out_of_range");
+      if (dueOn < issuedOn) {
+        return yield* new Invalid({
+          issues: [{ path: ["due"], code: "document.due_before_issue" }],
+        });
+      }
+    }
+    return {
+      ...row,
+      given,
+      note: patch.note ?? row.note,
+      language: patch.language ?? row.language,
+      paymentMethod: patch.paymentMethod ?? row.paymentMethod,
+      orderNumber: patch.orderNumber ?? row.orderNumber,
+      issuedOn,
+      dueOn,
+      number,
+      // A Credit Note keeps the corrected document's payment reference.
+      variableSymbol:
+        row.kind === "credit_note"
+          ? row.variableSymbol
+          : (given.variableSymbol ?? digitsOf(number)),
+    } satisfies DocumentRecord;
+  });
+
 /**
- * `edit` of an issued, unlocked document (row from `getForUpdate`, guarded by the caller):
- * D3 recompute with frozen parties (D10, unless `refreshParties` or a new Contact), D3a
- * freezes, D4 number override (the caller authorized `document.overrideNumber`). Every
- * accepted edit bumps the revision and writes one `document.edit` entry with the diff.
+ * `edit` of an issued, unlocked document (row from `getForUpdate`, guarded by the caller).
+ * Text, date and payment fields apply to the stored record (`lightEdit`); anything else
+ * recomputes through `compose` with frozen parties (D10, unless `refreshParties` or a new
+ * Contact). D3a: a document others depend on keeps its lines, currency, tax point and
+ * amounts; Payment Tax Documents and Credit Notes accept text fields only. D4: `number` (the
+ * caller authorized `document.overrideNumber`). Every accepted edit bumps the revision and
+ * writes one `document.edit` entry with the diff; the settlement follows a changed total.
  */
 export const editIssued = (row: DocumentRecord, patch: DocumentPatch) =>
   Effect.gen(function* () {
@@ -262,8 +341,9 @@ export const editIssued = (row: DocumentRecord, patch: DocumentPatch) =>
     if (textOnly && keys.some((k) => !TEXT_FIELDS.has(k))) return yield* illegal();
     // D3: the series never changes once a number is assigned.
     if (patch.series !== undefined && patch.series !== row.seriesId) return yield* illegal();
+    const dependents = hasDependents(row);
     if (
-      hasDependents(row) &&
+      dependents &&
       (patch.lines !== undefined ||
         (patch.currency !== undefined && patch.currency !== row.currency) ||
         (patch.taxableSupplyOn !== undefined && patch.taxableSupplyOn !== row.taxableSupplyOn))
@@ -283,25 +363,8 @@ export const editIssued = (row: DocumentRecord, patch: DocumentPatch) =>
     }
 
     let next: DocumentRecord;
-    if (textOnly) {
-      const given: GivenFields = {
-        ...row.given,
-        ...(patch.note === undefined ? {} : { note: patch.note }),
-        ...(patch.language === undefined ? {} : { language: patch.language }),
-      };
-      next = {
-        ...row,
-        given,
-        note: patch.note ?? row.note,
-        language: patch.language ?? row.language,
-        orderNumber: patch.orderNumber ?? row.orderNumber,
-        number,
-        variableSymbol:
-          row.kind === "credit_note"
-            ? row.variableSymbol
-            : (given.variableSymbol ?? digitsOf(number)),
-        updatedAt: at,
-      };
+    if (keys.every((k) => LIGHT_FIELDS.has(k))) {
+      next = yield* lightEdit(row, patch, number);
     } else {
       const spec = yield* applyPatch(row.workspaceId, specFromRecord(row), {
         ...patch,
@@ -316,18 +379,24 @@ export const editIssued = (row: DocumentRecord, patch: DocumentPatch) =>
               freeze: {
                 contact: spec.contactId === row.contactId ? row.contact : undefined,
                 issuer: row.issuer,
+                currency: row.currency,
               },
             }),
       });
+      // D3a: whatever moved them (prices incl. VAT, rate, Contact, refreshed regime), the
+      // amounts another document relies on stay as issued.
+      if (dependents && encodeTotals(composed.totals) !== encodeTotals(row.totals)) {
+        return yield* illegal();
+      }
       next = {
         ...row,
         ...composed,
         seriesId: row.seriesId,
         number,
         variableSymbol: composed.given.variableSymbol ?? digitsOf(number),
-        updatedAt: at,
       };
     }
+    next = { ...next, settlement: settlementOf(next), updatedAt: at };
 
     const saved = yield* repo
       .update(next, row.revision)
@@ -450,10 +519,12 @@ export const cancel = (id: DocumentId, input: CancelInput, opts?: RequestOptions
         const { today, at } = yield* now;
         const row = yield* repo.lock(workspaceId, id);
         yield* guard(row, "cancel");
+        // A Credit Note is corrected by issuing another document, never cancelled.
+        if (row.kind === "credit_note") return yield* illegal();
         if (paymentsBlockCancel(row)) return yield* illegal();
         if (row.kind === "proforma" && hasFinalInvoice(row)) return yield* illegal();
         const on = input.on ?? today;
-        if (on < row.issuedOn) {
+        if (on < row.issuedOn || on > today) {
           return yield* new Invalid({
             issues: [
               { path: ["on"], code: "request.malformed", params: { reason: "out_of_range" } },
@@ -469,6 +540,7 @@ export const cancel = (id: DocumentId, input: CancelInput, opts?: RequestOptions
           );
           const { original, creditNote } = yield* issueCreditNote(row, {
             reason,
+            issuedOn: today,
             correctedOn: on,
             credit: remainderSpec(row, earlier),
           });

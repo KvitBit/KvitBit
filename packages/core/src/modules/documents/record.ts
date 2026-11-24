@@ -121,7 +121,8 @@ export const GivenFields = Schema.Struct({
   language: Schema.optional(Locale),
   series: Schema.optional(NumberingSeriesId),
   bankAccount: Schema.optional(BankAccountId),
-  note: Schema.optional(Schema.String),
+  /** null: pinned "no note" (issued documents keep a resolved null note). */
+  note: Schema.optional(Schema.NullOr(Schema.String)),
   paymentMethod: Schema.optional(PaymentMethod),
   variableSymbol: Schema.optional(Schema.String),
 });
@@ -197,6 +198,8 @@ export const DocumentRecord = Schema.Struct({
   occurrence: Schema.NullOr(IsoDate),
 
   cancelledOn: Schema.NullOr(IsoDate),
+  /** A Credit Note's corrected document number as it was at correction time (rule D7). */
+  correctedNumber: Text,
   /** Why: a Credit Note's correction reason (rule D7), a cancelled document's cancel reason (D6). */
   reason: Text,
   createdAt: Schema.String,

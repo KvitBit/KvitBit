@@ -4,8 +4,10 @@
  * `compose`: it prints the original's frozen parties, currency, rates and exchange rate, so no
  * Contact, Workspace or CNB lookup can change what is being corrected.
  *
- * Dates: `issuedOn` = `taxableSupplyOn` = `dueOn` = the correction date (the date the
- * correction takes effect, §42/§45); the VAT rates and the exchange rate stay the original's.
+ * Dates: `issuedOn` = `dueOn` = the day it is issued; `taxableSupplyOn` = the correction date
+ * (when the correction takes effect, §42/§45). The VAT treatments, rates and the exchange rate
+ * stay the original's: a documented exception to D11's re-fixing, since a correction converts
+ * at the corrected supply's rate.
  */
 import type {
   DocumentId,
@@ -85,11 +87,27 @@ export const remainingBuckets = (
 export const isFullyCredited = (buckets: ReadonlyArray<VatBucket>): boolean =>
   buckets.every((b) => isZero(b.base) && isZero(b.vat) && isZero(b.gross));
 
+/** Sets the whole-unit rounding adjustment (outside every bucket, §36(5)) and the gross. */
+const withRounding = (totals: VatBreakdown, adjustment: BigDecimal.BigDecimal): VatBreakdown => ({
+  ...totals,
+  roundingAdjustment: { ...totals.roundingAdjustment, amount: BigDecimal.normalize(adjustment) },
+  gross: {
+    ...totals.gross,
+    amount: BigDecimal.normalize(
+      BigDecimal.sum(
+        BigDecimal.subtract(totals.gross.amount, totals.roundingAdjustment.amount),
+        adjustment,
+      ),
+    ),
+  },
+});
+
 /**
  * The Credit Note for the uncorrected remainder (rule D6). Without earlier Credit Notes it
  * negates every line and the totals exactly (`VatMath.negate`). After partial corrections it
- * credits one line per bucket with a remainder, and its totals are the negated remainders, so
- * the cumulative credits close the original to zero.
+ * credits one line per bucket with a remainder, and its totals are the negated remainders
+ * (base, VAT, gross and CZK VAT per bucket, plus the uncredited rounding adjustment), so the
+ * cumulative credits close the original to zero whatever `pricesIncludeVat` was.
  */
 export const remainderSpec = (
   original: DocumentRecord,
@@ -125,13 +143,24 @@ export const remainderSpec = (
       amount: neg(b.base),
       deducts: null,
     })),
-    totals: VatMath.negate(VatMath.fromBuckets(left, original.currency)),
+    totals: withRounding(
+      VatMath.negate(VatMath.fromBuckets(left, original.currency)),
+      neg(
+        [original, ...creditNotes].reduce(
+          (sum, d) => BigDecimal.sum(sum, d.totals.roundingAdjustment.amount),
+          ZERO,
+        ),
+      ),
+    ),
     pricesIncludeVat: false,
   };
 };
 
 export interface IssueCreditNoteInput {
   readonly reason: string;
+  /** Prague today: the Credit Note's issue (and due) date and its numbering period. */
+  readonly issuedOn: IsoDate;
+  /** The correction's tax point; the caller checks it against the original and today. */
   readonly correctedOn: IsoDate;
   readonly credit: CreditSpec;
 }
@@ -158,7 +187,7 @@ export const issueCreditNote = (original: DocumentRecord, input: IssueCreditNote
       kind: "credit_note",
       seriesId: series.id,
       documentId: id,
-      issuedOn: input.correctedOn,
+      issuedOn: input.issuedOn,
     });
     const lines: Array<LineRecord> = [];
     for (const l of input.credit.lines) lines.push({ ...l, id: (yield* ids.next) as LineId });
@@ -179,9 +208,9 @@ export const issueCreditNote = (original: DocumentRecord, input: IssueCreditNote
         issuer: original.issuer,
         given: {
           currency: original.currency,
-          issuedOn: input.correctedOn,
+          issuedOn: input.issuedOn,
           taxableSupplyOn: input.correctedOn,
-          due: { on: input.correctedOn },
+          due: { on: input.issuedOn },
           language: original.language,
           series: allocation.seriesId,
           paymentMethod: original.paymentMethod,
@@ -190,9 +219,9 @@ export const issueCreditNote = (original: DocumentRecord, input: IssueCreditNote
         language: original.language,
         paymentMethod: original.paymentMethod,
         note: null,
-        issuedOn: input.correctedOn,
+        issuedOn: input.issuedOn,
         taxableSupplyOn: input.correctedOn,
-        dueOn: input.correctedOn,
+        dueOn: input.issuedOn,
         pricesIncludeVat: input.credit.pricesIncludeVat,
         // The refund's payment reference is the corrected document's.
         variableSymbol: original.variableSymbol ?? digitsOf(original.number),
@@ -211,6 +240,7 @@ export const issueCreditNote = (original: DocumentRecord, input: IssueCreditNote
         scheduleId: null,
         occurrence: null,
         cancelledOn: null,
+        correctedNumber: original.number,
         reason: input.reason,
         createdAt: at,
         updatedAt: at,
