@@ -106,7 +106,42 @@ const cfgWords = (file: string): string[] => {
     .split(/\s+/)
     .filter(Boolean);
 };
-const cfgNames = (file: string) => new Set(cfgWords(file));
+const CFG_KEYWORDS = new Set([
+  "CONSTANT",
+  "CONSTANTS",
+  "INIT",
+  "NEXT",
+  "SPECIFICATION",
+  "INVARIANT",
+  "INVARIANTS",
+  "PROPERTY",
+  "PROPERTIES",
+  "CONSTRAINT",
+  "CONSTRAINTS",
+  "ACTION_CONSTRAINT",
+  "ACTION_CONSTRAINTS",
+  "SYMMETRY",
+  "VIEW",
+  "CHECK_DEADLOCK",
+  "POSTCONDITION",
+  "ALIAS",
+]);
+/** The names a .cfg declares under INVARIANT(S) and under PROPERTY/PROPERTIES. */
+export const cfgChecks = (file: string): { invariants: Set<string>; properties: Set<string> } => {
+  const invariants = new Set<string>();
+  const properties = new Set<string>();
+  let into: Set<string> | undefined;
+  for (const w of cfgWords(file)) {
+    if (CFG_KEYWORDS.has(w))
+      into = w.startsWith("INVARIANT")
+        ? invariants
+        : w.startsWith("PROPERT")
+          ? properties
+          : undefined;
+    else into?.add(w);
+  }
+  return { invariants, properties };
+};
 const disablesDeadlock = (file: string) => {
   const w = cfgWords(file);
   return w.some((x, i) => x === "CHECK_DEADLOCK" && w[i + 1] === "FALSE");
@@ -172,12 +207,9 @@ export const validateManifest = (raw: unknown, root = REPO_ROOT): string[] => {
       exists(where, c.spec, "spec");
       exists(where, c.config, "config");
       if (c.wideConfig !== undefined) exists(where, c.wideConfig, "wideConfig");
+      // Every config, whatever its own policy: a mutant may inherit the base or wide config.
       for (const cfg of [c.config, c.wideConfig])
-        if (
-          isString(cfg) &&
-          (c.deadlock ?? "check") === "check" &&
-          disablesDeadlock(path.join(root, cfg))
-        )
+        if (isString(cfg) && disablesDeadlock(path.join(root, cfg)))
           bad(
             where,
             `${cfg} sets CHECK_DEADLOCK FALSE; declare deadlock: "allow" in the manifest instead`,
@@ -213,24 +245,26 @@ export const validateManifest = (raw: unknown, root = REPO_ROOT): string[] => {
                 `violates.name is required for a${v.kind === "invariant" ? "n" : ""} ${v.kind} violation`,
               );
             // The base must check the property the mutant breaks, or the base pass proves nothing about it.
-            if (
-              isString(v.name) &&
-              isString(c.config) &&
-              existsSync(path.join(root, c.config)) &&
-              !cfgNames(path.join(root, c.config)).has(v.name)
-            )
-              bad(mw, `violates.name ${v.name} is not checked by the base config ${c.config}`);
+            // It must be declared as an invariant or property, not merely mentioned (a CONSTRAINT
+            // would prune the violating states), in the base and in the wide config.
+            for (const cfg of [c.config, c.wideConfig]) {
+              if (!isString(v.name) || !isString(cfg) || !existsSync(path.join(root, cfg)))
+                continue;
+              const declared = cfgChecks(path.join(root, cfg));
+              const where2 = v.kind === "invariant" ? declared.invariants : declared.properties;
+              if (v.kind !== "deadlock" && v.kind !== "assert" && !where2.has(v.name))
+                bad(
+                  mw,
+                  `violates.name ${v.name} is not declared under ${v.kind === "invariant" ? "INVARIANT" : "PROPERTY"} in ${cfg}`,
+                );
+            }
             const dl = m.deadlock ?? c.deadlock ?? "check";
             if (v.kind === "deadlock" && dl === "allow")
               bad(mw, "expects a deadlock violation but runs with deadlock: allow");
           }
           if (m.deadlock !== undefined && m.deadlock !== "check" && m.deadlock !== "allow")
             bad(mw, "deadlock must be check|allow");
-          if (
-            isString(m.config) &&
-            (m.deadlock ?? c.deadlock ?? "check") === "check" &&
-            disablesDeadlock(path.join(root, m.config))
-          )
+          if (isString(m.config) && disablesDeadlock(path.join(root, m.config)))
             bad(
               mw,
               `${m.config} sets CHECK_DEADLOCK FALSE; declare deadlock: "allow" in the manifest instead`,
@@ -247,6 +281,9 @@ export const validateManifest = (raw: unknown, root = REPO_ROOT): string[] => {
   });
   return problems;
 };
+
+const loadManifestRaw = (file = MANIFEST): Record<string, unknown> =>
+  JSON.parse(readFileSync(file, "utf8")) as Record<string, unknown>;
 
 export const loadManifest = (file = MANIFEST, root = REPO_ROOT): Manifest => {
   let raw: unknown;
@@ -341,10 +378,16 @@ export const classifyTlc = (status: number | null, output: string): TlcOutcome =
 
 type RunResult = { status: number | null; output: string; timedOut: boolean; seconds: number };
 
-const run = (cmd: string, args: readonly string[], cwd: string, timeoutSeconds: number) =>
+const run = (
+  cmd: string,
+  args: readonly string[],
+  cwd: string,
+  timeoutSeconds: number,
+  env: NodeJS.ProcessEnv = process.env,
+) =>
   new Promise<RunResult>((resolve) => {
     const started = performance.now();
-    const child = spawn(cmd, args, { cwd, stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawn(cmd, args, { cwd, env, stdio: ["ignore", "pipe", "pipe"] });
     const chunks: Buffer[] = [];
     child.stdout.on("data", (d: Buffer) => chunks.push(d));
     child.stderr.on("data", (d: Buffer) => chunks.push(d));
@@ -512,17 +555,22 @@ export const runTlcCheck = async (
  * Runs each replay harness in its own `bun test` so every file must execute at least one
  * passing test: an empty or all-skipped harness would otherwise pass while checking nothing.
  */
-export const runReplayCheck = async (check: Check): Promise<CheckResult> => {
+export const runReplayCheck = async (
+  check: Check,
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<CheckResult> => {
   const timeout = check.timeoutSeconds ?? DEFAULT_TIMEOUT;
   const lines: string[] = [];
   let ok = true;
   let seconds = 0;
   for (const f of check.replay ?? []) {
     const file = `./${path.normalize(f)}`;
-    const res = await run(process.execPath, ["test", file], REPO_ROOT, timeout);
+    const res = await run(process.execPath, ["test", file], REPO_ROOT, timeout, env);
     seconds += res.seconds;
+    // biome-ignore lint/suspicious/noControlCharactersInRegex: strips ANSI colour (FORCE_COLOR).
+    const plain = res.output.replace(/\u001b\[[0-9;?]*[A-Za-z]/g, "");
     const count = (word: string) =>
-      Number(new RegExp(`^\\s*(\\d+) ${word}$`, "m").exec(res.output)?.[1] ?? 0);
+      Number(new RegExp(`^\\s*(\\d+) ${word}$`, "m").exec(plain)?.[1] ?? 0);
     const [pass, fail, skip, todo] = [count("pass"), count("fail"), count("skip"), count("todo")];
     let why = "";
     if (res.timedOut) why = `timeout after ${timeout}s`;
@@ -765,6 +813,63 @@ export const selftest = async (tools: Pick<Toolchain, "jar" | "java">): Promise<
     path.join(CACHE_DIR, "tla2tools-selftest.jar"),
   );
   rmSync(fake, { force: true });
+  // Manifest validation rejects configs that would let a base pass without checking the
+  // property its mutant breaks, and configs that switch deadlock checking off.
+  const counter = loadManifest().checks.find((c) => c.id === "selftest.counter");
+  if (!counter) throw new ManifestError("selftest.counter is missing from the manifest");
+  const rejects = (name: string, over: Partial<Check>, reason: RegExp) => {
+    const raw = { ...loadManifestRaw(), checks: [{ ...counter, ...over }] };
+    const problems = validateManifest(raw);
+    const good = problems.some((p) => reason.test(p));
+    ok &&= good;
+    lines.push(
+      `${good ? "ok  " : "FAIL"} rejects ${name}${good ? "" : `: got ${problems.join("; ") || "no problem"}`}`,
+    );
+  };
+  rejects(
+    "a base config that only constrains the mutant's invariant",
+    { config: `${neg}/Counter_constraint.cfg` },
+    /WithinBound is not declared under INVARIANT/,
+  );
+  rejects(
+    "a wide config that omits the mutant's property",
+    { wideConfig: `${neg}/Counter_constraint.cfg` },
+    /WithinBound is not declared under INVARIANT in .*Counter_constraint/,
+  );
+  rejects(
+    "CHECK_DEADLOCK FALSE even when the check allows deadlock",
+    { config: `${neg}/Counter_nodeadlock.cfg`, deadlock: "allow" },
+    /sets CHECK_DEADLOCK FALSE/,
+  );
+  // Classifies an initial-state property violation as a named temporal violation.
+  const initial = await runTlc(
+    tools,
+    {
+      label: "selftest.initial-property",
+      spec: `${neg}/InitProperty.tla`,
+      config: `${neg}/InitProperty.cfg`,
+      deadlock: "allow",
+      timeoutSeconds: 60,
+    },
+    logDir,
+  );
+  const initialOk =
+    initial.outcome.verdict === "violation" &&
+    initial.outcome.kind === "temporal" &&
+    initial.outcome.name === "IsOne";
+  ok &&= initialOk;
+  lines.push(
+    `${initialOk ? "ok  " : "FAIL"} classifies an initial-state property violation: ${describe(initial.outcome)}`,
+  );
+  // Coloured bun output (FORCE_COLOR) still parses as a passing replay.
+  const coloured = await runReplayCheck(
+    selftestCheck({ kind: "replay", replay: [`${SELFTEST}/imports.replay.test.ts`] }),
+    { ...process.env, FORCE_COLOR: "1" },
+  );
+  ok &&= coloured.ok;
+  lines.push(
+    `${coloured.ok ? "ok  " : "FAIL"} parses a passing replay under FORCE_COLOR=1${coloured.ok ? "" : `: ${coloured.lines[0]}`}`,
+  );
   // A relative override is resolved before it is checksummed, so TLC loads the verified file.
   const relative = path.relative(process.cwd(), tools.jar);
   const viaRelative = await runTlcCheck(
