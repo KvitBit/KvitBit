@@ -2,7 +2,7 @@
  * `DocumentSenderLive`: the real `DocumentSender` (send.ts) that `DocumentsLive` delegates
  * `Documents.send` / `previewSend` to.
  */
-import type { CoreError, CurrentCaller } from "@kvitbit/domain/contract";
+import type { CurrentCaller } from "@kvitbit/domain/contract";
 import { Context, Effect, Layer } from "effect";
 import { IdGenerator } from "../../../shared/ids";
 import { CoreStore } from "../../../store/CoreStore";
@@ -22,13 +22,6 @@ export type DocumentSenderDeps =
   | DocumentContacts
   | DocumentIssuers
   | DeliveryJobs;
-
-type SenderShape = DocumentSender["Service"];
-type WideSender = {
-  readonly [K in keyof SenderShape]: (
-    ...args: Parameters<SenderShape[K]>
-  ) => Effect.Effect<Effect.Success<ReturnType<SenderShape[K]>>, CoreError, CurrentCaller>;
-};
 
 export const DocumentSenderLive: Layer.Layer<DocumentSender, never, DocumentSenderDeps> =
   Layer.effect(
@@ -51,12 +44,9 @@ export const DocumentSenderLive: Layer.Layer<DocumentSender, never, DocumentSend
         Effect.flatMap(Effect.context<CurrentCaller>(), (callSite) =>
           Effect.provideContext(effect, Context.merge(context, callSite)),
         );
-      const impl: WideSender = {
+      return DocumentSender.of({
         send: (id, input, opts) => run(send(id, input, opts)),
         previewSend: (id, input) => run(previewSend(id, input)),
-      };
-      // One cast at the layer boundary (board #341): the domain signatures lack
-      // Unavailable{database} and Conflict{idempotency_mismatch}.
-      return DocumentSender.of(impl as unknown as SenderShape);
+      });
     }),
   );

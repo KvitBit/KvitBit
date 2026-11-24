@@ -42,7 +42,7 @@ export class PublicShareGroup extends HttpApiGroup.make("publicShare")
     HttpApiEndpoint.get("open", "/", {
       params: ShareParams,
       success: SharedDocumentView,
-      error: [NotFound.schema, RateLimited.schema],
+      error: [NotFound.schema, Unavailable.schema, Forbidden.schema, RateLimited.schema],
     }).annotate(OpenApi.Summary, "Open a shared document"),
   )
   .add(
@@ -50,14 +50,14 @@ export class PublicShareGroup extends HttpApiGroup.make("publicShare")
       params: ShareParams,
       query: { language: Schema.optional(Locale) },
       success: PdfBytes,
-      error: [NotFound.schema, Unavailable.schema, RateLimited.schema],
+      error: [NotFound.schema, Unavailable.schema, Forbidden.schema, RateLimited.schema],
     }).annotate(OpenApi.Summary, "Download a shared document's PDF"),
   )
   .add(
     HttpApiEndpoint.get("logo", "/logo", {
       params: ShareParams,
       success: ImageBytes,
-      error: [NotFound.schema, Unavailable.schema],
+      error: [NotFound.schema, Unavailable.schema, Forbidden.schema],
     }).annotate(OpenApi.Summary, "Get a shared document's logo"),
   )
   .prefix("/share/:token")

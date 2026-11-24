@@ -5,7 +5,6 @@
  */
 import type {
   AuditEntry,
-  CoreError,
   CurrencyCode,
   DocumentId,
   DocumentView,
@@ -460,14 +459,6 @@ export const listFor = (target: PaymentTarget) =>
     );
   }).pipe(orUnavailable);
 
-type PaymentsShape = Payments["Service"];
-/** The domain shape with every method's error channel widened to `CoreError`. */
-type WidePayments = {
-  readonly [K in keyof PaymentsShape]: (
-    ...args: Parameters<PaymentsShape[K]>
-  ) => Effect.Effect<Effect.Success<ReturnType<PaymentsShape[K]>>, CoreError, CurrentCaller>;
-};
-
 const make = Effect.gen(function* () {
   // Only the build dependencies: the build-time context may hold a CurrentCaller, RequestOutcome
   // or transaction frame, and providing them per call would override the caller's own.
@@ -486,16 +477,11 @@ const make = Effect.gen(function* () {
     Effect.flatMap(Effect.context<CurrentCaller>(), (callSite) =>
       Effect.provideContext(effect, Context.merge(context, callSite)),
     );
-  /**
-   * The one cast at the layer boundary (board #341 approach). Domain signature gaps: `remove`
-   * lacks Invalid (a blank reason) and Unavailable; `listFor` lacks Unavailable.
-   */
-  const impl: WidePayments = {
+  return Payments.of({
     record: (input, opts) => run(record(input, opts)),
     remove: (id, reason) => run(remove(id, reason)),
     listFor: (target) => run(listFor(target)),
-  };
-  return Payments.of(impl as unknown as Payments["Service"]);
+  });
 });
 
 export const PaymentsLive: Layer.Layer<Payments, never, PaymentsDeps> = Layer.effect(

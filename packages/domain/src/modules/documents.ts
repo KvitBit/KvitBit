@@ -209,16 +209,20 @@ export class Documents extends Context.Service<
     /** Live totals for an editor. Same code path as issue; nothing is stored or numbered. */
     readonly preview: (
       input: DocumentInput,
-    ) => Effect.Effect<DocumentView, Invalid | Unavailable | Forbidden, CurrentCaller>;
+    ) => Effect.Effect<DocumentView, Invalid | NotFound | Unavailable | Forbidden, CurrentCaller>;
     readonly createDraft: (
       input: DocumentInput,
       opts?: RequestOptions,
-    ) => Effect.Effect<DocumentView, Invalid | NotFound | Unavailable | Forbidden, CurrentCaller>;
+    ) => Effect.Effect<
+      DocumentView,
+      Invalid | NotFound | Conflict | Unavailable | Forbidden,
+      CurrentCaller
+    >;
     /** Drafts only. Hard delete. */
     readonly discardDraft: (
       id: DocumentId,
       expectedRevision: number,
-    ) => Effect.Effect<void, NotFound | Conflict | Forbidden, CurrentCaller>;
+    ) => Effect.Effect<void, NotFound | Conflict | Unavailable | Forbidden, CurrentCaller>;
     /** From an existing draft or straight from input. Assigns the number. */
     readonly issue: (
       from:
@@ -234,11 +238,15 @@ export class Documents extends Context.Service<
     ) => Effect.Effect<DocumentView, CoreError, CurrentCaller>;
     readonly lock: (
       id: DocumentId,
-    ) => Effect.Effect<DocumentView, NotFound | Conflict | Forbidden, CurrentCaller>;
+    ) => Effect.Effect<DocumentView, NotFound | Conflict | Unavailable | Forbidden, CurrentCaller>;
     readonly unlock: (
       id: DocumentId,
       reason: string,
-    ) => Effect.Effect<DocumentView, NotFound | Conflict | Forbidden, CurrentCaller>;
+    ) => Effect.Effect<
+      DocumentView,
+      NotFound | Conflict | Invalid | Unavailable | Forbidden,
+      CurrentCaller
+    >;
     /** Void an issued document without deleting it (rule D6). */
     readonly cancel: (
       id: DocumentId,
@@ -272,7 +280,7 @@ export class Documents extends Context.Service<
       opts?: RequestOptions,
     ) => Effect.Effect<
       { readonly deliveryId: DeliveryId; readonly status: "queued" },
-      NotFound | Conflict | Invalid | Forbidden,
+      NotFound | Conflict | Invalid | Unavailable | Forbidden,
       CurrentCaller
     >;
 
@@ -281,7 +289,11 @@ export class Documents extends Context.Service<
     readonly previewSend: (
       id: DocumentId,
       input?: SendOptions,
-    ) => Effect.Effect<SendPreview, NotFound | Conflict | Invalid | Forbidden, CurrentCaller>;
+    ) => Effect.Effect<
+      SendPreview,
+      NotFound | Conflict | Invalid | Unavailable | Forbidden,
+      CurrentCaller
+    >;
     /** The Final Invoice issueFinalInvoice would produce, with deductions, unnumbered. */
     readonly previewFinalInvoice: (
       proforma: DocumentId,
@@ -299,13 +311,17 @@ export class Documents extends Context.Service<
     ) => Effect.Effect<FileDownload, NotFound | Unavailable | Forbidden, CurrentCaller>;
     readonly get: (
       id: DocumentId,
-    ) => Effect.Effect<DocumentView, NotFound | Forbidden, CurrentCaller>;
+    ) => Effect.Effect<DocumentView, NotFound | Unavailable | Forbidden, CurrentCaller>;
     /** Filter plus paging (cursor, limit 1 to 100, default 50). */
     readonly list: (
       q: DocumentQuery & PageRequest,
-    ) => Effect.Effect<Page<DocumentSummary>, Invalid | Forbidden, CurrentCaller>;
+    ) => Effect.Effect<Page<DocumentSummary>, Invalid | Unavailable | Forbidden, CurrentCaller>;
     readonly history: (
       id: DocumentId,
-    ) => Effect.Effect<ReadonlyArray<AuditEntry>, NotFound | Forbidden, CurrentCaller>;
+    ) => Effect.Effect<
+      ReadonlyArray<AuditEntry>,
+      NotFound | Unavailable | Forbidden,
+      CurrentCaller
+    >;
   }
 >()("kvitbit/Documents") {}
