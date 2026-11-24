@@ -568,8 +568,8 @@ export const makeTemplates = Effect.gen(function* () {
       };
       // The request key is Templates': a retry with another template or patch is a mismatch.
       // Documents runs nested in this transaction, without a key of its own. The request log
-      // stores the document id only (DocumentView's decimals have no JSON codec); the caller
-      // gets the document as it is now, on the first call and on a replay alike.
+      // stores a clean snapshot of the created document (no share URL, no delivery history; the
+      // document is fresh and unsent, so nothing is lost), and a replay returns that snapshot.
       const created = yield* withIdempotency(
         {
           scope: { _tag: "Workspace", workspaceId },
