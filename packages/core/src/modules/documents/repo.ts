@@ -102,8 +102,39 @@ export class DocumentsRepo extends Context.Service<
       { readonly rows: ReadonlyArray<DocumentRecord>; readonly more: boolean },
       StoreUnavailable
     >;
+
+    // ReportsSource reads (compose/reportsSource.ts) ------------------------------------------
+    /**
+     * Issued and cancelled documents (never drafts) whose `field` lies in `from..to`
+     * (inclusive). The tax point is `taxableSupplyOn ?? issuedOn`; a Proforma has none, so the
+     * `taxPoint` range never returns one. Any order.
+     */
+    readonly reportable: (
+      workspaceId: WorkspaceId,
+      range: ReportableRange,
+    ) => Effect.Effect<ReadonlyArray<DocumentRecord>, StoreUnavailable>;
+    /**
+     * Issued Invoices and Proformas whose stored settlement is `unpaid` or `partially_paid`:
+     * the candidates for a positive outstanding amount (the caller applies `outstandingOf`).
+     * Any order.
+     */
+    readonly receivable: (
+      workspaceId: WorkspaceId,
+    ) => Effect.Effect<ReadonlyArray<DocumentRecord>, StoreUnavailable>;
   }
 >()("kvitbit/core/DocumentsRepo") {}
+
+/** `DocumentsRepo.reportable` range; `from` and `to` inclusive. */
+export interface ReportableRange {
+  readonly field: "issuedOn" | "taxPoint";
+  readonly from: IsoDate;
+  readonly to: IsoDate;
+}
+
+/** The tax point a report files a document under; null for a Proforma (not a tax document). */
+export const reportTaxPoint = (
+  row: Pick<DocumentRecord, "kind" | "taxableSupplyOn" | "issuedOn">,
+): IsoDate | null => (row.kind === "proforma" ? null : (row.taxableSupplyOn ?? row.issuedOn));
 
 const matchesSearch = (row: DocumentRecord, s: DocumentSearch): boolean => {
   if (s.overdue !== undefined && isOverdue(row, s.overdue.today) !== s.overdue.value) return false;
@@ -173,6 +204,28 @@ export const DocumentsRepoMemory: Layer.Layer<DocumentsRepo, never, MemoryTables
             return { rows: sorted.slice(0, page.limit), more: sorted.length > page.limit };
           },
         ),
+
+      // ReportsSource reads ---------------------------------------------------------------
+      reportable: (workspaceId, range) =>
+        range.field === "issuedOn"
+          ? table.list(workspaceId, {
+              whereIn: { status: ["issued", "cancelled"] },
+              range: { issuedOn: { gte: range.from, lte: range.to } },
+            })
+          : // SQL: coalesce(taxable_supply_on, issued_on) between from and to, kind <> 'proforma'.
+            Effect.map(
+              table.list(workspaceId, { whereIn: { status: ["issued", "cancelled"] } }),
+              (rows) =>
+                rows.filter((row) => {
+                  const point = reportTaxPoint(row);
+                  return point !== null && range.from <= point && point <= range.to;
+                }),
+            ),
+      receivable: (workspaceId) =>
+        table.list(workspaceId, {
+          where: { status: "issued" },
+          whereIn: { kind: ["invoice", "proforma"], settlement: ["unpaid", "partially_paid"] },
+        }),
     });
   }),
 );
