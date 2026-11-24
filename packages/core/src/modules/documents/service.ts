@@ -53,9 +53,9 @@ const edit = (id: DocumentId, patch: DocumentPatch, expectedRevision: number) =>
       Effect.gen(function* () {
         const row = yield* repo.getForUpdate(workspaceId, id, expectedRevision);
         yield* guard(row, "edit");
-        return row.status === "draft"
-          ? yield* editDraft(row, patch)
-          : yield* editIssued(row, patch);
+        const view =
+          row.status === "draft" ? yield* editDraft(row, patch) : yield* editIssued(row, patch);
+        return yield* withActivity(workspaceId, view);
       }),
     );
   }).pipe(orUnavailable);
@@ -69,8 +69,9 @@ type WideDocuments = {
 };
 
 /**
- * The owner-facing view of a method's result: `share` and `deliveries` are added here, after
- * the method (and so after any idempotent body stores or replays its un-enriched result).
+ * The owner-facing view of a read or dry run: `share` and `deliveries` added after the method.
+ * Writes add them themselves, inside their transaction (`withIdempotency`'s `present`), so a
+ * failing activity read rolls the write back instead of failing after it committed.
  */
 const enriched = <E, R>(effect: Effect.Effect<DocumentView, E, R>) =>
   Effect.gen(function* () {
@@ -120,9 +121,9 @@ const make = Effect.gen(function* () {
    */
   const impl: WideDocuments = {
     preview: (input) => run(enriched(preview(input))),
-    createDraft: (input, opts) => run(enriched(createDraft(input, opts))),
+    createDraft: (input, opts) => run(createDraft(input, opts)),
     discardDraft: (id, expectedRevision) => run(discardDraft(id, expectedRevision)),
-    edit: (id, patch, expectedRevision) => run(enriched(edit(id, patch, expectedRevision))),
+    edit: (id, patch, expectedRevision) => run(edit(id, patch, expectedRevision)),
     get: (id) => run(enriched(get(id))),
     list: (q) => run(list(q)),
     history: (id) => run(history(id)),
@@ -130,23 +131,13 @@ const make = Effect.gen(function* () {
     // Delivery seam (stage 2): delegated unchanged.
     send: (id, input, opts) => sender.send(id, input, opts),
     previewSend: (id, input) => sender.previewSend(id, input),
-    issue: (from, opts) => run(enriched(issue(from, opts))),
-    lock: (id) => run(enriched(lock(id))),
-    unlock: (id, reason) => run(enriched(unlock(id, reason))),
-    cancel: (id, input, opts) =>
-      run(
-        Effect.flatMap(cancel(id, input, opts), ({ document, creditNote }) =>
-          Effect.all({
-            document: enriched(Effect.succeed(document)),
-            creditNote:
-              creditNote === null ? Effect.succeed(null) : enriched(Effect.succeed(creditNote)),
-          }),
-        ),
-      ),
-    correct: (id, input, opts) => run(enriched(correct(id, input, opts))),
+    issue: (from, opts) => run(issue(from, opts)),
+    lock: (id) => run(lock(id)),
+    unlock: (id, reason) => run(unlock(id, reason)),
+    cancel: (id, input, opts) => run(cancel(id, input, opts)),
+    correct: (id, input, opts) => run(correct(id, input, opts)),
     previewCorrection: (id, input) => run(enriched(previewCorrection(id, input))),
-    issueFinalInvoice: (proforma, input, opts) =>
-      run(enriched(issueFinalInvoice(proforma, input, opts))),
+    issueFinalInvoice: (proforma, input, opts) => run(issueFinalInvoice(proforma, input, opts)),
     previewFinalInvoice: (proforma, input) => run(enriched(previewFinalInvoice(proforma, input))),
   };
   return Documents.of(impl as unknown as Documents["Service"]);

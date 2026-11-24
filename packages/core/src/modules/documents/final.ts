@@ -36,7 +36,7 @@ import { remainingBuckets } from "./credit";
 import { numbered } from "./lifecycle";
 import type { DocumentRecord, LinkRecord } from "./record";
 import { DocumentsRepo } from "./repo";
-import { newDraftRecord, now, rolledBack, viewOf } from "./support";
+import { newDraftRecord, now, rolledBack, viewOf, withActivity } from "./support";
 import { guard, hasFinalInvoice } from "./transitions";
 import { DocumentViewCodec } from "./view";
 
@@ -250,6 +250,7 @@ export const issueFinalInvoice = (
         });
         return yield* viewOf(saved);
       }),
+      (view) => withActivity(workspaceId, view),
     );
   }).pipe(orUnavailable);
 

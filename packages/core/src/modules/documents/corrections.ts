@@ -49,7 +49,7 @@ import {
 } from "./credit";
 import type { DocumentRecord, LineRecord } from "./record";
 import { DocumentsRepo } from "./repo";
-import { now, rolledBack, viewOf } from "./support";
+import { now, rolledBack, viewOf, withActivity } from "./support";
 import { guard } from "./transitions";
 import { DocumentViewCodec } from "./view";
 
@@ -336,6 +336,7 @@ export const correct = (id: DocumentId, input: CorrectionInput, opts?: RequestOp
         });
         return yield* viewOf(creditNote);
       }),
+      (view) => withActivity(workspaceId, view),
     );
   }).pipe(orUnavailable);
 

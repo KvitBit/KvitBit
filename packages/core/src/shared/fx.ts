@@ -11,6 +11,10 @@
  * - `FxFixings`: the read-through service. Both failures stay distinct and raw: CNB down is
  *   `RatesUnavailable`, a cache read or write failure is `StoreUnavailable` (never swallowed: in
  *   Postgres it can abort the caller's transaction); callers map them with `orUnavailable`.
+ *
+ * Dry runs (previews) read through the cache too, so they may write to it. That is an accepted
+ * exception to "dry runs write nothing" (core-ports 4): the cache holds public CNB data, not
+ * Workspace state, and a cached answer is the same answer CNB would give again.
  */
 import type { IsoDate } from "@kvitbit/domain/contract";
 import type { CnbFixing, RatesUnavailable } from "@kvitbit/domain/ports";
@@ -19,6 +23,10 @@ import { Clock, Context, Effect, Layer, Option, Ref } from "effect";
 import { pragueDate } from "../engines/calendar";
 import type { StoreUnavailable } from "../store/CoreStore";
 
+/**
+ * Process-wide cache of public CNB answers (no Workspace data). Written on any read-through,
+ * dry runs included: the one write a preview may make (see the module comment).
+ */
 export class FxFixingCache extends Context.Service<
   FxFixingCache,
   {
@@ -59,7 +67,10 @@ export const cachedFixing = (
     return fixing;
   });
 
-/** The core's one way to a CNB fixing (read through `FxFixingCache`). */
+/**
+ * The core's one way to a CNB fixing (read through `FxFixingCache`). A miss caches the answer
+ * even in a dry run (accepted: public data, not Workspace state).
+ */
 export class FxFixings extends Context.Service<
   FxFixings,
   {

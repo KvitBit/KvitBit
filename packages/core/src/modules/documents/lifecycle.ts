@@ -41,7 +41,7 @@ import type { DocumentRecord, GivenFields } from "./record";
 import { DocumentRecord as DocumentRecordSchema } from "./record";
 import { DocumentsRepo } from "./repo";
 import { DocumentSender } from "./sender";
-import { newDraftRecord, now, viewOf } from "./support";
+import { newDraftRecord, now, viewOf, withActivity } from "./support";
 import { guard, hasDependents, hasFinalInvoice, paymentsBlockCancel } from "./transitions";
 import { DocumentViewCodec } from "./view";
 
@@ -207,6 +207,7 @@ export const issue = (from: IssueFrom, opts?: RequestOptions & { readonly send?:
         }
         return yield* viewOf(row);
       }),
+      (view) => withActivity(workspaceId, view),
     );
   }).pipe(orUnavailable);
 
@@ -511,7 +512,7 @@ export const lock = (id: DocumentId) =>
           changes: [{ path: "locked", before: false, after: true }],
         });
         return yield* viewOf(next);
-      }),
+      }).pipe(Effect.flatMap((view) => withActivity(workspaceId, view))),
     );
   }).pipe(orUnavailable);
 
@@ -542,7 +543,7 @@ export const unlock = (id: DocumentId, reason: string) =>
           reason: why,
         });
         return yield* viewOf(next);
-      }),
+      }).pipe(Effect.flatMap((view) => withActivity(workspaceId, view))),
     );
   }).pipe(orUnavailable);
 
@@ -669,5 +670,11 @@ export const cancel = (id: DocumentId, input: CancelInput, opts?: RequestOptions
         });
         return { document: yield* viewOf(next), creditNote: null } satisfies CancelResult;
       }),
+      ({ document, creditNote }) =>
+        Effect.all({
+          document: withActivity(workspaceId, document),
+          creditNote:
+            creditNote === null ? Effect.succeed(null) : withActivity(workspaceId, creditNote),
+        }),
     );
   }).pipe(orUnavailable);

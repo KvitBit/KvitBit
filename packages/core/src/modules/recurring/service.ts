@@ -588,7 +588,8 @@ export const makeTemplates = Effect.gen(function* () {
             as === "issued"
               ? yield* documents.issue({ input: document })
               : yield* documents.createDraft(document);
-          return { json: snapshotOf(view) };
+          // Never the owner-facing share URL or delivery history (core-ports.md 66-68).
+          return { json: snapshotOf({ ...view, share: null, deliveries: [] }) };
         }),
       );
       return restoreSnapshot(created.json) as DocumentView;

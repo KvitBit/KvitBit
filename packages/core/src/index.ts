@@ -118,5 +118,6 @@ export {
   WorkspacesRepo,
 } from "./modules/workspaces";
 export * from "./ports";
+export { FxFixings, FxFixingsLive } from "./shared/fx";
 export { IdGenerator, IdGeneratorLive, newId } from "./shared/ids";
 export { makeRequestOutcome, RequestOutcomeLive } from "./shared/requestOutcome";

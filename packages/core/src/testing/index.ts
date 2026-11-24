@@ -3,6 +3,7 @@
  * and deterministic ids, for tests of the core and of the packages that compose it.
  */
 
+export { FxFixingsMemory } from "../shared/fx";
 export { IdGeneratorTest } from "../shared/ids";
 export { RequestOutcomeLive } from "../shared/requestOutcome";
 export type { MemoryStore } from "../store/memory";

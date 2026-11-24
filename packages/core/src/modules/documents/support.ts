@@ -87,7 +87,8 @@ export const viewOf = (
 
 /**
  * The owner-facing view: `share` (with its bearer URL) and `deliveries` from `DocumentActivity`.
- * Apply it at a service boundary, after any idempotent body, never to a view that is stored.
+ * Apply it to what the caller gets, never to a view that is stored: a write applies it inside its
+ * transaction (`withIdempotency`'s `present`), so a failing read rolls the write back.
  * Drafts are never shared or sent, so they skip the reads.
  */
 export const withActivity = (

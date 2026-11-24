@@ -4,7 +4,7 @@
  * `PaymentDocumentsLive` binds it to documents' exported `DocumentsRepo`, `viewOf` and
  * `withActivity`; all reads are Workspace-scoped (another Workspace's document is
  * NotFound{Document}). `view` is the stored view (no share, no deliveries: it lands in the
- * `Payments.record` idempotency result); `withActivity` makes it owner-facing at the boundary.
+ * `Payments.record` idempotency result); `withActivity` makes it owner-facing before the write commits.
  */
 import type {
   DocumentId,

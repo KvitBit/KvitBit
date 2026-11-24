@@ -10,9 +10,11 @@ import type { CnbFixing } from "@kvitbit/domain/ports";
 import { RatesUnavailable } from "@kvitbit/domain/ports";
 import { BigDecimal, Cause, Effect, Exit, Layer, Option, Ref } from "effect";
 import { TestClock } from "effect/testing";
+import * as CoreRoot from "../src";
 import { orUnavailable } from "../src/shared/errors";
 import { FxFixingCache, FxFixings, FxFixingsLive } from "../src/shared/fx";
 import { StoreUnavailable } from "../src/store/CoreStore";
+import * as CoreTesting from "../src/testing";
 import { FixtureRates } from "../src/testing";
 import { TEST_NOW } from "./helpers";
 
@@ -91,5 +93,23 @@ describe("FxFixings (shared read-through)", () => {
   test("a working cache serves CNB's answer carried back", async () => {
     const r = await fixingOn(SATURDAY, flakyCache({}));
     expect(r.raw).toEqual(Exit.succeed(FRIDAY));
+  });
+});
+
+describe("FxFixings entry points", () => {
+  test("the package root and testing entry export the seam a standalone module layer needs", async () => {
+    expect(CoreRoot.FxFixings).toBe(FxFixings);
+    expect(CoreRoot.FxFixingsLive).toBe(FxFixingsLive);
+    const fixing = await Effect.runPromise(
+      Effect.flatMap(CoreRoot.FxFixings, (fx) => fx.fixing(SATURDAY)).pipe(
+        Effect.provide(
+          CoreTesting.FxFixingsMemory.pipe(
+            Layer.provideMerge(FixtureRates.layer([FRIDAY])),
+            Layer.provideMerge(TestClock.layer()),
+          ),
+        ),
+      ),
+    );
+    expect(fixing).toEqual(FRIDAY);
   });
 });

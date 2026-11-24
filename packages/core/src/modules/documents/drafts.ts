@@ -14,7 +14,7 @@ import { CoreStore } from "../../store/CoreStore";
 import { applyPatch, compose, specFromInput, specFromRecord } from "./compose";
 import type { DocumentRecord } from "./record";
 import { DocumentsRepo } from "./repo";
-import { newDraftRecord, now, viewOf } from "./support";
+import { newDraftRecord, now, viewOf, withActivity } from "./support";
 import { guard } from "./transitions";
 import { DocumentViewCodec, toView } from "./view";
 
@@ -65,6 +65,7 @@ export const createDraft = (input: DocumentInput, opts?: RequestOptions) =>
         });
         return toView(row, { today });
       }),
+      (view) => withActivity(workspaceId, view),
     );
   }).pipe(orUnavailable);
 

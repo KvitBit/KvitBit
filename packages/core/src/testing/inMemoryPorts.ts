@@ -13,8 +13,9 @@ export interface InMemoryPortsOptions {
 
 /**
  * Every process-wide port the core requires, in memory: CoreStore with its MemoryTables,
- * IdGenerator (deterministic), CompanyRegistry, ExchangeRates (+ FxFixings over a private
- * in-memory cache), EmailSender (capture) and BlobStorage, plus their test controls. No
+ * IdGenerator (deterministic), CompanyRegistry, ExchangeRates, EmailSender (capture) and
+ * BlobStorage, plus their test controls. No `FxFixings`: `CoreModulesLive` binds it, so a
+ * missing binding fails `TestCore` (`InMemoryPortsLive` adds one for module tests). No
  * `RequestOutcome`: it is per request (the edge provides one per call; `withIdempotency` works
  * without it), so `TestCore` uses this.
  * Pair it with `TestClock.layer()` for deterministic time.
@@ -24,14 +25,18 @@ export const InMemoryCorePorts = (options: InMemoryPortsOptions = {}) =>
     CoreStoreMemory,
     IdGeneratorTest,
     FakeCompanyRegistry.layer(options.registry),
-    FxFixingsMemory.pipe(Layer.provideMerge(FixtureRates.layer(options.fixings))),
+    FixtureRates.layer(options.fixings),
     CaptureEmailSender.layer,
     MemoryBlobStorage.layer,
   );
 
 /**
- * `InMemoryCorePorts` plus one `RequestOutcome` for the whole build, kept for `runTest` and the
- * module tests that run a single request per build. Never under a shared multi-request layer.
+ * `InMemoryCorePorts` plus `FxFixings` (over a private in-memory cache) and one `RequestOutcome`
+ * for the whole build, kept for `runTest` and the module tests that run a single request per
+ * build. Never under a shared multi-request layer.
  */
 export const InMemoryPortsLive = (options: InMemoryPortsOptions = {}) =>
-  Layer.merge(InMemoryCorePorts(options), RequestOutcomeLive);
+  Layer.merge(
+    FxFixingsMemory.pipe(Layer.provideMerge(InMemoryCorePorts(options))),
+    RequestOutcomeLive,
+  );
