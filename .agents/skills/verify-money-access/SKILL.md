@@ -42,8 +42,8 @@ The repo-wide coverage record is `formal/manifest.json`, kept centrally; `bun ru
 Money (oracle: BigInt):
 
 - `minorUnitScale` on all 17,576 codes `AAA`..`ZZZ`; `fromMinorUnits`/`toMinorUnits` round trip on each code × 7 unit values (123,032).
-- Rounding: one currency per scale that occurs (JPY 0, CZK 2, KWD 3, CLF 4) × 1, 2 and 3 digits below the minor unit with every residue (10 + 100 + 1,000) × 6 whole parts (0, 1, 9, 10, 12,345, 2^60 + 7) × both signs: 53,280 amounts, each checked for `round`, explicit-scale `round`, `toMinorUnits` and `round(-x) = -round(x)`. Amounts already at or coarser than the minor unit: 5,213, unchanged.
-- Arithmetic: every pair from the grid v / 10^s, v in -12..12, s in 0..3 (100 values, 10,000 pairs) for add, subtract, commutativity, a - b = a + (-b), compare, equals; every triple from v in -4..4, s in {0, 3} (5,832) for associativity and `sum`; all 30 ordered pairs of 6 different currencies fail with `CurrencyMismatch{expected, actual}`.
+- Rounding: one currency per scale that occurs (JPY 0, CZK 2, KWD 3, CLF 4) × 1, 2 and 3 digits below the minor unit with every residue (10 + 100 + 1,000) × 6 whole parts (0, 1, 9, 10, 12,345, 2^60 + 7) × both signs: 53,280 amounts (a fixed count; the test also requires a whole part past 2^53), each checked for `round`, explicit-scale `round`, `toMinorUnits` and `round(-x) = -round(x)`. Amounts already at or coarser than the minor unit: 5,213, unchanged.
+- Arithmetic: every pair from the grid v / 10^s, v in -12..12, s in 0..3 (100 values, 10,000 pairs) for add, subtract, commutativity, a - b = a + (-b), compare, equals, and `isZero`/`isNegative` on every grid value; every triple from v in -4..4, s in {0, 3} (5,832) for associativity and `sum`; all 30 ordered pairs of 6 different currencies fail with `CurrencyMismatch{expected, actual}`.
 
 Access (oracle: 20-bit mask, bit 2i read and 2i + 1 write of area i):
 

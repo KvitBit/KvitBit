@@ -17,9 +17,15 @@ import type {
   SystemJob,
   WorkspaceId,
 } from "@kvitbit/domain/contract";
-import { Action as ActionSchema, CurrentCaller, SCOPE_AREAS } from "@kvitbit/domain/contract";
+import {
+  Action as ActionSchema,
+  CurrentCaller,
+  Role as RoleSchema,
+  SCOPE_AREAS,
+  SystemJob as SystemJobSchema,
+} from "@kvitbit/domain/contract";
 import { Effect } from "effect";
-import { can } from "../../src/contract";
+import { actionScope, can } from "../../src/contract";
 import type { MembershipChange } from "../../src/policy";
 import { authorizeInWorkspace, checkMembershipChange } from "../../src/policy";
 import {
@@ -326,11 +332,28 @@ const otherCallers = (): Array<{
   ]),
 ];
 
+/**
+ * Every Caller variant, checked by the compiler: a new variant fails typecheck here until it is
+ * added, and the test below fails until the enumeration builds a caller of that kind.
+ */
+const CALLER_TAGS = {
+  Member: true,
+  Account: true,
+  ShareLinkVisitor: true,
+  InvitationHolder: true,
+  System: true,
+} as const satisfies Record<Caller["_tag"], true>;
+
 // --- Properties --------------------------------------------------------------------------------
 
 describe("can: exhaustive against core-ports 2.3", () => {
-  test("the domain has the expected size", () => {
+  test("the domain has the expected size and covers every real Role, System job and Caller kind", () => {
     expect(ACTIONS.length).toBe(54);
+    expect([...ROLES]).toEqual([...RoleSchema.literals]);
+    const jobTags = SystemJobSchema.members.map((m) => m.fields._tag.schema.literal);
+    expect(JOBS.map((job) => job._tag)).toEqual(jobTags);
+    const kinds = new Set<string>([member("owner")._tag, ...otherCallers().map((c) => c.caller._tag)]);
+    expect(kinds).toEqual(new Set(Object.keys(CALLER_TAGS)));
     expect(AREAS.length).toBe(10);
     expect(ALL_SCOPES.length).toBe(20);
     expect(GRANTS).toBe(59_049);
@@ -340,6 +363,17 @@ describe("can: exhaustive against core-ports 2.3", () => {
     const listed = SPEC.flatMap((row) => row.actions);
     expect(listed.length).toBe(ACTIONS.length);
     expect(new Set(listed)).toEqual(new Set(ACTIONS));
+  });
+
+  test("actionScope equals the spec's area and level for every scoped Action", () => {
+    // Session-only (6) and edge-holder (9) Actions ignore scopes, so their area is not checked.
+    const scoped = [...SCOPE_OF].filter(
+      ([a]) => !isSessionOnly(a) && specRow(a).holder === undefined,
+    );
+    expect(scoped.length).toBe(ACTIONS.length - 6 - 9);
+    for (const [action, scope] of scoped) {
+      expect([action, actionScope(action)]).toEqual([action, scope]);
+    }
   });
 
   test("Member: every role × every normalized grant and session × every Action equals role ∩ scopes; monotone in scopes", () => {
@@ -425,6 +459,49 @@ describe("can: exhaustive against core-ports 2.3", () => {
     expect(mismatches.slice(0, 5)).toEqual([]);
   });
 
+  // Wide bound: every raw scope list (each area none, read, write only, or both: 4^10), about
+  // 226M calls and a minute of runtime, so it runs only with KVITBIT_FORMAL_WIDE=1 (nightly and
+  // when moving the sync commit). It closes the gap between the two domains above.
+  test.skipIf(process.env.KVITBIT_FORMAL_WIDE !== "1")(
+    "wide: Member, every role × every raw scope list (4^10) × every Action equals role ∩ scopes",
+    () => {
+      const meta = ACTIONS.map((action) => {
+        const scope = SCOPE_OF.get(action);
+        const area = scope === undefined ? -1 : AREAS.indexOf(scope.area);
+        return {
+          action,
+          roles: specRow(action).roles,
+          scoped: scope !== undefined && !isSessionOnly(action),
+          read: area < 0 ? 0 : 1 << (2 * area),
+          write: area < 0 ? 0 : 1 << (2 * area + 1),
+          readLevel: scope?.level === "read",
+        };
+      });
+      const SUBSETS = 2 ** ALL_SCOPES.length;
+      let checked = 0;
+      const mismatches: Array<string> = [];
+      for (let mask = 0; mask < SUBSETS; mask++) {
+        const list = ALL_SCOPES.filter((_, i) => (mask >>> i) & 1);
+        for (const role of ROLES) {
+          const caller = member(role, { scopes: list });
+          for (const m of meta) {
+            checked++;
+            const expected =
+              m.roles.includes(role) &&
+              m.scoped &&
+              ((mask & m.write) !== 0 || (m.readLevel && (mask & m.read) !== 0));
+            if (can(caller, m.action) !== expected && mismatches.length < 5) {
+              mismatches.push(`${role} ${JSON.stringify(list)} ${m.action}`);
+            }
+          }
+        }
+      }
+      expect(checked).toBe(SUBSETS * ROLES.length * ACTIONS.length);
+      expect(mismatches).toEqual([]);
+    },
+    600_000,
+  );
+
   test("non-Member callers hold exactly their column; no caller kind escalates", () => {
     const mismatches: Array<string> = [];
     for (const { name, caller, spec } of otherCallers()) {
@@ -450,7 +527,14 @@ describe("can: exhaustive against core-ports 2.3", () => {
 
 // --- Workspace scoping (R2, R4) ----------------------------------------------------------------
 
-type Outcome = "ok" | { readonly _tag: string; readonly action?: string; readonly detail?: string };
+type Outcome =
+  | "ok"
+  | {
+      readonly _tag: string;
+      readonly action?: string;
+      readonly reason?: string;
+      readonly detail?: string;
+    };
 
 const outcomeOf = <A, E extends { readonly _tag: string }>(
   effect: Effect.Effect<A, E>,
@@ -550,7 +634,7 @@ describe("checkMembershipChange: exhaustive against R1c and R3", () => {
             // R3: the owner cannot leave; a token without members:write is refused by R1 first.
             denials =
               isOwner && coversMembersWrite(caller)
-                ? ["Conflict:member.owner_cannot_leave"]
+                ? ["Conflict:illegal_transition:member.owner_cannot_leave"]
                 : ["Forbidden:member.leave"];
             break;
           case "Invite": {
@@ -559,7 +643,7 @@ describe("checkMembershipChange: exhaustive against R1c and R3", () => {
             denials = !base
               ? ["Forbidden:member.invite"]
               : change.role === "owner"
-                ? ["Conflict:"]
+                ? ["Conflict:illegal_transition:"]
                 : ["Forbidden:member.manageAdmins"];
             break;
           }
@@ -573,9 +657,9 @@ describe("checkMembershipChange: exhaustive against R1c and R3", () => {
             denials = !base
               ? ["Forbidden:member.setRole"]
               : touchesOwner && touchesAdmin && !manage
-                ? ["Conflict:", "Forbidden:member.manageAdmins"]
+                ? ["Conflict:illegal_transition:", "Forbidden:member.manageAdmins"]
                 : touchesOwner
-                  ? ["Conflict:"]
+                  ? ["Conflict:illegal_transition:"]
                   : ["Forbidden:member.manageAdmins"];
             break;
           }
@@ -588,7 +672,9 @@ describe("checkMembershipChange: exhaustive against R1c and R3", () => {
         }
         const key =
           typeof got === "object" && got !== null && "_tag" in got
-            ? `${got._tag}:${got._tag === "Forbidden" ? got.action : (got.detail ?? "")}`
+            ? got._tag === "Forbidden"
+              ? `Forbidden:${got.action}`
+              : `${got._tag}:${got.reason}:${got.detail ?? ""}`
             : "ok";
         if (!denials.includes(key)) {
           mismatches.push(`${label}: expected ${denials.join(" or ")}, got ${key}`);

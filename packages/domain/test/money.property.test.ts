@@ -142,7 +142,10 @@ describe("round: half away from zero over the full residue space", () => {
         }
       }
     }
-    expect(checked).toBe(BY_SCALE.length * WHOLES.length * (10 + 100 + 1000) * 2);
+    // Fixed total (4 scales × 6 whole parts × 1,110 residues × 2 signs), and at least one whole
+    // part past 2^53, so neither the grid nor the float-hostile case can shrink silently.
+    expect(checked).toBe(53_280);
+    expect(WHOLES.some((w) => w > BigInt(Number.MAX_SAFE_INTEGER))).toBe(true);
     expect(wrong.slice(0, 5)).toEqual([]);
   });
 
@@ -190,6 +193,7 @@ describe("arithmetic laws over a bounded grid", () => {
       if (!MoneyMath.equals(ok(MoneyMath.add(ma, MoneyMath.zero(CZK))), ma))
         wrong.push(`x+0 ${at3(a)}`);
       if (MoneyMath.isNegative(ma) !== at3(a) < 0n) wrong.push(`isNegative ${at3(a)}`);
+      if (MoneyMath.isZero(ma) !== (at3(a) === 0n)) wrong.push(`isZero ${at3(a)}`);
       for (const b of GRID) {
         checked++;
         const mb = asMoney(b);
