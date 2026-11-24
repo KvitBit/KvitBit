@@ -80,7 +80,7 @@ vars == <<vat, pStatus, pLocked, pLines, pay, ptd, fi, fiCount, holder,
 \* final.ts:96-118); fi.cr: supply credited; fi.rev: a full remainder Credit
 \* Note reversed it (settlement "credited", credit.ts:81-107,142-155).
 FiNone == [ex |-> FALSE, status |-> "issued", locked |-> FALSE, cr |-> Zero,
-           rev |-> FALSE, ded |-> [j \in Slots |-> Zero], ptds |-> {},
+           rev |-> FALSE, storno |-> FALSE, ded |-> [j \in Slots |-> Zero], ptds |-> {},
            deducted |-> {}]
 
 PayNone == [st |-> "none", on |-> "P", ptd |-> 0]
@@ -229,7 +229,7 @@ FiLockPtds ==
 FiCommit ==
   /\ fiPc = "lockedPtds"
   /\ fi' = [ex |-> TRUE, status |-> "issued", locked |-> FALSE, cr |-> Zero,
-            rev |-> FALSE, ded |-> fiDed, ptds |-> fiPtds, deducted |-> LiveP]
+            rev |-> FALSE, storno |-> FALSE, ded |-> fiDed, ptds |-> fiPtds, deducted |-> LiveP]
   /\ fiCount' = fiCount + 1
   /\ holder' = [r \in Resources |-> IF holder[r] = "fi" THEN "none" ELSE holder[r]]
   /\ fiPc' = "idle" /\ fiDed' = [j \in Slots |-> Zero] /\ fiPtds' = {}
@@ -319,8 +319,8 @@ CorrectFinalPartial ==
 \* Credit Note reverses supply and deductions; settlement "credited".
 ReverseFinal(viaCancel) ==
   /\ Free("FI") /\ fi.ex /\ fi.status = "issued" /\ ~fi.locked /\ ~fi.rev
-  /\ viaCancel => vat /\ LiveFI = {}
-  /\ fi' = [fi EXCEPT !.rev = TRUE, !.cr = One]
+  /\ viaCancel => vat /\ (Mutant = "cancel_final_with_payments" \/ LiveFI = {})
+  /\ fi' = [fi EXCEPT !.rev = TRUE, !.cr = One, !.storno = viaCancel]
   /\ UNCHANGED <<vat, pStatus, pLocked, pLines, pay, ptd, fiCount, holder, FiVars, CpVars>>
 
 \* Cancel of a non-tax Final Invoice (non_vat_payer, lifecycle.ts:602,643-670):
@@ -359,7 +359,7 @@ TypeOK ==
   /\ pay \in [Slots -> [st : {"none", "live", "removed"}, on : {"P", "FI"}, ptd : 0..MaxPayments]]
   /\ ptd \in [Slots -> [ex : BOOLEAN, cr : Credits]]
   /\ fi.ex \in BOOLEAN /\ fi.status \in {"issued", "cancelled"} /\ fi.locked \in BOOLEAN
-  /\ fi.cr \in Credits /\ fi.rev \in BOOLEAN
+  /\ fi.cr \in Credits /\ fi.rev \in BOOLEAN /\ fi.storno \in BOOLEAN
   /\ fi.ptds \subseteq Slots /\ fi.deducted \subseteq Slots
   /\ fiCount \in 0..2
   /\ holder \in [Resources -> Owners]
@@ -389,8 +389,11 @@ NoPtdAfterFinal == fi.ex => {j \in Slots : ptd[j].ex} \subseteq fi.ptds
 \* D6: a cancelled Proforma has no recorded payments and no Final Invoice.
 CancelledProformaUnpaid == pStatus = "cancelled" => LiveP = {} /\ ~fi.ex
 
-\* D6: a cancelled Final Invoice has no payments of its own.
-CancelledFinalUnpaid == fi.ex /\ fi.status = "cancelled" => LiveFI = {}
+\* D6: a cancelled Final Invoice (status cancelled, or a tax document's storno
+\* by full Credit Note, fi.storno) has no payments of its own. No payment can
+\* land after it (RecordOnFinal needs ~fi.rev), so this checks the cancel guard.
+CancelledFinalUnpaid ==
+  fi.ex /\ (fi.status = "cancelled" \/ fi.storno) => LiveFI = {}
 
 \* D5: a cancelled document is always locked.
 CancelledIsLocked ==
@@ -415,6 +418,14 @@ CreditWithinOriginal ==
 DeductionsCurrent ==
   FiLive => \A j \in fi.ptds : fi.ded[j] = Minus(One, ptd[j].cr)
 
+\* S4: the two in-flight transactions never wait on each other. TLC's deadlock
+\* check cannot see such a cycle, because FiAbort and CpAbort are always
+\* enabled while a transaction is in flight, so it is stated here.
+FiWants == IF fiPc = "lockedP" THEN {"PTD"} ELSE {}
+CpWants == IF cpPc = "started" THEN {"PTD"} ELSE {}
+NoLockWaitCycle ==
+  ~ ( (\E r \in FiWants : holder[r] = "cp") /\ (\E r \in CpWants : holder[r] = "fi") )
+
 \* The part of the transition table (transitions.ts:64-123) this model
 \* represents (narrower than the whole table: no PTD lock, no draft edits):
 \* statuses move draft -> issued -> cancelled only, a Final Invoice never
@@ -427,7 +438,7 @@ LegalTransitions ==
       /\ (fi.ex => fi'.ex)
       /\ (fi.ex /\ fi'.status # fi.status => fi.status = "issued" /\ fi'.status = "cancelled")
       /\ (fi.ex /\ fi.status = "cancelled" => fi'.locked)
-      /\ (fi.ex /\ fi.rev /\ fiCount' = fiCount => fi'.rev)
+      /\ (fi.ex /\ fi.rev /\ fiCount' = fiCount => fi'.rev /\ fi'.storno = fi.storno)
       /\ \A j \in Slots : Leq(ptd[j].cr, ptd'[j].cr) /\ (ptd[j].ex => ptd'[j].ex)
       /\ \A i \in Slots : pay'[i].st # pay[i].st =>
             <<pay[i].st, pay'[i].st>> \in {<<"none", "live">>, <<"live", "removed">>}

@@ -91,6 +91,16 @@
           "description": "cancel ignores the Proforma's recorded payments"
         },
         {
+          "name": "cancel-final-with-payments",
+          "config": "formal/lifecycle/DocumentLifecycle_mutant_cancel_final_with_payments.cfg",
+          "expect": "violation",
+          "violates": {
+            "kind": "invariant",
+            "name": "CancelledFinalUnpaid"
+          },
+          "description": "storno of a tax Final Invoice ignores its own payments"
+        },
+        {
           "name": "duplicate-final",
           "config": "formal/lifecycle/DocumentLifecycle_mutant_duplicate_final.cfg",
           "expect": "violation",
@@ -194,7 +204,7 @@
         "Payments.record (recordOnDocument)",
         "Payments.remove"
       ],
-      "bounds": "base: 2 VAT buckets, 2 payment/PTD slots, 1 Final Invoice slot, one issueFinalInvoice and one PTD correction in flight, both regimes (15,920 distinct states); wide: 3 slots",
+      "bounds": "base: 2 VAT buckets, 2 payment/PTD slots, 1 Final Invoice slot, one issueFinalInvoice and one PTD correction in flight, both regimes (24,800 distinct states); wide: 3 slots",
       "assumptions": [
         "Every service method is one CoreStore transaction; the memory store serializes transactions and Postgres row-locks with SELECT ... FOR UPDATE at READ COMMITTED in S4 order (Proforma first)",
         "Only issueFinalInvoice and correct/cancel of a PTD are split at their row-lock acquisitions; every other method locks each row it decides on before reading it",
@@ -277,10 +287,10 @@
         "Payments.record (recordOnDocument)",
         "Payments.remove"
       ],
-      "bounds": "16 traces on TestCore (vat_payer and non_vat_payer): the shortest path to each model action, both serial orders of H2, two crash points (CNB fixing unavailable during PTD issue and Final Invoice issue); model invariants checked after every step",
+      "bounds": "29 traces on TestCore (vat_payer and non_vat_payer): the shortest path to each model action, guard traces, both serial orders of H2, the D7 cap for PTDs and the Final Invoice, four crash points (CNB fixing unavailable during PTD and Final Invoice issue; Credit Note and Final Invoice numbering exhausted); model invariants checked after every step",
       "assumptions": [
         "In-memory store: transactions run serially, so the H2 overlap itself is not replayed (pg-contention job)",
-        "Crash points only where a seam exists: FixtureRates.unavailable"
+        "Crash points only where a seam exists: FixtureRates.unavailable and a numbering series at its last counter (Workspaces.configureSeries)"
       ],
       "toolVersions": {
         "bun": "1.4.2"
