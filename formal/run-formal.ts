@@ -370,7 +370,8 @@ const VIOLATION_EXIT: Record<number, ViolationKind[]> = {
  * is an error, so a broken model can never count as a passing base or a failing mutant.
  */
 export const classifyTlc = (status: number | null, output: string): TlcOutcome => {
-  const states = /(\d[\d,]*) distinct states found/.exec(output)?.[1] ?? "?";
+  // Progress lines also report "distinct states found"; the last match is the final count.
+  const states = [...output.matchAll(/(\d[\d,]*) distinct states found/g)].at(-1)?.[1] ?? "?";
   const firstError = /^Error: .*$/m.exec(output)?.[0];
   if (/^\*\*\* ?(?:Errors|Abort messages|Parse Error)/m.test(output) || status === 150)
     return { verdict: "error", reason: `parse or semantic error (exit ${status})` };
@@ -388,7 +389,7 @@ export const classifyTlc = (status: number | null, output: string): TlcOutcome =
     // Zero states means Init is unsatisfiable, so every property holds vacuously.
     if (stats[2] === "0")
       return { verdict: "error", reason: "TLC found 0 distinct states (vacuous model)" };
-    return { verdict: "pass", states };
+    return { verdict: "pass", states: stats[2] };
   }
   const kinds = status === null ? undefined : VIOLATION_EXIT[status];
   if (kinds) {
