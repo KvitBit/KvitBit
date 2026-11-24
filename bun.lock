@@ -55,6 +55,16 @@
         "effect": "4.1.4",
       },
     },
+    "packages/ui-port": {
+      "name": "@kvitbit/ui-port",
+      "version": "0.0.0",
+      "dependencies": {
+        "@kvitbit/api-contract": "workspace:*",
+        "@kvitbit/brand": "workspace:*",
+        "@kvitbit/domain": "workspace:*",
+        "effect": "4.1.4",
+      },
+    },
   },
   "overrides": {
     "effect": "4.1.4",
@@ -151,6 +161,8 @@
     "@kvitbit/db": ["@kvitbit/db@workspace:packages/db"],
 
     "@kvitbit/domain": ["@kvitbit/domain@workspace:packages/domain"],
+
+    "@kvitbit/ui-port": ["@kvitbit/ui-port@workspace:packages/ui-port"],
 
     "@turbo/darwin-64": ["@turbo/darwin-64@2.11.13", "", { "os": "darwin", "cpu": "x64" }, "sha512-5IT29i4j55E5O66+la7L8Y46ut7dFaNZqrgUIYYNtcpMt9Ql7aYnSQb/6tZ+prE2AfX1RBCAtRJE41txS2rG3w=="],
 

@@ -1,0 +1,113 @@
+import type { EnSection } from "../../types";
+
+/** Screens 01-05: landing, legal, auth, /android, error pages, share link, MCP consent, invitation. */
+export const publicScreens = {
+  "public.landing.title": "Invoicing for Czech freelancers and small companies",
+  "public.landing.subtitle":
+    "Issue compliant invoices in seconds from your desktop, phone or AI assistant.",
+  "public.landing.cta.signUp": "Start for free",
+  "public.landing.cta.signIn": "I have an account",
+  "public.landing.feature.compliance.title": "Czech and EU compliant",
+  "public.landing.feature.compliance.body":
+    "All three tax regimes, statutory notes, credit notes and payment tax documents.",
+  "public.landing.feature.ares.title": "ARES lookup",
+  "public.landing.feature.ares.body": "Enter an IČO and the company details fill themselves in.",
+  "public.landing.feature.qr.title": "QR payments",
+  "public.landing.feature.qr.body": "QR Platba for CZK and EPC QR for EUR on every invoice.",
+  "public.landing.feature.fx.title": "Foreign currencies",
+  "public.landing.feature.fx.body": "Daily CNB exchange rates, applied the way the law requires.",
+  "public.landing.feature.mobile.title": "Phone first",
+  "public.landing.feature.mobile.body":
+    "Snap receipts, send invoices and record payments on the go.",
+  "public.landing.feature.mcp.title": "Works with AI assistants",
+  "public.landing.feature.mcp.body":
+    "Connect Claude or another MCP client with exactly the permissions you choose.",
+  "public.landing.selfHosted": "Open to self-hosting: run Kvitbit on your own server.",
+  "public.landing.signUpDisabled":
+    "Sign-up is disabled on this installation. Ask the operator for an invitation.",
+  "public.landing.language": "Language",
+
+  "public.legal.terms": "Terms of service",
+  "public.legal.privacy": "Privacy policy",
+  "public.legal.cookies": "Cookies",
+  "public.legal.loadFailed": "This page could not be loaded.",
+  "public.legal.fallbackLink": "Open the plain version",
+  "public.footer.copyright": "© {year} Kvitbit",
+
+  "public.androidDownload.title": "Kvitbit for Android",
+  "public.androidDownload.subtitle": "Install the app directly or keep it updated with Obtainium.",
+  "public.androidDownload.download": "Download APK",
+  "public.androidDownload.version": "Version {version}",
+  "public.androidDownload.size": "Size {size}",
+  "public.androidDownload.checksum": "SHA-256 checksum",
+  "public.androidDownload.copyChecksum": "Copy checksum",
+  "public.androidDownload.signingCert": "Signing certificate fingerprint",
+  "public.androidDownload.obtainium.title": "Automatic updates with Obtainium",
+  "public.androidDownload.obtainium.body":
+    "Add Kvitbit in Obtainium to get updates as soon as they are released.",
+  "public.androidDownload.obtainium.cta": "Add to Obtainium",
+  "public.androidDownload.releaseFailed":
+    "Release details are not available right now. You can still use Obtainium.",
+
+  "public.error.not_found.title": "Page not found",
+  "public.error.not_found.body": "The address may be mistyped, or the page was removed.",
+  "public.error.no_access.title": "No access",
+  "public.error.no_access.body":
+    "You are not a member of this workspace, or your access was removed.",
+  "public.error.no_access.switch": "Switch workspace",
+  "public.error.server.title": "Something went wrong",
+  "public.error.server.body": "We could not finish your request. Please try again.",
+  "public.error.server.requestId": "Request ID: {requestId}",
+  "public.error.offline.title": "You are offline",
+  "public.error.offline.body": "Connect to the internet to continue.",
+
+  "share.view.title": "{kind} {number}",
+  "share.view.from": "From {issuer}",
+  "share.view.amountDue": "Amount due",
+  "share.view.dueOn": "Due {date}",
+  "share.view.issuedOn": "Issued {date}",
+  "share.view.payWithQr": "Pay with QR code",
+  "share.view.scanHint": "Scan the code in your banking app.",
+  "share.view.bankDetails": "Payment details",
+  "share.view.copyIban": "Copy IBAN",
+  "share.view.copyVs": "Copy variable symbol",
+  "share.view.copyAmount": "Copy amount",
+  "share.view.notTaxDocument": "This is a proforma invoice, not a tax document.",
+  "share.view.creditNoteFor": "Credit note for document {number}",
+  "share.view.paidThanks": "Paid. Thank you!",
+  "share.view.cancelled": "This document was cancelled.",
+  "share.view.gone.title": "This link is no longer available",
+  "share.view.gone.body": "Ask the sender for a new link.",
+  "share.view.language": "Document language",
+  "share.view.downloadFailed": "The PDF could not be downloaded. Try again.",
+  "share.view.issuerPreview": "You are viewing your own document. Views are not counted.",
+  "share.view.poweredBy": "Sent with Kvitbit",
+
+  "mcp.consent.title": "{client} wants to access Kvitbit",
+  "mcp.consent.redirectHost": "After approval you return to {host}.",
+  "mcp.consent.workspace": "Workspace",
+  "mcp.consent.pickWorkspace": "Choose the workspace this app may use",
+  "mcp.consent.permissions": "Permissions",
+  "mcp.consent.approve": "Allow access",
+  "mcp.consent.deny": "Deny",
+  "mcp.consent.noWorkspace": "Create a workspace first.",
+  "mcp.consent.roleCannotGrant": "Your role here cannot grant what this app asks for.",
+  "mcp.consent.accountantReadOnly": "As an accountant you can grant read access only.",
+  "mcp.consent.unknownRedirect":
+    "This app's return address is not registered. Access cannot be granted.",
+  "mcp.consent.revokeHint": "You can revoke access at any time in Settings, Connected apps.",
+  "mcp.consent.expired": "This request has expired. Start the connection again from the app.",
+
+  "invitation.landing.title": "Join {workspace}",
+  "invitation.landing.body": "{inviter} invited you to join {workspace} as {role}.",
+  "invitation.landing.accept": "Accept invitation",
+  "invitation.landing.signInToAccept": "Sign in to accept",
+  "invitation.landing.signUpToAccept": "Create an account to accept",
+  "invitation.landing.wrongAccount":
+    "This invitation was sent to {email}. Sign in with that address to accept it.",
+  "invitation.landing.expired": "This invitation has expired. Ask for a new one.",
+  "invitation.landing.revoked": "This invitation was revoked.",
+  "invitation.landing.accepted": "This invitation was already accepted.",
+  "invitation.landing.open": "Open workspace",
+  "invitation.landing.notFound": "This invitation does not exist.",
+} as const satisfies EnSection;

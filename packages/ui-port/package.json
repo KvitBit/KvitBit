@@ -1,0 +1,24 @@
+{
+  "name": "@kvitbit/ui-port",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./theme": "./src/theme/index.ts",
+    "./i18n": "./src/i18n/index.ts",
+    "./format": "./src/format/index.ts",
+    "./api": "./src/api/index.ts",
+    "./view-models": "./src/view-models/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "bun test --pass-with-no-tests"
+  },
+  "dependencies": {
+    "@kvitbit/api-contract": "workspace:*",
+    "@kvitbit/brand": "workspace:*",
+    "@kvitbit/domain": "workspace:*",
+    "effect": "4.1.4"
+  }
+}
