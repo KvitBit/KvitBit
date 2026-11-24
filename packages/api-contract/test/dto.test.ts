@@ -124,6 +124,19 @@ describe("theme", () => {
     expect(Object.keys(ThemePresets).sort()).toEqual([...ThemePresetId.literals].sort());
   });
 
+  test("seeds match ui-port's tuned presets (packages/ui-port/src/theme/presets.ts)", () => {
+    expect(Object.fromEntries(Object.entries(ThemePresets).map(([id, p]) => [id, p.seed]))).toEqual(
+      {
+        graphite_atelier: "#111111",
+        forest: "#0F5D42",
+        ocean: "#0E6B8C",
+        plum: "#6B2D5C",
+        sand: "#1D4ED8",
+        graphite: "#4B5563",
+      },
+    );
+  });
+
   const extended = {
     color: "#112233",
     onColor: "#FFFFFF",

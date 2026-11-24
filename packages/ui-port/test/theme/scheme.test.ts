@@ -214,9 +214,9 @@ describe("seeds", () => {
     },
   );
 
-  test("records where tuned seeds differ from api-contract's placeholder ThemePresets", () => {
+  test("tuned seeds equal api-contract's ThemePresets seeds", () => {
     const diff = PRESET_IDS.filter((id) => PresetDefinitions[id].seed !== ThemePresets[id].seed);
-    expect(diff).toEqual(["ocean", "sand"]);
+    expect(diff).toEqual([]);
   });
 
   test.each([
