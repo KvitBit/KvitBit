@@ -46,10 +46,14 @@ export const DeliveryRecord = Schema.Struct({
     contentType: Schema.String,
     template: PdfTemplate,
   }),
+  /** The document's due date when queued (a later change re-arms reminders, D16). */
+  dueOn: IsoDate,
   /** Set for an automatic reminder (selection, reminders/); null for a send (manual or not). */
   reminder: Schema.NullOr(ReminderStepRecord),
   /** Dispatch attempts that reached the EmailSender. */
   attempts: Schema.Int,
+  /** The last retryable dispatch outcome; `outcome_unknown` means the provider may have it. */
+  lastOutcome: Schema.NullOr(Schema.Literals(["not_accepted", "outcome_unknown"])),
   /** Why the delivery failed or was skipped. */
   failure: Schema.NullOr(Schema.String),
   provider: Schema.NullOr(Schema.String),
@@ -71,13 +75,18 @@ export const DeliveriesTable = defineCollection<DeliveryRecord>({
     {
       name: REMINDER_STEP,
       scope: "workspace",
+      // A step skipped before any attempt is released, so it can be queued again (D16).
       key: (row) =>
-        row.reminder === null
+        row.reminder === null || isReleased(row)
           ? null
           : [row.documentId, row.reminder.dueOn, row.reminder.offsetDays],
     },
   ],
 });
+
+/** Skipped before any dispatch attempt: its reminder step no longer counts as taken. */
+export const isReleased = (row: Pick<DeliveryRecord, "status" | "attempts">): boolean =>
+  row.status === "skipped" && row.attempts === 0;
 
 /** Statuses no job step changes again. */
 export const isTerminal = (status: DeliveryStatus): boolean =>

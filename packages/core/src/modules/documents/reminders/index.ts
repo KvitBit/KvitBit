@@ -7,4 +7,6 @@
  */
 export { choiceOf, dueStep, effectiveReminders, remindable, scheduleOf, stillOwed } from "./policy";
 export type { DueReminder } from "./select";
+export type { ReminderBlock, ReminderState } from "./eligibility";
+export { reminderState, stepBlock } from "./eligibility";
 export { dueReminderOf, enqueueReminder, selectDueReminders } from "./select";

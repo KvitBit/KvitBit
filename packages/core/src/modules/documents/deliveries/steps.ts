@@ -15,7 +15,8 @@ import { EmailSender } from "@kvitbit/domain/ports";
 import { Data, Effect } from "effect";
 import { CoreStore } from "../../../store/CoreStore";
 import { DocumentDeliveryReads } from "../delivery";
-import { effectiveReminders, remindable, stillOwed } from "../reminders/policy";
+import { reminderState, stepBlock } from "../reminders/eligibility";
+import { stillOwed } from "../reminders/policy";
 import { DocumentsRepo } from "../repo";
 import { now } from "../support";
 import type { DeliveryRecord } from "./record";
@@ -40,17 +41,10 @@ const ineligible = (workspaceId: WorkspaceId, delivery: DeliveryRecord) =>
     if (delivery.purpose === "document") return null;
     if (!stillOwed(record)) return "document_settled";
     if (delivery.reminder === null) return null; // a manual reminder (D14)
-    // Automatic reminder: the current policy must still arm this step for the current due date.
+    // Automatic reminder: the same check as selection and enqueue (reminders/eligibility.ts).
     const { today } = yield* now;
-    const effective = yield* effectiveReminders(workspaceId, record, today);
-    if (!remindable(record, effective)) return "reminders_off";
-    if (
-      delivery.reminder.dueOn !== record.dueOn ||
-      !effective.offsetsDays.includes(delivery.reminder.offsetDays)
-    ) {
-      return "reminder_step_stale";
-    }
-    return null;
+    const state = yield* reminderState(workspaceId, record, today);
+    return stepBlock(state, record, delivery.reminder, today, delivery.id);
   });
 
 const transition = (
@@ -136,7 +130,11 @@ export const dispatch = (workspaceId: WorkspaceId, id: DeliveryId) =>
         }
         return outcome.failure._tag === "EmailRejected"
           ? { status: "failed", attempts, failure: "rejected" }
-          : { attempts };
+          : {
+              attempts,
+              lastOutcome:
+                outcome.failure._tag === "EmailNotAccepted" ? "not_accepted" : "outcome_unknown",
+            };
       }),
     );
     if (outcome._tag === "Failure" && outcome.failure._tag !== "EmailRejected") {

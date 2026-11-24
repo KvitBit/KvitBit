@@ -24,7 +24,7 @@ import {
   Invalid,
   Locale as LocaleSchema,
 } from "@kvitbit/domain/contract";
-import { Effect, Schema } from "effect";
+import { Effect, Option, Schema } from "effect";
 import { authorizeInWorkspace } from "../../../policy/Policy";
 import { appendAudit } from "../../../shared/audit";
 import { orUnavailable } from "../../../shared/errors";
@@ -175,6 +175,7 @@ export const queueDelivery = (
       revision: 1,
       documentId: p.record.id,
       documentRevision: p.record.revision,
+      dueOn: p.record.dueOn,
       purpose: p.purpose,
       status: "queued",
       to: p.to,
@@ -185,16 +186,31 @@ export const queueDelivery = (
       attachment: p.attachment,
       reminder,
       attempts: 0,
+      lastOutcome: null,
       failure: null,
       provider: null,
       providerMessageId: null,
       createdAt: at,
       updatedAt: at,
     };
-    // Fresh id; a reminder step is checked under the document row lock before queueing.
-    const inserted = yield* (yield* DeliveriesRepo)
-      .insert(row)
-      .pipe(Effect.catchTag("UniqueViolation", (e) => Effect.die(e)));
+    const repo = yield* DeliveriesRepo;
+    const store = yield* CoreStore;
+    // The insert runs as a savepoint, so a reminder step queued concurrently (unique
+    // `deliveries_reminder_step`) returns that delivery without aborting the caller's
+    // transaction or auditing twice. Other ids are fresh.
+    const taken = yield* store.transaction(repo.insert(row)).pipe(
+      Effect.map(() => null),
+      Effect.catchTag("UniqueViolation", (e) =>
+        reminder === null
+          ? Effect.die(e)
+          : Effect.flatMap(
+              repo.reminderStep(workspaceId, { documentId: p.record.id, ...reminder }),
+              (existing) => (Option.isSome(existing) ? Effect.succeed(existing.value) : Effect.die(e)),
+            ),
+      ),
+    );
+    if (taken !== null) return taken;
+    const inserted = row;
     yield* appendAudit({
       workspaceId,
       subject: { entity: "Document", id: p.record.id },
@@ -263,9 +279,10 @@ export const send = (id: DocumentId, input?: SendOptions, opts?: RequestOptions)
         let record = locked;
         const changes: Array<AuditEntry["changes"][number]> = [];
         if (p.choice !== null) {
-          // D16: the Document's own choice; `remindersOn` marks a send that armed reminders
+          // D16: the Document's own choice and the arm outcome resolved now (Credit Notes and
+          // PTDs never arm). Selection, enqueue and claim re-check the current policy.
           // (the effective policy is resolved again at selection and claim time).
-          const remindersOn = p.choice !== "off";
+          const remindersOn = p.armsReminders;
           if (record.remindersChoice !== p.choice || record.remindersOn !== remindersOn) {
             changes.push(
               { path: "remindersChoice", before: record.remindersChoice, after: p.choice },

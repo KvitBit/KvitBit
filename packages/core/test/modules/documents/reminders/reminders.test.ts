@@ -318,3 +318,68 @@ describe("resolution readings (overrides.ts resolveReminders)", () => {
     expect(Exit.isSuccess(exit)).toBe(true);
   });
 });
+
+describe("stored arm outcome and re-arm (D16, council terms)", () => {
+  test("an inherited send under a disabled Contact stores remindersOn false; a policy change alone does not arm it, a due-date edit re-arms", async () => {
+    const exit = await deliveryScenario(
+      Effect.gen(function* () {
+        const d = yield* Documents;
+        const id = yield* issueInvoice();
+        yield* setContactDefaults({ reminderPolicy: { mode: "disabled" } });
+        expect((yield* d.previewSend(id)).armsReminders).toBe(false);
+        yield* d.send(id);
+        const repo = yield* DocumentsRepo;
+        expect(yield* repo.get(WORKSPACE_A, id)).toMatchObject({
+          remindersChoice: "inherit",
+          remindersOn: false,
+        });
+        // The Contact returns to inherit: no arm without a re-arm event.
+        yield* setContactDefaults({ reminderPolicy: { mode: "inherit" } });
+        expect(yield* sweep("2026-12-10")).toEqual([]);
+        // A due-date change re-arms from the stored choice and the current policies.
+        yield* moveDue(id, "2026-12-14");
+        const due = yield* sweep("2026-12-17");
+        expect(due.map((r) => [r.documentId, r.offset])).toEqual([[id, 3]]);
+      }),
+    );
+    expect(Exit.isSuccess(exit)).toBe(true);
+  });
+
+  test("changed offsets never backfill a reminder earlier than one already sent", async () => {
+    const exit = await deliveryScenario(
+      Effect.gen(function* () {
+        const id = yield* issueInvoice();
+        yield* (yield* Documents).send(id);
+        const [late] = yield* sweep("2026-12-17");
+        expect(late?.offset).toBe(10);
+        yield* as(worker, deliver(WORKSPACE_A, late?.deliveryId as DeliveryId));
+        yield* setWorkspaceReminders({ enabled: true, proformas: false, offsetsDays: [5] });
+        expect(yield* sweep("2026-12-20")).toEqual([]);
+      }),
+    );
+    expect(Exit.isSuccess(exit)).toBe(true);
+  });
+
+  test("a step skipped before any attempt is released and can be queued again", async () => {
+    const exit = await deliveryScenario(
+      Effect.gen(function* () {
+        const d = yield* Documents;
+        const id = yield* issueInvoice();
+        yield* d.send(id);
+        const [first] = yield* sweep("2026-12-10");
+        yield* d.send(id, { reminders: false });
+        expect(yield* as(worker, claim(WORKSPACE_A, first?.deliveryId as DeliveryId))).toBe(
+          "skipped",
+        );
+        yield* d.send(id, { reminders: true });
+        const [again] = yield* sweep("2026-12-11");
+        expect(again).toMatchObject({ documentId: id, offset: 3 });
+        expect(again?.deliveryId).not.toBe(first?.deliveryId);
+        expect(yield* as(worker, deliver(WORKSPACE_A, again?.deliveryId as DeliveryId))).toBe(
+          "sent",
+        );
+      }),
+    );
+    expect(Exit.isSuccess(exit)).toBe(true);
+  });
+});

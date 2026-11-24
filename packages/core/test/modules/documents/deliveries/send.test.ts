@@ -375,7 +375,11 @@ describe("DocumentDelivery job steps", () => {
         yield* CaptureEmailSender.failNext("not_accepted");
         const retry = yield* Effect.flip(as(worker, deliver(WORKSPACE_A, deliveryId)));
         expect(retry).toEqual(new DeliveryRetry({ deliveryId, cause: "not_accepted" }));
-        expect(yield* delivery(deliveryId)).toMatchObject({ status: "sending", attempts: 1 });
+        expect(yield* delivery(deliveryId)).toMatchObject({
+          status: "sending",
+          attempts: 1,
+          lastOutcome: "not_accepted",
+        });
         // A reconcile re-start claims nothing new and re-dispatches.
         expect(yield* as(worker, claim(WORKSPACE_A, deliveryId))).toBe("sending");
         expect(yield* as(worker, dispatch(WORKSPACE_A, deliveryId))).toBe("sent");

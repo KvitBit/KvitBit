@@ -16,7 +16,8 @@ import { DocumentContacts, DocumentIssuers } from "../ports";
 import type { DocumentRecord } from "../record";
 import { DocumentsRepo } from "../repo";
 import { now } from "../support";
-import { dueStep, effectiveReminders, remindable } from "./policy";
+import { reminderState, stepBlock } from "./eligibility";
+import { dueStep } from "./policy";
 
 export interface DueReminder {
   readonly documentId: DocumentId;
@@ -28,20 +29,15 @@ export interface DueReminder {
 
 const PAGE = 200;
 
-/** The step `record` owes on `today`, or null (not remindable, nothing due, already queued). */
+/** The step `record` owes on `today`, or null (not armed or remindable, nothing due, covered). */
 export const dueReminderOf = (workspaceId: WorkspaceId, record: DocumentRecord, today: IsoDate) =>
   Effect.gen(function* () {
-    if (!record.remindersOn) return null;
-    const effective = yield* effectiveReminders(workspaceId, record, today);
-    if (!remindable(record, effective)) return null;
-    const step = dueStep(record.dueOn, effective, today);
+    const state = yield* reminderState(workspaceId, record, today);
+    if (state.block !== null) return null;
+    const step = dueStep(record.dueOn, state.effective, today);
     if (step === null) return null;
-    const existing = yield* (yield* DeliveriesRepo).reminderStep(workspaceId, {
-      documentId: record.id,
-      dueOn: record.dueOn,
-      offsetDays: step.offsetDays,
-    });
-    if (Option.isSome(existing)) return null;
+    const candidate = { dueOn: record.dueOn, offsetDays: step.offsetDays };
+    if (stepBlock(state, record, candidate, today) !== null) return null;
     return {
       documentId: record.id,
       dueOn: record.dueOn,
