@@ -62,7 +62,7 @@ import {
 } from "@kvitbit/domain/contract";
 import type { BlobKey } from "@kvitbit/domain/ports";
 import { BlobStorage } from "@kvitbit/domain/ports";
-import { Data, Effect, Layer, Option, Schema, Stream } from "effect";
+import { Context, Data, Effect, Layer, Option, Schema, Stream } from "effect";
 import { can } from "../../policy/can";
 import { checkMembershipChange } from "../../policy/membership";
 import { authorize, authorizeInWorkspace } from "../../policy/Policy";
@@ -70,7 +70,7 @@ import { appendAudit } from "../../shared/audit";
 import { orUnavailable } from "../../shared/errors";
 import { sha256Hex } from "../../shared/hash";
 import { withIdempotency } from "../../shared/idempotency";
-import { type IdGenerator, newId } from "../../shared/ids";
+import { IdGenerator, newId } from "../../shared/ids";
 import { CoreStore } from "../../store/CoreStore";
 import {
   BankAccountFields,
@@ -291,7 +291,12 @@ export const makeWorkspaces = Effect.gen(function* () {
   const preview = yield* BrandingPreview;
   const references = yield* BankAccountReferences;
   const store = yield* CoreStore;
-  const context = yield* Effect.context<CoreStore | IdGenerator>();
+  // Only the store and ids: the build-time context may hold a CurrentCaller (or other per-request
+  // services), and providing it per call would override the caller's own.
+  const context = Context.pick(
+    CoreStore,
+    IdGenerator,
+  )(yield* Effect.context<CoreStore | IdGenerator>());
 
   /** Provides the store and ids captured at layer build; every method needs only CurrentCaller. */
   const run = <A, E>(
