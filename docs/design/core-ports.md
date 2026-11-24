@@ -382,6 +382,8 @@ Email outages never surface as errors: `send` returns `queued`, and the delivery
 
 ## 4. Domain modules
 
+The signatures below show each method's shape and the errors its rules add. The error unions were widened in Phase 2 (#430, #478): every method that reaches the store or a driven port (registry, rates, blob storage, email) also fails with `Unavailable`, and a few gained cases such as `Contacts.fromIco` `NotFound`, `Contacts.search` `Invalid` (with a `limit` of 1-100), `Workspaces.create` `Conflict`, `Expenses.record` `Conflict` and `PublicShareLinks.open`/`pdf`/`logo` `Forbidden` for a caller that is not a share-link visitor. Where a union here is narrower, the tags in `packages/domain/src/modules/*.ts` are authoritative.
+
 Common rules for all nine modules:
 
 - C1. Every mutating method runs in one Postgres transaction that covers the domain change, its audit entries, its request-log row, and any outbox intent row (section 8).
