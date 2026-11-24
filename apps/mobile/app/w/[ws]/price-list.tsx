@@ -1,5 +1,5 @@
-import { Placeholder } from "../../../src/ui/placeholder";
+import { PriceListScreen } from "../../../src/features/price-list/price-list-screen";
 
 export default function Route() {
-  return <Placeholder title="Price list" />;
+  return <PriceListScreen />;
 }

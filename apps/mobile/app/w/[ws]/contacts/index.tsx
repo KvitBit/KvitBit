@@ -1,5 +1,5 @@
-import { Placeholder } from "../../../../src/ui/placeholder";
+import { ContactsListScreen } from "../../../../src/features/contacts/contacts-list-screen";
 
 export default function Route() {
-  return <Placeholder title="Contacts" />;
+  return <ContactsListScreen />;
 }
