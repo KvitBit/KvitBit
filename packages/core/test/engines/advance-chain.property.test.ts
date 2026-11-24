@@ -8,9 +8,10 @@
  * Asserted per bucket (treatment, ratePercent):
  * - document currency, exact: Proforma = sum of PTDs + Final Invoice (base, VAT, gross);
  *   Final Invoice + its Credit Notes = 0; every PTD + its Credit Note = 0;
- * - CZK VAT: each PTD = round2(VAT x its receipt-date rate); Final Invoice + PTDs =
- *   round2(Proforma VAT x the Final Invoice rate), within 0.005 CZK of exact (the documented
- *   residue); Final Invoice + Credit Notes = 0 exactly;
+ * - CZK VAT: each PTD = round2(VAT x its receipt-date rate); the Final Invoice =
+ *   round2((Proforma VAT - PTD VAT) x the Final Invoice rate) (D8, §37a: net in the document
+ *   currency, then convert at the Final Invoice's own fixing), and equal to what the VAT report
+ *   declares for it; Final Invoice + Credit Notes = 0 exactly;
  * - a Credit Note keeps the Final Invoice's FX (rate, quantity, fixing date) and VAT rates,
  *   even when issued on a later day with a different CNB fixing.
  */
@@ -303,9 +304,8 @@ describe("advance chain net-to-zero (property: seeded, 120 chains)", () => {
       ptdRateAboveFi: 0,
       ptdRateBelowFi: 0,
     };
-    // Final Invoice buckets left negative by per-PTD rounding (the
-    // negative case of §37a). The net-to-zero properties cover them; their CZK VAT is part of
-    // the FINDING below.
+    // Final Invoice buckets left negative by per-PTD rounding (the negative case of §37a). The
+    // net-to-zero properties and the D8 CZK test cover them.
     let negativeFiBuckets = 0;
     const fiRate = Number(BigDecimal.format(fixtureRate("2026-11-23")));
     for (const c of chains) {
@@ -421,33 +421,40 @@ describe("advance chain net-to-zero (property: seeded, 120 chains)", () => {
     });
   });
 
-  test("D8 as composed today: PTD CZK VAT + Final Invoice CZK VAT = round2(Proforma VAT x the Final Invoice rate)", () => {
-    // compose.ts adds the PTDs' stored CZK VAT to the full supply's conversion. This pins the
-    // current composition; see the FINDING test below for the per-bucket rule it departs from.
+  test("D8 (§37a): Final Invoice CZK VAT = round2((Proforma VAT - PTD VAT) x the Final Invoice rate) per bucket", () => {
+    // Filip's decision on finding F1 (legislative adhesion): the remainder is netted in the
+    // document currency and converted once at the Final Invoice's own fixing; the PTDs keep the
+    // CZK VAT declared at theirs. The oracle nets the Proforma and PTD buckets itself.
     eachChain(({ currency, proforma, ptds, fi }) => {
       if (currency === "CZK" || fi.fx === null) return;
-      const declared = bucketsOf(...ptds, fi);
+      const advances = bucketsOf(...ptds);
+      const stored = bucketsOf(fi);
+      let total = 0n;
       for (const b of proforma.totals.buckets) {
-        const got = declared.get(keyOf(b))?.vatCzk ?? 0n;
-        const want = czkOf(units(b.vat, 2), fi.fx);
-        if (got !== want)
-          throw new Error(`${keyOf(b)} declared CZK VAT ${fmt(got)}, want ${fmt(want)}`);
+        const net = units(b.vat, 2) - (advances.get(keyOf(b))?.vat ?? 0n);
+        const want = czkOf(net, fi.fx);
+        const got = stored.get(keyOf(b))?.vatCzk;
+        if (got !== want) {
+          throw new Error(
+            `Final Invoice ${fi.number} ${keyOf(b)}: vatCzk ${got === undefined ? "none" : fmt(got)}, want round2(${fmt(net)} x ${BigDecimal.format(fi.fx.rate)}) = ${fmt(want)}`,
+          );
+        }
+        total += want;
       }
+      const docCzk = fi.totals.vatCzk === null ? null : units(fi.totals.vatCzk.amount, 2);
+      if (docCzk !== total)
+        throw new Error(
+          `Final Invoice vatCzk ${docCzk === null ? "null" : fmt(docCzk)}, want the bucket sum ${fmt(total)}`,
+        );
     });
   });
 
   /**
-   * FINDING (reported, not fixed: product code is out of scope). The Final Invoice document and
-   * the VAT report disagree on its CZK VAT. compose.ts (totals step, D8) stores per bucket
-   * round2(supply VAT x FI rate) - sum(PTD CZK VAT at the PTDs' own rates). The VAT report
-   * (reports/compute.ts `taxableBucketsCzk`, fed by documents/reports.ts `reportFigures`: the full
-   * supply plus the deducted PTD buckets) nets in the document currency and converts the
-   * remainder at the FI rate, i.e. round2(FI bucket VAT x FI rate), which is also the per-bucket
-   * reading of Decision 2. They differ by about sum(PTD VAT) x (FI rate - PTD rate) whenever a
-   * PTD's fixing differs from the FI's. The report's own rule is a plain test above this one;
-   * the equality alone is `test.failing`: it passes while the finding stands and turns red once
-   * the document and the report agree. Then make it a plain test, and adjust the D8 test or the
-   * report test to the decided rule.
+   * Resolved finding F1 (seed 58256: stored 56,980.96 CZK, report 57,112.25 CZK). The Final
+   * Invoice document and the VAT report (reports/compute.ts `taxableBucketsCzk`, fed by
+   * documents/reports.ts `reportFigures`: the full supply plus the deducted PTD buckets) must
+   * declare the same CZK VAT per bucket. compose.ts used to store round2(supply VAT x FI rate) -
+   * sum(PTD CZK VAT at the PTDs' own rates); both now net through `VatMath.netDeductions`.
    */
   test("the VAT report converts each Final Invoice bucket's VAT at the Final Invoice rate", () => {
     eachChain(({ currency, fi, reported }) => {
@@ -464,8 +471,7 @@ describe("advance chain net-to-zero (property: seeded, 120 chains)", () => {
     });
   });
 
-  test.failing("FINDING: the Final Invoice's stored CZK VAT equals what the VAT report declares for it", () => {
-    // Only the document-vs-report equality: if either side changes to agree, this turns red.
+  test("the Final Invoice's stored CZK VAT equals what the VAT report declares for it", () => {
     eachChain(({ currency, fi, reported }) => {
       if (currency === "CZK" || fi.fx === null) return;
       for (const b of fi.totals.buckets) {

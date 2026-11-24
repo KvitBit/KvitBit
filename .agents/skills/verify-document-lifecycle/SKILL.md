@@ -90,7 +90,7 @@ Mutant `no-proforma-lock` (the PTD's Proforma read without its lock) breaks `Ded
 
 ## Coverage record
 
-- Sync commit: `77a5bb7` (product code unchanged by this work). Checked with tla2tools 1.7.4, Java 17.0.21, Bun 1.4.4 on 2026-11-24.
+- Sync commit: `2fa0670`. In sync: that commit changes only how `compose.ts` converts a Final Invoice's net bucket VAT to CZK (F1, `verify-vat-numbering-math`); the deduction lines, locks and transitions this model abstracts are unchanged. Base, mutants and the 30-test replay rerun green at that commit. Checked with tla2tools 1.7.4, Java 17.0.21, Bun 1.4.4 on 2026-11-24.
 - Mutants (`bun run verify:formal --only lifecycle.model`), each a genuine invariant violation of a property the base and wide configs declare:
 
 | Mutant | Break | Violates |
