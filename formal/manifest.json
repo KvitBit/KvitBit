@@ -91,6 +91,16 @@
           "description": "The Existing branch skips the method/fingerprint compare, so a reused key with another payload gets the first result"
         },
         {
+          "name": "reject-matching",
+          "config": "formal/idempotency/RequestLogCas_mutant_reject_matching.cfg",
+          "expect": "violation",
+          "violates": {
+            "kind": "invariant",
+            "name": "MismatchOnlyForOtherPayload"
+          },
+          "description": "The Existing branch answers idempotency_mismatch to every retry, so a matching retry is rejected instead of replayed"
+        },
+        {
           "name": "claim-no-wait",
           "config": "formal/idempotency/RequestLogCas_mutant_claim_no_wait.cfg",
           "expect": "violation",
@@ -121,7 +131,7 @@
         }
       ],
       "timeoutSeconds": 120,
-      "wideTimeoutSeconds": 3600,
+      "wideTimeoutSeconds": 900,
       "coveredFiles": [
         {
           "path": "packages/core/src/shared/idempotency.ts",
@@ -163,7 +173,7 @@
         "makeRequestOutcome",
         "Contacts.save (create, edit)"
       ],
-      "bounds": "4 requests (2 edits sharing one key with different payloads, 1 competing edit from the same revision, 1 create) x 2 overlapping attempts each (8 attempts), any attempt may abort before COMMIT; wide: x 3 attempts (12)",
+      "bounds": "5 requests (r1, r2 edit from revision 1 on one key with different payloads; r3 edits from revision 1 on its own key; r4 creates; r5 edits from revision 2 on r3's key), overlapping attempts per request 2,1,2,2,1 (8), any attempt may abort before COMMIT; wide: 2 attempts of every request (10)",
       "assumptions": [
         "One Contact row edited by Contacts.save stands for every Collection.getForUpdate/update and checkRevision caller; one create stands for every insert behind withIdempotency",
         "CoreStore port semantics as documented in CoreStore.ts: a claim on a key pending in another transaction waits until that transaction ends; rollback drops the pending claim and row locks (memory.ts runFrame; a SQL adapter must match)",
@@ -190,10 +200,6 @@
           "sha256": "1973965bead068f12e43020708e3e99a9b2932587aa813a6348bee1d835dd81b"
         },
         {
-          "path": "packages/core/src/shared/revision.ts",
-          "sha256": "9c445a1dbcfa1a6a6632865de4f2a006c6a4be8ee333d42f87d8a8fd0533b2bb"
-        },
-        {
           "path": "packages/core/src/shared/requestOutcome.ts",
           "sha256": "cb3cd76d8b708b4082659ae4468cbb0c6b6cf30633277cdcafaacfbe7572a0f8"
         },
@@ -221,11 +227,10 @@
         "makeMemoryStore (requestLog, runFrame rollback)",
         "Collection.getForUpdate",
         "Collection.update",
-        "checkRevision",
         "makeRequestOutcome",
         "Contacts.save (create, edit)"
       ],
-      "bounds": "7 shortest RequestLogCas traces on the in-memory CoreStore: replay, mismatch, stale twice then fresh, abort then retry, overlapping duplicate edit, overlapping duplicate create, overlapping competing edits",
+      "bounds": "7 RequestLogCas traces on the in-memory CoreStore: replay; mismatch on a reused key; stale twice, the fresh edit r5 on the same key, then a replay after the row moved on; abort after Lock then retry; overlapping duplicate edit; overlapping duplicate create; overlapping competing edits. Executes getForUpdate/update, not checkRevision (Expenses is its only caller)",
       "assumptions": [
         "The in-memory store serializes whole transactions, so overlapping attempts interleave only between transactions; Postgres interleavings inside a transaction belong to the model and the pg-contention job",
         "Request-key TTL (24 h) never expires inside a run: replay after expiry re-runs the body by design and is not modelled; scopes other than one Workspace are not modelled",

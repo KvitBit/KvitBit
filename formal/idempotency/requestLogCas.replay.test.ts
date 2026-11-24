@@ -116,6 +116,7 @@ const r1 = (seed: Contact) => ({ id: seed.id, expectedRevision: 1, name: "A" });
 const r2 = (seed: Contact) => ({ id: seed.id, expectedRevision: 1, name: "B" }); // key k1
 const r3 = (seed: Contact) => ({ id: seed.id, expectedRevision: 1, name: "C" }); // key k2
 const r4 = { name: "D" }; // create, key k3
+const r5 = (seed: Contact) => ({ id: seed.id, expectedRevision: 2, name: "C2" }); // key k2
 
 describe("RequestLogCas traces on Contacts.save", () => {
   test("r1: Claim, Lock, Commit; r1 retry: Claim, Existing -> the stored result, replayed", async () => {
@@ -148,16 +149,18 @@ describe("RequestLogCas traces on Contacts.save", () => {
     expect(row).toMatchObject({ revision: 2, name: "A" });
   });
 
-  test("r1 commits; r3 from revision 1: Claim, Lock (stale) twice -> revision_changed, key stays free", async () => {
-    const { stale, again, fresh, row } = await run((seed) =>
+  test("r1 commits; r3: Lock (stale) twice; r5 on k2 commits; r1 retry: Existing -> its own result", async () => {
+    const { first, stale, again, fresh, retry, row } = await run((seed) =>
       Effect.gen(function* () {
-        ok(yield* attempt(r1(seed), k1));
+        const first = yield* attempt(r1(seed), k1);
         const stale = yield* attempt(r3(seed), k2);
         // A failed attempt stores nothing: the retry runs the body again (no replay).
         const again = yield* attempt(r3(seed), k2);
-        // The same key with the fresh revision is a new payload on a free key: it claims.
-        const fresh = yield* attempt({ ...r3(seed), expectedRevision: 2 }, k2);
-        return { stale, again, fresh, row: yield* current(seed.id) };
+        // r5 (the fresh revision) is a new payload on k2, which nothing holds: it claims.
+        const fresh = yield* attempt(r5(seed), k2);
+        // r1's retry after a later edit gets r1's stored result, not the live row.
+        const retry = yield* attempt(r1(seed), k1);
+        return { first, stale, again, fresh, retry, row: yield* current(seed.id) };
       }),
     );
     for (const s of [stale, again]) {
@@ -169,8 +172,13 @@ describe("RequestLogCas traces on Contacts.save", () => {
       });
     }
     // NoLostUpdate: revision 3 = two committed edits, made from revisions 1 and 2
-    expect(ok(fresh)).toMatchObject({ revision: 3, name: "C" });
-    expect(row).toMatchObject({ revision: 3, name: "C" });
+    expect(fresh.replayed).toBe(false);
+    expect(ok(fresh)).toMatchObject({ revision: 3, name: "C2" });
+    expect(row).toMatchObject({ revision: 3, name: "C2" });
+    // ReplayReturnsStoredResult while the row has moved on
+    expect(retry.replayed).toBe(true);
+    expect(ok(retry)).toEqual(ok(first));
+    expect(ok(retry)).toMatchObject({ revision: 2, name: "A" });
   });
 
   test("r1: Claim, Lock, Abort; r1 retry: Claim, Lock, Commit -> the rollback freed the key", async () => {

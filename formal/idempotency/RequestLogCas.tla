@@ -30,22 +30,29 @@
 EXTENDS Naturals, Sequences, FiniteSets
 
 CONSTANTS
-  Attempts,  \* attempts (first try + retries) per request
+  Attempts,  \* Attempts[r]: attempts (first try + retries) of request r
   Bug        \* "none" in the base; a mutant config names the broken step
 
 (* The requests. r1 and r2 reuse one requestKey with different payloads   *)
 (* (a client bug or a replayed key: must be idempotency_mismatch). r3 is a *)
 (* competing edit of the same row from the same revision (one must get    *)
 (* revision_changed). r4 creates a Contact: no revision guards it, only   *)
-(* the claim does.                                                         *)
+(* the claim does. r5 is r3 sent again on key k2 from revision 2, the     *)
+(* client's retry after revision_changed (a new payload on a key whose     *)
+(* attempts all failed, so nothing is stored for it).                      *)
 Req == <<
   [key |-> "k1", payload |-> "A", op |-> "edit",   expected |-> 1],
   [key |-> "k1", payload |-> "B", op |-> "edit",   expected |-> 1],
   [key |-> "k2", payload |-> "C", op |-> "edit",   expected |-> 1],
-  [key |-> "k3", payload |-> "D", op |-> "create", expected |-> 0] >>
+  [key |-> "k3", payload |-> "D", op |-> "create", expected |-> 0],
+  [key |-> "k2", payload |-> "C2", op |-> "edit",  expected |-> 2] >>
 
 R == 1..Len(Req)
-Procs == R \X (1..Attempts)
+Procs == UNION {{r} \X (1..Attempts[r]) : r \in R}
+
+(* Attempt counts per request, chosen by the configs (Attempts <- ...). *)
+BaseAttempts == <<2, 1, 2, 2, 1>>
+WideAttempts == <<2, 2, 2, 2, 2>>
 Keys == {Req[r].key : r \in R}
 NoProc == <<0, 0>>
 KeyOf(p) == Req[p[1]].key
@@ -97,7 +104,8 @@ Existing(p) ==
   LET e == log[KeyOf(p)] IN
   /\ pc[p] = "existing"
   /\ reply' = [reply EXCEPT ![p] =
-       IF e.payload # Req[p[1]].payload /\ Bug # "accept_mismatch"
+       IF \/ e.payload # Req[p[1]].payload /\ Bug # "accept_mismatch"
+          \/ Bug = "reject_matching"
        THEN [kind |-> "mismatch", result |-> 0]
        ELSE [kind |-> "replayed", result |-> e.result]]
   /\ pc' = [pc EXCEPT ![p] = "done"]
@@ -185,6 +193,15 @@ MismatchNeverReplayed ==
   \A p \in Procs :
     reply[p].kind \in {"ok", "replayed"} =>
       log[KeyOf(p)].payload = Req[p[1]].payload
+
+(* The other direction: Conflict{idempotency_mismatch} only for another   *)
+(* payload. A retry with the same payload that finds the entry is replayed,*)
+(* never rejected.                                                         *)
+MismatchOnlyForOtherPayload ==
+  \A p \in Procs :
+    reply[p].kind = "mismatch" =>
+      /\ log[KeyOf(p)].tag = "entry"
+      /\ log[KeyOf(p)].payload # Req[p[1]].payload
 
 (* No lost update: the n-th committed edit was made from revision n, and  *)
 (* the row is at 1 + the number of committed edits. A stale edit is        *)
