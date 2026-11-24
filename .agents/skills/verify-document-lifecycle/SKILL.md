@@ -17,7 +17,7 @@ From the repo root (Bun 1.4.2 per `packageManager`, last run with Bun 1.4.4; JDK
 bun run verify:formal --only lifecycle.model --only lifecycle.replay
 ```
 
-Expected: `PASSED: 2 passed`, about 16 s in total (model base 3 s and twelve mutants about 1 s each; replay 1 s, 30 tests). Nightly (`--wide`) runs `DocumentLifecycle_wide.cfg` (3 payment slots, 530,520 distinct states, about 50 s). The runner's per-run state count can show a TLC progress line rather than the final count; the final count is in the log's last `distinct states found` line. The replay alone: `bun test ./formal/lifecycle/lifecycle.replay.test.ts`.
+Expected: `PASSED: 2 passed`, about 16 s in total (model base 3 s and twelve mutants about 1 s each; replay 1 s, 30 tests). Nightly (`--wide`) runs `DocumentLifecycle_wide.cfg` (3 payment slots, 530,520 distinct states, about 50 s). The replay alone: `bun test ./formal/lifecycle/lifecycle.replay.test.ts`.
 
 Read every TLC result, pass or violation, with the `/statechart` skill: it prints a violation's shortest path in plain words and charts a passing model. TLC logs land in `formal/.cache/logs/`.
 

@@ -68,7 +68,7 @@ Mutants (each must fail; `Bug` constant in the mutant config):
 
 ## Bounds
 
-- Base (`RequestLogCas.cfg`): overlapping attempts per request r1..r5 = 2, 1, 2, 2, 1 (8 attempts), any attempt may abort before COMMIT: 120,320 distinct states, complete search. (The runner's summary line prints the first progress count, not the final one; the TLC log's last `distinct states found` line is the full count.)
+- Base (`RequestLogCas.cfg`): overlapping attempts per request r1..r5 = 2, 1, 2, 2, 1 (8 attempts), any attempt may abort before COMMIT: 120,320 distinct states, complete search.
 - Wide (`RequestLogCas_wide.cfg`, nightly): 2 attempts of every request (10 attempts), 2,774,656 distinct states, complete search, 2 min 40 s through the runner (timeout 900 s). Three attempts of r1..r4 (12) passed 2 million distinct states with a growing queue within 10 minutes, so it is not a nightly bound.
 - Replay: 7 traces on one seeded Contact at revision 1 (`requestLogCas.replay.test.ts`), each named by its model steps and reachable in the base model: replay after commit; mismatch on a reused key; r3 stale twice, r5 commits on the same key, then r1's retry replays r1's result while the row is at revision 3; abort after `Lock` then retry; overlapping duplicate edit; overlapping duplicate create; overlapping competing edits.
 
