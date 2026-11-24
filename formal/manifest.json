@@ -1225,7 +1225,7 @@
         },
         {
           "path": "packages/core/src/engines/vat.ts",
-          "sha256": "a49ac9bea2de07d48911be755048ef50b4159db230b58dccd7ccaa3abd5cf01c"
+          "sha256": "7edfc289138ea3b2c452c288d96ade8e4fe4728760032b9eb15732e1aad8c3c2"
         },
         {
           "path": "packages/core/src/engines/fx.ts",
@@ -1254,7 +1254,7 @@
       "coveredFiles": [
         {
           "path": "packages/core/src/engines/vat.ts",
-          "sha256": "a49ac9bea2de07d48911be755048ef50b4159db230b58dccd7ccaa3abd5cf01c"
+          "sha256": "7edfc289138ea3b2c452c288d96ade8e4fe4728760032b9eb15732e1aad8c3c2"
         },
         {
           "path": "packages/core/src/engines/fx.ts",
@@ -1344,7 +1344,7 @@
       "coveredFiles": [
         {
           "path": "packages/core/src/engines/vat.ts",
-          "sha256": "a49ac9bea2de07d48911be755048ef50b4159db230b58dccd7ccaa3abd5cf01c"
+          "sha256": "7edfc289138ea3b2c452c288d96ade8e4fe4728760032b9eb15732e1aad8c3c2"
         },
         {
           "path": "packages/core/src/engines/fx.ts",
