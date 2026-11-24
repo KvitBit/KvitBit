@@ -2,7 +2,8 @@
 import { describe, expect, test } from "bun:test";
 import type { DeliveryId, DocumentId, RequestKey } from "@kvitbit/domain/contract";
 import { Conflict, Documents, Forbidden, Invalid, NotFound } from "@kvitbit/domain/contract";
-import { Effect, Exit, Ref } from "effect";
+import { EmailNotAccepted, EmailSender } from "@kvitbit/domain/ports";
+import { Deferred, Effect, Exit, Fiber, Ref } from "effect";
 import { systemCaller } from "../../../../src/internal/system";
 import {
   claim,
@@ -17,7 +18,7 @@ import {
 import { CoreStore } from "../../../../src/store/CoreStore";
 import { CaptureEmailSender } from "../../../../src/testing";
 import { member, system, WORKSPACE_A, WORKSPACE_B } from "../../../helpers";
-import { as, B_BUYER, dec, invoiceInput } from "../fixtures";
+import { as, B_BUYER, DE_BUYER, dec, invoiceInput } from "../fixtures";
 import { deliveryScenario, issueInvoice, patchDocument } from "./helpers";
 
 const run = deliveryScenario;
@@ -400,6 +401,10 @@ describe("DocumentDelivery job steps", () => {
         expect(first).toEqual(new DeliveryRetry({ deliveryId, cause: "outcome_unknown" }));
         const second = yield* Effect.flip(as(worker, dispatch(WORKSPACE_A, deliveryId)));
         expect(second).toEqual(new DeliveryRetry({ deliveryId, cause: "outcome_unknown" }));
+        expect(yield* delivery(deliveryId)).toMatchObject({
+          status: "sending",
+          lastOutcome: "outcome_unknown",
+        });
         expect(yield* as(worker, giveUp(WORKSPACE_A, deliveryId))).toBe("failed");
         expect(yield* delivery(deliveryId)).toMatchObject({
           status: "failed",
@@ -438,6 +443,88 @@ describe("DocumentDelivery job steps", () => {
         );
         const statuses = yield* (yield* DeliveriesRepo).statuses(WORKSPACE_B, [deliveryId]);
         expect(statuses.size).toBe(0);
+      }),
+    );
+    expect(Exit.isSuccess(exit)).toBe(true);
+  });
+});
+
+describe("council round: ordering, language, overlapping attempts", () => {
+  const queued = Effect.gen(function* () {
+    const id = yield* issueInvoice();
+    const { deliveryId } = yield* (yield* Documents).send(id);
+    return { id, deliveryId };
+  });
+
+  test("the snapshot is taken in the delivery's language (statutory notes)", async () => {
+    const exit = await run(
+      Effect.gen(function* () {
+        const d = yield* Documents;
+        const view = yield* d.issue({
+          input: invoiceInput({
+            contact: DE_BUYER,
+            lines: [{ description: "Consulting", unitPrice: dec("1000") }],
+          }),
+        });
+        const cs = yield* d.send(view.id, { language: "cs" });
+        const en = yield* d.send(view.id, { language: "en" });
+        const notes = (id: DeliveryId) =>
+          Effect.map(
+            delivery(id),
+            (row) =>
+              (row.view as unknown as { statutoryNotes: ReadonlyArray<unknown> }).statutoryNotes,
+          );
+        const csNotes = yield* notes(cs.deliveryId);
+        expect(csNotes.length).toBeGreaterThan(0);
+        expect(yield* notes(en.deliveryId)).not.toEqual(csNotes);
+      }),
+    );
+    expect(Exit.isSuccess(exit)).toBe(true);
+  });
+
+  test("deliveries carry a per-document sequence, also for sends in one transaction at one instant", async () => {
+    const exit = await run(
+      Effect.gen(function* () {
+        const d = yield* Documents;
+        const id = yield* issueInvoice();
+        const store = yield* CoreStore;
+        yield* store.transaction(
+          Effect.andThen(d.send(id, { to: ["a@x.cz"] }), d.send(id, { to: ["b@x.cz"] })),
+        );
+        const rows = yield* (yield* DeliveriesRepo).byDocument(WORKSPACE_A, id);
+        expect(rows.map((r) => [r.sequence, r.to])).toEqual([
+          [1, ["a@x.cz"]],
+          [2, ["b@x.cz"]],
+        ]);
+      }),
+    );
+    expect(Exit.isSuccess(exit)).toBe(true);
+  });
+
+  test("a retryable attempt that completes after another attempt sent the delivery raises no retry", async () => {
+    const exit = await run(
+      Effect.gen(function* () {
+        const { deliveryId } = yield* queued;
+        expect(yield* as(worker, claim(WORKSPACE_A, deliveryId))).toBe("sending");
+        const reached = yield* Deferred.make<void>();
+        const gate = yield* Deferred.make<void>();
+        const slow = EmailSender.of({
+          send: () =>
+            Effect.andThen(
+              Effect.andThen(Deferred.succeed(reached, undefined), Deferred.await(gate)),
+              Effect.fail(new EmailNotAccepted({})),
+            ),
+        });
+        const first = yield* Effect.forkChild(
+          as(worker, dispatch(WORKSPACE_A, deliveryId)).pipe(
+            Effect.provideService(EmailSender, slow),
+          ),
+        );
+        yield* Deferred.await(reached);
+        expect(yield* as(worker, dispatch(WORKSPACE_A, deliveryId))).toBe("sent");
+        yield* Deferred.succeed(gate, undefined);
+        expect(yield* Fiber.join(first)).toBe("sent");
+        expect(yield* delivery(deliveryId)).toMatchObject({ status: "sent", attempts: 2 });
       }),
     );
     expect(Exit.isSuccess(exit)).toBe(true);

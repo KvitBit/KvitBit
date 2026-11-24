@@ -39,6 +39,7 @@ import { now, viewOf } from "../support";
 import { guard } from "../transitions";
 import { DeliveryJobs } from "./jobs";
 import type { DeliveryRecord, ReminderStepRecord } from "./record";
+import { REMINDER_STEP } from "./record";
 import { DeliveriesRepo } from "./repo";
 
 const KIND_TITLE: Readonly<Record<Locale, Readonly<Record<DocumentKind, string>>>> = {
@@ -174,6 +175,8 @@ export const queueDelivery = (
       workspaceId,
       revision: 1,
       documentId: p.record.id,
+      // Per-document order, assigned under the document row lock the caller holds.
+      sequence: (yield* (yield* DeliveriesRepo).byDocument(workspaceId, p.record.id)).length + 1,
       documentRevision: p.record.revision,
       dueOn: p.record.dueOn,
       purpose: p.purpose,
@@ -182,7 +185,8 @@ export const queueDelivery = (
       replyTo: p.replyTo,
       language: p.language,
       subject: p.subject,
-      view: yield* viewOf(p.record),
+      // The view in the delivery's language (statutory notes, labels), as the PDF prints it.
+      view: yield* viewOf(p.record, { language: p.language }),
       attachment: p.attachment,
       reminder,
       attempts: 0,
@@ -201,7 +205,7 @@ export const queueDelivery = (
     const taken = yield* store.transaction(repo.insert(row)).pipe(
       Effect.map(() => null),
       Effect.catchTag("UniqueViolation", (e) =>
-        reminder === null
+        reminder === null || e.constraint !== REMINDER_STEP
           ? Effect.die(e)
           : Effect.flatMap(
               repo.reminderStep(workspaceId, { documentId: p.record.id, ...reminder }),

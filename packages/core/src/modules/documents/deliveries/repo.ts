@@ -38,7 +38,7 @@ export class DeliveriesRepo extends Context.Service<
       next: DeliveryRecord,
       expectedRevision: number,
     ) => Effect.Effect<DeliveryRecord, NotFound | Conflict | UniqueViolation | StoreUnavailable>;
-    /** A document's deliveries, oldest first. */
+    /** A document's deliveries in queueing order (`sequence`). */
     readonly byDocument: (
       workspaceId: WorkspaceId,
       documentId: DocumentId,
@@ -71,7 +71,7 @@ export const DeliveriesRepoMemory: Layer.Layer<DeliveriesRepo, never, MemoryTabl
       insert: table.insert,
       update: table.update,
       byDocument: (workspaceId, documentId) =>
-        table.list(workspaceId, { where: { documentId }, orderBy: ["createdAt"] }),
+        table.list(workspaceId, { where: { documentId }, orderBy: ["sequence"] }),
       reminderStep: (workspaceId, step) =>
         table.findUnique(
           REMINDER_STEP,

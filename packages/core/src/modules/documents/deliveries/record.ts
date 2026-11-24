@@ -31,6 +31,8 @@ export const DeliveryRecord = Schema.Struct({
   workspaceId: WorkspaceId,
   revision: Schema.Number,
   documentId: DocumentId,
+  /** 1, 2, ... per document in queueing order (unique `deliveries_document_sequence`). */
+  sequence: Schema.Int,
   /** The document revision the snapshot was taken at (J3). */
   documentRevision: Schema.Number,
   purpose: DeliveryPurpose,
@@ -65,6 +67,7 @@ export type DeliveryRecord = typeof DeliveryRecord.Type;
 
 /** One automatic reminder per document, due date and offset (no stored schedule, D16). */
 export const REMINDER_STEP = "deliveries_reminder_step";
+export const DOCUMENT_SEQUENCE = "deliveries_document_sequence";
 
 export const DeliveriesTable = defineCollection<DeliveryRecord>({
   name: "deliveries",
@@ -72,6 +75,11 @@ export const DeliveriesTable = defineCollection<DeliveryRecord>({
   entity: "Document",
   schema: DeliveryRecord as unknown as Schema.Codec<DeliveryRecord, unknown>,
   unique: [
+    {
+      name: DOCUMENT_SEQUENCE,
+      scope: "workspace",
+      key: (row) => [row.documentId, row.sequence],
+    },
     {
       name: REMINDER_STEP,
       scope: "workspace",

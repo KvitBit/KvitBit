@@ -383,3 +383,23 @@ describe("stored arm outcome and re-arm (D16, council terms)", () => {
     expect(Exit.isSuccess(exit)).toBe(true);
   });
 });
+
+describe("latest send by sequence (council round)", () => {
+  test("automatic reminders go to the latest send's recipients; a due-date edit re-arms from it", async () => {
+    const exit = await deliveryScenario(
+      Effect.gen(function* () {
+        const d = yield* Documents;
+        const id = yield* issueInvoice();
+        yield* setContactDefaults({ reminderPolicy: { mode: "disabled" } });
+        yield* d.send(id, { to: ["a@x.cz"] });
+        yield* d.send(id, { to: ["b@x.cz"] });
+        yield* setContactDefaults({ reminderPolicy: { mode: "inherit" } });
+        yield* moveDue(id, "2026-12-14");
+        const [due] = yield* sweep("2026-12-17");
+        const row = yield* (yield* DeliveriesRepo).get(WORKSPACE_A, due?.deliveryId as DeliveryId);
+        expect(row.to).toEqual(["b@x.cz"]);
+      }),
+    );
+    expect(Exit.isSuccess(exit)).toBe(true);
+  });
+});

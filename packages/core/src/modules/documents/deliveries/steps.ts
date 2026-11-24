@@ -115,10 +115,12 @@ export const dispatch = (workspaceId: WorkspaceId, id: DeliveryId) =>
         { idempotencyKey: row.id },
       )
       .pipe(Effect.result);
-    const attempts = row.attempts + 1;
+    // Counted from the locked row: overlapping attempts (a reconcile re-start) never lose one,
+    // and an attempt that finds the delivery already terminal leaves its status alone.
     const next = yield* store.transaction(
       transition(workspaceId, id, (current) => {
-        if (current.status !== "sending") return null;
+        const attempts = current.attempts + 1;
+        if (current.status !== "sending") return { attempts };
         if (outcome._tag === "Success") {
           return {
             status: "sent",
@@ -137,7 +139,11 @@ export const dispatch = (workspaceId: WorkspaceId, id: DeliveryId) =>
             };
       }),
     );
-    if (outcome._tag === "Failure" && outcome.failure._tag !== "EmailRejected") {
+    if (
+      next.status === "sending" &&
+      outcome._tag === "Failure" &&
+      outcome.failure._tag !== "EmailRejected"
+    ) {
       return yield* new DeliveryRetry({
         deliveryId: id,
         cause: outcome.failure._tag === "EmailNotAccepted" ? "not_accepted" : "outcome_unknown",

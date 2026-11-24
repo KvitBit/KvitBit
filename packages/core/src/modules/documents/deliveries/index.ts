@@ -18,6 +18,7 @@ export type { DeliveryRecord, DeliveryStatus, ReminderStepRecord } from "./recor
 export {
   DeliveriesTable,
   DeliveryStatus as DeliveryStatusSchema,
+  DOCUMENT_SEQUENCE,
   isTerminal,
   REMINDER_STEP,
 } from "./record";
