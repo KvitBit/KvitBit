@@ -501,3 +501,128 @@ describe("review round 2 regressions", () => {
     }
   });
 });
+
+describe("review round 3 regressions", () => {
+  /** A 200 whose malformed body only finishes reading once `release` is called. */
+  const gatedMalformed = (requestId: string) => {
+    let started!: () => void;
+    let release!: () => void;
+    const decodingStarted = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const response = () => {
+      const r = json(200, { nope: true }, { "x-request-id": requestId });
+      return Object.defineProperty(r, "arrayBuffer", {
+        value: async () => {
+          started();
+          await gate;
+          return new TextEncoder().encode('{"nope":true}').buffer;
+        },
+      });
+    };
+    return { response, decodingStarted, release };
+  };
+  const unauthorized = (requestId: string) =>
+    json(401, { _tag: "Unauthorized", reason: "expired" }, { "x-request-id": requestId });
+
+  test("a decode failure keeps its own status and request id when a sibling call handles a 401 meanwhile", async () => {
+    const malformed = gatedMalformed("broken");
+    let n = 0;
+    const mock = mockFetch(() => (n++ === 0 ? malformed.response() : unauthorized("handled")));
+    const sibling = Effect.gen(function* () {
+      yield* Effect.promise(() => malformed.decodingStarted);
+      yield* Effect.ignore(search);
+      malformed.release();
+    });
+    const result = await run(
+      attempt(Effect.all([search, sibling], { concurrency: "unbounded" })),
+      mock.fetch,
+    );
+    expect(mock.calls).toHaveLength(2);
+    expect(result).toEqual({
+      _tag: "Err",
+      error: { _tag: "Unexpected", status: 200, requestId: "broken" },
+    });
+  });
+
+  test("a sibling's 401 that fails first is reported as Unauthorized, not borrowed by the decode", async () => {
+    const malformed = gatedMalformed("broken");
+    let n = 0;
+    const mock = mockFetch(() => (n++ === 0 ? malformed.response() : unauthorized("handled")));
+    const result = await run(
+      attempt(
+        Effect.all(
+          [
+            search,
+            Effect.andThen(
+              Effect.promise(() => malformed.decodingStarted),
+              Effect.ensuring(
+                search,
+                Effect.sync(() => malformed.release()),
+              ),
+            ),
+          ],
+          { concurrency: "unbounded" },
+        ),
+      ),
+      mock.fetch,
+    );
+    expect(mock.calls).toHaveLength(2);
+    expect(result._tag === "Err" && result.error._tag).toBe("Unauthorized");
+  });
+
+  test("when the decode failure surfaces before a sibling's 500, it keeps its own status and request id", async () => {
+    const malformed = gatedMalformed("broken");
+    let n = 0;
+    const mock = mockFetch(() =>
+      n++ === 0
+        ? malformed.response()
+        : json(500, { _tag: "InternalError", requestId: "down" }, { "x-request-id": "down" }),
+    );
+    const sibling = Effect.gen(function* () {
+      yield* Effect.promise(() => malformed.decodingStarted);
+      const exit = yield* Effect.exit(search);
+      malformed.release();
+      yield* Effect.sleep("20 millis");
+      return yield* exit;
+    });
+    const result = await run(
+      attempt(Effect.all([search, sibling], { concurrency: "unbounded" })),
+      mock.fetch,
+    );
+    expect(mock.calls).toHaveLength(2);
+    expect(result).toEqual({
+      _tag: "Err",
+      error: { _tag: "Unexpected", status: 200, requestId: "broken" },
+    });
+  });
+
+  test("when sibling calls both fail, the reported status and request id belong together", async () => {
+    const malformed = gatedMalformed("broken");
+    let n = 0;
+    const mock = mockFetch(() =>
+      n++ === 0
+        ? malformed.response()
+        : json(500, { _tag: "InternalError", requestId: "down" }, { "x-request-id": "down" }),
+    );
+    const sibling = Effect.gen(function* () {
+      yield* Effect.promise(() => malformed.decodingStarted);
+      yield* Effect.ensuring(
+        search,
+        Effect.sync(() => malformed.release()),
+      );
+    });
+    const result = await run(
+      attempt(Effect.all([search, sibling], { concurrency: "unbounded" })),
+      mock.fetch,
+    );
+    expect(mock.calls).toHaveLength(2);
+    expect(result).toEqual({
+      _tag: "Err",
+      error: { _tag: "Unexpected", status: 500, requestId: "down" },
+    });
+  });
+});

@@ -9,10 +9,12 @@ import { Context, Effect, Layer, Option, type Redacted } from "effect";
 import {
   FetchHttpClient,
   HttpClient,
+  HttpClientError,
   HttpClientRequest,
   type HttpClientResponse,
 } from "effect/http";
 import { HttpApiClient } from "effect/http-api";
+import { isUiError, UndecodedResponse } from "./errors";
 
 export type KvitbitApiClient = HttpApiClient.ForApi<typeof Api>;
 
@@ -59,25 +61,26 @@ export interface ObservedResponse {
 }
 
 /**
- * Per-call cell the client pipeline writes each response's headers into. `attempt` provides a
- * fresh one per call; outside it nothing is recorded.
+ * Cell `attempt` provides per command: the response of the latest endpoint call whose body
+ * decoded, for success metadata. Failures never read it; a decode failure carries its own
+ * response (`UndecodedResponse`), so sibling calls cannot misattribute one.
  */
 export interface ResponseCell {
-  /** The response of the call's latest exchange; reset when a new request starts. */
   current: ObservedResponse | null;
-  /**
-   * The response whose body is still being decoded, or failed to decode. Cleared once the body
-   * decodes, so a later failure that never reached the server (a payload that does not encode)
-   * cannot borrow an earlier exchange's status and request id.
-   */
-  undecoded: ObservedResponse | null;
 }
 
 export class ResponseObserver extends Context.Service<ResponseObserver, ResponseCell>()(
   "ui-port/ResponseObserver",
 ) {}
 
-export const emptyResponseCell = (): ResponseCell => ({ current: null, undecoded: null });
+export const emptyResponseCell = (): ResponseCell => ({ current: null });
+
+/** The response of one endpoint call, provided fresh around each call. */
+interface ExchangeCell {
+  response: ObservedResponse | null;
+}
+
+class Exchange extends Context.Service<Exchange, ExchangeCell>()("ui-port/Exchange") {}
 
 const parseEtag = (value: string | undefined): number | null => {
   const match = value === undefined ? null : /^"(0|[1-9]\d{0,9})"$/.exec(value);
@@ -95,62 +98,66 @@ export const observeResponse = (
 
 const recordResponse = HttpClient.transformResponse(
   Effect.tap((response: HttpClientResponse.HttpClientResponse) =>
-    Effect.serviceOption(ResponseObserver).pipe(
+    Effect.serviceOption(Exchange).pipe(
       Effect.flatMap((cell) =>
         Option.isSome(cell)
           ? Effect.sync(() => {
-              const observed = observeResponse(response);
-              cell.value.current = observed;
-              cell.value.undecoded = observed;
+              cell.value.response = observeResponse(response);
             })
           : Effect.void,
       ),
     ),
   ),
 );
-
-/** The body decoded: the exchange is complete and no longer explains a later failure. */
-const markDecoded = <A, E, R>(decoded: Effect.Effect<A, E, R>): Effect.Effect<A, E, R> =>
-  Effect.tap(decoded, () =>
-    Effect.serviceOption(ResponseObserver).pipe(
-      Effect.flatMap((cell) =>
-        Option.isSome(cell)
-          ? Effect.sync(() => {
-              cell.value.undecoded = null;
-            })
-          : Effect.void,
-      ),
-    ),
-  );
 
 /**
- * Starts an exchange: forgets the previous response before this request encodes, so a failure
- * before anything is sent (a header or payload that does not encode) reports null status and
- * request id rather than an earlier, handled exchange's.
+ * Decoding one endpoint call's response, which is in hand: a body that does not decode fails with
+ * that response's status and request id attached; a decoded body records the success metadata.
+ * Typed wire errors (declared error statuses) and HttpClientErrors already carry their response.
  */
-const startExchange: Effect.Effect<void> = Effect.serviceOption(ResponseObserver).pipe(
-  Effect.flatMap((cell) =>
-    Option.isSome(cell)
-      ? Effect.sync(() => {
-          cell.value.current = null;
-          cell.value.undecoded = null;
-        })
-      : Effect.void,
-  ),
-);
+const decodingResponse = <A, E, R>(
+  decoded: Effect.Effect<A, E, R>,
+): Effect.Effect<A, E | UndecodedResponse, R> =>
+  Effect.flatMap(
+    Effect.serviceOption(Exchange),
+    (exchange): Effect.Effect<A, E | UndecodedResponse, R> => {
+      const response = Option.isSome(exchange) ? exchange.value.response : null;
+      if (response === null) return decoded;
+      return decoded.pipe(
+        Effect.mapError((error) =>
+          isUiError(error) || HttpClientError.isHttpClientError(error)
+            ? error
+            : new UndecodedResponse(response.status, response.requestId, error),
+        ),
+        Effect.tap(() =>
+          Effect.serviceOption(ResponseObserver).pipe(
+            Effect.flatMap((cell) =>
+              Option.isSome(cell)
+                ? Effect.sync(() => {
+                    cell.value.current = response;
+                  })
+                : Effect.void,
+            ),
+          ),
+        ),
+      );
+    },
+  );
 
-/** Runs `startExchange` before every endpoint call of a client (groups are nested records). */
-const startingExchanges = (client: object): object =>
+/** Gives every endpoint call of a client its own exchange cell (groups are nested records). */
+const withExchanges = (client: object): object =>
   Object.fromEntries(
     Object.entries(client).map(([name, member]: [string, unknown]) => [
       name,
       typeof member === "function"
         ? (...args: ReadonlyArray<unknown>) => {
             const call: unknown = member(...args);
-            return Effect.isEffect(call) ? Effect.andThen(startExchange, call) : call;
+            return Effect.isEffect(call)
+              ? Effect.suspend(() => Effect.provideService(call, Exchange, { response: null }))
+              : call;
           }
         : typeof member === "object" && member !== null
-          ? startingExchanges(member)
+          ? withExchanges(member)
           : member,
     ]),
   );
@@ -196,10 +203,10 @@ export const make = (
     HttpApiClient.make(Api, {
       baseUrl: config.baseUrl,
       transformClient: configureClient(config),
-      transformResponse: markDecoded,
+      transformResponse: decodingResponse,
     }),
-    // same shape, each endpoint now preceded by `startExchange`
-    (client) => startingExchanges(client) as KvitbitApiClient,
+    // same shape, each endpoint call now running in its own exchange
+    (client) => withExchanges(client) as KvitbitApiClient,
   );
 
 /** KvitbitApi over the adapter's `HttpClient` (tests inject a mock transport here). */

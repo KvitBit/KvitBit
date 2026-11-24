@@ -3,13 +3,7 @@
  * `ApiResult`, never a failure, so `update` handles errors as ordinary Messages.
  */
 import { type Duration, Effect, Exit, Fiber, type Scope } from "effect";
-import {
-  emptyResponseCell,
-  KvitbitApi,
-  type KvitbitApiClient,
-  type ObservedResponse,
-  ResponseObserver,
-} from "./client";
+import { emptyResponseCell, KvitbitApi, type KvitbitApiClient, ResponseObserver } from "./client";
 import { fromCause, UiError } from "./errors";
 
 export interface ResponseMeta {
@@ -58,19 +52,10 @@ export const attempt = <A, E, R>(
               ? noMeta
               : { etag: observed.current.etag, replayed: observed.current.replayed },
           ),
-        onFailure: (cause) => err<A>(withResponse(fromCause(cause), observed.undecoded)),
+        onFailure: (cause) => err<A>(fromCause(cause)),
       }),
     );
   });
-
-/**
- * A body that failed to decode still had a status and request id: keep them for support. Only the
- * failing exchange counts; a failure before any request was sent keeps null.
- */
-const withResponse = (error: UiError, response: ObservedResponse | null): UiError =>
-  error._tag === "Unexpected" && error.status === null && response !== null
-    ? { ...error, status: response.status, requestId: error.requestId ?? response.requestId }
-    : error;
 
 export interface ApiCommand<Msg> {
   readonly name: string;

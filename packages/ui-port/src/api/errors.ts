@@ -146,6 +146,19 @@ export const isUiError = (u: unknown): u is UiError =>
     u !== null &&
     (LOCAL_TAGS.has((u as { _tag?: unknown })._tag as string) || isPlainInvalid(u)));
 
+/**
+ * A response body that did not decode, annotated while that response was in hand, so the error
+ * keeps the status and `X-Request-Id` of the exchange that actually failed.
+ */
+export class UndecodedResponse {
+  readonly _tag = "UndecodedResponse";
+  constructor(
+    readonly status: number,
+    readonly requestId: string | null,
+    readonly cause: unknown,
+  ) {}
+}
+
 const fromHttpClientError = (error: HttpClientError.HttpClientError): UiError => {
   const reason = error.reason;
   switch (reason._tag) {
@@ -163,9 +176,9 @@ const fromHttpClientError = (error: HttpClientError.HttpClientError): UiError =>
 /** The one mapping from a failure value (the `E` channel of a KvitbitApi call) to UiError. */
 export const toUiError = (error: unknown): UiError => {
   if (isUiError(error)) return error;
+  if (error instanceof UndecodedResponse) return unexpected(error.status, error.requestId);
   if (HttpClientError.isHttpClientError(error)) return fromHttpClientError(error);
   if (Cause.isTimeoutError(error)) return timeout;
-  if (error instanceof Schema.SchemaError) return unexpected(); // response body did not decode
   return unexpected();
 };
 
