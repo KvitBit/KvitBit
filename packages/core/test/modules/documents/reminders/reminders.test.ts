@@ -474,3 +474,25 @@ describe("review round 1 regressions", () => {
     expect(Exit.isSuccess(exit)).toBe(true);
   });
 });
+
+describe("review round 2 regression", () => {
+  test("a re-send after a due-date re-arm keeps the arm: the same reminder is not sent twice", async () => {
+    const exit = await deliveryScenario(
+      Effect.gen(function* () {
+        const d = yield* Documents;
+        const id = yield* issueInvoice();
+        yield* setContactDefaults({ reminderPolicy: { mode: "disabled" } });
+        yield* d.send(id);
+        yield* setContactDefaults({ reminderPolicy: { mode: "inherit" } });
+        yield* moveDue(id, "2026-12-14");
+        const [first] = yield* sweep("2026-12-17");
+        yield* as(worker, deliver(WORKSPACE_A, first?.deliveryId as DeliveryId));
+        expect(yield* reminderEmails).toHaveLength(1);
+        yield* d.send(id);
+        expect(yield* sweep("2026-12-17")).toEqual([]);
+        expect(yield* reminderEmails).toHaveLength(1);
+      }),
+    );
+    expect(Exit.isSuccess(exit)).toBe(true);
+  });
+});

@@ -39,6 +39,22 @@ export interface ReminderState {
   readonly live: ReadonlyArray<DeliveryRecord>;
 }
 
+/**
+ * The document is armed: its last purpose "document" send armed reminders, or the due date
+ * changed since that send with a choice other than "off" (the re-arm of D16). Used by
+ * selection and claim, and by `send` to tell a new arm from a re-send.
+ */
+export const isArmed = (
+  record: Pick<DocumentRecord, "remindersOn" | "remindersChoice" | "dueOn">,
+  deliveries: ReadonlyArray<DeliveryRecord>,
+): boolean => {
+  if (record.remindersOn) return true;
+  const lastSend = deliveries.filter((d) => d.purpose === "document").at(-1);
+  return (
+    lastSend !== undefined && record.remindersChoice !== "off" && lastSend.dueOn !== record.dueOn
+  );
+};
+
 /** Whether `record` is armed and remindable now, with its live reminders for `dueOn`. */
 export const reminderState = (workspaceId: WorkspaceId, record: DocumentRecord, today: IsoDate) =>
   Effect.gen(function* () {
@@ -55,13 +71,7 @@ export const reminderState = (workspaceId: WorkspaceId, record: DocumentRecord, 
     if (!stillOwed(record)) {
       return { effective, arm, block: "document_settled", live } as const;
     }
-    const lastSend = deliveries.filter((d) => d.purpose === "document").at(-1);
-    const armed =
-      record.remindersOn ||
-      (lastSend !== undefined &&
-        record.remindersChoice !== "off" &&
-        lastSend.dueOn !== record.dueOn);
-    const on = remindable({ ...record, remindersOn: armed }, effective);
+    const on = remindable({ ...record, remindersOn: isArmed(record, deliveries) }, effective);
     return {
       effective,
       arm,

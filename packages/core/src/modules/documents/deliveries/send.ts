@@ -33,6 +33,7 @@ import { newId } from "../../../shared/ids";
 import { CoreStore } from "../../../store/CoreStore";
 import { DocumentContacts, DocumentIssuers } from "../ports";
 import type { DocumentRecord } from "../record";
+import { isArmed } from "../reminders/eligibility";
 import { choiceOf, effectiveReminders, stillOwed } from "../reminders/policy";
 import { DocumentsRepo } from "../repo";
 import { now, viewOf } from "../support";
@@ -311,8 +312,10 @@ export const send = (id: DocumentId, input?: SendOptions, opts?: RequestOptions)
           { ...p, record },
           null,
           changes,
-          // A new arm (D16): reminders were off and this send turns them on.
-          p.armsReminders && !locked.remindersOn,
+          // A new arm (D16): reminders were effectively off (stored flag and due-date re-arm,
+          // eligibility.ts) and this send turns them on; a re-send keeps the current arm.
+          p.armsReminders &&
+            !isArmed(locked, yield* (yield* DeliveriesRepo).byDocument(workspaceId, locked.id)),
         );
         return { deliveryId: delivery.id, status: "queued" as const };
       }),
