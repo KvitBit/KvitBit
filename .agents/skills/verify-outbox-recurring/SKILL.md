@@ -161,7 +161,7 @@ The pg-contention job (`*.contention.ts`) should later cover:
 
 ## Coverage record
 
-- Sync commit: `154383a` (the delivery reconcile; the recurring side is unchanged since `77a5bb7`). Tools: tla2tools 1.7.4, Java 17 (Temurin 17.0.21.1), Bun 1.4.4.
+- Sync commit: `fcb0f29` (integration: in sync, `store/memory.ts` only gained the F2 reservation FK checks, and `deliveries/sender.ts` only lost its boundary cast; `deliveries/record.ts` is now a covered file for `isReleased`; base, mutants and replay rerun green). Before: `154383a` (the delivery reconcile; the recurring side is unchanged since `77a5bb7`). Tools: tla2tools 1.7.4, Java 17 (Temurin 17.0.21.1), Bun 1.4.4.
 - Runs on 2026-11-24 from the repo root at 154383a plus the verification update, all exit 0:
 
   | Command | Result |

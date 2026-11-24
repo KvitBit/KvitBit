@@ -139,7 +139,7 @@ After an intended change:
 
 ## Coverage record
 
-- Sync commit: `0d117d3` (F2: model, replay and this skill re-confirmed against it on 2026-11-24; the manifest's `syncCommit` and digests are updated separately with `--update-digests`). Before: `77a5bb7`.
+- Sync commit: `fcb0f29` (integration: in sync, `documents/service.ts` only lost its boundary cast and `store/memory.ts` only gained the F3/F4 delivery query; model, mutants and replay rerun green). Before: `0d117d3` (F2: model, replay and this skill re-confirmed against it on 2026-11-24; the manifest's `syncCommit` and digests are updated separately with `--update-digests`). Before: `77a5bb7`.
 - Tools: tla2tools 1.7.4, Java 17, Bun 1.4.2 (pins in `formal/toolchain/toolchain.json`).
 - Covered files: `packages/core/src/modules/numbering/service.ts`, `packages/core/src/store/numbering.ts`, `packages/core/src/store/CoreStore.ts`, `packages/core/src/store/memory.ts` (replay), `packages/core/src/modules/documents/lifecycle.ts`, `packages/core/src/modules/documents/service.ts`, `packages/core/src/modules/documents/record.ts`, `packages/core/src/modules/documents/support.ts` (`insertNumbered`, `withDraftRow`; listed in the manifest, digest pending `--update-digests`), `packages/db/drizzle/20261123175822_init/migration.sql` (model). Digests are in the manifest.
 - Able-to-fail, recorded 2026-11-24, each reverted with `git checkout` and re-run green:

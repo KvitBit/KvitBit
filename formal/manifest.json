@@ -75,7 +75,7 @@
       "skill": "verify-document-lifecycle",
       "tier": 1,
       "kind": "tlc",
-      "syncCommit": "77a5bb7",
+      "syncCommit": "fcb0f29",
       "spec": "formal/lifecycle/DocumentLifecycle.tla",
       "config": "formal/lifecycle/DocumentLifecycle.cfg",
       "wideConfig": "formal/lifecycle/DocumentLifecycle_wide.cfg",
@@ -210,39 +210,39 @@
         },
         {
           "path": "packages/core/src/modules/documents/lifecycle.ts",
-          "sha256": "52ca553c677840c31266401da33f1ed8da783a53deae187706d6d24f89a1285a"
+          "sha256": "b410e2c64dc2972f843850ceea1939e39c45da8db1bd3a278928944bbcfc6203"
         },
         {
           "path": "packages/core/src/modules/documents/final.ts",
-          "sha256": "1c7bddbbb513cb17930d6d0ed9eb325a67d7103cea9bdd8e7cd7bb3800a18531"
+          "sha256": "4b84519910468302bd4ea3d1179c2e21de0c3ffa044c104dc8cf0ac950c60480"
         },
         {
           "path": "packages/core/src/modules/documents/corrections.ts",
-          "sha256": "4689ee06d5e465875b469526dbab760ebea5c34d71d6e24c129732eebdf9917d"
+          "sha256": "c18acbc4c117054d55ed9d9cc36035ae4b7a87c0bf6d0c74390e544300cd50f8"
         },
         {
           "path": "packages/core/src/modules/documents/credit.ts",
-          "sha256": "4c9758c878908e783ee53ca1776b1ab7f5111243d5174c630a3344e5be0c2d40"
+          "sha256": "9c8d8d1b41c6a313e26d2d2fa80d52a647093236edb15169a4d5c7f2221aa222"
         },
         {
           "path": "packages/core/src/modules/documents/payments.ts",
-          "sha256": "0daa8da5b617412f35d66eb072b6d6d17913076e014140455e76f3e800cfe427"
+          "sha256": "0f1abd852b276599edb8d3b9a5c4fc8e064f22cd17cc310f4b68a323eb0c1dae"
         },
         {
           "path": "packages/core/src/modules/payments/service.ts",
-          "sha256": "88ffd41bc39bde7a526a104aadf2ef9a48c512bf57211a7fe4dc75c23b39f5fc"
+          "sha256": "db1c57b95671de5843da29b8894322efce9a6efc7a50978211e56271848948d9"
         },
         {
           "path": "packages/core/src/store/memory.ts",
-          "sha256": "b12cacb2313336ffa34d3a9f28b13a4dcf9915bc7a00f68e9c0689a12c3a9eba"
+          "sha256": "83fdb2713655de3fcc4fe015ea23648b31d0e6e96cc6762b7f8e59d32750cbcb"
         },
         {
           "path": "packages/core/src/modules/documents/service.ts",
-          "sha256": "22d384d76b162172ee42625f2c85896ffad51634b73639f7ff6883d1571eb769"
+          "sha256": "6ea46deec8b34a475214bc6aa3f60974625c1c088da79612a4bf65a1068418e9"
         },
         {
           "path": "packages/core/src/modules/documents/compose.ts",
-          "sha256": "545885ad5f31ca80cdf2ba21782f6db0e89557d7fb00141a7f17177fd1566f41"
+          "sha256": "553c9b5a1c1a5edcb46e5682a65b25fdb81624c35ac0bd9d5b34eb6cca925bf9"
         }
       ],
       "guardedSymbols": [
@@ -293,7 +293,7 @@
       "skill": "verify-document-lifecycle",
       "tier": 1,
       "kind": "replay",
-      "syncCommit": "77a5bb7",
+      "syncCommit": "fcb0f29",
       "replay": ["formal/lifecycle/lifecycle.replay.test.ts"],
       "timeoutSeconds": 120,
       "coveredFiles": [
@@ -303,39 +303,39 @@
         },
         {
           "path": "packages/core/src/modules/documents/lifecycle.ts",
-          "sha256": "52ca553c677840c31266401da33f1ed8da783a53deae187706d6d24f89a1285a"
+          "sha256": "b410e2c64dc2972f843850ceea1939e39c45da8db1bd3a278928944bbcfc6203"
         },
         {
           "path": "packages/core/src/modules/documents/final.ts",
-          "sha256": "1c7bddbbb513cb17930d6d0ed9eb325a67d7103cea9bdd8e7cd7bb3800a18531"
+          "sha256": "4b84519910468302bd4ea3d1179c2e21de0c3ffa044c104dc8cf0ac950c60480"
         },
         {
           "path": "packages/core/src/modules/documents/corrections.ts",
-          "sha256": "4689ee06d5e465875b469526dbab760ebea5c34d71d6e24c129732eebdf9917d"
+          "sha256": "c18acbc4c117054d55ed9d9cc36035ae4b7a87c0bf6d0c74390e544300cd50f8"
         },
         {
           "path": "packages/core/src/modules/documents/credit.ts",
-          "sha256": "4c9758c878908e783ee53ca1776b1ab7f5111243d5174c630a3344e5be0c2d40"
+          "sha256": "9c8d8d1b41c6a313e26d2d2fa80d52a647093236edb15169a4d5c7f2221aa222"
         },
         {
           "path": "packages/core/src/modules/documents/payments.ts",
-          "sha256": "0daa8da5b617412f35d66eb072b6d6d17913076e014140455e76f3e800cfe427"
+          "sha256": "0f1abd852b276599edb8d3b9a5c4fc8e064f22cd17cc310f4b68a323eb0c1dae"
         },
         {
           "path": "packages/core/src/modules/payments/service.ts",
-          "sha256": "88ffd41bc39bde7a526a104aadf2ef9a48c512bf57211a7fe4dc75c23b39f5fc"
+          "sha256": "db1c57b95671de5843da29b8894322efce9a6efc7a50978211e56271848948d9"
         },
         {
           "path": "packages/core/src/store/memory.ts",
-          "sha256": "b12cacb2313336ffa34d3a9f28b13a4dcf9915bc7a00f68e9c0689a12c3a9eba"
+          "sha256": "83fdb2713655de3fcc4fe015ea23648b31d0e6e96cc6762b7f8e59d32750cbcb"
         },
         {
           "path": "packages/core/src/modules/documents/service.ts",
-          "sha256": "22d384d76b162172ee42625f2c85896ffad51634b73639f7ff6883d1571eb769"
+          "sha256": "6ea46deec8b34a475214bc6aa3f60974625c1c088da79612a4bf65a1068418e9"
         },
         {
           "path": "packages/core/src/modules/documents/compose.ts",
-          "sha256": "545885ad5f31ca80cdf2ba21782f6db0e89557d7fb00141a7f17177fd1566f41"
+          "sha256": "553c9b5a1c1a5edcb46e5682a65b25fdb81624c35ac0bd9d5b34eb6cca925bf9"
         }
       ],
       "guardedSymbols": [
@@ -381,7 +381,7 @@
       "skill": "verify-outbox-recurring",
       "tier": 1,
       "kind": "tlc",
-      "syncCommit": "77a5bb7",
+      "syncCommit": "fcb0f29",
       "spec": "formal/outbox/OutboxRecurring.tla",
       "config": "formal/outbox/OutboxRecurring.cfg",
       "wideConfig": "formal/outbox/OutboxRecurring_wide.cfg",
@@ -423,7 +423,7 @@
             "kind": "temporal"
           },
           "deadlock": "allow",
-          "description": "H3 on the code at 77a5bb7 (no J1a delivery reconcile in core): a crash between claim and the provider call leaves the delivery sending forever, NoLostSend breaks"
+          "description": "H3 with reconcileStaleDeliveries removed (DeliveryReconcile off, the code before 154383a): a crash between claim and the provider call leaves the delivery sending forever"
         },
         {
           "name": "no-reconcile-lost-start",
@@ -433,7 +433,7 @@
             "kind": "temporal"
           },
           "deadlock": "allow",
-          "description": "The code at 77a5bb7 (no J1a delivery reconcile): a crash before the afterCommit start leaves the delivery queued forever, NoLostSend breaks"
+          "description": "reconcileStaleDeliveries removed (the code before 154383a): a crash before the afterCommit start leaves the delivery queued forever"
         },
         {
           "name": "no-send-replay-guard",
@@ -517,19 +517,19 @@
         },
         {
           "path": "packages/core/src/modules/documents/deliveries/steps.ts",
-          "sha256": "aaa45ba102a6a4a580d0dd5ff9c6dc23890381d23b62f7822e6abd828eb867d0"
+          "sha256": "5d646fcc27feb3034abed544f93afb0b53174bd624c2ed26306910c778d775f3"
         },
         {
           "path": "packages/core/src/modules/documents/deliveries/jobs.ts",
-          "sha256": "d31711cb94720aca34ca689b88594f602ac19e8cf9442c6f3761f4e61b1916d2"
+          "sha256": "dbe90c42036148fef3c313925d9bb11b1226f26cf60f7a3e1547eca467314881"
         },
         {
           "path": "packages/core/src/modules/documents/deliveries/repo.ts",
-          "sha256": "bfd229e1edf7d8ebf9c05a8731fa4a29d26b9df82e0c614085b7b907e36104ee"
+          "sha256": "9af42e124f45444fe21060bcca42cf02da6599fdb3544379357cda1deb247673"
         },
         {
           "path": "packages/core/src/store/memory.ts",
-          "sha256": "b12cacb2313336ffa34d3a9f28b13a4dcf9915bc7a00f68e9c0689a12c3a9eba"
+          "sha256": "83fdb2713655de3fcc4fe015ea23648b31d0e6e96cc6762b7f8e59d32750cbcb"
         },
         {
           "path": "packages/core/src/store/CoreStore.ts",
@@ -542,6 +542,10 @@
         {
           "path": "packages/core/src/modules/recurring/links.ts",
           "sha256": "f01a9cfb357d2061b6eb2ec0c0bcb95efa9924f469a3c193378e77c8c04c70e9"
+        },
+        {
+          "path": "packages/core/src/modules/documents/deliveries/record.ts",
+          "sha256": "4601e564c3615ae4f7d172ef1a53b56e7a64fd5fec1cae739fea6b783a866a08"
         }
       ],
       "guardedSymbols": [
@@ -561,13 +565,15 @@
         "CoreStore.transaction",
         "CoreStore.afterCommit",
         "RecurringDocumentLink.link",
-        "documents(schedule_id, occurrence) unique key"
+        "documents(schedule_id, occurrence) unique key",
+        "reconcileStaleDeliveries",
+        "DeliveriesRepo.findStaleQueuedOrSending"
       ],
       "bounds": "base: 1 occurrence, 2 recurring workers, 2 crashes at any crash point, 1 duplicate or stale start, 2 provider failures (5 outcomes incl. outcome_unknown sent/not sent), 2 dispatch attempts per execution; wide (nightly): 2 occurrences, 1 provider failure, 2 attempts; mutants: 1 occurrence (2 for skip-occurrence), 1 crash",
       "assumptions": [
         "Each transaction is one step: the schedule row lock (issuance.ts lockSchedule) and the memory store's serialized transactions make it atomic; Postgres locking is not checked here (pg-contention)",
         "DocumentDelivery runs keyed by the delivery id: a start for a live execution attaches to it (J1); modelled as one execution slot per delivery",
-        "The base enables the designed J1a OutboxReconcile for queued/sending deliveries (core-ports J1a); core at 77a5bb7 has none, so H3 is CONFIRMED on the code (mutants no-reconcile-*, replay FINDING H3)",
+        "The base enables the J1a delivery reconcile, reconcileStaleDeliveries (deliveries/steps.ts, 154383a), for queued/sending deliveries; the model has no clock, so the staleness threshold only delays it and it may fire once the delivery's execution is not live. The no-reconcile-* mutants are the code before 154383a",
         "J3 eligibility re-check, pauses, catch-up cap and detach are left out: the document stays sendable and the schedule active",
         "The provider may accept a message twice (no dedupe assumed); fairness per component: sweep, reconcile, each job execution"
       ],
@@ -581,7 +587,7 @@
       "skill": "verify-outbox-recurring",
       "tier": 1,
       "kind": "replay",
-      "syncCommit": "77a5bb7",
+      "syncCommit": "fcb0f29",
       "replay": ["formal/outbox/outbox.replay.test.ts"],
       "timeoutSeconds": 120,
       "coveredFiles": [
@@ -603,19 +609,19 @@
         },
         {
           "path": "packages/core/src/modules/documents/deliveries/steps.ts",
-          "sha256": "aaa45ba102a6a4a580d0dd5ff9c6dc23890381d23b62f7822e6abd828eb867d0"
+          "sha256": "5d646fcc27feb3034abed544f93afb0b53174bd624c2ed26306910c778d775f3"
         },
         {
           "path": "packages/core/src/modules/documents/deliveries/jobs.ts",
-          "sha256": "d31711cb94720aca34ca689b88594f602ac19e8cf9442c6f3761f4e61b1916d2"
+          "sha256": "dbe90c42036148fef3c313925d9bb11b1226f26cf60f7a3e1547eca467314881"
         },
         {
           "path": "packages/core/src/modules/documents/deliveries/repo.ts",
-          "sha256": "bfd229e1edf7d8ebf9c05a8731fa4a29d26b9df82e0c614085b7b907e36104ee"
+          "sha256": "9af42e124f45444fe21060bcca42cf02da6599fdb3544379357cda1deb247673"
         },
         {
           "path": "packages/core/src/store/memory.ts",
-          "sha256": "b12cacb2313336ffa34d3a9f28b13a4dcf9915bc7a00f68e9c0689a12c3a9eba"
+          "sha256": "83fdb2713655de3fcc4fe015ea23648b31d0e6e96cc6762b7f8e59d32750cbcb"
         },
         {
           "path": "packages/core/src/store/CoreStore.ts",
@@ -628,6 +634,10 @@
         {
           "path": "packages/core/src/modules/recurring/links.ts",
           "sha256": "f01a9cfb357d2061b6eb2ec0c0bcb95efa9924f469a3c193378e77c8c04c70e9"
+        },
+        {
+          "path": "packages/core/src/modules/documents/deliveries/record.ts",
+          "sha256": "4601e564c3615ae4f7d172ef1a53b56e7a64fd5fec1cae739fea6b783a866a08"
         }
       ],
       "guardedSymbols": [
@@ -647,13 +657,15 @@
         "CoreStore.transaction",
         "CoreStore.afterCommit",
         "RecurringDocumentLink.link",
-        "documents(schedule_id, occurrence) unique key"
+        "documents(schedule_id, occurrence) unique key",
+        "reconcileStaleDeliveries",
+        "DeliveriesRepo.findStaleQueuedOrSending"
       ],
       "bounds": "one schedule, TODAY's occurrence, one delivery per run; replays: the happy path, duplicate/concurrent and repeated starts, a same-day second tick, crashes after issue commit, inside the send transaction, before the start hook, after claim (H3: stranded on core's own recovery; recovered by the designed J1a), after the provider accepted, and before giveUp; provider not_accepted / rejected / outcome_unknown",
       "assumptions": [
         "In-memory CoreStore (serialized transactions); Postgres row locks are the pg-contention job's",
         "Crash points use existing seams: a RecurringRepo or DeliveryJobs or EmailSender wrapper that dies, and not running the next step",
-        "Recovery tests other than FINDING H3 play the designed J1a delivery reconcile by calling deliver; core has no cross-tenant query for queued/sending deliveries",
+        "Recovery tests drive the real reconcileStaleDeliveries (DeliveriesRepo.findStaleQueuedOrSending across Workspaces, then DeliveryJobs.start keyed by the delivery id); the H3 test is a passing recovery test",
         "The sealed System caller is taken from a RecurringSweep tick (no export of the seal)"
       ],
       "toolVersions": {
@@ -665,7 +677,7 @@
       "skill": "verify-numbering",
       "tier": 1,
       "kind": "tlc",
-      "syncCommit": "77a5bb7",
+      "syncCommit": "fcb0f29",
       "spec": "formal/numbering/Numbering.tla",
       "config": "formal/numbering/Numbering.cfg",
       "wideConfig": "formal/numbering/Numbering_wide.cfg",
@@ -748,11 +760,11 @@
         },
         {
           "path": "packages/core/src/modules/documents/lifecycle.ts",
-          "sha256": "52ca553c677840c31266401da33f1ed8da783a53deae187706d6d24f89a1285a"
+          "sha256": "b410e2c64dc2972f843850ceea1939e39c45da8db1bd3a278928944bbcfc6203"
         },
         {
           "path": "packages/core/src/modules/documents/service.ts",
-          "sha256": "22d384d76b162172ee42625f2c85896ffad51634b73639f7ff6883d1571eb769"
+          "sha256": "6ea46deec8b34a475214bc6aa3f60974625c1c088da79612a4bf65a1068418e9"
         },
         {
           "path": "packages/core/src/modules/documents/record.ts",
@@ -760,7 +772,7 @@
         },
         {
           "path": "packages/core/src/modules/documents/support.ts",
-          "sha256": ""
+          "sha256": "085ba5c34f4e558f08d2de1ea2aff8431a08d2d234547cb2b452a5549cd6d9a6"
         },
         {
           "path": "packages/db/drizzle/20261123175822_init/migration.sql",
@@ -804,7 +816,7 @@
       "skill": "verify-numbering",
       "tier": 1,
       "kind": "replay",
-      "syncCommit": "77a5bb7",
+      "syncCommit": "fcb0f29",
       "replay": ["formal/numbering/numbering.replay.test.ts"],
       "timeoutSeconds": 120,
       "coveredFiles": [
@@ -818,7 +830,7 @@
         },
         {
           "path": "packages/core/src/store/memory.ts",
-          "sha256": "b12cacb2313336ffa34d3a9f28b13a4dcf9915bc7a00f68e9c0689a12c3a9eba"
+          "sha256": "83fdb2713655de3fcc4fe015ea23648b31d0e6e96cc6762b7f8e59d32750cbcb"
         },
         {
           "path": "packages/core/src/store/CoreStore.ts",
@@ -826,11 +838,11 @@
         },
         {
           "path": "packages/core/src/modules/documents/lifecycle.ts",
-          "sha256": "52ca553c677840c31266401da33f1ed8da783a53deae187706d6d24f89a1285a"
+          "sha256": "b410e2c64dc2972f843850ceea1939e39c45da8db1bd3a278928944bbcfc6203"
         },
         {
           "path": "packages/core/src/modules/documents/service.ts",
-          "sha256": "22d384d76b162172ee42625f2c85896ffad51634b73639f7ff6883d1571eb769"
+          "sha256": "6ea46deec8b34a475214bc6aa3f60974625c1c088da79612a4bf65a1068418e9"
         },
         {
           "path": "packages/core/src/modules/documents/record.ts",
@@ -838,7 +850,7 @@
         },
         {
           "path": "packages/core/src/modules/documents/support.ts",
-          "sha256": ""
+          "sha256": "085ba5c34f4e558f08d2de1ea2aff8431a08d2d234547cb2b452a5549cd6d9a6"
         }
       ],
       "guardedSymbols": [
@@ -871,7 +883,7 @@
       "skill": "verify-idempotency-cas",
       "tier": 1,
       "kind": "tlc",
-      "syncCommit": "77a5bb7",
+      "syncCommit": "fcb0f29",
       "spec": "formal/idempotency/RequestLogCas.tla",
       "config": "formal/idempotency/RequestLogCas.cfg",
       "wideConfig": "formal/idempotency/RequestLogCas_wide.cfg",
@@ -957,7 +969,7 @@
         },
         {
           "path": "packages/core/src/store/memory.ts",
-          "sha256": "b12cacb2313336ffa34d3a9f28b13a4dcf9915bc7a00f68e9c0689a12c3a9eba"
+          "sha256": "83fdb2713655de3fcc4fe015ea23648b31d0e6e96cc6762b7f8e59d32750cbcb"
         },
         {
           "path": "packages/core/src/store/tables.ts",
@@ -965,7 +977,7 @@
         },
         {
           "path": "packages/core/src/modules/contacts/live.ts",
-          "sha256": "874c19db566641c6438b104d44cdd5667be256485d83d537559da6a1580659fa"
+          "sha256": "76d230485b6e9be11b1990a5f1271f4f6344cdc549a3e1c0a10c904bc0a8b876"
         }
       ],
       "guardedSymbols": [
@@ -998,7 +1010,7 @@
       "skill": "verify-idempotency-cas",
       "tier": 1,
       "kind": "replay",
-      "syncCommit": "77a5bb7",
+      "syncCommit": "fcb0f29",
       "replay": ["formal/idempotency/requestLogCas.replay.test.ts"],
       "timeoutSeconds": 120,
       "coveredFiles": [
@@ -1016,7 +1028,7 @@
         },
         {
           "path": "packages/core/src/store/memory.ts",
-          "sha256": "b12cacb2313336ffa34d3a9f28b13a4dcf9915bc7a00f68e9c0689a12c3a9eba"
+          "sha256": "83fdb2713655de3fcc4fe015ea23648b31d0e6e96cc6762b7f8e59d32750cbcb"
         },
         {
           "path": "packages/core/src/store/tables.ts",
@@ -1024,7 +1036,7 @@
         },
         {
           "path": "packages/core/src/modules/contacts/live.ts",
-          "sha256": "874c19db566641c6438b104d44cdd5667be256485d83d537559da6a1580659fa"
+          "sha256": "76d230485b6e9be11b1990a5f1271f4f6344cdc549a3e1c0a10c904bc0a8b876"
         }
       ],
       "guardedSymbols": [
@@ -1204,7 +1216,7 @@
       "skill": "verify-vat-numbering-math",
       "tier": 1,
       "kind": "exhaustive",
-      "syncCommit": "77a5bb7",
+      "syncCommit": "fcb0f29",
       "command": "bun test --cwd packages/core ./test/engines/vat-rounding.property.test.ts",
       "coveredFiles": [
         {
@@ -1213,7 +1225,7 @@
         },
         {
           "path": "packages/core/src/engines/vat.ts",
-          "sha256": "d5a4b2d2e39074ef4753119f66bfdf53b847214b5726c5802496c856ed27544c"
+          "sha256": "a49ac9bea2de07d48911be755048ef50b4159db230b58dccd7ccaa3abd5cf01c"
         },
         {
           "path": "packages/core/src/engines/fx.ts",
@@ -1237,12 +1249,12 @@
       "skill": "verify-vat-numbering-math",
       "tier": 1,
       "kind": "property",
-      "syncCommit": "77a5bb7",
+      "syncCommit": "fcb0f29",
       "command": "bun test --cwd packages/core ./test/engines/vat-rounding.property.test.ts",
       "coveredFiles": [
         {
           "path": "packages/core/src/engines/vat.ts",
-          "sha256": "d5a4b2d2e39074ef4753119f66bfdf53b847214b5726c5802496c856ed27544c"
+          "sha256": "a49ac9bea2de07d48911be755048ef50b4159db230b58dccd7ccaa3abd5cf01c"
         },
         {
           "path": "packages/core/src/engines/fx.ts",
@@ -1270,7 +1282,7 @@
       "skill": "verify-vat-numbering-math",
       "tier": 1,
       "kind": "exhaustive",
-      "syncCommit": "77a5bb7",
+      "syncCommit": "fcb0f29",
       "command": "bun test --cwd packages/core ./test/engines/numbering.property.test.ts",
       "coveredFiles": [
         {
@@ -1293,7 +1305,7 @@
       "skill": "verify-vat-numbering-math",
       "tier": 1,
       "kind": "property",
-      "syncCommit": "77a5bb7",
+      "syncCommit": "fcb0f29",
       "command": "bun test --cwd packages/core ./test/engines/numbering.property.test.ts",
       "coveredFiles": [
         {
@@ -1327,12 +1339,12 @@
       "skill": "verify-vat-numbering-math",
       "tier": 1,
       "kind": "property",
-      "syncCommit": "77a5bb7",
+      "syncCommit": "fcb0f29",
       "command": "bun test --cwd packages/core ./test/engines/advance-chain.property.test.ts",
       "coveredFiles": [
         {
           "path": "packages/core/src/engines/vat.ts",
-          "sha256": "d5a4b2d2e39074ef4753119f66bfdf53b847214b5726c5802496c856ed27544c"
+          "sha256": "a49ac9bea2de07d48911be755048ef50b4159db230b58dccd7ccaa3abd5cf01c"
         },
         {
           "path": "packages/core/src/engines/fx.ts",
@@ -1340,31 +1352,31 @@
         },
         {
           "path": "packages/core/src/modules/documents/final.ts",
-          "sha256": "1c7bddbbb513cb17930d6d0ed9eb325a67d7103cea9bdd8e7cd7bb3800a18531"
+          "sha256": "4b84519910468302bd4ea3d1179c2e21de0c3ffa044c104dc8cf0ac950c60480"
         },
         {
           "path": "packages/core/src/modules/documents/credit.ts",
-          "sha256": "4c9758c878908e783ee53ca1776b1ab7f5111243d5174c630a3344e5be0c2d40"
+          "sha256": "9c8d8d1b41c6a313e26d2d2fa80d52a647093236edb15169a4d5c7f2221aa222"
         },
         {
           "path": "packages/core/src/modules/documents/corrections.ts",
-          "sha256": "4689ee06d5e465875b469526dbab760ebea5c34d71d6e24c129732eebdf9917d"
+          "sha256": "c18acbc4c117054d55ed9d9cc36035ae4b7a87c0bf6d0c74390e544300cd50f8"
         },
         {
           "path": "packages/core/src/modules/documents/payments.ts",
-          "sha256": "0daa8da5b617412f35d66eb072b6d6d17913076e014140455e76f3e800cfe427"
+          "sha256": "0f1abd852b276599edb8d3b9a5c4fc8e064f22cd17cc310f4b68a323eb0c1dae"
         },
         {
           "path": "packages/core/src/modules/documents/compose.ts",
-          "sha256": "545885ad5f31ca80cdf2ba21782f6db0e89557d7fb00141a7f17177fd1566f41"
+          "sha256": "553c9b5a1c1a5edcb46e5682a65b25fdb81624c35ac0bd9d5b34eb6cca925bf9"
         },
         {
           "path": "packages/core/src/modules/documents/reports.ts",
-          "sha256": "76e5f034d58c7bfbdf7a081612ff6a7a36d0a70d93e4bd8a161a53d7753ac5e6"
+          "sha256": "ca6758c914e7cf86e728c46288c64acf58845a5013c1b3ae32b6f4e97195c223"
         },
         {
           "path": "packages/core/src/modules/reports/compute.ts",
-          "sha256": "74c634ca1106963d8dab6a8803eae50072fd1ef2be3f391b15887cbfeaebd085"
+          "sha256": "91c34fb5063f0c27cd52dd672b5e94c68746a2dfac7c7e6674e6ad1e010928e7"
         }
       ],
       "guardedSymbols": [
@@ -1380,7 +1392,8 @@
         "issuePaymentTaxDocument",
         "mergeBuckets",
         "reportFigures",
-        "ReportCompute.taxableBucketsCzk"
+        "ReportCompute.taxableBucketsCzk",
+        "VatMath.netDeductions"
       ],
       "bounds": "120 seeded chains: EUR/CZK, gross or net prices, 1-4 lines, 1-3 partial or full payments on 2026-11-16..23, rising and falling fixings, optional partial credit, full credit 0-2 days later, PTD credits; includes 1 test.failing FINDING (stored FI CZK VAT vs VAT report)",
       "assumptions": [

@@ -95,7 +95,7 @@ When a change to the covered files is intended: re-read the changed code against
 
 ## Coverage record
 
-- Sync commit: `77a5bb7` (product code unchanged at `611b68e`; the verification was confirmed to describe the covered files there).
+- Sync commit: `fcb0f29`. In sync: since `77a5bb7` `contacts/live.ts` only lost its boundary cast (the Layer now provides `makeContacts` directly; `Contacts.save` is unchanged), and `store/memory.ts` gained the `number_reservations_document_fk` checks (F2) and `findStaleQueuedOrSending` (F3/F4), neither of which touches the request log, rollback or revision CAS. Model, mutants and replay rerun green at `fcb0f29`. Before: `77a5bb7` (product code unchanged at `611b68e`; the verification was confirmed to describe the covered files there).
 - Able-to-fail, recorded 2026-11-24 on the 7-trace harness, each break undone with `git checkout HEAD -- <file>` and re-run green (`7 pass`):
   - `idempotency.ts`: the method/fingerprint compare disabled (`if (false && (…))`) → 1 of 7 fails: "r1 commits; r2 (same key, other payload): Claim, Existing -> idempotency_mismatch" (the reused key got the stored result).
   - `idempotency.ts`: every existing entry treated as a mismatch (`if (true || …)`) → 4 of 7 fail: the replay, the replay after the row moved on, and both overlapping duplicates (a matching retry got `idempotency_mismatch`).

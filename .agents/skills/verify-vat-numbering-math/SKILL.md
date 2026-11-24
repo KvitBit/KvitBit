@@ -79,7 +79,7 @@ Found by check 4 at `77a5bb7`, fixed in `2fa0670`. `compose.ts` stored a Final I
 
 ## Coverage record
 
-- Sync commit: `2090595` (checks 1, 2, 3a and 3b in sync: `2fa0670`, `5669f20`, `eecb9be` and `2090595` add `netDeductions` to `vat.ts` and leave `calculate`, `assemble`, `toCzk` and `numbering.ts` unchanged; check 4 updated for F1 and its review round 1). The checks describe the covered files as they are at this commit.
+- Sync commit: `fcb0f29` (integration: in sync, F2 only reorders the row insert before the number reservation in `final.ts`, `credit.ts`, `corrections.ts` and `payments.ts`, no amount changes; core property and exhaustive checks green at `fcb0f29`). Before: `2090595` (checks 1, 2, 3a and 3b in sync: `2fa0670`, `5669f20`, `eecb9be` and `2090595` add `netDeductions` to `vat.ts` and leave `calculate`, `assemble`, `toCzk` and `numbering.ts` unchanged; check 4 updated for F1 and its review round 1). The checks describe the covered files as they are at this commit.
 - Able-to-fail gate, run on 2026-11-24 at `77a5bb7` (rows 7-10 came from review round 1, row 12 from review round 2, row 13 from the council; rows 11 and 14 were run at `2fa0670` for F1, rows 15-16 at `5669f20` after F1 review round 1; the chain breaks were rerun after the chain test was split into separate tests): each break below was applied to the real code, caught, reverted with `git checkout -- <file>`, and the file was green again.
 
 | Break | File | Caught by |
