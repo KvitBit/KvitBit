@@ -13,7 +13,7 @@
     },
     "test": {
       "dependsOn": ["^typecheck"],
-      "env": ["CI", "TZ"],
+      "env": ["CI", "TZ", "KVITBIT_FORMAL_WIDE"],
       "outputs": []
     },
     "db:generate": {

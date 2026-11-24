@@ -12,7 +12,9 @@
     "lint": "biome check --error-on-warnings .",
     "format": "biome format --write .",
     "format:check": "biome format .",
-    "typecheck": "turbo run typecheck",
+    "typecheck": "turbo run typecheck && bun run typecheck:formal",
+    "typecheck:formal": "tsc -p formal/tsconfig.json",
+    "verify:formal": "bun formal/run-formal.ts",
     "test": "turbo run test",
     "build": "turbo run build",
     "db:generate": "turbo run db:generate --filter=@kvitbit/db"

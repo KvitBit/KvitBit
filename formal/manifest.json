@@ -1,0 +1,1375 @@
+{
+  "schemaVersion": 1,
+  "syncCommit": "77a5bb7",
+  "toolchain": {
+    "tla2tools": "1.7.4",
+    "java": 17
+  },
+  "checks": [
+    {
+      "id": "selftest.counter",
+      "skill": "formal/README.md#runner-self-test",
+      "tier": 0,
+      "kind": "tlc",
+      "spec": "formal/selftest/Counter.tla",
+      "config": "formal/selftest/Counter.cfg",
+      "mutants": [
+        {
+          "name": "bound-below-limit",
+          "config": "formal/selftest/Counter_mutant_bound.cfg",
+          "expect": "violation",
+          "violates": {
+            "kind": "invariant",
+            "name": "WithinBound"
+          },
+          "description": "Bound below Limit, so WithinBound must break"
+        },
+        {
+          "name": "step-back",
+          "config": "formal/selftest/Counter_mutant_action.cfg",
+          "expect": "violation",
+          "violates": {
+            "kind": "action",
+            "name": "NoDecrease"
+          },
+          "description": "Lets x step back, so the action property NoDecrease must break"
+        }
+      ],
+      "timeoutSeconds": 60,
+      "coveredFiles": [
+        {
+          "path": "formal/selftest/Counter.tla",
+          "sha256": "1d69714f663aaed24cb60a0506e52c3113c174ccc28781038d273986ac5ea6ca"
+        }
+      ],
+      "guardedSymbols": ["Counter!WithinBound", "Counter!NoDecrease"],
+      "bounds": "Limit = 3 (4 distinct states); exhaustive within that bound",
+      "assumptions": ["Runner fixture only; covers no product code"],
+      "toolVersions": {
+        "tla2tools": "1.7.4",
+        "java": "17"
+      }
+    },
+    {
+      "id": "selftest.imports",
+      "skill": "formal/README.md#runner-self-test",
+      "tier": 0,
+      "kind": "replay",
+      "replay": ["formal/selftest/imports.replay.test.ts"],
+      "timeoutSeconds": 120,
+      "coveredFiles": [
+        {
+          "path": "formal/selftest/imports.replay.test.ts",
+          "sha256": "dd39e8ec9207db056bad172aa5cf8ab3f990b77741b72a59875e4ea598040e98"
+        }
+      ],
+      "guardedSymbols": ["makeMemoryStore", "MoneyMath.fromMinorUnits", "MoneyMath.toMinorUnits"],
+      "bounds": "one sample value; proves only that harnesses under formal/ import real code",
+      "assumptions": ["Runner fixture only; not a property check"],
+      "toolVersions": {
+        "bun": "1.4.2"
+      }
+    },
+    {
+      "id": "lifecycle.model",
+      "skill": "verify-document-lifecycle",
+      "tier": 1,
+      "kind": "tlc",
+      "syncCommit": "77a5bb7",
+      "spec": "formal/lifecycle/DocumentLifecycle.tla",
+      "config": "formal/lifecycle/DocumentLifecycle.cfg",
+      "wideConfig": "formal/lifecycle/DocumentLifecycle_wide.cfg",
+      "mutants": [
+        {
+          "name": "cancel-with-payments",
+          "config": "formal/lifecycle/DocumentLifecycle_mutant_cancel_with_payments.cfg",
+          "expect": "violation",
+          "violates": {
+            "kind": "invariant",
+            "name": "CancelledProformaUnpaid"
+          },
+          "description": "cancel ignores the Proforma's recorded payments"
+        },
+        {
+          "name": "cancel-final-with-payments",
+          "config": "formal/lifecycle/DocumentLifecycle_mutant_cancel_final_with_payments.cfg",
+          "expect": "violation",
+          "violates": {
+            "kind": "invariant",
+            "name": "CancelledFinalUnpaid"
+          },
+          "description": "storno of a tax Final Invoice ignores its own payments"
+        },
+        {
+          "name": "duplicate-final",
+          "config": "formal/lifecycle/DocumentLifecycle_mutant_duplicate_final.cfg",
+          "expect": "violation",
+          "violates": {
+            "kind": "invariant",
+            "name": "OneFinalInvoice"
+          },
+          "description": "issueFinalInvoice skips the hasFinalInvoice check"
+        },
+        {
+          "name": "remove-with-deduction",
+          "config": "formal/lifecycle/DocumentLifecycle_mutant_remove_with_deduction.cfg",
+          "expect": "violation",
+          "violates": {
+            "kind": "invariant",
+            "name": "RemovedPaymentReversed"
+          },
+          "description": "Payments.remove ignores a live Final Invoice that deducts the advance"
+        },
+        {
+          "name": "no-proforma-lock",
+          "config": "formal/lifecycle/DocumentLifecycle_mutant_no_proforma_lock.cfg",
+          "expect": "violation",
+          "violates": {
+            "kind": "invariant",
+            "name": "DeductionsCurrent"
+          },
+          "description": "PTD correction reads the Proforma without its row lock (H2)"
+        },
+        {
+          "name": "credit-over-cap",
+          "config": "formal/lifecycle/DocumentLifecycle_mutant_credit_over_cap.cfg",
+          "expect": "violation",
+          "violates": {
+            "kind": "invariant",
+            "name": "CreditWithinOriginal"
+          },
+          "description": "Credit Notes skip the D7 per-bucket cap"
+        },
+        {
+          "name": "reissue-cancelled",
+          "config": "formal/lifecycle/DocumentLifecycle_mutant_reissue_cancelled.cfg",
+          "expect": "violation",
+          "violates": {
+            "kind": "action",
+            "name": "LegalTransitions"
+          },
+          "description": "issue accepts a cancelled Proforma"
+        },
+        {
+          "name": "edit-with-payments",
+          "config": "formal/lifecycle/DocumentLifecycle_mutant_edit_with_payments.cfg",
+          "expect": "violation",
+          "violates": {
+            "kind": "action",
+            "name": "FrozenWhenDepended"
+          },
+          "description": "lines edit ignores the Proforma's payments"
+        },
+        {
+          "name": "cancel-unlocked",
+          "config": "formal/lifecycle/DocumentLifecycle_mutant_cancel_unlocked.cfg",
+          "expect": "violation",
+          "violates": {
+            "kind": "invariant",
+            "name": "CancelledIsLocked"
+          },
+          "description": "cancel leaves the Proforma unlocked"
+        },
+        {
+          "name": "ptd-after-final",
+          "config": "formal/lifecycle/DocumentLifecycle_mutant_ptd_after_final.cfg",
+          "expect": "violation",
+          "violates": {
+            "kind": "invariant",
+            "name": "NoPtdAfterFinal"
+          },
+          "description": "a payment on the Proforma after its Final Invoice issues a PTD"
+        },
+        {
+          "name": "no-ptd",
+          "config": "formal/lifecycle/DocumentLifecycle_mutant_no_ptd.cfg",
+          "expect": "violation",
+          "violates": {
+            "kind": "invariant",
+            "name": "PtdPerPayment"
+          },
+          "description": "a vat_payer's payment on the Proforma issues no PTD"
+        },
+        {
+          "name": "final-unpaid",
+          "config": "formal/lifecycle/DocumentLifecycle_mutant_final_unpaid.cfg",
+          "expect": "violation",
+          "violates": {
+            "kind": "invariant",
+            "name": "FinalInvoiceOfPaidProforma"
+          },
+          "description": "issueFinalInvoice skips the payments check"
+        }
+      ],
+      "timeoutSeconds": 120,
+      "wideTimeoutSeconds": 300,
+      "coveredFiles": [
+        {
+          "path": "packages/core/src/modules/documents/transitions.ts",
+          "sha256": "cbcdf32386c7735f0f77ff090dff2d06fce8f5778b8c69e5d1913b567ccb694b"
+        },
+        {
+          "path": "packages/core/src/modules/documents/lifecycle.ts",
+          "sha256": "52ca553c677840c31266401da33f1ed8da783a53deae187706d6d24f89a1285a"
+        },
+        {
+          "path": "packages/core/src/modules/documents/final.ts",
+          "sha256": "1c7bddbbb513cb17930d6d0ed9eb325a67d7103cea9bdd8e7cd7bb3800a18531"
+        },
+        {
+          "path": "packages/core/src/modules/documents/corrections.ts",
+          "sha256": "4689ee06d5e465875b469526dbab760ebea5c34d71d6e24c129732eebdf9917d"
+        },
+        {
+          "path": "packages/core/src/modules/documents/credit.ts",
+          "sha256": "4c9758c878908e783ee53ca1776b1ab7f5111243d5174c630a3344e5be0c2d40"
+        },
+        {
+          "path": "packages/core/src/modules/documents/payments.ts",
+          "sha256": "0daa8da5b617412f35d66eb072b6d6d17913076e014140455e76f3e800cfe427"
+        },
+        {
+          "path": "packages/core/src/modules/payments/service.ts",
+          "sha256": "88ffd41bc39bde7a526a104aadf2ef9a48c512bf57211a7fe4dc75c23b39f5fc"
+        },
+        {
+          "path": "packages/core/src/store/memory.ts",
+          "sha256": "b12cacb2313336ffa34d3a9f28b13a4dcf9915bc7a00f68e9c0689a12c3a9eba"
+        },
+        {
+          "path": "packages/core/src/modules/documents/service.ts",
+          "sha256": "22d384d76b162172ee42625f2c85896ffad51634b73639f7ff6883d1571eb769"
+        },
+        {
+          "path": "packages/core/src/modules/documents/compose.ts",
+          "sha256": "545885ad5f31ca80cdf2ba21782f6db0e89557d7fb00141a7f17177fd1566f41"
+        }
+      ],
+      "guardedSymbols": [
+        "TRANSITIONS",
+        "guard",
+        "paymentsBlockCancel",
+        "hasFinalInvoice",
+        "hasDependents",
+        "cancel",
+        "lock",
+        "unlock",
+        "editIssued",
+        "issueFinalInvoice",
+        "deductionLines",
+        "plan (final.ts)",
+        "loadForCredit",
+        "plan (corrections.ts)",
+        "correct",
+        "withinRemainder",
+        "issueCreditNote",
+        "settlementOf",
+        "isFullyCredited",
+        "DocumentPayments.lock",
+        "DocumentPayments.settle",
+        "issuePaymentTaxDocument",
+        "removalBlocked",
+        "Payments.record (recordOnDocument)",
+        "Payments.remove",
+        "Documents.edit"
+      ],
+      "bounds": "base: 2 VAT buckets, 2 payment/PTD slots, 1 Final Invoice slot, one issueFinalInvoice and one PTD correction in flight, both regimes (24,800 distinct states); wide: 3 slots",
+      "assumptions": [
+        "Every service method is one CoreStore transaction; the memory store serializes transactions and Postgres row-locks with SELECT ... FOR UPDATE at READ COMMITTED in S4 order (Proforma first)",
+        "Only issueFinalInvoice and correct/cancel of a PTD are split at their row-lock acquisitions; every other method is one step because what it decides on cannot change under it: it holds the lock every writer of that row takes (Payments.remove reads the PTD unlocked, every PTD writer locks the Proforma first) or the value only moves one way (loadForCredit's unlocked Final Invoice read can only become reversed)",
+        "A failed transaction writes nothing and releases its locks",
+        "Amounts are abstract units per VAT bucket; VAT, rounding and CZK math belong to verify-vat-numbering-math",
+        "Document Lock is modelled on the Proforma and the Final Invoice only; on a PTD it only disables correct/cancel",
+        "The Issuing Entity's regime is fixed for a run (both regimes are explored)",
+        "Regimes vat_payer and non_vat_payer only; identified_person is out of scope"
+      ],
+      "toolVersions": {
+        "tla2tools": "1.7.4",
+        "java": "17"
+      }
+    },
+    {
+      "id": "lifecycle.replay",
+      "skill": "verify-document-lifecycle",
+      "tier": 1,
+      "kind": "replay",
+      "syncCommit": "77a5bb7",
+      "replay": ["formal/lifecycle/lifecycle.replay.test.ts"],
+      "timeoutSeconds": 120,
+      "coveredFiles": [
+        {
+          "path": "packages/core/src/modules/documents/transitions.ts",
+          "sha256": "cbcdf32386c7735f0f77ff090dff2d06fce8f5778b8c69e5d1913b567ccb694b"
+        },
+        {
+          "path": "packages/core/src/modules/documents/lifecycle.ts",
+          "sha256": "52ca553c677840c31266401da33f1ed8da783a53deae187706d6d24f89a1285a"
+        },
+        {
+          "path": "packages/core/src/modules/documents/final.ts",
+          "sha256": "1c7bddbbb513cb17930d6d0ed9eb325a67d7103cea9bdd8e7cd7bb3800a18531"
+        },
+        {
+          "path": "packages/core/src/modules/documents/corrections.ts",
+          "sha256": "4689ee06d5e465875b469526dbab760ebea5c34d71d6e24c129732eebdf9917d"
+        },
+        {
+          "path": "packages/core/src/modules/documents/credit.ts",
+          "sha256": "4c9758c878908e783ee53ca1776b1ab7f5111243d5174c630a3344e5be0c2d40"
+        },
+        {
+          "path": "packages/core/src/modules/documents/payments.ts",
+          "sha256": "0daa8da5b617412f35d66eb072b6d6d17913076e014140455e76f3e800cfe427"
+        },
+        {
+          "path": "packages/core/src/modules/payments/service.ts",
+          "sha256": "88ffd41bc39bde7a526a104aadf2ef9a48c512bf57211a7fe4dc75c23b39f5fc"
+        },
+        {
+          "path": "packages/core/src/store/memory.ts",
+          "sha256": "b12cacb2313336ffa34d3a9f28b13a4dcf9915bc7a00f68e9c0689a12c3a9eba"
+        },
+        {
+          "path": "packages/core/src/modules/documents/service.ts",
+          "sha256": "22d384d76b162172ee42625f2c85896ffad51634b73639f7ff6883d1571eb769"
+        },
+        {
+          "path": "packages/core/src/modules/documents/compose.ts",
+          "sha256": "545885ad5f31ca80cdf2ba21782f6db0e89557d7fb00141a7f17177fd1566f41"
+        }
+      ],
+      "guardedSymbols": [
+        "TRANSITIONS",
+        "guard",
+        "paymentsBlockCancel",
+        "hasFinalInvoice",
+        "hasDependents",
+        "cancel",
+        "lock",
+        "unlock",
+        "editIssued",
+        "issueFinalInvoice",
+        "deductionLines",
+        "plan (final.ts)",
+        "loadForCredit",
+        "plan (corrections.ts)",
+        "correct",
+        "withinRemainder",
+        "issueCreditNote",
+        "settlementOf",
+        "isFullyCredited",
+        "DocumentPayments.lock",
+        "DocumentPayments.settle",
+        "issuePaymentTaxDocument",
+        "removalBlocked",
+        "Payments.record (recordOnDocument)",
+        "Payments.remove",
+        "Documents.edit",
+        "compose (Final Invoice deduction totals)"
+      ],
+      "bounds": "30 traces on TestCore (vat_payer and non_vat_payer): the shortest path to each model action, guard traces, both serial orders of H2, the D7 cap for PTDs and the Final Invoice, four crash points (CNB fixing unavailable during PTD and Final Invoice issue; Credit Note and Final Invoice numbering exhausted); model invariants checked after every step",
+      "assumptions": [
+        "In-memory store: transactions run serially, so the H2 overlap itself is not replayed (pg-contention job)",
+        "Crash points only where a seam exists: FixtureRates.unavailable and a numbering series at its last counter (Workspaces.configureSeries)"
+      ],
+      "toolVersions": {
+        "bun": "1.4.2"
+      }
+    },
+    {
+      "id": "outbox.recurring",
+      "skill": "verify-outbox-recurring",
+      "tier": 1,
+      "kind": "tlc",
+      "syncCommit": "77a5bb7",
+      "spec": "formal/outbox/OutboxRecurring.tla",
+      "config": "formal/outbox/OutboxRecurring.cfg",
+      "wideConfig": "formal/outbox/OutboxRecurring_wide.cfg",
+      "mutants": [
+        {
+          "name": "no-occurrence-guard",
+          "config": "formal/outbox/OutboxRecurring_mutant_no_occurrence_guard.cfg",
+          "expect": "violation",
+          "violates": {
+            "kind": "invariant",
+            "name": "OneDocumentPerOccurrence"
+          },
+          "description": "No schedule lock, CAS advance or unique link: two runs issue one occurrence twice"
+        },
+        {
+          "name": "no-replay-guard",
+          "config": "formal/outbox/OutboxRecurring_mutant_no_replay_guard.cfg",
+          "expect": "violation",
+          "violates": {
+            "kind": "temporal"
+          },
+          "description": "issue re-issues instead of returning the issued run: the rerun after a crash between issue and send is Skipped, NoLostSend breaks"
+        },
+        {
+          "name": "start-before-commit",
+          "config": "formal/outbox/OutboxRecurring_mutant_start_before_commit.cfg",
+          "expect": "violation",
+          "violates": {
+            "kind": "invariant",
+            "name": "StartedOnlyCommitted"
+          },
+          "description": "DeliveryJobs.start inside the send transaction: a rolled-back delivery gets a workflow"
+        },
+        {
+          "name": "no-reconcile-h3",
+          "config": "formal/outbox/OutboxRecurring_mutant_no_reconcile_h3.cfg",
+          "expect": "violation",
+          "violates": {
+            "kind": "temporal"
+          },
+          "deadlock": "allow",
+          "description": "H3 on the code at 77a5bb7 (no J1a delivery reconcile in core): a crash between claim and the provider call leaves the delivery sending forever, NoLostSend breaks"
+        },
+        {
+          "name": "no-reconcile-lost-start",
+          "config": "formal/outbox/OutboxRecurring_mutant_no_reconcile_lost_start.cfg",
+          "expect": "violation",
+          "violates": {
+            "kind": "temporal"
+          },
+          "deadlock": "allow",
+          "description": "The code at 77a5bb7 (no J1a delivery reconcile): a crash before the afterCommit start leaves the delivery queued forever, NoLostSend breaks"
+        },
+        {
+          "name": "no-send-replay-guard",
+          "config": "formal/outbox/OutboxRecurring_mutant_no_send_replay_guard.cfg",
+          "expect": "violation",
+          "violates": {
+            "kind": "invariant",
+            "name": "OneDeliveryPerOccurrence"
+          },
+          "description": "send sends again for an already queued run (issuance.ts:326-332, the queued replay and the pending-only check, dropped): two deliveries"
+        },
+        {
+          "name": "skip-occurrence",
+          "config": "formal/outbox/OutboxRecurring_mutant_skip_occurrence.cfg",
+          "expect": "violation",
+          "violates": {
+            "kind": "invariant",
+            "name": "NextFollowsIssued"
+          },
+          "description": "next_occurrence advances two occurrences per issue: one is never issued"
+        },
+        {
+          "name": "skip-occurrence-liveness",
+          "config": "formal/outbox/OutboxRecurring_mutant_skip_occurrence_liveness.cfg",
+          "expect": "violation",
+          "violates": {
+            "kind": "temporal"
+          },
+          "deadlock": "allow",
+          "description": "as skip-occurrence, liveness only: EveryOccurrenceIssued breaks"
+        },
+        {
+          "name": "claim-fails",
+          "config": "formal/outbox/OutboxRecurring_mutant_claim_fails.cfg",
+          "expect": "violation",
+          "violates": {
+            "kind": "invariant",
+            "name": "FailedOnlyAfterCall"
+          },
+          "description": "claim marks a queued delivery failed without a provider call (NoLostSend alone would pass)"
+        },
+        {
+          "name": "record-unknown-as-sent",
+          "config": "formal/outbox/OutboxRecurring_mutant_record_unknown_as_sent.cfg",
+          "expect": "violation",
+          "violates": {
+            "kind": "invariant",
+            "name": "SentImpliesAccepted"
+          },
+          "description": "record stores outcome_unknown as sent, also when the provider never took the message"
+        },
+        {
+          "name": "give-up-early",
+          "config": "formal/outbox/OutboxRecurring_mutant_give_up_early.cfg",
+          "expect": "violation",
+          "violates": {
+            "kind": "invariant",
+            "name": "FailedOnlyWhenJustified"
+          },
+          "description": "the first retryable failure gives up although a second attempt remains: failed without a rejection or exhausted retries"
+        }
+      ],
+      "timeoutSeconds": 120,
+      "wideTimeoutSeconds": 600,
+      "coveredFiles": [
+        {
+          "path": "packages/core/src/modules/recurring/issuance.ts",
+          "sha256": "e2ef965262e9f04035d3d39f91cd6daa7226258753f4c11952beab2997b4e771"
+        },
+        {
+          "path": "packages/core/src/modules/recurring/repo.ts",
+          "sha256": "4c68840ba4e22445b541efcdca68eee1d236db6db6d26867749216173d1592ed"
+        },
+        {
+          "path": "packages/core/src/modules/recurring/sweep.ts",
+          "sha256": "979f97daac6254370cb8559d1b0da2afe5cffaab2557b51f7fccfeb23ba363c6"
+        },
+        {
+          "path": "packages/core/src/modules/documents/deliveries/send.ts",
+          "sha256": "cfa24da63d91a46cfe1122f45b68a7efe01a146325d468cac211ec5153dadf6d"
+        },
+        {
+          "path": "packages/core/src/modules/documents/deliveries/steps.ts",
+          "sha256": "aaa45ba102a6a4a580d0dd5ff9c6dc23890381d23b62f7822e6abd828eb867d0"
+        },
+        {
+          "path": "packages/core/src/modules/documents/deliveries/jobs.ts",
+          "sha256": "d31711cb94720aca34ca689b88594f602ac19e8cf9442c6f3761f4e61b1916d2"
+        },
+        {
+          "path": "packages/core/src/modules/documents/deliveries/repo.ts",
+          "sha256": "bfd229e1edf7d8ebf9c05a8731fa4a29d26b9df82e0c614085b7b907e36104ee"
+        },
+        {
+          "path": "packages/core/src/store/memory.ts",
+          "sha256": "b12cacb2313336ffa34d3a9f28b13a4dcf9915bc7a00f68e9c0689a12c3a9eba"
+        },
+        {
+          "path": "packages/core/src/store/CoreStore.ts",
+          "sha256": "7971299fe86c8505f841c237ef8c103c1542b71174f6a530774c12e62c65fa03"
+        },
+        {
+          "path": "packages/core/src/modules/documents/record.ts",
+          "sha256": "14ad42c41aa69a4ef1544ddf013f4484dc0f83e1e58bcb29663116ad4ea1c234"
+        },
+        {
+          "path": "packages/core/src/modules/recurring/links.ts",
+          "sha256": "f01a9cfb357d2061b6eb2ec0c0bcb95efa9924f469a3c193378e77c8c04c70e9"
+        }
+      ],
+      "guardedSymbols": [
+        "RecurringIssuance.issue",
+        "RecurringIssuance.send",
+        "RecurringIssuance.run",
+        "RecurringIssuance.pendingSends",
+        "RecurringIssuance.sweep",
+        "RecurringRepo.pendingSendRuns",
+        "RecurringRepo.updateSchedule",
+        "queue (deliveries/send.ts afterCommit(jobs.start))",
+        "DeliveryJobs.start",
+        "claim",
+        "dispatch",
+        "giveUp",
+        "deliver",
+        "CoreStore.transaction",
+        "CoreStore.afterCommit",
+        "RecurringDocumentLink.link",
+        "documents(schedule_id, occurrence) unique key"
+      ],
+      "bounds": "base: 1 occurrence, 2 recurring workers, 2 crashes at any crash point, 1 duplicate or stale start, 2 provider failures (5 outcomes incl. outcome_unknown sent/not sent), 2 dispatch attempts per execution; wide (nightly): 2 occurrences, 1 provider failure, 2 attempts; mutants: 1 occurrence (2 for skip-occurrence), 1 crash",
+      "assumptions": [
+        "Each transaction is one step: the schedule row lock (issuance.ts lockSchedule) and the memory store's serialized transactions make it atomic; Postgres locking is not checked here (pg-contention)",
+        "DocumentDelivery runs keyed by the delivery id: a start for a live execution attaches to it (J1); modelled as one execution slot per delivery",
+        "The base enables the designed J1a OutboxReconcile for queued/sending deliveries (core-ports J1a); core at 77a5bb7 has none, so H3 is CONFIRMED on the code (mutants no-reconcile-*, replay FINDING H3)",
+        "J3 eligibility re-check, pauses, catch-up cap and detach are left out: the document stays sendable and the schedule active",
+        "The provider may accept a message twice (no dedupe assumed); fairness per component: sweep, reconcile, each job execution"
+      ],
+      "toolVersions": {
+        "tla2tools": "1.7.4",
+        "java": "17"
+      }
+    },
+    {
+      "id": "outbox.replay",
+      "skill": "verify-outbox-recurring",
+      "tier": 1,
+      "kind": "replay",
+      "syncCommit": "77a5bb7",
+      "replay": ["formal/outbox/outbox.replay.test.ts"],
+      "timeoutSeconds": 120,
+      "coveredFiles": [
+        {
+          "path": "packages/core/src/modules/recurring/issuance.ts",
+          "sha256": "e2ef965262e9f04035d3d39f91cd6daa7226258753f4c11952beab2997b4e771"
+        },
+        {
+          "path": "packages/core/src/modules/recurring/repo.ts",
+          "sha256": "4c68840ba4e22445b541efcdca68eee1d236db6db6d26867749216173d1592ed"
+        },
+        {
+          "path": "packages/core/src/modules/recurring/sweep.ts",
+          "sha256": "979f97daac6254370cb8559d1b0da2afe5cffaab2557b51f7fccfeb23ba363c6"
+        },
+        {
+          "path": "packages/core/src/modules/documents/deliveries/send.ts",
+          "sha256": "cfa24da63d91a46cfe1122f45b68a7efe01a146325d468cac211ec5153dadf6d"
+        },
+        {
+          "path": "packages/core/src/modules/documents/deliveries/steps.ts",
+          "sha256": "aaa45ba102a6a4a580d0dd5ff9c6dc23890381d23b62f7822e6abd828eb867d0"
+        },
+        {
+          "path": "packages/core/src/modules/documents/deliveries/jobs.ts",
+          "sha256": "d31711cb94720aca34ca689b88594f602ac19e8cf9442c6f3761f4e61b1916d2"
+        },
+        {
+          "path": "packages/core/src/modules/documents/deliveries/repo.ts",
+          "sha256": "bfd229e1edf7d8ebf9c05a8731fa4a29d26b9df82e0c614085b7b907e36104ee"
+        },
+        {
+          "path": "packages/core/src/store/memory.ts",
+          "sha256": "b12cacb2313336ffa34d3a9f28b13a4dcf9915bc7a00f68e9c0689a12c3a9eba"
+        },
+        {
+          "path": "packages/core/src/store/CoreStore.ts",
+          "sha256": "7971299fe86c8505f841c237ef8c103c1542b71174f6a530774c12e62c65fa03"
+        },
+        {
+          "path": "packages/core/src/modules/documents/record.ts",
+          "sha256": "14ad42c41aa69a4ef1544ddf013f4484dc0f83e1e58bcb29663116ad4ea1c234"
+        },
+        {
+          "path": "packages/core/src/modules/recurring/links.ts",
+          "sha256": "f01a9cfb357d2061b6eb2ec0c0bcb95efa9924f469a3c193378e77c8c04c70e9"
+        }
+      ],
+      "guardedSymbols": [
+        "RecurringIssuance.issue",
+        "RecurringIssuance.send",
+        "RecurringIssuance.run",
+        "RecurringIssuance.pendingSends",
+        "RecurringIssuance.sweep",
+        "RecurringRepo.pendingSendRuns",
+        "RecurringRepo.updateSchedule",
+        "queue (deliveries/send.ts afterCommit(jobs.start))",
+        "DeliveryJobs.start",
+        "claim",
+        "dispatch",
+        "giveUp",
+        "deliver",
+        "CoreStore.transaction",
+        "CoreStore.afterCommit",
+        "RecurringDocumentLink.link",
+        "documents(schedule_id, occurrence) unique key"
+      ],
+      "bounds": "one schedule, TODAY's occurrence, one delivery per run; replays: the happy path, duplicate/concurrent and repeated starts, a same-day second tick, crashes after issue commit, inside the send transaction, before the start hook, after claim (H3: stranded on core's own recovery; recovered by the designed J1a), after the provider accepted, and before giveUp; provider not_accepted / rejected / outcome_unknown",
+      "assumptions": [
+        "In-memory CoreStore (serialized transactions); Postgres row locks are the pg-contention job's",
+        "Crash points use existing seams: a RecurringRepo or DeliveryJobs or EmailSender wrapper that dies, and not running the next step",
+        "Recovery tests other than FINDING H3 play the designed J1a delivery reconcile by calling deliver; core has no cross-tenant query for queued/sending deliveries",
+        "The sealed System caller is taken from a RecurringSweep tick (no export of the seal)"
+      ],
+      "toolVersions": {
+        "bun": "1.4.2"
+      }
+    },
+    {
+      "id": "numbering.allocator",
+      "skill": "verify-numbering",
+      "tier": 1,
+      "kind": "tlc",
+      "syncCommit": "77a5bb7",
+      "spec": "formal/numbering/Numbering.tla",
+      "config": "formal/numbering/Numbering.cfg",
+      "wideConfig": "formal/numbering/Numbering_wide.cfg",
+      "mutants": [
+        {
+          "name": "no-reservation",
+          "config": "formal/numbering/Numbering_mutant_no_reservation.cfg",
+          "expect": "violation",
+          "violates": {
+            "kind": "invariant",
+            "name": "ReservedForever"
+          },
+          "description": "allocate formats the counter without reservations.tryReserve, so an overridden number is issued unreserved"
+        },
+        {
+          "name": "counter-kept-on-rollback",
+          "config": "formal/numbering/Numbering_mutant_counter_kept_on_rollback.cfg",
+          "expect": "violation",
+          "violates": {
+            "kind": "invariant",
+            "name": "Gapless"
+          },
+          "description": "counters.set survives the issue transaction's rollback, leaving a gap"
+        },
+        {
+          "name": "release-old-number",
+          "config": "formal/numbering/Numbering_mutant_release_old_number.cfg",
+          "expect": "violation",
+          "violates": {
+            "kind": "invariant",
+            "name": "ReservedForever"
+          },
+          "description": "an override frees the document's old number"
+        },
+        {
+          "name": "override-moves-counter",
+          "config": "formal/numbering/Numbering_mutant_override_moves_counter.cfg",
+          "expect": "violation",
+          "violates": {
+            "kind": "action",
+            "name": "OverrideKeepsCounter"
+          },
+          "description": "an override raises the series counter past the new number"
+        },
+        {
+          "name": "rollback-keeps-reservation",
+          "config": "formal/numbering/Numbering_mutant_rollback_keeps_reservation.cfg",
+          "expect": "violation",
+          "violates": {
+            "kind": "invariant",
+            "name": "NoOrphanReservation"
+          },
+          "description": "a rollback leaves its reservations behind as orphans"
+        }
+      ],
+      "timeoutSeconds": 120,
+      "wideTimeoutSeconds": 300,
+      "coveredFiles": [
+        {
+          "path": "packages/core/src/modules/numbering/service.ts",
+          "sha256": "faeefd7ed054889fad92997f447d7612f98a02b7de445da4724aefccbb7e89fb"
+        },
+        {
+          "path": "packages/core/src/store/numbering.ts",
+          "sha256": "b5f8672dba61c5f1318bf395de9a382a2e3bde0487565013d934cc479afb3c54"
+        },
+        {
+          "path": "packages/core/src/store/CoreStore.ts",
+          "sha256": "7971299fe86c8505f841c237ef8c103c1542b71174f6a530774c12e62c65fa03"
+        },
+        {
+          "path": "packages/core/src/modules/documents/lifecycle.ts",
+          "sha256": "52ca553c677840c31266401da33f1ed8da783a53deae187706d6d24f89a1285a"
+        },
+        {
+          "path": "packages/core/src/modules/documents/service.ts",
+          "sha256": "22d384d76b162172ee42625f2c85896ffad51634b73639f7ff6883d1571eb769"
+        },
+        {
+          "path": "packages/core/src/modules/documents/record.ts",
+          "sha256": "14ad42c41aa69a4ef1544ddf013f4484dc0f83e1e58bcb29663116ad4ea1c234"
+        },
+        {
+          "path": "packages/db/drizzle/20261123175822_init/migration.sql",
+          "sha256": "24d0444ee41ff55435024cba7e373ef8f89d2cfb82a2f13b218825614259832c"
+        }
+      ],
+      "guardedSymbols": [
+        "NumberingSeries.allocate",
+        "NumberingSeries.override",
+        "reserveNumber",
+        "allocateNumber",
+        "CoreStore.counters.lock",
+        "CoreStore.counters.set",
+        "CoreStore.reservations.tryReserve",
+        "numbered",
+        "issue",
+        "editIssued",
+        "Documents.edit",
+        "NUMBER_PER_KIND",
+        "number_reservations_pkey",
+        "number_reservations_document_fk",
+        "numbering_counters_pkey"
+      ],
+      "bounds": "base: 2 issues from stored drafts, 1 override, 2 periods, MaxSeq 3, 1 pre-issued document, a rollback at any statement that is not waiting, deadlock checked; 29,127 distinct states, exhaustive within the bound. wide: adds 1 issue from input; 324,673 distinct states. A second override is outside every bound (over 28.6 million states)",
+      "assumptions": [
+        "One Workspace, one DocumentKind, one YYYY-NNNN series: reservation keys include workspace and kind, and distinct sequences format to distinct numbers (Numbering.format, covered by verify-vat-numbering-math)",
+        "Steps are Postgres READ COMMITTED statements on the committed schema: counters.lock is SELECT ... FOR UPDATE on numbering_counters; reservations.tryReserve is INSERT ... ON CONFLICT DO NOTHING on number_reservations_pkey, which waits for an open inserter of the same key, and a free key for a document without a row fails number_reservations_document_fk (no Postgres CoreStore exists yet; the in-memory store serializes whole transactions and has no foreign keys)",
+        "A waiting transaction does not crash (no lock timeout), so a wait cycle is reported as a deadlock",
+        "Manual override numbers range over the series' own number space; numbers outside it cannot meet the allocator",
+        "Not modeled: configure(nextNumber) raising the counter (an intended gap, W3), pattern changes, Credit Note, Payment Tax Document and correction numbering"
+      ],
+      "toolVersions": {
+        "tla2tools": "1.7.4",
+        "java": "17"
+      }
+    },
+    {
+      "id": "numbering.replay",
+      "skill": "verify-numbering",
+      "tier": 1,
+      "kind": "replay",
+      "syncCommit": "77a5bb7",
+      "replay": ["formal/numbering/numbering.replay.test.ts"],
+      "timeoutSeconds": 120,
+      "coveredFiles": [
+        {
+          "path": "packages/core/src/modules/numbering/service.ts",
+          "sha256": "faeefd7ed054889fad92997f447d7612f98a02b7de445da4724aefccbb7e89fb"
+        },
+        {
+          "path": "packages/core/src/store/numbering.ts",
+          "sha256": "b5f8672dba61c5f1318bf395de9a382a2e3bde0487565013d934cc479afb3c54"
+        },
+        {
+          "path": "packages/core/src/store/memory.ts",
+          "sha256": "b12cacb2313336ffa34d3a9f28b13a4dcf9915bc7a00f68e9c0689a12c3a9eba"
+        },
+        {
+          "path": "packages/core/src/store/CoreStore.ts",
+          "sha256": "7971299fe86c8505f841c237ef8c103c1542b71174f6a530774c12e62c65fa03"
+        },
+        {
+          "path": "packages/core/src/modules/documents/lifecycle.ts",
+          "sha256": "52ca553c677840c31266401da33f1ed8da783a53deae187706d6d24f89a1285a"
+        },
+        {
+          "path": "packages/core/src/modules/documents/service.ts",
+          "sha256": "22d384d76b162172ee42625f2c85896ffad51634b73639f7ff6883d1571eb769"
+        },
+        {
+          "path": "packages/core/src/modules/documents/record.ts",
+          "sha256": "14ad42c41aa69a4ef1544ddf013f4484dc0f83e1e58bcb29663116ad4ea1c234"
+        }
+      ],
+      "guardedSymbols": [
+        "Documents.issue",
+        "Documents.edit",
+        "Documents.get",
+        "numbered",
+        "editIssued",
+        "NumberingSeries.allocate",
+        "NumberingSeries.override",
+        "NumberingSeries.view",
+        "reserveNumber",
+        "CoreStoreMemory.counters",
+        "CoreStoreMemory.reservations.tryReserve",
+        "CoreStoreMemory.transaction"
+      ],
+      "bounds": "11 hand-written serial traces (9 projections of Numbering.tla traces within the TLC bounds, 1 override of an override beyond them, 1 issue from input that commits only in memory) plus 100 seeded sampled traces of 6 steps checked against the model's serial transitions (property test, not exhaustive, not within a TLC bound)",
+      "assumptions": [
+        "In-memory store: one top-level transaction at a time and no foreign keys, so only serial projections of model traces replay, with the foreign-key check passing; statement interleaving and the number_reservations_document_fk failure under Postgres are left to the pg-contention job",
+        "Documents are read back through Documents.get after each step; reservations are probed with tryReserve in a transaction that always rolls back"
+      ],
+      "toolVersions": {
+        "bun": "1.4.2"
+      }
+    },
+    {
+      "id": "idempotency.request-log-cas",
+      "skill": "verify-idempotency-cas",
+      "tier": 1,
+      "kind": "tlc",
+      "syncCommit": "77a5bb7",
+      "spec": "formal/idempotency/RequestLogCas.tla",
+      "config": "formal/idempotency/RequestLogCas.cfg",
+      "wideConfig": "formal/idempotency/RequestLogCas_wide.cfg",
+      "mutants": [
+        {
+          "name": "accept-mismatch",
+          "config": "formal/idempotency/RequestLogCas_mutant_accept_mismatch.cfg",
+          "expect": "violation",
+          "violates": {
+            "kind": "invariant",
+            "name": "MismatchNeverReplayed"
+          },
+          "description": "The Existing branch skips the method/fingerprint compare, so a reused key with another payload gets the first result"
+        },
+        {
+          "name": "reject-matching",
+          "config": "formal/idempotency/RequestLogCas_mutant_reject_matching.cfg",
+          "expect": "violation",
+          "violates": {
+            "kind": "invariant",
+            "name": "MismatchOnlyForOtherPayload"
+          },
+          "description": "The Existing branch answers idempotency_mismatch to every retry, so a matching retry is rejected instead of replayed"
+        },
+        {
+          "name": "replay-live-row",
+          "config": "formal/idempotency/RequestLogCas_mutant_replay_live_row.cfg",
+          "expect": "violation",
+          "violates": {
+            "kind": "invariant",
+            "name": "ReplayReturnsStoredResult"
+          },
+          "description": "A replay of an edit returns the live row's revision instead of the stored result (a result enriched after the body), so a retry after a later edit sees that edit"
+        },
+        {
+          "name": "claim-no-wait",
+          "config": "formal/idempotency/RequestLogCas_mutant_claim_no_wait.cfg",
+          "expect": "violation",
+          "violates": {
+            "kind": "invariant",
+            "name": "AtMostOnceEffect"
+          },
+          "description": "requestLog.claim takes a key pending in another transaction instead of waiting, so overlapping creates both commit"
+        },
+        {
+          "name": "no-revision-check",
+          "config": "formal/idempotency/RequestLogCas_mutant_no_revision_check.cfg",
+          "expect": "violation",
+          "violates": {
+            "kind": "invariant",
+            "name": "NoLostUpdate"
+          },
+          "description": "getForUpdate ignores expectedRevision, so a stale edit overwrites a newer one"
+        },
+        {
+          "name": "keep-claim-on-rollback",
+          "config": "formal/idempotency/RequestLogCas_mutant_keep_claim_on_rollback.cfg",
+          "expect": "violation",
+          "violates": {
+            "kind": "deadlock"
+          },
+          "description": "A rolled-back transaction leaves its claim pending, so a retry of that key waits forever"
+        }
+      ],
+      "timeoutSeconds": 120,
+      "wideTimeoutSeconds": 900,
+      "coveredFiles": [
+        {
+          "path": "packages/core/src/shared/idempotency.ts",
+          "sha256": "1973965bead068f12e43020708e3e99a9b2932587aa813a6348bee1d835dd81b"
+        },
+        {
+          "path": "packages/core/src/shared/revision.ts",
+          "sha256": "9c445a1dbcfa1a6a6632865de4f2a006c6a4be8ee333d42f87d8a8fd0533b2bb"
+        },
+        {
+          "path": "packages/core/src/shared/requestOutcome.ts",
+          "sha256": "cb3cd76d8b708b4082659ae4468cbb0c6b6cf30633277cdcafaacfbe7572a0f8"
+        },
+        {
+          "path": "packages/core/src/store/CoreStore.ts",
+          "sha256": "7971299fe86c8505f841c237ef8c103c1542b71174f6a530774c12e62c65fa03"
+        },
+        {
+          "path": "packages/core/src/store/memory.ts",
+          "sha256": "b12cacb2313336ffa34d3a9f28b13a4dcf9915bc7a00f68e9c0689a12c3a9eba"
+        },
+        {
+          "path": "packages/core/src/store/tables.ts",
+          "sha256": "48c3753b7daa84f711c4bea51eb13bc548980e358461e2c5354cf251b089d477"
+        },
+        {
+          "path": "packages/core/src/modules/contacts/live.ts",
+          "sha256": "874c19db566641c6438b104d44cdd5667be256485d83d537559da6a1580659fa"
+        }
+      ],
+      "guardedSymbols": [
+        "withIdempotency",
+        "CoreStoreShape.requestLog.claim",
+        "CoreStoreShape.requestLog.complete",
+        "makeMemoryStore (requestLog, runFrame rollback)",
+        "Collection.getForUpdate",
+        "Collection.update",
+        "checkRevision",
+        "makeRequestOutcome",
+        "Contacts.save (create, edit)"
+      ],
+      "bounds": "5 requests (r1, r2 edit from revision 1 on one key with different payloads; r3 edits from revision 1 on its own key; r4 creates; r5 edits from revision 2 on r3's key), overlapping attempts per request 2,1,2,2,1 (8), any attempt may abort before COMMIT; wide: 2 attempts of every request (10)",
+      "assumptions": [
+        "One Contact row edited by Contacts.save stands for every Collection.getForUpdate/update and checkRevision caller; one create stands for every insert behind withIdempotency",
+        "CoreStore port semantics as documented in CoreStore.ts: a claim on a key pending in another transaction waits until that transaction ends; rollback drops the pending claim and row locks (memory.ts runFrame; a SQL adapter must match)",
+        "Body writes, requestLog.complete and the audit row are transaction-local until COMMIT, so they form one step; Abort models any failure, defect or interruption before COMMIT",
+        "Request-key TTL (24 h) never expires inside a run: replay after expiry re-runs the body by design and is not modelled; scopes other than one Workspace are not modelled",
+        "MCP preview -> confirm tokens are not modelled: core has no confirmation-token issuance or redemption yet (only api-contract helpers in packages/api-contract/src/mcp.ts)",
+        "Contacts.save's same-content no-op edit (returns the row unchanged, no revision bump) and IČO unique-index conflicts (ensureIcoFree, UniqueViolation) are not modelled"
+      ],
+      "toolVersions": {
+        "tla2tools": "1.7.4",
+        "java": "17"
+      }
+    },
+    {
+      "id": "idempotency.request-log-cas-replay",
+      "skill": "verify-idempotency-cas",
+      "tier": 1,
+      "kind": "replay",
+      "syncCommit": "77a5bb7",
+      "replay": ["formal/idempotency/requestLogCas.replay.test.ts"],
+      "timeoutSeconds": 120,
+      "coveredFiles": [
+        {
+          "path": "packages/core/src/shared/idempotency.ts",
+          "sha256": "1973965bead068f12e43020708e3e99a9b2932587aa813a6348bee1d835dd81b"
+        },
+        {
+          "path": "packages/core/src/shared/requestOutcome.ts",
+          "sha256": "cb3cd76d8b708b4082659ae4468cbb0c6b6cf30633277cdcafaacfbe7572a0f8"
+        },
+        {
+          "path": "packages/core/src/store/CoreStore.ts",
+          "sha256": "7971299fe86c8505f841c237ef8c103c1542b71174f6a530774c12e62c65fa03"
+        },
+        {
+          "path": "packages/core/src/store/memory.ts",
+          "sha256": "b12cacb2313336ffa34d3a9f28b13a4dcf9915bc7a00f68e9c0689a12c3a9eba"
+        },
+        {
+          "path": "packages/core/src/store/tables.ts",
+          "sha256": "48c3753b7daa84f711c4bea51eb13bc548980e358461e2c5354cf251b089d477"
+        },
+        {
+          "path": "packages/core/src/modules/contacts/live.ts",
+          "sha256": "874c19db566641c6438b104d44cdd5667be256485d83d537559da6a1580659fa"
+        }
+      ],
+      "guardedSymbols": [
+        "withIdempotency",
+        "CoreStoreShape.requestLog.claim",
+        "CoreStoreShape.requestLog.complete",
+        "makeMemoryStore (requestLog, runFrame rollback)",
+        "Collection.getForUpdate",
+        "Collection.update",
+        "makeRequestOutcome",
+        "Contacts.save (create, edit)"
+      ],
+      "bounds": "7 RequestLogCas traces on the in-memory CoreStore: replay; mismatch on a reused key; stale twice, the fresh edit r5 on the same key, then a replay after the row moved on; abort after Lock then retry; overlapping duplicate edit; overlapping duplicate create; overlapping competing edits. Executes getForUpdate/update, not checkRevision (Expenses is its only caller)",
+      "assumptions": [
+        "The in-memory store serializes whole transactions, so overlapping attempts interleave only between transactions; Postgres interleavings inside a transaction belong to the model and the pg-contention job",
+        "Request-key TTL (24 h) never expires inside a run: replay after expiry re-runs the body by design and is not modelled; scopes other than one Workspace are not modelled",
+        "MCP preview -> confirm tokens are not modelled: core has no confirmation-token issuance or redemption yet (only api-contract helpers in packages/api-contract/src/mcp.ts)",
+        "Contacts.save's same-content no-op edit (returns the row unchanged, no revision bump) and IČO unique-index conflicts (ensureIcoFree, UniqueViolation) are not modelled"
+      ],
+      "toolVersions": {
+        "bun": "1.4.2"
+      }
+    },
+    {
+      "id": "auth-policy.can",
+      "skill": "verify-auth-policy",
+      "tier": 1,
+      "kind": "exhaustive",
+      "syncCommit": "77a5bb7",
+      "command": "bun test --cwd packages/core ./test/policy/can.property.test.ts ./test/store.test.ts ./test/modules/contacts/contacts.test.ts",
+      "coveredFiles": [
+        {
+          "path": "packages/core/src/policy/can.ts",
+          "sha256": "1c101ab14e9fb1c58465cd1d0287fbd399b1e6b366498f583c3debadf13a0fc1"
+        },
+        {
+          "path": "packages/core/src/policy/table.ts",
+          "sha256": "c79d0a294591c2b67ac17213044f10011a1461c05b161b0b9f6d01f6a644ac44"
+        },
+        {
+          "path": "packages/core/src/policy/Policy.ts",
+          "sha256": "4a81f8d9a318d0499872c3c4df8d582c2473d911b42878f448f5d3f98807ceff"
+        },
+        {
+          "path": "packages/core/src/policy/membership.ts",
+          "sha256": "7535769e4429db6afd81cb8d838467bf1ebcd304396973f3fc9b8b5293f11684"
+        },
+        {
+          "path": "packages/core/src/internal/system.ts",
+          "sha256": "334083f965553dc7930236122db8bb42608be49acdf04a89afd9df4cba4fae26"
+        },
+        {
+          "path": "packages/domain/src/action.ts",
+          "sha256": "e941b7e0cf44c3d9a1e515453f3011630042f9bf141f984b316eb8100def6342"
+        },
+        {
+          "path": "packages/domain/src/scope.ts",
+          "sha256": "c42a40e2e7f4ab181f770c16d73efca3fc213a012e6aa0e25240c0256bb8bd8e"
+        },
+        {
+          "path": "packages/domain/src/caller.ts",
+          "sha256": "ba38f3a8ad1339ac17123b0ed7c60b3bba6e10b1e4fa091a22fe18c27146fac5"
+        },
+        {
+          "path": "packages/domain/src/vocabulary.ts",
+          "sha256": "874a5ac04149ea443ee3adfee546ea3a923e431dcf4dff41a1912b21acf7ab2c"
+        }
+      ],
+      "guardedSymbols": [
+        "can",
+        "scopesAllow",
+        "actionScope",
+        "POLICY",
+        "authorize",
+        "authorizeInWorkspace",
+        "checkMembershipChange",
+        "systemCaller",
+        "isSealedSystem"
+      ],
+      "bounds": "54 Actions x 4 roles x (3^10 normalized grants + session) = 12,754,800 calls; raw two-area lists in 2 orders + all-writes = 311,472; 12 non-Member callers; 44 callers x 54 Actions for Workspace scoping; 36 callers x 25 membership changes; wide (KVITBIT_FORMAL_WIDE=1, nightly): 4^10 raw lists x 4 x 54 = 226,492,416",
+      "assumptions": [
+        "oracle from core-ports.md 2.3 rows 274-287 and http-mcp-contracts.md 1319-1346",
+        "invitation->members and schedule->templates are conventions",
+        "R2 covered by store/Contacts example tests only"
+      ],
+      "toolVersions": {
+        "bun": "1.4.2",
+        "effect": "4.1.4"
+      }
+    },
+    {
+      "id": "money.rounding",
+      "skill": "verify-money-access",
+      "tier": 1,
+      "kind": "exhaustive",
+      "syncCommit": "77a5bb7",
+      "command": "bun test --cwd packages/domain ./test/money.property.test.ts ./test/money.test.ts",
+      "coveredFiles": [
+        {
+          "path": "packages/domain/src/money.ts",
+          "sha256": "30fbe9da53418e545689267d4485ca68161cecd031b6803ab7f77715990d1608"
+        },
+        {
+          "path": "packages/domain/src/vocabulary.ts",
+          "sha256": "874a5ac04149ea443ee3adfee546ea3a923e431dcf4dff41a1912b21acf7ab2c"
+        }
+      ],
+      "guardedSymbols": [
+        "round",
+        "toMinorUnits",
+        "fromMinorUnits",
+        "minorUnitScale",
+        "negate",
+        "add",
+        "subtract",
+        "sum",
+        "compare",
+        "equals",
+        "isZero",
+        "isNegative",
+        "zero",
+        "CurrencyMismatch"
+      ],
+      "bounds": "17,576 codes; 53,280 residue amounts (1-3 dropped digits, scales 0/2/3/4); 3,960 explicit-scale; 5,213 pre-rounded; 10,000 pairs; 5,832 triples; 30 currency pairs",
+      "assumptions": [
+        "BigInt oracle",
+        "ISO 4217 non-2 exponents",
+        "scale-insensitive equality",
+        "multiply and engines roundAt not covered"
+      ],
+      "toolVersions": {
+        "bun": "1.4.2",
+        "effect": "4.1.4"
+      }
+    },
+    {
+      "id": "access.scopes",
+      "skill": "verify-money-access",
+      "tier": 1,
+      "kind": "exhaustive",
+      "syncCommit": "77a5bb7",
+      "command": "bun test --cwd packages/api-contract ./test/access.property.test.ts ./test/access.test.ts",
+      "coveredFiles": [
+        {
+          "path": "packages/api-contract/src/access.ts",
+          "sha256": "3b3f466ec8a382c5881e2dc0e6d5bd9466f98c73e1f416e70b4f783e27c0096f"
+        },
+        {
+          "path": "packages/domain/src/scope.ts",
+          "sha256": "c42a40e2e7f4ab181f770c16d73efca3fc213a012e6aa0e25240c0256bb8bd8e"
+        }
+      ],
+      "guardedSymbols": [
+        "normalizeScopes",
+        "ALL_SCOPES",
+        "READ_SCOPES",
+        "expandAccess",
+        "GrantedAccess",
+        "isGrantedAccessConsistent",
+        "ScopeFromOAuth",
+        "accessFromOAuthScopes",
+        "oauthScopesForGrant",
+        "OAUTH_SCOPES_SUPPORTED"
+      ],
+      "bounds": "normalizeScopes on all 2^20 subsets; 61,094 expand/consistency lists; 16,376 OAuth requests; 59,048 custom-grant round trips",
+      "assumptions": [
+        "canonical order per access.ts and http-mcp-contracts.md:95",
+        "Schema-backed calls on closed sets + half-subsets only"
+      ],
+      "toolVersions": {
+        "bun": "1.4.2",
+        "effect": "4.1.4"
+      }
+    },
+    {
+      "id": "vat.rounding-residue",
+      "skill": "verify-vat-numbering-math",
+      "tier": 1,
+      "kind": "exhaustive",
+      "syncCommit": "77a5bb7",
+      "command": "bun test --cwd packages/core ./test/engines/vat-rounding.property.test.ts",
+      "coveredFiles": [
+        {
+          "path": "packages/core/src/engines/decimal.ts",
+          "sha256": "f52b9c0b112ab1eb8f4926416f9b279d6c21a7b4b708b7793a3534d024ea283e"
+        },
+        {
+          "path": "packages/core/src/engines/vat.ts",
+          "sha256": "d5a4b2d2e39074ef4753119f66bfdf53b847214b5726c5802496c856ed27544c"
+        },
+        {
+          "path": "packages/core/src/engines/fx.ts",
+          "sha256": "80584323cfb7b494a877224736972cabefb8bc4be4787f7255c04cd2b93ac7b4"
+        }
+      ],
+      "guardedSymbols": ["roundAt", "divideRound", "VatMath.calculate", "toCzk"],
+      "bounds": "roundAt: every sub-minor residue at scales 3-7 x cents {0,50,99} x int parts {0,7,123456789012345} x both signs = 1,999,980; bucket VAT every residue mod 100 (bottom-up) and mod 121/112 (top-down), both signs, 2 offsets; toCzk every residue for 3-decimal rates, quantity 1 and 100, both signs",
+      "assumptions": [
+        "rounding independent of integer part beyond the values tried",
+        "scales above 7 behave as 3-7",
+        "CNB quantity 1000 not enumerated"
+      ],
+      "toolVersions": {
+        "bun": "1.4.2",
+        "effect": "4.1.4"
+      }
+    },
+    {
+      "id": "vat.buckets-czk",
+      "skill": "verify-vat-numbering-math",
+      "tier": 1,
+      "kind": "property",
+      "syncCommit": "77a5bb7",
+      "command": "bun test --cwd packages/core ./test/engines/vat-rounding.property.test.ts",
+      "coveredFiles": [
+        {
+          "path": "packages/core/src/engines/vat.ts",
+          "sha256": "d5a4b2d2e39074ef4753119f66bfdf53b847214b5726c5802496c856ed27544c"
+        },
+        {
+          "path": "packages/core/src/engines/fx.ts",
+          "sha256": "80584323cfb7b494a877224736972cabefb8bc4be4787f7255c04cd2b93ac7b4"
+        },
+        {
+          "path": "packages/core/src/engines/decimal.ts",
+          "sha256": "f52b9c0b112ab1eb8f4926416f9b279d6c21a7b4b708b7793a3534d024ea283e"
+        },
+        {
+          "path": "packages/domain/src/vocabulary.ts",
+          "sha256": "874a5ac04149ea443ee3adfee546ea3a923e431dcf4dff41a1912b21acf7ab2c"
+        }
+      ],
+      "guardedSymbols": ["VatMath.calculate", "TREATMENTS", "rateFor", "toCzk"],
+      "bounds": "400 seeded inputs (BigInt oracle) + 400 seeded inputs (CZK residue <= 0.005 per bucket, document <= 0.005 x buckets); 0-10 lines, qty <=3 decimals, price <=4 decimals",
+      "assumptions": ["single VAT rate table entry", "whole-unit rounding sampled only"],
+      "toolVersions": {
+        "bun": "1.4.2",
+        "effect": "4.1.4"
+      }
+    },
+    {
+      "id": "numbering.grammar",
+      "skill": "verify-vat-numbering-math",
+      "tier": 1,
+      "kind": "exhaustive",
+      "syncCommit": "77a5bb7",
+      "command": "bun test --cwd packages/core ./test/engines/numbering.property.test.ts",
+      "coveredFiles": [
+        {
+          "path": "packages/core/src/engines/numbering.ts",
+          "sha256": "b46534ee44fd111a875069a302e411b678f9fe3dce9162c048544bd0b53de228"
+        }
+      ],
+      "guardedSymbols": ["parsePattern", "format"],
+      "bounds": "every string of length 0-6 over {Y,M,N,a,1,-,space} = 137,257 patterns; accepted ones rendered for counters 1, 10, 12345",
+      "assumptions": [
+        "longer patterns, control characters and too-long patterns covered only by the property entry"
+      ],
+      "toolVersions": {
+        "bun": "1.4.2",
+        "effect": "4.1.4"
+      }
+    },
+    {
+      "id": "numbering.format-periods",
+      "skill": "verify-vat-numbering-math",
+      "tier": 1,
+      "kind": "property",
+      "syncCommit": "77a5bb7",
+      "command": "bun test --cwd packages/core ./test/engines/numbering.property.test.ts",
+      "coveredFiles": [
+        {
+          "path": "packages/core/src/engines/numbering.ts",
+          "sha256": "b46534ee44fd111a875069a302e411b678f9fe3dce9162c048544bd0b53de228"
+        },
+        {
+          "path": "packages/core/src/engines/calendar.ts",
+          "sha256": "6ae73baf7bcad4d1a54a99a9041855428b2316b56e75fb7cc49a17d479fc090c"
+        }
+      ],
+      "guardedSymbols": [
+        "format",
+        "periodKey",
+        "fitsLength",
+        "checkNextCounter",
+        "MAX_NUMBER_LENGTH",
+        "MAX_COUNTER"
+      ],
+      "bounds": "2,000 generated patterns vs oracle; 500x20 round-trips; 500x30 same-period injectivity; 500x30 cross-period; boundary table 19/20/21 chars x widths 1-10; years 1900-2199",
+      "assumptions": [
+        "YY-only cross-period collisions harmless because the allocator skips numbers reserved per (workspace, kind)"
+      ],
+      "toolVersions": {
+        "bun": "1.4.2",
+        "effect": "4.1.4"
+      }
+    },
+    {
+      "id": "advance-chain.net-to-zero",
+      "skill": "verify-vat-numbering-math",
+      "tier": 1,
+      "kind": "property",
+      "syncCommit": "77a5bb7",
+      "command": "bun test --cwd packages/core ./test/engines/advance-chain.property.test.ts",
+      "coveredFiles": [
+        {
+          "path": "packages/core/src/engines/vat.ts",
+          "sha256": "d5a4b2d2e39074ef4753119f66bfdf53b847214b5726c5802496c856ed27544c"
+        },
+        {
+          "path": "packages/core/src/engines/fx.ts",
+          "sha256": "80584323cfb7b494a877224736972cabefb8bc4be4787f7255c04cd2b93ac7b4"
+        },
+        {
+          "path": "packages/core/src/modules/documents/final.ts",
+          "sha256": "1c7bddbbb513cb17930d6d0ed9eb325a67d7103cea9bdd8e7cd7bb3800a18531"
+        },
+        {
+          "path": "packages/core/src/modules/documents/credit.ts",
+          "sha256": "4c9758c878908e783ee53ca1776b1ab7f5111243d5174c630a3344e5be0c2d40"
+        },
+        {
+          "path": "packages/core/src/modules/documents/corrections.ts",
+          "sha256": "4689ee06d5e465875b469526dbab760ebea5c34d71d6e24c129732eebdf9917d"
+        },
+        {
+          "path": "packages/core/src/modules/documents/payments.ts",
+          "sha256": "0daa8da5b617412f35d66eb072b6d6d17913076e014140455e76f3e800cfe427"
+        },
+        {
+          "path": "packages/core/src/modules/documents/compose.ts",
+          "sha256": "545885ad5f31ca80cdf2ba21782f6db0e89557d7fb00141a7f17177fd1566f41"
+        },
+        {
+          "path": "packages/core/src/modules/documents/reports.ts",
+          "sha256": "76e5f034d58c7bfbdf7a081612ff6a7a36d0a70d93e4bd8a161a53d7753ac5e6"
+        },
+        {
+          "path": "packages/core/src/modules/reports/compute.ts",
+          "sha256": "74c634ca1106963d8dab6a8803eae50072fd1ef2be3f391b15887cbfeaebd085"
+        }
+      ],
+      "guardedSymbols": [
+        "VatMath.splitAdvance",
+        "VatMath.fromBuckets",
+        "VatMath.negate",
+        "deductionLines",
+        "issueFinalInvoice",
+        "remainderSpec",
+        "deductionBucketsOf",
+        "partialSpec",
+        "creditNoteRecord.fx",
+        "issuePaymentTaxDocument",
+        "mergeBuckets",
+        "reportFigures",
+        "ReportCompute.taxableBucketsCzk"
+      ],
+      "bounds": "120 seeded chains: EUR/CZK, gross or net prices, 1-4 lines, 1-3 partial or full payments on 2026-11-16..23, rising and falling fixings, optional partial credit, full credit 0-2 days later, PTD credits; includes 1 test.failing FINDING (stored FI CZK VAT vs VAT report)",
+      "assumptions": [
+        "vat_payer, CZ_BUYER, paymentRounding none, in-memory layers, TestClock 2026-11-23",
+        "single VAT rate table entry",
+        "no overpayment, patched Final Invoice or manual FX"
+      ],
+      "toolVersions": {
+        "bun": "1.4.2",
+        "effect": "4.1.4"
+      }
+    }
+  ]
+}

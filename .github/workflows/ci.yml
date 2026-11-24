@@ -27,3 +27,100 @@ jobs:
       - run: bunx biome ci --error-on-warnings .
       - run: bun run typecheck
       - run: bun run test
+
+  # Bounded TLC models with their mutants, trace-replay harnesses and covered-file digests
+  # (docs/adr/0005-formal-verification.md). A TLC timeout or incomplete search fails the job.
+  formal:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: actions/cache@v4
+        with:
+          path: formal/.cache/tla2tools-*.jar
+          key: formal-toolchain-${{ hashFiles('formal/toolchain/toolchain.json') }}
+      - run: bun install --frozen-lockfile
+      # Runs the digest gate and still runs every check, so drifted code is checked too.
+      - name: Formal checks and covered-file digests
+        run: bun run verify:formal
+
+  changes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      contention: ${{ steps.filter.outputs.contention }}
+    steps:
+      # Full history: on push, paths-filter diffs against the previous SHA locally, and
+      # persist-credentials: false leaves it no way to fetch that commit later.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            contention:
+              - 'packages/core/src/store/**'
+              - 'packages/core/src/shared/**'
+              - 'packages/core/src/modules/numbering/**'
+              - 'packages/core/src/modules/payments/**'
+              - 'packages/core/src/modules/documents/**'
+              - 'packages/core/src/modules/recurring/**'
+              - 'packages/db/**'
+              - '**/*.contention.ts'
+              - '.github/workflows/ci.yml'
+
+  # SKELETON (ADR-0005): two-connection Postgres 17 contention tests for numbering, revision
+  # CAS, request_log, payments/PTD, outbox claim and the ALTCHA replay store. It runs every
+  # `*.contention.ts` (outside bun's default test discovery, so package `bun test` never runs
+  # them without Postgres) against the service below, and passes while none exist yet.
+  pg-contention:
+    needs: changes
+    if: needs.changes.outputs.contention == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: kvitbit
+          POSTGRES_PASSWORD: kvitbit
+          POSTGRES_DB: kvitbit_contention
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U kvitbit"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      KVITBIT_CONTENTION_PG_URL: postgres://kvitbit:kvitbit@localhost:5432/kvitbit_contention
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
+      - run: bun install --frozen-lockfile
+      - name: Postgres 17 contention tests
+        run: |
+          mapfile -t files < <(git ls-files '*.contention.ts')
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "::notice::No *.contention.ts yet; pg-contention is a skeleton (ADR-0005)."
+            exit 0
+          fi
+          bun test "${files[@]/#/./}"

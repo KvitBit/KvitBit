@@ -1,0 +1,4 @@
+# Pinned developer tools. Formal checks (formal/README.md) need JDK 17; the TLC jar itself is
+# pinned by sha256 in formal/toolchain/toolchain.json and fetched by formal/toolchain/toolchain.ts.
+[tools]
+java = "temurin-17"
