@@ -69,6 +69,7 @@ import {
   WorkspacesLive,
   type WorkspacesRepo,
 } from "../modules/workspaces";
+import { FxFixingsLive } from "../shared/fx";
 import { IdGeneratorLive } from "../shared/ids";
 import type { CoreStore } from "../store/CoreStore";
 import { BankAccountReferencesLive } from "./bankAccounts";
@@ -131,6 +132,7 @@ const repoSeams = Layer.mergeAll(
   DocumentActivityLive,
   BankAccountReferencesLive,
   ShareWorkspacesLive,
+  FxFixingsLive,
 );
 
 const readSeams = Layer.mergeAll(

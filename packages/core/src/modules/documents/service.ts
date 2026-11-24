@@ -4,10 +4,10 @@
  */
 import type { CoreError, CurrentCaller, DocumentId, DocumentPatch } from "@kvitbit/domain/contract";
 import { Documents } from "@kvitbit/domain/contract";
-import type { ExchangeRates } from "@kvitbit/domain/ports";
 import { Context, Effect, Layer } from "effect";
 import { authorizeInWorkspace } from "../../policy/Policy";
 import { orUnavailable } from "../../shared/errors";
+import type { FxFixings } from "../../shared/fx";
 import type { IdGenerator } from "../../shared/ids";
 import { CoreStore } from "../../store/CoreStore";
 import type { NumberingSeries } from "../numbering";
@@ -32,7 +32,7 @@ export type DocumentsDeps =
   | IdGenerator
   | DocumentsRepo
   | NumberingSeries
-  | ExchangeRates
+  | FxFixings
   | DocumentContacts
   | DocumentIssuers
   | DocumentPriceList

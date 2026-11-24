@@ -405,7 +405,13 @@ describe("ReportsSourceLive", () => {
   });
 
   const dangling: ReadonlyArray<
-    readonly [string, (ids: { fi: DocumentId; cn: DocumentId }) => Effect.Effect<unknown>]
+    readonly [
+      string,
+      (ids: {
+        fi: DocumentId;
+        cn: DocumentId;
+      }) => Effect.Effect<unknown, never, CoreStore | DocumentsRepo>,
+    ]
   > = [
     [
       "corrects",

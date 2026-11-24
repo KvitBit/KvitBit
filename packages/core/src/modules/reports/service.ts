@@ -35,13 +35,14 @@ import {
   IsoDate,
   Reports,
 } from "@kvitbit/domain/contract";
-import { BlobStorage, ExchangeRates } from "@kvitbit/domain/ports";
+import { BlobStorage } from "@kvitbit/domain/ports";
 import { Clock, Effect, Layer, Option, Schema, Stream } from "effect";
 import { daysBetween, pragueDate } from "../../engines/calendar";
 import { Fx } from "../../engines/fx";
 import { authorizeInWorkspace } from "../../policy/Policy";
 import { appendAudit } from "../../shared/audit";
 import { orUnavailable } from "../../shared/errors";
+import { FxFixings } from "../../shared/fx";
 import { withIdempotency } from "../../shared/idempotency";
 import { IdGenerator, newId } from "../../shared/ids";
 import { CoreStore, StoreUnavailable } from "../../store/CoreStore";
@@ -56,7 +57,6 @@ import {
   ONE_RUNNING_EXPORT,
   toExportJobView,
 } from "./exports";
-import { cachedFixing, FxFixingCache } from "./fxcache";
 import { ReportPdfRenderer } from "./renderer";
 import { ReportsSource } from "./source";
 import { reportTable } from "./tables";
@@ -146,8 +146,7 @@ export const makeReports = Effect.gen(function* () {
   const repo = yield* ExportsRepo;
   const workflow = yield* ExportWorkflow;
   const blobs = yield* BlobStorage;
-  const rates = yield* ExchangeRates;
-  const fxCache = yield* FxFixingCache;
+  const fx = yield* FxFixings;
   const renderer = yield* ReportPdfRenderer;
   const ids = yield* IdGenerator;
 
@@ -264,12 +263,7 @@ export const makeReports = Effect.gen(function* () {
       Effect.gen(function* () {
         yield* authorizeInWorkspace("report.run");
         if (!isIsoDate(q.on)) return yield* malformed(["on"], "date_invalid");
-        const fixing = yield* orUnavailable(
-          cachedFixing(q.on, yield* today).pipe(
-            Effect.provideService(ExchangeRates, rates),
-            Effect.provideService(FxFixingCache, fxCache),
-          ),
-        );
+        const fixing = yield* orUnavailable(fx.fixing(q.on));
         const rate = yield* Effect.fromResult(Fx.fromFixing(fixing, q.currency));
         return {
           currency: q.currency,
@@ -396,8 +390,7 @@ export const ReportsLive: Layer.Layer<
   | ExportsRepo
   | ExportWorkflow
   | BlobStorage
-  | ExchangeRates
-  | FxFixingCache
+  | FxFixings
   | ReportPdfRenderer
 > = Layer.effect(
   Reports,
@@ -410,9 +403,7 @@ export const ReportsLive: Layer.Layer<
     | ExportsRepo
     | ExportWorkflow
     | BlobStorage
-    | ExchangeRates
-    | FxFixingCache
-    | FxFixingCache
+    | FxFixings
     | ReportPdfRenderer
   >,
 );

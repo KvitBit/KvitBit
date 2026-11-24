@@ -511,7 +511,7 @@ describe("deductibility, reverse charge and FX", () => {
     expect(fmt(v.deductibleVatCzk)).toBe("527.63");
   });
 
-  test("a currency CNB does not quote is fx.rate_missing; rates down is Unavailable", async () => {
+  test("a currency CNB does not quote is fx.rate_missing; rates down is Unavailable unless cached", async () => {
     const exit = await scenario(
       Effect.gen(function* () {
         const missing = yield* Effect.exit(
@@ -519,16 +519,26 @@ describe("deductibility, reverse charge and FX", () => {
         );
         const rates = yield* FixtureRates;
         yield* Ref.set(rates.unavailable, true);
-        const down = yield* Effect.exit(
+        // The USD attempt fetched the fixing for 2026-11-22: it is read through the cache.
+        const cached = yield* Effect.exit(
           record({ ...czkInput, currency: "EUR", taxableSupplyOn: "2026-11-22" }),
         );
+        const down = yield* Effect.exit(
+          record({ ...czkInput, currency: "EUR", taxableSupplyOn: "2026-11-21" }),
+        );
         const czkStillWorks = Exit.isSuccess(yield* Effect.exit(record(czkInput)));
-        return { missing: issuesOf(missing).map((i) => i.code), down, czkStillWorks };
+        return {
+          missing: issuesOf(missing).map((i) => i.code),
+          cachedFixing: Exit.isSuccess(cached) ? fields(cached.value).fx?.fixingDate : null,
+          down,
+          czkStillWorks,
+        };
       }),
     );
     expect(exit).toEqual(
       Exit.succeed({
         missing: ["fx.rate_missing"],
+        cachedFixing: "2026-11-20" as IsoDate,
         down: Exit.fail(new Unavailable({ dependency: "exchange_rates" })),
         czkStillWorks: true,
       }),

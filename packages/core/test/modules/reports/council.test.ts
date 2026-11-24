@@ -10,7 +10,6 @@ import {
   encodeCsv,
   FakeExportWorkflow,
   FakeReportPdfRenderer,
-  FxFixingCacheMemory,
   ONE_RUNNING_EXPORT,
   paymentsTable,
   ReportCompute,
@@ -269,7 +268,6 @@ const racyLayer = (constraint: string, losses = 1) =>
         ReportsSourceMemory,
         FakeReportPdfRenderer.layer,
         FakeExportWorkflow.layer,
-        FxFixingCacheMemory,
       ),
     ),
   );

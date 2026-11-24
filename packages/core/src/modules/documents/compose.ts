@@ -35,12 +35,13 @@ import type {
   WorkspaceId,
 } from "@kvitbit/domain/contract";
 import { Invalid, NotFound } from "@kvitbit/domain/contract";
-import { ExchangeRates, type RatesUnavailable } from "@kvitbit/domain/ports";
+import type { RatesUnavailable } from "@kvitbit/domain/ports";
 import { BigDecimal, Effect, Result } from "effect";
 import { addDays, isCalendarDate, MAX_ISO_DATE } from "../../engines/calendar";
 import { HUNDRED, ZERO } from "../../engines/decimal";
 import { Fx } from "../../engines/fx";
 import { VatMath } from "../../engines/vat";
+import { FxFixings } from "../../shared/fx";
 import { IdGenerator } from "../../shared/ids";
 import { resolveDocumentDefaults } from "../../shared/overrides";
 import type { StoreUnavailable } from "../../store/CoreStore";
@@ -164,7 +165,7 @@ export type ComposeServices =
   | DocumentContacts
   | DocumentIssuers
   | NumberingSeries
-  | ExchangeRates
+  | FxFixings
   | IdGenerator;
 
 const issue = (path: Issue["path"], code: Issue["code"], params?: Record<string, string>): Issue =>
@@ -626,7 +627,7 @@ export const compose = (
       fx = frozen.fx;
     } else {
       const fixing = Fx.needsFixing(currency, spec.fxOverride)
-        ? yield* (yield* ExchangeRates).fixing(taxPoint)
+        ? yield* (yield* FxFixings).fixing(taxPoint)
         : null;
       const fxResult = Fx.resolve({ currency, override: spec.fxOverride, fixing });
       if (Result.isFailure(fxResult)) return yield* fxResult.failure;

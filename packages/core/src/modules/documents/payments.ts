@@ -28,12 +28,13 @@ import type {
   WorkspaceId,
 } from "@kvitbit/domain/contract";
 import { Conflict, Invalid, MoneyMath } from "@kvitbit/domain/contract";
-import { ExchangeRates, type RatesUnavailable } from "@kvitbit/domain/ports";
+import type { RatesUnavailable } from "@kvitbit/domain/ports";
 import { BigDecimal, Context, Effect, Layer, Result } from "effect";
 import { ZERO } from "../../engines/decimal";
 import { Fx } from "../../engines/fx";
 import { VAT_RATE_TABLE, VatMath } from "../../engines/vat";
 import { appendAudit } from "../../shared/audit";
+import { FxFixings } from "../../shared/fx";
 import { IdGenerator, newId } from "../../shared/ids";
 import type { CoreStore, StoreUnavailable } from "../../store/CoreStore";
 import { NumberingSeries } from "../numbering";
@@ -393,7 +394,7 @@ const issuePaymentTaxDocument = (
     if (!BigDecimal.isPositive(bucketGross)) return yield* malformed("amount", "out_of_range");
     // Non-CZK: the CNB fixing valid on the receipt date (carried back), rule P2.
     const fixing = Fx.needsFixing(proforma.currency, null)
-      ? yield* (yield* ExchangeRates).fixing(payment.paidOn)
+      ? yield* (yield* FxFixings).fixing(payment.paidOn)
       : null;
     const fxResult = Fx.resolve({ currency: proforma.currency, override: null, fixing });
     if (Result.isFailure(fxResult)) return yield* fxResult.failure;
@@ -510,7 +511,7 @@ export type DocumentPaymentsDeps =
   | IdGenerator
   | DocumentsRepo
   | NumberingSeries
-  | ExchangeRates
+  | FxFixings
   | DocumentIssuers;
 
 export const DocumentPaymentsLive: Layer.Layer<DocumentPayments, never, DocumentPaymentsDeps> =
