@@ -196,7 +196,7 @@ describe("SQL CoreStore: audit", () => {
           revision: null,
           changes: [],
           reason: "nightly",
-        } as AuditEntry;
+        } as unknown as AuditEntry;
         yield* store.transaction(
           Effect.andThen(
             store.audit.append(workspaceId, member),
