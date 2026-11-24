@@ -27,7 +27,8 @@
     "@better-auth/cimd": "1.7.27",
     "@better-auth/oauth-provider": "1.7.27",
     "@better-auth/passkey": "1.7.27",
-    "@effect/sql-pg": "4.1.4",
+    "@effect/sql-pglite": "4.1.4",
+    "@electric-sql/pglite": "0.6.0",
     "@kvitbit/api-contract": "workspace:*",
     "@kvitbit/brand": "workspace:*",
     "@kvitbit/db": "workspace:*",
@@ -41,8 +42,7 @@
     "qrcode": "1.5.4"
   },
   "devDependencies": {
-    "@effect/sql-pglite": "4.1.4",
-    "@electric-sql/pglite": "0.6.0",
+    "@effect/sql-pg": "4.1.4",
     "@types/qrcode": "1.5.6"
   }
 }
