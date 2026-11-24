@@ -27,6 +27,7 @@ import {
   reportFigures,
 } from "../../../src/modules/documents";
 import { NumberingSeries } from "../../../src/modules/numbering";
+import { ReportCompute } from "../../../src/modules/reports";
 import { CoreStore } from "../../../src/store/CoreStore";
 import { member, WORKSPACE_A, WORKSPACE_B } from "../../helpers";
 import type { Services } from "./fixtures";
@@ -772,6 +773,61 @@ describe("issueFinalInvoice (D8)", () => {
       }),
     );
     expect(ok(partial)).toEqual(malformed(["lines", 0, "line"], "deduction_line"));
+  });
+
+  test("EUR advances at other fixings: the Final Invoice declares its net VAT at its own fixing, as the VAT report does (§37a)", async () => {
+    // The advance-chain property test's seed-58256 counterexample (formal finding F1).
+    const [ptds, fi, cn, reported] = ok(
+      await run(
+        Effect.gen(function* () {
+          const d = yield* docs;
+          const p = yield* issueProforma({
+            currency: EUR,
+            lines: [{ description: "Služba", unitPrice: dec("24082.29") }],
+          });
+          const ptds: Array<DocumentView> = [];
+          for (const [amount, on] of [
+            ["1182.63", "2026-11-18"],
+            ["5670.29", "2026-11-21"],
+            ["8832.48", "2026-11-23"],
+          ] as const) {
+            ptds.push((yield* pay(p.id, amount, on as IsoDate)).ptd as DocumentView);
+          }
+          const fi = yield* d.issueFinalInvoice(p.id);
+          const record = yield* Effect.flatMap(CoreStore, (store) =>
+            store.transaction(Effect.flatMap(DocumentsRepo, (repo) => repo.get(WS, fi.id))),
+          );
+          const figures = reportFigures(record, () => true);
+          const reported = ReportCompute.taxableBucketsCzk({
+            currency: record.currency,
+            fx: record.fx,
+            totals: figures.totals,
+            advanceDeductions: figures.advanceDeductions,
+          } as never);
+          const cn = yield* d.correct(fi.id, { reason: "storno", lines: "full" });
+          return [ptds, fi, cn, reported] as const;
+        }),
+        {
+          fixings: [
+            fixing("2026-11-18", "24.974"),
+            fixing("2026-11-21", "24.485"),
+            fixing("2026-11-23", "24.459"),
+          ],
+        },
+      ),
+    );
+    expect(ptds.map((t) => buckets(t)[0]?.slice(3))).toEqual([
+      ["205.25", "1182.63", "5125.91"],
+      ["984.1", "5670.29", "24095.69"],
+      ["1532.91", "8832.48", "37493.45"],
+    ]);
+    // round2(2335.02 x 24.459), not round2(5057.28 x 24.459) - PTDs' CZK VAT = 56980.96.
+    expect(buckets(fi)).toEqual([
+      ["standard", "21", "11119.15", "2335.02", "13454.17", "57112.25"],
+    ]);
+    expect(str(fi.totals.vatCzk?.amount ?? dec("0"))).toBe("57112.25");
+    expect(reported.map((b) => str(b.vat))).toEqual(["57112.25"]);
+    expect(cn.totals).toEqual(VatMath.negate(fi.totals));
   });
 
   test("checks: unpaid Proforma, not a Proforma, draft, cancelled", async () => {

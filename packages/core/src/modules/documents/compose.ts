@@ -678,13 +678,14 @@ export const compose = (
       fx,
       paymentRounding,
     });
-    // D8: the deducted buckets are added as stored, so VAT already declared on a Payment Tax
-    // Document (at its own rate and CZK fixing) is subtracted exactly, never re-derived.
+    // D8 (§37a ZDPH, VatMath rule 9): the deducted buckets are subtracted as stored in the
+    // document currency (never re-derived), and each net bucket's VAT is converted once at this
+    // document's own fixing, as the VAT report declares it. The PTDs keep their own CZK VAT.
     const totals =
       deductions.length === 0
         ? calculated
         : VatMath.fromBuckets(
-            mergeBuckets(
+            VatMath.netDeductions(
               calculated.buckets,
               deductions.map((d) => ({
                 treatment: d.treatment,
@@ -692,8 +693,10 @@ export const compose = (
                 base: d.base,
                 vat: d.vat,
                 gross: BigDecimal.normalize(BigDecimal.sum(d.base, d.vat)),
-                vatCzk: currency === "CZK" ? null : d.vatCzk,
+                vatCzk: null,
               })),
+              currency,
+              fx,
             ),
             currency,
             paymentRounding,
