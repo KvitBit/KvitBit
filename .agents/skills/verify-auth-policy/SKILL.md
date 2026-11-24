@@ -38,7 +38,9 @@ Wide bound (nightly, and every time you move the sync commit), about 50 seconds:
 
 ```sh
 KVITBIT_FORMAL_WIDE=1 bun test --cwd packages/core ./test/policy/can.property.test.ts -t wide
-``` Tool: bun 1.4.2 (root `packageManager`; also confirmed on bun 1.4.4), effect 4.1.4. `bun run test` runs it with the rest of `@kvitbit/core`.
+```
+
+Tool: bun 1.4.2 (root `packageManager`; also confirmed on bun 1.4.4), effect 4.1.4. `bun run test` runs it with the rest of `@kvitbit/core`.
 
 The repo-wide coverage record is `formal/manifest.json`, kept centrally by the ADR-0005 formal runner (it lands with the integration of the ADR-0005 streams, not in this skill's commit); once present, `bun run verify:formal --check-digests` reports checks whose covered files changed since they were last confirmed. Update this skill's entry there when you move the sync commit.
 
