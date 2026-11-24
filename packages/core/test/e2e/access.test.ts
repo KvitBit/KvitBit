@@ -19,6 +19,7 @@ import {
   Documents,
   Expenses,
   Payments,
+  PublicShareLinks,
   Reports,
   Templates,
   Workspaces,
@@ -190,7 +191,7 @@ describe("(h) workspace isolation", () => {
     expect(reportUnchanged).toBe(true);
   });
 
-  test("an API key with only documents:read reads documents, and every write is Forbidden", async () => {
+  test("an API key with only documents:read reads documents without the share link, and every write is Forbidden", async () => {
     const exit = await runCore(
       account(),
       Effect.gen(function* () {
@@ -202,7 +203,9 @@ describe("(h) workspace isolation", () => {
             const doc = yield* Effect.flatMap(Documents, (d) =>
               d.issue({ input: invoiceInput(contactIdOf(contact)) }),
             );
-            return { contact, doc };
+            // An active bearer share link: only share.read may see its URL (get_share_link).
+            const { url } = yield* Effect.flatMap(PublicShareLinks, (s) => s.create(doc.id));
+            return { contact, doc, url };
           }),
         );
         const apiKey: MemberCaller = {
@@ -219,6 +222,7 @@ describe("(h) workspace isolation", () => {
             const listed = ids((yield* docs.list({})).items);
             return {
               read: { get: got.id, list: listed },
+              share: got.share,
               writes: {
                 createDraft: yield* outcome(
                   docs.createDraft(invoiceInput(contactIdOf(seeded.contact))),
@@ -248,6 +252,18 @@ describe("(h) workspace isolation", () => {
             };
           }),
         );
+        // share.read sees the URL: a key holding share:read, and the owner's session.
+        const shareKey: MemberCaller = { ...apiKey, scopes: ["documents:read", "share:read"] };
+        const shareRead = {
+          key: (yield* asCaller(
+            shareKey,
+            Effect.flatMap(Documents, (d) => d.get(seeded.doc.id)),
+          )).share?.url,
+          owner: (yield* asCaller(
+            owner,
+            Effect.flatMap(Documents, (d) => d.get(seeded.doc.id)),
+          )).share?.url,
+        };
         // No write landed: the owner still sees one document, unpaid, and one contact.
         const after = yield* asCaller(
           owner,
@@ -265,14 +281,17 @@ describe("(h) workspace isolation", () => {
         return {
           result,
           after,
-          seeded: { doc: seeded.doc.id, contact: contactIdOf(seeded.contact) },
+          shareRead,
+          seeded: { doc: seeded.doc.id, contact: contactIdOf(seeded.contact), url: seeded.url },
         };
       }),
     );
     expect(Exit.isSuccess(exit)).toBe(true);
     if (!Exit.isSuccess(exit)) return;
-    const { result, after, seeded } = exit.value;
+    const { result, after, shareRead, seeded } = exit.value;
     expect(result.read).toEqual({ get: seeded.doc, list: [seeded.doc] });
+    expect(result.share).toBeNull();
+    expect(shareRead).toEqual({ key: seeded.url, owner: seeded.url });
     for (const [name, o] of Object.entries(result.writes)) {
       expect({ name, tag: o._tag }).toEqual({ name, tag: "Forbidden" });
     }

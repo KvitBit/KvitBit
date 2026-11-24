@@ -129,9 +129,9 @@ export type CoreExternalPorts =
 // Tiers, lowest first; each tier is built from the outputs of the tiers below it.
 
 /**
- * Seams over repositories and external ports only. `DocumentActivity` is required by the
- * owner-facing boundaries (`DocumentsLive`, `PaymentDocumentsLive`), which add `share` and
- * `deliveries` to the views they return; stored and visitor views never carry them.
+ * Seams over repositories and external ports only. `DocumentActivity` is required by
+ * `DocumentsLive`, whose owner reads (`get`, previews) add `share` and `deliveries`; write
+ * results, stored and visitor views never carry them.
  */
 const repoSeams = Layer.mergeAll(
   DocumentActivityLive,

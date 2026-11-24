@@ -12,21 +12,23 @@ import {
 } from "@kvitbit/domain/contract";
 import { Effect, Exit, Layer } from "effect";
 import { CoreLive, type CoreLiveRequires, type CoreRequirements } from "../../src/compose/CoreLive";
-import {
-  DeliveryJobsMemory,
-  DocumentRendererFake,
-  StartedDeliveries,
-} from "../../src/modules/documents";
 import { RecurringIssuance } from "../../src/modules/recurring";
-import { ExportJobs, FakeExportWorkflow, FakeReportPdfRenderer } from "../../src/modules/reports";
-import { ShareLinkKeysTest } from "../../src/modules/sharelinks";
+import { ExportJobs } from "../../src/modules/reports";
 import {
   BrandingPreviewFake,
+  CaptureEmailSender,
   CaptureInvitationDelivery,
+  CoreReposMemory,
+  DeliveryJobsMemory,
+  DocumentRendererFake,
+  FakeExportWorkflow,
+  FakeReportPdfRenderer,
+  InMemoryPortsLive,
   InvitationTokensFake,
+  ShareLinkKeysTest,
+  StartedDeliveries,
   UserDirectoryFake,
-} from "../../src/modules/workspaces";
-import { CaptureEmailSender, CoreReposMemory, InMemoryPortsLive } from "../../src/testing";
+} from "../../src/testing";
 import { account, asCaller, runCore } from "../helpers";
 import { dec } from "../modules/documents/fixtures";
 

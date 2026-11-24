@@ -11,8 +11,7 @@
  *
  * Read-only, Workspace scoped, inside the caller's transaction.
  *
- * Provide it to the documents layers that build views (DocumentsLive, DocumentPaymentsLive,
- * DocumentDeliveryReadsLive, PaymentDocumentsLive): `viewOf` reads it optionally.
+ * Provide it to `DocumentsLive`, whose owner reads add it (`withActivity`); `viewOf` never reads it.
  *
  * Requires ShareLinksRepo | ShareLinkKeys | DeliveriesRepo.
  */

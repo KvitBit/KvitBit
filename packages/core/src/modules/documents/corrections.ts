@@ -31,6 +31,7 @@ import { VatMath } from "../../engines/vat";
 import { authorizeInWorkspace } from "../../policy/Policy";
 import { appendAudit } from "../../shared/audit";
 import { orUnavailable } from "../../shared/errors";
+import { fxDryRun } from "../../shared/fx";
 import { withIdempotency } from "../../shared/idempotency";
 import { IdGenerator } from "../../shared/ids";
 import { NumberingSeries } from "../numbering";
@@ -49,7 +50,7 @@ import {
 } from "./credit";
 import type { DocumentRecord, LineRecord } from "./record";
 import { DocumentsRepo } from "./repo";
-import { now, rolledBack, viewOf, withActivity } from "./support";
+import { now, rolledBack, viewOf } from "./support";
 import { guard } from "./transitions";
 import { DocumentViewCodec } from "./view";
 
@@ -336,7 +337,6 @@ export const correct = (id: DocumentId, input: CorrectionInput, opts?: RequestOp
         });
         return yield* viewOf(creditNote);
       }),
-      (view) => withActivity(workspaceId, view),
     );
   }).pipe(orUnavailable);
 
@@ -371,4 +371,4 @@ export const previewCorrection = (id: DocumentId, input: CorrectionInput) =>
       { id: cnId, number: null, seriesId: null, lines, at },
     );
     return yield* viewOf({ ...record, status: "draft", issuedAt: null });
-  }).pipe(orUnavailable) satisfies Effect.Effect<DocumentView, unknown, unknown>;
+  }).pipe(fxDryRun, orUnavailable) satisfies Effect.Effect<DocumentView, unknown, unknown>;

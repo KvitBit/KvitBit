@@ -26,8 +26,8 @@
  * - support.ts  `now`, `newDraftRecord`, `viewOf` (the stored view: no share, no deliveries),
  *               `withActivity` (the owner-facing view), `relatedOf`.
  * - activity.ts `DocumentActivity`, the read port behind `DocumentView.share` and `deliveries`
- *               (bound at integration, compose/documentActivity.ts), required by the
- *               owner-facing boundaries (`DocumentsLive`, `PaymentDocumentsLive`);
+ *               (bound at integration, compose/documentActivity.ts), required by
+ *               `DocumentsLive` for its owner reads;
  *               `DocumentActivityNone` for module tests (`share: null`, `deliveries: []`).
  * - drafts.ts   preview, createDraft, discardDraft, editDraft (P1).
  * - reads.ts    get, list, history, pdf (P1).

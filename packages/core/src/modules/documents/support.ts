@@ -73,7 +73,7 @@ export const relatedOf = (
  * The stored view of a record as of now: `share: null`, `deliveries: []`. It is what delivery
  * snapshots, idempotency results, the renderer and share-link visitors get, so a bearer share
  * URL or the delivery history never lands in stored or replayed data (core-ports.md 66-68).
- * Owner-facing boundaries add them with `withActivity`.
+ * Owner reads add them with `withActivity`; write results never carry them (rule C3).
  */
 export const viewOf = (
   row: DocumentRecord,
@@ -86,20 +86,22 @@ export const viewOf = (
   });
 
 /**
- * The owner-facing view: `share` (with its bearer URL) and `deliveries` from `DocumentActivity`.
- * Apply it to what the caller gets, never to a view that is stored: a write applies it inside its
- * transaction (`withIdempotency`'s `present`), so a failing read rolls the write back.
- * Drafts are never shared or sent, so they skip the reads.
+ * The owner-facing view of a read: `deliveries` and, when `canReadShare` (the caller holds
+ * `share.read`, http-mcp-contracts `get_share_link`), `share` with its bearer URL, from
+ * `DocumentActivity`. Without `share.read` the share stays `null`. Apply it to owner reads only,
+ * never to a write result or a stored view. Drafts are never shared or sent, so they skip the
+ * reads.
  */
 export const withActivity = (
   workspaceId: WorkspaceId,
   view: DocumentView,
+  canReadShare: boolean,
 ): Effect.Effect<DocumentView, StoreUnavailable, DocumentActivity> =>
   view.status === "draft"
     ? Effect.succeed(view)
     : Effect.gen(function* () {
         const activity = yield* DocumentActivity;
-        const share = yield* activity.share(workspaceId, view.id);
+        const share = canReadShare ? yield* activity.share(workspaceId, view.id) : null;
         const deliveries = yield* activity.deliveries(workspaceId, view.id);
         return { ...view, share, deliveries };
       });

@@ -12,9 +12,8 @@
  *   `RatesUnavailable`, a cache read or write failure is `StoreUnavailable` (never swallowed: in
  *   Postgres it can abort the caller's transaction); callers map them with `orUnavailable`.
  *
- * Dry runs (previews) read through the cache too, so they may write to it. That is an accepted
- * exception to "dry runs write nothing" (core-ports 4): the cache holds public CNB data, not
- * Workspace state, and a cached answer is the same answer CNB would give again.
+ * Dry runs (previews) write nothing (core-ports 4), the cache included: they run under
+ * `fxDryRun`, which makes `FxFixings` read the cache and CNB without storing what it fetched.
  */
 import type { IsoDate } from "@kvitbit/domain/contract";
 import type { CnbFixing, RatesUnavailable } from "@kvitbit/domain/ports";
@@ -23,10 +22,7 @@ import { Clock, Context, Effect, Layer, Option, Ref } from "effect";
 import { pragueDate } from "../engines/calendar";
 import type { StoreUnavailable } from "../store/CoreStore";
 
-/**
- * Process-wide cache of public CNB answers (no Workspace data). Written on any read-through,
- * dry runs included: the one write a preview may make (see the module comment).
- */
+/** Process-wide cache of public CNB answers (no Workspace data); never written by a dry run. */
 export class FxFixingCache extends Context.Service<
   FxFixingCache,
   {
@@ -50,17 +46,20 @@ export const FxFixingCacheMemory: Layer.Layer<FxFixingCache> = Layer.effect(
 /**
  * The fixing valid on `on`: from the cache, else from `ExchangeRates`. A fetched fixing is cached
  * under its own publication date, and under `on` too when that answer is final (`on` before
- * `today`; today's fixing may not be published yet).
+ * `today`; today's fixing may not be published yet). With `persist: false` (a dry run) a fetched
+ * fixing is returned without being cached.
  */
 export const cachedFixing = (
   on: IsoDate,
   today: IsoDate,
+  persist = true,
 ): Effect.Effect<CnbFixing, RatesUnavailable | StoreUnavailable, FxFixingCache | ExchangeRates> =>
   Effect.gen(function* () {
     const cache = yield* FxFixingCache;
     const hit = yield* cache.get(on);
     if (Option.isSome(hit)) return hit.value;
     const fixing = yield* (yield* ExchangeRates).fixing(on);
+    if (!persist) return fixing;
     // A fixing is always the final answer for its own publication date.
     yield* cache.put(fixing.fixingDate, fixing);
     if (on !== fixing.fixingDate && on < today) yield* cache.put(on, fixing);
@@ -68,8 +67,20 @@ export const cachedFixing = (
   });
 
 /**
- * The core's one way to a CNB fixing (read through `FxFixingCache`). A miss caches the answer
- * even in a dry run (accepted: public data, not Workspace state).
+ * Whether the current call is a dry run: `FxFixings` then stores nothing. Set with `fxDryRun`;
+ * read at call time, so it reaches the fixing reads deep inside a preview's composition.
+ */
+export const FxDryRun = Context.Reference<boolean>("kvitbit/core/FxDryRun", {
+  defaultValue: () => false,
+});
+
+/** Runs `effect` as a dry run: its CNB fixings come from the cache or CNB, never stored. */
+export const fxDryRun = <A, E, R>(effect: Effect.Effect<A, E, R>): Effect.Effect<A, E, R> =>
+  Effect.provideService(effect, FxDryRun, true);
+
+/**
+ * The core's one way to a CNB fixing (read through `FxFixingCache`). Under `fxDryRun` a miss is
+ * fetched but not cached.
  */
 export class FxFixings extends Context.Service<
   FxFixings,
@@ -88,12 +99,14 @@ export const FxFixingsLive: Layer.Layer<FxFixings, never, ExchangeRates | FxFixi
       const cache = yield* FxFixingCache;
       return FxFixings.of({
         fixing: (on) =>
-          Effect.flatMap(Clock.currentTimeMillis, (now) =>
-            cachedFixing(on, pragueDate(now)).pipe(
+          Effect.gen(function* () {
+            const now = yield* Clock.currentTimeMillis;
+            const dryRun = yield* FxDryRun;
+            return yield* cachedFixing(on, pragueDate(now), !dryRun).pipe(
               Effect.provideService(ExchangeRates, rates),
               Effect.provideService(FxFixingCache, cache),
-            ),
-          ),
+            );
+          }),
       });
     }),
   );

@@ -5,6 +5,7 @@
 import type { CoreError, DocumentId, DocumentPatch, DocumentView } from "@kvitbit/domain/contract";
 import { CurrentCaller, Documents } from "@kvitbit/domain/contract";
 import { Context, Effect, Layer } from "effect";
+import { can } from "../../policy/can";
 import { authorizeInWorkspace } from "../../policy/Policy";
 import { orUnavailable } from "../../shared/errors";
 import { FxFixings } from "../../shared/fx";
@@ -53,9 +54,9 @@ const edit = (id: DocumentId, patch: DocumentPatch, expectedRevision: number) =>
       Effect.gen(function* () {
         const row = yield* repo.getForUpdate(workspaceId, id, expectedRevision);
         yield* guard(row, "edit");
-        const view =
-          row.status === "draft" ? yield* editDraft(row, patch) : yield* editIssued(row, patch);
-        return yield* withActivity(workspaceId, view);
+        return row.status === "draft"
+          ? yield* editDraft(row, patch)
+          : yield* editIssued(row, patch);
       }),
     );
   }).pipe(orUnavailable);
@@ -70,8 +71,8 @@ type WideDocuments = {
 
 /**
  * The owner-facing view of a read or dry run: `share` and `deliveries` added after the method.
- * Writes add them themselves, inside their transaction (`withIdempotency`'s `present`), so a
- * failing activity read rolls the write back instead of failing after it committed.
+ * Write results are never enriched (`share: null`, `deliveries: []`), so a keyed replay
+ * returns exactly the stored result (rule C3) and an activity read never touches a write.
  */
 const enriched = <E, R>(effect: Effect.Effect<DocumentView, E, R>) =>
   Effect.gen(function* () {
@@ -79,7 +80,7 @@ const enriched = <E, R>(effect: Effect.Effect<DocumentView, E, R>) =>
     const caller = yield* CurrentCaller;
     // A successful method had a Workspace caller (authorizeInWorkspace).
     return caller._tag === "Member" || caller._tag === "System"
-      ? yield* withActivity(caller.workspaceId, view)
+      ? yield* withActivity(caller.workspaceId, view, can(caller, "share.read"))
       : view;
   }).pipe(orUnavailable);
 

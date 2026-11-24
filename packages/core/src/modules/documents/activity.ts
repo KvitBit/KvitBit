@@ -4,9 +4,9 @@
  * so integration binds it (compose/documentActivity.ts, from ShareLinksRepo + DeliveriesRepo)
  * without documents importing the share-links module (which imports documents).
  *
- * Required by the owner-facing boundaries that return full views (`DocumentsLive`,
- * `PaymentDocumentsLive`; `withActivity` in support.ts), so a composition without it does not
- * compile. Stored, replayed, rendered and visitor views never carry it (`viewOf`).
+ * Required by `DocumentsLive`, whose owner reads (`get`, previews) add it (`withActivity` in
+ * support.ts), so a composition without it does not compile. Write results, stored, replayed,
+ * rendered and visitor views never carry it (`viewOf`).
  */
 import type { DocumentId, DocumentView, WorkspaceId } from "@kvitbit/domain/contract";
 import { Context, Effect, Layer } from "effect";

@@ -348,7 +348,6 @@ const recordOnExpense = (workspaceId: WorkspaceId, id: ExpenseId, input: RecordP
 export const record = (input: RecordPaymentInput, opts?: RequestOptions) =>
   Effect.gen(function* () {
     const { workspaceId } = yield* authorizeInWorkspace("payment.write");
-    const documents = yield* PaymentDocuments;
     return yield* withIdempotency(
       {
         scope: { _tag: "Workspace", workspaceId },
@@ -363,12 +362,6 @@ export const record = (input: RecordPaymentInput, opts?: RequestOptions) =>
           ? yield* recordOnDocument(workspaceId, target.document, input)
           : yield* recordOnExpense(workspaceId, target.expense, input);
       }),
-      // Stored and replayed without share/deliveries; the caller's view gets them before commit.
-      (result) =>
-        Effect.map(
-          Effect.forEach(result.issued, (view) => documents.withActivity(workspaceId, view)),
-          (issued) => ({ ...result, issued }),
-        ),
     );
   }).pipe(orUnavailable);
 

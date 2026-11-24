@@ -28,6 +28,7 @@ import { Effect, Option, Schema } from "effect";
 import { authorizeInWorkspace } from "../../../policy/Policy";
 import { appendAudit } from "../../../shared/audit";
 import { orUnavailable } from "../../../shared/errors";
+import { fxDryRun } from "../../../shared/fx";
 import { withIdempotency } from "../../../shared/idempotency";
 import { newId } from "../../../shared/ids";
 import { CoreStore } from "../../../store/CoreStore";
@@ -328,4 +329,4 @@ export const previewSend = (id: DocumentId, input?: SendOptions) =>
     const { workspaceId } = yield* authorizeInWorkspace("document.send");
     const record = yield* (yield* DocumentsRepo).get(workspaceId, id);
     return previewOf(yield* plan(workspaceId, record, input));
-  }).pipe(orUnavailable);
+  }).pipe(fxDryRun, orUnavailable);

@@ -8,13 +8,14 @@ import { Effect } from "effect";
 import { authorizeInWorkspace } from "../../policy/Policy";
 import { appendAudit } from "../../shared/audit";
 import { orUnavailable } from "../../shared/errors";
+import { fxDryRun } from "../../shared/fx";
 import { withIdempotency } from "../../shared/idempotency";
 import { newId } from "../../shared/ids";
 import { CoreStore } from "../../store/CoreStore";
 import { applyPatch, compose, specFromInput, specFromRecord } from "./compose";
 import type { DocumentRecord } from "./record";
 import { DocumentsRepo } from "./repo";
-import { newDraftRecord, now, viewOf, withActivity } from "./support";
+import { newDraftRecord, now, viewOf } from "./support";
 import { guard } from "./transitions";
 import { DocumentViewCodec, toView } from "./view";
 
@@ -35,7 +36,7 @@ export const preview = (input: DocumentInput) =>
         return toView(row, { today });
       }),
     );
-  }).pipe(orUnavailable);
+  }).pipe(fxDryRun, orUnavailable);
 
 export const createDraft = (input: DocumentInput, opts?: RequestOptions) =>
   Effect.gen(function* () {
@@ -65,7 +66,6 @@ export const createDraft = (input: DocumentInput, opts?: RequestOptions) =>
         });
         return toView(row, { today });
       }),
-      (view) => withActivity(workspaceId, view),
     );
   }).pipe(orUnavailable);
 

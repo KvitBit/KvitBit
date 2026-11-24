@@ -63,7 +63,7 @@ const flow = Effect.gen(function* () {
     sent,
     draft: yield* docs.get(draft.id),
     got: yield* docs.get(id),
-    // A mutation's returned view goes through the same `viewOf`.
+    // A write result is never enriched (rule C3): it is what a keyed replay returns.
     locked: yield* docs.lock(id),
     revoked: yield* Effect.andThen(links.revoke(id), docs.get(id)),
   };
@@ -98,8 +98,8 @@ describe("DocumentView.share and .deliveries", () => {
     expect(r.got.deliveries).toHaveLength(1);
     expect(r.got.deliveries[0]).toMatchObject({ purpose: "document", status: "queued", at });
     expect(r.got.deliveries[0]?.to.length).toBeGreaterThan(0);
-    expect(r.locked.share).toEqual(r.got.share);
-    expect(r.locked.deliveries).toEqual(r.got.deliveries);
+    expect(r.locked.share).toBeNull();
+    expect(r.locked.deliveries).toEqual([]);
     // Drafts are never shared or sent; a revoked link is no link.
     expect(r.draft.share).toBeNull();
     expect(r.draft.deliveries).toEqual([]);
@@ -162,19 +162,20 @@ const storedFlow = Effect.gen(function* () {
 });
 
 describe("stored, replayed and rendered views carry no share link or deliveries", () => {
-  test("delivery snapshots, the keyed cancel result and renderer views are un-enriched; owner reads are not", async () => {
+  test("delivery snapshots, the keyed cancel result, its replay and renderer views are un-enriched; owner reads are not", async () => {
     const r = ok(await runWith(bound, storedFlow));
     const leaks = (value: unknown) => {
       const json = JSON.stringify(value);
       return json.includes(r.token) || json.includes(r.url);
     };
-    // Owner-facing: the view, the cancel result and its replay all carry share and deliveries.
+    // Owner read: share and deliveries. The cancel result and its replay: neither (rule C3).
     expect(r.got.share?.url).toBe(r.url);
     expect(r.got.deliveries).toHaveLength(2);
-    expect(r.cancelled.document.share?.url).toBe(r.url);
-    expect(r.cancelled.document.deliveries).toHaveLength(2);
-    expect(r.replayed.document.share).toEqual(r.cancelled.document.share);
-    expect(r.replayed.document.deliveries).toEqual(r.cancelled.document.deliveries);
+    for (const result of [r.cancelled, r.replayed]) {
+      expect(result.document.share).toBeNull();
+      expect(result.document.deliveries).toEqual([]);
+    }
+    expect(leaks([r.cancelled, r.replayed])).toBe(false);
     // Stored: both delivery rows' snapshots (the second was taken after a share and a delivery).
     for (const row of r.rows) {
       expect(row.view.share).toBeNull();

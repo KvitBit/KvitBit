@@ -12,7 +12,7 @@ import { BigDecimal, Cause, Effect, Exit, Layer, Option, Ref } from "effect";
 import { TestClock } from "effect/testing";
 import * as CoreRoot from "../src";
 import { orUnavailable } from "../src/shared/errors";
-import { FxFixingCache, FxFixings, FxFixingsLive } from "../src/shared/fx";
+import { FxFixingCache, FxFixings, FxFixingsLive, fxDryRun } from "../src/shared/fx";
 import { StoreUnavailable } from "../src/store/CoreStore";
 import * as CoreTesting from "../src/testing";
 import { FixtureRates } from "../src/testing";
@@ -46,16 +46,20 @@ const flakyCache = (fail: { readonly get?: boolean; readonly put?: boolean }) =>
 const fixingOn = (
   on: IsoDate,
   cache: Layer.Layer<FxFixingCache>,
-  { ratesDown = false }: { readonly ratesDown?: boolean } = {},
+  {
+    ratesDown = false,
+    dryRun = false,
+  }: { readonly ratesDown?: boolean; readonly dryRun?: boolean } = {},
 ) =>
   Effect.runPromise(
     Effect.gen(function* () {
       yield* TestClock.setTime(TEST_NOW);
       if (ratesDown) yield* Ref.set((yield* FixtureRates).unavailable, true);
       const fx = yield* FxFixings;
+      const read = (e: ReturnType<typeof fx.fixing>) => (dryRun ? fxDryRun(e) : e);
       return {
-        raw: yield* Effect.exit(fx.fixing(on)),
-        mapped: yield* Effect.exit(orUnavailable(fx.fixing(on))),
+        raw: yield* Effect.exit(read(fx.fixing(on))),
+        mapped: yield* Effect.exit(orUnavailable(read(fx.fixing(on)))),
       };
     }).pipe(
       Effect.provide(
@@ -88,6 +92,13 @@ describe("FxFixings (shared read-through)", () => {
       RatesUnavailable,
     );
     expect(r.mapped).toEqual(Exit.fail(new Unavailable({ dependency: "exchange_rates" })));
+  });
+
+  test("a dry run returns CNB's answer without writing the cache", async () => {
+    // A failing write would surface as StoreUnavailable; a dry run never writes.
+    const r = await fixingOn(SATURDAY, flakyCache({ put: true }), { dryRun: true });
+    expect(r.raw).toEqual(Exit.succeed(FRIDAY));
+    expect(r.mapped).toEqual(Exit.succeed(FRIDAY));
   });
 
   test("a working cache serves CNB's answer carried back", async () => {

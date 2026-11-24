@@ -7,7 +7,7 @@ import { describe, expect, test } from "bun:test";
 import type { ContactView, DocumentId, DocumentView, IsoDate } from "@kvitbit/domain/contract";
 import { Contacts, Documents, Payments, PriceList, Workspaces } from "@kvitbit/domain/contract";
 import { Effect, Exit, Ref } from "effect";
-import { StartedDeliveries } from "../../src/modules/documents";
+import { StartedDeliveries } from "../../src/testing";
 import { account, asCaller, runCore } from "../helpers";
 import {
   amounts,

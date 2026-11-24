@@ -27,6 +27,7 @@ import { ZERO } from "../../engines/decimal";
 import { authorizeInWorkspace } from "../../policy/Policy";
 import { appendAudit } from "../../shared/audit";
 import { orUnavailable } from "../../shared/errors";
+import { fxDryRun } from "../../shared/fx";
 import { withIdempotency } from "../../shared/idempotency";
 import { newId } from "../../shared/ids";
 import { CoreStore } from "../../store/CoreStore";
@@ -36,7 +37,7 @@ import { remainingBuckets } from "./credit";
 import { numbered } from "./lifecycle";
 import type { DocumentRecord, LinkRecord } from "./record";
 import { DocumentsRepo } from "./repo";
-import { newDraftRecord, now, rolledBack, viewOf, withActivity } from "./support";
+import { newDraftRecord, now, rolledBack, viewOf } from "./support";
 import { guard, hasFinalInvoice } from "./transitions";
 import { DocumentViewCodec } from "./view";
 
@@ -250,7 +251,6 @@ export const issueFinalInvoice = (
         });
         return yield* viewOf(saved);
       }),
-      (view) => withActivity(workspaceId, view),
     );
   }).pipe(orUnavailable);
 
@@ -276,7 +276,7 @@ export const previewFinalInvoice = (
         return yield* viewOf(withSettlement({ ...row, links: finalLinks(proforma, spec) }));
       }),
     );
-  }).pipe(orUnavailable) satisfies Effect.Effect<DocumentView, unknown, unknown>;
+  }).pipe(fxDryRun, orUnavailable) satisfies Effect.Effect<DocumentView, unknown, unknown>;
 
 /** A Final Invoice whose advances cover it is `paid` (or `overpaid`) from the start. */
 const withSettlement = (row: DocumentRecord): DocumentRecord => {
