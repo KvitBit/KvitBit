@@ -16,6 +16,7 @@ import { Hct } from "./color/hct";
 import {
   clamp,
   hexFromRgb,
+  linearized,
   lstarFromRgb,
   lstarFromY,
   rgbFromComponents,
@@ -224,6 +225,49 @@ const feasibleColor = (
           }
     }
   }
+  if (best !== undefined) return hexFromRgb(best.rgb);
+  return exhaustiveColor(own, partners);
+};
+
+/** Linear sRGB channel (0..1) per 8-bit value, for the exhaustive search. */
+const LINEAR = Array.from({ length: 256 }, (_, v) => linearized(v) / 100);
+
+/**
+ * Complete fallback: every red / green pair, with the blue channel binary-searched into each
+ * feasible luminance range (luminance grows with blue). Finds a passing 8-bit colour whenever one
+ * exists; returns the one closest in tone to `own`.
+ */
+const exhaustiveColor = (
+  own: Hct,
+  partners: ReadonlyArray<{ readonly color: string; readonly required: number }>,
+): string | undefined => {
+  const passes = (rgb: number) =>
+    partners.every((p) => contrastRatio(rgb, rgbFromHex(p.color)) >= p.required);
+  const ranges = feasibleLuminance(partners);
+  let best: { rgb: number; distance: number } | undefined;
+  for (let r = 0; r < 256; r++)
+    for (let g = 0; g < 256; g++) {
+      const base = 0.2126 * (LINEAR[r] ?? 0) + 0.7152 * (LINEAR[g] ?? 0);
+      for (const [lo, hi] of ranges) {
+        const need = (lo - base) / 0.0722;
+        if ((hi - base) / 0.0722 < 0 || need > 1) continue;
+        let a = 0;
+        let z = 255;
+        while (a < z) {
+          const m = (a + z) >> 1;
+          if ((LINEAR[m] ?? 0) < need) a = m + 1;
+          else z = m;
+        }
+        for (const b of [a, a + 1]) {
+          if (b > 255) continue;
+          const rgb = rgbFromComponents(r, g, b);
+          if (!passes(rgb)) continue;
+          const y = base + 0.0722 * (LINEAR[b] ?? 0);
+          const distance = Math.abs(lstarFromY(y * 100) - own.tone);
+          if (best === undefined || distance < best.distance) best = { rgb, distance };
+        }
+      }
+    }
   return best === undefined ? undefined : hexFromRgb(best.rgb);
 };
 

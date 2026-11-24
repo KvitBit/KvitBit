@@ -270,6 +270,19 @@ describe("dynamic colour hardening", () => {
     expect(auditScheme({ roles: e.roles, extended: e.extended }, "light")).toEqual([]);
   });
 
+  test("a narrow off-grey band (#000000 + #FBFDE2) is found", () => {
+    const roles = Result.getOrThrow(
+      dynamicRoles({
+        _tag: "Roles",
+        light: { primaryFixed: "#000000", primaryFixedDim: "#FBFDE2" },
+        dark: {},
+      }),
+    );
+    const e = effectiveTheme(state({ system: { dynamic: Option.some(roles) } }));
+    expect([e.roles.primaryFixed, e.roles.primaryFixedDim]).toEqual(["#000000", "#FBFDE2"]);
+    expect(auditScheme({ roles: e.roles, extended: e.extended }, "light")).toEqual([]);
+  });
+
   test("two supplied backgrounds of one foreground pass whenever a feasible luminance exists", () => {
     const colours = ["#000000", "#FBFBFB", "#777777", "#1A1C18"];
     const byForeground = new Map<string, string[]>();
