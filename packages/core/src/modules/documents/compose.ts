@@ -30,6 +30,7 @@ import type {
   NumberingSeriesId,
   PriceListItemId,
   TaxRegime,
+  VatBucket,
   VatTreatment,
   WorkspaceId,
 } from "@kvitbit/domain/contract";
@@ -37,7 +38,7 @@ import { Invalid, NotFound } from "@kvitbit/domain/contract";
 import { ExchangeRates, type RatesUnavailable } from "@kvitbit/domain/ports";
 import { BigDecimal, Effect, Result } from "effect";
 import { addDays, isCalendarDate, MAX_ISO_DATE } from "../../engines/calendar";
-import { HUNDRED } from "../../engines/decimal";
+import { HUNDRED, ZERO } from "../../engines/decimal";
 import { Fx } from "../../engines/fx";
 import { VatMath } from "../../engines/vat";
 import { IdGenerator } from "../../shared/ids";
@@ -76,6 +77,23 @@ export interface LineSpec {
    */
   readonly itemPrice: LineRecord["itemPrice"];
   readonly deducts: DocumentId | null;
+  /** A Final Invoice deduction line (rule D8); null on every other line. */
+  readonly deduction: Deduction | null;
+}
+
+/**
+ * What a Final Invoice deduction line deducts, as stored on the deducted document (negative
+ * amounts, its currency, treatment and rate): `compose` never recomputes it. A Payment Tax
+ * Document bucket carries its VAT and CZK VAT; outside `vat_payer` the paid amount is one
+ * `outside_scope` deduction with zero VAT.
+ */
+export interface Deduction {
+  readonly currency: CurrencyCode;
+  readonly treatment: VatTreatment;
+  readonly ratePercent: BigDecimal.BigDecimal;
+  readonly base: BigDecimal.BigDecimal;
+  readonly vat: BigDecimal.BigDecimal;
+  readonly vatCzk: BigDecimal.BigDecimal | null;
 }
 
 /** What the caller asked for; `compose` resolves everything else. */
@@ -199,6 +217,7 @@ export const expandLines = (
             ? { currency: item.currency, net: item.unitPrice }
             : null,
         deducts: null,
+        deduction: null,
       });
     }
     if (issues.length > 0) return yield* invalid(issues);
@@ -250,6 +269,20 @@ export const specFromRecord = (row: DocumentRecord): DocumentSpec => ({
     itemVat: l.itemVat,
     itemPrice: l.itemPrice,
     deducts: l.deducts,
+    deduction:
+      l.deducts === null
+        ? null
+        : {
+            currency: row.currency,
+            treatment: l.treatment,
+            ratePercent: l.ratePercent,
+            // The stored amount is gross when prices include VAT.
+            base: row.pricesIncludeVat
+              ? BigDecimal.normalize(BigDecimal.subtract(l.amount, l.deductedVat ?? ZERO))
+              : l.amount,
+            vat: l.deductedVat ?? ZERO,
+            vatCzk: l.deductedVatCzk,
+          },
   })),
   pricesIncludeVat: row.pricesIncludeVat,
   orderNumber: row.orderNumber,
@@ -259,8 +292,14 @@ export const specFromRecord = (row: DocumentRecord): DocumentSpec => ({
 /** The fields of `DocumentPatch` that `applyPatch` handles (number/refreshParties are P2's). */
 export const applyPatch = (workspaceId: WorkspaceId, spec: DocumentSpec, patch: DocumentPatch) =>
   Effect.gen(function* () {
+    // A Final Invoice keeps its deduction lines (D8) whatever lines the patch gives.
     const lines =
-      patch.lines === undefined ? spec.lines : yield* expandLines(workspaceId, patch.lines);
+      patch.lines === undefined
+        ? spec.lines
+        : [
+            ...(yield* expandLines(workspaceId, patch.lines)),
+            ...spec.lines.filter((l) => l.deduction !== null),
+          ];
     const given: GivenFields = definedOnly({
       ...spec.given,
       currency: patch.currency ?? spec.given.currency,
@@ -412,6 +451,36 @@ const sameOverride = (a: FxOverride | null, b: FxOverride | null) =>
     ? a === b
     : BigDecimal.equals(a.manual.rate, b.manual.rate) && a.manual.quantity === b.manual.quantity;
 
+const bucketKey = (b: Pick<VatBucket, "treatment" | "ratePercent">) =>
+  `${b.treatment}|${BigDecimal.format(BigDecimal.normalize(b.ratePercent))}`;
+
+const addOpt = (a: BigDecimal.BigDecimal | null, b: BigDecimal.BigDecimal | null) =>
+  a === null ? b : b === null ? a : BigDecimal.normalize(BigDecimal.sum(a, b));
+
+/** Sums buckets per (treatment, rate), first-seen order. */
+export const mergeBuckets = (
+  ...lists: ReadonlyArray<ReadonlyArray<VatBucket>>
+): ReadonlyArray<VatBucket> => {
+  const byKey = new Map<string, VatBucket>();
+  for (const b of lists.flat()) {
+    const key = bucketKey(b);
+    const prev = byKey.get(key);
+    byKey.set(
+      key,
+      prev === undefined
+        ? b
+        : {
+            ...prev,
+            base: BigDecimal.normalize(BigDecimal.sum(prev.base, b.base)),
+            vat: BigDecimal.normalize(BigDecimal.sum(prev.vat, b.vat)),
+            gross: BigDecimal.normalize(BigDecimal.sum(prev.gross, b.gross)),
+            vatCzk: addOpt(prev.vatCzk, b.vatCzk),
+          },
+    );
+  }
+  return [...byKey.values()];
+};
+
 export const compose = (
   workspaceId: WorkspaceId,
   spec: DocumentSpec,
@@ -470,8 +539,12 @@ export const compose = (
       issues.push(issue(["due"], "request.malformed", { reason: "out_of_range" }));
     } else if (dueOn < issuedOn) issues.push(issue(["due"], "document.due_before_issue"));
 
-    const treatments = spec.lines.map((l) => treatmentOf(l, regime, buyer));
-    issues.push(...regimeIssues(regime, buyer, treatments));
+    // Deduction lines keep the deducted document's treatment and rate (D8): no D9 checks.
+    const treatments = spec.lines.map(
+      (l) => l.deduction?.treatment ?? treatmentOf(l, regime, buyer),
+    );
+    const supplyTreatments = treatments.filter((_, i) => spec.lines[i]?.deduction === null);
+    issues.push(...regimeIssues(regime, buyer, supplyTreatments));
     spec.lines.forEach((l, i) => {
       // A price copied from the Price List is in the item's currency: it must match (also
       // after an edit changes the document currency); else the caller gives a unitPrice.
@@ -484,7 +557,18 @@ export const compose = (
         );
       }
     });
-    if (spec.lines.length === 0) issues.push(issue(["lines"], "document.lines_required"));
+    spec.lines.forEach((l) => {
+      // Deducted amounts are in the deducted document's currency.
+      if (l.deduction !== null && l.deduction.currency !== currency) {
+        issues.push(
+          issue(["currency"], "request.malformed", {
+            reason: "currency_mismatch",
+            currency: l.deduction.currency,
+          }),
+        );
+      }
+    });
+    if (supplyTreatments.length === 0) issues.push(issue(["lines"], "document.lines_required"));
     if (given.variableSymbol !== undefined && !isValidVariableSymbol(given.variableSymbol)) {
       issues.push(
         issue(["variableSymbol"], "request.malformed", { reason: "variable_symbol_invalid" }),
@@ -553,6 +637,16 @@ export const compose = (
     // A Price List price is net (excl. VAT): with pricesIncludeVat it is grossed up at the
     // line's rate, so the top-down math (§37(b)) sees a gross unit price.
     const unitPrices = spec.lines.map((l, i) => {
+      // A deduction line prints quantity -1 at the deducted base (gross with VAT-inclusive prices).
+      if (l.deduction !== null) {
+        return BigDecimal.normalize(
+          BigDecimal.negate(
+            spec.pricesIncludeVat
+              ? BigDecimal.sum(l.deduction.base, l.deduction.vat)
+              : l.deduction.base,
+          ),
+        );
+      }
       if (l.itemPrice === null) return l.unitPrice;
       if (!spec.pricesIncludeVat) return l.itemPrice.net;
       const rate = VatMath.rateFor(treatments[i] ?? "outside_scope", taxPoint);
@@ -563,18 +657,46 @@ export const compose = (
         ),
       );
     });
-    const totals = VatMath.calculate({
-      lines: spec.lines.map((l, i) => ({
-        quantity: l.quantity,
-        unitPrice: unitPrices[i] ?? l.unitPrice,
-        treatment: treatments[i] ?? "outside_scope",
-      })),
+    const supply = spec.lines.flatMap((l, i) =>
+      l.deduction === null
+        ? [
+            {
+              quantity: l.quantity,
+              unitPrice: unitPrices[i] ?? l.unitPrice,
+              treatment: treatments[i] ?? "outside_scope",
+            },
+          ]
+        : [],
+    );
+    const deductions = spec.lines.flatMap((l) => (l.deduction === null ? [] : [l.deduction]));
+    const calculated = VatMath.calculate({
+      lines: supply,
       currency,
       taxPoint,
       pricesIncludeVat: spec.pricesIncludeVat,
       fx,
       paymentRounding,
     });
+    // D8: the deducted buckets are added as stored, so VAT already declared on a Payment Tax
+    // Document (at its own rate and CZK fixing) is subtracted exactly, never re-derived.
+    const totals =
+      deductions.length === 0
+        ? calculated
+        : VatMath.fromBuckets(
+            mergeBuckets(
+              calculated.buckets,
+              deductions.map((d) => ({
+                treatment: d.treatment,
+                ratePercent: d.ratePercent,
+                base: d.base,
+                vat: d.vat,
+                gross: BigDecimal.normalize(BigDecimal.sum(d.base, d.vat)),
+                vatCzk: currency === "CZK" ? null : d.vatCzk,
+              })),
+            ),
+            currency,
+            paymentRounding,
+          );
 
     const ids = yield* IdGenerator;
     const lines: Array<LineRecord> = [];
@@ -592,9 +714,11 @@ export const compose = (
         vat: l.vat,
         itemVat: l.itemVat,
         treatment,
-        ratePercent: VatMath.rateFor(treatment, taxPoint),
+        ratePercent: l.deduction?.ratePercent ?? VatMath.rateFor(treatment, taxPoint),
         amount: BigDecimal.normalize(BigDecimal.multiply(l.quantity, unitPrice)),
         deducts: l.deducts,
+        deductedVat: l.deduction?.vat ?? null,
+        deductedVatCzk: l.deduction?.vatCzk ?? null,
       });
     }
 
@@ -619,7 +743,7 @@ export const compose = (
       totals,
       fx,
       fxOverride: spec.fxOverride,
-      taxDocument: isTaxDocument(kind, regime, treatments),
+      taxDocument: isTaxDocument(kind, regime, supplyTreatments),
       paymentRounding,
     };
   });

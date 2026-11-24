@@ -34,20 +34,14 @@ import { CoreStore } from "../../store/CoreStore";
 import { NumberingSeries } from "../numbering";
 import type { Composed } from "./compose";
 import { applyPatch, compose, specFromInput, specFromRecord } from "./compose";
-import { digitsOf, issueCreditNote, remainderSpec } from "./credit";
+import { digitsOf, issueCreditNote, remainderSpec, settlementOf } from "./credit";
 import { DocumentIssuers } from "./ports";
 import type { DocumentRecord, GivenFields } from "./record";
 import { DocumentRecord as DocumentRecordSchema } from "./record";
 import { DocumentsRepo } from "./repo";
 import { DocumentSender } from "./sender";
 import { newDraftRecord, now, viewOf } from "./support";
-import {
-  guard,
-  hasDependents,
-  hasFinalInvoice,
-  paymentsBlockCancel,
-  settlementOf,
-} from "./transitions";
+import { guard, hasDependents, hasFinalInvoice, paymentsBlockCancel } from "./transitions";
 import { DocumentViewCodec } from "./view";
 
 const illegal = () => new Conflict({ reason: "illegal_transition" });
@@ -91,7 +85,7 @@ const pinDefaults = (c: Composed): GivenFields => ({
  * document resolved (else the kind's default). Exhaustion is
  * `Conflict{illegal_transition, numbering.pattern_invalid}` and rolls the issue back.
  */
-const numbered = (workspaceId: WorkspaceId, documentId: DocumentId, composed: Composed) =>
+export const numbered = (workspaceId: WorkspaceId, documentId: DocumentId, composed: Composed) =>
   Effect.gen(function* () {
     const numbering = yield* NumberingSeries;
     const series = yield* numbering.resolve(
@@ -469,7 +463,15 @@ export const editIssued = (row: DocumentRecord, patch: DocumentPatch) =>
         variableSymbol: composed.given.variableSymbol ?? digitsOf(number),
       };
     }
-    next = { ...next, settlement: settlementOf(next), updatedAt: at };
+    // With a Credit Note the totals are frozen (D3a), so the stored settlement stands.
+    next = {
+      ...next,
+      settlement:
+        dependents && row.links.some((l) => l.relation === "corrected_by")
+          ? row.settlement
+          : settlementOf(next),
+      updatedAt: at,
+    };
 
     const saved = yield* repo
       .update(next, row.revision)

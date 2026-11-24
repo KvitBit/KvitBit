@@ -23,8 +23,7 @@
  *               VatMath totals. Every write and dry run goes through `compose`.
  * - view.ts     record -> DocumentView/DocumentSummary, concrete codecs for the domain
  *               placeholders (`DocumentViewCodec` is the C3 result codec).
- * - support.ts  `now`, `newDraftRecord`, `viewOf`/`relatedOf`,
- *               `notImplemented`.
+ * - support.ts  `now`, `newDraftRecord`, `viewOf`/`relatedOf`.
  * - drafts.ts   preview, createDraft, discardDraft, editDraft (P1).
  * - reads.ts    get, list, history, pdf (P1).
  * - transitions.ts  the state machine: `TRANSITIONS` (lifecycle state x action -> ok | noop |
@@ -33,10 +32,41 @@
  * - lifecycle.ts  issue (numbering after the row lock, fresh snapshots, pinned defaults),
  *               editIssued (D3/D3a/D4/D10), lock, unlock, cancel (P2).
  * - credit.ts   Credit Note issuance from a corrected record (`issueCreditNote`, the uncorrected
- *               remainder `remainderSpec`, `remainingBuckets`/`isFullyCredited`); P3's
- *               `correct` builds its own `CreditSpec` and reuses `issueCreditNote`.
+ *               remainder `remainderSpec`, `remainingBuckets`/`isFullyCredited`) and the stored
+ *               settlement: `settlementOf(row, creditNotes)` against `owedOf` (gross minus
+ *               credited gross), `outstandingOf`.
+ * - corrections.ts  correct, previewCorrection (P3, D7): "full" = the remainder; partial picks
+ *               negate a line's quantity at the original's rate, fx and price basis; D7 cap per
+ *               bucket against `remainingBuckets` (`credit_note.exceeds_original`).
+ * - final.ts    issueFinalInvoice, previewFinalInvoice (P3, D8): the Proforma's lines and terms
+ *               + patch, then deduction lines (`deducts`; a PTD bucket's VAT/CZK VAT frozen on
+ *               the line as `deductedVat`/`deductedVatCzk`, which `compose` adds as stored;
+ *               outside vat_payer one `outside_scope` line for the amount paid). Locks the
+ *               Proforma first (S4), links `final_invoice_for` once (`Conflict{duplicate}`).
+ * - payments.ts PAYMENTS SEAM (stage 2, cd-payments; board #529), tag `DocumentPayments`
+ *               (`DocumentPaymentsLive`), inside the caller's CoreStore transaction, no
+ *               authorize, R = CurrentCaller, port failures raw (caller maps orUnavailable):
+ *               lock(ws, id) -> PaymentTargets {requested, settleOn, proforma} (S4: the
+ *                 Proforma first; a Proforma with a Final Invoice settles on the Invoice, D8);
+ *               settle(ws, id, {amount, payments}, {action, reason?}) -> Payable (stores paid
+ *                 total + count, credit-aware settlement, revision bump, one audit entry);
+ *               issuePaymentTaxDocument(ws, proforma, {amount, paidOn}) -> DocumentView | null
+ *                 (P2: null unless vat_payer on paidOn; VatMath.splitAdvance with the CNB
+ *                 fixing for paidOn; PTD series counter after the Proforma lock);
+ *               removalBlocked(ws, ptd) -> boolean (P3).
+ * - delivery.ts DELIVERY READ SEAM (stage 2, cd-delivery and share links; board #529), tag
+ *               `DocumentDeliveryReads` (`DocumentDeliveryReadsLive`): load(ws, id, ctx?) ->
+ *               {record, view, contactId, dueOn, reminders {choice, on}, settlement, overdue};
+ *               render(view, options) (DocumentRenderer). send/previewSend stay `DocumentSender`.
+ * - reports.ts  `reportFigures(record)` for the ReportsSource adapter (#384): full totals and
+ *               the advance deduction buckets of a Final Invoice (or its Credit Note).
  * - service.ts  `DocumentsLive`: captures `DocumentsDeps`, wires the method files, dispatches
- *               `edit` by state, and stubs later-phase methods with `notImplemented`.
+ *               `edit` by state.
+ *
+ * Links (`DocumentRecord.links`, stored on both documents): Credit Note `corrects` original,
+ * original `corrected_by` Credit Note; PTD and Final Invoice `advance_of` their Proforma;
+ * Proforma `tax_document_for` each PTD and `final_invoice_for` its Final Invoice; Final
+ * Invoice `deducts` each deducted PTD.
  *
  * Known contract gaps (domain frozen; listed for phase2a-core in board #430/#478): C4 resolved
  * language/note/series are on the record but not in DocumentView (deferred for P1); validation
@@ -46,48 +76,45 @@
  * PaymentQr engine (core-ports 5.3, src/engines; parent ruling, handoff in
  * ~/.t3/orchestrator-state/cd-lifecycle-paymentqr-handoff/). When it lands, run it in `compose`
  * (validation, with the allocated number at issue) and in `toView`.
- *
- * Extension points:
- * - P3 (corrections, final invoice, PTD, stage-2 seams): corrections.ts builds a `CreditSpec`
- *   (credit.ts; enforce D7's per-bucket cap against `remainingBuckets` before
- *   `issueCreditNote`); final.ts builds a `DocumentSpec` with `deducts` lines and runs `compose`;
- *   `creditNoteRecord` is the pure builder for previewCorrection; `settlementOf` compares
- *   payments with gross only, so make it credit-aware for partial credits; a Final Invoice
- *   deducts PTD buckets as stored (never re-derive VAT from a deducted base);
- *   guard every method with `guard(row, action)` (transitions.ts); links go in
- *   `DocumentRecord.links`; payments.ts is the payments seam (lock Proforma first, S2-S4;
- *   write `paidAmount`/`payments`/`settlement`; PTD via VatMath.splitAdvance). Stage-2
- *   deliveries/share links read records through `DocumentsRepo` + `viewOf` and pass
- *   `share`/`deliveries` into `toView`'s `ViewContext`.
  */
 import { Layer } from "effect";
 import { NumberingTestLayer } from "../numbering";
+import { DocumentDeliveryReadsLive } from "./delivery";
 import { DocumentFakesLive } from "./fakes";
+import { DocumentPaymentsLive } from "./payments";
 import { DocumentsRepoMemory } from "./repo";
 import { DocumentSenderStub } from "./sender";
 import { DocumentsLive } from "./service";
 
-export type { Composed, ComposeOptions, DocumentSpec, LineSpec } from "./compose";
+export type { Composed, ComposeOptions, Deduction, DocumentSpec, LineSpec } from "./compose";
 export {
   applyPatch,
   compose,
   defaultTreatment,
   expandLines,
   isTaxDocument,
+  mergeBuckets,
   specFromInput,
   specFromRecord,
 } from "./compose";
+export { correct, previewCorrection } from "./corrections";
 export type { CreditLine, CreditSpec, IssueCreditNoteInput } from "./credit";
 export {
   creditNoteRecord,
   digitsOf,
   isFullyCredited,
   issueCreditNote,
+  outstandingOf,
+  owedOf,
   remainderSpec,
   remainingBuckets,
+  settlementOf,
 } from "./credit";
+export type { DeliveryDocument } from "./delivery";
+export { DocumentDeliveryReads, DocumentDeliveryReadsLive } from "./delivery";
 export type { RenderCall } from "./fakes";
 export { DocumentFakesLive, DocumentFixtures, fakePdfBytes } from "./fakes";
+export { issueFinalInvoice, previewFinalInvoice } from "./final";
 export type { CancelInput, CancelResult, IssueFrom } from "./lifecycle";
 export {
   CancelResultCodec,
@@ -96,8 +123,16 @@ export {
   editIssued,
   issue,
   lock,
+  numbered,
   unlock,
 } from "./lifecycle";
+export type { Payable, PaymentTargets, SettleAudit } from "./payments";
+export {
+  DocumentPayments,
+  DocumentPaymentsLive,
+  payableOf,
+  paymentTaxDocumentRecord,
+} from "./payments";
 export type {
   ContactForDocument,
   IssuerBankAccount,
@@ -126,12 +161,12 @@ export {
 } from "./record";
 export type { DocumentPage, DocumentSearch } from "./repo";
 export { DocumentsRepo, DocumentsRepoMemory } from "./repo";
+export { reportFigures } from "./reports";
 export { DocumentSender, DocumentSenderStub } from "./sender";
 export type { DocumentsDeps } from "./service";
 export { DocumentsLive } from "./service";
 export {
   newDraftRecord,
-  notImplemented,
   now,
   relatedOf,
   viewOf,
@@ -145,7 +180,6 @@ export {
   LIFECYCLE_STATES,
   outcomeOf,
   paymentsBlockCancel,
-  settlementOf,
   stateOf,
   TRANSITIONS,
 } from "./transitions";
@@ -162,11 +196,16 @@ export {
 } from "./view";
 
 /**
- * `Documents` on the memory repo, the in-memory numbering module, the port fakes and the
- * sender stub, exposing `DocumentsRepo`, `NumberingSeries` and `DocumentFixtures` for seeding.
+ * `Documents` plus both stage-2 seams (`DocumentPayments`, `DocumentDeliveryReads`) on the
+ * memory repo, the in-memory numbering module, the port fakes and the sender stub, exposing
+ * `DocumentsRepo`, `NumberingSeries` and `DocumentFixtures` for seeding.
  * Requires `InMemoryPortsLive` (CoreStore, MemoryTables, IdGenerator, ExchangeRates).
  */
-export const DocumentsTestLayer = DocumentsLive.pipe(
+export const DocumentsTestLayer = Layer.mergeAll(
+  DocumentsLive,
+  DocumentPaymentsLive,
+  DocumentDeliveryReadsLive,
+).pipe(
   Layer.provideMerge(
     Layer.mergeAll(DocumentsRepoMemory, NumberingTestLayer, DocumentFakesLive, DocumentSenderStub),
   ),

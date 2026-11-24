@@ -11,6 +11,7 @@
  */
 import type {
   DocumentId,
+  DocumentSettlement,
   IsoDate,
   LineId,
   NumberingSeriesId,
@@ -26,6 +27,7 @@ import { VatMath } from "../../engines/vat";
 import { appendAudit } from "../../shared/audit";
 import { IdGenerator, newId } from "../../shared/ids";
 import { NumberingSeries } from "../numbering";
+import { mergeBuckets } from "./compose";
 import type { DocumentRecord, LineRecord } from "./record";
 import { DocumentsRepo } from "./repo";
 import { now } from "./support";
@@ -48,12 +50,6 @@ export interface CreditSpec {
 export const digitsOf = (number: string | null): string | null =>
   number === null ? null : Numbering.variableSymbol(number);
 
-const bucketKey = (b: Pick<VatBucket, "treatment" | "ratePercent">) =>
-  `${b.treatment}|${BigDecimal.format(BigDecimal.normalize(b.ratePercent))}`;
-
-const addOpt = (a: BigDecimal.BigDecimal | null, b: BigDecimal.BigDecimal | null) =>
-  a === null ? b : b === null ? a : BigDecimal.sum(a, b);
-
 /**
  * The original's buckets minus what its Credit Notes already credited (their buckets are
  * negative), in the original's bucket order. Buckets a Credit Note adds that the original
@@ -62,26 +58,8 @@ const addOpt = (a: BigDecimal.BigDecimal | null, b: BigDecimal.BigDecimal | null
 export const remainingBuckets = (
   original: Pick<DocumentRecord, "totals">,
   creditNotes: ReadonlyArray<Pick<DocumentRecord, "totals">>,
-): ReadonlyArray<VatBucket> => {
-  const byKey = new Map<string, VatBucket>();
-  for (const b of [...original.totals.buckets, ...creditNotes.flatMap((c) => c.totals.buckets)]) {
-    const key = bucketKey(b);
-    const prev = byKey.get(key);
-    byKey.set(
-      key,
-      prev === undefined
-        ? b
-        : {
-            ...prev,
-            base: BigDecimal.normalize(BigDecimal.sum(prev.base, b.base)),
-            vat: BigDecimal.normalize(BigDecimal.sum(prev.vat, b.vat)),
-            gross: BigDecimal.normalize(BigDecimal.sum(prev.gross, b.gross)),
-            vatCzk: addOpt(prev.vatCzk, b.vatCzk),
-          },
-    );
-  }
-  return [...byKey.values()];
-};
+): ReadonlyArray<VatBucket> =>
+  mergeBuckets(original.totals.buckets, ...creditNotes.map((c) => c.totals.buckets));
 
 /**
  * Nothing of the original is left to credit: every bucket's base, VAT, gross and CZK VAT is
@@ -101,6 +79,51 @@ export const isFullyCredited = (
       ZERO,
     ),
   );
+
+const sumGross = (docs: ReadonlyArray<Pick<DocumentRecord, "totals">>) =>
+  docs.reduce((sum, d) => BigDecimal.sum(sum, d.totals.gross.amount), ZERO);
+
+/**
+ * What the buyer still owes before payments: the gross minus what Credit Notes credited
+ * (their gross is negative). A Final Invoice's gross is already net of its deductions (D8).
+ */
+export const owedOf = (
+  row: Pick<DocumentRecord, "totals">,
+  creditNotes: ReadonlyArray<Pick<DocumentRecord, "totals">> = [],
+): BigDecimal.BigDecimal =>
+  BigDecimal.normalize(BigDecimal.sum(row.totals.gross.amount, sumGross(creditNotes)));
+
+/** The open amount: owed minus paid, never below zero (ReportsSource `outstanding`). */
+export const outstandingOf = (
+  row: Pick<DocumentRecord, "totals" | "paidAmount" | "kind" | "status">,
+  creditNotes: ReadonlyArray<Pick<DocumentRecord, "totals">> = [],
+): BigDecimal.BigDecimal => {
+  if (row.status !== "issued" || (row.kind !== "invoice" && row.kind !== "proforma")) return ZERO;
+  const open = BigDecimal.subtract(owedOf(row, creditNotes), row.paidAmount);
+  return BigDecimal.isNegative(open) ? ZERO : BigDecimal.normalize(open);
+};
+
+/**
+ * The stored settlement (core-ports 4.4, P1: from payments and Credit Notes). A Credit Note is
+ * never chased (`unpaid`, never overdue); a Payment Tax Document confirms a payment already
+ * received (`paid`). Otherwise `credited` once nothing is left to credit (sticky, D6), else
+ * the paid total against the owed amount (`owedOf`): nothing paid on a positive amount is
+ * `unpaid`, less `partially_paid`, equal `paid`, more `overpaid` (a Final Invoice covered by
+ * its advances is `paid` with no payments of its own).
+ */
+export const settlementOf = (
+  row: Pick<DocumentRecord, "kind" | "settlement" | "payments" | "paidAmount" | "totals">,
+  creditNotes: ReadonlyArray<Pick<DocumentRecord, "totals">> = [],
+): DocumentSettlement => {
+  if (row.kind === "credit_note") return "unpaid";
+  if (row.settlement === "credited") return "credited";
+  if (creditNotes.length > 0 && isFullyCredited(row, creditNotes)) return "credited";
+  if (row.kind === "payment_tax_document") return "paid";
+  const owed = owedOf(row, creditNotes);
+  if (row.payments === 0 && BigDecimal.isPositive(owed)) return "unpaid";
+  if (BigDecimal.isLessThan(row.paidAmount, owed)) return "partially_paid";
+  return BigDecimal.equals(row.paidAmount, owed) ? "paid" : "overpaid";
+};
 
 /** Sets the whole-unit rounding adjustment (outside every bucket, §36(5)) and the gross. */
 const withRounding = (totals: VatBreakdown, adjustment: BigDecimal.BigDecimal): VatBreakdown => ({
@@ -134,6 +157,9 @@ export const remainderSpec = (
         ...l,
         quantity: neg(l.quantity),
         amount: neg(l.amount),
+        // A Final Invoice's deductions are reversed with it (their stored VAT negated).
+        deductedVat: l.deductedVat === null ? null : neg(l.deductedVat),
+        deductedVatCzk: l.deductedVatCzk === null ? null : neg(l.deductedVatCzk),
       })),
       totals: VatMath.negate(original.totals),
       pricesIncludeVat: original.pricesIncludeVat,
@@ -163,6 +189,8 @@ export const remainderSpec = (
       ratePercent: b.ratePercent,
       amount: neg(b.base),
       deducts: null,
+      deductedVat: null,
+      deductedVatCzk: null,
     })),
     totals: withRounding(
       VatMath.negate(VatMath.fromBuckets(left, original.currency)),
@@ -299,13 +327,13 @@ export const issueCreditNote = (original: DocumentRecord, input: IssueCreditNote
       workspaceId,
       original.links.filter((l) => l.relation === "corrected_by").map((l) => l.id),
     );
-    const credited = isFullyCredited(original, [...earlier, creditNote]);
     const updated = yield* repo
       .update(
         {
           ...original,
           links: [...original.links, { relation: "corrected_by", id: creditNote.id }],
-          settlement: credited ? "credited" : original.settlement,
+          // Credited in full, or the amount owed dropped by the credited gross.
+          settlement: settlementOf(original, [...earlier, creditNote]),
           updatedAt: at,
         },
         original.revision,

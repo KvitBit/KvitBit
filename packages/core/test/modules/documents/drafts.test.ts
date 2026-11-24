@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import type { DocumentId, DocumentView, IsoDate, RequestKey } from "@kvitbit/domain/contract";
+import type { DocumentView, IsoDate, RequestKey } from "@kvitbit/domain/contract";
 import { Conflict, Documents, Forbidden, NotFound, Unavailable } from "@kvitbit/domain/contract";
 import { Effect, Exit, Ref, Schema, Stream } from "effect";
 import type { ContactSnapshotRecord, LineViewData } from "../../../src/modules/documents";
@@ -613,19 +613,5 @@ describe("list and pdf", () => {
     expect(renders.map((r) => [r.view.id, r.options])).toEqual([
       [view.id, { template: "modern_minimal", language: "cs" }],
     ]);
-  });
-});
-
-describe("later phases", () => {
-  test("correct dies with a clear not-implemented defect until P3", async () => {
-    const exit = await scenario(
-      Effect.flatMap(Documents, (d) =>
-        d.correct("01900000-0000-7000-8000-000000000000" as DocumentId, {
-          reason: "x",
-          lines: "full",
-        }),
-      ),
-    );
-    expect(Exit.isFailure(exit) && String(exit.cause)).toContain("not implemented (P3)");
   });
 });

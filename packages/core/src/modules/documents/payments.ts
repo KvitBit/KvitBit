@@ -1,0 +1,486 @@
+/**
+ * Payments seam (stage 2, cd-payments; board #529): what the Payments module needs from
+ * documents, so it never writes documents files. `DocumentPayments` methods run INSIDE the
+ * caller's CoreStore transaction (they join it; nothing commits on its own), never authorize
+ * (Payments authorizes `payment.write`) and need only `CurrentCaller` (audit actor).
+ *
+ * Port failures stay raw (`StoreUnavailable`, `RatesUnavailable`): the caller maps them with
+ * `orUnavailable` at its method boundary.
+ *
+ * Call order in one transaction (S2-S4): `lock` (the Proforma first, then the Final Invoice
+ * or the requested document), then `settle` and, for a `vat_payer` Proforma advance,
+ * `issuePaymentTaxDocument` (the PTD series counter after the Proforma lock).
+ */
+import type {
+  CurrencyCode,
+  CurrentCaller,
+  DocumentId,
+  DocumentKind,
+  DocumentSettlement,
+  DocumentStatus,
+  DocumentView,
+  IsoDate,
+  LineId,
+  Money,
+  NotFound,
+  TaxRegime,
+  WorkspaceId,
+} from "@kvitbit/domain/contract";
+import { Conflict, Invalid, MoneyMath } from "@kvitbit/domain/contract";
+import { ExchangeRates, type RatesUnavailable } from "@kvitbit/domain/ports";
+import { BigDecimal, Context, Effect, Layer, Result } from "effect";
+import { ZERO } from "../../engines/decimal";
+import { Fx } from "../../engines/fx";
+import { VatMath } from "../../engines/vat";
+import { appendAudit } from "../../shared/audit";
+import { IdGenerator, newId } from "../../shared/ids";
+import type { CoreStore, StoreUnavailable } from "../../store/CoreStore";
+import { NumberingSeries } from "../numbering";
+import { digitsOf, isFullyCredited, owedOf, settlementOf } from "./credit";
+import { DocumentIssuers } from "./ports";
+import type { DocumentRecord, LineRecord } from "./record";
+import { DocumentsRepo } from "./repo";
+import { now, viewOf } from "./support";
+import { guard } from "./transitions";
+
+/** A document as Payments sees it (amounts in the document currency). */
+export interface Payable {
+  readonly id: DocumentId;
+  readonly workspaceId: WorkspaceId;
+  readonly revision: number;
+  readonly kind: DocumentKind;
+  readonly status: DocumentStatus;
+  readonly locked: boolean;
+  readonly number: string | null;
+  readonly currency: CurrencyCode;
+  /** Stored gross (a Final Invoice's is net of its deductions, D8). */
+  readonly gross: Money;
+  /** What Credit Notes credited, positive. */
+  readonly credited: Money;
+  /** gross - credited: what payments settle against. */
+  readonly owed: Money;
+  readonly paid: Money;
+  readonly payments: number;
+  readonly settlement: DocumentSettlement;
+  /** The Issuing Entity's Tax Regime at the document's tax point (snapshot). */
+  readonly regime: TaxRegime;
+  /** A Proforma's Final Invoice (D8). */
+  readonly finalInvoice: DocumentId | null;
+  /** The Proforma of a Final Invoice or Payment Tax Document. */
+  readonly proforma: DocumentId | null;
+  /** A Proforma's Payment Tax Documents. */
+  readonly taxDocuments: ReadonlyArray<DocumentId>;
+}
+
+export interface PaymentTargets {
+  /** The document the payment names. */
+  readonly requested: Payable;
+  /** Where the payment settles: a Proforma's Final Invoice once it has one (D8), else requested. */
+  readonly settleOn: Payable;
+  /** The Proforma at the root (locked first), when there is one. */
+  readonly proforma: Payable | null;
+}
+
+export interface SettleAudit {
+  /** e.g. `payment.record`, `payment.remove`. */
+  readonly action: string;
+  readonly reason?: string | null;
+}
+
+type SeamError = NotFound | StoreUnavailable;
+
+export class DocumentPayments extends Context.Service<
+  DocumentPayments,
+  {
+    /** Row-locks the payment's documents in S4 order. Other Workspace -> NotFound{Document}. */
+    readonly lock: (
+      workspaceId: WorkspaceId,
+      id: DocumentId,
+    ) => Effect.Effect<PaymentTargets, SeamError, CurrentCaller>;
+    /**
+     * Stores the document's live payment total and count, derives the settlement (credit
+     * aware), bumps the revision and writes one audit entry on the Document subject with
+     * `audit.action`. More payments on anything but an issued (or locked) Invoice or Proforma
+     * -> Conflict{illegal_transition}; a negative or fractional count, or an amount without
+     * payments -> Invalid{request.malformed}.
+     */
+    readonly settle: (
+      workspaceId: WorkspaceId,
+      id: DocumentId,
+      paid: { readonly amount: BigDecimal.BigDecimal; readonly payments: number },
+      audit: SettleAudit,
+    ) => Effect.Effect<Payable, SeamError | Conflict | Invalid, CurrentCaller>;
+    /**
+     * P2: the Payment Tax Document for an advance received on a locked, issued Proforma;
+     * null when the Issuing Entity is not a `vat_payer` on `paidOn`. Tax point `paidOn`, VAT
+     * by `VatMath.splitAdvance` over the Proforma's buckets, CNB fixing for `paidOn` (carried
+     * back) when not CZK, numbered from the PTD series.
+     */
+    readonly issuePaymentTaxDocument: (
+      workspaceId: WorkspaceId,
+      proforma: DocumentId,
+      payment: { readonly amount: BigDecimal.BigDecimal; readonly paidOn: IsoDate },
+    ) => Effect.Effect<
+      DocumentView | null,
+      SeamError | Conflict | Invalid | RatesUnavailable,
+      CurrentCaller
+    >;
+    /** P3: the PTD is not fully credited, or a Final Invoice that is not credited deducts it. */
+    readonly removalBlocked: (
+      workspaceId: WorkspaceId,
+      taxDocument: DocumentId,
+    ) => Effect.Effect<boolean, SeamError, CurrentCaller>;
+  }
+>()("kvitbit/core/documents/DocumentPayments") {}
+
+const linksOf = (row: DocumentRecord, relation: DocumentRecord["links"][number]["relation"]) =>
+  row.links.filter((l) => l.relation === relation).map((l) => l.id);
+
+const creditsOf = (row: DocumentRecord) =>
+  Effect.flatMap(DocumentsRepo, (repo) =>
+    repo.getMany(row.workspaceId, linksOf(row, "corrected_by")),
+  );
+
+const money = (amount: BigDecimal.BigDecimal, currency: CurrencyCode) =>
+  MoneyMath.make(BigDecimal.normalize(amount), currency);
+
+/** The Payable view of a stored record. */
+export const payableOf = (
+  row: DocumentRecord,
+  creditNotes: ReadonlyArray<Pick<DocumentRecord, "totals">>,
+): Payable => {
+  const owed = owedOf(row, creditNotes);
+  return {
+    id: row.id,
+    workspaceId: row.workspaceId,
+    revision: row.revision,
+    kind: row.kind,
+    status: row.status,
+    locked: row.locked,
+    number: row.number,
+    currency: row.currency,
+    gross: row.totals.gross,
+    credited: money(BigDecimal.subtract(row.totals.gross.amount, owed), row.currency),
+    owed: money(owed, row.currency),
+    paid: money(row.paidAmount, row.currency),
+    payments: row.payments,
+    settlement: row.settlement,
+    regime: row.issuer.regime,
+    finalInvoice: linksOf(row, "final_invoice_for")[0] ?? null,
+    proforma: linksOf(row, "advance_of")[0] ?? null,
+    taxDocuments: linksOf(row, "tax_document_for"),
+  };
+};
+
+const payable = (row: DocumentRecord) =>
+  Effect.map(creditsOf(row), (credits) => payableOf(row, credits));
+
+const lock = (workspaceId: WorkspaceId, id: DocumentId) =>
+  Effect.gen(function* () {
+    const repo = yield* DocumentsRepo;
+    // An unlocked read only to find the root; the S4 order is root, dependents.
+    const peek = yield* repo.get(workspaceId, id);
+    const rootId = peek.kind === "proforma" ? id : linksOf(peek, "advance_of")[0];
+    let proforma: DocumentRecord | null = null;
+    let requested: DocumentRecord;
+    if (rootId !== undefined && rootId !== id) {
+      proforma = yield* repo.lock(workspaceId, rootId);
+      requested = yield* repo.lock(workspaceId, id);
+    } else {
+      requested = yield* repo.lock(workspaceId, id);
+      proforma = requested.kind === "proforma" ? requested : null;
+    }
+    const finalId = proforma === null ? undefined : linksOf(proforma, "final_invoice_for")[0];
+    const finalInvoice =
+      finalId === undefined
+        ? null
+        : finalId === requested.id
+          ? requested
+          : yield* repo.lock(workspaceId, finalId);
+    const settleOn =
+      requested.kind === "proforma" && finalInvoice !== null ? finalInvoice : requested;
+    return {
+      requested: yield* payable(requested),
+      settleOn: yield* payable(settleOn),
+      proforma: proforma === null ? null : yield* payable(proforma),
+    } satisfies PaymentTargets;
+  });
+
+const malformed = (path: string, reason: string) =>
+  new Invalid({ issues: [{ path: [path], code: "request.malformed", params: { reason } }] });
+
+const settle = (
+  workspaceId: WorkspaceId,
+  id: DocumentId,
+  paid: { readonly amount: BigDecimal.BigDecimal; readonly payments: number },
+  audit: SettleAudit,
+) =>
+  Effect.gen(function* () {
+    const repo = yield* DocumentsRepo;
+    const { at } = yield* now;
+    if (!Number.isInteger(paid.payments) || paid.payments < 0) {
+      return yield* malformed("payments", "out_of_range");
+    }
+    if (paid.payments === 0 && !BigDecimal.isZero(paid.amount)) {
+      return yield* malformed("amount", "out_of_range");
+    }
+    const row = yield* repo.lock(workspaceId, id);
+    if (paid.payments > row.payments) {
+      yield* guard(row, "recordPayment");
+      if (row.kind !== "invoice" && row.kind !== "proforma") {
+        return yield* new Conflict({ reason: "illegal_transition" });
+      }
+    }
+    const credits = yield* creditsOf(row);
+    const changed = {
+      ...row,
+      paidAmount: BigDecimal.normalize(paid.amount),
+      payments: paid.payments,
+    };
+    const next = yield* repo
+      .update(
+        { ...changed, settlement: settlementOf(changed, credits), updatedAt: at },
+        row.revision,
+      )
+      .pipe(Effect.catchTag("UniqueViolation", (e) => Effect.die(e)));
+    yield* appendAudit({
+      workspaceId,
+      subject: { entity: "Document", id },
+      action: audit.action,
+      revision: next.revision,
+      changes: [
+        {
+          path: "paidAmount",
+          before: BigDecimal.format(row.paidAmount),
+          after: BigDecimal.format(next.paidAmount),
+        },
+        { path: "payments", before: row.payments, after: next.payments },
+        { path: "settlement", before: row.settlement, after: next.settlement },
+      ],
+      reason: audit.reason ?? null,
+    });
+    return payableOf(next, credits);
+  });
+
+/** The record of a Payment Tax Document for `amount` received on `paidOn` (pure). */
+export const paymentTaxDocumentRecord = (
+  proforma: DocumentRecord,
+  input: {
+    readonly id: DocumentId;
+    readonly number: string | null;
+    readonly seriesId: DocumentRecord["seriesId"];
+    readonly paidOn: IsoDate;
+    readonly today: IsoDate;
+    readonly at: string;
+    readonly regime: TaxRegime;
+    readonly fx: DocumentRecord["fx"];
+    readonly lines: ReadonlyArray<LineRecord>;
+    readonly totals: DocumentRecord["totals"];
+  },
+): DocumentRecord => ({
+  id: input.id,
+  workspaceId: proforma.workspaceId,
+  revision: 1,
+  kind: "payment_tax_document",
+  status: "issued",
+  locked: false,
+  lockedAt: null,
+  number: input.number,
+  seriesId: input.seriesId,
+  contactId: proforma.contactId,
+  contact: proforma.contact,
+  issuer: { ...proforma.issuer, regime: input.regime },
+  given: {
+    currency: proforma.currency,
+    issuedOn: input.today,
+    taxableSupplyOn: input.paidOn,
+    due: { on: input.today },
+    language: proforma.language,
+    ...(input.seriesId === null ? {} : { series: input.seriesId }),
+    paymentMethod: proforma.paymentMethod,
+  },
+  currency: proforma.currency,
+  language: proforma.language,
+  paymentMethod: proforma.paymentMethod,
+  note: null,
+  issuedOn: input.today,
+  taxableSupplyOn: input.paidOn,
+  dueOn: input.today,
+  pricesIncludeVat: false,
+  variableSymbol: proforma.variableSymbol ?? digitsOf(proforma.number),
+  orderNumber: proforma.orderNumber,
+  lines: input.lines,
+  totals: input.totals,
+  fx: input.fx,
+  fxOverride: null,
+  taxDocument: true,
+  paymentRounding: "none",
+  remindersChoice: "off",
+  remindersOn: false,
+  links: [{ relation: "advance_of", id: proforma.id }],
+  paidAmount: ZERO,
+  payments: 0,
+  settlement: "paid",
+  scheduleId: null,
+  occurrence: null,
+  cancelledOn: null,
+  correctedNumber: null,
+  reason: null,
+  createdAt: input.at,
+  updatedAt: input.at,
+  issuedAt: input.at,
+});
+
+const issuePaymentTaxDocument = (
+  workspaceId: WorkspaceId,
+  proformaId: DocumentId,
+  payment: { readonly amount: BigDecimal.BigDecimal; readonly paidOn: IsoDate },
+) =>
+  Effect.gen(function* () {
+    const repo = yield* DocumentsRepo;
+    const numbering = yield* NumberingSeries;
+    const ids = yield* IdGenerator;
+    const { today, at } = yield* now;
+    // The caller locked it first (P2a); locking again in the same transaction is a no-op.
+    const proforma = yield* repo.lock(workspaceId, proformaId);
+    yield* guard(proforma, "recordPayment");
+    if (proforma.kind !== "proforma") return yield* new Conflict({ reason: "illegal_transition" });
+    if (!BigDecimal.isPositive(payment.amount)) return yield* malformed("amount", "out_of_range");
+    const issuer = yield* (yield* DocumentIssuers).forDocument(workspaceId, payment.paidOn);
+    if (issuer.regime !== "vat_payer") return null;
+    if (BigDecimal.isZero(proforma.totals.gross.amount)) {
+      return yield* malformed("amount", "out_of_range");
+    }
+    // Non-CZK: the CNB fixing valid on the receipt date (carried back), rule P2.
+    const fixing = Fx.needsFixing(proforma.currency, null)
+      ? yield* (yield* ExchangeRates).fixing(payment.paidOn)
+      : null;
+    const fxResult = Fx.resolve({ currency: proforma.currency, override: null, fixing });
+    if (Result.isFailure(fxResult)) return yield* fxResult.failure;
+    const fx = fxResult.success;
+    const shares = VatMath.splitAdvance(proforma.totals, payment.amount, {
+      fx: fx === null ? null : { rate: fx.rate, quantity: fx.quantity },
+      taxPoint: payment.paidOn,
+    }).filter((b) => !BigDecimal.isZero(b.gross));
+    const totals = VatMath.fromBuckets(shares, proforma.currency);
+    const label = proforma.language === "cs" ? "Přijatá záloha k" : "Advance received for";
+    const lines: Array<LineRecord> = [];
+    for (const b of shares) {
+      lines.push({
+        id: (yield* ids.next) as LineId,
+        item: null,
+        description: `${label} ${proforma.number ?? ""}`.trim(),
+        quantity: BigDecimal.fromBigInt(1n),
+        unit: null,
+        unitPrice: b.base,
+        itemPrice: null,
+        vat: b.treatment,
+        itemVat: null,
+        treatment: b.treatment,
+        ratePercent: b.ratePercent,
+        amount: b.base,
+        deducts: null,
+        deductedVat: null,
+        deductedVatCzk: null,
+      });
+    }
+    const id = yield* newId<DocumentId>();
+    const series = yield* numbering.resolve(workspaceId, "payment_tax_document");
+    const allocation = yield* numbering.allocate({
+      workspaceId,
+      kind: "payment_tax_document",
+      seriesId: series.id,
+      documentId: id,
+      issuedOn: today,
+    });
+    const ptd = yield* repo
+      .insert(
+        paymentTaxDocumentRecord(proforma, {
+          id,
+          number: allocation.number,
+          seriesId: allocation.seriesId,
+          paidOn: payment.paidOn,
+          today,
+          at,
+          regime: issuer.regime,
+          fx,
+          lines,
+          totals,
+        }),
+      )
+      .pipe(Effect.catchTag("UniqueViolation", () => new Conflict({ reason: "duplicate" })));
+    const updated = yield* repo
+      .update(
+        {
+          ...proforma,
+          links: [...proforma.links, { relation: "tax_document_for", id }],
+          updatedAt: at,
+        },
+        proforma.revision,
+      )
+      .pipe(Effect.catchTag("UniqueViolation", (e) => Effect.die(e)));
+    yield* appendAudit({
+      workspaceId,
+      subject: { entity: "Document", id },
+      action: "document.issue",
+      revision: ptd.revision,
+      changes: [
+        { path: "number", before: null, after: ptd.number },
+        { path: "advanceOf", before: null, after: proforma.id },
+      ],
+    });
+    yield* appendAudit({
+      workspaceId,
+      subject: { entity: "Document", id: proforma.id },
+      action: "document.taxDocument",
+      revision: updated.revision,
+      changes: [{ path: "taxDocuments", before: null, after: id }],
+    });
+    return yield* viewOf(ptd);
+  });
+
+const removalBlocked = (workspaceId: WorkspaceId, taxDocument: DocumentId) =>
+  Effect.gen(function* () {
+    const repo = yield* DocumentsRepo;
+    const ptd = yield* repo.get(workspaceId, taxDocument);
+    if (ptd.kind !== "payment_tax_document") return false;
+    if (!isFullyCredited(ptd, yield* creditsOf(ptd))) return true;
+    const proformaId = linksOf(ptd, "advance_of")[0];
+    if (proformaId === undefined) return false;
+    const proforma = yield* repo.get(workspaceId, proformaId);
+    const finalId = linksOf(proforma, "final_invoice_for")[0];
+    if (finalId === undefined) return false;
+    const finalInvoice = yield* repo.get(workspaceId, finalId);
+    return (
+      finalInvoice.settlement !== "credited" &&
+      finalInvoice.lines.some((l) => l.deducts === taxDocument)
+    );
+  });
+
+/** Everything `DocumentPaymentsLive` requires. */
+export type DocumentPaymentsDeps =
+  | CoreStore
+  | IdGenerator
+  | DocumentsRepo
+  | NumberingSeries
+  | ExchangeRates
+  | DocumentIssuers;
+
+export const DocumentPaymentsLive: Layer.Layer<DocumentPayments, never, DocumentPaymentsDeps> =
+  Layer.effect(
+    DocumentPayments,
+    Effect.gen(function* () {
+      const context = yield* Effect.context<DocumentPaymentsDeps>();
+      // The call site's context wins: its caller and CoreStore transaction frame.
+      const run = <A, E>(effect: Effect.Effect<A, E, DocumentPaymentsDeps | CurrentCaller>) =>
+        Effect.flatMap(Effect.context<CurrentCaller>(), (callSite) =>
+          Effect.provideContext(effect, Context.merge(context, callSite)),
+        );
+      return DocumentPayments.of({
+        lock: (ws, id) => run(lock(ws, id)),
+        settle: (ws, id, paid, audit) => run(settle(ws, id, paid, audit)),
+        issuePaymentTaxDocument: (ws, id, payment) => run(issuePaymentTaxDocument(ws, id, payment)),
+        removalBlocked: (ws, id) => run(removalBlocked(ws, id)),
+      });
+    }),
+  );

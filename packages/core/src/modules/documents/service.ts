@@ -11,7 +11,9 @@ import { orUnavailable } from "../../shared/errors";
 import type { IdGenerator } from "../../shared/ids";
 import { CoreStore } from "../../store/CoreStore";
 import type { NumberingSeries } from "../numbering";
+import { correct, previewCorrection } from "./corrections";
 import { createDraft, discardDraft, editDraft, preview } from "./drafts";
+import { issueFinalInvoice, previewFinalInvoice } from "./final";
 import { cancel, editIssued, issue, lock, unlock } from "./lifecycle";
 import type {
   DocumentContacts,
@@ -22,7 +24,6 @@ import type {
 import { get, history, list, pdf } from "./reads";
 import { DocumentsRepo } from "./repo";
 import { DocumentSender } from "./sender";
-import { notImplemented } from "./support";
 import { guard } from "./transitions";
 
 /** Everything `DocumentsLive` requires. */
@@ -107,11 +108,10 @@ const make = Effect.gen(function* () {
     lock: (id) => run(lock(id)),
     unlock: (id, reason) => run(unlock(id, reason)),
     cancel: (id, input, opts) => run(cancel(id, input, opts)),
-    // P3: corrections, Final Invoice.
-    correct: () => notImplemented("correct", "P3"),
-    previewCorrection: () => notImplemented("previewCorrection", "P3"),
-    issueFinalInvoice: () => notImplemented("issueFinalInvoice", "P3"),
-    previewFinalInvoice: () => notImplemented("previewFinalInvoice", "P3"),
+    correct: (id, input, opts) => run(correct(id, input, opts)),
+    previewCorrection: (id, input) => run(previewCorrection(id, input)),
+    issueFinalInvoice: (proforma, input, opts) => run(issueFinalInvoice(proforma, input, opts)),
+    previewFinalInvoice: (proforma, input) => run(previewFinalInvoice(proforma, input)),
   };
   return Documents.of(impl as unknown as Documents["Service"]);
 });

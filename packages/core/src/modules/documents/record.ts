@@ -107,8 +107,18 @@ export const LineRecord = Schema.Struct({
   ratePercent: Schema.BigDecimal,
   /** Full-precision quantity x unitPrice. */
   amount: Schema.BigDecimal,
-  /** Deduction lines of a Final Invoice (rule D8, P3): the deducted Payment Tax Document. */
+  /**
+   * Deduction lines of a Final Invoice (rule D8): the deducted Payment Tax Document (outside
+   * `vat_payer`, the Proforma whose paid amount is deducted).
+   */
   deducts: Schema.NullOr(DocumentId),
+  /**
+   * A Payment Tax Document deduction's VAT and CZK VAT as stored on the PTD (negative), frozen
+   * at issue: `compose` deducts them as given and never re-derives VAT from the deducted base.
+   * null on every other line.
+   */
+  deductedVat: Schema.NullOr(Schema.BigDecimal),
+  deductedVatCzk: Schema.NullOr(Schema.BigDecimal),
 });
 export type LineRecord = typeof LineRecord.Type;
 

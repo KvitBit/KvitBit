@@ -5,11 +5,11 @@
  *
  * The table covers what the state alone decides. Rules that depend on the document's kind,
  * payments or links are the named guards below it (`paymentsBlockCancel`, `hasFinalInvoice`,
- * `hasDependents`); `settlementOf` derives the stored settlement.
+ * `hasDependents`); `settlementOf` (credit.ts) derives the stored settlement.
  */
-import type { ConflictReason, DocumentSettlement } from "@kvitbit/domain/contract";
+import type { ConflictReason } from "@kvitbit/domain/contract";
 import { Conflict } from "@kvitbit/domain/contract";
-import { BigDecimal, Effect } from "effect";
+import { Effect } from "effect";
 import type { DocumentRecord } from "./record";
 
 /** `issued` split by the Document Lock; a cancelled document is always locked (D5). */
@@ -160,17 +160,3 @@ export const paymentsBlockCancel = (row: Pick<DocumentRecord, "payments">): bool
 export const hasDependents = (row: Pick<DocumentRecord, "kind" | "payments" | "links">): boolean =>
   (row.kind === "proforma" && row.payments > 0) ||
   row.links.some((l) => l.relation === "corrected_by" || l.relation === "final_invoice_for");
-
-/**
- * The stored settlement for the record's paid total against its gross: `credited` stays
- * (rule D6), no payments is `unpaid`, else partially paid / paid / overpaid.
- */
-export const settlementOf = (
-  row: Pick<DocumentRecord, "settlement" | "payments" | "paidAmount" | "totals">,
-): DocumentSettlement => {
-  if (row.settlement === "credited") return "credited";
-  if (row.payments === 0) return "unpaid";
-  const gross = row.totals.gross.amount;
-  if (BigDecimal.isLessThan(row.paidAmount, gross)) return "partially_paid";
-  return BigDecimal.equals(row.paidAmount, gross) ? "paid" : "overpaid";
-};

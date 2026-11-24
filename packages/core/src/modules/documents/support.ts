@@ -1,4 +1,4 @@
-/** Helpers shared by the Documents method files (drafts, reads; P2/P3 lifecycle files). */
+/** Helpers shared by the Documents method files. */
 import type { DocumentId, DocumentView, IsoDate, WorkspaceId } from "@kvitbit/domain/contract";
 import { Clock, Effect } from "effect";
 import { pragueDate } from "../../engines/calendar";
@@ -78,7 +78,3 @@ export const viewOf = (
     const related = yield* relatedOf(row);
     return toView(row, { ...extra, today, related });
   });
-
-/** A method of a later phase: dies with a clear defect until that phase lands. */
-export const notImplemented = (method: string, phase: string) =>
-  Effect.die(new Error(`Documents.${method}: not implemented (${phase})`));
