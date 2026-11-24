@@ -19,7 +19,7 @@ export type {
 } from "../store/tables";
 export { defineCollection, MemoryTables } from "../store/tables";
 export type { InMemoryPortsOptions } from "./inMemoryPorts";
-export { InMemoryPortsLive } from "./inMemoryPorts";
+export { InMemoryCorePorts, InMemoryPortsLive } from "./inMemoryPorts";
 export * from "./ports";
 export type { TestCoreOptions, TestCoreServices } from "./TestCore";
 export { CoreReposMemory, TestCore, TestCoreFakes } from "./TestCore";

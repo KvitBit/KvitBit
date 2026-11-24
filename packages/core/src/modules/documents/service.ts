@@ -2,28 +2,25 @@
  * `DocumentsLive`: the domain `Documents` tag over the method files. Every dependency is
  * captured when the layer is built, so each method only needs `CurrentCaller`.
  */
-import type { CoreError, CurrentCaller, DocumentId, DocumentPatch } from "@kvitbit/domain/contract";
-import { Documents } from "@kvitbit/domain/contract";
-import type { ExchangeRates } from "@kvitbit/domain/ports";
+import type { CoreError, DocumentId, DocumentPatch, DocumentView } from "@kvitbit/domain/contract";
+import { CurrentCaller, Documents } from "@kvitbit/domain/contract";
+import { ExchangeRates } from "@kvitbit/domain/ports";
 import { Context, Effect, Layer } from "effect";
 import { authorizeInWorkspace } from "../../policy/Policy";
 import { orUnavailable } from "../../shared/errors";
-import type { IdGenerator } from "../../shared/ids";
+import { IdGenerator } from "../../shared/ids";
 import { CoreStore } from "../../store/CoreStore";
-import type { NumberingSeries } from "../numbering";
+import { NumberingSeries } from "../numbering";
+import { DocumentActivity } from "./activity";
 import { correct, previewCorrection } from "./corrections";
 import { createDraft, discardDraft, editDraft, preview } from "./drafts";
 import { issueFinalInvoice, previewFinalInvoice } from "./final";
 import { cancel, editIssued, issue, lock, unlock } from "./lifecycle";
-import type {
-  DocumentContacts,
-  DocumentIssuers,
-  DocumentPriceList,
-  DocumentRenderer,
-} from "./ports";
+import { DocumentContacts, DocumentIssuers, DocumentPriceList, DocumentRenderer } from "./ports";
 import { get, history, list, pdf } from "./reads";
 import { DocumentsRepo } from "./repo";
 import { DocumentSender } from "./sender";
+import { withActivity } from "./support";
 import { guard } from "./transitions";
 
 /** Everything `DocumentsLive` requires. */
@@ -37,7 +34,8 @@ export type DocumentsDeps =
   | DocumentIssuers
   | DocumentPriceList
   | DocumentRenderer
-  | DocumentSender;
+  | DocumentSender
+  | DocumentActivity;
 
 /**
  * `edit` dispatches on the locked row's state (transition table): drafts (P1's `editDraft`),
@@ -70,8 +68,36 @@ type WideDocuments = {
   ) => Effect.Effect<Effect.Success<ReturnType<DocumentsShape[K]>>, CoreError, CurrentCaller>;
 };
 
+/**
+ * The owner-facing view of a method's result: `share` and `deliveries` are added here, after
+ * the method (and so after any idempotent body stores or replays its un-enriched result).
+ */
+const enriched = <E, R>(effect: Effect.Effect<DocumentView, E, R>) =>
+  Effect.gen(function* () {
+    const view = yield* effect;
+    const caller = yield* CurrentCaller;
+    // A successful method had a Workspace caller (authorizeInWorkspace).
+    return caller._tag === "Member" || caller._tag === "System"
+      ? yield* withActivity(caller.workspaceId, view)
+      : view;
+  }).pipe(orUnavailable);
+
 const make = Effect.gen(function* () {
-  const context = yield* Effect.context<DocumentsDeps>();
+  // Only the build dependencies: the build-time context may hold a CurrentCaller, RequestOutcome
+  // or transaction frame, and providing them per call would override the caller's own.
+  const context = Context.pick(
+    CoreStore,
+    IdGenerator,
+    DocumentsRepo,
+    NumberingSeries,
+    ExchangeRates,
+    DocumentContacts,
+    DocumentIssuers,
+    DocumentPriceList,
+    DocumentRenderer,
+    DocumentSender,
+    DocumentActivity,
+  )(yield* Effect.context<DocumentsDeps>());
   const sender = yield* DocumentSender;
   /**
    * Provides the captured dependencies under the call-time context, which wins: the caller,
@@ -93,25 +119,35 @@ const make = Effect.gen(function* () {
    * validation: core-wide interim is `request.malformed` + `params.reason` (#430/#478).
    */
   const impl: WideDocuments = {
-    preview: (input) => run(preview(input)),
-    createDraft: (input, opts) => run(createDraft(input, opts)),
+    preview: (input) => run(enriched(preview(input))),
+    createDraft: (input, opts) => run(enriched(createDraft(input, opts))),
     discardDraft: (id, expectedRevision) => run(discardDraft(id, expectedRevision)),
-    edit: (id, patch, expectedRevision) => run(edit(id, patch, expectedRevision)),
-    get: (id) => run(get(id)),
+    edit: (id, patch, expectedRevision) => run(enriched(edit(id, patch, expectedRevision))),
+    get: (id) => run(enriched(get(id))),
     list: (q) => run(list(q)),
     history: (id) => run(history(id)),
     pdf: (id, opts) => run(pdf(id, opts)),
     // Delivery seam (stage 2): delegated unchanged.
     send: (id, input, opts) => sender.send(id, input, opts),
     previewSend: (id, input) => sender.previewSend(id, input),
-    issue: (from, opts) => run(issue(from, opts)),
-    lock: (id) => run(lock(id)),
-    unlock: (id, reason) => run(unlock(id, reason)),
-    cancel: (id, input, opts) => run(cancel(id, input, opts)),
-    correct: (id, input, opts) => run(correct(id, input, opts)),
-    previewCorrection: (id, input) => run(previewCorrection(id, input)),
-    issueFinalInvoice: (proforma, input, opts) => run(issueFinalInvoice(proforma, input, opts)),
-    previewFinalInvoice: (proforma, input) => run(previewFinalInvoice(proforma, input)),
+    issue: (from, opts) => run(enriched(issue(from, opts))),
+    lock: (id) => run(enriched(lock(id))),
+    unlock: (id, reason) => run(enriched(unlock(id, reason))),
+    cancel: (id, input, opts) =>
+      run(
+        Effect.flatMap(cancel(id, input, opts), ({ document, creditNote }) =>
+          Effect.all({
+            document: enriched(Effect.succeed(document)),
+            creditNote:
+              creditNote === null ? Effect.succeed(null) : enriched(Effect.succeed(creditNote)),
+          }),
+        ),
+      ),
+    correct: (id, input, opts) => run(enriched(correct(id, input, opts))),
+    previewCorrection: (id, input) => run(enriched(previewCorrection(id, input))),
+    issueFinalInvoice: (proforma, input, opts) =>
+      run(enriched(issueFinalInvoice(proforma, input, opts))),
+    previewFinalInvoice: (proforma, input) => run(enriched(previewFinalInvoice(proforma, input))),
   };
   return Documents.of(impl as unknown as Documents["Service"]);
 });

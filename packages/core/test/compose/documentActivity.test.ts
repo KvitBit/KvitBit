@@ -1,10 +1,22 @@
 /** DocumentView.share and .deliveries through DocumentActivityLive, and empty without it. */
 import { describe, expect, test } from "bun:test";
-import type { DocumentId, ShareToken } from "@kvitbit/domain/contract";
+import type {
+  CurrentCaller,
+  DeliveryId,
+  DocumentId,
+  RequestKey,
+  ShareToken,
+} from "@kvitbit/domain/contract";
 import { Documents, PublicShareLinks } from "@kvitbit/domain/contract";
-import { Effect, Exit, Layer } from "effect";
+import { Effect, Exit, Layer, Ref } from "effect";
 import { DocumentActivityLive } from "../../src/compose/documentActivity";
-import { DeliveriesRepoMemory, DocumentsDeliveryTestLayer } from "../../src/modules/documents";
+import {
+  DeliveriesRepo,
+  DeliveriesRepoMemory,
+  DocumentFixtures,
+  DocumentsDeliveryTestLayer,
+  documentsDeliveryTestLayer,
+} from "../../src/modules/documents";
 import { NumberingSeries } from "../../src/modules/numbering";
 import type { ShareLink, ShareLinkId, ShareViewEventRow } from "../../src/modules/sharelinks";
 import {
@@ -14,6 +26,7 @@ import {
   ShareLinksTestLayer,
 } from "../../src/modules/sharelinks";
 import { CoreStore } from "../../src/store/CoreStore";
+import type { InMemoryPortsLive } from "../../src/testing";
 import { member, runTest, shareVisitor, TEST_NOW, WORKSPACE_A, WORKSPACE_B } from "../helpers";
 import { as, invoiceInput, seed } from "../modules/documents/fixtures";
 
@@ -21,7 +34,7 @@ const activity = DocumentActivityLive.pipe(
   Layer.provide(Layer.mergeAll(ShareLinksRepoMemory, ShareLinkKeysTest, DeliveriesRepoMemory)),
 );
 const base = ShareLinksTestLayer.pipe(Layer.provideMerge(DocumentsDeliveryTestLayer));
-const bound = base.pipe(Layer.provide(activity));
+const bound = ShareLinksTestLayer.pipe(Layer.provideMerge(documentsDeliveryTestLayer(activity)));
 
 const series = Effect.flatMap(CoreStore, (store) =>
   store.transaction(
@@ -56,14 +69,21 @@ const flow = Effect.gen(function* () {
   };
 });
 
-/** Runs `flow` as the owner over `layer` after seeding both Workspaces and the series. */
-const run = (layer: typeof base) =>
+/** Runs `body` as the owner over `layer` after seeding both Workspaces and the series. */
+type FlowServices =
+  | Layer.Success<typeof base>
+  | Layer.Success<ReturnType<typeof InMemoryPortsLive>>
+  | CurrentCaller;
+
+const runWith = <A, E>(layer: typeof base, body: Effect.Effect<A, E, FlowServices>) =>
   runTest(
     member("owner"),
-    Effect.andThen(seed("vat_payer", { seriesByKind: {} }), Effect.andThen(series, flow)).pipe(
+    Effect.andThen(seed("vat_payer", { seriesByKind: {} }), Effect.andThen(series, body)).pipe(
       Effect.provide(layer),
     ),
   );
+
+const run = (layer: typeof base) => runWith(layer, flow);
 
 const ok = <A, Err>(exit: Exit.Exit<A, Err>): A => {
   if (Exit.isFailure(exit)) throw new Error(`expected success, got ${JSON.stringify(exit.cause)}`);
@@ -87,11 +107,91 @@ describe("DocumentView.share and .deliveries", () => {
     expect(r.revoked.deliveries).toEqual(r.got.deliveries);
   });
 
-  test("empty without the port (DocumentsTestLayer default)", async () => {
+  test("empty with DocumentActivityNone (DocumentsDeliveryTestLayer default)", async () => {
     const r = ok(await run(base));
     expect(r.got.share).toBeNull();
     expect(r.got.deliveries).toEqual([]);
     expect(r.locked.share).toBeNull();
+  });
+});
+
+/**
+ * Shares, sends twice and cancels (keyed) an invoice, opens and downloads it as a visitor; returns
+ * what was stored (delivery rows, the request-log result), rendered, and returned to the owner.
+ */
+const storedFlow = Effect.gen(function* () {
+  const docs = yield* Documents;
+  const links = yield* PublicShareLinks;
+  const issued = yield* docs.issue({ input: invoiceInput() });
+  const id = issued.id as DocumentId;
+  const { url } = yield* links.create(id);
+  const token = url.slice("https://share.test/s/".length);
+  const first = yield* docs.send(id);
+  const second = yield* docs.send(id);
+  yield* as(
+    shareVisitor({ token: token as ShareToken }),
+    Effect.flatMap(PublicShareLinks, (s) => Effect.andThen(s.open, s.pdf())),
+  );
+  yield* docs.pdf(id);
+  const requestKey = "cancel-after-share" as RequestKey;
+  const cancelled = yield* docs.cancel(id, { reason: "duplicate" }, { requestKey });
+  const replayed = yield* docs.cancel(id, { reason: "duplicate" }, { requestKey });
+  const store = yield* CoreStore;
+  const claim = yield* store.transaction(
+    store.requestLog.claim(
+      { _tag: "Workspace", workspaceId: WORKSPACE_A },
+      requestKey,
+      new Date(TEST_NOW).toISOString(),
+    ),
+  );
+  const deliveries = yield* DeliveriesRepo;
+  const rows = yield* Effect.forEach([first, second], (d) =>
+    deliveries.get(WORKSPACE_A, d.deliveryId as DeliveryId),
+  );
+  const fixtures = yield* DocumentFixtures;
+  return {
+    url,
+    token,
+    rows,
+    stored: claim._tag === "Existing" ? claim.entry.result : undefined,
+    renders: yield* Ref.get(fixtures.renders),
+    cancelled,
+    replayed,
+    got: yield* docs.get(id),
+  };
+});
+
+describe("stored, replayed and rendered views carry no share link or deliveries", () => {
+  test("delivery snapshots, the keyed cancel result and renderer views are un-enriched; owner reads are not", async () => {
+    const r = ok(await runWith(bound, storedFlow));
+    const leaks = (value: unknown) => {
+      const json = JSON.stringify(value);
+      return json.includes(r.token) || json.includes(r.url);
+    };
+    // Owner-facing: the view, the cancel result and its replay all carry share and deliveries.
+    expect(r.got.share?.url).toBe(r.url);
+    expect(r.got.deliveries).toHaveLength(2);
+    expect(r.cancelled.document.share?.url).toBe(r.url);
+    expect(r.cancelled.document.deliveries).toHaveLength(2);
+    expect(r.replayed.document.share).toEqual(r.cancelled.document.share);
+    expect(r.replayed.document.deliveries).toEqual(r.cancelled.document.deliveries);
+    // Stored: both delivery rows' snapshots (the second was taken after a share and a delivery).
+    for (const row of r.rows) {
+      expect(row.view.share).toBeNull();
+      expect(row.view.deliveries).toEqual([]);
+    }
+    expect(leaks(r.rows)).toBe(false);
+    // Stored: the request-log result of the keyed cancel.
+    expect(r.stored).toBeDefined();
+    expect(leaks(r.stored)).toBe(false);
+    expect((r.stored as { document: { deliveries: unknown } }).document.deliveries).toEqual([]);
+    // Rendered: the owner PDF and the share-link visitor PDF.
+    expect(r.renders.length).toBeGreaterThanOrEqual(2);
+    for (const call of r.renders) {
+      expect(call.view.share).toBeNull();
+      expect(call.view.deliveries).toEqual([]);
+    }
+    expect(leaks(r.renders.map((c) => c.view))).toBe(false);
   });
 });
 

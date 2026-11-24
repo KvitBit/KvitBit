@@ -6,12 +6,12 @@
 import type { CoreError, CurrentCaller } from "@kvitbit/domain/contract";
 import { PublicShareLinks } from "@kvitbit/domain/contract";
 import { Context, Effect, Layer } from "effect";
-import type { IdGenerator } from "../../shared/ids";
-import type { CoreStore } from "../../store/CoreStore";
-import type { DocumentDeliveryReads, DocumentsRepo } from "../documents";
+import { IdGenerator } from "../../shared/ids";
+import { CoreStore } from "../../store/CoreStore";
+import { DocumentDeliveryReads, DocumentsRepo } from "../documents";
 import { create, revoke, views } from "./members";
-import type { ShareLinkKeys, ShareWorkspaces } from "./ports";
-import type { ShareLinksRepo } from "./repo";
+import { ShareLinkKeys, ShareWorkspaces } from "./ports";
+import { ShareLinksRepo } from "./repo";
 import { logo, open, pdf } from "./visitor";
 
 /** Everything `PublicShareLinksLive` requires. */
@@ -25,7 +25,17 @@ export type PublicShareLinksDeps =
   | ShareWorkspaces;
 
 const make = Effect.gen(function* () {
-  const context = yield* Effect.context<PublicShareLinksDeps>();
+  // Only the build dependencies: the build-time context may hold a CurrentCaller, RequestOutcome
+  // or transaction frame, and providing them per call would override the caller's own.
+  const context = Context.pick(
+    CoreStore,
+    IdGenerator,
+    DocumentsRepo,
+    DocumentDeliveryReads,
+    ShareLinksRepo,
+    ShareLinkKeys,
+    ShareWorkspaces,
+  )(yield* Effect.context<PublicShareLinksDeps>());
   const run = <A, E>(effect: Effect.Effect<A, E, PublicShareLinksDeps | CurrentCaller>) =>
     Effect.flatMap(Effect.context<CurrentCaller>(), (callSite) =>
       Effect.provideContext(effect, Context.merge(context, callSite)),

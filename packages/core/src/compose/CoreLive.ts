@@ -15,7 +15,13 @@
  * route sets per request.
  *
  * Layers are memoized by reference within one build, so `RegistryLookup.layer` (with its cache)
- * is built once and shared by Workspaces and Contacts.
+ * is built once and shared by Workspaces and Contacts. That cache lives as long as one CoreLive
+ * build: apps build CoreLive once per process, so it is process-wide there, while each
+ * `TestCore` build starts empty.
+ *
+ * No layer keeps a per-request service from its build: each captures only its declared build
+ * dependencies (`Context.pick`) and merges the call-site context (CurrentCaller, RequestOutcome,
+ * an enclosing transaction) on every call.
  */
 import type {
   BlobStorage,
@@ -122,10 +128,9 @@ export type CoreExternalPorts =
 // Tiers, lowest first; each tier is built from the outputs of the tiers below it.
 
 /**
- * Seams over repositories and external ports only. `viewOf` reads `DocumentActivity`
- * optionally, so no layer's type demands it; it sits below every tier so that both the
- * contexts the documents layers capture at build time (including `PaymentDocumentsLive` and
- * `DocumentDeliveryReadsLive` in `readSeams`) and the call-site context hold it.
+ * Seams over repositories and external ports only. `DocumentActivity` is required by the
+ * owner-facing boundaries (`DocumentsLive`, `PaymentDocumentsLive`), which add `share` and
+ * `deliveries` to the views they return; stored and visitor views never carry them.
  */
 const repoSeams = Layer.mergeAll(
   DocumentActivityLive,

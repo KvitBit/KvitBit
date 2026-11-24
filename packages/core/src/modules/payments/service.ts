@@ -25,8 +25,7 @@ import { authorizeInWorkspace } from "../../policy/Policy";
 import { appendAudit } from "../../shared/audit";
 import { orUnavailable } from "../../shared/errors";
 import { withIdempotency } from "../../shared/idempotency";
-import type { IdGenerator } from "../../shared/ids";
-import { newId } from "../../shared/ids";
+import { IdGenerator, newId } from "../../shared/ids";
 import { CoreStore } from "../../store/CoreStore";
 import { DocumentPayments, DocumentSender, now } from "../documents";
 import { PaymentDocuments } from "./documentReads";
@@ -349,7 +348,7 @@ const recordOnExpense = (workspaceId: WorkspaceId, id: ExpenseId, input: RecordP
 export const record = (input: RecordPaymentInput, opts?: RequestOptions) =>
   Effect.gen(function* () {
     const { workspaceId } = yield* authorizeInWorkspace("payment.write");
-    return yield* withIdempotency(
+    const result = yield* withIdempotency(
       {
         scope: { _tag: "Workspace", workspaceId },
         key: opts?.requestKey,
@@ -364,6 +363,12 @@ export const record = (input: RecordPaymentInput, opts?: RequestOptions) =>
           : yield* recordOnExpense(workspaceId, target.expense, input);
       }),
     );
+    // Stored and replayed without share/deliveries; the caller's view gets them here.
+    const documents = yield* PaymentDocuments;
+    const issued = yield* Effect.forEach(result.issued, (view) =>
+      documents.withActivity(workspaceId, view),
+    );
+    return { ...result, issued };
   }).pipe(orUnavailable);
 
 /**
@@ -470,7 +475,18 @@ type WidePayments = {
 };
 
 const make = Effect.gen(function* () {
-  const context = yield* Effect.context<PaymentsDeps>();
+  // Only the build dependencies: the build-time context may hold a CurrentCaller, RequestOutcome
+  // or transaction frame, and providing them per call would override the caller's own.
+  const context = Context.pick(
+    CoreStore,
+    IdGenerator,
+    PaymentsRepo,
+    DocumentPayments,
+    PaymentDocuments,
+    DocumentSender,
+    ExpensePayables,
+    PaymentSettings,
+  )(yield* Effect.context<PaymentsDeps>());
   // The call site's context wins: its caller, RequestOutcome and CoreStore transaction frame.
   const run = <A, E>(effect: Effect.Effect<A, E, PaymentsDeps | CurrentCaller>) =>
     Effect.flatMap(Effect.context<CurrentCaller>(), (callSite) =>

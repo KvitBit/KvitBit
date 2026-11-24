@@ -23,10 +23,12 @@
  *               VatMath totals. Every write and dry run goes through `compose`.
  * - view.ts     record -> DocumentView/DocumentSummary, concrete codecs for the domain
  *               placeholders (`DocumentViewCodec` is the C3 result codec).
- * - support.ts  `now`, `newDraftRecord`, `viewOf`/`relatedOf`.
- * - activity.ts `DocumentActivity`, the optional read port behind `DocumentView.share` and
- *               `deliveries` (bound at integration, compose/documentActivity.ts), and
- *               `DocumentActivityNone`. Absent = `share: null`, `deliveries: []`.
+ * - support.ts  `now`, `newDraftRecord`, `viewOf` (the stored view: no share, no deliveries),
+ *               `withActivity` (the owner-facing view), `relatedOf`.
+ * - activity.ts `DocumentActivity`, the read port behind `DocumentView.share` and `deliveries`
+ *               (bound at integration, compose/documentActivity.ts), required by the
+ *               owner-facing boundaries (`DocumentsLive`, `PaymentDocumentsLive`);
+ *               `DocumentActivityNone` for module tests (`share: null`, `deliveries: []`).
  * - drafts.ts   preview, createDraft, discardDraft, editDraft (P1).
  * - reads.ts    get, list, history, pdf (P1).
  * - transitions.ts  the state machine: `TRANSITIONS` (lifecycle state x action -> ok | noop |
@@ -109,6 +111,7 @@
  */
 import { Layer } from "effect";
 import { NumberingTestLayer } from "../numbering";
+import { type DocumentActivity, DocumentActivityNone } from "./activity";
 import { DeliveriesRepoMemory, DeliveryJobsMemory, DocumentSenderLive } from "./deliveries";
 import { DocumentDeliveryReadsLive } from "./delivery";
 import { DocumentFakesLive } from "./fakes";
@@ -208,6 +211,7 @@ export {
   now,
   relatedOf,
   viewOf,
+  withActivity,
 } from "./support";
 export type { LifecycleAction, LifecycleState, TransitionOutcome } from "./transitions";
 export {
@@ -245,28 +249,36 @@ export const DocumentsTestLayer = Layer.mergeAll(
   DocumentDeliveryReadsLive,
 ).pipe(
   Layer.provideMerge(
-    Layer.mergeAll(DocumentsRepoMemory, NumberingTestLayer, DocumentFakesLive, DocumentSenderStub),
+    Layer.mergeAll(
+      DocumentsRepoMemory,
+      NumberingTestLayer,
+      DocumentFakesLive,
+      DocumentSenderStub,
+      DocumentActivityNone,
+    ),
   ),
 );
 
 /**
  * `DocumentsTestLayer` with the real `DocumentSenderLive` instead of the stub, plus the memory
- * `DeliveriesRepo` and `DeliveryJobs`; exposes `DeliveriesRepo` and `StartedDeliveries`.
+ * `DeliveriesRepo` and `DeliveryJobs`; exposes `DeliveriesRepo` and `StartedDeliveries`, with
+ * the given `DocumentActivity` (compose tests bind `DocumentActivityLive`).
  * Requires `InMemoryPortsLive` (also EmailSender via CaptureEmailSender).
  */
-export const DocumentsDeliveryTestLayer = Layer.mergeAll(
-  DocumentsLive,
-  DocumentPaymentsLive,
-  DocumentDeliveryReadsLive,
-).pipe(
-  Layer.provideMerge(DocumentSenderLive),
-  Layer.provideMerge(
-    Layer.mergeAll(
-      DocumentsRepoMemory,
-      NumberingTestLayer,
-      DocumentFakesLive,
-      DeliveriesRepoMemory,
-      DeliveryJobsMemory,
+export const documentsDeliveryTestLayer = <R>(activity: Layer.Layer<DocumentActivity, never, R>) =>
+  Layer.mergeAll(DocumentsLive, DocumentPaymentsLive, DocumentDeliveryReadsLive).pipe(
+    Layer.provideMerge(DocumentSenderLive),
+    Layer.provideMerge(
+      Layer.mergeAll(
+        DocumentsRepoMemory,
+        NumberingTestLayer,
+        DocumentFakesLive,
+        DeliveriesRepoMemory,
+        DeliveryJobsMemory,
+        activity,
+      ),
     ),
-  ),
-);
+  );
+
+/** `documentsDeliveryTestLayer` without share links or deliveries in views. */
+export const DocumentsDeliveryTestLayer = documentsDeliveryTestLayer(DocumentActivityNone);
