@@ -175,6 +175,14 @@
         {
           "path": "packages/core/src/store/memory.ts",
           "sha256": "b12cacb2313336ffa34d3a9f28b13a4dcf9915bc7a00f68e9c0689a12c3a9eba"
+        },
+        {
+          "path": "packages/core/src/modules/documents/service.ts",
+          "sha256": "22d384d76b162172ee42625f2c85896ffad51634b73639f7ff6883d1571eb769"
+        },
+        {
+          "path": "packages/core/src/modules/documents/compose.ts",
+          "sha256": "545885ad5f31ca80cdf2ba21782f6db0e89557d7fb00141a7f17177fd1566f41"
         }
       ],
       "guardedSymbols": [
@@ -202,16 +210,18 @@
         "issuePaymentTaxDocument",
         "removalBlocked",
         "Payments.record (recordOnDocument)",
-        "Payments.remove"
+        "Payments.remove",
+        "Documents.edit"
       ],
       "bounds": "base: 2 VAT buckets, 2 payment/PTD slots, 1 Final Invoice slot, one issueFinalInvoice and one PTD correction in flight, both regimes (24,800 distinct states); wide: 3 slots",
       "assumptions": [
         "Every service method is one CoreStore transaction; the memory store serializes transactions and Postgres row-locks with SELECT ... FOR UPDATE at READ COMMITTED in S4 order (Proforma first)",
-        "Only issueFinalInvoice and correct/cancel of a PTD are split at their row-lock acquisitions; every other method locks each row it decides on before reading it",
+        "Only issueFinalInvoice and correct/cancel of a PTD are split at their row-lock acquisitions; every other method is one step because what it decides on cannot change under it: it holds the lock every writer of that row takes (Payments.remove reads the PTD unlocked, every PTD writer locks the Proforma first) or the value only moves one way (loadForCredit's unlocked Final Invoice read can only become reversed)",
         "A failed transaction writes nothing and releases its locks",
         "Amounts are abstract units per VAT bucket; VAT, rounding and CZK math belong to verify-vat-numbering-math",
         "Document Lock is modelled on the Proforma and the Final Invoice only; on a PTD it only disables correct/cancel",
-        "The Issuing Entity's regime is fixed for a run (both regimes are explored)"
+        "The Issuing Entity's regime is fixed for a run (both regimes are explored)",
+        "Regimes vat_payer and non_vat_payer only; identified_person is out of scope"
       ],
       "toolVersions": {
         "tla2tools": "1.7.4",
@@ -258,6 +268,14 @@
         {
           "path": "packages/core/src/store/memory.ts",
           "sha256": "b12cacb2313336ffa34d3a9f28b13a4dcf9915bc7a00f68e9c0689a12c3a9eba"
+        },
+        {
+          "path": "packages/core/src/modules/documents/service.ts",
+          "sha256": "22d384d76b162172ee42625f2c85896ffad51634b73639f7ff6883d1571eb769"
+        },
+        {
+          "path": "packages/core/src/modules/documents/compose.ts",
+          "sha256": "545885ad5f31ca80cdf2ba21782f6db0e89557d7fb00141a7f17177fd1566f41"
         }
       ],
       "guardedSymbols": [
@@ -285,7 +303,9 @@
         "issuePaymentTaxDocument",
         "removalBlocked",
         "Payments.record (recordOnDocument)",
-        "Payments.remove"
+        "Payments.remove",
+        "Documents.edit",
+        "compose (Final Invoice deduction totals)"
       ],
       "bounds": "29 traces on TestCore (vat_payer and non_vat_payer): the shortest path to each model action, guard traces, both serial orders of H2, the D7 cap for PTDs and the Final Invoice, four crash points (CNB fixing unavailable during PTD and Final Invoice issue; Credit Note and Final Invoice numbering exhausted); model invariants checked after every step",
       "assumptions": [

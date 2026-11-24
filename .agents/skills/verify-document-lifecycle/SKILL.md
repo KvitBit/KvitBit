@@ -27,13 +27,13 @@ Yes, if the diff touches a covered file, a guarded symbol, or what they call: `D
 
 | Check | Covered files (`packages/core/src/`) | Guarded symbols |
 |---|---|---|
-| `lifecycle.model` (TLC) and `lifecycle.replay` | `modules/documents/{transitions,lifecycle,final,corrections,credit,payments}.ts`, `modules/payments/service.ts`, `store/memory.ts` | `TRANSITIONS`, `guard`, `paymentsBlockCancel`, `hasFinalInvoice`, `hasDependents`, `cancel`, `lock`, `unlock`, `editIssued`, `issueFinalInvoice`, `deductionLines`, `plan` (final.ts, corrections.ts), `loadForCredit`, `correct`, `withinRemainder`, `issueCreditNote`, `settlementOf`, `isFullyCredited`, `DocumentPayments.lock`/`settle`, `issuePaymentTaxDocument`, `removalBlocked`, `Payments.record`/`remove` |
+| `lifecycle.model` (TLC) and `lifecycle.replay` | `modules/documents/{transitions,lifecycle,final,corrections,credit,payments,service,compose}.ts`, `modules/payments/service.ts`, `store/memory.ts` | `TRANSITIONS`, `Documents.edit`, `guard`, `paymentsBlockCancel`, `hasFinalInvoice`, `hasDependents`, `cancel`, `lock`, `unlock`, `editIssued`, `issueFinalInvoice`, `deductionLines`, `plan` (final.ts, corrections.ts), `loadForCredit`, `correct`, `withinRemainder`, `issueCreditNote`, `settlementOf`, `isFullyCredited`, `DocumentPayments.lock`/`settle`, `issuePaymentTaxDocument`, `removalBlocked`, `Payments.record`/`remove` |
 
-The VAT, rounding and CZK amounts of these documents are `verify-vat-numbering-math`'s; this skill abstracts amounts to units per bucket.
+The VAT, rounding and CZK amounts of these documents are `verify-vat-numbering-math`'s; this skill abstracts amounts to units per bucket. `compose.ts` is covered because it computes the Final Invoice's deduction lines that the replay compares with the PTDs; the replay uses prices without VAT only (`pricesIncludeVat` is not covered here).
 
 ## What the checks promise
 
-Each property is an INVARIANT or PROPERTY of `DocumentLifecycle.cfg`; the replay's `Lab.check` asserts the same names on real state.
+Each property is an INVARIANT or PROPERTY of `DocumentLifecycle.cfg`. The replay's `Lab.check` asserts, on the real state after each step: `OneFinalInvoice`, `FinalInvoiceOfPaidProforma`, `PtdPerPayment` (real payment -> PTD links), `CancelledProformaUnpaid`, `CancelledFinalUnpaid`, `CancelledIsLocked`, `RemovedPaymentReversed` (which payments the Final Invoice deducted is harness bookkeeping), `CreditWithinOriginal` (PTDs and the Final Invoice's supply), `DeductionsCurrent`. It holds no history, so `LegalTransitions` and `FrozenWhenDepended` are replayed only as expected outcomes of single steps (a refused edit, a refused cancel); `NoPtdAfterFinal` only through `PtdPerPayment` (payments after the Final Invoice carry no PTD); `NoLockWaitCycle` not at all.
 
 | Property | Promise | Harm if broken |
 |---|---|---|
@@ -59,7 +59,7 @@ Mutant `no-proforma-lock` (the PTD's Proforma read without its lock) breaks `Ded
 
 ## Model, bounds, assumptions
 
-- Bounds (base): 2 VAT buckets, 2 payment slots (and so up to 2 PTDs), one Final Invoice slot, at most one `issueFinalInvoice` and one PTD correction in flight, both regimes (vat_payer, non_vat_payer) from `Init`. 24,800 distinct states, depth 26. Wide: 3 payment slots.
+- Bounds (base): 2 VAT buckets, 2 payment slots (and so up to 2 PTDs), one Final Invoice slot, at most one `issueFinalInvoice` and one PTD correction in flight, both regimes (vat_payer, non_vat_payer) from `Init`; `identified_person` is out of scope. 24,800 distinct states, depth 26. Wide: 3 payment slots.
 - Scope: a bounded lifecycle and concurrency slice, not every clause of D5-D8, P2 and P3. `DeductionsCurrent` only bites on vat_payer traces (a non_vat_payer has no PTDs). `LegalTransitions` covers the part of the transition table the model represents. In the model `PtdPerPayment` checks the payment-slot-to-PTD-slot mapping; the replay checks the real payment -> PTD links. `duplicate-final` shows the count reacts to a second issue; the model keeps one Final Invoice record.
 - Atomic steps: every method is one CoreStore transaction. The memory store serializes transactions (`store/memory.ts:4-8,193-200`); the SQL adapter is assumed to row-lock with `SELECT ... FOR UPDATE` at READ COMMITTED (`store/CoreStore.ts:1-12`) in S4 order, the Proforma first (`docs/design/core-ports.md:1445-1447`). A method is one step when what it decides on cannot change under it. Either it holds the lock that every writer of that row takes: `Payments.remove` reads the PTD without a lock, but every PTD writer locks the Proforma first, which `remove` holds (`payments.ts:205-233,483-503`). Or the value only moves one way: `loadForCredit` reads the Final Invoice without a lock, but it can only become reversed, which only lifts a block. Correcting or cancelling the Final Invoice locks only the Final Invoice (`corrections.ts:202-205`) and is one step. The two H2 methods, `issueFinalInvoice` and a PTD's `correct`/`cancel`, are split at their lock acquisitions so the mutant can run them without the Proforma lock.
 - A failed transaction writes nothing and releases its locks (`FiAbort`, `CpAbort`; `store/memory.ts` restores the frame, Postgres rolls back).
@@ -103,7 +103,7 @@ Mutant `no-proforma-lock` (the PTD's Proforma read without its lock) breaks `Ded
 | `no-proforma-lock` | PTD correction without the Proforma lock (H2) | `DeductionsCurrent` |
 | `credit-over-cap` | no D7 per-bucket cap | `CreditWithinOriginal` |
 
-- Able-to-fail gate on the real code (2026-11-24, at `77a5bb7`): each break was applied to the file, `bun test ./formal/lifecycle/lifecycle.replay.test.ts` failed as shown, `git checkout` restored the file, and the run was green again (29 pass). Rows 1-4 were rerun on the 29-test harness; row 5 came from review round 1.
+- Able-to-fail gate on the real code (2026-11-24, at `77a5bb7`): each break was applied to the file, `bun test ./formal/lifecycle/lifecycle.replay.test.ts` failed as shown, `git checkout` restored the file, and the run was green again (29 pass). Rows 1-4 were rerun on the 29-test harness; row 7 came from review round 1, rows 5-6 from the diff council; the `deductedBy` row was rerun after `DeductionsCurrent` started summing signed deduction amounts.
 
 | Break | File | Caught by |
 |---|---|---|
@@ -111,4 +111,8 @@ Mutant `no-proforma-lock` (the PTD's Proforma read without its lock) breaks `Ded
 | `hasFinalInvoice` duplicate check disabled | `modules/documents/final.ts:130` | `Lab.check` `OneFinalInvoice` (2 `final_invoice_for` links; the memory store has no unique link index) |
 | `removalBlocked` Final Invoice check disabled | `modules/documents/payments.ts:497` | `Lab.check` `RemovedPaymentReversed` (non_vat_payer cash advance removed under a live Final Invoice); with a vat_payer the open PTD still blocks the removal |
 | `deductedBy` dropped from the correction plan | `modules/documents/corrections.ts:235` | `Lab.check` `DeductionsCurrent` (PTD credited under a live Final Invoice) |
+| `hasDependents` ignores the Proforma's payments | `modules/documents/transitions.ts:161` | the expected `Conflict{illegal_transition}` of a lines edit on a paid Proforma (`FrozenWhenDepended` as a step outcome) |
+| `issuePaymentTaxDocument` returns no PTD for a vat_payer | `modules/documents/payments.ts:384` | `Lab.check` `PtdPerPayment` (a vat_payer's payment on the Proforma without its PTD) |
 | D7 cap skipped for Invoices (`withinRemainder` only when `kind !== "invoice"`) | `modules/documents/corrections.ts:253` | `Lab.check` `CreditWithinOriginal` for the Final Invoice (its supply line credited twice) |
+
+- Able-to-fail evidence per property. With a mutant: `CancelledProformaUnpaid`, `CancelledFinalUnpaid`, `OneFinalInvoice`, `RemovedPaymentReversed`, `DeductionsCurrent`, `CreditWithinOriginal`. With a real-code break only: `PtdPerPayment`, `FrozenWhenDepended` (as a step outcome). With neither (they hold, but no run has shown them failing): `LegalTransitions`, `NoPtdAfterFinal`, `FinalInvoiceOfPaidProforma`, `CancelledIsLocked`, `NoLockWaitCycle`, `TypeOK`. Add a mutant before relying on one of these to catch a change.

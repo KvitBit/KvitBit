@@ -64,8 +64,10 @@ interface LineRow {
   readonly id: LineId;
   readonly deducts: DocumentId | null;
   readonly unitPrice: BigDecimal.BigDecimal;
+  /** quantity x unitPrice: negative on a deduction line (quantity -1). */
   readonly amount: BigDecimal.BigDecimal;
   readonly treatment: string;
+  readonly ratePercent: BigDecimal.BigDecimal;
 }
 const linesOf = (d: DocumentView) => d.lines as unknown as ReadonlyArray<LineRow>;
 const related = (d: DocumentView, relation: string) =>
@@ -272,11 +274,16 @@ class Lab {
         }
         // DeductionsCurrent (H2): a live Final Invoice deducts exactly the PTD's remainder
         if (fiLive && fi !== null) {
-          const deducted = new Map<string, string>();
+          // Sum every deduction line of this PTD per bucket (the line's own treatment and
+          // rate); a deduction line's amount is minus the deducted base.
+          const sums = new Map<string, BigDecimal.BigDecimal>();
           for (const l of linesOf(fi).filter((l) => l.deducts === id)) {
-            const rate = ptd.totals.buckets.find((b) => b.treatment === l.treatment)?.ratePercent;
-            deducted.set(`${l.treatment}|${str(rate ?? dec("0"))}`, str(l.unitPrice));
+            const k = bucketKey(l);
+            sums.set(k, BigDecimal.sum(sums.get(k) ?? dec("0"), BigDecimal.negate(l.amount)));
           }
+          const deducted = new Map(
+            [...sums].filter(([, v]) => !BigDecimal.isZero(v)).map(([k, v]) => [k, str(v)]),
+          );
           expect(deducted).toEqual(remaining);
         }
       }
@@ -300,7 +307,8 @@ class Lab {
           expect(BigDecimal.isLessThanOrEqualTo(c, supply.get(treatment) ?? dec("0"))).toBe(true);
         }
       }
-      // RemovedPaymentReversed
+      // RemovedPaymentReversed (which payments the Final Invoice deducted is the harness's
+      // bookkeeping: live on the Proforma when issueFinalInvoice succeeded)
       for (const b of onP.filter((b) => b.removed)) {
         if (b.ptd !== null) expect((yield* docs.get(b.ptd)).settlement).toBe("credited");
         if (b.deductedByFinal) expect(fiReversed).toBe(true);
@@ -897,7 +905,7 @@ describe("Crash points (FiAbort, CpAbort, a failed RecordOnProforma)", () => {
         value(yield* lab.step(lab.issueProforma(EUR)));
         yield* ratesDown(true);
         const exit = yield* Effect.exit(lab.pay("10", undefined, "2026-11-20", EUR));
-        expect(Exit.isFailure(exit)).toBe(true);
+        expect(failure(exit)._tag).toBe("Unavailable");
         yield* lab.check();
         const p = yield* lab.get(lab.p);
         expect(related(p, "tax_document_for")).toEqual([]);
@@ -909,7 +917,9 @@ describe("Crash points (FiAbort, CpAbort, a failed RecordOnProforma)", () => {
     );
   });
 
-  test("a Final Invoice that cannot get its fixing writes nothing", async () => {
+  // The fixing is read in compose, before the Final Invoice's first write: this shows the
+  // request fails cleanly, not a rollback (CpAbort/FiAbort below and the PTD case do that).
+  test("a Final Invoice that cannot get its fixing fails before writing", async () => {
     await replay("vat_payer", (lab) =>
       Effect.gen(function* () {
         value(yield* lab.step(lab.issueProforma(EUR)));
@@ -917,7 +927,7 @@ describe("Crash points (FiAbort, CpAbort, a failed RecordOnProforma)", () => {
         yield* ratesDown(true);
         const patch = { taxableSupplyOn: "2026-11-21" as IsoDate } as DocumentPatch;
         const exit = yield* lab.step(lab.issueFinal(patch));
-        expect(Exit.isFailure(exit)).toBe(true);
+        expect(failure(exit)._tag).toBe("Unavailable");
         expect(yield* lab.finalId()).toBeNull();
         yield* ratesDown(false);
         value(yield* lab.step(lab.issueFinal(patch)));
