@@ -1,0 +1,841 @@
+/**
+ * Tier 2 TEA & architecture invariants for @kvitbit/web:
+ *   1. Route codec round-trip (`toPath -> fromPath`) and Shell access gate invariants.
+ *   2. `Remote<A>` sequence-guard invariants (stale/out-of-order/post-settlement replies dropped).
+ *   3. Shell `update` invariants (unmounted page messages dropped, workspace switcher toggle/close,
+ *      prefs serialize/parse round-trip across all presets and random custom seeds).
+ *   4. Static architecture checks (zero React imports, zero direct document./window. DOM mutations
+ *      in `src/page/**` outside Command effects, zero raw hex literals in `src/styles/pages/**`).
+ */
+import { describe, expect, test } from "bun:test";
+import { readdirSync, readFileSync } from "node:fs";
+import { join, relative, resolve } from "node:path";
+import type {
+  AttachmentId,
+  ContactId,
+  DocumentId,
+  ExpenseId,
+  Hex,
+  IsoDate,
+  ShareToken,
+  TemplateId,
+  ThemeContrast,
+  ThemeMode,
+  ThemePresetId,
+  ThemeStyle,
+  WorkspaceSlug,
+} from "@kvitbit/domain";
+import { I18n, Theme, ViewModels } from "@kvitbit/ui-port";
+import { Option } from "effect";
+import * as fc from "fast-check";
+import { type Url, fromString as urlFromString } from "foldkit/url";
+import type { Failure } from "../../src/app/api";
+import type { Route } from "../../src/app/page";
+import type { PageKey, PageMessage } from "../../src/app/pages";
+import {
+  defaultPrefs,
+  type Locale,
+  PREFS_COOKIE,
+  type Prefs,
+  parsePrefs,
+  readCookie,
+  serializePrefs,
+} from "../../src/app/prefs";
+import * as Remote from "../../src/app/remote";
+import { gate, href, NOT_FOUND, routeFromPath } from "../../src/app/routing";
+import type { SessionState } from "../../src/app/session";
+import { DEMO_USER, DEMO_WORKSPACE, DEMO_WORKSPACES, demoId } from "../../src/demo/shell";
+import { init, Message, type Model, update } from "../../src/main";
+
+const WEB_SRC = resolve(import.meta.dirname, "../../src");
+
+const ALL_PAGE_KEYS: ReadonlyArray<PageKey> = [
+  "Landing",
+  "Legal",
+  "Auth",
+  "Android",
+  "Share",
+  "Consent",
+  "Invitation",
+  "ErrorPage",
+  "Onboarding",
+  "Dashboard",
+  "Documents",
+  "DocumentEditor",
+  "DocumentDetail",
+  "Templates",
+  "Contacts",
+  "PriceList",
+  "Expenses",
+  "Reports",
+  "Settings",
+  "Account",
+];
+
+// --- Arbitraries ---------------------------------------------------------------------------------
+
+const arbSlug = fc
+  .stringMatching(/^[a-z][a-z0-9]{2,8}(-[a-z0-9]{1,6})?$/)
+  .map((s) => s as WorkspaceSlug);
+
+const arbUuid = fc.integer({ min: 1, max: 10_000 }).map((n) => demoId(n));
+const arbDocId = arbUuid.map((s) => s as DocumentId);
+const arbContactId = arbUuid.map((s) => s as ContactId);
+const arbTemplateId = arbUuid.map((s) => s as TemplateId);
+const arbExpenseId = arbUuid.map((s) => s as ExpenseId);
+const arbAttachmentId = arbUuid.map((s) => s as AttachmentId);
+
+const arbSafeToken = fc.stringMatching(/^[a-zA-Z0-9._-]{1,24}$/);
+const arbSafeText = fc.stringMatching(/^[a-zA-Z0-9 _.-]{1,24}$/);
+const arbOptText = fc.option(arbSafeText, { nil: undefined });
+
+const arbIsoDate = fc
+  .tuple(
+    fc.integer({ min: 2024, max: 2030 }),
+    fc.integer({ min: 1, max: 12 }),
+    fc.integer({ min: 1, max: 28 }),
+  )
+  .map(
+    ([y, m, d]) => `${y}-${String(m).padStart(2, "0")}-${String(d).padStart(2, "0")}` as IsoDate,
+  );
+
+const arbPeriod = fc.oneof(
+  fc.integer({ min: 2024, max: 2030 }).map((y) => String(y) as ViewModels.Period),
+  fc
+    .tuple(fc.integer({ min: 2024, max: 2030 }), fc.integer({ min: 1, max: 4 }))
+    .map(([y, q]) => `${y}-Q${q}` as ViewModels.Period),
+  fc
+    .tuple(fc.integer({ min: 2024, max: 2030 }), fc.integer({ min: 1, max: 12 }))
+    .map(([y, m]) => `${y}-${String(m).padStart(2, "0")}` as ViewModels.Period),
+);
+
+type Compact<T extends Record<string, unknown>> = {
+  readonly [K in keyof T as undefined extends T[K] ? never : K]: T[K];
+} & {
+  readonly [K in keyof T as undefined extends T[K] ? K : never]?: Exclude<T[K], undefined>;
+};
+
+const compact = <T extends Record<string, unknown>>(obj: T): Compact<T> => {
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(obj)) {
+    if (v !== undefined) out[k] = v;
+  }
+  return out as Compact<T>;
+};
+
+const arbRoute: fc.Arbitrary<Route> = fc.oneof(
+  fc.constant<Route>({ _tag: "Landing" }),
+  fc
+    .constantFrom("terms" as const, "privacy" as const)
+    .map((page): Route => ({ _tag: "Legal", page })),
+  fc
+    .option(arbSafeToken, { nil: undefined })
+    .map((invitation): Route => compact({ _tag: "SignUp" as const, invitation })),
+  fc
+    .option(fc.constantFrom("/w/novak-design", "/account/profile", "/"), { nil: undefined })
+    .map((returnTo): Route => compact({ _tag: "SignIn" as const, returnTo })),
+  fc
+    .constantFrom("jana@example.cz", "user+1@test.org")
+    .map((email): Route => ({ _tag: "CheckEmail", email })),
+  fc
+    .tuple(fc.constantFrom("verify" as const, "magic" as const, "reset" as const), arbSafeToken)
+    .map(([kind, token]): Route => ({ _tag: "AuthLink", kind, token })),
+  fc
+    .option(arbSafeToken, { nil: undefined })
+    .map((token): Route => compact({ _tag: "ResetPassword" as const, token })),
+  fc.constant<Route>({ _tag: "AndroidDownload" }),
+  arbSafeToken.map((t): Route => ({ _tag: "Share", token: `v1.${t}` as ShareToken })),
+  arbSafeToken.map((consentId): Route => ({ _tag: "McpConsent", consentId })),
+  arbSafeToken.map((token): Route => ({ _tag: "Invitation", token })),
+  fc
+    .constantFrom("not_found" as const, "no_access" as const, "server" as const, "offline" as const)
+    .map((kind): Route => ({ _tag: "Error", kind })),
+  fc
+    .option(fc.integer({ min: 1, max: 4 }), { nil: undefined })
+    .map((step): Route => compact({ _tag: "Onboarding" as const, step })),
+  fc
+    .constantFrom(
+      "profile" as const,
+      "appearance" as const,
+      "security" as const,
+      "sessions" as const,
+      "danger" as const,
+    )
+    .map((tab): Route => ({ _tag: "Account", tab })),
+  arbSlug.map((ws): Route => ({ _tag: "Dashboard", ws })),
+  fc
+    .record({
+      ws: arbSlug,
+      text: arbOptText,
+      status: fc.option(
+        fc.constantFrom("draft" as const, "issued" as const, "cancelled" as const),
+        { nil: undefined },
+      ),
+      kind: fc.option(
+        fc.constantFrom(
+          "invoice" as const,
+          "proforma" as const,
+          "payment_tax_document" as const,
+          "credit_note" as const,
+        ),
+        { nil: undefined },
+      ),
+      settlement: fc.option(
+        fc.constantFrom(
+          "unpaid" as const,
+          "partially_paid" as const,
+          "paid" as const,
+          "overpaid" as const,
+        ),
+        { nil: undefined },
+      ),
+      overdue: fc.option(fc.boolean(), { nil: undefined }),
+      contact: fc.option(arbContactId, { nil: undefined }),
+      from: fc.option(arbIsoDate, { nil: undefined }),
+      to: fc.option(arbIsoDate, { nil: undefined }),
+    })
+    .map(({ ws, ...query }): Route => ({ _tag: "Documents", ws, query: compact(query) })),
+  fc
+    .record({
+      ws: arbSlug,
+      kind: fc.constantFrom("invoice" as const, "proforma" as const),
+      from: fc.option(
+        fc.oneof(
+          arbContactId.map((id) => ({ _tag: "Contact" as const, id })),
+          arbTemplateId.map((id) => ({ _tag: "Template" as const, id })),
+          arbDocId.map((id) => ({ _tag: "Duplicate" as const, id })),
+        ),
+        { nil: undefined },
+      ),
+    })
+    .map((r): Route => compact({ _tag: "DocumentNew" as const, ...r })),
+  fc.tuple(arbSlug, arbDocId).map(([ws, id]): Route => ({ _tag: "DocumentEdit", ws, id })),
+  fc
+    .record({
+      ws: arbSlug,
+      id: arbDocId,
+      tab: fc.constantFrom(
+        "preview" as const,
+        "payments" as const,
+        "share" as const,
+        "history" as const,
+      ),
+      dialog: fc.option(
+        fc.constantFrom(
+          "issue" as const,
+          "payment" as const,
+          "send" as const,
+          "cancel" as const,
+          "correct" as const,
+        ),
+        { nil: undefined },
+      ),
+    })
+    .map((r): Route => compact({ _tag: "Document" as const, ...r })),
+  arbSlug.map((ws): Route => ({ _tag: "Templates", ws })),
+  fc
+    .record({
+      ws: arbSlug,
+      id: fc.oneof(arbTemplateId, fc.constant("new" as const)),
+      tab: fc.constantFrom("template" as const, "schedule" as const, "runs" as const),
+    })
+    .map((r): Route => ({ _tag: "Template", ...r })),
+  fc
+    .record({
+      ws: arbSlug,
+      text: arbOptText,
+      incomplete: fc.option(fc.boolean(), { nil: undefined }),
+    })
+    .map(({ ws, ...query }): Route => ({ _tag: "Expenses", ws, query: compact(query) })),
+  arbSlug.map((ws): Route => ({ _tag: "ExpenseCapture", ws })),
+  fc
+    .record({
+      ws: arbSlug,
+      id: fc.oneof(arbExpenseId, fc.constant("new" as const)),
+      mode: fc.constantFrom("view" as const, "edit" as const),
+      attachment: fc.option(arbAttachmentId, { nil: undefined }),
+      job: fc.option(arbSafeToken, { nil: undefined }),
+    })
+    .map((r): Route => compact({ _tag: "Expense" as const, ...r })),
+  fc
+    .record({
+      ws: arbSlug,
+      text: arbOptText,
+      role: fc.option(fc.constantFrom("customer" as const, "supplier" as const), {
+        nil: undefined,
+      }),
+      archived: fc.option(fc.boolean(), { nil: undefined }),
+    })
+    .map(({ ws, ...query }): Route => ({ _tag: "Contacts", ws, query: compact(query) })),
+  fc
+    .record({
+      ws: arbSlug,
+      id: fc.oneof(arbContactId, fc.constant("new" as const)),
+      mode: fc.constantFrom("view" as const, "edit" as const),
+    })
+    .map((r): Route => ({ _tag: "Contact", ...r })),
+  fc
+    .record({ ws: arbSlug, text: arbOptText })
+    .map((r): Route => compact({ _tag: "PriceList" as const, ...r })),
+  fc
+    .record({
+      ws: arbSlug,
+      report: fc.constantFrom(...ViewModels.ReportTab.literals),
+      period: arbPeriod,
+    })
+    .map((r): Route => ({ _tag: "Reports", ...r })),
+  fc
+    .record({
+      ws: arbSlug,
+      section: fc.constantFrom(...ViewModels.SettingsSection.literals),
+    })
+    .map((r): Route => ({ _tag: "Settings", ...r })),
+  arbSlug.map((ws): Route => ({ _tag: "More", ws })),
+);
+
+// Representative sample of every single one of the 30 Route tags for exhaustive gate verification.
+const WS_MEMBER = DEMO_WORKSPACE.slug;
+const WS_NON_MEMBER = "foreign-workspace" as WorkspaceSlug;
+
+const sampleRoutesFor = (ws: WorkspaceSlug): ReadonlyArray<Route> => [
+  { _tag: "Landing" },
+  { _tag: "Legal", page: "terms" },
+  { _tag: "SignUp" },
+  { _tag: "SignIn" },
+  { _tag: "CheckEmail", email: "a@b.cz" },
+  { _tag: "AuthLink", kind: "verify", token: "tok1" },
+  { _tag: "ResetPassword" },
+  { _tag: "AndroidDownload" },
+  { _tag: "Share", token: "v1.tok" as ShareToken },
+  { _tag: "McpConsent", consentId: "c1" },
+  { _tag: "Invitation", token: "inv1" },
+  { _tag: "Error", kind: "not_found" },
+  { _tag: "Onboarding" },
+  { _tag: "Account", tab: "profile" },
+  { _tag: "Dashboard", ws },
+  { _tag: "Documents", ws, query: {} },
+  { _tag: "DocumentNew", ws, kind: "invoice" },
+  { _tag: "DocumentEdit", ws, id: demoId(10) as DocumentId },
+  { _tag: "Document", ws, id: demoId(10) as DocumentId, tab: "preview" },
+  { _tag: "Templates", ws },
+  { _tag: "Template", ws, id: "new", tab: "template" },
+  { _tag: "Expenses", ws, query: {} },
+  { _tag: "ExpenseCapture", ws },
+  { _tag: "Expense", ws, id: "new", mode: "view" },
+  { _tag: "Contacts", ws, query: {} },
+  { _tag: "Contact", ws, id: "new", mode: "view" },
+  { _tag: "PriceList", ws },
+  { _tag: "Reports", ws, report: "revenue", period: "2026" as ViewModels.Period },
+  { _tag: "Settings", ws, section: "issuingEntity" },
+  { _tag: "More", ws },
+];
+
+const parseUrl = (path: string): Url => {
+  const parsed = urlFromString(`http://localhost${path}`);
+  if (Option.isNone(parsed)) throw new Error(`Invalid test URL: ${path}`);
+  return parsed.value;
+};
+
+const mkFailure = (tag = "Offline"): Failure => ({
+  tag,
+  surface: "banner",
+  text: { key: "error.offline" },
+  issues: [],
+  retryable: true,
+  staleRevision: false,
+  freshBotProof: false,
+  requestId: null,
+});
+
+const bootModel = (path: string, session: SessionState, prefs: Prefs = defaultPrefs("cs")): Model =>
+  init({ prefs, session }, parseUrl(path)).model;
+
+// --- 1. Route round-trip & Shell gate invariants -------------------------------------------------
+
+describe("route round-trip & Shell access gate invariants", () => {
+  test("toPath -> fromPath round-trips across all 30 Route variants (fast-check)", () => {
+    fc.assert(
+      fc.property(arbRoute, (route) => {
+        const path = href(route);
+        expect(path.startsWith("/")).toBe(true);
+        const parsed = routeFromPath(path);
+        expect(parsed).toEqual(route);
+      }),
+      { numRuns: 200, seed: 20261124 },
+    );
+  });
+
+  test("unknown paths resolve to NOT_FOUND", () => {
+    for (const bad of ["/no/such/page", "/w/", "/legal/unknown", "/account/nope", "/error/bogus"]) {
+      expect(routeFromPath(bad)).toEqual(NOT_FOUND);
+    }
+  });
+
+  test("Shell gate exhaustively enforces public/account/workspace across all 5 session states", () => {
+    const signedInSession: SessionState = {
+      _tag: "SignedIn",
+      user: { ...DEMO_USER },
+      workspaces: DEMO_WORKSPACES,
+    };
+    const unavailableSession: SessionState = {
+      _tag: "Unavailable",
+      failure: mkFailure("Offline"),
+    };
+    const sessions: ReadonlyArray<SessionState> = [
+      { _tag: "Unknown" },
+      { _tag: "Anonymous" },
+      unavailableSession,
+      signedInSession,
+    ];
+
+    const memberRoutes = sampleRoutesFor(WS_MEMBER);
+    const nonMemberRoutes = sampleRoutesFor(WS_NON_MEMBER);
+    expect(memberRoutes.length).toBe(30);
+
+    let checks = 0;
+
+    for (const route of memberRoutes) {
+      const scope = ViewModels.Routes.requires(route);
+      for (const session of sessions) {
+        const result = gate(route, session);
+        checks += 1;
+        if (scope === "public") {
+          expect(result).toEqual({ _tag: "Allow" });
+        } else if (session._tag === "Unknown") {
+          expect(result).toEqual({ _tag: "Wait" });
+        } else if (session._tag === "Unavailable") {
+          expect(result).toEqual({ _tag: "Redirect", route: { _tag: "Error", kind: "server" } });
+        } else if (session._tag === "Anonymous") {
+          expect(result).toEqual({
+            _tag: "Redirect",
+            route: { _tag: "SignIn", returnTo: href(route) },
+          });
+        } else {
+          expect(result).toEqual({ _tag: "Allow" });
+        }
+      }
+    }
+
+    // Signed-in non-member on every workspace route must redirect to no_access
+    for (const route of nonMemberRoutes) {
+      const scope = ViewModels.Routes.requires(route);
+      const result = gate(route, signedInSession);
+      checks += 1;
+      if (scope === "workspace") {
+        expect(result).toEqual({ _tag: "Redirect", route: { _tag: "Error", kind: "no_access" } });
+      } else {
+        expect(result).toEqual({ _tag: "Allow" });
+      }
+    }
+
+    expect(checks).toBe(30 * 5);
+  });
+});
+
+// --- 2. Remote<A> sequence-guard invariants ------------------------------------------------------
+
+describe("Remote<A> sequence-guard invariants", () => {
+  type Op =
+    | { readonly kind: "load" }
+    | { readonly kind: "succeed"; readonly seqDelta: -2 | -1 | 0 | 1; readonly value: number }
+    | { readonly kind: "fail"; readonly seqDelta: -2 | -1 | 0 | 1; readonly msg: string };
+
+  const arbOp: fc.Arbitrary<Op> = fc.oneof(
+    fc.constant<Op>({ kind: "load" }),
+    fc.record({
+      kind: fc.constant("succeed" as const),
+      seqDelta: fc.constantFrom(-2 as const, -1 as const, 0 as const, 1 as const),
+      value: fc.integer({ min: -1000, max: 1000 }),
+    }),
+    fc.record({
+      kind: fc.constant("fail" as const),
+      seqDelta: fc.constantFrom(-2 as const, -1 as const, 0 as const, 1 as const),
+      msg: fc.constantFrom("timeout", "offline", "server"),
+    }),
+  );
+
+  test("stale, future, and post-settlement replies never overwrite newer loads or data (fast-check)", () => {
+    fc.assert(
+      fc.property(fc.array(arbOp, { minLength: 1, maxLength: 50 }), (ops) => {
+        let state: Remote.Remote<number> = Remote.idle;
+
+        for (const op of ops) {
+          const prev = state;
+          const prevSeq = Remote.seqOf(prev);
+          const prevData = Remote.dataOf(prev);
+
+          if (op.kind === "load") {
+            const next = Remote.load(prev);
+            expect(Remote.seqOf(next)).toBe(prevSeq + 1);
+            expect(Remote.isPending(next)).toBe(true);
+            if (prev._tag === "Loaded" || prev._tag === "Refreshing") {
+              expect(next._tag).toBe("Refreshing");
+              expect(Remote.dataOf(next)).toBe(prevData);
+            } else {
+              expect(next._tag).toBe("Loading");
+            }
+            state = next;
+          } else if (op.kind === "succeed") {
+            const targetSeq = Math.max(0, prevSeq + op.seqDelta);
+            const next = Remote.succeed(prev, targetSeq, op.value);
+            if (Remote.isPending(prev) && targetSeq === prevSeq) {
+              expect(next).toEqual({ _tag: "Loaded", seq: prevSeq, data: op.value });
+            } else {
+              expect(next).toBe(prev);
+            }
+            state = next;
+          } else {
+            const targetSeq = Math.max(0, prevSeq + op.seqDelta);
+            const failure: Failure = mkFailure(op.msg);
+            const next = Remote.fail(prev, targetSeq, failure);
+            if (Remote.isPending(prev) && targetSeq === prevSeq) {
+              expect(next).toEqual({ _tag: "Failed", seq: prevSeq, failure });
+            } else {
+              expect(next).toBe(prev);
+            }
+            state = next;
+          }
+
+          expect(Remote.seqOf(state)).toBeGreaterThanOrEqual(prevSeq);
+        }
+      }),
+      { numRuns: 200, seed: 20261125 },
+    );
+  });
+
+  test("deterministic out-of-order reply scenario: slow load #1 cannot overwrite load #2", () => {
+    const r1 = Remote.load<string>(Remote.idle);
+    expect(r1).toEqual({ _tag: "Loading", seq: 1 });
+
+    const r2 = Remote.load(r1);
+    expect(r2).toEqual({ _tag: "Loading", seq: 2 });
+
+    // Stale reply for seq 1 is ignored
+    const afterStale = Remote.succeed(r2, 1, "stale-v1");
+    expect(afterStale).toBe(r2);
+
+    // Current reply for seq 2 succeeds
+    const afterCurrent = Remote.succeed(afterStale, 2, "fresh-v2");
+    expect(afterCurrent).toEqual({ _tag: "Loaded", seq: 2, data: "fresh-v2" });
+
+    // Duplicate/late failure for seq 2 after settlement is ignored
+    const afterLateFail = Remote.fail(afterCurrent, 2, mkFailure("Offline"));
+    expect(afterLateFail).toBe(afterCurrent);
+
+    // Refresh preserves shown data while seq advances to 3
+    const r3 = Remote.load(afterCurrent);
+    expect(r3).toEqual({ _tag: "Refreshing", seq: 3, data: "fresh-v2" });
+    expect(Remote.succeed(r3, 2, "old")).toBe(r3);
+  });
+});
+
+// --- 3. Shell update & prefs invariants ----------------------------------------------------------
+
+describe("Shell update & prefs invariants", () => {
+  const signedInSession: SessionState = {
+    _tag: "SignedIn",
+    user: { ...DEMO_USER },
+    workspaces: DEMO_WORKSPACES,
+  };
+
+  test("GotPage messages are dropped while on Splash (all 20 page tags)", () => {
+    const splashModel = bootModel(`/w/${WS_MEMBER}/documents`, { _tag: "Unknown" });
+    expect(splashModel.mount._tag).toBe("Splash");
+
+    for (const tag of ALL_PAGE_KEYS) {
+      const probe = {
+        _tag: tag,
+        message: { _tag: "__unmounted_probe__" },
+      } as unknown as PageMessage;
+      const msg = { _tag: "GotPage", message: probe } as unknown as Message;
+      const result = update(splashModel, msg);
+      expect(result.model).toBe(splashModel);
+      expect(result.commands ?? []).toEqual([]);
+    }
+  });
+
+  test("GotPage messages for any unmounted page are dropped without mutating mounted state", () => {
+    const mountedTargets: ReadonlyArray<{ readonly path: string; readonly expectedTag: PageKey }> =
+      [
+        { path: "/", expectedTag: "Landing" },
+        { path: `/w/${WS_MEMBER}`, expectedTag: "Dashboard" },
+        { path: `/w/${WS_MEMBER}/documents`, expectedTag: "Documents" },
+        { path: `/w/${WS_MEMBER}/settings/issuing-entity`, expectedTag: "Settings" },
+        { path: "/account/profile", expectedTag: "Account" },
+      ];
+
+    for (const target of mountedTargets) {
+      const model = bootModel(target.path, signedInSession);
+      expect(model.mount._tag).toBe("Mounted");
+      if (model.mount._tag !== "Mounted") continue;
+      expect(model.mount.page._tag).toBe(target.expectedTag);
+
+      for (const otherTag of ALL_PAGE_KEYS) {
+        if (otherTag === target.expectedTag) continue;
+        const probe = {
+          _tag: otherTag,
+          message: { _tag: "__unmounted_probe__" },
+        } as unknown as PageMessage;
+        const msg = { _tag: "GotPage", message: probe } as unknown as Message;
+        const result = update(model, msg);
+        expect(result.model).toBe(model);
+        expect(result.commands ?? []).toEqual([]);
+      }
+    }
+  });
+
+  test("workspace switcher toggle, close, shortcut, and navigation reset invariants", () => {
+    const wsModel = bootModel(`/w/${WS_MEMBER}`, signedInSession);
+    expect(wsModel.switcherOpen).toBe(false);
+
+    const opened = update(wsModel, Message.ToggledSwitcher()).model;
+    expect(opened.switcherOpen).toBe(true);
+
+    const toggledClosed = update(opened, Message.ToggledSwitcher()).model;
+    expect(toggledClosed.switcherOpen).toBe(false);
+
+    const shortcutOpened = update(toggledClosed, Message.PressedSwitcherShortcut()).model;
+    expect(shortcutOpened.switcherOpen).toBe(true);
+
+    const closed = update(shortcutOpened, Message.ClosedSwitcher()).model;
+    expect(closed.switcherOpen).toBe(false);
+
+    // Idempotent close
+    expect(update(closed, Message.ClosedSwitcher()).model.switcherOpen).toBe(false);
+
+    // Navigation closes an open switcher
+    const afterNav = update(
+      shortcutOpened,
+      Message.ChangedUrl({ url: parseUrl(`/w/${WS_MEMBER}/documents`) }),
+    ).model;
+    expect(afterNav.switcherOpen).toBe(false);
+
+    // Shortcut is a no-op on public/account routes
+    const publicModel = bootModel("/", signedInSession);
+    expect(update(publicModel, Message.PressedSwitcherShortcut()).model.switcherOpen).toBe(false);
+  });
+
+  test("prefs serialize/parse round-trip exhaustively across all 216 preset combinations", () => {
+    const locales: ReadonlyArray<Locale> = I18n.LOCALES;
+    const styles: ReadonlyArray<ThemeStyle> = ["elegant", "cozy"];
+    const modes: ReadonlyArray<ThemeMode> = ["system", "light", "dark"];
+    const contrasts: ReadonlyArray<ThemeContrast> = ["standard", "medium", "high"];
+    const presets: ReadonlyArray<ThemePresetId> = Theme.PRESET_IDS;
+
+    let count = 0;
+    for (const locale of locales) {
+      for (const style of styles) {
+        for (const mode of modes) {
+          for (const contrast of contrasts) {
+            for (const id of presets) {
+              const prefs: Prefs = {
+                locale,
+                style,
+                mode,
+                contrast,
+                theme: { _tag: "Preset", id },
+              };
+              const serialized = serializePrefs(prefs);
+              const parsed = parsePrefs(serialized);
+              expect(Option.isSome(parsed)).toBe(true);
+              if (Option.isSome(parsed)) {
+                expect(parsed.value).toEqual(prefs);
+              }
+              // Cookie round-trip
+              const header = `other=1; ${PREFS_COOKIE}=${encodeURIComponent(serialized)}; theme=x`;
+              const fromCookie = parsePrefs(readCookie(header, PREFS_COOKIE));
+              expect(fromCookie).toEqual(Option.some(prefs));
+              count += 1;
+            }
+          }
+        }
+      }
+    }
+
+    expect(count).toBe(2 * 2 * 3 * 3 * 6);
+  });
+
+  test("prefs serialize/parse round-trip across random custom hex seeds (fast-check)", () => {
+    const arbHex = fc
+      .integer({ min: 0, max: 0xffffff })
+      .map((n) => `#${n.toString(16).padStart(6, "0").toUpperCase()}` as Hex);
+
+    const arbSeedPrefs: fc.Arbitrary<Prefs> = fc.record({
+      locale: fc.constantFrom(...I18n.LOCALES),
+      style: fc.constantFrom("elegant" as const, "cozy" as const),
+      mode: fc.constantFrom("system" as const, "light" as const, "dark" as const),
+      contrast: fc.constantFrom("standard" as const, "medium" as const, "high" as const),
+      theme: arbHex.map((hex) => ({ _tag: "Seed" as const, hex })),
+    });
+
+    fc.assert(
+      fc.property(arbSeedPrefs, (prefs) => {
+        const parsed = parsePrefs(serializePrefs(prefs));
+        expect(parsed).toEqual(Option.some(prefs));
+      }),
+      { numRuns: 100, seed: 20261126 },
+    );
+  });
+
+  test("parsePrefs returns None for empty and malformed inputs", () => {
+    const malformed = [
+      null,
+      undefined,
+      "",
+      "{}",
+      "not-json",
+      JSON.stringify({
+        locale: "de",
+        style: "elegant",
+        mode: "dark",
+        contrast: "standard",
+        theme: { _tag: "Preset", id: "forest" },
+      }),
+      JSON.stringify({
+        locale: "cs",
+        style: "brutalist",
+        mode: "dark",
+        contrast: "standard",
+        theme: { _tag: "Preset", id: "forest" },
+      }),
+      JSON.stringify({
+        locale: "cs",
+        style: "elegant",
+        mode: "dark",
+        contrast: "standard",
+        theme: { _tag: "Seed", hex: "not-hex" },
+      }),
+    ];
+    for (const raw of malformed) {
+      expect(Option.isNone(parsePrefs(raw))).toBe(true);
+    }
+  });
+});
+
+// --- 4. Static architecture checks ---------------------------------------------------------------
+
+const walkFiles = (dir: string, ext: string): ReadonlyArray<string> => {
+  const results: string[] = [];
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const full = join(dir, entry.name);
+    if (entry.isDirectory()) {
+      results.push(...walkFiles(full, ext));
+    } else if (entry.isFile() && entry.name.endsWith(ext)) {
+      results.push(full);
+    }
+  }
+  return results.sort();
+};
+
+const stripJsComments = (src: string): string =>
+  src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/.*$/gm, "$1");
+
+const stripCssComments = (src: string): string => src.replace(/\/\*[\s\S]*?\*\//g, "");
+
+/** Removes `Command.define(...)` call expressions so DOM side effects inside Commands are permitted. */
+const stripCommandDefineCalls = (src: string): string => {
+  const marker = "Command.define(";
+  let out = "";
+  let i = 0;
+
+  while (i < src.length) {
+    const idx = src.indexOf(marker, i);
+    if (idx === -1) {
+      out += src.slice(i);
+      break;
+    }
+    out += src.slice(i, idx);
+    let pos = idx + marker.length;
+    let depth = 1;
+    let quote: string | null = null;
+    while (pos < src.length && depth > 0) {
+      const ch = src[pos];
+      if (quote !== null) {
+        if (ch === "\\") {
+          pos += 2;
+          continue;
+        }
+        if (ch === quote) quote = null;
+      } else if (ch === '"' || ch === "'" || ch === "`") {
+        quote = ch;
+      } else if (ch === "(") {
+        depth += 1;
+      } else if (ch === ")") {
+        depth -= 1;
+      }
+      pos += 1;
+    }
+    i = pos;
+  }
+
+  return out;
+};
+
+describe("static architecture invariants", () => {
+  test("zero React imports anywhere in apps/web/src/**", () => {
+    const tsFiles = [...walkFiles(WEB_SRC, ".ts"), ...walkFiles(WEB_SRC, ".tsx")];
+    expect(tsFiles.length).toBeGreaterThan(0);
+
+    const reactImportPattern =
+      /(?:from\s+["']react(?:-dom)?(?:\/|["'])|require\(\s*["']react(?:-dom)?(?:\/|["'])|import\s+["']react(?:-dom)?(?:\/|["']))/;
+
+    const violations: string[] = [];
+    for (const file of tsFiles) {
+      const clean = stripJsComments(readFileSync(file, "utf8"));
+      if (reactImportPattern.test(clean)) {
+        violations.push(relative(WEB_SRC, file));
+      }
+    }
+    expect(violations).toEqual([]);
+  });
+
+  test("zero direct document./window. DOM mutations in apps/web/src/page/** outside Command effects", () => {
+    const pageDir = join(WEB_SRC, "page");
+    const pageFiles = walkFiles(pageDir, ".ts");
+    expect(pageFiles.length).toBeGreaterThan(0);
+
+    const domMutationPatterns: ReadonlyArray<{ readonly name: string; readonly re: RegExp }> = [
+      {
+        name: "document DOM access/mutation",
+        re: /\bdocument\.(?:body|head|documentElement|title|cookie|getElementById|querySelector|querySelectorAll|createElement|createTextNode|addEventListener|removeEventListener|write|open|close|execCommand)\b/,
+      },
+      {
+        name: "window DOM/navigation/storage side effect",
+        re: /\bwindow\.(?:location|history|localStorage|sessionStorage|open|close|scrollTo|scrollBy|addEventListener|removeEventListener|alert|confirm|prompt)\b/,
+      },
+      {
+        name: "imperative DOM node mutation",
+        re: /\.(?:innerHTML|outerHTML|insertAdjacentHTML|appendChild|removeChild|replaceChild|setAttribute|removeAttribute)\b/,
+      },
+    ];
+
+    const violations: string[] = [];
+    for (const file of pageFiles) {
+      const clean = stripCommandDefineCalls(stripJsComments(readFileSync(file, "utf8")));
+      for (const { name, re } of domMutationPatterns) {
+        if (re.test(clean)) {
+          violations.push(`${relative(WEB_SRC, file)}: ${name}`);
+        }
+      }
+    }
+    expect(violations).toEqual([]);
+  });
+
+  test("zero raw hex color literals in apps/web/src/styles/pages/**", () => {
+    const stylesDir = join(WEB_SRC, "styles/pages");
+    const cssFiles = walkFiles(stylesDir, ".css");
+    expect(cssFiles.length).toBeGreaterThan(0);
+
+    const hexValuePattern = /:\s*[^;{}]*#(?:[0-9a-fA-F]{3,4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})\b/g;
+
+    const violations: string[] = [];
+    for (const file of cssFiles) {
+      const clean = stripCssComments(readFileSync(file, "utf8"));
+      const matches = clean.match(hexValuePattern);
+      if (matches !== null) {
+        violations.push(`${relative(WEB_SRC, file)}: ${matches.join(", ")}`);
+      }
+    }
+    expect(violations).toEqual([]);
+  });
+});
