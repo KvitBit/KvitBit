@@ -97,6 +97,21 @@ const isObject = (v: unknown): v is Record<string, unknown> =>
 const isString = (v: unknown): v is string => typeof v === "string" && v.length > 0;
 const isStrings = (v: unknown): v is string[] => Array.isArray(v) && v.every(isString);
 
+/** Words in a TLC .cfg with comments stripped: the names it checks. Empty if unreadable. */
+const cfgWords = (file: string): string[] => {
+  if (!existsSync(file)) return [];
+  return readFileSync(file, "utf8")
+    .replace(/\(\*[\s\S]*?\*\)/g, " ")
+    .replace(/\\\*.*$/gm, " ")
+    .split(/\s+/)
+    .filter(Boolean);
+};
+const cfgNames = (file: string) => new Set(cfgWords(file));
+const disablesDeadlock = (file: string) => {
+  const w = cfgWords(file);
+  return w.some((x, i) => x === "CHECK_DEADLOCK" && w[i + 1] === "FALSE");
+};
+
 /** Validates a parsed manifest and returns the list of problems (empty when valid). */
 export const validateManifest = (raw: unknown, root = REPO_ROOT): string[] => {
   const problems: string[] = [];
@@ -157,6 +172,16 @@ export const validateManifest = (raw: unknown, root = REPO_ROOT): string[] => {
       exists(where, c.spec, "spec");
       exists(where, c.config, "config");
       if (c.wideConfig !== undefined) exists(where, c.wideConfig, "wideConfig");
+      for (const cfg of [c.config, c.wideConfig])
+        if (
+          isString(cfg) &&
+          (c.deadlock ?? "check") === "check" &&
+          disablesDeadlock(path.join(root, cfg))
+        )
+          bad(
+            where,
+            `${cfg} sets CHECK_DEADLOCK FALSE; declare deadlock: "allow" in the manifest instead`,
+          );
       if (isObject(c.toolVersions) && c.toolVersions.tla2tools !== pinned.tla2tools.version)
         bad(
           where,
@@ -179,10 +204,37 @@ export const validateManifest = (raw: unknown, root = REPO_ROOT): string[] => {
           if (m.config !== undefined) exists(mw, m.config, "config");
           if (m.spec !== undefined) exists(mw, m.spec, "spec");
           const v = m.violates;
-          if (v !== undefined && (!isObject(v) || !VIOLATIONS.includes(v.kind as ViolationKind)))
-            bad(mw, `violates.kind must be one of ${VIOLATIONS.join("|")}`);
+          if (!isObject(v) || !VIOLATIONS.includes(v.kind as ViolationKind))
+            bad(mw, `violates: {kind: ${VIOLATIONS.join("|")}, name?} is required`);
+          else {
+            if ((v.kind === "invariant" || v.kind === "action") && !isString(v.name))
+              bad(
+                mw,
+                `violates.name is required for a${v.kind === "invariant" ? "n" : ""} ${v.kind} violation`,
+              );
+            // The base must check the property the mutant breaks, or the base pass proves nothing about it.
+            if (
+              isString(v.name) &&
+              isString(c.config) &&
+              existsSync(path.join(root, c.config)) &&
+              !cfgNames(path.join(root, c.config)).has(v.name)
+            )
+              bad(mw, `violates.name ${v.name} is not checked by the base config ${c.config}`);
+            const dl = m.deadlock ?? c.deadlock ?? "check";
+            if (v.kind === "deadlock" && dl === "allow")
+              bad(mw, "expects a deadlock violation but runs with deadlock: allow");
+          }
           if (m.deadlock !== undefined && m.deadlock !== "check" && m.deadlock !== "allow")
             bad(mw, "deadlock must be check|allow");
+          if (
+            isString(m.config) &&
+            (m.deadlock ?? c.deadlock ?? "check") === "check" &&
+            disablesDeadlock(path.join(root, m.config))
+          )
+            bad(
+              mw,
+              `${m.config} sets CHECK_DEADLOCK FALSE; declare deadlock: "allow" in the manifest instead`,
+            );
         });
     }
     if (c.kind === "replay") {
@@ -247,12 +299,18 @@ export const classifyTlc = (status: number | null, output: string): TlcOutcome =
   if (status === 151)
     return { verdict: "error", reason: `config error: ${firstError ?? "exit 151"}` };
   if (status === 0) {
-    if (
-      /^Model checking completed\. No error has been found\./m.test(output) &&
-      / 0 states left on queue/.test(output)
-    )
-      return { verdict: "pass", states };
-    return { verdict: "error", reason: "TLC exited 0 without completing the search" };
+    const stats =
+      /^(\d[\d,]*) states generated, (\d[\d,]*) distinct states found, (\d[\d,]*) states left on queue\.$/m.exec(
+        output,
+      );
+    if (!/^Model checking completed\. No error has been found\./m.test(output) || !stats)
+      return { verdict: "error", reason: "TLC exited 0 without completing the search" };
+    if (stats[3] !== "0")
+      return { verdict: "error", reason: `TLC stopped with ${stats[3]} states left on the queue` };
+    // Zero states means Init is unsatisfiable, so every property holds vacuously.
+    if (stats[2] === "0")
+      return { verdict: "error", reason: "TLC found 0 distinct states (vacuous model)" };
+    return { verdict: "pass", states };
   }
   const kinds = status === null ? undefined : VIOLATION_EXIT[status];
   if (kinds) {
@@ -266,6 +324,9 @@ export const classifyTlc = (status: number | null, output: string): TlcOutcome =
       return { verdict: "violation", kind: "deadlock", states };
     if (kinds.includes("temporal") && /^Error: Temporal properties were violated\./m.test(output))
       return { verdict: "violation", kind: "temporal", states };
+    const initial = /^Error: Property (\S+) is violated by the initial state/m.exec(output);
+    if (kinds.includes("temporal") && initial?.[1])
+      return { verdict: "violation", kind: "temporal", name: initial[1], states };
     if (
       kinds.includes("assert") &&
       /^Error: The first argument of Assert evaluated to FALSE/m.test(output)
@@ -507,10 +568,19 @@ export const digestDrift = (manifest: Manifest, root = REPO_ROOT): DigestDrift[]
 /** Tier 0 and 1 drift fails the PR gate; tier 2+ and blocked checks only warn. */
 export const driftBlocks = (d: DigestDrift) => d.check.tier <= 1 && d.check.status !== "blocked";
 
-export const updateDigests = (file = MANIFEST, root = REPO_ROOT): string[] => {
+/**
+ * Rewrites covered-file sha256s for the checks in `only` (every check when empty). A blocked
+ * check keeps its digests unless `only` names it, so its drift stays visible.
+ */
+export const updateDigests = (
+  file = MANIFEST,
+  root = REPO_ROOT,
+  only: readonly string[] = [],
+): string[] => {
   const raw = JSON.parse(readFileSync(file, "utf8")) as Manifest;
   const changed: string[] = [];
-  for (const check of raw.checks)
+  for (const check of raw.checks) {
+    if (only.length ? !only.includes(check.id) : check.status === "blocked") continue;
     for (const f of check.coveredFiles) {
       const p = path.join(root, f.path);
       if (!existsSync(p)) throw new ManifestError(`${check.id}: covered file ${f.path} is missing`);
@@ -520,6 +590,7 @@ export const updateDigests = (file = MANIFEST, root = REPO_ROOT): string[] => {
         f.sha256 = sha;
       }
     }
+  }
   writeFileSync(file, `${JSON.stringify(raw, null, 2)}\n`);
   // Keep the file in Biome's JSON style so `bun run lint` stays green after an update.
   const biome = path.join(root, "node_modules/.bin/biome");
@@ -539,7 +610,14 @@ const selftestCheck = (over: Partial<Check>): Check => ({
   kind: "tlc",
   spec: `${SELFTEST}/Counter.tla`,
   config: `${SELFTEST}/Counter.cfg`,
-  mutants: [{ name: "bound", config: `${SELFTEST}/Counter_mutant_bound.cfg`, expect: "violation" }],
+  mutants: [
+    {
+      name: "bound",
+      config: `${SELFTEST}/Counter_mutant_bound.cfg`,
+      expect: "violation",
+      violates: { kind: "invariant", name: "WithinBound" },
+    },
+  ],
   timeoutSeconds: 60,
   coveredFiles: [],
   guardedSymbols: [],
@@ -605,6 +683,11 @@ export const selftest = async (tools: Pick<Toolchain, "jar" | "java">): Promise<
           },
         ],
       }),
+    },
+    {
+      name: "a model with no initial states",
+      reason: /0 distinct states \(vacuous model\)/,
+      check: selftestCheck({ spec: `${neg}/Empty.tla`, config: `${neg}/Empty.cfg`, mutants: [] }),
     },
     {
       name: "a TLC timeout",
@@ -753,8 +836,11 @@ const main = async (argv: readonly string[]): Promise<number> => {
   const started = performance.now();
   const args = parseArgs(argv);
   if (args.mode === "update-digests") {
-    loadManifest();
-    const changed = updateDigests();
+    const m = loadManifest();
+    const unknownIds = args.only.filter((id) => !m.checks.some((c) => c.id === id));
+    if (unknownIds.length)
+      throw new ManifestError(`--only: no check named ${unknownIds.join(", ")}`);
+    const changed = updateDigests(MANIFEST, REPO_ROOT, args.only);
     out(changed.length ? `updated:\n  ${changed.join("\n  ")}` : "digests already match");
     return 0;
   }

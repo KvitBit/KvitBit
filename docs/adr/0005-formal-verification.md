@@ -36,15 +36,15 @@ A passing check covers only its model or harness, its bounds and its stated assu
 
 PR CI (`.github/workflows/ci.yml`):
 - `check`: Biome, typecheck (including `formal/`), and `bun run test`, which runs the package unit, contract, PGlite, property and exhaustive tests.
-- `formal`: `bun run verify:formal --check-digests`, then `bun run verify:formal`: bounded TLC runs of each model with its mutants, replay harnesses, and the runner self-test. A TLC timeout or incomplete search is a failure.
-- `pg-contention`: a Postgres 17 service with two-connection contention tests (`*.contention.test.ts`), run only when numbering, revision CAS, request_log, payments/PTD, outbox claim or ALTCHA replay paths change. It starts as a skeleton that passes with no tests.
+- `formal`: `bun run verify:formal`: the covered-file digest gate, bounded TLC runs of each model with its mutants, replay harnesses, and the runner self-test. A TLC timeout or incomplete search is a failure.
+- `pg-contention`: a Postgres 17 service with two-connection contention tests (`*.contention.ts`, outside bun's default discovery), run only when numbering, revision CAS, request_log, payments/PTD, outbox claim or ALTCHA replay paths change. It starts as a skeleton that passes with no tests.
 - With Phase 3: production-layer composition and handler checks, PDF content checks, an in-Bun SSR render smoke, and contention tests on HTTP paths.
 
 Nightly plus `workflow_dispatch` (`.github/workflows/nightly.yml`): `verify:formal --wide` with each model's wider bounds, and the Playwright web, Expo, OAuth/provider and Cluster/PgBouncer E2E suites. Until Phase 3 apps exist the E2E jobs are skeletons; each fails once its app directory exists without a wired suite. A nightly run of the property tests with more seeds is planned, not wired: `--wide` skips property checks, so it needs its own job once the Tier 1 property tests define a seed setting.
 
 **Release gating: `main` deploys without waiting for E2E.** Filip accepted the exposure: a regression only E2E would catch can reach production between merge and the next nightly (or a manual `workflow_dispatch` run). A red nightly is fixed forward on `main`.
 
-**Budgets** are targets, measured before they are enforced: about 3 minutes for the `formal` job and about 5 extra PR minutes overall. The Wave 1 runner (self-test plus fixtures) takes about 14 seconds locally.
+**Budgets** are targets, measured before they are enforced: about 3 minutes for the `formal` job and about 5 extra PR minutes overall. The Wave 1 runner (self-test plus fixtures) takes about 15 seconds locally.
 
 ## Layout and toolchain
 
@@ -73,7 +73,7 @@ AGENTS.md                    path → verify skill router
 
 - One `verify-<subsystem>` skill per subsystem in `.agents/skills/`, generated with `/create-formal-verification-skill` against committed code. Each records its property and the harm, covered files and guarded symbols, bounds, assumptions, command, tool version and sync commit; TLA+ skills point to `/statechart` for reading results. `AGENTS.md` routes paths to skills.
 - `bun run verify:formal --check-digests` compares covered-file sha256s with the tree and names the drifted checks and skills.
-- **Tier 1:** a PR that changes covered code needs the reviewer's maintenance classification per `/maintain-formal-verification-skill` before merge: in sync, updated, bug or blocked. A reasoned "no effect" is valid. The digest gate makes the classification explicit without hard-blocking a change that leaves the property intact.
+- **Tier 1:** a PR that changes covered code fails the `formal` job until it carries a maintenance commit, separate from the product commits, that records the reviewer's classification per `/maintain-formal-verification-skill` (in sync, updated, bug or blocked) and refreshes the digests of the classified checks (`--update-digests --only <id>`). A reasoned "no effect" is classified in sync, so a change that leaves the property intact needs only the digest refresh, not a model rewrite. A blocked check keeps its digests and sync commit and only warns until it is fixed.
 - **Tier 2/3:** drift is annotated only; a stale covered digest blocks a release, not a merge.
 - Verification, digest and sync-commit updates go in a maintenance change separate from product fixes. A blocked check keeps its sync commit.
 - A check that finds a bug stays strict: the counterexample is reported in the code's own nouns and the property is not weakened to turn CI green.
@@ -137,6 +137,7 @@ None of these is a confirmed bug; the first models confirm or refute them.
 ## Consequences
 
 - E2E, browser, mobile, OAuth, provider, Cluster and PgBouncer behaviour are checked only nightly; regressions there can reach production until the next nightly or a manual run.
+- The nightly E2E skeletons turn red on the first nightly after a Phase 3 app directory merges without its suite: a post-merge signal, not a merge gate.
 - Real locking is covered only by the path-filtered Postgres 17 job; a change outside its filter that affects locking escapes it until review notices.
 - Reviewers carry a maintenance classification for every PR that touches Tier 1 covered code, and authors keep verification updates in separate commits.
 - Contributors need JDK 17 (mise) and a one-time network fetch of the jar; CI caches it by toolchain manifest.

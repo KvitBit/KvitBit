@@ -10,7 +10,7 @@ Cross-package formal checks for kvitbit: TLA+ models run by TLC, trace-replay ha
 | `bun run verify:formal --only <id>` | one check (repeatable); no self-test, no digest check |
 | `bun run verify:formal --wide` | TLC checks use their `wideConfig` (nightly) |
 | `bun run verify:formal --check-digests` | only compare `coveredFiles` sha256s with the working tree |
-| `bun run verify:formal --update-digests` | only rewrite `coveredFiles` sha256s |
+| `bun run verify:formal --update-digests [--only <id>]` | only rewrite `coveredFiles` sha256s, for the named checks or every non-blocked check |
 | `bun run verify:formal --selftest` | only prove the runner reports failures |
 | `bun run typecheck:formal` | typecheck everything under `formal/` (part of `bun run typecheck`) |
 | `bun formal/toolchain/toolchain.ts` | fetch and verify the pinned toolchain, print its paths |
@@ -37,7 +37,7 @@ formal/<area>/<Model>_mutant_<name>.tla   optional mutant spec (MODULE <Model>_m
 formal/<area>/<name>.replay.test.ts       bun:test harness replaying model traces on real code
 packages/<pkg>/test/**/*.property.test.ts    sampled property tests (run by turbo test)
 packages/<pkg>/test/**/*.exhaustive.test.ts  exhaustive finite enumeration (run by turbo test)
-**/*.contention.test.ts                   Postgres 17 contention tests (CI pg-contention job)
+**/*.contention.ts                        Postgres 17 contention tests (CI pg-contention job only)
 ```
 
 Areas so far: `numbering`, `lifecycle`, `idempotency`, `outbox`, plus `selftest` for the runner's own fixtures.
@@ -47,9 +47,12 @@ Areas so far: `numbering`, `lifecycle`, `idempotency`, `outbox`, plus `selftest`
 - Command: `java -XX:+UseParallelGC -cp <jar> tlc2.TLC -workers 1 -fp 0 -lncheck final -cleanup [-deadlock] -metadir formal/.cache/tlc/<run> -config <cfg> <spec>`, run in the spec's directory so sibling modules resolve.
 - Deadlock is checked by default; set `"deadlock": "allow"` on the check or a mutant to pass `-deadlock` (terminal states that do not stutter).
 - The base (or `wideConfig` under `--wide`) passes only when TLC exits 0, prints `Model checking completed. No error has been found.` and leaves 0 states on the queue.
-- A mutant passes only on a genuine violation: exit 11 with `Deadlock reached`, 12 with `Invariant X is violated` or `Action property X is violated`, 13 with `Temporal properties were violated` or `Action property X is violated` (TLC 1.7.4 reports a broken `[][A]_v` property with the liveness exit code), or 14 with `Assert evaluated to FALSE`. With `violates`, the kind and name must match too.
+- A mutant passes only on a genuine violation: exit 11 with `Deadlock reached`, 12 with `Invariant X is violated` or `Action property X is violated`, 13 with `Temporal properties were violated`, `Property X is violated by the initial state` or `Action property X is violated` (TLC 1.7.4 reports a broken `[][A]_v` property with the liveness exit code), or 14 with `Assert evaluated to FALSE`. With `violates`, the kind and name must match too.
 - Anything else fails the check, base or mutant: parse or semantic errors (exit 150), config errors (151), TLC exceptions (255), unknown flags, a missing marker, or the timeout (`timeoutSeconds`, default 300; the runner kills TLC and reports an incomplete search).
-- Every TLC check ships at least one mutant; the manifest is rejected without one.
+- Every TLC check ships at least one mutant, and every mutant declares `violates` (with a `name` for invariant and action kinds). The base config must name that property, so the base pass covers what the mutant breaks. The manifest is rejected otherwise.
+- A base that finds 0 distinct states fails: an unsatisfiable `Init` makes every property hold vacuously.
+- A `.cfg` must not set `CHECK_DEADLOCK FALSE`; declare `"deadlock": "allow"` in the manifest instead, so the deadlock policy is visible in one place. A mutant expecting a deadlock cannot run with `allow`.
+- `--wide` uses `wideTimeoutSeconds` for the wide base when set, else `timeoutSeconds`; mutants always use `timeoutSeconds`.
 
 ### Replay checks
 
@@ -78,10 +81,10 @@ Top level: `schemaVersion` (1), `syncCommit` (default sync commit for checks wit
 | `skill` | yes | the `.agents/skills/verify-*` skill that owns the check |
 | `tier` | yes | 0 runner fixture, 1 PR gate, 2 Phase 3, 3 optional/nightly |
 | `kind` | yes | `tlc`, `replay`, `property` or `exhaustive` |
-| `status`, `blockedReason` | no | `blocked` skips the run and turns digest drift into a warning; needs a reason |
+| `status`, `blockedReason` | no | `blocked` skips the run and turns digest drift into a warning at any tier, so a blocked Tier 1 check no longer gates PRs; needs a reason |
 | `syncCommit` | no | last commit the check was confirmed to describe; defaults to the top-level one |
 | `spec`, `config`, `wideConfig`, `deadlock` | tlc | repo-relative paths; `wideConfig` only under `--wide` |
-| `mutants[]` | tlc, ≥1 | `{name, config?, spec?, expect: "violation", violates?: {kind, name?}, deadlock?, description?}` |
+| `mutants[]` | tlc, ≥1 | `{name, config?, spec?, expect: "violation", violates: {kind, name?}, deadlock?, description?}` |
 | `replay[]` | replay | repo-relative bun test files |
 | `command` | property/exhaustive | the command that runs it under turbo test |
 | `timeoutSeconds`, `wideTimeoutSeconds` | no | per run; default 300 |
@@ -122,8 +125,10 @@ Add an entry with empty `sha256` strings, then run `bun run verify:formal --upda
 
 ### Digests and maintenance
 
-`--check-digests` hashes every `coveredFiles` path. Drift on a tier 0 or 1 check fails (the PR gate); drift on tier 2+ or blocked checks warns. The output names each drifted check and skill. Then, per `/maintain-formal-verification-skill`, classify each check as in sync, updated, bug or blocked; a reasoned "no effect" counts as in sync. Commit the verification and digest updates (`--update-digests`) separately from product fixes, and keep a blocked check's `syncCommit` where it was.
+`--check-digests` hashes every `coveredFiles` path. Drift on a tier 0 or 1 check fails (the PR gate); drift on tier 2+ or blocked checks warns. The output names each drifted check and skill. Then, per `/maintain-formal-verification-skill`, classify each check as in sync, updated, bug or blocked; a reasoned "no effect" counts as in sync. Commit the verification and digest updates (`--update-digests --only <id>` for each classified check) separately from product fixes, and keep a blocked check's `syncCommit` and digests where they were. The default run reports drift and still runs every check, so CI shows both the drift and whether the checks pass on the changed code.
+
+Contention tests (`*.contention.ts`) read `KVITBIT_CONTENTION_PG_URL` and fail when it is unset; they sit outside bun's default test discovery so package `bun test` runs never reach them. A replay harness that needs `@kvitbit/db` imports it through the mapped `@kvitbit/db` entries (PGlite comes from that package).
 
 ## Runner self-test
 
-`formal/selftest/` holds `Counter.tla` with a passing base and two mutants, one breaking an invariant and one an action property (manifest check `selftest.counter`), and `imports.replay.test.ts` (check `selftest.imports`). `negative/` holds fixtures the runner must report as failures on every default run: a mutant that passes, a base that violates, parse errors in a base and a mutant spec, a config naming an undefined invariant, a mutant breaking a different property than declared, a TLC timeout, a failing replay harness, a replay that runs no test, and a replay that skips a step. Each case must fail for the reason it provokes, not for an unrelated error in the fixture. The self-test also runs TLC through a relative `TLA2TOOLS` override and proves the toolchain fails closed on a wrong checksum, for a `TLA2TOOLS` override and for a download.
+`formal/selftest/` holds `Counter.tla` with a passing base and two mutants, one breaking an invariant and one an action property (manifest check `selftest.counter`), and `imports.replay.test.ts` (check `selftest.imports`). `negative/` holds fixtures the runner must report as failures on every default run: a mutant that passes, a base that violates, parse errors in a base and a mutant spec, a config naming an undefined invariant, a mutant breaking a different property than declared, a model with 0 states, a TLC timeout, a failing replay harness, a replay that runs no test, and a replay that skips a step. Each case must fail for the reason it provokes, not for an unrelated error in the fixture. The self-test also runs TLC through a relative `TLA2TOOLS` override and proves the toolchain fails closed on a wrong checksum, for a `TLA2TOOLS` override and for a download.

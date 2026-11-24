@@ -49,9 +49,8 @@ jobs:
           path: formal/.cache/tla2tools-*.jar
           key: formal-toolchain-${{ hashFiles('formal/toolchain/toolchain.json') }}
       - run: bun install --frozen-lockfile
-      - name: Covered-file digests (maintenance gate)
-        run: bun run verify:formal --check-digests
-      - name: Formal checks
+      # Runs the digest gate and still runs every check, so drifted code is checked too.
+      - name: Formal checks and covered-file digests
         run: bun run verify:formal
 
   changes:
@@ -81,12 +80,13 @@ jobs:
               - 'packages/core/src/modules/documents/**'
               - 'packages/core/src/modules/recurring/**'
               - 'packages/db/**'
-              - '**/*.contention.test.ts'
+              - '**/*.contention.ts'
               - '.github/workflows/ci.yml'
 
   # SKELETON (ADR-0005): two-connection Postgres 17 contention tests for numbering, revision
   # CAS, request_log, payments/PTD, outbox claim and the ALTCHA replay store. It runs every
-  # `*.contention.test.ts` against the service below and passes while none exist yet.
+  # `*.contention.ts` (outside bun's default test discovery, so package `bun test` never runs
+  # them without Postgres) against the service below, and passes while none exist yet.
   pg-contention:
     needs: changes
     if: needs.changes.outputs.contention == 'true'
@@ -118,9 +118,9 @@ jobs:
       - run: bun install --frozen-lockfile
       - name: Postgres 17 contention tests
         run: |
-          mapfile -t files < <(git ls-files '*.contention.test.ts')
+          mapfile -t files < <(git ls-files '*.contention.ts')
           if [ "${#files[@]}" -eq 0 ]; then
-            echo "::notice::No *.contention.test.ts yet; pg-contention is a skeleton (ADR-0005)."
+            echo "::notice::No *.contention.ts yet; pg-contention is a skeleton (ADR-0005)."
             exit 0
           fi
           bun test "${files[@]/#/./}"
