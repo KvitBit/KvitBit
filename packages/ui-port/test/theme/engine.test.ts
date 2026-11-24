@@ -3,11 +3,13 @@ import { Effect, Exit, Layer, Option, Result } from "effect";
 import { UiError } from "../../src/api/errors";
 import {
   auditScheme,
+  CHECKED_ROLE_PAIRS,
   contrastRatio,
   dynamicRoles,
   dynamicSchemeRoles,
   effectiveTheme,
   failingPairs,
+  feasibleLuminance,
   harmonizeExtended,
   initialThemeState,
   KvitbitDefaultTheme,
@@ -253,6 +255,58 @@ describe("dynamic colour hardening", () => {
     const e = effectiveTheme(state({ system: { scheme: "dark", dynamic: Option.some(roles) } }));
     expect(e.roles.surfaceVariant).toBe("#777777");
     expect(auditScheme({ roles: e.roles, extended: e.extended }, "dark")).toEqual([]);
+  });
+
+  test("a narrow feasible band between two supplied fixed backgrounds is found", () => {
+    const roles = Result.getOrThrow(
+      dynamicRoles({
+        _tag: "Roles",
+        light: { primaryFixed: "#000000", primaryFixedDim: "#FBFBFB" },
+        dark: {},
+      }),
+    );
+    const e = effectiveTheme(state({ system: { dynamic: Option.some(roles) } }));
+    expect([e.roles.primaryFixed, e.roles.primaryFixedDim]).toEqual(["#000000", "#FBFBFB"]);
+    expect(auditScheme({ roles: e.roles, extended: e.extended }, "light")).toEqual([]);
+  });
+
+  test("two supplied backgrounds of one foreground pass whenever a feasible luminance exists", () => {
+    const colours = ["#000000", "#FBFBFB", "#777777", "#1A1C18"];
+    const byForeground = new Map<string, string[]>();
+    for (const p of CHECKED_ROLE_PAIRS)
+      byForeground.set(p.foreground, [...(byForeground.get(p.foreground) ?? []), p.background]);
+    for (const [fg, bgs] of byForeground) {
+      const [bgA, bgB] = bgs;
+      if (bgA === undefined || bgB === undefined) continue;
+      for (const a of colours)
+        for (const b of colours) {
+          const supplied: Record<string, string> = { [bgA]: a, [bgB]: b };
+          const required = CHECKED_ROLE_PAIRS.filter(
+            (p) => p.foreground === fg && (p.background === bgA || p.background === bgB),
+          ).map((p) => ({ color: supplied[p.background] ?? "", required: p.required }));
+          if (feasibleLuminance(required).length === 0) continue;
+          for (const side of ["light", "dark"] as const) {
+            const d = Result.getOrThrow(
+              dynamicRoles({
+                _tag: "Roles",
+                light: side === "light" ? supplied : {},
+                dark: side === "dark" ? supplied : {},
+              }),
+            );
+            const failing = failingPairs(d[side]).filter(
+              (p) => !(supplied[p.foreground] && supplied[p.background]),
+            );
+            expect({ side, bgA, a, bgB, b, failing }).toEqual({
+              side,
+              bgA,
+              a,
+              bgB,
+              b,
+              failing: [],
+            });
+          }
+        }
+    }
   });
 
   test("any single supplied role leaves a passing standard scheme on both sides", () => {

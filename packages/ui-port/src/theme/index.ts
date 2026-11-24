@@ -17,6 +17,7 @@ export {
   type ContrastIssue,
   contrastIssueText,
   failingPairs,
+  feasibleLuminance,
   nearestPassing,
   type RolePair,
   repairContrast,

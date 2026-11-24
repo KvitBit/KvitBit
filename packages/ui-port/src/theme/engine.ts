@@ -108,11 +108,21 @@ export const dynamicRoles = (input: DynamicColorInput): Result.Result<DynamicRol
   const dark = pickValid(input.dark);
   const seed = light.primary ?? dark.primary ?? KvitbitDefaultTheme.schemes.light.roles.primary;
   const recipe = seedRecipe(seed);
-  const complete = (variant: "light" | "dark", system: Partial<Record<M3ColorRole, Hex>>) =>
-    repairContrast(
-      { ...schemeRoles(recipe, variant), ...system },
-      new Set(Object.keys(system) as M3ColorRole[]),
-    ) as RoleMap;
+  // Completion starts from the generated scheme of the same mode, and also from the opposite
+  // mode's: a platform map whose supplied backgrounds sit on the other side of the lightness
+  // scale (dark surfaces in a light map) is only satisfiable that way. The repaired map with the
+  // fewest failures wins, the same mode on ties.
+  const complete = (variant: "light" | "dark", system: Partial<Record<M3ColorRole, Hex>>) => {
+    const fixed = new Set(Object.keys(system) as M3ColorRole[]);
+    const from = (mode: "light" | "dark") =>
+      repairContrast({ ...schemeRoles(recipe, mode), ...system }, fixed) as RoleMap;
+    const same = from(variant);
+    const open = (m: RoleMap) =>
+      failingPairs(m).filter((p) => !(fixed.has(p.foreground) && fixed.has(p.background))).length;
+    if (open(same) === 0) return same;
+    const flipped = from(variant === "light" ? "dark" : "light");
+    return open(flipped) < open(same) ? flipped : same;
+  };
   return Result.succeed({ light: complete("light", light), dark: complete("dark", dark) });
 };
 

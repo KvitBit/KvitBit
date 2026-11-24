@@ -11,9 +11,16 @@ import type {
 } from "@kvitbit/api-contract";
 import { EXTENDED_ROLES } from "@kvitbit/api-contract";
 import { type Text, text } from "../text";
-import { contrastRatio } from "./color/contrast";
+import { contrastRatio, relativeLuminance } from "./color/contrast";
 import { Hct } from "./color/hct";
-import { hexFromRgb, rgbFromHex } from "./color/utils";
+import {
+  clamp,
+  hexFromRgb,
+  lstarFromRgb,
+  lstarFromY,
+  rgbFromComponents,
+  rgbFromHex,
+} from "./color/utils";
 import { SCHEME_VARIANTS, type SchemeVariant } from "./scheme";
 
 /** WCAG 2.x AA: 4.5:1 for body text, 3:1 for large text and UI components (1.4.11). */
@@ -158,7 +165,66 @@ export const nearestPassing = (
       (m < 1 && best.margin < 1 && m > best.margin);
     if (better) best = { ...c, margin: m };
   }
-  return best?.hex ?? color;
+  if (best !== undefined && best.margin >= 1) return best.hex;
+  return feasibleColor(own, partners) ?? best?.hex ?? color;
+};
+
+type Interval = readonly [number, number];
+
+/**
+ * WCAG luminance ranges (0..1) a colour may take to reach every partner's requirement: each
+ * partner allows "dark enough" or "light enough", and the ranges intersect.
+ */
+export const feasibleLuminance = (
+  partners: ReadonlyArray<{ readonly color: string; readonly required: number }>,
+): Interval[] => {
+  let ranges: Interval[] = [[0, 1]];
+  for (const p of partners) {
+    const l = relativeLuminance(rgbFromHex(p.color));
+    const allowed: Interval[] = [
+      [0, (l + 0.05) / p.required - 0.05],
+      [p.required * (l + 0.05) - 0.05, 1],
+    ];
+    ranges = ranges.flatMap(([a, b]) =>
+      allowed
+        .map(([c, d]): Interval => [Math.max(a, c), Math.min(b, d)])
+        .filter(([c, d]) => c <= d),
+    );
+  }
+  return ranges;
+};
+
+/**
+ * Exact fallback when tone sampling misses a narrow feasible band: aim at the middle of each
+ * feasible luminance range, then nudge 8-bit channels until one candidate passes. Prefers the
+ * candidate closest in tone to `own`.
+ */
+const feasibleColor = (
+  own: Hct,
+  partners: ReadonlyArray<{ readonly color: string; readonly required: number }>,
+): string | undefined => {
+  const passes = (rgb: number) =>
+    partners.every((p) => contrastRatio(rgb, rgbFromHex(p.color)) >= p.required);
+  let best: { rgb: number; distance: number } | undefined;
+  for (const [lo, hi] of feasibleLuminance(partners)) {
+    const tone = lstarFromY(((lo + hi) / 2) * 100);
+    for (const base of [Hct.from(own.hue, own.chroma, tone).rgb, Hct.from(0, 0, tone).rgb]) {
+      const [r, g, b] = [(base >> 16) & 0xff, (base >> 8) & 0xff, base & 0xff];
+      for (let dr = -4; dr <= 4; dr++)
+        for (let dg = -2; dg <= 2; dg++)
+          for (let db = -4; db <= 4; db++) {
+            const rgb = rgbFromComponents(
+              clamp(0, 255, r + dr),
+              clamp(0, 255, g + dg),
+              clamp(0, 255, b + db),
+            );
+            if (!passes(rgb)) continue;
+            const distance = Math.abs(lstarFromRgb(rgb) - own.tone);
+            if (best === undefined || distance < best.distance) best = { rgb, distance };
+          }
+    }
+  }
+  return best === undefined ? undefined : hexFromRgb(best.rgb);
 };
 
 /** `nearestPassing` against one background. */
