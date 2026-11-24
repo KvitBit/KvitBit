@@ -90,7 +90,7 @@ Mutant `no-proforma-lock` (the PTD's Proforma read without its lock) breaks `Ded
 
 ## Coverage record
 
-- Sync commit: `eecb9be`. In sync: `2fa0670`, `5669f20` and `eecb9be` change only how a Final Invoice's net bucket VAT is converted to CZK (`compose.ts`), the CZK VAT of the partial-credit cap (`corrections.ts`) and which open buckets a remainder Credit Note turns into supply lines (`credit.ts`, document-currency buckets only) (F1, `verify-vat-numbering-math`); the deduction lines, locks, transitions and bucket-level D7 caps this model abstracts are unchanged. Base, mutants and the 30-test replay rerun green at eecb9be. Checked with tla2tools 1.7.4, Java 17.0.21, Bun 1.4.4 on 2026-11-24.
+- Sync commit: `2090595`. In sync: `2fa0670`, `5669f20`, `eecb9be` and `2090595` change only how a Final Invoice's net bucket VAT is converted to CZK (`compose.ts`), the CZK VAT of the partial-credit cap (`corrections.ts`, now the supply's CZK VAT less earlier credits) and which open buckets a remainder Credit Note turns into supply lines (`credit.ts`, document-currency buckets only) (F1, `verify-vat-numbering-math`); the deduction lines, locks, transitions and bucket-level D7 caps this model abstracts are unchanged. Base, mutants and the 30-test replay rerun green at 2090595. Checked with tla2tools 1.7.4, Java 17.0.21, Bun 1.4.4 on 2026-11-24.
 - Mutants (`bun run verify:formal --only lifecycle.model`), each a genuine invariant violation of a property the base and wide configs declare:
 
 | Mutant | Break | Violates |
