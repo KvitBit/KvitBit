@@ -7,3 +7,6 @@ coverage/
 .env.*
 !.env.example
 .DS_Store
+
+# formal verification tool cache (tla2tools.jar, TLC metadirs)
+formal/.cache/

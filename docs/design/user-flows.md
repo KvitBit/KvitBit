@@ -485,7 +485,7 @@ Each flow lists Entry, Actor, Happy path, Branches (errors and empty states), an
   - Original is locked: allowed, since a Credit Note does not edit it.
   - Original already fully paid: the Credit Note shows "Refund due" with the amount, and a Payment of the refund can be recorded against it (flow 7.1, negative direction).
   - Credit total exceeds what remains uncredited: blocked with the remaining amount shown.
-  - Original in foreign currency: the Credit Note uses the same currency. Its CZK VAT uses the rate of the correction date. See open question Q5.
+  - Original in foreign currency: the Credit Note uses the same currency and inherits the original Invoice's exchange rate and VAT rate (Czech VAT Act §42). See decision Q5.
 - Outcome: Credit Note issued and linked, original's balance updated, both histories updated.
 
 #### 3.10 Download a PDF, pick template and language
