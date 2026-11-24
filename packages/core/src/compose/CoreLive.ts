@@ -71,6 +71,7 @@ import {
 } from "../modules/workspaces";
 import { IdGeneratorLive } from "../shared/ids";
 import type { CoreStore } from "../store/CoreStore";
+import { BankAccountReferencesLive } from "./bankAccounts";
 import {
   ContactSeriesLookupLive,
   DeliveryStatusLookupLive,
@@ -83,7 +84,9 @@ import {
   RecurringDocumentLinkLive,
   WorkspaceSeriesLive,
 } from "./bindings";
+import { DocumentActivityLive } from "./documentActivity";
 import { ReportsSourceLive } from "./reportsSource";
+import { ShareWorkspacesLive } from "./shareWorkspaces";
 
 /** One repository port per module, plus the FX fixing cache (the `fx_fixings` table). */
 export type CoreRepos =
@@ -117,6 +120,18 @@ export type CoreExternalPorts =
   | ShareLinkKeys;
 
 // Tiers, lowest first; each tier is built from the outputs of the tiers below it.
+
+/**
+ * Seams over repositories and external ports only. `viewOf` reads `DocumentActivity`
+ * optionally, so no layer's type demands it; it sits below every tier so that both the
+ * contexts the documents layers capture at build time (including `PaymentDocumentsLive` and
+ * `DocumentDeliveryReadsLive` in `readSeams`) and the call-site context hold it.
+ */
+const repoSeams = Layer.mergeAll(
+  DocumentActivityLive,
+  BankAccountReferencesLive,
+  ShareWorkspacesLive,
+);
 
 const readSeams = Layer.mergeAll(
   RegistryLookup.layer,
@@ -165,10 +180,9 @@ const dependents = Layer.mergeAll(
 );
 
 /**
- * Every module and seam, requiring `CoreStore | CoreRepos | CoreExternalPorts | IdGenerator`
- * (and the seams the integration has not bound yet). Its output holds the nine domain service
- * tags, the job services (`RecurringIssuance`, `ExportJobs`) and the internal seams the
- * workflows call (`DocumentDeliveryReads`, `DocumentSender`, ...).
+ * Every module and seam, requiring `CoreStore | CoreRepos | CoreExternalPorts | IdGenerator`.
+ * Its output holds the nine domain service tags, the job services (`RecurringIssuance`,
+ * `ExportJobs`) and the internal seams the workflows call (`DocumentDeliveryReads`, `DocumentSender`, ...).
  */
 export const CoreModulesLive = dependents.pipe(
   Layer.provideMerge(documents),
@@ -176,6 +190,7 @@ export const CoreModulesLive = dependents.pipe(
   Layer.provideMerge(workspaces),
   Layer.provideMerge(identity),
   Layer.provideMerge(readSeams),
+  Layer.provideMerge(repoSeams),
 );
 
 /** `CoreModulesLive` with real UUIDv7 ids. */

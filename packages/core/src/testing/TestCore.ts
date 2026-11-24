@@ -33,13 +33,8 @@ import {
   FakeReportPdfRenderer,
   FxFixingCacheMemory,
 } from "../modules/reports";
+import { ShareLinkKeysTest, ShareLinksRepoMemory } from "../modules/sharelinks";
 import {
-  ShareLinkKeysTest,
-  ShareLinksRepoMemory,
-  ShareWorkspacesFake,
-} from "../modules/sharelinks";
-import {
-  BankAccountReferencesFake,
   BrandingPreviewFake,
   CaptureInvitationDelivery,
   type DirectoryUser,
@@ -77,9 +72,6 @@ export const TestCoreFakes = (users: ReadonlyArray<DirectoryUser> = []) =>
     DeliveryJobsMemory,
     FakeExportWorkflow.layer,
     ShareLinkKeysTest,
-    // PENDING seams (bound for real once merged): BankAccountReferences, ShareWorkspaces.
-    BankAccountReferencesFake.layer,
-    ShareWorkspacesFake,
   );
 
 export interface TestCoreOptions extends InMemoryPortsOptions {
