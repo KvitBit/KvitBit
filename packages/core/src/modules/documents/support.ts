@@ -79,7 +79,7 @@ export const viewOf = (
     return toView(row, { ...extra, today, related });
   });
 
-class PreviewRollback extends Data.TaggedError("PreviewRollback")<{}> {}
+class PreviewRollback extends Data.TaggedError("PreviewRollback") {}
 
 /**
  * Runs `effect` (e.g. a number allocation) in a nested transaction that is always rolled back:
