@@ -13,19 +13,19 @@ import type {
 } from "@kvitbit/domain/contract";
 import type { BlobUnavailable } from "@kvitbit/domain/ports";
 import { Context, Effect, Layer, Option, Ref, Stream } from "effect";
-import type { StoreUnavailable } from "../../store/CoreStore";
+import { StoreUnavailable } from "../../store/CoreStore";
 import type { ShareDevice } from "./record";
 
 /**
- * Versioned HMAC keys for share tokens (core-ports section 1) and the public URLs. A version
- * whose `secret` is `null` is retired: its tokens are expired and return `NotFound`.
+ * The current share-token HMAC key (core-ports section 1) and the public URLs. Only the
+ * current version is valid: rotating the key version invalidates every old link, so tokens of
+ * any other version are expired and return `NotFound`.
  */
 export class ShareLinkKeys extends Context.Service<
   ShareLinkKeys,
   {
-    /** The version new tokens are derived with. */
-    readonly current: number;
-    readonly secret: (version: number) => Uint8Array | null;
+    readonly version: number;
+    readonly secret: Uint8Array;
     /** The Public Share Link page, e.g. `https://kvitbit.cz/s/{token}`. */
     readonly pageUrl: (token: ShareToken) => string;
     /** The page's PDF download link. */
@@ -61,15 +61,18 @@ export const ShareVisitorDevice = Context.Reference<ShareDevice>(
   { defaultValue: () => "unknown" },
 );
 
-/** Test keys: version 1 is current, version 0 is retired. */
-export const ShareLinkKeysTest: Layer.Layer<ShareLinkKeys> = Layer.succeed(
-  ShareLinkKeys,
+/** Test keys for `version` (default 1); a test rotates by providing `shareLinkKeysTest(2)`. */
+export const shareLinkKeysTest = (version = 1): ShareLinkKeys["Service"] =>
   ShareLinkKeys.of({
-    current: 1,
-    secret: (version) => (version === 1 ? new TextEncoder().encode("test-share-key-v1") : null),
+    version,
+    secret: new TextEncoder().encode(`test-share-key-v${version}`),
     pageUrl: (token) => `https://share.test/s/${token}`,
     pdfUrl: (token) => `https://share.test/s/${token}/pdf`,
-  }),
+  });
+
+export const ShareLinkKeysTest: Layer.Layer<ShareLinkKeys> = Layer.succeed(
+  ShareLinkKeys,
+  shareLinkKeysTest(),
 );
 
 export const DEFAULT_BRANDING: WorkspaceBranding = {
@@ -91,6 +94,8 @@ export class ShareFixtures extends Context.Service<
     readonly members: Ref.Ref<ReadonlySet<string>>;
     readonly brandings: Ref.Ref<ReadonlyMap<WorkspaceId, WorkspaceBranding>>;
     readonly logos: Ref.Ref<ReadonlyMap<WorkspaceId, Logo>>;
+    /** When true, every `ShareWorkspaces` call fails with `StoreUnavailable`. */
+    readonly unavailable: Ref.Ref<boolean>;
     readonly addMember: (workspaceId: WorkspaceId, userId: UserId) => Effect.Effect<void>;
     readonly setBranding: (
       workspaceId: WorkspaceId,
@@ -108,10 +113,12 @@ const fixtures = Layer.effect(
     const members = yield* Ref.make<ReadonlySet<string>>(new Set());
     const brandings = yield* Ref.make<ReadonlyMap<WorkspaceId, WorkspaceBranding>>(new Map());
     const logos = yield* Ref.make<ReadonlyMap<WorkspaceId, Logo>>(new Map());
+    const unavailable = yield* Ref.make(false);
     return ShareFixtures.of({
       members,
       brandings,
       logos,
+      unavailable,
       addMember: (workspaceId, userId) =>
         Ref.update(members, (all) => new Set(all).add(memberKey(workspaceId, userId))),
       setBranding: (workspaceId, branding) =>
@@ -126,22 +133,28 @@ const fixtures = Layer.effect(
 export const ShareWorkspacesFake: Layer.Layer<ShareWorkspaces | ShareFixtures> = Layer.provideMerge(
   Layer.effect(
     ShareWorkspaces,
-    Effect.map(ShareFixtures, (f) =>
-      ShareWorkspaces.of({
+    Effect.map(ShareFixtures, (f) => {
+      const up = <A>(effect: Effect.Effect<A>) =>
+        Effect.flatMap(Ref.get(f.unavailable), (down) =>
+          down ? Effect.fail(new StoreUnavailable({})) : effect,
+        );
+      return ShareWorkspaces.of({
         isMember: (workspaceId, userId) =>
-          Effect.map(Ref.get(f.members), (all) => all.has(memberKey(workspaceId, userId))),
+          up(Effect.map(Ref.get(f.members), (all) => all.has(memberKey(workspaceId, userId)))),
         branding: (workspaceId) =>
-          Effect.map(Ref.get(f.brandings), (all) => all.get(workspaceId) ?? DEFAULT_BRANDING),
+          up(Effect.map(Ref.get(f.brandings), (all) => all.get(workspaceId) ?? DEFAULT_BRANDING)),
         logo: (workspaceId) =>
-          Effect.map(Ref.get(f.logos), (all) =>
-            Option.map(Option.fromNullishOr(all.get(workspaceId)), (logo) => ({
-              filename: "logo",
-              contentType: logo.contentType,
-              bytes: Stream.make(logo.bytes),
-            })),
+          up(
+            Effect.map(Ref.get(f.logos), (all) =>
+              Option.map(Option.fromNullishOr(all.get(workspaceId)), (logo) => ({
+                filename: "logo",
+                contentType: logo.contentType,
+                bytes: Stream.make(logo.bytes),
+              })),
+            ),
           ),
-      }),
-    ),
+      });
+    }),
   ),
   fixtures,
 );

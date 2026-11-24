@@ -1,20 +1,14 @@
 /**
- * `ShareLinksRepo`: persistence port of the share-links module (src/store/tables.ts
- * conventions: Workspace scoped, revisioned links, `StoreUnavailable` for database failures).
- * The SQL implementation maps it onto `share_links` and `share_view_events`.
+ * `ShareLinksRepo`: persistence port of the share-links module, shaped on the real tables
+ * (`share_links` has no revision column, so writes are state-conditional updates, not
+ * compare-and-set). Workspace scoped except the token lookup; `StoreUnavailable` for database
+ * failures. Write operations run inside the caller's transaction.
  */
-import type {
-  Conflict,
-  DocumentId,
-  NotFound,
-  VisitorHash,
-  WorkspaceId,
-} from "@kvitbit/domain/contract";
-import type { Option } from "effect";
-import { Context, Effect, Layer } from "effect";
+import type { DocumentId, NotFound, VisitorHash, WorkspaceId } from "@kvitbit/domain/contract";
+import { Context, Effect, Layer, Option } from "effect";
 import type { StoreUnavailable, UniqueViolation } from "../../store/CoreStore";
 import { MemoryTables } from "../../store/tables";
-import type { ShareLinkId, ShareLinkRecord, ShareViewRecord } from "./record";
+import type { ShareLink, ShareLinkId, ShareViewEventRow } from "./record";
 import {
   SHARE_ONE_ACTIVE_PER_DOCUMENT,
   SHARE_TOKEN_HASH_UNIQUE,
@@ -29,43 +23,56 @@ export class ShareLinksRepo extends Context.Service<
     readonly activeFor: (
       workspaceId: WorkspaceId,
       documentId: DocumentId,
-    ) => Effect.Effect<Option.Option<ShareLinkRecord>, StoreUnavailable>;
-    /** Token lookup across Workspaces (the visitor has none yet), revoked links included. */
-    readonly byTokenHash: (
+    ) => Effect.Effect<Option.Option<ShareLink>, StoreUnavailable>;
+    /**
+     * Token lookup across Workspaces (the visitor has none yet), revoked links included.
+     * Row-locks the link (`FOR UPDATE`) for the rest of the transaction, so a visitor's
+     * dedup check, event insert and first-view update are atomic against a concurrent revoke.
+     */
+    readonly lockByTokenHash: (
       tokenHash: string,
-    ) => Effect.Effect<Option.Option<ShareLinkRecord>, StoreUnavailable>;
-    /** Row-lock without a revision check (create/revoke are idempotent by state, C6). */
-    readonly lock: (
+    ) => Effect.Effect<Option.Option<ShareLink>, StoreUnavailable>;
+    readonly insert: (link: ShareLink) => Effect.Effect<void, UniqueViolation | StoreUnavailable>;
+    /** `revoked_at = at` where it is still null. */
+    readonly revoke: (
       workspaceId: WorkspaceId,
       id: ShareLinkId,
-    ) => Effect.Effect<ShareLinkRecord, NotFound | StoreUnavailable>;
-    readonly insert: (
-      row: ShareLinkRecord,
-    ) => Effect.Effect<ShareLinkRecord, UniqueViolation | StoreUnavailable>;
-    readonly update: (
-      next: ShareLinkRecord,
-      expectedRevision: number,
-    ) => Effect.Effect<ShareLinkRecord, NotFound | Conflict | UniqueViolation | StoreUnavailable>;
-    readonly recordEvent: (event: ShareViewRecord) => Effect.Effect<void, StoreUnavailable>;
+      at: string,
+    ) => Effect.Effect<void, NotFound | StoreUnavailable>;
+    /** `viewed_at = at` where it is still null. */
+    readonly markViewed: (
+      workspaceId: WorkspaceId,
+      id: ShareLinkId,
+      at: string,
+    ) => Effect.Effect<void, NotFound | StoreUnavailable>;
+    readonly recordEvent: (event: ShareViewEventRow) => Effect.Effect<void, StoreUnavailable>;
     /** Whether the link has an event of `kind` by `visitor` at or after `since` (dedup). */
     readonly hasEventSince: (
       workspaceId: WorkspaceId,
       link: ShareLinkId,
       visitor: VisitorHash,
-      kind: ShareViewRecord["kind"],
+      kind: ShareViewEventRow["kind"],
       since: string,
     ) => Effect.Effect<boolean, StoreUnavailable>;
-    /** Events of every link of the document, newest first (`at` desc, `id` desc), keyset paged. */
+    /**
+     * Events of every link of the document (join through `share_links`), newest first
+     * (`at` desc, `id` desc), keyset paged after `[at, id]`.
+     */
     readonly events: (
       workspaceId: WorkspaceId,
       documentId: DocumentId,
       page: { readonly after?: readonly [string, string] | undefined; readonly limit: number },
     ) => Effect.Effect<
-      { readonly rows: ReadonlyArray<ShareViewRecord>; readonly more: boolean },
+      { readonly rows: ReadonlyArray<ShareViewEventRow>; readonly more: boolean },
       StoreUnavailable
     >;
   }
 >()("kvitbit/core/sharelinks/ShareLinksRepo") {}
+
+const withoutRevision = <A extends { readonly revision: number }>({
+  revision: _revision,
+  ...rest
+}: A): Omit<A, "revision"> => rest;
 
 /** In-memory `ShareLinksRepo` on `MemoryTables` (tests). */
 export const ShareLinksRepoMemory: Layer.Layer<ShareLinksRepo, never, MemoryTables> = Layer.effect(
@@ -73,17 +80,56 @@ export const ShareLinksRepoMemory: Layer.Layer<ShareLinksRepo, never, MemoryTabl
   Effect.map(MemoryTables, (tables) => {
     const links = tables.collection(ShareLinksTable);
     const views = tables.collection(ShareViewsTable);
+    /** Locks the row and applies `change` unless `skip` holds (a state-conditional UPDATE). */
+    const conditional = (
+      workspaceId: WorkspaceId,
+      id: ShareLinkId,
+      skip: (row: ShareLink) => boolean,
+      change: (row: ShareLink) => ShareLink,
+    ) =>
+      Effect.flatMap(links.lock(workspaceId, id), (row) =>
+        skip(row)
+          ? Effect.void
+          : links.update({ ...change(row), revision: row.revision }, row.revision).pipe(
+              // Locked row, no unique key touched: neither can happen.
+              Effect.catchTags({ Conflict: Effect.die, UniqueViolation: Effect.die }),
+              Effect.asVoid,
+            ),
+      );
     return ShareLinksRepo.of({
       activeFor: (workspaceId, documentId) =>
-        links.findUnique(SHARE_ONE_ACTIVE_PER_DOCUMENT, [documentId], workspaceId),
-      byTokenHash: (tokenHash) => links.findUnique(SHARE_TOKEN_HASH_UNIQUE, [tokenHash]),
-      lock: (workspaceId, id) => links.lock(workspaceId, id),
-      insert: links.insert,
-      update: links.update,
+        Effect.map(
+          links.findUnique(SHARE_ONE_ACTIVE_PER_DOCUMENT, [documentId], workspaceId),
+          Option.map(withoutRevision),
+        ),
+      lockByTokenHash: (tokenHash) =>
+        Effect.flatMap(links.findUnique(SHARE_TOKEN_HASH_UNIQUE, [tokenHash]), (found) =>
+          Option.isNone(found)
+            ? Effect.succeed(Option.none())
+            : links.lock(found.value.workspaceId, found.value.id).pipe(
+                Effect.map((row) => Option.some(withoutRevision(row))),
+                Effect.catchTag("NotFound", () => Effect.succeed(Option.none<ShareLink>())),
+              ),
+        ),
+      insert: (link) => Effect.asVoid(links.insert({ ...link, revision: 1 })),
+      revoke: (workspaceId, id, at) =>
+        conditional(
+          workspaceId,
+          id,
+          (row) => row.revokedAt !== null,
+          (row) => ({ ...row, revokedAt: at }),
+        ),
+      markViewed: (workspaceId, id, at) =>
+        conditional(
+          workspaceId,
+          id,
+          (row) => row.viewedAt !== null,
+          (row) => ({ ...row, viewedAt: at }),
+        ),
       recordEvent: (event) =>
-        views.insert(event).pipe(
-          // No unique index on events: a violation cannot happen.
-          Effect.catchTag("UniqueViolation", (e) => Effect.die(e)),
+        views.insert({ ...event, revision: 1 }).pipe(
+          // No unique index on events.
+          Effect.catchTag("UniqueViolation", Effect.die),
           Effect.asVoid,
         ),
       hasEventSince: (workspaceId, link, visitor, kind, since) =>
@@ -96,16 +142,21 @@ export const ShareLinksRepoMemory: Layer.Layer<ShareLinksRepo, never, MemoryTabl
           (rows) => rows.length > 0,
         ),
       events: (workspaceId, documentId, page) =>
-        Effect.map(
-          views.list(workspaceId, {
-            where: { documentId },
+        Effect.gen(function* () {
+          const ofDocument = yield* links.list(workspaceId, { where: { documentId } });
+          if (ofDocument.length === 0) return { rows: [], more: false };
+          const rows = yield* views.list(workspaceId, {
+            whereIn: { shareLinkId: ofDocument.map((l) => l.id) },
             orderBy: ["at"],
             direction: "desc",
             ...(page.after === undefined ? {} : { after: page.after }),
             limit: page.limit + 1,
-          }),
-          (rows) => ({ rows: rows.slice(0, page.limit), more: rows.length > page.limit }),
-        ),
+          });
+          return {
+            rows: rows.slice(0, page.limit).map(withoutRevision),
+            more: rows.length > page.limit,
+          };
+        }),
     });
   }),
 );

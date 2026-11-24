@@ -1,7 +1,8 @@
 /**
- * Stored rows of Public Share Links (core-ports 4.6), mirroring `share_links` and
- * `share_view_events` in packages/db/src/schema/documents.ts. The token is never stored: it is
- * re-derived from the link id and `keyVersion` (token.ts) and found by its SHA-256 `tokenHash`.
+ * Public Share Link rows (core-ports 4.6), exactly the columns of `share_links` and
+ * `share_view_events` in packages/db/src/schema/documents.ts: no revision column, and events
+ * reach their document through their link. The token is never stored: it is re-derived from
+ * the link id and `keyVersion` (token.ts) and found by its SHA-256 `tokenHash`.
  */
 import {
   DocumentId,
@@ -17,10 +18,9 @@ import { defineCollection } from "../../store/tables";
 export const ShareLinkId = Schema.String.pipe(Schema.brand("ShareLinkId"));
 export type ShareLinkId = typeof ShareLinkId.Type;
 
-export const ShareLinkRecord = Schema.Struct({
+export const ShareLink = Schema.Struct({
   id: ShareLinkId,
   workspaceId: WorkspaceId,
-  revision: Schema.Number,
   documentId: DocumentId,
   /** Hex SHA-256 of the token. */
   tokenHash: Schema.String,
@@ -31,34 +31,34 @@ export const ShareLinkRecord = Schema.Struct({
   revokedAt: Schema.NullOr(Schema.String),
   createdAt: Schema.String,
 });
-export type ShareLinkRecord = typeof ShareLinkRecord.Type;
+export type ShareLink = typeof ShareLink.Type;
 
 export const ShareEventKind = Schema.Literals(["view", "download"]);
 export const ShareDevice = Schema.Literals(["desktop", "mobile", "tablet", "unknown"]);
 export type ShareDevice = typeof ShareDevice.Type;
 
 /** A view or download. No IP or user agent: only the daily `VisitorHash`, time and device. */
-export const ShareViewRecord = Schema.Struct({
+export const ShareViewEventRow = Schema.Struct({
   id: ShareViewId,
   workspaceId: WorkspaceId,
-  revision: Schema.Number,
   shareLinkId: ShareLinkId,
-  /** Denormalized for `views(documentId)` across a document's links. */
-  documentId: DocumentId,
   kind: ShareEventKind,
   device: ShareDevice,
   visitorHash: VisitorHash,
   at: Schema.String,
 });
-export type ShareViewRecord = typeof ShareViewRecord.Type;
+export type ShareViewEventRow = typeof ShareViewEventRow.Type;
+
+// In-memory table rows: MemoryTables needs a revision; it never leaves repo.ts.
+type Revisioned<A> = A & { readonly revision: number };
 
 export const SHARE_TOKEN_HASH_UNIQUE = "share_links_token_hash_unique";
 export const SHARE_ONE_ACTIVE_PER_DOCUMENT = "share_links_one_active_per_document";
 
-export const ShareLinksTable = defineCollection<ShareLinkRecord>({
+export const ShareLinksTable = defineCollection<Revisioned<ShareLink>>({
   name: "share_links",
   entity: "ShareLink",
-  schema: ShareLinkRecord as unknown as Schema.Codec<ShareLinkRecord, unknown>,
+  schema: ShareLink as unknown as Schema.Codec<Revisioned<ShareLink>, unknown>,
   unique: [
     { name: SHARE_TOKEN_HASH_UNIQUE, scope: "global", key: (r) => [r.tokenHash] },
     {
@@ -69,8 +69,8 @@ export const ShareLinksTable = defineCollection<ShareLinkRecord>({
   ],
 });
 
-export const ShareViewsTable = defineCollection<ShareViewRecord>({
+export const ShareViewsTable = defineCollection<Revisioned<ShareViewEventRow>>({
   name: "share_view_events",
   entity: "ShareLink",
-  schema: ShareViewRecord as unknown as Schema.Codec<ShareViewRecord, unknown>,
+  schema: ShareViewEventRow as unknown as Schema.Codec<Revisioned<ShareViewEventRow>, unknown>,
 });

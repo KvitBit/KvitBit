@@ -5,7 +5,7 @@
  * Layout:
  * - record.ts   rows and collections (`share_links`, `share_view_events`), `ShareLinkId`
  * - repo.ts     `ShareLinksRepo` port + `ShareLinksRepoMemory` on MemoryTables
- * - ports.ts    narrow driven ports `ShareLinkKeys` (versioned HMAC keys, public URLs),
+ * - ports.ts    narrow driven ports `ShareLinkKeys` (current HMAC key version, public URLs),
  *               `ShareWorkspaces` (membership, branding, logo), the `ShareVisitorDevice`
  *               reference (coarse device from the user agent, set by the share route), fakes
  * - token.ts    token derivation "v{n}." + base64url(HMAC-SHA256(key, linkId))
@@ -29,13 +29,14 @@ export {
   ShareVisitorDevice,
   ShareWorkspaces,
   ShareWorkspacesFake,
+  shareLinkKeysTest,
 } from "./ports";
 export type { ShareDevice } from "./record";
 export {
+  ShareLink,
   ShareLinkId,
-  ShareLinkRecord,
   ShareLinksTable,
-  ShareViewRecord,
+  ShareViewEventRow,
   ShareViewsTable,
 } from "./record";
 export { ShareLinksRepo, ShareLinksRepoMemory } from "./repo";

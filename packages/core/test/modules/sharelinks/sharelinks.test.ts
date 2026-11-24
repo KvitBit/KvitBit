@@ -8,17 +8,20 @@ import {
   Invalid,
   NotFound,
   PublicShareLinks,
+  Unavailable,
 } from "@kvitbit/domain/contract";
 import type { Layer } from "effect";
-import { Effect, Exit, Option, Stream } from "effect";
+import { Effect, Exit, Option, Ref, Stream } from "effect";
 import { TestClock } from "effect/testing";
 import { NumberingSeries } from "../../../src/modules/numbering";
 import {
   deriveToken,
   ShareFixtures,
+  ShareLinkKeys,
   ShareLinksRepo,
   ShareLinksTestLayer,
   ShareVisitorDevice,
+  shareLinkKeysTest,
 } from "../../../src/modules/sharelinks";
 import { CoreStore } from "../../../src/store/CoreStore";
 import { member, shareVisitor, system, WORKSPACE_A, WORKSPACE_B } from "../../helpers";
@@ -173,27 +176,45 @@ describe("create", () => {
     fails(cancelled, new Conflict({ reason: "illegal_transition" }));
   });
 
-  test("a link whose key version was retired is re-keyed to the current version", async () => {
-    const [before, after] = ok(
+  test("rotating the key version expires old links; create replaces the link once", async () => {
+    const r = ok(
       await run(
         Effect.gen(function* () {
-          const { doc } = yield* shared;
+          const { doc, token } = yield* shared;
           const repo = yield* ShareLinksRepo;
-          const link = Option.getOrThrow(yield* repo.activeFor(WS, doc.id));
-          // Simulate a link minted under the retired version 0.
-          yield* (yield* CoreStore).transaction(
-            repo.update({ ...link, keyVersion: 0, tokenHash: "stale" }, link.revision),
-          );
-          const { url } = yield* share(doc.id);
-          const rekeyed = Option.getOrThrow(yield* repo.activeFor(WS, doc.id));
-          return [link, { url, rekeyed }] as const;
+          const before = Option.getOrThrow(yield* repo.activeFor(WS, doc.id));
+          // Every later call runs under key version 2 (the call site's context wins).
+          return yield* Effect.gen(function* () {
+            const oldOpen = yield* Effect.exit(visit(token, open));
+            const first = tokenOf((yield* share(doc.id)).url);
+            const repeat = tokenOf((yield* share(doc.id)).url);
+            const after = Option.getOrThrow(yield* repo.activeFor(WS, doc.id));
+            return {
+              before,
+              after,
+              first,
+              repeat,
+              oldOpen,
+              oldAgain: yield* Effect.exit(visit(token, open)),
+              fresh: yield* visit(first, open),
+              history: yield* Effect.flatMap(Documents, (d) => d.history(doc.id)),
+            };
+          }).pipe(Effect.provideService(ShareLinkKeys, shareLinkKeysTest(2)));
         }),
       ),
     );
-    expect(after.rekeyed.id).toBe(before.id);
-    expect(after.rekeyed.keyVersion).toBe(1);
-    expect(after.rekeyed.tokenHash).toBe(before.tokenHash);
-    expect(after.url).toMatch(/\/s\/v1\./);
+    fails(r.oldOpen, tokenNotFound);
+    fails(r.oldAgain, tokenNotFound);
+    expect(r.first).toMatch(/^v2\./);
+    expect(r.repeat).toBe(r.first);
+    expect(r.after.id).not.toBe(r.before.id);
+    expect(r.after.keyVersion).toBe(2);
+    expect(r.fresh.number).toBe("2026-0001");
+    const creates = r.history.filter((e) => e.action === "share.create");
+    expect(creates).toHaveLength(2);
+    expect(creates[1]?.changes).toEqual([
+      { path: "share", before: r.before.id, after: r.after.id },
+    ]);
   });
 });
 
@@ -277,9 +298,26 @@ describe("open", () => {
     expect(firstPage.items.map((e) => e.kind)).toEqual(["view", "view"]);
     expect(firstPage.items.map((e) => e.device)).toEqual(["unknown", "mobile"]);
     expect(firstPage.items[0]?.at).toBe("2026-11-23T10:01:00.000Z");
-    // The first view set viewedAt (one revision bump); later views did not move it.
+    // The first view set viewedAt; later views did not move it.
     expect(link.viewedAt).toBe("2026-11-23T09:00:00.000Z");
-    expect(link.revision).toBe(2);
+  });
+
+  test("concurrent opens by one visitor record one view", async () => {
+    const page = ok(
+      await run(
+        Effect.gen(function* () {
+          const { doc, token } = yield* shared;
+          yield* Effect.all(
+            Array.from({ length: 5 }, () => visit(token, open)),
+            {
+              concurrency: "unbounded",
+            },
+          );
+          return yield* views(doc.id);
+        }),
+      ),
+    );
+    expect(page.items).toHaveLength(1);
   });
 
   test("a different visitor hash counts as a new view", async () => {
@@ -425,6 +463,27 @@ describe("pdf and logo", () => {
     expect(file.filename).toBe("2026-0001.pdf");
     expect(bytes.length).toBeGreaterThan(0);
     expect(page.items.map((e) => e.kind)).toEqual(["download", "download"]);
+  });
+
+  test("a pdf that fails before rendering records no download", async () => {
+    const [exit, page] = ok(
+      await run(
+        Effect.gen(function* () {
+          const { doc, token } = yield* shared;
+          yield* Ref.set((yield* ShareFixtures).unavailable, true);
+          const exit = yield* Effect.exit(
+            visit(
+              token,
+              Effect.flatMap(PublicShareLinks, (s) => s.pdf()),
+            ),
+          );
+          yield* Ref.set((yield* ShareFixtures).unavailable, false);
+          return [exit, yield* views(doc.id)] as const;
+        }),
+      ),
+    );
+    fails(exit, new Unavailable({ dependency: "database" }));
+    expect(page.items).toHaveLength(0);
   });
 
   test("logo is NotFound without one and the Workspace logo with one; revoked tokens fail", async () => {
