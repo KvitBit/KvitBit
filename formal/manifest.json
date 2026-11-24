@@ -178,6 +178,16 @@
             "name": "SentImpliesAccepted"
           },
           "description": "record stores outcome_unknown as sent, also when the provider never took the message"
+        },
+        {
+          "name": "give-up-early",
+          "config": "formal/outbox/OutboxRecurring_mutant_give_up_early.cfg",
+          "expect": "violation",
+          "violates": {
+            "kind": "invariant",
+            "name": "FailedOnlyWhenJustified"
+          },
+          "description": "the first retryable failure gives up although a second attempt remains: failed without a rejection or exhausted retries"
         }
       ],
       "timeoutSeconds": 120,

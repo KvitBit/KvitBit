@@ -588,3 +588,27 @@ test("Dispatch(not_accepted), Record, CrashDelivery(giveup), ReconcileDelivery: 
   expect(r.provider.attempts).toBe(2);
   expect(r.provider.sent.map((e) => e.idempotencyKey)).toEqual([r.deliveryId]);
 });
+
+test("Dispatch(not_accepted) twice, Record, CrashDelivery(giveup), ReconcileDelivery: sent on the third call", async () => {
+  // The base model's bound: 2 retryable attempts per execution, then giveUp; the process
+  // dies before giveUp runs, and the re-executed delivery sends.
+  const r = await scenario((w) =>
+    Effect.gen(function* () {
+      const deliveryId = yield* queuedDelivery(w);
+      yield* CaptureEmailSender.failNext("not_accepted", "not_accepted");
+      const first = yield* Effect.exit(deliver(w.workspaceId, deliveryId));
+      const afterFirst = yield* status(w, deliveryId);
+      const second = yield* Effect.exit(dispatch(w.workspaceId, deliveryId));
+      const afterSecond = yield* status(w, deliveryId);
+      const end = yield* deliver(w.workspaceId, deliveryId);
+      return { deliveryId, first, afterFirst, second, afterSecond, end, provider: yield* provider };
+    }),
+  );
+  expect(Exit.isFailure(r.first)).toBe(true);
+  expect(r.afterFirst).toBe("sending");
+  expect(Exit.isFailure(r.second)).toBe(true);
+  expect(r.afterSecond).toBe("sending");
+  expect(r.end).toBe("sent");
+  expect(r.provider.attempts).toBe(3);
+  expect(r.provider.sent.map((e) => e.idempotencyKey)).toEqual([r.deliveryId]);
+});
