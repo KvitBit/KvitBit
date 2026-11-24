@@ -24,6 +24,9 @@
  * - view.ts     record -> DocumentView/DocumentSummary, concrete codecs for the domain
  *               placeholders (`DocumentViewCodec` is the C3 result codec).
  * - support.ts  `now`, `newDraftRecord`, `viewOf`/`relatedOf`.
+ * - activity.ts `DocumentActivity`, the optional read port behind `DocumentView.share` and
+ *               `deliveries` (bound at integration, compose/documentActivity.ts), and
+ *               `DocumentActivityNone`. Absent = `share: null`, `deliveries: []`.
  * - drafts.ts   preview, createDraft, discardDraft, editDraft (P1).
  * - reads.ts    get, list, history, pdf (P1).
  * - transitions.ts  the state machine: `TRANSITIONS` (lifecycle state x action -> ok | noop |
@@ -114,6 +117,7 @@ import { DocumentsRepoMemory } from "./repo";
 import { DocumentSenderStub } from "./sender";
 import { DocumentsLive } from "./service";
 
+export { DocumentActivity, DocumentActivityNone } from "./activity";
 export type { Composed, ComposeOptions, Deduction, DocumentSpec, LineSpec } from "./compose";
 export {
   applyPatch,

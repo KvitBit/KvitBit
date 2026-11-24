@@ -1,9 +1,10 @@
 /** Helpers shared by the Documents method files. */
 import type { DocumentId, DocumentView, IsoDate, WorkspaceId } from "@kvitbit/domain/contract";
-import { Clock, Data, Effect } from "effect";
+import { Clock, Data, Effect, Option } from "effect";
 import { pragueDate } from "../../engines/calendar";
 import { ZERO } from "../../engines/decimal";
 import { CoreStore, type StoreUnavailable } from "../../store/CoreStore";
+import { DocumentActivity } from "./activity";
 import type { Composed } from "./compose";
 import type { DocumentRecord } from "./record";
 import { DocumentsRepo } from "./repo";
@@ -68,6 +69,27 @@ export const relatedOf = (
         });
       });
 
+/**
+ * `share` and `deliveries` from the optional `DocumentActivity` port; values in `extra` win.
+ * Drafts are never shared or sent, so they skip the reads.
+ */
+const activityOf = (
+  row: DocumentRecord,
+  extra: Pick<ViewContext, "share" | "deliveries">,
+): Effect.Effect<Pick<ViewContext, "share" | "deliveries">, StoreUnavailable> =>
+  Effect.gen(function* () {
+    if (row.status === "draft") return {};
+    const port = yield* Effect.serviceOption(DocumentActivity);
+    if (Option.isNone(port)) return {};
+    const share =
+      extra.share !== undefined ? extra.share : yield* port.value.share(row.workspaceId, row.id);
+    const deliveries =
+      extra.deliveries !== undefined
+        ? extra.deliveries
+        : yield* port.value.deliveries(row.workspaceId, row.id);
+    return { share, deliveries };
+  });
+
 /** The full view of a stored record as of now. */
 export const viewOf = (
   row: DocumentRecord,
@@ -76,7 +98,8 @@ export const viewOf = (
   Effect.gen(function* () {
     const { today } = yield* now;
     const related = yield* relatedOf(row);
-    return toView(row, { ...extra, today, related });
+    const activity = yield* activityOf(row, extra);
+    return toView(row, { ...extra, ...activity, today, related });
   });
 
 class PreviewRollback extends Data.TaggedError("PreviewRollback") {}

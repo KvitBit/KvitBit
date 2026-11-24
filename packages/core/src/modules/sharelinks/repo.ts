@@ -66,6 +66,16 @@ export class ShareLinksRepo extends Context.Service<
       { readonly rows: ReadonlyArray<ShareViewEventRow>; readonly more: boolean },
       StoreUnavailable
     >;
+
+    // DocumentView.share (compose/documentActivity.ts) ---------------------------------------
+    /** The link's `view` events (downloads excluded): their count and the latest `at`. */
+    readonly viewStats: (
+      workspaceId: WorkspaceId,
+      link: ShareLinkId,
+    ) => Effect.Effect<
+      { readonly views: number; readonly lastViewedAt: string | null },
+      StoreUnavailable
+    >;
   }
 >()("kvitbit/core/sharelinks/ShareLinksRepo") {}
 
@@ -157,6 +167,17 @@ export const ShareLinksRepoMemory: Layer.Layer<ShareLinksRepo, never, MemoryTabl
             more: rows.length > page.limit,
           };
         }),
+
+      // DocumentView.share ---------------------------------------------------------------------
+      viewStats: (workspaceId, link) =>
+        Effect.map(
+          views.list(workspaceId, {
+            where: { shareLinkId: link, kind: "view" },
+            orderBy: ["at"],
+            direction: "desc",
+          }),
+          (rows) => ({ views: rows.length, lastViewedAt: rows[0]?.at ?? null }),
+        ),
     });
   }),
 );

@@ -4,6 +4,7 @@
  * `update`, `UniqueViolation` per index name, `StoreUnavailable`).
  */
 import type {
+  BankAccountId,
   Conflict,
   ContactId,
   DocumentId,
@@ -102,6 +103,17 @@ export class DocumentsRepo extends Context.Service<
       { readonly rows: ReadonlyArray<DocumentRecord>; readonly more: boolean },
       StoreUnavailable
     >;
+
+    // Bank account references (compose/bankAccounts.ts) ------------------------------------
+    /**
+     * Drafts that use the bank account: chosen (`given.bankAccount`) or resolved into the
+     * draft's issuer snapshot. Issued and cancelled documents keep their snapshot and are
+     * never returned.
+     */
+    readonly draftsUsingBankAccount: (
+      workspaceId: WorkspaceId,
+      bankAccountId: BankAccountId,
+    ) => Effect.Effect<ReadonlyArray<DocumentRecord>, StoreUnavailable>;
   }
 >()("kvitbit/core/DocumentsRepo") {}
 
@@ -172,6 +184,16 @@ export const DocumentsRepoMemory: Layer.Layer<DocumentsRepo, never, MemoryTables
               .sort(listOrder);
             return { rows: sorted.slice(0, page.limit), more: sorted.length > page.limit };
           },
+        ),
+
+      // Bank account references --------------------------------------------------------------
+      draftsUsingBankAccount: (workspaceId, bankAccountId) =>
+        Effect.map(table.list(workspaceId, { where: { status: "draft" } }), (rows) =>
+          rows.filter(
+            (row) =>
+              row.given.bankAccount === bankAccountId ||
+              row.issuer.bankAccount?.id === bankAccountId,
+          ),
         ),
     });
   }),
