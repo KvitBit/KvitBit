@@ -253,6 +253,188 @@
       "toolVersions": {
         "bun": "1.4.2"
       }
+    },
+    {
+      "id": "idempotency.request-log-cas",
+      "skill": "verify-idempotency-cas",
+      "tier": 1,
+      "kind": "tlc",
+      "syncCommit": "77a5bb7",
+      "spec": "formal/idempotency/RequestLogCas.tla",
+      "config": "formal/idempotency/RequestLogCas.cfg",
+      "wideConfig": "formal/idempotency/RequestLogCas_wide.cfg",
+      "mutants": [
+        {
+          "name": "accept-mismatch",
+          "config": "formal/idempotency/RequestLogCas_mutant_accept_mismatch.cfg",
+          "expect": "violation",
+          "violates": {
+            "kind": "invariant",
+            "name": "MismatchNeverReplayed"
+          },
+          "description": "The Existing branch skips the method/fingerprint compare, so a reused key with another payload gets the first result"
+        },
+        {
+          "name": "reject-matching",
+          "config": "formal/idempotency/RequestLogCas_mutant_reject_matching.cfg",
+          "expect": "violation",
+          "violates": {
+            "kind": "invariant",
+            "name": "MismatchOnlyForOtherPayload"
+          },
+          "description": "The Existing branch answers idempotency_mismatch to every retry, so a matching retry is rejected instead of replayed"
+        },
+        {
+          "name": "replay-live-row",
+          "config": "formal/idempotency/RequestLogCas_mutant_replay_live_row.cfg",
+          "expect": "violation",
+          "violates": {
+            "kind": "invariant",
+            "name": "ReplayReturnsStoredResult"
+          },
+          "description": "A replay of an edit returns the live row's revision instead of the stored result (a result enriched after the body), so a retry after a later edit sees that edit"
+        },
+        {
+          "name": "claim-no-wait",
+          "config": "formal/idempotency/RequestLogCas_mutant_claim_no_wait.cfg",
+          "expect": "violation",
+          "violates": {
+            "kind": "invariant",
+            "name": "AtMostOnceEffect"
+          },
+          "description": "requestLog.claim takes a key pending in another transaction instead of waiting, so overlapping creates both commit"
+        },
+        {
+          "name": "no-revision-check",
+          "config": "formal/idempotency/RequestLogCas_mutant_no_revision_check.cfg",
+          "expect": "violation",
+          "violates": {
+            "kind": "invariant",
+            "name": "NoLostUpdate"
+          },
+          "description": "getForUpdate ignores expectedRevision, so a stale edit overwrites a newer one"
+        },
+        {
+          "name": "keep-claim-on-rollback",
+          "config": "formal/idempotency/RequestLogCas_mutant_keep_claim_on_rollback.cfg",
+          "expect": "violation",
+          "violates": {
+            "kind": "deadlock"
+          },
+          "description": "A rolled-back transaction leaves its claim pending, so a retry of that key waits forever"
+        }
+      ],
+      "timeoutSeconds": 120,
+      "wideTimeoutSeconds": 900,
+      "coveredFiles": [
+        {
+          "path": "packages/core/src/shared/idempotency.ts",
+          "sha256": "1973965bead068f12e43020708e3e99a9b2932587aa813a6348bee1d835dd81b"
+        },
+        {
+          "path": "packages/core/src/shared/revision.ts",
+          "sha256": "9c445a1dbcfa1a6a6632865de4f2a006c6a4be8ee333d42f87d8a8fd0533b2bb"
+        },
+        {
+          "path": "packages/core/src/shared/requestOutcome.ts",
+          "sha256": "cb3cd76d8b708b4082659ae4468cbb0c6b6cf30633277cdcafaacfbe7572a0f8"
+        },
+        {
+          "path": "packages/core/src/store/CoreStore.ts",
+          "sha256": "7971299fe86c8505f841c237ef8c103c1542b71174f6a530774c12e62c65fa03"
+        },
+        {
+          "path": "packages/core/src/store/memory.ts",
+          "sha256": "b12cacb2313336ffa34d3a9f28b13a4dcf9915bc7a00f68e9c0689a12c3a9eba"
+        },
+        {
+          "path": "packages/core/src/store/tables.ts",
+          "sha256": "48c3753b7daa84f711c4bea51eb13bc548980e358461e2c5354cf251b089d477"
+        },
+        {
+          "path": "packages/core/src/modules/contacts/live.ts",
+          "sha256": "874c19db566641c6438b104d44cdd5667be256485d83d537559da6a1580659fa"
+        }
+      ],
+      "guardedSymbols": [
+        "withIdempotency",
+        "CoreStoreShape.requestLog.claim",
+        "CoreStoreShape.requestLog.complete",
+        "makeMemoryStore (requestLog, runFrame rollback)",
+        "Collection.getForUpdate",
+        "Collection.update",
+        "checkRevision",
+        "makeRequestOutcome",
+        "Contacts.save (create, edit)"
+      ],
+      "bounds": "5 requests (r1, r2 edit from revision 1 on one key with different payloads; r3 edits from revision 1 on its own key; r4 creates; r5 edits from revision 2 on r3's key), overlapping attempts per request 2,1,2,2,1 (8), any attempt may abort before COMMIT; wide: 2 attempts of every request (10)",
+      "assumptions": [
+        "One Contact row edited by Contacts.save stands for every Collection.getForUpdate/update and checkRevision caller; one create stands for every insert behind withIdempotency",
+        "CoreStore port semantics as documented in CoreStore.ts: a claim on a key pending in another transaction waits until that transaction ends; rollback drops the pending claim and row locks (memory.ts runFrame; a SQL adapter must match)",
+        "Body writes, requestLog.complete and the audit row are transaction-local until COMMIT, so they form one step; Abort models any failure, defect or interruption before COMMIT",
+        "Request-key TTL (24 h) never expires inside a run: replay after expiry re-runs the body by design and is not modelled; scopes other than one Workspace are not modelled",
+        "MCP preview -> confirm tokens are not modelled: core has no confirmation-token issuance or redemption yet (only api-contract helpers in packages/api-contract/src/mcp.ts)",
+        "Contacts.save's same-content no-op edit (returns the row unchanged, no revision bump) and IČO unique-index conflicts (ensureIcoFree, UniqueViolation) are not modelled"
+      ],
+      "toolVersions": {
+        "tla2tools": "1.7.4",
+        "java": "17"
+      }
+    },
+    {
+      "id": "idempotency.request-log-cas-replay",
+      "skill": "verify-idempotency-cas",
+      "tier": 1,
+      "kind": "replay",
+      "syncCommit": "77a5bb7",
+      "replay": ["formal/idempotency/requestLogCas.replay.test.ts"],
+      "timeoutSeconds": 120,
+      "coveredFiles": [
+        {
+          "path": "packages/core/src/shared/idempotency.ts",
+          "sha256": "1973965bead068f12e43020708e3e99a9b2932587aa813a6348bee1d835dd81b"
+        },
+        {
+          "path": "packages/core/src/shared/requestOutcome.ts",
+          "sha256": "cb3cd76d8b708b4082659ae4468cbb0c6b6cf30633277cdcafaacfbe7572a0f8"
+        },
+        {
+          "path": "packages/core/src/store/CoreStore.ts",
+          "sha256": "7971299fe86c8505f841c237ef8c103c1542b71174f6a530774c12e62c65fa03"
+        },
+        {
+          "path": "packages/core/src/store/memory.ts",
+          "sha256": "b12cacb2313336ffa34d3a9f28b13a4dcf9915bc7a00f68e9c0689a12c3a9eba"
+        },
+        {
+          "path": "packages/core/src/store/tables.ts",
+          "sha256": "48c3753b7daa84f711c4bea51eb13bc548980e358461e2c5354cf251b089d477"
+        },
+        {
+          "path": "packages/core/src/modules/contacts/live.ts",
+          "sha256": "874c19db566641c6438b104d44cdd5667be256485d83d537559da6a1580659fa"
+        }
+      ],
+      "guardedSymbols": [
+        "withIdempotency",
+        "CoreStoreShape.requestLog.claim",
+        "CoreStoreShape.requestLog.complete",
+        "makeMemoryStore (requestLog, runFrame rollback)",
+        "Collection.getForUpdate",
+        "Collection.update",
+        "makeRequestOutcome",
+        "Contacts.save (create, edit)"
+      ],
+      "bounds": "7 RequestLogCas traces on the in-memory CoreStore: replay; mismatch on a reused key; stale twice, the fresh edit r5 on the same key, then a replay after the row moved on; abort after Lock then retry; overlapping duplicate edit; overlapping duplicate create; overlapping competing edits. Executes getForUpdate/update, not checkRevision (Expenses is its only caller)",
+      "assumptions": [
+        "The in-memory store serializes whole transactions, so overlapping attempts interleave only between transactions; Postgres interleavings inside a transaction belong to the model and the pg-contention job",
+        "Request-key TTL (24 h) never expires inside a run: replay after expiry re-runs the body by design and is not modelled; scopes other than one Workspace are not modelled",
+        "MCP preview -> confirm tokens are not modelled: core has no confirmation-token issuance or redemption yet (only api-contract helpers in packages/api-contract/src/mcp.ts)",
+        "Contacts.save's same-content no-op edit (returns the row unchanged, no revision bump) and IČO unique-index conflicts (ensureIcoFree, UniqueViolation) are not modelled"
+      ],
+      "toolVersions": {
+        "bun": "1.4.2"
+      }
     }
   ]
 }
