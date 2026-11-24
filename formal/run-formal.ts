@@ -389,7 +389,7 @@ export const classifyTlc = (status: number | null, output: string): TlcOutcome =
     // Zero states means Init is unsatisfiable, so every property holds vacuously.
     if (stats[2] === "0")
       return { verdict: "error", reason: "TLC found 0 distinct states (vacuous model)" };
-    return { verdict: "pass", states: stats[2] };
+    return { verdict: "pass", states };
   }
   const kinds = status === null ? undefined : VIOLATION_EXIT[status];
   if (kinds) {
