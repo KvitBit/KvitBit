@@ -1,5 +1,5 @@
-import { Placeholder } from "../../../../src/ui/placeholder";
+import { DocumentsListScreen } from "../../../../src/features/documents/list-screen";
 
-export default function Route() {
-  return <Placeholder title="Documents" />;
+export default function DocumentsRoute() {
+  return <DocumentsListScreen />;
 }

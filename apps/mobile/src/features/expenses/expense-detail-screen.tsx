@@ -1,0 +1,956 @@
+import type {
+  CurrencyCode,
+  ExpenseId,
+  ExpenseInput,
+  ExpensePatch,
+  IsoDate,
+  PaymentId,
+  PaymentMethod,
+  VatTreatment,
+} from "@kvitbit/domain/contract";
+import { describeError, idempotencyHeaders, ifMatchHeaders, uuidV7 } from "@kvitbit/ui-port/api";
+import { formatDate, formatMoney } from "@kvitbit/ui-port/format";
+import { Effect } from "effect";
+import { Download, Edit3, Paperclip, Plus, Share2, Trash2, Upload } from "lucide-react-native";
+import { useCallback, useEffect, useState } from "react";
+import { StyleSheet, View } from "react-native";
+import { useI18n } from "../../i18n/i18n-provider";
+import { navigate } from "../../navigation/routes";
+import { useTransfer } from "../../platform/transfer";
+import { useApi, useRemote } from "../../runtime/api-runtime";
+import {
+  Badge,
+  type BadgeTone,
+  Banner,
+  Button,
+  Card,
+  IconButton,
+  ListRow,
+  RemoteView,
+  Screen,
+  Section,
+  SegmentedChoice,
+  space,
+  Text,
+  TextField,
+  useOverlay,
+} from "../../ui";
+import { useWorkspace } from "../../workspace/workspace-provider";
+import { defaultReceiptPicker, type ReceiptPicker } from "./capture-picker";
+import {
+  buildExpensePayload,
+  COMMON_CURRENCIES,
+  type DeductibilityMode,
+  decodeExpenseDetail,
+  decodePayment,
+  deductibilityPercent,
+  EXPENSE_VAT_TREATMENTS,
+  type ExpenseAttachmentData,
+  type ExpenseDetailData,
+  type ExpenseFormState,
+  type ExpenseSettlement,
+  emptyExpenseForm,
+  expenseFormFromDetail,
+  formatBytes,
+  PAYMENT_METHODS,
+  remainingAmount,
+  todayIsoDate,
+  validateAttachmentFile,
+  vatBreakdownDifference,
+} from "./model";
+
+const settlementTone = (s: ExpenseSettlement): BadgeTone => {
+  switch (s) {
+    case "paid":
+      return "success";
+    case "partially_paid":
+      return "warning";
+    case "overpaid":
+      return "info";
+    case "unpaid":
+      return "neutral";
+  }
+};
+
+export function ExpenseDetailScreen(props: {
+  readonly id: ExpenseId | "new";
+  readonly initialMode?: "view" | "edit";
+  readonly picker?: ReceiptPicker;
+}) {
+  const isNew = props.id === "new";
+  const expenseId = isNew ? null : props.id;
+  const picker = props.picker ?? defaultReceiptPicker;
+
+  const { workspace } = useWorkspace();
+  const { t, text, locale, local } = useI18n();
+  const api = useApi();
+  const transfer = useTransfer();
+  const overlay = useOverlay();
+
+  const [mode, setMode] = useState<"view" | "edit">(isNew ? "edit" : (props.initialMode ?? "view"));
+  const [form, setForm] = useState<ExpenseFormState>(() => emptyExpenseForm());
+  const [fieldErrors, setFieldErrors] = useState<Readonly<Record<string, string>>>({});
+  const [bannerError, setBannerError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+
+  // Payments form state
+  const [showPaymentForm, setShowPaymentForm] = useState(false);
+  const [payAmount, setPayAmount] = useState("");
+  const [payDate, setPayDate] = useState<string>(() => todayIsoDate());
+  const [payMethod, setPayMethod] = useState<PaymentMethod>("bank_transfer");
+  const [payNote, setPayNote] = useState("");
+  const [payBusy, setPayBusy] = useState(false);
+  const [removeReason, setRemoveReason] = useState("");
+
+  // Attachment transfer state
+  const [uploading, setUploading] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState(0);
+  const [transferBusyId, setTransferBusyId] = useState<string | null>(null);
+
+  const detailRemote = useRemote(
+    expenseId === null
+      ? null
+      : (client) => client.expenses.get({ params: { workspaceId: workspace.id, expenseId } }),
+    [workspace.id, expenseId],
+  );
+
+  const paymentsRemote = useRemote(
+    expenseId === null
+      ? null
+      : (client) =>
+          client.payments.listForExpense({ params: { workspaceId: workspace.id, expenseId } }),
+    [workspace.id, expenseId],
+  );
+
+  const loadedDetail: ExpenseDetailData | null =
+    detailRemote.state._tag === "Ready" ? decodeExpenseDetail(detailRemote.state.value) : null;
+
+  useEffect(() => {
+    if (loadedDetail !== null && mode === "view") {
+      setForm(expenseFormFromDetail(loadedDetail));
+    }
+  }, [loadedDetail, mode]);
+
+  const startEdit = useCallback(() => {
+    if (loadedDetail !== null) setForm(expenseFormFromDetail(loadedDetail));
+    setFieldErrors({});
+    setBannerError(null);
+    setMode("edit");
+  }, [loadedDetail]);
+
+  const handleSave = useCallback(async () => {
+    setBannerError(null);
+    const { payload, errors } = buildExpensePayload(form);
+    if (Object.keys(errors).length > 0) {
+      setFieldErrors(errors);
+      return;
+    }
+    setFieldErrors({});
+    setSaving(true);
+    if (isNew) {
+      const key = await Effect.runPromise(uuidV7);
+      const res = await api.run((client) =>
+        client.expenses.record({
+          params: { workspaceId: workspace.id },
+          headers: idempotencyHeaders(key),
+          payload: payload as ExpenseInput,
+        }),
+      );
+      setSaving(false);
+      if (res._tag === "Ok") {
+        const created = decodeExpenseDetail(res.value);
+        overlay.toast(t("common.toast.saved"));
+        navigate(
+          { _tag: "Expense", ws: workspace.slug, id: created.id, mode: "view" },
+          { replace: true },
+        );
+      } else {
+        const view = describeError(res.error);
+        setBannerError(text(view.text));
+        const mapped: Record<string, string> = {};
+        for (const issue of view.issues) {
+          const keyPath = issue.path.join(".");
+          if (keyPath !== "") mapped[keyPath] = text(issue.text);
+        }
+        setFieldErrors(mapped);
+      }
+      return;
+    }
+
+    if (expenseId === null || loadedDetail === null) {
+      setSaving(false);
+      return;
+    }
+    const res = await api.run((client) =>
+      client.expenses.edit({
+        params: { workspaceId: workspace.id, expenseId },
+        headers: ifMatchHeaders(loadedDetail.revision),
+        payload: payload as ExpensePatch,
+      }),
+    );
+    setSaving(false);
+    if (res._tag === "Ok") {
+      detailRemote.set(res.value);
+      setMode("view");
+      overlay.toast(t("common.toast.saved"));
+    } else {
+      const view = describeError(res.error);
+      setBannerError(text(view.text));
+      const mapped: Record<string, string> = {};
+      for (const issue of view.issues) {
+        const keyPath = issue.path.join(".");
+        if (keyPath !== "") mapped[keyPath] = text(issue.text);
+      }
+      setFieldErrors(mapped);
+      if (view.staleRevision) detailRemote.reload();
+    }
+  }, [api, detailRemote, expenseId, form, isNew, loadedDetail, overlay, t, text, workspace]);
+
+  const handleDeleteExpense = useCallback(async () => {
+    if (expenseId === null || loadedDetail === null) return;
+    const confirmed = await overlay.confirm({
+      title: t("expenses.detail.removeTitle"),
+      body: t("expenses.detail.removeBody"),
+      confirmLabel: t("common.action.delete"),
+      cancelLabel: t("common.action.cancel"),
+      destructive: true,
+    });
+    if (!confirmed) return;
+    const res = await api.run((client) =>
+      client.expenses.remove({
+        params: { workspaceId: workspace.id, expenseId },
+        headers: ifMatchHeaders(loadedDetail.revision),
+      }),
+    );
+    if (res._tag === "Ok") {
+      overlay.toast(t("common.toast.deleted"));
+      navigate({ _tag: "Expenses", ws: workspace.slug, query: {} }, { replace: true });
+    } else {
+      setBannerError(text(describeError(res.error).text));
+    }
+  }, [api, expenseId, loadedDetail, overlay, t, text, workspace]);
+
+  const openPaymentEditor = useCallback((detail: ExpenseDetailData) => {
+    setPayAmount(remainingAmount(detail) ?? detail.total ?? "");
+    setPayDate(todayIsoDate());
+    setPayMethod("bank_transfer");
+    setPayNote("");
+    setShowPaymentForm(true);
+  }, []);
+
+  const handleRecordPayment = useCallback(
+    async (detail: ExpenseDetailData) => {
+      if (expenseId === null) return;
+      setBannerError(null);
+      setPayBusy(true);
+      const key = await Effect.runPromise(uuidV7);
+      const cleanedAmount = payAmount.trim().replace(/\s+/g, "").replace(",", ".");
+      const res = await api.run((client) =>
+        client.payments.record({
+          params: { workspaceId: workspace.id },
+          headers: idempotencyHeaders(key),
+          payload: {
+            target: { expense: expenseId },
+            ...(cleanedAmount !== "" && detail.currency !== null
+              ? {
+                  amount: {
+                    amount: cleanedAmount as unknown as never,
+                    currency: detail.currency,
+                  },
+                }
+              : {}),
+            ...(payDate.trim() !== "" ? { paidOn: payDate.trim() as IsoDate } : {}),
+            method: payMethod,
+            ...(payNote.trim() !== "" ? { note: payNote.trim() } : {}),
+          },
+        }),
+      );
+      setPayBusy(false);
+      if (res._tag === "Ok") {
+        setShowPaymentForm(false);
+        detailRemote.reload();
+        paymentsRemote.reload();
+        overlay.toast(t("common.toast.saved"));
+      } else {
+        setBannerError(text(describeError(res.error).text));
+      }
+    },
+    [
+      api,
+      detailRemote,
+      expenseId,
+      overlay,
+      payAmount,
+      payDate,
+      payMethod,
+      payNote,
+      paymentsRemote,
+      t,
+      text,
+      workspace.id,
+    ],
+  );
+
+  const handleRemovePayment = useCallback(
+    async (paymentId: PaymentId) => {
+      const confirmed = await overlay.confirm({
+        title: local({ cs: "Odebrat platbu?", en: "Remove payment?" }),
+        body: t("common.confirm.reasonLabel"),
+        confirmLabel: t("common.action.remove"),
+        cancelLabel: t("common.action.cancel"),
+        destructive: true,
+      });
+      if (!confirmed) return;
+      const reason =
+        removeReason.trim() === ""
+          ? local({ cs: "Odebráno z mobilní aplikace", en: "Removed from mobile app" })
+          : removeReason.trim();
+      const res = await api.run((client) =>
+        client.payments.remove({
+          params: { workspaceId: workspace.id, paymentId },
+          payload: { reason },
+        }),
+      );
+      if (res._tag === "Ok") {
+        setRemoveReason("");
+        detailRemote.reload();
+        paymentsRemote.reload();
+        overlay.toast(t("common.toast.deleted"));
+      } else {
+        setBannerError(text(describeError(res.error).text));
+      }
+    },
+    [api, detailRemote, local, overlay, paymentsRemote, removeReason, t, text, workspace.id],
+  );
+
+  const handleAttachmentAction = useCallback(
+    async (att: ExpenseAttachmentData, action: "open" | "share") => {
+      if (expenseId === null) return;
+      setBannerError(null);
+      setTransferBusyId(att.id);
+      const dl = await transfer.download({
+        path: `/workspaces/${workspace.id}/expenses/${expenseId}/attachments/${att.id}`,
+        query: { disposition: action === "open" ? "inline" : "attachment" },
+        filename: att.name,
+        contentType: att.contentType,
+      });
+      if (dl._tag === "Err") {
+        setTransferBusyId(null);
+        setBannerError(text(describeError(dl.error).text));
+        return;
+      }
+      const next =
+        action === "open" ? await transfer.open(dl.value) : await transfer.share(dl.value);
+      setTransferBusyId(null);
+      if (next._tag === "Err") {
+        setBannerError(text(describeError(next.error).text));
+      }
+    },
+    [expenseId, text, transfer, workspace.id],
+  );
+
+  const handleDetachAttachment = useCallback(
+    async (att: ExpenseAttachmentData) => {
+      if (expenseId === null) return;
+      const confirmed = await overlay.confirm({
+        title: t("expenses.attachmentViewer.detachTitle"),
+        body: att.name,
+        confirmLabel: t("common.action.remove"),
+        cancelLabel: t("common.action.cancel"),
+        destructive: true,
+      });
+      if (!confirmed) return;
+      const res = await api.run((client) =>
+        client.expenses.detach({
+          params: { workspaceId: workspace.id, expenseId, attachmentId: att.id },
+        }),
+      );
+      if (res._tag === "Ok") {
+        detailRemote.reload();
+        overlay.toast(t("common.toast.deleted"));
+      } else {
+        setBannerError(text(describeError(res.error).text));
+      }
+    },
+    [api, detailRemote, expenseId, overlay, t, text, workspace.id],
+  );
+
+  const handleAddAttachment = useCallback(async () => {
+    if (expenseId === null) return;
+    setBannerError(null);
+    const picked = await picker.pickDocument();
+    if (picked._tag === "Cancelled") return;
+    if (picked._tag === "PermissionDenied") {
+      setBannerError(t("expenses.capture.cameraDenied"));
+      return;
+    }
+    if (picked._tag === "Error") {
+      setBannerError(picked.message);
+      return;
+    }
+    setUploading(true);
+    setUploadProgress(0);
+    for (const file of picked.files) {
+      const invalid = validateAttachmentFile(file);
+      if (invalid !== null) {
+        setBannerError(
+          invalid === "too_large"
+            ? local({ cs: "Soubor je větší než 20 MB.", en: "File exceeds 20 MB limit." })
+            : t("expenses.attachmentViewer.allowedTypes", { types: "PDF, JPEG, PNG, HEIC" }),
+        );
+        continue;
+      }
+      const uploaded = await transfer.upload({
+        path: `/workspaces/${workspace.id}/expenses/${expenseId}/attachments`,
+        file,
+        onProgress: (p) => setUploadProgress(Math.round(p * 100)),
+      });
+      if (uploaded._tag === "Err") {
+        setBannerError(text(describeError(uploaded.error).text));
+      }
+    }
+    setUploading(false);
+    detailRemote.reload();
+  }, [detailRemote, expenseId, local, picker, t, text, transfer, workspace.id]);
+
+  const errMsg = (key: string): string | null => {
+    const code = fieldErrors[key];
+    if (code === undefined) return null;
+    if (code === "required") return t("common.state.required");
+    if (code === "invalid_date") return local({ cs: "Formát RRRR-MM-DD", en: "Use YYYY-MM-DD" });
+    if (code === "invalid_number")
+      return local({ cs: "Zadejte platné číslo", en: "Enter a valid number" });
+    if (code === "invalid_percent") return local({ cs: "Zadejte 1 až 99 %", en: "Enter 1 to 99%" });
+    return code;
+  };
+
+  if (mode === "edit") {
+    const vatDiff = vatBreakdownDifference(form.total, form.vatRows);
+    return (
+      <Screen
+        title={isNew ? t("expenses.list.new") : t("expenses.editor.title")}
+        back={
+          isNew
+            ? true
+            : () => {
+                setMode("view");
+                setBannerError(null);
+              }
+        }
+        footer={
+          <>
+            {isNew ? null : (
+              <Button
+                kind="text"
+                label={t("common.action.cancel")}
+                onPress={() => setMode("view")}
+              />
+            )}
+            <Button
+              label={t("common.action.save")}
+              busy={saving}
+              onPress={() => void handleSave()}
+              testID="expense-save"
+            />
+          </>
+        }
+      >
+        {bannerError === null ? null : <Banner text={bannerError} />}
+
+        <SegmentedChoice
+          label={t("common.field.status")}
+          value={form.status}
+          choices={[
+            { value: "complete", label: t("enum.expenseStatus.complete") },
+            { value: "incomplete", label: t("enum.expenseStatus.incomplete") },
+          ]}
+          onChange={(status) => setForm((f) => ({ ...f, status }))}
+        />
+
+        <Section title={t("expenses.editor.supplier")}>
+          <TextField
+            label={t("common.field.name")}
+            value={form.supplierName}
+            onChangeText={(supplierName) => setForm((f) => ({ ...f, supplierName }))}
+            error={errMsg("supplier.manual.name")}
+          />
+          <TextField
+            label={t("common.field.ico")}
+            value={form.supplierIco}
+            onChangeText={(supplierIco) => setForm((f) => ({ ...f, supplierIco }))}
+            error={errMsg("supplier.ico")}
+          />
+          <TextField
+            label={t("common.field.dic")}
+            value={form.supplierDic}
+            onChangeText={(supplierDic) => setForm((f) => ({ ...f, supplierDic }))}
+          />
+          <TextField
+            label={t("expenses.editor.number")}
+            value={form.supplierDocumentNumber}
+            onChangeText={(supplierDocumentNumber) =>
+              setForm((f) => ({ ...f, supplierDocumentNumber }))
+            }
+          />
+        </Section>
+
+        <Section title={t("common.field.date")}>
+          <TextField
+            label={t("expenses.editor.issueDate")}
+            placeholder="YYYY-MM-DD"
+            value={form.issuedOn}
+            onChangeText={(issuedOn) => setForm((f) => ({ ...f, issuedOn }))}
+            error={errMsg("issuedOn")}
+          />
+          <TextField
+            label={t("expenses.editor.taxableSupplyDate")}
+            placeholder="YYYY-MM-DD"
+            value={form.taxableSupplyOn}
+            onChangeText={(taxableSupplyOn) => setForm((f) => ({ ...f, taxableSupplyOn }))}
+            error={errMsg("taxableSupplyOn")}
+          />
+          <TextField
+            label={t("expenses.editor.dueDate")}
+            placeholder="YYYY-MM-DD"
+            value={form.dueOn}
+            onChangeText={(dueOn) => setForm((f) => ({ ...f, dueOn }))}
+            error={errMsg("dueOn")}
+          />
+        </Section>
+
+        <Section title={t("common.field.amount")}>
+          <SegmentedChoice
+            label={t("common.field.currency")}
+            value={form.currency}
+            choices={COMMON_CURRENCIES.map((c) => ({ value: c, label: c }))}
+            onChange={(currency) => setForm((f) => ({ ...f, currency }))}
+          />
+          <TextField
+            label={t("expenses.editor.gross")}
+            keyboardType="decimal-pad"
+            value={form.total}
+            onChangeText={(total) => setForm((f) => ({ ...f, total }))}
+            error={errMsg("total")}
+            testID="expense-total"
+          />
+
+          <SegmentedChoice<DeductibilityMode>
+            label={local({ cs: "Odpočet DPH", en: "VAT deductibility" })}
+            value={form.deductibilityMode}
+            choices={[
+              { value: "full", label: local({ cs: "100 %", en: "Full (100%)" }) },
+              { value: "partial", label: local({ cs: "Částečný", en: "Partial %" }) },
+              { value: "none", label: local({ cs: "0 %", en: "None (0%)" }) },
+            ]}
+            onChange={(deductibilityMode) => setForm((f) => ({ ...f, deductibilityMode }))}
+          />
+          {form.deductibilityMode !== "partial" ? null : (
+            <TextField
+              label={local({ cs: "Procento odpočtu (1–99)", en: "Deductible % (1–99)" })}
+              keyboardType="number-pad"
+              value={form.deductiblePercent}
+              onChangeText={(deductiblePercent) => setForm((f) => ({ ...f, deductiblePercent }))}
+              error={errMsg("deductiblePercent")}
+            />
+          )}
+        </Section>
+
+        <Section
+          title={t("expenses.editor.vatBreakdown")}
+          action={
+            <Button
+              kind="text"
+              icon={Plus}
+              label={t("expenses.editor.addVatRow")}
+              onPress={() =>
+                setForm((f) => ({
+                  ...f,
+                  vatRows: [
+                    ...f.vatRows,
+                    {
+                      id: `vat-${Date.now()}-${f.vatRows.length}`,
+                      treatment: "standard",
+                      base: "",
+                      vat: "0",
+                    },
+                  ],
+                }))
+              }
+            />
+          }
+        >
+          {form.vatRows.map((row, idx) => (
+            <Card key={row.id}>
+              <SegmentedChoice<VatTreatment>
+                value={row.treatment}
+                choices={EXPENSE_VAT_TREATMENTS.map((tr) => ({
+                  value: tr,
+                  label: t(`enum.vatTreatment.${tr}`),
+                }))}
+                onChange={(treatment) =>
+                  setForm((f) => ({
+                    ...f,
+                    vatRows: f.vatRows.map((r, i) => (i === idx ? { ...r, treatment } : r)),
+                  }))
+                }
+              />
+              <View style={styles.rowFields}>
+                <View style={styles.flex}>
+                  <TextField
+                    label={t("expenses.editor.base")}
+                    keyboardType="decimal-pad"
+                    value={row.base}
+                    onChangeText={(base) =>
+                      setForm((f) => ({
+                        ...f,
+                        vatRows: f.vatRows.map((r, i) => (i === idx ? { ...r, base } : r)),
+                      }))
+                    }
+                    error={errMsg(`vat.${idx}.base`)}
+                  />
+                </View>
+                <View style={styles.flex}>
+                  <TextField
+                    label={t("expenses.editor.vat")}
+                    keyboardType="decimal-pad"
+                    value={row.vat}
+                    onChangeText={(vat) =>
+                      setForm((f) => ({
+                        ...f,
+                        vatRows: f.vatRows.map((r, i) => (i === idx ? { ...r, vat } : r)),
+                      }))
+                    }
+                    error={errMsg(`vat.${idx}.vat`)}
+                  />
+                </View>
+              </View>
+              <Button
+                kind="text"
+                label={t("common.action.remove")}
+                onPress={() =>
+                  setForm((f) => ({ ...f, vatRows: f.vatRows.filter((_, i) => i !== idx) }))
+                }
+              />
+            </Card>
+          ))}
+          {vatDiff !== null && vatDiff !== 0 ? (
+            <Banner
+              tone="warning"
+              text={t("expenses.editor.difference", { amount: `${vatDiff} ${form.currency}` })}
+            />
+          ) : null}
+        </Section>
+
+        <Section title={t("common.field.category")}>
+          <TextField
+            label={t("common.field.category")}
+            value={form.category}
+            onChangeText={(category) => setForm((f) => ({ ...f, category }))}
+          />
+          <TextField
+            label={t("common.field.tags")}
+            supporting={t("expenses.editor.tagsHint")}
+            value={form.tags}
+            onChangeText={(tags) => setForm((f) => ({ ...f, tags }))}
+          />
+          <TextField
+            label={t("common.field.note")}
+            multiline
+            value={form.note}
+            onChangeText={(note) => setForm((f) => ({ ...f, note }))}
+          />
+        </Section>
+      </Screen>
+    );
+  }
+
+  return (
+    <Screen
+      title={t("expenses.editor.title")}
+      back
+      onRefresh={() => {
+        detailRemote.reload();
+        paymentsRemote.reload();
+      }}
+      refreshing={detailRemote.state._tag === "Loading"}
+      actions={
+        loadedDetail === null ? null : (
+          <>
+            <IconButton icon={Edit3} label={t("common.action.edit")} onPress={startEdit} />
+            <IconButton
+              icon={Trash2}
+              label={t("common.action.delete")}
+              onPress={() => void handleDeleteExpense()}
+            />
+          </>
+        )
+      }
+    >
+      {bannerError === null ? null : <Banner text={bannerError} />}
+
+      <RemoteView state={detailRemote.state} onRetry={detailRemote.reload}>
+        {(raw) => {
+          const detail = decodeExpenseDetail(raw);
+          const totalLabel =
+            detail.total !== null && detail.currency !== null
+              ? formatMoney(locale, {
+                  amount: detail.total,
+                  currency: detail.currency as CurrencyCode,
+                })
+              : (detail.total ?? "—");
+          const czkLabel =
+            detail.totalCzk !== null && detail.currency !== "CZK"
+              ? formatMoney(locale, { amount: detail.totalCzk, currency: "CZK" as CurrencyCode })
+              : null;
+
+          return (
+            <>
+              <Card>
+                <View style={styles.headerRow}>
+                  <Text variant="headlineSmall" style={styles.flex}>
+                    {detail.supplier?.name ??
+                      detail.supplierDocumentNumber ??
+                      local({ cs: "Neúplný náklad", en: "Incomplete expense" })}
+                  </Text>
+                  <Badge
+                    label={t(`enum.expenseStatus.${detail.status}`)}
+                    tone={detail.status === "complete" ? "info" : "warning"}
+                  />
+                </View>
+                <Text variant="titleLarge" numeric>
+                  {totalLabel}
+                </Text>
+                {czkLabel === null ? null : (
+                  <Text variant="meta" color="onSurfaceVariant" numeric>
+                    {t("expenses.editor.czkEquivalent", { amount: czkLabel })}
+                  </Text>
+                )}
+                <View style={styles.badges}>
+                  <Badge
+                    label={t(`enum.settlement.${detail.payment.settlement}`)}
+                    tone={settlementTone(detail.payment.settlement)}
+                  />
+                  <Badge
+                    label={`${local({ cs: "Odpočet DPH", en: "Deductible" })}: ${deductibilityPercent(detail.deductibility)} %`}
+                    tone="neutral"
+                  />
+                </View>
+                {detail.supplierDocumentNumber === null ? null : (
+                  <Text variant="bodyMedium" color="onSurfaceVariant">
+                    {t("expenses.editor.number")}: {detail.supplierDocumentNumber}
+                  </Text>
+                )}
+                {detail.issuedOn === null ? null : (
+                  <Text variant="bodyMedium" color="onSurfaceVariant">
+                    {t("expenses.editor.issueDate")}: {formatDate(locale, detail.issuedOn)}
+                  </Text>
+                )}
+                {detail.dueOn === null ? null : (
+                  <Text variant="bodyMedium" color="onSurfaceVariant">
+                    {t("expenses.editor.dueDate")}: {formatDate(locale, detail.dueOn)}
+                  </Text>
+                )}
+                {detail.category === null ? null : (
+                  <Text variant="bodyMedium" color="onSurfaceVariant">
+                    {t("common.field.category")}: {detail.category}
+                  </Text>
+                )}
+                {detail.note === null ? null : <Text variant="bodyMedium">{detail.note}</Text>}
+              </Card>
+
+              {detail.buckets.length === 0 ? null : (
+                <Section title={t("expenses.editor.vatBreakdown")}>
+                  {detail.buckets.map((b) => (
+                    <ListRow
+                      key={`${b.treatment}-${b.ratePercent}`}
+                      title={`${t(`enum.vatTreatment.${b.treatment}`)} (${b.ratePercent} %)`}
+                      subtitle={`${t("expenses.editor.base")}: ${b.base} · ${t("expenses.editor.vat")}: ${b.vat}`}
+                      trailing={
+                        detail.currency !== null
+                          ? formatMoney(locale, {
+                              amount: b.gross,
+                              currency: detail.currency as CurrencyCode,
+                            })
+                          : b.gross
+                      }
+                    />
+                  ))}
+                </Section>
+              )}
+
+              <Section
+                title={t("enum.scopeArea.payments")}
+                action={
+                  <Button
+                    kind="tonal"
+                    label={
+                      detail.payment.settlement === "unpaid"
+                        ? t("expenses.detail.markPaid")
+                        : t("expenses.detail.partialPayment")
+                    }
+                    onPress={() => openPaymentEditor(detail)}
+                    testID="expense-record-payment-toggle"
+                  />
+                }
+              >
+                {!showPaymentForm ? null : (
+                  <Card>
+                    <TextField
+                      label={t("common.field.amount")}
+                      keyboardType="decimal-pad"
+                      value={payAmount}
+                      onChangeText={setPayAmount}
+                    />
+                    <TextField
+                      label={t("common.field.date")}
+                      placeholder="YYYY-MM-DD"
+                      value={payDate}
+                      onChangeText={setPayDate}
+                    />
+                    <SegmentedChoice<PaymentMethod>
+                      value={payMethod}
+                      choices={PAYMENT_METHODS.map((m) => ({
+                        value: m,
+                        label: t(`enum.paymentMethod.${m}`),
+                      }))}
+                      onChange={setPayMethod}
+                    />
+                    <TextField
+                      label={t("common.field.note")}
+                      value={payNote}
+                      onChangeText={setPayNote}
+                    />
+                    <View style={styles.rowActions}>
+                      <Button
+                        kind="text"
+                        label={t("common.action.cancel")}
+                        onPress={() => setShowPaymentForm(false)}
+                      />
+                      <Button
+                        label={t("common.action.confirm")}
+                        busy={payBusy}
+                        onPress={() => void handleRecordPayment(detail)}
+                        testID="expense-record-payment-submit"
+                      />
+                    </View>
+                  </Card>
+                )}
+
+                <RemoteView state={paymentsRemote.state} onRetry={paymentsRemote.reload}>
+                  {(rawPayments) => {
+                    const payments = rawPayments
+                      .map(decodePayment)
+                      .filter((p): p is NonNullable<typeof p> => p !== null);
+                    if (payments.length === 0) {
+                      return (
+                        <Text variant="meta" color="onSurfaceVariant">
+                          {t("common.state.none")}
+                        </Text>
+                      );
+                    }
+                    return (
+                      <>
+                        {payments.map((p) => (
+                          <Card key={p.id}>
+                            <View style={styles.headerRow}>
+                              <View style={styles.flex}>
+                                <Text variant="row" numeric>
+                                  {formatMoney(locale, p.amount)}
+                                </Text>
+                                <Text variant="meta" color="onSurfaceVariant">
+                                  {formatDate(locale, p.paidOn)} ·{" "}
+                                  {t(`enum.paymentMethod.${p.method}`)}
+                                </Text>
+                                {p.note === null ? null : <Text variant="bodySmall">{p.note}</Text>}
+                              </View>
+                              <IconButton
+                                icon={Trash2}
+                                label={t("common.action.remove")}
+                                onPress={() => void handleRemovePayment(p.id)}
+                              />
+                            </View>
+                          </Card>
+                        ))}
+                      </>
+                    );
+                  }}
+                </RemoteView>
+              </Section>
+
+              <Section
+                title={t("expenses.detail.attachments")}
+                action={
+                  <Button
+                    kind="outlined"
+                    icon={Upload}
+                    label={
+                      uploading
+                        ? t("common.state.uploadingPercent", { percent: uploadProgress })
+                        : t("expenses.detail.addFiles")
+                    }
+                    busy={uploading}
+                    onPress={() => void handleAddAttachment()}
+                    testID="expense-add-attachment"
+                  />
+                }
+              >
+                {detail.attachments.length === 0 ? (
+                  <Text variant="meta" color="onSurfaceVariant">
+                    {t("common.state.none")}
+                  </Text>
+                ) : (
+                  detail.attachments.map((att) => (
+                    <Card key={att.id}>
+                      <View style={styles.headerRow}>
+                        <Paperclip size={18} />
+                        <View style={styles.flex}>
+                          <Text variant="row" numberOfLines={1}>
+                            {att.name}
+                          </Text>
+                          <Text variant="meta" color="onSurfaceVariant">
+                            {att.contentType} · {formatBytes(att.bytes)}
+                          </Text>
+                        </View>
+                      </View>
+                      <View style={styles.rowActions}>
+                        <Button
+                          kind="tonal"
+                          icon={Download}
+                          label={t("common.action.open")}
+                          busy={transferBusyId === att.id}
+                          onPress={() => void handleAttachmentAction(att, "open")}
+                          testID={`attachment-open-${att.id}`}
+                        />
+                        <Button
+                          kind="outlined"
+                          icon={Share2}
+                          label={t("common.action.share")}
+                          disabled={transferBusyId === att.id}
+                          onPress={() => void handleAttachmentAction(att, "share")}
+                          testID={`attachment-share-${att.id}`}
+                        />
+                        <IconButton
+                          icon={Trash2}
+                          label={t("expenses.attachmentViewer.detach")}
+                          onPress={() => void handleDetachAttachment(att)}
+                        />
+                      </View>
+                    </Card>
+                  ))
+                )}
+              </Section>
+            </>
+          );
+        }}
+      </RemoteView>
+    </Screen>
+  );
+}
+
+const styles = StyleSheet.create({
+  flex: { flex: 1 },
+  headerRow: { flexDirection: "row", alignItems: "center", gap: space.sm },
+  badges: { flexDirection: "row", flexWrap: "wrap", gap: space.sm },
+  rowFields: { flexDirection: "row", gap: space.sm },
+  rowActions: { flexDirection: "row", flexWrap: "wrap", gap: space.sm, justifyContent: "flex-end" },
+});

@@ -1,5 +1,5 @@
-import { Placeholder } from "../../../../src/ui/placeholder";
+import { TemplatesListScreen } from "../../../../src/features/templates/templates-list-screen";
 
 export default function Route() {
-  return <Placeholder title="Templates" />;
+  return <TemplatesListScreen />;
 }

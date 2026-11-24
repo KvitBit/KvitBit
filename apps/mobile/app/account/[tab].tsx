@@ -1,5 +1,8 @@
-import { Placeholder } from "../../src/ui/placeholder";
+import { useLocalSearchParams } from "expo-router";
+import { AccountScreen, parseAccountTab } from "../../src/features/account/account-screen";
+import { param } from "../../src/navigation/routes";
 
-export default function Route() {
-  return <Placeholder title="Account" />;
+export default function AccountRoute() {
+  const params = useLocalSearchParams<{ readonly tab?: string | string[] }>();
+  return <AccountScreen tab={parseAccountTab(param(params.tab))} />;
 }
