@@ -10,6 +10,7 @@ FROM oven/bun:${BUN_VERSION}-debian AS builder
 WORKDIR /app
 
 COPY package.json bun.lock tsconfig.base.json turbo.json ./
+COPY assets ./assets
 COPY packages ./packages
 COPY infra/alchemy/package.json ./infra/alchemy/package.json
 COPY apps ./apps

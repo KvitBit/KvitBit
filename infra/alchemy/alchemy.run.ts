@@ -3,7 +3,7 @@ import * as Alchemy from "alchemy";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import { loadStackConfig } from "./src/config";
-import { declareKvitbitEdge } from "./src/resources/edge";
+import { declareKvitbitEdge, declareTokenRouteLogExclusion } from "./src/resources/edge";
 import { EdgeBackendServiceProvider } from "./src/resources/edge-backend-service";
 import { EdgeSecurityPolicyProvider } from "./src/resources/edge-security-policy";
 import { declareFoundation } from "./src/resources/foundation";
@@ -41,10 +41,25 @@ export default Alchemy.Stack(
     const config = yield* stackConfig;
 
     const foundation = yield* declareFoundation(config);
+    const tokenRouteExclusion = yield* declareTokenRouteLogExclusion(config);
+
+    if (config.bootstrapFoundation) {
+      return {
+        stage: config.stage,
+        bootstrapFoundation: true as const,
+        projectId: config.projectId,
+        region: config.region,
+        repository: foundation.repositoryName,
+        blobsBucket: foundation.blobsBucketName,
+        mobileAssetsBucket: foundation.mobileAssetsBucketName,
+        tokenRouteExclusion,
+      };
+    }
 
     const network = yield* declareNetworkAndRunners(config, {
       runnerServiceAccountEmail: foundation.runnerServiceAccountEmail,
       blobsBucketName: config.blobsBucket,
+      runnerDependencies: foundation.runnerDependencies,
     });
 
     const server = yield* declareServerService(config, {
@@ -53,6 +68,7 @@ export default Alchemy.Stack(
       blobsBucketName: config.blobsBucket,
       mobileAssetsBucketName: config.mobileAssetsBucket,
       serverServiceAccountEmail: foundation.serverServiceAccountEmail,
+      serverDependencies: [...foundation.serverDependencies, ...network.networkReadyDependencies],
     });
 
     const edge =
@@ -62,6 +78,7 @@ export default Alchemy.Stack(
 
     return {
       stage: config.stage,
+      bootstrapFoundation: false as const,
       projectId: config.projectId,
       region: config.region,
       repository: foundation.repositoryName,
@@ -72,6 +89,7 @@ export default Alchemy.Stack(
       runners: network.runnerNames,
       serverService: server.serviceName,
       serverUri: server.serviceUri,
+      tokenRouteExclusion,
       edge,
     };
   }),

@@ -86,6 +86,10 @@
             };
           };
 
+          ociWritableDirs = pkgs.runCommand "kvitbit-oci-dirs" { } ''
+            mkdir -p $out/var/lib/kvitbit/blobs $out/var/lib/kvitbit/mobile
+          '';
+
           ociImage = n2c.buildImage {
             name = "kvitbit";
             tag = "latest";
@@ -93,6 +97,7 @@
               name = "kvitbit-oci-root";
               paths = [
                 server
+                ociWritableDirs
                 pkgs.bun
                 pkgs.chromium
                 pkgs.tini
@@ -106,8 +111,18 @@
                 "/etc"
                 "/lib"
                 "/share"
+                "/var"
               ];
             };
+            perms = [
+              {
+                path = ociWritableDirs;
+                regex = ".*";
+                mode = "0750";
+                uid = 10001;
+                gid = 10001;
+              }
+            ];
             config = {
               User = "10001:10001";
               ExposedPorts = {
@@ -183,7 +198,13 @@
               environmentFile = lib.mkOption {
                 type = lib.types.nullOr lib.types.path;
                 default = null;
-                description = "Path to an EnvironmentFile containing secrets (DATABASE_URL, DATABASE_URL_UNPOOLED, BETTER_AUTH_SECRET, RESEND_API_KEY, KVITBIT_SMTP_URL, KVITBIT_MOBILE_UPDATES_SIGNING_KEY).";
+                description = "Path to an EnvironmentFile containing DML-only runtime secrets for the kvitbit server unit (DATABASE_URL with DML-only app role, BETTER_AUTH_SECRET, RESEND_API_KEY, KVITBIT_SMTP_URL, KVITBIT_MOBILE_UPDATES_SIGNING_KEY). Never include migration owner credentials here.";
+              };
+
+              migrationEnvironmentFile = lib.mkOption {
+                type = lib.types.nullOr lib.types.path;
+                default = null;
+                description = "Path to an EnvironmentFile containing owner-role migration credentials (DATABASE_URL_UNPOOLED) used exclusively by the kvitbit-migrate oneshot unit (core-ports.md S5). Never passed to the runtime kvitbit server unit.";
               };
 
               stateDir = lib.mkOption {
@@ -295,7 +316,7 @@
                   User = "kvitbit";
                   Group = "kvitbit";
                   ExecStart = "${cfg.package}/bin/kvitbit migrate";
-                  EnvironmentFile = lib.optional (cfg.environmentFile != null) cfg.environmentFile;
+                  EnvironmentFile = lib.optional (cfg.migrationEnvironmentFile != null) cfg.migrationEnvironmentFile;
                   NoNewPrivileges = true;
                   PrivateTmp = true;
                   ProtectSystem = "strict";

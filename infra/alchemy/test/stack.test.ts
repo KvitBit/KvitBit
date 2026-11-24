@@ -1,8 +1,14 @@
 import { describe, expect, test } from "bun:test";
-import { readdirSync, readFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import * as Output from "alchemy/Output";
+import * as Stack from "alchemy/Stack";
+import { Stage } from "alchemy/Stage";
+import * as State from "alchemy/State";
 import * as ConfigProvider from "effect/ConfigProvider";
 import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
 import {
   defaultSecretBindings,
   imageReference,
@@ -14,6 +20,8 @@ import {
 } from "../src/config";
 import { runnerPlainEnv, serverPlainEnv, serverSecretEnv } from "../src/env";
 import {
+  declareKvitbitEdge,
+  declareTokenRouteLogExclusion,
   edgeDynamicBackendProps,
   edgeObjectNames,
   edgeSecurityPolicyProps,
@@ -21,10 +29,12 @@ import {
   edgeStaticBackendProps,
   edgeUrlMapProps,
   tokenRouteExclusionFilter,
+  tokenRoutePatterns,
 } from "../src/resources/edge";
 import {
   artifactRepositoryProps,
   blobsBucketProps,
+  declareFoundation,
   mobileAssetsBucketProps,
   secretAccessorGrants,
   secretDeclarations,
@@ -32,18 +42,20 @@ import {
 import {
   buildRunnerStartupScript,
   COS_STABLE_IMAGE,
+  declareNetworkAndRunners,
   networkProps,
   routerProps,
   runnerFirewallProps,
   runnerInstanceProps,
   subnetworkProps,
 } from "../src/resources/network";
-import { serverServiceProps } from "../src/resources/server";
+import { declareServerService, serverServiceProps } from "../src/resources/server";
 
 const SAMPLE_DIGEST = `sha256:${"a".repeat(64)}`;
 
 const sampleProdConfig = (overrides: Partial<KvitbitStackConfig> = {}): KvitbitStackConfig => ({
   stage: "prod",
+  bootstrapFoundation: false,
   projectId: KVITBIT_PROD_DEFAULTS.projectId,
   projectNumber: KVITBIT_PROD_DEFAULTS.projectNumber,
   region: KVITBIT_PROD_DEFAULTS.region,
@@ -105,7 +117,7 @@ describe("Kvitbit Alchemy stack config", () => {
     );
   });
 
-  test("enables HTTPS edge and bumps trustedProxyHops when KVITBIT_EDGE_DOMAINS is set", async () => {
+  test("enables HTTPS edge, restricts direct Cloud Run ingress by default, and bumps trustedProxyHops when KVITBIT_EDGE_DOMAINS is set", async () => {
     const provider = ConfigProvider.fromEnv({
       env: {
         KVITBIT_IMAGE_DIGEST: SAMPLE_DIGEST,
@@ -117,7 +129,32 @@ describe("Kvitbit Alchemy stack config", () => {
     );
     expect(config.edge?.domains).toEqual(["kvitbit.cz", "kvitbit.app"]);
     expect(config.edge?.enableHttps).toBe(true);
+    expect(config.edge?.restrictDirectIngress).toBe(true);
     expect(config.trustedProxyHops).toBe(2);
+  });
+
+  test("handles empty GitHub Actions vars, optional secret flags, and bootstrapFoundation mode", async () => {
+    const provider = ConfigProvider.fromEnv({
+      env: {
+        KVITBIT_BOOTSTRAP_FOUNDATION: "true",
+        KVITBIT_RUNNER_COUNT: "",
+        KVITBIT_ENABLE_RESEND_SECRET: "true",
+        KVITBIT_ENABLE_SMTP_SECRET: "",
+        KVITBIT_ENABLE_MOBILE_SIGNING_KEY_SECRET: "true",
+      },
+    });
+    const config = await Effect.runPromise(
+      loadStackConfig.pipe(Effect.provide(ConfigProvider.layer(provider))),
+    );
+    expect(config.bootstrapFoundation).toBe(true);
+    expect(config.imageDigest).toBe("");
+    expect(config.runnerCount).toBe(KVITBIT_PROD_DEFAULTS.runnerCount);
+    const secretIds = config.secrets.map((s) => s.secretId);
+    expect(secretIds).toContain("kvitbit-prod-database-url");
+    expect(secretIds).toContain("kvitbit-prod-runner-database-url-unpooled");
+    expect(secretIds).toContain("kvitbit-prod-resend-api-key");
+    expect(secretIds).toContain("kvitbit-prod-mobile-updates-signing-key");
+    expect(secretIds).not.toContain("kvitbit-prod-smtp-url");
   });
 
   test("rejects mutable image tags, cross-region zones, and out-of-range runnerCount", async () => {
@@ -158,6 +195,7 @@ describe("Foundation resources", () => {
 
     const secrets = secretDeclarations(config);
     expect(secrets.map((s) => s.secretId)).toContain("kvitbit-prod-database-url");
+    expect(secrets.map((s) => s.secretId)).toContain("kvitbit-prod-runner-database-url-unpooled");
     expect(secrets.map((s) => s.secretId)).toContain("kvitbit-prod-better-auth-secret");
 
     const grants = secretAccessorGrants(config);
@@ -167,6 +205,128 @@ describe("Foundation resources", () => {
     expect(mobileSigningGrants.map((g) => g.workload)).toEqual(["server"]);
     const dbGrants = grants.filter((g) => g.secretId === "kvitbit-prod-database-url");
     expect(dbGrants.map((g) => g.workload).sort()).toEqual(["runner", "server"]);
+    const runnerUnpooledGrants = grants.filter(
+      (g) => g.secretId === "kvitbit-prod-runner-database-url-unpooled",
+    );
+    expect(runnerUnpooledGrants.map((g) => g.workload)).toEqual(["runner"]);
+  });
+
+  test("constructs the full Alchemy stack with real Output proxies without coercion errors and wires explicit DAG dependencies", async () => {
+    const config = sampleProdConfig({ edge: undefined });
+
+    const compileHermetic = <A, E, R>(
+      name: string,
+      program: Effect.Effect<A, E, R>,
+    ): Promise<Stack.CompiledStack<A, unknown>> => {
+      const makeStack = Stack.make({
+        name,
+        state: State.inMemoryState(),
+        providers: Layer.empty,
+      }) as <Out>(
+        eff: Effect.Effect<Out, E, R>,
+      ) => Effect.Effect<Stack.CompiledStack<Out, unknown>, E, unknown>;
+
+      return Effect.runPromise(
+        Effect.scoped(makeStack(program)).pipe(
+          Effect.provide(Layer.succeed(Stage, "prod")),
+        ) as Effect.Effect<Stack.CompiledStack<A, unknown>, E, never>,
+      );
+    };
+
+    const compiled = await compileHermetic(
+      "KvitbitTest",
+      Effect.gen(function* () {
+        const foundation = yield* declareFoundation(config);
+        const tokenRouteExclusion = yield* declareTokenRouteLogExclusion(config);
+        const network = yield* declareNetworkAndRunners(config, {
+          runnerServiceAccountEmail: foundation.runnerServiceAccountEmail,
+          blobsBucketName: config.blobsBucket,
+          runnerDependencies: foundation.runnerDependencies,
+        });
+        const server = yield* declareServerService(config, {
+          networkName: network.networkName,
+          subnetworkName: network.subnetworkName,
+          blobsBucketName: config.blobsBucket,
+          mobileAssetsBucketName: config.mobileAssetsBucket,
+          serverServiceAccountEmail: foundation.serverServiceAccountEmail,
+          serverDependencies: [
+            ...foundation.serverDependencies,
+            ...network.networkReadyDependencies,
+          ],
+        });
+        return { foundation, tokenRouteExclusion, network, server };
+      }),
+    );
+
+    const resourceIds = Object.keys(compiled.resources);
+    // Token-route log exclusion is installed unconditionally even when edge is disabled
+    expect(resourceIds).toContain("EdgeTokenRouteExclusion");
+
+    const runner0 = compiled.resources.KvitbitRunner0;
+    const serverRes = compiled.resources.KvitbitServer;
+    expect(runner0).toBeDefined();
+    expect(serverRes).toBeDefined();
+
+    const runnerUpstreams = Object.keys(Output.upstreamAny(runner0?.Props));
+    expect(runnerUpstreams).toEqual(
+      expect.arrayContaining([
+        "KvitbitRunnerSubnet",
+        "KvitbitRouter",
+        "KvitbitRunnerClusterIngress",
+        "RunnerBlobsAdmin",
+        "RunnerArtifactReader",
+        "SecretAccess-kvitbit-prod-database-url-runner",
+        "SecretAccess-kvitbit-prod-runner-database-url-unpooled-runner",
+        "SecretAccess-kvitbit-prod-better-auth-secret-runner",
+      ]),
+    );
+
+    const serverUpstreams = Object.keys(Output.upstreamAny(serverRes?.Props));
+    expect(serverUpstreams).toEqual(
+      expect.arrayContaining([
+        "KvitbitRunnerSubnet",
+        "KvitbitRouter",
+        "KvitbitRunnerClusterIngress",
+        "ServerBlobsAdmin",
+        "ServerMobileAssetsViewer",
+        "SecretAccess-kvitbit-prod-database-url-server",
+        "SecretAccess-kvitbit-prod-better-auth-secret-server",
+      ]),
+    );
+    expect(serverUpstreams).not.toContain(
+      "SecretAccess-kvitbit-prod-runner-database-url-unpooled-server",
+    );
+
+    // Also verify edge construction with real Outputs produces zero coercion exceptions
+    const edgeConfig = sampleProdConfig();
+    const compiledWithEdge = await compileHermetic(
+      "KvitbitEdgeTest",
+      Effect.gen(function* () {
+        const foundation = yield* declareFoundation(edgeConfig);
+        const network = yield* declareNetworkAndRunners(edgeConfig, {
+          runnerServiceAccountEmail: foundation.runnerServiceAccountEmail,
+          blobsBucketName: edgeConfig.blobsBucket,
+          runnerDependencies: foundation.runnerDependencies,
+        });
+        const server = yield* declareServerService(edgeConfig, {
+          networkName: network.networkName,
+          subnetworkName: network.subnetworkName,
+          blobsBucketName: edgeConfig.blobsBucket,
+          mobileAssetsBucketName: edgeConfig.mobileAssetsBucket,
+          serverServiceAccountEmail: foundation.serverServiceAccountEmail,
+          serverDependencies: [
+            ...foundation.serverDependencies,
+            ...network.networkReadyDependencies,
+          ],
+        });
+        const edge =
+          edgeConfig.edge === undefined
+            ? undefined
+            : yield* declareKvitbitEdge(edgeConfig, edgeConfig.edge, server.serviceId);
+        return { edge };
+      }),
+    );
+    expect(Object.keys(compiledWithEdge.resources)).toContain("EdgeSecurityPolicy");
   });
 });
 
@@ -202,20 +362,48 @@ describe("Pure-Alchemy Compute Engine runner pool (#908)", () => {
     expect(vm.tags).toEqual([names.runnerTag]);
   });
 
-  test("startup script runs Kvitbit image in worker mode with full KVITBIT_* env, Chromium, and Secret Manager boot fetch", () => {
+  test("startup script configures COS host iptables, systemd digest reconciliation, backoff retries, and S5 runner DB secrets", () => {
     const config = sampleProdConfig();
     const script = buildRunnerStartupScript(config);
 
+    // Valid bash syntax
+    const syntaxCheck = Bun.spawnSync(["bash", "-n"], {
+      stdin: new TextEncoder().encode(script),
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    expect(syntaxCheck.exitCode).toBe(0);
+
     expect(script).toContain("network-interfaces/0/ip");
-    expect(script).toContain("docker run --rm --name kvitbit-worker --network host");
-    expect(script).toContain(`${imageReference(config)} worker`);
+    expect(script).toContain(
+      'iptables -C INPUT -s "$RUNNER_CIDR" -p tcp --dport "$RUNNER_PORT" -j ACCEPT',
+    );
+    expect(script).toContain(
+      'iptables -I INPUT -s "$RUNNER_CIDR" -p tcp --dport "$RUNNER_PORT" -j ACCEPT',
+    );
+    expect(script).toContain("kvitbit-worker-reconcile.timer");
+    expect(script).toContain("instance/attributes/kvitbit-image-ref");
+    expect(script).toContain("instance/attributes/kvitbit-image-digest");
+    expect(script).toContain("guest-attributes/kvitbit/active-digest");
+    expect(script).toContain("retry_with_backoff");
     expect(script).toContain("secretmanager.googleapis.com/v1/projects/kvitbit-prod/secrets/");
     expect(script).toContain("fetch_secret 'DATABASE_URL' 'kvitbit-prod-database-url'");
+    expect(script).toContain(
+      "fetch_secret 'DATABASE_URL_UNPOOLED' 'kvitbit-prod-runner-database-url-unpooled'",
+    );
     expect(script).toContain("fetch_secret 'BETTER_AUTH_SECRET' 'kvitbit-prod-better-auth-secret'");
     expect(script).toContain("'KVITBIT_RUNNER_MODE' 'cluster'");
     expect(script).toContain("'KVITBIT_BLOB_DRIVER' 'gcs'");
     expect(script).toContain("'KVITBIT_CHROMIUM_PATH' '/usr/bin/chromium'");
     expect(script).toContain("'PORT' '34431'");
+
+    const vm = runnerInstanceProps(config, 0, {
+      network: "vpc",
+      subnetwork: "subnet",
+    });
+    expect(vm.metadata?.["kvitbit-image-ref"]).toBe(imageReference(config));
+    expect(vm.metadata?.["kvitbit-image-digest"]).toBe(config.imageDigest);
+    expect(vm.metadata?.["enable-guest-attributes"]).toBe("TRUE");
 
     const runnerEnvNames = runnerPlainEnv(config, config.blobsBucket).map((e) => e.name);
     expect(runnerEnvNames).toEqual(
@@ -231,6 +419,181 @@ describe("Pure-Alchemy Compute Engine runner pool (#908)", () => {
         "EMAIL_FROM",
       ]),
     );
+  });
+
+  test("reconcile script rolls out new digest, skips no-op ticks, opens iptables idempotently, and retries transient failures", () => {
+    const config = sampleProdConfig();
+    const startup = buildRunnerStartupScript(config);
+    const match = startup.match(
+      /cat <<'RECONCILE' > \/var\/lib\/kvitbit\/reconcile-worker\.sh\n([\s\S]*?)\nRECONCILE\n/,
+    );
+    expect(match?.[1]).toBeDefined();
+
+    const sandbox = mkdtempSync(join(tmpdir(), "kvitbit-reconcile-"));
+    try {
+      const binDir = join(sandbox, "bin");
+      const runDir = join(sandbox, "run");
+      const stateDir = join(sandbox, "state");
+      Bun.spawnSync(["mkdir", "-p", binDir, runDir, stateDir]);
+
+      // Rewrite /run/kvitbit to sandboxed runDir for hermetic execution
+      const reconcileScript = (match?.[1] ?? "").replaceAll("/run/kvitbit", runDir);
+      const scriptPath = join(sandbox, "reconcile-worker.sh");
+      writeFileSync(scriptPath, reconcileScript);
+      chmodSync(scriptPath, 0o755);
+
+      const digest1 = SAMPLE_DIGEST;
+      const digest2 = `sha256:${"b".repeat(64)}`;
+      const ref1 = `europe-west3-docker.pkg.dev/kvitbit-prod/kvitbit/kvitbit@${digest1}`;
+      const ref2 = `europe-west3-docker.pkg.dev/kvitbit-prod/kvitbit/kvitbit@${digest2}`;
+      writeFileSync(join(stateDir, "target-ref"), ref1);
+      writeFileSync(join(stateDir, "target-digest"), digest1);
+      writeFileSync(join(stateDir, "fail-once"), "1");
+
+      // Stub sleep (no-op for fast retry test)
+      writeFileSync(join(binDir, "sleep"), "#!/bin/sh\nexit 0\n");
+      chmodSync(join(binDir, "sleep"), 0o755);
+
+      // Stub iptables (tracks whether rule is installed)
+      writeFileSync(
+        join(binDir, "iptables"),
+        `#!/bin/sh
+set -eu
+RULE_FILE="${stateDir}/iptables-rule"
+if [ "$1" = "-C" ]; then
+  [ -f "$RULE_FILE" ]
+  exit $?
+elif [ "$1" = "-I" ]; then
+  echo "$*" > "$RULE_FILE"
+  echo "iptables:$*" >> "${stateDir}/log"
+  exit 0
+fi
+exit 1
+`,
+      );
+      chmodSync(join(binDir, "iptables"), 0o755);
+
+      // Stub curl (simulates metadata, transient failure on first metadata call, Secret Manager, and guest attributes PUT)
+      writeFileSync(
+        join(binDir, "curl"),
+        `#!/bin/sh
+set -eu
+URL=""
+DATA=""
+METHOD="GET"
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -X) METHOD="$2"; shift 2 ;;
+    --data) DATA="$2"; shift 2 ;;
+    -H|--connect-timeout|--max-time) shift 2 ;;
+    -*) shift ;;
+    *) URL="$1"; shift ;;
+  esac
+done
+
+if [ "$METHOD" = "PUT" ]; then
+  printf '%s' "$DATA" > "${stateDir}/guest-active-digest"
+  exit 0
+fi
+
+case "$URL" in
+  *"network-interfaces/0/ip")
+    if [ -f "${stateDir}/fail-once" ]; then
+      rm -f "${stateDir}/fail-once"
+      exit 22
+    fi
+    printf '10.42.0.10'
+    ;;
+  *"service-accounts/default/token")
+    printf '{"access_token":"tok-123","expires_in":3600}'
+    ;;
+  *"attributes/kvitbit-image-ref")
+    cat "${stateDir}/target-ref"
+    ;;
+  *"attributes/kvitbit-image-digest")
+    cat "${stateDir}/target-digest"
+    ;;
+  *"secretmanager.googleapis.com"*)
+    SECRET_VAL="$(printf '%s' "secret-val" | base64 | tr -d '\\n')"
+    printf '{"payload":{"data":"%s"}}' "$SECRET_VAL"
+    ;;
+  *)
+    exit 1
+    ;;
+esac
+`,
+      );
+      chmodSync(join(binDir, "curl"), 0o755);
+
+      // Stub docker
+      writeFileSync(
+        join(binDir, "docker"),
+        `#!/bin/sh
+set -eu
+case "$1" in
+  inspect)
+    if [ -f "${stateDir}/running-digest" ]; then
+      printf 'true|%s' "$(cat "${stateDir}/running-digest")"
+    fi
+    ;;
+  login)
+    cat >/dev/null
+    echo "docker:login" >> "${stateDir}/log"
+    ;;
+  pull)
+    echo "docker:pull:$2" >> "${stateDir}/log"
+    ;;
+esac
+`,
+      );
+      chmodSync(join(binDir, "docker"), 0o755);
+
+      // Stub systemctl (activates target digest as running)
+      writeFileSync(
+        join(binDir, "systemctl"),
+        `#!/bin/sh
+set -eu
+echo "systemctl:$*" >> "${stateDir}/log"
+. "${runDir}/worker-target.env"
+printf '%s' "$KVITBIT_WORKER_DIGEST" > "${stateDir}/running-digest"
+`,
+      );
+      chmodSync(join(binDir, "systemctl"), 0o755);
+
+      const env = { PATH: `${binDir}:${process.env.PATH ?? "/usr/bin:/bin"}` };
+
+      // 1. Initial boot reconcile (survives transient metadata failure, installs iptables, pulls & starts digest1)
+      const first = Bun.spawnSync(["bash", scriptPath], { env, stdout: "pipe", stderr: "pipe" });
+      expect(first.exitCode).toBe(0);
+      expect(readFileSync(join(stateDir, "guest-active-digest"), "utf8")).toBe(digest1);
+      expect(readFileSync(join(runDir, "worker.env"), "utf8")).toContain(
+        "DATABASE_URL_UNPOOLED=secret-val",
+      );
+      expect(readFileSync(join(stateDir, "iptables-rule"), "utf8")).toContain("10.42.0.0/20");
+
+      const logAfterFirst = readFileSync(join(stateDir, "log"), "utf8");
+      expect(logAfterFirst).toContain("systemctl:restart kvitbit-worker.service");
+
+      // 2. Second reconcile with same digest is a no-op (no restart, no duplicate iptables insert)
+      const second = Bun.spawnSync(["bash", scriptPath], { env, stdout: "pipe", stderr: "pipe" });
+      expect(second.exitCode).toBe(0);
+      expect(readFileSync(join(stateDir, "log"), "utf8")).toBe(logAfterFirst);
+
+      // 3. Metadata digest update triggers pull + restart + updated guest-attribute publication
+      writeFileSync(join(stateDir, "target-ref"), ref2);
+      writeFileSync(join(stateDir, "target-digest"), digest2);
+      const third = Bun.spawnSync(["bash", scriptPath], { env, stdout: "pipe", stderr: "pipe" });
+      expect(third.exitCode).toBe(0);
+      expect(readFileSync(join(stateDir, "guest-active-digest"), "utf8")).toBe(digest2);
+      const logAfterThird = readFileSync(join(stateDir, "log"), "utf8");
+      expect(logAfterThird).toContain(`docker:pull:${ref2}`);
+      expect(
+        logAfterThird.split("\n").filter((l) => l === "systemctl:restart kvitbit-worker.service")
+          .length,
+      ).toBe(2);
+    } finally {
+      rmSync(sandbox, { recursive: true, force: true });
+    }
   });
 });
 
@@ -299,6 +662,8 @@ describe("Cloud Run server service", () => {
     ]) {
       expect(secretNames).toContain(requiredSecret);
     }
+    // S5: Cloud Run server never receives runner direct-connection credentials
+    expect(secretNames).not.toContain("DATABASE_URL_UNPOOLED");
   });
 });
 
@@ -330,7 +695,41 @@ describe("Pure-Alchemy Edge (Cloud Armor + Cloud CDN + Token Log Exclusion)", ()
     expect(urlMap.pathMatchers[0]?.pathRules[0]?.paths).toEqual([...edgeStaticAssetPaths]);
 
     expect(tokenRouteExclusionFilter).toContain("/i/[^/?#]+");
+    expect(tokenRouteExclusionFilter).toContain("/invite/[^/?#]+");
+    expect(tokenRouteExclusionFilter).toContain("/api/v1/share/[^/?#]+");
+    expect(tokenRouteExclusionFilter).toContain("/api/v1/invitations/[^/?#]+");
     expect(tokenRouteExclusionFilter).toContain("/api/auth/magic-link/verify");
+
+    // Behavioral regex check against real token-bearing and non-token URLs
+    const regexMatch = tokenRouteExclusionFilter.match(/httpRequest\.requestUrl=~"([^"]+)"/);
+    expect(regexMatch?.[1]).toBeDefined();
+    const pattern = new RegExp(regexMatch?.[1] ?? "");
+
+    for (const url of [
+      "https://kvitbit.cz/i/tok123",
+      "https://kvitbit.cz/i/tok123?download=1",
+      "https://kvitbit.cz/invite/inv456",
+      "https://kvitbit.cz/api/v1/share/tok123",
+      "https://kvitbit.cz/api/v1/share/tok123/pdf",
+      "https://kvitbit.cz/api/v1/invitations/inv456",
+      "https://kvitbit.cz/api/v1/invitations/inv456/accept",
+      "https://kvitbit.cz/api/auth/magic-link/verify?token=secret",
+      "https://kvitbit.cz/api/auth/reset-password/reset789",
+      "https://kvitbit.cz/app/auth/callback?code=abc",
+    ]) {
+      expect(pattern.test(url)).toBe(true);
+    }
+
+    for (const url of [
+      "https://kvitbit.cz/healthz",
+      "https://kvitbit.cz/readyz",
+      "https://kvitbit.cz/api/v1/documents",
+      "https://kvitbit.cz/api/v1/share",
+      "https://kvitbit.cz/api/v1/invitations",
+    ]) {
+      expect(pattern.test(url)).toBe(false);
+    }
+    expect(tokenRoutePatterns.length).toBeGreaterThanOrEqual(7);
   });
 });
 

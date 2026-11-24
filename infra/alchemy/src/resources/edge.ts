@@ -36,6 +36,8 @@ export const edgeObjectNames = (config: KvitbitStackConfig) => ({
 export const tokenRoutePatterns = [
   "/i/[^/?#]+",
   "/invite/[^/?#]+",
+  "/api/v1/share/[^/?#]+",
+  "/api/v1/invitations/[^/?#]+",
   "/api/auth/magic-link/verify",
   "/api/auth/reset-password/[^/?#]+",
   "/app/auth/callback",
@@ -46,7 +48,7 @@ const requestLogSources =
 
 export const tokenRouteExclusionFilter = [
   requestLogSources,
-  `httpRequest.requestUrl=~"^https?://[^/]+(${tokenRoutePatterns.join("|")})([/?#]|$)"`,
+  `httpRequest.requestUrl=~"^https?://[^/]+(${tokenRoutePatterns.join("|")})([/?#].*|$)"`,
 ].join(" AND ");
 
 export const edgeSecurityPolicyProps = (
@@ -188,11 +190,23 @@ const declaredLink = (resource: string) =>
     return link;
   });
 
+export const declareTokenRouteLogExclusion = Effect.fn(
+  "KvitbitStack.declareTokenRouteLogExclusion",
+)(function* (config: KvitbitStackConfig) {
+  const names = edgeObjectNames(config);
+  const exclusion = yield* Logging.Exclusion("EdgeTokenRouteExclusion", {
+    exclusionId: names.tokenRouteExclusion,
+    description: "Drop raw request logs for token-bearing Kvitbit routes",
+    filter: tokenRouteExclusionFilter,
+  });
+  return exclusion.name;
+});
+
 /**
  * Pure-Alchemy External Application Load Balancer in front of Kvitbit Cloud Run:
  * GlobalAddress + Serverless NEG + Cloud Armor EdgeSecurityPolicy + Dynamic/Static
  * EdgeBackendService (with optional Cloud CDN) + Managed SSL Certificate (kvitbit.cz /
- * kvitbit.app) + HTTPS redirect + token-route Cloud Logging exclusion.
+ * kvitbit.app) + HTTPS redirect.
  */
 export const declareKvitbitEdge = Effect.fn("KvitbitStack.declareKvitbitEdge")(function* (
   config: KvitbitStackConfig,
@@ -284,17 +298,10 @@ export const declareKvitbitEdge = Effect.fn("KvitbitStack.declareKvitbitEdge")(f
     target: httpTarget,
   });
 
-  const exclusion = yield* Logging.Exclusion("EdgeTokenRouteExclusion", {
-    exclusionId: names.tokenRouteExclusion,
-    description: "Drop raw request logs for token-bearing Kvitbit routes",
-    filter: tokenRouteExclusionFilter,
-  });
-
   return {
     edgeIpAddress: address.address,
     edgeProtocol: edge.enableHttps ? ("https" as const) : ("http" as const),
     securityPolicy: policy.selfLink,
     backendServices: [dynamicBackend.selfLink, staticBackend.selfLink] as const,
-    tokenRouteExclusion: exclusion.name,
   };
 });

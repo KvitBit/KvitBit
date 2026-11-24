@@ -9,6 +9,7 @@ on:
     paths:
       - apps/**
       - packages/**
+      - assets/**
       - infra/alchemy/**
       - Dockerfile
       - docker/**
@@ -18,34 +19,32 @@ on:
       - bun.lock
   workflow_dispatch:
     inputs:
-      stage:
-        description: Target Alchemy stage
-        type: choice
-        default: prod
-        options:
-          - prod
-          - staging
       dry_run:
         description: Plan only (skip image push, DB migration, and live rollout)
         type: boolean
         default: false
+      bootstrap_foundation:
+        description: Bootstrap foundation only (Artifact Registry, GCS buckets, service accounts, empty Secret Manager containers, log exclusion)
+        type: boolean
+        default: false
 
-# Never cancel an active deployment or migration in progress.
+# Never cancel an active production deployment or migration in progress.
 concurrency:
-  group: deploy-${{ inputs.stage || 'prod' }}
+  group: deploy-prod
   cancel-in-progress: false
 
 jobs:
   deploy:
-    name: Deploy (${{ inputs.stage || 'prod' }})
+    name: Deploy (prod)
     runs-on: ubuntu-latest
     timeout-minutes: 45
     permissions:
       contents: read
       id-token: write
     env:
-      KVITBIT_STAGE: ${{ inputs.stage || 'prod' }}
+      KVITBIT_STAGE: prod
       DRY_RUN: ${{ inputs.dry_run && 'true' || 'false' }}
+      BOOTSTRAP_FOUNDATION: ${{ inputs.bootstrap_foundation && 'true' || 'false' }}
       GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
       GCP_PROJECT_NUMBER: ${{ vars.GCP_PROJECT_NUMBER }}
       GCP_REGION: ${{ vars.GCP_REGION }}
@@ -53,11 +52,18 @@ jobs:
       GCP_WORKLOAD_IDENTITY_PROVIDER: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
       GCP_DEPLOYER_SERVICE_ACCOUNT: ${{ vars.GCP_DEPLOYER_SERVICE_ACCOUNT }}
       ALCHEMY_STATE_BUCKET: ${{ vars.ALCHEMY_STATE_BUCKET }}
+      KVITBIT_ENABLE_RESEND_SECRET: ${{ vars.KVITBIT_ENABLE_RESEND_SECRET }}
+      KVITBIT_ENABLE_SMTP_SECRET: ${{ vars.KVITBIT_ENABLE_SMTP_SECRET }}
+      KVITBIT_ENABLE_MOBILE_SIGNING_KEY_SECRET: ${{ vars.KVITBIT_ENABLE_MOBILE_SIGNING_KEY_SECRET }}
 
     steps:
       - name: Validate GCP deployment variables
         run: |
           set -euo pipefail
+          if [ "$KVITBIT_STAGE" != "prod" ]; then
+            echo "::error::deploy.yml is strictly production-only until an isolated staging environment exists (got KVITBIT_STAGE=${KVITBIT_STAGE})"
+            exit 1
+          fi
           for name in \
             GCP_PROJECT_ID \
             GCP_PROJECT_NUMBER \
@@ -115,15 +121,54 @@ jobs:
       - name: Set up gcloud
         uses: google-github-actions/setup-gcloud@v3
 
+      # Fail fast before pushing images or running migrations if foundation resources
+      # or required Secret Manager versions have not been bootstrapped yet.
+      - name: Preflight Artifact Registry and Secret Manager versions
+        if: env.DRY_RUN != 'true' && env.BOOTSTRAP_FOUNDATION != 'true'
+        run: |
+          set -euo pipefail
+          if ! gcloud artifacts repositories describe kvitbit \
+            --project "$GCP_PROJECT_ID" \
+            --location "$GCP_REGION" >/dev/null 2>&1; then
+            echo "::error::Artifact Registry repository 'kvitbit' does not exist in ${GCP_PROJECT_ID}/${GCP_REGION}. Run this workflow once with bootstrap_foundation=true first."
+            exit 1
+          fi
+
+          required_secrets="kvitbit-${KVITBIT_STAGE}-database-url kvitbit-${KVITBIT_STAGE}-runner-database-url-unpooled kvitbit-${KVITBIT_STAGE}-better-auth-secret"
+          if [ "${KVITBIT_ENABLE_RESEND_SECRET:-}" = "true" ]; then
+            required_secrets="${required_secrets} kvitbit-${KVITBIT_STAGE}-resend-api-key"
+          fi
+          if [ "${KVITBIT_ENABLE_SMTP_SECRET:-}" = "true" ]; then
+            required_secrets="${required_secrets} kvitbit-${KVITBIT_STAGE}-smtp-url"
+          fi
+          if [ "${KVITBIT_ENABLE_MOBILE_SIGNING_KEY_SECRET:-}" = "true" ]; then
+            required_secrets="${required_secrets} kvitbit-${KVITBIT_STAGE}-mobile-updates-signing-key"
+          fi
+
+          for secret_id in $required_secrets; do
+            state="$(gcloud secrets versions describe latest \
+              --project "$GCP_PROJECT_ID" \
+              --secret "$secret_id" \
+              --format='value(state)' 2>/dev/null || true)"
+            if [ "$state" != "ENABLED" ]; then
+              echo "::error::Secret Manager secret '${secret_id}' does not have an ENABLED 'latest' version (got '${state:-missing}'). Run bootstrap_foundation=true if needed and populate secret versions before deploying."
+              exit 1
+            fi
+          done
+
       - name: Configure Docker for Artifact Registry
+        if: env.BOOTSTRAP_FOUNDATION != 'true'
         run: gcloud auth configure-docker "${GCP_REGION}-docker.pkg.dev" --quiet
 
       - name: Build and push Kvitbit OCI image
         id: image
+        if: env.BOOTSTRAP_FOUNDATION != 'true'
         run: |
           set -euo pipefail
           IMAGE_REPO="${GCP_REGION}-docker.pkg.dev/${GCP_PROJECT_ID}/kvitbit/kvitbit"
-          IMAGE_TAG="${GITHUB_SHA}"
+          # Attempt-specific tag avoids immutableTags collisions on workflow retries;
+          # workloads always deploy by resolved @sha256 digest.
+          IMAGE_TAG="sha-${GITHUB_SHA}-run-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
 
           docker build --file Dockerfile --tag "${IMAGE_REPO}:${IMAGE_TAG}" .
 
@@ -143,7 +188,7 @@ jobs:
 
       # Explicit migration step BEFORE Cloud Run / runner pool rollout (rule S5, #878).
       - name: Run database and cluster schema migrations
-        if: env.DRY_RUN != 'true'
+        if: env.DRY_RUN != 'true' && env.BOOTSTRAP_FOUNDATION != 'true'
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           DATABASE_URL_UNPOOLED: ${{ secrets.DATABASE_DIRECT_URL }}
@@ -159,12 +204,13 @@ jobs:
           fi
           bun apps/server/src/migrate.ts
 
-      - name: Run pure-Alchemy GCP stack (${{ inputs.dry_run && 'plan' || 'deploy' }})
+      - name: Run pure-Alchemy GCP stack (${{ inputs.dry_run && 'plan' || (inputs.bootstrap_foundation && 'bootstrap' || 'deploy') }})
         working-directory: infra/alchemy
         env:
           GOOGLE_ACCESS_TOKEN: ${{ steps.alchemy-auth.outputs.access_token }}
           GOOGLE_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
           KVITBIT_STAGE: ${{ env.KVITBIT_STAGE }}
+          KVITBIT_BOOTSTRAP_FOUNDATION: ${{ env.BOOTSTRAP_FOUNDATION }}
           KVITBIT_GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
           KVITBIT_GCP_PROJECT_NUMBER: ${{ vars.GCP_PROJECT_NUMBER }}
           KVITBIT_GCP_REGION: ${{ vars.GCP_REGION }}
@@ -176,27 +222,79 @@ jobs:
           KVITBIT_EDGE_DOMAINS: ${{ vars.KVITBIT_EDGE_DOMAINS }}
           KVITBIT_RUNNER_COUNT: ${{ vars.KVITBIT_RUNNER_COUNT }}
           KVITBIT_ANDROID_ASSETLINKS_SHA256: ${{ vars.KVITBIT_ANDROID_ASSETLINKS_SHA256 }}
+          KVITBIT_ENABLE_RESEND_SECRET: ${{ vars.KVITBIT_ENABLE_RESEND_SECRET }}
+          KVITBIT_ENABLE_SMTP_SECRET: ${{ vars.KVITBIT_ENABLE_SMTP_SECRET }}
+          KVITBIT_ENABLE_MOBILE_SIGNING_KEY_SECRET: ${{ vars.KVITBIT_ENABLE_MOBILE_SIGNING_KEY_SECRET }}
         run: |
           set -euo pipefail
           if [ "$DRY_RUN" = "true" ]; then
             bunx alchemy plan --stage "$KVITBIT_STAGE"
           else
-            bunx alchemy deploy --stage "$KVITBIT_STAGE"
+            bunx alchemy deploy --yes --stage "$KVITBIT_STAGE"
           fi
 
-      - name: Verify Cloud Run /healthz and /readyz
-        if: env.DRY_RUN != 'true'
+      - name: Verify runner pool reconciled target digest
+        if: env.DRY_RUN != 'true' && env.BOOTSTRAP_FOUNDATION != 'true'
+        env:
+          TARGET_DIGEST: ${{ steps.image.outputs.digest }}
         run: |
           set -euo pipefail
-          SERVICE_NAME="kvitbit-${KVITBIT_STAGE}-server"
-          SERVICE_URL="$(gcloud run services describe "$SERVICE_NAME" \
+          RUNNERS="$(gcloud compute instances list \
             --project "$GCP_PROJECT_ID" \
-            --region "$GCP_REGION" \
-            --format='value(status.url)')"
-          if [ -z "$SERVICE_URL" ]; then
-            echo "::error::Could not resolve Cloud Run URL for ${SERVICE_NAME}"
+            --zones "$GCP_ZONE" \
+            --filter="labels.app=kvitbit AND labels.stage=${KVITBIT_STAGE} AND labels.workload=runner" \
+            --format='value(name)')"
+          if [ -z "$RUNNERS" ]; then
+            echo "::error::No Kvitbit runner instances found in ${GCP_PROJECT_ID}/${GCP_ZONE}"
             exit 1
           fi
-          curl -fsS --retry 6 --retry-delay 5 "${SERVICE_URL}/healthz" > /dev/null
-          curl -fsS --retry 6 --retry-delay 5 "${SERVICE_URL}/readyz" > /dev/null
-          echo "Verified ${SERVICE_URL}/healthz and /readyz"
+          for runner in $RUNNERS; do
+            matched="false"
+            for attempt in $(seq 1 24); do
+              active_digest="$(gcloud compute instances get-guest-attributes "$runner" \
+                --project "$GCP_PROJECT_ID" \
+                --zone "$GCP_ZONE" \
+                --query-path="kvitbit/active-digest" \
+                --format='value(queryValue)' 2>/dev/null || true)"
+              if [ "$active_digest" = "$TARGET_DIGEST" ]; then
+                echo "Verified runner ${runner} is running ${TARGET_DIGEST}"
+                matched="true"
+                break
+              fi
+              echo "Waiting for runner ${runner} to reconcile ${TARGET_DIGEST} (attempt ${attempt}/24, observed: ${active_digest:-none})"
+              sleep 10
+            done
+            if [ "$matched" != "true" ]; then
+              echo "::error::Runner ${runner} did not reconcile target digest ${TARGET_DIGEST} in time"
+              exit 1
+            fi
+          done
+
+      - name: Verify /healthz and /readyz
+        if: env.DRY_RUN != 'true' && env.BOOTSTRAP_FOUNDATION != 'true'
+        env:
+          KVITBIT_EDGE_DOMAINS: ${{ vars.KVITBIT_EDGE_DOMAINS }}
+          APP_ORIGIN: ${{ vars.APP_ORIGIN }}
+        run: |
+          set -euo pipefail
+          if [ -n "${KVITBIT_EDGE_DOMAINS:-}" ]; then
+            if [ -n "${APP_ORIGIN:-}" ]; then
+              PROBE_URL="${APP_ORIGIN%/}"
+            else
+              FIRST_DOMAIN="$(printf '%s' "$KVITBIT_EDGE_DOMAINS" | cut -d',' -f1 | tr -d '[:space:]')"
+              PROBE_URL="https://${FIRST_DOMAIN}"
+            fi
+          else
+            SERVICE_NAME="kvitbit-${KVITBIT_STAGE}-server"
+            PROBE_URL="$(gcloud run services describe "$SERVICE_NAME" \
+              --project "$GCP_PROJECT_ID" \
+              --region "$GCP_REGION" \
+              --format='value(status.url)')"
+          fi
+          if [ -z "$PROBE_URL" ]; then
+            echo "::error::Could not resolve probe URL"
+            exit 1
+          fi
+          curl -fsS --retry 6 --retry-delay 5 "${PROBE_URL}/healthz" > /dev/null
+          curl -fsS --retry 6 --retry-delay 5 "${PROBE_URL}/readyz" > /dev/null
+          echo "Verified ${PROBE_URL}/healthz and /readyz"

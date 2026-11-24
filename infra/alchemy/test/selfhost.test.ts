@@ -1,5 +1,13 @@
 import { describe, expect, test } from "bun:test";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -143,8 +151,22 @@ describe("docker/entrypoint.sh dispatch contract (#878, #908, #913)", () => {
 });
 
 describe("Self-hosting and CI deploy artifacts", () => {
-  test("Dockerfile defines multi-stage Bun 1.4.2 build, Chromium, non-root uid 10001, tini entrypoint, and shared env", () => {
+  test("Dockerfile includes static assets, Bun 1.4.2 multi-stage build, Chromium, non-root uid 10001, and tini entrypoint", () => {
     const dockerfile = readFileSync(join(repoRoot, "Dockerfile"), "utf8");
+    const dockerignore = readFileSync(join(repoRoot, ".dockerignore"), "utf8");
+
+    // Static assets (assets/brand) must be in Docker build context and copied before web/mobile builds
+    const ignoredLines = dockerignore
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0 && !line.startsWith("#"));
+    expect(ignoredLines).not.toContain("assets");
+    expect(ignoredLines).not.toContain("assets/brand");
+    expect(dockerfile).toContain("COPY assets ./assets");
+    expect(dockerfile.indexOf("COPY assets ./assets")).toBeLessThan(
+      dockerfile.indexOf("bun run --filter @kvitbit/web build"),
+    );
+
     expect(dockerfile).toContain("ARG BUN_VERSION=1.4.2");
     expect(dockerfile).toContain("AS builder");
     expect(dockerfile).toContain("AS prod-deps");
@@ -159,39 +181,75 @@ describe("Self-hosting and CI deploy artifacts", () => {
     expect(dockerfile).toContain("KVITBIT_RUNNER_MODE=single");
   });
 
-  test("docker-compose.yml validates and wires Postgres 17, migrate, and SingleRunner server", () => {
+  test("docker-compose.yml separates migration owner credentials from DML-only app role (S5)", () => {
     const compose = readFileSync(join(repoRoot, "docker-compose.yml"), "utf8");
+    const initScriptPath = join(repoRoot, "docker/postgres-init/01-create-app-role.sh");
+    expect(existsSync(initScriptPath)).toBe(true);
+
+    const initSyntax = Bun.spawnSync(["sh", "-n", initScriptPath], {
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    expect(initSyntax.exitCode).toBe(0);
+
+    const initScript = readFileSync(initScriptPath, "utf8");
+    expect(initScript).toContain("NOSUPERUSER NOCREATEDB NOCREATEROLE");
+    expect(initScript).toContain("GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES");
+    expect(initScript).toContain("ALTER DEFAULT PRIVILEGES FOR ROLE");
+
+    const parsed = Bun.YAML.parse(compose) as {
+      services: {
+        postgres: { volumes: string[]; environment: Record<string, string> };
+        migrate: { environment: Record<string, string> };
+        kvitbit: { environment: Record<string, string> };
+      };
+    };
+    expect(parsed.services.postgres.volumes).toContain(
+      "./docker/postgres-init:/docker-entrypoint-initdb.d:ro",
+    );
+    expect(parsed.services.migrate.environment.DATABASE_URL_UNPOOLED).toContain("POSTGRES_USER");
+    expect(parsed.services.kvitbit.environment.DATABASE_URL).toContain("POSTGRES_APP_USER");
+    expect(parsed.services.kvitbit.environment.DATABASE_URL_UNPOOLED).toBeUndefined();
     expect(compose).toContain("postgres:17-alpine");
     expect(compose).toContain('command: ["migrate"]');
     expect(compose).toContain("condition: service_completed_successfully");
     expect(compose).toContain("KVITBIT_RUNNER_MODE: single");
-    expect(compose).toContain("KVITBIT_BLOB_DRIVER:");
-    expect(compose).toContain("KVITBIT_CHROMIUM_PATH: /usr/bin/chromium");
-    expect(compose).toContain("BETTER_AUTH_SECRET:");
-
-    const parsed = Bun.YAML.parse(compose) as Record<string, unknown>;
-    expect(parsed).toBeDefined();
-    expect("services" in parsed).toBe(true);
   });
 
-  test("flake.nix exposes bun2nix server, nix2container ociImage, and nixosModules.kvitbit", () => {
+  test("flake.nix has valid bun.nix, writable OCI storage dirs for uid 10001, and separate NixOS migration credentials", () => {
     const flake = readFileSync(join(repoRoot, "flake.nix"), "utf8");
+    const bunNixPath = join(repoRoot, "bun.nix");
+    expect(existsSync(bunNixPath)).toBe(true);
+    const bunNix = readFileSync(bunNixPath, "utf8");
+    expect(bunNix).toContain("{ fetchurl }:");
+    expect(bunNix).toContain("sha512-");
+
     expect(flake).toContain("bun2nix");
     expect(flake).toContain("nix2container");
-    expect(flake).toContain("x86_64-linux");
-    expect(flake).toContain("aarch64-linux");
-    expect(flake).toContain("nixosModules = rec {");
-    expect(flake).toContain("kvitbit =");
-    expect(flake).toContain("ociImage = n2c.buildImage");
+    expect(flake).toContain("ociWritableDirs");
+    expect(flake).toContain("/var/lib/kvitbit/blobs");
+    expect(flake).toContain("/var/lib/kvitbit/mobile");
+    expect(flake).toContain("uid = 10001;");
+    expect(flake).toContain("gid = 10001;");
+    expect(flake).toContain("migrationEnvironmentFile = lib.mkOption");
+    expect(flake).toContain("cfg.migrationEnvironmentFile");
     expect(flake).toContain('KVITBIT_RUNNER_MODE = "single"');
     expect(flake).toContain("systemd.services.kvitbit-migrate");
     expect(flake).toContain("services.nginx = lib.mkIf cfg.nginx.enable");
   });
 
-  test(".github/workflows/deploy.yml uses all 7 repo vars, OIDC + GOOGLE_ACCESS_TOKEN, and migrates before Alchemy deploy", () => {
+  test(".github/workflows/deploy.yml enforces prod-only stage, bootstrap preflight, --yes deploy, optional secret flags, immutable attempt tags, runner digest check, and edge probing", () => {
     const workflow = readFileSync(join(repoRoot, ".github/workflows/deploy.yml"), "utf8");
-    const parsed = Bun.YAML.parse(workflow) as Record<string, unknown>;
+    const parsed = Bun.YAML.parse(workflow) as {
+      on?: { workflow_dispatch?: { inputs?: Record<string, unknown> } };
+    };
     expect(parsed).toBeDefined();
+
+    // Production-only: no staging option pointing at prod secrets
+    expect(parsed.on?.workflow_dispatch?.inputs?.stage).toBeUndefined();
+    expect(parsed.on?.workflow_dispatch?.inputs?.bootstrap_foundation).toBeDefined();
+    expect(workflow).toContain("KVITBIT_STAGE: prod");
+    expect(workflow).not.toContain("- staging");
 
     for (const varName of [
       "GCP_PROJECT_ID",
@@ -201,6 +259,9 @@ describe("Self-hosting and CI deploy artifacts", () => {
       "GCP_WORKLOAD_IDENTITY_PROVIDER",
       "GCP_DEPLOYER_SERVICE_ACCOUNT",
       "ALCHEMY_STATE_BUCKET",
+      "KVITBIT_ENABLE_RESEND_SECRET",
+      "KVITBIT_ENABLE_SMTP_SECRET",
+      "KVITBIT_ENABLE_MOBILE_SIGNING_KEY_SECRET",
     ]) {
       expect(workflow).toContain(`vars.${varName}`);
     }
@@ -209,12 +270,21 @@ describe("Self-hosting and CI deploy artifacts", () => {
     expect(workflow).toContain("secrets.DATABASE_DIRECT_URL");
     expect(workflow).toContain("GOOGLE_ACCESS_TOKEN");
     expect(workflow).toContain("GOOGLE_PROJECT_ID");
+    expect(workflow).toContain("gcloud artifacts repositories describe kvitbit");
+    expect(workflow).toContain(`kvitbit-\${KVITBIT_STAGE}-runner-database-url-unpooled`);
+    expect(workflow).toContain(`sha-\${GITHUB_SHA}-run-\${GITHUB_RUN_ID}-\${GITHUB_RUN_ATTEMPT}`);
     expect(workflow).toContain("bun apps/server/src/migrate.ts");
-    expect(workflow).toContain("bunx alchemy deploy");
+    expect(workflow).toContain("bunx alchemy deploy --yes");
+    expect(workflow).toContain("kvitbit/active-digest");
+    expect(workflow).toContain(`if [ -n "\${KVITBIT_EDGE_DOMAINS:-}" ]; then`);
 
+    const preflightPos = workflow.indexOf("gcloud artifacts repositories describe kvitbit");
+    const pushPos = workflow.indexOf("docker push");
     const migratePos = workflow.indexOf("bun apps/server/src/migrate.ts");
-    const deployPos = workflow.indexOf("bunx alchemy deploy");
-    expect(migratePos).toBeGreaterThan(-1);
+    const deployPos = workflow.indexOf("bunx alchemy deploy --yes");
+    expect(preflightPos).toBeGreaterThan(-1);
+    expect(pushPos).toBeGreaterThan(preflightPos);
+    expect(migratePos).toBeGreaterThan(pushPos);
     expect(deployPos).toBeGreaterThan(migratePos);
   });
 });

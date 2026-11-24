@@ -26,6 +26,7 @@ export interface KvitbitEdgeConfig {
 
 export interface KvitbitStackConfig {
   readonly stage: KvitbitStage;
+  readonly bootstrapFoundation: boolean;
   readonly projectId: string;
   readonly projectNumber: string;
   readonly region: string;
@@ -97,6 +98,13 @@ export const defaultSecretBindings = (
       version: "latest",
       required: true,
       consumers: ["server", "runner"],
+    },
+    {
+      environmentVariable: "DATABASE_URL_UNPOOLED",
+      secretId: `${prefix}-runner-database-url-unpooled`,
+      version: "latest",
+      required: true,
+      consumers: ["runner"],
     },
     {
       environmentVariable: "BETTER_AUTH_SECRET",
@@ -194,7 +202,7 @@ export const validateStackConfig = (
         reason: `zone '${config.zone}' must be inside region '${config.region}'`,
       });
     }
-    if (!DIGEST_PATTERN.test(config.imageDigest)) {
+    if (!config.bootstrapFoundation && !DIGEST_PATTERN.test(config.imageDigest)) {
       return yield* new InvalidStackConfig({
         field: "imageDigest",
         reason: `must be an immutable sha256 digest (got '${config.imageDigest}')`,
@@ -257,6 +265,46 @@ const optionalNonEmptyString = (name: string) =>
     Config.map(Option.getOrUndefined),
   );
 
+const optionalBoolean = (
+  name: string,
+  defaultValue: boolean,
+): Effect.Effect<boolean, Config.ConfigError | InvalidStackConfig> =>
+  Effect.gen(function* () {
+    const raw = yield* optionalNonEmptyString(name);
+    if (raw === undefined) {
+      return defaultValue;
+    }
+    const normalized = raw.toLowerCase();
+    if (normalized === "true" || normalized === "1" || normalized === "yes") {
+      return true;
+    }
+    if (normalized === "false" || normalized === "0" || normalized === "no") {
+      return false;
+    }
+    return yield* new InvalidStackConfig({
+      field: name,
+      reason: `expected boolean ('true' or 'false'), got '${raw}'`,
+    });
+  });
+
+const optionalInt = (
+  name: string,
+  defaultValue: number,
+): Effect.Effect<number, Config.ConfigError | InvalidStackConfig> =>
+  Effect.gen(function* () {
+    const raw = yield* optionalNonEmptyString(name);
+    if (raw === undefined) {
+      return defaultValue;
+    }
+    if (!/^-?\d+$/.test(raw)) {
+      return yield* new InvalidStackConfig({
+        field: name,
+        reason: `expected integer, got '${raw}'`,
+      });
+    }
+    return Number.parseInt(raw, 10);
+  });
+
 const parseCsvList = (raw: string | undefined): ReadonlyArray<string> =>
   raw === undefined
     ? []
@@ -279,6 +327,7 @@ export const loadStackConfig: Effect.Effect<
     });
   }
   const stage: KvitbitStage = stageRaw;
+  const bootstrapFoundation = yield* optionalBoolean("KVITBIT_BOOTSTRAP_FOUNDATION", false);
 
   const projectId = yield* Config.String("KVITBIT_GCP_PROJECT_ID").pipe(
     Config.withDefault(KVITBIT_PROD_DEFAULTS.projectId),
@@ -295,39 +344,40 @@ export const loadStackConfig: Effect.Effect<
   const stateBucket = yield* Config.String("KVITBIT_ALCHEMY_STATE_BUCKET").pipe(
     Config.withDefault(KVITBIT_PROD_DEFAULTS.stateBucket),
   );
-  const imageDigest = yield* Config.String("KVITBIT_IMAGE_DIGEST");
-  const runnerCount = yield* Config.Int("KVITBIT_RUNNER_COUNT").pipe(
-    Config.withDefault(KVITBIT_PROD_DEFAULTS.runnerCount),
-  );
+  const imageDigest = bootstrapFoundation
+    ? ((yield* optionalNonEmptyString("KVITBIT_IMAGE_DIGEST")) ?? "")
+    : yield* Config.String("KVITBIT_IMAGE_DIGEST");
+  const runnerCount = yield* optionalInt("KVITBIT_RUNNER_COUNT", KVITBIT_PROD_DEFAULTS.runnerCount);
   const runnerMachineType = yield* Config.String("KVITBIT_RUNNER_MACHINE_TYPE").pipe(
     Config.withDefault(KVITBIT_PROD_DEFAULTS.runnerMachineType),
   );
-  const serverMinInstances = yield* Config.Int("KVITBIT_SERVER_MIN_INSTANCES").pipe(
-    Config.withDefault(KVITBIT_PROD_DEFAULTS.serverMinInstances),
+  const serverMinInstances = yield* optionalInt(
+    "KVITBIT_SERVER_MIN_INSTANCES",
+    KVITBIT_PROD_DEFAULTS.serverMinInstances,
   );
-  const serverMaxInstances = yield* Config.Int("KVITBIT_SERVER_MAX_INSTANCES").pipe(
-    Config.withDefault(KVITBIT_PROD_DEFAULTS.serverMaxInstances),
+  const serverMaxInstances = yield* optionalInt(
+    "KVITBIT_SERVER_MAX_INSTANCES",
+    KVITBIT_PROD_DEFAULTS.serverMaxInstances,
   );
   const appOrigin = yield* optionalNonEmptyString("KVITBIT_APP_ORIGIN");
   const emailFrom = yield* optionalNonEmptyString("KVITBIT_EMAIL_FROM");
   const androidAssetlinksSha256 = yield* optionalNonEmptyString(
     "KVITBIT_ANDROID_ASSETLINKS_SHA256",
   );
-  const shareKeyVersion = yield* Config.Int("KVITBIT_SHARE_KEY_VERSION").pipe(
-    Config.withDefault(KVITBIT_PROD_DEFAULTS.shareKeyVersion),
+  const shareKeyVersion = yield* optionalInt(
+    "KVITBIT_SHARE_KEY_VERSION",
+    KVITBIT_PROD_DEFAULTS.shareKeyVersion,
   );
 
   const edgeDomainsRaw = yield* optionalNonEmptyString("KVITBIT_EDGE_DOMAINS");
   const edgeDomains = parseCsvList(edgeDomainsRaw);
-  const edgeWafPreview = yield* Config.Boolean("KVITBIT_EDGE_WAF_PREVIEW").pipe(
-    Config.withDefault(false),
-  );
-  const edgeStaticCdnEnabled = yield* Config.Boolean("KVITBIT_EDGE_STATIC_CDN").pipe(
-    Config.withDefault(true),
-  );
-  const edgeRestrictDirectIngress = yield* Config.Boolean(
+  const edgeWafPreview = yield* optionalBoolean("KVITBIT_EDGE_WAF_PREVIEW", false);
+  const edgeStaticCdnEnabled = yield* optionalBoolean("KVITBIT_EDGE_STATIC_CDN", true);
+  // Default to restricting direct Cloud Run ingress when Cloud Armor edge is enabled.
+  const edgeRestrictDirectIngress = yield* optionalBoolean(
     "KVITBIT_EDGE_RESTRICT_DIRECT_INGRESS",
-  ).pipe(Config.withDefault(false));
+    true,
+  );
 
   const edge: KvitbitEdgeConfig | undefined =
     edgeDomains.length > 0
@@ -341,19 +391,17 @@ export const loadStackConfig: Effect.Effect<
         }
       : undefined;
 
-  const trustedProxyHops = yield* Config.Int("KVITBIT_TRUSTED_PROXY_HOPS").pipe(
-    Config.withDefault(edge !== undefined ? 2 : 1),
+  const trustedProxyHops = yield* optionalInt(
+    "KVITBIT_TRUSTED_PROXY_HOPS",
+    edge !== undefined ? 2 : 1,
   );
 
-  const enableResend = yield* Config.Boolean("KVITBIT_ENABLE_RESEND_SECRET").pipe(
-    Config.withDefault(false),
-  );
-  const enableSmtp = yield* Config.Boolean("KVITBIT_ENABLE_SMTP_SECRET").pipe(
-    Config.withDefault(false),
-  );
-  const enableMobileSigningKey = yield* Config.Boolean(
+  const enableResend = yield* optionalBoolean("KVITBIT_ENABLE_RESEND_SECRET", false);
+  const enableSmtp = yield* optionalBoolean("KVITBIT_ENABLE_SMTP_SECRET", false);
+  const enableMobileSigningKey = yield* optionalBoolean(
     "KVITBIT_ENABLE_MOBILE_SIGNING_KEY_SECRET",
-  ).pipe(Config.withDefault(false));
+    false,
+  );
 
   const blobsBucket = yield* Config.String("KVITBIT_BLOB_BUCKET").pipe(
     Config.withDefault(`${projectId}-blobs-${stage}`),
@@ -364,6 +412,7 @@ export const loadStackConfig: Effect.Effect<
 
   return yield* validateStackConfig({
     stage,
+    bootstrapFoundation,
     projectId,
     projectNumber,
     region,

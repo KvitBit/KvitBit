@@ -6,6 +6,7 @@ import type { SecretProps } from "@alchemy.run/gcp/SecretManager";
 import * as SecretManager from "@alchemy.run/gcp/SecretManager";
 import type { BucketProps } from "@alchemy.run/gcp/Storage";
 import * as Storage from "@alchemy.run/gcp/Storage";
+import * as Output from "alchemy/Output";
 import * as Effect from "effect/Effect";
 import type { KvitbitStackConfig, KvitbitWorkload } from "../config";
 import { resourceNames, secretResourceName, serviceAccountEmail, stackLabels } from "../config";
@@ -114,32 +115,32 @@ export const declareFoundation = Effect.fn("KvitbitStack.declareFoundation")(fun
   const serverSa = yield* IAM.ServiceAccount("KvitbitServerSa", serverServiceAccountProps(config));
   const runnerSa = yield* IAM.ServiceAccount("KvitbitRunnerSa", runnerServiceAccountProps(config));
 
-  // Least-privilege GCS bucket access
-  yield* IAM.Member("ServerBlobsAdmin", {
+  // Least-privilege GCS bucket access (use Output.interpolate to avoid premature Output coercion)
+  const serverBlobsAdmin = yield* IAM.Member("ServerBlobsAdmin", {
     kind: "storage.bucket",
     name: blobsBucket.bucketName,
     role: "roles/storage.objectAdmin",
-    member: serverSa.email.pipe((email) => `serviceAccount:${email}`),
+    member: Output.interpolate`serviceAccount:${serverSa.email}`,
   });
-  yield* IAM.Member("RunnerBlobsAdmin", {
+  const runnerBlobsAdmin = yield* IAM.Member("RunnerBlobsAdmin", {
     kind: "storage.bucket",
     name: blobsBucket.bucketName,
     role: "roles/storage.objectAdmin",
-    member: runnerSa.email.pipe((email) => `serviceAccount:${email}`),
+    member: Output.interpolate`serviceAccount:${runnerSa.email}`,
   });
-  yield* IAM.Member("ServerMobileAssetsViewer", {
+  const serverMobileAssetsViewer = yield* IAM.Member("ServerMobileAssetsViewer", {
     kind: "storage.bucket",
     name: mobileAssetsBucket.bucketName,
     role: "roles/storage.objectViewer",
-    member: serverSa.email.pipe((email) => `serviceAccount:${email}`),
+    member: Output.interpolate`serviceAccount:${serverSa.email}`,
   });
 
   // Runner VMs pull the Kvitbit OCI image from Artifact Registry
-  yield* IAM.Member("RunnerArtifactReader", {
+  const runnerArtifactReader = yield* IAM.Member("RunnerArtifactReader", {
     kind: "artifactregistry.repository",
     name: repository.name,
     role: "roles/artifactregistry.reader",
-    member: runnerSa.email.pipe((email) => `serviceAccount:${email}`),
+    member: Output.interpolate`serviceAccount:${runnerSa.email}`,
   });
 
   // Secret Manager containers (operator populates secret versions out-of-band)
@@ -151,15 +152,22 @@ export const declareFoundation = Effect.fn("KvitbitStack.declareFoundation")(fun
 
   // Per-workload secretAccessor bindings
   const secretGrants = new Map<string, IAM.Member>();
+  const serverSecretGrants: Array<IAM.Member> = [];
+  const runnerSecretGrants: Array<IAM.Member> = [];
   for (const grant of secretAccessorGrants(config)) {
     const secretResource = secretResources.get(grant.secretId);
     const sa = grant.workload === "server" ? serverSa : runnerSa;
     const member = yield* IAM.Member(grant.id, {
       ...grant.props,
       name: secretResource !== undefined ? secretResource.name : grant.props.name,
-      member: sa.email.pipe((email) => `serviceAccount:${email}`),
+      member: Output.interpolate`serviceAccount:${sa.email}`,
     });
     secretGrants.set(`${grant.secretId}|${grant.workload}`, member);
+    if (grant.workload === "server") {
+      serverSecretGrants.push(member);
+    } else {
+      runnerSecretGrants.push(member);
+    }
   }
 
   return {
@@ -169,5 +177,15 @@ export const declareFoundation = Effect.fn("KvitbitStack.declareFoundation")(fun
     serverServiceAccountEmail: serverSa.email,
     runnerServiceAccountEmail: runnerSa.email,
     secretGrants,
+    serverDependencies: [
+      serverBlobsAdmin.member,
+      serverMobileAssetsViewer.member,
+      ...serverSecretGrants.map((grant) => grant.member),
+    ] as const,
+    runnerDependencies: [
+      runnerBlobsAdmin.member,
+      runnerArtifactReader.member,
+      ...runnerSecretGrants.map((grant) => grant.member),
+    ] as const,
   };
 });

@@ -2,6 +2,7 @@ import * as IAM from "@alchemy.run/gcp/IAM";
 import type { ServiceProps } from "@alchemy.run/gcp/Run";
 import * as Run from "@alchemy.run/gcp/Run";
 import type { Input } from "alchemy/Input";
+import * as Output from "alchemy/Output";
 import * as Effect from "effect/Effect";
 import type { KvitbitStackConfig } from "../config";
 import { imageReference, resourceNames, serviceAccountEmail, stackLabels } from "../config";
@@ -87,6 +88,19 @@ export const serverServiceProps = (
   };
 };
 
+const afterResources = <A>(
+  value: Input<A>,
+  dependencies: ReadonlyArray<unknown>,
+): Output.Output<A> => {
+  if (dependencies.length === 0) {
+    return Output.asOutput(value as A);
+  }
+  return Output.all(
+    Output.asOutput(value as A),
+    ...dependencies.map((dep) => Output.asOutput(dep)),
+  ).pipe(Output.map(([resolved]) => resolved as A));
+};
+
 export const declareServerService = Effect.fn("KvitbitStack.declareServerService")(function* (
   config: KvitbitStackConfig,
   deps: {
@@ -95,6 +109,7 @@ export const declareServerService = Effect.fn("KvitbitStack.declareServerService
     readonly blobsBucketName: string;
     readonly mobileAssetsBucketName: string;
     readonly serverServiceAccountEmail: Input<string>;
+    readonly serverDependencies?: ReadonlyArray<unknown>;
   },
 ) {
   const baseProps = serverServiceProps(config, {
@@ -104,11 +119,16 @@ export const declareServerService = Effect.fn("KvitbitStack.declareServerService
     mobileAssetsBucketName: deps.mobileAssetsBucketName,
   });
 
+  const serviceAccount = afterResources(
+    deps.serverServiceAccountEmail,
+    deps.serverDependencies ?? [],
+  );
+
   const service = yield* Run.Service("KvitbitServer", {
     ...baseProps,
     template: {
       ...baseProps.template,
-      serviceAccount: deps.serverServiceAccountEmail,
+      serviceAccount,
       vpcAccess: {
         networkInterfaces: [
           {
