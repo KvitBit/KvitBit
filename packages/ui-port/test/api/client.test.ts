@@ -472,6 +472,10 @@ describe("review round 2 regressions", () => {
     // right after the fork. Every budget must still dispatch the command's own Message.
     for (let budget = 2; budget <= 16; budget++) {
       const delivered: Array<unknown> = [];
+      let onDelivered: () => void = () => {};
+      const firstDelivery = new Promise<"delivered">((resolve) => {
+        onDelivered = () => resolve("delivered");
+      });
       const scope = Scope.makeUnsafe();
       Effect.runFork(
         Effect.withFiber((runner) =>
@@ -485,7 +489,10 @@ describe("review round 2 regressions", () => {
               cancelled: "cancelled",
               failed: () => "defect",
             },
-            (msg) => delivered.push(msg),
+            (msg) => {
+              delivered.push(msg);
+              onDelivered();
+            },
           ),
         ).pipe(
           // the command never calls the API
@@ -494,10 +501,20 @@ describe("review round 2 regressions", () => {
           Effect.provideService(Scheduler.MaxOpsBeforeYield, budget),
         ),
       );
-      await new Promise((resolve) => setTimeout(resolve, 5));
+      // Close the scope only once the command ran and dispatched, so cleanup cannot cancel it
+      // first; a delivery that never comes fails at the deadline instead of hanging.
+      const outcome = await Promise.race([
+        firstDelivery,
+        new Promise<"missing">((resolve) => setTimeout(() => resolve("missing"), 2_000)),
+      ]);
       await Effect.runPromise(Scope.close(scope, Exit.void));
-      await new Promise((resolve) => setTimeout(resolve, 5));
-      expect({ budget, delivered }).toEqual({ budget, delivered: ["done"] });
+      // a duplicate dispatch would land after cleanup; give it a turn of the event loop
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect({ budget, outcome, delivered }).toEqual({
+        budget,
+        outcome: "delivered",
+        delivered: ["done"],
+      });
     }
   });
 });
@@ -624,5 +641,46 @@ describe("review round 3 regressions", () => {
       _tag: "Err",
       error: { _tag: "Unexpected", status: 500, requestId: "down" },
     });
+  });
+});
+
+describe("review round 4 regressions", () => {
+  test("a body that fails to decode stays a SchemaError that typed recovery can catch", async () => {
+    const recovered = search.pipe(Effect.catchTag("SchemaError", () => Effect.succeed("caught")));
+    const result = await run(
+      attempt(recovered),
+      mockFetch(() => json(200, { nope: true }, { "x-request-id": "broken" })).fetch,
+    );
+    expect(result).toEqual({ _tag: "Ok", value: "caught", meta: { etag: null, replayed: false } });
+  });
+
+  test("an uncaught decode failure still maps to Unexpected with its exchange", async () => {
+    const failure = await Effect.runPromise(
+      Effect.flip(search).pipe(
+        Effect.provide(layerFetch(cookieConfig)),
+        Effect.provideService(
+          FetchHttpClient.Fetch,
+          mockFetch(() => json(200, { nope: true }, { "x-request-id": "broken" })).fetch,
+        ),
+      ),
+    );
+    expect((failure as { _tag?: unknown })._tag).toBe("SchemaError");
+    expect(toUiError(failure)).toEqual({ _tag: "Unexpected", status: 200, requestId: "broken" });
+  });
+
+  test("response-only mode keeps the success response's ETag and Idempotent-Replayed", async () => {
+    const raw = Effect.gen(function* () {
+      const api = yield* KvitbitApi;
+      return yield* api.contacts.search({
+        params: inWorkspace(ws),
+        query: pageQuery({}),
+        responseMode: "response-only",
+      });
+    });
+    const result = await run(
+      attempt(raw),
+      mockFetch(() => json(200, {}, { etag: '"7"', "idempotent-replayed": "true" })).fetch,
+    );
+    expect(result._tag === "Ok" && result.meta).toEqual({ etag: 7, replayed: true });
   });
 });

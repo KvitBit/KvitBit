@@ -146,18 +146,28 @@ export const isUiError = (u: unknown): u is UiError =>
     u !== null &&
     (LOCAL_TAGS.has((u as { _tag?: unknown })._tag as string) || isPlainInvalid(u)));
 
-/**
- * A response body that did not decode, annotated while that response was in hand, so the error
- * keeps the status and `X-Request-Id` of the exchange that actually failed.
- */
-export class UndecodedResponse {
-  readonly _tag = "UndecodedResponse";
-  constructor(
-    readonly status: number,
-    readonly requestId: string | null,
-    readonly cause: unknown,
-  ) {}
+/** The exchange a failure came from, when the failure value does not carry its response. */
+export interface FailedResponse {
+  readonly status: number;
+  readonly requestId: string | null;
 }
+
+const failedResponses = new WeakMap<object, FailedResponse>();
+
+/**
+ * Associates a failure value (a response body's `SchemaError`) with the response that produced it,
+ * while that response is in hand. The error itself stays in the channel unchanged, so typed
+ * recovery (`Effect.catchTag("SchemaError", ...)`) still sees it; `toUiError` reads the
+ * association. Keyed by the error object, so each failure keeps its own exchange.
+ */
+export const annotateFailedResponse = (error: unknown, response: FailedResponse): void => {
+  if (typeof error === "object" && error !== null && !failedResponses.has(error)) {
+    failedResponses.set(error, { status: response.status, requestId: response.requestId });
+  }
+};
+
+export const failedResponseOf = (error: unknown): FailedResponse | undefined =>
+  typeof error === "object" && error !== null ? failedResponses.get(error) : undefined;
 
 const fromHttpClientError = (error: HttpClientError.HttpClientError): UiError => {
   const reason = error.reason;
@@ -176,8 +186,9 @@ const fromHttpClientError = (error: HttpClientError.HttpClientError): UiError =>
 /** The one mapping from a failure value (the `E` channel of a KvitbitApi call) to UiError. */
 export const toUiError = (error: unknown): UiError => {
   if (isUiError(error)) return error;
-  if (error instanceof UndecodedResponse) return unexpected(error.status, error.requestId);
   if (HttpClientError.isHttpClientError(error)) return fromHttpClientError(error);
+  const failed = failedResponseOf(error);
+  if (failed !== undefined) return unexpected(failed.status, failed.requestId);
   if (Cause.isTimeoutError(error)) return timeout;
   return unexpected();
 };

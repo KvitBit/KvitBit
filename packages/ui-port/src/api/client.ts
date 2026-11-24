@@ -14,7 +14,7 @@ import {
   type HttpClientResponse,
 } from "effect/http";
 import { HttpApiClient } from "effect/http-api";
-import { isUiError, UndecodedResponse } from "./errors";
+import { annotateFailedResponse, isUiError } from "./errors";
 
 export type KvitbitApiClient = HttpApiClient.ForApi<typeof Api>;
 
@@ -61,9 +61,10 @@ export interface ObservedResponse {
 }
 
 /**
- * Cell `attempt` provides per command: the response of the latest endpoint call whose body
- * decoded, for success metadata. Failures never read it; a decode failure carries its own
- * response (`UndecodedResponse`), so sibling calls cannot misattribute one.
+ * Cell `attempt` provides per command: the response of the latest endpoint call that succeeded
+ * (decoded, or returned raw in `response-only` mode), for success metadata. Failures never read
+ * it; a decode failure is annotated with its own response (`annotateFailedResponse`), so sibling
+ * calls cannot misattribute one.
  */
 export interface ResponseCell {
   current: ObservedResponse | null;
@@ -111,37 +112,35 @@ const recordResponse = HttpClient.transformResponse(
 );
 
 /**
- * Decoding one endpoint call's response, which is in hand: a body that does not decode fails with
- * that response's status and request id attached; a decoded body records the success metadata.
- * Typed wire errors (declared error statuses) and HttpClientErrors already carry their response.
+ * Decoding one endpoint call's response, which is in hand: a body that does not decode keeps its
+ * error (typed recovery on `SchemaError` still works), annotated with that response's status and
+ * request id. Typed wire errors (declared error statuses) and HttpClientErrors carry their response.
  */
-const decodingResponse = <A, E, R>(
-  decoded: Effect.Effect<A, E, R>,
-): Effect.Effect<A, E | UndecodedResponse, R> =>
-  Effect.flatMap(
-    Effect.serviceOption(Exchange),
-    (exchange): Effect.Effect<A, E | UndecodedResponse, R> => {
-      const response = Option.isSome(exchange) ? exchange.value.response : null;
-      if (response === null) return decoded;
-      return decoded.pipe(
-        Effect.mapError((error) =>
-          isUiError(error) || HttpClientError.isHttpClientError(error)
-            ? error
-            : new UndecodedResponse(response.status, response.requestId, error),
-        ),
-        Effect.tap(() =>
-          Effect.serviceOption(ResponseObserver).pipe(
-            Effect.flatMap((cell) =>
-              Option.isSome(cell)
-                ? Effect.sync(() => {
-                    cell.value.current = response;
-                  })
-                : Effect.void,
-            ),
-          ),
-        ),
-      );
-    },
+const decodingResponse = <A, E, R>(decoded: Effect.Effect<A, E, R>): Effect.Effect<A, E, R> =>
+  Effect.flatMap(Effect.serviceOption(Exchange), (exchange) => {
+    const response = Option.isSome(exchange) ? exchange.value.response : null;
+    if (response === null) return decoded;
+    return decoded.pipe(
+      Effect.tapError((error) =>
+        Effect.sync(() => {
+          if (!isUiError(error) && !HttpClientError.isHttpClientError(error)) {
+            annotateFailedResponse(error, response);
+          }
+        }),
+      ),
+    );
+  });
+
+/** Publishes a succeeded call's response to the command's observer, in every response mode. */
+const publishResponse = (exchange: ExchangeCell) =>
+  Effect.serviceOption(ResponseObserver).pipe(
+    Effect.flatMap((cell) =>
+      Option.isSome(cell) && exchange.response !== null
+        ? Effect.sync(() => {
+            cell.value.current = exchange.response;
+          })
+        : Effect.void,
+    ),
   );
 
 /** Gives every endpoint call of a client its own exchange cell (groups are nested records). */
@@ -153,7 +152,12 @@ const withExchanges = (client: object): object =>
         ? (...args: ReadonlyArray<unknown>) => {
             const call: unknown = member(...args);
             return Effect.isEffect(call)
-              ? Effect.suspend(() => Effect.provideService(call, Exchange, { response: null }))
+              ? Effect.suspend(() => {
+                  const exchange: ExchangeCell = { response: null };
+                  return Effect.provideService(call, Exchange, exchange).pipe(
+                    Effect.tap(() => publishResponse(exchange)),
+                  );
+                })
               : call;
           }
         : typeof member === "object" && member !== null

@@ -28,6 +28,8 @@ import { exhaustiveColor } from "../../src/theme/contrast-check";
 
 const account = resolvePreset("plum");
 const workspace = resolvePreset("forest");
+/** Bun's default is 5 s; the exhaustive searches below get margin for a loaded CI machine. */
+const HEAVY_TIMEOUT = 20_000;
 const dynamic = Result.getOrThrow(dynamicRoles({ _tag: "Seed", seed: "#B3261E" }));
 
 const state = (patch: {
@@ -208,29 +210,35 @@ describe("dynamic colour hardening", () => {
     }
   });
 
-  test("fuzz: realistic partial system maps resolve AA-clean in all six variants", () => {
-    let state = 11;
-    const rnd = () => {
-      state = (state * 1103515245 + 12345) & 0x7fffffff;
-      return state / 0x7fffffff;
-    };
-    const hex = () =>
-      `#${Math.floor(rnd() * 0xffffff)
-        .toString(16)
-        .padStart(6, "0")
-        .toUpperCase()}`;
-    const drop = (m: Record<string, string>) =>
-      Object.fromEntries(Object.entries(m).filter(() => rnd() > 0.3));
-    for (let i = 0; i < 20; i++) {
-      const sys = resolveSeed(hex()).schemes;
-      const d = Result.getOrThrow(
-        dynamicRoles({ _tag: "Roles", light: drop(sys.light.roles), dark: drop(sys.dark.roles) }),
-      );
-      for (const v of SCHEME_VARIANTS) expect(failingPairs(dynamicSchemeRoles(d, v))).toEqual([]);
-    }
-  });
+  test(
+    "fuzz: realistic partial system maps resolve AA-clean in all six variants",
+    () => {
+      let state = 11;
+      const rnd = () => {
+        state = (state * 1103515245 + 12345) & 0x7fffffff;
+        return state / 0x7fffffff;
+      };
+      const hex = () =>
+        `#${Math.floor(rnd() * 0xffffff)
+          .toString(16)
+          .padStart(6, "0")
+          .toUpperCase()}`;
+      const drop = (m: Record<string, string>) =>
+        Object.fromEntries(Object.entries(m).filter(() => rnd() > 0.3));
+      for (let i = 0; i < 20; i++) {
+        const sys = resolveSeed(hex()).schemes;
+        const d = Result.getOrThrow(
+          dynamicRoles({ _tag: "Roles", light: drop(sys.light.roles), dark: drop(sys.dark.roles) }),
+        );
+        for (const v of SCHEME_VARIANTS) expect(failingPairs(dynamicSchemeRoles(d, v))).toEqual([]);
+      }
+    },
+    HEAVY_TIMEOUT,
+  );
 
-  test("fuzz: medium and high never fail, even for conflicting system colours", () => {
+  // The same 20 seeded cases as one loop took seconds under load, so they run in chunks: each test
+  // stays well under bun's 5 s default even on a contended CI machine, with an explicit margin.
+  const conflictingCases = (() => {
     let state = 7;
     const rnd = () => {
       state = (state * 1103515245 + 12345) & 0x7fffffff;
@@ -243,12 +251,27 @@ describe("dynamic colour hardening", () => {
         .toUpperCase()}`;
     const roles = Object.keys(KvitbitDefaultTheme.schemes.light.roles);
     const pick = () => Object.fromEntries(roles.filter(() => rnd() < 0.08).map((r) => [r, hex()]));
-    for (let i = 0; i < 20; i++) {
-      const d = Result.getOrThrow(dynamicRoles({ _tag: "Roles", light: pick(), dark: pick() }));
-      for (const v of ["lightMedium", "lightHigh", "darkMedium", "darkHigh"] as const)
-        expect(failingPairs(dynamicSchemeRoles(d, v))).toEqual([]);
-    }
-  });
+    return Array.from({ length: 20 }, () => ({ light: pick(), dark: pick() }));
+  })();
+  const CONFLICTING_CHUNK = 4;
+  for (let from = 0; from < conflictingCases.length; from += CONFLICTING_CHUNK) {
+    const chunk = conflictingCases.slice(from, from + CONFLICTING_CHUNK);
+    test(
+      `fuzz: medium and high never fail, even for conflicting system colours (cases ${from}-${from + chunk.length - 1})`,
+      () => {
+        for (const supplied of chunk) {
+          const d = Result.getOrThrow(dynamicRoles({ _tag: "Roles", ...supplied }));
+          for (const v of ["lightMedium", "lightHigh", "darkMedium", "darkHigh"] as const)
+            expect({ supplied, v, failing: failingPairs(dynamicSchemeRoles(d, v)) }).toEqual({
+              supplied,
+              v,
+              failing: [],
+            });
+        }
+      },
+      HEAVY_TIMEOUT,
+    );
+  }
 
   test("a single supplied dark surfaceVariant survives and the effective dark scheme passes", () => {
     const roles = Result.getOrThrow(
@@ -308,64 +331,72 @@ describe("dynamic colour hardening", () => {
     expect(feasible.visited).toBe(65536);
   });
 
-  test("two supplied backgrounds of one foreground pass whenever a feasible luminance exists", () => {
-    const colours = ["#000000", "#FBFBFB", "#777777", "#1A1C18"];
-    const byForeground = new Map<string, string[]>();
-    for (const p of CHECKED_ROLE_PAIRS)
-      byForeground.set(p.foreground, [...(byForeground.get(p.foreground) ?? []), p.background]);
-    for (const [fg, bgs] of byForeground) {
-      const [bgA, bgB] = bgs;
-      if (bgA === undefined || bgB === undefined) continue;
-      for (const a of colours)
-        for (const b of colours) {
-          const supplied: Record<string, string> = { [bgA]: a, [bgB]: b };
-          const required = CHECKED_ROLE_PAIRS.filter(
-            (p) => p.foreground === fg && (p.background === bgA || p.background === bgB),
-          ).map((p) => ({ color: supplied[p.background] ?? "", required: p.required }));
-          if (feasibleLuminance(required).length === 0) continue;
+  test(
+    "two supplied backgrounds of one foreground pass whenever a feasible luminance exists",
+    () => {
+      const colours = ["#000000", "#FBFBFB", "#777777", "#1A1C18"];
+      const byForeground = new Map<string, string[]>();
+      for (const p of CHECKED_ROLE_PAIRS)
+        byForeground.set(p.foreground, [...(byForeground.get(p.foreground) ?? []), p.background]);
+      for (const [fg, bgs] of byForeground) {
+        const [bgA, bgB] = bgs;
+        if (bgA === undefined || bgB === undefined) continue;
+        for (const a of colours)
+          for (const b of colours) {
+            const supplied: Record<string, string> = { [bgA]: a, [bgB]: b };
+            const required = CHECKED_ROLE_PAIRS.filter(
+              (p) => p.foreground === fg && (p.background === bgA || p.background === bgB),
+            ).map((p) => ({ color: supplied[p.background] ?? "", required: p.required }));
+            if (feasibleLuminance(required).length === 0) continue;
+            for (const side of ["light", "dark"] as const) {
+              const d = Result.getOrThrow(
+                dynamicRoles({
+                  _tag: "Roles",
+                  light: side === "light" ? supplied : {},
+                  dark: side === "dark" ? supplied : {},
+                }),
+              );
+              const failing = failingPairs(d[side]).filter(
+                (p) => !(supplied[p.foreground] && supplied[p.background]),
+              );
+              expect({ side, bgA, a, bgB, b, failing }).toEqual({
+                side,
+                bgA,
+                a,
+                bgB,
+                b,
+                failing: [],
+              });
+            }
+          }
+      }
+    },
+    HEAVY_TIMEOUT,
+  );
+
+  test(
+    "any single supplied role leaves a passing standard scheme on both sides",
+    () => {
+      const roles = Object.keys(KvitbitDefaultTheme.schemes.light.roles);
+      for (const role of roles)
+        for (const colour of ["#777777", "#FFD600", "#0000FF"])
           for (const side of ["light", "dark"] as const) {
-            const d = Result.getOrThrow(
-              dynamicRoles({
-                _tag: "Roles",
-                light: side === "light" ? supplied : {},
-                dark: side === "dark" ? supplied : {},
-              }),
-            );
-            const failing = failingPairs(d[side]).filter(
-              (p) => !(supplied[p.foreground] && supplied[p.background]),
-            );
-            expect({ side, bgA, a, bgB, b, failing }).toEqual({
+            const input =
+              side === "light"
+                ? { light: { [role]: colour }, dark: {} }
+                : { light: {}, dark: { [role]: colour } };
+            const d = Result.getOrThrow(dynamicRoles({ _tag: "Roles", ...input }));
+            expect({ role, colour, side, failing: failingPairs(d[side]) }).toEqual({
+              role,
+              colour,
               side,
-              bgA,
-              a,
-              bgB,
-              b,
               failing: [],
             });
+            expect(d[side][role as "primary"]).toBe(colour);
           }
-        }
-    }
-  });
-
-  test("any single supplied role leaves a passing standard scheme on both sides", () => {
-    const roles = Object.keys(KvitbitDefaultTheme.schemes.light.roles);
-    for (const role of roles)
-      for (const colour of ["#777777", "#FFD600", "#0000FF"])
-        for (const side of ["light", "dark"] as const) {
-          const input =
-            side === "light"
-              ? { light: { [role]: colour }, dark: {} }
-              : { light: {}, dark: { [role]: colour } };
-          const d = Result.getOrThrow(dynamicRoles({ _tag: "Roles", ...input }));
-          expect({ role, colour, side, failing: failingPairs(d[side]) }).toEqual({
-            role,
-            colour,
-            side,
-            failing: [],
-          });
-          expect(d[side][role as "primary"]).toBe(colour);
-        }
-  });
+    },
+    HEAVY_TIMEOUT,
+  );
 
   test("a mid-grey system primary gets an onPrimary that reaches AA", () => {
     const roles = Result.getOrThrow(
