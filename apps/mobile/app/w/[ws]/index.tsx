@@ -1,5 +1,5 @@
-import { Placeholder } from "../../../src/ui/placeholder";
+import { DashboardScreen } from "../../../src/features/dashboard/dashboard-screen";
 
 export default function Route() {
-  return <Placeholder title="Dashboard" />;
+  return <DashboardScreen />;
 }
