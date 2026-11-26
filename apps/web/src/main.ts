@@ -21,7 +21,17 @@ export class Navigate extends Command.Service<Navigate>()("@kvitbit/web/Navigate
   static readonly layer = this.toLayer(
     Effect.gen(function* () {
       const router = yield* Router.Router;
-      return ({ path, replace }) => router.navigate(path, { replace });
+      return ({ path, replace }) => {
+        const origin = "https://kvitbit.invalid";
+        try {
+          const url = new URL(path, origin);
+          return path.startsWith("/") && url.origin === origin
+            ? router.navigate(url.pathname + url.search + url.hash, { replace })
+            : Effect.succeed("blocked" as const);
+        } catch {
+          return Effect.succeed("blocked" as const);
+        }
+      };
     }),
   );
 }

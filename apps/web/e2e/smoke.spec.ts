@@ -184,49 +184,38 @@ if (typeof Bun === "undefined") {
     test("a late share reply cannot replace the same route after remount", async ({ page }) => {
       const token = "demo-unpaid-czk";
       const sharePath = `/i/${token}`;
+      await page.addInitScript(
+        ({ token }) => {
+          const transport = window.fetch.bind(window);
+          let requests = 0;
+          window.fetch = Object.assign(
+            async (input: RequestInfo | URL, init?: RequestInit) => {
+              const request = input instanceof Request ? input : new Request(input, init);
+              if (new URL(request.url).pathname !== `/api/v1/share/${token}`) {
+                return transport(input, init);
+              }
+              const current = ++requests;
+              // This transport completes even if the page cancels the request.
+              const response = await transport(new Request(request, { signal: null }));
+              const invoice = await response.json();
+              if (current === 1) {
+                await new Promise<void>((release) =>
+                  Reflect.set(window, "kbReleaseOldShare", release),
+                );
+                Reflect.set(window, "kbOldShareReturned", true);
+              }
+              return Response.json({
+                ...invoice,
+                number: current === 1 ? "Earlier invoice" : "Current invoice",
+              });
+            },
+            { preconnect: () => undefined },
+          );
+        },
+        { token },
+      );
       await page.goto("/", { waitUntil: "domcontentloaded" });
       await expect(page.locator(".kb-landing")).toBeVisible();
-
-      // Delay the first successful API response across two SPA navigations.
-      let releaseOld: () => void = () => undefined;
-      const release = new Promise<void>((resolve) => {
-        releaseOld = resolve;
-      });
-      let receivedFirst: () => void = () => undefined;
-      const received = new Promise<void>((resolve) => {
-        receivedFirst = resolve;
-      });
-      let sentOld: () => void = () => undefined;
-      const sent = new Promise<void>((resolve) => {
-        sentOld = resolve;
-      });
-      let requestCount = 0;
-      await page.route(
-        (url) => url.pathname === `/api/v1/share/${token}`,
-        async (route) => {
-          const requestNumber = ++requestCount;
-          const response = await route.fetch();
-          const document = await response.json();
-          if (requestNumber === 1) {
-            receivedFirst();
-            await release;
-          }
-          try {
-            await route.fulfill({
-              response,
-              json: {
-                ...document,
-                number: requestNumber === 1 ? "Earlier invoice" : "Current invoice",
-              },
-            });
-          } catch (failure) {
-            if (requestNumber !== 1) throw failure;
-            // Leaving the component may abort the old request before its reply is sent.
-          } finally {
-            if (requestNumber === 1) sentOld();
-          }
-        },
-      );
 
       await page.evaluate((sharePath) => {
         for (const [href, label] of [
@@ -241,14 +230,16 @@ if (typeof Bun === "undefined") {
       }, sharePath);
 
       await page.getByRole("link", { name: "Open the share", exact: true }).click();
-      await received;
+      await page.waitForFunction(
+        () => typeof Reflect.get(window, "kbReleaseOldShare") === "function",
+      );
       await page.getByRole("link", { name: "Open terms", exact: true }).click();
       await expect(page).toHaveURL(/\/legal\/terms$/);
       await page.getByRole("link", { name: "Open the share", exact: true }).click();
       await expect(page.getByRole("heading", { name: /Current invoice$/ })).toBeVisible();
 
-      releaseOld();
-      await sent;
+      await page.evaluate(() => Reflect.get(window, "kbReleaseOldShare")());
+      await page.waitForFunction(() => Reflect.get(window, "kbOldShareReturned") === true);
       await expect(page.getByRole("heading", { name: /Current invoice$/ })).toBeVisible();
       await expect(page.getByRole("heading", { name: /Earlier invoice$/ })).toHaveCount(0);
     });

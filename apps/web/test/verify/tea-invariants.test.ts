@@ -369,8 +369,14 @@ describe("route round-trip & Shell access gate invariants", () => {
 
   test("Effect UI router preserves app URLs and leaves other mount points native", () => {
     for (const route of sampleRoutesFor(WS_MEMBER)) {
-      expect(Option.isSome(BrowserRoutes.parse(href(route)))).toBe(true);
+      const matched = Option.getOrThrow(BrowserRoutes.parse(href(route)));
+      expect(matched._tag).not.toBe("UnknownPath");
     }
+    expect(routeFromPath("/s/v1.demo")).toEqual(routeFromPath("/i/v1.demo"));
+    expect(routeFromPath("/consent/demo")).toEqual(routeFromPath("/oauth/consent?consent_id=demo"));
+    expect(Option.getOrThrow(BrowserRoutes.parse("/s/v1.demo"))._tag).toBe("ShareAlias");
+    expect(Option.getOrThrow(BrowserRoutes.parse("/consent/demo"))._tag).toBe("McpConsentAlias");
+
     for (const url of [
       "/app",
       "/app/",
