@@ -18,7 +18,11 @@ export const mockWire = (
     request: Request,
     credentials: RequestCredentials | undefined,
   ) => Response | Promise<Response>,
-) =>
-  spyOn(globalThis, "fetch").mockImplementation(async (input, init) =>
-    handle(new Request(input, init), init?.credentials),
+) => {
+  const implementation = Object.assign(
+    async (...[input, init]: Parameters<typeof fetch>) =>
+      handle(new Request(input, init), init?.credentials),
+    { preconnect: () => undefined },
   );
+  return spyOn(globalThis, "fetch").mockImplementation(implementation);
+};
