@@ -90,13 +90,26 @@ BEGIN
   END IF;
 
   -- Ownership grants DDL authority independently of the database and schema ACLs.
+  -- Traverse only active PostgreSQL 17 membership edges (INHERIT, reachable SET, or ADMIN),
+  -- allowing inactive memberships (INHERIT FALSE, SET FALSE, ADMIN FALSE).
+  WITH RECURSIVE reachable_roles(role_oid, can_set) AS (
+    SELECT v_role.oid, true
+    UNION
+    SELECT m.roleid,
+           (m.admin_option OR (r.can_set AND m.set_option))
+    FROM reachable_roles r
+    JOIN pg_auth_members m ON m.member = r.role_oid
+    WHERE m.inherit_option
+       OR m.admin_option
+       OR (r.can_set AND m.set_option)
+  )
   SELECT pg_describe_object(d.classid, d.objid, d.objsubid)
     INTO v_owned_object
   FROM pg_shdepend d
+  JOIN reachable_roles rr ON rr.role_oid = d.refobjid
   WHERE d.dbid = v_db.oid
     AND d.refclassid = 'pg_authid'::regclass
     AND d.deptype = 'o'
-    AND pg_has_role(v_role.oid, d.refobjid, 'MEMBER')
   LIMIT 1;
   IF FOUND THEN
     RAISE EXCEPTION 'Runtime role % owns database object % directly or through role membership',

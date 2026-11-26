@@ -523,18 +523,37 @@ describe("Self-hosting and CI deploy artifacts", () => {
           `
           CREATE ROLE legacy_app;
           CREATE ROLE legacy_member;
+          CREATE ROLE legacy_inherit_member;
+          CREATE ROLE legacy_set_inherit_bridge;
+          CREATE ROLE legacy_set_inherit_member;
+          CREATE ROLE legacy_admin_member;
+          CREATE ROLE legacy_inherit_admin_bridge;
+          CREATE ROLE legacy_inherit_admin_member;
           CREATE ROLE legacy_table_owner;
           CREATE TABLE public.legacy_table (id integer);
           ALTER TABLE public.legacy_table OWNER TO legacy_app;
           CREATE SCHEMA auth;
           CREATE TABLE auth.legacy_table (id integer);
           ALTER TABLE auth.legacy_table OWNER TO legacy_table_owner;
-          GRANT legacy_table_owner TO legacy_member WITH INHERIT FALSE, SET TRUE;
+          GRANT legacy_table_owner TO legacy_member WITH INHERIT FALSE, SET TRUE, ADMIN FALSE;
+          GRANT legacy_table_owner TO legacy_inherit_member WITH INHERIT TRUE, SET FALSE, ADMIN FALSE;
+          GRANT legacy_table_owner TO legacy_set_inherit_bridge WITH INHERIT TRUE, SET FALSE, ADMIN FALSE;
+          GRANT legacy_set_inherit_bridge TO legacy_set_inherit_member WITH INHERIT FALSE, SET TRUE, ADMIN FALSE;
+          GRANT legacy_table_owner TO legacy_admin_member WITH INHERIT FALSE, SET FALSE, ADMIN TRUE;
+          GRANT legacy_table_owner TO legacy_inherit_admin_bridge WITH INHERIT FALSE, SET FALSE, ADMIN TRUE;
+          GRANT legacy_inherit_admin_bridge TO legacy_inherit_admin_member WITH INHERIT TRUE, SET FALSE, ADMIN FALSE;
         `,
         ),
       );
 
-      for (const role of ["legacy_app", "legacy_member"]) {
+      for (const role of [
+        "legacy_app",
+        "legacy_member",
+        "legacy_inherit_member",
+        "legacy_set_inherit_member",
+        "legacy_admin_member",
+        "legacy_inherit_admin_member",
+      ]) {
         expect(
           assertOk(
             sql(
@@ -555,6 +574,61 @@ describe("Self-hosting and CI deploy artifacts", () => {
         expect(
           assertOk(sql(fresh, `SELECT rolcanlogin FROM pg_roles WHERE rolname = '${role}'`)),
         ).toBe("f");
+      }
+    });
+  }, 45_000);
+
+  test("PostgreSQL 17 allows inactive table-owner membership while keeping runtime DDL blocked", async () => {
+    await withPostgresRoleSandbox(({ init, reconcile, fresh, roleScript, sql, assertOk }) => {
+      assertOk(
+        sql(
+          fresh,
+          `
+          CREATE ROLE relation_owner;
+          CREATE ROLE report_reader;
+          CREATE TABLE public.owned_records (id integer);
+          ALTER TABLE public.owned_records OWNER TO relation_owner;
+          GRANT relation_owner TO report_reader WITH INHERIT FALSE, SET FALSE, ADMIN FALSE;
+        `,
+        ),
+      );
+
+      expect(
+        assertOk(
+          sql(
+            fresh,
+            `
+            SELECT pg_has_role('report_reader', 'relation_owner', 'MEMBER'),
+                   pg_has_role('report_reader', 'relation_owner', 'USAGE'),
+                   pg_has_role('report_reader', 'relation_owner', 'SET')
+          `,
+          ),
+        ),
+      ).toBe("t|f|f");
+
+      for (const script of [init, reconcile]) {
+        assertOk(roleScript(script, fresh, "report_reader"));
+      }
+
+      expect(
+        assertOk(
+          sql(
+            fresh,
+            "INSERT INTO public.owned_records (id) VALUES (1); SELECT count(*) FROM public.owned_records;",
+            "report_reader",
+          ),
+        ),
+      ).toBe("1");
+
+      for (const ddl of [
+        "ALTER TABLE public.owned_records ADD COLUMN extra integer",
+        "DROP TABLE public.owned_records",
+        "SET ROLE relation_owner",
+        "GRANT relation_owner TO report_reader WITH SET TRUE",
+      ]) {
+        const denied = sql(fresh, ddl, "report_reader");
+        expect(denied.exitCode).not.toBe(0);
+        expect(denied.stderr).toMatch(/must be owner|permission denied/);
       }
     });
   }, 45_000);
