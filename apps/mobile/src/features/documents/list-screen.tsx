@@ -2,17 +2,23 @@
  * Documents list screen (`app/w/[ws]/documents/index.tsx`): search, kind/status/settlement/overdue
  * filters, quick create (invoice, proforma, credit note), badges, and tabular currency amounts.
  */
-import type { DocumentKind, DocumentSettlement, DocumentStatus } from "@kvitbit/domain/contract";
-import { describeError } from "@kvitbit/ui-port/api";
+import type {
+  DocumentKind,
+  DocumentSettlement,
+  DocumentStatus,
+  WorkspaceSummary,
+} from "@kvitbit/domain/contract";
+import { cleanFilters, describeError, filterHash } from "@kvitbit/ui-port/api";
 import { formatDate, formatMoney } from "@kvitbit/ui-port/format";
 import { enumKey } from "@kvitbit/ui-port/i18n";
+import { DocumentListQuery } from "@kvitbit/ui-port/view-models";
+import { Schema } from "effect";
 import { router, useLocalSearchParams } from "expo-router";
 import { FilePlus2, Lock, Plus, Search } from "lucide-react-native";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import { StyleSheet, View } from "react-native";
 import { useI18n } from "../../i18n/i18n-provider";
 import { navigate, param } from "../../navigation/routes";
-import { useApi, useRemote } from "../../runtime/api-runtime";
 import {
   Badge,
   Banner,
@@ -31,101 +37,84 @@ import {
 } from "../../ui";
 import { useWorkspace } from "../../workspace/workspace-provider";
 import { documentStatusBadge, kindBadge, settlementBadge } from "./badges";
-import { type DocumentSummaryView, parseDocumentSummary } from "./codecs";
+import { useDocumentPages } from "./list-pages";
 
 type FilterValue<T extends string> = T | "all";
+type DocumentListParams = Partial<Record<keyof DocumentListQuery, string | string[]>>;
+
+const readFilter = <S extends Schema.Constraint>(schema: S, raw: string | string[] | undefined) => {
+  const value = param(raw);
+  return Schema.is(schema)(value) ? value : undefined;
+};
 
 export function DocumentsListScreen() {
   const { workspace } = useWorkspace();
-  const { t, locale, local, text: resolveText } = useI18n();
-  const { run } = useApi();
-  const overlay = useOverlay();
-  const params = useLocalSearchParams<{
-    text?: string | string[];
-    kind?: string | string[];
-    status?: string | string[];
-    settlement?: string | string[];
-    overdue?: string | string[];
-  }>();
+  const params = useLocalSearchParams<DocumentListParams>();
+  const overdue = param(params.overdue);
+  const initialQuery = cleanFilters({
+    text: param(params.text),
+    kind: readFilter(DocumentListQuery.fields.kind, params.kind),
+    status: readFilter(DocumentListQuery.fields.status, params.status),
+    settlement: readFilter(DocumentListQuery.fields.settlement, params.settlement),
+    overdue: overdue === "true" ? true : overdue === "false" ? false : undefined,
+    contact: readFilter(DocumentListQuery.fields.contact, params.contact),
+    from: readFilter(DocumentListQuery.fields.from, params.from),
+    to: readFilter(DocumentListQuery.fields.to, params.to),
+  });
+  return (
+    <DocumentsList
+      key={filterHash(initialQuery)}
+      workspace={workspace}
+      initialQuery={initialQuery}
+    />
+  );
+}
 
-  const [search, setSearch] = useState(() => param(params.text) ?? "");
-  const [kind, setKind] = useState<FilterValue<DocumentKind>>(
-    () => (param(params.kind) as DocumentKind | undefined) ?? "all",
-  );
-  const [status, setStatus] = useState<FilterValue<DocumentStatus>>(
-    () => (param(params.status) as DocumentStatus | undefined) ?? "all",
-  );
+function DocumentsList({
+  workspace,
+  initialQuery,
+}: {
+  readonly workspace: WorkspaceSummary;
+  readonly initialQuery: DocumentListQuery;
+}) {
+  const { t, locale, local, text: resolveText } = useI18n();
+  const overlay = useOverlay();
+  const [search, setSearch] = useState(initialQuery.text ?? "");
+  const [kind, setKind] = useState<FilterValue<DocumentKind>>(initialQuery.kind ?? "all");
+  const [status, setStatus] = useState<FilterValue<DocumentStatus>>(initialQuery.status ?? "all");
   const [settlement, setSettlement] = useState<FilterValue<DocumentSettlement>>(
-    () => (param(params.settlement) as DocumentSettlement | undefined) ?? "all",
+    initialQuery.settlement ?? "all",
   );
-  const [overdueOnly, setOverdueOnly] = useState(() => param(params.overdue) === "true");
-  const [extraItems, setExtraItems] = useState<ReadonlyArray<DocumentSummaryView>>([]);
-  const [extraCursor, setExtraCursor] = useState<string | null>(null);
-  const [loadingMore, setLoadingMore] = useState(false);
+  const [overdue, setOverdue] = useState(initialQuery.overdue);
+  const [routeFilters, setRouteFilters] = useState(() =>
+    cleanFilters({ contact: initialQuery.contact, from: initialQuery.from, to: initialQuery.to }),
+  );
 
   const canWrite = workspace.role !== "accountant";
   const trimmedSearch = search.trim();
 
-  const query = useMemo(
-    () => ({
-      ...(trimmedSearch !== "" ? { text: trimmedSearch } : {}),
-      ...(kind !== "all" ? { kind } : {}),
-      ...(status !== "all" ? { status } : {}),
-      ...(settlement !== "all" ? { settlement } : {}),
-      ...(overdueOnly ? { overdue: true } : {}),
-      limit: 50,
-    }),
-    [trimmedSearch, kind, status, settlement, overdueOnly],
-  );
-
-  const list = useRemote(
-    (api) =>
-      api.documents.list({
-        params: { workspaceId: workspace.id },
-        query,
+  const query = useMemo<DocumentListQuery>(
+    () =>
+      cleanFilters({
+        ...routeFilters,
+        text: trimmedSearch,
+        kind: kind === "all" ? undefined : kind,
+        status: status === "all" ? undefined : status,
+        settlement: settlement === "all" ? undefined : settlement,
+        overdue,
       }),
-    [workspace.id, query],
+    [routeFilters, trimmedSearch, kind, status, settlement, overdue],
   );
+  const list = useDocumentPages(workspace.id, query);
+  const hasFilters = Object.keys(query).length > 0;
 
-  // Reset appended pages whenever the filter query changes.
-  // biome-ignore lint/correctness/useExhaustiveDependencies: reset pagination on filter change
-  useEffect(() => {
-    setExtraItems([]);
-    setExtraCursor(null);
-  }, [query]);
-
-  const hasFilters =
-    trimmedSearch !== "" ||
-    kind !== "all" ||
-    status !== "all" ||
-    settlement !== "all" ||
-    overdueOnly;
-
-  const clearFilters = useCallback(() => {
+  const clearFilters = () => {
     setSearch("");
     setKind("all");
     setStatus("all");
     setSettlement("all");
-    setOverdueOnly(false);
-  }, []);
-
-  const loadMore = async (cursor: string) => {
-    if (loadingMore) return;
-    setLoadingMore(true);
-    const result = await run((api) =>
-      api.documents.list({
-        params: { workspaceId: workspace.id },
-        query: { ...query, cursor },
-      }),
-    );
-    setLoadingMore(false);
-    if (result._tag === "Err") {
-      overlay.toast(resolveText(describeError(result.error).text));
-      return;
-    }
-    const next = result.value.items.map(parseDocumentSummary);
-    setExtraItems((prev) => [...prev, ...next]);
-    setExtraCursor(result.value.nextCursor);
+    setOverdue(undefined);
+    setRouteFilters({});
   };
 
   const kindChoices: ReadonlyArray<Choice<FilterValue<DocumentKind>>> = [
@@ -167,7 +156,7 @@ export function DocumentsListScreen() {
     <Screen
       title={t("documents.list.title")}
       onRefresh={list.reload}
-      refreshing={list.state._tag === "Loading"}
+      refreshing={list.refreshing}
       actions={
         canWrite ? (
           <Button
@@ -241,8 +230,8 @@ export function DocumentsListScreen() {
         />
         <SwitchRow
           label={t("documents.list.filter.overdue")}
-          value={overdueOnly}
-          onChange={setOverdueOnly}
+          value={overdue === true}
+          onChange={(checked) => setOverdue(checked ? true : undefined)}
         />
         {hasFilters ? (
           <View style={styles.filterActions}>
@@ -252,11 +241,7 @@ export function DocumentsListScreen() {
       </Card>
 
       <RemoteView state={list.state} onRetry={list.reload}>
-        {(page) => {
-          const baseItems = page.items.map(parseDocumentSummary);
-          const items = [...baseItems, ...extraItems];
-          const nextCursor = extraItems.length > 0 ? extraCursor : page.nextCursor;
-
+        {(items) => {
           if (items.length === 0) {
             return hasFilters ? (
               <EmptyState
@@ -323,12 +308,15 @@ export function DocumentsListScreen() {
                   );
                 })}
               </Card>
-              {nextCursor !== null ? (
+              {list.hasMore ? (
                 <Button
                   kind="outlined"
                   label={t("common.action.loadMore")}
-                  busy={loadingMore}
-                  onPress={() => void loadMore(nextCursor)}
+                  busy={list.loadingMore}
+                  disabled={list.refreshing}
+                  onPress={() =>
+                    list.loadMore((error) => overlay.toast(resolveText(describeError(error).text)))
+                  }
                 />
               ) : null}
             </View>
