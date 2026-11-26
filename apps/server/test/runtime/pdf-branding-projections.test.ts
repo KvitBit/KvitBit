@@ -17,6 +17,7 @@ import {
   DeliveriesRepo,
   DocumentRenderer,
   DocumentsRepo,
+  deliveryJob,
   StoreUnavailable,
   WorkspacesRepo,
 } from "@kvitbit/core";
@@ -54,7 +55,7 @@ import {
   Workspaces,
 } from "@kvitbit/domain/contract";
 import { type BlobKey, BlobStorage } from "@kvitbit/domain/ports";
-import { BigDecimal, Effect, Layer, Stream } from "effect";
+import { BigDecimal, Effect, Layer, Ref, Stream } from "effect";
 import { TestClock } from "effect/testing";
 import { PersistenceLive, PgliteTestDatabase } from "../../src/persistence";
 import {
@@ -999,6 +1000,26 @@ describe("Phase 3A Round 1 fixes 6–8: PDF, branding, and document/share read p
       ),
     ).pipe(Layer.provideMerge(database));
 
+    let failSqlAudit = false;
+    const persistenceWithAuditSpy = Layer.merge(
+      persistence,
+      Layer.effect(
+        CoreStore,
+        Effect.map(CoreStore, (store) =>
+          CoreStore.of({
+            ...store,
+            audit: {
+              ...store.audit,
+              history: (ws, subject) =>
+                failSqlAudit
+                  ? Effect.fail(new StoreUnavailable({}))
+                  : store.audit.history(ws, subject),
+            },
+          }),
+        ),
+      ).pipe(Layer.provide(persistence)),
+    );
+
     const otherPorts = Layer.mergeAll(
       CaptureInvitationDelivery.layer,
       InvitationTokensFake,
@@ -1012,10 +1033,10 @@ describe("Phase 3A Round 1 fixes 6–8: PDF, branding, and document/share read p
       MemoryBlobStorage.layer,
     );
     const pdfRenderers = makePdfRenderersLayer(makeCapturePdfEngine(capturedHtml)).pipe(
-      Layer.provide(Layer.mergeAll(persistence, otherPorts)),
+      Layer.provide(Layer.mergeAll(persistenceWithAuditSpy, otherPorts)),
     );
     const core = CoreModulesLive.pipe(
-      Layer.provideMerge(Layer.mergeAll(persistence, otherPorts, pdfRenderers)),
+      Layer.provideMerge(Layer.mergeAll(persistenceWithAuditSpy, otherPorts, pdfRenderers)),
     );
     const layer = ServerDocumentProjectionsLive.pipe(
       Layer.provideMerge(core),
@@ -1201,9 +1222,27 @@ describe("Phase 3A Round 1 fixes 6–8: PDF, branding, and document/share read p
         expect(deliveryHtml).toContain("Frozen note");
         expect(deliveryHtml).not.toContain("Edited note");
 
-        // Legacy queued delivery row (no __snapshot) even with a warm PDF cache refuses dispatch
-        // before consulting cache and records terminal status='failed' with failure reason (J3/J4/J6).
+        // Legacy queued delivery row (no __snapshot) with warm cache seeded at CURRENT workspace revision:
+        // deliveryJob.dispatch returns "failed" normally on the FIRST call (J6), bumps revision,
+        // keeps attempts=0, and makes zero EmailSender calls!
         const sql = yield* SqlClient.SqlClient;
+        const wsCurrent = yield* asMember(workspaces.current);
+        const blobs = yield* BlobStorage;
+        const emailCapture = yield* CaptureEmailSender;
+        const warmCurrentKey = documentPdfCacheKey({
+          workspaceId: memberCaller.workspaceId,
+          documentId: deliveryRow.documentId,
+          documentRevision: deliveryRow.documentRevision,
+          workspaceRevision: wsCurrent.revision,
+          template: "classic",
+          language: deliveryRow.language,
+        });
+        yield* blobs.put(
+          warmCurrentKey,
+          Stream.succeed(new TextEncoder().encode("%PDF-1.4\n%warm-live-cache\n")),
+          { contentType: "application/pdf", maxBytes: 1024 * 1024 },
+        );
+
         const rawRow = yield* sql<{ readonly render_model: unknown }>`
           select render_model from deliveries where id = ${sent.deliveryId}
         `;
@@ -1217,46 +1256,54 @@ describe("Phase 3A Round 1 fixes 6–8: PDF, branding, and document/share read p
           update deliveries
           set render_model = ${JSON.stringify(parsedModel)}::jsonb,
               status = 'sending',
+              revision = 1,
               attempts = 0,
               failure = null
           where id = ${sent.deliveryId}
         `;
-        const legacyDelivery = yield* deliveriesRepo.get(memberCaller.workspaceId, sent.deliveryId);
-        const legacyExit = yield* Effect.exit(
-          renderer.render(legacyDelivery.view, {
-            template: legacyDelivery.attachment.template,
-            language: legacyDelivery.language,
-          }),
+        const sentBeforeDispatch = (yield* Ref.get(emailCapture.sent)).length;
+        const firstDispatchOutcome = yield* deliveryJob.dispatch(
+          memberCaller.workspaceId,
+          sent.deliveryId,
         );
-        expect(legacyExit._tag).toBe("Failure");
+        expect(firstDispatchOutcome).toBe("failed");
+        expect((yield* Ref.get(emailCapture.sent)).length).toBe(sentBeforeDispatch);
         const failedDelivery = yield* deliveriesRepo.get(memberCaller.workspaceId, sent.deliveryId);
         expect(failedDelivery.status).toBe("failed");
+        expect(failedDelivery.revision).toBe(2);
         expect(failedDelivery.failure).toBe("delivery.snapshot_missing");
-        expect(failedDelivery.attempts).toBe(1);
+        expect(failedDelivery.attempts).toBe(0);
 
-        // Zero-value CZK invoice with IBAN replayed directly (no RequestOutcome) returns paymentQr: null cleanly
-        const zeroInput = {
+        // Positive-gross SQL invoice with valid null QR (EUR 1,000,000,000 exceeds EPC limit)
+        // replayed directly without RequestOutcome returns paymentQr: null cleanly!
+        const bigEurInput = {
           kind: "invoice" as const,
           contact: contact.id as ContactId,
+          currency: CurrencyCode.make("EUR"),
+          fx: { manual: { rate: BigDecimal.fromStringUnsafe("25"), quantity: 1 } },
           lines: [
             {
-              description: "Zero-value item",
+              description: "Mega contract",
               quantity: BigDecimal.fromStringUnsafe("1"),
-              unitPrice: BigDecimal.fromStringUnsafe("0"),
+              unitPrice: BigDecimal.fromStringUnsafe("1000000000"),
             },
           ] as const,
         };
-        const zeroReqKey = "rk-zero-sql-1" as RequestKey;
-        const zeroInv = yield* asMember(
-          documents.issue({ input: zeroInput }, { requestKey: zeroReqKey }),
+        const bigEurKey = "rk-epc-limit-sql-1" as RequestKey;
+        const bigEurInv = yield* asMember(
+          documents.issue({ input: bigEurInput }, { requestKey: bigEurKey }),
         );
-        expect(zeroInv.paymentQr).toBeNull();
-        yield* asMember(documents.edit(zeroInv.id, { note: "Edited zero note" }, zeroInv.revision));
-        const zeroReplay = yield* asMember(
-          documents.issue({ input: zeroInput }, { requestKey: zeroReqKey }),
+        expect(bigEurInv.paymentQr).toBeNull();
+        yield* asMember(
+          documents.edit(bigEurInv.id, { note: "Edited big EUR note" }, bigEurInv.revision),
         );
-        expect(zeroReplay.revision).toBe(zeroInv.revision);
-        expect(zeroReplay.paymentQr).toBeNull();
+        failSqlAudit = true;
+        const bigEurReplay = yield* asMember(
+          documents.issue({ input: bigEurInput }, { requestKey: bigEurKey }),
+        );
+        failSqlAudit = false;
+        expect(bigEurReplay.revision).toBe(bigEurInv.revision);
+        expect(bigEurReplay.paymentQr).toBeNull();
 
         // 3. System caller export default template: restore modern_minimal, render without ExplicitPdfTemplate
         const wsAfterClassic = yield* asMember(workspaces.current);
@@ -1446,7 +1493,8 @@ describe("Phase 3A Round 1 fixes 6–8: PDF, branding, and document/share read p
         failGetMany = false;
         expect(creditFailExit._tag).toBe("Failure");
 
-        // Failed audit read on historical replay must NOT silently return newer symbol
+        // Keyed replay on memory store preserves the original projected result even during an audit outage,
+        // while direct historical rendering of an un-snapshotted older revision fails when audit is unavailable.
         const inv2 = yield* asMember(
           documents.issue(
             {
@@ -1468,24 +1516,34 @@ describe("Phase 3A Round 1 fixes 6–8: PDF, branding, and document/share read p
         );
         yield* asMember(documents.edit(inv2.id, { variableSymbol: "777777" }, inv2.revision));
         failAudit = true;
+        const replayedDuringAuditOutage = yield* asMember(
+          documents.issue(
+            {
+              input: {
+                kind: "invoice",
+                contact: contact.id as ContactId,
+                variableSymbol: "2612345678",
+                lines: [
+                  {
+                    description: "Work 2",
+                    quantity: BigDecimal.fromStringUnsafe("1"),
+                    unitPrice: BigDecimal.fromStringUnsafe("1000"),
+                  },
+                ],
+              },
+            },
+            { requestKey: "rk-spy-2" as RequestKey },
+          ),
+        );
+        expect(replayedDuringAuditOutage.revision).toBe(inv2.revision);
+        expect(replayedDuringAuditOutage.paymentQr).toEqual(inv2.paymentQr);
+
+        const spyRenderer = yield* DocumentRenderer;
         const auditFailExit = yield* Effect.exit(
           asMember(
-            documents.issue(
-              {
-                input: {
-                  kind: "invoice",
-                  contact: contact.id as ContactId,
-                  variableSymbol: "2612345678",
-                  lines: [
-                    {
-                      description: "Work 2",
-                      quantity: BigDecimal.fromStringUnsafe("1"),
-                      unitPrice: BigDecimal.fromStringUnsafe("1000"),
-                    },
-                  ],
-                },
-              },
-              { requestKey: "rk-spy-2" as RequestKey },
+            spyRenderer.render(
+              { ...inv2, paymentQr: null },
+              { template: "classic", language: "cs" },
             ),
           ),
         );
@@ -1547,6 +1605,45 @@ describe("Phase 3A Round 1 fixes 6–8: PDF, branding, and document/share read p
         failAudit = false;
         expect(zeroMemReplay.revision).toBe(zeroMemInv.revision);
         expect(zeroMemReplay.paymentQr).toBeNull();
+
+        // EUR 1,000,000,000 invoice (valid null QR due to EPC limit) replayed on memory store during audit outage
+        yield* asMember(
+          workspaces.saveBankAccount({
+            name: "EUR",
+            currency: CurrencyCode.make("EUR"),
+            iban: "CZ6508000000192000145399",
+            bic: "GIBACZPX",
+            isDefault: true,
+          } as never),
+        );
+        const bigEurMemInput = {
+          kind: "invoice" as const,
+          contact: contact.id as ContactId,
+          currency: CurrencyCode.make("EUR"),
+          fx: { manual: { rate: BigDecimal.fromStringUnsafe("25"), quantity: 1 } },
+          lines: [
+            {
+              description: "Mega EUR",
+              quantity: BigDecimal.fromStringUnsafe("1"),
+              unitPrice: BigDecimal.fromStringUnsafe("1000000000"),
+            },
+          ] as const,
+        };
+        const bigEurMemKey = "rk-spy-epc-limit-1" as RequestKey;
+        const bigEurMemInv = yield* asMember(
+          documents.issue({ input: bigEurMemInput }, { requestKey: bigEurMemKey }),
+        );
+        expect(bigEurMemInv.paymentQr).toBeNull();
+        yield* asMember(
+          documents.edit(bigEurMemInv.id, { note: "Edited mega EUR" }, bigEurMemInv.revision),
+        );
+        failAudit = true;
+        const bigEurMemReplay = yield* asMember(
+          documents.issue({ input: bigEurMemInput }, { requestKey: bigEurMemKey }),
+        );
+        failAudit = false;
+        expect(bigEurMemReplay.revision).toBe(bigEurMemInv.revision);
+        expect(bigEurMemReplay.paymentQr).toBeNull();
       }).pipe(Effect.provide(spyLayer)),
     );
   });

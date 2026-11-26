@@ -649,21 +649,9 @@ export const DocumentRendererLive: Layer.Layer<DocumentRenderer, never, PdfEngin
       render: (view, options) =>
         Effect.gen(function* () {
           // Legacy delivery rows without a frozen __snapshot cannot recover enqueue-time branding,
-          // template, or balance; refuse before consulting cache and record a terminal failure (J3/J4/J6).
+          // template, or balance; refuse before consulting cache (J3).
           const legacyDelivery = readLegacyDeliveryInfo(view);
           if (legacyDelivery !== undefined) {
-            if (Option.isSome(sqlOpt)) {
-              yield* sqlOpt.value`
-                update deliveries
-                set status = 'failed',
-                    failure = ${"delivery.snapshot_missing"},
-                    attempts = attempts + 1,
-                    updated_at = now()
-                where workspace_id = ${legacyDelivery.workspaceId}
-                  and id = ${legacyDelivery.deliveryId}
-                  and status = 'sending'
-              `.pipe(Effect.ignore);
-            }
             return yield* Effect.die(
               new Error(
                 "delivery.snapshot_missing: legacy queued delivery missing frozen snapshot",

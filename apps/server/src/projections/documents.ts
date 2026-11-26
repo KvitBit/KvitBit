@@ -439,28 +439,57 @@ export const documentPdfCacheKey = (params: {
 
 const toDbUnavailable = () => new Unavailable({ dependency: "database" });
 
-const withTrackedRequestOutcome = <A, E, R>(
-  hasRequestKey: boolean,
-  effect: Effect.Effect<A, E, R>,
-): Effect.Effect<A, E, R> =>
-  hasRequestKey
-    ? Effect.gen(function* () {
-        const existing = yield* Effect.serviceOption(RequestOutcome);
-        if (Option.isSome(existing)) return yield* effect;
-        const flag = yield* Ref.make(false);
-        const localOutcome = RequestOutcome.of({
-          markReplayed: Ref.set(flag, true),
-          replayed: Ref.get(flag),
+const runKeyedProjection = <A, E, R>(params: {
+  readonly method: string;
+  readonly requestKey: string | undefined;
+  readonly hasSqlRequestLog: boolean;
+  readonly memoryReplays: Map<string, A>;
+  readonly execute: Effect.Effect<A, E, R>;
+  readonly project: (
+    value: A,
+    wasReplayed: boolean,
+  ) => Effect.Effect<A, Unavailable, CurrentCaller>;
+}): Effect.Effect<A, E | Unavailable, R | CurrentCaller> => {
+  const { method, requestKey, hasSqlRequestLog, memoryReplays, execute, project } = params;
+  if (requestKey === undefined) {
+    return execute.pipe(Effect.flatMap((val) => project(val, false)));
+  }
+  return Effect.gen(function* () {
+    const existing = yield* Effect.serviceOption(RequestOutcome);
+    const localFlag = yield* Ref.make(false);
+    const outcome = Option.isSome(existing)
+      ? existing.value
+      : RequestOutcome.of({
+          markReplayed: Ref.set(localFlag, true),
+          replayed: Ref.get(localFlag),
         });
-        return yield* Effect.provideService(effect, RequestOutcome, localOutcome);
-      })
-    : effect;
+    const raw = yield* Option.isSome(existing)
+      ? execute
+      : Effect.provideService(execute, RequestOutcome, outcome);
+    const wasReplayed = yield* outcome.replayed;
+    const caller = yield* CurrentCaller;
+    const cacheKey =
+      caller._tag === "Member" ? `${caller.workspaceId}:${method}:${requestKey}` : undefined;
+    if (wasReplayed) {
+      if (hasSqlRequestLog) return raw;
+      if (cacheKey !== undefined && memoryReplays.has(cacheKey)) {
+        return memoryReplays.get(cacheKey) as A;
+      }
+    }
+    const projected = yield* project(raw, wasReplayed);
+    if (!hasSqlRequestLog && cacheKey !== undefined) {
+      memoryReplays.set(cacheKey, projected);
+    }
+    return projected;
+  });
+};
 
 const projectMemberDocumentView = (
   view: DocumentView,
   documentsRepo: DocumentsRepo["Service"],
   coreStore: CoreStore["Service"],
   hasSqlRequestLog: boolean,
+  wasReplayed = false,
 ): Effect.Effect<DocumentView, Unavailable, CurrentCaller> =>
   Effect.gen(function* () {
     if (
@@ -478,11 +507,12 @@ const projectMemberDocumentView = (
     if ((currency !== "CZK" && currency !== "EUR") || iban === null || iban.trim() === "") {
       return view;
     }
+    if (wasReplayed && hasSqlRequestLog) return view;
     const outcomeOpt = yield* Effect.serviceOption(RequestOutcome);
     if (Option.isSome(outcomeOpt)) {
-      const wasReplayed = yield* outcomeOpt.value.replayed;
+      const outcomeReplayed = yield* outcomeOpt.value.replayed;
       // CoreStoreSql already persisted the complete projected result (including valid null).
-      if (wasReplayed && hasSqlRequestLog) return view;
+      if (outcomeReplayed && hasSqlRequestLog) return view;
     }
     const caller = yield* CurrentCaller;
     if (caller._tag !== "Member") {
@@ -513,9 +543,14 @@ const ProjectedDocumentsLive: Layer.Layer<Documents, never, Documents | CoreStor
       const coreStore = yield* CoreStore;
       const documentsRepo = yield* DocumentsRepo;
       const hasSqlRequestLog = Option.isSome(yield* Effect.serviceOption(SqlClient.SqlClient));
+      const memoryViewReplays = new Map<string, DocumentView>();
+      const memoryCancelReplays = new Map<
+        string,
+        { readonly document: DocumentView; readonly creditNote: DocumentView | null }
+      >();
 
-      const projectView = (view: DocumentView) =>
-        projectMemberDocumentView(view, documentsRepo, coreStore, hasSqlRequestLog);
+      const projectView = (view: DocumentView, wasReplayed = false) =>
+        projectMemberDocumentView(view, documentsRepo, coreStore, hasSqlRequestLog, wasReplayed);
 
       return Documents.of({
         ...baseDocuments,
@@ -524,45 +559,63 @@ const ProjectedDocumentsLive: Layer.Layer<Documents, never, Documents | CoreStor
             .preview(input)
             .pipe(Effect.map((view) => enrichDocumentView(view, input.variableSymbol ?? null))),
         createDraft: (input, opts) =>
-          withTrackedRequestOutcome(
-            opts?.requestKey !== undefined,
-            baseDocuments.createDraft(input, opts).pipe(Effect.flatMap(projectView)),
-          ),
+          runKeyedProjection({
+            method: "createDraft",
+            requestKey: opts?.requestKey,
+            hasSqlRequestLog,
+            memoryReplays: memoryViewReplays,
+            execute: baseDocuments.createDraft(input, opts),
+            project: projectView,
+          }),
         issue: (from, opts) =>
-          withTrackedRequestOutcome(
-            opts?.requestKey !== undefined,
-            baseDocuments.issue(from, opts).pipe(Effect.flatMap(projectView)),
-          ),
+          runKeyedProjection({
+            method: "issue",
+            requestKey: opts?.requestKey,
+            hasSqlRequestLog,
+            memoryReplays: memoryViewReplays,
+            execute: baseDocuments.issue(from, opts),
+            project: projectView,
+          }),
         edit: (id, patch, expectedRevision) =>
-          baseDocuments.edit(id, patch, expectedRevision).pipe(Effect.flatMap(projectView)),
-        lock: (id) => baseDocuments.lock(id).pipe(Effect.flatMap(projectView)),
-        unlock: (id, reason) => baseDocuments.unlock(id, reason).pipe(Effect.flatMap(projectView)),
+          baseDocuments
+            .edit(id, patch, expectedRevision)
+            .pipe(Effect.flatMap((v) => projectView(v))),
+        lock: (id) => baseDocuments.lock(id).pipe(Effect.flatMap((v) => projectView(v))),
+        unlock: (id, reason) =>
+          baseDocuments.unlock(id, reason).pipe(Effect.flatMap((v) => projectView(v))),
         cancel: (id, input, opts) =>
-          withTrackedRequestOutcome(
-            opts?.requestKey !== undefined,
-            baseDocuments.cancel(id, input, opts).pipe(
-              Effect.flatMap((res) =>
-                Effect.gen(function* () {
-                  const document = yield* projectView(res.document);
-                  const creditNote =
-                    res.creditNote === null ? null : yield* projectView(res.creditNote);
-                  return { document, creditNote };
-                }),
-              ),
-            ),
-          ),
+          runKeyedProjection({
+            method: "cancel",
+            requestKey: opts?.requestKey,
+            hasSqlRequestLog,
+            memoryReplays: memoryCancelReplays,
+            execute: baseDocuments.cancel(id, input, opts),
+            project: (res, wasReplayed) =>
+              Effect.gen(function* () {
+                const document = yield* projectView(res.document, wasReplayed);
+                const creditNote =
+                  res.creditNote === null ? null : yield* projectView(res.creditNote, wasReplayed);
+                return { document, creditNote };
+              }),
+          }),
         correct: (id, input, opts) =>
-          withTrackedRequestOutcome(
-            opts?.requestKey !== undefined,
-            baseDocuments.correct(id, input, opts).pipe(Effect.flatMap(projectView)),
-          ),
+          runKeyedProjection({
+            method: "correct",
+            requestKey: opts?.requestKey,
+            hasSqlRequestLog,
+            memoryReplays: memoryViewReplays,
+            execute: baseDocuments.correct(id, input, opts),
+            project: projectView,
+          }),
         issueFinalInvoice: (proforma, input, opts) =>
-          withTrackedRequestOutcome(
-            opts?.requestKey !== undefined,
-            baseDocuments
-              .issueFinalInvoice(proforma, input, opts)
-              .pipe(Effect.flatMap(projectView)),
-          ),
+          runKeyedProjection({
+            method: "issueFinalInvoice",
+            requestKey: opts?.requestKey,
+            hasSqlRequestLog,
+            memoryReplays: memoryViewReplays,
+            execute: baseDocuments.issueFinalInvoice(proforma, input, opts),
+            project: projectView,
+          }),
         previewFinalInvoice: (proforma, input) =>
           baseDocuments
             .previewFinalInvoice(proforma, input)
@@ -573,7 +626,7 @@ const ProjectedDocumentsLive: Layer.Layer<Documents, never, Documents | CoreStor
           baseDocuments
             .previewCorrection(id, input)
             .pipe(Effect.map((view) => enrichDocumentView(view, null))),
-        get: (id) => baseDocuments.get(id).pipe(Effect.flatMap(projectView)),
+        get: (id) => baseDocuments.get(id).pipe(Effect.flatMap((v) => projectView(v))),
         pdf: (id, opts) =>
           baseDocuments
             .pdf(id, opts)
@@ -590,20 +643,26 @@ const ProjectedTemplatesLive: Layer.Layer<Templates, never, Templates | CoreStor
       const coreStore = yield* CoreStore;
       const documentsRepo = yield* DocumentsRepo;
       const hasSqlRequestLog = Option.isSome(yield* Effect.serviceOption(SqlClient.SqlClient));
+      const memoryReplays = new Map<string, DocumentView>();
 
       return Templates.of({
         ...baseTemplates,
         use: (template, input, opts) =>
-          withTrackedRequestOutcome(
-            opts?.requestKey !== undefined,
-            baseTemplates
-              .use(template, input, opts)
-              .pipe(
-                Effect.flatMap((view) =>
-                  projectMemberDocumentView(view, documentsRepo, coreStore, hasSqlRequestLog),
-                ),
+          runKeyedProjection({
+            method: "templates.use",
+            requestKey: opts?.requestKey,
+            hasSqlRequestLog,
+            memoryReplays,
+            execute: baseTemplates.use(template, input, opts),
+            project: (view, wasReplayed) =>
+              projectMemberDocumentView(
+                view,
+                documentsRepo,
+                coreStore,
+                hasSqlRequestLog,
+                wasReplayed,
               ),
-          ),
+          }),
       });
     }),
   );

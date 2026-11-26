@@ -20,6 +20,7 @@ import {
   markLegacyDeliveryView,
   projectDocumentFromSql,
   readDeliverySnapshot,
+  readLegacyDeliveryInfo,
 } from "../../projections/documents";
 import { asStringArray, parseJson, toJsonb } from "../codec";
 import { unavailable } from "../errors";
@@ -198,7 +199,26 @@ export const DeliveriesRepoSql: Layer.Layer<DeliveriesRepo, never, SqlClient.Sql
       const table = makeTable(sql, spec);
 
       return DeliveriesRepo.of({
-        get: (workspaceId, id) => table.get(workspaceId, id),
+        get: (workspaceId, id) =>
+          table.get(workspaceId, id).pipe(
+            Effect.flatMap((row) => {
+              if (row.status !== "sending" || readLegacyDeliveryInfo(row.view) === undefined) {
+                return Effect.succeed(row);
+              }
+              const updatedAt = new Date().toISOString();
+              return sql`
+                update deliveries
+                set status = 'failed',
+                    failure = ${"delivery.snapshot_missing"},
+                    revision = revision + 1,
+                    updated_at = ${updatedAt}::timestamptz
+                where workspace_id = ${workspaceId}
+                  and id = ${id}
+                  and revision = ${row.revision}
+                  and status = 'sending'
+              `.pipe(Effect.catch(unavailable), Effect.andThen(table.get(workspaceId, id)));
+            }),
+          ),
         lock: (workspaceId, id) => table.lock(workspaceId, id),
         insert: (row) =>
           Effect.gen(function* () {
