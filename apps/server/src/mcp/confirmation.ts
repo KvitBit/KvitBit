@@ -39,6 +39,29 @@ const canonicalJson = (value: unknown): string => {
 const hashBoundArgs = (args: Readonly<Record<string, unknown>>): string =>
   sha256(canonicalJson(confirmationBoundArgs(args)));
 
+// Core corrections lock a Payment Tax Document's Proforma first (S4).
+const lockCreditProforma = (
+  sql: SqlClient.SqlClient,
+  workspaceId: WorkspaceId,
+  documentId: string,
+) =>
+  Effect.gen(function* () {
+    const [parent] = yield* sql<{ readonly to_document_id: string }>`
+      SELECT link.to_document_id
+      FROM document_relations AS link
+      JOIN documents AS source
+        ON source.workspace_id = link.workspace_id AND source.id = link.from_document_id
+      WHERE link.workspace_id = ${workspaceId} AND link.from_document_id = ${documentId}
+        AND link.relation = 'advance_of' AND source.kind = 'payment_tax_document'
+    `;
+    if (parent !== undefined) {
+      yield* sql`
+        SELECT id FROM documents WHERE workspace_id = ${workspaceId}
+          AND id = ${parent.to_document_id} FOR UPDATE
+      `;
+    }
+  });
+
 export interface ConfirmationContext {
   readonly workspaceId: WorkspaceId;
   readonly grantId: string;
@@ -133,6 +156,9 @@ const makeConfirmations = (sql: SqlClient.SqlClient) => ({
           if (subject !== undefined && row.subject_revision !== null) {
             // The draft issue port takes expectedRevision directly. Keep the other
             // subjects stable until core finishes the write inside this transaction.
+            if (context.tool === "create_credit_note") {
+              yield* lockCreditProforma(sql, context.workspaceId, subject.id);
+            }
             const [current] = yield* sql<{ readonly revision: number }>`
               SELECT revision FROM ${sql(subject.table)}
               WHERE workspace_id = ${context.workspaceId} AND id = ${subject.id}

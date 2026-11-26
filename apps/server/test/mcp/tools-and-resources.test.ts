@@ -3,6 +3,7 @@ import { MCP_RESOURCES, MCP_TOOLS } from "@kvitbit/api-contract";
 import { CoreStore } from "@kvitbit/core/ports";
 import { StartedDeliveries } from "@kvitbit/core/testing";
 import {
+  ContactId,
   Contacts,
   CurrencyCode,
   CurrentCaller,
@@ -16,7 +17,7 @@ import {
   type WorkspaceId,
   Workspaces,
 } from "@kvitbit/domain/contract";
-import { BigDecimal, Duration, Effect, Option, Ref, Stream } from "effect";
+import { BigDecimal, Duration, Effect, Option, Ref, Schema, Stream } from "effect";
 import { SqlClient } from "effect/sql";
 import { TestClock } from "effect/testing";
 import { RequestClaimCheck } from "../../src/persistence/CoreStoreSql";
@@ -586,18 +587,26 @@ describe("MCP 28 tools, 9 resources, two-step confirmation, and scope enforcemen
       "draft",
     );
 
-    const tplIssuePreview = await h.callTool(rw.token, "create_from_template", {
+    const tplIssueArgs = {
       templateId,
       as: "issued",
-      patch: { contact: contactId },
-    });
+      patch: {
+        contact: contactId,
+        due: { inDays: 7 },
+        lines: [
+          { description: "Adjusted retainer", quantity: "1", unitPrice: "2000", vat: "standard" },
+        ],
+      },
+    };
+    const tplIssuePreview = await h.callTool(rw.token, "create_from_template", tplIssueArgs);
     expect(tplIssuePreview.result?.isError).toBe(false);
     expect(tplIssuePreview.result?.structuredContent?._tag)?.toBe("ConfirmationRequired");
+    expect(tplIssuePreview.result?.structuredContent?.summary).toMatchObject({
+      document: { contact: "Alza.cz a.s.", currency: "CZK", total: "2420", dueOn: "2026-11-30" },
+    });
     const tplToken = tplIssuePreview.result?.structuredContent?.confirmationToken as string;
     const tplIssueConfirm = await h.callTool(rw.token, "create_from_template", {
-      templateId,
-      as: "issued",
-      patch: { contact: contactId },
+      ...tplIssueArgs,
       confirm: true,
       confirmationToken: tplToken,
     });
@@ -612,6 +621,55 @@ describe("MCP 28 tools, 9 resources, two-step confirmation, and scope enforcemen
     });
     expect(reportRes.result?.isError).toBe(false);
     expect(reportRes.result?.structuredContent?.report)?.toBe("vat_summary");
+  });
+
+  test("confirming a Payment Tax Document credit locks its Proforma first", async () => {
+    const { h, rw, ownerCaller, seeded } = await setupSeededWorkspace();
+    const proforma = await h.run(
+      Effect.flatMap(Documents, (documents) =>
+        documents.issue({
+          input: {
+            kind: "proforma",
+            contact: Schema.decodeUnknownSync(ContactId)(seeded.supplierContact.id),
+            lines: [
+              {
+                description: "Advance",
+                unitPrice: BigDecimal.fromStringUnsafe("5000"),
+                vat: "standard",
+              },
+            ],
+          },
+        }),
+      ).pipe(Effect.provideService(CurrentCaller, ownerCaller)),
+    );
+    const settled = await h.callTool(rw.token, "settle_proforma", {
+      proformaId: proforma.id,
+      paidOn: "2026-11-23",
+      method: "bank_transfer",
+    });
+    expect(settled.result?.isError).toBe(false);
+    const issued = settled.result?.structuredContent?.issued as ReadonlyArray<{ id: string }>;
+    const ptdId = issued[0]?.id;
+    expect(ptdId).toBeDefined();
+
+    const args = { documentId: ptdId, lines: "full", reason: "Refund agreed" };
+    const preview = await h.callTool(rw.token, "create_credit_note", args);
+    expect(preview.result?.structuredContent?._tag).toBe("ConfirmationRequired");
+    const locked: unknown[] = [];
+    const instance = h.createInstance((statement) => {
+      const [query, params] = statement.compile();
+      if (/\bFROM\s+"?documents\b/i.test(query) && /\bFOR UPDATE\b/i.test(query)) {
+        locked.push(params.find((id) => id === proforma.id || id === ptdId));
+      }
+      return Effect.succeed(statement);
+    });
+    const confirmed = await instance.callTool(rw.token, "create_credit_note", {
+      ...args,
+      confirmationToken: preview.result?.structuredContent?.confirmationToken,
+      confirm: true,
+    });
+    expect(confirmed.result?.structuredContent?._tag).toBe("Confirmed");
+    expect(locked.slice(0, 2)).toEqual([proforma.id, ptdId]);
   });
 
   test("separate instances replay the same write through expiry and reject an expired log", async () => {

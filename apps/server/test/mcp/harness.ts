@@ -17,7 +17,7 @@ import {
 } from "@kvitbit/domain/contract";
 import { Effect, Layer, ManagedRuntime } from "effect";
 import { HttpRouter } from "effect/http";
-import { SqlClient } from "effect/sql";
+import { SqlClient, Statement } from "effect/sql";
 import { TestClock } from "effect/testing";
 import { PrincipalResolver } from "../../src/auth/PrincipalResolver";
 import { McpConfigTest, McpRoutesLive } from "../../src/mcp";
@@ -123,8 +123,12 @@ export const makeMcpHarness = (options: TestCoreOptions = {}) => {
   );
 
   const instances = new Set<ReturnType<typeof HttpRouter.toWebHandler>>();
-  const createInstance = () => {
-    const web = HttpRouter.toWebHandler(app, { disableLogger: true });
+  const createInstance = (transform?: Statement.Transformer) => {
+    const routes =
+      transform === undefined
+        ? app
+        : app.pipe(Layer.provide(Layer.succeed(Statement.CurrentTransformer, transform)));
+    const web = HttpRouter.toWebHandler(routes, { disableLogger: true });
     instances.add(web);
 
     const fetch = (path: string, init: RequestInit = {}) =>
