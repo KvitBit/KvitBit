@@ -199,6 +199,8 @@ test.each(["DCR", "CIMD"])(
           access_token: string;
           refresh_token: string;
           scope: string;
+          expires_at: number;
+          expires_in: number;
         };
         expect(response.status).toBe(200);
         expect(body.access_token).toBeTruthy();
@@ -274,9 +276,17 @@ test.each(["DCR", "CIMD"])(
         refresh(firstTokens.refresh_token),
       ]);
       const rotated = await tokens(rotation);
-      expect(await tokens(parallelReplay)).toEqual(rotated);
+      const expectSameRotation = (replayed: typeof rotated) => {
+        expect(replayed.access_token === rotated.access_token).toBe(true);
+        expect(replayed.refresh_token === rotated.refresh_token).toBe(true);
+        expect(replayed.expires_at).toBe(rotated.expires_at);
+        // A replay preserves absolute expiry and reports the remaining lifetime at response time.
+        expect(replayed.expires_in).toBeLessThanOrEqual(rotated.expires_in);
+        expect(replayed.expires_in).toBeGreaterThanOrEqual(rotated.expires_in - 10);
+      };
+      expectSameRotation(await tokens(parallelReplay));
       await expectWorkspace(rotated.access_token, "OAuth Alpha");
-      expect(await tokens(await refresh(firstTokens.refresh_token))).toEqual(rotated);
+      expectSameRotation(await tokens(await refresh(firstTokens.refresh_token)));
       const secondTokens = await tokens(await exchange(await consent(second.workspaceId)));
       await expectWorkspace(secondTokens.access_token, "OAuth Beta");
 
