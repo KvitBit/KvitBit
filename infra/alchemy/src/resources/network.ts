@@ -213,15 +213,18 @@ publish_guest_attribute() {
   local key="$1"
   local value="$2"
   curl -fsS --connect-timeout 5 --max-time 15 -X PUT -H "$HEADER" --data "$value" \
-    "$METADATA/instance/guest-attributes/kvitbit/$key" >/dev/null 2>&1 || true
+    "$METADATA/instance/guest-attributes/kvitbit/$key" >/dev/null 2>&1
 }
 
 publish_active_state() {
   local digest="$1"
   local config_sha="$2"
-  publish_guest_attribute "active-digest" "$digest"
-  publish_guest_attribute "active-config-sha" "$config_sha"
-  publish_guest_attribute "active-target" "$digest|$config_sha"
+  if ! publish_guest_attribute "active-target" "$digest|$config_sha"; then
+    echo "Failed to publish verified worker target" >&2
+    return 1
+  fi
+  publish_guest_attribute "active-digest" "$digest" || true
+  publish_guest_attribute "active-config-sha" "$config_sha" || true
 }
 
 parse_worker_config() {
@@ -438,6 +441,11 @@ EOF_VARS
   printf 'KVITBIT_WORKER_CONFIG_SHA=%s\\n' "$TARGET_CONFIG_SHA"
 } > "$TARGET_ENV_TMP"
 
+# A rollback must never read the previous target after its worker has stopped.
+if ! publish_guest_attribute "active-target" "pending"; then
+  echo "Failed to invalidate previous worker target" >&2
+  exit 1
+fi
 ensure_worker_unit
 # A systemd auto-restart must never see env and labels from different targets.
 systemctl stop kvitbit-worker.service

@@ -515,6 +515,50 @@ describe("Self-hosting and CI deploy artifacts", () => {
     );
   }, 45_000);
 
+  test("PostgreSQL 17 rejects runtime ownership of existing application tables", async () => {
+    await withPostgresRoleSandbox(({ init, reconcile, fresh, roleScript, sql, assertOk }) => {
+      assertOk(
+        sql(
+          fresh,
+          `
+          CREATE ROLE legacy_app;
+          CREATE ROLE legacy_member;
+          CREATE ROLE legacy_table_owner;
+          CREATE TABLE public.legacy_table (id integer);
+          ALTER TABLE public.legacy_table OWNER TO legacy_app;
+          CREATE SCHEMA auth;
+          CREATE TABLE auth.legacy_table (id integer);
+          ALTER TABLE auth.legacy_table OWNER TO legacy_table_owner;
+          GRANT legacy_table_owner TO legacy_member WITH INHERIT FALSE, SET TRUE;
+        `,
+        ),
+      );
+
+      for (const role of ["legacy_app", "legacy_member"]) {
+        expect(
+          assertOk(
+            sql(
+              fresh,
+              `
+              SELECT has_database_privilege('${role}', current_database(), 'CREATE'),
+                     has_schema_privilege('${role}', 'public', 'CREATE'),
+                     has_schema_privilege('${role}', 'auth', 'CREATE')
+            `,
+            ),
+          ),
+        ).toBe("f|f|f");
+        for (const script of [init, reconcile]) {
+          const result = roleScript(script, fresh, role);
+          expect(result.exitCode).not.toBe(0);
+          expect(result.stderr).toContain("owns database object");
+        }
+        expect(
+          assertOk(sql(fresh, `SELECT rolcanlogin FROM pg_roles WHERE rolname = '${role}'`)),
+        ).toBe("f");
+      }
+    });
+  }, 45_000);
+
   test("PostgreSQL 17 revokes database CREATE and enforces DML-only runtime roles", async () => {
     await withPostgresRoleSandbox(
       ({ init, reconcile, fresh, existing, owner, roleScript, psql, sql, assertOk }) => {

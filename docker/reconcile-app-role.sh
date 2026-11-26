@@ -59,6 +59,7 @@ DECLARE
   v_role pg_roles%ROWTYPE;
   v_schema text;
   v_ddl_role text;
+  v_owned_object text;
 BEGIN
   SELECT * INTO STRICT v_db FROM pg_database WHERE datname = current_database();
   IF v_db.datname <> current_setting('kvitbit.db_name') THEN
@@ -86,6 +87,20 @@ BEGIN
       AND pg_has_role(v_role.oid, r.oid, 'MEMBER')
   ) THEN
     RAISE EXCEPTION 'Runtime role % owns the database or belongs to an owner or elevated role', v_app_user;
+  END IF;
+
+  -- Ownership grants DDL authority independently of the database and schema ACLs.
+  SELECT pg_describe_object(d.classid, d.objid, d.objsubid)
+    INTO v_owned_object
+  FROM pg_shdepend d
+  WHERE d.dbid = v_db.oid
+    AND d.refclassid = 'pg_authid'::regclass
+    AND d.deptype = 'o'
+    AND pg_has_role(v_role.oid, d.refobjid, 'MEMBER')
+  LIMIT 1;
+  IF FOUND THEN
+    RAISE EXCEPTION 'Runtime role % owns database object % directly or through role membership',
+      v_app_user, v_owned_object;
   END IF;
 
   EXECUTE format('REVOKE CREATE ON DATABASE %I FROM %I', v_db.datname, v_app_user);

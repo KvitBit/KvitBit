@@ -715,7 +715,10 @@ if [ "$METHOD" = "PUT" ]; then
       printf '%s' "$DATA" > "${stateDir}/guest-active-config-sha"
       ;;
     *"guest-attributes/kvitbit/active-target")
-      if [ -f "${stateDir}/fail-active-target-once" ]; then
+      if [ "$DATA" = "pending" ] && [ -f "${stateDir}/fail-invalidation" ]; then
+        exit 22
+      fi
+      if [ "$DATA" != "pending" ] && [ -f "${stateDir}/fail-active-target-once" ]; then
         rm -f "${stateDir}/fail-active-target-once"
         exit 22
       fi
@@ -834,6 +837,7 @@ fi
       Bun.spawnSync(["/bin/bash", scriptPath], { env, stdout: "pipe", stderr: "pipe" });
 
     return {
+      binDir,
       reconcile,
       runDir,
       stateDir,
@@ -981,7 +985,6 @@ fi
         // The next tick applies the config-only rollout once its JSON is available.
         writeFileSync(join(stateDir, "target-config"), configJson2);
         writeFileSync(join(stateDir, "next-attributes-etag"), "changed-during-fetch");
-        writeFileSync(join(stateDir, "fail-active-target-once"), "");
         const readsBeforeRecovery = readFileSync(join(stateDir, "config-reads"), "utf8");
         expect(reconcile().exitCode).toBe(0);
         expect(readFileSync(join(stateDir, "config-reads"), "utf8")).toBe(
@@ -998,14 +1001,90 @@ fi
             .filter((l) => l === "systemctl:start kvitbit-worker.service").length,
         ).toBe(2);
         const logAfterConfigUpdate = readFileSync(join(stateDir, "log"), "utf8");
-        expect(readFileSync(join(stateDir, "guest-active-target"), "utf8")).toBe(
-          `${digest1}|${configSha1}`,
-        );
         expect(reconcile().exitCode).toBe(0);
         expect(readFileSync(join(stateDir, "log"), "utf8")).toBe(logAfterConfigUpdate);
         expect(readFileSync(join(stateDir, "guest-active-target"), "utf8")).toBe(
           `${digest1}|${configSha2}`,
         );
+      },
+    );
+  });
+
+  test("deploy waits for the verified rollback after a worker acknowledgement fails", () => {
+    withRunnerSandbox(
+      ({ binDir, reconcile, stateDir, digest1, configSha1, configSha2, configJson2 }) => {
+        const workflow = Bun.YAML.parse(
+          readFileSync(resolve(import.meta.dir, "../../../.github/workflows/deploy.yml"), "utf8"),
+        ) as { jobs: { deploy: { steps: { name?: string; run?: string }[] } } };
+        const verify = workflow.jobs.deploy.steps.find(
+          (step) => step.name === "Verify runner pool reconciled target digest and config",
+        )?.run;
+        if (verify === undefined) throw new Error("Expected the runner verification step");
+        const gcloud = join(binDir, "gcloud");
+        writeFileSync(
+          gcloud,
+          `#!/bin/sh
+set -eu
+case "$3" in
+  list) printf 'runner\\n' ;;
+  describe)
+    printf '{"metadata":{"items":[{"key":"kvitbit-worker-config-sha","value":"%s"}]}}' "$(cat "${stateDir}/target-config-sha")"
+    ;;
+  get-guest-attributes) cat "${stateDir}/guest-active-target" ;;
+  reset) : ;;
+  *) exit 1 ;;
+esac
+`,
+        );
+        chmodSync(gcloud, 0o755);
+        const verifyRollout = () =>
+          Bun.spawnSync(["bash", "-c", verify], {
+            env: {
+              PATH: `${binDir}:${process.env.PATH ?? "/usr/bin:/bin"}`,
+              GCP_PROJECT_ID: "kvitbit-prod",
+              GCP_ZONE: "europe-west3-a",
+              KVITBIT_STAGE: "prod",
+              TARGET_DIGEST: digest1,
+            },
+            stdout: "pipe",
+            stderr: "pipe",
+          });
+
+        expect(reconcile().exitCode).toBe(0);
+        const configJson1 = readFileSync(join(stateDir, "target-config"), "utf8");
+        writeFileSync(join(stateDir, "target-config"), configJson2);
+        writeFileSync(join(stateDir, "target-config-sha"), configSha2);
+        writeFileSync(join(stateDir, "fail-active-target-once"), "");
+        const changed = reconcile();
+        expect(readFileSync(join(stateDir, "running-config-sha"), "utf8")).toBe(configSha2);
+
+        writeFileSync(join(stateDir, "target-config"), configJson1);
+        writeFileSync(join(stateDir, "target-config-sha"), configSha1);
+        expect(verifyRollout().exitCode).toBe(1);
+        expect(changed.exitCode).toBe(1);
+        expect(readFileSync(join(stateDir, "guest-active-target"), "utf8")).toBe("pending");
+        expect(reconcile().exitCode).toBe(0);
+        expect(readFileSync(join(stateDir, "running-config-sha"), "utf8")).toBe(configSha1);
+        expect(verifyRollout().exitCode).toBe(0);
+
+        // If invalidation fails, the current worker must remain running and acknowledged.
+        writeFileSync(join(stateDir, "target-config"), configJson2);
+        writeFileSync(join(stateDir, "target-config-sha"), configSha2);
+        writeFileSync(join(stateDir, "fail-invalidation"), "");
+        expect(reconcile().exitCode).toBe(1);
+        expect(readFileSync(join(stateDir, "running-config-sha"), "utf8")).toBe(configSha1);
+        expect(readFileSync(join(stateDir, "guest-active-target"), "utf8")).toBe(
+          `${digest1}|${configSha1}`,
+        );
+
+        // A later tick can confirm a running target after an acknowledgement write failure.
+        rmSync(join(stateDir, "fail-invalidation"));
+        writeFileSync(join(stateDir, "fail-active-target-once"), "");
+        expect(reconcile().exitCode).toBe(1);
+        const log = readFileSync(join(stateDir, "log"), "utf8");
+        expect(reconcile().exitCode).toBe(0);
+        expect(readFileSync(join(stateDir, "log"), "utf8")).toBe(log);
+        expect(verifyRollout().exitCode).toBe(0);
       },
     );
   });
