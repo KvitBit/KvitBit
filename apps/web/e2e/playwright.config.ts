@@ -14,7 +14,7 @@ const CHROMIUM_EXECUTABLE = process.env.KVITBIT_CHROMIUM_PATH;
 export default defineConfig({
   testDir: ".",
   testMatch: "**/*.spec.ts",
-  fullyParallel: true,
+  workers: 1,
   forbidOnly: Boolean(process.env.CI),
   retries: process.env.CI ? 2 : 0,
   reporter: process.env.CI ? [["github"], ["list"]] : "list",
