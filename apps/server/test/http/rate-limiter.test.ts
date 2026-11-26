@@ -102,6 +102,62 @@ describe("Shared HTTP/MCP trailing sliding-window RateLimiter", () => {
           select count(*)::text as count from auth.rate_limit
           where starts_with(key, 'edge:shared:1#')`;
         expect(Number(rows[0]?.count)).toBe(3);
+
+        // Idle key cleanup: after 2 minutes of inactivity, a request on another key reclaims
+        // expired rows belonging to idle keys.
+        yield* TestClock.adjust(Duration.minutes(2));
+        expect(yield* limiterA.consume("other:key", rule)).toEqual({ allowed: true });
+        const staleRows = yield* sql<{ count: string }>`
+          select count(*)::text as count from auth.rate_limit
+          where starts_with(key, 'edge:shared:1#')`;
+        expect(Number(staleRows[0]?.count)).toBe(0);
+      }).pipe(Effect.provide(coreLayer)),
+    );
+  });
+
+  test("RateLimiterSql honors active legacy fixed-window aggregate rows during rollout", async () => {
+    const t0 = Date.parse("2026-11-23T12:00:00Z");
+    const clockLayer = Layer.effectDiscard(TestClock.setTime(t0)).pipe(
+      Layer.provideMerge(TestClock.layer()),
+    );
+    const coreLayer = SqlTestCore().pipe(Layer.provideMerge(clockLayer));
+
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient;
+        const limiter = yield* Effect.provide(RateLimiter, RateLimiterSql);
+        const rule = { max: 3, windowSeconds: 60 };
+
+        // Seed an active legacy aggregate row with count=2 at t=0s and a full one with count=3.
+        yield* sql`
+          insert into auth.rate_limit (id, key, count, last_request)
+          values
+            ('legacy-row-1', 'edge:api-key:legacy-partial', 2, ${t0}),
+            ('legacy-row-2', 'edge:api-key:legacy-full', 3, ${t0})`;
+
+        // At t=15s: legacy-full is already at limit (Retry-After: 45s).
+        yield* TestClock.adjust(Duration.seconds(15));
+        expect(yield* limiter.consume("api-key:legacy-full", rule)).toEqual({
+          allowed: false,
+          retryAfterSeconds: 45,
+        });
+
+        // At t=15s: legacy-partial has 1 slot left, then denies with Retry-After: 45s.
+        expect(yield* limiter.consume("api-key:legacy-partial", rule)).toEqual({ allowed: true });
+        expect(yield* limiter.consume("api-key:legacy-partial", rule)).toEqual({
+          allowed: false,
+          retryAfterSeconds: 45,
+        });
+
+        // At t=60s: legacy aggregate row expires and is pruned; the t=15s admission remains live,
+        // so 2 new slots open and the 3rd is denied with Retry-After: 15s.
+        yield* TestClock.adjust(Duration.seconds(45));
+        expect(yield* limiter.consume("api-key:legacy-partial", rule)).toEqual({ allowed: true });
+        expect(yield* limiter.consume("api-key:legacy-partial", rule)).toEqual({ allowed: true });
+        expect(yield* limiter.consume("api-key:legacy-partial", rule)).toEqual({
+          allowed: false,
+          retryAfterSeconds: 15,
+        });
       }).pipe(Effect.provide(coreLayer)),
     );
   });

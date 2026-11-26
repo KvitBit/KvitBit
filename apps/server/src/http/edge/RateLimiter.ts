@@ -43,6 +43,10 @@ export const RATE_LIMITS = {
   invitationPeek: { max: 30, windowSeconds: 60 },
 } as const satisfies Record<string, RateRule>;
 
+const MAX_EDGE_WINDOW_MS =
+  Math.max(...Object.values(RATE_LIMITS).map((rule) => rule.windowSeconds)) * 1000;
+const IDLE_PRUNE_LIMIT = 100;
+
 const retryAfterFrom = (oldestAdmissionMs: number, windowMs: number, now: number): number =>
   Math.max(1, Math.ceil((oldestAdmissionMs + windowMs - now) / 1000));
 
@@ -78,7 +82,10 @@ export const RateLimiterMemory: Layer.Layer<RateLimiter> = Layer.sync(RateLimite
 /**
  * Shared trailing sliding-window counters in `auth.rate_limit`: one admission row per accepted
  * request (`edge:<key>#<id>`), serialized per key with a transaction-scoped advisory lock.
- * Expired rows for the key are pruned in the same transaction; refused requests write nothing.
+ * Active legacy fixed-window aggregate rows (`edge:<key>`) are counted alongside admission rows
+ * until they age out, preserving active allowances across upgrades. Expired rows for the current
+ * key and a bounded batch of expired idle edge rows are pruned in the same transaction; refused
+ * requests write nothing.
  */
 export const RateLimiterSql: Layer.Layer<RateLimiter, never, SqlClient.SqlClient> = Layer.effect(
   RateLimiter,
@@ -97,20 +104,42 @@ export const RateLimiterSql: Layer.Layer<RateLimiter, never, SqlClient.SqlClient
               // admissions that expired meanwhile.
               const now = yield* Clock.currentTimeMillis;
               const cutoff = now - windowMs;
+              const idleCutoff = now - Math.max(windowMs, MAX_EDGE_WINDOW_MS);
               yield* sql`
                 delete from auth.rate_limit
-                where starts_with(key, ${prefix}) and last_request <= ${cutoff}`;
-              const live = yield* sql<{ last_request: string | number }>`
-                select last_request from auth.rate_limit
-                where starts_with(key, ${prefix})
+                where (key = ${bucketKey} or starts_with(key, ${prefix}))
+                  and last_request <= ${cutoff}`;
+              yield* sql`
+                delete from auth.rate_limit
+                where id in (
+                  select id from auth.rate_limit
+                  where starts_with(key, 'edge:') and last_request <= ${idleCutoff}
+                  limit ${IDLE_PRUNE_LIMIT}
+                )`;
+              const live = yield* sql<{ count: number | string; last_request: string | number }>`
+                select count, last_request from auth.rate_limit
+                where key = ${bucketKey} or starts_with(key, ${prefix})
                 order by last_request asc`;
-              if (live.length < rule.max) {
+              let totalLive = 0;
+              for (const row of live) {
+                totalLive += Math.max(0, Number(row.count));
+              }
+              if (totalLive < rule.max) {
                 yield* sql`
                   insert into auth.rate_limit (id, key, count, last_request)
                   values (${generateId()}, ${`${prefix}${generateId()}`}, 1, ${now})`;
                 return { allowed: true } as const;
               }
-              const oldest = Number(live[Math.max(0, live.length - rule.max)]?.last_request ?? now);
+              const excess = totalLive - rule.max;
+              let seen = 0;
+              let oldest = now;
+              for (const row of live) {
+                seen += Math.max(0, Number(row.count));
+                if (seen > excess) {
+                  oldest = Number(row.last_request);
+                  break;
+                }
+              }
               return {
                 allowed: false,
                 retryAfterSeconds: retryAfterFrom(oldest, windowMs, now),
