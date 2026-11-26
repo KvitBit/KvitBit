@@ -112,6 +112,9 @@ export const issuingEntities = pgTable("issuing_entities", {
   country: text("country").notNull().default("CZ"),
   commercialRegister: text("commercial_register"),
   senderName: text("sender_name"),
+  email: text("email"),
+  phone: text("phone"),
+  web: text("web"),
   registryFetchedAt: instant("registry_fetched_at"),
 });
 
@@ -165,8 +168,10 @@ export const invitations = pgTable(
       .notNull()
       .references(() => user.id, { onDelete: "restrict" }),
     sendEpoch: integer("send_epoch").notNull().default(0),
+    lastSentAt: createdAt("last_sent_at"),
     expiresAt: instant("expires_at").notNull(),
     acceptedAt: instant("accepted_at"),
+    acceptedBy: text("accepted_by").references(() => user.id, { onDelete: "set null" }),
     revokedAt: instant("revoked_at"),
     workflowStartedAt: instant("workflow_started_at"),
     revision: revision(),

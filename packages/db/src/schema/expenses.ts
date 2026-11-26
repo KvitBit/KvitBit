@@ -49,6 +49,8 @@ export const expenses = pgTable(
     dueOn: isoDate("due_on"),
     currency: currency("currency"),
     vatBreakdown: jsonb("vat_breakdown"),
+    /** Derived figures of a complete Expense (`ExpenseFigures`); null while incomplete. */
+    figures: jsonb("figures"),
     totalGross: money("total_gross"),
     category: text("category"),
     tags: text("tags").array().notNull().default(sql`'{}'::text[]`),
@@ -105,11 +107,13 @@ export const attachments = pgTable(
     contentType: text("content_type").notNull(),
     bytes: bigint("bytes", { mode: "number" }).notNull(),
     sha256: text("sha256").notNull(),
+    revision: revision(),
     createdAt: createdAt(),
   },
   (t) => [
     unique("attachments_workspace_id_id_unique").on(t.workspaceId, t.id),
     unique("attachments_expense_sha256_unique").on(t.expenseId, t.sha256),
+    index("attachments_blob_key_idx").on(t.blobKey),
     foreignKey({
       name: "attachments_expense_fk",
       columns: [t.workspaceId, t.expenseId],

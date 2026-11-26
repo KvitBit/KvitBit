@@ -1,0 +1,2 @@
+ALTER TABLE "deliveries" ADD COLUMN "workflow_attempt" integer DEFAULT 0 NOT NULL;--> statement-breakpoint
+ALTER TABLE "deliveries" ADD CONSTRAINT "deliveries_workflow_attempt_nonnegative" CHECK ("workflow_attempt" >= 0);

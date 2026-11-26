@@ -1,0 +1,29 @@
+{
+  "name": "@kvitbit/server",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "bun src/main.ts",
+    "worker": "bun src/worker.ts",
+    "migrate": "bun src/migrate.ts",
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "bun test --pass-with-no-tests"
+  },
+  "dependencies": {
+    "@better-auth/oauth-provider": "1.7.27",
+    "@effect/platform-bun": "4.1.4",
+    "@effect/platform-node": "4.1.4",
+    "@effect/sql-pg": "4.1.4",
+    "@effect/sql-pglite": "4.1.4",
+    "@electric-sql/pglite": "0.6.0",
+    "@kvitbit/adapters": "workspace:*",
+    "@kvitbit/api-contract": "workspace:*",
+    "@kvitbit/core": "workspace:*",
+    "@kvitbit/db": "workspace:*",
+    "@kvitbit/domain": "workspace:*",
+    "better-auth": "1.7.27",
+    "drizzle-orm": "1.0.0-rc.5",
+    "effect": "4.1.4"
+  }
+}

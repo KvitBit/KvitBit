@@ -59,6 +59,15 @@ export { DocumentActivityLive } from "./compose/documentActivity";
 export { ReportsSourceLive } from "./compose/reportsSource";
 export { ShareWorkspacesLive } from "./compose/shareWorkspaces";
 export * from "./contract";
+export type { WorkspaceReminderSweepResult } from "./jobs";
+export * as CoreJobs from "./jobs";
+export {
+  deliveryJob,
+  exportJob,
+  invitationJob,
+  recurringJob,
+  reminderJob,
+} from "./jobs";
 // Each module's full surface (row types, tables, job steps, pure helpers), namespaced -------
 export * as ContactsModule from "./modules/contacts";
 // Module layers, flat ---------------------------------------------------------------------
