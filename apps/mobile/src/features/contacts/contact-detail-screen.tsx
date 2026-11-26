@@ -69,12 +69,7 @@ import {
   useOverlay,
 } from "../../ui";
 import { useWorkspace } from "../../workspace/workspace-provider";
-import {
-  canWriteWorkspace,
-  type DashboardDocument,
-  parseDocumentSummaries,
-  pragueToday,
-} from "../dashboard/model";
+import { type DashboardDocument, parseDocumentSummaries, pragueToday } from "../dashboard/model";
 import { decodeReportView } from "../reports/model";
 import {
   applyRegistryPreview,
@@ -87,6 +82,7 @@ import {
   type ContactFormErrorCode,
   type ContactFormState,
   type ContactRecord,
+  canEditContact,
   contactFormFromRecord,
   diffContactWithRegistry,
   emptyContactForm,
@@ -134,7 +130,7 @@ export function ContactDetailView(props: ContactDetailViewProps) {
   const { t, locale, local } = useI18n();
   const { contact, workspace } = props;
   const ws = workspace.slug;
-  const writable = canWriteWorkspace(workspace);
+  const editable = canEditContact(workspace, contact);
 
   const fieldLabel = (field: RegistryDiffItem["field"]): string => {
     switch (field) {
@@ -208,7 +204,7 @@ export function ContactDetailView(props: ContactDetailViewProps) {
           </Text>
         ) : null}
 
-        {writable && !contact.archived ? (
+        {editable ? (
           <View style={styles.actionRow}>
             <Button
               label={t("contacts.detail.newInvoice")}
@@ -415,7 +411,7 @@ export function ContactDetailView(props: ContactDetailViewProps) {
         </RemoteView>
       </Section>
 
-      {writable && !contact.archived ? (
+      {editable ? (
         <View style={styles.actionRow}>
           <Button
             kind="outlined"
@@ -958,7 +954,6 @@ function WorkspaceContactDetail({
   const session = useSession();
   const overlay = useOverlay();
   const { t, text, locale, local } = useI18n();
-  const writable = canWriteWorkspace(workspace);
   const owner =
     session.state.status === "signed-in"
       ? JSON.stringify([api.origin, session.state.user.id, workspace.id])
@@ -987,7 +982,6 @@ function WorkspaceContactDetail({
   const [aresDiff, setAresDiff] = useState<RegistryPreview | null>(null);
 
   const savingRef = useRef(false);
-  const loadedRevisionRef = useRef<number | null>(null);
 
   const contactRemote = useRemote(
     contactId === null
@@ -1034,21 +1028,16 @@ function WorkspaceContactDetail({
     [workspace.id, contactId, today],
   );
 
-  const editable =
-    writable &&
-    (isNew ||
-      (contactRemote.state._tag === "Ready" && contactRemote.state.value?.archived === false));
+  const record = contactRemote.state._tag === "Ready" ? contactRemote.state.value : null;
+  const editable = canEditContact(workspace, isNew ? "new" : record);
 
   // Sync loaded contact into editor when entering edit mode or after reload.
   useEffect(() => {
-    if (contactRemote.state._tag === "Ready" && contactRemote.state.value !== null) {
-      const record = contactRemote.state.value;
-      if (loadedRevisionRef.current !== record.revision) {
-        loadedRevisionRef.current = record.revision;
-        setForm(contactFormFromRecord(record));
-      }
-    }
-  }, [contactRemote.state]);
+    if (record === null) return;
+    setForm((current) =>
+      current.editingRevision === record.revision ? current : contactFormFromRecord(record),
+    );
+  }, [record]);
 
   const handleChangeForm = useCallback((updater: (prev: ContactFormState) => ContactFormState) => {
     setForm(updater);
@@ -1117,7 +1106,7 @@ function WorkspaceContactDetail({
     const payload = buildContactInput(form);
     const result = await (async () => {
       if (contactId !== null) {
-        const revision = loadedRevisionRef.current;
+        const revision = form.editingRevision;
         if (revision === null) return null;
         return api.run((client) =>
           client.contacts.update({
@@ -1163,7 +1152,6 @@ function WorkspaceContactDetail({
           { replace: true },
         );
       } else if (saved !== null) {
-        loadedRevisionRef.current = saved.revision;
         contactRemote.set(saved);
         setForm(contactFormFromRecord(saved));
         setMode("view");
@@ -1202,7 +1190,7 @@ function WorkspaceContactDetail({
   ]);
 
   const handleReloadLatest = useCallback(() => {
-    loadedRevisionRef.current = null;
+    setForm((current) => ({ ...current, editingRevision: null }));
     setStaleRevision(false);
     setBannerError(null);
     contactRemote.reload();
@@ -1292,7 +1280,6 @@ function WorkspaceContactDetail({
     if (res._tag === "Ok") {
       const updated = parseContactView(res.value);
       if (updated !== null) {
-        loadedRevisionRef.current = updated.revision;
         contactRemote.set(updated);
         setForm(contactFormFromRecord(updated));
       }
@@ -1331,7 +1318,7 @@ function WorkspaceContactDetail({
   if (isNew) {
     return (
       <Screen title={t("contacts.list.new")} back>
-        {!writable ? (
+        {!editable ? (
           <EmptyState title={t("error.forbidden")} />
         ) : (
           <ContactEditorView
@@ -1377,12 +1364,7 @@ function WorkspaceContactDetail({
           if (record === null) {
             return <EmptyState title={t("error.notFound")} />;
           }
-          if (
-            mode === "edit" &&
-            writable &&
-            !record.archived &&
-            loadedRevisionRef.current !== null
-          ) {
+          if (mode === "edit" && editable && form.editingRevision !== null) {
             return (
               <ContactEditorView
                 isNew={false}

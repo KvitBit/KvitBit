@@ -29,6 +29,7 @@ import {
   applyRegistryToForm,
   buildContactInput,
   type ContactRecord,
+  canEditContact,
   contactFormFromRecord,
   diffContactWithRegistry,
   emptyContactForm,
@@ -105,6 +106,16 @@ const sampleRegistry: RegistryResult = {
 const within = (node: ReactElement) => <TestProviders>{node}</TestProviders>;
 
 describe("contacts model", () => {
+  test("contact edit access requires a writable workspace and an active record", () => {
+    expect(canEditContact(workspace, "new")).toBe(true);
+    expect(canEditContact(workspace, sampleContact)).toBe(true);
+    expect(canEditContact(workspace, { ...sampleContact, archived: true })).toBe(false);
+    expect(canEditContact(workspace, null)).toBe(false);
+    expect(canEditContact({ ...workspace, role: "accountant" }, sampleContact)).toBe(false);
+    expect(canEditContact({ ...workspace, closed: true }, "new")).toBe(false);
+    expect(contactFormFromRecord(sampleContact).editingRevision).toBe(sampleContact.revision);
+  });
+
   test("ignores pages and cursors from a superseded contact query", () => {
     const first = loadContactsQuery(Paged.init<ContactRecord, { text?: string }>({}).paged, {});
     const next = loadContactsQuery(first.paged, { text: "Asseco", role: "supplier" });

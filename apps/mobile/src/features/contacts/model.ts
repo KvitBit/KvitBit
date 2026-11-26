@@ -11,11 +11,13 @@ import type {
   RegistryResult,
   ReminderPolicy,
   WorkspaceId,
+  WorkspaceSummary,
 } from "@kvitbit/domain/contract";
 import { ifMatchHeaders, inWorkspace, type KvitbitApiClient } from "@kvitbit/ui-port/api";
 import { normalizeIco, normalizeVatId, validateIco } from "@kvitbit/ui-port/format";
 import { OverrideForm } from "@kvitbit/ui-port/view-models";
 import { BigDecimal, Effect, Result } from "effect";
+import { canWriteWorkspace } from "../dashboard/model";
 import type { ReceivablesReportData } from "../reports/model";
 
 export interface ContactAddressRecord {
@@ -43,6 +45,7 @@ export interface ContactRecord {
 }
 
 export interface ContactFormState {
+  readonly editingRevision: number | null;
   readonly name: string;
   readonly roles: ReadonlyArray<ContactRole>;
   readonly ico: string;
@@ -166,6 +169,7 @@ export const parseContactViews = (
   });
 
 export const emptyContactForm = (): ContactFormState => ({
+  editingRevision: null,
   name: "",
   roles: ["customer"],
   ico: "",
@@ -187,6 +191,7 @@ export const contactFormFromRecord = (record: ContactRecord): ContactFormState =
   const overrides = OverrideForm.init(record.defaults);
   const policy = overrides.current.reminderPolicy;
   return {
+    editingRevision: record.revision,
     name: record.name,
     roles: [...record.roles],
     ico: record.ico ?? "",
@@ -204,6 +209,11 @@ export const contactFormFromRecord = (record: ContactRecord): ContactFormState =
     reminderOffsetsText: policy?.mode === "custom" ? policy.offsetsDays.join(", ") : "",
   };
 };
+
+export const canEditContact = (
+  workspace: WorkspaceSummary,
+  contact: ContactRecord | "new" | null,
+): boolean => canWriteWorkspace(workspace) && (contact === "new" || contact?.archived === false);
 
 const emptyToNull = (value: string): string | null => {
   const trimmed = value.trim();
