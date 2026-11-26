@@ -9,11 +9,15 @@ import type {
 import { describeError } from "@kvitbit/ui-port/api";
 import { enumText, type Locale } from "@kvitbit/ui-port/i18n";
 import { Building2, Search } from "lucide-react-native";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { StyleSheet, View } from "react-native";
 import { useI18n } from "../../i18n/i18n-provider";
 import { navigate } from "../../navigation/routes";
 import { useApi } from "../../runtime/api-runtime";
+import {
+  isRequestIntentExpired,
+  requestIntentReconciliationCopy,
+} from "../../runtime/request-intent";
 import { useSession } from "../../session/session-provider";
 import {
   Banner,
@@ -27,7 +31,13 @@ import {
   TextField,
 } from "../../ui";
 import { lastWorkspace } from "../../workspace/last-workspace";
-import { type OnboardingProgress, saveOnboarding } from "./save-onboarding";
+import {
+  type OnboardingFormFields,
+  type OnboardingProgress,
+  type OnboardingStep,
+  onboardingStore,
+} from "./onboarding-persistence";
+import { saveOnboarding } from "./save-onboarding";
 
 const TOTAL_STEPS = 3;
 
@@ -41,11 +51,11 @@ export function OnboardingScreen(props: { readonly initialStep?: number }) {
   const api = useApi();
   const { state: session } = useSession();
 
-  const clampedInitial =
-    props.initialStep !== undefined && props.initialStep >= 1 && props.initialStep <= TOTAL_STEPS
+  const clampedInitial: OnboardingStep =
+    props.initialStep === 1 || props.initialStep === 2 || props.initialStep === 3
       ? props.initialStep
       : 1;
-  const [step, setStep] = useState(clampedInitial);
+  const [step, setStep] = useState<OnboardingStep>(clampedInitial);
 
   // Step 1: Issuing entity + ARES
   const [ico, setIco] = useState("");
@@ -78,6 +88,43 @@ export function OnboardingScreen(props: { readonly initialStep?: number }) {
   const [errorBanner, setErrorBanner] = useState<string | null>(null);
   const [nameError, setNameError] = useState<string | null>(null);
   const [progress, setProgress] = useState<OnboardingProgress | null>(null);
+  const userId = session.status === "signed-in" ? session.user.id : null;
+  const [hydratedScope, setHydratedScope] = useState<string | null>(null);
+  const activeScope = userId === null ? null : `${api.origin}\0${userId}`;
+  const hydrating = activeScope !== null && hydratedScope !== activeScope;
+
+  useEffect(() => {
+    if (userId === null || activeScope === null) {
+      setHydratedScope(null);
+      return;
+    }
+    let cancelled = false;
+    void onboardingStore.read(api.origin, userId).then((saved) => {
+      if (cancelled) return;
+      if (saved !== null) {
+        setStep(saved.step);
+        setProgress(saved.progress);
+        setIco(saved.fields.ico);
+        setName(saved.fields.name);
+        setSlug(saved.fields.slug);
+        setDic(saved.fields.dic);
+        setStreet(saved.fields.street);
+        setCity(saved.fields.city);
+        setPostalCode(saved.fields.postalCode);
+        setCountry(saved.fields.country);
+        setRegisterEntry(saved.fields.registerEntry);
+        setTaxRegime(saved.fields.taxRegime);
+        setCurrency(saved.fields.currency);
+        setDocLocale(saved.fields.docLocale);
+        setIban(saved.fields.iban);
+        setBic(saved.fields.bic);
+      }
+      setHydratedScope(activeScope);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [api.origin, userId, activeScope]);
 
   const applyAresResult = (result: RegistryResult) => {
     setIco(result.ico);
@@ -131,7 +178,7 @@ export function OnboardingScreen(props: { readonly initialStep?: number }) {
   };
 
   const handleCreate = async () => {
-    if (session.status !== "signed-in" || busy) return;
+    if (session.status !== "signed-in" || busy || hydrating) return;
     const trimmedName = name.trim();
     if (trimmedName.length === 0) {
       setStep(1);
@@ -140,6 +187,23 @@ export function OnboardingScreen(props: { readonly initialStep?: number }) {
     }
     setBusy(true);
     setErrorBanner(null);
+
+    const fields: OnboardingFormFields = {
+      ico,
+      name,
+      slug,
+      dic,
+      street,
+      city,
+      postalCode,
+      country,
+      registerEntry,
+      taxRegime,
+      currency,
+      docLocale,
+      iban,
+      bic,
+    };
 
     const trimmedIco = ico.replace(/\s+/g, "");
     const trimmedSlug = slug.trim();
@@ -190,14 +254,22 @@ export function OnboardingScreen(props: { readonly initialStep?: number }) {
 
     const saved = await saveOnboarding(
       api,
-      JSON.stringify([api.origin, session.user.id]),
       { workspace: payload, issuingEntity, bank },
-      progress,
-      setProgress,
+      {
+        scope: { origin: api.origin, userId: session.user.id },
+        fields,
+        step,
+        progress,
+        onProgress: setProgress,
+      },
     );
     if (saved.result._tag === "Err") {
       setBusy(false);
-      setErrorBanner(text(describeError(saved.result.error).text));
+      setErrorBanner(
+        isRequestIntentExpired(saved.result.error)
+          ? local(requestIntentReconciliationCopy)
+          : text(describeError(saved.result.error).text),
+      );
       if (saved.step === "issuer") setStep(1);
       return;
     }
@@ -217,7 +289,7 @@ export function OnboardingScreen(props: { readonly initialStep?: number }) {
             <Button
               kind="outlined"
               label={t("common.action.back")}
-              onPress={() => setStep((s) => Math.max(1, s - 1))}
+              onPress={() => setStep((s) => (s === 3 ? 2 : 1))}
               disabled={busy}
               testID="onboarding-back"
             />
@@ -234,6 +306,7 @@ export function OnboardingScreen(props: { readonly initialStep?: number }) {
               label={busy ? t("onboarding.wizard.creating") : t("onboarding.wizard.submit")}
               onPress={() => void handleCreate()}
               busy={busy}
+              disabled={hydrating}
               testID="onboarding-submit"
             />
           )}
@@ -436,9 +509,11 @@ export function OnboardingScreen(props: { readonly initialStep?: number }) {
                   numbers: DEFAULT_SERIES_PREVIEW(taxRegime),
                 })}
               </Text>
-              <Text variant="meta" color="onSurfaceVariant">
-                {t("onboarding.wizard.nothingSaved")}
-              </Text>
+              {progress === null ? (
+                <Text variant="meta" color="onSurfaceVariant">
+                  {t("onboarding.wizard.nothingSaved")}
+                </Text>
+              ) : null}
             </Card>
           </Section>
         </>
