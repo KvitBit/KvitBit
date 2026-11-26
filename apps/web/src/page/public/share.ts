@@ -133,6 +133,7 @@ export const update = (
     GotDocument: ({ seq, token, doc }) => {
       if (token !== model.token) return { model };
       const next = Remote.succeed(model.doc, seq, doc);
+      if (next === model.doc) return { model };
       return {
         model: {
           ...model,

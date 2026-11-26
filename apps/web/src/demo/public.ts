@@ -102,7 +102,7 @@ const buildShareFixture = (token: string): unknown | null => {
         name: isEur ? "Fio EUR" : "Fio CZK",
         currency,
         accountNumber: isEur ? null : "2000145399/2010",
-        iban: isEur ? "CZ6520100000002000145400" : "CZ6520100000002000145399",
+        iban: "CZ9320100000002000145399",
         bic: "FIOBCZPPXXX",
       },
     },
@@ -190,12 +190,12 @@ const buildShareFixture = (token: string): unknown | null => {
           ? {
               format: "epc",
               payload:
-                "BCD\n002\n1\nSCT\nFIOBCZPPXXX\nNovak Design s.r.o.\nCZ6520100000002000145400\nEUR1815.00\n\n20260043",
+                "BCD\n002\n1\nSCT\nFIOBCZPPXXX\nNovak Design s.r.o.\nCZ9320100000002000145399\nEUR1815.00\n\n20260043",
             }
           : {
               format: "spayd",
               payload:
-                "SPD*1.0*ACC:CZ6520100000002000145399*AM:48400.00*CC:CZK*X-VS:20260042*MSG:Faktura 2026-0042",
+                "SPD*1.0*ACC:CZ9320100000002000145399*AM:48400.00*CC:CZK*X-VS:20260042*MSG:Faktura 2026-0042",
             },
     language: isEur ? "en" : "cs",
     amountDue: {
@@ -331,12 +331,18 @@ export const routes: ReadonlyArray<DemoRoute> = [
   {
     method: "POST",
     path: "/api/auth/sign-up/email",
-    respond: ({ body }) => ({
-      user: {
-        ...DEMO_USER,
-        email: (body as Record<string, unknown> | null)?.email ?? DEMO_USER.email,
-      },
-    }),
+    respond: ({ body }) => {
+      const input = body as Record<string, unknown> | null;
+      const invited = typeof input?.invitationToken === "string";
+      return {
+        token: invited ? "demo-invited-session" : null,
+        user: {
+          ...DEMO_USER,
+          email: input?.email ?? DEMO_USER.email,
+          emailVerified: invited,
+        },
+      };
+    },
   },
   {
     method: "POST",

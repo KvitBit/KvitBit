@@ -1,12 +1,15 @@
 import { describe, expect, test } from "bun:test";
+import { Html, HtmlServer } from "@effect/ui/html";
 import { SharedDocumentView, type ShareToken } from "@kvitbit/domain";
-import { Schema } from "effect";
+import { Effect, Schema } from "effect";
+import jsQR from "jsqr";
 import type { Failure } from "../../src/app/api";
 import { routes as publicDemoRoutes } from "../../src/demo/public";
 import { match } from "../../src/demo/router";
 import * as Auth from "../../src/page/public/auth";
 import * as Share from "../../src/page/public/share";
-import { anonymous, ctxFor, renderPath } from "../support";
+import { anonymous, ctxFor, DEMO_WORKSPACE, renderPath } from "../support";
+import { mockWire, run } from "./wire";
 
 const failureOf = (tag: string, freshBotProof = false): Failure => ({
   tag,
@@ -105,7 +108,12 @@ describe("Auth page (Screen 02)", () => {
     );
     expect(passkey.model.botProof._tag).toBe("Idle");
 
-    const unsupported = Auth.update(passkey.model, Auth.Message.FailedPasskeyUnsupported(), ctx);
+    const started = Auth.update(passkey.model, Auth.Message.ClickedPasskeySignIn(), ctx);
+    const unsupported = Auth.update(
+      started.model,
+      Auth.Message.FailedPasskeyUnsupported({ seq: started.model.submitSeq }),
+      ctx,
+    );
     expect(unsupported.model.localError).toContain("Passkeys are not supported");
   });
 
@@ -136,6 +144,140 @@ describe("Auth page (Screen 02)", () => {
     const signIn = await renderPath("/sign-in", { locale: "cs", session: anonymous });
     expect(signIn.html).toContain("Přihlásit se");
   });
+
+  test("invited signup uses the peeked address and invitation proof, then accepts with the verified session", async () => {
+    const email = "invited@example.test";
+    const token = "web-wire-invite";
+    const invite = {
+      workspaceName: "Novák",
+      inviterName: "Jana",
+      email,
+      role: "member",
+      status: "pending",
+      expiresAt: "2099-01-01",
+    };
+    const route: Auth.Route = { _tag: "SignUp", invitation: token };
+    const ctx = ctxFor(route, { locale: "en", session: anonymous });
+    const calls: Array<string> = [];
+    let session = false;
+    const fetch = mockWire(async (request, credentials) => {
+      const url = new URL(request.url);
+      calls.push(`${request.method} ${url.pathname}`);
+      switch (url.pathname) {
+        case "/api/v1/bot-protection/challenges/invitation_accept":
+          return Response.json({
+            parameters: {
+              algorithm: "SHA-256",
+              nonce: "00112233",
+              salt: "aabbccdd",
+              cost: 1,
+              keyLength: 32,
+              keyPrefix: "0",
+              data: { scope: "invitation_accept" },
+            },
+            signature: "wire-fixture",
+          });
+        case `/api/v1/invitations/${token}`:
+          return Response.json(invite);
+        case "/api/auth/sign-up/email": {
+          expect(credentials).toBe("same-origin");
+          const proof = JSON.parse(atob(request.headers.get("x-altcha") ?? ""));
+          expect(proof.challenge.parameters.data.scope).toBe("invitation_accept");
+          expect(await request.json()).toMatchObject({
+            email,
+            invitationToken: token,
+            password: "wire-test-password",
+          });
+          session = true;
+          return Response.json(
+            { token: "fixture-session", user: { email, emailVerified: true } },
+            {
+              headers: {
+                "set-cookie": "better-auth.session_token=fixture-session; HttpOnly; Path=/",
+              },
+            },
+          );
+        }
+        case `/api/v1/invitations/${token}/accept`:
+          expect(session).toBe(true);
+          expect(credentials).toBe("include");
+          return Response.json(DEMO_WORKSPACE);
+        default:
+          throw new Error(`Unexpected request ${url.pathname}`);
+      }
+    });
+    try {
+      const initial = Auth.init(route, ctx);
+      const premature = Auth.update(initial.model, Auth.Message.SubmittedSignUp(), ctx);
+      expect(premature.commands).toBeUndefined();
+      const proof = Auth.update(initial.model, await run(initial.commands?.[0]), ctx);
+      expect(calls).toEqual(["GET /api/v1/bot-protection/challenges/invitation_accept"]);
+      expect(proof.model.botProof).toMatchObject({ _tag: "Solved" });
+      const peeked = Auth.update(proof.model, await run(initial.commands?.[1]), ctx);
+      const tampered = Auth.update(
+        peeked.model,
+        Auth.Message.ChangedEmail({ value: "other@example.test" }),
+        ctx,
+      );
+      expect(tampered.model.email).toBe(email);
+      const password = Auth.update(
+        tampered.model,
+        Auth.Message.ChangedPassword({ value: "wire-test-password" }),
+        ctx,
+      );
+      const agreed = Auth.update(password.model, Auth.Message.ToggledTerms({ checked: true }), ctx);
+      const submitted = Auth.update(agreed.model, Auth.Message.SubmittedSignUp(), ctx);
+      expect(submitted.model.submitting).toBe(true);
+      const signupResponse = await run(submitted.commands?.[0]);
+      expect(signupResponse).toMatchObject({ _tag: "CompletedSubmit", sessionEstablished: true });
+      const signedUp = Auth.update(submitted.model, signupResponse, ctx);
+      expect(signedUp.outMessage).toBeUndefined();
+      const accepted = Auth.update(signedUp.model, await run(signedUp.commands?.[0]), ctx);
+      expect(accepted.outMessage?._tag).toBe("ReloadSession");
+      expect(accepted.outMessage).toHaveProperty("then", {
+        _tag: "Path",
+        path: `/w/${DEMO_WORKSPACE.slug}`,
+        replace: true,
+      });
+      expect(calls).toEqual([
+        "GET /api/v1/bot-protection/challenges/invitation_accept",
+        `GET /api/v1/invitations/${token}`,
+        "POST /api/auth/sign-up/email",
+        `POST /api/v1/invitations/${token}/accept`,
+      ]);
+    } finally {
+      fetch.mockRestore();
+    }
+  });
+
+  test("post-auth intents reload before honoring a destination", () => {
+    for (const [returnTo, expected] of [
+      ["/w/novak-design", { _tag: "Path", path: "/w/novak-design", replace: true }],
+      ["/\\example.test", { _tag: "DefaultSignedIn" }],
+      [undefined, { _tag: "DefaultSignedIn" }],
+    ] as const) {
+      const route: Auth.Route =
+        returnTo === undefined ? { _tag: "SignIn" } : { _tag: "SignIn", returnTo };
+      const ctx = ctxFor(route, { locale: "en", session: anonymous });
+      const initial = Auth.init(route, ctx);
+      const ready = Auth.update(
+        initial.model,
+        Auth.Message.SelectedSignInMethod({ method: "passkey" }),
+        ctx,
+      );
+      const submitted = Auth.update(ready.model, Auth.Message.ClickedPasskeySignIn(), ctx);
+      const result = Auth.update(
+        submitted.model,
+        Auth.Message.CompletedSubmit({
+          seq: submitted.model.submitSeq,
+          action: "sign_in_passkey",
+        }),
+        ctx,
+      );
+      expect(result.outMessage?._tag).toBe("ReloadSession");
+      expect(result.outMessage).toHaveProperty("then", expected);
+    }
+  });
 });
 
 describe("Public Share Link page (Screen 04)", () => {
@@ -151,7 +293,7 @@ describe("Public Share Link page (Screen 04)", () => {
     const docCzk = decodeDemoShare("demo-unpaid-czk");
     const stale = Share.update(
       first.model,
-      Share.Message.GotDocument({ seq: 99, doc: docCzk }),
+      Share.Message.GotDocument({ seq: 99, token, doc: docCzk }),
       ctx,
     );
     expect(stale.model.doc._tag).toBe("Loading");
@@ -159,7 +301,7 @@ describe("Public Share Link page (Screen 04)", () => {
     // Current seq=1 succeeds
     const loaded = Share.update(
       first.model,
-      Share.Message.GotDocument({ seq: 1, doc: docCzk }),
+      Share.Message.GotDocument({ seq: 1, token, doc: docCzk }),
       ctx,
     );
     expect(loaded.model.doc._tag).toBe("Loaded");
@@ -193,7 +335,7 @@ describe("Public Share Link page (Screen 04)", () => {
     // Revoked / expired fails with NotFound
     const failed = Share.update(
       first.model,
-      Share.Message.FailedDocument({ seq: 1, failure: failureOf("NotFound") }),
+      Share.Message.FailedDocument({ seq: 1, token, failure: failureOf("NotFound") }),
       ctx,
     );
     expect(failed.model.doc._tag).toBe("Failed");
@@ -203,4 +345,77 @@ describe("Public Share Link page (Screen 04)", () => {
     const { html } = await renderPath("/i/demo-unpaid-czk", { locale: "cs", session: anonymous });
     expect(html).toContain("kb-share-wrap");
   });
+
+  test.each([
+    [
+      "demo-unpaid-czk",
+      "SPD*1.0*ACC:CZ9320100000002000145399*AM:48400.00*CC:CZK*X-VS:20260042*MSG:Faktura 2026-0042",
+    ],
+    [
+      "demo-unpaid-eur",
+      "BCD\n002\n1\nSCT\nFIOBCZPPXXX\nNovak Design s.r.o.\nCZ9320100000002000145399\nEUR1815.00\n\n20260043",
+    ],
+  ])("decodes the rendered payment symbol for %s", async (token, expectedPayload) => {
+    const html = await renderLoadedShare(token);
+    const image = /src="data:image\/svg\+xml,([^"]+)"/g;
+    const svg = Array.from(html.matchAll(image), (match) =>
+      decodeURIComponent(match[1] ?? ""),
+    ).find((markup) => markup.includes('shape-rendering="crispEdges"'));
+    expect(svg).toBeDefined();
+    expect(decodeQrSvg(svg ?? "")).toBe(expectedPayload);
+    expect(html).toContain(`href="/api/v1/share/${token}/pdf?language=en"`);
+    expect(html).toMatch(/<a[^>]*\bdownload(?:="")?[^>]*>/);
+  });
+
+  test.each(["demo-unpaid-czk", "demo-branded"])(
+    "renders workspace branding independently of viewer preferences for %s",
+    async (token) => {
+      const elegant = await renderLoadedShare(token, "elegant");
+      const cozy = await renderLoadedShare(token, "cozy");
+      expect(cozy).toBe(elegant);
+      expect(cozy).toContain('data-style="elegant"');
+      expect(cozy).toContain(".kb-share-themed {");
+      expect(cozy.includes('data-branded="1"')).toBe(token === "demo-branded");
+    },
+  );
 });
+
+const renderLoadedShare = async (token: string, style: "elegant" | "cozy" = "elegant") => {
+  const route: Share.Route = { _tag: "Share", token: token as ShareToken };
+  const base = ctxFor(route, { locale: "en", session: anonymous });
+  const ctx = { ...base, prefs: { ...base.prefs, style } };
+  const initial = Share.init(route, ctx);
+  const { model } = Share.update(
+    initial.model,
+    Share.Message.GotDocument({ seq: 1, token, doc: decodeDemoShare(token) }),
+    ctx,
+  );
+  const component = Html.component({
+    name: "LoadedShare",
+    props: Share.Model,
+    model: Share.Model,
+    message: Share.Message,
+  }).make({
+    init: ($) => $.set($.props),
+    update: ($) => $.set($.model),
+    view: (h, model) => Share.view({ ...model, pdfLanguage: "en" }, ctx, h),
+  });
+  return (await Effect.runPromise(HtmlServer.renderToHtml(component, model))).html;
+};
+
+// Rasterize the emitted SVG rectangles before passing pixels to the independent decoder.
+const decodeQrSvg = (svg: string) => {
+  const modules = Number(/viewBox="0 0 (\d+) \d+"/.exec(svg)?.[1]);
+  const scale = 4;
+  const size = modules * scale;
+  const pixels = new Uint8ClampedArray(size * size * 4).fill(255);
+  for (const [, x, y] of svg.matchAll(/<rect x="(\d+)" y="(\d+)" width="1" height="1"\/>/g)) {
+    for (let row = Number(y) * scale; row < (Number(y) + 1) * scale; row++) {
+      for (let col = Number(x) * scale; col < (Number(x) + 1) * scale; col++) {
+        const offset = (row * size + col) * 4;
+        pixels.fill(0, offset, offset + 3);
+      }
+    }
+  }
+  return jsQR(pixels, size, size)?.data;
+};
