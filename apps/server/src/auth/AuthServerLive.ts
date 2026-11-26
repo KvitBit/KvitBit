@@ -4,12 +4,7 @@
  * limiting, and the Workspace-ownership account deletion guard (http-mcp-contracts 2.6-2.7).
  */
 import { BotProtection } from "@kvitbit/adapters/altcha";
-import {
-  type AuthConfig,
-  generateId,
-  makeAuth,
-  makeEmailRateLimiter,
-} from "@kvitbit/adapters/auth";
+import { type AuthConfig, generateId, makeEmailRateLimiter } from "@kvitbit/adapters/auth";
 import { type EmailTemplate, renderEmail } from "@kvitbit/adapters/templates/email";
 import { Caller, CurrentCaller, type Locale, UserId, Workspaces } from "@kvitbit/domain/contract";
 import { EmailSender } from "@kvitbit/domain/ports";
@@ -20,6 +15,7 @@ import { HttpConfig } from "../http/config";
 import { acceptLanguageLocale } from "../http/edge/request";
 import { AuthServer } from "./AuthServer";
 import { makeDrizzleOverSqlClient } from "./drizzleBridge";
+import { makeWorkspaceAuth } from "./oauthWorkspace";
 
 const DEFAULT_LINK_VALID_MINUTES = 60;
 
@@ -70,7 +66,7 @@ export const makeAuthServerLayer = (overrides: AuthServerOverrides = {}) =>
         );
       };
 
-      const auth = makeAuth({
+      const auth = makeWorkspaceAuth(sql)({
         baseURL: config.appOrigin,
         secret: config.visitorSecret,
         db,
