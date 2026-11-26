@@ -9,19 +9,10 @@ export {
   wwwAuthenticateHeader,
 } from "./caller";
 export {
-  deriveConfirmationKey,
   McpConfig,
   McpConfigLive,
   type McpConfigShape,
   McpConfigTest,
   makeMcpConfig,
 } from "./config";
-export {
-  type ConfirmationContext,
-  ConsumedConfirmationCache,
-  type MintedConfirmation,
-  mintConfirmationToken,
-  type VerifiedConfirmation,
-  verifyConfirmationToken,
-} from "./confirmation";
 export { McpRoutesLive } from "./routes";

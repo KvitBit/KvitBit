@@ -1,5 +1,7 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { MCP_RESOURCES, MCP_TOOLS } from "@kvitbit/api-contract";
+import { CoreStore } from "@kvitbit/core/ports";
+import { StartedDeliveries } from "@kvitbit/core/testing";
 import {
   Contacts,
   CurrencyCode,
@@ -9,12 +11,18 @@ import {
   IsoDate,
   PriceList,
   PublicShareLinks,
+  RequestKey,
   Templates,
+  type WorkspaceId,
   Workspaces,
 } from "@kvitbit/domain/contract";
-import { BigDecimal, Duration, Effect, Stream } from "effect";
+import { BigDecimal, Duration, Effect, Option, Ref, Stream } from "effect";
+import { SqlClient } from "effect/sql";
 import { TestClock } from "effect/testing";
+import { RequestClaimCheck } from "../../src/persistence/CoreStoreSql";
 import { makeMcpHarness } from "./harness";
+
+setDefaultTimeout(15_000);
 
 let cleanup: (() => Promise<void>) | undefined;
 afterEach(async () => {
@@ -378,20 +386,12 @@ describe("MCP 28 tools, 9 resources, two-step confirmation, and scope enforcemen
     expect(issuedDoc.status).toBe("issued");
     expect(issuedDoc.number).toBeTruthy();
 
-    // Replay of same confirmationToken -> Invalid{mcp.confirmation_expired}
     const issueReplay = await h.callTool(rw.token, "issue_document", {
       ...issueArgs,
       confirm: true,
       confirmationToken: issueToken,
     });
-    expect(issueReplay.result?.isError).toBe(true);
-    expect(
-      (
-        issueReplay.result?.structuredContent?.error as
-          | { issues: Array<{ code: string }> }
-          | undefined
-      )?.issues[0]?.code,
-    ).toBe("mcp.confirmation_expired");
+    expect(issueReplay.result).toEqual(issueConfirmed.result);
 
     // update_draft on issued document -> Conflict{illegal_transition}
     const editIssued = await h.callTool(rw.token, "update_draft", {
@@ -506,7 +506,7 @@ describe("MCP 28 tools, 9 resources, two-step confirmation, and scope enforcemen
     expect(cnConfirm.result?.isError).toBe(false);
     expect(cnConfirm.result?.structuredContent?._tag)?.toBe("Confirmed");
 
-    // Replaying credit note token returns mcp.confirmation_expired even after source revision bumped
+    // The request log must replay even when correction changes the source revision.
     const cnReplay = await h.callTool(rw.token, "create_credit_note", {
       documentId: issuedDoc.id,
       reason: "Discount agreed",
@@ -515,11 +515,7 @@ describe("MCP 28 tools, 9 resources, two-step confirmation, and scope enforcemen
       confirm: true,
       confirmationToken: cnToken,
     });
-    expect(cnReplay.result?.isError).toBe(true);
-    expect(
-      (cnReplay.result?.structuredContent?.error as { issues: Array<{ code: string }> })?.issues[0]
-        ?.code,
-    ).toBe("mcp.confirmation_expired");
+    expect(cnReplay.result).toEqual(cnConfirm.result);
 
     const lockRes = await h.callTool(rw.token, "lock_document", { documentId: issuedDoc.id });
     expect(lockRes.result?.isError).toBe(false);
@@ -616,6 +612,232 @@ describe("MCP 28 tools, 9 resources, two-step confirmation, and scope enforcemen
     });
     expect(reportRes.result?.isError).toBe(false);
     expect(reportRes.result?.structuredContent?.report)?.toBe("vat_summary");
+  });
+
+  test("separate instances replay the same write through expiry and reject an expired log", async () => {
+    const { h, rw, ro, seeded } = await setupSeededWorkspace();
+    const second = h.createInstance();
+    const args = {
+      from: {
+        input: {
+          kind: "invoice",
+          contact: seeded.supplierContact.id,
+          currency: "EUR",
+          lines: [{ description: "Consulting", quantity: "1", unitPrice: "100", vat: "standard" }],
+        },
+      },
+      send: { to: ["recipient@example.cz"], language: "cs" },
+    };
+    const preview = await h.callTool(rw.token, "issue_document", args);
+    expect(preview.result?.structuredContent?.warnings).toEqual([
+      "document.no_bank_account_for_currency",
+    ]);
+    const token = preview.result?.structuredContent?.confirmationToken;
+    expect(typeof token).toBe("string");
+
+    const inspect = () =>
+      h.run(
+        Effect.gen(function* () {
+          const sql = yield* SqlClient.SqlClient;
+          const [confirmation] = yield* sql<{
+            id: string;
+            token_hash: string;
+            consumed_at: Date | null;
+          }>`SELECT id, token_hash, consumed_at FROM mcp_confirmations`;
+          const [writes] = yield* sql<{ documents: number; deliveries: number; requests: number }>`
+          SELECT
+            (SELECT count(*)::int FROM documents) documents,
+            (SELECT count(*)::int FROM deliveries) deliveries,
+            (SELECT count(*)::int FROM request_log WHERE request_key LIKE 'mcp-confirm:%') requests
+        `;
+          return { confirmation, writes };
+        }),
+      );
+
+    const before = await inspect();
+    expect(before.confirmation?.id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-/);
+    expect(before.confirmation?.token_hash).toMatch(/^[0-9a-f]{64}$/);
+    expect(before.confirmation?.token_hash).not.toBe(token);
+    expect(before.confirmation?.consumed_at).toBeNull();
+    expect(before.writes).toEqual({ documents: 0, deliveries: 0, requests: 0 });
+
+    // Object key order does not change the canonical approval hash.
+    const confirm = { confirmationToken: token, confirm: true, send: args.send, from: args.from };
+    const wrongGrant = await second.callTool(ro.token, "issue_document", confirm);
+    expect(wrongGrant.result?.structuredContent?.error).toMatchObject({
+      issues: [{ code: "mcp.confirmation_invalid" }],
+    });
+    const [first, concurrent] = await Promise.all([
+      h.callTool(rw.token, "issue_document", confirm),
+      second.callTool(rw.token, "issue_document", confirm),
+    ]);
+    expect(first.result?.structuredContent?._tag).toBe("Confirmed");
+    expect(concurrent.result).toEqual(first.result);
+    const committed = await inspect();
+    expect(committed.confirmation?.consumed_at).toBeInstanceOf(Date);
+    expect(committed.writes).toEqual({ documents: 1, deliveries: 1, requests: 1 });
+    expect(await h.run(Effect.flatMap(StartedDeliveries, Ref.get))).toHaveLength(1);
+
+    await second.dispose();
+    await h.run(TestClock.adjust(Duration.minutes(11)));
+    const restarted = h.createInstance();
+    const replay = await restarted.callTool(rw.token, "issue_document", confirm);
+    expect(replay.result).toEqual(first.result);
+    const reducedGrant = h.addGrant({ ...rw, scopes: ro.scopes, token: "reduced-scopes" });
+    const forbiddenReplay = await restarted.callTool(reducedGrant.token, "issue_document", confirm);
+    expect(forbiddenReplay.result?.structuredContent?.error).toMatchObject({
+      _tag: "Forbidden",
+      action: "document.issue",
+    });
+
+    await h.run(TestClock.adjust(Duration.hours(24)));
+    const expired = await restarted.callTool(rw.token, "issue_document", confirm);
+    expect(expired.result?.structuredContent?.error).toMatchObject({
+      issues: [{ code: "mcp.confirmation_expired" }],
+    });
+    expect(await inspect()).toEqual(committed);
+
+    // Housekeeping can also have purged the result already.
+    await h.run(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient;
+        yield* sql`DELETE FROM request_log WHERE request_key LIKE 'mcp-confirm:%'`;
+      }),
+    );
+    const missing = await restarted.callTool(rw.token, "issue_document", confirm);
+    expect(missing.result).toEqual(expired.result);
+    expect((await inspect()).writes).toEqual({ documents: 1, deliveries: 1, requests: 0 });
+  });
+
+  test("a failed core commit leaves approval, number and outbox available for retry", async () => {
+    const { h, rw, seeded } = await setupSeededWorkspace();
+    const args = {
+      from: {
+        input: {
+          kind: "invoice",
+          contact: seeded.supplierContact.id,
+          lines: [{ description: "Consulting", quantity: "1", unitPrice: "100", vat: "standard" }],
+        },
+      },
+      send: { to: ["recipient@example.cz"] },
+    };
+    const preview = await h.callTool(rw.token, "issue_document", args);
+    expect(preview.result?.structuredContent?.warnings).toEqual([]);
+    const confirm = {
+      ...args,
+      confirm: true,
+      confirmationToken: preview.result?.structuredContent?.confirmationToken,
+    };
+
+    await h.run(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient;
+        yield* sql`
+        CREATE FUNCTION reject_test_confirmation_completion() RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN
+          RAISE EXCEPTION 'test: request completion failed';
+        END;
+        $$
+      `;
+        yield* sql`
+        CREATE TRIGGER reject_test_confirmation_completion BEFORE UPDATE ON request_log
+        FOR EACH ROW WHEN (NEW.request_key LIKE 'mcp-confirm:%')
+        EXECUTE FUNCTION reject_test_confirmation_completion()
+      `;
+      }),
+    );
+
+    const failed = await h.callTool(rw.token, "issue_document", confirm);
+    expect(failed.result?.structuredContent?.error).toMatchObject({ _tag: "Unavailable" });
+    const rollback = await h.run(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient;
+        return yield* sql`
+        SELECT consumed_at,
+          (SELECT count(*)::int FROM documents) documents,
+          (SELECT count(*)::int FROM deliveries) deliveries,
+          (SELECT count(*)::int FROM request_log WHERE request_key LIKE 'mcp-confirm:%') requests
+        FROM mcp_confirmations
+      `;
+      }),
+    );
+    expect(rollback).toEqual([{ consumed_at: null, documents: 0, deliveries: 0, requests: 0 }]);
+    expect(await h.run(Effect.flatMap(StartedDeliveries, Ref.get))).toEqual([]);
+    await h.run(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient;
+        yield* sql`DROP TRIGGER reject_test_confirmation_completion ON request_log`;
+      }),
+    );
+
+    const retry = await h.createInstance().callTool(rw.token, "issue_document", confirm);
+    expect(retry.result?.structuredContent?._tag).toBe("Confirmed");
+    expect(await h.run(Effect.flatMap(StartedDeliveries, Ref.get))).toHaveLength(1);
+  });
+
+  test("the claim check runs after the matching workspace claim in its transaction", async () => {
+    const h = makeMcpHarness();
+    cleanup = h.dispose;
+    const first = await h.createWorkspace(h.addUser("Owner A"), { name: "Workspace A" });
+    const other = await h.createWorkspace(h.addUser("Owner B"), { name: "Workspace B" });
+    const requestKey = RequestKey.make("mcp-confirm:claim-hook-test");
+    const now = "2026-11-23T10:00:00.000Z";
+    const observed: Array<{ inTransaction: boolean; replayed: boolean; hasClaim: boolean }> = [];
+
+    await h.run(
+      Effect.gen(function* () {
+        const store = yield* CoreStore;
+        const sql = yield* SqlClient.SqlClient;
+        const claim = (workspaceId: WorkspaceId, key: RequestKey) =>
+          store.transaction(
+            Effect.gen(function* () {
+              const scope = { _tag: "Workspace", workspaceId } as const;
+              const outcome = yield* store.requestLog.claim(scope, key, now);
+              if (outcome._tag === "Claimed") {
+                yield* store.requestLog.complete({
+                  scope,
+                  key,
+                  method: "test",
+                  fingerprint: "test",
+                  result: null,
+                  createdAt: now,
+                  expiresAt: "2026-11-24T10:00:00.000Z",
+                });
+              }
+            }),
+          );
+
+        yield* Effect.gen(function* () {
+          yield* claim(other.workspaceId, requestKey);
+          yield* claim(first.workspaceId, RequestKey.make("unrelated"));
+          expect(observed).toEqual([]);
+          yield* claim(first.workspaceId, requestKey);
+          yield* claim(first.workspaceId, requestKey);
+        }).pipe(
+          Effect.provideService(RequestClaimCheck, {
+            workspaceId: first.workspaceId,
+            requestKey,
+            check: (replayed) =>
+              Effect.gen(function* () {
+                const transaction = yield* Effect.serviceOption(sql.transactionService);
+                const matching = yield* sql`
+                  SELECT 1 FROM request_log
+                  WHERE workspace_id = ${first.workspaceId} AND request_key = ${requestKey}
+                `.pipe(Effect.orDie);
+                observed.push({
+                  inTransaction: Option.isSome(transaction) && transaction.value[1] === 0,
+                  replayed,
+                  hasClaim: matching.length === 1,
+                });
+              }),
+          }),
+        );
+      }),
+    );
+    expect(observed).toEqual([
+      { inTransaction: true, replayed: false, hasClaim: true },
+      { inTransaction: true, replayed: true, hasClaim: true },
+    ]);
   });
 
   test("expired confirmation token and stale revision between preview and confirm fail cleanly", async () => {

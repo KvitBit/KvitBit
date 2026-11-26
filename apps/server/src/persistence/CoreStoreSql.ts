@@ -15,7 +15,7 @@ import {
 import type { CoreStoreShape, RequestLogEntry, RequestScope } from "@kvitbit/core/ports";
 import { CoreStore, type StoreUnavailable } from "@kvitbit/core/ports";
 import type { AuditEntry, RequestKey, WorkspaceId } from "@kvitbit/domain/contract";
-import { Cause, Effect, Layer, Option } from "effect";
+import { Cause, Context, Effect, Layer, Option } from "effect";
 import { SqlClient } from "effect/sql";
 import { isLockConflict, unavailable } from "./errors";
 import { col, type DbRow } from "./table";
@@ -25,6 +25,16 @@ const LOCK_RETRIES = 3;
 
 /** Request-log entries live 24 hours (C3). */
 const TTL_MS = 24 * 60 * 60 * 1000;
+
+/** An edge check that must run with its idempotent write and result in the same transaction. */
+export class RequestClaimCheck extends Context.Service<
+  RequestClaimCheck,
+  {
+    readonly requestKey: RequestKey;
+    readonly workspaceId: WorkspaceId;
+    readonly check: (replayed: boolean) => Effect.Effect<void, StoreUnavailable>;
+  }
+>()("kvitbit/server/persistence/RequestClaimCheck") {}
 
 const adapterScope = (scope: RequestScope) =>
   scope._tag === "Workspace" ? { workspaceId: scope.workspaceId } : { userId: scope.userId };
@@ -148,7 +158,17 @@ export const makeCoreStoreSql = Effect.gen(function* () {
     },
     requestLog: {
       claim: (scope, key, now) =>
-        Effect.map(db(claimRequest(adapterScope(scope), key, { now })), (outcome) => {
+        Effect.gen(function* () {
+          const outcome = yield* db(claimRequest(adapterScope(scope), key, { now }));
+          const hook = yield* Effect.serviceOption(RequestClaimCheck);
+          if (
+            Option.isSome(hook) &&
+            scope._tag === "Workspace" &&
+            hook.value.workspaceId === scope.workspaceId &&
+            hook.value.requestKey === key
+          ) {
+            yield* hook.value.check(outcome._tag === "Existing");
+          }
           if (outcome._tag === "Claimed") return outcome;
           const createdAt = new Date(outcome.entry.createdAt).toISOString();
           const entry: RequestLogEntry = {

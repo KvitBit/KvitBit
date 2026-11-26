@@ -45,6 +45,7 @@ describe("committed migration", () => {
       "public.numbering_counters",
       "public.altcha_replays",
       "public.audit_entries",
+      "public.mcp_confirmations",
       "public.user_preferences",
       "auth.user",
       "auth.session",
