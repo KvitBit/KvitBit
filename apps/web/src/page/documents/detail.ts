@@ -68,6 +68,7 @@ import {
   mintRequestKeyCommand,
   PaymentViewData,
   parseDecimalText,
+  preserveRequestKey,
   readContactSnapshot,
   readIssuerSnapshot,
   readLines,
@@ -516,15 +517,15 @@ const loadDetailCommand = (
     (failure): Message => Message.FailedDetail({ seq, failure }),
   );
 
-const dialogPermission = (dialog: typeof ActiveDialog.Type): DocumentAction | null => {
+const dialogPermission = (dialog: NonNullable<typeof ActiveDialog.Type>): DocumentAction => {
   switch (dialog) {
-    case "issue":
-      return "document.issue";
+    case "send":
+      return "document.send";
     case "payment":
     case "removePayment":
       return "payment.write";
-    case "send":
-      return "document.send";
+    case "issue":
+      return "document.issue";
     case "cancel":
       return "document.cancel";
     case "correct":
@@ -533,17 +534,51 @@ const dialogPermission = (dialog: typeof ActiveDialog.Type): DocumentAction | nu
       return "document.unlock";
     case "final":
       return "document.finalInvoice";
-    case null:
-      return null;
   }
+};
+
+const documentActions = (
+  doc: DocumentView,
+  role: NonNullable<PageContext["workspace"]>["role"] | undefined,
+) => {
+  const issued = doc.status === "issued";
+  const draft = doc.status === "draft";
+  return {
+    issue: draft && canRole(role, "document.issue"),
+    edit: (draft || issued) && !doc.locked && canRole(role, "document.edit"),
+    payment:
+      issued &&
+      (doc.kind === "invoice" || doc.kind === "proforma") &&
+      canRole(role, "payment.write"),
+    final:
+      issued &&
+      doc.kind === "proforma" &&
+      (doc.settlement === "paid" ||
+        doc.settlement === "partially_paid" ||
+        doc.settlement === "overpaid") &&
+      !documentHasFinalInvoice(doc) &&
+      canRole(role, "document.finalInvoice"),
+    correct:
+      issued &&
+      (doc.kind === "invoice" || doc.kind === "payment_tax_document") &&
+      canRole(role, "document.correct"),
+    send: issued && canRole(role, "document.send"),
+    lock: issued && !doc.locked && canRole(role, "document.lock"),
+    unlock: issued && doc.locked && canRole(role, "document.unlock"),
+    cancel: issued && canRole(role, "document.cancel"),
+    discard: draft && canRole(role, "document.draft"),
+    share: canRole(role, "share.write"),
+    removePayment: canRole(role, "payment.write"),
+  };
 };
 
 export const init = (route: Route, ctx: PageContext): PageReturn<Model, Message> => {
   const today = todayPrague();
   const initialDialog = route.dialog ?? null;
-  const initialPerm = dialogPermission(initialDialog);
   const allowedDialog =
-    initialPerm === null || canRole(ctx.workspace?.role, initialPerm) ? initialDialog : null;
+    initialDialog !== null && canRole(ctx.workspace?.role, dialogPermission(initialDialog))
+      ? initialDialog
+      : null;
   const base: Model = {
     route,
     detail: Remote.idle,
@@ -806,13 +841,29 @@ export const update = (
   const route = model.route as Route;
   const bundle = Remote.dataOf(model.detail);
 
+  const actions = bundle === undefined ? undefined : documentActions(bundle.doc, ws?.role);
+  const canStart = (action: keyof ReturnType<typeof documentActions>) =>
+    actions?.[action] === true &&
+    model.detail._tag === "Loaded" &&
+    !model.busy &&
+    (model.pendingAction === null || model.pendingAction === action);
+  const canSubmit = (dialog: NonNullable<typeof ActiveDialog.Type>) =>
+    model.activeDialog === dialog && canStart(dialog);
+  if ((model.busy || model.pendingAction !== null) && /^(Changed|Toggled)/.test(message._tag))
+    return { model };
+
   return Message.match(message, {
     LoadedDetail: ({ seq, data }) => {
+      const detail = Remote.succeed(model.detail, seq, data);
+      if (detail === model.detail) return { model };
       const contact = readContactSnapshot(data.doc.contact);
+      const allowed = documentActions(data.doc, ws?.role);
       return {
         model: {
           ...model,
-          detail: Remote.succeed(model.detail, seq, data),
+          detail,
+          activeDialog:
+            model.activeDialog !== null && allowed[model.activeDialog] ? model.activeDialog : null,
           sendTo: model.sendTo === "" ? (contact?.billingEmails.join(", ") ?? "") : model.sendTo,
           payAmount:
             model.payAmount === ""
@@ -826,12 +877,12 @@ export const update = (
       model: { ...model, detail: Remote.fail(model.detail, seq, failure) },
     }),
     ClickedRetry: () => {
-      if (ws === null) return { model };
+      if (ws === null || model.busy || model.pendingAction !== null) return { model };
       return reloadDetail(model, ws.id, route.id);
     },
     OpenedDialog: ({ dialog: dlg, paymentId }) => {
-      const perm = dialogPermission(dlg);
-      if (perm !== null && !canRole(ws?.role, perm)) return { model };
+      if (dlg === null || !canStart(dlg)) return { model };
+      if (model.pendingAction === dlg) return { model: { ...model, activeDialog: dlg } };
       return {
         model: {
           ...model,
@@ -839,107 +890,89 @@ export const update = (
           dialogError: null,
           reasonText: "",
           removingPaymentId: paymentId ?? null,
-          pendingRequestKey: null,
-          pendingAction: null,
         },
       };
     },
-    ClosedDialog: () => ({
-      model: {
-        ...model,
-        activeDialog: null,
-        dialogError: null,
-        removingPaymentId: null,
-        pendingRequestKey: null,
-        pendingAction: null,
-      },
-    }),
+    ClosedDialog: () =>
+      model.busy
+        ? { model }
+        : {
+            model: {
+              ...model,
+              activeDialog: null,
+              dialogError: model.pendingAction === null ? null : model.dialogError,
+              removingPaymentId: null,
+            },
+          },
     GotRequestKey: ({ action, key }) => {
-      if (ws === null) return { model: { ...model, busy: false } };
+      if (!model.busy || model.pendingAction !== action || model.pendingRequestKey !== null)
+        return { model };
+      if (ws === null || actions?.[action] !== true || model.activeDialog !== action) {
+        return { model: { ...model, busy: false, pendingAction: null } };
+      }
       return executeIdempotentWrite(model, action, key, ws, route, bundle, ctx.locale);
     },
     ChangedSendTo: ({ value }) => ({
-      model: { ...model, sendTo: value, pendingRequestKey: null, pendingAction: null },
+      model: { ...model, sendTo: value },
     }),
     ChangedSendLanguage: ({ value }) => ({
       model: {
         ...model,
         sendLanguage: value === "en" ? "en" : "cs",
-        pendingRequestKey: null,
-        pendingAction: null,
       },
     }),
     ChangedSendPurpose: ({ value }) => ({
       model: {
         ...model,
         sendPurpose: value === "reminder" ? "reminder" : "document",
-        pendingRequestKey: null,
-        pendingAction: null,
       },
     }),
     ToggledSendReminders: ({ checked }) => ({
-      model: { ...model, sendReminders: checked, pendingRequestKey: null, pendingAction: null },
+      model: { ...model, sendReminders: checked },
     }),
     SubmittedSend: () => {
-      if (ws === null || model.busy || !canRole(ws.role, "document.send")) return { model };
+      if (ws === null || !canSubmit("send")) return { model };
       return startIdempotentWrite(model, "send", ws, route, bundle, ctx.locale);
     },
     ChangedPayAmount: ({ value }) => ({
-      model: { ...model, payAmount: value, pendingRequestKey: null, pendingAction: null },
+      model: { ...model, payAmount: value },
     }),
     ChangedPayDate: ({ value }) => ({
-      model: { ...model, payDate: value, pendingRequestKey: null, pendingAction: null },
+      model: { ...model, payDate: value },
     }),
     ChangedPayMethod: ({ value }) => ({
       model: {
         ...model,
         payMethod:
           value === "cash" || value === "card" || value === "other" ? value : "bank_transfer",
-        pendingRequestKey: null,
-        pendingAction: null,
       },
     }),
     ChangedPayNote: ({ value }) => ({
-      model: { ...model, payNote: value, pendingRequestKey: null, pendingAction: null },
+      model: { ...model, payNote: value },
     }),
     SubmittedPayment: () => {
-      if (ws === null || bundle === undefined || model.busy || !canRole(ws.role, "payment.write")) {
+      if (ws === null || bundle === undefined || !canSubmit("payment")) {
         return { model };
       }
       return startIdempotentWrite(model, "payment", ws, route, bundle, ctx.locale);
     },
     ChangedReason: ({ value }) => ({
-      model: { ...model, reasonText: value, pendingRequestKey: null, pendingAction: null },
+      model: { ...model, reasonText: value },
     }),
     SubmittedCancel: () => {
-      if (
-        ws === null ||
-        model.busy ||
-        model.reasonText.trim() === "" ||
-        !canRole(ws.role, "document.cancel")
-      ) {
+      if (ws === null || !canSubmit("cancel") || model.reasonText.trim() === "") {
         return { model };
       }
       return startIdempotentWrite(model, "cancel", ws, route, bundle, ctx.locale);
     },
     SubmittedCreditNote: () => {
-      if (
-        ws === null ||
-        model.busy ||
-        model.reasonText.trim() === "" ||
-        !canRole(ws.role, "document.correct")
-      ) {
+      if (ws === null || !canSubmit("correct") || model.reasonText.trim() === "") {
         return { model };
       }
       return startIdempotentWrite(model, "correct", ws, route, bundle, ctx.locale);
     },
     SubmittedUnlock: () => {
-      if (
-        ws === null ||
-        model.busy ||
-        model.reasonText.trim() === "" ||
-        !canRole(ws.role, "document.unlock")
-      ) {
+      if (ws === null || !canSubmit("unlock") || model.reasonText.trim() === "") {
         return { model };
       }
       const reason = model.reasonText.trim();
@@ -963,10 +996,9 @@ export const update = (
     SubmittedRemovePayment: () => {
       if (
         ws === null ||
-        model.busy ||
+        !canSubmit("removePayment") ||
         model.removingPaymentId === null ||
-        model.reasonText.trim() === "" ||
-        !canRole(ws.role, "payment.write")
+        model.reasonText.trim() === ""
       ) {
         return { model };
       }
@@ -993,24 +1025,19 @@ export const update = (
       };
     },
     SubmittedFinalInvoice: () => {
-      if (ws === null || model.busy || !canRole(ws.role, "document.finalInvoice")) {
+      if (ws === null || !canSubmit("final")) {
         return { model };
       }
       return startIdempotentWrite(model, "final", ws, route, bundle, ctx.locale);
     },
     SubmittedIssueDraft: () => {
-      if (
-        ws === null ||
-        bundle === undefined ||
-        model.busy ||
-        !canRole(ws.role, "document.issue")
-      ) {
+      if (ws === null || bundle === undefined || !canSubmit("issue")) {
         return { model };
       }
       return startIdempotentWrite(model, "issue", ws, route, bundle, ctx.locale);
     },
     ClickedLock: () => {
-      if (ws === null || model.busy || !canRole(ws.role, "document.lock")) return { model };
+      if (ws === null || !canStart("lock")) return { model };
       return {
         model: { ...model, busy: true },
         commands: [
@@ -1025,12 +1052,7 @@ export const update = (
       };
     },
     ClickedDiscardDraft: () => {
-      if (
-        ws === null ||
-        bundle === undefined ||
-        model.busy ||
-        !canRole(ws.role, "document.draft")
-      ) {
+      if (ws === null || bundle === undefined || !canStart("discard")) {
         return { model };
       }
       return {
@@ -1055,7 +1077,8 @@ export const update = (
       };
     },
     ClickedCreateShare: () => {
-      if (ws === null || model.busy || !canRole(ws.role, "share.write")) return { model };
+      if (ws === null || bundle === undefined || !canStart("share") || bundle.doc.share !== null)
+        return { model };
       return {
         model: { ...model, busy: true },
         commands: [
@@ -1084,7 +1107,7 @@ export const update = (
       ),
     }),
     ClickedRevokeShare: () => {
-      if (ws === null || model.busy || !canRole(ws.role, "share.write")) return { model };
+      if (ws === null || bundle?.doc.share == null || !canStart("share")) return { model };
       return {
         model: { ...model, busy: true },
         commands: [
@@ -1102,6 +1125,7 @@ export const update = (
       };
     },
     ActionSucceeded: ({ toast, navigateTo, reload }) => {
+      if (!model.busy) return { model };
       const nextBase: Model = {
         ...model,
         busy: false,
@@ -1120,18 +1144,21 @@ export const update = (
       }
       return { model: nextBase, outMessage: Intent_.toast(toast) };
     },
-    ActionFailed: ({ failure }) => ({
-      model: {
-        ...model,
-        busy: false,
-        dialogError: textOf(translator(ctx.locale), failure.text),
-        pendingRequestKey: failure.retryable ? model.pendingRequestKey : null,
-        pendingAction: failure.retryable ? model.pendingAction : null,
-      },
-      ...(model.activeDialog === null
-        ? { outMessage: Intent_.toast(textOf(translator(ctx.locale), failure.text), "error") }
-        : {}),
-    }),
+    ActionFailed: ({ failure }) =>
+      model.busy
+        ? {
+            model: {
+              ...model,
+              busy: false,
+              dialogError: textOf(translator(ctx.locale), failure.text),
+              pendingRequestKey: preserveRequestKey(failure) ? model.pendingRequestKey : null,
+              pendingAction: preserveRequestKey(failure) ? model.pendingAction : null,
+            },
+            ...(model.activeDialog === null
+              ? { outMessage: Intent_.toast(textOf(translator(ctx.locale), failure.text), "error") }
+              : {}),
+          }
+        : { model },
   } satisfies MessageHandlers<Message, PageReturn<Model, Message>>);
 };
 
@@ -1147,6 +1174,7 @@ const renderActiveDialog = (
   locale: PageContext["locale"],
 ): ReadonlyArray<Markup<Message>> => {
   const t = translator(locale);
+  const fieldsDisabled = model.busy || model.pendingAction !== null;
   const err =
     model.dialogError !== null ? [banner(h, { text: model.dialogError, tone: "error" })] : [];
   switch (model.activeDialog) {
@@ -1161,12 +1189,14 @@ const renderActiveDialog = (
           body: [
             ...err,
             textField(h, {
+              disabled: fieldsDisabled,
               id: "send-to",
               label: txt(locale, "dlgSendTo"),
               value: model.sendTo,
               onInput: (value) => Message.ChangedSendTo({ value }),
             }),
             selectField(h, {
+              disabled: fieldsDisabled,
               id: "send-lang",
               label: txt(locale, "dlgSendLanguage"),
               value: model.sendLanguage,
@@ -1177,6 +1207,7 @@ const renderActiveDialog = (
               ],
             }),
             selectField(h, {
+              disabled: fieldsDisabled,
               id: "send-purpose",
               label: txt(locale, "dlgSendPurpose"),
               value: model.sendPurpose,
@@ -1193,6 +1224,7 @@ const renderActiveDialog = (
               ],
             }),
             checkbox(h, {
+              disabled: fieldsDisabled,
               id: "send-reminders",
               label: txt(locale, "dlgSendReminders"),
               checked: model.sendReminders,
@@ -1219,6 +1251,7 @@ const renderActiveDialog = (
           body: [
             ...err,
             textField(h, {
+              disabled: fieldsDisabled,
               id: "pay-amount",
               label: txt(locale, "dlgPayAmount"),
               value: model.payAmount,
@@ -1226,6 +1259,7 @@ const renderActiveDialog = (
               mono: true,
             }),
             textField(h, {
+              disabled: fieldsDisabled,
               id: "pay-date",
               label: txt(locale, "dlgPayDate"),
               type: "date",
@@ -1233,6 +1267,7 @@ const renderActiveDialog = (
               onInput: (value) => Message.ChangedPayDate({ value }),
             }),
             selectField(h, {
+              disabled: fieldsDisabled,
               id: "pay-method",
               label: txt(locale, "dlgPayMethod"),
               value: model.payMethod,
@@ -1248,6 +1283,7 @@ const renderActiveDialog = (
               ],
             }),
             textField(h, {
+              disabled: fieldsDisabled,
               id: "pay-note",
               label: txt(locale, "dlgPayNote"),
               value: model.payNote,
@@ -1274,6 +1310,7 @@ const renderActiveDialog = (
           body: [
             ...err,
             textField(h, {
+              disabled: fieldsDisabled,
               id: "cancel-reason",
               label: txt(locale, "dlgCancelReason"),
               value: model.reasonText,
@@ -1302,6 +1339,7 @@ const renderActiveDialog = (
           body: [
             ...err,
             textField(h, {
+              disabled: fieldsDisabled,
               id: "credit-reason",
               label: txt(locale, "dlgCreditReason"),
               value: model.reasonText,
@@ -1330,6 +1368,7 @@ const renderActiveDialog = (
           body: [
             ...err,
             textField(h, {
+              disabled: fieldsDisabled,
               id: "unlock-reason",
               label: txt(locale, "dlgUnlockReason"),
               value: model.reasonText,
@@ -1358,6 +1397,7 @@ const renderActiveDialog = (
           body: [
             ...err,
             textField(h, {
+              disabled: fieldsDisabled,
               id: "remove-pay-reason",
               label: txt(locale, "dlgRemovePayReason"),
               value: model.reasonText,
@@ -1473,33 +1513,21 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
   const lines = readLines(doc.lines);
   const pdfUrl = `/api/v1/workspaces/${ws.id}/documents/${doc.id}/pdf`;
 
-  const canIssueDraft = doc.status === "draft" && canRole(ws.role, "document.issue");
-  const canEdit =
-    (doc.status === "draft" || (doc.status === "issued" && !doc.locked)) &&
-    canRole(ws.role, "document.edit");
-  const canRecordPayment =
-    doc.status === "issued" &&
-    (doc.kind === "invoice" || doc.kind === "proforma") &&
-    canRole(ws.role, "payment.write");
-  const canFinalInvoice =
-    doc.status === "issued" &&
-    doc.kind === "proforma" &&
-    (doc.settlement === "paid" ||
-      doc.settlement === "partially_paid" ||
-      doc.settlement === "overpaid") &&
-    !documentHasFinalInvoice(doc) &&
-    canRole(ws.role, "document.finalInvoice");
-  const canCreditNote =
-    doc.status === "issued" &&
-    (doc.kind === "invoice" || doc.kind === "payment_tax_document") &&
-    canRole(ws.role, "document.correct");
-  const canSend = doc.status === "issued" && canRole(ws.role, "document.send");
-  const canLock = doc.status === "issued" && !doc.locked && canRole(ws.role, "document.lock");
-  const canUnlock = doc.status === "issued" && doc.locked && canRole(ws.role, "document.unlock");
-  const canCancel = doc.status === "issued" && canRole(ws.role, "document.cancel");
-  const canDiscardDraft = doc.status === "draft" && canRole(ws.role, "document.draft");
-  const canWriteShare = canRole(ws.role, "share.write");
-  const canRemovePayment = canRole(ws.role, "payment.write");
+  const permissions = documentActions(doc, ws.role);
+  const {
+    issue: canIssueDraft,
+    edit: canEdit,
+    payment: canRecordPayment,
+    final: canFinalInvoice,
+    correct: canCreditNote,
+    send: canSend,
+    lock: canLock,
+    unlock: canUnlock,
+    cancel: canCancel,
+    discard: canDiscardDraft,
+    share: canWriteShare,
+    removePayment: canRemovePayment,
+  } = permissions;
 
   const actions: Array<Markup<Message>> = [];
   if (canIssueDraft) {
@@ -2018,6 +2046,8 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
     }),
     tabBar,
     tabContent,
-    ...renderActiveDialog(h, model, locale),
+    ...(model.activeDialog !== null && permissions[model.activeDialog]
+      ? renderActiveDialog(h, model, locale)
+      : []),
   ]);
 };

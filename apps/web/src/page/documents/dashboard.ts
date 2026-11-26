@@ -33,6 +33,7 @@ import {
 } from "../../ui/kit";
 import {
   apiCommand,
+  canRole,
   DocumentSummaryData,
   documentBadges,
   fmtDate,
@@ -316,6 +317,7 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
     return page(h, [banner(h, { text: sharedCopy(locale, "noWorkspace"), tone: "error" })]);
   }
   const slug = ws.slug;
+  const canCreateDraft = canRole(ws.role, "document.draft");
   const dashData = Remote.dataOf(model.dashboard);
   const recentData = Remote.dataOf(model.recent);
 
@@ -418,13 +420,17 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
                 cta: txt(locale, "checkBankCta"),
                 to: href({ _tag: "Settings", ws: slug, section: "bankAccounts" }),
               },
-              {
-                done: hasIssuedDoc,
-                title: txt(locale, "checkInvoice"),
-                sub: txt(locale, "checkInvoiceSub"),
-                cta: txt(locale, "checkInvoiceCta"),
-                to: href({ _tag: "DocumentNew", ws: slug, kind: "invoice" }),
-              },
+              ...(canCreateDraft
+                ? [
+                    {
+                      done: hasIssuedDoc,
+                      title: txt(locale, "checkInvoice"),
+                      sub: txt(locale, "checkInvoiceSub"),
+                      cta: txt(locale, "checkInvoiceCta"),
+                      to: href({ _tag: "DocumentNew", ws: slug, kind: "invoice" }),
+                    },
+                  ]
+                : []),
               {
                 done: false,
                 title: txt(locale, "checkTemplate"),
@@ -531,11 +537,15 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
       : recentData.length === 0
         ? emptyState(h, {
             title: txt(locale, "recentEmpty"),
-            action: linkButton(h, {
-              label: txt(locale, "newInvoice"),
-              href: href({ _tag: "DocumentNew", ws: slug, kind: "invoice" }),
-              variant: "primary",
-            }),
+            ...(canCreateDraft
+              ? {
+                  action: linkButton(h, {
+                    label: txt(locale, "newInvoice"),
+                    href: href({ _tag: "DocumentNew", ws: slug, kind: "invoice" }),
+                    variant: "primary",
+                  }),
+                }
+              : {}),
           })
         : h.ul.class("kb-queue-list").children(
             recentData.slice(0, 6).map((doc) =>
@@ -579,17 +589,19 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
     pageHeader(h, {
       title: txt(locale, "title"),
       subtitle: txt(locale, "subtitle"),
-      actions: [
-        linkButton(h, {
-          label: txt(locale, "newProforma"),
-          href: href({ _tag: "DocumentNew", ws: slug, kind: "proforma" }),
-        }),
-        linkButton(h, {
-          label: txt(locale, "newInvoice"),
-          href: href({ _tag: "DocumentNew", ws: slug, kind: "invoice" }),
-          variant: "primary",
-        }),
-      ],
+      actions: canCreateDraft
+        ? [
+            linkButton(h, {
+              label: txt(locale, "newProforma"),
+              href: href({ _tag: "DocumentNew", ws: slug, kind: "proforma" }),
+            }),
+            linkButton(h, {
+              label: txt(locale, "newInvoice"),
+              href: href({ _tag: "DocumentNew", ws: slug, kind: "invoice" }),
+              variant: "primary",
+            }),
+          ]
+        : [],
     }),
     ...errorBanner,
     kpiRow,

@@ -37,6 +37,7 @@ import {
 } from "../../ui/kit";
 import {
   apiCommand,
+  canRole,
   DocumentSummaryData,
   documentBadges,
   fmtDate,
@@ -345,6 +346,7 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
     return page(h, [banner(h, { text: sharedCopy(locale, "noWorkspace"), tone: "error" })]);
   }
   const slug = ws.slug;
+  const canCreateDraft = canRole(ws.role, "document.draft");
   const q = route.query;
   const hasFilters =
     q.kind !== undefined ||
@@ -414,16 +416,22 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
         : data.items.length === 0
           ? emptyState(h, {
               title: hasFilters ? txt(locale, "emptyFiltered") : txt(locale, "emptyTitle"),
-              action: hasFilters
-                ? button(h, {
-                    label: txt(locale, "clearFilters"),
-                    onClick: Message.ClickedClearFilters(),
-                  })
-                : linkButton(h, {
-                    label: txt(locale, "newInvoice"),
-                    href: href({ _tag: "DocumentNew", ws: slug, kind: "invoice" }),
-                    variant: "primary",
-                  }),
+              ...(hasFilters
+                ? {
+                    action: button(h, {
+                      label: txt(locale, "clearFilters"),
+                      onClick: Message.ClickedClearFilters(),
+                    }),
+                  }
+                : canCreateDraft
+                  ? {
+                      action: linkButton(h, {
+                        label: txt(locale, "newInvoice"),
+                        href: href({ _tag: "DocumentNew", ws: slug, kind: "invoice" }),
+                        variant: "primary",
+                      }),
+                    }
+                  : {}),
             })
           : h.div.class("kb-stack").children([
               table(h, {
@@ -494,17 +502,19 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
     pageHeader(h, {
       title: txt(locale, "title"),
       subtitle: txt(locale, "subtitle"),
-      actions: [
-        linkButton(h, {
-          label: txt(locale, "newProforma"),
-          href: href({ _tag: "DocumentNew", ws: slug, kind: "proforma" }),
-        }),
-        linkButton(h, {
-          label: txt(locale, "newInvoice"),
-          href: href({ _tag: "DocumentNew", ws: slug, kind: "invoice" }),
-          variant: "primary",
-        }),
-      ],
+      actions: canCreateDraft
+        ? [
+            linkButton(h, {
+              label: txt(locale, "newProforma"),
+              href: href({ _tag: "DocumentNew", ws: slug, kind: "proforma" }),
+            }),
+            linkButton(h, {
+              label: txt(locale, "newInvoice"),
+              href: href({ _tag: "DocumentNew", ws: slug, kind: "invoice" }),
+              variant: "primary",
+            }),
+          ]
+        : [],
     }),
     tabs(h, {
       label: txt(locale, "tabsLabel"),

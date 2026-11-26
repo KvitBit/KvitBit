@@ -6,6 +6,7 @@ import { DEMO_WORKSPACE } from "../../src/demo/shell";
 import { TemplateViewData } from "../../src/page/documents/shared";
 import * as Templates from "../../src/page/documents/templates";
 import { ctxFor, renderPath, WS } from "../support";
+import { jsonDocument, runCommand, sampleProforma, sessionWithRole } from "./fixtures";
 
 const TPL_ID = "0193a000-0000-7000-8000-000000000801" as TemplateViewData["id"];
 
@@ -118,6 +119,35 @@ describe("Templates & Recurring page (Screen 12)", () => {
     expect(match(demoRoutes, "POST", `/api/v1/workspaces/${wsId}/payments`)).toBeDefined();
     expect(match(demoRoutes, "GET", `/api/v1/workspaces/${wsId}/templates`)).toBeDefined();
     expect(match(demoRoutes, "POST", `/api/v1/workspaces/${wsId}/contacts/from-ico`)).toBeDefined();
+  });
+
+  test("using a template as a draft preserves its request key when the first reply is lost", async () => {
+    const ctx = ctxFor(listRoute);
+    const open = Templates.init(listRoute, ctx);
+    const message = Templates.Message.ClickedUseTemplate({ templateId: TPL_ID });
+    const accountant = ctxFor(listRoute, { session: sessionWithRole("accountant") });
+    expect(Templates.update(open.model, message, accountant).commands).toBeUndefined();
+
+    const mint = Templates.update(open.model, message, ctx);
+    const first = Templates.update(mint.model, await runCommand(mint.commands), ctx);
+    const requests: Array<{ path: string; key: string | null; body: unknown }> = [];
+    const fetch = async (request: Request) => {
+      requests.push({
+        path: new URL(request.url).pathname,
+        key: request.headers.get("idempotency-key"),
+        body: await request.json(),
+      });
+      if (requests.length === 1) throw new TypeError("lost template reply");
+      return jsonDocument({ ...sampleProforma, status: "draft", number: null }, 201);
+    };
+    const failed = Templates.update(first.model, await runCommand(first.commands, fetch), ctx);
+    const retry = Templates.update(failed.model, message, ctx);
+    const done = Templates.update(retry.model, await runCommand(retry.commands, fetch), ctx);
+    expect(requests[0]?.path).toEndWith(`/${TPL_ID}/documents`);
+    expect(requests[0]?.key).toMatch(/^[0-9a-f-]{36}$/);
+    expect(requests[0]?.body).toEqual({ as: "draft" });
+    expect(requests[1]).toEqual(requests[0]);
+    expect(done.outMessage?._tag).toBe("Navigate");
   });
 
   test("renders cs and en via SSR", async () => {
