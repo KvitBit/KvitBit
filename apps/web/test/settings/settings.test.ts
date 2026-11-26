@@ -1,4 +1,6 @@
 import { describe, expect, it } from "bun:test";
+import type { View } from "@effect/ui";
+import { Html, HtmlServer } from "@effect/ui/html";
 import {
   ALL_SCOPES,
   ApiKeyId,
@@ -18,7 +20,7 @@ import {
   WorkspaceSlug,
 } from "@kvitbit/domain";
 import { ViewModels } from "@kvitbit/ui-port";
-import { type HtmlBuilder, inertHtml } from "foldkit/html";
+import { Effect, Schema } from "effect";
 import {
   czechAccountFromIban,
   previewNumberingPattern,
@@ -27,9 +29,20 @@ import {
 import * as Settings from "../../src/page/settings/settings";
 import { ctxFor, DEMO_USER, DEMO_WORKSPACE, renderPath, signedIn, WS } from "../support";
 
-const h = inertHtml as unknown as HtmlBuilder<Settings.Message>;
-
-const renderText = (node: unknown): string => JSON.stringify(node);
+const renderText = async (
+  view: (h: Html.H<Settings.Message>) => View.Content<Settings.Message>,
+): Promise<string> => {
+  const fixture = Html.component({
+    name: "SettingsViewFixture",
+    model: Schema.Null,
+    message: Settings.Message,
+  }).make({
+    init: () => null,
+    update: () => null,
+    view,
+  });
+  return (await Effect.runPromise(HtmlServer.renderToHtml(fixture, {}))).html;
+};
 
 const sampleWorkspace: WorkspaceDetail = {
   id: WorkspaceId.make(DEMO_WORKSPACE.id),
@@ -79,28 +92,27 @@ const sampleWorkspace: WorkspaceDetail = {
 };
 
 describe("Settings page (Screens 18-21 & More hub)", () => {
-  it("initializes and renders every Settings section in cs and en", () => {
+  it("initializes and renders every Settings section in cs and en", async () => {
     for (const section of Settings.SETTINGS_SECTIONS) {
       for (const locale of ["cs", "en"] as const) {
         const route: Settings.Route = { _tag: "Settings", ws: WS, section };
         const ctx = ctxFor(route, { locale });
         const { model } = Settings.init(route, ctx);
-        const html = Settings.view(model, ctx, h);
-        const out = renderText(html);
-        expect(out.length).toBeGreaterThan(200);
+        const html = await renderText((h) => Settings.view(model, ctx, h));
+        expect(html.length).toBeGreaterThan(200);
         expect(Settings.title(model, ctx).length).toBeGreaterThan(3);
       }
     }
   });
 
-  it("renders the Mobile More hub when route._tag === More", () => {
+  it("renders the Mobile More hub when route._tag === More", async () => {
     const route: Settings.Route = { _tag: "More", ws: WS };
     const ctxCs = ctxFor(route, { locale: "cs" });
     const ctxEn = ctxFor(route, { locale: "en" });
     const { model } = Settings.init(route, ctxCs);
     expect(Settings.title(model, ctxCs)).toBe("Více");
     expect(Settings.title(model, ctxEn)).toBe("More");
-    const html = renderText(Settings.view(model, ctxEn, h));
+    const html = await renderText((h) => Settings.view(model, ctxEn, h));
     expect(html).toContain(`/w/${WS}/settings/issuing-entity`);
     expect(html).toContain("/account/profile");
     expect(html).toContain(`/w/${WS}/templates`);
@@ -147,7 +159,7 @@ describe("Settings page (Screens 18-21 & More hub)", () => {
     expect(populated.outMessage?._tag).toBe("Toast");
   });
 
-  it("handles Tax Regime history and scheduled change confirmation", () => {
+  it("handles Tax Regime history and scheduled change confirmation", async () => {
     const route: Settings.Route = { _tag: "Settings", ws: WS, section: "taxRegime" };
     const ctx = ctxFor(route, { locale: "en" });
     let { model } = Settings.init(route, ctx);
@@ -168,14 +180,16 @@ describe("Settings page (Screens 18-21 & More hub)", () => {
     ).model;
     model = Settings.update(model, Settings.Message.ClickedAskChangeTaxRegime(), ctx).model;
     expect(model.taxForm.confirmOpen).toBe(true);
-    expect(renderText(Settings.view(model, ctx, h))).toContain("kb-tax-confirm-dialog");
+    expect(await renderText((h) => Settings.view(model, ctx, h))).toContain(
+      "kb-tax-confirm-dialog",
+    );
 
     const confirmed = Settings.update(model, Settings.Message.ClickedConfirmTaxRegime(), ctx);
     expect(confirmed.model.taxForm.confirmOpen).toBe(false);
     expect(confirmed.commands?.length).toBe(1);
   });
 
-  it("derives Czech domestic account number from CZ IBAN and manages Bank Accounts CRUD", () => {
+  it("derives Czech domestic account number from CZ IBAN and manages Bank Accounts CRUD", async () => {
     expect(czechAccountFromIban("CZ6508000000192000145399")).toBe("19-2000145399/0800");
     expect(czechAccountFromIban("DE89370400440532013000")).toBeNull();
 
@@ -201,7 +215,7 @@ describe("Settings page (Screens 18-21 & More hub)", () => {
       }),
       ctx,
     ).model;
-    const html = renderText(Settings.view(model, ctx, h));
+    const html = await renderText((h) => Settings.view(model, ctx, h));
     expect(html).toContain("19-2000145399/0800");
     expect(html).toContain("GIBACZPX");
 
@@ -211,12 +225,12 @@ describe("Settings page (Screens 18-21 & More hub)", () => {
     expect(model.bankForm.removingId).toBe(accId);
   });
 
-  it("toggles distinct Classic Czech vs Modern Minimal miniature PDF preview layouts", () => {
+  it("toggles distinct Classic Czech vs Modern Minimal miniature PDF preview layouts", async () => {
     const route: Settings.Route = { _tag: "Settings", ws: WS, section: "branding" };
     const ctx = ctxFor(route, { locale: "en" });
     let { model } = Settings.init(route, ctx);
 
-    const classicHtml = renderText(Settings.view(model, ctx, h));
+    const classicHtml = await renderText((h) => Settings.view(model, ctx, h));
     expect(classicHtml).toContain("kb-pdf-mini--classic");
     expect(classicHtml).not.toContain("kb-pdf-mini--modern");
 
@@ -225,7 +239,7 @@ describe("Settings page (Screens 18-21 & More hub)", () => {
       Settings.Message.SelectedPdfTemplate({ template: "modern_minimal" }),
       ctx,
     ).model;
-    const modernHtml = renderText(Settings.view(model, ctx, h));
+    const modernHtml = await renderText((h) => Settings.view(model, ctx, h));
     expect(modernHtml).toContain("kb-pdf-mini--modern");
     expect(modernHtml).not.toContain("kb-pdf-mini--classic");
 
@@ -238,7 +252,7 @@ describe("Settings page (Screens 18-21 & More hub)", () => {
     expect(saved.commands?.length).toBe(1);
   });
 
-  it("previews Numbering Series patterns live and rejects >20-char patterns", () => {
+  it("previews Numbering Series patterns live and rejects >20-char patterns", async () => {
     const p1 = previewNumberingPattern("FV-YYYY-NNNN", 42, 2026, 11);
     expect(p1.valid).toBe(true);
     expect(p1.samples).toEqual(["FV-2026-0042", "FV-2026-0043", "FV-2026-0044"]);
@@ -256,7 +270,7 @@ describe("Settings page (Screens 18-21 & More hub)", () => {
       ctx,
     ).model;
     expect(model.numberingForm.pattern).toBe("YYYY-NNNN-MM");
-    const html = renderText(Settings.view(model, ctx, h));
+    const html = await renderText((h) => Settings.view(model, ctx, h));
     expect(html).toContain("2026-0001-11");
   });
 
@@ -289,7 +303,7 @@ describe("Settings page (Screens 18-21 & More hub)", () => {
     expect(saved.commands?.length).toBe(1);
   });
 
-  it("toggles granular Read/Write scopes across all 10 ScopeAreas and reveals one-time kvb_ secret", () => {
+  it("toggles granular Read/Write scopes across all 10 ScopeAreas and reveals one-time kvb_ secret", async () => {
     const route: Settings.Route = { _tag: "Settings", ws: WS, section: "apiKeys" };
     const ctx = ctxFor(route, { locale: "en" });
     let { model } = Settings.init(route, ctx);
@@ -330,7 +344,7 @@ describe("Settings page (Screens 18-21 & More hub)", () => {
     }
 
     // Verify all 10 areas appear in the rendered scope matrix
-    const matrixHtml = renderText(Settings.view(model, ctx, h));
+    const matrixHtml = await renderText((h) => Settings.view(model, ctx, h));
     expect(matrixHtml).toContain("kb-scope-matrix");
     expect(matrixHtml).toContain("Documents");
     expect(matrixHtml).toContain("Share links");
@@ -363,13 +377,13 @@ describe("Settings page (Screens 18-21 & More hub)", () => {
       ctx,
     ).model;
     expect(model.apiKeysForm.createdSecret).toBe(secret);
-    expect(renderText(Settings.view(model, ctx, h))).toContain(secret);
+    expect(await renderText((h) => Settings.view(model, ctx, h))).toContain(secret);
 
     model = Settings.update(model, Settings.Message.ClickedDismissApiKeySecret(), ctx).model;
     expect(model.apiKeysForm.createdSecret).toBeNull();
   });
 
-  it("renders Connected MCP Apps with scope matrix and revokes grants", () => {
+  it("renders Connected MCP Apps with scope matrix and revokes grants", async () => {
     const route: Settings.Route = { _tag: "Settings", ws: WS, section: "connectedApps" };
     const ctx = ctxFor(route, { locale: "en" });
     let { model } = Settings.init(route, ctx);
@@ -387,7 +401,7 @@ describe("Settings page (Screens 18-21 & More hub)", () => {
       Settings.Message.GotConnectedApps({ seq: 1, items: [app] }),
       ctx,
     ).model;
-    const html = renderText(Settings.view(model, ctx, h));
+    const html = await renderText((h) => Settings.view(model, ctx, h));
     expect(html).toContain("Claude Desktop");
     expect(html).toContain("claude.ai");
 

@@ -3,7 +3,7 @@ import type { Html } from "@effect/ui/html";
 /**
  * Reports Suite screen (Screen 17, route `Reports`).
  * Tabs: Revenue, Expenses, Cashflow, Receivables, VAT Summary (+ non-VAT payer turnover threshold
- * hint), period selector, group-by switch, inline SVG charts & tabular summary tables, Export
+ * hint), period selector, group-by switch, bar charts & tabular summary tables, Export
  * dialog (CSV / PDF).
  */
 import type { ReportKind, VatTreatment, WorkspaceId } from "@kvitbit/domain/contract";
