@@ -597,6 +597,27 @@ describe("Shell update & prefs invariants", () => {
     expect(navigated.model.route._tag).toBe("Documents");
   });
 
+  test("plain sign-in selects a workspace or onboarding from the refreshed membership", () => {
+    const path = "/sign-in";
+    const signedOut = bootModel(path, { _tag: "Anonymous" });
+    const refresh = update(
+      signedOut,
+      Message.PageIntent({ path, intent: Intent_.reloadSession({ _tag: "DefaultSignedIn" }) }),
+    );
+    for (const [state, destination] of [
+      [signedInSession, `/w/${WS_MEMBER}`],
+      [{ ...signedInSession, workspaces: [] }, "/onboarding"],
+    ] as const) {
+      const loaded = update(
+        refresh.model,
+        Message.LoadedSession({ seq: refresh.model.sessionSeq, state }),
+      );
+      expect(loaded.commands?.[0]).toMatchObject({ args: { path: destination, replace: true } });
+      const result = update(loaded.model, Message.ChangedUrl({ path: destination }));
+      expect(result.model).toMatchObject({ path: destination, waitingForSession: false });
+    }
+  });
+
   test("ignores intents from other routes and while the protected shell waits", () => {
     const path = `/w/${WS_MEMBER}/documents`;
     const intent = Intent_.toast("stale", "info");
