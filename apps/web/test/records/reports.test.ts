@@ -1,5 +1,7 @@
 import { describe, expect, test } from "bun:test";
+import { Html, HtmlServer } from "@effect/ui/html";
 import type { ViewModels } from "@kvitbit/ui-port";
+import { Effect } from "effect";
 import * as Reports from "../../src/page/records/reports";
 import { periodToRange, type ReportDataRecord } from "../../src/page/records/shared";
 import { ctxFor, DEMO_WORKSPACES, renderPath, signedIn, WS } from "../support";
@@ -161,6 +163,52 @@ describe("Reports Suite page TEA", () => {
     expect(done.model.exporting).toBe(false);
     expect(done.model.exportOpen).toBe(false);
     expect(done.outMessage?._tag).toBe("Toast");
+  });
+
+  test("SSR renders stored contact labels as chart text and escaped titles", async () => {
+    const label = '<contact-label class="vip">A & B</contact-label>';
+    const route: Reports.Route = {
+      _tag: "Reports",
+      ws: WS,
+      report: "revenue",
+      period: "2026" as ViewModels.Period,
+    };
+    const ctx = ctxFor(route, { locale: "en" });
+    const { model } = Reports.init(route, ctx);
+    const grouped = Reports.update(
+      model,
+      Reports.Message.ChangedGroupBy({ groupBy: "contact" }),
+      ctx,
+    );
+    const loaded = Reports.update(
+      grouped.model,
+      Reports.Message.LoadedReport({
+        seq: 2,
+        report: {
+          ...SAMPLE_REVENUE,
+          groupBy: "contact",
+          rows: SAMPLE_REVENUE.rows.map((row) => ({ ...row, key: "contact-1", label })),
+        },
+      }),
+      ctx,
+    );
+    const report = Html.component({
+      name: "ContactReportFixture",
+      model: Reports.Model,
+      message: Reports.Message,
+    }).make({
+      init: () => loaded.model,
+      update: ($) => $.model,
+      view: (h, model) => Reports.view(model, ctx, h),
+    });
+    const { html } = await Effect.runPromise(HtmlServer.renderToHtml(report, {}));
+    expect(html).toMatch(
+      /kb-bar-chart__label[^>]*>&lt;contact-label[^>]*A &amp; B&lt;\/contact-label&gt;<\/span>/,
+    );
+    expect(html).toContain(
+      'title="&lt;contact-label class=&quot;vip&quot;&gt;A &amp; B&lt;/contact-label&gt;: 242000"',
+    );
+    expect(html).not.toContain("<contact-label");
   });
 
   test("SSR renders all report tabs in cs and en including non-VAT payer workspace", async () => {

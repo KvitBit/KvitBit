@@ -17,7 +17,7 @@ import {
 import { Api, I18n, Theme, ViewModels } from "@kvitbit/ui-port";
 import { Effect, Option, Schema } from "effect";
 import { authFetch, Failure, failureFromUnknown, request } from "../../app/api";
-import type { PageCommand } from "../../app/commands";
+import { browserCommand, type PageCommand } from "../../app/commands";
 import { textOf, translator } from "../../app/i18n";
 import { Intent_ } from "../../app/intent";
 import type { MessageHandlers, PageContext, PageReturn, RouteOf } from "../../app/page";
@@ -79,13 +79,14 @@ const SecurityState = Schema.Struct({
   renamingId: Schema.NullOr(Schema.String),
   renameValue: Schema.String,
   removingId: Schema.NullOr(Schema.String),
+  removingPasskey: Schema.Boolean,
   currentPassword: Schema.String,
   newPassword: Schema.String,
   confirmPassword: Schema.String,
   signOutOthers: Schema.Boolean,
   passwordError: Schema.NullOr(Schema.String),
   savingPassword: Schema.Boolean,
-  hasPassword: Schema.NullOr(Schema.Boolean),
+  hasPassword: Remote.remoteSchema(Schema.Boolean),
 });
 
 const SessionsState = Schema.Struct({
@@ -137,10 +138,12 @@ export const Message = UiSchema.TaggedEnum({
   // Security: Passkeys & Accounts
   GotPasskeys: { seq: Remote.Seq, items: Schema.Array(PasskeyItem) },
   FailedPasskeys: { seq: Remote.Seq, failure: Failure },
-  GotAccounts: { hasPassword: Schema.Boolean },
+  GotAccounts: { seq: Remote.Seq, hasPassword: Schema.Boolean },
+  FailedAccounts: { seq: Remote.Seq, failure: Failure },
   ChangedNewPasskeyName: { value: Schema.String },
   ClickedAddPasskey: {},
-  AddedPasskey: { item: PasskeyItem },
+  AddedPasskey: {},
+  FailedAddPasskey: { failure: Failure },
   ClickedStartRenamePasskey: { id: Schema.String, currentName: Schema.String },
   ChangedRenamePasskey: { value: Schema.String },
   ClickedConfirmRenamePasskey: {},
@@ -150,6 +153,7 @@ export const Message = UiSchema.TaggedEnum({
   ClickedCancelRemovePasskey: {},
   ClickedConfirmRemovePasskey: {},
   RemovedPasskey: { id: Schema.String },
+  FailedRemovePasskey: { failure: Failure },
   // Security: Password
   ChangedCurrentPassword: { value: Schema.String },
   ChangedNewPassword: { value: Schema.String },
@@ -209,134 +213,113 @@ const cmdSavePreferences = (prefs: Prefs, revision: number) => {
   );
 };
 
-const decodePasskeys = Schema.decodeUnknownOption(Schema.Array(PasskeyItem));
-const decodePasskey = Schema.decodeUnknownOption(PasskeyItem);
+const decodeAccounts = Schema.decodeUnknownOption(
+  Schema.Array(Schema.Struct({ providerId: Schema.String })),
+);
+const decodePasskeys = Schema.decodeUnknownOption(
+  Schema.Array(
+    Schema.Struct({
+      id: Schema.String,
+      name: Schema.optionalKey(Schema.NullOr(Schema.String)),
+      createdAt: Schema.optionalKey(Schema.NullOr(Schema.String)),
+      deviceType: Schema.String,
+    }),
+  ),
+);
+const decodeCurrentSession = Schema.decodeUnknownOption(
+  Schema.Struct({ session: Schema.Struct({ id: Schema.String }) }),
+);
+const decodeSessions = Schema.decodeUnknownOption(
+  Schema.Array(
+    Schema.Struct({
+      id: Schema.String,
+      token: Schema.String,
+      userAgent: Schema.optionalKey(Schema.NullOr(Schema.String)),
+      ipAddress: Schema.optionalKey(Schema.NullOr(Schema.String)),
+      updatedAt: Schema.String,
+    }),
+  ),
+);
+
+const invalidAuthResponse = (path: string): Failure =>
+  failureFromUnknown(new Error(`Unexpected response from ${path}`));
 
 const origin = (): string =>
   typeof location === "undefined" || location.origin === "null"
     ? "http://localhost"
     : location.origin;
 
-const adaptBetterAuthSessions = (
-  raw: unknown,
-  currentToken: string | null,
-  currentId: string | null,
-): ReadonlyArray<SessionItem> => {
-  const list =
-    typeof raw === "object" && raw !== null && "sessions" in raw
-      ? (raw as { sessions: unknown }).sessions
-      : raw;
-  if (!Array.isArray(list)) return [];
-  const out: Array<SessionItem> = [];
-  for (const item of list) {
-    if (typeof item !== "object" || item === null) continue;
-    const rec = item as Record<string, unknown>;
-    const id = typeof rec.id === "string" ? rec.id : undefined;
-    const token = typeof rec.token === "string" ? rec.token : id;
-    if (id === undefined || token === undefined) continue;
-    const userAgent =
-      typeof rec.userAgent === "string" && rec.userAgent.trim() !== ""
-        ? rec.userAgent
-        : "Browser session";
-    const ipAddress = typeof rec.ipAddress === "string" ? rec.ipAddress : null;
-    const updatedRaw = rec.updatedAt ?? rec.createdAt;
-    const updatedAt =
-      typeof updatedRaw === "string"
-        ? updatedRaw
-        : updatedRaw instanceof Date
-          ? updatedRaw.toISOString()
-          : "";
-    const current =
-      rec.current === true ||
-      (currentToken !== null && token === currentToken) ||
-      (currentId !== null && id === currentId);
-    out.push({ id, token, userAgent, ipAddress, updatedAt, current });
-  }
-  return out;
-};
-
-const cmdLoadAccounts = () =>
-  cmd(
+const cmdLoadAccounts = (seq: number) =>
+  browserCommand(
     "Account.LoadAccounts",
     authFetch(
       "/list-accounts",
       { method: "GET" },
       (json): Message => {
-        const list =
-          typeof json === "object" && json !== null && "accounts" in json
-            ? (json as { accounts: unknown }).accounts
-            : json;
-        const hasPassword =
-          Array.isArray(list) &&
-          list.some(
-            (acc) =>
-              typeof acc === "object" &&
-              acc !== null &&
-              (acc as Record<string, unknown>).providerId === "credential",
-          );
-        return Message.GotAccounts({ hasPassword });
+        const accounts = decodeAccounts(json);
+        return Option.isSome(accounts)
+          ? Message.GotAccounts({
+              seq,
+              hasPassword: accounts.value.some((account) => account.providerId === "credential"),
+            })
+          : Message.FailedAccounts({ seq, failure: invalidAuthResponse("/list-accounts") });
       },
-      (): Message => Message.GotAccounts({ hasPassword: false }),
+      (failure): Message => Message.FailedAccounts({ seq, failure }),
     ),
   );
 
-const cmdLoadPasskeys = (seq: number) =>
-  cmd(
+const cmdLoadPasskeys = (seq: number, locale: Locale) =>
+  browserCommand(
     "Account.LoadPasskeys",
     authFetch(
       "/passkey/list-user-passkeys",
       { method: "GET" },
       (json): Message => {
-        const raw =
-          typeof json === "object" && json !== null && "passkeys" in json
-            ? (json as { passkeys: unknown }).passkeys
-            : json;
-        return Message.GotPasskeys({
-          seq,
-          items: Option.getOrElse(decodePasskeys(raw), () => []),
-        });
+        const passkeys = decodePasskeys(json);
+        return Option.isSome(passkeys)
+          ? Message.GotPasskeys({
+              seq,
+              items: passkeys.value.map((passkey) => ({
+                ...passkey,
+                name: passkey.name?.trim() || sCopy(locale, "account.security.unnamedPasskey"),
+                createdAt: passkey.createdAt ?? "",
+              })),
+            })
+          : Message.FailedPasskeys({
+              seq,
+              failure: invalidAuthResponse("/passkey/list-user-passkeys"),
+            });
       },
       (failure): Message => Message.FailedPasskeys({ seq, failure }),
     ),
   );
 
 const cmdAddPasskey = (name: string) =>
-  cmd(
+  browserCommand(
     "Account.AddPasskey",
     Effect.tryPromise({
       try: () => performPasskeyRegistration(origin(), name),
       catch: (e) => e,
     }).pipe(
-      Effect.map((res): Message => {
-        if (!res.supported) {
-          return Message.FailedAction({
-            failure: {
-              tag: "Invalid",
-              surface: "inline",
-              text: { key: "auth.passkey.unsupported" },
-              issues: [],
-              retryable: false,
-              staleRevision: false,
-              freshBotProof: false,
-              requestId: null,
-            },
-          });
-        }
-        const json = res.json;
-        const candidate =
-          typeof json === "object" && json !== null && "passkey" in json
-            ? (json as { passkey: unknown }).passkey
-            : json;
-        const parsed = Option.getOrElse(decodePasskey(candidate), () => ({
-          id: `pk-${Date.now()}`,
-          name,
-          createdAt: new Date().toISOString().slice(0, 10),
-          deviceType: "platform",
-        }));
-        return Message.AddedPasskey({ item: parsed });
-      }),
+      Effect.map(
+        (res): Message =>
+          res.supported
+            ? Message.AddedPasskey()
+            : Message.FailedAddPasskey({
+                failure: {
+                  tag: "Invalid",
+                  surface: "inline",
+                  text: { key: "auth.passkey.unsupported" },
+                  issues: [],
+                  retryable: false,
+                  staleRevision: false,
+                  freshBotProof: false,
+                  requestId: null,
+                },
+              }),
+      ),
       Effect.catch((e) =>
-        Effect.succeed<Message>(Message.FailedAction({ failure: failureFromUnknown(e) })),
+        Effect.succeed<Message>(Message.FailedAddPasskey({ failure: failureFromUnknown(e) })),
       ),
     ),
   );
@@ -353,13 +336,13 @@ const cmdRenamePasskey = (id: string, name: string) =>
   );
 
 const cmdDeletePasskey = (id: string) =>
-  cmd(
+  browserCommand(
     "Account.DeletePasskey",
     authFetch(
       "/passkey/delete-passkey",
       { method: "POST", body: { id } },
       (): Message => Message.RemovedPasskey({ id }),
-      (failure): Message => Message.FailedAction({ failure }),
+      (failure): Message => Message.FailedRemovePasskey({ failure }),
     ),
   );
 
@@ -400,44 +383,51 @@ const cmdChangePassword = (
     ),
   );
 
-const cmdLoadSessions = (seq: number) =>
-  cmd(
+const cmdLoadSessions = (seq: number, unknownDevice: string) =>
+  browserCommand(
     "Account.LoadSessions",
     authFetch(
       "/get-session",
       { method: "GET" },
-      (sessionJson): { readonly token: string | null; readonly id: string | null } => {
-        const sess =
-          typeof sessionJson === "object" && sessionJson !== null && "session" in sessionJson
-            ? (sessionJson as { session?: Record<string, unknown> }).session
-            : undefined;
-        return {
-          token: typeof sess?.token === "string" ? sess.token : null,
-          id: typeof sess?.id === "string" ? sess.id : null,
-        };
+      (json) => {
+        const current = decodeCurrentSession(json);
+        return Option.isSome(current)
+          ? { _tag: "Current" as const, id: current.value.session.id }
+          : Message.FailedSessions({ seq, failure: invalidAuthResponse("/get-session") });
       },
-      (): { readonly token: string | null; readonly id: string | null } => ({
-        token: null,
-        id: null,
-      }),
+      (failure) => Message.FailedSessions({ seq, failure }),
     ).pipe(
-      Effect.andThen((cur) =>
-        authFetch(
+      Effect.andThen((current): Effect.Effect<Message> => {
+        if (current._tag === "FailedSessions") return Effect.succeed(current);
+        return authFetch(
           "/list-sessions",
           { method: "GET" },
-          (json): Message =>
-            Message.GotSessions({
+          (json): Message => {
+            const sessions = decodeSessions(json);
+            if (Option.isNone(sessions) || !sessions.value.some((s) => s.id === current.id)) {
+              return Message.FailedSessions({
+                seq,
+                failure: invalidAuthResponse("/list-sessions"),
+              });
+            }
+            return Message.GotSessions({
               seq,
-              items: adaptBetterAuthSessions(json, cur.token, cur.id),
-            }),
+              items: sessions.value.map((session) => ({
+                ...session,
+                userAgent: session.userAgent?.trim() || unknownDevice,
+                ipAddress: session.ipAddress ?? null,
+                current: session.id === current.id,
+              })),
+            });
+          },
           (failure): Message => Message.FailedSessions({ seq, failure }),
-        ),
-      ),
+        );
+      }),
     ),
   );
 
 const cmdRevokeSession = (id: string, token: string) =>
-  cmd(
+  browserCommand(
     "Account.RevokeSession",
     authFetch(
       "/revoke-session",
@@ -478,6 +468,7 @@ export const init = (route: Route, ctx: PageContext): PageReturn<Model, Message>
 
   let preferences: Remote.Remote<AccountPreferences> = Remote.idle;
   let passkeys: Remote.Remote<ReadonlyArray<PasskeyItem>> = Remote.idle;
+  let hasPassword: Remote.Remote<boolean> = Remote.idle;
   let sessions: Remote.Remote<ReadonlyArray<SessionItem>> = Remote.idle;
 
   if (route.tab === "profile" || route.tab === "appearance") {
@@ -485,10 +476,16 @@ export const init = (route: Route, ctx: PageContext): PageReturn<Model, Message>
     commands.push(cmdLoadPreferences(Remote.seqOf(preferences)));
   } else if (route.tab === "security") {
     passkeys = Remote.load(passkeys);
-    commands.push(cmdLoadPasskeys(Remote.seqOf(passkeys)), cmdLoadAccounts());
+    hasPassword = Remote.load(hasPassword);
+    commands.push(
+      cmdLoadPasskeys(Remote.seqOf(passkeys), ctx.locale),
+      cmdLoadAccounts(Remote.seqOf(hasPassword)),
+    );
   } else if (route.tab === "sessions") {
     sessions = Remote.load(sessions);
-    commands.push(cmdLoadSessions(Remote.seqOf(sessions)));
+    commands.push(
+      cmdLoadSessions(Remote.seqOf(sessions), sCopy(ctx.locale, "account.sessions.unknownDevice")),
+    );
   }
 
   return {
@@ -515,13 +512,14 @@ export const init = (route: Route, ctx: PageContext): PageReturn<Model, Message>
         renamingId: null,
         renameValue: "",
         removingId: null,
+        removingPasskey: false,
         currentPassword: "",
         newPassword: "",
         confirmPassword: "",
         signOutOthers: true,
         passwordError: null,
         savingPassword: false,
-        hasPassword: null,
+        hasPassword,
       },
       sessions: {
         list: sessions,
@@ -540,11 +538,12 @@ export const init = (route: Route, ctx: PageContext): PageReturn<Model, Message>
 
 // --- Update -------------------------------------------------------------------------------------
 
-const canRemovePasskey = (security: Model["security"]): boolean => {
-  if (security.hasPassword === null) return false;
-  if (security.hasPassword) return true;
-  return (Remote.dataOf(security.passkeys)?.length ?? 0) > 1;
-};
+const canRemovePasskey = (security: Model["security"], id: string): boolean =>
+  !security.removingPasskey &&
+  security.passkeys._tag === "Loaded" &&
+  security.passkeys.data.some((passkey) => passkey.id === id) &&
+  security.hasPassword._tag === "Loaded" &&
+  (security.hasPassword.data || security.passkeys.data.length > 1);
 
 const currentRevision = (model: Model): number => Remote.dataOf(model.preferences)?.revision ?? 1;
 
@@ -720,14 +719,32 @@ export const update = (
         },
       },
     }),
-    GotAccounts: ({ hasPassword }) => ({
-      model: { ...model, security: { ...model.security, hasPassword } },
+    GotAccounts: ({ seq, hasPassword }) => ({
+      model: {
+        ...model,
+        security: {
+          ...model.security,
+          hasPassword: Remote.succeed(model.security.hasPassword, seq, hasPassword),
+        },
+      },
+    }),
+    FailedAccounts: ({ seq, failure }) => ({
+      model: {
+        ...model,
+        security: {
+          ...model.security,
+          hasPassword: Remote.fail(model.security.hasPassword, seq, failure),
+        },
+      },
     }),
     ChangedNewPasskeyName: ({ value }) => ({
       model: { ...model, security: { ...model.security, newPasskeyName: value } },
     }),
     ClickedAddPasskey: () => {
-      const name = model.security.newPasskeyName.trim() || "Passkey";
+      if (model.security.addingPasskey) return { model };
+      const name =
+        model.security.newPasskeyName.trim() ||
+        sCopy(ctx.locale, "account.security.unnamedPasskey");
       return {
         model: {
           ...model,
@@ -737,25 +754,24 @@ export const update = (
         commands: [cmdAddPasskey(name)],
       };
     },
-    AddedPasskey: ({ item }) => {
-      const existing = Remote.dataOf(model.security.passkeys) ?? [];
+    AddedPasskey: () => {
+      const passkeys = Remote.load(model.security.passkeys);
       return {
         model: {
           ...model,
-          security: {
-            ...model.security,
-            addingPasskey: false,
-            newPasskeyName: "",
-            passkeys: {
-              _tag: "Loaded",
-              seq: Remote.seqOf(model.security.passkeys) + 1,
-              data: [...existing, item],
-            },
-          },
+          security: { ...model.security, addingPasskey: false, newPasskeyName: "", passkeys },
         },
+        commands: [cmdLoadPasskeys(Remote.seqOf(passkeys), ctx.locale)],
         outMessage: Intent_.toast(t.t("account.security.passkeyAdded")),
       };
     },
+    FailedAddPasskey: ({ failure }) => ({
+      model: {
+        ...model,
+        security: { ...model.security, addingPasskey: false },
+        actionFailure: failure,
+      },
+    }),
     ClickedStartRenamePasskey: ({ id, currentName }) => ({
       model: {
         ...model,
@@ -779,6 +795,7 @@ export const update = (
     },
     RenamedPasskey: ({ id, name }) => {
       const existing = Remote.dataOf(model.security.passkeys) ?? [];
+      const seq = Remote.seqOf(model.security.passkeys) + 1;
       return {
         model: {
           ...model,
@@ -787,48 +804,70 @@ export const update = (
             renamingId: null,
             renameValue: "",
             passkeys: {
-              _tag: "Loaded",
-              seq: Remote.seqOf(model.security.passkeys) + 1,
+              _tag: "Refreshing",
+              seq,
               data: existing.map((p) => (p.id === id ? { ...p, name } : p)),
             },
           },
         },
+        commands: [cmdLoadPasskeys(seq, ctx.locale)],
         outMessage: Intent_.toast(sCopy(ctx.locale, "account.security.passkeyRenamed")),
       };
     },
     ClickedAskRemovePasskey: ({ id }) =>
-      canRemovePasskey(model.security)
+      canRemovePasskey(model.security, id)
         ? { model: { ...model, security: { ...model.security, removingId: id } } }
         : { model },
-    ClickedCancelRemovePasskey: () => ({
-      model: { ...model, security: { ...model.security, removingId: null } },
-    }),
+    ClickedCancelRemovePasskey: () =>
+      model.security.removingPasskey
+        ? { model }
+        : { model: { ...model, security: { ...model.security, removingId: null } } },
     ClickedConfirmRemovePasskey: () => {
       const id = model.security.removingId;
-      if (id === null || !canRemovePasskey(model.security)) {
+      if (model.security.removingPasskey) return { model };
+      if (id === null || !canRemovePasskey(model.security, id)) {
         return { model: { ...model, security: { ...model.security, removingId: null } } };
       }
       return {
-        model: { ...model, actionFailure: null },
+        model: {
+          ...model,
+          security: { ...model.security, removingPasskey: true },
+          actionFailure: null,
+        },
         commands: [cmdDeletePasskey(id)],
       };
     },
     RemovedPasskey: ({ id }) => {
       const existing = Remote.dataOf(model.security.passkeys) ?? [];
+      const seq = Remote.seqOf(model.security.passkeys) + 1;
       return {
         model: {
           ...model,
           security: {
             ...model.security,
             removingId: null,
+            removingPasskey: false,
             passkeys: {
-              _tag: "Loaded",
-              seq: Remote.seqOf(model.security.passkeys) + 1,
+              _tag: "Refreshing",
+              seq,
               data: existing.filter((p) => p.id !== id),
             },
           },
         },
+        commands: [cmdLoadPasskeys(seq, ctx.locale)],
         outMessage: Intent_.toast(sCopy(ctx.locale, "account.security.passkeyRemoved")),
+      };
+    },
+
+    FailedRemovePasskey: ({ failure }) => {
+      const passkeys = Remote.load(model.security.passkeys);
+      return {
+        model: {
+          ...model,
+          security: { ...model.security, removingId: null, removingPasskey: false, passkeys },
+          actionFailure: failure,
+        },
+        commands: [cmdLoadPasskeys(Remote.seqOf(passkeys), ctx.locale)],
       };
     },
 
@@ -901,7 +940,11 @@ export const update = (
           currentPassword: "",
           newPassword: "",
           confirmPassword: "",
-          hasPassword: true,
+          hasPassword: {
+            _tag: "Loaded",
+            seq: Remote.seqOf(model.security.hasPassword) + 1,
+            data: true,
+          },
         },
       },
       outMessage: Intent_.toast(t.t("account.security.passwordChanged")),
@@ -921,15 +964,16 @@ export const update = (
       },
     }),
     ClickedRevokeSession: ({ id }) => {
-      const target = (Remote.dataOf(model.sessions.list) ?? []).find((s) => s.id === id);
-      const token = target?.token ?? id;
+      if (model.sessions.revokingId !== null || model.sessions.revokingOthers) return { model };
+      const target = Remote.dataOf(model.sessions.list)?.find((s) => s.id === id);
+      if (target === undefined || target.current) return { model };
       return {
         model: {
           ...model,
           sessions: { ...model.sessions, revokingId: id },
           actionFailure: null,
         },
-        commands: [cmdRevokeSession(id, token)],
+        commands: [cmdRevokeSession(id, target.token)],
       };
     },
     RevokedSession: ({ id }) => {
@@ -950,14 +994,22 @@ export const update = (
         outMessage: Intent_.toast(sCopy(ctx.locale, "account.sessions.revoked")),
       };
     },
-    ClickedRevokeOtherSessions: () => ({
-      model: {
-        ...model,
-        sessions: { ...model.sessions, revokingOthers: true },
-        actionFailure: null,
-      },
-      commands: [cmdRevokeOtherSessions()],
-    }),
+    ClickedRevokeOtherSessions: () => {
+      if (
+        model.sessions.revokingOthers ||
+        model.sessions.revokingId !== null ||
+        !Remote.dataOf(model.sessions.list)?.some((s) => !s.current)
+      )
+        return { model };
+      return {
+        model: {
+          ...model,
+          sessions: { ...model.sessions, revokingOthers: true },
+          actionFailure: null,
+        },
+        commands: [cmdRevokeOtherSessions()],
+      };
+    },
     RevokedOtherSessions: () => {
       const existing = Remote.dataOf(model.sessions.list) ?? [];
       return {
@@ -1002,14 +1054,28 @@ export const update = (
       model: {
         ...model,
         profile: { ...model.profile, savingProfile: false, savingEmail: false },
-        security: { ...model.security, addingPasskey: false, savingPassword: false },
+        security: { ...model.security, savingPassword: false },
         sessions: { ...model.sessions, revokingId: null, revokingOthers: false },
         danger: { ...model.danger, deleting: false },
         actionFailure: failure,
       },
     }),
 
-    ClickedRetry: () => (model.route._tag === "Account" ? init(model.route, ctx) : { model }),
+    ClickedRetry: () => {
+      if (model.route._tag !== "Account") return { model };
+      if (model.route.tab === "security") {
+        const passkeys = Remote.load(model.security.passkeys);
+        const hasPassword = Remote.load(model.security.hasPassword);
+        return {
+          model: { ...model, security: { ...model.security, passkeys, hasPassword } },
+          commands: [
+            cmdLoadPasskeys(Remote.seqOf(passkeys), ctx.locale),
+            cmdLoadAccounts(Remote.seqOf(hasPassword)),
+          ],
+        };
+      }
+      return init(model.route, ctx);
+    },
   } satisfies MessageHandlers<Message, PageReturn<Model, Message>>);
 };
 
@@ -1249,6 +1315,19 @@ const viewSecurity = (model: Model, ctx: PageContext, h: Html.H<Message>): Marku
           onClick: Message.ClickedAddPasskey(),
         }),
       ]),
+      ...(model.security.hasPassword._tag === "Failed" && model.security.passkeys._tag !== "Failed"
+        ? [
+            banner(h, {
+              tone: "error",
+              text: textOf(t, model.security.hasPassword.failure.text),
+              action: button(h, {
+                label: t.t("common.action.retry"),
+                small: true,
+                onClick: Message.ClickedRetry(),
+              }),
+            }),
+          ]
+        : []),
       ...(model.security.passkeys._tag === "Loading"
         ? [skeleton(h, "100%", "48px"), skeleton(h, "100%", "48px")]
         : model.security.passkeys._tag === "Failed"
@@ -1306,7 +1385,6 @@ const viewSecurity = (model: Model, ctx: PageContext, h: Html.H<Message>): Marku
                       header: "",
                       align: "end",
                       cell: (row) => {
-                        const isLast = !canRemovePasskey(model.security);
                         return h.div.class("kb-row").children([
                           button(h, {
                             label: t.t("common.action.rename"),
@@ -1321,7 +1399,7 @@ const viewSecurity = (model: Model, ctx: PageContext, h: Html.H<Message>): Marku
                             label: t.t("common.action.remove"),
                             small: true,
                             variant: "danger",
-                            disabled: isLast,
+                            disabled: !canRemovePasskey(model.security, row.id),
                             onClick: Message.ClickedAskRemovePasskey({ id: row.id }),
                           }),
                         ]);
@@ -1386,11 +1464,14 @@ const viewSecurity = (model: Model, ctx: PageContext, h: Html.H<Message>): Marku
             actions: [
               button(h, {
                 label: t.t("common.action.cancel"),
+                disabled: model.security.removingPasskey,
                 onClick: Message.ClickedCancelRemovePasskey(),
               }),
               button(h, {
                 label: t.t("common.action.remove"),
                 variant: "danger",
+                busy: model.security.removingPasskey,
+                disabled: !canRemovePasskey(model.security, removing.id),
                 onClick: Message.ClickedConfirmRemovePasskey(),
               }),
             ],
@@ -1411,6 +1492,7 @@ const viewSessions = (model: Model, ctx: PageContext, h: Html.H<Message>): Marku
         label: t.t("account.security.signOutOthers"),
         small: true,
         busy: model.sessions.revokingOthers,
+        disabled: model.sessions.revokingId !== null || !rows?.some((session) => !session.current),
         onClick: Message.ClickedRevokeOtherSessions(),
       }),
     ]),
@@ -1473,6 +1555,8 @@ const viewSessions = (model: Model, ctx: PageContext, h: Html.H<Message>): Marku
                             small: true,
                             variant: "danger",
                             busy: model.sessions.revokingId === s.id,
+                            disabled:
+                              model.sessions.revokingOthers || model.sessions.revokingId !== null,
                             onClick: Message.ClickedRevokeSession({ id: s.id }),
                           }),
                   },

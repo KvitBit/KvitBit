@@ -251,18 +251,19 @@ let passkeysState: Array<PasskeyItem> = [
     id: "pk-macbook-1",
     name: "MacBook Pro Touch ID",
     createdAt: "2026-05-14T09:30:00.000Z",
-    deviceType: "platform",
+    deviceType: "singleDevice",
   },
 ];
 
-let sessionsState: Array<SessionItem> = [
+// Matches the active session ID returned by the demo shell's get-session route.
+const demoCurrentSessionId = "demo";
+let sessionsState: Array<Omit<SessionItem, "current">> = [
   {
-    id: "sess-current",
+    id: demoCurrentSessionId,
     token: "tok-sess-current",
     userAgent: "Chrome 131 · Linux",
     ipAddress: "185.42.110.24",
     updatedAt: "2026-11-24T13:30:00.000Z",
-    current: true,
   },
   {
     id: "sess-pixel",
@@ -270,7 +271,6 @@ let sessionsState: Array<SessionItem> = [
     userAgent: "Kvitbit Android · Pixel 8",
     ipAddress: "185.42.110.24",
     updatedAt: "2026-11-23T20:15:00.000Z",
-    current: false,
   },
 ];
 
@@ -801,12 +801,14 @@ export const routes: ReadonlyArray<DemoRoute> = [
     method: "POST",
     path: "/api/auth/passkey/verify-registration",
     respond: ({ body }) => {
-      const name = (body as { name?: string } | null)?.name ?? "Passkey";
+      const { name = "Passkey", response } = (body ?? {}) as { name?: string; response?: unknown };
+      if (response === undefined)
+        return status(400, { message: "Registration response is required" });
       const created: PasskeyItem = {
         id: `pk-${++seqCounter}`,
         name,
         createdAt: new Date().toISOString(),
-        deviceType: "platform",
+        deviceType: "singleDevice",
       };
       passkeysState = [...passkeysState, created];
       return created;
@@ -837,12 +839,9 @@ export const routes: ReadonlyArray<DemoRoute> = [
     method: "POST",
     path: "/api/auth/revoke-session",
     respond: ({ body }) => {
-      const { token, id } = (body ?? {}) as { token?: string; id?: string };
-      if (token !== undefined) {
-        sessionsState = sessionsState.filter((s) => s.token !== token);
-      } else if (id !== undefined) {
-        sessionsState = sessionsState.filter((s) => s.id !== id);
-      }
+      const { token } = (body ?? {}) as { token?: string };
+      if (typeof token !== "string") return status(400, { message: "Session token is required" });
+      sessionsState = sessionsState.filter((s) => s.token !== token);
       return { status: true };
     },
   },
@@ -850,7 +849,7 @@ export const routes: ReadonlyArray<DemoRoute> = [
     method: "POST",
     path: "/api/auth/revoke-other-sessions",
     respond: () => {
-      sessionsState = sessionsState.filter((s) => s.current);
+      sessionsState = sessionsState.filter((s) => s.id === demoCurrentSessionId);
       return { status: true };
     },
   },
