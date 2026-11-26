@@ -43,6 +43,8 @@ import { SqlClient } from "effect/sql";
 import {
   computeDocumentPaymentQr,
   documentPdfCacheKey,
+  ExplicitPdfTemplate,
+  resolveDocumentFieldsAtRevision,
   resolveVariableSymbol,
   sha256HexSync,
 } from "../projections/documents";
@@ -72,25 +74,34 @@ const concatBytes = (chunks: ReadonlyArray<Uint8Array>): Uint8Array => {
 const isAllowedImageType = (mediaType: string): mediaType is RenderImage["mediaType"] =>
   ALLOWED_IMAGE_TYPES.has(mediaType as RenderImage["mediaType"]);
 
+interface LoadedBrandingImage {
+  readonly image: RenderImage | null;
+  /** False when a referenced image failed to load (e.g. transient storage error); blocks caching. */
+  readonly complete: boolean;
+}
+
 const loadBrandingImage = (
   blobs: BlobStorage["Service"],
   workspaceId: WorkspaceId,
   image: "logo" | "stamp",
   ref: ImageRef | null,
-): Effect.Effect<RenderImage | null> => {
+): Effect.Effect<LoadedBrandingImage> => {
   if (ref === null || !isAllowedImageType(ref.contentType)) {
-    return Effect.succeed(null);
+    return Effect.succeed({ image: null, complete: true });
   }
   const key = `branding/${workspaceId}/${image}/${ref.sha256}` as BlobKey;
   return blobs.get(key).pipe(
     Effect.flatMap((stream) => Stream.runCollect(stream)),
     Effect.map(
-      (chunks): RenderImage => ({
-        mediaType: ref.contentType as RenderImage["mediaType"],
-        bytes: concatBytes(chunks),
+      (chunks): LoadedBrandingImage => ({
+        image: {
+          mediaType: ref.contentType as RenderImage["mediaType"],
+          bytes: concatBytes(chunks),
+        },
+        complete: true,
       }),
     ),
-    Effect.catch(() => Effect.succeed(null)),
+    Effect.catch(() => Effect.succeed({ image: null, complete: false })),
   );
 };
 
@@ -99,6 +110,7 @@ export interface DocumentRenderContext {
   readonly variableSymbol?: string | null | undefined;
   readonly orderNumber?: string | null | undefined;
   readonly note?: string | null | undefined;
+  readonly amountDue?: BigDecimal.BigDecimal | undefined;
   readonly paymentQr?: DocumentRenderModel["paymentQr"] | undefined;
   readonly correction?:
     | {
@@ -196,6 +208,14 @@ export const documentViewToRenderModel = (
   };
 
   const variableSymbol = resolveVariableSymbol(context?.variableSymbol, view.number);
+  const qrAmount =
+    context?.amountDue !== undefined
+      ? context.amountDue
+      : view.settlement === "paid" ||
+          view.settlement === "overpaid" ||
+          view.settlement === "credited"
+        ? BigDecimal.fromStringUnsafe("0")
+        : view.totals.gross.amount;
   const paymentQr =
     context?.paymentQr !== undefined
       ? context.paymentQr
@@ -205,7 +225,7 @@ export const documentViewToRenderModel = (
           status: view.status,
           number: view.number,
           currency: view.totals.gross.currency,
-          amount: view.totals.gross.amount,
+          amount: qrAmount,
           issuer,
           variableSymbol,
           dueOn: view.dates.dueOn,
@@ -627,12 +647,19 @@ export const DocumentRendererLive: Layer.Layer<DocumentRenderer, never, PdfEngin
       render: (view, options) =>
         Effect.gen(function* () {
           const workspaceId = yield* resolveWorkspaceId(view.id);
+          const explicitOpt = yield* Effect.serviceOption(ExplicitPdfTemplate);
+          const isExplicitTemplate = Option.getOrElse(explicitOpt, () => false);
           const workspace =
             workspaceId !== undefined && Option.isSome(workspacesRepoOpt)
               ? yield* workspacesRepoOpt.value
                   .getWorkspace(workspaceId)
                   .pipe(Effect.catch(() => Effect.succeed(undefined)))
               : undefined;
+
+          const effectiveTemplate =
+            isExplicitTemplate || options.template !== "classic" || workspace === undefined
+              ? options.template
+              : workspace.branding.pdfTemplate;
 
           const cacheKey =
             workspaceId !== undefined && workspace !== undefined && Option.isSome(blobsOpt)
@@ -641,7 +668,7 @@ export const DocumentRendererLive: Layer.Layer<DocumentRenderer, never, PdfEngin
                   documentId: view.id,
                   documentRevision: view.revision,
                   workspaceRevision: workspace.revision,
-                  template: options.template,
+                  template: effectiveTemplate,
                   language: options.language,
                 })
               : undefined;
@@ -662,19 +689,35 @@ export const DocumentRendererLive: Layer.Layer<DocumentRenderer, never, PdfEngin
                   .pipe(Effect.catch(() => Effect.succeed(undefined)))
               : undefined;
 
+          const resolvedFields =
+            workspaceId !== undefined && record !== undefined && Option.isSome(documentsRepoOpt)
+              ? yield* resolveDocumentFieldsAtRevision({
+                  workspaceId,
+                  view,
+                  record,
+                  documentsRepo: documentsRepoOpt.value,
+                  coreStore: Option.getOrUndefined(coreStoreOpt),
+                })
+              : undefined;
+
           let branding: RenderBranding | undefined;
+          let brandingComplete = true;
           if (workspaceId !== undefined && workspace !== undefined) {
-            const [logo, stamp] = Option.isSome(blobsOpt)
+            const [logoResult, stampResult] = Option.isSome(blobsOpt)
               ? yield* Effect.all([
                   loadBrandingImage(blobsOpt.value, workspaceId, "logo", workspace.branding.logo),
                   loadBrandingImage(blobsOpt.value, workspaceId, "stamp", workspace.branding.stamp),
                 ])
-              : ([null, null] as const);
+              : ([
+                  { image: null, complete: workspace.branding.logo === null },
+                  { image: null, complete: workspace.branding.stamp === null },
+                ] as const);
+            brandingComplete = logoResult.complete && stampResult.complete;
             branding = {
               accentColor: workspace.branding.accentColor,
               footerText: workspace.branding.footerText,
-              logo,
-              stamp,
+              logo: logoResult.image,
+              stamp: stampResult.image,
             };
           }
 
@@ -701,17 +744,18 @@ export const DocumentRendererLive: Layer.Layer<DocumentRenderer, never, PdfEngin
 
           const model = documentViewToRenderModel(view, {
             branding,
-            variableSymbol: record?.variableSymbol,
-            orderNumber: record?.orderNumber,
-            note: record?.note,
+            variableSymbol: resolvedFields?.variableSymbol,
+            orderNumber: resolvedFields?.orderNumber,
+            note: resolvedFields?.note,
+            amountDue: resolvedFields?.amountDue,
             correction,
           });
-          const bytes = yield* renderDocumentPdf(model, options.template, options.language).pipe(
+          const bytes = yield* renderDocumentPdf(model, effectiveTemplate, options.language).pipe(
             Effect.provideService(PdfEngine, engine),
             Effect.orDie,
           );
 
-          if (cacheKey !== undefined && Option.isSome(blobsOpt)) {
+          if (brandingComplete && cacheKey !== undefined && Option.isSome(blobsOpt)) {
             yield* blobsOpt.value
               .put(cacheKey, Stream.succeed(bytes), {
                 contentType: "application/pdf",
@@ -744,7 +788,7 @@ export const ReportPdfRendererLive: Layer.Layer<ReportPdfRenderer, never, PdfEng
             : undefined;
           let context: ReportRenderContext | undefined;
           if (workspace !== undefined) {
-            const [logo, stamp] = Option.isSome(blobsOpt)
+            const [logoResult, stampResult] = Option.isSome(blobsOpt)
               ? yield* Effect.all([
                   loadBrandingImage(
                     blobsOpt.value,
@@ -759,7 +803,10 @@ export const ReportPdfRendererLive: Layer.Layer<ReportPdfRenderer, never, PdfEng
                     workspace.branding.stamp,
                   ),
                 ])
-              : ([null, null] as const);
+              : ([
+                  { image: null, complete: true },
+                  { image: null, complete: true },
+                ] as const);
             context = {
               workspace: {
                 name: workspace.issuingEntity.name,
@@ -769,8 +816,8 @@ export const ReportPdfRendererLive: Layer.Layer<ReportPdfRenderer, never, PdfEng
               branding: {
                 accentColor: workspace.branding.accentColor,
                 footerText: workspace.branding.footerText,
-                logo,
-                stamp,
+                logo: logoResult.image,
+                stamp: stampResult.image,
               },
             };
           }
@@ -792,14 +839,20 @@ export const BrandingPreviewLive: Layer.Layer<BrandingPreview, never, PdfEngine>
     return BrandingPreview.of({
       render: (input) =>
         Effect.gen(function* () {
-          const [logo, stamp] = Option.isSome(blobsOpt)
+          const [logoResult, stampResult] = Option.isSome(blobsOpt)
             ? yield* Effect.all([
                 loadBrandingImage(blobsOpt.value, input.workspaceId, "logo", input.branding.logo),
                 loadBrandingImage(blobsOpt.value, input.workspaceId, "stamp", input.branding.stamp),
               ])
-            : ([null, null] as const);
+            : ([
+                { image: null, complete: true },
+                { image: null, complete: true },
+              ] as const);
           const bytes = yield* renderDocumentPdf(
-            brandingPreviewToRenderModel(input, { logo, stamp }),
+            brandingPreviewToRenderModel(input, {
+              logo: logoResult.image,
+              stamp: stampResult.image,
+            }),
             input.branding.pdfTemplate,
             input.language,
           ).pipe(Effect.provideService(PdfEngine, engine), Effect.orDie);
