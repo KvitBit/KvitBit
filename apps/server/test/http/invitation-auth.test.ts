@@ -1,4 +1,5 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, expect, spyOn, test } from "bun:test";
+import { inspect } from "node:util";
 import { BotProtection, BotProtectionUnavailable, InvalidBotProof } from "@kvitbit/adapters/altcha";
 import { InvitationTokens } from "@kvitbit/core";
 import { CaptureEmailSender } from "@kvitbit/core/testing";
@@ -230,28 +231,42 @@ test("ordinary signup still verifies by email and an existing user can sign in t
   expect((await accept(token, cookie)).status).toBe(200);
 });
 
-test("invited signup rolls back if session creation fails, then works alongside ordinary signup", async () => {
+test("invited signup rolls back failed inserts without logging SQL and can retry", async () => {
   const { app, invite, signUp, verificationEmails } = setup();
   const email = "retry@example.cz";
   const { token } = await invite(email);
-  await app.run(
-    Effect.gen(function* () {
-      const sql = yield* SqlClient.SqlClient;
-      yield* sql`alter table auth.session add constraint fail_session_insert check (false)`;
-    }),
-  );
 
-  const failed = await signUp(email, "invitation_accept:abort", { invitation: token });
-  expect(failed.status).toBe(500);
-  expect(sessionCookie(failed)).toBeUndefined();
-  await app.run(
-    Effect.gen(function* () {
-      const sql = yield* SqlClient.SqlClient;
-      expect(yield* sql`select id from auth."user"`).toEqual([]);
-      expect(yield* sql`select id from auth.account`).toEqual([]);
-      yield* sql`alter table auth.session drop constraint fail_session_insert`;
-    }),
-  );
+  for (const { table, status } of [
+    { table: "user", status: 422 },
+    { table: "session", status: 500 },
+  ]) {
+    await app.run(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient;
+        yield* sql`alter table auth.${sql(table)} add constraint fail_auth_insert check (false)`;
+      }),
+    );
+
+    const log = spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const failed = await signUp(email, `invitation_accept:abort-${table}`, { invitation: token });
+      expect(failed.status).toBe(status);
+      expect(sessionCookie(failed)).toBeUndefined();
+      const leakedSql = log.mock.calls.some((args) => /Failed query:|params:/.test(inspect(args)));
+      expect(leakedSql).toBe(false);
+    } finally {
+      log.mockRestore();
+    }
+
+    await app.run(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient;
+        expect(yield* sql`select id from auth."user"`).toEqual([]);
+        expect(yield* sql`select id from auth.account`).toEqual([]);
+        yield* sql`alter table auth.${sql(table)} drop constraint fail_auth_insert`;
+      }),
+    );
+  }
 
   const [invited, ordinary] = await Promise.all([
     signUp(email, "invitation_accept:retry", { invitation: token }),

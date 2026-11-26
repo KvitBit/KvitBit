@@ -14,6 +14,10 @@ import { acceptLanguageLocale } from "../http/edge/request";
 
 const SIGN_UP_PATH = "/sign-up/email";
 
+// Better Auth can log Drizzle errors with raw SQL parameters before returning a response.
+const logInvitationSignUpError = () =>
+  Effect.runSync(Effect.logError("Invitation signup request failed"));
+
 const isInvitationSignUp = (body: unknown): body is Record<string, unknown> =>
   typeof body === "object" &&
   body !== null &&
@@ -121,6 +125,7 @@ export const makeAuthWithInvitationSignUp = (
     database: drizzleAdapter(config.db, { provider: "pg", schema: authTables, transaction: true }),
     emailAndPassword: { ...options.emailAndPassword, requireEmailVerification: false },
     emailVerification: { ...options.emailVerification, sendOnSignUp: false },
+    logger: { level: "error", log: logInvitationSignUpError },
     onAPIError: { throw: true },
     databaseHooks: {
       user: {
@@ -142,8 +147,7 @@ export const makeAuthWithInvitationSignUp = (
       try {
         return await invitationAuth.handler(request);
       } catch {
-        // Unexpected Drizzle errors can include SQL parameters, including session tokens.
-        await Effect.runPromise(Effect.logError("Invitation signup request failed"));
+        logInvitationSignUpError();
         return Response.json({ code: "InvitationSignupFailed" }, { status: 500 });
       }
     },
