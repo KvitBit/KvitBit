@@ -5,7 +5,7 @@ description: >-
   changes to apps/web/src, the web entry or build configuration, or
   packages/ui-port/src/theme.
 metadata:
-  sync_commit: "66c879f40d67de314f8f7cde583861624aa1fdf1"
+  sync_commit: "c194776af0c64cd1549c21c58aac75a4c1ac71af"
   bun: "1.4.2"
   node: "24.18.0"
   effect: "4.1.4"
@@ -44,10 +44,11 @@ through Effect services.
 hydrates server markup through the production browser entry, asserts DOM
 node reuse, and changes a preference through the adopted control. It also
 covers in-app focus and Back scroll restoration, Price List search history,
-native mobile-app navigation, public PDF downloads, appearance changes,
-default and explicit magic-link callbacks that recover from a failed
-membership request, and an open share that updates at UTC midnight. Both
-desktop and mobile profiles use demo responses.
+sign-in from a filtered Price List URL, native mobile-app navigation,
+public PDF downloads, and appearance changes. It covers default and explicit
+magic-link callbacks that recover from a failed membership request, and
+open shares that update after UTC midnight via a timer or a visibility
+event. Both desktop and mobile profiles use demo responses.
 The typed API and server integrations have their own checks.
 
 ## Run
@@ -72,6 +73,6 @@ that record in a verification commit after the product changes.
 
 The recorded product commit passed the frozen install, root lint and
 typecheck, web tests, static build and asset checks, and formal digest check.
-Playwright passed both profiles on port `54371` with one worker. The
+Playwright passed both profiles on port `50889` with one worker. The
 build includes the ALTCHA worker, hashed JavaScript and CSS, brand assets,
 and fonts.
