@@ -10,6 +10,7 @@
 import { describe, expect, test } from "bun:test";
 import { readdirSync, readFileSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
+import { Router } from "@effect/ui";
 import type {
   AttachmentId,
   ContactId,
@@ -26,7 +27,7 @@ import type {
   WorkspaceSlug,
 } from "@kvitbit/domain";
 import { I18n, Theme, ViewModels } from "@kvitbit/ui-port";
-import { Option } from "effect";
+import { Effect, Layer, Option } from "effect";
 import * as fc from "fast-check";
 import ts from "typescript";
 import type { Failure } from "../../src/app/api";
@@ -45,7 +46,7 @@ import * as Remote from "../../src/app/remote";
 import { BrowserRoutes, gate, href, NOT_FOUND, routeFromPath } from "../../src/app/routing";
 import type { SessionState } from "../../src/app/session";
 import { DEMO_USER, DEMO_WORKSPACE, DEMO_WORKSPACES, demoId } from "../../src/demo/shell";
-import { init, Message, type Model, update } from "../../src/main";
+import { init, Message, type Model, Navigate, update } from "../../src/main";
 
 const WEB_SRC = resolve(import.meta.dirname, "../../src");
 
@@ -604,6 +605,23 @@ describe("Shell update & prefs invariants", () => {
     const waiting = bootModel(path, { _tag: "Unknown" });
     expect(waiting.waitingForSession).toBe(true);
     expect(update(waiting, Message.PageIntent({ path, intent })).model).toBe(waiting);
+  });
+
+  test("the shell navigation command accepts same-origin destinations only", async () => {
+    const actual = await Effect.runPromise(
+      Effect.gen(function* () {
+        const router = yield* Router.Router;
+        const external = yield* Navigate.make({ path: "https://example.invalid/", replace: false })
+          .effect;
+        const internal = yield* Navigate.make({ path: "/sign-in", replace: false }).effect;
+        return { external, internal, path: router.location().url };
+      }).pipe(
+        Effect.provide(
+          Navigate.layer.pipe(Layer.provideMerge(Router.memory({ routes: BrowserRoutes }))),
+        ),
+      ),
+    );
+    expect(actual).toEqual({ external: "blocked", internal: "navigated", path: "/sign-in" });
   });
 
   test("workspace switcher toggle, close, shortcut, and navigation reset invariants", () => {
