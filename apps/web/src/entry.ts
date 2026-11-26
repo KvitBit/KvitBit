@@ -17,6 +17,7 @@ if (container === null) throw new Error("Missing #root for the application");
 const bootstrap = document.getElementById("kb-state")?.textContent;
 const flags: Flags = {
   path: window.location.pathname + window.location.search,
+  today: new Date().toISOString().slice(0, 10),
   prefs: loadBrowserPrefs(),
   session: { _tag: "Unknown" },
 };

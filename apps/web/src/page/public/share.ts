@@ -267,11 +267,10 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
     amount: doc.totals.gross.amount,
     currency: doc.totals.gross.currency,
   });
-  const todayIso = new Date().toISOString().slice(0, 10);
   const isOverdue =
     doc.status === "issued" &&
     (doc.settlement === "unpaid" || doc.settlement === "partially_paid") &&
-    doc.dates.dueOn < todayIso;
+    doc.dates.dueOn < ctx.today;
   const showPayBlock =
     doc.status === "issued" &&
     doc.kind !== "credit_note" &&

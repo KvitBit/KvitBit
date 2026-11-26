@@ -351,7 +351,7 @@ const mkFailure = (tag = "Offline"): Failure => ({
 });
 
 const bootModel = (path: string, session: SessionState, prefs: Prefs = defaultPrefs("cs")): Model =>
-  init({ path, prefs, session }).model;
+  init({ path, prefs, session, today: "2026-11-26" }).model;
 
 // --- 1. Route round-trip & Shell gate invariants -------------------------------------------------
 

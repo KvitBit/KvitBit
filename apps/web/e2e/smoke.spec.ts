@@ -89,6 +89,27 @@ if (typeof Bun === "undefined") {
       errors.assertClean();
     });
 
+    test("recovers a magic-link arrival after membership lookup is unavailable", async ({
+      page,
+    }) => {
+      const callback = "/sign-in?magic=complete";
+      let failed = false;
+      await page.route(
+        (url) => url.pathname === "/api/v1/workspaces",
+        async (route) => {
+          if (route.request().method() !== "GET" || failed) return route.continue();
+          failed = true;
+          await route.fulfill({ status: 503, json: { _tag: "Unavailable" } });
+        },
+      );
+      await page.goto(callback);
+      await expect(page.getByRole("alert")).toBeVisible();
+      await expect(page).toHaveURL(/\/sign-in\?magic=complete$/);
+      await page.getByRole("button", { name: /Try again|Retry|Zkusit znovu/i }).click();
+      await expect(page).toHaveURL(new RegExp(`/w/${DEMO_WS}$`));
+      await expect(page.locator("#main")).toBeVisible();
+    });
+
     test("toggles light/dark colour mode and locale cleanly", async ({ page }) => {
       const errors = attachErrorGuards(page);
       await page.goto(`/w/${DEMO_WS}`, { waitUntil: "domcontentloaded" });

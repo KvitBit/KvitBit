@@ -71,12 +71,6 @@ export const safeReturnTo = (raw: string | undefined): string | undefined => {
   return target.pathname + target.search + target.hash;
 };
 
-/** Generates an idempotency key inside a Command (pure fallback when crypto is unavailable). */
-export const randomKey = (): string =>
-  typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
-    ? crypto.randomUUID()
-    : `kb-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
-
 /** Maps a document settlement state to a kit badge tone. */
 export const settlementTone = (settlement: string): BadgeTone => {
   switch (settlement) {

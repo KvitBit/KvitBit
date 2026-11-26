@@ -117,6 +117,52 @@ describe("Auth page (Screen 02)", () => {
     expect(unsupported.model.localError).toContain("Passkeys are not supported");
   });
 
+  test("magic-link sign-in requests the default callback or the supplied destination", async () => {
+    const callbacks: Array<string> = [];
+    const fetch = mockWire(async (request) => {
+      expect(new URL(request.url).pathname).toBe("/api/auth/sign-in/magic-link");
+      callbacks.push((await request.json()).callbackURL);
+      return Response.json({ status: true });
+    });
+    try {
+      for (const route of [
+        { _tag: "SignIn" },
+        { _tag: "SignIn", returnTo: "/w/novak-design" },
+      ] as const) {
+        const ctx = ctxFor(route, { locale: "en", session: anonymous });
+        const { model } = Auth.init(route, ctx);
+        const selected = Auth.update(
+          model,
+          Auth.Message.SelectedSignInMethod({ method: "magic_link" }),
+          ctx,
+        );
+        const solved = Auth.update(
+          selected.model,
+          Auth.Message.GotBotProof({
+            seq: selected.model.botSeq,
+            status: "solved",
+            header: "proof",
+            reason: null,
+          }),
+          ctx,
+        );
+        const edited = Auth.update(
+          solved.model,
+          Auth.Message.ChangedEmail({ value: "demo@example.cz" }),
+          ctx,
+        );
+        const submit = Auth.update(edited.model, Auth.Message.SubmittedSignIn(), ctx);
+        expect(await run(submit.commands?.[0])).toMatchObject({
+          _tag: "CompletedSubmit",
+          action: "sign_in_magic",
+        });
+      }
+    } finally {
+      fetch.mockRestore();
+    }
+    expect(callbacks).toEqual(["/sign-in?magic=complete", "/w/novak-design"]);
+  });
+
   test("AuthLink reset redirects to ResetPassword; verify failure shows expired state", () => {
     const resetRoute: Auth.Route = { _tag: "AuthLink", kind: "reset", token: "tok-1" };
     const ctx = ctxFor(resetRoute, { locale: "en", session: anonymous });
@@ -367,6 +413,16 @@ describe("Public Share Link page (Screen 04)", () => {
     expect(html).toMatch(/<a[^>]*\bdownload(?:="")?[^>]*>/);
   });
 
+  test("calculates overdue state from the supplied render date", async () => {
+    const token = "demo-unpaid-czk";
+    const due = decodeDemoShare(token).dates.dueOn;
+    const nextDay = new Date(Date.parse(due) + 86_400_000).toISOString().slice(0, 10);
+    const onDueDate = await renderLoadedShare(token, "elegant", due);
+    expect(onDueDate).toBe(await renderLoadedShare(token, "elegant", due));
+    expect(onDueDate).not.toContain(">Overdue<");
+    expect(await renderLoadedShare(token, "elegant", nextDay)).toContain(">Overdue<");
+  });
+
   test.each(["demo-unpaid-czk", "demo-branded"])(
     "renders workspace branding independently of viewer preferences for %s",
     async (token) => {
@@ -380,9 +436,13 @@ describe("Public Share Link page (Screen 04)", () => {
   );
 });
 
-const renderLoadedShare = async (token: string, style: "elegant" | "cozy" = "elegant") => {
+const renderLoadedShare = async (
+  token: string,
+  style: "elegant" | "cozy" = "elegant",
+  today = "2026-11-26",
+) => {
   const route: Share.Route = { _tag: "Share", token: token as ShareToken };
-  const base = ctxFor(route, { locale: "en", session: anonymous });
+  const base = ctxFor(route, { locale: "en", session: anonymous, today });
   const ctx = { ...base, prefs: { ...base.prefs, style } };
   const initial = Share.init(route, ctx);
   const { model } = Share.update(

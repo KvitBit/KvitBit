@@ -4,11 +4,11 @@ import { ViewModels } from "@kvitbit/ui-port";
 import { Array as Arr, Effect, Option, Schema, Stream } from "effect";
 import { authFetch } from "./app/api";
 import { apiCommand, browserCommand, type RunApi } from "./app/commands";
-import type { Intent } from "./app/intent";
+import type { Intent, PendingNavigation } from "./app/intent";
 import type { PageContext } from "./app/page";
 import { type Prefs, persistPrefs } from "./app/prefs";
 import { Flags, Message, Model, type Toast } from "./app/root";
-import { gate, href, routeFromPath } from "./app/routing";
+import { gate, href, magicSignInCallback, routeFromPath } from "./app/routing";
 import { fetchSession, workspaceBySlug } from "./app/session";
 import { shellView } from "./app/shell";
 
@@ -53,6 +53,7 @@ const loadSession = (seq: number) =>
 
 export const contextOf = (model: Model): PageContext => ({
   route: model.route,
+  today: model.today,
   prefs: model.prefs,
   locale: model.prefs.locale,
   session: model.session,
@@ -105,6 +106,34 @@ const signedOut = (model: Model): UpdateReturn => {
   return { model: next.model, commands: [navigate(path)] };
 };
 
+const reloadSession = (model: Model, pendingNav: PendingNavigation | null): UpdateReturn => {
+  const sessionSeq = model.sessionSeq + 1;
+  return {
+    model: { ...model, pendingNav, sessionSeq, waitingForSession: pendingNav !== null },
+    commands: [loadSession(sessionSeq)],
+  };
+};
+
+const settleSession = (model: Model, session: Model["session"]): UpdateReturn => {
+  const pendingNav = model.pendingNav;
+  if (session._tag === "Unavailable" && pendingNav !== null) {
+    return { model: { ...model, session, waitingForSession: false } };
+  }
+  const next = { ...model, session, pendingNav: null };
+  if (session._tag !== "SignedIn" || pendingNav === null) return mountRoute(next, model.path);
+  const first = session.workspaces[0];
+  const path =
+    pendingNav._tag === "Path"
+      ? pendingNav.path
+      : href(first === undefined ? { _tag: "Onboarding" } : { _tag: "Dashboard", ws: first.slug });
+  return path === model.path
+    ? mountRoute(next, path)
+    : {
+        model: next,
+        commands: [navigate(path, pendingNav._tag === "Path" ? pendingNav.replace : true)],
+      };
+};
+
 const applyIntent = (model: Model, intent: Intent): UpdateReturn => {
   switch (intent._tag) {
     case "Navigate":
@@ -113,13 +142,8 @@ const applyIntent = (model: Model, intent: Intent): UpdateReturn => {
       return { model: pushToast(model, intent.text, intent.tone) };
     case "SetPrefs":
       return setPrefs(model, intent.prefs);
-    case "ReloadSession": {
-      const sessionSeq = model.sessionSeq + 1;
-      return {
-        model: { ...model, pendingNav: intent.destination ?? model.pendingNav, sessionSeq },
-        commands: [loadSession(sessionSeq)],
-      };
-    }
+    case "ReloadSession":
+      return reloadSession(model, intent.destination ?? model.pendingNav);
     case "SignedOut":
       return signedOut(model);
   }
@@ -129,6 +153,7 @@ export const init = (flags: Flags): UpdateReturn => {
   const initial = mountRoute(
     {
       path: flags.path,
+      today: flags.today,
       route: routeFromPath(flags.path),
       prefs: flags.prefs,
       session: flags.session,
@@ -141,6 +166,16 @@ export const init = (flags: Flags): UpdateReturn => {
     },
     flags.path,
   );
+  if (flags.path === magicSignInCallback && flags.session._tag !== "Anonymous") {
+    const callback: Model = {
+      ...initial.model,
+      pendingNav: { _tag: "DefaultSignedIn" },
+      waitingForSession: true,
+    };
+    return flags.session._tag === "Unknown"
+      ? { model: callback, commands: [loadSession(callback.sessionSeq)] }
+      : settleSession(callback, flags.session);
+  }
   return flags.session._tag === "Unknown"
     ? { model: initial.model, commands: [...(initial.commands ?? []), loadSession(1)] }
     : initial;
@@ -156,27 +191,14 @@ export const update = (model: Model, message: Message): UpdateReturn => {
       return !model.waitingForSession && message.path === model.path
         ? applyIntent(model, message.intent)
         : { model };
-    case "LoadedSession": {
-      if (message.seq !== model.sessionSeq) return { model };
-      const { state } = message;
-      const next = { ...model, session: state, pendingNav: null };
-      const pending = model.pendingNav;
-      if (state._tag === "SignedIn" && pending !== null) {
-        const path =
-          pending._tag === "Path"
-            ? pending.path
-            : href(
-                state.workspaces[0] === undefined
-                  ? { _tag: "Onboarding" }
-                  : { _tag: "Dashboard", ws: state.workspaces[0].slug },
-              );
-        return {
-          model: next,
-          commands: [navigate(path, pending._tag === "Path" ? pending.replace : true)],
-        };
-      }
-      return mountRoute(next, model.path);
-    }
+    case "LoadedSession":
+      return message.seq === model.sessionSeq ? settleSession(model, message.state) : { model };
+    case "ClickedRetrySession":
+      return model.session._tag === "Unavailable" &&
+        model.pendingNav !== null &&
+        !model.waitingForSession
+        ? reloadSession(model, model.pendingNav)
+        : { model };
     case "ChangedPrefs":
       return setPrefs(model, message.prefs);
     case "ToggledSwitcher":

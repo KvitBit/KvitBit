@@ -123,6 +123,8 @@ const CopyTable: Copy<
   | "bankAccount"
   | "bankAccountAuto"
   | "variableSymbol"
+  | "variableSymbolRetained"
+  | "variableSymbolUnchanged"
   | "orderNumber"
   | "numberOverride"
   | "refreshParties"
@@ -203,6 +205,9 @@ const CopyTable: Copy<
     bankAccount: "Bankovní účet",
     bankAccountAuto: "Automaticky dle měny",
     variableSymbol: "Variabilní symbol",
+    variableSymbolRetained:
+      "Uložený variabilní symbol {symbol} nelze vymazat. Zadejte jej znovu nebo jej nahraďte.",
+    variableSymbolUnchanged: "Prázdné pole ponechá uloženou hodnotu beze změny.",
     orderNumber: "Číslo objednávky",
     numberOverride: "Číslo dokladu (úprava)",
     refreshParties: "Aktualizovat údaje vystavitele a odběratele",
@@ -283,6 +288,9 @@ const CopyTable: Copy<
     bankAccount: "Bank account",
     bankAccountAuto: "Automatic by currency",
     variableSymbol: "Variable symbol",
+    variableSymbolRetained:
+      "The saved variable symbol {symbol} cannot be cleared. Enter it again or replace it.",
+    variableSymbolUnchanged: "Leaving this field blank keeps the stored value.",
     orderNumber: "Order number",
     numberOverride: "Document number override",
     refreshParties: "Refresh issuer and customer particulars",
@@ -932,6 +940,9 @@ const runDraftWrite = (
   };
 };
 
+const retainedVariableSymbol = (model: Model): string | undefined =>
+  model.variableSymbol.trim() === "" ? model.savedInput?.variableSymbol : undefined;
+
 const startDraftWrite = (
   model: Model,
   intent: WriteIntent,
@@ -947,6 +958,7 @@ const startDraftWrite = (
       : runDraftWrite(model, pending, ws.id);
   }
 
+  if (retainedVariableSymbol(model) !== undefined) return { model };
   const doc = model.savedDoc;
   if (doc !== null && intent === "issue" && !model.dirty) {
     return runDraftWrite(
@@ -1435,6 +1447,7 @@ export const update = (
         ws === null ||
         model.submitting ||
         model.savedDoc?.status !== "issued" ||
+        retainedVariableSymbol(model) !== undefined ||
         model.savedDoc.locked ||
         model.aresBusy ||
         (model.revisionState !== "current" && model.revisionState !== "review") ||
@@ -1626,7 +1639,9 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
       (!model.savedDoc.locked && model.savedDoc.status !== "cancelled")) &&
     model.revisionState !== "blocked";
   const activeWrite = model.draftWrite?.running === true;
+  const retainedSymbol = retainedVariableSymbol(model);
   const blockedFor = (intent: WriteIntent) =>
+    retainedSymbol !== undefined ||
     model.aresBusy ||
     (model.draftWrite !== null && (model.draftWrite.running || model.draftWrite.intent !== intent));
   const headerActions = [
@@ -1647,6 +1662,7 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
             busy: model.submitting,
             disabled:
               model.submitting ||
+              retainedSymbol !== undefined ||
               model.aresBusy ||
               model.revisionState === "stale" ||
               model.revisionState === "loading",
@@ -2032,6 +2048,11 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
                 label: txt(locale, "variableSymbol"),
                 value: model.variableSymbol,
                 onInput: (value) => Message.ChangedVariableSymbol({ value }),
+                ...(retainedSymbol !== undefined
+                  ? { error: txt(locale, "variableSymbolRetained", { symbol: retainedSymbol }) }
+                  : model.savedDoc !== null
+                    ? { hint: txt(locale, "variableSymbolUnchanged") }
+                    : {}),
                 mono: true,
               }),
               textField(h, {

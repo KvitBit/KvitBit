@@ -50,6 +50,8 @@ export const gate = (route: Route, session: SessionState): Gate => {
 const search = <const Key extends string>(...keys: ReadonlyArray<Key>) =>
   Object.fromEntries(keys.map((key) => [key, Schema.optionalKey(Schema.String)]));
 
+export const magicSignInCallback = "/sign-in?magic=complete";
+
 const workspace = { ws: Schema.String };
 const resource = { ...workspace, id: Schema.String };
 
@@ -57,7 +59,7 @@ const webRoutes = UiRoute.union({
   Landing: UiRoute.make("/"),
   Legal: UiRoute.make("/legal/:page", { params: { page: Schema.String } }),
   SignUp: UiRoute.make("/sign-up", { search: search("invitation") }),
-  SignIn: UiRoute.make("/sign-in", { search: search("returnTo") }),
+  SignIn: UiRoute.make("/sign-in", { search: search("returnTo", "magic") }),
   CheckEmail: UiRoute.make("/check-email", { search: search("email") }),
   AuthLink: UiRoute.make("/auth/:kind/:token", {
     params: { kind: Schema.String, token: Schema.String },

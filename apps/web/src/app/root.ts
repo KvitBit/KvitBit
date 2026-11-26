@@ -14,6 +14,7 @@ export type Toast = typeof Toast.Type;
 
 export const Model = Schema.Struct({
   path: Schema.String,
+  today: Schema.String,
   route: ViewModels.Route,
   prefs: Prefs,
   session: SessionState,
@@ -26,12 +27,18 @@ export const Model = Schema.Struct({
 });
 export type Model = typeof Model.Type;
 
-export const Flags = Schema.Struct({ path: Schema.String, prefs: Prefs, session: SessionState });
+export const Flags = Schema.Struct({
+  path: Schema.String,
+  today: Schema.String,
+  prefs: Prefs,
+  session: SessionState,
+});
 export type Flags = typeof Flags.Type;
 
 export const Message = UiSchema.TaggedEnum({
   ChangedUrl: { path: Schema.String },
   PageIntent: { path: Schema.String, intent: Intent },
+  ClickedRetrySession: {},
   LoadedSession: { state: SessionState, seq: Schema.Int },
   ChangedPrefs: { prefs: Prefs },
   ToggledSwitcher: {},

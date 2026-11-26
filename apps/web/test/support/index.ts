@@ -22,11 +22,12 @@ export const WS = DEMO_WORKSPACE.slug;
 
 export const ctxFor = (
   route: Route,
-  opts: { locale?: Locale; session?: SessionState } = {},
+  opts: { locale?: Locale; session?: SessionState; today?: string } = {},
 ): PageContext => {
   const session = opts.session ?? signedIn;
   return {
     route,
+    today: opts.today ?? "2026-11-26",
     prefs: defaultPrefs(opts.locale ?? "cs"),
     locale: opts.locale ?? "cs",
     session,
@@ -48,10 +49,11 @@ export interface RenderedPath {
 /** Server-renders the same component and input the browser entry adopts. */
 export const renderPath = async (
   path: string,
-  opts: { locale?: Locale; session?: SessionState } = {},
+  opts: { locale?: Locale; session?: SessionState; today?: string } = {},
 ): Promise<RenderedPath> => {
   const flags: Flags = {
     path,
+    today: opts.today ?? "2026-11-26",
     prefs: defaultPrefs(opts.locale ?? "cs"),
     session: opts.session ?? signedIn,
   };

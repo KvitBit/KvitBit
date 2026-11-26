@@ -20,7 +20,7 @@ import { copy, translator } from "../../app/i18n";
 import { Intent_ } from "../../app/intent";
 import type { MessageHandlers, PageContext, PageReturn, RouteOf } from "../../app/page";
 import * as Remote from "../../app/remote";
-import { href } from "../../app/routing";
+import { href, magicSignInCallback } from "../../app/routing";
 import { performPasskeyAuthentication } from "../../app/webauthn";
 import { lockup } from "../../ui/brand";
 import { attribute, type Markup } from "../../ui/html";
@@ -579,7 +579,10 @@ export const update = (
               seq,
               action: "sign_in_magic",
               path: "/sign-in/magic-link",
-              body: { email, callbackURL: safeReturnTo(model.route.returnTo) ?? "/" },
+              body: {
+                email,
+                callbackURL: safeReturnTo(model.route.returnTo) ?? magicSignInCallback,
+              },
               altchaHeader: botProofHeader(model.botProof) ?? null,
             }),
           ],

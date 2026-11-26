@@ -14,6 +14,7 @@ export type RouteOf<T extends ViewModels.RouteTag> = ViewModels.RouteOf<T>;
 
 export const PageContext = Schema.Struct({
   route: ViewModels.Route,
+  today: Schema.String,
   prefs: Prefs,
   locale: Locale,
   session: SessionState,

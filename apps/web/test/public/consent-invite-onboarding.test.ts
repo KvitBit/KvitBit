@@ -162,7 +162,7 @@ describe("Workspace Invitation Landing page (Screen 05)", () => {
 });
 
 describe("Workspace Onboarding Wizard (Screen 07)", () => {
-  test("walks 5 steps: ARES lookup, tax regime, Czech account -> IBAN, numbering, and create workspace", () => {
+  test("walks 5 steps: ARES lookup, tax regime, Czech account -> IBAN, numbering, and create workspace", async () => {
     const route: Onboarding.Route = { _tag: "Onboarding" };
     const ctx = ctxFor(route, { locale: "en", session: signedIn });
     const first = Onboarding.update(
@@ -235,9 +235,25 @@ describe("Workspace Onboarding Wizard (Screen 07)", () => {
     expect(m.step).toBe(5);
 
     // Finish configuration before asking the shell to refresh membership.
-    const creating = Onboarding.update(m, Onboarding.Message.ClickedCreateWorkspace(), ctx);
+    const submit = Onboarding.Message.ClickedCreateWorkspace();
+    const minting = Onboarding.update(m, submit, ctx);
+    const replay = Onboarding.update(m, submit, ctx);
+    expect(replay.model).toEqual(minting.model);
+    expect(replay.commands?.map((command) => command.name)).toEqual(["OnboardingRequestKeys"]);
+    expect(minting.model.createRequestKey).toBeNull();
+    expect(minting.model.bankRequestKey).toBeNull();
+    const creating = Onboarding.update(minting.model, await run(minting.commands?.[0]), ctx);
     expect(creating.model.submitting).toBe(true);
     expect(creating.commands?.length).toBe(1);
+    const keys = [
+      creating.model.createRequestKey,
+      creating.model.bankRequestKey,
+      ...Object.values(creating.model.seriesRequestKeys ?? {}),
+    ];
+    expect(keys).toHaveLength(6);
+    expect(new Set(keys).size).toBe(keys.length);
+    for (const key of keys)
+      expect(key).toMatch(/^[\da-f]{8}-[\da-f]{4}-7[\da-f]{3}-[89ab][\da-f]{3}-[\da-f]{12}$/);
 
     const wsView = Schema.decodeUnknownSync(WorkspaceView)({
       id: DEMO_WORKSPACE.id,
@@ -319,6 +335,7 @@ describe("Workspace Onboarding Wizard (Screen 07)", () => {
     };
     const calls: Array<string> = [];
     const bankKeys: Array<string | null> = [];
+    const seriesKeys: Record<string, string | null> = {};
     const fetch = mockWire(async (request) => {
       const path = new URL(request.url).pathname;
       calls.push(`${request.method} ${path}`);
@@ -377,7 +394,7 @@ describe("Workspace Onboarding Wizard (Screen 07)", () => {
       }
       if (path === `${base}/numbering-series` && request.method === "POST") {
         const body = (await request.json()) as { kind: string; name: string; pattern: string };
-        expect(request.headers.get("idempotency-key")).toMatch(new RegExp(`-${body.kind}$`));
+        seriesKeys[body.kind] = request.headers.get("idempotency-key");
         expect(body.kind).not.toBe("payment_tax_document");
         return Response.json(
           { ...invoice, ...body, nextCounter: 1, nextNumber: "2026-0001" },
@@ -418,7 +435,8 @@ describe("Workspace Onboarding Wizard (Screen 07)", () => {
         Onboarding.update(creating.model, Onboarding.Message.ClickedCreateWorkspace(), ctx)
           .commands,
       ).toBeUndefined();
-      const created = Onboarding.update(creating.model, await run(creating.commands?.[0]), ctx);
+      const ready = Onboarding.update(creating.model, await run(creating.commands?.[0]), ctx);
+      const created = Onboarding.update(ready.model, await run(ready.commands?.[0]), ctx);
       const failed = Onboarding.update(created.model, await run(created.commands?.[0]), ctx);
       expect(failed.outMessage).toBeUndefined();
       expect(failed.model.setupDone).toEqual({
@@ -442,9 +460,12 @@ describe("Workspace Onboarding Wizard (Screen 07)", () => {
         Onboarding.Message.ClickedCreateWorkspace(),
         ctx,
       );
-      const retryMessage = await run(retry.commands?.[0]);
+      const retrySetup = Onboarding.update(retry.model, await run(retry.commands?.[0]), ctx);
+      expect(retrySetup.model.bankRequestKey).toBe(failed.model.bankRequestKey);
+      expect(retrySetup.model.seriesRequestKeys).toEqual(failed.model.seriesRequestKeys);
+      const retryMessage = await run(retrySetup.commands?.[0]);
       expect({ retryMessage, calls }).toMatchObject({ retryMessage: { _tag: "CompletedSetup" } });
-      const done = Onboarding.update(retry.model, retryMessage, ctx);
+      const done = Onboarding.update(retrySetup.model, retryMessage, ctx);
       expect(done.outMessage?._tag).toBe("ReloadSession");
       expect(done.outMessage).toHaveProperty("destination", {
         _tag: "Path",
@@ -453,6 +474,13 @@ describe("Workspace Onboarding Wizard (Screen 07)", () => {
       });
       expect(bankKeys[0]).toBeTruthy();
       expect(bankKeys[1]).toBe(bankKeys[0]);
+      const savedSeriesKeys = ready.model.seriesRequestKeys;
+      if (savedSeriesKeys === undefined)
+        throw new Error("Expected request keys before the first write");
+      expect(seriesKeys).toEqual({
+        proforma: savedSeriesKeys.proforma,
+        credit_note: savedSeriesKeys.credit_note,
+      });
       expect(calls).toEqual([
         "POST /api/v1/workspaces",
         `GET ${base}`,

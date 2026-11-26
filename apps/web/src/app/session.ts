@@ -81,7 +81,7 @@ export const fetchSession: Effect.Effect<SessionState, never, WebServices> = aut
           (failure): SessionState =>
             failure.tag === "Unauthorized"
               ? { _tag: "Anonymous" }
-              : { _tag: "SignedIn", user: lookup.user, workspaces: [] },
+              : { _tag: "Unavailable", failure },
         );
     }
   }),

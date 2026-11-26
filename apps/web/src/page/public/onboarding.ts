@@ -42,7 +42,7 @@ import {
   selectField,
   textField,
 } from "../../ui/kit";
-import { callApi, failureMessage, randomKey, slugifyName } from "./_shared";
+import { callApi, failureMessage, slugifyName } from "./_shared";
 
 export type Route = RouteOf<"Onboarding">;
 
@@ -60,6 +60,14 @@ const emptySetupProgress: SetupProgress = {
   bankAccount: false,
   series: false,
 };
+
+const SeriesRequestKeys = Schema.Struct({
+  invoice: Schema.String,
+  proforma: Schema.String,
+  payment_tax_document: Schema.String,
+  credit_note: Schema.String,
+});
+type SeriesRequestKeys = typeof SeriesRequestKeys.Type;
 
 export const Model = Schema.Struct({
   route: ViewModels.Route,
@@ -103,6 +111,7 @@ export const Model = Schema.Struct({
   submitFailure: Schema.NullOr(Failure),
   createRequestKey: Schema.NullOr(Schema.String),
   bankRequestKey: Schema.NullOr(Schema.String),
+  seriesRequestKeys: Schema.optionalKey(SeriesRequestKeys),
   createdWorkspace: Schema.NullOr(WorkspaceView),
   setupDone: SetupProgress,
   draftReady: Schema.Boolean,
@@ -151,6 +160,12 @@ export const Message = UiSchema.TaggedEnum({
   GotAres: { seq: Remote.Seq, result: RegistryResult },
   FailedAres: { seq: Remote.Seq, failure: Failure },
   ClickedCreateWorkspace: {},
+  GotRequestKeys: {
+    seq: Remote.Seq,
+    createKey: Schema.NullOr(Schema.String),
+    bankKey: Schema.String,
+    seriesKeys: SeriesRequestKeys,
+  },
   CompletedCreate: { seq: Remote.Seq, workspace: WorkspaceView },
   FailedCreate: { seq: Remote.Seq, failure: Failure },
   CompletedSetup: { seq: Remote.Seq, slug: Schema.String },
@@ -363,6 +378,7 @@ const ApplySetupArgs = Schema.Struct({
   series: Schema.Array(
     Schema.Struct({
       kind: DocumentKind,
+      requestKey: Schema.String,
       name: Schema.String,
       pattern: Schema.String,
       nextNumber: Schema.Int,
@@ -457,7 +473,7 @@ const ApplyOnboardingSetupCmd = defineApiCommand("OnboardingApplySetup", {
               } else {
                 yield* client.workspace.createSeries({
                   params: { workspaceId },
-                  headers: Api.idempotencyHeaders(`${args.bankRequestKey}-${entry.kind}`),
+                  headers: Api.idempotencyHeaders(entry.requestKey),
                   payload: {
                     kind: entry.kind,
                     name: entry.name,
@@ -485,6 +501,7 @@ const buildSetupCmd = (
   seq: Remote.Seq,
   workspace: WorkspaceView,
   bankKey: string,
+  seriesKeys: SeriesRequestKeys,
   key: string | null,
 ) =>
   ApplyOnboardingSetupCmd({
@@ -508,6 +525,7 @@ const buildSetupCmd = (
     bankCurrency: model.bankCurrency,
     series: eligibleSeries(model.taxRegime).map((series) => ({
       kind: series.kind,
+      requestKey: seriesKeys[series.kind],
       name: series.name,
       pattern: model[series.pattern].trim(),
       nextNumber: Number(model[series.start]),
@@ -519,10 +537,10 @@ const clampStep = (n: number | undefined): number => {
   return Math.max(1, Math.min(5, Math.trunc(n)));
 };
 
-const formatPatternSample = (pattern: string, counter: number, year: number): string => {
-  const yyyy = String(year);
+const formatPatternSample = (pattern: string, counter: number, date: string): string => {
+  const yyyy = date.slice(0, 4);
   const yy = yyyy.slice(-2);
-  const mm = String(new Date().getMonth() + 1).padStart(2, "0");
+  const mm = date.slice(5, 7);
   return pattern.replace(/[A-Za-z]+/g, (word) =>
     /^[YMN]+$/.test(word)
       ? word.replace(/YYYY|YY|MM|N+/g, (token) =>
@@ -561,7 +579,7 @@ const validSeries = (pattern: string, start: string): boolean => {
     return false;
   // biome-ignore lint/suspicious/noControlCharactersInRegex: the numbering grammar disallows control characters.
   const hasControlCharacter = /[\u0000-\u001f\u007f]/.test(pattern);
-  return !hasControlCharacter && formatPatternSample(pattern, counter, 2026).length <= 20;
+  return !hasControlCharacter && formatPatternSample(pattern, counter, "2026-01-01").length <= 20;
 };
 
 export const init = (route: Route, ctx: PageContext): PageReturn<Model, Message> => ({
@@ -809,24 +827,53 @@ const updateWizard = (
         if (stepError !== null) return { model: { ...model, step, stepError } };
       }
       const seq = model.submitSeq + 1;
-      const bankKey = model.bankRequestKey ?? randomKey();
-      const pending = {
+      return {
+        model: { ...model, submitSeq: seq, submitting: true, submitFailure: null, stepError: null },
+        commands: [
+          browserCommand(
+            "OnboardingRequestKeys",
+            Effect.gen(function* () {
+              const createKey =
+                model.createRequestKey ??
+                (model.createdWorkspace === null ? yield* Api.uuidV7 : null);
+              const bankKey = model.bankRequestKey ?? (yield* Api.uuidV7);
+              const seriesKeys =
+                model.seriesRequestKeys ??
+                (yield* Effect.all({
+                  invoice: Api.uuidV7,
+                  proforma: Api.uuidV7,
+                  payment_tax_document: Api.uuidV7,
+                  credit_note: Api.uuidV7,
+                }));
+              return Message.GotRequestKeys({ seq, createKey, bankKey, seriesKeys });
+            }),
+          ),
+        ],
+      };
+    },
+    GotRequestKeys: ({ seq, createKey, bankKey, seriesKeys }) => {
+      if (
+        seq !== model.submitSeq ||
+        !model.submitting ||
+        (model.createdWorkspace === null && createKey === null)
+      )
+        return { model };
+      const draft = {
         ...model,
-        submitSeq: seq,
-        submitting: true,
-        submitFailure: null,
-        stepError: null,
+        createRequestKey: createKey,
         bankRequestKey: bankKey,
+        seriesRequestKeys: seriesKeys,
       };
       if (model.createdWorkspace !== null) {
         return {
-          model: pending,
-          commands: [buildSetupCmd(pending, seq, model.createdWorkspace, bankKey, draftKey(ctx))],
+          model: draft,
+          commands: [
+            buildSetupCmd(draft, seq, model.createdWorkspace, bankKey, seriesKeys, draftKey(ctx)),
+          ],
         };
       }
+      if (createKey === null) return { model };
       const slug = model.slugEdited ? model.slug.trim() : "";
-      const idempotencyKey = model.createRequestKey ?? randomKey();
-      const draft = { ...pending, createRequestKey: idempotencyKey };
       return {
         model: draft,
         commands: [
@@ -834,7 +881,7 @@ const updateWizard = (
             draftKey: draftKey(ctx),
             draft,
             seq,
-            idempotencyKey,
+            idempotencyKey: createKey,
             name: model.workspaceName.trim() || model.legalName.trim(),
             ...(slug !== "" ? { slug } : {}),
             taxRegime: model.taxRegime,
@@ -845,18 +892,28 @@ const updateWizard = (
       };
     },
     CompletedCreate: ({ seq, workspace }) => {
-      if (seq !== model.submitSeq || !model.submitting || model.createdWorkspace !== null)
+      const { bankRequestKey, seriesRequestKeys } = model;
+      if (
+        seq !== model.submitSeq ||
+        !model.submitting ||
+        model.createdWorkspace !== null ||
+        bankRequestKey === null ||
+        seriesRequestKeys === undefined
+      )
         return { model };
-      const bankKey = model.bankRequestKey ?? randomKey();
-      const nextModel: Model = {
-        ...model,
-        createdWorkspace: workspace,
-        bankRequestKey: bankKey,
-        submitting: true,
-      };
+      const nextModel: Model = { ...model, createdWorkspace: workspace };
       return {
         model: nextModel,
-        commands: [buildSetupCmd(nextModel, seq, workspace, bankKey, draftKey(ctx))],
+        commands: [
+          buildSetupCmd(
+            nextModel,
+            seq,
+            workspace,
+            bankRequestKey,
+            seriesRequestKeys,
+            draftKey(ctx),
+          ),
+        ],
       };
     },
     FailedCreate: ({ seq, failure }) => {
@@ -948,7 +1005,6 @@ export const title = (_model: Model, ctx: PageContext): string =>
 
 export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
   const t = translator(ctx.locale);
-  const year = new Date().getFullYear();
   const steps = [
     { num: 1, label: t.t("onboarding.wizard.step.entity") },
     { num: 2, label: t.t("onboarding.wizard.step.tax") },
@@ -1181,7 +1237,7 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
             formatPatternSample(
               model.invoicePattern || "YYYY-NNNN",
               n + (Number(model.invoiceStart) || 1) - 1,
-              year,
+              ctx.today,
             ),
           )
           .join(", ");
@@ -1247,7 +1303,7 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
         const sampleNumber = formatPatternSample(
           model.invoicePattern || "YYYY-NNNN",
           Number(model.invoiceStart) || 1,
-          year,
+          ctx.today,
         );
         const isVat = model.taxRegime === "vat_payer";
         const net = Format.moneyDisplay(ctx.locale, {

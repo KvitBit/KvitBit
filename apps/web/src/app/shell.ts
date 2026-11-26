@@ -10,10 +10,10 @@ import { Option } from "effect";
 import { lockup, mark } from "../ui/brand";
 import { type Markup, withAttributes } from "../ui/html";
 import { type IconName, icon } from "../ui/icons";
-import { linkButton, skeleton } from "../ui/kit";
+import { button, linkButton, skeleton } from "../ui/kit";
 import { compactPrefs } from "../ui/prefs-controls";
 import type { RunApi } from "./commands";
-import { copy, type Translator, translator } from "./i18n";
+import { copy, type Translator, textOf, translator } from "./i18n";
 import type { PageContext } from "./page";
 import { viewPage } from "./pages";
 import { Message, type Model } from "./root";
@@ -61,13 +61,9 @@ const NAV_ICON: Readonly<Record<ViewModels.NavSection, IconName>> = {
   more: "more",
 };
 
-const sectionHref = (
-  section: ViewModels.NavSection,
-  ws: string,
-  route: PageContext["route"],
-): string =>
-  Option.match(ViewModels.sectionRoute(section, ws as WorkspaceSummary["slug"], route), {
-    onNone: () => href(defaultReportRoute(ws, new Date().getFullYear())),
+const sectionHref = (section: ViewModels.NavSection, ws: string, ctx: PageContext): string =>
+  Option.match(ViewModels.sectionRoute(section, ws as WorkspaceSummary["slug"], ctx.route), {
+    onNone: () => href(defaultReportRoute(ws, Number(ctx.today.slice(0, 4)))),
     onSome: href,
   });
 
@@ -82,7 +78,7 @@ const navItems = (
   return sections.map((section) =>
     withAttributes(h.a.class(), [
       (element) => element.class("kb-nav__item"),
-      (element) => element.attr("href", sectionHref(section, ws, ctx.route)),
+      (element) => element.attr("href", sectionHref(section, ws, ctx)),
       (node) => (active === section ? node.attr("aria-current", "page") : node),
     ]).children([
       icon(h, NAV_ICON[section]),
@@ -174,13 +170,21 @@ const pageOrSplash = (
   ctx: PageContext,
   h: Html.H<Message>,
 ): Markup<Message, RunApi> =>
-  !model.waitingForSession
-    ? viewPage(h, ctx, model.path, (intent) => Message.PageIntent({ path: model.path, intent }))
-    : h.div
-        .class("kb-page")
-        .attr("aria-busy", String(true))
-        .attr("aria-label", tr(ctx).t("shell.splash"))
-        .children([skeleton(h, "40%", "1.5rem"), skeleton(h, "100%", "12rem")]);
+  !model.waitingForSession && model.pendingNav !== null && model.session._tag === "Unavailable"
+    ? h.div.class("kb-page kb-stack").children([
+        h.p.attr("role", "alert").children(textOf(tr(ctx), model.session.failure.text)),
+        button(h, {
+          label: tr(ctx).t("common.action.retry"),
+          onClick: Message.ClickedRetrySession(),
+        }),
+      ])
+    : !model.waitingForSession
+      ? viewPage(h, ctx, model.path, (intent) => Message.PageIntent({ path: model.path, intent }))
+      : h.div
+          .class("kb-page")
+          .attr("aria-busy", String(true))
+          .attr("aria-label", tr(ctx).t("shell.splash"))
+          .children([skeleton(h, "40%", "1.5rem"), skeleton(h, "100%", "12rem")]);
 
 const publicChrome = (
   model: Model,
@@ -232,7 +236,10 @@ const publicChrome = (
     h.footer.class("kb-public__footer").children([
       h.span
         .class("kb-row")
-        .children([mark(h, 16), text(ctx.locale, "rights", { year: new Date().getFullYear() })]),
+        .children([
+          mark(h, 16),
+          text(ctx.locale, "rights", { year: Number(ctx.today.slice(0, 4)) }),
+        ]),
       h.nav
         .class("kb-row")
         .attr("aria-label", "Legal")

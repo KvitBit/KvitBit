@@ -293,6 +293,47 @@ describe("DocumentEditor page (Screen 10)", () => {
     expect(done.outMessage?._tag).toBe("Navigate");
   });
 
+  test("keeps the persisted symbol visible and blocks autosave and issue after it is cleared", async () => {
+    const { update, model, ctx } = preparedEditor(draft, ctxFor(editRoute, { locale: "en" }));
+    const requests: Array<{ method: string; revision: string | null; body: unknown }> = [];
+    const fetch = async (request: Request) => {
+      requests.push({
+        method: request.method,
+        revision: request.headers.get("if-match"),
+        body: await request.json(),
+      });
+      return jsonDocument({ ...draft, revision: 3 + requests.length });
+    };
+    const edited = update(model, Editor.Message.ChangedVariableSymbol({ value: "777" }));
+    const saving = update(
+      edited.model,
+      Editor.Message.AutosaveDue({ seq: edited.model.previewSeq }),
+    );
+    const saved = update(saving.model, await runCommand(saving.commands, fetch));
+    expect(requests).toEqual([
+      { method: "PATCH", revision: '"3"', body: { variableSymbol: "777" } },
+    ]);
+
+    const cleared = update(saved.model, Editor.Message.ChangedVariableSymbol({ value: "" }));
+    expect(
+      update(cleared.model, Editor.Message.AutosaveDue({ seq: cleared.model.previewSeq })).commands,
+    ).toBeUndefined();
+    expect(update(cleared.model, Editor.Message.ClickedIssue()).commands).toBeUndefined();
+    const rendered = await renderEditor(cleared.model, ctx);
+    expect(rendered.html).toContain("777");
+    expect(rendered.html).toMatch(/<button[^>]*disabled[^>]*>Issue document<\/button>/);
+
+    const replaced = update(cleared.model, Editor.Message.ChangedVariableSymbol({ value: "888" }));
+    const savingForIssue = update(replaced.model, Editor.Message.ClickedIssue());
+    const minting = update(savingForIssue.model, await runCommand(savingForIssue.commands, fetch));
+    const issuing = update(minting.model, await runCommand(minting.commands));
+    await runCommand(issuing.commands, fetch);
+    expect(requests.slice(1)).toEqual([
+      { method: "PATCH", revision: '"4"', body: { variableSymbol: "888" } },
+      { method: "POST", revision: '"5"', body: {} },
+    ]);
+  });
+
   test("issuing a new invoice retries its original key and starts no draft or replacement issue", async () => {
     const { model, update, describeLine } = preparedEditor(null);
     const edited = describeLine(model, "New invoice line");
