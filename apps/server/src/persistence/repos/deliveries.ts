@@ -5,6 +5,7 @@ import type {
   DeliveryId,
   DeliveryPurpose,
   DocumentId,
+  ImageRef,
   IsoDate,
   Locale,
   PdfTemplate,
@@ -14,7 +15,9 @@ import { BigDecimal, Effect, Layer, Schema } from "effect";
 import { SqlClient } from "effect/sql";
 import {
   attachDeliverySnapshot,
+  type DeliveryBrandingSnapshot,
   type DeliveryRenderSnapshot,
+  markLegacyDeliveryView,
   projectDocumentFromSql,
   readDeliverySnapshot,
 } from "../../projections/documents";
@@ -35,6 +38,7 @@ interface SerializedDeliverySnapshot {
   readonly note: string | null;
   readonly amountDue: string;
   readonly template: PdfTemplate;
+  readonly branding?: DeliveryBrandingSnapshot | undefined;
 }
 
 const decodeRenderModel = (raw: unknown): DeliveryRecord["view"] => {
@@ -49,10 +53,11 @@ const decodeRenderModel = (raw: unknown): DeliveryRecord["view"] => {
       note: snapshotRaw.note,
       amountDue: BigDecimal.fromStringUnsafe(snapshotRaw.amountDue),
       template: snapshotRaw.template,
+      branding: snapshotRaw.branding,
     };
     return attachDeliverySnapshot(view, snapshot);
   }
-  return view;
+  return markLegacyDeliveryView(view);
 };
 
 const encodeRenderModel = (view: DeliveryRecord["view"]): string => {
@@ -65,6 +70,7 @@ const encodeRenderModel = (view: DeliveryRecord["view"]): string => {
     note: snapshot.note,
     amountDue: BigDecimal.format(snapshot.amountDue),
     template: snapshot.template,
+    ...(snapshot.branding === undefined ? {} : { branding: snapshot.branding }),
   };
   return JSON.stringify({ ...encoded, __snapshot: serialized });
 };
@@ -190,15 +196,40 @@ export const DeliveriesRepoSql: Layer.Layer<DeliveriesRepo, never, SqlClient.Sql
         lock: (workspaceId, id) => table.lock(workspaceId, id),
         insert: (row) =>
           Effect.gen(function* () {
-            let effectiveTemplate = row.attachment.template;
-            if (effectiveTemplate === "classic") {
-              const wsRows = yield* sql<{ readonly pdf_template: PdfTemplate }>`
-                select pdf_template from workspaces where id = ${row.workspaceId} limit 1
-              `.pipe(Effect.catch(unavailable));
-              if (wsRows[0] !== undefined) {
-                effectiveTemplate = wsRows[0].pdf_template;
-              }
-            }
+            const wsRows = yield* sql<{
+              readonly revision: number;
+              readonly pdf_template: PdfTemplate;
+              readonly accent_color: string | null;
+              readonly footer_text: string | null;
+              readonly logo: unknown;
+              readonly stamp: unknown;
+            }>`
+              select revision, pdf_template, accent_color, footer_text, logo, stamp
+              from workspaces
+              where id = ${row.workspaceId}
+              limit 1
+            `.pipe(Effect.catch(unavailable));
+            const wsRow = wsRows[0];
+            const effectiveTemplate =
+              row.attachment.template === "classic" && wsRow !== undefined
+                ? wsRow.pdf_template
+                : row.attachment.template;
+            const brandingSnapshot: DeliveryBrandingSnapshot | undefined =
+              wsRow === undefined
+                ? undefined
+                : {
+                    workspaceRevision: Number(wsRow.revision),
+                    accentColor: wsRow.accent_color ?? "#1F5FAF",
+                    footerText: wsRow.footer_text ?? null,
+                    logo:
+                      wsRow.logo === null || wsRow.logo === undefined
+                        ? null
+                        : parseJson<ImageRef>(wsRow.logo),
+                    stamp:
+                      wsRow.stamp === null || wsRow.stamp === undefined
+                        ? null
+                        : parseJson<ImageRef>(wsRow.stamp),
+                  };
             const issuer = row.view.issuer as unknown as DocumentsModule.IssuerSnapshotRecord;
             const projected = yield* projectDocumentFromSql(sql, row.workspaceId, row.documentId, {
               kind: row.view.kind,
@@ -222,6 +253,7 @@ export const DeliveriesRepoSql: Layer.Layer<DeliveriesRepo, never, SqlClient.Sql
                       note: projected.note,
                       amountDue: projected.amountDue,
                       template: effectiveTemplate,
+                      branding: brandingSnapshot,
                     },
                   );
 

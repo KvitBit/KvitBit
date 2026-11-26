@@ -9,6 +9,7 @@
  */
 import { describe, expect, test } from "bun:test";
 import { PdfEngine } from "@kvitbit/adapters/pdf";
+import { toSvg } from "@kvitbit/adapters/qr";
 import { ALL_SCOPES } from "@kvitbit/api-contract";
 import {
   CoreModulesLive,
@@ -1074,7 +1075,10 @@ describe("Phase 3A Round 1 fixes 6–8: PDF, branding, and document/share read p
         );
         const ws1 = yield* asMember(workspaces.current);
         const wsModern = yield* asMember(
-          workspaces.updateSettings({ branding: { pdfTemplate: "modern_minimal" } }, ws1.revision),
+          workspaces.updateSettings(
+            { branding: { pdfTemplate: "modern_minimal", footerText: "QUEUE-FOOTER" } },
+            ws1.revision,
+          ),
         );
 
         const contact = yield* asMember(
@@ -1085,7 +1089,7 @@ describe("Phase 3A Round 1 fixes 6–8: PDF, branding, and document/share read p
           } as never),
         );
 
-        // 1. Draft QR consistency: preview, createDraft, and replayed createDraft all return paymentQr: null
+        // 1. Draft QR consistency: preview, createDraft, and replayed createDraft all return the same eligible QR
         const draftInput = {
           kind: "invoice" as const,
           contact: contact.id as ContactId,
@@ -1099,12 +1103,13 @@ describe("Phase 3A Round 1 fixes 6–8: PDF, branding, and document/share read p
           ] as const,
         };
         const previewDraft = yield* asMember(documents.preview(draftInput));
-        expect(previewDraft.paymentQr).toBeNull();
+        expect(previewDraft.paymentQr?.format).toBe("spayd");
+        expect(previewDraft.paymentQr?.payload).toContain("AM:1000.00");
         const draftReqKey = "rk-draft-001" as RequestKey;
         const createdDraft = yield* asMember(
           documents.createDraft(draftInput, { requestKey: draftReqKey }),
         );
-        expect(createdDraft.paymentQr).toBeNull();
+        expect(createdDraft.paymentQr).toEqual(previewDraft.paymentQr);
         yield* asMember(
           documents.edit(createdDraft.id, { note: "Upravená poznámka" }, createdDraft.revision),
         );
@@ -1112,7 +1117,7 @@ describe("Phase 3A Round 1 fixes 6–8: PDF, branding, and document/share read p
           documents.createDraft(draftInput, { requestKey: draftReqKey }),
         );
         expect(replayedDraft.revision).toBe(createdDraft.revision);
-        expect(replayedDraft.paymentQr).toBeNull();
+        expect(replayedDraft.paymentQr).toEqual(createdDraft.paymentQr);
 
         // 2. Queued delivery snapshot (J3): partial payment (300/1000 -> 700 due), modern_minimal template,
         // then edit note/symbol AND change workspace template to classic BEFORE rendering!
@@ -1154,7 +1159,10 @@ describe("Phase 3A Round 1 fixes 6–8: PDF, branding, and document/share read p
           ),
         );
         yield* asMember(
-          workspaces.updateSettings({ branding: { pdfTemplate: "classic" } }, wsModern.revision),
+          workspaces.updateSettings(
+            { branding: { pdfTemplate: "classic", footerText: "LATER-FOOTER" } },
+            wsModern.revision,
+          ),
         );
 
         const deliveryRow = yield* deliveriesRepo.get(memberCaller.workspaceId, sent.deliveryId);
@@ -1168,10 +1176,36 @@ describe("Phase 3A Round 1 fixes 6–8: PDF, branding, and document/share read p
         });
         const deliveryHtml = capturedHtml.at(-1) ?? "";
         expect(deliveryHtml).toContain("hero-val");
+        expect(deliveryHtml).toContain("QUEUE-FOOTER");
+        expect(deliveryHtml).not.toContain("LATER-FOOTER");
         expect(deliveryHtml).toContain("2612345678");
         expect(deliveryHtml).not.toContain("777777");
         expect(deliveryHtml).toContain("Frozen note");
         expect(deliveryHtml).not.toContain("Edited note");
+
+        // Legacy queued delivery row (no __snapshot) for an edited/partially-paid invoice refuses to guess QR
+        const sql = yield* SqlClient.SqlClient;
+        const rawRow = yield* sql<{ readonly render_model: unknown }>`
+          select render_model from deliveries where id = ${sent.deliveryId}
+        `;
+        const parsedModel =
+          typeof rawRow[0]?.render_model === "string"
+            ? (JSON.parse(rawRow[0].render_model) as Record<string, unknown>)
+            : { ...(rawRow[0]?.render_model as Record<string, unknown>) };
+        delete parsedModel.__snapshot;
+        parsedModel.paymentQr = null;
+        yield* sql`
+          update deliveries set render_model = ${JSON.stringify(parsedModel)}::jsonb
+          where id = ${sent.deliveryId}
+        `;
+        const legacyDelivery = yield* deliveriesRepo.get(memberCaller.workspaceId, sent.deliveryId);
+        const legacyExit = yield* Effect.exit(
+          renderer.render(legacyDelivery.view, {
+            template: legacyDelivery.attachment.template,
+            language: legacyDelivery.language,
+          }),
+        );
+        expect(legacyExit._tag).toBe("Failure");
 
         // 3. System caller export default template: restore modern_minimal, render without ExplicitPdfTemplate
         const wsAfterClassic = yield* asMember(workspaces.current);
@@ -1220,7 +1254,11 @@ describe("Phase 3A Round 1 fixes 6–8: PDF, branding, and document/share read p
         );
         const eurPdfHtml = capturedHtml.at(-1) ?? "";
         expect(eurPdfHtml).toContain("hero-val");
-        expect(eurPdfHtml).toContain("<svg");
+        const expectedEurSvg = toSvg(eurAfterPay.paymentQr?.payload ?? "", {
+          margin: 4,
+          color: "#09090B",
+        });
+        expect(eurPdfHtml).toContain(expectedEurSvg);
       }).pipe(Effect.provide(layer)),
     );
 
@@ -1402,6 +1440,34 @@ describe("Phase 3A Round 1 fixes 6–8: PDF, branding, and document/share read p
         );
         failAudit = false;
         expect(auditFailExit._tag).toBe("Failure");
+
+        // USD invoice (valid paymentQr: null) replayed after note edit succeeds even when audit is unavailable
+        const usdInput = {
+          kind: "invoice" as const,
+          contact: contact.id as ContactId,
+          currency: CurrencyCode.make("USD"),
+          fx: { manual: { rate: BigDecimal.fromStringUnsafe("23"), quantity: 1 } },
+          lines: [
+            {
+              description: "USD Work",
+              quantity: BigDecimal.fromStringUnsafe("1"),
+              unitPrice: BigDecimal.fromStringUnsafe("500"),
+            },
+          ] as const,
+        };
+        const usdReqKey = "rk-spy-usd-1" as RequestKey;
+        const usdInv = yield* asMember(
+          documents.issue({ input: usdInput }, { requestKey: usdReqKey }),
+        );
+        expect(usdInv.paymentQr).toBeNull();
+        yield* asMember(documents.edit(usdInv.id, { note: "Edited USD note" }, usdInv.revision));
+        failAudit = true;
+        const usdReplay = yield* asMember(
+          documents.issue({ input: usdInput }, { requestKey: usdReqKey }),
+        );
+        failAudit = false;
+        expect(usdReplay.revision).toBe(usdInv.revision);
+        expect(usdReplay.paymentQr).toBeNull();
       }).pipe(Effect.provide(spyLayer)),
     );
   });

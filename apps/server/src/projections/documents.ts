@@ -30,6 +30,7 @@ import {
   type DocumentId,
   Documents,
   type DocumentView,
+  type ImageRef,
   type IsoDate,
   type Locale,
   type PdfTemplate,
@@ -41,10 +42,19 @@ import {
 } from "@kvitbit/domain/contract";
 import { type BlobKey, RequestOutcome } from "@kvitbit/domain/ports";
 import { BigDecimal, Context, Effect, Layer, Option, Result } from "effect";
-import type { SqlClient } from "effect/sql";
+import { SqlClient } from "effect/sql";
 
 const ZERO = BigDecimal.fromStringUnsafe("0");
 const DELIVERY_SNAPSHOT_SYMBOL = Symbol.for("kvitbit/server/DeliveryRenderSnapshot");
+const LEGACY_DELIVERY_SYMBOL = Symbol.for("kvitbit/server/LegacyDeliveryView");
+
+export interface DeliveryBrandingSnapshot {
+  readonly workspaceRevision: number;
+  readonly accentColor: string;
+  readonly footerText: string | null;
+  readonly logo: ImageRef | null;
+  readonly stamp: ImageRef | null;
+}
 
 export interface DeliveryRenderSnapshot {
   readonly variableSymbol: string | null;
@@ -52,6 +62,7 @@ export interface DeliveryRenderSnapshot {
   readonly note: string | null;
   readonly amountDue: BigDecimal.BigDecimal;
   readonly template: PdfTemplate;
+  readonly branding?: DeliveryBrandingSnapshot | undefined;
 }
 
 /** Attaches frozen J3 delivery snapshot metadata as a non-enumerable symbol on `view`. */
@@ -71,6 +82,21 @@ export const attachDeliverySnapshot = (
 /** Reads frozen J3 delivery snapshot metadata from `view`, if present. */
 export const readDeliverySnapshot = (view: DocumentView): DeliveryRenderSnapshot | undefined =>
   (view as unknown as Record<symbol, DeliveryRenderSnapshot | undefined>)[DELIVERY_SNAPSHOT_SYMBOL];
+
+/** Marks a delivery `view` decoded from a legacy row that lacked `__snapshot`. */
+export const markLegacyDeliveryView = (view: DocumentView): DocumentView => {
+  Object.defineProperty(view, LEGACY_DELIVERY_SYMBOL, {
+    value: true,
+    enumerable: false,
+    configurable: true,
+    writable: false,
+  });
+  return view;
+};
+
+/** True when `view` came from a legacy queued delivery row without frozen `__snapshot`. */
+export const isLegacyDeliveryView = (view: DocumentView): boolean =>
+  Boolean((view as unknown as Record<symbol, boolean | undefined>)[LEGACY_DELIVERY_SYMBOL]);
 
 /**
  * Signals whether the caller explicitly specified a `template` override on `Documents.pdf`.
@@ -112,12 +138,12 @@ export interface DocumentPaymentQrInput {
 
 /**
  * Computes the canonical payment QR payload (core-ports D12 & §5.2) shared across
- * HTTP, MCP, Public Share, and PDF rendering. Drafts and non-issued documents never carry a QR.
+ * HTTP, MCP, Public Share, Editor preview/drafts, and PDF rendering.
  */
 export const computeDocumentPaymentQr = (
   input: DocumentPaymentQrInput,
 ): PaymentQrPayload | null => {
-  if (input.status !== "issued") return null;
+  if (input.status === "cancelled") return null;
   const variableSymbol = resolveVariableSymbol(input.variableSymbol, input.number);
   const res = qrForDocument({
     kind: input.kind,
@@ -221,23 +247,30 @@ export const projectDocumentFromSql = (
     const fakeTotals = (amount: BigDecimal.BigDecimal) => ({
       gross: { amount, currency: view.currency },
     });
-    const amountDue = DocumentsModule.outstandingOf(
-      {
-        kind: docRow.kind,
-        status: docRow.status,
-        paidAmount: parseDecimal(docRow.paid_amount),
-        totals: fakeTotals(
-          grossOf(docRow.vat_breakdown),
-        ) as DocumentsModule.DocumentRecord["totals"],
-        links: relRows.map((r) => ({
-          relation: r.relation as DocumentsModule.LinkRecord["relation"],
-          id: r.to_document_id,
-        })),
-      },
-      creditRows.map((c) => ({
-        totals: fakeTotals(grossOf(c.vat_breakdown)) as DocumentsModule.DocumentRecord["totals"],
-      })),
-    );
+    const amountDue =
+      docRow.status === "draft"
+        ? docRow.kind === "invoice" || docRow.kind === "proforma"
+          ? grossOf(docRow.vat_breakdown)
+          : ZERO
+        : DocumentsModule.outstandingOf(
+            {
+              kind: docRow.kind,
+              status: docRow.status,
+              paidAmount: parseDecimal(docRow.paid_amount),
+              totals: fakeTotals(
+                grossOf(docRow.vat_breakdown),
+              ) as DocumentsModule.DocumentRecord["totals"],
+              links: relRows.map((r) => ({
+                relation: r.relation as DocumentsModule.LinkRecord["relation"],
+                id: r.to_document_id,
+              })),
+            },
+            creditRows.map((c) => ({
+              totals: fakeTotals(
+                grossOf(c.vat_breakdown),
+              ) as DocumentsModule.DocumentRecord["totals"],
+            })),
+          );
     const variableSymbol = resolveVariableSymbol(docRow.variable_symbol, view.number);
     const paymentQr = computeDocumentPaymentQr({
       kind: view.kind,
@@ -277,6 +310,13 @@ export const resolveDocumentFieldsAtRevision = (params: {
     let note: string | null = record.note;
 
     if (record.revision === view.revision) {
+      if (record.status === "draft") {
+        const amountDue =
+          record.kind === "invoice" || record.kind === "proforma"
+            ? record.totals.gross.amount
+            : ZERO;
+        return { variableSymbol, orderNumber, note, amountDue };
+      }
       const creditIds = record.links
         .filter((link) => link.relation === "corrected_by")
         .map((link) => link.id);
@@ -315,7 +355,7 @@ export const resolveDocumentFieldsAtRevision = (params: {
     }
 
     const amountDue =
-      view.status !== "issued" ||
+      view.status === "cancelled" ||
       view.settlement === "paid" ||
       view.settlement === "overpaid" ||
       view.settlement === "credited"
@@ -330,7 +370,7 @@ export const enrichDocumentView = (
   storedVariableSymbol?: string | null,
   amountDue?: BigDecimal.BigDecimal,
 ): DocumentView => {
-  if (view.paymentQr !== null || view.status !== "issued") return view;
+  if (view.paymentQr !== null || view.status === "cancelled") return view;
   const issuer = view.issuer as unknown as DocumentsModule.IssuerSnapshotRecord;
   const amount =
     amountDue !== undefined
@@ -394,20 +434,28 @@ const projectMemberDocumentView = (
   view: DocumentView,
   documentsRepo: DocumentsRepo["Service"],
   coreStore: CoreStore["Service"],
+  hasSqlRequestLog: boolean,
 ): Effect.Effect<DocumentView, Unavailable, CurrentCaller> =>
   Effect.gen(function* () {
     if (
       view.paymentQr !== null ||
-      view.status !== "issued" ||
+      view.status === "cancelled" ||
       view.kind === "credit_note" ||
       view.kind === "payment_tax_document"
     ) {
       return view;
     }
+    const currency = view.totals.gross.currency;
+    const issuer = view.issuer as unknown as DocumentsModule.IssuerSnapshotRecord;
+    const iban = issuer.bankAccount?.iban ?? null;
+    if ((currency !== "CZK" && currency !== "EUR") || iban === null || iban.trim() === "") {
+      return view;
+    }
     const outcomeOpt = yield* Effect.serviceOption(RequestOutcome);
     if (Option.isSome(outcomeOpt)) {
       const wasReplayed = yield* outcomeOpt.value.replayed;
-      if (wasReplayed && view.paymentQr !== null) return view;
+      // CoreStoreSql already persisted the complete projected result (including valid null).
+      if (wasReplayed && hasSqlRequestLog) return view;
     }
     const caller = yield* CurrentCaller;
     if (caller._tag !== "Member") {
@@ -437,9 +485,10 @@ const ProjectedDocumentsLive: Layer.Layer<Documents, never, Documents | CoreStor
       const baseDocuments = yield* Documents;
       const coreStore = yield* CoreStore;
       const documentsRepo = yield* DocumentsRepo;
+      const hasSqlRequestLog = Option.isSome(yield* Effect.serviceOption(SqlClient.SqlClient));
 
       const projectView = (view: DocumentView) =>
-        projectMemberDocumentView(view, documentsRepo, coreStore);
+        projectMemberDocumentView(view, documentsRepo, coreStore, hasSqlRequestLog);
 
       return Documents.of({
         ...baseDocuments,
@@ -495,6 +544,7 @@ const ProjectedTemplatesLive: Layer.Layer<Templates, never, Templates | CoreStor
       const baseTemplates = yield* Templates;
       const coreStore = yield* CoreStore;
       const documentsRepo = yield* DocumentsRepo;
+      const hasSqlRequestLog = Option.isSome(yield* Effect.serviceOption(SqlClient.SqlClient));
 
       return Templates.of({
         ...baseTemplates,
@@ -502,7 +552,9 @@ const ProjectedTemplatesLive: Layer.Layer<Templates, never, Templates | CoreStor
           baseTemplates
             .use(template, input, opts)
             .pipe(
-              Effect.flatMap((view) => projectMemberDocumentView(view, documentsRepo, coreStore)),
+              Effect.flatMap((view) =>
+                projectMemberDocumentView(view, documentsRepo, coreStore, hasSqlRequestLog),
+              ),
             ),
       });
     }),

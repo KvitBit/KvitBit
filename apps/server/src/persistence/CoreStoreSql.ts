@@ -204,7 +204,7 @@ export const makeCoreStoreSql = Effect.gen(function* () {
                 const obj = candidate as Record<string, unknown>;
                 if (
                   typeof obj.id !== "string" ||
-                  obj.status !== "issued" ||
+                  (obj.status !== "issued" && obj.status !== "draft") ||
                   obj.paymentQr !== null ||
                   typeof obj.kind !== "string" ||
                   obj.issuer === null ||

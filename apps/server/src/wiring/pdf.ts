@@ -44,6 +44,7 @@ import {
   computeDocumentPaymentQr,
   documentPdfCacheKey,
   ExplicitPdfTemplate,
+  isLegacyDeliveryView,
   readDeliverySnapshot,
   resolveDocumentFieldsAtRevision,
   resolveVariableSymbol,
@@ -665,13 +666,18 @@ export const DocumentRendererLive: Layer.Layer<DocumentRenderer, never, PdfEngin
                 ? options.template
                 : workspace.branding.pdfTemplate;
 
+          const effectiveWorkspaceRevision =
+            deliverySnapshot?.branding?.workspaceRevision ?? workspace?.revision;
+
           const cacheKey =
-            workspaceId !== undefined && workspace !== undefined && Option.isSome(blobsOpt)
+            workspaceId !== undefined &&
+            effectiveWorkspaceRevision !== undefined &&
+            Option.isSome(blobsOpt)
               ? documentPdfCacheKey({
                   workspaceId,
                   documentId: view.id,
                   documentRevision: view.revision,
-                  workspaceRevision: workspace.revision,
+                  workspaceRevision: effectiveWorkspaceRevision,
                   template: effectiveTemplate,
                   language: options.language,
                 })
@@ -694,6 +700,20 @@ export const DocumentRendererLive: Layer.Layer<DocumentRenderer, never, PdfEngin
                 )
               : undefined;
 
+          if (isLegacyDeliveryView(view)) {
+            const cannotRecover =
+              record === undefined ||
+              record.revision !== view.revision ||
+              (view.settlement === "partially_paid" && view.paymentQr === null);
+            if (cannotRecover) {
+              return yield* Effect.die(
+                new Error(
+                  "Legacy queued delivery missing frozen snapshot; refusing to dispatch with guessed payment instructions",
+                ),
+              );
+            }
+          }
+
           const resolvedFields =
             deliverySnapshot !== undefined
               ? {
@@ -714,20 +734,21 @@ export const DocumentRendererLive: Layer.Layer<DocumentRenderer, never, PdfEngin
 
           let branding: RenderBranding | undefined;
           let brandingComplete = true;
-          if (workspaceId !== undefined && workspace !== undefined) {
+          const brandingSource = deliverySnapshot?.branding ?? workspace?.branding;
+          if (workspaceId !== undefined && brandingSource !== undefined) {
             const [logoResult, stampResult] = Option.isSome(blobsOpt)
               ? yield* Effect.all([
-                  loadBrandingImage(blobsOpt.value, workspaceId, "logo", workspace.branding.logo),
-                  loadBrandingImage(blobsOpt.value, workspaceId, "stamp", workspace.branding.stamp),
+                  loadBrandingImage(blobsOpt.value, workspaceId, "logo", brandingSource.logo),
+                  loadBrandingImage(blobsOpt.value, workspaceId, "stamp", brandingSource.stamp),
                 ])
               : ([
-                  { image: null, complete: workspace.branding.logo === null },
-                  { image: null, complete: workspace.branding.stamp === null },
+                  { image: null, complete: brandingSource.logo === null },
+                  { image: null, complete: brandingSource.stamp === null },
                 ] as const);
             brandingComplete = logoResult.complete && stampResult.complete;
             branding = {
-              accentColor: workspace.branding.accentColor,
-              footerText: workspace.branding.footerText,
+              accentColor: brandingSource.accentColor,
+              footerText: brandingSource.footerText,
               logo: logoResult.image,
               stamp: stampResult.image,
             };
