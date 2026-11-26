@@ -4,6 +4,7 @@ import { BigDecimal, Schema } from "effect";
 import * as Dashboard from "../../src/page/documents/dashboard";
 import { DocumentSummaryData } from "../../src/page/documents/shared";
 import { ctxFor, renderPath, WS } from "../support";
+import { runCommand, sessionWithRole } from "./fixtures";
 
 const bd = (n: number) => BigDecimal.fromBigInt(BigInt(n));
 
@@ -114,5 +115,31 @@ describe("Dashboard page (Screen 08)", () => {
     const en = await renderPath(`/w/${WS}`, { locale: "en" });
     expect(en.html).toContain("Dashboard");
     expect(en.html).toContain("Workspace setup");
+  });
+  test("recent documents load monetary values from the API response", async () => {
+    const ctx = ctxFor(route);
+    const { model, commands } = Dashboard.init(route, ctx);
+    const recentCommand = commands?.[1];
+    if (recentCommand === undefined) throw new Error("Missing recent documents command");
+    const encode = Schema.encodeSync(Schema.toCodecJson(Schema.Array(DocumentSummaryData)));
+    const message = await runCommand([recentCommand], (request) => {
+      expect(new URL(request.url).pathname).toEndWith("/documents");
+      return Response.json({ items: encode(sampleRecent), nextCursor: null });
+    });
+    const recent = Dashboard.update(model, message, ctx).model.recent;
+    expect(recent._tag).toBe("Loaded");
+    if (recent._tag !== "Loaded") throw new Error("Recent documents were not loaded");
+    expect(encode(recent.data)).toEqual(encode(sampleRecent));
+  });
+
+  test("accountants can read the dashboard without draft creation links", async () => {
+    const { html } = await renderPath(`/w/${WS}`, {
+      locale: "en",
+      session: sessionWithRole("accountant"),
+    });
+    expect(html).toContain("Dashboard");
+    expect(html).not.toContain("New invoice");
+    expect(html).not.toContain("New proforma");
+    expect(html).not.toContain(`/w/${WS}/documents/new`);
   });
 });

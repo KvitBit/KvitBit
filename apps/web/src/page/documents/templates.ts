@@ -7,10 +7,11 @@ import type { Html } from "@effect/ui/html";
 import {
   type ContactId,
   type CurrencyCode,
+  DocumentId,
   type LineInput,
   type PaymentMethod,
   RecurringRunView,
-  type TemplateId,
+  TemplateId,
   type TemplateInput,
   type VatTreatment,
   type WorkspaceId,
@@ -47,13 +48,17 @@ import {
 import {
   apiCommand,
   ContactOptionData,
+  canRole,
   decimalToInput,
   fmtDate,
   fmtDateTime,
+  idempotencyHeaders,
   ifMatch,
   isIsoDateString,
   kindBadge,
+  mintRequestKeyCommand,
   parseDecimalText,
+  preserveRequestKey,
   readContacts,
   readTemplate,
   readTemplates,
@@ -324,6 +329,9 @@ export const Model = Schema.Struct({
   // UI state
   archiveDialogOpen: Schema.Boolean,
   busy: Schema.Boolean,
+  pendingUse: Schema.NullOr(
+    Schema.Struct({ templateId: TemplateId, key: Schema.NullOr(Schema.String) }),
+  ),
   formError: Schema.NullOr(Schema.String),
 });
 export type Model = typeof Model.Type;
@@ -360,7 +368,10 @@ export const Message = UiSchema.TaggedEnum({
   SubmittedSchedule: {},
   ClickedRemoveSchedule: {},
   ClickedResumeSchedule: { templateId: Schema.String },
-  ClickedUseTemplate: { templateId: Schema.String },
+  ClickedUseTemplate: { templateId: TemplateId },
+  GotTemplateUseKey: { key: Schema.String },
+  UsedTemplate: { id: DocumentId },
+  FailedTemplateUse: { failure: Failure },
   MutationSucceeded: {
     toast: Schema.String,
     navigateTo: Schema.optionalKey(Schema.String),
@@ -480,6 +491,7 @@ export const init = (route: Route, ctx: PageContext): PageReturn<Model, Message>
     autoSend: false,
     archiveDialogOpen: false,
     busy: false,
+    pendingUse: null,
     formError: null,
   };
   if (ctx.workspace === null) return { model: base };
@@ -520,6 +532,28 @@ const buildTemplateInput = (model: Model): TemplateInput | null => {
     ...(model.note.trim() === "" ? {} : { note: model.note.trim() }),
   };
 };
+
+const useTemplate = (
+  model: Model,
+  workspaceId: WorkspaceId,
+  templateId: TemplateId,
+  key: string,
+): PageReturn<Model, Message> => ({
+  model: { ...model, busy: true, formError: null, pendingUse: { templateId, key } },
+  commands: [
+    apiCommand(
+      "UseTemplate",
+      (c) =>
+        c.templates.use({
+          params: { workspaceId, templateId },
+          headers: idempotencyHeaders(key),
+          payload: { as: "draft" },
+        }),
+      (doc): Message => Message.UsedTemplate({ id: doc.id }),
+      (failure): Message => Message.FailedTemplateUse({ failure }),
+    ),
+  ],
+});
 
 export const update = (
   model: Model,
@@ -751,35 +785,40 @@ export const update = (
       };
     },
     ClickedUseTemplate: ({ templateId }) => {
-      if (ws === null || model.busy) return { model };
-      return {
-        model: { ...model, busy: true },
-        commands: [
-          apiCommand(
-            "UseTemplate",
-            (c) =>
-              withIdempotencyKey((headers) =>
-                c.templates.use({
-                  params: { workspaceId: ws.id, templateId: templateId as TemplateId },
-                  headers,
-                  payload: { as: "draft" },
-                }),
+      if (ws === null || model.busy || !canRole(ws.role, "document.draft")) return { model };
+      if (model.pendingUse !== null && model.pendingUse.templateId !== templateId) return { model };
+      const key = model.pendingUse?.key ?? null;
+      return key === null
+        ? {
+            model: { ...model, busy: true, formError: null, pendingUse: { templateId, key } },
+            commands: [
+              mintRequestKeyCommand("MintTemplateUseKey", (key) =>
+                Message.GotTemplateUseKey({ key }),
               ),
-            (doc): Message =>
-              Message.MutationSucceeded({
-                toast: txt(ctx.locale, "toastSaved"),
-                navigateTo: href({
-                  _tag: "DocumentEdit",
-                  ws: route.ws,
-                  id: doc.id,
-                }),
-                reload: false,
-              }),
-            (failure): Message => Message.MutationFailed({ failure }),
-          ),
-        ],
-      };
+            ],
+          }
+        : useTemplate(model, ws.id, templateId, key);
     },
+    GotTemplateUseKey: ({ key }) => {
+      if (!model.busy || model.pendingUse === null || model.pendingUse.key !== null)
+        return { model };
+      if (ws === null || !canRole(ws.role, "document.draft")) {
+        return { model: { ...model, busy: false, pendingUse: null } };
+      }
+      return useTemplate(model, ws.id, model.pendingUse.templateId, key);
+    },
+    UsedTemplate: ({ id }) => ({
+      model: { ...model, busy: false, pendingUse: null, formError: null },
+      outMessage: Intent_.navigate(href({ _tag: "DocumentEdit", ws: route.ws, id })),
+    }),
+    FailedTemplateUse: ({ failure }) => ({
+      model: {
+        ...model,
+        busy: false,
+        pendingUse: preserveRequestKey(failure) ? model.pendingUse : null,
+        formError: textOf(translator(ctx.locale), failure.text),
+      },
+    }),
     MutationSucceeded: ({ toast, navigateTo, reload }) => {
       const nextBase: Model = { ...model, busy: false, formError: null };
       if (navigateTo !== undefined) {
@@ -856,6 +895,25 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
           }),
         ],
       }),
+      ...(model.formError === null
+        ? []
+        : [
+            banner(h, {
+              text: model.formError,
+              tone: "error",
+              ...(model.pendingUse !== null && canRole(ws.role, "document.draft")
+                ? {
+                    action: button(h, {
+                      label: sharedCopy(locale, "retry"),
+                      onClick: Message.ClickedUseTemplate({
+                        templateId: model.pendingUse.templateId,
+                      }),
+                      small: true,
+                    }),
+                  }
+                : {}),
+            }),
+          ]),
       ...(pausedTemplates.length > 0
         ? [
             banner(h, {
@@ -936,6 +994,9 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
                       button(h, {
                         label: txt(locale, "useDraft"),
                         onClick: Message.ClickedUseTemplate({ templateId: tpl.id }),
+                        disabled:
+                          !canRole(ws.role, "document.draft") ||
+                          (model.pendingUse !== null && model.pendingUse.templateId !== tpl.id),
                         variant: "primary",
                         small: true,
                         busy: model.busy,

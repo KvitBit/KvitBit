@@ -1,3 +1,4 @@
+import { Command } from "@effect/ui";
 import type { Html } from "@effect/ui/html";
 /**
  * Private shared schemas, decoders, formatting and Command helpers for src/page/documents/*.
@@ -212,15 +213,22 @@ export type WorkspaceInfoData = typeof WorkspaceInfoData.Type;
 
 // --- Safe runtime decoders for opaque domain placeholders ----------------------------------------
 
-const decodeSummary = Schema.decodeUnknownOption(DocumentSummaryData);
+// Opaque API fields bypass nested schema decoding, so these amounts can still be wire strings.
+const decodeWithWireAmounts = <A>(schema: Schema.Codec<A, unknown, never, never>) => {
+  const decode = Schema.decodeUnknownOption(schema);
+  const decodeJson = Schema.decodeUnknownOption(Schema.toCodecJson(schema));
+  return (raw: unknown) => Option.orElse(decode(raw), () => decodeJson(raw));
+};
+
+const decodeSummary = decodeWithWireAmounts(DocumentSummaryData);
 const decodeContactSnapshot = Schema.decodeUnknownOption(ContactSnapshotData);
 const decodeIssuerSnapshot = Schema.decodeUnknownOption(IssuerSnapshotData);
-const decodeLineView = Schema.decodeUnknownOption(LineViewData);
-const decodePayment = Schema.decodeUnknownOption(PaymentViewData);
+const decodeLineView = decodeWithWireAmounts(LineViewData);
+const decodePayment = decodeWithWireAmounts(PaymentViewData);
 const decodeContactOption = Schema.decodeUnknownOption(ContactOptionData);
-const decodePriceListOption = Schema.decodeUnknownOption(PriceListOptionData);
+const decodePriceListOption = decodeWithWireAmounts(PriceListOptionData);
 const decodeBankAccount = Schema.decodeUnknownOption(BankAccountData);
-const decodeTemplate = Schema.decodeUnknownOption(TemplateViewData);
+const decodeTemplate = decodeWithWireAmounts(TemplateViewData);
 const decodeWorkspaceInfo = Schema.decodeUnknownOption(WorkspaceInfoData);
 
 export const readSummary = (raw: unknown): DocumentSummaryData | undefined =>
@@ -435,7 +443,13 @@ export const mintRequestKeyCommand = <M>(name: string, onKey: (key: string) => M
   browserCommand(name, Api.uuidV7.pipe(Effect.map(onKey)));
 
 export const delayCommand = <M>(name: string, ms: number, message: M): PageCommand<M> =>
-  browserCommand(name, Effect.as(Effect.sleep(ms), message));
+  Command.make(name, { args: {}, mode: "switch" }, () =>
+    Effect.as(Effect.sleep(ms), message),
+  ).make();
+
+// The only retryable conflict is an idempotency mismatch, which requires a fresh key.
+export const preserveRequestKey = (failure: Failure): boolean =>
+  failure.retryable && failure.tag !== "Conflict";
 
 export type DocumentAction =
   | "document.read"

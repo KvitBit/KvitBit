@@ -10,9 +10,9 @@ import {
   type BankAccountId,
   type ContactId,
   type CurrencyCode,
-  type DocumentId,
-  type DocumentInput,
-  type DocumentPatch,
+  DocumentId,
+  DocumentInput,
+  DocumentPatch,
   DocumentView,
   FxRateView,
   type IsoDate,
@@ -26,6 +26,7 @@ import {
 } from "@kvitbit/domain";
 import { I18n, ViewModels } from "@kvitbit/ui-port";
 import { BigDecimal, Effect, Result, Schema } from "effect";
+import { renderSVG } from "uqr";
 import { Failure } from "../../app/api";
 import type { PageCommand } from "../../app/commands";
 import { type Copy, copy, textOf, translator } from "../../app/i18n";
@@ -33,6 +34,7 @@ import { Intent_ } from "../../app/intent";
 import type { MessageHandlers, PageContext, PageReturn, RouteOf } from "../../app/page";
 import * as Remote from "../../app/remote";
 import { href } from "../../app/routing";
+import { svgImage } from "../../ui/html";
 import {
   amount,
   badge,
@@ -69,6 +71,7 @@ import {
   mintRequestKeyCommand,
   PriceListOptionData,
   parseDecimalText,
+  preserveRequestKey,
   readBankAccounts,
   readContact,
   readContactSnapshot,
@@ -154,9 +157,13 @@ const CopyTable: Copy<
   | "vatCzkTotal"
   | "regimeNonVat"
   | "regimeIdentified"
-  | "savedDraftToast"
-  | "issuedToast"
-  | "savedEditToast"
+  | "savingDraft"
+  | "draftSaved"
+  | "reloadRevision"
+  | "reviewRevision"
+  | "changedFields"
+  | "readOnly"
+  | "previewQr"
   | "needContact"
   | "needLines"
   | "clearOverride"
@@ -230,9 +237,13 @@ const CopyTable: Copy<
     vatCzkTotal: "DPH v CZK",
     regimeNonVat: "Neplátce DPH — doklad neobsahuje DPH.",
     regimeIdentified: "Identifikovaná osoba — u tuzemských plnění se DPH neúčtuje.",
-    savedDraftToast: "Koncept uložen.",
-    issuedToast: "Doklad byl vystaven.",
-    savedEditToast: "Změny dokladu uloženy.",
+    savingDraft: "Ukládání konceptu…",
+    draftSaved: "Koncept uložen.",
+    reloadRevision: "Načíst aktuální verzi",
+    reviewRevision: "Zkontrolujte své úpravy před uložením do aktuální verze.",
+    changedFields: "Změny v aktuální verzi",
+    readOnly: "Tento doklad zde nelze upravit.",
+    previewQr: "Platební QR kód",
     needContact: "Vyberte prosím odběratele.",
     needLines: "Přidejte alespoň jednu položku s popisem a cenou.",
     clearOverride: "Použít výchozí",
@@ -306,9 +317,13 @@ const CopyTable: Copy<
     vatCzkTotal: "VAT in CZK",
     regimeNonVat: "Non-VAT payer — no VAT is charged on this document.",
     regimeIdentified: "Identified person — domestic supplies carry no VAT.",
-    savedDraftToast: "Draft saved.",
-    issuedToast: "Document issued.",
-    savedEditToast: "Document changes saved.",
+    savingDraft: "Saving draft…",
+    draftSaved: "Draft saved.",
+    reloadRevision: "Reload latest version",
+    reviewRevision: "Review your edits before saving them to the latest version.",
+    changedFields: "Changes in the latest version",
+    readOnly: "This document cannot be edited here.",
+    previewQr: "Payment QR code",
     needContact: "Please select a customer.",
     needLines: "Add at least one line item with a description and price.",
     clearOverride: "Use default",
@@ -348,14 +363,36 @@ const LookupsData = Schema.Struct({
 const WriteIntent = Schema.Literals(["save_draft", "issue", "autosave"]);
 type WriteIntent = typeof WriteIntent.Type;
 
+const DraftOperation = Schema.Union([
+  Schema.TaggedStruct("Create", { input: DocumentInput, key: Schema.NullOr(Schema.String) }),
+  Schema.TaggedStruct("Edit", {
+    id: DocumentId,
+    revision: Schema.Int,
+    input: DocumentInput,
+    patch: DocumentPatch,
+  }),
+  Schema.TaggedStruct("IssueNew", { input: DocumentInput, key: Schema.NullOr(Schema.String) }),
+  Schema.TaggedStruct("IssueDraft", {
+    id: DocumentId,
+    revision: Schema.Int,
+    key: Schema.NullOr(Schema.String),
+  }),
+]);
+const DraftWrite = Schema.Struct({
+  intent: WriteIntent,
+  seq: Remote.Seq,
+  running: Schema.Boolean,
+  operation: DraftOperation,
+});
+type DraftWrite = typeof DraftWrite.Type;
+
 export const Model = Schema.Struct({
   route: ViewModels.Route,
   lookups: Remote.remoteSchema(LookupsData),
   fxLookup: Remote.remoteSchema(FxRateView),
   kind: Schema.Literals(["invoice", "proforma"]),
-  editingId: Schema.NullOr(Schema.String),
-  editingStatus: Schema.NullOr(Schema.Literals(["draft", "issued", "cancelled"])),
-  editingRevision: Schema.NullOr(Schema.Int),
+  savedDoc: Schema.NullOr(DocumentView),
+  savedInput: Schema.NullOr(DocumentInput),
   contactId: Schema.String,
   issuedOn: Schema.String,
   taxableSupplyOn: Schema.String,
@@ -384,11 +421,11 @@ export const Model = Schema.Struct({
   previewSeq: Remote.Seq,
   serverPreview: Remote.remoteSchema(DocumentView),
   calcDrift: Schema.Boolean,
-  autosaveSeq: Remote.Seq,
-  autosaveStatus: Schema.Literals(["clean", "dirty", "saving", "saved", "failed"]),
+  autosaveReady: Schema.Boolean,
   autosaveError: Schema.NullOr(Schema.String),
-  pendingWriteKey: Schema.NullOr(Schema.String),
-  pendingWriteIntent: Schema.NullOr(WriteIntent),
+  draftWrite: Schema.NullOr(DraftWrite),
+  revisionState: Schema.Literals(["current", "stale", "loading", "review", "blocked"]),
+  revisionChanges: Schema.Array(Schema.String),
   submitting: Schema.Boolean,
   submitError: Schema.NullOr(Schema.String),
 });
@@ -442,14 +479,17 @@ export const Message = UiSchema.TaggedEnum({
   GotPreview: { seq: Remote.Seq, doc: DocumentView },
   FailedPreview: { seq: Remote.Seq, failure: Failure },
   AutosaveDue: { seq: Remote.Seq },
-  AutosaveSucceeded: { seq: Remote.Seq, doc: DocumentView },
-  AutosaveFailed: { seq: Remote.Seq, failure: Failure },
-  GotRequestKey: { intent: WriteIntent, key: Schema.String },
-  DraftPersistedForIssue: { doc: DocumentView, key: Schema.String },
+  GotRequestKey: { key: Schema.String },
+  DraftWriteSucceeded: { doc: DocumentView },
+  DraftWriteFailed: { failure: Failure },
+  ClickedRetryAutosave: {},
+  ClickedReloadRevision: {},
+  LoadedRevision: { doc: DocumentView },
+  FailedRevision: { failure: Failure },
   ClickedSaveDraft: {},
   ClickedIssue: {},
   ClickedSaveIssued: {},
-  SavedDocument: { doc: DocumentView, action: Schema.Literals(["draft", "issue", "edit"]) },
+  SavedDocument: { doc: DocumentView },
   FailedSubmit: { failure: Failure },
   ClickedRetry: {},
 });
@@ -560,9 +600,7 @@ const hydrateFromDocument = (model: Model, doc: DocumentView, isEdit: boolean): 
   return {
     ...model,
     kind,
-    editingId: isEdit ? doc.id : null,
-    editingStatus: isEdit ? doc.status : null,
-    editingRevision: isEdit ? doc.revision : null,
+    savedDoc: isEdit ? doc : null,
     contactId: contact?.contactId ?? "",
     issuedOn: isEdit ? doc.dates.issuedOn : model.issuedOn,
     taxableSupplyOn: isEdit
@@ -570,6 +608,9 @@ const hydrateFromDocument = (model: Model, doc: DocumentView, isEdit: boolean): 
       : model.taxableSupplyOn,
     currencyOverride: doc.totals.gross.currency,
     paymentMethodOverride: doc.paymentMethod,
+    dueDaysOverride: isEdit
+      ? String((Date.parse(doc.dates.dueOn) - Date.parse(doc.dates.issuedOn)) / 86_400_000)
+      : model.dueDaysOverride,
     numberOverride: isEdit ? (doc.number ?? "") : "",
     manualFx: doc.fx?.source === "manual",
     fxRateInput: doc.fx !== null ? decimalToInput(doc.fx.rate) : "",
@@ -587,9 +628,8 @@ export const init = (route: Route, ctx: PageContext): PageReturn<Model, Message>
     lookups: Remote.idle,
     fxLookup: Remote.idle,
     kind: route._tag === "DocumentNew" ? route.kind : "invoice",
-    editingId: route._tag === "DocumentEdit" ? route.id : null,
-    editingStatus: null,
-    editingRevision: null,
+    savedDoc: null,
+    savedInput: null,
     contactId: route._tag === "DocumentNew" && route.from?._tag === "Contact" ? route.from.id : "",
     issuedOn: today,
     taxableSupplyOn: today,
@@ -618,11 +658,11 @@ export const init = (route: Route, ctx: PageContext): PageReturn<Model, Message>
     previewSeq: 0,
     serverPreview: Remote.idle,
     calcDrift: false,
-    autosaveSeq: 0,
-    autosaveStatus: "clean",
+    autosaveReady: false,
     autosaveError: null,
-    pendingWriteKey: null,
-    pendingWriteIntent: null,
+    draftWrite: null,
+    revisionState: "current",
+    revisionChanges: [],
     submitting: false,
     submitError: null,
   };
@@ -690,7 +730,8 @@ const buildDocumentInput = (
     if (line.description.trim() === "") continue;
     const qty = parseDecimalText(line.quantity);
     const price = parseDecimalText(line.unitPrice);
-    if (qty === undefined || price === undefined) continue;
+    if (qty === undefined || price === undefined)
+      return { ok: false, error: txt(locale, "needLines") };
     validLines.push({
       ...(line.itemId === null ? {} : { item: line.itemId as PriceListItemId }),
       description: line.description.trim(),
@@ -735,23 +776,41 @@ const buildDocumentInput = (
 const PREVIEW_DEBOUNCE_MS = 400;
 const AUTOSAVE_DEBOUNCE_MS = 3000;
 
-const buildDraftPatch = (input: DocumentInput): DocumentPatch => ({
-  contact: input.contact,
-  lines: input.lines,
-  currency: input.currency,
-  issuedOn: input.issuedOn,
-  taxableSupplyOn: input.taxableSupplyOn,
-  due: input.due,
-  language: input.language,
-  series: input.series,
-  bankAccount: input.bankAccount,
-  pricesIncludeVat: input.pricesIncludeVat,
-  variableSymbol: input.variableSymbol,
-  orderNumber: input.orderNumber,
-  note: input.note,
-  paymentMethod: input.paymentMethod,
-  fx: input.fx ?? null,
-});
+const encodeDocumentInput = Schema.encodeSync(DocumentInput);
+
+const buildDraftPatch = (input: DocumentInput, savedInput: DocumentInput | null): DocumentPatch => {
+  const patch = {
+    contact: input.contact,
+    lines: input.lines,
+    currency: input.currency,
+    issuedOn: input.issuedOn,
+    taxableSupplyOn: input.taxableSupplyOn,
+    due: input.due,
+    language: input.language,
+    series: input.series,
+    bankAccount: input.bankAccount,
+    pricesIncludeVat: input.pricesIncludeVat,
+    variableSymbol: input.variableSymbol,
+    orderNumber: input.orderNumber ?? (savedInput?.orderNumber === undefined ? undefined : ""),
+    note: input.note ?? (savedInput?.note === undefined ? undefined : ""),
+    paymentMethod: input.paymentMethod,
+    fx: input.fx ?? null,
+  } satisfies DocumentPatch;
+
+  // The view omits some saved settings. Preserve those when the user edits unrelated fields.
+  const before = savedInput === null ? null : encodeDocumentInput(savedInput);
+  const after = encodeDocumentInput(input);
+  const fields = Object.keys(patch) as Array<keyof typeof patch>;
+  return Object.fromEntries(
+    fields
+      .filter(
+        (field) =>
+          patch[field] !== undefined &&
+          (before === null || JSON.stringify(before[field]) !== JSON.stringify(after[field])),
+      )
+      .map((field) => [field, patch[field]]),
+  );
+};
 
 const scheduleAfterEdit = (
   model: Model,
@@ -759,8 +818,10 @@ const scheduleAfterEdit = (
   extraCommands: ReadonlyArray<PageCommand<Message>> = [],
 ): PageReturn<Model, Message> => {
   const previewSeq = model.previewSeq + 1;
-  const shouldAutosave = workspaceId !== undefined && model.editingStatus !== "issued";
-  const autosaveSeq = shouldAutosave ? model.autosaveSeq + 1 : model.autosaveSeq;
+  const shouldAutosave =
+    workspaceId !== undefined &&
+    model.revisionState === "current" &&
+    (model.savedDoc === null || model.savedDoc.status === "draft");
   const commands: Array<PageCommand<Message>> = [...extraCommands];
   if (workspaceId !== undefined) {
     commands.push(
@@ -776,7 +837,7 @@ const scheduleAfterEdit = (
       delayCommand(
         "DebounceAutosave",
         AUTOSAVE_DEBOUNCE_MS,
-        Message.AutosaveDue({ seq: autosaveSeq }),
+        Message.AutosaveDue({ seq: previewSeq }),
       ),
     );
   }
@@ -785,159 +846,182 @@ const scheduleAfterEdit = (
       ...model,
       dirty: true,
       previewSeq,
-      autosaveSeq,
-      autosaveStatus: shouldAutosave ? "dirty" : model.autosaveStatus,
-      autosaveError: null,
-      pendingWriteKey: null,
-      pendingWriteIntent: null,
+      serverPreview: Remote.idle,
+      calcDrift: false,
+      autosaveReady: false,
+      autosaveError: model.draftWrite === null ? null : model.autosaveError,
     },
     commands,
   };
 };
 
-const runSaveDraftWithKey = (
+const canWriteDraft = (
   model: Model,
-  workspaceId: WorkspaceId,
-  input: DocumentInput,
-  key: string,
-): PageReturn<Model, Message> => {
-  const isExistingDraft = model.editingId !== null && model.editingRevision !== null;
-  const editId = model.editingId as DocumentId;
-  const editRev = model.editingRevision ?? 1;
-  return {
-    model: {
-      ...model,
-      submitting: true,
-      submitError: null,
-      pendingWriteKey: key,
-      pendingWriteIntent: "save_draft",
-    },
-    commands: [
-      apiCommand(
-        "SaveDraft",
-        (c) =>
-          isExistingDraft
-            ? c.documents.edit({
-                params: { workspaceId, documentId: editId },
-                headers: ifMatch(editRev),
-                payload: buildDraftPatch(input),
-              })
-            : c.documents.createDraft({
-                params: { workspaceId },
-                headers: idempotencyHeaders(key),
-                payload: input,
-              }),
-        (doc): Message => Message.SavedDocument({ doc, action: "draft" }),
-        (failure): Message => Message.FailedSubmit({ failure }),
-      ),
-    ],
-  };
+  intent: WriteIntent,
+  ws: NonNullable<PageContext["workspace"]>,
+): boolean => {
+  const doc = model.savedDoc;
+  return (
+    (model.route._tag === "DocumentNew" || doc !== null) &&
+    (doc === null || (doc.status === "draft" && !doc.locked)) &&
+    (model.revisionState === "current" ||
+      (model.revisionState === "review" && intent !== "autosave")) &&
+    canRole(ws.role, intent === "issue" ? "document.issue" : "document.draft") &&
+    (doc === null || (intent === "issue" && !model.dirty) || canRole(ws.role, "document.edit"))
+  );
 };
 
-const runIssueWithKey = (
+const runDraftWrite = (
   model: Model,
+  write: DraftWrite,
   workspaceId: WorkspaceId,
-  input: DocumentInput,
-  key: string,
 ): PageReturn<Model, Message> => {
-  const isExistingDraft =
-    model.editingId !== null && model.editingStatus === "draft" && model.editingRevision !== null;
-  const editId = model.editingId as DocumentId;
-  const editRev = model.editingRevision ?? 1;
-  if (isExistingDraft && model.dirty) {
-    // Persist unsaved edits with If-Match first, then issue the resulting revision.
+  const operation = write.operation;
+  const key = operation._tag === "Edit" ? undefined : operation.key;
+  const next = {
+    ...model,
+    draftWrite: { ...write, running: true },
+    ...(write.intent === "autosave" ? { autosaveError: null } : { submitError: null }),
+  };
+  if (key === null) {
     return {
-      model: {
-        ...model,
-        submitting: true,
-        submitError: null,
-        pendingWriteKey: key,
-        pendingWriteIntent: "issue",
-      },
+      model: next,
       commands: [
-        apiCommand(
-          "PersistDraftBeforeIssue",
-          (c) =>
-            c.documents.edit({
-              params: { workspaceId, documentId: editId },
-              headers: ifMatch(editRev),
-              payload: buildDraftPatch(input),
-            }),
-          (doc): Message => Message.DraftPersistedForIssue({ doc, key }),
-          (failure): Message => Message.FailedSubmit({ failure }),
-        ),
+        mintRequestKeyCommand("MintDraftWriteKey", (key) => Message.GotRequestKey({ key })),
       ],
     };
   }
+  const headers = key === undefined ? {} : idempotencyHeaders(key);
   return {
-    model: {
-      ...model,
-      submitting: true,
-      submitError: null,
-      pendingWriteKey: key,
-      pendingWriteIntent: "issue",
-    },
+    model: next,
     commands: [
       apiCommand(
-        "IssueDocument",
-        (c) =>
-          isExistingDraft
-            ? c.documents.issueDraft({
-                params: { workspaceId, documentId: editId },
-                headers: { ...idempotencyHeaders(key), ...ifMatch(editRev) },
-                payload: {},
-              })
-            : c.documents.issueFromInput({
+        "WriteDraft",
+        (c) => {
+          switch (operation._tag) {
+            case "Edit":
+              return c.documents.edit({
+                params: { workspaceId, documentId: operation.id },
+                headers: ifMatch(operation.revision),
+                payload: operation.patch,
+              });
+            case "Create":
+              return c.documents.createDraft({
                 params: { workspaceId },
-                headers: idempotencyHeaders(key),
-                payload: { input },
-              }),
-        (doc): Message => Message.SavedDocument({ doc, action: "issue" }),
-        (failure): Message => Message.FailedSubmit({ failure }),
+                headers,
+                payload: operation.input,
+              });
+            case "IssueNew":
+              return c.documents.issueFromInput({
+                params: { workspaceId },
+                headers,
+                payload: { input: operation.input },
+              });
+            case "IssueDraft":
+              return c.documents.issueDraft({
+                params: { workspaceId, documentId: operation.id },
+                headers: { ...headers, ...ifMatch(operation.revision) },
+                payload: {},
+              });
+          }
+        },
+        (doc): Message => Message.DraftWriteSucceeded({ doc }),
+        (failure): Message => Message.DraftWriteFailed({ failure }),
       ),
     ],
   };
 };
 
-const runAutosaveWithKey = (
+const startDraftWrite = (
   model: Model,
-  workspaceId: WorkspaceId,
-  input: DocumentInput,
-  seq: Remote.Seq,
-  key: string,
+  intent: WriteIntent,
+  ctx: PageContext,
 ): PageReturn<Model, Message> => {
-  const isExistingDraft = model.editingId !== null && model.editingRevision !== null;
-  const editId = model.editingId as DocumentId;
-  const editRev = model.editingRevision ?? 1;
-  return {
-    model: {
-      ...model,
-      autosaveStatus: "saving",
-      autosaveError: null,
-      pendingWriteKey: isExistingDraft ? model.pendingWriteKey : key,
-      pendingWriteIntent: isExistingDraft ? model.pendingWriteIntent : "autosave",
-    },
-    commands: [
-      apiCommand(
-        "AutosaveDraft",
-        (c) =>
-          isExistingDraft
-            ? c.documents.edit({
-                params: { workspaceId, documentId: editId },
-                headers: ifMatch(editRev),
-                payload: buildDraftPatch(input),
-              })
-            : c.documents.createDraft({
-                params: { workspaceId },
-                headers: idempotencyHeaders(key),
-                payload: input,
-              }),
-        (doc): Message => Message.AutosaveSucceeded({ seq, doc }),
-        (failure): Message => Message.AutosaveFailed({ seq, failure }),
-      ),
-    ],
-  };
+  const ws = ctx.workspace;
+  if (ws === null || model.submitting || model.aresBusy || !canWriteDraft(model, intent, ws))
+    return { model };
+  const pending = model.draftWrite;
+  if (pending !== null) {
+    return pending.running || pending.intent !== intent
+      ? { model }
+      : runDraftWrite(model, pending, ws.id);
+  }
+
+  const doc = model.savedDoc;
+  if (doc !== null && intent === "issue" && !model.dirty) {
+    return runDraftWrite(
+      model,
+      {
+        intent,
+        seq: model.previewSeq,
+        running: true,
+        operation: { _tag: "IssueDraft", id: doc.id, revision: doc.revision, key: null },
+      },
+      ws.id,
+    );
+  }
+  const built = buildDocumentInput(model, ctx.locale);
+  if (!built.ok) {
+    return { model: intent === "autosave" ? model : { ...model, submitError: built.error } };
+  }
+  const operation: DraftWrite["operation"] =
+    doc !== null
+      ? {
+          _tag: "Edit",
+          id: doc.id,
+          revision: doc.revision,
+          input: built.input,
+          patch: buildDraftPatch(built.input, model.savedInput),
+        }
+      : intent === "issue"
+        ? { _tag: "IssueNew", key: null, input: built.input }
+        : { _tag: "Create", key: null, input: built.input };
+  return runDraftWrite(
+    { ...model, autosaveReady: false },
+    { intent, seq: model.previewSeq, running: true, operation },
+    ws.id,
+  );
 };
+
+const writeFreezesForm = (model: Model): boolean =>
+  model.submitting || (model.draftWrite !== null && model.draftWrite.intent !== "autosave");
+
+const changedDocumentFields = (
+  before: DocumentView,
+  after: DocumentView,
+  locale: PageContext["locale"],
+): ReadonlyArray<string> => {
+  const encode = Schema.encodeSync(DocumentView);
+  const old = encode(before);
+  const latest = encode(after);
+  const differs = (a: unknown, b: unknown) => JSON.stringify(a) !== JSON.stringify(b);
+  const fields = [
+    ["customerLabel", old.contact, latest.contact],
+    ["issuedOn", old.dates.issuedOn, latest.dates.issuedOn],
+    ["taxableSupplyOn", old.dates.taxableSupplyOn, latest.dates.taxableSupplyOn],
+    ["dueDays", old.dates.dueOn, latest.dates.dueOn],
+    ["paymentMethod", old.paymentMethod, latest.paymentMethod],
+    ["sectionLines", old.lines, latest.lines],
+    ["numberOverride", old.number, latest.number],
+    ["fxSection", old.fx, latest.fx],
+    ["grandTotal", old.totals.gross, latest.totals.gross],
+  ] as const;
+  return fields.filter(([, a, b]) => differs(a, b)).map(([label]) => txt(locale, label));
+};
+
+const showSavedDocument = (model: Model, doc: DocumentView): PageReturn<Model, Message> => ({
+  model: {
+    ...model,
+    savedDoc: doc,
+    dirty: false,
+    draftWrite: null,
+    submitting: false,
+    submitError: null,
+  },
+  outMessage: Intent_.navigate(
+    href({ _tag: "Document", ws: (model.route as Route).ws, id: doc.id, tab: "preview" }),
+  ),
+});
 
 const maybeLoadFx = (
   model: Model,
@@ -967,12 +1051,21 @@ export const update = (
   const route = model.route as Route;
   const regime: TaxRegime = ws?.taxRegime ?? "vat_payer";
 
+  if (
+    writeFreezesForm(model) &&
+    /^(Changed|Cleared|Selected|Added|Moved|Removed|Updated|Toggled)/.test(message._tag)
+  )
+    return { model };
+
   return Message.match(message, {
     LoadedLookups: ({ seq, data }) => {
       const lookups = Remote.succeed(model.lookups, seq, data);
       let next: Model = { ...model, lookups };
+      if (lookups === model.lookups) return { model };
       if (route._tag === "DocumentEdit" && data.existingDoc !== null) {
         next = hydrateFromDocument(next, data.existingDoc, true);
+        const input = buildDocumentInput(next, ctx.locale);
+        if (input.ok) next = { ...next, savedInput: input.input };
       } else if (
         route._tag === "DocumentNew" &&
         route.from?._tag === "Duplicate" &&
@@ -1010,7 +1103,13 @@ export const update = (
     }),
     ChangedAresIco: ({ value }) => ({ model: { ...model, aresIco: value, aresError: null } }),
     SubmittedAres: () => {
-      if (ws === null || model.aresBusy) return { model };
+      if (
+        ws === null ||
+        model.aresBusy ||
+        writeFreezesForm(model) ||
+        !canRole(ws.role, "document.draft")
+      )
+        return { model };
       const ico = model.aresIco.trim();
       return {
         model: { ...model, aresBusy: true, aresError: null },
@@ -1060,8 +1159,8 @@ export const update = (
                 ],
               },
             };
-      return {
-        model: {
+      const fx = maybeLoadFx(
+        {
           ...model,
           lookups: nextLookups,
           contactId: contact.id,
@@ -1070,6 +1169,10 @@ export const update = (
           aresBusy: false,
           aresError: null,
         },
+        ws?.id,
+      );
+      return {
+        ...scheduleAfterEdit(fx.model, ws?.id, fx.commands),
         outMessage: Intent_.toast(txt(ctx.locale, "aresAdded")),
       };
     },
@@ -1136,7 +1239,9 @@ export const update = (
       scheduleAfterEdit({ ...model, noteOverride: value === "" ? null : value }, ws?.id),
     ClearedNote: () => scheduleAfterEdit({ ...model, noteOverride: null }, ws?.id),
     ChangedNumberOverride: ({ value }) =>
-      scheduleAfterEdit({ ...model, numberOverride: value }, ws?.id),
+      canRole(ws?.role, "document.overrideNumber") && model.savedDoc?.status === "issued"
+        ? scheduleAfterEdit({ ...model, numberOverride: value }, ws?.id)
+        : { model },
     ToggledRefreshParties: ({ checked }) =>
       scheduleAfterEdit({ ...model, refreshParties: checked }, ws?.id),
     ToggledPricesIncludeVat: ({ checked }) =>
@@ -1213,12 +1318,13 @@ export const update = (
         ws?.id,
       ),
     DebouncedPreview: ({ seq }) => {
-      if (ws === null || seq !== model.previewSeq) return { model };
+      if (ws === null || seq !== model.previewSeq || model.serverPreview._tag !== "Idle") {
+        return { model };
+      }
       const built = buildDocumentInput(model, ctx.locale);
       if (!built.ok) return { model };
-      const serverPreview = Remote.load(model.serverPreview);
       return {
-        model: { ...model, serverPreview },
+        model: { ...model, serverPreview: { _tag: "Loading", seq } },
         commands: [
           apiCommand(
             "PreviewDocument",
@@ -1234,159 +1340,104 @@ export const update = (
       };
     },
     GotPreview: ({ seq, doc }) => {
-      if (seq !== model.previewSeq) return { model };
+      const serverPreview = Remote.succeed(model.serverPreview, seq, doc);
+      if (serverPreview === model.serverPreview) return { model };
       const local = computePreview(model, regime);
-      const calcDrift =
-        local !== null && !BigDecimal.equals(local.breakdown.gross.amount, doc.totals.gross.amount);
       return {
         model: {
           ...model,
-          serverPreview: { _tag: "Loaded", seq: Remote.seqOf(model.serverPreview), data: doc },
-          calcDrift,
+          serverPreview,
+          calcDrift: local !== null && !ViewModels.sameBreakdown(local.breakdown, doc.totals),
         },
       };
     },
-    FailedPreview: ({ seq, failure }) => {
-      if (seq !== model.previewSeq) return { model };
-      return {
-        model: {
-          ...model,
-          serverPreview: { _tag: "Failed", seq: Remote.seqOf(model.serverPreview), failure },
-        },
-      };
-    },
+    FailedPreview: ({ seq, failure }) => ({
+      model: { ...model, serverPreview: Remote.fail(model.serverPreview, seq, failure) },
+    }),
     AutosaveDue: ({ seq }) => {
       if (
         ws === null ||
-        seq !== model.autosaveSeq ||
+        seq !== model.previewSeq ||
         !model.dirty ||
-        model.submitting ||
-        model.editingStatus === "issued" ||
-        !canRole(ws.role, "document.draft")
+        !canWriteDraft(model, "autosave", ws)
       ) {
         return { model };
       }
-      const built = buildDocumentInput(model, ctx.locale);
-      if (!built.ok) return { model };
-      const isExistingDraft = model.editingId !== null && model.editingRevision !== null;
-      if (isExistingDraft) {
-        return runAutosaveWithKey(model, ws.id, built.input, seq, model.pendingWriteKey ?? "");
-      }
-      if (model.pendingWriteKey !== null && model.pendingWriteIntent === "autosave") {
-        return runAutosaveWithKey(model, ws.id, built.input, seq, model.pendingWriteKey);
-      }
-      return {
-        model: { ...model, autosaveStatus: "saving", autosaveError: null },
-        commands: [
-          mintRequestKeyCommand("MintAutosaveKey", (key) =>
-            Message.GotRequestKey({ intent: "autosave", key }),
-          ),
-        ],
-      };
+      const ready = { ...model, autosaveReady: true };
+      return model.draftWrite === null ? startDraftWrite(ready, "autosave", ctx) : { model: ready };
     },
-    AutosaveSucceeded: ({ seq, doc }) => ({
-      model: {
+    ClickedRetryAutosave: () =>
+      model.dirty && model.autosaveError !== null
+        ? startDraftWrite(model, "autosave", ctx)
+        : { model },
+    GotRequestKey: ({ key }) => {
+      const write = model.draftWrite;
+      if (ws === null || write === null || !write.running) return { model };
+      const operation = write.operation;
+      if (operation._tag === "Edit" || operation.key !== null) return { model };
+      if (!canWriteDraft(model, write.intent, ws)) return { model: { ...model, draftWrite: null } };
+      return runDraftWrite(model, { ...write, operation: { ...operation, key } }, ws.id);
+    },
+    DraftWriteSucceeded: ({ doc }) => {
+      const write = model.draftWrite;
+      if (write === null || !write.running) return { model };
+      const saved: Model = {
         ...model,
-        editingId: doc.id,
-        editingStatus: doc.status,
-        editingRevision: doc.revision,
-        dirty: seq === model.autosaveSeq ? false : model.dirty,
-        autosaveStatus: seq === model.autosaveSeq ? "saved" : model.autosaveStatus,
+        savedDoc: doc,
+        savedInput: "input" in write.operation ? write.operation.input : model.savedInput,
+        draftWrite: null,
+        dirty: write.seq !== model.previewSeq,
+        revisionState: "current",
+        revisionChanges: [],
         autosaveError: null,
-        pendingWriteKey: model.pendingWriteIntent === "autosave" ? null : model.pendingWriteKey,
-        pendingWriteIntent:
-          model.pendingWriteIntent === "autosave" ? null : model.pendingWriteIntent,
-      },
-    }),
-    AutosaveFailed: ({ seq, failure }) => ({
-      model: {
+        submitError: null,
+      };
+      if (write.intent === "issue" && write.operation._tag === "Edit") {
+        if (ws === null || saved.dirty || !canWriteDraft(saved, "issue", ws))
+          return { model: saved };
+        return runDraftWrite(
+          saved,
+          {
+            ...write,
+            operation: { _tag: "IssueDraft", id: doc.id, revision: doc.revision, key: null },
+          },
+          ws.id,
+        );
+      }
+      if (write.intent !== "autosave") return showSavedDocument(saved, doc);
+      return saved.dirty && saved.autosaveReady
+        ? startDraftWrite(saved, "autosave", ctx)
+        : { model: saved };
+    },
+    DraftWriteFailed: ({ failure }) => {
+      const write = model.draftWrite;
+      if (write === null || !write.running) return { model };
+      const error = textOf(translator(ctx.locale), failure.text);
+      const draftWrite = preserveRequestKey(failure) ? { ...write, running: false } : null;
+      const failed: Model = {
         ...model,
-        autosaveStatus: seq === model.autosaveSeq ? "failed" : model.autosaveStatus,
-        autosaveError: textOf(translator(ctx.locale), failure.text),
-        pendingWriteKey: failure.retryable ? model.pendingWriteKey : null,
-        pendingWriteIntent: failure.retryable ? model.pendingWriteIntent : null,
-      },
-    }),
-    GotRequestKey: ({ intent, key }) => {
-      if (ws === null) return { model };
-      const built = buildDocumentInput(model, ctx.locale);
-      if (!built.ok) {
-        return { model: { ...model, submitting: false, submitError: built.error } };
-      }
-      if (intent === "save_draft") return runSaveDraftWithKey(model, ws.id, built.input, key);
-      if (intent === "issue") return runIssueWithKey(model, ws.id, built.input, key);
-      return runAutosaveWithKey(model, ws.id, built.input, model.autosaveSeq, key);
-    },
-    DraftPersistedForIssue: ({ doc, key }) => {
-      if (ws === null) return { model };
-      return {
-        model: {
-          ...model,
-          editingId: doc.id,
-          editingStatus: doc.status,
-          editingRevision: doc.revision,
-          dirty: false,
-          submitting: true,
-          pendingWriteKey: key,
-          pendingWriteIntent: "issue",
-        },
-        commands: [
-          apiCommand(
-            "IssuePersistedDraft",
-            (c) =>
-              c.documents.issueDraft({
-                params: { workspaceId: ws.id, documentId: doc.id },
-                headers: { ...idempotencyHeaders(key), ...ifMatch(doc.revision) },
-                payload: {},
-              }),
-            (issued): Message => Message.SavedDocument({ doc: issued, action: "issue" }),
-            (failure): Message => Message.FailedSubmit({ failure }),
-          ),
-        ],
+        draftWrite,
+        revisionState: failure.staleRevision ? "stale" : model.revisionState,
+        ...(write.intent === "autosave" ? { autosaveError: error } : { submitError: error }),
       };
+      return write.intent === "autosave" &&
+        draftWrite === null &&
+        !failure.staleRevision &&
+        write.seq !== model.previewSeq &&
+        model.autosaveReady
+        ? startDraftWrite(failed, "autosave", ctx)
+        : { model: failed };
     },
-    ClickedSaveDraft: () => {
-      if (ws === null || model.submitting || !canRole(ws.role, "document.draft")) return { model };
-      const built = buildDocumentInput(model, ctx.locale);
-      if (!built.ok) return { model: { ...model, submitError: built.error } };
-      const isExistingDraft = model.editingId !== null && model.editingRevision !== null;
-      if (isExistingDraft) {
-        return runSaveDraftWithKey(model, ws.id, built.input, model.pendingWriteKey ?? "");
-      }
-      if (model.pendingWriteKey !== null && model.pendingWriteIntent === "save_draft") {
-        return runSaveDraftWithKey(model, ws.id, built.input, model.pendingWriteKey);
-      }
-      return {
-        model: { ...model, submitting: true, submitError: null },
-        commands: [
-          mintRequestKeyCommand("MintDraftKey", (key) =>
-            Message.GotRequestKey({ intent: "save_draft", key }),
-          ),
-        ],
-      };
-    },
-    ClickedIssue: () => {
-      if (ws === null || model.submitting || !canRole(ws.role, "document.issue")) return { model };
-      const built = buildDocumentInput(model, ctx.locale);
-      if (!built.ok) return { model: { ...model, submitError: built.error } };
-      if (model.pendingWriteKey !== null && model.pendingWriteIntent === "issue") {
-        return runIssueWithKey(model, ws.id, built.input, model.pendingWriteKey);
-      }
-      return {
-        model: { ...model, submitting: true, submitError: null },
-        commands: [
-          mintRequestKeyCommand("MintIssueKey", (key) =>
-            Message.GotRequestKey({ intent: "issue", key }),
-          ),
-        ],
-      };
-    },
+    ClickedSaveDraft: () => startDraftWrite(model, "save_draft", ctx),
+    ClickedIssue: () => startDraftWrite(model, "issue", ctx),
     ClickedSaveIssued: () => {
       if (
         ws === null ||
         model.submitting ||
-        model.editingId === null ||
-        model.editingRevision === null ||
+        model.savedDoc?.status !== "issued" ||
+        model.savedDoc.locked ||
+        model.aresBusy ||
+        (model.revisionState !== "current" && model.revisionState !== "review") ||
         !canRole(ws.role, "document.edit")
       ) {
         return { model };
@@ -1394,15 +1445,17 @@ export const update = (
       const built = buildDocumentInput(model, ctx.locale);
       if (!built.ok) return { model: { ...model, submitError: built.error } };
       const allowNumberOverride = canRole(ws.role, "document.overrideNumber");
+      const { series: _draftSeries, ...changes } = buildDraftPatch(built.input, model.savedInput);
       const patch: DocumentPatch = {
-        ...buildDraftPatch(built.input),
-        ...(allowNumberOverride && model.numberOverride.trim() !== ""
+        ...changes,
+        ...(allowNumberOverride &&
+        model.numberOverride.trim() !== "" &&
+        model.numberOverride.trim() !== model.savedDoc.number
           ? { number: model.numberOverride.trim() }
           : {}),
         ...(model.refreshParties ? { refreshParties: true } : {}),
       };
-      const editId = model.editingId as DocumentId;
-      const editRev = model.editingRevision;
+      const { id: editId, revision: editRev } = model.savedDoc;
       return {
         model: { ...model, submitting: true, submitError: null },
         commands: [
@@ -1414,38 +1467,63 @@ export const update = (
                 headers: ifMatch(editRev),
                 payload: patch,
               }),
-            (doc): Message => Message.SavedDocument({ doc, action: "edit" }),
+            (doc): Message => Message.SavedDocument({ doc }),
             (failure): Message => Message.FailedSubmit({ failure }),
           ),
         ],
       };
     },
-    SavedDocument: ({ doc, action }) => ({
-      model: {
-        ...model,
-        editingId: doc.id,
-        editingStatus: doc.status,
-        editingRevision: doc.revision,
-        dirty: false,
-        pendingWriteKey: null,
-        pendingWriteIntent: null,
-        submitting: false,
-        submitError: null,
-      },
-      outMessage: Intent_.navigate(
-        href({ _tag: "Document", ws: route.ws, id: doc.id, tab: "preview" }),
-      ),
-      commands: [...(action === "draft" || action === "issue" || action === "edit" ? [] : [])],
-    }),
+    SavedDocument: ({ doc }) => (model.submitting ? showSavedDocument(model, doc) : { model }),
     FailedSubmit: ({ failure }) => ({
       model: {
         ...model,
         submitting: false,
         submitError: textOf(translator(ctx.locale), failure.text),
-        pendingWriteKey: failure.retryable ? model.pendingWriteKey : null,
-        pendingWriteIntent: failure.retryable ? model.pendingWriteIntent : null,
+        revisionState: failure.staleRevision ? "stale" : model.revisionState,
       },
     }),
+    ClickedReloadRevision: () => {
+      const doc = model.savedDoc;
+      if (ws === null || doc === null || model.revisionState !== "stale") return { model };
+      return {
+        model: { ...model, revisionState: "loading" },
+        commands: [
+          apiCommand(
+            "ReloadDocumentRevision",
+            (c) => c.documents.get({ params: { workspaceId: ws.id, documentId: doc.id } }),
+            (doc): Message => Message.LoadedRevision({ doc }),
+            (failure): Message => Message.FailedRevision({ failure }),
+          ),
+        ],
+      };
+    },
+    LoadedRevision: ({ doc }) => {
+      const previous = model.savedDoc;
+      if (previous === null || model.revisionState !== "loading" || previous.id !== doc.id) {
+        return { model };
+      }
+      const canContinue = previous.status === doc.status && !doc.locked;
+      return {
+        model: {
+          ...model,
+          savedDoc: doc,
+          revisionState: canContinue ? "review" : "blocked",
+          revisionChanges: changedDocumentFields(previous, doc, ctx.locale),
+          submitError: null,
+          autosaveError: null,
+        },
+      };
+    },
+    FailedRevision: ({ failure }) =>
+      model.revisionState === "loading"
+        ? {
+            model: {
+              ...model,
+              revisionState: "stale",
+              submitError: textOf(translator(ctx.locale), failure.text),
+            },
+          }
+        : { model },
     ClickedRetry: () => {
       if (ws === null) return { model };
       const lookups = Remote.load(model.lookups);
@@ -1458,8 +1536,10 @@ export const update = (
 };
 
 export const title = (model: Model, ctx: PageContext): string => {
-  if (model.editingStatus === "issued") return txt(ctx.locale, "editIssuedTitle");
-  if (model.editingId !== null) return txt(ctx.locale, "editDraftTitle");
+  if (model.savedDoc?.status === "issued") return txt(ctx.locale, "editIssuedTitle");
+  if (model.route._tag === "DocumentEdit" || model.savedDoc !== null) {
+    return txt(ctx.locale, "editDraftTitle");
+  }
   return model.kind === "proforma"
     ? txt(ctx.locale, "newProformaTitle")
     : txt(ctx.locale, "newInvoiceTitle");
@@ -1513,15 +1593,16 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
   const data = Remote.dataOf(model.lookups);
   const effective = resolveEffective(model);
   const preview = computePreview(model, regime);
-  const serverDoc = Remote.dataOf(model.serverPreview);
+  const serverDoc = Remote.dataOf(model.serverPreview) ?? (model.dirty ? null : model.savedDoc);
+  const displayBuckets = serverDoc?.totals.buckets ?? preview?.breakdown.buckets ?? [];
   const displayTotals =
-    serverDoc !== undefined
+    serverDoc !== null
       ? {
           net: serverDoc.totals.net,
           vat: serverDoc.totals.vat,
           gross: serverDoc.totals.gross,
           vatCzk: serverDoc.totals.vatCzk,
-          roundingAdjustment: preview?.breakdown.roundingAdjustment ?? null,
+          roundingAdjustment: serverDoc.totals.roundingAdjustment,
         }
       : preview !== null
         ? {
@@ -1532,51 +1613,70 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
             roundingAdjustment: preview.breakdown.roundingAdjustment,
           }
         : null;
-  const isIssuedEdit = model.editingStatus === "issued";
+  const isIssuedEdit = model.savedDoc?.status === "issued";
   const selectedContact = data?.contacts.find((c) => c.id === model.contactId);
   const cnbFx = Remote.dataOf(model.fxLookup);
 
   const issuedIso = isIsoDateString(model.issuedOn) ? model.issuedOn : todayPrague();
   const computedDue = addDaysIso(issuedIso, effective.dueDays.value);
 
-  const headerActions = isIssuedEdit
-    ? [
-        linkButton(h, {
-          label: txt(locale, "backToList"),
-          href: href({
-            _tag: "Document",
-            ws: ws.slug,
-            id: model.editingId as DocumentId,
-            tab: "preview",
+  const mayEdit =
+    canRole(ws.role, "document.edit") &&
+    (model.savedDoc === null ||
+      (!model.savedDoc.locked && model.savedDoc.status !== "cancelled")) &&
+    model.revisionState !== "blocked";
+  const activeWrite = model.draftWrite?.running === true;
+  const blockedFor = (intent: WriteIntent) =>
+    model.aresBusy ||
+    (model.draftWrite !== null && (model.draftWrite.running || model.draftWrite.intent !== intent));
+  const headerActions = [
+    linkButton(h, {
+      label: txt(locale, "backToList"),
+      href:
+        isIssuedEdit && model.savedDoc !== null
+          ? href({ _tag: "Document", ws: ws.slug, id: model.savedDoc.id, tab: "preview" })
+          : href({ _tag: "Documents", ws: ws.slug, query: {} }),
+      variant: "ghost",
+    }),
+    ...(isIssuedEdit && mayEdit
+      ? [
+          button(h, {
+            label: txt(locale, "saveChanges"),
+            onClick: Message.ClickedSaveIssued(),
+            variant: "primary",
+            busy: model.submitting,
+            disabled:
+              model.submitting ||
+              model.aresBusy ||
+              model.revisionState === "stale" ||
+              model.revisionState === "loading",
           }),
-          variant: "ghost",
-        }),
-        button(h, {
-          label: txt(locale, "saveChanges"),
-          onClick: Message.ClickedSaveIssued(),
-          variant: "primary",
-          busy: model.submitting,
-        }),
-      ]
-    : [
-        linkButton(h, {
-          label: txt(locale, "backToList"),
-          href: href({ _tag: "Documents", ws: ws.slug, query: {} }),
-          variant: "ghost",
-        }),
-        button(h, {
-          label: txt(locale, "saveDraft"),
-          onClick: Message.ClickedSaveDraft(),
-          busy: model.submitting,
-        }),
-        button(h, {
-          label: txt(locale, "issue"),
-          onClick: Message.ClickedIssue(),
-          variant: "primary",
-          busy: model.submitting,
-        }),
-      ];
+        ]
+      : []),
+    ...(canWriteDraft(model, "save_draft", ws)
+      ? [
+          button(h, {
+            label: txt(locale, "saveDraft"),
+            onClick: Message.ClickedSaveDraft(),
+            busy: activeWrite && model.draftWrite?.intent === "save_draft",
+            disabled: blockedFor("save_draft"),
+          }),
+        ]
+      : []),
+    ...(canWriteDraft(model, "issue", ws)
+      ? [
+          button(h, {
+            label: txt(locale, "issue"),
+            onClick: Message.ClickedIssue(),
+            variant: "primary",
+            busy: activeWrite && model.draftWrite?.intent === "issue",
+            disabled: blockedFor("issue"),
+          }),
+        ]
+      : []),
+  ];
 
+  const error = model.submitError ?? model.autosaveError;
   const errorBanner =
     model.lookups._tag === "Failed"
       ? [
@@ -1590,9 +1690,39 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
             }),
           }),
         ]
-      : model.submitError !== null
-        ? [banner(h, { text: model.submitError, tone: "error" })]
+      : error !== null
+        ? [
+            banner(h, {
+              text: error,
+              tone: "error",
+              ...(model.revisionState === "stale" || model.revisionState === "loading"
+                ? {
+                    action: button(h, {
+                      label: txt(locale, "reloadRevision"),
+                      onClick: Message.ClickedReloadRevision(),
+                      small: true,
+                      disabled: model.revisionState === "loading",
+                    }),
+                  }
+                : model.autosaveError !== null && model.submitError === null
+                  ? {
+                      action: button(h, {
+                        label: sharedCopy(locale, "retry"),
+                        onClick: Message.ClickedRetryAutosave(),
+                        small: true,
+                      }),
+                    }
+                  : {}),
+            }),
+          ]
         : [];
+
+  const draftStatus =
+    activeWrite && model.draftWrite?.intent === "autosave"
+      ? txt(locale, "savingDraft")
+      : !model.dirty && model.savedDoc?.status === "draft" && model.revisionState === "current"
+        ? txt(locale, "draftSaved")
+        : "";
 
   const regimeBanner =
     regime === "non_vat_payer"
@@ -1854,6 +1984,7 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
                       value: model.numberOverride,
                       onInput: (value) => Message.ChangedNumberOverride({ value }),
                       mono: true,
+                      disabled: !canRole(ws.role, "document.overrideNumber"),
                     }),
                   ]
                 : [
@@ -2096,116 +2227,135 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
           ]),
         ]);
 
-  const previewColumn = h.aside
-    .class("kb-editor-preview-sticky")
-    .children([
-      card(h, [
-        cardTitle(h, txt(locale, "previewTitle"), [
-          badge(
-            h,
-            textOf(t, I18n.enumText("documentKind", model.kind)),
-            model.kind === "proforma" ? "proforma" : "outline",
-          ),
-        ]),
-        h.div
-          .class("kb-spread")
-          .children([
-            mono(h, model.numberOverride || txt(locale, "draftPreviewNumber")),
-            h.span.class("kb-small kb-muted kb-num").children([fmtDate(locale, issuedIso)]),
-          ]),
-        h.hr.class("kb-divider"),
-        h.div
-          .class("kb-stack")
-          .children([
-            h.strong.children([selectedContact?.name ?? txt(locale, "customerPlaceholder")]),
-            ...(selectedContact?.ico !== null && selectedContact?.ico !== undefined
-              ? [h.span.class("kb-small kb-muted kb-mono").children([`IČO ${selectedContact.ico}`])]
-              : []),
-            ...(selectedContact?.dic !== null && selectedContact?.dic !== undefined
-              ? [h.span.class("kb-small kb-muted kb-mono").children([`DIČ ${selectedContact.dic}`])]
-              : []),
-          ]),
-        h.hr.class("kb-divider"),
-        h.h3.children([txt(locale, "vatSummaryTitle")]),
-        ...(displayTotals === null
-          ? []
-          : [
-              ...(regime === "vat_payer" && preview !== null && preview.breakdown.buckets.length > 0
-                ? [
-                    h.table
-                      .class("kb-vat-table")
-                      .children([
-                        h.thead.children([
-                          h.tr.children([
-                            h.th.children([txt(locale, "vatColRate")]),
-                            h.th.class("kb-end").children([txt(locale, "vatColBase")]),
-                            h.th.class("kb-end").children([txt(locale, "vatColVat")]),
-                            h.th.class("kb-end").children([txt(locale, "vatColTotal")]),
-                          ]),
-                        ]),
-                        h.tbody.children(
-                          preview.breakdown.buckets.map((b) =>
-                            h.tr.children([
-                              h.td.children([fmtVatRate(locale, b.ratePercent)]),
-                              h.td.class("kb-end").children([fmtNum(locale, b.base, 2)]),
-                              h.td.class("kb-end").children([fmtNum(locale, b.vat, 2)]),
-                              h.td.class("kb-end").children([fmtNum(locale, b.gross, 2)]),
-                            ]),
-                          ),
-                        ),
-                      ]),
-                  ]
-                : []),
-              h.div
-                .class("kb-stack")
-                .children([
-                  h.div
-                    .class("kb-vat-total-row")
-                    .children([
-                      h.span.class("kb-muted").children([txt(locale, "netTotal")]),
-                      amount(h, fmtMoney(locale, displayTotals.net)),
-                    ]),
-                  ...(regime === "vat_payer"
-                    ? [
-                        h.div
-                          .class("kb-vat-total-row")
-                          .children([
-                            h.span.class("kb-muted").children([txt(locale, "vatTotal")]),
-                            amount(h, fmtMoney(locale, displayTotals.vat)),
-                          ]),
-                      ]
-                    : []),
-                  ...(displayTotals.roundingAdjustment !== null &&
-                  !BigDecimal.isZero(displayTotals.roundingAdjustment.amount)
-                    ? [
-                        h.div
-                          .class("kb-vat-total-row")
-                          .children([
-                            h.span.class("kb-muted").children([txt(locale, "roundingAdj")]),
-                            amount(h, fmtMoney(locale, displayTotals.roundingAdjustment)),
-                          ]),
-                      ]
-                    : []),
-                  h.div
-                    .class("kb-vat-total-row kb-vat-total-row--grand")
-                    .children([
-                      h.span.children([txt(locale, "grandTotal")]),
-                      amount(h, fmtMoney(locale, displayTotals.gross)),
-                    ]),
-                  ...(displayTotals.vatCzk !== null
-                    ? [
-                        h.div
-                          .class("kb-vat-total-row kb-small kb-muted")
-                          .children([
-                            h.span.children([txt(locale, "vatCzkTotal")]),
-                            amount(h, fmtMoney(locale, displayTotals.vatCzk)),
-                          ]),
-                      ]
-                    : []),
-                ]),
-            ]),
+  const previewColumn = h.aside.class("kb-editor-preview-sticky").children([
+    card(h, [
+      cardTitle(h, txt(locale, "previewTitle"), [
+        badge(
+          h,
+          textOf(t, I18n.enumText("documentKind", model.kind)),
+          model.kind === "proforma" ? "proforma" : "outline",
+        ),
       ]),
-    ]);
+      h.div
+        .class("kb-spread")
+        .children([
+          mono(h, model.numberOverride || txt(locale, "draftPreviewNumber")),
+          h.span.class("kb-small kb-muted kb-num").children([fmtDate(locale, issuedIso)]),
+        ]),
+      h.hr.class("kb-divider"),
+      h.div
+        .class("kb-stack")
+        .children([
+          h.strong.children([selectedContact?.name ?? txt(locale, "customerPlaceholder")]),
+          ...(selectedContact?.ico !== null && selectedContact?.ico !== undefined
+            ? [h.span.class("kb-small kb-muted kb-mono").children([`IČO ${selectedContact.ico}`])]
+            : []),
+          ...(selectedContact?.dic !== null && selectedContact?.dic !== undefined
+            ? [h.span.class("kb-small kb-muted kb-mono").children([`DIČ ${selectedContact.dic}`])]
+            : []),
+        ]),
+      h.hr.class("kb-divider"),
+      h.h3.children([txt(locale, "vatSummaryTitle")]),
+      ...(displayTotals === null
+        ? []
+        : [
+            ...(regime === "vat_payer" && displayBuckets.length > 0
+              ? [
+                  h.table
+                    .class("kb-vat-table")
+                    .children([
+                      h.thead.children([
+                        h.tr.children([
+                          h.th.children([txt(locale, "vatColRate")]),
+                          h.th.class("kb-end").children([txt(locale, "vatColBase")]),
+                          h.th.class("kb-end").children([txt(locale, "vatColVat")]),
+                          h.th.class("kb-end").children([txt(locale, "vatColTotal")]),
+                        ]),
+                      ]),
+                      h.tbody.children(
+                        displayBuckets.map((b) =>
+                          h.tr.children([
+                            h.td.children([fmtVatRate(locale, b.ratePercent)]),
+                            h.td.class("kb-end").children([fmtNum(locale, b.base, 2)]),
+                            h.td.class("kb-end").children([fmtNum(locale, b.vat, 2)]),
+                            h.td.class("kb-end").children([fmtNum(locale, b.gross, 2)]),
+                          ]),
+                        ),
+                      ),
+                    ]),
+                ]
+              : []),
+            h.div
+              .class("kb-stack")
+              .children([
+                h.div
+                  .class("kb-vat-total-row")
+                  .children([
+                    h.span.class("kb-muted").children([txt(locale, "netTotal")]),
+                    amount(h, fmtMoney(locale, displayTotals.net)),
+                  ]),
+                ...(regime === "vat_payer"
+                  ? [
+                      h.div
+                        .class("kb-vat-total-row")
+                        .children([
+                          h.span.class("kb-muted").children([txt(locale, "vatTotal")]),
+                          amount(h, fmtMoney(locale, displayTotals.vat)),
+                        ]),
+                    ]
+                  : []),
+                ...(displayTotals.roundingAdjustment !== null &&
+                !BigDecimal.isZero(displayTotals.roundingAdjustment.amount)
+                  ? [
+                      h.div
+                        .class("kb-vat-total-row")
+                        .children([
+                          h.span.class("kb-muted").children([txt(locale, "roundingAdj")]),
+                          amount(h, fmtMoney(locale, displayTotals.roundingAdjustment)),
+                        ]),
+                    ]
+                  : []),
+                h.div
+                  .class("kb-vat-total-row kb-vat-total-row--grand")
+                  .children([
+                    h.span.children([txt(locale, "grandTotal")]),
+                    amount(h, fmtMoney(locale, displayTotals.gross)),
+                  ]),
+                ...(displayTotals.vatCzk !== null
+                  ? [
+                      h.div
+                        .class("kb-vat-total-row kb-small kb-muted")
+                        .children([
+                          h.span.children([txt(locale, "vatCzkTotal")]),
+                          amount(h, fmtMoney(locale, displayTotals.vatCzk)),
+                        ]),
+                    ]
+                  : []),
+              ]),
+          ]),
+      ...(serverDoc?.fx == null
+        ? []
+        : [
+            h.p
+              .class("kb-small kb-muted")
+              .children([
+                `${txt(locale, "fxRate")} ${serverDoc.fx.quantity} ${serverDoc.totals.gross.currency} = ${fmtNum(locale, serverDoc.fx.rate, 3)} CZK`,
+              ]),
+          ]),
+      ...(serverDoc?.statutoryNotes.map((note) =>
+        h.p.class("kb-small kb-muted").children([note.text]),
+      ) ?? []),
+      ...(serverDoc?.paymentQr == null
+        ? []
+        : [
+            h.img
+              .attr("src", svgImage(renderSVG(serverDoc.paymentQr.payload, { border: 4 })))
+              .attr("alt", txt(locale, "previewQr"))
+              .attr("width", "120")
+              .attr("height", "120"),
+          ]),
+    ]),
+  ]);
 
   return page(h, [
     pageHeader(h, {
@@ -2214,7 +2364,28 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
       actions: headerActions,
     }),
     ...errorBanner,
+    ...(mayEdit ? [] : [banner(h, { text: txt(locale, "readOnly"), tone: "info" })]),
+    ...(model.revisionState === "review"
+      ? [
+          banner(h, {
+            text:
+              model.revisionChanges.length === 0
+                ? txt(locale, "reviewRevision")
+                : `${txt(locale, "reviewRevision")} ${txt(locale, "changedFields")}: ${model.revisionChanges.join(", ")}.`,
+            tone: "info",
+          }),
+        ]
+      : []),
+    ...(draftStatus === ""
+      ? []
+      : [h.p.class("kb-small kb-muted").attr("role", "status").children([draftStatus])]),
     ...regimeBanner,
-    h.div.class("kb-editor-grid").children([formColumn, previewColumn]),
+    h.div.class("kb-editor-grid").children([
+      h.fieldset
+        .style({ border: "0", padding: "0", margin: "0", minInlineSize: "0" })
+        .disabled(!mayEdit || writeFreezesForm(model))
+        .children([formColumn]),
+      previewColumn,
+    ]),
   ]);
 };
