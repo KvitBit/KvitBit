@@ -121,7 +121,7 @@ describe("AuthClient", () => {
     });
     try {
       const joined = await acceptInvitedSignup(server.url.origin, "en", "inv1", res.value.token);
-      expect(joined._tag === "Ok" && joined.value.slug).toBe("acme");
+      expect(joined._tag === "Ok" && String(joined.value.slug)).toBe("acme");
       expect(join).toEqual({
         method: "POST",
         path: "/api/v1/invitations/inv1/accept",
