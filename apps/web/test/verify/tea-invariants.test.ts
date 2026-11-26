@@ -434,7 +434,7 @@ describe("route round-trip & Shell access gate invariants", () => {
         } else if (session._tag === "Unknown") {
           expect(result).toEqual({ _tag: "Wait" });
         } else if (session._tag === "Unavailable") {
-          expect(result).toEqual({ _tag: "Redirect", route: { _tag: "Error", kind: "server" } });
+          expect(result).toEqual({ _tag: "Retry" });
         } else if (session._tag === "Anonymous") {
           expect(result).toEqual({
             _tag: "Redirect",

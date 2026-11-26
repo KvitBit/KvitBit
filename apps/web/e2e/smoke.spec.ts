@@ -141,26 +141,31 @@ if (typeof Bun === "undefined") {
       errors.assertClean();
     });
 
-    test("recovers a magic-link arrival after membership lookup is unavailable", async ({
-      page,
-    }) => {
-      const callback = "/sign-in?magic=complete";
-      let failed = false;
-      await page.route(
-        (url) => url.pathname === "/api/v1/workspaces",
-        async (route) => {
-          if (route.request().method() !== "GET" || failed) return route.continue();
-          failed = true;
-          await route.fulfill({ status: 503, json: { _tag: "Unavailable" } });
-        },
-      );
-      await page.goto(callback);
-      await expect(page.getByRole("alert")).toBeVisible();
-      await expect(page).toHaveURL(/\/sign-in\?magic=complete$/);
-      await page.getByRole("button", { name: /Try again|Retry|Zkusit znovu/i }).click();
-      await expect(page).toHaveURL(new RegExp(`/w/${DEMO_WS}$`));
-      await expect(page.locator("#main")).toBeVisible();
-    });
+    for (const [kind, callback, destination] of [
+      ["default", "/sign-in?magic=complete", `/w/${DEMO_WS}`],
+      ["explicit", `/w/${DEMO_WS}/documents?kind=invoice`, `/w/${DEMO_WS}/documents?kind=invoice`],
+    ] as const) {
+      test(`recovers the ${kind} magic-link arrival after membership lookup is unavailable`, async ({
+        page,
+      }) => {
+        let failed = false;
+        await page.route(
+          (url) => url.pathname === "/api/v1/workspaces",
+          async (route) => {
+            if (route.request().method() !== "GET" || failed) return route.continue();
+            failed = true;
+            await route.fulfill({ status: 503, json: { _tag: "Unavailable" } });
+          },
+        );
+        await page.goto(callback);
+        await expect(page.getByRole("alert")).toBeVisible();
+        await expect(page).toHaveURL(callback);
+        await page.getByRole("button", { name: /Try again|Retry|Zkusit znovu/i }).click();
+        await expect(page).toHaveURL(destination);
+        await expect(page.locator("#main h1")).toBeVisible();
+        await expect(page.getByRole("alert")).toHaveCount(0);
+      });
+    }
 
     test("toggles light/dark colour mode and locale cleanly", async ({ page }) => {
       const errors = attachErrorGuards(page);
@@ -338,6 +343,24 @@ if (typeof Bun === "undefined") {
       expect(await download.failure()).toBeNull();
       expect(download.suggestedFilename()).toBe("invoice.pdf");
       await expect(page).toHaveURL(new RegExp(`/i/${token}$`));
+    });
+
+    test("updates an open share when its due date passes at UTC midnight", async ({ page }) => {
+      const errors = attachErrorGuards(page);
+      let documentRequests = 0;
+      page.on("request", (request) => {
+        if (request.resourceType() === "document") documentRequests += 1;
+      });
+      await page.clock.install({ time: new Date("2026-11-24T23:59:30.000Z") });
+      await page.goto("/i/demo-unpaid-czk");
+      await expect(page.locator('a[href*="/pdf?"]')).toBeVisible();
+      const overdue = page.locator("#main").getByText(/^(Overdue|Po splatnosti)$/);
+      await expect(overdue).toHaveCount(0);
+
+      await page.clock.fastForward(31_000);
+      await expect(overdue).toBeVisible();
+      expect(documentRequests).toBe(1);
+      errors.assertClean();
     });
   });
 }

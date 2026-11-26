@@ -23,6 +23,7 @@ export const defaultReportRoute = (ws: string, year: number): Route =>
 export type Gate =
   | { readonly _tag: "Allow" }
   | { readonly _tag: "Wait" }
+  | { readonly _tag: "Retry" }
   | { readonly _tag: "Redirect"; readonly route: Route };
 
 /** What the Shell does with a route given the session (pure). */
@@ -33,7 +34,7 @@ export const gate = (route: Route, session: SessionState): Gate => {
     case "Unknown":
       return { _tag: "Wait" };
     case "Unavailable":
-      return { _tag: "Redirect", route: { _tag: "Error", kind: "server" } };
+      return { _tag: "Retry" };
     case "Anonymous":
       return { _tag: "Redirect", route: { _tag: "SignIn", returnTo: href(route) } };
     case "SignedIn": {

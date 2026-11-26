@@ -5,6 +5,7 @@ import { Effect, Layer } from "effect";
 import { RunApi } from "./app/commands";
 import { loadBrowserPrefs } from "./app/prefs";
 import { BrowserRoutes } from "./app/routing";
+import { utcDateAt } from "./app/utc-date";
 import { demoEnabled, demoRoutes } from "./demo";
 import { installDemoFetch } from "./demo/router";
 import { App, type Flags, Navigate } from "./main";
@@ -29,7 +30,7 @@ const host =
             App,
             {
               path: router.location().url,
-              today: new Date().toISOString().slice(0, 10),
+              today: utcDateAt(Date.now()),
               prefs,
               session: { _tag: "Unknown" },
             },

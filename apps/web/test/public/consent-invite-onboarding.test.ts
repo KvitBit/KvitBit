@@ -334,18 +334,21 @@ describe("Workspace Onboarding Wizard (Screen 07)", () => {
       nextNumber: "2026-0001",
     };
     const calls: Array<string> = [];
+    const createKeys: Array<string | null> = [];
     const bankKeys: Array<string | null> = [];
     const seriesKeys: Record<string, string | null> = {};
     const fetch = mockWire(async (request) => {
       const path = new URL(request.url).pathname;
       calls.push(`${request.method} ${path}`);
       if (path === "/api/v1/workspaces" && request.method === "POST") {
-        expect(request.headers.get("idempotency-key")).toBeTruthy();
+        createKeys.push(request.headers.get("idempotency-key"));
         expect(await request.json()).toMatchObject({
           name: "Test Workspace",
           taxRegime: "non_vat_payer",
           defaults: { currency: "CZK", language: "en" },
         });
+        if (createKeys.length === 1)
+          throw new TypeError("Connection lost after workspace creation");
         return Response.json(workspace, { status: 201 });
       }
       if (path === base) return Response.json(workspace);
@@ -436,7 +439,24 @@ describe("Workspace Onboarding Wizard (Screen 07)", () => {
           .commands,
       ).toBeUndefined();
       const ready = Onboarding.update(creating.model, await run(creating.commands?.[0]), ctx);
-      const created = Onboarding.update(ready.model, await run(ready.commands?.[0]), ctx);
+      const failedCreate = Onboarding.update(ready.model, await run(ready.commands?.[0]), ctx);
+      expect(failedCreate.model.submitFailure).not.toBeNull();
+      expect(failedCreate.model.createdWorkspace).toBeNull();
+      const retryCreate = Onboarding.update(
+        failedCreate.model,
+        Onboarding.Message.ClickedCreateWorkspace(),
+        ctx,
+      );
+      const retryCreateReady = Onboarding.update(
+        retryCreate.model,
+        await run(retryCreate.commands?.[0]),
+        ctx,
+      );
+      const created = Onboarding.update(
+        retryCreateReady.model,
+        await run(retryCreateReady.commands?.[0]),
+        ctx,
+      );
       const failed = Onboarding.update(created.model, await run(created.commands?.[0]), ctx);
       expect(failed.outMessage).toBeUndefined();
       expect(failed.model.setupDone).toEqual({
@@ -472,6 +492,8 @@ describe("Workspace Onboarding Wizard (Screen 07)", () => {
         path: "/w/wire-setup",
         replace: true,
       });
+      expect(createKeys[0]).toBeTruthy();
+      expect(createKeys[1]).toBe(createKeys[0]);
       expect(bankKeys[0]).toBeTruthy();
       expect(bankKeys[1]).toBe(bankKeys[0]);
       const savedSeriesKeys = ready.model.seriesRequestKeys;
@@ -482,6 +504,7 @@ describe("Workspace Onboarding Wizard (Screen 07)", () => {
         credit_note: savedSeriesKeys.credit_note,
       });
       expect(calls).toEqual([
+        "POST /api/v1/workspaces",
         "POST /api/v1/workspaces",
         `GET ${base}`,
         `PATCH ${base}/issuing-entity`,

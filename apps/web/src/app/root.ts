@@ -41,6 +41,7 @@ export const Message = UiSchema.TaggedEnum({
   ClickedRetrySession: {},
   LoadedSession: { state: SessionState, seq: Schema.Int },
   ChangedPrefs: { prefs: Prefs },
+  ChangedDate: { today: Schema.String },
   ToggledSwitcher: {},
   ClosedSwitcher: {},
   PressedSwitcherShortcut: {},

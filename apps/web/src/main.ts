@@ -11,6 +11,7 @@ import { Flags, Message, Model, type Toast } from "./app/root";
 import { BrowserRoutes, gate, href, magicSignInCallback, routeFromPath } from "./app/routing";
 import { fetchSession, workspaceBySlug } from "./app/session";
 import { shellView } from "./app/shell";
+import { browserDates } from "./app/utc-date";
 
 export { Flags, Message, Model } from "./app/root";
 
@@ -66,6 +67,18 @@ const mountRoute = (model: Model, path: string): UpdateReturn => {
   const route = routeFromPath(path);
   const access = gate(route, model.session);
   if (access._tag === "Wait") return { model: { ...model, path, route, waitingForSession: true } };
+  if (access._tag === "Retry") {
+    return {
+      model: {
+        ...model,
+        path,
+        route,
+        pendingNav: { _tag: "Path", path, replace: true },
+        waitingForSession: false,
+        switcherOpen: false,
+      },
+    };
+  }
   if (access._tag === "Redirect") {
     const target = href(access.route);
     return {
@@ -202,6 +215,8 @@ export const update = (model: Model, message: Message): UpdateReturn => {
         : { model };
     case "ChangedPrefs":
       return setPrefs(model, message.prefs);
+    case "ChangedDate":
+      return { model: message.today === model.today ? model : { ...model, today: message.today } };
     case "ToggledSwitcher":
       return { model: { ...model, switcherOpen: !model.switcherOpen } };
     case "ClosedSwitcher":
@@ -245,6 +260,11 @@ const shortcut = Subscription.make(
   ),
 );
 
+const changedDate = Subscription.make(
+  "utc-date",
+  browserDates.pipe(Stream.map((today) => Message.ChangedDate({ today }))),
+);
+
 export const App = Html.component({
   name: "Kvitbit",
   props: Flags,
@@ -269,6 +289,7 @@ export const App = Html.component({
       (route) => Message.ChangedUrl({ path: BrowserRoutes.print(route) }),
     ),
     shortcut,
+    changedDate,
   ],
   view: (h, model) => shellView(model, contextOf(model), h),
   head: ({ model }) => [Head.title("Kvitbit"), HtmlHead.lang(model.prefs.locale)],
