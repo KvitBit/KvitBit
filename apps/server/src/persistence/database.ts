@@ -5,7 +5,7 @@
 import { PgClient } from "@effect/sql-pg";
 import type { PgliteClient } from "@effect/sql-pglite";
 import { layerMigrated } from "@kvitbit/adapters/testing";
-import { Config, type Layer } from "effect";
+import { Config, Effect, Layer, Option } from "effect";
 import type { SqlClient } from "effect/sql";
 import type { SqlError } from "effect/sql/SqlError";
 
@@ -24,6 +24,29 @@ export const PgDatabaseLive: Layer.Layer<
   maxConnections: Config.Int("KVITBIT_DB_POOL_MAX").pipe(Config.withDefault(DEFAULT_POOL_MAX)),
   applicationName: Config.succeed("kvitbit-server"),
 });
+
+/**
+ * Postgres for the standalone cluster worker (`worker.ts`, rule S5): honors
+ * `DATABASE_URL_UNPOOLED` (direct DML connection for session advisory locks used by
+ * `SqlRunnerStorage`) when set, falling back to `DATABASE_URL` only when absent.
+ */
+export const PgWorkerDatabaseLive: Layer.Layer<
+  PgClient.PgClient | SqlClient.SqlClient,
+  Config.ConfigError | SqlError
+> = Layer.unwrap(
+  Effect.gen(function* () {
+    const unpooled = yield* Config.option(Config.Redacted("DATABASE_URL_UNPOOLED"));
+    const url = Option.isSome(unpooled) ? unpooled.value : yield* Config.Redacted("DATABASE_URL");
+    const maxConnections = yield* Config.Int("KVITBIT_DB_POOL_MAX").pipe(
+      Config.withDefault(DEFAULT_POOL_MAX),
+    );
+    return PgClient.layer({
+      url,
+      maxConnections,
+      applicationName: "kvitbit-worker",
+    });
+  }),
+);
 
 /**
  * A fresh in-memory PGlite with every committed `@kvitbit/db` migration applied, created when the

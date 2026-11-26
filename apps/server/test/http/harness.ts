@@ -13,6 +13,7 @@
  * owned by a user directly in core (as its Account caller).
  */
 import { BunHttpServer } from "@effect/platform-bun";
+import { type BotProtection, NoopBotProtection } from "@kvitbit/adapters/altcha";
 import { ApiKeyId, type Principal, SESSION_COOKIE, Unauthorized } from "@kvitbit/api-contract";
 import { TestCore, type TestCoreOptions } from "@kvitbit/core/testing";
 import {
@@ -27,7 +28,13 @@ import {
 import { Effect, Layer, ManagedRuntime } from "effect";
 import { HttpRouter } from "effect/http";
 import { TestClock } from "effect/testing";
+import {
+  AuthServerLive,
+  type AuthServerOverrides,
+  makeAuthServerLayer,
+} from "../../src/auth/AuthServerLive";
 import { PrincipalResolver } from "../../src/auth/PrincipalResolver";
+import { PrincipalResolverLive } from "../../src/auth/PrincipalResolverLive";
 import { HttpConfigTest, HttpRoutesLive, RateLimiterMemory } from "../../src/http";
 import { acceptLanguageLocale, bearerToken } from "../../src/http/edge/request";
 import { TestDatabase } from "./database";
@@ -99,8 +106,12 @@ export const FakePrincipalResolver = (users: Map<string, TestUser>) =>
   );
 
 export interface HarnessOptions extends TestCoreOptions {
-  /** Replace the fake resolver (e.g. the real Better Auth one). */
-  readonly principalResolver?: Layer.Layer<PrincipalResolver>;
+  /** Replace the fake resolver (e.g. `"live"` for `PrincipalResolverLive`, or a custom layer). */
+  readonly principalResolver?: "live" | Layer.Layer<PrincipalResolver>;
+  readonly botProtection?:
+    | Layer.Layer<BotProtection>
+    | Layer.Layer<BotProtection, never, import("effect/sql").SqlClient.SqlClient>;
+  readonly authOverrides?: AuthServerOverrides;
   readonly config?: Parameters<typeof HttpConfigTest>[0];
 }
 
@@ -110,19 +121,30 @@ export const makeHarness = (options: HarnessOptions = {}) => {
   // TestCore on memory ports, plus a migrated PGlite database (SqlClient) for the edge's own
   // tables (auth.*, user_preferences, rate limits). Both are memoized, so the web handler and
   // `run` share one instance.
-  const core = Layer.merge(TestCore(options), TestDatabase).pipe(
+  const configLayer = HttpConfigTest(options.config);
+  const dbAndCore = Layer.mergeAll(TestCore(options), TestDatabase, configLayer).pipe(
     Layer.provideMerge(TestClock.layer()),
   );
+  const botLayer = (options.botProtection ?? NoopBotProtection).pipe(Layer.provide(dbAndCore));
+  const baseCore = Layer.merge(dbAndCore, botLayer);
+  const authLayer = (
+    options.authOverrides === undefined
+      ? AuthServerLive
+      : makeAuthServerLayer(options.authOverrides)
+  ).pipe(Layer.provide(baseCore));
+  const core = Layer.merge(baseCore, authLayer);
+  const resolverLayer =
+    options.principalResolver === "live"
+      ? PrincipalResolverLive.pipe(Layer.provide(core))
+      : (options.principalResolver ?? FakePrincipalResolver(users));
   const app = HttpRoutesLive.pipe(
-    Layer.provide([
-      core,
-      options.principalResolver ?? FakePrincipalResolver(users),
-      HttpConfigTest(options.config),
-      RateLimiterMemory,
-      BunHttpServer.layerHttpServices,
-    ]),
+    Layer.provide([core, resolverLayer, RateLimiterMemory, BunHttpServer.layerHttpServices]),
   );
-  const web = HttpRouter.toWebHandler(app, { memoMap, disableLogger: true });
+  const web = HttpRouter.toWebHandler(app, {
+    memoMap,
+    disableLogger: true,
+    routerConfig: { maxParamLength: 2048 },
+  });
   const runtime = ManagedRuntime.make(core, { memoMap });
 
   const fetch = (path: string, init: RequestInit = {}) =>

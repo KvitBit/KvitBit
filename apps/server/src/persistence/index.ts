@@ -23,7 +23,7 @@ import { UserDirectorySql } from "./repos/userDirectory";
 import { WorkspacesRepoSql } from "./repos/workspaces";
 
 export { CoreStoreSql } from "./CoreStoreSql";
-export { PgDatabaseLive, PgliteTestDatabase } from "./database";
+export { PgDatabaseLive, PgliteTestDatabase, PgWorkerDatabaseLive } from "./database";
 export {
   ContactsRepoSql,
   DeliveriesRepoSql,

@@ -27,6 +27,14 @@ export const documentKindValues = [
 export const draftableKindValues = ["invoice", "proforma"] as const;
 /** core-ports.md:684-685 document status. */
 export const documentStatusValues = ["draft", "issued", "cancelled"] as const;
+/** core-ports.md:686-688 document settlement. */
+export const documentSettlementValues = [
+  "unpaid",
+  "partially_paid",
+  "paid",
+  "overpaid",
+  "credited",
+] as const;
 /** core-ports.md:80 `PaymentMethod`. */
 export const paymentMethodValues = ["bank_transfer", "cash", "card", "other"] as const;
 /** core-ports.md:91-98 `VatTreatment`. */
@@ -155,6 +163,7 @@ export const locale = pgEnum("locale", localeValues);
 export const documentKind = pgEnum("document_kind", documentKindValues);
 export const draftableKind = pgEnum("draftable_kind", draftableKindValues);
 export const documentStatus = pgEnum("document_status", documentStatusValues);
+export const documentSettlement = pgEnum("document_settlement", documentSettlementValues);
 export const paymentMethod = pgEnum("payment_method", paymentMethodValues);
 export const vatTreatment = pgEnum("vat_treatment", vatTreatmentValues);
 export const documentRelation = pgEnum("document_relation", documentRelationValues);

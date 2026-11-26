@@ -32,10 +32,12 @@ import {
   deliveryStatus,
   documentKind,
   documentRelation,
+  documentSettlement,
   documentStatus,
   fxSource,
   locale,
   paymentMethod,
+  paymentRounding,
   remindersChoice,
   shareDevice,
   shareEventKind,
@@ -78,13 +80,24 @@ export const documents = pgTable(
     fxQuantity: integer("fx_quantity"),
     fxFixingDate: isoDate("fx_fixing_date"),
     fxSource: fxSource("fx_source"),
+    /** Manual FX override as given (decision Q4); survives tax-point edits (D11). */
+    fxOverride: jsonb("fx_override"),
+    /** Caller-given fields for draft recomputation (`GivenFields`). */
+    given: jsonb("given").notNull().default(sql`'{}'::jsonb`),
     contactSnapshot: jsonb("contact_snapshot"),
     issuerSnapshot: jsonb("issuer_snapshot"),
     vatBreakdown: jsonb("vat_breakdown"),
     totalNet: money("total_net"),
     totalVat: money("total_vat"),
     totalGross: money("total_gross"),
+    taxDocument: boolean("tax_document").notNull().default(false),
+    paymentRounding: paymentRounding("payment_rounding").notNull().default("none"),
+    /** Sum of live Payments in `currency` and their count (overpayment allowed). */
+    paidAmount: decimal("paid_amount").notNull().default("0"),
+    payments: integer("payments").notNull().default(0),
+    settlement: documentSettlement("settlement").notNull().default("unpaid"),
     locked: boolean("locked").notNull().default(false),
+    lockedAt: instant("locked_at"),
     remindersChoice: remindersChoice("reminders_choice").notNull().default("inherit"),
     remindersOn: boolean("reminders_on").notNull().default(false),
     reminderEpoch: integer("reminder_epoch").notNull().default(0),
@@ -95,11 +108,14 @@ export const documents = pgTable(
     reminderOffsetsDays: integer("reminder_offsets_days").array(),
     scheduleId: uuid("schedule_id"),
     occurrence: isoDate("occurrence"),
+    /** Credit Note's corrected document number as it was at correction time (rule D7). */
+    correctedNumber: text("corrected_number"),
     /** Credit Note reason (core-ports.md D7). */
     correctionReason: text("correction_reason"),
     /** Cancellation reason (core-ports.md:725). */
     cancellationReason: text("cancellation_reason"),
     issuedAt: instant("issued_at"),
+    cancelledOn: isoDate("cancelled_on"),
     cancelledAt: instant("cancelled_at"),
     revision: revision(),
     createdAt: createdAt(),
@@ -147,6 +163,7 @@ export const documents = pgTable(
       sql`(${t.fxRate} is null) = (${t.fxSource} is null) and (${t.fxRate} is null) = (${t.fxQuantity} is null)`,
     ),
     check("documents_fx_positive", sql`${t.fxRate} > 0 and ${t.fxQuantity} >= 1`),
+    check("documents_payments_nonnegative", sql`${t.payments} >= 0`),
     check("documents_reminder_epoch_nonnegative", sql`${t.reminderEpoch} >= 0`),
   ],
 );
@@ -164,7 +181,12 @@ export const documentLines = pgTable(
     quantity: decimal("quantity").notNull().default("1"),
     unit: text("unit"),
     unitPrice: decimal("unit_price").notNull(),
+    itemPrice: jsonb("item_price"),
+    givenVat: vatTreatment("given_vat"),
+    itemVat: vatTreatment("item_vat"),
     vat: vatTreatment("vat").notNull(),
+    ratePercent: decimal("rate_percent").notNull().default("0"),
+    amount: decimal("amount").notNull().default("0"),
     /**
      * Final Invoice deduction line (core-ports.md D8): the Payment Tax Document (or, outside
      * `vat_payer`, the Proforma) it deducts, with the deducted VAT frozen at issue.
@@ -295,25 +317,43 @@ export const deliveries = pgTable(
     id: id(),
     workspaceId: workspaceIdColumn(),
     documentId: uuid("document_id").notNull(),
+    sequence: integer("sequence").notNull().default(1),
     documentRevision: integer("document_revision").notNull(),
     purpose: deliveryPurpose("purpose").notNull(),
     status: deliveryStatus("status").notNull().default("queued"),
     recipients: text("recipients").array().notNull(),
+    replyTo: text("reply_to"),
     language: locale("language").notNull(),
     subject: text("subject").notNull(),
     renderModel: jsonb("render_model").notNull(),
+    attachment: jsonb("attachment"),
+    contactId: uuid("contact_id"),
+    arms: boolean("arms").notNull().default(false),
+    dueOn: isoDate("due_on"),
     reminderEpoch: integer("reminder_epoch"),
+    reminderDueOn: isoDate("reminder_due_on"),
+    reminderOffsetDays: integer("reminder_offset_days"),
+    reminderArmedBy: integer("reminder_armed_by"),
+    attempts: integer("attempts").notNull().default(0),
+    lastOutcome: text("last_outcome"),
     failure: text("failure"),
     /** The EmailSender that accepted the message and its message id, once sent. */
     provider: text("provider"),
     providerMessageId: text("provider_message_id"),
     workflowStartedAt: instant("workflow_started_at"),
     sentAt: instant("sent_at"),
+    revision: revision(),
     createdAt: createdAt(),
     updatedAt: updatedAt(),
   },
   (t) => [
     unique("deliveries_workspace_id_id_unique").on(t.workspaceId, t.id),
+    uniqueIndex("deliveries_document_sequence").on(t.workspaceId, t.documentId, t.sequence),
+    uniqueIndex("deliveries_reminder_step")
+      .on(t.workspaceId, t.documentId, t.reminderDueOn, t.reminderOffsetDays, t.reminderArmedBy)
+      .where(
+        sql`${t.reminderDueOn} is not null and not (${t.status} = 'skipped' and ${t.attempts} = 0 and ${t.lastOutcome} is null)`,
+      ),
     index("deliveries_document_idx").on(t.documentId),
     index("deliveries_pending_idx")
       .on(t.status, t.workflowStartedAt)
@@ -323,10 +363,24 @@ export const deliveries = pgTable(
       columns: [t.workspaceId, t.documentId],
       foreignColumns: [documents.workspaceId, documents.id],
     }),
+    foreignKey({
+      name: "deliveries_contact_fk",
+      columns: [t.workspaceId, t.contactId],
+      foreignColumns: [contacts.workspaceId, contacts.id],
+    }),
     check("deliveries_recipients_nonempty", sql`cardinality(${t.recipients}) > 0`),
     check(
       "deliveries_reminder_epoch_purpose",
       sql`${t.reminderEpoch} is null or ${t.purpose} = 'reminder'`,
+    ),
+    check(
+      "deliveries_reminder_step_complete",
+      sql`(${t.reminderDueOn} is null) = (${t.reminderOffsetDays} is null) and (${t.reminderDueOn} is null) = (${t.reminderArmedBy} is null)`,
+    ),
+    check("deliveries_attempts_nonnegative", sql`${t.attempts} >= 0`),
+    check(
+      "deliveries_last_outcome_values",
+      sql`${t.lastOutcome} is null or ${t.lastOutcome} in ('not_accepted', 'outcome_unknown')`,
     ),
   ],
 );

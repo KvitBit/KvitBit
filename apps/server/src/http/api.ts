@@ -1,7 +1,7 @@
 /** The `Api` HttpApi at `/api/v1` with every group, its middleware and `openapi.json`. */
 import { Api } from "@kvitbit/api-contract";
 import { Layer } from "effect";
-import { HttpApiBuilder } from "effect/http-api";
+import { HttpApiBuilder, HttpApiScalar } from "effect/http-api";
 import { EdgeMiddlewareLive } from "./edge/middleware";
 import { SchemaErrorsLive } from "./edge/response";
 import { ApiKeysGroupLive } from "./groups/apiKeys";
@@ -52,7 +52,10 @@ export const ApiGroupsLive = Layer.mergeAll(
   ReportsGroupLive,
 ).pipe(Layer.provide([EdgeMiddlewareLive, SchemaErrorsLive]));
 
-/** Registers the HttpApi routes, including `GET /api/v1/openapi.json`, on the HttpRouter. */
-export const ApiRoutesLive = HttpApiBuilder.layer(Api, {
-  openapiPath: "/api/v1/openapi.json",
-}).pipe(Layer.provide(ApiGroupsLive));
+/** Registers the HttpApi, OpenAPI document, and public API reference. */
+export const ApiRoutesLive = Layer.merge(
+  HttpApiBuilder.layer(Api, { openapiPath: "/api/v1/openapi.json" }).pipe(
+    Layer.provide(ApiGroupsLive),
+  ),
+  HttpApiScalar.layer(Api, { path: "/api/v1/docs" }),
+);

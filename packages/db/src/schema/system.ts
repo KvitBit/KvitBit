@@ -12,7 +12,7 @@ import {
   uuid,
 } from "drizzle-orm/pg-core";
 import { user } from "./auth";
-import { createdAt, id, instant, workspaceIdColumn } from "./columns";
+import { createdAt, id, instant, revision, workspaceIdColumn } from "./columns";
 import { botScope, channel, clientKind, entityKind, exportStatus, systemJob } from "./enums";
 import { workspaces } from "./workspaces";
 
@@ -117,6 +117,7 @@ export const exports = pgTable(
     workflowStartedAt: instant("workflow_started_at"),
     readyAt: instant("ready_at"),
     expiresAt: instant("expires_at"),
+    revision: revision(),
     createdAt: createdAt(),
   },
   (t) => [

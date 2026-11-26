@@ -22,6 +22,8 @@ export interface HttpConfigShape {
   readonly version: string;
   /** `GET /api/v1/config` `features.signUp` (KVITBIT_SIGN_UP, default true). */
   readonly signUp: boolean;
+  /** `GET /api/v1/config` `botProtection` (`"altcha"` when ALTCHA_HMAC_KEY is set, else `"none"`). */
+  readonly botProtection: "altcha" | "none";
   /** Keys the daily `VisitorHash` of share-link visitors (derived from BETTER_AUTH_SECRET). */
   readonly visitorSecret: Redacted.Redacted<string>;
 }
@@ -47,7 +49,7 @@ export const makeHttpConfig = (
     HttpConfigShape,
     "appOrigin" | "trustedProxyHops" | "webDir" | "pwaDir" | "visitorSecret"
   > &
-    Partial<Pick<HttpConfigShape, "corsOrigins" | "version" | "signUp">> & {
+    Partial<Pick<HttpConfigShape, "corsOrigins" | "version" | "signUp" | "botProtection">> & {
       readonly trustedOrigins?: ReadonlyArray<string>;
     },
 ): HttpConfigShape => {
@@ -61,6 +63,7 @@ export const makeHttpConfig = (
     pwaDir: base.pwaDir,
     version: base.version ?? "0.0.0",
     signUp: base.signUp ?? true,
+    botProtection: base.botProtection ?? "none",
     visitorSecret: base.visitorSecret,
   };
 };
@@ -74,6 +77,7 @@ export const HttpConfigLive: Layer.Layer<HttpConfig, Config.ConfigError> = Layer
     const corsOrigins = yield* originList("KVITBIT_CORS_ORIGINS");
     const version = yield* Config.String("KVITBIT_VERSION").pipe(Config.withDefault("0.0.0"));
     const signUp = yield* Config.Boolean("KVITBIT_SIGN_UP").pipe(Config.withDefault(true));
+    const altchaKey = yield* Config.option(Config.Redacted("ALTCHA_HMAC_KEY"));
     return makeHttpConfig({
       appOrigin: server.appOrigin,
       trustedProxyHops: server.trustedProxyHops,
@@ -84,6 +88,7 @@ export const HttpConfigLive: Layer.Layer<HttpConfig, Config.ConfigError> = Layer
       corsOrigins,
       version,
       signUp,
+      botProtection: Option.isSome(altchaKey) ? "altcha" : "none",
     });
   }),
 );

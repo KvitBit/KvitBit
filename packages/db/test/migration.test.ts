@@ -76,12 +76,15 @@ describe("schema invariants", () => {
       "contacts",
       "price_list_items",
       "documents",
+      "deliveries",
       "payments",
       "expenses",
+      "attachments",
       "templates",
       "schedules",
       "schedule_runs",
       "memberships",
+      "exports",
       "user_preferences",
     ]) {
       expect(names).toContain(table);

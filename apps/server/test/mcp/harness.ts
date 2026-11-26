@@ -1,0 +1,243 @@
+/**
+ * Test harness for the MCP Streamable HTTP adapter: `McpRoutesLive` behind
+ * `HttpRouter.toWebHandler` on `TestCore` (in-memory core + fakes) + `TestClock`.
+ */
+import { BunHttpServer } from "@effect/platform-bun";
+import { ALL_SCOPES, type Principal, READ_SCOPES, Unauthorized } from "@kvitbit/api-contract";
+import { TestCore, type TestCoreOptions } from "@kvitbit/core/testing";
+import {
+  Caller,
+  CurrentCaller,
+  type Locale,
+  type MemberCaller,
+  type Scope,
+  UserId,
+  type WorkspaceId,
+  Workspaces,
+} from "@kvitbit/domain/contract";
+import { Effect, Layer, ManagedRuntime } from "effect";
+import { HttpRouter } from "effect/http";
+import { TestClock } from "effect/testing";
+import { PrincipalResolver } from "../../src/auth/PrincipalResolver";
+import { McpConfigTest, McpRoutesLive } from "../../src/mcp";
+
+export const MCP_ORIGIN = "https://kvitbit.test";
+
+export interface TestUser {
+  readonly id: UserId;
+  readonly email: string;
+  readonly name: string;
+}
+
+export interface TestMcpGrant {
+  readonly token: string;
+  readonly user: TestUser;
+  readonly workspaceId: WorkspaceId;
+  readonly grantId: string;
+  readonly clientId: string;
+  readonly clientName: string;
+  readonly scopes: ReadonlyArray<Scope>;
+  readonly locale?: Locale;
+}
+
+const FakeMcpPrincipalResolver = (grants: Map<string, TestMcpGrant>) =>
+  Layer.succeed(
+    PrincipalResolver,
+    PrincipalResolver.of({
+      fromApiRequest: () => Effect.fail(new Unauthorized({ reason: "invalid" })),
+      fromMcpBearer: (request) =>
+        Effect.gen(function* () {
+          const auth = request.headers.get("authorization");
+          if (auth === null) return yield* new Unauthorized({ reason: "missing" });
+          const match = /^Bearer[ ]+(\S+)\s*$/i.exec(auth);
+          const rawToken = match?.[1];
+          if (rawToken === undefined) return yield* new Unauthorized({ reason: "missing" });
+          if (rawToken === "expired-token") {
+            return yield* new Unauthorized({ reason: "expired" });
+          }
+          const grant = grants.get(rawToken);
+          if (grant === undefined) return yield* new Unauthorized({ reason: "invalid" });
+          return {
+            userId: grant.user.id,
+            email: grant.user.email,
+            channel: "mcp",
+            locale: grant.locale ?? "en",
+            credential: {
+              _tag: "McpGrant",
+              grantId: grant.grantId,
+              clientId: grant.clientId,
+              clientName: grant.clientName,
+              workspaceId: grant.workspaceId,
+              scopes: [...grant.scopes],
+            },
+          } satisfies Principal;
+        }),
+    }),
+  );
+
+export const makeMcpHarness = (options: TestCoreOptions = {}) => {
+  const users = new Map<string, TestUser>();
+  const grants = new Map<string, TestMcpGrant>();
+  const memoMap = Layer.makeMemoMapUnsafe();
+
+  const clockLayer = Layer.effectDiscard(
+    TestClock.setTime(Date.parse("2026-11-23T10:00:00Z")),
+  ).pipe(Layer.provideMerge(TestClock.layer()));
+  const core = TestCore(options).pipe(Layer.provideMerge(clockLayer));
+  const app = McpRoutesLive.pipe(
+    Layer.provide([
+      core,
+      FakeMcpPrincipalResolver(grants),
+      McpConfigTest({ appOrigin: MCP_ORIGIN }),
+      BunHttpServer.layerHttpServices,
+    ]),
+  );
+
+  const web = HttpRouter.toWebHandler(app, { memoMap, disableLogger: true });
+  const runtime = ManagedRuntime.make(core, { memoMap });
+
+  const fetch = (path: string, init: RequestInit = {}) =>
+    web.handler(new Request(`${MCP_ORIGIN}${path}`, init));
+
+  const postMcp = (
+    token: string | null,
+    body: unknown,
+    extraHeaders: Record<string, string> = {},
+  ) =>
+    fetch("/mcp", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        ...(token !== null ? { authorization: `Bearer ${token}` } : {}),
+        ...extraHeaders,
+      },
+      body: typeof body === "string" ? body : JSON.stringify(body),
+    });
+
+  const rpc = async (
+    token: string | null,
+    method: string,
+    params?: Record<string, unknown>,
+    id: string | number = 1,
+    extraHeaders: Record<string, string> = {},
+  ) => {
+    const res = await postMcp(
+      token,
+      { jsonrpc: "2.0", id, method, ...(params !== undefined ? { params } : {}) },
+      extraHeaders,
+    );
+    const json = (await res.json()) as Record<string, unknown>;
+    return { res, json };
+  };
+
+  const callTool = async (
+    token: string,
+    name: string,
+    args: Record<string, unknown> = {},
+    id: string | number = 1,
+  ) => {
+    const { res, json } = await rpc(token, "tools/call", { name, arguments: args }, id);
+    return {
+      res,
+      json,
+      result: json.result as
+        | {
+            readonly isError: boolean;
+            readonly content: ReadonlyArray<Record<string, unknown>>;
+            readonly structuredContent?: Record<string, unknown>;
+          }
+        | undefined,
+      error: json.error as
+        | { readonly code: number; readonly message: string; readonly data?: unknown }
+        | undefined,
+    };
+  };
+
+  const readResource = async (token: string, uri: string, id: string | number = 1) => {
+    const { res, json } = await rpc(token, "resources/read", { uri }, id);
+    return {
+      res,
+      json,
+      contents: (
+        json.result as { readonly contents?: ReadonlyArray<Record<string, unknown>> } | undefined
+      )?.contents,
+      error: json.error as
+        | { readonly code: number; readonly message: string; readonly data?: unknown }
+        | undefined,
+    };
+  };
+
+  const addUser = (name: string): TestUser => {
+    const id = UserId.make(`01900000-0000-7000-8000-${String(users.size + 1).padStart(12, "0")}`);
+    const user = { id, name, email: `${name.toLowerCase().replace(/\s+/g, ".")}@example.cz` };
+    users.set(id, user);
+    return user;
+  };
+
+  const createWorkspace = (
+    user: TestUser,
+    input: Record<string, unknown> = { name: "Kvitbit Test s.r.o.", taxRegime: "vat_payer" },
+  ) =>
+    runtime.runPromise(
+      Effect.gen(function* () {
+        const ws = yield* Workspaces;
+        return yield* ws.create(input as never);
+      }).pipe(
+        Effect.provideService(
+          CurrentCaller,
+          Caller.account({ userId: user.id, email: user.email, locale: "en", channel: "web" }),
+        ),
+      ),
+    ) as Promise<MemberCaller>;
+
+  const addGrant = (
+    grant: Omit<TestMcpGrant, "token"> & { readonly token?: string },
+  ): TestMcpGrant => {
+    const token = grant.token ?? `mcp_tok_${grants.size + 1}`;
+    const full: TestMcpGrant = { ...grant, token };
+    grants.set(token, full);
+    return full;
+  };
+
+  const addReadWriteGrant = (user: TestUser, workspaceId: WorkspaceId, locale: Locale = "en") =>
+    addGrant({
+      user,
+      workspaceId,
+      grantId: `grant-rw-${grants.size + 1}`,
+      clientId: "client-claude",
+      clientName: "Claude Desktop",
+      scopes: ALL_SCOPES,
+      locale,
+    });
+
+  const addReadOnlyGrant = (user: TestUser, workspaceId: WorkspaceId, locale: Locale = "en") =>
+    addGrant({
+      user,
+      workspaceId,
+      grantId: `grant-ro-${grants.size + 1}`,
+      clientId: "client-reader",
+      clientName: "ReadOnly Agent",
+      scopes: READ_SCOPES,
+      locale,
+    });
+
+  const dispose = async () => {
+    await web.dispose();
+    await runtime.dispose();
+  };
+
+  return {
+    fetch,
+    postMcp,
+    rpc,
+    callTool,
+    readResource,
+    addUser,
+    createWorkspace,
+    addGrant,
+    addReadWriteGrant,
+    addReadOnlyGrant,
+    run: runtime.runPromise,
+    dispose,
+  };
+};

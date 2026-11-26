@@ -49,6 +49,8 @@ export const expenses = pgTable(
     dueOn: isoDate("due_on"),
     currency: currency("currency"),
     vatBreakdown: jsonb("vat_breakdown"),
+    /** Derived figures of a complete Expense (`ExpenseFigures`); null while incomplete. */
+    figures: jsonb("figures"),
     totalGross: money("total_gross"),
     category: text("category"),
     tags: text("tags").array().notNull().default(sql`'{}'::text[]`),
@@ -105,6 +107,7 @@ export const attachments = pgTable(
     contentType: text("content_type").notNull(),
     bytes: bigint("bytes", { mode: "number" }).notNull(),
     sha256: text("sha256").notNull(),
+    revision: revision(),
     createdAt: createdAt(),
   },
   (t) => [
