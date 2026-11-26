@@ -5,6 +5,7 @@
  * Templates + Recurring Schedules, Reports + Exports, and FxFixingCache.
  */
 import { describe, expect, test } from "bun:test";
+import { exportJob } from "@kvitbit/core";
 import {
   Caller,
   type ContactId,
@@ -194,7 +195,23 @@ describe("PersistenceLive SQL conformance (all 12 CoreRepos over PGlite)", () =>
               currency: CurrencyCode.make("EUR"),
               on: IsoDate.make("2026-11-23"),
             });
-            const exportJob = yield* reports.startExport();
+            const exportIntent = yield* reports.startExport();
+            const reportingFiles = yield* exportJob.reportingTables(
+              member.workspaceId,
+              exportIntent.id,
+              "cs",
+            );
+            expect(reportingFiles.map((file) => file.name)).toEqual([
+              "reports/issued-documents.csv",
+              "reports/payments.csv",
+              "reports/complete-expenses.csv",
+            ]);
+            const documentPdf = yield* exportJob.documentPdf(
+              member.workspaceId,
+              exportIntent.id,
+              finalInv.id,
+            );
+            expect(documentPdf.contentType).toBe("application/pdf");
 
             return {
               bankId: (bank as unknown as { id: string }).id,
@@ -211,7 +228,7 @@ describe("PersistenceLive SQL conformance (all 12 CoreRepos over PGlite)", () =>
               scheduledHasSchedule: scheduled.schedule !== null,
               fromTplStatus: fromTpl.status,
               fxRate: BigDecimal.format(fxRate.rate),
-              exportId: exportJob.id,
+              exportId: exportIntent.id,
             };
           }),
         );

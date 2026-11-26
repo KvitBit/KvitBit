@@ -11,7 +11,7 @@ import type {
 } from "@kvitbit/domain/contract";
 import { Effect, Layer } from "effect";
 import { SqlClient } from "effect/sql";
-import { formatDecimal, parseDecimal } from "../codec";
+import { formatDecimal, parseDecimal, toPgDate } from "../codec";
 import { col, type DbRow, decodeEach, makeTable, type TableSpec } from "../table";
 
 type PaymentRecord = Effect.Success<ReturnType<PaymentsRepo["Service"]["get"]>>;
@@ -92,7 +92,7 @@ export const PaymentsRepoSql: Layer.Layer<PaymentsRepo, never, SqlClient.SqlClie
       paidBetween: (workspaceId, range) =>
         table.select(
           workspaceId,
-          sql`removed_at is null and paid_on >= ${range.from} and paid_on <= ${range.to}`,
+          sql`removed_at is null and paid_on >= ${toPgDate(range.from)} and paid_on <= ${toPgDate(range.to)}`,
           sql`order by paid_on asc, id asc`,
         ),
     });

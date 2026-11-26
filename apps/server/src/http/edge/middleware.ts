@@ -29,8 +29,8 @@ import {
   WorkspaceId,
   Workspaces,
 } from "@kvitbit/domain/contract";
-import { DateTime, Effect, Layer, Option, Redacted, Schema } from "effect";
-import { HttpRouter } from "effect/http";
+import { ByteSize, DateTime, Effect, Layer, Option, Redacted, Schema } from "effect";
+import { HttpIncomingMessage, HttpRouter, HttpServerError } from "effect/http";
 import { HttpServerRequest } from "effect/http/HttpServerRequest";
 import { HttpApiError } from "effect/http-api";
 import { PrincipalResolver } from "../../auth/PrincipalResolver";
@@ -165,8 +165,16 @@ export const EdgeGuardLive = Layer.effect(
         }
         // Streamed bodies that outgrow a payload limit while decoding.
         return yield* handler.pipe(
+          Effect.provideService(HttpIncomingMessage.MaxBodySize, ByteSize.bytes(limitBytes)),
           Effect.catchIf(HttpApiError.HttpApiPayloadTooLarge.is, () =>
             Effect.fail(new PayloadTooLarge({ limitBytes })),
+          ),
+          Effect.catchDefect((defect) =>
+            HttpServerError.isHttpServerError(defect) &&
+            defect.reason._tag === "RequestParseError" &&
+            defect.reason.reason === "BodyTooLarge"
+              ? Effect.fail(new PayloadTooLarge({ limitBytes }))
+              : Effect.die(defect),
           ),
         );
       }),

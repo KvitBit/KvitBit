@@ -13,7 +13,7 @@ import type {
   ScheduleId,
   WorkspaceId,
 } from "@kvitbit/domain/contract";
-import { CurrentCaller } from "@kvitbit/domain/contract";
+import { CurrentCaller, Documents } from "@kvitbit/domain/contract";
 import { Cause, Effect } from "effect";
 import { systemCaller } from "./internal/system";
 import * as deliveries from "./modules/documents/deliveries/steps";
@@ -202,6 +202,12 @@ export const exportJob = {
   /** Builds the reporting CSV tables as `System{DataExport, exportId}`. */
   reportingTables: (workspaceId: WorkspaceId, exportId: ExportId, locale: Locale) =>
     Effect.flatMap(ExportJobs, (svc) => svc.reportingTables(workspaceId, locale)).pipe(
+      asExportSystem(workspaceId, exportId),
+    ),
+
+  /** Renders an uncached document PDF as the read-only DataExport System caller. */
+  documentPdf: (workspaceId: WorkspaceId, exportId: ExportId, documentId: DocumentId) =>
+    Effect.flatMap(Documents, (svc) => svc.pdf(documentId)).pipe(
       asExportSystem(workspaceId, exportId),
     ),
 

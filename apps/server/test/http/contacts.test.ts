@@ -32,6 +32,12 @@ const post = (body: unknown, headers: Record<string, string> = {}) => {
 };
 
 describe("contacts group", () => {
+  test("oversized JSON without Content-Length returns 413", async () => {
+    const res = await post({ ...contact, name: "x".repeat(1024 * 1024) });
+    expect(res.status).toBe(413);
+    expect(await res.json()).toEqual({ _tag: "PayloadTooLarge", limitBytes: 1024 * 1024 });
+  });
+
   test("create answers 201 with ETag and Location; get echoes the ETag", async () => {
     const res = await post(contact);
     expect(res.status).toBe(201);

@@ -3,8 +3,10 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { generateId } from "@kvitbit/adapters/auth";
-import { Effect, Option } from "effect";
+import { Effect, Layer, Option } from "effect";
+import { HttpRouter } from "effect/http";
 import { SqlClient } from "effect/sql";
+import { RequestIdsLive } from "../../src/http/edge/requestId";
 import { as, type Harness, json, makeHarness } from "./harness";
 
 describe("Edge routes: health, config, botProtection, invitations, oauthConsent, static", () => {
@@ -53,6 +55,46 @@ describe("Edge routes: health, config, botProtection, invitations, oauthConsent,
     expect(response.status).toBe(200);
     expect(response.headers.get("content-type")).toContain("text/html");
     expect(await response.text()).toContain("Scalar.createApiReference");
+  });
+
+  test("a route defect returns a correlated error without its cause", async () => {
+    const routes = HttpRouter.add("GET", "/broken", Effect.die(new Error("fixture detail")));
+    const app = HttpRouter.toWebHandler(Layer.merge(routes, RequestIdsLive), {
+      disableLogger: true,
+    });
+    try {
+      const response = await app.handler(new Request("https://kvitbit.test/broken"));
+      const requestId = response.headers.get("x-request-id");
+      expect(response.status).toBe(500);
+      expect(requestId).toBeTruthy();
+      expect(await response.json()).toEqual({ _tag: "InternalError", requestId });
+    } finally {
+      await app.dispose();
+    }
+  });
+
+  test("grants cross-origin calls only to configured API origins", async () => {
+    const browser = "https://self-hosted.example";
+    harness = makeHarness({ config: { corsOrigins: [browser] } });
+
+    const preflight = await harness.fetch("/api/v1/config", {
+      method: "OPTIONS",
+      headers: {
+        Origin: browser,
+        "Access-Control-Request-Method": "GET",
+        "Access-Control-Request-Headers": "authorization",
+      },
+    });
+    expect(preflight.status).toBe(204);
+    expect(preflight.headers.get("access-control-allow-origin")).toBe(browser);
+    expect(preflight.headers.get("access-control-allow-headers")).toContain("authorization");
+
+    const allowed = await harness.fetch("/api/v1/config", { headers: { Origin: browser } });
+    expect(allowed.headers.get("access-control-allow-origin")).toBe(browser);
+    const unlisted = await harness.fetch("/api/v1/config", {
+      headers: { Origin: "https://unlisted.example" },
+    });
+    expect(unlisted.headers.get("access-control-allow-origin")).toBeNull();
   });
 
   test("GET /api/v1/config returns version, botProtection, upload limits, and features", async () => {
@@ -163,6 +205,11 @@ describe("Edge routes: health, config, botProtection, invitations, oauthConsent,
     expect(webSpa.status).toBe(200);
     expect(await webSpa.text()).toBe("<html>web-spa</html>");
     expect(webSpa.headers.get("cache-control")).toBe("no-cache");
+
+    const sharePage = await harness.fetch("/i/some-token");
+    expect(sharePage.headers.get("cache-control")).toBe("private, no-store");
+    expect(sharePage.headers.get("referrer-policy")).toBe("no-referrer");
+    expect(sharePage.headers.get("x-robots-tag")).toBe("noindex");
 
     // Web hashed asset is immutable
     const webAsset = await harness.fetch("/assets/main-deadbeef.js");

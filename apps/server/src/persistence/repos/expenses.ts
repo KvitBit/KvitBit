@@ -23,6 +23,7 @@ import {
   parseDecimal,
   parseJson,
   parseNullableDecimal,
+  toPgDate,
 } from "../codec";
 import { unavailable } from "../errors";
 import { col, type DbRow, decodeEach, makeTable, type TableSpec } from "../table";
@@ -322,8 +323,8 @@ export const ExpensesRepoSql: Layer.Layer<ExpensesRepo, never, SqlClient.SqlClie
         expenses.select(
           ws,
           range.field === "issuedOn"
-            ? sql`status = 'complete' and removed_at is null and issued_on >= ${range.from} and issued_on <= ${range.to}`
-            : sql`status = 'complete' and removed_at is null and coalesce(taxable_supply_on, issued_on) >= ${range.from} and coalesce(taxable_supply_on, issued_on) <= ${range.to}`,
+            ? sql`status = 'complete' and removed_at is null and issued_on >= ${toPgDate(range.from)} and issued_on <= ${toPgDate(range.to)}`
+            : sql`status = 'complete' and removed_at is null and coalesce(taxable_supply_on, issued_on) >= ${toPgDate(range.from)} and coalesce(taxable_supply_on, issued_on) <= ${toPgDate(range.to)}`,
         ),
       countIncomplete: (ws) =>
         Effect.map(

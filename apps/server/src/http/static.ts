@@ -162,6 +162,13 @@ const makeWebHandler = (rootDir: string) =>
 
     const indexPath = safeResolve(rootDir, "index.html");
     if (indexPath !== undefined && isExistingFile(indexPath)) {
+      if (/^\/i\/[^/]+\/?$/.test(pathname)) {
+        const page = yield* serveFile(indexPath, "private, no-store", headOnly);
+        return HttpServerResponse.setHeaders(page, {
+          "referrer-policy": "no-referrer",
+          "x-robots-tag": "noindex",
+        });
+      }
       return yield* serveFile(indexPath, "no-cache", headOnly);
     }
     return notFound;

@@ -2,7 +2,7 @@
  * Small serialization helpers shared by the SQL repositories: BigDecimal <-> text, JSONB parsing,
  * `VatBreakdown` JSON encoding/decoding, and diacritics-insensitive text folding matching core.
  */
-import type { VatBreakdown, VatBucket } from "@kvitbit/domain/contract";
+import type { IsoDate, VatBreakdown, VatBucket } from "@kvitbit/domain/contract";
 import {
   VatBreakdown as VatBreakdownSchema,
   VatBucket as VatBucketSchema,
@@ -16,6 +16,10 @@ export const encodeVatBreakdown = Schema.encodeSync(vatBreakdownJson);
 export const decodeVatBreakdown = Schema.decodeUnknownSync(vatBreakdownJson);
 export const encodeVatBucket = Schema.encodeSync(vatBucketJson);
 export const decodeVatBucket = Schema.decodeUnknownSync(vatBucketJson);
+
+/** PostgreSQL calls ISO year zero `0001 BC`. The full export range starts in ISO year zero. */
+export const toPgDate = (value: IsoDate): string =>
+  value.startsWith("0000-") ? `0001-${value.slice(5)} BC` : value;
 
 /** Parses a `jsonb` column whether the driver returned a parsed value or a JSON string. */
 export const parseJson = <A>(value: unknown): A =>

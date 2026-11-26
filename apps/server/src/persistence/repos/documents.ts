@@ -31,6 +31,7 @@ import {
   parseJson,
   parseNullableDecimal,
   toJsonb,
+  toPgDate,
 } from "../codec";
 import { writeErrors } from "../errors";
 import { col, type DbRow, makeTable, type TableSpec } from "../table";
@@ -442,15 +443,15 @@ export const DocumentsRepoSql: Layer.Layer<DocumentsRepo, never, SqlClient.SqlCl
             ? table.select(
                 workspaceId,
                 sql`status in ('issued', 'cancelled')
-                  and issued_on >= ${range.from}::date
-                  and issued_on <= ${range.to}::date`,
+                  and issued_on >= ${toPgDate(range.from)}::date
+                  and issued_on <= ${toPgDate(range.to)}::date`,
               )
             : table.select(
                 workspaceId,
                 sql`status in ('issued', 'cancelled')
                   and kind <> 'proforma'
-                  and coalesce(taxable_supply_on, issued_on) >= ${range.from}::date
-                  and coalesce(taxable_supply_on, issued_on) <= ${range.to}::date`,
+                  and coalesce(taxable_supply_on, issued_on) >= ${toPgDate(range.from)}::date
+                  and coalesce(taxable_supply_on, issued_on) <= ${toPgDate(range.to)}::date`,
               ),
         receivable: (workspaceId) =>
           table.select(

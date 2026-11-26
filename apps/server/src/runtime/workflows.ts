@@ -23,6 +23,7 @@ import {
 } from "@kvitbit/core";
 import {
   DeliveryId,
+  type DocumentId,
   ExportId,
   InvitationId,
   IsoDate,
@@ -302,31 +303,24 @@ export const makeWorkflowHandlersLayer = (options: WorkflowHandlerOptions = {}) 
           // Expense attachments from BlobStorage
           const attachmentRows = yield* sql<{
             readonly id: string;
-            readonly filename: string;
+            readonly file_name: string | null;
             readonly blob_key: string;
           }>`
-            SELECT id, filename, blob_key
+            SELECT id, file_name, blob_key
             FROM attachments
             WHERE workspace_id = ${workspaceId} AND expense_id IS NOT NULL
           `;
           for (const att of attachmentRows) {
-            const maybeBlob = yield* blobs.get(att.blob_key as BlobKey).pipe(
-              Effect.flatMap((stream) => collectStreamBytes(stream)),
-              Effect.catchCause((cause) =>
-                Cause.hasInterrupts(cause)
-                  ? Effect.interrupt
-                  : Effect.succeed(null as Uint8Array | null),
-              ),
-            );
-            if (maybeBlob !== null) {
-              const safeName = att.filename.replace(/[/\\]/g, "_");
-              entries.push({ name: `attachments/${att.id}-${safeName}`, bytes: maybeBlob });
-            }
+            const bytes = yield* blobs
+              .get(att.blob_key as BlobKey)
+              .pipe(Effect.flatMap((stream) => collectStreamBytes(stream)));
+            const safeName = (att.file_name || "attachment").replace(/[/\\]/g, "_");
+            entries.push({ name: `attachments/${att.id}-${safeName}`, bytes });
           }
 
-          // Cached document PDFs from BlobStorage
+          // Use a cached revision when present. An export also includes PDFs never downloaded before.
           const docRows = yield* sql<{
-            readonly id: string;
+            readonly id: DocumentId;
             readonly number: string | null;
             readonly revision: number;
           }>`
@@ -336,18 +330,18 @@ export const makeWorkflowHandlersLayer = (options: WorkflowHandlerOptions = {}) 
           `;
           for (const doc of docRows) {
             const pdfKey = `pdf/${workspaceId}/${doc.id}/${doc.revision}.pdf` as BlobKey;
-            const maybePdf = yield* blobs.get(pdfKey).pipe(
-              Effect.flatMap((stream) => collectStreamBytes(stream)),
-              Effect.catchCause((cause) =>
-                Cause.hasInterrupts(cause)
-                  ? Effect.interrupt
-                  : Effect.succeed(null as Uint8Array | null),
-              ),
-            );
-            if (maybePdf !== null) {
-              const label = (doc.number ?? doc.id).replace(/[/\\]/g, "_");
-              entries.push({ name: `pdfs/${label}.pdf`, bytes: maybePdf });
-            }
+            const pdf = yield* blobs
+              .get(pdfKey)
+              .pipe(
+                Effect.catchTag("BlobMissing", () =>
+                  Effect.map(
+                    exportJob.documentPdf(workspaceId, exportId, doc.id),
+                    (file) => file.bytes,
+                  ),
+                ),
+              );
+            const label = (doc.number ?? doc.id).replace(/[/\\]/g, "_");
+            entries.push({ name: `pdfs/${label}.pdf`, bytes: yield* collectStreamBytes(pdf) });
           }
 
           const zipBytes = buildZip(entries);

@@ -15,7 +15,18 @@ export const RequestIdsLive = HttpRouter.middleware(
       const request = yield* HttpServerRequest;
       const requestId = requestIdFor(request.headers[HEADER]);
       yield* Effect.annotateCurrentSpan("http.request.id", requestId);
+      yield* Effect.annotateLogsScoped({ requestId });
       return yield* handle.pipe(
+        Effect.catchDefect((defect) =>
+          Effect.logError("Unhandled HTTP error", defect).pipe(
+            Effect.as(
+              HttpServerResponse.jsonUnsafe(
+                { _tag: "InternalError", requestId },
+                { status: 500, headers: { "cache-control": "no-store" } },
+              ),
+            ),
+          ),
+        ),
         HttpEffect.withPreResponseHandler((_request, response) =>
           Effect.succeed(HttpServerResponse.setHeader(response, HEADER, requestId)),
         ),
@@ -23,7 +34,6 @@ export const RequestIdsLive = HttpRouter.middleware(
           HttpServerRequest,
           request.modify({ headers: Headers.set(request.headers, HEADER, requestId) }),
         ),
-        Effect.annotateLogs({ requestId }),
       );
     }),
   { global: true },
