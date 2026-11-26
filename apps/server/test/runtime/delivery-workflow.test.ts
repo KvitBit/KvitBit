@@ -14,9 +14,11 @@ import {
 } from "@kvitbit/domain/contract";
 import { EmailNotAccepted, EmailSender } from "@kvitbit/domain/ports";
 import { BigDecimal, Cause, Duration, Effect, Layer, Option, Schedule, Schema } from "effect";
+import { SqlClient } from "effect/sql";
 import { TestClock } from "effect/testing";
 import * as DurableClock from "effect/workflow/DurableClock";
 import * as WorkflowEngine from "effect/workflow/WorkflowEngine";
+import { PgliteTestDatabase } from "../../src/persistence";
 import {
   DEFAULT_DELIVERY_RETRY_SCHEDULE,
   DocumentDeliveryWorkflow,
@@ -105,9 +107,12 @@ test.each([
   30_000,
 );
 
-test("reconciliation attaches to an active recovery during its durable backoff", async () => {
+test("reconciliation tracks active retries even when older workflow history was pruned", async () => {
   const workspaceId = WorkspaceId.make("01950000-0000-7000-8000-000000000001");
   const deliveryId = DeliveryId.make("01950000-0000-7000-8000-000000000002");
+  const prunedDeliveryId = DeliveryId.make("01950000-0000-7000-8000-000000000003");
+  const contactId = "01950000-0000-7000-8000-000000000004";
+  const documentId = "01950000-0000-7000-8000-000000000005";
   const launched: number[] = [];
   const workflows = DocumentDeliveryWorkflow.toLayer(({ attempt = 0 }) =>
     Effect.gen(function* () {
@@ -120,15 +125,27 @@ test("reconciliation attaches to an active recovery during its durable backoff",
   await Effect.runPromise(
     Effect.gen(function* () {
       const jobs = yield* DeliveryJobs;
-      const awaitResult = (attempt: number) =>
+      const sql = yield* SqlClient.SqlClient;
+      yield* sql`INSERT INTO workspaces (id, slug, name) VALUES (${workspaceId}, 'fixture', 'Fixture')`;
+      yield* sql`INSERT INTO contacts (id, workspace_id, name) VALUES (${contactId}, ${workspaceId}, 'Fixture')`;
+      yield* sql`INSERT INTO documents (id, workspace_id, kind, contact_id, currency, language, payment_method)
+        VALUES (${documentId}, ${workspaceId}, 'invoice', ${contactId}, 'CZK', 'cs', 'bank_transfer')`;
+      yield* sql`INSERT INTO deliveries (id, workspace_id, document_id, document_revision, sequence,
+          status, purpose, recipients, language, subject, render_model, workflow_attempt)
+        VALUES (${deliveryId}, ${workspaceId}, ${documentId}, 1, 1, 'sending', 'document',
+          '{buyer@example.test}', 'cs', 'Fixture', '{}', 0),
+          (${prunedDeliveryId}, ${workspaceId}, ${documentId}, 1, 2, 'sending', 'document',
+          '{buyer@example.test}', 'cs', 'Fixture', '{}', 4)`;
+
+      const awaitResult = (id: DeliveryId, attempt: number) =>
         Effect.gen(function* () {
-          const id = yield* DocumentDeliveryWorkflow.executionId({
+          const executionId = yield* DocumentDeliveryWorkflow.executionId({
             workspaceId,
-            deliveryId,
+            deliveryId: id,
             attempt,
           });
           for (let wait = 0; wait < 100; wait++) {
-            const result = yield* DocumentDeliveryWorkflow.poll(id);
+            const result = yield* DocumentDeliveryWorkflow.poll(executionId);
             if (Option.isSome(result)) return result.value;
             yield* Effect.promise(() => Bun.sleep(10));
           }
@@ -136,20 +153,30 @@ test("reconciliation attaches to an active recovery during its durable backoff",
         });
 
       yield* jobs.start(workspaceId, deliveryId);
-      expect((yield* awaitResult(0))._tag).toBe("Complete");
-      yield* jobs.start(workspaceId, deliveryId);
-      expect((yield* awaitResult(1))._tag).toBe("Suspended");
+      expect((yield* awaitResult(deliveryId, 0))._tag).toBe("Complete");
+      yield* Effect.all(
+        [jobs.start(workspaceId, deliveryId), jobs.start(workspaceId, deliveryId)],
+        { concurrency: 2 },
+      );
+      expect((yield* awaitResult(deliveryId, 1))._tag).toBe("Suspended");
+      yield* jobs.start(workspaceId, prunedDeliveryId);
+      expect((yield* awaitResult(prunedDeliveryId, 4))._tag).toBe("Suspended");
       yield* TestClock.adjust("3 minutes");
       yield* jobs.start(workspaceId, deliveryId);
+      yield* jobs.start(workspaceId, prunedDeliveryId);
       yield* Effect.promise(() => Bun.sleep(50));
     }).pipe(
       Effect.provide(
-        DeliveryJobsLive.pipe(Layer.provideMerge(workflows), Layer.provideMerge(TestClock.layer())),
+        DeliveryJobsLive.pipe(
+          Layer.provideMerge(workflows),
+          Layer.provideMerge(TestClock.layer()),
+          Layer.provideMerge(PgliteTestDatabase),
+        ),
       ),
     ),
   );
-  expect(launched).toEqual([0, 1]);
-});
+  expect(launched).toEqual([0, 1, 4]);
+}, 30_000);
 
 test("the default delivery retry policy caps spacing and total elapsed time", async () => {
   const waits = await Effect.runPromise(

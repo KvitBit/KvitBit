@@ -342,6 +342,7 @@ export const deliveries = pgTable(
     provider: text("provider"),
     providerMessageId: text("provider_message_id"),
     workflowStartedAt: instant("workflow_started_at"),
+    workflowAttempt: integer("workflow_attempt").notNull().default(0),
     sentAt: instant("sent_at"),
     revision: revision(),
     createdAt: createdAt(),
@@ -379,6 +380,7 @@ export const deliveries = pgTable(
       sql`(${t.reminderDueOn} is null) = (${t.reminderOffsetDays} is null) and (${t.reminderDueOn} is null) = (${t.reminderArmedBy} is null)`,
     ),
     check("deliveries_attempts_nonnegative", sql`${t.attempts} >= 0`),
+    check("deliveries_workflow_attempt_nonnegative", sql`${t.workflowAttempt} >= 0`),
     check(
       "deliveries_last_outcome_values",
       sql`${t.lastOutcome} is null or ${t.lastOutcome} in ('not_accepted', 'outcome_unknown')`,
