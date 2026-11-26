@@ -203,6 +203,40 @@ describe("Shared HTTP/MCP trailing sliding-window RateLimiter", () => {
           allowed: false,
           retryAfterSeconds: 15,
         });
+
+        // 4. Legacy-first post-rollover: upgraded admits 1 at t=60s and 2 at t=100s (total 3).
+        //    At t=120s, legacy receives the first post-rollover request and resets edge:<key>
+        //    to count=1, last_request=t+120s while the 2 admissions from t=100s remain live.
+        //    Upgraded must count 2 retained + 1 fresh legacy = 3 (deny) and resync edge:<key>
+        //    so legacy also sees the full allowance consumed; then at t=160s the t=100s rows
+        //    expire while the t=120s legacy admission remains live until t=180s.
+        expect(yield* limiter.consume("api-key:mixed-rollover", rule)).toEqual({ allowed: true });
+        yield* TestClock.adjust(Duration.seconds(40));
+        expect(yield* limiter.consume("api-key:mixed-rollover", rule)).toEqual({ allowed: true });
+        expect(yield* limiter.consume("api-key:mixed-rollover", rule)).toEqual({ allowed: true });
+
+        yield* TestClock.adjust(Duration.seconds(20));
+        expect(yield* consumeLegacy("api-key:mixed-rollover")).toEqual({ allowed: true });
+
+        yield* TestClock.adjust(Duration.seconds(1));
+        expect(yield* limiter.consume("api-key:mixed-rollover", rule)).toEqual({
+          allowed: false,
+          retryAfterSeconds: 39,
+        });
+        expect(yield* consumeLegacy("api-key:mixed-rollover")).toEqual({
+          allowed: false,
+          retryAfterSeconds: 39,
+        });
+
+        // At t=160s (+39s): the two t=100s admissions expire; the materialized t=120s legacy
+        // admission stays live -> exactly 2 slots open, 3rd denied with Retry-After: 20s.
+        yield* TestClock.adjust(Duration.seconds(39));
+        expect(yield* limiter.consume("api-key:mixed-rollover", rule)).toEqual({ allowed: true });
+        expect(yield* limiter.consume("api-key:mixed-rollover", rule)).toEqual({ allowed: true });
+        expect(yield* limiter.consume("api-key:mixed-rollover", rule)).toEqual({
+          allowed: false,
+          retryAfterSeconds: 20,
+        });
       }).pipe(Effect.provide(coreLayer)),
     );
   });
