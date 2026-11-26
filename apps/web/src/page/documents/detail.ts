@@ -1,3 +1,5 @@
+import { UiSchema } from "@effect/ui";
+import type { Html } from "@effect/ui/html";
 /**
  * Screen 11 — Document Detail & Action Dialogs: invoice preview, Payments list, Share Link
  * create/copy/revoke, Send email dialog, Record Payment dialog, Proforma -> PTD -> Final Invoice
@@ -17,15 +19,14 @@ import {
 } from "@kvitbit/domain";
 import { I18n, ViewModels } from "@kvitbit/ui-port";
 import { BigDecimal, Effect, Schema } from "effect";
-import { type Command, Submodel } from "foldkit";
-import type { Html, HtmlBuilder } from "foldkit/html";
-import { defineMessageUnion } from "foldkit/message";
-import { Failure, type WebServices } from "../../app/api";
+import { Failure } from "../../app/api";
+import type { PageCommand } from "../../app/commands";
 import { type Copy, copy, textOf, translator } from "../../app/i18n";
 import { Intent_ } from "../../app/intent";
-import type { PageContext, PageReturn, RouteOf } from "../../app/page";
+import type { MessageHandlers, PageContext, PageReturn, RouteOf } from "../../app/page";
 import * as Remote from "../../app/remote";
 import { href } from "../../app/routing";
+import type { Markup } from "../../ui/html";
 import {
   amount,
   badge,
@@ -49,7 +50,9 @@ import {
 } from "../../ui/kit";
 import {
   apiCommand,
+  canRole,
   copyTextCommand,
+  type DocumentAction,
   documentBadges,
   documentHasFinalInvoice,
   fmtDate,
@@ -58,9 +61,11 @@ import {
   fmtNum,
   fmtVatRate,
   formatAddress,
+  idempotencyHeaders,
   ifMatch,
   isIsoDateString,
   kindBadge,
+  mintRequestKeyCommand,
   PaymentViewData,
   parseDecimalText,
   readContactSnapshot,
@@ -69,7 +74,6 @@ import {
   readPayments,
   sharedCopy,
   todayPrague,
-  withIdempotencyKey,
 } from "./shared";
 
 export type Route = RouteOf<"Document">;
@@ -407,12 +411,24 @@ const DetailBundle = Schema.Struct({
   shareViews: Schema.Array(ShareViewEvent),
 });
 
+const PendingWriteKind = Schema.Literals([
+  "send",
+  "payment",
+  "cancel",
+  "correct",
+  "final",
+  "issue",
+]);
+type PendingWriteKind = typeof PendingWriteKind.Type;
+
 export const Model = Schema.Struct({
   route: ViewModels.Route,
   detail: Remote.remoteSchema(DetailBundle),
   activeDialog: ActiveDialog,
   busy: Schema.Boolean,
   dialogError: Schema.NullOr(Schema.String),
+  pendingRequestKey: Schema.NullOr(Schema.String),
+  pendingAction: Schema.NullOr(PendingWriteKind),
   // Send dialog
   sendTo: Schema.String,
   sendLanguage: Schema.Literals(["cs", "en"]),
@@ -429,12 +445,13 @@ export const Model = Schema.Struct({
 });
 export type Model = typeof Model.Type;
 
-export const Message = defineMessageUnion({
+export const Message = UiSchema.TaggedEnum({
   LoadedDetail: { seq: Remote.Seq, data: DetailBundle },
   FailedDetail: { seq: Remote.Seq, failure: Failure },
   ClickedRetry: {},
   OpenedDialog: { dialog: ActiveDialog, paymentId: Schema.optionalKey(Schema.String) },
   ClosedDialog: {},
+  GotRequestKey: { action: PendingWriteKind, key: Schema.String },
   ChangedSendTo: { value: Schema.String },
   ChangedSendLanguage: { value: Schema.String },
   ChangedSendPurpose: { value: Schema.String },
@@ -471,7 +488,7 @@ const loadDetailCommand = (
   workspaceId: WorkspaceId,
   documentId: DocumentId,
   seq: Remote.Seq,
-): Command.Command<Message, never, WebServices> =>
+): PageCommand<Message> =>
   apiCommand(
     "LoadDocumentDetail",
     (c) =>
@@ -499,14 +516,42 @@ const loadDetailCommand = (
     (failure): Message => Message.FailedDetail({ seq, failure }),
   );
 
+const dialogPermission = (dialog: typeof ActiveDialog.Type): DocumentAction | null => {
+  switch (dialog) {
+    case "issue":
+      return "document.issue";
+    case "payment":
+    case "removePayment":
+      return "payment.write";
+    case "send":
+      return "document.send";
+    case "cancel":
+      return "document.cancel";
+    case "correct":
+      return "document.correct";
+    case "unlock":
+      return "document.unlock";
+    case "final":
+      return "document.finalInvoice";
+    case null:
+      return null;
+  }
+};
+
 export const init = (route: Route, ctx: PageContext): PageReturn<Model, Message> => {
   const today = todayPrague();
+  const initialDialog = route.dialog ?? null;
+  const initialPerm = dialogPermission(initialDialog);
+  const allowedDialog =
+    initialPerm === null || canRole(ctx.workspace?.role, initialPerm) ? initialDialog : null;
   const base: Model = {
     route,
     detail: Remote.idle,
-    activeDialog: route.dialog ?? null,
+    activeDialog: allowedDialog,
     busy: false,
     dialogError: null,
+    pendingRequestKey: null,
+    pendingAction: null,
     sendTo: "",
     sendLanguage: ctx.locale,
     sendPurpose: "document",
@@ -532,12 +577,223 @@ const reloadDetail = (
   documentId: DocumentId,
 ): {
   readonly model: Model;
-  readonly commands: ReadonlyArray<Command.Command<Message, never, WebServices>>;
+  readonly commands: ReadonlyArray<PageCommand<Message>>;
 } => {
   const detail = Remote.load(model.detail);
   return {
     model: { ...model, detail },
     commands: [loadDetailCommand(workspaceId, documentId, Remote.seqOf(detail))],
+  };
+};
+
+const executeIdempotentWrite = (
+  model: Model,
+  action: PendingWriteKind,
+  key: string,
+  ws: NonNullable<PageContext["workspace"]>,
+  route: Route,
+  bundle: typeof DetailBundle.Type | undefined,
+  locale: PageContext["locale"],
+): PageReturn<Model, Message> => {
+  const base: Model = {
+    ...model,
+    busy: true,
+    dialogError: null,
+    pendingRequestKey: key,
+    pendingAction: action,
+  };
+  const headers = idempotencyHeaders(key);
+  switch (action) {
+    case "send": {
+      const recipients = model.sendTo
+        .split(",")
+        .map((s) => s.trim())
+        .filter((s) => s !== "");
+      return {
+        model: base,
+        commands: [
+          apiCommand(
+            "SendDocument",
+            (c) =>
+              c.documents.send({
+                params: { workspaceId: ws.id, documentId: route.id },
+                headers,
+                payload: {
+                  ...(recipients.length === 0 ? {} : { to: recipients }),
+                  language: model.sendLanguage as Locale,
+                  purpose: model.sendPurpose as DeliveryPurpose,
+                  reminders: model.sendReminders,
+                },
+              }),
+            (): Message =>
+              Message.ActionSucceeded({ toast: txt(locale, "toastSent"), reload: true }),
+            (failure): Message => Message.ActionFailed({ failure }),
+          ),
+        ],
+      };
+    }
+    case "payment": {
+      if (bundle === undefined) return { model: { ...model, busy: false } };
+      const parsed = parseDecimalText(model.payAmount);
+      const amountVal =
+        parsed !== undefined ? MoneyMath.make(parsed, bundle.doc.totals.gross.currency) : undefined;
+      const paidOn = isIsoDateString(model.payDate) ? model.payDate : undefined;
+      return {
+        model: base,
+        commands: [
+          apiCommand(
+            "RecordPayment",
+            (c) =>
+              c.payments.record({
+                params: { workspaceId: ws.id },
+                headers,
+                payload: {
+                  target: { document: route.id },
+                  ...(amountVal === undefined ? {} : { amount: amountVal }),
+                  ...(paidOn === undefined ? {} : { paidOn }),
+                  method: model.payMethod as PaymentMethod,
+                  ...(model.payNote.trim() === "" ? {} : { note: model.payNote.trim() }),
+                },
+              }),
+            (res): Message => {
+              const ptd = res.issued[0];
+              const toast =
+                ptd !== undefined && ptd.number !== null
+                  ? txt(locale, "dlgPayPtdToast", { number: ptd.number })
+                  : txt(locale, "toastPaid");
+              return Message.ActionSucceeded({ toast, reload: true });
+            },
+            (failure): Message => Message.ActionFailed({ failure }),
+          ),
+        ],
+      };
+    }
+    case "cancel": {
+      const reason = model.reasonText.trim();
+      return {
+        model: base,
+        commands: [
+          apiCommand(
+            "CancelDocument",
+            (c) =>
+              c.documents.cancel({
+                params: { workspaceId: ws.id, documentId: route.id },
+                headers,
+                payload: { reason },
+              }),
+            (): Message =>
+              Message.ActionSucceeded({
+                toast: txt(locale, "toastCancelled"),
+                reload: true,
+              }),
+            (failure): Message => Message.ActionFailed({ failure }),
+          ),
+        ],
+      };
+    }
+    case "correct": {
+      const reason = model.reasonText.trim();
+      return {
+        model: base,
+        commands: [
+          apiCommand(
+            "IssueCreditNote",
+            (c) =>
+              c.documents.correct({
+                params: { workspaceId: ws.id, documentId: route.id },
+                headers,
+                payload: { reason, lines: "full" },
+              }),
+            (creditNote): Message =>
+              Message.ActionSucceeded({
+                toast: txt(locale, "toastIssued"),
+                navigateTo: href({
+                  _tag: "Document",
+                  ws: route.ws,
+                  id: creditNote.id,
+                  tab: "preview",
+                }),
+                reload: false,
+              }),
+            (failure): Message => Message.ActionFailed({ failure }),
+          ),
+        ],
+      };
+    }
+    case "final":
+      return {
+        model: base,
+        commands: [
+          apiCommand(
+            "IssueFinalInvoice",
+            (c) =>
+              c.documents.issueFinalInvoice({
+                params: { workspaceId: ws.id, documentId: route.id },
+                headers,
+                payload: {},
+              }),
+            (finalInv): Message =>
+              Message.ActionSucceeded({
+                toast: txt(locale, "toastIssued"),
+                navigateTo: href({
+                  _tag: "Document",
+                  ws: route.ws,
+                  id: finalInv.id,
+                  tab: "preview",
+                }),
+                reload: false,
+              }),
+            (failure): Message => Message.ActionFailed({ failure }),
+          ),
+        ],
+      };
+    case "issue": {
+      if (bundle === undefined) return { model: { ...model, busy: false } };
+      return {
+        model: base,
+        commands: [
+          apiCommand(
+            "IssueDraftFromDetail",
+            (c) =>
+              c.documents.issueDraft({
+                params: { workspaceId: ws.id, documentId: route.id },
+                headers: { ...headers, ...ifMatch(bundle.doc.revision) },
+                payload: {},
+              }),
+            (): Message =>
+              Message.ActionSucceeded({ toast: txt(locale, "toastIssued"), reload: true }),
+            (failure): Message => Message.ActionFailed({ failure }),
+          ),
+        ],
+      };
+    }
+  }
+};
+
+const startIdempotentWrite = (
+  model: Model,
+  action: PendingWriteKind,
+  ws: NonNullable<PageContext["workspace"]>,
+  route: Route,
+  bundle: typeof DetailBundle.Type | undefined,
+  locale: PageContext["locale"],
+): PageReturn<Model, Message> => {
+  if (model.pendingRequestKey !== null && model.pendingAction === action) {
+    return executeIdempotentWrite(
+      model,
+      action,
+      model.pendingRequestKey,
+      ws,
+      route,
+      bundle,
+      locale,
+    );
+  }
+  return {
+    model: { ...model, busy: true, dialogError: null, pendingAction: action },
+    commands: [
+      mintRequestKeyCommand(`MintKey_${action}`, (key) => Message.GotRequestKey({ action, key })),
+    ],
   };
 };
 
@@ -550,7 +806,7 @@ export const update = (
   const route = model.route as Route;
   const bundle = Remote.dataOf(model.detail);
 
-  return Message.match<PageReturn<Model, Message>>(message, {
+  return Message.match(message, {
     LoadedDetail: ({ seq, data }) => {
       const contact = readContactSnapshot(data.doc.contact);
       return {
@@ -573,166 +829,119 @@ export const update = (
       if (ws === null) return { model };
       return reloadDetail(model, ws.id, route.id);
     },
-    OpenedDialog: ({ dialog: dlg, paymentId }) => ({
-      model: {
-        ...model,
-        activeDialog: dlg,
-        dialogError: null,
-        reasonText: "",
-        removingPaymentId: paymentId ?? null,
-      },
-    }),
-    ClosedDialog: () => ({
-      model: { ...model, activeDialog: null, dialogError: null, removingPaymentId: null },
-    }),
-    ChangedSendTo: ({ value }) => ({ model: { ...model, sendTo: value } }),
-    ChangedSendLanguage: ({ value }) => ({
-      model: { ...model, sendLanguage: value === "en" ? "en" : "cs" },
-    }),
-    ChangedSendPurpose: ({ value }) => ({
-      model: { ...model, sendPurpose: value === "reminder" ? "reminder" : "document" },
-    }),
-    ToggledSendReminders: ({ checked }) => ({ model: { ...model, sendReminders: checked } }),
-    SubmittedSend: () => {
-      if (ws === null || model.busy) return { model };
-      const recipients = model.sendTo
-        .split(",")
-        .map((s) => s.trim())
-        .filter((s) => s !== "");
+    OpenedDialog: ({ dialog: dlg, paymentId }) => {
+      const perm = dialogPermission(dlg);
+      if (perm !== null && !canRole(ws?.role, perm)) return { model };
       return {
-        model: { ...model, busy: true, dialogError: null },
-        commands: [
-          apiCommand(
-            "SendDocument",
-            (c) =>
-              withIdempotencyKey((headers) =>
-                c.documents.send({
-                  params: { workspaceId: ws.id, documentId: route.id },
-                  headers,
-                  payload: {
-                    ...(recipients.length === 0 ? {} : { to: recipients }),
-                    language: model.sendLanguage as Locale,
-                    purpose: model.sendPurpose as DeliveryPurpose,
-                    reminders: model.sendReminders,
-                  },
-                }),
-              ),
-            (): Message =>
-              Message.ActionSucceeded({ toast: txt(ctx.locale, "toastSent"), reload: true }),
-            (failure): Message => Message.ActionFailed({ failure }),
-          ),
-        ],
+        model: {
+          ...model,
+          activeDialog: dlg,
+          dialogError: null,
+          reasonText: "",
+          removingPaymentId: paymentId ?? null,
+          pendingRequestKey: null,
+          pendingAction: null,
+        },
       };
     },
-    ChangedPayAmount: ({ value }) => ({ model: { ...model, payAmount: value } }),
-    ChangedPayDate: ({ value }) => ({ model: { ...model, payDate: value } }),
+    ClosedDialog: () => ({
+      model: {
+        ...model,
+        activeDialog: null,
+        dialogError: null,
+        removingPaymentId: null,
+        pendingRequestKey: null,
+        pendingAction: null,
+      },
+    }),
+    GotRequestKey: ({ action, key }) => {
+      if (ws === null) return { model: { ...model, busy: false } };
+      return executeIdempotentWrite(model, action, key, ws, route, bundle, ctx.locale);
+    },
+    ChangedSendTo: ({ value }) => ({
+      model: { ...model, sendTo: value, pendingRequestKey: null, pendingAction: null },
+    }),
+    ChangedSendLanguage: ({ value }) => ({
+      model: {
+        ...model,
+        sendLanguage: value === "en" ? "en" : "cs",
+        pendingRequestKey: null,
+        pendingAction: null,
+      },
+    }),
+    ChangedSendPurpose: ({ value }) => ({
+      model: {
+        ...model,
+        sendPurpose: value === "reminder" ? "reminder" : "document",
+        pendingRequestKey: null,
+        pendingAction: null,
+      },
+    }),
+    ToggledSendReminders: ({ checked }) => ({
+      model: { ...model, sendReminders: checked, pendingRequestKey: null, pendingAction: null },
+    }),
+    SubmittedSend: () => {
+      if (ws === null || model.busy || !canRole(ws.role, "document.send")) return { model };
+      return startIdempotentWrite(model, "send", ws, route, bundle, ctx.locale);
+    },
+    ChangedPayAmount: ({ value }) => ({
+      model: { ...model, payAmount: value, pendingRequestKey: null, pendingAction: null },
+    }),
+    ChangedPayDate: ({ value }) => ({
+      model: { ...model, payDate: value, pendingRequestKey: null, pendingAction: null },
+    }),
     ChangedPayMethod: ({ value }) => ({
       model: {
         ...model,
         payMethod:
           value === "cash" || value === "card" || value === "other" ? value : "bank_transfer",
+        pendingRequestKey: null,
+        pendingAction: null,
       },
     }),
-    ChangedPayNote: ({ value }) => ({ model: { ...model, payNote: value } }),
+    ChangedPayNote: ({ value }) => ({
+      model: { ...model, payNote: value, pendingRequestKey: null, pendingAction: null },
+    }),
     SubmittedPayment: () => {
-      if (ws === null || bundle === undefined || model.busy) return { model };
-      const parsed = parseDecimalText(model.payAmount);
-      const amountVal =
-        parsed !== undefined ? MoneyMath.make(parsed, bundle.doc.totals.gross.currency) : undefined;
-      const paidOn = isIsoDateString(model.payDate) ? model.payDate : undefined;
-      return {
-        model: { ...model, busy: true, dialogError: null },
-        commands: [
-          apiCommand(
-            "RecordPayment",
-            (c) =>
-              withIdempotencyKey((headers) =>
-                c.payments.record({
-                  params: { workspaceId: ws.id },
-                  headers,
-                  payload: {
-                    target: { document: route.id },
-                    ...(amountVal === undefined ? {} : { amount: amountVal }),
-                    ...(paidOn === undefined ? {} : { paidOn }),
-                    method: model.payMethod as PaymentMethod,
-                    ...(model.payNote.trim() === "" ? {} : { note: model.payNote.trim() }),
-                  },
-                }),
-              ),
-            (res): Message => {
-              const ptd = res.issued[0];
-              const toast =
-                ptd !== undefined && ptd.number !== null
-                  ? txt(ctx.locale, "dlgPayPtdToast", { number: ptd.number })
-                  : txt(ctx.locale, "toastPaid");
-              return Message.ActionSucceeded({ toast, reload: true });
-            },
-            (failure): Message => Message.ActionFailed({ failure }),
-          ),
-        ],
-      };
+      if (ws === null || bundle === undefined || model.busy || !canRole(ws.role, "payment.write")) {
+        return { model };
+      }
+      return startIdempotentWrite(model, "payment", ws, route, bundle, ctx.locale);
     },
-    ChangedReason: ({ value }) => ({ model: { ...model, reasonText: value } }),
+    ChangedReason: ({ value }) => ({
+      model: { ...model, reasonText: value, pendingRequestKey: null, pendingAction: null },
+    }),
     SubmittedCancel: () => {
-      if (ws === null || model.busy || model.reasonText.trim() === "") return { model };
-      const reason = model.reasonText.trim();
-      return {
-        model: { ...model, busy: true, dialogError: null },
-        commands: [
-          apiCommand(
-            "CancelDocument",
-            (c) =>
-              withIdempotencyKey((headers) =>
-                c.documents.cancel({
-                  params: { workspaceId: ws.id, documentId: route.id },
-                  headers,
-                  payload: { reason },
-                }),
-              ),
-            (): Message =>
-              Message.ActionSucceeded({
-                toast: txt(ctx.locale, "toastCancelled"),
-                reload: true,
-              }),
-            (failure): Message => Message.ActionFailed({ failure }),
-          ),
-        ],
-      };
+      if (
+        ws === null ||
+        model.busy ||
+        model.reasonText.trim() === "" ||
+        !canRole(ws.role, "document.cancel")
+      ) {
+        return { model };
+      }
+      return startIdempotentWrite(model, "cancel", ws, route, bundle, ctx.locale);
     },
     SubmittedCreditNote: () => {
-      if (ws === null || model.busy || model.reasonText.trim() === "") return { model };
-      const reason = model.reasonText.trim();
-      return {
-        model: { ...model, busy: true, dialogError: null },
-        commands: [
-          apiCommand(
-            "IssueCreditNote",
-            (c) =>
-              withIdempotencyKey((headers) =>
-                c.documents.correct({
-                  params: { workspaceId: ws.id, documentId: route.id },
-                  headers,
-                  payload: { reason, lines: "full" },
-                }),
-              ),
-            (creditNote): Message =>
-              Message.ActionSucceeded({
-                toast: txt(ctx.locale, "toastIssued"),
-                navigateTo: href({
-                  _tag: "Document",
-                  ws: route.ws,
-                  id: creditNote.id,
-                  tab: "preview",
-                }),
-                reload: false,
-              }),
-            (failure): Message => Message.ActionFailed({ failure }),
-          ),
-        ],
-      };
+      if (
+        ws === null ||
+        model.busy ||
+        model.reasonText.trim() === "" ||
+        !canRole(ws.role, "document.correct")
+      ) {
+        return { model };
+      }
+      return startIdempotentWrite(model, "correct", ws, route, bundle, ctx.locale);
     },
     SubmittedUnlock: () => {
-      if (ws === null || model.busy || model.reasonText.trim() === "") return { model };
+      if (
+        ws === null ||
+        model.busy ||
+        model.reasonText.trim() === "" ||
+        !canRole(ws.role, "document.unlock")
+      ) {
+        return { model };
+      }
       const reason = model.reasonText.trim();
       return {
         model: { ...model, busy: true, dialogError: null },
@@ -756,7 +965,8 @@ export const update = (
         ws === null ||
         model.busy ||
         model.removingPaymentId === null ||
-        model.reasonText.trim() === ""
+        model.reasonText.trim() === "" ||
+        !canRole(ws.role, "payment.write")
       ) {
         return { model };
       }
@@ -783,60 +993,24 @@ export const update = (
       };
     },
     SubmittedFinalInvoice: () => {
-      if (ws === null || model.busy) return { model };
-      return {
-        model: { ...model, busy: true, dialogError: null },
-        commands: [
-          apiCommand(
-            "IssueFinalInvoice",
-            (c) =>
-              withIdempotencyKey((headers) =>
-                c.documents.issueFinalInvoice({
-                  params: { workspaceId: ws.id, documentId: route.id },
-                  headers,
-                  payload: {},
-                }),
-              ),
-            (finalInv): Message =>
-              Message.ActionSucceeded({
-                toast: txt(ctx.locale, "toastIssued"),
-                navigateTo: href({
-                  _tag: "Document",
-                  ws: route.ws,
-                  id: finalInv.id,
-                  tab: "preview",
-                }),
-                reload: false,
-              }),
-            (failure): Message => Message.ActionFailed({ failure }),
-          ),
-        ],
-      };
+      if (ws === null || model.busy || !canRole(ws.role, "document.finalInvoice")) {
+        return { model };
+      }
+      return startIdempotentWrite(model, "final", ws, route, bundle, ctx.locale);
     },
     SubmittedIssueDraft: () => {
-      if (ws === null || bundle === undefined || model.busy) return { model };
-      return {
-        model: { ...model, busy: true, dialogError: null },
-        commands: [
-          apiCommand(
-            "IssueDraftFromDetail",
-            (c) =>
-              withIdempotencyKey((idemp) =>
-                c.documents.issueDraft({
-                  params: { workspaceId: ws.id, documentId: route.id },
-                  headers: { ...idemp, ...ifMatch(bundle.doc.revision) },
-                  payload: {},
-                }),
-              ),
-            (): Message =>
-              Message.ActionSucceeded({ toast: txt(ctx.locale, "toastIssued"), reload: true }),
-            (failure): Message => Message.ActionFailed({ failure }),
-          ),
-        ],
-      };
+      if (
+        ws === null ||
+        bundle === undefined ||
+        model.busy ||
+        !canRole(ws.role, "document.issue")
+      ) {
+        return { model };
+      }
+      return startIdempotentWrite(model, "issue", ws, route, bundle, ctx.locale);
     },
     ClickedLock: () => {
-      if (ws === null || model.busy) return { model };
+      if (ws === null || model.busy || !canRole(ws.role, "document.lock")) return { model };
       return {
         model: { ...model, busy: true },
         commands: [
@@ -851,7 +1025,14 @@ export const update = (
       };
     },
     ClickedDiscardDraft: () => {
-      if (ws === null || bundle === undefined || model.busy) return { model };
+      if (
+        ws === null ||
+        bundle === undefined ||
+        model.busy ||
+        !canRole(ws.role, "document.draft")
+      ) {
+        return { model };
+      }
       return {
         model: { ...model, busy: true },
         commands: [
@@ -874,7 +1055,7 @@ export const update = (
       };
     },
     ClickedCreateShare: () => {
-      if (ws === null || model.busy) return { model };
+      if (ws === null || model.busy || !canRole(ws.role, "share.write")) return { model };
       return {
         model: { ...model, busy: true },
         commands: [
@@ -903,7 +1084,7 @@ export const update = (
       ),
     }),
     ClickedRevokeShare: () => {
-      if (ws === null || model.busy) return { model };
+      if (ws === null || model.busy || !canRole(ws.role, "share.write")) return { model };
       return {
         model: { ...model, busy: true },
         commands: [
@@ -927,6 +1108,8 @@ export const update = (
         activeDialog: null,
         dialogError: null,
         removingPaymentId: null,
+        pendingRequestKey: null,
+        pendingAction: null,
       };
       if (navigateTo !== undefined) {
         return { model: nextBase, outMessage: Intent_.navigate(navigateTo) };
@@ -942,12 +1125,14 @@ export const update = (
         ...model,
         busy: false,
         dialogError: textOf(translator(ctx.locale), failure.text),
+        pendingRequestKey: failure.retryable ? model.pendingRequestKey : null,
+        pendingAction: failure.retryable ? model.pendingAction : null,
       },
       ...(model.activeDialog === null
         ? { outMessage: Intent_.toast(textOf(translator(ctx.locale), failure.text), "error") }
         : {}),
     }),
-  });
+  } satisfies MessageHandlers<Message, PageReturn<Model, Message>>);
 };
 
 export const title = (model: Model, ctx: PageContext): string => {
@@ -957,10 +1142,10 @@ export const title = (model: Model, ctx: PageContext): string => {
 };
 
 const renderActiveDialog = (
-  h: HtmlBuilder<Message>,
+  h: Html.H<Message>,
   model: Model,
   locale: PageContext["locale"],
-): ReadonlyArray<Html> => {
+): ReadonlyArray<Markup<Message>> => {
   const t = translator(locale);
   const err =
     model.dialogError !== null ? [banner(h, { text: model.dialogError, tone: "error" })] : [];
@@ -1198,7 +1383,7 @@ const renderActiveDialog = (
           id: "dlg-final",
           title: txt(locale, "dlgFinalTitle"),
           onClose: Message.ClosedDialog(),
-          body: [...err, h.p([], [txt(locale, "dlgFinalBody")])],
+          body: [...err, h.p.children([txt(locale, "dlgFinalBody")])],
           actions: [
             button(h, { label: sharedCopy(locale, "cancel"), onClick: Message.ClosedDialog() }),
             button(h, {
@@ -1216,7 +1401,7 @@ const renderActiveDialog = (
           id: "dlg-issue",
           title: txt(locale, "dlgIssueTitle"),
           onClose: Message.ClosedDialog(),
-          body: [...err, h.p([], [txt(locale, "dlgIssueBody")])],
+          body: [...err, h.p.children([txt(locale, "dlgIssueBody")])],
           actions: [
             button(h, { label: sharedCopy(locale, "cancel"), onClick: Message.ClosedDialog() }),
             button(h, {
@@ -1231,7 +1416,7 @@ const renderActiveDialog = (
   }
 };
 
-export const view = Submodel.defineView<Model, Message, PageContext>((model, ctx, h) => {
+export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
   const { locale } = ctx;
   const t = translator(locale);
   const ws = ctx.workspace;
@@ -1270,10 +1455,14 @@ export const view = Submodel.defineView<Model, Message, PageContext>((model, ctx
     return page(h, [
       pageHeader(h, { title: txt(locale, "title") }),
       card(h, [
-        h.div(
-          [h.Class("kb-stack"), h.AriaBusy(true)],
-          [skeleton(h, "35%", "1.5rem"), skeleton(h, "100%", "8rem"), skeleton(h, "100%", "10rem")],
-        ),
+        h.div
+          .class("kb-stack")
+          .attr("aria-busy", String(true))
+          .children([
+            skeleton(h, "35%", "1.5rem"),
+            skeleton(h, "100%", "8rem"),
+            skeleton(h, "100%", "10rem"),
+          ]),
       ]),
     ]);
   }
@@ -1284,21 +1473,35 @@ export const view = Submodel.defineView<Model, Message, PageContext>((model, ctx
   const lines = readLines(doc.lines);
   const pdfUrl = `/api/v1/workspaces/${ws.id}/documents/${doc.id}/pdf`;
 
-  const canIssueDraft = doc.status === "draft";
-  const canEdit = doc.status === "draft" || (doc.status === "issued" && !doc.locked);
+  const canIssueDraft = doc.status === "draft" && canRole(ws.role, "document.issue");
+  const canEdit =
+    (doc.status === "draft" || (doc.status === "issued" && !doc.locked)) &&
+    canRole(ws.role, "document.edit");
   const canRecordPayment =
-    doc.status === "issued" && (doc.kind === "invoice" || doc.kind === "proforma");
+    doc.status === "issued" &&
+    (doc.kind === "invoice" || doc.kind === "proforma") &&
+    canRole(ws.role, "payment.write");
   const canFinalInvoice =
     doc.status === "issued" &&
     doc.kind === "proforma" &&
     (doc.settlement === "paid" ||
       doc.settlement === "partially_paid" ||
       doc.settlement === "overpaid") &&
-    !documentHasFinalInvoice(doc);
+    !documentHasFinalInvoice(doc) &&
+    canRole(ws.role, "document.finalInvoice");
   const canCreditNote =
-    doc.status === "issued" && (doc.kind === "invoice" || doc.kind === "payment_tax_document");
+    doc.status === "issued" &&
+    (doc.kind === "invoice" || doc.kind === "payment_tax_document") &&
+    canRole(ws.role, "document.correct");
+  const canSend = doc.status === "issued" && canRole(ws.role, "document.send");
+  const canLock = doc.status === "issued" && !doc.locked && canRole(ws.role, "document.lock");
+  const canUnlock = doc.status === "issued" && doc.locked && canRole(ws.role, "document.unlock");
+  const canCancel = doc.status === "issued" && canRole(ws.role, "document.cancel");
+  const canDiscardDraft = doc.status === "draft" && canRole(ws.role, "document.draft");
+  const canWriteShare = canRole(ws.role, "share.write");
+  const canRemovePayment = canRole(ws.role, "payment.write");
 
-  const actions: Array<Html> = [];
+  const actions: Array<Markup<Message>> = [];
   if (canIssueDraft) {
     actions.push(
       button(h, {
@@ -1326,7 +1529,7 @@ export const view = Submodel.defineView<Model, Message, PageContext>((model, ctx
       }),
     );
   }
-  if (doc.status === "issued") {
+  if (canSend) {
     actions.push(
       button(h, {
         label: txt(locale, "sendAction"),
@@ -1352,25 +1555,33 @@ export const view = Submodel.defineView<Model, Message, PageContext>((model, ctx
   }
   if (doc.status === "issued") {
     actions.push(
-      h.a(
-        [h.Class("kb-btn"), h.Href(pdfUrl), h.Target("_blank"), h.Rel("noopener")],
-        [txt(locale, "pdfAction")],
-      ),
+      h.a
+        .class("kb-btn")
+        .attr("href", pdfUrl)
+        .attr("target", "_blank")
+        .attr("rel", "noopener")
+        .children([txt(locale, "pdfAction")]),
     );
+  }
+  if (canUnlock) {
     actions.push(
-      doc.locked
-        ? button(h, {
-            label: txt(locale, "unlockAction"),
-            onClick: Message.OpenedDialog({ dialog: "unlock" }),
-            variant: "ghost",
-          })
-        : button(h, {
-            label: txt(locale, "lockAction"),
-            onClick: Message.ClickedLock(),
-            variant: "ghost",
-            busy: model.busy,
-          }),
+      button(h, {
+        label: txt(locale, "unlockAction"),
+        onClick: Message.OpenedDialog({ dialog: "unlock" }),
+        variant: "ghost",
+      }),
     );
+  } else if (canLock) {
+    actions.push(
+      button(h, {
+        label: txt(locale, "lockAction"),
+        onClick: Message.ClickedLock(),
+        variant: "ghost",
+        busy: model.busy,
+      }),
+    );
+  }
+  if (canCancel) {
     actions.push(
       button(h, {
         label: txt(locale, "cancelAction"),
@@ -1379,7 +1590,7 @@ export const view = Submodel.defineView<Model, Message, PageContext>((model, ctx
       }),
     );
   }
-  if (doc.status === "draft") {
+  if (canDiscardDraft) {
     actions.push(
       button(h, {
         label: txt(locale, "discardDraftAction"),
@@ -1417,243 +1628,217 @@ export const view = Submodel.defineView<Model, Message, PageContext>((model, ctx
     ],
   });
 
-  const previewTab = h.div(
-    [h.Class("kb-detail-layout")],
-    [
-      h.section(
-        [h.Class("kb-invoice-sheet")],
-        [
-          h.div(
-            [h.Class("kb-spread")],
-            [
-              h.div(
-                [h.Class("kb-row")],
-                [kindBadge(h, locale, doc.kind), mono(h, doc.number ?? txt(locale, "draftTitle"))],
-              ),
-              amount(h, fmtMoney(locale, doc.totals.gross)),
-            ],
-          ),
-          h.div(
-            [h.Class("kb-invoice-parties")],
-            [
-              h.div(
-                [h.Class("kb-party-block")],
-                [
-                  h.span([h.Class("kb-party-block__label")], [txt(locale, "issuerLabel")]),
-                  h.strong([], [issuer?.name ?? ws.name]),
-                  ...(issuer !== undefined
-                    ? [
-                        h.span([h.Class("kb-small")], [formatAddress(issuer.address)]),
-                        ...(issuer.ico !== null
-                          ? [h.span([h.Class("kb-small kb-mono")], [`IČO ${issuer.ico}`])]
-                          : []),
-                        ...(issuer.dic !== null
-                          ? [h.span([h.Class("kb-small kb-mono")], [`DIČ ${issuer.dic}`])]
-                          : []),
-                      ]
-                    : []),
-                ],
-              ),
-              h.div(
-                [h.Class("kb-party-block")],
-                [
-                  h.span([h.Class("kb-party-block__label")], [txt(locale, "customerLabel")]),
-                  h.strong([], [contact?.name ?? "—"]),
-                  ...(contact !== undefined
-                    ? [
-                        h.span([h.Class("kb-small")], [formatAddress(contact.address)]),
-                        ...(contact.ico !== null
-                          ? [h.span([h.Class("kb-small kb-mono")], [`IČO ${contact.ico}`])]
-                          : []),
-                        ...(contact.dic !== null
-                          ? [h.span([h.Class("kb-small kb-mono")], [`DIČ ${contact.dic}`])]
-                          : []),
-                      ]
-                    : []),
-                ],
-              ),
-            ],
-          ),
-          dl(h, [
-            [
-              txt(locale, "issuedOn"),
-              h.span([h.Class("kb-num")], [fmtDate(locale, doc.dates.issuedOn)]),
-            ],
-            ...(doc.dates.taxableSupplyOn !== null
-              ? [
-                  [
-                    txt(locale, "taxableSupplyOn"),
-                    h.span([h.Class("kb-num")], [fmtDate(locale, doc.dates.taxableSupplyOn)]),
-                  ] as const,
-                ]
-              : []),
-            [txt(locale, "dueOn"), h.span([h.Class("kb-num")], [fmtDate(locale, doc.dates.dueOn)])],
-            [
-              txt(locale, "paymentMethod"),
-              textOf(t, I18n.enumText("paymentMethod", doc.paymentMethod)),
-            ],
-            ...(issuer?.bankAccount !== null && issuer?.bankAccount !== undefined
-              ? [
-                  [
-                    txt(locale, "bankAccount"),
-                    mono(h, issuer.bankAccount.iban ?? issuer.bankAccount.accountNumber ?? "—"),
-                  ] as const,
-                ]
-              : []),
-          ]),
-          table(h, {
-            caption: txt(locale, "linesCaption"),
-            rows: lines,
-            rowKey: (l) => l.id,
-            columns: [
-              { header: txt(locale, "colDesc"), cell: (l) => l.description },
-              {
-                header: txt(locale, "colQty"),
-                align: "end",
-                numeric: true,
-                cell: (l) => `${fmtNum(locale, l.quantity)}${l.unit ? ` ${l.unit}` : ""}`,
-              },
-              {
-                header: txt(locale, "colPrice"),
-                align: "end",
-                numeric: true,
-                cell: (l) => fmtNum(locale, l.unitPrice, 2),
-              },
-              {
-                header: txt(locale, "colVat"),
-                align: "end",
-                numeric: true,
-                cell: (l) => fmtVatRate(locale, l.ratePercent),
-              },
-              {
-                header: txt(locale, "colTotal"),
-                align: "end",
-                numeric: true,
-                cell: (l) => fmtNum(locale, l.amount, 2),
-              },
-            ],
-          }),
-          h.div(
-            [h.Class("kb-stack")],
-            [
-              h.div(
-                [h.Class("kb-vat-total-row")],
-                [
-                  h.span([h.Class("kb-muted")], [txt(locale, "netTotal")]),
-                  amount(h, fmtMoney(locale, doc.totals.net)),
-                ],
-              ),
-              h.div(
-                [h.Class("kb-vat-total-row")],
-                [
-                  h.span([h.Class("kb-muted")], [txt(locale, "vatTotal")]),
-                  amount(h, fmtMoney(locale, doc.totals.vat)),
-                ],
-              ),
-              h.div(
-                [h.Class("kb-vat-total-row kb-vat-total-row--grand")],
-                [
-                  h.span([], [txt(locale, "grandTotal")]),
-                  amount(h, fmtMoney(locale, doc.totals.gross)),
-                ],
-              ),
-              ...(doc.totals.vatCzk !== null
+  const previewTab = h.div.class("kb-detail-layout").children([
+    h.section.class("kb-invoice-sheet").children([
+      h.div
+        .class("kb-spread")
+        .children([
+          h.div
+            .class("kb-row")
+            .children([
+              kindBadge(h, locale, doc.kind),
+              mono(h, doc.number ?? txt(locale, "draftTitle")),
+            ]),
+          amount(h, fmtMoney(locale, doc.totals.gross)),
+        ]),
+      h.div
+        .class("kb-invoice-parties")
+        .children([
+          h.div
+            .class("kb-party-block")
+            .children([
+              h.span.class("kb-party-block__label").children([txt(locale, "issuerLabel")]),
+              h.strong.children([issuer?.name ?? ws.name]),
+              ...(issuer !== undefined
                 ? [
-                    h.div(
-                      [h.Class("kb-vat-total-row kb-small kb-muted")],
-                      [
-                        h.span([], [txt(locale, "vatCzkTotal")]),
-                        amount(h, fmtMoney(locale, doc.totals.vatCzk)),
-                      ],
-                    ),
+                    h.span.class("kb-small").children([formatAddress(issuer.address)]),
+                    ...(issuer.ico !== null
+                      ? [h.span.class("kb-small kb-mono").children([`IČO ${issuer.ico}`])]
+                      : []),
+                    ...(issuer.dic !== null
+                      ? [h.span.class("kb-small kb-mono").children([`DIČ ${issuer.dic}`])]
+                      : []),
                   ]
                 : []),
-            ],
-          ),
-          ...(doc.statutoryNotes.length > 0
-            ? [
-                h.hr([h.Class("kb-divider")]),
-                h.div(
-                  [h.Class("kb-stack")],
-                  [
-                    h.span([h.Class("kb-small kb-muted")], [txt(locale, "statutoryNotes")]),
-                    ...doc.statutoryNotes.map((n) => h.p([h.Class("kb-small")], [n.text])),
-                  ],
-                ),
-              ]
-            : []),
-        ],
-      ),
-      h.div(
-        [h.Class("kb-stack")],
+            ]),
+          h.div
+            .class("kb-party-block")
+            .children([
+              h.span.class("kb-party-block__label").children([txt(locale, "customerLabel")]),
+              h.strong.children([contact?.name ?? "—"]),
+              ...(contact !== undefined
+                ? [
+                    h.span.class("kb-small").children([formatAddress(contact.address)]),
+                    ...(contact.ico !== null
+                      ? [h.span.class("kb-small kb-mono").children([`IČO ${contact.ico}`])]
+                      : []),
+                    ...(contact.dic !== null
+                      ? [h.span.class("kb-small kb-mono").children([`DIČ ${contact.dic}`])]
+                      : []),
+                  ]
+                : []),
+            ]),
+        ]),
+      dl(h, [
         [
-          ...(doc.related.length > 0
+          txt(locale, "issuedOn"),
+          h.span.class("kb-num").children([fmtDate(locale, doc.dates.issuedOn)]),
+        ],
+        ...(doc.dates.taxableSupplyOn !== null
+          ? [
+              [
+                txt(locale, "taxableSupplyOn"),
+                h.span.class("kb-num").children([fmtDate(locale, doc.dates.taxableSupplyOn)]),
+              ] as const,
+            ]
+          : []),
+        [txt(locale, "dueOn"), h.span.class("kb-num").children([fmtDate(locale, doc.dates.dueOn)])],
+        [
+          txt(locale, "paymentMethod"),
+          textOf(t, I18n.enumText("paymentMethod", doc.paymentMethod)),
+        ],
+        ...(issuer?.bankAccount !== null && issuer?.bankAccount !== undefined
+          ? [
+              [
+                txt(locale, "bankAccount"),
+                mono(h, issuer.bankAccount.iban ?? issuer.bankAccount.accountNumber ?? "—"),
+              ] as const,
+            ]
+          : []),
+      ]),
+      table(h, {
+        caption: txt(locale, "linesCaption"),
+        rows: lines,
+        rowKey: (l) => l.id,
+        columns: [
+          { header: txt(locale, "colDesc"), cell: (l) => l.description },
+          {
+            header: txt(locale, "colQty"),
+            align: "end",
+            numeric: true,
+            cell: (l) => `${fmtNum(locale, l.quantity)}${l.unit ? ` ${l.unit}` : ""}`,
+          },
+          {
+            header: txt(locale, "colPrice"),
+            align: "end",
+            numeric: true,
+            cell: (l) => fmtNum(locale, l.unitPrice, 2),
+          },
+          {
+            header: txt(locale, "colVat"),
+            align: "end",
+            numeric: true,
+            cell: (l) => fmtVatRate(locale, l.ratePercent),
+          },
+          {
+            header: txt(locale, "colTotal"),
+            align: "end",
+            numeric: true,
+            cell: (l) => fmtNum(locale, l.amount, 2),
+          },
+        ],
+      }),
+      h.div
+        .class("kb-stack")
+        .children([
+          h.div
+            .class("kb-vat-total-row")
+            .children([
+              h.span.class("kb-muted").children([txt(locale, "netTotal")]),
+              amount(h, fmtMoney(locale, doc.totals.net)),
+            ]),
+          h.div
+            .class("kb-vat-total-row")
+            .children([
+              h.span.class("kb-muted").children([txt(locale, "vatTotal")]),
+              amount(h, fmtMoney(locale, doc.totals.vat)),
+            ]),
+          h.div
+            .class("kb-vat-total-row kb-vat-total-row--grand")
+            .children([
+              h.span.children([txt(locale, "grandTotal")]),
+              amount(h, fmtMoney(locale, doc.totals.gross)),
+            ]),
+          ...(doc.totals.vatCzk !== null
             ? [
-                card(h, [
-                  cardTitle(h, txt(locale, "relatedDocs")),
-                  h.div(
-                    [h.Class("kb-related-list")],
-                    doc.related.map((rel) =>
-                      h.a(
-                        [
-                          h.Class("kb-related-link"),
-                          h.Href(href({ _tag: "Document", ws: slug, id: rel.id, tab: "preview" })),
-                        ],
-                        [
-                          h.div(
-                            [h.Class("kb-stack")],
-                            [
-                              h.span(
-                                [h.Class("kb-small kb-muted")],
-                                [textOf(t, I18n.enumText("documentRelation", rel.relation))],
-                              ),
-                              mono(h, rel.number),
-                            ],
-                          ),
-                          kindBadge(h, locale, rel.kind),
-                        ],
-                      ),
-                    ),
-                  ),
-                ]),
+                h.div
+                  .class("kb-vat-total-row kb-small kb-muted")
+                  .children([
+                    h.span.children([txt(locale, "vatCzkTotal")]),
+                    amount(h, fmtMoney(locale, doc.totals.vatCzk)),
+                  ]),
               ]
             : []),
-          card(h, [
-            cardTitle(h, txt(locale, "deliveriesTitle")),
-            doc.deliveries.length === 0
-              ? h.p([h.Class("kb-small kb-muted")], [txt(locale, "noDeliveries")])
-              : h.ul(
-                  [h.Class("kb-audit-list")],
-                  doc.deliveries.map((del) =>
-                    h.keyed("li")(
-                      del.id,
-                      [h.Class("kb-audit-item")],
-                      [
-                        h.div(
-                          [h.Class("kb-spread")],
-                          [
-                            h.span([h.Class("kb-small")], [del.to.join(", ")]),
-                            badge(
-                              h,
-                              textOf(t, I18n.enumText("deliveryStatus", del.status)),
-                              del.status === "sent"
-                                ? "paid"
-                                : del.status === "failed"
-                                  ? "error"
-                                  : "neutral",
-                            ),
-                          ],
-                        ),
-                        h.span([h.Class("kb-footnote kb-num")], [fmtDateTime(locale, del.at)]),
-                      ],
-                    ),
-                  ),
+        ]),
+      ...(doc.statutoryNotes.length > 0
+        ? [
+            h.hr.class("kb-divider"),
+            h.div
+              .class("kb-stack")
+              .children([
+                h.span.class("kb-small kb-muted").children([txt(locale, "statutoryNotes")]),
+                ...doc.statutoryNotes.map((n) => h.p.class("kb-small").children([n.text])),
+              ]),
+          ]
+        : []),
+    ]),
+    h.div.class("kb-stack").children([
+      ...(doc.related.length > 0
+        ? [
+            card(h, [
+              cardTitle(h, txt(locale, "relatedDocs")),
+              h.div.class("kb-related-list").children(
+                doc.related.map((rel) =>
+                  h.a
+                    .class("kb-related-link")
+                    .attr("href", href({ _tag: "Document", ws: slug, id: rel.id, tab: "preview" }))
+                    .children([
+                      h.div
+                        .class("kb-stack")
+                        .children([
+                          h.span
+                            .class("kb-small kb-muted")
+                            .children([textOf(t, I18n.enumText("documentRelation", rel.relation))]),
+                          mono(h, rel.number),
+                        ]),
+                      kindBadge(h, locale, rel.kind),
+                    ]),
                 ),
-          ]),
-        ],
-      ),
-    ],
-  );
+              ),
+            ]),
+          ]
+        : []),
+      card(h, [
+        cardTitle(h, txt(locale, "deliveriesTitle")),
+        doc.deliveries.length === 0
+          ? h.p.class("kb-small kb-muted").children([txt(locale, "noDeliveries")])
+          : h.ul.class("kb-audit-list").children(
+              doc.deliveries.map((del) =>
+                h.li
+                  .key(del.id)
+                  .class("kb-audit-item")
+                  .children([
+                    h.div
+                      .class("kb-spread")
+                      .children([
+                        h.span.class("kb-small").children([del.to.join(", ")]),
+                        badge(
+                          h,
+                          textOf(t, I18n.enumText("deliveryStatus", del.status)),
+                          del.status === "sent"
+                            ? "paid"
+                            : del.status === "failed"
+                              ? "error"
+                              : "neutral",
+                        ),
+                      ]),
+                    h.span.class("kb-footnote kb-num").children([fmtDateTime(locale, del.at)]),
+                  ]),
+              ),
+            ),
+      ]),
+    ]),
+  ]);
 
   const paymentsTab = card(h, [
     cardTitle(h, txt(locale, "tabPayments"), [
@@ -1702,17 +1887,21 @@ export const view = Submodel.defineView<Model, Message, PageContext>((model, ctx
                       small: true,
                     }),
             },
-            {
-              header: txt(locale, "payColActions"),
-              align: "end",
-              cell: (p) =>
-                button(h, {
-                  label: txt(locale, "removePayment"),
-                  onClick: Message.OpenedDialog({ dialog: "removePayment", paymentId: p.id }),
-                  variant: "ghost",
-                  small: true,
-                }),
-            },
+            ...(canRemovePayment
+              ? [
+                  {
+                    header: txt(locale, "payColActions"),
+                    align: "end" as const,
+                    cell: (p: PaymentViewData) =>
+                      button(h, {
+                        label: txt(locale, "removePayment"),
+                        onClick: Message.OpenedDialog({ dialog: "removePayment", paymentId: p.id }),
+                        variant: "ghost",
+                        small: true,
+                      }),
+                  },
+                ]
+              : []),
           ],
         }),
   ]);
@@ -1724,94 +1913,87 @@ export const view = Submodel.defineView<Model, Message, PageContext>((model, ctx
       : doc.share === null
         ? emptyState(h, {
             title: txt(locale, "shareNone"),
-            action: button(h, {
-              label: txt(locale, "shareCreate"),
-              onClick: Message.ClickedCreateShare(),
-              variant: "primary",
-              busy: model.busy,
-            }),
-          })
-        : h.div(
-            [h.Class("kb-stack")],
-            [
-              h.div(
-                [h.Class("kb-share-url")],
-                [
-                  h.span([h.Class("kb-mono"), h.Style({ flex: "1" })], [doc.share.url]),
-                  button(h, {
-                    label: txt(locale, "shareCopy"),
-                    onClick: Message.ClickedCopyShare({ url: doc.share.url }),
-                    small: true,
-                  }),
-                  button(h, {
-                    label: txt(locale, "shareRevoke"),
-                    onClick: Message.ClickedRevokeShare(),
-                    variant: "danger",
-                    small: true,
+            ...(canWriteShare
+              ? {
+                  action: button(h, {
+                    label: txt(locale, "shareCreate"),
+                    onClick: Message.ClickedCreateShare(),
+                    variant: "primary",
                     busy: model.busy,
                   }),
-                ],
-              ),
-              h.span(
-                [h.Class("kb-small kb-muted kb-num")],
-                [txt(locale, "shareStats", { views: doc.share.views })],
-              ),
-              h.h3([], [txt(locale, "shareEventsTitle")]),
-              shareViews.length === 0
-                ? h.p([h.Class("kb-small kb-muted")], [txt(locale, "shareEventsEmpty")])
-                : h.ul(
-                    [h.Class("kb-audit-list")],
-                    shareViews.map((ev) =>
-                      h.keyed("li")(
-                        ev.id,
-                        [h.Class("kb-audit-item")],
-                        [
-                          h.div(
-                            [h.Class("kb-spread")],
-                            [
-                              h.span(
-                                [],
-                                [
-                                  `${textOf(t, I18n.enumText("shareEvent", ev.kind))} · ${textOf(t, I18n.enumText("device", ev.device))}`,
-                                ],
-                              ),
-                              h.span(
-                                [h.Class("kb-small kb-muted kb-num")],
-                                [fmtDateTime(locale, ev.at)],
-                              ),
-                            ],
-                          ),
-                        ],
-                      ),
-                    ),
+                }
+              : {}),
+          })
+        : h.div.class("kb-stack").children([
+            h.div.class("kb-share-url").children([
+              h.span.class("kb-mono").style({ flex: "1" }).children([doc.share.url]),
+              button(h, {
+                label: txt(locale, "shareCopy"),
+                onClick: Message.ClickedCopyShare({ url: doc.share.url }),
+                small: true,
+              }),
+              ...(canWriteShare
+                ? [
+                    button(h, {
+                      label: txt(locale, "shareRevoke"),
+                      onClick: Message.ClickedRevokeShare(),
+                      variant: "danger",
+                      small: true,
+                      busy: model.busy,
+                    }),
+                  ]
+                : []),
+            ]),
+            h.span
+              .class("kb-small kb-muted kb-num")
+              .children([txt(locale, "shareStats", { views: doc.share.views })]),
+            h.h3.children([txt(locale, "shareEventsTitle")]),
+            shareViews.length === 0
+              ? h.p.class("kb-small kb-muted").children([txt(locale, "shareEventsEmpty")])
+              : h.ul.class("kb-audit-list").children(
+                  shareViews.map((ev) =>
+                    h.li
+                      .key(ev.id)
+                      .class("kb-audit-item")
+                      .children([
+                        h.div
+                          .class("kb-spread")
+                          .children([
+                            h.span.children([
+                              `${textOf(t, I18n.enumText("shareEvent", ev.kind))} · ${textOf(t, I18n.enumText("device", ev.device))}`,
+                            ]),
+                            h.span
+                              .class("kb-small kb-muted kb-num")
+                              .children([fmtDateTime(locale, ev.at)]),
+                          ]),
+                      ]),
                   ),
-            ],
-          ),
+                ),
+          ]),
   ]);
 
   const historyTab = card(h, [
     cardTitle(h, txt(locale, "tabHistory")),
     history.length === 0
       ? emptyState(h, { title: txt(locale, "historyEmpty") })
-      : h.ul(
-          [h.Class("kb-audit-list")],
+      : h.ul.class("kb-audit-list").children(
           history.map((entry) =>
-            h.keyed("li")(
-              entry.id,
-              [h.Class("kb-audit-item")],
-              [
-                h.div(
-                  [h.Class("kb-spread")],
-                  [
-                    h.span([h.Class("kb-mono")], [entry.action]),
-                    h.span([h.Class("kb-small kb-muted kb-num")], [fmtDateTime(locale, entry.at)]),
-                  ],
-                ),
+            h.li
+              .key(entry.id)
+              .class("kb-audit-item")
+              .children([
+                h.div
+                  .class("kb-spread")
+                  .children([
+                    h.span.class("kb-mono").children([entry.action]),
+                    h.span
+                      .class("kb-small kb-muted kb-num")
+                      .children([fmtDateTime(locale, entry.at)]),
+                  ]),
                 ...(entry.reason !== null
-                  ? [h.span([h.Class("kb-small kb-muted")], [entry.reason])]
+                  ? [h.span.class("kb-small kb-muted").children([entry.reason])]
                   : []),
-              ],
-            ),
+              ]),
           ),
         ),
   ]);
@@ -1827,10 +2009,9 @@ export const view = Submodel.defineView<Model, Message, PageContext>((model, ctx
 
   return page(h, [
     pageHeader(h, {
-      eyebrow: h.div(
-        [h.Class("kb-row")],
-        [kindBadge(h, locale, doc.kind), ...documentBadges(h, locale, doc)],
-      ),
+      eyebrow: h.div
+        .class("kb-row")
+        .children([kindBadge(h, locale, doc.kind), ...documentBadges(h, locale, doc)]),
       title: doc.number ?? txt(locale, "draftTitle"),
       ...(contact?.name === undefined ? {} : { subtitle: contact.name }),
       actions,
@@ -1839,4 +2020,4 @@ export const view = Submodel.defineView<Model, Message, PageContext>((model, ctx
     tabContent,
     ...renderActiveDialog(h, model, locale),
   ]);
-});
+};

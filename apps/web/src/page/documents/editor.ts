@@ -1,3 +1,5 @@
+import { UiSchema } from "@effect/ui";
+import type { Html } from "@effect/ui/html";
 /**
  * Screen 10 — Document Editor (Draft & Issued-edit): split-screen editor with VAT/FX preview
  * via @kvitbit/ui-port ViewModels.calculate, Tax Regime variants, ARES quick-add contact,
@@ -24,12 +26,11 @@ import {
 } from "@kvitbit/domain";
 import { I18n, ViewModels } from "@kvitbit/ui-port";
 import { BigDecimal, Effect, Result, Schema } from "effect";
-import { type Command, Submodel } from "foldkit";
-import { defineMessageUnion } from "foldkit/message";
-import { Failure, type WebServices } from "../../app/api";
+import { Failure } from "../../app/api";
+import type { PageCommand } from "../../app/commands";
 import { type Copy, copy, textOf, translator } from "../../app/i18n";
 import { Intent_ } from "../../app/intent";
-import type { PageContext, PageReturn, RouteOf } from "../../app/page";
+import type { MessageHandlers, PageContext, PageReturn, RouteOf } from "../../app/page";
 import * as Remote from "../../app/remote";
 import { href } from "../../app/routing";
 import {
@@ -55,13 +56,17 @@ import {
   apiCommand,
   BankAccountData,
   ContactOptionData,
+  canRole,
   decimalToInput,
+  delayCommand,
   fmtDate,
   fmtMoney,
   fmtNum,
   fmtVatRate,
+  idempotencyHeaders,
   ifMatch,
   isIsoDateString,
+  mintRequestKeyCommand,
   PriceListOptionData,
   parseDecimalText,
   readBankAccounts,
@@ -77,7 +82,6 @@ import {
   TemplateViewData,
   todayPrague,
   WorkspaceInfoData,
-  withIdempotencyKey,
 } from "./shared";
 
 export type Route = RouteOf<"DocumentNew" | "DocumentEdit">;
@@ -341,6 +345,9 @@ const LookupsData = Schema.Struct({
   existingDoc: Schema.NullOr(DocumentView),
 });
 
+const WriteIntent = Schema.Literals(["save_draft", "issue", "autosave"]);
+type WriteIntent = typeof WriteIntent.Type;
+
 export const Model = Schema.Struct({
   route: ViewModels.Route,
   lookups: Remote.remoteSchema(LookupsData),
@@ -373,12 +380,21 @@ export const Model = Schema.Struct({
   aresIco: Schema.String,
   aresBusy: Schema.Boolean,
   aresError: Schema.NullOr(Schema.String),
+  dirty: Schema.Boolean,
+  previewSeq: Remote.Seq,
+  serverPreview: Remote.remoteSchema(DocumentView),
+  calcDrift: Schema.Boolean,
+  autosaveSeq: Remote.Seq,
+  autosaveStatus: Schema.Literals(["clean", "dirty", "saving", "saved", "failed"]),
+  autosaveError: Schema.NullOr(Schema.String),
+  pendingWriteKey: Schema.NullOr(Schema.String),
+  pendingWriteIntent: Schema.NullOr(WriteIntent),
   submitting: Schema.Boolean,
   submitError: Schema.NullOr(Schema.String),
 });
 export type Model = typeof Model.Type;
 
-export const Message = defineMessageUnion({
+export const Message = UiSchema.TaggedEnum({
   LoadedLookups: { seq: Remote.Seq, data: LookupsData },
   FailedLookups: { seq: Remote.Seq, failure: Failure },
   LoadedFx: { seq: Remote.Seq, data: FxRateView },
@@ -422,6 +438,14 @@ export const Message = defineMessageUnion({
   },
   MovedLine: { key: Schema.String, direction: Schema.Literals(["up", "down"]) },
   RemovedLine: { key: Schema.String },
+  DebouncedPreview: { seq: Remote.Seq },
+  GotPreview: { seq: Remote.Seq, doc: DocumentView },
+  FailedPreview: { seq: Remote.Seq, failure: Failure },
+  AutosaveDue: { seq: Remote.Seq },
+  AutosaveSucceeded: { seq: Remote.Seq, doc: DocumentView },
+  AutosaveFailed: { seq: Remote.Seq, failure: Failure },
+  GotRequestKey: { intent: WriteIntent, key: Schema.String },
+  DraftPersistedForIssue: { doc: DocumentView, key: Schema.String },
   ClickedSaveDraft: {},
   ClickedIssue: {},
   ClickedSaveIssued: {},
@@ -445,7 +469,7 @@ const loadLookupsCommand = (
   workspaceId: WorkspaceId,
   route: Route,
   seq: Remote.Seq,
-): Command.Command<Message, never, WebServices> =>
+): PageCommand<Message> =>
   apiCommand(
     "LoadEditorLookups",
     (c) =>
@@ -485,7 +509,7 @@ const loadFxCommand = (
   currency: CurrencyCode,
   on: IsoDate,
   seq: Remote.Seq,
-): Command.Command<Message, never, WebServices> =>
+): PageCommand<Message> =>
   apiCommand(
     "LoadFxRate",
     (c) => c.reports.fxRate({ params: { workspaceId, currency }, query: { on } }),
@@ -590,6 +614,15 @@ export const init = (route: Route, ctx: PageContext): PageReturn<Model, Message>
     aresIco: "",
     aresBusy: false,
     aresError: null,
+    dirty: false,
+    previewSeq: 0,
+    serverPreview: Remote.idle,
+    calcDrift: false,
+    autosaveSeq: 0,
+    autosaveStatus: "clean",
+    autosaveError: null,
+    pendingWriteKey: null,
+    pendingWriteIntent: null,
     submitting: false,
     submitError: null,
   };
@@ -699,12 +732,219 @@ const buildDocumentInput = (
   return { ok: true, input };
 };
 
+const PREVIEW_DEBOUNCE_MS = 400;
+const AUTOSAVE_DEBOUNCE_MS = 3000;
+
+const buildDraftPatch = (input: DocumentInput): DocumentPatch => ({
+  contact: input.contact,
+  lines: input.lines,
+  currency: input.currency,
+  issuedOn: input.issuedOn,
+  taxableSupplyOn: input.taxableSupplyOn,
+  due: input.due,
+  language: input.language,
+  series: input.series,
+  bankAccount: input.bankAccount,
+  pricesIncludeVat: input.pricesIncludeVat,
+  variableSymbol: input.variableSymbol,
+  orderNumber: input.orderNumber,
+  note: input.note,
+  paymentMethod: input.paymentMethod,
+  fx: input.fx ?? null,
+});
+
+const scheduleAfterEdit = (
+  model: Model,
+  workspaceId: WorkspaceId | undefined,
+  extraCommands: ReadonlyArray<PageCommand<Message>> = [],
+): PageReturn<Model, Message> => {
+  const previewSeq = model.previewSeq + 1;
+  const shouldAutosave = workspaceId !== undefined && model.editingStatus !== "issued";
+  const autosaveSeq = shouldAutosave ? model.autosaveSeq + 1 : model.autosaveSeq;
+  const commands: Array<PageCommand<Message>> = [...extraCommands];
+  if (workspaceId !== undefined) {
+    commands.push(
+      delayCommand(
+        "DebouncePreview",
+        PREVIEW_DEBOUNCE_MS,
+        Message.DebouncedPreview({ seq: previewSeq }),
+      ),
+    );
+  }
+  if (shouldAutosave) {
+    commands.push(
+      delayCommand(
+        "DebounceAutosave",
+        AUTOSAVE_DEBOUNCE_MS,
+        Message.AutosaveDue({ seq: autosaveSeq }),
+      ),
+    );
+  }
+  return {
+    model: {
+      ...model,
+      dirty: true,
+      previewSeq,
+      autosaveSeq,
+      autosaveStatus: shouldAutosave ? "dirty" : model.autosaveStatus,
+      autosaveError: null,
+      pendingWriteKey: null,
+      pendingWriteIntent: null,
+    },
+    commands,
+  };
+};
+
+const runSaveDraftWithKey = (
+  model: Model,
+  workspaceId: WorkspaceId,
+  input: DocumentInput,
+  key: string,
+): PageReturn<Model, Message> => {
+  const isExistingDraft = model.editingId !== null && model.editingRevision !== null;
+  const editId = model.editingId as DocumentId;
+  const editRev = model.editingRevision ?? 1;
+  return {
+    model: {
+      ...model,
+      submitting: true,
+      submitError: null,
+      pendingWriteKey: key,
+      pendingWriteIntent: "save_draft",
+    },
+    commands: [
+      apiCommand(
+        "SaveDraft",
+        (c) =>
+          isExistingDraft
+            ? c.documents.edit({
+                params: { workspaceId, documentId: editId },
+                headers: ifMatch(editRev),
+                payload: buildDraftPatch(input),
+              })
+            : c.documents.createDraft({
+                params: { workspaceId },
+                headers: idempotencyHeaders(key),
+                payload: input,
+              }),
+        (doc): Message => Message.SavedDocument({ doc, action: "draft" }),
+        (failure): Message => Message.FailedSubmit({ failure }),
+      ),
+    ],
+  };
+};
+
+const runIssueWithKey = (
+  model: Model,
+  workspaceId: WorkspaceId,
+  input: DocumentInput,
+  key: string,
+): PageReturn<Model, Message> => {
+  const isExistingDraft =
+    model.editingId !== null && model.editingStatus === "draft" && model.editingRevision !== null;
+  const editId = model.editingId as DocumentId;
+  const editRev = model.editingRevision ?? 1;
+  if (isExistingDraft && model.dirty) {
+    // Persist unsaved edits with If-Match first, then issue the resulting revision.
+    return {
+      model: {
+        ...model,
+        submitting: true,
+        submitError: null,
+        pendingWriteKey: key,
+        pendingWriteIntent: "issue",
+      },
+      commands: [
+        apiCommand(
+          "PersistDraftBeforeIssue",
+          (c) =>
+            c.documents.edit({
+              params: { workspaceId, documentId: editId },
+              headers: ifMatch(editRev),
+              payload: buildDraftPatch(input),
+            }),
+          (doc): Message => Message.DraftPersistedForIssue({ doc, key }),
+          (failure): Message => Message.FailedSubmit({ failure }),
+        ),
+      ],
+    };
+  }
+  return {
+    model: {
+      ...model,
+      submitting: true,
+      submitError: null,
+      pendingWriteKey: key,
+      pendingWriteIntent: "issue",
+    },
+    commands: [
+      apiCommand(
+        "IssueDocument",
+        (c) =>
+          isExistingDraft
+            ? c.documents.issueDraft({
+                params: { workspaceId, documentId: editId },
+                headers: { ...idempotencyHeaders(key), ...ifMatch(editRev) },
+                payload: {},
+              })
+            : c.documents.issueFromInput({
+                params: { workspaceId },
+                headers: idempotencyHeaders(key),
+                payload: { input },
+              }),
+        (doc): Message => Message.SavedDocument({ doc, action: "issue" }),
+        (failure): Message => Message.FailedSubmit({ failure }),
+      ),
+    ],
+  };
+};
+
+const runAutosaveWithKey = (
+  model: Model,
+  workspaceId: WorkspaceId,
+  input: DocumentInput,
+  seq: Remote.Seq,
+  key: string,
+): PageReturn<Model, Message> => {
+  const isExistingDraft = model.editingId !== null && model.editingRevision !== null;
+  const editId = model.editingId as DocumentId;
+  const editRev = model.editingRevision ?? 1;
+  return {
+    model: {
+      ...model,
+      autosaveStatus: "saving",
+      autosaveError: null,
+      pendingWriteKey: isExistingDraft ? model.pendingWriteKey : key,
+      pendingWriteIntent: isExistingDraft ? model.pendingWriteIntent : "autosave",
+    },
+    commands: [
+      apiCommand(
+        "AutosaveDraft",
+        (c) =>
+          isExistingDraft
+            ? c.documents.edit({
+                params: { workspaceId, documentId: editId },
+                headers: ifMatch(editRev),
+                payload: buildDraftPatch(input),
+              })
+            : c.documents.createDraft({
+                params: { workspaceId },
+                headers: idempotencyHeaders(key),
+                payload: input,
+              }),
+        (doc): Message => Message.AutosaveSucceeded({ seq, doc }),
+        (failure): Message => Message.AutosaveFailed({ seq, failure }),
+      ),
+    ],
+  };
+};
+
 const maybeLoadFx = (
   model: Model,
   workspaceId: WorkspaceId | undefined,
 ): {
   readonly model: Model;
-  readonly commands: ReadonlyArray<Command.Command<Message, never, WebServices>>;
+  readonly commands: ReadonlyArray<PageCommand<Message>>;
 } => {
   if (workspaceId === undefined || model.manualFx) return { model, commands: [] };
   const effective = resolveEffective(model);
@@ -727,7 +967,7 @@ export const update = (
   const route = model.route as Route;
   const regime: TaxRegime = ws?.taxRegime ?? "vat_payer";
 
-  return Message.match<PageReturn<Model, Message>>(message, {
+  return Message.match(message, {
     LoadedLookups: ({ seq, data }) => {
       const lookups = Remote.succeed(model.lookups, seq, data);
       let next: Model = { ...model, lookups };
@@ -758,10 +998,13 @@ export const update = (
       const data = Remote.dataOf(model.lookups);
       const tpl = data?.templates.find((t) => t.id === templateId);
       if (tpl === undefined) return { model };
-      return maybeLoadFx(applyTemplateToModel(model, tpl), ws?.id);
+      const fxRes = maybeLoadFx(applyTemplateToModel(model, tpl), ws?.id);
+      return scheduleAfterEdit(fxRes.model, ws?.id, fxRes.commands);
     },
-    SelectedContact: ({ contactId }) =>
-      maybeLoadFx({ ...model, contactId, submitError: null }, ws?.id),
+    SelectedContact: ({ contactId }) => {
+      const fxRes = maybeLoadFx({ ...model, contactId, submitError: null }, ws?.id);
+      return scheduleAfterEdit(fxRes.model, ws?.id, fxRes.commands);
+    },
     ToggledAres: () => ({
       model: { ...model, aresOpen: !model.aresOpen, aresError: null },
     }),
@@ -837,57 +1080,83 @@ export const update = (
         aresError: textOf(translator(ctx.locale), failure.text),
       },
     }),
-    ChangedIssuedOn: ({ value }) => ({ ...maybeLoadFx({ ...model, issuedOn: value }, ws?.id) }),
-    ChangedTaxableSupplyOn: ({ value }) =>
-      maybeLoadFx({ ...model, taxableSupplyOn: value }, ws?.id),
-    ChangedDueDays: ({ value }) => ({
-      model: { ...model, dueDaysOverride: value === "" ? null : value },
-    }),
-    ClearedDueDays: () => ({ model: { ...model, dueDaysOverride: null } }),
-    ChangedCurrency: ({ value }) =>
-      maybeLoadFx({ ...model, currencyOverride: value === "" ? null : value }, ws?.id),
-    ClearedCurrency: () => maybeLoadFx({ ...model, currencyOverride: null }, ws?.id),
-    ChangedLanguage: ({ value }) => ({
-      model: {
-        ...model,
-        languageOverride: value === "cs" || value === "en" ? value : null,
-      },
-    }),
-    ClearedLanguage: () => ({ model: { ...model, languageOverride: null } }),
-    ChangedPaymentMethod: ({ value }) => ({
-      model: {
-        ...model,
-        paymentMethodOverride:
-          value === "bank_transfer" || value === "cash" || value === "card" || value === "other"
-            ? value
-            : null,
-      },
-    }),
-    ClearedPaymentMethod: () => ({ model: { ...model, paymentMethodOverride: null } }),
-    ChangedSeries: ({ value }) => ({
-      model: { ...model, seriesOverride: value === "" ? null : value },
-    }),
-    ClearedSeries: () => ({ model: { ...model, seriesOverride: null } }),
-    ChangedBankAccount: ({ value }) => ({ model: { ...model, bankAccountId: value } }),
-    ChangedVariableSymbol: ({ value }) => ({ model: { ...model, variableSymbol: value } }),
-    ChangedOrderNumber: ({ value }) => ({ model: { ...model, orderNumber: value } }),
-    ChangedNote: ({ value }) => ({
-      model: { ...model, noteOverride: value === "" ? null : value },
-    }),
-    ClearedNote: () => ({ model: { ...model, noteOverride: null } }),
-    ChangedNumberOverride: ({ value }) => ({ model: { ...model, numberOverride: value } }),
-    ToggledRefreshParties: ({ checked }) => ({ model: { ...model, refreshParties: checked } }),
-    ToggledPricesIncludeVat: ({ checked }) => ({ model: { ...model, pricesIncludeVat: checked } }),
-    ToggledManualFx: ({ checked }) => maybeLoadFx({ ...model, manualFx: checked }, ws?.id),
-    ChangedFxRate: ({ value }) => ({ model: { ...model, fxRateInput: value } }),
-    ChangedFxQuantity: ({ value }) => ({ model: { ...model, fxQuantityInput: value } }),
-    AddedLine: () => ({
-      model: {
-        ...model,
-        lines: [...model.lines, emptyLine(model.nextLineKey, regime)],
-        nextLineKey: model.nextLineKey + 1,
-      },
-    }),
+    ChangedIssuedOn: ({ value }) => {
+      const fxRes = maybeLoadFx({ ...model, issuedOn: value }, ws?.id);
+      return scheduleAfterEdit(fxRes.model, ws?.id, fxRes.commands);
+    },
+    ChangedTaxableSupplyOn: ({ value }) => {
+      const fxRes = maybeLoadFx({ ...model, taxableSupplyOn: value }, ws?.id);
+      return scheduleAfterEdit(fxRes.model, ws?.id, fxRes.commands);
+    },
+    ChangedDueDays: ({ value }) =>
+      scheduleAfterEdit({ ...model, dueDaysOverride: value === "" ? null : value }, ws?.id),
+    ClearedDueDays: () => scheduleAfterEdit({ ...model, dueDaysOverride: null }, ws?.id),
+    ChangedCurrency: ({ value }) => {
+      const fxRes = maybeLoadFx(
+        { ...model, currencyOverride: value === "" ? null : value },
+        ws?.id,
+      );
+      return scheduleAfterEdit(fxRes.model, ws?.id, fxRes.commands);
+    },
+    ClearedCurrency: () => {
+      const fxRes = maybeLoadFx({ ...model, currencyOverride: null }, ws?.id);
+      return scheduleAfterEdit(fxRes.model, ws?.id, fxRes.commands);
+    },
+    ChangedLanguage: ({ value }) =>
+      scheduleAfterEdit(
+        {
+          ...model,
+          languageOverride: value === "cs" || value === "en" ? value : null,
+        },
+        ws?.id,
+      ),
+    ClearedLanguage: () => scheduleAfterEdit({ ...model, languageOverride: null }, ws?.id),
+    ChangedPaymentMethod: ({ value }) =>
+      scheduleAfterEdit(
+        {
+          ...model,
+          paymentMethodOverride:
+            value === "bank_transfer" || value === "cash" || value === "card" || value === "other"
+              ? value
+              : null,
+        },
+        ws?.id,
+      ),
+    ClearedPaymentMethod: () =>
+      scheduleAfterEdit({ ...model, paymentMethodOverride: null }, ws?.id),
+    ChangedSeries: ({ value }) =>
+      scheduleAfterEdit({ ...model, seriesOverride: value === "" ? null : value }, ws?.id),
+    ClearedSeries: () => scheduleAfterEdit({ ...model, seriesOverride: null }, ws?.id),
+    ChangedBankAccount: ({ value }) =>
+      scheduleAfterEdit({ ...model, bankAccountId: value }, ws?.id),
+    ChangedVariableSymbol: ({ value }) =>
+      scheduleAfterEdit({ ...model, variableSymbol: value }, ws?.id),
+    ChangedOrderNumber: ({ value }) => scheduleAfterEdit({ ...model, orderNumber: value }, ws?.id),
+    ChangedNote: ({ value }) =>
+      scheduleAfterEdit({ ...model, noteOverride: value === "" ? null : value }, ws?.id),
+    ClearedNote: () => scheduleAfterEdit({ ...model, noteOverride: null }, ws?.id),
+    ChangedNumberOverride: ({ value }) =>
+      scheduleAfterEdit({ ...model, numberOverride: value }, ws?.id),
+    ToggledRefreshParties: ({ checked }) =>
+      scheduleAfterEdit({ ...model, refreshParties: checked }, ws?.id),
+    ToggledPricesIncludeVat: ({ checked }) =>
+      scheduleAfterEdit({ ...model, pricesIncludeVat: checked }, ws?.id),
+    ToggledManualFx: ({ checked }) => {
+      const fxRes = maybeLoadFx({ ...model, manualFx: checked }, ws?.id);
+      return scheduleAfterEdit(fxRes.model, ws?.id, fxRes.commands);
+    },
+    ChangedFxRate: ({ value }) => scheduleAfterEdit({ ...model, fxRateInput: value }, ws?.id),
+    ChangedFxQuantity: ({ value }) =>
+      scheduleAfterEdit({ ...model, fxQuantityInput: value }, ws?.id),
+    AddedLine: () =>
+      scheduleAfterEdit(
+        {
+          ...model,
+          lines: [...model.lines, emptyLine(model.nextLineKey, regime)],
+          nextLineKey: model.nextLineKey + 1,
+        },
+        ws?.id,
+      ),
     AddedPriceListItem: ({ itemId }) => {
       const data = Remote.dataOf(model.lookups);
       const item = data?.priceList.find((p) => p.id === itemId);
@@ -901,20 +1170,23 @@ export const update = (
         unitPrice: decimalToInput(item.unitPrice),
         vat: item.vat ?? (regime === "vat_payer" ? "standard" : "outside_scope"),
       };
-      return {
-        model: {
+      return scheduleAfterEdit(
+        {
           ...model,
           lines: [...model.lines, line],
           nextLineKey: model.nextLineKey + 1,
         },
-      };
+        ws?.id,
+      );
     },
-    UpdatedLineField: ({ key, field, value }) => ({
-      model: {
-        ...model,
-        lines: model.lines.map((l) => (l.key === key ? { ...l, [field]: value } : l)),
-      },
-    }),
+    UpdatedLineField: ({ key, field, value }) =>
+      scheduleAfterEdit(
+        {
+          ...model,
+          lines: model.lines.map((l) => (l.key === key ? { ...l, [field]: value } : l)),
+        },
+        ws?.id,
+      ),
     MovedLine: ({ key, direction }) => {
       const idx = model.lines.findIndex((l) => l.key === key);
       if (idx < 0) return { model };
@@ -926,97 +1198,185 @@ export const update = (
       if (current === undefined || target === undefined) return { model };
       copyLines[idx] = target;
       copyLines[swap] = current;
-      return { model: { ...model, lines: copyLines } };
+      return scheduleAfterEdit({ ...model, lines: copyLines }, ws?.id);
     },
-    RemovedLine: ({ key }) => ({
-      model: {
-        ...model,
-        lines:
-          model.lines.length <= 1
-            ? [emptyLine(model.nextLineKey, regime)]
-            : model.lines.filter((l) => l.key !== key),
-        nextLineKey: model.lines.length <= 1 ? model.nextLineKey + 1 : model.nextLineKey,
-      },
-    }),
-    ClickedSaveDraft: () => {
-      if (ws === null || model.submitting) return { model };
+    RemovedLine: ({ key }) =>
+      scheduleAfterEdit(
+        {
+          ...model,
+          lines:
+            model.lines.length <= 1
+              ? [emptyLine(model.nextLineKey, regime)]
+              : model.lines.filter((l) => l.key !== key),
+          nextLineKey: model.lines.length <= 1 ? model.nextLineKey + 1 : model.nextLineKey,
+        },
+        ws?.id,
+      ),
+    DebouncedPreview: ({ seq }) => {
+      if (ws === null || seq !== model.previewSeq) return { model };
       const built = buildDocumentInput(model, ctx.locale);
-      if (!built.ok) return { model: { ...model, submitError: built.error } };
-      const isExistingDraft = model.editingId !== null && model.editingRevision !== null;
-      const editId = model.editingId as DocumentId;
-      const editRev = model.editingRevision ?? 1;
+      if (!built.ok) return { model };
+      const serverPreview = Remote.load(model.serverPreview);
       return {
-        model: { ...model, submitting: true, submitError: null },
+        model: { ...model, serverPreview },
         commands: [
           apiCommand(
-            "SaveDraft",
+            "PreviewDocument",
             (c) =>
-              isExistingDraft
-                ? c.documents.edit({
-                    params: { workspaceId: ws.id, documentId: editId },
-                    headers: ifMatch(editRev),
-                    payload: {
-                      contact: built.input.contact,
-                      lines: built.input.lines,
-                      currency: built.input.currency,
-                      issuedOn: built.input.issuedOn,
-                      taxableSupplyOn: built.input.taxableSupplyOn,
-                      due: built.input.due,
-                      language: built.input.language,
-                      series: built.input.series,
-                      bankAccount: built.input.bankAccount,
-                      pricesIncludeVat: built.input.pricesIncludeVat,
-                      variableSymbol: built.input.variableSymbol,
-                      orderNumber: built.input.orderNumber,
-                      note: built.input.note,
-                      paymentMethod: built.input.paymentMethod,
-                      fx: built.input.fx ?? null,
-                    },
-                  })
-                : withIdempotencyKey((headers) =>
-                    c.documents.createDraft({
-                      params: { workspaceId: ws.id },
-                      headers,
-                      payload: built.input,
-                    }),
-                  ),
-            (doc): Message => Message.SavedDocument({ doc, action: "draft" }),
+              c.documents.preview({
+                params: { workspaceId: ws.id },
+                payload: built.input,
+              }),
+            (doc): Message => Message.GotPreview({ seq, doc }),
+            (failure): Message => Message.FailedPreview({ seq, failure }),
+          ),
+        ],
+      };
+    },
+    GotPreview: ({ seq, doc }) => {
+      if (seq !== model.previewSeq) return { model };
+      const local = computePreview(model, regime);
+      const calcDrift =
+        local !== null && !BigDecimal.equals(local.breakdown.gross.amount, doc.totals.gross.amount);
+      return {
+        model: {
+          ...model,
+          serverPreview: { _tag: "Loaded", seq: Remote.seqOf(model.serverPreview), data: doc },
+          calcDrift,
+        },
+      };
+    },
+    FailedPreview: ({ seq, failure }) => {
+      if (seq !== model.previewSeq) return { model };
+      return {
+        model: {
+          ...model,
+          serverPreview: { _tag: "Failed", seq: Remote.seqOf(model.serverPreview), failure },
+        },
+      };
+    },
+    AutosaveDue: ({ seq }) => {
+      if (
+        ws === null ||
+        seq !== model.autosaveSeq ||
+        !model.dirty ||
+        model.submitting ||
+        model.editingStatus === "issued" ||
+        !canRole(ws.role, "document.draft")
+      ) {
+        return { model };
+      }
+      const built = buildDocumentInput(model, ctx.locale);
+      if (!built.ok) return { model };
+      const isExistingDraft = model.editingId !== null && model.editingRevision !== null;
+      if (isExistingDraft) {
+        return runAutosaveWithKey(model, ws.id, built.input, seq, model.pendingWriteKey ?? "");
+      }
+      if (model.pendingWriteKey !== null && model.pendingWriteIntent === "autosave") {
+        return runAutosaveWithKey(model, ws.id, built.input, seq, model.pendingWriteKey);
+      }
+      return {
+        model: { ...model, autosaveStatus: "saving", autosaveError: null },
+        commands: [
+          mintRequestKeyCommand("MintAutosaveKey", (key) =>
+            Message.GotRequestKey({ intent: "autosave", key }),
+          ),
+        ],
+      };
+    },
+    AutosaveSucceeded: ({ seq, doc }) => ({
+      model: {
+        ...model,
+        editingId: doc.id,
+        editingStatus: doc.status,
+        editingRevision: doc.revision,
+        dirty: seq === model.autosaveSeq ? false : model.dirty,
+        autosaveStatus: seq === model.autosaveSeq ? "saved" : model.autosaveStatus,
+        autosaveError: null,
+        pendingWriteKey: model.pendingWriteIntent === "autosave" ? null : model.pendingWriteKey,
+        pendingWriteIntent:
+          model.pendingWriteIntent === "autosave" ? null : model.pendingWriteIntent,
+      },
+    }),
+    AutosaveFailed: ({ seq, failure }) => ({
+      model: {
+        ...model,
+        autosaveStatus: seq === model.autosaveSeq ? "failed" : model.autosaveStatus,
+        autosaveError: textOf(translator(ctx.locale), failure.text),
+        pendingWriteKey: failure.retryable ? model.pendingWriteKey : null,
+        pendingWriteIntent: failure.retryable ? model.pendingWriteIntent : null,
+      },
+    }),
+    GotRequestKey: ({ intent, key }) => {
+      if (ws === null) return { model };
+      const built = buildDocumentInput(model, ctx.locale);
+      if (!built.ok) {
+        return { model: { ...model, submitting: false, submitError: built.error } };
+      }
+      if (intent === "save_draft") return runSaveDraftWithKey(model, ws.id, built.input, key);
+      if (intent === "issue") return runIssueWithKey(model, ws.id, built.input, key);
+      return runAutosaveWithKey(model, ws.id, built.input, model.autosaveSeq, key);
+    },
+    DraftPersistedForIssue: ({ doc, key }) => {
+      if (ws === null) return { model };
+      return {
+        model: {
+          ...model,
+          editingId: doc.id,
+          editingStatus: doc.status,
+          editingRevision: doc.revision,
+          dirty: false,
+          submitting: true,
+          pendingWriteKey: key,
+          pendingWriteIntent: "issue",
+        },
+        commands: [
+          apiCommand(
+            "IssuePersistedDraft",
+            (c) =>
+              c.documents.issueDraft({
+                params: { workspaceId: ws.id, documentId: doc.id },
+                headers: { ...idempotencyHeaders(key), ...ifMatch(doc.revision) },
+                payload: {},
+              }),
+            (issued): Message => Message.SavedDocument({ doc: issued, action: "issue" }),
             (failure): Message => Message.FailedSubmit({ failure }),
           ),
         ],
       };
     },
-    ClickedIssue: () => {
-      if (ws === null || model.submitting) return { model };
+    ClickedSaveDraft: () => {
+      if (ws === null || model.submitting || !canRole(ws.role, "document.draft")) return { model };
       const built = buildDocumentInput(model, ctx.locale);
       if (!built.ok) return { model: { ...model, submitError: built.error } };
-      const isExistingDraft =
-        model.editingId !== null &&
-        model.editingStatus === "draft" &&
-        model.editingRevision !== null;
-      const editId = model.editingId as DocumentId;
-      const editRev = model.editingRevision ?? 1;
+      const isExistingDraft = model.editingId !== null && model.editingRevision !== null;
+      if (isExistingDraft) {
+        return runSaveDraftWithKey(model, ws.id, built.input, model.pendingWriteKey ?? "");
+      }
+      if (model.pendingWriteKey !== null && model.pendingWriteIntent === "save_draft") {
+        return runSaveDraftWithKey(model, ws.id, built.input, model.pendingWriteKey);
+      }
       return {
         model: { ...model, submitting: true, submitError: null },
         commands: [
-          apiCommand(
-            "IssueDocument",
-            (c) =>
-              withIdempotencyKey((idemp) =>
-                isExistingDraft
-                  ? c.documents.issueDraft({
-                      params: { workspaceId: ws.id, documentId: editId },
-                      headers: { ...idemp, ...ifMatch(editRev) },
-                      payload: {},
-                    })
-                  : c.documents.issueFromInput({
-                      params: { workspaceId: ws.id },
-                      headers: idemp,
-                      payload: { input: built.input },
-                    }),
-              ),
-            (doc): Message => Message.SavedDocument({ doc, action: "issue" }),
-            (failure): Message => Message.FailedSubmit({ failure }),
+          mintRequestKeyCommand("MintDraftKey", (key) =>
+            Message.GotRequestKey({ intent: "save_draft", key }),
+          ),
+        ],
+      };
+    },
+    ClickedIssue: () => {
+      if (ws === null || model.submitting || !canRole(ws.role, "document.issue")) return { model };
+      const built = buildDocumentInput(model, ctx.locale);
+      if (!built.ok) return { model: { ...model, submitError: built.error } };
+      if (model.pendingWriteKey !== null && model.pendingWriteIntent === "issue") {
+        return runIssueWithKey(model, ws.id, built.input, model.pendingWriteKey);
+      }
+      return {
+        model: { ...model, submitting: true, submitError: null },
+        commands: [
+          mintRequestKeyCommand("MintIssueKey", (key) =>
+            Message.GotRequestKey({ intent: "issue", key }),
           ),
         ],
       };
@@ -1026,28 +1386,19 @@ export const update = (
         ws === null ||
         model.submitting ||
         model.editingId === null ||
-        model.editingRevision === null
+        model.editingRevision === null ||
+        !canRole(ws.role, "document.edit")
       ) {
         return { model };
       }
       const built = buildDocumentInput(model, ctx.locale);
       if (!built.ok) return { model: { ...model, submitError: built.error } };
+      const allowNumberOverride = canRole(ws.role, "document.overrideNumber");
       const patch: DocumentPatch = {
-        contact: built.input.contact,
-        lines: built.input.lines,
-        currency: built.input.currency,
-        issuedOn: built.input.issuedOn,
-        taxableSupplyOn: built.input.taxableSupplyOn,
-        due: built.input.due,
-        language: built.input.language,
-        bankAccount: built.input.bankAccount,
-        pricesIncludeVat: built.input.pricesIncludeVat,
-        variableSymbol: built.input.variableSymbol,
-        orderNumber: built.input.orderNumber,
-        note: built.input.note,
-        paymentMethod: built.input.paymentMethod,
-        fx: built.input.fx ?? null,
-        ...(model.numberOverride.trim() === "" ? {} : { number: model.numberOverride.trim() }),
+        ...buildDraftPatch(built.input),
+        ...(allowNumberOverride && model.numberOverride.trim() !== ""
+          ? { number: model.numberOverride.trim() }
+          : {}),
         ...(model.refreshParties ? { refreshParties: true } : {}),
       };
       const editId = model.editingId as DocumentId;
@@ -1070,20 +1421,29 @@ export const update = (
       };
     },
     SavedDocument: ({ doc, action }) => ({
-      model: { ...model, submitting: false, submitError: null },
+      model: {
+        ...model,
+        editingId: doc.id,
+        editingStatus: doc.status,
+        editingRevision: doc.revision,
+        dirty: false,
+        pendingWriteKey: null,
+        pendingWriteIntent: null,
+        submitting: false,
+        submitError: null,
+      },
       outMessage: Intent_.navigate(
         href({ _tag: "Document", ws: route.ws, id: doc.id, tab: "preview" }),
       ),
-      commands: [
-        // Navigate first; toast is shown by detail or caller if desired.
-        ...(action === "draft" || action === "issue" || action === "edit" ? [] : []),
-      ],
+      commands: [...(action === "draft" || action === "issue" || action === "edit" ? [] : [])],
     }),
     FailedSubmit: ({ failure }) => ({
       model: {
         ...model,
         submitting: false,
         submitError: textOf(translator(ctx.locale), failure.text),
+        pendingWriteKey: failure.retryable ? model.pendingWriteKey : null,
+        pendingWriteIntent: failure.retryable ? model.pendingWriteIntent : null,
       },
     }),
     ClickedRetry: () => {
@@ -1094,7 +1454,7 @@ export const update = (
         commands: [loadLookupsCommand(ws.id, route, Remote.seqOf(lookups))],
       };
     },
-  });
+  } satisfies MessageHandlers<Message, PageReturn<Model, Message>>);
 };
 
 export const title = (model: Model, ctx: PageContext): string => {
@@ -1141,7 +1501,7 @@ const computePreview = (model: Model, regime: TaxRegime): ViewModels.LivePreview
   return Result.isSuccess(res) ? res.success : null;
 };
 
-export const view = Submodel.defineView<Model, Message, PageContext>((model, ctx, h) => {
+export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
   const { locale } = ctx;
   const t = translator(locale);
   const ws = ctx.workspace;
@@ -1153,6 +1513,25 @@ export const view = Submodel.defineView<Model, Message, PageContext>((model, ctx
   const data = Remote.dataOf(model.lookups);
   const effective = resolveEffective(model);
   const preview = computePreview(model, regime);
+  const serverDoc = Remote.dataOf(model.serverPreview);
+  const displayTotals =
+    serverDoc !== undefined
+      ? {
+          net: serverDoc.totals.net,
+          vat: serverDoc.totals.vat,
+          gross: serverDoc.totals.gross,
+          vatCzk: serverDoc.totals.vatCzk,
+          roundingAdjustment: preview?.breakdown.roundingAdjustment ?? null,
+        }
+      : preview !== null
+        ? {
+            net: preview.breakdown.net,
+            vat: preview.breakdown.vat,
+            gross: preview.breakdown.gross,
+            vatCzk: preview.breakdown.vatCzk,
+            roundingAdjustment: preview.breakdown.roundingAdjustment,
+          }
+        : null;
   const isIssuedEdit = model.editingStatus === "issued";
   const selectedContact = data?.contacts.find((c) => c.id === model.contactId);
   const cnbFx = Remote.dataOf(model.fxLookup);
@@ -1258,540 +1637,468 @@ export const view = Submodel.defineView<Model, Message, PageContext>((model, ctx
   const formColumn =
     data === undefined
       ? card(h, [
-          h.div(
-            [h.Class("kb-stack"), h.AriaBusy(true)],
-            [
+          h.div
+            .class("kb-stack")
+            .attr("aria-busy", String(true))
+            .children([
               skeleton(h, "40%", "1.2rem"),
               skeleton(h, "100%", "2.5rem"),
               skeleton(h, "100%", "6rem"),
-            ],
-          ),
+            ]),
         ])
-      : h.div(
-          [h.Class("kb-stack")],
-          [
-            // Quick template start (only for new documents)
-            ...(route._tag === "DocumentNew" && data.templates.length > 0
+      : h.div.class("kb-stack").children([
+          // Quick template start (only for new documents)
+          ...(route._tag === "DocumentNew" && data.templates.length > 0
+            ? [
+                card(
+                  h,
+                  [
+                    selectField(h, {
+                      id: "editor-template",
+                      label: txt(locale, "quickTemplate"),
+                      value: "",
+                      onChange: (templateId) => Message.SelectedTemplate({ templateId }),
+                      options: [
+                        { value: "", label: txt(locale, "quickTemplateNone") },
+                        ...data.templates.map((tpl) => ({ value: tpl.id, label: tpl.name })),
+                      ],
+                    }),
+                  ],
+                  [],
+                  true,
+                ),
+              ]
+            : []),
+          // Customer + ARES quick-add
+          card(h, [
+            cardTitle(h, txt(locale, "sectionCustomer"), [
+              button(h, {
+                label: txt(locale, "aresToggle"),
+                onClick: Message.ToggledAres(),
+                small: true,
+              }),
+            ]),
+            selectField(h, {
+              id: "editor-contact",
+              label: txt(locale, "customerLabel"),
+              value: model.contactId,
+              onChange: (contactId) => Message.SelectedContact({ contactId }),
+              options: [
+                { value: "", label: txt(locale, "customerPlaceholder") },
+                ...data.contacts.map((c) => ({
+                  value: c.id,
+                  label: c.ico !== null ? `${c.name} (${c.ico})` : c.name,
+                })),
+              ],
+            }),
+            ...(model.aresOpen
               ? [
-                  card(
-                    h,
-                    [
-                      selectField(h, {
-                        id: "editor-template",
-                        label: txt(locale, "quickTemplate"),
-                        value: "",
-                        onChange: (templateId) => Message.SelectedTemplate({ templateId }),
-                        options: [
-                          { value: "", label: txt(locale, "quickTemplateNone") },
-                          ...data.templates.map((tpl) => ({ value: tpl.id, label: tpl.name })),
-                        ],
+                  h.div.class("kb-ares-box").children([
+                    h.div.class("kb-row").children([
+                      textField(h, {
+                        id: "editor-ares-ico",
+                        label: txt(locale, "aresIcoLabel"),
+                        value: model.aresIco,
+                        onInput: (value) => Message.ChangedAresIco({ value }),
+                        placeholder: txt(locale, "aresIcoPlaceholder"),
+                        mono: true,
+                        error: model.aresError ?? undefined,
                       }),
-                    ],
-                    [],
-                    true,
-                  ),
+                      button(h, {
+                        label: txt(locale, "aresLookup"),
+                        onClick: Message.SubmittedAres(),
+                        variant: "primary",
+                        busy: model.aresBusy,
+                      }),
+                    ]),
+                  ]),
                 ]
               : []),
-            // Customer + ARES quick-add
-            card(h, [
-              cardTitle(h, txt(locale, "sectionCustomer"), [
-                button(h, {
-                  label: txt(locale, "aresToggle"),
-                  onClick: Message.ToggledAres(),
-                  small: true,
+          ]),
+          // Dates
+          card(h, [
+            cardTitle(h, txt(locale, "sectionDates")),
+            h.div.class("kb-editor-form-grid kb-editor-form-grid--3").children([
+              textField(h, {
+                id: "editor-issued-on",
+                label: txt(locale, "issuedOn"),
+                type: "date",
+                value: model.issuedOn,
+                onInput: (value) => Message.ChangedIssuedOn({ value }),
+              }),
+              textField(h, {
+                id: "editor-duzp",
+                label: txt(locale, "taxableSupplyOn"),
+                type: "date",
+                value: model.taxableSupplyOn,
+                onInput: (value) => Message.ChangedTaxableSupplyOn({ value }),
+              }),
+              h.div.class("kb-stack").children([
+                h.div.class("kb-editor-field-head").children([
+                  h.label
+                    .class("kb-field__label")
+                    .attr("for", "editor-due-days")
+                    .children([txt(locale, "dueDays")]),
+                  sourceBadge(h, locale, effective.dueDays.source),
+                ]),
+                h.input
+                  .class("kb-input kb-num")
+                  .id("editor-due-days")
+                  .attr("type", "number")
+                  .value(model.dueDaysOverride ?? String(effective.dueDays.value))
+                  .on("input", ({ value }) => Message.ChangedDueDays({ value })),
+                h.span
+                  .class("kb-field__hint kb-num")
+                  .children([txt(locale, "dueDateHint", { date: fmtDate(locale, computedDue) })]),
+              ]),
+            ]),
+          ]),
+          // Billing details with override source badges
+          card(h, [
+            cardTitle(h, txt(locale, "sectionBilling")),
+            h.div.class("kb-editor-form-grid").children([
+              // Currency
+              h.div.class("kb-field").children([
+                h.div.class("kb-editor-field-head").children([
+                  h.label
+                    .class("kb-field__label")
+                    .attr("for", "editor-currency")
+                    .children([txt(locale, "currency")]),
+                  h.div.class("kb-row").children([
+                    sourceBadge(h, locale, effective.currency.source),
+                    ...(effective.currency.overridden
+                      ? [
+                          button(h, {
+                            label: txt(locale, "clearOverride"),
+                            onClick: Message.ClearedCurrency(),
+                            variant: "ghost",
+                            small: true,
+                          }),
+                        ]
+                      : []),
+                  ]),
+                ]),
+                select(h, {
+                  id: "editor-currency",
+                  label: txt(locale, "currency"),
+                  value: effective.currency.value,
+                  onChange: (value) => Message.ChangedCurrency({ value }),
+                  options: [
+                    { value: "CZK", label: "CZK" },
+                    { value: "EUR", label: "EUR" },
+                    { value: "USD", label: "USD" },
+                    { value: "GBP", label: "GBP" },
+                  ],
                 }),
               ]),
+              // Language
+              h.div.class("kb-field").children([
+                h.div.class("kb-editor-field-head").children([
+                  h.label
+                    .class("kb-field__label")
+                    .attr("for", "editor-language")
+                    .children([txt(locale, "language")]),
+                  sourceBadge(h, locale, effective.language.source),
+                ]),
+                select(h, {
+                  id: "editor-language",
+                  label: txt(locale, "language"),
+                  value: effective.language.value,
+                  onChange: (value) => Message.ChangedLanguage({ value }),
+                  options: [
+                    { value: "cs", label: textOf(t, I18n.enumText("locale", "cs")) },
+                    { value: "en", label: textOf(t, I18n.enumText("locale", "en")) },
+                  ],
+                }),
+              ]),
+              // Payment method
+              h.div.class("kb-field").children([
+                h.div.class("kb-editor-field-head").children([
+                  h.label
+                    .class("kb-field__label")
+                    .attr("for", "editor-pm")
+                    .children([txt(locale, "paymentMethod")]),
+                  sourceBadge(h, locale, effective.paymentMethod.source),
+                ]),
+                select(h, {
+                  id: "editor-pm",
+                  label: txt(locale, "paymentMethod"),
+                  value: effective.paymentMethod.value,
+                  onChange: (value) => Message.ChangedPaymentMethod({ value }),
+                  options: [
+                    {
+                      value: "bank_transfer",
+                      label: textOf(t, I18n.enumText("paymentMethod", "bank_transfer")),
+                    },
+                    {
+                      value: "cash",
+                      label: textOf(t, I18n.enumText("paymentMethod", "cash")),
+                    },
+                    {
+                      value: "card",
+                      label: textOf(t, I18n.enumText("paymentMethod", "card")),
+                    },
+                    {
+                      value: "other",
+                      label: textOf(t, I18n.enumText("paymentMethod", "other")),
+                    },
+                  ],
+                }),
+              ]),
+              // Numbering series (drafts only)
+              ...(isIssuedEdit
+                ? [
+                    textField(h, {
+                      id: "editor-number-override",
+                      label: txt(locale, "numberOverride"),
+                      value: model.numberOverride,
+                      onInput: (value) => Message.ChangedNumberOverride({ value }),
+                      mono: true,
+                    }),
+                  ]
+                : [
+                    h.div.class("kb-field").children([
+                      h.div.class("kb-editor-field-head").children([
+                        h.label
+                          .class("kb-field__label")
+                          .attr("for", "editor-series")
+                          .children([txt(locale, "series")]),
+                        sourceBadge(h, locale, effective.series.source),
+                      ]),
+                      select(h, {
+                        id: "editor-series",
+                        label: txt(locale, "series"),
+                        value: effective.series.value ?? "",
+                        onChange: (value) => Message.ChangedSeries({ value }),
+                        options: [
+                          { value: "", label: txt(locale, "seriesDefault") },
+                          ...data.series
+                            .filter((s) => s.kind === model.kind)
+                            .map((s) => ({
+                              value: s.id,
+                              label: `${s.name} (${s.nextNumber})`,
+                            })),
+                        ],
+                      }),
+                    ]),
+                  ]),
+              // Bank account
               selectField(h, {
-                id: "editor-contact",
-                label: txt(locale, "customerLabel"),
-                value: model.contactId,
-                onChange: (contactId) => Message.SelectedContact({ contactId }),
+                id: "editor-bank",
+                label: txt(locale, "bankAccount"),
+                value: model.bankAccountId,
+                onChange: (value) => Message.ChangedBankAccount({ value }),
                 options: [
-                  { value: "", label: txt(locale, "customerPlaceholder") },
-                  ...data.contacts.map((c) => ({
-                    value: c.id,
-                    label: c.ico !== null ? `${c.name} (${c.ico})` : c.name,
+                  { value: "", label: txt(locale, "bankAccountAuto") },
+                  ...data.bankAccounts.map((b) => ({
+                    value: b.id,
+                    label: `${b.name ?? b.iban ?? b.accountNumber ?? b.id} (${b.currency})`,
                   })),
                 ],
               }),
-              ...(model.aresOpen
-                ? [
-                    h.div(
-                      [h.Class("kb-ares-box")],
-                      [
-                        h.div(
-                          [h.Class("kb-row")],
-                          [
-                            textField(h, {
-                              id: "editor-ares-ico",
-                              label: txt(locale, "aresIcoLabel"),
-                              value: model.aresIco,
-                              onInput: (value) => Message.ChangedAresIco({ value }),
-                              placeholder: txt(locale, "aresIcoPlaceholder"),
-                              mono: true,
-                              error: model.aresError ?? undefined,
-                            }),
-                            button(h, {
-                              label: txt(locale, "aresLookup"),
-                              onClick: Message.SubmittedAres(),
-                              variant: "primary",
-                              busy: model.aresBusy,
-                            }),
-                          ],
-                        ),
-                      ],
-                    ),
-                  ]
-                : []),
-            ]),
-            // Dates
-            card(h, [
-              cardTitle(h, txt(locale, "sectionDates")),
-              h.div(
-                [h.Class("kb-editor-form-grid kb-editor-form-grid--3")],
-                [
-                  textField(h, {
-                    id: "editor-issued-on",
-                    label: txt(locale, "issuedOn"),
-                    type: "date",
-                    value: model.issuedOn,
-                    onInput: (value) => Message.ChangedIssuedOn({ value }),
-                  }),
-                  textField(h, {
-                    id: "editor-duzp",
-                    label: txt(locale, "taxableSupplyOn"),
-                    type: "date",
-                    value: model.taxableSupplyOn,
-                    onInput: (value) => Message.ChangedTaxableSupplyOn({ value }),
-                  }),
-                  h.div(
-                    [h.Class("kb-stack")],
-                    [
-                      h.div(
-                        [h.Class("kb-editor-field-head")],
-                        [
-                          h.label(
-                            [h.Class("kb-field__label"), h.For("editor-due-days")],
-                            [txt(locale, "dueDays")],
-                          ),
-                          sourceBadge(h, locale, effective.dueDays.source),
-                        ],
-                      ),
-                      h.input([
-                        h.Class("kb-input kb-num"),
-                        h.Id("editor-due-days"),
-                        h.Type("number"),
-                        h.Value(model.dueDaysOverride ?? String(effective.dueDays.value)),
-                        h.OnInput((value) => Message.ChangedDueDays({ value })),
-                      ]),
-                      h.span(
-                        [h.Class("kb-field__hint kb-num")],
-                        [txt(locale, "dueDateHint", { date: fmtDate(locale, computedDue) })],
-                      ),
-                    ],
-                  ),
-                ],
-              ),
-            ]),
-            // Billing details with override source badges
-            card(h, [
-              cardTitle(h, txt(locale, "sectionBilling")),
-              h.div(
-                [h.Class("kb-editor-form-grid")],
-                [
-                  // Currency
-                  h.div(
-                    [h.Class("kb-field")],
-                    [
-                      h.div(
-                        [h.Class("kb-editor-field-head")],
-                        [
-                          h.label(
-                            [h.Class("kb-field__label"), h.For("editor-currency")],
-                            [txt(locale, "currency")],
-                          ),
-                          h.div(
-                            [h.Class("kb-row")],
-                            [
-                              sourceBadge(h, locale, effective.currency.source),
-                              ...(effective.currency.overridden
-                                ? [
-                                    button(h, {
-                                      label: txt(locale, "clearOverride"),
-                                      onClick: Message.ClearedCurrency(),
-                                      variant: "ghost",
-                                      small: true,
-                                    }),
-                                  ]
-                                : []),
-                            ],
-                          ),
-                        ],
-                      ),
-                      select(h, {
-                        id: "editor-currency",
-                        label: txt(locale, "currency"),
-                        value: effective.currency.value,
-                        onChange: (value) => Message.ChangedCurrency({ value }),
-                        options: [
-                          { value: "CZK", label: "CZK" },
-                          { value: "EUR", label: "EUR" },
-                          { value: "USD", label: "USD" },
-                          { value: "GBP", label: "GBP" },
-                        ],
-                      }),
-                    ],
-                  ),
-                  // Language
-                  h.div(
-                    [h.Class("kb-field")],
-                    [
-                      h.div(
-                        [h.Class("kb-editor-field-head")],
-                        [
-                          h.label(
-                            [h.Class("kb-field__label"), h.For("editor-language")],
-                            [txt(locale, "language")],
-                          ),
-                          sourceBadge(h, locale, effective.language.source),
-                        ],
-                      ),
-                      select(h, {
-                        id: "editor-language",
-                        label: txt(locale, "language"),
-                        value: effective.language.value,
-                        onChange: (value) => Message.ChangedLanguage({ value }),
-                        options: [
-                          { value: "cs", label: textOf(t, I18n.enumText("locale", "cs")) },
-                          { value: "en", label: textOf(t, I18n.enumText("locale", "en")) },
-                        ],
-                      }),
-                    ],
-                  ),
-                  // Payment method
-                  h.div(
-                    [h.Class("kb-field")],
-                    [
-                      h.div(
-                        [h.Class("kb-editor-field-head")],
-                        [
-                          h.label(
-                            [h.Class("kb-field__label"), h.For("editor-pm")],
-                            [txt(locale, "paymentMethod")],
-                          ),
-                          sourceBadge(h, locale, effective.paymentMethod.source),
-                        ],
-                      ),
-                      select(h, {
-                        id: "editor-pm",
-                        label: txt(locale, "paymentMethod"),
-                        value: effective.paymentMethod.value,
-                        onChange: (value) => Message.ChangedPaymentMethod({ value }),
-                        options: [
-                          {
-                            value: "bank_transfer",
-                            label: textOf(t, I18n.enumText("paymentMethod", "bank_transfer")),
-                          },
-                          {
-                            value: "cash",
-                            label: textOf(t, I18n.enumText("paymentMethod", "cash")),
-                          },
-                          {
-                            value: "card",
-                            label: textOf(t, I18n.enumText("paymentMethod", "card")),
-                          },
-                          {
-                            value: "other",
-                            label: textOf(t, I18n.enumText("paymentMethod", "other")),
-                          },
-                        ],
-                      }),
-                    ],
-                  ),
-                  // Numbering series (drafts only)
-                  ...(isIssuedEdit
-                    ? [
-                        textField(h, {
-                          id: "editor-number-override",
-                          label: txt(locale, "numberOverride"),
-                          value: model.numberOverride,
-                          onInput: (value) => Message.ChangedNumberOverride({ value }),
-                          mono: true,
-                        }),
-                      ]
-                    : [
-                        h.div(
-                          [h.Class("kb-field")],
-                          [
-                            h.div(
-                              [h.Class("kb-editor-field-head")],
-                              [
-                                h.label(
-                                  [h.Class("kb-field__label"), h.For("editor-series")],
-                                  [txt(locale, "series")],
-                                ),
-                                sourceBadge(h, locale, effective.series.source),
-                              ],
-                            ),
-                            select(h, {
-                              id: "editor-series",
-                              label: txt(locale, "series"),
-                              value: effective.series.value ?? "",
-                              onChange: (value) => Message.ChangedSeries({ value }),
-                              options: [
-                                { value: "", label: txt(locale, "seriesDefault") },
-                                ...data.series
-                                  .filter((s) => s.kind === model.kind)
-                                  .map((s) => ({
-                                    value: s.id,
-                                    label: `${s.name} (${s.nextNumber})`,
-                                  })),
-                              ],
-                            }),
-                          ],
-                        ),
-                      ]),
-                  // Bank account
-                  selectField(h, {
-                    id: "editor-bank",
-                    label: txt(locale, "bankAccount"),
-                    value: model.bankAccountId,
-                    onChange: (value) => Message.ChangedBankAccount({ value }),
-                    options: [
-                      { value: "", label: txt(locale, "bankAccountAuto") },
-                      ...data.bankAccounts.map((b) => ({
-                        value: b.id,
-                        label: `${b.name ?? b.iban ?? b.accountNumber ?? b.id} (${b.currency})`,
-                      })),
-                    ],
-                  }),
-                  textField(h, {
-                    id: "editor-vs",
-                    label: txt(locale, "variableSymbol"),
-                    value: model.variableSymbol,
-                    onInput: (value) => Message.ChangedVariableSymbol({ value }),
-                    mono: true,
-                  }),
-                  textField(h, {
-                    id: "editor-order",
-                    label: txt(locale, "orderNumber"),
-                    value: model.orderNumber,
-                    onInput: (value) => Message.ChangedOrderNumber({ value }),
-                    mono: true,
-                  }),
-                ],
-              ),
-              h.div(
-                [h.Class("kb-row")],
-                [
-                  ...(regime === "vat_payer"
-                    ? [
-                        checkbox(h, {
-                          id: "editor-incl-vat",
-                          label: txt(locale, "pricesIncludeVat"),
-                          checked: model.pricesIncludeVat,
-                          onToggle: (checked) => Message.ToggledPricesIncludeVat({ checked }),
-                        }),
-                      ]
-                    : []),
-                  ...(isIssuedEdit
-                    ? [
-                        checkbox(h, {
-                          id: "editor-refresh-parties",
-                          label: txt(locale, "refreshParties"),
-                          checked: model.refreshParties,
-                          onToggle: (checked) => Message.ToggledRefreshParties({ checked }),
-                        }),
-                      ]
-                    : []),
-                ],
-              ),
-              // FX section for non-CZK
-              ...(effective.currency.value !== "CZK"
-                ? [
-                    h.hr([h.Class("kb-divider")]),
-                    h.div(
-                      [h.Class("kb-stack")],
-                      [
-                        h.div(
-                          [h.Class("kb-spread")],
-                          [
-                            h.strong([], [txt(locale, "fxSection")]),
-                            checkbox(h, {
-                              id: "editor-manual-fx",
-                              label: txt(locale, "fxManualToggle"),
-                              checked: model.manualFx,
-                              onToggle: (checked) => Message.ToggledManualFx({ checked }),
-                            }),
-                          ],
-                        ),
-                        ...(model.manualFx
-                          ? [
-                              h.div(
-                                [h.Class("kb-editor-form-grid")],
-                                [
-                                  textField(h, {
-                                    id: "editor-fx-rate",
-                                    label: txt(locale, "fxRate"),
-                                    value: model.fxRateInput,
-                                    onInput: (value) => Message.ChangedFxRate({ value }),
-                                    mono: true,
-                                  }),
-                                  textField(h, {
-                                    id: "editor-fx-qty",
-                                    label: txt(locale, "fxQuantity"),
-                                    type: "number",
-                                    value: model.fxQuantityInput,
-                                    onInput: (value) => Message.ChangedFxQuantity({ value }),
-                                    mono: true,
-                                  }),
-                                ],
-                              ),
-                            ]
-                          : cnbFx !== undefined
-                            ? [
-                                h.p(
-                                  [h.Class("kb-small kb-muted kb-num")],
-                                  [
-                                    txt(locale, "fxCnbNote", {
-                                      date: fmtDate(locale, cnbFx.fixingDate),
-                                      qty: cnbFx.quantity,
-                                      cur: cnbFx.currency,
-                                      rate: fmtNum(locale, cnbFx.rate, 3),
-                                    }),
-                                  ],
-                                ),
-                              ]
-                            : []),
-                      ],
-                    ),
-                  ]
-                : []),
-            ]),
-            // Line items
-            card(h, [
-              cardTitle(h, txt(locale, "sectionLines"), [
-                ...(data.priceList.length > 0
-                  ? [
-                      select(h, {
-                        id: "editor-add-pricelist",
-                        label: txt(locale, "addFromPriceList"),
-                        value: "",
-                        onChange: (itemId) => Message.AddedPriceListItem({ itemId }),
-                        options: [
-                          { value: "", label: txt(locale, "addFromPriceList") },
-                          ...data.priceList.map((p) => ({
-                            value: p.id,
-                            label: `${p.name} (${fmtNum(locale, p.unitPrice)} ${p.currency})`,
-                          })),
-                        ],
-                      }),
-                    ]
-                  : []),
-                button(h, {
-                  label: txt(locale, "addLine"),
-                  onClick: Message.AddedLine(),
-                  small: true,
-                }),
-              ]),
-              ...model.lines.map((line, index) =>
-                h.keyed("div")(
-                  line.key,
-                  [h.Class("kb-line-row")],
-                  [
-                    textField(h, {
-                      id: `line-desc-${line.key}`,
-                      label: txt(locale, "lineDesc"),
-                      value: line.description,
-                      onInput: (value) =>
-                        Message.UpdatedLineField({ key: line.key, field: "description", value }),
-                    }),
-                    textField(h, {
-                      id: `line-qty-${line.key}`,
-                      label: txt(locale, "lineQty"),
-                      value: line.quantity,
-                      onInput: (value) =>
-                        Message.UpdatedLineField({ key: line.key, field: "quantity", value }),
-                      mono: true,
-                    }),
-                    textField(h, {
-                      id: `line-unit-${line.key}`,
-                      label: txt(locale, "lineUnit"),
-                      value: line.unit,
-                      onInput: (value) =>
-                        Message.UpdatedLineField({ key: line.key, field: "unit", value }),
-                    }),
-                    textField(h, {
-                      id: `line-price-${line.key}`,
-                      label: txt(locale, "linePrice"),
-                      value: line.unitPrice,
-                      onInput: (value) =>
-                        Message.UpdatedLineField({ key: line.key, field: "unitPrice", value }),
-                      mono: true,
-                    }),
-                    selectField(h, {
-                      id: `line-vat-${line.key}`,
-                      label: txt(locale, "lineVat"),
-                      value: line.vat,
-                      onChange: (value) =>
-                        Message.UpdatedLineField({ key: line.key, field: "vat", value }),
-                      options: vatOptions,
-                    }),
-                    h.div(
-                      [h.Class("kb-line-actions")],
-                      [
-                        button(h, {
-                          label: "↑",
-                          ariaLabel: txt(locale, "moveUp"),
-                          onClick: Message.MovedLine({ key: line.key, direction: "up" }),
-                          disabled: index === 0,
-                          small: true,
-                        }),
-                        button(h, {
-                          label: "↓",
-                          ariaLabel: txt(locale, "moveDown"),
-                          onClick: Message.MovedLine({ key: line.key, direction: "down" }),
-                          disabled: index === model.lines.length - 1,
-                          small: true,
-                        }),
-                        button(h, {
-                          label: "×",
-                          ariaLabel: txt(locale, "removeLine"),
-                          onClick: Message.RemovedLine({ key: line.key }),
-                          variant: "ghost",
-                          small: true,
-                        }),
-                      ],
-                    ),
-                  ],
-                ),
-              ),
-            ]),
-            // Printed note
-            card(h, [
-              h.div(
-                [h.Class("kb-editor-field-head")],
-                [
-                  h.label(
-                    [h.Class("kb-field__label"), h.For("editor-note")],
-                    [txt(locale, "noteLabel")],
-                  ),
-                  sourceBadge(h, locale, effective.note.source),
-                ],
-              ),
-              textArea(h, {
-                id: "editor-note",
-                label: "",
-                value: model.noteOverride ?? effective.note.value,
-                onInput: (value) => Message.ChangedNote({ value }),
+              textField(h, {
+                id: "editor-vs",
+                label: txt(locale, "variableSymbol"),
+                value: model.variableSymbol,
+                onInput: (value) => Message.ChangedVariableSymbol({ value }),
+                mono: true,
+              }),
+              textField(h, {
+                id: "editor-order",
+                label: txt(locale, "orderNumber"),
+                value: model.orderNumber,
+                onInput: (value) => Message.ChangedOrderNumber({ value }),
+                mono: true,
               }),
             ]),
-          ],
-        );
+            h.div.class("kb-row").children([
+              ...(regime === "vat_payer"
+                ? [
+                    checkbox(h, {
+                      id: "editor-incl-vat",
+                      label: txt(locale, "pricesIncludeVat"),
+                      checked: model.pricesIncludeVat,
+                      onToggle: (checked) => Message.ToggledPricesIncludeVat({ checked }),
+                    }),
+                  ]
+                : []),
+              ...(isIssuedEdit
+                ? [
+                    checkbox(h, {
+                      id: "editor-refresh-parties",
+                      label: txt(locale, "refreshParties"),
+                      checked: model.refreshParties,
+                      onToggle: (checked) => Message.ToggledRefreshParties({ checked }),
+                    }),
+                  ]
+                : []),
+            ]),
+            // FX section for non-CZK
+            ...(effective.currency.value !== "CZK"
+              ? [
+                  h.hr.class("kb-divider"),
+                  h.div.class("kb-stack").children([
+                    h.div.class("kb-spread").children([
+                      h.strong.children([txt(locale, "fxSection")]),
+                      checkbox(h, {
+                        id: "editor-manual-fx",
+                        label: txt(locale, "fxManualToggle"),
+                        checked: model.manualFx,
+                        onToggle: (checked) => Message.ToggledManualFx({ checked }),
+                      }),
+                    ]),
+                    ...(model.manualFx
+                      ? [
+                          h.div.class("kb-editor-form-grid").children([
+                            textField(h, {
+                              id: "editor-fx-rate",
+                              label: txt(locale, "fxRate"),
+                              value: model.fxRateInput,
+                              onInput: (value) => Message.ChangedFxRate({ value }),
+                              mono: true,
+                            }),
+                            textField(h, {
+                              id: "editor-fx-qty",
+                              label: txt(locale, "fxQuantity"),
+                              type: "number",
+                              value: model.fxQuantityInput,
+                              onInput: (value) => Message.ChangedFxQuantity({ value }),
+                              mono: true,
+                            }),
+                          ]),
+                        ]
+                      : cnbFx !== undefined
+                        ? [
+                            h.p.class("kb-small kb-muted kb-num").children([
+                              txt(locale, "fxCnbNote", {
+                                date: fmtDate(locale, cnbFx.fixingDate),
+                                qty: cnbFx.quantity,
+                                cur: cnbFx.currency,
+                                rate: fmtNum(locale, cnbFx.rate, 3),
+                              }),
+                            ]),
+                          ]
+                        : []),
+                  ]),
+                ]
+              : []),
+          ]),
+          // Line items
+          card(h, [
+            cardTitle(h, txt(locale, "sectionLines"), [
+              ...(data.priceList.length > 0
+                ? [
+                    select(h, {
+                      id: "editor-add-pricelist",
+                      label: txt(locale, "addFromPriceList"),
+                      value: "",
+                      onChange: (itemId) => Message.AddedPriceListItem({ itemId }),
+                      options: [
+                        { value: "", label: txt(locale, "addFromPriceList") },
+                        ...data.priceList.map((p) => ({
+                          value: p.id,
+                          label: `${p.name} (${fmtNum(locale, p.unitPrice)} ${p.currency})`,
+                        })),
+                      ],
+                    }),
+                  ]
+                : []),
+              button(h, {
+                label: txt(locale, "addLine"),
+                onClick: Message.AddedLine(),
+                small: true,
+              }),
+            ]),
+            ...model.lines.map((line, index) =>
+              h.div
+                .key(line.key)
+                .class("kb-line-row")
+                .children([
+                  textField(h, {
+                    id: `line-desc-${line.key}`,
+                    label: txt(locale, "lineDesc"),
+                    value: line.description,
+                    onInput: (value) =>
+                      Message.UpdatedLineField({ key: line.key, field: "description", value }),
+                  }),
+                  textField(h, {
+                    id: `line-qty-${line.key}`,
+                    label: txt(locale, "lineQty"),
+                    value: line.quantity,
+                    onInput: (value) =>
+                      Message.UpdatedLineField({ key: line.key, field: "quantity", value }),
+                    mono: true,
+                  }),
+                  textField(h, {
+                    id: `line-unit-${line.key}`,
+                    label: txt(locale, "lineUnit"),
+                    value: line.unit,
+                    onInput: (value) =>
+                      Message.UpdatedLineField({ key: line.key, field: "unit", value }),
+                  }),
+                  textField(h, {
+                    id: `line-price-${line.key}`,
+                    label: txt(locale, "linePrice"),
+                    value: line.unitPrice,
+                    onInput: (value) =>
+                      Message.UpdatedLineField({ key: line.key, field: "unitPrice", value }),
+                    mono: true,
+                  }),
+                  selectField(h, {
+                    id: `line-vat-${line.key}`,
+                    label: txt(locale, "lineVat"),
+                    value: line.vat,
+                    onChange: (value) =>
+                      Message.UpdatedLineField({ key: line.key, field: "vat", value }),
+                    options: vatOptions,
+                  }),
+                  h.div.class("kb-line-actions").children([
+                    button(h, {
+                      label: "↑",
+                      ariaLabel: txt(locale, "moveUp"),
+                      onClick: Message.MovedLine({ key: line.key, direction: "up" }),
+                      disabled: index === 0,
+                      small: true,
+                    }),
+                    button(h, {
+                      label: "↓",
+                      ariaLabel: txt(locale, "moveDown"),
+                      onClick: Message.MovedLine({ key: line.key, direction: "down" }),
+                      disabled: index === model.lines.length - 1,
+                      small: true,
+                    }),
+                    button(h, {
+                      label: "×",
+                      ariaLabel: txt(locale, "removeLine"),
+                      onClick: Message.RemovedLine({ key: line.key }),
+                      variant: "ghost",
+                      small: true,
+                    }),
+                  ]),
+                ]),
+            ),
+          ]),
+          // Printed note
+          card(h, [
+            h.div.class("kb-editor-field-head").children([
+              h.label
+                .class("kb-field__label")
+                .attr("for", "editor-note")
+                .children([txt(locale, "noteLabel")]),
+              sourceBadge(h, locale, effective.note.source),
+            ]),
+            textArea(h, {
+              id: "editor-note",
+              label: "",
+              value: model.noteOverride ?? effective.note.value,
+              onInput: (value) => Message.ChangedNote({ value }),
+            }),
+          ]),
+        ]);
 
-  const previewColumn = h.aside(
-    [h.Class("kb-editor-preview-sticky")],
-    [
+  const previewColumn = h.aside
+    .class("kb-editor-preview-sticky")
+    .children([
       card(h, [
         cardTitle(h, txt(locale, "previewTitle"), [
           badge(
@@ -1800,124 +2107,105 @@ export const view = Submodel.defineView<Model, Message, PageContext>((model, ctx
             model.kind === "proforma" ? "proforma" : "outline",
           ),
         ]),
-        h.div(
-          [h.Class("kb-spread")],
-          [
+        h.div
+          .class("kb-spread")
+          .children([
             mono(h, model.numberOverride || txt(locale, "draftPreviewNumber")),
-            h.span([h.Class("kb-small kb-muted kb-num")], [fmtDate(locale, issuedIso)]),
-          ],
-        ),
-        h.hr([h.Class("kb-divider")]),
-        h.div(
-          [h.Class("kb-stack")],
-          [
-            h.strong([], [selectedContact?.name ?? txt(locale, "customerPlaceholder")]),
+            h.span.class("kb-small kb-muted kb-num").children([fmtDate(locale, issuedIso)]),
+          ]),
+        h.hr.class("kb-divider"),
+        h.div
+          .class("kb-stack")
+          .children([
+            h.strong.children([selectedContact?.name ?? txt(locale, "customerPlaceholder")]),
             ...(selectedContact?.ico !== null && selectedContact?.ico !== undefined
-              ? [h.span([h.Class("kb-small kb-muted kb-mono")], [`IČO ${selectedContact.ico}`])]
+              ? [h.span.class("kb-small kb-muted kb-mono").children([`IČO ${selectedContact.ico}`])]
               : []),
             ...(selectedContact?.dic !== null && selectedContact?.dic !== undefined
-              ? [h.span([h.Class("kb-small kb-muted kb-mono")], [`DIČ ${selectedContact.dic}`])]
+              ? [h.span.class("kb-small kb-muted kb-mono").children([`DIČ ${selectedContact.dic}`])]
               : []),
-          ],
-        ),
-        h.hr([h.Class("kb-divider")]),
-        h.h3([], [txt(locale, "vatSummaryTitle")]),
-        ...(preview === null
+          ]),
+        h.hr.class("kb-divider"),
+        h.h3.children([txt(locale, "vatSummaryTitle")]),
+        ...(displayTotals === null
           ? []
           : [
-              ...(regime === "vat_payer" && preview.breakdown.buckets.length > 0
+              ...(regime === "vat_payer" && preview !== null && preview.breakdown.buckets.length > 0
                 ? [
-                    h.table(
-                      [h.Class("kb-vat-table")],
-                      [
-                        h.thead(
-                          [],
-                          [
-                            h.tr(
-                              [],
-                              [
-                                h.th([], [txt(locale, "vatColRate")]),
-                                h.th([h.Class("kb-end")], [txt(locale, "vatColBase")]),
-                                h.th([h.Class("kb-end")], [txt(locale, "vatColVat")]),
-                                h.th([h.Class("kb-end")], [txt(locale, "vatColTotal")]),
-                              ],
-                            ),
-                          ],
-                        ),
-                        h.tbody(
-                          [],
+                    h.table
+                      .class("kb-vat-table")
+                      .children([
+                        h.thead.children([
+                          h.tr.children([
+                            h.th.children([txt(locale, "vatColRate")]),
+                            h.th.class("kb-end").children([txt(locale, "vatColBase")]),
+                            h.th.class("kb-end").children([txt(locale, "vatColVat")]),
+                            h.th.class("kb-end").children([txt(locale, "vatColTotal")]),
+                          ]),
+                        ]),
+                        h.tbody.children(
                           preview.breakdown.buckets.map((b) =>
-                            h.tr(
-                              [],
-                              [
-                                h.td([], [fmtVatRate(locale, b.ratePercent)]),
-                                h.td([h.Class("kb-end")], [fmtNum(locale, b.base, 2)]),
-                                h.td([h.Class("kb-end")], [fmtNum(locale, b.vat, 2)]),
-                                h.td([h.Class("kb-end")], [fmtNum(locale, b.gross, 2)]),
-                              ],
-                            ),
+                            h.tr.children([
+                              h.td.children([fmtVatRate(locale, b.ratePercent)]),
+                              h.td.class("kb-end").children([fmtNum(locale, b.base, 2)]),
+                              h.td.class("kb-end").children([fmtNum(locale, b.vat, 2)]),
+                              h.td.class("kb-end").children([fmtNum(locale, b.gross, 2)]),
+                            ]),
                           ),
                         ),
-                      ],
-                    ),
+                      ]),
                   ]
                 : []),
-              h.div(
-                [h.Class("kb-stack")],
-                [
-                  h.div(
-                    [h.Class("kb-vat-total-row")],
-                    [
-                      h.span([h.Class("kb-muted")], [txt(locale, "netTotal")]),
-                      amount(h, fmtMoney(locale, preview.breakdown.net)),
-                    ],
-                  ),
+              h.div
+                .class("kb-stack")
+                .children([
+                  h.div
+                    .class("kb-vat-total-row")
+                    .children([
+                      h.span.class("kb-muted").children([txt(locale, "netTotal")]),
+                      amount(h, fmtMoney(locale, displayTotals.net)),
+                    ]),
                   ...(regime === "vat_payer"
                     ? [
-                        h.div(
-                          [h.Class("kb-vat-total-row")],
-                          [
-                            h.span([h.Class("kb-muted")], [txt(locale, "vatTotal")]),
-                            amount(h, fmtMoney(locale, preview.breakdown.vat)),
-                          ],
-                        ),
+                        h.div
+                          .class("kb-vat-total-row")
+                          .children([
+                            h.span.class("kb-muted").children([txt(locale, "vatTotal")]),
+                            amount(h, fmtMoney(locale, displayTotals.vat)),
+                          ]),
                       ]
                     : []),
-                  ...(!BigDecimal.isZero(preview.breakdown.roundingAdjustment.amount)
+                  ...(displayTotals.roundingAdjustment !== null &&
+                  !BigDecimal.isZero(displayTotals.roundingAdjustment.amount)
                     ? [
-                        h.div(
-                          [h.Class("kb-vat-total-row")],
-                          [
-                            h.span([h.Class("kb-muted")], [txt(locale, "roundingAdj")]),
-                            amount(h, fmtMoney(locale, preview.breakdown.roundingAdjustment)),
-                          ],
-                        ),
+                        h.div
+                          .class("kb-vat-total-row")
+                          .children([
+                            h.span.class("kb-muted").children([txt(locale, "roundingAdj")]),
+                            amount(h, fmtMoney(locale, displayTotals.roundingAdjustment)),
+                          ]),
                       ]
                     : []),
-                  h.div(
-                    [h.Class("kb-vat-total-row kb-vat-total-row--grand")],
-                    [
-                      h.span([], [txt(locale, "grandTotal")]),
-                      amount(h, fmtMoney(locale, preview.breakdown.gross)),
-                    ],
-                  ),
-                  ...(preview.breakdown.vatCzk !== null
+                  h.div
+                    .class("kb-vat-total-row kb-vat-total-row--grand")
+                    .children([
+                      h.span.children([txt(locale, "grandTotal")]),
+                      amount(h, fmtMoney(locale, displayTotals.gross)),
+                    ]),
+                  ...(displayTotals.vatCzk !== null
                     ? [
-                        h.div(
-                          [h.Class("kb-vat-total-row kb-small kb-muted")],
-                          [
-                            h.span([], [txt(locale, "vatCzkTotal")]),
-                            amount(h, fmtMoney(locale, preview.breakdown.vatCzk)),
-                          ],
-                        ),
+                        h.div
+                          .class("kb-vat-total-row kb-small kb-muted")
+                          .children([
+                            h.span.children([txt(locale, "vatCzkTotal")]),
+                            amount(h, fmtMoney(locale, displayTotals.vatCzk)),
+                          ]),
                       ]
                     : []),
-                ],
-              ),
+                ]),
             ]),
       ]),
-    ],
-  );
+    ]);
 
   return page(h, [
     pageHeader(h, {
@@ -1927,6 +2215,6 @@ export const view = Submodel.defineView<Model, Message, PageContext>((model, ctx
     }),
     ...errorBanner,
     ...regimeBanner,
-    h.div([h.Class("kb-editor-grid")], [formColumn, previewColumn]),
+    h.div.class("kb-editor-grid").children([formColumn, previewColumn]),
   ]);
-});
+};

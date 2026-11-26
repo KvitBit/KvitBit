@@ -1,16 +1,18 @@
+import { UiSchema } from "@effect/ui";
+import type { Html } from "@effect/ui/html";
 /**
  * Screen 03 — /android download & Obtainium instructions + /app/ PWA link.
  */
 import { ReleaseInfo } from "@kvitbit/api-contract";
 import { Format, ViewModels } from "@kvitbit/ui-port";
 import { Effect, Schema } from "effect";
-import { Command, Submodel } from "foldkit";
-import { defineMessageUnion } from "foldkit/message";
 import { Failure, failureFromUnknown } from "../../app/api";
+import { defineApiCommand } from "../../app/commands";
 import { copy, translator } from "../../app/i18n";
 import { Intent_ } from "../../app/intent";
-import type { PageContext, PageReturn, RouteOf } from "../../app/page";
+import type { MessageHandlers, PageContext, PageReturn, RouteOf } from "../../app/page";
 import * as Remote from "../../app/remote";
+import { svgImage } from "../../ui/html";
 import { icon } from "../../ui/icons";
 import {
   badge,
@@ -35,7 +37,7 @@ export const Model = Schema.Struct({
 });
 export type Model = typeof Model.Type;
 
-export const Message = defineMessageUnion({
+export const Message = UiSchema.TaggedEnum({
   GotRelease: { seq: Remote.Seq, release: ReleaseInfo },
   FailedRelease: { seq: Remote.Seq, failure: Failure },
   ClickedRetry: {},
@@ -109,15 +111,13 @@ const fetchLatestRelease = (seq: Remote.Seq) =>
     ),
   );
 
-const FetchRelease = Command.define("AndroidFetchRelease", {
+const FetchRelease = defineApiCommand("AndroidFetchRelease", {
   args: { seq: Remote.Seq },
-  messages: [Message.GotRelease, Message.FailedRelease],
   execute: ({ seq }) => fetchLatestRelease(seq),
 });
 
-const CopyCmd = Command.define("AndroidCopy", {
+const CopyCmd = defineApiCommand("AndroidCopy", {
   args: { value: Schema.String },
-  messages: [Message.CopiedValue],
   execute: ({ value }) => copyToClipboard(value, (ok) => Message.CopiedValue({ ok })),
 });
 
@@ -135,7 +135,7 @@ export const update = (
   message: Message,
   ctx: PageContext,
 ): PageReturn<Model, Message> =>
-  Message.match<PageReturn<Model, Message>>(message, {
+  Message.match(message, {
     GotRelease: ({ seq, release }) => ({
       model: { ...model, release: Remote.succeed(model.release, seq, release) },
     }),
@@ -158,204 +158,167 @@ export const update = (
       model,
       ...(ok ? { outMessage: Intent_.toast(translator(ctx.locale).t("common.toast.copied")) } : {}),
     }),
-  });
+  } satisfies MessageHandlers<Message, PageReturn<Model, Message>>);
 
 export const title = (_model: Model, ctx: PageContext): string =>
   translator(ctx.locale).t("public.androidDownload.title");
 
-export const view = Submodel.defineView<Model, Message, PageContext>((model, ctx, h) => {
+export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
   const t = translator(ctx.locale);
   const release = Remote.dataOf(model.release);
   const obtainiumHref = release?.obtainiumUrl ?? local(ctx.locale, "defaultObtainium");
 
-  return h.div(
-    [h.Class("kb-android")],
-    [
-      pageHeader(h, {
-        title: t.t("public.androidDownload.title"),
-        subtitle: t.t("public.androidDownload.subtitle"),
-      }),
-      ...(model.release._tag === "Failed"
-        ? [
-            banner(h, {
-              text: t.t("public.androidDownload.releaseFailed"),
-              tone: "error",
-              action: button(h, {
-                label: t.t("common.action.retry"),
-                onClick: Message.ClickedRetry(),
-                small: true,
-              }),
+  return h.div.class("kb-android").children([
+    pageHeader(h, {
+      title: t.t("public.androidDownload.title"),
+      subtitle: t.t("public.androidDownload.subtitle"),
+    }),
+    ...(model.release._tag === "Failed"
+      ? [
+          banner(h, {
+            text: t.t("public.androidDownload.releaseFailed"),
+            tone: "error",
+            action: button(h, {
+              label: t.t("common.action.retry"),
+              onClick: Message.ClickedRetry(),
+              small: true,
             }),
-          ]
-        : []),
-      h.div(
-        [h.Class("kb-android-grid")],
-        [
-          card(h, [
-            cardTitle(
-              h,
-              local(ctx.locale, "directTitle"),
-              release !== undefined
-                ? [
-                    badge(
-                      h,
-                      t.t("public.androidDownload.version", { version: release.version }),
-                      "paid",
-                    ),
-                  ]
-                : [],
-            ),
-            h.div(
-              [h.Class("kb-stack")],
-              [
-                h.p([h.Class("kb-muted")], [local(ctx.locale, "directBody")]),
-                ...(model.release._tag === "Loading"
-                  ? [skeleton(h, "60%", "1.25rem"), skeleton(h, "45%", "2.25rem")]
-                  : release !== undefined
-                    ? [
-                        dl(h, [
-                          [
-                            t.t("public.androidDownload.version", { version: "" }).trim(),
-                            mono(h, `${release.version} (${release.versionCode})`),
-                          ],
-                          [
-                            t.t("public.androidDownload.size", { size: "" }).trim(),
-                            formatBytes(release.sizeBytes),
-                          ],
-                          [
-                            local(ctx.locale, "releasedOn"),
-                            Format.formatDate(ctx.locale, release.releasedAt.slice(0, 10)),
-                          ],
-                          [local(ctx.locale, "minSdk"), `API ${release.minAndroidSdk}+`],
-                        ]),
-                        h.div(
-                          [h.Class("kb-row")],
-                          [
-                            h.a(
-                              [
-                                h.Class("kb-btn kb-btn--primary"),
-                                h.Href(release.apkUrl),
-                                h.Download(`kvitbit-${release.version}.apk`),
-                              ],
-                              [icon(h, "download", 16), t.t("public.androidDownload.download")],
-                            ),
-                          ],
-                        ),
-                      ]
-                    : []),
-              ],
-            ),
-          ]),
-          card(h, [
-            h.div(
-              [h.Class("kb-row")],
-              [
-                h.span([h.Class("kb-obtainium-mark"), h.InnerHTML(OBTAINIUM_MARK_SVG)]),
-                h.h2([], [t.t("public.androidDownload.obtainium.title")]),
-              ],
-            ),
-            h.div(
-              [h.Class("kb-stack"), h.Style({ marginTop: "12px" })],
-              [
-                h.p([h.Class("kb-muted")], [t.t("public.androidDownload.obtainium.body")]),
-                h.div(
-                  [h.Class("kb-stack"), h.Style({ "--kb-gap": "4px" })],
-                  [
-                    h.strong([h.Class("kb-small")], [local(ctx.locale, "obtainiumStepsTitle")]),
-                    h.span([h.Class("kb-small kb-muted")], [local(ctx.locale, "obtainiumStep1")]),
-                    h.span([h.Class("kb-small kb-muted")], [local(ctx.locale, "obtainiumStep2")]),
-                    h.span([h.Class("kb-small kb-muted")], [local(ctx.locale, "obtainiumStep3")]),
-                  ],
+          }),
+        ]
+      : []),
+    h.div.class("kb-android-grid").children([
+      card(h, [
+        cardTitle(
+          h,
+          local(ctx.locale, "directTitle"),
+          release !== undefined
+            ? [
+                badge(
+                  h,
+                  t.t("public.androidDownload.version", { version: release.version }),
+                  "paid",
                 ),
-                h.div(
-                  [h.Class("kb-row")],
-                  [
-                    h.a(
-                      [h.Class("kb-btn kb-btn--primary"), h.Href(obtainiumHref)],
-                      [t.t("public.androidDownload.obtainium.cta")],
-                    ),
-                  ],
-                ),
-              ],
-            ),
+              ]
+            : [],
+        ),
+        h.div.class("kb-stack").children([
+          h.p.class("kb-muted").children([local(ctx.locale, "directBody")]),
+          ...(model.release._tag === "Loading"
+            ? [skeleton(h, "60%", "1.25rem"), skeleton(h, "45%", "2.25rem")]
+            : release !== undefined
+              ? [
+                  dl(h, [
+                    [
+                      t.t("public.androidDownload.version", { version: "" }).trim(),
+                      mono(h, `${release.version} (${release.versionCode})`),
+                    ],
+                    [
+                      t.t("public.androidDownload.size", { size: "" }).trim(),
+                      formatBytes(release.sizeBytes),
+                    ],
+                    [
+                      local(ctx.locale, "releasedOn"),
+                      Format.formatDate(ctx.locale, release.releasedAt.slice(0, 10)),
+                    ],
+                    [local(ctx.locale, "minSdk"), `API ${release.minAndroidSdk}+`],
+                  ]),
+                  h.div.class("kb-row").children([
+                    h.a
+                      .class("kb-btn kb-btn--primary")
+                      .attr("href", release.apkUrl)
+                      .attr("download", `kvitbit-${release.version}.apk`)
+                      .children([icon(h, "download", 16), t.t("public.androidDownload.download")]),
+                  ]),
+                ]
+              : []),
+        ]),
+      ]),
+      card(h, [
+        h.div
+          .class("kb-row")
+          .children([
+            h.img
+              .class("kb-obtainium-mark")
+              .attr("src", svgImage(OBTAINIUM_MARK_SVG))
+              .attr("alt", ""),
+            h.h2.children([t.t("public.androidDownload.obtainium.title")]),
           ]),
-        ],
-      ),
-      ...(release !== undefined
-        ? [
-            card(h, [
-              cardTitle(h, local(ctx.locale, "verifyTitle")),
-              h.div(
-                [h.Class("kb-stack")],
-                [
-                  h.div(
-                    [h.Class("kb-field")],
-                    [
-                      h.span(
-                        [h.Class("kb-field__label")],
-                        [t.t("public.androidDownload.checksum")],
-                      ),
-                      h.div(
-                        [h.Class("kb-checksum-row")],
-                        [
-                          mono(h, release.apkSha256),
-                          button(h, {
-                            label: t.t("public.androidDownload.copyChecksum"),
-                            onClick: Message.ClickedCopy({ value: release.apkSha256 }),
-                            small: true,
-                          }),
-                        ],
-                      ),
-                    ],
-                  ),
-                  h.div(
-                    [h.Class("kb-field")],
-                    [
-                      h.span(
-                        [h.Class("kb-field__label")],
-                        [t.t("public.androidDownload.signingCert")],
-                      ),
-                      h.div(
-                        [h.Class("kb-checksum-row")],
-                        [
-                          mono(h, release.signingCertSha256),
-                          button(h, {
-                            label: local(ctx.locale, "copyCert"),
-                            onClick: Message.ClickedCopy({ value: release.signingCertSha256 }),
-                            small: true,
-                          }),
-                        ],
-                      ),
-                    ],
-                  ),
-                ],
-              ),
+        h.div
+          .class("kb-stack")
+          .style({ marginTop: "12px" })
+          .children([
+            h.p.class("kb-muted").children([t.t("public.androidDownload.obtainium.body")]),
+            h.div
+              .class("kb-stack")
+              .style({ "--kb-gap": "4px" })
+              .children([
+                h.strong.class("kb-small").children([local(ctx.locale, "obtainiumStepsTitle")]),
+                h.span.class("kb-small kb-muted").children([local(ctx.locale, "obtainiumStep1")]),
+                h.span.class("kb-small kb-muted").children([local(ctx.locale, "obtainiumStep2")]),
+                h.span.class("kb-small kb-muted").children([local(ctx.locale, "obtainiumStep3")]),
+              ]),
+            h.div.class("kb-row").children([
+              h.a
+                .class("kb-btn kb-btn--primary")
+                .attr("href", obtainiumHref)
+                .children([t.t("public.androidDownload.obtainium.cta")]),
             ]),
-          ]
-        : []),
-      card(
-        h,
-        [
-          h.div(
-            [h.Class("kb-spread")],
-            [
-              h.div(
-                [h.Class("kb-stack"), h.Style({ "--kb-gap": "4px" })],
-                [
-                  h.h2([], [local(ctx.locale, "pwaTitle")]),
-                  h.p([h.Class("kb-muted")], [local(ctx.locale, "pwaBody")]),
-                ],
-              ),
-              h.a(
-                [h.Class("kb-btn kb-btn--secondary"), h.Href("/app/")],
-                [local(ctx.locale, "pwaCta")],
-              ),
-            ],
-          ),
-        ],
-        [],
-        true,
-      ),
-    ],
-  );
-});
+          ]),
+      ]),
+    ]),
+    ...(release !== undefined
+      ? [
+          card(h, [
+            cardTitle(h, local(ctx.locale, "verifyTitle")),
+            h.div.class("kb-stack").children([
+              h.div.class("kb-field").children([
+                h.span.class("kb-field__label").children([t.t("public.androidDownload.checksum")]),
+                h.div.class("kb-checksum-row").children([
+                  mono(h, release.apkSha256),
+                  button(h, {
+                    label: t.t("public.androidDownload.copyChecksum"),
+                    onClick: Message.ClickedCopy({ value: release.apkSha256 }),
+                    small: true,
+                  }),
+                ]),
+              ]),
+              h.div.class("kb-field").children([
+                h.span
+                  .class("kb-field__label")
+                  .children([t.t("public.androidDownload.signingCert")]),
+                h.div.class("kb-checksum-row").children([
+                  mono(h, release.signingCertSha256),
+                  button(h, {
+                    label: local(ctx.locale, "copyCert"),
+                    onClick: Message.ClickedCopy({ value: release.signingCertSha256 }),
+                    small: true,
+                  }),
+                ]),
+              ]),
+            ]),
+          ]),
+        ]
+      : []),
+    card(
+      h,
+      [
+        h.div.class("kb-spread").children([
+          h.div
+            .class("kb-stack")
+            .style({ "--kb-gap": "4px" })
+            .children([
+              h.h2.children([local(ctx.locale, "pwaTitle")]),
+              h.p.class("kb-muted").children([local(ctx.locale, "pwaBody")]),
+            ]),
+          h.a
+            .class("kb-btn kb-btn--secondary")
+            .attr("href", "/app/")
+            .attr("rel", "external")
+            .children([local(ctx.locale, "pwaCta")]),
+        ]),
+      ],
+      [],
+      true,
+    ),
+  ]);
+};

@@ -1,3 +1,4 @@
+import type { Html } from "@effect/ui/html";
 /**
  * Viewer preference controls: language (cs/en), colour mode, style (Elegant/Cozy), contrast and
  * built-in theme preset. Compact form sits in the top bar and public header; the full form is
@@ -5,19 +6,19 @@
  */
 import { DEFAULT_THEME_PRESET } from "@kvitbit/domain";
 import { Theme } from "@kvitbit/ui-port";
-import type { Html, HtmlBuilder } from "foldkit/html";
 import type { Translator } from "../app/i18n";
 import type { Prefs } from "../app/prefs";
+import type { Markup } from "./html";
 import { select, selectField } from "./kit";
 
 const LOCALE_LABEL = { cs: "Čeština", en: "English" } as const;
 
 export const localeSelect = <M>(
-  h: HtmlBuilder<M>,
+  h: Html.H<M>,
   prefs: Prefs,
   onChange: (p: Prefs) => M,
   id = "kb-locale",
-): Html =>
+): Markup<M> =>
   select(h, {
     id,
     label: prefs.locale === "cs" ? "Jazyk" : "Language",
@@ -30,12 +31,12 @@ export const localeSelect = <M>(
   });
 
 export const modeSelect = <M>(
-  h: HtmlBuilder<M>,
+  h: Html.H<M>,
   t: Translator,
   prefs: Prefs,
   onChange: (p: Prefs) => M,
   id = "kb-mode",
-): Html =>
+): Markup<M> =>
   select(h, {
     id,
     label: t.t("account.appearance.mode"),
@@ -49,26 +50,26 @@ export const modeSelect = <M>(
 
 /** Top-bar cluster: language + mode. */
 export const compactPrefs = <M>(
-  h: HtmlBuilder<M>,
+  h: Html.H<M>,
   t: Translator,
   prefs: Prefs,
   onChange: (p: Prefs) => M,
-): Html =>
-  h.div(
-    [h.Class("kb-prefs")],
-    [localeSelect(h, prefs, onChange), modeSelect(h, t, prefs, onChange)],
-  );
+): Markup<M> =>
+  h.div
+    .class("kb-prefs")
+    .children([localeSelect(h, prefs, onChange), modeSelect(h, t, prefs, onChange)]);
 
 /** Full appearance form: mode, style, contrast, preset. */
 export const appearanceForm = <M>(
-  h: HtmlBuilder<M>,
+  h: Html.H<M>,
   t: Translator,
   prefs: Prefs,
   onChange: (p: Prefs) => M,
-): Html =>
-  h.div(
-    [h.Class("kb-grid"), h.Style({ "--kb-grid-min": "200px" })],
-    [
+): Markup<M> =>
+  h.div
+    .class("kb-grid")
+    .style({ "--kb-grid-min": "200px" })
+    .children([
       selectField(h, {
         id: "kb-appearance-mode",
         label: t.t("account.appearance.mode"),
@@ -123,10 +124,9 @@ export const appearanceForm = <M>(
           }),
       }),
       localeSelectField(h, prefs, onChange),
-    ],
-  );
+    ]);
 
-const localeSelectField = <M>(h: HtmlBuilder<M>, prefs: Prefs, onChange: (p: Prefs) => M): Html =>
+const localeSelectField = <M>(h: Html.H<M>, prefs: Prefs, onChange: (p: Prefs) => M): Markup<M> =>
   selectField(h, {
     id: "kb-appearance-locale",
     label: prefs.locale === "cs" ? "Jazyk" : "Language",

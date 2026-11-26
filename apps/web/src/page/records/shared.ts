@@ -1,5 +1,9 @@
+import { apiCommand, browserCommand, type PageCommand } from "../../app/commands";
+
+export { apiCommand };
+
 /**
- * Private shared schemas, decoders, VAT/FX math helpers and Foldkit Commands for the `records`
+ * Private shared schemas, decoders, VAT/FX math helpers and Effect UI Commands for the `records`
  * page group (Expenses, Contacts, Price List, Reports). Kept private inside `src/page/records/`.
  */
 import type {
@@ -14,8 +18,7 @@ import type {
 } from "@kvitbit/domain/contract";
 import { Format, I18n, type ViewModels } from "@kvitbit/ui-port";
 import { BigDecimal, Effect, Option, Schema } from "effect";
-import { Command } from "foldkit";
-import { type Failure, failureFromUnknown, type WebServices } from "../../app/api";
+import { type Failure, failureFromUnknown } from "../../app/api";
 import type { Translator } from "../../app/i18n";
 import type { PageContext } from "../../app/page";
 import type { BadgeTone } from "../../ui/kit";
@@ -26,7 +29,7 @@ export const enumLabel = <E extends I18n.EnumName>(
   value: I18n.EnumLabels[E],
 ): string => t.translate(I18n.enumText(name, value));
 
-// --- Common value schemas (JSON-safe for Foldkit SSR Model codecs) -------------------------------
+// --- Common value schemas (JSON-safe for Effect UI SSR Model codecs) -------------------------------
 
 export const MoneyRecord = Schema.Struct({
   amount: Schema.String,
@@ -1090,45 +1093,30 @@ const currentOrigin = (): string =>
     ? "http://localhost"
     : location.origin;
 
-export const apiCommand = <M>(
-  name: string,
-  effect: Effect.Effect<M, never, WebServices>,
-): Command.Command<M, never, WebServices> =>
-  ({ name, effect }) as Command.Command<M, never, WebServices>;
-
-const DownloadResult = Schema.Union([
-  Schema.TaggedStruct("Ok", {}),
-  Schema.TaggedStruct("Err", { error: Schema.Unknown }),
-]);
-
-const DownloadFileCmd = Command.define("RecordsDownloadUrl", {
-  args: { path: Schema.String, filename: Schema.String },
-  messages: [DownloadResult],
-  execute: ({ path, filename }) =>
-    Effect.tryPromise({
-      try: async () => {
-        const res = await fetch(`${currentOrigin()}${path}`, { credentials: "same-origin" });
-        if (!res.ok) {
-          throw Object.assign(new Error(`download ${res.status}`), { status: res.status });
-        }
-        const blob = await res.blob();
-        if (typeof document !== "undefined" && typeof URL.createObjectURL === "function") {
-          const objectUrl = URL.createObjectURL(blob);
-          const anchor = document.createElement("a");
-          anchor.href = objectUrl;
-          anchor.download = filename;
-          document.body.appendChild(anchor);
-          anchor.click();
-          anchor.remove();
-          URL.revokeObjectURL(objectUrl);
-        }
-      },
-      catch: (e) => e,
-    }).pipe(
-      Effect.map(() => ({ _tag: "Ok" as const })),
-      Effect.catch((error) => Effect.succeed({ _tag: "Err" as const, error })),
-    ),
-});
+const downloadFile = (path: string, filename: string) =>
+  Effect.tryPromise({
+    try: async () => {
+      const res = await fetch(`${currentOrigin()}${path}`, { credentials: "same-origin" });
+      if (!res.ok) {
+        throw Object.assign(new Error(`download ${res.status}`), { status: res.status });
+      }
+      const blob = await res.blob();
+      if (typeof document !== "undefined" && typeof URL.createObjectURL === "function") {
+        const objectUrl = URL.createObjectURL(blob);
+        const anchor = document.createElement("a");
+        anchor.href = objectUrl;
+        anchor.download = filename;
+        document.body.appendChild(anchor);
+        anchor.click();
+        anchor.remove();
+        URL.revokeObjectURL(objectUrl);
+      }
+    },
+    catch: (e) => e,
+  }).pipe(
+    Effect.map(() => ({ _tag: "Ok" as const })),
+    Effect.catch((error) => Effect.succeed({ _tag: "Err" as const, error })),
+  );
 
 /** Trigger a same-origin file download (report CSV/PDF or expense attachment) inside a Command. */
 export const downloadUrlCommand = <M1, M2>(
@@ -1137,17 +1125,17 @@ export const downloadUrlCommand = <M1, M2>(
   filename: string,
   onSuccess: () => M1,
   onFailure: (failure: Failure) => M2,
-): Command.Command<M1 | M2, never, WebServices> =>
-  apiCommand<M1 | M2>(
+): PageCommand<M1 | M2> =>
+  browserCommand<M1 | M2>(
     name,
-    DownloadFileCmd({ path, filename }).effect.pipe(
+    downloadFile(path, filename).pipe(
       Effect.map((res) =>
         res._tag === "Ok" ? onSuccess() : onFailure(failureFromUnknown(res.error)),
       ),
     ),
   );
 
-/** Upload a multipart file attachment to an expense inside a Foldkit Command. */
+/** Upload a multipart file attachment to an expense inside a Effect UI Command. */
 export const uploadAttachmentCommand = <M1, M2>(
   name: string,
   workspaceId: string,
@@ -1155,7 +1143,7 @@ export const uploadAttachmentCommand = <M1, M2>(
   file: File,
   onSuccess: (attachment: ExpenseAttachmentRecord) => M1,
   onFailure: (failure: Failure) => M2,
-): Command.Command<M1 | M2, never, WebServices> =>
+): PageCommand<M1 | M2> =>
   apiCommand<M1 | M2>(
     name,
     Effect.tryPromise({

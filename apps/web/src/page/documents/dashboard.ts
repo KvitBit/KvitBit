@@ -1,3 +1,5 @@
+import { UiSchema } from "@effect/ui";
+import type { Html } from "@effect/ui/html";
 /**
  * Screen 08 — Dashboard: KPIs, 12-month SVG cashflow chart, overdue/unpaid queue, recent activity,
  * quick actions, and onboarding checklist (CTAs pinned right per screens.md #08).
@@ -5,14 +7,14 @@
 import { DashboardView, type WorkspaceId } from "@kvitbit/domain";
 import { ViewModels } from "@kvitbit/ui-port";
 import { BigDecimal, Schema } from "effect";
-import { type Command, Submodel } from "foldkit";
-import type { Html, HtmlBuilder } from "foldkit/html";
-import { defineMessageUnion } from "foldkit/message";
-import { Failure, type WebServices } from "../../app/api";
+import { Failure } from "../../app/api";
+import type { PageCommand } from "../../app/commands";
 import { type Copy, copy, textOf, translator } from "../../app/i18n";
-import type { PageContext, PageReturn, RouteOf } from "../../app/page";
+import type { MessageHandlers, PageContext, PageReturn, RouteOf } from "../../app/page";
 import * as Remote from "../../app/remote";
 import { href } from "../../app/routing";
+import { barChart } from "../../ui/bars";
+import type { Markup } from "../../ui/html";
 import { icon } from "../../ui/icons";
 import {
   amount,
@@ -173,7 +175,7 @@ export const Model = Schema.Struct({
 });
 export type Model = typeof Model.Type;
 
-export const Message = defineMessageUnion({
+export const Message = UiSchema.TaggedEnum({
   LoadedDashboard: { seq: Remote.Seq, data: DashboardView },
   FailedDashboard: { seq: Remote.Seq, failure: Failure },
   LoadedRecent: { seq: Remote.Seq, data: Schema.Array(DocumentSummaryData) },
@@ -183,10 +185,7 @@ export const Message = defineMessageUnion({
 });
 export type Message = typeof Message.Type;
 
-const loadDashboardCommand = (
-  workspaceId: WorkspaceId,
-  seq: Remote.Seq,
-): Command.Command<Message, never, WebServices> => {
+const loadDashboardCommand = (workspaceId: WorkspaceId, seq: Remote.Seq): PageCommand<Message> => {
   const period = yearPeriodOf(todayPrague());
   return apiCommand(
     "LoadDashboard",
@@ -200,10 +199,7 @@ const loadDashboardCommand = (
   );
 };
 
-const loadRecentCommand = (
-  workspaceId: WorkspaceId,
-  seq: Remote.Seq,
-): Command.Command<Message, never, WebServices> =>
+const loadRecentCommand = (workspaceId: WorkspaceId, seq: Remote.Seq): PageCommand<Message> =>
   apiCommand(
     "LoadRecentDocuments",
     (c) => c.documents.list({ params: { workspaceId }, query: { limit: 8 } }),
@@ -239,7 +235,7 @@ export const update = (
   message: Message,
   ctx: PageContext,
 ): PageReturn<Model, Message> =>
-  Message.match<PageReturn<Model, Message>>(message, {
+  Message.match(message, {
     LoadedDashboard: ({ seq, data }) => ({
       model: { ...model, dashboard: Remote.succeed(model.dashboard, seq, data) },
     }),
@@ -268,7 +264,7 @@ export const update = (
     ClickedDismissChecklist: () => ({
       model: { ...model, checklistHidden: true },
     }),
-  });
+  } satisfies MessageHandlers<Message, PageReturn<Model, Message>>);
 
 export const title = (_model: Model, ctx: PageContext): string => txt(ctx.locale, "title");
 
@@ -278,73 +274,41 @@ const toNumber = (bd: BigDecimal.BigDecimal): number => {
 };
 
 const renderCashflowSvg = (
-  h: HtmlBuilder<Message>,
+  h: Html.H<Message>,
   locale: PageContext["locale"],
   points: DashboardView["cashflow"],
-): Html => {
+): Markup<Message> => {
   if (points.length === 0) {
-    return h.p([h.Class("kb-muted kb-small")], [txt(locale, "cashflowEmpty")]);
+    return h.p.class("kb-muted kb-small").children([txt(locale, "cashflowEmpty")]);
   }
-  const width = 560;
-  const height = 180;
-  const padLeft = 12;
-  const padRight = 12;
-  const padTop = 14;
-  const padBottom = 26;
-  const chartW = width - padLeft - padRight;
-  const chartH = height - padTop - padBottom;
-  const maxVal = Math.max(
-    1,
-    ...points.flatMap((p) => [toNumber(p.in.amount), toNumber(p.out.amount)]),
-  );
-  const slotW = chartW / points.length;
-  const barW = Math.max(6, Math.min(16, slotW * 0.34));
-
-  const gridLines = [0, 0.5, 1].map((ratio) => {
-    const y = Math.round(padTop + chartH * (1 - ratio));
-    return `<line class="kb-chart-grid-line" x1="${padLeft}" y1="${y}" x2="${width - padRight}" y2="${y}" />`;
-  });
-
-  const bars = points
-    .map((p, idx) => {
-      const xCenter = padLeft + slotW * idx + slotW / 2;
-      const inH = Math.round((toNumber(p.in.amount) / maxVal) * chartH);
-      const outH = Math.round((toNumber(p.out.amount) / maxVal) * chartH);
-      const inY = padTop + chartH - inH;
-      const outY = padTop + chartH - outH;
-      const label = p.month.slice(5);
-      return [
-        `<rect class="kb-chart-bar-in" x="${(xCenter - barW - 1).toFixed(1)}" y="${inY}" width="${barW.toFixed(1)}" height="${inH}" rx="2" />`,
-        `<rect class="kb-chart-bar-out" x="${(xCenter + 1).toFixed(1)}" y="${outY}" width="${barW.toFixed(1)}" height="${outH}" rx="2" />`,
-        `<text class="kb-chart-axis-label" x="${xCenter.toFixed(1)}" y="${height - 6}" text-anchor="middle">${label}</text>`,
-      ].join("");
-    })
-    .join("");
-
-  const svg = `<svg class="kb-chart-svg" viewBox="0 0 ${width} ${height}" role="img" aria-label="${txt(locale, "cashflowAria")}">${gridLines.join("")}${bars}</svg>`;
-
-  return h.div(
-    [h.Class("kb-stack")],
-    [
-      h.div([h.Class("kb-chart-wrap"), h.InnerHTML(svg)], []),
-      h.div(
-        [h.Class("kb-chart-legend")],
-        [
-          h.span(
-            [],
-            [h.span([h.Class("kb-chart-dot kb-chart-dot--in")], []), txt(locale, "cashflowIn")],
-          ),
-          h.span(
-            [],
-            [h.span([h.Class("kb-chart-dot kb-chart-dot--out")], []), txt(locale, "cashflowOut")],
-          ),
-        ],
-      ),
+  const groups = points.map((point) => ({
+    label: point.month.slice(5),
+    bars: [
+      { value: toNumber(point.in.amount), tone: "primary" as const },
+      { value: toNumber(point.out.amount), tone: "secondary" as const },
     ],
-  );
+  }));
+
+  return h.div
+    .class("kb-stack")
+    .children([
+      barChart(h, txt(locale, "cashflowAria"), groups),
+      h.div
+        .class("kb-chart-legend")
+        .children([
+          h.span.children([
+            h.span.class("kb-chart-dot kb-chart-dot--in").children([]),
+            txt(locale, "cashflowIn"),
+          ]),
+          h.span.children([
+            h.span.class("kb-chart-dot kb-chart-dot--out").children([]),
+            txt(locale, "cashflowOut"),
+          ]),
+        ]),
+    ]);
 };
 
-export const view = Submodel.defineView<Model, Message, PageContext>((model, ctx, h) => {
+export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
   const { locale } = ctx;
   const t = translator(locale);
   const ws = ctx.workspace;
@@ -372,54 +336,51 @@ export const view = Submodel.defineView<Model, Message, PageContext>((model, ctx
 
   const kpiRow =
     dashData === undefined
-      ? h.div(
-          [h.Class("kb-dash-kpis"), h.AriaBusy(true)],
-          [
+      ? h.div
+          .class("kb-dash-kpis")
+          .attr("aria-busy", String(true))
+          .children([
             card(h, [skeleton(h, "50%", "0.75rem"), skeleton(h, "75%", "1.5rem")]),
             card(h, [skeleton(h, "50%", "0.75rem"), skeleton(h, "75%", "1.5rem")]),
             card(h, [skeleton(h, "50%", "0.75rem"), skeleton(h, "75%", "1.5rem")]),
             card(h, [skeleton(h, "50%", "0.75rem"), skeleton(h, "75%", "1.5rem")]),
-          ],
-        )
-      : h.div(
-          [h.Class("kb-dash-kpis")],
-          [
-            kpi(h, {
-              label: txt(locale, "kpiRevenue"),
-              value: fmtMoney(locale, dashData.revenue),
-            }),
-            kpi(h, {
-              label: txt(locale, "kpiUnpaid"),
-              value: fmtMoney(locale, dashData.unpaid),
-            }),
-            kpi(h, {
-              label: txt(locale, "kpiOverdue"),
-              value: fmtMoney(locale, dashData.overdue.total),
-              ...(dashData.overdue.count > 0
-                ? {
-                    note: badge(
-                      h,
-                      txt(locale, "kpiOverdueCount", { count: dashData.overdue.count }),
-                      "overdue",
-                    ),
-                  }
-                : {}),
-            }),
-            kpi(h, {
-              label: txt(locale, "kpiExpenses"),
-              value: fmtMoney(locale, dashData.expenses),
-              ...(dashData.incompleteExpenses > 0
-                ? {
-                    note: badge(
-                      h,
-                      txt(locale, "kpiIncomplete", { count: dashData.incompleteExpenses }),
-                      "proforma",
-                    ),
-                  }
-                : {}),
-            }),
-          ],
-        );
+          ])
+      : h.div.class("kb-dash-kpis").children([
+          kpi(h, {
+            label: txt(locale, "kpiRevenue"),
+            value: fmtMoney(locale, dashData.revenue),
+          }),
+          kpi(h, {
+            label: txt(locale, "kpiUnpaid"),
+            value: fmtMoney(locale, dashData.unpaid),
+          }),
+          kpi(h, {
+            label: txt(locale, "kpiOverdue"),
+            value: fmtMoney(locale, dashData.overdue.total),
+            ...(dashData.overdue.count > 0
+              ? {
+                  note: badge(
+                    h,
+                    txt(locale, "kpiOverdueCount", { count: dashData.overdue.count }),
+                    "overdue",
+                  ),
+                }
+              : {}),
+          }),
+          kpi(h, {
+            label: txt(locale, "kpiExpenses"),
+            value: fmtMoney(locale, dashData.expenses),
+            ...(dashData.incompleteExpenses > 0
+              ? {
+                  note: badge(
+                    h,
+                    txt(locale, "kpiIncomplete", { count: dashData.incompleteExpenses }),
+                    "proforma",
+                  ),
+                }
+              : {}),
+          }),
+        ]);
 
   const queueItems = (recentData ?? []).filter(
     (d) =>
@@ -441,8 +402,7 @@ export const view = Submodel.defineView<Model, Message, PageContext>((model, ctx
               small: true,
             }),
           ]),
-          h.ul(
-            [h.Class("kb-checklist")],
+          h.ul.class("kb-checklist").children(
             [
               {
                 done: true,
@@ -473,26 +433,22 @@ export const view = Submodel.defineView<Model, Message, PageContext>((model, ctx
                 to: href({ _tag: "Templates", ws: slug }),
               },
             ].map((item) =>
-              h.li(
-                [h.Class("kb-checklist__row")],
-                [
-                  h.span(
-                    [h.Class(`kb-checklist__mark${item.done ? " kb-checklist__mark--done" : ""}`)],
-                    item.done ? [icon(h, "check", 14)] : [],
-                  ),
-                  h.div(
-                    [h.Class("kb-checklist__text")],
-                    [
-                      h.strong([], [item.title]),
-                      h.span([h.Class("kb-small kb-muted")], [item.sub]),
-                    ],
-                  ),
-                  h.span(
-                    [h.Class("kb-checklist__cta")],
-                    [linkButton(h, { label: item.cta, href: item.to, small: true })],
-                  ),
-                ],
-              ),
+              h.li
+                .class("kb-checklist__row")
+                .children([
+                  h.span
+                    .class(`kb-checklist__mark${item.done ? " kb-checklist__mark--done" : ""}`)
+                    .children(item.done ? [icon(h, "check", 14)] : []),
+                  h.div
+                    .class("kb-checklist__text")
+                    .children([
+                      h.strong.children([item.title]),
+                      h.span.class("kb-small kb-muted").children([item.sub]),
+                    ]),
+                  h.span
+                    .class("kb-checklist__cta")
+                    .children([linkButton(h, { label: item.cta, href: item.to, small: true })]),
+                ]),
             ),
           ),
         ]),
@@ -508,52 +464,49 @@ export const view = Submodel.defineView<Model, Message, PageContext>((model, ctx
       }),
     ]),
     recentData === undefined
-      ? h.div(
-          [h.Class("kb-stack"), h.AriaBusy(true)],
-          [skeleton(h, "100%", "2rem"), skeleton(h, "100%", "2rem"), skeleton(h, "100%", "2rem")],
-        )
+      ? h.div
+          .class("kb-stack")
+          .attr("aria-busy", String(true))
+          .children([
+            skeleton(h, "100%", "2rem"),
+            skeleton(h, "100%", "2rem"),
+            skeleton(h, "100%", "2rem"),
+          ])
       : queueItems.length === 0
         ? emptyState(h, { title: txt(locale, "queueEmpty") })
-        : h.ul(
-            [h.Class("kb-queue-list")],
-            queueItems
-              .slice(0, 5)
-              .map((doc) =>
-                h.keyed("li")(
-                  doc.id,
-                  [h.Class("kb-queue-item")],
-                  [
-                    h.div(
-                      [h.Class("kb-queue-item__meta")],
-                      [
-                        h.a(
-                          [
-                            h.Class("kb-queue-item__link"),
-                            h.Href(
-                              href({ _tag: "Document", ws: slug, id: doc.id, tab: "preview" }),
-                            ),
-                          ],
-                          [doc.contact.name],
-                        ),
-                        h.div(
-                          [h.Class("kb-row")],
-                          [
-                            mono(h, doc.number ?? txt(locale, "draftLabel")),
-                            h.span(
-                              [h.Class("kb-small kb-muted kb-num")],
-                              [txt(locale, "dueLabel", { date: fmtDate(locale, doc.dueOn) })],
-                            ),
-                          ],
-                        ),
-                      ],
-                    ),
-                    h.div(
-                      [h.Class("kb-row")],
-                      [...documentBadges(h, locale, doc), amount(h, fmtMoney(locale, doc.total))],
-                    ),
-                  ],
-                ),
-              ),
+        : h.ul.class("kb-queue-list").children(
+            queueItems.slice(0, 5).map((doc) =>
+              h.li
+                .key(doc.id)
+                .class("kb-queue-item")
+                .children([
+                  h.div.class("kb-queue-item__meta").children([
+                    h.a
+                      .class("kb-queue-item__link")
+                      .attr(
+                        "href",
+                        href({ _tag: "Document", ws: slug, id: doc.id, tab: "preview" }),
+                      )
+                      .children([doc.contact.name]),
+                    h.div
+                      .class("kb-row")
+                      .children([
+                        mono(h, doc.number ?? txt(locale, "draftLabel")),
+                        h.span
+                          .class("kb-small kb-muted kb-num")
+                          .children([
+                            txt(locale, "dueLabel", { date: fmtDate(locale, doc.dueOn) }),
+                          ]),
+                      ]),
+                  ]),
+                  h.div
+                    .class("kb-row")
+                    .children([
+                      ...documentBadges(h, locale, doc),
+                      amount(h, fmtMoney(locale, doc.total)),
+                    ]),
+                ]),
+            ),
           ),
   ]);
 
@@ -567,10 +520,14 @@ export const view = Submodel.defineView<Model, Message, PageContext>((model, ctx
       }),
     ]),
     recentData === undefined
-      ? h.div(
-          [h.Class("kb-stack"), h.AriaBusy(true)],
-          [skeleton(h, "100%", "2rem"), skeleton(h, "100%", "2rem"), skeleton(h, "100%", "2rem")],
-        )
+      ? h.div
+          .class("kb-stack")
+          .attr("aria-busy", String(true))
+          .children([
+            skeleton(h, "100%", "2rem"),
+            skeleton(h, "100%", "2rem"),
+            skeleton(h, "100%", "2rem"),
+          ])
       : recentData.length === 0
         ? emptyState(h, {
             title: txt(locale, "recentEmpty"),
@@ -580,50 +537,41 @@ export const view = Submodel.defineView<Model, Message, PageContext>((model, ctx
               variant: "primary",
             }),
           })
-        : h.ul(
-            [h.Class("kb-queue-list")],
-            recentData
-              .slice(0, 6)
-              .map((doc) =>
-                h.keyed("li")(
-                  doc.id,
-                  [h.Class("kb-queue-item")],
-                  [
-                    h.div(
-                      [h.Class("kb-queue-item__meta")],
-                      [
-                        h.a(
-                          [
-                            h.Class("kb-queue-item__link"),
-                            h.Href(
-                              href({ _tag: "Document", ws: slug, id: doc.id, tab: "preview" }),
-                            ),
-                          ],
-                          [
-                            doc.number !== null
-                              ? `${doc.number} · ${doc.contact.name}`
-                              : `${txt(locale, "draftLabel")} · ${doc.contact.name}`,
-                          ],
-                        ),
-                        h.div(
-                          [h.Class("kb-row")],
-                          [
-                            kindBadge(h, locale, doc.kind),
-                            h.span(
-                              [h.Class("kb-small kb-muted kb-num")],
-                              [fmtDate(locale, doc.issuedOn)],
-                            ),
-                          ],
-                        ),
-                      ],
-                    ),
-                    h.div(
-                      [h.Class("kb-row")],
-                      [...documentBadges(h, locale, doc), amount(h, fmtMoney(locale, doc.total))],
-                    ),
-                  ],
-                ),
-              ),
+        : h.ul.class("kb-queue-list").children(
+            recentData.slice(0, 6).map((doc) =>
+              h.li
+                .key(doc.id)
+                .class("kb-queue-item")
+                .children([
+                  h.div.class("kb-queue-item__meta").children([
+                    h.a
+                      .class("kb-queue-item__link")
+                      .attr(
+                        "href",
+                        href({ _tag: "Document", ws: slug, id: doc.id, tab: "preview" }),
+                      )
+                      .children([
+                        doc.number !== null
+                          ? `${doc.number} · ${doc.contact.name}`
+                          : `${txt(locale, "draftLabel")} · ${doc.contact.name}`,
+                      ]),
+                    h.div
+                      .class("kb-row")
+                      .children([
+                        kindBadge(h, locale, doc.kind),
+                        h.span
+                          .class("kb-small kb-muted kb-num")
+                          .children([fmtDate(locale, doc.issuedOn)]),
+                      ]),
+                  ]),
+                  h.div
+                    .class("kb-row")
+                    .children([
+                      ...documentBadges(h, locale, doc),
+                      amount(h, fmtMoney(locale, doc.total)),
+                    ]),
+                ]),
+            ),
           ),
   ]);
 
@@ -645,12 +593,12 @@ export const view = Submodel.defineView<Model, Message, PageContext>((model, ctx
     }),
     ...errorBanner,
     kpiRow,
-    h.div(
-      [h.Class("kb-dash-main")],
-      [
-        h.div(
-          [h.Class("kb-stack")],
-          [
+    h.div
+      .class("kb-dash-main")
+      .children([
+        h.div
+          .class("kb-stack")
+          .children([
             card(h, [
               cardTitle(h, txt(locale, "cashflowTitle")),
               dashData === undefined
@@ -658,10 +606,8 @@ export const view = Submodel.defineView<Model, Message, PageContext>((model, ctx
                 : renderCashflowSvg(h, locale, dashData.cashflow),
             ]),
             recentCard,
-          ],
-        ),
-        h.div([h.Class("kb-stack")], [queueCard, ...checklistCard]),
-      ],
-    ),
+          ]),
+        h.div.class("kb-stack").children([queueCard, ...checklistCard]),
+      ]),
   ]);
-});
+};

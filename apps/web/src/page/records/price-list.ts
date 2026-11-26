@@ -1,3 +1,5 @@
+import { UiSchema } from "@effect/ui";
+import type { Html } from "@effect/ui/html";
 /**
  * Price List screen (Screen 16, route `PriceList`).
  * Saved catalog items with search, archived toggle, inline/sheet create & edit,
@@ -12,12 +14,11 @@ import type {
 } from "@kvitbit/domain/contract";
 import { Format, ViewModels } from "@kvitbit/ui-port";
 import { Schema } from "effect";
-import { type Command, Submodel } from "foldkit";
-import { defineMessageUnion } from "foldkit/message";
-import { Failure, request, type WebServices } from "../../app/api";
+import { Failure, request } from "../../app/api";
+import type { PageCommand } from "../../app/commands";
 import { copy, textOf, translator } from "../../app/i18n";
 import { Intent_ } from "../../app/intent";
-import type { PageContext, PageReturn, RouteOf } from "../../app/page";
+import type { MessageHandlers, PageContext, PageReturn, RouteOf } from "../../app/page";
 import * as Remote from "../../app/remote";
 import { href } from "../../app/routing";
 import { icon } from "../../ui/icons";
@@ -113,7 +114,7 @@ export const Model = Schema.Struct({
 });
 export type Model = typeof Model.Type;
 
-export const Message = defineMessageUnion({
+export const Message = UiSchema.TaggedEnum({
   LoadedItems: { seq: Schema.Int, items: Schema.Array(PriceListItemRecord) },
   FailedItems: { seq: Schema.Int, failure: Failure },
   ChangedSearch: { value: Schema.String },
@@ -142,7 +143,7 @@ const loadItemsCommand = (
   seq: number,
   text: string,
   includeArchived: boolean,
-): Command.Command<Message, never, WebServices> =>
+): PageCommand<Message> =>
   apiCommand(
     "PriceListLoadItems",
     request(
@@ -159,10 +160,7 @@ const loadItemsCommand = (
     ),
   );
 
-const saveItemCommand = (
-  workspaceId: string,
-  draft: EditorDraft,
-): Command.Command<Message, never, WebServices> => {
+const saveItemCommand = (workspaceId: string, draft: EditorDraft): PageCommand<Message> => {
   const parsedPrice = parseUserDecimal(draft.unitPrice) ?? 0;
   const payload = {
     name: draft.name.trim(),
@@ -197,10 +195,7 @@ const saveItemCommand = (
   );
 };
 
-const archiveItemCommand = (
-  workspaceId: string,
-  itemId: string,
-): Command.Command<Message, never, WebServices> =>
+const archiveItemCommand = (workspaceId: string, itemId: string): PageCommand<Message> =>
   apiCommand(
     "PriceListArchiveItem",
     request(
@@ -272,7 +267,7 @@ export const update = (
   const wsId = ctx.workspace?.id;
   const route = model.route as Route;
 
-  return Message.match<PageReturn<Model, Message>>(message, {
+  return Message.match(message, {
     LoadedItems: ({ seq, items }) => ({
       model: { ...model, items: Remote.succeed(model.items, seq, items) },
     }),
@@ -438,7 +433,7 @@ export const update = (
       model: { ...model, archiving: false, confirmArchive: null },
       outMessage: Intent_.toast(textOf(tr, failure.text), "error"),
     }),
-  });
+  } satisfies MessageHandlers<Message, PageReturn<Model, Message>>);
 };
 
 export const title = (_model: Model, ctx: PageContext): string =>
@@ -456,7 +451,7 @@ const formatVatLabel = (locale: PageContext["locale"], treatment: string | null)
   });
 };
 
-export const view = Submodel.defineView<Model, Message, PageContext>((model, ctx, h) => {
+export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
   const tr = translator(ctx.locale);
   const writable = canWrite(ctx);
   const items = Remote.dataOf(model.items);
@@ -469,44 +464,33 @@ export const view = Submodel.defineView<Model, Message, PageContext>((model, ctx
     "",
   ];
 
-  const toolbar = h.div(
-    [h.Class("kb-rec-toolbar")],
-    [
-      h.div(
-        [h.Class("kb-rec-search")],
-        [
-          h.span([h.Class("kb-rec-search__icon")], [icon(h, "search", 16)]),
-          h.input([
-            h.Class("kb-input"),
-            h.Type("search"),
-            h.Placeholder(tr.t("priceList.search")),
-            h.AriaLabel(tr.t("priceList.search")),
-            h.Value(model.search),
-            h.OnInput((value) => Message.ChangedSearch({ value })),
-          ]),
-        ],
-      ),
-      h.div(
-        [h.Class("kb-row")],
-        [
-          checkbox(h, {
-            id: "pricelist-include-archived",
-            label: tr.t("priceList.showArchived"),
-            checked: model.includeArchived,
-            onToggle: (checked) => Message.ToggledIncludeArchived({ checked }),
-          }),
-          ...(items !== undefined
-            ? [
-                h.span(
-                  [h.Class("kb-small kb-muted kb-num")],
-                  [tLocal(ctx.locale, "countLabel", { count: items.length })],
-                ),
-              ]
-            : []),
-        ],
-      ),
-    ],
-  );
+  const toolbar = h.div.class("kb-rec-toolbar").children([
+    h.div.class("kb-rec-search").children([
+      h.span.class("kb-rec-search__icon").children([icon(h, "search", 16)]),
+      h.input
+        .class("kb-input")
+        .attr("type", "search")
+        .attr("placeholder", tr.t("priceList.search"))
+        .attr("aria-label", tr.t("priceList.search"))
+        .value(model.search)
+        .on("input", ({ value }) => Message.ChangedSearch({ value })),
+    ]),
+    h.div.class("kb-row").children([
+      checkbox(h, {
+        id: "pricelist-include-archived",
+        label: tr.t("priceList.showArchived"),
+        checked: model.includeArchived,
+        onToggle: (checked) => Message.ToggledIncludeArchived({ checked }),
+      }),
+      ...(items !== undefined
+        ? [
+            h.span
+              .class("kb-small kb-muted kb-num")
+              .children([tLocal(ctx.locale, "countLabel", { count: items.length })]),
+          ]
+        : []),
+    ]),
+  ]);
 
   const listBody = (() => {
     if (model.items._tag === "Loading" || model.items._tag === "Idle") {
@@ -548,22 +532,19 @@ export const view = Submodel.defineView<Model, Message, PageContext>((model, ctx
         {
           header: tr.t("priceList.column.name"),
           cell: (item) =>
-            h.div(
-              [
-                h.Class(item.archived ? "kb-stack kb-row-archived" : "kb-stack"),
-                h.Style({ "--kb-gap": "2px" }),
-              ],
-              [
-                h.strong([], [item.name]),
+            h.div
+              .class(item.archived ? "kb-stack kb-row-archived" : "kb-stack")
+              .style({ "--kb-gap": "2px" })
+              .children([
+                h.strong.children([item.name]),
                 ...(item.description !== null && item.description !== ""
-                  ? [h.span([h.Class("kb-small kb-muted")], [item.description])]
+                  ? [h.span.class("kb-small kb-muted").children([item.description])]
                   : []),
-              ],
-            ),
+              ]),
         },
         {
           header: tr.t("priceList.column.unit"),
-          cell: (item) => h.span([h.Class("kb-muted")], [item.unit ?? "—"]),
+          cell: (item) => h.span.class("kb-muted").children([item.unit ?? "—"]),
         },
         {
           header: tr.t("priceList.column.price"),
@@ -593,7 +574,7 @@ export const view = Submodel.defineView<Model, Message, PageContext>((model, ctx
                   small: true,
                   onClick: Message.ClickedEdit({ item }),
                 })
-              : h.empty,
+              : h.text(""),
         },
       ],
     });
@@ -601,7 +582,7 @@ export const view = Submodel.defineView<Model, Message, PageContext>((model, ctx
 
   const editorPanel =
     model.editor === null
-      ? h.empty
+      ? h.text("")
       : card(h, [
           cardTitle(
             h,
@@ -617,9 +598,10 @@ export const view = Submodel.defineView<Model, Message, PageContext>((model, ctx
               }),
             ],
           ),
-          h.form(
-            [h.Class("kb-stack"), h.OnSubmit(Message.SubmittedEditor())],
-            [
+          h.form
+            .class("kb-stack")
+            .on("submit", Message.SubmittedEditor(), { preventDefault: true })
+            .children([
               ...(model.editor.error !== null
                 ? [banner(h, { text: model.editor.error, tone: "error" })]
                 : []),
@@ -636,98 +618,90 @@ export const view = Submodel.defineView<Model, Message, PageContext>((model, ctx
                 value: model.editor.description,
                 onInput: (value) => Message.ChangedField({ field: "description", value }),
               }),
-              h.div(
-                [h.Class("kb-form-grid")],
-                [
-                  textField(h, {
-                    id: "pli-price",
-                    label: tr.t("common.field.unitPrice"),
-                    value: model.editor.unitPrice,
-                    required: true,
-                    mono: true,
-                    onInput: (value) => Message.ChangedField({ field: "unitPrice", value }),
-                  }),
-                  selectField(h, {
-                    id: "pli-currency",
-                    label: tr.t("common.field.currency"),
-                    value: model.editor.currency,
-                    options: CURRENCIES.map((c) => ({ value: c, label: c })),
-                    onChange: (value) => Message.ChangedField({ field: "currency", value }),
-                  }),
-                  textField(h, {
-                    id: "pli-unit",
-                    label: tr.t("common.field.unit"),
-                    value: model.editor.unit,
-                    placeholder: tr.t("common.unit.hour"),
-                    onInput: (value) => Message.ChangedField({ field: "unit", value }),
-                  }),
-                  selectField(h, {
-                    id: "pli-vat",
-                    label: tr.t("common.field.vat"),
-                    value: model.editor.vat,
-                    options: [
-                      { value: "", label: tLocal(ctx.locale, "vatDefault") },
-                      ...VAT_TREATMENTS.map((v) => ({
-                        value: v,
-                        label: formatVatLabel(ctx.locale, v),
-                      })),
-                    ],
-                    onChange: (value) => Message.ChangedField({ field: "vat", value }),
-                  }),
-                ],
-              ),
-              h.div(
-                [h.Class("kb-spread")],
-                [
-                  model.editor.id !== null
-                    ? button(h, {
-                        label: tr.t("common.action.archive"),
-                        variant: "danger",
-                        small: true,
-                        onClick: Message.RequestedArchive({
-                          item: {
-                            id: model.editor.id,
-                            name: model.editor.name,
-                            description: model.editor.description || null,
-                            unit: model.editor.unit || null,
-                            unitPrice: model.editor.unitPrice,
-                            currency: model.editor.currency,
-                            vat: model.editor.vat || null,
-                            archived: false,
-                            revision: model.editor.revision ?? 1,
-                          },
-                        }),
-                      })
-                    : h.span([], []),
-                  h.div(
-                    [h.Class("kb-row")],
-                    [
-                      button(h, {
-                        label: tr.t("common.action.cancel"),
-                        onClick: Message.ClickedCloseEditor(),
+              h.div.class("kb-form-grid").children([
+                textField(h, {
+                  id: "pli-price",
+                  label: tr.t("common.field.unitPrice"),
+                  value: model.editor.unitPrice,
+                  required: true,
+                  mono: true,
+                  onInput: (value) => Message.ChangedField({ field: "unitPrice", value }),
+                }),
+                selectField(h, {
+                  id: "pli-currency",
+                  label: tr.t("common.field.currency"),
+                  value: model.editor.currency,
+                  options: CURRENCIES.map((c) => ({ value: c, label: c })),
+                  onChange: (value) => Message.ChangedField({ field: "currency", value }),
+                }),
+                textField(h, {
+                  id: "pli-unit",
+                  label: tr.t("common.field.unit"),
+                  value: model.editor.unit,
+                  placeholder: tr.t("common.unit.hour"),
+                  onInput: (value) => Message.ChangedField({ field: "unit", value }),
+                }),
+                selectField(h, {
+                  id: "pli-vat",
+                  label: tr.t("common.field.vat"),
+                  value: model.editor.vat,
+                  options: [
+                    { value: "", label: tLocal(ctx.locale, "vatDefault") },
+                    ...VAT_TREATMENTS.map((v) => ({
+                      value: v,
+                      label: formatVatLabel(ctx.locale, v),
+                    })),
+                  ],
+                  onChange: (value) => Message.ChangedField({ field: "vat", value }),
+                }),
+              ]),
+              h.div.class("kb-spread").children([
+                model.editor.id !== null
+                  ? button(h, {
+                      label: tr.t("common.action.archive"),
+                      variant: "danger",
+                      small: true,
+                      onClick: Message.RequestedArchive({
+                        item: {
+                          id: model.editor.id,
+                          name: model.editor.name,
+                          description: model.editor.description || null,
+                          unit: model.editor.unit || null,
+                          unitPrice: model.editor.unitPrice,
+                          currency: model.editor.currency,
+                          vat: model.editor.vat || null,
+                          archived: false,
+                          revision: model.editor.revision ?? 1,
+                        },
                       }),
-                      button(h, {
-                        label: tr.t("common.action.save"),
-                        variant: "primary",
-                        type: "submit",
-                        busy: model.editor.saving,
-                      }),
-                    ],
-                  ),
-                ],
-              ),
-            ],
-          ),
+                    })
+                  : h.span.children([]),
+                h.div.class("kb-row").children([
+                  button(h, {
+                    label: tr.t("common.action.cancel"),
+                    onClick: Message.ClickedCloseEditor(),
+                  }),
+                  button(h, {
+                    label: tr.t("common.action.save"),
+                    variant: "primary",
+                    type: "submit",
+                    busy: model.editor.saving,
+                  }),
+                ]),
+              ]),
+            ]),
         ]);
 
   const archiveModal =
     model.confirmArchive === null
-      ? h.empty
+      ? h.text("")
       : dialog(h, {
           id: "pricelist-archive-dialog",
           title: tLocal(ctx.locale, "archiveTitle"),
           onClose: Message.CancelledArchive(),
-          body: [h.p([], [tLocal(ctx.locale, "archiveBody", { name: model.confirmArchive.name })])],
+          body: [
+            h.p.children([tLocal(ctx.locale, "archiveBody", { name: model.confirmArchive.name })]),
+          ],
           actions: [
             button(h, {
               label: tr.t("common.action.cancel"),
@@ -758,16 +732,13 @@ export const view = Submodel.defineView<Model, Message, PageContext>((model, ctx
         : [],
     }),
     toolbar,
-    h.div(
-      [
-        h.Class(
-          model.editor === null
-            ? "kb-pricelist-layout"
-            : "kb-pricelist-layout kb-pricelist-layout--editing",
-        ),
-      ],
-      [listBody, editorPanel],
-    ),
+    h.div
+      .class(
+        model.editor === null
+          ? "kb-pricelist-layout"
+          : "kb-pricelist-layout kb-pricelist-layout--editing",
+      )
+      .children([listBody, editorPanel]),
     archiveModal,
   ]);
-});
+};

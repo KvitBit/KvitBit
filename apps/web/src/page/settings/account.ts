@@ -1,3 +1,5 @@
+import { UiSchema } from "@effect/ui";
+import type { Html } from "@effect/ui/html";
 /**
  * Account & Security Settings page (Screen 22, route `Account`).
  * Tabs: profile, appearance, security (passkeys + password), sessions, danger (soft-delete).
@@ -13,17 +15,17 @@ import {
   type ThemeStyle,
 } from "@kvitbit/api-contract";
 import { Api, I18n, Theme, ViewModels } from "@kvitbit/ui-port";
-import { Option, Schema } from "effect";
-import { type Command, Submodel } from "foldkit";
-import type { Html, HtmlBuilder } from "foldkit/html";
-import { defineMessageUnion } from "foldkit/message";
-import { authFetch, Failure, request, type WebServices } from "../../app/api";
+import { Effect, Option, Schema } from "effect";
+import { authFetch, Failure, failureFromUnknown, request } from "../../app/api";
+import type { PageCommand } from "../../app/commands";
 import { textOf, translator } from "../../app/i18n";
 import { Intent_ } from "../../app/intent";
-import type { PageContext, PageReturn, RouteOf } from "../../app/page";
+import type { MessageHandlers, PageContext, PageReturn, RouteOf } from "../../app/page";
 import type { Locale, Prefs, ThemeChoice } from "../../app/prefs";
 import * as Remote from "../../app/remote";
 import { href } from "../../app/routing";
+import { performPasskeyRegistration } from "../../app/webauthn";
+import { attribute, type Markup } from "../../ui/html";
 import {
   badge,
   banner,
@@ -83,7 +85,7 @@ const SecurityState = Schema.Struct({
   signOutOthers: Schema.Boolean,
   passwordError: Schema.NullOr(Schema.String),
   savingPassword: Schema.Boolean,
-  hasPassword: Schema.Boolean,
+  hasPassword: Schema.NullOr(Schema.Boolean),
 });
 
 const SessionsState = Schema.Struct({
@@ -109,7 +111,7 @@ export const Model = Schema.Struct({
 });
 export type Model = typeof Model.Type;
 
-export const Message = defineMessageUnion({
+export const Message = UiSchema.TaggedEnum({
   // Preferences
   GotPreferences: { seq: Remote.Seq, data: AccountPreferences },
   FailedPreferences: { seq: Remote.Seq, failure: Failure },
@@ -132,9 +134,10 @@ export const Message = defineMessageUnion({
   SelectedStyle: { style: Schema.Literals(["elegant", "cozy"]) },
   SelectedMode: { mode: Schema.Literals(["system", "light", "dark"]) },
   SelectedContrast: { contrast: Schema.Literals(["standard", "medium", "high"]) },
-  // Security: Passkeys
+  // Security: Passkeys & Accounts
   GotPasskeys: { seq: Remote.Seq, items: Schema.Array(PasskeyItem) },
   FailedPasskeys: { seq: Remote.Seq, failure: Failure },
+  GotAccounts: { hasPassword: Schema.Boolean },
   ChangedNewPasskeyName: { value: Schema.String },
   ClickedAddPasskey: {},
   AddedPasskey: { item: PasskeyItem },
@@ -208,7 +211,74 @@ const cmdSavePreferences = (prefs: Prefs, revision: number) => {
 
 const decodePasskeys = Schema.decodeUnknownOption(Schema.Array(PasskeyItem));
 const decodePasskey = Schema.decodeUnknownOption(PasskeyItem);
-const decodeSessions = Schema.decodeUnknownOption(Schema.Array(SessionItem));
+
+const origin = (): string =>
+  typeof location === "undefined" || location.origin === "null"
+    ? "http://localhost"
+    : location.origin;
+
+const adaptBetterAuthSessions = (
+  raw: unknown,
+  currentToken: string | null,
+  currentId: string | null,
+): ReadonlyArray<SessionItem> => {
+  const list =
+    typeof raw === "object" && raw !== null && "sessions" in raw
+      ? (raw as { sessions: unknown }).sessions
+      : raw;
+  if (!Array.isArray(list)) return [];
+  const out: Array<SessionItem> = [];
+  for (const item of list) {
+    if (typeof item !== "object" || item === null) continue;
+    const rec = item as Record<string, unknown>;
+    const id = typeof rec.id === "string" ? rec.id : undefined;
+    const token = typeof rec.token === "string" ? rec.token : id;
+    if (id === undefined || token === undefined) continue;
+    const userAgent =
+      typeof rec.userAgent === "string" && rec.userAgent.trim() !== ""
+        ? rec.userAgent
+        : "Browser session";
+    const ipAddress = typeof rec.ipAddress === "string" ? rec.ipAddress : null;
+    const updatedRaw = rec.updatedAt ?? rec.createdAt;
+    const updatedAt =
+      typeof updatedRaw === "string"
+        ? updatedRaw
+        : updatedRaw instanceof Date
+          ? updatedRaw.toISOString()
+          : "";
+    const current =
+      rec.current === true ||
+      (currentToken !== null && token === currentToken) ||
+      (currentId !== null && id === currentId);
+    out.push({ id, token, userAgent, ipAddress, updatedAt, current });
+  }
+  return out;
+};
+
+const cmdLoadAccounts = () =>
+  cmd(
+    "Account.LoadAccounts",
+    authFetch(
+      "/list-accounts",
+      { method: "GET" },
+      (json): Message => {
+        const list =
+          typeof json === "object" && json !== null && "accounts" in json
+            ? (json as { accounts: unknown }).accounts
+            : json;
+        const hasPassword =
+          Array.isArray(list) &&
+          list.some(
+            (acc) =>
+              typeof acc === "object" &&
+              acc !== null &&
+              (acc as Record<string, unknown>).providerId === "credential",
+          );
+        return Message.GotAccounts({ hasPassword });
+      },
+      (): Message => Message.GotAccounts({ hasPassword: false }),
+    ),
+  );
 
 const cmdLoadPasskeys = (seq: number) =>
   cmd(
@@ -233,19 +303,41 @@ const cmdLoadPasskeys = (seq: number) =>
 const cmdAddPasskey = (name: string) =>
   cmd(
     "Account.AddPasskey",
-    authFetch(
-      "/passkey/add-passkey",
-      { method: "POST", body: { name } },
-      (json): Message => {
-        const parsed = Option.getOrElse(decodePasskey(json), () => ({
+    Effect.tryPromise({
+      try: () => performPasskeyRegistration(origin(), name),
+      catch: (e) => e,
+    }).pipe(
+      Effect.map((res): Message => {
+        if (!res.supported) {
+          return Message.FailedAction({
+            failure: {
+              tag: "Invalid",
+              surface: "inline",
+              text: { key: "auth.passkey.unsupported" },
+              issues: [],
+              retryable: false,
+              staleRevision: false,
+              freshBotProof: false,
+              requestId: null,
+            },
+          });
+        }
+        const json = res.json;
+        const candidate =
+          typeof json === "object" && json !== null && "passkey" in json
+            ? (json as { passkey: unknown }).passkey
+            : json;
+        const parsed = Option.getOrElse(decodePasskey(candidate), () => ({
           id: `pk-${Date.now()}`,
           name,
           createdAt: new Date().toISOString().slice(0, 10),
           deviceType: "platform",
         }));
         return Message.AddedPasskey({ item: parsed });
-      },
-      (failure): Message => Message.FailedAction({ failure }),
+      }),
+      Effect.catch((e) =>
+        Effect.succeed<Message>(Message.FailedAction({ failure: failureFromUnknown(e) })),
+      ),
     ),
   );
 
@@ -312,28 +404,44 @@ const cmdLoadSessions = (seq: number) =>
   cmd(
     "Account.LoadSessions",
     authFetch(
-      "/list-sessions",
+      "/get-session",
       { method: "GET" },
-      (json): Message => {
-        const raw =
-          typeof json === "object" && json !== null && "sessions" in json
-            ? (json as { sessions: unknown }).sessions
-            : json;
-        return Message.GotSessions({
-          seq,
-          items: Option.getOrElse(decodeSessions(raw), () => []),
-        });
+      (sessionJson): { readonly token: string | null; readonly id: string | null } => {
+        const sess =
+          typeof sessionJson === "object" && sessionJson !== null && "session" in sessionJson
+            ? (sessionJson as { session?: Record<string, unknown> }).session
+            : undefined;
+        return {
+          token: typeof sess?.token === "string" ? sess.token : null,
+          id: typeof sess?.id === "string" ? sess.id : null,
+        };
       },
-      (failure): Message => Message.FailedSessions({ seq, failure }),
+      (): { readonly token: string | null; readonly id: string | null } => ({
+        token: null,
+        id: null,
+      }),
+    ).pipe(
+      Effect.andThen((cur) =>
+        authFetch(
+          "/list-sessions",
+          { method: "GET" },
+          (json): Message =>
+            Message.GotSessions({
+              seq,
+              items: adaptBetterAuthSessions(json, cur.token, cur.id),
+            }),
+          (failure): Message => Message.FailedSessions({ seq, failure }),
+        ),
+      ),
     ),
   );
 
-const cmdRevokeSession = (id: string) =>
+const cmdRevokeSession = (id: string, token: string) =>
   cmd(
     "Account.RevokeSession",
     authFetch(
       "/revoke-session",
-      { method: "POST", body: { id } },
+      { method: "POST", body: { token } },
       (): Message => Message.RevokedSession({ id }),
       (failure): Message => Message.FailedAction({ failure }),
     ),
@@ -366,7 +474,7 @@ const cmdDeleteAccount = () =>
 export const init = (route: Route, ctx: PageContext): PageReturn<Model, Message> => {
   const userName = ctx.session._tag === "SignedIn" ? ctx.session.user.name : "";
   const seedInput = ctx.prefs.theme._tag === "Seed" ? ctx.prefs.theme.hex : "";
-  const commands: Array<Command.Command<Message, never, WebServices>> = [];
+  const commands: Array<PageCommand<Message>> = [];
 
   let preferences: Remote.Remote<AccountPreferences> = Remote.idle;
   let passkeys: Remote.Remote<ReadonlyArray<PasskeyItem>> = Remote.idle;
@@ -377,7 +485,7 @@ export const init = (route: Route, ctx: PageContext): PageReturn<Model, Message>
     commands.push(cmdLoadPreferences(Remote.seqOf(preferences)));
   } else if (route.tab === "security") {
     passkeys = Remote.load(passkeys);
-    commands.push(cmdLoadPasskeys(Remote.seqOf(passkeys)));
+    commands.push(cmdLoadPasskeys(Remote.seqOf(passkeys)), cmdLoadAccounts());
   } else if (route.tab === "sessions") {
     sessions = Remote.load(sessions);
     commands.push(cmdLoadSessions(Remote.seqOf(sessions)));
@@ -413,7 +521,7 @@ export const init = (route: Route, ctx: PageContext): PageReturn<Model, Message>
         signOutOthers: true,
         passwordError: null,
         savingPassword: false,
-        hasPassword: true,
+        hasPassword: null,
       },
       sessions: {
         list: sessions,
@@ -432,6 +540,12 @@ export const init = (route: Route, ctx: PageContext): PageReturn<Model, Message>
 
 // --- Update -------------------------------------------------------------------------------------
 
+const canRemovePasskey = (security: Model["security"]): boolean => {
+  if (security.hasPassword === null) return false;
+  if (security.hasPassword) return true;
+  return (Remote.dataOf(security.passkeys)?.length ?? 0) > 1;
+};
+
 const currentRevision = (model: Model): number => Remote.dataOf(model.preferences)?.revision ?? 1;
 
 export const update = (
@@ -441,7 +555,7 @@ export const update = (
 ): PageReturn<Model, Message> => {
   const t = translator(ctx.locale);
 
-  return Message.match<PageReturn<Model, Message>>(message, {
+  return Message.match(message, {
     GotPreferences: ({ seq, data }) => ({
       model: { ...model, preferences: Remote.succeed(model.preferences, seq, data) },
     }),
@@ -606,6 +720,9 @@ export const update = (
         },
       },
     }),
+    GotAccounts: ({ hasPassword }) => ({
+      model: { ...model, security: { ...model.security, hasPassword } },
+    }),
     ChangedNewPasskeyName: ({ value }) => ({
       model: { ...model, security: { ...model.security, newPasskeyName: value } },
     }),
@@ -679,15 +796,18 @@ export const update = (
         outMessage: Intent_.toast(sCopy(ctx.locale, "account.security.passkeyRenamed")),
       };
     },
-    ClickedAskRemovePasskey: ({ id }) => ({
-      model: { ...model, security: { ...model.security, removingId: id } },
-    }),
+    ClickedAskRemovePasskey: ({ id }) =>
+      canRemovePasskey(model.security)
+        ? { model: { ...model, security: { ...model.security, removingId: id } } }
+        : { model },
     ClickedCancelRemovePasskey: () => ({
       model: { ...model, security: { ...model.security, removingId: null } },
     }),
     ClickedConfirmRemovePasskey: () => {
       const id = model.security.removingId;
-      if (id === null) return { model };
+      if (id === null || !canRemovePasskey(model.security)) {
+        return { model: { ...model, security: { ...model.security, removingId: null } } };
+      }
       return {
         model: { ...model, actionFailure: null },
         commands: [cmdDeletePasskey(id)],
@@ -800,14 +920,18 @@ export const update = (
         sessions: { ...model.sessions, list: Remote.fail(model.sessions.list, seq, failure) },
       },
     }),
-    ClickedRevokeSession: ({ id }) => ({
-      model: {
-        ...model,
-        sessions: { ...model.sessions, revokingId: id },
-        actionFailure: null,
-      },
-      commands: [cmdRevokeSession(id)],
-    }),
+    ClickedRevokeSession: ({ id }) => {
+      const target = (Remote.dataOf(model.sessions.list) ?? []).find((s) => s.id === id);
+      const token = target?.token ?? id;
+      return {
+        model: {
+          ...model,
+          sessions: { ...model.sessions, revokingId: id },
+          actionFailure: null,
+        },
+        commands: [cmdRevokeSession(id, token)],
+      };
+    },
     RevokedSession: ({ id }) => {
       const existing = Remote.dataOf(model.sessions.list) ?? [];
       return {
@@ -886,7 +1010,7 @@ export const update = (
     }),
 
     ClickedRetry: () => (model.route._tag === "Account" ? init(model.route, ctx) : { model }),
-  });
+  } satisfies MessageHandlers<Message, PageReturn<Model, Message>>);
 };
 
 // --- Title --------------------------------------------------------------------------------------
@@ -901,249 +1025,205 @@ export const title = (model: Model, ctx: PageContext): string => {
 
 const tabLabel = (locale: Locale, tab: AccountTab): string => sCopy(locale, `account.nav.${tab}`);
 
-const viewProfile = (model: Model, ctx: PageContext, h: HtmlBuilder<Message>): Html => {
+const viewProfile = (model: Model, ctx: PageContext, h: Html.H<Message>): Markup<Message> => {
   const t = translator(ctx.locale);
   const currentEmail = ctx.session._tag === "SignedIn" ? ctx.session.user.email : "";
 
-  return h.div(
-    [h.Class("kb-stack")],
-    [
-      card(h, [
-        cardTitle(h, t.t("account.profile.title")),
-        h.div(
-          [h.Class("kb-form-grid")],
-          [
-            textField(h, {
-              id: "kb-account-name",
-              label: t.t("account.profile.name"),
-              value: model.profile.name,
-              onInput: (value) => Message.ChangedName({ value }),
-              autocomplete: "name",
-            }),
-            h.div(
-              [h.Class("kb-field")],
-              [
-                h.span([h.Class("kb-field__label")], [t.t("account.profile.language")]),
-                segmented(h, {
-                  label: t.t("account.profile.language"),
-                  selected: ctx.prefs.locale,
-                  items: [
-                    { id: "cs", label: "Čeština" },
-                    { id: "en", label: "English" },
-                  ],
-                  onSelect: (id) => Message.ChangedLocale({ locale: id === "en" ? "en" : "cs" }),
-                }),
-              ],
-            ),
-          ],
-        ),
-        h.div(
-          [h.Class("kb-row")],
-          [
-            button(h, {
-              label: sCopy(ctx.locale, "account.profile.save"),
-              variant: "primary",
-              busy: model.profile.savingProfile,
-              onClick: Message.ClickedSaveProfile(),
-            }),
-          ],
-        ),
+  return h.div.class("kb-stack").children([
+    card(h, [
+      cardTitle(h, t.t("account.profile.title")),
+      h.div.class("kb-form-grid").children([
+        textField(h, {
+          id: "kb-account-name",
+          label: t.t("account.profile.name"),
+          value: model.profile.name,
+          onInput: (value) => Message.ChangedName({ value }),
+          autocomplete: "name",
+        }),
+        h.div.class("kb-field").children([
+          h.span.class("kb-field__label").children([t.t("account.profile.language")]),
+          segmented(h, {
+            label: t.t("account.profile.language"),
+            selected: ctx.prefs.locale,
+            items: [
+              { id: "cs", label: "Čeština" },
+              { id: "en", label: "English" },
+            ],
+            onSelect: (id) => Message.ChangedLocale({ locale: id === "en" ? "en" : "cs" }),
+          }),
+        ]),
       ]),
-      card(h, [
-        cardTitle(h, t.t("account.profile.email")),
-        h.p([h.Class("kb-muted")], [currentEmail]),
-        ...(model.profile.emailSentTo !== null
-          ? [
-              banner(h, {
-                tone: "info",
-                text: t.t("account.profile.emailChangeSent", { email: model.profile.emailSentTo }),
-              }),
-            ]
-          : []),
-        h.div(
-          [h.Class("kb-ares-row")],
-          [
-            textField(h, {
-              id: "kb-account-new-email",
-              label: sCopy(ctx.locale, "account.profile.newEmail"),
-              type: "email",
-              value: model.profile.newEmail,
-              onInput: (value) => Message.ChangedNewEmail({ value }),
-              autocomplete: "email",
-            }),
-            button(h, {
-              label: t.t("account.profile.changeEmail"),
-              busy: model.profile.savingEmail,
-              onClick: Message.ClickedChangeEmail(),
-            }),
-          ],
-        ),
+      h.div.class("kb-row").children([
+        button(h, {
+          label: sCopy(ctx.locale, "account.profile.save"),
+          variant: "primary",
+          busy: model.profile.savingProfile,
+          onClick: Message.ClickedSaveProfile(),
+        }),
       ]),
-    ],
-  );
+    ]),
+    card(h, [
+      cardTitle(h, t.t("account.profile.email")),
+      h.p.class("kb-muted").children([currentEmail]),
+      ...(model.profile.emailSentTo !== null
+        ? [
+            banner(h, {
+              tone: "info",
+              text: t.t("account.profile.emailChangeSent", { email: model.profile.emailSentTo }),
+            }),
+          ]
+        : []),
+      h.div.class("kb-ares-row").children([
+        textField(h, {
+          id: "kb-account-new-email",
+          label: sCopy(ctx.locale, "account.profile.newEmail"),
+          type: "email",
+          value: model.profile.newEmail,
+          onInput: (value) => Message.ChangedNewEmail({ value }),
+          autocomplete: "email",
+        }),
+        button(h, {
+          label: t.t("account.profile.changeEmail"),
+          busy: model.profile.savingEmail,
+          onClick: Message.ClickedChangeEmail(),
+        }),
+      ]),
+    ]),
+  ]);
 };
 
-const viewAppearance = (model: Model, ctx: PageContext, h: HtmlBuilder<Message>): Html => {
+const viewAppearance = (model: Model, ctx: PageContext, h: Html.H<Message>): Markup<Message> => {
   const t = translator(ctx.locale);
   const activePreset = ctx.prefs.theme._tag === "Preset" ? ctx.prefs.theme.id : null;
 
-  return h.div(
-    [h.Class("kb-settings-grid")],
-    [
-      card(h, [
-        cardTitle(h, t.t("account.appearance.title"), [
-          button(h, {
-            label: sCopy(ctx.locale, "account.appearance.savePrefs"),
-            variant: "primary",
-            busy: model.appearance.saving,
-            onClick: Message.ClickedSaveAppearance(),
+  return h.div.class("kb-settings-grid").children([
+    card(h, [
+      cardTitle(h, t.t("account.appearance.title"), [
+        button(h, {
+          label: sCopy(ctx.locale, "account.appearance.savePrefs"),
+          variant: "primary",
+          busy: model.appearance.saving,
+          onClick: Message.ClickedSaveAppearance(),
+        }),
+      ]),
+      ...(model.appearance.dirty
+        ? [banner(h, { tone: "info", text: t.t("account.appearance.unsaved") })]
+        : []),
+      h.div.class("kb-section").children([
+        h.h3.children([t.t("account.appearance.presets")]),
+        h.div.class("kb-preset-grid").children(
+          Theme.PRESET_IDS.map((id) => {
+            const def = Theme.PresetDefinitions[id];
+            return h.button
+              .attr("type", "button")
+              .class("kb-preset-card")
+              .attr("aria-pressed", String(activePreset === id ? "true" : "false"))
+              .attr("data-preset", id)
+              .on("click", Message.SelectedPreset({ preset: id }))
+              .children([
+                h.span
+                  .class("kb-preset-swatch")
+                  .style({ "--kb-swatch-color": def.seed })
+                  .children([]),
+                h.span.children([t.translate(Theme.presetNameText(id))]),
+              ]);
+          }),
+        ),
+      ]),
+      h.div.class("kb-ares-row").children([
+        textField(h, {
+          id: "kb-account-seed",
+          label: t.t("account.appearance.seed"),
+          hint: t.t("account.appearance.seedHint"),
+          placeholder: sCopy(ctx.locale, "account.appearance.seedPlaceholder"),
+          value: model.appearance.seedInput,
+          error: model.appearance.seedError ?? undefined,
+          mono: true,
+          onInput: (value) => Message.ChangedSeedInput({ value }),
+        }),
+        button(h, {
+          label: sCopy(ctx.locale, "account.appearance.applySeed"),
+          onClick: Message.ClickedApplySeed(),
+        }),
+      ]),
+      h.div.class("kb-form-grid").children([
+        h.div.class("kb-field").children([
+          h.span.class("kb-field__label").children([t.t("account.appearance.style")]),
+          segmented(h, {
+            label: t.t("account.appearance.style"),
+            selected: ctx.prefs.style,
+            items: (["elegant", "cozy"] as const).map((s) => ({
+              id: s,
+              label: t.translate(Theme.styleNameText(s)),
+            })),
+            onSelect: (id) => Message.SelectedStyle({ style: id === "cozy" ? "cozy" : "elegant" }),
+          }),
+          h.span
+            .class("kb-field__hint")
+            .children([t.translate(I18n.enumText("themeStyleHint", ctx.prefs.style))]),
+        ]),
+        h.div.class("kb-field").children([
+          h.span.class("kb-field__label").children([t.t("account.appearance.mode")]),
+          segmented(h, {
+            label: t.t("account.appearance.mode"),
+            selected: ctx.prefs.mode,
+            items: (["system", "light", "dark"] as const).map((m) => ({
+              id: m,
+              label: t.translate(Theme.modeNameText(m)),
+            })),
+            onSelect: (id) =>
+              Message.SelectedMode({
+                mode: id === "light" || id === "dark" ? id : "system",
+              }),
           }),
         ]),
-        ...(model.appearance.dirty
-          ? [banner(h, { tone: "info", text: t.t("account.appearance.unsaved") })]
-          : []),
-        h.div(
-          [h.Class("kb-section")],
-          [
-            h.h3([], [t.t("account.appearance.presets")]),
-            h.div(
-              [h.Class("kb-preset-grid")],
-              Theme.PRESET_IDS.map((id) => {
-                const def = Theme.PresetDefinitions[id];
-                return h.button(
-                  [
-                    h.Type("button"),
-                    h.Class("kb-preset-card"),
-                    h.AriaPressed(activePreset === id ? "true" : "false"),
-                    h.DataAttribute("preset", id),
-                    h.OnClick(Message.SelectedPreset({ preset: id })),
-                  ],
-                  [
-                    h.span(
-                      [h.Class("kb-preset-swatch"), h.Style({ "--kb-swatch-color": def.seed })],
-                      [],
-                    ),
-                    h.span([], [t.translate(Theme.presetNameText(id))]),
-                  ],
-                );
+        h.div.class("kb-field").children([
+          h.span.class("kb-field__label").children([t.t("account.appearance.contrast")]),
+          segmented(h, {
+            label: t.t("account.appearance.contrast"),
+            selected: ctx.prefs.contrast,
+            items: (["standard", "medium", "high"] as const).map((c) => ({
+              id: c,
+              label: t.translate(Theme.contrastNameText(c)),
+            })),
+            onSelect: (id) =>
+              Message.SelectedContrast({
+                contrast: id === "medium" || id === "high" ? id : "standard",
               }),
-            ),
-          ],
-        ),
-        h.div(
-          [h.Class("kb-ares-row")],
-          [
-            textField(h, {
-              id: "kb-account-seed",
-              label: t.t("account.appearance.seed"),
-              hint: t.t("account.appearance.seedHint"),
-              placeholder: sCopy(ctx.locale, "account.appearance.seedPlaceholder"),
-              value: model.appearance.seedInput,
-              error: model.appearance.seedError ?? undefined,
-              mono: true,
-              onInput: (value) => Message.ChangedSeedInput({ value }),
-            }),
-            button(h, {
-              label: sCopy(ctx.locale, "account.appearance.applySeed"),
-              onClick: Message.ClickedApplySeed(),
-            }),
-          ],
-        ),
-        h.div(
-          [h.Class("kb-form-grid")],
-          [
-            h.div(
-              [h.Class("kb-field")],
-              [
-                h.span([h.Class("kb-field__label")], [t.t("account.appearance.style")]),
-                segmented(h, {
-                  label: t.t("account.appearance.style"),
-                  selected: ctx.prefs.style,
-                  items: (["elegant", "cozy"] as const).map((s) => ({
-                    id: s,
-                    label: t.translate(Theme.styleNameText(s)),
-                  })),
-                  onSelect: (id) =>
-                    Message.SelectedStyle({ style: id === "cozy" ? "cozy" : "elegant" }),
-                }),
-                h.span(
-                  [h.Class("kb-field__hint")],
-                  [t.translate(I18n.enumText("themeStyleHint", ctx.prefs.style))],
-                ),
-              ],
-            ),
-            h.div(
-              [h.Class("kb-field")],
-              [
-                h.span([h.Class("kb-field__label")], [t.t("account.appearance.mode")]),
-                segmented(h, {
-                  label: t.t("account.appearance.mode"),
-                  selected: ctx.prefs.mode,
-                  items: (["system", "light", "dark"] as const).map((m) => ({
-                    id: m,
-                    label: t.translate(Theme.modeNameText(m)),
-                  })),
-                  onSelect: (id) =>
-                    Message.SelectedMode({
-                      mode: id === "light" || id === "dark" ? id : "system",
-                    }),
-                }),
-              ],
-            ),
-            h.div(
-              [h.Class("kb-field")],
-              [
-                h.span([h.Class("kb-field__label")], [t.t("account.appearance.contrast")]),
-                segmented(h, {
-                  label: t.t("account.appearance.contrast"),
-                  selected: ctx.prefs.contrast,
-                  items: (["standard", "medium", "high"] as const).map((c) => ({
-                    id: c,
-                    label: t.translate(Theme.contrastNameText(c)),
-                  })),
-                  onSelect: (id) =>
-                    Message.SelectedContrast({
-                      contrast: id === "medium" || id === "high" ? id : "standard",
-                    }),
-                }),
-              ],
-            ),
-          ],
-        ),
+          }),
+        ]),
       ]),
-      card(h, [
-        cardTitle(h, t.t("account.appearance.preview")),
-        h.div(
-          [h.Class("kb-appearance-sample")],
-          [
-            h.div(
-              [h.Class("kb-spread")],
-              [
-                h.strong([], [t.t("account.appearance.sampleCard")]),
-                badge(h, t.translate(I18n.enumText("badge", "paid")), "paid"),
-              ],
-            ),
-            h.div(
-              [h.Class("kb-row")],
-              [
-                badge(h, t.translate(I18n.enumText("badge", "proforma")), "proforma"),
-                badge(h, t.translate(I18n.enumText("badge", "overdue")), "overdue"),
-                badge(h, t.translate(I18n.enumText("badge", "draft")), "draft"),
-              ],
-            ),
-            h.div(
-              [h.Class("kb-row")],
-              [button(h, { label: t.t("account.appearance.sampleButton"), variant: "primary" })],
-            ),
-            h.p([h.Class("kb-small kb-muted")], [t.t("account.appearance.contrastOk")]),
-          ],
-        ),
-      ]),
-    ],
-  );
+    ]),
+    card(h, [
+      cardTitle(h, t.t("account.appearance.preview")),
+      h.div
+        .class("kb-appearance-sample")
+        .children([
+          h.div
+            .class("kb-spread")
+            .children([
+              h.strong.children([t.t("account.appearance.sampleCard")]),
+              badge(h, t.translate(I18n.enumText("badge", "paid")), "paid"),
+            ]),
+          h.div
+            .class("kb-row")
+            .children([
+              badge(h, t.translate(I18n.enumText("badge", "proforma")), "proforma"),
+              badge(h, t.translate(I18n.enumText("badge", "overdue")), "overdue"),
+              badge(h, t.translate(I18n.enumText("badge", "draft")), "draft"),
+            ]),
+          h.div
+            .class("kb-row")
+            .children([
+              button(h, { label: t.t("account.appearance.sampleButton"), variant: "primary" }),
+            ]),
+          h.p.class("kb-small kb-muted").children([t.t("account.appearance.contrastOk")]),
+        ]),
+    ]),
+  ]);
 };
 
-const viewSecurity = (model: Model, ctx: PageContext, h: HtmlBuilder<Message>): Html => {
+const viewSecurity = (model: Model, ctx: PageContext, h: Html.H<Message>): Markup<Message> => {
   const t = translator(ctx.locale);
   const passkeys = Remote.dataOf(model.security.passkeys);
   const removing =
@@ -1151,195 +1231,177 @@ const viewSecurity = (model: Model, ctx: PageContext, h: HtmlBuilder<Message>): 
       ? undefined
       : passkeys?.find((p) => p.id === model.security.removingId);
 
-  return h.div(
-    [h.Class("kb-stack")],
-    [
-      card(h, [
-        cardTitle(h, t.t("account.security.passkeys")),
-        h.div(
-          [h.Class("kb-ares-row")],
-          [
-            textField(h, {
-              id: "kb-passkey-name",
-              label: t.t("account.security.passkeyName"),
-              placeholder: sCopy(ctx.locale, "account.security.passkeyPlaceholder"),
-              value: model.security.newPasskeyName,
-              onInput: (value) => Message.ChangedNewPasskeyName({ value }),
-            }),
-            button(h, {
-              label: t.t("account.security.addPasskey"),
-              variant: "primary",
-              busy: model.security.addingPasskey,
-              onClick: Message.ClickedAddPasskey(),
-            }),
-          ],
-        ),
-        ...(model.security.passkeys._tag === "Loading"
-          ? [skeleton(h, "100%", "48px"), skeleton(h, "100%", "48px")]
-          : model.security.passkeys._tag === "Failed"
-            ? [
-                banner(h, {
-                  tone: "error",
-                  text: textOf(t, model.security.passkeys.failure.text),
-                  action: button(h, {
-                    label: t.t("common.action.retry"),
-                    small: true,
-                    onClick: Message.ClickedRetry(),
-                  }),
+  return h.div.class("kb-stack").children([
+    card(h, [
+      cardTitle(h, t.t("account.security.passkeys")),
+      h.div.class("kb-ares-row").children([
+        textField(h, {
+          id: "kb-passkey-name",
+          label: t.t("account.security.passkeyName"),
+          placeholder: sCopy(ctx.locale, "account.security.passkeyPlaceholder"),
+          value: model.security.newPasskeyName,
+          onInput: (value) => Message.ChangedNewPasskeyName({ value }),
+        }),
+        button(h, {
+          label: t.t("account.security.addPasskey"),
+          variant: "primary",
+          busy: model.security.addingPasskey,
+          onClick: Message.ClickedAddPasskey(),
+        }),
+      ]),
+      ...(model.security.passkeys._tag === "Loading"
+        ? [skeleton(h, "100%", "48px"), skeleton(h, "100%", "48px")]
+        : model.security.passkeys._tag === "Failed"
+          ? [
+              banner(h, {
+                tone: "error",
+                text: textOf(t, model.security.passkeys.failure.text),
+                action: button(h, {
+                  label: t.t("common.action.retry"),
+                  small: true,
+                  onClick: Message.ClickedRetry(),
                 }),
-              ]
-            : passkeys !== undefined && passkeys.length === 0
-              ? [emptyState(h, { title: t.t("account.security.noPasskeys") })]
-              : [
-                  table(h, {
-                    caption: t.t("account.security.passkeys"),
-                    rows: passkeys ?? [],
-                    rowKey: (row) => row.id,
-                    columns: [
-                      {
-                        header: t.t("common.field.name"),
-                        cell: (row) =>
-                          model.security.renamingId === row.id
-                            ? h.div(
-                                [h.Class("kb-row")],
-                                [
-                                  h.input([
-                                    h.Class("kb-input"),
-                                    h.Value(model.security.renameValue),
-                                    h.AriaLabel(t.t("account.security.passkeyName")),
-                                    h.OnInput((value) => Message.ChangedRenamePasskey({ value })),
-                                  ]),
-                                  button(h, {
-                                    label: t.t("common.action.save"),
-                                    small: true,
-                                    variant: "primary",
-                                    onClick: Message.ClickedConfirmRenamePasskey(),
-                                  }),
-                                  button(h, {
-                                    label: t.t("common.action.cancel"),
-                                    small: true,
-                                    variant: "ghost",
-                                    onClick: Message.ClickedCancelRenamePasskey(),
-                                  }),
-                                ],
-                              )
-                            : row.name,
-                      },
-                      {
-                        header: t.t("common.field.created"),
-                        cell: (row) => h.span([h.Class("kb-mono")], [row.createdAt.slice(0, 10)]),
-                      },
-                      {
-                        header: "",
-                        align: "end",
-                        cell: (row) => {
-                          const isLast =
-                            !model.security.hasPassword && (passkeys?.length ?? 0) <= 1;
-                          return h.div(
-                            [h.Class("kb-row")],
-                            [
+              }),
+            ]
+          : passkeys !== undefined && passkeys.length === 0
+            ? [emptyState(h, { title: t.t("account.security.noPasskeys") })]
+            : [
+                table(h, {
+                  caption: t.t("account.security.passkeys"),
+                  rows: passkeys ?? [],
+                  rowKey: (row) => row.id,
+                  columns: [
+                    {
+                      header: t.t("common.field.name"),
+                      cell: (row) =>
+                        model.security.renamingId === row.id
+                          ? h.div.class("kb-row").children([
+                              h.input
+                                .class("kb-input")
+                                .value(model.security.renameValue)
+                                .attr("aria-label", t.t("account.security.passkeyName"))
+                                .on("input", ({ value }) =>
+                                  Message.ChangedRenamePasskey({ value }),
+                                ),
                               button(h, {
-                                label: t.t("common.action.rename"),
+                                label: t.t("common.action.save"),
+                                small: true,
+                                variant: "primary",
+                                onClick: Message.ClickedConfirmRenamePasskey(),
+                              }),
+                              button(h, {
+                                label: t.t("common.action.cancel"),
                                 small: true,
                                 variant: "ghost",
-                                onClick: Message.ClickedStartRenamePasskey({
-                                  id: row.id,
-                                  currentName: row.name,
-                                }),
+                                onClick: Message.ClickedCancelRenamePasskey(),
                               }),
-                              button(h, {
-                                label: t.t("common.action.remove"),
-                                small: true,
-                                variant: "danger",
-                                disabled: isLast,
-                                onClick: Message.ClickedAskRemovePasskey({ id: row.id }),
-                              }),
-                            ],
-                          );
-                        },
+                            ])
+                          : row.name,
+                    },
+                    {
+                      header: t.t("common.field.created"),
+                      cell: (row) => h.span.class("kb-mono").children([row.createdAt.slice(0, 10)]),
+                    },
+                    {
+                      header: "",
+                      align: "end",
+                      cell: (row) => {
+                        const isLast = !canRemovePasskey(model.security);
+                        return h.div.class("kb-row").children([
+                          button(h, {
+                            label: t.t("common.action.rename"),
+                            small: true,
+                            variant: "ghost",
+                            onClick: Message.ClickedStartRenamePasskey({
+                              id: row.id,
+                              currentName: row.name,
+                            }),
+                          }),
+                          button(h, {
+                            label: t.t("common.action.remove"),
+                            small: true,
+                            variant: "danger",
+                            disabled: isLast,
+                            onClick: Message.ClickedAskRemovePasskey({ id: row.id }),
+                          }),
+                        ]);
                       },
-                    ],
-                  }),
-                ]),
-      ]),
-      card(h, [
-        cardTitle(h, t.t("account.security.changePassword")),
-        ...(model.security.passwordError !== null
-          ? [banner(h, { tone: "error", text: model.security.passwordError })]
-          : []),
-        h.div(
-          [h.Class("kb-form-grid")],
-          [
-            textField(h, {
-              id: "kb-pw-current",
-              label: t.t("account.security.currentPassword"),
-              type: "password",
-              value: model.security.currentPassword,
-              autocomplete: "current-password",
-              onInput: (value) => Message.ChangedCurrentPassword({ value }),
-            }),
-            textField(h, {
-              id: "kb-pw-new",
-              label: t.t("account.security.newPassword"),
-              type: "password",
-              value: model.security.newPassword,
-              autocomplete: "new-password",
-              onInput: (value) => Message.ChangedNewPassword({ value }),
-            }),
-            textField(h, {
-              id: "kb-pw-confirm",
-              label: sCopy(ctx.locale, "account.security.confirmPassword"),
-              type: "password",
-              value: model.security.confirmPassword,
-              autocomplete: "new-password",
-              onInput: (value) => Message.ChangedConfirmPassword({ value }),
-            }),
-          ],
-        ),
-        checkbox(h, {
-          id: "kb-pw-signout-others",
-          label: t.t("account.security.signOutOthers"),
-          checked: model.security.signOutOthers,
-          onToggle: (checked) => Message.ToggledSignOutOthers({ checked }),
-        }),
-        h.div(
-          [h.Class("kb-row")],
-          [
-            button(h, {
-              label: t.t("account.security.changePassword"),
-              variant: "primary",
-              busy: model.security.savingPassword,
-              onClick: Message.ClickedChangePassword(),
-            }),
-          ],
-        ),
-      ]),
-      ...(removing !== undefined
-        ? [
-            dialog(h, {
-              id: "kb-remove-passkey-dialog",
-              title: t.t("account.security.removePasskeyTitle", { name: removing.name }),
-              body: [h.p([], [t.t("common.confirm.delete.body")])],
-              actions: [
-                button(h, {
-                  label: t.t("common.action.cancel"),
-                  onClick: Message.ClickedCancelRemovePasskey(),
+                    },
+                  ],
                 }),
-                button(h, {
-                  label: t.t("common.action.remove"),
-                  variant: "danger",
-                  onClick: Message.ClickedConfirmRemovePasskey(),
-                }),
-              ],
-              onClose: Message.ClickedCancelRemovePasskey(),
-            }),
-          ]
+              ]),
+    ]),
+    card(h, [
+      cardTitle(h, t.t("account.security.changePassword")),
+      ...(model.security.passwordError !== null
+        ? [banner(h, { tone: "error", text: model.security.passwordError })]
         : []),
-    ],
-  );
+      h.div.class("kb-form-grid").children([
+        textField(h, {
+          id: "kb-pw-current",
+          label: t.t("account.security.currentPassword"),
+          type: "password",
+          value: model.security.currentPassword,
+          autocomplete: "current-password",
+          onInput: (value) => Message.ChangedCurrentPassword({ value }),
+        }),
+        textField(h, {
+          id: "kb-pw-new",
+          label: t.t("account.security.newPassword"),
+          type: "password",
+          value: model.security.newPassword,
+          autocomplete: "new-password",
+          onInput: (value) => Message.ChangedNewPassword({ value }),
+        }),
+        textField(h, {
+          id: "kb-pw-confirm",
+          label: sCopy(ctx.locale, "account.security.confirmPassword"),
+          type: "password",
+          value: model.security.confirmPassword,
+          autocomplete: "new-password",
+          onInput: (value) => Message.ChangedConfirmPassword({ value }),
+        }),
+      ]),
+      checkbox(h, {
+        id: "kb-pw-signout-others",
+        label: t.t("account.security.signOutOthers"),
+        checked: model.security.signOutOthers,
+        onToggle: (checked) => Message.ToggledSignOutOthers({ checked }),
+      }),
+      h.div.class("kb-row").children([
+        button(h, {
+          label: t.t("account.security.changePassword"),
+          variant: "primary",
+          busy: model.security.savingPassword,
+          onClick: Message.ClickedChangePassword(),
+        }),
+      ]),
+    ]),
+    ...(removing !== undefined
+      ? [
+          dialog(h, {
+            id: "kb-remove-passkey-dialog",
+            title: t.t("account.security.removePasskeyTitle", { name: removing.name }),
+            body: [h.p.children([t.t("common.confirm.delete.body")])],
+            actions: [
+              button(h, {
+                label: t.t("common.action.cancel"),
+                onClick: Message.ClickedCancelRemovePasskey(),
+              }),
+              button(h, {
+                label: t.t("common.action.remove"),
+                variant: "danger",
+                onClick: Message.ClickedConfirmRemovePasskey(),
+              }),
+            ],
+            onClose: Message.ClickedCancelRemovePasskey(),
+          }),
+        ]
+      : []),
+  ]);
 };
 
-const viewSessions = (model: Model, ctx: PageContext, h: HtmlBuilder<Message>): Html => {
+const viewSessions = (model: Model, ctx: PageContext, h: Html.H<Message>): Markup<Message> => {
   const t = translator(ctx.locale);
   const rows = Remote.dataOf(model.sessions.list);
 
@@ -1352,7 +1414,7 @@ const viewSessions = (model: Model, ctx: PageContext, h: HtmlBuilder<Message>): 
         onClick: Message.ClickedRevokeOtherSessions(),
       }),
     ]),
-    h.p([h.Class("kb-muted")], [sCopy(ctx.locale, "account.sessions.subtitle")]),
+    h.p.class("kb-muted").children([sCopy(ctx.locale, "account.sessions.subtitle")]),
     ...(model.sessions.list._tag === "Loading"
       ? [skeleton(h, "100%", "48px"), skeleton(h, "100%", "48px")]
       : model.sessions.list._tag === "Failed"
@@ -1378,27 +1440,27 @@ const viewSessions = (model: Model, ctx: PageContext, h: HtmlBuilder<Message>): 
                   {
                     header: t.t("common.field.name"),
                     cell: (s) =>
-                      h.div(
-                        [h.Class("kb-row")],
-                        [
-                          h.span([], [s.userAgent]),
+                      h.div
+                        .class("kb-row")
+                        .children([
+                          h.span.children([s.userAgent]),
                           ...(s.current
                             ? [badge(h, t.t("account.security.thisDevice"), "paid")]
                             : []),
-                        ],
-                      ),
+                        ]),
                   },
                   {
                     header: "IP",
-                    cell: (s) => h.span([h.Class("kb-mono")], [s.ipAddress ?? "—"]),
+                    cell: (s) => h.span.class("kb-mono").children([s.ipAddress ?? "—"]),
                   },
                   {
                     header: t.t("common.field.updated"),
                     cell: (s) =>
-                      h.span(
-                        [h.Class("kb-mono")],
-                        [t.t("account.security.lastActive", { date: s.updatedAt.slice(0, 10) })],
-                      ),
+                      h.span
+                        .class("kb-mono")
+                        .children([
+                          t.t("account.security.lastActive", { date: s.updatedAt.slice(0, 10) }),
+                        ]),
                   },
                   {
                     header: "",
@@ -1420,7 +1482,7 @@ const viewSessions = (model: Model, ctx: PageContext, h: HtmlBuilder<Message>): 
   ]);
 };
 
-const viewDanger = (model: Model, ctx: PageContext, h: HtmlBuilder<Message>): Html => {
+const viewDanger = (model: Model, ctx: PageContext, h: Html.H<Message>): Markup<Message> => {
   const t = translator(ctx.locale);
   const phrase = t.t("account.danger.confirmPhrase");
   const blockingWorkspaces =
@@ -1434,7 +1496,7 @@ const viewDanger = (model: Model, ctx: PageContext, h: HtmlBuilder<Message>): Ht
     h,
     [
       cardTitle(h, t.t("account.danger.title")),
-      h.p([], [t.t("account.danger.body")]),
+      h.p.children([t.t("account.danger.body")]),
       ...blockingWorkspaces.map((w) =>
         banner(h, {
           tone: "error",
@@ -1449,24 +1511,21 @@ const viewDanger = (model: Model, ctx: PageContext, h: HtmlBuilder<Message>): Ht
         mono: true,
         onInput: (value) => Message.ChangedDeleteConfirm({ value }),
       }),
-      h.div(
-        [h.Class("kb-row")],
-        [
-          button(h, {
-            label: t.t("account.danger.submit"),
-            variant: "danger",
-            disabled: !canSubmit,
-            busy: model.danger.deleting,
-            onClick: Message.ClickedDeleteAccount(),
-          }),
-        ],
-      ),
+      h.div.class("kb-row").children([
+        button(h, {
+          label: t.t("account.danger.submit"),
+          variant: "danger",
+          disabled: !canSubmit,
+          busy: model.danger.deleting,
+          onClick: Message.ClickedDeleteAccount(),
+        }),
+      ]),
     ],
-    [h.Class("kb-card kb-danger-card")],
+    [attribute("class", "kb-card kb-danger-card")],
   );
 };
 
-export const view = Submodel.defineView<Model, Message, PageContext>((model, ctx, h) => {
+export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
   const t = translator(ctx.locale);
   const activeTab: AccountTab = model.route._tag === "Account" ? model.route.tab : "profile";
 
@@ -1500,4 +1559,4 @@ export const view = Submodel.defineView<Model, Message, PageContext>((model, ctx
       : []),
     body,
   ]);
-});
+};

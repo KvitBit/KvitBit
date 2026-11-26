@@ -1,3 +1,5 @@
+import { UiSchema } from "@effect/ui";
+import type { Html } from "@effect/ui/html";
 /**
  * Contacts screen (Screen 15, routes `Contacts` | `Contact`).
  * - List with live search, role filters (customer/supplier), archived toggle, zero-CLS shimmer
@@ -15,12 +17,11 @@ import type {
 } from "@kvitbit/domain/contract";
 import { Format, ViewModels } from "@kvitbit/ui-port";
 import { Option, Result, Schema } from "effect";
-import { type Command, Submodel } from "foldkit";
-import { defineMessageUnion } from "foldkit/message";
-import { Failure, request, type WebServices } from "../../app/api";
+import { Failure, request } from "../../app/api";
+import type { PageCommand } from "../../app/commands";
 import { copy, textOf, translator } from "../../app/i18n";
 import { Intent_ } from "../../app/intent";
-import type { PageContext, PageReturn, RouteOf } from "../../app/page";
+import type { MessageHandlers, PageContext, PageReturn, RouteOf } from "../../app/page";
 import * as Remote from "../../app/remote";
 import { href } from "../../app/routing";
 import { icon } from "../../ui/icons";
@@ -202,7 +203,7 @@ export const Model = Schema.Struct({
 });
 export type Model = typeof Model.Type;
 
-export const Message = defineMessageUnion({
+export const Message = UiSchema.TaggedEnum({
   LoadedList: { seq: Schema.Int, contacts: Schema.Array(ContactRecord) },
   FailedList: { seq: Schema.Int, failure: Failure },
   ChangedSearch: { value: Schema.String },
@@ -281,7 +282,7 @@ const loadListCommand = (
   seq: number,
   text: string,
   role: "customer" | "supplier" | null,
-): Command.Command<Message, never, WebServices> =>
+): PageCommand<Message> =>
   apiCommand(
     "ContactsSearch",
     request(
@@ -303,7 +304,7 @@ const loadDetailCommand = (
   workspaceId: string,
   contactId: string,
   seq: number,
-): Command.Command<Message, never, WebServices> =>
+): PageCommand<Message> =>
   apiCommand(
     "ContactsGet",
     request(
@@ -323,7 +324,7 @@ const loadRelatedDocsCommand = (
   workspaceId: string,
   contactId: string,
   seq: number,
-): Command.Command<Message, never, WebServices> =>
+): PageCommand<Message> =>
   apiCommand(
     "ContactsRelatedDocs",
     request(
@@ -356,10 +357,7 @@ const loadRelatedDocsCommand = (
     ),
   );
 
-const loadRelatedExpensesCommand = (
-  workspaceId: string,
-  seq: number,
-): Command.Command<Message, never, WebServices> =>
+const loadRelatedExpensesCommand = (workspaceId: string, seq: number): PageCommand<Message> =>
   apiCommand(
     "ContactsRelatedExpenses",
     request(
@@ -382,7 +380,7 @@ const lookupAresCommand = (
   ico: string,
   seq: number,
   role?: ContactRoleLiteral,
-): Command.Command<Message, never, WebServices> =>
+): PageCommand<Message> =>
   apiCommand(
     "ContactsLookupAres",
     request(
@@ -396,10 +394,7 @@ const lookupAresCommand = (
     ),
   );
 
-const refreshAresCommand = (
-  workspaceId: string,
-  ico: string,
-): Command.Command<Message, never, WebServices> =>
+const refreshAresCommand = (workspaceId: string, ico: string): PageCommand<Message> =>
   apiCommand(
     "ContactsRefreshAres",
     request(
@@ -459,10 +454,7 @@ const buildContactPayload = (ed: ContactEditor): ContactInput => {
   } as unknown as ContactInput;
 };
 
-const saveContactCommand = (
-  workspaceId: string,
-  ed: ContactEditor,
-): Command.Command<Message, never, WebServices> => {
+const saveContactCommand = (workspaceId: string, ed: ContactEditor): PageCommand<Message> => {
   const payload = buildContactPayload(ed);
   return apiCommand(
     "ContactsSave",
@@ -488,10 +480,7 @@ const saveContactCommand = (
   );
 };
 
-const archiveContactCommand = (
-  workspaceId: string,
-  contactId: string,
-): Command.Command<Message, never, WebServices> =>
+const archiveContactCommand = (workspaceId: string, contactId: string): PageCommand<Message> =>
   apiCommand(
     "ContactsArchive",
     request(
@@ -662,7 +651,7 @@ export const update = (
   const route = model.route as Route;
   const wsId = ctx.workspace?.id;
 
-  return Message.match<PageReturn<Model, Message>>(message, {
+  return Message.match(message, {
     LoadedList: ({ seq, contacts }) => ({
       model: { ...model, list: Remote.succeed(model.list, seq, contacts) },
     }),
@@ -974,7 +963,7 @@ export const update = (
       model: { ...model, archiving: false, confirmArchive: false },
       outMessage: Intent_.toast(textOf(tr, failure.text), "error"),
     }),
-  });
+  } satisfies MessageHandlers<Message, PageReturn<Model, Message>>);
 };
 
 export const title = (model: Model, ctx: PageContext): string => {
@@ -988,7 +977,7 @@ export const title = (model: Model, ctx: PageContext): string => {
 
 // --- View ----------------------------------------------------------------------------------------
 
-export const view = Submodel.defineView<Model, Message, PageContext>((model, ctx, h) => {
+export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
   const tr = translator(ctx.locale);
   const route = model.route as Route;
   const writable = canWrite(ctx);
@@ -1049,37 +1038,32 @@ export const view = Submodel.defineView<Model, Message, PageContext>((model, ctx
           {
             header: tLocal(ctx.locale, "colName"),
             cell: (c) =>
-              h.div(
-                [
-                  h.Class(c.archived ? "kb-stack kb-row-archived" : "kb-stack"),
-                  h.Style({ "--kb-gap": "2px" }),
-                ],
-                [
-                  h.a(
-                    [
-                      h.Href(
-                        href({
-                          _tag: "Contact",
-                          ws: route.ws,
-                          id: c.id as ContactId,
-                          mode: "view",
-                        }),
-                      ),
-                    ],
-                    [h.strong([], [c.name])],
-                  ),
+              h.div
+                .class(c.archived ? "kb-stack kb-row-archived" : "kb-stack")
+                .style({ "--kb-gap": "2px" })
+                .children([
+                  h.a
+                    .attr(
+                      "href",
+                      href({
+                        _tag: "Contact",
+                        ws: route.ws,
+                        id: c.id as ContactId,
+                        mode: "view",
+                      }),
+                    )
+                    .children([h.strong.children([c.name])]),
                   ...(c.legalForm !== null
-                    ? [h.span([h.Class("kb-small kb-muted")], [c.legalForm])]
+                    ? [h.span.class("kb-small kb-muted").children([c.legalForm])]
                     : []),
-                ],
-              ),
+                ]),
           },
           {
             header: tLocal(ctx.locale, "colRoles"),
             cell: (c) =>
-              h.div(
-                [h.Class("kb-row")],
-                [
+              h.div
+                .class("kb-row")
+                .children([
                   ...c.roles.map((r) =>
                     badge(
                       h,
@@ -1090,37 +1074,35 @@ export const view = Submodel.defineView<Model, Message, PageContext>((model, ctx
                   ...(c.archived
                     ? [badge(h, ctx.locale === "cs" ? "Archivovaný" : "Archived", "outline")]
                     : []),
-                ],
-              ),
+                ]),
           },
           {
             header: tLocal(ctx.locale, "colIds"),
             cell: (c) =>
-              h.div(
-                [h.Class("kb-stack"), h.Style({ "--kb-gap": "2px" })],
-                [
-                  c.ico !== null ? mono(h, c.ico) : h.span([h.Class("kb-muted")], ["—"]),
+              h.div
+                .class("kb-stack")
+                .style({ "--kb-gap": "2px" })
+                .children([
+                  c.ico !== null ? mono(h, c.ico) : h.span.class("kb-muted").children(["—"]),
                   ...(c.dic !== null
-                    ? [h.span([h.Class("kb-small kb-mono kb-muted")], [c.dic])]
+                    ? [h.span.class("kb-small kb-mono kb-muted").children([c.dic])]
                     : []),
-                ],
-              ),
+                ]),
           },
           {
             header: tLocal(ctx.locale, "colLocation"),
             cell: (c) =>
-              h.span(
-                [h.Class("kb-muted")],
-                [
+              h.span
+                .class("kb-muted")
+                .children([
                   [c.address.city, c.address.country]
                     .filter((x) => x !== null && x !== "")
                     .join(", ") || "—",
-                ],
-              ),
+                ]),
           },
           {
             header: tLocal(ctx.locale, "colEmail"),
-            cell: (c) => h.span([h.Class("kb-muted")], [c.billingEmails[0] ?? "—"]),
+            cell: (c) => h.span.class("kb-muted").children([c.billingEmails[0] ?? "—"]),
           },
         ],
       });
@@ -1140,63 +1122,44 @@ export const view = Submodel.defineView<Model, Message, PageContext>((model, ctx
             ]
           : [],
       }),
-      h.div(
-        [h.Class("kb-rec-toolbar")],
-        [
-          h.div(
-            [h.Class("kb-rec-search")],
-            [
-              h.span([h.Class("kb-rec-search__icon")], [icon(h, "search", 16)]),
-              h.input([
-                h.Class("kb-input"),
-                h.Type("search"),
-                h.Placeholder(tr.t("contacts.list.search")),
-                h.AriaLabel(tr.t("contacts.list.search")),
-                h.Value(model.search),
-                h.OnInput((value) => Message.ChangedSearch({ value })),
-              ]),
-            ],
-          ),
-          h.div(
-            [h.Class("kb-rec-chips")],
-            [
-              h.button(
-                [
-                  h.Class("kb-chip"),
-                  h.Type("button"),
-                  h.AriaPressed(model.roleFilter === null ? "true" : "false"),
-                  h.OnClick(Message.SelectedRoleFilter({ role: null })),
-                ],
-                [tLocal(ctx.locale, "allRoles")],
-              ),
-              h.button(
-                [
-                  h.Class("kb-chip"),
-                  h.Type("button"),
-                  h.AriaPressed(model.roleFilter === "customer" ? "true" : "false"),
-                  h.OnClick(Message.SelectedRoleFilter({ role: "customer" })),
-                ],
-                [tLocal(ctx.locale, "customers")],
-              ),
-              h.button(
-                [
-                  h.Class("kb-chip"),
-                  h.Type("button"),
-                  h.AriaPressed(model.roleFilter === "supplier" ? "true" : "false"),
-                  h.OnClick(Message.SelectedRoleFilter({ role: "supplier" })),
-                ],
-                [tLocal(ctx.locale, "suppliers")],
-              ),
-              checkbox(h, {
-                id: "contacts-show-archived",
-                label: tr.t("contacts.list.showArchived"),
-                checked: model.showArchived,
-                onToggle: (checked) => Message.ToggledShowArchived({ checked }),
-              }),
-            ],
-          ),
-        ],
-      ),
+      h.div.class("kb-rec-toolbar").children([
+        h.div.class("kb-rec-search").children([
+          h.span.class("kb-rec-search__icon").children([icon(h, "search", 16)]),
+          h.input
+            .class("kb-input")
+            .attr("type", "search")
+            .attr("placeholder", tr.t("contacts.list.search"))
+            .attr("aria-label", tr.t("contacts.list.search"))
+            .value(model.search)
+            .on("input", ({ value }) => Message.ChangedSearch({ value })),
+        ]),
+        h.div.class("kb-rec-chips").children([
+          h.button
+            .class("kb-chip")
+            .attr("type", "button")
+            .attr("aria-pressed", String(model.roleFilter === null ? "true" : "false"))
+            .on("click", Message.SelectedRoleFilter({ role: null }))
+            .children([tLocal(ctx.locale, "allRoles")]),
+          h.button
+            .class("kb-chip")
+            .attr("type", "button")
+            .attr("aria-pressed", String(model.roleFilter === "customer" ? "true" : "false"))
+            .on("click", Message.SelectedRoleFilter({ role: "customer" }))
+            .children([tLocal(ctx.locale, "customers")]),
+          h.button
+            .class("kb-chip")
+            .attr("type", "button")
+            .attr("aria-pressed", String(model.roleFilter === "supplier" ? "true" : "false"))
+            .on("click", Message.SelectedRoleFilter({ role: "supplier" }))
+            .children([tLocal(ctx.locale, "suppliers")]),
+          checkbox(h, {
+            id: "contacts-show-archived",
+            label: tr.t("contacts.list.showArchived"),
+            checked: model.showArchived,
+            onToggle: (checked) => Message.ToggledShowArchived({ checked }),
+          }),
+        ]),
+      ]),
       listBody,
     ]);
   }
@@ -1237,163 +1200,142 @@ export const view = Submodel.defineView<Model, Message, PageContext>((model, ctx
       }),
       card(h, [
         cardTitle(h, "ARES"),
-        h.p([h.Class("kb-small kb-muted")], [tr.t("contacts.editor.icoFirst")]),
+        h.p.class("kb-small kb-muted").children([tr.t("contacts.editor.icoFirst")]),
         ...(ed.aresError !== null ? [banner(h, { text: ed.aresError, tone: "error" })] : []),
-        h.div(
-          [h.Class("kb-inline-action")],
-          [
-            textField(h, {
-              id: "contact-ares-ico",
-              label: tr.t("common.field.ico"),
-              value: ed.icoLookup,
-              mono: true,
-              placeholder: "27082440",
-              onInput: (value) => Message.ChangedEditorField({ field: "icoLookup", value }),
-            }),
-            button(h, {
-              label: tr.t("contacts.editor.lookup"),
-              busy: ed.aresBusy,
-              onClick: Message.ClickedLookupAres(),
-            }),
-          ],
-        ),
+        h.div.class("kb-inline-action").children([
+          textField(h, {
+            id: "contact-ares-ico",
+            label: tr.t("common.field.ico"),
+            value: ed.icoLookup,
+            mono: true,
+            placeholder: "27082440",
+            onInput: (value) => Message.ChangedEditorField({ field: "icoLookup", value }),
+          }),
+          button(h, {
+            label: tr.t("contacts.editor.lookup"),
+            busy: ed.aresBusy,
+            onClick: Message.ClickedLookupAres(),
+          }),
+        ]),
       ]),
-      h.form(
-        [h.Class("kb-stack"), h.OnSubmit(Message.SubmittedEditor())],
-        [
+      h.form
+        .class("kb-stack")
+        .on("submit", Message.SubmittedEditor(), { preventDefault: true })
+        .children([
           ...(ed.error !== null ? [banner(h, { text: ed.error, tone: "error" })] : []),
           card(h, [
             cardTitle(h, tr.t("contacts.detail.particulars")),
-            h.div(
-              [h.Class("kb-row")],
-              [
-                checkbox(h, {
-                  id: "contact-role-customer",
-                  label: enumLabel(tr, "contactRole", "customer"),
-                  checked: ed.isCustomer,
-                  onToggle: (checked) => Message.ToggledRole({ role: "customer", checked }),
+            h.div.class("kb-row").children([
+              checkbox(h, {
+                id: "contact-role-customer",
+                label: enumLabel(tr, "contactRole", "customer"),
+                checked: ed.isCustomer,
+                onToggle: (checked) => Message.ToggledRole({ role: "customer", checked }),
+              }),
+              checkbox(h, {
+                id: "contact-role-supplier",
+                label: enumLabel(tr, "contactRole", "supplier"),
+                checked: ed.isSupplier,
+                onToggle: (checked) => Message.ToggledRole({ role: "supplier", checked }),
+              }),
+            ]),
+            h.div.class("kb-form-grid").children([
+              h.div.class("kb-form-span-full").children([
+                textField(h, {
+                  id: "contact-name",
+                  label: tr.t("contacts.editor.companyName"),
+                  value: ed.name,
+                  required: true,
+                  onInput: (value) => Message.ChangedEditorField({ field: "name", value }),
                 }),
-                checkbox(h, {
-                  id: "contact-role-supplier",
-                  label: enumLabel(tr, "contactRole", "supplier"),
-                  checked: ed.isSupplier,
-                  onToggle: (checked) => Message.ToggledRole({ role: "supplier", checked }),
-                }),
-              ],
-            ),
-            h.div(
-              [h.Class("kb-form-grid")],
-              [
-                h.div(
-                  [h.Class("kb-form-span-full")],
-                  [
+              ]),
+              textField(h, {
+                id: "contact-ico",
+                label: tr.t("common.field.ico"),
+                value: ed.ico,
+                mono: true,
+                onInput: (value) => Message.ChangedEditorField({ field: "ico", value }),
+              }),
+              textField(h, {
+                id: "contact-dic",
+                label: tr.t("common.field.dic"),
+                value: ed.dic,
+                mono: true,
+                onInput: (value) => Message.ChangedEditorField({ field: "dic", value }),
+              }),
+              textField(h, {
+                id: "contact-legal-form",
+                label: tLocal(ctx.locale, "legalForm"),
+                value: ed.legalForm,
+                onInput: (value) => Message.ChangedEditorField({ field: "legalForm", value }),
+              }),
+              textField(h, {
+                id: "contact-phone",
+                label: tr.t("common.field.phone"),
+                value: ed.phone,
+                onInput: (value) => Message.ChangedEditorField({ field: "phone", value }),
+              }),
+              textField(h, {
+                id: "contact-street",
+                label: tr.t("common.field.street"),
+                value: ed.street,
+                onInput: (value) => Message.ChangedEditorField({ field: "street", value }),
+              }),
+              textField(h, {
+                id: "contact-city",
+                label: tr.t("common.field.city"),
+                value: ed.city,
+                onInput: (value) => Message.ChangedEditorField({ field: "city", value }),
+              }),
+              textField(h, {
+                id: "contact-postal",
+                label: tr.t("common.field.postalCode"),
+                value: ed.postalCode,
+                mono: true,
+                onInput: (value) => Message.ChangedEditorField({ field: "postalCode", value }),
+              }),
+              textField(h, {
+                id: "contact-country",
+                label: tr.t("common.field.country"),
+                value: ed.country,
+                mono: true,
+                onInput: (value) => Message.ChangedEditorField({ field: "country", value }),
+              }),
+            ]),
+            h.div.class("kb-stack").children([
+              h.span.class("kb-field__label").children([tr.t("contacts.editor.invoicingEmails")]),
+              h.div.class("kb-email-list").children(
+                ed.billingEmails.map((email, idx) =>
+                  h.div.class("kb-inline-action").children([
                     textField(h, {
-                      id: "contact-name",
-                      label: tr.t("contacts.editor.companyName"),
-                      value: ed.name,
-                      required: true,
-                      onInput: (value) => Message.ChangedEditorField({ field: "name", value }),
+                      id: `contact-email-${idx}`,
+                      label: `${tr.t("common.field.email")} #${idx + 1}`,
+                      type: "email",
+                      value: email,
+                      onInput: (value) => Message.ChangedEmail({ index: idx, value }),
                     }),
-                  ],
+                    ...(ed.billingEmails.length > 1
+                      ? [
+                          button(h, {
+                            label: tr.t("common.action.remove"),
+                            variant: "ghost",
+                            small: true,
+                            onClick: Message.ClickedRemoveEmail({ index: idx }),
+                          }),
+                        ]
+                      : []),
+                  ]),
                 ),
-                textField(h, {
-                  id: "contact-ico",
-                  label: tr.t("common.field.ico"),
-                  value: ed.ico,
-                  mono: true,
-                  onInput: (value) => Message.ChangedEditorField({ field: "ico", value }),
+              ),
+              h.div.class("kb-row").children([
+                button(h, {
+                  label: tr.t("contacts.editor.addEmail"),
+                  small: true,
+                  icon: icon(h, "plus", 14),
+                  onClick: Message.ClickedAddEmail(),
                 }),
-                textField(h, {
-                  id: "contact-dic",
-                  label: tr.t("common.field.dic"),
-                  value: ed.dic,
-                  mono: true,
-                  onInput: (value) => Message.ChangedEditorField({ field: "dic", value }),
-                }),
-                textField(h, {
-                  id: "contact-legal-form",
-                  label: tLocal(ctx.locale, "legalForm"),
-                  value: ed.legalForm,
-                  onInput: (value) => Message.ChangedEditorField({ field: "legalForm", value }),
-                }),
-                textField(h, {
-                  id: "contact-phone",
-                  label: tr.t("common.field.phone"),
-                  value: ed.phone,
-                  onInput: (value) => Message.ChangedEditorField({ field: "phone", value }),
-                }),
-                textField(h, {
-                  id: "contact-street",
-                  label: tr.t("common.field.street"),
-                  value: ed.street,
-                  onInput: (value) => Message.ChangedEditorField({ field: "street", value }),
-                }),
-                textField(h, {
-                  id: "contact-city",
-                  label: tr.t("common.field.city"),
-                  value: ed.city,
-                  onInput: (value) => Message.ChangedEditorField({ field: "city", value }),
-                }),
-                textField(h, {
-                  id: "contact-postal",
-                  label: tr.t("common.field.postalCode"),
-                  value: ed.postalCode,
-                  mono: true,
-                  onInput: (value) => Message.ChangedEditorField({ field: "postalCode", value }),
-                }),
-                textField(h, {
-                  id: "contact-country",
-                  label: tr.t("common.field.country"),
-                  value: ed.country,
-                  mono: true,
-                  onInput: (value) => Message.ChangedEditorField({ field: "country", value }),
-                }),
-              ],
-            ),
-            h.div(
-              [h.Class("kb-stack")],
-              [
-                h.span([h.Class("kb-field__label")], [tr.t("contacts.editor.invoicingEmails")]),
-                h.div(
-                  [h.Class("kb-email-list")],
-                  ed.billingEmails.map((email, idx) =>
-                    h.div(
-                      [h.Class("kb-inline-action")],
-                      [
-                        textField(h, {
-                          id: `contact-email-${idx}`,
-                          label: `${tr.t("common.field.email")} #${idx + 1}`,
-                          type: "email",
-                          value: email,
-                          onInput: (value) => Message.ChangedEmail({ index: idx, value }),
-                        }),
-                        ...(ed.billingEmails.length > 1
-                          ? [
-                              button(h, {
-                                label: tr.t("common.action.remove"),
-                                variant: "ghost",
-                                small: true,
-                                onClick: Message.ClickedRemoveEmail({ index: idx }),
-                              }),
-                            ]
-                          : []),
-                      ],
-                    ),
-                  ),
-                ),
-                h.div(
-                  [h.Class("kb-row")],
-                  [
-                    button(h, {
-                      label: tr.t("contacts.editor.addEmail"),
-                      small: true,
-                      icon: icon(h, "plus", 14),
-                      onClick: Message.ClickedAddEmail(),
-                    }),
-                  ],
-                ),
-              ],
-            ),
+              ]),
+            ]),
             textArea(h, {
               id: "contact-note",
               label: tr.t("common.field.note"),
@@ -1403,207 +1345,183 @@ export const view = Submodel.defineView<Model, Message, PageContext>((model, ctx
           ]),
           card(h, [
             cardTitle(h, tr.t("contacts.editor.defaults.title")),
-            h.p([h.Class("kb-small kb-muted")], [tr.t("contacts.editor.defaults.intro")]),
-            h.div(
-              [h.Class("kb-override-row")],
-              [
-                h.div(
-                  [h.Class("kb-override-meta")],
-                  [
-                    h.strong([], [tr.t("contacts.editor.defaults.currency")]),
-                    badge(
-                      h,
-                      ed.currencyOverride === ""
-                        ? tr.t("contacts.override.inherited")
-                        : tr.t("contacts.override.overridden"),
-                      ed.currencyOverride === "" ? "neutral" : "proforma",
-                    ),
-                  ],
-                ),
+            h.p.class("kb-small kb-muted").children([tr.t("contacts.editor.defaults.intro")]),
+            h.div.class("kb-override-row").children([
+              h.div
+                .class("kb-override-meta")
+                .children([
+                  h.strong.children([tr.t("contacts.editor.defaults.currency")]),
+                  badge(
+                    h,
+                    ed.currencyOverride === ""
+                      ? tr.t("contacts.override.inherited")
+                      : tr.t("contacts.override.overridden"),
+                    ed.currencyOverride === "" ? "neutral" : "proforma",
+                  ),
+                ]),
+              selectField(h, {
+                id: "contact-def-currency",
+                label: tr.t("contacts.editor.defaults.currency"),
+                value: ed.currencyOverride,
+                options: [
+                  { value: "", label: tr.t("contacts.override.workspaceDefault") },
+                  ...CURRENCIES.map((c) => ({ value: c, label: c })),
+                ],
+                onChange: (value) =>
+                  Message.ChangedEditorField({ field: "currencyOverride", value }),
+              }),
+              ed.currencyOverride !== ""
+                ? button(h, {
+                    label: tLocal(ctx.locale, "overrideClear"),
+                    variant: "ghost",
+                    small: true,
+                    onClick: Message.ClearedOverride({ field: "currencyOverride" }),
+                  })
+                : h.text(""),
+            ]),
+            h.div.class("kb-override-row").children([
+              h.div
+                .class("kb-override-meta")
+                .children([
+                  h.strong.children([tr.t("contacts.editor.defaults.language")]),
+                  badge(
+                    h,
+                    ed.languageOverride === ""
+                      ? tr.t("contacts.override.inherited")
+                      : tr.t("contacts.override.overridden"),
+                    ed.languageOverride === "" ? "neutral" : "proforma",
+                  ),
+                ]),
+              selectField(h, {
+                id: "contact-def-language",
+                label: tr.t("contacts.editor.defaults.language"),
+                value: ed.languageOverride,
+                options: [
+                  { value: "", label: tr.t("contacts.override.workspaceDefault") },
+                  { value: "cs", label: enumLabel(tr, "locale", "cs") },
+                  { value: "en", label: enumLabel(tr, "locale", "en") },
+                ],
+                onChange: (value) =>
+                  Message.ChangedEditorField({ field: "languageOverride", value }),
+              }),
+              ed.languageOverride !== ""
+                ? button(h, {
+                    label: tLocal(ctx.locale, "overrideClear"),
+                    variant: "ghost",
+                    small: true,
+                    onClick: Message.ClearedOverride({ field: "languageOverride" }),
+                  })
+                : h.text(""),
+            ]),
+            h.div.class("kb-override-row").children([
+              h.div
+                .class("kb-override-meta")
+                .children([
+                  h.strong.children([tr.t("contacts.editor.defaults.dueDays")]),
+                  badge(
+                    h,
+                    ed.dueDaysOverride === ""
+                      ? tr.t("contacts.override.inherited")
+                      : tr.t("contacts.override.overridden"),
+                    ed.dueDaysOverride === "" ? "neutral" : "proforma",
+                  ),
+                ]),
+              textField(h, {
+                id: "contact-def-due",
+                label: tr.t("contacts.editor.defaults.dueDays"),
+                type: "number",
+                value: ed.dueDaysOverride,
+                placeholder: "14",
+                onInput: (value) => Message.ChangedEditorField({ field: "dueDaysOverride", value }),
+              }),
+              ed.dueDaysOverride !== ""
+                ? button(h, {
+                    label: tLocal(ctx.locale, "overrideClear"),
+                    variant: "ghost",
+                    small: true,
+                    onClick: Message.ClearedOverride({ field: "dueDaysOverride" }),
+                  })
+                : h.text(""),
+            ]),
+            h.div.class("kb-override-row").children([
+              h.div
+                .class("kb-override-meta")
+                .children([
+                  h.strong.children([tr.t("contacts.editor.defaults.paymentMethod")]),
+                  badge(
+                    h,
+                    ed.paymentMethodOverride === ""
+                      ? tr.t("contacts.override.inherited")
+                      : tr.t("contacts.override.overridden"),
+                    ed.paymentMethodOverride === "" ? "neutral" : "proforma",
+                  ),
+                ]),
+              selectField(h, {
+                id: "contact-def-payment",
+                label: tr.t("contacts.editor.defaults.paymentMethod"),
+                value: ed.paymentMethodOverride,
+                options: [
+                  { value: "", label: tr.t("contacts.override.workspaceDefault") },
+                  ...PAYMENT_METHODS.map((pm) => ({
+                    value: pm,
+                    label: enumLabel(tr, "paymentMethod", pm),
+                  })),
+                ],
+                onChange: (value) =>
+                  Message.ChangedEditorField({ field: "paymentMethodOverride", value }),
+              }),
+              ed.paymentMethodOverride !== ""
+                ? button(h, {
+                    label: tLocal(ctx.locale, "overrideClear"),
+                    variant: "ghost",
+                    small: true,
+                    onClick: Message.ClearedOverride({ field: "paymentMethodOverride" }),
+                  })
+                : h.text(""),
+            ]),
+            h.div.class("kb-override-row").children([
+              h.div
+                .class("kb-override-meta")
+                .children([
+                  h.strong.children([tr.t("contacts.editor.defaults.reminders")]),
+                  badge(
+                    h,
+                    ed.reminderMode === "inherit"
+                      ? tr.t("contacts.override.inherited")
+                      : tr.t("contacts.override.overridden"),
+                    ed.reminderMode === "inherit" ? "neutral" : "proforma",
+                  ),
+                ]),
+              h.div.class("kb-stack").children([
                 selectField(h, {
-                  id: "contact-def-currency",
-                  label: tr.t("contacts.editor.defaults.currency"),
-                  value: ed.currencyOverride,
+                  id: "contact-def-reminders",
+                  label: tr.t("contacts.editor.defaults.reminders"),
+                  value: ed.reminderMode,
                   options: [
-                    { value: "", label: tr.t("contacts.override.workspaceDefault") },
-                    ...CURRENCIES.map((c) => ({ value: c, label: c })),
+                    { value: "inherit", label: enumLabel(tr, "reminderMode", "inherit") },
+                    { value: "disabled", label: enumLabel(tr, "reminderMode", "disabled") },
+                    { value: "custom", label: enumLabel(tr, "reminderMode", "custom") },
                   ],
                   onChange: (value) =>
-                    Message.ChangedEditorField({ field: "currencyOverride", value }),
-                }),
-                ed.currencyOverride !== ""
-                  ? button(h, {
-                      label: tLocal(ctx.locale, "overrideClear"),
-                      variant: "ghost",
-                      small: true,
-                      onClick: Message.ClearedOverride({ field: "currencyOverride" }),
-                    })
-                  : h.empty,
-              ],
-            ),
-            h.div(
-              [h.Class("kb-override-row")],
-              [
-                h.div(
-                  [h.Class("kb-override-meta")],
-                  [
-                    h.strong([], [tr.t("contacts.editor.defaults.language")]),
-                    badge(
-                      h,
-                      ed.languageOverride === ""
-                        ? tr.t("contacts.override.inherited")
-                        : tr.t("contacts.override.overridden"),
-                      ed.languageOverride === "" ? "neutral" : "proforma",
-                    ),
-                  ],
-                ),
-                selectField(h, {
-                  id: "contact-def-language",
-                  label: tr.t("contacts.editor.defaults.language"),
-                  value: ed.languageOverride,
-                  options: [
-                    { value: "", label: tr.t("contacts.override.workspaceDefault") },
-                    { value: "cs", label: enumLabel(tr, "locale", "cs") },
-                    { value: "en", label: enumLabel(tr, "locale", "en") },
-                  ],
-                  onChange: (value) =>
-                    Message.ChangedEditorField({ field: "languageOverride", value }),
-                }),
-                ed.languageOverride !== ""
-                  ? button(h, {
-                      label: tLocal(ctx.locale, "overrideClear"),
-                      variant: "ghost",
-                      small: true,
-                      onClick: Message.ClearedOverride({ field: "languageOverride" }),
-                    })
-                  : h.empty,
-              ],
-            ),
-            h.div(
-              [h.Class("kb-override-row")],
-              [
-                h.div(
-                  [h.Class("kb-override-meta")],
-                  [
-                    h.strong([], [tr.t("contacts.editor.defaults.dueDays")]),
-                    badge(
-                      h,
-                      ed.dueDaysOverride === ""
-                        ? tr.t("contacts.override.inherited")
-                        : tr.t("contacts.override.overridden"),
-                      ed.dueDaysOverride === "" ? "neutral" : "proforma",
-                    ),
-                  ],
-                ),
-                textField(h, {
-                  id: "contact-def-due",
-                  label: tr.t("contacts.editor.defaults.dueDays"),
-                  type: "number",
-                  value: ed.dueDaysOverride,
-                  placeholder: "14",
-                  onInput: (value) =>
-                    Message.ChangedEditorField({ field: "dueDaysOverride", value }),
-                }),
-                ed.dueDaysOverride !== ""
-                  ? button(h, {
-                      label: tLocal(ctx.locale, "overrideClear"),
-                      variant: "ghost",
-                      small: true,
-                      onClick: Message.ClearedOverride({ field: "dueDaysOverride" }),
-                    })
-                  : h.empty,
-              ],
-            ),
-            h.div(
-              [h.Class("kb-override-row")],
-              [
-                h.div(
-                  [h.Class("kb-override-meta")],
-                  [
-                    h.strong([], [tr.t("contacts.editor.defaults.paymentMethod")]),
-                    badge(
-                      h,
-                      ed.paymentMethodOverride === ""
-                        ? tr.t("contacts.override.inherited")
-                        : tr.t("contacts.override.overridden"),
-                      ed.paymentMethodOverride === "" ? "neutral" : "proforma",
-                    ),
-                  ],
-                ),
-                selectField(h, {
-                  id: "contact-def-payment",
-                  label: tr.t("contacts.editor.defaults.paymentMethod"),
-                  value: ed.paymentMethodOverride,
-                  options: [
-                    { value: "", label: tr.t("contacts.override.workspaceDefault") },
-                    ...PAYMENT_METHODS.map((pm) => ({
-                      value: pm,
-                      label: enumLabel(tr, "paymentMethod", pm),
-                    })),
-                  ],
-                  onChange: (value) =>
-                    Message.ChangedEditorField({ field: "paymentMethodOverride", value }),
-                }),
-                ed.paymentMethodOverride !== ""
-                  ? button(h, {
-                      label: tLocal(ctx.locale, "overrideClear"),
-                      variant: "ghost",
-                      small: true,
-                      onClick: Message.ClearedOverride({ field: "paymentMethodOverride" }),
-                    })
-                  : h.empty,
-              ],
-            ),
-            h.div(
-              [h.Class("kb-override-row")],
-              [
-                h.div(
-                  [h.Class("kb-override-meta")],
-                  [
-                    h.strong([], [tr.t("contacts.editor.defaults.reminders")]),
-                    badge(
-                      h,
-                      ed.reminderMode === "inherit"
-                        ? tr.t("contacts.override.inherited")
-                        : tr.t("contacts.override.overridden"),
-                      ed.reminderMode === "inherit" ? "neutral" : "proforma",
-                    ),
-                  ],
-                ),
-                h.div(
-                  [h.Class("kb-stack")],
-                  [
-                    selectField(h, {
-                      id: "contact-def-reminders",
-                      label: tr.t("contacts.editor.defaults.reminders"),
-                      value: ed.reminderMode,
-                      options: [
-                        { value: "inherit", label: enumLabel(tr, "reminderMode", "inherit") },
-                        { value: "disabled", label: enumLabel(tr, "reminderMode", "disabled") },
-                        { value: "custom", label: enumLabel(tr, "reminderMode", "custom") },
-                      ],
-                      onChange: (value) =>
-                        Message.ChangedReminderMode({
-                          mode: value as "inherit" | "disabled" | "custom",
-                        }),
+                    Message.ChangedReminderMode({
+                      mode: value as "inherit" | "disabled" | "custom",
                     }),
-                    ...(ed.reminderMode === "custom"
-                      ? [
-                          textField(h, {
-                            id: "contact-def-reminder-offsets",
-                            label: tr.t("contacts.editor.defaults.reminderOffsets"),
-                            value: ed.reminderOffsets,
-                            placeholder: tLocal(ctx.locale, "reminderOffsetsPlaceholder"),
-                            onInput: (value) =>
-                              Message.ChangedEditorField({ field: "reminderOffsets", value }),
-                          }),
-                        ]
-                      : []),
-                  ],
-                ),
-                h.empty,
-              ],
-            ),
+                }),
+                ...(ed.reminderMode === "custom"
+                  ? [
+                      textField(h, {
+                        id: "contact-def-reminder-offsets",
+                        label: tr.t("contacts.editor.defaults.reminderOffsets"),
+                        value: ed.reminderOffsets,
+                        placeholder: tLocal(ctx.locale, "reminderOffsetsPlaceholder"),
+                        onInput: (value) =>
+                          Message.ChangedEditorField({ field: "reminderOffsets", value }),
+                      }),
+                    ]
+                  : []),
+              ]),
+              h.text(""),
+            ]),
             textArea(h, {
               id: "contact-def-note",
               label: tr.t("contacts.editor.defaults.note"),
@@ -1612,8 +1530,7 @@ export const view = Submodel.defineView<Model, Message, PageContext>((model, ctx
                 Message.ChangedEditorField({ field: "defaultNoteOverride", value }),
             }),
           ]),
-        ],
-      ),
+        ]),
     ]);
   }
 
@@ -1728,119 +1645,105 @@ export const view = Submodel.defineView<Model, Message, PageContext>((model, ctx
           : []),
       ],
     }),
-    h.div(
-      [h.Class("kb-row")],
-      [
+    h.div
+      .class("kb-row")
+      .children([
         ...contact.roles.map((r) =>
           badge(h, enumLabel(tr, "contactRole", r), r === "customer" ? "proforma" : "neutral"),
         ),
         ...(contact.archived
           ? [badge(h, ctx.locale === "cs" ? "Archivovaný" : "Archived", "outline")]
           : []),
-      ],
-    ),
-    h.div(
-      [h.Class("kb-contact-grid")],
-      [
-        card(h, [
-          cardTitle(h, tr.t("contacts.detail.particulars")),
-          dl(h, [
-            [tr.t("common.field.ico"), contact.ico !== null ? mono(h, contact.ico) : "—"],
-            [tr.t("common.field.dic"), contact.dic !== null ? mono(h, contact.dic) : "—"],
-            [tLocal(ctx.locale, "legalForm"), contact.legalForm ?? "—"],
-            [tr.t("common.field.address"), addressLine || "—"],
-            [
-              tr.t("contacts.editor.invoicingEmails"),
-              contact.billingEmails.length > 0 ? contact.billingEmails.join(", ") : "—",
-            ],
-            [tr.t("common.field.phone"), contact.phone ?? "—"],
-            [tr.t("common.field.note"), contact.note ?? "—"],
-            [
-              tLocal(ctx.locale, "registrySynced"),
-              contact.registryFetchedAt !== null
-                ? Format.formatDateTime(ctx.locale, contact.registryFetchedAt)
-                : "—",
-            ],
-          ]),
+      ]),
+    h.div.class("kb-contact-grid").children([
+      card(h, [
+        cardTitle(h, tr.t("contacts.detail.particulars")),
+        dl(h, [
+          [tr.t("common.field.ico"), contact.ico !== null ? mono(h, contact.ico) : "—"],
+          [tr.t("common.field.dic"), contact.dic !== null ? mono(h, contact.dic) : "—"],
+          [tLocal(ctx.locale, "legalForm"), contact.legalForm ?? "—"],
+          [tr.t("common.field.address"), addressLine || "—"],
+          [
+            tr.t("contacts.editor.invoicingEmails"),
+            contact.billingEmails.length > 0 ? contact.billingEmails.join(", ") : "—",
+          ],
+          [tr.t("common.field.phone"), contact.phone ?? "—"],
+          [tr.t("common.field.note"), contact.note ?? "—"],
+          [
+            tLocal(ctx.locale, "registrySynced"),
+            contact.registryFetchedAt !== null
+              ? Format.formatDateTime(ctx.locale, contact.registryFetchedAt)
+              : "—",
+          ],
         ]),
-        card(h, [
-          cardTitle(h, tr.t("contacts.detail.billingDefaults")),
-          dl(h, [
-            [
-              tr.t("contacts.editor.defaults.currency"),
-              h.div(
-                [h.Class("kb-row")],
-                [
-                  h.strong([], [resolvedBilling.currency.value]),
-                  sourceBadge(resolvedBilling.currency.source),
-                ],
-              ),
-            ],
-            [
-              tr.t("contacts.editor.defaults.language"),
-              h.div(
-                [h.Class("kb-row")],
-                [
-                  h.strong([], [enumLabel(tr, "locale", resolvedBilling.language.value)]),
-                  sourceBadge(resolvedBilling.language.source),
-                ],
-              ),
-            ],
-            [
-              tr.t("contacts.editor.defaults.dueDays"),
-              h.div(
-                [h.Class("kb-row")],
-                [
-                  h.strong(
-                    [h.Class("kb-num")],
-                    [tLocal(ctx.locale, "daysUnit", { days: resolvedBilling.dueDays.value })],
-                  ),
-                  sourceBadge(resolvedBilling.dueDays.source),
-                ],
-              ),
-            ],
-            [
-              tr.t("contacts.editor.defaults.paymentMethod"),
-              h.div(
-                [h.Class("kb-row")],
-                [
-                  h.strong(
-                    [],
-                    [enumLabel(tr, "paymentMethod", resolvedBilling.paymentMethod.value)],
-                  ),
-                  sourceBadge(resolvedBilling.paymentMethod.source),
-                ],
-              ),
-            ],
-            [
-              tr.t("contacts.editor.defaults.reminders"),
-              h.div(
-                [h.Class("kb-row")],
-                [
-                  h.strong(
-                    [],
-                    [
-                      contact.defaults.reminderPolicy?.mode === "disabled"
-                        ? tLocal(ctx.locale, "remindersDisabled")
-                        : resolvedReminders.source === "contact"
-                          ? tLocal(ctx.locale, "remindersCustom", {
-                              offsets: resolvedReminders.value.join(", "),
-                            })
-                          : tLocal(ctx.locale, "remindersInherit"),
-                    ],
-                  ),
-                  sourceBadge(resolvedReminders.source),
-                ],
-              ),
-            ],
-          ]),
+      ]),
+      card(h, [
+        cardTitle(h, tr.t("contacts.detail.billingDefaults")),
+        dl(h, [
+          [
+            tr.t("contacts.editor.defaults.currency"),
+            h.div
+              .class("kb-row")
+              .children([
+                h.strong.children([resolvedBilling.currency.value]),
+                sourceBadge(resolvedBilling.currency.source),
+              ]),
+          ],
+          [
+            tr.t("contacts.editor.defaults.language"),
+            h.div
+              .class("kb-row")
+              .children([
+                h.strong.children([enumLabel(tr, "locale", resolvedBilling.language.value)]),
+                sourceBadge(resolvedBilling.language.source),
+              ]),
+          ],
+          [
+            tr.t("contacts.editor.defaults.dueDays"),
+            h.div
+              .class("kb-row")
+              .children([
+                h.strong
+                  .class("kb-num")
+                  .children([
+                    tLocal(ctx.locale, "daysUnit", { days: resolvedBilling.dueDays.value }),
+                  ]),
+                sourceBadge(resolvedBilling.dueDays.source),
+              ]),
+          ],
+          [
+            tr.t("contacts.editor.defaults.paymentMethod"),
+            h.div
+              .class("kb-row")
+              .children([
+                h.strong.children([
+                  enumLabel(tr, "paymentMethod", resolvedBilling.paymentMethod.value),
+                ]),
+                sourceBadge(resolvedBilling.paymentMethod.source),
+              ]),
+          ],
+          [
+            tr.t("contacts.editor.defaults.reminders"),
+            h.div.class("kb-row").children([
+              h.strong.children([
+                contact.defaults.reminderPolicy?.mode === "disabled"
+                  ? tLocal(ctx.locale, "remindersDisabled")
+                  : resolvedReminders.source === "contact"
+                    ? tLocal(ctx.locale, "remindersCustom", {
+                        offsets: resolvedReminders.value.join(", "),
+                      })
+                    : tLocal(ctx.locale, "remindersInherit"),
+              ]),
+              sourceBadge(resolvedReminders.source),
+            ]),
+          ],
         ]),
-      ],
-    ),
+      ]),
+    ]),
     card(h, [
       cardTitle(h, tr.t("contacts.detail.documents")),
       docs.length === 0
-        ? h.p([h.Class("kb-muted")], [tLocal(ctx.locale, "noDocuments")])
+        ? h.p.class("kb-muted").children([tLocal(ctx.locale, "noDocuments")])
         : table(h, {
             caption: tr.t("contacts.detail.documents"),
             rows: docs,
@@ -1849,19 +1752,17 @@ export const view = Submodel.defineView<Model, Message, PageContext>((model, ctx
               {
                 header: tLocal(ctx.locale, "docNumber"),
                 cell: (d) =>
-                  h.a(
-                    [
-                      h.Href(
-                        href({
-                          _tag: "Document",
-                          ws: route.ws,
-                          id: d.id as never,
-                          tab: "preview",
-                        }),
-                      ),
-                    ],
-                    [mono(h, d.number ?? d.id.slice(0, 8))],
-                  ),
+                  h.a
+                    .attr(
+                      "href",
+                      href({
+                        _tag: "Document",
+                        ws: route.ws,
+                        id: d.id as never,
+                        tab: "preview",
+                      }),
+                    )
+                    .children([mono(h, d.number ?? d.id.slice(0, 8))]),
               },
               {
                 header: tLocal(ctx.locale, "docDate"),
@@ -1883,7 +1784,7 @@ export const view = Submodel.defineView<Model, Message, PageContext>((model, ctx
     card(h, [
       cardTitle(h, tr.t("contacts.detail.expenses")),
       expenses.length === 0
-        ? h.p([h.Class("kb-muted")], [tLocal(ctx.locale, "noExpenses")])
+        ? h.p.class("kb-muted").children([tLocal(ctx.locale, "noExpenses")])
         : table(h, {
             caption: tr.t("contacts.detail.expenses"),
             rows: expenses,
@@ -1892,19 +1793,17 @@ export const view = Submodel.defineView<Model, Message, PageContext>((model, ctx
               {
                 header: tLocal(ctx.locale, "docNumber"),
                 cell: (ex) =>
-                  h.a(
-                    [
-                      h.Href(
-                        href({
-                          _tag: "Expense",
-                          ws: route.ws,
-                          id: ex.id as never,
-                          mode: "view",
-                        }),
-                      ),
-                    ],
-                    [mono(h, ex.supplierDocumentNumber ?? ex.id.slice(0, 8))],
-                  ),
+                  h.a
+                    .attr(
+                      "href",
+                      href({
+                        _tag: "Expense",
+                        ws: route.ws,
+                        id: ex.id as never,
+                        mode: "view",
+                      }),
+                    )
+                    .children([mono(h, ex.supplierDocumentNumber ?? ex.id.slice(0, 8))]),
               },
               {
                 header: tLocal(ctx.locale, "docDate"),
@@ -1936,7 +1835,7 @@ export const view = Submodel.defineView<Model, Message, PageContext>((model, ctx
           id: "contact-archive-dialog",
           title: tLocal(ctx.locale, "archiveTitle"),
           onClose: Message.CancelledArchive(),
-          body: [h.p([], [tLocal(ctx.locale, "archiveBody", { name: contact.name })])],
+          body: [h.p.children([tLocal(ctx.locale, "archiveBody", { name: contact.name })])],
           actions: [
             button(h, {
               label: tr.t("common.action.cancel"),
@@ -1950,6 +1849,6 @@ export const view = Submodel.defineView<Model, Message, PageContext>((model, ctx
             }),
           ],
         })
-      : h.empty,
+      : h.text(""),
   ]);
-});
+};

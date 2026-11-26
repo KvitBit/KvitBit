@@ -1,11 +1,11 @@
+import { UiSchema } from "@effect/ui";
+import type { Html } from "@effect/ui/html";
 /**
  * Screen 01 — Legal pages (Terms of Service & Privacy Policy).
  * Route kind `terms | privacy`, full bilingual cs/en copy.
  */
 import { ViewModels } from "@kvitbit/ui-port";
 import { Schema } from "effect";
-import { Submodel } from "foldkit";
-import { defineMessageUnion } from "foldkit/message";
 import { copy, translator } from "../../app/i18n";
 import type { PageContext, PageReturn, RouteOf } from "../../app/page";
 import { href } from "../../app/routing";
@@ -19,7 +19,7 @@ export const Model = Schema.Struct({
 });
 export type Model = typeof Model.Type;
 
-export const Message = defineMessageUnion({});
+export const Message = UiSchema.TaggedEnum({});
 export type Message = typeof Message.Type;
 
 const local = copy({
@@ -94,7 +94,7 @@ export const title = (model: Model, ctx: PageContext): string => {
   return model.kind === "terms" ? t.t("public.legal.terms") : t.t("public.legal.privacy");
 };
 
-export const view = Submodel.defineView<Model, Message, PageContext>((model, ctx, h) => {
+export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
   const t = translator(ctx.locale);
   const heading = model.kind === "terms" ? t.t("public.legal.terms") : t.t("public.legal.privacy");
   const sections =
@@ -128,48 +128,46 @@ export const view = Submodel.defineView<Model, Message, PageContext>((model, ctx
           },
         ];
 
-  return h.div(
-    [h.Class("kb-legal")],
-    [
-      pageHeader(h, {
-        title: heading,
-        subtitle: local(ctx.locale, "updated"),
-        actions: [
-          linkButton(h, {
-            label: local(ctx.locale, "backHome"),
-            href: href({ _tag: "Landing" }),
-            variant: "ghost",
-            small: true,
-          }),
-        ],
-      }),
-      tabs(h, {
-        label: local(ctx.locale, "navLabel"),
-        selected: model.kind,
-        items: [
-          {
-            id: "terms",
-            label: t.t("public.legal.terms"),
-            href: href({ _tag: "Legal", page: "terms" }),
-          },
-          {
-            id: "privacy",
-            label: t.t("public.legal.privacy"),
-            href: href({ _tag: "Legal", page: "privacy" }),
-          },
-        ],
-      }),
-      card(h, [
-        h.article(
-          [h.Class("kb-legal__article")],
-          [
-            h.p([], [local(ctx.locale, model.kind === "terms" ? "termsIntro" : "privacyIntro")]),
-            ...sections.map((s) =>
-              h.section([h.Class("kb-legal__section")], [h.h2([], [s.title]), h.p([], [s.body])]),
-            ),
-          ],
-        ),
-      ]),
-    ],
-  );
-});
+  return h.div.class("kb-legal").children([
+    pageHeader(h, {
+      title: heading,
+      subtitle: local(ctx.locale, "updated"),
+      actions: [
+        linkButton(h, {
+          label: local(ctx.locale, "backHome"),
+          href: href({ _tag: "Landing" }),
+          variant: "ghost",
+          small: true,
+        }),
+      ],
+    }),
+    tabs(h, {
+      label: local(ctx.locale, "navLabel"),
+      selected: model.kind,
+      items: [
+        {
+          id: "terms",
+          label: t.t("public.legal.terms"),
+          href: href({ _tag: "Legal", page: "terms" }),
+        },
+        {
+          id: "privacy",
+          label: t.t("public.legal.privacy"),
+          href: href({ _tag: "Legal", page: "privacy" }),
+        },
+      ],
+    }),
+    card(h, [
+      h.article
+        .class("kb-legal__article")
+        .children([
+          h.p.children([local(ctx.locale, model.kind === "terms" ? "termsIntro" : "privacyIntro")]),
+          ...sections.map((s) =>
+            h.section
+              .class("kb-legal__section")
+              .children([h.h2.children([s.title]), h.p.children([s.body])]),
+          ),
+        ]),
+    ]),
+  ]);
+};

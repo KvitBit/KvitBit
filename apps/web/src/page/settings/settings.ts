@@ -1,3 +1,5 @@
+import { UiSchema } from "@effect/ui";
+import type { Html } from "@effect/ui/html";
 /**
  * Workspace Settings & Mobile More Hub (Screens 18–21, routes `Settings` | `More`).
  * Covers all 11 settings sections: issuingEntity, taxRegime, bankAccounts, branding, numbering,
@@ -37,12 +39,11 @@ import {
 } from "@kvitbit/domain";
 import { Api, Theme, ViewModels } from "@kvitbit/ui-port";
 import { Effect, Option, Schema } from "effect";
-import { type Command, Submodel } from "foldkit";
-import { defineMessageUnion } from "foldkit/message";
 import { type Client, Failure, failureFromUnknown, request, type WebServices } from "../../app/api";
+import type { PageCommand } from "../../app/commands";
 import { translator } from "../../app/i18n";
 import { Intent_ } from "../../app/intent";
-import type { PageContext, PageReturn, RouteOf } from "../../app/page";
+import type { MessageHandlers, PageContext, PageReturn, RouteOf } from "../../app/page";
 import * as Remote from "../../app/remote";
 import { href } from "../../app/routing";
 import { sCopy } from "./copy";
@@ -215,7 +216,7 @@ export type Model = typeof Model.Type;
 
 // --- Messages -----------------------------------------------------------------------------------
 
-export const Message = defineMessageUnion({
+export const Message = UiSchema.TaggedEnum({
   // Data loads
   GotWorkspace: { seq: Remote.Seq, data: WorkspaceDetail },
   FailedWorkspace: { seq: Remote.Seq, failure: Failure },
@@ -997,7 +998,7 @@ const cmdCloseWorkspace = (workspaceId: WorkspaceId, confirmName: string) =>
 
 export const init = (route: Route, ctx: PageContext): PageReturn<Model, Message> => {
   const wsId = workspaceIdOf(ctx);
-  const commands: Array<Command.Command<Message, never, WebServices>> = [];
+  const commands: Array<PageCommand<Message>> = [];
 
   let workspace: Remote.Remote<WorkspaceDetail> = Remote.idle;
   let bankAccounts: Remote.Remote<ReadonlyArray<BankAccount>> = Remote.idle;
@@ -1182,7 +1183,7 @@ export const update = (
   const t = translator(ctx.locale);
   const wsId = workspaceIdOf(ctx);
 
-  return Message.match<PageReturn<Model, Message>>(message, {
+  return Message.match(message, {
     // Loads
     GotWorkspace: ({ seq, data }) => {
       const next = Remote.succeed(model.workspace, seq, data);
@@ -2263,7 +2264,7 @@ export const update = (
       model.route._tag === "Settings" || model.route._tag === "More"
         ? init(model.route, ctx)
         : { model },
-  });
+  } satisfies MessageHandlers<Message, PageReturn<Model, Message>>);
 };
 
 // --- Title & View -------------------------------------------------------------------------------
@@ -2277,6 +2278,5 @@ export const title = (model: Model, ctx: PageContext): string => {
   return t.t("settings.title");
 };
 
-export const view = Submodel.defineView<Model, Message, PageContext>((model, ctx, h) =>
-  viewSettingsPage(model, ctx, h),
-);
+export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) =>
+  viewSettingsPage(model, ctx, h);

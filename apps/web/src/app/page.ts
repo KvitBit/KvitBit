@@ -1,44 +1,71 @@
-/**
- * The page contract. Every screen under src/page/<group>/ is a Foldkit Submodel exporting:
- *
- *   Model    Schema of its state (a codec, so SSR can embed it and tests can generate it)
- *   Message  defineMessageUnion(...) of fact-named Messages
- *   init     (route, ctx) => PageReturn: first state + load Commands
- *   update   (model, message, ctx) => PageReturn: pure transition; OutMessage = Intent
- *   view     Submodel.defineView<Model, Message, PageContext>((model, ctx, h) => Html)
- *   title    (model, ctx) => string: document title (without the " · Kvitbit" suffix)
- *
- * The Shell re-runs `init` whenever the route changes, so a page never sees a route it does not
- * own, and drops any Message addressed to a page that is no longer mounted (see app/pages.ts).
- */
-import type { WorkspaceSummary } from "@kvitbit/domain";
-import type { ViewModels } from "@kvitbit/ui-port";
-import type { Update } from "foldkit";
-import type { WebServices } from "./api";
-import type { Intent } from "./intent";
-import type { Locale, Prefs } from "./prefs";
-import type { SessionState } from "./session";
+import { Head } from "@effect/ui";
+import { Html } from "@effect/ui/html";
+import { WorkspaceSummary } from "@kvitbit/domain";
+import { ViewModels } from "@kvitbit/ui-port";
+import { Schema } from "effect";
+import type { Markup } from "../ui/html";
+import type { PageCommand } from "./commands";
+import { Intent } from "./intent";
+import { Locale, Prefs } from "./prefs";
+import { SessionState } from "./session";
 
 export type Route = ViewModels.Route;
 export type RouteOf<T extends ViewModels.RouteTag> = ViewModels.RouteOf<T>;
 
-/**
- * Read-only context every page receives in init, update and view. Plain data only: Foldkit
- * forbids functions in Submodel view inputs, so derive helpers in the page
- * (`translator(ctx.locale)` from app/i18n, `href` from app/routing).
- */
-export interface PageContext {
-  readonly route: Route;
-  readonly prefs: Prefs;
-  readonly locale: Locale;
-  readonly session: SessionState;
-  /** The workspace named by the route's `ws` slug, when the viewer is a member. */
-  readonly workspace: WorkspaceSummary | null;
+export const PageContext = Schema.Struct({
+  route: ViewModels.Route,
+  prefs: Prefs,
+  locale: Locale,
+  session: SessionState,
+  workspace: Schema.NullOr(WorkspaceSummary),
+});
+export type PageContext = typeof PageContext.Type;
+
+export interface PageReturn<Model, Message> {
+  readonly model: Model;
+  readonly commands?: ReadonlyArray<PageCommand<Message>>;
+  readonly outMessage?: Intent;
 }
 
-export type PageReturn<Model, Message> = Update.ReturnWithOutMessage<
-  Model,
-  Message,
-  Intent,
-  WebServices
->;
+export type MessageHandlers<Message extends { readonly _tag: string }, Result> = {
+  readonly [Tag in Message["_tag"]]: (message: Extract<Message, { readonly _tag: Tag }>) => Result;
+};
+
+export const definePage = <const Name extends string, Model, Message, PageRoute extends Route>(
+  name: Name,
+  page: {
+    readonly Model: Schema.Codec<Model, unknown, never, never>;
+    readonly Message: Schema.Codec<Message, unknown, never, never>;
+    readonly init: (route: PageRoute, ctx: PageContext) => PageReturn<Model, Message>;
+    readonly update: (
+      model: Model,
+      message: Message,
+      ctx: PageContext,
+    ) => PageReturn<Model, Message>;
+    readonly view: (model: Model, ctx: PageContext, h: Html.H<Message>) => Markup<Message>;
+    readonly title: (model: Model, ctx: PageContext) => string;
+  },
+) =>
+  Html.component({
+    name,
+    props: PageContext,
+    model: page.Model,
+    message: page.Message,
+    events: Intent,
+    // A route mount always starts its own reads and commands.
+    restore: false,
+  }).make({
+    init: ($) => {
+      // The route-to-component switch is exhaustive and selects the matching PageRoute.
+      const result = page.init($.props.route as PageRoute, $.props);
+      const step = $.set(result.model).run(...(result.commands ?? []));
+      return result.outMessage === undefined ? step : step.emit(result.outMessage);
+    },
+    update: ($, message) => {
+      const result = page.update($.model, message, $.props);
+      const step = $.set(result.model).run(...(result.commands ?? []));
+      return result.outMessage === undefined ? step : step.emit(result.outMessage);
+    },
+    view: (h, model) => page.view(model, h.props, h),
+    head: ({ model, props }) => [Head.title(`${page.title(model, props)} · Kvitbit`)],
+  });

@@ -1,3 +1,5 @@
+import { UiSchema } from "@effect/ui";
+import type { Html } from "@effect/ui/html";
 /**
  * Screen 12 — Invoice Templates & Recurring Schedules: lists, Template editor, Recurring Schedule
  * editor with cadence/issueAs/autoSend, pause/resume, Run history & failed-run attention.
@@ -15,12 +17,11 @@ import {
 } from "@kvitbit/domain";
 import { I18n, ViewModels } from "@kvitbit/ui-port";
 import { Effect, Schema } from "effect";
-import { type Command, Submodel } from "foldkit";
-import { defineMessageUnion } from "foldkit/message";
-import { Failure, type WebServices } from "../../app/api";
+import { Failure } from "../../app/api";
+import type { PageCommand } from "../../app/commands";
 import { type Copy, copy, textOf, translator } from "../../app/i18n";
 import { Intent_ } from "../../app/intent";
-import type { PageContext, PageReturn, RouteOf } from "../../app/page";
+import type { MessageHandlers, PageContext, PageReturn, RouteOf } from "../../app/page";
 import * as Remote from "../../app/remote";
 import { href } from "../../app/routing";
 import {
@@ -327,7 +328,7 @@ export const Model = Schema.Struct({
 });
 export type Model = typeof Model.Type;
 
-export const Message = defineMessageUnion({
+export const Message = UiSchema.TaggedEnum({
   Loaded: { seq: Remote.Seq, data: TemplatesData },
   Failed: { seq: Remote.Seq, failure: Failure },
   ClickedRetry: {},
@@ -382,7 +383,7 @@ const loadCommand = (
   workspaceId: WorkspaceId,
   route: Route,
   seq: Remote.Seq,
-): Command.Command<Message, never, WebServices> =>
+): PageCommand<Message> =>
   apiCommand(
     "LoadTemplates",
     (c) =>
@@ -529,7 +530,7 @@ export const update = (
   const route = model.route as Route;
   const loaded = Remote.dataOf(model.data);
 
-  return Message.match<PageReturn<Model, Message>>(message, {
+  return Message.match(message, {
     Loaded: ({ seq, data }) => {
       const nextData = Remote.succeed(model.data, seq, data);
       let next: Model = { ...model, data: nextData };
@@ -801,7 +802,7 @@ export const update = (
         formError: textOf(translator(ctx.locale), failure.text),
       },
     }),
-  });
+  } satisfies MessageHandlers<Message, PageReturn<Model, Message>>);
 };
 
 export const title = (model: Model, ctx: PageContext): string => {
@@ -812,7 +813,7 @@ export const title = (model: Model, ctx: PageContext): string => {
   return txt(ctx.locale, "listTitle");
 };
 
-export const view = Submodel.defineView<Model, Message, PageContext>((model, ctx, h) => {
+export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
   const { locale } = ctx;
   const t = translator(locale);
   const ws = ctx.workspace;
@@ -864,13 +865,13 @@ export const view = Submodel.defineView<Model, Message, PageContext>((model, ctx
           ]
         : []),
       loaded === undefined
-        ? h.div(
-            [h.Class("kb-templates-grid"), h.AriaBusy(true)],
-            [
+        ? h.div
+            .class("kb-templates-grid")
+            .attr("aria-busy", String(true))
+            .children([
               card(h, [skeleton(h, "60%", "1.2rem"), skeleton(h, "90%", "1rem")]),
               card(h, [skeleton(h, "60%", "1.2rem"), skeleton(h, "90%", "1rem")]),
-            ],
-          )
+            ])
         : templates.length === 0
           ? emptyState(h, {
               title: txt(locale, "emptyTitle"),
@@ -881,8 +882,7 @@ export const view = Submodel.defineView<Model, Message, PageContext>((model, ctx
                 variant: "primary",
               }),
             })
-          : h.div(
-              [h.Class("kb-templates-grid")],
+          : h.div.class("kb-templates-grid").children(
               templates.map((tpl) => {
                 const contactName =
                   loaded.contacts.find((c) => c.id === tpl.input.contact)?.name ?? "—";
@@ -897,67 +897,56 @@ export const view = Submodel.defineView<Model, Message, PageContext>((model, ctx
                         : badge(h, txt(locale, "scheduleActive"), "paid");
 
                 return card(h, [
-                  h.div(
-                    [h.Class("kb-template-card")],
-                    [
-                      h.div(
-                        [h.Class("kb-spread")],
-                        [
-                          h.strong([], [tpl.name]),
-                          h.div(
-                            [h.Class("kb-row")],
-                            [kindBadge(h, locale, tpl.input.kind), schedBadge],
-                          ),
-                        ],
-                      ),
-                      h.span([h.Class("kb-small kb-muted")], [contactName]),
-                      ...(sched !== null && sched.nextOccurrence !== null
-                        ? [
-                            h.span(
-                              [h.Class("kb-small kb-num")],
-                              [
-                                txt(locale, "nextRun", {
-                                  date: fmtDate(locale, sched.nextOccurrence),
-                                }),
-                              ],
-                            ),
-                          ]
-                        : []),
-                      ...(sched?.paused === true
-                        ? [
-                            banner(h, {
-                              text: txt(locale, "pausedAlert", {
-                                reason: sched.pausedReason ?? sched.pausedError ?? "error",
-                              }),
-                              tone: "error",
-                              action: button(h, {
-                                label: txt(locale, "resumeSchedule"),
-                                onClick: Message.ClickedResumeSchedule({ templateId: tpl.id }),
-                                small: true,
-                                busy: model.busy,
-                              }),
+                  h.div.class("kb-template-card").children([
+                    h.div
+                      .class("kb-spread")
+                      .children([
+                        h.strong.children([tpl.name]),
+                        h.div
+                          .class("kb-row")
+                          .children([kindBadge(h, locale, tpl.input.kind), schedBadge]),
+                      ]),
+                    h.span.class("kb-small kb-muted").children([contactName]),
+                    ...(sched !== null && sched.nextOccurrence !== null
+                      ? [
+                          h.span.class("kb-small kb-num").children([
+                            txt(locale, "nextRun", {
+                              date: fmtDate(locale, sched.nextOccurrence),
                             }),
-                          ]
-                        : []),
-                      h.div(
-                        [h.Class("kb-row")],
-                        [
-                          button(h, {
-                            label: txt(locale, "useDraft"),
-                            onClick: Message.ClickedUseTemplate({ templateId: tpl.id }),
-                            variant: "primary",
-                            small: true,
-                            busy: model.busy,
+                          ]),
+                        ]
+                      : []),
+                    ...(sched?.paused === true
+                      ? [
+                          banner(h, {
+                            text: txt(locale, "pausedAlert", {
+                              reason: sched.pausedReason ?? sched.pausedError ?? "error",
+                            }),
+                            tone: "error",
+                            action: button(h, {
+                              label: txt(locale, "resumeSchedule"),
+                              onClick: Message.ClickedResumeSchedule({ templateId: tpl.id }),
+                              small: true,
+                              busy: model.busy,
+                            }),
                           }),
-                          linkButton(h, {
-                            label: txt(locale, "openTemplate"),
-                            href: href({ _tag: "Template", ws: slug, id: tpl.id, tab: "template" }),
-                            small: true,
-                          }),
-                        ],
-                      ),
-                    ],
-                  ),
+                        ]
+                      : []),
+                    h.div.class("kb-row").children([
+                      button(h, {
+                        label: txt(locale, "useDraft"),
+                        onClick: Message.ClickedUseTemplate({ templateId: tpl.id }),
+                        variant: "primary",
+                        small: true,
+                        busy: model.busy,
+                      }),
+                      linkButton(h, {
+                        label: txt(locale, "openTemplate"),
+                        href: href({ _tag: "Template", ws: slug, id: tpl.id, tab: "template" }),
+                        small: true,
+                      }),
+                    ]),
+                  ]),
                 ]);
               }),
             ),
@@ -1007,167 +996,152 @@ export const view = Submodel.defineView<Model, Message, PageContext>((model, ctx
       ];
 
   const templateTab = card(h, [
-    h.div(
-      [h.Class("kb-stack")],
-      [
-        h.div(
-          [h.Class("kb-editor-form-grid")],
-          [
+    h.div.class("kb-stack").children([
+      h.div.class("kb-editor-form-grid").children([
+        textField(h, {
+          id: "tpl-name",
+          label: txt(locale, "nameLabel"),
+          value: model.name,
+          onInput: (value) => Message.ChangedName({ value }),
+          required: true,
+        }),
+        selectField(h, {
+          id: "tpl-kind",
+          label: txt(locale, "kindLabel"),
+          value: model.kind,
+          onChange: (value) => Message.ChangedKind({ value }),
+          options: [
+            { value: "invoice", label: textOf(t, I18n.enumText("documentKind", "invoice")) },
+            { value: "proforma", label: textOf(t, I18n.enumText("documentKind", "proforma")) },
+          ],
+        }),
+        selectField(h, {
+          id: "tpl-contact",
+          label: txt(locale, "contactLabel"),
+          value: model.contactId,
+          onChange: (value) => Message.ChangedContact({ value }),
+          options: [
+            { value: "", label: txt(locale, "contactPlaceholder") },
+            ...(loaded?.contacts ?? []).map((c) => ({ value: c.id, label: c.name })),
+          ],
+        }),
+        selectField(h, {
+          id: "tpl-currency",
+          label: txt(locale, "currencyLabel"),
+          value: model.currency,
+          onChange: (value) => Message.ChangedCurrency({ value }),
+          options: [
+            { value: "CZK", label: "CZK" },
+            { value: "EUR", label: "EUR" },
+            { value: "USD", label: "USD" },
+          ],
+        }),
+        textField(h, {
+          id: "tpl-due-days",
+          label: txt(locale, "dueDaysLabel"),
+          type: "number",
+          value: model.dueDays,
+          onInput: (value) => Message.ChangedDueDays({ value }),
+          mono: true,
+        }),
+        selectField(h, {
+          id: "tpl-pm",
+          label: txt(locale, "paymentMethodLabel"),
+          value: model.paymentMethod,
+          onChange: (value) => Message.ChangedPaymentMethod({ value }),
+          options: [
+            {
+              value: "bank_transfer",
+              label: textOf(t, I18n.enumText("paymentMethod", "bank_transfer")),
+            },
+            { value: "cash", label: textOf(t, I18n.enumText("paymentMethod", "cash")) },
+            { value: "card", label: textOf(t, I18n.enumText("paymentMethod", "card")) },
+            { value: "other", label: textOf(t, I18n.enumText("paymentMethod", "other")) },
+          ],
+        }),
+      ]),
+      checkbox(h, {
+        id: "tpl-incl-vat",
+        label: txt(locale, "pricesIncludeVat"),
+        checked: model.pricesIncludeVat,
+        onToggle: (checked) => Message.ToggledPricesIncludeVat({ checked }),
+      }),
+      h.hr.class("kb-divider"),
+      cardTitle(h, txt(locale, "linesTitle"), [
+        button(h, { label: txt(locale, "addLine"), onClick: Message.AddedLine(), small: true }),
+      ]),
+      ...model.lines.map((line) =>
+        h.div
+          .key(line.key)
+          .class("kb-line-row")
+          .children([
             textField(h, {
-              id: "tpl-name",
-              label: txt(locale, "nameLabel"),
-              value: model.name,
-              onInput: (value) => Message.ChangedName({ value }),
-              required: true,
-            }),
-            selectField(h, {
-              id: "tpl-kind",
-              label: txt(locale, "kindLabel"),
-              value: model.kind,
-              onChange: (value) => Message.ChangedKind({ value }),
-              options: [
-                { value: "invoice", label: textOf(t, I18n.enumText("documentKind", "invoice")) },
-                { value: "proforma", label: textOf(t, I18n.enumText("documentKind", "proforma")) },
-              ],
-            }),
-            selectField(h, {
-              id: "tpl-contact",
-              label: txt(locale, "contactLabel"),
-              value: model.contactId,
-              onChange: (value) => Message.ChangedContact({ value }),
-              options: [
-                { value: "", label: txt(locale, "contactPlaceholder") },
-                ...(loaded?.contacts ?? []).map((c) => ({ value: c.id, label: c.name })),
-              ],
-            }),
-            selectField(h, {
-              id: "tpl-currency",
-              label: txt(locale, "currencyLabel"),
-              value: model.currency,
-              onChange: (value) => Message.ChangedCurrency({ value }),
-              options: [
-                { value: "CZK", label: "CZK" },
-                { value: "EUR", label: "EUR" },
-                { value: "USD", label: "USD" },
-              ],
+              id: `tl-desc-${line.key}`,
+              label: txt(locale, "lineDesc"),
+              value: line.description,
+              onInput: (value) =>
+                Message.UpdatedLine({ key: line.key, field: "description", value }),
             }),
             textField(h, {
-              id: "tpl-due-days",
-              label: txt(locale, "dueDaysLabel"),
-              type: "number",
-              value: model.dueDays,
-              onInput: (value) => Message.ChangedDueDays({ value }),
+              id: `tl-qty-${line.key}`,
+              label: txt(locale, "lineQty"),
+              value: line.quantity,
+              onInput: (value) => Message.UpdatedLine({ key: line.key, field: "quantity", value }),
+              mono: true,
+            }),
+            textField(h, {
+              id: `tl-unit-${line.key}`,
+              label: txt(locale, "lineUnit"),
+              value: line.unit,
+              onInput: (value) => Message.UpdatedLine({ key: line.key, field: "unit", value }),
+            }),
+            textField(h, {
+              id: `tl-price-${line.key}`,
+              label: txt(locale, "linePrice"),
+              value: line.unitPrice,
+              onInput: (value) => Message.UpdatedLine({ key: line.key, field: "unitPrice", value }),
               mono: true,
             }),
             selectField(h, {
-              id: "tpl-pm",
-              label: txt(locale, "paymentMethodLabel"),
-              value: model.paymentMethod,
-              onChange: (value) => Message.ChangedPaymentMethod({ value }),
-              options: [
-                {
-                  value: "bank_transfer",
-                  label: textOf(t, I18n.enumText("paymentMethod", "bank_transfer")),
-                },
-                { value: "cash", label: textOf(t, I18n.enumText("paymentMethod", "cash")) },
-                { value: "card", label: textOf(t, I18n.enumText("paymentMethod", "card")) },
-                { value: "other", label: textOf(t, I18n.enumText("paymentMethod", "other")) },
-              ],
+              id: `tl-vat-${line.key}`,
+              label: txt(locale, "lineVat"),
+              value: line.vat,
+              onChange: (value) => Message.UpdatedLine({ key: line.key, field: "vat", value }),
+              options: vatOptions,
             }),
-          ],
-        ),
-        checkbox(h, {
-          id: "tpl-incl-vat",
-          label: txt(locale, "pricesIncludeVat"),
-          checked: model.pricesIncludeVat,
-          onToggle: (checked) => Message.ToggledPricesIncludeVat({ checked }),
-        }),
-        h.hr([h.Class("kb-divider")]),
-        cardTitle(h, txt(locale, "linesTitle"), [
-          button(h, { label: txt(locale, "addLine"), onClick: Message.AddedLine(), small: true }),
-        ]),
-        ...model.lines.map((line) =>
-          h.keyed("div")(
-            line.key,
-            [h.Class("kb-line-row")],
-            [
-              textField(h, {
-                id: `tl-desc-${line.key}`,
-                label: txt(locale, "lineDesc"),
-                value: line.description,
-                onInput: (value) =>
-                  Message.UpdatedLine({ key: line.key, field: "description", value }),
+            h.div.class("kb-line-actions").children([
+              button(h, {
+                label: "×",
+                ariaLabel: txt(locale, "removeLine"),
+                onClick: Message.RemovedLine({ key: line.key }),
+                variant: "ghost",
+                small: true,
               }),
-              textField(h, {
-                id: `tl-qty-${line.key}`,
-                label: txt(locale, "lineQty"),
-                value: line.quantity,
-                onInput: (value) =>
-                  Message.UpdatedLine({ key: line.key, field: "quantity", value }),
-                mono: true,
-              }),
-              textField(h, {
-                id: `tl-unit-${line.key}`,
-                label: txt(locale, "lineUnit"),
-                value: line.unit,
-                onInput: (value) => Message.UpdatedLine({ key: line.key, field: "unit", value }),
-              }),
-              textField(h, {
-                id: `tl-price-${line.key}`,
-                label: txt(locale, "linePrice"),
-                value: line.unitPrice,
-                onInput: (value) =>
-                  Message.UpdatedLine({ key: line.key, field: "unitPrice", value }),
-                mono: true,
-              }),
-              selectField(h, {
-                id: `tl-vat-${line.key}`,
-                label: txt(locale, "lineVat"),
-                value: line.vat,
-                onChange: (value) => Message.UpdatedLine({ key: line.key, field: "vat", value }),
-                options: vatOptions,
-              }),
-              h.div(
-                [h.Class("kb-line-actions")],
-                [
-                  button(h, {
-                    label: "×",
-                    ariaLabel: txt(locale, "removeLine"),
-                    onClick: Message.RemovedLine({ key: line.key }),
-                    variant: "ghost",
-                    small: true,
-                  }),
-                ],
-              ),
-            ],
-          ),
-        ),
-        textArea(h, {
-          id: "tpl-note",
-          label: txt(locale, "noteLabel"),
-          value: model.note,
-          onInput: (value) => Message.ChangedNote({ value }),
-        }),
-        h.div(
-          [h.Class("kb-spread")],
-          [
-            isNew
-              ? h.span([], [])
-              : button(h, {
-                  label: txt(locale, "archiveTemplate"),
-                  onClick: Message.OpenedArchiveDialog(),
-                  variant: "danger",
-                }),
-            button(h, {
-              label: txt(locale, "saveTemplate"),
-              onClick: Message.SubmittedTemplate(),
-              variant: "primary",
-              busy: model.busy,
+            ]),
+          ]),
+      ),
+      textArea(h, {
+        id: "tpl-note",
+        label: txt(locale, "noteLabel"),
+        value: model.note,
+        onInput: (value) => Message.ChangedNote({ value }),
+      }),
+      h.div.class("kb-spread").children([
+        isNew
+          ? h.span.children([])
+          : button(h, {
+              label: txt(locale, "archiveTemplate"),
+              onClick: Message.OpenedArchiveDialog(),
+              variant: "danger",
             }),
-          ],
-        ),
-      ],
-    ),
+        button(h, {
+          label: txt(locale, "saveTemplate"),
+          onClick: Message.SubmittedTemplate(),
+          variant: "primary",
+          busy: model.busy,
+        }),
+      ]),
+    ]),
   ]);
 
   const scheduleTab =
@@ -1193,89 +1167,77 @@ export const view = Submodel.defineView<Model, Message, PageContext>((model, ctx
                 }),
               ]
             : []),
-          h.div(
-            [h.Class("kb-stack")],
-            [
-              h.div(
-                [h.Class("kb-schedule-cadence")],
-                [
-                  textField(h, {
-                    id: "sched-count",
-                    label: txt(locale, "cadenceCount"),
-                    type: "number",
-                    value: model.cadenceCount,
-                    onInput: (value) => Message.ChangedCadenceCount({ value }),
-                    mono: true,
-                  }),
-                  selectField(h, {
-                    id: "sched-unit",
-                    label: txt(locale, "cadenceUnit"),
-                    value: model.cadenceUnit,
-                    onChange: (value) => Message.ChangedCadenceUnit({ value }),
-                    options: [
-                      { value: "weeks", label: textOf(t, I18n.enumText("cadenceUnit", "weeks")) },
-                      { value: "months", label: textOf(t, I18n.enumText("cadenceUnit", "months")) },
-                      { value: "years", label: textOf(t, I18n.enumText("cadenceUnit", "years")) },
-                    ],
-                  }),
-                ],
-              ),
-              h.div(
-                [h.Class("kb-editor-form-grid")],
-                [
-                  textField(h, {
-                    id: "sched-start",
-                    label: txt(locale, "startOn"),
-                    type: "date",
-                    value: model.startOn,
-                    onInput: (value) => Message.ChangedStartOn({ value }),
-                  }),
-                  textField(h, {
-                    id: "sched-end",
-                    label: txt(locale, "endOn"),
-                    type: "date",
-                    value: model.endOn,
-                    onInput: (value) => Message.ChangedEndOn({ value }),
-                  }),
-                  selectField(h, {
-                    id: "sched-issue-as",
-                    label: txt(locale, "issueAs"),
-                    value: model.issueAs,
-                    onChange: (value) => Message.ChangedIssueAs({ value }),
-                    options: [
-                      { value: "invoice", label: textOf(t, I18n.enumText("issueAs", "invoice")) },
-                      { value: "proforma", label: textOf(t, I18n.enumText("issueAs", "proforma")) },
-                    ],
-                  }),
-                ],
-              ),
-              checkbox(h, {
-                id: "sched-autosend",
-                label: txt(locale, "autoSend"),
-                checked: model.autoSend,
-                onToggle: (checked) => Message.ToggledAutoSend({ checked }),
+          h.div.class("kb-stack").children([
+            h.div.class("kb-schedule-cadence").children([
+              textField(h, {
+                id: "sched-count",
+                label: txt(locale, "cadenceCount"),
+                type: "number",
+                value: model.cadenceCount,
+                onInput: (value) => Message.ChangedCadenceCount({ value }),
+                mono: true,
               }),
-              h.div(
-                [h.Class("kb-spread")],
-                [
-                  existing.schedule !== null
-                    ? button(h, {
-                        label: txt(locale, "removeSchedule"),
-                        onClick: Message.ClickedRemoveSchedule(),
-                        variant: "danger",
-                        busy: model.busy,
-                      })
-                    : h.span([], []),
-                  button(h, {
-                    label: txt(locale, "saveSchedule"),
-                    onClick: Message.SubmittedSchedule(),
-                    variant: "primary",
-                    busy: model.busy,
-                  }),
+              selectField(h, {
+                id: "sched-unit",
+                label: txt(locale, "cadenceUnit"),
+                value: model.cadenceUnit,
+                onChange: (value) => Message.ChangedCadenceUnit({ value }),
+                options: [
+                  { value: "weeks", label: textOf(t, I18n.enumText("cadenceUnit", "weeks")) },
+                  { value: "months", label: textOf(t, I18n.enumText("cadenceUnit", "months")) },
+                  { value: "years", label: textOf(t, I18n.enumText("cadenceUnit", "years")) },
                 ],
-              ),
-            ],
-          ),
+              }),
+            ]),
+            h.div.class("kb-editor-form-grid").children([
+              textField(h, {
+                id: "sched-start",
+                label: txt(locale, "startOn"),
+                type: "date",
+                value: model.startOn,
+                onInput: (value) => Message.ChangedStartOn({ value }),
+              }),
+              textField(h, {
+                id: "sched-end",
+                label: txt(locale, "endOn"),
+                type: "date",
+                value: model.endOn,
+                onInput: (value) => Message.ChangedEndOn({ value }),
+              }),
+              selectField(h, {
+                id: "sched-issue-as",
+                label: txt(locale, "issueAs"),
+                value: model.issueAs,
+                onChange: (value) => Message.ChangedIssueAs({ value }),
+                options: [
+                  { value: "invoice", label: textOf(t, I18n.enumText("issueAs", "invoice")) },
+                  { value: "proforma", label: textOf(t, I18n.enumText("issueAs", "proforma")) },
+                ],
+              }),
+            ]),
+            checkbox(h, {
+              id: "sched-autosend",
+              label: txt(locale, "autoSend"),
+              checked: model.autoSend,
+              onToggle: (checked) => Message.ToggledAutoSend({ checked }),
+            }),
+            h.div.class("kb-spread").children([
+              existing.schedule !== null
+                ? button(h, {
+                    label: txt(locale, "removeSchedule"),
+                    onClick: Message.ClickedRemoveSchedule(),
+                    variant: "danger",
+                    busy: model.busy,
+                  })
+                : h.span.children([]),
+              button(h, {
+                label: txt(locale, "saveSchedule"),
+                onClick: Message.SubmittedSchedule(),
+                variant: "primary",
+                busy: model.busy,
+              }),
+            ]),
+          ]),
         ]);
 
   const runsTab = card(h, [
@@ -1311,15 +1273,13 @@ export const view = Submodel.defineView<Model, Message, PageContext>((model, ctx
               cell: (r) =>
                 r.document === null
                   ? "—"
-                  : h.a(
-                      [
-                        h.Class("kb-queue-item__link"),
-                        h.Href(
-                          href({ _tag: "Document", ws: slug, id: r.document.id, tab: "preview" }),
-                        ),
-                      ],
-                      [mono(h, r.document.number)],
-                    ),
+                  : h.a
+                      .class("kb-queue-item__link")
+                      .attr(
+                        "href",
+                        href({ _tag: "Document", ws: slug, id: r.document.id, tab: "preview" }),
+                      )
+                      .children([mono(h, r.document.number)]),
             },
             {
               header: txt(locale, "runColDelivery"),
@@ -1363,7 +1323,7 @@ export const view = Submodel.defineView<Model, Message, PageContext>((model, ctx
             id: "dlg-archive-template",
             title: txt(locale, "archiveDialogTitle"),
             onClose: Message.ClosedArchiveDialog(),
-            body: [h.p([], [txt(locale, "archiveDialogBody")])],
+            body: [h.p.children([txt(locale, "archiveDialogBody")])],
             actions: [
               button(h, {
                 label: sharedCopy(locale, "cancel"),
@@ -1380,4 +1340,4 @@ export const view = Submodel.defineView<Model, Message, PageContext>((model, ctx
         ]
       : []),
   ]);
-});
+};

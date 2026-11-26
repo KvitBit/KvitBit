@@ -1,3 +1,5 @@
+import { UiSchema } from "@effect/ui";
+import type { Html } from "@effect/ui/html";
 /**
  * Expenses screen (Screens 13 & 14, routes `Expenses` | `ExpenseCapture` | `Expense`).
  * Czech term: Náklady (#171).
@@ -22,15 +24,14 @@ import type {
 } from "@kvitbit/domain/contract";
 import { Format, ViewModels } from "@kvitbit/ui-port";
 import { BigDecimal, Result, Schema } from "effect";
-import { type Command, Submodel } from "foldkit";
-import type { Html, HtmlBuilder } from "foldkit/html";
-import { defineMessageUnion } from "foldkit/message";
-import { Failure, request, type WebServices } from "../../app/api";
+import { Failure, request } from "../../app/api";
+import type { PageCommand } from "../../app/commands";
 import { copy, textOf, translator } from "../../app/i18n";
 import { Intent_ } from "../../app/intent";
-import type { PageContext, PageReturn, RouteOf } from "../../app/page";
+import type { MessageHandlers, PageContext, PageReturn, RouteOf } from "../../app/page";
 import * as Remote from "../../app/remote";
 import { href } from "../../app/routing";
+import { attribute, type Markup, withAttributes } from "../../ui/html";
 import { icon } from "../../ui/icons";
 import {
   badge,
@@ -287,7 +288,7 @@ export const Model = Schema.Struct({
 });
 export type Model = typeof Model.Type;
 
-export const Message = defineMessageUnion({
+export const Message = UiSchema.TaggedEnum({
   LoadedList: { seq: Schema.Int, items: Schema.Array(ExpenseSummaryRecord) },
   FailedList: { seq: Schema.Int, failure: Failure },
   ChangedSearch: { value: Schema.String },
@@ -401,7 +402,7 @@ const loadListCommand = (
   workspaceId: string,
   seq: number,
   incompleteOnly: boolean,
-): Command.Command<Message, never, WebServices> =>
+): PageCommand<Message> =>
   apiCommand(
     "ExpensesList",
     request(
@@ -420,7 +421,7 @@ const loadDetailCommand = (
   workspaceId: string,
   expenseId: string,
   seq: number,
-): Command.Command<Message, never, WebServices> =>
+): PageCommand<Message> =>
   apiCommand(
     "ExpensesGet",
     request(
@@ -437,7 +438,7 @@ const loadPaymentsCommand = (
   workspaceId: string,
   expenseId: string,
   seq: number,
-): Command.Command<Message, never, WebServices> =>
+): PageCommand<Message> =>
   apiCommand(
     "ExpensePaymentsList",
     request(
@@ -455,7 +456,7 @@ const fetchFxCommand = (
   currency: string,
   on: string,
   seq: number,
-): Command.Command<Message, never, WebServices> =>
+): PageCommand<Message> =>
   apiCommand(
     "ExpensesFetchFx",
     request(
@@ -482,7 +483,7 @@ const lookupSupplierAresCommand = (
   workspaceId: string,
   ico: string,
   seq: number,
-): Command.Command<Message, never, WebServices> =>
+): PageCommand<Message> =>
   apiCommand(
     "ExpensesSupplierAres",
     request(
@@ -509,7 +510,7 @@ const createCaptureExpenseCommand = (
   workspaceId: string,
   jobId: string,
   file: File,
-): Command.Command<Message, never, WebServices> =>
+): PageCommand<Message> =>
   apiCommand(
     "ExpensesQuickCaptureCreate",
     request(
@@ -592,10 +593,7 @@ const buildExpensePayload = (ed: ExpenseEditorDraft): Record<string, unknown> =>
   };
 };
 
-const saveExpenseCommand = (
-  workspaceId: string,
-  ed: ExpenseEditorDraft,
-): Command.Command<Message, never, WebServices> => {
+const saveExpenseCommand = (workspaceId: string, ed: ExpenseEditorDraft): PageCommand<Message> => {
   const payload = buildExpensePayload(ed);
   return apiCommand(
     "ExpensesSave",
@@ -622,7 +620,7 @@ const removeExpenseCommand = (
   workspaceId: string,
   expenseId: string,
   revision: number,
-): Command.Command<Message, never, WebServices> =>
+): PageCommand<Message> =>
   apiCommand(
     "ExpensesRemove",
     request(
@@ -640,7 +638,7 @@ const detachAttachmentCommand = (
   workspaceId: string,
   expenseId: string,
   attachmentId: string,
-): Command.Command<Message, never, WebServices> =>
+): PageCommand<Message> =>
   apiCommand(
     "ExpensesDetach",
     request(
@@ -662,7 +660,7 @@ const recordPaymentCommand = (
   expenseId: string,
   currency: string,
   dlg: PaymentDialogState,
-): Command.Command<Message, never, WebServices> => {
+): PageCommand<Message> => {
   const parsed = parseUserDecimal(dlg.amount);
   const amount: Money | undefined =
     parsed !== null && parsed > 0
@@ -696,7 +694,7 @@ const removePaymentCommand = (
   workspaceId: string,
   paymentId: string,
   reason: string,
-): Command.Command<Message, never, WebServices> =>
+): PageCommand<Message> =>
   apiCommand(
     "ExpenseRemovePayment",
     request(
@@ -907,7 +905,7 @@ export const update = (
   const route = model.route as Route;
   const wsId = ctx.workspace?.id;
 
-  return Message.match<PageReturn<Model, Message>>(message, {
+  return Message.match(message, {
     LoadedList: ({ seq, items }) => ({
       model: { ...model, list: Remote.succeed(model.list, seq, items) },
     }),
@@ -1591,7 +1589,7 @@ export const update = (
       model: { ...model, removingPayment: false, confirmRemovePaymentId: null },
       outMessage: Intent_.toast(textOf(tr, failure.text), "error"),
     }),
-  });
+  } satisfies MessageHandlers<Message, PageReturn<Model, Message>>);
 };
 
 export const title = (model: Model, ctx: PageContext): string => {
@@ -1607,12 +1605,12 @@ export const title = (model: Model, ctx: PageContext): string => {
 // --- Attachment Viewer Helper --------------------------------------------------------------------
 
 const renderAttachmentViewer = (
-  h: HtmlBuilder<Message>,
+  h: Html.H<Message>,
   ctx: PageContext,
   model: Model,
   expense: ExpenseViewRecord | undefined,
   writable: boolean,
-): Html => {
+): Markup<Message> => {
   const tr = translator(ctx.locale);
   const attachments = expense?.attachments ?? [];
   const selected = attachments.find((a) => a.id === model.selectedAttachmentId) ?? attachments[0];
@@ -1628,121 +1626,103 @@ const renderAttachmentViewer = (
       cardTitle(h, tr.t("expenses.detail.attachments"), [
         ...(writable && expense !== undefined
           ? [
-              h.label(
-                [h.Class("kb-btn kb-btn--small kb-file-label")],
-                [
-                  icon(h, "upload", 14),
-                  tr.t("expenses.detail.addFiles"),
-                  h.input([
-                    h.Class("kb-file-input"),
-                    h.Type("file"),
-                    h.Accept(ALLOWED_MIME_TYPES),
-                    h.OnFileChange((files) => Message.SelectedDetailFiles({ files })),
-                  ]),
-                ],
-              ),
+              h.label.class("kb-btn kb-btn--small kb-file-label").children([
+                icon(h, "upload", 14),
+                tr.t("expenses.detail.addFiles"),
+                h.input
+                  .class("kb-file-input")
+                  .attr("type", "file")
+                  .attr("accept", ALLOWED_MIME_TYPES)
+                  .on("change", ({ files }) => Message.SelectedDetailFiles({ files })),
+              ]),
             ]
           : []),
       ]),
       selected === undefined
-        ? h.div(
-            [h.Class("kb-att-preview")],
-            [h.p([h.Class("kb-muted")], [tLocal(ctx.locale, "noAttachments")])],
-          )
-        : h.div(
-            [h.Class("kb-stack")],
-            [
-              h.div(
-                [h.Class("kb-spread")],
-                [
-                  h.span([h.Class("kb-small kb-mono")], [selected.name]),
-                  h.div(
-                    [h.Class("kb-row")],
-                    [
+        ? h.div
+            .class("kb-att-preview")
+            .children([h.p.class("kb-muted").children([tLocal(ctx.locale, "noAttachments")])])
+        : h.div.class("kb-stack").children([
+            h.div.class("kb-spread").children([
+              h.span.class("kb-small kb-mono").children([selected.name]),
+              h.div.class("kb-row").children([
+                button(h, {
+                  label: "−",
+                  small: true,
+                  ariaLabel: "Zoom out",
+                  onClick: Message.ChangedZoom({ delta: -25 }),
+                }),
+                h.span.class("kb-small kb-num").children([`${model.viewerZoom} %`]),
+                button(h, {
+                  label: "+",
+                  small: true,
+                  ariaLabel: "Zoom in",
+                  onClick: Message.ChangedZoom({ delta: 25 }),
+                }),
+                button(h, {
+                  label: tr.t("common.action.download"),
+                  small: true,
+                  icon: icon(h, "download", 14),
+                  onClick: Message.ClickedDownloadAttachment({ attachment: selected }),
+                }),
+                ...(writable
+                  ? [
                       button(h, {
-                        label: "−",
+                        label: tr.t("common.action.remove"),
+                        variant: "ghost",
                         small: true,
-                        ariaLabel: "Zoom out",
-                        onClick: Message.ChangedZoom({ delta: -25 }),
+                        onClick: Message.RequestedDetach({ id: selected.id }),
                       }),
-                      h.span([h.Class("kb-small kb-num")], [`${model.viewerZoom} %`]),
-                      button(h, {
-                        label: "+",
-                        small: true,
-                        ariaLabel: "Zoom in",
-                        onClick: Message.ChangedZoom({ delta: 25 }),
-                      }),
-                      button(h, {
-                        label: tr.t("common.action.download"),
-                        small: true,
-                        icon: icon(h, "download", 14),
-                        onClick: Message.ClickedDownloadAttachment({ attachment: selected }),
-                      }),
-                      ...(writable
-                        ? [
-                            button(h, {
-                              label: tr.t("common.action.remove"),
-                              variant: "ghost",
-                              small: true,
-                              onClick: Message.RequestedDetach({ id: selected.id }),
-                            }),
-                          ]
-                        : []),
-                    ],
-                  ),
-                ],
-              ),
-              h.div(
-                [h.Class("kb-att-preview")],
-                [
-                  selected.contentType.startsWith("image/")
-                    ? h.img([
-                        h.Src(inlineUrl),
-                        h.Alt(selected.name),
-                        h.Style({ transform: `scale(${model.viewerZoom / 100})` }),
-                      ])
-                    : h.object(
-                        [h.Attribute("data", inlineUrl), h.Type(selected.contentType)],
-                        [
-                          h.p(
-                            [h.Class("kb-muted")],
-                            [tLocal(ctx.locale, "previewFallback", { name: selected.name })],
-                          ),
-                        ],
-                      ),
-                ],
-              ),
-              ...(attachments.length > 1
-                ? [
-                    h.div(
-                      [h.Class("kb-att-thumbs")],
+                    ]
+                  : []),
+              ]),
+            ]),
+            h.div.class("kb-att-preview").children([
+              selected.contentType.startsWith("image/")
+                ? h.img
+                    .attr("src", inlineUrl)
+                    .attr("alt", selected.name)
+                    .style({ transform: `scale(${model.viewerZoom / 100})` })
+                : h
+                    .el("object")
+                    .attr("data", inlineUrl)
+                    .attr("type", selected.contentType)
+                    .children([
+                      h.p
+                        .class("kb-muted")
+                        .children([tLocal(ctx.locale, "previewFallback", { name: selected.name })]),
+                    ]),
+            ]),
+            ...(attachments.length > 1
+              ? [
+                  h.div
+                    .class("kb-att-thumbs")
+                    .children(
                       attachments.map((att) =>
-                        h.button(
-                          [
-                            h.Class("kb-att-thumb"),
-                            h.Type("button"),
-                            ...(att.id === selected.id ? [h.AriaCurrent("true")] : []),
-                            h.OnClick(Message.SelectedAttachment({ id: att.id })),
-                          ],
-                          [
-                            h.span([h.Class("kb-mono")], [att.name]),
-                            h.span([h.Class("kb-muted")], [formatBytes(att.bytes)]),
-                          ],
-                        ),
+                        withAttributes(h.button.class(), [
+                          (element) => element.class("kb-att-thumb"),
+                          (element) => element.attr("type", "button"),
+                          (node) =>
+                            att.id === selected.id ? node.attr("aria-current", "true") : node,
+                          (element) =>
+                            element.on("click", Message.SelectedAttachment({ id: att.id })),
+                        ]).children([
+                          h.span.class("kb-mono").children([att.name]),
+                          h.span.class("kb-muted").children([formatBytes(att.bytes)]),
+                        ]),
                       ),
                     ),
-                  ]
-                : []),
-            ],
-          ),
+                ]
+              : []),
+          ]),
     ],
-    [h.Class("kb-card kb-att-viewer")],
+    [attribute("class", "kb-card kb-att-viewer")],
   );
 };
 
 // --- Main View -----------------------------------------------------------------------------------
 
-export const view = Submodel.defineView<Model, Message, PageContext>((model, ctx, h) => {
+export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
   const tr = translator(ctx.locale);
   const route = model.route as Route;
   const writable = canWrite(ctx);
@@ -1816,32 +1796,31 @@ export const view = Submodel.defineView<Model, Message, PageContext>((model, ctx
           {
             header: tr.t("expenses.list.column.supplier"),
             cell: (item) =>
-              h.div(
-                [h.Class("kb-stack"), h.Style({ "--kb-gap": "2px" })],
-                [
-                  h.a(
-                    [
-                      h.Href(
-                        href({
-                          _tag: "Expense",
-                          ws: route.ws,
-                          id: item.id as ExpenseId,
-                          mode: item.status === "incomplete" && writable ? "edit" : "view",
-                        }),
-                      ),
-                    ],
-                    [h.strong([], [item.supplierName ?? tr.t("common.state.unknown")])],
-                  ),
+              h.div
+                .class("kb-stack")
+                .style({ "--kb-gap": "2px" })
+                .children([
+                  h.a
+                    .attr(
+                      "href",
+                      href({
+                        _tag: "Expense",
+                        ws: route.ws,
+                        id: item.id as ExpenseId,
+                        mode: item.status === "incomplete" && writable ? "edit" : "view",
+                      }),
+                    )
+                    .children([
+                      h.strong.children([item.supplierName ?? tr.t("common.state.unknown")]),
+                    ]),
                   ...(item.supplierDocumentNumber !== null
                     ? [
-                        h.span(
-                          [h.Class("kb-small kb-mono kb-muted")],
-                          [item.supplierDocumentNumber],
-                        ),
+                        h.span
+                          .class("kb-small kb-mono kb-muted")
+                          .children([item.supplierDocumentNumber]),
                       ]
                     : []),
-                ],
-              ),
+                ]),
           },
           {
             header: tr.t("expenses.list.column.date"),
@@ -1849,14 +1828,14 @@ export const view = Submodel.defineView<Model, Message, PageContext>((model, ctx
           },
           {
             header: tLocal(ctx.locale, "colCategory"),
-            cell: (item) => h.span([h.Class("kb-muted")], [item.category ?? "—"]),
+            cell: (item) => h.span.class("kb-muted").children([item.category ?? "—"]),
           },
           {
             header: tLocal(ctx.locale, "colStatus"),
             cell: (item) =>
-              h.div(
-                [h.Class("kb-row")],
-                [
+              h.div
+                .class("kb-row")
+                .children([
                   ...(item.status === "incomplete"
                     ? [badge(h, enumLabel(tr, "badge", "incomplete"), "proforma")]
                     : []),
@@ -1866,8 +1845,7 @@ export const view = Submodel.defineView<Model, Message, PageContext>((model, ctx
                     settlementTone(item.settlement),
                   ),
                   ...(item.attachments > 0 ? [badge(h, `${item.attachments} 📎`, "outline")] : []),
-                ],
-              ),
+                ]),
           },
           {
             header: tr.t("expenses.list.column.total"),
@@ -1875,8 +1853,8 @@ export const view = Submodel.defineView<Model, Message, PageContext>((model, ctx
             numeric: true,
             cell: (item) =>
               item.total !== null && item.currency !== null
-                ? h.strong([], [moneyText(ctx.locale, item.total, item.currency)])
-                : h.span([h.Class("kb-muted")], ["—"]),
+                ? h.strong.children([moneyText(ctx.locale, item.total, item.currency)])
+                : h.span.class("kb-muted").children(["—"]),
           },
         ],
       });
@@ -1902,104 +1880,74 @@ export const view = Submodel.defineView<Model, Message, PageContext>((model, ctx
       }),
       ...(writable
         ? [
-            h.div(
-              [
-                h.Class(model.dragActive ? "kb-dropzone kb-dropzone--active" : "kb-dropzone"),
-                h.OnDragEnter(Message.DraggedEnter()),
-                h.OnDragLeave(Message.DraggedLeave()),
-                h.OnDropFiles((files) => Message.SelectedCaptureFiles({ files })),
-              ],
-              [
-                h.div(
-                  [h.Class("kb-dropzone__lead")],
-                  [
-                    h.span([h.Class("kb-dropzone__icon")], [icon(h, "upload", 20)]),
-                    h.div(
-                      [h.Class("kb-stack"), h.Style({ "--kb-gap": "2px" })],
-                      [
-                        h.strong([], [tLocal(ctx.locale, "dropTitle")]),
-                        h.span([h.Class("kb-small kb-muted")], [tLocal(ctx.locale, "dropSub")]),
-                      ],
-                    ),
-                  ],
-                ),
-                h.label(
-                  [h.Class("kb-btn kb-btn--small kb-file-label")],
-                  [
-                    tr.t("expenses.capture.files"),
-                    h.input([
-                      h.Class("kb-file-input"),
-                      h.Type("file"),
-                      h.Accept(ALLOWED_MIME_TYPES),
-                      h.Multiple(true),
-                      h.OnFileChange((files) => Message.SelectedCaptureFiles({ files })),
+            h.div
+              .class(model.dragActive ? "kb-dropzone kb-dropzone--active" : "kb-dropzone")
+              .on("dragenter", Message.DraggedEnter(), { preventDefault: true })
+              .on("dragleave", Message.DraggedLeave())
+              .on("drop", ({ files }) => Message.SelectedCaptureFiles({ files }), {
+                preventDefault: true,
+              })
+              .children([
+                h.div.class("kb-dropzone__lead").children([
+                  h.span.class("kb-dropzone__icon").children([icon(h, "upload", 20)]),
+                  h.div
+                    .class("kb-stack")
+                    .style({ "--kb-gap": "2px" })
+                    .children([
+                      h.strong.children([tLocal(ctx.locale, "dropTitle")]),
+                      h.span.class("kb-small kb-muted").children([tLocal(ctx.locale, "dropSub")]),
                     ]),
-                  ],
-                ),
-              ],
-            ),
+                ]),
+                h.label.class("kb-btn kb-btn--small kb-file-label").children([
+                  tr.t("expenses.capture.files"),
+                  h.input
+                    .class("kb-file-input")
+                    .attr("type", "file")
+                    .attr("accept", ALLOWED_MIME_TYPES)
+                    .attr("multiple", "")
+                    .on("change", ({ files }) => Message.SelectedCaptureFiles({ files })),
+                ]),
+              ]),
           ]
         : []),
-      h.div(
-        [h.Class("kb-rec-toolbar")],
-        [
-          h.div(
-            [h.Class("kb-rec-search")],
-            [
-              h.span([h.Class("kb-rec-search__icon")], [icon(h, "search", 16)]),
-              h.input([
-                h.Class("kb-input"),
-                h.Type("search"),
-                h.Placeholder(tr.t("expenses.list.search")),
-                h.AriaLabel(tr.t("expenses.list.search")),
-                h.Value(model.search),
-                h.OnInput((value) => Message.ChangedSearch({ value })),
-              ]),
-            ],
-          ),
-          h.div(
-            [h.Class("kb-rec-chips")],
-            [
-              h.button(
-                [
-                  h.Class("kb-chip"),
-                  h.Type("button"),
-                  h.AriaPressed(model.filter === "all" ? "true" : "false"),
-                  h.OnClick(Message.SelectedFilter({ filter: "all" })),
-                ],
-                [tLocal(ctx.locale, "filterAll", { count: allItems.length })],
-              ),
-              h.button(
-                [
-                  h.Class("kb-chip"),
-                  h.Type("button"),
-                  h.AriaPressed(model.filter === "incomplete" ? "true" : "false"),
-                  h.OnClick(Message.SelectedFilter({ filter: "incomplete" })),
-                ],
-                [tLocal(ctx.locale, "filterIncomplete", { count: incompleteCount })],
-              ),
-              h.button(
-                [
-                  h.Class("kb-chip"),
-                  h.Type("button"),
-                  h.AriaPressed(model.filter === "unpaid" ? "true" : "false"),
-                  h.OnClick(Message.SelectedFilter({ filter: "unpaid" })),
-                ],
-                [tLocal(ctx.locale, "filterUnpaid")],
-              ),
-              h.button(
-                [
-                  h.Class("kb-chip"),
-                  h.Type("button"),
-                  h.AriaPressed(model.filter === "paid" ? "true" : "false"),
-                  h.OnClick(Message.SelectedFilter({ filter: "paid" })),
-                ],
-                [tLocal(ctx.locale, "filterPaid")],
-              ),
-            ],
-          ),
-        ],
-      ),
+      h.div.class("kb-rec-toolbar").children([
+        h.div.class("kb-rec-search").children([
+          h.span.class("kb-rec-search__icon").children([icon(h, "search", 16)]),
+          h.input
+            .class("kb-input")
+            .attr("type", "search")
+            .attr("placeholder", tr.t("expenses.list.search"))
+            .attr("aria-label", tr.t("expenses.list.search"))
+            .value(model.search)
+            .on("input", ({ value }) => Message.ChangedSearch({ value })),
+        ]),
+        h.div.class("kb-rec-chips").children([
+          h.button
+            .class("kb-chip")
+            .attr("type", "button")
+            .attr("aria-pressed", String(model.filter === "all" ? "true" : "false"))
+            .on("click", Message.SelectedFilter({ filter: "all" }))
+            .children([tLocal(ctx.locale, "filterAll", { count: allItems.length })]),
+          h.button
+            .class("kb-chip")
+            .attr("type", "button")
+            .attr("aria-pressed", String(model.filter === "incomplete" ? "true" : "false"))
+            .on("click", Message.SelectedFilter({ filter: "incomplete" }))
+            .children([tLocal(ctx.locale, "filterIncomplete", { count: incompleteCount })]),
+          h.button
+            .class("kb-chip")
+            .attr("type", "button")
+            .attr("aria-pressed", String(model.filter === "unpaid" ? "true" : "false"))
+            .on("click", Message.SelectedFilter({ filter: "unpaid" }))
+            .children([tLocal(ctx.locale, "filterUnpaid")]),
+          h.button
+            .class("kb-chip")
+            .attr("type", "button")
+            .attr("aria-pressed", String(model.filter === "paid" ? "true" : "false"))
+            .on("click", Message.SelectedFilter({ filter: "paid" }))
+            .children([tLocal(ctx.locale, "filterPaid")]),
+        ]),
+      ]),
       listBody,
     ]);
   }
@@ -2017,96 +1965,79 @@ export const view = Submodel.defineView<Model, Message, PageContext>((model, ctx
           small: true,
         }),
       }),
-      h.div(
-        [h.Class("kb-capture-shell")],
-        [
-          h.div(
-            [
-              h.Class(
-                model.dragActive ? "kb-capture-stage kb-dropzone--active" : "kb-capture-stage",
-              ),
-              h.OnDragEnter(Message.DraggedEnter()),
-              h.OnDragLeave(Message.DraggedLeave()),
-              h.OnDropFiles((files) => Message.SelectedCaptureFiles({ files })),
-            ],
-            [
-              icon(h, "upload", 28),
-              h.strong([], [tLocal(ctx.locale, "dropTitle")]),
-              h.p([h.Class("kb-small kb-muted")], [tr.t("expenses.capture.edgeHint")]),
-              h.label(
-                [h.Class("kb-btn kb-btn--primary kb-file-label")],
-                [
-                  tr.t("expenses.capture.files"),
-                  h.input([
-                    h.Class("kb-file-input"),
-                    h.Type("file"),
-                    h.Accept(ALLOWED_MIME_TYPES),
-                    h.Multiple(true),
-                    h.OnFileChange((files) => Message.SelectedCaptureFiles({ files })),
-                  ]),
-                ],
-              ),
-            ],
-          ),
-          card(h, [
-            cardTitle(h, tLocal(ctx.locale, "captureQueue")),
-            model.captureJobs.length === 0
-              ? h.p([h.Class("kb-muted")], [tLocal(ctx.locale, "captureEmpty")])
-              : h.div(
-                  [h.Class("kb-stack")],
-                  model.captureJobs.map((job) =>
-                    h.div(
-                      [h.Class("kb-spread")],
-                      [
-                        h.div(
-                          [h.Class("kb-stack"), h.Style({ "--kb-gap": "2px" })],
-                          [
-                            h.span([h.Class("kb-mono")], [job.fileName]),
-                            h.span([h.Class("kb-small kb-muted")], [formatBytes(job.fileSize)]),
-                            ...(job.error !== null
-                              ? [h.span([h.Class("kb-field__error")], [job.error])]
-                              : []),
-                          ],
-                        ),
-                        h.div(
-                          [h.Class("kb-row")],
-                          [
-                            badge(
-                              h,
-                              job.status === "done"
-                                ? enumLabel(tr, "captureJob", "done")
-                                : job.status === "failed"
-                                  ? enumLabel(tr, "captureJob", "failed")
-                                  : enumLabel(tr, "captureJob", "uploading"),
-                              job.status === "done"
-                                ? "paid"
-                                : job.status === "failed"
-                                  ? "error"
-                                  : "proforma",
-                            ),
-                            ...(job.expenseId !== null
-                              ? [
-                                  linkButton(h, {
-                                    label: tr.t("expenses.capture.openJob"),
-                                    href: href({
-                                      _tag: "Expense",
-                                      ws: route.ws,
-                                      id: job.expenseId as ExpenseId,
-                                      mode: "edit",
-                                    }),
-                                    small: true,
-                                  }),
-                                ]
-                              : []),
-                          ],
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
+      h.div.class("kb-capture-shell").children([
+        h.div
+          .class(model.dragActive ? "kb-capture-stage kb-dropzone--active" : "kb-capture-stage")
+          .on("dragenter", Message.DraggedEnter(), { preventDefault: true })
+          .on("dragleave", Message.DraggedLeave())
+          .on("drop", ({ files }) => Message.SelectedCaptureFiles({ files }), {
+            preventDefault: true,
+          })
+          .children([
+            icon(h, "upload", 28),
+            h.strong.children([tLocal(ctx.locale, "dropTitle")]),
+            h.p.class("kb-small kb-muted").children([tr.t("expenses.capture.edgeHint")]),
+            h.label.class("kb-btn kb-btn--primary kb-file-label").children([
+              tr.t("expenses.capture.files"),
+              h.input
+                .class("kb-file-input")
+                .attr("type", "file")
+                .attr("accept", ALLOWED_MIME_TYPES)
+                .attr("multiple", "")
+                .on("change", ({ files }) => Message.SelectedCaptureFiles({ files })),
+            ]),
           ]),
-        ],
-      ),
+        card(h, [
+          cardTitle(h, tLocal(ctx.locale, "captureQueue")),
+          model.captureJobs.length === 0
+            ? h.p.class("kb-muted").children([tLocal(ctx.locale, "captureEmpty")])
+            : h.div.class("kb-stack").children(
+                model.captureJobs.map((job) =>
+                  h.div.class("kb-spread").children([
+                    h.div
+                      .class("kb-stack")
+                      .style({ "--kb-gap": "2px" })
+                      .children([
+                        h.span.class("kb-mono").children([job.fileName]),
+                        h.span.class("kb-small kb-muted").children([formatBytes(job.fileSize)]),
+                        ...(job.error !== null
+                          ? [h.span.class("kb-field__error").children([job.error])]
+                          : []),
+                      ]),
+                    h.div.class("kb-row").children([
+                      badge(
+                        h,
+                        job.status === "done"
+                          ? enumLabel(tr, "captureJob", "done")
+                          : job.status === "failed"
+                            ? enumLabel(tr, "captureJob", "failed")
+                            : enumLabel(tr, "captureJob", "uploading"),
+                        job.status === "done"
+                          ? "paid"
+                          : job.status === "failed"
+                            ? "error"
+                            : "proforma",
+                      ),
+                      ...(job.expenseId !== null
+                        ? [
+                            linkButton(h, {
+                              label: tr.t("expenses.capture.openJob"),
+                              href: href({
+                                _tag: "Expense",
+                                ws: route.ws,
+                                id: job.expenseId as ExpenseId,
+                                mode: "edit",
+                              }),
+                              small: true,
+                            }),
+                          ]
+                        : []),
+                    ]),
+                  ]),
+                ),
+              ),
+        ]),
+      ]),
     ]);
   }
 
@@ -2166,358 +2097,299 @@ export const view = Submodel.defineView<Model, Message, PageContext>((model, ctx
           }),
         ],
       }),
-      h.div(
-        [h.Class("kb-expense-split")],
-        [
-          renderAttachmentViewer(h, ctx, model, loadedExpense, writable),
-          h.form(
-            [h.Class("kb-stack"), h.OnSubmit(Message.SubmittedEditor())],
-            [
-              ...(ed.error !== null ? [banner(h, { text: ed.error, tone: "error" })] : []),
-              ...(ed.aresError !== null ? [banner(h, { text: ed.aresError, tone: "error" })] : []),
-              card(h, [
-                cardTitle(h, tr.t("expenses.editor.supplier")),
-                h.div(
-                  [h.Class("kb-form-grid")],
-                  [
-                    h.div(
-                      [h.Class("kb-inline-action")],
-                      [
-                        textField(h, {
-                          id: "exp-supplier-ico",
-                          label: tLocal(ctx.locale, "supplierIco"),
-                          value: ed.supplierIco,
-                          mono: true,
-                          placeholder: "27082440",
-                          onInput: (value) =>
-                            Message.ChangedEditorField({ field: "supplierIco", value }),
-                        }),
-                        button(h, {
-                          label: tLocal(ctx.locale, "aresLookup"),
-                          busy: ed.aresBusy,
-                          small: true,
-                          onClick: Message.ClickedAresLookup(),
-                        }),
-                      ],
-                    ),
-                    textField(h, {
-                      id: "exp-doc-number",
-                      label: tr.t("expenses.editor.number"),
-                      value: ed.supplierDocumentNumber,
-                      mono: true,
-                      onInput: (value) =>
-                        Message.ChangedEditorField({ field: "supplierDocumentNumber", value }),
+      h.div.class("kb-expense-split").children([
+        renderAttachmentViewer(h, ctx, model, loadedExpense, writable),
+        h.form
+          .class("kb-stack")
+          .on("submit", Message.SubmittedEditor(), { preventDefault: true })
+          .children([
+            ...(ed.error !== null ? [banner(h, { text: ed.error, tone: "error" })] : []),
+            ...(ed.aresError !== null ? [banner(h, { text: ed.aresError, tone: "error" })] : []),
+            card(h, [
+              cardTitle(h, tr.t("expenses.editor.supplier")),
+              h.div.class("kb-form-grid").children([
+                h.div.class("kb-inline-action").children([
+                  textField(h, {
+                    id: "exp-supplier-ico",
+                    label: tLocal(ctx.locale, "supplierIco"),
+                    value: ed.supplierIco,
+                    mono: true,
+                    placeholder: "27082440",
+                    onInput: (value) => Message.ChangedEditorField({ field: "supplierIco", value }),
+                  }),
+                  button(h, {
+                    label: tLocal(ctx.locale, "aresLookup"),
+                    busy: ed.aresBusy,
+                    small: true,
+                    onClick: Message.ClickedAresLookup(),
+                  }),
+                ]),
+                textField(h, {
+                  id: "exp-doc-number",
+                  label: tr.t("expenses.editor.number"),
+                  value: ed.supplierDocumentNumber,
+                  mono: true,
+                  onInput: (value) =>
+                    Message.ChangedEditorField({ field: "supplierDocumentNumber", value }),
+                }),
+                textField(h, {
+                  id: "exp-supplier-name",
+                  label: tLocal(ctx.locale, "supplierName"),
+                  value: ed.supplierName,
+                  onInput: (value) => Message.ChangedEditorField({ field: "supplierName", value }),
+                }),
+                textField(h, {
+                  id: "exp-supplier-dic",
+                  label: tLocal(ctx.locale, "supplierDic"),
+                  value: ed.supplierDic,
+                  mono: true,
+                  onInput: (value) => Message.ChangedEditorField({ field: "supplierDic", value }),
+                }),
+              ]),
+            ]),
+            card(h, [
+              cardTitle(h, tr.t("expenses.editor.title")),
+              h.div.class("kb-form-grid kb-form-grid--3").children([
+                textField(h, {
+                  id: "exp-issued-on",
+                  label: tr.t("expenses.editor.issueDate"),
+                  type: "date",
+                  value: ed.issuedOn,
+                  onInput: (value) => Message.ChangedEditorField({ field: "issuedOn", value }),
+                }),
+                textField(h, {
+                  id: "exp-duzp",
+                  label: tr.t("expenses.editor.taxableSupplyDate"),
+                  type: "date",
+                  value: ed.taxableSupplyOn,
+                  onInput: (value) =>
+                    Message.ChangedEditorField({ field: "taxableSupplyOn", value }),
+                }),
+                textField(h, {
+                  id: "exp-due-on",
+                  label: tr.t("expenses.editor.dueDate"),
+                  type: "date",
+                  value: ed.dueOn,
+                  onInput: (value) => Message.ChangedEditorField({ field: "dueOn", value }),
+                }),
+              ]),
+              h.div.class("kb-form-grid").children([
+                textField(h, {
+                  id: "exp-total",
+                  label: tr.t("expenses.editor.gross"),
+                  value: ed.total,
+                  mono: true,
+                  onInput: (value) => Message.ChangedEditorField({ field: "total", value }),
+                }),
+                selectField(h, {
+                  id: "exp-currency",
+                  label: tr.t("common.field.currency"),
+                  value: ed.currency,
+                  options: CURRENCIES.map((c) => ({ value: c, label: c })),
+                  onChange: (value) => Message.ChangedEditorField({ field: "currency", value }),
+                }),
+              ]),
+              ...(ed.currency !== "CZK"
+                ? [
+                    banner(h, {
+                      tone: "info",
+                      text: ed.fxBusy
+                        ? tLocal(ctx.locale, "fxLoading")
+                        : ed.fxRate !== ""
+                          ? tLocal(ctx.locale, "fxFixingNote", {
+                              date: dateText(ctx.locale, ed.fxFixingDate),
+                              qty: ed.fxQuantity,
+                              currency: ed.currency,
+                              rate: ed.fxRate,
+                            })
+                          : tLocal(ctx.locale, "fxRateLabel", { currency: ed.currency }),
                     }),
-                    textField(h, {
-                      id: "exp-supplier-name",
-                      label: tLocal(ctx.locale, "supplierName"),
-                      value: ed.supplierName,
-                      onInput: (value) =>
-                        Message.ChangedEditorField({ field: "supplierName", value }),
-                    }),
-                    textField(h, {
-                      id: "exp-supplier-dic",
-                      label: tLocal(ctx.locale, "supplierDic"),
-                      value: ed.supplierDic,
-                      mono: true,
-                      onInput: (value) =>
-                        Message.ChangedEditorField({ field: "supplierDic", value }),
-                    }),
-                  ],
+                  ]
+                : []),
+              h.div.class("kb-stack").children([
+                h.div.class("kb-spread").children([
+                  h.h3.children([tr.t("expenses.editor.vatBreakdown")]),
+                  button(h, {
+                    label: tr.t("expenses.editor.addVatRow"),
+                    small: true,
+                    icon: icon(h, "plus", 14),
+                    onClick: Message.AddedVatRow(),
+                  }),
+                ]),
+                h.div.class("kb-vat-rows").children(
+                  ed.vatLines.map((row, idx) =>
+                    h.div.class("kb-vat-row").children([
+                      selectField(h, {
+                        id: `exp-vat-tr-${idx}`,
+                        label: tr.t("common.field.vatRate"),
+                        value: row.treatment,
+                        options: VAT_TREATMENTS.map((v) => ({
+                          value: v,
+                          label: enumLabel(tr, "vatTreatment", v),
+                        })),
+                        onChange: (value) =>
+                          Message.ChangedVatRow({ index: idx, field: "treatment", value }),
+                      }),
+                      textField(h, {
+                        id: `exp-vat-base-${idx}`,
+                        label: tr.t("expenses.editor.base"),
+                        value: row.base,
+                        mono: true,
+                        onInput: (value) =>
+                          Message.ChangedVatRow({ index: idx, field: "base", value }),
+                      }),
+                      textField(h, {
+                        id: `exp-vat-tax-${idx}`,
+                        label: tr.t("expenses.editor.vat"),
+                        value: row.vat,
+                        mono: true,
+                        onInput: (value) =>
+                          Message.ChangedVatRow({ index: idx, field: "vat", value }),
+                      }),
+                      button(h, {
+                        label: tr.t("common.action.remove"),
+                        variant: "ghost",
+                        small: true,
+                        onClick: Message.RemovedVatRow({ index: idx }),
+                      }),
+                    ]),
+                  ),
                 ),
               ]),
-              card(h, [
-                cardTitle(h, tr.t("expenses.editor.title")),
-                h.div(
-                  [h.Class("kb-form-grid kb-form-grid--3")],
-                  [
-                    textField(h, {
-                      id: "exp-issued-on",
-                      label: tr.t("expenses.editor.issueDate"),
-                      type: "date",
-                      value: ed.issuedOn,
-                      onInput: (value) => Message.ChangedEditorField({ field: "issuedOn", value }),
-                    }),
-                    textField(h, {
-                      id: "exp-duzp",
-                      label: tr.t("expenses.editor.taxableSupplyDate"),
-                      type: "date",
-                      value: ed.taxableSupplyOn,
-                      onInput: (value) =>
-                        Message.ChangedEditorField({ field: "taxableSupplyOn", value }),
-                    }),
-                    textField(h, {
-                      id: "exp-due-on",
-                      label: tr.t("expenses.editor.dueDate"),
-                      type: "date",
-                      value: ed.dueOn,
-                      onInput: (value) => Message.ChangedEditorField({ field: "dueOn", value }),
-                    }),
-                  ],
-                ),
-                h.div(
-                  [h.Class("kb-form-grid")],
-                  [
-                    textField(h, {
-                      id: "exp-total",
-                      label: tr.t("expenses.editor.gross"),
-                      value: ed.total,
-                      mono: true,
-                      onInput: (value) => Message.ChangedEditorField({ field: "total", value }),
-                    }),
-                    selectField(h, {
-                      id: "exp-currency",
-                      label: tr.t("common.field.currency"),
-                      value: ed.currency,
-                      options: CURRENCIES.map((c) => ({ value: c, label: c })),
-                      onChange: (value) => Message.ChangedEditorField({ field: "currency", value }),
-                    }),
-                  ],
-                ),
-                ...(ed.currency !== "CZK"
+              h.div.class("kb-form-grid").children([
+                h.div.class("kb-field").children([
+                  h.span.class("kb-field__label").children([tLocal(ctx.locale, "deductibility")]),
+                  segmented(h, {
+                    label: tLocal(ctx.locale, "deductibility"),
+                    selected: ed.deductibilityMode,
+                    items: [
+                      { id: "full", label: tLocal(ctx.locale, "dedFull") },
+                      { id: "partial", label: tLocal(ctx.locale, "dedPartial") },
+                      { id: "none", label: tLocal(ctx.locale, "dedNone") },
+                    ],
+                    onSelect: (id) =>
+                      Message.ChangedDeductibilityMode({
+                        mode: id as "full" | "none" | "partial",
+                      }),
+                  }),
+                ]),
+                ...(ed.deductibilityMode === "partial"
                   ? [
-                      banner(h, {
-                        tone: "info",
-                        text: ed.fxBusy
-                          ? tLocal(ctx.locale, "fxLoading")
-                          : ed.fxRate !== ""
-                            ? tLocal(ctx.locale, "fxFixingNote", {
-                                date: dateText(ctx.locale, ed.fxFixingDate),
-                                qty: ed.fxQuantity,
-                                currency: ed.currency,
-                                rate: ed.fxRate,
-                              })
-                            : tLocal(ctx.locale, "fxRateLabel", { currency: ed.currency }),
+                      textField(h, {
+                        id: "exp-ded-pct",
+                        label: tLocal(ctx.locale, "dedPercent"),
+                        type: "number",
+                        value: ed.deductibilityPercent,
+                        mono: true,
+                        onInput: (value) =>
+                          Message.ChangedEditorField({ field: "deductibilityPercent", value }),
                       }),
                     ]
                   : []),
-                h.div(
-                  [h.Class("kb-stack")],
-                  [
-                    h.div(
-                      [h.Class("kb-spread")],
-                      [
-                        h.h3([], [tr.t("expenses.editor.vatBreakdown")]),
-                        button(h, {
-                          label: tr.t("expenses.editor.addVatRow"),
-                          small: true,
-                          icon: icon(h, "plus", 14),
-                          onClick: Message.AddedVatRow(),
-                        }),
-                      ],
-                    ),
-                    h.div(
-                      [h.Class("kb-vat-rows")],
-                      ed.vatLines.map((row, idx) =>
-                        h.div(
-                          [h.Class("kb-vat-row")],
-                          [
-                            selectField(h, {
-                              id: `exp-vat-tr-${idx}`,
-                              label: tr.t("common.field.vatRate"),
-                              value: row.treatment,
-                              options: VAT_TREATMENTS.map((v) => ({
-                                value: v,
-                                label: enumLabel(tr, "vatTreatment", v),
-                              })),
-                              onChange: (value) =>
-                                Message.ChangedVatRow({ index: idx, field: "treatment", value }),
-                            }),
-                            textField(h, {
-                              id: `exp-vat-base-${idx}`,
-                              label: tr.t("expenses.editor.base"),
-                              value: row.base,
-                              mono: true,
-                              onInput: (value) =>
-                                Message.ChangedVatRow({ index: idx, field: "base", value }),
-                            }),
-                            textField(h, {
-                              id: `exp-vat-tax-${idx}`,
-                              label: tr.t("expenses.editor.vat"),
-                              value: row.vat,
-                              mono: true,
-                              onInput: (value) =>
-                                Message.ChangedVatRow({ index: idx, field: "vat", value }),
-                            }),
-                            button(h, {
-                              label: tr.t("common.action.remove"),
-                              variant: "ghost",
-                              small: true,
-                              onClick: Message.RemovedVatRow({ index: idx }),
-                            }),
-                          ],
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-                h.div(
-                  [h.Class("kb-form-grid")],
-                  [
-                    h.div(
-                      [h.Class("kb-field")],
-                      [
-                        h.span([h.Class("kb-field__label")], [tLocal(ctx.locale, "deductibility")]),
-                        segmented(h, {
-                          label: tLocal(ctx.locale, "deductibility"),
-                          selected: ed.deductibilityMode,
-                          items: [
-                            { id: "full", label: tLocal(ctx.locale, "dedFull") },
-                            { id: "partial", label: tLocal(ctx.locale, "dedPartial") },
-                            { id: "none", label: tLocal(ctx.locale, "dedNone") },
-                          ],
-                          onSelect: (id) =>
-                            Message.ChangedDeductibilityMode({
-                              mode: id as "full" | "none" | "partial",
-                            }),
-                        }),
-                      ],
-                    ),
-                    ...(ed.deductibilityMode === "partial"
-                      ? [
-                          textField(h, {
-                            id: "exp-ded-pct",
-                            label: tLocal(ctx.locale, "dedPercent"),
-                            type: "number",
-                            value: ed.deductibilityPercent,
-                            mono: true,
-                            onInput: (value) =>
-                              Message.ChangedEditorField({ field: "deductibilityPercent", value }),
-                          }),
-                        ]
-                      : []),
-                  ],
-                ),
-                h.div(
-                  [h.Class("kb-summary-strip")],
-                  [
-                    h.div(
-                      [h.Class("kb-summary-metric")],
-                      [
-                        h.span(
-                          [h.Class("kb-summary-metric__label")],
-                          [tr.t("expenses.editor.base")],
-                        ),
-                        h.span(
-                          [h.Class("kb-summary-metric__value")],
-                          [
-                            moneyText(
-                              ctx.locale,
-                              formatDecimalFixed(preview.sumBase, 2),
-                              ed.currency,
-                            ),
-                          ],
-                        ),
-                      ],
-                    ),
-                    h.div(
-                      [h.Class("kb-summary-metric")],
-                      [
-                        h.span(
-                          [h.Class("kb-summary-metric__label")],
-                          [tLocal(ctx.locale, "deductibleVat")],
-                        ),
-                        h.span(
-                          [h.Class("kb-summary-metric__value")],
-                          [
-                            moneyText(
-                              ctx.locale,
-                              formatDecimalFixed(preview.deductibleVat, 2),
-                              ed.currency,
-                            ),
-                          ],
-                        ),
-                      ],
-                    ),
-                    ...(preview.totalCzk !== null && ed.currency !== "CZK"
-                      ? [
-                          h.div(
-                            [h.Class("kb-summary-metric")],
-                            [
-                              h.span([h.Class("kb-summary-metric__label")], ["CZK"]),
-                              h.span(
-                                [h.Class("kb-summary-metric__value")],
-                                [
-                                  tr.t("expenses.editor.czkEquivalent", {
-                                    amount: moneyText(
-                                      ctx.locale,
-                                      formatDecimalFixed(preview.totalCzk, 2),
-                                      "CZK",
-                                    ),
-                                  }),
-                                ],
-                              ),
-                            ],
-                          ),
-                        ]
-                      : []),
-                    ...(preview.difference !== null && Math.abs(preview.difference) > 0.001
-                      ? [
-                          badge(
-                            h,
-                            tr.t("expenses.editor.difference", {
-                              amount: moneyText(
-                                ctx.locale,
-                                formatDecimalFixed(preview.difference, 2),
-                                ed.currency,
-                              ),
-                            }),
-                            "error",
-                          ),
-                        ]
-                      : []),
-                  ],
-                ),
-                h.div(
-                  [h.Class("kb-form-grid")],
-                  [
-                    textField(h, {
-                      id: "exp-category",
-                      label: tr.t("common.field.category"),
-                      value: ed.category,
-                      onInput: (value) => Message.ChangedEditorField({ field: "category", value }),
-                    }),
-                    textField(h, {
-                      id: "exp-tags",
-                      label: tr.t("common.field.tags"),
-                      value: ed.tagsText,
-                      hint: tr.t("expenses.editor.tagsHint"),
-                      onInput: (value) => Message.ChangedEditorField({ field: "tagsText", value }),
-                    }),
-                  ],
-                ),
-                textArea(h, {
-                  id: "exp-note",
-                  label: tr.t("common.field.note"),
-                  value: ed.note,
-                  onInput: (value) => Message.ChangedEditorField({ field: "note", value }),
-                }),
-                h.div(
-                  [h.Class("kb-spread")],
-                  [
-                    segmented(h, {
-                      label: tr.t("common.field.status"),
-                      selected: ed.status,
-                      items: [
-                        { id: "complete", label: tLocal(ctx.locale, "statusComplete") },
-                        { id: "incomplete", label: tLocal(ctx.locale, "statusIncomplete") },
-                      ],
-                      onSelect: (id) =>
-                        Message.ChangedExpenseStatus({ status: id as "complete" | "incomplete" }),
-                    }),
-                    button(h, {
-                      label: tr.t("common.action.save"),
-                      variant: "primary",
-                      type: "submit",
-                      busy: ed.saving,
-                    }),
-                  ],
-                ),
               ]),
-            ],
-          ),
-        ],
-      ),
+              h.div.class("kb-summary-strip").children([
+                h.div
+                  .class("kb-summary-metric")
+                  .children([
+                    h.span
+                      .class("kb-summary-metric__label")
+                      .children([tr.t("expenses.editor.base")]),
+                    h.span
+                      .class("kb-summary-metric__value")
+                      .children([
+                        moneyText(ctx.locale, formatDecimalFixed(preview.sumBase, 2), ed.currency),
+                      ]),
+                  ]),
+                h.div
+                  .class("kb-summary-metric")
+                  .children([
+                    h.span
+                      .class("kb-summary-metric__label")
+                      .children([tLocal(ctx.locale, "deductibleVat")]),
+                    h.span
+                      .class("kb-summary-metric__value")
+                      .children([
+                        moneyText(
+                          ctx.locale,
+                          formatDecimalFixed(preview.deductibleVat, 2),
+                          ed.currency,
+                        ),
+                      ]),
+                  ]),
+                ...(preview.totalCzk !== null && ed.currency !== "CZK"
+                  ? [
+                      h.div.class("kb-summary-metric").children([
+                        h.span.class("kb-summary-metric__label").children(["CZK"]),
+                        h.span.class("kb-summary-metric__value").children([
+                          tr.t("expenses.editor.czkEquivalent", {
+                            amount: moneyText(
+                              ctx.locale,
+                              formatDecimalFixed(preview.totalCzk, 2),
+                              "CZK",
+                            ),
+                          }),
+                        ]),
+                      ]),
+                    ]
+                  : []),
+                ...(preview.difference !== null && Math.abs(preview.difference) > 0.001
+                  ? [
+                      badge(
+                        h,
+                        tr.t("expenses.editor.difference", {
+                          amount: moneyText(
+                            ctx.locale,
+                            formatDecimalFixed(preview.difference, 2),
+                            ed.currency,
+                          ),
+                        }),
+                        "error",
+                      ),
+                    ]
+                  : []),
+              ]),
+              h.div.class("kb-form-grid").children([
+                textField(h, {
+                  id: "exp-category",
+                  label: tr.t("common.field.category"),
+                  value: ed.category,
+                  onInput: (value) => Message.ChangedEditorField({ field: "category", value }),
+                }),
+                textField(h, {
+                  id: "exp-tags",
+                  label: tr.t("common.field.tags"),
+                  value: ed.tagsText,
+                  hint: tr.t("expenses.editor.tagsHint"),
+                  onInput: (value) => Message.ChangedEditorField({ field: "tagsText", value }),
+                }),
+              ]),
+              textArea(h, {
+                id: "exp-note",
+                label: tr.t("common.field.note"),
+                value: ed.note,
+                onInput: (value) => Message.ChangedEditorField({ field: "note", value }),
+              }),
+              h.div.class("kb-spread").children([
+                segmented(h, {
+                  label: tr.t("common.field.status"),
+                  selected: ed.status,
+                  items: [
+                    { id: "complete", label: tLocal(ctx.locale, "statusComplete") },
+                    { id: "incomplete", label: tLocal(ctx.locale, "statusIncomplete") },
+                  ],
+                  onSelect: (id) =>
+                    Message.ChangedExpenseStatus({ status: id as "complete" | "incomplete" }),
+                }),
+                button(h, {
+                  label: tr.t("common.action.save"),
+                  variant: "primary",
+                  type: "submit",
+                  busy: ed.saving,
+                }),
+              ]),
+            ]),
+          ]),
+      ]),
     ]);
   }
 
@@ -2566,9 +2438,9 @@ export const view = Submodel.defineView<Model, Message, PageContext>((model, ctx
           ]
         : [badge(h, tLocal(ctx.locale, "readOnlyBadge"), "outline")],
     }),
-    h.div(
-      [h.Class("kb-row")],
-      [
+    h.div
+      .class("kb-row")
+      .children([
         badge(
           h,
           enumLabel(tr, "expenseStatus", loadedExpense.status),
@@ -2579,128 +2451,120 @@ export const view = Submodel.defineView<Model, Message, PageContext>((model, ctx
           enumLabel(tr, "settlement", loadedExpense.payment.settlement),
           settlementTone(loadedExpense.payment.settlement),
         ),
-      ],
-    ),
-    h.div(
-      [h.Class("kb-expense-split")],
-      [
-        renderAttachmentViewer(h, ctx, model, loadedExpense, writable),
-        h.div(
-          [h.Class("kb-stack")],
-          [
-            card(h, [
-              cardTitle(h, tr.t("expenses.editor.title")),
-              dl(h, [
-                [tr.t("expenses.editor.supplier"), loadedExpense.supplier?.name ?? "—"],
-                [
-                  tr.t("common.field.ico"),
-                  loadedExpense.supplier?.ico !== null && loadedExpense.supplier?.ico !== undefined
-                    ? mono(h, loadedExpense.supplier.ico)
-                    : "—",
-                ],
-                [
-                  tr.t("expenses.editor.number"),
-                  loadedExpense.supplierDocumentNumber !== null
-                    ? mono(h, loadedExpense.supplierDocumentNumber)
-                    : "—",
-                ],
-                [tr.t("expenses.editor.issueDate"), dateText(ctx.locale, loadedExpense.issuedOn)],
-                [
-                  tr.t("expenses.editor.taxableSupplyDate"),
-                  dateText(ctx.locale, loadedExpense.taxableSupplyOn),
-                ],
-                [tr.t("expenses.editor.dueDate"), dateText(ctx.locale, loadedExpense.dueOn)],
-                [
-                  tr.t("expenses.editor.gross"),
-                  loadedExpense.total !== null && loadedExpense.currency !== null
-                    ? h.strong(
-                        [],
-                        [moneyText(ctx.locale, loadedExpense.total, loadedExpense.currency)],
-                      )
-                    : "—",
-                ],
-                ...(loadedExpense.totalCzk !== null && loadedExpense.currency !== "CZK"
-                  ? [["CZK", moneyText(ctx.locale, loadedExpense.totalCzk, "CZK")] as const]
-                  : []),
-                [
-                  tLocal(ctx.locale, "deductibleVat"),
-                  loadedExpense.deductibleVat !== null
-                    ? moneyText(
-                        ctx.locale,
-                        loadedExpense.deductibleVat.amount,
-                        loadedExpense.deductibleVat.currency,
-                      )
-                    : "—",
-                ],
-                [tr.t("common.field.category"), loadedExpense.category ?? "—"],
-                [
-                  tr.t("common.field.tags"),
-                  loadedExpense.tags.length > 0 ? loadedExpense.tags.join(", ") : "—",
-                ],
-                [tr.t("common.field.note"), loadedExpense.note ?? "—"],
-              ]),
-            ]),
-            card(h, [
-              cardTitle(
-                h,
-                tLocal(ctx.locale, "paymentsTitle"),
-                writable && loadedExpense.status === "complete"
-                  ? [
-                      button(h, {
-                        label: tr.t("expenses.detail.partialPayment"),
-                        small: true,
-                        onClick: Message.OpenedPaymentDialog({ presetFull: false }),
-                      }),
-                    ]
-                  : [],
-              ),
-              payments.length === 0
-                ? h.p([h.Class("kb-muted")], [tLocal(ctx.locale, "paymentsEmpty")])
-                : table(h, {
-                    caption: tLocal(ctx.locale, "paymentsTitle"),
-                    rows: payments,
-                    rowKey: (p) => p.id,
-                    columns: [
-                      {
-                        header: tLocal(ctx.locale, "paidOn"),
-                        cell: (p) => dateText(ctx.locale, p.paidOn),
-                      },
-                      {
-                        header: tLocal(ctx.locale, "method"),
-                        cell: (p) => enumLabel(tr, "paymentMethod", p.method as PaymentMethod),
-                      },
-                      {
-                        header: tr.t("common.field.amount"),
-                        align: "end",
-                        numeric: true,
-                        cell: (p) => moneyText(ctx.locale, p.amount.amount, p.amount.currency),
-                      },
-                      {
-                        header: "",
-                        align: "end",
-                        cell: (p) =>
-                          writable
-                            ? button(h, {
-                                label: tr.t("common.action.remove"),
-                                variant: "ghost",
-                                small: true,
-                                onClick: Message.RequestedRemovePayment({ id: p.id }),
-                              })
-                            : h.empty,
-                      },
-                    ],
+      ]),
+    h.div.class("kb-expense-split").children([
+      renderAttachmentViewer(h, ctx, model, loadedExpense, writable),
+      h.div.class("kb-stack").children([
+        card(h, [
+          cardTitle(h, tr.t("expenses.editor.title")),
+          dl(h, [
+            [tr.t("expenses.editor.supplier"), loadedExpense.supplier?.name ?? "—"],
+            [
+              tr.t("common.field.ico"),
+              loadedExpense.supplier?.ico !== null && loadedExpense.supplier?.ico !== undefined
+                ? mono(h, loadedExpense.supplier.ico)
+                : "—",
+            ],
+            [
+              tr.t("expenses.editor.number"),
+              loadedExpense.supplierDocumentNumber !== null
+                ? mono(h, loadedExpense.supplierDocumentNumber)
+                : "—",
+            ],
+            [tr.t("expenses.editor.issueDate"), dateText(ctx.locale, loadedExpense.issuedOn)],
+            [
+              tr.t("expenses.editor.taxableSupplyDate"),
+              dateText(ctx.locale, loadedExpense.taxableSupplyOn),
+            ],
+            [tr.t("expenses.editor.dueDate"), dateText(ctx.locale, loadedExpense.dueOn)],
+            [
+              tr.t("expenses.editor.gross"),
+              loadedExpense.total !== null && loadedExpense.currency !== null
+                ? h.strong.children([
+                    moneyText(ctx.locale, loadedExpense.total, loadedExpense.currency),
+                  ])
+                : "—",
+            ],
+            ...(loadedExpense.totalCzk !== null && loadedExpense.currency !== "CZK"
+              ? [["CZK", moneyText(ctx.locale, loadedExpense.totalCzk, "CZK")] as const]
+              : []),
+            [
+              tLocal(ctx.locale, "deductibleVat"),
+              loadedExpense.deductibleVat !== null
+                ? moneyText(
+                    ctx.locale,
+                    loadedExpense.deductibleVat.amount,
+                    loadedExpense.deductibleVat.currency,
+                  )
+                : "—",
+            ],
+            [tr.t("common.field.category"), loadedExpense.category ?? "—"],
+            [
+              tr.t("common.field.tags"),
+              loadedExpense.tags.length > 0 ? loadedExpense.tags.join(", ") : "—",
+            ],
+            [tr.t("common.field.note"), loadedExpense.note ?? "—"],
+          ]),
+        ]),
+        card(h, [
+          cardTitle(
+            h,
+            tLocal(ctx.locale, "paymentsTitle"),
+            writable && loadedExpense.status === "complete"
+              ? [
+                  button(h, {
+                    label: tr.t("expenses.detail.partialPayment"),
+                    small: true,
+                    onClick: Message.OpenedPaymentDialog({ presetFull: false }),
                   }),
-            ]),
-          ],
-        ),
-      ],
-    ),
+                ]
+              : [],
+          ),
+          payments.length === 0
+            ? h.p.class("kb-muted").children([tLocal(ctx.locale, "paymentsEmpty")])
+            : table(h, {
+                caption: tLocal(ctx.locale, "paymentsTitle"),
+                rows: payments,
+                rowKey: (p) => p.id,
+                columns: [
+                  {
+                    header: tLocal(ctx.locale, "paidOn"),
+                    cell: (p) => dateText(ctx.locale, p.paidOn),
+                  },
+                  {
+                    header: tLocal(ctx.locale, "method"),
+                    cell: (p) => enumLabel(tr, "paymentMethod", p.method as PaymentMethod),
+                  },
+                  {
+                    header: tr.t("common.field.amount"),
+                    align: "end",
+                    numeric: true,
+                    cell: (p) => moneyText(ctx.locale, p.amount.amount, p.amount.currency),
+                  },
+                  {
+                    header: "",
+                    align: "end",
+                    cell: (p) =>
+                      writable
+                        ? button(h, {
+                            label: tr.t("common.action.remove"),
+                            variant: "ghost",
+                            small: true,
+                            onClick: Message.RequestedRemovePayment({ id: p.id }),
+                          })
+                        : h.text(""),
+                  },
+                ],
+              }),
+        ]),
+      ]),
+    ]),
     model.confirmDetachId !== null
       ? dialog(h, {
           id: "expense-detach-dialog",
           title: tr.t("expenses.attachmentViewer.detachTitle"),
           onClose: Message.CancelledDetach(),
-          body: [h.p([], [tr.t("expenses.attachmentViewer.detach")])],
+          body: [h.p.children([tr.t("expenses.attachmentViewer.detach")])],
           actions: [
             button(h, { label: tr.t("common.action.cancel"), onClick: Message.CancelledDetach() }),
             button(h, {
@@ -2711,13 +2575,13 @@ export const view = Submodel.defineView<Model, Message, PageContext>((model, ctx
             }),
           ],
         })
-      : h.empty,
+      : h.text(""),
     model.confirmRemove
       ? dialog(h, {
           id: "expense-remove-dialog",
           title: tr.t("expenses.detail.removeTitle"),
           onClose: Message.CancelledRemove(),
-          body: [h.p([], [tr.t("expenses.detail.removeBody")])],
+          body: [h.p.children([tr.t("expenses.detail.removeBody")])],
           actions: [
             button(h, { label: tr.t("common.action.cancel"), onClick: Message.CancelledRemove() }),
             button(h, {
@@ -2728,7 +2592,7 @@ export const view = Submodel.defineView<Model, Message, PageContext>((model, ctx
             }),
           ],
         })
-      : h.empty,
+      : h.text(""),
     model.paymentDialog !== null
       ? dialog(h, {
           id: "expense-payment-dialog",
@@ -2782,7 +2646,7 @@ export const view = Submodel.defineView<Model, Message, PageContext>((model, ctx
             }),
           ],
         })
-      : h.empty,
+      : h.text(""),
     model.confirmRemovePaymentId !== null
       ? dialog(h, {
           id: "expense-remove-payment-dialog",
@@ -2809,6 +2673,6 @@ export const view = Submodel.defineView<Model, Message, PageContext>((model, ctx
             }),
           ],
         })
-      : h.empty,
+      : h.text(""),
   ]);
-});
+};

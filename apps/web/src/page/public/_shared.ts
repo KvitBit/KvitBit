@@ -36,7 +36,7 @@ export const fieldIssue = (
   });
 };
 
-/** Browser clipboard copy wrapped in a never-failing Effect for Foldkit Commands. */
+/** Browser clipboard copy wrapped in a never-failing Effect for Effect UI Commands. */
 export const copyToClipboard = <M>(value: string, onDone: (ok: boolean) => M): Effect.Effect<M> =>
   Effect.tryPromise({
     try: async () => {

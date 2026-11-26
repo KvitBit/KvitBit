@@ -258,6 +258,7 @@ let passkeysState: Array<PasskeyItem> = [
 let sessionsState: Array<SessionItem> = [
   {
     id: "sess-current",
+    token: "tok-sess-current",
     userAgent: "Chrome 131 · Linux",
     ipAddress: "185.42.110.24",
     updatedAt: "2026-11-24T13:30:00.000Z",
@@ -265,6 +266,7 @@ let sessionsState: Array<SessionItem> = [
   },
   {
     id: "sess-pixel",
+    token: "tok-sess-pixel",
     userAgent: "Kvitbit Android · Pixel 8",
     ipAddress: "185.42.110.24",
     updatedAt: "2026-11-23T20:15:00.000Z",
@@ -777,12 +779,27 @@ export const routes: ReadonlyArray<DemoRoute> = [
   { method: "POST", path: "/api/auth/change-password", respond: () => ({ status: true }) },
   {
     method: "GET",
+    path: "/api/auth/list-accounts",
+    respond: () => [{ id: "acc-cred-1", providerId: "credential" }],
+  },
+  {
+    method: "GET",
     path: "/api/auth/passkey/list-user-passkeys",
     respond: () => passkeysState,
   },
   {
+    method: "GET",
+    path: "/api/auth/passkey/generate-register-options",
+    respond: () => ({
+      challenge: "ZGVtby1yZWdpc3Rlci1jaGFsbGVuZ2U",
+      rp: { name: "Kvitbit", id: "localhost" },
+      user: { id: "ZGVtby11c2VyLWlk", name: "jana@novak.cz", displayName: "Jana Nováková" },
+      pubKeyCredParams: [{ type: "public-key", alg: -7 }],
+    }),
+  },
+  {
     method: "POST",
-    path: "/api/auth/passkey/add-passkey",
+    path: "/api/auth/passkey/verify-registration",
     respond: ({ body }) => {
       const name = (body as { name?: string } | null)?.name ?? "Passkey";
       const created: PasskeyItem = {
@@ -820,8 +837,12 @@ export const routes: ReadonlyArray<DemoRoute> = [
     method: "POST",
     path: "/api/auth/revoke-session",
     respond: ({ body }) => {
-      const id = (body as { id?: string } | null)?.id;
-      if (id !== undefined) sessionsState = sessionsState.filter((s) => s.id !== id);
+      const { token, id } = (body ?? {}) as { token?: string; id?: string };
+      if (token !== undefined) {
+        sessionsState = sessionsState.filter((s) => s.token !== token);
+      } else if (id !== undefined) {
+        sessionsState = sessionsState.filter((s) => s.id !== id);
+      }
       return { status: true };
     },
   },

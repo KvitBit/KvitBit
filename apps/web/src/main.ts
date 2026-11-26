@@ -1,66 +1,45 @@
-/**
- * Kvitbit web: the root Foldkit program (Shell). Owns the URL, the session, viewer preferences
- * (locale, style, mode, contrast, theme), toasts and the workspace switcher; mounts exactly one
- * page Submodel per route (app/pages.ts). `update` is pure; every effect is a Command.
- */
+import { Command, type Component, Head, Router, Subscription } from "@effect/ui";
+import { Html, HtmlHead } from "@effect/ui/html";
 import { ViewModels } from "@kvitbit/ui-port";
 import { Array as Arr, Effect, Option, Schema, Stream } from "effect";
-import { Command, type Runtime, Subscription, type Update } from "foldkit";
-import type { Document, HtmlBuilder } from "foldkit/html";
-import { load, pushUrl, replaceUrl, UrlRequest } from "foldkit/navigation";
-import { toString as urlToString } from "foldkit/url";
-import { authFetch, type WebServices } from "./app/api";
+import { authFetch } from "./app/api";
+import { apiCommand, browserCommand, type RunApi } from "./app/commands";
 import type { Intent } from "./app/intent";
-import type { PageContext, Route } from "./app/page";
-import { initPage, pageTitle, updatePage } from "./app/pages";
-import { Prefs, persistPrefs } from "./app/prefs";
-import { type Flags, Message, type Model, type Toast } from "./app/root";
+import type { PageContext } from "./app/page";
+import { type Prefs, persistPrefs } from "./app/prefs";
+import { Flags, Message, Model, type Toast } from "./app/root";
 import { gate, href, routeFromPath } from "./app/routing";
 import { fetchSession, workspaceBySlug } from "./app/session";
 import { shellView } from "./app/shell";
 
-export { Flags, Message, Model, Mount, Toast } from "./app/root";
+export { Flags, Message, Model } from "./app/root";
 
-type UpdateReturn = Update.Return<Model, Message, WebServices>;
+export class Navigate extends Command.Service<Navigate>()("@kvitbit/web/Navigate", {
+  args: { path: Schema.String, replace: Schema.Boolean },
+  success: Router.Outcome,
+}) {
+  static readonly layer = this.toLayer(
+    Effect.gen(function* () {
+      const router = yield* Router.Router;
+      return ({ path, replace }) => router.navigate(path, { replace });
+    }),
+  );
+}
 
-// COMMAND
+const navigate = (path: string, replace = false) =>
+  Command.asNoop(Navigate.make({ path, replace }));
 
-const Navigate = Command.define("Navigate", {
-  args: { url: Schema.String, replace: Schema.Boolean },
-  messages: [Message.CompletedNavigate],
-  execute: ({ url, replace }) =>
-    (replace ? replaceUrl(url) : pushUrl(url)).pipe(Effect.as(Message.CompletedNavigate())),
-});
+type ShellCommand = Command.Command<Message | Component.Noop, RunApi | Navigate>;
+interface UpdateReturn {
+  readonly model: Model;
+  readonly commands?: ReadonlyArray<ShellCommand>;
+}
 
-const LoadExternal = Command.define("LoadExternal", {
-  args: { href: Schema.String },
-  messages: [Message.CompletedNavigate],
-  execute: ({ href }) => load(href).pipe(Effect.as(Message.CompletedNavigate())),
-});
-
-export const LoadSession = Command.define("LoadSession", {
-  messages: [Message.LoadedSession],
-  interrupt: true,
-  execute: fetchSession.pipe(Effect.map((state) => Message.LoadedSession({ state }))),
-});
-
-const PersistPrefs = Command.define("PersistPrefs", {
-  args: { prefs: Prefs },
-  messages: [Message.CompletedPersistPrefs],
-  execute: ({ prefs }) => persistPrefs(prefs).pipe(Effect.as(Message.CompletedPersistPrefs())),
-});
-
-const SignOut = Command.define("SignOut", {
-  messages: [Message.CompletedSignOut],
-  execute: authFetch(
-    "/sign-out",
-    { method: "POST", body: {} },
-    () => Message.CompletedSignOut(),
-    () => Message.CompletedSignOut(),
-  ),
-});
-
-// CONTEXT
+const loadSession = (seq: number) =>
+  apiCommand(
+    "LoadSession",
+    Effect.map(fetchSession, (state) => Message.LoadedSession({ state, seq })),
+  );
 
 export const contextOf = (model: Model): PageContext => ({
   route: model.route,
@@ -71,27 +50,24 @@ export const contextOf = (model: Model): PageContext => ({
     "ws" in model.route ? Option.getOrNull(workspaceBySlug(model.session, model.route.ws)) : null,
 });
 
-// MOUNTING
-
-/** Applies the access gate and mounts the page for `route` (or the Splash while the session loads). */
-const mountRoute = (model: Model, route: Route): UpdateReturn => {
-  const g = gate(route, model.session);
-  if (g._tag === "Wait") return { model: { ...model, route, mount: { _tag: "Splash" } } };
-  if (g._tag === "Redirect") {
-    const next = { ...model, route: g.route };
-    const mounted = mountRoute(next, g.route);
+const mountRoute = (model: Model, path: string): UpdateReturn => {
+  const route = routeFromPath(path);
+  const access = gate(route, model.session);
+  if (access._tag === "Wait") return { model: { ...model, path, route, waitingForSession: true } };
+  if (access._tag === "Redirect") {
+    const target = href(access.route);
     return {
-      model: mounted.model,
-      commands: [Navigate({ url: href(g.route), replace: true }), ...(mounted.commands ?? [])],
+      model: {
+        ...model,
+        path: target,
+        route: access.route,
+        waitingForSession: false,
+        switcherOpen: false,
+      },
+      commands: [navigate(target, true)],
     };
   }
-  const base: Model = { ...model, route, switcherOpen: false };
-  const result = initPage(route, contextOf(base));
-  return applyIntent(
-    { ...base, mount: { _tag: "Mounted", page: result.page } },
-    Command.mapMessages(result.commands, (message) => Message.GotPage({ message })),
-    result.outMessage,
-  );
+  return { model: { ...model, path, route, waitingForSession: false, switcherOpen: false } };
 };
 
 const pushToast = (model: Model, text: string, tone: Toast["tone"]): Model => ({
@@ -102,133 +78,162 @@ const pushToast = (model: Model, text: string, tone: Toast["tone"]): Model => ({
 
 const setPrefs = (model: Model, prefs: Prefs): UpdateReturn => ({
   model: { ...model, prefs },
-  commands: [PersistPrefs({ prefs })],
+  commands: [Command.asNoop(browserCommand("PersistPrefs", persistPrefs(prefs)))],
 });
 
-const applyIntent = (
-  model: Model,
-  commands: ReadonlyArray<Command.Command<Message, never, WebServices>>,
-  intent: Intent | undefined,
-): UpdateReturn => {
-  if (intent === undefined) return { model, commands };
+const signedOut = (model: Model): UpdateReturn => ({
+  model: {
+    ...model,
+    session: { _tag: "Anonymous" },
+    pendingNav: null,
+    sessionSeq: model.sessionSeq + 1,
+  },
+  commands: [navigate(href({ _tag: "SignIn" }))],
+});
+
+const applyIntent = (model: Model, intent: Intent): UpdateReturn => {
   switch (intent._tag) {
     case "Navigate":
-      return {
-        model,
-        commands: [...commands, Navigate({ url: intent.path, replace: intent.replace })],
-      };
+      return { model, commands: [navigate(intent.path, intent.replace)] };
     case "Toast":
-      return { model: pushToast(model, intent.text, intent.tone), commands };
-    case "SetPrefs": {
-      const next = setPrefs(model, intent.prefs);
-      return { model: next.model, commands: [...commands, ...(next.commands ?? [])] };
-    }
-    case "ReloadSession":
-      return { model, commands: [...commands, LoadSession()] };
-    case "SignedOut":
+      return { model: pushToast(model, intent.text, intent.tone) };
+    case "SetPrefs":
+      return setPrefs(model, intent.prefs);
+    case "ReloadSession": {
+      const sessionSeq = model.sessionSeq + 1;
       return {
-        model: { ...model, session: { _tag: "Anonymous" } },
-        commands: [...commands, Navigate({ url: href({ _tag: "SignIn" }), replace: false })],
+        model: { ...model, pendingNav: intent.then ?? model.pendingNav, sessionSeq },
+        commands: [loadSession(sessionSeq)],
       };
+    }
+    case "SignedOut":
+      return signedOut(model);
   }
 };
 
-// INIT
-
-export const init: Runtime.RoutingApplicationInit<Model, Message, Flags, WebServices> = (
-  flags,
-  url,
-) => {
-  const route = routeFromPath(urlToString(url).replace(/^[a-z]+:\/\/[^/]+/i, ""));
-  const model: Model = {
-    route,
-    prefs: flags.prefs,
-    session: flags.session,
-    mount: { _tag: "Splash" },
-    switcherOpen: false,
-    toasts: [],
-    nextToastId: 1,
-  };
-  const mounted = mountRoute(model, route);
+export const init = (flags: Flags): UpdateReturn => {
+  const initial = mountRoute(
+    {
+      path: flags.path,
+      route: routeFromPath(flags.path),
+      prefs: flags.prefs,
+      session: flags.session,
+      waitingForSession: false,
+      sessionSeq: 1,
+      pendingNav: null,
+      switcherOpen: false,
+      toasts: [],
+      nextToastId: 1,
+    },
+    flags.path,
+  );
   return flags.session._tag === "Unknown"
-    ? { model: mounted.model, commands: [...(mounted.commands ?? []), LoadSession()] }
-    : mounted;
+    ? { model: initial.model, commands: [...(initial.commands ?? []), loadSession(1)] }
+    : initial;
 };
 
-// UPDATE
-
-export const update = (model: Model, message: Message): UpdateReturn =>
-  Message.match<UpdateReturn>(message, {
-    ClickedLink: ({ request }) =>
-      UrlRequest.match<UpdateReturn>(request, {
-        Internal: ({ url }) => ({
-          model,
-          commands: [Navigate({ url: urlToString(url), replace: false })],
-        }),
-        External: ({ href }) => ({ model, commands: [LoadExternal({ href })] }),
-      }),
-    ChangedUrl: ({ url }) =>
-      mountRoute(
+export const update = (model: Model, message: Message): UpdateReturn => {
+  switch (message._tag) {
+    case "ChangedUrl":
+      return message.path === model.path
+        ? { model }
+        : mountRoute({ ...model, pendingNav: null }, message.path);
+    case "PageIntent":
+      return message.path === model.path ? applyIntent(model, message.intent) : { model };
+    case "LoadedSession": {
+      if (message.seq !== model.sessionSeq) return { model };
+      const { state } = message;
+      const next = { ...model, session: state, pendingNav: null };
+      const pending = model.pendingNav;
+      if (state._tag === "SignedIn" && pending !== null) {
+        const path =
+          pending._tag === "Path"
+            ? pending.path
+            : href(
+                state.workspaces[0] === undefined
+                  ? { _tag: "Onboarding" }
+                  : { _tag: "Dashboard", ws: state.workspaces[0].slug },
+              );
+        return {
+          model: next,
+          commands: [navigate(path, pending._tag === "Path" ? pending.replace : true)],
+        };
+      }
+      return mountRoute(next, model.path);
+    }
+    case "ChangedPrefs":
+      return setPrefs(model, message.prefs);
+    case "ToggledSwitcher":
+      return { model: { ...model, switcherOpen: !model.switcherOpen } };
+    case "ClosedSwitcher":
+      return { model: { ...model, switcherOpen: false } };
+    case "PressedSwitcherShortcut":
+      return "ws" in model.route
+        ? { model: { ...model, switcherOpen: !model.switcherOpen } }
+        : { model };
+    case "ClickedSignOut":
+      return {
         model,
-        routeFromPath(
-          `${url.pathname}${Option.match(url.search, { onNone: () => "", onSome: (s) => `?${s}` })}`,
-        ),
-      ),
-    GotPage: ({ message }) => {
-      if (model.mount._tag !== "Mounted") return { model };
-      const result = updatePage(model.mount.page, message, contextOf(model));
-      if (result === undefined) return { model };
-      return applyIntent(
-        { ...model, mount: { _tag: "Mounted", page: result.page } },
-        Command.mapMessages(result.commands, (m) => Message.GotPage({ message: m })),
-        result.outMessage,
-      );
-    },
-    LoadedSession: ({ state }) => {
-      const next = { ...model, session: state };
-      // Re-mount when the gate may now resolve differently (Splash, or account/workspace scope).
-      return model.mount._tag === "Splash" || ViewModels.Routes.requires(model.route) !== "public"
-        ? mountRoute(next, model.route)
-        : { model: next };
-    },
-    ChangedPrefs: ({ prefs }) => setPrefs(model, prefs),
-    ToggledSwitcher: () => ({ model: { ...model, switcherOpen: !model.switcherOpen } }),
-    ClosedSwitcher: () => ({ model: { ...model, switcherOpen: false } }),
-    PressedSwitcherShortcut: () =>
-      "ws" in model.route ? { model: { ...model, switcherOpen: !model.switcherOpen } } : { model },
-    ClickedSignOut: () => ({ model, commands: [SignOut()] }),
-    CompletedSignOut: () => applyIntent(model, [], { _tag: "SignedOut" }),
-    DismissedToast: ({ id }) => ({
-      model: { ...model, toasts: model.toasts.filter((t) => t.id !== id) },
-    }),
-    CompletedNavigate: () => ({ model }),
-    CompletedPersistPrefs: () => ({ model }),
-  });
-
-// SUBSCRIPTIONS
-
-/** Ctrl/Cmd+K opens the workspace switcher (ui-port SHORTCUTS); active only in a workspace. */
-export const subscriptions = Subscription.make<Model, Message>()(() => ({
-  switcherShortcut: Subscription.persistentEntry(
-    typeof window === "undefined"
-      ? Stream.empty
-      : Stream.fromEventListener<KeyboardEvent>(window, "keydown").pipe(
-          Stream.filter((e) =>
-            Option.isSome(ViewModels.matchShortcut(e, /Mac|iPhone|iPad/.test(navigator.platform))),
+        commands: [
+          browserCommand(
+            "SignOut",
+            authFetch(
+              "/sign-out",
+              { method: "POST", body: {} },
+              () => Message.CompletedSignOut(),
+              () => Message.CompletedSignOut(),
+            ),
           ),
-          Stream.tap((e) => Effect.sync(() => e.preventDefault())),
-          Stream.map(() => Message.PressedSwitcherShortcut()),
-        ),
-  ),
-}));
-
-// VIEW
-
-export const view = (model: Model, h: HtmlBuilder<Message>): Document => {
-  const ctx = contextOf(model);
-  const title = model.mount._tag === "Mounted" ? pageTitle(model.mount.page, ctx) : "";
-  return {
-    title: title === "" ? "Kvitbit" : `${title} · Kvitbit`,
-    body: shellView(model, ctx, h),
-  };
+        ],
+      };
+    case "CompletedSignOut":
+      return signedOut(model);
+    case "DismissedToast":
+      return { model: { ...model, toasts: model.toasts.filter((t) => t.id !== message.id) } };
+  }
 };
+
+const linkChanges = Subscription.make(
+  "web-route",
+  Stream.unwrap(
+    Effect.map(Router.Router, (router) =>
+      router.changes.pipe(
+        Stream.filter((location) => location.seq !== 0),
+        Stream.map((location) => Message.ChangedUrl({ path: location.url })),
+      ),
+    ),
+  ),
+);
+
+const shortcut = Subscription.make(
+  "workspace-switcher",
+  Stream.suspend(() =>
+    Stream.fromEventListener<KeyboardEvent>(window, "keydown").pipe(
+      Stream.filter((event) =>
+        Option.isSome(ViewModels.matchShortcut(event, /Mac|iPhone|iPad/.test(navigator.platform))),
+      ),
+      Stream.tap((event) => Effect.sync(() => event.preventDefault())),
+      Stream.map(() => Message.PressedSwitcherShortcut()),
+    ),
+  ),
+);
+
+export const App = Html.component({
+  name: "Kvitbit",
+  props: Flags,
+  model: Model,
+  message: Message,
+  restore: false,
+}).make({
+  init: ($) => {
+    const result = init($.props);
+    return $.set(result.model).run(...(result.commands ?? []));
+  },
+  update: ($, message) => {
+    const result = update($.model, message);
+    return $.set(result.model).run(...(result.commands ?? []));
+  },
+  subscriptions: () => [linkChanges, shortcut],
+  view: (h, model) => shellView(model, contextOf(model), h),
+  head: ({ model }) => [Head.title("Kvitbit"), HtmlHead.lang(model.prefs.locale)],
+});

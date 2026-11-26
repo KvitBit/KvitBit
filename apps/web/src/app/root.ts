@@ -1,14 +1,9 @@
-/** Root Shell Model, Flags and Message schemas (kept apart from main.ts so views can import them). */
+import { UiSchema } from "@effect/ui";
 import { ViewModels } from "@kvitbit/ui-port";
 import { Schema } from "effect";
-import { defineMessageUnion } from "foldkit/message";
-import { UrlRequest } from "foldkit/navigation";
-import { Url } from "foldkit/url";
-import { PageMessage, PageModel } from "./pages";
+import { Intent, PendingNavigation } from "./intent";
 import { Prefs } from "./prefs";
 import { SessionState } from "./session";
-
-// MODEL
 
 export const Toast = Schema.Struct({
   id: Schema.Int,
@@ -17,41 +12,33 @@ export const Toast = Schema.Struct({
 });
 export type Toast = typeof Toast.Type;
 
-export const Mount = Schema.Union([
-  Schema.TaggedStruct("Splash", {}),
-  Schema.TaggedStruct("Mounted", { page: PageModel }),
-]);
-export type Mount = typeof Mount.Type;
-
 export const Model = Schema.Struct({
+  path: Schema.String,
   route: ViewModels.Route,
   prefs: Prefs,
   session: SessionState,
-  mount: Mount,
+  waitingForSession: Schema.Boolean,
+  sessionSeq: Schema.Int,
+  pendingNav: Schema.NullOr(PendingNavigation),
   switcherOpen: Schema.Boolean,
   toasts: Schema.Array(Toast),
   nextToastId: Schema.Int,
 });
 export type Model = typeof Model.Type;
 
-export const Flags = Schema.Struct({ prefs: Prefs, session: SessionState });
+export const Flags = Schema.Struct({ path: Schema.String, prefs: Prefs, session: SessionState });
 export type Flags = typeof Flags.Type;
 
-// MESSAGE
-
-export const Message = defineMessageUnion({
-  ClickedLink: { request: UrlRequest },
-  ChangedUrl: { url: Url },
-  GotPage: { message: PageMessage },
-  LoadedSession: { state: SessionState },
+export const Message = UiSchema.TaggedEnum({
+  ChangedUrl: { path: Schema.String },
+  PageIntent: { path: Schema.String, intent: Intent },
+  LoadedSession: { state: SessionState, seq: Schema.Int },
   ChangedPrefs: { prefs: Prefs },
   ToggledSwitcher: {},
   ClosedSwitcher: {},
+  PressedSwitcherShortcut: {},
   ClickedSignOut: {},
   CompletedSignOut: {},
   DismissedToast: { id: Schema.Int },
-  PressedSwitcherShortcut: {},
-  CompletedNavigate: {},
-  CompletedPersistPrefs: {},
 });
 export type Message = typeof Message.Type;

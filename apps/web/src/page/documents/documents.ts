@@ -1,3 +1,5 @@
+import { UiSchema } from "@effect/ui";
+import type { Html } from "@effect/ui/html";
 /**
  * Screen 09 — Documents List: Invoices, Proformas, Payment Tax Documents, Credit Notes.
  * Kind/status/settlement/overdue/search filters, badges, cursor pagination, zero-CLS loading
@@ -11,12 +13,11 @@ import type {
 } from "@kvitbit/domain";
 import { I18n, ViewModels } from "@kvitbit/ui-port";
 import { Schema } from "effect";
-import { type Command, Submodel } from "foldkit";
-import { defineMessageUnion } from "foldkit/message";
-import { Failure, type WebServices } from "../../app/api";
+import { Failure } from "../../app/api";
+import type { PageCommand } from "../../app/commands";
 import { type Copy, copy, textOf, translator } from "../../app/i18n";
 import { Intent_ } from "../../app/intent";
-import type { PageContext, PageReturn, RouteOf } from "../../app/page";
+import type { MessageHandlers, PageContext, PageReturn, RouteOf } from "../../app/page";
 import * as Remote from "../../app/remote";
 import { href } from "../../app/routing";
 import {
@@ -152,7 +153,7 @@ export const Model = Schema.Struct({
 });
 export type Model = typeof Model.Type;
 
-export const Message = defineMessageUnion({
+export const Message = UiSchema.TaggedEnum({
   Loaded: { seq: Remote.Seq, data: DocumentsPageData, append: Schema.Boolean },
   Failed: { seq: Remote.Seq, failure: Failure },
   ChangedSearch: { value: Schema.String },
@@ -173,7 +174,7 @@ const loadDocumentsCommand = (
   seq: Remote.Seq,
   cursor: string | undefined,
   append: boolean,
-): Command.Command<Message, never, WebServices> =>
+): PageCommand<Message> =>
   apiCommand(
     "LoadDocuments",
     (c) =>
@@ -243,7 +244,7 @@ export const update = (
   ctx: PageContext,
 ): PageReturn<Model, Message> => {
   const route = model.route as Route;
-  return Message.match<PageReturn<Model, Message>>(message, {
+  return Message.match(message, {
     Loaded: ({ seq, data, append }) => {
       if (append) {
         const existing = Remote.dataOf(model.list);
@@ -321,7 +322,7 @@ export const update = (
         commands: [loadDocumentsCommand(ws.id, route.query, Remote.seqOf(list), undefined, false)],
       };
     },
-  });
+  } satisfies MessageHandlers<Message, PageReturn<Model, Message>>);
 };
 
 export const title = (_model: Model, ctx: PageContext): string => txt(ctx.locale, "title");
@@ -335,7 +336,7 @@ const activeTabId = (q: Route["query"]): string => {
   return "all";
 };
 
-export const view = Submodel.defineView<Model, Message, PageContext>((model, ctx, h) => {
+export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
   const { locale } = ctx;
   const t = translator(locale);
   const route = model.route as Route;
@@ -424,79 +425,70 @@ export const view = Submodel.defineView<Model, Message, PageContext>((model, ctx
                     variant: "primary",
                   }),
             })
-          : h.div(
-              [h.Class("kb-stack")],
-              [
-                table(h, {
-                  caption: txt(locale, "caption"),
-                  rows: data.items,
-                  rowKey: (row) => row.id,
-                  onRowClick: (row) => Message.ClickedRow({ id: row.id }),
-                  columns: [
-                    {
-                      header: txt(locale, "colNumber"),
-                      cell: (row) =>
-                        h.a(
-                          [
-                            h.Href(
-                              href({ _tag: "Document", ws: slug, id: row.id, tab: "preview" }),
-                            ),
-                            h.Class("kb-queue-item__link"),
-                          ],
-                          [mono(h, row.number ?? txt(locale, "draftNumber"))],
-                        ),
-                    },
-                    {
-                      header: txt(locale, "colKind"),
-                      cell: (row) => kindBadge(h, locale, row.kind),
-                    },
-                    {
-                      header: txt(locale, "colContact"),
-                      cell: (row) => row.contact.name,
-                    },
-                    {
-                      header: txt(locale, "colIssued"),
-                      numeric: true,
-                      cell: (row) => fmtDate(locale, row.issuedOn),
-                    },
-                    {
-                      header: txt(locale, "colDue"),
-                      numeric: true,
-                      cell: (row) => fmtDate(locale, row.dueOn),
-                    },
-                    {
-                      header: txt(locale, "colStatus"),
-                      cell: (row) =>
-                        h.span([h.Class("kb-docs-badges")], documentBadges(h, locale, row)),
-                    },
-                    {
-                      header: txt(locale, "colTotal"),
-                      align: "end",
-                      numeric: true,
-                      cell: (row) => amount(h, fmtMoney(locale, row.total)),
-                    },
-                  ],
-                }),
-                h.div(
-                  [h.Class("kb-docs-pager")],
-                  [
-                    h.span(
-                      [h.Class("kb-small kb-muted kb-num")],
-                      [txt(locale, "showingCount", { count: data.items.length })],
-                    ),
-                    ...(data.nextCursor === null
-                      ? []
-                      : [
-                          button(h, {
-                            label: txt(locale, "loadMore"),
-                            onClick: Message.ClickedLoadMore(),
-                            busy: model.loadingMore,
-                          }),
-                        ]),
-                  ],
-                ),
-              ],
-            );
+          : h.div.class("kb-stack").children([
+              table(h, {
+                caption: txt(locale, "caption"),
+                rows: data.items,
+                rowKey: (row) => row.id,
+                onRowClick: (row) => Message.ClickedRow({ id: row.id }),
+                columns: [
+                  {
+                    header: txt(locale, "colNumber"),
+                    cell: (row) =>
+                      h.a
+                        .attr(
+                          "href",
+                          href({ _tag: "Document", ws: slug, id: row.id, tab: "preview" }),
+                        )
+                        .class("kb-queue-item__link")
+                        .children([mono(h, row.number ?? txt(locale, "draftNumber"))]),
+                  },
+                  {
+                    header: txt(locale, "colKind"),
+                    cell: (row) => kindBadge(h, locale, row.kind),
+                  },
+                  {
+                    header: txt(locale, "colContact"),
+                    cell: (row) => row.contact.name,
+                  },
+                  {
+                    header: txt(locale, "colIssued"),
+                    numeric: true,
+                    cell: (row) => fmtDate(locale, row.issuedOn),
+                  },
+                  {
+                    header: txt(locale, "colDue"),
+                    numeric: true,
+                    cell: (row) => fmtDate(locale, row.dueOn),
+                  },
+                  {
+                    header: txt(locale, "colStatus"),
+                    cell: (row) =>
+                      h.span.class("kb-docs-badges").children(documentBadges(h, locale, row)),
+                  },
+                  {
+                    header: txt(locale, "colTotal"),
+                    align: "end",
+                    numeric: true,
+                    cell: (row) => amount(h, fmtMoney(locale, row.total)),
+                  },
+                ],
+              }),
+              h.div.class("kb-docs-pager").children([
+                h.span
+                  .class("kb-small kb-muted kb-num")
+                  .children([txt(locale, "showingCount", { count: data.items.length })]),
+                ...(data.nextCursor === null
+                  ? []
+                  : [
+                      button(h, {
+                        label: txt(locale, "loadMore"),
+                        onClick: Message.ClickedLoadMore(),
+                        busy: model.loadingMore,
+                      }),
+                    ]),
+              ]),
+            ]);
 
   return page(h, [
     pageHeader(h, {
@@ -519,77 +511,73 @@ export const view = Submodel.defineView<Model, Message, PageContext>((model, ctx
       items: tabItems,
       selected: activeTabId(q),
     }),
-    h.div(
-      [h.Class("kb-docs-toolbar")],
-      [
-        h.form(
-          [h.Class("kb-docs-filters"), h.OnSubmit(Message.SubmittedSearch())],
-          [
-            h.input([
-              h.Class("kb-input kb-docs-search"),
-              h.Type("search"),
-              h.AriaLabel(txt(locale, "searchLabel")),
-              h.Placeholder(txt(locale, "searchPlaceholder")),
-              h.Value(model.searchInput),
-              h.OnInput((value) => Message.ChangedSearch({ value })),
-            ]),
-            select(h, {
-              id: "docs-status",
-              label: txt(locale, "statusLabel"),
-              value: q.status ?? "",
-              onChange: (value) => Message.SelectedStatus({ value }),
-              options: [
-                { value: "", label: txt(locale, "allStatuses") },
-                { value: "draft", label: textOf(t, I18n.enumText("documentStatus", "draft")) },
-                { value: "issued", label: textOf(t, I18n.enumText("documentStatus", "issued")) },
-                {
-                  value: "cancelled",
-                  label: textOf(t, I18n.enumText("documentStatus", "cancelled")),
-                },
-              ],
-            }),
-            select(h, {
-              id: "docs-settlement",
-              label: txt(locale, "settlementLabel"),
-              value: q.settlement ?? "",
-              onChange: (value) => Message.SelectedSettlement({ value }),
-              options: [
-                { value: "", label: txt(locale, "allSettlements") },
-                { value: "unpaid", label: textOf(t, I18n.enumText("settlement", "unpaid")) },
-                {
-                  value: "partially_paid",
-                  label: textOf(t, I18n.enumText("settlement", "partially_paid")),
-                },
-                { value: "paid", label: textOf(t, I18n.enumText("settlement", "paid")) },
-                { value: "overpaid", label: textOf(t, I18n.enumText("settlement", "overpaid")) },
-                { value: "credited", label: textOf(t, I18n.enumText("settlement", "credited")) },
-              ],
-            }),
-            checkbox(h, {
-              id: "docs-overdue",
-              label: txt(locale, "overdueOnly"),
-              checked: q.overdue === true,
-              onToggle: (checked) => Message.ToggledOverdue({ checked }),
-            }),
-            button(h, {
-              label: txt(locale, "applySearch"),
-              type: "submit",
-              small: true,
-            }),
-            ...(hasFilters
-              ? [
-                  button(h, {
-                    label: txt(locale, "clearFilters"),
-                    onClick: Message.ClickedClearFilters(),
-                    variant: "ghost",
-                    small: true,
-                  }),
-                ]
-              : []),
-          ],
-        ),
-      ],
-    ),
+    h.div.class("kb-docs-toolbar").children([
+      h.form
+        .class("kb-docs-filters")
+        .on("submit", Message.SubmittedSearch(), { preventDefault: true })
+        .children([
+          h.input
+            .class("kb-input kb-docs-search")
+            .attr("type", "search")
+            .attr("aria-label", txt(locale, "searchLabel"))
+            .attr("placeholder", txt(locale, "searchPlaceholder"))
+            .value(model.searchInput)
+            .on("input", ({ value }) => Message.ChangedSearch({ value })),
+          select(h, {
+            id: "docs-status",
+            label: txt(locale, "statusLabel"),
+            value: q.status ?? "",
+            onChange: (value) => Message.SelectedStatus({ value }),
+            options: [
+              { value: "", label: txt(locale, "allStatuses") },
+              { value: "draft", label: textOf(t, I18n.enumText("documentStatus", "draft")) },
+              { value: "issued", label: textOf(t, I18n.enumText("documentStatus", "issued")) },
+              {
+                value: "cancelled",
+                label: textOf(t, I18n.enumText("documentStatus", "cancelled")),
+              },
+            ],
+          }),
+          select(h, {
+            id: "docs-settlement",
+            label: txt(locale, "settlementLabel"),
+            value: q.settlement ?? "",
+            onChange: (value) => Message.SelectedSettlement({ value }),
+            options: [
+              { value: "", label: txt(locale, "allSettlements") },
+              { value: "unpaid", label: textOf(t, I18n.enumText("settlement", "unpaid")) },
+              {
+                value: "partially_paid",
+                label: textOf(t, I18n.enumText("settlement", "partially_paid")),
+              },
+              { value: "paid", label: textOf(t, I18n.enumText("settlement", "paid")) },
+              { value: "overpaid", label: textOf(t, I18n.enumText("settlement", "overpaid")) },
+              { value: "credited", label: textOf(t, I18n.enumText("settlement", "credited")) },
+            ],
+          }),
+          checkbox(h, {
+            id: "docs-overdue",
+            label: txt(locale, "overdueOnly"),
+            checked: q.overdue === true,
+            onToggle: (checked) => Message.ToggledOverdue({ checked }),
+          }),
+          button(h, {
+            label: txt(locale, "applySearch"),
+            type: "submit",
+            small: true,
+          }),
+          ...(hasFilters
+            ? [
+                button(h, {
+                  label: txt(locale, "clearFilters"),
+                  onClick: Message.ClickedClearFilters(),
+                  variant: "ghost",
+                  small: true,
+                }),
+              ]
+            : []),
+        ]),
+    ]),
     body,
   ]);
-});
+};

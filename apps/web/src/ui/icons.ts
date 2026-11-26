@@ -1,5 +1,7 @@
+import type { Html } from "@effect/ui/html";
+import { type Markup, svgImage } from "./html";
+
 /** Minimal 24px stroke icon set (inline SVG, currentColor). */
-import type { Html, HtmlBuilder } from "foldkit/html";
 
 const PATHS = {
   dashboard:
@@ -32,11 +34,18 @@ const PATHS = {
 
 export type IconName = keyof typeof PATHS;
 
-export const icon = <M>(h: HtmlBuilder<M>, name: IconName, size = 18): Html =>
-  h.span([
-    h.Class("kb-icon"),
-    h.AriaHidden(true),
-    h.InnerHTML(
-      `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" focusable="false">${PATHS[name]}</svg>`,
-    ),
-  ]);
+export const icon = <M>(h: Html.H<M>, name: IconName, size = 18): Markup<M> => {
+  const image = svgImage(
+    `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="black" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">${PATHS[name]}</svg>`,
+  );
+  return h.span
+    .class("kb-icon")
+    .attr("aria-hidden", "true")
+    .style({
+      width: `${size}px`,
+      height: `${size}px`,
+      backgroundColor: "currentColor",
+      maskImage: `url("${image}")`,
+      maskSize: "contain",
+    });
+};

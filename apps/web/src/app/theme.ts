@@ -1,3 +1,4 @@
+import type { Html } from "@effect/ui/html";
 /**
  * Live Material 3 theme injection. The resolved HCT tonal schemes (light, dark, medium and high
  * contrast) are serialized by @kvitbit/ui-port into `--md-sys-color-*`, `--kb-color-*` and the
@@ -5,7 +6,8 @@
  * render and the hydrated client paint the same theme with no DOM command.
  */
 import { Theme } from "@kvitbit/ui-port";
-import type { Html, HtmlBuilder } from "foldkit/html";
+import type { Markup } from "../ui/html";
+
 import type { Prefs, ThemeChoice } from "./prefs";
 
 export const THEME_ROOT = ".kb-root";
@@ -27,13 +29,16 @@ export const themeCss = (choice: ThemeChoice, style: Prefs["style"]): string => 
 };
 
 /** Attributes for the `.kb-root` element: `data-theme` only when the viewer forces a mode. */
-export const rootAttributes = <M>(prefs: Prefs, h: HtmlBuilder<M>) => [
-  h.Class("kb-root"),
-  h.DataAttribute("style", prefs.style),
-  h.DataAttribute("contrast", prefs.contrast),
-  ...(prefs.mode === "system" ? [] : [h.DataAttribute("theme", prefs.mode)]),
-  h.Lang(prefs.locale),
-];
+export const rootNode = <M>(prefs: Prefs, h: Html.H<M>) =>
+  h.div
+    .class("kb-root")
+    .attr("data-style", prefs.style)
+    .attr("data-contrast", prefs.contrast)
+    .attr("data-theme", prefs.mode === "system" ? undefined : prefs.mode)
+    .attr("lang", prefs.locale);
 
-export const themeStyle = <M>(prefs: Prefs, h: HtmlBuilder<M>): Html =>
-  h.style([h.Id("kb-theme-vars")], [themeCss(prefs.theme, prefs.style)]);
+export const themeStyle = <M>(prefs: Prefs, h: Html.H<M>): Markup<M> =>
+  h
+    .el("style")
+    .attr("id", "kb-theme-vars")
+    .children([themeCss(prefs.theme, prefs.style)]);

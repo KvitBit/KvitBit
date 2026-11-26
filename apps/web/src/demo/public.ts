@@ -380,9 +380,9 @@ export const routes: ReadonlyArray<DemoRoute> = [
     respond: () => ({ status: true }),
   },
   {
-    method: "POST",
+    method: "GET",
     path: "/api/auth/passkey/generate-authenticate-options",
-    respond: () => ({ challenge: "demo-webauthn-challenge" }),
+    respond: () => ({ challenge: "ZGVtby13ZWJhdXRobi1jaGFsbGVuZ2U", rpId: "localhost" }),
   },
   {
     method: "POST",

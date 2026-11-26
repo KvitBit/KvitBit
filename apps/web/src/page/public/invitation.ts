@@ -1,3 +1,5 @@
+import { UiSchema } from "@effect/ui";
+import type { Html } from "@effect/ui/html";
 /**
  * Screen 05 — Workspace Invitation Landing (/invite/:token).
  * Previews workspace, inviter, role, and invited email; supports accept/decline for signed-in
@@ -6,14 +8,14 @@
 import { InvitationPeek, WorkspaceSummary } from "@kvitbit/domain";
 import { Format, I18n, ViewModels } from "@kvitbit/ui-port";
 import { Schema } from "effect";
-import { Command, Submodel } from "foldkit";
-import { defineMessageUnion } from "foldkit/message";
 import { Failure } from "../../app/api";
+import { defineApiCommand } from "../../app/commands";
 import { copy, translator } from "../../app/i18n";
 import { Intent_ } from "../../app/intent";
-import type { PageContext, PageReturn, RouteOf } from "../../app/page";
+import type { MessageHandlers, PageContext, PageReturn, RouteOf } from "../../app/page";
 import * as Remote from "../../app/remote";
 import { href } from "../../app/routing";
+import { attribute } from "../../ui/html";
 import { icon } from "../../ui/icons";
 import { badge, banner, button, card, dl, linkButton, skeleton } from "../../ui/kit";
 import { callApi, failureMessage } from "./_shared";
@@ -34,7 +36,7 @@ export const Model = Schema.Struct({
 });
 export type Model = typeof Model.Type;
 
-export const Message = defineMessageUnion({
+export const Message = UiSchema.TaggedEnum({
   GotPeek: { seq: Remote.Seq, peek: InvitationPeek },
   FailedPeek: { seq: Remote.Seq, failure: Failure },
   ClickedRetry: {},
@@ -69,9 +71,8 @@ const local = copy({
   },
 });
 
-const FetchPeek = Command.define("InvitationPeek", {
+const FetchPeek = defineApiCommand("InvitationPeek", {
   args: { token: Schema.String, seq: Remote.Seq },
-  messages: [Message.GotPeek, Message.FailedPeek],
   execute: ({ token, seq }) =>
     callApi(
       (client) => client.invitations.peek({ params: { token: token as never } }),
@@ -80,9 +81,8 @@ const FetchPeek = Command.define("InvitationPeek", {
     ),
 });
 
-const AcceptInvite = Command.define("InvitationAccept", {
+const AcceptInvite = defineApiCommand("InvitationAccept", {
   args: { token: Schema.String, seq: Remote.Seq },
-  messages: [Message.CompletedAccept, Message.FailedAccept],
   execute: ({ token, seq }) =>
     callApi(
       (client) => client.invitations.accept({ params: { token: token as never } }),
@@ -114,7 +114,7 @@ export const update = (
   message: Message,
   _ctx: PageContext,
 ): PageReturn<Model, Message> =>
-  Message.match<PageReturn<Model, Message>>(message, {
+  Message.match(message, {
     GotPeek: ({ seq, peek }) => ({
       model: { ...model, peek: Remote.succeed(model.peek, seq, peek) },
     }),
@@ -150,7 +150,7 @@ export const update = (
       if (seq !== model.acceptSeq) return { model };
       return { model: { ...model, accepting: false, acceptFailure: failure } };
     },
-  });
+  } satisfies MessageHandlers<Message, PageReturn<Model, Message>>);
 
 export const title = (model: Model, ctx: PageContext): string => {
   const t = translator(ctx.locale);
@@ -160,13 +160,14 @@ export const title = (model: Model, ctx: PageContext): string => {
     : t.t("invitation.landing.notFound");
 };
 
-export const view = Submodel.defineView<Model, Message, PageContext>((model, ctx, h) => {
+export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
   const t = translator(ctx.locale);
 
   if (model.peek._tag === "Loading" || model.peek._tag === "Idle") {
-    return h.div(
-      [h.Class("kb-invite-shell"), h.AriaBusy(true)],
-      [
+    return h.div
+      .class("kb-invite-shell")
+      .attr("aria-busy", String(true))
+      .children([
         card(
           h,
           [
@@ -174,84 +175,69 @@ export const view = Submodel.defineView<Model, Message, PageContext>((model, ctx
             skeleton(h, "100%", "4rem"),
             skeleton(h, "50%", "2.25rem"),
           ],
-          [h.Class("kb-card kb-invite-card")],
+          [attribute("class", "kb-card kb-invite-card")],
         ),
-      ],
-    );
+      ]);
   }
 
   if (model.peek._tag === "Failed") {
     const missing = model.peek.failure.tag === "NotFound";
-    return h.div(
-      [h.Class("kb-invite-shell")],
-      [
-        card(
-          h,
-          [
-            h.div(
-              [h.Class("kb-row")],
-              [
-                icon(h, "alert", 20),
-                h.h1(
-                  [],
-                  [missing ? t.t("invitation.landing.notFound") : t.t("common.state.error")],
-                ),
-              ],
-            ),
-            ...(!missing
-              ? [
-                  h.p([h.Class("kb-muted")], [failureMessage(t, model.peek.failure)]),
-                  h.div(
-                    [h.Class("kb-row")],
-                    [
-                      button(h, {
-                        label: t.t("common.action.retry"),
-                        onClick: Message.ClickedRetry(),
-                        variant: "primary",
-                      }),
-                    ],
-                  ),
-                ]
-              : [
-                  linkButton(h, {
-                    label: local(ctx.locale, "backHome"),
-                    href: href({ _tag: "Landing" }),
-                    variant: "secondary",
+    return h.div.class("kb-invite-shell").children([
+      card(
+        h,
+        [
+          h.div
+            .class("kb-row")
+            .children([
+              icon(h, "alert", 20),
+              h.h1.children([
+                missing ? t.t("invitation.landing.notFound") : t.t("common.state.error"),
+              ]),
+            ]),
+          ...(!missing
+            ? [
+                h.p.class("kb-muted").children([failureMessage(t, model.peek.failure)]),
+                h.div.class("kb-row").children([
+                  button(h, {
+                    label: t.t("common.action.retry"),
+                    onClick: Message.ClickedRetry(),
+                    variant: "primary",
                   }),
                 ]),
-          ],
-          [h.Class("kb-card kb-invite-card")],
-        ),
-      ],
-    );
+              ]
+            : [
+                linkButton(h, {
+                  label: local(ctx.locale, "backHome"),
+                  href: href({ _tag: "Landing" }),
+                  variant: "secondary",
+                }),
+              ]),
+        ],
+        [attribute("class", "kb-card kb-invite-card")],
+      ),
+    ]);
   }
 
   if (model.acceptedWorkspace !== null) {
-    return h.div(
-      [h.Class("kb-invite-shell")],
-      [
-        card(
-          h,
-          [
-            banner(h, {
-              text: local(ctx.locale, "joinedNotice", { workspace: model.acceptedWorkspace.name }),
-              tone: "info",
+    return h.div.class("kb-invite-shell").children([
+      card(
+        h,
+        [
+          banner(h, {
+            text: local(ctx.locale, "joinedNotice", { workspace: model.acceptedWorkspace.name }),
+            tone: "info",
+          }),
+          h.div.class("kb-row").children([
+            linkButton(h, {
+              label: t.t("invitation.landing.open"),
+              href: href({ _tag: "Dashboard", ws: model.acceptedWorkspace.slug }),
+              variant: "primary",
             }),
-            h.div(
-              [h.Class("kb-row")],
-              [
-                linkButton(h, {
-                  label: t.t("invitation.landing.open"),
-                  href: href({ _tag: "Dashboard", ws: model.acceptedWorkspace.slug }),
-                  variant: "primary",
-                }),
-              ],
-            ),
-          ],
-          [h.Class("kb-card kb-invite-card")],
-        ),
-      ],
-    );
+          ]),
+        ],
+        [attribute("class", "kb-card kb-invite-card")],
+      ),
+    ]);
   }
 
   const peek = model.peek.data;
@@ -264,116 +250,103 @@ export const view = Submodel.defineView<Model, Message, PageContext>((model, ctx
     ctx.session._tag === "SignedIn" &&
     ctx.session.user.email.toLowerCase() !== peek.email.toLowerCase();
 
-  return h.div(
-    [h.Class("kb-invite-shell")],
-    [
-      card(
-        h,
-        [
-          h.div(
-            [h.Class("kb-spread")],
-            [
-              h.h1([], [t.t("invitation.landing.title", { workspace: peek.workspaceName })]),
-              badge(h, statusLabel, statusBadgeTone),
-            ],
-          ),
-          h.p(
-            [h.Class("kb-muted")],
-            [
-              t.t("invitation.landing.body", {
-                inviter: peek.inviterName,
-                workspace: peek.workspaceName,
-                role: roleLabel,
-              }),
-            ],
-          ),
-          dl(h, [
-            [local(ctx.locale, "invitedEmail"), peek.email],
-            [local(ctx.locale, "roleLabel"), roleLabel],
-            [
-              local(ctx.locale, "expiresLabel"),
-              Format.formatDate(ctx.locale, peek.expiresAt.slice(0, 10)),
-            ],
+  return h.div.class("kb-invite-shell").children([
+    card(
+      h,
+      [
+        h.div
+          .class("kb-spread")
+          .children([
+            h.h1.children([t.t("invitation.landing.title", { workspace: peek.workspaceName })]),
+            badge(h, statusLabel, statusBadgeTone),
           ]),
-          ...(model.acceptFailure !== null
-            ? [banner(h, { text: failureMessage(t, model.acceptFailure), tone: "error" })]
-            : []),
-          ...(model.declined
-            ? [
-                banner(h, { text: local(ctx.locale, "declinedNotice"), tone: "neutral" }),
-                linkButton(h, {
-                  label: local(ctx.locale, "backHome"),
-                  href: href({ _tag: "Landing" }),
-                  variant: "secondary",
-                }),
-              ]
-            : peek.status === "expired"
-              ? [banner(h, { text: t.t("invitation.landing.expired"), tone: "error" })]
-              : peek.status === "revoked"
-                ? [banner(h, { text: t.t("invitation.landing.revoked"), tone: "error" })]
-                : peek.status === "accepted"
+        h.p.class("kb-muted").children([
+          t.t("invitation.landing.body", {
+            inviter: peek.inviterName,
+            workspace: peek.workspaceName,
+            role: roleLabel,
+          }),
+        ]),
+        dl(h, [
+          [local(ctx.locale, "invitedEmail"), peek.email],
+          [local(ctx.locale, "roleLabel"), roleLabel],
+          [
+            local(ctx.locale, "expiresLabel"),
+            Format.formatDate(ctx.locale, peek.expiresAt.slice(0, 10)),
+          ],
+        ]),
+        ...(model.acceptFailure !== null
+          ? [banner(h, { text: failureMessage(t, model.acceptFailure), tone: "error" })]
+          : []),
+        ...(model.declined
+          ? [
+              banner(h, { text: local(ctx.locale, "declinedNotice"), tone: "neutral" }),
+              linkButton(h, {
+                label: local(ctx.locale, "backHome"),
+                href: href({ _tag: "Landing" }),
+                variant: "secondary",
+              }),
+            ]
+          : peek.status === "expired"
+            ? [banner(h, { text: t.t("invitation.landing.expired"), tone: "error" })]
+            : peek.status === "revoked"
+              ? [banner(h, { text: t.t("invitation.landing.revoked"), tone: "error" })]
+              : peek.status === "accepted"
+                ? [
+                    banner(h, { text: t.t("invitation.landing.accepted"), tone: "info" }),
+                    linkButton(h, {
+                      label: local(ctx.locale, "backHome"),
+                      href: href({ _tag: "Landing" }),
+                      variant: "secondary",
+                    }),
+                  ]
+                : ctx.session._tag === "Anonymous"
                   ? [
-                      banner(h, { text: t.t("invitation.landing.accepted"), tone: "info" }),
-                      linkButton(h, {
-                        label: local(ctx.locale, "backHome"),
-                        href: href({ _tag: "Landing" }),
-                        variant: "secondary",
-                      }),
+                      h.div.class("kb-row").children([
+                        linkButton(h, {
+                          label: t.t("invitation.landing.signUpToAccept"),
+                          href: href({ _tag: "SignUp", invitation: model.token }),
+                          variant: "primary",
+                        }),
+                        linkButton(h, {
+                          label: t.t("invitation.landing.signInToAccept"),
+                          href: href({ _tag: "SignIn", returnTo: href(model.route) }),
+                          variant: "secondary",
+                        }),
+                      ]),
                     ]
-                  : ctx.session._tag === "Anonymous"
+                  : wrongAccount
                     ? [
-                        h.div(
-                          [h.Class("kb-row")],
-                          [
-                            linkButton(h, {
-                              label: t.t("invitation.landing.signUpToAccept"),
-                              href: href({ _tag: "SignUp", invitation: model.token }),
-                              variant: "primary",
-                            }),
-                            linkButton(h, {
-                              label: t.t("invitation.landing.signInToAccept"),
-                              href: href({ _tag: "SignIn", returnTo: href(model.route) }),
-                              variant: "secondary",
-                            }),
-                          ],
-                        ),
+                        banner(h, {
+                          text: t.t("invitation.landing.wrongAccount", { email: peek.email }),
+                          tone: "error",
+                        }),
+                        linkButton(h, {
+                          label: local(ctx.locale, "switchAccount"),
+                          href: href({ _tag: "SignIn", returnTo: href(model.route) }),
+                          variant: "secondary",
+                        }),
                       ]
-                    : wrongAccount
-                      ? [
-                          banner(h, {
-                            text: t.t("invitation.landing.wrongAccount", { email: peek.email }),
-                            tone: "error",
+                    : [
+                        h.div.class("kb-spread").children([
+                          button(h, {
+                            label: local(ctx.locale, "decline"),
+                            onClick: Message.ClickedDecline(),
+                            variant: "ghost",
+                            disabled: model.accepting,
                           }),
-                          linkButton(h, {
-                            label: local(ctx.locale, "switchAccount"),
-                            href: href({ _tag: "SignIn", returnTo: href(model.route) }),
-                            variant: "secondary",
+                          button(h, {
+                            label: t.t("invitation.landing.accept"),
+                            onClick: Message.ClickedAccept(),
+                            variant: "primary",
+                            busy: model.accepting,
+                            disabled: model.accepting,
+                            testId: "invitation-accept",
                           }),
-                        ]
-                      : [
-                          h.div(
-                            [h.Class("kb-spread")],
-                            [
-                              button(h, {
-                                label: local(ctx.locale, "decline"),
-                                onClick: Message.ClickedDecline(),
-                                variant: "ghost",
-                                disabled: model.accepting,
-                              }),
-                              button(h, {
-                                label: t.t("invitation.landing.accept"),
-                                onClick: Message.ClickedAccept(),
-                                variant: "primary",
-                                busy: model.accepting,
-                                disabled: model.accepting,
-                                testId: "invitation-accept",
-                              }),
-                            ],
-                          ),
                         ]),
-        ],
-        [h.Class("kb-card kb-invite-card")],
-      ),
-    ],
-  );
-});
+                      ]),
+      ],
+      [attribute("class", "kb-card kb-invite-card")],
+    ),
+  ]);
+};

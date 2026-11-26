@@ -1,16 +1,19 @@
 /**
  * Quiet ALTCHA PoW v2 client solver and Better Auth POST helper carrying `X-Altcha`.
+ * Supports ARGON2ID (server default), PBKDF2/SHA-256, and SHA-256 compatible with `altcha-lib`.
  * Private to src/page/public/.
- *
- * Per http-mcp-contracts section 2.6:
- * - `GET /api/v1/bot-protection/challenges/:scope` returns an `AltchaChallenge` JSON object,
- *   or 204 No Content when the installation runs `NoopBotProtection`.
- * - Solved payload is sent in the `X-Altcha` header as base64-encoded JSON `{ challenge, solution }`.
- * - Plain user-facing copy lives in @kvitbit/ui-port `auth.botProof.*` (no crypto/PoW jargon).
  */
 import { ALTCHA_HEADER, type AltchaChallenge, type BotScope } from "@kvitbit/api-contract";
 import { Effect, Schema } from "effect";
 import { type Failure, failureFromUnknown, request, type WebServices } from "../../app/api";
+import {
+  argon2id,
+  bytesToHex,
+  hexToBytes,
+  pbkdf2Sha256,
+  sha256,
+  utf8ToBase64,
+} from "./_altcha_kdf";
 
 export const BotProofState = Schema.Union([
   Schema.TaggedStruct("Idle", {}),
@@ -27,116 +30,124 @@ export const isBotProofReady = (state: BotProofState): boolean =>
 export const botProofHeader = (state: BotProofState): string | undefined =>
   state._tag === "Solved" ? state.header : undefined;
 
-const toHex = (bytes: Uint8Array): string => {
-  let out = "";
-  for (const b of bytes) out += b.toString(16).padStart(2, "0");
-  return out;
-};
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
 
-const encodeBase64 = (text: string): string => {
-  if (typeof btoa === "function") return btoa(text);
-  return Buffer.from(text, "utf8").toString("base64");
-};
-
-const sha256Hex = async (input: string): Promise<string> => {
-  const data = new TextEncoder().encode(input);
-  if (typeof crypto !== "undefined" && crypto.subtle !== undefined) {
-    const digest = await crypto.subtle.digest("SHA-256", data);
-    return toHex(new Uint8Array(digest));
-  }
-  // Fallback for environments without WebCrypto subtle (e.g. non-secure test contexts)
-  let hash = 2166136261;
-  for (const byte of data) {
-    hash ^= byte;
-    hash = Math.imul(hash, 16777619);
-  }
-  return (hash >>> 0).toString(16).padStart(8, "0");
-};
-
-const pbkdf2Hex = async (
-  nonce: string,
-  counter: number,
-  iterations: number,
-  keyLength: number,
-): Promise<string> => {
-  if (typeof crypto === "undefined" || crypto.subtle === undefined) {
-    return sha256Hex(`${nonce}:${counter}`);
-  }
-  const enc = new TextEncoder();
-  const baseKey = await crypto.subtle.importKey(
-    "raw",
-    enc.encode(String(counter)),
-    "PBKDF2",
-    false,
-    ["deriveBits"],
-  );
-  const bits = await crypto.subtle.deriveBits(
-    {
-      name: "PBKDF2",
-      hash: "SHA-256",
-      salt: enc.encode(nonce),
-      iterations: Math.max(1, iterations),
-    },
-    baseKey,
-    Math.max(16, keyLength) * 8,
-  );
-  return toHex(new Uint8Array(bits));
-};
-
-interface ChallengeParams {
-  readonly algorithm: string | undefined;
-  readonly nonce: string | undefined;
-  readonly salt: string | undefined;
-  readonly cost: number | undefined;
-  readonly keyLength: number | undefined;
-  readonly keyPrefix: string | undefined;
+interface ParsedParameters {
+  readonly algorithm: "ARGON2ID" | "PBKDF2/SHA-256" | "SHA-256";
+  readonly nonce: Uint8Array;
+  readonly salt: Uint8Array;
+  readonly cost: number;
+  readonly keyLength: number;
+  readonly memoryCost: number;
+  readonly parallelism: number;
+  readonly keyPrefix: string;
 }
 
-const readParams = (challenge: AltchaChallenge): ChallengeParams => {
+const toBytesOrUtf8 = (value: string): Uint8Array =>
+  hexToBytes(value) ?? new TextEncoder().encode(value);
+
+const parseParameters = (challenge: AltchaChallenge): ParsedParameters => {
   const obj = challenge as Record<string, unknown>;
-  const nested =
-    typeof obj.parameters === "object" && obj.parameters !== null
-      ? (obj.parameters as Record<string, unknown>)
-      : obj;
+  const nested = isRecord(obj.parameters) ? obj.parameters : obj;
+  const rawAlgo = typeof nested.algorithm === "string" ? nested.algorithm : "ARGON2ID";
+  if (rawAlgo !== "ARGON2ID" && rawAlgo !== "PBKDF2/SHA-256" && rawAlgo !== "SHA-256") {
+    throw new Error(`Unsupported ALTCHA algorithm: ${rawAlgo}`);
+  }
+  const nonceStr = typeof nested.nonce === "string" ? nested.nonce : "";
+  const saltStr = typeof nested.salt === "string" ? nested.salt : nonceStr;
+  if (nonceStr === "" || saltStr === "") {
+    throw new Error("Malformed ALTCHA challenge: missing nonce or salt");
+  }
+  const nonce = toBytesOrUtf8(nonceStr);
+  const salt = toBytesOrUtf8(saltStr);
+  const cost = typeof nested.cost === "number" && nested.cost >= 1 ? Math.trunc(nested.cost) : 1;
+  const keyLength =
+    typeof nested.keyLength === "number" && nested.keyLength >= 1
+      ? Math.trunc(nested.keyLength)
+      : 32;
+  const memoryCost =
+    typeof nested.memoryCost === "number" && nested.memoryCost >= 8
+      ? Math.trunc(nested.memoryCost)
+      : 19_456;
+  const parallelism =
+    typeof nested.parallelism === "number" && nested.parallelism >= 1
+      ? Math.trunc(nested.parallelism)
+      : 1;
+  const keyPrefix = (typeof nested.keyPrefix === "string" ? nested.keyPrefix : "0").toLowerCase();
   return {
-    algorithm: typeof nested.algorithm === "string" ? nested.algorithm : undefined,
-    nonce: typeof nested.nonce === "string" ? nested.nonce : undefined,
-    salt: typeof nested.salt === "string" ? nested.salt : undefined,
-    cost: typeof nested.cost === "number" ? nested.cost : undefined,
-    keyLength: typeof nested.keyLength === "number" ? nested.keyLength : undefined,
-    keyPrefix: typeof nested.keyPrefix === "string" ? nested.keyPrefix : undefined,
+    algorithm: rawAlgo,
+    nonce,
+    salt,
+    cost,
+    keyLength,
+    memoryCost,
+    parallelism,
+    keyPrefix,
   };
 };
 
+const deriveSha256 = (
+  salt: Uint8Array,
+  password: Uint8Array,
+  cost: number,
+  keyLength: number,
+): Uint8Array => {
+  const first = new Uint8Array(salt.length + password.length);
+  first.set(salt, 0);
+  first.set(password, salt.length);
+  let digest = sha256(first);
+  for (let i = 1; i < cost; i++) digest = sha256(digest);
+  return digest.subarray(0, keyLength);
+};
+
+const yieldToEventLoop = (): Promise<void> =>
+  new Promise((resolve) => {
+    setTimeout(resolve, 0);
+  });
+
 /**
- * Solves an ALTCHA v2 challenge on-device and returns the base64 `X-Altcha` header value.
- * Supports PBKDF2/SHA-256 and SHA-256 challenges directly via WebCrypto.
+ * Solves an ALTCHA PoW v2 challenge on-device and returns the base64 `X-Altcha` header value.
+ * Matches `altcha-lib` for ARGON2ID, PBKDF2/SHA-256, and SHA-256.
  */
 export const solveAltchaChallenge = async (challenge: AltchaChallenge): Promise<string> => {
-  const params = readParams(challenge);
-  const nonce = params.nonce ?? params.salt ?? "kvitbit";
-  const prefix = (params.keyPrefix ?? "0").toLowerCase();
-  const algorithm = params.algorithm ?? "PBKDF2/SHA-256";
-  const cost = params.cost ?? 1000;
-  const keyLength = params.keyLength ?? 32;
+  const params = parseParameters(challenge);
+  const password = new Uint8Array(params.nonce.length + 4);
+  password.set(params.nonce, 0);
+  const passwordView = new DataView(password.buffer);
+  const chunkSize = params.algorithm === "ARGON2ID" ? 1 : 8;
   const maxAttempts = 50_000;
   const started = Date.now();
 
   for (let counter = 0; counter < maxAttempts; counter++) {
-    const derivedKey =
-      algorithm === "PBKDF2/SHA-256"
-        ? await pbkdf2Hex(nonce, counter, cost, keyLength)
-        : await sha256Hex(`${nonce}:${counter}`);
-    if (derivedKey.startsWith(prefix)) {
+    passwordView.setUint32(params.nonce.length, counter, false);
+    const derived =
+      params.algorithm === "ARGON2ID"
+        ? argon2id(password, params.salt, {
+            memoryCost: params.memoryCost,
+            cost: params.cost,
+            parallelism: params.parallelism,
+            keyLength: params.keyLength,
+          })
+        : params.algorithm === "PBKDF2/SHA-256"
+          ? await pbkdf2Sha256(password, params.salt, params.cost, params.keyLength)
+          : deriveSha256(params.salt, password, params.cost, params.keyLength);
+
+    const derivedKey = bytesToHex(derived);
+    if (derivedKey.startsWith(params.keyPrefix)) {
       const payload = {
         challenge,
         solution: {
           counter,
           derivedKey,
-          time: Date.now() - started,
+          time: Math.max(0, Date.now() - started),
         },
       };
-      return encodeBase64(JSON.stringify(payload));
+      return utf8ToBase64(JSON.stringify(payload));
+    }
+
+    if ((counter + 1) % chunkSize === 0) {
+      await yieldToEventLoop();
     }
   }
   throw new Error("Unable to complete verification challenge");
@@ -148,7 +159,7 @@ export type FetchAndSolveResult =
   | { readonly _tag: "Failed"; readonly reason: string };
 
 /**
- * Fetches a fresh ALTCHA challenge for `scope` and solves it in a single Foldkit Command Effect.
+ * Fetches a fresh ALTCHA challenge for `scope` and solves it in a single Effect UI Command Effect.
  * 204 No Content (NoopBotProtection) yields `NotRequired`.
  */
 export const fetchAndSolveBotProof = <M>(
@@ -182,7 +193,6 @@ const origin = (): string =>
 
 /**
  * Same-origin Better Auth POST carrying an optional `X-Altcha` proof header.
- * Mirrors `app/api.ts` `authFetch` (which is frozen and omits custom headers).
  */
 export const authPostWithProof = <M1, M2>(
   path: string,

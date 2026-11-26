@@ -1,3 +1,4 @@
+import type { Html } from "@effect/ui/html";
 /**
  * Kvitbit brand rendering (DESIGN.md "Brand Identity"). The N2 mark ships as two optical masters:
  * the light master (10-unit gaps) for dark ink on light surfaces and the dark master (14-unit gaps)
@@ -6,30 +7,27 @@
  * committed path-only SVGs; the wordmark is never retyped in a font.
  */
 import { markSvg } from "@kvitbit/brand";
-import type { Html, HtmlBuilder } from "foldkit/html";
+import { type Markup, svgImage } from "./html";
 
 const inline = (master: "light" | "dark"): string =>
   markSvg({ master, fill: "currentColor", title: "Kvitbit" })
     .replace(' aria-labelledby="title"', ' aria-hidden="true" focusable="false"')
     .replace(/<title id="title">[^<]*<\/title>\s*/, "");
 
-const MARK_LIGHT = inline("light");
-const MARK_DARK = inline("dark");
+const MARK_LIGHT = svgImage(inline("light").replace("currentColor", "#1d2330"));
+const MARK_DARK = svgImage(inline("dark").replace("currentColor", "#e8edf5"));
 
 /** The mark alone (minimum 16px). `size` sets the rendered square in px. */
-export const mark = <M>(h: HtmlBuilder<M>, size = 28, label = "Kvitbit"): Html =>
-  h.span(
-    [
-      h.Class("kb-mark"),
-      h.Role("img"),
-      h.AriaLabel(label),
-      h.Style({ "--kb-mark-size": `${size}px` }),
-    ],
-    [
-      h.span([h.Class("kb-only-light"), h.InnerHTML(MARK_LIGHT)]),
-      h.span([h.Class("kb-only-dark"), h.InnerHTML(MARK_DARK)]),
-    ],
-  );
+export const mark = <M>(h: Html.H<M>, size = 28, label = "Kvitbit"): Markup<M> =>
+  h.span
+    .class("kb-mark")
+    .attr("role", "img")
+    .attr("aria-label", label)
+    .style({ "--kb-mark-size": `${size}px` })
+    .children([
+      h.img.class("kb-only-light").attr("src", MARK_LIGHT).attr("alt", ""),
+      h.img.class("kb-only-dark").attr("src", MARK_DARK).attr("alt", ""),
+    ]);
 
 const lockupSrc = (layout: "horizontal" | "stacked", master: "light" | "dark") =>
   `/assets/brand/lockup/kvitbit-lockup-${layout}-${master}.svg`;
@@ -39,24 +37,22 @@ const lockupSrc = (layout: "horizontal" | "stacked", master: "light" | "dark") =
  * wrapper padding. Below the horizontal minimum use `mark` instead.
  */
 export const lockup = <M>(
-  h: HtmlBuilder<M>,
+  h: Html.H<M>,
   layout: "horizontal" | "stacked" = "horizontal",
   height = layout === "horizontal" ? 22 : 64,
-): Html =>
-  h.span(
-    [h.Class(`kb-lockup kb-lockup--${layout}`), h.Style({ "--kb-lockup-height": `${height}px` })],
-    [
-      h.img([
-        h.Class("kb-only-light"),
-        h.Src(lockupSrc(layout, "light")),
-        h.Alt("Kvitbit"),
-        h.Height(String(height)),
-      ]),
-      h.img([
-        h.Class("kb-only-dark"),
-        h.Src(lockupSrc(layout, "dark")),
-        h.Alt("Kvitbit"),
-        h.Height(String(height)),
-      ]),
-    ],
-  );
+): Markup<M> =>
+  h.span
+    .class(`kb-lockup kb-lockup--${layout}`)
+    .style({ "--kb-lockup-height": `${height}px` })
+    .children([
+      h.img
+        .class("kb-only-light")
+        .attr("src", lockupSrc(layout, "light"))
+        .attr("alt", "Kvitbit")
+        .attr("height", String(height)),
+      h.img
+        .class("kb-only-dark")
+        .attr("src", lockupSrc(layout, "dark"))
+        .attr("alt", "Kvitbit")
+        .attr("height", String(height)),
+    ]);

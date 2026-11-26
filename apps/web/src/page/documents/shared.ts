@@ -1,3 +1,4 @@
+import type { Html } from "@effect/ui/html";
 /**
  * Private shared schemas, decoders, formatting and Command helpers for src/page/documents/*.
  * Mirrors the concrete wire shapes produced by @kvitbit/core behind @kvitbit/domain placeholders.
@@ -20,6 +21,7 @@ import {
   PaymentId,
   PaymentMethod,
   PriceListItemId,
+  type Role,
   ScheduleId,
   TaxRegime,
   TemplateId,
@@ -29,11 +31,11 @@ import {
 } from "@kvitbit/domain";
 import { Api, Format, I18n, type ViewModels } from "@kvitbit/ui-port";
 import { BigDecimal, Effect, Option, Schema } from "effect";
-import type { Command } from "foldkit";
-import type { Html, HtmlBuilder } from "foldkit/html";
-import { type Client, type Failure, request, type WebServices } from "../../app/api";
+import { type Client, type Failure, request } from "../../app/api";
+import { browserCommand, type PageCommand, apiCommand as runApi } from "../../app/commands";
 import { type Copy, copy, textOf, translator } from "../../app/i18n";
 import type { Locale as AppLocale } from "../../app/prefs";
+import type { Markup } from "../../ui/html";
 import { type BadgeTone, badge } from "../../ui/kit";
 
 // --- Concrete wire schemas for domain placeholders -----------------------------------------------
@@ -342,7 +344,7 @@ export const formatAddress = (addr: AddressData): string =>
 
 // --- Status & kind badges ------------------------------------------------------------------------
 
-export const kindBadge = <M>(h: HtmlBuilder<M>, locale: AppLocale, kind: DocumentKind): Html => {
+export const kindBadge = <M>(h: Html.H<M>, locale: AppLocale, kind: DocumentKind): Markup<M> => {
   const t = translator(locale);
   const label = textOf(t, I18n.enumText("documentKind", kind));
   const tone: BadgeTone = kind === "proforma" ? "proforma" : "outline";
@@ -350,7 +352,7 @@ export const kindBadge = <M>(h: HtmlBuilder<M>, locale: AppLocale, kind: Documen
 };
 
 export const documentBadges = <M>(
-  h: HtmlBuilder<M>,
+  h: Html.H<M>,
   locale: AppLocale,
   doc: {
     readonly status: DocumentStatus;
@@ -359,9 +361,9 @@ export const documentBadges = <M>(
     readonly locked: boolean;
     readonly kind: DocumentKind;
   },
-): ReadonlyArray<Html> => {
+): ReadonlyArray<Markup<M>> => {
   const t = translator(locale);
-  const out: Array<Html> = [];
+  const out: Array<Markup<M>> = [];
   if (doc.status === "draft") {
     out.push(badge(h, textOf(t, I18n.enumText("badge", "draft")), "draft"));
   } else if (doc.status === "cancelled") {
@@ -384,10 +386,10 @@ export const documentBadges = <M>(
 };
 
 export const sourceBadge = <M>(
-  h: HtmlBuilder<M>,
+  h: Html.H<M>,
   locale: AppLocale,
   source: ViewModels.SettingSource,
-): Html => {
+): Markup<M> => {
   const t = translator(locale);
   const label = textOf(t, I18n.enumText("settingSource", source));
   const tone: BadgeTone =
@@ -402,19 +404,12 @@ export const apiCommand = <A, E, M>(
   call: (client: Client) => Effect.Effect<A, E>,
   onSuccess: (a: A) => M,
   onFailure: (f: Failure) => M,
-): Command.Command<M, never, WebServices> =>
-  ({
-    name,
-    effect: request<A, E, M>(call, onSuccess, onFailure),
-  }) as Command.Command<M, never, WebServices>;
+): PageCommand<M> => runApi(name, request(call, onSuccess, onFailure));
 
-export const copyTextCommand = <M>(
-  text: string,
-  onResult: (ok: boolean) => M,
-): Command.Command<M, never, WebServices> =>
-  ({
-    name: "CopyText",
-    effect: Effect.tryPromise({
+export const copyTextCommand = <M>(text: string, onResult: (ok: boolean) => M): PageCommand<M> =>
+  browserCommand(
+    "CopyText",
+    Effect.tryPromise({
       try: async () => {
         if (typeof navigator !== "undefined" && navigator.clipboard !== undefined) {
           await navigator.clipboard.writeText(text);
@@ -427,11 +422,66 @@ export const copyTextCommand = <M>(
       Effect.map(onResult),
       Effect.catch(() => Effect.succeed(onResult(false))),
     ),
-  }) as Command.Command<M, never, WebServices>;
+  );
 
 export const withIdempotencyKey = <A, E, R>(
   fn: (headers: { readonly "idempotency-key": string }) => Effect.Effect<A, E, R>,
 ): Effect.Effect<A, E, R> => Effect.flatMap(Api.uuidV7, (key) => fn(Api.idempotencyHeaders(key)));
+
+export const idempotencyHeaders = (key: string): { readonly "idempotency-key": string } =>
+  Api.idempotencyHeaders(key);
+
+export const mintRequestKeyCommand = <M>(name: string, onKey: (key: string) => M): PageCommand<M> =>
+  browserCommand(name, Api.uuidV7.pipe(Effect.map(onKey)));
+
+export const delayCommand = <M>(name: string, ms: number, message: M): PageCommand<M> =>
+  browserCommand(name, Effect.as(Effect.sleep(ms), message));
+
+export type DocumentAction =
+  | "document.read"
+  | "document.pdf"
+  | "document.history"
+  | "document.draft"
+  | "document.issue"
+  | "document.edit"
+  | "document.cancel"
+  | "document.correct"
+  | "document.finalInvoice"
+  | "document.send"
+  | "document.lock"
+  | "document.unlock"
+  | "document.overrideNumber"
+  | "payment.write"
+  | "share.write";
+
+const WRITER_ROLES: ReadonlyArray<Role> = ["owner", "admin", "member"];
+const MANAGER_ROLES: ReadonlyArray<Role> = ["owner", "admin"];
+const ALL_ROLES: ReadonlyArray<Role> = ["owner", "admin", "member", "accountant"];
+
+/** Canonical role × action policy matching core-ports 2.3 (packages/core/src/policy/table.ts). */
+export const canRole = (role: Role | undefined, action: DocumentAction): boolean => {
+  if (role === undefined) return false;
+  switch (action) {
+    case "document.read":
+    case "document.pdf":
+    case "document.history":
+      return ALL_ROLES.includes(role);
+    case "document.unlock":
+    case "document.overrideNumber":
+      return MANAGER_ROLES.includes(role);
+    case "document.draft":
+    case "document.issue":
+    case "document.edit":
+    case "document.cancel":
+    case "document.correct":
+    case "document.finalInvoice":
+    case "document.send":
+    case "document.lock":
+    case "payment.write":
+    case "share.write":
+      return WRITER_ROLES.includes(role);
+  }
+};
 
 export const ifMatch = (revision: number) => Api.ifMatchHeaders(revision);
 

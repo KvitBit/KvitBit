@@ -1,3 +1,5 @@
+export { apiCommand as cmd } from "../../app/commands";
+
 /**
  * Concrete Schema models and pure helpers private to the Settings & Account page group.
  * Matches packages/core/src/modules/workspaces/model.ts wire shapes and api-contract views.
@@ -17,15 +19,7 @@ import {
   WorkspaceId,
   WorkspaceSlug,
 } from "@kvitbit/domain";
-import { type Effect, Option, Schema } from "effect";
-import type { Command } from "foldkit";
-import type { WebServices } from "../../app/api";
-
-export const cmd = <M>(
-  name: string,
-  effect: Effect.Effect<M, never, WebServices>,
-): Command.Command<M, never, WebServices> =>
-  ({ name, effect }) as Command.Command<M, never, WebServices>;
+import { Option, Schema } from "effect";
 
 export const Address = Schema.Struct({
   street: Schema.String,
@@ -122,6 +116,7 @@ export type PasskeyItem = typeof PasskeyItem.Type;
 
 export const SessionItem = Schema.Struct({
   id: Schema.String,
+  token: Schema.String,
   userAgent: Schema.String,
   ipAddress: Schema.NullOr(Schema.String),
   updatedAt: Schema.String,

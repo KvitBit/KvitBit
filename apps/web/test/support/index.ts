@@ -1,15 +1,13 @@
-/**
- * Test helpers shared by every page group: a PageContext builder, demo session fixtures, and a
- * server render of any path through the real root program (Foldkit experimental Server).
- */
-import { Effect } from "effect";
-import type { Runtime } from "foldkit";
-import { Server } from "foldkit/experimental";
+import { type Renderer, Router } from "@effect/ui";
+import { HtmlServer } from "@effect/ui/html";
+import { Effect, Layer } from "effect";
+import { RunApi } from "../../src/app/commands";
 import type { PageContext, Route } from "../../src/app/page";
 import { defaultPrefs, type Locale } from "../../src/app/prefs";
+import { BrowserRoutes } from "../../src/app/routing";
 import type { SessionState } from "../../src/app/session";
 import { DEMO_USER, DEMO_WORKSPACE, DEMO_WORKSPACES } from "../../src/demo/shell";
-import { Flags, init, Message, Model, update, view } from "../../src/main";
+import { App, type Flags, Navigate } from "../../src/main";
 
 export { DEMO_USER, DEMO_WORKSPACE, DEMO_WORKSPACES };
 
@@ -39,36 +37,29 @@ export const ctxFor = (
   };
 };
 
-const routing = {
-  onUrlRequest: (request: Parameters<typeof Message.ClickedLink>[0]["request"]) =>
-    Message.ClickedLink({ request }),
-  onUrlChange: (url: Parameters<typeof Message.ChangedUrl>[0]["url"]) =>
-    Message.ChangedUrl({ url }),
-};
+export interface RenderedPath {
+  readonly html: string;
+  readonly head: string;
+  readonly title: string;
+  readonly flags: Flags;
+  readonly state: Renderer.State;
+}
 
-// A server render never runs Commands, so the WebServices requirement of init/update is erased for
-// renderToString, which only accepts programs without Resources.
-const initForRender = init as unknown as Runtime.RoutingApplicationInit<Model, Message, Flags>;
-const updateForRender = update as unknown as (
-  model: Model,
-  message: Message,
-) => { readonly model: Model };
-
-const renderConfig = { Model, Flags, init: initForRender, update: updateForRender, view, routing };
-
-/** Server-renders `path` with the given session; resolves to the HTML and document title. */
-export const renderPath = (
+/** Server-renders the same component and input the browser entry adopts. */
+export const renderPath = async (
   path: string,
   opts: { locale?: Locale; session?: SessionState } = {},
-): Promise<{ readonly html: string; readonly title: string }> =>
-  Effect.runPromise(
-    Server.renderToString(
-      // The overloads cannot infer this program shape; the call is checked at runtime by the smoke tests.
-      renderConfig as never,
-      {
-        url: `http://localhost${path}`,
-        flags: { prefs: defaultPrefs(opts.locale ?? "cs"), session: opts.session ?? signedIn },
-        buildId: "test",
-      } as never,
-    ),
+): Promise<RenderedPath> => {
+  const flags: Flags = {
+    path,
+    prefs: defaultPrefs(opts.locale ?? "cs"),
+    session: opts.session ?? signedIn,
+  };
+  const router = Router.static({ routes: BrowserRoutes, url: path });
+  const layers = Layer.merge(RunApi.layer, Navigate.layer.pipe(Layer.provideMerge(router)));
+  const rendered = await Effect.runPromise(
+    HtmlServer.renderToHtml(App, flags).pipe(Effect.provide(layers)),
   );
+  const title = /<title[^>]*>([^<]*)<\/title>/.exec(rendered.head)?.[1] ?? "";
+  return { ...rendered, title, flags };
+};
