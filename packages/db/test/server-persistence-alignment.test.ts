@@ -4,8 +4,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { PGlite } from "@electric-sql/pglite";
+import { VatBreakdown } from "@kvitbit/domain/contract";
 import { drizzle } from "drizzle-orm/pglite";
 import { migrate } from "drizzle-orm/pglite/migrator";
+import { BigDecimal, Schema } from "effect";
+
+const decodeVatBreakdown = Schema.decodeUnknownSync(Schema.toCodecJson(VatBreakdown));
 
 // The server persistence alignment migration (20261124135932) must upgrade a populated database
 // from the prior schema without failing on existing delivery history (S5) or zeroing out
@@ -50,6 +54,10 @@ const docProforma = "0190a000-0000-7000-8000-00000000031a";
 const docNonVat = "0190a000-0000-7000-8000-00000000031b";
 const docIdentTax = "0190a000-0000-7000-8000-00000000031c";
 const docIdentOutside = "0190a000-0000-7000-8000-00000000031d";
+const finalLegacyNoTotal = "0190a000-0000-7000-8000-00000000031e";
+const docIdentRounded = "0190a000-0000-7000-8000-00000000031f";
+const cnIdentPartialOutside = "0190a000-0000-7000-8000-000000000320";
+const docHistoricalRate = "0190a000-0000-7000-8000-000000000321";
 
 // Deliveries
 const del1 = "0190a000-0000-7000-8000-000000000401";
@@ -66,6 +74,7 @@ const lineNegative = "0190a000-0000-7000-8000-000000000503";
 const lineReduced = "0190a000-0000-7000-8000-000000000504";
 const lineReverseCharge = "0190a000-0000-7000-8000-000000000505";
 const lineDeduction = "0190a000-0000-7000-8000-000000000506";
+const lineHistorical15 = "0190a000-0000-7000-8000-000000000507";
 
 let client: PGlite;
 let preDir: string;
@@ -231,6 +240,40 @@ beforeAll(async () => {
     ],
     { net: "-20", vat: "0", gross: "-20" },
   );
+  const bIdentRounded = breakdown(
+    [
+      {
+        treatment: "reverse_charge",
+        ratePercent: "0",
+        base: "100",
+        vat: "0",
+        gross: "100",
+        vatCzk: null,
+      },
+      {
+        treatment: "outside_scope",
+        ratePercent: "0",
+        base: "50.60",
+        vat: "0",
+        gross: "50.60",
+        vatCzk: null,
+      },
+    ],
+    { net: "150.60", vat: "0", gross: "151", roundingAdjustment: "0.40" },
+  );
+  const bHist15 = breakdown(
+    [
+      {
+        treatment: "reduced",
+        ratePercent: "15",
+        base: "100",
+        vat: "15",
+        gross: "115",
+        vatCzk: null,
+      },
+    ],
+    { net: "100", vat: "15", gross: "115" },
+  );
 
   await client.exec(`
     insert into workspaces (id, slug, name) values
@@ -325,7 +368,18 @@ beforeAll(async () => {
       ('${docIdentTax}', '${wsIdent}', 'invoice', 'issued', '20260001', '${contactIdent}', 'CZK', 'cs', 'bank_transfer',
        '2026-01-10', '2026-01-24', '100.00', '0.00', '100.00', '${b100}', false, null, null, null, null),
       ('${docIdentOutside}', '${wsIdent}', 'invoice', 'issued', '20260002', '${contactIdent}', 'CZK', 'cs', 'bank_transfer',
-       '2026-01-10', '2026-01-24', '100.00', '0.00', '100.00', '${b100}', false, null, null, null, null);
+       '2026-01-10', '2026-01-24', '100.00', '0.00', '100.00', '${b100}', false, null, null, null, null),
+      -- Legacy Final Invoice with NULL gross & breakdown: 121 supply less 0.03 advance => 120.97 due
+      ('${finalLegacyNoTotal}', '${wsVat}', 'invoice', 'issued', '20260010', '${contactVat}', 'CZK', 'cs', 'bank_transfer',
+       '2026-01-10', '2026-01-24', null, null, null, null, false, null, null, null, null),
+      -- Identified-person tax_document=true + whole_unit rounding, partially credited on outside_scope only
+      ('${docIdentRounded}', '${wsIdent}', 'invoice', 'issued', '20260003', '${contactIdent}', 'CZK', 'cs', 'bank_transfer',
+       '2026-01-10', '2026-01-24', '150.60', '0.00', '151.00', '${bIdentRounded}', true, null, null, null, null),
+      ('${cnIdentPartialOutside}', '${wsIdent}', 'credit_note', 'issued', 'CN20260001', '${contactIdent}', 'CZK', 'cs', 'bank_transfer',
+       '2026-01-12', '2026-01-12', '-40.00', '0.00', '-40.00', '${bNeg40}', false, null, null, null, null),
+      -- Historical 2023 reduced VAT rate (15%) differing from the 2024+ fallback (12%)
+      ('${docHistoricalRate}', '${wsVat}', 'invoice', 'issued', '20230001', '${contactVat}', 'CZK', 'cs', 'bank_transfer',
+       '2023-06-10', '2023-06-24', '100.00', '15.00', '115.00', '${bHist15}', false, null, null, null, null);
 
     insert into document_lines (
       id, workspace_id, document_id, position, description, quantity, unit_price, vat,
@@ -337,7 +391,13 @@ beforeAll(async () => {
       ('${lineReduced}', '${wsVat}', '${docPartialPaid}', 1, 'Books', '3', '100', 'reduced', null, null),
       ('${lineReverseCharge}', '${wsIdent}', '${docIdentTax}', 1, 'EU service', '1', '100', 'reverse_charge', null, null),
       (gen_random_uuid(), '${wsIdent}', '${docIdentOutside}', 1, 'Local', '1', '100', 'outside_scope', null, null),
-      ('${lineDeduction}', '${wsVat}', '${finalDeductionOpen}', 1, 'Advance deduction', '-1', '100', 'standard', '${ptdOpen}', '-21.00');
+      ('${lineDeduction}', '${wsVat}', '${finalDeductionOpen}', 1, 'Advance deduction', '-1', '100', 'standard', '${ptdOpen}', '-21.00'),
+      (gen_random_uuid(), '${wsVat}', '${finalLegacyNoTotal}', 1, 'Supply', '1', '100', 'standard', null, null),
+      (gen_random_uuid(), '${wsVat}', '${finalLegacyNoTotal}', 2, 'Advance', '-1', '0.02', 'standard', '${ptdOpen}', '-0.01'),
+      (gen_random_uuid(), '${wsIdent}', '${docIdentRounded}', 1, 'EU service', '1', '100', 'reverse_charge', null, null),
+      (gen_random_uuid(), '${wsIdent}', '${docIdentRounded}', 2, 'Local', '1', '50.60', 'outside_scope', null, null),
+      (gen_random_uuid(), '${wsIdent}', '${cnIdentPartialOutside}', 1, 'Local credit', '-1', '40', 'outside_scope', null, null),
+      ('${lineHistorical15}', '${wsVat}', '${docHistoricalRate}', 1, '2023 books', '1', '100', 'reduced', null, null);
 
     insert into document_relations (workspace_id, from_document_id, to_document_id, relation) values
       -- 'corrects' only
@@ -355,13 +415,17 @@ beforeAll(async () => {
       -- credited PTD (via 'corrected_by' only)
       ('${wsVat}', '${ptdCredited}', '${cnPtdCredited}', 'corrected_by'),
       -- Final Invoice with open deduction
-      ('${wsVat}', '${cnFinalDeductionOpen}', '${finalDeductionOpen}', 'corrects');
+      ('${wsVat}', '${cnFinalDeductionOpen}', '${finalDeductionOpen}', 'corrects'),
+      -- Partial outside-scope credit note against identified-person rounded tax document
+      ('${wsIdent}', '${cnIdentPartialOutside}', '${docIdentRounded}', 'corrects');
 
     insert into payments (id, workspace_id, document_id, amount, currency, paid_on, method, removed_at) values
       -- Partially paid: 50 of 121
       (gen_random_uuid(), '${wsVat}', '${docPartialPaid}', '50.00', 'CZK', '2026-01-12', 'bank_transfer', null),
       -- Paid (probe scenario): 100 of 100
       (gen_random_uuid(), '${wsNonVat}', '${docPaidNoTotal}', '100.00', 'CZK', '2026-01-12', 'bank_transfer', null),
+      -- Legacy Final Invoice: 121 - 0.03 = 120.97 paid in full
+      (gen_random_uuid(), '${wsVat}', '${finalLegacyNoTotal}', '120.97', 'CZK', '2026-01-12', 'bank_transfer', null),
       -- Overpaid: 70 + 50 = 120 of 100, plus a soft-deleted payment of 999
       (gen_random_uuid(), '${wsNonVat}', '${docOverpaid}', '70.00', 'CZK', '2026-01-12', 'bank_transfer', null),
       (gen_random_uuid(), '${wsNonVat}', '${docOverpaid}', '50.00', 'CZK', '2026-01-13', 'bank_transfer', null),
@@ -447,13 +511,21 @@ describe("server persistence alignment migration (populated upgrade)", () => {
     ).rejects.toThrow(/deliveries_document_sequence/);
   });
 
-  test("backfills exact unrounded line amounts and VAT rate_percent", async () => {
+  test("backfills exact unrounded line amounts and VAT rate_percent including stored historical rates", async () => {
     const lines = await rows<{ id: string; rate_percent: string; amount: string }>(
       `select id, rate_percent::text as rate_percent, amount::text as amount
        from document_lines
-       where id in ($1, $2, $3, $4, $5, $6)
+       where id in ($1, $2, $3, $4, $5, $6, $7)
        order by id asc`,
-      [lineProbe, lineFractional, lineNegative, lineReduced, lineReverseCharge, lineDeduction],
+      [
+        lineProbe,
+        lineFractional,
+        lineNegative,
+        lineReduced,
+        lineReverseCharge,
+        lineDeduction,
+        lineHistorical15,
+      ],
     );
     expect(lines).toEqual([
       { id: lineProbe, rate_percent: "0", amount: "100" },
@@ -462,6 +534,8 @@ describe("server persistence alignment migration (populated upgrade)", () => {
       { id: lineReduced, rate_percent: "12", amount: "300" },
       { id: lineReverseCharge, rate_percent: "0", amount: "100" },
       { id: lineDeduction, rate_percent: "21", amount: "-100" },
+      // Preserves stored 2023 reduced rate (15%) instead of the 2024+ fallback (12%)
+      { id: lineHistorical15, rate_percent: "15", amount: "100" },
     ]);
   });
 
@@ -493,6 +567,13 @@ describe("server persistence alignment migration (populated upgrade)", () => {
     expect(byId.get(docPaidNoTotal)).toEqual({
       id: docPaidNoTotal,
       paid_amount: "100",
+      payments: 1,
+      settlement: "paid",
+    });
+    // Legacy Final Invoice with NULL gross & breakdown: supply 121 less 0.03 advance = 120.97 paid
+    expect(byId.get(finalLegacyNoTotal)).toEqual({
+      id: finalLegacyNoTotal,
+      paid_amount: "120.97",
       payments: 1,
       settlement: "paid",
     });
@@ -574,7 +655,52 @@ describe("server persistence alignment migration (populated upgrade)", () => {
     expect(byId.get(cnCorrects)?.corrected_number).toBe("20260003");
     expect(byId.get(cnPtdCredited)?.corrected_number).toBe("PTD20260002");
 
+    // Partial outside-scope credit note inherits tax_document and payment_rounding from its original
+    expect(byId.get(docIdentRounded)?.tax_document).toBe(true);
+    expect(byId.get(docIdentRounded)?.payment_rounding).toBe("whole_unit");
+    expect(byId.get(cnIdentPartialOutside)?.tax_document).toBe(true);
+    expect(byId.get(cnIdentPartialOutside)?.payment_rounding).toBe("whole_unit");
+    expect(byId.get(cnIdentPartialOutside)?.corrected_number).toBe("20260003");
+
     // 2026-01-15T23:30:00Z is 2026-01-16 00:30:00 in Europe/Prague (CET, UTC+1)
     expect(byId.get(docUnpaidWithRemoved)?.cancelled_on).toBe("2026-01-16");
+  });
+
+  test("persists valid VatBreakdown decoded by the production codec for every upgraded document", async () => {
+    const allDocs = await rows<{
+      id: string;
+      vat_breakdown: unknown;
+      total_net: string | null;
+      total_vat: string | null;
+      total_gross: string | null;
+    }>(
+      `select id, vat_breakdown, total_net::text, total_vat::text, total_gross::text from documents`,
+    );
+    expect(allDocs.length).toBeGreaterThan(20);
+
+    const decoded = new Map<string, ReturnType<typeof decodeVatBreakdown>>();
+    for (const doc of allDocs) {
+      expect(doc.vat_breakdown).not.toBeNull();
+      const parsed =
+        typeof doc.vat_breakdown === "string" ? JSON.parse(doc.vat_breakdown) : doc.vat_breakdown;
+      decoded.set(doc.id, decodeVatBreakdown(parsed));
+    }
+
+    const legacyPaid = decoded.get(docPaidNoTotal);
+    if (!legacyPaid) throw new Error("missing docPaidNoTotal");
+    expect(BigDecimal.format(legacyPaid.net.amount)).toBe("100");
+    expect(BigDecimal.format(legacyPaid.vat.amount)).toBe("0");
+    expect(BigDecimal.format(legacyPaid.gross.amount)).toBe("100");
+    expect(legacyPaid.buckets).toHaveLength(1);
+
+    const legacyFinal = decoded.get(finalLegacyNoTotal);
+    if (!legacyFinal) throw new Error("missing finalLegacyNoTotal");
+    expect(BigDecimal.format(legacyFinal.net.amount)).toBe("99.98");
+    expect(BigDecimal.format(legacyFinal.vat.amount)).toBe("20.99");
+    expect(BigDecimal.format(legacyFinal.gross.amount)).toBe("120.97");
+    expect(legacyFinal.buckets).toHaveLength(1);
+    const firstBucket = legacyFinal.buckets[0];
+    if (!firstBucket) throw new Error("missing finalLegacyNoTotal bucket");
+    expect(BigDecimal.format(firstBucket.gross)).toBe("120.97");
   });
 });

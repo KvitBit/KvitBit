@@ -106,8 +106,9 @@ SET "rate_percent" = COALESCE(
 FROM "documents" AS d
 WHERE d."workspace_id" = l."workspace_id"
 	AND d."id" = l."document_id";--> statement-breakpoint
--- Backfill Document payment projections (paid_amount, payments, settlement per core P1/P3/D6/D8)
--- and accounting metadata from live payments, lines, credit relations and stored totals.
+-- Backfill Document payment projections (paid_amount, payments, settlement per core P1/P3/D6/D8),
+-- missing legacy vat_breakdown / totals (with supply VAT separated from stored advance deductions
+-- per VatMath rule 9), and accounting metadata (including Credit Note inheritance from original).
 WITH live_payments AS (
 	SELECT
 		"workspace_id",
@@ -119,53 +120,204 @@ WITH live_payments AS (
 		AND "removed_at" IS NULL
 	GROUP BY "workspace_id", "document_id"
 ),
-line_gross_fallback AS (
+supply_buckets AS (
 	SELECT
-		b."workspace_id",
-		b."document_id",
-		trim_scale(sum(
-			CASE
-				WHEN b."prices_include_vat" THEN round(b.line_sum, 2)
-				ELSE round(b.line_sum, 2) + round(round(b.line_sum, 2) * b."rate_percent" / 100, 2)
-			END
-		)) AS computed_gross
+		s."workspace_id",
+		s."document_id",
+		s."vat" AS treatment,
+		s.rate_percent,
+		CASE
+			WHEN s."prices_include_vat" THEN
+				round(s.line_sum, 2) - CASE
+					WHEN s.rate_percent = 0 THEN 0::numeric
+					ELSE round(round(s.line_sum, 2) * s.rate_percent / (100 + s.rate_percent), 2)
+				END
+			ELSE round(s.line_sum, 2)
+		END AS base,
+		CASE
+			WHEN s."prices_include_vat" THEN
+				CASE
+					WHEN s.rate_percent = 0 THEN 0::numeric
+					ELSE round(round(s.line_sum, 2) * s.rate_percent / (100 + s.rate_percent), 2)
+				END
+			ELSE round(round(s.line_sum, 2) * s.rate_percent / 100, 2)
+		END AS vat,
+		CASE
+			WHEN s."prices_include_vat" THEN round(s.line_sum, 2)
+			ELSE round(s.line_sum, 2) + round(round(s.line_sum, 2) * s.rate_percent / 100, 2)
+		END AS gross
 	FROM (
 		SELECT
 			l."workspace_id",
 			l."document_id",
 			d."prices_include_vat",
 			l."vat",
-			l."rate_percent",
+			trim_scale(l."rate_percent") AS rate_percent,
 			sum(l."amount") AS line_sum
 		FROM "document_lines" AS l
 		JOIN "documents" AS d
 			ON d."workspace_id" = l."workspace_id"
 			AND d."id" = l."document_id"
-		GROUP BY l."workspace_id", l."document_id", d."prices_include_vat", l."vat", l."rate_percent"
-	) AS b
-	GROUP BY b."workspace_id", b."document_id"
+		WHERE l."deducts_document_id" IS NULL
+		GROUP BY l."workspace_id", l."document_id", d."prices_include_vat", l."vat", trim_scale(l."rate_percent")
+	) AS s
+),
+deduction_buckets AS (
+	SELECT
+		l."workspace_id",
+		l."document_id",
+		l."vat" AS treatment,
+		trim_scale(l."rate_percent") AS rate_percent,
+		sum(
+			CASE
+				WHEN d."prices_include_vat" THEN l."amount" - COALESCE(l."deducted_vat", 0::numeric)
+				ELSE l."amount"
+			END
+		) AS base,
+		sum(COALESCE(l."deducted_vat", 0::numeric)) AS vat,
+		sum(
+			CASE
+				WHEN d."prices_include_vat" THEN l."amount"
+				ELSE l."amount" + COALESCE(l."deducted_vat", 0::numeric)
+			END
+		) AS gross
+	FROM "document_lines" AS l
+	JOIN "documents" AS d
+		ON d."workspace_id" = l."workspace_id"
+		AND d."id" = l."document_id"
+	WHERE l."deducts_document_id" IS NOT NULL
+	GROUP BY l."workspace_id", l."document_id", l."vat", trim_scale(l."rate_percent")
+),
+netted_fallback_buckets AS (
+	SELECT
+		u."workspace_id",
+		u."document_id",
+		u.treatment,
+		u.rate_percent,
+		sum(u.base) AS base,
+		sum(u.vat) AS vat,
+		sum(u.gross) AS gross,
+		CASE
+			WHEN trim(d."currency") <> 'CZK'
+				AND d."fx_rate" IS NOT NULL
+				AND d."fx_quantity" IS NOT NULL
+			THEN round(sum(u.vat) * d."fx_rate" / d."fx_quantity", 2)
+			ELSE NULL
+		END AS vat_czk
+	FROM (
+		SELECT "workspace_id", "document_id", treatment, rate_percent, base, vat, gross
+		FROM supply_buckets
+		UNION ALL
+		SELECT "workspace_id", "document_id", treatment, rate_percent, base, vat, gross
+		FROM deduction_buckets
+	) AS u
+	JOIN "documents" AS d
+		ON d."workspace_id" = u."workspace_id"
+		AND d."id" = u."document_id"
+	GROUP BY
+		u."workspace_id",
+		u."document_id",
+		u.treatment,
+		u.rate_percent,
+		d."currency",
+		d."fx_rate",
+		d."fx_quantity"
+),
+reconstructed_breakdowns AS (
+	SELECT
+		d."workspace_id",
+		d."id" AS "document_id",
+		COALESCE(agg.net_amt, 0::numeric) AS net_amt,
+		COALESCE(agg.vat_amt, 0::numeric) AS vat_amt,
+		COALESCE(d."total_gross", COALESCE(agg.gross_amt, 0::numeric)) AS gross_amt,
+		COALESCE(d."total_gross", COALESCE(agg.gross_amt, 0::numeric)) - COALESCE(agg.gross_amt, 0::numeric) AS rounding_adj,
+		jsonb_build_object(
+			'buckets', COALESCE(agg.buckets_json, '[]'::jsonb),
+			'net', jsonb_build_object(
+				'amount', trim_scale(COALESCE(agg.net_amt, 0::numeric))::text,
+				'currency', trim(d."currency")
+			),
+			'vat', jsonb_build_object(
+				'amount', trim_scale(COALESCE(agg.vat_amt, 0::numeric))::text,
+				'currency', trim(d."currency")
+			),
+			'roundingAdjustment', jsonb_build_object(
+				'amount', trim_scale(
+					COALESCE(d."total_gross", COALESCE(agg.gross_amt, 0::numeric)) - COALESCE(agg.gross_amt, 0::numeric)
+				)::text,
+				'currency', trim(d."currency")
+			),
+			'gross', jsonb_build_object(
+				'amount', trim_scale(COALESCE(d."total_gross", COALESCE(agg.gross_amt, 0::numeric)))::text,
+				'currency', trim(d."currency")
+			),
+			'vatCzk', CASE
+				WHEN trim(d."currency") <> 'CZK'
+					AND d."fx_rate" IS NOT NULL
+					AND d."fx_quantity" IS NOT NULL
+				THEN jsonb_build_object(
+					'amount', trim_scale(COALESCE(agg.vat_czk_amt, 0::numeric))::text,
+					'currency', 'CZK'
+				)
+				ELSE NULL
+			END
+		) AS vat_breakdown
+	FROM "documents" AS d
+	LEFT JOIN (
+		SELECT
+			nb."workspace_id",
+			nb."document_id",
+			sum(nb.base) AS net_amt,
+			sum(nb.vat) AS vat_amt,
+			sum(nb.gross) AS gross_amt,
+			sum(COALESCE(nb.vat_czk, 0::numeric)) AS vat_czk_amt,
+			jsonb_agg(
+				jsonb_build_object(
+					'treatment', nb.treatment::text,
+					'ratePercent', trim_scale(nb.rate_percent)::text,
+					'base', trim_scale(nb.base)::text,
+					'vat', trim_scale(nb.vat)::text,
+					'gross', trim_scale(nb.gross)::text,
+					'vatCzk', CASE WHEN nb.vat_czk IS NULL THEN NULL ELSE trim_scale(nb.vat_czk)::text END
+				)
+				ORDER BY
+					array_position(
+						ARRAY['standard', 'reduced', 'exempt_intra_eu_goods', 'reverse_charge', 'outside_scope'],
+						nb.treatment::text
+					),
+					nb.rate_percent
+			) AS buckets_json
+		FROM netted_fallback_buckets AS nb
+		GROUP BY nb."workspace_id", nb."document_id"
+	) AS agg
+		ON agg."workspace_id" = d."workspace_id"
+		AND agg."document_id" = d."id"
+	WHERE d."vat_breakdown" IS NULL
 ),
 doc_totals AS (
 	SELECT
 		d."workspace_id",
 		d."id",
+		COALESCE(d."vat_breakdown", rb.vat_breakdown) AS effective_vat_breakdown,
+		COALESCE(d."total_net", rb.net_amt) AS effective_total_net,
+		COALESCE(d."total_vat", rb.vat_amt) AS effective_total_vat,
 		COALESCE(
 			d."total_gross",
 			CASE
 				WHEN d."vat_breakdown"->'gross'->>'amount' IS NOT NULL
 				THEN (d."vat_breakdown"->'gross'->>'amount')::numeric
 			END,
-			lg.computed_gross,
+			rb.gross_amt,
 			0::numeric
 		) AS gross,
 		d."total_net",
 		d."total_vat",
-		(jsonb_typeof(d."vat_breakdown"->'buckets') = 'array') AS has_buckets,
-		COALESCE((d."vat_breakdown"->'roundingAdjustment'->>'amount')::numeric, 0::numeric) AS rounding_adj
+		(jsonb_typeof(COALESCE(d."vat_breakdown", rb.vat_breakdown)->'buckets') = 'array') AS has_buckets,
+		COALESCE((COALESCE(d."vat_breakdown", rb.vat_breakdown)->'roundingAdjustment'->>'amount')::numeric, 0::numeric) AS rounding_adj
 	FROM "documents" AS d
-	LEFT JOIN line_gross_fallback AS lg
-		ON lg."workspace_id" = d."workspace_id"
-		AND lg."document_id" = d."id"
+	LEFT JOIN reconstructed_breakdowns AS rb
+		ON rb."workspace_id" = d."workspace_id"
+		AND rb."document_id" = d."id"
 ),
 credit_links AS (
 	SELECT DISTINCT
@@ -209,13 +361,13 @@ open_bucket_originals AS (
 			sum((b->>'gross')::numeric) AS sum_gross,
 			sum(COALESCE((b->>'vatCzk')::numeric, 0::numeric)) AS sum_vat_czk
 		FROM credit_group_docs AS cg
-		JOIN "documents" AS m
+		JOIN doc_totals AS m
 			ON m."workspace_id" = cg."workspace_id"
 			AND m."id" = cg.member_id
 		CROSS JOIN LATERAL jsonb_array_elements(
 			CASE
-				WHEN jsonb_typeof(m."vat_breakdown"->'buckets') = 'array'
-				THEN m."vat_breakdown"->'buckets'
+				WHEN jsonb_typeof(m.effective_vat_breakdown->'buckets') = 'array'
+				THEN m.effective_vat_breakdown->'buckets'
 				ELSE '[]'::jsonb
 			END
 		) AS b
@@ -249,7 +401,7 @@ open_deduction_originals AS (
 			) AS sum_gross,
 			sum(
 				CASE
-					WHEN m."currency" = 'CZK' THEN 0::numeric
+					WHEN trim(m."currency") = 'CZK' THEN 0::numeric
 					ELSE COALESCE(l."deducted_vat_czk", 0::numeric)
 				END
 			) AS sum_vat_czk
@@ -291,41 +443,10 @@ credit_summary AS (
 		AND ct."id" = cl.credit_note_id
 	GROUP BY cl."workspace_id", cl.original_id
 ),
-computed_docs AS (
+base_meta AS (
 	SELECT
 		d."workspace_id",
 		d."id",
-		COALESCE(lp.paid_amount, 0::numeric) AS paid_amount,
-		COALESCE(lp.payments, 0) AS payments,
-		(
-			CASE
-				WHEN d."kind" = 'credit_note' THEN 'unpaid'
-				WHEN d."status" = 'draft' THEN 'unpaid'
-				WHEN COALESCE(cs.credit_count, 0) > 0
-					AND od.original_id IS NULL
-					AND (
-						CASE
-							WHEN dt.has_buckets AND cs.all_credits_have_buckets THEN
-								ob.original_id IS NULL
-								AND (dt.rounding_adj + cs.credit_rounding_adj) = 0
-							ELSE
-								(dt.gross + cs.credit_gross) = 0
-								AND (dt."total_net" IS NULL OR (dt."total_net" + cs.credit_net) = 0)
-								AND (dt."total_vat" IS NULL OR (dt."total_vat" + cs.credit_vat) = 0)
-						END
-					)
-					THEN 'credited'
-				WHEN d."kind" = 'payment_tax_document' THEN 'paid'
-				WHEN COALESCE(lp.payments, 0) = 0
-					AND (dt.gross + COALESCE(cs.credit_gross, 0::numeric)) > 0
-					THEN 'unpaid'
-				WHEN COALESCE(lp.paid_amount, 0::numeric) < (dt.gross + COALESCE(cs.credit_gross, 0::numeric))
-					THEN 'partially_paid'
-				WHEN COALESCE(lp.paid_amount, 0::numeric) = (dt.gross + COALESCE(cs.credit_gross, 0::numeric))
-					THEN 'paid'
-				ELSE 'overpaid'
-			END
-		)::"document_settlement" AS settlement,
 		CASE
 			WHEN d."kind" = 'payment_tax_document' THEN true
 			WHEN d."kind" = 'proforma' THEN false
@@ -366,6 +487,58 @@ computed_docs AS (
 		CASE
 			WHEN dt.rounding_adj <> 0 THEN 'whole_unit'::"payment_rounding"
 			ELSE d."payment_rounding"
+		END AS payment_rounding
+	FROM "documents" AS d
+	JOIN doc_totals AS dt
+		ON dt."workspace_id" = d."workspace_id"
+		AND dt."id" = d."id"
+),
+computed_docs AS (
+	SELECT
+		d."workspace_id",
+		d."id",
+		dt.effective_vat_breakdown AS vat_breakdown,
+		dt.effective_total_net AS total_net,
+		dt.effective_total_vat AS total_vat,
+		COALESCE(d."total_gross", dt.gross) AS total_gross,
+		COALESCE(lp.paid_amount, 0::numeric) AS paid_amount,
+		COALESCE(lp.payments, 0) AS payments,
+		(
+			CASE
+				WHEN d."kind" = 'credit_note' THEN 'unpaid'
+				WHEN d."status" = 'draft' THEN 'unpaid'
+				WHEN COALESCE(cs.credit_count, 0) > 0
+					AND od.original_id IS NULL
+					AND (
+						CASE
+							WHEN dt.has_buckets AND cs.all_credits_have_buckets THEN
+								ob.original_id IS NULL
+								AND (dt.rounding_adj + cs.credit_rounding_adj) = 0
+							ELSE
+								(dt.gross + cs.credit_gross) = 0
+								AND (dt."total_net" IS NULL OR (dt."total_net" + cs.credit_net) = 0)
+								AND (dt."total_vat" IS NULL OR (dt."total_vat" + cs.credit_vat) = 0)
+						END
+					)
+					THEN 'credited'
+				WHEN d."kind" = 'payment_tax_document' THEN 'paid'
+				WHEN COALESCE(lp.payments, 0) = 0
+					AND (dt.gross + COALESCE(cs.credit_gross, 0::numeric)) > 0
+					THEN 'unpaid'
+				WHEN COALESCE(lp.paid_amount, 0::numeric) < (dt.gross + COALESCE(cs.credit_gross, 0::numeric))
+					THEN 'partially_paid'
+				WHEN COALESCE(lp.paid_amount, 0::numeric) = (dt.gross + COALESCE(cs.credit_gross, 0::numeric))
+					THEN 'paid'
+				ELSE 'overpaid'
+			END
+		)::"document_settlement" AS settlement,
+		CASE
+			WHEN d."kind" = 'credit_note' THEN COALESCE(orig_meta.tax_document, bm.tax_document)
+			ELSE bm.tax_document
+		END AS tax_document,
+		CASE
+			WHEN d."kind" = 'credit_note' THEN COALESCE(orig_meta.payment_rounding, bm.payment_rounding)
+			ELSE bm.payment_rounding
 		END AS payment_rounding,
 		CASE
 			WHEN d."fx_override" IS NULL
@@ -388,16 +561,7 @@ computed_docs AS (
 		END AS locked_at,
 		COALESCE(
 			d."corrected_number",
-			(
-				SELECT orig."number"
-				FROM credit_links AS cl2
-				JOIN "documents" AS orig
-					ON orig."workspace_id" = cl2."workspace_id"
-					AND orig."id" = cl2.original_id
-				WHERE cl2."workspace_id" = d."workspace_id"
-					AND cl2.credit_note_id = d."id"
-				LIMIT 1
-			)
+			orig_doc."number"
 		) AS corrected_number,
 		CASE
 			WHEN d."cancelled_on" IS NULL AND d."cancelled_at" IS NOT NULL
@@ -408,6 +572,9 @@ computed_docs AS (
 	JOIN doc_totals AS dt
 		ON dt."workspace_id" = d."workspace_id"
 		AND dt."id" = d."id"
+	JOIN base_meta AS bm
+		ON bm."workspace_id" = d."workspace_id"
+		AND bm."id" = d."id"
 	LEFT JOIN live_payments AS lp
 		ON lp."workspace_id" = d."workspace_id"
 		AND lp."document_id" = d."id"
@@ -420,9 +587,26 @@ computed_docs AS (
 	LEFT JOIN open_deduction_originals AS od
 		ON od."workspace_id" = d."workspace_id"
 		AND od.original_id = d."id"
+	LEFT JOIN LATERAL (
+		SELECT cl2.original_id
+		FROM credit_links AS cl2
+		WHERE cl2."workspace_id" = d."workspace_id"
+			AND cl2.credit_note_id = d."id"
+		LIMIT 1
+	) AS cn_orig ON true
+	LEFT JOIN "documents" AS orig_doc
+		ON orig_doc."workspace_id" = d."workspace_id"
+		AND orig_doc."id" = cn_orig.original_id
+	LEFT JOIN base_meta AS orig_meta
+		ON orig_meta."workspace_id" = d."workspace_id"
+		AND orig_meta."id" = cn_orig.original_id
 )
 UPDATE "documents" AS d
-SET "paid_amount" = c.paid_amount,
+SET "vat_breakdown" = c.vat_breakdown,
+	"total_net" = c.total_net,
+	"total_vat" = c.total_vat,
+	"total_gross" = c.total_gross,
+	"paid_amount" = c.paid_amount,
 	"payments" = c.payments,
 	"settlement" = c.settlement,
 	"tax_document" = c.tax_document,
