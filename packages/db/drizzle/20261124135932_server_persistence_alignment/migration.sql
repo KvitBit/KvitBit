@@ -294,31 +294,6 @@ reconstructed_breakdowns AS (
 		AND agg."document_id" = d."id"
 	WHERE d."vat_breakdown" IS NULL
 ),
-doc_totals AS (
-	SELECT
-		d."workspace_id",
-		d."id",
-		COALESCE(d."vat_breakdown", rb.vat_breakdown) AS effective_vat_breakdown,
-		COALESCE(d."total_net", rb.net_amt) AS effective_total_net,
-		COALESCE(d."total_vat", rb.vat_amt) AS effective_total_vat,
-		COALESCE(
-			d."total_gross",
-			CASE
-				WHEN d."vat_breakdown"->'gross'->>'amount' IS NOT NULL
-				THEN (d."vat_breakdown"->'gross'->>'amount')::numeric
-			END,
-			rb.gross_amt,
-			0::numeric
-		) AS gross,
-		d."total_net",
-		d."total_vat",
-		(jsonb_typeof(COALESCE(d."vat_breakdown", rb.vat_breakdown)->'buckets') = 'array') AS has_buckets,
-		COALESCE((COALESCE(d."vat_breakdown", rb.vat_breakdown)->'roundingAdjustment'->>'amount')::numeric, 0::numeric) AS rounding_adj
-	FROM "documents" AS d
-	LEFT JOIN reconstructed_breakdowns AS rb
-		ON rb."workspace_id" = d."workspace_id"
-		AND rb."document_id" = d."id"
-),
 credit_links AS (
 	SELECT DISTINCT
 		r."workspace_id",
@@ -340,6 +315,212 @@ credit_links AS (
 	WHERE r."relation" IN ('corrects', 'corrected_by')
 		AND cn."kind" = 'credit_note'
 		AND cn."status" = 'issued'
+),
+stage1_breakdowns AS (
+	SELECT
+		d."workspace_id",
+		d."id",
+		COALESCE(d."vat_breakdown", rb.vat_breakdown) AS vat_breakdown,
+		COALESCE((COALESCE(d."vat_breakdown", rb.vat_breakdown)->'roundingAdjustment'->>'amount')::numeric, 0::numeric) AS rounding_adj
+	FROM "documents" AS d
+	LEFT JOIN reconstructed_breakdowns AS rb
+		ON rb."workspace_id" = d."workspace_id"
+		AND rb."document_id" = d."id"
+),
+-- For a legacy closing credit note with null vat_breakdown, reconstruct its breakdown from the
+-- original document's remaining open buckets after earlier credit notes (matching credit.ts:283),
+-- so leftover rounding VAT cents stay in VAT rather than leaking into roundingAdjustment.
+closing_credit_prior_docs AS (
+	SELECT
+		cl."workspace_id",
+		cl.credit_note_id,
+		cl.original_id,
+		cl.original_id AS member_id
+	FROM credit_links AS cl
+	JOIN "documents" AS cn
+		ON cn."workspace_id" = cl."workspace_id"
+		AND cn."id" = cl.credit_note_id
+	WHERE cn."vat_breakdown" IS NULL
+	UNION ALL
+	SELECT
+		cl."workspace_id",
+		cl.credit_note_id,
+		cl.original_id,
+		prior_cl.credit_note_id AS member_id
+	FROM credit_links AS cl
+	JOIN "documents" AS cn
+		ON cn."workspace_id" = cl."workspace_id"
+		AND cn."id" = cl.credit_note_id
+	JOIN credit_links AS prior_cl
+		ON prior_cl."workspace_id" = cl."workspace_id"
+		AND prior_cl.original_id = cl.original_id
+		AND prior_cl.credit_note_id <> cl.credit_note_id
+	JOIN "documents" AS prior_cn
+		ON prior_cn."workspace_id" = prior_cl."workspace_id"
+		AND prior_cn."id" = prior_cl.credit_note_id
+	WHERE cn."vat_breakdown" IS NULL
+		AND (
+			COALESCE(prior_cn."issued_on", '0001-01-01'::date),
+			COALESCE(prior_cn."issued_at", prior_cn."created_at"),
+			prior_cn."created_at",
+			prior_cn."id"
+		) < (
+			COALESCE(cn."issued_on", '0001-01-01'::date),
+			COALESCE(cn."issued_at", cn."created_at"),
+			cn."created_at",
+			cn."id"
+		)
+),
+closing_credit_remaining_buckets AS (
+	SELECT
+		p."workspace_id",
+		p.credit_note_id,
+		b->>'treatment' AS treatment,
+		trim_scale((b->>'ratePercent')::numeric) AS rate_percent,
+		sum((b->>'base')::numeric) AS rem_base,
+		sum((b->>'vat')::numeric) AS rem_vat,
+		sum((b->>'gross')::numeric) AS rem_gross,
+		CASE
+			WHEN bool_or(b->>'vatCzk' IS NOT NULL)
+			THEN sum(COALESCE((b->>'vatCzk')::numeric, 0::numeric))
+			ELSE NULL
+		END AS rem_vat_czk
+	FROM closing_credit_prior_docs AS p
+	JOIN stage1_breakdowns AS sb
+		ON sb."workspace_id" = p."workspace_id"
+		AND sb."id" = p.member_id
+	CROSS JOIN LATERAL jsonb_array_elements(
+		CASE
+			WHEN jsonb_typeof(sb.vat_breakdown->'buckets') = 'array'
+			THEN sb.vat_breakdown->'buckets'
+			ELSE '[]'::jsonb
+		END
+	) AS b
+	GROUP BY p."workspace_id", p.credit_note_id, b->>'treatment', trim_scale((b->>'ratePercent')::numeric)
+	HAVING sum((b->>'base')::numeric) <> 0
+		OR sum((b->>'vat')::numeric) <> 0
+		OR sum((b->>'gross')::numeric) <> 0
+		OR (
+			bool_or(b->>'vatCzk' IS NOT NULL)
+			AND sum(COALESCE((b->>'vatCzk')::numeric, 0::numeric)) <> 0
+		)
+),
+closing_credit_remaining_rounding AS (
+	SELECT
+		p."workspace_id",
+		p.credit_note_id,
+		sum(sb.rounding_adj) AS rem_rounding
+	FROM closing_credit_prior_docs AS p
+	JOIN stage1_breakdowns AS sb
+		ON sb."workspace_id" = p."workspace_id"
+		AND sb."id" = p.member_id
+	GROUP BY p."workspace_id", p.credit_note_id
+),
+closing_credit_breakdowns AS (
+	SELECT
+		cn."workspace_id",
+		cn."id" AS "document_id",
+		-COALESCE(agg.rem_net, 0::numeric) AS net_amt,
+		-COALESCE(agg.rem_vat, 0::numeric) AS vat_amt,
+		-(COALESCE(agg.rem_gross, 0::numeric) + COALESCE(rr.rem_rounding, 0::numeric)) AS gross_amt,
+		jsonb_build_object(
+			'buckets', COALESCE(agg.buckets_json, '[]'::jsonb),
+			'net', jsonb_build_object(
+				'amount', trim_scale(-COALESCE(agg.rem_net, 0::numeric))::text,
+				'currency', trim(cn."currency")
+			),
+			'vat', jsonb_build_object(
+				'amount', trim_scale(-COALESCE(agg.rem_vat, 0::numeric))::text,
+				'currency', trim(cn."currency")
+			),
+			'roundingAdjustment', jsonb_build_object(
+				'amount', trim_scale(-COALESCE(rr.rem_rounding, 0::numeric))::text,
+				'currency', trim(cn."currency")
+			),
+			'gross', jsonb_build_object(
+				'amount', trim_scale(-(COALESCE(agg.rem_gross, 0::numeric) + COALESCE(rr.rem_rounding, 0::numeric)))::text,
+				'currency', trim(cn."currency")
+			),
+			'vatCzk', CASE
+				WHEN COALESCE(agg.has_vat_czk, false)
+				THEN jsonb_build_object(
+					'amount', trim_scale(-COALESCE(agg.rem_vat_czk, 0::numeric))::text,
+					'currency', 'CZK'
+				)
+				ELSE NULL
+			END
+		) AS vat_breakdown
+	FROM closing_credit_remaining_rounding AS rr
+	JOIN "documents" AS cn
+		ON cn."workspace_id" = rr."workspace_id"
+		AND cn."id" = rr.credit_note_id
+	LEFT JOIN (
+		SELECT
+			rb."workspace_id",
+			rb.credit_note_id,
+			sum(rb.rem_base) AS rem_net,
+			sum(rb.rem_vat) AS rem_vat,
+			sum(rb.rem_gross) AS rem_gross,
+			bool_or(rb.rem_vat_czk IS NOT NULL) AS has_vat_czk,
+			sum(COALESCE(rb.rem_vat_czk, 0::numeric)) AS rem_vat_czk,
+			jsonb_agg(
+				jsonb_build_object(
+					'treatment', rb.treatment,
+					'ratePercent', trim_scale(rb.rate_percent)::text,
+					'base', trim_scale(-rb.rem_base)::text,
+					'vat', trim_scale(-rb.rem_vat)::text,
+					'gross', trim_scale(-rb.rem_gross)::text,
+					'vatCzk', CASE WHEN rb.rem_vat_czk IS NULL THEN NULL ELSE trim_scale(-rb.rem_vat_czk)::text END
+				)
+				ORDER BY
+					array_position(
+						ARRAY['standard', 'reduced', 'exempt_intra_eu_goods', 'reverse_charge', 'outside_scope'],
+						rb.treatment
+					),
+					rb.rate_percent
+			) AS buckets_json
+		FROM closing_credit_remaining_buckets AS rb
+		GROUP BY rb."workspace_id", rb.credit_note_id
+	) AS agg
+		ON agg."workspace_id" = rr."workspace_id"
+		AND agg.credit_note_id = rr.credit_note_id
+	WHERE cn."vat_breakdown" IS NULL
+		AND cn."total_gross" IS NOT NULL
+		AND cn."total_gross" = -(COALESCE(agg.rem_gross, 0::numeric) + COALESCE(rr.rem_rounding, 0::numeric))
+		AND (cn."total_net" IS NULL OR cn."total_net" = -COALESCE(agg.rem_net, 0::numeric))
+		AND (cn."total_vat" IS NULL OR cn."total_vat" = -COALESCE(agg.rem_vat, 0::numeric))
+),
+doc_totals AS (
+	SELECT
+		d."workspace_id",
+		d."id",
+		COALESCE(d."vat_breakdown", ccb.vat_breakdown, rb.vat_breakdown) AS effective_vat_breakdown,
+		COALESCE(d."total_net", ccb.net_amt, rb.net_amt) AS effective_total_net,
+		COALESCE(d."total_vat", ccb.vat_amt, rb.vat_amt) AS effective_total_vat,
+		COALESCE(
+			d."total_gross",
+			CASE
+				WHEN d."vat_breakdown"->'gross'->>'amount' IS NOT NULL
+				THEN (d."vat_breakdown"->'gross'->>'amount')::numeric
+			END,
+			ccb.gross_amt,
+			rb.gross_amt,
+			0::numeric
+		) AS gross,
+		d."total_net",
+		d."total_vat",
+		(jsonb_typeof(COALESCE(d."vat_breakdown", ccb.vat_breakdown, rb.vat_breakdown)->'buckets') = 'array') AS has_buckets,
+		COALESCE(
+			(COALESCE(d."vat_breakdown", ccb.vat_breakdown, rb.vat_breakdown)->'roundingAdjustment'->>'amount')::numeric,
+			0::numeric
+		) AS rounding_adj
+	FROM "documents" AS d
+	LEFT JOIN reconstructed_breakdowns AS rb
+		ON rb."workspace_id" = d."workspace_id"
+		AND rb."document_id" = d."id"
+	LEFT JOIN closing_credit_breakdowns AS ccb
+		ON ccb."workspace_id" = d."workspace_id"
+		AND ccb."document_id" = d."id"
 ),
 credit_group_docs AS (
 	SELECT DISTINCT "workspace_id", original_id, original_id AS member_id
