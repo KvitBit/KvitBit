@@ -1,13 +1,27 @@
 import { describe, expect, mock, test } from "bun:test";
 import type { ReactElement } from "react";
 import { SessionProvider } from "../../session/session-provider";
+import { clientRoot } from "../../testing/client-root";
 import { allText, findAll, hostTree } from "../../testing/element-tree";
 import { expoRouterStandIn } from "../../testing/expo-router-stand-in";
 import { recordedOverlay, TestProviders } from "../../testing/providers";
 import type { AuthClient } from "./auth-port";
 
-mock.module("expo-router", () => expoRouterStandIn());
+const replacements: string[] = [];
+mock.module("expo-router", () => {
+  const standIn = expoRouterStandIn();
+  return {
+    ...standIn,
+    router: {
+      ...standIn.router,
+      replace: (href: string) => {
+        replacements.push(href);
+      },
+    },
+  };
+});
 
+const { AuthLinkScreen } = await import("./auth-link-screen");
 const { BotProofWidget } = await import("./bot-proof-widget");
 const { CheckEmailScreen } = await import("./check-email-screen");
 const { ErrorScreen, parseErrorKind } = await import("./error-screen");
@@ -165,5 +179,27 @@ describe("auth screens", () => {
 
     const offlineTree = hostTree(<ErrorScreen kind="offline" />, withProviders());
     expect(allText(offlineTree)).toContain("You are offline");
+  });
+});
+
+describe("verification link continuation", () => {
+  const root = clientRoot({ keepFetch: true });
+
+  test("a verified link without a session offers sign-in with the original destination", async () => {
+    replacements.length = 0;
+    const auth = fakeAuthClient({
+      verifyLink: async () => ({ _tag: "Ok", value: null }),
+    });
+    await root.render(
+      withProviders()(
+        <AuthLinkScreen
+          kind="verify"
+          token="test-verification"
+          returnTo="/invite/inv1"
+          authClient={auth}
+        />,
+      ),
+    );
+    expect(replacements).toEqual(["/sign-in?verified=1&returnTo=%2Finvite%2Finv1"]);
   });
 });
