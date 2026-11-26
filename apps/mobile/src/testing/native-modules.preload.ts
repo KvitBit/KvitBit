@@ -197,6 +197,8 @@ mock.module("expo-crypto", () => ({
   CryptoDigestAlgorithm: { SHA256: "SHA-256" },
   randomUUID,
   getRandomBytes: (count: number) => new Uint8Array(randomBytes(count)),
+  digestStringAsync: async (_algorithm: string, value: string) =>
+    createHash("sha256").update(value).digest("hex"),
   digest: async (_algorithm: string, data: Uint8Array) => {
     const digest = createHash("sha256").update(data).digest();
     return digest.buffer.slice(digest.byteOffset, digest.byteOffset + digest.byteLength);
@@ -255,6 +257,9 @@ mock.module("@react-native-async-storage/async-storage", () => ({
     getItem: async (key: string) => asyncStorageItems.get(key) ?? null,
     setItem: async (key: string, value: string) => {
       asyncStorageItems.set(key, value);
+    },
+    removeItem: async (key: string) => {
+      asyncStorageItems.delete(key);
     },
     multiRemove: async (keys: readonly string[]) => {
       for (const key of keys) asyncStorageItems.delete(key);
