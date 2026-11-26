@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { createHash, randomBytes } from "node:crypto";
 import { BunHttpServer } from "@effect/platform-bun";
-import { SESSION_COOKIE } from "@kvitbit/api-contract";
+import { READ_SCOPES, SESSION_COOKIE } from "@kvitbit/api-contract";
 import { UserId } from "@kvitbit/domain/contract";
 import { Effect, Layer } from "effect";
 import { HttpRouter } from "effect/http";
@@ -21,7 +21,7 @@ const clientMetadata = {
   token_endpoint_auth_method: "none",
   grant_types: ["authorization_code", "refresh_token"],
   response_types: ["code"],
-  scope: "kvitbit:write offline_access",
+  scope: "kvitbit:read kvitbit:write offline_access",
 };
 
 test.each(["DCR", "CIMD"])(
@@ -97,14 +97,14 @@ test.each(["DCR", "CIMD"])(
         clientId = ((await registered.json()) as { client_id: string }).client_id;
       }
 
-      const startConsent = async () => {
+      const startConsent = async (scope = "kvitbit:write offline_access") => {
         const verifier = randomBytes(32).toString("base64url");
         const state = randomBytes(12).toString("base64url");
         const query = new URLSearchParams({
           response_type: "code",
           client_id: clientId,
           redirect_uri: redirectUri,
-          scope: "kvitbit:write offline_access",
+          scope,
           resource,
           state,
           code_challenge: createHash("sha256").update(verifier).digest("base64url"),
@@ -132,7 +132,8 @@ test.each(["DCR", "CIMD"])(
           location = new URL(url, ORIGIN);
         }
         expect(location.pathname).toBe("/oauth/consent");
-        const consentId = location.searchParams.get("consent_id") ?? location.search.slice(1);
+        const consentId = location.searchParams.get("consent_id");
+        if (consentId === null) throw new Error("The consent redirect must include consent_id");
         const path = `/api/v1/oauth/consents/${encodeURIComponent(consentId)}`;
         return { path, state, verifier, cookie };
       };
@@ -226,8 +227,36 @@ test.each(["DCR", "CIMD"])(
         expect(JSON.parse(result.contents[0].text)).toMatchObject({ name });
       };
 
-      const denied = await startConsent();
+      const denied = await startConsent("kvitbit:read offline_access");
       const session = { cookie: denied.cookie };
+      const readOnly = await harness.fetch(denied.path, { headers: session });
+      expect(readOnly.status).toBe(200);
+      expect(await readOnly.json()).toMatchObject({
+        client: {
+          id: clientId,
+          name: clientMetadata.client_name,
+          redirectHost: new URL(redirectUri).host,
+        },
+        requestedAccess: "read",
+        requestedScopes: READ_SCOPES,
+        workspaces: expect.arrayContaining([
+          expect.objectContaining({
+            id: first.workspaceId,
+            role: "owner",
+            offerableScopes: READ_SCOPES,
+          }),
+        ]),
+      });
+      const widened = await postJson(
+        denied.path,
+        {
+          _tag: "Approve",
+          workspace: first.workspaceId,
+          grant: { access: "read_write" },
+        },
+        session.cookie,
+      );
+      expect(widened.status).toBe(403);
       const denial = await postJson(denied.path, { _tag: "Deny" }, session.cookie);
       expect(denial.status).toBe(200);
       const deniedCallback = new URL(((await denial.json()) as { redirectTo: string }).redirectTo);
@@ -240,13 +269,19 @@ test.each(["DCR", "CIMD"])(
       await expectWorkspace(firstTokens.access_token, "OAuth Alpha");
       const outsideScope = await readWorkspace(firstTokens.access_token, "kvitbit://price-list");
       expect(await outsideScope.json()).toHaveProperty("error");
-      const rotated = await tokens(await refresh(firstTokens.refresh_token));
+      const [rotation, parallelReplay] = await Promise.all([
+        refresh(firstTokens.refresh_token),
+        refresh(firstTokens.refresh_token),
+      ]);
+      const rotated = await tokens(rotation);
+      expect(await tokens(parallelReplay)).toEqual(rotated);
       await expectWorkspace(rotated.access_token, "OAuth Alpha");
       expect(await tokens(await refresh(firstTokens.refresh_token))).toEqual(rotated);
       const secondTokens = await tokens(await exchange(await consent(second.workspaceId)));
       await expectWorkspace(secondTokens.access_token, "OAuth Beta");
 
       const pendingCode = await consent(first.workspaceId);
+      const pendingUntilReconnected = await consent(first.workspaceId);
       const appsPath = `/api/v1/workspaces/${first.workspaceId}/connected-apps`;
       const listed = await harness.fetch(appsPath, { headers: session });
       expect(listed.status).toBe(200);
@@ -273,6 +308,10 @@ test.each(["DCR", "CIMD"])(
       );
       expect((await readWorkspace(rotated.access_token)).status).toBe(401);
       expect((await refresh(rotated.refresh_token)).status).toBe(400);
+
+      const staleAfterReconnect = await exchange(pendingUntilReconnected);
+      expect(staleAfterReconnect.status).toBe(400);
+      expect(await staleAfterReconnect.json()).toMatchObject({ error: "invalid_grant" });
 
       const secondRotated = await tokens(await refresh(secondTokens.refresh_token));
       await harness.run(

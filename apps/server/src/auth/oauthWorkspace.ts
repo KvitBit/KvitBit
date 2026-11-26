@@ -67,6 +67,49 @@ const tokenBinding = Schema.is(
   }),
 );
 
+const oauthRedirect = Schema.is(
+  Schema.Struct({ redirect: Schema.Literal(true), url: Schema.String }),
+);
+
+const consentRedirect = (page: URL, url: string) => {
+  if (!URL.canParse(url, page.href)) return undefined;
+  const redirect = new URL(url, page);
+  if (
+    redirect.origin !== page.origin ||
+    redirect.pathname !== page.pathname ||
+    !redirect.searchParams.has("sig")
+  ) {
+    return undefined;
+  }
+  const signedQuery = redirect.search.slice(1);
+  const query = new URLSearchParams({ consent_id: Buffer.from(signedQuery).toString("base64url") });
+  return `${page.pathname}?${query}`;
+};
+
+const exposeConsentId = async (response: Response, page: URL) => {
+  const location = response.headers.get("location");
+  if (location !== null) {
+    const redirect = consentRedirect(page, location);
+    if (redirect === undefined) return response;
+    const headers = new Headers(response.headers);
+    headers.set("location", redirect);
+    return new Response(response.body, { status: response.status, headers });
+  }
+
+  if (!response.ok || !response.headers.get("content-type")?.includes("application/json"))
+    return response;
+  const body: unknown = await response
+    .clone()
+    .json()
+    .catch(() => undefined);
+  if (!oauthRedirect(body)) return response;
+  const redirect = consentRedirect(page, body.url);
+  if (redirect === undefined) return response;
+  const headers = new Headers(response.headers);
+  headers.delete("content-length");
+  return Response.json({ ...body, url: redirect }, { status: response.status, headers });
+};
+
 const scopeAliasesForGrant = <T>(client: T): T => {
   if (!decisionContext.getStore()?.accept && tokenContext.getStore() === undefined) return client;
   if (
@@ -185,15 +228,21 @@ export const makeWorkspaceAuth = (sql: SqlClient.SqlClient) => (config: AuthConf
       return {
         ...adapter,
         findOne: async <T>(input: Parameters<typeof adapter.findOne>[0]) => {
+          const tokenRequest = tokenContext.getStore();
+          const refreshDigest =
+            tokenRequest !== undefined && input.model === "oauthRefreshToken"
+              ? input.where.find(({ field }) => field === "token")?.value
+              : undefined;
+          if (typeof refreshDigest === "string") {
+            // The second request must see the completed rotation and its replay response.
+            await runDrizzleEffect(sql`
+              select 1 from pg_advisory_xact_lock(hashtextextended(${`oauth-refresh:${refreshDigest}`}, 0))
+            `);
+          }
           const row = await adapter.findOne<T>(input);
           if (input.model === "oauthClient") return scopeAliasesForGrant(row);
 
-          const tokenRequest = tokenContext.getStore();
-          if (
-            tokenRequest !== undefined &&
-            input.model === "oauthRefreshToken" &&
-            input.where.some(({ field }) => field === "token")
-          ) {
+          if (tokenRequest !== undefined && typeof refreshDigest === "string") {
             if (!tokenBinding(row) || !(await runDrizzleEffect(activeGrant(row)))) return null;
             tokenRequest.grantId = row.referenceId;
           }
@@ -242,11 +291,39 @@ export const makeWorkspaceAuth = (sql: SqlClient.SqlClient) => (config: AuthConf
     },
   });
 
+  const consentPage = new URL(config.oauthConsentPage, config.baseURL);
   return {
     ...auth,
-    handler: (request: Request) =>
-      new URL(request.url).pathname === "/api/auth/oauth2/token"
-        ? tokenContext.run({}, () => auth.handler(request))
-        : auth.handler(request),
+    handler: async (request: Request) => {
+      if (request.method !== "POST" || new URL(request.url).pathname !== "/api/auth/oauth2/token") {
+        return exposeConsentId(await auth.handler(request), consentPage);
+      }
+      return runDrizzleEffect(
+        sql
+          .withTransaction(
+            withDrizzleSqlContext(() => tokenContext.run({}, () => auth.handler(request))).pipe(
+              // Provider 4xx responses can intentionally revoke a token family.
+              Effect.flatMap((response) =>
+                response.status >= 500 ? Effect.fail(response) : Effect.succeed(response),
+              ),
+            ),
+          )
+          .pipe(
+            Effect.catch((error) =>
+              Effect.succeed(
+                error instanceof Response
+                  ? error
+                  : Response.json(
+                      { error: "server_error" },
+                      {
+                        status: 500,
+                        headers: { "cache-control": "no-store", pragma: "no-cache" },
+                      },
+                    ),
+              ),
+            ),
+          ),
+      );
+    },
   };
 };
