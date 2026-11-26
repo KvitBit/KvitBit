@@ -23,6 +23,7 @@ export const PgDatabaseLive: Layer.Layer<
   url: Config.Redacted("DATABASE_URL"),
   maxConnections: Config.Int("KVITBIT_DB_POOL_MAX").pipe(Config.withDefault(DEFAULT_POOL_MAX)),
   applicationName: Config.succeed("kvitbit-server"),
+  prepare: Config.succeed(false),
 });
 
 /**
@@ -44,6 +45,7 @@ export const PgWorkerDatabaseLive: Layer.Layer<
       url,
       maxConnections,
       applicationName: "kvitbit-worker",
+      prepare: Option.isSome(unpooled),
     });
   }),
 );

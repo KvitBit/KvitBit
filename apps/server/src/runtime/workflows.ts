@@ -113,21 +113,17 @@ export const DEFAULT_DELIVERY_RETRY_SCHEDULE = Schedule.exponential(Duration.sec
 
 // 3. CSV + ZIP helpers for DataExport ---------------------------------------------------------
 
-const csvEscape = (value: unknown): string => {
+type CsvRow = Readonly<Record<string, string | null>>;
+
+const csvEscape = (value: string | null | undefined): string => {
   if (value === null || value === undefined) return "";
-  const str =
-    value instanceof Date
-      ? value.toISOString()
-      : typeof value === "object"
-        ? JSON.stringify(value)
-        : String(value);
-  if (/[",\r\n]/.test(str)) {
-    return `"${str.replace(/"/g, '""')}"`;
+  if (/[",\r\n]/.test(value)) {
+    return `"${value.replace(/"/g, '""')}"`;
   }
-  return str;
+  return value;
 };
 
-const rowsToCsv = (rows: ReadonlyArray<Record<string, unknown>>): Uint8Array => {
+const rowsToCsv = (rows: ReadonlyArray<CsvRow>): Uint8Array => {
   const encoder = new TextEncoder();
   const first = rows[0];
   if (first === undefined) return new Uint8Array(0);
@@ -293,11 +289,15 @@ export const makeWorkflowHandlersLayer = (options: WorkflowHandlerOptions = {}) 
 
           // Full workspace tables as CSVs
           for (const spec of EXPORT_TABLES) {
-            const rows = yield* sql.unsafe<Record<string, unknown>>(
-              `SELECT * FROM ${spec.table} WHERE ${spec.filterCol} = $1`,
+            // Text at the PostgreSQL boundary keeps decimals exact and avoids unregistered enum array types.
+            const rows = yield* sql.unsafe<{ readonly data: CsvRow }>(
+              `SELECT (SELECT jsonb_object_agg(key, value) FROM jsonb_each_text(to_jsonb(source_row))) AS data
+               FROM ${spec.table} AS source_row
+               WHERE ${spec.filterCol} = $1
+               ORDER BY data`,
               [workspaceId],
             );
-            entries.push({ name: spec.file, bytes: rowsToCsv(rows) });
+            entries.push({ name: spec.file, bytes: rowsToCsv(rows.map(({ data }) => data)) });
           }
 
           // Expense attachments from BlobStorage

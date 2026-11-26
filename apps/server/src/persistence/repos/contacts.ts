@@ -53,7 +53,7 @@ const spec: TableSpec<ContactRow> = {
     "id",
     "workspace_id",
     "revision",
-    "roles",
+    "roles::text[] as roles",
     "name",
     "ico",
     "dic",
