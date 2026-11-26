@@ -1,3 +1,4 @@
+import { Stage } from "alchemy/Stage";
 import type * as State from "alchemy/State";
 import * as Data from "effect/Data";
 import * as Effect from "effect/Effect";
@@ -12,6 +13,15 @@ import { declareNetworkAndRunners } from "./resources/network";
 import { declareServerService } from "./resources/server";
 
 export const KVITBIT_STACK_NAME = "Kvitbit";
+
+export class StackStageMismatchError extends Data.TaggedError("StackStageMismatchError")<{
+  readonly alchemyStage: string;
+  readonly configStage: KvitbitStackConfig["stage"];
+}> {
+  override get message() {
+    return `Alchemy stage '${this.alchemyStage}' must match KVITBIT_STAGE '${this.configStage}'.`;
+  }
+}
 
 export class BootstrapPopulatedStateError extends Data.TaggedError("BootstrapPopulatedStateError")<{
   readonly stackName: string;
@@ -104,20 +114,28 @@ export const declareKvitbitStack = <R = never>(
   },
 ) =>
   Effect.gen(function* () {
+    const stage = yield* Stage;
+    if (stage !== config.stage) {
+      return yield* new StackStageMismatchError({
+        alchemyStage: stage,
+        configStage: config.stage,
+      });
+    }
+
     const stackName = options?.stackName ?? KVITBIT_STACK_NAME;
 
     if (config.bootstrapFoundation) {
       if (options?.inspectState === undefined) {
         return yield* new BootstrapPopulatedStateError({
           stackName,
-          stage: config.stage,
+          stage,
           unexpectedResources: ["<state-inspection-unavailable>"],
         });
       }
       const stateService = yield* options.inspectState;
       yield* assertBootstrapSafeState({
         stackName,
-        stage: config.stage,
+        stage,
         allowedFoundationIds: foundationResourceIds(config),
         state: stateService,
       });
