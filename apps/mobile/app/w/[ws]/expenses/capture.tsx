@@ -4,7 +4,13 @@ import { ExpenseCaptureScreen } from "../../../../src/features/expenses/expense-
 import { param } from "../../../../src/navigation/routes";
 
 export default function Route() {
-  const params = useLocalSearchParams<{ expenseId?: string }>();
+  const params = useLocalSearchParams<{ expenseId?: string; captureId?: string }>();
   const targetExpenseId = param(params.expenseId) as ExpenseId | undefined;
-  return <ExpenseCaptureScreen {...(targetExpenseId !== undefined ? { targetExpenseId } : {})} />;
+  const captureId = param(params.captureId);
+  return (
+    <ExpenseCaptureScreen
+      {...(targetExpenseId === undefined ? {} : { targetExpenseId })}
+      {...(captureId === undefined ? {} : { captureId })}
+    />
+  );
 }

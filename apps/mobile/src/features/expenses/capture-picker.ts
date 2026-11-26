@@ -2,11 +2,11 @@
  * Camera, gallery and document pickers for expense receipt capture.
  * Isolated behind a narrow interface so capture and detail screens can be tested without native bridges.
  */
-import * as Crypto from "expo-crypto";
 import * as DocumentPicker from "expo-document-picker";
 import * as ImagePicker from "expo-image-picker";
 import type { LocalFile } from "../../platform/transfer";
-import { ALLOWED_ATTACHMENT_TYPES } from "./model";
+import { ALLOWED_ATTACHMENT_TYPES, ATTACHMENT_MAX_BYTES, validateAttachmentFile } from "./model";
+import { InvalidReceipt, readReceipt } from "./receipt-file";
 
 export type PickerOutcome =
   | { readonly _tag: "Picked"; readonly files: ReadonlyArray<LocalFile> }
@@ -19,14 +19,6 @@ export interface ReceiptPicker {
   readonly pickFromGallery: () => Promise<PickerOutcome>;
   readonly pickDocument: () => Promise<PickerOutcome>;
 }
-
-const hashSeed = async (seed: string): Promise<string> => {
-  try {
-    return await Crypto.digestStringAsync(Crypto.CryptoDigestAlgorithm.SHA256, seed);
-  } catch {
-    return Crypto.randomUUID().replace(/-/g, "").repeat(2);
-  }
-};
 
 const mimeFromName = (name: string, fallback: string): string => {
   const lower = name.toLowerCase();
@@ -53,8 +45,17 @@ const assetToLocalFile = async (
   const name = asset.fileName ?? asset.name ?? fallbackName;
   const contentType = asset.mimeType ?? mimeFromName(name, fallbackMime);
   const size = asset.fileSize ?? asset.size ?? 0;
-  const sha256 = await hashSeed(`${asset.uri}:${name}:${size}`);
-  return { ref: asset.uri, name, contentType, size, sha256 };
+  const source = { ref: asset.uri, name, contentType, size };
+  // Leave rejected metadata for the caller to present alongside any accepted files.
+  if (validateAttachmentFile(source) !== null) return { ...source, sha256: "" };
+  try {
+    return (await readReceipt(source)).file;
+  } catch (error) {
+    if (error instanceof InvalidReceipt && error.issue === "too_large") {
+      return { ...source, size: ATTACHMENT_MAX_BYTES + 1, sha256: "" };
+    }
+    throw error;
+  }
 };
 
 export const defaultReceiptPicker: ReceiptPicker = {
