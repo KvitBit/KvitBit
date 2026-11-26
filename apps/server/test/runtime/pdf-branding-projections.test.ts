@@ -10,7 +10,15 @@
 import { describe, expect, test } from "bun:test";
 import { PdfEngine } from "@kvitbit/adapters/pdf";
 import { ALL_SCOPES } from "@kvitbit/api-contract";
-import { CoreModulesLive, DocumentRenderer } from "@kvitbit/core";
+import {
+  CoreModulesLive,
+  CoreStore,
+  DeliveriesRepo,
+  DocumentRenderer,
+  DocumentsRepo,
+  StoreUnavailable,
+  WorkspacesRepo,
+} from "@kvitbit/core";
 import {
   CaptureEmailSender,
   CaptureInvitationDelivery,
@@ -47,6 +55,7 @@ import {
 import { type BlobKey, BlobStorage } from "@kvitbit/domain/ports";
 import { BigDecimal, Effect, Layer, Stream } from "effect";
 import { TestClock } from "effect/testing";
+import { PersistenceLive, PgliteTestDatabase } from "../../src/persistence";
 import {
   documentPdfCacheKey,
   resolveVariableSymbol,
@@ -971,5 +980,429 @@ describe("Phase 3A Round 1 fixes 6–8: PDF, branding, and document/share read p
       await http.dispose();
       await mcp.dispose();
     }
+  });
+
+  test("Round 3 SQL & failure-path verification: queued delivery snapshot (balance + template + fields), draft replay, StoreUnavailable propagation, EUR PDF, and R1a workspace-read order", async () => {
+    const capturedHtml: Array<string> = [];
+    const userId = UserId.make("01950000-0000-7000-8000-000000000099");
+    const { SqlClient } = await import("effect/sql");
+    const { FixtureRates, MemoryBlobStorage } = await import("@kvitbit/core/testing");
+    const database = PgliteTestDatabase.pipe(Layer.orDie);
+    const persistence = Layer.merge(
+      PersistenceLive,
+      Layer.effectDiscard(
+        Effect.gen(function* () {
+          const sql = yield* SqlClient.SqlClient;
+          yield* sql`insert into auth."user" (id, name, email) values (${userId}, ${"Eva"}, ${"eva@example.cz"})`;
+        }).pipe(Effect.orDie),
+      ),
+    ).pipe(Layer.provideMerge(database));
+
+    const otherPorts = Layer.mergeAll(
+      CaptureInvitationDelivery.layer,
+      InvitationTokensFake,
+      DeliveryJobsMemory,
+      FakeExportWorkflow.layer,
+      ShareLinkKeysTest,
+      IdGeneratorTest,
+      FakeCompanyRegistry.layer(),
+      FixtureRates.layer(),
+      CaptureEmailSender.layer,
+      MemoryBlobStorage.layer,
+    );
+    const pdfRenderers = makePdfRenderersLayer(makeCapturePdfEngine(capturedHtml)).pipe(
+      Layer.provide(Layer.mergeAll(persistence, otherPorts)),
+    );
+    const core = CoreModulesLive.pipe(
+      Layer.provideMerge(Layer.mergeAll(persistence, otherPorts, pdfRenderers)),
+    );
+    const layer = ServerDocumentProjectionsLive.pipe(
+      Layer.provideMerge(core),
+      Layer.provideMerge(TestClock.layer()),
+    );
+
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        yield* TestClock.setTime(Date.parse("2026-10-05T10:00:00Z"));
+        const workspaces = yield* Workspaces;
+        const contacts = yield* Contacts;
+        const documents = yield* Documents;
+        const payments = yield* Payments;
+        const deliveriesRepo = yield* DeliveriesRepo;
+        const renderer = yield* DocumentRenderer;
+
+        const accountCaller = Caller.account({
+          userId,
+          email: "eva@example.cz",
+          locale: "cs",
+          channel: "web",
+        });
+        const memberCaller = yield* workspaces
+          .create({
+            name: "SQL Studio s.r.o.",
+            issuingEntity: {
+              name: "SQL Studio s.r.o.",
+              ico: "12345678",
+              dic: "CZ12345678",
+              address: { street: "Ulice 1", city: "Praha", postalCode: "110 00", country: "CZ" },
+            },
+            initialTaxRegime: "non_vat_payer",
+          })
+          .pipe(Effect.provideService(CurrentCaller, accountCaller));
+
+        const asMember = <A, E, R>(eff: Effect.Effect<A, E, R>) =>
+          Effect.provideService(eff, CurrentCaller, memberCaller);
+
+        yield* asMember(
+          workspaces.saveBankAccount({
+            name: "CZK",
+            currency: CurrencyCode.make("CZK"),
+            accountNumber: "123456789/0100",
+            iban: "CZ6508000000192000145399",
+            bic: "GIBACZPX",
+            isDefault: true,
+          } as never),
+        );
+        yield* asMember(
+          workspaces.saveBankAccount({
+            name: "EUR",
+            currency: CurrencyCode.make("EUR"),
+            iban: "CZ6508000000192000145399",
+            bic: "GIBACZPX",
+            isDefault: true,
+          } as never),
+        );
+        const ws1 = yield* asMember(workspaces.current);
+        const wsModern = yield* asMember(
+          workspaces.updateSettings({ branding: { pdfTemplate: "modern_minimal" } }, ws1.revision),
+        );
+
+        const contact = yield* asMember(
+          contacts.save({
+            name: "Klient s.r.o.",
+            address: { street: "Ulice 2", city: "Brno", postalCode: "602 00", country: "CZ" },
+            billingEmails: ["klient@example.cz"],
+          } as never),
+        );
+
+        // 1. Draft QR consistency: preview, createDraft, and replayed createDraft all return paymentQr: null
+        const draftInput = {
+          kind: "invoice" as const,
+          contact: contact.id as ContactId,
+          note: "Draft poznámka",
+          lines: [
+            {
+              description: "Služba",
+              quantity: BigDecimal.fromStringUnsafe("1"),
+              unitPrice: BigDecimal.fromStringUnsafe("1000"),
+            },
+          ] as const,
+        };
+        const previewDraft = yield* asMember(documents.preview(draftInput));
+        expect(previewDraft.paymentQr).toBeNull();
+        const draftReqKey = "rk-draft-001" as RequestKey;
+        const createdDraft = yield* asMember(
+          documents.createDraft(draftInput, { requestKey: draftReqKey }),
+        );
+        expect(createdDraft.paymentQr).toBeNull();
+        yield* asMember(
+          documents.edit(createdDraft.id, { note: "Upravená poznámka" }, createdDraft.revision),
+        );
+        const replayedDraft = yield* asMember(
+          documents.createDraft(draftInput, { requestKey: draftReqKey }),
+        );
+        expect(replayedDraft.revision).toBe(createdDraft.revision);
+        expect(replayedDraft.paymentQr).toBeNull();
+
+        // 2. Queued delivery snapshot (J3): partial payment (300/1000 -> 700 due), modern_minimal template,
+        // then edit note/symbol AND change workspace template to classic BEFORE rendering!
+        const invoice = yield* asMember(
+          documents.issue({
+            input: {
+              kind: "invoice",
+              contact: contact.id as ContactId,
+              variableSymbol: "2612345678",
+              note: "Frozen note",
+              lines: [
+                {
+                  description: "Vývoj",
+                  quantity: BigDecimal.fromStringUnsafe("1"),
+                  unitPrice: BigDecimal.fromStringUnsafe("1000"),
+                },
+              ],
+            },
+          }),
+        );
+        yield* asMember(
+          payments.record({
+            target: { document: invoice.id },
+            amount: money("300"),
+            paidOn: "2026-10-06" as IsoDate,
+            method: "bank_transfer",
+          }),
+        );
+        const sent = yield* asMember(documents.send(invoice.id, { purpose: "document" }));
+        const afterPayment = yield* asMember(documents.get(invoice.id));
+        expect(afterPayment.paymentQr?.payload).toContain("AM:700.00");
+
+        // Mutate document AND switch workspace default back to classic AFTER enqueue
+        yield* asMember(
+          documents.edit(
+            invoice.id,
+            { variableSymbol: "777777", note: "Edited note" },
+            afterPayment.revision,
+          ),
+        );
+        yield* asMember(
+          workspaces.updateSettings({ branding: { pdfTemplate: "classic" } }, wsModern.revision),
+        );
+
+        const deliveryRow = yield* deliveriesRepo.get(memberCaller.workspaceId, sent.deliveryId);
+        expect(deliveryRow.attachment.template).toBe("modern_minimal");
+        expect(deliveryRow.view.paymentQr?.payload).toContain("AM:700.00");
+        expect(deliveryRow.view.paymentQr?.payload).toContain("X-VS:2612345678");
+
+        yield* renderer.render(deliveryRow.view, {
+          template: deliveryRow.attachment.template,
+          language: deliveryRow.language,
+        });
+        const deliveryHtml = capturedHtml.at(-1) ?? "";
+        expect(deliveryHtml).toContain("hero-val");
+        expect(deliveryHtml).toContain("2612345678");
+        expect(deliveryHtml).not.toContain("777777");
+        expect(deliveryHtml).toContain("Frozen note");
+        expect(deliveryHtml).not.toContain("Edited note");
+
+        // 3. System caller export default template: restore modern_minimal, render without ExplicitPdfTemplate
+        const wsAfterClassic = yield* asMember(workspaces.current);
+        yield* asMember(
+          workspaces.updateSettings(
+            { branding: { pdfTemplate: "modern_minimal" } },
+            wsAfterClassic.revision,
+          ),
+        );
+        const eurInvoice = yield* asMember(
+          documents.issue({
+            input: {
+              kind: "invoice",
+              contact: contact.id as ContactId,
+              currency: CurrencyCode.make("EUR"),
+              fx: { manual: { rate: BigDecimal.fromStringUnsafe("25"), quantity: 1 } },
+              lines: [
+                {
+                  description: "Advisory",
+                  quantity: BigDecimal.fromStringUnsafe("1"),
+                  unitPrice: BigDecimal.fromStringUnsafe("1000"),
+                },
+              ],
+            },
+          }),
+        );
+        yield* asMember(
+          payments.record({
+            target: { document: eurInvoice.id },
+            amount: money("250", CurrencyCode.make("EUR")),
+            paidOn: "2026-10-06" as IsoDate,
+            method: "bank_transfer",
+          }),
+        );
+        const eurAfterPay = yield* asMember(documents.get(eurInvoice.id));
+        expect(eurAfterPay.paymentQr?.format).toBe("epc");
+        expect(eurAfterPay.paymentQr?.payload).toContain("EUR750.00");
+
+        // Render EUR PDF as System caller (export path, no CurrentCaller Member, template="classic")
+        yield* renderer.render(
+          { ...eurAfterPay, paymentQr: null },
+          {
+            template: "classic",
+            language: "en",
+          },
+        );
+        const eurPdfHtml = capturedHtml.at(-1) ?? "";
+        expect(eurPdfHtml).toContain("hero-val");
+        expect(eurPdfHtml).toContain("<svg");
+      }).pipe(Effect.provide(layer)),
+    );
+
+    // 4. R1a workspace-read ordering on denied PDF + StoreUnavailable propagation on getMany & audit.history
+    let workspaceReads = 0;
+    const basePorts = InMemoryCorePorts();
+    const baseRepos = CoreReposMemory.pipe(Layer.provideMerge(basePorts));
+    const spyWorkspacesRepo = Layer.effect(
+      WorkspacesRepo,
+      Effect.map(WorkspacesRepo, (repo) =>
+        WorkspacesRepo.of({
+          ...repo,
+          getWorkspace: (id) =>
+            Effect.sync(() => {
+              workspaceReads += 1;
+            }).pipe(Effect.andThen(repo.getWorkspace(id))),
+        }),
+      ),
+    ).pipe(Layer.provide(baseRepos));
+    let failGetMany = false;
+    const spyDocumentsRepo = Layer.effect(
+      DocumentsRepo,
+      Effect.map(DocumentsRepo, (repo) =>
+        DocumentsRepo.of({
+          ...repo,
+          getMany: (ws, ids) =>
+            failGetMany ? Effect.fail(new StoreUnavailable({})) : repo.getMany(ws, ids),
+        }),
+      ),
+    ).pipe(Layer.provide(baseRepos));
+    let failAudit = false;
+    const spyCoreStore = Layer.effect(
+      CoreStore,
+      Effect.map(CoreStore, (store) =>
+        CoreStore.of({
+          ...store,
+          audit: {
+            ...store.audit,
+            history: (ws, subject) =>
+              failAudit ? Effect.fail(new StoreUnavailable({})) : store.audit.history(ws, subject),
+          },
+        }),
+      ),
+    ).pipe(Layer.provide(baseRepos));
+
+    const spyRepos = Layer.mergeAll(baseRepos, spyWorkspacesRepo, spyDocumentsRepo, spyCoreStore);
+    const spyFakes = Layer.mergeAll(
+      UserDirectoryFake.layer([{ userId, name: "Eva", email: "eva@example.cz" }]),
+      CaptureInvitationDelivery.layer,
+      InvitationTokensFake,
+      DeliveryJobsMemory,
+      FakeExportWorkflow.layer,
+      ShareLinkKeysTest,
+      IdGeneratorTest,
+      FakeCompanyRegistry.layer(),
+      FixtureRates.layer(),
+      CaptureEmailSender.layer,
+    );
+    const spyPdf = makePdfRenderersLayer(makeCapturePdfEngine([])).pipe(
+      Layer.provide(Layer.mergeAll(spyRepos, spyFakes)),
+    );
+    const spyCore = CoreModulesLive.pipe(
+      Layer.provideMerge(Layer.mergeAll(spyRepos, spyFakes, spyPdf)),
+    );
+    const spyLayer = ServerDocumentProjectionsLive.pipe(
+      Layer.provideMerge(spyCore),
+      Layer.provideMerge(TestClock.layer()),
+    );
+
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        yield* TestClock.setTime(Date.parse("2026-10-05T10:00:00Z"));
+        const workspaces = yield* Workspaces;
+        const contacts = yield* Contacts;
+        const documents = yield* Documents;
+        const memberCaller = yield* workspaces
+          .create({ name: "Spy Studio", initialTaxRegime: "non_vat_payer" })
+          .pipe(
+            Effect.provideService(
+              CurrentCaller,
+              Caller.account({ userId, email: "eva@example.cz", locale: "cs", channel: "web" }),
+            ),
+          );
+        const asMember = <A, E, R>(eff: Effect.Effect<A, E, R>) =>
+          Effect.provideService(eff, CurrentCaller, memberCaller);
+        yield* asMember(
+          workspaces.saveBankAccount({
+            name: "CZK",
+            currency: CurrencyCode.make("CZK"),
+            iban: "CZ6508000000192000145399",
+            bic: "GIBACZPX",
+            isDefault: true,
+          } as never),
+        );
+        const contact = yield* asMember(
+          contacts.save({
+            name: "Buyer",
+            address: { street: "A 1", city: "Praha", postalCode: "110 00", country: "CZ" },
+          } as never),
+        );
+        const inv = yield* asMember(
+          documents.issue(
+            {
+              input: {
+                kind: "invoice",
+                contact: contact.id as ContactId,
+                variableSymbol: "2612345678",
+                lines: [
+                  {
+                    description: "Work",
+                    quantity: BigDecimal.fromStringUnsafe("1"),
+                    unitPrice: BigDecimal.fromStringUnsafe("1000"),
+                  },
+                ],
+              },
+            },
+            { requestKey: "rk-spy-1" as RequestKey },
+          ),
+        );
+
+        // R1a: unauthorized caller fails with Forbidden with ZERO WorkspacesRepo reads
+        const limitedCaller = { ...memberCaller, scopes: ["contacts:read"] as never };
+        const readsBeforeDenied = workspaceReads;
+        const deniedExit = yield* Effect.exit(
+          documents.pdf(inv.id).pipe(Effect.provideService(CurrentCaller, limitedCaller)),
+        );
+        expect(deniedExit._tag).toBe("Failure");
+        expect(workspaceReads).toBe(readsBeforeDenied);
+
+        // Failed credit lookup (StoreUnavailable on getMany) must NOT return payable QR
+        yield* asMember(documents.correct(inv.id, { reason: "Full credit", lines: "full" }));
+        failGetMany = true;
+        const creditFailExit = yield* Effect.exit(asMember(documents.get(inv.id)));
+        failGetMany = false;
+        expect(creditFailExit._tag).toBe("Failure");
+
+        // Failed audit read on historical replay must NOT silently return newer symbol
+        const inv2 = yield* asMember(
+          documents.issue(
+            {
+              input: {
+                kind: "invoice",
+                contact: contact.id as ContactId,
+                variableSymbol: "2612345678",
+                lines: [
+                  {
+                    description: "Work 2",
+                    quantity: BigDecimal.fromStringUnsafe("1"),
+                    unitPrice: BigDecimal.fromStringUnsafe("1000"),
+                  },
+                ],
+              },
+            },
+            { requestKey: "rk-spy-2" as RequestKey },
+          ),
+        );
+        yield* asMember(documents.edit(inv2.id, { variableSymbol: "777777" }, inv2.revision));
+        failAudit = true;
+        const auditFailExit = yield* Effect.exit(
+          asMember(
+            documents.issue(
+              {
+                input: {
+                  kind: "invoice",
+                  contact: contact.id as ContactId,
+                  variableSymbol: "2612345678",
+                  lines: [
+                    {
+                      description: "Work 2",
+                      quantity: BigDecimal.fromStringUnsafe("1"),
+                      unitPrice: BigDecimal.fromStringUnsafe("1000"),
+                    },
+                  ],
+                },
+              },
+              { requestKey: "rk-spy-2" as RequestKey },
+            ),
+          ),
+        );
+        failAudit = false;
+        expect(auditFailExit._tag).toBe("Failure");
+      }).pipe(Effect.provide(spyLayer)),
+    );
   });
 });

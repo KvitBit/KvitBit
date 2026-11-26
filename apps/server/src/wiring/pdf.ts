@@ -44,6 +44,7 @@ import {
   computeDocumentPaymentQr,
   documentPdfCacheKey,
   ExplicitPdfTemplate,
+  readDeliverySnapshot,
   resolveDocumentFieldsAtRevision,
   resolveVariableSymbol,
   sha256HexSync,
@@ -647,6 +648,7 @@ export const DocumentRendererLive: Layer.Layer<DocumentRenderer, never, PdfEngin
       render: (view, options) =>
         Effect.gen(function* () {
           const workspaceId = yield* resolveWorkspaceId(view.id);
+          const deliverySnapshot = readDeliverySnapshot(view);
           const explicitOpt = yield* Effect.serviceOption(ExplicitPdfTemplate);
           const isExplicitTemplate = Option.getOrElse(explicitOpt, () => false);
           const workspace =
@@ -657,9 +659,11 @@ export const DocumentRendererLive: Layer.Layer<DocumentRenderer, never, PdfEngin
               : undefined;
 
           const effectiveTemplate =
-            isExplicitTemplate || options.template !== "classic" || workspace === undefined
-              ? options.template
-              : workspace.branding.pdfTemplate;
+            deliverySnapshot !== undefined
+              ? deliverySnapshot.template
+              : isExplicitTemplate || options.template !== "classic" || workspace === undefined
+                ? options.template
+                : workspace.branding.pdfTemplate;
 
           const cacheKey =
             workspaceId !== undefined && workspace !== undefined && Option.isSome(blobsOpt)
@@ -684,21 +688,29 @@ export const DocumentRendererLive: Layer.Layer<DocumentRenderer, never, PdfEngin
 
           const record =
             workspaceId !== undefined && Option.isSome(documentsRepoOpt)
-              ? yield* documentsRepoOpt.value
-                  .get(workspaceId, view.id)
-                  .pipe(Effect.catch(() => Effect.succeed(undefined)))
+              ? yield* documentsRepoOpt.value.get(workspaceId, view.id).pipe(
+                  Effect.catchTag("NotFound", () => Effect.succeed(undefined)),
+                  Effect.orDie,
+                )
               : undefined;
 
           const resolvedFields =
-            workspaceId !== undefined && record !== undefined && Option.isSome(documentsRepoOpt)
-              ? yield* resolveDocumentFieldsAtRevision({
-                  workspaceId,
-                  view,
-                  record,
-                  documentsRepo: documentsRepoOpt.value,
-                  coreStore: Option.getOrUndefined(coreStoreOpt),
-                })
-              : undefined;
+            deliverySnapshot !== undefined
+              ? {
+                  variableSymbol: deliverySnapshot.variableSymbol,
+                  orderNumber: deliverySnapshot.orderNumber,
+                  note: deliverySnapshot.note,
+                  amountDue: deliverySnapshot.amountDue,
+                }
+              : workspaceId !== undefined && record !== undefined && Option.isSome(documentsRepoOpt)
+                ? yield* resolveDocumentFieldsAtRevision({
+                    workspaceId,
+                    view,
+                    record,
+                    documentsRepo: documentsRepoOpt.value,
+                    coreStore: Option.getOrUndefined(coreStoreOpt),
+                  }).pipe(Effect.orDie)
+                : undefined;
 
           let branding: RenderBranding | undefined;
           let brandingComplete = true;
