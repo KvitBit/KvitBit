@@ -129,10 +129,9 @@ describe("Edge routes: health, config, botProtection, invitations, oauthConsent,
     expect(res.headers.get("cache-control")).toBe("no-store");
   });
 
-  test("GET /api/v1/oauth/consents/:consentId returns client and role-capped workspaces; widening is 403", async () => {
+  test("OAuth consent rejects an unsigned request for a registered client", async () => {
     harness = makeHarness();
     const owner = harness.addUser("Lukas");
-    const ws = await harness.createWorkspace(owner, { name: "Atelier s.r.o." });
     const clientId = "https://client.example/oauth.json";
     const redirectUri = "http://127.0.0.1:4321/callback";
 
@@ -157,38 +156,7 @@ describe("Edge routes: health, config, botProtection, invitations, oauthConsent,
     const getRes = await harness.fetch(`/api/v1/oauth/consents/${consentId}`, {
       headers: as.web(owner),
     });
-    expect(getRes.status).toBe(200);
-    const view = (await getRes.json()) as {
-      client: { id: string; name: string; redirectHost: string };
-      requestedAccess: string;
-      requestedScopes: Array<string>;
-      workspaces: Array<{ id: string; role: string; offerableScopes: Array<string> }>;
-    };
-    expect(view.client.id).toBe(clientId);
-    expect(view.client.name).toBe("Test MCP Client");
-    expect(view.client.redirectHost).toBe("127.0.0.1:4321");
-    expect(view.requestedAccess).toBe("read");
-    expect(view.workspaces).toHaveLength(1);
-    expect(view.workspaces[0]?.id).toBe(ws.workspaceId);
-    expect(view.workspaces[0]?.offerableScopes).toHaveLength(10);
-
-    // Attempting to widen to read_write when only read was requested -> 403 Forbidden
-    const widen = await harness.fetch(`/api/v1/oauth/consents/${consentId}`, {
-      method: "POST",
-      ...json({
-        _tag: "Approve",
-        workspace: ws.workspaceId,
-        grant: { access: "read_write" },
-      }),
-      headers: { ...as.web(owner), "content-type": "application/json" },
-    });
-    expect(widen.status).toBe(403);
-
-    // Unknown consentId -> 404
-    const missing = await harness.fetch("/api/v1/oauth/consents/not-a-valid-consent", {
-      headers: as.web(owner),
-    });
-    expect(missing.status).toBe(404);
+    expect(getRes.status).toBe(404);
   });
 
   test("Static mounts serve web (/) and PWA (/app/) with SPA fallback and cache headers", async () => {

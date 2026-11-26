@@ -1,9 +1,9 @@
 import {
+  type Auth,
   type AuthConfig,
   authOptions,
   authTables,
   type BeforeHook,
-  makeAuth,
 } from "@kvitbit/adapters/auth";
 import { Caller, CurrentCaller, InvitationToken, type Workspaces } from "@kvitbit/domain/contract";
 import { betterAuth } from "better-auth";
@@ -97,12 +97,12 @@ const usesInvitation = async (request: Request): Promise<boolean> => {
   return isInvitationSignUp(await readBody().catch(() => undefined));
 };
 
-export const makeAuthWithInvitationSignUp = (
+export const makeAuthWithInvitationSignUp = async (
+  auth: Auth,
   config: AuthConfig,
   workspaces: Workspaces["Service"],
   clock: Clock.Clock,
 ) => {
-  const auth = makeAuth(config);
   const verifiedEmails = new WeakMap<Request, string>();
   const options = authOptions({
     ...config,
@@ -140,6 +140,7 @@ export const makeAuthWithInvitationSignUp = (
     },
   });
 
+  await Promise.all([auth.$context, invitationAuth.$context]);
   return {
     ...auth,
     handler: async (request: Request) => {

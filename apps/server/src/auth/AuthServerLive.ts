@@ -16,6 +16,7 @@ import { acceptLanguageLocale } from "../http/edge/request";
 import { AuthServer } from "./AuthServer";
 import { makeDrizzleOverSqlClient } from "./drizzleBridge";
 import { makeAuthWithInvitationSignUp } from "./invitationSignUp";
+import { makeWorkspaceAuth } from "./oauthWorkspace";
 
 const DEFAULT_LINK_VALID_MINUTES = 60;
 
@@ -148,7 +149,11 @@ export const makeAuthServerLayer = (overrides: AuthServerOverrides = {}) =>
         },
       };
 
-      return AuthServer.of(makeAuthWithInvitationSignUp(authConfig, workspaces, clock));
+      const auth = makeWorkspaceAuth(sql)(authConfig);
+      const withInvitations = yield* Effect.promise(() =>
+        makeAuthWithInvitationSignUp(auth, authConfig, workspaces, clock),
+      );
+      return AuthServer.of(withInvitations);
     }),
   );
 
