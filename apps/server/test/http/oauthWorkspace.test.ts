@@ -8,6 +8,7 @@ import { HttpRouter } from "effect/http";
 import { SqlClient } from "effect/sql";
 import { TestClock } from "effect/testing";
 import { PrincipalResolverLive } from "../../src/auth/PrincipalResolverLive";
+import { RateLimiterMemory } from "../../src/http";
 import { McpConfigTest, McpRoutesLive } from "../../src/mcp";
 import { createSeededWorkspace, joinMember, seedWorkspaceRow } from "./credentials/seed";
 import { makeHarness, ORIGIN } from "./harness";
@@ -41,6 +42,7 @@ test.each(["DCR", "CIMD"])(
       McpRoutesLive.pipe(
         Layer.provide([
           core,
+          RateLimiterMemory,
           PrincipalResolverLive.pipe(Layer.provide(core)),
           McpConfigTest({ appOrigin: ORIGIN }),
           BunHttpServer.layerHttpServices,

@@ -74,6 +74,7 @@ import {
   McpConfirmations,
 } from "./confirmation";
 import { coreErrorToolResult, type McpToolCallResult } from "./errors";
+import { encodeToolOutput, jsonizeOpenValue, prepareDocumentView } from "./wire";
 
 export class ToolInvalidParams extends Data.TaggedError("ToolInvalidParams")<{
   readonly message: string;
@@ -205,32 +206,27 @@ const decodeArgs = <S extends Schema.Top>(schema: S, raw: unknown) =>
   );
 
 const okResult = (
+  tool: McpToolName,
   text: string,
   structured: unknown,
   extraContent: McpToolCallResult["content"] = [],
 ): McpToolCallResult => ({
   isError: false,
   content: [{ type: "text", text }, ...extraContent],
-  structuredContent: structured as Record<string, unknown>,
+  structuredContent: encodeToolOutput(tool, structured),
 });
 
 const formatDecimal = (value: BigDecimal.BigDecimal): string =>
   BigDecimal.format(BigDecimal.normalize(value));
 
-// The request log restores decimal values from text, which can change their in-memory scale.
-const normalizeConfirmedValue = (value: unknown): unknown => {
-  if (BigDecimal.isBigDecimal(value)) return BigDecimal.normalize(value);
-  if (Array.isArray(value)) return value.map(normalizeConfirmedValue);
-  if (value === null || typeof value !== "object") return value;
-  return Object.fromEntries(
-    Object.entries(value).map(([key, entry]) => [key, normalizeConfirmedValue(entry)]),
-  );
-};
-
-const confirmedDocument = (text: string, document: DocumentView): McpToolCallResult =>
-  okResult(text, {
+const confirmedDocument = (
+  tool: McpToolName,
+  text: string,
+  document: DocumentView,
+): McpToolCallResult =>
+  okResult(tool, text, {
     _tag: "Confirmed",
-    result: { document: normalizeConfirmedValue(document) },
+    result: { document: prepareDocumentView(document) },
   });
 
 type ConfirmationSendSummaryType = typeof ConfirmationSendSummary.Type;
@@ -409,10 +405,14 @@ export const callTool = (
             const ws = yield* Workspaces;
             const workspace = yield* ws.current;
             const series = yield* ws.listSeries;
-            return okResult(`Workspace ${workspace.name} (${series.length} numbering series).`, {
-              workspace,
-              series,
-            });
+            return okResult(
+              "get_workspace",
+              `Workspace ${workspace.name} (${series.length} numbering series).`,
+              {
+                workspace: jsonizeOpenValue(workspace),
+                series: jsonizeOpenValue(series),
+              },
+            );
           });
 
         case "list_documents":
@@ -420,7 +420,10 @@ export const callTool = (
             const args = yield* decodeArgs(ListDocumentsArgs, normalizedInput);
             const documents = yield* Documents;
             const page = yield* documents.list(args);
-            return okResult(`Listed ${page.items.length} document(s).`, page);
+            return okResult("list_documents", `Listed ${page.items.length} document(s).`, {
+              ...page,
+              items: page.items.map(jsonizeOpenValue),
+            });
           });
 
         case "get_document":
@@ -429,8 +432,9 @@ export const callTool = (
             const documents = yield* Documents;
             const document = yield* documents.get(args.documentId);
             return okResult(
+              "get_document",
               `Document ${document.number ?? document.id} (${document.kind}, ${document.status}).`,
-              { document },
+              { document: prepareDocumentView(document) },
             );
           });
 
@@ -439,7 +443,13 @@ export const callTool = (
             const args = yield* decodeArgs(DocumentIdArgs, normalizedInput);
             const documents = yield* Documents;
             const items = yield* documents.history(args.documentId);
-            return okResult(`Document history (${items.length} entries).`, { items });
+            return okResult("get_document_history", `Document history (${items.length} entries).`, {
+              items: items.map((entry) =>
+                entry.changes === undefined
+                  ? entry
+                  : { ...entry, changes: jsonizeOpenValue(entry.changes) },
+              ),
+            });
           });
 
         case "get_document_pdf":
@@ -472,6 +482,7 @@ export const callTool = (
               });
             }
             return okResult(
+              "get_document_pdf",
               `PDF ${download.filename} (${bytes.byteLength} bytes, ${embedded ? "embedded" : "link only"}).`,
               {
                 uri,
@@ -488,7 +499,9 @@ export const callTool = (
             const args = yield* decodeArgs(ListPaymentsArgs, normalizedInput);
             const payments = yield* Payments;
             const items = yield* payments.listFor(args.target);
-            return okResult(`Listed ${items.length} payment(s).`, { items });
+            return okResult("list_payments", `Listed ${items.length} payment(s).`, {
+              items: items.map(jsonizeOpenValue),
+            });
           });
 
         case "list_invoice_templates":
@@ -496,7 +509,11 @@ export const callTool = (
             yield* decodeArgs(NoArgs, normalizedInput);
             const templates = yield* Templates;
             const items = yield* templates.list;
-            return okResult(`Listed ${items.length} invoice template(s).`, { items });
+            return okResult(
+              "list_invoice_templates",
+              `Listed ${items.length} invoice template(s).`,
+              { items: items.map(jsonizeOpenValue) },
+            );
           });
 
         case "list_expenses":
@@ -504,7 +521,10 @@ export const callTool = (
             const args = yield* decodeArgs(ListExpensesArgs, normalizedInput);
             const expenses = yield* Expenses;
             const page = yield* expenses.list(args);
-            return okResult(`Listed ${page.items.length} expense(s).`, page);
+            return okResult("list_expenses", `Listed ${page.items.length} expense(s).`, {
+              ...page,
+              items: page.items.map(jsonizeOpenValue),
+            });
           });
 
         case "get_expense":
@@ -512,7 +532,9 @@ export const callTool = (
             const args = yield* decodeArgs(GetExpenseArgs, normalizedInput);
             const expenses = yield* Expenses;
             const expense = yield* expenses.get(args.expenseId);
-            return okResult(`Expense ${args.expenseId} (${expense.status}).`, { expense });
+            return okResult("get_expense", `Expense ${args.expenseId} (${expense.status}).`, {
+              expense: jsonizeOpenValue(expense),
+            });
           });
 
         case "list_contacts":
@@ -520,7 +542,10 @@ export const callTool = (
             const args = yield* decodeArgs(ListContactsArgs, normalizedInput);
             const contacts = yield* Contacts;
             const page = yield* contacts.search(compact(args));
-            return okResult(`Listed ${page.items.length} contact(s).`, page);
+            return okResult("list_contacts", `Listed ${page.items.length} contact(s).`, {
+              ...page,
+              items: page.items.map(jsonizeOpenValue),
+            });
           });
 
         case "lookup_ares":
@@ -529,7 +554,11 @@ export const callTool = (
             yield* requireActions(caller, ["contact.read"]);
             const ws = yield* Workspaces;
             const result = yield* ws.lookupCompany(args.ico);
-            return okResult(`ARES lookup for IČO ${args.ico} completed.`, result);
+            return okResult(
+              "lookup_ares",
+              `ARES lookup for IČO ${args.ico} completed.`,
+              jsonizeOpenValue(result),
+            );
           });
 
         case "list_price_list_items":
@@ -537,7 +566,9 @@ export const callTool = (
             const args = yield* decodeArgs(ListPriceListItemsArgs, normalizedInput);
             const priceList = yield* PriceList;
             const items = yield* priceList.list(compact(args));
-            return okResult(`Listed ${items.length} price list item(s).`, { items });
+            return okResult("list_price_list_items", `Listed ${items.length} price list item(s).`, {
+              items: items.map(jsonizeOpenValue),
+            });
           });
 
         case "get_share_link":
@@ -547,6 +578,7 @@ export const callTool = (
             const documents = yield* Documents;
             const doc = yield* documents.get(args.documentId);
             return okResult(
+              "get_share_link",
               doc.share
                 ? `Active share link: ${doc.share.url}`
                 : "Document has no active share link.",
@@ -564,11 +596,11 @@ export const callTool = (
               period: { from: args.from, to: args.to },
               ...(args.groupBy !== undefined ? { groupBy: args.groupBy } : {}),
             });
-            return okResult(`Report ${report} (${args.from} to ${args.to}).`, {
+            return okResult("get_report", `Report ${report} (${args.from} to ${args.to}).`, {
               report,
               from: args.from,
               to: args.to,
-              data,
+              data: jsonizeOpenValue(data),
             });
           });
 
@@ -577,7 +609,7 @@ export const callTool = (
             const args = yield* decodeArgs(GetFxRateArgs, normalizedInput);
             const reports = yield* Reports;
             const fx = yield* reports.fxRate({ currency: args.currency, on: args.on });
-            return okResult(`FX rate for ${args.currency} on ${args.on}.`, fx);
+            return okResult("get_fx_rate", `FX rate for ${args.currency} on ${args.on}.`, fx);
           });
 
         case "create_draft":
@@ -591,9 +623,11 @@ export const callTool = (
                 ? { requestKey: mcpRequestKey(grant.grantId, idempotencyKey) }
                 : undefined,
             );
-            return okResult(`Created draft ${document.id} (rev ${document.revision}).`, {
-              document,
-            });
+            return okResult(
+              "create_draft",
+              `Created draft ${document.id} (rev ${document.revision}).`,
+              { document: prepareDocumentView(document) },
+            );
           });
 
         case "update_draft":
@@ -606,9 +640,11 @@ export const callTool = (
               return yield* new Conflict({ reason: "illegal_transition" });
             }
             const document = yield* documents.edit(args.documentId, args.patch, args.revision);
-            return okResult(`Updated draft ${document.id} (rev ${document.revision}).`, {
-              document,
-            });
+            return okResult(
+              "update_draft",
+              `Updated draft ${document.id} (rev ${document.revision}).`,
+              { document: prepareDocumentView(document) },
+            );
           });
 
         case "upsert_contact":
@@ -632,7 +668,9 @@ export const callTool = (
                       ? { requestKey: mcpRequestKey(grant.grantId, args.idempotencyKey) }
                       : undefined,
                   );
-            return okResult(`Saved contact (rev ${contact.revision}).`, { contact });
+            return okResult("upsert_contact", `Saved contact (rev ${contact.revision}).`, {
+              contact: jsonizeOpenValue(contact),
+            });
           });
 
         case "record_expense":
@@ -645,9 +683,11 @@ export const callTool = (
                 ? { requestKey: mcpRequestKey(grant.grantId, args.idempotencyKey) }
                 : undefined,
             );
-            return okResult(`Recorded expense (${expense.status}, rev ${expense.revision}).`, {
-              expense,
-            });
+            return okResult(
+              "record_expense",
+              `Recorded expense (${expense.status}, rev ${expense.revision}).`,
+              { expense: jsonizeOpenValue(expense) },
+            );
           });
 
         case "record_payment":
@@ -661,7 +701,15 @@ export const callTool = (
                 ? { requestKey: mcpRequestKey(grant.grantId, idempotencyKey) }
                 : undefined,
             );
-            return okResult(`Recorded payment (settlement: ${result.settlement}).`, result);
+            return okResult(
+              "record_payment",
+              `Recorded payment (settlement: ${result.settlement}).`,
+              {
+                ...result,
+                payment: jsonizeOpenValue(result.payment),
+                issued: result.issued.map(prepareDocumentView),
+              },
+            );
           });
 
         case "settle_proforma":
@@ -686,8 +734,13 @@ export const callTool = (
                 : undefined,
             );
             return okResult(
+              "settle_proforma",
               `Settled proforma ${proforma.number ?? proforma.id} (settlement: ${result.settlement}).`,
-              result,
+              {
+                ...result,
+                payment: jsonizeOpenValue(result.payment),
+                issued: result.issued.map(prepareDocumentView),
+              },
             );
           });
 
@@ -696,7 +749,9 @@ export const callTool = (
             const args = yield* decodeArgs(LockDocumentArgs, normalizedInput);
             const documents = yield* Documents;
             const document = yield* documents.lock(args.documentId);
-            return okResult(`Locked document ${document.number ?? document.id}.`, { document });
+            return okResult("lock_document", `Locked document ${document.number ?? document.id}.`, {
+              document: prepareDocumentView(document),
+            });
           });
 
         case "create_from_template":
@@ -717,7 +772,13 @@ export const callTool = (
                   ? { requestKey: mcpRequestKey(grant.grantId, args.idempotencyKey) }
                   : undefined,
               );
-              return okResult(`Created draft ${document.id} from template.`, { document });
+              return okResult(
+                "create_from_template",
+                `Created draft ${document.id} from template.`,
+                {
+                  document: prepareDocumentView(document),
+                },
+              );
             }
 
             const step = confirmStep(args);
@@ -744,7 +805,7 @@ export const callTool = (
                 document: summary,
                 warnings: documentWarnings(previewDoc),
               });
-              return okResult(confirmation.summary.text, confirmation);
+              return okResult("create_from_template", confirmation.summary.text, confirmation);
             }
 
             const document = yield* confirm(
@@ -762,6 +823,7 @@ export const callTool = (
                 ),
             );
             return confirmedDocument(
+              "create_from_template",
               `Issued document ${document.number ?? document.id} from template.`,
               document,
             );
@@ -814,7 +876,7 @@ export const callTool = (
                 warnings: documentWarnings(previewDoc),
                 ...(sendSummary !== undefined ? { send: sendSummary } : {}),
               });
-              return okResult(confirmation.summary.text, confirmation);
+              return okResult("issue_document", confirmation.summary.text, confirmation);
             }
 
             const document = yield* confirm(
@@ -833,6 +895,7 @@ export const callTool = (
                 ),
             );
             return confirmedDocument(
+              "issue_document",
               `Issued document ${document.number ?? document.id}.`,
               document,
             );
@@ -869,7 +932,7 @@ export const callTool = (
                   subject: sendPreview.subject,
                 },
               });
-              return okResult(confirmation.summary.text, confirmation);
+              return okResult("send_document", confirmation.summary.text, confirmation);
             }
 
             const delivery = yield* confirm(
@@ -878,7 +941,7 @@ export const callTool = (
               { table: "documents", id: args.documentId },
               (requestKey) => documents.send(args.documentId, sendOptions, { requestKey }),
             );
-            return okResult(`Queued email delivery ${delivery.deliveryId}.`, {
+            return okResult("send_document", `Queued email delivery ${delivery.deliveryId}.`, {
               _tag: "Confirmed",
               result: delivery,
             });
@@ -913,7 +976,7 @@ export const callTool = (
                   subject: sendPreview.subject,
                 },
               });
-              return okResult(confirmation.summary.text, confirmation);
+              return okResult("send_reminder", confirmation.summary.text, confirmation);
             }
 
             const delivery = yield* confirm(
@@ -922,7 +985,7 @@ export const callTool = (
               { table: "documents", id: args.documentId },
               (requestKey) => documents.send(args.documentId, sendOptions, { requestKey }),
             );
-            return okResult(`Queued payment reminder ${delivery.deliveryId}.`, {
+            return okResult("send_reminder", `Queued payment reminder ${delivery.deliveryId}.`, {
               _tag: "Confirmed",
               result: delivery,
             });
@@ -951,7 +1014,7 @@ export const callTool = (
                 document: summary,
                 warnings: documentWarnings(previewDoc),
               });
-              return okResult(confirmation.summary.text, confirmation);
+              return okResult("create_final_invoice", confirmation.summary.text, confirmation);
             }
 
             const document = yield* confirm(
@@ -961,6 +1024,7 @@ export const callTool = (
               (requestKey) => documents.issueFinalInvoice(args.proformaId, input, { requestKey }),
             );
             return confirmedDocument(
+              "create_final_invoice",
               `Issued Final Invoice ${document.number ?? document.id}.`,
               document,
             );
@@ -996,7 +1060,7 @@ export const callTool = (
                 document: summary,
                 warnings: documentWarnings(previewDoc),
               });
-              return okResult(confirmation.summary.text, confirmation);
+              return okResult("create_credit_note", confirmation.summary.text, confirmation);
             }
 
             const document = yield* confirm(
@@ -1006,6 +1070,7 @@ export const callTool = (
               (requestKey) => documents.correct(args.documentId, correctionInput, { requestKey }),
             );
             return confirmedDocument(
+              "create_credit_note",
               `Issued Credit Note ${document.number ?? document.id}.`,
               document,
             );

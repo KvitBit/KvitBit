@@ -19,10 +19,11 @@ import { ByteSize, Effect } from "effect";
 import { HttpIncomingMessage, HttpServerResponse } from "effect/http";
 import type { HttpServerRequest } from "effect/http/HttpServerRequest";
 import type { PrincipalResolver } from "../auth/PrincipalResolver";
+import { RATE_LIMITS, RateLimiter } from "../http/edge/RateLimiter";
 import { requestIdFor } from "../http/edge/requestId";
 import { authenticateMcpRequest, wwwAuthenticateHeader } from "./caller";
 import type { McpConfigShape } from "./config";
-import { formatCoreErrorText } from "./errors";
+import { encodeToolError, formatCoreErrorText } from "./errors";
 import { MCP_SERVER_INSTRUCTIONS } from "./guide";
 import {
   listResourceTemplates,
@@ -71,7 +72,11 @@ const parseOrigin = (header: string): string | null => {
   }
 };
 
-export type McpTransportServices = PrincipalResolver | McpToolServices | McpResourceServices;
+export type McpTransportServices =
+  | PrincipalResolver
+  | RateLimiter
+  | McpToolServices
+  | McpResourceServices;
 
 export const handleMcpPost = (
   request: HttpServerRequest,
@@ -129,6 +134,28 @@ export const handleMcpPost = (
       );
     }
     const auth = authResult.success;
+
+    // 3b. Per-grant rate limit (http-mcp-contracts section 2.5: 300/min per grant, trailing window).
+    const rateLimiter = yield* RateLimiter;
+    const rateDecision = yield* rateLimiter.consume(
+      `mcp-grant:${auth.grant.grantId}`,
+      RATE_LIMITS.mcpGrant,
+    );
+    if (!rateDecision.allowed) {
+      return HttpServerResponse.jsonUnsafe(
+        {
+          _tag: "RateLimited",
+          retryAfterSeconds: rateDecision.retryAfterSeconds,
+        },
+        {
+          status: 429,
+          headers: {
+            ...responseHeaders,
+            "retry-after": String(Math.ceil(rateDecision.retryAfterSeconds)),
+          },
+        },
+      );
+    }
 
     // 4. Body size limit (1 MB).
     const contentLengthHeader = request.headers["content-length"];
@@ -292,7 +319,7 @@ export const handleMcpPost = (
             formatCoreErrorText(err, auth.caller),
             200,
             responseHeaders,
-            { error: err },
+            encodeToolError({ error: err }),
           );
         }
         return jsonRpcSuccess(id, { contents: result.success }, responseHeaders);

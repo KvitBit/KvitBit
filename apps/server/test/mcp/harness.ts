@@ -20,6 +20,7 @@ import { HttpRouter } from "effect/http";
 import { SqlClient, Statement } from "effect/sql";
 import { TestClock } from "effect/testing";
 import { PrincipalResolver } from "../../src/auth/PrincipalResolver";
+import { type RateLimiter, RateLimiterSql } from "../../src/http";
 import { McpConfigTest, McpRoutesLive } from "../../src/mcp";
 import { SqlTestCore } from "../persistence/conformance/sqlCore";
 
@@ -77,7 +78,12 @@ const FakeMcpPrincipalResolver = (grants: Map<string, TestMcpGrant>) =>
     }),
   );
 
-export const makeMcpHarness = (options: TestCoreOptions = {}) => {
+export interface McpHarnessOptions extends TestCoreOptions {
+  readonly rateLimiter?: Layer.Layer<RateLimiter>;
+}
+
+export const makeMcpHarness = (options: McpHarnessOptions = {}) => {
+  const { rateLimiter, ...coreOptions } = options;
   const users = new Map<string, TestUser>();
   const grants = new Map<string, TestMcpGrant>();
   const seededGrants = new Map<string, Promise<unknown>>();
@@ -85,7 +91,7 @@ export const makeMcpHarness = (options: TestCoreOptions = {}) => {
   const clockLayer = Layer.effectDiscard(
     TestClock.setTime(Date.parse("2026-11-23T10:00:00Z")),
   ).pipe(Layer.provideMerge(TestClock.layer()));
-  const core = SqlTestCore(options).pipe(Layer.provideMerge(clockLayer));
+  const core = SqlTestCore(coreOptions).pipe(Layer.provideMerge(clockLayer));
   const runtime = ManagedRuntime.make(core);
   const seedUser = (user: TestUser) =>
     Effect.gen(function* () {
@@ -113,9 +119,13 @@ export const makeMcpHarness = (options: TestCoreOptions = {}) => {
       `;
       }),
     );
+  const sharedCore = Layer.effectContext(runtime.contextEffect);
+  const limiterLayer =
+    rateLimiter !== undefined ? rateLimiter : RateLimiterSql.pipe(Layer.provide(sharedCore));
   const app = McpRoutesLive.pipe(
     Layer.provide([
-      Layer.effectContext(runtime.contextEffect),
+      sharedCore,
+      limiterLayer,
       FakeMcpPrincipalResolver(grants),
       McpConfigTest({ appOrigin: MCP_ORIGIN }),
       BunHttpServer.layerHttpServices,
