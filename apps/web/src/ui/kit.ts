@@ -151,21 +151,17 @@ export const selectField = <M>(h: Html.H<M>, o: SelectOptions<M>): Markup<M> =>
 
 /** A bare select (no label wrapper), e.g. for toolbars. Needs an accessible name via `label`. */
 export const select = <M>(h: Html.H<M>, o: SelectOptions<M>): Markup<M> =>
-  withAttributes(h.select.class(), [
-    (element) => element.class("kb-select"),
-    (element) => element.id(o.id),
-    (element) => element.attr("name", o.id),
-    (element) => element.attr("aria-label", o.label),
-    (element) => element.on("change", ({ value }) => o.onChange(value)),
-    (node) => (o.disabled === true ? node.disabled(true) : node),
-  ]).children(
-    o.options.map((opt) =>
-      withAttributes(h.option.class(), [
-        (element) => element.attr("value", opt.value),
-        (node) => (opt.value === o.value ? node.attr("selected", "") : node),
-      ]).children([opt.label]),
-    ),
-  );
+  h.select
+    .class("kb-select")
+    .id(o.id)
+    .attr("name", o.id)
+    .attr("aria-label", o.label)
+    .value(o.value)
+    .disabled(o.disabled === true)
+    .on("change", ({ value }) => o.onChange(value))
+    .children(
+      o.options.map((option) => h.option.attr("value", option.value).children(option.label)),
+    );
 
 export const checkbox = <M>(
   h: Html.H<M>,

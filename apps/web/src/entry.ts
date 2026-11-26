@@ -23,6 +23,9 @@ const flags: Flags = {
 const state: { readonly flags: Flags; readonly state: Renderer.State } | undefined = bootstrap
   ? JSON.parse(bootstrap)
   : undefined;
+// Keep the static document language in sync before the browser host takes ownership.
+if (state === undefined) document.documentElement.lang = flags.prefs.locale;
+
 const host =
   state === undefined
     ? BrowserHost.mount(App, flags, container)

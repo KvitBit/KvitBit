@@ -92,10 +92,11 @@ export const authFetch = <M>(
   onFailure: (f: Failure) => M,
 ): Effect.Effect<M> =>
   Effect.tryPromise({
-    try: async () => {
+    try: async (signal) => {
       const res = await fetch(`${origin()}/api/auth${path}`, {
         method: init.method ?? "GET",
         credentials: "same-origin",
+        signal,
         headers: init.body === undefined ? {} : { "content-type": "application/json" },
         ...(init.body === undefined ? {} : { body: JSON.stringify(init.body) }),
       });

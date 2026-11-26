@@ -6,16 +6,10 @@ import type { Html } from "@effect/ui/html";
  * the one matching the active scheme (`.kb-only-light` / `.kb-only-dark`). K4 lockups are the
  * committed path-only SVGs; the wordmark is never retyped in a font.
  */
-import { markSvg } from "@kvitbit/brand";
-import { type Markup, svgImage } from "./html";
+import type { Markup } from "./html";
 
-const inline = (master: "light" | "dark"): string =>
-  markSvg({ master, fill: "currentColor", title: "Kvitbit" })
-    .replace(' aria-labelledby="title"', ' aria-hidden="true" focusable="false"')
-    .replace(/<title id="title">[^<]*<\/title>\s*/, "");
-
-const MARK_LIGHT = svgImage(inline("light").replace("currentColor", "#1d2330"));
-const MARK_DARK = svgImage(inline("dark").replace("currentColor", "#e8edf5"));
+const MARK_LIGHT = "/assets/brand/kvitbit-mark-current-light.svg";
+const MARK_DARK = "/assets/brand/kvitbit-mark-current-dark.svg";
 
 /** The mark alone (minimum 16px). `size` sets the rendered square in px. */
 export const mark = <M>(h: Html.H<M>, size = 28, label = "Kvitbit"): Markup<M> =>
