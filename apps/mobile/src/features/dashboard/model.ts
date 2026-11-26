@@ -7,9 +7,10 @@ import type {
   DocumentStatus,
   DocumentView,
   IsoDate,
+  ShareViewEvent,
   WorkspaceSummary,
 } from "@kvitbit/domain/contract";
-import { type Remote, Remote as RemoteOps } from "@kvitbit/ui-port/api";
+import type { Remote } from "@kvitbit/ui-port/api";
 import { BUSINESS_TIME_ZONE, parseIsoDate } from "@kvitbit/ui-port/format";
 import type { Period } from "@kvitbit/ui-port/view-models";
 import { BigDecimal, Option } from "effect";
@@ -204,9 +205,6 @@ export const parseDocumentSummaries = (
     return parsed === null ? [] : [parsed];
   });
 
-export const recentActivityDocuments = (documents: Remote<RecentDashboardDocuments>) =>
-  Option.getOrNull(RemoteOps.value(documents))?.items ?? null;
-
 export const mostOverdueDocuments = (report: ReceivablesReportData) =>
   report.buckets
     .flatMap((bucket) => bucket.documents.filter((document) => document.daysOverdue > 0))
@@ -215,8 +213,9 @@ export const mostOverdueDocuments = (report: ReceivablesReportData) =>
 
 export const documentActivity = (
   document: DashboardDocument,
-  detail: Pick<DocumentView, "deliveries" | "share">,
+  detail: Pick<DocumentView, "deliveries">,
   payments: ReadonlyArray<unknown>,
+  views: ReadonlyArray<ShareViewEvent>,
 ): ReadonlyArray<DashboardActivity> => {
   const events: DashboardActivity[] = [];
   for (const delivery of detail.deliveries) {
@@ -224,9 +223,10 @@ export const documentActivity = (
       events.push({ id: `sent:${delivery.id}`, document, kind: "sent", at: delivery.at });
     }
   }
-  const viewedAt = detail.share?.lastViewedAt;
-  if (viewedAt != null) {
-    events.push({ id: `viewed:${document.id}`, document, kind: "viewed", at: viewedAt });
+  for (const view of views) {
+    if (view.kind === "view") {
+      events.push({ id: `viewed:${view.id}`, document, kind: "viewed", at: view.at });
+    }
   }
   for (const payment of payments) {
     if (

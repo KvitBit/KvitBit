@@ -5,18 +5,21 @@ import type {
   DeliveryId,
   DocumentId,
   IsoDate,
+  ShareViewId,
   WorkspaceId,
   WorkspaceSlug,
   WorkspaceSummary,
 } from "@kvitbit/domain/contract";
-import { Remote as RemoteOps, UiError } from "@kvitbit/ui-port/api";
+import { Remote as RemoteOps, sessionCookie, UiError } from "@kvitbit/ui-port/api";
 import { formatMoney, formatMonth } from "@kvitbit/ui-port/format";
 import type { Period, Route } from "@kvitbit/ui-port/view-models";
-import { BigDecimal } from "effect";
+import { BigDecimal, Effect } from "effect";
 import type { ReactElement } from "react";
+import { makeApiRunner } from "../../runtime/api-runtime";
 import { expoRouterStandIn } from "../../testing/expo-router-stand-in";
 import type { ReceivableDocumentRow } from "../reports/model";
 import type { DashboardContentProps } from "./dashboard-screen";
+import { loadWorkspaceActivity } from "./data";
 import {
   canWriteWorkspace,
   cashflowBarRatio,
@@ -27,7 +30,6 @@ import {
   mostOverdueDocuments,
   parseDocumentSummaries,
   periodRange,
-  recentActivityDocuments,
 } from "./model";
 
 mock.module("expo-router", () => expoRouterStandIn());
@@ -78,6 +80,147 @@ const sampleDoc: DashboardDocument = {
   dueOn: "2026-10-29" as IsoDate,
   total: money(14500),
 };
+
+const activityId = (n: number) => `01937c7a-0000-7000-8000-${String(n).padStart(12, "0")}`;
+
+test("finds the latest workspace activity across pages, including historical link views", async () => {
+  const recent = activityId(11);
+  const old = activityId(12);
+  const draft = activityId(13);
+  const other = activityId(14);
+  const workspaceId = activityId(1) as WorkspaceId;
+  const doc = (id: string, status: "issued" | "draft" = "issued") => ({
+    ...sampleDoc,
+    id,
+    status,
+    issuedOn: id === old ? "2024-01-01" : sampleDoc.issuedOn,
+    contact: { name: sampleDoc.contactName },
+    total: { amount: "14500", currency: "CZK" },
+  });
+  const at = (day: number) => `2026-11-${day}T10:00:00Z`;
+  const activityRequests: string[] = [];
+  const docCursors: Array<string | null> = [];
+  const viewCursors: Array<string | null> = [];
+  let active = 0;
+  let peak = 0;
+  const server = Bun.serve({
+    port: 0,
+    fetch: async (request) => {
+      const { pathname, searchParams } = new URL(request.url);
+      const path = pathname.split("/documents")[1] ?? "";
+      const cursor = searchParams.get("cursor");
+      if (path === "") {
+        docCursors.push(cursor);
+        return Response.json({
+          items:
+            cursor === null
+              ? [doc(recent), doc(other), doc(draft, "draft")]
+              : [doc(recent), doc(old)],
+          nextCursor: cursor === null ? "doc-next" : null,
+        });
+      }
+      activityRequests.push(path);
+      peak = Math.max(peak, ++active);
+      await Bun.sleep(5);
+      active -= 1;
+      if (path.endsWith("/payments")) {
+        const payment = { id: activityId(21), createdAt: at(24) };
+        return Response.json(path.includes(old) ? [payment, payment] : []);
+      }
+      if (path.endsWith("/views")) {
+        if (!path.includes(old)) return Response.json({ items: [], nextCursor: null });
+        viewCursors.push(cursor);
+        return Response.json({
+          items:
+            cursor === null
+              ? [{ id: activityId(31), kind: "download", at: at(27), device: "mobile" }]
+              : [
+                  { id: activityId(32), kind: "view", at: at(26), device: "mobile" },
+                  { id: activityId(33), kind: "view", at: at(25), device: "desktop" },
+                ],
+          nextCursor: cursor === null ? "views-next" : null,
+        });
+      }
+      const id = path.slice(1);
+      const sentOn = id === old ? 23 : id === recent ? 22 : 21;
+      const amount = { amount: "0", currency: "CZK" };
+      return Response.json({
+        ...doc(id),
+        revision: 1,
+        taxDocument: false,
+        contact: {
+          id: null,
+          name: "Contact",
+          ico: null,
+          dic: null,
+          legalForm: null,
+          address: {},
+          billingEmails: [],
+        },
+        issuer: {
+          workspaceId,
+          name: "Issuer",
+          ico: null,
+          dic: null,
+          address: {},
+          registerEntry: null,
+          email: null,
+          phone: null,
+          web: null,
+          regime: "non_payer",
+          bankAccount: null,
+        },
+        dates: { issuedOn: sampleDoc.issuedOn, dueOn: sampleDoc.dueOn, taxableSupplyOn: null },
+        paymentMethod: "bank_transfer",
+        lines: [],
+        totals: {
+          buckets: [],
+          net: amount,
+          vat: amount,
+          roundingAdjustment: amount,
+          gross: amount,
+          vatCzk: null,
+        },
+        fx: null,
+        statutoryNotes: [],
+        paymentQr: null,
+        related: [],
+        share: null,
+        deliveries: [
+          {
+            id: activityId(sentOn + 20),
+            purpose: "document",
+            status: "sent",
+            to: [],
+            at: at(sentOn),
+          },
+        ],
+      });
+    },
+  });
+  const runner = makeApiRunner(server.url.origin, sessionCookie, () => "en");
+  try {
+    const client = await runner.run(Effect.succeed);
+    if (client._tag === "Err") throw new Error("Could not get the API client");
+    const events = await Effect.runPromise(loadWorkspaceActivity(client.value, workspaceId));
+    expect(events.map(({ id, document }) => [id, document.id])).toEqual([
+      [`viewed:${activityId(32)}`, old],
+      [`viewed:${activityId(33)}`, old],
+      [`paid:${activityId(21)}`, old],
+      [`sent:${activityId(43)}`, old],
+      [`sent:${activityId(42)}`, recent],
+    ]);
+    expect(docCursors).toEqual([null, "doc-next"]);
+    expect(viewCursors).toEqual([null, "views-next"]);
+    expect(activityRequests.filter((path) => path === `/${recent}`)).toHaveLength(1);
+    expect(activityRequests.some((path) => path.includes(draft))).toBe(false);
+    expect(peak).toBeGreaterThan(1);
+    expect(peak).toBeLessThanOrEqual(4);
+  } finally {
+    await runner.dispose();
+    await server.stop(true);
+  }
+});
 
 const within = (node: ReactElement) => <TestProviders>{node}</TestProviders>;
 
@@ -185,14 +328,6 @@ describe("dashboard model", () => {
     expect(isWorkspaceEmpty(RemoteOps.load(noDocuments), noExpenses)).toBe(false);
     expect(isWorkspaceEmpty(noDocuments, RemoteOps.load(RemoteOps.idle))).toBe(false);
     expect(isWorkspaceEmpty(noDocuments, RemoteOps.fail(noExpenses, UiError.offline))).toBe(false);
-  });
-
-  test("keeps the activity request tied to the last successful document page when refresh fails", () => {
-    const refreshing = RemoteOps.load(recentDocuments);
-    const failed = RemoteOps.fail(refreshing, UiError.offline);
-    expect(recentActivityDocuments(failed)).toBe(recentActivityDocuments(recentDocuments));
-    expect(recentActivityDocuments(failed)).toEqual([sampleDoc]);
-    expect(recentActivityDocuments(RemoteOps.fail(RemoteOps.idle, UiError.offline))).toBeNull();
   });
 
   test("ranks open receivables across all aging buckets before taking the oldest five", () => {
@@ -314,7 +449,7 @@ describe("DashboardContent", () => {
     ).not.toContain("Invite your accountant");
   });
 
-  test("labels activity as recent-document activity and only renders actual document events", () => {
+  test("shows workspace activity independently of the recent documents list", () => {
     const events = documentActivity(
       sampleDoc,
       {
@@ -341,18 +476,21 @@ describe("DashboardContent", () => {
             at: "2026-11-09T09:00:00Z",
           },
         ],
-        share: { url: "https://example.com/share", views: 1, lastViewedAt: "2026-11-09T11:00:00Z" },
       },
       [
         { id: "partial_1", createdAt: "2026-11-10T09:00:00Z" },
         { id: "malformed_1", createdAt: "invalid" },
       ],
+      [{ id: "view_1" as ShareViewId, kind: "view", at: "2026-11-09T11:00:00Z", device: "mobile" }],
     );
-    expect(events.map(({ id }) => id)).toEqual(["sent:sent_1", "viewed:doc_1", "paid:partial_1"]);
+    expect(events.map(({ id }) => id)).toEqual(["sent:sent_1", "viewed:view_1", "paid:partial_1"]);
     const text = allText(
-      renderDashboard({ activity: RemoteOps.ready(events), recentDocs: recentDocuments }),
+      renderDashboard({
+        activity: RemoteOps.ready(events),
+        recentDocs: RemoteOps.fail(RemoteOps.idle, UiError.offline),
+      }),
     );
-    expect(text).toContain("Activity on recent documents");
+    expect(text).toContain("Recent activity");
     expect(text).toContain("Recent documents");
     expect(text).toContain("Sent");
     expect(text).toContain("Viewed");

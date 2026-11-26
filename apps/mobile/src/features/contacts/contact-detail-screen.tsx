@@ -13,19 +13,22 @@ import {
   ifMatchHeaders,
   inWorkspace,
   issuesAt,
+  type KvitbitApiClient,
   partitionIssues,
   type Remote,
+  Remote as RemoteOps,
 } from "@kvitbit/ui-port/api";
 import {
   formatDate,
   formatDateTime,
   formatMoney,
   normalizeIco,
+  parseIsoDate,
   validateIco,
 } from "@kvitbit/ui-port/format";
 import { enumKey } from "@kvitbit/ui-port/i18n";
 import { OverrideForm, type Route } from "@kvitbit/ui-port/view-models";
-import { Effect, Result } from "effect";
+import { Effect, Option, Result } from "effect";
 import { useLocalSearchParams } from "expo-router";
 import {
   Archive,
@@ -34,6 +37,7 @@ import {
   FileText,
   Pencil,
   Plus,
+  Receipt,
   RefreshCw,
   Search,
   Trash2,
@@ -70,7 +74,9 @@ import {
 } from "../../ui";
 import { useWorkspace } from "../../workspace/workspace-provider";
 import { type DashboardDocument, parseDocumentSummaries, pragueToday } from "../dashboard/model";
+import { usePagedFeed } from "../dashboard/paged-feed";
 import { decodeReportView } from "../reports/model";
+import { type ContactExpense, loadSupplierExpenses } from "./expense-history";
 import {
   applyRegistryPreview,
   applyRegistryToForm,
@@ -114,6 +120,8 @@ export interface ContactDetailViewProps {
   readonly onRetryDocuments: () => void;
   readonly receivables: Remote<ReturnType<typeof summarizeContactReceivables> | null>;
   readonly onRetryReceivables: () => void;
+  readonly expenses: Remote<ReadonlyArray<ContactExpense>>;
+  readonly onRetryExpenses: () => void;
   readonly onEdit: () => void;
   readonly onArchive: () => void;
   readonly archiving: boolean;
@@ -402,6 +410,52 @@ export function ContactDetailView(props: ContactDetailViewProps) {
                     }
                     onPress={() =>
                       props.onNavigate({ _tag: "Document", ws, id: doc.id, tab: "preview" })
+                    }
+                  />
+                ))}
+              </Card>
+            )
+          }
+        </RemoteView>
+      </Section>
+
+      <Section title={t("expenses.list.title")}>
+        <RemoteView state={props.expenses} onRetry={props.onRetryExpenses}>
+          {(expenses) =>
+            expenses.length === 0 ? (
+              <Card>
+                <EmptyState
+                  title={local({
+                    cs: "Žádné náklady tohoto kontaktu",
+                    en: "No expenses for this contact",
+                  })}
+                />
+              </Card>
+            ) : (
+              <Card style={styles.listCard}>
+                {expenses.map((expense) => (
+                  <ListRow
+                    key={expense.id}
+                    leading={Receipt}
+                    title={expense.supplierDocumentNumber ?? t("expenses.editor.title")}
+                    {...(expense.issuedOn !== null && parseIsoDate(expense.issuedOn) !== null
+                      ? { subtitle: formatDate(locale, expense.issuedOn) }
+                      : {})}
+                    {...(expense.total !== null && expense.currency !== null
+                      ? {
+                          trailing: formatMoney(locale, {
+                            amount: expense.total,
+                            currency: expense.currency,
+                          }),
+                        }
+                      : {})}
+                    badge={
+                      expense.status === "incomplete" ? (
+                        <Badge tone="warning" label={t("enum.badge.incomplete")} />
+                      ) : undefined
+                    }
+                    onPress={() =>
+                      props.onNavigate({ _tag: "Expense", ws, id: expense.id, mode: "view" })
                     }
                   />
                 ))}
@@ -1051,6 +1105,15 @@ function WorkspaceContactDetail({
   );
 
   const record = contactRemote.state._tag === "Ready" ? contactRemote.state.value : null;
+  const loadedContactId = Option.getOrNull(RemoteOps.value(contactRemote.state))?.id ?? null;
+  const loadExpenses = useCallback(
+    (client: KvitbitApiClient) =>
+      loadedContactId === null
+        ? Effect.succeed([])
+        : loadSupplierExpenses(client, workspace.id, loadedContactId),
+    [workspace.id, loadedContactId],
+  );
+  const expensesRemote = usePagedFeed(loadedContactId === null ? null : loadExpenses);
   const editable = canEditContact(workspace, isNew ? "new" : record);
 
   // Keep a draft and its base revision until the user explicitly reloads it.
@@ -1403,6 +1466,7 @@ function WorkspaceContactDetail({
         contactRemote.reload();
         documentsRemote.reload();
         receivablesRemote.reload();
+        expensesRemote.reload();
       }}
       refreshing={contactRemote.state._tag === "Loading"}
     >
@@ -1451,6 +1515,8 @@ function WorkspaceContactDetail({
               onRetryDocuments={documentsRemote.reload}
               receivables={receivablesRemote.state}
               onRetryReceivables={receivablesRemote.reload}
+              expenses={expensesRemote.state}
+              onRetryExpenses={expensesRemote.reload}
               onEdit={() => {
                 if (savingRef.current) return;
                 setForm(contactFormFromRecord(record));

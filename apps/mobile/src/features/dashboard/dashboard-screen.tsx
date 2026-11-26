@@ -1,5 +1,10 @@
 import type { DashboardView, WorkspaceSummary } from "@kvitbit/domain/contract";
-import { inWorkspace, type Remote, Remote as RemoteOps } from "@kvitbit/ui-port/api";
+import {
+  inWorkspace,
+  type KvitbitApiClient,
+  type Remote,
+  Remote as RemoteOps,
+} from "@kvitbit/ui-port/api";
 import { formatDate, formatDateTime, formatMoney, formatMonth } from "@kvitbit/ui-port/format";
 import { type EnumKey, enumKey } from "@kvitbit/ui-port/i18n";
 import type { Period, Route } from "@kvitbit/ui-port/view-models";
@@ -32,7 +37,7 @@ import {
 import { useWorkspace } from "../../workspace/workspace-provider";
 import type { ReceivableDocumentRow } from "../reports/model";
 import { canManageInvitations } from "../settings/permissions";
-import { loadOverdueDocuments, loadRecentDocumentActivity, loadRecentDocuments } from "./data";
+import { loadOverdueDocuments, loadRecentDocuments, loadWorkspaceActivity } from "./data";
 import {
   canWriteWorkspace,
   cashflowBarRatio,
@@ -44,8 +49,8 @@ import {
   periodRange,
   pragueToday,
   type RecentDashboardDocuments,
-  recentActivityDocuments,
 } from "./model";
+import { usePagedFeed } from "./paged-feed";
 
 const badgeForDocument = (
   doc: DashboardDocument,
@@ -410,9 +415,7 @@ export function DashboardContent(props: DashboardContentProps) {
         </RemoteView>
       </Section>
 
-      <Section
-        title={local({ cs: "Aktivita u posledních dokladů", en: "Activity on recent documents" })}
-      >
+      <Section title={t("dashboard.recent.title")}>
         <RemoteView state={props.activity} onRetry={props.onRetryActivity}>
           {(events) =>
             events.length === 0 ? (
@@ -520,13 +523,11 @@ function WorkspaceDashboard({ workspace }: { readonly workspace: WorkspaceSummar
 
   const recentDocs = useRemote((api) => loadRecentDocuments(api, workspace.id), [workspace.id]);
 
-  const recentItems = recentActivityDocuments(recentDocs.state);
-  const activity = useRemote(
-    recentItems === null
-      ? null
-      : (api) => loadRecentDocumentActivity(api, workspace.id, recentItems),
-    [workspace.id, recentItems],
+  const loadActivity = useCallback(
+    (api: KvitbitApiClient) => loadWorkspaceActivity(api, workspace.id),
+    [workspace.id],
   );
+  const activity = usePagedFeed(loadActivity);
 
   const hasExpenses = useRemote(
     canWriteWorkspace(workspace)
@@ -539,24 +540,22 @@ function WorkspaceDashboard({ workspace }: { readonly workspace: WorkspaceSummar
     [workspace.id, workspace.role, workspace.closed],
   );
 
-  const refreshing = [
-    dashboard.state,
-    overdueDocs.state,
-    recentDocs.state,
-    activity.state,
-    hasExpenses.state,
-  ].some((state) => RemoteOps.isBusy<unknown, unknown>(state));
+  const refreshing = [dashboard.state, overdueDocs.state, recentDocs.state, hasExpenses.state].some(
+    (state) => RemoteOps.isBusy<unknown, unknown>(state),
+  );
 
   const reloadDashboard = dashboard.reload;
   const reloadOverdue = overdueDocs.reload;
   const reloadRecent = recentDocs.reload;
+  const reloadActivity = activity.reload;
   const reloadExpenses = hasExpenses.reload;
   const onRefresh = useCallback(() => {
     reloadDashboard();
     reloadOverdue();
     reloadRecent();
     reloadExpenses();
-  }, [reloadDashboard, reloadOverdue, reloadRecent, reloadExpenses]);
+    reloadActivity();
+  }, [reloadDashboard, reloadOverdue, reloadRecent, reloadExpenses, reloadActivity]);
 
   useFocusEffect(
     useCallback(() => {
@@ -586,7 +585,7 @@ function WorkspaceDashboard({ workspace }: { readonly workspace: WorkspaceSummar
         recentDocs={recentDocs.state}
         onRetryRecent={reloadRecent}
         activity={activity.state}
-        onRetryActivity={activity.reload}
+        onRetryActivity={reloadActivity}
         hasExpenses={hasExpenses.state}
         onNavigate={(route) => navigate(route)}
       />

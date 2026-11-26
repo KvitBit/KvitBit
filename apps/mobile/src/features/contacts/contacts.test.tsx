@@ -2,6 +2,7 @@ import { describe, expect, mock, test } from "bun:test";
 import type {
   ContactId,
   CurrencyCode,
+  ExpenseId,
   IsoDate,
   RegistryResult,
   WorkspaceId,
@@ -10,6 +11,7 @@ import type {
 } from "@kvitbit/domain/contract";
 import { text as uiText } from "@kvitbit/ui-port";
 import {
+  fromCause,
   ifMatchHeaders,
   ok,
   Paged,
@@ -17,13 +19,15 @@ import {
   sessionCookie,
 } from "@kvitbit/ui-port/api";
 import { OverrideForm, type Route } from "@kvitbit/ui-port/view-models";
-import { BigDecimal, Effect, Option } from "effect";
+import { BigDecimal, Effect, Exit, Option } from "effect";
 import type { ReactElement } from "react";
 import { ApiProvider, makeApiRunner } from "../../runtime/api-runtime";
 import { SessionProvider } from "../../session/session-provider";
 import { expoRouterStandIn } from "../../testing/expo-router-stand-in";
 import { WorkspaceProvider } from "../../workspace/workspace-provider";
+import { decodeExpenseDetail } from "../expenses/model";
 import { decodeReportView } from "../reports/model";
+import { loadSupplierExpenses } from "./expense-history";
 import {
   applyRegistryPreview,
   applyRegistryToForm,
@@ -104,6 +108,100 @@ const sampleRegistry: RegistryResult = {
 };
 
 const within = (node: ReactElement) => <TestProviders>{node}</TestProviders>;
+
+const expenseId = (n: number) =>
+  `01937c7a-0000-7000-8000-${String(n).padStart(12, "0")}` as ExpenseId;
+const linkedExpense = (id: ExpenseId, supplierDocumentNumber: string) => ({
+  id,
+  revision: 1,
+  status: "complete",
+  supplier: { contactId: sampleContact.id, name: "Old supplier name" },
+  supplierDocumentNumber,
+  issuedOn: "2026-11-26",
+  total: "200",
+  currency: "CZK",
+});
+
+describe("supplier expense history", () => {
+  test("follows the expense cursor, matches the linked ID and preserves list order", async () => {
+    const ids = Array.from({ length: 7 }, (_, index) => expenseId(index + 10));
+    const first = expenseId(10);
+    const last = expenseId(16);
+    const removed = expenseId(15);
+    const queries: string[] = [];
+    const reads: string[] = [];
+    let active = 0;
+    let peak = 0;
+    let failLast = false;
+    const server = Bun.serve({
+      port: 0,
+      fetch: async (request) => {
+        const url = new URL(request.url);
+        if (url.pathname.endsWith("/expenses")) {
+          queries.push(url.search);
+          const second = url.searchParams.has("cursor");
+          return Response.json({
+            items: (second ? [first, last] : ids.slice(0, -1)).map((id) => ({
+              id,
+              status: "complete",
+              supplierName: sampleContact.name,
+            })),
+            nextCursor: second ? null : "expense-next",
+          });
+        }
+        const id = url.pathname.split("/").at(-1) as ExpenseId;
+        reads.push(id);
+        peak = Math.max(peak, ++active);
+        await Bun.sleep(id === first ? 30 : 5);
+        active -= 1;
+        if (id === removed)
+          return Response.json({ _tag: "NotFound", entity: "Expense", id }, { status: 404 });
+        if (id === last && failLast) {
+          return Response.json({ _tag: "Unavailable", dependency: "database" }, { status: 503 });
+        }
+        const record = linkedExpense(id, id === first ? "FIRST" : "LATER");
+        return Response.json(
+          id === first || id === last
+            ? record
+            : {
+                ...record,
+                supplier: {
+                  contactId: id === expenseId(11) ? workspace.id : null,
+                  name: sampleContact.name,
+                },
+              },
+        );
+      },
+    });
+    const runner = makeApiRunner(server.url.origin, sessionCookie, () => "en");
+    try {
+      const client = await runner.run(Effect.succeed);
+      if (client._tag === "Err") throw new Error("Could not get the API client");
+      const load = loadSupplierExpenses(client.value, workspace.id, sampleContact.id);
+      const expenses = await Effect.runPromise(load);
+      expect(expenses.map((expense) => expense.supplierDocumentNumber)).toEqual(["FIRST", "LATER"]);
+      expect(queries.map((query) => new URLSearchParams(query).get("cursor"))).toEqual([
+        null,
+        "expense-next",
+      ]);
+      expect(queries.map((query) => [...new URLSearchParams(query).keys()].sort())).toEqual([
+        ["limit"],
+        ["cursor", "limit"],
+      ]);
+      expect(new Set(queries.map((query) => new URLSearchParams(query).get("limit"))).size).toBe(1);
+      expect(reads.toSorted()).toEqual(ids.toSorted());
+      expect(peak).toBeGreaterThan(1);
+      expect(peak).toBeLessThanOrEqual(4);
+
+      failLast = true;
+      const failed = await Effect.runPromiseExit(load);
+      expect(Exit.isFailure(failed) && fromCause(failed.cause)._tag).toBe("Unavailable");
+    } finally {
+      await runner.dispose();
+      await server.stop(true);
+    }
+  });
+});
 
 describe("contacts model", () => {
   test("equivalent contact role selections produce identical create payloads", () => {
@@ -400,6 +498,7 @@ describe("ContactDetailView & ContactEditorView", () => {
 
   test("shows contact particulars, billing defaults, and ARES diff preview", () => {
     let applied = 0;
+    const routes: Route[] = [];
     const tree = hostTree(
       <ContactDetailView
         workspace={workspace}
@@ -408,6 +507,10 @@ describe("ContactDetailView & ContactEditorView", () => {
         onRetryDocuments={() => undefined}
         receivables={RemoteOps.ready(null)}
         onRetryReceivables={() => undefined}
+        expenses={RemoteOps.ready([
+          decodeExpenseDetail(linkedExpense(expenseId(10), "SUP-2026-10")),
+        ])}
+        onRetryExpenses={() => undefined}
         onEdit={() => undefined}
         onArchive={() => undefined}
         archiving={false}
@@ -420,7 +523,7 @@ describe("ContactDetailView & ContactEditorView", () => {
         onApplyAresDiff={() => applied++}
         onDismissAresDiff={() => undefined}
         applyingAres={false}
-        onNavigate={() => undefined}
+        onNavigate={(route) => routes.push(route)}
       />,
       within,
     ) as ReactElement<HostProps>;
@@ -431,6 +534,14 @@ describe("ContactDetailView & ContactEditorView", () => {
     expect(text).toContain("Changes from ARES");
     expect(text).toContain("Nová ulice 12");
     expect(text).toContain("terminated");
+    expect(text).toContain("Expenses");
+    const expenseRow = findAll<{ onPress?: () => void }>(tree, "Pressable").find((node) =>
+      allText(node).includes("SUP-2026-10"),
+    );
+    expenseRow?.props.onPress?.();
+    expect(routes).toEqual([
+      { _tag: "Expense", ws: workspace.slug, id: expenseId(10), mode: "view" },
+    ]);
 
     const applyBtn = findAll<{ onPress?: () => void }>(tree, "Pressable").find((p) =>
       allText(p).includes("Apply"),
