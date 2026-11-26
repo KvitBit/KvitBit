@@ -220,6 +220,7 @@ describe("DocumentDetailScreen and DocumentEditorScreen", () => {
   }> = [];
   let dropNext: string | null = null;
   let dropIssueBeforeCommit = false;
+  let holdFxResponse: Promise<void> | null = null;
   let committed: Map<string, ReturnType<typeof makeWireDoc>>;
 
   beforeAll(() => {
@@ -449,6 +450,11 @@ describe("DocumentDetailScreen and DocumentEditorScreen", () => {
             },
           ]);
         }
+        if (req.method === "GET" && url.pathname.endsWith("/fx-rates/EUR") && holdFxResponse) {
+          const held = holdFxResponse;
+          holdFxResponse = null;
+          await held;
+        }
         if (req.method === "POST" && url.pathname.endsWith("/documents")) {
           return Response.json(
             makeWireDoc({ id: FINAL_ID, kind: "invoice", number: null, status: "draft" }),
@@ -487,6 +493,7 @@ describe("DocumentDetailScreen and DocumentEditorScreen", () => {
     committed = new Map();
     dropNext = null;
     dropIssueBeforeCommit = false;
+    holdFxResponse = null;
     wireDoc = makeWireDoc();
     mockParams = { id: DOC_ID };
   });
@@ -1073,21 +1080,28 @@ describe("DocumentDetailScreen and DocumentEditorScreen", () => {
 
   test("an editor refresh cannot submit a template draft against an unrelated newer revision", async () => {
     await importTemplateDraft();
-    await openEditor();
-    await change("editor-line-desc-0", "Local edit before refresh");
-    wireDoc = { ...wireDoc, revision: wireDoc.revision + 1 };
-    const reads = () =>
-      calls.filter((call) => call.method === "GET" && call.path.endsWith(`/documents/${DOC_ID}`))
-        .length;
-    const before = reads();
-    await show(<DocumentEditRoute />, "refreshed");
-    await waitFor(() => reads() > before, "document reloaded");
-    await settle();
-    await click("editor-save-button");
-    await waitFor(
-      () => root.container().textContent?.includes("changed while you were editing") === true,
-    );
-    expect(calls.filter((call) => call.method === "PATCH")).toHaveLength(0);
+    const fxResponse = Promise.withResolvers<void>();
+    holdFxResponse = fxResponse.promise;
+    try {
+      await openEditor();
+      await waitFor(() => holdFxResponse === null, "old session's FX request is in flight");
+      await change("editor-line-desc-0", "Local edit before refresh");
+      wireDoc = { ...wireDoc, revision: wireDoc.revision + 1 };
+      const reads = () =>
+        calls.filter((call) => call.method === "GET" && call.path.endsWith(`/documents/${DOC_ID}`))
+          .length;
+      const before = reads();
+      await show(<DocumentEditRoute />, "refreshed");
+      await waitFor(() => reads() > before, "document reloaded");
+      await settle();
+      await click("editor-save-button");
+      await waitFor(
+        () => root.container().textContent?.includes("changed while you were editing") === true,
+      );
+      expect(calls.filter((call) => call.method === "PATCH")).toHaveLength(0);
+    } finally {
+      fxResponse.resolve();
+    }
   });
 
   test("issuing an imported draft from detail carries its known template settings forward", async () => {

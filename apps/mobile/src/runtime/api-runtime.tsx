@@ -7,6 +7,8 @@ import {
   attempt,
   bearer,
   type Credentials,
+  err,
+  fromCause,
   KvitbitApi,
   type KvitbitApiClient,
   layerFetch,
@@ -14,7 +16,7 @@ import {
   Remote as RemoteOps,
   sessionCookie,
 } from "@kvitbit/ui-port/api";
-import { Effect, ManagedRuntime } from "effect";
+import { Effect, Exit, ManagedRuntime } from "effect";
 import {
   createContext,
   type DependencyList,
@@ -53,14 +55,16 @@ export const makeApiRunner = (
     origin,
     credentials,
     run: (call) =>
-      runtime.runPromise(
-        attempt(
-          Effect.gen(function* () {
-            const api = yield* KvitbitApi;
-            return yield* call(api);
-          }),
-        ),
-      ),
+      runtime
+        .runPromiseExit(
+          attempt(
+            Effect.gen(function* () {
+              const api = yield* KvitbitApi;
+              return yield* call(api);
+            }),
+          ),
+        )
+        .then((exit) => (Exit.isSuccess(exit) ? exit.value : err(fromCause(exit.cause)))),
     dispose: () => runtime.dispose(),
   };
 };
