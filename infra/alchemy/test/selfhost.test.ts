@@ -554,8 +554,7 @@ describe("Self-hosting and CI deploy artifacts", () => {
     expect(workflow).toContain(`sha-\${GITHUB_SHA}-run-\${GITHUB_RUN_ID}-\${GITHUB_RUN_ATTEMPT}`);
     expect(workflow).toContain("bun apps/server/src/migrate.ts");
     expect(workflow).toContain("bunx alchemy deploy --yes");
-    expect(workflow).toContain("kvitbit/active-digest");
-    expect(workflow).toContain("kvitbit/active-config-sha");
+    expect(workflow).toContain("kvitbit/active-target");
     expect(workflow).toContain("--format='value(value)'");
     expect(workflow).not.toContain("--format='value(queryValue)'");
     expect(workflow).toContain(
@@ -579,7 +578,7 @@ describe("Self-hosting and CI deploy artifacts", () => {
     expect(deployPos).toBeGreaterThan(migratePos);
   });
 
-  test("deploy.yml normalizes optional secret booleans and verifies runner active-digest + active-config-sha (with legacy VM reset fallback)", () => {
+  test("deploy.yml normalizes secret flags and resets legacy runners that cannot confirm a verified target", () => {
     const workflow = readFileSync(join(repoRoot, ".github/workflows/deploy.yml"), "utf8");
     const parsed = Bun.YAML.parse(workflow) as {
       jobs: {
@@ -643,8 +642,7 @@ describe("Self-hosting and CI deploy artifacts", () => {
       });
       expect(normBad.exitCode).not.toBe(0);
 
-      // 2. Test runner rollout verification step with representative gcloud --format='value(value)'
-      //    and legacy pre-timer VM reset fallback
+      // 2. Verify the rollout step requires the combined acknowledgement from the current script.
       const binDir = join(sandbox, "bin");
       const stateDir = join(sandbox, "state");
       mkdirSync(binDir, { recursive: true });
@@ -687,13 +685,16 @@ if [ "$1" = "compute" ] && [ "$2" = "instances" ] && [ "$3" = "get-guest-attribu
   if [ "$FORMAT" != "value(value)" ]; then
     exit 0
   fi
-  # runner-0 is already converged; runner-1 simulates a legacy pre-timer VM that converges after 1 reset
-  if [ "$RUNNER" = "kvitbit-prod-runner-1" ] && [ ! -f "${stateDir}/reset-kvitbit-prod-runner-1" ]; then
-    exit 0
-  fi
   case "$QUERY_PATH" in
     "kvitbit/active-digest") printf '%s\\n' "${targetDigest}" ;;
     "kvitbit/active-config-sha") printf '%s\\n' "${targetConfigSha}" ;;
+    "kvitbit/active-target")
+      # Legacy runner-1 advertises matching individual attributes. Only the updated script,
+      # installed on reset, can attest to the combined target.
+      if [ "$RUNNER" = "kvitbit-prod-runner-0" ] || [ -f "${stateDir}/reset-kvitbit-prod-runner-1" ]; then
+        printf '%s\\n' "${targetDigest}|${targetConfigSha}"
+      fi
+      ;;
   esac
   exit 0
 fi

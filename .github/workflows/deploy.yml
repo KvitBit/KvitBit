@@ -301,22 +301,19 @@ jobs:
             local runner="$1"
             local expected_config_sha="$2"
             local max_attempts="$3"
+            local expected_target="${TARGET_DIGEST}|${expected_config_sha}"
             for attempt in $(seq 1 "$max_attempts"); do
-              active_digest="$(gcloud compute instances get-guest-attributes "$runner" \
+              # This single value binds the digest and config SHA to the same verified worker.
+              active_target="$(gcloud compute instances get-guest-attributes "$runner" \
                 --project "$GCP_PROJECT_ID" \
                 --zone "$GCP_ZONE" \
-                --query-path="kvitbit/active-digest" \
+                --query-path="kvitbit/active-target" \
                 --format='value(value)' 2>/dev/null || true)"
-              active_config_sha="$(gcloud compute instances get-guest-attributes "$runner" \
-                --project "$GCP_PROJECT_ID" \
-                --zone "$GCP_ZONE" \
-                --query-path="kvitbit/active-config-sha" \
-                --format='value(value)' 2>/dev/null || true)"
-              if [ "$active_digest" = "$TARGET_DIGEST" ] && [ "$active_config_sha" = "$expected_config_sha" ]; then
+              if [ "$active_target" = "$expected_target" ]; then
                 echo "Verified runner ${runner} is running digest=${TARGET_DIGEST} config=${expected_config_sha}"
                 return 0
               fi
-              echo "Waiting for runner ${runner} (attempt ${attempt}/${max_attempts}, observed digest=${active_digest:-none} config=${active_config_sha:-none})"
+              echo "Waiting for runner ${runner} (attempt ${attempt}/${max_attempts}, observed target=${active_target:-none})"
               sleep 10
             done
             return 1
@@ -339,7 +336,7 @@ jobs:
             fi
 
             if ! poll_runner_convergence "$runner" "$expected_config_sha" 12; then
-              echo "Runner ${runner} did not converge via timer (possible legacy pre-timer VM); resetting instance once to apply startup script"
+              echo "Runner ${runner} did not report the verified target via timer. Resetting the instance once to apply the current startup script."
               gcloud compute instances reset "$runner" \
                 --project "$GCP_PROJECT_ID" \
                 --zone "$GCP_ZONE" \
