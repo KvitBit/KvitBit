@@ -28,6 +28,9 @@ import { useApi, useRemote } from "../../runtime/api-runtime";
 import {
   acquireRequestKey,
   completeRequestKey,
+  isRequestIntentExpired,
+  requestIntentFailure,
+  requestIntentReconciliationCopy,
   settlesRequestIntent,
 } from "../../runtime/request-intent";
 import { useSession } from "../../session/session-provider";
@@ -483,8 +486,12 @@ export function PriceListScreen() {
       }
       return created;
     })()
-      .catch(() => {
-        setBannerError(t("error.unknown"));
+      .catch((error) => {
+        setBannerError(
+          isRequestIntentExpired(requestIntentFailure(error))
+            ? local(requestIntentReconciliationCopy)
+            : t("error.unknown"),
+        );
         return null;
       })
       .finally(() => {
@@ -524,6 +531,7 @@ export function PriceListScreen() {
     closeEditor,
     form,
     itemsRemote,
+    local,
     overlay,
     owner,
     staleRevision,

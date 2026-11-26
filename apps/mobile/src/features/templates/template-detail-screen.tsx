@@ -13,7 +13,11 @@ import { StyleSheet, View } from "react-native";
 import { useI18n } from "../../i18n/i18n-provider";
 import { navigate } from "../../navigation/routes";
 import { useApi, useRemote } from "../../runtime/api-runtime";
-import { runRequestIntent } from "../../runtime/request-intent";
+import {
+  isRequestIntentExpired,
+  requestIntentReconciliationCopy,
+  runRequestIntent,
+} from "../../runtime/request-intent";
 import { useSession } from "../../session/session-provider";
 import {
   Badge,
@@ -157,7 +161,11 @@ export function TemplateDetailScreen(props: {
           { replace: true },
         );
       } else {
-        setBannerError(text(describeError(res.error).text));
+        setBannerError(
+          isRequestIntentExpired(res.error)
+            ? local(requestIntentReconciliationCopy)
+            : text(describeError(res.error).text),
+        );
       }
       return;
     }
@@ -187,6 +195,7 @@ export function TemplateDetailScreen(props: {
     form,
     isNew,
     loaded,
+    local,
     overlay,
     owner,
     saving,
@@ -226,7 +235,11 @@ export function TemplateDetailScreen(props: {
           tab: "preview",
         });
       } else {
-        setBannerError(text(describeError(res.error).text));
+        setBannerError(
+          isRequestIntentExpired(res.error)
+            ? local(requestIntentReconciliationCopy)
+            : text(describeError(res.error).text),
+        );
       }
     },
     [actionBusy, api, local, overlay, owner, templateId, text, workspace],

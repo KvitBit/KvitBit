@@ -6,6 +6,10 @@ import {
   type UiError,
 } from "@kvitbit/ui-port/api";
 import type { I18n } from "../../i18n/i18n-provider";
+import {
+  isRequestIntentExpired,
+  requestIntentReconciliationCopy,
+} from "../../runtime/request-intent";
 
 export interface FormErrorState {
   readonly banner: string | null;
@@ -20,6 +24,9 @@ export const noFormError: FormErrorState = {
 };
 
 export const formErrorFrom = (error: UiError, i18n: I18n): FormErrorState => {
+  if (isRequestIntentExpired(error)) {
+    return { ...noFormError, banner: i18n.local(requestIntentReconciliationCopy) };
+  }
   const view = describeError(error);
   return {
     banner: view.surface === "silent" ? null : i18n.text(view.text),
