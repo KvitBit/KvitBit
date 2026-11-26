@@ -47,8 +47,17 @@
 
             nativeBuildInputs = [ pkgs.makeWrapper ];
 
+            bunInstallFlags = [
+              "--linker=isolated"
+              "--frozen-lockfile"
+            ];
+            preBunNodeModulesInstallPhase = ''
+              bun scripts/prepare-bun-tarball-cache.ts "$BUN_INSTALL_CACHE_DIR" "${bunDeps}"
+            '';
+
             buildPhase = ''
               runHook preBuild
+              export CI=1 EXPO_NO_TELEMETRY=1
               mkdir -p public/web public/app
               if [ -f apps/web/package.json ]; then
                 bun run --filter @kvitbit/web build
