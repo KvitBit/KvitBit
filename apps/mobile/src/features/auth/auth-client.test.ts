@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { PasskeyBridge } from "../../platform/passkeys/passkey-bridge";
 import type { AuthFetch, AuthRequest, AuthResponse } from "../../session/auth-http";
+import { acceptInvitedSignup } from "./accept-invited-signup";
 import { makeAuthClient } from "./auth-client";
 
 const sampleUser = {
@@ -56,19 +57,79 @@ describe("AuthClient", () => {
   test("signUpEmail sends x-altcha and accept-language", async () => {
     const h = makeHarness(() => ({ status: 200, ok: true, body: {}, token: null }));
     const res = await h.client.signUpEmail(
-      { email: "a@b.cz", password: "longpassword", name: "A", locale: "cs", invitation: "inv1" },
+      { email: "a@b.cz", password: "longpassword", name: "A", locale: "cs" },
       "altcha-b64",
     );
-    expect(res).toEqual({ _tag: "Ok", value: undefined });
+    expect(res).toEqual({ _tag: "Ok", value: null });
     expect(h.calls[0]?.path).toBe("/sign-up/email");
     expect(h.calls[0]?.req?.headers).toEqual({ "accept-language": "cs", "x-altcha": "altcha-b64" });
     expect(h.calls[0]?.req?.body).toEqual({
       email: "a@b.cz",
       password: "longpassword",
       name: "A",
-      invitation: "inv1",
-      callbackURL: "/app/sign-in?verified=1&returnTo=%2Finvite%2Finv1",
+      callbackURL: "/app/sign-in?verified=1",
     });
+  });
+
+  test("invited signup uses the invitation proof and joins with its fresh bearer session", async () => {
+    const h = makeHarness(() => ({
+      status: 200,
+      ok: true,
+      body: { user: sampleUser },
+      token: "fresh-test-session",
+    }));
+    const res = await h.client.signUpEmail(
+      {
+        email: sampleUser.email,
+        password: "longpassword",
+        name: "Jana",
+        locale: "en",
+        invitation: "inv1",
+      },
+      "invitation-accept-test-proof",
+    );
+    expect(h.calls[0]).toMatchObject({
+      path: "/sign-up/email",
+      req: {
+        headers: { "x-altcha": "invitation-accept-test-proof" },
+        body: { invitation: "inv1", email: sampleUser.email },
+      },
+    });
+    expect(h.signedInTokens).toEqual(["fresh-test-session"]);
+    expect(res._tag).toBe("Ok");
+    if (res._tag !== "Ok" || res.value === null) throw new Error("Expected invited session");
+
+    let join: { method: string; path: string; authorization: string | null } | undefined;
+    const server = Bun.serve({
+      port: 0,
+      fetch(request) {
+        join = {
+          method: request.method,
+          path: new URL(request.url).pathname,
+          authorization: request.headers.get("Authorization"),
+        };
+        return Response.json({
+          id: "019a0000-0000-7000-8000-000000000001",
+          slug: "acme",
+          name: "Acme",
+          role: "member",
+          memberCount: 2,
+          taxRegime: "non_vat_payer",
+          closed: false,
+        });
+      },
+    });
+    try {
+      const joined = await acceptInvitedSignup(server.url.origin, "en", "inv1", res.value.token);
+      expect(joined._tag === "Ok" && joined.value.slug).toBe("acme");
+      expect(join).toEqual({
+        method: "POST",
+        path: "/api/v1/invitations/inv1/accept",
+        authorization: "Bearer fresh-test-session",
+      });
+    } finally {
+      server.stop(true);
+    }
   });
 
   test("passkey signup requests an email-backed session and resumes at registration", async () => {

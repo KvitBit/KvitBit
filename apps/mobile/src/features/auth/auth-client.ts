@@ -213,7 +213,16 @@ export const makeAuthClient = (deps: AuthClientDeps): AuthClient => {
             ...(input.invitation !== undefined ? { invitation: input.invitation } : {}),
           },
         });
-        return res.ok ? ok(undefined) : err(mapAuthError(res));
+        if (!res.ok) return err(mapAuthError(res));
+        if (input.invitation === undefined) return ok(null);
+        const invited = readSessionUser(res.body);
+        if (
+          invited === null ||
+          !invited.emailVerified ||
+          invited.email.toLowerCase() !== input.email.toLowerCase()
+        )
+          return err(UiError.unexpected(res.status, null));
+        return establishSession(res);
       }),
 
     signInEmail: (input, proof) =>

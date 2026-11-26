@@ -6,6 +6,8 @@ import { StyleSheet, View } from "react-native";
 import { useI18n } from "../../i18n/i18n-provider";
 import { navigate } from "../../navigation/routes";
 import { passkeyBridge } from "../../platform/passkeys/passkey-bridge";
+import { useSession } from "../../session/session-provider";
+import { tokenStore } from "../../session/token-store";
 import {
   Banner,
   Button,
@@ -17,8 +19,10 @@ import {
   Text,
   TextField,
 } from "../../ui";
+import { lastWorkspace } from "../../workspace/last-workspace";
+import { acceptInvitedSignup } from "./accept-invited-signup";
 import { checkEmailHref, inviteReturnTo } from "./auth-links";
-import type { AuthClient } from "./auth-port";
+import type { AuthClient, AuthSession } from "./auth-port";
 import { BotProofWidget } from "./bot-proof-widget";
 import { CheckEmailScreen } from "./check-email-screen";
 import { useAuthClient } from "./use-auth-client";
@@ -35,6 +39,7 @@ export function SignUpScreen(props: {
   const { t, text, locale, setLocale, local } = useI18n();
   const contextAuth = useAuthClient();
   const auth = props.authClient ?? contextAuth;
+  const { origin } = useSession();
 
   const [name, setName] = useState("");
   const [email, setEmail] = useState(props.lockedEmail ?? "");
@@ -45,9 +50,39 @@ export function SignUpScreen(props: {
   const [busy, setBusy] = useState(false);
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
   const [errorBanner, setErrorBanner] = useState<string | null>(null);
+  const [invitedAccount, setInvitedAccount] = useState<AuthSession | null>(null);
 
-  const bot = useBotProof(method === "passkey" ? "magic_link" : "sign_up", { initial: "auto" });
+  const scope =
+    props.invitation !== undefined
+      ? "invitation_accept"
+      : method === "passkey"
+        ? "magic_link"
+        : "sign_up";
+  const bot = useBotProof(scope, { initial: "auto" });
   const returnTo = inviteReturnTo(props.invitation);
+
+  const joinInvitation = async (token: string, account: AuthSession) => {
+    setBusy(true);
+    setErrorBanner(null);
+    try {
+      const joined = await acceptInvitedSignup(
+        origin,
+        locale,
+        token,
+        tokenStore.usesBearer ? account.token : null,
+      );
+      if (joined._tag === "Err") {
+        setErrorBanner(text(describeError(joined.error).text));
+        return;
+      }
+      await lastWorkspace.write(joined.value.slug);
+      navigate({ _tag: "Dashboard", ws: joined.value.slug }, { replace: true });
+    } catch {
+      setErrorBanner(t("auth.genericError"));
+    } finally {
+      setBusy(false);
+    }
+  };
 
   const sendPasskeyLink = async (email: string) => {
     const fresh = await bot.ensureFresh();
@@ -66,6 +101,7 @@ export function SignUpScreen(props: {
   };
 
   const handleSubmit = async () => {
+    if (busy) return;
     const trimmedEmail = (props.lockedEmail ?? email).trim();
     const trimmedName = name.trim();
     const nextErrors: Record<string, string> = {};
@@ -119,6 +155,15 @@ export function SignUpScreen(props: {
     setBusy(false);
 
     if (res._tag === "Ok") {
+      if (props.invitation !== undefined) {
+        if (res.value === null) {
+          setErrorBanner(t("auth.genericError"));
+          return;
+        }
+        setInvitedAccount(res.value);
+        await joinInvitation(props.invitation, res.value);
+        return;
+      }
       router.push(checkEmailHref(trimmedEmail, returnTo) as never);
       return;
     }
@@ -128,6 +173,21 @@ export function SignUpScreen(props: {
     const described = describeError(res.error);
     setErrorBanner(text(described.text));
   };
+
+  if (props.invitation !== undefined && invitedAccount !== null) {
+    const invitation = props.invitation;
+    return (
+      <Screen title={t("app.name")}>
+        {errorBanner === null ? null : <Banner tone="error" text={errorBanner} />}
+        <Button
+          label={t("invitation.landing.accept")}
+          onPress={() => void joinInvitation(invitation, invitedAccount)}
+          busy={busy}
+          testID="invited-signup-join"
+        />
+      </Screen>
+    );
+  }
 
   if (passkeyEmail !== null) {
     return (

@@ -12,7 +12,7 @@ mock.module("expo-router", () => expoRouterStandIn());
 const { AccountScreen, parseAccountTab } = await import("./account-screen");
 
 const fakeAuth: AuthClient = {
-  signUpEmail: async () => ({ _tag: "Ok", value: undefined }),
+  signUpEmail: async () => ({ _tag: "Ok", value: null }),
   signInEmail: async () => ({ _tag: "Cancelled" }),
   sendMagicLink: async () => ({ _tag: "Ok", value: undefined }),
   verifyLink: async () => ({ _tag: "Cancelled" }),

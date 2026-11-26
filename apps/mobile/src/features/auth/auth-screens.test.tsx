@@ -16,7 +16,7 @@ const { SignInScreen, safeReturnTo } = await import("./sign-in-screen");
 const { SignUpScreen } = await import("./sign-up-screen");
 
 const fakeAuthClient = (overrides: Partial<AuthClient> = {}): AuthClient => ({
-  signUpEmail: async () => ({ _tag: "Ok", value: undefined }),
+  signUpEmail: async () => ({ _tag: "Ok", value: null }),
   signInEmail: async () => ({ _tag: "Cancelled" }),
   sendMagicLink: async () => ({ _tag: "Ok", value: undefined }),
   verifyLink: async () => ({ _tag: "Cancelled" }),

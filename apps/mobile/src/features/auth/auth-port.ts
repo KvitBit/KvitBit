@@ -50,7 +50,7 @@ export interface AuthClient {
       readonly invitation?: string;
     },
     proof: BotProofPayload,
-  ) => Promise<AuthResult<void>>; // 200 even if already registered (flow 1.2)
+  ) => Promise<AuthResult<AuthSession | null>>; // invitation signup returns its verified session
   readonly signInEmail: (
     input: { readonly email: string; readonly password: string },
     proof: BotProofPayload,
