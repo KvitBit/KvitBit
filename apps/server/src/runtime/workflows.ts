@@ -365,44 +365,62 @@ export const makeWorkflowHandlersLayer = (options: WorkflowHandlerOptions = {}) 
             });
           }
 
-          // Expense attachments from BlobStorage
-          const attachmentRows = yield* sql<{
-            readonly id: string;
-            readonly file_name: string | null;
-            readonly blob_key: string;
-          }>`
-            SELECT id, file_name, blob_key
-            FROM attachments
-            WHERE workspace_id = ${workspaceId} AND expense_id IS NOT NULL
-          `;
-          for (const att of attachmentRows) {
-            const safeName = (att.file_name || "attachment").replace(/[/\\]/g, "_");
-            entries.push({
-              name: `attachments/${att.id}-${safeName}`,
-              bytes: Stream.unwrap(blobs.get(att.blob_key as BlobKey)),
-            });
-          }
-
-          const docRows = yield* sql<{
-            readonly id: DocumentId;
-            readonly number: string | null;
-          }>`
-            SELECT id, number
-            FROM documents
-            WHERE workspace_id = ${workspaceId}
-            ORDER BY id
-          `;
-          for (const doc of docRows) {
-            const number = doc.number?.replace(/[^\p{L}\p{N}._-]+/gu, "-") ?? "draft";
-            const pdf = exportJob.documentPdf(workspaceId, exportId, doc.id);
-            entries.push({
-              name: `pdfs/${number}-${doc.id}.pdf`,
-              bytes: Stream.unwrap(Effect.map(pdf, (file) => file.bytes)),
-            });
-          }
+          // Fetch entry names in pages and release the SQL connection before opening a blob or PDF.
+          const attachments = archivePages(
+            sql,
+            workspaceId,
+            "attachments",
+            sql`id, file_name, blob_key`,
+            Effect.succeed<
+              ReadonlyArray<{
+                readonly id: string;
+                readonly file_name: string | null;
+                readonly blob_key: string;
+              }>
+            >,
+            sql`expense_id is not null`,
+          ).pipe(
+            Stream.flattenIterable,
+            Stream.map((att) => {
+              const safeName = (att.file_name || "attachment").replace(/[/\\]/g, "_");
+              return {
+                name: `attachments/${att.id}-${safeName}`,
+                bytes: Stream.unwrap(blobs.get(att.blob_key as BlobKey)),
+              };
+            }),
+          );
+          const pdfs = archivePages(
+            sql,
+            workspaceId,
+            "documents",
+            sql`id, number`,
+            Effect.succeed<
+              ReadonlyArray<{
+                readonly id: DocumentId;
+                readonly number: string | null;
+              }>
+            >,
+          ).pipe(
+            Stream.flattenIterable,
+            Stream.map((doc) => {
+              const number = doc.number?.replace(/[^\p{L}\p{N}._-]+/gu, "-") ?? "draft";
+              const pdf = exportJob.documentPdf(workspaceId, exportId, doc.id);
+              return {
+                name: `pdfs/${number}-${doc.id}.pdf`,
+                bytes: Stream.unwrap(Effect.map(pdf, (file) => file.bytes)),
+              };
+            }),
+          );
 
           const services = yield* Effect.context<Documents>();
-          const archive = streamZip(entries).pipe(Stream.provideContext(services), Stream.orDie);
+          const archiveEntries = Stream.fromIterable(entries).pipe(
+            Stream.concat(attachments),
+            Stream.concat(pdfs),
+          );
+          const archive = streamZip(archiveEntries).pipe(
+            Stream.provideContext(services),
+            Stream.orDie,
+          );
           const blobKey = ReportsModule.exportBlobKey(workspaceId, exportId);
           const stored = yield* blobs.put(blobKey, archive, {
             contentType: "application/zip",
