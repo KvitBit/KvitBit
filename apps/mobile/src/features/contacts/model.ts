@@ -344,7 +344,7 @@ export const buildContactInput = (form: ContactFormState): ContactInput => {
     overrides = OverrideForm.setReminderPolicy(overrides, policy);
   }
 
-  const roles = asRoles(form.roles);
+  const roles = asRoles([...form.roles].sort());
 
   return {
     roles: [...roles],

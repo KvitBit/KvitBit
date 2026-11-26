@@ -106,6 +106,13 @@ const sampleRegistry: RegistryResult = {
 const within = (node: ReactElement) => <TestProviders>{node}</TestProviders>;
 
 describe("contacts model", () => {
+  test("equivalent contact role selections produce identical create payloads", () => {
+    const form = contactFormFromRecord(sampleContact);
+    expect(buildContactInput({ ...form, roles: ["supplier", "customer"] })).toEqual(
+      buildContactInput({ ...form, roles: ["customer", "supplier"] }),
+    );
+  });
+
   test("contact edit access requires a writable workspace and an active record", () => {
     expect(canEditContact(workspace, "new")).toBe(true);
     expect(canEditContact(workspace, sampleContact)).toBe(true);

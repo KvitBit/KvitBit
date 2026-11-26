@@ -781,6 +781,7 @@ export function ContactEditorView(props: ContactEditorViewProps) {
           <TextField
             label={t("common.field.email")}
             value={newEmail}
+            disabled={props.saving}
             onChangeText={(v) => {
               setNewEmail(v);
               setEmailError(null);
@@ -917,10 +918,16 @@ export function ContactEditorView(props: ContactEditorViewProps) {
         <Button
           label={t("common.action.save")}
           busy={props.saving}
+          disabled={props.staleRevision}
           onPress={props.onSave}
           testID="contact-save-button"
         />
-        <Button kind="outlined" label={t("common.action.cancel")} onPress={props.onCancel} />
+        <Button
+          kind="outlined"
+          label={t("common.action.cancel")}
+          disabled={props.saving}
+          onPress={props.onCancel}
+        />
       </View>
     </View>
   );
@@ -974,6 +981,7 @@ function WorkspaceContactDetail({
   const [archiving, setArchiving] = useState(false);
   const [lookingUpAres, setLookingUpAres] = useState(false);
   const [aresNotice, setAresNotice] = useState<{
+    readonly ico: string;
     readonly tone: "info" | "warning" | "error";
     readonly text: string;
   } | null>(null);
@@ -982,6 +990,20 @@ function WorkspaceContactDetail({
   const [aresDiff, setAresDiff] = useState<RegistryPreview | null>(null);
 
   const savingRef = useRef(false);
+  const mounted = useRef(false);
+  const lookupSequence = useRef(0);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      lookupSequence.current += 1;
+    };
+  }, []);
+
+  const invalidateLookup = useCallback(() => {
+    lookupSequence.current += 1;
+    setLookingUpAres(false);
+  }, []);
 
   const contactRemote = useRemote(
     contactId === null
@@ -1031,23 +1053,28 @@ function WorkspaceContactDetail({
   const record = contactRemote.state._tag === "Ready" ? contactRemote.state.value : null;
   const editable = canEditContact(workspace, isNew ? "new" : record);
 
-  // Sync loaded contact into editor when entering edit mode or after reload.
+  // Keep a draft and its base revision until the user explicitly reloads it.
   useEffect(() => {
     if (record === null) return;
     setForm((current) =>
-      current.editingRevision === record.revision ? current : contactFormFromRecord(record),
+      current.editingRevision === null ? contactFormFromRecord(record) : current,
     );
   }, [record]);
 
-  const handleChangeForm = useCallback((updater: (prev: ContactFormState) => ContactFormState) => {
-    setForm(updater);
-    setClientErrors({});
-    setServerIssues([]);
-    setDuplicateIco(false);
-  }, []);
+  const handleChangeForm = useCallback(
+    (updater: (prev: ContactFormState) => ContactFormState) => {
+      if (savingRef.current) return;
+      invalidateLookup();
+      setForm(updater);
+      setClientErrors({});
+      setServerIssues([]);
+      setDuplicateIco(false);
+    },
+    [invalidateLookup],
+  );
 
   const handleLookupAres = useCallback(async () => {
-    if (!editable || form.country.trim().toUpperCase() !== "CZ") return;
+    if (!editable || savingRef.current || form.country.trim().toUpperCase() !== "CZ") return;
     const check = validateIco(form.ico);
     if (Result.isFailure(check)) {
       setClientErrors({
@@ -1056,10 +1083,12 @@ function WorkspaceContactDetail({
       return;
     }
     const ico = normalizeIco(check.success);
+    const sequence = ++lookupSequence.current;
     setLookingUpAres(true);
     setAresNotice(null);
     setClientErrors({});
     const res = await api.run((client) => client.registry.lookupCompany({ params: { ico } }));
+    if (lookupSequence.current !== sequence) return;
     setLookingUpAres(false);
     if (res._tag === "Ok") {
       setForm((prev) =>
@@ -1069,6 +1098,7 @@ function WorkspaceContactDetail({
       );
       if (res.value.terminatedOn !== null) {
         setAresNotice({
+          ico,
           tone: "warning",
           text: local({
             cs: `Subjekt byl ukončen dne ${formatDate(locale, res.value.terminatedOn)}. Kontakt přesto můžete uložit.`,
@@ -1076,16 +1106,16 @@ function WorkspaceContactDetail({
           }),
         });
       } else {
-        setAresNotice({ tone: "info", text: t("onboarding.wizard.entity.found") });
+        setAresNotice({ ico, tone: "info", text: t("onboarding.wizard.entity.found") });
       }
       return;
     }
     if (res.error._tag === "NotFound") {
-      setAresNotice({ tone: "warning", text: t("onboarding.wizard.entity.notFound") });
+      setAresNotice({ ico, tone: "warning", text: t("onboarding.wizard.entity.notFound") });
     } else if (res.error._tag === "Unavailable") {
-      setAresNotice({ tone: "warning", text: t("onboarding.wizard.entity.aresDown") });
+      setAresNotice({ ico, tone: "warning", text: t("onboarding.wizard.entity.aresDown") });
     } else {
-      setAresNotice({ tone: "error", text: text(describeError(res.error).text) });
+      setAresNotice({ ico, tone: "error", text: text(describeError(res.error).text) });
     }
   }, [api, editable, form.country, form.ico, local, locale, t, text]);
 
@@ -1097,6 +1127,7 @@ function WorkspaceContactDetail({
       return;
     }
     savingRef.current = true;
+    invalidateLookup();
     setSaving(true);
     setBannerError(null);
     setServerIssues([]);
@@ -1141,7 +1172,7 @@ function WorkspaceContactDetail({
         savingRef.current = false;
         setSaving(false);
       });
-    if (result === null) return;
+    if (!mounted.current || result === null) return;
 
     if (result._tag === "Ok") {
       const saved = parseContactView(result.value);
@@ -1179,6 +1210,7 @@ function WorkspaceContactDetail({
     contactRemote,
     editable,
     form,
+    invalidateLookup,
     isNew,
     overlay,
     owner,
@@ -1190,15 +1222,19 @@ function WorkspaceContactDetail({
   ]);
 
   const handleReloadLatest = useCallback(() => {
+    if (savingRef.current) return;
+    invalidateLookup();
+    setAresNotice(null);
     setForm((current) => ({ ...current, editingRevision: null }));
     setStaleRevision(false);
     setBannerError(null);
     contactRemote.reload();
-  }, [contactRemote]);
+  }, [contactRemote, invalidateLookup]);
 
   const handleArchive = useCallback(async () => {
     if (
       !editable ||
+      savingRef.current ||
       contactId === null ||
       contactRemote.state._tag !== "Ready" ||
       contactRemote.state.value === null
@@ -1242,7 +1278,12 @@ function WorkspaceContactDetail({
   ]);
 
   const handleRefreshAres = useCallback(async () => {
-    if (!editable || contactRemote.state._tag !== "Ready" || contactRemote.state.value === null)
+    if (
+      !editable ||
+      savingRef.current ||
+      contactRemote.state._tag !== "Ready" ||
+      contactRemote.state.value === null
+    )
       return;
     const record = contactRemote.state.value;
     const ico = record.ico;
@@ -1306,6 +1347,7 @@ function WorkspaceContactDetail({
         }),
       ),
     );
+    if (!mounted.current) return;
     if (result._tag === "Err") {
       overlay.toast(text(describeError(result.error).text));
     } else if (result.value === null) {
@@ -1315,6 +1357,7 @@ function WorkspaceContactDetail({
     }
   }, [api, contactId, form.ico, overlay, t, text, workspace.id, workspace.slug]);
 
+  const visibleAresNotice = aresNotice?.ico === normalizeIco(form.ico) ? aresNotice : null;
   if (isNew) {
     return (
       <Screen title={t("contacts.list.new")} back>
@@ -1334,9 +1377,13 @@ function WorkspaceContactDetail({
             onOpenContactsSearch={handleOpenDuplicate}
             onLookupAres={handleLookupAres}
             lookingUpAres={lookingUpAres}
-            aresNotice={aresNotice}
+            aresNotice={visibleAresNotice}
             onSave={handleSave}
-            onCancel={() => navigate({ _tag: "Contacts", ws: workspace.slug, query: {} })}
+            onCancel={() => {
+              if (savingRef.current) return;
+              invalidateLookup();
+              navigate({ _tag: "Contacts", ws: workspace.slug, query: {} });
+            }}
             saving={saving}
           />
         )}
@@ -1379,9 +1426,12 @@ function WorkspaceContactDetail({
                 onOpenContactsSearch={handleOpenDuplicate}
                 onLookupAres={handleLookupAres}
                 lookingUpAres={lookingUpAres}
-                aresNotice={aresNotice}
+                aresNotice={visibleAresNotice}
                 onSave={handleSave}
                 onCancel={() => {
+                  if (savingRef.current) return;
+                  invalidateLookup();
+                  setAresNotice(null);
                   setForm(contactFormFromRecord(record));
                   setClientErrors({});
                   setServerIssues([]);
@@ -1402,6 +1452,7 @@ function WorkspaceContactDetail({
               receivables={receivablesRemote.state}
               onRetryReceivables={receivablesRemote.reload}
               onEdit={() => {
+                if (savingRef.current) return;
                 setForm(contactFormFromRecord(record));
                 setMode("edit");
               }}

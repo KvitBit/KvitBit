@@ -210,7 +210,12 @@ export function PriceListEditor(props: PriceListEditorProps) {
           onPress={props.onSave}
           testID="price-list-save-button"
         />
-        <Button kind="outlined" label={t("common.action.cancel")} onPress={props.onCancel} />
+        <Button
+          kind="outlined"
+          label={t("common.action.cancel")}
+          disabled={props.saving}
+          onPress={props.onCancel}
+        />
       </View>
     </Card>
   );
@@ -425,6 +430,7 @@ export function PriceListScreen() {
 
   const handleChangeForm = useCallback(
     (updater: (prev: PriceListFormState) => PriceListFormState) => {
+      if (savingRef.current) return;
       setForm((prev) => (prev === null ? null : updater(prev)));
       setClientErrors({});
       setServerIssues([]);
