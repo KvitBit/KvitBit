@@ -28,7 +28,11 @@ type ConsentDecision =
     };
 
 const decisionContext = new AsyncLocalStorage<ConsentDecision>();
-const tokenContext = new AsyncLocalStorage<{ grantId?: string }>();
+interface TokenRequest {
+  grantId?: string;
+  refreshDigest?: string;
+}
+const tokenContext = new AsyncLocalStorage<TokenRequest>();
 
 export const processWorkspaceConsent = <A>(decision: ConsentDecision, callback: () => Promise<A>) =>
   withDrizzleSqlContext(() => decisionContext.run(decision, callback));
@@ -245,6 +249,7 @@ export const makeWorkspaceAuth = (sql: SqlClient.SqlClient) => (config: AuthConf
           if (tokenRequest !== undefined && typeof refreshDigest === "string") {
             if (!tokenBinding(row) || !(await runDrizzleEffect(activeGrant(row)))) return null;
             tokenRequest.grantId = row.referenceId;
+            tokenRequest.refreshDigest = refreshDigest;
           }
           return row;
         },
@@ -302,15 +307,31 @@ export const makeWorkspaceAuth = (sql: SqlClient.SqlClient) => (config: AuthConf
       ) {
         return exposeConsentId(await auth.handler(request), consentPage);
       }
+      const tokenRequest: TokenRequest = {};
       return runDrizzleEffect(
         sql
           .withTransaction(
-            withDrizzleSqlContext(() => tokenContext.run({}, () => auth.handler(request))).pipe(
+            Effect.gen(function* () {
+              const response = yield* withDrizzleSqlContext(() =>
+                tokenContext.run(tokenRequest, () => auth.handler(request)),
+              );
               // Provider 4xx responses can intentionally revoke a token family.
-              Effect.flatMap((response) =>
-                response.status >= 500 ? Effect.fail(response) : Effect.succeed(response),
-              ),
-            ),
+              if (response.status >= 500) return yield* Effect.fail(response);
+              if (
+                response.ok &&
+                path === "/api/auth/oauth2/token" &&
+                tokenRequest.refreshDigest !== undefined
+              ) {
+                // Better Auth can swallow a replay-write failure and return success.
+                const persisted = yield* sql`
+                  select 1 from auth.oauth_refresh_token
+                  where token = ${tokenRequest.refreshDigest} and rotation_replay_response is not null
+                `;
+                if (persisted.length === 0)
+                  return yield* Effect.fail(new Error("Missing OAuth refresh replay"));
+              }
+              return response;
+            }),
           )
           .pipe(
             Effect.provideService(

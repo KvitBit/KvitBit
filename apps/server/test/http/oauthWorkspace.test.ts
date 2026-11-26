@@ -271,6 +271,30 @@ test.each(["DCR", "CIMD"])(
       await expectWorkspace(firstTokens.access_token, "OAuth Alpha");
       const outsideScope = await readWorkspace(firstTokens.access_token, "kvitbit://price-list");
       expect(await outsideScope.json()).toHaveProperty("error");
+
+      await harness.run(
+        Effect.gen(function* () {
+          const sql = yield* SqlClient.SqlClient;
+          yield* sql`create function suppress_rotation_replay() returns trigger language plpgsql as $$
+          begin
+            if new.rotation_replay_response is not null then return null; end if;
+            return new;
+          end;
+        $$`;
+          yield* sql`create trigger suppress_rotation_replay before update on auth.oauth_refresh_token
+          for each row execute function suppress_rotation_replay()`;
+        }),
+      );
+      const missingReplay = await refresh(firstTokens.refresh_token);
+      expect(missingReplay.status).toBe(500);
+      expect(await missingReplay.json()).toEqual({ error: "server_error" });
+      await harness.run(
+        Effect.flatMap(
+          SqlClient.SqlClient,
+          (sql) => sql`drop trigger suppress_rotation_replay on auth.oauth_refresh_token`,
+        ),
+      );
+
       const [rotation, parallelReplay] = await Promise.all([
         refresh(firstTokens.refresh_token),
         refresh(firstTokens.refresh_token),

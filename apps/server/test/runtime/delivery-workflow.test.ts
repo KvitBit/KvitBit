@@ -1,22 +1,28 @@
 import { expect, test } from "bun:test";
+import { DeliveryJobs } from "@kvitbit/core";
 import {
   Caller,
   ContactId,
   Contacts,
   CurrencyCode,
+  DeliveryId,
   Documents,
   IsoDate,
   UserId,
+  WorkspaceId,
   Workspaces,
 } from "@kvitbit/domain/contract";
 import { EmailNotAccepted, EmailSender } from "@kvitbit/domain/ports";
-import { BigDecimal, Cause, Duration, Effect, Layer, Schedule, Schema } from "effect";
+import { BigDecimal, Cause, Duration, Effect, Layer, Option, Schedule, Schema } from "effect";
+import { TestClock } from "effect/testing";
+import * as DurableClock from "effect/workflow/DurableClock";
 import * as WorkflowEngine from "effect/workflow/WorkflowEngine";
 import {
   DEFAULT_DELIVERY_RETRY_SCHEDULE,
   DocumentDeliveryWorkflow,
   makeWorkflowHandlersLayer,
 } from "../../src/runtime/workflows";
+import { DeliveryJobsLive } from "../../src/wiring/workflows";
 import { asCaller, runSqlCore } from "../persistence/conformance/sqlCore";
 
 test.each([
@@ -98,6 +104,52 @@ test.each([
   },
   30_000,
 );
+
+test("reconciliation attaches to an active recovery during its durable backoff", async () => {
+  const workspaceId = WorkspaceId.make("01950000-0000-7000-8000-000000000001");
+  const deliveryId = DeliveryId.make("01950000-0000-7000-8000-000000000002");
+  const launched: number[] = [];
+  const workflows = DocumentDeliveryWorkflow.toLayer(({ attempt = 0 }) =>
+    Effect.gen(function* () {
+      launched.push(attempt);
+      if (attempt === 0) return yield* Effect.die(new Error("synthetic completed worker failure"));
+      yield* DurableClock.sleep({ name: "recovery-backoff", duration: "1 hour" });
+      return "sent" as const;
+    }),
+  ).pipe(Layer.provideMerge(WorkflowEngine.layerMemory));
+  await Effect.runPromise(
+    Effect.gen(function* () {
+      const jobs = yield* DeliveryJobs;
+      const awaitResult = (attempt: number) =>
+        Effect.gen(function* () {
+          const id = yield* DocumentDeliveryWorkflow.executionId({
+            workspaceId,
+            deliveryId,
+            attempt,
+          });
+          for (let wait = 0; wait < 100; wait++) {
+            const result = yield* DocumentDeliveryWorkflow.poll(id);
+            if (Option.isSome(result)) return result.value;
+            yield* Effect.promise(() => Bun.sleep(10));
+          }
+          return yield* Effect.die(new Error("The workflow did not publish its result"));
+        });
+
+      yield* jobs.start(workspaceId, deliveryId);
+      expect((yield* awaitResult(0))._tag).toBe("Complete");
+      yield* jobs.start(workspaceId, deliveryId);
+      expect((yield* awaitResult(1))._tag).toBe("Suspended");
+      yield* TestClock.adjust("3 minutes");
+      yield* jobs.start(workspaceId, deliveryId);
+      yield* Effect.promise(() => Bun.sleep(50));
+    }).pipe(
+      Effect.provide(
+        DeliveryJobsLive.pipe(Layer.provideMerge(workflows), Layer.provideMerge(TestClock.layer())),
+      ),
+    ),
+  );
+  expect(launched).toEqual([0, 1]);
+});
 
 test("the default delivery retry policy caps spacing and total elapsed time", async () => {
   const waits = await Effect.runPromise(

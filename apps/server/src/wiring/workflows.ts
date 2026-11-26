@@ -3,7 +3,7 @@
  * Effect Cluster's `WorkflowEngine` (core-ports 7.1-7.2).
  */
 import { DeliveryJobs, ExportWorkflow, InvitationDelivery } from "@kvitbit/core";
-import { Clock, Effect, Layer, Option } from "effect";
+import { Effect, Layer, Option } from "effect";
 import type * as WorkflowEngine from "effect/workflow/WorkflowEngine";
 import {
   DataExportWorkflow,
@@ -16,8 +16,8 @@ import {
  *
  * Implements rule J1a: if execution 0 (keyed by `deliveryId`) already completed while the
  * intent row is still `queued` or `sending` (e.g. crash after claim/provider call), starts a
- * fresh reconcile execution so `deliver` actually runs again (still using `deliveryId` as the
- * email provider idempotency key per J2).
+ * fresh reconcile execution. A reconciled run waiting on a retry timer keeps its execution key,
+ * and every run still uses `deliveryId` as the provider idempotency key per J2.
  */
 export const DeliveryJobsLive: Layer.Layer<DeliveryJobs, never, WorkflowEngine.WorkflowEngine> =
   Layer.effect(
@@ -26,23 +26,22 @@ export const DeliveryJobsLive: Layer.Layer<DeliveryJobs, never, WorkflowEngine.W
       DeliveryJobs.of({
         start: (workspaceId, deliveryId) =>
           Effect.gen(function* () {
-            const basePayload = { workspaceId, deliveryId, attempt: 0 };
-            const execId = yield* DocumentDeliveryWorkflow.executionId(basePayload);
-            const status = yield* DocumentDeliveryWorkflow.poll(execId);
+            for (let attempt = 0; ; attempt++) {
+              const payload = { workspaceId, deliveryId, attempt };
+              const execId = yield* DocumentDeliveryWorkflow.executionId(payload);
+              const status = yield* DocumentDeliveryWorkflow.poll(execId);
 
-            if (Option.isSome(status) && status.value._tag === "Complete") {
-              const attempt = Math.max(1, yield* Clock.currentTimeMillis);
-              yield* DocumentDeliveryWorkflow.execute(
-                { workspaceId, deliveryId, attempt },
-                { discard: true, detached: true },
-              );
+              if (Option.isSome(status)) {
+                if (status.value._tag === "Complete") continue;
+                if (status.value.failed) yield* DocumentDeliveryWorkflow.resume(execId);
+              } else {
+                yield* DocumentDeliveryWorkflow.execute(payload, {
+                  discard: true,
+                  detached: true,
+                });
+              }
               return;
             }
-
-            yield* DocumentDeliveryWorkflow.execute(basePayload, {
-              discard: true,
-              detached: true,
-            });
           }).pipe(Effect.provide(ctx), Effect.asVoid),
       }),
     ),
