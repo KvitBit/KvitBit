@@ -70,8 +70,9 @@
               fi
               install -m 0755 docker/entrypoint.sh $out/lib/kvitbit/entrypoint.sh
               install -m 0755 docker/reconcile-app-role.sh $out/lib/kvitbit/reconcile-app-role.sh
+              install -m 0644 docker/database-target.sh $out/lib/kvitbit/database-target.sh
               makeWrapper $out/lib/kvitbit/entrypoint.sh $out/bin/kvitbit \
-                --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.bun pkgs.coreutils ]} \
+                --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.bun pkgs.coreutils pkgs.gawk ]} \
                 --set KVITBIT_APP_ROOT $out/lib/kvitbit \
                 --set KVITBIT_WEB_DIR $out/lib/kvitbit/public/web \
                 --set KVITBIT_PWA_DIR $out/lib/kvitbit/public/app \

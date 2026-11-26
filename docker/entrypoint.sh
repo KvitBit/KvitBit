@@ -44,7 +44,7 @@ case "$cmd" in
     if [ -n "${DATABASE_MIGRATION_URL:-}" ]; then
       export DATABASE_URL_UNPOOLED="$DATABASE_MIGRATION_URL"
     elif [ -z "${DATABASE_URL_UNPOOLED:-}" ]; then
-      if [ -n "${KVITBIT_RUNTIME_DATABASE_URL:-}${KVITBIT_BUNDLED_DATABASE_NAME:-}" ]; then
+      if [ -n "${KVITBIT_BUNDLED_MIGRATION_URL:-}${KVITBIT_RUNTIME_DATABASE_URL:-}${KVITBIT_BUNDLED_DATABASE_NAME:-}" ]; then
         . "$(dirname "$0")/database-target.sh"
         if [ -z "${KVITBIT_BUNDLED_MIGRATION_URL:-}" ] ||
           ! kvitbit_compare_database_target "$KVITBIT_BUNDLED_MIGRATION_URL" postgres 5432 "${KVITBIT_BUNDLED_DATABASE_NAME:-}"; then

@@ -6,7 +6,7 @@ export KVITBIT_APP_ROLE_PASSWORD="${POSTGRES_APP_PASSWORD:-kvitbit_app}"
 export KVITBIT_OWNER_ROLE="${POSTGRES_USER:-kvitbit}"
 export PGDATABASE="${POSTGRES_DB:-kvitbit}"
 
-if [ "${1:-}" != "--init" ] && [ -n "${KVITBIT_RUNTIME_DATABASE_URL:-}" ]; then
+if [ "${1:-}" != "--init" ] && [ -n "${DATABASE_URL:-}${KVITBIT_RUNTIME_DATABASE_URL:-}" ]; then
   . "$(dirname "$0")/database-target.sh"
   target_status=0
   kvitbit_compare_database_target "" "${PGHOST:-postgres}" "${PGPORT:-5432}" "$PGDATABASE" ||

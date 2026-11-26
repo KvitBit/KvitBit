@@ -24,7 +24,7 @@ kvitbit_compare_database_target() {
       return result
     }
 
-    function destination(url, target,    path, authority, query, args, count, i, separator, key, value, parts) {
+    function destination(url, target,    path, authority, query, args, count, i, separator, key, value, parts, seen) {
       if (url !~ /^postgres(ql)?:\/\// || url ~ /[[:space:]#]/) exit 3
       sub(/^postgres(ql)?:\/\//, "", url)
       i = index(url, "?")
@@ -58,6 +58,7 @@ kvitbit_compare_database_target() {
         key = decode(substr(args[i], 1, separator - 1))
         if (key ~ /^(hostaddr|dbname|database|service|connectionString)$/) exit 3
         if (key == "host" || key == "port") {
+          if (++seen[key] > 1) exit 3
           value = decode(substr(args[i], separator + 1))
           if (key == "host" && value !~ /^[a-zA-Z0-9_.-]+$/) exit 3
           if (value == "") exit 3
@@ -89,7 +90,8 @@ kvitbit_compare_database_target() {
         bundled["port"] = owner["port"]
         bundled["database"] = owner["database"]
       }
-      runtime_url = ENVIRON["KVITBIT_RUNTIME_DATABASE_URL"]
+      runtime_url = ENVIRON["DATABASE_URL"]
+      if (runtime_url == "") runtime_url = ENVIRON["KVITBIT_RUNTIME_DATABASE_URL"]
       if (runtime_url != "") {
         destination(runtime_url, runtime)
         if (!same_server(runtime, bundled)) exit 1

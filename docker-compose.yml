@@ -31,8 +31,8 @@ services:
         condition: service_healthy
     environment:
       # Owner-role credentials are scoped strictly to the one-shot migrate container (S5).
-      # Prefer DATABASE_MIGRATION_URL, fall back to DATABASE_URL_UNPOOLED, and only default
-      # to bundled postgres when DATABASE_URL is not pointing at an external database.
+      # Prefer DATABASE_MIGRATION_URL, then DATABASE_URL_UNPOOLED. Bundled owner
+      # credentials require DATABASE_URL to match the bundled host, port and database.
       DATABASE_URL_UNPOOLED: ${DATABASE_MIGRATION_URL:-${DATABASE_URL_UNPOOLED:-}}
       KVITBIT_RUNTIME_DATABASE_URL: ${DATABASE_URL:-}
       KVITBIT_BUNDLED_DATABASE_NAME: ${POSTGRES_DB:-kvitbit}
