@@ -1,8 +1,8 @@
 /**
  * Android 12+ (API 31+) Material You (Monet) dynamic colour bridge for ThemeState.system.dynamic.
- * Resolves the Android system accent/neutral resources through React Native's built-in
- * `PlatformColor` + `processColor` (no extra native dependency), falling back safely to `null`
- * on Android < 12 or whenever the platform cannot resolve the Monet resources.
+ * Resolves actual 32-bit ARGB integers through the native `KvitbitDynamicColor` Android module
+ * (which reads `android.R.color.system_accent*` / `system_neutral*` via `ContextCompat.getColor`),
+ * falling back safely to `null` on Android < 12 or whenever the native bridge is unavailable.
  */
 import type { Hex } from "@kvitbit/domain/contract";
 import type { DynamicColorInput } from "@kvitbit/ui-port/theme";
@@ -10,13 +10,25 @@ import * as RN from "react-native";
 
 const ANDROID_MONET_MIN_API = 31;
 
+export interface AndroidDynamicPalette {
+  readonly system_accent1_600?: number;
+  readonly system_accent1_200?: number;
+  readonly system_accent1_500?: number;
+  readonly system_accent2_600?: number;
+  readonly system_accent2_200?: number;
+  readonly system_accent3_600?: number;
+  readonly system_accent3_200?: number;
+  readonly system_neutral1_10?: number;
+  readonly system_neutral1_900?: number;
+}
+
 export interface AndroidDynamicColorEnv {
   readonly os: string;
   readonly version: number | string;
-  readonly resolveResource: (resourceName: string) => number | null;
+  readonly getNativePalette?: () => Promise<AndroidDynamicPalette | null>;
 }
 
-/** Converts a React Native ARGB 32-bit integer to an uppercase `#RRGGBB` hex string. */
+/** Converts an Android ARGB 32-bit integer to an uppercase `#RRGGBB` hex string. */
 export const argbToHex = (value: number): Hex | null => {
   if (!Number.isFinite(value)) return null;
   const rgb = (value >>> 0) & 0x00ffffff;
@@ -29,26 +41,30 @@ const parseApiLevel = (version: number | string): number => {
   return Number.isFinite(parsed) ? parsed : 0;
 };
 
-const defaultEnv = (): AndroidDynamicColorEnv => {
+export const readDefaultAndroidDynamicColorEnv = (): AndroidDynamicColorEnv => {
   const rn = RN as unknown as {
     readonly Platform?: { readonly OS?: string; readonly Version?: number | string };
-    readonly PlatformColor?: (name: string) => unknown;
-    readonly processColor?: (color: unknown) => unknown;
+    readonly NativeModules?: {
+      readonly KvitbitDynamicColor?: {
+        readonly getDynamicPalette?: () => Promise<AndroidDynamicPalette | null>;
+      };
+    };
   };
+  const nativeModule = rn.NativeModules?.KvitbitDynamicColor;
   return {
     os: rn.Platform?.OS ?? "",
     version: rn.Platform?.Version ?? 0,
-    resolveResource: (resourceName) => {
-      if (typeof rn.PlatformColor !== "function" || typeof rn.processColor !== "function") {
-        return null;
-      }
-      try {
-        const color = rn.processColor(rn.PlatformColor(resourceName));
-        return typeof color === "number" ? color : null;
-      } catch {
-        return null;
-      }
-    },
+    ...(typeof nativeModule?.getDynamicPalette === "function"
+      ? {
+          getNativePalette: async () => {
+            try {
+              return (await nativeModule.getDynamicPalette?.()) ?? null;
+            } catch {
+              return null;
+            }
+          },
+        }
+      : {}),
   };
 };
 
@@ -58,29 +74,35 @@ const defaultEnv = (): AndroidDynamicColorEnv => {
  * a single `Seed` if only `system_accent1_500` resolves, or `null` when unsupported.
  */
 export const makeAndroidDynamicColorReader =
-  (getEnv: () => AndroidDynamicColorEnv = defaultEnv) =>
+  (getEnv: () => AndroidDynamicColorEnv = readDefaultAndroidDynamicColorEnv) =>
   async (): Promise<DynamicColorInput | null> => {
     const env = getEnv();
     if (env.os !== "android" || parseApiLevel(env.version) < ANDROID_MONET_MIN_API) {
       return null;
     }
-    const read = (name: string): Hex | null => {
+
+    let palette: AndroidDynamicPalette | null = null;
+    if (env.getNativePalette) {
       try {
-        const raw = env.resolveResource(name);
-        return raw === null ? null : argbToHex(raw);
+        palette = await env.getNativePalette();
       } catch {
-        return null;
+        palette = null;
       }
+    }
+
+    const read = (key: keyof AndroidDynamicPalette): Hex | null => {
+      const value = palette?.[key];
+      return typeof value === "number" ? argbToHex(value) : null;
     };
 
-    const lightPrimary = read("@android:color/system_accent1_600");
-    const darkPrimary = read("@android:color/system_accent1_200");
-    const lightSurface = read("@android:color/system_neutral1_10");
-    const darkSurface = read("@android:color/system_neutral1_900");
-    const lightSecondary = read("@android:color/system_accent2_600");
-    const darkSecondary = read("@android:color/system_accent2_200");
-    const lightTertiary = read("@android:color/system_accent3_600");
-    const darkTertiary = read("@android:color/system_accent3_200");
+    const lightPrimary = read("system_accent1_600");
+    const darkPrimary = read("system_accent1_200");
+    const lightSurface = read("system_neutral1_10");
+    const darkSurface = read("system_neutral1_900");
+    const lightSecondary = read("system_accent2_600");
+    const darkSecondary = read("system_accent2_200");
+    const lightTertiary = read("system_accent3_600");
+    const darkTertiary = read("system_accent3_200");
 
     if (lightPrimary !== null && darkPrimary !== null) {
       return {
@@ -100,7 +122,7 @@ export const makeAndroidDynamicColorReader =
       };
     }
 
-    const seed = read("@android:color/system_accent1_500");
+    const seed = read("system_accent1_500");
     return seed === null ? null : { _tag: "Seed", seed };
   };
 

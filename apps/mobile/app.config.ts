@@ -1,3 +1,5 @@
+import { existsSync } from "node:fs";
+import { relative, resolve } from "node:path";
 import type { ConfigContext, ExpoConfig } from "expo/config";
 
 // Dynamic Expo config layered over app.json.
@@ -58,6 +60,7 @@ type UpdatesCodeSigning = Pick<
 
 const updatesCodeSigning = (
   env: Readonly<Record<string, string | undefined>>,
+  projectRoot: string,
 ): UpdatesCodeSigning => {
   const setting = env.MOBILE_UPDATES_CODE_SIGNING;
   if (setting === undefined || setting === "") return {};
@@ -69,30 +72,46 @@ const updatesCodeSigning = (
   const certPath =
     env.MOBILE_UPDATES_CODE_SIGNING_CERTIFICATE?.trim() ||
     "./code-signing/code-signing-certificate.pem";
+  const resolvedCertPath = resolve(projectRoot, certPath);
+  if (!existsSync(resolvedCertPath)) {
+    throw new Error(
+      `MOBILE_UPDATES_CODE_SIGNING=required but code-signing certificate was not found at ${resolvedCertPath}. Provision apps/mobile/code-signing/code-signing-certificate.pem or set MOBILE_UPDATES_CODE_SIGNING_CERTIFICATE.`,
+    );
+  }
   return {
-    codeSigningCertificate: certPath,
+    codeSigningCertificate: relative(projectRoot, resolvedCertPath).replaceAll("\\", "/"),
     codeSigningMetadata: { keyid: "main", alg: "rsa-v1_5-sha256" },
   };
 };
 
 export default (
-  { config }: ConfigContext,
+  { config, projectRoot }: ConfigContext,
   env: Readonly<Record<string, string | undefined>> = process.env,
-): ExpoConfig => ({
-  ...config,
-  name: config.name ?? "Kvitbit",
-  slug: config.slug ?? "kvitbit",
-  android: {
-    ...config.android,
-    package: config.android?.package ?? ANDROID_PACKAGE,
-    versionCode: deriveAndroidVersionCode(config.version),
-  },
-  updates: {
-    ...config.updates,
-    enabled: true,
-    url: updatesManifestUrl(env.EXPO_PUBLIC_API_ORIGIN),
-    checkAutomatically: "ON_LOAD",
-    fallbackToCacheTimeout: 15_000,
-    ...updatesCodeSigning(env),
-  },
-});
+): ExpoConfig => {
+  const plugins = [...(config.plugins ?? [])];
+  if (!plugins.includes("./plugins/with-android-release-signing.cjs")) {
+    plugins.push("./plugins/with-android-release-signing.cjs");
+  }
+  if (!plugins.includes("./plugins/with-android-platform-modules.cjs")) {
+    plugins.push("./plugins/with-android-platform-modules.cjs");
+  }
+  return {
+    ...config,
+    name: config.name ?? "Kvitbit",
+    slug: config.slug ?? "kvitbit",
+    plugins,
+    android: {
+      ...config.android,
+      package: config.android?.package ?? ANDROID_PACKAGE,
+      versionCode: deriveAndroidVersionCode(config.version),
+    },
+    updates: {
+      ...config.updates,
+      enabled: true,
+      url: updatesManifestUrl(env.EXPO_PUBLIC_API_ORIGIN),
+      checkAutomatically: "ON_LOAD",
+      fallbackToCacheTimeout: 15_000,
+      ...updatesCodeSigning(env, projectRoot),
+    },
+  };
+};

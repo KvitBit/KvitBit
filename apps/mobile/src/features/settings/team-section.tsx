@@ -1,4 +1,3 @@
-import type { IdempotencyKey } from "@kvitbit/api-contract";
 import type { InvitationId, InvitationView, MemberView } from "@kvitbit/domain/contract";
 import { idempotencyHeaders, inWorkspace } from "@kvitbit/ui-port/api";
 import { router } from "expo-router";
@@ -7,6 +6,7 @@ import { useState } from "react";
 import { StyleSheet, View } from "react-native";
 import { useI18n } from "../../i18n/i18n-provider";
 import { useApi, useRemote } from "../../runtime/api-runtime";
+import { runRequestIntent } from "../../runtime/request-intent";
 import { useSession } from "../../session/session-provider";
 import {
   Badge,
@@ -29,7 +29,6 @@ import {
   type InvitationRole,
   invitableRolesFor,
 } from "./permissions";
-import { mintIdempotencyKey } from "./platform-helpers";
 import {
   type FormErrorState,
   fieldErrorText,
@@ -63,30 +62,33 @@ export function TeamSection() {
 
   const [inviteEmail, setInviteEmail] = useState("");
   const [inviteRole, setInviteRole] = useState<InvitationRole>("member");
-  const [inviteKey, setInviteKey] = useState<IdempotencyKey | null>(null);
   const [inviting, setInviting] = useState(false);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [errorState, setErrorState] = useState<FormErrorState>(noFormError);
 
   const handleInvite = async () => {
-    if (!canInvite) return;
+    if (!canInvite || currentUserId === null || inviting) return;
     const email = inviteEmail.trim();
     if (email === "") return;
     setInviting(true);
     setErrorState(noFormError);
-    const key = inviteKey ?? mintIdempotencyKey();
-    setInviteKey(key);
-    const result = await api.run((client) =>
-      client.team.invite({
-        params: inWorkspace(workspace.id),
-        headers: idempotencyHeaders(key),
-        payload: { email, role: inviteRole },
-      }),
+    const payload = { email, role: inviteRole };
+    const result = await runRequestIntent(
+      JSON.stringify([api.origin, currentUserId, workspace.id]),
+      "workspace/invite",
+      payload,
+      (key) =>
+        api.run((client) =>
+          client.team.invite({
+            params: inWorkspace(workspace.id),
+            headers: idempotencyHeaders(key),
+            payload,
+          }),
+        ),
     );
     setInviting(false);
     if (result._tag === "Ok") {
       setInviteEmail("");
-      setInviteKey(null);
       invitationsRemote.reload();
       overlay.toast(t("settings.team.inviteSent", { email }));
     } else {

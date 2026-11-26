@@ -1,4 +1,3 @@
-import type { IdempotencyKey } from "@kvitbit/api-contract";
 import type {
   DocumentKind,
   NumberingSeriesId,
@@ -10,6 +9,8 @@ import { useState } from "react";
 import { StyleSheet, View } from "react-native";
 import { useI18n } from "../../i18n/i18n-provider";
 import { useApi, useRemote } from "../../runtime/api-runtime";
+import { runRequestIntent } from "../../runtime/request-intent";
+import { useSession } from "../../session/session-provider";
 import {
   Badge,
   Banner,
@@ -27,7 +28,6 @@ import {
 import { useWorkspace } from "../../workspace/workspace-provider";
 import { hasCounterToken, previewSeriesNumbers } from "./numbering-preview";
 import { canEditWorkspaceSettings } from "./permissions";
-import { mintIdempotencyKey } from "./platform-helpers";
 import {
   type FormErrorState,
   fieldErrorText,
@@ -65,6 +65,7 @@ const emptySeriesDraft = (kind: DocumentKind = "invoice"): SeriesDraft => ({
 export function NumberingSection() {
   const { workspace } = useWorkspace();
   const api = useApi();
+  const { state: session } = useSession();
   const i18n = useI18n();
   const { t, local } = i18n;
   const overlay = useOverlay();
@@ -76,13 +77,11 @@ export function NumberingSection() {
   );
 
   const [draft, setDraft] = useState<SeriesDraft | null>(null);
-  const [createKey, setCreateKey] = useState<IdempotencyKey | null>(null);
   const [saving, setSaving] = useState(false);
   const [errorState, setErrorState] = useState<FormErrorState>(noFormError);
 
   const openCreate = (kind: DocumentKind = "invoice") => {
     setDraft(emptySeriesDraft(kind));
-    setCreateKey(mintIdempotencyKey());
     setErrorState(noFormError);
   };
 
@@ -95,12 +94,11 @@ export function NumberingSection() {
       nextNumber: String(series.nextCounter),
       isDefault: series.isDefault,
     });
-    setCreateKey(null);
     setErrorState(noFormError);
   };
 
   const handleSave = async () => {
-    if (!editable || draft === null) return;
+    if (!editable || draft === null || session.status !== "signed-in" || saving) return;
     if (!hasCounterToken(draft.pattern)) return;
     const parsedNext = Number.parseInt(draft.nextNumber.trim(), 10);
     setSaving(true);
@@ -116,15 +114,19 @@ export function NumberingSection() {
 
     const result =
       draft.id === undefined
-        ? await api.run((client) => {
-            const key = createKey ?? mintIdempotencyKey();
-            setCreateKey(key);
-            return client.workspace.createSeries({
-              params: inWorkspace(workspace.id),
-              headers: idempotencyHeaders(key),
-              payload,
-            });
-          })
+        ? await runRequestIntent(
+            JSON.stringify([api.origin, session.user.id, workspace.id]),
+            "workspace/createSeries",
+            payload,
+            (key) =>
+              api.run((client) =>
+                client.workspace.createSeries({
+                  params: inWorkspace(workspace.id),
+                  headers: idempotencyHeaders(key),
+                  payload,
+                }),
+              ),
+          )
         : await api.run((client) =>
             client.workspace.updateSeries({
               params: inWorkspace(workspace.id, { seriesId: draft.id as NumberingSeriesId }),
@@ -134,7 +136,6 @@ export function NumberingSection() {
     setSaving(false);
     if (result._tag === "Ok") {
       setDraft(null);
-      setCreateKey(null);
       remote.reload();
       overlay.toast(t("common.toast.saved"));
     } else {

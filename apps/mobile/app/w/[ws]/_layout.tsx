@@ -1,9 +1,10 @@
 import { MOBILE_NAV, type NavSection, navLabelKey } from "@kvitbit/ui-port/view-models";
-import { Redirect, router, Tabs, useLocalSearchParams } from "expo-router";
+import { Redirect, router, Tabs, useLocalSearchParams, useUnstableGlobalHref } from "expo-router";
 import { FileText, House, Menu, Receipt, Users } from "lucide-react-native";
 import { useEffect } from "react";
 import { useI18n } from "../../../src/i18n/i18n-provider";
-import { param } from "../../../src/navigation/routes";
+import { safeReturnTo } from "../../../src/navigation/return-to";
+import { hrefOf, param } from "../../../src/navigation/routes";
 import { useRemote } from "../../../src/runtime/api-runtime";
 import { useSession } from "../../../src/session/session-provider";
 import { useTheme } from "../../../src/theme/theme-provider";
@@ -36,11 +37,20 @@ export default function WorkspaceLayout() {
   const theme = useTheme();
   const { t, local } = useI18n();
   const slug = param(useLocalSearchParams<{ ws: string }>().ws) ?? "";
-  const workspaces = useRemote((api) => api.myWorkspaces.listMine(), []);
+  const returnTo = safeReturnTo(useUnstableGlobalHref());
+  const signedIn = session.state.status === "signed-in";
+  const workspaces = useRemote(signedIn ? (api) => api.myWorkspaces.listMine() : null, [signedIn]);
+  const isMember =
+    signedIn &&
+    workspaces.state._tag === "Ready" &&
+    workspaces.state.value.some((w) => w.slug === slug);
   useEffect(() => {
-    if (slug !== "") void lastWorkspace.write(slug);
-  }, [slug]);
-  if (session.state.status !== "signed-in") return <Redirect href="/sign-in" />;
+    if (isMember) void lastWorkspace.write(slug);
+  }, [isMember, slug]);
+  if (!signedIn) {
+    const href = hrefOf({ _tag: "SignIn", ...(returnTo === null ? {} : { returnTo }) });
+    return <Redirect href={href as never} />;
+  }
   return (
     <RemoteView state={workspaces.state} onRetry={workspaces.reload}>
       {(all) => {

@@ -131,6 +131,10 @@ describe("service worker", () => {
   const source = serviceWorkerSource({
     version: "abc123",
     precache: ["/app/_expo/static/js/web/index-1.js"],
+    integrity: {
+      "/app/_expo/static/js/web/index-1.js": "sha256-bundle",
+      "/app/index.html": "sha256-shell",
+    },
   });
 
   test("versions its cache and drops older kvitbit caches on activate", () => {
@@ -144,10 +148,17 @@ describe("service worker", () => {
   });
 
   /** Runs the generated worker against stand-in globals and returns how it answers fetches. */
-  const loadWorker = () => {
+  const loadWorker = (respond?: (pathname: string, request: Request) => Response) => {
     const listeners = new Map<string, (event: unknown) => void>();
     const store = new Map<string, Response>();
     const network: string[] = [];
+    const requests: RequestInit[] = [];
+    class WorkerRequest extends Request {
+      constructor(input: string, init: RequestInit) {
+        super(input, init);
+        requests.push(init);
+      }
+    }
     let online = true;
     const cache = {
       match: async (request: Request | string) =>
@@ -165,14 +176,34 @@ describe("service worker", () => {
       clients: { claim: () => {} },
     };
     const fetchStub = async (request: Request) => {
-      network.push(new URL(request.url).pathname);
+      const pathname = new URL(request.url).pathname;
+      network.push(pathname);
       if (!online) throw new TypeError("offline");
-      return new Response(`net ${new URL(request.url).pathname}`, {
+      if (respond) return respond(pathname, request);
+      const response = new Response(`net ${pathname}`, {
+        status: 200,
         headers: { "content-type": "text/html" },
       });
+      Object.defineProperty(response, "url", { value: request.url });
+      return response;
     };
     const caches = { open: async () => cache, keys: async () => [], delete: async () => true };
-    new Function("self", "caches", "fetch", source)(self, caches, fetchStub);
+    new Function("self", "caches", "fetch", "Request", source)(
+      self,
+      caches,
+      fetchStub,
+      WorkerRequest,
+    );
+
+    const install = async () => {
+      let pending: Promise<unknown> | undefined;
+      listeners.get("install")?.({
+        waitUntil: (promise: Promise<unknown>) => {
+          pending = promise;
+        },
+      });
+      if (pending) await pending;
+    };
 
     const dispatch = async (url: string, init: { mode?: string; method?: string } = {}) => {
       let answer: Promise<Response> | undefined;
@@ -184,12 +215,13 @@ describe("service worker", () => {
       });
       return answer ? await (await answer).text() : undefined;
     };
-    return { dispatch, network, store, goOffline: () => (online = false) };
+    return { install, dispatch, network, requests, store, goOffline: () => (online = false) };
   };
 
-  test("leaves /api/**, cross-origin, non-GET and non-/app/ requests to the network", async () => {
+  test("leaves /api/**, /mcp/**, cross-origin, non-GET and non-/app/ requests to the network", async () => {
     const worker = loadWorker();
     expect(await worker.dispatch("https://kvitbit.cz/api/documents")).toBeUndefined();
+    expect(await worker.dispatch("https://kvitbit.cz/mcp/tools")).toBeUndefined();
     expect(
       await worker.dispatch("https://kvitbit.cz/api/auth/session", { mode: "navigate" }),
     ).toBeUndefined();
@@ -210,17 +242,102 @@ describe("service worker", () => {
       "net /app/_expo/static/js/web/index-1.js",
     );
     expect(worker.network).toEqual(["/app/_expo/static/js/web/index-1.js"]);
+    expect(worker.requests[0]).toMatchObject({
+      credentials: "omit",
+      redirect: "error",
+      integrity: "sha256-bundle",
+    });
   });
 
-  test("serves navigations network-first and falls back to the last shell offline", async () => {
+  test("serves navigations network-first and falls back to the cached public shell offline", async () => {
     const worker = loadWorker();
+    await worker.install();
     expect(
       await worker.dispatch("https://kvitbit.cz/app/w/acme/documents", { mode: "navigate" }),
     ).toBe("net /app/w/acme/documents");
     worker.goOffline();
     expect(
       await worker.dispatch("https://kvitbit.cz/app/w/acme/contacts", { mode: "navigate" }),
-    ).toBe("net /app/w/acme/documents");
+    ).toBe("net /app/index.html");
+  });
+
+  test("never caches private, no-store, or Set-Cookie HTML responses into the offline shell", async () => {
+    const worker = loadWorker((pathname, request) => {
+      if (pathname === "/app/index.html") {
+        const res = new Response("PUBLIC-SHELL", {
+          status: 200,
+          headers: { "content-type": "text/html", "cache-control": "public, max-age=60" },
+        });
+        Object.defineProperty(res, "url", { value: request.url });
+        return res;
+      }
+      if (pathname === "/app/") {
+        const res = new Response("PRIVATE-ROOT-BODY", {
+          status: 200,
+          headers: { "content-type": "text/html", "cache-control": "private, no-store" },
+        });
+        Object.defineProperty(res, "url", { value: request.url });
+        return res;
+      }
+      const res = new Response("PRIVATE-ROUTE-SENTINEL", {
+        status: 200,
+        headers: {
+          "content-type": "text/html",
+          "cache-control": "private, no-store",
+          "set-cookie": "session=secret",
+        },
+      });
+      Object.defineProperty(res, "url", { value: request.url });
+      return res;
+    });
+
+    await worker.install();
+    expect(
+      await worker.dispatch("https://kvitbit.cz/app/w/acme/invoices", { mode: "navigate" }),
+    ).toBe("PRIVATE-ROUTE-SENTINEL");
+    expect(await worker.dispatch("https://kvitbit.cz/app/", { mode: "navigate" })).toBe(
+      "PRIVATE-ROOT-BODY",
+    );
+
+    worker.goOffline();
+    const offlineAnswer = await worker.dispatch("https://kvitbit.cz/app/", { mode: "navigate" });
+    expect(offlineAnswer).toBe("PUBLIC-SHELL");
+    expect(offlineAnswer).not.toContain("PRIVATE-");
+  });
+
+  test.each([
+    { "cache-control": "private, max-age=60" },
+    { "cache-control": "no-store" },
+    { "set-cookie": "session=example" },
+    { vary: "Accept-Language, Cookie" },
+  ])(
+    "checks cache eligibility during installation and on static cache misses (%j)",
+    async (headers) => {
+      const worker = loadWorker((_pathname, request) => {
+        const response = new Response("uncacheable", {
+          headers: { "content-type": "text/html", ...headers },
+        });
+        Object.defineProperty(response, "url", { value: request.url });
+        return response;
+      });
+      await worker.install();
+      expect(worker.store.size).toBe(0);
+      await worker.dispatch("https://kvitbit.cz/app/_expo/static/js/web/index-1.js");
+      expect(worker.store.size).toBe(0);
+    },
+  );
+
+  test("rejects a final URL outside the artifact path and ignores unlisted assets", async () => {
+    const worker = loadWorker(() => {
+      const response = new Response("API data", { headers: { "content-type": "text/html" } });
+      Object.defineProperty(response, "url", { value: "https://kvitbit.cz/api/private" });
+      return response;
+    });
+    await worker.install();
+    expect(worker.store.size).toBe(0);
+    expect(
+      await worker.dispatch("https://kvitbit.cz/app/_expo/static/unlisted.js"),
+    ).toBeUndefined();
   });
 });
 
@@ -230,6 +347,11 @@ describe("decorateExport", () => {
   beforeEach(async () => {
     dist = await mkdtemp(join(tmpdir(), "kvitbit-pwa-"));
     await writeFile(join(dist, "index.html"), expoShell);
+    for (const url of staticAssetUrls(expoShell)) {
+      const file = join(dist, url.slice("/app/".length));
+      await mkdir(join(file, ".."), { recursive: true });
+      await writeFile(file, "exported bundle");
+    }
   });
 
   afterEach(async () => {

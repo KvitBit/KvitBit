@@ -81,6 +81,8 @@ mock.module("react-native", () => ({
     select: (options: Record<string, unknown>) =>
       options.android ?? options.native ?? options.default,
   },
+  NativeModules: {},
+  DeviceEventEmitter: { addListener: () => ({ remove: () => undefined }) },
   AppState: {
     currentState: "active",
     addEventListener: () => ({ remove: () => undefined }),

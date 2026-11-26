@@ -1,5 +1,5 @@
 import type { RequestKey } from "@kvitbit/domain/contract";
-import { describeError, type UiError, uuidV7 } from "@kvitbit/ui-port/api";
+import { type ApiResult, describeError, UiError, uuidV7 } from "@kvitbit/ui-port/api";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { Effect } from "effect";
 import { CryptoDigestAlgorithm, digestStringAsync } from "expo-crypto";
@@ -28,6 +28,10 @@ export const makeRequestIntents = (
   digest: (value: string) => Promise<string>,
   mint: () => Promise<RequestKey>,
 ) => {
+  const readKeys = async (slot: string): Promise<Record<string, RequestKey>> => {
+    const stored = await storage.getItem(slot);
+    return stored === null ? {} : JSON.parse(stored);
+  };
   const pending = new Map<string, Promise<void>>();
   const inSlot = async <T>(
     owner: string,
@@ -36,7 +40,7 @@ export const makeRequestIntents = (
   ) => {
     const slot = `kvitbit.request-intent.v1.${await digest(JSON.stringify([owner, operation]))}`;
     // Web tabs share local storage. Native uses the same queue within its JS runtime.
-    if (typeof navigator !== "undefined" && navigator.locks !== undefined) {
+    if (typeof navigator !== "undefined" && typeof navigator.locks?.request === "function") {
       return navigator.locks.request(slot, () => work(slot));
     }
     const task = (pending.get(slot) ?? Promise.resolve()).then(() => work(slot));
@@ -56,18 +60,21 @@ export const makeRequestIntents = (
     acquireRequestKey: async (owner: string, operation: string, payload: unknown) => {
       const fingerprint = await digest(canonicalPayload(payload));
       return inSlot(owner, operation, async (slot) => {
-        const stored = await storage.getItem(slot);
-        const [previousFingerprint, previousKey] = stored?.split(":") ?? [];
-        if (previousFingerprint === fingerprint && previousKey) return previousKey as RequestKey;
+        const keys = await readKeys(slot);
+        const previous = keys[fingerprint];
+        if (previous !== undefined) return previous;
         const key = await mint();
-        await storage.setItem(slot, `${fingerprint}:${key}`);
+        await storage.setItem(slot, JSON.stringify({ ...keys, [fingerprint]: key }));
         return key;
       });
     },
     completeRequestKey: (owner: string, operation: string, key: RequestKey) =>
       inSlot(owner, operation, async (slot) => {
-        const stored = await storage.getItem(slot);
-        if (stored?.split(":")[1] === key) await storage.removeItem(slot);
+        const keys = Object.entries(await readKeys(slot));
+        const remaining = keys.filter(([, candidate]) => candidate !== key);
+        if (remaining.length === keys.length) return;
+        if (remaining.length === 0) await storage.removeItem(slot);
+        else await storage.setItem(slot, JSON.stringify(Object.fromEntries(remaining)));
       }),
   };
 };
@@ -81,3 +88,22 @@ export const { acquireRequestKey, completeRequestKey } = makeRequestIntents(
 export const settlesRequestIntent = (
   result: { readonly _tag: "Ok" } | { readonly _tag: "Err"; readonly error: UiError },
 ): boolean => result._tag === "Ok" || describeError(result.error).clearRequestKey;
+
+export const runRequestIntent = async <A>(
+  owner: string,
+  operation: string,
+  payload: unknown,
+  run: (key: RequestKey) => Promise<ApiResult<A>>,
+): Promise<ApiResult<A>> => {
+  try {
+    const key = await acquireRequestKey(owner, operation, payload);
+    const result = await run(key);
+    if (settlesRequestIntent(result)) {
+      // The write has already succeeded. A failed cleanup must not report it as a failed write.
+      await completeRequestKey(owner, operation, key).catch(() => undefined);
+    }
+    return result;
+  } catch {
+    return { _tag: "Err", error: UiError.offline };
+  }
+};

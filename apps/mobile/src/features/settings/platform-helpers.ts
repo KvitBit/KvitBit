@@ -1,16 +1,8 @@
-import {
-  BRANDING_IMAGE_MAX_BYTES,
-  BRANDING_IMAGE_TYPES,
-  type IdempotencyKey,
-} from "@kvitbit/api-contract";
+import { BRANDING_IMAGE_MAX_BYTES, BRANDING_IMAGE_TYPES } from "@kvitbit/api-contract";
 import type { BrandingImage, ImageRef, WorkspaceId } from "@kvitbit/domain/contract";
 import { type Credentials, type UiError, UiError as UiErrorFactory } from "@kvitbit/ui-port/api";
-import { randomUUID } from "expo-crypto";
 import { Platform } from "react-native";
 import { apiUrl, authHeaders, errorFromResponse, parseJson } from "../../platform/transfer/http";
-
-/** Mints a client-chosen retry key (alphanumeric + hyphens, valid IdempotencyKey). */
-export const mintIdempotencyKey = (): IdempotencyKey => randomUUID() as IdempotencyKey;
 
 /** Copies text to clipboard using expo-clipboard on native and navigator.clipboard on web. */
 export const copyToClipboard = async (value: string): Promise<boolean> => {

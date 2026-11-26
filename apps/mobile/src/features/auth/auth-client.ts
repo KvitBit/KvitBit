@@ -8,6 +8,7 @@ import { type AuthInvalid, type AuthIssueCode, UiError } from "@kvitbit/ui-port/
 import type { JsonObject, PasskeyBridge } from "../../platform/passkeys/passkey-bridge";
 import type { AuthFetch, AuthResponse } from "../../session/auth-http";
 import { readSessionUser, type SessionUser } from "../../session/session-user";
+import { inviteReturnTo, verifiedSignInHref } from "./auth-links";
 import type {
   AuthClient,
   AuthResult,
@@ -23,7 +24,6 @@ export interface AuthClientDeps {
   readonly refresh: () => Promise<void>;
   readonly clear: () => Promise<void>;
   readonly passkeyBridge: PasskeyBridge;
-  readonly currentSessionToken?: () => string | null;
 }
 
 const ok = <A>(value: A): AuthResult<A> => ({ _tag: "Ok", value });
@@ -161,18 +161,14 @@ const parsePasskey = (raw: unknown): PasskeyView | null => {
   };
 };
 
-const parseSession = (raw: unknown, currentToken: string | null): SessionView | null => {
+const parseSession = (raw: unknown, currentSessionId: string): SessionView | null => {
   if (!isRecord(raw)) return null;
   const token = typeof raw.token === "string" ? raw.token : null;
   const id = token ?? (typeof raw.id === "string" ? raw.id : null);
   if (id === null) return null;
-  const isCurrent =
-    raw.current === true ||
-    raw.isCurrent === true ||
-    (currentToken !== null && (token === currentToken || raw.id === currentToken));
   return {
     id,
-    current: isCurrent,
+    current: raw.id === currentSessionId,
     userAgent: typeof raw.userAgent === "string" ? raw.userAgent : null,
     ipAddress: typeof raw.ipAddress === "string" ? raw.ipAddress : null,
     createdAt: toIso(raw.createdAt),
@@ -192,7 +188,7 @@ export const makeAuthClient = (deps: AuthClientDeps): AuthClient => {
   const establishSession = async (response: AuthResponse): Promise<AuthResult<AuthSession>> => {
     const token = response.token;
     let user: SessionUser | null = readSessionUser(response.body);
-    await deps.signedIn(token);
+    if (!(await deps.signedIn(token))) return err(UiError.unexpected(response.status, null));
     if (user === null) {
       const sessionRes = await deps.auth("/get-session");
       user = sessionRes.ok ? readSessionUser(sessionRes.body) : null;
@@ -212,6 +208,7 @@ export const makeAuthClient = (deps: AuthClientDeps): AuthClient => {
             email: input.email,
             password: input.password,
             name: input.name,
+            callbackURL: `/app${verifiedSignInHref(inviteReturnTo(input.invitation))}`,
             ...(input.invitation !== undefined ? { invitation: input.invitation } : {}),
           },
         });
@@ -244,14 +241,24 @@ export const makeAuthClient = (deps: AuthClientDeps): AuthClient => {
       guard(async () => {
         const path = kind === "verify" ? "/verify-email" : "/magic-link/verify";
         const res = await deps.auth(path, { method: "GET", query: { token } });
-        return res.ok ? establishSession(res) : err(mapAuthError(res, { notFoundOn400: true }));
+        if (!res.ok) return err(mapAuthError(res, { notFoundOn400: true }));
+        if (
+          kind === "verify" &&
+          isRecord(res.body) &&
+          res.body.status === true &&
+          res.body.user === null &&
+          res.token === null
+        ) {
+          return ok(null);
+        }
+        return establishSession(res);
       }),
 
-    resendVerification: (email) =>
+    resendVerification: (email, returnTo = null) =>
       guard(async () => {
         const res = await deps.auth("/send-verification-email", {
           method: "POST",
-          body: { email },
+          body: { email, callbackURL: `/app${verifiedSignInHref(returnTo)}` },
         });
         return res.ok ? ok(undefined) : err(mapAuthError(res));
       }),
@@ -387,17 +394,24 @@ export const makeAuthClient = (deps: AuthClientDeps): AuthClient => {
 
     sessions: () =>
       guard(async () => {
-        const res = await deps.auth("/list-sessions", { method: "GET" });
+        const [res, current] = await Promise.all([
+          deps.auth("/list-sessions", { method: "GET" }),
+          deps.auth("/get-session", { method: "GET" }),
+        ]);
         if (!res.ok) return err(mapAuthError(res));
+        if (!current.ok) return err(mapAuthError(current));
+        const session = isRecord(current.body) ? current.body.session : null;
+        if (!isRecord(session) || typeof session.id !== "string")
+          return err(UiError.unexpected(current.status, null));
+        const currentSessionId = session.id;
         const list = Array.isArray(res.body)
           ? res.body
           : isRecord(res.body) && Array.isArray(res.body.sessions)
             ? res.body.sessions
             : [];
-        const currentToken = deps.currentSessionToken?.() ?? null;
         return ok(
           list
-            .map((row) => parseSession(row, currentToken))
+            .map((row) => parseSession(row, currentSessionId))
             .filter((s): s is SessionView => s !== null),
         );
       }),

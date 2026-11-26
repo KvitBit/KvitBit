@@ -17,6 +17,7 @@ const inertHooks = {
   useRoute: () => ({ key: "" }),
   useRouter: () => ({ push: (_href: unknown) => undefined }),
   useSegments: () => [] as string[],
+  useUnstableGlobalHref: () => "/",
 };
 
 const unusedExport = () => {

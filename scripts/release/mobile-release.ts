@@ -11,9 +11,9 @@
  *   verify       Verify a live origin or local storage directory (manifest multipart + RSA signature).
  */
 
-import { createHash, generateKeyPairSync, randomUUID } from "node:crypto";
-import { constants as fsConstants } from "node:fs";
-import { mkdir, mkdtemp, open, readdir, readFile, rm, stat } from "node:fs/promises";
+import { createHash, generateKeyPairSync, randomUUID, X509Certificate } from "node:crypto";
+import { existsSync, readdirSync } from "node:fs";
+import { chmod, link, mkdir, mkdtemp, readdir, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -154,6 +154,104 @@ export const parseApkSignerDigests = (apksignerOutput: string): string[] =>
     .filter((digest): digest is string => digest !== undefined)
     .map(normalizeCertificateSha256);
 
+const findAndroidBuildTool = (tool: "apksigner" | "aapt2"): string | undefined => {
+  const sdk = readEnv("ANDROID_HOME") ?? readEnv("ANDROID_SDK_ROOT");
+  if (sdk) {
+    const buildToolsDir = join(sdk, "build-tools");
+    if (existsSync(buildToolsDir)) {
+      const versions = readdirSync(buildToolsDir)
+        .filter((version) => existsSync(join(buildToolsDir, version, tool)))
+        .sort((left, right) => right.localeCompare(left, undefined, { numeric: true }));
+      const newest = versions[0];
+      if (newest) return join(buildToolsDir, newest, tool);
+    }
+  }
+  return Bun.which(tool) ?? undefined;
+};
+
+const inspectApkSignerSha256s = async (apkPath: string): Promise<string[]> => {
+  const apksigner = findAndroidBuildTool("apksigner");
+  if (!apksigner) throw new Error("Android build-tools apksigner is required to verify APKs.");
+  const res = await runProcess([apksigner, "verify", "--print-certs", apkPath]);
+  if (res.exitCode !== 0) {
+    throw new Error(`apksigner verification failed for ${apkPath}:\n${res.stderr || res.stdout}`);
+  }
+  const digests = parseApkSignerDigests(res.stdout);
+  if (digests.length === 0) {
+    throw new Error(`apksigner reported no signer certificates for ${apkPath}.`);
+  }
+  return digests;
+};
+
+const verifyApkArtifact = async (
+  apkPath: string,
+  expected: {
+    readonly packageName: string;
+    readonly versionCode: number;
+    readonly versionName: string;
+    readonly expectedSignerSha256?: string;
+  },
+): Promise<{ readonly signingCertSha256: string }> => {
+  const signers = await inspectApkSignerSha256s(apkPath);
+  const uniqueSigners = [...new Set(signers)];
+  if (uniqueSigners.length !== 1) {
+    throw new Error(`APK ${apkPath} must have exactly one current signer.`);
+  }
+  if (expected.expectedSignerSha256) {
+    const expectedHex = normalizeCertificateSha256(expected.expectedSignerSha256);
+    const unexpected = uniqueSigners.filter((digest) => digest !== expectedHex);
+    if (unexpected.length > 0) {
+      throw new Error(
+        `APK signer certificate ${unexpected.map(formatCertificateSha256).join(", ")} does not match expected ${formatCertificateSha256(expectedHex)}.`,
+      );
+    }
+  }
+  const primarySigner = uniqueSigners[0];
+  if (!primarySigner) {
+    throw new Error(`APK ${apkPath} has no signer certificate.`);
+  }
+
+  const aapt2 = findAndroidBuildTool("aapt2");
+  if (!aapt2) throw new Error("Android build-tools aapt2 is required to verify APK identity.");
+  const badging = await runProcess([aapt2, "dump", "badging", apkPath]);
+  if (badging.exitCode !== 0) {
+    throw new Error(`aapt2 dump badging failed for ${apkPath}:\n${badging.stderr}`);
+  }
+  const actual = parseApkBadgingIdentity(badging.stdout);
+  if (
+    actual.packageName !== expected.packageName ||
+    actual.versionCode !== expected.versionCode ||
+    actual.versionName !== expected.versionName
+  ) {
+    throw new Error(
+      `APK identity mismatch: got ${actual.packageName} (${actual.versionName} / ${actual.versionCode}), expected ${expected.packageName} (${expected.versionName} / ${expected.versionCode}).`,
+    );
+  }
+
+  return { signingCertSha256: formatCertificateSha256(primarySigner) };
+};
+
+const withOtaCodeSigningEnv = async <T>(
+  projectDir: string,
+  env: Record<string, string | undefined>,
+  fn: (resolvedEnv: Record<string, string | undefined>) => Promise<T>,
+): Promise<T> => {
+  const pemContent = env.MOBILE_UPDATES_CODE_SIGNING_CERTIFICATE_PEM?.trim();
+  if (!pemContent) {
+    return fn(env);
+  }
+  const certificate = new X509Certificate(pemContent);
+  // Expo uses a project-relative path. The same certificate must have the same
+  // path in the APK build and in the OTA job's independent checkout.
+  const fileName = `${certificate.fingerprint256.replaceAll(":", "").toLowerCase()}.pem`;
+  const certPath = join(projectDir, ".expo", "release-signing", fileName);
+  await Bun.write(certPath, `${certificate.toString().trim()}\n`, { createPath: true });
+  return fn({
+    ...env,
+    MOBILE_UPDATES_CODE_SIGNING_CERTIFICATE: certPath,
+  });
+};
+
 export const parseApkBadgingIdentity = (
   badging: string,
 ): { readonly packageName: string; readonly versionCode: number; readonly versionName: string } => {
@@ -291,25 +389,19 @@ const writeCreateOnly = async (
   if (target.kind === "dir") {
     const fullPath = join(target.root, key);
     await mkdir(dirname(fullPath), { recursive: true });
+    const stagingDir = await mkdtemp(join(dirname(fullPath), ".staging-"));
+    const stagedPath = join(stagingDir, "payload");
     try {
-      const handle = await open(
-        fullPath,
-        fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_WRONLY,
-        0o644,
-      );
-      try {
-        await handle.writeFile(bytes);
-      } finally {
-        await handle.close();
-      }
+      await Bun.write(stagedPath, bytes);
+      // Same-filesystem link publishes the complete file atomically and fails if it exists.
+      await link(stagedPath, fullPath);
       return "written";
     } catch (err) {
-      if ((err as NodeJS.ErrnoException).code === "EEXIST" && options.allowExisting) {
-        return "exists";
-      }
-      throw new Error(
-        `Object ${key} already exists (create-only storage refuses overwrite): ${String(err)}`,
-      );
+      if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+      if (options.allowExisting) return "exists";
+      throw new Error(`Object ${key} already exists (create-only storage refuses overwrite).`);
+    } finally {
+      await rm(stagingDir, { recursive: true, force: true });
     }
   }
 
@@ -340,6 +432,32 @@ const writeCreateOnly = async (
       return "exists";
     }
     throw new Error(`gcloud storage cp failed for ${key}: ${result.stderr.trim()}`);
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+};
+
+const readStorageObject = async (target: StorageTarget, key: string): Promise<Uint8Array> => {
+  if (target.kind === "none") {
+    throw new Error("Cannot read without a storage target.");
+  }
+  if (target.kind === "dir") {
+    return new Uint8Array(await readFile(join(target.root, key)));
+  }
+  const tempDir = await mkdtemp(join(tmpdir(), "kvitbit-gcs-read-"));
+  const tempFile = join(tempDir, "payload");
+  try {
+    const result = await runProcess([
+      "gcloud",
+      "storage",
+      "cp",
+      `gs://${target.bucket}/${key}`,
+      tempFile,
+    ]);
+    if (result.exitCode !== 0) {
+      throw new Error(`gcloud storage cp failed reading ${key}: ${result.stderr.trim()}`);
+    }
+    return new Uint8Array(await readFile(tempFile));
   } finally {
     await rm(tempDir, { recursive: true, force: true });
   }
@@ -496,69 +614,120 @@ const cmdBuild = async (argv: readonly string[]): Promise<void> => {
     return;
   }
 
+  const keystoreBase64 = readEnv("ANDROID_KEYSTORE_BASE64");
+  const keystorePathEnv = readEnv("ANDROID_KEYSTORE_PATH");
+  const keystorePassword = readEnv("ANDROID_KEYSTORE_PASSWORD");
+  const keyAlias = readEnv("ANDROID_KEY_ALIAS") ?? "kvitbit-release";
+  const keyPassword = readEnv("ANDROID_KEY_PASSWORD") ?? keystorePassword;
+
   if (values.signing === "release") {
-    if (!readEnv("ANDROID_KEYSTORE_BASE64") || !readEnv("ANDROID_KEYSTORE_PASSWORD")) {
+    if ((!keystoreBase64 && !keystorePathEnv) || !keystorePassword) {
       throw new Error(
-        "Release build requires ANDROID_KEYSTORE_BASE64 and ANDROID_KEYSTORE_PASSWORD (or pass --signing debug / --dry-run).",
+        "Release build requires ANDROID_KEYSTORE_PASSWORD and ANDROID_KEYSTORE_BASE64 (or ANDROID_KEYSTORE_PATH), or pass --signing debug / --dry-run.",
       );
     }
   }
 
   await mkdir(outDir, { recursive: true });
-  const prebuild = await runProcess(
-    [
-      process.execPath,
-      "x",
-      "--no-install",
-      "expo",
-      "prebuild",
-      "--platform",
-      "android",
-      "--non-interactive",
-    ],
-    {
-      cwd: projectDir,
-      env: {
-        ...process.env,
-        EXPO_PUBLIC_API_ORIGIN: values.origin,
-        MOBILE_UPDATES_CODE_SIGNING: values.signing === "release" ? "required" : "",
-      },
-    },
-  );
-  if (prebuild.exitCode !== 0) {
-    throw new Error(`expo prebuild failed:\n${prebuild.stderr}`);
+  let tempKeystoreDir: string | undefined;
+  let resolvedKeystorePath = keystorePathEnv === undefined ? undefined : resolve(keystorePathEnv);
+  try {
+    if (values.signing === "release" && keystoreBase64) {
+      tempKeystoreDir = await mkdtemp(join(tmpdir(), "kvitbit-android-keystore-"));
+      resolvedKeystorePath = join(tempKeystoreDir, "release.keystore");
+      await Bun.write(resolvedKeystorePath, Buffer.from(keystoreBase64, "base64"));
+      await chmod(resolvedKeystorePath, 0o600);
+    }
+
+    const baseBuildEnv: Record<string, string | undefined> = {
+      ...process.env,
+      EXPO_PUBLIC_API_ORIGIN: values.origin,
+      MOBILE_UPDATES_CODE_SIGNING: values.signing === "release" ? "required" : "",
+      EXPO_UPDATES_WORKFLOW_OVERRIDE: "managed",
+    };
+
+    const androidDir = join(projectDir, "android");
+    await withOtaCodeSigningEnv(projectDir, baseBuildEnv, async (prebuildEnv) => {
+      const prebuild = await runProcess(
+        [
+          process.execPath,
+          "x",
+          "--no-install",
+          "expo",
+          "prebuild",
+          "--platform",
+          "android",
+          "--no-install",
+        ],
+        {
+          cwd: projectDir,
+          env: { ...prebuildEnv, CI: "1" },
+        },
+      );
+      if (prebuild.exitCode !== 0) {
+        throw new Error(`expo prebuild failed:\n${prebuild.stderr}`);
+      }
+
+      const gradleTask = values.signing === "release" ? "assembleRelease" : "assembleDebug";
+      const gradleEnv: Record<string, string | undefined> =
+        values.signing === "release"
+          ? {
+              ...prebuildEnv,
+              ANDROID_KEYSTORE_PATH: resolvedKeystorePath,
+              ANDROID_KEYSTORE_PASSWORD: keystorePassword,
+              ANDROID_KEY_ALIAS: keyAlias,
+              ANDROID_KEY_PASSWORD: keyPassword,
+              KVITBIT_REQUIRE_RELEASE_SIGNING: "true",
+            }
+          : prebuildEnv;
+      const gradle = await runProcess(["./gradlew", gradleTask, "--no-daemon", "--console=plain"], {
+        cwd: androidDir,
+        env: gradleEnv,
+      });
+      if (gradle.exitCode !== 0) {
+        throw new Error(
+          `Gradle ${gradleTask} failed:\n${gradle.stderr}\n${gradle.stdout.slice(-8000)}`,
+        );
+      }
+    });
+
+    const builtApk = join(
+      androidDir,
+      "app/build/outputs/apk",
+      values.signing === "release" ? "release/app-release.apk" : "debug/app-debug.apk",
+    );
+    const verified = await verifyApkArtifact(builtApk, {
+      packageName: meta.packageName,
+      versionCode: meta.versionCode,
+      versionName: meta.version,
+      expectedSignerSha256:
+        values.signing === "release" ? readEnv("KVITBIT_ANDROID_SIGNING_CERT_SHA256") : undefined,
+    });
+
+    const apkBytes = new Uint8Array(await readFile(builtApk));
+    await Bun.write(apkOutPath, apkBytes);
+
+    const apkSha256 = createHash("sha256").update(apkBytes).digest("hex");
+    writeStdout(
+      JSON.stringify(
+        {
+          command: "build",
+          version: meta.version,
+          versionCode: meta.versionCode,
+          apkPath: apkOutPath,
+          apkSha256,
+          signingCertSha256: verified.signingCertSha256,
+          sizeBytes: apkBytes.byteLength,
+        },
+        null,
+        2,
+      ),
+    );
+  } finally {
+    if (tempKeystoreDir) {
+      await rm(tempKeystoreDir, { recursive: true, force: true });
+    }
   }
-
-  const androidDir = join(projectDir, "android");
-  const gradleTask = values.signing === "release" ? "assembleRelease" : "assembleDebug";
-  const gradle = await runProcess(["./gradlew", gradleTask, "--no-daemon"], { cwd: androidDir });
-  if (gradle.exitCode !== 0) {
-    throw new Error(`Gradle ${gradleTask} failed:\n${gradle.stderr}`);
-  }
-
-  const builtApk = join(
-    androidDir,
-    "app/build/outputs/apk",
-    values.signing === "release" ? "release/app-release.apk" : "debug/app-debug.apk",
-  );
-  const apkBytes = new Uint8Array(await readFile(builtApk));
-  await Bun.write(apkOutPath, apkBytes);
-
-  const apkSha256 = createHash("sha256").update(apkBytes).digest("hex");
-  writeStdout(
-    JSON.stringify(
-      {
-        command: "build",
-        version: meta.version,
-        versionCode: meta.versionCode,
-        apkPath: apkOutPath,
-        apkSha256,
-        sizeBytes: apkBytes.byteLength,
-      },
-      null,
-      2,
-    ),
-  );
 };
 
 const cmdPublishApk = async (argv: readonly string[]): Promise<void> => {
@@ -585,12 +754,13 @@ const cmdPublishApk = async (argv: readonly string[]): Promise<void> => {
   const target = resolveStorageTarget(values["storage-dir"], values.bucket, dryRun);
   const releasedAt = values["released-at"] ?? new Date().toISOString();
 
+  let apkPath: string | undefined;
   let apkBytes: Uint8Array | undefined;
   let apkSha256: string;
   let sizeBytes: number;
 
   if (values.apk) {
-    const apkPath = resolve(values.apk);
+    apkPath = resolve(values.apk);
     apkBytes = new Uint8Array(await readFile(apkPath));
     apkSha256 = createHash("sha256").update(apkBytes).digest("hex");
     sizeBytes = apkBytes.byteLength;
@@ -601,17 +771,32 @@ const cmdPublishApk = async (argv: readonly string[]): Promise<void> => {
     throw new Error("publish-apk requires --apk <path> (or --dry-run).");
   }
 
-  const rawCertSha =
+  const expectedCertSha =
     values["signing-cert-sha256"] ?? readEnv("KVITBIT_ANDROID_SIGNING_CERT_SHA256");
-  const signingCertSha256 = rawCertSha
-    ? formatCertificateSha256(rawCertSha)
-    : dryRun
-      ? formatCertificateSha256("0".repeat(64))
-      : (() => {
-          throw new Error(
-            "publish-apk requires --signing-cert-sha256 or KVITBIT_ANDROID_SIGNING_CERT_SHA256.",
-          );
-        })();
+
+  let signingCertSha256: string;
+  if (apkPath && apkBytes) {
+    const staging = await mkdtemp(join(tmpdir(), "kvitbit-apk-verify-"));
+    const snapshot = join(staging, "candidate.apk");
+    try {
+      await Bun.write(snapshot, apkBytes);
+      const verified = await verifyApkArtifact(snapshot, {
+        packageName: meta.packageName,
+        versionCode,
+        versionName: version,
+        expectedSignerSha256: expectedCertSha,
+      });
+      signingCertSha256 = verified.signingCertSha256;
+    } finally {
+      await rm(staging, { recursive: true, force: true });
+    }
+  } else if (dryRun) {
+    signingCertSha256 = expectedCertSha
+      ? formatCertificateSha256(expectedCertSha)
+      : formatCertificateSha256("0".repeat(64));
+  } else {
+    throw new Error("Missing APK path.");
+  }
 
   const releaseInfo: ReleaseInfo = {
     version,
@@ -649,20 +834,45 @@ const cmdPublishApk = async (argv: readonly string[]): Promise<void> => {
     throw new Error("Missing APK bytes.");
   }
 
-  await writeCreateOnly(target, apkKey, apkBytes, {
+  const apkOutcome = await writeCreateOnly(target, apkKey, apkBytes, {
     contentType: APK_CONTENT_TYPE,
     cacheControl: ASSET_CACHE_CONTROL,
-    allowExisting: false,
+    allowExisting: true,
   });
-  await writeCreateOnly(
+  if (apkOutcome === "exists") {
+    const existingBytes = await readStorageObject(target, apkKey);
+    const existingSha = createHash("sha256").update(existingBytes).digest("hex");
+    if (existingSha !== apkSha256 || existingBytes.byteLength !== apkBytes.byteLength) {
+      throw new Error(
+        `Object ${apkKey} already exists with different bytes (existing sha256=${existingSha}, local sha256=${apkSha256}); create-only storage refuses overwrite.`,
+      );
+    }
+  }
+  const infoOutcome = await writeCreateOnly(
     target,
     infoKey,
     new TextEncoder().encode(`${JSON.stringify(releaseInfo, null, 2)}\n`),
     {
       contentType: "application/json; charset=utf-8",
-      allowExisting: false,
+      allowExisting: true,
     },
   );
+
+  let publishedReleaseInfo = releaseInfo;
+  if (infoOutcome === "exists") {
+    const existing = parseReleaseInfo(
+      new TextDecoder().decode(await readStorageObject(target, infoKey)),
+    );
+    const compatible = Object.entries(releaseInfo).every(
+      ([key, value]) =>
+        (key === "releasedAt" && values["released-at"] === undefined) ||
+        existing[key as keyof ReleaseInfo] === value,
+    );
+    if (!compatible) {
+      throw new Error(`Object ${infoKey} already exists with different release metadata.`);
+    }
+    publishedReleaseInfo = existing;
+  }
 
   writeStdout(
     JSON.stringify(
@@ -671,7 +881,7 @@ const cmdPublishApk = async (argv: readonly string[]): Promise<void> => {
         target,
         apkKey,
         infoKey,
-        releaseInfo,
+        releaseInfo: publishedReleaseInfo,
       },
       null,
       2,
@@ -683,36 +893,43 @@ const resolveRuntimeVersionFromExpo = async (
   projectDir: string,
   platform: MobilePlatform,
   origin: string,
-): Promise<string> => {
-  const result = await runProcess(
-    [
-      process.execPath,
-      "x",
-      "--no-install",
-      "expo-updates",
-      "runtimeversion:resolve",
-      "--platform",
-      platform,
-    ],
+): Promise<string> =>
+  withOtaCodeSigningEnv(
+    projectDir,
     {
-      cwd: projectDir,
-      env: {
-        ...process.env,
-        EXPO_PUBLIC_API_ORIGIN: origin,
-      },
+      ...process.env,
+      EXPO_PUBLIC_API_ORIGIN: origin,
+    },
+    async (env) => {
+      const result = await runProcess(
+        [
+          process.execPath,
+          "x",
+          "--no-install",
+          "expo-updates",
+          "runtimeversion:resolve",
+          "--platform",
+          platform,
+          "--workflow",
+          "managed",
+        ],
+        {
+          cwd: projectDir,
+          env,
+        },
+      );
+      if (result.exitCode !== 0) {
+        throw new Error(
+          `expo-updates runtimeversion:resolve failed for ${platform}:\n${result.stderr}`,
+        );
+      }
+      const parsed = JSON.parse(result.stdout) as { runtimeVersion?: unknown };
+      if (typeof parsed.runtimeVersion !== "string" || parsed.runtimeVersion.length === 0) {
+        throw new Error(`Unexpected runtimeversion:resolve output: ${result.stdout}`);
+      }
+      return assertRuntimeVersion(parsed.runtimeVersion);
     },
   );
-  if (result.exitCode !== 0) {
-    throw new Error(
-      `expo-updates runtimeversion:resolve failed for ${platform}:\n${result.stderr}`,
-    );
-  }
-  const parsed = JSON.parse(result.stdout) as { runtimeVersion?: unknown };
-  if (typeof parsed.runtimeVersion !== "string" || parsed.runtimeVersion.length === 0) {
-    throw new Error(`Unexpected runtimeversion:resolve output: ${result.stdout}`);
-  }
-  return assertRuntimeVersion(parsed.runtimeVersion);
-};
 
 const parsePlatforms = (raw: readonly string[] | undefined): readonly MobilePlatform[] => {
   const input = raw && raw.length > 0 ? raw : ["android"];
@@ -770,10 +987,11 @@ const cmdPublishOta = async (argv: readonly string[]): Promise<void> => {
       tempExportDir,
       ...platforms.flatMap((p) => ["--platform", p]),
     ];
-    const exported = await runProcess(exportArgs, {
-      cwd: projectDir,
-      env: { ...process.env, EXPO_PUBLIC_API_ORIGIN: values.origin },
-    });
+    const exported = await withOtaCodeSigningEnv(
+      projectDir,
+      { ...process.env, EXPO_PUBLIC_API_ORIGIN: values.origin },
+      (env) => runProcess(exportArgs, { cwd: projectDir, env }),
+    );
     if (exported.exitCode !== 0) {
       await rm(tempExportDir, { recursive: true, force: true });
       throw new Error(`expo export failed:\n${exported.stderr}`);

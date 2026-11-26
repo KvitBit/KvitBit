@@ -1,7 +1,7 @@
 export const KVITBIT_ANDROID_PACKAGE = "cz.kvitbit.app";
 export const OBTAINIUM_REDIRECT_ORIGIN = "https://apps.obtainium.imranr.dev/redirect";
-export const OBTAINIUM_APK_FILTER_REGEX = "kvitbit-[0-9.]+\\.apk$";
-export const OBTAINIUM_VERSION_EXTRACTION_REGEX = "kvitbit-([0-9.]+)\\.apk";
+export const OBTAINIUM_APK_FILTER_REGEX = "/releases/[0-9]+\\.[0-9]+\\.[0-9]+/apk$";
+export const OBTAINIUM_VERSION_EXTRACTION_REGEX = "/releases/([0-9]+\\.[0-9]+\\.[0-9]+)/apk$";
 
 /**
  * Obtainium's web page source settings: picks the APK link on `/android` by

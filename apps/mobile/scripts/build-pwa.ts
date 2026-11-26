@@ -7,7 +7,7 @@
 import { copyFile, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { injectPwaHead, staticAssetUrls, urlsOutsideBase } from "./pwa/html";
-import { appleTouchIcon, pwaColors, pwaIcons, pwaManifest } from "./pwa/manifest";
+import { APP_BASE, appleTouchIcon, pwaColors, pwaIcons, pwaManifest } from "./pwa/manifest";
 import { serviceWorkerSource } from "./pwa/service-worker";
 
 const appRoot = resolve(import.meta.dir, "..");
@@ -45,17 +45,31 @@ export const decorateExport = async ({
     join(dist, "manifest.webmanifest"),
     `${JSON.stringify(pwaManifest(), null, 2)}\n`,
   );
-  await writeFile(
-    join(dist, "sw.js"),
-    serviceWorkerSource({ version: exportVersion(exported), precache: staticAssetUrls(exported) }),
-  );
-
   const shell = injectPwaHead(exported, { themeColor: pwaColors.theme });
   const outside = urlsOutsideBase(shell);
   if (outside.length > 0) {
     throw new Error(`index.html loads URLs outside /app/: ${outside.join(", ")}`);
   }
   await writeFile(shellPath, shell);
+  const integrity: Record<string, string> = {};
+  const artifacts = [
+    "index.html",
+    ...(await Array.fromAsync(new Bun.Glob("_expo/static/**/*").scan(dist))),
+  ];
+  for (const file of artifacts.sort()) {
+    const url = file.split("/").map(encodeURIComponent).join("/");
+    integrity[`${APP_BASE}${url}`] =
+      `sha256-${new Bun.CryptoHasher("sha256").update(await readFile(join(dist, file))).digest("base64")}`;
+  }
+  const precache = staticAssetUrls(exported);
+  const missingArtifacts = precache.filter((url) => !Object.hasOwn(integrity, url));
+  if (missingArtifacts.length > 0) {
+    throw new Error(`The PWA build lacks static artifacts: ${missingArtifacts.join(", ")}`);
+  }
+  await writeFile(
+    join(dist, "sw.js"),
+    serviceWorkerSource({ version: exportVersion(exported), precache, integrity }),
+  );
 
   const missing: string[] = [];
   for (const file of pwaEntryFiles) {

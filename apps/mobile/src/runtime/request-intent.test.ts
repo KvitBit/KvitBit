@@ -38,6 +38,9 @@ test("a committed write whose response was lost reuses its key after restart", a
     currency: "CZK",
   });
   expect(edited).not.toBe(key);
+  expect(await retry.acquireRequestKey(owner, operation, { amount: "321", currency: "CZK" })).toBe(
+    key,
+  );
   await retry.completeRequestKey(owner, operation, key);
   expect(await retry.acquireRequestKey(owner, operation, { amount: "400", currency: "CZK" })).toBe(
     edited,

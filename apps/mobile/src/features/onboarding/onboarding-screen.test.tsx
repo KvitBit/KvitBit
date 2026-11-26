@@ -1,6 +1,7 @@
 import { describe, expect, mock, test } from "bun:test";
 import type { ReactElement } from "react";
 import { ApiProvider } from "../../runtime/api-runtime";
+import { SessionProvider } from "../../session/session-provider";
 import { allText, findAll, hostTree } from "../../testing/element-tree";
 import { expoRouterStandIn } from "../../testing/expo-router-stand-in";
 import { TestProviders } from "../../testing/providers";
@@ -12,7 +13,7 @@ const { OnboardingScreen } = await import("./onboarding-screen");
 const within = (node: ReactElement) => (
   <TestProviders>
     <ApiProvider token={null} origin="https://kvitbit.test">
-      {node}
+      <SessionProvider origin="https://kvitbit.test">{node}</SessionProvider>
     </ApiProvider>
   </TestProviders>
 );

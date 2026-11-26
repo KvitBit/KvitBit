@@ -3,6 +3,15 @@ import { CheckEmailScreen } from "../src/features/auth/check-email-screen";
 import { param } from "../src/navigation/routes";
 
 export default function CheckEmailRoute() {
-  const params = useLocalSearchParams<{ readonly email?: string | string[] }>();
-  return <CheckEmailScreen email={param(params.email) ?? ""} />;
+  const params = useLocalSearchParams<{
+    readonly email?: string | string[];
+    readonly returnTo?: string | string[];
+  }>();
+  const returnTo = param(params.returnTo);
+  return (
+    <CheckEmailScreen
+      email={param(params.email) ?? ""}
+      {...(returnTo === undefined ? {} : { returnTo })}
+    />
+  );
 }

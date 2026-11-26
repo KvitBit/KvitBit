@@ -60,12 +60,15 @@ export interface AuthClient {
     proof: BotProofPayload,
     returnTo: string | null,
   ) => Promise<AuthResult<void>>;
-  /** NotFound = expired or already used. */
+  /** Null means email verification succeeded, and the user can sign in. */
   readonly verifyLink: (
     kind: "verify" | "magic",
     token: string,
-  ) => Promise<AuthResult<AuthSession>>;
-  readonly resendVerification: (email: string) => Promise<AuthResult<void>>;
+  ) => Promise<AuthResult<AuthSession | null>>;
+  readonly resendVerification: (
+    email: string,
+    returnTo?: string | null,
+  ) => Promise<AuthResult<void>>;
   readonly requestPasswordReset: (
     email: string,
     proof: BotProofPayload,

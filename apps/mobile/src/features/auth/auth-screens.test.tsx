@@ -49,6 +49,12 @@ const withProviders =
 describe("auth screens", () => {
   test("safeReturnTo allows relative in-app paths and rejects external/protocol-relative URLs", () => {
     expect(safeReturnTo("/w/acme/documents")).toBe("/w/acme/documents");
+    expect(safeReturnTo("/app/w/acme/documents/123?tab=payments#receipt")).toBe(
+      "/w/acme/documents/123?tab=payments#receipt",
+    );
+    expect(safeReturnTo("/app//evil.example")).toBeNull();
+    expect(safeReturnTo("/%5c/evil.example")).toBeNull();
+    expect(safeReturnTo("/w/../w/evil")).toBeNull();
     expect(safeReturnTo("//evil.example")).toBeNull();
     expect(safeReturnTo("https://evil.example")).toBeNull();
     expect(safeReturnTo("")).toBeNull();

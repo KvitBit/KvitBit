@@ -42,7 +42,6 @@ const makeHarness = (
       cleared += 1;
     },
     passkeyBridge,
-    currentSessionToken: () => "tok-cur",
   });
   return {
     client,
@@ -68,6 +67,7 @@ describe("AuthClient", () => {
       password: "longpassword",
       name: "A",
       invitation: "inv1",
+      callbackURL: "/app/sign-in?verified=1&returnTo=%2Finvite%2Finv1",
     });
   });
 
@@ -118,6 +118,18 @@ describe("AuthClient", () => {
 
     const expired = await h.client.verifyLink("magic", "tok2");
     expect(expired._tag === "Err" && expired.error._tag).toBe("NotFound");
+  });
+
+  test("email verification without a session succeeds without signing in another user", async () => {
+    const h = makeHarness(() => ({
+      status: 200,
+      ok: true,
+      body: { status: true, user: null },
+      token: null,
+    }));
+    expect(await h.client.verifyLink("verify", "token")).toEqual({ _tag: "Ok", value: null });
+    expect(h.signedInTokens).toEqual([]);
+    expect(h.calls.map(({ path }) => path)).toEqual(["/verify-email"]);
   });
 
   test("passkeySignIn returns Cancelled quietly when user dismisses sheet", async () => {
@@ -173,12 +185,21 @@ describe("AuthClient", () => {
 
   test("sessions, revokeSession, updateUser, signOut, and deleteAccount", async () => {
     const h = makeHarness((path) => {
+      if (path === "/get-session") {
+        return {
+          status: 200,
+          ok: true,
+          body: { session: { id: "session-cur" }, user: sampleUser },
+          token: null,
+        };
+      }
       if (path === "/list-sessions") {
         return {
           status: 200,
           ok: true,
           body: [
             {
+              id: "session-cur",
               token: "tok-cur",
               userAgent: "Android",
               ipAddress: "1.2.3.4",
@@ -186,6 +207,7 @@ describe("AuthClient", () => {
               expiresAt: "2026-12-01T00:00:00Z",
             },
             {
+              id: "session-other",
               token: "tok-other",
               userAgent: "Firefox",
               ipAddress: "5.6.7.8",

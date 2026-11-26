@@ -9,6 +9,14 @@ export default function AuthLinkRoute() {
   const params = useLocalSearchParams<{
     readonly kind?: string | string[];
     readonly token?: string | string[];
+    readonly returnTo?: string | string[];
   }>();
-  return <AuthLinkScreen kind={parseKind(param(params.kind))} token={param(params.token) ?? ""} />;
+  const returnTo = param(params.returnTo);
+  return (
+    <AuthLinkScreen
+      kind={parseKind(param(params.kind))}
+      token={param(params.token) ?? ""}
+      {...(returnTo === undefined ? {} : { returnTo })}
+    />
+  );
 }

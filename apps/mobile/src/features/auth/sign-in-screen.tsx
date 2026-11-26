@@ -4,8 +4,10 @@ import { KeyRound, Mail } from "lucide-react-native";
 import { useState } from "react";
 import { StyleSheet, View } from "react-native";
 import { useI18n } from "../../i18n/i18n-provider";
+import { safeReturnTo } from "../../navigation/return-to";
 import { navigate } from "../../navigation/routes";
 import { Banner, Button, Card, Screen, SegmentedChoice, space, Text, TextField } from "../../ui";
+import { checkEmailHref } from "./auth-links";
 import type { AuthClient } from "./auth-port";
 import { BotProofWidget } from "./bot-proof-widget";
 import { useAuthClient } from "./use-auth-client";
@@ -13,18 +15,14 @@ import { useBotProof } from "./use-bot-proof";
 
 type SignInMode = "password" | "magic_link";
 
-/** Validates a relative in-app return path (rejects protocol-relative or external URLs). */
-export const safeReturnTo = (raw: string | undefined): string | null => {
-  if (raw === undefined || raw.length === 0) return null;
-  if (!raw.startsWith("/") || raw.startsWith("//")) return null;
-  return raw;
-};
+export { safeReturnTo } from "../../navigation/return-to";
 
 const hasIssueCode = (error: UiError, code: string): boolean =>
   error._tag === "Invalid" && error.issues.some((i) => i.code === code);
 
 export function SignInScreen(props: {
   readonly returnTo?: string;
+  readonly emailVerified?: boolean;
   readonly authClient?: AuthClient;
 }) {
   const { t, text } = useI18n();
@@ -79,7 +77,7 @@ export function SignInScreen(props: {
     if (res._tag === "Cancelled") return;
 
     if (hasIssueCode(res.error, "auth.email_not_verified")) {
-      navigate({ _tag: "CheckEmail", email: trimmed });
+      router.push(checkEmailHref(trimmed, returnTo) as never);
       return;
     }
     const nextFailures = failures + 1;
@@ -137,6 +135,7 @@ export function SignInScreen(props: {
 
   return (
     <Screen title={t("auth.signIn.title")}>
+      {props.emailVerified === true ? <Banner tone="info" text={t("auth.link.verified")} /> : null}
       {errorBanner === null ? null : <Banner tone="error" text={errorBanner} />}
       {magicSent ? (
         <Banner tone="info" text={t("auth.checkEmail.body", { email: email.trim() })} />

@@ -23,6 +23,16 @@
           "autoVerify": true,
           "data": [{ "scheme": "https", "host": "kvitbit.cz", "pathPrefix": "/app" }],
           "category": ["BROWSABLE", "DEFAULT"]
+        },
+        {
+          "action": "SEND",
+          "data": [{ "mimeType": "image/*" }, { "mimeType": "application/pdf" }],
+          "category": ["DEFAULT"]
+        },
+        {
+          "action": "SEND_MULTIPLE",
+          "data": [{ "mimeType": "image/*" }, { "mimeType": "application/pdf" }],
+          "category": ["DEFAULT"]
         }
       ]
     },

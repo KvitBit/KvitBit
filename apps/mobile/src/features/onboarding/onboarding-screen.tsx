@@ -4,19 +4,17 @@ import type {
   IssuingEntityPatch,
   NewWorkspace,
   RegistryResult,
-  RequestKey,
   TaxRegime,
-  WorkspaceId,
 } from "@kvitbit/domain/contract";
 import { describeError } from "@kvitbit/ui-port/api";
 import { enumText, type Locale } from "@kvitbit/ui-port/i18n";
-import * as Crypto from "expo-crypto";
 import { Building2, Search } from "lucide-react-native";
 import { useState } from "react";
 import { StyleSheet, View } from "react-native";
 import { useI18n } from "../../i18n/i18n-provider";
 import { navigate } from "../../navigation/routes";
 import { useApi } from "../../runtime/api-runtime";
+import { useSession } from "../../session/session-provider";
 import {
   Banner,
   Button,
@@ -29,6 +27,7 @@ import {
   TextField,
 } from "../../ui";
 import { lastWorkspace } from "../../workspace/last-workspace";
+import { type OnboardingProgress, saveOnboarding } from "./save-onboarding";
 
 const TOTAL_STEPS = 3;
 
@@ -40,6 +39,7 @@ const DEFAULT_SERIES_PREVIEW = (regime: TaxRegime): string =>
 export function OnboardingScreen(props: { readonly initialStep?: number }) {
   const { t, text, locale, local } = useI18n();
   const api = useApi();
+  const { state: session } = useSession();
 
   const clampedInitial =
     props.initialStep !== undefined && props.initialStep >= 1 && props.initialStep <= TOTAL_STEPS
@@ -77,6 +77,7 @@ export function OnboardingScreen(props: { readonly initialStep?: number }) {
   const [busy, setBusy] = useState(false);
   const [errorBanner, setErrorBanner] = useState<string | null>(null);
   const [nameError, setNameError] = useState<string | null>(null);
+  const [progress, setProgress] = useState<OnboardingProgress | null>(null);
 
   const applyAresResult = (result: RegistryResult) => {
     setIco(result.ico);
@@ -130,6 +131,7 @@ export function OnboardingScreen(props: { readonly initialStep?: number }) {
   };
 
   const handleCreate = async () => {
+    if (session.status !== "signed-in" || busy) return;
     const trimmedName = name.trim();
     if (trimmedName.length === 0) {
       setStep(1);
@@ -149,22 +151,6 @@ export function OnboardingScreen(props: { readonly initialStep?: number }) {
       defaults: { currency, language: docLocale },
     } as unknown as NewWorkspace;
 
-    const idempotencyKey = Crypto.randomUUID() as RequestKey;
-    const created = await api.run((client) =>
-      client.myWorkspaces.create({
-        headers: { "idempotency-key": idempotencyKey },
-        payload,
-      }),
-    );
-
-    if (created._tag !== "Ok") {
-      setBusy(false);
-      setErrorBanner(text(describeError(created.error).text));
-      return;
-    }
-
-    const ws = created.value;
-    const workspaceId = ws.id as WorkspaceId;
     // Persist optional address/DIČ/registerEntry if user edited or loaded them
     const hasEntityExtras =
       dic.trim().length > 0 ||
@@ -172,48 +158,50 @@ export function OnboardingScreen(props: { readonly initialStep?: number }) {
       city.trim().length > 0 ||
       postalCode.trim().length > 0 ||
       registerEntry.trim().length > 0;
-    if (hasEntityExtras) {
-      const entityPatch = {
-        name: trimmedName,
-        ...(trimmedIco.length > 0 ? { ico: trimmedIco } : {}),
-        ...(dic.trim().length > 0 ? { dic: dic.trim() } : {}),
-        ...(street.trim().length > 0 || city.trim().length > 0
-          ? {
-              address: {
-                street: street.trim(),
-                city: city.trim(),
-                postalCode: postalCode.trim(),
-                country: country.trim() || "CZ",
-              },
-            }
-          : {}),
-        ...(registerEntry.trim().length > 0 ? { registerEntry: registerEntry.trim() } : {}),
-      } as unknown as IssuingEntityPatch;
-      await api.run((client) =>
-        client.workspace.updateIssuingEntity({
-          params: { workspaceId },
-          headers: { "if-match": `"${ws.revision}"` },
-          payload: entityPatch,
-        }),
-      );
-    }
+    const issuingEntity = hasEntityExtras
+      ? ({
+          name: trimmedName,
+          ...(trimmedIco.length > 0 ? { ico: trimmedIco } : {}),
+          ...(dic.trim().length > 0 ? { dic: dic.trim() } : {}),
+          ...(street.trim().length > 0 || city.trim().length > 0
+            ? {
+                address: {
+                  street: street.trim(),
+                  city: city.trim(),
+                  postalCode: postalCode.trim(),
+                  country: country.trim() || "CZ",
+                },
+              }
+            : {}),
+          ...(registerEntry.trim().length > 0 ? { registerEntry: registerEntry.trim() } : {}),
+        } as unknown as IssuingEntityPatch)
+      : null;
 
     const trimmedIban = iban.replace(/\s+/g, "");
-    if (trimmedIban.length > 0) {
-      const bankPayload = {
-        iban: trimmedIban,
-        ...(bic.trim().length > 0 ? { bic: bic.trim() } : {}),
-        currency,
-        isDefault: true,
-      } as unknown as BankAccountInput;
-      await api.run((client) =>
-        client.workspace.createBankAccount({
-          params: { workspaceId },
-          headers: { "idempotency-key": Crypto.randomUUID() as RequestKey },
-          payload: bankPayload,
-        }),
-      );
+    const bank =
+      trimmedIban.length > 0
+        ? ({
+            iban: trimmedIban,
+            ...(bic.trim().length > 0 ? { bic: bic.trim() } : {}),
+            currency,
+            isDefault: true,
+          } as unknown as BankAccountInput)
+        : null;
+
+    const saved = await saveOnboarding(
+      api,
+      JSON.stringify([api.origin, session.user.id]),
+      { workspace: payload, issuingEntity, bank },
+      progress,
+      setProgress,
+    );
+    if (saved.result._tag === "Err") {
+      setBusy(false);
+      setErrorBanner(text(describeError(saved.result.error).text));
+      if (saved.step === "issuer") setStep(1);
+      return;
     }
+    const ws = saved.result.value;
 
     await lastWorkspace.write(ws.slug);
     setBusy(false);
@@ -225,7 +213,7 @@ export function OnboardingScreen(props: { readonly initialStep?: number }) {
       title={t("onboarding.wizard.title")}
       footer={
         <>
-          {step > 1 ? (
+          {step > 1 && progress === null ? (
             <Button
               kind="outlined"
               label={t("common.action.back")}

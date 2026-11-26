@@ -10,6 +10,7 @@ import { idempotencyHeaders, ifMatchHeaders, uuidV7 } from "@kvitbit/ui-port/api
 import { Effect } from "effect";
 import type { ReactElement } from "react";
 import { ApiProvider, type ApiRunner, useApi, useRemote } from "../../runtime/api-runtime";
+import { SessionProvider } from "../../session/session-provider";
 import { clientRoot } from "../../testing/client-root";
 import { allText, hostTree } from "../../testing/element-tree";
 import { eventually } from "../../testing/eventually";
@@ -236,9 +237,15 @@ describe("templates screens and API integration", () => {
   const within = (node: ReactElement) => (
     <TestProviders overlay={recordedOverlay()}>
       <ApiProvider token="tok" origin={server.url.origin}>
-        <WorkspaceProvider workspace={WORKSPACE} workspaces={[WORKSPACE]} reload={() => undefined}>
-          {node}
-        </WorkspaceProvider>
+        <SessionProvider origin={server.url.origin}>
+          <WorkspaceProvider
+            workspace={WORKSPACE}
+            workspaces={[WORKSPACE]}
+            reload={() => undefined}
+          >
+            {node}
+          </WorkspaceProvider>
+        </SessionProvider>
       </ApiProvider>
     </TestProviders>
   );

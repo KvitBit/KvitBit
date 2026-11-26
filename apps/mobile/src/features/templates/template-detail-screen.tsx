@@ -5,15 +5,16 @@ import type {
   TemplateId,
   VatTreatment,
 } from "@kvitbit/domain/contract";
-import { describeError, idempotencyHeaders, ifMatchHeaders, uuidV7 } from "@kvitbit/ui-port/api";
+import { describeError, idempotencyHeaders, ifMatchHeaders } from "@kvitbit/ui-port/api";
 import { formatDate } from "@kvitbit/ui-port/format";
-import { Effect } from "effect";
 import { Archive, Play, Plus, RefreshCw, Send, Trash2 } from "lucide-react-native";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { StyleSheet, View } from "react-native";
 import { useI18n } from "../../i18n/i18n-provider";
 import { navigate } from "../../navigation/routes";
 import { useApi, useRemote } from "../../runtime/api-runtime";
+import { runRequestIntent } from "../../runtime/request-intent";
+import { useSession } from "../../session/session-provider";
 import {
   Badge,
   type BadgeTone,
@@ -74,6 +75,11 @@ export function TemplateDetailScreen(props: {
   const { workspace } = useWorkspace();
   const { t, text, locale, local } = useI18n();
   const api = useApi();
+  const { state: session } = useSession();
+  const owner =
+    session.status === "signed-in"
+      ? JSON.stringify([api.origin, session.user.id, workspace.id])
+      : null;
   const overlay = useOverlay();
 
   const [tab, setTab] = useState<TemplateDetailTab>(
@@ -123,6 +129,7 @@ export function TemplateDetailScreen(props: {
   }, [loaded]);
 
   const handleSaveTemplate = useCallback(async () => {
+    if (owner === null || saving) return;
     setBannerError(null);
     const { input, errors } = buildTemplateInput(form);
     if (input === null || Object.keys(errors).length > 0) {
@@ -132,13 +139,14 @@ export function TemplateDetailScreen(props: {
     setFieldErrors({});
     setSaving(true);
     if (isNew) {
-      const key = await Effect.runPromise(uuidV7);
-      const res = await api.run((client) =>
-        client.templates.create({
-          params: { workspaceId: workspace.id },
-          headers: idempotencyHeaders(key),
-          payload: input,
-        }),
+      const res = await runRequestIntent(owner, "templates/create", input, (key) =>
+        api.run((client) =>
+          client.templates.create({
+            params: { workspaceId: workspace.id },
+            headers: idempotencyHeaders(key),
+            payload: input,
+          }),
+        ),
       );
       setSaving(false);
       if (res._tag === "Ok") {
@@ -174,20 +182,35 @@ export function TemplateDetailScreen(props: {
       setBannerError(text(view.text));
       if (view.staleRevision) templateRemote.reload();
     }
-  }, [api, form, isNew, loaded, overlay, t, templateId, templateRemote, text, workspace]);
+  }, [
+    api,
+    form,
+    isNew,
+    loaded,
+    overlay,
+    owner,
+    saving,
+    t,
+    templateId,
+    templateRemote,
+    text,
+    workspace,
+  ]);
 
   const handleUseTemplate = useCallback(
     async (as: "draft" | "issued") => {
-      if (templateId === null) return;
+      if (templateId === null || owner === null || actionBusy) return;
       setBannerError(null);
       setActionBusy(true);
-      const key = await Effect.runPromise(uuidV7);
-      const res = await api.run((client) =>
-        client.templates.use({
-          params: { workspaceId: workspace.id, templateId },
-          headers: idempotencyHeaders(key),
-          payload: { as },
-        }),
+      const payload = { as };
+      const res = await runRequestIntent(owner, `templates/use/${templateId}`, payload, (key) =>
+        api.run((client) =>
+          client.templates.use({
+            params: { workspaceId: workspace.id, templateId },
+            headers: idempotencyHeaders(key),
+            payload,
+          }),
+        ),
       );
       setActionBusy(false);
       if (res._tag === "Ok") {
@@ -206,7 +229,7 @@ export function TemplateDetailScreen(props: {
         setBannerError(text(describeError(res.error).text));
       }
     },
-    [api, local, overlay, templateId, text, workspace],
+    [actionBusy, api, local, overlay, owner, templateId, text, workspace],
   );
 
   const handleArchive = useCallback(async () => {

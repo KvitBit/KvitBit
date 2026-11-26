@@ -6,6 +6,7 @@ import {
   obtainiumAppLink,
   obtainiumImportUrl,
 } from "./obtainium-link";
+import { apkRoutePath } from "./storage-layout";
 
 describe("obtainium-link", () => {
   test("builds Obtainium redirect URL targeting cz.kvitbit.app and /android", () => {
@@ -38,14 +39,18 @@ describe("obtainium-link", () => {
     expect(settings.versionExtractionRegEx).toBe(OBTAINIUM_VERSION_EXTRACTION_REGEX);
     expect(settings.matchGroupToUse).toBe("1");
 
-    expect(
-      new RegExp(settings.customLinkFilterRegex).test(
-        "/api/mobile/releases/1.4.0/kvitbit-1.4.0.apk",
-      ),
-    ).toBe(true);
-    expect(new RegExp(settings.versionExtractionRegEx).exec("kvitbit-1.4.0.apk")?.[1]).toBe(
-      "1.4.0",
-    );
+    // Exercise against the actual public ReleaseInfo.apkUrl / <a href="..."> path
+    const relativeHref = apkRoutePath("1.4.0");
+    const absoluteHref = `https://kvitbit.cz${relativeHref}`;
+    const filterRe = new RegExp(settings.customLinkFilterRegex);
+    const versionRe = new RegExp(settings.versionExtractionRegEx);
+
+    expect(relativeHref).toBe("/api/mobile/releases/1.4.0/apk");
+    expect(filterRe.test(relativeHref)).toBe(true);
+    expect(filterRe.test(absoluteHref)).toBe(true);
+    expect(filterRe.test("https://kvitbit.cz/android")).toBe(false);
+    expect(versionRe.exec(relativeHref)?.[1]).toBe("1.4.0");
+    expect(versionRe.exec(absoluteHref)?.[1]).toBe("1.4.0");
   });
 
   test("rejects non-http(s) origins", () => {

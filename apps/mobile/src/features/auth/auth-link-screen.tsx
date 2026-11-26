@@ -2,8 +2,10 @@ import { describeError } from "@kvitbit/ui-port/api";
 import { router } from "expo-router";
 import { useEffect, useState } from "react";
 import { useI18n } from "../../i18n/i18n-provider";
+import { safeReturnTo } from "../../navigation/return-to";
 import { navigate } from "../../navigation/routes";
 import { Banner, Button, EmptyState, Loading, Screen } from "../../ui";
+import { verifiedSignInHref } from "./auth-links";
 import type { AuthClient } from "./auth-port";
 import { useAuthClient } from "./use-auth-client";
 
@@ -12,11 +14,13 @@ export type AuthLinkKind = "verify" | "magic" | "reset";
 export function AuthLinkScreen(props: {
   readonly kind: AuthLinkKind;
   readonly token: string;
+  readonly returnTo?: string;
   readonly authClient?: AuthClient;
 }) {
   const { t, text } = useI18n();
   const contextAuth = useAuthClient();
   const auth = props.authClient ?? contextAuth;
+  const returnTo = safeReturnTo(props.returnTo);
 
   const [status, setStatus] = useState<"verifying" | "expired" | "error">("verifying");
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -34,7 +38,9 @@ export function AuthLinkScreen(props: {
     void auth.verifyLink(props.kind, props.token).then((res) => {
       if (!live) return;
       if (res._tag === "Ok") {
-        router.replace("/" as never);
+        router.replace(
+          (res.value === null ? verifiedSignInHref(returnTo) : (returnTo ?? "/")) as never,
+        );
         return;
       }
       if (res._tag === "Err" && res.error._tag === "NotFound") {
@@ -49,7 +55,7 @@ export function AuthLinkScreen(props: {
     return () => {
       live = false;
     };
-  }, [auth, props.kind, props.token, text]);
+  }, [auth, props.kind, props.token, returnTo, text]);
 
   if (status === "verifying") {
     return (

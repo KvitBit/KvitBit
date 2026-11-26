@@ -1,5 +1,6 @@
 import { describeError } from "@kvitbit/ui-port/api";
 import type { Locale } from "@kvitbit/ui-port/i18n";
+import { router } from "expo-router";
 import { useState } from "react";
 import { StyleSheet, View } from "react-native";
 import { useI18n } from "../../i18n/i18n-provider";
@@ -15,6 +16,7 @@ import {
   Text,
   TextField,
 } from "../../ui";
+import { checkEmailHref, inviteReturnTo } from "./auth-links";
 import type { AuthClient } from "./auth-port";
 import { BotProofWidget } from "./bot-proof-widget";
 import { useAuthClient } from "./use-auth-client";
@@ -39,8 +41,8 @@ export function SignUpScreen(props: {
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
   const [errorBanner, setErrorBanner] = useState<string | null>(null);
 
-  const scope = props.invitation !== undefined ? "invitation_accept" : "sign_up";
-  const bot = useBotProof(scope, { initial: "auto" });
+  const bot = useBotProof("sign_up", { initial: "auto" });
+  const returnTo = inviteReturnTo(props.invitation);
 
   const handleSubmit = async () => {
     const trimmedEmail = (props.lockedEmail ?? email).trim();
@@ -84,7 +86,7 @@ export function SignUpScreen(props: {
     setBusy(false);
 
     if (res._tag === "Ok") {
-      navigate({ _tag: "CheckEmail", email: trimmedEmail });
+      router.push(checkEmailHref(trimmedEmail, returnTo) as never);
       return;
     }
     if (res._tag === "Cancelled") return;
@@ -175,7 +177,7 @@ export function SignUpScreen(props: {
         <Button
           kind="text"
           label={t("common.action.signIn")}
-          onPress={() => navigate({ _tag: "SignIn" })}
+          onPress={() => navigate({ _tag: "SignIn", ...(returnTo === null ? {} : { returnTo }) })}
           testID="sign-up-to-signin"
         />
       </View>

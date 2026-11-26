@@ -1,4 +1,3 @@
-import type { IdempotencyKey } from "@kvitbit/api-contract";
 import type { BankAccountId, BankAccountInput, CurrencyCode } from "@kvitbit/domain/contract";
 import { idempotencyHeaders, inWorkspace } from "@kvitbit/ui-port/api";
 import { Plus, Trash2 } from "lucide-react-native";
@@ -6,6 +5,8 @@ import { useState } from "react";
 import { StyleSheet, View } from "react-native";
 import { useI18n } from "../../i18n/i18n-provider";
 import { useApi, useRemote } from "../../runtime/api-runtime";
+import { runRequestIntent } from "../../runtime/request-intent";
+import { useSession } from "../../session/session-provider";
 import {
   Badge,
   Banner,
@@ -23,7 +24,6 @@ import {
 } from "../../ui";
 import { useWorkspace } from "../../workspace/workspace-provider";
 import { canEditWorkspaceSettings } from "./permissions";
-import { mintIdempotencyKey } from "./platform-helpers";
 import {
   type FormErrorState,
   fieldErrorText,
@@ -55,6 +55,7 @@ const emptyDraft = (): BankAccountDraft => ({
 export function BankAccountsSection() {
   const { workspace } = useWorkspace();
   const api = useApi();
+  const { state: session } = useSession();
   const i18n = useI18n();
   const { t, local } = i18n;
   const overlay = useOverlay();
@@ -66,7 +67,6 @@ export function BankAccountsSection() {
   );
 
   const [draft, setDraft] = useState<BankAccountDraft | null>(null);
-  const [createKey, setCreateKey] = useState<IdempotencyKey | null>(null);
   const [saving, setSaving] = useState(false);
   const [removingId, setRemovingId] = useState<BankAccountId | null>(null);
   const [replacementTarget, setReplacementTarget] = useState<BankAccountData | null>(null);
@@ -75,7 +75,6 @@ export function BankAccountsSection() {
 
   const openCreate = () => {
     setDraft(emptyDraft());
-    setCreateKey(mintIdempotencyKey());
     setErrorState(noFormError);
   };
 
@@ -88,12 +87,11 @@ export function BankAccountsSection() {
       currency: account.currency,
       isDefault: account.isDefault,
     });
-    setCreateKey(null);
     setErrorState(noFormError);
   };
 
   const handleSave = async () => {
-    if (!editable || draft === null) return;
+    if (!editable || draft === null || session.status !== "signed-in" || saving) return;
     setSaving(true);
     setErrorState(noFormError);
     const payload = {
@@ -106,15 +104,19 @@ export function BankAccountsSection() {
 
     const result =
       draft.id === undefined
-        ? await api.run((client) => {
-            const key = createKey ?? mintIdempotencyKey();
-            setCreateKey(key);
-            return client.workspace.createBankAccount({
-              params: inWorkspace(workspace.id),
-              headers: idempotencyHeaders(key),
-              payload,
-            });
-          })
+        ? await runRequestIntent(
+            JSON.stringify([api.origin, session.user.id, workspace.id]),
+            "workspace/createBankAccount",
+            payload,
+            (key) =>
+              api.run((client) =>
+                client.workspace.createBankAccount({
+                  params: inWorkspace(workspace.id),
+                  headers: idempotencyHeaders(key),
+                  payload,
+                }),
+              ),
+          )
         : await api.run((client) =>
             client.workspace.updateBankAccount({
               params: inWorkspace(workspace.id, { bankAccountId: draft.id as BankAccountId }),
@@ -124,7 +126,6 @@ export function BankAccountsSection() {
     setSaving(false);
     if (result._tag === "Ok") {
       setDraft(null);
-      setCreateKey(null);
       remote.reload();
       overlay.toast(t("common.toast.saved"));
     } else {

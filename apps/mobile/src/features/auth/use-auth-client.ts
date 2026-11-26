@@ -19,8 +19,6 @@ export function AuthClientProvider(props: {
 export const useAuthClient = (): AuthClient => {
   const override = useContext(AuthClientContext);
   const session = useSession();
-  const currentToken = session.state.status === "signed-in" ? session.state.token : null;
-
   const built = useMemo(
     () =>
       makeAuthClient({
@@ -29,9 +27,8 @@ export const useAuthClient = (): AuthClient => {
         refresh: session.refresh,
         clear: session.clear,
         passkeyBridge,
-        currentSessionToken: () => currentToken,
       }),
-    [session.auth, session.signedIn, session.refresh, session.clear, currentToken],
+    [session.auth, session.signedIn, session.refresh, session.clear],
   );
 
   return override ?? built;
