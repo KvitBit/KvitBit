@@ -1,4 +1,7 @@
-/** Streams a ZIP64-capable archive without buffering file contents. */
+/**
+ * Streams a ZIP64 archive without buffering file contents. Older Java ZipInputStream
+ * implementations can misread the 64-bit descriptor for small entries.
+ */
 import { crc32, createDeflateRaw } from "node:zlib";
 import { NodeStream } from "@effect/platform-node";
 import { Effect, Stream } from "effect";
@@ -12,6 +15,8 @@ export interface ZipEntry<E, R> {
 export const MAX_ZIP_BYTES = 5 * 1024 ** 4;
 const ZIP32_MAX = 0xffffffff;
 const ZIP32_MAX_COUNT = 0xffff;
+const CENTRAL_HEADER_LENGTH = 46;
+const MAX_CENTRAL_RECORD_LENGTH = 0xffff;
 const ZIP64_VERSION = 45;
 const ZIP64_EXTRA_ID = 1;
 const EXTRA_HEADER_SIZE = 4;
@@ -22,7 +27,8 @@ const MODIFIED_DATE = 0x5421;
 const encoder = new TextEncoder();
 
 const directoryEnd = (count: number, size: number, offset: bigint) => {
-  const needsZip64 = count >= ZIP32_MAX_COUNT || size >= ZIP32_MAX || offset >= ZIP32_MAX;
+  // Strict libzip readers use this footer to recognize 64-bit descriptors.
+  const needsZip64 = count > 0;
   const zip64EndLength = 56;
   const locatorLength = 20;
   const endOffset = needsZip64 ? zip64EndLength + locatorLength : 0;
@@ -67,7 +73,9 @@ export const streamZip = <E, R, SourceE = never, SourceR = never>(
       Stream.flatMap((entry) =>
         Stream.suspend(() => {
           const filename = encoder.encode(entry.name);
-          if (filename.length > 0xffff) throw new RangeError("ZIP filename is too long");
+          const centralExtra = CENTRAL_HEADER_LENGTH + filename.length;
+          if (centralExtra > MAX_CENTRAL_RECORD_LENGTH)
+            throw new RangeError("ZIP filename is too long");
           // The header arrives before the sizes are known. Its ZIP64 extra field
           // tells streaming readers to look for a descriptor with 64-bit sizes.
           const localExtra = 30 + filename.length;
@@ -119,8 +127,11 @@ export const streamZip = <E, R, SourceE = never, SourceR = never>(
             const sizesLength = zip64Sizes ? ZIP64_SIZES_LENGTH : 0;
             const extraDataLength = sizesLength + (zip64Offset ? 8 : 0);
             const extraLength = extraDataLength === 0 ? 0 : EXTRA_HEADER_SIZE + extraDataLength;
-            const centralExtra = 46 + filename.length;
-            const central = new Uint8Array(centralExtra + extraLength);
+            const centralLength = centralExtra + extraLength;
+            if (centralLength > MAX_CENTRAL_RECORD_LENGTH) {
+              throw new RangeError("ZIP filename is too long");
+            }
+            const central = new Uint8Array(centralLength);
             const index = new DataView(central.buffer);
             index.setUint32(0, 0x02014b50, true);
             index.setUint16(4, ZIP64_VERSION, true);
@@ -134,7 +145,7 @@ export const streamZip = <E, R, SourceE = never, SourceR = never>(
             index.setUint16(28, filename.length, true);
             index.setUint16(30, extraLength, true);
             index.setUint32(42, zip64Offset ? ZIP32_MAX : Number(offset), true);
-            central.set(filename, 46);
+            central.set(filename, CENTRAL_HEADER_LENGTH);
             if (extraLength > 0) {
               index.setUint16(centralExtra, ZIP64_EXTRA_ID, true);
               index.setUint16(centralExtra + 2, extraDataLength, true);
