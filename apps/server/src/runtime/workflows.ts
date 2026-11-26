@@ -24,6 +24,7 @@ import {
 import {
   DeliveryId,
   type DocumentId,
+  type Documents,
   ExportId,
   InvitationId,
   IsoDate,
@@ -37,7 +38,7 @@ import { SqlClient } from "effect/sql";
 import * as Activity from "effect/workflow/Activity";
 import * as DurableClock from "effect/workflow/DurableClock";
 import * as Workflow from "effect/workflow/Workflow";
-import { buildZip, type ZipEntry } from "./zip";
+import { MAX_ZIP_BYTES, streamZip, type ZipEntry } from "./zip";
 
 // 1. Workflow definitions ---------------------------------------------------------------------
 
@@ -123,33 +124,18 @@ const csvEscape = (value: string | null | undefined): string => {
   return value;
 };
 
-const rowsToCsv = (rows: ReadonlyArray<CsvRow>): Uint8Array => {
-  const encoder = new TextEncoder();
-  const first = rows[0];
-  if (first === undefined) return new Uint8Array(0);
-  const headers = Object.keys(first);
-  const lines = [
-    headers.map(csvEscape).join(","),
-    ...rows.map((row) => headers.map((h) => csvEscape(row[h])).join(",")),
-  ];
-  return encoder.encode(`${lines.join("\r\n")}\r\n`);
-};
+const csvEncoder = new TextEncoder();
+const csvLine = (fields: ReadonlyArray<string | null | undefined>) =>
+  csvEncoder.encode(`${fields.map(csvEscape).join(",")}\r\n`);
 
-const collectStreamBytes = (
-  stream: Stream.Stream<Uint8Array, unknown>,
-): Effect.Effect<Uint8Array, unknown> =>
-  Stream.runCollect(stream).pipe(
-    Effect.map((chunks) => {
-      const total = chunks.reduce((sum, c) => sum + c.length, 0);
-      const out = new Uint8Array(total);
-      let offset = 0;
-      for (const chunk of chunks) {
-        out.set(chunk, offset);
-        offset += chunk.length;
-      }
-      return out;
-    }),
-  );
+const rowsToCsv = Stream.mapAccum<ReadonlyArray<string> | undefined, CsvRow, Uint8Array>(
+  () => undefined,
+  (previous, row) => {
+    const headers = previous ?? Object.keys(row);
+    const line = csvLine(headers.map((name) => row[name]));
+    return [headers, previous === undefined ? [csvLine(headers), line] : [line]];
+  },
+);
 
 const EXPORT_TABLES = [
   { file: "tables/workspaces.csv", table: "workspaces", filterCol: "id" },
@@ -272,7 +258,7 @@ export const makeWorkflowHandlersLayer = (options: WorkflowHandlerOptions = {}) 
         execute: Effect.gen(function* () {
           const sql = yield* SqlClient.SqlClient;
           const blobs = yield* BlobStorage;
-          const entries: Array<ZipEntry> = [];
+          const entries: Array<ZipEntry<unknown, Documents>> = [];
 
           // Determine workspace locale (fallback "cs")
           const wsRows = yield* sql<{ readonly default_language: string }>`
@@ -283,21 +269,26 @@ export const makeWorkflowHandlersLayer = (options: WorkflowHandlerOptions = {}) 
           // Canonical reporting CSVs from CoreJobs
           const reportingFiles = yield* exportJob.reportingTables(workspaceId, exportId, locale);
           for (const file of reportingFiles) {
-            const bytes = yield* collectStreamBytes(file.bytes);
-            entries.push({ name: file.name, bytes });
+            entries.push({ name: file.name, bytes: file.bytes });
           }
 
           // Full workspace tables as CSVs
           for (const spec of EXPORT_TABLES) {
             // Text at the PostgreSQL boundary keeps decimals exact and avoids unregistered enum array types.
-            const rows = yield* sql.unsafe<{ readonly data: CsvRow }>(
+            const rows = sql.unsafe<{ readonly data: CsvRow }>(
               `SELECT (SELECT jsonb_object_agg(key, value) FROM jsonb_each_text(to_jsonb(source_row))) AS data
                FROM ${spec.table} AS source_row
                WHERE ${spec.filterCol} = $1
                ORDER BY data`,
               [workspaceId],
-            );
-            entries.push({ name: spec.file, bytes: rowsToCsv(rows.map(({ data }) => data)) });
+            ).stream;
+            entries.push({
+              name: spec.file,
+              bytes: rows.pipe(
+                Stream.map(({ data }) => data),
+                rowsToCsv,
+              ),
+            });
           }
 
           // Expense attachments from BlobStorage
@@ -311,11 +302,11 @@ export const makeWorkflowHandlersLayer = (options: WorkflowHandlerOptions = {}) 
             WHERE workspace_id = ${workspaceId} AND expense_id IS NOT NULL
           `;
           for (const att of attachmentRows) {
-            const bytes = yield* blobs
-              .get(att.blob_key as BlobKey)
-              .pipe(Effect.flatMap((stream) => collectStreamBytes(stream)));
             const safeName = (att.file_name || "attachment").replace(/[/\\]/g, "_");
-            entries.push({ name: `attachments/${att.id}-${safeName}`, bytes });
+            entries.push({
+              name: `attachments/${att.id}-${safeName}`,
+              bytes: Stream.unwrap(blobs.get(att.blob_key as BlobKey)),
+            });
           }
 
           // Use a cached revision when present. An export also includes PDFs never downloaded before.
@@ -330,7 +321,7 @@ export const makeWorkflowHandlersLayer = (options: WorkflowHandlerOptions = {}) 
           `;
           for (const doc of docRows) {
             const pdfKey = `pdf/${workspaceId}/${doc.id}/${doc.revision}.pdf` as BlobKey;
-            const pdf = yield* blobs
+            const pdf = blobs
               .get(pdfKey)
               .pipe(
                 Effect.catchTag("BlobMissing", () =>
@@ -341,17 +332,18 @@ export const makeWorkflowHandlersLayer = (options: WorkflowHandlerOptions = {}) 
                 ),
               );
             const label = (doc.number ?? doc.id).replace(/[/\\]/g, "_");
-            entries.push({ name: `pdfs/${label}.pdf`, bytes: yield* collectStreamBytes(pdf) });
+            entries.push({ name: `pdfs/${label}.pdf`, bytes: Stream.unwrap(pdf) });
           }
 
-          const zipBytes = buildZip(entries);
+          const services = yield* Effect.context<Documents>();
+          const archive = streamZip(entries).pipe(Stream.provideContext(services), Stream.orDie);
           const blobKey = ReportsModule.exportBlobKey(workspaceId, exportId);
-          yield* blobs.put(blobKey, Stream.succeed(zipBytes), {
+          const stored = yield* blobs.put(blobKey, archive, {
             contentType: "application/zip",
-            maxBytes: zipBytes.length,
+            maxBytes: MAX_ZIP_BYTES,
           });
 
-          return { sizeBytes: zipBytes.length };
+          return { sizeBytes: stored.bytes };
         }).pipe(
           Effect.catchCause((cause) =>
             Cause.hasInterrupts(cause)

@@ -34,4 +34,3 @@ export {
   type WorkflowHandlerOptions,
   WorkflowHandlersLive,
 } from "./workflows";
-export { buildZip, type ZipEntry } from "./zip";
