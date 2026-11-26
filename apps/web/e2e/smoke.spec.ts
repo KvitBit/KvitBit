@@ -89,6 +89,58 @@ if (typeof Bun === "undefined") {
       errors.assertClean();
     });
 
+    test("settles SPA navigation with anchor focus, an announcement, and Back scroll", async ({
+      page,
+    }) => {
+      const errors = attachErrorGuards(page);
+      await page.goto("/");
+      const privacy = page.locator('footer a[href^="/legal/privacy"]');
+      await privacy.evaluate((link) => {
+        link.setAttribute("href", "/legal/privacy#main");
+        document.body.dataset.navigationProbe = "same-document";
+      });
+      await privacy.scrollIntoViewIfNeeded();
+      const originalScroll = await page.evaluate(() => window.scrollY);
+      expect(originalScroll).toBeGreaterThan(0);
+      await privacy.click();
+
+      await expect(page).toHaveURL(/\/legal\/privacy#main$/);
+      await expect(page.locator("#main")).toBeFocused();
+      await expect(page.locator('body > div[aria-live="assertive"]')).toHaveText(/Kvitbit/);
+      await expect(page.locator("body")).toHaveAttribute("data-navigation-probe", "same-document");
+
+      await page.goBack();
+      await expect(page).toHaveURL(/\/$/);
+      await expect.poll(() => page.evaluate(() => window.scrollY)).toBe(originalScroll);
+      errors.assertClean();
+    });
+
+    test("applies a price-list search without remounting on input", async ({ page }) => {
+      const errors = attachErrorGuards(page);
+      await page.goto(`/w/${DEMO_WS}/price-list/`);
+      await expect(page).toHaveURL(/\/price-list$/);
+      const input = page.getByRole("searchbox");
+      const archived = page.locator("#pricelist-include-archived");
+      await archived.check();
+      await input.pressSequentially("UX");
+      await expect(input).toBeFocused();
+      await expect(input).toHaveValue("UX");
+      await expect(archived).toBeChecked();
+      await expect(page).toHaveURL(/\/price-list$/);
+
+      await input.press("Enter");
+      await expect(page).toHaveURL(/\/price-list\?text=UX&archived=1$/);
+      await expect(page.getByRole("cell", { name: "UX & produktový design" })).toBeVisible();
+      await expect(archived).toBeChecked();
+
+      await page.goBack();
+      await expect(input).toHaveValue("");
+      await page.goForward();
+      await expect(input).toHaveValue("UX");
+      await expect(archived).toBeChecked();
+      errors.assertClean();
+    });
+
     test("recovers a magic-link arrival after membership lookup is unavailable", async ({
       page,
     }) => {

@@ -104,7 +104,13 @@ const webRoutes = UiRoute.union({
     search: search("text", "role", "archived"),
   }),
   Contact: UiRoute.make("/w/:ws/contacts/:id", { params: resource, search: search("mode") }),
-  PriceList: UiRoute.make("/w/:ws/price-list", { params: workspace, search: search("text") }),
+  PriceList: UiRoute.make("/w/:ws/price-list", {
+    params: workspace,
+    search: {
+      text: Schema.optionalKey(Schema.String),
+      archived: Schema.optionalKey(Schema.String),
+    },
+  }),
   Reports: UiRoute.make("/w/:ws/reports/:report", {
     params: { ...workspace, report: Schema.String },
     search: search("period"),
@@ -120,17 +126,21 @@ const webRoutes = UiRoute.union({
 // leaves requests for the other app and the API to the browser.
 const resolveWeb = (path: string) => {
   const pathname = path.split(/[?#]/, 1)[0] ?? "";
-  if (/^\/(?:app|api|assets|fonts)(?:\/|$)/.test(pathname) || /\.pdf$/i.test(pathname)) {
+  if (/^\/(?:app|api|assets|fonts)(?:\/|$)/.test(pathname)) return Option.none();
+  const match = webRoutes.resolve(path);
+  if (
+    /\.pdf$/i.test(pathname) &&
+    (Option.isNone(match) ||
+      match.value.notFound ||
+      Option.isNone(ViewModels.Routes.fromPath(path, "/")))
+  ) {
     return Option.none();
   }
-  return webRoutes.resolve(path).pipe(Option.orElse(() => webRoutes.resolve("/error/not-found")));
+  return match.pipe(Option.orElse(() => webRoutes.resolve("/error/not-found")));
 };
 
-export const BrowserRoutes: UiRoute.AnyUnion = {
-  parse: (path) => Option.map(resolveWeb(path), (resolved) => resolved.route),
+export const BrowserRoutes = {
+  ...webRoutes,
+  parse: (path: string) => Option.map(resolveWeb(path), (resolved) => resolved.route),
   resolve: resolveWeb,
-  print: webRoutes.print,
-  printPath: webRoutes.printPath,
-  base: webRoutes.base,
-  setBase: webRoutes.setBase,
 };

@@ -13,14 +13,14 @@ import type {
   WorkspaceId,
 } from "@kvitbit/domain/contract";
 import { Format, ViewModels } from "@kvitbit/ui-port";
-import { Schema } from "effect";
+import { Option, Schema } from "effect";
 import { Failure, request } from "../../app/api";
 import type { PageCommand } from "../../app/commands";
 import { copy, textOf, translator } from "../../app/i18n";
 import { Intent_ } from "../../app/intent";
 import type { MessageHandlers, PageContext, PageReturn, RouteOf } from "../../app/page";
 import * as Remote from "../../app/remote";
-import { href } from "../../app/routing";
+import { BrowserRoutes } from "../../app/routing";
 import { icon } from "../../ui/icons";
 import {
   badge,
@@ -118,6 +118,7 @@ export const Message = UiSchema.TaggedEnum({
   LoadedItems: { seq: Schema.Int, items: Schema.Array(PriceListItemRecord) },
   FailedItems: { seq: Schema.Int, failure: Failure },
   ChangedSearch: { value: Schema.String },
+  SubmittedSearch: {},
   ToggledIncludeArchived: { checked: Schema.Boolean },
   ClickedRetry: {},
   ClickedNew: {},
@@ -241,20 +242,24 @@ const draftFromItem = (item: PriceListItemRecord): EditorDraft => ({
 
 export const init = (route: Route, ctx: PageContext): PageReturn<Model, Message> => {
   const search = route.text ?? "";
+  const location = Option.getOrUndefined(BrowserRoutes.parse(ctx.path));
+  const includeArchived = location?._tag === "PriceList" && location.search.archived === "1";
   const items = Remote.load<ReadonlyArray<PriceListItemRecord>>(Remote.idle);
   const wsId = ctx.workspace?.id;
   return {
     model: {
       route,
       search,
-      includeArchived: false,
+      includeArchived,
       items,
       editor: null,
       confirmArchive: null,
       archiving: false,
     },
     commands:
-      wsId === undefined ? [] : [loadItemsCommand(wsId, Remote.seqOf(items), search, false)],
+      wsId === undefined
+        ? []
+        : [loadItemsCommand(wsId, Remote.seqOf(items), search, includeArchived)],
   };
 };
 
@@ -266,6 +271,7 @@ export const update = (
   const tr = translator(ctx.locale);
   const wsId = ctx.workspace?.id;
   const route = model.route as Route;
+  const committedSearch = route.text ?? "";
 
   return Message.match(message, {
     LoadedItems: ({ seq, items }) => ({
@@ -276,20 +282,22 @@ export const update = (
       model: { ...model, items: Remote.fail(model.items, seq, failure) },
     }),
 
-    ChangedSearch: ({ value }) => {
-      const nextItems = Remote.load(model.items);
-      const trimmed = value.trim();
-      const nextRoute: Route =
-        trimmed === ""
-          ? { _tag: "PriceList", ws: route.ws }
-          : { _tag: "PriceList", ws: route.ws, text: trimmed };
+    ChangedSearch: ({ value }) => ({ model: { ...model, search: value } }),
+
+    SubmittedSearch: () => {
+      const trimmed = model.search.trim();
+      const path = BrowserRoutes.print(
+        BrowserRoutes.PriceList({
+          params: { ws: route.ws },
+          search: {
+            ...(trimmed === "" ? {} : { text: trimmed }),
+            ...(model.includeArchived ? { archived: "1" } : {}),
+          },
+        }),
+      );
       return {
-        model: { ...model, search: value, items: nextItems },
-        commands:
-          wsId === undefined
-            ? []
-            : [loadItemsCommand(wsId, Remote.seqOf(nextItems), value, model.includeArchived)],
-        outMessage: Intent_.navigate(href(nextRoute), true),
+        model: { ...model, search: trimmed },
+        ...(path === ctx.path ? {} : { outMessage: Intent_.navigate(path) }),
       };
     },
 
@@ -300,7 +308,7 @@ export const update = (
         commands:
           wsId === undefined
             ? []
-            : [loadItemsCommand(wsId, Remote.seqOf(nextItems), model.search, checked)],
+            : [loadItemsCommand(wsId, Remote.seqOf(nextItems), committedSearch, checked)],
       };
     },
 
@@ -315,7 +323,7 @@ export const update = (
                 loadItemsCommand(
                   wsId,
                   Remote.seqOf(nextItems),
-                  model.search,
+                  committedSearch,
                   model.includeArchived,
                 ),
               ],
@@ -465,15 +473,25 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
   ];
 
   const toolbar = h.div.class("kb-rec-toolbar").children([
-    h.div.class("kb-rec-search").children([
-      h.span.class("kb-rec-search__icon").children([icon(h, "search", 16)]),
-      h.input
-        .class("kb-input")
-        .attr("type", "search")
-        .attr("placeholder", tr.t("priceList.search"))
-        .attr("aria-label", tr.t("priceList.search"))
-        .value(model.search)
-        .on("input", ({ value }) => Message.ChangedSearch({ value })),
+    h.search.children([
+      h.form
+        .class("kb-row")
+        .attr("action", ctx.path.split("?", 1)[0] ?? ctx.path)
+        .on("submit", Message.SubmittedSearch(), { preventDefault: true })
+        .children([
+          h.div.class("kb-rec-search").children([
+            h.span.class("kb-rec-search__icon").children([icon(h, "search", 16)]),
+            h.input
+              .class("kb-input")
+              .attr("type", "search")
+              .attr("name", "text")
+              .attr("placeholder", tr.t("priceList.search"))
+              .attr("aria-label", tr.t("priceList.search"))
+              .value(model.search)
+              .on("input", ({ value }) => Message.ChangedSearch({ value })),
+          ]),
+          button(h, { label: tr.t("common.action.search"), type: "submit" }),
+        ]),
     ]),
     h.div.class("kb-row").children([
       checkbox(h, {

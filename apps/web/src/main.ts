@@ -8,7 +8,7 @@ import type { Intent, PendingNavigation } from "./app/intent";
 import type { PageContext } from "./app/page";
 import { type Prefs, persistPrefs } from "./app/prefs";
 import { Flags, Message, Model, type Toast } from "./app/root";
-import { gate, href, magicSignInCallback, routeFromPath } from "./app/routing";
+import { BrowserRoutes, gate, href, magicSignInCallback, routeFromPath } from "./app/routing";
 import { fetchSession, workspaceBySlug } from "./app/session";
 import { shellView } from "./app/shell";
 
@@ -53,6 +53,7 @@ const loadSession = (seq: number) =>
 
 export const contextOf = (model: Model): PageContext => ({
   route: model.route,
+  path: model.path,
   today: model.today,
   prefs: model.prefs,
   locale: model.prefs.locale,
@@ -231,18 +232,6 @@ export const update = (model: Model, message: Message): UpdateReturn => {
   }
 };
 
-const linkChanges = Subscription.make(
-  "web-route",
-  Stream.unwrap(
-    Effect.map(Router.Router, (router) =>
-      router.changes.pipe(
-        Stream.filter((location) => location.seq !== 0),
-        Stream.map((location) => Message.ChangedUrl({ path: location.url })),
-      ),
-    ),
-  ),
-);
-
 const shortcut = Subscription.make(
   "workspace-switcher",
   Stream.suspend(() =>
@@ -271,7 +260,16 @@ export const App = Html.component({
     const result = update($.model, message);
     return $.set(result.model).run(...(result.commands ?? []));
   },
-  subscriptions: () => [linkChanges, shortcut],
+  subscriptions: ({ model }) => [
+    Router.subscription(
+      BrowserRoutes,
+      Option.getOrElse(BrowserRoutes.parse(model.path), () =>
+        BrowserRoutes.ErrorPage({ params: { kind: "not-found" } }),
+      ),
+      (route) => Message.ChangedUrl({ path: BrowserRoutes.print(route) }),
+    ),
+    shortcut,
+  ],
   view: (h, model) => shellView(model, contextOf(model), h),
   head: ({ model }) => [Head.title("Kvitbit"), HtmlHead.lang(model.prefs.locale)],
 });

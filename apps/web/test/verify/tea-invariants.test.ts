@@ -377,6 +377,8 @@ describe("route round-trip & Shell access gate invariants", () => {
     expect(routeFromPath("/consent/demo")).toEqual(routeFromPath("/oauth/consent?consent_id=demo"));
     expect(Option.getOrThrow(BrowserRoutes.parse("/s/v1.demo"))._tag).toBe("ShareAlias");
     expect(Option.getOrThrow(BrowserRoutes.parse("/consent/demo"))._tag).toBe("McpConsentAlias");
+    expect(Option.getOrThrow(BrowserRoutes.parse("/i/demo.pdf"))._tag).toBe("Share");
+    expect(Option.getOrThrow(BrowserRoutes.parse("/s/demo.pdf"))._tag).toBe("ShareAlias");
 
     for (const url of [
       "/app",
@@ -385,6 +387,7 @@ describe("route round-trip & Shell access gate invariants", () => {
       "/api/v1/shares/token/pdf",
       "/api/auth/get-session",
       "/download.pdf?language=en",
+      "/legal/unknown.pdf",
     ]) {
       expect(Option.isNone(BrowserRoutes.parse(url))).toBe(true);
     }

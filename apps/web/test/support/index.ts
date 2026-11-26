@@ -4,7 +4,7 @@ import { Effect, Layer } from "effect";
 import { RunApi } from "../../src/app/commands";
 import type { PageContext, Route } from "../../src/app/page";
 import { defaultPrefs, type Locale } from "../../src/app/prefs";
-import { BrowserRoutes } from "../../src/app/routing";
+import { BrowserRoutes, href } from "../../src/app/routing";
 import type { SessionState } from "../../src/app/session";
 import { DEMO_USER, DEMO_WORKSPACE, DEMO_WORKSPACES } from "../../src/demo/shell";
 import { App, type Flags, Navigate } from "../../src/main";
@@ -27,6 +27,7 @@ export const ctxFor = (
   const session = opts.session ?? signedIn;
   return {
     route,
+    path: href(route),
     today: opts.today ?? "2026-11-26",
     prefs: defaultPrefs(opts.locale ?? "cs"),
     locale: opts.locale ?? "cs",
