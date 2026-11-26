@@ -1,9 +1,9 @@
 import { expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { type ExpenseId, WorkspaceSummary } from "@kvitbit/domain/contract";
+import { type ExpenseId, Invalid, WorkspaceSummary } from "@kvitbit/domain/contract";
 import { Schema } from "effect";
 import type { CaptureStorage } from "../../platform/capture/capture-storage-port";
-import { done } from "../../platform/transfer/http";
+import { done, failed } from "../../platform/transfer/http";
 import {
   type CaptureAccess,
   type CaptureFields,
@@ -30,10 +30,17 @@ const expenseId = "01937c7a-0000-7000-8000-000000000002" as ExpenseId;
 const content = { a: Uint8Array.of(37, 80, 68, 70, 100), b: Uint8Array.of(37, 80, 68, 70, 200) };
 const hash = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
 const noProgress = () => undefined;
+const rejectedFile = new Invalid({
+  issues: [{ path: ["attachment"], code: "attachment.type_rejected" }],
+});
 
 class Interrupted extends Error {}
 
-async function exercise(receipts: readonly (keyof typeof content)[], cut?: number) {
+async function exercise(
+  receipts: readonly (keyof typeof content)[],
+  cut?: number,
+  rejected?: keyof typeof content,
+) {
   const journal = new Map<string, string>();
   const localBytes = new Map<string, Uint8Array<ArrayBuffer>>();
   const expenseWrites = new Map<string, string>();
@@ -63,7 +70,8 @@ async function exercise(receipts: readonly (keyof typeof content)[], cut?: numbe
   const storage: CaptureStorage = {
     load: async (scope) => journal.get(scope) ?? null,
     save: async (scope, value, previous) => {
-      boundary("job persist", () => {
+      const label = JSON.parse(scope).length === 2 ? "job persist" : "rejection persist";
+      boundary(label, () => {
         expect(journal.get(scope) ?? "[]").toBe(previous);
         journal.set(scope, value);
       });
@@ -105,6 +113,7 @@ async function exercise(receipts: readonly (keyof typeof content)[], cut?: numbe
         if (bytes === undefined) throw new Error("Missing bytes for upload");
         const sha = hash(bytes);
         expect(file.sha256).toBe(sha);
+        if (rejected !== undefined && sha === hash(content[rejected])) return failed(rejectedFile);
         const key = headers?.["idempotency-key"];
         if (key === undefined) throw new Error("Missing upload key");
         const prior = attachmentWrites.get(key);
@@ -149,11 +158,26 @@ async function exercise(receipts: readonly (keyof typeof content)[], cut?: numbe
     await restarted.drain(access, network, { reconnect: true, signedIn: true });
   }
 
-  expect(await start().load(access.scope)).toEqual([]);
+  const reopened = start();
+  expect(await reopened.load(access.scope)).toEqual([]);
   expect(expenseWrites.size).toBe(1);
   expect([...attachmentWrites.values()].sort()).toEqual(
-    [...new Set(receipts.map((kind) => hash(content[kind])))].sort(),
+    [
+      ...new Set(receipts.filter((kind) => kind !== rejected).map((kind) => hash(content[kind]))),
+    ].sort(),
   );
+  const rejectedIndex = rejected === undefined ? -1 : receipts.indexOf(rejected);
+  expect(await reopened.loadRejected(access.scope, expenseId)).toEqual(
+    rejectedIndex === -1
+      ? []
+      : [
+          expect.objectContaining({
+            name: `receipt-${rejectedIndex}.pdf`,
+            error: expect.objectContaining({ _tag: "Invalid", issues: rejectedFile.issues }),
+          }),
+        ],
+  );
+  expect([...localBytes.keys()].filter((ref) => ref.startsWith("staged:"))).toEqual([]);
   return checkpoints;
 }
 
@@ -174,4 +198,12 @@ test("restarting at each side of every receipt request and persist creates each 
     );
     for (const index of checkpoints.keys()) await exercise(receipts, index + 1);
   }
+});
+
+test("restarting at each mixed upload boundary preserves one rejection beside the accepted receipts", async () => {
+  const receipts = ["a", "b", "a"] as const;
+  const checkpoints = await exercise(receipts, undefined, "b");
+  expect(checkpoints).toContain("before rejection persist");
+  expect(checkpoints).toContain("after rejection persist");
+  for (const index of checkpoints.keys()) await exercise(receipts, index + 1, "b");
 });
