@@ -68,7 +68,7 @@ export const makeRequestIntents = (
   storage: IntentStorage,
   digest: (value: string) => Promise<string>,
   mint: () => Promise<RequestKey>,
-  now: () => number = Date.now,
+  now: () => number = () => Date.now(),
 ) => {
   const readKeys = async (slot: string): Promise<Record<string, RequestIntent | RequestKey>> => {
     const stored = await storage.getItem(slot);
