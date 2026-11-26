@@ -82,6 +82,7 @@ const DOC_ID = "01930000-0000-7000-8000-000000000101" as DocumentId;
 const FINAL_ID = "01930000-0000-7000-8000-000000000199" as DocumentId;
 const CON_ID = "01930000-0000-7000-8000-000000000201" as ContactId;
 const TEMPLATE_ID = "01930000-0000-7000-8000-000000000901";
+const CONTACT_SERIES = "01930000-0000-7000-8000-000000000602";
 
 const WORKSPACE: WorkspaceSummary = {
   id: WS_ID,
@@ -277,6 +278,13 @@ describe("DocumentDetailScreen and DocumentEditorScreen", () => {
           return Response.json(issued, { status: fromDraft ? 200 : 201 });
         }
         if (req.method === "POST" && url.pathname.endsWith(`/templates/${TEMPLATE_ID}/documents`)) {
+          if (dropNext === url.pathname) {
+            dropNext = null;
+            return new Response("{", {
+              status: 201,
+              headers: { "content-type": "application/json" },
+            });
+          }
           return Response.json(wireDoc, { status: 201 });
         }
         if (req.method === "GET" && url.pathname.endsWith(`/templates/${TEMPLATE_ID}`)) {
@@ -285,9 +293,9 @@ describe("DocumentDetailScreen and DocumentEditorScreen", () => {
             schedule: null,
             input: {
               contact: CON_ID,
-              language: "en",
+              kind: "invoice",
               pricesIncludeVat: true,
-              note: "Imported template note",
+              note: dropNext === null ? "Newer template note" : "Imported template note",
             },
           });
         }
@@ -297,7 +305,7 @@ describe("DocumentDetailScreen and DocumentEditorScreen", () => {
             name: "Beta s.r.o.",
             archived: false,
             revision: 1,
-            defaults: {},
+            defaults: { language: "en", preferredSeriesByKind: { invoice: CONTACT_SERIES } },
           });
         }
         if (req.method === "GET" && url.pathname.endsWith(`/documents/${DOC_ID}/payments`)) {
@@ -736,21 +744,85 @@ describe("DocumentDetailScreen and DocumentEditorScreen", () => {
     expect(attempts[1]?.body).toEqual(attempts[0]?.body);
   });
 
-  test("a template route creates the draft through Templates.use and opens it with the template fields", async () => {
-    wireDoc = makeWireDoc({ status: "draft", kind: "invoice", number: null, settlement: "unpaid" });
-    mockParams = { kind: "invoice", template: TEMPLATE_ID };
-    await show(<DocumentNewRoute />);
-    await waitFor(() => replaced.length === 1, "template draft opened");
-    const creation = calls.find((call) =>
-      call.path.endsWith(`/templates/${TEMPLATE_ID}/documents`),
-    );
-    expect(creation?.body).toEqual({ as: "draft" });
-    expect(creation?.key).toBeTruthy();
-    expect(replaced[0]).toBe(
-      `/w/${WS_SLUG}/documents/${DOC_ID}/edit?template=${TEMPLATE_ID}&revision=3`,
+  test("a new payment gets its own key when its details match an earlier ambiguous write", async () => {
+    const path = `/api/v1/workspaces/${WS_ID}/payments`;
+    dropNext = path;
+    mockParams = { id: DOC_ID, tab: "payments", dialog: "payment" };
+    const paymentReady = () =>
+      root.container().querySelector('[data-testid="payment-amount-input"]') !== null &&
+      root.container().textContent?.includes("Wire") === true;
+
+    await show(<DocumentDetailScreen />);
+    await waitFor(paymentReady);
+    await change("payment-amount-input", "100");
+    await click("payment-modal-submit");
+    await waitFor(() => overlay.toasts.some((message) => message.includes("Please try again")));
+
+    await change("payment-amount-input", "200");
+    await click("payment-modal-submit");
+    await waitFor(() => overlay.toasts.includes("Payment recorded"));
+    await waitFor(paymentReady);
+    await click("payments-tab-record");
+    await waitFor(paymentReady);
+    dropNext = path;
+    await change("payment-amount-input", "100");
+    await click("payment-modal-submit");
+    await waitFor(
+      () => overlay.toasts.filter((message) => message.includes("Please try again")).length === 2,
     );
 
-    mockParams = { id: DOC_ID, template: TEMPLATE_ID, revision: "3" };
+    await root.render(null);
+    await show(<DocumentDetailScreen />);
+    await waitFor(paymentReady);
+    await change("payment-amount-input", "100");
+    await click("payment-modal-submit");
+    await waitFor(
+      () => overlay.toasts.filter((message) => message === "Payment recorded").length === 2,
+    );
+
+    const attempts = calls.filter((c) => c.method === "POST" && c.path.endsWith("/payments"));
+    expect(attempts).toHaveLength(4);
+    expect(attempts[2]?.body).toEqual(attempts[0]?.body);
+    expect(attempts[3]?.body).toEqual(attempts[2]?.body);
+    expect(attempts[3]?.key).toBe(attempts[2]?.key);
+    expect(new Set(attempts.map(({ key }) => key)).size).toBe(3);
+  });
+
+  test("a replayed template import opens the created draft's effective fields", async () => {
+    const path = `/api/v1/workspaces/${WS_ID}/templates/${TEMPLATE_ID}/documents`;
+    dropNext = path;
+    wireDoc = makeWireDoc({
+      status: "draft",
+      kind: "invoice",
+      number: null,
+      settlement: "unpaid",
+    });
+    mockParams = { kind: "invoice", template: TEMPLATE_ID };
+    await show(<DocumentNewRoute />);
+    await waitFor(
+      () => root.container().querySelector('[data-testid="template-import-retry"]') !== null,
+    );
+    await root.render(null);
+    await show(<DocumentNewRoute />);
+    await waitFor(() => replaced.length === 1, "template draft opened");
+    const attempts = calls.filter((call) => call.path === path);
+    expect(attempts).toHaveLength(2);
+    expect(attempts[0]?.body).toEqual({
+      as: "draft",
+      patch: {
+        contact: CON_ID,
+        language: "en",
+        series: CONTACT_SERIES,
+        note: "Imported template note",
+        pricesIncludeVat: true,
+      },
+    });
+    expect(attempts[0]?.key).toBeTruthy();
+    expect(attempts[1]?.key).toBe(attempts[0]?.key);
+    expect(attempts[1]?.body).toEqual(attempts[0]?.body);
+    expect(replaced[0]).toBe(`/w/${WS_SLUG}/documents/${DOC_ID}/edit`);
+
+    mockParams = { id: DOC_ID };
     await show(<DocumentEditRoute />);
     await waitFor(
       () =>
@@ -762,12 +834,18 @@ describe("DocumentDetailScreen and DocumentEditorScreen", () => {
       .container()
       .querySelector<HTMLInputElement>('[data-testid="editor-line-desc-0"]');
     expect(line?.value).toBe("Development sprint");
+    expect(
+      calls.filter(
+        ({ method, path }) => method === "GET" && path.endsWith(`/templates/${TEMPLATE_ID}`),
+      ),
+    ).toHaveLength(1);
     await change("editor-line-desc-0", "Edited development sprint");
     await click("editor-save-button");
     await waitFor(() => calls.some((call) => call.method === "PATCH"), "template draft saved");
     expect(calls.find((call) => call.method === "PATCH")?.body).toMatchObject({
       note: "Imported template note",
       language: "en",
+      series: CONTACT_SERIES,
       pricesIncludeVat: true,
     });
   });

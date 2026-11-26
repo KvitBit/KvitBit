@@ -13,7 +13,7 @@ import type {
   Locale,
   TemplateId,
 } from "@kvitbit/domain/contract";
-import { MoneyMath, TemplateInput } from "@kvitbit/domain/contract";
+import { MoneyMath } from "@kvitbit/domain/contract";
 import {
   describeError,
   idempotencyHeaders,
@@ -24,13 +24,13 @@ import {
 import { formatDate, formatMoney, formatVatRate, parseIsoDate } from "@kvitbit/ui-port/format";
 import { enumKey } from "@kvitbit/ui-port/i18n";
 import { displayAmount } from "@kvitbit/ui-port/view-models";
-import { BigDecimal, Option, Schema } from "effect";
+import { BigDecimal } from "effect";
 import { router } from "expo-router";
 import { BookOpen, Plus, Save, Send, Trash2, Users } from "lucide-react-native";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Modal, ScrollView, StyleSheet, View } from "react-native";
 import { useI18n } from "../../i18n/i18n-provider";
-import { hrefOf, navigate } from "../../navigation/routes";
+import { navigate } from "../../navigation/routes";
 import { useApi, useRemote } from "../../runtime/api-runtime";
 import { useTheme } from "../../theme/theme-provider";
 import {
@@ -58,6 +58,7 @@ import {
   type PriceListOption,
   parseBankAccountOption,
   parseContactOption,
+  parseContactSnapshot,
   parseDocumentSummary,
   parseLineView,
   parsePriceListOption,
@@ -85,58 +86,37 @@ import {
   VAT_TREATMENTS,
   validateEditorDraft,
 } from "./editor-model";
-import { useRequestMutation } from "./request-mutation";
-
-const templateFields = TemplateInput.fields;
-const decodeTemplateEditorFields = Schema.decodeUnknownOption(
-  Schema.Struct({
-    contact: templateFields.contact,
-    language: templateFields.language,
-    series: templateFields.series,
-    bankAccount: templateFields.bankAccount,
-    pricesIncludeVat: templateFields.pricesIncludeVat,
-    variableSymbol: templateFields.variableSymbol,
-    orderNumber: templateFields.orderNumber,
-    note: templateFields.note,
-  }),
-);
+import { useRequestMutation, useRequestOwner } from "./request-mutation";
+import { importTemplate, openImportedDraft, type TemplateSeed } from "./template-import";
 
 export function DocumentFromTemplateScreen({ templateId }: { readonly templateId: TemplateId }) {
   const { workspace } = useWorkspace();
   const { t, text } = useI18n();
-  const runMutation = useRequestMutation(workspace.id);
+  const { run } = useApi();
+  const requestOwner = useRequestOwner(workspace.id);
   const writable = canWriteWorkspace(workspace);
   const [failure, setFailure] = useState<UiError | null>(null);
   const [attempt, setAttempt] = useState(0);
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: the retry button starts a new attempt
   useEffect(() => {
-    if (!writable) return;
+    if (!writable || requestOwner === null) return;
     let active = true;
-    const payload = { as: "draft" } as const;
-    void runMutation(`templates.use:${templateId}`, payload, (api, key) =>
-      api.templates.use({
-        params: { workspaceId: workspace.id, templateId },
-        headers: idempotencyHeaders(key),
-        payload,
-      }),
-    ).then((result) => {
+    void importTemplate(requestOwner, workspace, templateId, run).then((result) => {
       if (!active) return;
       if (result._tag === "Err") {
         setFailure(result.error);
       } else {
-        const route = hrefOf({ _tag: "DocumentEdit", ws: workspace.slug, id: result.value.id });
-        const source = new URLSearchParams({
-          template: templateId,
-          revision: String(result.value.revision),
-        });
-        router.replace(`${route}?${source}` as never);
+        navigate(
+          { _tag: "DocumentEdit", ws: workspace.slug, id: result.value.id },
+          { replace: true },
+        );
       }
     });
     return () => {
       active = false;
     };
-  }, [attempt, runMutation, templateId, workspace.id, workspace.slug, writable]);
+  }, [attempt, requestOwner, run, templateId, workspace, writable]);
 
   return (
     <Screen title={t("documents.editor.titleDraft")} back>
@@ -149,6 +129,7 @@ export function DocumentFromTemplateScreen({ templateId }: { readonly templateId
           <Banner text={text(describeError(failure).text)} />
           <Button
             label={t("common.action.retry")}
+            testID="template-import-retry"
             onPress={() => {
               setFailure(null);
               setAttempt((n) => n + 1);
@@ -236,7 +217,6 @@ export type DocumentEditorProps =
   | {
       readonly mode: "edit";
       readonly documentId: DocumentId;
-      readonly templateSource?: { readonly id: TemplateId; readonly revision: number };
     };
 
 export function DocumentEditorScreen(props: DocumentEditorProps) {
@@ -244,6 +224,7 @@ export function DocumentEditorScreen(props: DocumentEditorProps) {
   const { t, locale, local, text: resolveText } = useI18n();
   const { run } = useApi();
   const runMutation = useRequestMutation(workspace.id);
+  const requestOwner = useRequestOwner(workspace.id);
   const overlay = useOverlay();
 
   const wsRemote = useRemote(
@@ -288,27 +269,14 @@ export function DocumentEditorScreen(props: DocumentEditorProps) {
     props.mode === "edit" && sourceDocRemote.state._tag === "Ready"
       ? sourceDocRemote.state.value
       : null;
-  const templateId =
-    props.mode === "edit" &&
-    originalDoc !== null &&
-    originalDoc.status === "draft" &&
-    props.templateSource?.revision === originalDoc.revision
-      ? props.templateSource.id
+  const [cachedTemplate, setCachedTemplate] = useState<{
+    readonly revision: number;
+    readonly seed: TemplateSeed | null;
+  } | null>(null);
+  const templateContactId =
+    cachedTemplate?.seed != null && originalDoc !== null && originalDoc.status === "draft"
+      ? parseContactSnapshot(originalDoc.contact).contactId || null
       : null;
-  const templateRemote = useRemote(
-    templateId === null
-      ? null
-      : (api) => api.templates.get({ params: { workspaceId: workspace.id, templateId } }),
-    [workspace.id, templateId],
-  );
-  const template = useMemo(
-    () =>
-      templateRemote.state._tag === "Ready"
-        ? Option.getOrNull(decodeTemplateEditorFields(templateRemote.state.value.input))
-        : null,
-    [templateRemote.state],
-  );
-  const templateContactId = template?.contact ?? null;
   const templateContactRemote = useRemote(
     templateContactId === null
       ? null
@@ -316,10 +284,10 @@ export function DocumentEditorScreen(props: DocumentEditorProps) {
           api.contacts.get({ params: { workspaceId: workspace.id, contactId: templateContactId } }),
     [workspace.id, templateContactId],
   );
-  const templateContact =
-    templateContactRemote.state._tag === "Ready"
-      ? parseContactOption(templateContactRemote.state.value)
-      : null;
+  const templateContactArchived =
+    templateContactId !== null &&
+    templateContactRemote.state._tag === "Ready" &&
+    parseContactOption(templateContactRemote.state.value).archived;
 
   const workspaceDefaults = useMemo(
     () =>
@@ -359,15 +327,39 @@ export function DocumentEditorScreen(props: DocumentEditorProps) {
     [seriesRemote.state],
   );
 
+  const [draft, setDraft] = useState<EditorDraft | null>(null);
+  const [templateLoadFailed, setTemplateLoadFailed] = useState(false);
+  const [templateLoadAttempt, setTemplateLoadAttempt] = useState(0);
+  const importDocId = originalDoc?.id ?? null;
+  const importRevision = originalDoc?.revision ?? null;
+
+  // biome-ignore lint/correctness/useExhaustiveDependencies: the retry button starts a new lookup
+  useEffect(() => {
+    if (draft !== null || requestOwner === null || importDocId === null || importRevision === null)
+      return;
+    let live = true;
+    void openImportedDraft(requestOwner, importDocId, importRevision).then(
+      (seed) => {
+        if (live) setCachedTemplate({ revision: importRevision, seed });
+      },
+      () => {
+        if (live) setTemplateLoadFailed(true);
+      },
+    );
+    return () => {
+      live = false;
+    };
+  }, [draft, importDocId, importRevision, requestOwner, templateLoadAttempt]);
+
   const readyToInit =
     wsRemote.state._tag === "Ready" &&
     contactsRemote.state._tag === "Ready" &&
     bankAccountsRemote.state._tag === "Ready" &&
     seriesRemote.state._tag === "Ready" &&
     (sourceDocId === null || sourceDocRemote.state._tag === "Ready") &&
-    (templateId === null || (template !== null && templateContact !== null));
+    (originalDoc === null || cachedTemplate?.revision === importRevision) &&
+    (templateContactId === null || templateContactRemote.state._tag === "Ready");
 
-  const [draft, setDraft] = useState<EditorDraft | null>(null);
   const savedDraft = useRef<EditorDraft | null>(null);
   const submitting = useRef(false);
   const [cnbFx, setCnbFx] = useState<FxRateView | null>(null);
@@ -389,26 +381,12 @@ export function DocumentEditorScreen(props: DocumentEditorProps) {
         workspaceDefaults,
         bankAccounts,
         seriesList,
+        importedSeed: cachedTemplate?.seed ?? null,
       });
-      if (templateId === null || template === null) {
-        savedDraft.current = initial;
-        setDraft(initial);
-      } else {
-        const imported = {
-          ...initial,
-          contactId: templateContact?.archived === true ? null : initial.contactId,
-          language: template.language ?? initial.language,
-          seriesId: template.series ?? initial.seriesId,
-          bankAccountId: template.bankAccount ?? initial.bankAccountId,
-          pricesIncludeVat: template.pricesIncludeVat ?? initial.pricesIncludeVat,
-          variableSymbol: template.variableSymbol ?? initial.variableSymbol,
-          orderNumber: template.orderNumber ?? initial.orderNumber,
-          note: template.note ?? initial.note,
-        };
-        savedDraft.current = imported;
-        setDraft(imported);
-        if (templateContact?.archived === true) setContactPickerOpen(true);
-      }
+      const loaded = templateContactArchived ? { ...initial, contactId: null } : initial;
+      savedDraft.current = loaded;
+      setDraft(loaded);
+      if (templateContactArchived) setContactPickerOpen(true);
       return;
     }
     if (
@@ -451,9 +429,8 @@ export function DocumentEditorScreen(props: DocumentEditorProps) {
     seriesList,
     contacts,
     originalDoc,
-    templateId,
-    template,
-    templateContact?.archived,
+    cachedTemplate?.seed,
+    templateContactArchived,
   ]);
 
   // Fetch CNB FX rate whenever non-CZK currency & CNB mode are active.
@@ -731,16 +708,21 @@ export function DocumentEditorScreen(props: DocumentEditorProps) {
         <RemoteView state={sourceDocRemote.state} onRetry={sourceDocRemote.reload}>
           {() => null}
         </RemoteView>
-      ) : templateId !== null && templateRemote.state._tag === "Failed" ? (
-        <RemoteView state={templateRemote.state} onRetry={templateRemote.reload}>
-          {() => null}
-        </RemoteView>
-      ) : templateId !== null && templateRemote.state._tag === "Ready" && template === null ? (
-        <Banner text={t("error.unknown")} />
-      ) : templateId !== null && templateContactRemote.state._tag === "Failed" ? (
+      ) : templateContactId !== null && templateContactRemote.state._tag === "Failed" ? (
         <RemoteView state={templateContactRemote.state} onRetry={templateContactRemote.reload}>
           {() => null}
         </RemoteView>
+      ) : draft === null && templateLoadFailed ? (
+        <Banner
+          text={t("error.unknown")}
+          action={{
+            label: t("common.action.retry"),
+            onPress: () => {
+              setTemplateLoadFailed(false);
+              setTemplateLoadAttempt((n) => n + 1);
+            },
+          }}
+        />
       ) : draft === null ? (
         <Loading label={t("common.state.loading")} />
       ) : (
@@ -750,7 +732,7 @@ export function DocumentEditorScreen(props: DocumentEditorProps) {
             <Banner tone="warning" text={t("documents.editor.issuedWarning")} />
           ) : null}
           {bannerError !== null ? <Banner text={bannerError} /> : null}
-          {templateId !== null && templateContact?.archived === true && draft.contactId === null ? (
+          {templateContactArchived && draft.contactId === null ? (
             <Banner
               tone="warning"
               text={local({

@@ -375,7 +375,7 @@ export const parseWorkspaceDefaults = (
     dueDays: asNumber(defaults.dueDays, 14),
     paymentMethod: asString(defaults.paymentMethod, "bank_transfer") as PaymentMethod,
     paymentRounding: rounding,
-    note: asNullableString(defaults.note),
+    note: asNullableString(defaults.defaultNote) ?? asNullableString(defaults.note),
     preferredSeriesByKind,
   };
 };

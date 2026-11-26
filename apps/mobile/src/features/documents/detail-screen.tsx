@@ -88,7 +88,7 @@ import {
   SendEmailModal,
   UnlockDocumentModal,
 } from "./modals";
-import { useRequestMutation } from "./request-mutation";
+import { usePaymentMutation, useRequestMutation } from "./request-mutation";
 
 type DetailTab = "preview" | "payments" | "share" | "history";
 
@@ -109,6 +109,7 @@ export function DocumentDetailScreen() {
   const { t, locale, local, text: resolveText } = useI18n();
   const { run } = useApi();
   const runMutation = useRequestMutation(workspace.id);
+  const runPayment = usePaymentMutation(workspace.id);
   const transfer = useTransfer();
   const overlay = useOverlay();
   const params = useLocalSearchParams<{
@@ -406,7 +407,7 @@ export function DocumentDetailScreen() {
       method: values.method,
       ...(values.note !== "" ? { note: values.note } : {}),
     };
-    const result = await runMutation(`payments.record:document:${doc.id}`, payload, (api, key) =>
+    const result = await runPayment(`payments.record:document:${doc.id}`, payload, (api, key) =>
       api.payments.record({
         params: { workspaceId: workspace.id },
         headers: idempotencyHeaders(key),

@@ -38,7 +38,7 @@ import {
 } from "../../ui";
 import { useWorkspace } from "../../workspace/workspace-provider";
 import { canWriteWorkspace } from "../dashboard/model";
-import { useRequestMutation } from "../documents/request-mutation";
+import { usePaymentMutation, useRequestMutation } from "../documents/request-mutation";
 import { defaultReceiptPicker, type ReceiptPicker } from "./capture-picker";
 import {
   buildExpensePayload,
@@ -89,6 +89,7 @@ export function ExpenseDetailScreen(props: {
   const { t, text, locale, local } = useI18n();
   const api = useApi();
   const runMutation = useRequestMutation(workspace.id);
+  const runPayment = usePaymentMutation(workspace.id);
   const transfer = useTransfer();
   const overlay = useOverlay();
 
@@ -289,15 +290,12 @@ export function ExpenseDetailScreen(props: {
         ...(payNote.trim() !== "" ? { note: payNote.trim() } : {}),
       };
       setPayBusy(true);
-      const res = await runMutation(
-        `payments.record:expense:${expenseId}`,
-        payload,
-        (client, key) =>
-          client.payments.record({
-            params: { workspaceId: workspace.id },
-            headers: idempotencyHeaders(key),
-            payload,
-          }),
+      const res = await runPayment(`payments.record:expense:${expenseId}`, payload, (client, key) =>
+        client.payments.record({
+          params: { workspaceId: workspace.id },
+          headers: idempotencyHeaders(key),
+          payload,
+        }),
       );
       setPayBusy(false);
       if (res._tag === "Ok") {
@@ -320,7 +318,7 @@ export function ExpenseDetailScreen(props: {
       payMethod,
       payNote,
       paymentsRemote,
-      runMutation,
+      runPayment,
       t,
       text,
       workspace.id,

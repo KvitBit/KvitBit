@@ -43,6 +43,7 @@ import {
   todayIsoPrague,
   type WorkspaceDefaultsView,
 } from "./codecs";
+import type { TemplateSeed } from "./template-import";
 
 export type EditableDocumentKind = "invoice" | "proforma";
 
@@ -193,6 +194,7 @@ export const draftFromDocument = (
     readonly bankAccounts: ReadonlyArray<BankAccountOption>;
     readonly seriesList: ReadonlyArray<NumberingSeriesView>;
     readonly duplicate?: boolean;
+    readonly importedSeed?: TemplateSeed | null;
     readonly today?: IsoDate;
   },
 ): EditorDraft => {
@@ -214,6 +216,7 @@ export const draftFromDocument = (
   const currency = doc.totals.gross.currency;
   const today = params.today ?? todayIsoPrague();
   const isDuplicate = params.duplicate === true;
+  const stored = params.importedSeed ?? undefined;
   return {
     kind,
     contactId: contact.contactId || null,
@@ -221,18 +224,24 @@ export const draftFromDocument = (
     issuedOn: isDuplicate ? today : doc.dates.issuedOn,
     taxableSupplyOn: isDuplicate ? today : (doc.dates.taxableSupplyOn ?? doc.dates.issuedOn),
     dueOn: isDuplicate ? addDaysIso(today, params.workspaceDefaults.dueDays) : doc.dates.dueOn,
-    language: params.workspaceDefaults.language,
-    seriesId: defaultSeriesId(
-      params.seriesList,
-      kind,
-      params.workspaceDefaults.preferredSeriesByKind[kind],
-    ),
-    bankAccountId: issuer.bankAccount?.id ?? defaultBankAccountId(params.bankAccounts, currency),
+    language: stored?.language ?? params.workspaceDefaults.language,
+    seriesId:
+      stored === undefined
+        ? defaultSeriesId(
+            params.seriesList,
+            kind,
+            params.workspaceDefaults.preferredSeriesByKind[kind],
+          )
+        : (stored.series ?? null),
+    bankAccountId:
+      issuer.bankAccount?.id ??
+      stored?.bankAccount ??
+      defaultBankAccountId(params.bankAccounts, currency),
     paymentMethod: doc.paymentMethod,
-    pricesIncludeVat: false,
-    variableSymbol: "",
-    orderNumber: "",
-    note: "",
+    pricesIncludeVat: stored?.pricesIncludeVat ?? false,
+    variableSymbol: stored?.variableSymbol ?? "",
+    orderNumber: stored?.orderNumber ?? "",
+    note: stored?.note ?? "",
     fxMode: doc.fx?.source === "manual" ? "manual" : "cnb",
     manualFxRate: doc.fx ? decimalToInputString(doc.fx.rate) : "",
     manualFxQuantity: doc.fx ? String(doc.fx.quantity) : "1",
