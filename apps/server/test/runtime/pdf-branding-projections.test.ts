@@ -1234,7 +1234,7 @@ describe("Phase 3A Round 1 fixes 6–8: PDF, branding, and document/share read p
           documentId: deliveryRow.documentId,
           documentRevision: deliveryRow.documentRevision,
           workspaceRevision: wsCurrent.revision,
-          template: "classic",
+          template: deliveryRow.attachment.template,
           language: deliveryRow.language,
         });
         yield* blobs.put(
@@ -1255,7 +1255,29 @@ describe("Phase 3A Round 1 fixes 6–8: PDF, branding, and document/share read p
         yield* sql`
           update deliveries
           set render_model = ${JSON.stringify(parsedModel)}::jsonb,
-              status = 'sending',
+              status = 'queued',
+              revision = 1,
+              attempts = 0,
+              failure = null
+          where id = ${sent.deliveryId}
+        `;
+        // Direct legacy renderer call refuses BEFORE consulting the warm cache at attachment.template
+        const legacyQueuedRow = yield* deliveriesRepo.get(
+          memberCaller.workspaceId,
+          sent.deliveryId,
+        );
+        const directLegacyExit = yield* Effect.exit(
+          renderer.render(legacyQueuedRow.view, {
+            template: legacyQueuedRow.attachment.template,
+            language: legacyQueuedRow.language,
+          }),
+        );
+        expect(directLegacyExit._tag).toBe("Failure");
+
+        // Dispatch of a sending legacy row returns "failed" normally on first call (J6), bumps revision, attempts=0
+        yield* sql`
+          update deliveries
+          set status = 'sending',
               revision = 1,
               attempts = 0,
               failure = null
@@ -1644,6 +1666,48 @@ describe("Phase 3A Round 1 fixes 6–8: PDF, branding, and document/share read p
         failAudit = false;
         expect(bigEurMemReplay.revision).toBe(bigEurMemInv.revision);
         expect(bigEurMemReplay.paymentQr).toBeNull();
+
+        // Expired memory requestKey reused with new payload after 24h must NOT return predecessor invoice
+        const reuseKey = "rk-spy-expire-reuse" as RequestKey;
+        const firstReuse = yield* asMember(
+          documents.issue(
+            {
+              input: {
+                kind: "invoice",
+                contact: contact.id as ContactId,
+                lines: [
+                  {
+                    description: "First invoice",
+                    quantity: BigDecimal.fromStringUnsafe("1"),
+                    unitPrice: BigDecimal.fromStringUnsafe("500"),
+                  },
+                ],
+              },
+            },
+            { requestKey: reuseKey },
+          ),
+        );
+        yield* TestClock.adjust("25 hours");
+        const secondPayload = {
+          kind: "invoice" as const,
+          contact: contact.id as ContactId,
+          lines: [
+            {
+              description: "Second invoice after expiry",
+              quantity: BigDecimal.fromStringUnsafe("1"),
+              unitPrice: BigDecimal.fromStringUnsafe("900"),
+            },
+          ] as const,
+        };
+        const secondReuse = yield* asMember(
+          documents.issue({ input: secondPayload }, { requestKey: reuseKey }),
+        );
+        expect(secondReuse.id).not.toBe(firstReuse.id);
+        const secondReuseReplay = yield* asMember(
+          documents.issue({ input: secondPayload }, { requestKey: reuseKey }),
+        );
+        expect(secondReuseReplay.id).toBe(secondReuse.id);
+        expect(secondReuseReplay.paymentQr?.payload).toContain("AM:900.00");
       }).pipe(Effect.provide(spyLayer)),
     );
   });

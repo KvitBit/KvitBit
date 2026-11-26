@@ -444,13 +444,15 @@ const runKeyedProjection = <A, E, R>(params: {
   readonly requestKey: string | undefined;
   readonly hasSqlRequestLog: boolean;
   readonly memoryReplays: Map<string, A>;
+  readonly identityOf: (value: A) => string;
   readonly execute: Effect.Effect<A, E, R>;
   readonly project: (
     value: A,
     wasReplayed: boolean,
   ) => Effect.Effect<A, Unavailable, CurrentCaller>;
 }): Effect.Effect<A, E | Unavailable, R | CurrentCaller> => {
-  const { method, requestKey, hasSqlRequestLog, memoryReplays, execute, project } = params;
+  const { method, requestKey, hasSqlRequestLog, memoryReplays, identityOf, execute, project } =
+    params;
   if (requestKey === undefined) {
     return execute.pipe(Effect.flatMap((val) => project(val, false)));
   }
@@ -469,7 +471,9 @@ const runKeyedProjection = <A, E, R>(params: {
     const wasReplayed = yield* outcome.replayed;
     const caller = yield* CurrentCaller;
     const cacheKey =
-      caller._tag === "Member" ? `${caller.workspaceId}:${method}:${requestKey}` : undefined;
+      caller._tag === "Member"
+        ? `${caller.workspaceId}:${method}:${requestKey}:${identityOf(raw)}`
+        : undefined;
     if (wasReplayed) {
       if (hasSqlRequestLog) return raw;
       if (cacheKey !== undefined && memoryReplays.has(cacheKey)) {
@@ -552,6 +556,13 @@ const ProjectedDocumentsLive: Layer.Layer<Documents, never, Documents | CoreStor
       const projectView = (view: DocumentView, wasReplayed = false) =>
         projectMemberDocumentView(view, documentsRepo, coreStore, hasSqlRequestLog, wasReplayed);
 
+      const viewIdentity = (v: DocumentView) => `${v.id}:${v.revision}`;
+      const cancelIdentity = (res: {
+        readonly document: DocumentView;
+        readonly creditNote: DocumentView | null;
+      }) =>
+        `${res.document.id}:${res.document.revision}:${res.creditNote === null ? "none" : `${res.creditNote.id}:${res.creditNote.revision}`}`;
+
       return Documents.of({
         ...baseDocuments,
         preview: (input) =>
@@ -564,6 +575,7 @@ const ProjectedDocumentsLive: Layer.Layer<Documents, never, Documents | CoreStor
             requestKey: opts?.requestKey,
             hasSqlRequestLog,
             memoryReplays: memoryViewReplays,
+            identityOf: viewIdentity,
             execute: baseDocuments.createDraft(input, opts),
             project: projectView,
           }),
@@ -573,6 +585,7 @@ const ProjectedDocumentsLive: Layer.Layer<Documents, never, Documents | CoreStor
             requestKey: opts?.requestKey,
             hasSqlRequestLog,
             memoryReplays: memoryViewReplays,
+            identityOf: viewIdentity,
             execute: baseDocuments.issue(from, opts),
             project: projectView,
           }),
@@ -589,6 +602,7 @@ const ProjectedDocumentsLive: Layer.Layer<Documents, never, Documents | CoreStor
             requestKey: opts?.requestKey,
             hasSqlRequestLog,
             memoryReplays: memoryCancelReplays,
+            identityOf: cancelIdentity,
             execute: baseDocuments.cancel(id, input, opts),
             project: (res, wasReplayed) =>
               Effect.gen(function* () {
@@ -604,6 +618,7 @@ const ProjectedDocumentsLive: Layer.Layer<Documents, never, Documents | CoreStor
             requestKey: opts?.requestKey,
             hasSqlRequestLog,
             memoryReplays: memoryViewReplays,
+            identityOf: viewIdentity,
             execute: baseDocuments.correct(id, input, opts),
             project: projectView,
           }),
@@ -613,6 +628,7 @@ const ProjectedDocumentsLive: Layer.Layer<Documents, never, Documents | CoreStor
             requestKey: opts?.requestKey,
             hasSqlRequestLog,
             memoryReplays: memoryViewReplays,
+            identityOf: viewIdentity,
             execute: baseDocuments.issueFinalInvoice(proforma, input, opts),
             project: projectView,
           }),
@@ -653,6 +669,7 @@ const ProjectedTemplatesLive: Layer.Layer<Templates, never, Templates | CoreStor
             requestKey: opts?.requestKey,
             hasSqlRequestLog,
             memoryReplays,
+            identityOf: (v) => `${v.id}:${v.revision}`,
             execute: baseTemplates.use(template, input, opts),
             project: (view, wasReplayed) =>
               projectMemberDocumentView(
