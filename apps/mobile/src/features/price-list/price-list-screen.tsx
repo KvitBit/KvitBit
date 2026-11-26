@@ -1,25 +1,36 @@
-import type { CurrencyCode, VatTreatment, WorkspaceSummary } from "@kvitbit/domain/contract";
+import type {
+  CurrencyCode,
+  PriceListItemId,
+  VatTreatment,
+  WorkspaceId,
+  WorkspaceSummary,
+} from "@kvitbit/domain/contract";
 import {
   describeError,
-  ensureRequestKey,
   type FieldIssue,
   idempotencyHeaders,
   ifMatchHeaders,
   inWorkspace,
   issuesAt,
-  keyAfter,
+  type KvitbitApiClient,
   optimisticList,
   partitionIssues,
   type Remote,
 } from "@kvitbit/ui-port/api";
 import { formatMoney } from "@kvitbit/ui-port/format";
 import { enumKey } from "@kvitbit/ui-port/i18n";
-import { Effect, Option } from "effect";
+import { Effect } from "effect";
 import { Archive, Pencil, Plus, Tag, X } from "lucide-react-native";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { StyleSheet, View } from "react-native";
 import { useI18n } from "../../i18n/i18n-provider";
 import { useApi, useRemote } from "../../runtime/api-runtime";
+import {
+  acquireRequestKey,
+  completeRequestKey,
+  settlesRequestIntent,
+} from "../../runtime/request-intent";
+import { useSession } from "../../session/session-provider";
 import {
   Badge,
   Banner,
@@ -195,6 +206,7 @@ export function PriceListEditor(props: PriceListEditorProps) {
         <Button
           label={t("common.action.save")}
           busy={props.saving}
+          disabled={props.staleRevision}
           onPress={props.onSave}
           testID="price-list-save-button"
         />
@@ -335,9 +347,14 @@ export function PriceListContent(props: PriceListContentProps) {
 export function PriceListScreen() {
   const { workspace } = useWorkspace();
   const api = useApi();
+  const session = useSession();
   const overlay = useOverlay();
   const { t, text, local } = useI18n();
   const writable = canWriteWorkspace(workspace);
+  const owner =
+    session.state.status === "signed-in"
+      ? JSON.stringify([api.origin, session.state.user.id, workspace.id])
+      : null;
 
   const [searchText, setSearchText] = useState("");
   const [includeArchived, setIncludeArchived] = useState(false);
@@ -377,10 +394,10 @@ export function PriceListScreen() {
   const [bannerError, setBannerError] = useState<string | null>(null);
   const [staleRevision, setStaleRevision] = useState(false);
   const [saving, setSaving] = useState(false);
-  const requestKeyRef = useRef<Option.Option<string>>(Option.none());
+  const savingRef = useRef(false);
 
   const openCreate = useCallback(() => {
-    requestKeyRef.current = Option.none();
+    if (savingRef.current) return;
     setForm(emptyPriceListForm());
     setClientErrors({});
     setServerIssues([]);
@@ -389,7 +406,7 @@ export function PriceListScreen() {
   }, []);
 
   const openEdit = useCallback((item: PriceListItemRecord) => {
-    requestKeyRef.current = Option.none();
+    if (savingRef.current || item.archived) return;
     setForm(priceListFormFromItem(item));
     setClientErrors({});
     setServerIssues([]);
@@ -398,6 +415,7 @@ export function PriceListScreen() {
   }, []);
 
   const closeEditor = useCallback(() => {
+    if (savingRef.current) return;
     setForm(null);
     setClientErrors({});
     setServerIssues([]);
@@ -407,7 +425,6 @@ export function PriceListScreen() {
 
   const handleChangeForm = useCallback(
     (updater: (prev: PriceListFormState) => PriceListFormState) => {
-      requestKeyRef.current = Option.none();
       setForm((prev) => (prev === null ? null : updater(prev)));
       setClientErrors({});
       setServerIssues([]);
@@ -416,12 +433,13 @@ export function PriceListScreen() {
   );
 
   const handleSave = useCallback(async () => {
-    if (form === null) return;
+    if (!writable || form === null || staleRevision || savingRef.current) return;
     const validation = validatePriceListForm(form);
     if (Object.keys(validation).length > 0) {
       setClientErrors(validation);
       return;
     }
+    savingRef.current = true;
     setSaving(true);
     setBannerError(null);
     setServerIssues([]);
@@ -430,31 +448,44 @@ export function PriceListScreen() {
     const payload = buildPriceListInput(form);
     const editingId = form.editingId;
     const isCreate = editingId === null;
-    const result =
-      editingId === null
-        ? await (async () => {
-            const key = await Effect.runPromise(ensureRequestKey(requestKeyRef.current));
-            requestKeyRef.current = Option.some(key);
-            return api.run((client) =>
-              client.priceList.create({
-                params: inWorkspace(workspace.id),
-                headers: idempotencyHeaders(key),
-                payload,
-              }),
-            );
-          })()
-        : await api.run((client) =>
-            client.priceList.update({
-              params: inWorkspace(workspace.id, { itemId: editingId }),
-              headers: ifMatchHeaders(form.editingRevision ?? 0),
-              payload,
-            }),
-          );
-
-    setSaving(false);
-    if (isCreate) {
-      requestKeyRef.current = keyAfter(requestKeyRef.current, result);
-    }
+    const result = await (async () => {
+      if (editingId !== null) {
+        const revision = form.editingRevision;
+        if (revision === null) return null;
+        return api.run((client) =>
+          client.priceList.update({
+            params: inWorkspace(workspace.id, { itemId: editingId }),
+            headers: ifMatchHeaders(revision),
+            payload,
+          }),
+        );
+      }
+      if (owner === null) return null;
+      const operation = "priceList.create";
+      const key = await acquireRequestKey(owner, operation, payload);
+      const created = await api.run((client) =>
+        client.priceList.create({
+          params: inWorkspace(workspace.id),
+          headers: idempotencyHeaders(key),
+          payload,
+        }),
+      );
+      if (settlesRequestIntent(created)) {
+        await completeRequestKey(owner, operation, key).catch(() => {
+          overlay.toast(t("error.unknown"));
+        });
+      }
+      return created;
+    })()
+      .catch(() => {
+        setBannerError(t("error.unknown"));
+        return null;
+      })
+      .finally(() => {
+        savingRef.current = false;
+        setSaving(false);
+      });
+    if (result === null) return;
 
     if (result._tag === "Ok") {
       const saved = parsePriceListItem(result.value);
@@ -482,7 +513,19 @@ export function PriceListScreen() {
       return;
     }
     setBannerError(text(view.text));
-  }, [api, closeEditor, form, itemsRemote, overlay, t, text, workspace.id]);
+  }, [
+    api,
+    closeEditor,
+    form,
+    itemsRemote,
+    overlay,
+    owner,
+    staleRevision,
+    t,
+    text,
+    workspace.id,
+    writable,
+  ]);
 
   const handleArchive = useCallback(
     async (item: PriceListItemRecord) => {
@@ -524,11 +567,26 @@ export function PriceListScreen() {
     [api, closeEditor, form?.editingId, includeArchived, local, overlay, t, text, workspace.id],
   );
 
-  const handleReload = useCallback(() => {
-    setStaleRevision(false);
+  const handleReload = useCallback(async () => {
+    if (form?.editingId == null || savingRef.current) return;
+    const editingId = form.editingId;
+    savingRef.current = true;
+    setSaving(true);
     setBannerError(null);
+    const result = await api
+      .run((client) => reloadPriceListItem(client.priceList, workspace.id, editingId))
+      .finally(() => {
+        savingRef.current = false;
+        setSaving(false);
+      });
+    if (result._tag === "Err") {
+      overlay.toast(text(describeError(result.error).text));
+      return;
+    }
+    if (result.value === undefined) closeEditor();
+    else openEdit(result.value);
     itemsRemote.reload();
-  }, [itemsRemote]);
+  }, [api, closeEditor, form?.editingId, itemsRemote, openEdit, overlay, text, workspace.id]);
 
   return (
     <Screen
@@ -578,6 +636,15 @@ export function PriceListScreen() {
     </Screen>
   );
 }
+
+export const reloadPriceListItem = (
+  priceList: Pick<KvitbitApiClient["priceList"], "list">,
+  workspaceId: WorkspaceId,
+  editingId: PriceListItemId,
+) =>
+  Effect.map(priceList.list({ params: inWorkspace(workspaceId), query: {} }), (items) =>
+    parsePriceListItems(items).find((item) => item.id === editingId && !item.archived),
+  );
 
 const styles = StyleSheet.create({
   stack: { gap: space.lg },

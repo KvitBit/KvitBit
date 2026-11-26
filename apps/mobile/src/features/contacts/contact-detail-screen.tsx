@@ -4,18 +4,15 @@ import type {
   CurrencyCode,
   Locale,
   PaymentMethod,
-  RegistryResult,
   WorkspaceSummary,
 } from "@kvitbit/domain/contract";
 import {
   describeError,
-  ensureRequestKey,
   type FieldIssue,
   idempotencyHeaders,
   ifMatchHeaders,
   inWorkspace,
   issuesAt,
-  keyAfter,
   partitionIssues,
   type Remote,
 } from "@kvitbit/ui-port/api";
@@ -28,7 +25,7 @@ import {
 } from "@kvitbit/ui-port/format";
 import { enumKey } from "@kvitbit/ui-port/i18n";
 import { OverrideForm, type Route } from "@kvitbit/ui-port/view-models";
-import { Effect, Option, Result } from "effect";
+import { Effect, Result } from "effect";
 import { useLocalSearchParams } from "expo-router";
 import {
   Archive,
@@ -46,6 +43,12 @@ import { StyleSheet, View } from "react-native";
 import { useI18n } from "../../i18n/i18n-provider";
 import { navigate, param } from "../../navigation/routes";
 import { useApi, useRemote } from "../../runtime/api-runtime";
+import {
+  acquireRequestKey,
+  completeRequestKey,
+  settlesRequestIntent,
+} from "../../runtime/request-intent";
+import { useSession } from "../../session/session-provider";
 import {
   Badge,
   Banner,
@@ -70,8 +73,11 @@ import {
   canWriteWorkspace,
   type DashboardDocument,
   parseDocumentSummaries,
+  pragueToday,
 } from "../dashboard/model";
+import { decodeReportView } from "../reports/model";
 import {
+  applyRegistryPreview,
   applyRegistryToForm,
   buildContactInput,
   COMMON_COUNTRIES,
@@ -84,10 +90,12 @@ import {
   contactFormFromRecord,
   diffContactWithRegistry,
   emptyContactForm,
+  findActiveContactByIco,
   isValidEmail,
   parseContactView,
   type RegistryDiffItem,
-  summarizeContactDocuments,
+  type RegistryPreview,
+  summarizeContactReceivables,
   validateContactForm,
 } from "./model";
 
@@ -108,15 +116,14 @@ export interface ContactDetailViewProps {
   readonly contact: ContactRecord;
   readonly documents: Remote<ReadonlyArray<DashboardDocument>>;
   readonly onRetryDocuments: () => void;
+  readonly receivables: Remote<ReturnType<typeof summarizeContactReceivables> | null>;
+  readonly onRetryReceivables: () => void;
   readonly onEdit: () => void;
   readonly onArchive: () => void;
   readonly archiving: boolean;
   readonly onRefreshAres: () => void;
   readonly refreshingAres: boolean;
-  readonly aresDiff: {
-    readonly result: RegistryResult;
-    readonly items: ReadonlyArray<RegistryDiffItem>;
-  } | null;
+  readonly aresDiff: Pick<RegistryPreview, "result" | "items"> | null;
   readonly onApplyAresDiff: () => void;
   readonly onDismissAresDiff: () => void;
   readonly applyingAres: boolean;
@@ -361,53 +368,50 @@ export function ContactDetailView(props: ContactDetailViewProps) {
           />
         }
       >
+        <RemoteView state={props.receivables} onRetry={props.onRetryReceivables}>
+          {(summary) =>
+            summary === null ? null : (
+              <Card style={styles.listCard}>
+                <ListRow
+                  title={local({ cs: "Dlužná částka", en: "Outstanding balance" })}
+                  trailing={formatMoney(locale, summary.outstanding)}
+                />
+                <ListRow
+                  title={t("reports.suite.receivables.overdue")}
+                  trailing={String(summary.overdueCount)}
+                />
+              </Card>
+            )
+          }
+        </RemoteView>
         <RemoteView state={props.documents} onRetry={props.onRetryDocuments}>
-          {(docs) => {
-            const summary = summarizeContactDocuments(docs);
-            return docs.length === 0 ? (
+          {(docs) =>
+            docs.length === 0 ? (
               <Card>
                 <EmptyState title={t("common.state.empty")} />
               </Card>
             ) : (
-              <View style={styles.stackSm}>
-                {summary.overdueCount > 0 || summary.unpaidCount > 0 ? (
-                  <View style={styles.badges}>
-                    {summary.unpaidCount > 0 ? (
-                      <Badge
-                        tone="info"
-                        label={`${t("reports.suite.receivables.unpaid")}: ${summary.unpaidCount}`}
-                      />
-                    ) : null}
-                    {summary.overdueCount > 0 ? (
-                      <Badge
-                        tone="warning"
-                        label={`${t("reports.suite.receivables.overdue")}: ${summary.overdueCount}`}
-                      />
-                    ) : null}
-                  </View>
-                ) : null}
-                <Card style={styles.listCard}>
-                  {docs.map((doc) => (
-                    <ListRow
-                      key={doc.id}
-                      leading={FileText}
-                      title={doc.number ?? t(enumKey("documentKind", doc.kind))}
-                      subtitle={formatDate(locale, doc.issuedOn)}
-                      trailing={formatMoney(locale, doc.total)}
-                      badge={
-                        doc.overdue ? (
-                          <Badge tone="warning" label={t("enum.badge.overdue")} />
-                        ) : undefined
-                      }
-                      onPress={() =>
-                        props.onNavigate({ _tag: "Document", ws, id: doc.id, tab: "preview" })
-                      }
-                    />
-                  ))}
-                </Card>
-              </View>
-            );
-          }}
+              <Card style={styles.listCard}>
+                {docs.map((doc) => (
+                  <ListRow
+                    key={doc.id}
+                    leading={FileText}
+                    title={doc.number ?? t(enumKey("documentKind", doc.kind))}
+                    subtitle={formatDate(locale, doc.issuedOn)}
+                    trailing={formatMoney(locale, doc.total)}
+                    badge={
+                      doc.overdue ? (
+                        <Badge tone="warning" label={t("enum.badge.overdue")} />
+                      ) : undefined
+                    }
+                    onPress={() =>
+                      props.onNavigate({ _tag: "Document", ws, id: doc.id, tab: "preview" })
+                    }
+                  />
+                ))}
+              </Card>
+            )
+          }
         </RemoteView>
       </Section>
 
@@ -597,6 +601,8 @@ export function ContactEditorView(props: ContactEditorViewProps) {
   );
 
   const currentReminderMode = form.overrides.current.reminderPolicy?.mode ?? "inherit";
+  const country = form.country.trim().toUpperCase();
+  const czech = country === "CZ";
 
   return (
     <View style={styles.stack}>
@@ -635,33 +641,58 @@ export function ContactEditorView(props: ContactEditorViewProps) {
       ) : null}
 
       <Card>
-        <View style={styles.headerRow}>
-          <Building2 size={20} color="#666" />
-          <Text variant="titleMedium" style={styles.flex}>
-            {t("contacts.editor.icoFirst")}
-          </Text>
-        </View>
+        <SegmentedChoice
+          label={t("common.field.country")}
+          value={country}
+          choices={countryChoices}
+          onChange={(country) => onChangeForm((prev) => ({ ...prev, country }))}
+        />
         <TextField
-          label={t("common.field.ico")}
-          value={form.ico}
-          onChangeText={(ico) => onChangeForm((prev) => ({ ...prev, ico }))}
-          keyboardType="number-pad"
-          placeholder="27074358"
-          error={fieldError(["ico"])}
-          testID="contact-ico-input"
+          label={local({ cs: "Kód země", en: "Country code" })}
+          value={form.country}
+          onChangeText={(country) =>
+            onChangeForm((prev) => ({ ...prev, country: country.toUpperCase().slice(0, 2) }))
+          }
+          autoCapitalize="characters"
+          maxLength={2}
+          error={fieldError(["address", "country"])}
         />
-        <Button
-          kind="tonal"
-          icon={Search}
-          label={t("contacts.editor.lookup")}
-          busy={props.lookingUpAres}
-          onPress={props.onLookupAres}
-          testID="contact-ares-lookup"
-        />
-        {props.aresNotice !== null ? (
-          <Banner tone={props.aresNotice.tone} text={props.aresNotice.text} />
-        ) : null}
       </Card>
+
+      {czech || form.ico !== "" ? (
+        <Card>
+          {czech ? (
+            <View style={styles.headerRow}>
+              <Building2 size={20} color="#666" />
+              <Text variant="titleMedium" style={styles.flex}>
+                {t("contacts.editor.icoFirst")}
+              </Text>
+            </View>
+          ) : null}
+          <TextField
+            label={t("common.field.ico")}
+            value={form.ico}
+            onChangeText={(ico) => onChangeForm((prev) => ({ ...prev, ico }))}
+            keyboardType="number-pad"
+            placeholder="27074358"
+            error={fieldError(["ico"])}
+            testID="contact-ico-input"
+          />
+          {czech ? (
+            <Button
+              kind="tonal"
+              icon={Search}
+              label={t("contacts.editor.lookup")}
+              busy={props.lookingUpAres}
+              onPress={props.onLookupAres}
+              testID="contact-ares-lookup"
+            />
+          ) : null}
+          {czech && props.aresNotice !== null ? (
+            <Banner tone={props.aresNotice.tone} text={props.aresNotice.text} />
+          ) : null}
+        </Card>
+      ) : null}
 
       <Section title={t("contacts.detail.particulars")}>
         <Card>
@@ -673,11 +704,11 @@ export function ContactEditorView(props: ContactEditorViewProps) {
             testID="contact-name-input"
           />
           <TextField
-            label={t("common.field.dic")}
+            label={czech ? t("common.field.dic") : local({ cs: "DIČ", en: "VAT ID" })}
             value={form.dic}
             onChangeText={(dic) => onChangeForm((prev) => ({ ...prev, dic }))}
             autoCapitalize="characters"
-            placeholder="CZ27074358"
+            placeholder={czech ? "CZ27074358" : undefined}
             error={fieldError(["dic"])}
           />
           <TextField
@@ -718,32 +749,11 @@ export function ContactEditorView(props: ContactEditorViewProps) {
 
       <Section title={t("common.field.address")}>
         <Card>
-          <SegmentedChoice
-            label={t("common.field.country")}
-            value={
-              COMMON_COUNTRIES.includes(
-                form.country.toUpperCase() as (typeof COMMON_COUNTRIES)[number],
-              )
-                ? form.country.toUpperCase()
-                : null
-            }
-            choices={countryChoices}
-            onChange={(country) => onChangeForm((prev) => ({ ...prev, country }))}
-          />
           <TextField
-            label={t("common.field.country")}
-            value={form.country}
-            onChangeText={(country) =>
-              onChangeForm((prev) => ({ ...prev, country: country.toUpperCase().slice(0, 2) }))
-            }
-            autoCapitalize="characters"
-            maxLength={2}
-            error={fieldError(["address", "country"])}
-          />
-          <TextField
-            label={t("common.field.street")}
+            label={t(czech ? "common.field.street" : "common.field.address")}
             value={form.street}
             onChangeText={(street) => onChangeForm((prev) => ({ ...prev, street }))}
+            multiline={!czech}
           />
           <TextField
             label={t("common.field.city")}
@@ -922,12 +932,37 @@ export function ContactEditorView(props: ContactEditorViewProps) {
 
 export function ContactDetailScreen() {
   const { workspace } = useWorkspace();
-  const api = useApi();
-  const overlay = useOverlay();
-  const { t, text, locale, local } = useI18n();
   const params = useLocalSearchParams<{ id?: string; mode?: string }>();
   const rawId = param(params.id) ?? "new";
   const initialMode = param(params.mode) === "edit" || rawId === "new" ? "edit" : "view";
+  return (
+    <WorkspaceContactDetail
+      key={JSON.stringify([workspace.id, rawId, initialMode])}
+      workspace={workspace}
+      rawId={rawId}
+      initialMode={initialMode}
+    />
+  );
+}
+
+function WorkspaceContactDetail({
+  workspace,
+  rawId,
+  initialMode,
+}: {
+  readonly workspace: WorkspaceSummary;
+  readonly rawId: string;
+  readonly initialMode: "view" | "edit";
+}) {
+  const api = useApi();
+  const session = useSession();
+  const overlay = useOverlay();
+  const { t, text, locale, local } = useI18n();
+  const writable = canWriteWorkspace(workspace);
+  const owner =
+    session.state.status === "signed-in"
+      ? JSON.stringify([api.origin, session.state.user.id, workspace.id])
+      : null;
   const isNew = rawId === "new";
   const contactId = isNew ? null : (rawId as ContactId);
 
@@ -949,12 +984,9 @@ export function ContactDetailScreen() {
   } | null>(null);
   const [refreshingAres, setRefreshingAres] = useState(false);
   const [applyingAres, setApplyingAres] = useState(false);
-  const [aresDiff, setAresDiff] = useState<{
-    readonly result: RegistryResult;
-    readonly items: ReadonlyArray<RegistryDiffItem>;
-  } | null>(null);
+  const [aresDiff, setAresDiff] = useState<RegistryPreview | null>(null);
 
-  const requestKeyRef = useRef<Option.Option<string>>(Option.none());
+  const savingRef = useRef(false);
   const loadedRevisionRef = useRef<number | null>(null);
 
   const contactRemote = useRemote(
@@ -982,6 +1014,31 @@ export function ContactDetailScreen() {
     [workspace.id, contactId],
   );
 
+  const today = pragueToday();
+  const receivablesRemote = useRemote(
+    contactId === null
+      ? null
+      : (client) =>
+          Effect.map(
+            client.reports.run({
+              params: inWorkspace(workspace.id, { report: "receivables" }),
+              query: { from: today, to: today },
+            }),
+            (view) => {
+              const report = decodeReportView(view, "receivables");
+              return report.report === "receivables"
+                ? summarizeContactReceivables(report, contactId)
+                : null;
+            },
+          ),
+    [workspace.id, contactId, today],
+  );
+
+  const editable =
+    writable &&
+    (isNew ||
+      (contactRemote.state._tag === "Ready" && contactRemote.state.value?.archived === false));
+
   // Sync loaded contact into editor when entering edit mode or after reload.
   useEffect(() => {
     if (contactRemote.state._tag === "Ready" && contactRemote.state.value !== null) {
@@ -994,7 +1051,6 @@ export function ContactDetailScreen() {
   }, [contactRemote.state]);
 
   const handleChangeForm = useCallback((updater: (prev: ContactFormState) => ContactFormState) => {
-    requestKeyRef.current = Option.none();
     setForm(updater);
     setClientErrors({});
     setServerIssues([]);
@@ -1002,6 +1058,7 @@ export function ContactDetailScreen() {
   }, []);
 
   const handleLookupAres = useCallback(async () => {
+    if (!editable || form.country.trim().toUpperCase() !== "CZ") return;
     const check = validateIco(form.ico);
     if (Result.isFailure(check)) {
       setClientErrors({
@@ -1016,8 +1073,11 @@ export function ContactDetailScreen() {
     const res = await api.run((client) => client.registry.lookupCompany({ params: { ico } }));
     setLookingUpAres(false);
     if (res._tag === "Ok") {
-      setForm((prev) => applyRegistryToForm(prev, res.value));
-      requestKeyRef.current = Option.none();
+      setForm((prev) =>
+        prev.country.trim().toUpperCase() === "CZ" && normalizeIco(prev.ico) === ico
+          ? applyRegistryToForm(prev, res.value)
+          : prev,
+      );
       if (res.value.terminatedOn !== null) {
         setAresNotice({
           tone: "warning",
@@ -1038,14 +1098,16 @@ export function ContactDetailScreen() {
     } else {
       setAresNotice({ tone: "error", text: text(describeError(res.error).text) });
     }
-  }, [api, form.ico, local, locale, t, text]);
+  }, [api, editable, form.country, form.ico, local, locale, t, text]);
 
   const handleSave = useCallback(async () => {
+    if (!editable || savingRef.current || staleRevision) return;
     const validation = validateContactForm(form);
     if (Object.keys(validation).length > 0) {
       setClientErrors(validation);
       return;
     }
+    savingRef.current = true;
     setSaving(true);
     setBannerError(null);
     setServerIssues([]);
@@ -1053,30 +1115,44 @@ export function ContactDetailScreen() {
     setDuplicateIco(false);
 
     const payload = buildContactInput(form);
-    const result = isNew
-      ? await (async () => {
-          const key = await Effect.runPromise(ensureRequestKey(requestKeyRef.current));
-          requestKeyRef.current = Option.some(key);
-          return api.run((client) =>
-            client.contacts.create({
-              params: inWorkspace(workspace.id),
-              headers: idempotencyHeaders(key),
-              payload,
-            }),
-          );
-        })()
-      : await api.run((client) =>
+    const result = await (async () => {
+      if (contactId !== null) {
+        const revision = loadedRevisionRef.current;
+        if (revision === null) return null;
+        return api.run((client) =>
           client.contacts.update({
-            params: inWorkspace(workspace.id, { contactId: contactId as ContactId }),
-            headers: ifMatchHeaders(loadedRevisionRef.current ?? 0),
+            params: inWorkspace(workspace.id, { contactId }),
+            headers: ifMatchHeaders(revision),
             payload,
           }),
         );
-
-    setSaving(false);
-    if (isNew) {
-      requestKeyRef.current = keyAfter(requestKeyRef.current, result);
-    }
+      }
+      if (owner === null) return null;
+      const operation = "contacts.create";
+      const key = await acquireRequestKey(owner, operation, payload);
+      const created = await api.run((client) =>
+        client.contacts.create({
+          params: inWorkspace(workspace.id),
+          headers: idempotencyHeaders(key),
+          payload,
+        }),
+      );
+      if (settlesRequestIntent(created)) {
+        await completeRequestKey(owner, operation, key).catch(() => {
+          overlay.toast(t("error.unknown"));
+        });
+      }
+      return created;
+    })()
+      .catch(() => {
+        setBannerError(t("error.unknown"));
+        return null;
+      })
+      .finally(() => {
+        savingRef.current = false;
+        setSaving(false);
+      });
+    if (result === null) return;
 
     if (result._tag === "Ok") {
       const saved = parseContactView(result.value);
@@ -1109,7 +1185,21 @@ export function ContactDetailScreen() {
       return;
     }
     setBannerError(text(view.text));
-  }, [api, contactId, contactRemote, form, isNew, overlay, t, text, workspace.id, workspace.slug]);
+  }, [
+    api,
+    contactId,
+    contactRemote,
+    editable,
+    form,
+    isNew,
+    overlay,
+    owner,
+    staleRevision,
+    t,
+    text,
+    workspace.id,
+    workspace.slug,
+  ]);
 
   const handleReloadLatest = useCallback(() => {
     loadedRevisionRef.current = null;
@@ -1120,6 +1210,7 @@ export function ContactDetailScreen() {
 
   const handleArchive = useCallback(async () => {
     if (
+      !editable ||
       contactId === null ||
       contactRemote.state._tag !== "Ready" ||
       contactRemote.state.value === null
@@ -1149,16 +1240,27 @@ export function ContactDetailScreen() {
     } else {
       overlay.toast(text(describeError(res.error).text));
     }
-  }, [api, contactId, contactRemote.state, local, overlay, t, text, workspace.id, workspace.slug]);
+  }, [
+    api,
+    contactId,
+    contactRemote.state,
+    editable,
+    local,
+    overlay,
+    t,
+    text,
+    workspace.id,
+    workspace.slug,
+  ]);
 
   const handleRefreshAres = useCallback(async () => {
-    if (contactRemote.state._tag !== "Ready" || contactRemote.state.value === null) return;
+    if (!editable || contactRemote.state._tag !== "Ready" || contactRemote.state.value === null)
+      return;
     const record = contactRemote.state.value;
-    if (record.ico === null) return;
+    const ico = record.ico;
+    if (ico === null) return;
     setRefreshingAres(true);
-    const res = await api.run((client) =>
-      client.registry.lookupCompany({ params: { ico: record.ico as string } }),
-    );
+    const res = await api.run((client) => client.registry.lookupCompany({ params: { ico } }));
     setRefreshingAres(false);
     if (res._tag === "Err") {
       overlay.toast(text(describeError(res.error).text));
@@ -1174,21 +1276,19 @@ export function ContactDetailScreen() {
       );
       return;
     }
-    setAresDiff({ result: res.value, items });
-  }, [api, contactRemote.state, local, overlay, text]);
+    setAresDiff({ result: res.value, items, contactId: record.id, revision: record.revision });
+  }, [api, contactRemote.state, editable, local, overlay, text]);
 
   const handleApplyAresDiff = useCallback(async () => {
-    if (contactRemote.state._tag !== "Ready" || contactRemote.state.value === null) return;
-    const record = contactRemote.state.value;
-    if (record.ico === null) return;
+    if (!editable || aresDiff === null || savingRef.current) return;
+    savingRef.current = true;
     setApplyingAres(true);
-    const res = await api.run((client) =>
-      client.contacts.fromIco({
-        params: inWorkspace(workspace.id),
-        payload: { ico: record.ico as string },
-      }),
-    );
-    setApplyingAres(false);
+    const res = await api
+      .run((client) => applyRegistryPreview(client.contacts, workspace.id, aresDiff))
+      .finally(() => {
+        savingRef.current = false;
+        setApplyingAres(false);
+      });
     if (res._tag === "Ok") {
       const updated = parseContactView(res.value);
       if (updated !== null) {
@@ -1199,37 +1299,60 @@ export function ContactDetailScreen() {
       setAresDiff(null);
       overlay.toast(t("contacts.detail.refreshed"));
     } else {
-      overlay.toast(text(describeError(res.error).text));
+      const error = describeError(res.error);
+      overlay.toast(text(error.text));
+      if (error.staleRevision || res.error._tag === "NotFound") {
+        setAresDiff(null);
+        contactRemote.reload();
+      }
     }
-  }, [api, contactRemote, overlay, t, text, workspace.id]);
+  }, [api, aresDiff, contactRemote, editable, overlay, t, text, workspace.id]);
+
+  const handleOpenDuplicate = useCallback(async () => {
+    const ico = normalizeIco(form.ico);
+    if (ico === "") return;
+    const result = await api.run((client) =>
+      findActiveContactByIco(ico, contactId, (cursor) =>
+        client.contacts.search({
+          params: inWorkspace(workspace.id),
+          query: { text: ico, ...(cursor === null ? {} : { cursor }) },
+        }),
+      ),
+    );
+    if (result._tag === "Err") {
+      overlay.toast(text(describeError(result.error).text));
+    } else if (result.value === null) {
+      overlay.toast(t("error.notFound"));
+    } else {
+      navigate({ _tag: "Contact", ws: workspace.slug, id: result.value.id, mode: "view" });
+    }
+  }, [api, contactId, form.ico, overlay, t, text, workspace.id, workspace.slug]);
 
   if (isNew) {
     return (
       <Screen title={t("contacts.list.new")} back>
-        <ContactEditorView
-          isNew
-          form={form}
-          onChangeForm={handleChangeForm}
-          clientErrors={clientErrors}
-          serverIssues={serverIssues}
-          bannerError={bannerError}
-          staleRevision={false}
-          duplicateIco={duplicateIco}
-          onReloadLatest={handleReloadLatest}
-          onOpenContactsSearch={() =>
-            navigate({
-              _tag: "Contacts",
-              ws: workspace.slug,
-              query: form.ico.trim() !== "" ? { text: form.ico.trim() } : {},
-            })
-          }
-          onLookupAres={handleLookupAres}
-          lookingUpAres={lookingUpAres}
-          aresNotice={aresNotice}
-          onSave={handleSave}
-          onCancel={() => navigate({ _tag: "Contacts", ws: workspace.slug, query: {} })}
-          saving={saving}
-        />
+        {!writable ? (
+          <EmptyState title={t("error.forbidden")} />
+        ) : (
+          <ContactEditorView
+            isNew
+            form={form}
+            onChangeForm={handleChangeForm}
+            clientErrors={clientErrors}
+            serverIssues={serverIssues}
+            bannerError={bannerError}
+            staleRevision={false}
+            duplicateIco={duplicateIco}
+            onReloadLatest={handleReloadLatest}
+            onOpenContactsSearch={handleOpenDuplicate}
+            onLookupAres={handleLookupAres}
+            lookingUpAres={lookingUpAres}
+            aresNotice={aresNotice}
+            onSave={handleSave}
+            onCancel={() => navigate({ _tag: "Contacts", ws: workspace.slug, query: {} })}
+            saving={saving}
+          />
+        )}
       </Screen>
     );
   }
@@ -1245,6 +1368,7 @@ export function ContactDetailScreen() {
       onRefresh={() => {
         contactRemote.reload();
         documentsRemote.reload();
+        receivablesRemote.reload();
       }}
       refreshing={contactRemote.state._tag === "Loading"}
     >
@@ -1253,7 +1377,12 @@ export function ContactDetailScreen() {
           if (record === null) {
             return <EmptyState title={t("error.notFound")} />;
           }
-          if (mode === "edit") {
+          if (
+            mode === "edit" &&
+            writable &&
+            !record.archived &&
+            loadedRevisionRef.current !== null
+          ) {
             return (
               <ContactEditorView
                 isNew={false}
@@ -1265,13 +1394,7 @@ export function ContactDetailScreen() {
                 staleRevision={staleRevision}
                 duplicateIco={duplicateIco}
                 onReloadLatest={handleReloadLatest}
-                onOpenContactsSearch={() =>
-                  navigate({
-                    _tag: "Contacts",
-                    ws: workspace.slug,
-                    query: form.ico.trim() !== "" ? { text: form.ico.trim() } : {},
-                  })
-                }
+                onOpenContactsSearch={handleOpenDuplicate}
                 onLookupAres={handleLookupAres}
                 lookingUpAres={lookingUpAres}
                 aresNotice={aresNotice}
@@ -1294,6 +1417,8 @@ export function ContactDetailScreen() {
               contact={record}
               documents={documentsRemote.state}
               onRetryDocuments={documentsRemote.reload}
+              receivables={receivablesRemote.state}
+              onRetryReceivables={receivablesRemote.reload}
               onEdit={() => {
                 setForm(contactFormFromRecord(record));
                 setMode("edit");

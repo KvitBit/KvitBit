@@ -205,8 +205,20 @@ const buildQuery = (text: string, roleFilter: RoleFilter): ContactQuery => ({
   ...(roleFilter !== "all" ? { role: roleFilter } : {}),
 });
 
+export function loadContactsQuery(
+  current: PagedState<ContactRecord, ContactQuery>,
+  query: ContactQuery,
+) {
+  const step = Paged.setQuery(current, query);
+  return step.fetch === null && current.seq === 1 ? Paged.refresh(current) : step;
+}
+
 export function ContactsListScreen() {
   const { workspace } = useWorkspace();
+  return <WorkspaceContactsList key={workspace.id} workspace={workspace} />;
+}
+
+function WorkspaceContactsList({ workspace }: { readonly workspace: WorkspaceSummary }) {
   const api = useApi();
   const { t } = useI18n();
   const writable = canWriteWorkspace(workspace);
@@ -219,7 +231,6 @@ export function ContactsListScreen() {
     () => Paged.init<ContactRecord, ContactQuery>({}).paged,
   );
   const pagedRef = useRef(paged);
-  pagedRef.current = paged;
 
   const runFetch = useCallback(
     async (step: ReturnType<typeof Paged.init<ContactRecord, ContactQuery>>) => {
@@ -259,11 +270,8 @@ export function ContactsListScreen() {
     [api, workspace.id],
   );
 
-  // Initial load and reload on workspace / filter changes.
   useEffect(() => {
-    const query = buildQuery(searchText, roleFilter);
-    const step = Paged.init<ContactRecord, ContactQuery>(query);
-    void runFetch(step);
+    void runFetch(loadContactsQuery(pagedRef.current, buildQuery(searchText, roleFilter)));
   }, [runFetch, searchText, roleFilter]);
 
   const onRefresh = useCallback(() => {

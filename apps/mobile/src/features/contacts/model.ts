@@ -6,14 +6,17 @@ import type {
   ContactView,
   CurrencyCode,
   Locale,
+  Page,
   PaymentMethod,
   RegistryResult,
   ReminderPolicy,
+  WorkspaceId,
 } from "@kvitbit/domain/contract";
+import { ifMatchHeaders, inWorkspace, type KvitbitApiClient } from "@kvitbit/ui-port/api";
 import { normalizeIco, normalizeVatId, validateIco } from "@kvitbit/ui-port/format";
 import { OverrideForm } from "@kvitbit/ui-port/view-models";
-import { Result } from "effect";
-import type { DashboardDocument } from "../dashboard/model";
+import { BigDecimal, Effect, Result } from "effect";
+import type { ReceivablesReportData } from "../reports/model";
 
 export interface ContactAddressRecord {
   readonly street: string | null;
@@ -61,6 +64,13 @@ export interface RegistryDiffItem {
   readonly field: "name" | "dic" | "legalForm" | "street" | "city" | "postalCode" | "country";
   readonly before: string | null;
   readonly after: string | null;
+}
+
+export interface RegistryPreview {
+  readonly result: RegistryResult;
+  readonly items: ReadonlyArray<RegistryDiffItem>;
+  readonly contactId: ContactId;
+  readonly revision: number;
 }
 
 export type ContactFormErrorCode =
@@ -230,11 +240,11 @@ export const diffContactWithRegistry = (
     ? result.address.country.trim().toUpperCase()
     : "CZ";
   const pairs: ReadonlyArray<RegistryDiffItem> = [
-    { field: "name", before: record.name, after: emptyToNull(result.name) },
+    { field: "name", before: record.name, after: emptyToNull(result.name) ?? record.name },
     {
       field: "dic",
       before: record.dic,
-      after: result.dic === null ? null : emptyToNull(result.dic),
+      after: result.dic === null ? record.dic : (emptyToNull(result.dic) ?? record.dic),
     },
     { field: "legalForm", before: record.legalForm, after: emptyToNull(result.legalForm) },
     { field: "street", before: record.address.street, after: emptyToNull(result.address.street) },
@@ -278,7 +288,7 @@ export const validateContactForm = (
   if (!COUNTRY_RE.test(country)) errors["address.country"] = "country_invalid";
 
   const icoTrimmed = form.ico.trim();
-  if (icoTrimmed !== "" && country === "CZ") {
+  if (icoTrimmed !== "") {
     const check = validateIco(icoTrimmed);
     if (Result.isFailure(check)) {
       errors.ico = check.failure.code === "ico.checksum" ? "ico_checksum" : "ico_format";
@@ -306,7 +316,7 @@ export const validateContactForm = (
 export const buildContactInput = (form: ContactFormState): ContactInput => {
   const country = form.country.trim().toUpperCase() || "CZ";
   const icoRaw = form.ico.trim();
-  const ico = icoRaw === "" ? null : country === "CZ" ? normalizeIco(icoRaw) : icoRaw;
+  const ico = icoRaw === "" ? null : normalizeIco(icoRaw);
   const dicRaw = form.dic.trim();
   const dic = dicRaw === "" ? null : normalizeVatId(dicRaw);
 
@@ -359,19 +369,60 @@ export const contactSubtitle = (contact: ContactRecord): string => {
   return parts.join(" · ");
 };
 
-export const summarizeContactDocuments = (
-  docs: ReadonlyArray<DashboardDocument>,
-): { readonly totalCount: number; readonly unpaidCount: number; readonly overdueCount: number } => {
-  let unpaidCount = 0;
-  let overdueCount = 0;
-  for (const doc of docs) {
-    if (
-      doc.status === "issued" &&
-      (doc.settlement === "unpaid" || doc.settlement === "partially_paid")
-    ) {
-      unpaidCount += 1;
-    }
-    if (doc.overdue) overdueCount += 1;
+const registryContactPatch = (items: ReadonlyArray<RegistryDiffItem>): ContactInput => {
+  const patch: Record<string, string | null> = {};
+  const address: Record<string, string | null> = {};
+  for (const { field, after } of items) {
+    const target = field === "name" || field === "dic" || field === "legalForm" ? patch : address;
+    target[field] = after;
   }
-  return { totalCount: docs.length, unpaidCount, overdueCount };
+  return Object.keys(address).length === 0 ? patch : { ...patch, address };
+};
+
+export const applyRegistryPreview = (
+  contacts: Pick<KvitbitApiClient["contacts"], "update">,
+  workspaceId: WorkspaceId,
+  preview: RegistryPreview,
+) =>
+  contacts.update({
+    params: inWorkspace(workspaceId, { contactId: preview.contactId }),
+    headers: ifMatchHeaders(preview.revision),
+    payload: registryContactPatch(preview.items),
+  });
+
+export const findActiveContactByIco = <E>(
+  ico: string,
+  excludedId: ContactId | null,
+  loadPage: (cursor: string | null) => Effect.Effect<Page<ContactView>, E>,
+) =>
+  Effect.gen(function* () {
+    let cursor: string | null = null;
+    do {
+      const page: Page<ContactView> = yield* loadPage(cursor);
+      const match = parseContactViews(page.items).find(
+        (contact) => !contact.archived && contact.ico === ico && contact.id !== excludedId,
+      );
+      if (match !== undefined) return match;
+      cursor = page.nextCursor;
+    } while (cursor !== null);
+    return null;
+  });
+
+export const summarizeContactReceivables = (
+  report: ReceivablesReportData,
+  contactId: ContactId,
+) => {
+  let outstanding = BigDecimal.fromBigInt(0n);
+  let overdueCount = 0;
+  for (const bucket of report.buckets) {
+    for (const row of bucket.documents) {
+      if (row.contact.id !== contactId) continue;
+      outstanding = BigDecimal.sum(
+        outstanding,
+        BigDecimal.fromStringUnsafe(row.outstandingCzk.amount),
+      );
+      if (row.daysOverdue > 0) overdueCount += 1;
+    }
+  }
+  return { outstanding: { amount: outstanding, currency: report.total.currency }, overdueCount };
 };

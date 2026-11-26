@@ -6,9 +6,10 @@ import type {
   WorkspaceSlug,
   WorkspaceSummary,
 } from "@kvitbit/domain/contract";
-import { Remote as RemoteOps } from "@kvitbit/ui-port/api";
+import { Remote as RemoteOps, sessionCookie } from "@kvitbit/ui-port/api";
 import { BigDecimal } from "effect";
 import type { ReactElement } from "react";
+import { makeApiRunner } from "../../runtime/api-runtime";
 import { expoRouterStandIn } from "../../testing/expo-router-stand-in";
 import {
   buildPriceListInput,
@@ -25,12 +26,12 @@ mock.module("expo-router", () => expoRouterStandIn());
 const { allText, findAll, hostTree } = await import("../../testing/element-tree");
 type HostProps = import("../../testing/element-tree").HostProps;
 const { TestProviders } = await import("../../testing/providers");
-const { PriceListContent } = await import("./price-list-screen");
+const { PriceListContent, reloadPriceListItem } = await import("./price-list-screen");
 
 const CZK = "CZK" as CurrencyCode;
 
 const workspace: WorkspaceSummary = {
-  id: "ws_1" as WorkspaceId,
+  id: "01937c7a-0000-7000-8000-000000000001" as WorkspaceId,
   slug: "acme" as WorkspaceSlug,
   name: "Acme s.r.o.",
   role: "owner",
@@ -54,6 +55,47 @@ const sampleItem: PriceListItemRecord = {
 const within = (node: ReactElement) => <TestProviders>{node}</TestProviders>;
 
 describe("price list model", () => {
+  test("stale editor reload searches the unfiltered list for the latest active revision", async () => {
+    const changed = {
+      ...sampleItem,
+      unitPrice: "2400",
+      name: "Renamed elsewhere",
+      revision: sampleItem.revision + 1,
+    };
+    const requested: URL[] = [];
+    let archived = false;
+    const server = Bun.serve({
+      port: 0,
+      fetch: (req) => {
+        requested.push(new URL(req.url));
+        return Response.json([{ ...changed, archived }]);
+      },
+    });
+
+    const api = makeApiRunner(server.url.origin, sessionCookie, () => "en");
+    const reload = () =>
+      api.run((client) => reloadPriceListItem(client.priceList, workspace.id, sampleItem.id));
+    try {
+      const current = await reload();
+      if (current._tag !== "Ok" || current.value === undefined) {
+        throw new Error("Expected the renamed item");
+      }
+      expect(priceListFormFromItem(current.value)).toMatchObject({
+        name: changed.name,
+        editingRevision: changed.revision,
+      });
+      expect(requested[0]?.pathname).toBe(`/api/v1/workspaces/${workspace.id}/price-list-items`);
+      expect(requested[0]?.search).toBe("");
+
+      archived = true;
+      const removed = await reload();
+      expect(removed).toMatchObject({ _tag: "Ok", value: undefined });
+    } finally {
+      await api.dispose();
+      server.stop(true);
+    }
+  });
+
   test("parses PriceListItemView and normalizes Czech decimal inputs", () => {
     const parsed = parsePriceListItem({
       id: "pli_1",
