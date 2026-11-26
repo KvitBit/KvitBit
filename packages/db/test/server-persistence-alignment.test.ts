@@ -71,6 +71,10 @@ const docEurClosedCzkOrig = "0190a000-0000-7000-8000-00000000032b";
 const cnEurClosedPartial1 = "0190a000-0000-7000-8000-00000000032c";
 const cnEurClosedPartial2 = "0190a000-0000-7000-8000-00000000032d";
 const cnEurClosedLineless = "0190a000-0000-7000-8000-00000000032e";
+const docEurOffsetOrig = "0190a000-0000-7000-8000-00000000032f";
+const cnEurOffsetPartial1 = "0190a000-0000-7000-8000-000000000330";
+const cnEurOffsetPartial2 = "0190a000-0000-7000-8000-000000000331";
+const cnEurOffsetLineless = "0190a000-0000-7000-8000-000000000332";
 
 // Deliveries
 const del1 = "0190a000-0000-7000-8000-000000000401";
@@ -422,6 +426,15 @@ beforeAll(async () => {
       ('${cnEurClosedPartial2}', '${wsVat}', 'credit_note', 'issued', 'CN20260014', '${contactVat}', 'EUR', 'en', 'bank_transfer',
        '2026-01-12', '2026-01-12', '-0.04', '-0.01', '-0.05', null, false, '25.40', 1, 'cnb', null),
       ('${cnEurClosedLineless}', '${wsVat}', 'credit_note', 'issued', 'CN20260015', '${contactVat}', 'EUR', 'en', 'bank_transfer',
+       '2026-01-13', '2026-01-13', '0.00', '0.00', '0.00', null, false, '25.40', 1, 'cnb', null),
+      -- Offsetting CZK VAT residuals across standard (-0.01) and reduced (+0.01) buckets (sum = 0)
+      ('${docEurOffsetOrig}', '${wsVat}', 'invoice', 'issued', '20260015', '${contactVat}', 'EUR', 'en', 'bank_transfer',
+       '2026-01-10', '2026-01-24', '0.58', '0.08', '0.66', null, true, '25.40', 1, 'cnb', null),
+      ('${cnEurOffsetPartial1}', '${wsVat}', 'credit_note', 'issued', 'CN20260016', '${contactVat}', 'EUR', 'en', 'bank_transfer',
+       '2026-01-11', '2026-01-11', '-0.21', '-0.03', '-0.24', null, false, '25.40', 1, 'cnb', null),
+      ('${cnEurOffsetPartial2}', '${wsVat}', 'credit_note', 'issued', 'CN20260017', '${contactVat}', 'EUR', 'en', 'bank_transfer',
+       '2026-01-12', '2026-01-12', '-0.37', '-0.05', '-0.42', null, false, '25.40', 1, 'cnb', null),
+      ('${cnEurOffsetLineless}', '${wsVat}', 'credit_note', 'issued', 'CN20260018', '${contactVat}', 'EUR', 'en', 'bank_transfer',
        '2026-01-13', '2026-01-13', '0.00', '0.00', '0.00', null, false, '25.40', 1, 'cnb', null);
 
     insert into document_lines (
@@ -452,7 +465,13 @@ beforeAll(async () => {
       (gen_random_uuid(), '${wsVat}', '${cnEurPartial2}', 1, 'EUR partial 2', '-1', '0.04', 'standard', null, null),
       (gen_random_uuid(), '${wsVat}', '${docEurClosedCzkOrig}', 1, 'EUR micro', '2', '0.04', 'standard', null, null),
       (gen_random_uuid(), '${wsVat}', '${cnEurClosedPartial1}', 1, 'EUR partial 1', '-1', '0.04', 'standard', null, null),
-      (gen_random_uuid(), '${wsVat}', '${cnEurClosedPartial2}', 1, 'EUR partial 2', '-1', '0.04', 'standard', null, null);
+      (gen_random_uuid(), '${wsVat}', '${cnEurClosedPartial2}', 1, 'EUR partial 2', '-1', '0.04', 'standard', null, null),
+      (gen_random_uuid(), '${wsVat}', '${docEurOffsetOrig}', 1, 'EUR std', '2', '0.04', 'standard', null, null),
+      (gen_random_uuid(), '${wsVat}', '${docEurOffsetOrig}', 2, 'EUR red', '1', '0.50', 'reduced', null, null),
+      (gen_random_uuid(), '${wsVat}', '${cnEurOffsetPartial1}', 1, 'EUR std p1', '-1', '0.04', 'standard', null, null),
+      (gen_random_uuid(), '${wsVat}', '${cnEurOffsetPartial1}', 2, 'EUR red p1', '-1', '0.17', 'reduced', null, null),
+      (gen_random_uuid(), '${wsVat}', '${cnEurOffsetPartial2}', 1, 'EUR std p2', '-1', '0.04', 'standard', null, null),
+      (gen_random_uuid(), '${wsVat}', '${cnEurOffsetPartial2}', 2, 'EUR red p2', '-1', '0.33', 'reduced', null, null);
 
     insert into document_relations (workspace_id, from_document_id, to_document_id, relation) values
       -- 'corrects' only
@@ -485,7 +504,11 @@ beforeAll(async () => {
       -- Two EUR partial credits + line-less full correction closing the 0.01 CZK VAT residual
       ('${wsVat}', '${cnEurClosedPartial1}', '${docEurClosedCzkOrig}', 'corrects'),
       ('${wsVat}', '${cnEurClosedPartial2}', '${docEurClosedCzkOrig}', 'corrects'),
-      ('${wsVat}', '${cnEurClosedLineless}', '${docEurClosedCzkOrig}', 'corrects');
+      ('${wsVat}', '${cnEurClosedLineless}', '${docEurClosedCzkOrig}', 'corrects'),
+      -- Offsetting CZK VAT residuals across standard and reduced buckets
+      ('${wsVat}', '${cnEurOffsetPartial1}', '${docEurOffsetOrig}', 'corrects'),
+      ('${wsVat}', '${cnEurOffsetPartial2}', '${docEurOffsetOrig}', 'corrects'),
+      ('${wsVat}', '${cnEurOffsetLineless}', '${docEurOffsetOrig}', 'corrects');
 
     insert into payments (id, workspace_id, document_id, amount, currency, paid_on, method, removed_at) values
       -- Partially paid: 50 of 121
@@ -672,6 +695,9 @@ describe("server persistence alignment migration (populated upgrade)", () => {
     // Adding a line-less closing credit closes the 0.01 CZK VAT residual, marking original credited
     expect(byId.get(docEurClosedCzkOrig)?.settlement).toBe("credited");
     expect(byId.get(cnEurClosedLineless)?.settlement).toBe("unpaid");
+    // Offsetting CZK VAT residuals (-0.01 standard, +0.01 reduced, sum 0) also close original to credited
+    expect(byId.get(docEurOffsetOrig)?.settlement).toBe("credited");
+    expect(byId.get(cnEurOffsetLineless)?.settlement).toBe("unpaid");
     expect(byId.get(docPartialCreditPaid)).toEqual({
       id: docPartialCreditPaid,
       paid_amount: "60",
@@ -826,5 +852,20 @@ describe("server persistence alignment migration (populated upgrade)", () => {
     }
     expect(eurLinelessBucket.treatment).toBe("standard");
     expect(BigDecimal.format(eurLinelessBucket.vatCzk)).toBe("-0.01");
+
+    // Offsetting-bucket line-less closing credit preserves both signed buckets (-0.01, +0.01) and total 0 CZK
+    const eurOffset = decoded.get(cnEurOffsetLineless);
+    if (!eurOffset) throw new Error("missing cnEurOffsetLineless");
+    expect(eurOffset.vatCzk).not.toBeNull();
+    if (!eurOffset.vatCzk) throw new Error("missing cnEurOffsetLineless vatCzk");
+    expect(BigDecimal.format(eurOffset.vatCzk.amount)).toBe("0");
+    expect(eurOffset.buckets).toHaveLength(2);
+    const stdBucket = eurOffset.buckets.find((b) => b.treatment === "standard");
+    const redBucket = eurOffset.buckets.find((b) => b.treatment === "reduced");
+    if (!stdBucket || stdBucket.vatCzk === null || !redBucket || redBucket.vatCzk === null) {
+      throw new Error("missing offsetting buckets");
+    }
+    expect(BigDecimal.format(stdBucket.vatCzk)).toBe("-0.01");
+    expect(BigDecimal.format(redBucket.vatCzk)).toBe("0.01");
   });
 });

@@ -466,6 +466,7 @@ closing_credit_breakdowns AS (
 			sum(rb.rem_vat) AS rem_vat,
 			sum(rb.rem_gross) AS rem_gross,
 			bool_or(rb.rem_vat_czk IS NOT NULL) AS has_vat_czk,
+			bool_or(COALESCE(rb.rem_vat_czk, 0::numeric) <> 0) AS has_open_vat_czk,
 			sum(COALESCE(rb.rem_vat_czk, 0::numeric)) AS rem_vat_czk,
 			jsonb_agg(
 				jsonb_build_object(
@@ -494,8 +495,7 @@ closing_credit_breakdowns AS (
 			OR (cn."total_vat" IS NOT NULL AND cn."total_vat" <> rb_cn.vat_amt)
 			OR (cn."total_gross" IS NOT NULL AND cn."total_gross" <> rb_cn.raw_gross_amt)
 			OR (
-				COALESCE(agg.has_vat_czk, false)
-				AND COALESCE(agg.rem_vat_czk, 0::numeric) <> 0
+				COALESCE(agg.has_open_vat_czk, false)
 				AND NOT EXISTS (
 					SELECT 1
 					FROM "document_lines" AS cl_line
