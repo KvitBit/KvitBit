@@ -88,7 +88,13 @@ import {
   SendEmailModal,
   UnlockDocumentModal,
 } from "./modals";
-import { requestErrorText, usePaymentMutation, useRequestMutation } from "./request-mutation";
+import {
+  requestErrorText,
+  usePaymentMutation,
+  useRequestMutation,
+  useRequestOwner,
+} from "./request-mutation";
+import { recordImportedDraftWrite } from "./template-import";
 
 type DetailTab = "preview" | "payments" | "share" | "history";
 
@@ -108,6 +114,7 @@ export function DocumentDetailScreen() {
   const { workspace } = useWorkspace();
   const { t, locale, local, text: resolveText } = useI18n();
   const { run } = useApi();
+  const requestOwner = useRequestOwner(workspace.id);
   const runMutation = useRequestMutation(workspace.id);
   const runPayment = usePaymentMutation(workspace.id);
   const transfer = useTransfer();
@@ -224,6 +231,25 @@ export function DocumentDetailScreen() {
       return;
     }
     docRemote.set(result.value);
+    if (requestOwner !== null) {
+      try {
+        await recordImportedDraftWrite(
+          requestOwner,
+          doc.id,
+          null,
+          doc.revision,
+          result.value.revision,
+        );
+      } catch {
+        reportError(
+          local({
+            cs: "Doklad byl vystaven, ale nastavení šablony se na tomto zařízení nepodařilo uložit.",
+            en: "The document was issued, but its template settings could not be saved on this device.",
+          }),
+        );
+        return;
+      }
+    }
     overlay.toast(t("documents.issue.done", { number: result.value.number ?? "" }));
   };
 

@@ -15,6 +15,7 @@ import type { ApiRunner } from "../../runtime/api-runtime";
 import {
   acquireRequestKey,
   completeRequestKey,
+  isRequestIntentExpired,
   requestIntentFailure,
   reuseRequestKey,
 } from "../../runtime/request-intent";
@@ -164,15 +165,43 @@ export async function importTemplate(
   }
 }
 
+export async function discardExpiredTemplateImport(
+  owner: string,
+  templateId: TemplateId,
+): Promise<void> {
+  const slot = pendingSlot(owner, templateId);
+  await locked(slot, async () => {
+    const pending = await readPending(slot);
+    if (pending === null || pending.document !== null) return;
+    try {
+      await reuseRequestKey(owner, pending.operation, payloadFor(pending.seed), pending.key);
+    } catch (error) {
+      if (!isRequestIntentExpired(requestIntentFailure(error))) throw error;
+      await AsyncStorage.removeItem(slot);
+      await completeRequestKey(owner, pending.operation, pending.key).catch(() => undefined);
+    }
+  });
+}
+
 const readStored = async (key: string): Promise<typeof StoredSeed.Type | null> => {
   const text = await AsyncStorage.getItem(key);
   return text === null ? null : Schema.decodeUnknownSync(StoredSeed)(JSON.parse(text));
 };
 
+// Keep acknowledged writes recoverable across editor remounts while local storage is unavailable.
+const unsavedSnapshots = new Map<string, typeof StoredSeed.Type>();
+
+async function saveSnapshot(key: string, snapshot: typeof StoredSeed.Type) {
+  unsavedSnapshots.set(key, snapshot);
+  await AsyncStorage.setItem(key, JSON.stringify(snapshot));
+  unsavedSnapshots.delete(key);
+}
+
+export class ImportedDraftRevisionMismatch extends Error {}
+
 // DocumentView does not carry the imported values, so this cache is their only record.
 // It applies only at the revision it was recorded for: a newer revision came from a write
-// this client did not record, and its values are unknown here. The cache is kept so a
-// stale read of the document cannot erase it.
+// this client did not record. Do not let the editor replace its unknown values with defaults.
 export async function openImportedDraft(
   owner: string,
   documentId: DocumentId,
@@ -186,7 +215,14 @@ export async function openImportedDraft(
     const pending = await readPending(slot);
     if (pending?.document?.id === documentId) await AsyncStorage.removeItem(slot);
     const latest = (await readStored(key)) ?? cached;
-    return latest.revision === revision ? latest.seed : null;
+    const unsaved = unsavedSnapshots.get(key);
+    if (unsaved?.revision === revision && latest.revision < revision) {
+      await saveSnapshot(key, unsaved);
+      return unsaved.seed;
+    }
+    if (unsaved !== undefined && latest.revision >= unsaved.revision) unsavedSnapshots.delete(key);
+    if (latest.revision !== revision) throw new ImportedDraftRevisionMismatch();
+    return latest.seed;
   });
 }
 
@@ -221,8 +257,13 @@ export async function recordImportedDraftWrite(
   if (cached === null) return;
   await locked(pendingSlot(owner, cached.templateId), async () => {
     const latest = await readStored(key);
-    if (latest === null || latest.revision !== baseRevision) return;
+    if (latest === null) return;
+    if (latest.revision === revision) {
+      unsavedSnapshots.delete(key);
+      return;
+    }
+    if (latest.revision !== baseRevision) throw new ImportedDraftRevisionMismatch();
     const seed = patch === null ? latest.seed : seedAfterPatch(latest.seed, patch);
-    await AsyncStorage.setItem(key, JSON.stringify({ ...latest, seed, revision }));
+    await saveSnapshot(key, { ...latest, seed, revision });
   });
 }

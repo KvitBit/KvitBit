@@ -7,6 +7,7 @@ import {
   expect,
   mock,
   setSystemTime,
+  spyOn,
   test,
 } from "bun:test";
 import type {
@@ -1026,12 +1027,64 @@ describe("DocumentDetailScreen and DocumentEditorScreen", () => {
   test("a revision this client did not write does not reuse the imported snapshot", async () => {
     await importTemplateDraft();
     wireDoc = { ...wireDoc, revision: wireDoc.revision + 1 };
-    await openEditor();
-    await waitFor(() => noteValue() !== undefined, "editor fields loaded");
-    expect(noteValue()).toBe("");
+    await show(<DocumentEditRoute />);
+    await waitFor(() => root.container().textContent?.includes("Editing is paused") === true);
+    expect(noteValue()).toBeUndefined();
+    expect(root.container().querySelector('[data-testid="editor-save-button"]')).toBeNull();
+    expect(calls.filter((call) => call.method === "PATCH")).toHaveLength(0);
   });
 
-  test("a stored template import past the replay window asks for reconciliation", async () => {
+  test("an acknowledged template draft edit recovers after its snapshot write fails", async () => {
+    await importTemplateDraft();
+    await openEditor();
+    await change("editor-note", "Recover this edited note");
+    replaced.length = 0;
+    const setItem = AsyncStorage.setItem.bind(AsyncStorage);
+    const storage = spyOn(AsyncStorage, "setItem").mockImplementation(async (key, value) => {
+      if (key.startsWith("kvitbit.template-draft.v1.")) throw new Error("Test storage is full");
+      await setItem(key, value);
+    });
+    try {
+      await click("editor-save-button");
+      await waitFor(
+        () => root.container().textContent?.includes("The document was saved, but") === true,
+        "local checkpoint failure shown",
+      );
+      expect(wireDoc.revision).toBe(4);
+      expect(replaced).toHaveLength(0);
+      expect(root.container().querySelector('[data-testid="editor-save-button"]')).toBeNull();
+      await click("editor-template-checkpoint-retry");
+      expect(calls.filter((call) => call.method === "PATCH")).toHaveLength(1);
+    } finally {
+      storage.mockRestore();
+    }
+
+    await openEditor();
+    expect(noteValue()).toBe("Recover this edited note");
+    const second = await saveEdit("Update just the description");
+    expect(second?.ifMatch).toBe('"4"');
+    expect(second?.body).toMatchObject({
+      note: "Recover this edited note",
+      language: "en",
+      series: CONTACT_SERIES,
+      pricesIncludeVat: true,
+    });
+  });
+
+  test("issuing an imported draft from detail carries its known template settings forward", async () => {
+    await importTemplateDraft();
+    await openEditor();
+    await show(<DocumentDetailScreen />);
+    await waitFor(
+      () => root.container().querySelector('[data-testid="detail-action-issue"]') !== null,
+    );
+    await click("detail-action-issue");
+    await waitFor(() => overlay.toasts.some((message) => message.includes("2026-0099")));
+    await openEditor();
+    expect(noteValue()).toBe("Newer template note");
+  });
+
+  test("an expired template import starts fresh only after explicit reconciliation confirmation", async () => {
     const path = `/api/v1/workspaces/${WS_ID}/templates/${TEMPLATE_ID}/documents`;
     dropNext = path;
     wireDoc = makeWireDoc({ status: "draft", kind: "invoice", number: null, settlement: "unpaid" });
@@ -1048,10 +1101,33 @@ describe("DocumentDetailScreen and DocumentEditorScreen", () => {
         () => root.container().textContent?.includes("may already have been saved") === true,
         "reconciliation shown",
       );
+      expect(root.container().querySelector('[data-testid="template-import-retry"]')).toBeNull();
+      expect(calls.filter((call) => call.path === path)).toHaveLength(1);
+      expect(replaced).toHaveLength(0);
+
+      await click("template-import-review-documents");
+      expect(replaced).toHaveLength(1);
+      replaced.length = 0;
+      await root.render(null);
+      await show(<DocumentNewRoute />);
+      await waitFor(
+        () => root.container().querySelector('[data-testid="template-import-start-new"]') !== null,
+        "reconciliation remains available after viewing documents",
+      );
+
+      overlay.answer = false;
+      await click("template-import-start-new");
+      expect(calls.filter((call) => call.path === path)).toHaveLength(1);
+
+      overlay.answer = true;
+      await click("template-import-start-new");
+      await waitFor(() => replaced.length === 1, "new import opens its draft");
+      const attempts = calls.filter((call) => call.path === path);
+      expect(attempts).toHaveLength(2);
+      expect(attempts[1]?.key).not.toBe(attempts[0]?.key);
+      expect(attempts[1]?.body).toMatchObject({ patch: { note: "Newer template note" } });
     } finally {
       setSystemTime();
     }
-    expect(calls.filter((call) => call.path === path)).toHaveLength(1);
-    expect(replaced).toHaveLength(0);
   });
 });

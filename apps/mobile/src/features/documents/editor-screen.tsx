@@ -33,6 +33,7 @@ import { Modal, ScrollView, StyleSheet, View } from "react-native";
 import { useI18n } from "../../i18n/i18n-provider";
 import { navigate } from "../../navigation/routes";
 import { useApi, useRemote } from "../../runtime/api-runtime";
+import { isRequestIntentExpired, requestIntentFailure } from "../../runtime/request-intent";
 import { useTheme } from "../../theme/theme-provider";
 import {
   Banner,
@@ -89,6 +90,8 @@ import {
 } from "./editor-model";
 import { requestErrorText, useRequestMutation, useRequestOwner } from "./request-mutation";
 import {
+  discardExpiredTemplateImport,
+  ImportedDraftRevisionMismatch,
   importTemplate,
   openImportedDraft,
   recordImportedDraftWrite,
@@ -99,10 +102,42 @@ export function DocumentFromTemplateScreen({ templateId }: { readonly templateId
   const { workspace } = useWorkspace();
   const { t, local, text } = useI18n();
   const { run } = useApi();
+  const overlay = useOverlay();
   const requestOwner = useRequestOwner(workspace.id);
   const writable = canWriteWorkspace(workspace);
   const [failure, setFailure] = useState<UiError | null>(null);
   const [attempt, setAttempt] = useState(0);
+  const [restarting, setRestarting] = useState(false);
+  const expired = failure !== null && isRequestIntentExpired(failure);
+
+  const retry = () => {
+    setFailure(null);
+    setAttempt((n) => n + 1);
+  };
+
+  const startNewImport = async () => {
+    if (requestOwner === null || restarting) return;
+    setRestarting(true);
+    const label = local({ cs: "Zahájit nový import", en: "Start new import" });
+    try {
+      const confirmed = await overlay.confirm({
+        title: label,
+        body: local({
+          cs: "Zkontrolujte, zda už předchozí import nevytvořil koncept. Pokračováním vytvoříte nový koncept.",
+          en: "Check whether the earlier import already created a draft. Continuing will start a new draft.",
+        }),
+        confirmLabel: label,
+        cancelLabel: t("common.action.cancel"),
+      });
+      if (!confirmed) return;
+      await discardExpiredTemplateImport(requestOwner, templateId);
+      retry();
+    } catch (error) {
+      setFailure(requestIntentFailure(error));
+    } finally {
+      setRestarting(false);
+    }
+  };
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: the retry button starts a new attempt
   useEffect(() => {
@@ -133,14 +168,31 @@ export function DocumentFromTemplateScreen({ templateId }: { readonly templateId
       ) : (
         <>
           <Banner text={requestErrorText(failure, { local, text })} />
-          <Button
-            label={t("common.action.retry")}
-            testID="template-import-retry"
-            onPress={() => {
-              setFailure(null);
-              setAttempt((n) => n + 1);
-            }}
-          />
+          {expired ? (
+            <>
+              <Button
+                kind="outlined"
+                label={local({ cs: "Zkontrolovat doklady", en: "Review documents" })}
+                testID="template-import-review-documents"
+                disabled={restarting}
+                onPress={() =>
+                  navigate({ _tag: "Documents", ws: workspace.slug, query: {} }, { replace: true })
+                }
+              />
+              <Button
+                label={local({ cs: "Zahájit nový import", en: "Start new import" })}
+                testID="template-import-start-new"
+                busy={restarting}
+                onPress={() => void startNewImport()}
+              />
+            </>
+          ) : (
+            <Button
+              label={t("common.action.retry")}
+              testID="template-import-retry"
+              onPress={retry}
+            />
+          )}
         </>
       )}
     </Screen>
@@ -334,7 +386,9 @@ export function DocumentEditorScreen(props: DocumentEditorProps) {
   );
 
   const [draft, setDraft] = useState<EditorDraft | null>(null);
-  const [templateLoadFailed, setTemplateLoadFailed] = useState(false);
+  const [templateLoadFailure, setTemplateLoadFailure] = useState<"storage" | "revision" | null>(
+    null,
+  );
   const [templateLoadAttempt, setTemplateLoadAttempt] = useState(0);
   const importDocId = originalDoc?.id ?? null;
   const importRevision = originalDoc?.revision ?? null;
@@ -346,10 +400,17 @@ export function DocumentEditorScreen(props: DocumentEditorProps) {
     let live = true;
     void openImportedDraft(requestOwner, importDocId, importRevision).then(
       (seed) => {
-        if (live) setCachedTemplate({ revision: importRevision, seed });
+        if (live) {
+          setTemplateLoadFailure(null);
+          setCachedTemplate({ revision: importRevision, seed });
+        }
       },
-      () => {
-        if (live) setTemplateLoadFailed(true);
+      (error: unknown) => {
+        if (live) {
+          setTemplateLoadFailure(
+            error instanceof ImportedDraftRevisionMismatch ? "revision" : "storage",
+          );
+        }
       },
     );
     return () => {
@@ -375,6 +436,9 @@ export function DocumentEditorScreen(props: DocumentEditorProps) {
   const [pricePickerLineKey, setPricePickerLineKey] = useState<string | null>(null);
   const [priceMismatchWarning, setPriceMismatchWarning] = useState<string | null>(null);
   const [busyMode, setBusyMode] = useState<"save" | "issue" | null>(null);
+  const [pendingCheckpoint, setPendingCheckpoint] = useState<Parameters<
+    typeof recordImportedDraftWrite
+  > | null>(null);
   const [bannerError, setBannerError] = useState<string | null>(null);
   const [serverIssues, setServerIssues] = useState<ReturnType<typeof describeError>["issues"]>([]);
   const [validationShown, setValidationShown] = useState(false);
@@ -550,7 +614,8 @@ export function DocumentEditorScreen(props: DocumentEditorProps) {
   }, [workspaceDefaults.taxRegime]);
 
   const submit = async (intent: "save" | "issue") => {
-    if (draft === null || validation === null || submitting.current) return;
+    if (draft === null || validation === null || submitting.current || pendingCheckpoint !== null)
+      return;
     setValidationShown(true);
     setBannerError(null);
     setServerIssues([]);
@@ -566,19 +631,43 @@ export function DocumentEditorScreen(props: DocumentEditorProps) {
     }
   };
 
-  // The write already succeeded. A failed cache update must not report it as failed.
-  const recordWrite = (
+  const recordWrite = async (
     documentId: DocumentId,
     patch: DocumentPatch | null,
     baseRevision: number,
     revision: number,
-  ) =>
-    requestOwner === null
-      ? Promise.resolve()
-      : recordImportedDraftWrite(requestOwner, documentId, patch, baseRevision, revision).then(
-          () => undefined,
-          () => undefined,
-        );
+  ): Promise<boolean> => {
+    if (requestOwner === null || cachedTemplate?.seed == null) return true;
+    const checkpoint: Parameters<typeof recordImportedDraftWrite> = [
+      requestOwner,
+      documentId,
+      patch,
+      baseRevision,
+      revision,
+    ];
+    try {
+      await recordImportedDraftWrite(...checkpoint);
+      return true;
+    } catch {
+      setPendingCheckpoint(checkpoint);
+      return false;
+    }
+  };
+
+  const retryCheckpoint = async () => {
+    if (pendingCheckpoint === null || submitting.current) return;
+    submitting.current = true;
+    setBusyMode("save");
+    try {
+      await recordImportedDraftWrite(...pendingCheckpoint);
+      setPendingCheckpoint(null);
+    } catch {
+      // Keep the acknowledged revision and retry only its local checkpoint.
+    } finally {
+      submitting.current = false;
+      setBusyMode(null);
+    }
+  };
 
   const saveOrIssue = async (draft: EditorDraft, intent: "save" | "issue") => {
     if (props.mode === "new") {
@@ -636,9 +725,11 @@ export function DocumentEditorScreen(props: DocumentEditorProps) {
         return;
       }
       finalDoc = editRes.value;
-      await recordWrite(originalDoc.id, patch, originalDoc.revision, finalDoc.revision);
       sourceDocRemote.set(finalDoc);
       savedDraft.current = draft;
+      if (!(await recordWrite(originalDoc.id, patch, originalDoc.revision, finalDoc.revision))) {
+        return;
+      }
     }
 
     if (intent === "issue" && finalDoc.status === "draft") {
@@ -657,7 +748,8 @@ export function DocumentEditorScreen(props: DocumentEditorProps) {
         return;
       }
       finalDoc = issueRes.value;
-      await recordWrite(id, null, revision, finalDoc.revision);
+      sourceDocRemote.set(finalDoc);
+      if (!(await recordWrite(id, null, revision, finalDoc.revision))) return;
     }
 
     overlay.toast(
@@ -700,7 +792,7 @@ export function DocumentEditorScreen(props: DocumentEditorProps) {
           : navigate({ _tag: "Documents", ws: workspace.slug, query: {} }, { replace: true })
       }
       footer={
-        draft !== null && !isLocked ? (
+        draft !== null && !isLocked && pendingCheckpoint === null ? (
           <>
             <Button
               kind="outlined"
@@ -734,13 +826,36 @@ export function DocumentEditorScreen(props: DocumentEditorProps) {
         <RemoteView state={templateContactRemote.state} onRetry={templateContactRemote.reload}>
           {() => null}
         </RemoteView>
-      ) : draft === null && templateLoadFailed ? (
+      ) : pendingCheckpoint !== null ? (
+        <>
+          <Banner
+            text={local({
+              cs: "Doklad se uložil, ale nastavení šablony se na tomto zařízení nepodařilo uložit. Než budete pokračovat, zkuste obnovu znovu.",
+              en: "The document was saved, but its template settings could not be saved on this device. Retry recovery to continue.",
+            })}
+          />
+          <Button
+            label={t("common.action.retry")}
+            testID="editor-template-checkpoint-retry"
+            busy={busyMode !== null}
+            onPress={() => void retryCheckpoint()}
+          />
+        </>
+      ) : draft === null && templateLoadFailure !== null ? (
         <Banner
-          text={t("error.unknown")}
+          text={
+            templateLoadFailure === "revision"
+              ? local({
+                  cs: "Uložené nastavení šablony neodpovídá této verzi dokladu. Úpravy jsou pozastavené, aby se nezměnily údaje na dokladu.",
+                  en: "The saved template settings do not match this document revision. Editing is paused to protect the document’s terms.",
+                })
+              : t("error.unknown")
+          }
           action={{
             label: t("common.action.retry"),
             onPress: () => {
-              setTemplateLoadFailed(false);
+              setTemplateLoadFailure(null);
+              sourceDocRemote.reload();
               setTemplateLoadAttempt((n) => n + 1);
             },
           }}
