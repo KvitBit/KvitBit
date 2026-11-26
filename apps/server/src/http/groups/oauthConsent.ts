@@ -6,6 +6,7 @@
  */
 
 import { generateId } from "@kvitbit/adapters/auth";
+import { transactionWithRetry } from "@kvitbit/adapters/sql";
 import {
   ALL_SCOPES,
   Api,
@@ -289,44 +290,50 @@ export const OauthConsentGroupLive = HttpApiBuilder.group(Api, "oauthConsent", (
           );
           yield* loadClient(parsed, params.consentId);
 
-          return yield* sql
-            .withTransaction(
-              Effect.gen(function* () {
-                const claimed = yield* sql`
+          return yield* transactionWithRetry(
+            Effect.gen(function* () {
+              const claimed = yield* sql`
               insert into auth.verification (id, identifier, value, expires_at)
               values (${decision.id}, ${decision.id}, '', ${decision.expiresAt})
               on conflict (id) do nothing
               returning id`;
-                if (claimed.length === 0) return yield* notFound;
+              if (claimed.length === 0) return yield* notFound;
 
-                const accept = payload._tag === "Approve";
-                let providerDecision: Parameters<typeof processWorkspaceConsent>[0] = {
-                  accept: false,
-                };
-                if (accept) {
-                  const member = yield* workspaces.enter(payload.workspace, {
-                    scopes: "all",
-                    channel: principal.channel,
-                  });
-                  const expanded = expandAccess(payload.grant);
-                  const requestedSet = new Set(parsed.requestedScopes);
-                  const offerable = grantableScopesForRole(member.role).filter((scope) =>
-                    requestedSet.has(scope),
-                  );
-                  if (
-                    expanded.scopes.length === 0 ||
-                    expanded.scopes.some((scope) => !offerable.includes(scope))
-                  ) {
-                    return yield* new Forbidden({ action: "grant.create" });
-                  }
+              const accept = payload._tag === "Approve";
+              let providerDecision: Parameters<typeof processWorkspaceConsent>[0] = {
+                accept: false,
+              };
+              if (accept) {
+                // Membership removal and role changes take this same workspace lock.
+                const openWorkspaces = yield* sql`
+                    select id from workspaces
+                    where id = ${payload.workspace} and closed_at is null
+                    for update
+                  `;
+                if (openWorkspaces.length === 0) return yield* notFound;
+                const member = yield* workspaces.enter(payload.workspace, {
+                  scopes: "all",
+                  channel: principal.channel,
+                });
+                const expanded = expandAccess(payload.grant);
+                const requestedSet = new Set(parsed.requestedScopes);
+                const offerable = grantableScopesForRole(member.role).filter((scope) =>
+                  requestedSet.has(scope),
+                );
+                if (
+                  expanded.scopes.length === 0 ||
+                  expanded.scopes.some((scope) => !offerable.includes(scope))
+                ) {
+                  return yield* new Forbidden({ action: "grant.create" });
+                }
 
-                  const wireScopes = wireScopesForGrant(
-                    expanded.access,
-                    expanded.scopes,
-                    parsed.offlineAccess,
-                  );
-                  const referenceId = generateId();
-                  const grants = yield* sql<{ id: string }>`
+                const wireScopes = wireScopesForGrant(
+                  expanded.access,
+                  expanded.scopes,
+                  parsed.offlineAccess,
+                );
+                const referenceId = generateId();
+                const grants = yield* sql<{ id: string }>`
                 insert into auth.oauth_consent as existing
                   (id, reference_id, client_id, user_id, workspace_id, access, granted_scopes, scopes, created_at, updated_at)
                 select ${referenceId}, ${referenceId}, ${parsed.clientId}, ${principal.userId},
@@ -340,50 +347,51 @@ export const OauthConsentGroupLive = HttpApiBuilder.group(Api, "oauthConsent", (
                   scopes = excluded.scopes,
                   updated_at = excluded.updated_at
                 returning id`;
-                  const grant = grants[0];
-                  if (grant === undefined) return yield* notFound;
-                  providerDecision = {
-                    accept: true,
-                    grantId: grant.id,
-                    userId: principal.userId,
-                    sessionId,
-                    scopes: wireScopes,
-                  };
-                }
+                const grant = grants[0];
+                if (grant === undefined) return yield* notFound;
+                providerDecision = {
+                  accept: true,
+                  grantId: grant.id,
+                  userId: principal.userId,
+                  sessionId,
+                  scopes: wireScopes,
+                };
+              }
 
-                const response = yield* processWorkspaceConsent(providerDecision, () =>
-                  auth.handler(
-                    new Request(`${config.appOrigin}/api/auth/oauth2/consent`, {
-                      method: "POST",
-                      headers: forwardHeaders(request),
-                      body: JSON.stringify({ accept, oauth_query: parsed.oauthQuery }),
-                    }),
-                  ),
-                ).pipe(Effect.mapError(() => new Unavailable({ dependency: "database" })));
-                if (response.status >= 500)
-                  return yield* new Unavailable({ dependency: "database" });
-                if (!response.ok) return yield* notFound;
+              const response = yield* processWorkspaceConsent(providerDecision, () =>
+                auth.handler(
+                  new Request(`${config.appOrigin}/api/auth/oauth2/consent`, {
+                    method: "POST",
+                    headers: forwardHeaders(request),
+                    body: JSON.stringify({ accept, oauth_query: parsed.oauthQuery }),
+                  }),
+                ),
+              ).pipe(Effect.mapError(() => new Unavailable({ dependency: "database" })));
+              if (response.status >= 500) return yield* new Unavailable({ dependency: "database" });
+              if (!response.ok) return yield* notFound;
 
-                const callback = yield* Effect.tryPromise({
-                  try: async () => {
-                    const body = (await response.json()) as { url: string };
-                    return new URL(body.url);
-                  },
-                  catch: () => notFound,
+              const callback = yield* Effect.tryPromise({
+                try: async () => {
+                  const body = (await response.json()) as { url: string };
+                  return new URL(body.url);
+                },
+                catch: () => notFound,
+              });
+              if (
+                accept
+                  ? !callback.searchParams.has("code")
+                  : callback.searchParams.get("error") !== "access_denied"
+              ) {
+                return yield* new Invalid({
+                  issues: [{ path: ["consentId"], code: "request.malformed" }],
                 });
-                if (
-                  accept
-                    ? !callback.searchParams.has("code")
-                    : callback.searchParams.get("error") !== "access_denied"
-                ) {
-                  return yield* new Invalid({
-                    issues: [{ path: ["consentId"], code: "request.malformed" }],
-                  });
-                }
-                return { redirectTo: callback.href };
-              }),
-            )
-            .pipe(Effect.catchTag("SqlError", () => new Unavailable({ dependency: "database" })));
+              }
+              return { redirectTo: callback.href };
+            }),
+          ).pipe(
+            Effect.provideService(SqlClient.SqlClient, sql),
+            Effect.catchTag("SqlError", () => new Unavailable({ dependency: "database" })),
+          );
         }),
       );
   }),

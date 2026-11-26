@@ -51,6 +51,34 @@ describe("me preferences group", () => {
     });
   });
 
+  test("preferences and the theme endpoint produce the same Material scheme for a seed", async () => {
+    const source = { _tag: "Seed", seed: "#336699" };
+    const resolved = await h.fetch("/api/v1/themes/resolve", {
+      ...json({ source }),
+      method: "POST",
+      headers: { "content-type": "application/json", ...as.mobile(alice) },
+    });
+    expect(resolved.status).toBe(200);
+    const expected = await resolved.json();
+    const saved = await patchPrefs(
+      alice,
+      {
+        theme: {
+          mode: "system",
+          style: "elegant",
+          contrast: "standard",
+          dynamicColor: false,
+          source,
+        },
+      },
+      { "if-match": '"1"' },
+    );
+    expect(saved.status).toBe(200);
+    expect(await saved.json()).toMatchObject({ resolvedTheme: expected });
+    const read = await h.fetch(PATH, { headers: as.mobile(alice) });
+    expect(await read.json()).toMatchObject({ resolvedTheme: expected });
+  });
+
   test("PATCH requires If-Match (428) and enforces optimistic revision (412 with ETag)", async () => {
     // Missing If-Match -> 428 PreconditionRequired
     const missing = await patchPrefs(alice, { locale: "en" });
@@ -210,6 +238,7 @@ describe("me preferences group", () => {
       "theme.json_invalid",
     );
 
+    const roles = Object.fromEntries(M3_COLOR_ROLES.map((role) => [role, "#EEEEEE"]));
     const lowContrastMtb = await patchPrefs(
       alice,
       {
@@ -222,9 +251,10 @@ describe("me preferences group", () => {
             _tag: "MaterialThemeBuilder",
             json: {
               seed: "#1D4ED8",
+              coreColors: { primary: "#1D4ED8" },
               schemes: {
-                light: { primary: "#FFFFFF", onPrimary: "#EEEEEE" },
-                dark: { primary: "#93C5FD", onPrimary: "#111111" },
+                light: { ...roles, primary: "#FFFFFF" },
+                dark: { ...roles, primary: "#93C5FD", onPrimary: "#111111" },
               },
             },
           },

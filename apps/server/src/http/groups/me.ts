@@ -19,7 +19,7 @@ import { Clock, Effect, Option, Schema } from "effect";
 import { HttpApiBuilder } from "effect/http-api";
 import { SqlClient } from "effect/sql";
 import { withRevision } from "../conventions";
-import { resolveThemeSource } from "./credentials/theme";
+import { resolveTheme } from "./workspace/themeResolver";
 
 interface UserPreferencesRow {
   readonly locale: Locale | null;
@@ -68,10 +68,12 @@ const rowToStoredPreferences = (
 const withResolvedTheme = (
   prefs: Omit<AccountPreferences, "resolvedTheme">,
 ): Effect.Effect<AccountPreferences, Invalid> =>
-  Effect.map(resolveThemeSource(prefs.theme.source), (resolvedTheme) => ({
-    ...prefs,
-    resolvedTheme,
-  }));
+  prefs.theme.source === null
+    ? Effect.succeed({ ...prefs, resolvedTheme: null })
+    : Effect.map(resolveTheme(prefs.theme.source), (resolvedTheme) => ({
+        ...prefs,
+        resolvedTheme,
+      }));
 
 export const MeGroupLive = HttpApiBuilder.group(Api, "me", (handlers) =>
   Effect.gen(function* () {
@@ -109,7 +111,9 @@ export const MeGroupLive = HttpApiBuilder.group(Api, "me", (handlers) =>
             const incomingResolved =
               payload.theme === undefined
                 ? undefined
-                : yield* resolveThemeSource(payload.theme.source);
+                : payload.theme.source === null
+                  ? null
+                  : yield* resolveTheme(payload.theme.source);
 
             const saved = yield* sql
               .withTransaction(

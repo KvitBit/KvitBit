@@ -290,6 +290,19 @@ test.each(["DCR", "CIMD"])(
       const secondTokens = await tokens(await exchange(await consent(second.workspaceId)));
       await expectWorkspace(secondTokens.access_token, "OAuth Beta");
 
+      const revokedFamily = await harness.fetch("/api/auth/oauth2/revoke", {
+        method: "POST",
+        body: new URLSearchParams({
+          client_id: clientId,
+          token_type_hint: "refresh_token",
+          token: firstTokens.refresh_token,
+        }),
+      });
+      // Better Auth reports that the presented token was already rotated and revokes its family.
+      expect(revokedFamily.status).toBe(400);
+      expect((await readWorkspace(rotated.access_token)).status).toBe(401);
+      await expectWorkspace(secondTokens.access_token, "OAuth Beta");
+
       const pendingCode = await consent(first.workspaceId);
       const pendingUntilReconnected = await consent(first.workspaceId);
       const appsPath = `/api/v1/workspaces/${first.workspaceId}/connected-apps`;

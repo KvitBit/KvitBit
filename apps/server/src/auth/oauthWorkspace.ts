@@ -14,7 +14,7 @@ import {
 import { betterAuth } from "better-auth";
 import { APIError, createAuthMiddleware } from "better-auth/api";
 import { Effect, Redacted, Schema } from "effect";
-import type { SqlClient } from "effect/sql";
+import { SqlClient } from "effect/sql";
 import { runDrizzleEffect, withDrizzleSqlContext } from "./drizzleBridge";
 
 type ConsentDecision =
@@ -249,14 +249,14 @@ export const makeWorkspaceAuth = (sql: SqlClient.SqlClient) => (config: AuthConf
           return row;
         },
         deleteMany: (input) => {
-          const grantId = tokenContext.getStore()?.grantId;
           if (
-            grantId !== undefined &&
             (input.model === "oauthAccessToken" || input.model === "oauthRefreshToken") &&
             input.where.some(({ field }) => field === "clientId") &&
             input.where.some(({ field }) => field === "userId")
           ) {
             // The provider's refresh reuse cleanup otherwise targets every workspace for this client and user.
+            const grantId = tokenContext.getStore()?.grantId;
+            if (grantId === undefined) return Promise.resolve(0);
             return adapter.deleteMany({
               ...input,
               where: [...input.where, { field: "referenceId", value: grantId }],
@@ -295,7 +295,11 @@ export const makeWorkspaceAuth = (sql: SqlClient.SqlClient) => (config: AuthConf
   return {
     ...auth,
     handler: async (request: Request) => {
-      if (request.method !== "POST" || new URL(request.url).pathname !== "/api/auth/oauth2/token") {
+      const path = new URL(request.url).pathname;
+      if (
+        request.method !== "POST" ||
+        (path !== "/api/auth/oauth2/token" && path !== "/api/auth/oauth2/revoke")
+      ) {
         return exposeConsentId(await auth.handler(request), consentPage);
       }
       return runDrizzleEffect(
@@ -309,6 +313,10 @@ export const makeWorkspaceAuth = (sql: SqlClient.SqlClient) => (config: AuthConf
             ),
           )
           .pipe(
+            Effect.provideService(
+              SqlClient.BeginTransaction,
+              "BEGIN ISOLATION LEVEL READ COMMITTED",
+            ),
             Effect.catch((error) =>
               Effect.succeed(
                 error instanceof Response

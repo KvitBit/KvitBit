@@ -3,6 +3,7 @@
  * Workspace `kvb_` API keys in `auth.apikey`.
  */
 import { generateApiKey } from "@kvitbit/adapters/auth";
+import { transactionWithRetry } from "@kvitbit/adapters/sql";
 import {
   type AccessMode,
   API_PREFIX,
@@ -10,9 +11,17 @@ import {
   ApiKeyId,
   type ApiKeyView,
   apiKeyDisplayPrefix,
+  CurrentPrincipal,
   expandAccess,
 } from "@kvitbit/api-contract";
-import { Invalid, NotFound, UserId, Workspaces } from "@kvitbit/domain/contract";
+import {
+  Caller,
+  CurrentCaller,
+  Invalid,
+  NotFound,
+  UserId,
+  Workspaces,
+} from "@kvitbit/domain/contract";
 import { Clock, Effect } from "effect";
 import { HttpApiBuilder } from "effect/http-api";
 import { SqlClient } from "effect/sql";
@@ -93,6 +102,7 @@ export const ApiKeysGroupLive = HttpApiBuilder.group(Api, "apiKeys", (handlers) 
       .handle("createApiKey", ({ params, payload }) =>
         Effect.gen(function* () {
           const caller = yield* authorizeMember("apiKey.manage");
+          const principal = yield* CurrentPrincipal;
           const trimmedName = payload.name.trim();
           if (trimmedName.length === 0) {
             return yield* new Invalid({
@@ -111,13 +121,32 @@ export const ApiKeysGroupLive = HttpApiBuilder.group(Api, "apiKeys", (handlers) 
           }
 
           const granted = expandAccess(payload);
-          yield* enforceRoleScopeCap(caller.role, granted.scopes, "apiKey.manage");
-
           const issued = generateApiKey();
 
           const creatorName = yield* dbUnavailable(
-            sql.withTransaction(
+            transactionWithRetry(
               Effect.gen(function* () {
+                yield* sql`select id from workspaces where id = ${caller.workspaceId} for update`;
+                const current = yield* workspaces
+                  .enter(caller.workspaceId, {
+                    scopes: caller.scopes,
+                    channel: caller.channel,
+                  })
+                  .pipe(
+                    Effect.provideService(
+                      CurrentCaller,
+                      Caller.account({
+                        userId: principal.userId,
+                        email: principal.email,
+                        locale: principal.locale,
+                        channel: principal.channel,
+                      }),
+                    ),
+                  );
+                yield* authorizeMember("apiKey.manage").pipe(
+                  Effect.provideService(CurrentCaller, current),
+                );
+                yield* enforceRoleScopeCap(current.role, granted.scopes, "apiKey.manage");
                 const inserted = yield* sql<{ creator_name: string | null }>`
                   with ins as (
                     insert into auth.apikey (
@@ -169,7 +198,7 @@ export const ApiKeysGroupLive = HttpApiBuilder.group(Api, "apiKeys", (handlers) 
                 });
                 return inserted[0]?.creator_name ?? "";
               }),
-            ),
+            ).pipe(Effect.provideService(SqlClient.SqlClient, sql)),
           );
 
           yield* setLocation(

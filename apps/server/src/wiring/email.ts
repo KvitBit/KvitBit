@@ -1,12 +1,14 @@
 /**
- * Live `EmailSender` port wiring:
+ * Live `EmailSender` port wiring in production:
  * - Both `RESEND_API_KEY` and `KVITBIT_SMTP_URL`: Resend primary with SMTP fallback.
  * - Only `RESEND_API_KEY`: Resend.
  * - Only `KVITBIT_SMTP_URL`: SMTP (nodemailer via `@kvitbit/adapters/email`).
- * - Neither: Console logger in development, or a delivery rejection in production.
+ * - Neither: Delivery rejection.
+ * Non-production captures email locally. Development with no provider logs it to the console.
  */
 import {
   layerSmtp,
+  makeCaptureEmailSender,
   makeConsoleEmailSender,
   makeFallbackEmailSender,
   makeResendEmailSender,
@@ -65,6 +67,12 @@ export const makeEmailSenderLayer = (
       const hasResend = Option.isSome(config.resendApiKey);
       const hasSmtp = Option.isSome(config.smtpUrl);
 
+      if (nodeEnv !== "production") {
+        return nodeEnv === "development" && !hasResend && !hasSmtp
+          ? makeConsoleEmailSender()
+          : yield* makeCaptureEmailSender;
+      }
+
       if (hasResend && hasSmtp) {
         const resend = yield* makeResendEmailSender({
           apiKey: config.resendApiKey.value,
@@ -85,12 +93,9 @@ export const makeEmailSenderLayer = (
         return yield* acquireSmtpSender(Redacted.value(config.smtpUrl.value), config.from);
       }
 
-      if (nodeEnv === "production") {
-        return EmailSender.of({
-          send: () => Effect.fail(new EmailRejected({ cause: "Email delivery is not configured" })),
-        });
-      }
-      return makeConsoleEmailSender();
+      return EmailSender.of({
+        send: () => Effect.fail(new EmailRejected({ cause: "Email delivery is not configured" })),
+      });
     }),
   ).pipe(Layer.provide(FetchHttpClient.layer));
 

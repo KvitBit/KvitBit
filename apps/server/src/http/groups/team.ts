@@ -3,27 +3,35 @@ import { API_PREFIX, Api, CurrentPrincipal } from "@kvitbit/api-contract";
 import { Workspaces } from "@kvitbit/domain/contract";
 import { Effect } from "effect";
 import { HttpApiBuilder } from "effect/http-api";
+import { SqlClient } from "effect/sql";
 import { requestOptions, setLocation } from "../conventions";
 import { requireFreshSession } from "./workspace/freshSession";
-import { revokeMemberCredentials } from "./workspace/revokeCredentials";
+import { changeMembershipAndRevokeCredentials } from "./workspace/revokeCredentials";
 
 export const TeamGroupLive = HttpApiBuilder.group(Api, "team", (handlers) =>
   Effect.gen(function* () {
     const workspaces = yield* Workspaces;
+    const sql = yield* SqlClient.SqlClient;
     return handlers
       .handle("listMembers", () => workspaces.members)
       .handle("setRole", ({ params, payload }) => workspaces.setRole(params.userId, payload.role))
       .handle("removeMember", ({ params }) =>
-        Effect.andThen(
+        changeMembershipAndRevokeCredentials(
+          sql,
           workspaces.setRole(params.userId, null),
-          revokeMemberCredentials(params.workspaceId, params.userId),
+          params.workspaceId,
+          params.userId,
         ),
       )
       .handle("leave", ({ params }) =>
         Effect.gen(function* () {
           const principal = yield* CurrentPrincipal;
-          yield* workspaces.leave;
-          yield* revokeMemberCredentials(params.workspaceId, principal.userId);
+          yield* changeMembershipAndRevokeCredentials(
+            sql,
+            workspaces.leave,
+            params.workspaceId,
+            principal.userId,
+          );
         }),
       )
       .handle("listInvitations", () => workspaces.invitations)

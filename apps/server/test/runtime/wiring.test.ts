@@ -29,6 +29,7 @@ import {
   deriveInvitationTokenKey,
   deriveShareLinkKey,
   documentViewToRenderModel,
+  type EmailWiringConfig,
   makeBlobStorageLayer,
   makeEmailSenderLayer,
   makeInvitationTokensLayer,
@@ -198,7 +199,7 @@ describe("wiring: email & SMTP URL parsing", () => {
     expect(tls.transport.auth).toBeUndefined();
   });
 
-  test("uses the console only outside production when no email provider is configured", async () => {
+  test("captures preview mail even with a production provider configured", async () => {
     const send = Effect.flatMap(EmailSender, (sender) =>
       sender.send(
         {
@@ -213,14 +214,14 @@ describe("wiring: email & SMTP URL parsing", () => {
         { idempotencyKey: "k-1" },
       ),
     );
-    const config = {
+    const config: EmailWiringConfig = {
       from: "Kvitbit <noreply@kvitbit.cz>",
       resendApiKey: Option.none(),
       smtpUrl: Option.none(),
     };
-    const sendWith = (nodeEnv: string) =>
+    const sendWith = (nodeEnv: string, configuration = config) =>
       Effect.runPromise(
-        send.pipe(Effect.provide(makeEmailSenderLayer(config, nodeEnv)), Effect.result),
+        send.pipe(Effect.provide(makeEmailSenderLayer(configuration, nodeEnv)), Effect.result),
       );
 
     expect(await sendWith("development")).toMatchObject({
@@ -230,6 +231,19 @@ describe("wiring: email & SMTP URL parsing", () => {
     expect(await sendWith("production")).toMatchObject({
       _tag: "Failure",
       failure: { _tag: "EmailRejected" },
+    });
+    const configured = {
+      ...config,
+      resendApiKey: Option.some(Redacted.make("synthetic-resend-key")),
+      smtpUrl: Option.some(Redacted.make("invalid-test-smtp-url")),
+    };
+    expect(await sendWith("development", configured)).toMatchObject({
+      _tag: "Success",
+      success: { provider: "capture" },
+    });
+    expect(await sendWith("preview", configured)).toMatchObject({
+      _tag: "Success",
+      success: { provider: "capture" },
     });
   });
 });
