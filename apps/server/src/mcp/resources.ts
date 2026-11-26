@@ -10,22 +10,29 @@ import {
   AttachmentId,
   ContactId,
   Contacts,
+  ContactView,
   type CoreError,
   type CurrentCaller,
   DocumentId,
   Documents,
+  DocumentView,
   ExpenseId,
   Expenses,
+  ExpenseView,
   Invalid,
   Locale,
   type MemberCaller,
   PdfTemplate,
   PriceList,
+  PriceListItemView,
   Templates,
+  TemplateView,
   Workspaces,
+  WorkspaceView,
 } from "@kvitbit/domain/contract";
 import { Data, Effect, Schema, Stream } from "effect";
 import { guideMarkdown } from "./guide";
+import { jsonizeOpenValue, makeResourceEncoder, prepareDocumentView } from "./wire";
 
 export class ResourceInvalidParams extends Data.TaggedError("ResourceInvalidParams")<{
   readonly message: string;
@@ -149,10 +156,17 @@ export const collectBoundedBytes = (
     return merged;
   });
 
-const jsonContent = (uri: string, value: unknown): McpResourceContent => ({
+const encodeWorkspace = makeResourceEncoder(WorkspaceView);
+const encodeTemplates = makeResourceEncoder(Schema.Array(TemplateView));
+const encodePriceList = makeResourceEncoder(Schema.Array(PriceListItemView));
+const encodeDocument = makeResourceEncoder(DocumentView);
+const encodeContact = makeResourceEncoder(ContactView);
+const encodeExpense = makeResourceEncoder(ExpenseView);
+
+const jsonContent = (uri: string, encoded: unknown): McpResourceContent => ({
   uri,
   mimeType: "application/json",
-  text: JSON.stringify(value),
+  text: JSON.stringify(encoded),
 });
 
 export type McpResourceServices =
@@ -185,19 +199,19 @@ export const readResource = (
     if (uri === "kvitbit://workspace") {
       const ws = yield* Workspaces;
       const view = yield* ws.current;
-      return [jsonContent(uri, view)];
+      return [jsonContent(uri, encodeWorkspace(jsonizeOpenValue(view)))];
     }
 
     if (uri === "kvitbit://templates") {
       const templates = yield* Templates;
       const items = yield* templates.list;
-      return [jsonContent(uri, items)];
+      return [jsonContent(uri, encodeTemplates(items.map(jsonizeOpenValue)))];
     }
 
     if (uri === "kvitbit://price-list") {
       const priceList = yield* PriceList;
       const items = yield* priceList.list();
-      return [jsonContent(uri, items)];
+      return [jsonContent(uri, encodePriceList(items.map(jsonizeOpenValue)))];
     }
 
     let parsed: URL;
@@ -222,7 +236,7 @@ export const readResource = (
       const docId = yield* decodeId(DocumentId, segments[0] ?? "", "documentId");
       const documents = yield* Documents;
       const doc = yield* documents.get(docId);
-      return [jsonContent(uri, doc)];
+      return [jsonContent(uri, encodeDocument(prepareDocumentView(doc)))];
     }
 
     // kvitbit://documents/{documentId}/pdf{?template,language}
@@ -256,7 +270,7 @@ export const readResource = (
       const contactId = yield* decodeId(ContactId, segments[0] ?? "", "contactId");
       const contacts = yield* Contacts;
       const contact = yield* contacts.get(contactId);
-      return [jsonContent(uri, contact)];
+      return [jsonContent(uri, encodeContact(jsonizeOpenValue(contact)))];
     }
 
     // kvitbit://expenses/{expenseId}
@@ -264,7 +278,7 @@ export const readResource = (
       const expenseId = yield* decodeId(ExpenseId, segments[0] ?? "", "expenseId");
       const expenses = yield* Expenses;
       const expense = yield* expenses.get(expenseId);
-      return [jsonContent(uri, expense)];
+      return [jsonContent(uri, encodeExpense(jsonizeOpenValue(expense)))];
     }
 
     // kvitbit://expenses/{expenseId}/attachments/{attachmentId}

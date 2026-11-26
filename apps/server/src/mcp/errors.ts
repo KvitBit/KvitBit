@@ -8,7 +8,7 @@ import { can } from "@kvitbit/core";
 import type { Action, CoreError, Locale, MemberCaller } from "@kvitbit/domain/contract";
 import { Schema } from "effect";
 
-const encodeToolError = Schema.encodeUnknownSync(McpToolError);
+export const encodeToolError = Schema.encodeUnknownSync(Schema.toCodecJson(McpToolError));
 
 const ACTION_LABELS_EN: Partial<Record<Action, string>> = {
   "workspace.read": "read Workspace details",
