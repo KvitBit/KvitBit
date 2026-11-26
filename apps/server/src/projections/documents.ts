@@ -434,8 +434,14 @@ export const documentPdfCacheKey = (params: {
   readonly workspaceRevision: number;
   readonly template: PdfTemplate;
   readonly language: Locale;
-}): BlobKey =>
-  `pdf/${params.workspaceId}/${params.documentId}/${params.documentRevision}/${params.workspaceRevision}/${params.template}/${params.language}.pdf` as BlobKey;
+  readonly correctionReference?: IsoDate | undefined;
+}): BlobKey => {
+  const variant =
+    params.correctionReference === undefined
+      ? params.language
+      : `${params.language}-original-${params.correctionReference}`;
+  return `pdf/${params.workspaceId}/${params.documentId}/${params.documentRevision}/${params.workspaceRevision}/${params.template}/${variant}.pdf` as BlobKey;
+};
 
 const toDbUnavailable = () => new Unavailable({ dependency: "database" });
 

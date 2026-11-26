@@ -116,6 +116,7 @@ export interface DocumentRenderContext {
   readonly paymentQr?: DocumentRenderModel["paymentQr"] | undefined;
   readonly correction?:
     | {
+        readonly originalNumber: string;
         readonly originalIssuedOn: IsoDate;
         readonly reason: string;
       }
@@ -155,16 +156,8 @@ const buildReference = (
       proformaNumber: proforma?.number ?? null,
     };
   }
-  if (view.kind === "credit_note") {
-    const original = view.related.find((r) => r.relation === "corrects");
-    if (original !== undefined) {
-      return {
-        kind: "correction",
-        originalNumber: original.number,
-        originalIssuedOn: context?.correction?.originalIssuedOn ?? view.dates.issuedOn,
-        reason: context?.correction?.reason ?? "",
-      };
-    }
+  if (view.kind === "credit_note" && context?.correction !== undefined) {
+    return { kind: "correction", ...context.correction };
   }
   if (view.kind === "invoice") {
     const proformas = view.related
@@ -680,6 +673,42 @@ export const DocumentRendererLive: Layer.Layer<DocumentRenderer, never, PdfEngin
           const effectiveWorkspaceRevision =
             deliverySnapshot?.branding?.workspaceRevision ?? workspace?.revision;
 
+          const loadRecord =
+            workspaceId !== undefined && Option.isSome(documentsRepoOpt)
+              ? documentsRepoOpt.value.get(workspaceId, view.id).pipe(
+                  Effect.catchTag("NotFound", () => Effect.succeed(undefined)),
+                  Effect.orDie,
+                )
+              : Effect.succeed(undefined);
+          const creditRecord = view.kind === "credit_note" ? yield* loadRecord : undefined;
+          let correction: DocumentRenderContext["correction"];
+          if (view.kind === "credit_note") {
+            const originalId = creditRecord?.links.find((link) => link.relation === "corrects")?.id;
+            if (
+              creditRecord === undefined ||
+              workspaceId === undefined ||
+              originalId === undefined ||
+              Option.isNone(documentsRepoOpt)
+            ) {
+              return yield* Effect.die(
+                new Error("Credit Note correction reference is unavailable"),
+              );
+            }
+            // An unavailable original cannot be replaced by the Credit Note's own date.
+            const original = yield* documentsRepoOpt.value
+              .get(workspaceId, originalId)
+              .pipe(Effect.orDie);
+            const originalNumber = creditRecord.correctedNumber ?? original.number;
+            if (originalNumber === null) {
+              return yield* Effect.die(new Error("Credit Note original document has no number"));
+            }
+            correction = {
+              originalNumber,
+              originalIssuedOn: original.issuedOn,
+              reason: creditRecord.reason ?? "",
+            };
+          }
+
           const cacheKey =
             workspaceId !== undefined &&
             effectiveWorkspaceRevision !== undefined &&
@@ -691,6 +720,7 @@ export const DocumentRendererLive: Layer.Layer<DocumentRenderer, never, PdfEngin
                   workspaceRevision: effectiveWorkspaceRevision,
                   template: effectiveTemplate,
                   language: options.language,
+                  correctionReference: correction?.originalIssuedOn,
                 })
               : undefined;
 
@@ -703,13 +733,7 @@ export const DocumentRendererLive: Layer.Layer<DocumentRenderer, never, PdfEngin
             if (Option.isSome(cached)) return cached.value;
           }
 
-          const record =
-            workspaceId !== undefined && Option.isSome(documentsRepoOpt)
-              ? yield* documentsRepoOpt.value.get(workspaceId, view.id).pipe(
-                  Effect.catchTag("NotFound", () => Effect.succeed(undefined)),
-                  Effect.orDie,
-                )
-              : undefined;
+          const record = creditRecord ?? (yield* loadRecord);
 
           const resolvedFields =
             deliverySnapshot !== undefined
@@ -749,27 +773,6 @@ export const DocumentRendererLive: Layer.Layer<DocumentRenderer, never, PdfEngin
               logo: logoResult.image,
               stamp: stampResult.image,
             };
-          }
-
-          let correction: DocumentRenderContext["correction"];
-          if (view.kind === "credit_note") {
-            const originalId =
-              record?.links.find((l) => l.relation === "corrects")?.id ??
-              view.related.find((r) => r.relation === "corrects")?.id;
-            const originalRecord =
-              workspaceId !== undefined &&
-              originalId !== undefined &&
-              Option.isSome(documentsRepoOpt)
-                ? yield* documentsRepoOpt.value
-                    .get(workspaceId, originalId)
-                    .pipe(Effect.catch(() => Effect.succeed(undefined)))
-                : undefined;
-            if (originalRecord !== undefined || record !== undefined) {
-              correction = {
-                originalIssuedOn: originalRecord?.issuedOn ?? view.dates.issuedOn,
-                reason: record?.reason ?? "",
-              };
-            }
           }
 
           const model = documentViewToRenderModel(view, {

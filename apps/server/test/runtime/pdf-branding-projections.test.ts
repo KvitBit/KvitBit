@@ -95,10 +95,30 @@ const makeCapturePdfEngine = (capturedHtml: Array<string>) =>
     }),
   );
 
-const makeLivePdfCore = (capturedHtml: Array<string>) => {
+const makeLivePdfCore = (
+  capturedHtml: Array<string>,
+  rejectDocumentRead?: (id: DocumentId) => boolean,
+) => {
   const userId = UserId.make("01950000-0000-7000-8000-000000000001");
   const basePorts = InMemoryCorePorts();
-  const baseRepos = CoreReposMemory.pipe(Layer.provideMerge(basePorts));
+  const repos = CoreReposMemory.pipe(Layer.provideMerge(basePorts));
+  const baseRepos =
+    rejectDocumentRead === undefined
+      ? repos
+      : Layer.effect(
+          DocumentsRepo,
+          Effect.map(DocumentsRepo, (repo) =>
+            DocumentsRepo.of({
+              ...repo,
+              get: (workspaceId, id) =>
+                Effect.suspend(() =>
+                  rejectDocumentRead(id)
+                    ? Effect.fail(new StoreUnavailable({}))
+                    : repo.get(workspaceId, id),
+                ),
+            }),
+          ),
+        ).pipe(Layer.provideMerge(repos));
   const otherFakes = Layer.mergeAll(
     UserDirectoryFake.layer([{ userId, name: "Eva", email: "eva@example.cz" }]),
     CaptureInvitationDelivery.layer,
@@ -207,7 +227,12 @@ describe("Phase 3A Round 1 fixes 6–8: PDF, branding, and document/share read p
 
   test("Finding 6 & 8 end-to-end: Credit Note PDF has real original issue date + stored reason; branding/images, default template, and revision cache work", async () => {
     const capturedHtml: Array<string> = [];
-    const { userId, layer } = makeLivePdfCore(capturedHtml);
+    let rejectRead: DocumentId | undefined;
+    const { userId, layer } = makeLivePdfCore(capturedHtml, (id) => {
+      if (id !== rejectRead) return false;
+      rejectRead = undefined;
+      return true;
+    });
 
     await Effect.runPromise(
       Effect.gen(function* () {
@@ -421,14 +446,26 @@ describe("Phase 3A Round 1 fixes 6–8: PDF, branding, and document/share read p
         expect(String(creditNote.dates.issuedOn)).toBe("2026-11-20");
         expect(creditNote.paymentQr).toBeNull();
 
+        const beforeCreditPdf = capturedHtml.length;
+        rejectRead = invoice.id;
+        const unavailableOriginal = yield* asMember(documents.pdf(creditNote.id)).pipe(Effect.exit);
+        expect(unavailableOriginal._tag).toBe("Failure");
+        expect(rejectRead).toBeUndefined();
+        expect(capturedHtml).toHaveLength(beforeCreditPdf);
+
         const cnPdf = yield* asMember(documents.pdf(creditNote.id));
         yield* Stream.runDrain(cnPdf.bytes);
+        expect(capturedHtml).toHaveLength(beforeCreditPdf + 1);
         const cnHtml = (capturedHtml.at(-1) ?? "").replace(/\u00a0/g, " ");
         // Czech date formatting: 05. 10. 2026 (original) vs 20. 11. 2026 (credit note)
         expect(cnHtml).toContain("Vrácení vadného zboží");
         expect(cnHtml).toContain(invoice.number ?? "");
         expect(cnHtml).toContain("05. 10. 2026");
         expect(cnHtml).toContain("20. 11. 2026");
+
+        const cachedCreditPdf = yield* asMember(documents.pdf(creditNote.id));
+        yield* Stream.runDrain(cachedCreditPdf.bytes);
+        expect(capturedHtml).toHaveLength(beforeCreditPdf + 1);
       }).pipe(Effect.provide(layer)),
     );
   });
