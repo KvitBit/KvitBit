@@ -5,7 +5,13 @@ import type {
   WorkspaceId,
   WorkspaceView,
 } from "@kvitbit/domain/contract";
-import { type ApiResult, idempotencyHeaders, ifMatchHeaders, ok } from "@kvitbit/ui-port/api";
+import {
+  type ApiResult,
+  describeError,
+  idempotencyHeaders,
+  ifMatchHeaders,
+  ok,
+} from "@kvitbit/ui-port/api";
 import type { ApiRunner } from "../../runtime/api-runtime";
 import { runRequestIntent } from "../../runtime/request-intent";
 
@@ -13,6 +19,13 @@ export interface OnboardingProgress {
   readonly workspace: WorkspaceView;
   readonly issuerSaved: boolean;
 }
+
+const includesPatch = (stored: unknown, patch: unknown): boolean => {
+  if (patch === null || typeof patch !== "object") return stored === patch;
+  if (stored === null || typeof stored !== "object") return false;
+  const fields = stored as Record<string, unknown>;
+  return Object.entries(patch).every(([key, value]) => includesPatch(fields[key], value));
+};
 
 export const saveOnboarding = async (
   api: ApiRunner,
@@ -45,13 +58,23 @@ export const saveOnboarding = async (
   const issuingEntity = input.issuingEntity;
   if (!progress.issuerSaved && issuingEntity !== null) {
     const revision = progress.workspace.revision;
-    const result = await api.run((client) =>
+    let result = await api.run((client) =>
       client.workspace.updateIssuingEntity({
         params: { workspaceId },
         headers: ifMatchHeaders(revision),
         payload: issuingEntity,
       }),
     );
+    if (result._tag === "Err" && describeError(result.error).staleRevision) {
+      // The PATCH may have committed before its response was lost. Continue only
+      // if the current entity already contains every edit from this attempt.
+      const current = await api.run((client) =>
+        client.workspace.current({ params: { workspaceId } }),
+      );
+      if (current._tag === "Ok" && includesPatch(current.value.issuingEntity, issuingEntity)) {
+        result = current;
+      }
+    }
     if (result._tag === "Err") return { step: "issuer", result };
     progress = { workspace: result.value, issuerSaved: true };
     checkpoint(progress);

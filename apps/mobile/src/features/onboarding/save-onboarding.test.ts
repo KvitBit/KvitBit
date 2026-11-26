@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { PreconditionFailed } from "@kvitbit/api-contract";
 import type { BankAccountInput, IssuingEntityPatch, NewWorkspace } from "@kvitbit/domain/contract";
 import { type ApiResult, err, type KvitbitApiClient, ok, UiError } from "@kvitbit/ui-port/api";
 import { Effect } from "effect";
@@ -66,3 +67,41 @@ test("an issuer or bank failure resumes the same workspace at the failed step", 
   expect(bankKeys[0]).toBeTruthy();
   expect(bankKeys[0]).toBe(bankKeys[1]);
 });
+
+test.each([true, false])(
+  "reconciles a lost issuer response only when the stored patch matches (%s)",
+  async (matches) => {
+    const workspace = { id: "workspace-1", revision: 2, slug: "acme" };
+    const client = {
+      workspace: {
+        updateIssuingEntity: () =>
+          Effect.succeed(err(new PreconditionFailed({ currentRevision: 3 }))),
+        current: () =>
+          Effect.succeed(
+            ok({
+              ...workspace,
+              revision: 3,
+              issuingEntity: { dic: matches ? "CZ123" : "CZ456" },
+            }),
+          ),
+      },
+    } as unknown as KvitbitApiClient;
+    const api = {
+      run: async <A, E>(call: ApiCall<A, E>) =>
+        Effect.runPromise(call(client)) as Promise<ApiResult<A>>,
+    } as ApiRunner;
+    const progress = { workspace, issuerSaved: false } as unknown as OnboardingProgress;
+    const { result } = await saveOnboarding(
+      api,
+      "signed-in-test-user",
+      {
+        workspace: { name: "Acme" } as NewWorkspace,
+        issuingEntity: { dic: "CZ123" } as unknown as IssuingEntityPatch,
+        bank: null,
+      },
+      progress,
+      () => undefined,
+    );
+    expect(result._tag).toBe(matches ? "Ok" : "Err");
+  },
+);
