@@ -23,8 +23,19 @@ export const makeDrizzleOverSqlClient = (
   const session = db._.session as unknown as {
     transaction: <T>(fn: (tx: unknown) => Promise<T>) => Promise<T>;
   };
+  // Drizzle runs its callback in a promise. Bind queries on its transaction proxy to the SQL
+  // connection in the active Effect transaction context.
   session.transaction = <T>(fn: (tx: unknown) => Promise<T>) =>
-    runPromise(sql.withTransaction(Effect.tryPromise(() => fn(db))));
+    runPromise(
+      sql.withTransaction(
+        Effect.contextWith((context) =>
+          Effect.tryPromise({
+            try: () => fn(makeDrizzleOverSqlClient(sql, Effect.runPromiseWith(context))),
+            catch: (error) => error,
+          }),
+        ),
+      ),
+    );
 
   return db;
 };
