@@ -5,12 +5,17 @@ import type {
   DocumentKind,
   DocumentSettlement,
   DocumentStatus,
+  DocumentView,
   IsoDate,
   WorkspaceSummary,
 } from "@kvitbit/domain/contract";
+import type { Remote } from "@kvitbit/ui-port/api";
 import { BUSINESS_TIME_ZONE, parseIsoDate } from "@kvitbit/ui-port/format";
 import type { Period } from "@kvitbit/ui-port/view-models";
 import { BigDecimal, Option } from "effect";
+import type { ReceivablesReportData } from "../reports/model";
+
+export const DASHBOARD_LIST_LIMIT = 5;
 
 export type DashboardPeriodPreset = "this_month" | "last_month" | "this_quarter" | "this_year";
 
@@ -32,6 +37,18 @@ export interface DashboardDocument {
   readonly issuedOn: IsoDate;
   readonly dueOn: IsoDate;
   readonly total: { readonly amount: BigDecimal.BigDecimal; readonly currency: CurrencyCode };
+}
+
+export interface RecentDashboardDocuments {
+  readonly items: ReadonlyArray<DashboardDocument>;
+  readonly hasDocuments: boolean;
+}
+
+export interface DashboardActivity {
+  readonly id: string;
+  readonly document: DashboardDocument;
+  readonly kind: "sent" | "viewed" | "paid";
+  readonly at: string;
 }
 
 const pad2 = (n: number): string => String(n).padStart(2, "0");
@@ -187,6 +204,39 @@ export const parseDocumentSummaries = (
     return parsed === null ? [] : [parsed];
   });
 
+export const mostOverdueDocuments = (report: ReceivablesReportData) =>
+  report.buckets
+    .flatMap((bucket) => bucket.documents.filter((document) => document.daysOverdue > 0))
+    .sort((a, b) => b.daysOverdue - a.daysOverdue)
+    .slice(0, DASHBOARD_LIST_LIMIT);
+
+export const documentActivity = (
+  document: DashboardDocument,
+  detail: Pick<DocumentView, "deliveries" | "share">,
+  payments: ReadonlyArray<unknown>,
+): ReadonlyArray<DashboardActivity> => {
+  const events: DashboardActivity[] = [];
+  for (const delivery of detail.deliveries) {
+    if (delivery.status === "sent") {
+      events.push({ id: `sent:${delivery.id}`, document, kind: "sent", at: delivery.at });
+    }
+  }
+  const viewedAt = detail.share?.lastViewedAt;
+  if (viewedAt != null) {
+    events.push({ id: `viewed:${document.id}`, document, kind: "viewed", at: viewedAt });
+  }
+  for (const payment of payments) {
+    if (
+      isRecord(payment) &&
+      typeof payment.id === "string" &&
+      typeof payment.createdAt === "string"
+    ) {
+      events.push({ id: `paid:${payment.id}`, document, kind: "paid", at: payment.createdAt });
+    }
+  }
+  return events.filter(({ at }) => Number.isFinite(Date.parse(at)));
+};
+
 /** Returns a clamped 0..1 ratio for rendering cashflow bars without NaN/Infinity. */
 export const cashflowBarRatio = (
   value: BigDecimal.BigDecimal,
@@ -209,12 +259,16 @@ export const maxCashflowAmount = (points: DashboardView["cashflow"]): BigDecimal
   return max;
 };
 
-export const isWorkspaceEmpty = (dashboard: DashboardView, recentDocumentCount: number): boolean =>
-  recentDocumentCount === 0 &&
-  BigDecimal.isZero(dashboard.revenue.amount) &&
-  BigDecimal.isZero(dashboard.expenses.amount) &&
-  BigDecimal.isZero(dashboard.unpaid.amount) &&
-  dashboard.incompleteExpenses === 0;
+export const isWorkspaceEmpty = (
+  documents: Remote<RecentDashboardDocuments>,
+  hasExpenses: Remote<boolean>,
+): boolean =>
+  documents._tag === "Ready" &&
+  !documents.refreshing &&
+  !documents.value.hasDocuments &&
+  hasExpenses._tag === "Ready" &&
+  !hasExpenses.refreshing &&
+  !hasExpenses.value;
 
 export const canWriteWorkspace = (workspace: WorkspaceSummary): boolean =>
   !workspace.closed && workspace.role !== "accountant";

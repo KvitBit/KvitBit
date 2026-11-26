@@ -20,6 +20,7 @@ import { eventually } from "../../testing/eventually";
 import { expoRouterStandIn } from "../../testing/expo-router-stand-in";
 import { recordedOverlay, TestProviders } from "../../testing/providers";
 import { WorkspaceProvider } from "../../workspace/workspace-provider";
+import { loadOverdueDocuments } from "../dashboard/data";
 import {
   buildReportExportRequest,
   decodeReportView,
@@ -352,7 +353,21 @@ describe("reports screen and API/export integration", () => {
       if (decoded.report === "receivables") {
         expect(decoded.overdue.count).toBe(1);
         expect(decoded.buckets[0]?.documents[0]?.number).toBe("2026-0077");
+        expect(decoded.buckets[0]?.documents[0]?.outstanding.amount).toBe("9500.00");
       }
+    }
+
+    const overdue = await api.run((c) =>
+      loadOverdueDocuments(c, WS_ID, {
+        from: "2026-11-30" as IsoDate,
+        to: "2026-11-30" as IsoDate,
+      }),
+    );
+    expect(overdue._tag).toBe("Ok");
+    if (overdue._tag === "Ok") {
+      expect(overdue.value.map(({ id, outstanding }) => [id, outstanding.amount])).toEqual([
+        [DOC_1, "9500.00"],
+      ]);
     }
 
     // Export CSV & PDF via Transfer

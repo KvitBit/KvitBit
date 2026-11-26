@@ -1,11 +1,12 @@
 import type { DashboardView, WorkspaceSummary } from "@kvitbit/domain/contract";
-import { inWorkspace, type Remote } from "@kvitbit/ui-port/api";
-import { formatDate, formatMoney, formatMonth } from "@kvitbit/ui-port/format";
+import { inWorkspace, type Remote, Remote as RemoteOps } from "@kvitbit/ui-port/api";
+import { formatDate, formatDateTime, formatMoney, formatMonth } from "@kvitbit/ui-port/format";
 import { type EnumKey, enumKey } from "@kvitbit/ui-port/i18n";
 import type { Period, Route } from "@kvitbit/ui-port/view-models";
 import { Effect } from "effect";
-import { AlertCircle, Camera, FilePlus2, FileText, UserPlus } from "lucide-react-native";
-import { useCallback, useMemo, useState } from "react";
+import { useFocusEffect } from "expo-router";
+import { AlertCircle, Camera, FilePlus2, FileText, MailPlus, UserPlus } from "lucide-react-native";
+import { useCallback, useMemo, useRef, useState } from "react";
 import { StyleSheet, View } from "react-native";
 import { useI18n } from "../../i18n/i18n-provider";
 import { navigate } from "../../navigation/routes";
@@ -29,16 +30,20 @@ import {
   Text,
 } from "../../ui";
 import { useWorkspace } from "../../workspace/workspace-provider";
+import type { ReceivableDocumentRow } from "../reports/model";
+import { canManageInvitations } from "../settings/permissions";
+import { loadOverdueDocuments, loadRecentDocumentActivity, loadRecentDocuments } from "./data";
 import {
   canWriteWorkspace,
   cashflowBarRatio,
+  type DashboardActivity,
   type DashboardDocument,
   type DashboardPeriodPreset,
   isWorkspaceEmpty,
   maxCashflowAmount,
-  parseDocumentSummaries,
   periodRange,
   pragueToday,
+  type RecentDashboardDocuments,
 } from "./model";
 
 const badgeForDocument = (
@@ -64,10 +69,13 @@ export interface DashboardContentProps {
   readonly onSelectPreset: (preset: DashboardPeriodPreset) => void;
   readonly dashboard: Remote<DashboardView>;
   readonly onRetryDashboard: () => void;
-  readonly overdueDocs: Remote<ReadonlyArray<DashboardDocument>>;
+  readonly overdueDocs: Remote<ReadonlyArray<ReceivableDocumentRow>>;
   readonly onRetryOverdue: () => void;
-  readonly recentDocs: Remote<ReadonlyArray<DashboardDocument>>;
+  readonly recentDocs: Remote<RecentDashboardDocuments>;
   readonly onRetryRecent: () => void;
+  readonly activity: Remote<ReadonlyArray<DashboardActivity>>;
+  readonly onRetryActivity: () => void;
+  readonly hasExpenses: Remote<boolean>;
   readonly onNavigate: (route: Route) => void;
 }
 
@@ -77,6 +85,9 @@ export function DashboardContent(props: DashboardContentProps) {
   const { workspace } = props;
   const ws = workspace.slug;
   const writable = canWriteWorkspace(workspace);
+  const empty = writable && isWorkspaceEmpty(props.recentDocs, props.hasExpenses);
+  const openReceivables = () =>
+    props.onNavigate({ _tag: "Reports", ws, report: "receivables", period: props.reportPeriod });
 
   const periodChoices: ReadonlyArray<Choice<DashboardPeriodPreset>> = useMemo(
     () => [
@@ -88,10 +99,8 @@ export function DashboardContent(props: DashboardContentProps) {
     [t],
   );
 
-  const recentCount = props.recentDocs._tag === "Ready" ? props.recentDocs.value.length : 0;
-
-  return (
-    <View style={styles.stack}>
+  const header = (
+    <>
       {props.userName ? (
         <Text variant="titleMedium" color="onSurfaceVariant">
           {t("dashboard.greeting", { name: props.userName })}
@@ -99,6 +108,44 @@ export function DashboardContent(props: DashboardContentProps) {
       ) : null}
 
       {workspace.closed ? <Banner tone="warning" text={t("shell.closedWorkspace")} /> : null}
+    </>
+  );
+
+  if (empty) {
+    return (
+      <View style={styles.stack}>
+        {header}
+        <Section title={t("dashboard.quick.title")}>
+          <Card style={styles.listCard}>
+            <ListRow
+              leading={UserPlus}
+              title={t("dashboard.quick.addContact")}
+              onPress={() => props.onNavigate({ _tag: "Contact", ws, id: "new", mode: "edit" })}
+            />
+            <ListRow
+              leading={FilePlus2}
+              title={t("dashboard.quick.firstInvoice")}
+              onPress={() => props.onNavigate({ _tag: "DocumentNew", ws, kind: "invoice" })}
+            />
+            {canManageInvitations(workspace.role, workspace.closed) ? (
+              <ListRow
+                leading={MailPlus}
+                title={local({
+                  cs: "Pozvěte svou účetní nebo účetního",
+                  en: "Invite your accountant",
+                })}
+                onPress={() => props.onNavigate({ _tag: "Settings", ws, section: "team" })}
+              />
+            ) : null}
+          </Card>
+        </Section>
+      </View>
+    );
+  }
+
+  return (
+    <View style={styles.stack}>
+      {header}
 
       <SegmentedChoice
         label={t("reports.suite.period")}
@@ -136,23 +183,9 @@ export function DashboardContent(props: DashboardContentProps) {
 
       <RemoteView state={props.dashboard} onRetry={props.onRetryDashboard}>
         {(data) => {
-          const empty = isWorkspaceEmpty(data, recentCount);
           const cashflowMax = maxCashflowAmount(data.cashflow);
-          const recentCashflow = data.cashflow.slice(-6);
           return (
             <View style={styles.stack}>
-              {empty && writable ? (
-                <Card>
-                  <Text variant="titleMedium">{t("dashboard.quick.title")}</Text>
-                  <Text variant="bodyMedium" color="onSurfaceVariant">
-                    {local({
-                      cs: "Vytvořte první fakturu, vyfoťte účtenku nebo přidejte kontakt.",
-                      en: "Create your first invoice, snap a receipt, or add a contact to get started.",
-                    })}
-                  </Text>
-                </Card>
-              ) : null}
-
               <View style={styles.kpiGrid}>
                 <Card
                   style={styles.kpiCard}
@@ -197,13 +230,7 @@ export function DashboardContent(props: DashboardContentProps) {
                 <Card
                   style={styles.kpiCard}
                   accessibilityLabel={t("dashboard.tile.unpaid")}
-                  onPress={() =>
-                    props.onNavigate({
-                      _tag: "Documents",
-                      ws,
-                      query: { settlement: "unpaid" },
-                    })
-                  }
+                  onPress={openReceivables}
                 >
                   <Text variant="labelMedium" color="onSurfaceVariant">
                     {t("dashboard.tile.unpaid")}
@@ -216,13 +243,7 @@ export function DashboardContent(props: DashboardContentProps) {
                 <Card
                   style={styles.kpiCard}
                   accessibilityLabel={t("dashboard.tile.overdue")}
-                  onPress={() =>
-                    props.onNavigate({
-                      _tag: "Documents",
-                      ws,
-                      query: { overdue: true },
-                    })
-                  }
+                  onPress={openReceivables}
                 >
                   <View style={styles.kpiHead}>
                     <Text variant="labelMedium" color="onSurfaceVariant">
@@ -270,7 +291,7 @@ export function DashboardContent(props: DashboardContentProps) {
                 </Card>
               ) : null}
 
-              {recentCashflow.length > 0 ? (
+              {data.cashflow.length > 0 ? (
                 <Section
                   title={t("dashboard.cashflow.title")}
                   action={
@@ -308,7 +329,7 @@ export function DashboardContent(props: DashboardContentProps) {
                       </View>
                     </View>
                     <View style={styles.bars}>
-                      {recentCashflow.map((point) => {
+                      {data.cashflow.map((point) => {
                         const inPct = Math.round(
                           cashflowBarRatio(point.in.amount, cashflowMax) * 100,
                         );
@@ -359,13 +380,7 @@ export function DashboardContent(props: DashboardContentProps) {
 
       <Section
         title={t("dashboard.overdue.title")}
-        action={
-          <Button
-            kind="text"
-            label={t("common.action.view")}
-            onPress={() => props.onNavigate({ _tag: "Documents", ws, query: { overdue: true } })}
-          />
-        }
+        action={<Button kind="text" label={t("common.action.view")} onPress={openReceivables} />}
       >
         <RemoteView state={props.overdueDocs} onRetry={props.onRetryOverdue}>
           {(docs) =>
@@ -380,8 +395,8 @@ export function DashboardContent(props: DashboardContentProps) {
                     key={doc.id}
                     leading={FileText}
                     title={doc.number ?? t(enumKey("documentKind", doc.kind))}
-                    subtitle={`${doc.contactName} · ${formatDate(locale, doc.dueOn)}`}
-                    trailing={formatMoney(locale, doc.total)}
+                    subtitle={`${doc.contact.name}${doc.dueOn === null ? "" : ` · ${formatDate(locale, doc.dueOn)}`}`}
+                    trailing={formatMoney(locale, doc.outstanding)}
                     badge={<Badge tone="warning" label={t("enum.badge.overdue")} />}
                     onPress={() =>
                       props.onNavigate({ _tag: "Document", ws, id: doc.id, tab: "preview" })
@@ -395,7 +410,45 @@ export function DashboardContent(props: DashboardContentProps) {
       </Section>
 
       <Section
-        title={t("dashboard.recent.title")}
+        title={local({ cs: "Aktivita u posledních dokladů", en: "Activity on recent documents" })}
+      >
+        <RemoteView state={props.activity} onRetry={props.onRetryActivity}>
+          {(events) =>
+            events.length === 0 ? (
+              <Card>
+                <EmptyState title={t("dashboard.recent.empty")} />
+              </Card>
+            ) : (
+              <Card style={styles.listCard}>
+                {events.map(({ id, document, kind, at }) => (
+                  <ListRow
+                    key={id}
+                    leading={FileText}
+                    title={document.number ?? t(enumKey("documentKind", document.kind))}
+                    subtitle={formatDateTime(locale, at)}
+                    badge={
+                      <Badge
+                        tone={kind === "paid" ? "success" : "info"}
+                        label={
+                          kind === "paid"
+                            ? local({ cs: "Platba zaznamenána", en: "Payment recorded" })
+                            : t(enumKey("badge", kind))
+                        }
+                      />
+                    }
+                    onPress={() =>
+                      props.onNavigate({ _tag: "Document", ws, id: document.id, tab: "preview" })
+                    }
+                  />
+                ))}
+              </Card>
+            )
+          }
+        </RemoteView>
+      </Section>
+
+      <Section
+        title={local({ cs: "Poslední doklady", en: "Recent documents" })}
         action={
           <Button
             kind="text"
@@ -405,10 +458,10 @@ export function DashboardContent(props: DashboardContentProps) {
         }
       >
         <RemoteView state={props.recentDocs} onRetry={props.onRetryRecent}>
-          {(docs) =>
+          {({ items: docs }) =>
             docs.length === 0 ? (
               <Card>
-                <EmptyState title={t("dashboard.recent.empty")} />
+                <EmptyState title={local({ cs: "Zatím žádné doklady", en: "No documents yet" })} />
               </Card>
             ) : (
               <Card style={styles.listCard}>
@@ -439,9 +492,14 @@ export function DashboardContent(props: DashboardContentProps) {
 
 export function DashboardScreen() {
   const { workspace } = useWorkspace();
+  return <WorkspaceDashboard key={workspace.id} workspace={workspace} />;
+}
+
+function WorkspaceDashboard({ workspace }: { readonly workspace: WorkspaceSummary }) {
   const session = useSession();
   const { t } = useI18n();
   const [preset, setPreset] = useState<DashboardPeriodPreset>("this_month");
+  const visited = useRef(false);
   const today = useMemo(() => pragueToday(), []);
   const range = useMemo(() => periodRange(preset, today), [preset, today]);
 
@@ -455,39 +513,56 @@ export function DashboardScreen() {
   );
 
   const overdueDocs = useRemote(
-    (api) =>
-      Effect.map(
-        api.documents.list({
-          params: inWorkspace(workspace.id),
-          query: { overdue: true, limit: 5 },
-        }),
-        (page) => parseDocumentSummaries(page.items),
-      ),
-    [workspace.id],
+    (api) => loadOverdueDocuments(api, workspace.id, { from: today, to: today }),
+    [workspace.id, today],
   );
 
-  const recentDocs = useRemote(
-    (api) =>
-      Effect.map(
-        api.documents.list({
-          params: inWorkspace(workspace.id),
-          query: { limit: 5 },
-        }),
-        (page) => parseDocumentSummaries(page.items),
-      ),
-    [workspace.id],
+  const recentDocs = useRemote((api) => loadRecentDocuments(api, workspace.id), [workspace.id]);
+
+  const recentItems = recentDocs.state._tag === "Ready" ? recentDocs.state.value.items : null;
+  const activity = useRemote(
+    recentItems === null
+      ? null
+      : (api) => loadRecentDocumentActivity(api, workspace.id, recentItems),
+    [workspace.id, recentItems],
   );
 
-  const refreshing =
-    dashboard.state._tag === "Loading" ||
-    overdueDocs.state._tag === "Loading" ||
-    recentDocs.state._tag === "Loading";
+  const hasExpenses = useRemote(
+    canWriteWorkspace(workspace)
+      ? (api) =>
+          Effect.map(
+            api.expenses.list({ params: inWorkspace(workspace.id), query: { limit: 1 } }),
+            (page) => page.items.length > 0 || page.nextCursor !== null,
+          )
+      : null,
+    [workspace.id, workspace.role, workspace.closed],
+  );
 
+  const refreshing = [
+    dashboard.state,
+    overdueDocs.state,
+    recentDocs.state,
+    activity.state,
+    hasExpenses.state,
+  ].some((state) => RemoteOps.isBusy<unknown, unknown>(state));
+
+  const reloadDashboard = dashboard.reload;
+  const reloadOverdue = overdueDocs.reload;
+  const reloadRecent = recentDocs.reload;
+  const reloadExpenses = hasExpenses.reload;
   const onRefresh = useCallback(() => {
-    dashboard.reload();
-    overdueDocs.reload();
-    recentDocs.reload();
-  }, [dashboard, overdueDocs, recentDocs]);
+    reloadDashboard();
+    reloadOverdue();
+    reloadRecent();
+    reloadExpenses();
+  }, [reloadDashboard, reloadOverdue, reloadRecent, reloadExpenses]);
+
+  useFocusEffect(
+    useCallback(() => {
+      if (visited.current) onRefresh();
+      visited.current = true;
+    }, [onRefresh]),
+  );
 
   const userName = session.state.status === "signed-in" ? session.state.user.name : null;
 
@@ -504,11 +579,14 @@ export function DashboardScreen() {
         reportPeriod={range.reportPeriod}
         onSelectPreset={setPreset}
         dashboard={dashboard.state}
-        onRetryDashboard={dashboard.reload}
+        onRetryDashboard={reloadDashboard}
         overdueDocs={overdueDocs.state}
-        onRetryOverdue={overdueDocs.reload}
+        onRetryOverdue={reloadOverdue}
         recentDocs={recentDocs.state}
-        onRetryRecent={recentDocs.reload}
+        onRetryRecent={reloadRecent}
+        activity={activity.state}
+        onRetryActivity={activity.reload}
+        hasExpenses={hasExpenses.state}
         onNavigate={(route) => navigate(route)}
       />
     </Screen>
