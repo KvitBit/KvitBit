@@ -2,7 +2,6 @@
  * Runtime decoders for domain views whose contract schemas are opaque (`Schema.Unknown` brands or
  * `OpenStruct`), plus Europe/Prague date and decimal parsing helpers.
  */
-import type { IdempotencyKey } from "@kvitbit/api-contract";
 import {
   type BankAccountId,
   type BankAccountView,
@@ -32,9 +31,8 @@ import {
   type VatTreatment,
   type WorkspaceView,
 } from "@kvitbit/domain/contract";
-import { uuidV7 } from "@kvitbit/ui-port/api";
 import { BUSINESS_TIME_ZONE, parseIsoDate } from "@kvitbit/ui-port/format";
-import { BigDecimal, Effect, Option } from "effect";
+import { BigDecimal, Option } from "effect";
 
 // --- Small runtime guards -----------------------------------------------------------------------
 
@@ -408,4 +406,3 @@ export const addDaysIso = (iso: string, days: number): IsoDate => {
 };
 
 /** Mints one RFC 9562 UUIDv7 Idempotency-Key for a user write intent. */
-export const newIdempotencyKey = (): IdempotencyKey => Effect.runSync(uuidV7) as IdempotencyKey;

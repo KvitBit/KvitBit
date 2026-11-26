@@ -72,7 +72,6 @@ import {
 import { copyText } from "./clipboard";
 import {
   formatAddress,
-  newIdempotencyKey,
   parseContactSnapshot,
   parseIssuerSnapshot,
   parseLineView,
@@ -89,6 +88,7 @@ import {
   SendEmailModal,
   UnlockDocumentModal,
 } from "./modals";
+import { useRequestMutation } from "./request-mutation";
 
 type DetailTab = "preview" | "payments" | "share" | "history";
 
@@ -108,6 +108,7 @@ export function DocumentDetailScreen() {
   const { workspace } = useWorkspace();
   const { t, locale, local, text: resolveText } = useI18n();
   const { run } = useApi();
+  const runMutation = useRequestMutation(workspace.id);
   const transfer = useTransfer();
   const overlay = useOverlay();
   const params = useLocalSearchParams<{
@@ -206,15 +207,15 @@ export function DocumentDetailScreen() {
     if (!confirmed) return;
     setBusyAction("issue");
     setActionError(null);
-    const result = await run((api) =>
-      api.documents.issueDraft({
-        params: { workspaceId: workspace.id, documentId: doc.id },
-        headers: {
-          ...ifMatchHeaders(doc.revision),
-          ...idempotencyHeaders(newIdempotencyKey()),
-        },
-        payload: {},
-      }),
+    const result = await runMutation(
+      `documents.issueDraft:${doc.id}`,
+      { revision: doc.revision },
+      (api, key) =>
+        api.documents.issueDraft({
+          params: { workspaceId: workspace.id, documentId: doc.id },
+          headers: { ...ifMatchHeaders(doc.revision), ...idempotencyHeaders(key) },
+          payload: {},
+        }),
     );
     setBusyAction(null);
     if (result._tag === "Err") {
@@ -300,14 +301,15 @@ export function DocumentDetailScreen() {
   ) => {
     setBusyAction("cancel");
     setActionError(null);
-    const result = await run((api) =>
+    const payload = {
+      reason: values.reason,
+      ...(values.on !== undefined ? { on: values.on } : {}),
+    };
+    const result = await runMutation(`documents.cancel:${doc.id}`, payload, (api, key) =>
       api.documents.cancel({
         params: { workspaceId: workspace.id, documentId: doc.id },
-        headers: idempotencyHeaders(newIdempotencyKey()),
-        payload: {
-          reason: values.reason,
-          ...(values.on !== undefined ? { on: values.on } : {}),
-        },
+        headers: idempotencyHeaders(key),
+        payload,
       }),
     );
     setBusyAction(null);
@@ -340,11 +342,12 @@ export function DocumentDetailScreen() {
     if (!confirmed) return;
     setBusyAction("final");
     setActionError(null);
-    const result = await run((api) =>
+    const payload = {};
+    const result = await runMutation(`documents.issueFinalInvoice:${doc.id}`, payload, (api, key) =>
       api.documents.issueFinalInvoice({
         params: { workspaceId: workspace.id, documentId: doc.id },
-        headers: idempotencyHeaders(newIdempotencyKey()),
-        payload: {},
+        headers: idempotencyHeaders(key),
+        payload,
       }),
     );
     setBusyAction(null);
@@ -365,15 +368,16 @@ export function DocumentDetailScreen() {
   const handleCreateCreditNote = async (doc: DocumentView, values: CreditNoteFormValues) => {
     setBusyAction("creditNote");
     setActionError(null);
-    const result = await run((api) =>
+    const payload = {
+      reason: values.reason,
+      lines: values.lines === "full" ? ("full" as const) : [...values.lines],
+      ...(values.correctedOn !== undefined ? { correctedOn: values.correctedOn } : {}),
+    };
+    const result = await runMutation(`documents.correct:${doc.id}`, payload, (api, key) =>
       api.documents.correct({
         params: { workspaceId: workspace.id, documentId: doc.id },
-        headers: idempotencyHeaders(newIdempotencyKey()),
-        payload: {
-          reason: values.reason,
-          lines: values.lines === "full" ? "full" : [...values.lines],
-          ...(values.correctedOn !== undefined ? { correctedOn: values.correctedOn } : {}),
-        },
+        headers: idempotencyHeaders(key),
+        payload,
       }),
     );
     setBusyAction(null);
@@ -395,17 +399,18 @@ export function DocumentDetailScreen() {
   const handleRecordPayment = async (doc: DocumentView, values: RecordPaymentFormValues) => {
     setBusyAction("payment");
     setActionError(null);
-    const result = await run((api) =>
+    const payload = {
+      target: { document: doc.id },
+      amount: MoneyMath.make(values.amount, doc.totals.gross.currency),
+      paidOn: values.paidOn,
+      method: values.method,
+      ...(values.note !== "" ? { note: values.note } : {}),
+    };
+    const result = await runMutation(`payments.record:document:${doc.id}`, payload, (api, key) =>
       api.payments.record({
         params: { workspaceId: workspace.id },
-        headers: idempotencyHeaders(newIdempotencyKey()),
-        payload: {
-          target: { document: doc.id },
-          amount: MoneyMath.make(values.amount, doc.totals.gross.currency),
-          paidOn: values.paidOn,
-          method: values.method,
-          ...(values.note !== "" ? { note: values.note } : {}),
-        },
+        headers: idempotencyHeaders(key),
+        payload,
       }),
     );
     setBusyAction(null);
@@ -447,16 +452,17 @@ export function DocumentDetailScreen() {
   const handleSendEmail = async (doc: DocumentView, values: SendEmailFormValues) => {
     setBusyAction("send");
     setActionError(null);
-    const result = await run((api) =>
+    const payload = {
+      to: [...values.to],
+      language: values.language,
+      purpose: values.purpose,
+      ...(values.purpose === "document" ? { reminders: values.reminders } : {}),
+    };
+    const result = await runMutation(`documents.send:${doc.id}`, payload, (api, key) =>
       api.documents.send({
         params: { workspaceId: workspace.id, documentId: doc.id },
-        headers: idempotencyHeaders(newIdempotencyKey()),
-        payload: {
-          to: [...values.to],
-          language: values.language,
-          purpose: values.purpose,
-          ...(values.purpose === "document" ? { reminders: values.reminders } : {}),
-        },
+        headers: idempotencyHeaders(key),
+        payload,
       }),
     );
     setBusyAction(null);

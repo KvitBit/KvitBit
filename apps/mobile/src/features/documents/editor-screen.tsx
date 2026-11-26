@@ -11,19 +11,26 @@ import type {
   FxRateView,
   IsoDate,
   Locale,
+  TemplateId,
 } from "@kvitbit/domain/contract";
-import { MoneyMath } from "@kvitbit/domain/contract";
-import { describeError, idempotencyHeaders, ifMatchHeaders, issuesAt } from "@kvitbit/ui-port/api";
+import { MoneyMath, TemplateInput } from "@kvitbit/domain/contract";
+import {
+  describeError,
+  idempotencyHeaders,
+  ifMatchHeaders,
+  issuesAt,
+  type UiError,
+} from "@kvitbit/ui-port/api";
 import { formatDate, formatMoney, formatVatRate, parseIsoDate } from "@kvitbit/ui-port/format";
 import { enumKey } from "@kvitbit/ui-port/i18n";
 import { displayAmount } from "@kvitbit/ui-port/view-models";
-import { BigDecimal } from "effect";
+import { BigDecimal, Option, Schema } from "effect";
 import { router } from "expo-router";
 import { BookOpen, Plus, Save, Send, Trash2, Users } from "lucide-react-native";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Modal, ScrollView, StyleSheet, View } from "react-native";
 import { useI18n } from "../../i18n/i18n-provider";
-import { navigate } from "../../navigation/routes";
+import { hrefOf, navigate } from "../../navigation/routes";
 import { useApi, useRemote } from "../../runtime/api-runtime";
 import { useTheme } from "../../theme/theme-provider";
 import {
@@ -44,10 +51,10 @@ import {
   useOverlay,
 } from "../../ui";
 import { useWorkspace } from "../../workspace/workspace-provider";
+import { canWriteWorkspace } from "../dashboard/model";
 import {
   type BankAccountOption,
   type ContactOption,
-  newIdempotencyKey,
   type PriceListOption,
   parseBankAccountOption,
   parseContactOption,
@@ -78,6 +85,80 @@ import {
   VAT_TREATMENTS,
   validateEditorDraft,
 } from "./editor-model";
+import { useRequestMutation } from "./request-mutation";
+
+const templateFields = TemplateInput.fields;
+const decodeTemplateEditorFields = Schema.decodeUnknownOption(
+  Schema.Struct({
+    contact: templateFields.contact,
+    language: templateFields.language,
+    series: templateFields.series,
+    bankAccount: templateFields.bankAccount,
+    pricesIncludeVat: templateFields.pricesIncludeVat,
+    variableSymbol: templateFields.variableSymbol,
+    orderNumber: templateFields.orderNumber,
+    note: templateFields.note,
+  }),
+);
+
+export function DocumentFromTemplateScreen({ templateId }: { readonly templateId: TemplateId }) {
+  const { workspace } = useWorkspace();
+  const { t, text } = useI18n();
+  const runMutation = useRequestMutation(workspace.id);
+  const writable = canWriteWorkspace(workspace);
+  const [failure, setFailure] = useState<UiError | null>(null);
+  const [attempt, setAttempt] = useState(0);
+
+  // biome-ignore lint/correctness/useExhaustiveDependencies: the retry button starts a new attempt
+  useEffect(() => {
+    if (!writable) return;
+    let active = true;
+    const payload = { as: "draft" } as const;
+    void runMutation(`templates.use:${templateId}`, payload, (api, key) =>
+      api.templates.use({
+        params: { workspaceId: workspace.id, templateId },
+        headers: idempotencyHeaders(key),
+        payload,
+      }),
+    ).then((result) => {
+      if (!active) return;
+      if (result._tag === "Err") {
+        setFailure(result.error);
+      } else {
+        const route = hrefOf({ _tag: "DocumentEdit", ws: workspace.slug, id: result.value.id });
+        const source = new URLSearchParams({
+          template: templateId,
+          revision: String(result.value.revision),
+        });
+        router.replace(`${route}?${source}` as never);
+      }
+    });
+    return () => {
+      active = false;
+    };
+  }, [attempt, runMutation, templateId, workspace.id, workspace.slug, writable]);
+
+  return (
+    <Screen title={t("documents.editor.titleDraft")} back>
+      {!writable ? (
+        <Banner text={t(workspace.closed ? "shell.closedWorkspace" : "error.forbidden")} />
+      ) : failure === null ? (
+        <Loading label={t("common.state.loading")} />
+      ) : (
+        <>
+          <Banner text={text(describeError(failure).text)} />
+          <Button
+            label={t("common.action.retry")}
+            onPress={() => {
+              setFailure(null);
+              setAttempt((n) => n + 1);
+            }}
+          />
+        </>
+      )}
+    </Screen>
+  );
+}
 
 // --- Picker modal -------------------------------------------------------------------------------
 
@@ -155,12 +236,14 @@ export type DocumentEditorProps =
   | {
       readonly mode: "edit";
       readonly documentId: DocumentId;
+      readonly templateSource?: { readonly id: TemplateId; readonly revision: number };
     };
 
 export function DocumentEditorScreen(props: DocumentEditorProps) {
   const { workspace } = useWorkspace();
   const { t, locale, local, text: resolveText } = useI18n();
   const { run } = useApi();
+  const runMutation = useRequestMutation(workspace.id);
   const overlay = useOverlay();
 
   const wsRemote = useRemote(
@@ -201,6 +284,43 @@ export function DocumentEditorScreen(props: DocumentEditorProps) {
     [workspace.id, sourceDocId],
   );
 
+  const originalDoc: DocumentView | null =
+    props.mode === "edit" && sourceDocRemote.state._tag === "Ready"
+      ? sourceDocRemote.state.value
+      : null;
+  const templateId =
+    props.mode === "edit" &&
+    originalDoc !== null &&
+    originalDoc.status === "draft" &&
+    props.templateSource?.revision === originalDoc.revision
+      ? props.templateSource.id
+      : null;
+  const templateRemote = useRemote(
+    templateId === null
+      ? null
+      : (api) => api.templates.get({ params: { workspaceId: workspace.id, templateId } }),
+    [workspace.id, templateId],
+  );
+  const template = useMemo(
+    () =>
+      templateRemote.state._tag === "Ready"
+        ? Option.getOrNull(decodeTemplateEditorFields(templateRemote.state.value.input))
+        : null,
+    [templateRemote.state],
+  );
+  const templateContactId = template?.contact ?? null;
+  const templateContactRemote = useRemote(
+    templateContactId === null
+      ? null
+      : (api) =>
+          api.contacts.get({ params: { workspaceId: workspace.id, contactId: templateContactId } }),
+    [workspace.id, templateContactId],
+  );
+  const templateContact =
+    templateContactRemote.state._tag === "Ready"
+      ? parseContactOption(templateContactRemote.state.value)
+      : null;
+
   const workspaceDefaults = useMemo(
     () =>
       parseWorkspaceDefaults(
@@ -239,19 +359,17 @@ export function DocumentEditorScreen(props: DocumentEditorProps) {
     [seriesRemote.state],
   );
 
-  const originalDoc: DocumentView | null =
-    props.mode === "edit" && sourceDocRemote.state._tag === "Ready"
-      ? sourceDocRemote.state.value
-      : null;
-
   const readyToInit =
     wsRemote.state._tag === "Ready" &&
     contactsRemote.state._tag === "Ready" &&
     bankAccountsRemote.state._tag === "Ready" &&
     seriesRemote.state._tag === "Ready" &&
-    (sourceDocId === null || sourceDocRemote.state._tag === "Ready");
+    (sourceDocId === null || sourceDocRemote.state._tag === "Ready") &&
+    (templateId === null || (template !== null && templateContact !== null));
 
   const [draft, setDraft] = useState<EditorDraft | null>(null);
+  const lastPatchedDraft = useRef<EditorDraft | null>(null);
+  const submitting = useRef(false);
   const [cnbFx, setCnbFx] = useState<FxRateView | null>(null);
   const [fxLoading, setFxLoading] = useState(false);
   const [fxUnavailable, setFxUnavailable] = useState(false);
@@ -266,15 +384,28 @@ export function DocumentEditorScreen(props: DocumentEditorProps) {
   // Initialize editor state once all reference data has loaded.
   useEffect(() => {
     if (!readyToInit || draft !== null) return;
-    if (props.mode === "edit" && sourceDocRemote.state._tag === "Ready") {
-      setDraft(
-        draftFromDocument(sourceDocRemote.state.value, {
-          workspaceDefaults,
-          bankAccounts,
-          seriesList,
-          duplicate: false,
-        }),
-      );
+    if (originalDoc !== null) {
+      const initial = draftFromDocument(originalDoc, {
+        workspaceDefaults,
+        bankAccounts,
+        seriesList,
+      });
+      if (templateId === null || template === null) {
+        setDraft(initial);
+      } else {
+        setDraft({
+          ...initial,
+          contactId: templateContact?.archived === true ? null : initial.contactId,
+          language: template.language ?? initial.language,
+          seriesId: template.series ?? initial.seriesId,
+          bankAccountId: template.bankAccount ?? initial.bankAccountId,
+          pricesIncludeVat: template.pricesIncludeVat ?? initial.pricesIncludeVat,
+          variableSymbol: template.variableSymbol ?? initial.variableSymbol,
+          orderNumber: template.orderNumber ?? initial.orderNumber,
+          note: template.note ?? initial.note,
+        });
+        if (templateContact?.archived === true) setContactPickerOpen(true);
+      }
       return;
     }
     if (
@@ -316,6 +447,10 @@ export function DocumentEditorScreen(props: DocumentEditorProps) {
     bankAccounts,
     seriesList,
     contacts,
+    originalDoc,
+    templateId,
+    template,
+    templateContact?.archived,
   ]);
 
   // Fetch CNB FX rate whenever non-CZK currency & CNB mode are active.
@@ -429,32 +564,41 @@ export function DocumentEditorScreen(props: DocumentEditorProps) {
   }, [workspaceDefaults.taxRegime]);
 
   const submit = async (intent: "save" | "issue") => {
-    if (draft === null || validation === null) return;
+    if (draft === null || validation === null || submitting.current) return;
     setValidationShown(true);
     setBannerError(null);
     setServerIssues([]);
     if (validation.hasErrors) return;
 
+    submitting.current = true;
     setBusyMode(intent);
+    try {
+      await saveOrIssue(draft, intent);
+    } finally {
+      submitting.current = false;
+      setBusyMode(null);
+    }
+  };
+
+  const saveOrIssue = async (draft: EditorDraft, intent: "save" | "issue") => {
     if (props.mode === "new") {
       const input = buildDocumentInput(draft);
       const res =
         intent === "issue"
-          ? await run((api) =>
+          ? await runMutation("documents.issueFromInput", input, (api, key) =>
               api.documents.issueFromInput({
                 params: { workspaceId: workspace.id },
-                headers: idempotencyHeaders(newIdempotencyKey()),
+                headers: idempotencyHeaders(key),
                 payload: { input },
               }),
             )
-          : await run((api) =>
+          : await runMutation("documents.createDraft", input, (api, key) =>
               api.documents.createDraft({
                 params: { workspaceId: workspace.id },
-                headers: idempotencyHeaders(newIdempotencyKey()),
+                headers: idempotencyHeaders(key),
                 payload: input,
               }),
             );
-      setBusyMode(null);
       if (res._tag === "Err") {
         const described = describeError(res.error);
         setBannerError(resolveText(described.text));
@@ -473,41 +617,39 @@ export function DocumentEditorScreen(props: DocumentEditorProps) {
       return;
     }
 
-    if (originalDoc === null) {
-      setBusyMode(null);
-      return;
+    if (originalDoc === null) return;
+
+    let finalDoc = originalDoc;
+    if (lastPatchedDraft.current !== draft) {
+      const patch = buildDocumentPatch(draft, originalDoc, workspace.role);
+      const editRes = await run((api) =>
+        api.documents.edit({
+          params: { workspaceId: workspace.id, documentId: originalDoc.id },
+          headers: ifMatchHeaders(originalDoc.revision),
+          payload: patch,
+        }),
+      );
+      if (editRes._tag === "Err") {
+        const described = describeError(editRes.error);
+        setBannerError(resolveText(described.text));
+        setServerIssues(described.issues);
+        return;
+      }
+      finalDoc = editRes.value;
+      sourceDocRemote.set(finalDoc);
+      lastPatchedDraft.current = draft;
     }
 
-    const patch = buildDocumentPatch(draft, originalDoc, workspace.role);
-    const editRes = await run((api) =>
-      api.documents.edit({
-        params: { workspaceId: workspace.id, documentId: originalDoc.id },
-        headers: ifMatchHeaders(originalDoc.revision),
-        payload: patch,
-      }),
-    );
-    if (editRes._tag === "Err") {
-      setBusyMode(null);
-      const described = describeError(editRes.error);
-      setBannerError(resolveText(described.text));
-      setServerIssues(described.issues);
-      return;
-    }
-
-    let finalDoc = editRes.value;
     if (intent === "issue" && finalDoc.status === "draft") {
-      const issueRes = await run((api) =>
+      const { id, revision } = finalDoc;
+      const issueRes = await runMutation(`documents.issueDraft:${id}`, { revision }, (api, key) =>
         api.documents.issueDraft({
-          params: { workspaceId: workspace.id, documentId: finalDoc.id },
-          headers: {
-            ...ifMatchHeaders(finalDoc.revision),
-            ...idempotencyHeaders(newIdempotencyKey()),
-          },
+          params: { workspaceId: workspace.id, documentId: id },
+          headers: { ...ifMatchHeaders(revision), ...idempotencyHeaders(key) },
           payload: {},
         }),
       );
       if (issueRes._tag === "Err") {
-        setBusyMode(null);
         const described = describeError(issueRes.error);
         setBannerError(resolveText(described.text));
         setServerIssues(described.issues);
@@ -516,7 +658,6 @@ export function DocumentEditorScreen(props: DocumentEditorProps) {
       finalDoc = issueRes.value;
     }
 
-    setBusyMode(null);
     overlay.toast(
       intent === "issue"
         ? t("documents.issue.done", { number: finalDoc.number ?? "" })
@@ -587,6 +728,16 @@ export function DocumentEditorScreen(props: DocumentEditorProps) {
         <RemoteView state={sourceDocRemote.state} onRetry={sourceDocRemote.reload}>
           {() => null}
         </RemoteView>
+      ) : templateId !== null && templateRemote.state._tag === "Failed" ? (
+        <RemoteView state={templateRemote.state} onRetry={templateRemote.reload}>
+          {() => null}
+        </RemoteView>
+      ) : templateId !== null && templateRemote.state._tag === "Ready" && template === null ? (
+        <Banner text={t("error.unknown")} />
+      ) : templateId !== null && templateContactRemote.state._tag === "Failed" ? (
+        <RemoteView state={templateContactRemote.state} onRetry={templateContactRemote.reload}>
+          {() => null}
+        </RemoteView>
       ) : draft === null ? (
         <Loading label={t("common.state.loading")} />
       ) : (
@@ -596,6 +747,15 @@ export function DocumentEditorScreen(props: DocumentEditorProps) {
             <Banner tone="warning" text={t("documents.editor.issuedWarning")} />
           ) : null}
           {bannerError !== null ? <Banner text={bannerError} /> : null}
+          {templateId !== null && templateContact?.archived === true && draft.contactId === null ? (
+            <Banner
+              tone="warning"
+              text={local({
+                cs: "Kontakt ze šablony je archivovaný. Vyberte jiný kontakt.",
+                en: "The template's contact is archived. Select another contact.",
+              })}
+            />
+          ) : null}
           {priceMismatchWarning !== null ? (
             <Banner tone="warning" text={priceMismatchWarning} />
           ) : null}
@@ -1065,6 +1225,7 @@ export function DocumentEditorScreen(props: DocumentEditorProps) {
             <Card>
               <TextField
                 label={t("documents.editor.note")}
+                testID="editor-note"
                 value={draft.note}
                 onChangeText={(value) => setDraft({ ...draft, note: value })}
                 multiline
@@ -1159,7 +1320,7 @@ export function DocumentEditorScreen(props: DocumentEditorProps) {
 export function CreditNoteCreatorScreen() {
   const { workspace } = useWorkspace();
   const { t, locale, local, text: resolveText } = useI18n();
-  const { run } = useApi();
+  const runMutation = useRequestMutation(workspace.id);
   const overlay = useOverlay();
 
   const issuedRemote = useRemote(
@@ -1202,15 +1363,16 @@ export function CreditNoteCreatorScreen() {
     }
     setBusy(true);
     setError(null);
-    const res = await run((api) =>
+    const payload = {
+      reason: reason.trim(),
+      lines: "full" as const,
+      ...(correctedOn.trim() !== "" ? { correctedOn: correctedOn as IsoDate } : {}),
+    };
+    const res = await runMutation(`documents.correct:${selectedDocId}`, payload, (api, key) =>
       api.documents.correct({
         params: { workspaceId: workspace.id, documentId: selectedDocId },
-        headers: idempotencyHeaders(newIdempotencyKey()),
-        payload: {
-          reason: reason.trim(),
-          lines: "full",
-          ...(correctedOn.trim() !== "" ? { correctedOn: correctedOn as IsoDate } : {}),
-        },
+        headers: idempotencyHeaders(key),
+        payload,
       }),
     );
     setBusy(false);

@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, mock, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, mock, test } from "bun:test";
 import type {
   ExpenseId,
   ExpenseInput,
@@ -9,18 +9,21 @@ import type {
 } from "@kvitbit/domain/contract";
 import { idempotencyHeaders, ifMatchHeaders, UiError, uuidV7 } from "@kvitbit/ui-port/api";
 import { Effect } from "effect";
-import type { ReactElement } from "react";
+import { act, type ReactElement } from "react";
 import {
   fakeTransfer,
   useFakeTransfer as installFakeTransfer,
 } from "../../platform/transfer/testing";
 import { ApiProvider, type ApiRunner, useApi, useRemote } from "../../runtime/api-runtime";
+import { SessionProvider, useSession } from "../../session/session-provider";
+import { tokenStore } from "../../session/token-store";
 import { clientRoot } from "../../testing/client-root";
 import { allText, hostTree } from "../../testing/element-tree";
 import { eventually } from "../../testing/eventually";
 import { expoRouterStandIn } from "../../testing/expo-router-stand-in";
 import { recordedOverlay, TestProviders } from "../../testing/providers";
 import { WorkspaceProvider } from "../../workspace/workspace-provider";
+import { uiShim } from "../documents/test-ui-shim";
 import type { ReceiptPicker } from "./capture-picker";
 import {
   buildExpensePayload,
@@ -36,9 +39,10 @@ import {
 } from "./model";
 
 const transferFake = fakeTransfer();
+let expenseRouteParams: Record<string, string> = {};
 
 mock.module("expo-router", () => ({
-  ...expoRouterStandIn(),
+  ...expoRouterStandIn({ useLocalSearchParams: () => expenseRouteParams }),
   router: {
     back: () => undefined,
     canGoBack: () => true,
@@ -56,10 +60,16 @@ mock.module("expo-document-picker", () => ({
 }));
 installFakeTransfer(transferFake);
 
+const realUi = { ...(await import("../../ui")) };
 const { ExpensesListScreen } = await import("./expenses-list-screen");
 const { ExpenseDetailScreen } = await import("./expense-detail-screen");
 const { ExpenseCaptureScreen } = await import("./expense-capture-screen");
 const { useTransfer } = await import("../../platform/transfer");
+const { default: ExpenseRoute } = await import("../../../app/w/[ws]/expenses/[id]");
+
+function SignedInFixture({ children }: { readonly children: ReactElement }) {
+  return useSession().state.status === "signed-in" ? children : null;
+}
 
 const WS_ID = "01937c7a-0000-7000-8000-000000000001" as WorkspaceId;
 const EXP_1 = "01937c7a-0000-7000-8000-000000000101" as ExpenseId;
@@ -243,6 +253,8 @@ function ExpensesProbe(props: {
 describe("expenses screens and API/transfer integration", () => {
   const root = clientRoot({ keepFetch: true });
   let server: ReturnType<typeof Bun.serve>;
+  let losePaymentResponse = false;
+  let paymentConfirmed = false;
   const requests: Array<{
     readonly method: string;
     readonly path: string;
@@ -251,6 +263,7 @@ describe("expenses screens and API/transfer integration", () => {
   }> = [];
 
   beforeAll(() => {
+    mock.module("../../ui", () => uiShim);
     server = Bun.serve({
       port: 0,
       fetch: async (req) => {
@@ -261,6 +274,11 @@ describe("expenses screens and API/transfer integration", () => {
           idempotencyKey: req.headers.get("idempotency-key"),
           ifMatch: req.headers.get("if-match"),
         });
+        if (url.pathname.endsWith("/get-session")) {
+          return Response.json({
+            user: { id: "expenses-test-user", email: "expenses@example.test" },
+          });
+        }
         if (url.pathname.endsWith("/expenses") && req.method === "GET") {
           return Response.json({
             items: [
@@ -286,7 +304,14 @@ describe("expenses screens and API/transfer integration", () => {
           return Response.json({ ...sampleExpenseView, id: EXP_2 }, { status: 201 });
         }
         if (url.pathname.endsWith(`/expenses/${EXP_1}`) && req.method === "GET") {
-          return Response.json(sampleExpenseView);
+          return Response.json(
+            paymentConfirmed
+              ? {
+                  ...sampleExpenseView,
+                  supplier: { ...sampleExpenseView.supplier, name: "Refreshed supplier" },
+                }
+              : sampleExpenseView,
+          );
         }
         if (url.pathname.endsWith(`/expenses/${EXP_1}`) && req.method === "PATCH") {
           return Response.json({ ...sampleExpenseView, revision: 4, note: "Updated note" });
@@ -300,13 +325,21 @@ describe("expenses screens and API/transfer integration", () => {
               amount: { amount: "500.00", currency: "CZK" },
               paidOn: "2026-11-12",
               method: "bank_transfer",
-              note: "Deposit",
+              note: paymentConfirmed ? "Refreshed payments" : "Deposit",
               taxDocument: null,
               createdAt: "2026-11-12T09:00:00Z",
             },
           ]);
         }
         if (url.pathname.endsWith("/payments") && req.method === "POST") {
+          if (losePaymentResponse) {
+            losePaymentResponse = false;
+            return new Response("{", {
+              status: 201,
+              headers: { "content-type": "application/json" },
+            });
+          }
+          paymentConfirmed = true;
           return Response.json(
             {
               payment: {
@@ -333,17 +366,50 @@ describe("expenses screens and API/transfer integration", () => {
 
   afterAll(() => {
     server.stop(true);
+    mock.module("../../ui", () => realUi);
   });
 
-  const within = (node: ReactElement) => (
+  afterEach(async () => {
+    expenseRouteParams = {};
+    losePaymentResponse = false;
+    paymentConfirmed = false;
+    await root.render(null);
+    await tokenStore.clear();
+  });
+
+  const within = (node: ReactElement, workspace = WORKSPACE, signIn = false) => (
     <TestProviders overlay={recordedOverlay()}>
-      <ApiProvider token="tok" origin={server.url.origin}>
-        <WorkspaceProvider workspace={WORKSPACE} workspaces={[WORKSPACE]} reload={() => undefined}>
-          {node}
-        </WorkspaceProvider>
-      </ApiProvider>
+      <SessionProvider origin={server.url.origin}>
+        <ApiProvider token="tok" origin={server.url.origin}>
+          <WorkspaceProvider
+            workspace={workspace}
+            workspaces={[workspace]}
+            reload={() => undefined}
+          >
+            {signIn ? <SignedInFixture>{node}</SignedInFixture> : node}
+          </WorkspaceProvider>
+        </ApiProvider>
+      </SessionProvider>
     </TestProviders>
   );
+
+  const waitForScreen = async (condition: () => boolean) => {
+    for (let attempt = 0; attempt < 100 && !condition(); attempt++) {
+      await act(async () => {
+        await Bun.sleep(5);
+      });
+    }
+    expect(condition()).toBe(true);
+  };
+
+  const element = (id: string) =>
+    root.container().querySelector<HTMLElement>(`[data-testid="${id}"]`);
+
+  const press = async (id: string) => {
+    const target = element(id);
+    expect(target).not.toBeNull();
+    await act(async () => target?.click());
+  };
 
   test("screens render expected controls and copy via hostTree", () => {
     const listText = allText(hostTree(<ExpensesListScreen />, within));
@@ -357,17 +423,64 @@ describe("expenses screens and API/transfer integration", () => {
     expect(editorText).toContain("New expense");
     expect(editorText).toContain("VAT deductibility");
     expect(editorText).toContain("VAT breakdown");
+  });
 
+  test("a signed-in writer can open the capture pickers", async () => {
     const fakePicker: ReceiptPicker = {
       takePhoto: async () => ({ _tag: "Cancelled" }),
       pickFromGallery: async () => ({ _tag: "Cancelled" }),
       pickDocument: async () => ({ _tag: "Cancelled" }),
     };
-    const captureText = allText(hostTree(<ExpenseCaptureScreen picker={fakePicker} />, within));
+    await tokenStore.write("expenses-test-session");
+    await root.render(within(<ExpenseCaptureScreen picker={fakePicker} />, WORKSPACE, true));
+    await waitForScreen(() => root.container().textContent?.includes("Choose file") === true);
+    const captureText = root.container().textContent ?? "";
     expect(captureText).toContain("Capture receipt");
     expect(captureText).toContain("Take photo");
     expect(captureText).toContain("Choose from gallery");
     expect(captureText).toContain("Choose file");
+  });
+
+  test("the edit deep link keeps accountants in read mode with attachment access", async () => {
+    const readOnly = { ...WORKSPACE, role: "accountant" } as const;
+    expenseRouteParams = { id: EXP_1, mode: "edit" };
+    await root.render(within(<ExpenseRoute />, readOnly));
+    await waitForScreen(() => element(`attachment-open-${ATT_1}`) !== null);
+    expect(element(`attachment-share-${ATT_1}`)).not.toBeNull();
+    expect(element("expense-save")).toBeNull();
+    expect(element("expense-add-attachment")).toBeNull();
+    expect(element("expense-record-payment-toggle")).toBeNull();
+    expect(root.container().querySelector('[aria-label="Edit"]')).toBeNull();
+    expect(root.container().querySelector('[aria-label="Delete"]')).toBeNull();
+
+    expenseRouteParams = { id: "new", mode: "edit" };
+    await root.render(within(<ExpenseRoute />, readOnly));
+    expect(root.container().textContent).toContain("Your role does not allow this action.");
+    expect(element("expense-save")).toBeNull();
+  });
+
+  test("retries expense payment submission with the same request key", async () => {
+    requests.length = 0;
+    losePaymentResponse = true;
+    await tokenStore.write("expenses-test-session");
+    await root.render(within(<ExpenseDetailScreen id={EXP_1} />, WORKSPACE, true));
+    await waitForScreen(() => element("expense-record-payment-toggle") !== null);
+    await press("expense-record-payment-toggle");
+    await press("expense-record-payment-submit");
+    await waitForScreen(() => root.container().textContent?.includes("Please try again") === true);
+    await press("expense-record-payment-submit");
+    await waitForScreen(() => {
+      const content = root.container().textContent ?? "";
+      return content.includes("Refreshed supplier") && content.includes("Refreshed payments");
+    });
+    expect(element("expense-record-payment-submit")).toBeNull();
+
+    const attempts = requests.filter(
+      ({ path, method }) => path.endsWith("/payments") && method === "POST",
+    );
+    expect(attempts).toHaveLength(2);
+    expect(attempts[0]?.idempotencyKey).toBeTruthy();
+    expect(attempts[1]?.idempotencyKey).toBe(attempts[0]?.idempotencyKey);
   });
 
   test("end-to-end API + Transfer runtime loads, edits, pays, uploads and downloads attachments", async () => {

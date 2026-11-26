@@ -8,6 +8,10 @@ export default function Route() {
   const rawId = param(params.id) ?? "new";
   const mode = param(params.mode) === "edit" ? "edit" : "view";
   return (
-    <ExpenseDetailScreen id={rawId === "new" ? "new" : (rawId as ExpenseId)} initialMode={mode} />
+    <ExpenseDetailScreen
+      key={`${rawId}:${mode}`}
+      id={rawId === "new" ? "new" : (rawId as ExpenseId)}
+      initialMode={mode}
+    />
   );
 }

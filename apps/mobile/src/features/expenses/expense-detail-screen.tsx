@@ -8,11 +8,12 @@ import type {
   PaymentMethod,
   VatTreatment,
 } from "@kvitbit/domain/contract";
-import { describeError, idempotencyHeaders, ifMatchHeaders, uuidV7 } from "@kvitbit/ui-port/api";
+import { MoneyMath } from "@kvitbit/domain/contract";
+import { describeError, idempotencyHeaders, ifMatchHeaders } from "@kvitbit/ui-port/api";
 import { formatDate, formatMoney } from "@kvitbit/ui-port/format";
-import { Effect } from "effect";
+import { BigDecimal, Option } from "effect";
 import { Download, Edit3, Paperclip, Plus, Share2, Trash2, Upload } from "lucide-react-native";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { StyleSheet, View } from "react-native";
 import { useI18n } from "../../i18n/i18n-provider";
 import { navigate } from "../../navigation/routes";
@@ -36,6 +37,8 @@ import {
   useOverlay,
 } from "../../ui";
 import { useWorkspace } from "../../workspace/workspace-provider";
+import { canWriteWorkspace } from "../dashboard/model";
+import { useRequestMutation } from "../documents/request-mutation";
 import { defaultReceiptPicker, type ReceiptPicker } from "./capture-picker";
 import {
   buildExpensePayload,
@@ -82,13 +85,16 @@ export function ExpenseDetailScreen(props: {
   const picker = props.picker ?? defaultReceiptPicker;
 
   const { workspace } = useWorkspace();
+  const writable = canWriteWorkspace(workspace);
   const { t, text, locale, local } = useI18n();
   const api = useApi();
+  const runMutation = useRequestMutation(workspace.id);
   const transfer = useTransfer();
   const overlay = useOverlay();
 
   const [mode, setMode] = useState<"view" | "edit">(isNew ? "edit" : (props.initialMode ?? "view"));
   const [form, setForm] = useState<ExpenseFormState>(() => emptyExpenseForm());
+  const formInitialized = useRef(false);
   const [fieldErrors, setFieldErrors] = useState<Readonly<Record<string, string>>>({});
   const [bannerError, setBannerError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
@@ -122,23 +128,29 @@ export function ExpenseDetailScreen(props: {
     [workspace.id, expenseId],
   );
 
-  const loadedDetail: ExpenseDetailData | null =
-    detailRemote.state._tag === "Ready" ? decodeExpenseDetail(detailRemote.state.value) : null;
+  const loadedDetail = useMemo(
+    () =>
+      detailRemote.state._tag === "Ready" ? decodeExpenseDetail(detailRemote.state.value) : null,
+    [detailRemote.state],
+  );
 
   useEffect(() => {
-    if (loadedDetail !== null && mode === "view") {
+    if (loadedDetail !== null && (mode === "view" || !formInitialized.current)) {
       setForm(expenseFormFromDetail(loadedDetail));
+      formInitialized.current = true;
     }
   }, [loadedDetail, mode]);
 
   const startEdit = useCallback(() => {
+    if (!writable) return;
     if (loadedDetail !== null) setForm(expenseFormFromDetail(loadedDetail));
     setFieldErrors({});
     setBannerError(null);
     setMode("edit");
-  }, [loadedDetail]);
+  }, [loadedDetail, writable]);
 
   const handleSave = useCallback(async () => {
+    if (!writable || saving) return;
     setBannerError(null);
     const { payload, errors } = buildExpensePayload(form);
     if (Object.keys(errors).length > 0) {
@@ -148,8 +160,7 @@ export function ExpenseDetailScreen(props: {
     setFieldErrors({});
     setSaving(true);
     if (isNew) {
-      const key = await Effect.runPromise(uuidV7);
-      const res = await api.run((client) =>
+      const res = await runMutation("expenses.record", payload, (client, key) =>
         client.expenses.record({
           params: { workspaceId: workspace.id },
           headers: idempotencyHeaders(key),
@@ -204,10 +215,24 @@ export function ExpenseDetailScreen(props: {
       setFieldErrors(mapped);
       if (view.staleRevision) detailRemote.reload();
     }
-  }, [api, detailRemote, expenseId, form, isNew, loadedDetail, overlay, t, text, workspace]);
+  }, [
+    api,
+    detailRemote,
+    expenseId,
+    form,
+    isNew,
+    loadedDetail,
+    overlay,
+    runMutation,
+    saving,
+    t,
+    text,
+    workspace,
+    writable,
+  ]);
 
   const handleDeleteExpense = useCallback(async () => {
-    if (expenseId === null || loadedDetail === null) return;
+    if (!writable || expenseId === null || loadedDetail === null) return;
     const confirmed = await overlay.confirm({
       title: t("expenses.detail.removeTitle"),
       body: t("expenses.detail.removeBody"),
@@ -228,42 +253,51 @@ export function ExpenseDetailScreen(props: {
     } else {
       setBannerError(text(describeError(res.error).text));
     }
-  }, [api, expenseId, loadedDetail, overlay, t, text, workspace]);
+  }, [api, expenseId, loadedDetail, overlay, t, text, workspace, writable]);
 
-  const openPaymentEditor = useCallback((detail: ExpenseDetailData) => {
-    setPayAmount(remainingAmount(detail) ?? detail.total ?? "");
-    setPayDate(todayIsoDate());
-    setPayMethod("bank_transfer");
-    setPayNote("");
-    setShowPaymentForm(true);
-  }, []);
+  const openPaymentEditor = useCallback(
+    (detail: ExpenseDetailData) => {
+      if (!writable) return;
+      setPayAmount(remainingAmount(detail) ?? detail.total ?? "");
+      setPayDate(todayIsoDate());
+      setPayMethod("bank_transfer");
+      setPayNote("");
+      setShowPaymentForm(true);
+    },
+    [writable],
+  );
 
   const handleRecordPayment = useCallback(
     async (detail: ExpenseDetailData) => {
-      if (expenseId === null) return;
+      if (!writable || expenseId === null || payBusy) return;
       setBannerError(null);
-      setPayBusy(true);
-      const key = await Effect.runPromise(uuidV7);
       const cleanedAmount = payAmount.trim().replace(/\s+/g, "").replace(",", ".");
-      const res = await api.run((client) =>
-        client.payments.record({
-          params: { workspaceId: workspace.id },
-          headers: idempotencyHeaders(key),
-          payload: {
-            target: { expense: expenseId },
-            ...(cleanedAmount !== "" && detail.currency !== null
-              ? {
-                  amount: {
-                    amount: cleanedAmount as unknown as never,
-                    currency: detail.currency,
-                  },
-                }
-              : {}),
-            ...(payDate.trim() !== "" ? { paidOn: payDate.trim() as IsoDate } : {}),
-            method: payMethod,
-            ...(payNote.trim() !== "" ? { note: payNote.trim() } : {}),
-          },
-        }),
+      const amount = BigDecimal.fromString(cleanedAmount);
+      if (cleanedAmount !== "" && Option.isNone(amount)) {
+        setBannerError(
+          local({ cs: "Zadejte platnou částku.", en: "Enter a valid payment amount." }),
+        );
+        return;
+      }
+      const payload = {
+        target: { expense: expenseId },
+        ...(cleanedAmount !== "" && Option.isSome(amount) && detail.currency !== null
+          ? { amount: MoneyMath.make(amount.value, detail.currency) }
+          : {}),
+        ...(payDate.trim() !== "" ? { paidOn: payDate.trim() as IsoDate } : {}),
+        method: payMethod,
+        ...(payNote.trim() !== "" ? { note: payNote.trim() } : {}),
+      };
+      setPayBusy(true);
+      const res = await runMutation(
+        `payments.record:expense:${expenseId}`,
+        payload,
+        (client, key) =>
+          client.payments.record({
+            params: { workspaceId: workspace.id },
+            headers: idempotencyHeaders(key),
+            payload,
+          }),
       );
       setPayBusy(false);
       if (res._tag === "Ok") {
@@ -276,23 +310,27 @@ export function ExpenseDetailScreen(props: {
       }
     },
     [
-      api,
       detailRemote,
       expenseId,
+      local,
       overlay,
       payAmount,
+      payBusy,
       payDate,
       payMethod,
       payNote,
       paymentsRemote,
+      runMutation,
       t,
       text,
       workspace.id,
+      writable,
     ],
   );
 
   const handleRemovePayment = useCallback(
     async (paymentId: PaymentId) => {
+      if (!writable) return;
       const confirmed = await overlay.confirm({
         title: local({ cs: "Odebrat platbu?", en: "Remove payment?" }),
         body: t("common.confirm.reasonLabel"),
@@ -320,7 +358,18 @@ export function ExpenseDetailScreen(props: {
         setBannerError(text(describeError(res.error).text));
       }
     },
-    [api, detailRemote, local, overlay, paymentsRemote, removeReason, t, text, workspace.id],
+    [
+      api,
+      detailRemote,
+      local,
+      overlay,
+      paymentsRemote,
+      removeReason,
+      t,
+      text,
+      workspace.id,
+      writable,
+    ],
   );
 
   const handleAttachmentAction = useCallback(
@@ -351,7 +400,7 @@ export function ExpenseDetailScreen(props: {
 
   const handleDetachAttachment = useCallback(
     async (att: ExpenseAttachmentData) => {
-      if (expenseId === null) return;
+      if (!writable || expenseId === null) return;
       const confirmed = await overlay.confirm({
         title: t("expenses.attachmentViewer.detachTitle"),
         body: att.name,
@@ -372,11 +421,11 @@ export function ExpenseDetailScreen(props: {
         setBannerError(text(describeError(res.error).text));
       }
     },
-    [api, detailRemote, expenseId, overlay, t, text, workspace.id],
+    [api, detailRemote, expenseId, overlay, t, text, workspace.id, writable],
   );
 
   const handleAddAttachment = useCallback(async () => {
-    if (expenseId === null) return;
+    if (!writable || expenseId === null) return;
     setBannerError(null);
     const picked = await picker.pickDocument();
     if (picked._tag === "Cancelled") return;
@@ -411,7 +460,7 @@ export function ExpenseDetailScreen(props: {
     }
     setUploading(false);
     detailRemote.reload();
-  }, [detailRemote, expenseId, local, picker, t, text, transfer, workspace.id]);
+  }, [detailRemote, expenseId, local, picker, t, text, transfer, workspace.id, writable]);
 
   const errMsg = (key: string): string | null => {
     const code = fieldErrors[key];
@@ -424,7 +473,15 @@ export function ExpenseDetailScreen(props: {
     return code;
   };
 
-  if (mode === "edit") {
+  if (isNew && !writable) {
+    return (
+      <Screen title={t("expenses.list.new")} back>
+        <Banner text={t(workspace.closed ? "shell.closedWorkspace" : "error.forbidden")} />
+      </Screen>
+    );
+  }
+
+  if (writable && mode === "edit") {
     const vatDiff = vatBreakdownDifference(form.total, form.vatRows);
     return (
       <Screen
@@ -449,6 +506,7 @@ export function ExpenseDetailScreen(props: {
             <Button
               label={t("common.action.save")}
               busy={saving}
+              disabled={!isNew && loadedDetail === null}
               onPress={() => void handleSave()}
               testID="expense-save"
             />
@@ -674,7 +732,7 @@ export function ExpenseDetailScreen(props: {
       }}
       refreshing={detailRemote.state._tag === "Loading"}
       actions={
-        loadedDetail === null ? null : (
+        !writable || loadedDetail === null ? null : (
           <>
             <IconButton icon={Edit3} label={t("common.action.edit")} onPress={startEdit} />
             <IconButton
@@ -781,19 +839,21 @@ export function ExpenseDetailScreen(props: {
               <Section
                 title={t("enum.scopeArea.payments")}
                 action={
-                  <Button
-                    kind="tonal"
-                    label={
-                      detail.payment.settlement === "unpaid"
-                        ? t("expenses.detail.markPaid")
-                        : t("expenses.detail.partialPayment")
-                    }
-                    onPress={() => openPaymentEditor(detail)}
-                    testID="expense-record-payment-toggle"
-                  />
+                  writable ? (
+                    <Button
+                      kind="tonal"
+                      label={
+                        detail.payment.settlement === "unpaid"
+                          ? t("expenses.detail.markPaid")
+                          : t("expenses.detail.partialPayment")
+                      }
+                      onPress={() => openPaymentEditor(detail)}
+                      testID="expense-record-payment-toggle"
+                    />
+                  ) : null
                 }
               >
-                {!showPaymentForm ? null : (
+                {!writable || !showPaymentForm ? null : (
                   <Card>
                     <TextField
                       label={t("common.field.amount")}
@@ -863,11 +923,13 @@ export function ExpenseDetailScreen(props: {
                                 </Text>
                                 {p.note === null ? null : <Text variant="bodySmall">{p.note}</Text>}
                               </View>
-                              <IconButton
-                                icon={Trash2}
-                                label={t("common.action.remove")}
-                                onPress={() => void handleRemovePayment(p.id)}
-                              />
+                              {writable ? (
+                                <IconButton
+                                  icon={Trash2}
+                                  label={t("common.action.remove")}
+                                  onPress={() => void handleRemovePayment(p.id)}
+                                />
+                              ) : null}
                             </View>
                           </Card>
                         ))}
@@ -880,18 +942,20 @@ export function ExpenseDetailScreen(props: {
               <Section
                 title={t("expenses.detail.attachments")}
                 action={
-                  <Button
-                    kind="outlined"
-                    icon={Upload}
-                    label={
-                      uploading
-                        ? t("common.state.uploadingPercent", { percent: uploadProgress })
-                        : t("expenses.detail.addFiles")
-                    }
-                    busy={uploading}
-                    onPress={() => void handleAddAttachment()}
-                    testID="expense-add-attachment"
-                  />
+                  writable ? (
+                    <Button
+                      kind="outlined"
+                      icon={Upload}
+                      label={
+                        uploading
+                          ? t("common.state.uploadingPercent", { percent: uploadProgress })
+                          : t("expenses.detail.addFiles")
+                      }
+                      busy={uploading}
+                      onPress={() => void handleAddAttachment()}
+                      testID="expense-add-attachment"
+                    />
+                  ) : null
                 }
               >
                 {detail.attachments.length === 0 ? (
@@ -929,11 +993,13 @@ export function ExpenseDetailScreen(props: {
                           onPress={() => void handleAttachmentAction(att, "share")}
                           testID={`attachment-share-${att.id}`}
                         />
-                        <IconButton
-                          icon={Trash2}
-                          label={t("expenses.attachmentViewer.detach")}
-                          onPress={() => void handleDetachAttachment(att)}
-                        />
+                        {writable ? (
+                          <IconButton
+                            icon={Trash2}
+                            label={t("expenses.attachmentViewer.detach")}
+                            onPress={() => void handleDetachAttachment(att)}
+                          />
+                        ) : null}
                       </View>
                     </Card>
                   ))

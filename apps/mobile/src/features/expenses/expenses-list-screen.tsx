@@ -23,6 +23,7 @@ import {
   TextField,
 } from "../../ui";
 import { useWorkspace } from "../../workspace/workspace-provider";
+import { canWriteWorkspace } from "../dashboard/model";
 import {
   decodeExpenseSummary,
   type ExpenseSettlement,
@@ -50,6 +51,7 @@ export function ExpensesListScreen(props: {
   readonly initialSearch?: string;
 }) {
   const { workspace } = useWorkspace();
+  const writable = canWriteWorkspace(workspace);
   const { t, locale, local } = useI18n();
   const api = useApi();
 
@@ -84,12 +86,14 @@ export function ExpensesListScreen(props: {
   }, []);
 
   const openCapture = useCallback(() => {
+    if (!writable) return;
     navigate({ _tag: "ExpenseCapture", ws: workspace.slug });
-  }, [workspace.slug]);
+  }, [workspace.slug, writable]);
 
   const openNew = useCallback(() => {
+    if (!writable) return;
     navigate({ _tag: "Expense", ws: workspace.slug, id: "new", mode: "edit" });
-  }, [workspace.slug]);
+  }, [workspace.slug, writable]);
 
   const openDetail = useCallback(
     (id: ExpenseId) => {
@@ -134,10 +138,12 @@ export function ExpensesListScreen(props: {
       onRefresh={handleRefresh}
       refreshing={remote.state._tag === "Loading"}
       actions={
-        <>
-          <IconButton icon={Camera} label={t("expenses.capture.title")} onPress={openCapture} />
-          <IconButton icon={Plus} label={t("expenses.list.new")} onPress={openNew} />
-        </>
+        writable ? (
+          <>
+            <IconButton icon={Camera} label={t("expenses.capture.title")} onPress={openCapture} />
+            <IconButton icon={Plus} label={t("expenses.list.new")} onPress={openNew} />
+          </>
+        ) : null
       }
     >
       <View style={styles.filters}>
@@ -172,7 +178,9 @@ export function ExpensesListScreen(props: {
               <EmptyState
                 title={t("expenses.list.empty.title")}
                 body={t("expenses.list.empty.mobile")}
-                action={{ label: t("expenses.capture.title"), onPress: openCapture }}
+                {...(writable
+                  ? { action: { label: t("expenses.capture.title"), onPress: openCapture } }
+                  : {})}
               />
             );
           }
