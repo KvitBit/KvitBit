@@ -28,11 +28,12 @@ import { DeliveryJobsLive } from "../../src/wiring/workflows";
 import { asCaller, runSqlCore } from "../persistence/conformance/sqlCore";
 
 test.each([
-  { succeeds: true, expectedAttempts: 2, terminal: "sent" },
-  { succeeds: false, expectedAttempts: 3, terminal: "failed" },
+  { succeeds: true, expired: false, expectedAttempts: 2, terminal: "sent" },
+  { succeeds: false, expired: false, expectedAttempts: 3, terminal: "failed" },
+  { succeeds: false, expired: true, expectedAttempts: 0, terminal: "failed" },
 ])(
   "delivery persists $terminal after $expectedAttempts attempts",
-  async ({ succeeds, expectedAttempts, terminal }) => {
+  async ({ succeeds, expired, expectedAttempts, terminal }) => {
     const user = {
       userId: UserId.make("01950000-0000-7000-8000-000000000001"),
       name: "Owner",
@@ -82,6 +83,12 @@ test.each([
             const { deliveryId: id } = yield* documents.send(doc.id, {
               to: ["buyer@example.test"],
             });
+            if (expired) {
+              // A recovered intent keeps its original time budget even without a live execution.
+              const sql = yield* SqlClient.SqlClient;
+              yield* sql`UPDATE deliveries SET workflow_started_at = '2020-01-01T00:00:00Z'
+                WHERE workspace_id = ${caller.workspaceId} AND id = ${id}`;
+            }
             const outcome = yield* DocumentDeliveryWorkflow.execute({
               workspaceId: caller.workspaceId,
               deliveryId: id,
@@ -102,7 +109,7 @@ test.each([
       value: { outcome: terminal, status: terminal },
     });
     expect(attemptedKeys).toHaveLength(expectedAttempts);
-    expect(new Set(attemptedKeys).size).toBe(1);
+    if (!expired) expect(new Set(attemptedKeys).size).toBe(1);
   },
   30_000,
 );

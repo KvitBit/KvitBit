@@ -198,7 +198,17 @@ export const makeWorkflowHandlersLayer = (options: WorkflowHandlerOptions = {}) 
         }),
         execute: Effect.gen(function* () {
           const status = yield* deliveryJob.claim(workspaceId, deliveryId).pipe(Effect.orDie);
-          return { status, deadline: (yield* Clock.currentTimeMillis) + DELIVERY_RETRY_WINDOW_MS };
+          if (isTerminalDelivery(status)) return { status, deadline: 0 };
+
+          const sql = yield* SqlClient.SqlClient;
+          const now = yield* Clock.currentTimeMillis;
+          const [timing] = yield* sql<{ readonly started_ms: number }>`
+            UPDATE deliveries
+            SET workflow_started_at = COALESCE(workflow_started_at, ${new Date(now)})
+            WHERE workspace_id = ${workspaceId} AND id = ${deliveryId}
+            RETURNING EXTRACT(EPOCH FROM workflow_started_at)::double precision * 1000 AS started_ms
+          `.pipe(Effect.orDie);
+          return { status, deadline: (timing?.started_ms ?? now) + DELIVERY_RETRY_WINDOW_MS };
         }),
       });
 
@@ -212,9 +222,8 @@ export const makeWorkflowHandlersLayer = (options: WorkflowHandlerOptions = {}) 
         success: Schema.Literals(["queued", "sending", "sent", "failed", "skipped"]),
         error: DeliveryRetryError,
         execute: Effect.gen(function* () {
-          const attempt = yield* Activity.CurrentAttempt;
           const now = yield* Clock.currentTimeMillis;
-          if (attempt > 1 && now >= claimed.deadline) {
+          if (now >= claimed.deadline) {
             return yield* Effect.fail({
               _tag: "DeliveryRetry" as const,
               deliveryId,
