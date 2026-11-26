@@ -17,6 +17,7 @@ import { HttpRouter } from "effect/http";
 import { AllRoutesLive, EdgeServicesLive } from "./app";
 import { ServerConfig } from "./config";
 import { PersistenceLive, PgDatabaseLive } from "./persistence";
+import { ServerDocumentProjectionsLive } from "./projections/documents";
 import {
   ClusterClientRuntimeLive,
   CronsLive,
@@ -24,6 +25,8 @@ import {
   WorkflowHandlersLive,
 } from "./runtime";
 import { CoreExternalPortsLive } from "./wiring";
+
+const ServerCoreLive = ServerDocumentProjectionsLive.pipe(Layer.provideMerge(CoreLive));
 
 const ServerRuntimeLive = Layer.unwrap(
   Effect.gen(function* () {
@@ -43,7 +46,7 @@ const ServerRuntimeLive = Layer.unwrap(
 
     if (config.runnerMode === "cluster") {
       return httpLayer.pipe(
-        Layer.provide(CoreLive),
+        Layer.provide(ServerCoreLive),
         Layer.provide(IdGeneratorLive),
         Layer.provide(CoreExternalPortsLive),
         Layer.provide(PersistenceLive),
@@ -54,7 +57,7 @@ const ServerRuntimeLive = Layer.unwrap(
 
     const singleNodeWorkers = Layer.mergeAll(WorkflowHandlersLive, CronsLive);
     return Layer.merge(httpLayer, singleNodeWorkers).pipe(
-      Layer.provide(CoreLive),
+      Layer.provide(ServerCoreLive),
       Layer.provide(IdGeneratorLive),
       Layer.provide(CoreExternalPortsLive),
       Layer.provide(PersistenceLive),

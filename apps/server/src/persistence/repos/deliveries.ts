@@ -5,13 +5,23 @@ import type {
   DeliveryId,
   DeliveryPurpose,
   DocumentId,
+  ImageRef,
   IsoDate,
   Locale,
   PdfTemplate,
   WorkspaceId,
 } from "@kvitbit/domain/contract";
-import { Effect, Layer, Schema } from "effect";
+import { BigDecimal, Effect, Layer, Schema } from "effect";
 import { SqlClient } from "effect/sql";
+import {
+  attachDeliverySnapshot,
+  type DeliveryBrandingSnapshot,
+  type DeliveryRenderSnapshot,
+  markLegacyDeliveryView,
+  projectDocumentFromSql,
+  readDeliverySnapshot,
+  readLegacyDeliveryInfo,
+} from "../../projections/documents";
 import { asStringArray, parseJson, toJsonb } from "../codec";
 import { unavailable } from "../errors";
 import { col, type DbRow, decodeEach, makeTable, type TableSpec } from "../table";
@@ -22,6 +32,52 @@ type DeliveryStatus = DeliveryRecord["status"];
 const documentViewJson = Schema.toCodecJson(DocumentsModule.DocumentViewCodec);
 const encodeDocumentView = Schema.encodeSync(documentViewJson);
 const decodeDocumentView = Schema.decodeUnknownSync(documentViewJson);
+
+interface SerializedDeliverySnapshot {
+  readonly variableSymbol: string | null;
+  readonly orderNumber: string | null;
+  readonly note: string | null;
+  readonly amountDue: string;
+  readonly template: PdfTemplate;
+  readonly branding?: DeliveryBrandingSnapshot | undefined;
+}
+
+const decodeRenderModel = (
+  raw: unknown,
+  meta: { readonly deliveryId: DeliveryId; readonly workspaceId: WorkspaceId },
+): DeliveryRecord["view"] => {
+  const parsed = parseJson<Record<string, unknown>>(raw);
+  const snapshotRaw = parsed.__snapshot as SerializedDeliverySnapshot | undefined;
+  const { __snapshot: _ignored, ...viewJson } = parsed;
+  const view = decodeDocumentView(viewJson);
+  if (snapshotRaw !== undefined) {
+    const snapshot: DeliveryRenderSnapshot = {
+      variableSymbol: snapshotRaw.variableSymbol,
+      orderNumber: snapshotRaw.orderNumber,
+      note: snapshotRaw.note,
+      amountDue: BigDecimal.fromStringUnsafe(snapshotRaw.amountDue),
+      template: snapshotRaw.template,
+      branding: snapshotRaw.branding,
+    };
+    return attachDeliverySnapshot(view, snapshot);
+  }
+  return markLegacyDeliveryView(view, meta);
+};
+
+const encodeRenderModel = (view: DeliveryRecord["view"]): string => {
+  const encoded = encodeDocumentView(view) as Record<string, unknown>;
+  const snapshot = readDeliverySnapshot(view);
+  if (snapshot === undefined) return JSON.stringify(encoded);
+  const serialized: SerializedDeliverySnapshot = {
+    variableSymbol: snapshot.variableSymbol,
+    orderNumber: snapshot.orderNumber,
+    note: snapshot.note,
+    amountDue: BigDecimal.format(snapshot.amountDue),
+    template: snapshot.template,
+    ...(snapshot.branding === undefined ? {} : { branding: snapshot.branding }),
+  };
+  return JSON.stringify({ ...encoded, __snapshot: serialized });
+};
 
 const decodeRow = (row: DbRow): DeliveryRecord => {
   const reminder =
@@ -52,7 +108,10 @@ const decodeRow = (row: DbRow): DeliveryRecord => {
     replyTo: (row.reply_to as string | null) ?? null,
     language: row.language as Locale,
     subject: row.subject as string,
-    view: decodeDocumentView(parseJson<unknown>(row.render_model)),
+    view: decodeRenderModel(row.render_model, {
+      deliveryId: row.id as DeliveryId,
+      workspaceId: row.workspace_id as WorkspaceId,
+    }),
     attachment,
     contactId: row.contact_id as ContactId,
     arms: Boolean(row.arms),
@@ -114,7 +173,7 @@ const spec: TableSpec<DeliveryRecord> = {
     reply_to: row.replyTo,
     language: row.language,
     subject: row.subject,
-    render_model: JSON.stringify(encodeDocumentView(row.view)),
+    render_model: encodeRenderModel(row.view),
     attachment: toJsonb(row.attachment),
     contact_id: row.contactId,
     arms: row.arms,
@@ -140,9 +199,96 @@ export const DeliveriesRepoSql: Layer.Layer<DeliveriesRepo, never, SqlClient.Sql
       const table = makeTable(sql, spec);
 
       return DeliveriesRepo.of({
-        get: (workspaceId, id) => table.get(workspaceId, id),
+        get: (workspaceId, id) =>
+          table.get(workspaceId, id).pipe(
+            Effect.flatMap((row) => {
+              if (row.status !== "sending" || readLegacyDeliveryInfo(row.view) === undefined) {
+                return Effect.succeed(row);
+              }
+              const updatedAt = new Date().toISOString();
+              return sql`
+                update deliveries
+                set status = 'failed',
+                    failure = ${"delivery.snapshot_missing"},
+                    revision = revision + 1,
+                    updated_at = ${updatedAt}::timestamptz
+                where workspace_id = ${workspaceId}
+                  and id = ${id}
+                  and revision = ${row.revision}
+                  and status = 'sending'
+              `.pipe(Effect.catch(unavailable), Effect.andThen(table.get(workspaceId, id)));
+            }),
+          ),
         lock: (workspaceId, id) => table.lock(workspaceId, id),
-        insert: table.insert,
+        insert: (row) =>
+          Effect.gen(function* () {
+            const wsRows = yield* sql<{
+              readonly revision: number;
+              readonly pdf_template: PdfTemplate;
+              readonly accent_color: string | null;
+              readonly footer_text: string | null;
+              readonly logo: unknown;
+              readonly stamp: unknown;
+            }>`
+              select revision, pdf_template, accent_color, footer_text, logo, stamp
+              from workspaces
+              where id = ${row.workspaceId}
+              limit 1
+            `.pipe(Effect.catch(unavailable));
+            const wsRow = wsRows[0];
+            const effectiveTemplate =
+              row.attachment.template === "classic" && wsRow !== undefined
+                ? wsRow.pdf_template
+                : row.attachment.template;
+            const brandingSnapshot: DeliveryBrandingSnapshot | undefined =
+              wsRow === undefined
+                ? undefined
+                : {
+                    workspaceRevision: Number(wsRow.revision),
+                    accentColor: wsRow.accent_color ?? "#1F5FAF",
+                    footerText: wsRow.footer_text ?? null,
+                    logo:
+                      wsRow.logo === null || wsRow.logo === undefined
+                        ? null
+                        : parseJson<ImageRef>(wsRow.logo),
+                    stamp:
+                      wsRow.stamp === null || wsRow.stamp === undefined
+                        ? null
+                        : parseJson<ImageRef>(wsRow.stamp),
+                  };
+            const issuer = row.view.issuer as unknown as DocumentsModule.IssuerSnapshotRecord;
+            const projected = yield* projectDocumentFromSql(sql, row.workspaceId, row.documentId, {
+              kind: row.view.kind,
+              status: row.view.status,
+              number: row.view.number,
+              currency: row.view.totals.gross.currency,
+              issuer,
+              dueOn: row.view.dates.dueOn,
+            }).pipe(Effect.catch(unavailable));
+
+            const enrichedView =
+              projected === undefined
+                ? row.view
+                : attachDeliverySnapshot(
+                    projected.paymentQr === null
+                      ? { ...row.view }
+                      : { ...row.view, paymentQr: projected.paymentQr },
+                    {
+                      variableSymbol: projected.variableSymbol,
+                      orderNumber: projected.orderNumber,
+                      note: projected.note,
+                      amountDue: projected.amountDue,
+                      template: effectiveTemplate,
+                      branding: brandingSnapshot,
+                    },
+                  );
+
+            return yield* table.insert({
+              ...row,
+              view: enrichedView,
+              attachment: { ...row.attachment, template: effectiveTemplate },
+            });
+          }),
         update: table.update,
         byDocument: (workspaceId, documentId) =>
           table.select(workspaceId, sql`document_id = ${documentId}`, sql`order by sequence asc`),

@@ -12,11 +12,22 @@ import {
   setCounter,
   tryReserveNumber,
 } from "@kvitbit/adapters/sql";
+import type { DocumentsModule } from "@kvitbit/core";
 import type { CoreStoreShape, RequestLogEntry, RequestScope } from "@kvitbit/core/ports";
 import { CoreStore, type StoreUnavailable } from "@kvitbit/core/ports";
-import type { AuditEntry, RequestKey, WorkspaceId } from "@kvitbit/domain/contract";
+import type {
+  AuditEntry,
+  CurrencyCode,
+  DocumentId,
+  DocumentKind,
+  DocumentStatus,
+  IsoDate,
+  RequestKey,
+  WorkspaceId,
+} from "@kvitbit/domain/contract";
 import { Cause, Context, Effect, Layer, Option } from "effect";
 import { SqlClient } from "effect/sql";
+import { projectDocumentFromSql } from "../projections/documents";
 import { isLockConflict, unavailable } from "./errors";
 import { col, type DbRow } from "./table";
 
@@ -183,14 +194,61 @@ export const makeCoreStoreSql = Effect.gen(function* () {
           return { _tag: "Existing" as const, entry };
         }),
       complete: (entry) =>
-        db(
-          completeRequest(adapterScope(entry.scope), {
+        Effect.gen(function* () {
+          let result: unknown = entry.result === undefined ? null : entry.result;
+          if (entry.scope._tag === "Workspace" && result !== null && typeof result === "object") {
+            const wsId = entry.scope.workspaceId;
+            const enrichEncodedView = (candidate: unknown) =>
+              Effect.gen(function* () {
+                if (candidate === null || typeof candidate !== "object") return candidate;
+                const obj = candidate as Record<string, unknown>;
+                if (
+                  typeof obj.id !== "string" ||
+                  (obj.status !== "issued" && obj.status !== "draft") ||
+                  obj.paymentQr !== null ||
+                  typeof obj.kind !== "string" ||
+                  obj.issuer === null ||
+                  typeof obj.issuer !== "object" ||
+                  obj.totals === null ||
+                  typeof obj.totals !== "object" ||
+                  obj.dates === null ||
+                  typeof obj.dates !== "object"
+                ) {
+                  return candidate;
+                }
+                const totals = obj.totals as { gross?: { currency?: unknown } };
+                const dates = obj.dates as { dueOn?: unknown };
+                if (typeof totals.gross?.currency !== "string") return candidate;
+                const projected = yield* projectDocumentFromSql(sql, wsId, obj.id as DocumentId, {
+                  kind: obj.kind as DocumentKind,
+                  status: obj.status as DocumentStatus,
+                  number: typeof obj.number === "string" ? obj.number : null,
+                  currency: totals.gross.currency as CurrencyCode,
+                  issuer: obj.issuer as DocumentsModule.IssuerSnapshotRecord,
+                  dueOn: typeof dates.dueOn === "string" ? (dates.dueOn as IsoDate) : null,
+                });
+                return projected === undefined || projected.paymentQr === null
+                  ? candidate
+                  : { ...obj, paymentQr: projected.paymentQr };
+              });
+
+            const rec = result as Record<string, unknown>;
+            if ("document" in rec && rec.document !== null && typeof rec.document === "object") {
+              result = {
+                ...rec,
+                document: yield* enrichEncodedView(rec.document),
+              };
+            } else {
+              result = yield* enrichEncodedView(result);
+            }
+          }
+          yield* completeRequest(adapterScope(entry.scope), {
             requestKey: entry.key,
             method: entry.method,
             payloadHash: entry.fingerprint,
-            result: entry.result === undefined ? null : entry.result,
-          }),
-        ),
+            result: result as Record<string, unknown> | null,
+          });
+        }).pipe(db),
     },
     audit: {
       append: (workspaceId, entry) =>

@@ -11,8 +11,11 @@ import { NodeRuntime } from "@effect/platform-node";
 import { CoreLive, IdGeneratorLive } from "@kvitbit/core";
 import { Effect, Layer } from "effect";
 import { PersistenceLive, PgWorkerDatabaseLive } from "./persistence";
+import { ServerDocumentProjectionsLive } from "./projections/documents";
 import { ClusterWorkerRuntimeLive, CronsLive, WorkflowHandlersLive } from "./runtime";
 import { CoreExternalPortsLive } from "./wiring";
+
+const ServerCoreLive = ServerDocumentProjectionsLive.pipe(Layer.provideMerge(CoreLive));
 
 /**
  * Complete worker composition:
@@ -20,11 +23,11 @@ import { CoreExternalPortsLive } from "./wiring";
  *    locks per rule S5, falling back to `DATABASE_URL`).
  * 2. `ClusterWorkerRuntimeLive` starts the HTTP runner (`Sharding`, `WorkflowEngine`).
  * 3. `PersistenceLive` + `CoreExternalPortsLive` + `IdGeneratorLive` provide all persistence and external ports.
- * 4. `CoreLive` provides all 9 domain modules + job services (`RecurringIssuance`, `ExportJobs`, `FxFixings`).
+ * 4. `CoreLive` + `ServerDocumentProjectionsLive` provide all 9 domain modules + job services + server read projections.
  * 5. `WorkflowHandlersLive` and `CronsLive` register the 4 workflows and 5 ClusterCrons.
  */
 export const WorkerLive = Layer.mergeAll(WorkflowHandlersLive, CronsLive).pipe(
-  Layer.provideMerge(CoreLive),
+  Layer.provideMerge(ServerCoreLive),
   Layer.provideMerge(IdGeneratorLive),
   Layer.provideMerge(CoreExternalPortsLive),
   Layer.provideMerge(PersistenceLive),
