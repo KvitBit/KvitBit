@@ -5,7 +5,7 @@ description: >-
   changes to apps/web/src, the web entry or build configuration, or
   packages/ui-port/src/theme.
 metadata:
-  sync_commit: "9b80e0134cb9ef64039047b0c63ec8e1fb3e2986"
+  sync_commit: "999b1599b64374db766214e1bcf413ccf5f7b70c"
   bun: "1.4.2"
   node: "24.18.0"
   effect: "4.1.4"
@@ -43,9 +43,10 @@ through Effect services.
 `HtmlServer` smoke tests render route groups in cs and en. Playwright
 hydrates server markup through the production browser entry, asserts DOM
 node reuse, and changes a preference through the adopted control. It also
-covers native mobile-app navigation, public PDF downloads, appearance
-changes, and a magic-link callback that recovers from a failed membership
-request on desktop and mobile. The browser suite uses demo responses.
+covers in-app focus and Back scroll restoration, Price List search history,
+native mobile-app navigation, public PDF downloads, appearance changes,
+and a magic-link callback that recovers from a failed membership request.
+Both desktop and mobile profiles use demo responses.
 The typed API and server integrations have their own checks.
 
 ## Run
@@ -70,6 +71,6 @@ that record in a verification commit after the product changes.
 
 The recorded product commit passed the frozen install, root lint and
 typecheck, web tests, static build and asset checks, and formal digest check.
-Playwright passed both profiles on port `34803` with one worker. The
+Playwright passed both profiles on port `40315` with one worker. The
 build includes the ALTCHA worker, hashed JavaScript and CSS, brand assets,
 and fonts.
