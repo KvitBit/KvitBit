@@ -13,6 +13,7 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./docker/postgres-init:/docker-entrypoint-initdb.d:ro
+      - ./docker/reconcile-app-role.sh:/usr/local/bin/reconcile-app-role.sh:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-kvitbit} -d ${POSTGRES_DB:-kvitbit}"]
       interval: 5s
@@ -34,6 +35,7 @@ services:
       # to bundled postgres when DATABASE_URL is not pointing at an external database.
       DATABASE_URL_UNPOOLED: ${DATABASE_MIGRATION_URL:-${DATABASE_URL_UNPOOLED:-}}
       KVITBIT_RUNTIME_DATABASE_URL: ${DATABASE_URL:-}
+      KVITBIT_BUNDLED_DATABASE_NAME: ${POSTGRES_DB:-kvitbit}
       KVITBIT_BUNDLED_MIGRATION_URL: postgres://${POSTGRES_USER:-kvitbit}:${POSTGRES_PASSWORD:-kvitbit}@postgres:5432/${POSTGRES_DB:-kvitbit}
 
   reconcile-roles:
@@ -57,6 +59,7 @@ services:
       DATABASE_URL_UNPOOLED: ${DATABASE_MIGRATION_URL:-${DATABASE_URL_UNPOOLED:-}}
     volumes:
       - ./docker/reconcile-app-role.sh:/usr/local/bin/reconcile-app-role.sh:ro
+      - ./docker/database-target.sh:/usr/local/bin/database-target.sh:ro
 
   kvitbit:
     build:

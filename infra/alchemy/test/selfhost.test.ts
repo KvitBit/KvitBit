@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { randomUUID } from "node:crypto";
 import {
   chmodSync,
   existsSync,
@@ -168,6 +169,63 @@ describe("docker/entrypoint.sh dispatch contract (#878, #908, #913)", () => {
     expect(arbitrary.exitCode).toBe(0);
     expect(arbitrary.stdout.trim()).toBe("kvitbit-ok");
   });
+
+  test("uses bundled migration credentials only for the same PostgreSQL destination", () => {
+    const sandbox = mkdtempSync(join(tmpdir(), "kvitbit-ep-migrate-"));
+    try {
+      const serverDir = join(sandbox, "apps/server/src");
+      mkdirSync(serverDir, { recursive: true });
+      writeFileSync(join(serverDir, "migrate.ts"), "// migrate\n");
+      const fakeBun = join(sandbox, "fake-bun.sh");
+      writeFileSync(fakeBun, '#!/bin/sh\nprintf "%s\\n" "$DATABASE_URL_UNPOOLED"\n');
+      chmodSync(fakeBun, 0o755);
+
+      const bundledUrl = "postgres://owner:synthetic@postgres:5432/kvitbit";
+      const ownerUrl = "postgres://owner:synthetic@postgres:5432/other";
+      const migrate = (url: string, owner?: string) =>
+        runEntrypoint(["migrate"], {
+          KVITBIT_APP_ROOT: sandbox,
+          KVITBIT_BUN_BIN: fakeBun,
+          KVITBIT_RUNTIME_DATABASE_URL: url,
+          KVITBIT_BUNDLED_DATABASE_NAME: "kvitbit",
+          KVITBIT_BUNDLED_MIGRATION_URL: bundledUrl,
+          ...(owner === undefined ? {} : { DATABASE_MIGRATION_URL: owner }),
+        });
+
+      const same = migrate("postgresql://app:p%40ss@Postgres/kvit%62it?sslmode=disable");
+      expect(same.exitCode).toBe(0);
+      expect(same.stdout.trim()).toBe(bundledUrl);
+
+      for (const url of [
+        "postgres://app:synthetic@postgres:5432/other",
+        "postgres://app:synthetic@postgres:5433/kvitbit",
+        "postgres://app:synthetic@away.invalid:5432/kvitbit?application_name=@postgres:5432",
+        "postgres://app:synthetic@postgres:5432/kvitbit?%68ost=away.invalid",
+        "postgres://app:synthetic@postgres:5432/kvitbit?port=5433",
+        "postgres://app:synthetic@postgres:5432/kvitbit?dbname=other",
+      ]) {
+        const rejected = migrate(url);
+        expect(rejected.exitCode).toBe(64);
+        expect(rejected.stdout).toBe("");
+        expect(rejected.stderr).not.toContain("synthetic");
+      }
+
+      const explicit = migrate("postgres://app:synthetic@postgres:5432/other", ownerUrl);
+      expect(explicit.exitCode).toBe(0);
+      expect(explicit.stdout.trim()).toBe(ownerUrl);
+
+      const invalidFallback = runEntrypoint(["migrate"], {
+        KVITBIT_APP_ROOT: sandbox,
+        KVITBIT_BUN_BIN: fakeBun,
+        KVITBIT_BUNDLED_DATABASE_NAME: "kvitbit",
+        KVITBIT_BUNDLED_MIGRATION_URL: ownerUrl,
+      });
+      expect(invalidFallback.exitCode).toBe(64);
+      expect(invalidFallback.stdout).toBe("");
+    } finally {
+      rmSync(sandbox, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("Self-hosting and CI deploy artifacts", () => {
@@ -205,22 +263,16 @@ describe("Self-hosting and CI deploy artifacts", () => {
     const compose = readFileSync(join(repoRoot, "docker-compose.yml"), "utf8");
     const initScriptPath = join(repoRoot, "docker/postgres-init/01-create-app-role.sh");
     const reconcileScriptPath = join(repoRoot, "docker/reconcile-app-role.sh");
+    const targetScriptPath = join(repoRoot, "docker/database-target.sh");
     expect(existsSync(initScriptPath)).toBe(true);
     expect(existsSync(reconcileScriptPath)).toBe(true);
 
-    for (const scriptPath of [initScriptPath, reconcileScriptPath]) {
+    for (const scriptPath of [initScriptPath, reconcileScriptPath, targetScriptPath]) {
       const syntax = Bun.spawnSync(["sh", "-n", scriptPath], {
         stdout: "pipe",
         stderr: "pipe",
       });
       expect(syntax.exitCode).toBe(0);
-
-      const content = readFileSync(scriptPath, "utf8");
-      expect(content).toContain("NOSUPERUSER NOCREATEDB NOCREATEROLE");
-      expect(content).toContain("GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES");
-      expect(content).toContain("ALTER DEFAULT PRIVILEGES FOR ROLE");
-      expect(content).toContain("ARRAY['public', 'auth']");
-      expect(content).toContain("rolsuper OR v_role.rolcreatedb OR v_role.rolcreaterole");
     }
 
     const parsed = Bun.YAML.parse(compose) as {
@@ -241,6 +293,9 @@ describe("Self-hosting and CI deploy artifacts", () => {
     expect(parsed.services.postgres.volumes).toContain(
       "./docker/postgres-init:/docker-entrypoint-initdb.d:ro",
     );
+    expect(parsed.services.postgres.volumes).toContain(
+      "./docker/reconcile-app-role.sh:/usr/local/bin/reconcile-app-role.sh:ro",
+    );
     expect(parsed.services.migrate.environment.DATABASE_URL_UNPOOLED).toContain(
       "DATABASE_URL_UNPOOLED",
     );
@@ -253,6 +308,9 @@ describe("Self-hosting and CI deploy artifacts", () => {
     expect(parsed.services["reconcile-roles"].volumes).toContain(
       "./docker/reconcile-app-role.sh:/usr/local/bin/reconcile-app-role.sh:ro",
     );
+    expect(parsed.services["reconcile-roles"].volumes).toContain(
+      "./docker/database-target.sh:/usr/local/bin/database-target.sh:ro",
+    );
     expect(parsed.services.kvitbit.depends_on["reconcile-roles"]?.condition).toBe(
       "service_completed_successfully",
     );
@@ -264,236 +322,280 @@ describe("Self-hosting and CI deploy artifacts", () => {
     expect(compose).toContain("KVITBIT_RUNNER_MODE: single");
   });
 
-  test("Postgres role reconciliation grants DML on public and auth schemas for fresh and existing volumes, denies DDL, and rejects role collision or elevated roles", async () => {
-    const pgBinDir = ["/usr/lib/postgresql/18/bin", "/usr/lib/postgresql/17/bin"].find((dir) =>
-      existsSync(join(dir, "initdb")),
-    );
-    if (pgBinDir === undefined) {
-      throw new Error("Expected local PostgreSQL binaries (initdb/postgres) to be installed");
-    }
-
-    const sandbox = mkdtempSync(join(tmpdir(), "kvitbit-pg-roles-"));
-    const dataDir = join(sandbox, "pgdata");
-    const socketDir = join(sandbox, "sock");
-    mkdirSync(socketDir, { recursive: true });
-
-    let pgProc: ReturnType<typeof Bun.spawn> | undefined;
-    try {
-      const initdb = Bun.spawnSync(
+  test("PostgreSQL 17 init and reconcile keep credentials private and enforce DML-only runtime roles", async () => {
+    const container = `kvitbit-pg-roles-${randomUUID()}`;
+    const owner = "kvitbit";
+    const ownerPassword = "synthetic-pg-owner";
+    const passwordMarker = "synthetic-runtime-password-sentinel";
+    const password = `${passwordMarker}-'quoted`;
+    const fresh = "kvitbit_fresh";
+    const existing = "kvitbit_existing";
+    const migration = join(repoRoot, "packages/db/drizzle/20261123175822_init/migration.sql");
+    const runDocker = (args: ReadonlyArray<string>) => {
+      const result = Bun.spawnSync(["docker", ...args], { stdout: "pipe", stderr: "pipe" });
+      return {
+        exitCode: result.exitCode,
+        stdout: result.stdout.toString(),
+        stderr: result.stderr.toString(),
+      };
+    };
+    const exec = (args: ReadonlyArray<string>, env: Record<string, string> = {}) =>
+      runDocker([
+        "exec",
+        ...Object.entries(env).flatMap(([key, value]) => ["--env", `${key}=${value}`]),
+        container,
+        ...args,
+      ]);
+    const psql = (db: string, args: ReadonlyArray<string>, user = owner) =>
+      exec(
         [
-          join(pgBinDir, "initdb"),
-          "-D",
-          dataDir,
-          "-U",
-          "kvitbit",
-          "--auth=trust",
-          "--no-sync",
-          "--no-instructions",
-        ],
-        { stdout: "pipe", stderr: "pipe" },
-      );
-      expect(initdb.exitCode).toBe(0);
-
-      pgProc = Bun.spawn(
-        [
-          join(pgBinDir, "postgres"),
-          "-D",
-          dataDir,
-          "-k",
-          socketDir,
+          "psql",
+          "-XqAt",
+          "-v",
+          "ON_ERROR_STOP=1",
           "-h",
-          "",
-          "-c",
-          "fsync=off",
-          "-c",
-          "synchronous_commit=off",
-          "-c",
-          "full_page_writes=off",
+          "127.0.0.1",
+          "-U",
+          user,
+          "-d",
+          db,
+          ...args,
         ],
-        { stdout: "pipe", stderr: "pipe" },
+        { PGPASSWORD: user === owner ? ownerPassword : password },
+      );
+    const sql = (db: string, statement: string, user?: string) => psql(db, ["-c", statement], user);
+    const assertOk = (result: ReturnType<typeof runDocker>) => {
+      if (result.exitCode !== 0) throw new Error(result.stderr.replaceAll(password, "[redacted]"));
+      return result.stdout.trim();
+    };
+    const assertPrivate = (result: ReturnType<typeof runDocker>) => {
+      expect(result.stdout.includes(passwordMarker)).toBe(false);
+      expect(result.stderr.includes(passwordMarker)).toBe(false);
+    };
+
+    try {
+      assertOk(
+        runDocker([
+          "run",
+          "--detach",
+          "--rm",
+          "--name",
+          container,
+          "--env",
+          `POSTGRES_USER=${owner}`,
+          "--env",
+          `POSTGRES_PASSWORD=${ownerPassword}`,
+          "--env",
+          `POSTGRES_DB=${fresh}`,
+          "--env",
+          `POSTGRES_APP_PASSWORD=${password}`,
+          "--mount",
+          `type=bind,src=${join(repoRoot, "docker/postgres-init")},dst=/docker-entrypoint-initdb.d,readonly`,
+          "--mount",
+          `type=bind,src=${join(repoRoot, "docker/reconcile-app-role.sh")},dst=/usr/local/bin/reconcile-app-role.sh,readonly`,
+          "--mount",
+          `type=bind,src=${join(repoRoot, "docker/database-target.sh")},dst=/usr/local/bin/database-target.sh,readonly`,
+          "--mount",
+          `type=bind,src=${migration},dst=/migration.sql,readonly`,
+          "postgres:17-alpine",
+        ]),
       );
 
-      // Wait for Postgres socket readiness
-      let ready = false;
-      for (let i = 0; i < 40; i += 1) {
-        const probe = Bun.spawnSync(
-          ["psql", "-h", socketDir, "-U", "kvitbit", "-d", "postgres", "-c", "SELECT 1"],
-          { stdout: "pipe", stderr: "pipe" },
-        );
+      let version = "";
+      for (let attempt = 0; attempt < 50; attempt++) {
+        const probe = sql(fresh, "SHOW server_version_num");
         if (probe.exitCode === 0) {
-          ready = true;
+          version = probe.stdout.trim();
           break;
         }
         await Bun.sleep(100);
       }
-      expect(ready).toBe(true);
+      if (!version)
+        throw new Error(runDocker(["logs", container]).stderr.replaceAll(password, "[redacted]"));
+      expect(version).toMatch(/^17[0-9]{4}$/);
+      assertPrivate(runDocker(["logs", container]));
+      expect(assertOk(sql(fresh, "SELECT current_user", "kvitbit_app"))).toBe("kvitbit_app");
 
-      const psql = (args: ReadonlyArray<string>, extraEnv: Record<string, string> = {}) =>
-        Bun.spawnSync(["psql", "-v", "ON_ERROR_STOP=1", "-h", socketDir, ...args], {
-          env: { PATH: process.env.PATH ?? "/usr/bin:/bin", ...extraEnv },
-          stdout: "pipe",
-          stderr: "pipe",
+      const init = "/docker-entrypoint-initdb.d/01-create-app-role.sh";
+      const reconcile = "/usr/local/bin/reconcile-app-role.sh";
+      const roleScript = (
+        script: string,
+        db: string,
+        role: string,
+        env: Record<string, string> = {},
+      ) => {
+        const result = exec(["sh", script], {
+          PGHOST: "127.0.0.1",
+          PGPORT: "5432",
+          PGPASSWORD: ownerPassword,
+          POSTGRES_DB: db,
+          POSTGRES_APP_USER: role,
+          POSTGRES_APP_PASSWORD: password,
+          ...env,
         });
-
-      const initScriptPath = join(repoRoot, "docker/postgres-init/01-create-app-role.sh");
-      const reconcileScriptPath = join(repoRoot, "docker/reconcile-app-role.sh");
-      const initMigrationSql = join(
-        repoRoot,
-        "packages/db/drizzle/20261123175822_init/migration.sql",
+        assertPrivate(result);
+        return result;
+      };
+      const runtimeUrl = `postgres://kvitbit_app:synthetic@127.0.0.1/${fresh}`;
+      assertOk(psql(fresh, ["-f", "/migration.sql"]));
+      assertOk(
+        roleScript(reconcile, fresh, "kvitbit_app", { KVITBIT_RUNTIME_DATABASE_URL: runtimeUrl }),
       );
-
-      // Create fresh DB and existing-volume DB
       expect(
-        psql(["-U", "kvitbit", "-d", "postgres", "-c", "CREATE DATABASE kvitbit_fresh;"]).exitCode,
-      ).toBe(0);
-      expect(
-        psql(["-U", "kvitbit", "-d", "postgres", "-c", "CREATE DATABASE kvitbit_existing;"])
-          .exitCode,
-      ).toBe(0);
-
-      const runRoleScript = (script: string, env: Record<string, string>) =>
-        Bun.spawnSync(["sh", script], {
-          env: {
-            PATH: process.env.PATH ?? "/usr/bin:/bin",
-            PGHOST: socketDir,
-            ...env,
-          },
-          stdout: "pipe",
-          stderr: "pipe",
-        });
-
-      // 1. Fresh volume: initdb script -> Drizzle migrations -> post-migration reconcile
-      expect(
-        runRoleScript(initScriptPath, {
-          POSTGRES_USER: "kvitbit",
-          POSTGRES_DB: "kvitbit_fresh",
-          POSTGRES_APP_USER: "kvitbit_app",
-          POSTGRES_APP_PASSWORD: "app_password_1",
-        }).exitCode,
-      ).toBe(0);
-
-      expect(psql(["-U", "kvitbit", "-d", "kvitbit_fresh", "-f", initMigrationSql]).exitCode).toBe(
-        0,
-      );
-
-      expect(
-        runRoleScript(reconcileScriptPath, {
-          POSTGRES_USER: "kvitbit",
-          POSTGRES_DB: "kvitbit_fresh",
-          POSTGRES_APP_USER: "kvitbit_app",
-          POSTGRES_APP_PASSWORD: "app_password_1",
-        }).exitCode,
-      ).toBe(0);
-
-      // Verify kvitbit_app can SELECT & INSERT on auth.user / auth.account and public.workspaces
-      expect(
-        psql([
-          "-U",
-          "kvitbit_app",
-          "-d",
-          "kvitbit_fresh",
-          "-c",
-          `INSERT INTO auth."user" (id, name, email, email_verified, created_at, updated_at)
-           VALUES ('u1', 'Ada', 'ada@example.com', true, now(), now());
-           INSERT INTO auth.account (id, account_id, provider_id, user_id, created_at, updated_at)
-           VALUES ('a1', 'acc1', 'credential', 'u1', now(), now());
-           SELECT count(*) FROM auth.account;
-           SELECT count(*) FROM public.workspaces;`,
-        ]).exitCode,
-      ).toBe(0);
-
-      // Verify kvitbit_app is denied DDL in both public and auth schemas
-      expect(
-        psql([
-          "-U",
-          "kvitbit_app",
-          "-d",
-          "kvitbit_fresh",
-          "-c",
-          "CREATE TABLE public.should_fail (id int);",
-        ]).exitCode,
-      ).not.toBe(0);
-      expect(
-        psql([
-          "-U",
-          "kvitbit_app",
-          "-d",
-          "kvitbit_fresh",
-          "-c",
-          "CREATE TABLE auth.should_fail (id int);",
-        ]).exitCode,
-      ).not.toBe(0);
-      expect(
-        psql(["-U", "kvitbit_app", "-d", "kvitbit_fresh", "-c", "DROP TABLE auth.account;"])
-          .exitCode,
-      ).not.toBe(0);
-
-      // 2. Existing volume upgrade: NO initdb script ran; migrations exist; reconcile creates role & grants
-      expect(
-        psql(["-U", "kvitbit", "-d", "kvitbit_existing", "-f", initMigrationSql]).exitCode,
-      ).toBe(0);
-      expect(
-        runRoleScript(reconcileScriptPath, {
-          POSTGRES_USER: "kvitbit",
-          POSTGRES_DB: "kvitbit_existing",
-          POSTGRES_APP_USER: "kvitbit_app_existing",
-          POSTGRES_APP_PASSWORD: "app_password_2",
-        }).exitCode,
-      ).toBe(0);
-      expect(
-        psql([
-          "-U",
-          "kvitbit_app_existing",
-          "-d",
-          "kvitbit_existing",
-          "-c",
-          "SELECT count(*) FROM auth.account; SELECT count(*) FROM public.workspaces;",
-        ]).exitCode,
-      ).toBe(0);
-      expect(
-        psql([
-          "-U",
-          "kvitbit_app_existing",
-          "-d",
-          "kvitbit_existing",
-          "-c",
-          "CREATE TABLE auth.should_fail_existing (id int);",
-        ]).exitCode,
-      ).not.toBe(0);
-
-      // 3. Role-name collision (POSTGRES_USER == POSTGRES_APP_USER) is rejected by BOTH scripts
-      for (const script of [initScriptPath, reconcileScriptPath]) {
-        const collision = runRoleScript(script, {
-          POSTGRES_USER: "kvitbit",
-          POSTGRES_DB: "kvitbit_fresh",
-          POSTGRES_APP_USER: "kvitbit",
-          POSTGRES_APP_PASSWORD: "any",
-        });
-        expect(collision.exitCode).not.toBe(0);
+        assertOk(
+          sql(
+            fresh,
+            `
+        INSERT INTO auth."user" (id, name, email, email_verified, created_at, updated_at)
+        VALUES ('u1', 'Ada', 'ada@example.com', true, now(), now());
+        INSERT INTO auth.account (id, account_id, provider_id, user_id, created_at, updated_at)
+        VALUES ('a1', 'acc1', 'credential', 'u1', now(), now());
+        SELECT count(*) FROM auth.account;
+        SELECT count(*) FROM public.workspaces;
+      `,
+            "kvitbit_app",
+          ),
+        ),
+      ).toBe("1\n0");
+      for (const ddl of [
+        "CREATE SCHEMA should_fail",
+        "CREATE TABLE public.should_fail (id int)",
+        "CREATE TABLE auth.should_fail (id int)",
+        "DROP TABLE auth.account",
+      ]) {
+        expect(sql(fresh, ddl, "kvitbit_app").stderr).toMatch(/permission denied|must be owner/);
       }
 
-      // 4. Pre-existing elevated role (SUPERUSER / CREATEDB / CREATEROLE) is rejected by BOTH scripts
-      expect(
-        psql(["-U", "kvitbit", "-d", "postgres", "-c", "CREATE ROLE elevated_app LOGIN SUPERUSER;"])
-          .exitCode,
-      ).toBe(0);
-      for (const script of [initScriptPath, reconcileScriptPath]) {
-        const elevated = runRoleScript(script, {
-          POSTGRES_USER: "kvitbit",
-          POSTGRES_DB: "kvitbit_fresh",
-          POSTGRES_APP_USER: "elevated_app",
-          POSTGRES_APP_PASSWORD: "any",
-        });
-        expect(elevated.exitCode).not.toBe(0);
+      assertOk(sql(fresh, `CREATE DATABASE ${existing}`));
+      assertOk(psql(existing, ["-f", "/migration.sql"]));
+      assertOk(roleScript(reconcile, existing, "new_app"));
+      expect(assertOk(sql(existing, "SELECT count(*) FROM auth.account", "new_app"))).toBe("0");
+
+      const wrongDbUrl = { KVITBIT_RUNTIME_DATABASE_URL: `${runtimeUrl}_other` };
+      const wrongDb = roleScript(reconcile, fresh, "unselected_app", wrongDbUrl);
+      expect(wrongDb.exitCode).toBe(64);
+      expect(wrongDb.stderr).toContain("different database");
+      assertOk(
+        roleScript(reconcile, fresh, "unselected_app", {
+          ...wrongDbUrl,
+          DATABASE_URL_UNPOOLED: "postgres://owner:synthetic@127.0.0.1/kvitbit_fresh_other",
+        }),
+      );
+      assertOk(
+        roleScript(reconcile, fresh, "unselected_app", {
+          KVITBIT_RUNTIME_DATABASE_URL: `${runtimeUrl}?port=5433`,
+        }),
+      );
+      expect(assertOk(sql(fresh, "SELECT to_regrole('unselected_app') IS NULL"))).toBe("t");
+
+      assertOk(
+        sql(
+          existing,
+          `
+        CREATE ROLE actual_db_owner;
+        ALTER DATABASE ${existing} OWNER TO actual_db_owner;
+        CREATE ROLE owner_member;
+        GRANT actual_db_owner TO owner_member WITH INHERIT FALSE, SET TRUE;
+        CREATE ROLE configured_owner_member;
+        GRANT ${owner} TO configured_owner_member WITH INHERIT FALSE, SET TRUE;
+        CREATE ROLE superuser_member;
+        CREATE ROLE member_bridge;
+        CREATE ROLE elevated_superuser SUPERUSER;
+        GRANT elevated_superuser TO member_bridge WITH INHERIT FALSE, SET TRUE;
+        GRANT member_bridge TO superuser_member WITH INHERIT FALSE, SET TRUE;
+        CREATE ROLE set_role_app;
+        CREATE ROLE inherit_role_app;
+        CREATE ROLE schema_creator;
+        GRANT CREATE ON SCHEMA auth TO schema_creator;
+        GRANT schema_creator TO set_role_app WITH INHERIT FALSE, SET TRUE;
+        GRANT schema_creator TO inherit_role_app WITH INHERIT TRUE, SET FALSE;
+        CREATE ROLE elevated_createdb CREATEDB;
+        CREATE ROLE elevated_createrole CREATEROLE;
+        CREATE ROLE elevated_bypassrls BYPASSRLS;
+        CREATE ROLE elevated_replication REPLICATION;
+      `,
+        ),
+      );
+
+      for (const [script, role] of [
+        [init, "init_app"],
+        [reconcile, "reconcile_app"],
+      ] as const) {
+        assertOk(
+          sql(
+            existing,
+            `
+          CREATE ROLE ${role};
+          GRANT CREATE ON DATABASE ${existing} TO ${role};
+          GRANT CREATE ON SCHEMA public, auth TO ${role};
+        `,
+          ),
+        );
+        assertOk(roleScript(script, existing, role));
+        expect(
+          assertOk(
+            sql(
+              existing,
+              `
+          SELECT has_database_privilege(current_user, current_database(), 'CREATE'),
+                 has_schema_privilege(current_user, 'public', 'CREATE'),
+                 has_schema_privilege(current_user, 'auth', 'CREATE')
+        `,
+              role,
+            ),
+          ),
+        ).toBe("f|f|f");
+        expect(assertOk(sql(existing, "SELECT count(*) FROM public.workspaces", role))).toBe("0");
+
+        for (const [invalidRole, diagnostic] of [
+          [owner, "must name different roles"],
+          ["actual_db_owner", "owns the database or belongs"],
+          ["owner_member", "owns the database or belongs"],
+          ["configured_owner_member", "owns the database or belongs"],
+          ["superuser_member", "owns the database or belongs"],
+          ["set_role_app", "effective CREATE privileges"],
+          ["inherit_role_app", "effective CREATE privileges"],
+          ...["superuser", "createdb", "createrole", "bypassrls", "replication"].map(
+            (flag) => [`elevated_${flag}`, "Refusing elevated runtime role"] as const,
+          ),
+        ] as const) {
+          const result = roleScript(script, existing, invalidRole);
+          expect(result.stderr).toContain(diagnostic);
+          expect(result.exitCode).not.toBe(0);
+        }
+
+        for (const target of [`DATABASE ${existing}`, "SCHEMA public"]) {
+          assertOk(
+            sql(
+              existing,
+              `
+            GRANT CREATE ON DATABASE ${existing} TO ${role};
+            GRANT CREATE ON ${target} TO PUBLIC;
+          `,
+            ),
+          );
+          const result = roleScript(script, existing, role);
+          expect(result.exitCode).not.toBe(0);
+          expect(result.stderr).toContain("effective CREATE privileges");
+          assertOk(sql(existing, `REVOKE CREATE ON ${target} FROM PUBLIC`));
+          // A failed check rolls back the role script's direct grant changes.
+          expect(
+            assertOk(
+              sql(
+                existing,
+                `
+            SELECT has_database_privilege('${role}', current_database(), 'CREATE')
+          `,
+              ),
+            ),
+          ).toBe("t");
+          assertOk(roleScript(script, existing, role));
+        }
       }
     } finally {
-      if (pgProc !== undefined) {
-        pgProc.kill("SIGTERM");
-        await pgProc.exited;
-      }
-      rmSync(sandbox, { recursive: true, force: true });
+      runDocker(["rm", "-f", container]);
     }
-  }, 30_000);
+  }, 45_000);
 
   test("flake.nix has valid bun.nix, writable OCI storage dirs for uid 10001, and separate NixOS migration credentials", () => {
     const flake = readFileSync(join(repoRoot, "flake.nix"), "utf8");
