@@ -493,6 +493,16 @@ closing_credit_breakdowns AS (
 			(cn."total_net" IS NOT NULL AND cn."total_net" <> rb_cn.net_amt)
 			OR (cn."total_vat" IS NOT NULL AND cn."total_vat" <> rb_cn.vat_amt)
 			OR (cn."total_gross" IS NOT NULL AND cn."total_gross" <> rb_cn.raw_gross_amt)
+			OR (
+				COALESCE(agg.has_vat_czk, false)
+				AND COALESCE(agg.rem_vat_czk, 0::numeric) <> 0
+				AND NOT EXISTS (
+					SELECT 1
+					FROM "document_lines" AS cl_line
+					WHERE cl_line."workspace_id" = cn."workspace_id"
+						AND cl_line."document_id" = cn."id"
+				)
+			)
 		)
 		AND (cn."total_net" IS NULL OR cn."total_net" = -COALESCE(agg.rem_net, 0::numeric))
 		AND (cn."total_vat" IS NULL OR cn."total_vat" = -COALESCE(agg.rem_vat, 0::numeric))

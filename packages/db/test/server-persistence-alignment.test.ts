@@ -67,6 +67,10 @@ const cnRemainderNullGrossClosing = "0190a000-0000-7000-8000-000000000327";
 const docEurTwoPartialsOrig = "0190a000-0000-7000-8000-000000000328";
 const cnEurPartial1 = "0190a000-0000-7000-8000-000000000329";
 const cnEurPartial2 = "0190a000-0000-7000-8000-00000000032a";
+const docEurClosedCzkOrig = "0190a000-0000-7000-8000-00000000032b";
+const cnEurClosedPartial1 = "0190a000-0000-7000-8000-00000000032c";
+const cnEurClosedPartial2 = "0190a000-0000-7000-8000-00000000032d";
+const cnEurClosedLineless = "0190a000-0000-7000-8000-00000000032e";
 
 // Deliveries
 const del1 = "0190a000-0000-7000-8000-000000000401";
@@ -409,7 +413,16 @@ beforeAll(async () => {
       ('${cnEurPartial1}', '${wsVat}', 'credit_note', 'issued', 'CN20260011', '${contactVat}', 'EUR', 'en', 'bank_transfer',
        '2026-01-11', '2026-01-11', '-0.04', '-0.01', '-0.05', null, false, '25.40', 1, 'cnb', null),
       ('${cnEurPartial2}', '${wsVat}', 'credit_note', 'issued', 'CN20260012', '${contactVat}', 'EUR', 'en', 'bank_transfer',
-       '2026-01-12', '2026-01-12', '-0.04', '-0.01', '-0.05', null, false, '25.40', 1, 'cnb', null);
+       '2026-01-12', '2026-01-12', '-0.04', '-0.01', '-0.05', null, false, '25.40', 1, 'cnb', null),
+      -- Same two EUR partials followed by a line-less full correction closing the 0.01 CZK VAT residual
+      ('${docEurClosedCzkOrig}', '${wsVat}', 'invoice', 'issued', '20260014', '${contactVat}', 'EUR', 'en', 'bank_transfer',
+       '2026-01-10', '2026-01-24', '0.08', '0.02', '0.10', null, true, '25.40', 1, 'cnb', null),
+      ('${cnEurClosedPartial1}', '${wsVat}', 'credit_note', 'issued', 'CN20260013', '${contactVat}', 'EUR', 'en', 'bank_transfer',
+       '2026-01-11', '2026-01-11', '-0.04', '-0.01', '-0.05', null, false, '25.40', 1, 'cnb', null),
+      ('${cnEurClosedPartial2}', '${wsVat}', 'credit_note', 'issued', 'CN20260014', '${contactVat}', 'EUR', 'en', 'bank_transfer',
+       '2026-01-12', '2026-01-12', '-0.04', '-0.01', '-0.05', null, false, '25.40', 1, 'cnb', null),
+      ('${cnEurClosedLineless}', '${wsVat}', 'credit_note', 'issued', 'CN20260015', '${contactVat}', 'EUR', 'en', 'bank_transfer',
+       '2026-01-13', '2026-01-13', '0.00', '0.00', '0.00', null, false, '25.40', 1, 'cnb', null);
 
     insert into document_lines (
       id, workspace_id, document_id, position, description, quantity, unit_price, vat,
@@ -436,7 +449,10 @@ beforeAll(async () => {
       (gen_random_uuid(), '${wsVat}', '${cnRemainderNullGrossClosing}', 1, 'Closing credit', '-1', '0.01', 'standard', null, null),
       (gen_random_uuid(), '${wsVat}', '${docEurTwoPartialsOrig}', 1, 'EUR micro', '2', '0.04', 'standard', null, null),
       (gen_random_uuid(), '${wsVat}', '${cnEurPartial1}', 1, 'EUR partial 1', '-1', '0.04', 'standard', null, null),
-      (gen_random_uuid(), '${wsVat}', '${cnEurPartial2}', 1, 'EUR partial 2', '-1', '0.04', 'standard', null, null);
+      (gen_random_uuid(), '${wsVat}', '${cnEurPartial2}', 1, 'EUR partial 2', '-1', '0.04', 'standard', null, null),
+      (gen_random_uuid(), '${wsVat}', '${docEurClosedCzkOrig}', 1, 'EUR micro', '2', '0.04', 'standard', null, null),
+      (gen_random_uuid(), '${wsVat}', '${cnEurClosedPartial1}', 1, 'EUR partial 1', '-1', '0.04', 'standard', null, null),
+      (gen_random_uuid(), '${wsVat}', '${cnEurClosedPartial2}', 1, 'EUR partial 2', '-1', '0.04', 'standard', null, null);
 
     insert into document_relations (workspace_id, from_document_id, to_document_id, relation) values
       -- 'corrects' only
@@ -465,7 +481,11 @@ beforeAll(async () => {
       ('${wsVat}', '${cnRemainderNullGrossClosing}', '${docRemainderNullGrossOrig}', 'corrects'),
       -- Two EUR partial credits leaving 0.01 CZK VAT open
       ('${wsVat}', '${cnEurPartial1}', '${docEurTwoPartialsOrig}', 'corrects'),
-      ('${wsVat}', '${cnEurPartial2}', '${docEurTwoPartialsOrig}', 'corrects');
+      ('${wsVat}', '${cnEurPartial2}', '${docEurTwoPartialsOrig}', 'corrects'),
+      -- Two EUR partial credits + line-less full correction closing the 0.01 CZK VAT residual
+      ('${wsVat}', '${cnEurClosedPartial1}', '${docEurClosedCzkOrig}', 'corrects'),
+      ('${wsVat}', '${cnEurClosedPartial2}', '${docEurClosedCzkOrig}', 'corrects'),
+      ('${wsVat}', '${cnEurClosedLineless}', '${docEurClosedCzkOrig}', 'corrects');
 
     insert into payments (id, workspace_id, document_id, amount, currency, paid_on, method, removed_at) values
       -- Partially paid: 50 of 121
@@ -649,6 +669,9 @@ describe("server persistence alignment migration (populated upgrade)", () => {
     expect(byId.get(cnRemainderNullGrossClosing)?.settlement).toBe("unpaid");
     // Two EUR partial credits leave 0.01 CZK VAT open (0.51 - 0.25 - 0.25), so NOT credited
     expect(byId.get(docEurTwoPartialsOrig)?.settlement).toBe("paid");
+    // Adding a line-less closing credit closes the 0.01 CZK VAT residual, marking original credited
+    expect(byId.get(docEurClosedCzkOrig)?.settlement).toBe("credited");
+    expect(byId.get(cnEurClosedLineless)?.settlement).toBe("unpaid");
     expect(byId.get(docPartialCreditPaid)).toEqual({
       id: docPartialCreditPaid,
       paid_amount: "60",
@@ -786,5 +809,22 @@ describe("server persistence alignment migration (populated upgrade)", () => {
     if (!eurPartial1.vatCzk || !eurPartial2.vatCzk) throw new Error("missing EUR vatCzk");
     expect(BigDecimal.format(eurPartial1.vatCzk.amount)).toBe("-0.25");
     expect(BigDecimal.format(eurPartial2.vatCzk.amount)).toBe("-0.25");
+
+    // Line-less closing credit closes the 0.01 CZK VAT residual with exact bucket and total vatCzk
+    const eurLineless = decoded.get(cnEurClosedLineless);
+    if (!eurLineless) throw new Error("missing cnEurClosedLineless");
+    expect(BigDecimal.format(eurLineless.net.amount)).toBe("0");
+    expect(BigDecimal.format(eurLineless.vat.amount)).toBe("0");
+    expect(BigDecimal.format(eurLineless.gross.amount)).toBe("0");
+    expect(eurLineless.vatCzk).not.toBeNull();
+    if (!eurLineless.vatCzk) throw new Error("missing cnEurClosedLineless vatCzk");
+    expect(BigDecimal.format(eurLineless.vatCzk.amount)).toBe("-0.01");
+    expect(eurLineless.buckets).toHaveLength(1);
+    const eurLinelessBucket = eurLineless.buckets[0];
+    if (!eurLinelessBucket || eurLinelessBucket.vatCzk === null) {
+      throw new Error("missing cnEurClosedLineless bucket vatCzk");
+    }
+    expect(eurLinelessBucket.treatment).toBe("standard");
+    expect(BigDecimal.format(eurLinelessBucket.vatCzk)).toBe("-0.01");
   });
 });
