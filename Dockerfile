@@ -66,6 +66,7 @@ COPY --from=prod-deps --chown=10001:10001 /app/packages ./packages
 COPY --from=prod-deps --chown=10001:10001 /app/apps ./apps
 COPY --from=builder --chown=10001:10001 /app/public ./public
 COPY --chmod=0755 docker/entrypoint.sh /usr/local/bin/kvitbit
+COPY docker/database-target.sh /usr/local/bin/database-target.sh
 
 ENV NODE_ENV=production \
     HOST=0.0.0.0 \

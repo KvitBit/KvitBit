@@ -41,16 +41,16 @@ case "$cmd" in
     ;;
 
   migrate)
-    if [ -z "${DATABASE_URL_UNPOOLED:-}" ]; then
-      if [ -n "${KVITBIT_RUNTIME_DATABASE_URL:-}" ]; then
-        case "${KVITBIT_RUNTIME_DATABASE_URL}" in
-          *"@postgres:"*|*"@postgres/"*)
-            ;;
-          *)
-            echo "kvitbit: DATABASE_URL points to an external database, so DATABASE_MIGRATION_URL or DATABASE_URL_UNPOOLED must be set for migrations (refusing to silently migrate bundled postgres)" >&2
-            exit 64
-            ;;
-        esac
+    if [ -n "${DATABASE_MIGRATION_URL:-}" ]; then
+      export DATABASE_URL_UNPOOLED="$DATABASE_MIGRATION_URL"
+    elif [ -z "${DATABASE_URL_UNPOOLED:-}" ]; then
+      if [ -n "${KVITBIT_RUNTIME_DATABASE_URL:-}${KVITBIT_BUNDLED_DATABASE_NAME:-}" ]; then
+        . "$(dirname "$0")/database-target.sh"
+        if [ -z "${KVITBIT_BUNDLED_MIGRATION_URL:-}" ] ||
+          ! kvitbit_compare_database_target "$KVITBIT_BUNDLED_MIGRATION_URL" postgres 5432 "${KVITBIT_BUNDLED_DATABASE_NAME:-}"; then
+          echo "kvitbit: DATABASE_URL must point to the bundled PostgreSQL host, port and database to use bundled migration credentials. Set DATABASE_MIGRATION_URL or DATABASE_URL_UNPOOLED for an external database or a different database on the same server." >&2
+          exit 64
+        fi
       fi
       if [ -n "${KVITBIT_BUNDLED_MIGRATION_URL:-}" ]; then
         export DATABASE_URL_UNPOOLED="${KVITBIT_BUNDLED_MIGRATION_URL}"
