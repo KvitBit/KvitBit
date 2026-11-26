@@ -2,8 +2,7 @@
  * All 28 MCP tools (http-mcp-contracts sections 6.5, 6.6, 6.8, 6.9):
  * - Exact tool names, input/output JSON Schemas, and annotations from `@kvitbit/api-contract`.
  * - Read-only filtering on `tools/list` via `can(caller, action)`.
- * - Two-step preview -> confirm with stateless HMAC tokens, single-use replay rejection via
- *   `RequestOutcome` + core request log (`mcp-confirm:<id>`), and subject revision re-checks.
+ * - Durable approvals for two-step tools, replayed through the core request log.
  */
 import {
   type ConfirmationDocumentSummary,
@@ -32,7 +31,6 @@ import {
   MCP_EMBEDDED_PDF_MAX_BYTES,
   MCP_TOOLS,
   type McpToolName,
-  mcpConfirmRequestKey,
   mcpRequestKey,
   NoArgs,
   RecordExpenseArgs,
@@ -52,6 +50,7 @@ import {
   Contacts,
   type CoreError,
   type CurrentCaller,
+  type DocumentPatch,
   Documents,
   type DocumentView,
   Expenses,
@@ -60,19 +59,19 @@ import {
   Payments,
   PriceList,
   Reports,
+  type RequestKey,
+  TemplateInput,
   Templates,
+  type TemplateView,
   Workspaces,
 } from "@kvitbit/domain/contract";
 import { RequestOutcome } from "@kvitbit/domain/ports";
-import { BigDecimal, Clock, Data, Effect, Redacted, Schema, SchemaIssue, Stream } from "effect";
+import { BigDecimal, Data, Effect, Schema, SchemaIssue, Stream } from "effect";
 import type { AuthenticatedMcpCaller } from "./caller";
-import type { McpConfigShape } from "./config";
 import {
-  type ConsumedConfirmationCache,
-  confirmationExpiredError,
+  type ConfirmationSubject,
   confirmationRequiredError,
-  mintConfirmationToken,
-  verifyConfirmationToken,
+  McpConfirmations,
 } from "./confirmation";
 import { coreErrorToolResult, type McpToolCallResult } from "./errors";
 
@@ -218,6 +217,22 @@ const okResult = (
 const formatDecimal = (value: BigDecimal.BigDecimal): string =>
   BigDecimal.format(BigDecimal.normalize(value));
 
+// The request log restores decimal values from text, which can change their in-memory scale.
+const normalizeConfirmedValue = (value: unknown): unknown => {
+  if (BigDecimal.isBigDecimal(value)) return BigDecimal.normalize(value);
+  if (Array.isArray(value)) return value.map(normalizeConfirmedValue);
+  if (value === null || typeof value !== "object") return value;
+  return Object.fromEntries(
+    Object.entries(value).map(([key, entry]) => [key, normalizeConfirmedValue(entry)]),
+  );
+};
+
+const confirmedDocument = (text: string, document: DocumentView): McpToolCallResult =>
+  okResult(text, {
+    _tag: "Confirmed",
+    result: { document: normalizeConfirmedValue(document) },
+  });
+
 type ConfirmationSendSummaryType = typeof ConfirmationSendSummary.Type;
 
 const compact = <T extends object>(
@@ -252,6 +267,40 @@ const documentSummaryOf = (
   ...(doc.number !== null ? { number: doc.number } : {}),
   ...(estimated === true ? { estimated: true } : {}),
 });
+
+const documentWarnings = (doc: DocumentView): ReadonlyArray<string> => {
+  const { issuer } = doc;
+  return doc.paymentMethod === "bank_transfer" &&
+    issuer !== null &&
+    typeof issuer === "object" &&
+    "bankAccount" in issuer &&
+    issuer.bankAccount === null
+    ? ["document.no_bank_account_for_currency"]
+    : [];
+};
+
+const templatePreviewInput = (template: TemplateView, patch: DocumentPatch | undefined) =>
+  Effect.gen(function* () {
+    const { number, refreshParties, fx, ...fields } = patch ?? {};
+    if (template.archived === true || number !== undefined || refreshParties !== undefined) {
+      return yield* new Conflict({ reason: "illegal_transition" });
+    }
+    const {
+      name: _name,
+      fx: templateFx,
+      ...defaults
+    } = yield* Schema.decodeUnknownEffect(Schema.toType(TemplateInput))(template.input).pipe(
+      Effect.orDie,
+    );
+    const resolvedFx = fx === undefined ? templateFx : fx;
+    return {
+      ...defaults,
+      ...fields,
+      contact: fields.contact ?? defaults.contact,
+      lines: fields.lines ?? defaults.lines,
+      ...(resolvedFx != null ? { fx: resolvedFx } : {}),
+    };
+  });
 
 const buildConfirmationRequired = (params: {
   readonly action: McpToolName;
@@ -308,71 +357,13 @@ export type McpToolServices =
   | Contacts
   | PriceList
   | Templates
-  | Reports;
-
-export interface ToolCallContext {
-  readonly auth: AuthenticatedMcpCaller;
-  readonly config: McpConfigShape;
-  readonly consumedCache: ConsumedConfirmationCache;
-}
-
-const runConfirmed = <A, E, R>(
-  ctx: ToolCallContext,
-  tool: McpToolName,
-  rawArgs: Readonly<Record<string, unknown>>,
-  token: ConfirmationToken,
-  execute: (verified: {
-    readonly confirmationId: string;
-    readonly subjectRevision: number | null;
-    readonly requestKey: ReturnType<typeof mcpConfirmRequestKey>;
-  }) => Effect.Effect<A, E | CoreError, R>,
-): Effect.Effect<A, E | CoreError, R> =>
-  Effect.gen(function* () {
-    const nowMillis = yield* Clock.currentTimeMillis;
-    const nowSeconds = Math.floor(nowMillis / 1000);
-    const verified = yield* verifyConfirmationToken({
-      key: Redacted.value(ctx.config.confirmationKey),
-      token,
-      context: {
-        workspaceId: ctx.auth.grant.workspaceId,
-        grantId: ctx.auth.grant.grantId,
-        userId: ctx.auth.principal.userId,
-        tool,
-      },
-      args: rawArgs,
-      nowMillis,
-    });
-    if (ctx.consumedCache.has(verified.confirmationId, nowSeconds)) {
-      return yield* confirmationExpiredError();
-    }
-    const outcome = yield* makeRequestOutcome;
-    const result = yield* execute({
-      confirmationId: verified.confirmationId,
-      subjectRevision: verified.subjectRevision,
-      requestKey: mcpConfirmRequestKey(verified.confirmationId),
-    }).pipe(Effect.provideService(RequestOutcome, outcome));
-    const wasReplayed = yield* outcome.replayed;
-    if (wasReplayed) {
-      ctx.consumedCache.markConsumed(
-        verified.confirmationId,
-        verified.expiresAtSeconds,
-        nowSeconds,
-      );
-      return yield* confirmationExpiredError();
-    }
-    ctx.consumedCache.markConsumed(verified.confirmationId, verified.expiresAtSeconds, nowSeconds);
-    return result;
-  });
-
-const checkRevision = (expected: number | null, actual: number): Effect.Effect<void, Conflict> =>
-  expected !== null && actual !== expected
-    ? Effect.fail(new Conflict({ reason: "revision_changed", currentRevision: actual }))
-    : Effect.void;
+  | Reports
+  | McpConfirmations;
 
 export const callTool = (
   name: string,
   rawArgs: unknown,
-  ctx: ToolCallContext,
+  auth: AuthenticatedMcpCaller,
 ): Effect.Effect<McpToolCallResult, ToolInvalidParams, McpToolServices | CurrentCaller> =>
   Effect.gen(function* () {
     const def = TOOL_BY_NAME.get(name);
@@ -384,8 +375,26 @@ export const callTool = (
       return yield* new ToolInvalidParams({ message: "Tool arguments must be a JSON object" });
     }
 
-    const { caller, grant, principal } = ctx.auth;
-    const confirmationKey = Redacted.value(ctx.config.confirmationKey);
+    const { caller, grant, principal } = auth;
+    const confirmations = yield* McpConfirmations;
+    const boundArgs = normalizedInput as Record<string, unknown>;
+    const confirmationContext = (tool: McpToolName) => ({
+      workspaceId: grant.workspaceId,
+      grantId: grant.grantId,
+      userId: principal.userId,
+      tool,
+    });
+    const mint = (tool: McpToolName, revision: number | null) =>
+      confirmations.mint(confirmationContext(tool), boundArgs, revision);
+    const confirm = <A, R>(
+      tool: McpToolName,
+      token: ConfirmationToken | undefined,
+      subject: ConfirmationSubject | undefined,
+      execute: (requestKey: RequestKey) => Effect.Effect<A, CoreError, R>,
+    ) =>
+      token === undefined
+        ? Effect.fail(confirmationRequiredError())
+        : confirmations.confirm(confirmationContext(tool), boundArgs, token, subject, execute);
     const singleOutcome = yield* makeRequestOutcome;
 
     const executeTool = (): Effect.Effect<
@@ -720,53 +729,42 @@ export const callTool = (
                 requiredActions("create_from_template", { as: "issued" }),
               );
               const template = yield* templates.get(args.templateId);
-              const nowMillis = yield* Clock.currentTimeMillis;
-              const minted = mintConfirmationToken({
-                key: confirmationKey,
-                context: {
-                  workspaceId: grant.workspaceId,
-                  grantId: grant.grantId,
-                  userId: principal.userId,
-                  tool: "create_from_template",
-                },
-                args: normalizedInput as Record<string, unknown>,
-                subjectRevision: template.revision,
-                nowMillis,
-              });
+              const input = yield* templatePreviewInput(template, args.patch);
+              const documents = yield* Documents;
+              const previewDoc = yield* documents.preview(input);
+              const summary = documentSummaryOf(previewDoc);
+              const minted = yield* mint("create_from_template", template.revision);
               const templateName =
                 typeof template.name === "string" ? template.name : args.templateId;
               const confirmation = buildConfirmationRequired({
                 action: "create_from_template",
                 token: minted.token,
                 expiresAt: minted.expiresAt,
-                text: `Issue a new document from template "${templateName}" (rev ${template.revision}). Number will be assigned from the series on confirm.`,
+                text: `Issue ${summary.kind} for ${summary.contact}, ${summary.total} ${summary.currency}, due ${summary.dueOn}, from template "${templateName}". The number will be assigned on confirm.`,
+                document: summary,
+                warnings: documentWarnings(previewDoc),
               });
               return okResult(confirmation.summary.text, confirmation);
             }
 
-            const document = yield* runConfirmed(
-              ctx,
+            const document = yield* confirm(
               "create_from_template",
-              normalizedInput as Record<string, unknown>,
-              args.confirmationToken ?? ("" as ConfirmationToken),
-              ({ subjectRevision, requestKey }) =>
-                Effect.gen(function* () {
-                  const current = yield* templates.get(args.templateId);
-                  yield* checkRevision(subjectRevision, current.revision);
-                  return yield* templates.use(
-                    args.templateId,
-                    {
-                      as: "issued",
-                      ...(args.patch !== undefined ? { patch: args.patch } : {}),
-                    },
-                    { requestKey },
-                  );
-                }),
+              args.confirmationToken,
+              { table: "templates", id: args.templateId },
+              (requestKey) =>
+                templates.use(
+                  args.templateId,
+                  {
+                    as: "issued",
+                    ...(args.patch !== undefined ? { patch: args.patch } : {}),
+                  },
+                  { requestKey },
+                ),
             );
-            return okResult(`Issued document ${document.number ?? document.id} from template.`, {
-              _tag: "Confirmed",
-              result: { document },
-            });
+            return confirmedDocument(
+              `Issued document ${document.number ?? document.id} from template.`,
+              document,
+            );
           });
 
         case "issue_document":
@@ -794,19 +792,7 @@ export const callTool = (
                 previewDoc = yield* documents.preview(args.from.input);
                 subjectRevision = null;
               }
-              const nowMillis = yield* Clock.currentTimeMillis;
-              const minted = mintConfirmationToken({
-                key: confirmationKey,
-                context: {
-                  workspaceId: grant.workspaceId,
-                  grantId: grant.grantId,
-                  userId: principal.userId,
-                  tool: "issue_document",
-                },
-                args: normalizedInput as Record<string, unknown>,
-                subjectRevision,
-                nowMillis,
-              });
+              const minted = yield* mint("issue_document", subjectRevision);
               const docSummary = documentSummaryOf(previewDoc);
               const sendSummary: ConfirmationSendSummaryType | undefined =
                 args.send !== undefined
@@ -825,17 +811,17 @@ export const callTool = (
                 expiresAt: minted.expiresAt,
                 text: `Issue ${docSummary.kind} for ${docSummary.contact}, ${docSummary.total} ${docSummary.currency}${docSummary.dueOn ? `, due ${docSummary.dueOn}` : ""}.${sendNote}`,
                 document: docSummary,
+                warnings: documentWarnings(previewDoc),
                 ...(sendSummary !== undefined ? { send: sendSummary } : {}),
               });
               return okResult(confirmation.summary.text, confirmation);
             }
 
-            const document = yield* runConfirmed(
-              ctx,
+            const document = yield* confirm(
               "issue_document",
-              normalizedInput as Record<string, unknown>,
-              args.confirmationToken ?? ("" as ConfirmationToken),
-              ({ requestKey }) =>
+              args.confirmationToken,
+              undefined,
+              (requestKey) =>
                 documents.issue(
                   "draft" in args.from
                     ? { draft: args.from.draft, expectedRevision: args.from.revision }
@@ -846,10 +832,10 @@ export const callTool = (
                   },
                 ),
             );
-            return okResult(`Issued document ${document.number ?? document.id}.`, {
-              _tag: "Confirmed",
-              result: { document },
-            });
+            return confirmedDocument(
+              `Issued document ${document.number ?? document.id}.`,
+              document,
+            );
           });
 
         case "send_document":
@@ -870,19 +856,7 @@ export const callTool = (
               yield* requireActions(caller, requiredActions("send_document", {}));
               const doc = yield* documents.get(args.documentId);
               const sendPreview = yield* documents.previewSend(args.documentId, sendOptions);
-              const nowMillis = yield* Clock.currentTimeMillis;
-              const minted = mintConfirmationToken({
-                key: confirmationKey,
-                context: {
-                  workspaceId: grant.workspaceId,
-                  grantId: grant.grantId,
-                  userId: principal.userId,
-                  tool: "send_document",
-                },
-                args: normalizedInput as Record<string, unknown>,
-                subjectRevision: doc.revision,
-                nowMillis,
-              });
+              const minted = yield* mint("send_document", doc.revision);
               const confirmation = buildConfirmationRequired({
                 action: "send_document",
                 token: minted.token,
@@ -898,17 +872,11 @@ export const callTool = (
               return okResult(confirmation.summary.text, confirmation);
             }
 
-            const delivery = yield* runConfirmed(
-              ctx,
+            const delivery = yield* confirm(
               "send_document",
-              normalizedInput as Record<string, unknown>,
-              args.confirmationToken ?? ("" as ConfirmationToken),
-              ({ subjectRevision, requestKey }) =>
-                Effect.gen(function* () {
-                  const current = yield* documents.get(args.documentId);
-                  yield* checkRevision(subjectRevision, current.revision);
-                  return yield* documents.send(args.documentId, sendOptions, { requestKey });
-                }),
+              args.confirmationToken,
+              { table: "documents", id: args.documentId },
+              (requestKey) => documents.send(args.documentId, sendOptions, { requestKey }),
             );
             return okResult(`Queued email delivery ${delivery.deliveryId}.`, {
               _tag: "Confirmed",
@@ -932,19 +900,7 @@ export const callTool = (
               yield* requireActions(caller, requiredActions("send_reminder", {}));
               const doc = yield* documents.get(args.documentId);
               const sendPreview = yield* documents.previewSend(args.documentId, sendOptions);
-              const nowMillis = yield* Clock.currentTimeMillis;
-              const minted = mintConfirmationToken({
-                key: confirmationKey,
-                context: {
-                  workspaceId: grant.workspaceId,
-                  grantId: grant.grantId,
-                  userId: principal.userId,
-                  tool: "send_reminder",
-                },
-                args: normalizedInput as Record<string, unknown>,
-                subjectRevision: doc.revision,
-                nowMillis,
-              });
+              const minted = yield* mint("send_reminder", doc.revision);
               const confirmation = buildConfirmationRequired({
                 action: "send_reminder",
                 token: minted.token,
@@ -960,17 +916,11 @@ export const callTool = (
               return okResult(confirmation.summary.text, confirmation);
             }
 
-            const delivery = yield* runConfirmed(
-              ctx,
+            const delivery = yield* confirm(
               "send_reminder",
-              normalizedInput as Record<string, unknown>,
-              args.confirmationToken ?? ("" as ConfirmationToken),
-              ({ subjectRevision, requestKey }) =>
-                Effect.gen(function* () {
-                  const current = yield* documents.get(args.documentId);
-                  yield* checkRevision(subjectRevision, current.revision);
-                  return yield* documents.send(args.documentId, sendOptions, { requestKey });
-                }),
+              args.confirmationToken,
+              { table: "documents", id: args.documentId },
+              (requestKey) => documents.send(args.documentId, sendOptions, { requestKey }),
             );
             return okResult(`Queued payment reminder ${delivery.deliveryId}.`, {
               _tag: "Confirmed",
@@ -991,19 +941,7 @@ export const callTool = (
               yield* requireActions(caller, requiredActions("create_final_invoice", {}));
               const proforma = yield* documents.get(args.proformaId);
               const previewDoc = yield* documents.previewFinalInvoice(args.proformaId, input);
-              const nowMillis = yield* Clock.currentTimeMillis;
-              const minted = mintConfirmationToken({
-                key: confirmationKey,
-                context: {
-                  workspaceId: grant.workspaceId,
-                  grantId: grant.grantId,
-                  userId: principal.userId,
-                  tool: "create_final_invoice",
-                },
-                args: normalizedInput as Record<string, unknown>,
-                subjectRevision: proforma.revision,
-                nowMillis,
-              });
+              const minted = yield* mint("create_final_invoice", proforma.revision);
               const summary = documentSummaryOf(previewDoc);
               const confirmation = buildConfirmationRequired({
                 action: "create_final_invoice",
@@ -1011,26 +949,21 @@ export const callTool = (
                 expiresAt: minted.expiresAt,
                 text: `Issue Final Invoice for Proforma ${proforma.number ?? proforma.id} (${summary.contact}), amount due ${summary.total} ${summary.currency}.`,
                 document: summary,
+                warnings: documentWarnings(previewDoc),
               });
               return okResult(confirmation.summary.text, confirmation);
             }
 
-            const document = yield* runConfirmed(
-              ctx,
+            const document = yield* confirm(
               "create_final_invoice",
-              normalizedInput as Record<string, unknown>,
-              args.confirmationToken ?? ("" as ConfirmationToken),
-              ({ subjectRevision, requestKey }) =>
-                Effect.gen(function* () {
-                  const current = yield* documents.get(args.proformaId);
-                  yield* checkRevision(subjectRevision, current.revision);
-                  return yield* documents.issueFinalInvoice(args.proformaId, input, { requestKey });
-                }),
+              args.confirmationToken,
+              { table: "documents", id: args.proformaId },
+              (requestKey) => documents.issueFinalInvoice(args.proformaId, input, { requestKey }),
             );
-            return okResult(`Issued Final Invoice ${document.number ?? document.id}.`, {
-              _tag: "Confirmed",
-              result: { document },
-            });
+            return confirmedDocument(
+              `Issued Final Invoice ${document.number ?? document.id}.`,
+              document,
+            );
           });
 
         case "create_credit_note":
@@ -1053,19 +986,7 @@ export const callTool = (
                 args.documentId,
                 correctionInput,
               );
-              const nowMillis = yield* Clock.currentTimeMillis;
-              const minted = mintConfirmationToken({
-                key: confirmationKey,
-                context: {
-                  workspaceId: grant.workspaceId,
-                  grantId: grant.grantId,
-                  userId: principal.userId,
-                  tool: "create_credit_note",
-                },
-                args: normalizedInput as Record<string, unknown>,
-                subjectRevision: source.revision,
-                nowMillis,
-              });
+              const minted = yield* mint("create_credit_note", source.revision);
               const summary = documentSummaryOf(previewDoc);
               const confirmation = buildConfirmationRequired({
                 action: "create_credit_note",
@@ -1073,26 +994,21 @@ export const callTool = (
                 expiresAt: minted.expiresAt,
                 text: `Issue Credit Note against ${source.number ?? source.id} (${summary.contact}), total ${summary.total} ${summary.currency}, reason: "${args.reason}".`,
                 document: summary,
+                warnings: documentWarnings(previewDoc),
               });
               return okResult(confirmation.summary.text, confirmation);
             }
 
-            const document = yield* runConfirmed(
-              ctx,
+            const document = yield* confirm(
               "create_credit_note",
-              normalizedInput as Record<string, unknown>,
-              args.confirmationToken ?? ("" as ConfirmationToken),
-              ({ subjectRevision, requestKey }) =>
-                Effect.gen(function* () {
-                  const current = yield* documents.get(args.documentId);
-                  yield* checkRevision(subjectRevision, current.revision);
-                  return yield* documents.correct(args.documentId, correctionInput, { requestKey });
-                }),
+              args.confirmationToken,
+              { table: "documents", id: args.documentId },
+              (requestKey) => documents.correct(args.documentId, correctionInput, { requestKey }),
             );
-            return okResult(`Issued Credit Note ${document.number ?? document.id}.`, {
-              _tag: "Confirmed",
-              result: { document },
-            });
+            return confirmedDocument(
+              `Issued Credit Note ${document.number ?? document.id}.`,
+              document,
+            );
           });
       }
     };

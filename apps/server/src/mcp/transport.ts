@@ -22,7 +22,6 @@ import type { PrincipalResolver } from "../auth/PrincipalResolver";
 import { requestIdFor } from "../http/edge/requestId";
 import { authenticateMcpRequest, wwwAuthenticateHeader } from "./caller";
 import type { McpConfigShape } from "./config";
-import type { ConsumedConfirmationCache } from "./confirmation";
 import { formatCoreErrorText } from "./errors";
 import { MCP_SERVER_INSTRUCTIONS } from "./guide";
 import {
@@ -77,7 +76,6 @@ export type McpTransportServices = PrincipalResolver | McpToolServices | McpReso
 export const handleMcpPost = (
   request: HttpServerRequest,
   config: McpConfigShape,
-  consumedCache: ConsumedConfirmationCache,
 ): Effect.Effect<HttpServerResponse.HttpServerResponse, never, McpTransportServices> => {
   const requestId = requestIdFor(request.headers["x-request-id"]);
   const baseHeaders: Record<string, string> = {
@@ -239,11 +237,10 @@ export const handleMcpPost = (
             responseHeaders,
           );
         }
-        const result = yield* callTool(params.name, params.arguments, {
-          auth,
-          config,
-          consumedCache,
-        }).pipe(Effect.provideService(CurrentCaller, auth.caller), Effect.result);
+        const result = yield* callTool(params.name, params.arguments, auth).pipe(
+          Effect.provideService(CurrentCaller, auth.caller),
+          Effect.result,
+        );
         if (result._tag === "Failure") {
           const err = result.failure;
           return jsonRpcError(

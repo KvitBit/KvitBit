@@ -1,6 +1,8 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { MCP_PROTOCOL_VERSION, OAUTH_SCOPES_SUPPORTED } from "@kvitbit/api-contract";
 import { MCP_ORIGIN, makeMcpHarness } from "./harness";
+
+setDefaultTimeout(15_000);
 
 let cleanup: (() => Promise<void>) | undefined;
 afterEach(async () => {

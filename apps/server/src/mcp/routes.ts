@@ -11,7 +11,7 @@ import { HttpRouter, HttpServerResponse } from "effect/http";
 import { HttpServerRequest } from "effect/http/HttpServerRequest";
 import { protectedResourceMetadata } from "./caller";
 import { McpConfig } from "./config";
-import { ConsumedConfirmationCache } from "./confirmation";
+import { McpConfirmationsLive } from "./confirmation";
 import { handleMcpPost, type McpTransportServices } from "./transport";
 
 const methodNotAllowed = HttpServerResponse.jsonUnsafe(
@@ -30,7 +30,6 @@ export const McpRoutesLive = HttpRouter.use((router) =>
   Effect.gen(function* () {
     const config = yield* McpConfig;
     const services = yield* Effect.context<McpTransportServices>();
-    const consumedCache = new ConsumedConfirmationCache();
     const metadata = protectedResourceMetadata(config.appOrigin);
     const metadataResponse = Effect.succeed(
       HttpServerResponse.jsonUnsafe(metadata, {
@@ -47,10 +46,8 @@ export const McpRoutesLive = HttpRouter.use((router) =>
       "POST",
       MCP_PATH,
       Effect.flatMap(HttpServerRequest, (request) =>
-        handleMcpPost(request, config, consumedCache).pipe(Effect.provideContext(services)),
+        handleMcpPost(request, config).pipe(Effect.provideContext(services)),
       ),
     );
   }),
-);
-
-export const McpLayer = McpRoutesLive.pipe(Layer.provide(Layer.empty));
+).pipe(Layer.provide(McpConfirmationsLive));

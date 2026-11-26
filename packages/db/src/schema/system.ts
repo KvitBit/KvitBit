@@ -11,7 +11,7 @@ import {
   uniqueIndex,
   uuid,
 } from "drizzle-orm/pg-core";
-import { user } from "./auth";
+import { oauthConsent, user } from "./auth";
 import { createdAt, id, instant, revision, workspaceIdColumn } from "./columns";
 import { botScope, channel, clientKind, entityKind, exportStatus, systemJob } from "./enums";
 import { workspaces } from "./workspaces";
@@ -85,6 +85,29 @@ export const requestLog = pgTable(
     index("request_log_created_at_idx").on(t.createdAt),
     check("request_log_one_scope", sql`num_nonnulls(${t.workspaceId}, ${t.userId}) >= 1`),
   ],
+);
+
+/** Approvals for irreversible MCP tool calls (http-mcp-contracts §6.6). */
+export const mcpConfirmations = pgTable(
+  "mcp_confirmations",
+  {
+    id: id(),
+    tokenHash: text("token_hash").notNull().unique(),
+    grantId: text("grant_id")
+      .notNull()
+      .references(() => oauthConsent.id, { onDelete: "cascade" }),
+    userId: text("user_id")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    workspaceId: workspaceIdColumn().references(() => workspaces.id, { onDelete: "cascade" }),
+    tool: text("tool").notNull(),
+    argsHash: text("args_hash").notNull(),
+    subjectRevision: integer("subject_revision"),
+    createdAt: createdAt(),
+    expiresAt: instant("expires_at").notNull(),
+    consumedAt: instant("consumed_at"),
+  },
+  (t) => [index("mcp_confirmations_expires_at_idx").on(t.expiresAt)],
 );
 
 /**

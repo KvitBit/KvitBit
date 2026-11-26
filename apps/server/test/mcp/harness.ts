@@ -1,10 +1,10 @@
 /**
  * Test harness for the MCP Streamable HTTP adapter: `McpRoutesLive` behind
- * `HttpRouter.toWebHandler` on `TestCore` (in-memory core + fakes) + `TestClock`.
+ * `HttpRouter.toWebHandler` on the SQL-backed core + `TestClock`.
  */
 import { BunHttpServer } from "@effect/platform-bun";
 import { ALL_SCOPES, type Principal, READ_SCOPES, Unauthorized } from "@kvitbit/api-contract";
-import { TestCore, type TestCoreOptions } from "@kvitbit/core/testing";
+import type { TestCoreOptions } from "@kvitbit/core/testing";
 import {
   Caller,
   CurrentCaller,
@@ -17,9 +17,11 @@ import {
 } from "@kvitbit/domain/contract";
 import { Effect, Layer, ManagedRuntime } from "effect";
 import { HttpRouter } from "effect/http";
+import { SqlClient, Statement } from "effect/sql";
 import { TestClock } from "effect/testing";
 import { PrincipalResolver } from "../../src/auth/PrincipalResolver";
 import { McpConfigTest, McpRoutesLive } from "../../src/mcp";
+import { SqlTestCore } from "../persistence/conformance/sqlCore";
 
 export const MCP_ORIGIN = "https://kvitbit.test";
 
@@ -78,94 +80,147 @@ const FakeMcpPrincipalResolver = (grants: Map<string, TestMcpGrant>) =>
 export const makeMcpHarness = (options: TestCoreOptions = {}) => {
   const users = new Map<string, TestUser>();
   const grants = new Map<string, TestMcpGrant>();
-  const memoMap = Layer.makeMemoMapUnsafe();
+  const seededGrants = new Map<string, Promise<unknown>>();
 
   const clockLayer = Layer.effectDiscard(
     TestClock.setTime(Date.parse("2026-11-23T10:00:00Z")),
   ).pipe(Layer.provideMerge(TestClock.layer()));
-  const core = TestCore(options).pipe(Layer.provideMerge(clockLayer));
+  const core = SqlTestCore(options).pipe(Layer.provideMerge(clockLayer));
+  const runtime = ManagedRuntime.make(core);
+  const seedUser = (user: TestUser) =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      yield* sql`
+        INSERT INTO auth."user" (id, name, email) VALUES (${user.id}, ${user.name}, ${user.email})
+        ON CONFLICT (id) DO NOTHING
+      `;
+    });
+  const seedGrant = (grant: TestMcpGrant) =>
+    runtime.runPromise(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient;
+        yield* seedUser(grant.user);
+        yield* sql`
+        INSERT INTO auth.oauth_client (id, client_id, redirect_uris)
+        VALUES (${grant.clientId}, ${grant.clientId}, '{}')
+        ON CONFLICT (id) DO NOTHING
+      `;
+        yield* sql`
+        INSERT INTO auth.oauth_consent (id, client_id, user_id, workspace_id, scopes, access, granted_scopes)
+        VALUES (${grant.grantId}, ${grant.clientId}, ${grant.user.id}, ${grant.workspaceId},
+          '{kvitbit:read}', 'custom', string_to_array(${grant.scopes.join(",")}, ','))
+        ON CONFLICT (id) DO NOTHING
+      `;
+      }),
+    );
   const app = McpRoutesLive.pipe(
     Layer.provide([
-      core,
+      Layer.effectContext(runtime.contextEffect),
       FakeMcpPrincipalResolver(grants),
       McpConfigTest({ appOrigin: MCP_ORIGIN }),
       BunHttpServer.layerHttpServices,
     ]),
   );
 
-  const web = HttpRouter.toWebHandler(app, { memoMap, disableLogger: true });
-  const runtime = ManagedRuntime.make(core, { memoMap });
+  const instances = new Set<ReturnType<typeof HttpRouter.toWebHandler>>();
+  const createInstance = (transform?: Statement.Transformer) => {
+    const routes =
+      transform === undefined
+        ? app
+        : app.pipe(Layer.provide(Layer.succeed(Statement.CurrentTransformer, transform)));
+    const web = HttpRouter.toWebHandler(routes, { disableLogger: true });
+    instances.add(web);
 
-  const fetch = (path: string, init: RequestInit = {}) =>
-    web.handler(new Request(`${MCP_ORIGIN}${path}`, init));
+    const fetch = (path: string, init: RequestInit = {}) =>
+      web.handler(new Request(`${MCP_ORIGIN}${path}`, init));
 
-  const postMcp = (
-    token: string | null,
-    body: unknown,
-    extraHeaders: Record<string, string> = {},
-  ) =>
-    fetch("/mcp", {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        ...(token !== null ? { authorization: `Bearer ${token}` } : {}),
-        ...extraHeaders,
+    const postMcp = async (
+      token: string | null,
+      body: unknown,
+      extraHeaders: Record<string, string> = {},
+    ) => {
+      const grant = token === null ? undefined : grants.get(token);
+      if (grant !== undefined && !seededGrants.has(grant.grantId)) {
+        seededGrants.set(grant.grantId, seedGrant(grant));
+      }
+      if (grant !== undefined) await seededGrants.get(grant.grantId);
+      return fetch("/mcp", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          ...(token !== null ? { authorization: `Bearer ${token}` } : {}),
+          ...extraHeaders,
+        },
+        body: typeof body === "string" ? body : JSON.stringify(body),
+      });
+    };
+
+    const rpc = async (
+      token: string | null,
+      method: string,
+      params?: Record<string, unknown>,
+      id: string | number = 1,
+      extraHeaders: Record<string, string> = {},
+    ) => {
+      const res = await postMcp(
+        token,
+        { jsonrpc: "2.0", id, method, ...(params !== undefined ? { params } : {}) },
+        extraHeaders,
+      );
+      const json = (await res.json()) as Record<string, unknown>;
+      return { res, json };
+    };
+
+    const callTool = async (
+      token: string,
+      name: string,
+      args: Record<string, unknown> = {},
+      id: string | number = 1,
+    ) => {
+      const { res, json } = await rpc(token, "tools/call", { name, arguments: args }, id);
+      return {
+        res,
+        json,
+        result: json.result as
+          | {
+              readonly isError: boolean;
+              readonly content: ReadonlyArray<Record<string, unknown>>;
+              readonly structuredContent?: Record<string, unknown>;
+            }
+          | undefined,
+        error: json.error as
+          | { readonly code: number; readonly message: string; readonly data?: unknown }
+          | undefined,
+      };
+    };
+
+    const readResource = async (token: string, uri: string, id: string | number = 1) => {
+      const { res, json } = await rpc(token, "resources/read", { uri }, id);
+      return {
+        res,
+        json,
+        contents: (
+          json.result as { readonly contents?: ReadonlyArray<Record<string, unknown>> } | undefined
+        )?.contents,
+        error: json.error as
+          | { readonly code: number; readonly message: string; readonly data?: unknown }
+          | undefined,
+      };
+    };
+
+    return {
+      fetch,
+      postMcp,
+      rpc,
+      callTool,
+      readResource,
+      dispose: async () => {
+        instances.delete(web);
+        await web.dispose();
       },
-      body: typeof body === "string" ? body : JSON.stringify(body),
-    });
-
-  const rpc = async (
-    token: string | null,
-    method: string,
-    params?: Record<string, unknown>,
-    id: string | number = 1,
-    extraHeaders: Record<string, string> = {},
-  ) => {
-    const res = await postMcp(
-      token,
-      { jsonrpc: "2.0", id, method, ...(params !== undefined ? { params } : {}) },
-      extraHeaders,
-    );
-    const json = (await res.json()) as Record<string, unknown>;
-    return { res, json };
-  };
-
-  const callTool = async (
-    token: string,
-    name: string,
-    args: Record<string, unknown> = {},
-    id: string | number = 1,
-  ) => {
-    const { res, json } = await rpc(token, "tools/call", { name, arguments: args }, id);
-    return {
-      res,
-      json,
-      result: json.result as
-        | {
-            readonly isError: boolean;
-            readonly content: ReadonlyArray<Record<string, unknown>>;
-            readonly structuredContent?: Record<string, unknown>;
-          }
-        | undefined,
-      error: json.error as
-        | { readonly code: number; readonly message: string; readonly data?: unknown }
-        | undefined,
     };
   };
-
-  const readResource = async (token: string, uri: string, id: string | number = 1) => {
-    const { res, json } = await rpc(token, "resources/read", { uri }, id);
-    return {
-      res,
-      json,
-      contents: (
-        json.result as { readonly contents?: ReadonlyArray<Record<string, unknown>> } | undefined
-      )?.contents,
-      error: json.error as
-        | { readonly code: number; readonly message: string; readonly data?: unknown }
-        | undefined,
-    };
-  };
+  const instance = createInstance();
 
   const addUser = (name: string): TestUser => {
     const id = UserId.make(`01900000-0000-7000-8000-${String(users.size + 1).padStart(12, "0")}`);
@@ -180,6 +235,7 @@ export const makeMcpHarness = (options: TestCoreOptions = {}) => {
   ) =>
     runtime.runPromise(
       Effect.gen(function* () {
+        yield* seedUser(user);
         const ws = yield* Workspaces;
         return yield* ws.create(input as never);
       }).pipe(
@@ -204,7 +260,7 @@ export const makeMcpHarness = (options: TestCoreOptions = {}) => {
       user,
       workspaceId,
       grantId: `grant-rw-${grants.size + 1}`,
-      clientId: "client-claude",
+      clientId: `client-claude-${grants.size + 1}`,
       clientName: "Claude Desktop",
       scopes: ALL_SCOPES,
       locale,
@@ -215,23 +271,20 @@ export const makeMcpHarness = (options: TestCoreOptions = {}) => {
       user,
       workspaceId,
       grantId: `grant-ro-${grants.size + 1}`,
-      clientId: "client-reader",
+      clientId: `client-reader-${grants.size + 1}`,
       clientName: "ReadOnly Agent",
       scopes: READ_SCOPES,
       locale,
     });
 
   const dispose = async () => {
-    await web.dispose();
+    await Promise.all([...instances].map((web) => web.dispose()));
     await runtime.dispose();
   };
 
   return {
-    fetch,
-    postMcp,
-    rpc,
-    callTool,
-    readResource,
+    ...instance,
+    createInstance,
     addUser,
     createWorkspace,
     addGrant,
