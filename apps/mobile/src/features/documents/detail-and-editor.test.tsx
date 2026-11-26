@@ -206,6 +206,7 @@ describe("DocumentDetailScreen and DocumentEditorScreen", () => {
     ifMatch: string | null;
   }> = [];
   let dropNext: string | null = null;
+  let dropIssueBeforeCommit = false;
   let committed: Map<string, ReturnType<typeof makeWireDoc>>;
 
   beforeAll(() => {
@@ -251,6 +252,13 @@ describe("DocumentDetailScreen and DocumentEditorScreen", () => {
               status: url.pathname.endsWith(`/documents/${DOC_ID}/issue`) ? 200 : 201,
             });
           const fromDraft = url.pathname.endsWith(`/documents/${DOC_ID}/issue`);
+          if (dropNext === url.pathname && dropIssueBeforeCommit) {
+            dropNext = null;
+            return new Response("{", {
+              status: fromDraft ? 200 : 201,
+              headers: { "content-type": "application/json" },
+            });
+          }
           const issued = makeWireDoc({
             id: fromDraft ? DOC_ID : FINAL_ID,
             revision: wireDoc.revision + 1,
@@ -458,6 +466,7 @@ describe("DocumentDetailScreen and DocumentEditorScreen", () => {
     calls = [];
     committed = new Map();
     dropNext = null;
+    dropIssueBeforeCommit = false;
     wireDoc = makeWireDoc();
     mockParams = { id: DOC_ID };
   });
@@ -487,6 +496,14 @@ describe("DocumentDetailScreen and DocumentEditorScreen", () => {
         reactPropsOf(root.container().querySelector(`[data-testid="${testId}"]`))
           .onClick as () => void
       )();
+    });
+
+  const change = (testId: string, value: string) =>
+    act(async () => {
+      const input = root.container().querySelector(`[data-testid="${testId}"]`);
+      (reactPropsOf(input).onChange as (event: { target: { value: string } }) => void)({
+        target: { value },
+      });
     });
 
   test("detail screen renders VAT/CZK breakdown, chain links, PDF transfer and final invoice", async () => {
@@ -645,6 +662,7 @@ describe("DocumentDetailScreen and DocumentEditorScreen", () => {
       () => root.container().querySelector('[data-testid="editor-issue-button"]') !== null,
     );
 
+    await change("editor-note", "Saved before issue");
     await click("editor-issue-button");
     await waitFor(
       () =>
@@ -658,6 +676,32 @@ describe("DocumentDetailScreen and DocumentEditorScreen", () => {
     const edits = calls.filter((c) => c.method === "PATCH");
     expect(edits).toHaveLength(1);
     expect(edits[0]?.ifMatch).toBe('"3"');
+    const attempts = calls.filter((c) => c.path === path);
+    expect(attempts.map((c) => c.ifMatch)).toEqual(['"4"', '"4"']);
+    expect(attempts[1]?.key).toBe(attempts[0]?.key);
+    expect(committed.size).toBe(1);
+  });
+
+  test("reopening a patched draft retries issue at the saved revision and key", async () => {
+    const path = `/api/v1/workspaces/${WS_ID}/documents/${DOC_ID}/issue`;
+    wireDoc = makeWireDoc({ kind: "invoice", status: "draft", number: null, settlement: "unpaid" });
+    dropNext = path;
+    dropIssueBeforeCommit = true;
+    await show(<DocumentEditorScreen mode="edit" documentId={DOC_ID} />);
+    const editorReady = () =>
+      root.container().querySelector('[data-testid="editor-issue-button"]') !== null;
+    await waitFor(editorReady);
+    await change("editor-note", "Saved before issue");
+    await click("editor-issue-button");
+    await waitFor(() => root.container().textContent?.includes("Please try again") === true);
+
+    await root.render(null);
+    await show(<DocumentEditorScreen mode="edit" documentId={DOC_ID} />);
+    await waitFor(editorReady);
+    await click("editor-issue-button");
+    await waitFor(() => replaced.some((href) => href.includes(DOC_ID)), "retried after reopening");
+
+    expect(calls.filter((c) => c.method === "PATCH").map((c) => c.ifMatch)).toEqual(['"3"']);
     const attempts = calls.filter((c) => c.path === path);
     expect(attempts.map((c) => c.ifMatch)).toEqual(['"4"', '"4"']);
     expect(attempts[1]?.key).toBe(attempts[0]?.key);
@@ -718,6 +762,7 @@ describe("DocumentDetailScreen and DocumentEditorScreen", () => {
       .container()
       .querySelector<HTMLInputElement>('[data-testid="editor-line-desc-0"]');
     expect(line?.value).toBe("Development sprint");
+    await change("editor-line-desc-0", "Edited development sprint");
     await click("editor-save-button");
     await waitFor(() => calls.some((call) => call.method === "PATCH"), "template draft saved");
     expect(calls.find((call) => call.method === "PATCH")?.body).toMatchObject({

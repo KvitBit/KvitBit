@@ -368,7 +368,7 @@ export function DocumentEditorScreen(props: DocumentEditorProps) {
     (templateId === null || (template !== null && templateContact !== null));
 
   const [draft, setDraft] = useState<EditorDraft | null>(null);
-  const lastPatchedDraft = useRef<EditorDraft | null>(null);
+  const savedDraft = useRef<EditorDraft | null>(null);
   const submitting = useRef(false);
   const [cnbFx, setCnbFx] = useState<FxRateView | null>(null);
   const [fxLoading, setFxLoading] = useState(false);
@@ -391,9 +391,10 @@ export function DocumentEditorScreen(props: DocumentEditorProps) {
         seriesList,
       });
       if (templateId === null || template === null) {
+        savedDraft.current = initial;
         setDraft(initial);
       } else {
-        setDraft({
+        const imported = {
           ...initial,
           contactId: templateContact?.archived === true ? null : initial.contactId,
           language: template.language ?? initial.language,
@@ -403,7 +404,9 @@ export function DocumentEditorScreen(props: DocumentEditorProps) {
           variableSymbol: template.variableSymbol ?? initial.variableSymbol,
           orderNumber: template.orderNumber ?? initial.orderNumber,
           note: template.note ?? initial.note,
-        });
+        };
+        savedDraft.current = imported;
+        setDraft(imported);
         if (templateContact?.archived === true) setContactPickerOpen(true);
       }
       return;
@@ -620,7 +623,7 @@ export function DocumentEditorScreen(props: DocumentEditorProps) {
     if (originalDoc === null) return;
 
     let finalDoc = originalDoc;
-    if (lastPatchedDraft.current !== draft) {
+    if (savedDraft.current !== draft) {
       const patch = buildDocumentPatch(draft, originalDoc, workspace.role);
       const editRes = await run((api) =>
         api.documents.edit({
@@ -637,7 +640,7 @@ export function DocumentEditorScreen(props: DocumentEditorProps) {
       }
       finalDoc = editRes.value;
       sourceDocRemote.set(finalDoc);
-      lastPatchedDraft.current = draft;
+      savedDraft.current = draft;
     }
 
     if (intent === "issue" && finalDoc.status === "draft") {
