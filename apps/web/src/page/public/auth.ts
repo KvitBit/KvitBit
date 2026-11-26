@@ -11,11 +11,11 @@ import type { Html } from "@effect/ui/html";
  * Plain user-facing copy per DESIGN.md (no "PoW" or "Local cryptographic" jargon).
  */
 import { BotScope } from "@kvitbit/api-contract";
-import { InvitationPeek } from "@kvitbit/domain";
+import { InvitationPeek, InvitationToken, WorkspaceSummary } from "@kvitbit/domain";
 import { ViewModels } from "@kvitbit/ui-port";
 import { Effect, Schema } from "effect";
 import { authFetch, Failure, failureFromUnknown } from "../../app/api";
-import { defineApiCommand, type PageCommand } from "../../app/commands";
+import { browserCommand, defineApiCommand, type PageCommand } from "../../app/commands";
 import { copy, translator } from "../../app/i18n";
 import { Intent_ } from "../../app/intent";
 import type { MessageHandlers, PageContext, PageReturn, RouteOf } from "../../app/page";
@@ -59,7 +59,7 @@ export const Model = Schema.Struct({
   submitFailure: Schema.NullOr(Failure),
   localError: Schema.NullOr(Schema.String),
   infoNotice: Schema.NullOr(Schema.String),
-  linkState: Schema.Literals(["idle", "verifying", "verified", "expired"]),
+  linkState: Schema.Literals(["idle", "sent", "verifying", "verified", "expired"]),
   resetDone: Schema.Boolean,
   resent: Schema.Boolean,
   invitation: InvitationRemote,
@@ -81,18 +81,23 @@ export const Message = UiSchema.TaggedEnum({
     reason: Schema.NullOr(Schema.String),
   },
   ClickedRetryBotProof: {},
+  ClickedRetryInvitation: {},
   GotInvitation: { seq: Remote.Seq, peek: InvitationPeek },
   FailedInvitation: { seq: Remote.Seq, failure: Failure },
+  CompletedInvitationSignUp: { seq: Remote.Seq, workspace: WorkspaceSummary },
+  FailedInvitationSignUp: { seq: Remote.Seq },
   SubmittedSignUp: {},
   SubmittedSignIn: {},
   ClickedPasskeySignIn: {},
   ClickedResendEmail: {},
+  ClickedChangeEmail: {},
   SubmittedResetRequest: {},
   SubmittedResetConfirm: {},
   CompletedSubmit: {
     seq: Remote.Seq,
     action: Schema.Literals([
       "sign_up",
+      "sign_up_passkey",
       "sign_in_password",
       "sign_in_magic",
       "sign_in_passkey",
@@ -101,9 +106,10 @@ export const Message = UiSchema.TaggedEnum({
       "reset_request",
       "reset_confirm",
     ]),
+    sessionEstablished: Schema.optionalKey(Schema.Boolean),
   },
   FailedSubmit: { seq: Remote.Seq, failure: Failure },
-  FailedPasskeyUnsupported: {},
+  FailedPasskeyUnsupported: { seq: Remote.Seq },
 });
 export type Message = typeof Message.Type;
 
@@ -121,6 +127,12 @@ const local = copy({
     signUpLink: "Vytvořit účet",
     forgotLink: "Zapomenuté heslo?",
     requestNewReset: "Požádat o nový odkaz",
+    invitationUnavailable:
+      "Pozvánku se nepodařilo ověřit. Zkontrolujte odkaz nebo to zkuste znovu.",
+    passkeySignUpHint:
+      "Potvrďte e-mail odkazem. Potom si v nastavení zabezpečení vytvoříte přístupový klíč.",
+    verifySignIn: "E-mail byl ověřen. Pokračujte přihlášením.",
+    changeEmail: "Změnit e-mail",
   },
   en: {
     fullName: "Full name",
@@ -135,6 +147,11 @@ const local = copy({
     signUpLink: "Create account",
     forgotLink: "Forgot password?",
     requestNewReset: "Request a new link",
+    invitationUnavailable: "We couldn't verify this invitation. Check the link or try again.",
+    passkeySignUpHint:
+      "Verify your email with the link we send, then add a passkey in Security settings.",
+    verifySignIn: "Your email is verified. Sign in to continue.",
+    changeEmail: "Change email",
   },
 });
 
@@ -145,8 +162,8 @@ const scopeForRoute = (
 ): BotScope | null => {
   switch (route._tag) {
     case "SignUp":
-      if (signUpMethod === "passkey") return "magic_link";
-      return route.invitation !== undefined ? "invitation_accept" : "sign_up";
+      if (route.invitation !== undefined) return "invitation_accept";
+      return signUpMethod === "passkey" ? "magic_link" : "sign_up";
     case "SignIn":
       return signInMethod === "magic_link"
         ? "magic_link"
@@ -186,8 +203,19 @@ const PeekInviteCmd = defineApiCommand("AuthPeekInvite", {
     ),
 });
 
+const AcceptSignedUpInviteCmd = defineApiCommand("AuthAcceptSignedUpInvite", {
+  args: { token: Schema.String, seq: Remote.Seq },
+  execute: ({ token, seq }) =>
+    callApi(
+      (client) => client.invitations.accept({ params: { token: InvitationToken.make(token) } }),
+      (workspace) => Message.CompletedInvitationSignUp({ seq, workspace }),
+      () => Message.FailedInvitationSignUp({ seq }),
+    ),
+});
+
 const AuthAction = Schema.Literals([
   "sign_up",
+  "sign_up_passkey",
   "sign_in_password",
   "sign_in_magic",
   "sign_in_passkey",
@@ -210,7 +238,17 @@ const AuthPostCmd = defineApiCommand("AuthPost", {
       path,
       body,
       altchaHeader ?? undefined,
-      () => Message.CompletedSubmit({ seq, action }),
+      (json) =>
+        Message.CompletedSubmit({
+          seq,
+          action,
+          sessionEstablished:
+            typeof json === "object" &&
+            json !== null &&
+            "token" in json &&
+            typeof json.token === "string" &&
+            json.token.length > 0,
+        }),
       (failure) => Message.FailedSubmit({ seq, failure }),
     ),
 });
@@ -226,11 +264,6 @@ const AuthGetCmd = defineApiCommand("AuthGet", {
     ),
 });
 
-const PasskeyAuthCmd = defineApiCommand("AuthPasskey", {
-  args: { seq: Remote.Seq },
-  execute: ({ seq }) => runPasskeyAuth(seq),
-});
-
 const startBotProof = (scope: BotScope, seq: Remote.Seq) => BotProofCmd({ scope, seq });
 
 const origin = (): string =>
@@ -239,19 +272,30 @@ const origin = (): string =>
     : location.origin;
 
 const runPasskeyAuth = (seq: Remote.Seq) =>
-  Effect.tryPromise({
-    try: () => performPasskeyAuthentication(origin()),
-    catch: (e) => e,
-  }).pipe(
-    Effect.map((out) =>
-      !out.supported
-        ? Message.FailedPasskeyUnsupported()
-        : Message.CompletedSubmit({ seq, action: "sign_in_passkey" }),
-    ),
-    Effect.catch((e) =>
-      Effect.succeed(Message.FailedSubmit({ seq, failure: failureFromUnknown(e) })),
+  browserCommand(
+    "AuthPasskey",
+    Effect.tryPromise({
+      try: (signal) => performPasskeyAuthentication(origin(), signal),
+      catch: (e) => e,
+    }).pipe(
+      Effect.map((out) =>
+        !out.supported
+          ? Message.FailedPasskeyUnsupported({ seq })
+          : Message.CompletedSubmit({ seq, action: "sign_in_passkey" }),
+      ),
+      Effect.catch((e) =>
+        Effect.succeed(Message.FailedSubmit({ seq, failure: failureFromUnknown(e) })),
+      ),
     ),
   );
+
+const invitationPath = (model: Model) =>
+  model.route._tag === "SignUp" && model.route.invitation !== undefined
+    ? href({ _tag: "Invitation", token: model.route.invitation })
+    : undefined;
+
+const signInPath = (returnTo: string | undefined) =>
+  href(returnTo === undefined ? { _tag: "SignIn" } : { _tag: "SignIn", returnTo });
 
 export const init = (route: Route, _ctx: PageContext): PageReturn<Model, Message> => {
   const scope = scopeForRoute(route, "password");
@@ -342,9 +386,10 @@ export const update = (
   ctx: PageContext,
 ): PageReturn<Model, Message> =>
   Message.match(message, {
-    ChangedEmail: ({ value }) => ({
-      model: { ...model, email: value, localError: null, submitFailure: null },
-    }),
+    ChangedEmail: ({ value }) =>
+      invitationPath(model) !== undefined || model.submitting
+        ? { model }
+        : { model: { ...model, email: value, localError: null, submitFailure: null } },
     ChangedName: ({ value }) => ({
       model: { ...model, name: value, localError: null, submitFailure: null },
     }),
@@ -358,6 +403,8 @@ export const update = (
       model: { ...model, acceptedTerms: checked, localError: null },
     }),
     SelectedSignUpMethod: ({ method }) => {
+      if (model.submitting || model.signUpMethod === method || invitationPath(model) !== undefined)
+        return { model };
       const route = model.route as Route;
       const scope = scopeForRoute(route, model.signInMethod, method);
       if (scope === null) {
@@ -379,6 +426,7 @@ export const update = (
       };
     },
     SelectedSignInMethod: ({ method }) => {
+      if (model.submitting || model.signInMethod === method) return { model };
       const route = model.route as Route;
       const scope = scopeForRoute(route, method);
       if (scope === null) {
@@ -386,6 +434,7 @@ export const update = (
           model: {
             ...model,
             signInMethod: method,
+            botSeq: model.botSeq + 1,
             botProof: { _tag: "Idle" },
             localError: null,
             submitFailure: null,
@@ -406,7 +455,7 @@ export const update = (
       };
     },
     GotBotProof: ({ seq, status, header, reason }) => {
-      if (seq !== model.botSeq) return { model };
+      if (seq !== model.botSeq || model.botProof._tag !== "Solving") return { model };
       const botProof: BotProofState =
         status === "not_required"
           ? { _tag: "NotRequired" }
@@ -426,6 +475,7 @@ export const update = (
     },
     GotInvitation: ({ seq, peek }) => {
       const invitation = Remote.succeed(model.invitation, seq, peek);
+      if (invitation === model.invitation) return { model };
       return {
         model: {
           ...model,
@@ -437,8 +487,26 @@ export const update = (
     FailedInvitation: ({ seq, failure }) => ({
       model: { ...model, invitation: Remote.fail(model.invitation, seq, failure) },
     }),
+    ClickedRetryInvitation: () => {
+      if (model.route._tag !== "SignUp" || model.route.invitation === undefined) return { model };
+      const invitation = Remote.load(model.invitation);
+      return {
+        model: { ...model, invitation, localError: null },
+        commands: [PeekInviteCmd({ token: model.route.invitation, seq: Remote.seqOf(invitation) })],
+      };
+    },
     SubmittedSignUp: () => {
-      const email = model.email.trim();
+      if (model.submitting || model.route._tag !== "SignUp") return { model };
+      const route = model.route;
+      const invite = invitationPath(model);
+      const peek = Remote.dataOf(model.invitation);
+      if (
+        invite !== undefined &&
+        (model.invitation._tag !== "Loaded" || peek?.status !== "pending")
+      ) {
+        return { model: { ...model, localError: local(ctx.locale, "invitationUnavailable") } };
+      }
+      const email = (peek?.email ?? model.email).trim();
       if (email === "") {
         return { model: { ...model, localError: local(ctx.locale, "emailRequired") } };
       }
@@ -452,7 +520,6 @@ export const update = (
         return { model: { ...model, localError: local(ctx.locale, "botWait") } };
       }
       const seq = model.submitSeq + 1;
-      const route = model.route as RouteOf<"SignUp">;
       const displayName = model.name.trim() || email.split("@")[0] || email;
       const isPasskeySignUp = model.signUpMethod === "passkey";
       return {
@@ -466,18 +533,19 @@ export const update = (
         commands: [
           AuthPostCmd({
             seq,
-            action: "sign_up",
+            action: isPasskeySignUp ? "sign_up_passkey" : "sign_up",
             path: isPasskeySignUp ? "/sign-in/magic-link" : "/sign-up/email",
             body: isPasskeySignUp
               ? {
                   email,
                   name: displayName,
-                  callbackURL: "/account/security",
+                  callbackURL: href({ _tag: "Account", tab: "security" }),
                 }
               : {
                   email,
                   name: displayName,
                   password: model.password,
+                  callbackURL: signInPath(invite),
                   ...(route.invitation !== undefined ? { invitationToken: route.invitation } : {}),
                 },
             altchaHeader: botProofHeader(model.botProof) ?? null,
@@ -486,6 +554,9 @@ export const update = (
       };
     },
     SubmittedSignIn: () => {
+      if (model.submitting || model.route._tag !== "SignIn" || model.signInMethod === "passkey") {
+        return { model };
+      }
       const email = model.email.trim();
       if (email === "") {
         return { model: { ...model, localError: local(ctx.locale, "emailRequired") } };
@@ -508,7 +579,7 @@ export const update = (
               seq,
               action: "sign_in_magic",
               path: "/sign-in/magic-link",
-              body: { email },
+              body: { email, callbackURL: safeReturnTo(model.route.returnTo) ?? "/" },
               altchaHeader: botProofHeader(model.botProof) ?? null,
             }),
           ],
@@ -534,6 +605,9 @@ export const update = (
       };
     },
     ClickedPasskeySignIn: () => {
+      if (model.submitting || model.route._tag !== "SignIn" || model.signInMethod !== "passkey") {
+        return { model };
+      }
       const seq = model.submitSeq + 1;
       return {
         model: {
@@ -543,7 +617,16 @@ export const update = (
           localError: null,
           submitFailure: null,
         },
-        commands: [PasskeyAuthCmd({ seq })],
+        commands: [runPasskeyAuth(seq)],
+      };
+    },
+    ClickedChangeEmail: () => {
+      const scope = scopeForRoute(model.route as Route, model.signInMethod, model.signUpMethod);
+      if (scope === null) return { model };
+      const botSeq = model.botSeq + 1;
+      return {
+        model: { ...model, linkState: "idle", botSeq, botProof: { _tag: "Solving", seq: botSeq } },
+        commands: [startBotProof(scope, botSeq)],
       };
     },
     ClickedResendEmail: () => {
@@ -617,12 +700,31 @@ export const update = (
         ],
       };
     },
-    CompletedSubmit: ({ seq, action }) => {
+    CompletedSubmit: ({ seq, action, sessionEstablished }) => {
       if (seq !== model.submitSeq) return { model };
       const t = translator(ctx.locale);
       switch (action) {
-        case "sign_up":
+        case "sign_up": {
+          if (sessionEstablished) {
+            if (model.route._tag === "SignUp" && model.route.invitation !== undefined) {
+              return {
+                model: { ...model, password: "" },
+                commands: [AcceptSignedUpInviteCmd({ token: model.route.invitation, seq })],
+              };
+            }
+            return {
+              model: { ...model, submitting: false, password: "" },
+              outMessage: Intent_.reloadSession({ _tag: "DefaultSignedIn" }),
+            };
+          }
+          return {
+            model: { ...model, submitting: false, password: "" },
+            outMessage: Intent_.navigate(href({ _tag: "CheckEmail", email: model.email.trim() })),
+          };
+        }
+        case "sign_up_passkey":
         case "sign_in_magic":
+          return { model: { ...model, submitting: false, linkState: "sent" } };
         case "reset_request":
           return {
             model: { ...model, submitting: false },
@@ -655,13 +757,35 @@ export const update = (
         case "verify_link":
           return {
             model: { ...model, submitting: false, linkState: "verified" },
-            outMessage: Intent_.reloadSession({ _tag: "DefaultSignedIn" }),
+            ...(model.route._tag === "AuthLink" && model.route.kind === "magic"
+              ? { outMessage: Intent_.reloadSession({ _tag: "DefaultSignedIn" }) }
+              : {}),
           };
         case "reset_confirm":
           return {
             model: { ...model, submitting: false, resetDone: true },
           };
       }
+    },
+    CompletedInvitationSignUp: ({ seq, workspace }) =>
+      seq !== model.submitSeq
+        ? { model }
+        : {
+            model: { ...model, submitting: false },
+            outMessage: Intent_.reloadSession({
+              _tag: "Path",
+              path: href({ _tag: "Dashboard", ws: workspace.slug }),
+              replace: true,
+            }),
+          },
+    FailedInvitationSignUp: ({ seq }) => {
+      const invite = invitationPath(model);
+      return seq !== model.submitSeq || invite === undefined
+        ? { model }
+        : {
+            model: { ...model, submitting: false },
+            outMessage: Intent_.reloadSession({ _tag: "Path", path: invite, replace: true }),
+          };
     },
     FailedSubmit: ({ seq, failure }) => {
       if (seq !== model.submitSeq) return { model };
@@ -689,13 +813,16 @@ export const update = (
         model: { ...model, submitting: false, submitFailure: failure },
       };
     },
-    FailedPasskeyUnsupported: () => ({
-      model: {
-        ...model,
-        submitting: false,
-        localError: translator(ctx.locale).t("auth.passkey.unsupported"),
-      },
-    }),
+    FailedPasskeyUnsupported: ({ seq }) =>
+      seq !== model.submitSeq
+        ? { model }
+        : {
+            model: {
+              ...model,
+              submitting: false,
+              localError: translator(ctx.locale).t("auth.passkey.unsupported"),
+            },
+          },
   } satisfies MessageHandlers<Message, PageReturn<Model, Message>>);
 
 export const title = (model: Model, ctx: PageContext): string => {
@@ -756,10 +883,23 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
     (model.submitFailure !== null ? failureMessage(t, model.submitFailure) : null);
 
   const body = (() => {
+    if (model.linkState === "sent") {
+      return h.div.class("kb-auth-form").children([
+        h.h1.children([t.t("auth.checkEmail.title")]),
+        h.p.class("kb-muted").children([t.t("auth.checkEmail.body", { email: model.email })]),
+        button(h, {
+          label: local(ctx.locale, "changeEmail"),
+          onClick: Message.ClickedChangeEmail(),
+          variant: "secondary",
+        }),
+      ]);
+    }
     switch (model.route._tag) {
       case "SignUp": {
         const invited = Remote.dataOf(model.invitation);
-        const emailLocked = invited !== undefined;
+        const invite = invitationPath(model);
+        const emailLocked = invite !== undefined;
+        const inviteReady = model.invitation._tag === "Loaded" && invited?.status === "pending";
         return h.div.class("kb-auth-form").children([
           h.div
             .class("kb-auth-header")
@@ -770,17 +910,33 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
           ...(invited !== undefined
             ? [banner(h, { text: t.t("auth.signUp.invitationNote"), tone: "info" })]
             : []),
+          ...(model.invitation._tag === "Failed"
+            ? [
+                banner(h, { text: local(ctx.locale, "invitationUnavailable"), tone: "error" }),
+                button(h, {
+                  label: t.t("common.action.retry"),
+                  onClick: Message.ClickedRetryInvitation(),
+                  variant: "secondary",
+                }),
+              ]
+            : []),
           ...(errorText !== null ? [banner(h, { text: errorText, tone: "error" })] : []),
-          segmented(h, {
-            label: t.t("auth.signUp.title"),
-            selected: model.signUpMethod,
-            items: [
-              { id: "password", label: t.t("auth.signUp.methodPassword") },
-              { id: "passkey", label: t.t("auth.signUp.methodPasskey") },
-            ],
-            onSelect: (id) =>
-              Message.SelectedSignUpMethod({ method: id === "passkey" ? "passkey" : "password" }),
-          }),
+          ...(emailLocked
+            ? []
+            : [
+                segmented(h, {
+                  label: t.t("auth.signUp.title"),
+                  selected: model.signUpMethod,
+                  items: [
+                    { id: "password", label: t.t("auth.signUp.methodPassword") },
+                    { id: "passkey", label: t.t("auth.signUp.methodPasskey") },
+                  ],
+                  onSelect: (id) =>
+                    Message.SelectedSignUpMethod({
+                      method: id === "passkey" ? "passkey" : "password",
+                    }),
+                }),
+              ]),
           textField(h, {
             id: "auth-signup-email",
             label: t.t("common.field.email"),
@@ -813,7 +969,7 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
                   error: fieldIssue(t, model.submitFailure, "password"),
                 }),
               ]
-            : [h.p.class("kb-small kb-muted").children([t.t("auth.passkey.prompt")])]),
+            : [h.p.class("kb-small kb-muted").children([local(ctx.locale, "passkeySignUpHint")])]),
           checkbox(h, {
             id: "auth-signup-terms",
             label: t.t("auth.signUp.acceptTerms"),
@@ -826,14 +982,15 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
             onClick: Message.SubmittedSignUp(),
             variant: "primary",
             busy: model.submitting,
-            disabled: model.submitting || !isBotProofReady(model.botProof),
+            disabled:
+              model.submitting || !isBotProofReady(model.botProof) || (emailLocked && !inviteReady),
             testId: "auth-signup-submit",
           }),
           h.div
             .class("kb-auth-footer")
             .children([
               h.span.children([t.t("auth.signUp.haveAccount")]),
-              h.a.attr("href", href({ _tag: "SignIn" })).children([local(ctx.locale, "signInNow")]),
+              h.a.attr("href", signInPath(invite)).children([local(ctx.locale, "signInNow")]),
             ]),
         ]);
       }
@@ -954,11 +1111,11 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
       case "AuthLink": {
         if (model.linkState === "verified") {
           return h.div.class("kb-auth-form").children([
-            banner(h, { text: t.t("auth.link.verified"), tone: "info" }),
+            banner(h, { text: local(ctx.locale, "verifySignIn"), tone: "info" }),
             h.a
               .class("kb-btn kb-btn--primary")
-              .attr("href", href({ _tag: "Onboarding" }))
-              .children([t.t("common.action.continue")]),
+              .attr("href", signInPath(undefined))
+              .children([local(ctx.locale, "signInNow")]),
           ]);
         }
         if (model.linkState === "expired") {

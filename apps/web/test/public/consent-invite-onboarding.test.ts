@@ -9,6 +9,7 @@ import * as Consent from "../../src/page/public/consent";
 import * as Invitation from "../../src/page/public/invitation";
 import * as Onboarding from "../../src/page/public/onboarding";
 import { anonymous, ctxFor, DEMO_WORKSPACE, renderPath, signedIn } from "../support";
+import { mockWire, run } from "./wire";
 
 const demoCall = (method: string, path: string, body: unknown = null): unknown => {
   const hit = match(publicDemoRoutes, method, path);
@@ -164,7 +165,11 @@ describe("Workspace Onboarding Wizard (Screen 07)", () => {
   test("walks 5 steps: ARES lookup, tax regime, Czech account -> IBAN, numbering, and create workspace", () => {
     const route: Onboarding.Route = { _tag: "Onboarding" };
     const ctx = ctxFor(route, { locale: "en", session: signedIn });
-    const first = Onboarding.init(route, ctx);
+    const first = Onboarding.update(
+      Onboarding.init(route, ctx).model,
+      Onboarding.Message.RestoredDraft({ draft: null }),
+      ctx,
+    );
     expect(first.model.step).toBe(1);
 
     // Cannot advance Step 1 without business name
@@ -194,7 +199,7 @@ describe("Workspace Onboarding Wizard (Screen 07)", () => {
     );
     expect(staleAres.model.ares._tag).toBe("Loading");
 
-    // Current ARES seq auto-fills legal name, slug, DIC, and VAT payer regime
+    // ARES supplies entity data but does not determine VAT payer status.
     const filled = Onboarding.update(
       lookup.model,
       Onboarding.Message.GotAres({ seq: 1, result: aresRes }),
@@ -202,7 +207,7 @@ describe("Workspace Onboarding Wizard (Screen 07)", () => {
     );
     expect(filled.model.legalName).toBe("Alza.cz a.s.");
     expect(filled.model.slug).toBe("alza-cz-a-s");
-    expect(filled.model.taxRegime).toBe("vat_payer");
+    expect(filled.model.taxRegime).toBe("non_vat_payer");
 
     // Step 1 -> Step 2 -> Step 3
     m = Onboarding.update(filled.model, Onboarding.Message.ClickedNext(), ctx).model;
@@ -229,12 +234,13 @@ describe("Workspace Onboarding Wizard (Screen 07)", () => {
     m = Onboarding.update(m, Onboarding.Message.ClickedNext(), ctx).model;
     expect(m.step).toBe(5);
 
-    // Submit workspace creation -> Navigate to Dashboard
+    // Finish configuration before asking the shell to refresh membership.
     const creating = Onboarding.update(m, Onboarding.Message.ClickedCreateWorkspace(), ctx);
     expect(creating.model.submitting).toBe(true);
     expect(creating.commands?.length).toBe(1);
 
     const wsView = Schema.decodeUnknownSync(WorkspaceView)({
+      id: DEMO_WORKSPACE.id,
       slug: "novak-design-s-r-o",
       branding: {
         pdfTemplate: "classic",
@@ -251,10 +257,19 @@ describe("Workspace Onboarding Wizard (Screen 07)", () => {
       Onboarding.Message.CompletedCreate({ seq: 1, workspace: wsView }),
       ctx,
     );
-    expect(created.outMessage?._tag).toBe("Navigate");
-    if (created.outMessage?._tag === "Navigate") {
-      expect(created.outMessage.path).toBe("/w/novak-design-s-r-o");
-    }
+    expect(created.outMessage).toBeUndefined();
+    expect(created.commands).toHaveLength(1);
+    const completed = Onboarding.update(
+      created.model,
+      Onboarding.Message.CompletedSetup({ seq: 1, slug: wsView.slug }),
+      ctx,
+    );
+    expect(completed.outMessage?._tag).toBe("ReloadSession");
+    expect(completed.outMessage).toHaveProperty("then", {
+      _tag: "Path",
+      path: "/w/novak-design-s-r-o",
+      replace: true,
+    });
 
     // Failure path keeps wizard on step 5 with submitFailure
     const failed = Onboarding.update(
@@ -273,6 +288,185 @@ describe("Workspace Onboarding Wizard (Screen 07)", () => {
 
     const en = await renderPath("/onboarding?step=5", { locale: "en", session: signedIn });
     expect(en.html).toContain("Live miniature invoice preview");
+  });
+
+  test("writes the issuer, bank and numbering through the typed API and resumes lost replies", async () => {
+    const route: Onboarding.Route = { _tag: "Onboarding", step: 5 };
+    const ctx = ctxFor(route, { locale: "en", session: signedIn });
+    const workspace = {
+      id: DEMO_WORKSPACE.id,
+      slug: "wire-setup",
+      revision: 1,
+      branding: {
+        pdfTemplate: "classic",
+        accentColor: "#123456",
+        footerText: null,
+        theme: null,
+        logo: null,
+        stamp: null,
+      },
+    };
+    const base = `/api/v1/workspaces/${workspace.id}`;
+    let invoice = {
+      id: "10000000-0000-7000-8000-000000000001",
+      kind: "invoice",
+      name: "Invoices",
+      pattern: "YYYY-NNNN",
+      isDefault: true,
+      periodKey: "2026",
+      nextCounter: 1,
+      nextNumber: "2026-0001",
+    };
+    const calls: Array<string> = [];
+    const bankKeys: Array<string | null> = [];
+    const fetch = mockWire(async (request) => {
+      const path = new URL(request.url).pathname;
+      calls.push(`${request.method} ${path}`);
+      if (path === "/api/v1/workspaces" && request.method === "POST") {
+        expect(request.headers.get("idempotency-key")).toBeTruthy();
+        expect(await request.json()).toMatchObject({
+          name: "Test Workspace",
+          taxRegime: "non_vat_payer",
+          defaults: { currency: "CZK", language: "en" },
+        });
+        return Response.json(workspace, { status: 201 });
+      }
+      if (path === base) return Response.json(workspace);
+      if (path === `${base}/issuing-entity`) {
+        expect(request.headers.get("if-match")).toBe('"1"');
+        expect(await request.json()).toEqual({
+          name: "Manual Issuer",
+          ico: null,
+          dic: null,
+          address: { street: "Main 1", city: "Prague", postalCode: "100 00", country: "CZ" },
+          legalForm: null,
+          registerEntry: null,
+        });
+        return Response.json({ ...workspace, revision: 2 });
+      }
+      if (path === `${base}/bank-accounts`) {
+        bankKeys.push(request.headers.get("idempotency-key"));
+        expect(await request.json()).toEqual({
+          iban: "CZ9320100000002000145399",
+          bic: "FIOBCZPPXXX",
+          currency: "CZK",
+          isDefault: true,
+        });
+        return bankKeys.length === 1
+          ? Response.json({ _tag: "Unavailable" }, { status: 503 })
+          : Response.json({ id: "bank-created" }, { status: 201 });
+      }
+      if (path === `${base}/numbering-series` && request.method === "GET") {
+        return Response.json([invoice]);
+      }
+      if (path === `${base}/numbering-series/${invoice.id}`) {
+        expect(await request.json()).toEqual({
+          kind: "invoice",
+          name: "Invoices",
+          pattern: "INV-YYYY-NNNN",
+          nextNumber: 42,
+          isDefault: true,
+        });
+        invoice = {
+          ...invoice,
+          pattern: "INV-YYYY-NNNN",
+          nextCounter: 42,
+          nextNumber: "INV-2026-0042",
+        };
+        return Response.json(invoice);
+      }
+      if (path === `${base}/numbering-series` && request.method === "POST") {
+        const body = (await request.json()) as { kind: string; name: string; pattern: string };
+        expect(request.headers.get("idempotency-key")).toMatch(new RegExp(`-${body.kind}$`));
+        expect(body.kind).not.toBe("payment_tax_document");
+        return Response.json(
+          { ...invoice, ...body, nextCounter: 1, nextNumber: "2026-0001" },
+          { status: 201 },
+        );
+      }
+      throw new Error(`Unexpected request ${path}`);
+    });
+    try {
+      let current = Onboarding.update(
+        Onboarding.init(route, ctx).model,
+        Onboarding.Message.RestoredDraft({ draft: null }),
+        ctx,
+      );
+      for (const [field, value] of [
+        ["legalName", "Manual Issuer"],
+        ["workspaceName", "Test Workspace"],
+        ["street", "Main 1"],
+        ["city", "Prague"],
+        ["postalCode", "100 00"],
+        ["iban", "CZ93 2010 0000 0020 0014 5399"],
+        ["bic", "FIOBCZPPXXX"],
+        ["invoicePattern", "INV-YYYY-NNNN"],
+        ["invoiceStart", "42"],
+      ] as const) {
+        current = Onboarding.update(
+          current.model,
+          Onboarding.Message.ChangedField({ field, value }),
+          ctx,
+        );
+      }
+      const creating = Onboarding.update(
+        current.model,
+        Onboarding.Message.ClickedCreateWorkspace(),
+        ctx,
+      );
+      expect(
+        Onboarding.update(creating.model, Onboarding.Message.ClickedCreateWorkspace(), ctx)
+          .commands,
+      ).toBeUndefined();
+      const created = Onboarding.update(creating.model, await run(creating.commands?.[0]), ctx);
+      const failed = Onboarding.update(created.model, await run(created.commands?.[0]), ctx);
+      expect(failed.outMessage).toBeUndefined();
+      expect(failed.model.setupDone).toEqual({
+        issuingEntity: true,
+        bankAccount: false,
+        series: false,
+      });
+      const restored = Onboarding.update(
+        Onboarding.init(route, ctx).model,
+        Onboarding.Message.RestoredDraft({ draft: failed.model }),
+        ctx,
+      );
+      const edited = Onboarding.update(
+        restored.model,
+        Onboarding.Message.ChangedField({ field: "bic", value: "WRONGBIC" }),
+        ctx,
+      );
+      expect(edited.model.bic).toBe("FIOBCZPPXXX");
+      const retry = Onboarding.update(
+        edited.model,
+        Onboarding.Message.ClickedCreateWorkspace(),
+        ctx,
+      );
+      const retryMessage = await run(retry.commands?.[0]);
+      expect({ retryMessage, calls }).toMatchObject({ retryMessage: { _tag: "CompletedSetup" } });
+      const done = Onboarding.update(retry.model, retryMessage, ctx);
+      expect(done.outMessage?._tag).toBe("ReloadSession");
+      expect(done.outMessage).toHaveProperty("then", {
+        _tag: "Path",
+        path: "/w/wire-setup",
+        replace: true,
+      });
+      expect(bankKeys[0]).toBeTruthy();
+      expect(bankKeys[1]).toBe(bankKeys[0]);
+      expect(calls).toEqual([
+        "POST /api/v1/workspaces",
+        `GET ${base}`,
+        `PATCH ${base}/issuing-entity`,
+        `POST ${base}/bank-accounts`,
+        `POST ${base}/bank-accounts`,
+        `GET ${base}/numbering-series`,
+        `PUT ${base}/numbering-series/${invoice.id}`,
+        `POST ${base}/numbering-series`,
+        `POST ${base}/numbering-series`,
+      ]);
+    } finally {
+      fetch.mockRestore();
+    }
   });
 });
 

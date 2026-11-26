@@ -2,7 +2,7 @@ import type { Html } from "@effect/ui/html";
 import { type Markup, svgImage } from "../../ui/html";
 /**
  * ISO/IEC 18004 SVG QR renderer for SPAYD / EPC payment payloads (via `uqr`).
- * Uses `currentColor` so styling comes strictly from M3 CSS tokens (zero raw hex).
+ * Keeps the symbol and its quiet zone high contrast under every share theme.
  * Private to src/page/public/.
  */
 

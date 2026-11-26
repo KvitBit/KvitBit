@@ -10,17 +10,18 @@ import type { Html } from "@effect/ui/html";
  */
 import {
   CurrencyCode,
-  type DocumentKind,
+  DocumentKind,
   Locale as DomainLocale,
   RegistryResult,
   TaxRegime,
   WorkspaceId,
+  WorkspaceSlug,
   WorkspaceView,
 } from "@kvitbit/domain";
 import { Api, Format, I18n, ViewModels } from "@kvitbit/ui-port";
 import { Effect, Result, Schema } from "effect";
 import { Failure } from "../../app/api";
-import { defineApiCommand } from "../../app/commands";
+import { browserCommand, defineApiCommand } from "../../app/commands";
 import { copy, translator } from "../../app/i18n";
 import { Intent_ } from "../../app/intent";
 import type { MessageHandlers, PageContext, PageReturn, RouteOf } from "../../app/page";
@@ -79,7 +80,6 @@ export const Model = Schema.Struct({
   ares: AresRemote,
   // Step 2: Tax Regime
   taxRegime: TaxRegime,
-  taxEffectiveFrom: Schema.String,
   // Step 3: Bank Account
   czechAccount: Schema.String,
   iban: Schema.String,
@@ -90,6 +90,10 @@ export const Model = Schema.Struct({
   proformaPattern: Schema.String,
   ptdPattern: Schema.String,
   creditNotePattern: Schema.String,
+  invoiceStart: Schema.String,
+  proformaStart: Schema.String,
+  ptdStart: Schema.String,
+  creditNoteStart: Schema.String,
   defaultCurrency: CurrencyCode,
   defaultLanguage: DomainLocale,
   // Step 5: Submit & resumable setup progress
@@ -101,10 +105,14 @@ export const Model = Schema.Struct({
   bankRequestKey: Schema.NullOr(Schema.String),
   createdWorkspace: Schema.NullOr(WorkspaceView),
   setupDone: SetupProgress,
+  draftReady: Schema.Boolean,
+  interruptedWrite: Schema.Boolean,
 });
 export type Model = typeof Model.Type;
 
 export const Message = UiSchema.TaggedEnum({
+  RestoredDraft: { draft: Schema.NullOr(Model) },
+  SavedDraft: {},
   ClickedStep: { step: Schema.Int },
   ClickedNext: {},
   ClickedBack: {},
@@ -119,8 +127,8 @@ export const Message = UiSchema.TaggedEnum({
       "city",
       "postalCode",
       "country",
+      "legalForm",
       "registerEntry",
-      "taxEffectiveFrom",
       "czechAccount",
       "iban",
       "bic",
@@ -128,6 +136,10 @@ export const Message = UiSchema.TaggedEnum({
       "proformaPattern",
       "ptdPattern",
       "creditNotePattern",
+      "invoiceStart",
+      "proformaStart",
+      "ptdStart",
+      "creditNoteStart",
     ]),
     value: Schema.String,
   },
@@ -146,6 +158,46 @@ export const Message = UiSchema.TaggedEnum({
 });
 export type Message = typeof Message.Type;
 
+const onboardingDraftKey = (userId: string) => `kb.onboarding.v1.${userId}`;
+const draftKey = (ctx: PageContext) =>
+  ctx.session._tag === "SignedIn" ? onboardingDraftKey(ctx.session.user.id) : null;
+
+const readDraft = (key: string) =>
+  browserCommand(
+    "OnboardingReadDraft",
+    Effect.sync(() => {
+      try {
+        const stored = sessionStorage.getItem(key);
+        return Message.RestoredDraft({
+          draft: stored === null ? null : Schema.decodeUnknownSync(Model)(JSON.parse(stored)),
+        });
+      } catch {
+        return Message.RestoredDraft({ draft: null });
+      }
+    }),
+  );
+
+const storeDraft = (key: string | null, model: Model) => {
+  if (key === null) return;
+  try {
+    if (model.setupDone.series) {
+      sessionStorage.removeItem(key);
+    } else {
+      sessionStorage.setItem(
+        key,
+        JSON.stringify({
+          ...model,
+          ares: Remote.idle,
+          stepError: null,
+          submitFailure: null,
+        }),
+      );
+    }
+  } catch {
+    // The wizard also supports retry in memory when storage is unavailable.
+  }
+};
+
 const local = copy({
   cs: {
     stepPreview: "Náhled a potvrzení",
@@ -155,10 +207,16 @@ const local = copy({
     czechAccountLabel: "České číslo účtu (např. 123456789/0100)",
     czechAccountHint: "Automaticky převedeme na IBAN.",
     ibanInvalid: "Zadejte platný IBAN.",
+    bicInvalid: "Zadejte platný BIC.",
+    slugInvalid: "Adresa prostoru musí mít 3 až 40 znaků.",
+    legalForm: "Právní forma",
     invoiceSeries: "Řada faktur",
     proformaSeries: "Řada zálohových faktur",
     ptdSeries: "Řada daňových dokladů k platbě",
     creditNoteSeries: "Řada opravných dokladů",
+    startNumber: "Počáteční číslo",
+    seriesInvalid: "Zadejte vzor a kladné celé počáteční číslo pro každou řadu.",
+    resume: "Dokončit nastavení",
     defaultCurrency: "Výchozí měna",
     defaultLanguage: "Výchozí jazyk dokladů",
     previewHeading: "Živý náhled faktury",
@@ -179,10 +237,16 @@ const local = copy({
     czechAccountLabel: "Czech account number (e.g. 123456789/0100)",
     czechAccountHint: "Automatically converted to IBAN.",
     ibanInvalid: "Enter a valid IBAN.",
+    bicInvalid: "Enter a valid BIC.",
+    slugInvalid: "Use 3 to 40 characters for the workspace address.",
+    legalForm: "Legal form",
     invoiceSeries: "Invoice series",
     proformaSeries: "Proforma series",
     ptdSeries: "Payment tax document series",
     creditNoteSeries: "Credit note series",
+    startNumber: "Starting number",
+    seriesInvalid: "Enter a pattern and a positive whole starting number for each series.",
+    resume: "Finish workspace setup",
     defaultCurrency: "Default currency",
     defaultLanguage: "Default document language",
     previewHeading: "Live miniature invoice preview",
@@ -198,11 +262,12 @@ const local = copy({
 });
 
 const CreateWorkspaceArgs = Schema.Struct({
+  draftKey: Schema.NullOr(Schema.String),
+  draft: Model,
   seq: Remote.Seq,
   idempotencyKey: Schema.String,
   name: Schema.String,
   slug: Schema.optionalKey(Schema.String),
-  ico: Schema.optionalKey(Schema.String),
   taxRegime: TaxRegime,
   currency: CurrencyCode,
   language: DomainLocale,
@@ -220,25 +285,64 @@ const LookupAresCmd = defineApiCommand("OnboardingLookupAres", {
 
 const CreateWorkspaceCmd = defineApiCommand("OnboardingCreateWorkspace", {
   args: CreateWorkspaceArgs.fields,
-  execute: ({ seq, idempotencyKey, name, slug, ico, taxRegime, currency, language }) =>
-    callApi(
-      (client) =>
-        client.myWorkspaces.create({
-          headers: { "idempotency-key": idempotencyKey },
-          payload: {
-            name,
-            ...(slug !== undefined ? { slug } : {}),
-            ...(ico !== undefined ? { ico } : {}),
-            taxRegime,
-            defaults: { currency, language },
-          } as never,
-        }),
-      (workspace) => Message.CompletedCreate({ seq, workspace }),
-      (failure) => Message.FailedCreate({ seq, failure }),
+  execute: ({ draftKey, draft, seq, idempotencyKey, name, slug, taxRegime, currency, language }) =>
+    Effect.sync(() => storeDraft(draftKey, draft)).pipe(
+      Effect.andThen(
+        callApi(
+          (client) =>
+            client.myWorkspaces.create({
+              headers: { "idempotency-key": idempotencyKey },
+              payload: {
+                name,
+                ...(slug !== undefined ? { slug } : {}),
+                taxRegime,
+                defaults: { currency, language },
+              } as never,
+            }),
+          (workspace) => Message.CompletedCreate({ seq, workspace }),
+          (failure) => Message.FailedCreate({ seq, failure }),
+        ),
+      ),
     ),
 });
 
+const setupSeries = [
+  {
+    kind: "invoice",
+    label: "invoiceSeries",
+    name: "Invoices",
+    pattern: "invoicePattern",
+    start: "invoiceStart",
+  },
+  {
+    kind: "proforma",
+    label: "proformaSeries",
+    name: "Proformas",
+    pattern: "proformaPattern",
+    start: "proformaStart",
+  },
+  {
+    kind: "payment_tax_document",
+    label: "ptdSeries",
+    name: "Payment tax documents",
+    pattern: "ptdPattern",
+    start: "ptdStart",
+  },
+  {
+    kind: "credit_note",
+    label: "creditNoteSeries",
+    name: "Credit notes",
+    pattern: "creditNotePattern",
+    start: "creditNoteStart",
+  },
+] as const;
+
+const eligibleSeries = (taxRegime: TaxRegime) =>
+  setupSeries.filter(({ kind }) => kind !== "payment_tax_document" || taxRegime === "vat_payer");
+
 const ApplySetupArgs = Schema.Struct({
+  draftKey: Schema.NullOr(Schema.String),
+  draft: Model,
   seq: Remote.Seq,
   workspace: WorkspaceView,
   setupDone: SetupProgress,
@@ -255,10 +359,14 @@ const ApplySetupArgs = Schema.Struct({
   iban: Schema.String,
   bic: Schema.String,
   bankCurrency: CurrencyCode,
-  invoicePattern: Schema.String,
-  proformaPattern: Schema.String,
-  ptdPattern: Schema.String,
-  creditNotePattern: Schema.String,
+  series: Schema.Array(
+    Schema.Struct({
+      kind: DocumentKind,
+      name: Schema.String,
+      pattern: Schema.String,
+      nextNumber: Schema.Int,
+    }),
+  ),
 });
 
 const ApplyOnboardingSetupCmd = defineApiCommand("OnboardingApplySetup", {
@@ -270,35 +378,37 @@ const ApplyOnboardingSetupCmd = defineApiCommand("OnboardingApplySetup", {
     return callApi(
       (client) =>
         Effect.gen(function* () {
+          yield* Effect.sync(() => storeDraft(args.draftKey, args.draft));
           const workspaceId = yield* Schema.decodeUnknownEffect(WorkspaceId)(args.workspace.id);
-          // 1. Persist manually entered / confirmed issuing entity details
           if (!progress.issuingEntity) {
-            const hasManualEntity =
-              args.legalName.trim() !== "" ||
-              args.dic.trim() !== "" ||
-              args.street.trim() !== "" ||
-              args.city.trim() !== "" ||
-              args.postalCode.trim() !== "" ||
-              args.registerEntry.trim() !== "";
-            if (hasManualEntity) {
-              const current = yield* client.workspace.current({ params: { workspaceId } });
-              const patch = {
-                name: args.legalName.trim() || args.workspace.slug,
-                ico: args.ico.trim() || null,
-                dic: args.dic.trim() || null,
-                address: {
-                  street: args.street.trim(),
-                  city: args.city.trim(),
-                  postalCode: args.postalCode.trim(),
-                  country: args.country.trim() || "CZ",
-                },
-                legalForm: args.legalForm.trim() || null,
-                registerEntry: args.registerEntry.trim() || null,
-              };
+            const current = yield* client.workspace.current({ params: { workspaceId } });
+            const address = {
+              street: args.street.trim(),
+              city: args.city.trim(),
+              postalCode: args.postalCode.trim(),
+              country: args.country.trim().toUpperCase() || "CZ",
+            };
+            const issuer = {
+              name: args.legalName.trim(),
+              ico: args.ico.trim() || null,
+              dic: args.dic.trim() || null,
+              legalForm: args.legalForm.trim() || null,
+              registerEntry: args.registerEntry.trim() || null,
+            };
+            const stored = current.issuingEntity as
+              | (Record<string, unknown> & {
+                  address?: Record<string, unknown>;
+                })
+              | undefined;
+            const matches =
+              stored != null &&
+              Object.entries(issuer).every(([key, value]) => stored[key] === value) &&
+              Object.entries(address).every(([key, value]) => stored.address?.[key] === value);
+            if (!matches) {
               yield* client.workspace.updateIssuingEntity({
                 params: { workspaceId },
                 headers: Api.ifMatchHeaders(current.revision),
-                payload: patch as never,
+                payload: { ...issuer, address } as never,
               });
             }
             progress.issuingEntity = true;
@@ -313,7 +423,7 @@ const ApplyOnboardingSetupCmd = defineApiCommand("OnboardingApplySetup", {
                 headers: Api.idempotencyHeaders(args.bankRequestKey),
                 payload: {
                   iban: rawIban,
-                  bic: args.bic.trim() || null,
+                  bic: args.bic.trim().toUpperCase() || null,
                   currency: args.bankCurrency,
                   isDefault: true,
                 } as never,
@@ -322,36 +432,23 @@ const ApplyOnboardingSetupCmd = defineApiCommand("OnboardingApplySetup", {
             progress.bankAccount = true;
           }
 
-          // 3. Persist numbering series patterns
           if (!progress.series) {
             const existing = yield* client.workspace.listSeries({ params: { workspaceId } });
-            const desired: ReadonlyArray<{
-              readonly kind: DocumentKind;
-              readonly name: string;
-              readonly pattern: string;
-            }> = [
-              { kind: "invoice", name: "Invoices", pattern: args.invoicePattern.trim() },
-              { kind: "proforma", name: "Proformas", pattern: args.proformaPattern.trim() },
-              {
-                kind: "payment_tax_document",
-                name: "Payment tax documents",
-                pattern: args.ptdPattern.trim(),
-              },
-              { kind: "credit_note", name: "Credit notes", pattern: args.creditNotePattern.trim() },
-            ];
-            for (const entry of desired) {
-              if (entry.pattern === "") continue;
+            for (const entry of args.series) {
               const match =
                 existing.find((s) => s.kind === entry.kind && s.isDefault) ??
                 existing.find((s) => s.kind === entry.kind);
               if (match !== undefined) {
-                if (match.pattern !== entry.pattern) {
+                const changedPattern = match.pattern !== entry.pattern;
+                const setCounter = entry.nextNumber > (changedPattern ? 1 : match.nextCounter);
+                if (!match.isDefault || changedPattern || setCounter) {
                   yield* client.workspace.updateSeries({
                     params: { workspaceId, seriesId: match.id },
                     payload: {
                       kind: entry.kind,
                       name: match.name,
                       pattern: entry.pattern,
+                      ...(setCounter ? { nextNumber: entry.nextNumber } : {}),
                       isDefault: true,
                     },
                   });
@@ -364,7 +461,7 @@ const ApplyOnboardingSetupCmd = defineApiCommand("OnboardingApplySetup", {
                     kind: entry.kind,
                     name: entry.name,
                     pattern: entry.pattern,
-                    nextNumber: 1,
+                    nextNumber: entry.nextNumber,
                     isDefault: true,
                   },
                 });
@@ -373,6 +470,9 @@ const ApplyOnboardingSetupCmd = defineApiCommand("OnboardingApplySetup", {
             progress.series = true;
           }
 
+          yield* Effect.sync(() =>
+            storeDraft(args.draftKey, { ...args.draft, setupDone: progress }),
+          );
           return args.workspace.slug;
         }),
       (slug) => Message.CompletedSetup({ seq: args.seq, slug }),
@@ -381,8 +481,16 @@ const ApplyOnboardingSetupCmd = defineApiCommand("OnboardingApplySetup", {
   },
 });
 
-const buildSetupCmd = (model: Model, seq: Remote.Seq, workspace: WorkspaceView, bankKey: string) =>
+const buildSetupCmd = (
+  model: Model,
+  seq: Remote.Seq,
+  workspace: WorkspaceView,
+  bankKey: string,
+  key: string | null,
+) =>
   ApplyOnboardingSetupCmd({
+    draftKey: key,
+    draft: model,
     seq,
     workspace,
     setupDone: model.setupDone,
@@ -399,10 +507,12 @@ const buildSetupCmd = (model: Model, seq: Remote.Seq, workspace: WorkspaceView, 
     iban: model.iban,
     bic: model.bic,
     bankCurrency: model.bankCurrency,
-    invoicePattern: model.invoicePattern,
-    proformaPattern: model.proformaPattern,
-    ptdPattern: model.ptdPattern,
-    creditNotePattern: model.creditNotePattern,
+    series: eligibleSeries(model.taxRegime).map((series) => ({
+      kind: series.kind,
+      name: series.name,
+      pattern: model[series.pattern].trim(),
+      nextNumber: Number(model[series.start]),
+    })),
   });
 
 const clampStep = (n: number | undefined): number => {
@@ -413,12 +523,46 @@ const clampStep = (n: number | undefined): number => {
 const formatPatternSample = (pattern: string, counter: number, year: number): string => {
   const yyyy = String(year);
   const yy = yyyy.slice(-2);
-  const mm = "11";
-  return pattern
-    .replace(/YYYY/g, yyyy)
-    .replace(/YY/g, yy)
-    .replace(/MM/g, mm)
-    .replace(/N+/g, (m) => String(counter).padStart(m.length, "0"));
+  const mm = String(new Date().getMonth() + 1).padStart(2, "0");
+  return pattern.replace(/[A-Za-z]+/g, (word) =>
+    /^[YMN]+$/.test(word)
+      ? word.replace(/YYYY|YY|MM|N+/g, (token) =>
+          token === "YYYY"
+            ? yyyy
+            : token === "YY"
+              ? yy
+              : token === "MM"
+                ? mm
+                : String(counter).padStart(token.length, "0"),
+        )
+      : word,
+  );
+};
+
+const validSeries = (pattern: string, start: string): boolean => {
+  const counter = Number(start);
+  if (
+    !/^\d+$/.test(start) ||
+    !Number.isSafeInteger(counter) ||
+    counter < 1 ||
+    counter > 2_147_483_646
+  )
+    return false;
+  const runs = (pattern.match(/[A-Za-z]+/g) ?? [])
+    .filter((word) => /^[YMN]+$/.test(word))
+    .flatMap((word) => word.match(/Y+|M+|N+/g) ?? []);
+  if (runs.filter((run) => run.startsWith("N")).length !== 1) return false;
+  if (runs.some((run) => run.startsWith("Y") && run !== "YY" && run !== "YYYY")) return false;
+  if (
+    runs.some(
+      (run) =>
+        run.startsWith("M") && (run !== "MM" || !runs.some((other) => other.startsWith("Y"))),
+    )
+  )
+    return false;
+  // biome-ignore lint/suspicious/noControlCharactersInRegex: the numbering grammar disallows control characters.
+  const hasControlCharacter = /[\u0000-\u001f\u007f]/.test(pattern);
+  return !hasControlCharacter && formatPatternSample(pattern, counter, 2026).length <= 20;
 };
 
 export const init = (route: Route, ctx: PageContext): PageReturn<Model, Message> => ({
@@ -439,7 +583,6 @@ export const init = (route: Route, ctx: PageContext): PageReturn<Model, Message>
     registerEntry: "",
     ares: Remote.idle,
     taxRegime: "non_vat_payer",
-    taxEffectiveFrom: new Date().toISOString().slice(0, 10),
     czechAccount: "",
     iban: "",
     bic: "",
@@ -448,6 +591,10 @@ export const init = (route: Route, ctx: PageContext): PageReturn<Model, Message>
     proformaPattern: "ZF-YYYY-NNNN",
     ptdPattern: "DD-YYYY-NNNN",
     creditNotePattern: "OD-YYYY-NNNN",
+    invoiceStart: "1",
+    proformaStart: "1",
+    ptdStart: "1",
+    creditNoteStart: "1",
     defaultCurrency: "CZK" as CurrencyCode,
     defaultLanguage: ctx.locale,
     stepError: null,
@@ -458,27 +605,70 @@ export const init = (route: Route, ctx: PageContext): PageReturn<Model, Message>
     bankRequestKey: null,
     createdWorkspace: null,
     setupDone: emptySetupProgress,
+    draftReady: draftKey(ctx) === null,
+    interruptedWrite: false,
   },
+  commands:
+    ctx.session._tag === "SignedIn" ? [readDraft(onboardingDraftKey(ctx.session.user.id))] : [],
 });
 
 const validateStep = (model: Model, ctx: PageContext): string | null => {
-  if (model.step === 1 && model.legalName.trim() === "") {
-    return local(ctx.locale, "nameRequired");
+  if (model.step === 1) {
+    if (model.legalName.trim() === "") return local(ctx.locale, "nameRequired");
+    if (model.ico.trim() !== "" && !Result.isSuccess(Format.validateIco(model.ico)))
+      return local(ctx.locale, "icoInvalid");
+    if (model.slugEdited && !Schema.is(WorkspaceSlug)(model.slug))
+      return local(ctx.locale, "slugInvalid");
   }
-  if (model.step === 3 && model.iban.trim() !== "") {
-    const res = Format.validateIban(model.iban);
-    if (!Result.isSuccess(res)) return local(ctx.locale, "ibanInvalid");
+  if (model.step === 3) {
+    if (model.iban.trim() !== "" && !Result.isSuccess(Format.validateIban(model.iban)))
+      return local(ctx.locale, "ibanInvalid");
+    if (model.bic.trim() !== "" && !Result.isSuccess(Format.validateBic(model.bic)))
+      return local(ctx.locale, "bicInvalid");
+  }
+  if (
+    model.step === 4 &&
+    eligibleSeries(model.taxRegime).some(
+      ({ pattern, start }) => !validSeries(model[pattern].trim(), model[start]),
+    )
+  ) {
+    return local(ctx.locale, "seriesInvalid");
   }
   return null;
 };
 
-export const update = (
+const editingLocked = (model: Model) =>
+  !model.draftReady ||
+  model.submitting ||
+  model.interruptedWrite ||
+  (model.createdWorkspace === null && model.createRequestKey !== null);
+
+const bankLocked = (model: Model) =>
+  model.setupDone.bankAccount || (model.setupDone.issuingEntity && model.bankRequestKey !== null);
+
+const bankFields = new Set(["czechAccount", "iban", "bic"]);
+const seriesFields = new Set<string>(setupSeries.flatMap(({ pattern, start }) => [pattern, start]));
+
+const updateWizard = (
   model: Model,
   message: Message,
   ctx: PageContext,
 ): PageReturn<Model, Message> =>
   Message.match(message, {
+    RestoredDraft: ({ draft }) => ({
+      model: model.draftReady
+        ? model
+        : {
+            ...(draft ?? model),
+            route: model.route,
+            draftReady: true,
+            submitting: false,
+            interruptedWrite: draft?.submitting === true || draft?.interruptedWrite === true,
+          },
+    }),
+    SavedDraft: () => ({ model }),
     ClickedStep: ({ step }) => {
+      if (model.submitting) return { model };
       const target = clampStep(step);
       if (target > model.step) {
         const err = validateStep(model, ctx);
@@ -487,25 +677,43 @@ export const update = (
       return { model: { ...model, step: target, stepError: null } };
     },
     ClickedNext: () => {
+      if (model.submitting) return { model };
       const err = validateStep(model, ctx);
       if (err !== null) return { model: { ...model, stepError: err } };
       return { model: { ...model, step: clampStep(model.step + 1), stepError: null } };
     },
     ClickedBack: () => ({
-      model: { ...model, step: clampStep(model.step - 1), stepError: null },
+      model: model.submitting
+        ? model
+        : { ...model, step: clampStep(model.step - 1), stepError: null },
     }),
     ChangedField: ({ field, value }) => {
+      if (editingLocked(model)) return { model };
+      if (model.createdWorkspace !== null) {
+        if (
+          bankFields.has(field)
+            ? bankLocked(model)
+            : !seriesFields.has(field) &&
+              (model.setupDone.issuingEntity || field === "workspaceName" || field === "slug")
+        ) {
+          return { model };
+        }
+      }
       const next: Model = { ...model, [field]: value, stepError: null, submitFailure: null };
       if (field === "legalName") {
         const wsName =
-          model.workspaceName === "" || model.workspaceName === model.legalName
+          model.createdWorkspace === null &&
+          (model.workspaceName === "" || model.workspaceName === model.legalName)
             ? value
             : model.workspaceName;
         return {
           model: {
             ...next,
             workspaceName: wsName,
-            slug: model.slugEdited ? model.slug : slugifyName(wsName),
+            slug:
+              model.slugEdited || model.createdWorkspace !== null
+                ? model.slug
+                : slugifyName(wsName),
           },
         };
       }
@@ -529,18 +737,29 @@ export const update = (
       return { model: next };
     },
     SelectedTaxRegime: ({ regime }) => ({
-      model: { ...model, taxRegime: regime, stepError: null },
+      model:
+        editingLocked(model) || model.createdWorkspace !== null
+          ? model
+          : { ...model, taxRegime: regime, stepError: null },
     }),
     SelectedBankCurrency: ({ currency }) => ({
-      model: { ...model, bankCurrency: currency },
+      model:
+        editingLocked(model) || bankLocked(model) ? model : { ...model, bankCurrency: currency },
     }),
     SelectedDefaultCurrency: ({ currency }) => ({
-      model: { ...model, defaultCurrency: currency },
+      model:
+        editingLocked(model) || model.createdWorkspace !== null
+          ? model
+          : { ...model, defaultCurrency: currency },
     }),
     SelectedDefaultLanguage: ({ language }) => ({
-      model: { ...model, defaultLanguage: language },
+      model:
+        editingLocked(model) || model.createdWorkspace !== null
+          ? model
+          : { ...model, defaultLanguage: language },
     }),
     ClickedLookupAres: () => {
+      if (editingLocked(model) || model.createdWorkspace !== null) return { model };
       const check = Format.validateIco(model.ico);
       if (!Result.isSuccess(check)) {
         return { model: { ...model, stepError: local(ctx.locale, "icoInvalid") } };
@@ -555,7 +774,13 @@ export const update = (
     },
     GotAres: ({ seq, result }) => {
       const ares = Remote.succeed(model.ares, seq, result);
-      if (ares._tag !== "Loaded") return { model: { ...model, ares } };
+      if (
+        ares === model.ares ||
+        ares._tag !== "Loaded" ||
+        editingLocked(model) ||
+        model.createdWorkspace !== null
+      )
+        return { model };
       const wsName = result.name;
       return {
         model: {
@@ -572,7 +797,6 @@ export const update = (
           country: result.address.country,
           legalForm: result.legalForm,
           registerEntry: result.registerEntry ?? "",
-          taxRegime: result.dic !== null ? "vat_payer" : model.taxRegime,
         },
       };
     },
@@ -580,51 +804,40 @@ export const update = (
       model: { ...model, ares: Remote.fail(model.ares, seq, failure) },
     }),
     ClickedCreateWorkspace: () => {
-      if (model.legalName.trim() === "") {
-        return { model: { ...model, step: 1, stepError: local(ctx.locale, "nameRequired") } };
-      }
-      if (model.iban.trim() !== "") {
-        const ibanCheck = Format.validateIban(model.iban);
-        if (!Result.isSuccess(ibanCheck)) {
-          return { model: { ...model, step: 3, stepError: local(ctx.locale, "ibanInvalid") } };
-        }
+      if (!model.draftReady || model.submitting || model.setupDone.series) return { model };
+      for (const step of [1, 3, 4]) {
+        const stepError = validateStep({ ...model, step }, ctx);
+        if (stepError !== null) return { model: { ...model, step, stepError } };
       }
       const seq = model.submitSeq + 1;
       const bankKey = model.bankRequestKey ?? randomKey();
-      // Resume setup steps if workspace was already created on a previous attempt
+      const pending = {
+        ...model,
+        submitSeq: seq,
+        submitting: true,
+        submitFailure: null,
+        stepError: null,
+        bankRequestKey: bankKey,
+      };
       if (model.createdWorkspace !== null) {
         return {
-          model: {
-            ...model,
-            submitSeq: seq,
-            submitting: true,
-            submitFailure: null,
-            stepError: null,
-            bankRequestKey: bankKey,
-          },
-          commands: [buildSetupCmd(model, seq, model.createdWorkspace, bankKey)],
+          model: pending,
+          commands: [buildSetupCmd(pending, seq, model.createdWorkspace, bankKey, draftKey(ctx))],
         };
       }
-      const slug = model.slug.trim() || slugifyName(model.workspaceName || model.legalName);
-      const ico = model.ico.trim();
+      const slug = model.slugEdited ? model.slug.trim() : "";
       const idempotencyKey = model.createRequestKey ?? randomKey();
+      const draft = { ...pending, createRequestKey: idempotencyKey };
       return {
-        model: {
-          ...model,
-          submitSeq: seq,
-          submitting: true,
-          submitFailure: null,
-          stepError: null,
-          createRequestKey: idempotencyKey,
-          bankRequestKey: bankKey,
-        },
+        model: draft,
         commands: [
           CreateWorkspaceCmd({
+            draftKey: draftKey(ctx),
+            draft,
             seq,
             idempotencyKey,
             name: model.workspaceName.trim() || model.legalName.trim(),
             ...(slug !== "" ? { slug } : {}),
-            ...(ico !== "" ? { ico } : {}),
             taxRegime: model.taxRegime,
             currency: model.defaultCurrency,
             language: model.defaultLanguage,
@@ -633,7 +846,8 @@ export const update = (
       };
     },
     CompletedCreate: ({ seq, workspace }) => {
-      if (seq !== model.submitSeq) return { model };
+      if (seq !== model.submitSeq || !model.submitting || model.createdWorkspace !== null)
+        return { model };
       const bankKey = model.bankRequestKey ?? randomKey();
       const nextModel: Model = {
         ...model,
@@ -643,19 +857,30 @@ export const update = (
       };
       return {
         model: nextModel,
-        commands: [buildSetupCmd(nextModel, seq, workspace, bankKey)],
+        commands: [buildSetupCmd(nextModel, seq, workspace, bankKey, draftKey(ctx))],
       };
     },
     FailedCreate: ({ seq, failure }) => {
-      if (seq !== model.submitSeq) return { model };
-      return { model: { ...model, submitting: false, submitFailure: failure } };
-    },
-    CompletedSetup: ({ seq, slug }) => {
-      if (seq !== model.submitSeq) return { model };
+      if (seq !== model.submitSeq || !model.submitting || model.createdWorkspace !== null)
+        return { model };
       return {
         model: {
           ...model,
           submitting: false,
+          interruptedWrite: false,
+          submitFailure: failure,
+          createRequestKey: failure.tag === "Invalid" ? null : model.createRequestKey,
+        },
+      };
+    },
+    CompletedSetup: ({ seq, slug }) => {
+      if (seq !== model.submitSeq || !model.submitting || model.createdWorkspace === null)
+        return { model };
+      return {
+        model: {
+          ...model,
+          submitting: false,
+          interruptedWrite: false,
           setupDone: { issuingEntity: true, bankAccount: true, series: true },
         },
         outMessage: Intent_.reloadSession({
@@ -666,19 +891,68 @@ export const update = (
       };
     },
     FailedSetup: ({ seq, setupDone, failure }) => {
-      if (seq !== model.submitSeq) return { model };
+      if (seq !== model.submitSeq || !model.submitting || model.createdWorkspace === null)
+        return { model };
       return {
-        model: { ...model, submitting: false, setupDone, submitFailure: failure },
+        model: {
+          ...model,
+          step:
+            failure.tag === "Invalid"
+              ? !setupDone.issuingEntity
+                ? 1
+                : !setupDone.bankAccount
+                  ? 3
+                  : 4
+              : model.step,
+          submitting: false,
+          interruptedWrite: false,
+          setupDone,
+          submitFailure: failure,
+          bankRequestKey:
+            setupDone.issuingEntity && !setupDone.bankAccount && failure.tag === "Invalid"
+              ? null
+              : model.bankRequestKey,
+        },
       };
     },
   } satisfies MessageHandlers<Message, PageReturn<Model, Message>>);
+
+export const update = (
+  model: Model,
+  message: Message,
+  ctx: PageContext,
+): PageReturn<Model, Message> => {
+  const result = updateWizard(model, message, ctx);
+  const key = draftKey(ctx);
+  if (
+    key === null ||
+    result.model === model ||
+    result.model.submitting ||
+    message._tag === "RestoredDraft" ||
+    (result.model.createRequestKey === null && model.createRequestKey === null)
+  )
+    return result;
+  return {
+    ...result,
+    commands: [
+      ...(result.commands ?? []),
+      browserCommand(
+        "OnboardingSaveDraft",
+        Effect.sync(() => {
+          storeDraft(key, result.model);
+          return Message.SavedDraft();
+        }),
+      ),
+    ],
+  };
+};
 
 export const title = (_model: Model, ctx: PageContext): string =>
   translator(ctx.locale).t("onboarding.wizard.title");
 
 export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
   const t = translator(ctx.locale);
-  const year = 2026;
+  const year = new Date().getFullYear();
   const steps = [
     { num: 1, label: t.t("onboarding.wizard.step.entity") },
     { num: 2, label: t.t("onboarding.wizard.step.tax") },
@@ -689,6 +963,12 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
 
   const aresData = Remote.dataOf(model.ares);
   const aresBusy = Remote.isPending(model.ares);
+  const workspaceCreated = model.createdWorkspace !== null;
+  const disableStepFields =
+    editingLocked(model) ||
+    (model.step === 1 && model.setupDone.issuingEntity) ||
+    (model.step === 2 && workspaceCreated) ||
+    (model.step === 3 && bankLocked(model));
 
   const stepContent = (() => {
     switch (model.step) {
@@ -719,7 +999,7 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
                   variant: "secondary",
                   icon: icon(h, "search", 16),
                   busy: aresBusy,
-                  disabled: aresBusy,
+                  disabled: aresBusy || workspaceCreated,
                   testId: "onboarding-ares-lookup",
                 }),
               ]),
@@ -757,12 +1037,14 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
               }),
               textField(h, {
                 id: "onb-ws-name",
+                disabled: workspaceCreated,
                 label: t.t("onboarding.wizard.entity.workspaceName"),
                 value: model.workspaceName,
                 onInput: (value) => Message.ChangedField({ field: "workspaceName", value }),
               }),
               textField(h, {
                 id: "onb-slug",
+                disabled: workspaceCreated,
                 label: t.t("onboarding.wizard.entity.slug"),
                 value: model.slug,
                 mono: true,
@@ -793,6 +1075,12 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
                 value: model.postalCode,
                 mono: true,
                 onInput: (value) => Message.ChangedField({ field: "postalCode", value }),
+              }),
+              textField(h, {
+                id: "onb-legal-form",
+                label: local(ctx.locale, "legalForm"),
+                value: model.legalForm,
+                onInput: (value) => Message.ChangedField({ field: "legalForm", value }),
               }),
               textField(h, {
                 id: "onb-register",
@@ -836,13 +1124,6 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
                     }),
                   ]
                 : []),
-              textField(h, {
-                id: "onb-tax-effective",
-                label: t.t("onboarding.wizard.tax.effectiveFrom"),
-                type: "date",
-                value: model.taxEffectiveFrom,
-                onInput: (value) => Message.ChangedField({ field: "taxEffectiveFrom", value }),
-              }),
             ]),
           ]),
         ]);
@@ -900,7 +1181,13 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
 
       case 4: {
         const previewList = [1, 2, 3]
-          .map((n) => formatPatternSample(model.invoicePattern || "YYYY-NNNN", n, year))
+          .map((n) =>
+            formatPatternSample(
+              model.invoicePattern || "YYYY-NNNN",
+              n + (Number(model.invoiceStart) || 1) - 1,
+              year,
+            ),
+          )
           .join(", ");
         return card(h, [
           cardTitle(h, local(ctx.locale, "step4Title")),
@@ -911,40 +1198,27 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
               tone: "info",
             }),
             h.div.class("kb-grid").children([
-              textField(h, {
-                id: "onb-pat-inv",
-                label: local(ctx.locale, "invoiceSeries"),
-                value: model.invoicePattern,
-                mono: true,
-                onInput: (value) => Message.ChangedField({ field: "invoicePattern", value }),
-              }),
-              textField(h, {
-                id: "onb-pat-prof",
-                label: local(ctx.locale, "proformaSeries"),
-                value: model.proformaPattern,
-                mono: true,
-                onInput: (value) => Message.ChangedField({ field: "proformaPattern", value }),
-              }),
-              ...(model.taxRegime === "vat_payer"
-                ? [
-                    textField(h, {
-                      id: "onb-pat-ptd",
-                      label: local(ctx.locale, "ptdSeries"),
-                      value: model.ptdPattern,
-                      mono: true,
-                      onInput: (value) => Message.ChangedField({ field: "ptdPattern", value }),
-                    }),
-                  ]
-                : []),
-              textField(h, {
-                id: "onb-pat-cn",
-                label: local(ctx.locale, "creditNoteSeries"),
-                value: model.creditNotePattern,
-                mono: true,
-                onInput: (value) => Message.ChangedField({ field: "creditNotePattern", value }),
-              }),
+              ...eligibleSeries(model.taxRegime).map(({ kind, label, pattern, start }) =>
+                h.div.class("kb-stack").children([
+                  textField(h, {
+                    id: `onb-pattern-${kind}`,
+                    label: local(ctx.locale, label),
+                    value: model[pattern],
+                    mono: true,
+                    onInput: (value) => Message.ChangedField({ field: pattern, value }),
+                  }),
+                  textField(h, {
+                    id: `onb-start-${kind}`,
+                    label: local(ctx.locale, "startNumber"),
+                    type: "number",
+                    value: model[start],
+                    onInput: (value) => Message.ChangedField({ field: start, value }),
+                  }),
+                ]),
+              ),
               selectField(h, {
                 id: "onb-def-currency",
+                disabled: workspaceCreated,
                 label: local(ctx.locale, "defaultCurrency"),
                 value: model.defaultCurrency,
                 options: [
@@ -958,6 +1232,7 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
               }),
               selectField(h, {
                 id: "onb-def-lang",
+                disabled: workspaceCreated,
                 label: local(ctx.locale, "defaultLanguage"),
                 value: model.defaultLanguage,
                 options: [
@@ -973,7 +1248,11 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
       }
 
       default: {
-        const sampleNumber = formatPatternSample(model.invoicePattern || "YYYY-NNNN", 1, year);
+        const sampleNumber = formatPatternSample(
+          model.invoicePattern || "YYYY-NNNN",
+          Number(model.invoiceStart) || 1,
+          year,
+        );
         const isVat = model.taxRegime === "vat_payer";
         const net = Format.moneyDisplay(ctx.locale, {
           amount: "10000.00",
@@ -1073,6 +1352,7 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
             (element) => element.attr("type", "button"),
             (element) => element.class("kb-stepper__item"),
             (node) => (s.num === model.step ? node.attr("aria-current", "step") : node),
+            (node) => (model.submitting ? node.attr("disabled", "") : node),
             (element) => element.on("click", Message.ClickedStep({ step: s.num })),
           ]).children([
             h.span.class("kb-stepper__num").children([String(s.num)]),
@@ -1084,13 +1364,16 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
     ...(model.submitFailure !== null
       ? [banner(h, { text: failureMessage(t, model.submitFailure), tone: "error" })]
       : []),
-    stepContent,
+    withAttributes(h.el("fieldset").attr("style", "min-width:0;margin:0;padding:0;border:0"), [
+      (node) => (disableStepFields ? node.attr("disabled", "") : node),
+    ]).children([stepContent]),
     h.div.class("kb-onboarding__actions").children([
       model.step > 1
         ? button(h, {
             label: t.t("common.action.back"),
             onClick: Message.ClickedBack(),
             variant: "secondary",
+            disabled: model.submitting,
           })
         : h.span.children([]),
       h.div.class("kb-row").children([
@@ -1113,7 +1396,9 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
           : button(h, {
               label: model.submitting
                 ? t.t("onboarding.wizard.creating")
-                : t.t("onboarding.wizard.submit"),
+                : workspaceCreated
+                  ? local(ctx.locale, "resume")
+                  : t.t("onboarding.wizard.submit"),
               onClick: Message.ClickedCreateWorkspace(),
               variant: "primary",
               busy: model.submitting,
