@@ -5,7 +5,7 @@
  * - `cnbFixing`: daily CNB fixing prefetch via `FxFixings.fixing(today)`
  * - `outboxReconcile`: `deliveryJob.reconcileStaleDeliveries` + `recurringJob.reconcilePendingSends`
  *   + stale `running` exports + stale `pending` invitations
- * - `housekeeping`: `exportJob.purgeExpired` + expired `request_log` (>24h) + expired `altcha_replays`
+ * - `housekeeping`: expired exports, request logs, ALTCHA replays, and MCP confirmations
  */
 import { type CronLayerOptions, cronsLayer } from "@kvitbit/adapters/jobs";
 import {
@@ -184,6 +184,13 @@ export const makeCronHandlers = (options: CronHandlerOptions = {}) => {
     // 3. Expired ALTCHA replay rows
     yield* sql`
       DELETE FROM altcha_replays WHERE expires_at < ${nowIso}::timestamptz
+    `;
+
+    // Keep consumed confirmations available while their core request result can still be replayed.
+    yield* sql`
+      DELETE FROM mcp_confirmations
+      WHERE expires_at <= ${nowIso}::timestamptz
+        AND (consumed_at IS NULL OR consumed_at <= ${requestLogCutoff}::timestamptz)
     `;
   });
 

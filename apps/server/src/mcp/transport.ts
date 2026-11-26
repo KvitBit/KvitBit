@@ -15,8 +15,8 @@ import {
   MCP_SUPPORTED_PROTOCOL_VERSIONS,
 } from "@kvitbit/api-contract";
 import { CurrentCaller } from "@kvitbit/domain/contract";
-import { Effect } from "effect";
-import { HttpServerResponse } from "effect/http";
+import { ByteSize, Effect } from "effect";
+import { HttpIncomingMessage, HttpServerResponse } from "effect/http";
 import type { HttpServerRequest } from "effect/http/HttpServerRequest";
 import type { PrincipalResolver } from "../auth/PrincipalResolver";
 import { requestIdFor } from "../http/edge/requestId";
@@ -139,16 +139,18 @@ export const handleMcpPost = (
       }
     }
 
-    const rawBytes = yield* request.arrayBuffer.pipe(
-      Effect.map((buf) => new Uint8Array(buf)),
-      Effect.catch(() => Effect.succeed(null)),
+    const rawBody = yield* request.arrayBuffer.pipe(
+      Effect.provideService(HttpIncomingMessage.MaxBodySize, ByteSize.bytes(MCP_BODY_MAX_BYTES)),
+      Effect.result,
     );
-    if (rawBytes === null) {
+    if (rawBody._tag === "Failure") {
+      const reason = rawBody.failure.reason;
+      if (reason._tag === "RequestParseError" && reason.reason === "BodyTooLarge") {
+        return jsonRpcError(null, -32600, "Request body exceeds 1 MB limit", 413, responseHeaders);
+      }
       return jsonRpcError(null, -32700, "Failed to read request body", 400, responseHeaders);
     }
-    if (rawBytes.byteLength > MCP_BODY_MAX_BYTES) {
-      return jsonRpcError(null, -32600, "Request body exceeds 1 MB limit", 413, responseHeaders);
-    }
+    const rawBytes = new Uint8Array(rawBody.success);
 
     // 5. Parse JSON-RPC envelope; reject batches.
     let parsed: unknown;
