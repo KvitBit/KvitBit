@@ -240,7 +240,7 @@ export const PrincipalResolverLive = Layer.effect(
             t.expires_at as token_expires_at,
             t.revoked as token_revoked,
             c.id as consent_id,
-            c.workspace_id,
+            w.id as workspace_id,
             c.granted_scopes,
             cl.client_id,
             cl.name as client_name,
@@ -251,7 +251,9 @@ export const PrincipalResolverLive = Layer.effect(
             p.locale
           from auth.oauth_access_token t
           join auth.oauth_client cl on cl.client_id = t.client_id
-          left join auth.oauth_consent c on c.id = t.consent_id
+          left join auth.oauth_consent c
+            on c.id = t.consent_id and c.client_id = t.client_id and c.user_id = t.user_id
+          left join workspaces w on w.id = c.workspace_id and w.closed_at is null
           left join auth."user" u on u.id = t.user_id
           left join user_preferences p on p.user_id = u.id
           where t.token = ${digest}

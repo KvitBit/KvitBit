@@ -4,6 +4,8 @@
  * Bridges P16 (`/oauth/consent`) to Better Auth's OAuth 2.1 provider (`/api/auth/oauth2/consent`)
  * and binds the Workspace, AccessMode and expanded core `Scope[]` onto `auth.oauth_consent`.
  */
+
+import { generateId } from "@kvitbit/adapters/auth";
 import {
   ALL_SCOPES,
   Api,
@@ -29,6 +31,7 @@ import { HttpServerRequest } from "effect/http/HttpServerRequest";
 import { HttpApiBuilder } from "effect/http-api";
 import { SqlClient } from "effect/sql";
 import { AuthServer } from "../../auth/AuthServer";
+import { processWorkspaceConsent, verifyWorkspaceConsent } from "../../auth/oauthWorkspace";
 import { HttpConfig } from "../config";
 
 const isOAuthScopeToken = Schema.is(OAuthScopeToken);
@@ -119,7 +122,6 @@ interface ParsedConsentRequest {
   readonly clientId: string;
   readonly redirectUri: string;
   readonly redirectHost: string;
-  readonly originalWireScopes: ReadonlyArray<string>;
   readonly requestedAccess: "read" | "read_write" | "custom";
   readonly requestedScopes: ReadonlyArray<Scope>;
   readonly offlineAccess: boolean;
@@ -161,7 +163,6 @@ const parseConsentRequest = (
     clientId,
     redirectUri,
     redirectHost,
-    originalWireScopes: rawScopes,
     requestedAccess: parsed.access.access,
     requestedScopes: parsed.access.scopes,
     offlineAccess: parsed.offlineAccess,
@@ -200,6 +201,23 @@ export const OauthConsentGroupLive = HttpApiBuilder.group(Api, "oauthConsent", (
     const workspaces = yield* Workspaces;
     const config = yield* HttpConfig;
 
+    const loadConsent = (consentId: string) =>
+      Effect.gen(function* () {
+        const principal = yield* CurrentPrincipal;
+        const nowMs = yield* Clock.currentTimeMillis;
+        const parsed = parseConsentRequest(consentId, nowMs);
+        const notFound = new NotFound({ entity: "Workspace", id: consentId });
+        if (parsed === undefined || principal.credential._tag !== "Session") {
+          return yield* notFound;
+        }
+        const sessionId = principal.credential.sessionId;
+        const decision = yield* Effect.promise(() =>
+          verifyWorkspaceConsent(parsed.oauthQuery, config.visitorSecret, sessionId),
+        );
+        if (decision === undefined) return yield* notFound;
+        return { principal, sessionId, parsed, decision, notFound, nowMs };
+      });
+
     const loadClient = (parsed: ParsedConsentRequest, consentId: string) =>
       Effect.gen(function* () {
         const rows = yield* sql<{
@@ -227,11 +245,11 @@ export const OauthConsentGroupLive = HttpApiBuilder.group(Api, "oauthConsent", (
     return handlers
       .handle("getConsent", ({ params }) =>
         Effect.gen(function* () {
-          const nowMs = yield* Clock.currentTimeMillis;
-          const parsed = parseConsentRequest(params.consentId, nowMs);
-          if (parsed === undefined) {
-            return yield* new NotFound({ entity: "Workspace", id: params.consentId });
-          }
+          const { parsed, decision, notFound } = yield* loadConsent(params.consentId);
+          const used = yield* sql`select id from auth.verification where id = ${decision.id}`.pipe(
+            Effect.mapError(() => new Unavailable({ dependency: "database" })),
+          );
+          if (used.length > 0) return yield* notFound;
 
           const client = yield* loadClient(parsed, params.consentId);
           const mine = yield* workspaces.listMine;
@@ -265,117 +283,107 @@ export const OauthConsentGroupLive = HttpApiBuilder.group(Api, "oauthConsent", (
       )
       .handle("decide", ({ params, payload }) =>
         Effect.gen(function* () {
-          const principal = yield* CurrentPrincipal;
           const request = yield* HttpServerRequest;
-          const nowMs = yield* Clock.currentTimeMillis;
-          const parsed = parseConsentRequest(params.consentId, nowMs);
-          if (parsed === undefined) {
-            return yield* new NotFound({ entity: "Workspace", id: params.consentId });
-          }
-
+          const { principal, sessionId, parsed, decision, notFound, nowMs } = yield* loadConsent(
+            params.consentId,
+          );
           yield* loadClient(parsed, params.consentId);
 
-          if (payload._tag === "Deny") {
-            const response = yield* Effect.tryPromise({
-              try: () =>
-                auth.handler(
-                  new Request(`${config.appOrigin}/api/auth/oauth2/consent`, {
-                    method: "POST",
-                    headers: forwardHeaders(request),
-                    body: JSON.stringify({
-                      accept: false,
-                      oauth_query: parsed.oauthQuery,
-                    }),
-                  }),
-                ),
-              catch: () => new Unavailable({ dependency: "database" }),
-            });
-            if (!response.ok) {
-              return yield* new NotFound({ entity: "Workspace", id: params.consentId });
-            }
-            const body = yield* Effect.tryPromise({
-              try: () => response.json() as Promise<{ url?: string }>,
-              catch: () => new Unavailable({ dependency: "database" }),
-            });
-            if (typeof body.url !== "string" || body.url.length === 0) {
-              return yield* new NotFound({ entity: "Workspace", id: params.consentId });
-            }
-            return { redirectTo: body.url };
-          }
+          return yield* sql
+            .withTransaction(
+              Effect.gen(function* () {
+                const claimed = yield* sql`
+              insert into auth.verification (id, identifier, value, expires_at)
+              values (${decision.id}, ${decision.id}, '', ${decision.expiresAt})
+              on conflict (id) do nothing
+              returning id`;
+                if (claimed.length === 0) return yield* notFound;
 
-          // Approve: re-check membership and cap scopes against offerableScopes.
-          const member = yield* workspaces.enter(payload.workspace, {
-            scopes: "all",
-            channel: principal.channel,
-          });
-          const expanded = expandAccess(payload.grant);
-          const requestedSet = new Set(parsed.requestedScopes);
-          const offerable = new Set(
-            grantableScopesForRole(member.role).filter((scope) => requestedSet.has(scope)),
-          );
-          if (
-            expanded.scopes.length === 0 ||
-            expanded.scopes.some((scope) => !offerable.has(scope))
-          ) {
-            return yield* new Forbidden({ action: "grant.create" });
-          }
+                const accept = payload._tag === "Approve";
+                let providerDecision: Parameters<typeof processWorkspaceConsent>[0] = {
+                  accept: false,
+                };
+                if (accept) {
+                  const member = yield* workspaces.enter(payload.workspace, {
+                    scopes: "all",
+                    channel: principal.channel,
+                  });
+                  const expanded = expandAccess(payload.grant);
+                  const requestedSet = new Set(parsed.requestedScopes);
+                  const offerable = grantableScopesForRole(member.role).filter((scope) =>
+                    requestedSet.has(scope),
+                  );
+                  if (
+                    expanded.scopes.length === 0 ||
+                    expanded.scopes.some((scope) => !offerable.includes(scope))
+                  ) {
+                    return yield* new Forbidden({ action: "grant.create" });
+                  }
 
-          const wireScopes = wireScopesForGrant(
-            expanded.access,
-            expanded.scopes,
-            parsed.offlineAccess,
-          );
-          const allInOriginal = wireScopes.every((s) => parsed.originalWireScopes.includes(s));
-
-          const response = yield* Effect.tryPromise({
-            try: () =>
-              auth.handler(
-                new Request(`${config.appOrigin}/api/auth/oauth2/consent`, {
-                  method: "POST",
-                  headers: forwardHeaders(request),
-                  body: JSON.stringify({
+                  const wireScopes = wireScopesForGrant(
+                    expanded.access,
+                    expanded.scopes,
+                    parsed.offlineAccess,
+                  );
+                  const referenceId = generateId();
+                  const grants = yield* sql<{ id: string }>`
+                insert into auth.oauth_consent as existing
+                  (id, reference_id, client_id, user_id, workspace_id, access, granted_scopes, scopes, created_at, updated_at)
+                select ${referenceId}, ${referenceId}, ${parsed.clientId}, ${principal.userId},
+                  w.id, ${expanded.access}::access_mode, ${[...expanded.scopes]}::text[],
+                  ${[...wireScopes]}::text[], ${new Date(nowMs)}, ${new Date(nowMs)}
+                from workspaces w where w.id = ${payload.workspace}::uuid and w.closed_at is null
+                on conflict (client_id, user_id, workspace_id) do update set
+                  reference_id = existing.id,
+                  access = excluded.access,
+                  granted_scopes = excluded.granted_scopes,
+                  scopes = excluded.scopes,
+                  updated_at = excluded.updated_at
+                returning id`;
+                  const grant = grants[0];
+                  if (grant === undefined) return yield* notFound;
+                  providerDecision = {
                     accept: true,
-                    oauth_query: parsed.oauthQuery,
-                    ...(allInOriginal ? { scope: wireScopes.join(" ") } : {}),
-                  }),
-                }),
-              ),
-            catch: () => new Unavailable({ dependency: "database" }),
-          });
+                    grantId: grant.id,
+                    userId: principal.userId,
+                    sessionId,
+                    scopes: wireScopes,
+                  };
+                }
 
-          if (!response.ok) {
-            if (response.status === 400) {
-              return yield* new Invalid({
-                issues: [{ path: ["consentId"], code: "request.malformed" }],
-              });
-            }
-            return yield* new NotFound({ entity: "Workspace", id: params.consentId });
-          }
+                const response = yield* processWorkspaceConsent(providerDecision, () =>
+                  auth.handler(
+                    new Request(`${config.appOrigin}/api/auth/oauth2/consent`, {
+                      method: "POST",
+                      headers: forwardHeaders(request),
+                      body: JSON.stringify({ accept, oauth_query: parsed.oauthQuery }),
+                    }),
+                  ),
+                ).pipe(Effect.mapError(() => new Unavailable({ dependency: "database" })));
+                if (response.status >= 500)
+                  return yield* new Unavailable({ dependency: "database" });
+                if (!response.ok) return yield* notFound;
 
-          const body = yield* Effect.tryPromise({
-            try: () => response.json() as Promise<{ url?: string }>,
-            catch: () => new Unavailable({ dependency: "database" }),
-          });
-          if (typeof body.url !== "string" || body.url.length === 0) {
-            return yield* new NotFound({ entity: "Workspace", id: params.consentId });
-          }
-
-          // Bind workspace_id, access and granted_scopes onto the auth.oauth_consent row (#889).
-          yield* sql`
-            update auth.oauth_consent
-            set
-              workspace_id = ${payload.workspace}::uuid,
-              access = ${expanded.access}::access_mode,
-              granted_scopes = ${[...expanded.scopes]}::text[],
-              scopes = ${[...wireScopes]}::text[],
-              updated_at = ${new Date(nowMs)}
-            where client_id = ${parsed.clientId}
-              and user_id = ${principal.userId}
-              and (workspace_id is null or workspace_id = ${payload.workspace}::uuid)`.pipe(
-            Effect.mapError(() => new Unavailable({ dependency: "database" })),
-          );
-
-          return { redirectTo: body.url };
+                const callback = yield* Effect.tryPromise({
+                  try: async () => {
+                    const body = (await response.json()) as { url: string };
+                    return new URL(body.url);
+                  },
+                  catch: () => notFound,
+                });
+                if (
+                  accept
+                    ? !callback.searchParams.has("code")
+                    : callback.searchParams.get("error") !== "access_denied"
+                ) {
+                  return yield* new Invalid({
+                    issues: [{ path: ["consentId"], code: "request.malformed" }],
+                  });
+                }
+                return { redirectTo: callback.href };
+              }),
+            )
+            .pipe(Effect.catchTag("SqlError", () => new Unavailable({ dependency: "database" })));
         }),
       );
   }),

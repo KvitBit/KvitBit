@@ -16,6 +16,7 @@
       "name": "@kvitbit/server",
       "version": "0.0.0",
       "dependencies": {
+        "@better-auth/oauth-provider": "1.7.27",
         "@effect/platform-bun": "4.1.4",
         "@effect/platform-node": "4.1.4",
         "@effect/sql-pg": "4.1.4",
