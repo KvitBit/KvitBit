@@ -115,7 +115,7 @@ describe("Shared HTTP/MCP trailing sliding-window RateLimiter", () => {
     );
   });
 
-  test("RateLimiterSql honors active legacy fixed-window aggregate rows during rollout", async () => {
+  test("RateLimiterSql shares one allowance bidirectionally with legacy fixed-window instances during rollout", async () => {
     const t0 = Date.parse("2026-11-23T12:00:00Z");
     const clockLayer = Layer.effectDiscard(TestClock.setTime(t0)).pipe(
       Layer.provideMerge(TestClock.layer()),
@@ -128,33 +128,78 @@ describe("Shared HTTP/MCP trailing sliding-window RateLimiter", () => {
         const limiter = yield* Effect.provide(RateLimiter, RateLimiterSql);
         const rule = { max: 3, windowSeconds: 60 };
 
-        // Seed an active legacy aggregate row with count=2 at t=0s and a full one with count=3.
-        yield* sql`
-          insert into auth.rate_limit (id, key, count, last_request)
-          values
-            ('legacy-row-1', 'edge:api-key:legacy-partial', 2, ${t0}),
-            ('legacy-row-2', 'edge:api-key:legacy-full', 3, ${t0})`;
+        // Exact SQL from the previous fixed-window release.
+        const consumeLegacy = (key: string) =>
+          Effect.gen(function* () {
+            const now = yield* Effect.clockWith((clock) => clock.currentTimeMillis);
+            const windowOpenedAfter = now - rule.windowSeconds * 1000;
+            const rows = yield* sql<{ count: number; last_request: string | number }>`
+              insert into auth.rate_limit (id, key, count, last_request)
+              values (${`legacy-${now}-${Math.random()}`}, ${`edge:${key}`}, 1, ${now})
+              on conflict (key) do update set
+                count = case when auth.rate_limit.last_request <= ${windowOpenedAfter}
+                  then 1 else auth.rate_limit.count + 1 end,
+                last_request = case when auth.rate_limit.last_request <= ${windowOpenedAfter}
+                  then ${now} else auth.rate_limit.last_request end
+              returning count, last_request`;
+            const row = rows[0];
+            if (row === undefined) return { allowed: true } as const;
+            const count = Number(row.count);
+            const start = Number(row.last_request);
+            return count <= rule.max
+              ? ({ allowed: true } as const)
+              : ({
+                  allowed: false,
+                  retryAfterSeconds: Math.max(
+                    1,
+                    Math.ceil((start + rule.windowSeconds * 1000 - now) / 1000),
+                  ),
+                } as const);
+          });
 
-        // At t=15s: legacy-full is already at limit (Retry-After: 45s).
+        // 1. Legacy admits 2 at t=0s, upgraded takes the 3rd slot at t=15s -> legacy row updates
+        //    to count=3 so a legacy instance also sees 0 remaining slots.
+        expect(yield* consumeLegacy("api-key:mixed-1")).toEqual({ allowed: true });
+        expect(yield* consumeLegacy("api-key:mixed-1")).toEqual({ allowed: true });
         yield* TestClock.adjust(Duration.seconds(15));
-        expect(yield* limiter.consume("api-key:legacy-full", rule)).toEqual({
+        expect(yield* limiter.consume("api-key:mixed-1", rule)).toEqual({ allowed: true });
+
+        const [aggAfterUpgrade] = yield* sql<{ count: number | string }>`
+          select count from auth.rate_limit where key = 'edge:api-key:mixed-1'`;
+        expect(Number(aggAfterUpgrade?.count)).toBe(3);
+
+        // Both upgraded and legacy instances now deny with Retry-After: 45s.
+        expect(yield* limiter.consume("api-key:mixed-1", rule)).toEqual({
+          allowed: false,
+          retryAfterSeconds: 45,
+        });
+        expect(yield* consumeLegacy("api-key:mixed-1")).toEqual({
           allowed: false,
           retryAfterSeconds: 45,
         });
 
-        // At t=15s: legacy-partial has 1 slot left, then denies with Retry-After: 45s.
-        expect(yield* limiter.consume("api-key:legacy-partial", rule)).toEqual({ allowed: true });
-        expect(yield* limiter.consume("api-key:legacy-partial", rule)).toEqual({
+        // 2. Interleaved order: upgraded admits 1 at t=15s, legacy admits 1 at t=25s,
+        //    upgraded admits 1 at t=35s -> both see the 4th request denied.
+        expect(yield* limiter.consume("api-key:mixed-2", rule)).toEqual({ allowed: true });
+        yield* TestClock.adjust(Duration.seconds(10));
+        expect(yield* consumeLegacy("api-key:mixed-2")).toEqual({ allowed: true });
+        yield* TestClock.adjust(Duration.seconds(10));
+        expect(yield* limiter.consume("api-key:mixed-2", rule)).toEqual({ allowed: true });
+        expect(yield* limiter.consume("api-key:mixed-2", rule)).toEqual({
           allowed: false,
-          retryAfterSeconds: 45,
+          retryAfterSeconds: 40,
+        });
+        expect(yield* consumeLegacy("api-key:mixed-2")).toEqual({
+          allowed: false,
+          retryAfterSeconds: 40,
         });
 
-        // At t=60s: legacy aggregate row expires and is pruned; the t=15s admission remains live,
-        // so 2 new slots open and the 3rd is denied with Retry-After: 15s.
-        yield* TestClock.adjust(Duration.seconds(45));
-        expect(yield* limiter.consume("api-key:legacy-partial", rule)).toEqual({ allowed: true });
-        expect(yield* limiter.consume("api-key:legacy-partial", rule)).toEqual({ allowed: true });
-        expect(yield* limiter.consume("api-key:legacy-partial", rule)).toEqual({
+        // 3. At t=60s (45s after t=15s, 25s after t=35s): mixed-1's t=0s legacy admissions
+        //    expire; the t=15s upgraded admission remains live -> 2 slots open, 3rd denied (15s).
+        yield* TestClock.adjust(Duration.seconds(25));
+        expect(yield* limiter.consume("api-key:mixed-1", rule)).toEqual({ allowed: true });
+        expect(yield* limiter.consume("api-key:mixed-1", rule)).toEqual({ allowed: true });
+        expect(yield* limiter.consume("api-key:mixed-1", rule)).toEqual({
           allowed: false,
           retryAfterSeconds: 15,
         });
