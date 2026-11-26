@@ -16,7 +16,9 @@
     "typecheck:formal": "tsc -p formal/tsconfig.json",
     "verify:formal": "bun formal/run-formal.ts",
     "test": "turbo run test",
+    "test:static-mounts": "bun test ./apps/server/test/integration/static-mounts.integration.ts",
     "build": "turbo run build",
+    "generate:bun-nix": "bun scripts/generate-bun-nix.ts",
     "db:generate": "turbo run db:generate --filter=@kvitbit/db"
   },
   "devDependencies": {

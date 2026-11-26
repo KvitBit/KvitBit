@@ -56,8 +56,8 @@ case "$cmd" in
         export DATABASE_URL_UNPOOLED="${KVITBIT_BUNDLED_MIGRATION_URL}"
       fi
     fi
-    if [ -z "${DATABASE_URL_UNPOOLED:-}" ] && [ -z "${DATABASE_URL:-}" ]; then
-      echo "kvitbit: migrate requires DATABASE_URL_UNPOOLED (preferred, owner role) or DATABASE_URL" >&2
+    if [ -z "${DATABASE_URL_UNPOOLED:-}" ]; then
+      echo "kvitbit: migrate requires DATABASE_MIGRATION_URL or DATABASE_URL_UNPOOLED for the direct owner connection" >&2
       exit 64
     fi
     entry="${APP_ROOT}/apps/server/src/migrate.ts"

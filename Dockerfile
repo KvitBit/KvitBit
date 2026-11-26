@@ -54,7 +54,7 @@ RUN apt-get update \
   && rm -rf /var/lib/apt/lists/*
 
 RUN groupadd --gid 10001 kvitbit \
-  && useradd --uid 10001 --gid 10001 --home-dir /app --shell /usr/sbin/nologin kvitbit \
+  && useradd --uid 10001 --gid 10001 --home-dir /var/lib/kvitbit --shell /usr/sbin/nologin kvitbit \
   && install -d -o 10001 -g 10001 -m 0750 /var/lib/kvitbit /var/lib/kvitbit/blobs /var/lib/kvitbit/mobile
 
 WORKDIR /app

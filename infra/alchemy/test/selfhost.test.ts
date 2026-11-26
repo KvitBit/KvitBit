@@ -103,6 +103,14 @@ describe("docker/entrypoint.sh dispatch contract (#878, #908, #913)", () => {
       });
       expect(migrateNoDb.exitCode).toBe(64);
 
+      const migrateRuntimeOnly = runEntrypoint(["migrate"], {
+        KVITBIT_APP_ROOT: sandbox,
+        KVITBIT_BUN_BIN: fakeBun,
+        DATABASE_URL: "postgres://app:pw@external.invalid:5432/kvitbit",
+      });
+      expect(migrateRuntimeOnly.exitCode).toBe(64);
+      expect(migrateRuntimeOnly.stderr).toContain("direct owner connection");
+
       const migrateOk = runEntrypoint(["migrate"], {
         KVITBIT_APP_ROOT: sandbox,
         KVITBIT_BUN_BIN: fakeBun,

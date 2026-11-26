@@ -24,9 +24,53 @@ jobs:
         with:
           bun-version: 1.4.2
       - run: bun install --frozen-lockfile
+      - run: bun run generate:bun-nix --check
       - run: bunx biome ci --error-on-warnings .
       - run: bun run typecheck
       - run: bun run test
+
+  static-mounts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: kvitbit
+          POSTGRES_PASSWORD: kvitbit
+          POSTGRES_DB: kvitbit_smoke
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U kvitbit -d kvitbit_smoke"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
+      - run: bun install --frozen-lockfile
+      - name: Build web and Expo PWA
+        run: bun run build
+        env:
+          EXPO_NO_TELEMETRY: "1"
+      - name: Install Chromium for the production server
+        working-directory: apps/web
+        run: |
+          bunx --no-install playwright install --with-deps chromium
+          chromium_path="$(bun -e 'import { chromium } from "@playwright/test"; process.stdout.write(chromium.executablePath())')"
+          printf 'KVITBIT_CHROMIUM_PATH=%s\n' "$chromium_path" >> "$GITHUB_ENV"
+      - name: Smoke-test both builds on the production server
+        run: bun run test:static-mounts
+        env:
+          KVITBIT_SMOKE_DATABASE_URL: postgres://kvitbit:kvitbit@127.0.0.1:5432/kvitbit_smoke
 
   # Bounded TLC models with their mutants, trace-replay harnesses and covered-file digests
   # (docs/adr/0005-formal-verification.md). A TLC timeout or incomplete search fails the job.
@@ -79,14 +123,14 @@ jobs:
               - 'packages/core/src/modules/payments/**'
               - 'packages/core/src/modules/documents/**'
               - 'packages/core/src/modules/recurring/**'
+              - 'packages/adapters/src/sql/**'
+              - 'packages/adapters/test/sql/contention.postgres.test.ts'
               - 'packages/db/**'
               - '**/*.contention.ts'
               - '.github/workflows/ci.yml'
 
-  # SKELETON (ADR-0005): two-connection Postgres 17 contention tests for numbering, revision
-  # CAS, request_log, payments/PTD, outbox claim and the ALTCHA replay store. It runs every
-  # `*.contention.ts` (outside bun's default test discovery, so package `bun test` never runs
-  # them without Postgres) against the service below, and passes while none exist yet.
+  # Run the adapter's lock and deadlock tests and discover any additional explicit
+  # *.contention.ts suites for the Postgres-only cases in ADR-0005.
   pg-contention:
     needs: changes
     if: needs.changes.outputs.contention == 'true'
@@ -116,11 +160,15 @@ jobs:
         with:
           bun-version: 1.4.2
       - run: bun install --frozen-lockfile
-      - name: Postgres 17 contention tests
+      - name: Postgres 17 adapter contention tests
+        run: bun test ./packages/adapters/test/sql/contention.postgres.test.ts
+        env:
+          DATABASE_URL: ${{ env.KVITBIT_CONTENTION_PG_URL }}
+      - name: Additional Postgres 17 contention suites
         run: |
           mapfile -t files < <(git ls-files '*.contention.ts')
           if [ "${#files[@]}" -eq 0 ]; then
-            echo "::notice::No *.contention.ts yet; pg-contention is a skeleton (ADR-0005)."
+            echo "::notice::No additional *.contention.ts suites found."
             exit 0
           fi
           bun test "${files[@]/#/./}"

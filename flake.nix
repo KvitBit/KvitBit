@@ -139,6 +139,7 @@
               Cmd = [ "server" ];
               Env = [
                 "NODE_ENV=production"
+                "HOME=/var/lib/kvitbit"
                 "HOST=0.0.0.0"
                 "PORT=8080"
                 "KVITBIT_RUNNER_MODE=single"

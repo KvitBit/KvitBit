@@ -5,6 +5,8 @@
   "tasks": {
     "build": {
       "dependsOn": ["^build"],
+      "env": ["EXPO_PUBLIC_*", "VITE_*"],
+      "passThroughEnv": ["CI", "EXPO_NO_TELEMETRY"],
       "outputs": ["dist/**"]
     },
     "typecheck": {
