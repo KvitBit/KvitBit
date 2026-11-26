@@ -149,11 +149,11 @@ jobs:
               ;;
           esac
           if ! [[ "$channel" =~ ^[a-z0-9][a-z0-9_-]{0,63}$ ]]; then
-            echo "Invalid channel: $channel" >&2
+            echo "Invalid release channel" >&2
             exit 1
           fi
           if [ -n "$runtime_version" ] && ! [[ "$runtime_version" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]]; then
-            echo "Invalid runtime_version: $runtime_version" >&2
+            echo "Invalid runtime version" >&2
             exit 1
           fi
 
@@ -200,7 +200,11 @@ jobs:
           bun run scripts/release/mobile-release.ts build --dry-run
           bun run scripts/release/mobile-release.ts publish-apk --dry-run
           bun run scripts/release/mobile-release.ts publish-ota --dry-run --channel "$MODE_CHANNEL" --platform "$MODE_PLATFORM"
-          bun run scripts/release/mobile-release.ts verify --dry-run --channel "$MODE_CHANNEL" --platform "$MODE_PLATFORM"
+          platforms=("$MODE_PLATFORM")
+          if [ "$MODE_PLATFORM" = "all" ]; then platforms=(android ios); fi
+          for platform in "${platforms[@]}"; do
+            bun run scripts/release/mobile-release.ts verify --dry-run --channel "$MODE_CHANNEL" --platform "$platform"
+          done
 
   build-and-publish-apk:
     needs: prepare
@@ -261,6 +265,13 @@ jobs:
           fi
           bun run scripts/release/mobile-release.ts "${args[@]}"
 
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kvitbit-mobile-apk
+          path: ${{ runner.temp }}/mobile-release/${{ needs.prepare.outputs.apk-name }}
+          if-no-files-found: error
+          retention-days: 90
+
       - name: Publish signed APK and release.json
         env:
           KVITBIT_MOBILE_STORAGE_BUCKET: ${{ vars.KVITBIT_MOBILE_STORAGE_BUCKET }}
@@ -270,13 +281,6 @@ jobs:
           bun run scripts/release/mobile-release.ts publish-apk \
             --apk "$RUNNER_TEMP/mobile-release/$APK_NAME" \
             --origin "$KVITBIT_ORIGIN"
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: kvitbit-mobile-apk
-          path: ${{ runner.temp }}/mobile-release/${{ needs.prepare.outputs.apk-name }}
-          if-no-files-found: error
-          retention-days: 90
 
   publish-ota:
     needs: [prepare, build-and-publish-apk]

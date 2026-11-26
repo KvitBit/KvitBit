@@ -2,6 +2,7 @@ import { MOBILE_NAV, type NavSection, navLabelKey } from "@kvitbit/ui-port/view-
 import { Redirect, router, Tabs, useLocalSearchParams, useUnstableGlobalHref } from "expo-router";
 import { FileText, House, Menu, Receipt, Users } from "lucide-react-native";
 import { useEffect } from "react";
+import { ExpenseCaptureRuntime } from "../../../src/features/expenses/expense-capture-runtime";
 import { useI18n } from "../../../src/i18n/i18n-provider";
 import { safeReturnTo } from "../../../src/navigation/return-to";
 import { hrefOf, param } from "../../../src/navigation/routes";
@@ -66,6 +67,7 @@ export default function WorkspaceLayout() {
           );
         return (
           <WorkspaceProvider workspace={workspace} workspaces={all} reload={workspaces.reload}>
+            <ExpenseCaptureRuntime />
             <Tabs
               screenOptions={{
                 headerShown: false,

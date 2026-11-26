@@ -1,10 +1,11 @@
-import { describeError } from "@kvitbit/ui-port/api";
+import { describeError, UiError } from "@kvitbit/ui-port/api";
 import type { Locale } from "@kvitbit/ui-port/i18n";
 import { router } from "expo-router";
 import { useState } from "react";
 import { StyleSheet, View } from "react-native";
 import { useI18n } from "../../i18n/i18n-provider";
 import { navigate } from "../../navigation/routes";
+import { passkeyBridge } from "../../platform/passkeys/passkey-bridge";
 import {
   Banner,
   Button,
@@ -19,30 +20,50 @@ import {
 import { checkEmailHref, inviteReturnTo } from "./auth-links";
 import type { AuthClient } from "./auth-port";
 import { BotProofWidget } from "./bot-proof-widget";
+import { CheckEmailScreen } from "./check-email-screen";
 import { useAuthClient } from "./use-auth-client";
 import { useBotProof } from "./use-bot-proof";
 
 const MIN_PASSWORD_LENGTH = 10;
+type SignupMethod = "password" | "passkey";
 
 export function SignUpScreen(props: {
   readonly invitation?: string;
   readonly lockedEmail?: string;
   readonly authClient?: AuthClient;
 }) {
-  const { t, text, locale, setLocale } = useI18n();
+  const { t, text, locale, setLocale, local } = useI18n();
   const contextAuth = useAuthClient();
   const auth = props.authClient ?? contextAuth;
 
   const [name, setName] = useState("");
   const [email, setEmail] = useState(props.lockedEmail ?? "");
   const [password, setPassword] = useState("");
+  const [method, setMethod] = useState<SignupMethod>("password");
+  const [passkeyEmail, setPasskeyEmail] = useState<string | null>(null);
   const [acceptedTerms, setAcceptedTerms] = useState(false);
   const [busy, setBusy] = useState(false);
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
   const [errorBanner, setErrorBanner] = useState<string | null>(null);
 
-  const bot = useBotProof("sign_up", { initial: "auto" });
+  const bot = useBotProof(method === "passkey" ? "magic_link" : "sign_up", { initial: "auto" });
   const returnTo = inviteReturnTo(props.invitation);
+
+  const sendPasskeyLink = async (email: string) => {
+    const fresh = await bot.ensureFresh();
+    if (fresh._tag === "Failed") return { _tag: "Err" as const, error: fresh.error };
+    if (fresh._tag !== "Solved" && fresh._tag !== "NotRequired")
+      return { _tag: "Err" as const, error: UiError.offline };
+    const result = await auth.sendMagicLink(
+      email,
+      fresh._tag === "Solved" ? fresh.payload : null,
+      "/passkey-setup",
+      { name: name.trim(), locale },
+    );
+    if (result._tag === "Ok" || (result._tag === "Err" && result.error._tag === "InvalidBotProof"))
+      void bot.restart();
+    return result;
+  };
 
   const handleSubmit = async () => {
     const trimmedEmail = (props.lockedEmail ?? email).trim();
@@ -51,7 +72,7 @@ export function SignUpScreen(props: {
 
     if (trimmedName.length === 0) nextErrors.name = t("issue.form.required");
     if (!trimmedEmail.includes("@")) nextErrors.email = t("issue.form.email_invalid");
-    if (password.length < MIN_PASSWORD_LENGTH) {
+    if (method === "password" && password.length < MIN_PASSWORD_LENGTH) {
       nextErrors.password = t("issue.form.password_too_short", { min: MIN_PASSWORD_LENGTH });
     }
     if (!acceptedTerms) nextErrors.terms = t("issue.form.terms_required");
@@ -66,6 +87,18 @@ export function SignUpScreen(props: {
     setErrorBanner(null);
     setBusy(true);
 
+    if (method === "passkey") {
+      if ((await passkeyBridge.availability()) === "unavailable") {
+        setBusy(false);
+        setErrorBanner(t("auth.passkey.unsupported"));
+        return;
+      }
+      const res = await sendPasskeyLink(trimmedEmail);
+      setBusy(false);
+      if (res._tag === "Ok") setPasskeyEmail(trimmedEmail);
+      else if (res._tag === "Err") setErrorBanner(text(describeError(res.error).text));
+      return;
+    }
     const fresh = await bot.ensureFresh();
     if (fresh._tag === "Failed") {
       setBusy(false);
@@ -96,6 +129,17 @@ export function SignUpScreen(props: {
     setErrorBanner(text(described.text));
   };
 
+  if (passkeyEmail !== null) {
+    return (
+      <CheckEmailScreen
+        email={passkeyEmail}
+        authClient={auth}
+        resend={() => sendPasskeyLink(passkeyEmail)}
+        onWrongEmail={() => setPasskeyEmail(null)}
+      />
+    );
+  }
+
   return (
     <Screen title={t("auth.signUp.title")} back>
       <Text variant="bodyMedium" color="onSurfaceVariant">
@@ -108,6 +152,22 @@ export function SignUpScreen(props: {
       {errorBanner === null ? null : <Banner tone="error" text={errorBanner} />}
 
       <Card>
+        {props.invitation === undefined ? (
+          <SegmentedChoice<SignupMethod>
+            value={method}
+            onChange={(next) => {
+              if (busy || next === method) return;
+              setMethod(next);
+              setPassword("");
+              setFieldErrors({});
+              setErrorBanner(null);
+            }}
+            choices={[
+              { value: "password", label: t("auth.signUp.methodPassword") },
+              { value: "passkey", label: t("auth.signUp.methodPasskey") },
+            ]}
+          />
+        ) : null}
         <SegmentedChoice<Locale>
           label={t("common.field.language")}
           value={locale}
@@ -140,17 +200,26 @@ export function SignUpScreen(props: {
           testID="sign-up-email"
         />
 
-        <TextField
-          label={t("common.field.password")}
-          value={password}
-          onChangeText={setPassword}
-          {...(fieldErrors.password !== undefined ? { error: fieldErrors.password } : {})}
-          supporting={t("auth.signUp.passwordHint")}
-          secureTextEntry
-          autoComplete="new-password"
-          disabled={busy}
-          testID="sign-up-password"
-        />
+        {method === "password" ? (
+          <TextField
+            label={t("common.field.password")}
+            value={password}
+            onChangeText={setPassword}
+            {...(fieldErrors.password !== undefined ? { error: fieldErrors.password } : {})}
+            supporting={t("auth.signUp.passwordHint")}
+            secureTextEntry
+            autoComplete="new-password"
+            disabled={busy}
+            testID="sign-up-password"
+          />
+        ) : (
+          <Text variant="bodyMedium" color="onSurfaceVariant">
+            {local({
+              cs: "Po potvrzení e-mailu si vytvoříte přístupový klíč.",
+              en: "Confirm your email to set up a passkey.",
+            })}
+          </Text>
+        )}
 
         <SwitchRow
           label={t("auth.signUp.acceptTerms")}

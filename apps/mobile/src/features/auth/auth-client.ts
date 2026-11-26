@@ -5,6 +5,7 @@
 import { InvalidBotProof, RateLimited, Unauthorized } from "@kvitbit/api-contract";
 import { Conflict, NotFound, Unavailable } from "@kvitbit/domain/contract";
 import { type AuthInvalid, type AuthIssueCode, UiError } from "@kvitbit/ui-port/api";
+import { safeReturnTo } from "../../navigation/return-to";
 import type { JsonObject, PasskeyBridge } from "../../platform/passkeys/passkey-bridge";
 import type { AuthFetch, AuthResponse } from "../../session/auth-http";
 import { readSessionUser, type SessionUser } from "../../session/session-user";
@@ -226,13 +227,21 @@ export const makeAuthClient = (deps: AuthClientDeps): AuthClient => {
         return res.ok ? establishSession(res) : err(mapAuthError(res));
       }),
 
-    sendMagicLink: (email, proof, returnTo) =>
+    sendMagicLink: (email, proof, returnTo, signUp) =>
       guard(async () => {
-        const headers = altchaHeaders(proof);
+        const headers = altchaHeaders(
+          proof,
+          signUp === undefined ? undefined : { "accept-language": signUp.locale },
+        );
+        const destination = safeReturnTo(returnTo ?? undefined);
         const res = await deps.auth("/sign-in/magic-link", {
           method: "POST",
           ...(headers !== undefined ? { headers } : {}),
-          body: { email, ...(returnTo !== null ? { callbackURL: returnTo } : {}) },
+          body: {
+            email,
+            callbackURL: `/app${destination ?? "/"}`,
+            ...(signUp === undefined ? {} : { name: signUp.name }),
+          },
         });
         return res.ok ? ok(undefined) : err(mapAuthError(res));
       }),

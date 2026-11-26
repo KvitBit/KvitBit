@@ -25,6 +25,15 @@
           "category": ["BROWSABLE", "DEFAULT"]
         },
         {
+          "action": "VIEW",
+          "autoVerify": true,
+          "data": [
+            { "scheme": "https", "host": "kvitbit.cz", "path": "/api/auth/verify-email" },
+            { "scheme": "https", "host": "kvitbit.cz", "path": "/api/auth/magic-link/verify" }
+          ],
+          "category": ["BROWSABLE", "DEFAULT"]
+        },
+        {
           "action": "SEND",
           "data": [{ "mimeType": "image/*" }, { "mimeType": "application/pdf" }],
           "category": ["DEFAULT"]

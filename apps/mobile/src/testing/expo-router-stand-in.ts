@@ -10,6 +10,7 @@ const inertHooks = {
   useFocusEffect: (_effect: () => undefined | (() => void)) => undefined,
   useIsFocused: () => true,
   useLocalSearchParams: () => ({}) as Record<string, string>,
+  useGlobalSearchParams: () => ({}) as Record<string, string>,
   useNavigation: () => ({ getState: () => ({ routes: [] as unknown[] }) }),
   usePathname: () => "/",
   usePreventRemove: (_prevent: boolean, _blocked: (event: { repeat: () => void }) => void) =>

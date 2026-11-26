@@ -6,7 +6,7 @@ import { useI18n } from "../../i18n/i18n-provider";
 import { safeReturnTo } from "../../navigation/return-to";
 import { navigate } from "../../navigation/routes";
 import { Banner, Button, Card, Icon, Screen, space, Text, useOverlay } from "../../ui";
-import type { AuthClient } from "./auth-port";
+import type { AuthClient, AuthResult } from "./auth-port";
 import { useAuthClient } from "./use-auth-client";
 
 const RESEND_COOLDOWN_SECONDS = 60;
@@ -15,6 +15,8 @@ export function CheckEmailScreen(props: {
   readonly email: string;
   readonly initialCooldown?: number;
   readonly returnTo?: string;
+  readonly resend?: () => Promise<AuthResult<void>>;
+  readonly onWrongEmail?: () => void;
   readonly authClient?: AuthClient;
 }) {
   const { t, text } = useI18n();
@@ -38,7 +40,9 @@ export function CheckEmailScreen(props: {
     if (cooldown > 0 || props.email.length === 0) return;
     setBusy(true);
     setErrorBanner(null);
-    const res = await auth.resendVerification(props.email, safeReturnTo(props.returnTo));
+    const res = props.resend
+      ? await props.resend()
+      : await auth.resendVerification(props.email, safeReturnTo(props.returnTo));
     setBusy(false);
 
     if (res._tag === "Ok") {
@@ -74,7 +78,7 @@ export function CheckEmailScreen(props: {
         <Button
           kind="text"
           label={t("auth.checkEmail.wrongEmail")}
-          onPress={() => navigate({ _tag: "SignIn" }, { replace: true })}
+          onPress={props.onWrongEmail ?? (() => navigate({ _tag: "SignIn" }, { replace: true }))}
           testID="check-email-back"
         />
       </Card>

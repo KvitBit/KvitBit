@@ -71,6 +71,32 @@ describe("AuthClient", () => {
     });
   });
 
+  test("passkey signup requests an email-backed session and resumes at registration", async () => {
+    const h = makeHarness((path) => ({
+      status: 200,
+      ok: true,
+      body: path === "/magic-link/verify" ? { user: sampleUser } : {},
+      token: path === "/magic-link/verify" ? "test-session" : null,
+    }));
+    const started = await h.client.sendMagicLink(
+      "new@example.test",
+      "magic-proof",
+      "/passkey-setup",
+      { name: "New user", locale: "en" },
+    );
+    expect(started._tag).toBe("Ok");
+    expect(h.calls[0]).toEqual({
+      path: "/sign-in/magic-link",
+      req: {
+        method: "POST",
+        headers: { "accept-language": "en", "x-altcha": "magic-proof" },
+        body: { email: "new@example.test", name: "New user", callbackURL: "/app/passkey-setup" },
+      },
+    });
+    expect((await h.client.verifyLink("magic", "emailed-token"))._tag).toBe("Ok");
+    expect(h.signedInTokens).toEqual(["test-session"]);
+  });
+
   test("signInEmail establishes session and maps EMAIL_NOT_VERIFIED / InvalidBotProof", async () => {
     const okH = makeHarness(() => ({
       status: 200,

@@ -9,11 +9,14 @@ const PLAIN_HTTP_HOSTS = new Set(["localhost", "127.0.0.1", "10.0.2.2"]);
 export const parseApiOrigin = (configured: string | undefined): string | null => {
   const candidate = configured?.trim();
   if (candidate === undefined || candidate === "") return null;
-  const url = URL.parse(candidate);
-  if (url === null) return null;
-  const allowed =
-    url.protocol === "https:" || (url.protocol === "http:" && PLAIN_HTTP_HOSTS.has(url.hostname));
-  return allowed ? url.origin : null;
+  try {
+    const url = new URL(candidate);
+    const allowed =
+      url.protocol === "https:" || (url.protocol === "http:" && PLAIN_HTTP_HOSTS.has(url.hostname));
+    return allowed ? url.origin : null;
+  } catch {
+    return null;
+  }
 };
 
 /**

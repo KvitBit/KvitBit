@@ -59,6 +59,7 @@ export interface AuthClient {
     email: string,
     proof: BotProofPayload,
     returnTo: string | null,
+    signUp?: { readonly name: string; readonly locale: Locale },
   ) => Promise<AuthResult<void>>;
   /** Null means email verification succeeded, and the user can sign in. */
   readonly verifyLink: (
