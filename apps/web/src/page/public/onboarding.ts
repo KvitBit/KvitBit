@@ -177,26 +177,27 @@ const readDraft = (key: string) =>
     }),
   );
 
-const storeDraft = (key: string | null, model: Model) => {
-  if (key === null) return;
-  try {
-    if (model.setupDone.series) {
-      sessionStorage.removeItem(key);
-    } else {
-      sessionStorage.setItem(
-        key,
-        JSON.stringify({
-          ...model,
-          ares: Remote.idle,
-          stepError: null,
-          submitFailure: null,
-        }),
-      );
+const storeDraft = (key: string | null, model: Model) =>
+  Effect.sync(() => {
+    if (key === null) return;
+    try {
+      if (model.setupDone.series) {
+        sessionStorage.removeItem(key);
+      } else {
+        sessionStorage.setItem(
+          key,
+          JSON.stringify({
+            ...model,
+            ares: Remote.idle,
+            stepError: null,
+            submitFailure: null,
+          }),
+        );
+      }
+    } catch {
+      // The wizard also supports retry in memory when storage is unavailable.
     }
-  } catch {
-    // The wizard also supports retry in memory when storage is unavailable.
-  }
-};
+  });
 
 const local = copy({
   cs: {
@@ -286,7 +287,7 @@ const LookupAresCmd = defineApiCommand("OnboardingLookupAres", {
 const CreateWorkspaceCmd = defineApiCommand("OnboardingCreateWorkspace", {
   args: CreateWorkspaceArgs.fields,
   execute: ({ draftKey, draft, seq, idempotencyKey, name, slug, taxRegime, currency, language }) =>
-    Effect.sync(() => storeDraft(draftKey, draft)).pipe(
+    storeDraft(draftKey, draft).pipe(
       Effect.andThen(
         callApi(
           (client) =>
@@ -378,7 +379,7 @@ const ApplyOnboardingSetupCmd = defineApiCommand("OnboardingApplySetup", {
     return callApi(
       (client) =>
         Effect.gen(function* () {
-          yield* Effect.sync(() => storeDraft(args.draftKey, args.draft));
+          yield* storeDraft(args.draftKey, args.draft);
           const workspaceId = yield* Schema.decodeUnknownEffect(WorkspaceId)(args.workspace.id);
           if (!progress.issuingEntity) {
             const current = yield* client.workspace.current({ params: { workspaceId } });
@@ -470,9 +471,7 @@ const ApplyOnboardingSetupCmd = defineApiCommand("OnboardingApplySetup", {
             progress.series = true;
           }
 
-          yield* Effect.sync(() =>
-            storeDraft(args.draftKey, { ...args.draft, setupDone: progress }),
-          );
+          yield* storeDraft(args.draftKey, { ...args.draft, setupDone: progress });
           return args.workspace.slug;
         }),
       (slug) => Message.CompletedSetup({ seq: args.seq, slug }),
@@ -938,10 +937,7 @@ export const update = (
       ...(result.commands ?? []),
       browserCommand(
         "OnboardingSaveDraft",
-        Effect.sync(() => {
-          storeDraft(key, result.model);
-          return Message.SavedDraft();
-        }),
+        Effect.as(storeDraft(key, result.model), Message.SavedDraft()),
       ),
     ],
   };

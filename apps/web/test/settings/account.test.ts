@@ -272,23 +272,28 @@ describe("Account & Security page (Screen 22)", () => {
     expect(
       Account.update(started.model, Account.Message.ClickedAddPasskey(), ctx).commands,
     ).toBeUndefined();
+    class CredentialFixture {
+      readonly id = "BAUG";
+      readonly rawId = Uint8Array.of(4, 5, 6).buffer;
+      readonly type = "public-key";
+      readonly authenticatorAttachment = "platform";
+      readonly response = {
+        attestationObject: Uint8Array.of(7, 8, 9).buffer,
+        clientDataJSON: Uint8Array.of(10, 11, 12).buffer,
+      };
+    }
+    const previousConstructor = Object.getOwnPropertyDescriptor(globalThis, "PublicKeyCredential");
     const previousCredentials = Object.getOwnPropertyDescriptor(navigator, "credentials");
+    Object.defineProperty(globalThis, "PublicKeyCredential", {
+      configurable: true,
+      value: CredentialFixture,
+    });
     Object.defineProperty(navigator, "credentials", {
       configurable: true,
       value: {
         create: async ({ publicKey }: CredentialCreationOptions) => {
           expect(publicKey?.challenge).toEqual(Uint8Array.of(1, 2, 3).buffer);
-          return {
-            id: "BAUG",
-            rawId: Uint8Array.of(4, 5, 6).buffer,
-            type: "public-key",
-            authenticatorAttachment: "platform",
-            getClientExtensionResults: () => ({}),
-            response: {
-              attestationObject: Uint8Array.of(7, 8, 9).buffer,
-              clientDataJSON: Uint8Array.of(10, 11, 12).buffer,
-            },
-          };
+          return new CredentialFixture();
         },
       },
     });
@@ -337,6 +342,9 @@ describe("Account & Security page (Screen 22)", () => {
       fetch.mockRestore();
       if (previousCredentials === undefined) Reflect.deleteProperty(navigator, "credentials");
       else Object.defineProperty(navigator, "credentials", previousCredentials);
+      if (previousConstructor === undefined)
+        Reflect.deleteProperty(globalThis, "PublicKeyCredential");
+      else Object.defineProperty(globalThis, "PublicKeyCredential", previousConstructor);
     }
   });
 

@@ -265,7 +265,7 @@ describe("Workspace Onboarding Wizard (Screen 07)", () => {
       ctx,
     );
     expect(completed.outMessage?._tag).toBe("ReloadSession");
-    expect(completed.outMessage).toHaveProperty("then", {
+    expect(completed.outMessage).toHaveProperty("destination", {
       _tag: "Path",
       path: "/w/novak-design-s-r-o",
       replace: true,
@@ -446,7 +446,7 @@ describe("Workspace Onboarding Wizard (Screen 07)", () => {
       expect({ retryMessage, calls }).toMatchObject({ retryMessage: { _tag: "CompletedSetup" } });
       const done = Onboarding.update(retry.model, retryMessage, ctx);
       expect(done.outMessage?._tag).toBe("ReloadSession");
-      expect(done.outMessage).toHaveProperty("then", {
+      expect(done.outMessage).toHaveProperty("destination", {
         _tag: "Path",
         path: "/w/wire-setup",
         replace: true,

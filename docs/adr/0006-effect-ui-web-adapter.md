@@ -16,6 +16,12 @@ page owns its model and commands. Its key includes the route URL, so leaving
 a page closes its command scope. Request sequence checks still guard multiple
 loads within one page.
 
+Invited signup pairs with the reviewed Phase 3A invitation signup handler.
+The web request includes the invitation token and an `invitation_accept`
+proof. After the handler sets the verified session cookie, the web client
+accepts the invitation and refreshes workspace membership before navigating.
+Ordinary email signup uses a `sign_up` proof.
+
 `BrowserRouter` owns link interception and browser history. The mobile app
 under `/app/` and endpoints under `/api/` use native browser navigation.
 Public PDF links use download anchors. Views emit native HTML. Chart labels

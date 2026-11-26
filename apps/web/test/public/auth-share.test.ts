@@ -234,7 +234,7 @@ describe("Auth page (Screen 02)", () => {
       expect(signedUp.outMessage).toBeUndefined();
       const accepted = Auth.update(signedUp.model, await run(signedUp.commands?.[0]), ctx);
       expect(accepted.outMessage?._tag).toBe("ReloadSession");
-      expect(accepted.outMessage).toHaveProperty("then", {
+      expect(accepted.outMessage).toHaveProperty("destination", {
         _tag: "Path",
         path: `/w/${DEMO_WORKSPACE.slug}`,
         replace: true,
@@ -275,7 +275,7 @@ describe("Auth page (Screen 02)", () => {
         ctx,
       );
       expect(result.outMessage?._tag).toBe("ReloadSession");
-      expect(result.outMessage).toHaveProperty("then", expected);
+      expect(result.outMessage).toHaveProperty("destination", expected);
     }
   });
 });
