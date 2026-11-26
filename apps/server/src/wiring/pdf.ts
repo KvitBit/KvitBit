@@ -44,8 +44,8 @@ import {
   computeDocumentPaymentQr,
   documentPdfCacheKey,
   ExplicitPdfTemplate,
-  isLegacyDeliveryView,
   readDeliverySnapshot,
+  readLegacyDeliveryInfo,
   resolveDocumentFieldsAtRevision,
   resolveVariableSymbol,
   sha256HexSync,
@@ -648,6 +648,29 @@ export const DocumentRendererLive: Layer.Layer<DocumentRenderer, never, PdfEngin
     return DocumentRenderer.of({
       render: (view, options) =>
         Effect.gen(function* () {
+          // Legacy delivery rows without a frozen __snapshot cannot recover enqueue-time branding,
+          // template, or balance; refuse before consulting cache and record a terminal failure (J3/J4/J6).
+          const legacyDelivery = readLegacyDeliveryInfo(view);
+          if (legacyDelivery !== undefined) {
+            if (Option.isSome(sqlOpt)) {
+              yield* sqlOpt.value`
+                update deliveries
+                set status = 'failed',
+                    failure = ${"delivery.snapshot_missing"},
+                    attempts = attempts + 1,
+                    updated_at = now()
+                where workspace_id = ${legacyDelivery.workspaceId}
+                  and id = ${legacyDelivery.deliveryId}
+                  and status = 'sending'
+              `.pipe(Effect.ignore);
+            }
+            return yield* Effect.die(
+              new Error(
+                "delivery.snapshot_missing: legacy queued delivery missing frozen snapshot",
+              ),
+            );
+          }
+
           const workspaceId = yield* resolveWorkspaceId(view.id);
           const deliverySnapshot = readDeliverySnapshot(view);
           const explicitOpt = yield* Effect.serviceOption(ExplicitPdfTemplate);
@@ -699,20 +722,6 @@ export const DocumentRendererLive: Layer.Layer<DocumentRenderer, never, PdfEngin
                   Effect.orDie,
                 )
               : undefined;
-
-          if (isLegacyDeliveryView(view)) {
-            const cannotRecover =
-              record === undefined ||
-              record.revision !== view.revision ||
-              (view.settlement === "partially_paid" && view.paymentQr === null);
-            if (cannotRecover) {
-              return yield* Effect.die(
-                new Error(
-                  "Legacy queued delivery missing frozen snapshot; refusing to dispatch with guessed payment instructions",
-                ),
-              );
-            }
-          }
 
           const resolvedFields =
             deliverySnapshot !== undefined

@@ -27,6 +27,7 @@ import { Numbering } from "@kvitbit/core/engines";
 import {
   type CurrencyCode,
   CurrentCaller,
+  type DeliveryId,
   type DocumentId,
   Documents,
   type DocumentView,
@@ -41,7 +42,7 @@ import {
   type WorkspaceId,
 } from "@kvitbit/domain/contract";
 import { type BlobKey, RequestOutcome } from "@kvitbit/domain/ports";
-import { BigDecimal, Context, Effect, Layer, Option, Result } from "effect";
+import { BigDecimal, Context, Effect, Layer, Option, Ref, Result } from "effect";
 import { SqlClient } from "effect/sql";
 
 const ZERO = BigDecimal.fromStringUnsafe("0");
@@ -83,10 +84,18 @@ export const attachDeliverySnapshot = (
 export const readDeliverySnapshot = (view: DocumentView): DeliveryRenderSnapshot | undefined =>
   (view as unknown as Record<symbol, DeliveryRenderSnapshot | undefined>)[DELIVERY_SNAPSHOT_SYMBOL];
 
+export interface LegacyDeliveryInfo {
+  readonly deliveryId: DeliveryId;
+  readonly workspaceId: WorkspaceId;
+}
+
 /** Marks a delivery `view` decoded from a legacy row that lacked `__snapshot`. */
-export const markLegacyDeliveryView = (view: DocumentView): DocumentView => {
+export const markLegacyDeliveryView = (
+  view: DocumentView,
+  info: LegacyDeliveryInfo,
+): DocumentView => {
   Object.defineProperty(view, LEGACY_DELIVERY_SYMBOL, {
-    value: true,
+    value: info,
     enumerable: false,
     configurable: true,
     writable: false,
@@ -94,9 +103,9 @@ export const markLegacyDeliveryView = (view: DocumentView): DocumentView => {
   return view;
 };
 
-/** True when `view` came from a legacy queued delivery row without frozen `__snapshot`. */
-export const isLegacyDeliveryView = (view: DocumentView): boolean =>
-  Boolean((view as unknown as Record<symbol, boolean | undefined>)[LEGACY_DELIVERY_SYMBOL]);
+/** Returns legacy delivery metadata when `view` came from a legacy row without frozen `__snapshot`. */
+export const readLegacyDeliveryInfo = (view: DocumentView): LegacyDeliveryInfo | undefined =>
+  (view as unknown as Record<symbol, LegacyDeliveryInfo | undefined>)[LEGACY_DELIVERY_SYMBOL];
 
 /**
  * Signals whether the caller explicitly specified a `template` override on `Documents.pdf`.
@@ -430,6 +439,23 @@ export const documentPdfCacheKey = (params: {
 
 const toDbUnavailable = () => new Unavailable({ dependency: "database" });
 
+const withTrackedRequestOutcome = <A, E, R>(
+  hasRequestKey: boolean,
+  effect: Effect.Effect<A, E, R>,
+): Effect.Effect<A, E, R> =>
+  hasRequestKey
+    ? Effect.gen(function* () {
+        const existing = yield* Effect.serviceOption(RequestOutcome);
+        if (Option.isSome(existing)) return yield* effect;
+        const flag = yield* Ref.make(false);
+        const localOutcome = RequestOutcome.of({
+          markReplayed: Ref.set(flag, true),
+          replayed: Ref.get(flag),
+        });
+        return yield* Effect.provideService(effect, RequestOutcome, localOutcome);
+      })
+    : effect;
+
 const projectMemberDocumentView = (
   view: DocumentView,
   documentsRepo: DocumentsRepo["Service"],
@@ -441,7 +467,8 @@ const projectMemberDocumentView = (
       view.paymentQr !== null ||
       view.status === "cancelled" ||
       view.kind === "credit_note" ||
-      view.kind === "payment_tax_document"
+      view.kind === "payment_tax_document" ||
+      !BigDecimal.isPositive(view.totals.gross.amount)
     ) {
       return view;
     }
@@ -497,27 +524,45 @@ const ProjectedDocumentsLive: Layer.Layer<Documents, never, Documents | CoreStor
             .preview(input)
             .pipe(Effect.map((view) => enrichDocumentView(view, input.variableSymbol ?? null))),
         createDraft: (input, opts) =>
-          baseDocuments.createDraft(input, opts).pipe(Effect.flatMap(projectView)),
-        issue: (from, opts) => baseDocuments.issue(from, opts).pipe(Effect.flatMap(projectView)),
+          withTrackedRequestOutcome(
+            opts?.requestKey !== undefined,
+            baseDocuments.createDraft(input, opts).pipe(Effect.flatMap(projectView)),
+          ),
+        issue: (from, opts) =>
+          withTrackedRequestOutcome(
+            opts?.requestKey !== undefined,
+            baseDocuments.issue(from, opts).pipe(Effect.flatMap(projectView)),
+          ),
         edit: (id, patch, expectedRevision) =>
           baseDocuments.edit(id, patch, expectedRevision).pipe(Effect.flatMap(projectView)),
         lock: (id) => baseDocuments.lock(id).pipe(Effect.flatMap(projectView)),
         unlock: (id, reason) => baseDocuments.unlock(id, reason).pipe(Effect.flatMap(projectView)),
         cancel: (id, input, opts) =>
-          baseDocuments.cancel(id, input, opts).pipe(
-            Effect.flatMap((res) =>
-              Effect.gen(function* () {
-                const document = yield* projectView(res.document);
-                const creditNote =
-                  res.creditNote === null ? null : yield* projectView(res.creditNote);
-                return { document, creditNote };
-              }),
+          withTrackedRequestOutcome(
+            opts?.requestKey !== undefined,
+            baseDocuments.cancel(id, input, opts).pipe(
+              Effect.flatMap((res) =>
+                Effect.gen(function* () {
+                  const document = yield* projectView(res.document);
+                  const creditNote =
+                    res.creditNote === null ? null : yield* projectView(res.creditNote);
+                  return { document, creditNote };
+                }),
+              ),
             ),
           ),
         correct: (id, input, opts) =>
-          baseDocuments.correct(id, input, opts).pipe(Effect.flatMap(projectView)),
+          withTrackedRequestOutcome(
+            opts?.requestKey !== undefined,
+            baseDocuments.correct(id, input, opts).pipe(Effect.flatMap(projectView)),
+          ),
         issueFinalInvoice: (proforma, input, opts) =>
-          baseDocuments.issueFinalInvoice(proforma, input, opts).pipe(Effect.flatMap(projectView)),
+          withTrackedRequestOutcome(
+            opts?.requestKey !== undefined,
+            baseDocuments
+              .issueFinalInvoice(proforma, input, opts)
+              .pipe(Effect.flatMap(projectView)),
+          ),
         previewFinalInvoice: (proforma, input) =>
           baseDocuments
             .previewFinalInvoice(proforma, input)
@@ -549,13 +594,16 @@ const ProjectedTemplatesLive: Layer.Layer<Templates, never, Templates | CoreStor
       return Templates.of({
         ...baseTemplates,
         use: (template, input, opts) =>
-          baseTemplates
-            .use(template, input, opts)
-            .pipe(
-              Effect.flatMap((view) =>
-                projectMemberDocumentView(view, documentsRepo, coreStore, hasSqlRequestLog),
+          withTrackedRequestOutcome(
+            opts?.requestKey !== undefined,
+            baseTemplates
+              .use(template, input, opts)
+              .pipe(
+                Effect.flatMap((view) =>
+                  projectMemberDocumentView(view, documentsRepo, coreStore, hasSqlRequestLog),
+                ),
               ),
-            ),
+          ),
       });
     }),
   );

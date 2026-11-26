@@ -1073,8 +1073,14 @@ describe("Phase 3A Round 1 fixes 6–8: PDF, branding, and document/share read p
             isDefault: true,
           } as never),
         );
+        yield* asMember(
+          workspaces.setBrandingImage("logo", {
+            contentType: "image/png",
+            bytes: Stream.succeed(LOGO_PNG),
+          }),
+        );
         const ws1 = yield* asMember(workspaces.current);
-        const wsModern = yield* asMember(
+        yield* asMember(
           workspaces.updateSettings(
             { branding: { pdfTemplate: "modern_minimal", footerText: "QUEUE-FOOTER" } },
             ws1.revision,
@@ -1158,10 +1164,18 @@ describe("Phase 3A Round 1 fixes 6–8: PDF, branding, and document/share read p
             afterPayment.revision,
           ),
         );
+        // Replace workspace logo + change template/footer AFTER enqueue
+        yield* asMember(
+          workspaces.setBrandingImage("logo", {
+            contentType: "image/png",
+            bytes: Stream.succeed(STAMP_PNG),
+          }),
+        );
+        const wsAfterLogoSwap = yield* asMember(workspaces.current);
         yield* asMember(
           workspaces.updateSettings(
             { branding: { pdfTemplate: "classic", footerText: "LATER-FOOTER" } },
-            wsModern.revision,
+            wsAfterLogoSwap.revision,
           ),
         );
 
@@ -1175,15 +1189,20 @@ describe("Phase 3A Round 1 fixes 6–8: PDF, branding, and document/share read p
           language: deliveryRow.language,
         });
         const deliveryHtml = capturedHtml.at(-1) ?? "";
+        const origLogoB64 = Buffer.from(LOGO_PNG).toString("base64");
+        const newLogoB64 = Buffer.from(STAMP_PNG).toString("base64");
         expect(deliveryHtml).toContain("hero-val");
         expect(deliveryHtml).toContain("QUEUE-FOOTER");
         expect(deliveryHtml).not.toContain("LATER-FOOTER");
+        expect(deliveryHtml).toContain(`data:image/png;base64,${origLogoB64}`);
+        expect(deliveryHtml).not.toContain(`data:image/png;base64,${newLogoB64}`);
         expect(deliveryHtml).toContain("2612345678");
         expect(deliveryHtml).not.toContain("777777");
         expect(deliveryHtml).toContain("Frozen note");
         expect(deliveryHtml).not.toContain("Edited note");
 
-        // Legacy queued delivery row (no __snapshot) for an edited/partially-paid invoice refuses to guess QR
+        // Legacy queued delivery row (no __snapshot) even with a warm PDF cache refuses dispatch
+        // before consulting cache and records terminal status='failed' with failure reason (J3/J4/J6).
         const sql = yield* SqlClient.SqlClient;
         const rawRow = yield* sql<{ readonly render_model: unknown }>`
           select render_model from deliveries where id = ${sent.deliveryId}
@@ -1195,7 +1214,11 @@ describe("Phase 3A Round 1 fixes 6–8: PDF, branding, and document/share read p
         delete parsedModel.__snapshot;
         parsedModel.paymentQr = null;
         yield* sql`
-          update deliveries set render_model = ${JSON.stringify(parsedModel)}::jsonb
+          update deliveries
+          set render_model = ${JSON.stringify(parsedModel)}::jsonb,
+              status = 'sending',
+              attempts = 0,
+              failure = null
           where id = ${sent.deliveryId}
         `;
         const legacyDelivery = yield* deliveriesRepo.get(memberCaller.workspaceId, sent.deliveryId);
@@ -1206,6 +1229,34 @@ describe("Phase 3A Round 1 fixes 6–8: PDF, branding, and document/share read p
           }),
         );
         expect(legacyExit._tag).toBe("Failure");
+        const failedDelivery = yield* deliveriesRepo.get(memberCaller.workspaceId, sent.deliveryId);
+        expect(failedDelivery.status).toBe("failed");
+        expect(failedDelivery.failure).toBe("delivery.snapshot_missing");
+        expect(failedDelivery.attempts).toBe(1);
+
+        // Zero-value CZK invoice with IBAN replayed directly (no RequestOutcome) returns paymentQr: null cleanly
+        const zeroInput = {
+          kind: "invoice" as const,
+          contact: contact.id as ContactId,
+          lines: [
+            {
+              description: "Zero-value item",
+              quantity: BigDecimal.fromStringUnsafe("1"),
+              unitPrice: BigDecimal.fromStringUnsafe("0"),
+            },
+          ] as const,
+        };
+        const zeroReqKey = "rk-zero-sql-1" as RequestKey;
+        const zeroInv = yield* asMember(
+          documents.issue({ input: zeroInput }, { requestKey: zeroReqKey }),
+        );
+        expect(zeroInv.paymentQr).toBeNull();
+        yield* asMember(documents.edit(zeroInv.id, { note: "Edited zero note" }, zeroInv.revision));
+        const zeroReplay = yield* asMember(
+          documents.issue({ input: zeroInput }, { requestKey: zeroReqKey }),
+        );
+        expect(zeroReplay.revision).toBe(zeroInv.revision);
+        expect(zeroReplay.paymentQr).toBeNull();
 
         // 3. System caller export default template: restore modern_minimal, render without ExplicitPdfTemplate
         const wsAfterClassic = yield* asMember(workspaces.current);
@@ -1468,6 +1519,34 @@ describe("Phase 3A Round 1 fixes 6–8: PDF, branding, and document/share read p
         failAudit = false;
         expect(usdReplay.revision).toBe(usdInv.revision);
         expect(usdReplay.paymentQr).toBeNull();
+
+        // Zero-value CZK invoice with IBAN replayed on memory store after note edit + audit outage succeeds
+        const zeroMemInput = {
+          kind: "invoice" as const,
+          contact: contact.id as ContactId,
+          lines: [
+            {
+              description: "Zero CZK",
+              quantity: BigDecimal.fromStringUnsafe("1"),
+              unitPrice: BigDecimal.fromStringUnsafe("0"),
+            },
+          ] as const,
+        };
+        const zeroMemKey = "rk-spy-zero-1" as RequestKey;
+        const zeroMemInv = yield* asMember(
+          documents.issue({ input: zeroMemInput }, { requestKey: zeroMemKey }),
+        );
+        expect(zeroMemInv.paymentQr).toBeNull();
+        yield* asMember(
+          documents.edit(zeroMemInv.id, { note: "Edited zero" }, zeroMemInv.revision),
+        );
+        failAudit = true;
+        const zeroMemReplay = yield* asMember(
+          documents.issue({ input: zeroMemInput }, { requestKey: zeroMemKey }),
+        );
+        failAudit = false;
+        expect(zeroMemReplay.revision).toBe(zeroMemInv.revision);
+        expect(zeroMemReplay.paymentQr).toBeNull();
       }).pipe(Effect.provide(spyLayer)),
     );
   });

@@ -41,7 +41,10 @@ interface SerializedDeliverySnapshot {
   readonly branding?: DeliveryBrandingSnapshot | undefined;
 }
 
-const decodeRenderModel = (raw: unknown): DeliveryRecord["view"] => {
+const decodeRenderModel = (
+  raw: unknown,
+  meta: { readonly deliveryId: DeliveryId; readonly workspaceId: WorkspaceId },
+): DeliveryRecord["view"] => {
   const parsed = parseJson<Record<string, unknown>>(raw);
   const snapshotRaw = parsed.__snapshot as SerializedDeliverySnapshot | undefined;
   const { __snapshot: _ignored, ...viewJson } = parsed;
@@ -57,7 +60,7 @@ const decodeRenderModel = (raw: unknown): DeliveryRecord["view"] => {
     };
     return attachDeliverySnapshot(view, snapshot);
   }
-  return markLegacyDeliveryView(view);
+  return markLegacyDeliveryView(view, meta);
 };
 
 const encodeRenderModel = (view: DeliveryRecord["view"]): string => {
@@ -104,7 +107,10 @@ const decodeRow = (row: DbRow): DeliveryRecord => {
     replyTo: (row.reply_to as string | null) ?? null,
     language: row.language as Locale,
     subject: row.subject as string,
-    view: decodeRenderModel(row.render_model),
+    view: decodeRenderModel(row.render_model, {
+      deliveryId: row.id as DeliveryId,
+      workspaceId: row.workspace_id as WorkspaceId,
+    }),
     attachment,
     contactId: row.contact_id as ContactId,
     arms: Boolean(row.arms),
