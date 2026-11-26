@@ -89,6 +89,9 @@ export default (
   env: Readonly<Record<string, string | undefined>> = process.env,
 ): ExpoConfig => {
   const plugins = [...(config.plugins ?? [])];
+  if (!plugins.includes("expo-background-task")) {
+    plugins.push("expo-background-task");
+  }
   if (!plugins.includes("./plugins/with-android-release-signing.cjs")) {
     plugins.push("./plugins/with-android-release-signing.cjs");
   }

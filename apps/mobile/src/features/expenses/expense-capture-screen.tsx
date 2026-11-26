@@ -165,21 +165,11 @@ function CaptureForm(props: CaptureScreenProps & { readonly access: CaptureAcces
       );
       if (result?.done === true && result.expenseId !== null && access.canWrite()) {
         const rejected = result.files.some((receipt) => receipt.result?.kind === "rejected");
-        if (rejected) {
-          const fileError = result.files.find(
-            (receipt) => receipt.result?.kind === "rejected",
-          )?.result;
-          if (fileError?.kind === "rejected")
-            setBannerError(text(describeError(fileError.error).text));
-        } else {
-          overlay.toast(t("common.toast.saved"));
-        }
-        if (!rejected) {
-          navigate(
-            { _tag: "Expense", ws: access.scope.workspaceSlug, id: result.expenseId, mode: "edit" },
-            { replace: true },
-          );
-        }
+        overlay.toast(t(rejected ? "error.invalid" : "common.toast.saved"));
+        navigate(
+          { _tag: "Expense", ws: access.scope.workspaceSlug, id: result.expenseId, mode: "edit" },
+          { replace: true },
+        );
       }
     } catch {
       setBannerError(t("error.unknown"));
@@ -303,7 +293,12 @@ function CaptureForm(props: CaptureScreenProps & { readonly access: CaptureAcces
                     ) : null}
                     {item.result?.kind === "rejected" ? (
                       <Text variant="bodySmall" color="error">
-                        {text(describeError(item.result.error).text)}
+                        {(() => {
+                          const view = describeError(item.result.error);
+                          return view.issues.length > 0
+                            ? view.issues.map((issue) => text(issue.text)).join(" · ")
+                            : text(view.text);
+                        })()}
                       </Text>
                     ) : null}
                   </View>

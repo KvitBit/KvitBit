@@ -1,6 +1,11 @@
 import { describe, expect, test } from "bun:test";
-import type { ExpenseId, WorkspaceSummary } from "@kvitbit/domain/contract";
-import { WorkspaceSummary as WorkspaceSummarySchema } from "@kvitbit/domain/contract";
+import { PayloadTooLarge } from "@kvitbit/api-contract";
+import {
+  type ExpenseId,
+  Invalid,
+  type WorkspaceSummary,
+  WorkspaceSummary as WorkspaceSummarySchema,
+} from "@kvitbit/domain/contract";
 import { UiError } from "@kvitbit/ui-port/api";
 import { Schema } from "effect";
 import type { CaptureStorage } from "../../platform/capture/capture-storage-port";
@@ -11,6 +16,7 @@ import {
   type CaptureNetwork,
   makeCaptureQueue,
   mayCapture,
+  summarizeCaptureJobs,
 } from "./capture-queue";
 import { importSharedReceipts } from "./capture-share";
 import { readReceipt } from "./receipt-file";
@@ -278,6 +284,110 @@ describe("expense capture replay", () => {
     expect(mayCapture("account", { ...workspace, role: "accountant" })).toBe(false);
     expect(mayCapture("account", { ...workspace, closed: true })).toBe(false);
     expect(mayCapture(null, workspace)).toBe(false);
+  });
+
+  test("preserves rejected receipt filenames and issues across mixed job cleanup and restart", async () => {
+    const disk = fixture();
+    const queue = disk.start();
+    const acceptedFile = { ...first, name: "valid-receipt.pdf" };
+    const rejectedFile = { ...second, name: "spoofed-receipt.pdf" };
+    const { job } = await queue.stage(access, null, [acceptedFile, rejectedFile]);
+    if (job === undefined) throw new Error("Missing staged job");
+
+    const mimeMismatch = new Invalid({
+      issues: [{ path: ["file"], code: "attachment.type_rejected" }],
+    });
+    const tooLarge = new PayloadTooLarge({ limitBytes: 20 * 1024 * 1024 });
+
+    const network: CaptureNetwork = {
+      record: async () => done(expenseId),
+      upload: async (request) =>
+        request.file.name === rejectedFile.name ? failed(mimeMismatch) : done({}),
+    };
+
+    const completed = await queue.submit(access, network, job.key, fields, progress);
+    expect(completed?.done).toBe(true);
+    expect(await disk.start().load(scope)).toEqual([]);
+    expect([...disk.bytes.keys()].filter((key) => key.startsWith("saved:"))).toEqual([]);
+
+    const reopened = disk.start();
+    const persisted = await reopened.loadRejected(scope, expenseId);
+    expect(persisted).toHaveLength(1);
+    expect(persisted[0]?.name).toBe("spoofed-receipt.pdf");
+    expect(persisted[0]?.error._tag).toBe("Invalid");
+    expect(await reopened.loadRejected({ ...scope, principalId: "other-user" }, expenseId)).toEqual(
+      [],
+    );
+
+    // Additional rejection on the same expense appends without losing earlier ones.
+    disk.bytes.set("cache:third", Uint8Array.of(1, 2, 3, 4));
+    const secondStage = await reopened.stage(access, expenseId, [
+      { ref: "cache:third", name: "huge-scan.pdf", contentType: "application/pdf", size: 4 },
+    ]);
+    if (secondStage.job === undefined) throw new Error("Missing second job");
+    await reopened.submit(
+      access,
+      { record: async () => done(expenseId), upload: async () => failed(tooLarge) },
+      secondStage.job.key,
+      fields,
+      progress,
+    );
+
+    const both = await disk.start().loadRejected(scope, expenseId);
+    expect(both.map((item) => item.name)).toEqual(["spoofed-receipt.pdf", "huge-scan.pdf"]);
+    expect(both[1]?.error._tag).toBe("PayloadTooLarge");
+
+    const firstKey = both[0]?.key;
+    if (firstKey === undefined) throw new Error("Missing rejected key");
+    await disk.start().dismissRejected(access, expenseId, firstKey);
+    expect((await disk.start().loadRejected(scope, expenseId)).map((i) => i.name)).toEqual([
+      "huge-scan.pdf",
+    ]);
+
+    await disk.start().clearRejected(access, expenseId);
+    expect(await disk.start().loadRejected(scope, expenseId)).toEqual([]);
+  });
+
+  test("summarizes cross-workspace pending counts and blocked states", async () => {
+    const disk = fixture();
+    const queue = disk.start();
+    const secondWorkspaceScope = {
+      principalId: scope.principalId,
+      workspaceId: "01937c7a-0000-7000-8000-000000000099" as WorkspaceSummary["id"],
+      workspaceSlug: "beta" as WorkspaceSummary["slug"],
+    };
+    const secondAccess: CaptureAccess = { scope: secondWorkspaceScope, canWrite: () => true };
+
+    const firstStage = await queue.stage(access, null, [first]);
+    const secondStage = await queue.stage(secondAccess, null, [second]);
+    if (firstStage.job === undefined || secondStage.job === undefined)
+      throw new Error("Missing staged jobs");
+
+    expect(
+      summarizeCaptureJobs([
+        { jobs: await queue.load(scope), canWrite: true },
+        { jobs: await queue.load(secondWorkspaceScope), canWrite: true },
+      ]),
+    ).toEqual({ pendingCount: 2, blockedCount: 0, hasBlocked: false });
+
+    await queue.submit(
+      secondAccess,
+      {
+        record: async () =>
+          failed(new Invalid({ issues: [{ path: ["total"], code: "expense.incomplete" }] })),
+        upload: async () => done({}),
+      },
+      secondStage.job.key,
+      fields,
+      progress,
+    );
+
+    expect(
+      summarizeCaptureJobs([
+        { jobs: await queue.load(scope), canWrite: true },
+        { jobs: await queue.load(secondWorkspaceScope), canWrite: true },
+      ]),
+    ).toEqual({ pendingCount: 2, blockedCount: 1, hasBlocked: true });
   });
 });
 

@@ -40,6 +40,7 @@ import { useWorkspace } from "../../workspace/workspace-provider";
 import { canWriteWorkspace } from "../dashboard/model";
 import { usePaymentMutation, useRequestMutation } from "../documents/request-mutation";
 import { defaultReceiptPicker, type ReceiptPicker } from "./capture-picker";
+import type { RejectedReceipt } from "./capture-queue";
 import {
   buildExpensePayload,
   COMMON_CURRENCIES,
@@ -61,6 +62,7 @@ import {
   validateAttachmentFile,
   vatBreakdownDifference,
 } from "./model";
+import { useRejectedReceipts } from "./use-expense-capture";
 
 const settlementTone = (s: ExpenseSettlement): BadgeTone => {
   switch (s) {
@@ -92,6 +94,7 @@ export function ExpenseDetailScreen(props: {
   const runPayment = usePaymentMutation(workspace.id);
   const transfer = useTransfer();
   const overlay = useOverlay();
+  const rejectedReceipts = useRejectedReceipts(expenseId);
 
   const [mode, setMode] = useState<"view" | "edit">(isNew ? "edit" : (props.initialMode ?? "view"));
   const [form, setForm] = useState<ExpenseFormState>(() => emptyExpenseForm());
@@ -249,12 +252,13 @@ export function ExpenseDetailScreen(props: {
       }),
     );
     if (res._tag === "Ok") {
+      await rejectedReceipts.clearAll().catch(() => undefined);
       overlay.toast(t("common.toast.deleted"));
       navigate({ _tag: "Expenses", ws: workspace.slug, query: {} }, { replace: true });
     } else {
       setBannerError(text(describeError(res.error).text));
     }
-  }, [api, expenseId, loadedDetail, overlay, t, text, workspace, writable]);
+  }, [api, expenseId, loadedDetail, overlay, rejectedReceipts, t, text, workspace, writable]);
 
   const openPaymentEditor = useCallback(
     (detail: ExpenseDetailData) => {
@@ -471,6 +475,40 @@ export function ExpenseDetailScreen(props: {
     return code;
   };
 
+  const renderRejectedReceipt = (item: RejectedReceipt) => {
+    const view = describeError(item.error);
+    const issueText =
+      view.issues.length > 0
+        ? view.issues.map((issue) => text(issue.text)).join(" · ")
+        : text(view.text);
+    return (
+      <Card key={item.key}>
+        <View style={styles.headerRow}>
+          <Paperclip size={18} />
+          <View style={styles.flex}>
+            <Text variant="row" numberOfLines={1}>
+              {item.name}
+            </Text>
+            <Text variant="meta" color="onSurfaceVariant">
+              {item.contentType} · {formatBytes(item.size)}
+            </Text>
+            <Text variant="bodySmall" color="error">
+              {issueText}
+            </Text>
+          </View>
+          <Badge label={t("enum.captureJob.failed")} tone="danger" />
+          {writable ? (
+            <IconButton
+              icon={Trash2}
+              label={t("common.action.discard")}
+              onPress={() => void rejectedReceipts.dismiss(item.key)}
+            />
+          ) : null}
+        </View>
+      </Card>
+    );
+  };
+
   if (isNew && !writable) {
     return (
       <Screen title={t("expenses.list.new")} back>
@@ -512,6 +550,11 @@ export function ExpenseDetailScreen(props: {
         }
       >
         {bannerError === null ? null : <Banner text={bannerError} />}
+        {rejectedReceipts.rejected.length === 0 ? null : (
+          <Section title={t("expenses.detail.attachments")}>
+            {rejectedReceipts.rejected.map(renderRejectedReceipt)}
+          </Section>
+        )}
 
         <SegmentedChoice
           label={t("common.field.status")}
@@ -956,51 +999,54 @@ export function ExpenseDetailScreen(props: {
                   ) : null
                 }
               >
-                {detail.attachments.length === 0 ? (
+                {detail.attachments.length === 0 && rejectedReceipts.rejected.length === 0 ? (
                   <Text variant="meta" color="onSurfaceVariant">
                     {t("common.state.none")}
                   </Text>
                 ) : (
-                  detail.attachments.map((att) => (
-                    <Card key={att.id}>
-                      <View style={styles.headerRow}>
-                        <Paperclip size={18} />
-                        <View style={styles.flex}>
-                          <Text variant="row" numberOfLines={1}>
-                            {att.name}
-                          </Text>
-                          <Text variant="meta" color="onSurfaceVariant">
-                            {att.contentType} · {formatBytes(att.bytes)}
-                          </Text>
+                  <>
+                    {rejectedReceipts.rejected.map(renderRejectedReceipt)}
+                    {detail.attachments.map((att) => (
+                      <Card key={att.id}>
+                        <View style={styles.headerRow}>
+                          <Paperclip size={18} />
+                          <View style={styles.flex}>
+                            <Text variant="row" numberOfLines={1}>
+                              {att.name}
+                            </Text>
+                            <Text variant="meta" color="onSurfaceVariant">
+                              {att.contentType} · {formatBytes(att.bytes)}
+                            </Text>
+                          </View>
                         </View>
-                      </View>
-                      <View style={styles.rowActions}>
-                        <Button
-                          kind="tonal"
-                          icon={Download}
-                          label={t("common.action.open")}
-                          busy={transferBusyId === att.id}
-                          onPress={() => void handleAttachmentAction(att, "open")}
-                          testID={`attachment-open-${att.id}`}
-                        />
-                        <Button
-                          kind="outlined"
-                          icon={Share2}
-                          label={t("common.action.share")}
-                          disabled={transferBusyId === att.id}
-                          onPress={() => void handleAttachmentAction(att, "share")}
-                          testID={`attachment-share-${att.id}`}
-                        />
-                        {writable ? (
-                          <IconButton
-                            icon={Trash2}
-                            label={t("expenses.attachmentViewer.detach")}
-                            onPress={() => void handleDetachAttachment(att)}
+                        <View style={styles.rowActions}>
+                          <Button
+                            kind="tonal"
+                            icon={Download}
+                            label={t("common.action.open")}
+                            busy={transferBusyId === att.id}
+                            onPress={() => void handleAttachmentAction(att, "open")}
+                            testID={`attachment-open-${att.id}`}
                           />
-                        ) : null}
-                      </View>
-                    </Card>
-                  ))
+                          <Button
+                            kind="outlined"
+                            icon={Share2}
+                            label={t("common.action.share")}
+                            disabled={transferBusyId === att.id}
+                            onPress={() => void handleAttachmentAction(att, "share")}
+                            testID={`attachment-share-${att.id}`}
+                          />
+                          {writable ? (
+                            <IconButton
+                              icon={Trash2}
+                              label={t("expenses.attachmentViewer.detach")}
+                              onPress={() => void handleDetachAttachment(att)}
+                            />
+                          ) : null}
+                        </View>
+                      </Card>
+                    ))}
+                  </>
                 )}
               </Section>
             </>

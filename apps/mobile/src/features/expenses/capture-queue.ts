@@ -10,6 +10,7 @@ import {
 import { Effect } from "effect";
 import type { CaptureStorage } from "../../platform/capture/capture-storage-port";
 import type { LocalFile, SavedFile, TransferResult, UploadRequest } from "../../platform/transfer";
+import { requestKeyReplayWindowOpen } from "../../runtime/request-intent";
 import { canWriteWorkspace } from "../dashboard/model";
 import { InvalidReceipt, readReceipt } from "./receipt-file";
 
@@ -26,6 +27,7 @@ export interface CaptureScope {
 export interface CaptureAccess {
   readonly scope: CaptureScope;
   readonly canWrite: () => boolean;
+  readonly verifyWrite?: () => Promise<boolean>;
 }
 
 type CaptureFailure =
@@ -52,6 +54,20 @@ export interface CaptureFields {
   readonly total: string;
   readonly currency: string;
   readonly note: string;
+}
+
+export interface RejectedReceipt {
+  readonly key: string;
+  readonly name: string;
+  readonly contentType: string;
+  readonly size: number;
+  readonly error: UiError;
+}
+
+export interface CaptureQueueSummary {
+  readonly pendingCount: number;
+  readonly blockedCount: number;
+  readonly hasBlocked: boolean;
 }
 
 export interface CaptureJob {
@@ -96,10 +112,10 @@ type CaptureSource = SavedFile & { readonly source?: string };
 type CaptureIssue = InvalidReceipt["issue"] | "unreadable";
 type JobChanges = (scope: CaptureScope) => void;
 
-// The API can create a second expense after its request-log entry expires.
-const RECORD_REPLAY_WINDOW_MS = 24 * 60 * 60 * 1000;
 const BACKOFF_MS = [5_000, 30_000, 120_000, 600_000, 1_800_000] as const;
 const scopeKey = (scope: CaptureScope) => JSON.stringify([scope.principalId, scope.workspaceId]);
+const rejectedScopeKey = (scope: CaptureScope, expenseId: ExpenseId) =>
+  JSON.stringify(["rejected", scope.principalId, scope.workspaceId, expenseId]);
 
 export function capturePayload(fields: CaptureFields): ExpenseInput {
   const total = fields.total.trim().replace(/\s+/g, "").replace(",", ".");
@@ -158,7 +174,60 @@ export function makeCaptureQueue({
     return result;
   }
 
+  async function loadRejected(
+    scope: CaptureScope,
+    expenseId: ExpenseId,
+  ): Promise<readonly RejectedReceipt[]> {
+    const stored = await storage.load(rejectedScopeKey(scope, expenseId));
+    return stored === null ? [] : (JSON.parse(stored) as RejectedReceipt[]);
+  }
+
+  async function saveRejected(
+    scope: CaptureScope,
+    expenseId: ExpenseId,
+    items: readonly RejectedReceipt[],
+    previous: readonly RejectedReceipt[],
+  ) {
+    await storage.save(
+      rejectedScopeKey(scope, expenseId),
+      JSON.stringify(items),
+      JSON.stringify(previous),
+    );
+    for (const listener of listeners) listener(scope);
+  }
+
+  async function persistRejected(scope: CaptureScope, job: CaptureJob) {
+    if (job.expenseId === null) return;
+    const rejected: RejectedReceipt[] = [];
+    for (const receipt of job.files) {
+      if (receipt.result?.kind === "rejected") {
+        rejected.push({
+          key: receipt.key,
+          name: receipt.file.name,
+          contentType: receipt.file.contentType,
+          size: receipt.file.size,
+          error: receipt.result.error,
+        });
+      }
+    }
+    if (rejected.length === 0) return;
+    const existing = await loadRejected(scope, job.expenseId);
+    const existingKeys = new Set(existing.map((entry) => entry.key));
+    const merged = [...existing, ...rejected.filter((entry) => !existingKeys.has(entry.key))];
+    if (merged.length !== existing.length) {
+      await saveRejected(scope, job.expenseId, merged, existing);
+    }
+  }
+
+  async function canWriteNow(access: CaptureAccess): Promise<boolean> {
+    if (!access.canWrite()) return false;
+    if (access.verifyWrite !== undefined) return access.verifyWrite();
+    return true;
+  }
+
   async function dropFinished(scope: CaptureScope, jobs: readonly CaptureJob[], job: CaptureJob) {
+    // Persist rejected filenames and issues before removing the job so reopening the expense shows them.
+    await persistRejected(scope, job);
     // Keep the completed job until its local files have been released, so a restart can finish cleanup.
     await Promise.all(job.files.map((receipt) => removeBytes(receipt.file.ref)));
     const remaining = jobs.filter((other) => other.key !== job.key);
@@ -209,7 +278,7 @@ export function makeCaptureQueue({
     let expenseId = job.expenseId;
     if (expenseId === null) {
       const firstAttempt = job.recordAttemptAt;
-      if (firstAttempt !== undefined && now() - firstAttempt >= RECORD_REPLAY_WINDOW_MS) {
+      if (firstAttempt !== undefined && !requestKeyReplayWindowOpen(firstAttempt, now())) {
         await update({ submission: { fields, payload, failure: { kind: "expired" } } });
         return { jobs, job };
       }
@@ -217,11 +286,12 @@ export function makeCaptureQueue({
         await fail(UiError.offline);
         return { jobs, job };
       }
-      if (!access.canWrite()) return { jobs, job };
+      if (!(await canWriteNow(access))) return { jobs, job };
       if (firstAttempt === undefined) await update({ recordAttemptAt: now() });
-      if (!access.canWrite()) return { jobs, job };
+      if (!(await canWriteNow(access))) return { jobs, job };
       const result = await network.record(job.scope, job.key, payload);
       if (result._tag === "Err") {
+        if (!(await canWriteNow(access))) return { jobs, job };
         await fail(result.error);
         return { jobs, job };
       }
@@ -231,13 +301,13 @@ export function makeCaptureQueue({
 
     for (const receipt of job.files) {
       if (receipt.result !== undefined) continue;
-      if (!access.canWrite()) return { jobs, job };
+      if (!(await canWriteNow(access))) return { jobs, job };
       const actual = await read(receipt.file).catch(() => null);
       if (actual?.file.sha256 !== receipt.file.sha256 || actual.file.size !== receipt.file.size) {
         await fail(UiError.unexpected());
         return { jobs, job };
       }
-      if (!access.canWrite()) return { jobs, job };
+      if (!(await canWriteNow(access))) return { jobs, job };
       options.onProgress?.(receipt.key, 0);
       const result = await network.upload({
         path: `/workspaces/${job.scope.workspaceId}/expenses/${expenseId}/attachments`,
@@ -253,6 +323,7 @@ export function makeCaptureQueue({
           result.error.issues.every((issue) => issue.code.startsWith("attachment."))
         )
       ) {
+        if (!(await canWriteNow(access))) return { jobs, job };
         await fail(result.error);
         return { jobs, job };
       }
@@ -273,6 +344,26 @@ export function makeCaptureQueue({
 
   return {
     load,
+    loadRejected,
+    dismissRejected(access: CaptureAccess, expenseId: ExpenseId, fileKey: string) {
+      return locked(access, async () => {
+        if (!(await canWriteNow(access))) return;
+        const existing = await loadRejected(access.scope, expenseId);
+        const remaining = existing.filter((entry) => entry.key !== fileKey);
+        if (remaining.length !== existing.length) {
+          await saveRejected(access.scope, expenseId, remaining, existing);
+        }
+      });
+    },
+    clearRejected(access: CaptureAccess, expenseId: ExpenseId) {
+      return locked(access, async () => {
+        if (!(await canWriteNow(access))) return;
+        const existing = await loadRejected(access.scope, expenseId);
+        if (existing.length > 0) {
+          await saveRejected(access.scope, expenseId, [], existing);
+        }
+      });
+    },
     subscribe(listener: JobChanges) {
       listeners.add(listener);
       return () => {
@@ -453,4 +544,27 @@ export function canRetryCapture(job: CaptureJob) {
     (isRetryable(error) && error._tag !== "Conflict") ||
     error._tag === "Unauthorized"
   );
+}
+
+export function isCaptureJobBlocked(job: CaptureJob, canWrite: boolean): boolean {
+  if (job.done === true) return false;
+  const failure = job.submission?.failure;
+  if (failure?.kind === "blocked" || failure?.kind === "expired") return true;
+  if (job.submission !== undefined && !canWrite) return true;
+  return false;
+}
+
+export function summarizeCaptureJobs(
+  entries: readonly { readonly jobs: readonly CaptureJob[]; readonly canWrite: boolean }[],
+): CaptureQueueSummary {
+  let pendingCount = 0;
+  let blockedCount = 0;
+  for (const entry of entries) {
+    for (const job of entry.jobs) {
+      if (job.done === true) continue;
+      pendingCount += 1;
+      if (isCaptureJobBlocked(job, entry.canWrite)) blockedCount += 1;
+    }
+  }
+  return { pendingCount, blockedCount, hasBlocked: blockedCount > 0 };
 }

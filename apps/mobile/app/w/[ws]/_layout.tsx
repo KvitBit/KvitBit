@@ -3,6 +3,7 @@ import { Redirect, router, Tabs, useLocalSearchParams, useUnstableGlobalHref } f
 import { FileText, House, Menu, Receipt, Users } from "lucide-react-native";
 import { useEffect } from "react";
 import { ExpenseCaptureRuntime } from "../../../src/features/expenses/expense-capture-runtime";
+import { useCaptureQueueSummary } from "../../../src/features/expenses/use-expense-capture";
 import { useI18n } from "../../../src/i18n/i18n-provider";
 import { safeReturnTo } from "../../../src/navigation/return-to";
 import { hrefOf, param } from "../../../src/navigation/routes";
@@ -33,9 +34,65 @@ const TAB_ICON: Readonly<Partial<Record<NavSection, IconComponent>>> = {
 };
 const HIDDEN = ["templates", "price-list", "reports", "settings"] as const;
 
+function WorkspaceTabs() {
+  const theme = useTheme();
+  const { t } = useI18n();
+  const captureSummary = useCaptureQueueSummary();
+  return (
+    <>
+      <ExpenseCaptureRuntime />
+      <Tabs
+        screenOptions={{
+          headerShown: false,
+          tabBarActiveTintColor: theme.colors.onSecondaryContainer,
+          tabBarInactiveTintColor: theme.colors.onSurfaceVariant,
+          tabBarStyle: {
+            backgroundColor: theme.colors.surfaceContainer,
+            borderTopColor: theme.colors.outlineVariant,
+            minHeight: 64,
+          },
+        }}
+      >
+        {MOBILE_NAV.map((section) => {
+          const name = TAB_ROUTE[section];
+          const Glyph = TAB_ICON[section];
+          if (name === undefined || Glyph === undefined) return null;
+          const badge =
+            section === "expenses" && captureSummary.pendingCount > 0
+              ? {
+                  tabBarBadge: captureSummary.pendingCount,
+                  tabBarBadgeStyle: {
+                    backgroundColor: captureSummary.hasBlocked
+                      ? theme.colors.error
+                      : theme.colors.primary,
+                    color: captureSummary.hasBlocked
+                      ? theme.colors.onError
+                      : theme.colors.onPrimary,
+                  },
+                }
+              : {};
+          return (
+            <Tabs.Screen
+              key={section}
+              name={name}
+              options={{
+                title: t(navLabelKey(section)),
+                tabBarIcon: ({ color, size }) => <Glyph color={color} size={size} />,
+                ...badge,
+              }}
+            />
+          );
+        })}
+        {HIDDEN.map((name) => (
+          <Tabs.Screen key={name} name={name} options={{ href: null }} />
+        ))}
+      </Tabs>
+    </>
+  );
+}
+
 export default function WorkspaceLayout() {
   const session = useSession();
-  const theme = useTheme();
   const { t, local } = useI18n();
   const slug = param(useLocalSearchParams<{ ws: string }>().ws) ?? "";
   const returnTo = safeReturnTo(useUnstableGlobalHref());
@@ -67,38 +124,7 @@ export default function WorkspaceLayout() {
           );
         return (
           <WorkspaceProvider workspace={workspace} workspaces={all} reload={workspaces.reload}>
-            <ExpenseCaptureRuntime />
-            <Tabs
-              screenOptions={{
-                headerShown: false,
-                tabBarActiveTintColor: theme.colors.onSecondaryContainer,
-                tabBarInactiveTintColor: theme.colors.onSurfaceVariant,
-                tabBarStyle: {
-                  backgroundColor: theme.colors.surfaceContainer,
-                  borderTopColor: theme.colors.outlineVariant,
-                  minHeight: 64,
-                },
-              }}
-            >
-              {MOBILE_NAV.map((section) => {
-                const name = TAB_ROUTE[section];
-                const Glyph = TAB_ICON[section];
-                if (name === undefined || Glyph === undefined) return null;
-                return (
-                  <Tabs.Screen
-                    key={section}
-                    name={name}
-                    options={{
-                      title: t(navLabelKey(section)),
-                      tabBarIcon: ({ color, size }) => <Glyph color={color} size={size} />,
-                    }}
-                  />
-                );
-              })}
-              {HIDDEN.map((name) => (
-                <Tabs.Screen key={name} name={name} options={{ href: null }} />
-              ))}
-            </Tabs>
+            <WorkspaceTabs />
           </WorkspaceProvider>
         );
       }}
