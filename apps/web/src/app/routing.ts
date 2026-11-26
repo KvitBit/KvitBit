@@ -16,6 +16,16 @@ export const routeFromPath = (pathAndSearch: string): Route =>
 
 export const href = (route: Route): string => ViewModels.Routes.toPath(route, "/");
 
+/** Returns a safe relative internal path for post-auth redirects, rejecting open redirects. */
+export const safeReturnTo = (raw: string | undefined): string | undefined => {
+  if (raw === undefined || raw === "") return undefined;
+  if (!raw.startsWith("/") || raw.startsWith("//") || raw.includes("\\")) return undefined;
+  const base = "https://kvitbit.invalid";
+  const target = new URL(raw, base);
+  if (target.origin !== base || target.pathname.startsWith("//")) return undefined;
+  return target.pathname + target.search + target.hash;
+};
+
 /** The current year as a report period, for nav links into Reports. */
 export const defaultReportRoute = (ws: string, year: number): Route =>
   ({ _tag: "Reports", ws, report: "revenue", period: String(year) }) as Route;
@@ -27,7 +37,7 @@ export type Gate =
   | { readonly _tag: "Redirect"; readonly route: Route };
 
 /** What the Shell does with a route given the session (pure). */
-export const gate = (route: Route, session: SessionState): Gate => {
+export const gate = (route: Route, session: SessionState, path: string): Gate => {
   const needs = ViewModels.Routes.requires(route);
   if (needs === "public") return { _tag: "Allow" };
   switch (session._tag) {
@@ -36,7 +46,10 @@ export const gate = (route: Route, session: SessionState): Gate => {
     case "Unavailable":
       return { _tag: "Retry" };
     case "Anonymous":
-      return { _tag: "Redirect", route: { _tag: "SignIn", returnTo: href(route) } };
+      return {
+        _tag: "Redirect",
+        route: { _tag: "SignIn", returnTo: safeReturnTo(path) ?? href(route) },
+      };
     case "SignedIn": {
       if (needs === "account") return { _tag: "Allow" };
       const ws = "ws" in route ? route.ws : undefined;

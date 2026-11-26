@@ -20,7 +20,7 @@ import { copy, translator } from "../../app/i18n";
 import { Intent_ } from "../../app/intent";
 import type { MessageHandlers, PageContext, PageReturn, RouteOf } from "../../app/page";
 import * as Remote from "../../app/remote";
-import { href, magicSignInCallback } from "../../app/routing";
+import { href, magicSignInCallback, safeReturnTo } from "../../app/routing";
 import { performPasskeyAuthentication } from "../../app/webauthn";
 import { lockup } from "../../ui/brand";
 import { attribute, type Markup } from "../../ui/html";
@@ -34,7 +34,7 @@ import {
   fetchAndSolveBotProof,
   isBotProofReady,
 } from "./_altcha";
-import { callApi, failureMessage, fieldIssue, safeReturnTo } from "./_shared";
+import { callApi, failureMessage, fieldIssue } from "./_shared";
 
 export type Route = RouteOf<"SignUp" | "SignIn" | "CheckEmail" | "AuthLink" | "ResetPassword">;
 

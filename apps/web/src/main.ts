@@ -65,7 +65,7 @@ export const contextOf = (model: Model): PageContext => ({
 
 const mountRoute = (model: Model, path: string): UpdateReturn => {
   const route = routeFromPath(path);
-  const access = gate(route, model.session);
+  const access = gate(route, model.session, path);
   if (access._tag === "Wait") return { model: { ...model, path, route, waitingForSession: true } };
   if (access._tag === "Retry") {
     return {

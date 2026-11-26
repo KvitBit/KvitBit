@@ -427,7 +427,7 @@ describe("route round-trip & Shell access gate invariants", () => {
     for (const route of memberRoutes) {
       const scope = expectedScope[route._tag];
       for (const session of sessions) {
-        const result = gate(route, session);
+        const result = gate(route, session, href(route));
         checks += 1;
         if (scope === "public") {
           expect(result).toEqual({ _tag: "Allow" });
@@ -449,7 +449,7 @@ describe("route round-trip & Shell access gate invariants", () => {
     // Signed-in non-member on every workspace route must redirect to no_access
     for (const route of nonMemberRoutes) {
       const scope = expectedScope[route._tag];
-      const result = gate(route, signedInSession);
+      const result = gate(route, signedInSession, href(route));
       checks += 1;
       if (scope === "workspace") {
         expect(result).toEqual({ _tag: "Redirect", route: { _tag: "Error", kind: "no_access" } });

@@ -61,16 +61,6 @@ export const redirectLocation = <M>(url: string, onDone: () => M): Effect.Effect
     return onDone();
   });
 
-/** Returns a safe relative internal path for post-auth redirects, rejecting open redirects. */
-export const safeReturnTo = (raw: string | undefined): string | undefined => {
-  if (raw === undefined || raw === "") return undefined;
-  if (!raw.startsWith("/") || raw.startsWith("//") || raw.includes("\\")) return undefined;
-  const base = "https://kvitbit.invalid";
-  const target = new URL(raw, base);
-  if (target.origin !== base || target.pathname.startsWith("//")) return undefined;
-  return target.pathname + target.search + target.hash;
-};
-
 /** Maps a document settlement state to a kit badge tone. */
 export const settlementTone = (settlement: string): BadgeTone => {
   switch (settlement) {

@@ -141,6 +141,34 @@ if (typeof Bun === "undefined") {
       errors.assertClean();
     });
 
+    test("returns to a filtered Price List after signing in from a deep link", async ({ page }) => {
+      const errors = attachErrorGuards(page);
+      const destination = `/w/${DEMO_WS}/price-list?text=UX&archived=1`;
+      let authenticated = false;
+      await page.route("**/api/auth/get-session", (route) =>
+        authenticated ? route.continue() : route.fulfill({ json: null }),
+      );
+      await page.route("**/api/auth/sign-in/email", async (route) => {
+        const response = await route.fetch();
+        authenticated = response.ok();
+        await route.fulfill({ response });
+      });
+
+      await page.goto(destination);
+      await expect(page).toHaveURL(
+        (url) => url.pathname === "/sign-in" && url.searchParams.get("returnTo") === destination,
+      );
+      await page.locator("#auth-signin-email").fill("demo@example.com");
+      await page.locator("#auth-signin-password").fill("example-password");
+      await page.getByTestId("auth-signin-submit").click();
+
+      await expect(page).toHaveURL(destination);
+      await expect(page.getByRole("searchbox")).toHaveValue("UX");
+      await expect(page.locator("#pricelist-include-archived")).toBeChecked();
+      await expect(page.getByRole("cell", { name: "UX & produktový design" })).toBeVisible();
+      errors.assertClean();
+    });
+
     for (const [kind, callback, destination] of [
       ["default", "/sign-in?magic=complete", `/w/${DEMO_WS}`],
       ["explicit", `/w/${DEMO_WS}/documents?kind=invoice`, `/w/${DEMO_WS}/documents?kind=invoice`],
@@ -361,6 +389,26 @@ if (typeof Bun === "undefined") {
       await expect(overdue).toBeVisible();
       expect(documentRequests).toBe(1);
       errors.assertClean();
+    });
+
+    test("refreshes an open share on visibility change when the midnight timer has not run", async ({
+      page,
+    }) => {
+      await page.clock.install({ time: new Date("2026-11-24T23:59:30.000Z") });
+      await page.goto("/i/demo-unpaid-czk");
+      await expect(page.locator('a[href*="/pdf?"]')).toBeVisible();
+      const overdue = page.locator("#main").getByText(/^(Overdue|Po splatnosti)$/);
+      let reloaded = false;
+      page.on("framenavigated", (frame) => {
+        if (frame === page.mainFrame()) reloaded = true;
+      });
+
+      // Move wall time past midnight without advancing the pending timer.
+      await page.clock.setSystemTime(new Date("2026-11-25T00:00:01.000Z"));
+      await expect(overdue).toHaveCount(0);
+      await page.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
+      await expect(overdue).toBeVisible();
+      expect(reloaded).toBe(false);
     });
   });
 }
