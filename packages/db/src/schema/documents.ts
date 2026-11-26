@@ -1,5 +1,6 @@
 import { sql } from "drizzle-orm";
 import {
+  bigint,
   boolean,
   check,
   date,
@@ -432,6 +433,26 @@ export const shareViewEvents = pgTable(
     index("share_view_events_dedupe_idx").on(t.shareLinkId, t.visitorHash, t.kind, t.at),
     foreignKey({
       name: "share_view_events_share_link_fk",
+      columns: [t.workspaceId, t.shareLinkId],
+      foreignColumns: [shareLinks.workspaceId, shareLinks.id],
+    }).onDelete("cascade"),
+  ],
+);
+
+/** Daily UTC counts without visitor identifiers. Detailed events remain available for history. */
+export const shareViewRollups = pgTable(
+  "share_view_rollups",
+  {
+    workspaceId: workspaceIdColumn(),
+    shareLinkId: uuid("share_link_id").notNull(),
+    day: isoDate("day").notNull(),
+    views: bigint("views", { mode: "number" }).notNull(),
+    downloads: bigint("downloads", { mode: "number" }).notNull(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.workspaceId, t.shareLinkId, t.day] }),
+    foreignKey({
+      name: "share_view_rollups_share_link_fk",
       columns: [t.workspaceId, t.shareLinkId],
       foreignColumns: [shareLinks.workspaceId, shareLinks.id],
     }).onDelete("cascade"),

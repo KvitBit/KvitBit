@@ -79,7 +79,7 @@ export const DataExportWorkflow = Workflow.make("kvitbit/DataExport", {
   },
   idempotencyKey: ({ exportId }) => exportId,
   success: DataExportOutcome,
-});
+}).annotate(Workflow.SuspendOnFailure, true);
 
 const InvitationOutcome = Schema.Literals(["sent_and_checked", "skipped"]);
 
@@ -88,10 +88,12 @@ export const MemberInvitationWorkflow = Workflow.make("kvitbit/MemberInvitation"
     workspaceId: WorkspaceId,
     invitationId: InvitationId,
     epoch: Schema.Int,
+    recovery: Schema.optional(Schema.Boolean),
   },
-  idempotencyKey: ({ invitationId, epoch }) => `${invitationId}:${epoch}`,
+  idempotencyKey: ({ invitationId, epoch, recovery }) =>
+    recovery === true ? `${invitationId}:${epoch}:reconcile` : `${invitationId}:${epoch}`,
   success: InvitationOutcome,
-});
+}).annotate(Workflow.SuspendOnFailure, true);
 
 // 2. Options & retry policies -----------------------------------------------------------------
 
@@ -104,12 +106,17 @@ export interface WorkflowHandlerOptions {
   readonly invitationExpiryDuration?: Duration.Input | undefined;
 }
 
+const DELIVERY_RETRY_WINDOW_MS = Duration.toMillis(Duration.hours(24));
+
 /**
  * Default delivery retry policy (core-ports 7.2): exponential from 30 s, capped at 1 h,
  * up to 24 h total elapsed time.
  */
 export const DEFAULT_DELIVERY_RETRY_SCHEDULE = Schedule.exponential(Duration.seconds(30)).pipe(
-  Schedule.while(({ elapsed }) => elapsed < Duration.toMillis(Duration.hours(24))),
+  Schedule.modifyDelay(({ duration }) => Effect.succeed(Duration.min(duration, Duration.hours(1)))),
+  Schedule.while(
+    ({ elapsed, duration }) => elapsed + Duration.toMillis(duration) <= DELIVERY_RETRY_WINDOW_MS,
+  ),
 );
 
 // 3. CSV + ZIP helpers for DataExport ---------------------------------------------------------
@@ -128,37 +135,37 @@ const csvEncoder = new TextEncoder();
 const csvLine = (fields: ReadonlyArray<string | null | undefined>) =>
   csvEncoder.encode(`${fields.map(csvEscape).join(",")}\r\n`);
 
-const rowsToCsv = Stream.mapAccum<ReadonlyArray<string> | undefined, CsvRow, Uint8Array>(
-  () => undefined,
-  (previous, row) => {
-    const headers = previous ?? Object.keys(row);
-    const line = csvLine(headers.map((name) => row[name]));
-    return [headers, previous === undefined ? [csvLine(headers), line] : [line]];
-  },
-);
-
+// Workspace-owned data only. Auth secrets, request replays, and global cache rows are operational data.
 const EXPORT_TABLES = [
-  { file: "tables/workspaces.csv", table: "workspaces", filterCol: "id" },
-  { file: "tables/issuing_entities.csv", table: "issuing_entities", filterCol: "workspace_id" },
-  { file: "tables/tax_regime_periods.csv", table: "tax_regime_periods", filterCol: "workspace_id" },
-  { file: "tables/memberships.csv", table: "memberships", filterCol: "workspace_id" },
-  { file: "tables/invitations.csv", table: "invitations", filterCol: "workspace_id" },
-  { file: "tables/bank_accounts.csv", table: "bank_accounts", filterCol: "workspace_id" },
-  { file: "tables/numbering_series.csv", table: "numbering_series", filterCol: "workspace_id" },
-  { file: "tables/contacts.csv", table: "contacts", filterCol: "workspace_id" },
-  { file: "tables/price_list_items.csv", table: "price_list_items", filterCol: "workspace_id" },
-  { file: "tables/documents.csv", table: "documents", filterCol: "workspace_id" },
-  { file: "tables/document_lines.csv", table: "document_lines", filterCol: "workspace_id" },
-  { file: "tables/document_relations.csv", table: "document_relations", filterCol: "workspace_id" },
-  { file: "tables/payments.csv", table: "payments", filterCol: "workspace_id" },
-  { file: "tables/deliveries.csv", table: "deliveries", filterCol: "workspace_id" },
-  { file: "tables/share_links.csv", table: "share_links", filterCol: "workspace_id" },
-  { file: "tables/expenses.csv", table: "expenses", filterCol: "workspace_id" },
-  { file: "tables/attachments.csv", table: "attachments", filterCol: "workspace_id" },
-  { file: "tables/templates.csv", table: "templates", filterCol: "workspace_id" },
-  { file: "tables/schedules.csv", table: "schedules", filterCol: "workspace_id" },
-  { file: "tables/schedule_runs.csv", table: "schedule_runs", filterCol: "workspace_id" },
-  { file: "tables/audit_entries.csv", table: "audit_entries", filterCol: "workspace_id" },
+  "workspaces",
+  "workspace_slug_aliases",
+  "issuing_entities",
+  "tax_regime_periods",
+  "memberships",
+  "invitations",
+  "bank_accounts",
+  "numbering_series",
+  "numbering_counters",
+  "number_reservations",
+  "contacts",
+  "contact_preferred_series",
+  "price_list_items",
+  "documents",
+  "document_lines",
+  "document_relations",
+  "payments",
+  "deliveries",
+  "share_links",
+  "share_view_events",
+  "share_view_rollups",
+  "expenses",
+  "attachments",
+  "templates",
+  "template_lines",
+  "schedules",
+  "schedule_runs",
+  "audit_entries",
+  "exports",
 ] as const;
 
 const isTerminalDelivery = (status: string): status is DeliveryOutcome =>
@@ -177,7 +184,7 @@ export const makeWorkflowHandlersLayer = (options: WorkflowHandlerOptions = {}) 
   const DeliveryRetryError = Schema.Struct({
     _tag: Schema.Literal("DeliveryRetry"),
     deliveryId: DeliveryId,
-    cause: Schema.Literals(["not_accepted", "outcome_unknown"]),
+    cause: Schema.Literals(["not_accepted", "outcome_unknown", "retry_window_closed"]),
   });
 
   // 1. DocumentDelivery
@@ -185,29 +192,62 @@ export const makeWorkflowHandlersLayer = (options: WorkflowHandlerOptions = {}) 
     Effect.gen(function* () {
       const claimed = yield* Activity.make({
         name: "claim",
-        success: Schema.Literals(["queued", "sending", "sent", "failed", "skipped"]),
-        execute: deliveryJob.claim(workspaceId, deliveryId).pipe(Effect.orDie),
+        success: Schema.Struct({
+          status: Schema.Literals(["queued", "sending", "sent", "failed", "skipped"]),
+          deadline: Schema.Number,
+        }),
+        execute: Effect.gen(function* () {
+          const status = yield* deliveryJob.claim(workspaceId, deliveryId).pipe(Effect.orDie);
+          return { status, deadline: (yield* Clock.currentTimeMillis) + DELIVERY_RETRY_WINDOW_MS };
+        }),
       });
 
-      if (isTerminalDelivery(claimed)) {
-        return claimed;
-      }
+      if (isTerminalDelivery(claimed.status)) return claimed.status;
 
+      const nextRetry = yield* Schedule.toStep(retrySchedule);
+      let scheduledElapsed = 0;
+      let retryNumber = 0;
       const dispatchResult = yield* Activity.make({
         name: "dispatch",
         success: Schema.Literals(["queued", "sending", "sent", "failed", "skipped"]),
         error: DeliveryRetryError,
-        execute: deliveryJob.dispatch(workspaceId, deliveryId).pipe(
-          Effect.catchTag("DeliveryRetry", (err) =>
-            Effect.fail({
+        execute: Effect.gen(function* () {
+          const attempt = yield* Activity.CurrentAttempt;
+          const now = yield* Clock.currentTimeMillis;
+          if (attempt > 1 && now >= claimed.deadline) {
+            return yield* Effect.fail({
               _tag: "DeliveryRetry" as const,
-              deliveryId: err.deliveryId,
-              cause: err.cause,
+              deliveryId,
+              cause: "retry_window_closed" as const,
+            });
+          }
+          return yield* deliveryJob
+            .dispatch(workspaceId, deliveryId)
+            .pipe(Effect.catchIf((err) => err._tag !== "DeliveryRetry", Effect.die));
+        }),
+      }).pipe(
+        Activity.retry({
+          while: (failure) =>
+            Effect.gen(function* () {
+              if (failure.cause === "retry_window_closed") return false;
+              // Rebuild identical timer names and delays when the workflow resumes.
+              const retry = yield* nextRetry(scheduledElapsed, failure).pipe(
+                Effect.catchIf(Cause.isDone, () => Effect.succeed(null)),
+              );
+              if (retry === null) return false;
+              const [, duration] = retry;
+              scheduledElapsed += Duration.toMillis(duration);
+              retryNumber += 1;
+              yield* DurableClock.sleep({
+                name: `dispatch-retry-${retryNumber}`,
+                duration,
+                inMemoryThreshold: Duration.zero,
+              });
+              return true;
             }),
-          ),
-          Effect.orDie,
-        ),
-      }).pipe(Effect.retry({ schedule: retrySchedule }), Effect.result);
+        }),
+        Effect.result,
+      );
 
       if (dispatchResult._tag === "Success") {
         return isTerminalDelivery(dispatchResult.success) ? dispatchResult.success : "failed";
@@ -273,20 +313,37 @@ export const makeWorkflowHandlersLayer = (options: WorkflowHandlerOptions = {}) 
           }
 
           // Full workspace tables as CSVs
-          for (const spec of EXPORT_TABLES) {
+          const tableColumns = yield* sql<{
+            readonly table_name: string;
+            readonly headers: ReadonlyArray<string>;
+          }>`
+            SELECT table_name, array_agg(column_name::text ORDER BY ordinal_position) AS headers
+            FROM information_schema.columns
+            WHERE table_schema = 'public' AND table_name = ANY(${[...EXPORT_TABLES]}::text[])
+            GROUP BY table_name
+          `;
+          const headersByTable = new Map(
+            tableColumns.map(({ table_name, headers }) => [table_name, headers]),
+          );
+          for (const table of EXPORT_TABLES) {
+            const workspaceColumn = table === "workspaces" ? "id" : "workspace_id";
+            const headers = headersByTable.get(table);
+            if (headers === undefined) {
+              return yield* Effect.die(new Error(`Missing export table permissions: ${table}`));
+            }
             // Text at the PostgreSQL boundary keeps decimals exact and avoids unregistered enum array types.
             const rows = sql.unsafe<{ readonly data: CsvRow }>(
               `SELECT (SELECT jsonb_object_agg(key, value) FROM jsonb_each_text(to_jsonb(source_row))) AS data
-               FROM ${spec.table} AS source_row
-               WHERE ${spec.filterCol} = $1
+               FROM ${table} AS source_row
+               WHERE ${workspaceColumn} = $1
                ORDER BY data`,
               [workspaceId],
             ).stream;
             entries.push({
-              name: spec.file,
-              bytes: rows.pipe(
-                Stream.map(({ data }) => data),
-                rowsToCsv,
+              name: `tables/${table}.csv`,
+              bytes: Stream.concat(
+                Stream.succeed(csvLine(headers)),
+                rows.pipe(Stream.map(({ data }) => csvLine(headers.map((name) => data[name])))),
               ),
             });
           }
@@ -309,30 +366,22 @@ export const makeWorkflowHandlersLayer = (options: WorkflowHandlerOptions = {}) 
             });
           }
 
-          // Use a cached revision when present. An export also includes PDFs never downloaded before.
           const docRows = yield* sql<{
             readonly id: DocumentId;
             readonly number: string | null;
-            readonly revision: number;
           }>`
-            SELECT id, number, revision
+            SELECT id, number
             FROM documents
-            WHERE workspace_id = ${workspaceId} AND status <> 'draft'
+            WHERE workspace_id = ${workspaceId}
+            ORDER BY id
           `;
           for (const doc of docRows) {
-            const pdfKey = `pdf/${workspaceId}/${doc.id}/${doc.revision}.pdf` as BlobKey;
-            const pdf = blobs
-              .get(pdfKey)
-              .pipe(
-                Effect.catchTag("BlobMissing", () =>
-                  Effect.map(
-                    exportJob.documentPdf(workspaceId, exportId, doc.id),
-                    (file) => file.bytes,
-                  ),
-                ),
-              );
-            const label = (doc.number ?? doc.id).replace(/[/\\]/g, "_");
-            entries.push({ name: `pdfs/${label}.pdf`, bytes: Stream.unwrap(pdf) });
+            const number = doc.number?.replace(/[^\p{L}\p{N}._-]+/gu, "-") ?? "draft";
+            const pdf = exportJob.documentPdf(workspaceId, exportId, doc.id);
+            entries.push({
+              name: `pdfs/${number}-${doc.id}.pdf`,
+              bytes: Stream.unwrap(Effect.map(pdf, (file) => file.bytes)),
+            });
           }
 
           const services = yield* Effect.context<Documents>();
@@ -385,7 +434,12 @@ export const makeWorkflowHandlersLayer = (options: WorkflowHandlerOptions = {}) 
             const nowMs = yield* Clock.currentTimeMillis;
             const nowIso = new Date(nowMs).toISOString();
             const pending = yield* invitationJob.getPending(workspaceId, invitationId, nowIso);
-            if (pending === null || pending.sendEpoch !== epoch) {
+            if (pending === null) {
+              // An invitation can expire while a send is waiting for recovery.
+              yield* invitationJob.expirePending(workspaceId, invitationId, nowIso);
+              return { sent: false, sleepMillis: 0 };
+            }
+            if (pending.sendEpoch !== epoch) {
               return { sent: false, sleepMillis: 0 };
             }
 

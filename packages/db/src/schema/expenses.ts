@@ -113,6 +113,7 @@ export const attachments = pgTable(
   (t) => [
     unique("attachments_workspace_id_id_unique").on(t.workspaceId, t.id),
     unique("attachments_expense_sha256_unique").on(t.expenseId, t.sha256),
+    index("attachments_blob_key_idx").on(t.blobKey),
     foreignKey({
       name: "attachments_expense_fk",
       columns: [t.workspaceId, t.expenseId],
