@@ -44,6 +44,7 @@ import {
   periodRange,
   pragueToday,
   type RecentDashboardDocuments,
+  recentActivityDocuments,
 } from "./model";
 
 const badgeForDocument = (
@@ -519,7 +520,7 @@ function WorkspaceDashboard({ workspace }: { readonly workspace: WorkspaceSummar
 
   const recentDocs = useRemote((api) => loadRecentDocuments(api, workspace.id), [workspace.id]);
 
-  const recentItems = recentDocs.state._tag === "Ready" ? recentDocs.state.value.items : null;
+  const recentItems = recentActivityDocuments(recentDocs.state);
   const activity = useRemote(
     recentItems === null
       ? null

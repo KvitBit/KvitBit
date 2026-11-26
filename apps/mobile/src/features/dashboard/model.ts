@@ -9,7 +9,7 @@ import type {
   IsoDate,
   WorkspaceSummary,
 } from "@kvitbit/domain/contract";
-import type { Remote } from "@kvitbit/ui-port/api";
+import { type Remote, Remote as RemoteOps } from "@kvitbit/ui-port/api";
 import { BUSINESS_TIME_ZONE, parseIsoDate } from "@kvitbit/ui-port/format";
 import type { Period } from "@kvitbit/ui-port/view-models";
 import { BigDecimal, Option } from "effect";
@@ -204,6 +204,9 @@ export const parseDocumentSummaries = (
     return parsed === null ? [] : [parsed];
   });
 
+export const recentActivityDocuments = (documents: Remote<RecentDashboardDocuments>) =>
+  Option.getOrNull(RemoteOps.value(documents))?.items ?? null;
+
 export const mostOverdueDocuments = (report: ReceivablesReportData) =>
   report.buckets
     .flatMap((bucket) => bucket.documents.filter((document) => document.daysOverdue > 0))
@@ -217,7 +220,7 @@ export const documentActivity = (
 ): ReadonlyArray<DashboardActivity> => {
   const events: DashboardActivity[] = [];
   for (const delivery of detail.deliveries) {
-    if (delivery.status === "sent") {
+    if (delivery.status === "sent" && delivery.purpose === "document") {
       events.push({ id: `sent:${delivery.id}`, document, kind: "sent", at: delivery.at });
     }
   }

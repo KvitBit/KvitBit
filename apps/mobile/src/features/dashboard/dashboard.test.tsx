@@ -27,6 +27,7 @@ import {
   mostOverdueDocuments,
   parseDocumentSummaries,
   periodRange,
+  recentActivityDocuments,
 } from "./model";
 
 mock.module("expo-router", () => expoRouterStandIn());
@@ -186,6 +187,14 @@ describe("dashboard model", () => {
     expect(isWorkspaceEmpty(noDocuments, RemoteOps.fail(noExpenses, UiError.offline))).toBe(false);
   });
 
+  test("keeps the activity request tied to the last successful document page when refresh fails", () => {
+    const refreshing = RemoteOps.load(recentDocuments);
+    const failed = RemoteOps.fail(refreshing, UiError.offline);
+    expect(recentActivityDocuments(failed)).toBe(recentActivityDocuments(recentDocuments));
+    expect(recentActivityDocuments(failed)).toEqual([sampleDoc]);
+    expect(recentActivityDocuments(RemoteOps.fail(RemoteOps.idle, UiError.offline))).toBeNull();
+  });
+
   test("ranks open receivables across all aging buckets before taking the oldest five", () => {
     const buckets = [
       { bucket: "not_due", days: [0] },
@@ -322,6 +331,13 @@ describe("DashboardContent", () => {
             to: [],
             purpose: "document",
             status: "failed",
+            at: "2026-11-09T09:00:00Z",
+          },
+          {
+            id: "reminder_1" as DeliveryId,
+            to: [],
+            purpose: "reminder",
+            status: "sent",
             at: "2026-11-09T09:00:00Z",
           },
         ],
