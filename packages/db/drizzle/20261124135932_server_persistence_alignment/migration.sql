@@ -34,6 +34,406 @@ ALTER TABLE "invitations" ADD COLUMN "accepted_by" text;--> statement-breakpoint
 ALTER TABLE "issuing_entities" ADD COLUMN "email" text;--> statement-breakpoint
 ALTER TABLE "issuing_entities" ADD COLUMN "phone" text;--> statement-breakpoint
 ALTER TABLE "issuing_entities" ADD COLUMN "web" text;--> statement-breakpoint
+-- Backfill distinct delivery sequences per document in stable historical order before creating
+-- the unique (workspace_id, document_id, sequence) index, and preserve document metadata (S5).
+UPDATE "deliveries" AS d
+SET "sequence" = ranked.seq,
+	"contact_id" = COALESCE(d."contact_id", ranked."doc_contact_id"),
+	"due_on" = COALESCE(d."due_on", ranked."doc_due_on"),
+	"attempts" = CASE
+		WHEN d."status" IN ('sending', 'sent', 'failed')
+			OR d."sent_at" IS NOT NULL
+			OR d."failure" IS NOT NULL
+		THEN GREATEST(d."attempts", 1)
+		ELSE d."attempts"
+	END
+FROM (
+	SELECT
+		del."id",
+		row_number() OVER (
+			PARTITION BY del."workspace_id", del."document_id"
+			ORDER BY del."created_at" ASC, del."id" ASC
+		)::integer AS seq,
+		doc."contact_id" AS "doc_contact_id",
+		doc."due_on" AS "doc_due_on"
+	FROM "deliveries" AS del
+	JOIN "documents" AS doc
+		ON doc."workspace_id" = del."workspace_id"
+		AND doc."id" = del."document_id"
+) AS ranked
+WHERE d."id" = ranked."id";--> statement-breakpoint
+-- Backfill exact line amounts (quantity * unit_price, unrounded per VatMath rule 1) and
+-- rate_percent from stored vat_breakdown buckets, deducted document buckets, or Czech VAT rates.
+UPDATE "document_lines" AS l
+SET "rate_percent" = COALESCE(
+		(
+			SELECT trim_scale((b->>'ratePercent')::numeric)
+			FROM jsonb_array_elements(
+				CASE
+					WHEN jsonb_typeof(d."vat_breakdown"->'buckets') = 'array'
+					THEN d."vat_breakdown"->'buckets'
+					ELSE '[]'::jsonb
+				END
+			) AS b
+			WHERE b->>'treatment' = l."vat"::text
+				AND b->>'ratePercent' IS NOT NULL
+			LIMIT 1
+		),
+		(
+			SELECT trim_scale((b->>'ratePercent')::numeric)
+			FROM "documents" AS ded
+			CROSS JOIN LATERAL jsonb_array_elements(
+				CASE
+					WHEN jsonb_typeof(ded."vat_breakdown"->'buckets') = 'array'
+					THEN ded."vat_breakdown"->'buckets'
+					ELSE '[]'::jsonb
+				END
+			) AS b
+			WHERE l."deducts_document_id" IS NOT NULL
+				AND ded."workspace_id" = l."workspace_id"
+				AND ded."id" = l."deducts_document_id"
+				AND b->>'treatment' = l."vat"::text
+				AND b->>'ratePercent' IS NOT NULL
+			LIMIT 1
+		),
+		CASE l."vat"
+			WHEN 'standard' THEN 21::numeric
+			WHEN 'reduced' THEN 12::numeric
+			ELSE 0::numeric
+		END
+	),
+	"amount" = trim_scale(l."quantity" * l."unit_price")
+FROM "documents" AS d
+WHERE d."workspace_id" = l."workspace_id"
+	AND d."id" = l."document_id";--> statement-breakpoint
+-- Backfill Document payment projections (paid_amount, payments, settlement per core P1/P3/D6/D8)
+-- and accounting metadata from live payments, lines, credit relations and stored totals.
+WITH live_payments AS (
+	SELECT
+		"workspace_id",
+		"document_id",
+		trim_scale(sum("amount")) AS paid_amount,
+		count(*)::integer AS payments
+	FROM "payments"
+	WHERE "document_id" IS NOT NULL
+		AND "removed_at" IS NULL
+	GROUP BY "workspace_id", "document_id"
+),
+line_gross_fallback AS (
+	SELECT
+		b."workspace_id",
+		b."document_id",
+		trim_scale(sum(
+			CASE
+				WHEN b."prices_include_vat" THEN round(b.line_sum, 2)
+				ELSE round(b.line_sum, 2) + round(round(b.line_sum, 2) * b."rate_percent" / 100, 2)
+			END
+		)) AS computed_gross
+	FROM (
+		SELECT
+			l."workspace_id",
+			l."document_id",
+			d."prices_include_vat",
+			l."vat",
+			l."rate_percent",
+			sum(l."amount") AS line_sum
+		FROM "document_lines" AS l
+		JOIN "documents" AS d
+			ON d."workspace_id" = l."workspace_id"
+			AND d."id" = l."document_id"
+		GROUP BY l."workspace_id", l."document_id", d."prices_include_vat", l."vat", l."rate_percent"
+	) AS b
+	GROUP BY b."workspace_id", b."document_id"
+),
+doc_totals AS (
+	SELECT
+		d."workspace_id",
+		d."id",
+		COALESCE(
+			d."total_gross",
+			CASE
+				WHEN d."vat_breakdown"->'gross'->>'amount' IS NOT NULL
+				THEN (d."vat_breakdown"->'gross'->>'amount')::numeric
+			END,
+			lg.computed_gross,
+			0::numeric
+		) AS gross,
+		d."total_net",
+		d."total_vat",
+		(jsonb_typeof(d."vat_breakdown"->'buckets') = 'array') AS has_buckets,
+		COALESCE((d."vat_breakdown"->'roundingAdjustment'->>'amount')::numeric, 0::numeric) AS rounding_adj
+	FROM "documents" AS d
+	LEFT JOIN line_gross_fallback AS lg
+		ON lg."workspace_id" = d."workspace_id"
+		AND lg."document_id" = d."id"
+),
+credit_links AS (
+	SELECT DISTINCT
+		r."workspace_id",
+		CASE
+			WHEN r."relation" = 'corrects' THEN r."to_document_id"
+			ELSE r."from_document_id"
+		END AS original_id,
+		CASE
+			WHEN r."relation" = 'corrects' THEN r."from_document_id"
+			ELSE r."to_document_id"
+		END AS credit_note_id
+	FROM "document_relations" AS r
+	JOIN "documents" AS cn
+		ON cn."workspace_id" = r."workspace_id"
+		AND cn."id" = CASE
+			WHEN r."relation" = 'corrects' THEN r."from_document_id"
+			ELSE r."to_document_id"
+		END
+	WHERE r."relation" IN ('corrects', 'corrected_by')
+		AND cn."kind" = 'credit_note'
+		AND cn."status" = 'issued'
+),
+credit_group_docs AS (
+	SELECT DISTINCT "workspace_id", original_id, original_id AS member_id
+	FROM credit_links
+	UNION
+	SELECT "workspace_id", original_id, credit_note_id AS member_id
+	FROM credit_links
+),
+open_bucket_originals AS (
+	SELECT DISTINCT "workspace_id", original_id
+	FROM (
+		SELECT
+			cg."workspace_id",
+			cg.original_id,
+			b->>'treatment' AS treatment,
+			trim_scale((b->>'ratePercent')::numeric) AS rate_percent,
+			sum((b->>'base')::numeric) AS sum_base,
+			sum((b->>'vat')::numeric) AS sum_vat,
+			sum((b->>'gross')::numeric) AS sum_gross,
+			sum(COALESCE((b->>'vatCzk')::numeric, 0::numeric)) AS sum_vat_czk
+		FROM credit_group_docs AS cg
+		JOIN "documents" AS m
+			ON m."workspace_id" = cg."workspace_id"
+			AND m."id" = cg.member_id
+		CROSS JOIN LATERAL jsonb_array_elements(
+			CASE
+				WHEN jsonb_typeof(m."vat_breakdown"->'buckets') = 'array'
+				THEN m."vat_breakdown"->'buckets'
+				ELSE '[]'::jsonb
+			END
+		) AS b
+		GROUP BY cg."workspace_id", cg.original_id, b->>'treatment', trim_scale((b->>'ratePercent')::numeric)
+	) AS grouped
+	WHERE sum_base <> 0
+		OR sum_vat <> 0
+		OR sum_gross <> 0
+		OR sum_vat_czk <> 0
+),
+open_deduction_originals AS (
+	SELECT DISTINCT "workspace_id", original_id
+	FROM (
+		SELECT
+			cg."workspace_id",
+			cg.original_id,
+			l."vat" AS treatment,
+			trim_scale(l."rate_percent") AS rate_percent,
+			sum(
+				CASE
+					WHEN m."prices_include_vat" THEN l."amount" - COALESCE(l."deducted_vat", 0::numeric)
+					ELSE l."amount"
+				END
+			) AS sum_base,
+			sum(COALESCE(l."deducted_vat", 0::numeric)) AS sum_vat,
+			sum(
+				CASE
+					WHEN m."prices_include_vat" THEN l."amount"
+					ELSE l."amount" + COALESCE(l."deducted_vat", 0::numeric)
+				END
+			) AS sum_gross,
+			sum(
+				CASE
+					WHEN m."currency" = 'CZK' THEN 0::numeric
+					ELSE COALESCE(l."deducted_vat_czk", 0::numeric)
+				END
+			) AS sum_vat_czk
+		FROM credit_group_docs AS cg
+		JOIN "documents" AS m
+			ON m."workspace_id" = cg."workspace_id"
+			AND m."id" = cg.member_id
+		JOIN "document_lines" AS l
+			ON l."workspace_id" = m."workspace_id"
+			AND l."document_id" = m."id"
+		WHERE l."deducts_document_id" IS NOT NULL
+			AND EXISTS (
+				SELECT 1
+				FROM "document_lines" AS ol
+				WHERE ol."workspace_id" = cg."workspace_id"
+					AND ol."document_id" = cg.original_id
+					AND ol."deducts_document_id" IS NOT NULL
+			)
+		GROUP BY cg."workspace_id", cg.original_id, l."vat", trim_scale(l."rate_percent")
+	) AS ded_grouped
+	WHERE sum_base <> 0
+		OR sum_vat <> 0
+		OR sum_gross <> 0
+		OR sum_vat_czk <> 0
+),
+credit_summary AS (
+	SELECT
+		cl."workspace_id",
+		cl.original_id,
+		count(*)::integer AS credit_count,
+		sum(ct.gross) AS credit_gross,
+		sum(COALESCE(ct."total_net", 0::numeric)) AS credit_net,
+		sum(COALESCE(ct."total_vat", 0::numeric)) AS credit_vat,
+		bool_and(ct.has_buckets) AS all_credits_have_buckets,
+		sum(ct.rounding_adj) AS credit_rounding_adj
+	FROM credit_links AS cl
+	JOIN doc_totals AS ct
+		ON ct."workspace_id" = cl."workspace_id"
+		AND ct."id" = cl.credit_note_id
+	GROUP BY cl."workspace_id", cl.original_id
+),
+computed_docs AS (
+	SELECT
+		d."workspace_id",
+		d."id",
+		COALESCE(lp.paid_amount, 0::numeric) AS paid_amount,
+		COALESCE(lp.payments, 0) AS payments,
+		(
+			CASE
+				WHEN d."kind" = 'credit_note' THEN 'unpaid'
+				WHEN d."status" = 'draft' THEN 'unpaid'
+				WHEN COALESCE(cs.credit_count, 0) > 0
+					AND od.original_id IS NULL
+					AND (
+						CASE
+							WHEN dt.has_buckets AND cs.all_credits_have_buckets THEN
+								ob.original_id IS NULL
+								AND (dt.rounding_adj + cs.credit_rounding_adj) = 0
+							ELSE
+								(dt.gross + cs.credit_gross) = 0
+								AND (dt."total_net" IS NULL OR (dt."total_net" + cs.credit_net) = 0)
+								AND (dt."total_vat" IS NULL OR (dt."total_vat" + cs.credit_vat) = 0)
+						END
+					)
+					THEN 'credited'
+				WHEN d."kind" = 'payment_tax_document' THEN 'paid'
+				WHEN COALESCE(lp.payments, 0) = 0
+					AND (dt.gross + COALESCE(cs.credit_gross, 0::numeric)) > 0
+					THEN 'unpaid'
+				WHEN COALESCE(lp.paid_amount, 0::numeric) < (dt.gross + COALESCE(cs.credit_gross, 0::numeric))
+					THEN 'partially_paid'
+				WHEN COALESCE(lp.paid_amount, 0::numeric) = (dt.gross + COALESCE(cs.credit_gross, 0::numeric))
+					THEN 'paid'
+				ELSE 'overpaid'
+			END
+		)::"document_settlement" AS settlement,
+		CASE
+			WHEN d."kind" = 'payment_tax_document' THEN true
+			WHEN d."kind" = 'proforma' THEN false
+			WHEN COALESCE(
+				d."issuer_snapshot"->>'regime',
+				(
+					SELECT trp."regime"::text
+					FROM "tax_regime_periods" AS trp
+					WHERE trp."workspace_id" = d."workspace_id"
+						AND trp."effective_from" <= COALESCE(d."taxable_supply_on", d."issued_on", CURRENT_DATE)
+					ORDER BY trp."effective_from" DESC
+					LIMIT 1
+				),
+				'non_vat_payer'
+			) = 'vat_payer' THEN true
+			WHEN COALESCE(
+				d."issuer_snapshot"->>'regime',
+				(
+					SELECT trp."regime"::text
+					FROM "tax_regime_periods" AS trp
+					WHERE trp."workspace_id" = d."workspace_id"
+						AND trp."effective_from" <= COALESCE(d."taxable_supply_on", d."issued_on", CURRENT_DATE)
+					ORDER BY trp."effective_from" DESC
+					LIMIT 1
+				),
+				'non_vat_payer'
+			) = 'identified_person'
+				AND EXISTS (
+					SELECT 1
+					FROM "document_lines" AS l
+					WHERE l."workspace_id" = d."workspace_id"
+						AND l."document_id" = d."id"
+						AND l."vat" <> 'outside_scope'
+				)
+				THEN true
+			ELSE false
+		END AS tax_document,
+		CASE
+			WHEN dt.rounding_adj <> 0 THEN 'whole_unit'::"payment_rounding"
+			ELSE d."payment_rounding"
+		END AS payment_rounding,
+		CASE
+			WHEN d."fx_override" IS NULL
+				AND d."fx_source" = 'manual'
+				AND d."fx_rate" IS NOT NULL
+				AND d."fx_quantity" IS NOT NULL
+			THEN jsonb_build_object(
+				'manual',
+				jsonb_build_object(
+					'rate', trim_scale(d."fx_rate")::text,
+					'quantity', d."fx_quantity"
+				)
+			)
+			ELSE d."fx_override"
+		END AS fx_override,
+		CASE
+			WHEN d."locked" AND d."locked_at" IS NULL
+			THEN COALESCE(d."updated_at", d."created_at")
+			ELSE d."locked_at"
+		END AS locked_at,
+		COALESCE(
+			d."corrected_number",
+			(
+				SELECT orig."number"
+				FROM credit_links AS cl2
+				JOIN "documents" AS orig
+					ON orig."workspace_id" = cl2."workspace_id"
+					AND orig."id" = cl2.original_id
+				WHERE cl2."workspace_id" = d."workspace_id"
+					AND cl2.credit_note_id = d."id"
+				LIMIT 1
+			)
+		) AS corrected_number,
+		CASE
+			WHEN d."cancelled_on" IS NULL AND d."cancelled_at" IS NOT NULL
+			THEN (d."cancelled_at" AT TIME ZONE 'Europe/Prague')::date
+			ELSE d."cancelled_on"
+		END AS cancelled_on
+	FROM "documents" AS d
+	JOIN doc_totals AS dt
+		ON dt."workspace_id" = d."workspace_id"
+		AND dt."id" = d."id"
+	LEFT JOIN live_payments AS lp
+		ON lp."workspace_id" = d."workspace_id"
+		AND lp."document_id" = d."id"
+	LEFT JOIN credit_summary AS cs
+		ON cs."workspace_id" = d."workspace_id"
+		AND cs.original_id = d."id"
+	LEFT JOIN open_bucket_originals AS ob
+		ON ob."workspace_id" = d."workspace_id"
+		AND ob.original_id = d."id"
+	LEFT JOIN open_deduction_originals AS od
+		ON od."workspace_id" = d."workspace_id"
+		AND od.original_id = d."id"
+)
+UPDATE "documents" AS d
+SET "paid_amount" = c.paid_amount,
+	"payments" = c.payments,
+	"settlement" = c.settlement,
+	"tax_document" = c.tax_document,
+	"payment_rounding" = c.payment_rounding,
+	"fx_override" = c.fx_override,
+	"locked_at" = c.locked_at,
+	"corrected_number" = c.corrected_number,
+	"cancelled_on" = c.cancelled_on
+FROM computed_docs AS c
+WHERE d."workspace_id" = c."workspace_id"
+	AND d."id" = c."id";--> statement-breakpoint
 CREATE UNIQUE INDEX "deliveries_document_sequence" ON "deliveries" ("workspace_id","document_id","sequence");--> statement-breakpoint
 CREATE UNIQUE INDEX "deliveries_reminder_step" ON "deliveries" ("workspace_id","document_id","reminder_due_on","reminder_offset_days","reminder_armed_by") WHERE "reminder_due_on" is not null and not ("status" = 'skipped' and "attempts" = 0 and "last_outcome" is null);--> statement-breakpoint
 ALTER TABLE "deliveries" ADD CONSTRAINT "deliveries_contact_fk" FOREIGN KEY ("workspace_id","contact_id") REFERENCES "contacts"("workspace_id","id");--> statement-breakpoint

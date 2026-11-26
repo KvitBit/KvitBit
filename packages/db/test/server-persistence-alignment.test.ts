@@ -1,0 +1,580 @@
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { cpSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { PGlite } from "@electric-sql/pglite";
+import { drizzle } from "drizzle-orm/pglite";
+import { migrate } from "drizzle-orm/pglite/migrator";
+
+// The server persistence alignment migration (20261124135932) must upgrade a populated database
+// from the prior schema without failing on existing delivery history (S5) or zeroing out
+// accounting projections (core P1/P3/D6/D8).
+const migrationsFolder = fileURLToPath(new URL("../drizzle", import.meta.url));
+const PRE_MIGRATIONS = ["20261123175822_init", "20261124120853_core_record_alignment"] as const;
+
+const wsVat = "0190a000-0000-7000-8000-0000000003a0";
+const wsNonVat = "0190a000-0000-7000-8000-0000000003b0";
+const wsIdent = "0190a000-0000-7000-8000-0000000003c0";
+const contactVat = "0190a000-0000-7000-8000-0000000003a1";
+const contactNonVat = "0190a000-0000-7000-8000-0000000003b1";
+const contactIdent = "0190a000-0000-7000-8000-0000000003c1";
+
+// Documents
+const docMultiDelivery = "0190a000-0000-7000-8000-000000000301";
+const docPartialPaid = "0190a000-0000-7000-8000-000000000302";
+const docPaidNoTotal = "0190a000-0000-7000-8000-000000000303";
+const docOverpaid = "0190a000-0000-7000-8000-000000000304";
+const docUnpaidWithRemoved = "0190a000-0000-7000-8000-000000000305";
+const docCreditedCorrects = "0190a000-0000-7000-8000-000000000306";
+const cnCorrects = "0190a000-0000-7000-8000-000000000307";
+const docCreditedBothLinks = "0190a000-0000-7000-8000-000000000308";
+const cnBothLinks = "0190a000-0000-7000-8000-000000000309";
+const docPartialCreditPaid = "0190a000-0000-7000-8000-00000000030a";
+const cnPartialCreditPaid = "0190a000-0000-7000-8000-00000000030b";
+const docPartialCreditOverpaid = "0190a000-0000-7000-8000-00000000030c";
+const cnPartialCreditOverpaid = "0190a000-0000-7000-8000-00000000030d";
+const docEurVatCzkOpen = "0190a000-0000-7000-8000-00000000030e";
+const cnEurVatCzkOpen = "0190a000-0000-7000-8000-00000000030f";
+const docRoundingOpen = "0190a000-0000-7000-8000-000000000310";
+const cnRoundingOpen = "0190a000-0000-7000-8000-000000000311";
+const ptdOpen = "0190a000-0000-7000-8000-000000000312";
+const ptdCredited = "0190a000-0000-7000-8000-000000000313";
+const cnPtdCredited = "0190a000-0000-7000-8000-000000000314";
+const finalCovered = "0190a000-0000-7000-8000-000000000315";
+const finalOverCovered = "0190a000-0000-7000-8000-000000000316";
+const finalDeductionOpen = "0190a000-0000-7000-8000-000000000317";
+const cnFinalDeductionOpen = "0190a000-0000-7000-8000-000000000318";
+const docDraft = "0190a000-0000-7000-8000-000000000319";
+const docProforma = "0190a000-0000-7000-8000-00000000031a";
+const docNonVat = "0190a000-0000-7000-8000-00000000031b";
+const docIdentTax = "0190a000-0000-7000-8000-00000000031c";
+const docIdentOutside = "0190a000-0000-7000-8000-00000000031d";
+
+// Deliveries
+const del1 = "0190a000-0000-7000-8000-000000000401";
+const del2a = "0190a000-0000-7000-8000-000000000402";
+const del2b = "0190a000-0000-7000-8000-000000000403";
+const del3 = "0190a000-0000-7000-8000-000000000404";
+const delOtherDoc = "0190a000-0000-7000-8000-000000000405";
+const delOtherWs = "0190a000-0000-7000-8000-000000000406";
+
+// Lines
+const lineProbe = "0190a000-0000-7000-8000-000000000501";
+const lineFractional = "0190a000-0000-7000-8000-000000000502";
+const lineNegative = "0190a000-0000-7000-8000-000000000503";
+const lineReduced = "0190a000-0000-7000-8000-000000000504";
+const lineReverseCharge = "0190a000-0000-7000-8000-000000000505";
+const lineDeduction = "0190a000-0000-7000-8000-000000000506";
+
+let client: PGlite;
+let preDir: string;
+
+const rows = async <T>(sql: string, params: ReadonlyArray<unknown> = []): Promise<Array<T>> =>
+  (await client.query<T>(sql, [...params])).rows;
+
+const breakdown = (
+  buckets: ReadonlyArray<{
+    treatment: string;
+    ratePercent: string;
+    base: string;
+    vat: string;
+    gross: string;
+    vatCzk: string | null;
+  }>,
+  totals: {
+    net: string;
+    vat: string;
+    gross: string;
+    roundingAdjustment?: string;
+    currency?: string;
+    vatCzk?: string | null;
+  },
+) => {
+  const currency = totals.currency ?? "CZK";
+  return JSON.stringify({
+    buckets,
+    net: { amount: totals.net, currency },
+    vat: { amount: totals.vat, currency },
+    roundingAdjustment: { amount: totals.roundingAdjustment ?? "0", currency },
+    gross: { amount: totals.gross, currency },
+    vatCzk:
+      totals.vatCzk === undefined || totals.vatCzk === null
+        ? null
+        : { amount: totals.vatCzk, currency: "CZK" },
+  });
+};
+
+beforeAll(async () => {
+  preDir = mkdtempSync(join(tmpdir(), "kvitbit-db-pre-3a-"));
+  for (const name of PRE_MIGRATIONS) {
+    cpSync(join(migrationsFolder, name), join(preDir, name), { recursive: true });
+  }
+  client = new PGlite();
+  await migrate(drizzle({ client }), { migrationsFolder: preDir });
+
+  const b121 = breakdown(
+    [
+      {
+        treatment: "standard",
+        ratePercent: "21",
+        base: "100",
+        vat: "21",
+        gross: "121",
+        vatCzk: null,
+      },
+    ],
+    { net: "100", vat: "21", gross: "121" },
+  );
+  const bNeg121 = breakdown(
+    [
+      {
+        treatment: "standard",
+        ratePercent: "21",
+        base: "-100",
+        vat: "-21",
+        gross: "-121",
+        vatCzk: null,
+      },
+    ],
+    { net: "-100", vat: "-21", gross: "-121" },
+  );
+  const b100 = breakdown(
+    [
+      {
+        treatment: "outside_scope",
+        ratePercent: "0",
+        base: "100",
+        vat: "0",
+        gross: "100",
+        vatCzk: null,
+      },
+    ],
+    { net: "100", vat: "0", gross: "100" },
+  );
+  const bNeg40 = breakdown(
+    [
+      {
+        treatment: "outside_scope",
+        ratePercent: "0",
+        base: "-40",
+        vat: "0",
+        gross: "-40",
+        vatCzk: null,
+      },
+    ],
+    { net: "-40", vat: "0", gross: "-40" },
+  );
+  const bEurOrig = breakdown(
+    [
+      {
+        treatment: "standard",
+        ratePercent: "21",
+        base: "100",
+        vat: "21",
+        gross: "121",
+        vatCzk: "525",
+      },
+    ],
+    { net: "100", vat: "21", gross: "121", currency: "EUR", vatCzk: "525" },
+  );
+  const bEurCnMismatch = breakdown(
+    [
+      {
+        treatment: "standard",
+        ratePercent: "21",
+        base: "-100",
+        vat: "-21",
+        gross: "-121",
+        vatCzk: "-500",
+      },
+    ],
+    { net: "-100", vat: "-21", gross: "-121", currency: "EUR", vatCzk: "-500" },
+  );
+  const bRounded = breakdown(
+    [
+      {
+        treatment: "standard",
+        ratePercent: "21",
+        base: "100",
+        vat: "21",
+        gross: "121",
+        vatCzk: null,
+      },
+    ],
+    { net: "100", vat: "21", gross: "121.40", roundingAdjustment: "0.40" },
+  );
+  const bPtd = breakdown(
+    [
+      {
+        treatment: "standard",
+        ratePercent: "21",
+        base: "100",
+        vat: "21",
+        gross: "121",
+        vatCzk: null,
+      },
+    ],
+    { net: "100", vat: "21", gross: "121" },
+  );
+  const bZero = breakdown([], { net: "0", vat: "0", gross: "0" });
+  const bNeg20 = breakdown(
+    [
+      {
+        treatment: "outside_scope",
+        ratePercent: "0",
+        base: "-20",
+        vat: "0",
+        gross: "-20",
+        vatCzk: null,
+      },
+    ],
+    { net: "-20", vat: "0", gross: "-20" },
+  );
+
+  await client.exec(`
+    insert into workspaces (id, slug, name) values
+      ('${wsVat}', 'vat-co', 'VAT Co'),
+      ('${wsNonVat}', 'nonvat-co', 'NonVAT Co'),
+      ('${wsIdent}', 'ident-co', 'Ident Co');
+
+    insert into tax_regime_periods (workspace_id, effective_from, regime) values
+      ('${wsVat}', '2024-01-01', 'vat_payer'),
+      ('${wsNonVat}', '2024-01-01', 'non_vat_payer'),
+      ('${wsIdent}', '2024-01-01', 'identified_person');
+
+    insert into contacts (id, workspace_id, name) values
+      ('${contactVat}', '${wsVat}', 'Buyer VAT'),
+      ('${contactNonVat}', '${wsNonVat}', 'Buyer NonVAT'),
+      ('${contactIdent}', '${wsIdent}', 'Buyer Ident');
+
+    insert into documents (
+      id, workspace_id, kind, status, number, contact_id, currency, language, payment_method,
+      issued_on, due_on, total_net, total_vat, total_gross, vat_breakdown, locked,
+      fx_rate, fx_quantity, fx_source, cancelled_at
+    ) values
+      -- Multi-delivery + locked + cancelled_at check
+      ('${docMultiDelivery}', '${wsVat}', 'invoice', 'issued', '20260001', '${contactVat}', 'CZK', 'cs', 'bank_transfer',
+       '2026-01-10', '2026-01-24', '100.00', '21.00', '121.00', '${b121}', true, null, null, null, null),
+      -- Partially paid (50 of 121)
+      ('${docPartialPaid}', '${wsVat}', 'invoice', 'issued', '20260002', '${contactVat}', 'CZK', 'cs', 'bank_transfer',
+       '2026-01-10', '2026-01-24', '100.00', '21.00', '121.00', '${b121}', false, null, null, null, null),
+      -- Paid with NULL total_gross & vat_breakdown (exact review probe scenario: 2 * 50 = 100, payment 100)
+      ('${docPaidNoTotal}', '${wsNonVat}', 'invoice', 'issued', '20260001', '${contactNonVat}', 'CZK', 'cs', 'bank_transfer',
+       '2026-01-10', '2026-01-24', null, null, null, null, false, null, null, null, null),
+      -- Overpaid (120 of 100)
+      ('${docOverpaid}', '${wsNonVat}', 'invoice', 'issued', '20260002', '${contactNonVat}', 'CZK', 'cs', 'bank_transfer',
+       '2026-01-10', '2026-01-24', '100.00', '0.00', '100.00', '${b100}', false, null, null, null, null),
+      -- Unpaid with only a soft-deleted payment + cancelled_at
+      ('${docUnpaidWithRemoved}', '${wsNonVat}', 'invoice', 'cancelled', '20260003', '${contactNonVat}', 'CZK', 'cs', 'bank_transfer',
+       '2026-01-10', '2026-01-24', '100.00', '0.00', '100.00', '${b100}', false, null, null, null, '2026-01-15T23:30:00Z'),
+      -- Fully credited via 'corrects' link only
+      ('${docCreditedCorrects}', '${wsVat}', 'invoice', 'issued', '20260003', '${contactVat}', 'CZK', 'cs', 'bank_transfer',
+       '2026-01-10', '2026-01-24', '100.00', '21.00', '121.00', '${b121}', true, null, null, null, null),
+      ('${cnCorrects}', '${wsVat}', 'credit_note', 'issued', 'CN20260001', '${contactVat}', 'CZK', 'cs', 'bank_transfer',
+       '2026-01-12', '2026-01-12', '-100.00', '-21.00', '-121.00', '${bNeg121}', false, null, null, null, null),
+      -- Fully credited via BOTH 'corrects' and 'corrected_by' links (must not double-count)
+      ('${docCreditedBothLinks}', '${wsVat}', 'invoice', 'issued', '20260004', '${contactVat}', 'CZK', 'cs', 'bank_transfer',
+       '2026-01-10', '2026-01-24', '100.00', '21.00', '121.00', '${b121}', true, null, null, null, null),
+      ('${cnBothLinks}', '${wsVat}', 'credit_note', 'issued', 'CN20260002', '${contactVat}', 'CZK', 'cs', 'bank_transfer',
+       '2026-01-12', '2026-01-12', '-100.00', '-21.00', '-121.00', '${bNeg121}', false, null, null, null, null),
+      -- Partially credited (100 - 40 = 60) + paid 60 => paid
+      ('${docPartialCreditPaid}', '${wsNonVat}', 'invoice', 'issued', '20260004', '${contactNonVat}', 'CZK', 'cs', 'bank_transfer',
+       '2026-01-10', '2026-01-24', '100.00', '0.00', '100.00', '${b100}', true, null, null, null, null),
+      ('${cnPartialCreditPaid}', '${wsNonVat}', 'credit_note', 'issued', 'CN20260001', '${contactNonVat}', 'CZK', 'cs', 'bank_transfer',
+       '2026-01-12', '2026-01-12', '-40.00', '0.00', '-40.00', '${bNeg40}', false, null, null, null, null),
+      -- Partially credited (100 - 40 = 60) + paid 100 => overpaid
+      ('${docPartialCreditOverpaid}', '${wsNonVat}', 'invoice', 'issued', '20260005', '${contactNonVat}', 'CZK', 'cs', 'bank_transfer',
+       '2026-01-10', '2026-01-24', '100.00', '0.00', '100.00', '${b100}', true, null, null, null, null),
+      ('${cnPartialCreditOverpaid}', '${wsNonVat}', 'credit_note', 'issued', 'CN20260002', '${contactNonVat}', 'CZK', 'cs', 'bank_transfer',
+       '2026-01-12', '2026-01-12', '-40.00', '0.00', '-40.00', '${bNeg40}', false, null, null, null, null),
+      -- Foreign currency (EUR) with manual FX and unclosed vatCzk (525 - 500 = 25 != 0) => NOT credited
+      ('${docEurVatCzkOpen}', '${wsVat}', 'invoice', 'issued', '20260005', '${contactVat}', 'EUR', 'en', 'bank_transfer',
+       '2026-01-10', '2026-01-24', '100.00', '21.00', '121.00', '${bEurOrig}', true, '25.50', 1, 'manual', null),
+      ('${cnEurVatCzkOpen}', '${wsVat}', 'credit_note', 'issued', 'CN20260003', '${contactVat}', 'EUR', 'en', 'bank_transfer',
+       '2026-01-12', '2026-01-12', '-100.00', '-21.00', '-121.00', '${bEurCnMismatch}', false, '25.50', 1, 'manual', null),
+      -- Whole-unit rounding adjustment left open (0.40 != 0) => NOT credited, payment_rounding = whole_unit
+      ('${docRoundingOpen}', '${wsVat}', 'invoice', 'issued', '20260006', '${contactVat}', 'CZK', 'cs', 'bank_transfer',
+       '2026-01-10', '2026-01-24', '100.00', '21.00', '121.40', '${bRounded}', true, null, null, null, null),
+      ('${cnRoundingOpen}', '${wsVat}', 'credit_note', 'issued', 'CN20260004', '${contactVat}', 'CZK', 'cs', 'bank_transfer',
+       '2026-01-12', '2026-01-12', '-100.00', '-21.00', '-121.00', '${bNeg121}', false, null, null, null, null),
+      -- Payment Tax Documents: open => paid, fully credited => credited
+      ('${ptdOpen}', '${wsVat}', 'payment_tax_document', 'issued', 'PTD20260001', '${contactVat}', 'CZK', 'cs', 'bank_transfer',
+       '2026-01-10', '2026-01-10', '100.00', '21.00', '121.00', '${bPtd}', false, null, null, null, null),
+      ('${ptdCredited}', '${wsVat}', 'payment_tax_document', 'issued', 'PTD20260002', '${contactVat}', 'CZK', 'cs', 'bank_transfer',
+       '2026-01-10', '2026-01-10', '100.00', '21.00', '121.00', '${bPtd}', false, null, null, null, null),
+      ('${cnPtdCredited}', '${wsVat}', 'credit_note', 'issued', 'CN20260005', '${contactVat}', 'CZK', 'cs', 'bank_transfer',
+       '2026-01-12', '2026-01-12', '-100.00', '-21.00', '-121.00', '${bNeg121}', false, null, null, null, null),
+      -- Final Invoices covered (gross = 0 => paid) and over-covered (gross = -20 => overpaid)
+      ('${finalCovered}', '${wsVat}', 'invoice', 'issued', '20260007', '${contactVat}', 'CZK', 'cs', 'bank_transfer',
+       '2026-01-10', '2026-01-24', '0.00', '0.00', '0.00', '${bZero}', false, null, null, null, null),
+      ('${finalOverCovered}', '${wsVat}', 'invoice', 'issued', '20260008', '${contactVat}', 'CZK', 'cs', 'bank_transfer',
+       '2026-01-10', '2026-01-24', '-20.00', '0.00', '-20.00', '${bNeg20}', false, null, null, null, null),
+      -- Final Invoice with open deduction line: buckets net to 0 but deduction not reversed => NOT credited
+      ('${finalDeductionOpen}', '${wsVat}', 'invoice', 'issued', '20260009', '${contactVat}', 'CZK', 'cs', 'bank_transfer',
+       '2026-01-10', '2026-01-24', '0.00', '0.00', '0.00', '${bZero}', true, null, null, null, null),
+      ('${cnFinalDeductionOpen}', '${wsVat}', 'credit_note', 'issued', 'CN20260006', '${contactVat}', 'CZK', 'cs', 'bank_transfer',
+       '2026-01-12', '2026-01-12', '0.00', '0.00', '0.00', '${bZero}', false, null, null, null, null),
+      -- Draft, Proforma, Non-VAT, Identified Person (tax vs outside_scope)
+      ('${docDraft}', '${wsVat}', 'invoice', 'draft', null, '${contactVat}', 'CZK', 'cs', 'bank_transfer',
+       '2026-01-10', '2026-01-24', '0.00', '0.00', '0.00', '${bZero}', false, null, null, null, null),
+      ('${docProforma}', '${wsVat}', 'proforma', 'issued', 'PF20260001', '${contactVat}', 'CZK', 'cs', 'bank_transfer',
+       '2026-01-10', '2026-01-24', '100.00', '21.00', '121.00', '${b121}', false, null, null, null, null),
+      ('${docNonVat}', '${wsNonVat}', 'invoice', 'issued', '20260006', '${contactNonVat}', 'CZK', 'cs', 'bank_transfer',
+       '2026-01-10', '2026-01-24', '100.00', '0.00', '100.00', '${b100}', false, null, null, null, null),
+      ('${docIdentTax}', '${wsIdent}', 'invoice', 'issued', '20260001', '${contactIdent}', 'CZK', 'cs', 'bank_transfer',
+       '2026-01-10', '2026-01-24', '100.00', '0.00', '100.00', '${b100}', false, null, null, null, null),
+      ('${docIdentOutside}', '${wsIdent}', 'invoice', 'issued', '20260002', '${contactIdent}', 'CZK', 'cs', 'bank_transfer',
+       '2026-01-10', '2026-01-24', '100.00', '0.00', '100.00', '${b100}', false, null, null, null, null);
+
+    insert into document_lines (
+      id, workspace_id, document_id, position, description, quantity, unit_price, vat,
+      deducts_document_id, deducted_vat
+    ) values
+      ('${lineProbe}', '${wsNonVat}', '${docPaidNoTotal}', 1, 'Consulting', '2', '50', 'outside_scope', null, null),
+      ('${lineFractional}', '${wsVat}', '${docMultiDelivery}', 1, 'Hours', '1.5', '33.333', 'standard', null, null),
+      ('${lineNegative}', '${wsVat}', '${docMultiDelivery}', 2, 'Discount', '-1', '10', 'standard', null, null),
+      ('${lineReduced}', '${wsVat}', '${docPartialPaid}', 1, 'Books', '3', '100', 'reduced', null, null),
+      ('${lineReverseCharge}', '${wsIdent}', '${docIdentTax}', 1, 'EU service', '1', '100', 'reverse_charge', null, null),
+      (gen_random_uuid(), '${wsIdent}', '${docIdentOutside}', 1, 'Local', '1', '100', 'outside_scope', null, null),
+      ('${lineDeduction}', '${wsVat}', '${finalDeductionOpen}', 1, 'Advance deduction', '-1', '100', 'standard', '${ptdOpen}', '-21.00');
+
+    insert into document_relations (workspace_id, from_document_id, to_document_id, relation) values
+      -- 'corrects' only
+      ('${wsVat}', '${cnCorrects}', '${docCreditedCorrects}', 'corrects'),
+      -- both 'corrects' and 'corrected_by'
+      ('${wsVat}', '${cnBothLinks}', '${docCreditedBothLinks}', 'corrects'),
+      ('${wsVat}', '${docCreditedBothLinks}', '${cnBothLinks}', 'corrected_by'),
+      -- partial credits
+      ('${wsNonVat}', '${cnPartialCreditPaid}', '${docPartialCreditPaid}', 'corrects'),
+      ('${wsNonVat}', '${cnPartialCreditOverpaid}', '${docPartialCreditOverpaid}', 'corrects'),
+      -- EUR vatCzk mismatch
+      ('${wsVat}', '${cnEurVatCzkOpen}', '${docEurVatCzkOpen}', 'corrects'),
+      -- rounding open
+      ('${wsVat}', '${cnRoundingOpen}', '${docRoundingOpen}', 'corrects'),
+      -- credited PTD (via 'corrected_by' only)
+      ('${wsVat}', '${ptdCredited}', '${cnPtdCredited}', 'corrected_by'),
+      -- Final Invoice with open deduction
+      ('${wsVat}', '${cnFinalDeductionOpen}', '${finalDeductionOpen}', 'corrects');
+
+    insert into payments (id, workspace_id, document_id, amount, currency, paid_on, method, removed_at) values
+      -- Partially paid: 50 of 121
+      (gen_random_uuid(), '${wsVat}', '${docPartialPaid}', '50.00', 'CZK', '2026-01-12', 'bank_transfer', null),
+      -- Paid (probe scenario): 100 of 100
+      (gen_random_uuid(), '${wsNonVat}', '${docPaidNoTotal}', '100.00', 'CZK', '2026-01-12', 'bank_transfer', null),
+      -- Overpaid: 70 + 50 = 120 of 100, plus a soft-deleted payment of 999
+      (gen_random_uuid(), '${wsNonVat}', '${docOverpaid}', '70.00', 'CZK', '2026-01-12', 'bank_transfer', null),
+      (gen_random_uuid(), '${wsNonVat}', '${docOverpaid}', '50.00', 'CZK', '2026-01-13', 'bank_transfer', null),
+      (gen_random_uuid(), '${wsNonVat}', '${docOverpaid}', '999.00', 'CZK', '2026-01-14', 'bank_transfer', now()),
+      -- Unpaid: only soft-deleted payment
+      (gen_random_uuid(), '${wsNonVat}', '${docUnpaidWithRemoved}', '100.00', 'CZK', '2026-01-12', 'bank_transfer', now()),
+      -- Partial credit (owed 60): paid 60
+      (gen_random_uuid(), '${wsNonVat}', '${docPartialCreditPaid}', '60.00', 'CZK', '2026-01-13', 'bank_transfer', null),
+      -- Partial credit (owed 60): paid 100 before credit
+      (gen_random_uuid(), '${wsNonVat}', '${docPartialCreditOverpaid}', '100.00', 'CZK', '2026-01-11', 'bank_transfer', null);
+
+    insert into deliveries (
+      id, workspace_id, document_id, document_revision, purpose, status, recipients,
+      language, subject, render_model, sent_at, failure, created_at, updated_at
+    ) values
+      -- Four deliveries for docMultiDelivery, including two at the exact same created_at
+      ('${del1}', '${wsVat}', '${docMultiDelivery}', 1, 'document', 'sent', '{buyer@example.test}',
+       'cs', 'Invoice 1', '{}', '2026-01-10T10:00:05Z', null, '2026-01-10T10:00:00Z', '2026-01-10T10:00:05Z'),
+      ('${del2b}', '${wsVat}', '${docMultiDelivery}', 1, 'reminder', 'failed', '{buyer@example.test}',
+       'cs', 'Reminder 2', '{}', null, 'smtp_timeout', '2026-01-25T08:00:00Z', '2026-01-25T08:00:10Z'),
+      ('${del2a}', '${wsVat}', '${docMultiDelivery}', 1, 'reminder', 'queued', '{buyer@example.test}',
+       'cs', 'Reminder 1', '{}', null, null, '2026-01-25T08:00:00Z', '2026-01-25T08:00:00Z'),
+      ('${del3}', '${wsVat}', '${docMultiDelivery}', 1, 'reminder', 'skipped', '{buyer@example.test}',
+       'cs', 'Reminder 3', '{}', null, null, '2026-01-30T08:00:00Z', '2026-01-30T08:00:00Z'),
+      -- Delivery for a different document in the same workspace
+      ('${delOtherDoc}', '${wsVat}', '${docPartialPaid}', 1, 'document', 'sent', '{buyer@example.test}',
+       'cs', 'Invoice 2', '{}', '2026-01-10T11:00:05Z', null, '2026-01-10T11:00:00Z', '2026-01-10T11:00:05Z'),
+      -- Delivery for a document in a different workspace
+      ('${delOtherWs}', '${wsNonVat}', '${docPaidNoTotal}', 1, 'document', 'sending', '{nonvat@example.test}',
+       'cs', 'Invoice NV', '{}', null, null, '2026-01-10T12:00:00Z', '2026-01-10T12:00:00Z');
+  `);
+
+  // Upgrade to the full migration chain (includes 20261124135932_server_persistence_alignment).
+  await migrate(drizzle({ client }), { migrationsFolder });
+}, 60_000);
+
+afterAll(async () => {
+  await client?.close();
+  if (preDir) rmSync(preDir, { recursive: true, force: true });
+});
+
+describe("server persistence alignment migration (populated upgrade)", () => {
+  test("backfills distinct delivery sequences in stable historical order and preserves metadata", async () => {
+    const multi = await rows<{
+      id: string;
+      sequence: number;
+      contact_id: string | null;
+      due_on: string | null;
+      attempts: number;
+    }>(
+      `select id, sequence, contact_id, due_on::text as due_on, attempts
+       from deliveries where document_id = $1 order by sequence asc`,
+      [docMultiDelivery],
+    );
+    expect(multi).toEqual([
+      { id: del1, sequence: 1, contact_id: contactVat, due_on: "2026-01-24", attempts: 1 },
+      // del2a and del2b share created_at; del2a (...402) orders before del2b (...403)
+      { id: del2a, sequence: 2, contact_id: contactVat, due_on: "2026-01-24", attempts: 0 },
+      { id: del2b, sequence: 3, contact_id: contactVat, due_on: "2026-01-24", attempts: 1 },
+      { id: del3, sequence: 4, contact_id: contactVat, due_on: "2026-01-24", attempts: 0 },
+    ]);
+
+    const others = await rows<{ id: string; sequence: number; attempts: number }>(
+      `select id, sequence, attempts from deliveries where id in ($1, $2) order by id asc`,
+      [delOtherDoc, delOtherWs],
+    );
+    expect(others).toEqual([
+      { id: delOtherDoc, sequence: 1, attempts: 1 },
+      { id: delOtherWs, sequence: 1, attempts: 1 },
+    ]);
+
+    // Unique index is enforced after backfill.
+    await expect(
+      client.query(
+        `insert into deliveries (
+           id, workspace_id, document_id, sequence, document_revision, purpose,
+           recipients, language, subject, render_model
+         ) values (
+           gen_random_uuid(), $1, $2, 1, 1, 'document', '{dup@example.test}', 'cs', 'Dup', '{}'
+         )`,
+        [wsVat, docMultiDelivery],
+      ),
+    ).rejects.toThrow(/deliveries_document_sequence/);
+  });
+
+  test("backfills exact unrounded line amounts and VAT rate_percent", async () => {
+    const lines = await rows<{ id: string; rate_percent: string; amount: string }>(
+      `select id, rate_percent::text as rate_percent, amount::text as amount
+       from document_lines
+       where id in ($1, $2, $3, $4, $5, $6)
+       order by id asc`,
+      [lineProbe, lineFractional, lineNegative, lineReduced, lineReverseCharge, lineDeduction],
+    );
+    expect(lines).toEqual([
+      { id: lineProbe, rate_percent: "0", amount: "100" },
+      { id: lineFractional, rate_percent: "21", amount: "49.9995" },
+      { id: lineNegative, rate_percent: "21", amount: "-10" },
+      { id: lineReduced, rate_percent: "12", amount: "300" },
+      { id: lineReverseCharge, rate_percent: "0", amount: "100" },
+      { id: lineDeduction, rate_percent: "21", amount: "-100" },
+    ]);
+  });
+
+  test("backfills document paid_amount, payments and settlement across payments, credits and advances", async () => {
+    const docs = await rows<{
+      id: string;
+      paid_amount: string;
+      payments: number;
+      settlement: string;
+    }>(
+      `select id, paid_amount::text as paid_amount, payments, settlement::text as settlement
+       from documents`,
+    );
+    const byId = new Map(docs.map((d) => [d.id, d]));
+
+    expect(byId.get(docMultiDelivery)).toEqual({
+      id: docMultiDelivery,
+      paid_amount: "0",
+      payments: 0,
+      settlement: "unpaid",
+    });
+    expect(byId.get(docPartialPaid)).toEqual({
+      id: docPartialPaid,
+      paid_amount: "50",
+      payments: 1,
+      settlement: "partially_paid",
+    });
+    // Exact review probe scenario: 2 * 50 line, 100 payment, NULL total_gross
+    expect(byId.get(docPaidNoTotal)).toEqual({
+      id: docPaidNoTotal,
+      paid_amount: "100",
+      payments: 1,
+      settlement: "paid",
+    });
+    expect(byId.get(docOverpaid)).toEqual({
+      id: docOverpaid,
+      paid_amount: "120",
+      payments: 2,
+      settlement: "overpaid",
+    });
+    expect(byId.get(docUnpaidWithRemoved)).toEqual({
+      id: docUnpaidWithRemoved,
+      paid_amount: "0",
+      payments: 0,
+      settlement: "unpaid",
+    });
+
+    // Credit Note relationships (corrects only, both directions, partial credits)
+    expect(byId.get(docCreditedCorrects)?.settlement).toBe("credited");
+    expect(byId.get(cnCorrects)?.settlement).toBe("unpaid");
+    expect(byId.get(docCreditedBothLinks)?.settlement).toBe("credited");
+    expect(byId.get(cnBothLinks)?.settlement).toBe("unpaid");
+    expect(byId.get(docPartialCreditPaid)).toEqual({
+      id: docPartialCreditPaid,
+      paid_amount: "60",
+      payments: 1,
+      settlement: "paid",
+    });
+    expect(byId.get(docPartialCreditOverpaid)).toEqual({
+      id: docPartialCreditOverpaid,
+      paid_amount: "100",
+      payments: 1,
+      settlement: "overpaid",
+    });
+
+    // Credit closure invariants: open vatCzk, open roundingAdjustment, open deduction
+    expect(byId.get(docEurVatCzkOpen)?.settlement).toBe("paid"); // owed = 0, not fully credited
+    expect(byId.get(docRoundingOpen)?.settlement).toBe("unpaid"); // owed = 0.40, 0 payments
+    expect(byId.get(finalDeductionOpen)?.settlement).toBe("paid"); // owed = 0, deduction still open
+
+    // PTDs, Final Invoices, Draft
+    expect(byId.get(ptdOpen)?.settlement).toBe("paid");
+    expect(byId.get(ptdCredited)?.settlement).toBe("credited");
+    expect(byId.get(finalCovered)?.settlement).toBe("paid");
+    expect(byId.get(finalOverCovered)?.settlement).toBe("overpaid");
+    expect(byId.get(docDraft)?.settlement).toBe("unpaid");
+  });
+
+  test("backfills accounting metadata (tax_document, payment_rounding, fx_override, locked_at, corrected_number, cancelled_on)", async () => {
+    const meta = await rows<{
+      id: string;
+      tax_document: boolean;
+      payment_rounding: string;
+      fx_override: unknown;
+      locked_at: string | null;
+      corrected_number: string | null;
+      cancelled_on: string | null;
+    }>(
+      `select id, tax_document, payment_rounding::text as payment_rounding, fx_override,
+              locked_at::text as locked_at, corrected_number, cancelled_on::text as cancelled_on
+       from documents`,
+    );
+    const byId = new Map(meta.map((m) => [m.id, m]));
+
+    expect(byId.get(docMultiDelivery)?.tax_document).toBe(true);
+    expect(byId.get(docMultiDelivery)?.locked_at).not.toBeNull();
+    expect(byId.get(docProforma)?.tax_document).toBe(false);
+    expect(byId.get(ptdOpen)?.tax_document).toBe(true);
+    expect(byId.get(docNonVat)?.tax_document).toBe(false);
+    expect(byId.get(docIdentTax)?.tax_document).toBe(true);
+    expect(byId.get(docIdentOutside)?.tax_document).toBe(false);
+
+    expect(byId.get(docRoundingOpen)?.payment_rounding).toBe("whole_unit");
+    expect(byId.get(docMultiDelivery)?.payment_rounding).toBe("none");
+
+    expect(byId.get(docEurVatCzkOpen)?.fx_override).toEqual({
+      manual: { rate: "25.5", quantity: 1 },
+    });
+
+    expect(byId.get(cnCorrects)?.corrected_number).toBe("20260003");
+    expect(byId.get(cnPtdCredited)?.corrected_number).toBe("PTD20260002");
+
+    // 2026-01-15T23:30:00Z is 2026-01-16 00:30:00 in Europe/Prague (CET, UTC+1)
+    expect(byId.get(docUnpaidWithRemoved)?.cancelled_on).toBe("2026-01-16");
+  });
+});
