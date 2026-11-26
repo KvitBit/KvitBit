@@ -1,25 +1,21 @@
 /**
  * Live Better Auth service (`AuthServerLive`), wrapping `@kvitbit/adapters/auth` `makeAuth`
  * with transactional email rendering (E01-E03, E07), ALTCHA bot protection, per-email rate
- * limiting, and the Workspace-ownership account deletion guard (http-mcp-contracts 2.6-2.7).
+ * limiting, invitation signup, and the Workspace-ownership account deletion guard.
  */
 import { BotProtection } from "@kvitbit/adapters/altcha";
-import {
-  type AuthConfig,
-  generateId,
-  makeAuth,
-  makeEmailRateLimiter,
-} from "@kvitbit/adapters/auth";
+import { type AuthConfig, generateId, makeEmailRateLimiter } from "@kvitbit/adapters/auth";
 import { type EmailTemplate, renderEmail } from "@kvitbit/adapters/templates/email";
 import { Caller, CurrentCaller, type Locale, UserId, Workspaces } from "@kvitbit/domain/contract";
 import { EmailSender } from "@kvitbit/domain/ports";
 import { APIError } from "better-auth/api";
-import { Effect, Layer } from "effect";
+import { Clock, Effect, Layer } from "effect";
 import { SqlClient } from "effect/sql";
 import { HttpConfig } from "../http/config";
 import { acceptLanguageLocale } from "../http/edge/request";
 import { AuthServer } from "./AuthServer";
 import { makeDrizzleOverSqlClient } from "./drizzleBridge";
+import { makeAuthWithInvitationSignUp } from "./invitationSignUp";
 
 const DEFAULT_LINK_VALID_MINUTES = 60;
 
@@ -42,6 +38,7 @@ export const makeAuthServerLayer = (overrides: AuthServerOverrides = {}) =>
       const botProtection = yield* BotProtection;
       const emailSender = yield* EmailSender;
       const workspaces = yield* Workspaces;
+      const clock = yield* Clock.Clock;
       const emailRateLimiter = yield* makeEmailRateLimiter();
 
       const db = makeDrizzleOverSqlClient(sql);
@@ -70,7 +67,7 @@ export const makeAuthServerLayer = (overrides: AuthServerOverrides = {}) =>
         );
       };
 
-      const auth = makeAuth({
+      const authConfig: AuthConfig = {
         baseURL: config.appOrigin,
         secret: config.visitorSecret,
         db,
@@ -149,9 +146,9 @@ export const makeAuthServerLayer = (overrides: AuthServerOverrides = {}) =>
             });
           }
         },
-      });
+      };
 
-      return AuthServer.of(auth);
+      return AuthServer.of(makeAuthWithInvitationSignUp(authConfig, workspaces, clock));
     }),
   );
 
