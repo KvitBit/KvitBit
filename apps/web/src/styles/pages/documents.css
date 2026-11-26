@@ -12,32 +12,6 @@
   grid-template-columns: minmax(0, 1.45fr) minmax(300px, 1fr);
   align-items: start;
 }
-.kb-chart-wrap {
-  width: 100%;
-  overflow-x: auto;
-}
-.kb-chart-svg {
-  width: 100%;
-  min-width: 440px;
-  height: auto;
-  display: block;
-}
-.kb-chart-grid-line {
-  stroke: var(--md-sys-color-outline-variant);
-  stroke-width: 1;
-  stroke-dasharray: 2 3;
-}
-.kb-chart-axis-label {
-  fill: var(--md-sys-color-on-surface-variant);
-  font-size: 11px;
-  font-variant-numeric: var(--kb-font-numeric-variant);
-}
-.kb-chart-bar-in {
-  fill: var(--md-sys-color-primary);
-}
-.kb-chart-bar-out {
-  fill: var(--md-sys-color-outline);
-}
 .kb-chart-legend {
   display: flex;
   gap: 16px;

@@ -1,7 +1,17 @@
+import { execFileSync } from "node:child_process";
+import { resolve } from "node:path";
 import { expect, type Page, test } from "@playwright/test";
+import type { RenderedPath } from "../test/support";
 
 const DEMO_WS = "novak-design";
-const PREFS_STORAGE_KEY = "kvitbit.prefs";
+const WEB_ROOT = resolve(import.meta.dirname, "..");
+const renderForHydration = (path: string): RenderedPath =>
+  JSON.parse(
+    execFileSync("bun", [resolve(import.meta.dirname, "render.ts"), path], {
+      cwd: WEB_ROOT,
+      encoding: "utf8",
+    }),
+  );
 
 const attachErrorGuards = (page: Page) => {
   const consoleErrors: string[] = [];
@@ -36,7 +46,7 @@ if (typeof Bun === "undefined") {
       ];
 
       for (const path of publicPaths) {
-        await page.goto(path, { waitUntil: "networkidle" });
+        await page.goto(path, { waitUntil: "domcontentloaded" });
         const root = page.locator(".kb-root");
         await expect(root).toBeVisible();
         await expect(page.locator("#kb-theme-vars")).toBeAttached();
@@ -63,7 +73,7 @@ if (typeof Bun === "undefined") {
       ];
 
       for (const path of workspacePaths) {
-        await page.goto(path, { waitUntil: "networkidle" });
+        await page.goto(path, { waitUntil: "domcontentloaded" });
         await expect(page.locator(".kb-root")).toBeVisible();
         await expect(page.locator("#kb-theme-vars")).toBeAttached();
         await expect(page.locator("#main")).toBeVisible();
@@ -81,7 +91,7 @@ if (typeof Bun === "undefined") {
 
     test("toggles light/dark colour mode and locale cleanly", async ({ page }) => {
       const errors = attachErrorGuards(page);
-      await page.goto(`/w/${DEMO_WS}`, { waitUntil: "networkidle" });
+      await page.goto(`/w/${DEMO_WS}`, { waitUntil: "domcontentloaded" });
 
       const root = page.locator(".kb-root");
       const modeSelect = page.locator("#kb-mode");
@@ -109,47 +119,161 @@ if (typeof Bun === "undefined") {
 
     test("toggles Elegant and Cozy styles and persists across reload", async ({ page }) => {
       const errors = attachErrorGuards(page);
-      await page.goto("/account/appearance", { waitUntil: "networkidle" });
+      await page.goto("/account/appearance", { waitUntil: "domcontentloaded" });
 
       const root = page.locator(".kb-root");
-      const styleSelect = page.locator("#kb-appearance-style");
+      const cozy = page.getByRole("button", { name: "Cozy", exact: true });
+      const elegant = page.getByRole("button", { name: "Elegant", exact: true });
 
-      if ((await styleSelect.count()) > 0) {
-        await styleSelect.selectOption("cozy");
-        await expect(root).toHaveAttribute("data-style", "cozy");
-        await page.reload({ waitUntil: "networkidle" });
-        await expect(root).toHaveAttribute("data-style", "cozy");
+      await expect(cozy).toBeVisible();
+      await cozy.click();
+      await expect(root).toHaveAttribute("data-style", "cozy");
+      await page.reload({ waitUntil: "domcontentloaded" });
+      await expect(root).toHaveAttribute("data-style", "cozy");
+      await expect(cozy).toHaveAttribute("aria-pressed", "true");
 
-        await styleSelect.selectOption("elegant");
-        await expect(root).toHaveAttribute("data-style", "elegant");
-      } else {
-        // Fallback for scaffold states before the appearance form mounts on /account/appearance:
-        // exercise the real localStorage prefs persistence and inline stylesheet regeneration.
-        await page.evaluate((key) => {
-          const current = JSON.parse(
-            window.localStorage.getItem(key) ??
-              JSON.stringify({
-                locale: "cs",
-                style: "elegant",
-                mode: "system",
-                contrast: "standard",
-                theme: { _tag: "Preset", id: "graphite_atelier" },
-              }),
-          );
-          window.localStorage.setItem(key, JSON.stringify({ ...current, style: "cozy" }));
-        }, PREFS_STORAGE_KEY);
-        await page.reload({ waitUntil: "networkidle" });
-        await expect(root).toHaveAttribute("data-style", "cozy");
-
-        await page.evaluate((key) => {
-          const current = JSON.parse(window.localStorage.getItem(key) ?? "{}");
-          window.localStorage.setItem(key, JSON.stringify({ ...current, style: "elegant" }));
-        }, PREFS_STORAGE_KEY);
-        await page.reload({ waitUntil: "networkidle" });
-        await expect(root).toHaveAttribute("data-style", "elegant");
-      }
-
+      await elegant.click();
+      await expect(root).toHaveAttribute("data-style", "elegant");
       errors.assertClean();
+    });
+
+    test("hydrates server-rendered shell nodes and handles input through the browser entry", async ({
+      page,
+    }) => {
+      const errors = attachErrorGuards(page);
+      const path = `/w/${DEMO_WS}`;
+      const rendered = renderForHydration(path);
+      const state = JSON.stringify({ flags: rendered.flags, state: rendered.state }).replaceAll(
+        "<",
+        "\\u003c",
+      );
+      await page.route(
+        (url) => url.pathname === path,
+        async (route) => {
+          const response = await route.fetch();
+          const html = (await response.text()).replace(
+            '<div id="root"></div>',
+            `<div id="root">${rendered.html}</div>
+           <script type="application/json" id="kb-state">${state}</script>
+           <script>window.kbServerControl = document.querySelector("#kb-locale")</script>`,
+          );
+          await route.fulfill({ response, body: html });
+        },
+      );
+      await page.goto(path, { waitUntil: "domcontentloaded" });
+      const locale = page.locator("#kb-locale");
+      await expect(locale).toBeVisible();
+      await expect
+        .poll(() =>
+          page.evaluate(
+            () => Reflect.get(window, "kbServerControl") === document.querySelector("#kb-locale"),
+          ),
+        )
+        .toBe(true);
+      await locale.selectOption("en");
+      await expect(page.locator(".kb-root")).toHaveAttribute("lang", "en");
+      await expect(page.locator("html")).toHaveAttribute("lang", "en");
+      expect(
+        await page.evaluate(
+          () => Reflect.get(window, "kbServerControl") === document.querySelector("#kb-locale"),
+        ),
+      ).toBe(true);
+      errors.assertClean();
+    });
+
+    test("a late share reply cannot replace the same route after remount", async ({ page }) => {
+      const token = "demo-unpaid-czk";
+      const sharePath = `/i/${token}`;
+      await page.goto("/", { waitUntil: "domcontentloaded" });
+      await expect(page.locator(".kb-landing")).toBeVisible();
+
+      // Delay the first successful API response across two SPA navigations.
+      let releaseOld: () => void = () => undefined;
+      const release = new Promise<void>((resolve) => {
+        releaseOld = resolve;
+      });
+      let receivedFirst: () => void = () => undefined;
+      const received = new Promise<void>((resolve) => {
+        receivedFirst = resolve;
+      });
+      let sentOld: () => void = () => undefined;
+      const sent = new Promise<void>((resolve) => {
+        sentOld = resolve;
+      });
+      let requestCount = 0;
+      await page.route(
+        (url) => url.pathname === `/api/v1/share/${token}`,
+        async (route) => {
+          const requestNumber = ++requestCount;
+          const response = await route.fetch();
+          const document = await response.json();
+          if (requestNumber === 1) {
+            receivedFirst();
+            await release;
+          }
+          try {
+            await route.fulfill({
+              response,
+              json: {
+                ...document,
+                number: requestNumber === 1 ? "Earlier invoice" : "Current invoice",
+              },
+            });
+          } catch (failure) {
+            if (requestNumber !== 1) throw failure;
+            // Leaving the component may abort the old request before its reply is sent.
+          } finally {
+            if (requestNumber === 1) sentOld();
+          }
+        },
+      );
+
+      await page.evaluate((sharePath) => {
+        for (const [href, label] of [
+          [sharePath, "Open the share"],
+          ["/legal/terms", "Open terms"],
+        ] as const) {
+          const anchor = document.createElement("a");
+          anchor.href = href;
+          anchor.textContent = label;
+          document.body.appendChild(anchor);
+        }
+      }, sharePath);
+
+      await page.getByRole("link", { name: "Open the share", exact: true }).click();
+      await received;
+      await page.getByRole("link", { name: "Open terms", exact: true }).click();
+      await expect(page).toHaveURL(/\/legal\/terms$/);
+      await page.getByRole("link", { name: "Open the share", exact: true }).click();
+      await expect(page.getByRole("heading", { name: /Current invoice$/ })).toBeVisible();
+
+      releaseOld();
+      await sent;
+      await expect(page.getByRole("heading", { name: /Current invoice$/ })).toBeVisible();
+      await expect(page.getByRole("heading", { name: /Earlier invoice$/ })).toHaveCount(0);
+    });
+
+    test("follows the mobile app link as a native document navigation", async ({ page }) => {
+      await page.goto("/", { waitUntil: "domcontentloaded" });
+      const native = page.waitForRequest(
+        (request) => request.isNavigationRequest() && new URL(request.url()).pathname === "/app/",
+      );
+      await page.locator('a[href="/app/"]').first().click();
+      await native;
+      await expect(page.getByText("Mobile app mount")).toBeVisible();
+    });
+
+    test("downloads a shared PDF without navigating the web shell", async ({ page }) => {
+      const token = "demo-unpaid-czk";
+      await page.goto(`/i/${token}`, { waitUntil: "domcontentloaded" });
+      const pdf = page.locator('a[href*="/pdf?"]');
+      await expect(pdf).toBeVisible();
+      const started = page.waitForEvent("download");
+      await pdf.click();
+      const download = await started;
+      expect(await download.failure()).toBeNull();
+      expect(download.suggestedFilename()).toBe("invoice.pdf");
+      await expect(page).toHaveURL(new RegExp(`/i/${token}$`));
     });
   });
 }

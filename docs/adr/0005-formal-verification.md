@@ -13,7 +13,7 @@ They cannot establish:
 - production Effect layer wiring: that the right service and layer are provided and that the transaction boundary really wraps the steps a model treats as atomic.
 - HTTP, MCP and OAuth adapters (ETag, `If-Match`, 428/412 mapping, `Idempotency-Key`, token grants).
 - PDF rendering output.
-- browser SSR and hydration, the Foldkit runtime, Expo and mobile behaviour.
+- browser SSR, hydration and runtime behaviour outside the explicit web scenarios, plus Expo and mobile behaviour.
 - external providers: SMTP, GCS, Neon/PgBouncer, the ALTCHA library, Cluster runner behaviour.
 
 A passing check covers only its model or harness, its bounds and its stated assumptions. Every verify skill states them.
@@ -22,7 +22,7 @@ A passing check covers only its model or harness, its bounds and its stated assu
 
 - **TLA+/TLC** for protocols and concurrency: numbering allocation, reservation and override; the document and payment lifecycle; request_log idempotency with revision CAS, including MCP preview→confirm; recurring issuance with the afterCommit outbox. Counterexamples are read with `/statechart`.
 - **Exhaustive enumeration over the real function** where the input space is finite: `can(caller, action)` intersected with credential scopes and tenant isolation, and half-away-from-zero rounding over the whole minor-unit residue space.
-- **Generated-input tests with an independent oracle** over the real code for the rest: VAT bucket grouping and CZK conversion, Proforma→PTD→Final Invoice→Credit Note chains, the numbering lexer, `format` and `periodKey`, SPAYD and EPC payloads, Foldkit TEA `update`, and HCT contrast. The ALTCHA single-use property is checked with real SQL contention and handler order, not a separate model.
+- **Generated-input tests with an independent oracle** over the real code for the rest: VAT bucket grouping and CZK conversion, Proforma→PTD→Final Invoice→Credit Note chains, the numbering lexer, `format` and `periodKey`, SPAYD and EPC payloads, Effect UI state transitions, and HCT contrast. The ALTCHA single-use property is checked with real SQL contention and handler order, not a separate model.
 - **Anti-drift binding.** Trace replay drives the real Effect services with model traces (PGlite for semantics, Postgres 17 for interleavings): a replayed counterexample that cannot happen means the model drifted, one that can means a bug. Every model ships at least one mutant that must fail, on every PR. The able-to-fail gate (break the real code, see the check fail, restore it) runs when a skill is created or rebound to moved code.
 - **Deferred tools.** Quint, Apalache, Lean 4 and Z3 are adopted only when a named theorem the enumeration cannot reach (for example an unbounded conservation law) or a TLC state-space limit justifies one, and then through the same pinned-toolchain mechanism.
 - **Terminology.** Sampled property tests are called property tests, never proofs. Only exhaustive enumeration over a finite domain, bounded model checks stated with their bounds, and prover or SMT results are called verification.
@@ -105,9 +105,9 @@ Tier 2, with Phase 3. Bounds marked *to measure* are set when the first check is
 | MCP confirm and ALTCHA PoW: consumed before any auth side effect, replay rejected, fail closed | PG17 contention + handler-order checks | 2 concurrent redemptions per token or challenge | replayed confirmations, bot sign-ups past the PoW gate |
 | HTTP and MCP precondition mapping: missing `If-Match` is 428, stale ETag is 412, `Idempotency-Key` replays the stored response | handler checks over the production layer | every precondition case per mutating route | lost updates or duplicate effects through the API |
 | SPAYD 1.2 and EPC069-12 payloads: grammar, field limits, escaping, and no QR for another currency, no IBAN, a Credit Note or a cancelled document | generated inputs + round-trip oracle | *to measure* (seeded inputs per field class, every null case) | payments to the wrong account or amount, unscannable QR codes |
-| Foldkit TEA `update`: total over every Message, keyed commands superseded, late replies ignored by sequence guards | generated message sequences | *to measure* (sequence length and seeds) | stale data shown or saved, UI stuck in a state |
-| HCT/M3 contrast ≥ 4.5:1 | exhaustive over scheme variants × roles | six contrast variants × light and dark × every role pair | unreadable text, an accessibility failure |
-| Production-layer composition, PDF content, SSR render | composition checks, render-model-in/text-out checks, in-Bun SSR smoke | each production layer; each document kind; each SSR route | missing services at runtime, wrong statutory text on PDFs, broken first render |
+| Effect UI route access, route-owned Commands and late replies | exhaustive access table, sampled route and sequence properties, Playwright navigation across mounts | every route tag × session access state, 200 generated routes and 200 generated reply sequences, delayed share response across remounts | stale data shown or saved, workspace access exposed |
+| HCT/M3 contrast ≥ 4.5:1 for text and ≥ 3:1 for non-text controls | exhaustive over preset × scheme variant × named role pairs, independent luminance formula | six presets, light and dark at three contrast levels, 50 role pairs | unreadable text, an accessibility failure |
+| Production-layer composition, PDF content, Effect UI SSR and hydration | composition checks, PDF render assertions, `HtmlServer` smoke tests and Playwright through the browser entry | production layers, document kinds, route groups in cs/en, one interactive hydrated workspace route per browser profile | missing services at runtime, wrong statutory text on PDFs, broken first render |
 
 Tier 3, optional or nightly.
 

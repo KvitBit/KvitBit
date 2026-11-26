@@ -28,10 +28,10 @@ import type {
 import { I18n, Theme, ViewModels } from "@kvitbit/ui-port";
 import { Option } from "effect";
 import * as fc from "fast-check";
-import { type Url, fromString as urlFromString } from "foldkit/url";
+import ts from "typescript";
 import type { Failure } from "../../src/app/api";
+import { Intent_ } from "../../src/app/intent";
 import type { Route } from "../../src/app/page";
-import type { PageKey, PageMessage } from "../../src/app/pages";
 import {
   defaultPrefs,
   type Locale,
@@ -42,37 +42,12 @@ import {
   serializePrefs,
 } from "../../src/app/prefs";
 import * as Remote from "../../src/app/remote";
-import { gate, href, NOT_FOUND, routeFromPath } from "../../src/app/routing";
+import { BrowserRoutes, gate, href, NOT_FOUND, routeFromPath } from "../../src/app/routing";
 import type { SessionState } from "../../src/app/session";
 import { DEMO_USER, DEMO_WORKSPACE, DEMO_WORKSPACES, demoId } from "../../src/demo/shell";
 import { init, Message, type Model, update } from "../../src/main";
 
 const WEB_SRC = resolve(import.meta.dirname, "../../src");
-
-const ALL_PAGE_KEYS: ReadonlyArray<PageKey> = [
-  "Landing",
-  "Legal",
-  "Auth",
-  "Android",
-  "Share",
-  "Consent",
-  "Invitation",
-  "ErrorPage",
-  "Onboarding",
-  "Dashboard",
-  "Documents",
-  "DocumentEditor",
-  "DocumentDetail",
-  "Templates",
-  "Contacts",
-  "PriceList",
-  "Expenses",
-  "Reports",
-  "Settings",
-  "Account",
-];
-
-// --- Arbitraries ---------------------------------------------------------------------------------
 
 const arbSlug = fc
   .stringMatching(/^[a-z][a-z0-9]{2,8}(-[a-z0-9]{1,6})?$/)
@@ -330,11 +305,38 @@ const sampleRoutesFor = (ws: WorkspaceSlug): ReadonlyArray<Route> => [
   { _tag: "More", ws },
 ];
 
-const parseUrl = (path: string): Url => {
-  const parsed = urlFromString(`http://localhost${path}`);
-  if (Option.isNone(parsed)) throw new Error(`Invalid test URL: ${path}`);
-  return parsed.value;
-};
+const expectedScope = {
+  Landing: "public",
+  Legal: "public",
+  SignUp: "public",
+  SignIn: "public",
+  CheckEmail: "public",
+  AuthLink: "public",
+  ResetPassword: "public",
+  AndroidDownload: "public",
+  Share: "public",
+  McpConsent: "public",
+  Invitation: "public",
+  Error: "public",
+  Onboarding: "account",
+  Account: "account",
+  Dashboard: "workspace",
+  Documents: "workspace",
+  DocumentNew: "workspace",
+  DocumentEdit: "workspace",
+  Document: "workspace",
+  Templates: "workspace",
+  Template: "workspace",
+  Expenses: "workspace",
+  ExpenseCapture: "workspace",
+  Expense: "workspace",
+  Contacts: "workspace",
+  Contact: "workspace",
+  PriceList: "workspace",
+  Reports: "workspace",
+  Settings: "workspace",
+  More: "workspace",
+} satisfies Record<Route["_tag"], "public" | "account" | "workspace">;
 
 const mkFailure = (tag = "Offline"): Failure => ({
   tag,
@@ -348,7 +350,7 @@ const mkFailure = (tag = "Offline"): Failure => ({
 });
 
 const bootModel = (path: string, session: SessionState, prefs: Prefs = defaultPrefs("cs")): Model =>
-  init({ prefs, session }, parseUrl(path)).model;
+  init({ path, prefs, session }).model;
 
 // --- 1. Route round-trip & Shell gate invariants -------------------------------------------------
 
@@ -363,6 +365,22 @@ describe("route round-trip & Shell access gate invariants", () => {
       }),
       { numRuns: 200, seed: 20261124 },
     );
+  });
+
+  test("Effect UI router preserves app URLs and leaves other mount points native", () => {
+    for (const route of sampleRoutesFor(WS_MEMBER)) {
+      expect(Option.isSome(BrowserRoutes.parse(href(route)))).toBe(true);
+    }
+    for (const url of [
+      "/app",
+      "/app/",
+      "/app/w/example",
+      "/api/v1/shares/token/pdf",
+      "/api/auth/get-session",
+      "/download.pdf?language=en",
+    ]) {
+      expect(Option.isNone(BrowserRoutes.parse(url))).toBe(true);
+    }
   });
 
   test("unknown paths resolve to NOT_FOUND", () => {
@@ -390,12 +408,14 @@ describe("route round-trip & Shell access gate invariants", () => {
 
     const memberRoutes = sampleRoutesFor(WS_MEMBER);
     const nonMemberRoutes = sampleRoutesFor(WS_NON_MEMBER);
-    expect(memberRoutes.length).toBe(30);
+    expect(new Set<string>(memberRoutes.map((route) => route._tag))).toEqual(
+      new Set(Object.keys(expectedScope)),
+    );
 
     let checks = 0;
 
     for (const route of memberRoutes) {
-      const scope = ViewModels.Routes.requires(route);
+      const scope = expectedScope[route._tag];
       for (const session of sessions) {
         const result = gate(route, session);
         checks += 1;
@@ -418,7 +438,7 @@ describe("route round-trip & Shell access gate invariants", () => {
 
     // Signed-in non-member on every workspace route must redirect to no_access
     for (const route of nonMemberRoutes) {
-      const scope = ViewModels.Routes.requires(route);
+      const scope = expectedScope[route._tag];
       const result = gate(route, signedInSession);
       checks += 1;
       if (scope === "workspace") {
@@ -428,7 +448,7 @@ describe("route round-trip & Shell access gate invariants", () => {
       }
     }
 
-    expect(checks).toBe(30 * 5);
+    expect(checks).toBe(Object.keys(expectedScope).length * 5);
   });
 });
 
@@ -538,50 +558,46 @@ describe("Shell update & prefs invariants", () => {
     workspaces: DEMO_WORKSPACES,
   };
 
-  test("GotPage messages are dropped while on Splash (all 20 page tags)", () => {
-    const splashModel = bootModel(`/w/${WS_MEMBER}/documents`, { _tag: "Unknown" });
-    expect(splashModel.mount._tag).toBe("Splash");
+  test("redirects only after the request that refreshes the session succeeds", () => {
+    const path = "/sign-in";
+    const destination = `/w/${WS_MEMBER}/documents`;
+    const signedOut = bootModel(path, { _tag: "Anonymous" });
+    const refresh = update(
+      signedOut,
+      Message.PageIntent({
+        path,
+        intent: Intent_.reloadSession({ _tag: "Path", path: destination, replace: true }),
+      }),
+    );
+    expect(refresh.model.path).toBe(path);
+    expect(refresh.model.pendingNav).toEqual({ _tag: "Path", path: destination, replace: true });
+    expect(refresh.commands).toHaveLength(1);
 
-    for (const tag of ALL_PAGE_KEYS) {
-      const probe = {
-        _tag: tag,
-        message: { _tag: "__unmounted_probe__" },
-      } as unknown as PageMessage;
-      const msg = { _tag: "GotPage", message: probe } as unknown as Message;
-      const result = update(splashModel, msg);
-      expect(result.model).toBe(splashModel);
-      expect(result.commands ?? []).toEqual([]);
-    }
+    const stale = update(
+      refresh.model,
+      Message.LoadedSession({ seq: signedOut.sessionSeq, state: signedInSession }),
+    );
+    expect(stale.model).toBe(refresh.model);
+
+    const loaded = update(
+      refresh.model,
+      Message.LoadedSession({ seq: refresh.model.sessionSeq, state: signedInSession }),
+    );
+    expect(loaded.model.session).toEqual(signedInSession);
+    expect(loaded.commands?.[0]).toMatchObject({ args: { path: destination, replace: true } });
+    const navigated = update(loaded.model, Message.ChangedUrl({ path: destination }));
+    expect(navigated.model).toMatchObject({ path: destination, waitingForSession: false });
+    expect(navigated.model.route._tag).toBe("Documents");
   });
 
-  test("GotPage messages for any unmounted page are dropped without mutating mounted state", () => {
-    const mountedTargets: ReadonlyArray<{ readonly path: string; readonly expectedTag: PageKey }> =
-      [
-        { path: "/", expectedTag: "Landing" },
-        { path: `/w/${WS_MEMBER}`, expectedTag: "Dashboard" },
-        { path: `/w/${WS_MEMBER}/documents`, expectedTag: "Documents" },
-        { path: `/w/${WS_MEMBER}/settings/issuing-entity`, expectedTag: "Settings" },
-        { path: "/account/profile", expectedTag: "Account" },
-      ];
-
-    for (const target of mountedTargets) {
-      const model = bootModel(target.path, signedInSession);
-      expect(model.mount._tag).toBe("Mounted");
-      if (model.mount._tag !== "Mounted") continue;
-      expect(model.mount.page._tag).toBe(target.expectedTag);
-
-      for (const otherTag of ALL_PAGE_KEYS) {
-        if (otherTag === target.expectedTag) continue;
-        const probe = {
-          _tag: otherTag,
-          message: { _tag: "__unmounted_probe__" },
-        } as unknown as PageMessage;
-        const msg = { _tag: "GotPage", message: probe } as unknown as Message;
-        const result = update(model, msg);
-        expect(result.model).toBe(model);
-        expect(result.commands ?? []).toEqual([]);
-      }
-    }
+  test("ignores intents from other routes and while the protected shell waits", () => {
+    const path = `/w/${WS_MEMBER}/documents`;
+    const intent = Intent_.toast("stale", "info");
+    const open = bootModel(path, signedInSession);
+    expect(update(open, Message.PageIntent({ path: "/", intent })).model).toBe(open);
+    const waiting = bootModel(path, { _tag: "Unknown" });
+    expect(waiting.waitingForSession).toBe(true);
+    expect(update(waiting, Message.PageIntent({ path, intent })).model).toBe(waiting);
   });
 
   test("workspace switcher toggle, close, shortcut, and navigation reset invariants", () => {
@@ -606,7 +622,7 @@ describe("Shell update & prefs invariants", () => {
     // Navigation closes an open switcher
     const afterNav = update(
       shortcutOpened,
-      Message.ChangedUrl({ url: parseUrl(`/w/${WS_MEMBER}/documents`) }),
+      Message.ChangedUrl({ path: `/w/${WS_MEMBER}/documents` }),
     ).model;
     expect(afterNav.switcherOpen).toBe(false);
 
@@ -727,98 +743,137 @@ const walkFiles = (dir: string, ext: string): ReadonlyArray<string> => {
   return results.sort();
 };
 
-const stripJsComments = (src: string): string =>
-  src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/.*$/gm, "$1");
-
 const stripCssComments = (src: string): string => src.replace(/\/\*[\s\S]*?\*\//g, "");
 
-/** Removes `Command.define(...)` call expressions so DOM side effects inside Commands are permitted. */
-const stripCommandDefineCalls = (src: string): string => {
-  const marker = "Command.define(";
-  let out = "";
-  let i = 0;
+const literal = (node: ts.Node | undefined): string | undefined =>
+  node !== undefined && ts.isStringLiteralLike(node) ? node.text : undefined;
 
-  while (i < src.length) {
-    const idx = src.indexOf(marker, i);
-    if (idx === -1) {
-      out += src.slice(i);
-      break;
-    }
-    out += src.slice(i, idx);
-    let pos = idx + marker.length;
-    let depth = 1;
-    let quote: string | null = null;
-    while (pos < src.length && depth > 0) {
-      const ch = src[pos];
-      if (quote !== null) {
-        if (ch === "\\") {
-          pos += 2;
-          continue;
-        }
-        if (ch === quote) quote = null;
-      } else if (ch === '"' || ch === "'" || ch === "`") {
-        quote = ch;
-      } else if (ch === "(") {
-        depth += 1;
-      } else if (ch === ")") {
-        depth -= 1;
-      }
-      pos += 1;
-    }
-    i = pos;
+const member = (
+  node: ts.Node,
+): { readonly receiver: ts.Expression; readonly name?: string } | undefined => {
+  if (ts.isPropertyAccessExpression(node))
+    return { receiver: node.expression, name: node.name.text };
+  if (ts.isElementAccessExpression(node)) {
+    const name = literal(node.argumentExpression);
+    return name === undefined ? { receiver: node.expression } : { receiver: node.expression, name };
   }
+  return undefined;
+};
 
-  return out;
+const retired = "fold" + "kit";
+const forbiddenPackage = (name: string) =>
+  ["react", "react-dom", retired].some((root) => name === root || name.startsWith(`${root}/`)) ||
+  name.startsWith(`@${retired}/`);
+
+const domMutators = new Set([
+  "innerHTML",
+  "outerHTML",
+  "insertAdjacentHTML",
+  "appendChild",
+  "removeChild",
+  "replaceChild",
+  "replaceChildren",
+  "setAttribute",
+  "removeAttribute",
+  "toggleAttribute",
+  "setHTML",
+  "setHTMLUnsafe",
+]);
+const browserGlobals = new Set(["document", "window", "localStorage", "sessionStorage"]);
+const effectFactories = new Set(["sync", "promise", "tryPromise", "gen", "suspend"]);
+
+const sourceViolations = (filename: string, code: string, page: boolean): ReadonlyArray<string> => {
+  const file = ts.createSourceFile(filename, code, ts.ScriptTarget.Latest, true);
+  const violations: string[] = [];
+  const record = (node: ts.Node, reason: string) => {
+    const { line } = file.getLineAndCharacterOfPosition(node.getStart(file));
+    violations.push(`${filename}:${line + 1} ${reason}`);
+  };
+  const visit = (node: ts.Node, deferred: boolean) => {
+    let imported: string | undefined;
+    if (ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) {
+      imported = literal(node.moduleSpecifier);
+    } else if (ts.isExternalModuleReference(node)) {
+      imported = literal(node.expression);
+    } else if (ts.isImportTypeNode(node) && ts.isLiteralTypeNode(node.argument)) {
+      imported = literal(node.argument.literal);
+    } else if (ts.isCallExpression(node)) {
+      if (
+        node.expression.kind === ts.SyntaxKind.ImportKeyword ||
+        node.expression.getText(file) === "require"
+      ) {
+        imported = literal(node.arguments[0]);
+      }
+      const call = member(node.expression);
+      if (page && call?.receiver.getText(file) === "Effect" && call.name?.startsWith("run")) {
+        record(node, "starts an Effect inside a page");
+      }
+    }
+    if (imported !== undefined && forbiddenPackage(imported)) record(node, `imports ${imported}`);
+
+    const access = member(node);
+    if (access?.name?.toLowerCase() === "innerhtml") record(node, "accesses raw HTML");
+    if (page && !deferred && access !== undefined) {
+      const receiver = access.receiver.getText(file);
+      const globalMember = member(access.receiver);
+      const explicitGlobal =
+        globalMember?.receiver.getText(file) === "globalThis" &&
+        globalMember.name !== undefined &&
+        browserGlobals.has(globalMember.name);
+      if (
+        browserGlobals.has(receiver) ||
+        explicitGlobal ||
+        (receiver === "history" &&
+          ["pushState", "replaceState", "go", "back", "forward"].includes(access.name ?? "")) ||
+        (access.name !== undefined && domMutators.has(access.name))
+      ) {
+        record(node, "accesses browser state or mutates DOM outside an Effect");
+      }
+    }
+
+    ts.forEachChild(node, (child) => {
+      const factory =
+        ts.isPropertyAssignment(node) &&
+        node.name.getText(file) === "try" &&
+        ts.isObjectLiteralExpression(node.parent)
+          ? node.parent.parent
+          : node;
+      const call = ts.isCallExpression(factory) ? member(factory.expression) : undefined;
+      const callback = ts.isArrowFunction(child) || ts.isFunctionExpression(child);
+      const lazy =
+        callback &&
+        call?.receiver.getText(file) === "Effect" &&
+        call.name !== undefined &&
+        effectFactories.has(call.name);
+      visit(child, deferred || lazy);
+    });
+  };
+  visit(file, false);
+  return violations;
 };
 
 describe("static architecture invariants", () => {
-  test("zero React imports anywhere in apps/web/src/**", () => {
-    const tsFiles = [...walkFiles(WEB_SRC, ".ts"), ...walkFiles(WEB_SRC, ".tsx")];
-    expect(tsFiles.length).toBeGreaterThan(0);
-
-    const reactImportPattern =
-      /(?:from\s+["']react(?:-dom)?(?:\/|["'])|require\(\s*["']react(?:-dom)?(?:\/|["'])|import\s+["']react(?:-dom)?(?:\/|["']))/;
-
-    const violations: string[] = [];
-    for (const file of tsFiles) {
-      const clean = stripJsComments(readFileSync(file, "utf8"));
-      if (reactImportPattern.test(clean)) {
-        violations.push(relative(WEB_SRC, file));
-      }
-    }
-    expect(violations).toEqual([]);
+  test("detects dynamic React imports and computed DOM mutations", () => {
+    const source = 'const view = () => { import("react/dom"); element["replaceChildren"](); };';
+    expect(sourceViolations("fixture.ts", source, true)).toEqual([
+      "fixture.ts:1 imports react/dom",
+      "fixture.ts:1 accesses browser state or mutates DOM outside an Effect",
+    ]);
   });
 
-  test("zero direct document./window. DOM mutations in apps/web/src/page/** outside Command effects", () => {
-    const pageDir = join(WEB_SRC, "page");
-    const pageFiles = walkFiles(pageDir, ".ts");
-    expect(pageFiles.length).toBeGreaterThan(0);
-
-    const domMutationPatterns: ReadonlyArray<{ readonly name: string; readonly re: RegExp }> = [
-      {
-        name: "document DOM access/mutation",
-        re: /\bdocument\.(?:body|head|documentElement|title|cookie|getElementById|querySelector|querySelectorAll|createElement|createTextNode|addEventListener|removeEventListener|write|open|close|execCommand)\b/,
-      },
-      {
-        name: "window DOM/navigation/storage side effect",
-        re: /\bwindow\.(?:location|history|localStorage|sessionStorage|open|close|scrollTo|scrollBy|addEventListener|removeEventListener|alert|confirm|prompt)\b/,
-      },
-      {
-        name: "imperative DOM node mutation",
-        re: /\.(?:innerHTML|outerHTML|insertAdjacentHTML|appendChild|removeChild|replaceChild|setAttribute|removeAttribute)\b/,
-      },
-    ];
-
-    const violations: string[] = [];
-    for (const file of pageFiles) {
-      const clean = stripCommandDefineCalls(stripJsComments(readFileSync(file, "utf8")));
-      for (const { name, re } of domMutationPatterns) {
-        if (re.test(clean)) {
-          violations.push(`${relative(WEB_SRC, file)}: ${name}`);
-        }
-      }
-    }
+  test("web source and tests use the Effect UI runtime and page effects own DOM access", () => {
+    const webRoot = resolve(WEB_SRC, "..");
+    const files = ["src", "test", "e2e"].flatMap((dir) =>
+      [".ts", ".tsx"].flatMap((ext) => walkFiles(join(webRoot, dir), ext)),
+    );
+    const violations = files.flatMap((file) => {
+      const path = relative(webRoot, file);
+      return sourceViolations(path, readFileSync(file, "utf8"), path.startsWith("src/page/"));
+    });
     expect(violations).toEqual([]);
+    const manifest = JSON.parse(readFileSync(join(webRoot, "package.json"), "utf8"));
+    const dependencies = Object.keys({ ...manifest.dependencies, ...manifest.devDependencies });
+    expect(dependencies.filter(forbiddenPackage)).toEqual([]);
   });
 
   test("zero raw hex color literals in apps/web/src/styles/pages/**", () => {

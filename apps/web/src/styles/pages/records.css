@@ -347,47 +347,6 @@
   gap: 12px;
 }
 
-.kb-chart-svg {
-  width: 100%;
-  height: auto;
-  display: block;
-}
-
-.kb-chart-grid {
-  stroke: var(--md-sys-color-outline-variant);
-  stroke-width: 1;
-  stroke-dasharray: 3 3;
-}
-
-.kb-chart-axis {
-  fill: var(--md-sys-color-on-surface-variant);
-  font-size: 11px;
-  font-family: var(--kb-font-body);
-  font-variant-numeric: var(--kb-font-numeric-variant);
-}
-
-.kb-chart-bar-primary {
-  fill: var(--md-sys-color-primary);
-}
-
-.kb-chart-bar-secondary {
-  fill: var(--md-sys-color-tertiary);
-}
-
-.kb-chart-bar-muted {
-  fill: var(--md-sys-color-secondary);
-}
-
-.kb-chart-bar-overdue {
-  fill: var(--md-sys-color-error);
-}
-
-.kb-chart-line {
-  fill: none;
-  stroke: var(--md-sys-color-on-surface);
-  stroke-width: 2;
-}
-
 .kb-chart-legend {
   display: flex;
   flex-wrap: wrap;

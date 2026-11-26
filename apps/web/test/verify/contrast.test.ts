@@ -5,8 +5,8 @@
  * (never trusting the theme engine's own contrast function alone) across:
  *   - All 6 built-in theme presets (graphite_atelier, forest, ocean, plum, sand, graphite)
  *   - All 6 scheme variants (light/dark × standard/medium/high contrast) = 36 schemes
- *   - All 37 M3 color role pairs (primary, secondary, tertiary, error, surfaces, inverse, fixed)
- *     + all 8 extended financial status pairs (paid, proforma, overdue, draft) = 1,620 pairs
+ *   - All 42 M3 color role pairs (primary, secondary, tertiary, error, surfaces, inverse, fixed)
+ *     + all 8 extended financial status pairs (paid, proforma, overdue, draft) = 1,800 pairs
  *   - Elegant and Cozy stylesheet generation across all 6 presets (12 stylesheets)
  */
 import { describe, expect, test } from "bun:test";
@@ -52,6 +52,43 @@ const SURFACE_ROLES: ReadonlyArray<M3ColorRole> = [
   "surfaceContainer",
   "surfaceContainerHigh",
   "surfaceContainerHighest",
+];
+
+const TEXT_AA = 4.5;
+const NON_TEXT_AA = 3;
+
+type RolePair = readonly [foreground: M3ColorRole, background: M3ColorRole];
+const TEXT_PAIRS: ReadonlyArray<RolePair> = [
+  ["onPrimary", "primary"],
+  ["onPrimaryContainer", "primaryContainer"],
+  ["onSecondary", "secondary"],
+  ["onSecondaryContainer", "secondaryContainer"],
+  ["onTertiary", "tertiary"],
+  ["onTertiaryContainer", "tertiaryContainer"],
+  ["onError", "error"],
+  ["onErrorContainer", "errorContainer"],
+  ["onBackground", "background"],
+  ...SURFACE_ROLES.map((role): RolePair => ["onSurface", role]),
+  ...SURFACE_ROLES.map((role): RolePair => ["onSurfaceVariant", role]),
+  ["onSurfaceVariant", "surfaceVariant"],
+  ["inverseOnSurface", "inverseSurface"],
+  ["inversePrimary", "inverseSurface"],
+  ["onPrimaryFixed", "primaryFixed"],
+  ["onPrimaryFixedVariant", "primaryFixed"],
+  ["onSecondaryFixed", "secondaryFixed"],
+  ["onSecondaryFixedVariant", "secondaryFixed"],
+  ["onTertiaryFixed", "tertiaryFixed"],
+  ["onTertiaryFixedVariant", "tertiaryFixed"],
+  ["onPrimaryFixed", "primaryFixedDim"],
+  ["onPrimaryFixedVariant", "primaryFixedDim"],
+  ["onSecondaryFixed", "secondaryFixedDim"],
+  ["onSecondaryFixedVariant", "secondaryFixedDim"],
+  ["onTertiaryFixed", "tertiaryFixedDim"],
+  ["onTertiaryFixedVariant", "tertiaryFixedDim"],
+];
+const NON_TEXT_PAIRS: ReadonlyArray<RolePair> = [
+  ["primary", "surface"],
+  ["error", "surface"],
 ];
 
 /** Independent WCAG 2.1 sRGB channel linearization (W3C WCAG 2.1 §1.4.3 / §1.4.6). */
@@ -102,68 +139,19 @@ const assertSchemeAccessible = (
 ): number => {
   let checked = 0;
 
-  // Primary, error, and all 8 surface pairs explicitly verified
-  assertPairContrast(
-    `${presetLabel}/${variant} onPrimary/primary`,
-    scheme.roles.onPrimary,
-    scheme.roles.primary,
-    Theme.AA_TEXT,
-  );
-  assertPairContrast(
-    `${presetLabel}/${variant} onPrimaryContainer/primaryContainer`,
-    scheme.roles.onPrimaryContainer,
-    scheme.roles.primaryContainer,
-    Theme.AA_TEXT,
-  );
-  assertPairContrast(
-    `${presetLabel}/${variant} primary/surface`,
-    scheme.roles.primary,
-    scheme.roles.surface,
-    Theme.AA_UI,
-  );
-  assertPairContrast(
-    `${presetLabel}/${variant} onError/error`,
-    scheme.roles.onError,
-    scheme.roles.error,
-    Theme.AA_TEXT,
-  );
-  assertPairContrast(
-    `${presetLabel}/${variant} onErrorContainer/errorContainer`,
-    scheme.roles.onErrorContainer,
-    scheme.roles.errorContainer,
-    Theme.AA_TEXT,
-  );
-  assertPairContrast(
-    `${presetLabel}/${variant} error/surface`,
-    scheme.roles.error,
-    scheme.roles.surface,
-    Theme.AA_UI,
-  );
-
-  for (const surface of SURFACE_ROLES) {
-    assertPairContrast(
-      `${presetLabel}/${variant} onSurface/${surface}`,
-      scheme.roles.onSurface,
-      scheme.roles[surface],
-      Theme.AA_TEXT,
-    );
-    assertPairContrast(
-      `${presetLabel}/${variant} onSurfaceVariant/${surface}`,
-      scheme.roles.onSurfaceVariant,
-      scheme.roles[surface],
-      Theme.AA_TEXT,
-    );
-  }
-
-  // Every pair in CHECKED_ROLE_PAIRS (37 M3 pairs)
-  for (const pair of Theme.CHECKED_ROLE_PAIRS) {
-    assertPairContrast(
-      `${presetLabel}/${variant} ${pair.foreground}/${pair.background}`,
-      scheme.roles[pair.foreground],
-      scheme.roles[pair.background],
-      pair.required,
-    );
-    checked += 1;
+  for (const [pairs, minimum] of [
+    [TEXT_PAIRS, TEXT_AA],
+    [NON_TEXT_PAIRS, NON_TEXT_AA],
+  ] as const) {
+    for (const [foreground, background] of pairs) {
+      assertPairContrast(
+        `${presetLabel}/${variant} ${foreground}/${background}`,
+        scheme.roles[foreground],
+        scheme.roles[background],
+        minimum,
+      );
+      checked += 1;
+    }
   }
 
   // All 4 extended financial status roles (paid, proforma, overdue, draft) × 2 pairs = 8 pairs
@@ -173,13 +161,13 @@ const assertSchemeAccessible = (
       `${presetLabel}/${variant} ${role}.onColor/${role}.color`,
       ext.onColor,
       ext.color,
-      Theme.AA_TEXT,
+      TEXT_AA,
     );
     assertPairContrast(
       `${presetLabel}/${variant} ${role}.onColorContainer/${role}.colorContainer`,
       ext.onColorContainer,
       ext.colorContainer,
-      Theme.AA_TEXT,
+      TEXT_AA,
     );
     checked += 2;
   }
@@ -193,7 +181,18 @@ describe("WCAG 2.1 AA contrast — exhaustive preset × mode × contrast matrix"
     expect([...Theme.PRESET_IDS]).toEqual([...EXPECTED_PRESETS]);
     expect([...Theme.SCHEME_VARIANTS]).toEqual([...EXPECTED_VARIANTS]);
     expect([...EXTENDED_ROLES]).toEqual([...EXPECTED_EXTENDED]);
-    expect(Theme.CHECKED_ROLE_PAIRS.length).toBe(42);
+    expect(
+      new Set(
+        Theme.CHECKED_ROLE_PAIRS.map(
+          ({ foreground, background, required }) => `${foreground}/${background}/${required}`,
+        ),
+      ),
+    ).toEqual(
+      new Set([
+        ...TEXT_PAIRS.map(([fg, bg]) => `${fg}/${bg}/${TEXT_AA}`),
+        ...NON_TEXT_PAIRS.map(([fg, bg]) => `${fg}/${bg}/${NON_TEXT_AA}`),
+      ]),
+    );
   });
 
   test("all 6 presets × 6 scheme variants × 50 pairs (1,800 pairs) pass WCAG 2.1 AA", () => {

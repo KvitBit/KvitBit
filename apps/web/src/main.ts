@@ -81,15 +81,19 @@ const setPrefs = (model: Model, prefs: Prefs): UpdateReturn => ({
   commands: [Command.asNoop(browserCommand("PersistPrefs", persistPrefs(prefs)))],
 });
 
-const signedOut = (model: Model): UpdateReturn => ({
-  model: {
-    ...model,
-    session: { _tag: "Anonymous" },
-    pendingNav: null,
-    sessionSeq: model.sessionSeq + 1,
-  },
-  commands: [navigate(href({ _tag: "SignIn" }))],
-});
+const signedOut = (model: Model): UpdateReturn => {
+  const path = href({ _tag: "SignIn" });
+  const next = mountRoute(
+    {
+      ...model,
+      session: { _tag: "Anonymous" },
+      pendingNav: null,
+      sessionSeq: model.sessionSeq + 1,
+    },
+    path,
+  );
+  return { model: next.model, commands: [navigate(path)] };
+};
 
 const applyIntent = (model: Model, intent: Intent): UpdateReturn => {
   switch (intent._tag) {
@@ -102,7 +106,7 @@ const applyIntent = (model: Model, intent: Intent): UpdateReturn => {
     case "ReloadSession": {
       const sessionSeq = model.sessionSeq + 1;
       return {
-        model: { ...model, pendingNav: intent.then ?? model.pendingNav, sessionSeq },
+        model: { ...model, pendingNav: intent.destination ?? model.pendingNav, sessionSeq },
         commands: [loadSession(sessionSeq)],
       };
     }
@@ -139,7 +143,9 @@ export const update = (model: Model, message: Message): UpdateReturn => {
         ? { model }
         : mountRoute({ ...model, pendingNav: null }, message.path);
     case "PageIntent":
-      return message.path === model.path ? applyIntent(model, message.intent) : { model };
+      return !model.waitingForSession && message.path === model.path
+        ? applyIntent(model, message.intent)
+        : { model };
     case "LoadedSession": {
       if (message.seq !== model.sessionSeq) return { model };
       const { state } = message;

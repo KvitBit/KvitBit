@@ -16,7 +16,7 @@ export const Intent = Schema.Union([
   Schema.TaggedStruct("Toast", { text: Schema.String, tone: Schema.Literals(["info", "error"]) }),
   Schema.TaggedStruct("SetPrefs", { prefs: Prefs }),
   Schema.TaggedStruct("ReloadSession", {
-    then: Schema.optionalKey(PendingNavigation),
+    destination: Schema.optionalKey(PendingNavigation),
   }),
   Schema.TaggedStruct("SignedOut", {}),
 ]);
@@ -26,7 +26,7 @@ export const Intent_ = {
   navigate: (path: string, replace = false): Intent => ({ _tag: "Navigate", path, replace }),
   toast: (text: string, tone: "info" | "error" = "info"): Intent => ({ _tag: "Toast", text, tone }),
   setPrefs: (prefs: Prefs): Intent => ({ _tag: "SetPrefs", prefs }),
-  reloadSession: (then?: PendingNavigation): Intent =>
-    then === undefined ? { _tag: "ReloadSession" } : { _tag: "ReloadSession", then },
+  reloadSession: (destination?: PendingNavigation): Intent =>
+    destination === undefined ? { _tag: "ReloadSession" } : { _tag: "ReloadSession", destination },
   signedOut: (): Intent => ({ _tag: "SignedOut" }),
 } as const;

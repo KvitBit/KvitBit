@@ -1,7 +1,7 @@
 import { resolve } from "node:path";
 import { defineConfig, devices } from "@playwright/test";
 
-const PORT = 4173;
+const PORT = Number(process.env.KVITBIT_WEB_E2E_PORT ?? 4173);
 const BASE_URL = `http://127.0.0.1:${PORT}`;
 const WEB_ROOT = resolve(import.meta.dirname, "..");
 
@@ -9,7 +9,7 @@ const CHROMIUM_EXECUTABLE = process.env.KVITBIT_CHROMIUM_PATH;
 
 /**
  * Nightly Playwright E2E configuration for @kvitbit/web (ADR-0005 Tier 2).
- * Boots Vite in demo mode (`VITE_KVITBIT_DEMO=1`) so no external API server is required.
+ * Serves the static build with the demo API fixtures.
  */
 export default defineConfig({
   testDir: ".",
@@ -40,14 +40,14 @@ export default defineConfig({
     },
   ],
   webServer: {
-    command: `bun run dev -- --port ${PORT} --strictPort --host 127.0.0.1`,
+    command: "bun run build && bun e2e/server.ts",
     cwd: WEB_ROOT,
     env: {
       ...process.env,
-      VITE_KVITBIT_DEMO: "1",
+      VITE_KVITBIT_DEMO: "0",
     },
     url: BASE_URL,
-    reuseExistingServer: !process.env.CI,
+    reuseExistingServer: false,
     timeout: 60_000,
   },
 });

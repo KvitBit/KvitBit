@@ -116,10 +116,13 @@ const webRoutes = UiRoute.union({
 
 // The shared route codec owns validation and defaults. BrowserRouter owns navigation and
 // leaves requests for the other app and the API to the browser.
-const resolveWeb = (path: string) =>
-  /^\/(?:app|api)(?:[/?#]|$)/.test(path)
-    ? Option.none()
-    : webRoutes.resolve(path).pipe(Option.orElse(() => webRoutes.resolve("/error/not-found")));
+const resolveWeb = (path: string) => {
+  const pathname = path.split(/[?#]/, 1)[0] ?? "";
+  if (/^\/(?:app|api|assets|fonts)(?:\/|$)/.test(pathname) || /\.pdf$/i.test(pathname)) {
+    return Option.none();
+  }
+  return webRoutes.resolve(path).pipe(Option.orElse(() => webRoutes.resolve("/error/not-found")));
+};
 
 export const BrowserRoutes: UiRoute.AnyUnion = {
   parse: (path) => Option.map(resolveWeb(path), (resolved) => resolved.route),

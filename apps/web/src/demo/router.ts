@@ -49,7 +49,7 @@ export const match = (
   return undefined;
 };
 
-const isStatus = (r: DemoResponse): r is { status: number; body: unknown; __demo: true } =>
+export const isStatus = (r: DemoResponse): r is { status: number; body: unknown; __demo: true } =>
   typeof r === "object" && r !== null && "__demo" in r;
 
 /** Replaces `globalThis.fetch` for same-origin `/api/*` calls; everything else passes through. */
