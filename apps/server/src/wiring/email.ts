@@ -3,7 +3,7 @@
  * - Both `RESEND_API_KEY` and `KVITBIT_SMTP_URL`: Resend primary with SMTP fallback.
  * - Only `RESEND_API_KEY`: Resend.
  * - Only `KVITBIT_SMTP_URL`: SMTP (nodemailer via `@kvitbit/adapters/email`).
- * - Neither: Console logger (dev / local fallback).
+ * - Neither: Console logger in development, or a delivery rejection in production.
  */
 import {
   layerSmtp,
@@ -13,8 +13,8 @@ import {
   SMTP_DEFAULT_TIMEOUTS,
   type SmtpTransportOptions,
 } from "@kvitbit/adapters/email";
-import { EmailSender } from "@kvitbit/domain/ports";
-import { type Config, Context, Effect, Layer, Option, Redacted } from "effect";
+import { EmailRejected, EmailSender } from "@kvitbit/domain/ports";
+import { Config, Context, Effect, Layer, Option, Redacted } from "effect";
 import { FetchHttpClient } from "effect/http";
 import { type EmailWiringConfig, EmailWiringConfigSchema } from "./config";
 
@@ -55,7 +55,10 @@ const acquireSmtpSender = (rawUrl: string, from: string) => {
 };
 
 /** Builds an `EmailSender` layer from explicit config (used by live wiring and tests). */
-export const makeEmailSenderLayer = (config: EmailWiringConfig): Layer.Layer<EmailSender> =>
+export const makeEmailSenderLayer = (
+  config: EmailWiringConfig,
+  nodeEnv = "development",
+): Layer.Layer<EmailSender> =>
   Layer.effect(
     EmailSender,
     Effect.gen(function* () {
@@ -82,11 +85,22 @@ export const makeEmailSenderLayer = (config: EmailWiringConfig): Layer.Layer<Ema
         return yield* acquireSmtpSender(Redacted.value(config.smtpUrl.value), config.from);
       }
 
+      if (nodeEnv === "production") {
+        return EmailSender.of({
+          send: () => Effect.fail(new EmailRejected({ cause: "Email delivery is not configured" })),
+        });
+      }
       return makeConsoleEmailSender();
     }),
   ).pipe(Layer.provide(FetchHttpClient.layer));
 
 /** Live `EmailSender` configured from `EMAIL_FROM`, `RESEND_API_KEY`, `KVITBIT_SMTP_URL`. */
 export const EmailSenderLive: Layer.Layer<EmailSender, Config.ConfigError> = Layer.unwrap(
-  Effect.map(EmailWiringConfigSchema, makeEmailSenderLayer),
+  Effect.map(
+    Config.all([
+      EmailWiringConfigSchema,
+      Config.String("NODE_ENV").pipe(Config.withDefault("development")),
+    ]),
+    ([config, nodeEnv]) => makeEmailSenderLayer(config, nodeEnv),
+  ),
 );

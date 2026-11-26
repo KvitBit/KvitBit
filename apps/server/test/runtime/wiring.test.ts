@@ -198,33 +198,39 @@ describe("wiring: email & SMTP URL parsing", () => {
     expect(tls.transport.auth).toBeUndefined();
   });
 
-  test("falls back to console EmailSender when neither Resend nor SMTP is configured", async () => {
-    const receipt = await Effect.runPromise(
-      Effect.gen(function* () {
-        const sender = yield* EmailSender;
-        return yield* sender.send(
-          {
-            to: ["test@example.cz"],
-            replyTo: "info@kvitbit.cz",
-            subject: "Test",
-            html: "<p>Test</p>",
-            text: "Test",
-            attachments: [],
-            tags: { template: "test" },
-          },
-          { idempotencyKey: "k-1" },
-        );
-      }).pipe(
-        Effect.provide(
-          makeEmailSenderLayer({
-            from: "Kvitbit <noreply@kvitbit.cz>",
-            resendApiKey: Option.none(),
-            smtpUrl: Option.none(),
-          }),
-        ),
+  test("uses the console only outside production when no email provider is configured", async () => {
+    const send = Effect.flatMap(EmailSender, (sender) =>
+      sender.send(
+        {
+          to: ["test@example.cz"],
+          replyTo: "info@kvitbit.cz",
+          subject: "Test",
+          html: "<p>Test</p>",
+          text: "Test",
+          attachments: [],
+          tags: { template: "test" },
+        },
+        { idempotencyKey: "k-1" },
       ),
     );
-    expect(receipt.provider).toBe("console");
+    const config = {
+      from: "Kvitbit <noreply@kvitbit.cz>",
+      resendApiKey: Option.none(),
+      smtpUrl: Option.none(),
+    };
+    const sendWith = (nodeEnv: string) =>
+      Effect.runPromise(
+        send.pipe(Effect.provide(makeEmailSenderLayer(config, nodeEnv)), Effect.result),
+      );
+
+    expect(await sendWith("development")).toMatchObject({
+      _tag: "Success",
+      success: { provider: "console" },
+    });
+    expect(await sendWith("production")).toMatchObject({
+      _tag: "Failure",
+      failure: { _tag: "EmailRejected" },
+    });
   });
 });
 
