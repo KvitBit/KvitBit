@@ -1,0 +1,585 @@
+/* Public, auth, share, consent, invitation, error, and onboarding pages (screens 01-05, 07).
+ * Strictly Material 3 --md-sys-color-* and --kb-* tokens; zero raw hex colours.
+ */
+
+/* --- Screen 01: Marketing Landing (Persuade) -------------------------------------------------- */
+.kb-landing {
+  display: flex;
+  flex-direction: column;
+  gap: 48px;
+  padding-bottom: 64px;
+}
+
+.kb-landing-hero {
+  position: relative;
+  border-bottom: 1px solid var(--md-sys-color-outline-variant);
+  background-color: var(--md-sys-color-surface-container-low);
+  padding: 56px 28px;
+}
+
+.kb-landing-hero__inner {
+  max-width: 1120px;
+  margin: 0 auto;
+  display: grid;
+  grid-template-columns: minmax(0, 1.25fr) minmax(0, 0.9fr);
+  gap: 36px;
+  align-items: center;
+}
+
+.kb-landing-hero__copy {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  background: color-mix(in srgb, var(--md-sys-color-surface) 92%, transparent);
+  border: 1px solid var(--md-sys-color-outline-variant);
+  border-radius: var(--kb-shape-panel);
+  padding: 28px;
+}
+
+.kb-landing-hero__title {
+  font-family: var(--kb-font-display);
+  font-size: clamp(1.85rem, 3.4vw, 2.5rem);
+  line-height: 1.15;
+  letter-spacing: -0.02em;
+  color: var(--md-sys-color-on-surface);
+}
+
+.kb-landing-hero__subtitle {
+  font-size: 1rem;
+  line-height: 1.5;
+  color: var(--md-sys-color-on-surface-variant);
+  max-width: 54ch;
+}
+
+.kb-landing-hero__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+  margin-top: 4px;
+}
+
+.kb-landing-preview {
+  background: var(--md-sys-color-surface-container-lowest);
+  border: 1px solid var(--md-sys-color-outline-variant);
+  border-radius: var(--kb-shape-panel);
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.kb-landing-preview__total {
+  font-family: var(--kb-font-display);
+  font-size: 1.5rem;
+  line-height: 1.875rem;
+}
+
+.kb-landing-section {
+  max-width: 1120px;
+  width: 100%;
+  margin: 0 auto;
+  padding: 0 28px;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.kb-feature-grid {
+  display: grid;
+  gap: 16px;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+}
+
+.kb-feature-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.kb-feature-card__icon {
+  width: 36px;
+  height: 36px;
+  border-radius: var(--kb-shape-control);
+  background: var(--md-sys-color-surface-container);
+  color: var(--md-sys-color-primary);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.kb-selfhost-strip {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+  padding: 20px 24px;
+  background: var(--md-sys-color-surface-container-low);
+  border: 1px solid var(--md-sys-color-outline-variant);
+  border-radius: var(--kb-shape-panel);
+}
+
+/* --- Screen 01: Legal (Terms & Privacy) ------------------------------------------------------- */
+.kb-legal {
+  max-width: 780px;
+  width: 100%;
+  margin: 0 auto;
+  padding: 28px 24px 64px;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.kb-legal__article {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.kb-legal__section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.kb-legal__section p {
+  color: var(--md-sys-color-on-surface-variant);
+  line-height: 1.6;
+}
+
+/* --- Screen 02: Authentication ---------------------------------------------------------------- */
+.kb-auth-shell {
+  flex: 1;
+  display: grid;
+  place-items: center;
+  padding: 32px 16px 56px;
+}
+
+.kb-auth-card {
+  width: min(440px, 100%);
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  padding: 24px;
+}
+
+.kb-auth-header {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.kb-auth-form {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.kb-auth-divider {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  color: var(--md-sys-color-on-surface-variant);
+  font-size: 0.75rem;
+}
+
+.kb-auth-divider::before,
+.kb-auth-divider::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--md-sys-color-outline-variant);
+}
+
+.kb-bot-proof {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: var(--kb-shape-control);
+  border: 1px solid var(--md-sys-color-outline-variant);
+  background: var(--md-sys-color-surface-container-low);
+  font-size: 0.8125rem;
+}
+
+.kb-bot-proof--verified {
+  border-color: var(--kb-color-paid);
+  background: var(--kb-color-paid-container);
+  color: var(--kb-color-on-paid-container);
+}
+
+.kb-bot-proof--failed {
+  border-color: var(--md-sys-color-error);
+  background: var(--md-sys-color-error-container);
+  color: var(--md-sys-color-on-error-container);
+}
+
+.kb-auth-footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 0.8125rem;
+  color: var(--md-sys-color-on-surface-variant);
+}
+
+/* --- Screen 03: Android Download & Error Pages ------------------------------------------------ */
+.kb-android {
+  max-width: 920px;
+  width: 100%;
+  margin: 0 auto;
+  padding: 28px 24px 64px;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.kb-android-grid {
+  display: grid;
+  gap: 16px;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+}
+
+.kb-obtainium-mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border-radius: var(--kb-shape-control);
+  background: var(--md-sys-color-primary-container);
+  color: var(--md-sys-color-on-primary-container);
+  flex: none;
+}
+
+.kb-checksum-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: var(--kb-shape-control);
+  background: var(--md-sys-color-surface-container-low);
+  border: 1px solid var(--md-sys-color-outline-variant);
+  word-break: break-all;
+}
+
+.kb-error-shell {
+  flex: 1;
+  display: grid;
+  place-items: center;
+  padding: 40px 16px 64px;
+}
+
+.kb-error-card {
+  width: min(520px, 100%);
+  padding: 28px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.kb-error-code {
+  font-family: var(--kb-font-mono);
+  font-size: 0.75rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--md-sys-color-on-surface-variant);
+}
+
+/* --- Screen 04: Public Share Link (/i/:token) ------------------------------------------------- */
+.kb-share-wrap {
+  max-width: 960px;
+  width: 100%;
+  margin: 0 auto;
+  padding: 24px 20px 64px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.kb-share-paper {
+  background: var(--md-sys-color-surface-container-lowest);
+  border: 1px solid var(--md-sys-color-outline-variant);
+  border-radius: var(--kb-shape-panel);
+  padding: 28px;
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+
+.kb-share-hero {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 20px;
+  flex-wrap: wrap;
+  padding-bottom: 18px;
+  border-bottom: 1px solid var(--md-sys-color-outline-variant);
+}
+
+.kb-share-due {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 4px;
+}
+
+.kb-share-due__amount {
+  font-family: var(--kb-font-display);
+  font-size: 1.75rem;
+  line-height: 2.125rem;
+}
+
+.kb-share-pay {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 24px;
+  align-items: center;
+  padding: 18px;
+  border-radius: var(--kb-shape-panel);
+  background: var(--md-sys-color-surface-container-low);
+  border: 1px solid var(--md-sys-color-outline-variant);
+}
+
+.kb-qr-frame {
+  display: inline-flex;
+  padding: 10px;
+  border-radius: var(--kb-shape-control);
+  background: var(--md-sys-color-surface-container-lowest);
+  border: 1px solid var(--md-sys-color-outline-variant);
+  color: var(--md-sys-color-on-surface);
+}
+
+.kb-share-parties {
+  display: grid;
+  gap: 20px;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+}
+
+.kb-share-totals {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  align-self: flex-end;
+  min-width: min(320px, 100%);
+}
+
+.kb-share-totals__row {
+  display: flex;
+  justify-content: space-between;
+  gap: 24px;
+  font-size: 0.875rem;
+}
+
+.kb-share-totals__grand {
+  font-family: var(--kb-font-display);
+  font-size: 1.125rem;
+  padding-top: 8px;
+  border-top: 1px solid var(--md-sys-color-outline-variant);
+}
+
+.kb-share-powered {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: 8px;
+  color: var(--md-sys-color-on-surface-variant);
+  font-size: 0.75rem;
+  padding-top: 8px;
+}
+
+/* --- Screen 05: MCP OAuth Consent & Workspace Invitation -------------------------------------- */
+.kb-consent-shell {
+  max-width: 680px;
+  width: 100%;
+  margin: 0 auto;
+  padding: 28px 20px 64px;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.kb-consent-client {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.kb-consent-client__avatar {
+  width: 44px;
+  height: 44px;
+  border-radius: var(--kb-shape-control);
+  background: var(--md-sys-color-primary-container);
+  color: var(--md-sys-color-on-primary-container);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--kb-font-display);
+  font-size: 1.125rem;
+  flex: none;
+}
+
+.kb-scope-matrix {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.8125rem;
+}
+
+.kb-scope-matrix th,
+.kb-scope-matrix td {
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--md-sys-color-outline-variant);
+  text-align: left;
+}
+
+.kb-scope-matrix th.kb-center,
+.kb-scope-matrix td.kb-center {
+  text-align: center;
+  width: 84px;
+}
+
+.kb-scope-matrix tr:last-child td {
+  border-bottom: 0;
+}
+
+.kb-invite-shell {
+  flex: 1;
+  display: grid;
+  place-items: center;
+  padding: 36px 16px 64px;
+}
+
+.kb-invite-card {
+  width: min(500px, 100%);
+  padding: 28px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+/* --- Screen 07: Workspace Onboarding Wizard --------------------------------------------------- */
+.kb-onboarding {
+  max-width: 860px;
+  width: 100%;
+  margin: 0 auto;
+  padding: 28px 20px 64px;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.kb-stepper {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.kb-stepper__item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-radius: var(--kb-shape-control);
+  border: 1px solid var(--md-sys-color-outline-variant);
+  background: var(--md-sys-color-surface-container-low);
+  color: var(--md-sys-color-on-surface-variant);
+  font-size: 0.75rem;
+  cursor: pointer;
+  text-align: left;
+}
+
+.kb-stepper__item[aria-current="step"] {
+  border-color: var(--md-sys-color-primary);
+  background: var(--md-sys-color-primary-container);
+  color: var(--md-sys-color-on-primary-container);
+  font-weight: 600;
+}
+
+.kb-stepper__num {
+  width: 20px;
+  height: 20px;
+  border-radius: var(--kb-shape-badge);
+  border: 1px solid currentColor;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.6875rem;
+  flex: none;
+}
+
+.kb-regime-grid {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+}
+
+.kb-regime-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 14px;
+  border-radius: var(--kb-shape-panel);
+  border: 1px solid var(--md-sys-color-outline-variant);
+  background: var(--md-sys-color-surface-container-lowest);
+  text-align: left;
+  cursor: pointer;
+}
+
+.kb-regime-card[aria-pressed="true"] {
+  border-color: var(--md-sys-color-primary);
+  background: var(--md-sys-color-primary-container);
+  color: var(--md-sys-color-on-primary-container);
+}
+
+.kb-mini-invoice {
+  border: 1px solid var(--md-sys-color-outline-variant);
+  border-radius: var(--kb-shape-panel);
+  background: var(--md-sys-color-surface-container-lowest);
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  font-size: 0.8125rem;
+}
+
+.kb-mini-invoice__head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--md-sys-color-outline-variant);
+}
+
+.kb-onboarding__actions {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding-top: 8px;
+}
+
+@media (max-width: 760px) {
+  .kb-landing-hero {
+    padding: 32px 16px;
+  }
+  .kb-landing-hero__inner {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .kb-landing-section {
+    padding: 0 16px;
+  }
+  .kb-share-pay {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .kb-share-due {
+    align-items: flex-start;
+  }
+  .kb-stepper {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
