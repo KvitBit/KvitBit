@@ -103,165 +103,23 @@ describe("Shared HTTP/MCP trailing sliding-window RateLimiter", () => {
           where starts_with(key, 'edge:shared:1#')`;
         expect(Number(rows[0]?.count)).toBe(3);
 
+        // Seed a non-edge Better Auth counter row to verify edge idle pruning leaves it intact.
+        yield* sql`
+          insert into auth.rate_limit (id, key, count, last_request)
+          values ('ba-row-1', '/sign-in/email:127.0.0.1', 2, ${Date.parse("2026-11-23T12:00:00Z")})`;
+
         // Idle key cleanup: after 2 minutes of inactivity, a request on another key reclaims
-        // expired rows belonging to idle keys.
+        // expired edge rows belonging to idle keys without touching Better Auth rows.
         yield* TestClock.adjust(Duration.minutes(2));
         expect(yield* limiterA.consume("other:key", rule)).toEqual({ allowed: true });
         const staleRows = yield* sql<{ count: string }>`
           select count(*)::text as count from auth.rate_limit
           where starts_with(key, 'edge:shared:1#')`;
         expect(Number(staleRows[0]?.count)).toBe(0);
-      }).pipe(Effect.provide(coreLayer)),
-    );
-  });
-
-  test("RateLimiterSql shares one allowance bidirectionally with legacy fixed-window instances during rollout", async () => {
-    const t0 = Date.parse("2026-11-23T12:00:00Z");
-    const clockLayer = Layer.effectDiscard(TestClock.setTime(t0)).pipe(
-      Layer.provideMerge(TestClock.layer()),
-    );
-    const coreLayer = SqlTestCore().pipe(Layer.provideMerge(clockLayer));
-
-    await Effect.runPromise(
-      Effect.gen(function* () {
-        const sql = yield* SqlClient.SqlClient;
-        const limiter = yield* Effect.provide(RateLimiter, RateLimiterSql);
-        const rule = { max: 3, windowSeconds: 60 };
-
-        // Exact SQL from the previous fixed-window release.
-        const consumeLegacy = (key: string) =>
-          Effect.gen(function* () {
-            const now = yield* Effect.clockWith((clock) => clock.currentTimeMillis);
-            const windowOpenedAfter = now - rule.windowSeconds * 1000;
-            const rows = yield* sql<{ count: number; last_request: string | number }>`
-              insert into auth.rate_limit (id, key, count, last_request)
-              values (${`legacy-${now}-${Math.random()}`}, ${`edge:${key}`}, 1, ${now})
-              on conflict (key) do update set
-                count = case when auth.rate_limit.last_request <= ${windowOpenedAfter}
-                  then 1 else auth.rate_limit.count + 1 end,
-                last_request = case when auth.rate_limit.last_request <= ${windowOpenedAfter}
-                  then ${now} else auth.rate_limit.last_request end
-              returning count, last_request`;
-            const row = rows[0];
-            if (row === undefined) return { allowed: true } as const;
-            const count = Number(row.count);
-            const start = Number(row.last_request);
-            return count <= rule.max
-              ? ({ allowed: true } as const)
-              : ({
-                  allowed: false,
-                  retryAfterSeconds: Math.max(
-                    1,
-                    Math.ceil((start + rule.windowSeconds * 1000 - now) / 1000),
-                  ),
-                } as const);
-          });
-
-        // 1. Legacy admits 2 at t=0s, upgraded takes the 3rd slot at t=15s -> legacy row updates
-        //    to count=3 so a legacy instance also sees 0 remaining slots.
-        expect(yield* consumeLegacy("api-key:mixed-1")).toEqual({ allowed: true });
-        expect(yield* consumeLegacy("api-key:mixed-1")).toEqual({ allowed: true });
-        yield* TestClock.adjust(Duration.seconds(15));
-        expect(yield* limiter.consume("api-key:mixed-1", rule)).toEqual({ allowed: true });
-
-        const [aggAfterUpgrade] = yield* sql<{ count: number | string }>`
-          select count from auth.rate_limit where key = 'edge:api-key:mixed-1'`;
-        expect(Number(aggAfterUpgrade?.count)).toBe(3);
-
-        // Both upgraded and legacy instances now deny with Retry-After: 45s.
-        expect(yield* limiter.consume("api-key:mixed-1", rule)).toEqual({
-          allowed: false,
-          retryAfterSeconds: 45,
-        });
-        expect(yield* consumeLegacy("api-key:mixed-1")).toEqual({
-          allowed: false,
-          retryAfterSeconds: 45,
-        });
-
-        // 2. Interleaved order: upgraded admits 1 at t=15s, legacy admits 1 at t=25s,
-        //    upgraded admits 1 at t=35s -> both see the 4th request denied.
-        expect(yield* limiter.consume("api-key:mixed-2", rule)).toEqual({ allowed: true });
-        yield* TestClock.adjust(Duration.seconds(10));
-        expect(yield* consumeLegacy("api-key:mixed-2")).toEqual({ allowed: true });
-        yield* TestClock.adjust(Duration.seconds(10));
-        expect(yield* limiter.consume("api-key:mixed-2", rule)).toEqual({ allowed: true });
-        expect(yield* limiter.consume("api-key:mixed-2", rule)).toEqual({
-          allowed: false,
-          retryAfterSeconds: 40,
-        });
-        expect(yield* consumeLegacy("api-key:mixed-2")).toEqual({
-          allowed: false,
-          retryAfterSeconds: 40,
-        });
-
-        // 3. At t=60s (45s after t=15s, 25s after t=35s): mixed-1's 1st legacy admission (t=0s)
-        //    expires while the 2nd legacy admission (materialized at t=15s) and the upgraded
-        //    t=15s admission remain live -> 1 slot opens (not 2), 2nd denied with Retry-After: 15s.
-        yield* TestClock.adjust(Duration.seconds(25));
-        expect(yield* limiter.consume("api-key:mixed-1", rule)).toEqual({ allowed: true });
-        expect(yield* limiter.consume("api-key:mixed-1", rule)).toEqual({
-          allowed: false,
-          retryAfterSeconds: 15,
-        });
-
-        // 4. Legacy-first post-rollover with a single legacy admission.
-        expect(yield* limiter.consume("api-key:mixed-rollover", rule)).toEqual({ allowed: true });
-        yield* TestClock.adjust(Duration.seconds(40));
-        expect(yield* limiter.consume("api-key:mixed-rollover", rule)).toEqual({ allowed: true });
-        expect(yield* limiter.consume("api-key:mixed-rollover", rule)).toEqual({ allowed: true });
-
-        yield* TestClock.adjust(Duration.seconds(20));
-        expect(yield* consumeLegacy("api-key:mixed-rollover")).toEqual({ allowed: true });
-
-        yield* TestClock.adjust(Duration.seconds(1));
-        expect(yield* limiter.consume("api-key:mixed-rollover", rule)).toEqual({
-          allowed: false,
-          retryAfterSeconds: 39,
-        });
-        expect(yield* consumeLegacy("api-key:mixed-rollover")).toEqual({
-          allowed: false,
-          retryAfterSeconds: 39,
-        });
-
-        // At t=160s (+39s): the two t=100s admissions expire; the materialized t=120s legacy
-        // admission stays live -> exactly 2 slots open, 3rd denied with Retry-After: 20s.
-        yield* TestClock.adjust(Duration.seconds(39));
-        expect(yield* limiter.consume("api-key:mixed-rollover", rule)).toEqual({ allowed: true });
-        expect(yield* limiter.consume("api-key:mixed-rollover", rule)).toEqual({ allowed: true });
-        expect(yield* limiter.consume("api-key:mixed-rollover", rule)).toEqual({
-          allowed: false,
-          retryAfterSeconds: 20,
-        });
-
-        // 5. Staggered legacy batch (t=160s and t=170s, observed by upgraded at t=175s):
-        //    at t=220s only the 1st legacy admission expires; the 2nd stays live (never released
-        //    early at t=220s) until t=235s.
-        expect(yield* consumeLegacy("api-key:mixed-batch")).toEqual({ allowed: true });
-        yield* TestClock.adjust(Duration.seconds(10));
-        expect(yield* consumeLegacy("api-key:mixed-batch")).toEqual({ allowed: true });
-        yield* TestClock.adjust(Duration.seconds(5));
-        expect(yield* limiter.consume("api-key:mixed-batch", rule)).toEqual({ allowed: true });
-        expect(yield* limiter.consume("api-key:mixed-batch", rule)).toEqual({
-          allowed: false,
-          retryAfterSeconds: 45,
-        });
-
-        // At t=220s (+45s): only the t=160s admission expires -> 1 slot opens, 2nd denied (15s).
-        yield* TestClock.adjust(Duration.seconds(45));
-        expect(yield* limiter.consume("api-key:mixed-batch", rule)).toEqual({ allowed: true });
-        expect(yield* limiter.consume("api-key:mixed-batch", rule)).toEqual({
-          allowed: false,
-          retryAfterSeconds: 15,
-        });
-
-        // At t=235s (+15s): both t=175s entries (materialized 2nd legacy + upgraded) expire -> 2 open.
-        yield* TestClock.adjust(Duration.seconds(15));
-        expect(yield* limiter.consume("api-key:mixed-batch", rule)).toEqual({ allowed: true });
-        expect(yield* limiter.consume("api-key:mixed-batch", rule)).toEqual({ allowed: true });
-        expect(yield* limiter.consume("api-key:mixed-batch", rule)).toEqual({
-          allowed: false,
-          retryAfterSeconds: 45,
-        });
+        const betterAuthRows = yield* sql<{ count: string }>`
+          select count(*)::text as count from auth.rate_limit
+          where key = '/sign-in/email:127.0.0.1'`;
+        expect(Number(betterAuthRows[0]?.count)).toBe(1);
       }).pipe(Effect.provide(coreLayer)),
     );
   });

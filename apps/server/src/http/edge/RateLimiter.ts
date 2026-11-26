@@ -82,10 +82,8 @@ export const RateLimiterMemory: Layer.Layer<RateLimiter> = Layer.sync(RateLimite
 /**
  * Shared trailing sliding-window counters in `auth.rate_limit`: one admission row per accepted
  * request (`edge:<key>#<id>`), serialized per key with a transaction-scoped advisory lock.
- * Active legacy fixed-window aggregate rows (`edge:<key>`) are counted alongside admission rows
- * until they age out, preserving active allowances across upgrades. Expired rows for the current
- * key and a bounded batch of expired idle edge rows are pruned in the same transaction; refused
- * requests write nothing.
+ * Expired rows for the current key and a bounded batch of expired idle edge rows are pruned in
+ * the same transaction; refused requests write nothing.
  */
 export const RateLimiterSql: Layer.Layer<RateLimiter, never, SqlClient.SqlClient> = Layer.effect(
   RateLimiter,
@@ -107,8 +105,7 @@ export const RateLimiterSql: Layer.Layer<RateLimiter, never, SqlClient.SqlClient
               const idleCutoff = now - Math.max(windowMs, MAX_EDGE_WINDOW_MS);
               yield* sql`
                 delete from auth.rate_limit
-                where (key = ${bucketKey} or starts_with(key, ${prefix}))
-                  and last_request <= ${cutoff}`;
+                where starts_with(key, ${prefix}) and last_request <= ${cutoff}`;
               yield* sql`
                 delete from auth.rate_limit
                 where id in (
@@ -116,91 +113,17 @@ export const RateLimiterSql: Layer.Layer<RateLimiter, never, SqlClient.SqlClient
                   where starts_with(key, 'edge:') and last_request <= ${idleCutoff}
                   limit ${IDLE_PRUNE_LIMIT}
                 )`;
-              const admissions = yield* sql<{
-                count: number | string;
-                last_request: string | number;
-              }>`
-                select count, last_request from auth.rate_limit
+              const live = yield* sql<{ last_request: string | number }>`
+                select last_request from auth.rate_limit
                 where starts_with(key, ${prefix})
                 order by last_request asc`;
-              const [aggregate] = yield* sql<{
-                count: number | string;
-                last_request: string | number;
-              }>`
-                select count, last_request from auth.rate_limit
-                where key = ${bucketKey}`;
-              const aggregateCount =
-                aggregate === undefined
-                  ? 0
-                  : Math.min(rule.max, Math.max(0, Number(aggregate.count)));
-              const aggregateStart = aggregate === undefined ? now : Number(aggregate.last_request);
-              let admissionsTotal = 0;
-              let admissionsFromStart = 0;
-              for (const row of admissions) {
-                const weight = Math.max(0, Number(row.count));
-                const ts = Number(row.last_request);
-                admissionsTotal += weight;
-                if (ts >= aggregateStart) {
-                  admissionsFromStart += weight;
-                }
-              }
-              // Only admissions at or after `aggregateStart` are reflected in `aggregate.count`.
-              // Any remaining count came from legacy instances that do not write `#<id>` rows.
-              const legacyOnlyCount = Math.max(0, aggregateCount - admissionsFromStart);
-              const totalLive = admissionsTotal + legacyOnlyCount;
-              const slots: Array<{ readonly ts: number; readonly weight: number }> = admissions.map(
-                (row) => ({ ts: Number(row.last_request), weight: Math.max(0, Number(row.count)) }),
-              );
-              // Materialize legacy-only admissions into `#<id>` rows: the first opened the legacy
-              // window at `aggregateStart` (exact), and any additional admissions arrived in
-              // `(aggregateStart, now]` so anchoring them at `now` ensures they never expire early.
-              if (legacyOnlyCount > 0) {
-                yield* sql`
-                  insert into auth.rate_limit (id, key, count, last_request)
-                  values (${generateId()}, ${`${prefix}${generateId()}`}, 1, ${aggregateStart})`;
-                slots.push({ ts: aggregateStart, weight: 1 });
-                if (legacyOnlyCount > 1) {
-                  yield* sql`
-                    insert into auth.rate_limit (id, key, count, last_request)
-                    values (${generateId()}, ${`${prefix}${generateId()}`}, ${legacyOnlyCount - 1}, ${now})`;
-                  slots.push({ ts: now, weight: legacyOnlyCount - 1 });
-                }
-                slots.sort((a, b) => a.ts - b.ts);
-              }
-              const oldestLive = slots.length > 0 ? (slots[0]?.ts ?? now) : now;
-
-              if (totalLive < rule.max) {
+              if (live.length < rule.max) {
                 yield* sql`
                   insert into auth.rate_limit (id, key, count, last_request)
                   values (${generateId()}, ${`${prefix}${generateId()}`}, 1, ${now})`;
-                const nextCount = totalLive + 1;
-                const nextWindowStart = Math.min(oldestLive, now);
-                yield* sql`
-                  insert into auth.rate_limit (id, key, count, last_request)
-                  values (${generateId()}, ${bucketKey}, ${nextCount}, ${nextWindowStart})
-                  on conflict (key) do update set
-                    count = ${nextCount},
-                    last_request = ${nextWindowStart}`;
                 return { allowed: true } as const;
               }
-              if (legacyOnlyCount > 0) {
-                yield* sql`
-                  insert into auth.rate_limit (id, key, count, last_request)
-                  values (${generateId()}, ${bucketKey}, ${totalLive}, ${oldestLive})
-                  on conflict (key) do update set
-                    count = ${totalLive},
-                    last_request = ${oldestLive}`;
-              }
-              const excess = totalLive - rule.max;
-              let seen = 0;
-              let oldest = now;
-              for (const slot of slots) {
-                seen += slot.weight;
-                if (seen > excess) {
-                  oldest = slot.ts;
-                  break;
-                }
-              }
+              const oldest = Number(live[Math.max(0, live.length - rule.max)]?.last_request ?? now);
               return {
                 allowed: false,
                 retryAfterSeconds: retryAfterFrom(oldest, windowMs, now),
