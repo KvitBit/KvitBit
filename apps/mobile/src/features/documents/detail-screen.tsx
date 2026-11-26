@@ -88,7 +88,7 @@ import {
   SendEmailModal,
   UnlockDocumentModal,
 } from "./modals";
-import { usePaymentMutation, useRequestMutation } from "./request-mutation";
+import { requestErrorText, usePaymentMutation, useRequestMutation } from "./request-mutation";
 
 type DetailTab = "preview" | "payments" | "share" | "history";
 
@@ -220,7 +220,7 @@ export function DocumentDetailScreen() {
     );
     setBusyAction(null);
     if (result._tag === "Err") {
-      reportError(resolveText(describeError(result.error).text));
+      reportError(requestErrorText(result.error, { local, text: resolveText }));
       return;
     }
     docRemote.set(result.value);
@@ -246,7 +246,7 @@ export function DocumentDetailScreen() {
     );
     setBusyAction(null);
     if (result._tag === "Err") {
-      reportError(resolveText(describeError(result.error).text));
+      reportError(requestErrorText(result.error, { local, text: resolveText }));
       return;
     }
     overlay.toast(t("common.toast.deleted"));
@@ -270,7 +270,7 @@ export function DocumentDetailScreen() {
     );
     setBusyAction(null);
     if (result._tag === "Err") {
-      reportError(resolveText(describeError(result.error).text));
+      reportError(requestErrorText(result.error, { local, text: resolveText }));
       return;
     }
     docRemote.set(result.value);
@@ -288,7 +288,7 @@ export function DocumentDetailScreen() {
     );
     setBusyAction(null);
     if (result._tag === "Err") {
-      reportError(resolveText(describeError(result.error).text));
+      reportError(requestErrorText(result.error, { local, text: resolveText }));
       return;
     }
     setActiveDialog(null);
@@ -315,7 +315,7 @@ export function DocumentDetailScreen() {
     );
     setBusyAction(null);
     if (result._tag === "Err") {
-      reportError(resolveText(describeError(result.error).text));
+      reportError(requestErrorText(result.error, { local, text: resolveText }));
       return;
     }
     setActiveDialog(null);
@@ -353,7 +353,7 @@ export function DocumentDetailScreen() {
     );
     setBusyAction(null);
     if (result._tag === "Err") {
-      reportError(resolveText(describeError(result.error).text));
+      reportError(requestErrorText(result.error, { local, text: resolveText }));
       return;
     }
     docRemote.reload();
@@ -383,7 +383,7 @@ export function DocumentDetailScreen() {
     );
     setBusyAction(null);
     if (result._tag === "Err") {
-      reportError(resolveText(describeError(result.error).text));
+      reportError(requestErrorText(result.error, { local, text: resolveText }));
       return;
     }
     setActiveDialog(null);
@@ -416,7 +416,7 @@ export function DocumentDetailScreen() {
     );
     setBusyAction(null);
     if (result._tag === "Err") {
-      reportError(resolveText(describeError(result.error).text));
+      reportError(requestErrorText(result.error, { local, text: resolveText }));
       return;
     }
     setActiveDialog(null);
@@ -441,7 +441,7 @@ export function DocumentDetailScreen() {
     );
     setBusyAction(null);
     if (result._tag === "Err") {
-      reportError(resolveText(describeError(result.error).text));
+      reportError(requestErrorText(result.error, { local, text: resolveText }));
       return;
     }
     setRemovingPayment(null);
@@ -468,7 +468,7 @@ export function DocumentDetailScreen() {
     );
     setBusyAction(null);
     if (result._tag === "Err") {
-      reportError(resolveText(describeError(result.error).text));
+      reportError(requestErrorText(result.error, { local, text: resolveText }));
       return;
     }
     setActiveDialog(null);
@@ -486,7 +486,7 @@ export function DocumentDetailScreen() {
     );
     setBusyAction(null);
     if (result._tag === "Err") {
-      reportError(resolveText(describeError(result.error).text));
+      reportError(requestErrorText(result.error, { local, text: resolveText }));
       return;
     }
     docRemote.reload();
@@ -512,7 +512,7 @@ export function DocumentDetailScreen() {
     );
     setBusyAction(null);
     if (result._tag === "Err") {
-      reportError(resolveText(describeError(result.error).text));
+      reportError(requestErrorText(result.error, { local, text: resolveText }));
       return;
     }
     docRemote.reload();

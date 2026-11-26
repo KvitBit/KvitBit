@@ -7,6 +7,7 @@ import type {
   ContactId,
   CurrencyCode,
   DocumentId,
+  DocumentPatch,
   DocumentView,
   FxRateView,
   IsoDate,
@@ -86,12 +87,17 @@ import {
   VAT_TREATMENTS,
   validateEditorDraft,
 } from "./editor-model";
-import { useRequestMutation, useRequestOwner } from "./request-mutation";
-import { importTemplate, openImportedDraft, type TemplateSeed } from "./template-import";
+import { requestErrorText, useRequestMutation, useRequestOwner } from "./request-mutation";
+import {
+  importTemplate,
+  openImportedDraft,
+  recordImportedDraftWrite,
+  type TemplateSeed,
+} from "./template-import";
 
 export function DocumentFromTemplateScreen({ templateId }: { readonly templateId: TemplateId }) {
   const { workspace } = useWorkspace();
-  const { t, text } = useI18n();
+  const { t, local, text } = useI18n();
   const { run } = useApi();
   const requestOwner = useRequestOwner(workspace.id);
   const writable = canWriteWorkspace(workspace);
@@ -126,7 +132,7 @@ export function DocumentFromTemplateScreen({ templateId }: { readonly templateId
         <Loading label={t("common.state.loading")} />
       ) : (
         <>
-          <Banner text={text(describeError(failure).text)} />
+          <Banner text={requestErrorText(failure, { local, text })} />
           <Button
             label={t("common.action.retry")}
             testID="template-import-retry"
@@ -560,6 +566,20 @@ export function DocumentEditorScreen(props: DocumentEditorProps) {
     }
   };
 
+  // The write already succeeded. A failed cache update must not report it as failed.
+  const recordWrite = (
+    documentId: DocumentId,
+    patch: DocumentPatch | null,
+    baseRevision: number,
+    revision: number,
+  ) =>
+    requestOwner === null
+      ? Promise.resolve()
+      : recordImportedDraftWrite(requestOwner, documentId, patch, baseRevision, revision).then(
+          () => undefined,
+          () => undefined,
+        );
+
   const saveOrIssue = async (draft: EditorDraft, intent: "save" | "issue") => {
     if (props.mode === "new") {
       const input = buildDocumentInput(draft);
@@ -581,7 +601,7 @@ export function DocumentEditorScreen(props: DocumentEditorProps) {
             );
       if (res._tag === "Err") {
         const described = describeError(res.error);
-        setBannerError(resolveText(described.text));
+        setBannerError(requestErrorText(res.error, { local, text: resolveText }));
         setServerIssues(described.issues);
         return;
       }
@@ -616,6 +636,7 @@ export function DocumentEditorScreen(props: DocumentEditorProps) {
         return;
       }
       finalDoc = editRes.value;
+      await recordWrite(originalDoc.id, patch, originalDoc.revision, finalDoc.revision);
       sourceDocRemote.set(finalDoc);
       savedDraft.current = draft;
     }
@@ -631,11 +652,12 @@ export function DocumentEditorScreen(props: DocumentEditorProps) {
       );
       if (issueRes._tag === "Err") {
         const described = describeError(issueRes.error);
-        setBannerError(resolveText(described.text));
+        setBannerError(requestErrorText(issueRes.error, { local, text: resolveText }));
         setServerIssues(described.issues);
         return;
       }
       finalDoc = issueRes.value;
+      await recordWrite(id, null, revision, finalDoc.revision);
     }
 
     overlay.toast(
@@ -1362,7 +1384,7 @@ export function CreditNoteCreatorScreen() {
     );
     setBusy(false);
     if (res._tag === "Err") {
-      setError(resolveText(describeError(res.error).text));
+      setError(requestErrorText(res.error, { local, text: resolveText }));
       return;
     }
     overlay.toast(t("documents.creditNote.issued", { number: res.value.number ?? "" }));

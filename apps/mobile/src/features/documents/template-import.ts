@@ -1,6 +1,7 @@
 import {
   ContactId,
   DocumentId,
+  type DocumentPatch,
   Locale,
   RequestKey,
   TemplateId,
@@ -11,7 +12,12 @@ import { type ApiResult, err, idempotencyHeaders, ok, UiError, uuidV7 } from "@k
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { Effect, Option, Schema } from "effect";
 import type { ApiRunner } from "../../runtime/api-runtime";
-import { acquireRequestKey, completeRequestKey } from "../../runtime/request-intent";
+import {
+  acquireRequestKey,
+  completeRequestKey,
+  requestIntentFailure,
+  reuseRequestKey,
+} from "../../runtime/request-intent";
 import { parseWorkspaceDefaults } from "./codecs";
 
 const fields = TemplateInput.fields;
@@ -131,6 +137,9 @@ export async function importTemplate(
         const key = await acquireRequestKey(owner, operation, payloadFor(resolved.value));
         pending = { seed: resolved.value, key, operation, document: null };
         await AsyncStorage.setItem(slot, JSON.stringify(pending));
+      } else {
+        // A stored import may already have created its draft. Resend it only within the replay window.
+        await reuseRequestKey(owner, pending.operation, payloadFor(pending.seed), pending.key);
       }
       const { seed, key, operation } = pending;
       const result = await run((api) =>
@@ -150,26 +159,70 @@ export async function importTemplate(
       await completeRequestKey(owner, operation, key).catch(() => undefined);
       return ok({ id, revision });
     });
-  } catch {
-    return err(UiError.unexpected());
+  } catch (error) {
+    return err(requestIntentFailure(error));
   }
 }
 
+const readStored = async (key: string): Promise<typeof StoredSeed.Type | null> => {
+  const text = await AsyncStorage.getItem(key);
+  return text === null ? null : Schema.decodeUnknownSync(StoredSeed)(JSON.parse(text));
+};
+
+// DocumentView does not carry the imported values, so this cache is their only record.
+// It applies only at the revision it was recorded for: a newer revision came from a write
+// this client did not record, and its values are unknown here. The cache is kept so a
+// stale read of the document cannot erase it.
 export async function openImportedDraft(
   owner: string,
   documentId: DocumentId,
   revision: number,
 ): Promise<TemplateSeed | null> {
   const key = draftSlot(owner, documentId);
-  const text = await AsyncStorage.getItem(key);
-  if (text === null) return null;
-  const cached = Schema.decodeUnknownSync(StoredSeed)(JSON.parse(text));
+  const cached = await readStored(key);
+  if (cached === null) return null;
   const slot = pendingSlot(owner, cached.templateId);
   return locked(slot, async () => {
     const pending = await readPending(slot);
     if (pending?.document?.id === documentId) await AsyncStorage.removeItem(slot);
-    if (cached.revision === revision) return cached.seed;
-    await AsyncStorage.removeItem(key);
-    return null;
+    const latest = (await readStored(key)) ?? cached;
+    return latest.revision === revision ? latest.seed : null;
+  });
+}
+
+// Mirrors the PATCH semantics: a field the patch omits keeps its stored value.
+const seedAfterPatch = (seed: TemplateSeed, patch: DocumentPatch): TemplateSeed => ({
+  ...seed,
+  ...(patch.contact === undefined ? {} : { contact: patch.contact }),
+  ...(patch.language === undefined ? {} : { language: patch.language }),
+  ...(patch.series === undefined ? {} : { series: patch.series }),
+  ...(patch.pricesIncludeVat === undefined ? {} : { pricesIncludeVat: patch.pricesIncludeVat }),
+  ...(patch.bankAccount === undefined ? {} : { bankAccount: patch.bankAccount }),
+  ...(patch.variableSymbol === undefined ? {} : { variableSymbol: patch.variableSymbol }),
+  ...(patch.orderNumber === undefined ? {} : { orderNumber: patch.orderNumber }),
+  ...(patch.note === undefined ? {} : { note: patch.note }),
+});
+
+/**
+ * Carries the imported values forward after the server accepted a write made at
+ * `baseRevision` and returned `revision`. Pass the applied patch, or null when the write
+ * changed no imported field (issuing). The cache moves only when it was recorded at
+ * `baseRevision`, so a write the client cannot account for still invalidates it.
+ */
+export async function recordImportedDraftWrite(
+  owner: string,
+  documentId: DocumentId,
+  patch: DocumentPatch | null,
+  baseRevision: number,
+  revision: number,
+): Promise<void> {
+  const key = draftSlot(owner, documentId);
+  const cached = await readStored(key);
+  if (cached === null) return;
+  await locked(pendingSlot(owner, cached.templateId), async () => {
+    const latest = await readStored(key);
+    if (latest === null || latest.revision !== baseRevision) return;
+    const seed = patch === null ? latest.seed : seedAfterPatch(latest.seed, patch);
+    await AsyncStorage.setItem(key, JSON.stringify({ ...latest, seed, revision }));
   });
 }

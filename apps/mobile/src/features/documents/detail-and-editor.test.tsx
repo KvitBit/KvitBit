@@ -1,4 +1,14 @@
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, mock, test } from "bun:test";
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  mock,
+  setSystemTime,
+  test,
+} from "bun:test";
 import type {
   ContactId,
   DocumentId,
@@ -6,6 +16,7 @@ import type {
   WorkspaceSlug,
   WorkspaceSummary,
 } from "@kvitbit/domain/contract";
+import AsyncStorage from "@react-native-async-storage/async-storage";
 import { act, type ReactNode } from "react";
 import {
   fakeTransfer,
@@ -762,6 +773,7 @@ describe("DocumentDetailScreen and DocumentEditorScreen", () => {
     await click("payment-modal-submit");
     await waitFor(() => overlay.toasts.includes("Payment recorded"));
     await waitFor(paymentReady);
+    await settle();
     await click("payments-tab-record");
     await waitFor(paymentReady);
     dropNext = path;
@@ -848,5 +860,198 @@ describe("DocumentDetailScreen and DocumentEditorScreen", () => {
       series: CONTACT_SERIES,
       pricesIncludeVat: true,
     });
+  });
+  const paymentPath = `/api/v1/workspaces/${WS_ID}/payments`;
+  const paymentAttempts = () =>
+    calls.filter((c) => c.method === "POST" && c.path.endsWith("/payments"));
+  const paymentReady = () =>
+    root.container().querySelector('[data-testid="payment-amount-input"]') !== null &&
+    root.container().textContent?.includes("Wire") === true;
+  const lostToasts = () => overlay.toasts.filter((m) => m.includes("Please try again")).length;
+  const recordedToasts = () => overlay.toasts.filter((m) => m === "Payment recorded").length;
+  // Let reloads started by the previous screen settle before it unmounts.
+  const settle = () =>
+    act(async () => {
+      await new Promise((r) => setTimeout(r, 25));
+    });
+  const openPaymentForm = async () => {
+    await settle();
+    await root.render(null);
+    await show(<DocumentDetailScreen />);
+    await waitFor(paymentReady, "payment form open");
+  };
+  const submitPayment = async (amount: string) => {
+    await change("payment-amount-input", amount);
+    await click("payment-modal-submit");
+  };
+
+  test("a reopened payment form retries an unresolved payment with its exact key", async () => {
+    mockParams = { id: DOC_ID, tab: "payments", dialog: "payment" };
+    dropNext = paymentPath;
+    await openPaymentForm();
+    await submitPayment("100");
+    await waitFor(() => lostToasts() === 1, "first response lost");
+
+    await openPaymentForm();
+    await submitPayment("100");
+    await waitFor(() => recordedToasts() === 1, "retry after reopening confirmed");
+
+    const attempts = paymentAttempts();
+    expect(attempts).toHaveLength(2);
+    expect(attempts[1]?.body).toEqual(attempts[0]?.body);
+    expect(attempts[1]?.key).toBe(attempts[0]?.key);
+  });
+
+  test("a payment form reopened after a confirmed payment does not reuse an older unresolved key", async () => {
+    mockParams = { id: DOC_ID, tab: "payments", dialog: "payment" };
+    dropNext = paymentPath;
+    await openPaymentForm();
+    await submitPayment("100");
+    await waitFor(() => lostToasts() === 1, "payment A response lost");
+    await submitPayment("200");
+    await waitFor(() => recordedToasts() === 1, "payment B confirmed");
+
+    await openPaymentForm();
+    await submitPayment("100");
+    await waitFor(() => recordedToasts() === 2, "new payment confirmed");
+
+    const attempts = paymentAttempts();
+    expect(attempts).toHaveLength(3);
+    expect(attempts[2]?.body).toEqual(attempts[0]?.body);
+    expect(new Set(attempts.map(({ key }) => key)).size).toBe(3);
+  });
+
+  test("a confirmed payment keeps its key when the next form scope cannot be stored", async () => {
+    mockParams = { id: DOC_ID, tab: "payments", dialog: "payment" };
+    const setItem = AsyncStorage.setItem;
+    let failScope = true;
+    AsyncStorage.setItem = async (slot: string, value: string) => {
+      if (failScope && slot.startsWith("kvitbit.payment-form.v1.")) {
+        failScope = false;
+        throw new Error("storage full");
+      }
+      return setItem(slot, value);
+    };
+    try {
+      await openPaymentForm();
+      await submitPayment("300");
+      // The payment committed, but the client could not record that. It reports an unknown outcome.
+      await waitFor(
+        () => overlay.toasts.includes("You are offline."),
+        "scope commit failure reported",
+      );
+      await openPaymentForm();
+      await submitPayment("300");
+      await waitFor(() => recordedToasts() === 1, "replayed payment confirmed");
+      await openPaymentForm();
+      await submitPayment("300");
+      await waitFor(() => recordedToasts() === 2, "next payment confirmed");
+    } finally {
+      AsyncStorage.setItem = setItem;
+    }
+
+    const attempts = paymentAttempts();
+    expect(attempts).toHaveLength(3);
+    expect(attempts[1]?.key).toBe(attempts[0]?.key);
+    expect(attempts[2]?.key).not.toBe(attempts[0]?.key);
+  });
+
+  test("an unresolved payment past the replay window asks for reconciliation instead of resending", async () => {
+    mockParams = { id: DOC_ID, tab: "payments", dialog: "payment" };
+    dropNext = paymentPath;
+    await openPaymentForm();
+    await submitPayment("400");
+    await waitFor(() => lostToasts() === 1, "payment response lost");
+    setSystemTime(new Date(Date.now() + 25 * 60 * 60 * 1000));
+    try {
+      await submitPayment("400");
+      await waitFor(
+        () => overlay.toasts.some((m) => m.includes("may already have been saved")),
+        "reconciliation shown",
+      );
+    } finally {
+      setSystemTime();
+    }
+    expect(paymentAttempts()).toHaveLength(1);
+  });
+
+  const importTemplateDraft = async () => {
+    wireDoc = makeWireDoc({ status: "draft", kind: "invoice", number: null, settlement: "unpaid" });
+    mockParams = { kind: "invoice", template: TEMPLATE_ID };
+    await show(<DocumentNewRoute />);
+    await waitFor(() => replaced.length === 1, "template draft opened");
+    mockParams = { id: DOC_ID };
+  };
+  const noteValue = () =>
+    root.container().querySelector<HTMLInputElement>('[data-testid="editor-note"]')?.value;
+  const openEditor = async () => {
+    await settle();
+    await root.render(null);
+    await show(<DocumentEditRoute />);
+    await waitFor(
+      () => root.container().querySelector('[data-testid="editor-save-button"]') !== null,
+      "editor open",
+    );
+  };
+  const saveEdit = async (description: string) => {
+    const before = calls.filter((call) => call.method === "PATCH").length;
+    replaced.length = 0;
+    await change("editor-line-desc-0", description);
+    await click("editor-save-button");
+    await waitFor(() => replaced.length === 1, "saved");
+    expect(calls.filter((call) => call.method === "PATCH")).toHaveLength(before + 1);
+    return calls.filter((call) => call.method === "PATCH").at(-1);
+  };
+
+  test("imported template fields survive saving and reopening the draft", async () => {
+    await importTemplateDraft();
+    await openEditor();
+    await waitFor(() => noteValue() === "Newer template note", "imported note loaded");
+    await change("editor-note", "Edited note");
+    const first = await saveEdit("First edit");
+    expect(first?.ifMatch).toBe('"3"');
+
+    await openEditor();
+    await waitFor(() => noteValue() === "Edited note", "saved note reopened");
+    const second = await saveEdit("Second edit");
+    expect(second?.ifMatch).toBe('"4"');
+    expect(second?.body).toMatchObject({
+      note: "Edited note",
+      language: "en",
+      series: CONTACT_SERIES,
+      pricesIncludeVat: true,
+    });
+  });
+
+  test("a revision this client did not write does not reuse the imported snapshot", async () => {
+    await importTemplateDraft();
+    wireDoc = { ...wireDoc, revision: wireDoc.revision + 1 };
+    await openEditor();
+    await waitFor(() => noteValue() !== undefined, "editor fields loaded");
+    expect(noteValue()).toBe("");
+  });
+
+  test("a stored template import past the replay window asks for reconciliation", async () => {
+    const path = `/api/v1/workspaces/${WS_ID}/templates/${TEMPLATE_ID}/documents`;
+    dropNext = path;
+    wireDoc = makeWireDoc({ status: "draft", kind: "invoice", number: null, settlement: "unpaid" });
+    mockParams = { kind: "invoice", template: TEMPLATE_ID };
+    await show(<DocumentNewRoute />);
+    await waitFor(
+      () => root.container().querySelector('[data-testid="template-import-retry"]') !== null,
+    );
+    setSystemTime(new Date(Date.now() + 25 * 60 * 60 * 1000));
+    try {
+      await root.render(null);
+      await show(<DocumentNewRoute />);
+      await waitFor(
+        () => root.container().textContent?.includes("may already have been saved") === true,
+        "reconciliation shown",
+      );
+    } finally {
+      setSystemTime();
+    }
+    expect(calls.filter((call) => call.path === path)).toHaveLength(1);
+    expect(replaced).toHaveLength(0);
   });
 });
