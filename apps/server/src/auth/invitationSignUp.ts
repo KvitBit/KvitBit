@@ -103,6 +103,8 @@ export const makeAuthWithInvitationSignUp = async (
   workspaces: Workspaces["Service"],
   clock: Clock.Clock,
 ) => {
+  // The normal OAuth provider initializes its resource rows before the invitation-only instance.
+  await auth.$context;
   const verifiedEmails = new WeakMap<Request, string>();
   const options = authOptions({
     ...config,
@@ -140,7 +142,7 @@ export const makeAuthWithInvitationSignUp = async (
     },
   });
 
-  await Promise.all([auth.$context, invitationAuth.$context]);
+  await invitationAuth.$context;
   return {
     ...auth,
     handler: async (request: Request) => {
