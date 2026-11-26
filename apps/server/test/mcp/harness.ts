@@ -21,6 +21,7 @@ import { SqlClient, Statement } from "effect/sql";
 import { TestClock } from "effect/testing";
 import { PrincipalResolver } from "../../src/auth/PrincipalResolver";
 import { McpConfigTest, McpRoutesLive } from "../../src/mcp";
+import { ServerDocumentProjectionsLive } from "../../src/projections/documents";
 import { SqlTestCore } from "../persistence/conformance/sqlCore";
 
 export const MCP_ORIGIN = "https://kvitbit.test";
@@ -85,7 +86,10 @@ export const makeMcpHarness = (options: TestCoreOptions = {}) => {
   const clockLayer = Layer.effectDiscard(
     TestClock.setTime(Date.parse("2026-11-23T10:00:00Z")),
   ).pipe(Layer.provideMerge(TestClock.layer()));
-  const core = SqlTestCore(options).pipe(Layer.provideMerge(clockLayer));
+  const core = ServerDocumentProjectionsLive.pipe(
+    Layer.provideMerge(SqlTestCore(options)),
+    Layer.provideMerge(clockLayer),
+  );
   const runtime = ManagedRuntime.make(core);
   const seedUser = (user: TestUser) =>
     Effect.gen(function* () {

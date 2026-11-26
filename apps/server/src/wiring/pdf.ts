@@ -8,6 +8,7 @@ import {
   makeChromiumPdfEngine,
   PdfEngine,
   type RenderBranding,
+  type RenderImage,
   type RenderLine,
   type RenderReference,
   type ReportCell,
@@ -15,20 +16,102 @@ import {
   renderDocumentPdf,
   renderReportPdf,
 } from "@kvitbit/adapters/pdf";
-import { forDocument as qrForDocument } from "@kvitbit/adapters/qr";
 import {
   BrandingPreview,
+  CoreStore,
   DocumentRenderer,
   type DocumentsModule,
+  DocumentsRepo,
   ReportPdfRenderer,
   type ReportsModule,
+  ShareLinksRepo,
   type WorkspacesModule,
+  WorkspacesRepo,
 } from "@kvitbit/core";
-import type { CurrencyCode, DocumentView, IsoDate, Money } from "@kvitbit/domain/contract";
-import { BigDecimal, type Config, Effect, Layer, Result, Stream } from "effect";
+import {
+  type CurrencyCode,
+  CurrentCaller,
+  type DocumentView,
+  type ImageRef,
+  type IsoDate,
+  type Money,
+  type WorkspaceId,
+} from "@kvitbit/domain/contract";
+import { type BlobKey, BlobStorage } from "@kvitbit/domain/ports";
+import { BigDecimal, type Config, Effect, Layer, Option, Stream } from "effect";
+import { SqlClient } from "effect/sql";
+import {
+  computeDocumentPaymentQr,
+  documentPdfCacheKey,
+  resolveVariableSymbol,
+  sha256HexSync,
+} from "../projections/documents";
 import { PdfWiringConfigSchema } from "./config";
 
 const DEFAULT_ACCENT = "#18181B";
+const MAX_PDF_CACHE_BYTES = 25 * 1024 * 1024;
+const ALLOWED_IMAGE_TYPES = new Set<RenderImage["mediaType"]>([
+  "image/png",
+  "image/jpeg",
+  "image/webp",
+  "image/svg+xml",
+]);
+
+const concatBytes = (chunks: ReadonlyArray<Uint8Array>): Uint8Array => {
+  let total = 0;
+  for (const chunk of chunks) total += chunk.byteLength;
+  const out = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    out.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return out;
+};
+
+const isAllowedImageType = (mediaType: string): mediaType is RenderImage["mediaType"] =>
+  ALLOWED_IMAGE_TYPES.has(mediaType as RenderImage["mediaType"]);
+
+const loadBrandingImage = (
+  blobs: BlobStorage["Service"],
+  workspaceId: WorkspaceId,
+  image: "logo" | "stamp",
+  ref: ImageRef | null,
+): Effect.Effect<RenderImage | null> => {
+  if (ref === null || !isAllowedImageType(ref.contentType)) {
+    return Effect.succeed(null);
+  }
+  const key = `branding/${workspaceId}/${image}/${ref.sha256}` as BlobKey;
+  return blobs.get(key).pipe(
+    Effect.flatMap((stream) => Stream.runCollect(stream)),
+    Effect.map(
+      (chunks): RenderImage => ({
+        mediaType: ref.contentType as RenderImage["mediaType"],
+        bytes: concatBytes(chunks),
+      }),
+    ),
+    Effect.catch(() => Effect.succeed(null)),
+  );
+};
+
+export interface DocumentRenderContext {
+  readonly branding?: RenderBranding | undefined;
+  readonly variableSymbol?: string | null | undefined;
+  readonly orderNumber?: string | null | undefined;
+  readonly note?: string | null | undefined;
+  readonly paymentQr?: DocumentRenderModel["paymentQr"] | undefined;
+  readonly correction?:
+    | {
+        readonly originalIssuedOn: IsoDate;
+        readonly reason: string;
+      }
+    | undefined;
+}
+
+export interface ReportRenderContext {
+  readonly workspace?: ReportRenderModel["workspace"] | undefined;
+  readonly branding?: RenderBranding | undefined;
+}
 
 const formatAddressLines = (address: {
   readonly street?: string | null;
@@ -46,27 +129,10 @@ const formatAddressLines = (address: {
   return lines;
 };
 
-const computePaymentQr = (
+const buildReference = (
   view: DocumentView,
-  issuer: DocumentsModule.IssuerSnapshotRecord,
-): DocumentRenderModel["paymentQr"] => {
-  if (view.paymentQr !== null) return view.paymentQr;
-  const amount = view.totals.gross.amount;
-  const res = qrForDocument({
-    kind: view.kind,
-    status: view.status,
-    currency: view.totals.gross.currency,
-    amount,
-    bankAccount: issuer.bankAccount,
-    recipientName: issuer.name,
-    message: view.number ? `${view.kind} ${view.number}` : view.kind,
-    variableSymbol: view.number ? view.number.replace(/\D/g, "").slice(0, 10) : null,
-    dueOn: view.dates.dueOn,
-  });
-  return Result.isSuccess(res) ? res.success : null;
-};
-
-const buildReference = (view: DocumentView): RenderReference | null => {
+  context?: DocumentRenderContext,
+): RenderReference | null => {
   if (view.kind === "payment_tax_document") {
     const proforma = view.related.find((r) => r.relation === "advance_of");
     return {
@@ -81,8 +147,8 @@ const buildReference = (view: DocumentView): RenderReference | null => {
       return {
         kind: "correction",
         originalNumber: original.number,
-        originalIssuedOn: view.dates.issuedOn,
-        reason: "",
+        originalIssuedOn: context?.correction?.originalIssuedOn ?? view.dates.issuedOn,
+        reason: context?.correction?.reason ?? "",
       };
     }
   }
@@ -103,7 +169,10 @@ const buildReference = (view: DocumentView): RenderReference | null => {
 };
 
 /** Maps a `DocumentView` to `@kvitbit/adapters/pdf`'s `DocumentRenderModel`. */
-export const documentViewToRenderModel = (view: DocumentView): DocumentRenderModel => {
+export const documentViewToRenderModel = (
+  view: DocumentView,
+  context?: DocumentRenderContext,
+): DocumentRenderModel => {
   const issuer = view.issuer as unknown as DocumentsModule.IssuerSnapshotRecord;
   const contact = view.contact as unknown as DocumentsModule.ContactSnapshotRecord;
   const rawLines = view.lines as unknown as ReadonlyArray<DocumentsModule.LineViewData>;
@@ -119,12 +188,28 @@ export const documentViewToRenderModel = (view: DocumentView): DocumentRenderMod
     role: line.deducts !== null ? "deduction" : "item",
   }));
 
-  const branding: RenderBranding = {
+  const branding: RenderBranding = context?.branding ?? {
     accentColor: DEFAULT_ACCENT,
     footerText: null,
     logo: null,
     stamp: null,
   };
+
+  const variableSymbol = resolveVariableSymbol(context?.variableSymbol, view.number);
+  const paymentQr =
+    context?.paymentQr !== undefined
+      ? context.paymentQr
+      : (view.paymentQr ??
+        computeDocumentPaymentQr({
+          kind: view.kind,
+          status: view.status,
+          number: view.number,
+          currency: view.totals.gross.currency,
+          amount: view.totals.gross.amount,
+          issuer,
+          variableSymbol,
+          dueOn: view.dates.dueOn,
+        }));
 
   return {
     kind: view.kind,
@@ -161,10 +246,10 @@ export const documentViewToRenderModel = (view: DocumentView): DocumentRenderMod
           bic: issuer.bankAccount.bic,
         }
       : null,
-    variableSymbol: view.number ? view.number.replace(/\D/g, "").slice(0, 10) : null,
-    orderNumber: null,
-    note: null,
-    reference: buildReference(view),
+    variableSymbol,
+    orderNumber: context?.orderNumber ?? null,
+    note: context?.note ?? null,
+    reference: buildReference(view, context),
     lines,
     totals: view.totals,
     fx: view.fx,
@@ -176,7 +261,7 @@ export const documentViewToRenderModel = (view: DocumentView): DocumentRenderMod
           })),
         }
       : {}),
-    paymentQr: computePaymentQr(view, issuer),
+    paymentQr,
     branding,
   };
 };
@@ -189,6 +274,10 @@ const czk = (n: string): Money => ({
 /** Builds a deterministic sample `DocumentRenderModel` for `Workspaces.previewBranding`. */
 export const brandingPreviewToRenderModel = (
   input: WorkspacesModule.BrandingPreviewInput,
+  images?: {
+    readonly logo?: RenderImage | null | undefined;
+    readonly stamp?: RenderImage | null | undefined;
+  },
 ): DocumentRenderModel => {
   const isCs = input.language === "cs";
   const unitPrice = BigDecimal.fromStringUnsafe("10000");
@@ -270,8 +359,8 @@ export const brandingPreviewToRenderModel = (
     branding: {
       accentColor: input.branding.accentColor,
       footerText: input.branding.footerText,
-      logo: null,
-      stamp: null,
+      logo: images?.logo ?? null,
+      stamp: images?.stamp ?? null,
     },
   };
 };
@@ -280,13 +369,19 @@ export const brandingPreviewToRenderModel = (
 export const reportPdfInputToRenderModel = (
   input: ReportsModule.ReportPdfInput,
   generatedAtIso: string,
+  context?: ReportRenderContext,
 ): ReportRenderModel => {
   const isCs = input.locale === "cs";
   const view = input.view;
   const periodLabel = `${view.period.from} – ${view.period.to}`;
   const base = {
-    workspace: { name: input.workspaceId, companyId: null, vatId: null },
-    branding: { accentColor: DEFAULT_ACCENT, footerText: null, logo: null, stamp: null },
+    workspace: context?.workspace ?? { name: input.workspaceId, companyId: null, vatId: null },
+    branding: context?.branding ?? {
+      accentColor: DEFAULT_ACCENT,
+      footerText: null,
+      logo: null,
+      stamp: null,
+    },
     periodLabel,
     generatedAt: generatedAtIso,
     footerNote: null,
@@ -488,53 +583,234 @@ export const PdfEngineLive: Layer.Layer<PdfEngine, Config.ConfigError> = Layer.e
 
 export const DocumentRendererLive: Layer.Layer<DocumentRenderer, never, PdfEngine> = Layer.effect(
   DocumentRenderer,
-  Effect.map(PdfEngine, (engine) =>
-    DocumentRenderer.of({
+  Effect.gen(function* () {
+    const engine = yield* PdfEngine;
+    const blobsOpt = yield* Effect.serviceOption(BlobStorage);
+    const documentsRepoOpt = yield* Effect.serviceOption(DocumentsRepo);
+    const workspacesRepoOpt = yield* Effect.serviceOption(WorkspacesRepo);
+    const coreStoreOpt = yield* Effect.serviceOption(CoreStore);
+    const shareLinksRepoOpt = yield* Effect.serviceOption(ShareLinksRepo);
+    const sqlOpt = yield* Effect.serviceOption(SqlClient.SqlClient);
+
+    const resolveWorkspaceId = (documentId: DocumentView["id"]) =>
+      Effect.gen(function* () {
+        const callerOpt = yield* Effect.serviceOption(CurrentCaller);
+        if (Option.isSome(callerOpt)) {
+          const caller = callerOpt.value;
+          if (caller._tag === "Member") return caller.workspaceId;
+          if (
+            caller._tag === "ShareLinkVisitor" &&
+            Option.isSome(shareLinksRepoOpt) &&
+            Option.isSome(coreStoreOpt)
+          ) {
+            const tokenHash = sha256HexSync(caller.token);
+            const linkOpt = yield* coreStoreOpt.value
+              .transaction(shareLinksRepoOpt.value.lockByTokenHash(tokenHash))
+              .pipe(Effect.catch(() => Effect.succeed(Option.none())));
+            if (Option.isSome(linkOpt)) return linkOpt.value.workspaceId;
+          }
+        }
+        if (Option.isSome(sqlOpt)) {
+          const rows = yield* sqlOpt.value<{ readonly workspace_id: WorkspaceId }>`
+            SELECT workspace_id FROM documents WHERE id = ${documentId} LIMIT 1
+          `.pipe(
+            Effect.catch(() =>
+              Effect.succeed([] as ReadonlyArray<{ readonly workspace_id: WorkspaceId }>),
+            ),
+          );
+          if (rows[0] !== undefined) return rows[0].workspace_id;
+        }
+        return undefined;
+      });
+
+    return DocumentRenderer.of({
       render: (view, options) =>
-        renderDocumentPdf(documentViewToRenderModel(view), options.template, options.language).pipe(
-          Effect.provideService(PdfEngine, engine),
-          Effect.orDie,
-        ),
-    }),
-  ),
+        Effect.gen(function* () {
+          const workspaceId = yield* resolveWorkspaceId(view.id);
+          const workspace =
+            workspaceId !== undefined && Option.isSome(workspacesRepoOpt)
+              ? yield* workspacesRepoOpt.value
+                  .getWorkspace(workspaceId)
+                  .pipe(Effect.catch(() => Effect.succeed(undefined)))
+              : undefined;
+
+          const cacheKey =
+            workspaceId !== undefined && workspace !== undefined && Option.isSome(blobsOpt)
+              ? documentPdfCacheKey({
+                  workspaceId,
+                  documentId: view.id,
+                  documentRevision: view.revision,
+                  workspaceRevision: workspace.revision,
+                  template: options.template,
+                  language: options.language,
+                })
+              : undefined;
+
+          if (cacheKey !== undefined && Option.isSome(blobsOpt)) {
+            const cached = yield* blobsOpt.value.get(cacheKey).pipe(
+              Effect.flatMap((stream) => Stream.runCollect(stream)),
+              Effect.map((chunks) => Option.some(concatBytes(chunks))),
+              Effect.catch(() => Effect.succeed(Option.none<Uint8Array>())),
+            );
+            if (Option.isSome(cached)) return cached.value;
+          }
+
+          const record =
+            workspaceId !== undefined && Option.isSome(documentsRepoOpt)
+              ? yield* documentsRepoOpt.value
+                  .get(workspaceId, view.id)
+                  .pipe(Effect.catch(() => Effect.succeed(undefined)))
+              : undefined;
+
+          let branding: RenderBranding | undefined;
+          if (workspaceId !== undefined && workspace !== undefined) {
+            const [logo, stamp] = Option.isSome(blobsOpt)
+              ? yield* Effect.all([
+                  loadBrandingImage(blobsOpt.value, workspaceId, "logo", workspace.branding.logo),
+                  loadBrandingImage(blobsOpt.value, workspaceId, "stamp", workspace.branding.stamp),
+                ])
+              : ([null, null] as const);
+            branding = {
+              accentColor: workspace.branding.accentColor,
+              footerText: workspace.branding.footerText,
+              logo,
+              stamp,
+            };
+          }
+
+          let correction: DocumentRenderContext["correction"];
+          if (view.kind === "credit_note") {
+            const originalId =
+              record?.links.find((l) => l.relation === "corrects")?.id ??
+              view.related.find((r) => r.relation === "corrects")?.id;
+            const originalRecord =
+              workspaceId !== undefined &&
+              originalId !== undefined &&
+              Option.isSome(documentsRepoOpt)
+                ? yield* documentsRepoOpt.value
+                    .get(workspaceId, originalId)
+                    .pipe(Effect.catch(() => Effect.succeed(undefined)))
+                : undefined;
+            if (originalRecord !== undefined || record !== undefined) {
+              correction = {
+                originalIssuedOn: originalRecord?.issuedOn ?? view.dates.issuedOn,
+                reason: record?.reason ?? "",
+              };
+            }
+          }
+
+          const model = documentViewToRenderModel(view, {
+            branding,
+            variableSymbol: record?.variableSymbol,
+            orderNumber: record?.orderNumber,
+            note: record?.note,
+            correction,
+          });
+          const bytes = yield* renderDocumentPdf(model, options.template, options.language).pipe(
+            Effect.provideService(PdfEngine, engine),
+            Effect.orDie,
+          );
+
+          if (cacheKey !== undefined && Option.isSome(blobsOpt)) {
+            yield* blobsOpt.value
+              .put(cacheKey, Stream.succeed(bytes), {
+                contentType: "application/pdf",
+                maxBytes: MAX_PDF_CACHE_BYTES,
+              })
+              .pipe(Effect.ignore);
+          }
+
+          return bytes;
+        }),
+    });
+  }),
 );
 
 export const ReportPdfRendererLive: Layer.Layer<ReportPdfRenderer, never, PdfEngine> = Layer.effect(
   ReportPdfRenderer,
-  Effect.map(PdfEngine, (engine) =>
-    ReportPdfRenderer.of({
+  Effect.gen(function* () {
+    const engine = yield* PdfEngine;
+    const workspacesRepoOpt = yield* Effect.serviceOption(WorkspacesRepo);
+    const blobsOpt = yield* Effect.serviceOption(BlobStorage);
+
+    return ReportPdfRenderer.of({
       render: (input) =>
-        Effect.sync(() => new Date().toISOString()).pipe(
-          Effect.flatMap((nowIso) =>
-            renderReportPdf(reportPdfInputToRenderModel(input, nowIso), input.locale),
-          ),
-          Effect.provideService(PdfEngine, engine),
-          Effect.orDie,
-        ),
-    }),
-  ),
+        Effect.gen(function* () {
+          const nowIso = new Date().toISOString();
+          const workspace = Option.isSome(workspacesRepoOpt)
+            ? yield* workspacesRepoOpt.value
+                .getWorkspace(input.workspaceId)
+                .pipe(Effect.catch(() => Effect.succeed(undefined)))
+            : undefined;
+          let context: ReportRenderContext | undefined;
+          if (workspace !== undefined) {
+            const [logo, stamp] = Option.isSome(blobsOpt)
+              ? yield* Effect.all([
+                  loadBrandingImage(
+                    blobsOpt.value,
+                    input.workspaceId,
+                    "logo",
+                    workspace.branding.logo,
+                  ),
+                  loadBrandingImage(
+                    blobsOpt.value,
+                    input.workspaceId,
+                    "stamp",
+                    workspace.branding.stamp,
+                  ),
+                ])
+              : ([null, null] as const);
+            context = {
+              workspace: {
+                name: workspace.issuingEntity.name,
+                companyId: workspace.issuingEntity.ico,
+                vatId: workspace.issuingEntity.dic,
+              },
+              branding: {
+                accentColor: workspace.branding.accentColor,
+                footerText: workspace.branding.footerText,
+                logo,
+                stamp,
+              },
+            };
+          }
+          return yield* renderReportPdf(
+            reportPdfInputToRenderModel(input, nowIso, context),
+            input.locale,
+          ).pipe(Effect.provideService(PdfEngine, engine), Effect.orDie);
+        }),
+    });
+  }),
 );
 
 export const BrandingPreviewLive: Layer.Layer<BrandingPreview, never, PdfEngine> = Layer.effect(
   BrandingPreview,
-  Effect.map(PdfEngine, (engine) =>
-    BrandingPreview.of({
+  Effect.gen(function* () {
+    const engine = yield* PdfEngine;
+    const blobsOpt = yield* Effect.serviceOption(BlobStorage);
+
+    return BrandingPreview.of({
       render: (input) =>
-        renderDocumentPdf(
-          brandingPreviewToRenderModel(input),
-          input.branding.pdfTemplate,
-          input.language,
-        ).pipe(
-          Effect.provideService(PdfEngine, engine),
-          Effect.orDie,
-          Effect.map((bytes) => ({
+        Effect.gen(function* () {
+          const [logo, stamp] = Option.isSome(blobsOpt)
+            ? yield* Effect.all([
+                loadBrandingImage(blobsOpt.value, input.workspaceId, "logo", input.branding.logo),
+                loadBrandingImage(blobsOpt.value, input.workspaceId, "stamp", input.branding.stamp),
+              ])
+            : ([null, null] as const);
+          const bytes = yield* renderDocumentPdf(
+            brandingPreviewToRenderModel(input, { logo, stamp }),
+            input.branding.pdfTemplate,
+            input.language,
+          ).pipe(Effect.provideService(PdfEngine, engine), Effect.orDie);
+          return {
             filename: `preview-${input.kind}.pdf`,
             contentType: "application/pdf",
             bytes: Stream.succeed(bytes),
-          })),
-        ),
-    }),
-  ),
+          };
+        }),
+    });
+  }),
 );
 
 /** Builds all three PDF renderer ports over a supplied `PdfEngine` layer (useful in tests). */

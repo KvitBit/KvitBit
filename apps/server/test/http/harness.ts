@@ -37,6 +37,7 @@ import { PrincipalResolver } from "../../src/auth/PrincipalResolver";
 import { PrincipalResolverLive } from "../../src/auth/PrincipalResolverLive";
 import { HttpConfigTest, HttpRoutesLive, RateLimiterMemory } from "../../src/http";
 import { acceptLanguageLocale, bearerToken } from "../../src/http/edge/request";
+import { ServerDocumentProjectionsLive } from "../../src/projections/documents";
 import { TestDatabase } from "./database";
 
 export const ORIGIN = "https://kvitbit.test";
@@ -122,7 +123,10 @@ export const makeHarness = (options: HarnessOptions = {}) => {
   // tables (auth.*, user_preferences, rate limits). Both are memoized, so the web handler and
   // `run` share one instance.
   const configLayer = HttpConfigTest(options.config);
-  const dbAndCore = Layer.mergeAll(TestCore(options), TestDatabase, configLayer).pipe(
+  const projectedTestCore = ServerDocumentProjectionsLive.pipe(
+    Layer.provideMerge(TestCore(options)),
+  );
+  const dbAndCore = Layer.mergeAll(projectedTestCore, TestDatabase, configLayer).pipe(
     Layer.provideMerge(TestClock.layer()),
   );
   const botLayer = (options.botProtection ?? NoopBotProtection).pipe(Layer.provide(dbAndCore));

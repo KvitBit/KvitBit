@@ -25,12 +25,14 @@ import { ExchangeRatesLive } from "./fx";
 import {
   BrandingPreviewLive,
   brandingPreviewToRenderModel,
+  type DocumentRenderContext,
   DocumentRendererLive,
   documentViewToRenderModel,
   makePdfRenderersLayer,
   PdfEngineLive,
   PdfRenderersLive,
   ReportPdfRendererLive,
+  type ReportRenderContext,
   reportPdfInputToRenderModel,
 } from "./pdf";
 import { CompanyRegistryLive } from "./registry";
@@ -52,8 +54,10 @@ import {
 export type {
   BlobDriver,
   BlobWiringConfig,
+  DocumentRenderContext,
   EmailWiringConfig,
   PdfWiringConfig,
+  ReportRenderContext,
   ShareSecretsConfig,
 };
 export {
@@ -92,6 +96,8 @@ export {
 /** Every external port `CoreLive` needs besides `UserDirectory` (provided by `PersistenceLive`). */
 export type ServerExternalPorts = Exclude<CoreExternalPorts, UserDirectory>;
 
+const PdfSupportingPortsLive = Layer.mergeAll(BlobStorageLive, ShareLinkKeysLive);
+
 /**
  * Live driven-port layer for `apps/server` (`main.ts` and `worker.ts`).
  * Requires only `SqlClient` (for `ExchangeRates` SQL cache) and `WorkflowEngine` (for workflow starters).
@@ -104,10 +110,9 @@ export const CoreExternalPortsLive: Layer.Layer<
   CompanyRegistryLive,
   ExchangeRatesLive,
   EmailSenderLive,
-  BlobStorageLive,
-  ShareLinkKeysLive,
+  PdfSupportingPortsLive,
   InvitationTokensLive,
-  PdfRenderersLive,
+  PdfRenderersLive.pipe(Layer.provide(PdfSupportingPortsLive)),
   WorkflowStartersLive,
 );
 
