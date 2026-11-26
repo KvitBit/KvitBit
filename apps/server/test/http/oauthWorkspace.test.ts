@@ -291,16 +291,28 @@ test.each(["DCR", "CIMD"])(
       expect(missingReplay.status).toBe(500);
       expect(await missingReplay.json()).toEqual({ error: "server_error" });
       await harness.run(
-        Effect.flatMap(
-          SqlClient.SqlClient,
-          (sql) => sql`drop trigger suppress_rotation_replay on auth.oauth_refresh_token`,
-        ),
+        Effect.gen(function* () {
+          const sql = yield* SqlClient.SqlClient;
+          yield* sql`drop trigger suppress_rotation_replay on auth.oauth_refresh_token`;
+          yield* sql`delete from auth.rate_limit`;
+          yield* sql`create function delay_initial_bucket() returns trigger language plpgsql as $$
+          begin perform pg_sleep(0.05); return new; end;
+        $$`;
+          yield* sql`create trigger delay_initial_bucket before insert on auth.rate_limit
+          for each row execute function delay_initial_bucket()`;
+        }),
       );
 
       const [rotation, parallelReplay] = await Promise.all([
         refresh(firstTokens.refresh_token),
         refresh(firstTokens.refresh_token),
       ]);
+      await harness.run(
+        Effect.flatMap(
+          SqlClient.SqlClient,
+          (sql) => sql`drop trigger delay_initial_bucket on auth.rate_limit`,
+        ),
+      );
       const rotated = await tokens(rotation);
       const expectSameRotation = (replayed: typeof rotated) => {
         expect(replayed.access_token === rotated.access_token).toBe(true);

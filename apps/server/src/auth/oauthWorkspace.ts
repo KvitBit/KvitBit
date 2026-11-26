@@ -275,6 +275,13 @@ export const makeWorkspaceAuth = (sql: SqlClient.SqlClient) => (config: AuthConf
           select?: string[] | undefined;
           forceAllowId?: boolean | undefined;
         }) => {
+          if (input.model === "rateLimit" && tokenContext.getStore() !== undefined) {
+            // Better Auth retries a duplicate cold-bucket insert. Roll back only the insert
+            // so its retry can read and increment the winning row in the same transaction.
+            return runDrizzleEffect(
+              sql.withTransaction(withDrizzleSqlContext(() => adapter.create<T, R>(input))),
+            );
+          }
           if (input.model !== "oauthAccessToken" && input.model !== "oauthRefreshToken") {
             return adapter.create<T, R>(input);
           }
