@@ -1,0 +1,86 @@
+{
+  "expo": {
+    "name": "Kvitbit",
+    "slug": "kvitbit",
+    "version": "0.1.0",
+    "scheme": "kvitbit",
+    "orientation": "default",
+    "userInterfaceStyle": "automatic",
+    "backgroundColor": "#F4F4F5",
+    "icon": "../../assets/brand/mobile/icon-1024.png",
+    "runtimeVersion": { "policy": "fingerprint" },
+    "android": {
+      "package": "cz.kvitbit.app",
+      "adaptiveIcon": {
+        "foregroundImage": "../../assets/brand/mobile/adaptive-foreground-1024.png",
+        "monochromeImage": "./assets/brand/adaptive-monochrome-1024.png",
+        "backgroundColor": "#111111"
+      },
+      "edgeToEdgeEnabled": true,
+      "intentFilters": [
+        {
+          "action": "VIEW",
+          "autoVerify": true,
+          "data": [{ "scheme": "https", "host": "kvitbit.cz", "pathPrefix": "/app" }],
+          "category": ["BROWSABLE", "DEFAULT"]
+        },
+        {
+          "action": "VIEW",
+          "autoVerify": true,
+          "data": [
+            { "scheme": "https", "host": "kvitbit.cz", "path": "/api/auth/verify-email" },
+            { "scheme": "https", "host": "kvitbit.cz", "path": "/api/auth/magic-link/verify" }
+          ],
+          "category": ["BROWSABLE", "DEFAULT"]
+        },
+        {
+          "action": "SEND",
+          "data": [{ "mimeType": "image/*" }, { "mimeType": "application/pdf" }],
+          "category": ["DEFAULT"]
+        },
+        {
+          "action": "SEND_MULTIPLE",
+          "data": [{ "mimeType": "image/*" }, { "mimeType": "application/pdf" }],
+          "category": ["DEFAULT"]
+        }
+      ]
+    },
+    "web": {
+      "output": "single",
+      "bundler": "metro",
+      "favicon": "../../assets/brand/web/favicon-48.png",
+      "name": "Kvitbit",
+      "shortName": "Kvitbit",
+      "themeColor": "#111111",
+      "backgroundColor": "#F4F4F5"
+    },
+    "experiments": { "baseUrl": "/app", "typedRoutes": false },
+    "plugins": [
+      "expo-router",
+      "expo-localization",
+      "expo-system-ui",
+      "expo-secure-store",
+      [
+        "expo-splash-screen",
+        {
+          "image": "../../assets/brand/mobile/splash-icon-1024.png",
+          "imageWidth": 200,
+          "backgroundColor": "#F4F4F5",
+          "dark": {
+            "image": "../../assets/brand/mobile/splash-icon-1024.png",
+            "backgroundColor": "#111111"
+          }
+        }
+      ],
+      ["expo-build-properties", { "android": { "minSdkVersion": 28 } }],
+      "expo-status-bar",
+      [
+        "expo-image-picker",
+        {
+          "cameraPermission": "Kvitbit uses the camera to capture receipts.",
+          "microphonePermission": false
+        }
+      ]
+    ]
+  }
+}
