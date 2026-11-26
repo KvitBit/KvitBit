@@ -426,10 +426,19 @@ describe("document editor model", () => {
     expect(input.lines.length).toBe(1);
     expect(input.fx?.manual.quantity).toBe(1);
 
-    const patch = buildDocumentPatch(filled, makeDoc(), "admin");
+    const patch = buildDocumentPatch(filled, base, makeDoc(), "admin");
     expect(patch.number).toBe("2026-9999");
     expect(patch.refreshParties).toBe(true);
-    const memberPatch = buildDocumentPatch(filled, makeDoc(), "member");
+    expect(patch).not.toHaveProperty("language");
+    expect(patch).not.toHaveProperty("pricesIncludeVat");
+    const memberPatch = buildDocumentPatch(filled, base, makeDoc(), "member");
     expect(memberPatch.number).toBeUndefined();
+
+    const unverified = { ...base, language: null, pricesIncludeVat: null };
+    const explicit = { ...unverified, language: "cs" as const, pricesIncludeVat: false };
+    expect(buildDocumentPatch(explicit, unverified, makeDoc(), "member")).toEqual({
+      language: "cs",
+      pricesIncludeVat: false,
+    });
   });
 });

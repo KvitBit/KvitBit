@@ -222,6 +222,7 @@ describe("DocumentDetailScreen and DocumentEditorScreen", () => {
   let dropIssueBeforeCommit = false;
   let holdFxResponse: Promise<void> | null = null;
   let committed: Map<string, ReturnType<typeof makeWireDoc>>;
+  let templateTerms: { language: string; series: string; pricesIncludeVat: boolean } | null = null;
 
   beforeAll(() => {
     mock.module("../../ui", () => uiShim);
@@ -249,12 +250,19 @@ describe("DocumentDetailScreen and DocumentEditorScreen", () => {
           });
         }
 
-        if (req.method === "GET" && url.pathname.endsWith(`/documents/${DOC_ID}`)) {
+        if (req.method === "GET" && url.pathname.endsWith(`/documents/${wireDoc.id}`)) {
           return Response.json(wireDoc);
         }
-        if (req.method === "PATCH" && url.pathname.endsWith(`/documents/${DOC_ID}`)) {
+        if (req.method === "PATCH" && url.pathname.endsWith(`/documents/${wireDoc.id}`)) {
           if (req.headers.get("If-Match") !== `"${wireDoc.revision}"`) {
             return new Response(null, { status: 412 });
+          }
+          if (templateTerms !== null) {
+            templateTerms = {
+              language: body.language ?? templateTerms.language,
+              series: body.series ?? templateTerms.series,
+              pricesIncludeVat: body.pricesIncludeVat ?? templateTerms.pricesIncludeVat,
+            };
           }
           wireDoc = { ...wireDoc, revision: wireDoc.revision + 1 };
           return Response.json(wireDoc);
@@ -291,6 +299,11 @@ describe("DocumentDetailScreen and DocumentEditorScreen", () => {
           return Response.json(issued, { status: fromDraft ? 200 : 201 });
         }
         if (req.method === "POST" && url.pathname.endsWith(`/templates/${TEMPLATE_ID}/documents`)) {
+          templateTerms = {
+            language: body.patch.language,
+            series: body.patch.series,
+            pricesIncludeVat: body.patch.pricesIncludeVat,
+          };
           if (dropNext === url.pathname) {
             dropNext = null;
             return new Response("{", {
@@ -494,6 +507,7 @@ describe("DocumentDetailScreen and DocumentEditorScreen", () => {
     dropNext = null;
     dropIssueBeforeCommit = false;
     holdFxResponse = null;
+    templateTerms = null;
     wireDoc = makeWireDoc();
     mockParams = { id: DOC_ID };
   });
@@ -862,8 +876,10 @@ describe("DocumentDetailScreen and DocumentEditorScreen", () => {
     await change("editor-line-desc-0", "Edited development sprint");
     await click("editor-save-button");
     await waitFor(() => calls.some((call) => call.method === "PATCH"), "template draft saved");
-    expect(calls.find((call) => call.method === "PATCH")?.body).toMatchObject({
-      note: "Imported template note",
+    expect(calls.find((call) => call.method === "PATCH")?.body).toEqual({
+      lines: [expect.objectContaining({ description: "Edited development sprint" })],
+    });
+    expect(templateTerms).toEqual({
       language: "en",
       series: CONTACT_SERIES,
       pricesIncludeVat: true,
@@ -1018,13 +1034,16 @@ describe("DocumentDetailScreen and DocumentEditorScreen", () => {
     await change("editor-note", "Edited note");
     const first = await saveEdit("First edit");
     expect(first?.ifMatch).toBe('"3"');
+    expect(first?.body).toMatchObject({ note: "Edited note" });
 
     await openEditor();
     await waitFor(() => noteValue() === "Edited note", "saved note reopened");
     const second = await saveEdit("Second edit");
     expect(second?.ifMatch).toBe('"4"');
-    expect(second?.body).toMatchObject({
-      note: "Edited note",
+    expect(second?.body).toEqual({
+      lines: [expect.objectContaining({ description: "Second edit" })],
+    });
+    expect(templateTerms).toEqual({
       language: "en",
       series: CONTACT_SERIES,
       pricesIncludeVat: true,
@@ -1070,8 +1089,10 @@ describe("DocumentDetailScreen and DocumentEditorScreen", () => {
     expect(noteValue()).toBe("Recover this edited note");
     const second = await saveEdit("Update just the description");
     expect(second?.ifMatch).toBe('"4"');
-    expect(second?.body).toMatchObject({
-      note: "Recover this edited note",
+    expect(second?.body).toEqual({
+      lines: [expect.objectContaining({ description: "Update just the description" })],
+    });
+    expect(templateTerms).toEqual({
       language: "en",
       series: CONTACT_SERIES,
       pricesIncludeVat: true,
@@ -1119,8 +1140,15 @@ describe("DocumentDetailScreen and DocumentEditorScreen", () => {
 
   test("an expired template import starts fresh only after explicit reconciliation confirmation", async () => {
     const path = `/api/v1/workspaces/${WS_ID}/templates/${TEMPLATE_ID}/documents`;
+    const recoveredId = "01930000-0000-7000-8000-000000000199" as DocumentId;
     dropNext = path;
-    wireDoc = makeWireDoc({ status: "draft", kind: "invoice", number: null, settlement: "unpaid" });
+    wireDoc = makeWireDoc({
+      id: recoveredId,
+      status: "draft",
+      kind: "invoice",
+      number: null,
+      settlement: "unpaid",
+    });
     mockParams = { kind: "invoice", template: TEMPLATE_ID };
     await show(<DocumentNewRoute />);
     await waitFor(
@@ -1140,6 +1168,27 @@ describe("DocumentDetailScreen and DocumentEditorScreen", () => {
 
       await click("template-import-review-documents");
       expect(replaced).toHaveLength(1);
+      expect(templateTerms).toEqual({
+        language: "en",
+        series: CONTACT_SERIES,
+        pricesIncludeVat: true,
+      });
+      mockParams = { id: recoveredId };
+      await openEditor();
+      expect(root.container().textContent).toContain("Some saved settings are unavailable");
+      expect(root.container().querySelector('[data-testid="editor-preview-total"]')).toBeNull();
+      const edit = await saveEdit("Change only the description");
+      expect(edit?.ifMatch).toBe('"3"');
+      expect(edit?.body).toEqual({
+        lines: [expect.objectContaining({ description: "Change only the description" })],
+      });
+      expect(templateTerms).toEqual({
+        language: "en",
+        series: CONTACT_SERIES,
+        pricesIncludeVat: true,
+      });
+
+      mockParams = { kind: "invoice", template: TEMPLATE_ID };
       replaced.length = 0;
       await root.render(null);
       await show(<DocumentNewRoute />);
@@ -1152,6 +1201,7 @@ describe("DocumentDetailScreen and DocumentEditorScreen", () => {
       await click("template-import-start-new");
       expect(calls.filter((call) => call.path === path)).toHaveLength(1);
 
+      wireDoc = { ...wireDoc, id: FINAL_ID, revision: 1 };
       overlay.answer = true;
       await click("template-import-start-new");
       await waitFor(() => replaced.length === 1, "new import opens its draft");
@@ -1159,6 +1209,7 @@ describe("DocumentDetailScreen and DocumentEditorScreen", () => {
       expect(attempts).toHaveLength(2);
       expect(attempts[1]?.key).not.toBe(attempts[0]?.key);
       expect(attempts[1]?.body).toMatchObject({ patch: { note: "Newer template note" } });
+      expect(replaced[0]).toBe(`/w/${WS_SLUG}/documents/${FINAL_ID}/edit`);
     } finally {
       setSystemTime();
     }

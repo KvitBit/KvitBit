@@ -723,8 +723,11 @@ export function DocumentEditorScreen(props: DocumentEditorProps) {
     }
 
     let finalDoc = originalDoc;
-    if (base.draft !== draft) {
-      const patch = buildDocumentPatch(draft, originalDoc, workspace.role);
+    const patch =
+      base.draft === draft
+        ? {}
+        : buildDocumentPatch(draft, base.draft, originalDoc, workspace.role);
+    if (Object.keys(patch).length > 0) {
       const editRes = await run((api) =>
         api.documents.edit({
           params: { workspaceId: workspace.id, documentId: originalDoc.id },
@@ -789,6 +792,11 @@ export function DocumentEditorScreen(props: DocumentEditorProps) {
 
   const isLocked = originalDoc?.locked === true;
   const isIssued = originalDoc?.status === "issued";
+  const hasSavedTerms = props.mode === "new" || cachedTemplate?.seed != null;
+  const keepSaved = {
+    value: "keep" as const,
+    label: local({ cs: "Ponechat uložené", en: "Keep saved value" }),
+  };
   const canAdmin = workspace.role === "owner" || workspace.role === "admin";
   const selectedContact =
     draft === null ? null : (contacts.find((c) => c.id === draft.contactId) ?? null);
@@ -884,6 +892,14 @@ export function DocumentEditorScreen(props: DocumentEditorProps) {
             <Banner tone="warning" text={t("documents.editor.issuedWarning")} />
           ) : null}
           {bannerError !== null ? <Banner text={bannerError} /> : null}
+          {!hasSavedTerms ? (
+            <Banner
+              text={local({
+                cs: "Některá uložená nastavení se v editoru nezobrazují. Uložením se změní jen upravená pole.",
+                en: "Some saved settings are unavailable in this editor. Saving changes only the fields you edit.",
+              })}
+            />
+          ) : null}
           {templateContactArchived && draft.contactId === null ? (
             <Banner
               tone="warning"
@@ -1214,10 +1230,14 @@ export function DocumentEditorScreen(props: DocumentEditorProps) {
                 <>
                   <SegmentedChoice
                     label={t("documents.editor.series")}
-                    value={draft.seriesId}
-                    choices={kindSeries.map((s) => ({ value: s.id, label: s.name }))}
+                    value={draft.seriesId ?? (hasSavedTerms ? null : "keep")}
+                    choices={[
+                      ...(!hasSavedTerms ? [keepSaved] : []),
+                      ...kindSeries.map((s) => ({ value: s.id, label: s.name })),
+                    ]}
                     onChange={(seriesId) => {
-                      if (!isLocked) setDraft({ ...draft, seriesId });
+                      if (!isLocked)
+                        setDraft({ ...draft, seriesId: seriesId === "keep" ? null : seriesId });
                     }}
                   />
                   {selectedSeries !== null ? (
@@ -1238,23 +1258,50 @@ export function DocumentEditorScreen(props: DocumentEditorProps) {
 
               <SegmentedChoice
                 label={t("documents.editor.language")}
-                value={draft.language}
+                value={draft.language ?? (hasSavedTerms ? null : "keep")}
                 choices={[
+                  ...(!hasSavedTerms ? [keepSaved] : []),
                   { value: "cs", label: t(enumKey("locale", "cs")) },
                   { value: "en", label: t(enumKey("locale", "en")) },
                 ]}
-                onChange={(language: Locale) => {
-                  if (!isLocked) setDraft({ ...draft, language });
+                onChange={(language: Locale | "keep") => {
+                  if (!isLocked)
+                    setDraft({ ...draft, language: language === "keep" ? null : language });
                 }}
               />
 
               {workspaceDefaults.taxRegime === "vat_payer" ? (
-                <SwitchRow
-                  label={t("documents.editor.pricesIncludeVat")}
-                  value={draft.pricesIncludeVat}
-                  disabled={isLocked}
-                  onChange={(pricesIncludeVat) => setDraft({ ...draft, pricesIncludeVat })}
-                />
+                hasSavedTerms ? (
+                  <SwitchRow
+                    label={t("documents.editor.pricesIncludeVat")}
+                    value={draft.pricesIncludeVat === true}
+                    disabled={isLocked}
+                    onChange={(pricesIncludeVat) => setDraft({ ...draft, pricesIncludeVat })}
+                  />
+                ) : (
+                  <SegmentedChoice
+                    label={t("documents.editor.pricesIncludeVat")}
+                    value={
+                      draft.pricesIncludeVat === null
+                        ? "keep"
+                        : draft.pricesIncludeVat
+                          ? "inclusive"
+                          : "exclusive"
+                    }
+                    choices={[
+                      keepSaved,
+                      { value: "inclusive", label: local({ cs: "S DPH", en: "Including VAT" }) },
+                      { value: "exclusive", label: local({ cs: "Bez DPH", en: "Excluding VAT" }) },
+                    ]}
+                    onChange={(basis) => {
+                      if (!isLocked)
+                        setDraft({
+                          ...draft,
+                          pricesIncludeVat: basis === "keep" ? null : basis === "inclusive",
+                        });
+                    }}
+                  />
+                )
               ) : null}
 
               <View style={styles.rowFields}>
@@ -1355,6 +1402,13 @@ export function DocumentEditorScreen(props: DocumentEditorProps) {
                 ) : null}
               </Card>
             </Section>
+          ) : draft.pricesIncludeVat === null && workspaceDefaults.taxRegime === "vat_payer" ? (
+            <Text variant="meta" color="onSurfaceVariant">
+              {local({
+                cs: "Pro náhled vyberte, zda ceny zahrnují DPH.",
+                en: "Choose a VAT pricing basis to preview changes.",
+              })}
+            </Text>
           ) : null}
 
           {/* Notes */}
@@ -1394,7 +1448,7 @@ export function DocumentEditorScreen(props: DocumentEditorProps) {
             )}
             onSelect={(contact) =>
               setDraft((prev) =>
-                prev === null
+                prev === null || prev.contactId === contact.id
                   ? prev
                   : applyContactDefaults(
                       prev,

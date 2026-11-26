@@ -64,11 +64,11 @@ export interface EditorDraft {
   readonly issuedOn: string;
   readonly taxableSupplyOn: string;
   readonly dueOn: string;
-  readonly language: Locale;
+  readonly language: Locale | null;
   readonly seriesId: NumberingSeriesId | null;
   readonly bankAccountId: BankAccountId | null;
   readonly paymentMethod: PaymentMethod;
-  readonly pricesIncludeVat: boolean;
+  readonly pricesIncludeVat: boolean | null;
   readonly variableSymbol: string;
   readonly orderNumber: string;
   readonly note: string;
@@ -216,6 +216,7 @@ export const draftFromDocument = (
   const currency = doc.totals.gross.currency;
   const today = params.today ?? todayIsoPrague();
   const isDuplicate = params.duplicate === true;
+  // DocumentView omits these persisted terms. Defaults are suitable only for a new copy.
   const stored = params.importedSeed ?? undefined;
   return {
     kind,
@@ -224,21 +225,22 @@ export const draftFromDocument = (
     issuedOn: isDuplicate ? today : doc.dates.issuedOn,
     taxableSupplyOn: isDuplicate ? today : (doc.dates.taxableSupplyOn ?? doc.dates.issuedOn),
     dueOn: isDuplicate ? addDaysIso(today, params.workspaceDefaults.dueDays) : doc.dates.dueOn,
-    language: stored?.language ?? params.workspaceDefaults.language,
+    language: stored?.language ?? (isDuplicate ? params.workspaceDefaults.language : null),
     seriesId:
-      stored === undefined
+      stored?.series ??
+      (isDuplicate && stored === undefined
         ? defaultSeriesId(
             params.seriesList,
             kind,
             params.workspaceDefaults.preferredSeriesByKind[kind],
           )
-        : (stored.series ?? null),
+        : null),
     bankAccountId:
       issuer.bankAccount?.id ??
       stored?.bankAccount ??
-      defaultBankAccountId(params.bankAccounts, currency),
+      (isDuplicate ? defaultBankAccountId(params.bankAccounts, currency) : null),
     paymentMethod: doc.paymentMethod,
-    pricesIncludeVat: stored?.pricesIncludeVat ?? false,
+    pricesIncludeVat: stored?.pricesIncludeVat ?? (isDuplicate ? false : null),
     variableSymbol: stored?.variableSymbol ?? "",
     orderNumber: stored?.orderNumber ?? "",
     note: stored?.note ?? "",
@@ -329,6 +331,7 @@ export const computeLivePreview = (
   paymentRounding: "none" | "whole_unit",
   cnbFx: FxRateView | null,
 ): LivePreview | null => {
+  if (taxRegime === "vat_payer" && draft.pricesIncludeVat === null) return null;
   const taxPointRaw =
     parseIsoDate(draft.taxableSupplyOn) !== undefined
       ? draft.taxableSupplyOn
@@ -344,7 +347,7 @@ export const computeLivePreview = (
     lines: previewLines,
     currency: draft.currency,
     taxPoint: taxPointRaw as IsoDate,
-    pricesIncludeVat: draft.pricesIncludeVat,
+    pricesIncludeVat: draft.pricesIncludeVat ?? false,
     fx: resolvePreviewFx(draft, cnbFx),
     paymentRounding,
     direction: "outgoing",
@@ -478,10 +481,10 @@ export const buildDocumentInput = (draft: EditorDraft): DocumentInput => {
       ? { taxableSupplyOn: draft.taxableSupplyOn as IsoDate }
       : {}),
     due: { on: draft.dueOn as IsoDate },
-    language: draft.language,
+    ...(draft.language === null ? {} : { language: draft.language }),
     ...(draft.seriesId !== null ? { series: draft.seriesId } : {}),
     ...(draft.bankAccountId !== null ? { bankAccount: draft.bankAccountId } : {}),
-    pricesIncludeVat: draft.pricesIncludeVat,
+    ...(draft.pricesIncludeVat === null ? {} : { pricesIncludeVat: draft.pricesIncludeVat }),
     ...(draft.variableSymbol.trim() !== "" ? { variableSymbol: draft.variableSymbol.trim() } : {}),
     ...(draft.orderNumber.trim() !== "" ? { orderNumber: draft.orderNumber.trim() } : {}),
     ...(draft.note.trim() !== "" ? { note: draft.note.trim() } : {}),
@@ -492,6 +495,7 @@ export const buildDocumentInput = (draft: EditorDraft): DocumentInput => {
 
 export const buildDocumentPatch = (
   draft: EditorDraft,
+  baseline: EditorDraft,
   original: DocumentView,
   role: Role,
 ): DocumentPatch => {
@@ -501,27 +505,42 @@ export const buildDocumentPatch = (
   const trimmedNumber = draft.overrideNumber.trim();
   const numberChanged =
     !isDraft && canAdmin && trimmedNumber !== "" && trimmedNumber !== (original.number ?? "");
+  const changed = (field: keyof EditorDraft) => draft[field] !== baseline[field];
+  const fxChanged =
+    changed("currency") ||
+    changed("fxMode") ||
+    (draft.fxMode === "manual" && (changed("manualFxRate") || changed("manualFxQuantity")));
   return {
-    ...(draft.contactId !== null ? { contact: draft.contactId } : {}),
-    lines: toLineInputs(draft.lines),
-    currency: draft.currency,
-    issuedOn: draft.issuedOn as IsoDate,
-    ...(draft.taxableSupplyOn.trim() !== ""
+    ...(changed("contactId") && draft.contactId !== null ? { contact: draft.contactId } : {}),
+    ...(changed("lines") ? { lines: toLineInputs(draft.lines) } : {}),
+    ...(changed("currency") ? { currency: draft.currency } : {}),
+    ...(changed("issuedOn") ? { issuedOn: draft.issuedOn as IsoDate } : {}),
+    ...(changed("taxableSupplyOn") && draft.taxableSupplyOn.trim() !== ""
       ? { taxableSupplyOn: draft.taxableSupplyOn as IsoDate }
       : {}),
-    due: { on: draft.dueOn as IsoDate },
-    language: draft.language,
-    ...(isDraft && draft.seriesId !== null ? { series: draft.seriesId } : {}),
-    ...(draft.bankAccountId !== null ? { bankAccount: draft.bankAccountId } : {}),
-    pricesIncludeVat: draft.pricesIncludeVat,
-    ...(draft.variableSymbol.trim() !== "" ? { variableSymbol: draft.variableSymbol.trim() } : {}),
-    ...(draft.orderNumber.trim() !== "" ? { orderNumber: draft.orderNumber.trim() } : {}),
-    ...(draft.note.trim() !== "" ? { note: draft.note.trim() } : {}),
-    paymentMethod: draft.paymentMethod,
-    ...(draft.currency.toUpperCase() !== "CZK"
+    ...(changed("dueOn") ? { due: { on: draft.dueOn as IsoDate } } : {}),
+    ...(changed("language") && draft.language !== null ? { language: draft.language } : {}),
+    ...(isDraft && changed("seriesId") && draft.seriesId !== null
+      ? { series: draft.seriesId }
+      : {}),
+    ...(changed("bankAccountId") && draft.bankAccountId !== null
+      ? { bankAccount: draft.bankAccountId }
+      : {}),
+    ...(changed("pricesIncludeVat") && draft.pricesIncludeVat !== null
+      ? { pricesIncludeVat: draft.pricesIncludeVat }
+      : {}),
+    ...(changed("variableSymbol") && draft.variableSymbol.trim() !== ""
+      ? { variableSymbol: draft.variableSymbol.trim() }
+      : {}),
+    ...(changed("orderNumber") && draft.orderNumber.trim() !== ""
+      ? { orderNumber: draft.orderNumber.trim() }
+      : {}),
+    ...(changed("note") && draft.note.trim() !== "" ? { note: draft.note.trim() } : {}),
+    ...(changed("paymentMethod") ? { paymentMethod: draft.paymentMethod } : {}),
+    ...(fxChanged && draft.currency.toUpperCase() !== "CZK"
       ? { fx: draft.fxMode === "manual" ? (fx ?? null) : null }
       : {}),
     ...(numberChanged ? { number: trimmedNumber } : {}),
-    ...(draft.refreshParties ? { refreshParties: true } : {}),
+    ...(changed("refreshParties") && draft.refreshParties ? { refreshParties: true } : {}),
   };
 };
