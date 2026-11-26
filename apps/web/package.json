@@ -12,7 +12,6 @@
     "e2e": "playwright test -c e2e/playwright.config.ts"
   },
   "dependencies": {
-    "@effect/platform-browser": "4.1.4",
     "@effect/ui": "https://pkg.pr.new/Effect-TS/ui/@effect/ui@5f8b357",
     "@kvitbit/api-contract": "workspace:*",
     "@kvitbit/brand": "workspace:*",
