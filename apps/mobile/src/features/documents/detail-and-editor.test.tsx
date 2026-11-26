@@ -491,12 +491,12 @@ describe("DocumentDetailScreen and DocumentEditorScreen", () => {
     mockParams = { id: DOC_ID };
   });
 
-  const show = (node: ReactNode) =>
+  const show = (node: ReactNode, token = "tok") =>
     root.render(
       <TestProviders locale="en" overlay={overlay}>
         <SessionProvider origin={server.url.origin}>
           <SignedInFixture>
-            <ApiProvider token="tok" origin={server.url.origin}>
+            <ApiProvider token={token} origin={server.url.origin}>
               <WorkspaceProvider
                 workspace={WORKSPACE}
                 workspaces={[WORKSPACE]}
@@ -1069,6 +1069,25 @@ describe("DocumentDetailScreen and DocumentEditorScreen", () => {
       series: CONTACT_SERIES,
       pricesIncludeVat: true,
     });
+  });
+
+  test("an editor refresh cannot submit a template draft against an unrelated newer revision", async () => {
+    await importTemplateDraft();
+    await openEditor();
+    await change("editor-line-desc-0", "Local edit before refresh");
+    wireDoc = { ...wireDoc, revision: wireDoc.revision + 1 };
+    const reads = () =>
+      calls.filter((call) => call.method === "GET" && call.path.endsWith(`/documents/${DOC_ID}`))
+        .length;
+    const before = reads();
+    await show(<DocumentEditRoute />, "refreshed");
+    await waitFor(() => reads() > before, "document reloaded");
+    await settle();
+    await click("editor-save-button");
+    await waitFor(
+      () => root.container().textContent?.includes("changed while you were editing") === true,
+    );
+    expect(calls.filter((call) => call.method === "PATCH")).toHaveLength(0);
   });
 
   test("issuing an imported draft from detail carries its known template settings forward", async () => {

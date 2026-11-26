@@ -427,7 +427,11 @@ export function DocumentEditorScreen(props: DocumentEditorProps) {
     (originalDoc === null || cachedTemplate?.revision === importRevision) &&
     (templateContactId === null || templateContactRemote.state._tag === "Ready");
 
-  const savedDraft = useRef<EditorDraft | null>(null);
+  const savedDraft = useRef<{
+    readonly draft: EditorDraft;
+    readonly id: DocumentId;
+    readonly revision: number;
+  } | null>(null);
   const submitting = useRef(false);
   const [cnbFx, setCnbFx] = useState<FxRateView | null>(null);
   const [fxLoading, setFxLoading] = useState(false);
@@ -454,7 +458,7 @@ export function DocumentEditorScreen(props: DocumentEditorProps) {
         importedSeed: cachedTemplate?.seed ?? null,
       });
       const loaded = templateContactArchived ? { ...initial, contactId: null } : initial;
-      savedDraft.current = loaded;
+      savedDraft.current = { draft: loaded, id: originalDoc.id, revision: originalDoc.revision };
       setDraft(loaded);
       if (templateContactArchived) setContactPickerOpen(true);
       return;
@@ -706,10 +710,20 @@ export function DocumentEditorScreen(props: DocumentEditorProps) {
       return;
     }
 
-    if (originalDoc === null) return;
+    const base = savedDraft.current;
+    if (originalDoc === null || base === null) return;
+    if (base.id !== originalDoc.id || base.revision !== originalDoc.revision) {
+      setBannerError(
+        local({
+          cs: "Doklad se během úprav změnil. Otevřete jej znovu a načtěte aktuální verzi.",
+          en: "This document changed while you were editing it. Reopen it to load the current revision.",
+        }),
+      );
+      return;
+    }
 
     let finalDoc = originalDoc;
-    if (savedDraft.current !== draft) {
+    if (base.draft !== draft) {
       const patch = buildDocumentPatch(draft, originalDoc, workspace.role);
       const editRes = await run((api) =>
         api.documents.edit({
@@ -726,7 +740,7 @@ export function DocumentEditorScreen(props: DocumentEditorProps) {
       }
       finalDoc = editRes.value;
       sourceDocRemote.set(finalDoc);
-      savedDraft.current = draft;
+      savedDraft.current = { draft, id: finalDoc.id, revision: finalDoc.revision };
       if (!(await recordWrite(originalDoc.id, patch, originalDoc.revision, finalDoc.revision))) {
         return;
       }
@@ -749,6 +763,7 @@ export function DocumentEditorScreen(props: DocumentEditorProps) {
       }
       finalDoc = issueRes.value;
       sourceDocRemote.set(finalDoc);
+      savedDraft.current = { draft, id: finalDoc.id, revision: finalDoc.revision };
       if (!(await recordWrite(id, null, revision, finalDoc.revision))) return;
     }
 
