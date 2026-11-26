@@ -57,6 +57,16 @@ describe("Edge routes: health, config, botProtection, invitations, oauthConsent,
     expect(await response.text()).toContain("Scalar.createApiReference");
   });
 
+  test("the Better Auth route bounds JSON bodies without Content-Length", async () => {
+    harness = makeHarness();
+    const response = await harness.fetch("/api/auth/sign-up/email", {
+      ...json({ name: "x".repeat(1024 * 1024) }),
+      method: "POST",
+    });
+    expect(response.status).toBe(413);
+    expect(await response.json()).toEqual({ _tag: "PayloadTooLarge", limitBytes: 1024 * 1024 });
+  });
+
   test("a route defect returns a correlated error without its cause", async () => {
     const routes = HttpRouter.add("GET", "/broken", Effect.die(new Error("fixture detail")));
     const app = HttpRouter.toWebHandler(Layer.merge(routes, RequestIdsLive), {

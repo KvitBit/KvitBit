@@ -3,15 +3,16 @@
  * (`/.well-known/oauth-authorization-server` and `/.well-known/oauth-authorization-server/api/auth`,
  * per http-mcp-contracts section 1 & 6.2 and board agreement #889).
  */
-import { Effect, Layer } from "effect";
-import { HttpRouter, HttpServerResponse } from "effect/http";
+import { ByteSize, Effect, Layer } from "effect";
+import { HttpIncomingMessage, HttpRouter, HttpServerResponse } from "effect/http";
 import { HttpServerRequest } from "effect/http/HttpServerRequest";
 import { HttpConfig } from "../http/config";
+import { JSON_BODY_MAX_BYTES } from "../http/edge/middleware";
 import { AuthServer } from "./AuthServer";
 
 const METHODS_WITHOUT_BODY = new Set(["GET", "HEAD"]);
 
-const toWebRequest = (request: HttpServerRequest, url: string): Effect.Effect<Request, never> =>
+const toWebRequest = (request: HttpServerRequest, url: string) =>
   Effect.gen(function* () {
     const headers = new Headers();
     for (const [name, value] of Object.entries(request.headers)) {
@@ -21,7 +22,7 @@ const toWebRequest = (request: HttpServerRequest, url: string): Effect.Effect<Re
       return new Request(url, { method: request.method, headers });
     }
     const body = yield* request.arrayBuffer.pipe(
-      Effect.catchCause(() => Effect.succeed(new ArrayBuffer(0))),
+      Effect.provideService(HttpIncomingMessage.MaxBodySize, ByteSize.bytes(JSON_BODY_MAX_BYTES)),
     );
     return new Request(url, {
       method: request.method,
@@ -29,6 +30,11 @@ const toWebRequest = (request: HttpServerRequest, url: string): Effect.Effect<Re
       body: body.byteLength > 0 ? body : undefined,
     });
   });
+
+const oversized = HttpServerResponse.jsonUnsafe(
+  { _tag: "PayloadTooLarge", limitBytes: JSON_BODY_MAX_BYTES },
+  { status: 413 },
+);
 
 const fromWebResponse = (
   response: Response,
@@ -58,9 +64,17 @@ export const AuthRoutesLive = HttpRouter.use((router) =>
 
     const handleAuth = Effect.gen(function* () {
       const request = yield* HttpServerRequest;
+      if (Number(request.headers["content-length"]) > JSON_BODY_MAX_BYTES) return oversized;
+
       const url = new URL(request.url, config.appOrigin).toString();
-      const webReq = yield* toWebRequest(request, url);
-      const webRes = yield* Effect.promise(() => auth.handler(webReq));
+      const webReq = yield* toWebRequest(request, url).pipe(Effect.result);
+      if (webReq._tag === "Failure") {
+        const reason = webReq.failure.reason;
+        return reason._tag === "RequestParseError" && reason.reason === "BodyTooLarge"
+          ? oversized
+          : HttpServerResponse.empty({ status: 400 });
+      }
+      const webRes = yield* Effect.promise(() => auth.handler(webReq.success));
       return yield* fromWebResponse(webRes);
     });
 
