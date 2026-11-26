@@ -61,6 +61,12 @@ const docHistoricalRate = "0190a000-0000-7000-8000-000000000321";
 const docRemainderOrig = "0190a000-0000-7000-8000-000000000322";
 const cnRemainderPartial = "0190a000-0000-7000-8000-000000000323";
 const cnRemainderClosing = "0190a000-0000-7000-8000-000000000324";
+const docRemainderNullGrossOrig = "0190a000-0000-7000-8000-000000000325";
+const cnRemainderNullGrossPartial = "0190a000-0000-7000-8000-000000000326";
+const cnRemainderNullGrossClosing = "0190a000-0000-7000-8000-000000000327";
+const docEurTwoPartialsOrig = "0190a000-0000-7000-8000-000000000328";
+const cnEurPartial1 = "0190a000-0000-7000-8000-000000000329";
+const cnEurPartial2 = "0190a000-0000-7000-8000-00000000032a";
 
 // Deliveries
 const del1 = "0190a000-0000-7000-8000-000000000401";
@@ -389,7 +395,21 @@ beforeAll(async () => {
       ('${cnRemainderPartial}', '${wsVat}', 'credit_note', 'issued', 'CN20260007', '${contactVat}', 'CZK', 'cs', 'bank_transfer',
        '2026-01-11', '2026-01-11', '-0.02', '0.00', '-0.02', null, false, null, null, null, null),
       ('${cnRemainderClosing}', '${wsVat}', 'credit_note', 'issued', 'CN20260008', '${contactVat}', 'CZK', 'cs', 'bank_transfer',
-       '2026-01-12', '2026-01-12', '-0.01', '-0.01', '-0.02', null, false, null, null, null, null);
+       '2026-01-12', '2026-01-12', '-0.01', '-0.01', '-0.02', null, false, null, null, null, null),
+      -- Same closing remainder credit but with total_gross = NULL (stored net = -0.01, vat = -0.01)
+      ('${docRemainderNullGrossOrig}', '${wsVat}', 'invoice', 'issued', '20260012', '${contactVat}', 'CZK', 'cs', 'bank_transfer',
+       '2026-01-10', '2026-01-24', '0.03', '0.01', '0.04', null, true, null, null, null, null),
+      ('${cnRemainderNullGrossPartial}', '${wsVat}', 'credit_note', 'issued', 'CN20260009', '${contactVat}', 'CZK', 'cs', 'bank_transfer',
+       '2026-01-11', '2026-01-11', '-0.02', '0.00', '-0.02', null, false, null, null, null, null),
+      ('${cnRemainderNullGrossClosing}', '${wsVat}', 'credit_note', 'issued', 'CN20260010', '${contactVat}', 'CZK', 'cs', 'bank_transfer',
+       '2026-01-12', '2026-01-12', '-0.01', '-0.01', null, null, false, null, null, null, null),
+      -- Two EUR partial credits at 25.4 CZK/EUR: orig VAT 0.02 EUR (0.51 CZK), each partial -0.01 EUR (-0.25 CZK) => 0.01 CZK stays open
+      ('${docEurTwoPartialsOrig}', '${wsVat}', 'invoice', 'issued', '20260013', '${contactVat}', 'EUR', 'en', 'bank_transfer',
+       '2026-01-10', '2026-01-24', '0.08', '0.02', '0.10', null, true, '25.40', 1, 'cnb', null),
+      ('${cnEurPartial1}', '${wsVat}', 'credit_note', 'issued', 'CN20260011', '${contactVat}', 'EUR', 'en', 'bank_transfer',
+       '2026-01-11', '2026-01-11', '-0.04', '-0.01', '-0.05', null, false, '25.40', 1, 'cnb', null),
+      ('${cnEurPartial2}', '${wsVat}', 'credit_note', 'issued', 'CN20260012', '${contactVat}', 'EUR', 'en', 'bank_transfer',
+       '2026-01-12', '2026-01-12', '-0.04', '-0.01', '-0.05', null, false, '25.40', 1, 'cnb', null);
 
     insert into document_lines (
       id, workspace_id, document_id, position, description, quantity, unit_price, vat,
@@ -410,7 +430,13 @@ beforeAll(async () => {
       ('${lineHistorical15}', '${wsVat}', '${docHistoricalRate}', 1, '2023 books', '1', '100', 'reduced', null, null),
       (gen_random_uuid(), '${wsVat}', '${docRemainderOrig}', 1, 'Micro supply', '1', '0.03', 'standard', null, null),
       (gen_random_uuid(), '${wsVat}', '${cnRemainderPartial}', 1, 'Partial credit', '-1', '0.02', 'standard', null, null),
-      (gen_random_uuid(), '${wsVat}', '${cnRemainderClosing}', 1, 'Closing credit', '-1', '0.01', 'standard', null, null);
+      (gen_random_uuid(), '${wsVat}', '${cnRemainderClosing}', 1, 'Closing credit', '-1', '0.01', 'standard', null, null),
+      (gen_random_uuid(), '${wsVat}', '${docRemainderNullGrossOrig}', 1, 'Micro supply', '1', '0.03', 'standard', null, null),
+      (gen_random_uuid(), '${wsVat}', '${cnRemainderNullGrossPartial}', 1, 'Partial credit', '-1', '0.02', 'standard', null, null),
+      (gen_random_uuid(), '${wsVat}', '${cnRemainderNullGrossClosing}', 1, 'Closing credit', '-1', '0.01', 'standard', null, null),
+      (gen_random_uuid(), '${wsVat}', '${docEurTwoPartialsOrig}', 1, 'EUR micro', '2', '0.04', 'standard', null, null),
+      (gen_random_uuid(), '${wsVat}', '${cnEurPartial1}', 1, 'EUR partial 1', '-1', '0.04', 'standard', null, null),
+      (gen_random_uuid(), '${wsVat}', '${cnEurPartial2}', 1, 'EUR partial 2', '-1', '0.04', 'standard', null, null);
 
     insert into document_relations (workspace_id, from_document_id, to_document_id, relation) values
       -- 'corrects' only
@@ -433,7 +459,13 @@ beforeAll(async () => {
       ('${wsIdent}', '${cnIdentPartialOutside}', '${docIdentRounded}', 'corrects'),
       -- Partial + closing remainder credits
       ('${wsVat}', '${cnRemainderPartial}', '${docRemainderOrig}', 'corrects'),
-      ('${wsVat}', '${cnRemainderClosing}', '${docRemainderOrig}', 'corrects');
+      ('${wsVat}', '${cnRemainderClosing}', '${docRemainderOrig}', 'corrects'),
+      -- Partial + closing remainder credits with NULL total_gross
+      ('${wsVat}', '${cnRemainderNullGrossPartial}', '${docRemainderNullGrossOrig}', 'corrects'),
+      ('${wsVat}', '${cnRemainderNullGrossClosing}', '${docRemainderNullGrossOrig}', 'corrects'),
+      -- Two EUR partial credits leaving 0.01 CZK VAT open
+      ('${wsVat}', '${cnEurPartial1}', '${docEurTwoPartialsOrig}', 'corrects'),
+      ('${wsVat}', '${cnEurPartial2}', '${docEurTwoPartialsOrig}', 'corrects');
 
     insert into payments (id, workspace_id, document_id, amount, currency, paid_on, method, removed_at) values
       -- Partially paid: 50 of 121
@@ -613,6 +645,10 @@ describe("server persistence alignment migration (populated upgrade)", () => {
     expect(byId.get(cnBothLinks)?.settlement).toBe("unpaid");
     expect(byId.get(docRemainderOrig)?.settlement).toBe("credited");
     expect(byId.get(cnRemainderClosing)?.settlement).toBe("unpaid");
+    expect(byId.get(docRemainderNullGrossOrig)?.settlement).toBe("credited");
+    expect(byId.get(cnRemainderNullGrossClosing)?.settlement).toBe("unpaid");
+    // Two EUR partial credits leave 0.01 CZK VAT open (0.51 - 0.25 - 0.25), so NOT credited
+    expect(byId.get(docEurTwoPartialsOrig)?.settlement).toBe("paid");
     expect(byId.get(docPartialCreditPaid)).toEqual({
       id: docPartialCreditPaid,
       paid_amount: "60",
@@ -732,5 +768,23 @@ describe("server persistence alignment migration (populated upgrade)", () => {
     const closingBucket = closingCredit.buckets[0];
     if (!closingBucket) throw new Error("missing cnRemainderClosing bucket");
     expect(BigDecimal.format(closingBucket.vat)).toBe("-0.01");
+
+    // Closing remainder credit note with NULL total_gross reconciles VAT (-0.01) and gross (-0.02)
+    const closingNullGross = decoded.get(cnRemainderNullGrossClosing);
+    if (!closingNullGross) throw new Error("missing cnRemainderNullGrossClosing");
+    expect(BigDecimal.format(closingNullGross.net.amount)).toBe("-0.01");
+    expect(BigDecimal.format(closingNullGross.vat.amount)).toBe("-0.01");
+    expect(BigDecimal.format(closingNullGross.roundingAdjustment.amount)).toBe("0");
+    expect(BigDecimal.format(closingNullGross.gross.amount)).toBe("-0.02");
+
+    // Two EUR partial credits keep -0.25 CZK VAT each (never silently reassigned to -0.26)
+    const eurPartial1 = decoded.get(cnEurPartial1);
+    const eurPartial2 = decoded.get(cnEurPartial2);
+    if (!eurPartial1 || !eurPartial2) throw new Error("missing EUR partial credits");
+    expect(eurPartial1.vatCzk).not.toBeNull();
+    expect(eurPartial2.vatCzk).not.toBeNull();
+    if (!eurPartial1.vatCzk || !eurPartial2.vatCzk) throw new Error("missing EUR vatCzk");
+    expect(BigDecimal.format(eurPartial1.vatCzk.amount)).toBe("-0.25");
+    expect(BigDecimal.format(eurPartial2.vatCzk.amount)).toBe("-0.25");
   });
 });

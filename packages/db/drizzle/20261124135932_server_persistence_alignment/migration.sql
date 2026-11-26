@@ -229,6 +229,7 @@ reconstructed_breakdowns AS (
 		d."id" AS "document_id",
 		COALESCE(agg.net_amt, 0::numeric) AS net_amt,
 		COALESCE(agg.vat_amt, 0::numeric) AS vat_amt,
+		COALESCE(agg.gross_amt, 0::numeric) AS raw_gross_amt,
 		COALESCE(d."total_gross", COALESCE(agg.gross_amt, 0::numeric)) AS gross_amt,
 		COALESCE(d."total_gross", COALESCE(agg.gross_amt, 0::numeric)) - COALESCE(agg.gross_amt, 0::numeric) AS rounding_adj,
 		jsonb_build_object(
@@ -454,6 +455,9 @@ closing_credit_breakdowns AS (
 	JOIN "documents" AS cn
 		ON cn."workspace_id" = rr."workspace_id"
 		AND cn."id" = rr.credit_note_id
+	JOIN reconstructed_breakdowns AS rb_cn
+		ON rb_cn."workspace_id" = cn."workspace_id"
+		AND rb_cn."document_id" = cn."id"
 	LEFT JOIN (
 		SELECT
 			rb."workspace_id",
@@ -485,10 +489,17 @@ closing_credit_breakdowns AS (
 		ON agg."workspace_id" = rr."workspace_id"
 		AND agg.credit_note_id = rr.credit_note_id
 	WHERE cn."vat_breakdown" IS NULL
-		AND cn."total_gross" IS NOT NULL
-		AND cn."total_gross" = -(COALESCE(agg.rem_gross, 0::numeric) + COALESCE(rr.rem_rounding, 0::numeric))
+		AND (
+			(cn."total_net" IS NOT NULL AND cn."total_net" <> rb_cn.net_amt)
+			OR (cn."total_vat" IS NOT NULL AND cn."total_vat" <> rb_cn.vat_amt)
+			OR (cn."total_gross" IS NOT NULL AND cn."total_gross" <> rb_cn.raw_gross_amt)
+		)
 		AND (cn."total_net" IS NULL OR cn."total_net" = -COALESCE(agg.rem_net, 0::numeric))
 		AND (cn."total_vat" IS NULL OR cn."total_vat" = -COALESCE(agg.rem_vat, 0::numeric))
+		AND (
+			cn."total_gross" IS NULL
+			OR cn."total_gross" = -(COALESCE(agg.rem_gross, 0::numeric) + COALESCE(rr.rem_rounding, 0::numeric))
+		)
 ),
 doc_totals AS (
 	SELECT
