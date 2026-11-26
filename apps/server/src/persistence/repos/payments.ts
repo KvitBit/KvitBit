@@ -13,6 +13,7 @@ import { Effect, Layer } from "effect";
 import { SqlClient } from "effect/sql";
 import { formatDecimal, parseDecimal, toPgDate } from "../codec";
 import { col, type DbRow, decodeEach, makeTable, type TableSpec } from "../table";
+import { selectReportRows } from "./reportArchivePages";
 
 type PaymentRecord = Effect.Success<ReturnType<PaymentsRepo["Service"]["get"]>>;
 
@@ -90,10 +91,11 @@ export const PaymentsRepoSql: Layer.Layer<PaymentsRepo, never, SqlClient.SqlClie
           sql`order by paid_on asc, id asc`,
         ),
       paidBetween: (workspaceId, range) =>
-        table.select(
-          workspaceId,
+        selectReportRows(
+          sql,
+          "payments",
           sql`removed_at is null and paid_on >= ${toPgDate(range.from)} and paid_on <= ${toPgDate(range.to)}`,
-          sql`order by paid_on asc, id asc`,
+          (where) => table.select(workspaceId, where, sql`order by paid_on asc, id asc`),
         ),
     });
   }),

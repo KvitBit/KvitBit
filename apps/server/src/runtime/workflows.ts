@@ -2,7 +2,7 @@
  * Effect Cluster Workflows for Kvitbit (core-ports.md 7.2, board #894/#908):
  * - `DocumentDeliveryWorkflow`: claim -> dispatch (with retry on `DeliveryRetry`) -> giveUp
  * - `RecurringIssuanceWorkflow`: `recurringJob.run` (issue + advance + auto-send)
- * - `DataExportWorkflow`: build ZIP (reportingTables + full workspace tables + attachments/PDFs)
+ * - `DataExportWorkflow`: build ZIP (reporting CSVs + full workspace tables + attachments/PDFs)
  *   -> upload to `BlobStorage` -> `exportJob.finish` / `exportJob.fail`
  * - `MemberInvitationWorkflow`: `invitationJob.getPending` -> E04 invitation email ->
  *   `DurableClock.sleep` until expiry -> `invitationJob.expirePending`
@@ -38,6 +38,7 @@ import { SqlClient } from "effect/sql";
 import * as Activity from "effect/workflow/Activity";
 import * as DurableClock from "effect/workflow/DurableClock";
 import * as Workflow from "effect/workflow/Workflow";
+import { archivePages, withReportArchivePage } from "../persistence/repos/reportArchivePages";
 import { MAX_ZIP_BYTES, streamZip, type ZipEntry } from "./zip";
 
 // 1. Workflow definitions ---------------------------------------------------------------------
@@ -315,8 +316,15 @@ export const makeWorkflowHandlersLayer = (options: WorkflowHandlerOptions = {}) 
           `;
           const locale: Locale = wsRows[0]?.default_language === "en" ? "en" : "cs";
 
-          // Canonical reporting CSVs from CoreJobs
-          const reportingFiles = yield* exportJob.reportingTables(workspaceId, exportId, locale);
+          const reportingFiles = yield* exportJob.reportingFiles(
+            workspaceId,
+            exportId,
+            locale,
+            (table, read) =>
+              archivePages(sql, workspaceId, table, sql`id`, (rows) =>
+                withReportArchivePage(read, { table, ids: rows.map(({ id }) => id) }),
+              ),
+          );
           for (const file of reportingFiles) {
             entries.push({ name: file.name, bytes: file.bytes });
           }

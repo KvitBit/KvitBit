@@ -14,16 +14,19 @@ import type {
   WorkspaceId,
 } from "@kvitbit/domain/contract";
 import { CurrentCaller, Documents } from "@kvitbit/domain/contract";
-import { Cause, Effect } from "effect";
+import { Cause, Effect, Stream } from "effect";
 import { systemCaller } from "./internal/system";
 import * as deliveries from "./modules/documents/deliveries/steps";
 import type { DueReminder } from "./modules/documents/reminders/select";
 import { enqueueReminder, selectDueReminders } from "./modules/documents/reminders/select";
 import { RecurringIssuance } from "./modules/recurring/issuance";
-import { ExportJobs } from "./modules/reports/exports";
+import { CSV_CONTENT_TYPE, type CsvTable, csvStream } from "./modules/reports/csv";
+import { ExportJobs, REPORTING_FILES } from "./modules/reports/exports";
+import { ReportsSource } from "./modules/reports/source";
+import { documentsTable, expensesTable, paymentsTable } from "./modules/reports/tables";
 import type { InvitationRow } from "./modules/workspaces/model";
 import { WorkspacesRepo } from "./modules/workspaces/repo";
-import { CoreStore } from "./store/CoreStore";
+import { CoreStore, type StoreUnavailable } from "./store/CoreStore";
 
 const asDeliverySystem = (workspaceId: WorkspaceId, deliveryId: DeliveryId) =>
   Effect.provideService(
@@ -198,12 +201,47 @@ export const recurringJob = {
 
 // 4. DataExport -------------------------------------------------------------------------------
 
+const allReportDates = { from: "0000-01-01" as IsoDate, to: "9999-12-31" as IsoDate };
+const issuedReportDates = { ...allReportDates, field: "issuedOn" } as const;
+
 export const exportJob = {
   /** Builds the reporting CSV tables as `System{DataExport, exportId}`. */
   reportingTables: (workspaceId: WorkspaceId, exportId: ExportId, locale: Locale) =>
     Effect.flatMap(ExportJobs, (svc) => svc.reportingTables(workspaceId, locale)).pipe(
       asExportSystem(workspaceId, exportId),
     ),
+
+  /** Uses the archive's ID-ordered pages to read and encode the canonical CSVs on demand. */
+  reportingFiles: <E, R>(
+    workspaceId: WorkspaceId,
+    exportId: ExportId,
+    locale: Locale,
+    pages: <Row>(
+      table: keyof typeof REPORTING_FILES,
+      read: Effect.Effect<ReadonlyArray<Row>, StoreUnavailable>,
+    ) => Stream.Stream<ReadonlyArray<Row>, E, R>,
+  ) =>
+    Effect.map(ReportsSource, (source) => {
+      const file = <Row>(
+        table: keyof typeof REPORTING_FILES,
+        read: Effect.Effect<ReadonlyArray<Row>, StoreUnavailable>,
+        format: (rows: ReadonlyArray<Row>) => CsvTable,
+      ) => ({
+        name: REPORTING_FILES[table],
+        contentType: CSV_CONTENT_TYPE,
+        bytes: Stream.concat(
+          csvStream(format([]), locale),
+          pages(table, read.pipe(asExportSystem(workspaceId, exportId))).pipe(
+            Stream.flatMap((rows) => csvStream(format(rows), locale).pipe(Stream.drop(1))),
+          ),
+        ),
+      });
+      return [
+        file("documents", source.documents(workspaceId, issuedReportDates), documentsTable),
+        file("payments", source.payments(workspaceId, allReportDates), paymentsTable),
+        file("expenses", source.expenses(workspaceId, issuedReportDates), expensesTable),
+      ];
+    }),
 
   /** Renders an uncached document PDF as the read-only DataExport System caller. */
   documentPdf: (workspaceId: WorkspaceId, exportId: ExportId, documentId: DocumentId) =>

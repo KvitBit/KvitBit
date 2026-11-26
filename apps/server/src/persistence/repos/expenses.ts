@@ -27,6 +27,7 @@ import {
 } from "../codec";
 import { unavailable } from "../errors";
 import { col, type DbRow, decodeEach, makeTable, type TableSpec } from "../table";
+import { selectReportRows } from "./reportArchivePages";
 
 type ExpenseRow = Effect.Success<ReturnType<ExpensesRepo["Service"]["get"]>>;
 type AttachmentRow = Effect.Success<ReturnType<ExpensesRepo["Service"]["getAttachment"]>>;
@@ -320,11 +321,13 @@ export const ExpensesRepoSql: Layer.Layer<ExpensesRepo, never, SqlClient.SqlClie
           return { row, attachments: atts };
         }),
       completeIn: (ws, range) =>
-        expenses.select(
-          ws,
+        selectReportRows(
+          sql,
+          "expenses",
           range.field === "issuedOn"
             ? sql`status = 'complete' and removed_at is null and issued_on >= ${toPgDate(range.from)} and issued_on <= ${toPgDate(range.to)}`
             : sql`status = 'complete' and removed_at is null and coalesce(taxable_supply_on, issued_on) >= ${toPgDate(range.from)} and coalesce(taxable_supply_on, issued_on) <= ${toPgDate(range.to)}`,
+          (where) => expenses.select(ws, where),
         ),
       countIncomplete: (ws) =>
         Effect.map(

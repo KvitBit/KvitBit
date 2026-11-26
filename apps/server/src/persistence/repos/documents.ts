@@ -35,6 +35,7 @@ import {
 } from "../codec";
 import { writeErrors } from "../errors";
 import { col, type DbRow, makeTable, type TableSpec } from "../table";
+import { selectReportRows } from "./reportArchivePages";
 
 type DocumentRecord = Effect.Success<ReturnType<DocumentsRepo["Service"]["get"]>>;
 type LineRecord = DocumentRecord["lines"][number];
@@ -439,20 +440,19 @@ export const DocumentsRepoSql: Layer.Layer<DocumentsRepo, never, SqlClient.SqlCl
           });
         },
         reportable: (workspaceId, range) =>
-          range.field === "issuedOn"
-            ? table.select(
-                workspaceId,
-                sql`status in ('issued', 'cancelled')
+          selectReportRows(
+            sql,
+            "documents",
+            range.field === "issuedOn"
+              ? sql`status in ('issued', 'cancelled')
                   and issued_on >= ${toPgDate(range.from)}::date
-                  and issued_on <= ${toPgDate(range.to)}::date`,
-              )
-            : table.select(
-                workspaceId,
-                sql`status in ('issued', 'cancelled')
+                  and issued_on <= ${toPgDate(range.to)}::date`
+              : sql`status in ('issued', 'cancelled')
                   and kind <> 'proforma'
                   and coalesce(taxable_supply_on, issued_on) >= ${toPgDate(range.from)}::date
                   and coalesce(taxable_supply_on, issued_on) <= ${toPgDate(range.to)}::date`,
-              ),
+            (where) => table.select(workspaceId, where),
+          ),
         receivable: (workspaceId) =>
           table.select(
             workspaceId,
