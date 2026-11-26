@@ -194,22 +194,17 @@ describe("Shared HTTP/MCP trailing sliding-window RateLimiter", () => {
           retryAfterSeconds: 40,
         });
 
-        // 3. At t=60s (45s after t=15s, 25s after t=35s): mixed-1's t=0s legacy admissions
-        //    expire; the t=15s upgraded admission remains live -> 2 slots open, 3rd denied (15s).
+        // 3. At t=60s (45s after t=15s, 25s after t=35s): mixed-1's 1st legacy admission (t=0s)
+        //    expires while the 2nd legacy admission (materialized at t=15s) and the upgraded
+        //    t=15s admission remain live -> 1 slot opens (not 2), 2nd denied with Retry-After: 15s.
         yield* TestClock.adjust(Duration.seconds(25));
-        expect(yield* limiter.consume("api-key:mixed-1", rule)).toEqual({ allowed: true });
         expect(yield* limiter.consume("api-key:mixed-1", rule)).toEqual({ allowed: true });
         expect(yield* limiter.consume("api-key:mixed-1", rule)).toEqual({
           allowed: false,
           retryAfterSeconds: 15,
         });
 
-        // 4. Legacy-first post-rollover: upgraded admits 1 at t=60s and 2 at t=100s (total 3).
-        //    At t=120s, legacy receives the first post-rollover request and resets edge:<key>
-        //    to count=1, last_request=t+120s while the 2 admissions from t=100s remain live.
-        //    Upgraded must count 2 retained + 1 fresh legacy = 3 (deny) and resync edge:<key>
-        //    so legacy also sees the full allowance consumed; then at t=160s the t=100s rows
-        //    expire while the t=120s legacy admission remains live until t=180s.
+        // 4. Legacy-first post-rollover with a single legacy admission.
         expect(yield* limiter.consume("api-key:mixed-rollover", rule)).toEqual({ allowed: true });
         yield* TestClock.adjust(Duration.seconds(40));
         expect(yield* limiter.consume("api-key:mixed-rollover", rule)).toEqual({ allowed: true });
@@ -236,6 +231,36 @@ describe("Shared HTTP/MCP trailing sliding-window RateLimiter", () => {
         expect(yield* limiter.consume("api-key:mixed-rollover", rule)).toEqual({
           allowed: false,
           retryAfterSeconds: 20,
+        });
+
+        // 5. Staggered legacy batch (t=160s and t=170s, observed by upgraded at t=175s):
+        //    at t=220s only the 1st legacy admission expires; the 2nd stays live (never released
+        //    early at t=220s) until t=235s.
+        expect(yield* consumeLegacy("api-key:mixed-batch")).toEqual({ allowed: true });
+        yield* TestClock.adjust(Duration.seconds(10));
+        expect(yield* consumeLegacy("api-key:mixed-batch")).toEqual({ allowed: true });
+        yield* TestClock.adjust(Duration.seconds(5));
+        expect(yield* limiter.consume("api-key:mixed-batch", rule)).toEqual({ allowed: true });
+        expect(yield* limiter.consume("api-key:mixed-batch", rule)).toEqual({
+          allowed: false,
+          retryAfterSeconds: 45,
+        });
+
+        // At t=220s (+45s): only the t=160s admission expires -> 1 slot opens, 2nd denied (15s).
+        yield* TestClock.adjust(Duration.seconds(45));
+        expect(yield* limiter.consume("api-key:mixed-batch", rule)).toEqual({ allowed: true });
+        expect(yield* limiter.consume("api-key:mixed-batch", rule)).toEqual({
+          allowed: false,
+          retryAfterSeconds: 15,
+        });
+
+        // At t=235s (+15s): both t=175s entries (materialized 2nd legacy + upgraded) expire -> 2 open.
+        yield* TestClock.adjust(Duration.seconds(15));
+        expect(yield* limiter.consume("api-key:mixed-batch", rule)).toEqual({ allowed: true });
+        expect(yield* limiter.consume("api-key:mixed-batch", rule)).toEqual({ allowed: true });
+        expect(yield* limiter.consume("api-key:mixed-batch", rule)).toEqual({
+          allowed: false,
+          retryAfterSeconds: 45,
         });
       }).pipe(Effect.provide(coreLayer)),
     );

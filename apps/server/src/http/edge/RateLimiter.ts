@@ -130,7 +130,9 @@ export const RateLimiterSql: Layer.Layer<RateLimiter, never, SqlClient.SqlClient
                 select count, last_request from auth.rate_limit
                 where key = ${bucketKey}`;
               const aggregateCount =
-                aggregate === undefined ? 0 : Math.max(0, Number(aggregate.count));
+                aggregate === undefined
+                  ? 0
+                  : Math.min(rule.max, Math.max(0, Number(aggregate.count)));
               const aggregateStart = aggregate === undefined ? now : Number(aggregate.last_request);
               let admissionsTotal = 0;
               let admissionsFromStart = 0;
@@ -143,31 +145,36 @@ export const RateLimiterSql: Layer.Layer<RateLimiter, never, SqlClient.SqlClient
                 }
               }
               // Only admissions at or after `aggregateStart` are reflected in `aggregate.count`.
-              // When a legacy instance resets `edge:<key>` on rollover while newer `#<id>` rows
-              // remain live, `admissionsFromStart` excludes those older retained rows so the fresh
-              // legacy admission is counted alongside them rather than absorbed.
+              // Any remaining count came from legacy instances that do not write `#<id>` rows.
               const legacyOnlyCount = Math.max(0, aggregateCount - admissionsFromStart);
               const totalLive = admissionsTotal + legacyOnlyCount;
-              const oldestAdmission =
-                admissions.length > 0 ? Number(admissions[0]?.last_request ?? now) : now;
-              const legacyResetAfterRetained =
-                legacyOnlyCount > 0 && admissions.length > 0 && aggregateStart > oldestAdmission;
-
-              if (legacyResetAfterRetained) {
+              const slots: Array<{ readonly ts: number; readonly weight: number }> = admissions.map(
+                (row) => ({ ts: Number(row.last_request), weight: Math.max(0, Number(row.count)) }),
+              );
+              // Materialize legacy-only admissions into `#<id>` rows: the first opened the legacy
+              // window at `aggregateStart` (exact), and any additional admissions arrived in
+              // `(aggregateStart, now]` so anchoring them at `now` ensures they never expire early.
+              if (legacyOnlyCount > 0) {
                 yield* sql`
                   insert into auth.rate_limit (id, key, count, last_request)
-                  values (${generateId()}, ${`${prefix}${generateId()}`}, ${legacyOnlyCount}, ${aggregateStart})`;
+                  values (${generateId()}, ${`${prefix}${generateId()}`}, 1, ${aggregateStart})`;
+                slots.push({ ts: aggregateStart, weight: 1 });
+                if (legacyOnlyCount > 1) {
+                  yield* sql`
+                    insert into auth.rate_limit (id, key, count, last_request)
+                    values (${generateId()}, ${`${prefix}${generateId()}`}, ${legacyOnlyCount - 1}, ${now})`;
+                  slots.push({ ts: now, weight: legacyOnlyCount - 1 });
+                }
+                slots.sort((a, b) => a.ts - b.ts);
               }
+              const oldestLive = slots.length > 0 ? (slots[0]?.ts ?? now) : now;
 
               if (totalLive < rule.max) {
                 yield* sql`
                   insert into auth.rate_limit (id, key, count, last_request)
                   values (${generateId()}, ${`${prefix}${generateId()}`}, 1, ${now})`;
                 const nextCount = totalLive + 1;
-                const nextWindowStart =
-                  legacyOnlyCount > 0 && !legacyResetAfterRetained
-                    ? Math.min(aggregateStart, oldestAdmission)
-                    : oldestAdmission;
+                const nextWindowStart = Math.min(oldestLive, now);
                 yield* sql`
                   insert into auth.rate_limit (id, key, count, last_request)
                   values (${generateId()}, ${bucketKey}, ${nextCount}, ${nextWindowStart})
@@ -176,20 +183,13 @@ export const RateLimiterSql: Layer.Layer<RateLimiter, never, SqlClient.SqlClient
                     last_request = ${nextWindowStart}`;
                 return { allowed: true } as const;
               }
-              if (legacyResetAfterRetained) {
+              if (legacyOnlyCount > 0) {
                 yield* sql`
                   insert into auth.rate_limit (id, key, count, last_request)
-                  values (${generateId()}, ${bucketKey}, ${totalLive}, ${oldestAdmission})
+                  values (${generateId()}, ${bucketKey}, ${totalLive}, ${oldestLive})
                   on conflict (key) do update set
                     count = ${totalLive},
-                    last_request = ${oldestAdmission}`;
-              }
-              const slots: Array<{ readonly ts: number; readonly weight: number }> = admissions.map(
-                (row) => ({ ts: Number(row.last_request), weight: Math.max(0, Number(row.count)) }),
-              );
-              if (legacyOnlyCount > 0) {
-                slots.push({ ts: aggregateStart, weight: legacyOnlyCount });
-                slots.sort((a, b) => a.ts - b.ts);
+                    last_request = ${oldestLive}`;
               }
               const excess = totalLive - rule.max;
               let seen = 0;
