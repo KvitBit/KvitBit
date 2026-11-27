@@ -1411,12 +1411,12 @@
       "skill": "verify-deploy-config",
       "tier": 1,
       "kind": "exhaustive",
-      "syncCommit": "7512a53",
+      "syncCommit": "0883be7",
       "command": "bun test --cwd apps/server ./test/runtime/deploy-config.exhaustive.test.ts",
       "coveredFiles": [
         {
           "path": "apps/server/src/config-contract.ts",
-          "sha256": "7b0232bb39809d8679ce0f84e9217ce73ee34c5c30e0c50e7f01921f10a787e9"
+          "sha256": "3ca476015b0c3e36729097ec23be8f04f76a67f2e02d8093454aed1e91ab80ff"
         },
         {
           "path": "apps/server/src/config.ts",
@@ -1452,7 +1452,7 @@
         },
         {
           "path": "infra/alchemy/src/deploy-preflight.ts",
-          "sha256": "9f74e481882939a1d443ac7372adb5856baf8a7b6ea814ab6c197aea2debfbe4"
+          "sha256": "83a82d435c0008c55656cd0878d5786d61f670098f93c8c9799a514f1e98e8b9"
         },
         {
           "path": "infra/alchemy/src/preflight-cli.ts",
@@ -1460,7 +1460,7 @@
         },
         {
           "path": "infra/alchemy/src/config.ts",
-          "sha256": "30b6929b078ed9e12eabcb2e80de75df8409a5a5a9a0745c857588987ecbf5cc"
+          "sha256": "fdf3bfaae2986b7cc8f9414413fbb9d8c20a0a34b15050da43e538f3eac915d7"
         },
         {
           "path": "infra/alchemy/src/env.ts",
@@ -1510,7 +1510,7 @@
         "declareKvitbitStack",
         "assertFeedbackSecretSelection"
       ],
-      "bounds": "49 (KVITBIT_ENV x NODE_ENV) pairs; 295,680 server/worker runtime env states + 331 core secret/dynamic & fallback opt-out/sparse-array/boundary/upgrade states; 780 real Effect layer builds (280 email, 20 blob, 480 mobile); 215,040 Alchemy stack states (+25 core consumer and live/fallback/sparse-array loadStackConfig opt-out checks) with cross-layer server+worker soundness; 423,360 deploy.yml preflight states (+78 GCP/bool/opt-out/repo-vars checks) with 3-layer soundness (935,343 total exhaustive cases)",
+      "bounds": "49 (KVITBIT_ENV x NODE_ENV) pairs; 295,680 server/worker runtime env states + 339 core secret/dynamic & fallback opt-out/exact-key/sparse-array/boundary/upgrade states; 780 real Effect layer builds (280 email, 20 blob, 480 mobile); 215,040 Alchemy stack states (+29 core consumer and live/fallback/exact-key/sparse-array loadStackConfig opt-out checks) with cross-layer server+worker soundness; 423,360 deploy.yml preflight states (+78 GCP/bool/opt-out/repo-vars checks) with 3-layer soundness (935,355 total exhaustive cases)",
       "assumptions": [
         "Representative values stand for each equivalence class (origin, EMAIL_FROM, SMTP URL, domain); live network/credential validity and Secret Manager ENABLED state are outside pure config verification",
         "Cross-layer soundness substitutes synthetic valid non-empty strings for Secret Manager refs",
