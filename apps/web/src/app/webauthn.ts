@@ -11,11 +11,11 @@ import { sendAuthRequest } from "./api";
 
 const opt = Schema.optionalKey;
 const verification = Schema.Literals(["discouraged", "preferred", "required"]);
-const transport = Schema.Literals(["ble", "hybrid", "internal", "nfc", "usb"]);
+const isBrowserTransport = Schema.is(Schema.Literals(["ble", "hybrid", "internal", "nfc", "usb"]));
 const descriptor = Schema.Struct({
   id: Schema.String,
   type: Schema.Literal("public-key"),
-  transports: transport.pipe(Schema.Array, Schema.mutable, opt),
+  transports: Schema.String.pipe(Schema.Array, Schema.mutable, opt),
 });
 const prfValues = Schema.Struct({
   first: Schema.String,
@@ -100,7 +100,7 @@ const decodeDescriptor = ({
   transports,
 }: typeof descriptor.Type): PublicKeyCredentialDescriptor => {
   const result: PublicKeyCredentialDescriptor = { type: "public-key", id: decodeBase64Url(id) };
-  if (transports !== undefined) result.transports = transports;
+  if (transports !== undefined) result.transports = Arr.filter(transports, isBrowserTransport);
   return result;
 };
 

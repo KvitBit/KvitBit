@@ -120,6 +120,8 @@ interface AuthCall extends AuthRequest {
   readonly path: string;
 }
 
+const decodeAuthJson = Schema.decodeEffect(Schema.fromJsonString(Schema.Json));
+
 export const sendAuthRequest = Effect.fn("sendAuthRequest")(function* (init: AuthCall) {
   const authRequest = HttpClientRequest.make(init.method ?? "GET")(
     `${browserOrigin()}/api/auth${init.path}`,
@@ -134,7 +136,9 @@ export const sendAuthRequest = Effect.fn("sendAuthRequest")(function* (init: Aut
       : yield* HttpClientRequest.bodyJson(requestWithProof, init.body);
   const response = yield* fetchBrowser(prepared);
   const type = response.headers["content-type"] ?? "";
-  const json = Str.includes("json")(type) ? yield* response.json : null;
+  const json = Str.includes("json")(type)
+    ? yield* response.text.pipe(Effect.flatMap(decodeAuthJson))
+    : null;
   if (response.status < 200 || response.status >= 300) {
     return yield* AuthResponseError.make({ status: response.status, json });
   }

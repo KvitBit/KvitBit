@@ -96,54 +96,57 @@ const ProofJson = Schema.fromJsonString(
  * Solves an ALTCHA PoW v2 challenge on-device and returns the base64 `X-Altcha` header value.
  * Matches `altcha-lib` for ARGON2ID, PBKDF2/SHA-256, and SHA-256.
  */
-export const solveAltchaChallenge = Effect.fn("solveAltchaChallenge")(function* (
-  challenge: AltchaChallenge,
-) {
-  const params = parseParameters(challenge);
-  if ("reason" in params) return yield* params;
-  const password = new Uint8Array(params.nonce.length + 4);
-  password.set(params.nonce, 0);
-  const passwordView = new DataView(password.buffer);
-  const chunkSize = params.algorithm === "ARGON2ID" ? 1 : 8;
-  const maxAttempts = 50_000;
-  const started = yield* Clock.currentTimeMillis;
+export const solveAltchaChallenge = Effect.fn("solveAltchaChallenge")(
+  function* (challenge: AltchaChallenge) {
+    const params = parseParameters(challenge);
+    if ("reason" in params) return yield* params;
+    const password = new Uint8Array(params.nonce.length + 4);
+    password.set(params.nonce, 0);
+    const passwordView = new DataView(password.buffer);
+    const chunkSize = params.algorithm === "ARGON2ID" ? 1 : 8;
+    const maxAttempts = 50_000;
+    const started = yield* Clock.currentTimeMillis;
 
-  for (let counter = 0; counter < maxAttempts; counter++) {
-    passwordView.setUint32(params.nonce.length, counter, false);
-    const derived =
-      params.algorithm === "ARGON2ID"
-        ? argon2id(password, params.salt, {
-            memoryCost: params.memoryCost,
-            cost: params.cost,
-            parallelism: params.parallelism,
-            keyLength: params.keyLength,
-          })
-        : params.algorithm === "PBKDF2/SHA-256"
-          ? yield* pbkdf2Sha256({
-              password,
-              salt: params.salt,
-              iterations: params.cost,
+    for (let counter = 0; counter < maxAttempts; counter++) {
+      passwordView.setUint32(params.nonce.length, counter, false);
+      const derived =
+        params.algorithm === "ARGON2ID"
+          ? argon2id(password, params.salt, {
+              memoryCost: params.memoryCost,
+              cost: params.cost,
+              parallelism: params.parallelism,
               keyLength: params.keyLength,
             })
-          : deriveSha256(params.salt, password, params.cost, params.keyLength);
+          : params.algorithm === "PBKDF2/SHA-256"
+            ? yield* pbkdf2Sha256({
+                password,
+                salt: params.salt,
+                iterations: params.cost,
+                keyLength: params.keyLength,
+              })
+            : deriveSha256(params.salt, password, params.cost, params.keyLength);
 
-    const derivedKey = bytesToHex(derived);
-    if (Str.startsWith(params.keyPrefix)(derivedKey)) {
-      const elapsed = (yield* Clock.currentTimeMillis) - started;
-      const payload = {
-        challenge,
-        solution: {
-          counter,
-          derivedKey,
-          time: Math.max(0, elapsed),
-        },
-      };
-      return yield* Schema.encodeEffect(ProofJson)(payload).pipe(Effect.map(utf8ToBase64));
-    }
+      const derivedKey = bytesToHex(derived);
+      if (Str.startsWith(params.keyPrefix)(derivedKey)) {
+        const elapsed = (yield* Clock.currentTimeMillis) - started;
+        const payload = {
+          challenge,
+          solution: {
+            counter,
+            derivedKey,
+            time: Math.max(0, elapsed),
+          },
+        };
+        return yield* Schema.encodeEffect(ProofJson)(payload).pipe(Effect.map(utf8ToBase64));
+      }
 
-    if ((counter + 1) % chunkSize === 0) {
-      yield* Effect.sleep(1);
+      if ((counter + 1) % chunkSize === 0) {
+        yield* Effect.sleep(1);
+      }
     }
-  }
-  return yield* AltchaSolveError.make({ reason: "Unable to complete verification challenge" });
-});
+    return yield* AltchaSolveError.make({ reason: "Unable to complete verification challenge" });
+  },
+  Effect.catchDefect(() =>
+    AltchaSolveError.make({ reason: "Unable to complete verification challenge" }),
+  ),
+);

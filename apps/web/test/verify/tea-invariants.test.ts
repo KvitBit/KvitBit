@@ -77,6 +77,7 @@ const arbExpenseId = arbUuid.map((s) => ExpenseId.make(s));
 const arbAttachmentId = arbUuid.map((s) => AttachmentId.make(s));
 
 const arbSafeToken = fc.stringMatching(/^[a-zA-Z0-9._-]{1,24}$/);
+const arbSearchText = fc.stringMatching(/^[a-zA-Z0-9 _.-]{1,24}$/);
 
 const arbIsoDate = fc
   .tuple(
@@ -153,7 +154,7 @@ const arbRoute: fc.Arbitrary<Route> = fc.oneof(
     .record(
       {
         ws: arbSlug,
-        text: arbSafeToken,
+        text: arbSearchText,
         status: fc.constantFrom("draft" as const, "issued" as const, "cancelled" as const),
         kind: fc.constantFrom(
           "invoice" as const,
@@ -224,7 +225,7 @@ const arbRoute: fc.Arbitrary<Route> = fc.oneof(
     .record(
       {
         ws: arbSlug,
-        text: arbSafeToken,
+        text: arbSearchText,
         incomplete: fc.boolean(),
       },
       { requiredKeys: ["ws"] },
@@ -247,7 +248,7 @@ const arbRoute: fc.Arbitrary<Route> = fc.oneof(
     .record(
       {
         ws: arbSlug,
-        text: arbSafeToken,
+        text: arbSearchText,
         role: fc.constantFrom("customer" as const, "supplier" as const),
         archived: fc.boolean(),
       },
@@ -262,7 +263,7 @@ const arbRoute: fc.Arbitrary<Route> = fc.oneof(
     })
     .map((r): Route => ({ _tag: "Contact", ...r })),
   fc
-    .record({ ws: arbSlug, text: arbSafeToken }, { requiredKeys: ["ws"] })
+    .record({ ws: arbSlug, text: arbSearchText }, { requiredKeys: ["ws"] })
     .map((r): Route => ({ _tag: "PriceList", ...r })),
   fc
     .record({

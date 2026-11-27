@@ -5,7 +5,7 @@ import * as Arr from "effect/Array";
 import * as Effect from "effect/Effect";
 
 import * as Reports from "../../src/page/records/reports";
-import { periodToRange, type ReportDataRecord } from "../../src/page/records/shared";
+import { periodOptions, periodToRange, type ReportDataRecord } from "../../src/page/records/shared";
 import { ctxFor, DEMO_WORKSPACES, renderPath, signedIn, WS } from "../support";
 
 const escapedContactLabelPattern =
@@ -78,6 +78,30 @@ describe("Reports Suite page TEA", () => {
       from: IsoDate.make("2024-02-01"),
       to: IsoDate.make("2024-02-29"),
     });
+    expect(periodToRange("0999-01")).toEqual({
+      from: IsoDate.make("0999-01-01"),
+      to: IsoDate.make("0999-01-31"),
+    });
+    expect(periodToRange("0000-02")).toEqual({
+      from: IsoDate.make("0000-02-01"),
+      to: IsoDate.make("0000-02-29"),
+    });
+  });
+
+  test("renders early-year report links with four-digit selector options", async () => {
+    const [year, month] = await Promise.all([
+      renderPath(`/w/${WS}/reports/revenue?period=1000`, { locale: "en" }),
+      renderPath(`/w/${WS}/reports/revenue?period=0999-01`, { locale: "en" }),
+    ]);
+    expect(year.html).toContain('value="0999"');
+    expect(month.html).toContain('value="0999-01"');
+    expect(Arr.map(periodOptions("0000", "en"), (option) => option.value)).toEqual([
+      "0000",
+      "0000-Q4",
+      "0000-Q3",
+      "0000-Q2",
+      "0000-Q1",
+    ]);
   });
 
   test("groupBy switch bumps seq and drops stale responses", () => {

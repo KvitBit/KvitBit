@@ -71,7 +71,11 @@ const solveInBrowser = (challenge: AltchaChallenge) =>
             };
             worker.onerror = (event) => resume(WorkerSolveError.make({ reason: event.message }));
             worker.postMessage(challenge);
-          }),
+          }).pipe(
+            Effect.catchDefect(() =>
+              WorkerSolveError.make({ reason: "Could not send verification challenge" }),
+            ),
+          ),
         (worker) => Effect.sync(() => worker.terminate()),
       );
     },

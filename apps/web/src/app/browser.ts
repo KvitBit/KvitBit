@@ -3,6 +3,7 @@ import * as FetchHttpClient from "effect/http/FetchHttpClient";
 import * as HttpClient from "effect/http/HttpClient";
 import * as HttpClientRequest from "effect/http/HttpClientRequest";
 import * as HttpClientResponse from "effect/http/HttpClientResponse";
+import * as Predicate from "effect/Predicate";
 
 export const browserOrigin = () => {
   const location = globalThis.location;
@@ -56,6 +57,9 @@ export const writeSessionStorage = ({
     },
     catch: () => "storage-unavailable" as const,
   });
+const tryDownload = <A>(operation: () => A) =>
+  Effect.try({ try: operation, catch: () => "download-unavailable" as const });
+
 export const downloadFile = Effect.fn("downloadFile")(function* ({
   path,
   filename,
@@ -66,21 +70,23 @@ export const downloadFile = Effect.fn("downloadFile")(function* ({
   const response = yield* fetchBrowserOk(HttpClientRequest.get(`${browserOrigin()}${path}`));
   const bytes = yield* response.arrayBuffer;
   const document = globalThis.document;
-  if (document === undefined) return;
-  const blob = new Blob([bytes], { type: response.headers["content-type"] ?? "" });
-  const objectUrl = URL.createObjectURL(blob);
-  const anchor = document.createElement("a");
-  yield* Effect.sync(() => {
-    anchor.href = objectUrl;
-    anchor.download = filename;
-    document.body.append(anchor);
-    anchor.click();
-  }).pipe(
-    Effect.ensuring(
-      Effect.sync(() => {
-        anchor.remove();
-        URL.revokeObjectURL(objectUrl);
-      }),
+  if (document === undefined || !Predicate.isFunction(URL.createObjectURL)) return;
+  yield* Effect.acquireUseRelease(
+    tryDownload(() =>
+      URL.createObjectURL(new Blob([bytes], { type: response.headers["content-type"] ?? "" })),
     ),
+    (objectUrl) =>
+      Effect.acquireUseRelease(
+        tryDownload(() => document.createElement("a")),
+        (anchor) =>
+          tryDownload(() => {
+            anchor.href = objectUrl;
+            anchor.download = filename;
+            document.body.append(anchor);
+            anchor.click();
+          }),
+        (anchor) => tryDownload(() => anchor.remove()),
+      ),
+    (objectUrl) => tryDownload(() => URL.revokeObjectURL(objectUrl)),
   );
 });

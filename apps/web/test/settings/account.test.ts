@@ -48,6 +48,26 @@ const mockFetch = (handle: (...args: Parameters<typeof fetch>) => Response | Pro
   );
 
 describe("Account & Security page (Screen 22)", () => {
+  test("reports an empty JSON profile response as a failed save", async () => {
+    const route: Account.Route = { _tag: "Account", tab: "profile" };
+    const ctx = ctxFor(route, { locale: "en" });
+    const { model } = Account.init(route, ctx);
+    const named = Account.update(model, Account.Message.ChangedName({ value: "Jana" }), ctx);
+    const saving = Account.update(named.model, Account.Message.ClickedSaveProfile(), ctx);
+    const [command] = saving.commands ?? [];
+    if (command?._tag !== "Effect") throw new Error("Missing profile save effect");
+    const fetch = mockFetch(
+      () => new Response(null, { headers: { "content-type": "application/json" } }),
+    );
+    try {
+      const reply = await command.effect.pipe(Effect.provide(RunApi.layer), Effect.runPromise);
+      expect(reply._tag).toBe("FailedAction");
+      expect(Account.update(saving.model, reply, ctx).model.profile.savingProfile).toBe(false);
+    } finally {
+      fetch.mockRestore();
+    }
+  });
+
   test("initializes and renders all 5 Account tabs in cs and en", async () => {
     const tabs: ReadonlyArray<Account.AccountTab> = [
       "profile",
@@ -320,11 +340,13 @@ describe("Account & Security page (Screen 22)", () => {
       value: AttestationFixture,
     });
     let challenge: BufferSource | undefined;
+    let excluded: readonly PublicKeyCredentialDescriptor[] | undefined;
     Object.defineProperty(navigator, "credentials", {
       configurable: true,
       value: {
         create: ({ publicKey }: CredentialCreationOptions) => {
           challenge = publicKey?.challenge;
+          excluded = publicKey?.excludeCredentials;
           return Promise.resolve(new CredentialFixture());
         },
       },
@@ -346,6 +368,9 @@ describe("Account & Security page (Screen 22)", () => {
             rp: { id: "localhost", name: "Kvitbit" },
             user: { id: "AQID", name: "demo@example.com", displayName: "Demo" },
             pubKeyCredParams: [{ type: "public-key", alg: -7 }],
+            excludeCredentials: [
+              { id: "BAUG", type: "public-key", transports: ["smart-card", "usb"] },
+            ],
           });
         case "/api/auth/passkey/verify-registration":
           registration = registrationJson(await new Request(input, options).text()).pipe(
@@ -371,6 +396,9 @@ describe("Account & Security page (Screen 22)", () => {
         { path: "/api/auth/passkey/list-user-passkeys", method: "GET", name: null },
       ]);
       expect(challenge).toEqual(Uint8Array.of(1, 2, 3).buffer);
+      expect(excluded).toEqual([
+        { id: Uint8Array.of(4, 5, 6).buffer, type: "public-key", transports: ["usb"] },
+      ]);
       expect(registration).toMatchObject({
         name: "Passkey",
         response: {

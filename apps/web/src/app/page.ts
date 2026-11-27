@@ -36,21 +36,19 @@ export type MessageHandlers<Message extends { readonly _tag: string }, Result> =
   readonly [Tag in Message["_tag"]]: (message: Extract<Message, { readonly _tag: Tag }>) => Result;
 };
 
+interface PageDefinition<Model, Message, PageRoute extends Route> {
+  readonly Route: Schema.Codec<PageRoute, unknown, never, never>;
+  readonly Model: Schema.Codec<Model, unknown, never, never>;
+  readonly Message: Schema.Codec<Message, unknown, never, never>;
+  readonly init: (route: PageRoute, ctx: PageContext) => PageReturn<Model, Message>;
+  readonly update: (model: Model, message: Message, ctx: PageContext) => PageReturn<Model, Message>;
+  readonly view: (model: Model, ctx: PageContext, h: Html.H<Message>) => Markup<Message>;
+  readonly title: (model: Model, ctx: PageContext) => string;
+}
+
 const definePageImpl = <const Name extends string, Model, Message, PageRoute extends Route>(
   name: Name,
-  page: {
-    readonly Route: Schema.Codec<PageRoute, unknown, never, never>;
-    readonly Model: Schema.Codec<Model, unknown, never, never>;
-    readonly Message: Schema.Codec<Message, unknown, never, never>;
-    readonly init: (route: PageRoute, ctx: PageContext) => PageReturn<Model, Message>;
-    readonly update: (
-      model: Model,
-      message: Message,
-      ctx: PageContext,
-    ) => PageReturn<Model, Message>;
-    readonly view: (model: Model, ctx: PageContext, h: Html.H<Message>) => Markup<Message>;
-    readonly title: (model: Model, ctx: PageContext) => string;
-  },
+  page: PageDefinition<Model, Message, PageRoute>,
 ) =>
   Html.component({
     name,
@@ -83,33 +81,11 @@ const definePageImpl = <const Name extends string, Model, Message, PageRoute ext
   });
 
 export const definePage: {
-  <const Name extends string, Model, Message, PageRoute extends Route>(page: {
-    readonly Route: Schema.Codec<PageRoute, unknown, never, never>;
-    readonly Model: Schema.Codec<Model, unknown, never, never>;
-    readonly Message: Schema.Codec<Message, unknown, never, never>;
-    readonly init: (route: PageRoute, ctx: PageContext) => PageReturn<Model, Message>;
-    readonly update: (
-      model: Model,
-      message: Message,
-      ctx: PageContext,
-    ) => PageReturn<Model, Message>;
-    readonly view: (model: Model, ctx: PageContext, h: Html.H<Message>) => Markup<Message>;
-    readonly title: (model: Model, ctx: PageContext) => string;
-  }): (name: Name) => ReturnType<typeof definePageImpl<Name, Model, Message, PageRoute>>;
+  <const Name extends string, Model, Message, PageRoute extends Route>(
+    page: PageDefinition<Model, Message, PageRoute>,
+  ): (name: Name) => ReturnType<typeof definePageImpl<Name, Model, Message, PageRoute>>;
   <const Name extends string, Model, Message, PageRoute extends Route>(
     name: Name,
-    page: {
-      readonly Route: Schema.Codec<PageRoute, unknown, never, never>;
-      readonly Model: Schema.Codec<Model, unknown, never, never>;
-      readonly Message: Schema.Codec<Message, unknown, never, never>;
-      readonly init: (route: PageRoute, ctx: PageContext) => PageReturn<Model, Message>;
-      readonly update: (
-        model: Model,
-        message: Message,
-        ctx: PageContext,
-      ) => PageReturn<Model, Message>;
-      readonly view: (model: Model, ctx: PageContext, h: Html.H<Message>) => Markup<Message>;
-      readonly title: (model: Model, ctx: PageContext) => string;
-    },
+    page: PageDefinition<Model, Message, PageRoute>,
   ): ReturnType<typeof definePageImpl<Name, Model, Message, PageRoute>>;
 } = Fn.dual(2, definePageImpl);

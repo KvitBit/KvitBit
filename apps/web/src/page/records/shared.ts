@@ -1052,8 +1052,8 @@ export const computeExpensePreview = (input: {
 
 // --- Report period helpers -----------------------------------------------------------------------
 
-const lastDayOfMonth = (year: number, month: number): number =>
-  DateTime.makeUnsafe({ year, month, day: 1 }).pipe(
+const lastDayOfMonth = (year: string, month: number): number =>
+  DateTime.makeUnsafe(`${year}-${pad2(month)}-01T00:00:00Z`).pipe(
     DateTime.endOf("month"),
     DateTime.getPartUtc("day"),
   );
@@ -1066,30 +1066,28 @@ const pad2 = (n: number): string => Str.padStart(2, "0")(String(n));
 
 /** Converts a Period (`2026`, `2026-Q4`, `2026-11`) into inclusive `{ from, to }` IsoDates. */
 export const periodToRange = (period: ViewModels.Period): { from: IsoDate; to: IsoDate } => {
+  const year = Str.slice(0, 4)(period);
   const qMatch = quarterPeriod.exec(period);
   if (qMatch !== null) {
-    const y = Number(qMatch[1]);
     const q = Number(qMatch[2]);
     const startMonth = (q - 1) * 3 + 1;
     const endMonth = startMonth + 2;
     return {
-      from: IsoDate.make(`${y}-${pad2(startMonth)}-01`),
-      to: IsoDate.make(`${y}-${pad2(endMonth)}-${pad2(lastDayOfMonth(y, endMonth))}`),
+      from: IsoDate.make(`${year}-${pad2(startMonth)}-01`),
+      to: IsoDate.make(`${year}-${pad2(endMonth)}-${pad2(lastDayOfMonth(year, endMonth))}`),
     };
   }
   const mMatch = monthPeriod.exec(period);
   if (mMatch !== null) {
-    const y = Number(mMatch[1]);
     const m = Number(mMatch[2]);
     return {
-      from: IsoDate.make(`${y}-${pad2(m)}-01`),
-      to: IsoDate.make(`${y}-${pad2(m)}-${pad2(lastDayOfMonth(y, m))}`),
+      from: IsoDate.make(`${year}-${pad2(m)}-01`),
+      to: IsoDate.make(`${year}-${pad2(m)}-${pad2(lastDayOfMonth(year, m))}`),
     };
   }
-  const y = Number(Str.slice(0, 4)(period)) || 2026;
   return {
-    from: IsoDate.make(`${y}-01-01`),
-    to: IsoDate.make(`${y}-12-31`),
+    from: IsoDate.make(`${year}-01-01`),
+    to: IsoDate.make(`${year}-12-31`),
   };
 };
 
@@ -1109,18 +1107,19 @@ export const periodOptions: {
     currentPeriod: ViewModels.Period,
     locale: Locale,
   ): ReadonlyArray<{ readonly value: ViewModels.Period; readonly label: string }> => {
-    const year = Number(Str.slice(0, 4)(currentPeriod)) || 2026;
-    const prev = year - 1;
-    const qLabel = (y: number, q: number) =>
-      locale === "cs" ? `${q}. čtvrtletí ${y}` : `Q${q} ${y}`;
+    const year = Str.slice(0, 4)(currentPeriod);
+    const qLabel = (q: number) => (locale === "cs" ? `${q}. čtvrtletí ${year}` : `Q${q} ${year}`);
     const base: Array<{ readonly value: ViewModels.Period; readonly label: string }> = [
-      { value: ViewModels.Period.make(String(year)), label: `${year}` },
-      { value: ViewModels.Period.make(`${year}-Q4`), label: qLabel(year, 4) },
-      { value: ViewModels.Period.make(`${year}-Q3`), label: qLabel(year, 3) },
-      { value: ViewModels.Period.make(`${year}-Q2`), label: qLabel(year, 2) },
-      { value: ViewModels.Period.make(`${year}-Q1`), label: qLabel(year, 1) },
-      { value: ViewModels.Period.make(String(prev)), label: `${prev}` },
+      { value: ViewModels.Period.make(year), label: year },
+      { value: ViewModels.Period.make(`${year}-Q4`), label: qLabel(4) },
+      { value: ViewModels.Period.make(`${year}-Q3`), label: qLabel(3) },
+      { value: ViewModels.Period.make(`${year}-Q2`), label: qLabel(2) },
+      { value: ViewModels.Period.make(`${year}-Q1`), label: qLabel(1) },
     ];
+    if (year !== "0000") {
+      const previous = Str.padStart(4, "0")(String(Number(year) - 1));
+      base.push({ value: ViewModels.Period.make(previous), label: previous });
+    }
     if (!Arr.some(base, (o) => o.value === currentPeriod)) {
       base.unshift({ value: currentPeriod, label: currentPeriod });
     }
