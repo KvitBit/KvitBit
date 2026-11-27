@@ -3,9 +3,14 @@
  * The control service lets a test add or remove records, simulate an outage, and read the
  * lookups the fake received (to check caching and no-fan-out rules).
  */
+
 import { IsoDate } from "@kvitbit/domain";
 import { CompanyRegistry, type RegistryRecord, RegistryUnavailable } from "@kvitbit/domain/ports";
-import { Context, Effect, Layer, Ref } from "effect";
+import * as Context from "effect/Context";
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+import * as Rec from "effect/Record";
+import * as Ref from "effect/Ref";
 
 export type FakeRegistryRecords = Readonly<Record<string, RegistryRecord>>;
 
@@ -26,7 +31,10 @@ export class FakeCompanyRegistryControl extends Context.Service<
     /** IČOs passed to lookup, in call order. */
     readonly lookups: Effect.Effect<ReadonlyArray<string>>;
   }
->()("kvitbit/adapters/FakeCompanyRegistryControl") {}
+>()(
+  // biome-ignore lint/security/noSecrets: Effect checks this public service identifier against its package path.
+  "@kvitbit/adapters/registry/fake/FakeCompanyRegistryControl",
+) {}
 
 /** Synthetic companies; the IČOs pass the mod-11 checksum. */
 export const defaultFakeRecords: FakeRegistryRecords = {
@@ -59,41 +67,42 @@ export const defaultFakeRecords: FakeRegistryRecords = {
   },
 };
 
-const build = (options: FakeCompanyRegistryOptions) =>
-  Effect.gen(function* () {
-    const records = yield* Ref.make<ReadonlyMap<string, RegistryRecord>>(
-      new Map(Object.entries(options.records ?? defaultFakeRecords)),
-    );
-    const unavailable = yield* Ref.make(options.unavailable ?? false);
-    const lookups = yield* Ref.make<ReadonlyArray<string>>([]);
+const build = Effect.fn("build")(function* (options: FakeCompanyRegistryOptions) {
+  const records = yield* Ref.make<ReadonlyMap<string, RegistryRecord>>(
+    new Map(Rec.toEntries(options.records ?? defaultFakeRecords)),
+  );
+  const unavailable = yield* Ref.make(options.unavailable ?? false);
+  const lookups = yield* Ref.make<ReadonlyArray<string>>([]);
 
-    const registry = CompanyRegistry.of({
-      lookup: (ico) =>
-        Effect.gen(function* () {
-          yield* Ref.update(lookups, (seen) => [...seen, ico]);
-          if (yield* Ref.get(unavailable)) {
-            return yield* new RegistryUnavailable({ cause: "FakeCompanyRegistry: unavailable" });
-          }
-          return (yield* Ref.get(records)).get(ico) ?? null;
-        }),
-    });
-
-    const control = FakeCompanyRegistryControl.of({
-      put: (ico, record) => Ref.update(records, (map) => new Map(map).set(ico, record)),
-      remove: (ico) =>
-        Ref.update(records, (map) => {
-          const next = new Map(map);
-          next.delete(ico);
-          return next;
-        }),
-      setUnavailable: (value) => Ref.set(unavailable, value),
-      lookups: Ref.get(lookups),
-    });
-
-    return Context.make(CompanyRegistry, registry).pipe(
-      Context.add(FakeCompanyRegistryControl, control),
-    );
+  const registry = CompanyRegistry.of({
+    lookup: Effect.fn("CompanyRegistry.lookup")(function* (ico) {
+      yield* Ref.update(lookups, (seen) => [...seen, ico]);
+      if (yield* Ref.get(unavailable)) {
+        return yield* new RegistryUnavailable({ cause: "FakeCompanyRegistry: unavailable" });
+      }
+      return (yield* Ref.get(records)).get(ico) ?? null;
+    }),
   });
+
+  const control = FakeCompanyRegistryControl.of({
+    put: Effect.fn("registry.put")((ico, record) =>
+      Ref.update(records, (map) => new Map(map).set(ico, record)),
+    ),
+    remove: Effect.fn("registry.remove")((ico) =>
+      Ref.update(records, (map) => {
+        const next = new Map(map);
+        next.delete(ico);
+        return next;
+      }),
+    ),
+    setUnavailable: Effect.fn("registry.outage")((value) => Ref.set(unavailable, value)),
+    lookups: Ref.get(lookups),
+  });
+
+  return Context.make(CompanyRegistry, registry).pipe(
+    Context.add(FakeCompanyRegistryControl, control),
+  );
+});
 
 /** Fake registry plus its control service, with the given records and outage state. */
 export const layerWith = (

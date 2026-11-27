@@ -1,14 +1,24 @@
 import { describe, expect, test } from "bun:test";
-import { createHash, createVerify, generateKeyPairSync } from "node:crypto";
-import { Effect, Layer } from "effect";
-import { TestClock } from "effect/testing";
+// @effect-diagnostics-next-line nodeBuiltinImport:off
+import { createHash, createVerify, generateKeyPairSync } from "node:crypto"; // Verify the output through the PEM and RSA boundary.
+import * as Arr from "effect/Array";
+import * as DateTime from "effect/DateTime";
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+import * as Str from "effect/String";
+import * as TestClock from "effect/testing/TestClock";
 import {
+  gcsV4CanonicalRequest as canonicalRequest,
   type GcsSignedUrlRequest,
   gcsSignedUrl,
-  gcsV4CanonicalRequest,
   InvalidBlobKey,
-  signGcsV4Url,
+  signGcsV4Url as signedUrl,
 } from "../../src/blob/index";
+
+const gcsV4CanonicalRequest = (input: GcsSignedUrlRequest, time: Date) =>
+  Effect.runSync(canonicalRequest(input, time));
+const signGcsV4Url = (input: GcsSignedUrlRequest, time: Date) =>
+  Effect.runSync(signedUrl(input, time));
 
 const { privateKey, publicKey } = generateKeyPairSync("rsa", {
   modulusLength: 2048,
@@ -16,7 +26,8 @@ const { privateKey, publicKey } = generateKeyPairSync("rsa", {
   publicKeyEncoding: { type: "spki", format: "pem" },
 });
 
-const now = new Date("2026-11-23T10:15:30.123Z");
+const now = DateTime.toDateUtc(DateTime.makeUnsafe("2026-11-23T10:15:30.123Z"));
+const rsaSignature = /^[0-9a-f]{512}$/;
 const request: GcsSignedUrlRequest = {
   bucket: "kvitbit-blobs",
   key: "pdf/ws 1/doc(1)/cs.pdf",
@@ -25,16 +36,26 @@ const request: GcsSignedUrlRequest = {
   queryParameters: { "response-content-disposition": 'attachment; filename="F 2026*1.pdf"' },
 };
 
-const credential =
-  "blob%40kvitbit.iam.gserviceaccount.com%2F20261123%2Fauto%2Fstorage%2Fgoog4_request";
-const expectedQuery = [
-  "X-Goog-Algorithm=GOOG4-RSA-SHA256",
-  `X-Goog-Credential=${credential}`,
-  "X-Goog-Date=20261123T101530Z",
-  "X-Goog-Expires=900",
-  "X-Goog-SignedHeaders=host",
-  "response-content-disposition=attachment%3B%20filename%3D%22F%202026%2A1.pdf%22",
-].join("&");
+const credential = Arr.join(
+  ["blob%40kvitbit.iam.gserviceaccount.com", "20261123", "auto", "storage", "goog4_request"],
+  "%2F",
+);
+const expectedDisposition = Str.replace(
+  "*",
+  "%2A",
+)(encodeURIComponent('attachment; filename="F 2026*1.pdf"'));
+const expectedTimestamp = "20261123T101530Z";
+const expectedQuery = Arr.join(
+  [
+    "X-Goog-Algorithm=GOOG4-RSA-SHA256",
+    `X-Goog-Credential=${credential}`,
+    `X-Goog-Date=${expectedTimestamp}`,
+    "X-Goog-Expires=900",
+    "X-Goog-SignedHeaders=host",
+    `response-content-disposition=${expectedDisposition}`,
+  ],
+  "&",
+);
 
 describe("GCS V4 signed URLs", () => {
   test("builds the canonical request and string to sign per the V4 spec", () => {
@@ -42,23 +63,29 @@ describe("GCS V4 signed URLs", () => {
     expect(parts.path).toBe("/kvitbit-blobs/pdf/ws%201/doc%281%29/cs.pdf");
     expect(parts.query).toBe(expectedQuery);
     expect(parts.canonicalRequest).toBe(
-      [
-        "GET",
-        "/kvitbit-blobs/pdf/ws%201/doc%281%29/cs.pdf",
-        expectedQuery,
-        "host:storage.googleapis.com",
-        "",
-        "host",
-        "UNSIGNED-PAYLOAD",
-      ].join("\n"),
+      Arr.join(
+        [
+          "GET",
+          "/kvitbit-blobs/pdf/ws%201/doc%281%29/cs.pdf",
+          expectedQuery,
+          "host:storage.googleapis.com",
+          "",
+          "host",
+          "UNSIGNED-PAYLOAD",
+        ],
+        "\n",
+      ),
     );
     expect(parts.stringToSign).toBe(
-      [
-        "GOOG4-RSA-SHA256",
-        "20261123T101530Z",
-        "20261123/auto/storage/goog4_request",
-        createHash("sha256").update(parts.canonicalRequest).digest("hex"),
-      ].join("\n"),
+      Arr.join(
+        [
+          "GOOG4-RSA-SHA256",
+          "20261123T101530Z",
+          "20261123/auto/storage/goog4_request",
+          createHash("sha256").update(parts.canonicalRequest).digest("hex"),
+        ],
+        "\n",
+      ),
     );
   });
 
@@ -66,14 +93,16 @@ describe("GCS V4 signed URLs", () => {
     const url = signGcsV4Url(request, now);
     expect(signGcsV4Url(request, now)).toBe(url);
     const prefix = `https://storage.googleapis.com/kvitbit-blobs/pdf/ws%201/doc%281%29/cs.pdf?${expectedQuery}&X-Goog-Signature=`;
-    expect(url.startsWith(prefix)).toBe(true);
-    const signature = url.slice(prefix.length);
-    expect(signature).toMatch(/^[0-9a-f]{512}$/);
+    expect(Str.startsWith(prefix)(url)).toBe(true);
+    const signature = Str.slice(prefix.length)(url);
+    expect(signature).toMatch(rsaSignature);
     const verified = createVerify("RSA-SHA256")
       .update(gcsV4CanonicalRequest(request, now).stringToSign)
       .verify(publicKey, signature, "hex");
     expect(verified).toBe(true);
-    expect(signGcsV4Url(request, new Date(now.getTime() + 1000))).not.toBe(url);
+    expect(
+      signGcsV4Url(request, DateTime.toDateUtc(DateTime.makeUnsafe(now.getTime() + 1000))),
+    ).not.toBe(url);
   });
 
   test("parses as a URL whose parameters decode back to the inputs", () => {
@@ -88,11 +117,13 @@ describe("GCS V4 signed URLs", () => {
 
   test("rejects bad keys and expiries", () => {
     expect(() => signGcsV4Url({ ...request, key: "../x" }, now)).toThrow(InvalidBlobKey);
-    expect(() => signGcsV4Url({ ...request, expiresInSeconds: 0 }, now)).toThrow(RangeError);
+    expect(() => signGcsV4Url({ ...request, expiresInSeconds: 0 }, now)).toThrow("out of range");
     // A JavaScript caller can pass any string; write methods are refused at runtime.
-    const put = { ...request, method: "PUT" } as unknown as GcsSignedUrlRequest;
-    expect(() => signGcsV4Url(put, now)).toThrow(RangeError);
-    expect(() => signGcsV4Url({ ...request, expiresInSeconds: 604801 }, now)).toThrow(RangeError);
+    const put = Object.defineProperty({ ...request }, "method", { value: "PUT" });
+    expect(() => signGcsV4Url(put, now)).toThrow("only GET and HEAD");
+    expect(() => signGcsV4Url({ ...request, expiresInSeconds: 604801 }, now)).toThrow(
+      "out of range",
+    );
     expect(() => signGcsV4Url({ ...request, expiresInSeconds: 604800 }, now)).not.toThrow();
   });
 

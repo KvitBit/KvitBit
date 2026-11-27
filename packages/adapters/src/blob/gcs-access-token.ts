@@ -3,31 +3,29 @@
  * apps/deskohub-workspace/shared/backend/google-cloud/google-access-token.ts (metadata-server
  * read, cached until shortly before expiry, one shared refresh).
  */
-import {
-  Cause,
-  Clock,
-  Context,
-  Data,
-  Duration,
-  Effect,
-  Layer,
-  Option,
-  Schedule,
-  Schema,
-  SynchronizedRef,
-} from "effect";
-import {
-  HttpClient,
-  type HttpClientError,
-  HttpClientRequest,
-  type HttpClientResponse,
-} from "effect/http";
+import * as Cause from "effect/Cause";
+import * as Clock from "effect/Clock";
+import * as Context from "effect/Context";
+import * as Duration from "effect/Duration";
+import * as Effect from "effect/Effect";
+import * as HttpClient from "effect/http/HttpClient";
+import type * as HttpClientError from "effect/http/HttpClientError";
+import * as HttpClientRequest from "effect/http/HttpClientRequest";
+import type * as HttpClientResponse from "effect/http/HttpClientResponse";
+import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
+import * as Schedule from "effect/Schedule";
+import * as Schema from "effect/Schema";
+import * as SynchronizedRef from "effect/SynchronizedRef";
 
 /** No access token. Carries no token or response body. */
-export class GcsAccessTokenError extends Data.TaggedError("GcsAccessTokenError")<{
-  readonly reason: "transport" | "timeout" | "status" | "invalid-response";
-  readonly httpStatus?: number | undefined;
-}> {}
+export class GcsAccessTokenError extends Schema.TaggedError<
+  GcsAccessTokenError,
+  { readonly brand: unique symbol }
+>()("GcsAccessTokenError", {
+  reason: Schema.Literals(["transport", "timeout", "status", "invalid-response"]),
+  httpStatus: Schema.optionalKey(Schema.Int),
+}) {}
 
 export interface GcsAccessTokenService {
   /** A bearer token for storage.googleapis.com. */
@@ -37,7 +35,7 @@ export interface GcsAccessTokenService {
 }
 
 export class GcsAccessToken extends Context.Service<GcsAccessToken, GcsAccessTokenService>()(
-  "kvitbit/adapters/GcsAccessToken",
+  "@kvitbit/adapters/blob/gcs-access-token/GcsAccessToken",
 ) {}
 
 /** Where Cloud Run and Compute Engine expose the service account's token. */
@@ -61,18 +59,18 @@ interface CachedToken {
 
 const toTokenError = ({ reason }: HttpClientError.HttpClientError) => {
   if (reason._tag === "StatusCodeError") {
-    return new GcsAccessTokenError({ reason: "status", httpStatus: reason.response.status });
+    return GcsAccessTokenError.make({ reason: "status", httpStatus: reason.response.status });
   }
   if (reason._tag === "TransportError" && Cause.isTimeoutError(reason.cause)) {
-    return new GcsAccessTokenError({ reason: "timeout" });
+    return GcsAccessTokenError.make({ reason: "timeout" });
   }
-  return new GcsAccessTokenError({ reason: "transport" });
+  return GcsAccessTokenError.make({ reason: "transport" });
 };
 
 const readTokenResponse = (response: HttpClientResponse.HttpClientResponse) =>
   response.json.pipe(
     Effect.flatMap(Schema.decodeUnknownEffect(TokenResponse)),
-    Effect.mapError(() => new GcsAccessTokenError({ reason: "invalid-response" })),
+    Effect.mapError(() => GcsAccessTokenError.make({ reason: "invalid-response" })),
   );
 
 /**
@@ -105,16 +103,14 @@ const metadataServer: Layer.Layer<GcsAccessToken, never, HttpClient.HttpClient> 
         Effect.flatMap(readTokenResponse),
         Effect.timeoutOrElse({
           duration: refreshDeadline,
-          orElse: () => Effect.fail(new GcsAccessTokenError({ reason: "timeout" })),
+          orElse: () => Effect.fail(GcsAccessTokenError.make({ reason: "timeout" })),
         }),
-        Effect.flatMap((response) =>
-          Effect.map(
-            Clock.currentTimeMillis,
-            (now): CachedToken => ({
-              accessToken: response.access_token,
-              refreshAtMillis: now + response.expires_in * 1000 - Duration.toMillis(expiryMargin),
-            }),
-          ),
+        Effect.zipWith(
+          Clock.currentTimeMillis,
+          (response, now): CachedToken => ({
+            accessToken: response.access_token,
+            refreshAtMillis: now + response.expires_in * 1000 - Duration.toMillis(expiryMargin),
+          }),
         ),
       );
 
@@ -130,11 +126,12 @@ const metadataServer: Layer.Layer<GcsAccessToken, never, HttpClient.HttpClient> 
       get: SynchronizedRef.modifyEffect(cache, reuseOrRefresh).pipe(
         Effect.withSpan("GcsAccessToken.get"),
       ),
-      invalidate: (token) =>
+      invalidate: Effect.fn("GcsAccessToken.invalidate")((token) =>
         SynchronizedRef.update(
           cache,
           Option.filter(({ accessToken }) => accessToken !== token),
         ),
+      ),
     });
   }),
 );
@@ -143,11 +140,14 @@ const metadataServer: Layer.Layer<GcsAccessToken, never, HttpClient.HttpClient> 
 const fromEffect = <E>(
   get: Effect.Effect<string, E>,
   toError: (error: E) => GcsAccessTokenError = () =>
-    new GcsAccessTokenError({ reason: "transport" }),
+    GcsAccessTokenError.make({ reason: "transport" }),
 ): Layer.Layer<GcsAccessToken> =>
   Layer.succeed(
     GcsAccessToken,
-    GcsAccessToken.of({ get: Effect.mapError(get, toError), invalidate: () => Effect.void }),
+    GcsAccessToken.of({
+      get: Effect.mapError(get, toError),
+      invalidate: Effect.fn("GcsAccessToken.invalidate")(() => Effect.void),
+    }),
   );
 
 export const GcsAccessTokens = { metadataServer, fromEffect } as const;

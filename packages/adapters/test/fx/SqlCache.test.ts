@@ -1,8 +1,12 @@
 import { describe, expect, test } from "bun:test";
-import type { IsoDate } from "@kvitbit/domain/contract";
+import { IsoDate } from "@kvitbit/domain/contract";
 import { type CnbFixing, ExchangeRates, RatesUnavailable } from "@kvitbit/domain/ports";
-import { BigDecimal, Effect, Layer } from "effect";
-import { SqlClient } from "effect/sql";
+import * as Arr from "effect/Array";
+import * as BigDecimal from "effect/BigDecimal";
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
+import * as SqlClient from "effect/sql/SqlClient";
 import { FixtureRates, SqlCache } from "../../src/fx";
 import { counting, migratedPglite } from "./support";
 
@@ -13,7 +17,7 @@ const friday = FixtureRates.fixing("2026-11-20", 225, {
 
 const fixing = (date: string) =>
   Effect.gen(function* () {
-    return yield* (yield* ExchangeRates).fixing(date as IsoDate);
+    return yield* (yield* ExchangeRates).fixing(IsoDate.make(date));
   });
 
 /** Runs `body` against SqlCache over `inner` and a fresh migrated database. */
@@ -30,7 +34,7 @@ const withSqlCache = <A, E>(
 /** BigDecimal memoizes its normalized form, so compare fixings as plain values. */
 const plain = (f: CnbFixing) => ({
   ...f,
-  rates: f.rates.map((r) => ({ ...r, rate: BigDecimal.format(r.rate) })),
+  rates: Arr.map(f.rates, (r) => ({ ...r, rate: BigDecimal.format(r.rate) })),
 });
 
 const rows = Effect.gen(function* () {
@@ -47,7 +51,8 @@ describe("SqlCache", () => {
       inner.layer,
       Effect.gen(function* () {
         const first = yield* fixing("2026-11-20");
-        expect(yield* rows).toEqual([
+        const rows_1 = yield* rows;
+        expect(rows_1).toEqual([
           {
             fixing_date: "2026-11-20",
             sequence: 225,
@@ -59,7 +64,9 @@ describe("SqlCache", () => {
         ]);
         const second = yield* fixing("2026-11-20");
         expect(second.sequence).toBe(225);
-        const jpy = second.rates.find((r) => r.code === "JPY");
+        const jpy = Option.getOrUndefined(
+          Arr.findFirst(second.rates, (rate) => rate.code === "JPY"),
+        );
         expect(jpy?.quantity).toBe(100);
         expect(jpy && BigDecimal.equals(jpy.rate, BigDecimal.fromStringUnsafe("15.123"))).toBe(
           true,
@@ -76,11 +83,13 @@ describe("SqlCache", () => {
       inner.layer,
       Effect.gen(function* () {
         expect<unknown>((yield* fixing("2026-11-22")).fixingDate).toBe("2026-11-20");
-        expect((yield* rows).map((r) => r.fixing_date)).toEqual(["2026-11-20"]);
+        const rows_2 = yield* rows;
+        expect(Arr.map(rows_2, (r) => r.fixing_date)).toEqual(["2026-11-20"]);
         expect<unknown>((yield* fixing("2026-11-20")).fixingDate).toBe("2026-11-20");
         // Exact-date lookup only: the weekend date misses again (documented strategy).
         expect<unknown>((yield* fixing("2026-11-22")).fixingDate).toBe("2026-11-20");
-        expect((yield* rows).map((r) => r.fixing_date)).toEqual(["2026-11-20"]);
+        const rows_3 = yield* rows;
+        expect(Arr.map(rows_3, (r) => r.fixing_date)).toEqual(["2026-11-20"]);
       }),
     );
     expect(inner.state.calls).toBe(2);
@@ -94,17 +103,20 @@ describe("SqlCache", () => {
     ["an empty rates array", "[]"],
   ])("a row with %s is a miss and is repaired", async (_, stored) => {
     const inner = counting(FixtureRates.make([friday]));
-    const eur = (f: CnbFixing) => plain(f).rates.find((r) => r.code === "EUR")?.rate;
+    const eur = (f: CnbFixing) =>
+      Option.getOrUndefined(Arr.findFirst(plain(f).rates, (rate) => rate.code === "EUR"))?.rate;
     await withSqlCache(
       inner.layer,
       Effect.gen(function* () {
         const sql = yield* SqlClient.SqlClient;
         yield* sql`insert into fx_fixings (fixing_date, sequence, rates)
                    values ('2026-11-20', 223, ${stored}::jsonb)`;
-        expect(eur(yield* fixing("2026-11-20"))).toBe("24.335");
+        const value = yield* fixing("2026-11-20");
+        expect(eur(value)).toBe("24.335");
         const [row] = yield* rows;
         expect(row?.rates).toHaveLength(2);
-        expect(eur(yield* fixing("2026-11-20"))).toBe("24.335");
+        const value_1 = yield* fixing("2026-11-20");
+        expect(eur(value_1)).toBe("24.335");
       }),
     );
     expect(inner.state.calls).toBe(1);
@@ -119,7 +131,8 @@ describe("SqlCache", () => {
         yield* sql`insert into fx_fixings (fixing_date, sequence, rates)
                    values ('2026-11-20', 999, '[{"code":"EUR","quantity":1,"rate":"1"}]'::jsonb)`;
         expect((yield* fixing("2026-11-22")).sequence).toBe(225);
-        expect((yield* rows).map((r) => r.sequence)).toEqual([999]);
+        const rows_4 = yield* rows;
+        expect(Arr.map(rows_4, (r) => r.sequence)).toEqual([999]);
       }),
     );
   });
@@ -134,7 +147,8 @@ describe("SqlCache", () => {
                    ('2026-11-20', 999, '[{"code":"EUR","quantity":1,"rate":"1"}]'::jsonb),
                    ('2026-11-22', 1, '[]'::jsonb)`;
         expect((yield* fixing("2026-11-22")).sequence).toBe(225);
-        expect((yield* rows).map((r) => r.sequence)).toEqual([999, 1]);
+        const rows_5 = yield* rows;
+        expect(Arr.map(rows_5, (r) => r.sequence)).toEqual([999, 1]);
       }),
     );
   });
@@ -143,8 +157,10 @@ describe("SqlCache", () => {
     await withSqlCache(
       FixtureRates.layer([]),
       Effect.gen(function* () {
-        expect(yield* Effect.flip(fixing("2026-11-20"))).toBeInstanceOf(RatesUnavailable);
-        expect(yield* rows).toEqual([]);
+        const value_2 = yield* Effect.flip(fixing("2026-11-20"));
+        expect(value_2).toBeInstanceOf(RatesUnavailable);
+        const rows_6 = yield* rows;
+        expect(rows_6).toEqual([]);
       }),
     );
   });

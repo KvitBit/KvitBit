@@ -9,7 +9,9 @@
 
 import type { IsoDate } from "@kvitbit/domain/contract";
 import { type CnbFixing, ExchangeRates } from "@kvitbit/domain/ports";
-import { Clock, Effect, Layer } from "effect";
+import * as Clock from "effect/Clock";
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
 
 const pragueDate = new Intl.DateTimeFormat("en-CA", {
   timeZone: "Europe/Prague",
@@ -27,16 +29,15 @@ export const make = (inner: ExchangeRates["Service"]): Effect.Effect<ExchangeRat
   Effect.sync(() => {
     const byDate = new Map<IsoDate, CnbFixing>();
 
-    const remember = (date: IsoDate, fixing: CnbFixing) =>
-      Effect.gen(function* () {
-        if (fixing.fixingDate === date || date < (yield* pragueToday)) byDate.set(date, fixing);
-      });
+    const remember = Effect.fn("remember")(function* (date: IsoDate, fixing: CnbFixing) {
+      if (fixing.fixingDate === date || date < (yield* pragueToday)) byDate.set(date, fixing);
+    });
 
     return {
       fixing: (date) =>
         Effect.suspend(() => {
           const hit = byDate.get(date);
-          return hit
+          return hit !== undefined
             ? Effect.succeed(hit)
             : inner.fixing(date).pipe(Effect.tap((fixing) => remember(date, fixing)));
         }),
@@ -47,6 +48,7 @@ export const make = (inner: ExchangeRates["Service"]): Effect.Effect<ExchangeRat
 export const layer: Layer.Layer<ExchangeRates, never, ExchangeRates> = Layer.effect(
   ExchangeRates,
   Effect.gen(function* () {
-    return yield* make(yield* ExchangeRates);
+    const ExchangeRates_1 = yield* ExchangeRates;
+    return yield* make(ExchangeRates_1);
   }),
 );

@@ -6,21 +6,36 @@
 
 import { CurrencyCode, IsoDate } from "@kvitbit/domain/contract";
 import { type CnbFixing, ExchangeRates, RatesUnavailable } from "@kvitbit/domain/ports";
-import { BigDecimal, Effect, Layer, Schema } from "effect";
+import * as Arr from "effect/Array";
+import * as BigDecimal from "effect/BigDecimal";
+import * as Effect from "effect/Effect";
+import * as Fn from "effect/Function";
+import * as Layer from "effect/Layer";
+import * as Rec from "effect/Record";
+import * as Schema from "effect/Schema";
+import * as Str from "effect/String";
 
-export class NoFixingOnOrBefore extends Error {
-  override readonly name = "NoFixingOnOrBefore";
-}
+export class NoFixingOnOrBefore extends Schema.TaggedError<
+  NoFixingOnOrBefore,
+  { readonly brand: unique symbol }
+>()(
+  // biome-ignore lint/security/noSecrets: The exported Effect error discriminant is a fixed literal.
+  "NoFixingOnOrBefore",
+  { message: Schema.String },
+) {}
 
 export const make = (fixings: Iterable<CnbFixing>): ExchangeRates["Service"] => {
-  const newestFirst = [...fixings].sort((a, b) => b.fixingDate.localeCompare(a.fixingDate));
+  const newestFirst = [...fixings].sort((a, b) => Str.localeCompare(a.fixingDate)(b.fixingDate));
   return {
-    fixing: (date) => {
-      const found = newestFirst.find((f) => f.fixingDate <= date);
-      return found
-        ? Effect.succeed(found)
-        : Effect.fail(new RatesUnavailable({ cause: new NoFixingOnOrBefore(date) }));
-    },
+    fixing: Effect.fnUntraced(function* (date) {
+      const found = Arr.findFirst(newestFirst, (candidate) => candidate.fixingDate <= date);
+      const latest = yield* Effect.fromOption(found).pipe(
+        Effect.mapError(
+          () => new RatesUnavailable({ cause: NoFixingOnOrBefore.make({ message: date }) }),
+        ),
+      );
+      return latest;
+    }),
   };
 };
 
@@ -31,16 +46,20 @@ export const layer = (fixings: Iterable<CnbFixing>): Layer.Layer<ExchangeRates> 
  * A fixing from plain values: `fixing("2026-11-20", 225, { EUR: [1, "24.335"], JPY: [100, "15.123"] })`.
  * Rates use a decimal point. Throws on an invalid date or currency code.
  */
-export const fixing = (
-  fixingDate: string,
-  sequence: number,
-  rates: Readonly<Record<string, readonly [quantity: number, rate: string]>>,
-): CnbFixing => ({
-  fixingDate: Schema.decodeUnknownSync(IsoDate)(fixingDate),
-  sequence,
-  rates: Object.entries(rates).map(([code, [quantity, rate]]) => ({
-    code: Schema.decodeUnknownSync(CurrencyCode)(code),
-    quantity,
-    rate: BigDecimal.fromStringUnsafe(rate),
-  })),
-});
+type FixtureRates = Readonly<Record<string, readonly [quantity: number, rate: string]>>;
+
+export const fixing: {
+  (sequence: number, rates: FixtureRates): (fixingDate: string) => CnbFixing;
+  (fixingDate: string, sequence: number, rates: FixtureRates): CnbFixing;
+} = Fn.dual(
+  3,
+  (fixingDate: string, sequence: number, rates: FixtureRates): CnbFixing => ({
+    fixingDate: IsoDate.make(fixingDate),
+    sequence,
+    rates: Arr.map(Rec.toEntries(rates), ([code, [quantity, rate]]) => ({
+      code: CurrencyCode.make(code),
+      quantity,
+      rate: BigDecimal.fromStringUnsafe(rate),
+    })),
+  }),
+);

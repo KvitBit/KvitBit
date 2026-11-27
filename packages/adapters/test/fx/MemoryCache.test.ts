@@ -1,8 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import type { IsoDate } from "@kvitbit/domain/contract";
+import { IsoDate } from "@kvitbit/domain/contract";
 import { type CnbFixing, ExchangeRates, RatesUnavailable } from "@kvitbit/domain/ports";
-import { Effect, Layer } from "effect";
-import { TestClock } from "effect/testing";
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+import * as TestClock from "effect/testing/TestClock";
 import { FixtureRates, MemoryCache } from "../../src/fx";
 import { counting } from "./support";
 
@@ -21,15 +22,12 @@ const withCache = <A, E>(
     Effect.gen(function* () {
       yield* TestClock.setTime(now);
       return yield* body;
-    }).pipe(
-      Effect.provide(MemoryCache.layer.pipe(Layer.provide(inner))),
-      Effect.provide(TestClock.layer()),
-    ),
+    }).pipe(Effect.provide([MemoryCache.layer.pipe(Layer.provide(inner)), TestClock.layer()])),
   );
 
 const fixing = (date: string) =>
   Effect.gen(function* () {
-    return yield* (yield* ExchangeRates).fixing(date as IsoDate);
+    return yield* (yield* ExchangeRates).fixing(IsoDate.make(date));
   });
 
 describe("MemoryCache", () => {
@@ -91,7 +89,8 @@ describe("MemoryCache", () => {
     await withCache(
       inner.layer,
       Effect.gen(function* () {
-        expect(yield* Effect.flip(fixing("2026-11-20"))).toBeInstanceOf(RatesUnavailable);
+        const value = yield* Effect.flip(fixing("2026-11-20"));
+        expect(value).toBeInstanceOf(RatesUnavailable);
         fail = false;
         expect((yield* fixing("2026-11-20")).sequence).toBe(225);
       }),

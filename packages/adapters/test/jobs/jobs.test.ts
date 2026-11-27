@@ -11,6 +11,7 @@ import {
   selfHostedRunnerLayer,
   testRunnerLayer,
 } from "@kvitbit/adapters/jobs";
+import * as Arr from "effect/Array";
 import * as Cron from "effect/Cron";
 import * as SqlMessageStorage from "effect/cluster/SqlMessageStorage";
 import * as SqlRunnerStorage from "effect/cluster/SqlRunnerStorage";
@@ -21,15 +22,19 @@ import * as Layer from "effect/Layer";
 import * as Ref from "effect/Ref";
 import * as References from "effect/References";
 import * as Result from "effect/Result";
+import * as Str from "effect/String";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as TestClock from "effect/testing/TestClock";
 
 const nextAfter = (job: CronJob, iso: string): string =>
-  Cron.next(parseCron(cronSpecs[job]), new Date(iso)).toISOString();
+  Cron.next(parseCron(cronSpecs[job]), DateTime.toDateUtc(DateTime.makeUnsafe(iso))).toISOString();
 
 const sequenceAfter = (job: CronJob, iso: string, count: number): ReadonlyArray<string> => {
   const out: string[] = [];
-  for (const date of Cron.sequence(parseCron(cronSpecs[job]), new Date(iso))) {
+  for (const date of Cron.sequence(
+    parseCron(cronSpecs[job]),
+    DateTime.toDateUtc(DateTime.makeUnsafe(iso)),
+  )) {
     out.push(date.toISOString());
     if (out.length === count) break;
   }
@@ -38,13 +43,13 @@ const sequenceAfter = (job: CronJob, iso: string, count: number): ReadonlyArray<
 
 describe("cron table", () => {
   test("every row parses and names are unique kvitbit/ names", () => {
-    const names = cronJobs.map((job) => cronSpecs[job].name);
+    const names = Arr.map(cronJobs, (job) => cronSpecs[job].name);
     expect(new Set(names).size).toBe(names.length);
     for (const job of cronJobs) {
       const spec = cronSpecs[job];
-      expect(spec.name.startsWith("kvitbit/")).toBe(true);
-      expect(Result.isSuccess(Cron.parse(spec.expression, spec.timeZone))).toBe(true);
-      expect(Duration.toMillis(spec.skipIfOlderThan)).toBeGreaterThan(0);
+      expect(Str.startsWith("kvitbit/")(spec.name)).toBe(true);
+      Cron.parse(spec.expression, spec.timeZone).pipe(Result.isSuccess, expect).toBe(true);
+      spec.skipIfOlderThan.pipe(Duration.toMillis, expect).toBeGreaterThan(0);
     }
   });
 
@@ -69,9 +74,9 @@ describe("cron table", () => {
       expression: "30 3 * * *",
       timeZone: "Europe/Prague",
     });
-    expect(Duration.toMillis(cronSpecs.recurringSweep.skipIfOlderThan)).toBe(3_600_000);
-    expect(Duration.toMillis(cronSpecs.outboxReconcile.skipIfOlderThan)).toBe(300_000);
-    expect(Duration.toMillis(cronSpecs.housekeeping.skipIfOlderThan)).toBe(6 * 3_600_000);
+    cronSpecs.recurringSweep.skipIfOlderThan.pipe(Duration.toMillis, expect).toBe(3_600_000);
+    cronSpecs.outboxReconcile.skipIfOlderThan.pipe(Duration.toMillis, expect).toBe(300_000);
+    cronSpecs.housekeeping.skipIfOlderThan.pipe(Duration.toMillis, expect).toBe(6 * 3_600_000);
   });
 
   test("reminder sweep stays at 08:00 Prague across both 2026 DST switches", () => {
@@ -162,7 +167,10 @@ describe("cron layers on the memory runner", () => {
         // Handlers with different error types: cronsLayer infers the union.
         const handlers = {
           recurringSweep: hit("recurringSweep"),
-          reminderSweep: Effect.andThen(hit("reminderSweep"), Effect.fail(new Error("x"))),
+          reminderSweep: Effect.andThen(
+            hit("reminderSweep"),
+            Effect.fail({ _tag: "TestFailure" } as const),
+          ),
           cnbFixing: hit("cnbFixing"),
           outboxReconcile: Effect.andThen(hit("outboxReconcile"), Effect.fail("boom" as const)),
           housekeeping: Effect.andThen(hit("housekeeping"), Effect.die("defect")),
@@ -196,7 +204,7 @@ describe("cron layers on the memory runner", () => {
       yield* sql`GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO jobs_runtime`;
       yield* sql`SET ROLE jobs_runtime`;
       const [who] = yield* sql<{ readonly user: string }>`SELECT current_user AS user`;
-      if (who?.user !== "jobs_runtime") yield* Effect.die(`running as ${who?.user}`);
+      if (who?.user !== "jobs_runtime") return yield* Effect.die(`running as ${who?.user}`);
     }),
   ).pipe(
     // Fresh layers, not the shared constant, so memoization cannot hide a second migration run.
