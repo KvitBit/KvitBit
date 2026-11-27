@@ -1,0 +1,73 @@
+{
+  "$schema": "https://turborepo.com/schema.json",
+  "extends": ["//"],
+  "tasks": {
+    "test:suite": {
+      "dependsOn": ["test:selfhost", "test:stack", "test:mail", "test:infra"],
+      "cache": false
+    },
+    "test:selfhost": {
+      "dependsOn": [],
+      "inputs": [
+        "package.json",
+        "tsconfig.json",
+        "test/selfhost.test.ts",
+        "$TURBO_ROOT$/Dockerfile",
+        "$TURBO_ROOT$/.dockerignore",
+        "$TURBO_ROOT$/docker-compose.yml",
+        "$TURBO_ROOT$/docker/**",
+        "$TURBO_ROOT$/flake.nix",
+        "$TURBO_ROOT$/bun.nix",
+        "$TURBO_ROOT$/.github/workflows/deploy.yml",
+        "$TURBO_ROOT$/packages/db/drizzle/20261123175822_init/migration.sql"
+      ],
+      "env": ["TZ"],
+      "passThroughEnv": ["CI"],
+      "outputs": []
+    },
+    "test:stack": {
+      "dependsOn": [],
+      "inputs": [
+        "package.json",
+        "tsconfig.json",
+        "alchemy.run.ts",
+        "src/**",
+        "test/stack.test.ts",
+        "$TURBO_ROOT$/.github/workflows/deploy.yml"
+      ],
+      "env": ["TZ"],
+      "passThroughEnv": ["CI"],
+      "outputs": []
+    },
+    "test:mail": {
+      "dependsOn": [],
+      "inputs": [
+        "package.json",
+        "tsconfig.json",
+        "src/config.ts",
+        "src/env.ts",
+        "src/mail-forwarder/**",
+        "src/resources/mail.ts",
+        "src/resources/network.ts",
+        "test/mail-forwarder.test.ts"
+      ],
+      "env": ["TZ"],
+      "passThroughEnv": ["CI"],
+      "outputs": []
+    },
+    "test:infra": {
+      "dependsOn": [],
+      "inputs": [
+        "package.json",
+        "tsconfig.json",
+        "src/**",
+        "test/bootstrap-stage.test.ts",
+        "test/monitoring-provider.test.ts",
+        "test/turbo-cache.test.ts"
+      ],
+      "env": ["TZ"],
+      "passThroughEnv": ["CI"],
+      "outputs": []
+    }
+  }
+}

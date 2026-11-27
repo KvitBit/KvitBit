@@ -19,8 +19,22 @@
     "./sql": "./src/sql/index.ts"
   },
   "scripts": {
+    "lint": "biome check --error-on-warnings .",
     "typecheck": "tsc -p tsconfig.json",
-    "test": "bun test --pass-with-no-tests"
+    "test": "bun test --pass-with-no-tests",
+    "test:suite": ":",
+    "test:altcha": "bun test test/altcha",
+    "test:auth": "bun test test/auth",
+    "test:blob": "bun test test/blob",
+    "test:email": "bun test test/email",
+    "test:fx": "bun test test/fx",
+    "test:jobs": "bun test test/jobs",
+    "test:pdf": "bun test test/pdf",
+    "test:qr": "bun test test/qr",
+    "test:registry": "bun test test/registry",
+    "test:sql": "bun test test/sql",
+    "test:templates": "bun test test/templates",
+    "test:testing": "bun test test/testing"
   },
   "dependencies": {
     "@better-auth/api-key": "1.7.27",

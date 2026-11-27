@@ -7,8 +7,12 @@
     ".": "./src/index.ts"
   },
   "scripts": {
+    "lint": "biome check --error-on-warnings .",
     "typecheck": "tsc -p tsconfig.json",
-    "test": "bun test --pass-with-no-tests"
+    "test": "bun test --pass-with-no-tests",
+    "test:suite": ":",
+    "test:access": "bun test test/access.test.ts test/access.property.test.ts",
+    "test:contracts": "bun test test/altcha.test.ts test/api-key.test.ts test/api.test.ts test/core-inputs.test.ts test/dto.test.ts test/feedback.test.ts test/http.test.ts test/mcp.test.ts"
   },
   "dependencies": {
     "@kvitbit/domain": "workspace:*",

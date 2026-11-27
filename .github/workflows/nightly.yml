@@ -14,6 +14,11 @@ concurrency:
   group: nightly-${{ github.ref }}
   cancel-in-progress: false
 
+env:
+  TURBO_API: ${{ vars.TURBO_API }}
+  TURBO_TEAM: ${{ vars.TURBO_TEAM || 'team_kvitbit' }}
+  TURBO_TOKEN: ${{ secrets.TURBO_TOKEN }}
+
 jobs:
   formal-wide:
     runs-on: ubuntu-latest
@@ -31,10 +36,23 @@ jobs:
           java-version: "17"
       - uses: actions/cache@v4
         with:
+          path: ~/.bun/install/cache
+          key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-bun-
+      - uses: actions/cache@v4
+        with:
           path: formal/.cache/tla2tools-*.jar
           key: formal-toolchain-${{ hashFiles('formal/toolchain/toolchain.json') }}
+      - uses: actions/cache@v4
+        with:
+          path: .turbo/cache
+          key: ${{ runner.os }}-turbo-nightly-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-turbo-nightly-
+            ${{ runner.os }}-turbo-
       - run: bun install --frozen-lockfile
-      - run: bun run verify:formal --wide
+      - run: bun run verify:formal:wide:cached -- --continue
       # Property/exhaustive tests gate their wider bounds on KVITBIT_FORMAL_WIDE=1 (ADR-0005).
       - run: bun run test
         env:
@@ -66,6 +84,12 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.4.2
+      - uses: actions/cache@v4
+        with:
+          path: ~/.bun/install/cache
+          key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-bun-
       - run: bun install --frozen-lockfile
       - name: Postgres 17 adapter contention tests
         run: bun test ./packages/adapters/test/sql/contention.postgres.test.ts
@@ -94,9 +118,25 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.4.2
+      - uses: actions/cache@v4
+        with:
+          path: ~/.bun/install/cache
+          key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-bun-
+      - uses: actions/cache@v4
+        id: playwright-cache
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-playwright-${{ hashFiles('bun.lock') }}
       - run: bun install --frozen-lockfile
-      - run: bunx --no-install playwright install --with-deps chromium
-        working-directory: apps/web
+      - working-directory: apps/web
+        run: |
+          if [ "${{ steps.playwright-cache.outputs.cache-hit }}" = "true" ]; then
+            bunx --no-install playwright install-deps chromium
+          else
+            bunx --no-install playwright install --with-deps chromium
+          fi
       - name: Playwright web journeys and hydration
         run: bun run --cwd apps/web e2e
 

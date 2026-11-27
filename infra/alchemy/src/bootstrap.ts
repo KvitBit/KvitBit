@@ -17,6 +17,7 @@ import { declareMailForwarder } from "./resources/mail";
 import { declareMonitoring } from "./resources/monitoring";
 import { declareNetworkAndRunners } from "./resources/network";
 import { declareServerService } from "./resources/server";
+import { declareTurboCache } from "./resources/turbo-cache";
 
 export const KVITBIT_STACK_NAME = "Kvitbit";
 
@@ -187,6 +188,12 @@ export const declareKvitbitStack = (config: KvitbitStackConfig) =>
             networkSelfLink: network.networkSelfLink,
             resendSecretName: foundation.resendSecretName,
           });
+    const turboCache =
+      config.turboCache === undefined
+        ? undefined
+        : yield* declareTurboCache(config, config.turboCache, {
+            tokenSecretName: foundation.turboCacheTokenSecretName,
+          });
     const dnsNameServers =
       foundation.dnsApi === undefined
         ? undefined
@@ -220,6 +227,7 @@ export const declareKvitbitStack = (config: KvitbitStackConfig) =>
       tokenRouteExclusion,
       edge,
       ...(mail === undefined ? {} : { mail }),
+      ...(turboCache === undefined ? {} : { turboCache }),
       ...(dnsNameServers === undefined ? {} : { dnsNameServers }),
     };
   });

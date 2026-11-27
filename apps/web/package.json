@@ -7,8 +7,14 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
+    "lint": "biome check --error-on-warnings .",
     "typecheck": "tsc -p tsconfig.json",
     "test": "bun test test",
+    "test:suite": ":",
+    "test:altcha": "bun test test/public/altcha.test.ts",
+    "test:feedback": "bun test test/feedback",
+    "test:verify": "bun test test/verify test/ssr.smoke.test.ts",
+    "test:pages": "bun test test/documents test/records test/settings test/public/auth-share.test.ts test/public/consent-invite-onboarding.test.ts test/public/public-pages.test.ts",
     "e2e": "playwright test -c e2e/playwright.config.ts"
   },
   "dependencies": {
