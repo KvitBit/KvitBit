@@ -323,6 +323,16 @@ describe("wiring: email & SMTP URL parsing", () => {
         ["KVITBIT_DISABLE_BLOB", { KVITBIT_DISABLE_BLOB: "true" }],
         ["KVITBIT_DISABLE_CUSTOM", { KVITBIT_DISABLE_CUSTOM: "1" }],
         ["KVITBIT_DISABLE_HTTP_2 (Array node)", { KVITBIT_DISABLE_HTTP_2: "true" }],
+        [
+          "sparse Array node (1200=true + 3000 empty)",
+          { KVITBIT_DISABLE_HTTP_1200: "true", KVITBIT_DISABLE_HTTP_3000: "" },
+        ],
+        [
+          "very sparse Array node (5000=true + 10000 empty)",
+          { KVITBIT_DISABLE_HTTP_5000: "true", KVITBIT_DISABLE_HTTP_10000: "" },
+        ],
+        ["empty forbidden key KVITBIT_DISABLE_OTHER", { KVITBIT_DISABLE_OTHER: "" }],
+        ["empty KVITBIT_ALLOW_LOCAL_BLOBS", { KVITBIT_ALLOW_LOCAL_BLOBS: "" }],
         ["KVITBIT_PREVIEW_DISABLE_EMAIL", { KVITBIT_PREVIEW_DISABLE_EMAIL: "true" }],
         ["trailing-dot localhost", { APP_ORIGIN: "https://localhost." }],
         ["trailing-dot sub.localhost", { APP_ORIGIN: "https://sub.localhost." }],
@@ -338,14 +348,25 @@ describe("wiring: email & SMTP URL parsing", () => {
         expect(res._tag, `expected failure for ${workload} ${label}`).toBe("Failure");
       }
 
-      // Composed fallback ConfigProvider (primary valid prod + fallback forbidden flag) must fail fast.
-      for (const [label, fallbackEnv] of [
-        ["fallback KVITBIT_DISABLE_CUSTOM", { KVITBIT_DISABLE_CUSTOM: "true" }],
-        ["fallback KVITBIT_DISABLE_HTTP_2", { KVITBIT_DISABLE_HTTP_2: "true" }],
-        ["fallback KVITBIT_PREVIEW_DISABLE_CUSTOM", { KVITBIT_PREVIEW_DISABLE_CUSTOM: "true" }],
+      // Composed fallback ConfigProvider (primary valid prod + fallback forbidden flag) must fail fast,
+      // even when the primary provider carries an empty forbidden sibling key.
+      for (const [label, primaryExtra, fallbackEnv] of [
+        ["fallback KVITBIT_DISABLE_CUSTOM", {}, { KVITBIT_DISABLE_CUSTOM: "true" }],
+        [
+          "empty primary KVITBIT_DISABLE_OTHER + fallback KVITBIT_DISABLE_CUSTOM",
+          { KVITBIT_DISABLE_OTHER: "" },
+          { KVITBIT_DISABLE_CUSTOM: "true" },
+        ],
+        [
+          "empty primary KVITBIT_PREVIEW_DISABLE_OTHER + fallback KVITBIT_PREVIEW_DISABLE_CUSTOM",
+          { KVITBIT_PREVIEW_DISABLE_OTHER: "" },
+          { KVITBIT_PREVIEW_DISABLE_CUSTOM: "true" },
+        ],
+        ["fallback KVITBIT_DISABLE_HTTP_2", {}, { KVITBIT_DISABLE_HTTP_2: "true" }],
+        ["fallback KVITBIT_PREVIEW_DISABLE_CUSTOM", {}, { KVITBIT_PREVIEW_DISABLE_CUSTOM: "true" }],
       ] as const) {
         const composed = ConfigProvider.orElse(
-          ConfigProvider.fromEnv({ env: validProdEnv }),
+          ConfigProvider.fromEnv({ env: { ...validProdEnv, ...primaryExtra } }),
           ConfigProvider.fromEnv({ env: fallbackEnv }),
         );
         const res = await loadWithProvider(workload, composed);

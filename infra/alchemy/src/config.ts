@@ -10,6 +10,7 @@ import {
   findForbiddenOptOutFlag,
   isBlobDriver,
   isEmailMode,
+  isForbiddenOptOutKey,
   isProdEmailMode,
   isValidDomain,
   isValidEmailFrom,
@@ -499,7 +500,7 @@ const optionalInt = (
     return Number.parseInt(raw, 10);
   });
 
-const MAX_ARRAY_EDGE_SCAN = 1024;
+const MAX_ARRAY_DIRECT_SCAN = 4096;
 
 const FORBIDDEN_PROVIDER_PROBE_PATHS: ReadonlyArray<ReadonlyArray<string>> = [
   [],
@@ -507,6 +508,7 @@ const FORBIDDEN_PROVIDER_PROBE_PATHS: ReadonlyArray<ReadonlyArray<string>> = [
   ["KVITBIT", "PREVIEW"],
   ["KVITBIT", "PREVIEW", "DISABLE"],
   ["KVITBIT", "ALLOW"],
+  ["KVITBIT", "ALLOW", "LOCAL"],
   ["KVITBIT", "ALLOW", "LOCAL", "BLOBS"],
 ];
 
@@ -539,8 +541,13 @@ const collectKvitbitProviderSubtree = (
         if (path.length === 0 && key !== "KVITBIT" && !key.startsWith("KVITBIT_")) {
           continue;
         }
-        const nested = yield* collectKvitbitProviderSubtree(provider, [...path, key], visited);
+        const childPath = [...path, key];
+        const nested = yield* collectKvitbitProviderSubtree(provider, childPath, visited);
         entries.push(...nested);
+        const childName = childPath.map(String).join("_");
+        if (nested.length === 0 && isForbiddenOptOutKey(childName)) {
+          entries.push([childName, ""]);
+        }
       }
       return entries;
     }
@@ -548,22 +555,18 @@ const collectKvitbitProviderSubtree = (
       if (node.value !== undefined && path.length > 0) {
         entries.push([path.map(String).join("_"), node.value]);
       }
-      const indices: Array<number> = [];
-      if (node.length <= MAX_ARRAY_EDGE_SCAN * 2) {
-        for (let i = 0; i < node.length; i++) {
-          indices.push(i);
-        }
-      } else {
-        for (let i = 0; i < MAX_ARRAY_EDGE_SCAN; i++) {
-          indices.push(i);
-        }
-        for (let i = node.length - MAX_ARRAY_EDGE_SCAN; i < node.length; i++) {
-          indices.push(i);
-        }
-      }
-      for (const index of indices) {
+      const arrayEntries: Array<readonly [string, string]> = [];
+      const limit = Math.min(node.length, MAX_ARRAY_DIRECT_SCAN);
+      for (let index = 0; index < limit; index++) {
         const nested = yield* collectKvitbitProviderSubtree(provider, [...path, index], visited);
-        entries.push(...nested);
+        arrayEntries.push(...nested);
+      }
+      entries.push(...arrayEntries);
+      if (node.length > 0 && arrayEntries.length === 0) {
+        const lastName = [...path, node.length - 1].map(String).join("_");
+        if (isForbiddenOptOutKey(lastName)) {
+          entries.push([lastName, ""]);
+        }
       }
     }
     return entries;
@@ -601,8 +604,9 @@ export const loadStackConfig: Effect.Effect<
   const kvitbitEntries = yield* collectKvitbitProviderEnv(provider);
   const dynamicMap: Record<string, string | undefined> = Object.fromEntries(kvitbitEntries);
   for (const forbidden of FORBIDDEN_OPT_OUT_ENV_VARS) {
-    if (dynamicMap[forbidden] === undefined) {
-      dynamicMap[forbidden] = yield* optionalNonEmptyString(forbidden);
+    const direct = yield* optionalNonEmptyString(forbidden);
+    if (direct !== undefined) {
+      dynamicMap[forbidden] = direct;
     }
   }
   const forbiddenFlag = findForbiddenOptOutFlag(dynamicMap);

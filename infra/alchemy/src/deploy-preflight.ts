@@ -281,14 +281,15 @@ export const isProdEmailMode = (value: string): value is ProdEmailMode =>
 export const isBlobDriver = (value: string): value is BlobDriver =>
   (BLOB_DRIVERS as ReadonlyArray<string>).includes(value);
 
+export const isForbiddenOptOutKey = (key: string): boolean =>
+  FORBIDDEN_OPT_OUT_PATTERN.test(key) ||
+  (FORBIDDEN_OPT_OUT_ENV_VARS as ReadonlyArray<string>).includes(key);
+
 export const findForbiddenOptOutFlag = (
   env: Readonly<Record<string, string | undefined>>,
 ): string | undefined => {
   for (const [key, value] of Object.entries(env)) {
-    const isForbidden =
-      FORBIDDEN_OPT_OUT_PATTERN.test(key) ||
-      (FORBIDDEN_OPT_OUT_ENV_VARS as ReadonlyArray<string>).includes(key);
-    if (isForbidden && trimOptional(value) !== undefined) {
+    if (isForbiddenOptOutKey(key) && value !== undefined) {
       return key;
     }
   }

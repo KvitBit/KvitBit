@@ -373,6 +373,16 @@ describe("Kvitbit Alchemy stack config", () => {
       ["64-char email domain label", { KVITBIT_EMAIL_FROM: `a@${"b".repeat(64)}.org` }],
       ["64-char email TLD label", { KVITBIT_EMAIL_FROM: `a@example.${"c".repeat(64)}` }],
       ["Array-node disable flag", { KVITBIT_DISABLE_HTTP_2: "true" }],
+      [
+        "sparse Array-node disable flag (1200=true + 3000 empty)",
+        { KVITBIT_DISABLE_HTTP_1200: "true", KVITBIT_DISABLE_HTTP_3000: "" },
+      ],
+      [
+        "very sparse Array-node disable flag (5000=true + 10000 empty)",
+        { KVITBIT_DISABLE_HTTP_5000: "true", KVITBIT_DISABLE_HTTP_10000: "" },
+      ],
+      ["empty forbidden key KVITBIT_DISABLE_OTHER", { KVITBIT_DISABLE_OTHER: "" }],
+      ["empty KVITBIT_ALLOW_LOCAL_BLOBS", { KVITBIT_ALLOW_LOCAL_BLOBS: "" }],
     ] as const) {
       const res = await loadWith(
         ConfigProvider.fromEnv({ env: { ...PROD_REQUIRED_ENV, ...overrides } }),
@@ -380,13 +390,23 @@ describe("Kvitbit Alchemy stack config", () => {
       expect(res._tag, `expected InvalidStackConfig for ${label}`).toBe("Failure");
     }
 
-    for (const [label, fallbackEnv] of [
-      ["fallback KVITBIT_DISABLE_CUSTOM", { KVITBIT_DISABLE_CUSTOM: "true" }],
-      ["fallback KVITBIT_DISABLE_HTTP_2", { KVITBIT_DISABLE_HTTP_2: "true" }],
-      ["fallback KVITBIT_PREVIEW_DISABLE_CUSTOM", { KVITBIT_PREVIEW_DISABLE_CUSTOM: "true" }],
+    for (const [label, primaryExtra, fallbackEnv] of [
+      ["fallback KVITBIT_DISABLE_CUSTOM", {}, { KVITBIT_DISABLE_CUSTOM: "true" }],
+      [
+        "empty primary KVITBIT_DISABLE_OTHER + fallback KVITBIT_DISABLE_CUSTOM",
+        { KVITBIT_DISABLE_OTHER: "" },
+        { KVITBIT_DISABLE_CUSTOM: "true" },
+      ],
+      [
+        "empty primary KVITBIT_PREVIEW_DISABLE_OTHER + fallback KVITBIT_PREVIEW_DISABLE_CUSTOM",
+        { KVITBIT_PREVIEW_DISABLE_OTHER: "" },
+        { KVITBIT_PREVIEW_DISABLE_CUSTOM: "true" },
+      ],
+      ["fallback KVITBIT_DISABLE_HTTP_2", {}, { KVITBIT_DISABLE_HTTP_2: "true" }],
+      ["fallback KVITBIT_PREVIEW_DISABLE_CUSTOM", {}, { KVITBIT_PREVIEW_DISABLE_CUSTOM: "true" }],
     ] as const) {
       const composed = ConfigProvider.orElse(
-        ConfigProvider.fromEnv({ env: PROD_REQUIRED_ENV }),
+        ConfigProvider.fromEnv({ env: { ...PROD_REQUIRED_ENV, ...primaryExtra } }),
         ConfigProvider.fromEnv({ env: fallbackEnv }),
       );
       const res = await loadWith(composed);

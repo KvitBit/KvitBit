@@ -532,6 +532,10 @@ export interface ValidatedRuntimeEnv {
 
 const FORBIDDEN_OPT_OUT_PATTERN = /^KVITBIT_(?:PREVIEW_)?DISABLE_/;
 
+const isForbiddenOptOutKey = (key: string): boolean =>
+  FORBIDDEN_OPT_OUT_PATTERN.test(key) ||
+  (FORBIDDEN_OPT_OUT_ENV_VARS as ReadonlyArray<string>).includes(key);
+
 /**
  * Pure boot-time validation of the full runtime environment map for `apps/server` (`server` or
  * `worker`). Directly exercised by both runtime boot and the Tier 1 exhaustive verification suite.
@@ -548,10 +552,7 @@ export const validateServerRuntimeEnv = (
   const env = envResult.value;
 
   for (const [key, value] of Object.entries(envMap)) {
-    const isForbiddenName =
-      FORBIDDEN_OPT_OUT_PATTERN.test(key) ||
-      (FORBIDDEN_OPT_OUT_ENV_VARS as ReadonlyArray<string>).includes(key);
-    if (isForbiddenName && trimOptional(value) !== undefined) {
+    if (isForbiddenOptOutKey(key) && value !== undefined) {
       return fail(
         key,
         env === "production"
@@ -624,7 +625,7 @@ export const loadValidatedAppOrigin: Effect.Effect<string, Config.ConfigError> =
   },
 );
 
-const MAX_ARRAY_EDGE_SCAN = 1024;
+const MAX_ARRAY_DIRECT_SCAN = 4096;
 
 const FORBIDDEN_PROVIDER_PROBE_PATHS: ReadonlyArray<ReadonlyArray<string>> = [
   [],
@@ -632,6 +633,7 @@ const FORBIDDEN_PROVIDER_PROBE_PATHS: ReadonlyArray<ReadonlyArray<string>> = [
   ["KVITBIT", "PREVIEW"],
   ["KVITBIT", "PREVIEW", "DISABLE"],
   ["KVITBIT", "ALLOW"],
+  ["KVITBIT", "ALLOW", "LOCAL"],
   ["KVITBIT", "ALLOW", "LOCAL", "BLOBS"],
 ];
 
@@ -664,8 +666,13 @@ const collectKvitbitProviderSubtree = (
         if (path.length === 0 && key !== "KVITBIT" && !key.startsWith("KVITBIT_")) {
           continue;
         }
-        const nested = yield* collectKvitbitProviderSubtree(provider, [...path, key], visited);
+        const childPath = [...path, key];
+        const nested = yield* collectKvitbitProviderSubtree(provider, childPath, visited);
         entries.push(...nested);
+        const childName = childPath.map(String).join("_");
+        if (nested.length === 0 && isForbiddenOptOutKey(childName)) {
+          entries.push([childName, ""]);
+        }
       }
       return entries;
     }
@@ -673,22 +680,18 @@ const collectKvitbitProviderSubtree = (
       if (node.value !== undefined && path.length > 0) {
         entries.push([path.map(String).join("_"), node.value]);
       }
-      const indices: Array<number> = [];
-      if (node.length <= MAX_ARRAY_EDGE_SCAN * 2) {
-        for (let i = 0; i < node.length; i++) {
-          indices.push(i);
-        }
-      } else {
-        for (let i = 0; i < MAX_ARRAY_EDGE_SCAN; i++) {
-          indices.push(i);
-        }
-        for (let i = node.length - MAX_ARRAY_EDGE_SCAN; i < node.length; i++) {
-          indices.push(i);
-        }
-      }
-      for (const index of indices) {
+      const arrayEntries: Array<readonly [string, string]> = [];
+      const limit = Math.min(node.length, MAX_ARRAY_DIRECT_SCAN);
+      for (let index = 0; index < limit; index++) {
         const nested = yield* collectKvitbitProviderSubtree(provider, [...path, index], visited);
-        entries.push(...nested);
+        arrayEntries.push(...nested);
+      }
+      entries.push(...arrayEntries);
+      if (node.length > 0 && arrayEntries.length === 0) {
+        const lastName = [...path, node.length - 1].map(String).join("_");
+        if (isForbiddenOptOutKey(lastName)) {
+          entries.push([lastName, ""]);
+        }
       }
     }
     return entries;
@@ -740,8 +743,9 @@ export const loadBootRuntimeConfig = (
       }
     }
     for (const forbidden of FORBIDDEN_OPT_OUT_ENV_VARS) {
-      if (trimOptional(envMap[forbidden]) === undefined) {
-        envMap[forbidden] = yield* optionalEnvString(forbidden);
+      const direct = yield* optionalEnvString(forbidden);
+      if (direct !== undefined) {
+        envMap[forbidden] = direct;
       }
     }
     return yield* liftValidation(validateServerRuntimeEnv(envMap, workload));
