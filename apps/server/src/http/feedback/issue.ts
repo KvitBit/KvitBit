@@ -2,6 +2,7 @@ import {
   type FeedbackIssue,
   type FeedbackSubmission,
   redactFeedbackApiKeys,
+  redactFeedbackUrls,
 } from "@kvitbit/api-contract";
 import { Effect, Redacted, Schema } from "effect";
 import { FetchHttpClient, HttpClient, HttpClientRequest } from "effect/http";
@@ -9,9 +10,11 @@ import type { FeedbackConfig } from "./access";
 
 const plainText = (value: string) =>
   redactFeedbackApiKeys(
-    value
-      .replaceAll(/\r\n?/g, "\n")
-      .replaceAll(/[\p{Cc}\p{Cf}]/gu, (char) => (char === "\n" || char === "\t" ? char : "")),
+    redactFeedbackUrls(
+      value
+        .replaceAll(/\r\n?/g, "\n")
+        .replaceAll(/[\p{Cc}\p{Cf}]/gu, (char) => (char === "\n" || char === "\t" ? char : "")),
+    ),
   );
 
 const fenceLength = (value: string, runs: RegExp) =>
@@ -36,7 +39,8 @@ const issueContent = (
   submission: FeedbackSubmission,
   page: { readonly url: string; readonly sensitive: boolean },
 ) => {
-  const summary = plainText(submission.comment)
+  const comment = plainText(submission.comment);
+  const summary = comment
     .trim()
     .split("\n", 1)[0]
     ?.replaceAll(/[^\p{L}\p{M}\p{N} ]+/gu, " ")
@@ -86,7 +90,7 @@ const issueContent = (
 
   const body = [
     "## Feedback",
-    codeBlock(plainText(submission.comment)),
+    codeBlock(comment),
     "## Page",
     context,
     "## Pins",

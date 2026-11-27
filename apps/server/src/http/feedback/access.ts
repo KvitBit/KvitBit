@@ -10,7 +10,9 @@ export interface FeedbackConfig {
 }
 
 const repositoryName = /^(?=[^/]{1,39}\/)[a-z\d]+(?:-[a-z\d]+)*\/([a-z\d_.-]{1,100})$/i;
-const githubToken = /^(?:github_pat_[a-zA-Z\d_]+|gh[opsu]_[a-zA-Z\d]+)$/;
+const githubToken = /^(?:github_pat_[a-zA-Z\d]{22}_[a-zA-Z\d]{59}|gh[opsu]_[a-zA-Z\d]{36})$/;
+// GitHub's stateless installation tokens are variable-length ghs_APPID_JWT values.
+const statelessInstallationToken = /^ghs_(?=.{36,}$)\d+_[a-zA-Z\d_-]+(?:\.[a-zA-Z\d_-]+){2}$/;
 const emailAddress =
   /^[a-z\d!#$%&'*+/=?^_`{|}~-]+(?:\.[a-z\d!#$%&'*+/=?^_`{|}~-]+)*@[a-z\d](?:[a-z\d-]*[a-z\d])?(?:\.[a-z\d](?:[a-z\d-]*[a-z\d])?)+$/;
 
@@ -19,12 +21,12 @@ export const makeFeedbackConfig = (
   repository: string,
   emails: string,
 ): FeedbackConfig | undefined => {
+  if (token === undefined) return undefined;
   const name = repositoryName.exec(repository)?.[1];
+  const credential = Redacted.value(token);
   const ownerEmails = emails.split(",").map((email) => email.trim().toLowerCase());
   if (
-    token === undefined ||
-    Redacted.value(token).length > 512 ||
-    !githubToken.test(Redacted.value(token)) ||
+    (!githubToken.test(credential) && !statelessInstallationToken.test(credential)) ||
     name === undefined ||
     name === "." ||
     name === ".." ||

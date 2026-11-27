@@ -1,5 +1,5 @@
 import { FeedbackSubmission, STRICT_REQUEST, sanitizeFeedbackPageUrl } from "@kvitbit/api-contract";
-import { ByteSize, Effect, Layer, Schema } from "effect";
+import { ByteSize, Clock, Effect, Layer, Schema } from "effect";
 import {
   FetchHttpClient,
   HttpClient,
@@ -11,6 +11,7 @@ import { HttpServerRequest } from "effect/http/HttpServerRequest";
 import { SqlClient } from "effect/sql";
 import { AuthServer } from "../../auth/AuthServer";
 import { HttpConfig } from "../config";
+import { RATE_LIMITS, RateLimiter } from "../edge/RateLimiter";
 import { canSubmitFeedback, feedbackSessionCookie } from "./access";
 import { createFeedbackIssue } from "./issue";
 
@@ -27,6 +28,8 @@ export const FeedbackRoutesLive = HttpRouter.use((router) =>
     const sql = yield* SqlClient.SqlClient;
     const client = yield* HttpClient.HttpClient;
     const fetch = yield* FetchHttpClient.Fetch;
+    const limiter = yield* RateLimiter;
+    const clock = yield* Clock.Clock;
 
     yield* router.add(
       "POST",
@@ -71,6 +74,16 @@ export const FeedbackRoutesLive = HttpRouter.use((router) =>
         const page = sanitizeFeedbackPageUrl(submission.success.page.url);
         if (page === undefined || new URL(page.url).origin !== origin) return malformed;
 
+        const decision = yield* limiter
+          .consume(`feedback:${session.user.id}`, RATE_LIMITS.feedback)
+          .pipe(Effect.provideService(Clock.Clock, clock));
+        if (!decision.allowed) {
+          return HttpServerResponse.empty({
+            status: 429,
+            headers: { "retry-after": String(decision.retryAfterSeconds) },
+          });
+        }
+
         const issue = yield* createFeedbackIssue(
           client,
           config.feedback,
@@ -79,7 +92,10 @@ export const FeedbackRoutesLive = HttpRouter.use((router) =>
         ).pipe(Effect.provideService(FetchHttpClient.Fetch, fetch));
         return issue === undefined
           ? HttpServerResponse.empty({ status: 502 })
-          : HttpServerResponse.jsonUnsafe(issue, { status: 201 });
+          : HttpServerResponse.jsonUnsafe(issue, {
+              status: 201,
+              headers: { "cache-control": "no-store" },
+            });
       }),
     );
   }),

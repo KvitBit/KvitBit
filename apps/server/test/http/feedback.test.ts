@@ -1,12 +1,18 @@
 import { afterAll, beforeAll, beforeEach, expect, mock, test } from "bun:test";
 import { Effect, Redacted } from "effect";
 import { SqlClient } from "effect/sql";
+import { TestClock } from "effect/testing";
 import { makeFeedbackConfig } from "../../src/http/feedback/access";
 import { makeHarness, ORIGIN } from "./harness";
 
 const ownerEmail = "owner@example.cz";
-const token = "github_pat_example_test_token";
-const configured = makeFeedbackConfig(Redacted.make(token), "example/kvitbit", ownerEmail);
+const secondOwnerEmail = "second-owner@example.cz";
+const token = `ghs_12345_${"a".repeat(36)}.${"b-".repeat(200)}.${"c_".repeat(43)}`;
+const configured = makeFeedbackConfig(
+  Redacted.make(token),
+  "example/kvitbit",
+  `${ownerEmail},${secondOwnerEmail}`,
+);
 const issueResponse = async (..._args: Parameters<typeof fetch>) =>
   Response.json({ number: 42 }, { status: 201 });
 const upstream = mock(issueResponse);
@@ -100,13 +106,18 @@ beforeAll(async () => {
 
 afterAll(async () => app.dispose());
 
-beforeEach(() => upstream.mockReset().mockImplementation(issueResponse));
+beforeEach(async () => {
+  await app.run(TestClock.adjust("1 minute"));
+  upstream.mockReset().mockImplementation(issueResponse);
+});
 
 const ownerHeaders = () => ({ origin: ORIGIN, cookie: owner.cookie });
 
 test("only a cookie session for a verified owner advertises and can submit feedback", async () => {
   expect(await (await getSession()).json()).toBeNull();
-  expect(await (await getSession({ cookie: owner.cookie })).json()).toMatchObject({
+  const ownerSession = await getSession({ cookie: owner.cookie });
+  expect(ownerSession.headers.get("cache-control")).toBe("no-store");
+  expect(await ownerSession.json()).toMatchObject({
     feedbackEnabled: true,
     user: { email: ownerEmail },
   });
@@ -177,6 +188,7 @@ const upstreamRequest = () => {
 test("submits one labeled issue with structured Markdown and no active user-supplied markup", async () => {
   const response = await submit(ownerHeaders());
   expect(response.status).toBe(201);
+  expect(response.headers.get("cache-control")).toBe("no-store");
   expect(await response.json()).toEqual({
     issueNumber: 42,
     issueUrl: "https://github.com/example/kvitbit/issues/42",
@@ -206,37 +218,35 @@ test("submits one labeled issue with structured Markdown and no active user-supp
   expect(issue.body).not.toMatch(/url-password|query-token|secret-fragment/);
 });
 
-test("redacts sensitive routes and their automatic text even when path segments are encoded", async () => {
-  for (const path of [
-    "/i/private-url",
-    "/s/private-url",
-    "/invite/private-url",
-    "/auth/verify/private-url",
-    "/consent/private-url",
-    "/oauth/consent/private-url",
-    "/reset-password/private-url",
-    "/api/v1/share/private-url",
-    "/api/auth/magic-link/%76erify/private-url",
-    "/app/%61uth%2Fcallback%2Fprivate-url",
-    "/x/%252e%252e/app/%2569%252Fprivate-url",
-    "/app/w/alfa/settings/api%4Beys",
-    "/w/alfa/settings/api-keys",
-    "/[redacted]",
-  ]) {
-    const response = await submit(ownerHeaders(), {
-      ...feedback,
-      page: { ...feedback.page, url: `${ORIGIN}${path}?token=private-query` },
-      pins: [
-        { ...pin, selector: "#private-id", accessibleName: "private-name", text: "private-text" },
-      ],
-    });
-    expect(response.status).toBe(201);
-    const issue = (await upstreamRequest().json()) as { body: string };
-    expect(issue.body).toContain(`URL: "${ORIGIN}/[redacted]"`);
-    expect(issue.body).toContain('Selector: ""');
-    expect(issue.body).toContain('DOM path: "main > button:nth-of-type(1)"');
-    expect(issue.body).not.toMatch(/private-(url|query|id|name|text)/);
-  }
+test.each([
+  "/i/private-url",
+  "/s/private-url",
+  "/invite/private-url",
+  "/auth/verify/private-url",
+  "/consent/private-url",
+  "/oauth/consent/private-url",
+  "/reset-password/private-url",
+  "/api/v1/share/private-url",
+  "/api/auth/magic-link/%76erify/private-url",
+  "/app/%61uth%2Fcallback%2Fprivate-url",
+  "/x/%252e%252e/app/%2569%252Fprivate-url",
+  "/app/w/alfa/settings/api%4Beys",
+  "/w/alfa/settings/api-keys",
+  "/[redacted]",
+])("redacts the sensitive route %s and its automatic text", async (path) => {
+  const response = await submit(ownerHeaders(), {
+    ...feedback,
+    page: { ...feedback.page, url: `${ORIGIN}${path}?token=private-query` },
+    pins: [
+      { ...pin, selector: "#private-id", accessibleName: "private-name", text: "private-text" },
+    ],
+  });
+  expect(response.status).toBe(201);
+  const issue = (await upstreamRequest().json()) as { body: string };
+  expect(issue.body).toContain(`URL: "${ORIGIN}/[redacted]"`);
+  expect(issue.body).toContain('Selector: ""');
+  expect(issue.body).toContain('DOM path: "main > button:nth-of-type(1)"');
+  expect(issue.body).not.toMatch(/private-(url|query|id|name|text)/);
 });
 
 test("removes workspace API keys from titles, comments and fields outside sensitive pages", async () => {
@@ -255,6 +265,45 @@ test("removes workspace API keys from titles, comments and fields outside sensit
   expect(issue.body).toContain('Selector: "#[redacted]"');
   expect(issue.body).toContain(`Text: "Displayed ${keyPrefix}"`);
   expect(issue.body).not.toContain(`${keyPrefix}_`);
+});
+
+test("removes embedded token-bearing links from the outgoing issue on an ordinary page", async () => {
+  const shareUrl = `${ORIGIN}/i/v1.comment-secret?download=private-query`;
+  const encoded = `${ORIGIN}/app/%2569%252Fv1.encoded-secret`;
+  const relative = "/s/v1.relative-secret/pdf";
+  const response = await submit(ownerHeaders(), {
+    ...feedback,
+    comment: `Check (${shareUrl})\nInvite: /invite/private-invite`,
+    pins: [{ ...pin, text: `Copied ${encoded}`, accessibleName: relative }],
+    page: { ...feedback.page, theme: `/api/v1/share/v1.theme-secret/logo` },
+  });
+  expect(response.status).toBe(201);
+  expect(await response.json()).toMatchObject({ title: "Visual feedback: Check redacted" });
+  const issue = (await upstreamRequest().json()) as { title: string; body: string };
+  expect(issue.title).toBe("Visual feedback: Check redacted");
+  expect(issue.body).toContain("Check ([redacted])");
+  expect(issue.body).toContain("Invite: [redacted]");
+  expect(issue.body).toContain('Text: "Copied [redacted]"');
+  expect(issue.body).toContain('Accessible name: "[redacted]"');
+  expect(issue.body).toContain('Theme: "[redacted]"');
+  expect(issue.body).toContain(`URL: "${ORIGIN}/w/alfa"`);
+  expect(issue.body).not.toMatch(/v1\.|private-query|private-invite/);
+});
+
+test("rate limits validated submissions per verified user before calling GitHub", async () => {
+  const secondOwner = await sessionFor(secondOwnerEmail);
+  expect((await submit(ownerHeaders(), { ...feedback, comment: " " })).status).toBe(400);
+  for (let i = 0; i < 12; i++) {
+    expect((await submit(ownerHeaders())).status).toBe(201);
+  }
+  const denied = await submit(ownerHeaders());
+  expect(denied.status).toBe(429);
+  expect(denied.headers.get("retry-after")).toBe("60");
+  expect(upstream).toHaveBeenCalledTimes(12);
+  expect((await submit({ origin: ORIGIN, cookie: secondOwner.cookie })).status).toBe(201);
+  await app.run(TestClock.adjust("1 minute"));
+  expect((await submit(ownerHeaders())).status).toBe(201);
+  expect(upstream).toHaveBeenCalledTimes(14);
 });
 
 test("GitHub errors and invented issue URLs do not reach the caller", async () => {
@@ -304,4 +353,20 @@ test("absent or malformed configuration leaves feedback disabled", async () => {
   } finally {
     await disabled.dispose();
   }
+});
+
+test("accepts supported GitHub token formats and rejects incomplete configuration values", () => {
+  const configFor = (value: string) =>
+    makeFeedbackConfig(Redacted.make(value), "example/kvitbit", ownerEmail);
+  const fineGrained = `github_pat_${"x".repeat(22)}_${"y".repeat(59)}`;
+  for (const prefix of ["ghp", "gho", "ghu", "ghs"]) {
+    expect(configFor(`${prefix}_${"x".repeat(36)}`)).toBeDefined();
+    expect(configFor(`${prefix}_${"x".repeat(35)}`)).toBeUndefined();
+  }
+  expect(configFor(fineGrained)).toBeDefined();
+  expect(configFor(fineGrained.slice(0, -1))).toBeUndefined();
+  expect(configFor(token)).toBeDefined();
+  expect(configFor(token.slice(0, token.lastIndexOf(".")))).toBeUndefined();
+  expect(configFor("ghp_X")).toBeUndefined();
+  expect(configFor(`${token}\n`)).toBeUndefined();
 });
