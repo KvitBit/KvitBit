@@ -1,6 +1,9 @@
 /** Workspaces module (core-ports section 4.1). Interface only. */
-import type { Effect, Stream } from "effect";
-import { Context, Schema } from "effect";
+
+import * as Context from "effect/Context";
+import type * as Effect from "effect/Effect";
+import * as Schema from "effect/Schema";
+import type * as Stream from "effect/Stream";
 import type { Channel, CurrentCaller, MemberCaller } from "../caller";
 import type { Conflict, Forbidden, Invalid, NotFound, Unavailable } from "../errors";
 import type { BankAccountId, InvitationId, InvitationToken, NumberingSeriesId } from "../ids";
@@ -50,8 +53,8 @@ export type WorkspaceBranding = typeof WorkspaceBranding.Type;
 export const BrandingPatch = Schema.Struct({
   pdfTemplate: Schema.optional(PdfTemplate),
   accentColor: Schema.optional(Hex),
-  footerText: Schema.optional(Schema.NullOr(Schema.String)),
-  theme: Schema.optional(Schema.NullOr(ThemeSource)),
+  footerText: Schema.String.pipe(Schema.NullOr, Schema.optional),
+  theme: ThemeSource.pipe(Schema.NullOr, Schema.optional),
 });
 export type BrandingPatch = typeof BrandingPatch.Type;
 
@@ -152,6 +155,7 @@ export interface AccessEvent {
   readonly onBehalfOf?: UserId; // the grant's Member, when an owner or admin revokes someone else's grant
 }
 
+// @effect-diagnostics-next-line leakingRequirements:off Resolve the caller at method invocation.
 export class Workspaces extends Context.Service<
   Workspaces,
   {
@@ -311,4 +315,5 @@ export class Workspaces extends Context.Service<
       event: AccessEvent,
     ) => Effect.Effect<void, Unavailable | Forbidden, CurrentCaller>;
   }
+  // @effect-diagnostics-next-line deterministicKeys:off Preserve the service key specified in core-ports.
 >()("kvitbit/Workspaces") {}

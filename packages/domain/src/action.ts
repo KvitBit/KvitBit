@@ -3,7 +3,7 @@
  * (core-ports sections 2.3 and 3). The pure `can(caller, action)` policy belongs to the core
  * package and is not implemented here.
  */
-import { Schema } from "effect";
+import * as Schema from "effect/Schema";
 
 /** Every permission the policy table (core-ports 2.3) names. */
 export const Action = Schema.Literals([

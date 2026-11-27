@@ -4,11 +4,12 @@
  * All ids are UUIDv7 except InvitationToken, ShareToken and VisitorHash (and RequestKey, the
  * client-chosen retry key), so entity ids are checked as UUIDv7 before branding: a malformed
  * path parameter fails at decode.
+ * Construct a branded value from a string with its schema's `.make` method.
  * - InvitationToken: 32 random bytes, base64url; stored only as its SHA-256 hash.
  * - ShareToken: "v{keyVersion}." + base64url(HMAC-SHA256(shareKey[keyVersion], shareLinkId)).
  * - VisitorHash: HMAC of IP + user agent with a daily rotated key.
  */
-import { Schema } from "effect";
+import * as Schema from "effect/Schema";
 
 const UUID_V7 = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const Uuid7 = Schema.String.pipe(Schema.check(Schema.isPattern(UUID_V7)));

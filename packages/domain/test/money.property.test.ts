@@ -5,10 +5,12 @@
  * in full and its size is asserted. Guarded by .agents/skills/verify-money-access.
  */
 import { describe, expect, test } from "bun:test";
-import { BigDecimal, Result } from "effect";
-import { type CurrencyCode, type Money, MoneyMath } from "../src/index";
+import * as Arr from "effect/Array";
+import * as BigDecimal from "effect/BigDecimal";
+import * as Result from "effect/Result";
+import { CurrencyCode, type Money, MoneyMath } from "../src/index";
 
-const code = (c: string) => c as CurrencyCode;
+const code = CurrencyCode.make;
 const CZK = code("CZK");
 const ok = <A, E>(r: Result.Result<A, E>): A => {
   if (Result.isFailure(r)) throw new Error("expected success");
@@ -24,9 +26,9 @@ const roundHalfAway = (value: bigint, drop: number): bigint => {
   if (drop <= 0) return value * 10n ** BigInt(-drop);
   const unit = 10n ** BigInt(drop);
   const magnitude = value < 0n ? -value : value;
-  const q = magnitude / unit;
+  const q: bigint = magnitude / unit;
   const r = magnitude % unit;
-  const rounded = 2n * r >= unit ? q + 1n : q;
+  const rounded: bigint = 2n * r >= unit ? q + 1n : q;
   return value < 0n ? -rounded : rounded;
 };
 
@@ -75,11 +77,11 @@ describe("minor units: every three-letter code", () => {
   const LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
   const codes: Array<CurrencyCode> = [];
   for (const a of LETTERS)
-    for (const b of LETTERS) for (const c of LETTERS) codes.push(code(a + b + c));
+    for (const b of LETTERS) for (const c of LETTERS) codes.push(code(`${a}${b}${c}`));
 
   test("minorUnitScale matches ISO 4217 with the 2-decimal fallback", () => {
     expect(codes.length).toBe(17_576);
-    const wrong = codes.filter((c) => MoneyMath.minorUnitScale(c) !== (ISO_SCALE[c] ?? 2));
+    const wrong = Arr.filter(codes, (c) => MoneyMath.minorUnitScale(c) !== (ISO_SCALE[c] ?? 2));
     expect(wrong).toEqual([]);
   });
 
@@ -105,7 +107,9 @@ describe("minor units: every three-letter code", () => {
 describe("round: half away from zero over the full residue space", () => {
   // Whole parts of the rounded result, in minor units at the target scale, including a value
   // past 2^53 so float shortcuts would show.
-  const WHOLES = [0n, 1n, 9n, 10n, 12_345n, 2n ** 60n + 7n];
+  const beyondSafeInteger: bigint = 2n ** 60n;
+  const largeWhole = beyondSafeInteger + 7n;
+  const WHOLES = [0n, 1n, 9n, 10n, 12_345n, largeWhole];
   // Extra digits below the minor unit: every residue 0 .. 10^extra - 1.
   const EXTRA = [1, 2, 3];
 
@@ -116,10 +120,11 @@ describe("round: half away from zero over the full residue space", () => {
       for (const extra of EXTRA) {
         const unit = 10n ** BigInt(extra);
         for (const whole of WHOLES) {
+          const scaledWhole: bigint = whole * unit;
           for (let r = 0n; r < unit; r++) {
             for (const sign of [1n, -1n]) {
               checked++;
-              const value = sign * (whole * unit + r);
+              const value = sign * (scaledWhole + r);
               const money = moneyOf(value, scale + extra, currency);
               const expected = roundHalfAway(value, extra);
               const rounded = MoneyMath.round(money);
@@ -146,7 +151,7 @@ describe("round: half away from zero over the full residue space", () => {
     // Fixed total (4 scales × 6 whole parts × 1,110 residues × 2 signs), and at least one whole
     // part past 2^53, so neither the grid nor the float-hostile case can shrink silently.
     expect(checked).toBe(53_280);
-    expect(WHOLES.some((w) => w > BigInt(Number.MAX_SAFE_INTEGER))).toBe(true);
+    expect(Arr.some(WHOLES, (w) => w > BigInt(Number.MAX_SAFE_INTEGER))).toBe(true);
     expect(wrong.slice(0, 5)).toEqual([]);
   });
 
@@ -156,11 +161,12 @@ describe("round: half away from zero over the full residue space", () => {
     for (const target of [0, 1, 2, 3, 4, 6]) {
       for (const extra of [1, 2]) {
         const unit = 10n ** BigInt(extra);
-        for (const whole of [0n, 3n, 2n ** 60n + 7n]) {
+        for (const whole of [0n, 3n, largeWhole]) {
+          const scaledWhole: bigint = whole * unit;
           for (let r = 0n; r < unit; r++) {
             for (const sign of [1n, -1n]) {
               checked++;
-              const value = sign * (whole * unit + r);
+              const value = sign * (scaledWhole + r);
               const rounded = MoneyMath.round(moneyOf(value, target + extra), target);
               if (
                 rounded.currency !== CZK ||
@@ -216,7 +222,7 @@ describe("arithmetic laws over a bounded grid", () => {
       if (!BigDecimal.equals(MoneyMath.negate(MoneyMath.negate(ma)).amount, ma.amount)) {
         wrong.push(`--${at3(a)}`);
       }
-      if (!MoneyMath.isZero(ok(MoneyMath.add(ma, MoneyMath.negate(ma)))))
+      if (!MoneyMath.add(ma, MoneyMath.negate(ma)).pipe(ok, MoneyMath.isZero))
         wrong.push(`x+-x ${at3(a)}`);
       if (!MoneyMath.equals(ok(MoneyMath.add(ma, MoneyMath.zero(CZK))), ma))
         wrong.push(`x+0 ${at3(a)}`);
@@ -246,7 +252,7 @@ describe("arithmetic laws over a bounded grid", () => {
   });
 
   test("add is associative and sum equals the BigInt fold on every triple", () => {
-    const small = GRID.filter(([v, s]) => v >= -4n && v <= 4n && (s === 0 || s === 3));
+    const small = Arr.filter(GRID, ([v, s]) => v >= -4n && v <= 4n && (s === 0 || s === 3));
     expect(small.length).toBe(18);
     let checked = 0;
     const wrong: Array<string> = [];
@@ -287,8 +293,7 @@ describe("arithmetic laws over a bounded grid", () => {
         ];
         for (const r of results) {
           if (
-            !Result.isFailure(r) ||
-            !(r.failure instanceof MoneyMath.CurrencyMismatch) ||
+            !(Result.isFailure(r) && r.failure instanceof MoneyMath.CurrencyMismatch) ||
             r.failure.expected !== x ||
             r.failure.actual !== y
           ) {

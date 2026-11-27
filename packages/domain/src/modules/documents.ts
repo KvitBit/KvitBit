@@ -1,6 +1,8 @@
 /** Documents module (core-ports section 4.4). Interface only. */
-import type { BigDecimal, Effect } from "effect";
-import { Context, Schema } from "effect";
+import type * as BigDecimal from "effect/BigDecimal";
+import * as Context from "effect/Context";
+import type * as Effect from "effect/Effect";
+import * as Schema from "effect/Schema";
 import type { CurrentCaller } from "../caller";
 import type { Conflict, CoreError, Forbidden, Invalid, NotFound, Unavailable } from "../errors";
 import type { LineId } from "../ids";
@@ -55,7 +57,7 @@ export type DocumentInput = typeof DocumentInput.Type;
 /** Every DocumentInput field except kind, each optional, plus two edit-only fields. */
 export const DocumentPatch = Schema.Struct({
   contact: Schema.optional(ContactId),
-  lines: Schema.optional(Schema.NonEmptyArray(LineInput)),
+  lines: LineInput.pipe(Schema.NonEmptyArray, Schema.optional),
   currency: Schema.optional(CurrencyCode),
   issuedOn: Schema.optional(IsoDate),
   taxableSupplyOn: Schema.optional(IsoDate),
@@ -68,7 +70,7 @@ export const DocumentPatch = Schema.Struct({
   orderNumber: Schema.optional(Schema.String),
   note: Schema.optional(Schema.String),
   paymentMethod: Schema.optional(PaymentMethod),
-  fx: Schema.optional(Schema.NullOr(FxOverride)), // null returns to the CNB fixing (rule D11)
+  fx: FxOverride.pipe(Schema.NullOr, Schema.optional), // null returns to the CNB fixing (rule D11)
   number: Schema.optional(Schema.String), // issued only; owner/admin; unique (rule D4)
   refreshParties: Schema.optional(Schema.Boolean), // re-snapshot Contact and Issuing Entity (rule D10)
 });
@@ -203,6 +205,7 @@ export interface SendPreview {
   readonly armsReminders: boolean;
 }
 
+// @effect-diagnostics-next-line leakingRequirements:off Resolve the caller at method invocation.
 export class Documents extends Context.Service<
   Documents,
   {
@@ -324,4 +327,5 @@ export class Documents extends Context.Service<
       CurrentCaller
     >;
   }
+  // @effect-diagnostics-next-line deterministicKeys:off Preserve the service key specified in core-ports.
 >()("kvitbit/Documents") {}

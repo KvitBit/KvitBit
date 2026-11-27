@@ -1,14 +1,18 @@
 import { describe, expect, test } from "bun:test";
-import { Exit, Schema } from "effect";
+import * as Arr from "effect/Array";
+import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
+import * as Schema from "effect/Schema";
 import { Conflict, CoreError, Forbidden, Invalid, NotFound, Unavailable } from "../src/index";
 
 const json = Schema.toCodecJson(CoreError);
-const roundTrip = (e: CoreError) => Schema.decodeUnknownSync(json)(Schema.encodeSync(json)(e));
+const roundTrip = (e: CoreError) =>
+  e.pipe(Schema.encodeEffect(json), Effect.flatMap(Schema.decodeEffect(json)), Effect.runSync);
 
 const samples: ReadonlyArray<CoreError> = [
-  new NotFound({ entity: "Document", id: "doc-1" }),
-  new Forbidden({ action: "document.unlock" }),
-  new Invalid({
+  NotFound.make({ entity: "Document", id: "doc-1" }),
+  Forbidden.make({ action: "document.unlock" }),
+  Invalid.make({
     issues: [
       {
         path: ["lines", 0, "vat"],
@@ -17,20 +21,25 @@ const samples: ReadonlyArray<CoreError> = [
       },
     ],
   }),
-  new Conflict({ reason: "revision_changed", currentRevision: 7 }),
-  new Conflict({ reason: "illegal_transition", detail: "member.owner_cannot_leave" }),
-  new Unavailable({ dependency: "company_registry", retryAfterSeconds: 30 }),
+  Conflict.make({ reason: "revision_changed", currentRevision: 7 }),
+  Conflict.make({ reason: "illegal_transition", detail: "member.owner_cannot_leave" }),
+  Unavailable.make({ dependency: "company_registry", retryAfterSeconds: 30 }),
 ];
 
 describe("error codecs", () => {
-  test.each(samples.map((e) => [e._tag, e] as const))("%s round-trips through JSON", (_, e) => {
-    const back = roundTrip(e);
-    expect(back).toBeInstanceOf(e.constructor);
-    expect(back).toEqual(e);
-  });
+  test.each(Arr.map(samples, (error) => [error._tag, error] as const))(
+    "%s round-trips through JSON",
+    (_, e) => {
+      const back = roundTrip(e);
+      expect(back).toBeInstanceOf(e.constructor);
+      expect(back).toEqual(e);
+    },
+  );
 
   test("encoded form carries _tag and fields only", () => {
-    expect(Schema.encodeSync(json)(new NotFound({ entity: "Contact", id: "c" }))).toEqual({
+    expect(
+      NotFound.make({ entity: "Contact", id: "c" }).pipe(Schema.encodeEffect(json), Effect.runSync),
+    ).toEqual({
       _tag: "NotFound",
       entity: "Contact",
       id: "c",
@@ -38,7 +47,7 @@ describe("error codecs", () => {
   });
 
   test("errors are yieldable Error instances", () => {
-    expect(new Forbidden({ action: "workspace.close" })).toBeInstanceOf(Error);
+    expect(Forbidden.make({ action: "workspace.close" })).toBeInstanceOf(Error);
   });
 
   test.each([
@@ -50,7 +59,7 @@ describe("error codecs", () => {
     ["unknown dependency", { _tag: "Unavailable", dependency: "smtp" }],
     ["unknown tag", { _tag: "Teapot" }],
   ])("rejects %s", (_, input) => {
-    expect(Exit.isFailure(Schema.decodeUnknownExit(json)(input))).toBe(true);
+    expect(Schema.decodeExit(json)(input).pipe(Exit.isFailure)).toBe(true);
   });
 });
 

@@ -1,5 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import { Effect, Schema } from "effect";
+import * as Arr from "effect/Array";
+import * as Effect from "effect/Effect";
+import * as Order from "effect/Order";
+import * as Record from "effect/Record";
 import {
   Caller,
   CurrentCaller,
@@ -32,25 +35,25 @@ const describeCaller = (caller: Caller): string => {
   }
 };
 
-const userId = Schema.decodeUnknownSync(UserId)("0192f0c4-1b2c-7d3e-8f40-0123456789ab");
+const userId = UserId.make("0192f0c4-1b2c-7d3e-8f40-0123456789ab");
 
 describe("Caller", () => {
   test("edge constructors stamp the tag", () => {
     const account = Caller.account({ userId, email: "a@b.cz", locale: "cs", channel: "web" });
     expect(account._tag).toBe("Account");
     const visitor = Caller.shareLinkVisitor({
-      token: Schema.decodeUnknownSync(ShareToken)("v1.abc"),
-      visitor: Schema.decodeUnknownSync(VisitorHash)("h"),
+      token: ShareToken.make("v1.abc"),
+      visitor: VisitorHash.make("h"),
       locale: "en",
     });
     expect(visitor._tag).toBe("ShareLinkVisitor");
     expect("signedInUser" in visitor).toBe(false);
     const holder = Caller.invitationHolder({
-      token: Schema.decodeUnknownSync(InvitationToken)("t"),
+      token: InvitationToken.make("t"),
       locale: "cs",
     });
     expect(holder._tag).toBe("InvitationHolder");
-    expect([account, visitor, holder].map(describeCaller)).toEqual([
+    expect(Arr.map([account, visitor, holder], describeCaller)).toEqual([
       "account:a@b.cz",
       "visitor",
       "invitation",
@@ -63,14 +66,18 @@ describe("Caller", () => {
   });
 
   test("there is no System constructor and no literal satisfies SystemCaller", () => {
-    expect(Object.keys(Caller).sort()).toEqual(["account", "invitationHolder", "shareLinkVisitor"]);
+    expect(Arr.sort(Record.keys(Caller), Order.String)).toEqual([
+      "account",
+      "invitationHolder",
+      "shareLinkVisitor",
+    ]);
     // Every public field is present and correctly typed, so only the seal makes this fail.
     const literal = {
       _tag: "System" as const,
-      workspaceId: Schema.decodeUnknownSync(WorkspaceId)("0192f0c4-1b2c-7d3e-8f40-0123456789ac"),
+      workspaceId: WorkspaceId.make("0192f0c4-1b2c-7d3e-8f40-0123456789ac"),
       job: {
         _tag: "DataExport" as const,
-        exportId: Schema.decodeUnknownSync(ExportId)("0192f0c4-1b2c-7d3e-8f40-0123456789ad"),
+        exportId: ExportId.make("0192f0c4-1b2c-7d3e-8f40-0123456789ad"),
       },
     };
     // @ts-expect-error the seal key is not nameable outside caller.ts
@@ -78,12 +85,13 @@ describe("Caller", () => {
     expect(forged._tag).toBe("System");
   });
 
-  test("CurrentCaller is a Context service keyed kvitbit/Caller", async () => {
+  test("CurrentCaller is a Context service keyed kvitbit/Caller", () => {
     expect(CurrentCaller.key).toBe("kvitbit/Caller");
     const caller = Caller.account({ userId, email: "a@b.cz", locale: "en", channel: "api" });
-    const tag = await Effect.runPromise(
+    const tag = Effect.runSync(
       Effect.gen(function* () {
-        return describeCaller(yield* CurrentCaller);
+        const currentCaller = yield* CurrentCaller;
+        return describeCaller(currentCaller);
       }).pipe(Effect.provideService(CurrentCaller, caller)),
     );
     expect(tag).toBe("account:a@b.cz");

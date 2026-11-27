@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { Schema } from "effect";
+import * as Schema from "effect/Schema";
 import { VatRatePercent, VatTreatment } from "../src/index";
 
 describe("Czech VAT vocabulary", () => {

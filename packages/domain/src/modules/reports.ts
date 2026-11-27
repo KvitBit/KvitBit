@@ -1,6 +1,8 @@
 /** Reports module (core-ports section 4.9). Interface only. */
-import type { Effect } from "effect";
-import { Context, Schema } from "effect";
+
+import * as Context from "effect/Context";
+import type * as Effect from "effect/Effect";
+import * as Schema from "effect/Schema";
 import type { CurrentCaller } from "../caller";
 import type { Conflict, Forbidden, Invalid, NotFound, Unavailable } from "../errors";
 import { ExportId } from "../ids";
@@ -70,6 +72,7 @@ export const ExportJobView = Schema.Struct({
 });
 export type ExportJobView = typeof ExportJobView.Type;
 
+// @effect-diagnostics-next-line leakingRequirements:off Resolve the caller at method invocation.
 export class Reports extends Context.Service<
   Reports,
   {
@@ -103,4 +106,5 @@ export class Reports extends Context.Service<
       id: ExportId,
     ) => Effect.Effect<FileDownload, NotFound | Conflict | Unavailable | Forbidden, CurrentCaller>;
   }
+  // @effect-diagnostics-next-line deterministicKeys:off Preserve the service key specified in core-ports.
 >()("kvitbit/Reports") {}
