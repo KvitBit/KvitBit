@@ -1,0 +1,11 @@
+[Unit]
+Description=Create GitHub issues from DKIM-verified alerts@kvitbit.com emails
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/.t3/projects/invoicarr
+Environment=PATH=%h/.local/bin:%h/.bun/bin:/usr/local/bin:/usr/bin:/bin
+StateDirectory=kvitbit-alert-inbox
+UMask=0077
+ExecStart=/usr/bin/flock -n %S/kvitbit-alert-inbox/pass.lock %h/.bun/bin/bun scripts/alert-inbox/service.ts --apply --state %S/kvitbit-alert-inbox/inbox.sqlite
+TimeoutStartSec=5min

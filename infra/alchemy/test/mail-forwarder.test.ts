@@ -16,6 +16,7 @@ import {
   parseEmail,
 } from "../src/mail-forwarder/mime";
 import {
+  buildAlertArchivePrefix,
   buildArchiveObjectName,
   buildArchivePrefix,
   buildResendFallbackPayload,
@@ -988,6 +989,71 @@ describe("Effect MailRelay (GCS archive + Resend HTTPS)", () => {
     expect(outcome.throttled.smtpCode).toBe(451);
     expect(outcome.fallback.smtpCode).toBe(250);
     expect(outcome.fallbackCalls).toBe(2);
+  });
+
+  test("mirrors raw .eml under inbound/alerts/by-hash/ only for alerts@<domain> and fails with 451 if alert archival fails", async () => {
+    const alertMsg: InboundMessage = {
+      ...sampleMessage,
+      rcptTo: ["alerts@kvitbit.com"],
+    };
+    const uploadedNames: Array<string> = [];
+    let failAlertUpload = false;
+    const layer = layerMailRelay({
+      domain: "kvitbit.com",
+      forwardTo: "filkalny@gmail.com",
+      forwardFrom: "forwarder@kvitbit.com",
+      archiveBucket: "kvitbit-prod-mail-archive-prod",
+      relayMode: "resend",
+      resendApiKey: Option.some(Redacted.make("re_test_key")),
+    }).pipe(
+      Layer.provide(
+        mockHttpClientLayer((request) => {
+          if (request.url.includes("metadata.google.internal")) {
+            return new Response(JSON.stringify({ access_token: "tok-1", expires_in: 600 }), {
+              status: 200,
+              headers: { "content-type": "application/json" },
+            });
+          }
+          if (request.url.includes("storage.googleapis.com")) {
+            const name = new URL(request.url).searchParams.get("name") ?? "";
+            if (failAlertUpload && name.startsWith("inbound/alerts/")) {
+              return new Response("alert upload failed", { status: 503 });
+            }
+            uploadedNames.push(name);
+            return new Response(JSON.stringify({ name }), {
+              status: 200,
+              headers: { "content-type": "application/json" },
+            });
+          }
+          return new Response(JSON.stringify({ id: "email_alert" }), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          });
+        }),
+      ),
+    );
+
+    const ok = await Effect.runPromise(
+      Effect.gen(function* () {
+        const relay = yield* MailRelay;
+        return yield* relay.handleMessage(alertMsg);
+      }).pipe(Effect.provide(layer)),
+    );
+    expect(ok.smtpCode).toBe(250);
+    const expectedHashPrefix = buildArchivePrefix(computeDeliveryFingerprint(alertMsg));
+    const expectedAlertPrefix = buildAlertArchivePrefix(computeDeliveryFingerprint(alertMsg));
+    expect(uploadedNames).toHaveLength(2);
+    expect(uploadedNames[0]).toStartWith(expectedHashPrefix);
+    expect(uploadedNames[1]).toStartWith(expectedAlertPrefix);
+
+    failAlertUpload = true;
+    const failed = await Effect.runPromise(
+      Effect.gen(function* () {
+        const relay = yield* MailRelay;
+        return yield* relay.handleMessage(alertMsg);
+      }).pipe(Effect.provide(layer)),
+    );
+    expect(failed.smtpCode).toBe(451);
   });
 });
 
