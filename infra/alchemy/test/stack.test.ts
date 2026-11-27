@@ -921,7 +921,7 @@ esac
     );
     chmodSync(join(binDir, "curl"), 0o755);
 
-    // Stub docker
+    // Stub docker with a local image store enforcing --pull=never restart semantics.
     writeFileSync(
       join(binDir, "docker"),
       `#!/bin/sh
@@ -930,6 +930,10 @@ case "$1" in
   inspect)
     [ -f "${stateDir}/running-image-id" ] || exit 1
     image_id="$(cat "${stateDir}/running-image-id")"
+    if printf '%s' "$*" | grep -Fq 'if .State.Running'; then
+      printf '%s' "$image_id"
+      exit 0
+    fi
     configured_image="$image_id"
     if [ -f "${stateDir}/legacy-image-ref" ]; then
       configured_image="$(cat "${stateDir}/legacy-image-ref")"
@@ -943,11 +947,41 @@ case "$1" in
   pull)
     [ "$2" = "--" ] || exit 1
     echo "docker:pull:$3" >> "${stateDir}/log"
+    if [ -f "${stateDir}/fail-pull" ]; then
+      exit 1
+    fi
     printf '%s' "$3" > "${stateDir}/pulled-ref"
     cp "${stateDir}/registry-image-id" "${stateDir}/pulled-image-id"
     cp "${stateDir}/registry-ref" "${stateDir}/pulled-repo-digest"
+    cat "${stateDir}/registry-image-id" >> "${stateDir}/images"
+    printf '\\n' >> "${stateDir}/images"
+    ;;
+  container)
+    if [ "$2" = "prune" ]; then
+      echo "docker:prune:containers" >> "${stateDir}/log"
+      exit 0
+    fi
+    exit 1
     ;;
   image)
+    if [ "$2" = "ls" ]; then
+      if [ -f "${stateDir}/images" ]; then
+        cat "${stateDir}/images"
+      fi
+      exit 0
+    fi
+    if [ "$2" = "rm" ]; then
+      target_id=""
+      for arg in "$@"; do
+        target_id="$arg"
+      done
+      echo "docker:rmi:$target_id" >> "${stateDir}/log"
+      if [ -f "${stateDir}/images" ]; then
+        grep -Fxv -- "$target_id" "${stateDir}/images" > "${stateDir}/images.tmp" || true
+        mv -f "${stateDir}/images.tmp" "${stateDir}/images"
+      fi
+      exit 0
+    fi
     [ "$2" = "inspect" ] && [ -f "${stateDir}/pulled-ref" ] || exit 1
     [ "$5" = "$(cat "${stateDir}/pulled-ref")" ] || exit 1
     printf '%s\\n%s\\n' "$(cat "${stateDir}/pulled-image-id")" "$(cat "${stateDir}/pulled-repo-digest")"
@@ -958,7 +992,7 @@ esac
     );
     chmodSync(join(binDir, "docker"), 0o755);
 
-    // Stub systemctl (activates target digest + config sha as running)
+    // Stub systemctl (activates target digest + config sha as running; enforces --pull=never)
     writeFileSync(
       join(binDir, "systemctl"),
       `#!/bin/sh
@@ -970,7 +1004,7 @@ fi
 if [ "$1" = "start" ]; then
   . "${runDir}/worker-target.env"
   grep -Fq 'docker run --pull=never ' "${systemdDir}/kvitbit-worker.service"
-  [ "$KVITBIT_WORKER_IMAGE" = "$(cat "${stateDir}/pulled-image-id")" ]
+  grep -Fxq -- "$KVITBIT_WORKER_IMAGE" "${stateDir}/images"
   printf '%s' "$KVITBIT_WORKER_IMAGE" > "${stateDir}/running-image-id"
   printf '%s' "$KVITBIT_WORKER_DIGEST" > "${stateDir}/running-digest"
   printf '%s' "$KVITBIT_WORKER_CONFIG_SHA" > "${stateDir}/running-config-sha"
@@ -1012,6 +1046,7 @@ fi
   test("reconcile replaces legacy workers, rolls out config and digest changes, and skips no-op ticks", () => {
     withRunnerSandbox(
       ({
+        binDir,
         reconcile,
         runDir,
         stateDir,
@@ -1083,7 +1118,44 @@ fi
         expect(readFileSync(join(runDir, "worker.env"), "utf8")).toBe(env2);
         expect(readFileSync(join(runDir, "worker-target.env"), "utf8")).toBe(targetEnv2);
 
+        // Simulate --rm worker exiting (5s systemd RestartSec window, no running container)
+        // while a stale image is on disk and the replacement pull fails: stale image must be
+        // pruned before pull, while worker-target.env's installed imageId1 survives so systemd
+        // can restart kvitbit-worker with --pull=never.
+        const staleImageId = `sha256:${"9".repeat(64)}`;
+        writeFileSync(join(stateDir, "images"), `${staleImageId}\n${imageId1}\n`);
+        rmSync(join(stateDir, "running-image-id"));
+        writeFileSync(join(stateDir, "fail-pull"), "1");
+        const logBeforeFailedPull = readFileSync(join(stateDir, "log"), "utf8");
+        expect(reconcile().exitCode).toBe(1);
+        const failedPullDelta = readFileSync(join(stateDir, "log"), "utf8")
+          .slice(logBeforeFailedPull.length)
+          .trim()
+          .split("\n");
+        const staleRmiIdx = failedPullDelta.indexOf(`docker:rmi:${staleImageId}`);
+        const failedPullIdx = failedPullDelta.indexOf(`docker:pull:${ref2}`);
+        expect(staleRmiIdx).toBeGreaterThanOrEqual(0);
+        expect(failedPullIdx).toBeGreaterThan(staleRmiIdx);
+        expect(failedPullDelta).not.toContain(`docker:rmi:${imageId1}`);
+        const imagesAfterFailedPull = readFileSync(join(stateDir, "images"), "utf8")
+          .trim()
+          .split("\n")
+          .filter(Boolean);
+        expect(imagesAfterFailedPull).toEqual([imageId1]);
+        // Confirm systemd can still restart the installed worker with --pull=never.
+        const restartCheck = Bun.spawnSync([
+          join(binDir, "systemctl"),
+          "start",
+          "kvitbit-worker.service",
+        ]);
+        expect(restartCheck.exitCode).toBe(0);
+        expect(readFileSync(join(stateDir, "running-image-id"), "utf8")).toBe(imageId1);
+        rmSync(join(stateDir, "fail-pull"));
+
+        // Now allow the verified pull to succeed and inspect ONLY this reconcile's delta log.
         writeFileSync(join(stateDir, "registry-ref"), ref2);
+        writeFileSync(join(stateDir, "images"), `${staleImageId}\n${imageId1}\n`);
+        const logBeforeRollout = readFileSync(join(stateDir, "log"), "utf8");
         expect(reconcile().exitCode).toBe(0);
         expect(readFileSync(join(stateDir, "running-image-id"), "utf8")).toBe(imageId2);
         expect(readFileSync(join(stateDir, "guest-active-digest"), "utf8")).toBe(digest2);
@@ -1091,12 +1163,32 @@ fi
         expect(readFileSync(join(stateDir, "guest-active-target"), "utf8")).toBe(
           `${digest2}|${configSha2}`,
         );
-        const logAfterFourth = readFileSync(join(stateDir, "log"), "utf8");
-        expect(logAfterFourth).toContain(`docker:pull:${ref2}`);
+        const rolloutDelta = readFileSync(join(stateDir, "log"), "utf8")
+          .slice(logBeforeRollout.length)
+          .trim()
+          .split("\n");
+        const prePullContainerPruneIdx = rolloutDelta.indexOf("docker:prune:containers");
+        const prePullRmiIdx = rolloutDelta.indexOf(`docker:rmi:${staleImageId}`);
+        const pullRef2Idx = rolloutDelta.indexOf(`docker:pull:${ref2}`);
+        const startIdx = rolloutDelta.indexOf("systemctl:start kvitbit-worker.service");
+        const postSwitchRmiOldIdx = rolloutDelta.indexOf(`docker:rmi:${imageId1}`, startIdx);
+        expect(prePullContainerPruneIdx).toBeGreaterThanOrEqual(0);
+        expect(prePullRmiIdx).toBeGreaterThan(prePullContainerPruneIdx);
+        expect(pullRef2Idx).toBeGreaterThan(prePullRmiIdx);
+        expect(startIdx).toBeGreaterThan(pullRef2Idx);
+        expect(postSwitchRmiOldIdx).toBeGreaterThan(startIdx);
+        expect(rolloutDelta).not.toContain(`docker:rmi:${imageId2}`);
+        const imagesAfterRollout = readFileSync(join(stateDir, "images"), "utf8")
+          .trim()
+          .split("\n")
+          .filter(Boolean);
+        expect(imagesAfterRollout).toEqual([imageId2]);
         expect(
-          logAfterFourth.split("\n").filter((l) => l === "systemctl:start kvitbit-worker.service")
-            .length,
-        ).toBe(3);
+          readFileSync(join(stateDir, "log"), "utf8")
+            .trim()
+            .split("\n")
+            .filter((l) => l === "systemctl:start kvitbit-worker.service").length,
+        ).toBe(4);
       },
     );
   });
