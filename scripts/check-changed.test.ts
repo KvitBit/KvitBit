@@ -7,6 +7,7 @@ import * as Path from "effect/Path";
 import * as ChildProcess from "effect/process/ChildProcess";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 import * as Result from "effect/Result";
+import * as Str from "effect/String";
 import { planChecks, readChanges, selectTests } from "./check-changed";
 
 test("Git includes committed, staged, unstaged, and untracked changes with literal names", () =>
@@ -151,7 +152,7 @@ test("the plan checks surviving files and includes deleted code in Knip, Turbo, 
   });
 });
 
-test("shared compiler inputs and workspace manifest changes typecheck the whole repo", () => {
+test("shared compiler inputs and deleted workspace manifests typecheck the whole repo", () => {
   for (const file of ["tsconfig.effect.json", "apps/removed/package.json"]) {
     const plan = planChecks({
       files: [file],
@@ -167,6 +168,26 @@ test("shared compiler inputs and workspace manifest changes typecheck the whole 
       ["run", "typecheck:formal"],
     ]);
   }
+});
+
+test("a surviving workspace manifest scopes typecheck to its workspace and dependents", () => {
+  const plan = planChecks({
+    files: ["apps/web/package.json"],
+    present: ["apps/web/package.json"],
+    workspaces: [
+      { name: "@kvitbit/web", path: "apps/web" },
+      { name: "@kvitbit/mobile", path: "apps/mobile" },
+    ],
+    tests: [],
+    covered: new Set(),
+  });
+  expect(plan).toContainEqual({ name: "Knip", args: ["run", "knip:check"] });
+  expect(Arr.filter(plan, (check) => Str.includes("typecheck")(check.name))).toEqual([
+    {
+      name: "Workspace typechecks",
+      args: ["run", "turbo", "run", "typecheck", "--filter=...@kvitbit/web"],
+    },
+  ]);
 });
 
 test("mobile release changes typecheck the scripts project and run tests from their workspace", () => {

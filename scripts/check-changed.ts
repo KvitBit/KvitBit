@@ -160,8 +160,16 @@ export const selectTests = (input: {
   return uniquePaths(selected);
 };
 
-const requiresAllTypechecks = (files: readonly string[]) =>
-  Arr.some(files, (file) => sharedTypecheckInput.test(file) || workspaceManifest.test(file));
+const requiresAllTypechecks = (input: {
+  readonly files: readonly string[];
+  readonly present: readonly string[];
+}) =>
+  Arr.some(
+    input.files,
+    (file) =>
+      sharedTypecheckInput.test(file) ||
+      (workspaceManifest.test(file) && !input.present.includes(file)),
+  );
 
 export const planChecks = (input: {
   readonly files: readonly string[];
@@ -184,7 +192,7 @@ export const planChecks = (input: {
   if (Arr.some(input.files, (file) => codeFile.test(file) || knipInput.test(file))) {
     checks.push({ name: "Knip", args: ["run", "knip:check"] });
   }
-  const allTypechecks = input.workspaces === undefined || requiresAllTypechecks(input.files);
+  const allTypechecks = input.workspaces === undefined || requiresAllTypechecks(input);
   const filters = Fn.pipe(
     input.workspaces ?? [],
     Arr.filter(({ path }) => Arr.some(input.files, Str.startsWith(`${path}/`))),
@@ -257,7 +265,8 @@ const checkChanged = Effect.fn("CheckChanged.run")(function* (ref: string) {
   });
   const present = yield* Effect.filter(files, isFile);
   const workspaces =
-    Arr.some(files, (file) => workspacePath.test(file)) && !requiresAllTypechecks(files)
+    Arr.some(files, (file) => workspacePath.test(file)) &&
+    !requiresAllTypechecks({ files, present })
       ? yield* readCommand(root, "bun", ["run", "turbo", "ls", "--output=json"]).pipe(
           Effect.flatMap(decodeWorkspaces),
           Effect.map(({ packages }) => packages.items),
