@@ -5,7 +5,7 @@ description: >-
   changes to apps/web/src, the web entry or build configuration, or
   packages/ui-port/src/theme.
 metadata:
-  sync_commit: "0fd105ebb0533916112db09d3f035ae3d0ac476b"
+  sync_commit: "d79521f1f5767ae8537baa093cf23d486a2e13cb"
   bun: "1.4.4"
   node: "24.18.0"
   effect: "4.1.4"
@@ -49,7 +49,9 @@ sign-in from a filtered Price List URL, native mobile-app navigation,
 public PDF downloads, and appearance changes. It covers default and explicit
 magic-link callbacks that recover from a failed membership request, and
 open shares that update after UTC midnight via a timer or a visibility
-event. Both desktop and mobile profiles use demo responses.
+event. Auth coverage measures submit position across challenge outcomes and
+checks that edits, validation errors, and method changes retain the status
+node. Both desktop and mobile profiles use demo responses.
 The typed API and server integrations have their own checks.
 
 ## Run
@@ -70,7 +72,7 @@ Playwright runs in `.github/workflows/nightly.yml`:
 3. Run the browser suite on an unused local port with one worker.
 
    ```sh
-   KVITBIT_WEB_E2E_PORT=34181 bun run --cwd apps/web e2e smoke.spec.ts feedback.spec.ts --workers=1
+   KVITBIT_WEB_E2E_PORT=34181 bun run --cwd apps/web e2e auth.spec.ts smoke.spec.ts feedback.spec.ts --workers=1
    ```
 
 Record the product commit and tool versions after the suite passes. Keep
@@ -78,6 +80,17 @@ that record in a verification commit after the product changes.
 [ADR-0005](../../../docs/adr/0005-formal-verification.md)
 
 ## Verification record
+
+At the recorded product commit, the Playwright auth tests kept the submit
+button in place when sign-in, sign-up, and password reset received a
+no-challenge response. The sign-up test also covered validation and retry.
+Before this change, the same measurements found 28 to 54 pixels of movement
+and the sign-up validation error replaced the status node.
+
+The auth, smoke, and feedback suites passed in desktop and mobile Chromium
+with one worker on port `36000`. Biome checks on the edited files, the web
+and mobile typechecks, the targeted web and mobile auth tests, and the formal
+digest check passed.
 
 At `0fd105ebb0533916112db09d3f035ae3d0ac476b` (rebased cleanly from `3372918b`
 onto `0f5643de`), the onboarding numbering overhaul passed Biome checks on the
@@ -91,8 +104,9 @@ redesigned `/onboarding?step=4` numbering ledger and document defaults layout
 in English and Czech, including per-row alignment, independent live number
 previews, inline validation, and zero horizontal overflow.
 
-At `27555299dca87058231afdf2872b9c247091a1d9`, the recorded product commit passed Biome checks on all edited files and
-targeted unit tests for `packages/ui-port` (`address.test.ts`), `apps/web`
+At `27555299dca87058231afdf2872b9c247091a1d9`, the address paste change passed
+Biome checks on all edited files and targeted unit tests for `packages/ui-port`
+(`address.test.ts`), `apps/web`
 (`consent-invite-onboarding.test.ts`, `settings.test.ts`, `contacts.test.ts`,
 `tea-invariants.test.ts`), and `apps/mobile` (`onboarding-screen.test.tsx`).
 The lockfile was unchanged. The static build contained `dist/index.html`,
