@@ -1167,11 +1167,13 @@ fi
           .slice(logBeforeRollout.length)
           .trim()
           .split("\n");
+        const prePullContainerPruneIdx = rolloutDelta.indexOf("docker:prune:containers");
         const prePullRmiIdx = rolloutDelta.indexOf(`docker:rmi:${staleImageId}`);
         const pullRef2Idx = rolloutDelta.indexOf(`docker:pull:${ref2}`);
         const startIdx = rolloutDelta.indexOf("systemctl:start kvitbit-worker.service");
         const postSwitchRmiOldIdx = rolloutDelta.indexOf(`docker:rmi:${imageId1}`, startIdx);
-        expect(prePullRmiIdx).toBeGreaterThanOrEqual(0);
+        expect(prePullContainerPruneIdx).toBeGreaterThanOrEqual(0);
+        expect(prePullRmiIdx).toBeGreaterThan(prePullContainerPruneIdx);
         expect(pullRef2Idx).toBeGreaterThan(prePullRmiIdx);
         expect(startIdx).toBeGreaterThan(pullRef2Idx);
         expect(postSwitchRmiOldIdx).toBeGreaterThan(startIdx);
