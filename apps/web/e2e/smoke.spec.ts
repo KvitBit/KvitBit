@@ -1,5 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { resolve } from "node:path";
+import { gunzipSync } from "node:zlib";
 import { expect, type Page, test } from "@playwright/test";
 import type { RenderedPath } from "../test/support";
 
@@ -34,6 +35,80 @@ const attachErrorGuards = (page: Page) => {
 // outside Node/Playwright; `bun run --cwd apps/web e2e` executes under Node where `Bun` is absent.
 if (typeof Bun === "undefined") {
   test.describe("web smoke journeys (demo mode)", () => {
+    test("sends only cookieless pageviews after a single startup config request", async ({
+      page,
+    }) => {
+      const host = "https://eu.i.posthog.com";
+      let configRequests = 0;
+      const uploads: { event: string; properties: Record<string, unknown> }[] = [];
+      // Exercise actual ingestion while keeping PostHog's bot filter enabled in production.
+      await page.addInitScript(() => {
+        Object.defineProperty(navigator, "webdriver", { get: () => false });
+        Object.defineProperty(navigator, "userAgentData", { get: () => undefined });
+      });
+      await page.route("**/api/v1/config", async (route) => {
+        configRequests += 1;
+        const response = await route.fetch();
+        await route.fulfill({
+          response,
+          json: {
+            ...(await response.json()),
+            analytics: { posthog: { apiKey: "phc_smoke", host } },
+          },
+        });
+      });
+      await page.route(`${host}/**`, async (route) => {
+        const request = route.request();
+        if (request.method() === "POST") {
+          const data = request.postDataBuffer();
+          if (data === null) throw new Error("PostHog request has no body");
+          const formData = new URLSearchParams(data.toString()).get("data");
+          const body =
+            data[0] === 0x1f
+              ? gunzipSync(data).toString()
+              : formData
+                ? Buffer.from(formData, "base64").toString()
+                : data.toString();
+          const payload = JSON.parse(body);
+          uploads.push(...(payload.batch ?? [payload]));
+        }
+        await route.fulfill({
+          json: { status: 1 },
+          headers: { "access-control-allow-origin": "*" },
+        });
+      });
+
+      await page.goto("/?email=private@example.test#private");
+      await expect.poll(() => uploads.length).toBe(1);
+      await page.locator('a[href="/legal/privacy"]').first().click();
+      await expect.poll(() => uploads.length).toBe(2);
+      expect(configRequests).toBe(1);
+
+      const origin = new URL(page.url()).origin;
+      expect(uploads.map(({ event, properties }) => ({ event, properties }))).toEqual(
+        ["/", "/legal/privacy"].map((path) => ({
+          event: "$pageview",
+          properties: {
+            $current_url: origin + path,
+            $pathname: path,
+            token: "phc_smoke",
+            distinct_id: "$posthog_cookieless",
+            $cookieless_mode: true,
+            $process_person_profile: false,
+            $geoip_disable: true,
+          },
+        })),
+      );
+      expect(await page.context().cookies()).toEqual([]);
+      expect(
+        await page.evaluate(() =>
+          [...Object.keys(localStorage), ...Object.keys(sessionStorage)].filter((key) =>
+            /posthog|^ph_/i.test(key),
+          ),
+        ),
+      ).toEqual([]);
+    });
+
     test("navigates public routes with clean rendering and zero errors", async ({ page }) => {
       const errors = attachErrorGuards(page);
       const publicPaths = [

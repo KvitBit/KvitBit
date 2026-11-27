@@ -1,7 +1,7 @@
 import { Command } from "@effect/ui";
 import { Api } from "@kvitbit/ui-port";
-import { Effect, Layer, Schema } from "effect";
-import { type WebServices, WebServicesLive } from "./api";
+import { Effect, Layer, Option, Schema } from "effect";
+import { StartupConfig, type WebServices, WebServicesLive } from "./api";
 
 class ApiOperation {
   constructor(readonly effect: Effect.Effect<unknown, never, WebServices>) {}
@@ -12,12 +12,19 @@ export class RunApi extends Command.Service<RunApi>()("@kvitbit/web/RunApi", {
   args: { name: Schema.String, operation: Schema.instanceOf(ApiOperation) },
   success: Schema.Unknown,
 }) {
-  static readonly layer = this.toLayer(
+  static readonly fromClient = this.toLayer(
     Effect.gen(function* () {
       const client = yield* Api.KvitbitApi;
-      return ({ operation }) => Effect.provideService(operation.effect, Api.KvitbitApi, client);
+      const config = yield* Effect.serviceOption(StartupConfig);
+      return ({ operation }) => {
+        const effect = Effect.provideService(operation.effect, Api.KvitbitApi, client);
+        return Option.isSome(config)
+          ? Effect.provideService(effect, StartupConfig, config.value)
+          : effect;
+      };
     }),
-  ).pipe(Layer.provide(WebServicesLive));
+  );
+  static readonly layer = this.fromClient.pipe(Layer.provide(WebServicesLive));
 }
 
 export type PageCommand<Message> = Command.Command<Message, RunApi>;

@@ -8,7 +8,7 @@ import type { Html } from "@effect/ui/html";
 import { ConfigView } from "@kvitbit/api-contract";
 import { Format, ViewModels } from "@kvitbit/ui-port";
 import { Schema } from "effect";
-import { Failure } from "../../app/api";
+import { Failure, getPublicConfig } from "../../app/api";
 import { defineApiCommand } from "../../app/commands";
 import { copy, translator } from "../../app/i18n";
 import type { MessageHandlers, PageContext, PageReturn, RouteOf } from "../../app/page";
@@ -117,7 +117,7 @@ const FetchConfig = defineApiCommand("PublicLandingFetchConfig", {
   args: { seq: Remote.Seq },
   execute: ({ seq }) =>
     callApi(
-      (client) => client.config.getConfig(),
+      getPublicConfig,
       (cfg) => Message.GotConfig({ seq, config: cfg }),
       (failure) => Message.FailedConfig({ seq, failure }),
     ),
