@@ -124,7 +124,11 @@
         "packages/core/src/**",
         "packages/domain/src/**",
         "packages/api-contract/src/**",
-        "packages/db/drizzle/20261123175822_init/migration.sql"
+        "packages/db/drizzle/20261123175822_init/migration.sql",
+        "apps/server/src/**",
+        "infra/alchemy/src/**",
+        "infra/alchemy/alchemy.run.ts",
+        ".github/workflows/deploy.yml"
       ],
       "outputs": []
     },
