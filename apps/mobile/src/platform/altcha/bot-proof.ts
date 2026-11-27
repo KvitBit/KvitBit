@@ -289,10 +289,6 @@ const derive = Effect.fn("BotProof.derive")(function* (
 });
 
 /** Solve a fetched ALTCHA PoW v2 challenge in pure TS, yielding between chunks. */
-export const solveChallenge: {
-  (options?: SolveOptions): (challenge: ChallengeJson) => Promise<SolveOutcome>;
-  (challenge: ChallengeJson, options?: SolveOptions): Promise<SolveOutcome>;
-} = Fn.dual(
-  (args) => Predicate.hasProperty(args[0], "parameters"),
-  (challenge: ChallengeJson, options?: SolveOptions) => runMobileEffect(solve(challenge, options)),
-);
+// @effect-diagnostics-next-line missingPipeableSignature:off The challenge is open JSON and can overlap the optional solve settings.
+export const solveChallenge = (challenge: ChallengeJson, options?: SolveOptions) =>
+  runMobileEffect(solve(challenge, options));

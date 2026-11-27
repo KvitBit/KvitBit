@@ -275,11 +275,11 @@ describe("DocumentEditor page (Screen 10)", () => {
     expect(
       update(save.model, Editor.Message.AutosaveDue({ seq: save.model.previewSeq })).commands,
     ).toBeUndefined();
-    const mint = update(save.model, await runCommand(save.commands, fetch));
-    const issue = update(mint.model, await runCommand(mint.commands));
-    const failed = update(issue.model, await runCommand(issue.commands, fetch));
+    const mint = update(save.model, await runCommand({ commands: save.commands, fetch }));
+    const issue = update(mint.model, await runCommand({ commands: mint.commands }));
+    const failed = update(issue.model, await runCommand({ commands: issue.commands, fetch }));
     const retry = update(failed.model, Editor.Message.ClickedIssue());
-    const done = update(retry.model, await runCommand(retry.commands, fetch));
+    const done = update(retry.model, await runCommand({ commands: retry.commands, fetch }));
 
     expect(Arr.map(requests, ({ method, revision }) => [method, revision])).toEqual([
       ["PATCH", '"3"'],
@@ -320,7 +320,7 @@ describe("DocumentEditor page (Screen 10)", () => {
       edited.model,
       Editor.Message.AutosaveDue({ seq: edited.model.previewSeq }),
     );
-    const saved = update(saving.model, await runCommand(saving.commands, fetch));
+    const saved = update(saving.model, await runCommand({ commands: saving.commands, fetch }));
     expect(requests).toEqual([
       { method: "PATCH", revision: '"3"', body: { variableSymbol: "777" } },
     ]);
@@ -336,9 +336,12 @@ describe("DocumentEditor page (Screen 10)", () => {
 
     const replaced = update(cleared.model, Editor.Message.ChangedVariableSymbol({ value: "888" }));
     const savingForIssue = update(replaced.model, Editor.Message.ClickedIssue());
-    const minting = update(savingForIssue.model, await runCommand(savingForIssue.commands, fetch));
-    const issuing = update(minting.model, await runCommand(minting.commands));
-    await runCommand(issuing.commands, fetch);
+    const minting = update(
+      savingForIssue.model,
+      await runCommand({ commands: savingForIssue.commands, fetch }),
+    );
+    const issuing = update(minting.model, await runCommand({ commands: minting.commands }));
+    await runCommand({ commands: issuing.commands, fetch });
     expect(requests.slice(1)).toEqual([
       { method: "PATCH", revision: '"4"', body: { variableSymbol: "888" } },
       { method: "POST", revision: '"5"', body: {} },
@@ -349,7 +352,7 @@ describe("DocumentEditor page (Screen 10)", () => {
     const { model, update, describeLine } = preparedEditor(null);
     const edited = describeLine(model, "New invoice line");
     const mint = update(edited.model, Editor.Message.ClickedIssue());
-    const issue = update(mint.model, await runCommand(mint.commands));
+    const issue = update(mint.model, await runCommand({ commands: mint.commands }));
     const requests: Array<{ path: string; key: string | null; body: unknown }> = [];
     const fetch = async (request: Request) => {
       requests.push({
@@ -360,10 +363,10 @@ describe("DocumentEditor page (Screen 10)", () => {
       if (requests.length === 1) throw new TypeError("lost reply");
       return jsonDocument({ ...draft, status: "issued", revision: 7 }, 201);
     };
-    const failed = update(issue.model, await runCommand(issue.commands, fetch));
+    const failed = update(issue.model, await runCommand({ commands: issue.commands, fetch }));
     expect(update(failed.model, Editor.Message.ClickedSaveDraft()).commands).toBeUndefined();
     const retry = update(failed.model, Editor.Message.ClickedIssue());
-    const done = update(retry.model, await runCommand(retry.commands, fetch));
+    const done = update(retry.model, await runCommand({ commands: retry.commands, fetch }));
     expect(requests[0]?.path).toEndWith("/documents/issue");
     expect(requests[0]?.key).toMatch(requestKeyPattern);
     expect(requests[0]?.body).toMatchObject({
@@ -412,10 +415,13 @@ describe("DocumentEditor page (Screen 10)", () => {
       ],
       paymentQr: { format: "spayd" as const, payload: "SPD*1.0*AM:14520*CC:CZK" },
     };
-    const reply = await runCommand(preview.commands, async (request) => {
-      expect(new URL(request.url).pathname).toEndWith("/documents/preview");
-      expect(await request.json()).toMatchObject({ lines: [{ description: "Latest" }] });
-      return jsonDocument(canonical);
+    const reply = await runCommand({
+      commands: preview.commands,
+      fetch: async (request) => {
+        expect(new URL(request.url).pathname).toEndWith("/documents/preview");
+        expect(await request.json()).toMatchObject({ lines: [{ description: "Latest" }] });
+        return jsonDocument(canonical);
+      },
     });
     const newer = describeLine(preview.model, "Newer");
     expect(update(newer.model, reply).model.serverPreview._tag).toBe("Idle");
@@ -431,7 +437,7 @@ describe("DocumentEditor page (Screen 10)", () => {
     const { update, model, describeLine } = preparedEditor(null);
     const first = describeLine(model, "First version");
     const mint = update(first.model, Editor.Message.AutosaveDue({ seq: first.model.previewSeq }));
-    const create = update(mint.model, await runCommand(mint.commands));
+    const create = update(mint.model, await runCommand({ commands: mint.commands }));
     const second = describeLine(create.model, "Second version");
     const ready = update(
       second.model,
@@ -457,10 +463,10 @@ describe("DocumentEditor page (Screen 10)", () => {
       if (request.method === "POST") return jsonDocument({ ...draft, revision: 19 }, 201);
       return jsonDocument({ ...draft, revision: 20 });
     };
-    const failed = update(ready.model, await runCommand(create.commands, fetch));
+    const failed = update(ready.model, await runCommand({ commands: create.commands, fetch }));
     const retry = update(failed.model, Editor.Message.ClickedRetryAutosave());
-    const patch = update(retry.model, await runCommand(retry.commands, fetch));
-    const saved = update(patch.model, await runCommand(patch.commands, fetch));
+    const patch = update(retry.model, await runCommand({ commands: retry.commands, fetch }));
+    const saved = update(patch.model, await runCommand({ commands: patch.commands, fetch }));
 
     expect(requests[0]?.key).toMatch(requestKeyPattern);
     expect(requests[0]?.body).toMatchObject({ lines: [{ description: "First version" }] });
@@ -481,9 +487,11 @@ describe("DocumentEditor page (Screen 10)", () => {
     const save = update(edited.model, Editor.Message.ClickedIssue());
     const conflict = update(
       save.model,
-      await runCommand(save.commands, () =>
-        Response.json({ _tag: "PreconditionFailed", currentRevision: 23 }, { status: 412 }),
-      ),
+      await runCommand({
+        commands: save.commands,
+        fetch: () =>
+          Response.json({ _tag: "PreconditionFailed", currentRevision: 23 }, { status: 412 }),
+      }),
     );
     expect(conflict.model.revisionState).toBe("stale");
     expect(conflict.commands).toBeUndefined();
@@ -492,9 +500,12 @@ describe("DocumentEditor page (Screen 10)", () => {
     const reload = update(conflict.model, Editor.Message.ClickedReloadRevision());
     const reviewed = update(
       reload.model,
-      await runCommand(reload.commands, (request) => {
-        expect(request.method).toBe("GET");
-        return jsonDocument({ ...draft, revision: 23, paymentMethod: "cash" });
+      await runCommand({
+        commands: reload.commands,
+        fetch: (request) => {
+          expect(request.method).toBe("GET");
+          return jsonDocument({ ...draft, revision: 23, paymentMethod: "cash" });
+        },
       }),
     );
     expect(reviewed.model.savedDoc?.revision).toBe(23);
@@ -520,13 +531,16 @@ describe("DocumentEditor page (Screen 10)", () => {
     const requests: Array<{ method: string; revision: string | null; body: unknown }> = [];
     const saved = update(
       explicitSave.model,
-      await runCommand(explicitSave.commands, async (request) => {
-        requests.push({
-          method: request.method,
-          revision: request.headers.get("if-match"),
-          body: await request.json(),
-        });
-        return jsonDocument({ ...issued, revision: 4 });
+      await runCommand({
+        commands: explicitSave.commands,
+        fetch: async (request) => {
+          requests.push({
+            method: request.method,
+            revision: request.headers.get("if-match"),
+            body: await request.json(),
+          });
+          return jsonDocument({ ...issued, revision: 4 });
+        },
       }),
     );
     expect(requests).toEqual([

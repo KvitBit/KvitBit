@@ -44,8 +44,9 @@ describe("FallbackEmailSender", () => {
   test("uses the primary when it accepts", async () => {
     const primary = scripted("resend", "ok");
     const secondary = scripted("smtp", "ok");
+    const options = { deliveredRetention: 1_000, send: false };
     const exit = await run(
-      makeFallbackEmailSender(primary.sender, secondary.sender).send(message(), {
+      makeFallbackEmailSender(primary.sender, secondary.sender, options).send(message(), {
         idempotencyKey: "k1",
       }),
     );

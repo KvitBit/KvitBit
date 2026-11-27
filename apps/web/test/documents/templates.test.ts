@@ -137,7 +137,7 @@ describe("Templates & Recurring page (Screen 12)", () => {
     expect(Templates.update(open.model, message, accountant).commands).toBeUndefined();
 
     const mint = Templates.update(open.model, message, ctx);
-    const first = Templates.update(mint.model, await runCommand(mint.commands), ctx);
+    const first = Templates.update(mint.model, await runCommand({ commands: mint.commands }), ctx);
     const requests: Array<{ path: string; key: string | null; body: unknown }> = [];
     const fetch = async (request: Request) => {
       requests.push({
@@ -148,9 +148,17 @@ describe("Templates & Recurring page (Screen 12)", () => {
       if (requests.length === 1) throw new TypeError("lost template reply");
       return jsonDocument({ ...sampleProforma, status: "draft", number: null }, 201);
     };
-    const failed = Templates.update(first.model, await runCommand(first.commands, fetch), ctx);
+    const failed = Templates.update(
+      first.model,
+      await runCommand({ commands: first.commands, fetch }),
+      ctx,
+    );
     const retry = Templates.update(failed.model, message, ctx);
-    const done = Templates.update(retry.model, await runCommand(retry.commands, fetch), ctx);
+    const done = Templates.update(
+      retry.model,
+      await runCommand({ commands: retry.commands, fetch }),
+      ctx,
+    );
     expect(requests[0]?.path).toEndWith(`/${TPL_ID}/documents`);
     expect(requests[0]?.key).toMatch(requestKeyPattern);
     expect(requests[0]?.body).toEqual({ as: "draft" });

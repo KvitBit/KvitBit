@@ -90,11 +90,13 @@ export const commandEffect = <Msg>(commands: ReadonlyArray<PageCommand<Msg>> | u
   return command.effect;
 };
 
-// @effect-diagnostics-next-line missingPipeableSignature:off Tests run their command directly with an optional fetch fixture.
-export const runCommand = <Msg>(
-  commands: ReadonlyArray<PageCommand<Msg>> | undefined,
-  fetch?: (request: Request) => Response | Promise<Response>,
-): Promise<Msg> => {
+export const runCommand = <Msg>({
+  commands,
+  fetch,
+}: {
+  readonly commands: ReadonlyArray<PageCommand<Msg>> | undefined;
+  readonly fetch?: (request: Request) => Response | Promise<Response>;
+}): Promise<Msg> => {
   const effect = commandEffect(commands).pipe(Effect.provide(RunApi.layer));
   return Effect.runPromise(
     fetch === undefined

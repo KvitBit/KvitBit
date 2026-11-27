@@ -171,7 +171,8 @@ describe("solveChallenge", () => {
   test("respects AbortSignal", async () => {
     const controller = new AbortController();
     controller.abort();
-    const outcome = await solveChallenge(
+    const options = { signal: controller.signal, parameters: {} };
+    const outcome = solveChallenge(
       {
         parameters: {
           algorithm: "SHA-256",
@@ -181,9 +182,9 @@ describe("solveChallenge", () => {
           keyPrefix: "000000",
         },
       },
-      { signal: controller.signal },
+      options,
     );
-    expect(outcome).toEqual({ _tag: "Aborted" });
+    await expect(outcome).resolves.toEqual({ _tag: "Aborted" });
   });
 
   test("returns Err on malformed challenge parameters", async () => {

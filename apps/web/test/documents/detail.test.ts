@@ -138,7 +138,7 @@ describe("DocumentDetail page (Screen 11)", () => {
     const opened = update(model, Detail.Message.OpenedDialog({ dialog: "payment" }));
     const typed = update(opened.model, Detail.Message.ChangedPayAmount({ value: "300" }));
     const mint = update(typed.model, Detail.Message.SubmittedPayment());
-    const payment = update(mint.model, await runCommand(mint.commands));
+    const payment = update(mint.model, await runCommand({ commands: mint.commands }));
     const requests: Array<{ path: string; key: string | null; body: unknown }> = [];
     const fetch = async (request: Request) => {
       requests.push({
@@ -149,13 +149,13 @@ describe("DocumentDetail page (Screen 11)", () => {
       if (requests.length === 1) throw new TypeError("lost payment reply");
       return Response.json({ payment: {}, settlement: "paid", issued: [] }, { status: 201 });
     };
-    const failed = update(payment.model, await runCommand(payment.commands, fetch));
+    const failed = update(payment.model, await runCommand({ commands: payment.commands, fetch }));
     expect(failed.model.dialogError).not.toBeNull();
     const close = update(failed.model, Detail.Message.ClosedDialog());
     const reopen = update(close.model, Detail.Message.OpenedDialog({ dialog: "payment" }));
     const changed = update(reopen.model, Detail.Message.ChangedPayAmount({ value: "400" }));
     const retry = update(changed.model, Detail.Message.SubmittedPayment());
-    const done = update(retry.model, await runCommand(retry.commands, fetch));
+    const done = update(retry.model, await runCommand({ commands: retry.commands, fetch }));
 
     expect(requests[0]?.path).toEndWith("/payments");
     expect(requests[0]?.body).toMatchObject({

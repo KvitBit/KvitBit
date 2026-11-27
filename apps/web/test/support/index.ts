@@ -35,28 +35,23 @@ interface FixtureOptions {
   readonly today?: string;
 }
 
-export const ctxFor: {
-  (opts?: FixtureOptions): (route: Route) => PageContext;
-  (route: Route, opts?: FixtureOptions): PageContext;
-} = Fn.dual(
-  (args) => Predicate.hasProperty(args[0], "_tag"),
-  (route: Route, opts: FixtureOptions = {}): PageContext => {
-    const session = opts.session ?? signedIn;
-    return {
-      route,
-      path: href(route),
-      today: opts.today ?? "2026-11-26",
-      prefs: defaultPrefs(opts.locale ?? "cs"),
-      locale: opts.locale ?? "cs",
-      session,
-      workspace:
-        "ws" in route && session._tag === "SignedIn"
-          ? (Option.getOrUndefined(Arr.findFirst(session.workspaces, (w) => w.slug === route.ws)) ??
-            null)
-          : null,
-    };
-  },
-);
+// @effect-diagnostics-next-line missingPipeableSignature:off A fixture options object can also contain a route tag.
+export const ctxFor = (route: Route, opts: FixtureOptions = {}): PageContext => {
+  const session = opts.session ?? signedIn;
+  return {
+    route,
+    path: href(route),
+    today: opts.today ?? "2026-11-26",
+    prefs: defaultPrefs(opts.locale ?? "cs"),
+    locale: opts.locale ?? "cs",
+    session,
+    workspace:
+      "ws" in route && session._tag === "SignedIn"
+        ? (Option.getOrUndefined(Arr.findFirst(session.workspaces, (w) => w.slug === route.ws)) ??
+          null)
+        : null,
+  };
+};
 
 export interface RenderedPath {
   readonly html: string;

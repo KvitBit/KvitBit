@@ -59,7 +59,8 @@ describe("Dashboard page (Screen 08)", () => {
   const route: Dashboard.Route = { _tag: "Dashboard", ws: WS };
 
   test("init loads dashboard and recent documents", () => {
-    const ctx = ctxFor(route, { locale: "cs" });
+    const options = { locale: "cs", _tag: "SignIn" } as const;
+    const ctx = ctxFor(route, options);
     const res = Dashboard.init(route, ctx);
     expect(res.model.dashboard._tag).toBe("Loading");
     expect(res.model.recent._tag).toBe("Loading");
@@ -129,9 +130,12 @@ describe("Dashboard page (Screen 08)", () => {
     const recentCommand = commands?.[1];
     if (recentCommand === undefined) throw new Error("Missing recent documents command");
     const encode = Schema.encodeEffect(Schema.toCodecJson(Schema.Array(DocumentSummaryData)));
-    const message = await runCommand([recentCommand], (request) => {
-      expect(new URL(request.url).pathname).toEndWith("/documents");
-      return Response.json({ items: Effect.runSync(encode(sampleRecent)), nextCursor: null });
+    const message = await runCommand({
+      commands: [recentCommand],
+      fetch: (request) => {
+        expect(new URL(request.url).pathname).toEndWith("/documents");
+        return Response.json({ items: Effect.runSync(encode(sampleRecent)), nextCursor: null });
+      },
     });
     const recent = Dashboard.update(model, message, ctx).model.recent;
     expect(recent._tag).toBe("Loaded");
