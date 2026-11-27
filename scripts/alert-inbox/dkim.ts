@@ -1,13 +1,19 @@
 /**
- * RFC 6376 cryptographic DKIM verifier for programmatic alert email ingestion.
+ * RFC 6376 / RFC 8301 / RFC 8463 cryptographic DKIM verifier for programmatic alert ingestion.
  *
- * Security invariants:
- * - Verifies raw RFC 5322 wire bytes directly (RSA-SHA256 and Ed25519-SHA256 only; rejects SHA-1).
- * - Rejects `l=` body-length tags (prevents trailing spoofed body content).
- * - Rejects messages with missing or duplicate `From:` headers (prevents header-shadowing attacks).
- * - Requires `from` in the signed header list (`h=`) and enforces expiration (`x=`).
- * - Enforces both signing-domain (`d=`) allowlist membership AND `From:` domain alignment
- *   under the same allowed root domain (plus strict equality when DNS key specifies `t=s`).
+ * Security & standards invariants:
+ * - Verifies raw RFC 5322 wire bytes directly (`rsa-sha256` with >= 1024-bit modulus per RFC 8301
+ *   §3.2, and `ed25519-sha256` verifying the SHA-256 digest of the canonicalized signing input per
+ *   RFC 8463 §3.3; rejects SHA-1).
+ * - Rejects duplicate DKIM tags (RFC 6376 §3.2), `l=` body-length tags, expired `x=` signatures,
+ *   revoked keys (`p=`), non-email DNS key services (`s=` without `*` or `email`), and `t=s`
+ *   identity mismatches (`i=` domain vs `d=` per RFC 6376 §3.6.1).
+ * - Rejects missing or duplicate `From:` headers, requires `from` in `h=`, and enforces both
+ *   signing-domain (`d=`) allowlist membership and `From:` domain alignment under the same
+ *   allowed root domain.
+ * - Returns the exact cryptographically verified header instances (`fromHeader`, `signedSubject`,
+ *   `signedDate`, `signedMessageId`) so downstream formatting and deduplication never trust
+ *   unsigned or prepended duplicate headers.
  */
 
 import {
@@ -18,7 +24,11 @@ import {
 } from "node:crypto";
 import { resolveTxt } from "node:dns/promises";
 import { Clock, Context, Data, Effect, Layer } from "effect";
-import { extractAddress } from "../../infra/alchemy/src/mail-forwarder/mime";
+import {
+  decodeRfc2047,
+  extractAddress,
+  trimAsciiWsp,
+} from "../../infra/alchemy/src/mail-forwarder/mime";
 
 export interface DnsTxtResolverService {
   readonly resolveTxt: (hostname: string) => Effect.Effect<ReadonlyArray<string>, DnsLookupError>;
@@ -53,9 +63,13 @@ export interface DkimVerified {
   readonly signingDomain: string;
   readonly selector: string;
   readonly algorithm: "rsa-sha256" | "ed25519-sha256";
+  readonly fromHeader: string;
   readonly fromAddress: string;
   readonly fromDomain: string;
   readonly matchedAllowedDomain: string;
+  readonly signedSubject: string | undefined;
+  readonly signedDate: string | undefined;
+  readonly signedMessageId: string | undefined;
 }
 
 export interface DkimRejected {
@@ -78,6 +92,7 @@ interface RawHeaderField {
 }
 
 const ED25519_SPKI_PREFIX = Buffer.from("302a300506032b6570032100", "hex");
+const MIN_RSA_MODULUS_BITS = 1024;
 
 const normalizeDomain = (domain: string): string => domain.trim().toLowerCase().replace(/\.$/, "");
 
@@ -159,22 +174,40 @@ const parseRawHeaderFields = (headerRaw: string): ReadonlyArray<RawHeaderField> 
   return fields;
 };
 
-const parseTagList = (raw: string): Map<string, string> => {
+/**
+ * Parses an RFC 6376 §3.2 tag=value list, rejecting duplicate tag names and malformed entries.
+ */
+const parseTagList = (raw: string): Map<string, string> | undefined => {
   const tags = new Map<string, string>();
   const parts = raw.split(";");
-  for (const part of parts) {
-    const eq = part.indexOf("=");
-    if (eq <= 0) continue;
-    const key = part.slice(0, eq).trim().toLowerCase();
-    const value = part.slice(eq + 1).trim();
-    if (key.length > 0 && !tags.has(key)) {
-      tags.set(key, value);
+  for (let i = 0; i < parts.length; i += 1) {
+    const part = parts[i] ?? "";
+    const trimmed = part.trim();
+    if (trimmed.length === 0) {
+      // A single trailing semicolon is permitted per RFC 6376 §3.2; empty interior entries are invalid.
+      if (i === parts.length - 1) continue;
+      return undefined;
     }
+    const eq = trimmed.indexOf("=");
+    if (eq <= 0) return undefined;
+    const key = trimmed.slice(0, eq).trim().toLowerCase();
+    const value = trimmed.slice(eq + 1).trim();
+    if (key.length === 0 || tags.has(key)) {
+      return undefined;
+    }
+    tags.set(key, value);
   }
   return tags;
 };
 
 const stripFws = (value: string): string => value.replace(/[\r\n \t]+/g, "");
+
+const unfoldHeaderValueUtf8 = (rawValueLatin1: string): string =>
+  trimAsciiWsp(
+    Buffer.from(rawValueLatin1, "latin1")
+      .toString("utf8")
+      .replace(/\r\n([ \t])/g, "$1"),
+  );
 
 export const canonicalizeBody = (bodyBytes: Uint8Array, mode: "simple" | "relaxed"): Buffer => {
   const rawStr = Buffer.from(bodyBytes).toString("latin1").replace(/\r?\n/g, "\r\n");
@@ -245,6 +278,21 @@ const parseCanonicalization = (
   return { header: headerRaw, body: bodyRaw };
 };
 
+const parseIdentityDomain = (
+  rawI: string | undefined,
+  signingDomain: string,
+): string | undefined => {
+  if (rawI === undefined) return signingDomain;
+  const cleaned = stripFws(rawI);
+  const atIdx = cleaned.lastIndexOf("@");
+  if (atIdx === -1 || atIdx === cleaned.length - 1) return undefined;
+  const iDomain = normalizeDomain(cleaned.slice(atIdx + 1));
+  if (iDomain !== signingDomain && !iDomain.endsWith(`.${signingDomain}`)) {
+    return undefined;
+  }
+  return iDomain;
+};
+
 const parsePublicKey = (
   algorithm: "rsa-sha256" | "ed25519-sha256",
   base64Key: string,
@@ -252,18 +300,30 @@ const parsePublicKey = (
   const keyBytes = Buffer.from(stripFws(base64Key), "base64");
   if (keyBytes.length === 0) return undefined;
   try {
-    if (algorithm === "ed25519-sha256" && keyBytes.length === 32) {
-      return createPublicKey({
-        key: Buffer.concat([ED25519_SPKI_PREFIX, keyBytes]),
-        format: "der",
-        type: "spki",
-      });
+    if (algorithm === "ed25519-sha256") {
+      const key =
+        keyBytes.length === 32
+          ? createPublicKey({
+              key: Buffer.concat([ED25519_SPKI_PREFIX, keyBytes]),
+              format: "der",
+              type: "spki",
+            })
+          : createPublicKey({
+              key: keyBytes,
+              format: "der",
+              type: "spki",
+            });
+      return key.asymmetricKeyType === "ed25519" ? key : undefined;
     }
-    return createPublicKey({
+    const key = createPublicKey({
       key: keyBytes,
       format: "der",
       type: "spki",
     });
+    if (key.asymmetricKeyType !== "rsa") return undefined;
+    const modulusLength = key.asymmetricKeyDetails?.modulusLength ?? 0;
+    if (modulusLength < MIN_RSA_MODULUS_BITS) return undefined;
+    return key;
   } catch {
     return undefined;
   }
@@ -290,16 +350,14 @@ export const verifyAlertDkim = (
             : `Ambiguous message with ${fromHeaders.length} From headers`,
       };
     }
-    const rawFromUtf8 = Buffer.from(fromHeaders[0]?.rawValue ?? "", "latin1")
-      .toString("utf8")
-      .replace(/\r\n[ \t]+/g, " ")
-      .trim();
-    const fromParsed = extractAddress(rawFromUtf8);
+    const rawFromUnfolded = unfoldHeaderValueUtf8(fromHeaders[0]?.rawValue ?? "");
+    const fromParsed = extractAddress(rawFromUnfolded);
     if (!fromParsed.address) {
       return { _tag: "DkimRejected", reason: "Invalid From address" };
     }
     const atIdx = fromParsed.address.lastIndexOf("@");
     const fromDomain = normalizeDomain(fromParsed.address.slice(atIdx + 1));
+    const fromHeaderDecoded = trimAsciiWsp(decodeRfc2047(rawFromUnfolded));
 
     const dkimHeaders = fields.filter((f) => f.nameLower === "dkim-signature");
     if (dkimHeaders.length === 0) {
@@ -311,6 +369,10 @@ export const verifyAlertDkim = (
 
     for (const dkimField of dkimHeaders) {
       const tags = parseTagList(dkimField.rawValue);
+      if (!tags) {
+        failureReasons.push("Malformed DKIM-Signature tag list or duplicate tag");
+        continue;
+      }
       if (tags.get("v") !== "1") {
         failureReasons.push("Unsupported DKIM version");
         continue;
@@ -333,6 +395,12 @@ export const verifyAlertDkim = (
       const bRaw = stripFws(tags.get("b") ?? "");
       if (!signingDomain || !selector || !signedHeadersRaw || !bhRaw || !bRaw) {
         failureReasons.push("DKIM-Signature missing required tag(s)");
+        continue;
+      }
+
+      const identityDomain = parseIdentityDomain(tags.get("i"), signingDomain);
+      if (!identityDomain) {
+        failureReasons.push("Invalid DKIM identity tag (i=)");
         continue;
       }
 
@@ -400,9 +468,11 @@ export const verifyAlertDkim = (
         continue;
       }
 
-      // 2. Construct canonicalized signed headers (bottom-to-top per RFC 6376 §5.4.2)
+      // 2. Construct canonicalized signed headers bottom-to-top per RFC 6376 §5.4.2,
+      // capturing the exact verified header instances for downstream formatting & dedup.
       const usedIndices = new Set<number>();
       const signedLines: Array<string> = [];
+      const verifiedHeaderValues = new Map<string, Array<string>>();
       for (const targetName of signedHeaderNames) {
         for (let idx = fields.length - 1; idx >= 0; idx -= 1) {
           if (usedIndices.has(idx)) continue;
@@ -410,6 +480,9 @@ export const verifyAlertDkim = (
           if (candidate && candidate.nameLower === targetName) {
             usedIndices.add(idx);
             signedLines.push(`${canonicalizeHeaderField(candidate, canon.header)}\r\n`);
+            const list = verifiedHeaderValues.get(targetName) ?? [];
+            list.push(unfoldHeaderValueUtf8(candidate.rawValue));
+            verifiedHeaderValues.set(targetName, list);
             break;
           }
         }
@@ -450,6 +523,10 @@ export const verifyAlertDkim = (
       let matched = false;
       for (const txt of txtResult.success) {
         const keyTags = parseTagList(txt);
+        if (!keyTags) {
+          failureReasons.push(`Malformed DKIM DNS key record at ${dnsHost}`);
+          continue;
+        }
         const keyVersion = keyTags.get("v");
         if (keyVersion !== undefined && keyVersion !== "DKIM1") continue;
         const keyType = (keyTags.get("k") ?? "rsa").trim().toLowerCase();
@@ -457,6 +534,15 @@ export const verifyAlertDkim = (
           (algorithm === "rsa-sha256" && keyType !== "rsa") ||
           (algorithm === "ed25519-sha256" && keyType !== "ed25519")
         ) {
+          continue;
+        }
+        // RFC 6376 §3.6.1 service type restriction (`s=` defaults to `*`)
+        const serviceTypes = (keyTags.get("s") ?? "*")
+          .split(":")
+          .map((s) => s.trim().toLowerCase())
+          .filter((s) => s.length > 0);
+        if (!serviceTypes.includes("*") && !serviceTypes.includes("email")) {
+          failureReasons.push(`DKIM key at ${dnsHost} is not permitted for email service`);
           continue;
         }
         const allowedHashes = keyTags.get("h");
@@ -469,12 +555,13 @@ export const verifyAlertDkim = (
         ) {
           continue;
         }
+        // RFC 6376 §3.6.1 `t=s` requires the identity domain (`i=`) to equal `d=` exactly.
         const keyFlags = (keyTags.get("t") ?? "")
           .split(":")
           .map((flag) => flag.trim().toLowerCase());
-        if (keyFlags.includes("s") && fromDomain !== signingDomain) {
+        if (keyFlags.includes("s") && identityDomain !== signingDomain) {
           failureReasons.push(
-            `Key t=s requires strict domain alignment (${fromDomain} != ${signingDomain})`,
+            `Key t=s requires strict identity alignment (${identityDomain} != ${signingDomain})`,
           );
           continue;
         }
@@ -485,12 +572,18 @@ export const verifyAlertDkim = (
         }
         const pubKey = parsePublicKey(algorithm, keyBase64);
         if (!pubKey) {
-          failureReasons.push(`Invalid DKIM public key at ${dnsHost}`);
+          failureReasons.push(`Invalid or too-weak DKIM public key at ${dnsHost}`);
           continue;
         }
+        // RFC 8463 §3.3: Ed25519-SHA256 verifies the SHA-256 digest of the canonicalized signing input.
         const ok =
           algorithm === "ed25519-sha256"
-            ? verifySignature(null, signingInput, pubKey, sigBytes)
+            ? verifySignature(
+                null,
+                createHash("sha256").update(signingInput).digest(),
+                pubKey,
+                sigBytes,
+              )
             : verifySignature("sha256", signingInput, pubKey, sigBytes);
         if (ok) {
           matched = true;
@@ -499,14 +592,25 @@ export const verifyAlertDkim = (
       }
 
       if (matched) {
+        const rawSignedSubject = verifiedHeaderValues.get("subject")?.[0];
+        const rawSignedDate = verifiedHeaderValues.get("date")?.[0];
+        const rawSignedMessageId = verifiedHeaderValues.get("message-id")?.[0];
         return {
           _tag: "DkimVerified",
           signingDomain,
           selector,
           algorithm,
+          fromHeader: fromHeaderDecoded,
           fromAddress: fromParsed.address,
           fromDomain,
           matchedAllowedDomain: matchedAllowed,
+          signedSubject:
+            rawSignedSubject !== undefined
+              ? trimAsciiWsp(decodeRfc2047(rawSignedSubject))
+              : undefined,
+          signedDate: rawSignedDate !== undefined ? trimAsciiWsp(rawSignedDate) : undefined,
+          signedMessageId:
+            rawSignedMessageId !== undefined ? trimAsciiWsp(rawSignedMessageId) : undefined,
         };
       }
       failureReasons.push(`Cryptographic signature verification failed for ${dnsHost}`);

@@ -1,18 +1,21 @@
 /**
  * Safe GitHub issue formatting for DKIM-verified alert emails.
  *
- * Follows the same fencing and redaction discipline as `apps/server/src/http/feedback/issue.ts`:
- * - Strips control/format characters and redacts common secret/token patterns.
- * - Uses dynamically sized markdown code fences so untrusted alert bodies cannot break out
- *   into active markdown, mentions, or commands.
- * - Labels issues `alert` (separate from `visual-feedback`) so untrusted email text cannot
- *   auto-trigger `scripts/issue-pool` coding workers.
+ * Security invariants:
+ * - Always applies exclusively the `alert` label (never `visual-feedback` or caller-overridden
+ *   labels) so untrusted email text cannot route into `scripts/issue-pool` coding workers.
+ * - Uses ONLY cryptographically verified DKIM header values (`fromHeader`, `signedSubject`,
+ *   `signedDate`, `signedMessageId`), falling back to a neutral title when `Subject` is unsigned.
+ * - Embeds a stable deterministic marker (`kvitbit-alert-key:<dedupKey>`) for idempotent
+ *   reconciliation after uncertain GitHub API replies.
+ * - Redacts secret/token patterns and dynamically sizes markdown code fences so untrusted body
+ *   content cannot break out of fenced blocks.
  */
 
 import type { ParsedEmail } from "../../infra/alchemy/src/mail-forwarder/mime";
 import type { DkimVerified } from "./dkim";
 
-export const DEFAULT_ALERT_LABEL = "alert";
+export const ALERT_ISSUE_LABEL = "alert" as const;
 const MAX_BODY_CHARS = 12_000;
 
 const WHOLE_SECRET_PATTERNS: ReadonlyArray<RegExp> = [
@@ -45,34 +48,40 @@ export const safeCodeBlock = (value: string): string => {
   return `${fence}text\n${value}\n${fence}`;
 };
 
+export const alertIssueMarker = (dedupKey: string): string => `kvitbit-alert-key:${dedupKey}`;
+
 export interface FormattedAlertIssue {
   readonly title: string;
   readonly body: string;
-  readonly labels: ReadonlyArray<string>;
+  readonly labels: readonly [typeof ALERT_ISSUE_LABEL];
 }
 
 export const formatAlertIssue = (params: {
   readonly parsed: ParsedEmail;
   readonly verified: DkimVerified;
   readonly archiveUri: string;
-  readonly label?: string;
+  readonly dedupKey: string;
 }): FormattedAlertIssue => {
-  const { parsed, verified, archiveUri } = params;
-  const label = params.label?.trim() || DEFAULT_ALERT_LABEL;
+  const { parsed, verified, archiveUri, dedupKey } = params;
 
-  const cleanSubject = redactAlertText(parsed.subject || "(no subject)")
-    .replaceAll(/\s+/g, " ")
-    .trim();
-  const excerpt = Array.from(cleanSubject).slice(0, 96).join("").trimEnd();
+  // Never copy an unsigned Subject into the issue title.
+  const verifiedSubject =
+    verified.signedSubject !== undefined
+      ? redactAlertText(verified.signedSubject).replaceAll(/\s+/g, " ").trim()
+      : "";
+  const excerpt = Array.from(verifiedSubject).slice(0, 96).join("").trimEnd();
   const title = `Alert (${verified.matchedAllowedDomain}): ${excerpt || "Monitoring notification"}`;
 
   const metadataBlock = safeCodeBlock(
     [
       `Source domain: ${verified.matchedAllowedDomain}`,
       `DKIM: verified (d=${verified.signingDomain}, s=${verified.selector}, a=${verified.algorithm})`,
-      `From: ${redactAlertText(parsed.fromHeader || verified.fromAddress)}`,
-      ...(parsed.date ? [`Date: ${redactAlertText(parsed.date)}`] : []),
-      ...(parsed.messageId ? [`Message-ID: ${redactAlertText(parsed.messageId)}`] : []),
+      `From: ${redactAlertText(verified.fromHeader || verified.fromAddress)}`,
+      ...(verified.signedDate ? [`Date: ${redactAlertText(verified.signedDate)}`] : []),
+      ...(verified.signedMessageId
+        ? [`Message-ID: ${redactAlertText(verified.signedMessageId)}`]
+        : []),
+      `Alert key: ${alertIssueMarker(dedupKey)}`,
       `Archive: ${archiveUri}`,
     ].join("\n"),
   );
@@ -90,11 +99,12 @@ export const formatAlertIssue = (params: {
     safeCodeBlock(truncatedBody),
     "## Triage Note",
     "This issue was filed automatically from a DKIM-verified email sent to `alerts@kvitbit.com`. Treat the alert body above as external telemetry data.",
+    `<!-- ${alertIssueMarker(dedupKey)} -->`,
   ].join("\n\n");
 
   return {
     title,
     body,
-    labels: [label],
+    labels: [ALERT_ISSUE_LABEL],
   };
 };
