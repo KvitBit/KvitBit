@@ -9,6 +9,7 @@ import * as Order from "effect/Order";
 import * as Path from "effect/Path";
 import * as ChildProcess from "effect/process/ChildProcess";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
+import * as Rec from "effect/Record";
 import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
@@ -23,12 +24,16 @@ class CheckError extends Schema.TaggedError<CheckError, { readonly brand: unique
 
 const codeFile = /\.[cm]?[jt]sx?$/;
 const testFile = /\.(?:test|spec)\.[cm]?[jt]sx?$/;
-const workspacePath = /^(?:apps|infra|packages)\/[^/]+\//;
+const workspacePath = /^(?<workspace>(?:apps|infra|packages)\/[^/]+)\//;
 const workspaceManifest = /^(?:apps|infra|packages)\/[^/]+\/package\.json$/;
+const nestedWorkspaceSource = /^(?:apps|infra|packages)\/[^/]+\/src\/[^/]+\//;
 const sharedTypecheckInput = /^(?:package\.json|bun\.lock|tsconfig[^/]*\.json|turbo\.json)$/;
-const knipInput = /(?:^|\/)package\.json$|\.sh$|^(?:knip\.jsonc?|bun\.lock)$/;
+const knipInput =
+  /(?:^|\/)(?:package|tsconfig[^/]*)\.json$|\.sh$|^(?:knip\.jsonc?|bun\.lock|apps\/mobile\/app\.json)$/;
 const formalManifest = "formal/manifest.json";
 const formalDependencies = /^packages\/(?:api-contract|core|db|domain)\//;
+const scriptsDependencies = /^(?:scripts|apps\/mobile\/release)\//;
+const directory = Str.replace(/\/?[^/]*$/, "");
 
 const decodeManifest = Schema.decodeEffect(
   Schema.fromJsonString(
@@ -51,6 +56,7 @@ const decodeWorkspaces = Schema.decodeEffect(
 interface Check {
   readonly name: string;
   readonly args: readonly string[];
+  readonly cwd?: string;
 }
 
 const readCommand = Effect.fn("CheckChanged.readCommand")(function* (
@@ -91,18 +97,26 @@ export const readChanges = Effect.fn("CheckChanged.readChanges")(function* (
   const base = yield* readCommand(root, "git", ["merge-base", "--", "HEAD", ref]).pipe(
     Effect.map(Str.trim),
   );
-  const [tracked, untracked] = yield* Effect.all(
+  const diff = (...refs: string[]) =>
+    readCommand(root, "git", ["diff", "--name-only", "--no-renames", "-z", ...refs, "--"]);
+  // An unstaged hunk can undo a staged hunk in the working tree.
+  const sources = yield* Effect.all(
     [
-      readCommand(root, "git", ["diff", "--name-only", "--no-renames", "-z", base, "--"]),
+      diff(base, "HEAD"),
+      diff("--cached", "HEAD"),
+      diff(),
       readCommand(root, "git", ["ls-files", "--others", "--exclude-standard", "-z"]),
     ],
-    { concurrency: 2 },
+    { concurrency: 4 },
   );
-  return { base, files: uniquePaths([...splitPaths(tracked), ...splitPaths(untracked)]) };
+  return { base, files: uniquePaths(Arr.flatMap(sources, splitPaths)) };
 });
 
 const testPrefixesFor = (file: string) => {
   const stem = Str.replace(codeFile, "")(file);
+  if (Str.startsWith("scripts/release/")(stem)) {
+    return [stem, `apps/mobile/${Str.slice("scripts/".length)(stem)}`];
+  }
   const [group, workspace, sourceTree, ...relative] = Str.split("/")(stem);
   if (workspace !== undefined && workspacePath.test(file) && sourceTree === "src") {
     const name = Arr.join(relative, "/");
@@ -116,24 +130,34 @@ export const selectTests = (input: {
   readonly candidates: readonly string[];
 }) => {
   const { changed, candidates } = input;
-  const prefixes = Fn.pipe(
-    changed,
-    Arr.filter((file) => codeFile.test(file)),
-    Arr.flatMap(testPrefixesFor),
+  const tests = Arr.filter(
+    candidates,
+    (file) => testFile.test(file) && !Str.startsWith("apps/web/e2e/")(file),
   );
-  return uniquePaths(
-    Arr.filter(candidates, (file) => {
-      if (!testFile.test(file) || Str.startsWith("apps/web/e2e/")(file)) return false;
-      if (changed.includes(file)) return true;
-      const stem = Str.replace(testFile, "")(file);
+  const selected = new Set(Arr.filter(tests, (file) => changed.includes(file)));
+  for (const file of changed) {
+    if (!codeFile.test(file) || testFile.test(file)) continue;
+    const prefixes = testPrefixesFor(file);
+    const matches = Arr.filter(tests, (test) => {
+      const stem = Str.replace(testFile, "")(test);
       return Arr.some(
         prefixes,
         (prefix) =>
           stem === prefix ||
-          (Str.startsWith(`${prefix}.`)(stem) && !Str.includes("/", prefix.length)(stem)),
+          (directory(stem) === directory(prefix) &&
+            (Str.startsWith(`${prefix}.`)(stem) || Str.startsWith(`${prefix}-`)(stem))),
       );
-    }),
-  );
+    });
+    if (matches.length > 0) {
+      for (const test of matches) selected.add(test);
+    } else if (nestedWorkspaceSource.test(file)) {
+      const directories = new Set(Arr.map(prefixes, directory));
+      for (const test of tests) {
+        if (directories.has(directory(test))) selected.add(test);
+      }
+    }
+  }
+  return uniquePaths(selected);
 };
 
 const requiresAllTypechecks = (files: readonly string[]) =>
@@ -173,7 +197,7 @@ export const planChecks = (input: {
       args: ["run", "turbo", "run", "typecheck", ...(allTypechecks ? [] : filters)],
     });
   }
-  if (allTypechecks || Arr.some(input.files, Str.startsWith("scripts/"))) {
+  if (allTypechecks || Arr.some(input.files, (file) => scriptsDependencies.test(file))) {
     checks.push({ name: "Scripts typecheck", args: ["run", "typecheck:scripts"] });
   }
   if (
@@ -185,13 +209,30 @@ export const planChecks = (input: {
   ) {
     checks.push({ name: "Formal typecheck", args: ["run", "typecheck:formal"] });
   }
-  if (input.tests.length > 0) {
+  const testsByWorkspace = Arr.groupBy(
+    input.tests,
+    (file) => workspacePath.exec(file)?.groups?.workspace ?? ".",
+  );
+  for (const cwd of Rec.keys(testsByWorkspace)) {
+    const files = testsByWorkspace[cwd] ?? [];
     checks.push({
-      name: "Nearby tests",
-      args: ["test", ...Arr.map(input.tests, (file) => `./${file}`)],
+      name: cwd === "." ? "Nearby tests" : `Nearby tests (${cwd})`,
+      cwd,
+      args: [
+        "test",
+        ...Arr.map(files, (file) =>
+          cwd === "." ? `./${file}` : `./${Str.slice(cwd.length + 1)(file)}`,
+        ),
+      ],
     });
   }
-  if (Arr.some(input.files, (file) => file === formalManifest || input.covered.has(file))) {
+  if (
+    Arr.some(
+      input.files,
+      (file) =>
+        file === formalManifest || file === "formal/run-formal.ts" || input.covered.has(file),
+    )
+  ) {
     checks.push({ name: "Formal digests", args: ["run", "verify:formal", "--check-digests"] });
   }
   return checks;
@@ -249,12 +290,13 @@ const checkChanged = Effect.fn("CheckChanged.run")(function* (ref: string) {
               Arr.flatMap(checks, (check) => Arr.map(check.coveredFiles, (entry) => entry.path)),
             ),
         ),
+        Effect.orElseSucceed(() => new Set(files)),
       );
   const failed: string[] = [];
   for (const check of planChecks({ files, present, workspaces, tests, covered })) {
     yield* Console.log(`\n> ${check.name}`);
     const command = ChildProcess.make("bun", check.args, {
-      cwd: root,
+      cwd: path.join(root, check.cwd ?? "."),
       stdout: "inherit",
       stderr: "inherit",
     });
