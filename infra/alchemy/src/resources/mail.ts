@@ -172,8 +172,8 @@ export const mailAddressProps = (
   addressName: resourceNames(config).mailAddressName,
   region: mail.region,
   addressType: "EXTERNAL",
-  // Omit `ipVersion`: GCP regional `addresses.insert` rejects `ipVersion` (even "IPV4") and
-  // defaults external regional addresses to IPv4 automatically.
+  // Omit `ipVersion` for this regional IPv4 reservation: GCP's regional `addresses.insert`
+  // rejects explicit `"IPV4"` here and defaults external regional addresses to IPv4 automatically.
   networkTier: "PREMIUM",
   description: `Static external IPv4 for ${mail.mxHost} inbound SMTP (billed per GCP VPC external IPv4 tariff).`,
   labels: {
