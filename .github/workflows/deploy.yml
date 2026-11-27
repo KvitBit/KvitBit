@@ -27,6 +27,10 @@ on:
         description: Bootstrap foundation only (Artifact Registry, GCS buckets, service accounts, empty Secret Manager containers, log exclusion)
         type: boolean
         default: false
+      bootstrap_feedback_secret:
+        description: Create the feedback token container after enabling the feedback secret flag
+        type: boolean
+        default: false
 
 # Never cancel an active production deployment or migration in progress.
 concurrency:
@@ -45,6 +49,7 @@ jobs:
       KVITBIT_STAGE: prod
       DRY_RUN: ${{ inputs.dry_run && 'true' || 'false' }}
       BOOTSTRAP_FOUNDATION: ${{ inputs.bootstrap_foundation && 'true' || 'false' }}
+      BOOTSTRAP_FEEDBACK_SECRET: ${{ inputs.bootstrap_feedback_secret && 'true' || 'false' }}
       GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
       GCP_PROJECT_NUMBER: ${{ vars.GCP_PROJECT_NUMBER }}
       GCP_REGION: ${{ vars.GCP_REGION }}
@@ -63,6 +68,10 @@ jobs:
           set -euo pipefail
           if [ "$KVITBIT_STAGE" != "prod" ]; then
             echo "::error::deploy.yml is strictly production-only until an isolated staging environment exists (got KVITBIT_STAGE=${KVITBIT_STAGE})"
+            exit 1
+          fi
+          if [ "$BOOTSTRAP_FOUNDATION" = "true" ] && [ "$BOOTSTRAP_FEEDBACK_SECRET" = "true" ]; then
+            echo "::error::Select only one of bootstrap_foundation and bootstrap_feedback_secret."
             exit 1
           fi
           for name in \
@@ -125,6 +134,7 @@ jobs:
 
       # Step 1: Federated credentials file for gcloud and Artifact Registry Docker push.
       - name: Authenticate to Google Cloud (OIDC)
+        if: env.BOOTSTRAP_FEEDBACK_SECRET != 'true'
         id: gcp-auth
         uses: google-github-actions/auth@v3
         with:
@@ -146,6 +156,7 @@ jobs:
           create_credentials_file: false
 
       - name: Set up gcloud
+        if: env.BOOTSTRAP_FEEDBACK_SECRET != 'true'
         uses: google-github-actions/setup-gcloud@v3
 
       # Guard against accidentally running foundation-only bootstrap on a populated production
@@ -174,7 +185,7 @@ jobs:
       # Fail fast before pushing images or running migrations if foundation resources
       # or required Secret Manager versions have not been bootstrapped yet.
       - name: Preflight Artifact Registry and Secret Manager versions
-        if: env.DRY_RUN != 'true' && env.BOOTSTRAP_FOUNDATION != 'true'
+        if: env.DRY_RUN != 'true' && env.BOOTSTRAP_FOUNDATION != 'true' && env.BOOTSTRAP_FEEDBACK_SECRET != 'true'
         run: |
           set -euo pipefail
           if ! gcloud artifacts repositories describe kvitbit \
@@ -194,8 +205,9 @@ jobs:
           if [ "${KVITBIT_ENABLE_MOBILE_SIGNING_KEY_SECRET:-false}" = "true" ]; then
             required_secrets="${required_secrets} kvitbit-${KVITBIT_STAGE}-mobile-updates-signing-key"
           fi
+          feedback_secret="kvitbit-${KVITBIT_STAGE}-feedback-github-token"
           if [ "${KVITBIT_ENABLE_FEEDBACK_GITHUB_TOKEN_SECRET:-false}" = "true" ]; then
-            required_secrets="${required_secrets} kvitbit-${KVITBIT_STAGE}-feedback-github-token"
+            required_secrets="${required_secrets} ${feedback_secret}"
           fi
 
           for secret_id in $required_secrets; do
@@ -204,18 +216,22 @@ jobs:
               --secret "$secret_id" \
               --format='value(state)' 2>/dev/null || true)"
             if [ "$state" != "ENABLED" ]; then
-              echo "::error::Secret Manager secret '${secret_id}' does not have an ENABLED 'latest' version (got '${state:-missing}'). Run bootstrap_foundation=true if needed and populate secret versions before deploying."
+              if [ "$secret_id" = "$feedback_secret" ]; then
+                echo "::error::Secret Manager secret '${secret_id}' does not have an ENABLED 'latest' version (got '${state:-missing}'). Run bootstrap_feedback_secret=true if the container is missing, then add an enabled token version before deploying."
+              else
+                echo "::error::Secret Manager secret '${secret_id}' does not have an ENABLED 'latest' version (got '${state:-missing}'). Run bootstrap_foundation=true if needed and populate secret versions before deploying."
+              fi
               exit 1
             fi
           done
 
       - name: Configure Docker for Artifact Registry
-        if: env.BOOTSTRAP_FOUNDATION != 'true'
+        if: env.BOOTSTRAP_FOUNDATION != 'true' && env.BOOTSTRAP_FEEDBACK_SECRET != 'true'
         run: gcloud auth configure-docker "${GCP_REGION}-docker.pkg.dev" --quiet
 
       - name: Build and push Kvitbit OCI image
         id: image
-        if: env.BOOTSTRAP_FOUNDATION != 'true'
+        if: env.BOOTSTRAP_FOUNDATION != 'true' && env.BOOTSTRAP_FEEDBACK_SECRET != 'true'
         run: |
           set -euo pipefail
           IMAGE_REPO="${GCP_REGION}-docker.pkg.dev/${GCP_PROJECT_ID}/kvitbit/kvitbit"
@@ -241,7 +257,7 @@ jobs:
 
       # Explicit migration step BEFORE Cloud Run / runner pool rollout (rule S5, #878).
       - name: Run database and cluster schema migrations
-        if: env.DRY_RUN != 'true' && env.BOOTSTRAP_FOUNDATION != 'true'
+        if: env.DRY_RUN != 'true' && env.BOOTSTRAP_FOUNDATION != 'true' && env.BOOTSTRAP_FEEDBACK_SECRET != 'true'
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           DATABASE_URL_UNPOOLED: ${{ secrets.DATABASE_DIRECT_URL }}
@@ -257,7 +273,7 @@ jobs:
           fi
           bun apps/server/src/migrate.ts
 
-      - name: Run pure-Alchemy GCP stack (${{ inputs.dry_run && 'plan' || (inputs.bootstrap_foundation && 'bootstrap' || 'deploy') }})
+      - name: Run pure-Alchemy GCP stack (${{ inputs.dry_run && 'plan' || inputs.bootstrap_feedback_secret && 'feedback secret bootstrap' || inputs.bootstrap_foundation && 'foundation bootstrap' || 'deploy' }})
         working-directory: infra/alchemy
         env:
           GOOGLE_ACCESS_TOKEN: ${{ steps.alchemy-auth.outputs.access_token }}
@@ -283,14 +299,25 @@ jobs:
           KVITBIT_FEEDBACK_OWNER_EMAILS: ${{ vars.KVITBIT_FEEDBACK_OWNER_EMAILS }}
         run: |
           set -euo pipefail
+          selection=()
+          if [ "$BOOTSTRAP_FEEDBACK_SECRET" = "true" ]; then
+            if [ "$KVITBIT_ENABLE_FEEDBACK_GITHUB_TOKEN_SECRET" != "true" ]; then
+              echo "::error::Set the KVITBIT_ENABLE_FEEDBACK_GITHUB_TOKEN_SECRET repository variable to true before bootstrapping the feedback token container."
+              exit 1
+            fi
+            # Alchemy evaluates the full declaration before selecting the one secret.
+            KVITBIT_IMAGE_DIGEST="sha256:$(printf '%s' "$GITHUB_SHA" | sha256sum | awk '{print $1}')"
+            export KVITBIT_IMAGE_DIGEST
+            selection=(--include "Secret-kvitbit-${KVITBIT_STAGE}-feedback-github-token")
+          fi
           if [ "$DRY_RUN" = "true" ]; then
-            bunx alchemy plan --stage "$KVITBIT_STAGE"
+            bunx alchemy plan --stage "$KVITBIT_STAGE" "${selection[@]}"
           else
-            bunx alchemy deploy --yes --stage "$KVITBIT_STAGE"
+            bunx alchemy deploy --yes --stage "$KVITBIT_STAGE" "${selection[@]}"
           fi
 
       - name: Verify runner pool reconciled target digest and config
-        if: env.DRY_RUN != 'true' && env.BOOTSTRAP_FOUNDATION != 'true'
+        if: env.DRY_RUN != 'true' && env.BOOTSTRAP_FOUNDATION != 'true' && env.BOOTSTRAP_FEEDBACK_SECRET != 'true'
         env:
           TARGET_DIGEST: ${{ steps.image.outputs.digest }}
         run: |
@@ -357,7 +384,7 @@ jobs:
           done
 
       - name: Verify database readiness and static mounts
-        if: env.DRY_RUN != 'true' && env.BOOTSTRAP_FOUNDATION != 'true'
+        if: env.DRY_RUN != 'true' && env.BOOTSTRAP_FOUNDATION != 'true' && env.BOOTSTRAP_FEEDBACK_SECRET != 'true'
         env:
           KVITBIT_EDGE_DOMAINS: ${{ vars.KVITBIT_EDGE_DOMAINS }}
           APP_ORIGIN: ${{ vars.APP_ORIGIN }}
