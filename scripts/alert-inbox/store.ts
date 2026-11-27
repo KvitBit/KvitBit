@@ -7,8 +7,10 @@
  *   wrong schemas, or I/O failures stay cleanly in the Effect error channel.
  * - Migrates legacy databases in-place inside `BEGIN IMMEDIATE ... COMMIT`, preserving recorded
  *   `issue_number` / `delivery_hash` while clearing historical unverified `message_id`s.
- * - Enforces exclusive apply ownership across concurrent callers (both in-process and across
- *   separate OS processes via atomic `O_CREAT | O_EXCL` lockfiles with PID-liveness checks).
+ * - Enforces exclusive apply ownership across all callers (same-process, cross-process, and
+ *   symlink/hardlink path aliases) using kernel `flock(2)` directly on the backing database inode,
+ *   so the OS atomically releases ownership on process exit / SIGKILL with zero lockfiles or
+ *   stale-PID cleanup races.
  * - Pairs atomic SQLite claim acquisition (`BEGIN IMMEDIATE` + partial unique index on active
  *   `dedup_key`) with a monotonic `claim_generation` fencing token verified/renewed immediately
  *   before GitHub POST and checked on every state transition, while making terminal `'created'`
@@ -17,17 +19,10 @@
  *   retries can starve even when `maxPerPass === 1`.
  */
 
+import { dlopen, FFIType, read } from "bun:ffi";
 import { Database } from "bun:sqlite";
 import { randomUUID } from "node:crypto";
-import {
-  closeSync,
-  constants as fsConstants,
-  openSync,
-  readFileSync,
-  unlinkSync,
-  writeFileSync,
-} from "node:fs";
-import { resolve } from "node:path";
+import { closeSync, constants as fsConstants, fstatSync, openSync, realpathSync } from "node:fs";
 import { Data, Effect, type Scope } from "effect";
 
 export type AlertRecordStatus = "claiming" | "created" | "duplicate" | "rejected" | "retry";
@@ -172,106 +167,124 @@ const withImmediateTx = <A>(db: Database, thunk: () => A): A => {
   }
 };
 
-// In-process lock registry so concurrent passes in the same process sharing a SQLite file or
-// `:memory:` store never overlap apply mutations or GitHub POSTs.
-const activeInProcessApplyLocks = new Set<string>();
+// Kernel `flock(2)` binding (POSIX Linux & macOS). `flock(2)` locks are owned by the kernel on
+// the backing inode / open file description, automatically released on process exit or SIGKILL,
+// completely independent of SQLite's POSIX `fcntl(F_SETLK)` byte-range locks on Linux, and
+// immune to symlinks, hardlinks, stale PID files, and unlink races.
+const LOCK_EX = 2;
+const LOCK_NB = 4;
+const LOCK_UN = 8;
+const EINTR = 4;
+const EWOULDBLOCK = process.platform === "darwin" ? 35 : 11;
 
-const isProcessAlive = (pid: number): boolean => {
-  if (!Number.isSafeInteger(pid) || pid <= 0) return false;
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    const code = (error as NodeJS.ErrnoException).code;
-    // EPERM means the process exists under another user; ESRCH means it does not exist.
-    return code === "EPERM";
+interface NativeFlock {
+  readonly flock: (fd: number, operation: number) => number;
+  readonly getErrno: () => number;
+}
+
+let cachedNativeFlock: NativeFlock | null = null;
+
+const loadNativeFlock = (): NativeFlock => {
+  if (cachedNativeFlock !== null) return cachedNativeFlock;
+  if (process.platform === "darwin") {
+    const lib = dlopen("libSystem.B.dylib", {
+      flock: { args: [FFIType.i32, FFIType.i32], returns: FFIType.i32 },
+      __error: { args: [], returns: FFIType.ptr },
+    });
+    cachedNativeFlock = {
+      flock: (fd, op) => lib.symbols.flock(fd, op),
+      getErrno: () => {
+        const ptr = lib.symbols.__error();
+        return ptr ? read.i32(ptr, 0) : -1;
+      },
+    };
+  } else {
+    const lib = dlopen("libc.so.6", {
+      flock: { args: [FFIType.i32, FFIType.i32], returns: FFIType.i32 },
+      __errno_location: { args: [], returns: FFIType.ptr },
+    });
+    cachedNativeFlock = {
+      flock: (fd, op) => lib.symbols.flock(fd, op),
+      getErrno: () => {
+        const ptr = lib.symbols.__errno_location();
+        return ptr ? read.i32(ptr, 0) : -1;
+      },
+    };
   }
+  return cachedNativeFlock;
 };
+
+// In-process registry keyed by `inode:<dev>:<ino>` (or `memory:<uuid>` for `:memory:`) so
+// concurrent same-process passes and `:memory:` tests also serialize cleanly.
+const activeInProcessApplyLocks = new Set<string>();
 
 interface AcquiredApplyLock {
   readonly lockKey: string;
-  readonly lockFilePath: string | null;
-  readonly token: string;
+  readonly fd: number | null;
 }
 
 const tryAcquireLockHandle = (
-  lockKey: string,
-  lockFilePath: string | null,
+  memoryLockKey: string | null,
+  canonicalDbPath: string | null,
 ): AcquiredApplyLock | null => {
-  if (activeInProcessApplyLocks.has(lockKey)) {
-    return null;
-  }
-  activeInProcessApplyLocks.add(lockKey);
-
-  const token = randomUUID();
-  if (lockFilePath === null) {
-    return { lockKey, lockFilePath: null, token };
+  if (canonicalDbPath === null) {
+    const lockKey = memoryLockKey ?? "memory:default";
+    if (activeInProcessApplyLocks.has(lockKey)) return null;
+    activeInProcessApplyLocks.add(lockKey);
+    return { lockKey, fd: null };
   }
 
-  const payload = JSON.stringify({ pid: process.pid, token, acquiredAt: new Date().toISOString() });
-  for (let attempt = 0; attempt < 2; attempt += 1) {
-    try {
-      const fd = openSync(
-        lockFilePath,
-        fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_WRONLY,
-        0o600,
-      );
-      try {
-        writeFileSync(fd, payload, "utf8");
-      } finally {
-        closeSync(fd);
-      }
-      return { lockKey, lockFilePath, token };
-    } catch (error) {
-      const code = (error as NodeJS.ErrnoException).code;
-      if (code !== "EEXIST") {
-        activeInProcessApplyLocks.delete(lockKey);
-        throw error;
-      }
-      // Check whether the existing lockfile belongs to a dead process.
-      let stale = false;
-      try {
-        const existingRaw = readFileSync(lockFilePath, "utf8");
-        const parsed = JSON.parse(existingRaw) as { pid?: unknown };
-        if (
-          typeof parsed.pid === "number" &&
-          parsed.pid !== process.pid &&
-          !isProcessAlive(parsed.pid)
-        ) {
-          stale = true;
-        }
-      } catch {
-        // Unreadable/half-written lockfile: treat as busy on this pass.
-      }
-      if (stale) {
-        try {
-          unlinkSync(lockFilePath);
-          continue;
-        } catch {
-          // Another process removed or replaced it first.
-        }
-      }
-      activeInProcessApplyLocks.delete(lockKey);
+  const native = loadNativeFlock();
+  const fd = openSync(canonicalDbPath, fsConstants.O_RDONLY);
+  try {
+    const st = fstatSync(fd);
+    const lockKey = `inode:${st.dev}:${st.ino}`;
+    if (activeInProcessApplyLocks.has(lockKey)) {
+      closeSync(fd);
       return null;
     }
+
+    while (true) {
+      const rc = native.flock(fd, LOCK_EX | LOCK_NB);
+      if (rc === 0) {
+        activeInProcessApplyLocks.add(lockKey);
+        return { lockKey, fd };
+      }
+      const err = native.getErrno();
+      if (err === EINTR) continue;
+      if (err === EWOULDBLOCK) {
+        closeSync(fd);
+        return null;
+      }
+      throw new Error(`flock(${canonicalDbPath}) failed with errno ${err}`);
+    }
+  } catch (error) {
+    try {
+      closeSync(fd);
+    } catch {
+      // Ignore close errors while unwinding.
+    }
+    throw error;
   }
-  activeInProcessApplyLocks.delete(lockKey);
-  return null;
 };
 
 const releaseLockHandle = (handle: AcquiredApplyLock): void => {
-  if (handle.lockFilePath !== null) {
-    try {
-      const raw = readFileSync(handle.lockFilePath, "utf8");
-      const parsed = JSON.parse(raw) as { token?: unknown };
-      if (parsed.token === handle.token) {
-        unlinkSync(handle.lockFilePath);
+  try {
+    if (handle.fd !== null) {
+      try {
+        loadNativeFlock().flock(handle.fd, LOCK_UN);
+      } catch {
+        // Closing the fd also releases the kernel lock.
       }
-    } catch {
-      // Lockfile already gone or replaced.
+      try {
+        closeSync(handle.fd);
+      } catch {
+        // Ignore close errors during teardown.
+      }
     }
+  } finally {
+    activeInProcessApplyLocks.delete(handle.lockKey);
   }
-  activeInProcessApplyLocks.delete(handle.lockKey);
 };
 
 const REQUIRED_COLUMNS = [
@@ -487,9 +500,9 @@ export const openAlertInboxStore = (
           }
         }
         const isMemory = path === ":memory:";
-        const lockKey = isMemory ? `memory:${randomUUID()}` : `file:${resolve(path)}`;
-        const lockFilePath = isMemory ? null : `${resolve(path)}.apply.lock`;
-        return { db, lockKey, lockFilePath };
+        const memoryLockKey = isMemory ? `memory:${randomUUID()}` : null;
+        const canonicalDbPath = isMemory ? null : realpathSync(path);
+        return { db, memoryLockKey, canonicalDbPath };
       } catch (error) {
         db.close();
         throw error;
@@ -505,12 +518,14 @@ export const openAlertInboxStore = (
       }),
   ).pipe(
     Effect.map(
-      ({ db, lockKey, lockFilePath }): AlertInboxStoreService => ({
+      ({ db, memoryLockKey, canonicalDbPath }): AlertInboxStoreService => ({
         withExclusiveApplyLock: <A, E, R>(effect: Effect.Effect<A, E, R>) =>
           Effect.scoped(
             Effect.gen(function* () {
               const handle = yield* Effect.acquireRelease(
-                wrapDb("acquireApplyLock", () => tryAcquireLockHandle(lockKey, lockFilePath)),
+                wrapDb("acquireApplyLock", () =>
+                  tryAcquireLockHandle(memoryLockKey, canonicalDbPath),
+                ),
                 (acquired) =>
                   Effect.sync(() => {
                     if (acquired !== null) {

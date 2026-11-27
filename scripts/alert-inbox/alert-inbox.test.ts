@@ -1,7 +1,7 @@
 import { Database } from "bun:sqlite";
 import { describe, expect, test } from "bun:test";
 import { createHash, generateKeyPairSync, type KeyObject, sign } from "node:crypto";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Effect, Layer } from "effect";
@@ -956,6 +956,189 @@ describe("Alert inbox operational invariants (migration, concurrency, recovery, 
       expect(redeliveryRes.duplicates).toEqual([
         { objectKey: objKey2, matchedBy: "dedup_key", existingIssueNumber: 801 },
       ]);
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  test("enforces OS kernel flock across SIGKILL crash recovery, competing processes, database symlinks, and superseded claiming generations", async () => {
+    const tmpDir = mkdtempSync(join(tmpdir(), "kvitbit-alert-flock-"));
+    try {
+      const dbPath = join(tmpDir, "state.sqlite");
+      const symPath = join(tmpDir, "alias.sqlite");
+      const storeModulePath = join(import.meta.dir, "store.ts");
+
+      // Initialize database and create a symlink alias to the same backing file.
+      await Effect.runPromise(Effect.scoped(openAlertInboxStore(dbPath, false)));
+      symlinkSync(dbPath, symPath);
+
+      // 1. Cross-process SIGKILL crash recovery + competing process race:
+      // Holder acquires kernel flock, prints READY, then is SIGKILL'd without cleanup.
+      // Two competing processes then race simultaneously to acquire the lock and hold it 150ms:
+      // strictly ONE wins (`acquired: true`), the other gets `acquired: false`, and after the
+      // winner exits a fresh caller succeeds cleanly.
+      const holderScript = `
+        import { Effect } from "effect";
+        import { openAlertInboxStore } from ${JSON.stringify(storeModulePath)};
+        await Effect.runPromise(
+          Effect.scoped(
+            Effect.gen(function* () {
+              const store = yield* openAlertInboxStore(${JSON.stringify(dbPath)}, false);
+              yield* store.withExclusiveApplyLock(
+                Effect.promise(async () => {
+                  process.stdout.write("READY\\n");
+                  await Bun.sleep(10_000);
+                }),
+              );
+            }),
+          ),
+        );
+      `;
+      const holder = Bun.spawn(["bun", "-e", holderScript], { stdout: "pipe", stderr: "pipe" });
+      const reader = holder.stdout.getReader();
+      const firstChunk = await reader.read();
+      reader.releaseLock();
+      expect(Buffer.from(firstChunk.value ?? new Uint8Array()).toString("utf8")).toContain("READY");
+
+      // While holder is alive, opening via the SYMLINK alias MUST fail to acquire the lock!
+      const busyViaSymlink = await Effect.runPromise(
+        Effect.scoped(
+          Effect.gen(function* () {
+            const symStore = yield* openAlertInboxStore(symPath, false);
+            return yield* symStore.withExclusiveApplyLock(Effect.succeed("should-not-run"));
+          }),
+        ),
+      );
+      expect(busyViaSymlink).toEqual({ acquired: false });
+
+      // SIGKILL the holder (no graceful teardown, kernel releases flock atomically).
+      holder.kill(9);
+      await holder.exited;
+
+      // Spawn two competing child processes (one via direct path, one via symlink!) racing to acquire.
+      const racerScript = (targetPath: string) => `
+        import { Effect } from "effect";
+        import { openAlertInboxStore } from ${JSON.stringify(storeModulePath)};
+        const res = await Effect.runPromise(
+          Effect.scoped(
+            Effect.gen(function* () {
+              const store = yield* openAlertInboxStore(${JSON.stringify(targetPath)}, false);
+              return yield* store.withExclusiveApplyLock(
+                Effect.promise(async () => {
+                  await Bun.sleep(200);
+                  return "won";
+                }),
+              );
+            }),
+          ),
+        );
+        process.stdout.write(JSON.stringify(res));
+      `;
+      const racer1 = Bun.spawn(["bun", "-e", racerScript(dbPath)], {
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      const racer2 = Bun.spawn(["bun", "-e", racerScript(symPath)], {
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      const [out1, out2, code1, code2] = await Promise.all([
+        new Response(racer1.stdout).text(),
+        new Response(racer2.stdout).text(),
+        racer1.exited,
+        racer2.exited,
+      ]);
+      expect(code1).toBe(0);
+      expect(code2).toBe(0);
+      const parsed1 = JSON.parse(out1) as { acquired: boolean };
+      const parsed2 = JSON.parse(out2) as { acquired: boolean };
+      expect([parsed1.acquired, parsed2.acquired].filter(Boolean)).toHaveLength(1);
+
+      // 2. Superseded generation fencing while the row is STILL `claiming` (not yet `created`):
+      await Effect.runPromise(
+        Effect.scoped(
+          Effect.gen(function* () {
+            const store = yield* openAlertInboxStore(dbPath, false);
+            const objKey = `inbound/alerts/by-hash/${"7".repeat(32)}/1000-gen.eml`;
+            const dedupKey = "7".repeat(32);
+
+            const c1 = yield* store.tryClaimForCreation({
+              objectKey: objKey,
+              deliveryHash: dedupKey,
+              dedupKey,
+              messageId: "<gen-test@google.com>",
+              nowIso: "2026-11-27T21:00:00.000Z",
+              leaseUntilIso: "2026-11-27T21:05:00.000Z",
+            });
+            expect(c1.outcome).toBe("acquired");
+            if (c1.outcome !== "acquired") throw new Error("expected acquired");
+            const gen1 = c1.claimGeneration;
+
+            // Lease expires and second holder takes over -> row stays `claiming` at gen2 > gen1.
+            const c2 = yield* store.tryClaimForCreation({
+              objectKey: objKey,
+              deliveryHash: dedupKey,
+              dedupKey,
+              messageId: "<gen-test@google.com>",
+              nowIso: "2026-11-27T21:10:00.000Z",
+              leaseUntilIso: "2026-11-27T21:15:00.000Z",
+            });
+            expect(c2.outcome).toBe("acquired");
+            if (c2.outcome !== "acquired") throw new Error("expected acquired");
+            const gen2 = c2.claimGeneration;
+            expect(gen2).toBeGreaterThan(gen1);
+
+            // Stale gen1 MUST be rejected by verifyAndRenewClaim, markCreated, and markRetry
+            // while row is STILL in `claiming` state!
+            const staleRenew = yield* store.verifyAndRenewClaim({
+              objectKey: objKey,
+              claimGeneration: gen1,
+              nowIso: "2026-11-27T21:11:00.000Z",
+              leaseUntilIso: "2026-11-27T21:16:00.000Z",
+            });
+            expect(staleRenew).toBe(false);
+
+            const staleCreate = yield* store.markCreated({
+              objectKey: objKey,
+              claimGeneration: gen1,
+              issueNumber: 999,
+              nowIso: "2026-11-27T21:11:00.000Z",
+            });
+            expect(staleCreate).toBe(false);
+
+            yield* store.markRetry({
+              objectKey: objKey,
+              deliveryHash: dedupKey,
+              dedupKey,
+              messageId: "<gen-test@google.com>",
+              keepClaiming: true,
+              expectedClaimGeneration: gen1,
+              reason: "stale failure",
+              nextRetryAt: "2026-11-27T21:20:00.000Z",
+              nowIso: "2026-11-27T21:11:00.000Z",
+            });
+
+            // Gen2's active `claiming` lease is completely untouched!
+            const stillGen2 = yield* store.getObject(objKey);
+            expect(stillGen2?.status).toBe("claiming");
+            expect(stillGen2?.claimGeneration).toBe(gen2);
+            expect(stillGen2?.claimExpiresAt).toBe("2026-11-27T21:15:00.000Z");
+            expect(stillGen2?.issueNumber).toBeNull();
+
+            // Gen2 succeeds cleanly.
+            const validCreate = yield* store.markCreated({
+              objectKey: objKey,
+              claimGeneration: gen2,
+              issueNumber: 888,
+              nowIso: "2026-11-27T21:12:00.000Z",
+            });
+            expect(validCreate).toBe(true);
+            const finalRow = yield* store.getObject(objKey);
+            expect(finalRow?.status).toBe("created");
+            expect(finalRow?.issueNumber).toBe(888);
+          }),
+        ),
+      );
     } finally {
       rmSync(tmpDir, { recursive: true, force: true });
     }
