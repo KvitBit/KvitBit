@@ -5,16 +5,29 @@
  * - All SQLite operations return `Effect.Effect<..., AlertStoreError>` and the connection
  *   lifecycle is managed with `Effect.acquireRelease` so corrupted files (`SQLITE_NOTADB`),
  *   wrong schemas, or I/O failures stay cleanly in the Effect error channel.
- * - Migrates legacy Round 1 databases in-place inside `BEGIN IMMEDIATE ... COMMIT`, preserving
- *   recorded `issue_number` / `delivery_hash` while clearing historical unverified `message_id`s.
- * - Acquires issue-creation claims atomically inside `BEGIN IMMEDIATE ... COMMIT` backed by a
- *   partial unique index on active `dedup_key` and an explicit lease (`claim_expires_at`), so
- *   overlapping passes cannot both post duplicate GitHub issues.
+ * - Migrates legacy databases in-place inside `BEGIN IMMEDIATE ... COMMIT`, preserving recorded
+ *   `issue_number` / `delivery_hash` while clearing historical unverified `message_id`s.
+ * - Enforces exclusive apply ownership across concurrent callers (both in-process and across
+ *   separate OS processes via atomic `O_CREAT | O_EXCL` lockfiles with PID-liveness checks).
+ * - Pairs atomic SQLite claim acquisition (`BEGIN IMMEDIATE` + partial unique index on active
+ *   `dedup_key`) with a monotonic `claim_generation` fencing token verified/renewed immediately
+ *   before GitHub POST and checked on every state transition, while making terminal `'created'`
+ *   rows immutable so a delayed or stale pass can never overwrite or downgrade a created issue.
  * - Tracks fair-scheduling turn state in `alert_inbox_meta` so neither fresh arrivals nor overdue
  *   retries can starve even when `maxPerPass === 1`.
  */
 
 import { Database } from "bun:sqlite";
+import { randomUUID } from "node:crypto";
+import {
+  closeSync,
+  constants as fsConstants,
+  openSync,
+  readFileSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
+import { resolve } from "node:path";
 import { Data, Effect, type Scope } from "effect";
 
 export type AlertRecordStatus = "claiming" | "created" | "duplicate" | "rejected" | "retry";
@@ -36,6 +49,7 @@ export interface ProcessedAlertRecord {
   readonly attemptCount: number;
   readonly nextRetryAt: string | null;
   readonly claimExpiresAt: string | null;
+  readonly claimGeneration: number;
   readonly processedAt: string;
 }
 
@@ -50,7 +64,8 @@ export type ClaimAcquisitionResult =
   | {
       readonly outcome: "acquired";
       readonly needsReconcile: boolean;
-      readonly holderObjectKey: string | null;
+      readonly holderObjectKey: string;
+      readonly claimGeneration: number;
     }
   | {
       readonly outcome: "already_created";
@@ -63,6 +78,13 @@ export type ClaimAcquisitionResult =
     };
 
 export interface AlertInboxStoreService {
+  readonly withExclusiveApplyLock: <A, E, R>(
+    effect: Effect.Effect<A, E, R>,
+  ) => Effect.Effect<
+    { readonly acquired: true; readonly value: A } | { readonly acquired: false },
+    E | AlertStoreError,
+    R
+  >;
   readonly getObject: (
     objectKey: string,
   ) => Effect.Effect<ProcessedAlertRecord | null, AlertStoreError>;
@@ -81,11 +103,18 @@ export interface AlertInboxStoreService {
     readonly nowIso: string;
     readonly leaseUntilIso: string;
   }) => Effect.Effect<ClaimAcquisitionResult, AlertStoreError>;
+  readonly verifyAndRenewClaim: (entry: {
+    readonly objectKey: string;
+    readonly claimGeneration: number;
+    readonly nowIso: string;
+    readonly leaseUntilIso: string;
+  }) => Effect.Effect<boolean, AlertStoreError>;
   readonly markCreated: (entry: {
     readonly objectKey: string;
+    readonly claimGeneration: number;
     readonly issueNumber: number;
     readonly nowIso: string;
-  }) => Effect.Effect<void, AlertStoreError>;
+  }) => Effect.Effect<boolean, AlertStoreError>;
   readonly markDuplicate: (entry: {
     readonly objectKey: string;
     readonly deliveryHash: string;
@@ -107,6 +136,7 @@ export interface AlertInboxStoreService {
     readonly dedupKey: string | null;
     readonly messageId: string | null;
     readonly keepClaiming: boolean;
+    readonly expectedClaimGeneration?: number;
     readonly reason: string;
     readonly nextRetryAt: string;
     readonly nowIso: string;
@@ -142,6 +172,108 @@ const withImmediateTx = <A>(db: Database, thunk: () => A): A => {
   }
 };
 
+// In-process lock registry so concurrent passes in the same process sharing a SQLite file or
+// `:memory:` store never overlap apply mutations or GitHub POSTs.
+const activeInProcessApplyLocks = new Set<string>();
+
+const isProcessAlive = (pid: number): boolean => {
+  if (!Number.isSafeInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    // EPERM means the process exists under another user; ESRCH means it does not exist.
+    return code === "EPERM";
+  }
+};
+
+interface AcquiredApplyLock {
+  readonly lockKey: string;
+  readonly lockFilePath: string | null;
+  readonly token: string;
+}
+
+const tryAcquireLockHandle = (
+  lockKey: string,
+  lockFilePath: string | null,
+): AcquiredApplyLock | null => {
+  if (activeInProcessApplyLocks.has(lockKey)) {
+    return null;
+  }
+  activeInProcessApplyLocks.add(lockKey);
+
+  const token = randomUUID();
+  if (lockFilePath === null) {
+    return { lockKey, lockFilePath: null, token };
+  }
+
+  const payload = JSON.stringify({ pid: process.pid, token, acquiredAt: new Date().toISOString() });
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      const fd = openSync(
+        lockFilePath,
+        fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_WRONLY,
+        0o600,
+      );
+      try {
+        writeFileSync(fd, payload, "utf8");
+      } finally {
+        closeSync(fd);
+      }
+      return { lockKey, lockFilePath, token };
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== "EEXIST") {
+        activeInProcessApplyLocks.delete(lockKey);
+        throw error;
+      }
+      // Check whether the existing lockfile belongs to a dead process.
+      let stale = false;
+      try {
+        const existingRaw = readFileSync(lockFilePath, "utf8");
+        const parsed = JSON.parse(existingRaw) as { pid?: unknown };
+        if (
+          typeof parsed.pid === "number" &&
+          parsed.pid !== process.pid &&
+          !isProcessAlive(parsed.pid)
+        ) {
+          stale = true;
+        }
+      } catch {
+        // Unreadable/half-written lockfile: treat as busy on this pass.
+      }
+      if (stale) {
+        try {
+          unlinkSync(lockFilePath);
+          continue;
+        } catch {
+          // Another process removed or replaced it first.
+        }
+      }
+      activeInProcessApplyLocks.delete(lockKey);
+      return null;
+    }
+  }
+  activeInProcessApplyLocks.delete(lockKey);
+  return null;
+};
+
+const releaseLockHandle = (handle: AcquiredApplyLock): void => {
+  if (handle.lockFilePath !== null) {
+    try {
+      const raw = readFileSync(handle.lockFilePath, "utf8");
+      const parsed = JSON.parse(raw) as { token?: unknown };
+      if (parsed.token === handle.token) {
+        unlinkSync(handle.lockFilePath);
+      }
+    } catch {
+      // Lockfile already gone or replaced.
+    }
+  }
+  activeInProcessApplyLocks.delete(handle.lockKey);
+};
+
 const REQUIRED_COLUMNS = [
   "object_key",
   "delivery_hash",
@@ -153,6 +285,7 @@ const REQUIRED_COLUMNS = [
   "attempt_count",
   "next_retry_at",
   "claim_expires_at",
+  "claim_generation",
   "processed_at",
 ] as const;
 
@@ -168,6 +301,7 @@ const CREATE_PROCESSED_ALERT_TABLE_SQL = `
     attempt_count INTEGER NOT NULL DEFAULT 0,
     next_retry_at TEXT,
     claim_expires_at TEXT,
+    claim_generation INTEGER NOT NULL DEFAULT 0,
     processed_at TEXT NOT NULL
   ) STRICT;
 `;
@@ -201,6 +335,7 @@ const SELECT_COLUMNS = `
   attempt_count AS attemptCount,
   next_retry_at AS nextRetryAt,
   claim_expires_at AS claimExpiresAt,
+  claim_generation AS claimGeneration,
   processed_at AS processedAt
 `;
 
@@ -263,6 +398,7 @@ const initializeOrMigrateSchema = (db: Database): void => {
       const hasAttemptCount = existingCols.has("attempt_count");
       const hasNextRetryAt = existingCols.has("next_retry_at");
       const hasClaimExpiresAt = existingCols.has("claim_expires_at");
+      const hasClaimGeneration = existingCols.has("claim_generation");
 
       db.exec(`
         CREATE TABLE processed_alert_migrated (
@@ -276,6 +412,7 @@ const initializeOrMigrateSchema = (db: Database): void => {
           attempt_count INTEGER NOT NULL DEFAULT 0,
           next_retry_at TEXT,
           claim_expires_at TEXT,
+          claim_generation INTEGER NOT NULL DEFAULT 0,
           processed_at TEXT NOT NULL
         ) STRICT;
       `);
@@ -286,7 +423,8 @@ const initializeOrMigrateSchema = (db: Database): void => {
       db.exec(`
         INSERT INTO processed_alert_migrated (
           object_key, delivery_hash, dedup_key, message_id, status,
-          issue_number, reason, attempt_count, next_retry_at, claim_expires_at, processed_at
+          issue_number, reason, attempt_count, next_retry_at, claim_expires_at,
+          claim_generation, processed_at
         )
         SELECT
           object_key,
@@ -302,6 +440,7 @@ const initializeOrMigrateSchema = (db: Database): void => {
           ${hasAttemptCount ? "COALESCE(attempt_count, 0)" : "0"},
           ${hasNextRetryAt ? "next_retry_at" : "NULL"},
           ${hasClaimExpiresAt ? "claim_expires_at" : "NULL"},
+          ${hasClaimGeneration ? "COALESCE(claim_generation, 0)" : "0"},
           processed_at
         FROM processed_alert;
       `);
@@ -347,13 +486,16 @@ export const openAlertInboxStore = (
             );
           }
         }
-        return db;
+        const isMemory = path === ":memory:";
+        const lockKey = isMemory ? `memory:${randomUUID()}` : `file:${resolve(path)}`;
+        const lockFilePath = isMemory ? null : `${resolve(path)}.apply.lock`;
+        return { db, lockKey, lockFilePath };
       } catch (error) {
         db.close();
         throw error;
       }
     }),
-    (db) =>
+    ({ db }) =>
       Effect.sync(() => {
         try {
           db.close();
@@ -363,7 +505,27 @@ export const openAlertInboxStore = (
       }),
   ).pipe(
     Effect.map(
-      (db): AlertInboxStoreService => ({
+      ({ db, lockKey, lockFilePath }): AlertInboxStoreService => ({
+        withExclusiveApplyLock: <A, E, R>(effect: Effect.Effect<A, E, R>) =>
+          Effect.scoped(
+            Effect.gen(function* () {
+              const handle = yield* Effect.acquireRelease(
+                wrapDb("acquireApplyLock", () => tryAcquireLockHandle(lockKey, lockFilePath)),
+                (acquired) =>
+                  Effect.sync(() => {
+                    if (acquired !== null) {
+                      releaseLockHandle(acquired);
+                    }
+                  }),
+              );
+              if (handle === null) {
+                return { acquired: false as const };
+              }
+              const value = yield* effect;
+              return { acquired: true as const, value };
+            }),
+          ),
+
         getObject: (objectKey) =>
           wrapDb("getObject", () =>
             db
@@ -437,6 +599,7 @@ export const openAlertInboxStore = (
                     status: "claiming" | "created";
                     issueNumber: number | null;
                     claimExpiresAt: string | null;
+                    claimGeneration: number;
                   },
                   [string, string]
                 >(
@@ -444,7 +607,8 @@ export const openAlertInboxStore = (
                      object_key AS objectKey,
                      status,
                      issue_number AS issueNumber,
-                     claim_expires_at AS claimExpiresAt
+                     claim_expires_at AS claimExpiresAt,
+                     claim_generation AS claimGeneration
                    FROM processed_alert
                    WHERE (dedup_key = ? OR object_key = ?)
                      AND status IN ('created', 'claiming')
@@ -467,8 +631,7 @@ export const openAlertInboxStore = (
                     holderObjectKey: activeRow.objectKey,
                   };
                 }
-                // Lease expired or prior attempt failed cleanly: take over the claim atomically
-                // on the holder row so the partial unique index stays intact and only this caller reconciles.
+                const nextGen = activeRow.claimGeneration + 1;
                 db.query(`
                   UPDATE processed_alert
                   SET dedup_key = COALESCE(dedup_key, ?),
@@ -478,12 +641,14 @@ export const openAlertInboxStore = (
                       attempt_count = attempt_count + 1,
                       next_retry_at = NULL,
                       claim_expires_at = ?,
+                      claim_generation = ?,
                       processed_at = ?
-                  WHERE object_key = ?
+                  WHERE object_key = ? AND status = 'claiming'
                 `).run(
                   entry.dedupKey,
                   entry.messageId,
                   entry.leaseUntilIso,
+                  nextGen,
                   entry.nowIso,
                   activeRow.objectKey,
                 );
@@ -491,14 +656,23 @@ export const openAlertInboxStore = (
                   outcome: "acquired",
                   needsReconcile: true,
                   holderObjectKey: activeRow.objectKey,
+                  claimGeneration: nextGen,
                 };
               }
+
+              const priorRow = db
+                .query<{ claimGeneration: number }, [string]>(
+                  "SELECT claim_generation AS claimGeneration FROM processed_alert WHERE object_key = ? LIMIT 1",
+                )
+                .get(entry.objectKey);
+              const nextGen = (priorRow?.claimGeneration ?? 0) + 1;
 
               db.query(`
                 INSERT INTO processed_alert (
                   object_key, delivery_hash, dedup_key, message_id, status,
-                  issue_number, reason, attempt_count, next_retry_at, claim_expires_at, processed_at
-                ) VALUES (?, ?, ?, ?, 'claiming', NULL, NULL, 1, NULL, ?, ?)
+                  issue_number, reason, attempt_count, next_retry_at, claim_expires_at,
+                  claim_generation, processed_at
+                ) VALUES (?, ?, ?, ?, 'claiming', NULL, NULL, 1, NULL, ?, ?, ?)
                 ON CONFLICT(object_key) DO UPDATE SET
                   dedup_key = excluded.dedup_key,
                   message_id = excluded.message_id,
@@ -507,44 +681,74 @@ export const openAlertInboxStore = (
                   attempt_count = processed_alert.attempt_count + 1,
                   next_retry_at = NULL,
                   claim_expires_at = excluded.claim_expires_at,
+                  claim_generation = excluded.claim_generation,
                   processed_at = excluded.processed_at
+                WHERE processed_alert.status <> 'created'
               `).run(
                 entry.objectKey,
                 entry.deliveryHash,
                 entry.dedupKey,
                 entry.messageId,
                 entry.leaseUntilIso,
+                nextGen,
                 entry.nowIso,
               );
               return {
                 outcome: "acquired",
                 needsReconcile: false,
                 holderObjectKey: entry.objectKey,
+                claimGeneration: nextGen,
               };
+            }),
+          ),
+
+        verifyAndRenewClaim: (entry) =>
+          wrapDb("verifyAndRenewClaim", () =>
+            withImmediateTx(db, () => {
+              // Fencing check: ownership holds iff the row is still `claiming` at our exact
+              // `claim_generation` (no other caller took over or completed it).
+              const res = db
+                .query(`
+                  UPDATE processed_alert
+                  SET claim_expires_at = ?,
+                      processed_at = ?
+                  WHERE object_key = ?
+                    AND status = 'claiming'
+                    AND claim_generation = ?
+                `)
+                .run(entry.leaseUntilIso, entry.nowIso, entry.objectKey, entry.claimGeneration);
+              return res.changes === 1;
             }),
           ),
 
         markCreated: (entry) =>
           wrapDb("markCreated", () => {
-            db.query(`
-              UPDATE processed_alert
-              SET status = 'created',
-                  issue_number = ?,
-                  reason = NULL,
-                  next_retry_at = NULL,
-                  claim_expires_at = NULL,
-                  processed_at = ?
-              WHERE object_key = ?
-            `).run(entry.issueNumber, entry.nowIso, entry.objectKey);
+            const res = db
+              .query(`
+                UPDATE processed_alert
+                SET status = 'created',
+                    issue_number = ?,
+                    reason = NULL,
+                    next_retry_at = NULL,
+                    claim_expires_at = NULL,
+                    processed_at = ?
+                WHERE object_key = ?
+                  AND status = 'claiming'
+                  AND claim_generation = ?
+              `)
+              .run(entry.issueNumber, entry.nowIso, entry.objectKey, entry.claimGeneration);
+            return res.changes === 1;
           }),
 
         markDuplicate: (entry) =>
           wrapDb("markDuplicate", () => {
+            // Never overwrite or downgrade an already-created row.
             db.query(`
               INSERT INTO processed_alert (
                 object_key, delivery_hash, dedup_key, message_id, status,
-                issue_number, reason, attempt_count, next_retry_at, claim_expires_at, processed_at
-              ) VALUES (?, ?, ?, ?, 'duplicate', ?, ?, 0, NULL, NULL, ?)
+                issue_number, reason, attempt_count, next_retry_at, claim_expires_at,
+                claim_generation, processed_at
+              ) VALUES (?, ?, ?, ?, 'duplicate', ?, ?, 0, NULL, NULL, 0, ?)
               ON CONFLICT(object_key) DO UPDATE SET
                 dedup_key = excluded.dedup_key,
                 message_id = excluded.message_id,
@@ -554,6 +758,7 @@ export const openAlertInboxStore = (
                 next_retry_at = NULL,
                 claim_expires_at = NULL,
                 processed_at = excluded.processed_at
+              WHERE processed_alert.status <> 'created'
             `).run(
               entry.objectKey,
               entry.deliveryHash,
@@ -567,11 +772,13 @@ export const openAlertInboxStore = (
 
         markRejected: (entry) =>
           wrapDb("markRejected", () => {
+            // Never overwrite or downgrade an already-created row.
             db.query(`
               INSERT INTO processed_alert (
                 object_key, delivery_hash, dedup_key, message_id, status,
-                issue_number, reason, attempt_count, next_retry_at, claim_expires_at, processed_at
-              ) VALUES (?, ?, NULL, NULL, 'rejected', NULL, ?, 0, NULL, NULL, ?)
+                issue_number, reason, attempt_count, next_retry_at, claim_expires_at,
+                claim_generation, processed_at
+              ) VALUES (?, ?, NULL, NULL, 'rejected', NULL, ?, 0, NULL, NULL, 0, ?)
               ON CONFLICT(object_key) DO UPDATE SET
                 dedup_key = NULL,
                 message_id = NULL,
@@ -580,17 +787,45 @@ export const openAlertInboxStore = (
                 next_retry_at = NULL,
                 claim_expires_at = NULL,
                 processed_at = excluded.processed_at
+              WHERE processed_alert.status <> 'created'
             `).run(entry.objectKey, entry.deliveryHash, entry.reason, entry.nowIso);
           }),
 
         markRetry: (entry) =>
           wrapDb("markRetry", () => {
             const nextStatus: AlertRecordStatus = entry.keepClaiming ? "claiming" : "retry";
+            if (entry.expectedClaimGeneration !== undefined) {
+              db.query(`
+                UPDATE processed_alert
+                SET dedup_key = COALESCE(?, dedup_key),
+                    message_id = COALESCE(?, message_id),
+                    status = ?,
+                    reason = ?,
+                    attempt_count = attempt_count + 1,
+                    next_retry_at = ?,
+                    claim_expires_at = NULL,
+                    processed_at = ?
+                WHERE object_key = ?
+                  AND status = 'claiming'
+                  AND claim_generation = ?
+              `).run(
+                entry.dedupKey,
+                entry.messageId,
+                nextStatus,
+                entry.reason,
+                entry.nextRetryAt,
+                entry.nowIso,
+                entry.objectKey,
+                entry.expectedClaimGeneration,
+              );
+              return;
+            }
             db.query(`
               INSERT INTO processed_alert (
                 object_key, delivery_hash, dedup_key, message_id, status,
-                issue_number, reason, attempt_count, next_retry_at, claim_expires_at, processed_at
-              ) VALUES (?, ?, ?, ?, ?, NULL, ?, 1, ?, NULL, ?)
+                issue_number, reason, attempt_count, next_retry_at, claim_expires_at,
+                claim_generation, processed_at
+              ) VALUES (?, ?, ?, ?, ?, NULL, ?, 1, ?, NULL, 0, ?)
               ON CONFLICT(object_key) DO UPDATE SET
                 dedup_key = COALESCE(excluded.dedup_key, processed_alert.dedup_key),
                 message_id = COALESCE(excluded.message_id, processed_alert.message_id),
@@ -600,6 +835,7 @@ export const openAlertInboxStore = (
                 next_retry_at = excluded.next_retry_at,
                 claim_expires_at = NULL,
                 processed_at = excluded.processed_at
+              WHERE processed_alert.status <> 'created'
             `).run(
               entry.objectKey,
               entry.deliveryHash,

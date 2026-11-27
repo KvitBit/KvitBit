@@ -261,8 +261,25 @@ describe("RFC 6376 / RFC 8301 / RFC 8463 DKIM verifier", () => {
       signedMessageId: "<20030712040037.46341.5F8J@football.example.com>",
     });
 
-    // RFC 6376 §3.2: tag names are case-sensitive, so `V=custom` alongside `v=DKIM1` is valid.
-    const rsaWithExtension = await Effect.runPromise(
+    // RFC 6376 §3.2 & §3.6.1: tag names are case-sensitive (`V=custom` after `v=DKIM1` is valid),
+    // whereas placing `v=DKIM1` after another tag MUST be rejected.
+    const rsaWithExtensionAfterV = await Effect.runPromise(
+      verifyAlertDkim(RFC_8463_APPENDIX_A_MESSAGE, ["example.com"]).pipe(
+        Effect.provide(
+          mockDnsLayer({
+            "test._domainkey.football.example.com": [
+              RFC_8463_RSA_TXT.replace("v=DKIM1;", "v=DKIM1; V=custom;"),
+            ],
+          }),
+        ),
+      ),
+    );
+    expect(rsaWithExtensionAfterV._tag).toBe("DkimVerified");
+    if (rsaWithExtensionAfterV._tag !== "DkimVerified") throw new Error("expected verified");
+    expect(rsaWithExtensionAfterV.algorithm).toBe("rsa-sha256");
+    expect(rsaWithExtensionAfterV.selector).toBe("test");
+
+    const rsaWithVNotFirst = await Effect.runPromise(
       verifyAlertDkim(RFC_8463_APPENDIX_A_MESSAGE, ["example.com"]).pipe(
         Effect.provide(
           mockDnsLayer({
@@ -271,10 +288,24 @@ describe("RFC 6376 / RFC 8301 / RFC 8463 DKIM verifier", () => {
         ),
       ),
     );
-    expect(rsaWithExtension._tag).toBe("DkimVerified");
-    if (rsaWithExtension._tag !== "DkimVerified") throw new Error("expected verified");
-    expect(rsaWithExtension.algorithm).toBe("rsa-sha256");
-    expect(rsaWithExtension.selector).toBe("test");
+    expect(rsaWithVNotFirst._tag).toBe("DkimRejected");
+
+    // Case-sensitive `b=` stripping: uppercase extension `B=ignored` before lowercase `b=` MUST verify.
+    const withUppercaseBExt = buildDkimSignedMessage({
+      algorithm: "rsa-sha256",
+      signingDomain: "google.com",
+      selector: "s-ext",
+      fromHeader: "alerts-noreply@google.com",
+      subject: "Uppercase B extension",
+      body: "Hello\r\n",
+      extraDkimTags: "B=ignored-extension-value",
+    });
+    const uppercaseBRes = await Effect.runPromise(
+      verifyAlertDkim(withUppercaseBExt.raw, ["google.com"]).pipe(
+        Effect.provide(mockDnsLayer(withUppercaseBExt.dnsRecords)),
+      ),
+    );
+    expect(uppercaseBRes._tag).toBe("DkimVerified");
 
     // Exact duplicate tag names and invalid tag-name grammar must be rejected.
     expect(parseTagList("v=DKIM1; V=custom")).toBeDefined();
@@ -718,6 +749,213 @@ describe("Alert inbox operational invariants (migration, concurrency, recovery, 
       );
       expect(persisted?.status).toBe("created");
       expect(persisted?.issueNumber).toBe(801);
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  test("prevents stale expired-lease holder from posting or overwriting AND prevents delayed download from downgrading a created row", async () => {
+    const tmpDir = mkdtempSync(join(tmpdir(), "kvitbit-alert-overlap-"));
+    try {
+      const dbPath = join(tmpDir, "overlap.sqlite");
+      const sharedMsgId = "<overlap-incident@google.com>";
+      const alert1 = buildDkimSignedMessage({
+        algorithm: "rsa-sha256",
+        signingDomain: "google.com",
+        selector: "s1",
+        fromHeader: "Cloud Monitoring <alerts-noreply@google.com>",
+        subject: "Overlap incident",
+        messageId: sharedMsgId,
+        body: "First delivery\r\n",
+      });
+      const alert2 = buildDkimSignedMessage({
+        algorithm: "rsa-sha256",
+        signingDomain: "google.com",
+        selector: "s2",
+        fromHeader: "Cloud Monitoring <alerts-noreply@google.com>",
+        subject: "Overlap incident",
+        messageId: sharedMsgId,
+        body: "Redelivered copy\r\n",
+      });
+      const objKey1 = `inbound/alerts/by-hash/${"f".repeat(32)}/1000-first.eml`;
+      const objKey2 = `inbound/alerts/by-hash/${"9".repeat(32)}/2000-second.eml`;
+
+      // 1. Expired-lease overlap schedule: Pass 1 pauses during ensureLabel; lease is backdated in
+      // SQLite; Pass 2 runs concurrently; Pass 1 resumes -> ONLY ONE issue (#801) is posted and recorded.
+      let releaseEnsureLabel!: () => void;
+      const ensureLabelGate = new Promise<void>((resolve) => {
+        releaseEnsureLabel = resolve;
+      });
+      let notifyInEnsureLabel!: () => void;
+      const inEnsureLabel = new Promise<void>((resolve) => {
+        notifyInEnsureLabel = resolve;
+      });
+      let ensureCalls = 0;
+      const postedNumbers: Array<number> = [];
+
+      const leaseLayer = Layer.mergeAll(
+        Layer.succeed(AlertBucket, {
+          listObjects: () => Effect.succeed([objKey1]),
+          downloadObject: () => Effect.succeed(alert1.raw),
+        }),
+        Layer.succeed(AlertIssueTracker, {
+          ensureLabel: () =>
+            Effect.promise(async () => {
+              ensureCalls += 1;
+              if (ensureCalls === 1) {
+                notifyInEnsureLabel();
+                await ensureLabelGate;
+              }
+            }),
+          findExistingIssueByMarker: () => Effect.succeed(null),
+          createIssue: () =>
+            Effect.sync(() => {
+              const number = 800 + postedNumbers.length + 1;
+              postedNumbers.push(number);
+              return { number, url: `https://github.com/KvitBit/KvitBit/issues/${number}` };
+            }),
+        }),
+        mockDnsLayer(alert1.dnsRecords),
+      );
+
+      await Effect.runPromise(Effect.scoped(openAlertInboxStore(dbPath, false)));
+
+      const pass1Promise = Effect.runPromise(
+        Effect.scoped(
+          Effect.gen(function* () {
+            const store = yield* openAlertInboxStore(dbPath, false);
+            return yield* runAlertInboxPass({
+              apply: true,
+              bucket: "kvitbit-prod-mail-archive-prod",
+              prefix: "inbound/alerts/",
+              repo: "KvitBit/KvitBit",
+              allowedDomains: ["google.com"],
+              maxPerPass: 5,
+              store,
+            });
+          }),
+        ).pipe(Effect.provide(leaseLayer)),
+      );
+
+      await inEnsureLabel;
+      // Expire the SQLite lease directly while Pass 1 is paused in ensureLabel.
+      const expireDb = new Database(dbPath);
+      expireDb.exec(
+        "UPDATE processed_alert SET claim_expires_at = '2000-01-01T00:00:00.000Z' WHERE status = 'claiming'",
+      );
+      expireDb.close();
+
+      // Run Pass 2 concurrently while Pass 1 is still alive.
+      const pass2Res = await Effect.runPromise(
+        Effect.scoped(
+          Effect.gen(function* () {
+            const store = yield* openAlertInboxStore(dbPath, false);
+            return yield* runAlertInboxPass({
+              apply: true,
+              bucket: "kvitbit-prod-mail-archive-prod",
+              prefix: "inbound/alerts/",
+              repo: "KvitBit/KvitBit",
+              allowedDomains: ["google.com"],
+              maxPerPass: 5,
+              store,
+            });
+          }),
+        ).pipe(Effect.provide(leaseLayer)),
+      );
+      releaseEnsureLabel();
+      const pass1Res = await pass1Promise;
+
+      expect(postedNumbers).toEqual([801]);
+      expect(pass1Res.created.length + pass2Res.created.length).toBe(1);
+
+      // 2. Direct fencing-token & immutable-created-row invariant (even without file lock):
+      // Verify a stale claimGeneration cannot renew or overwrite, and markDuplicate/markRejected/
+      // markRetry cannot downgrade `created` or wipe its dedup_key/message_id.
+      await Effect.runPromise(
+        Effect.scoped(
+          Effect.gen(function* () {
+            const store = yield* openAlertInboxStore(dbPath, false);
+            const rowBefore = yield* store.getObject(objKey1);
+            expect(rowBefore?.status).toBe("created");
+            expect(rowBefore?.issueNumber).toBe(801);
+            expect(rowBefore?.messageId).toBe(sharedMsgId);
+
+            // Stale generation cannot renew or overwrite #801.
+            const renewed = yield* store.verifyAndRenewClaim({
+              objectKey: objKey1,
+              claimGeneration: rowBefore?.claimGeneration ?? 1,
+              nowIso: "2026-11-27T21:00:00.000Z",
+              leaseUntilIso: "2026-11-27T21:05:00.000Z",
+            });
+            expect(renewed).toBe(false);
+            const overwritten = yield* store.markCreated({
+              objectKey: objKey1,
+              claimGeneration: rowBefore?.claimGeneration ?? 1,
+              issueNumber: 802,
+              nowIso: "2026-11-27T21:00:00.000Z",
+            });
+            expect(overwritten).toBe(false);
+
+            // Delayed pass attempting markDuplicate on the same objectKey MUST NOT downgrade `created`.
+            yield* store.markDuplicate({
+              objectKey: objKey1,
+              deliveryHash: "f".repeat(32),
+              dedupKey: null,
+              messageId: null,
+              issueNumber: 801,
+              reason: "stale self-duplicate",
+              nowIso: "2026-11-27T21:01:00.000Z",
+            });
+            const rowAfter = yield* store.getObject(objKey1);
+            expect(rowAfter?.status).toBe("created");
+            expect(rowAfter?.issueNumber).toBe(801);
+            expect(rowAfter?.messageId).toBe(sharedMsgId);
+            expect(rowAfter?.dedupKey).not.toBeNull();
+          }),
+        ),
+      );
+
+      // 3. Subsequent redelivery with same signed Message-ID deduplicates cleanly against #801!
+      const redeliveryLayer = Layer.mergeAll(
+        Layer.succeed(AlertBucket, {
+          listObjects: () => Effect.succeed([objKey1, objKey2]),
+          downloadObject: (_b, key) => Effect.succeed(key === objKey1 ? alert1.raw : alert2.raw),
+        }),
+        Layer.succeed(AlertIssueTracker, {
+          ensureLabel: () => Effect.void,
+          findExistingIssueByMarker: () => Effect.succeed(null),
+          createIssue: () => {
+            postedNumbers.push(802);
+            return Effect.succeed({
+              number: 802,
+              url: "https://github.com/KvitBit/KvitBit/issues/802",
+            });
+          },
+        }),
+        mockDnsLayer({ ...alert1.dnsRecords, ...alert2.dnsRecords }),
+      );
+
+      const redeliveryRes = await Effect.runPromise(
+        Effect.scoped(
+          Effect.gen(function* () {
+            const store = yield* openAlertInboxStore(dbPath, false);
+            return yield* runAlertInboxPass({
+              apply: true,
+              bucket: "kvitbit-prod-mail-archive-prod",
+              prefix: "inbound/alerts/",
+              repo: "KvitBit/KvitBit",
+              allowedDomains: ["google.com"],
+              maxPerPass: 5,
+              store,
+            });
+          }),
+        ).pipe(Effect.provide(redeliveryLayer)),
+      );
+      expect(postedNumbers).toEqual([801]);
+      expect(redeliveryRes.created).toHaveLength(0);
+      expect(redeliveryRes.duplicates).toEqual([
+        { objectKey: objKey2, matchedBy: "dedup_key", existingIssueNumber: 801 },
+      ]);
     } finally {
       rmSync(tmpDir, { recursive: true, force: true });
     }

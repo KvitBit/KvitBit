@@ -9,9 +9,11 @@
  *   header instances (including top-level MIME headers) and verified body bytes to formatting.
  * - Schedules fresh arrivals and due retries fairly (alternating turn persisted in SQLite so
  *   neither queue starves even at `maxPerPass === 1`).
- * - Acquires creation claims atomically in SQLite with leases so overlapping passes cannot
- *   double-post, and reconciles outstanding authenticated claims against GitHub independently of
- *   mutable labels BEFORE re-verifying DKIM (so key rotation cannot discard a committed issue).
+ * - Serializes apply passes with an exclusive per-store apply lock and pairs SQLite claim leases
+ *   with a monotonic `claim_generation` fencing token verified/renewed right before posting to
+ *   GitHub, so overlapping or stale callers cannot double-post or downgrade created rows.
+ * - Reconciles outstanding authenticated claims against GitHub independently of mutable labels
+ *   BEFORE re-verifying DKIM (so key rotation cannot discard a committed issue).
  * - Always applies exclusively the `alert` label (never `visual-feedback`).
  */
 
@@ -398,7 +400,15 @@ export interface AlertInboxPassResult {
   }>;
 }
 
-export const runAlertInboxPass = (
+const EMPTY_PASS_RESULT: AlertInboxPassResult = {
+  scanned: 0,
+  created: [],
+  duplicates: [],
+  rejected: [],
+  failures: [],
+};
+
+const runAlertInboxPassUnlocked = (
   options: AlertInboxPassOptions,
 ): Effect.Effect<
   AlertInboxPassResult,
@@ -428,7 +438,6 @@ export const runAlertInboxPass = (
       ) {
         continue;
       }
-      // Skip items currently leased by another active pass or still in backoff.
       if (prior.claimExpiresAt !== null && prior.claimExpiresAt > nowIso) {
         continue;
       }
@@ -487,6 +496,8 @@ export const runAlertInboxPass = (
       // so routine sender key rotation/retirement cannot discard an already-committed issue.
       let claimAlreadyAcquired = false;
       let acquiredHolderObjectKey = objectKey;
+      let acquiredClaimGeneration = 0;
+
       if (options.apply && prior?.status === "claiming" && prior.dedupKey !== null) {
         const claim = yield* options.store.tryClaimForCreation({
           objectKey,
@@ -520,7 +531,9 @@ export const runAlertInboxPass = (
         }
 
         claimAlreadyAcquired = true;
-        acquiredHolderObjectKey = claim.holderObjectKey ?? objectKey;
+        acquiredHolderObjectKey = claim.holderObjectKey;
+        acquiredClaimGeneration = claim.claimGeneration;
+
         const lookupResult = yield* Effect.result(
           tracker.findExistingIssueByMarker(options.repo, alertIssueMarker(prior.dedupKey)),
         );
@@ -532,6 +545,7 @@ export const runAlertInboxPass = (
             dedupKey: prior.dedupKey,
             messageId: prior.messageId,
             keepClaiming: true,
+            expectedClaimGeneration: acquiredClaimGeneration,
             reason: lookupResult.failure.reason,
             nextRetryAt: computeNextRetryIso(itemNowMs, priorAttempts),
             nowIso: itemNowIso,
@@ -540,18 +554,21 @@ export const runAlertInboxPass = (
         }
         if (lookupResult.success !== null) {
           const reconciledNumber = lookupResult.success.number;
-          yield* options.store.markCreated({
+          const marked = yield* options.store.markCreated({
             objectKey: acquiredHolderObjectKey,
+            claimGeneration: acquiredClaimGeneration,
             issueNumber: reconciledNumber,
             nowIso: itemNowIso,
           });
-          created.push({
-            objectKey,
-            issueNumber: reconciledNumber,
-            title: `Reconciled issue #${reconciledNumber}`,
-            signingDomain: "reconciled",
-            reconciled: true,
-          });
+          if (marked) {
+            created.push({
+              objectKey,
+              issueNumber: reconciledNumber,
+              title: `Reconciled issue #${reconciledNumber}`,
+              signingDomain: "reconciled",
+              reconciled: true,
+            });
+          }
           continue;
         }
       }
@@ -561,11 +578,12 @@ export const runAlertInboxPass = (
         failures.push({ objectKey, reason: rawResult.failure.reason });
         if (options.apply) {
           yield* options.store.markRetry({
-            objectKey,
+            objectKey: claimAlreadyAcquired ? acquiredHolderObjectKey : objectKey,
             deliveryHash: prior?.deliveryHash ?? extractDeliveryHash(objectKey, new Uint8Array(0)),
             dedupKey: prior?.dedupKey ?? null,
             messageId: prior?.messageId ?? null,
-            keepClaiming: prior?.status === "claiming",
+            keepClaiming: claimAlreadyAcquired || prior?.status === "claiming",
+            ...(claimAlreadyAcquired ? { expectedClaimGeneration: acquiredClaimGeneration } : {}),
             reason: rawResult.failure.reason,
             nextRetryAt: computeNextRetryIso(itemNowMs, priorAttempts),
             nowIso: itemNowIso,
@@ -578,10 +596,12 @@ export const runAlertInboxPass = (
       const deliveryHash = extractDeliveryHash(objectKey, rawBytes);
 
       // Delivery hash is a cryptographic SHA-256 of the wire bytes; safe to check against
-      // already-created issues before verifying DKIM. Cross-delivery Message-ID deduplication
-      // happens strictly AFTER DKIM verification using the authenticated signed Message-ID.
+      // already-created issues before verifying DKIM. Never mark an object as its own duplicate!
       const existingByHash = yield* options.store.findByDeliveryHash(deliveryHash);
       if (existingByHash !== null && existingByHash.status === "created") {
+        if (existingByHash.objectKey === objectKey) {
+          continue;
+        }
         duplicates.push({
           objectKey,
           matchedBy: "delivery_hash",
@@ -606,11 +626,12 @@ export const runAlertInboxPass = (
         failures.push({ objectKey, reason: dkim.reason });
         if (options.apply) {
           yield* options.store.markRetry({
-            objectKey,
+            objectKey: claimAlreadyAcquired ? acquiredHolderObjectKey : objectKey,
             deliveryHash,
             dedupKey: prior?.dedupKey ?? null,
             messageId: prior?.messageId ?? null,
-            keepClaiming: prior?.status === "claiming",
+            keepClaiming: claimAlreadyAcquired || prior?.status === "claiming",
+            ...(claimAlreadyAcquired ? { expectedClaimGeneration: acquiredClaimGeneration } : {}),
             reason: dkim.reason,
             nextRetryAt: computeNextRetryIso(itemNowMs, priorAttempts),
             nowIso: itemNowIso,
@@ -639,6 +660,9 @@ export const runAlertInboxPass = (
         dkim.signedMessageId,
       );
       if (existingAuth !== null && existingAuth.status === "created") {
+        if (existingAuth.objectKey === objectKey) {
+          continue;
+        }
         duplicates.push({
           objectKey,
           matchedBy: existingAuth.matchedBy,
@@ -674,10 +698,11 @@ export const runAlertInboxPass = (
         continue;
       }
 
-      // Atomically acquire the creation lease for this authenticated dedupKey so overlapping
-      // passes cannot both post to GitHub.
+      // Atomically acquire the creation lease + fencing generation for this authenticated dedupKey.
       let holderObjectKey = acquiredHolderObjectKey;
+      let claimGeneration = acquiredClaimGeneration;
       let needsReconcile = false;
+
       if (!claimAlreadyAcquired) {
         const claim = yield* options.store.tryClaimForCreation({
           objectKey,
@@ -691,12 +716,12 @@ export const runAlertInboxPass = (
           continue;
         }
         if (claim.outcome === "already_created") {
-          duplicates.push({
-            objectKey,
-            matchedBy: "dedup_key",
-            existingIssueNumber: claim.issueNumber,
-          });
           if (claim.objectKey !== objectKey) {
+            duplicates.push({
+              objectKey,
+              matchedBy: "dedup_key",
+              existingIssueNumber: claim.issueNumber,
+            });
             yield* options.store.markDuplicate({
               objectKey,
               deliveryHash,
@@ -709,7 +734,8 @@ export const runAlertInboxPass = (
           }
           continue;
         }
-        holderObjectKey = claim.holderObjectKey ?? objectKey;
+        holderObjectKey = claim.holderObjectKey;
+        claimGeneration = claim.claimGeneration;
         needsReconcile = claim.needsReconcile;
       }
 
@@ -725,6 +751,7 @@ export const runAlertInboxPass = (
             dedupKey,
             messageId: dkim.signedMessageId ?? null,
             keepClaiming: true,
+            expectedClaimGeneration: claimGeneration,
             reason: lookupResult.failure.reason,
             nextRetryAt: computeNextRetryIso(itemNowMs, priorAttempts),
             nowIso: itemNowIso,
@@ -733,11 +760,15 @@ export const runAlertInboxPass = (
         }
         if (lookupResult.success !== null) {
           const reconciledNumber = lookupResult.success.number;
-          yield* options.store.markCreated({
+          const marked = yield* options.store.markCreated({
             objectKey: holderObjectKey,
+            claimGeneration,
             issueNumber: reconciledNumber,
             nowIso: itemNowIso,
           });
+          if (!marked) {
+            continue;
+          }
           if (holderObjectKey === objectKey) {
             created.push({
               objectKey,
@@ -778,6 +809,7 @@ export const runAlertInboxPass = (
             dedupKey,
             messageId: dkim.signedMessageId ?? null,
             keepClaiming: true,
+            expectedClaimGeneration: claimGeneration,
             reason: ensureResult.failure.reason,
             nextRetryAt: computeNextRetryIso(itemNowMs, priorAttempts),
             nowIso: itemNowIso,
@@ -785,6 +817,19 @@ export const runAlertInboxPass = (
           continue;
         }
         labelEnsured = true;
+      }
+
+      // Re-verify & renew our fencing generation right before posting to GitHub so a paused pass
+      // whose lease expired or was superseded can NEVER issue a duplicate POST.
+      const prePostNowMs = yield* Clock.currentTimeMillis;
+      const stillOwned = yield* options.store.verifyAndRenewClaim({
+        objectKey: holderObjectKey,
+        claimGeneration,
+        nowIso: new Date(prePostNowMs).toISOString(),
+        leaseUntilIso: new Date(prePostNowMs + CLAIM_LEASE_MS).toISOString(),
+      });
+      if (!stillOwned) {
+        continue;
       }
 
       const createResult = yield* Effect.result(tracker.createIssue(options.repo, formatted));
@@ -796,6 +841,7 @@ export const runAlertInboxPass = (
           dedupKey,
           messageId: dkim.signedMessageId ?? null,
           keepClaiming: true,
+          expectedClaimGeneration: claimGeneration,
           reason: createResult.failure.reason,
           nextRetryAt: computeNextRetryIso(itemNowMs, priorAttempts),
           nowIso: itemNowIso,
@@ -803,11 +849,16 @@ export const runAlertInboxPass = (
         continue;
       }
 
-      yield* options.store.markCreated({
+      const marked = yield* options.store.markCreated({
         objectKey: holderObjectKey,
+        claimGeneration,
         issueNumber: createResult.success.number,
         nowIso: itemNowIso,
       });
+      if (!marked) {
+        continue;
+      }
+
       if (holderObjectKey !== objectKey) {
         yield* options.store.markDuplicate({
           objectKey,
@@ -841,6 +892,21 @@ export const runAlertInboxPass = (
       failures,
     };
   });
+
+export const runAlertInboxPass = (
+  options: AlertInboxPassOptions,
+): Effect.Effect<
+  AlertInboxPassResult,
+  AlertInboxError | AlertStoreError,
+  AlertBucket | AlertIssueTracker | DnsTxtResolver
+> => {
+  if (!options.apply) {
+    return runAlertInboxPassUnlocked(options);
+  }
+  return options.store
+    .withExclusiveApplyLock(runAlertInboxPassUnlocked(options))
+    .pipe(Effect.map((outcome) => (outcome.acquired ? outcome.value : EMPTY_PASS_RESULT)));
+};
 
 const REPO_SLUG_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9-]{0,38}\/(?!\.{1,2}$)[a-zA-Z0-9_.-]{1,100}$/;
 

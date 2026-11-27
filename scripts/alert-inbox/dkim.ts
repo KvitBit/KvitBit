@@ -541,7 +541,15 @@ export const verifyAlertDkim = (
           continue;
         }
         const keyVersion = keyTags.get("v");
-        if (keyVersion !== undefined && keyVersion !== "DKIM1") continue;
+        if (keyVersion !== undefined) {
+          // RFC 6376 §3.6.1: If `v=` is present in a DKIM key record, it MUST be the first tag
+          // and MUST equal "DKIM1".
+          const firstTagName = keyTags.keys().next().value;
+          if (firstTagName !== "v" || keyVersion !== "DKIM1") {
+            failureReasons.push(`Invalid DKIM key version tag at ${dnsHost}`);
+            continue;
+          }
+        }
         const keyType = (keyTags.get("k") ?? "rsa").trim().toLowerCase();
         if (
           (algorithm === "rsa-sha256" && keyType !== "rsa") ||
