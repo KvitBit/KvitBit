@@ -1,7 +1,7 @@
 import { Database } from "bun:sqlite";
 import { describe, expect, test } from "bun:test";
 import { createHash, generateKeyPairSync, type KeyObject, sign } from "node:crypto";
-import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { linkSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Effect, Layer } from "effect";
@@ -1016,6 +1016,8 @@ describe("Alert inbox operational invariants (migration, concurrency, recovery, 
       await holder.exited;
 
       // Spawn two competing child processes (one via direct path, one via symlink!) racing to acquire.
+      // The winner holds its lock until stdin closes so the loser is deterministically guaranteed to
+      // observe the held lock regardless of process startup jitter (no sleep-based race!).
       const racerScript = (targetPath: string) => `
         import { Effect } from "effect";
         import { openAlertInboxStore } from ${JSON.stringify(storeModulePath)};
@@ -1025,36 +1027,151 @@ describe("Alert inbox operational invariants (migration, concurrency, recovery, 
               const store = yield* openAlertInboxStore(${JSON.stringify(targetPath)}, false);
               return yield* store.withExclusiveApplyLock(
                 Effect.promise(async () => {
-                  await Bun.sleep(200);
+                  process.stdout.write("ACQUIRED\\n");
+                  await new Response(Bun.stdin.stream()).text();
                   return "won";
                 }),
               );
             }),
           ),
         );
-        process.stdout.write(JSON.stringify(res));
+        if (!res.acquired) {
+          process.stdout.write("BUSY\\n");
+        }
       `;
+
+      const readFirstLine = async (stream: ReadableStream<Uint8Array>): Promise<string> => {
+        const streamReader = stream.getReader();
+        let acc = "";
+        try {
+          while (!acc.includes("\n")) {
+            const { value, done } = await streamReader.read();
+            if (done) break;
+            acc += Buffer.from(value).toString("utf8");
+          }
+          return acc.split("\n")[0]?.trim() ?? "";
+        } finally {
+          streamReader.releaseLock();
+        }
+      };
+
       const racer1 = Bun.spawn(["bun", "-e", racerScript(dbPath)], {
+        stdin: "pipe",
         stdout: "pipe",
         stderr: "pipe",
       });
       const racer2 = Bun.spawn(["bun", "-e", racerScript(symPath)], {
+        stdin: "pipe",
         stdout: "pipe",
         stderr: "pipe",
       });
-      const [out1, out2, code1, code2] = await Promise.all([
-        new Response(racer1.stdout).text(),
-        new Response(racer2.stdout).text(),
-        racer1.exited,
-        racer2.exited,
+
+      const [line1, line2] = await Promise.all([
+        readFirstLine(racer1.stdout),
+        readFirstLine(racer2.stdout),
       ]);
+      expect([line1, line2].sort()).toEqual(["ACQUIRED", "BUSY"]);
+
+      // Release the winner's stdin barrier so it exits cleanly and releases the kernel lock.
+      racer1.stdin.end();
+      racer2.stdin.end();
+      const [code1, code2] = await Promise.all([racer1.exited, racer2.exited]);
       expect(code1).toBe(0);
       expect(code2).toBe(0);
-      const parsed1 = JSON.parse(out1) as { acquired: boolean };
-      const parsed2 = JSON.parse(out2) as { acquired: boolean };
-      expect([parsed1.acquired, parsed2.acquired].filter(Boolean)).toHaveLength(1);
 
-      // 2. Superseded generation fencing while the row is STILL `claiming` (not yet `created`):
+      // After the winner releases, a fresh caller acquires the lock cleanly.
+      const afterRelease = await Effect.runPromise(
+        Effect.scoped(
+          Effect.gen(function* () {
+            const freshStore = yield* openAlertInboxStore(symPath, false);
+            return yield* freshStore.withExclusiveApplyLock(Effect.succeed("fresh-ok"));
+          }),
+        ),
+      );
+      expect(afterRelease).toEqual({ acquired: true, value: "fresh-ok" });
+
+      // 2. WAL-mode symlink alias shares the exact canonical SQLite journal/WAL path after SIGKILL,
+      // and multiply hard-linked state files are rejected before opening or migrating.
+      const walDbPath = join(tmpDir, "wal.sqlite");
+      const walSymPath = join(tmpDir, "wal-sym.sqlite");
+      const walHardPath = join(tmpDir, "wal-hard.sqlite");
+      await Effect.runPromise(Effect.scoped(openAlertInboxStore(walDbPath, false)));
+      symlinkSync(walDbPath, walSymPath);
+
+      const walWriterScript = `
+        import { Database } from "bun:sqlite";
+        import { Effect } from "effect";
+        import { openAlertInboxStore } from ${JSON.stringify(storeModulePath)};
+        const rawDb = new Database(${JSON.stringify(walDbPath)});
+        rawDb.exec("PRAGMA journal_mode = WAL;");
+        rawDb.close();
+        await Effect.runPromise(
+          Effect.scoped(
+            Effect.gen(function* () {
+              const store = yield* openAlertInboxStore(${JSON.stringify(walDbPath)}, false);
+              yield* store.withExclusiveApplyLock(
+                Effect.gen(function* () {
+                  const c = yield* store.tryClaimForCreation({
+                    objectKey: "inbound/alerts/by-hash/${"5".repeat(32)}/1000-wal.eml",
+                    deliveryHash: "${"5".repeat(32)}",
+                    dedupKey: "${"5".repeat(32)}",
+                    messageId: "<wal-42@google.com>",
+                    nowIso: "2026-11-27T21:00:00.000Z",
+                    leaseUntilIso: "2026-11-27T21:05:00.000Z",
+                  });
+                  if (c.outcome !== "acquired") throw new Error("expected claim");
+                  yield* store.markCreated({
+                    objectKey: c.holderObjectKey,
+                    claimGeneration: c.claimGeneration,
+                    issueNumber: 42,
+                    nowIso: "2026-11-27T21:00:01.000Z",
+                  });
+                  yield* Effect.promise(async () => {
+                    process.stdout.write("WAL_READY\\n");
+                    await Bun.sleep(10_000);
+                  });
+                }),
+              );
+            }),
+          ),
+        );
+      `;
+      const walWriter = Bun.spawn(["bun", "-e", walWriterScript], {
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      const walLine = await readFirstLine(walWriter.stdout);
+      expect(walLine).toBe("WAL_READY");
+      walWriter.kill(9);
+      await walWriter.exited;
+
+      // Opening via symlink after SIGKILL MUST see #42 from the canonical WAL file.
+      const seenViaSym = await Effect.runPromise(
+        Effect.scoped(
+          Effect.gen(function* () {
+            const symStore = yield* openAlertInboxStore(walSymPath, false);
+            return yield* symStore.getObject(
+              `inbound/alerts/by-hash/${"5".repeat(32)}/1000-wal.eml`,
+            );
+          }),
+        ),
+      );
+      expect(seenViaSym?.status).toBe("created");
+      expect(seenViaSym?.issueNumber).toBe(42);
+
+      // Creating a hard link makes nlink=2 -> opening either path MUST fail with AlertStoreError!
+      linkSync(walDbPath, walHardPath);
+      const hardLinkErr = await Effect.runPromise(
+        Effect.flip(Effect.scoped(openAlertInboxStore(walHardPath, false))),
+      );
+      expect(hardLinkErr._tag).toBe("AlertStoreError");
+      expect(hardLinkErr.reason).toMatch(/hard-linked/i);
+      const hardLinkReadonlyErr = await Effect.runPromise(
+        Effect.flip(Effect.scoped(openAlertInboxStore(walDbPath, true))),
+      );
+      expect(hardLinkReadonlyErr._tag).toBe("AlertStoreError");
+
+      // 3. Superseded generation fencing while the row is STILL `claiming` (not yet `created`):
       await Effect.runPromise(
         Effect.scoped(
           Effect.gen(function* () {

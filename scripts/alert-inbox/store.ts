@@ -22,7 +22,16 @@
 import { dlopen, FFIType, read } from "bun:ffi";
 import { Database } from "bun:sqlite";
 import { randomUUID } from "node:crypto";
-import { closeSync, constants as fsConstants, fstatSync, openSync, realpathSync } from "node:fs";
+import {
+  closeSync,
+  existsSync,
+  constants as fsConstants,
+  fstatSync,
+  openSync,
+  realpathSync,
+  statSync,
+} from "node:fs";
+import { basename, dirname, join } from "node:path";
 import { Data, Effect, type Scope } from "effect";
 
 export type AlertRecordStatus = "claiming" | "created" | "duplicate" | "rejected" | "retry";
@@ -238,6 +247,11 @@ const tryAcquireLockHandle = (
   const fd = openSync(canonicalDbPath, fsConstants.O_RDONLY);
   try {
     const st = fstatSync(fd);
+    if (st.nlink > 1) {
+      throw new Error(
+        `Refusing to lock multiply hard-linked SQLite state file (${canonicalDbPath}, nlink=${st.nlink})`,
+      );
+    }
     const lockKey = `inode:${st.dev}:${st.ino}`;
     if (activeInProcessApplyLocks.has(lockKey)) {
       closeSync(fd);
@@ -480,14 +494,44 @@ const initializeOrMigrateSchema = (db: Database): void => {
   });
 };
 
+const resolveAndValidateDbPath = (path: string, readonly: boolean): string | null => {
+  if (path === ":memory:") return null;
+  let canonicalPath: string;
+  if (existsSync(path)) {
+    canonicalPath = realpathSync(path);
+    const st = statSync(canonicalPath);
+    if (st.nlink > 1) {
+      throw new Error(
+        `Refusing to open multiply hard-linked SQLite state file (${canonicalPath}, nlink=${st.nlink}): hard links break SQLite journal/WAL discovery`,
+      );
+    }
+  } else {
+    if (readonly) {
+      throw new Error(`SQLite state file does not exist: ${path}`);
+    }
+    canonicalPath = join(realpathSync(dirname(path)), basename(path));
+  }
+  return canonicalPath;
+};
+
 export const openAlertInboxStore = (
   path: string,
   readonly = false,
 ): Effect.Effect<AlertInboxStoreService, AlertStoreError, Scope.Scope> =>
   Effect.acquireRelease(
     wrapDb("open", () => {
-      const db = new Database(path, { readonly, create: !readonly, strict: true });
+      const canonicalDbPath = resolveAndValidateDbPath(path, readonly);
+      const openTarget = canonicalDbPath ?? ":memory:";
+      const db = new Database(openTarget, { readonly, create: !readonly, strict: true });
       try {
+        if (canonicalDbPath !== null) {
+          const st = statSync(canonicalDbPath);
+          if (st.nlink > 1) {
+            throw new Error(
+              `Refusing to open multiply hard-linked SQLite state file (${canonicalDbPath}, nlink=${st.nlink}): hard links break SQLite journal/WAL discovery`,
+            );
+          }
+        }
         db.exec("PRAGMA busy_timeout = 5000");
         if (!readonly) {
           initializeOrMigrateSchema(db);
@@ -499,9 +543,7 @@ export const openAlertInboxStore = (
             );
           }
         }
-        const isMemory = path === ":memory:";
-        const memoryLockKey = isMemory ? `memory:${randomUUID()}` : null;
-        const canonicalDbPath = isMemory ? null : realpathSync(path);
+        const memoryLockKey = canonicalDbPath === null ? `memory:${randomUUID()}` : null;
         return { db, memoryLockKey, canonicalDbPath };
       } catch (error) {
         db.close();
