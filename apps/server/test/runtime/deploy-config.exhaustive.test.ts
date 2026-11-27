@@ -21,11 +21,13 @@ import { describe, expect, test } from "bun:test";
 import { EmailSender } from "@kvitbit/domain/ports";
 import { ConfigProvider, Effect, Layer, Option, Redacted } from "effect";
 import {
+  composeStackEnvLayers,
   defaultSecretBindings,
   KVITBIT_PROD_DEFAULTS,
   type KvitbitEdgeConfig,
   type KvitbitStackConfig,
   loadStackConfig,
+  makeStackEnvLayer,
   validateStackConfigSync,
 } from "../../../../infra/alchemy/src/config";
 import {
@@ -43,11 +45,13 @@ import {
 } from "../../../../infra/alchemy/src/env";
 import {
   BLOB_DRIVERS,
+  composeRuntimeEnvLayers,
   EMAIL_MODES,
   FORBIDDEN_OPT_OUT_ENV_VARS,
   KVITBIT_ENVS,
   type KvitbitEnv,
   loadBootRuntimeConfig,
+  makeRuntimeEnvLayer,
   PROD_EMAIL_MODES,
   RESOLVED_EMAIL_MODES,
   resolveKvitbitEnv,
@@ -618,16 +622,29 @@ describe("verify-deploy-config: apps/server runtime contract", () => {
         .ok,
     ).toBe(false);
 
-    // Live-loader checks for empty primary sibling masking fallback and sparse Array gaps.
+    // Live-loader checks for composed primary+fallback key preservation, exact-key presence, and sparse Array gaps.
     for (const workload of SERVER_WORKLOADS) {
+      // Permitted scalar/empty KVITBIT_DISABLE (no trailing underscore) succeeds alone.
+      for (const [label, extra] of [
+        ["scalar KVITBIT_DISABLE=metadata alone", { KVITBIT_DISABLE: "metadata" }],
+        ["empty KVITBIT_DISABLE alone", { KVITBIT_DISABLE: "" }],
+      ] as const) {
+        expect(validateServerRuntimeEnv({ ...upgradedEnv, ...extra }, workload).ok).toBe(true);
+        const permittedRes = await Effect.runPromise(
+          loadBootRuntimeConfig(workload).pipe(
+            Effect.provide(makeRuntimeEnvLayer({ ...upgradedEnv, ...extra })),
+            Effect.result,
+          ),
+        );
+        expect(permittedRes._tag, `${workload} ${label}`).toBe("Success");
+      }
+
       const siblingMasked = await Effect.runPromise(
         loadBootRuntimeConfig(workload).pipe(
           Effect.provide(
-            ConfigProvider.layer(
-              ConfigProvider.orElse(
-                ConfigProvider.fromEnv({ env: { ...upgradedEnv, KVITBIT_DISABLE_OTHER: "" } }),
-                ConfigProvider.fromEnv({ env: { KVITBIT_DISABLE_CUSTOM: "true" } }),
-              ),
+            composeRuntimeEnvLayers(
+              { ...upgradedEnv, KVITBIT_DISABLE_OTHER: "" },
+              { KVITBIT_DISABLE_CUSTOM: "true" },
             ),
           ),
           Effect.result,
@@ -635,17 +652,17 @@ describe("verify-deploy-config: apps/server runtime contract", () => {
       );
       expect(siblingMasked._tag, `${workload} empty primary sibling + fallback`).toBe("Failure");
       if (siblingMasked._tag === "Failure") {
-        expect(String(siblingMasked.failure)).toContain("KVITBIT_DISABLE_OTHER");
+        expect(String(siblingMasked.failure)).toContain(
+          "Invalid runtime config (KVITBIT_DISABLE_CUSTOM):",
+        );
       }
 
       const scalarMasked = await Effect.runPromise(
         loadBootRuntimeConfig(workload).pipe(
           Effect.provide(
-            ConfigProvider.layer(
-              ConfigProvider.orElse(
-                ConfigProvider.fromEnv({ env: { ...upgradedEnv, KVITBIT_DISABLE: "metadata" } }),
-                ConfigProvider.fromEnv({ env: { KVITBIT_DISABLE_CUSTOM: "true" } }),
-              ),
+            composeRuntimeEnvLayers(
+              { ...upgradedEnv, KVITBIT_DISABLE: "metadata" },
+              { KVITBIT_DISABLE_CUSTOM: "true" },
             ),
           ),
           Effect.result,
@@ -655,15 +672,19 @@ describe("verify-deploy-config: apps/server runtime contract", () => {
         "Failure",
       );
       if (scalarMasked._tag === "Failure") {
-        expect(String(scalarMasked.failure)).toContain("KVITBIT_DISABLE");
+        expect(String(scalarMasked.failure)).toContain(
+          "Invalid runtime config (KVITBIT_DISABLE_CUSTOM):",
+        );
       }
 
-      // Exact-key KVITBIT_ALLOW_LOCAL_BLOBS presence agrees with flat validation regardless of longer neighbors.
+      // Exact-key KVITBIT_ALLOW_LOCAL_BLOBS presence is strictly rejected with and without longer neighbors,
+      // while the longer neighbor alone succeeds.
       for (const [label, extraEnv, expectedTag] of [
+        ["empty exact alone", { KVITBIT_ALLOW_LOCAL_BLOBS: "" }, "Failure"],
         [
           "empty exact + EXTRA",
           { KVITBIT_ALLOW_LOCAL_BLOBS: "", KVITBIT_ALLOW_LOCAL_BLOBS_EXTRA: "metadata" },
-          "Success",
+          "Failure",
         ],
         ["only EXTRA empty", { KVITBIT_ALLOW_LOCAL_BLOBS_EXTRA: "" }, "Success"],
         [
@@ -676,17 +697,15 @@ describe("verify-deploy-config: apps/server runtime contract", () => {
         expect(flatRes.ok, `flat ${workload} ${label}`).toBe(expectedTag === "Success");
         const liveRes = await Effect.runPromise(
           loadBootRuntimeConfig(workload).pipe(
-            Effect.provide(
-              ConfigProvider.layer(
-                ConfigProvider.fromEnv({ env: { ...upgradedEnv, ...extraEnv } }),
-              ),
-            ),
+            Effect.provide(makeRuntimeEnvLayer({ ...upgradedEnv, ...extraEnv })),
             Effect.result,
           ),
         );
         expect(liveRes._tag, `live ${workload} ${label}`).toBe(expectedTag);
         if (liveRes._tag === "Failure") {
-          expect(String(liveRes.failure)).toContain("KVITBIT_ALLOW_LOCAL_BLOBS");
+          expect(String(liveRes.failure)).toContain(
+            "Invalid runtime config (KVITBIT_ALLOW_LOCAL_BLOBS):",
+          );
         }
       }
 
@@ -699,22 +718,18 @@ describe("verify-deploy-config: apps/server runtime contract", () => {
         [
           "sparse 5000/10000",
           { KVITBIT_DISABLE_HTTP_5000: "true", KVITBIT_DISABLE_HTTP_10000: "" },
-          "KVITBIT_DISABLE_HTTP_10000",
+          "KVITBIT_DISABLE_HTTP_5000",
         ],
       ] as const) {
         const sparseRes = await Effect.runPromise(
           loadBootRuntimeConfig(workload).pipe(
-            Effect.provide(
-              ConfigProvider.layer(
-                ConfigProvider.fromEnv({ env: { ...upgradedEnv, ...sparseExtra } }),
-              ),
-            ),
+            Effect.provide(makeRuntimeEnvLayer({ ...upgradedEnv, ...sparseExtra })),
             Effect.result,
           ),
         );
         expect(sparseRes._tag, `${workload} ${label}`).toBe("Failure");
         if (sparseRes._tag === "Failure") {
-          expect(String(sparseRes.failure)).toContain(expectedKey);
+          expect(String(sparseRes.failure)).toContain(`Invalid runtime config (${expectedKey}):`);
         }
       }
     }
@@ -1279,15 +1294,27 @@ describe("verify-deploy-config: infra/alchemy stack validation & cross-layer sou
       expect(fallback._tag, `loadStackConfig fallback ${key}`).toBe("Failure");
     }
 
-    // Empty primary sibling masking fallback and sparse Array gaps must also fail in live loadStackConfig.
+    // Permitted scalar/empty KVITBIT_DISABLE (no trailing underscore) succeeds alone in loadStackConfig.
+    for (const [label, extra] of [
+      ["scalar KVITBIT_DISABLE=metadata alone", { KVITBIT_DISABLE: "metadata" }],
+      ["empty KVITBIT_DISABLE alone", { KVITBIT_DISABLE: "" }],
+    ] as const) {
+      const permittedRes = await Effect.runPromise(
+        loadStackConfig.pipe(
+          Effect.provide(makeStackEnvLayer({ ...baseStackEnv, ...extra })),
+          Effect.result,
+        ),
+      );
+      expect(permittedRes._tag, `loadStackConfig ${label}`).toBe("Success");
+    }
+
+    // Composed primary+fallback key preservation, exact-key presence, and sparse Array gaps in live loadStackConfig.
     const stackSiblingMasked = await Effect.runPromise(
       loadStackConfig.pipe(
         Effect.provide(
-          ConfigProvider.layer(
-            ConfigProvider.orElse(
-              ConfigProvider.fromEnv({ env: { ...baseStackEnv, KVITBIT_DISABLE_OTHER: "" } }),
-              ConfigProvider.fromEnv({ env: { KVITBIT_DISABLE_CUSTOM: "true" } }),
-            ),
+          composeStackEnvLayers(
+            { ...baseStackEnv, KVITBIT_DISABLE_OTHER: "" },
+            { KVITBIT_DISABLE_CUSTOM: "true" },
           ),
         ),
         Effect.result,
@@ -1299,18 +1326,16 @@ describe("verify-deploy-config: infra/alchemy stack validation & cross-layer sou
     if (stackSiblingMasked._tag === "Failure") {
       expect(stackSiblingMasked.failure).toMatchObject({
         _tag: "InvalidStackConfig",
-        field: "KVITBIT_DISABLE_OTHER",
+        field: "KVITBIT_DISABLE_CUSTOM",
       });
     }
 
     const stackScalarMasked = await Effect.runPromise(
       loadStackConfig.pipe(
         Effect.provide(
-          ConfigProvider.layer(
-            ConfigProvider.orElse(
-              ConfigProvider.fromEnv({ env: { ...baseStackEnv, KVITBIT_DISABLE: "metadata" } }),
-              ConfigProvider.fromEnv({ env: { KVITBIT_DISABLE_CUSTOM: "true" } }),
-            ),
+          composeStackEnvLayers(
+            { ...baseStackEnv, KVITBIT_DISABLE: "metadata" },
+            { KVITBIT_DISABLE_CUSTOM: "true" },
           ),
         ),
         Effect.result,
@@ -1323,15 +1348,16 @@ describe("verify-deploy-config: infra/alchemy stack validation & cross-layer sou
     if (stackScalarMasked._tag === "Failure") {
       expect(stackScalarMasked.failure).toMatchObject({
         _tag: "InvalidStackConfig",
-        field: "KVITBIT_DISABLE",
+        field: "KVITBIT_DISABLE_CUSTOM",
       });
     }
 
     for (const [label, extraEnv, expectedTag] of [
+      ["empty exact alone", { KVITBIT_ALLOW_LOCAL_BLOBS: "" }, "Failure"],
       [
         "empty exact + EXTRA",
         { KVITBIT_ALLOW_LOCAL_BLOBS: "", KVITBIT_ALLOW_LOCAL_BLOBS_EXTRA: "metadata" },
-        "Success",
+        "Failure",
       ],
       ["only EXTRA empty", { KVITBIT_ALLOW_LOCAL_BLOBS_EXTRA: "" }, "Success"],
       [
@@ -1342,9 +1368,7 @@ describe("verify-deploy-config: infra/alchemy stack validation & cross-layer sou
     ] as const) {
       const exactRes = await Effect.runPromise(
         loadStackConfig.pipe(
-          Effect.provide(
-            ConfigProvider.layer(ConfigProvider.fromEnv({ env: { ...baseStackEnv, ...extraEnv } })),
-          ),
+          Effect.provide(makeStackEnvLayer({ ...baseStackEnv, ...extraEnv })),
           Effect.result,
         ),
       );
@@ -1366,16 +1390,12 @@ describe("verify-deploy-config: infra/alchemy stack validation & cross-layer sou
       [
         "sparse 5000/10000",
         { KVITBIT_DISABLE_HTTP_5000: "true", KVITBIT_DISABLE_HTTP_10000: "" },
-        "KVITBIT_DISABLE_HTTP_10000",
+        "KVITBIT_DISABLE_HTTP_5000",
       ],
     ] as const) {
       const sparseRes = await Effect.runPromise(
         loadStackConfig.pipe(
-          Effect.provide(
-            ConfigProvider.layer(
-              ConfigProvider.fromEnv({ env: { ...baseStackEnv, ...sparseExtra } }),
-            ),
-          ),
+          Effect.provide(makeStackEnvLayer({ ...baseStackEnv, ...sparseExtra })),
           Effect.result,
         ),
       );

@@ -1411,12 +1411,12 @@
       "skill": "verify-deploy-config",
       "tier": 1,
       "kind": "exhaustive",
-      "syncCommit": "0883be7",
+      "syncCommit": "76abde0",
       "command": "bun test --cwd apps/server ./test/runtime/deploy-config.exhaustive.test.ts",
       "coveredFiles": [
         {
           "path": "apps/server/src/config-contract.ts",
-          "sha256": "3ca476015b0c3e36729097ec23be8f04f76a67f2e02d8093454aed1e91ab80ff"
+          "sha256": "2de02a224bf4fbaaa44e28410c62512eb960f59165fd41ce2bd4778c9d3276ab"
         },
         {
           "path": "apps/server/src/config.ts",
@@ -1424,11 +1424,11 @@
         },
         {
           "path": "apps/server/src/main.ts",
-          "sha256": "27dea6d39607960a195f215691c56765de74f5014de33186e6505347de6ec10c"
+          "sha256": "e54fa6a28ca0ed3c89a0a309687b3753f5026b47fb3a789ad7d0035a2ff90ec8"
         },
         {
           "path": "apps/server/src/worker.ts",
-          "sha256": "d3a7d6c06cf89a6a5f179d25dfb6c68b918f66d915ef715a34bfedcd2c651e23"
+          "sha256": "6116ad74e9f9946d3a4918ae67ea9c9c9e7bbca9bafeeef71bf1072a5a9193ee"
         },
         {
           "path": "apps/server/src/wiring/config.ts",
@@ -1452,7 +1452,7 @@
         },
         {
           "path": "infra/alchemy/src/deploy-preflight.ts",
-          "sha256": "83a82d435c0008c55656cd0878d5786d61f670098f93c8c9799a514f1e98e8b9"
+          "sha256": "92dc71664799390875d9240805d78436891e4c9b8061e2f75e863e3151d26d10"
         },
         {
           "path": "infra/alchemy/src/preflight-cli.ts",
@@ -1460,7 +1460,7 @@
         },
         {
           "path": "infra/alchemy/src/config.ts",
-          "sha256": "fdf3bfaae2986b7cc8f9414413fbb9d8c20a0a34b15050da43e538f3eac915d7"
+          "sha256": "f6f310021137941b049717b704369c161691484b289db71e24d33a8b7c8e05b0"
         },
         {
           "path": "infra/alchemy/src/env.ts",
@@ -1472,7 +1472,7 @@
         },
         {
           "path": "infra/alchemy/alchemy.run.ts",
-          "sha256": "ca0bcfdbf3f5712d99f7aa9477b4ad483ff09995c93f497761e1d3c9cf451186"
+          "sha256": "b8538b1a6f513416b71a88b1306c0dea90705e4415dff3c378fe0aae176d8447"
         },
         {
           "path": ".github/workflows/deploy.yml",
@@ -1493,6 +1493,9 @@
         "resolveBlobConfig",
         "validateServerRuntimeEnv",
         "loadBootRuntimeConfig",
+        "RuntimeEnv",
+        "makeRuntimeEnvLayer",
+        "composeRuntimeEnvLayers",
         "ServerConfig",
         "makeEmailSenderLayer",
         "makeBlobStorageLayer",
@@ -1502,6 +1505,9 @@
         "validateStackConfigSync",
         "validateStackConfig",
         "loadStackConfig",
+        "StackEnv",
+        "makeStackEnvLayer",
+        "composeStackEnvLayers",
         "defaultSecretBindings",
         "serverPlainEnv",
         "serverSecretEnv",
@@ -1510,7 +1516,7 @@
         "declareKvitbitStack",
         "assertFeedbackSecretSelection"
       ],
-      "bounds": "49 (KVITBIT_ENV x NODE_ENV) pairs; 295,680 server/worker runtime env states + 339 core secret/dynamic & fallback opt-out/exact-key/sparse-array/boundary/upgrade states; 780 real Effect layer builds (280 email, 20 blob, 480 mobile); 215,040 Alchemy stack states (+29 core consumer and live/fallback/exact-key/sparse-array loadStackConfig opt-out checks) with cross-layer server+worker soundness; 423,360 deploy.yml preflight states (+78 GCP/bool/opt-out/repo-vars checks) with 3-layer soundness (935,355 total exhaustive cases)",
+      "bounds": "49 (KVITBIT_ENV x NODE_ENV) pairs; 295,680 server/worker runtime env states + 345 core secret/dynamic & composed opt-out/exact-key/sparse-array/boundary/upgrade states; 780 real Effect layer builds (280 email, 20 blob, 480 mobile); 215,040 Alchemy stack states (+32 core consumer and live/composed/exact-key/sparse-array loadStackConfig opt-out checks) with cross-layer server+worker soundness; 423,360 deploy.yml preflight states (+78 GCP/bool/opt-out/repo-vars checks) with 3-layer soundness (935,364 total exhaustive cases)",
       "assumptions": [
         "Representative values stand for each equivalence class (origin, EMAIL_FROM, SMTP URL, domain); live network/credential validity and Secret Manager ENABLED state are outside pure config verification",
         "Cross-layer soundness substitutes synthetic valid non-empty strings for Secret Manager refs",
