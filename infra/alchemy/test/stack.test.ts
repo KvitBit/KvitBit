@@ -1737,6 +1737,26 @@ describe("Pure-Alchemy Cloud DNS", () => {
       ),
     );
     expect(missingZone).toMatchObject({ _tag: "InvalidStackConfig", field: "KVITBIT_MAIL_DOMAIN" });
+
+    const emptyZones = await Effect.runPromise(
+      Effect.flip(
+        loadStackConfig.pipe(
+          Effect.provide(
+            ConfigProvider.layer(
+              ConfigProvider.fromEnv({
+                env: {
+                  KVITBIT_IMAGE_DIGEST: SAMPLE_DIGEST,
+                  KVITBIT_MAIL_DOMAIN: "kvitbit.com",
+                  KVITBIT_MAIL_FORWARD_TO: "filkalny@gmail.com",
+                  KVITBIT_MAIL_ALIASES: "ops",
+                },
+              }),
+            ),
+          ),
+        ),
+      ),
+    );
+    expect(emptyZones).toMatchObject({ _tag: "InvalidStackConfig", field: "KVITBIT_MAIL_DOMAIN" });
   });
 });
 

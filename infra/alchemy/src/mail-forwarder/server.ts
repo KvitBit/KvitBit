@@ -72,6 +72,7 @@ export const MailForwarderLive = Layer.unwrap(
         const bound = yield* startSmtpServer({
           host: "0.0.0.0",
           port: config.smtpPort,
+          domain: config.domain,
           mxHost: config.mxHost,
           allowedRecipients: config.allowedRecipients,
           onMessage: relay.handleMessage,

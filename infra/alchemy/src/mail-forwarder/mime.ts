@@ -38,18 +38,23 @@ const splitHeaderAndBody = (raw: Uint8Array): { headers: string; body: Uint8Arra
       raw[i + 3] === 10
     ) {
       return {
-        headers: Buffer.from(raw.subarray(0, i)).toString("latin1"),
+        // Decode headers as UTF-8 so RFC 6532 internationalized headers are preserved;
+        // pure US-ASCII is a strict subset of UTF-8.
+        headers: new TextDecoder("utf-8", { fatal: false }).decode(raw.subarray(0, i)),
         body: raw.subarray(i + 4),
       };
     }
     if (i + 1 < raw.length && raw[i] === 10 && raw[i + 1] === 10) {
       return {
-        headers: Buffer.from(raw.subarray(0, i)).toString("latin1"),
+        headers: new TextDecoder("utf-8", { fatal: false }).decode(raw.subarray(0, i)),
         body: raw.subarray(i + 2),
       };
     }
   }
-  return { headers: Buffer.from(raw).toString("latin1"), body: new Uint8Array(0) };
+  return {
+    headers: new TextDecoder("utf-8", { fatal: false }).decode(raw),
+    body: new Uint8Array(0),
+  };
 };
 
 export const parseHeaders = (headerBlock: string): Map<string, Array<string>> => {
@@ -286,12 +291,17 @@ export const extractAddress = (
 };
 
 interface CollectedParts {
-  text: string | undefined;
-  html: string | undefined;
-  attachments: Array<ParsedAttachment>;
+  readonly textParts: Array<string>;
+  readonly htmlParts: Array<string>;
+  readonly attachments: Array<ParsedAttachment>;
 }
 
-const walkEntity = (raw: Uint8Array, out: CollectedParts, depth: number): void => {
+const walkEntity = (
+  raw: Uint8Array,
+  out: CollectedParts,
+  depth: number,
+  inAlternative: boolean,
+): void => {
   if (depth > MAX_MIME_DEPTH) return;
   const { headers: headerBlock, body } = splitHeaderAndBody(raw);
   const headers = parseHeaders(headerBlock);
@@ -301,8 +311,23 @@ const walkEntity = (raw: Uint8Array, out: CollectedParts, depth: number): void =
   const transferEncoding = firstHeader(headers, "content-transfer-encoding");
 
   if (mimeType.startsWith("multipart/") && contentType.params.boundary) {
+    const isAlt = mimeType === "multipart/alternative";
+    if (isAlt) {
+      const altBucket: CollectedParts = { textParts: [], htmlParts: [], attachments: [] };
+      for (const child of splitMultipart(body, contentType.params.boundary)) {
+        walkEntity(child, altBucket, depth + 1, true);
+      }
+      if (altBucket.textParts.length > 0) {
+        out.textParts.push(altBucket.textParts.join("\n\n"));
+      }
+      if (altBucket.htmlParts.length > 0) {
+        out.htmlParts.push(altBucket.htmlParts.join("<hr>"));
+      }
+      out.attachments.push(...altBucket.attachments);
+      return;
+    }
     for (const child of splitMultipart(body, contentType.params.boundary)) {
-      walkEntity(child, out, depth + 1);
+      walkEntity(child, out, depth + 1, false);
     }
     return;
   }
@@ -328,15 +353,19 @@ const walkEntity = (raw: Uint8Array, out: CollectedParts, depth: number): void =
     return;
   }
 
-  if (mimeType === "text/plain" && out.text === undefined) {
-    out.text = decodeCharset(decodedBytes, contentType.params.charset);
+  if (mimeType === "text/plain") {
+    if (!inAlternative || out.textParts.length === 0) {
+      out.textParts.push(decodeCharset(decodedBytes, contentType.params.charset));
+    }
     return;
   }
-  if (mimeType === "text/html" && out.html === undefined) {
-    out.html = decodeCharset(decodedBytes, contentType.params.charset);
+  if (mimeType === "text/html") {
+    if (!inAlternative || out.htmlParts.length === 0) {
+      out.htmlParts.push(decodeCharset(decodedBytes, contentType.params.charset));
+    }
     return;
   }
-  if (mimeType !== "text/plain" && mimeType !== "text/html" && decodedBytes.byteLength > 0) {
+  if (decodedBytes.byteLength > 0) {
     out.attachments.push({
       filename: filename || `part-${out.attachments.length + 1}.bin`,
       contentType: mimeType,
@@ -358,11 +387,11 @@ export const parseEmail = (raw: Uint8Array): ParsedEmail => {
   const date = firstHeader(headers, "date")?.trim();
 
   const collected: CollectedParts = {
-    text: undefined,
-    html: undefined,
+    textParts: [],
+    htmlParts: [],
     attachments: [],
   };
-  walkEntity(raw, collected, 0);
+  walkEntity(raw, collected, 0, false);
 
   return {
     subject,
@@ -372,8 +401,8 @@ export const parseEmail = (raw: Uint8Array): ParsedEmail => {
     replyToAddress: replyToParsed.address,
     messageId,
     date,
-    text: collected.text,
-    html: collected.html,
+    text: collected.textParts.length > 0 ? collected.textParts.join("\n\n") : undefined,
+    html: collected.htmlParts.length > 0 ? collected.htmlParts.join("<hr>") : undefined,
     attachments: collected.attachments,
   };
 };

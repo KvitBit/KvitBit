@@ -113,15 +113,33 @@ const isSimpleEmail = (value: string | undefined): value is string =>
   value.length <= 254 &&
   /^[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+$/.test(value);
 
+export const computeDeliveryFingerprint = (message: InboundMessage): string =>
+  createHash("sha256")
+    .update(message.mailFrom)
+    .update("\0")
+    .update([...message.rcptTo].sort().join(","))
+    .update("\0")
+    .update(message.rawBytes)
+    .digest("hex");
+
 export const buildResendForwardPayload = (params: {
   readonly message: InboundMessage;
   readonly parsed: ParsedEmail;
-  readonly archiveUri: string;
+  readonly deliveryFingerprint: string;
+  readonly archiveBucket: string;
   readonly forwardTo: string;
   readonly forwardFrom: string;
   readonly maxAttachmentBytes: number;
 }): Record<string, unknown> => {
-  const { message, parsed, archiveUri, forwardTo, forwardFrom, maxAttachmentBytes } = params;
+  const {
+    message,
+    parsed,
+    deliveryFingerprint,
+    archiveBucket,
+    forwardTo,
+    forwardFrom,
+    maxAttachmentBytes,
+  } = params;
   const senderLabel = sanitizeHeaderText(
     parsed.fromDisplayName || parsed.fromAddress || message.mailFrom || "External Sender",
     80,
@@ -132,6 +150,7 @@ export const buildResendForwardPayload = (params: {
   const aliasTag = sanitizeHeaderText(aliasTagForRecipients(message.rcptTo), 64);
   const cleanSubject = sanitizeHeaderText(parsed.subject || "(no subject)", 200);
   const subject = `[${aliasTag}] ${cleanSubject}`;
+  const shortHash = deliveryFingerprint.slice(0, 16);
 
   const forwardedAttachments: Array<{
     filename: string;
@@ -158,14 +177,14 @@ export const buildResendForwardPayload = (params: {
   const originalFrom = parsed.fromHeader || message.mailFrom || "(empty reverse-path)";
   const skippedNotice =
     skippedAttachments.length > 0
-      ? `Omitted large attachment(s): ${skippedAttachments.join(", ")} (see archive)`
+      ? `Omitted large attachment(s): ${skippedAttachments.join(", ")} (see gs://${archiveBucket})`
       : undefined;
 
   const metaLines = [
     `Forwarded for: ${recipientList}`,
     `Original From: ${originalFrom}`,
     ...(parsed.date ? [`Date: ${parsed.date}`] : []),
-    `Archive: ${archiveUri}`,
+    `Archive Bucket: gs://${archiveBucket} (sha256:${shortHash})`,
     ...(skippedNotice ? [skippedNotice] : []),
   ];
 
@@ -195,7 +214,7 @@ export const buildResendForwardPayload = (params: {
     ...(forwardedAttachments.length > 0 ? { attachments: forwardedAttachments } : {}),
     headers: {
       "X-Kvitbit-Original-To": sanitizeHeaderText(recipientList, 250),
-      "X-Kvitbit-Archive": sanitizeHeaderText(archiveUri, 250),
+      "X-Kvitbit-Delivery-Hash": `sha256:${shortHash}`,
     },
   };
 };
@@ -203,13 +222,15 @@ export const buildResendForwardPayload = (params: {
 export const buildResendFallbackPayload = (params: {
   readonly message: InboundMessage;
   readonly parsed: ParsedEmail;
-  readonly archiveUri: string;
+  readonly deliveryFingerprint: string;
+  readonly archiveBucket: string;
   readonly forwardTo: string;
   readonly forwardFrom: string;
   readonly rejectionStatus: number;
 }): Record<string, unknown> => {
   const aliasTag = sanitizeHeaderText(aliasTagForRecipients(params.message.rcptTo), 64);
   const cleanSubject = sanitizeHeaderText(params.parsed.subject || "(no subject)", 180);
+  const shortHash = params.deliveryFingerprint.slice(0, 16);
   return {
     from: `"Kvitbit Mail Forwarder" <${params.forwardFrom}>`,
     to: [params.forwardTo],
@@ -219,7 +240,7 @@ export const buildResendFallbackPayload = (params: {
       `Status: HTTP ${params.rejectionStatus}`,
       `Original To: ${params.message.rcptTo.join(", ")}`,
       `Original From: ${params.parsed.fromHeader || params.message.mailFrom || "(unknown)"}`,
-      `Archive: ${params.archiveUri}`,
+      `Archive Bucket: gs://${params.archiveBucket} (sha256:${shortHash})`,
     ].join("\n"),
   };
 };
@@ -423,15 +444,17 @@ export const makeMailRelay = (
           };
         }
 
+        const deliveryFingerprint = computeDeliveryFingerprint(message);
         const payload = buildResendForwardPayload({
           message,
           parsed,
-          archiveUri: archive.uri,
+          deliveryFingerprint,
+          archiveBucket: config.archiveBucket,
           forwardTo: config.forwardTo,
           forwardFrom: config.forwardFrom,
           maxAttachmentBytes,
         });
-        const sendResult = yield* Effect.result(postResend(payload, archive.objectName));
+        const sendResult = yield* Effect.result(postResend(payload, deliveryFingerprint));
         if (sendResult._tag === "Success") {
           yield* Effect.logInfo("mail_forwarded", {
             remoteIp: message.remoteIp,
@@ -439,6 +462,7 @@ export const makeMailRelay = (
             rcptTo: message.rcptTo,
             sizeBytes: message.rawBytes.byteLength,
             archivePath: archive.uri,
+            deliveryHash: deliveryFingerprint.slice(0, 16),
             resendId: sendResult.success,
           });
           return {
@@ -455,6 +479,7 @@ export const makeMailRelay = (
             remoteIp: message.remoteIp,
             rcptTo: message.rcptTo,
             archivePath: archive.uri,
+            deliveryHash: deliveryFingerprint.slice(0, 16),
             resendStatus: sendError.status,
             reason: sendError.reason,
           });
@@ -469,13 +494,14 @@ export const makeMailRelay = (
         const fallback = buildResendFallbackPayload({
           message,
           parsed,
-          archiveUri: archive.uri,
+          deliveryFingerprint,
+          archiveBucket: config.archiveBucket,
           forwardTo: config.forwardTo,
           forwardFrom: config.forwardFrom,
           rejectionStatus: sendError.status,
         });
         const fallbackResult = yield* Effect.result(
-          postResend(fallback, `${archive.objectName}:fallback`),
+          postResend(fallback, `${deliveryFingerprint}:fallback`),
         );
         if (fallbackResult._tag === "Success") {
           yield* Effect.logWarning("mail_forwarded_fallback_notice", {

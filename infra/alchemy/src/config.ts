@@ -333,7 +333,7 @@ export const validateStackConfig = (
           reason: `invalid domain '${mail.domain}'`,
         });
       }
-      if (config.dnsZones.length > 0 && !config.dnsZones.includes(mail.domain)) {
+      if (!config.dnsZones.includes(mail.domain)) {
         return yield* new InvalidStackConfig({
           field: "KVITBIT_MAIL_DOMAIN",
           reason: `domain '${mail.domain}' must be included in KVITBIT_DNS_ZONES`,

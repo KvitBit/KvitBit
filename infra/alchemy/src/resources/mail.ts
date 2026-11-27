@@ -36,7 +36,7 @@ export class MailBundleError extends Data.TaggedError("MailBundleError")<{
 export const MAIL_FORWARDER_BUN_IMAGE_DIGEST =
   "sha256:debbe76858f2e398d2937c1eceeb82c571ac1fcd78aadf00e9634578ac2b5ef7";
 
-export const MAIL_FORWARDER_BUN_IMAGE_REF = `docker.io/oven/bun@${MAIL_FORWARDER_BUN_IMAGE_DIGEST}`;
+export const MAIL_FORWARDER_BUN_IMAGE_REF = `oven/bun@${MAIL_FORWARDER_BUN_IMAGE_DIGEST}`;
 
 export const MAIL_FORWARDER_INTERNAL_PORT = 2525;
 export const MAIL_FORWARDER_HEALTH_PORT = 8081;
@@ -174,7 +174,7 @@ export const mailAddressProps = (
   addressType: "EXTERNAL",
   ipVersion: "IPV4",
   networkTier: "PREMIUM",
-  description: `Static external IPv4 for ${mail.mxHost} inbound SMTP (Always-Free while attached to running e2-micro).`,
+  description: `Static external IPv4 for ${mail.mxHost} inbound SMTP (billed per GCP VPC external IPv4 tariff).`,
   labels: {
     ...stackLabels(config),
     workload: "mail-ingress",
@@ -276,13 +276,28 @@ fetch_target() {
   [[ -s "$SCRIPT_TMP" && "$TARGET_SCRIPT_SHA" == "sha256:\${script_hash%% *}" ]]
 }
 
+normalize_image_ref() {
+  local ref="$1"
+  ref="\${ref#index.docker.io/library/}"
+  ref="\${ref#index.docker.io/}"
+  ref="\${ref#docker.io/library/}"
+  ref="\${ref#docker.io/}"
+  printf '%s\\n' "$ref"
+}
+
 verified_image_id() {
-  local image_info image_id
+  local image_info image_id expected_ref line
   image_info="$(docker image inspect --format='{{println .Id}}{{range .RepoDigests}}{{println .}}{{end}}' -- "$TARGET_IMAGE_REF")" || return 1
   read -r image_id <<< "$image_info"
   [[ "$image_id" =~ ^sha256:[a-f0-9]{64}$ ]] || return 1
-  grep -Fxq -- "$TARGET_IMAGE_REF" <<< "$image_info" || return 1
-  printf '%s\\n' "$image_id"
+  expected_ref="$(normalize_image_ref "$TARGET_IMAGE_REF")"
+  while IFS= read -r line; do
+    if [ -n "$line" ] && [ "$(normalize_image_ref "$line")" = "$expected_ref" ]; then
+      printf '%s\\n' "$image_id"
+      return 0
+    fi
+  done <<< "$(tail -n +2 <<< "$image_info")"
+  return 1
 }
 
 forwarder_is_running() {
@@ -314,8 +329,8 @@ ensure_host_firewall() {
 
 ensure_tls_cert() {
   local mx_host="$1"
-  local cert="/var/lib/kvitbit-mail/tls/cert.pem"
-  local key="/var/lib/kvitbit-mail/tls/key.pem"
+  local cert="\${STATE_DIR}/tls/cert.pem"
+  local key="\${STATE_DIR}/tls/key.pem"
   if [ -s "$cert" ] && [ -s "$key" ]; then
     chown 1000:1000 "$cert" "$key"
     chmod 0644 "$cert"
@@ -367,16 +382,18 @@ parse_mail_config() {
   '
 }
 
-install -d -m 0755 /var/lib/kvitbit-mail /var/lib/kvitbit-mail/tls
-install -d -m 0700 /run/kvitbit-mail
+STATE_DIR="\${KVITBIT_MAIL_STATE_DIR:-/var/lib/kvitbit-mail}"
+RUN_DIR="\${KVITBIT_MAIL_RUN_DIR:-/run/kvitbit-mail}"
+install -d -m 0755 "$STATE_DIR" "\${STATE_DIR}/tls"
+install -d -m 0700 "$RUN_DIR"
 
-CONFIG_FILE="$(mktemp /run/kvitbit-mail/config.XXXXXX)"
-SCRIPT_TMP="$(mktemp /run/kvitbit-mail/script.XXXXXX)"
-SCRIPT_FILE="/var/lib/kvitbit-mail/mail-forwarder.mjs"
-ENV_FILE="/run/kvitbit-mail/mail.env"
-ENV_TMP="/run/kvitbit-mail/mail.env.tmp.$$"
-TARGET_ENV_FILE="/run/kvitbit-mail/mail-target.env"
-TARGET_ENV_TMP="/run/kvitbit-mail/mail-target.env.tmp.$$"
+CONFIG_FILE="$(mktemp "\${RUN_DIR}/config.XXXXXX")"
+SCRIPT_TMP="$(mktemp "\${RUN_DIR}/script.XXXXXX")"
+SCRIPT_FILE="\${STATE_DIR}/mail-forwarder.mjs"
+ENV_FILE="\${RUN_DIR}/mail.env"
+ENV_TMP="\${RUN_DIR}/mail.env.tmp.$$"
+TARGET_ENV_FILE="\${RUN_DIR}/mail-target.env"
+TARGET_ENV_TMP="\${RUN_DIR}/mail-target.env.tmp.$$"
 trap 'rm -f "$CONFIG_FILE" "$SCRIPT_TMP" "$ENV_TMP" "$TARGET_ENV_TMP"' EXIT
 
 if ! retry_with_backoff 6 fetch_target; then
@@ -574,7 +591,7 @@ export const mailInstanceProps = (
     instanceName: names.mailInstanceName,
     zone: mail.zone,
     machineType: "e2-micro",
-    description: `Kvitbit ${config.stage} Always-Free inbound SMTP forwarder for ${mail.domain}.`,
+    description: `Kvitbit ${config.stage} inbound SMTP forwarder for ${mail.domain} (US e2-micro compute + pd-standard disk; external IPv4 billed per GCP VPC tariff).`,
     labels: {
       ...stackLabels(config),
       workload: "mail-ingress",

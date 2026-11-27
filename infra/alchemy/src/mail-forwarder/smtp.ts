@@ -26,6 +26,7 @@ export class SmtpBindError extends Data.TaggedError("SmtpBindError")<{
 export interface SmtpServerOptions {
   readonly host: string;
   readonly port: number;
+  readonly domain: string;
   readonly mxHost: string;
   readonly allowedRecipients: ReadonlySet<string>;
   readonly onMessage: (message: InboundMessage) => Effect.Effect<RelayResult>;
@@ -64,10 +65,42 @@ const normalizeIp = (raw: string | undefined): string => {
   return raw.startsWith("::ffff:") ? raw.slice(7) : raw;
 };
 
-/** Parses `MAIL FROM:<addr> [params...]` or `RCPT TO:<addr> [params...]`. */
+const hasDisallowedAddrChar = (value: string): boolean => {
+  for (const ch of value) {
+    const code = ch.charCodeAt(0);
+    if (code <= 0x20 || code === 0x7f || ch === "<" || ch === ">" || ch === "\\" || ch === '"') {
+      return true;
+    }
+  }
+  return false;
+};
+
+const isValidSmtpMailbox = (address: string): boolean => {
+  if (address.length === 0 || address.length > 254 || hasDisallowedAddrChar(address)) {
+    return false;
+  }
+  const atIdx = address.lastIndexOf("@");
+  if (atIdx <= 0 || atIdx === address.length - 1) return false;
+  const local = address.slice(0, atIdx);
+  const domain = address.slice(atIdx + 1);
+  if (local.includes("@") || domain.includes("@")) return false;
+  const labels = domain.split(".");
+  if (labels.length < 2) return false;
+  return labels.every(
+    (label) =>
+      label.length > 0 && label.length <= 63 && !label.startsWith("-") && !label.endsWith("-"),
+  );
+};
+
+/**
+ * Parses `MAIL FROM:<addr> [params...]` or `RCPT TO:<addr> [params...]`.
+ * Supports RFC 6531 (`SMTPUTF8`) internationalized addresses and RFC 5321 §4.5.1
+ * bare `<Postmaster>` recipient syntax when `barePostmasterDomain` is provided.
+ */
 export const parseEnvelopePath = (
   args: string,
   allowEmpty: boolean,
+  barePostmasterDomain?: string,
 ): { address: string; sizeParam?: number } | undefined => {
   const trimmed = args.trim();
   const angleMatch = trimmed.match(/^<\s*([^<>]*?)\s*>(.*)$/);
@@ -85,9 +118,12 @@ export const parseEnvelopePath = (
   if (address.length === 0) {
     if (!allowEmpty) return undefined;
   } else if (
-    address.length > 254 ||
-    !/^[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+$/.test(address)
+    !allowEmpty &&
+    barePostmasterDomain !== undefined &&
+    address.toLowerCase() === "postmaster"
   ) {
+    address = `postmaster@${barePostmasterDomain.toLowerCase()}`;
+  } else if (!isValidSmtpMailbox(address)) {
     return undefined;
   }
 
@@ -177,6 +213,7 @@ const createRawSmtpServer = (
     let dataChunks: Array<Buffer> = [];
     let dataBytes = 0;
     let dataOversized = false;
+    let prevDataLineHadCrlf = true;
     let processing = false;
 
     const sessionTimer = setTimeout(() => {
@@ -353,7 +390,7 @@ const createRawSmtpServer = (
             writeLine("452 4.5.3 Too many recipients");
             return "continue";
           }
-          const parsed = parseEnvelopePath(args.slice(3), false);
+          const parsed = parseEnvelopePath(args.slice(3), false, options.domain);
           if (!parsed?.address) {
             handleBadCommand("501 5.1.3 Bad recipient address syntax");
             return "continue";
@@ -383,6 +420,7 @@ const createRawSmtpServer = (
           dataChunks = [];
           dataBytes = 0;
           dataOversized = false;
+          prevDataLineHadCrlf = true;
           writeLine("354 End data with <CR><LF>.<CR><LF>");
           return "continue";
         }
@@ -467,8 +505,9 @@ const createRawSmtpServer = (
             }
             const status = handleCommandLine(lineBuf.toString("utf8"));
             if (status === "stop") return;
-          } else if (hasCrlf && lineBuf.length === 1 && lineBuf[0] === 46) {
+          } else if (prevDataLineHadCrlf && hasCrlf && lineBuf.length === 1 && lineBuf[0] === 46) {
             mode = "command";
+            prevDataLineHadCrlf = true;
             const oversized = dataOversized;
             const rawBytes = oversized ? new Uint8Array(0) : Buffer.concat(dataChunks);
             const currentMailFrom = mailFrom ?? "";
@@ -494,6 +533,7 @@ const createRawSmtpServer = (
               writeLine("451 4.3.0 Temporary local error");
             }
           } else {
+            prevDataLineHadCrlf = hasCrlf;
             appendDataLine(lineBuf);
           }
         }

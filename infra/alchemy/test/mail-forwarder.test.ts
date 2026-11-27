@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { execSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import net from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -18,6 +18,7 @@ import {
 import {
   buildArchiveObjectName,
   buildResendForwardPayload,
+  computeDeliveryFingerprint,
   type InboundMessage,
   layerMailRelay,
   MailRelay,
@@ -29,6 +30,7 @@ import {
   bundleMailForwarderScript,
   MAIL_FORWARDER_BUN_IMAGE_DIGEST,
   MAIL_FORWARDER_BUN_IMAGE_REF,
+  serializeMailForwarderConfig,
   sha256Prefixed,
 } from "../src/resources/mail";
 
@@ -100,7 +102,7 @@ describe("Effect MailForwarderConfig", () => {
 });
 
 describe("MIME parser", () => {
-  test("decodes RFC 2047 UTF-8 headers and extracts addresses safely", () => {
+  test("decodes RFC 2047 and raw RFC 6532 UTF-8 headers without corruption", () => {
     const encodedCzech = `=?UTF-8?B?${Buffer.from("Ověření áúčtu", "utf8").toString("base64")}?=`;
     expect(decodeRfc2047(encodedCzech)).toBe("Ověření áúčtu");
     expect(decodeRfc2047("=?UTF-8?Q?Verify_your_=E2=9C=85_account?=")).toBe(
@@ -114,6 +116,42 @@ describe("MIME parser", () => {
       address: "plain@example.org",
       displayName: undefined,
     });
+
+    const utf8Raw = [
+      "From: Jan Novák <jan@example.cz>",
+      "To: ops@kvitbit.com",
+      "Subject: Příliš žlutý kůň",
+      'Content-Type: text/plain; charset="utf-8"',
+      "",
+      "Úpěl ďábelské ódy.",
+    ].join("\r\n");
+    const parsedUtf8 = parseEmail(Buffer.from(utf8Raw, "utf8"));
+    expect(parsedUtf8.subject).toBe("Příliš žlutý kůň");
+    expect(parsedUtf8.fromDisplayName).toBe("Jan Novák");
+    expect(parsedUtf8.fromAddress).toBe("jan@example.cz");
+  });
+
+  test("preserves independent sibling parts in multipart/mixed per RFC 2046 §5.1.3", () => {
+    const raw = [
+      "From: notes@example.com",
+      "To: ops@kvitbit.com",
+      "Subject: Multi-part notes",
+      'Content-Type: multipart/mixed; boundary="mix-b"',
+      "",
+      "--mix-b",
+      'Content-Type: text/plain; charset="utf-8"',
+      "",
+      "Meeting notes",
+      "--mix-b",
+      'Content-Type: text/plain; charset="utf-8"',
+      "",
+      "Page two",
+      "--mix-b--",
+      "",
+    ].join("\r\n");
+
+    const parsed = parseEmail(Buffer.from(raw, "utf8"));
+    expect(parsed.text).toBe("Meeting notes\n\nPage two");
   });
 
   test("decodes quoted-printable soft line breaks and parses multipart mixed + alternative + attachments", () => {
@@ -199,7 +237,8 @@ describe("Effect MailRelay (GCS archive + Resend HTTPS)", () => {
     const payload = buildResendForwardPayload({
       message: sampleMessage,
       parsed,
-      archiveUri: `gs://kvitbit-prod-mail-archive-prod/${objectName}`,
+      deliveryFingerprint: computeDeliveryFingerprint(sampleMessage),
+      archiveBucket: "kvitbit-prod-mail-archive-prod",
       forwardTo: "filkalny@gmail.com",
       forwardFrom: "forwarder@kvitbit.com",
       maxAttachmentBytes: 7 * 1024 * 1024,
@@ -210,6 +249,68 @@ describe("Effect MailRelay (GCS archive + Resend HTTPS)", () => {
     expect(payload.to).toEqual(["filkalny@gmail.com"]);
     expect(payload.reply_to).toBe("verify@resend.com");
     expect(payload.subject).toBe("[ops] Verify your Resend account");
+  });
+
+  test("reuses identical Idempotency-Key and JSON payload across retries after ambiguous Resend failure", async () => {
+    const resendRequests: Array<{ key: string | undefined; body: string }> = [];
+    let attempt = 0;
+    const layer = layerMailRelay({
+      domain: "kvitbit.com",
+      forwardTo: "filkalny@gmail.com",
+      forwardFrom: "forwarder@kvitbit.com",
+      archiveBucket: "kvitbit-prod-mail-archive-prod",
+      relayMode: "resend",
+      resendApiKey: Option.some(Redacted.make("re_test_key")),
+    }).pipe(
+      Layer.provide(
+        mockHttpClientLayer((request) => {
+          if (request.url.includes("metadata.google.internal")) {
+            return new Response(JSON.stringify({ access_token: "tok-1", expires_in: 600 }), {
+              status: 200,
+              headers: { "content-type": "application/json" },
+            });
+          }
+          if (request.url.includes("storage.googleapis.com")) {
+            return new Response(JSON.stringify({ name: "ok" }), {
+              status: 200,
+              headers: { "content-type": "application/json" },
+            });
+          }
+          attempt += 1;
+          const bodyStr =
+            request.body._tag === "Uint8Array"
+              ? Buffer.from(request.body.body).toString("utf8")
+              : "";
+          resendRequests.push({
+            key: request.headers["idempotency-key"],
+            body: bodyStr,
+          });
+          if (attempt === 1) {
+            return new Response("upstream timeout", { status: 504 });
+          }
+          return new Response(JSON.stringify({ id: "email_deduped" }), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          });
+        }),
+      ),
+    );
+
+    const { first, second } = await Effect.runPromise(
+      Effect.gen(function* () {
+        const relay = yield* MailRelay;
+        const firstRes = yield* relay.handleMessage(sampleMessage);
+        const secondRes = yield* relay.handleMessage(sampleMessage);
+        return { first: firstRes, second: secondRes };
+      }).pipe(Effect.provide(layer)),
+    );
+
+    expect(first.smtpCode).toBe(451);
+    expect(second.smtpCode).toBe(250);
+    expect(resendRequests).toHaveLength(2);
+    expect(resendRequests[0]?.key).toBeDefined();
+    expect(resendRequests[0]?.key).toBe(resendRequests[1]?.key);
+    expect(resendRequests[0]?.body).toBe(resendRequests[1]?.body);
   });
 
   test("archives to GCS and returns 250 without calling Resend in archive-only mode", async () => {
@@ -343,14 +444,21 @@ describe("Effect MailRelay (GCS archive + Resend HTTPS)", () => {
   });
 });
 
-describe("Effect SMTP server (RFC 5321 + STARTTLS)", () => {
-  test("parses envelope paths including empty bounce sender and SIZE extension", () => {
+describe("Effect SMTP server (RFC 5321 + RFC 6531 SMTPUTF8 + STARTTLS)", () => {
+  test("parses envelope paths including empty bounce, SMTPUTF8 international sender, SIZE, and bare Postmaster", () => {
     expect(parseEnvelopePath("<>", true)).toEqual({ address: "" });
     expect(parseEnvelopePath("<>", false)).toBeUndefined();
     expect(parseEnvelopePath("<OPS@Kvitbit.com> SIZE=4096 BODY=8BITMIME", false)).toEqual({
       address: "ops@kvitbit.com",
       sizeParam: 4096,
     });
+    expect(parseEnvelopePath("<žan@example.net> SMTPUTF8", true)).toEqual({
+      address: "žan@example.net",
+    });
+    expect(parseEnvelopePath("<Postmaster>", false, "kvitbit.com")).toEqual({
+      address: "postmaster@kvitbit.com",
+    });
+    expect(parseEnvelopePath("<bad addr@example.net>", true)).toBeUndefined();
   });
 
   const runSmtpSession = (
@@ -418,7 +526,7 @@ describe("Effect SMTP server (RFC 5321 + STARTTLS)", () => {
       attach(sock);
     });
 
-  test("enforces recipient allowlist, dot-unstuffing, SMTP smuggling protection, size cap, and STARTTLS", async () => {
+  test("enforces allowlist, bare Postmaster, SMTPUTF8, strict both-sides CRLF DATA termination, size cap, and STARTTLS", async () => {
     const certDir = mkdtempSync(join(tmpdir(), "kvitbit-smtp-tls-"));
     try {
       execSync(
@@ -435,11 +543,16 @@ describe("Effect SMTP server (RFC 5321 + STARTTLS)", () => {
             const bound = yield* startSmtpServer({
               host: "127.0.0.1",
               port: 0,
+              domain: "kvitbit.com",
               mxHost: "mx.kvitbit.com",
-              allowedRecipients: new Set(["ops@kvitbit.com", "founder@kvitbit.com"]),
+              allowedRecipients: new Set([
+                "ops@kvitbit.com",
+                "founder@kvitbit.com",
+                "postmaster@kvitbit.com",
+              ]),
               tlsCert,
               tlsKey,
-              maxMessageBytes: 1024,
+              maxMessageBytes: 2048,
               onMessage: (msg) =>
                 Effect.sync(() => {
                   received.push(msg);
@@ -452,13 +565,17 @@ describe("Effect SMTP server (RFC 5321 + STARTTLS)", () => {
               { send: "STARTTLS\r\n" },
               { upgradeTls: true },
               { send: "EHLO sender.example.com\r\n" },
-              { send: "MAIL FROM:<verify@resend.com> SIZE=99999\r\n" },
-              { send: "MAIL FROM:<verify@resend.com> SIZE=200\r\n" },
+              { send: "MAIL FROM:<žan@example.net> SIZE=99999\r\n" },
+              { send: "MAIL FROM:<žan@example.net> SIZE=200 SMTPUTF8\r\n" },
               { send: "RCPT TO:<unknown@kvitbit.com>\r\n" },
               { send: "RCPT TO:<OPS@kvitbit.com>\r\n" },
+              { send: "RCPT TO:<Postmaster>\r\n" },
               { send: "DATA\r\n" },
               {
-                send: "Subject: Hello\r\n\r\n..leading dot\r\nnot-end\n.\nstill body\r\n.\r\n",
+                // Verify BOTH smuggling variants fail to terminate DATA:
+                // 1) bare LF after dot (`\r\n.\n`)
+                // 2) bare LF before dot (`\n.\r\n`)
+                send: "Subject: Příliš žlutý\r\n\r\n..leading dot\r\nsmuggle1\r\n.\nsmuggle2\n.\r\nstill body\r\n.\r\n",
               },
               { send: "QUIT\r\n" },
             ]);
@@ -478,17 +595,21 @@ describe("Effect SMTP server (RFC 5321 + STARTTLS)", () => {
       const firstMsg = received[0];
       if (!firstMsg) throw new Error("expected received message");
       expect(firstMsg.tls).toBe(true);
-      expect(firstMsg.rcptTo).toEqual(["ops@kvitbit.com"]);
-      const body = Buffer.from(firstMsg.rawBytes).toString("utf8");
-      expect(body).toContain("\r\n.leading dot\r\n");
-      expect(body).toContain("not-end\r\n.\r\nstill body");
+      expect(firstMsg.mailFrom).toBe("žan@example.net");
+      expect(firstMsg.rcptTo).toEqual(["ops@kvitbit.com", "postmaster@kvitbit.com"]);
+      const parsed = parseEmail(firstMsg.rawBytes);
+      expect(parsed.subject).toBe("Příliš žlutý");
+      expect(parsed.text).toContain(".leading dot");
+      expect(parsed.text).toContain("smuggle1");
+      expect(parsed.text).toContain("smuggle2");
+      expect(parsed.text).toContain("still body");
     } finally {
       rmSync(certDir, { recursive: true, force: true });
     }
   });
 });
 
-describe("Effect mail forwarder bundling & Cloud DNS helpers", () => {
+describe("Effect mail forwarder bundling, cold-pull reconciler, & Cloud DNS helpers", () => {
   test("bundles and compresses mail-forwarder deterministically within GCE 256 KB metadata limit", async () => {
     const first = await Effect.runPromise(bundleMailForwarderScript);
     const second = await Effect.runPromise(bundleMailForwarderScript);
@@ -498,20 +619,165 @@ describe("Effect mail forwarder bundling & Cloud DNS helpers", () => {
     expect(first.scriptB64Gz.length).toBeLessThan(200 * 1024);
     const decompressed = gunzipSync(Buffer.from(first.scriptB64Gz, "base64")).toString("utf8");
     expect(sha256Prefixed(decompressed)).toBe(first.sha);
-    expect(MAIL_FORWARDER_BUN_IMAGE_REF).toBe(
-      `docker.io/oven/bun@${MAIL_FORWARDER_BUN_IMAGE_DIGEST}`,
-    );
+    expect(MAIL_FORWARDER_BUN_IMAGE_REF).toBe(`oven/bun@${MAIL_FORWARDER_BUN_IMAGE_DIGEST}`);
   });
 
-  test("startup script hardens container, decompresses script, and redirects TCP 25 -> 2525", () => {
-    const script = buildMailForwarderStartupScript();
-    expect(script).toContain("kvitbit-mail-script-b64gz");
-    expect(script).toContain("base64 -d | gunzip");
-    expect(script).toContain("PREROUTING -p tcp --dport 25 -j REDIRECT --to-port");
-    expect(script).toContain("--read-only --cap-drop=ALL --security-opt=no-new-privileges:true");
-    expect(script).toContain("--user 1000:1000");
-    expect(script).toContain("/bin/bash /var/lib/kvitbit-mail/reconcile-mail.sh");
-    expect(script).toContain("mail-active-target");
+  test("generated reconcile-mail.sh cold-pulls image with Docker 29 RepoDigests normalization, decompresses script, and publishes active target", async () => {
+    const bundle = await Effect.runPromise(bundleMailForwarderScript);
+    const startup = buildMailForwarderStartupScript();
+    const match = startup.match(
+      /cat <<'RECONCILE' > \/var\/lib\/kvitbit-mail\/reconcile-mail\.sh\n([\s\S]*?)\nRECONCILE/,
+    );
+    if (!match?.[1]) throw new Error("Failed to extract reconcile-mail.sh from startup script");
+    const reconcileScript = match[1];
+
+    const runtimeCfg = serializeMailForwarderConfig({
+      version: 1,
+      projectId: "kvitbit-prod",
+      mxHost: "mx.kvitbit.com",
+      domain: "kvitbit.com",
+      forwardTo: "filkalny@gmail.com",
+      forwardFrom: "forwarder@kvitbit.com",
+      aliases: ["founder", "ops"],
+      archiveBucket: "kvitbit-prod-mail-archive-prod",
+      relayMode: "archive-only",
+      smtpPort: 2525,
+      healthPort: 8081,
+      resendSecretId: undefined,
+    });
+    const runtimeCfgSha = sha256Prefixed(runtimeCfg);
+    const imageId = `sha256:${"c".repeat(64)}`;
+
+    const sandbox = mkdtempSync(join(tmpdir(), "kvitbit-mail-reconcile-"));
+    try {
+      const binDir = join(sandbox, "bin");
+      const metaDir = join(sandbox, "meta");
+      const stateDir = join(sandbox, "state");
+      const runDir = join(sandbox, "run");
+      const guestAttrPath = join(sandbox, "guest-attr.txt");
+      const pulledMarker = join(sandbox, "pulled");
+      const runningMarker = join(sandbox, "running");
+
+      execSync(`mkdir -p "${binDir}" "${metaDir}" "${stateDir}" "${runDir}"`);
+      writeFileSync(join(sandbox, "reconcile-mail.sh"), reconcileScript, { mode: 0o700 });
+      writeFileSync(join(metaDir, "kvitbit-mail-image-digest"), MAIL_FORWARDER_BUN_IMAGE_DIGEST);
+      // Test with docker.io/ prefix in metadata while Docker 29 RepoDigests returns short `oven/bun@sha256:...`
+      writeFileSync(
+        join(metaDir, "kvitbit-mail-image-ref"),
+        `docker.io/oven/bun@${MAIL_FORWARDER_BUN_IMAGE_DIGEST}`,
+      );
+      writeFileSync(join(metaDir, "kvitbit-mail-config"), runtimeCfg);
+      writeFileSync(join(metaDir, "kvitbit-mail-config-sha"), runtimeCfgSha);
+      writeFileSync(join(metaDir, "kvitbit-mail-script-b64gz"), bundle.scriptB64Gz);
+      writeFileSync(join(metaDir, "kvitbit-mail-script-sha"), bundle.sha);
+
+      // Stub curl for GCE metadata, guest-attributes, and localhost /healthz
+      writeFileSync(
+        join(binDir, "curl"),
+        `#!/bin/bash
+set -euo pipefail
+url=""
+method="GET"
+data=""
+dump_header=""
+for arg in "$@"; do
+  case "$arg" in
+    http://*|https://*) url="$arg" ;;
+  esac
+done
+prev=""
+for arg in "$@"; do
+  if [ "$prev" = "-X" ]; then method="$arg"; fi
+  if [ "$prev" = "--data" ]; then data="$arg"; fi
+  if [ "$prev" = "--dump-header" ]; then dump_header="$arg"; fi
+  prev="$arg"
+done
+if [[ "$url" == *"/instance/attributes/?recursive=true" ]]; then
+  printf 'HTTP/1.1 200 OK\\r\\nETag: etag-1\\r\\n\\r\\n'
+  exit 0
+fi
+if [[ "$url" == *"/instance/attributes/"* ]]; then
+  key="\${url##*/}"
+  cat "${metaDir}/$key"
+  exit 0
+fi
+if [[ "$url" == *"/instance/guest-attributes/kvitbit/mail-active-target" ]] && [ "$method" = "PUT" ]; then
+  printf '%s' "$data" > "${guestAttrPath}"
+  exit 0
+fi
+if [[ "$url" == "http://127.0.0.1:8081/healthz" ]]; then
+  [ -f "${runningMarker}" ] || exit 7
+  printf '{"status":"ok"}'
+  exit 0
+fi
+exit 1
+`,
+        { mode: 0o755 },
+      );
+
+      // Stub docker simulating Docker 29 returning short `oven/bun@sha256:...` in RepoDigests
+      writeFileSync(
+        join(binDir, "docker"),
+        `#!/bin/bash
+set -euo pipefail
+if [ "$1" = "pull" ]; then
+  touch "${pulledMarker}"
+  exit 0
+fi
+if [ "$1" = "image" ] && [ "$2" = "inspect" ]; then
+  [ -f "${pulledMarker}" ] || exit 1
+  printf '%s\\n%s\\n' "${imageId}" "oven/bun@${MAIL_FORWARDER_BUN_IMAGE_DIGEST}"
+  exit 0
+fi
+if [ "$1" = "inspect" ]; then
+  [ -f "${runningMarker}" ] || exit 1
+  printf 'true|%s|%s|%s|%s\\n' "${imageId}" "${MAIL_FORWARDER_BUN_IMAGE_DIGEST}" "${runtimeCfgSha}" "${bundle.sha}"
+  exit 0
+fi
+exit 1
+`,
+        { mode: 0o755 },
+      );
+
+      writeFileSync(
+        join(binDir, "systemctl"),
+        `#!/bin/bash
+if [ "$1" = "start" ]; then touch "${runningMarker}"; fi
+if [ "$1" = "stop" ]; then rm -f "${runningMarker}"; fi
+exit 0
+`,
+        { mode: 0o755 },
+      );
+      writeFileSync(join(binDir, "iptables"), "#!/bin/bash\nexit 0\n", { mode: 0o755 });
+      writeFileSync(join(binDir, "chown"), "#!/bin/bash\nexit 0\n", { mode: 0o755 });
+
+      const result = Bun.spawnSync(["bash", join(sandbox, "reconcile-mail.sh")], {
+        env: {
+          PATH: `${binDir}:${process.env.PATH ?? "/usr/bin:/bin"}`,
+          KVITBIT_MAIL_STATE_DIR: stateDir,
+          KVITBIT_MAIL_RUN_DIR: runDir,
+        },
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+
+      if (result.exitCode !== 0) {
+        throw new Error(
+          `reconcile-mail.sh failed (${result.exitCode}): ${result.stderr.toString()}`,
+        );
+      }
+      expect(readFileSync(guestAttrPath, "utf8")).toBe(
+        `${MAIL_FORWARDER_BUN_IMAGE_DIGEST}|${runtimeCfgSha}|${bundle.sha}`,
+      );
+      const installedScript = readFileSync(join(stateDir, "mail-forwarder.mjs"), "utf8");
+      expect(sha256Prefixed(installedScript)).toBe(bundle.sha);
+      const envContent = readFileSync(join(runDir, "mail.env"), "utf8");
+      expect(envContent).toContain("KVITBIT_MAIL_DOMAIN=kvitbit.com");
+      expect(envContent).toContain("KVITBIT_MAIL_ALIASES=founder,ops");
+      expect(envContent).toContain("KVITBIT_MAIL_RELAY_MODE=archive-only");
+    } finally {
+      rmSync(sandbox, { recursive: true, force: true });
+    }
   });
 
   test("formats long Cloud DNS TXT records (>255 bytes DKIM) and normalizes MX records", () => {
