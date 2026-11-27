@@ -55,7 +55,7 @@ describe("@kvitbit/ui-port/style", () => {
   });
 
   test("uniwindThemeVariables emits all runtime color and radius variables for active theme", () => {
-    const base = initialThemeState("light");
+    const base = initialThemeState({ scheme: "light" });
     const theme = effectiveTheme({
       ...base,
       preference: { ...base.preference, style: "cozy" },
