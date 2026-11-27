@@ -493,10 +493,11 @@ const walkEntity = (raw: Uint8Array, out: CollectedParts, depth: number): void =
     if (mimeType === "multipart/alternative") {
       // Per RFC 2046 §5.1.4, render each direct child completely (including nested
       // multipart/mixed or multipart/alternative children) before selecting alternatives.
-      // Track explicit plain-text separately so a later HTML-only sibling replaces HTML
-      // without discarding an earlier explicit plain-text alternative.
+      // Only propagate authored plain text (`plainAltText`) in `segment.text`; HTML-only
+      // alternatives emit `{ html }` alone so an outer multipart/alternative never mistakes
+      // HTML-stripped fallback text for authored plain text (top-level renderSegments derives
+      // stripped text automatically when no authored plain text exists).
       let plainAltText: string | undefined;
-      let fallbackText: string | undefined;
       let richestHtml: string | undefined;
       const attachments: Array<ParsedAttachment> = [];
 
@@ -509,17 +510,13 @@ const walkEntity = (raw: Uint8Array, out: CollectedParts, depth: number): void =
         }
         if (rendered.html !== undefined) {
           richestHtml = rendered.html;
-          if (!rendered.hasExplicitText && rendered.text !== undefined) {
-            fallbackText = rendered.text;
-          }
         }
         attachments.push(...childBucket.attachments);
       }
 
-      const selectedText = plainAltText ?? fallbackText;
-      if (selectedText !== undefined || richestHtml !== undefined) {
+      if (plainAltText !== undefined || richestHtml !== undefined) {
         out.segments.push({
-          ...(selectedText !== undefined ? { text: selectedText } : {}),
+          ...(plainAltText !== undefined ? { text: plainAltText } : {}),
           ...(richestHtml !== undefined ? { html: richestHtml } : {}),
         });
       }

@@ -226,6 +226,33 @@ describe("MIME parser", () => {
     const nestedAltParsed = parseEmail(Buffer.from(nestedAltRaw, "utf8"));
     expect(nestedAltParsed.text).toBe("Plain version with reference 123");
     expect(nestedAltParsed.html).toBe("<p>Rich version</p>");
+
+    // Reverse nesting: outer plain text followed by nested HTML-only multipart/alternative
+    // must keep the outer authored plain text instead of overwriting with stripped HTML.
+    const reverseNestedAltRaw = [
+      "From: notes@example.com",
+      "To: ops@kvitbit.com",
+      "Subject: Outer plain + inner HTML-only alternative",
+      'Content-Type: multipart/alternative; boundary="outer-rev"',
+      "",
+      "--outer-rev",
+      'Content-Type: text/plain; charset="utf-8"',
+      "",
+      "Authored 123",
+      "--outer-rev",
+      'Content-Type: multipart/alternative; boundary="inner-html-only"',
+      "",
+      "--inner-html-only",
+      'Content-Type: text/html; charset="utf-8"',
+      "",
+      "<p>Latest HTML</p>",
+      "--inner-html-only--",
+      "--outer-rev--",
+      "",
+    ].join("\r\n");
+    const reverseNestedAltParsed = parseEmail(Buffer.from(reverseNestedAltRaw, "utf8"));
+    expect(reverseNestedAltParsed.text).toBe("Authored 123");
+    expect(reverseNestedAltParsed.html).toBe("<p>Latest HTML</p>");
   });
 
   test("parses RFC 5322 trailing/inline comments, case-distinct local-part Reply-To, and UTF-8 Reply-To", () => {
