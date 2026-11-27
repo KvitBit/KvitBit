@@ -10,13 +10,20 @@ import {
   EmailSender,
   type OutboundEmail,
 } from "@kvitbit/domain/ports";
-import { Duration, Effect, Layer, Option, type Redacted } from "effect";
-import {
-  HttpClient,
-  type HttpClientError,
-  HttpClientRequest,
-  type HttpClientResponse,
-} from "effect/http";
+import * as Arr from "effect/Array";
+import * as Duration from "effect/Duration";
+import * as Effect from "effect/Effect";
+import * as Base64 from "effect/encoding/Base64";
+import * as HttpClient from "effect/http/HttpClient";
+import type * as HttpClientError from "effect/http/HttpClientError";
+import * as HttpClientRequest from "effect/http/HttpClientRequest";
+import type * as HttpClientResponse from "effect/http/HttpClientResponse";
+import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
+import * as Rec from "effect/Record";
+import type * as Redacted from "effect/Redacted";
+import * as Schema from "effect/Schema";
+import * as Str from "effect/String";
 import { boundedToken, type EmailSenderService } from "./shared";
 
 export interface ResendConfig {
@@ -32,12 +39,15 @@ export interface ResendConfig {
 export const RESEND_PROVIDER = "resend";
 
 const idempotencyKeyMaxLength = 256;
+const idempotencyKeyPattern = /^[\x21-\x7e]+$/;
+const trailingSlashes = /\/+$/;
 const tagPattern = /[^A-Za-z0-9_-]/g;
 
 /** Resend tag names and values allow ASCII letters, digits, `_` and `-`, at most 256 each. */
-const resendTag = (raw: string): string => raw.replace(tagPattern, "_").slice(0, 256);
+const resendTag = (raw: string): string => Str.slice(0, 256)(Str.replace(tagPattern, "_")(raw));
 
 /** Resend's `POST /emails` body for a message. */
+// @effect-diagnostics-next-line missingPipeableSignature:off Keep the published positional adapter API.
 export const resendBody = (message: OutboundEmail, from: string) => ({
   from,
   to: message.to,
@@ -47,14 +57,14 @@ export const resendBody = (message: OutboundEmail, from: string) => ({
   html: message.html,
   text: message.text,
   ...(message.attachments.length > 0 && {
-    attachments: message.attachments.map((attachment) => ({
+    attachments: Arr.map(message.attachments, (attachment) => ({
       filename: attachment.filename,
-      content: Buffer.from(attachment.bytes).toString("base64"),
+      content: Base64.encode(attachment.bytes),
       content_type: attachment.contentType,
     })),
   }),
-  ...(Object.keys(message.tags).length > 0 && {
-    tags: Object.entries(message.tags).map(([name, value]) => ({
+  ...(Rec.keys(message.tags).length > 0 && {
+    tags: Arr.map(Rec.toEntries(message.tags), ([name, value]) => ({
       name: resendTag(name),
       value: resendTag(value),
     })),
@@ -63,7 +73,7 @@ export const resendBody = (message: OutboundEmail, from: string) => ({
 
 /** Resend's Idempotency-Key for a delivery id; over 256 characters becomes a SHA-256 digest. */
 export const resendIdempotencyKey = (key: string): string =>
-  boundedToken(key, idempotencyKeyMaxLength, /^[\x21-\x7e]+$/);
+  boundedToken({ maxLength: idempotencyKeyMaxLength, allowed: idempotencyKeyPattern })(key);
 
 type SendError = EmailRejected | EmailNotAccepted | EmailOutcomeUnknown;
 
@@ -100,6 +110,7 @@ const preConnectCodes = new Set([
   "ENETUNREACH",
   "UND_ERR_CONNECT_TIMEOUT",
   "ConnectionRefused",
+  // biome-ignore lint/security/noSecrets: Bun fetch error code for a socket it could not open.
   "FailedToOpenSocket",
   "DNSError",
   "CERT_HAS_EXPIRED",
@@ -108,19 +119,26 @@ const preConnectCodes = new Set([
   "ERR_TLS_CERT_ALTNAME_INVALID",
 ]);
 
+const transportCause = Schema.Struct({
+  code: Schema.optional(Schema.Unknown),
+  errors: Schema.optional(Schema.Unknown),
+  cause: Schema.optional(Schema.Unknown),
+});
+const decodeTransportCause = Schema.decodeUnknownOption(transportCause);
+
 /** The `code` strings along a cause chain (and inside an AggregateError), outermost first. */
-const causeCodes = (cause: unknown): ReadonlyArray<string> => {
+const causeCodes = (root: ReturnType<typeof decodeTransportCause>): ReadonlyArray<string> => {
   const codes: Array<string> = [];
-  const visit = (current: unknown, depth: number) => {
-    if (depth > 5 || typeof current !== "object" || current === null) return;
-    const code = "code" in current ? current.code : undefined;
-    if (typeof code === "string") codes.push(code);
-    if ("errors" in current && Array.isArray(current.errors)) {
-      for (const inner of current.errors) visit(inner, depth + 1);
+  const visit = (decoded: ReturnType<typeof decodeTransportCause>, depth: number) => {
+    if (depth > 5 || Option.isNone(decoded)) return;
+    const { code, errors, cause } = decoded.value;
+    if (Schema.is(Schema.String)(code)) codes.push(code);
+    if (Arr.isArray(errors)) {
+      for (const inner of errors) visit(decodeTransportCause(inner), depth + 1);
     }
-    if ("cause" in current) visit(current.cause, depth + 1);
+    if (cause !== undefined) visit(decodeTransportCause(cause), depth + 1);
   };
-  visit(cause, 0);
+  visit(root, 0);
   return codes;
 };
 
@@ -134,7 +152,7 @@ const safeCause = (reason: HttpClientError.HttpClientErrorReason) => ({
     reason.description !== undefined && {
       description: reason.description,
     }),
-  codes: causeCodes("cause" in reason ? reason.cause : undefined),
+  codes: causeCodes(decodeTransportCause("cause" in reason ? reason.cause : undefined)),
 });
 
 /**
@@ -149,7 +167,7 @@ export const classifyResendTransport = (error: HttpClientError.HttpClientError):
     case "InvalidUrlError":
       return new EmailNotAccepted({ cause });
     case "TransportError":
-      return cause.codes.some((code) => preConnectCodes.has(code))
+      return Arr.some(cause.codes, (code) => preConnectCodes.has(code))
         ? new EmailNotAccepted({ cause })
         : new EmailOutcomeUnknown({ cause });
     case "StatusCodeError":
@@ -159,21 +177,20 @@ export const classifyResendTransport = (error: HttpClientError.HttpClientError):
   }
 };
 
+const decodeAcceptedBody = Schema.decodeUnknownOption(Schema.Struct({ id: Schema.NonEmptyString }));
+
 /** A 2xx answer must carry the message id; without one, acceptance is unknown. */
 const acceptedId = (
   response: HttpClientResponse.HttpClientResponse,
 ): Effect.Effect<string, EmailOutcomeUnknown> =>
   response.json.pipe(
     Effect.mapError((error) => new EmailOutcomeUnknown({ cause: safeCause(error.reason) })),
-    Effect.flatMap((body) =>
-      typeof body === "object" &&
-      body !== null &&
-      "id" in body &&
-      typeof body.id === "string" &&
-      body.id.length > 0
-        ? Effect.succeed(body.id)
-        : Effect.fail(new EmailOutcomeUnknown({ cause: { body: "missing id" } })),
-    ),
+    Effect.flatMap((body) => {
+      const decoded = decodeAcceptedBody(body);
+      return Option.isSome(decoded)
+        ? Effect.succeed(decoded.value.id)
+        : Effect.fail(new EmailOutcomeUnknown({ cause: { body: "missing id" } }));
+    }),
   );
 
 export const makeResendEmailSender = (
@@ -181,31 +198,33 @@ export const makeResendEmailSender = (
 ): Effect.Effect<EmailSenderService, never, HttpClient.HttpClient> =>
   Effect.gen(function* () {
     const client = yield* HttpClient.HttpClient;
-    const url = `${(config.baseUrl ?? "https://api.resend.com").replace(/\/+$/, "")}/emails`;
+    const url = `${Str.replace(trailingSlashes, "")(config.baseUrl ?? "https://api.resend.com")}/emails`;
     const timeout = config.timeout ?? Duration.seconds(15);
 
-    const send: EmailSenderService["send"] = (message, { idempotencyKey }) =>
-      Effect.gen(function* () {
-        const request = HttpClientRequest.post(url).pipe(
-          HttpClientRequest.bearerToken(config.apiKey),
-          HttpClientRequest.acceptJson,
-          HttpClientRequest.setHeader("Idempotency-Key", resendIdempotencyKey(idempotencyKey)),
-          HttpClientRequest.bodyJsonUnsafe(resendBody(message, config.from)),
-        );
-        const answer = yield* client.execute(request).pipe(
-          Effect.mapError(classifyResendTransport),
-          Effect.flatMap((response) =>
-            response.status >= 200 && response.status < 300
-              ? acceptedId(response)
-              : Effect.fail(classifyResendStatus(response.status)),
-          ),
-          Effect.timeoutOption(timeout),
-        );
-        if (Option.isNone(answer)) {
-          return yield* new EmailOutcomeUnknown({ cause: { timedOut: true } });
-        }
-        return { provider: RESEND_PROVIDER, providerMessageId: answer.value };
-      }).pipe(Effect.withSpan("ResendEmailSender.send"));
+    const send = Effect.fn("ResendEmailSender.send")(function* (
+      message: OutboundEmail,
+      { idempotencyKey }: Parameters<EmailSenderService["send"]>[1],
+    ) {
+      const request = HttpClientRequest.post(url).pipe(
+        HttpClientRequest.bearerToken(config.apiKey),
+        HttpClientRequest.acceptJson,
+        HttpClientRequest.setHeader("Idempotency-Key", resendIdempotencyKey(idempotencyKey)),
+        HttpClientRequest.bodyJsonUnsafe(resendBody(message, config.from)),
+      );
+      const answer = yield* client.execute(request).pipe(
+        Effect.mapError(classifyResendTransport),
+        Effect.flatMap((response) =>
+          response.status >= 200 && response.status < 300
+            ? acceptedId(response)
+            : Effect.fail(classifyResendStatus(response.status)),
+        ),
+        Effect.timeoutOption(timeout),
+      );
+      if (Option.isNone(answer)) {
+        return yield* new EmailOutcomeUnknown({ cause: { timedOut: true } });
+      }
+      return { provider: RESEND_PROVIDER, providerMessageId: answer.value };
+    });
 
     return EmailSender.of({ send });
   });

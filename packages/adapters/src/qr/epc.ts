@@ -8,8 +8,12 @@
  * unstructured remittance text (max 140, never both). Trailing empty lines are dropped; the
  * whole payload is at most 331 bytes.
  */
+
 import type { Invalid } from "@kvitbit/domain";
-import { type BigDecimal, Result } from "effect";
+import * as Arr from "effect/Array";
+import type * as BigDecimal from "effect/BigDecimal";
+import * as Result from "effect/Result";
+import * as Str from "effect/String";
 import {
   EEA_COUNTRIES,
   invalid,
@@ -33,6 +37,8 @@ export interface EpcInput {
 
 export const EPC_LIMITS = { name: 70, reference: 35, text: 140, payloadBytes: 331 } as const;
 
+// biome-ignore lint/suspicious/noControlCharactersInRegex: control characters are rejected
+const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f]/;
 const utf8Length = (s: string): number => new TextEncoder().encode(s).length;
 
 export const epc = (input: EpcInput): Result.Result<string, Invalid> =>
@@ -41,27 +47,37 @@ export const epc = (input: EpcInput): Result.Result<string, Invalid> =>
     const bic = yield* validBic("bic", input.bic);
     // Version 002 allows omitting the BIC only within the EEA. Only the beneficiary side can be
     // checked here; a payer PSP outside the EEA is the caller's concern.
-    if (bic === undefined && !EEA_COUNTRIES.has(iban.slice(0, 2))) {
+    if (bic === undefined && !EEA_COUNTRIES.has(Str.slice(0, 2)(iban))) {
       return yield* Result.fail(
-        invalid("bic", "request.malformed", { reason: "required_outside_eea" }),
+        invalid({
+          path: ["bic"],
+          code: "request.malformed",
+          params: { reason: "required_outside_eea" },
+        }),
       );
     }
-    const name = truncateAtWord(singleLine(input.beneficiaryName), EPC_LIMITS.name);
-    if (name === "") return yield* Result.fail(invalid("beneficiaryName", "request.malformed"));
+    const name = truncateAtWord({ max: EPC_LIMITS.name })(singleLine(input.beneficiaryName));
+    if (name === "")
+      return yield* Result.fail(invalid({ path: ["beneficiaryName"], code: "request.malformed" }));
     const amount = yield* validAmount("amount", input.amount, "0.01", "999999999.99");
 
     let reference = "";
     let text = "";
     if ("reference" in input.remittance) {
-      reference = input.remittance.reference.replace(/\s+/g, "");
-      // biome-ignore lint/suspicious/noControlCharactersInRegex: control characters are rejected
-      if (reference === "" || /[\u0000-\u001f\u007f]/.test(reference)) {
-        return yield* Result.fail(invalid(["remittance", "reference"], "request.malformed"));
+      reference = Str.replace(/\s+/g, "")(input.remittance.reference);
+      if (reference === "" || CONTROL_CHARACTERS.test(reference)) {
+        return yield* Result.fail(
+          invalid({ path: ["remittance", "reference"], code: "request.malformed" }),
+        );
       }
       if (reference.length > EPC_LIMITS.reference) {
         return yield* Result.fail(
-          invalid(["remittance", "reference"], "qr.field_too_long", {
-            max: String(EPC_LIMITS.reference),
+          invalid({
+            path: ["remittance", "reference"],
+            code: "qr.field_too_long",
+            params: {
+              max: String(EPC_LIMITS.reference),
+            },
           }),
         );
       }
@@ -70,17 +86,22 @@ export const epc = (input: EpcInput): Result.Result<string, Invalid> =>
     const head = ["BCD", "002", "1", "SCT", bic ?? "", name, iban, `EUR${amount}`, "", reference];
     if (!("reference" in input.remittance)) {
       // Free text yields first when multi-byte characters would push the payload over budget.
-      const budget = EPC_LIMITS.payloadBytes - utf8Length(`${head.join("\n")}\n`);
-      text = truncateAtWord(singleLine(input.remittance.text), EPC_LIMITS.text, (s) =>
-        utf8Length(s) > budget ? Number.POSITIVE_INFINITY : [...s].length,
-      );
+      const budget = EPC_LIMITS.payloadBytes - utf8Length(`${Arr.join(head, "\n")}\n`);
+      text = truncateAtWord({
+        max: EPC_LIMITS.text,
+        measure: (s) => (utf8Length(s) > budget ? Number.POSITIVE_INFINITY : Array.from(s).length),
+      })(singleLine(input.remittance.text));
     }
     const lines = [...head, text];
     while (lines.at(-1) === "") lines.pop();
-    const payload = lines.join("\n");
+    const payload = Arr.join(lines, "\n");
     if (utf8Length(payload) > EPC_LIMITS.payloadBytes) {
       return yield* Result.fail(
-        invalid("payload", "qr.field_too_long", { max: String(EPC_LIMITS.payloadBytes) }),
+        invalid({
+          path: ["payload"],
+          code: "qr.field_too_long",
+          params: { max: String(EPC_LIMITS.payloadBytes) },
+        }),
       );
     }
     return payload;

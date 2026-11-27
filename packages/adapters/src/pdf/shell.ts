@@ -1,5 +1,7 @@
 /** The self-contained A4 HTML page every template renders into. */
+
 import type { Locale } from "@kvitbit/domain";
+import * as Fn from "effect/Function";
 import { escapeHtml } from "./format";
 
 /**
@@ -12,7 +14,7 @@ export const SHEET_ZOOM = 794 / 688;
  * No network: fonts fall back from the brand faces (used only when installed on the render
  * host) to system faces. Colours are forced in print.
  */
-export const BASE_CSS = `
+const BASE_CSS = `
 @page { size: A4; margin: 10mm 0 10mm; }
 @page :first { margin-top: 0; }
 * { box-sizing: border-box; }
@@ -57,7 +59,11 @@ ${input.body}
 </html>
 `;
 
-export const watermark = (draft: boolean, text: string): string =>
+export const watermark: {
+  (text: string): (draft: boolean) => string;
+  (draft: boolean, text: string): string;
+} = Fn.dual(2, (draft: boolean, text: string): string =>
   draft
     ? `<div class="watermark" data-watermark="draft"><span>${escapeHtml(text)}</span></div>`
-    : "";
+    : "",
+);

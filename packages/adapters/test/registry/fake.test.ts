@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { CompanyRegistry, type RegistryRecord, RegistryUnavailable } from "@kvitbit/domain/ports";
-import { Effect, type Layer } from "effect";
+import * as Effect from "effect/Effect";
+import type * as Layer from "effect/Layer";
 import { FakeCompanyRegistry, FakeCompanyRegistryControl } from "../../src/registry";
 
 const run = <A, E>(
@@ -23,10 +24,10 @@ const record: RegistryRecord = {
   terminatedOn: null,
 };
 
-describe("FakeCompanyRegistry", () => {
+describe("Fake company registry", () => {
   test("the default seed covers a VAT s.r.o., a trader without DIČ and a dissolved company", async () => {
     const [sro, trader, dissolved] = await run(
-      Effect.all([lookup("10047514"), lookup("10079190"), lookup("10087109")]),
+      Effect.all([lookup("10047514"), lookup("10079190"), lookup("10087109")], { concurrency: 1 }),
     );
     expect(sro?.dic).toBe("CZ10047514");
     expect(sro?.registerEntry).toBe("C 123456/MSPH");
@@ -42,10 +43,9 @@ describe("FakeCompanyRegistry", () => {
 
   test("layerWith replaces the seed", async () => {
     const layer = FakeCompanyRegistry.layerWith({ records: { "10213813": record } });
-    expect(await run(Effect.all([lookup("10213813"), lookup("10047514")]), layer)).toEqual([
-      record,
-      null,
-    ]);
+    expect(
+      await run(Effect.all([lookup("10213813"), lookup("10047514")], { concurrency: 1 }), layer),
+    ).toEqual([record, null]);
   });
 
   test("put and remove change later lookups", async () => {

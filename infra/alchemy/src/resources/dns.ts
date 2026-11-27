@@ -1,14 +1,17 @@
+// Alchemy resource names and instance props need a synchronous SHA-256. Effect Digest is asynchronous.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { createHash } from "node:crypto";
 import * as DNS from "@alchemy.run/gcp/DNS";
 import type { ProjectService } from "@alchemy.run/gcp/ServiceUsage";
 import * as Output from "alchemy/Output";
 import * as Effect from "effect/Effect";
+import * as Str from "effect/String";
 import { type KvitbitStackConfig, resourceNames, stackLabels } from "../config";
 
 const zoneNameFor = (prefix: string, domain: string) => {
-  const slug = domain.replaceAll(".", "-");
-  const hash = createHash("sha256").update(domain).digest("hex").slice(0, 12);
-  return `${prefix}-${slug.slice(0, 63 - prefix.length - hash.length - 2)}-${hash}`;
+  const slug = Str.replaceAll(".", "-")(domain);
+  const hash = Str.slice(0, 12)(createHash("sha256").update(domain).digest("hex"));
+  return `${prefix}-${Str.slice(0, 63 - prefix.length - hash.length - 2)(slug)}-${hash}`;
 };
 
 export const declareKvitbitDns = Effect.fn("KvitbitStack.declareDns")(function* (
@@ -17,12 +20,13 @@ export const declareKvitbitDns = Effect.fn("KvitbitStack.declareDns")(function* 
   edgeIpAddress: Output.Output<string | undefined> | undefined,
 ) {
   const { prefix } = resourceNames(config);
-  const nameServers: Record<string, Output.Output<ReadonlyArray<string>>> = {};
+  const nameServers: Record<string, Output.Output<ReadonlyArray<string>, never>> = {};
   const edgeAddressData = edgeIpAddress?.pipe(
-    Output.map((address) => {
-      if (!address) throw new Error("EdgeAddress has no IPv4 address for the Cloud DNS A records");
-      return [address];
-    }),
+    Output.mapEffect((address) =>
+      address === undefined || address === ""
+        ? Effect.die(new Error("EdgeAddress has no IPv4 address for the Cloud DNS A records"))
+        : Effect.succeed([address]),
+    ),
   );
 
   for (const domain of config.dnsZones) {

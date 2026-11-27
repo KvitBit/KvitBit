@@ -1,3 +1,5 @@
+// Alchemy resource names and instance props need a synchronous SHA-256. Effect Digest is asynchronous.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { createHash } from "node:crypto";
 import type {
   FirewallProps,
@@ -7,16 +9,19 @@ import type {
   SubnetworkProps,
 } from "@alchemy.run/gcp/Compute";
 import * as Compute from "@alchemy.run/gcp/Compute";
-import type { Input } from "alchemy/Input";
-import * as Output from "alchemy/Output";
+import type * as Output from "alchemy/Output";
+import * as Arr from "effect/Array";
 import * as Effect from "effect/Effect";
+import * as Result from "effect/Result";
+import * as Schema from "effect/Schema";
 import type { KvitbitStackConfig } from "../config";
 import { imageReference, resourceNames, serviceAccountEmail, stackLabels } from "../config";
 import { type PlainEnvVar, runnerPlainEnv, secretBindingsForWorkload } from "../env";
+import { afterResources, declaredLink } from "./provider-inputs";
 
 export const COS_STABLE_IMAGE = "projects/cos-cloud/global/images/family/cos-stable";
 
-export interface RunnerWorkerSecretSpec {
+interface RunnerWorkerSecretSpec {
   readonly environmentVariable: string;
   readonly secretId: string;
   readonly version: string;
@@ -33,10 +38,13 @@ export interface RunnerWorkerConfig {
   readonly secrets: ReadonlyArray<RunnerWorkerSecretSpec>;
 }
 
-export const buildRunnerWorkerConfig = (
-  config: KvitbitStackConfig,
-  options?: { readonly blobsBucket?: string | undefined },
-): RunnerWorkerConfig => {
+export const buildRunnerWorkerConfig = ({
+  config,
+  options,
+}: {
+  readonly config: KvitbitStackConfig;
+  readonly options?: { readonly blobsBucket?: string | undefined };
+}): RunnerWorkerConfig => {
   const blobsBucket = options?.blobsBucket ?? config.blobsBucket;
   return {
     version: 1,
@@ -44,8 +52,8 @@ export const buildRunnerWorkerConfig = (
     registryHost: `${config.region}-docker.pkg.dev`,
     runnerCidr: config.runnerCidr,
     runnerPort: config.runnerPort,
-    plainEnv: runnerPlainEnv(config, blobsBucket),
-    secrets: secretBindingsForWorkload(config, "runner").map((secret) => ({
+    plainEnv: runnerPlainEnv({ config, blobsBucket }),
+    secrets: Arr.map(secretBindingsForWorkload({ config, workload: "runner" }), (secret) => ({
       environmentVariable: secret.environmentVariable,
       secretId: secret.secretId,
       version: secret.version,
@@ -54,8 +62,10 @@ export const buildRunnerWorkerConfig = (
   };
 };
 
+const encodeWorkerConfig = Schema.encodeResult(Schema.fromJsonString(Schema.Unknown, { space: 2 }));
+
 export const serializeRunnerWorkerConfig = (workerConfig: RunnerWorkerConfig): string =>
-  JSON.stringify(workerConfig, null, 2);
+  Result.getOrThrow(encodeWorkerConfig(workerConfig));
 
 export const runnerWorkerConfigSha = (workerConfig: RunnerWorkerConfig): string => {
   const hash = createHash("sha256").update(serializeRunnerWorkerConfig(workerConfig)).digest("hex");
@@ -69,7 +79,13 @@ export const networkProps = (config: KvitbitStackConfig): NetworkProps => ({
   routingMode: "REGIONAL",
 });
 
-export const subnetworkProps = (config: KvitbitStackConfig, network: string): SubnetworkProps => ({
+export const subnetworkProps = ({
+  config,
+  network,
+}: {
+  readonly config: KvitbitStackConfig;
+  readonly network: string;
+}): SubnetworkProps => ({
   subnetworkName: resourceNames(config).subnetworkName,
   region: config.region,
   network,
@@ -78,7 +94,13 @@ export const subnetworkProps = (config: KvitbitStackConfig, network: string): Su
   description: `Kvitbit ${config.stage} private subnet for Effect Cluster runners and Cloud Run Direct VPC egress.`,
 });
 
-export const routerProps = (config: KvitbitStackConfig, network: string): RouterProps => ({
+export const routerProps = ({
+  config,
+  network,
+}: {
+  readonly config: KvitbitStackConfig;
+  readonly network: string;
+}): RouterProps => ({
   routerName: resourceNames(config).routerName,
   region: config.region,
   network,
@@ -92,7 +114,13 @@ export const routerProps = (config: KvitbitStackConfig, network: string): Router
   ],
 });
 
-export const runnerFirewallProps = (config: KvitbitStackConfig, network: string): FirewallProps => {
+export const runnerFirewallProps = ({
+  config,
+  network,
+}: {
+  readonly config: KvitbitStackConfig;
+  readonly network: string;
+}): FirewallProps => {
   const names = resourceNames(config);
   return {
     firewallName: names.runnerFirewallName,
@@ -126,8 +154,7 @@ export const runnerFirewallProps = (config: KvitbitStackConfig, network: string)
  * - Retries transient metadata, Secret Manager, and Artifact Registry failures with bounded
  *   exponential backoff, and installs systemd units before initial reconciliation.
  */
-export const buildRunnerStartupScript = (): string => {
-  return `#!/bin/bash
+export const buildRunnerStartupScript = (): string => `#!/bin/bash
 set -euo pipefail
 
 install -d -m 0700 /var/lib/kvitbit /run/kvitbit
@@ -516,23 +543,27 @@ systemctl enable kvitbit-worker.service
 systemctl enable --now kvitbit-worker-reconcile.timer
 systemctl start kvitbit-worker-reconcile.service
 `;
-};
 
-export const runnerInstanceProps = (
-  config: KvitbitStackConfig,
-  index: number,
-  deps: {
+export const runnerInstanceProps = ({
+  config,
+  index,
+  deps,
+}: {
+  readonly config: KvitbitStackConfig;
+  readonly index: number;
+  readonly deps: {
     readonly network: string;
     readonly subnetwork: string;
     readonly blobsBucket?: string;
     readonly serviceAccountEmail?: string;
     readonly startupScript?: string;
     readonly workerConfig?: RunnerWorkerConfig;
-  },
-): InstanceProps => {
+  };
+}): InstanceProps => {
   const names = resourceNames(config);
   const workerConfig =
-    deps.workerConfig ?? buildRunnerWorkerConfig(config, { blobsBucket: deps.blobsBucket });
+    deps.workerConfig ??
+    buildRunnerWorkerConfig({ config, options: { blobsBucket: deps.blobsBucket } });
   const workerConfigJson = serializeRunnerWorkerConfig(workerConfig);
   const workerConfigSha = runnerWorkerConfigSha(workerConfig);
   return {
@@ -555,7 +586,7 @@ export const runnerInstanceProps = (
     automaticRestart: true,
     serviceAccount:
       deps.serviceAccountEmail ??
-      serviceAccountEmail(config.projectId, names.runnerServiceAccountId),
+      serviceAccountEmail({ projectId: config.projectId, accountId: names.runnerServiceAccountId }),
     oauthScopes: ["https://www.googleapis.com/auth/cloud-platform"],
     shieldedInstanceConfig: {
       enableSecureBoot: true,
@@ -574,32 +605,11 @@ export const runnerInstanceProps = (
   };
 };
 
-const declaredLink = (resource: string) =>
-  Output.map((link: string | undefined) => {
-    if (link === undefined) {
-      throw new Error(`${resource} reported no self link`);
-    }
-    return link;
-  });
-
-const afterResources = <A>(
-  value: Input<A>,
-  dependencies: ReadonlyArray<unknown>,
-): Output.Output<A> => {
-  if (dependencies.length === 0) {
-    return Output.asOutput(value as A);
-  }
-  return Output.all(
-    Output.asOutput(value as A),
-    ...dependencies.map((dep) => Output.asOutput(dep)),
-  ).pipe(Output.map(([resolved]) => resolved as A));
-};
-
 export const declareNetworkAndRunners = Effect.fn("KvitbitStack.declareNetworkAndRunners")(
   function* (
     config: KvitbitStackConfig,
     deps: {
-      readonly runnerServiceAccountEmail: Input<string>;
+      readonly runnerServiceAccountEmail: string | Output.Output<string>;
       readonly blobsBucketName: string;
       readonly runnerDependencies?: ReadonlyArray<unknown>;
     },
@@ -607,21 +617,24 @@ export const declareNetworkAndRunners = Effect.fn("KvitbitStack.declareNetworkAn
     const network = yield* Compute.Network("KvitbitVpc", networkProps(config));
     const networkLink = network.selfLink.pipe(declaredLink("KvitbitVpc"));
     const subnetwork = yield* Compute.Subnetwork("KvitbitRunnerSubnet", {
-      ...subnetworkProps(config, ""),
+      ...subnetworkProps({ config, network: "" }),
       network: networkLink,
     });
     const subnetworkLink = subnetwork.selfLink.pipe(declaredLink("KvitbitRunnerSubnet"));
     const router = yield* Compute.Router("KvitbitRouter", {
-      ...routerProps(config, ""),
+      ...routerProps({ config, network: "" }),
       network: networkLink,
     });
     const firewall = yield* Compute.Firewall("KvitbitRunnerClusterIngress", {
-      ...runnerFirewallProps(config, ""),
+      ...runnerFirewallProps({ config, network: "" }),
       network: networkLink,
     });
 
-    const workerConfig = buildRunnerWorkerConfig(config, {
-      blobsBucket: deps.blobsBucketName,
+    const workerConfig = buildRunnerWorkerConfig({
+      config,
+      options: {
+        blobsBucket: deps.blobsBucketName,
+      },
     });
     const workerConfigSha = runnerWorkerConfigSha(workerConfig);
     const startupScript = buildRunnerStartupScript();
@@ -632,19 +645,23 @@ export const declareNetworkAndRunners = Effect.fn("KvitbitStack.declareNetworkAn
       firewall.firewallName,
     ] as const;
 
-    const runnerServiceAccount = afterResources(deps.runnerServiceAccountEmail, [
+    const runnerServiceAccount = afterResources([
       ...networkReadyDependencies,
       ...(deps.runnerDependencies ?? []),
-    ]);
+    ])(deps.runnerServiceAccountEmail);
 
     const runners: Array<Compute.Instance> = [];
     for (let index = 0; index < config.runnerCount; index += 1) {
-      const base = runnerInstanceProps(config, index, {
-        network: "",
-        subnetwork: "",
-        blobsBucket: deps.blobsBucketName,
-        startupScript,
-        workerConfig,
+      const base = runnerInstanceProps({
+        config,
+        index,
+        deps: {
+          network: "",
+          subnetwork: "",
+          blobsBucket: deps.blobsBucketName,
+          startupScript,
+          workerConfig,
+        },
       });
       const instance = yield* Compute.Instance(`KvitbitRunner${index}`, {
         ...base,
@@ -663,7 +680,7 @@ export const declareNetworkAndRunners = Effect.fn("KvitbitStack.declareNetworkAn
       routerName: router.routerName,
       firewallName: firewall.firewallName,
       networkReadyDependencies,
-      runnerNames: runners.map((runner) => runner.instanceName),
+      runnerNames: Arr.map(runners, (runner) => runner.instanceName),
       runnerConfigSha: workerConfigSha,
     };
   },

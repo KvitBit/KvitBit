@@ -4,7 +4,13 @@ import { solveChallenge } from "altcha-lib";
 import { deriveKey } from "altcha-lib/algorithms/pbkdf2";
 import { APIError, createAuthMiddleware } from "better-auth/api";
 import { drizzle } from "drizzle-orm/pglite";
-import { Effect, Redacted } from "effect";
+import * as Arr from "effect/Array";
+import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
+import * as Rec from "effect/Record";
+import * as Redacted from "effect/Redacted";
+import * as Schema from "effect/Schema";
+import * as Str from "effect/String";
 import { type BotProtection, type BotScope, makeAltchaBotProtection } from "../../src/altcha";
 import {
   API_KEY_PLUGIN_PATHS,
@@ -20,6 +26,14 @@ import {
 import { layerFromPglite, makeMigratedPglite } from "../../src/testing";
 
 const UUID_V7 = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+// biome-ignore lint/security/noSecrets: Public PKCE challenge used by the client fixture.
+const PKCE_CHALLENGE = "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM";
+// biome-ignore lint/security/noSecrets: Signing key for the in-process test instance.
+const TEST_AUTH_SECRET = "test-better-auth-secret-0123456789abcdef";
+const encodeJsonEffect = Schema.encodeEffect(Schema.fromJsonString(Schema.Unknown));
+const encodeJson = <A>(value: A) => encodeJsonEffect(value).pipe(Effect.runSync);
+const decodeClient = Schema.decodeUnknownOption(Schema.Struct({ client_id: Schema.String }));
+const neverSettles = Promise.withResolvers<void>().promise;
 const BASE = "http://localhost:3000";
 const MCP = `${BASE}/mcp`;
 const REDIRECT = "https://client.example/callback";
@@ -34,12 +48,11 @@ const slowCleanup = (first?: Uint8Array, counter?: { pulled: number }) =>
       if (first !== undefined) controller.enqueue(first);
     },
     pull(controller) {
-      if (counter === undefined) return new Promise(() => undefined);
+      if (counter === undefined) return neverSettles;
       counter.pulled += 1;
       controller.enqueue(new Uint8Array(1024).fill(32));
-      return undefined;
     },
-    cancel: () => new Promise<void>(() => undefined),
+    cancel: () => neverSettles,
   });
 /** A body delivered in one chunk, without Content-Length. */
 const stalledOnce = (text: string) =>
@@ -49,7 +62,7 @@ const stalledOnce = (text: string) =>
       controller.close();
     },
   });
-const cimdDocument = (clientId: string, extra: Record<string, unknown> = {}) => ({
+const cimdDocument = (clientId: string, extra: Schema.JsonObject = {}) => ({
   client_id: clientId,
   client_name: "Metadata document client",
   redirect_uris: [REDIRECT],
@@ -59,8 +72,12 @@ const cimdDocument = (clientId: string, extra: Record<string, unknown> = {}) => 
   ...extra,
 });
 const cimdFetches: Array<string> = [];
-const fetchClientMetadata = async (input: string | URL | Request) => {
-  const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+const fetchClientMetadata = (input: string | URL | Request) => {
+  const url = Schema.is(Schema.String)(input)
+    ? input
+    : input instanceof URL
+      ? input.href
+      : input.url;
   cimdFetches.push(url);
   if (url === CIMD_CLIENT_ID) return Response.json(cimdDocument(CIMD_CLIENT_ID));
   if (url === CIMD_SLOW_CLIENT_ID) {
@@ -70,8 +87,8 @@ const fetchClientMetadata = async (input: string | URL | Request) => {
     });
   }
   if (url === CIMD_BIG_CLIENT_ID) {
-    const doc = cimdDocument(CIMD_BIG_CLIENT_ID, { client_name: "x".repeat(6000) });
-    return new Response(stalledOnce(JSON.stringify(doc)), {
+    const doc = cimdDocument(CIMD_BIG_CLIENT_ID, { client_name: Str.repeat(6000)("x") });
+    return new Response(stalledOnce(encodeJson(doc)), {
       headers: { "content-type": "application/json" },
     });
   }
@@ -84,7 +101,9 @@ const fetchClientMetadata = async (input: string | URL | Request) => {
             {
               kty: "EC",
               crv: "P-256",
+              // biome-ignore lint/security/noSecrets: Public JWK coordinate.
               x: "f83OJ3D2xF1Bg8vub9tLe1gHMzV76e8Tus9uPHvRVEU",
+              // biome-ignore lint/security/noSecrets: Public JWK coordinate.
               y: "x_FEzRu9m36HLN_tue659LNpXW6pCyStikYjKIWI5a0",
               use: "sig",
               alg: "ES256",
@@ -106,22 +125,26 @@ const sent: Array<{ kind: string; to: string; url: string }> = [];
 
 const config = (): AuthConfig => ({
   baseURL: BASE,
-  secret: Redacted.make("test-better-auth-secret-0123456789abcdef"),
+  secret: Redacted.make(TEST_AUTH_SECRET),
   db: drizzle({ client: pg }),
   rpID: "localhost",
-  sendVerificationEmail: async ({ user, url }) => {
+  sendVerificationEmail: ({ user, url }) => {
     sent.push({ kind: "verify", to: user.email, url });
+    return Promise.resolve();
   },
-  sendResetPassword: async ({ user, url }) => {
+  sendResetPassword: ({ user, url }) => {
     sent.push({ kind: "reset", to: user.email, url });
+    return Promise.resolve();
   },
-  sendMagicLink: async ({ email, url }) => {
+  sendMagicLink: ({ email, url }) => {
     sent.push({ kind: "magic", to: email, url });
+    return Promise.resolve();
   },
-  sendChangeEmailConfirmation: async ({ user, url }) => {
+  sendChangeEmailConfirmation: ({ user, url }) => {
     sent.push({ kind: "change", to: user.email, url });
+    return Promise.resolve();
   },
-  beforeDeleteUser: async () => {},
+  beforeDeleteUser: () => Promise.resolve(),
   oauthLoginPage: "/sign-in",
   oauthConsentPage: "/oauth/consent",
   mcpResource: MCP,
@@ -131,11 +154,11 @@ const config = (): AuthConfig => ({
   beforeHooks: [
     {
       matcher: (ctx) => ctx.path === "/sign-up/email",
-      handler: createAuthMiddleware(async (ctx) => {
-        if (String(ctx.body?.email).endsWith("@blocked.test")) {
-          throw new APIError("FORBIDDEN", { code: "InvitationLocked" });
-        }
-      }),
+      handler: createAuthMiddleware((ctx) =>
+        Str.endsWith("@blocked.test")(String(ctx.body?.email))
+          ? Promise.reject(new APIError("FORBIDDEN", { code: "InvitationLocked" }))
+          : Promise.resolve(),
+      ),
     },
   ],
 });
@@ -143,15 +166,18 @@ const config = (): AuthConfig => ({
 beforeAll(async () => {
   pg = await makeMigratedPglite();
   const services = await Effect.runPromise(
-    Effect.all({
-      bp: makeAltchaBotProtection({
-        hmacKey: Redacted.make("altcha-secret-0123456789"),
-        algorithm: "PBKDF2/SHA-256",
-        cost: 1,
-        keyPrefix: "0",
-      }),
-      limiter: makeEmailRateLimiter(),
-    }).pipe(Effect.provide(layerFromPglite(pg))),
+    Effect.all(
+      {
+        bp: makeAltchaBotProtection({
+          hmacKey: Redacted.make("altcha-secret-0123456789"),
+          algorithm: "PBKDF2/SHA-256",
+          cost: 1,
+          keyPrefix: "0",
+        }),
+        limiter: makeEmailRateLimiter(),
+      },
+      { concurrency: 1 },
+    ).pipe(Effect.provide(layerFromPglite(pg))),
   );
   botProtection = services.bp;
   emailRateLimiter = services.limiter;
@@ -164,15 +190,15 @@ afterAll(async () => {
 const proof = async (scope: BotScope = "sign_up") => {
   const challenge = await Effect.runPromise(botProtection.issue(scope));
   const solution = await solveChallenge({ challenge, deriveKey });
-  return Buffer.from(JSON.stringify({ challenge, solution })).toString("base64");
+  return Buffer.from(encodeJson({ challenge, solution })).toString("base64");
 };
 
-const post = (path: string, body: unknown, headers: Record<string, string> = {}) =>
+const post = (path: string, body: Schema.Json, headers: Record<string, string> = {}) =>
   auth.handler(
     new Request(`${BASE}/api/auth${path}`, {
       method: "POST",
       headers: { "content-type": "application/json", origin: BASE, ...headers },
-      body: JSON.stringify(body),
+      body: encodeJson(body),
     }),
   );
 
@@ -185,7 +211,7 @@ const signUp = (email: string, altcha?: string) =>
 
 describe("makeAuth configuration", () => {
   test("installs the plugins, scopes and account options the spec asks for", () => {
-    const ids = (auth.options.plugins ?? []).map((plugin) => plugin.id);
+    const ids = Arr.map(auth.options.plugins ?? [], (plugin) => plugin.id);
     expect(ids).toEqual([
       "kvitbit-edge-guards",
       "magic-link",
@@ -234,7 +260,7 @@ describe("bot-protected endpoints", () => {
     );
     expect(users.rows[0]?.id).toMatch(UUID_V7);
     expect(users.rows[0]?.email_verified).toBe(false);
-    expect(sent.some((m) => m.kind === "verify" && m.to === "ok@example.com")).toBe(true);
+    expect(Arr.some(sent, (m) => m.kind === "verify" && m.to === "ok@example.com")).toBe(true);
     const sessions = await pg.query("select 1 from auth.session");
     expect(sessions.rows).toHaveLength(0);
   });
@@ -263,9 +289,17 @@ describe("bot-protected endpoints", () => {
         withProof ? { "x-altcha": await proof("sign_in") } : {},
       );
     // Bots without a proof cannot exhaust the address's quota.
-    for (let i = 0; i < 6; i++) expect((await signIn(false)).status).toBe(400);
+    const unproven = await Effect.runPromise(
+      Effect.forEach(Arr.range(1, 6), () => Effect.promise(() => signIn(false)), {
+        concurrency: 1,
+      }),
+    );
+    expect(Arr.map(unproven, (response) => response.status)).toEqual(Arr.replicate(400, 6));
     // Four proven sign-ins (wrong password) and one proven reset use the five allowed.
-    for (let i = 0; i < 4; i++) expect((await signIn(true)).status).toBe(401);
+    const proven = await Effect.runPromise(
+      Effect.forEach(Arr.range(1, 4), () => Effect.promise(() => signIn(true)), { concurrency: 1 }),
+    );
+    expect(Arr.map(proven, (response) => response.status)).toEqual(Arr.replicate(401, 4));
     const reset = await post(
       "/request-password-reset",
       { email: "limit@example.com" },
@@ -292,15 +326,16 @@ describe("OAuth 2.1 for MCP", () => {
       new Request(`${BASE}/api/auth/.well-known/oauth-authorization-server`),
     );
     expect(response.status).toBe(200);
-    const metadata = (await response.json()) as Record<string, unknown>;
-    expect(metadata.grant_types_supported).toEqual(["authorization_code", "refresh_token"]);
-    expect(metadata.token_endpoint_auth_methods_supported).toEqual(["none", "client_secret_basic"]);
-    expect(metadata.code_challenge_methods_supported).toEqual(["S256"]);
-    expect(metadata.client_id_metadata_document_supported).toBe(true);
-    expect(metadata.scopes_supported).toEqual(expect.arrayContaining([...OAUTH_SCOPES]));
+    expect(await response.json()).toMatchObject({
+      grant_types_supported: ["authorization_code", "refresh_token"],
+      token_endpoint_auth_methods_supported: ["none", "client_secret_basic"],
+      code_challenge_methods_supported: ["S256"],
+      client_id_metadata_document_supported: true,
+      scopes_supported: expect.arrayContaining([...OAUTH_SCOPES]),
+    });
   });
 
-  const register = (body: Record<string, unknown>) =>
+  const register = (body: Schema.JsonObject) =>
     post("/oauth2/register", {
       client_name: "Test MCP client",
       redirect_uris: [REDIRECT],
@@ -313,17 +348,17 @@ describe("OAuth 2.1 for MCP", () => {
   test("a public client registers for an area scope and reaches sign-in for /mcp", async () => {
     const registered = await register({ scope: "kvitbit:documents:read offline_access" });
     expect(registered.status).toBeLessThan(300);
-    const client = (await registered.json()) as { client_id: string };
-    expect(typeof client.client_id).toBe("string");
+    const client = decodeClient(await registered.json()).pipe(Option.getOrThrow);
+    expect(client.client_id.length).toBeGreaterThan(0);
 
     const authorize = (params: Record<string, string>) => {
       const url = new URL(`${BASE}/api/auth/oauth2/authorize`);
-      for (const [k, v] of Object.entries({
+      for (const [k, v] of Rec.toEntries({
         response_type: "code",
         client_id: client.client_id,
         redirect_uri: REDIRECT,
         scope: "kvitbit:documents:read",
-        code_challenge: "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM",
+        code_challenge: PKCE_CHALLENGE,
         code_challenge_method: "S256",
         ...params,
       })) {
@@ -346,14 +381,14 @@ describe("OAuth 2.1 for MCP", () => {
 
   test("an HTTPS client_id resolves through its metadata document and reaches sign-in", async () => {
     const url = new URL(`${BASE}/api/auth/oauth2/authorize`);
-    for (const [k, v] of Object.entries({
+    for (const [k, v] of Rec.toEntries({
       response_type: "code",
       client_id: CIMD_CLIENT_ID,
       redirect_uri: REDIRECT,
       scope: "kvitbit:read",
       state: "cimd-state",
       resource: MCP,
-      code_challenge: "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM",
+      code_challenge: PKCE_CHALLENGE,
       code_challenge_method: "S256",
     })) {
       url.searchParams.set(k, v);
@@ -366,14 +401,14 @@ describe("OAuth 2.1 for MCP", () => {
 
   test("a metadata document asking for private_key_jwt is refused", async () => {
     const url = new URL(`${BASE}/api/auth/oauth2/authorize`);
-    for (const [k, v] of Object.entries({
+    for (const [k, v] of Rec.toEntries({
       response_type: "code",
       client_id: CIMD_JWT_CLIENT_ID,
       redirect_uri: REDIRECT,
       scope: "kvitbit:read",
       state: "jwt-state",
       resource: MCP,
-      code_challenge: "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM",
+      code_challenge: PKCE_CHALLENGE,
       code_challenge_method: "S256",
     })) {
       url.searchParams.set(k, v);
@@ -446,8 +481,9 @@ describe("OAuth 2.1 for MCP", () => {
         async () => new Response(slowCleanup(new TextEncoder().encode("{")), { headers: json }),
       );
       const pending = mid(CIMD_CLIENT_ID, { signal: during.signal });
-      setTimeout(() => during.abort(new Error("timed out")), 10);
+      const abort = Bun.sleep(10).then(() => during.abort(new Error("timed out")));
       await expect(pending).rejects.toThrow("timed out");
+      await abort;
     });
 
     test("an overflow settles even while stream cleanup is pending", async () => {
@@ -493,9 +529,9 @@ describe("OAuth 2.1 for MCP", () => {
       const keys = Array.from({ length: 48 }, (_, n) => ({
         kty: "oct",
         kid: `k${n}`,
-        k: "x".repeat(120),
+        k: Str.repeat(120)("x"),
       }));
-      const body = JSON.stringify({ keys });
+      const body = encodeJson({ keys });
       expect(body.length).toBeGreaterThan(6 * 1024);
       const guarded = guardClientMetadataFetch(
         async () => new Response(stalledOnce(body), { headers: json }),
@@ -532,43 +568,44 @@ describe("OAuth 2.1 for MCP", () => {
           new Response(stalled(new TextEncoder().encode('{"client_id":')), { headers: json }),
       );
       const pending = guarded(CIMD_CLIENT_ID, { signal: controller.signal });
-      setTimeout(() => controller.abort(new Error("timed out")), 10);
+      const abort = Bun.sleep(10).then(() => controller.abort(new Error("timed out")));
       await expect(pending).rejects.toThrow("timed out");
+      await abort;
     });
 
     test("first-time resolution of a declared oversized document fails promptly", async () => {
       const url = new URL(`${BASE}/api/auth/oauth2/authorize`);
-      for (const [k, v] of Object.entries({
+      for (const [k, v] of Rec.toEntries({
         response_type: "code",
         client_id: CIMD_SLOW_CLIENT_ID,
         redirect_uri: REDIRECT,
         scope: "kvitbit:read",
         state: "slow-state",
         resource: MCP,
-        code_challenge: "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM",
+        code_challenge: PKCE_CHALLENGE,
         code_challenge_method: "S256",
       })) {
         url.searchParams.set(k, v);
       }
-      const started = Date.now();
+      const started = performance.now();
       const response = await auth.handler(new Request(url.toString(), { redirect: "manual" }));
-      expect(Date.now() - started).toBeLessThan(2000);
+      expect(performance.now() - started).toBeLessThan(2000);
       expect(cimdFetches).toContain(CIMD_SLOW_CLIENT_ID);
       expect(response.headers.get("location") ?? "").not.toContain("/sign-in");
-      const body = JSON.stringify(await response.json());
+      const body = encodeJson(await response.json());
       expect(body).toContain("size limit");
     });
 
     test("an oversized metadata document still fails resolution", async () => {
       const url = new URL(`${BASE}/api/auth/oauth2/authorize`);
-      for (const [k, v] of Object.entries({
+      for (const [k, v] of Rec.toEntries({
         response_type: "code",
         client_id: CIMD_BIG_CLIENT_ID,
         redirect_uri: REDIRECT,
         scope: "kvitbit:read",
         state: "big-state",
         resource: MCP,
-        code_challenge: "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM",
+        code_challenge: PKCE_CHALLENGE,
         code_challenge_method: "S256",
       })) {
         url.searchParams.set(k, v);

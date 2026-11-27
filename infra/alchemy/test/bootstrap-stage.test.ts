@@ -33,8 +33,10 @@ test("bootstrap rejects a staging config for the Alchemy prod stage before inspe
     { state, providers: Layer.empty },
     declareKvitbitStack(config).pipe(Effect.orDie),
   );
-  const compiled = Effect.runPromise(
-    Effect.scoped(stack).pipe(Effect.provideService(Stage, "prod")),
+  const compiled = stack.pipe(
+    Effect.scoped,
+    Effect.provideService(Stage, "prod"),
+    Effect.runPromise,
   );
   await expect(compiled).rejects.toMatchObject({
     _tag: "StackStageMismatchError",

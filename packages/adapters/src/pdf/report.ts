@@ -1,5 +1,8 @@
 /** Report export PDF (D11), in the Modern Minimal chrome of mockup screen 24. */
+
 import type { Locale } from "@kvitbit/domain";
+import * as Arr from "effect/Array";
+import * as Fn from "effect/Function";
 import { escapeHtml as e, formatDateTime, formatMoney } from "./format";
 import { LABELS } from "./labels";
 import type { ReportCell, ReportRenderModel } from "./model";
@@ -22,27 +25,45 @@ const cell = (c: ReportCell, align: "left" | "right", lang: Locale): string => {
   return `<td${cls}>${e(formatMoney(c.money.amount, c.money.currency, lang))}</td>`;
 };
 
-export const renderReportHtml = (model: ReportRenderModel, lang: Locale): string => {
+export const renderReportHtml: {
+  (lang: Locale): (model: ReportRenderModel) => string;
+  (model: ReportRenderModel, lang: Locale): string;
+} = Fn.dual(2, (model: ReportRenderModel, lang: Locale): string => {
   const t = LABELS[lang];
   const brand = brandingView(model.branding, model.workspace.name);
-  const ids = [
-    model.workspace.companyId ? `${t.companyId} ${model.workspace.companyId}` : null,
-    model.workspace.vatId ? `${t.vatId} ${model.workspace.vatId}` : null,
-  ]
-    .filter((x) => x !== null)
-    .join(" · ");
+  const ids = Arr.join(
+    Arr.filter(
+      [
+        model.workspace.companyId !== null && model.workspace.companyId !== ""
+          ? `${t.companyId} ${model.workspace.companyId}`
+          : null,
+        model.workspace.vatId !== null && model.workspace.vatId !== ""
+          ? `${t.vatId} ${model.workspace.vatId}`
+          : null,
+      ],
+      (x) => x !== null,
+    ),
+    " · ",
+  );
   const columns = model.table.columns;
-  const rows = model.table.rows
-    .map(
+  const rows = Arr.join(
+    Arr.map(
+      model.table.rows,
       (row) =>
-        `<tr${row.tone === "deduction" ? ' class="deduct"' : ""}>${row.cells
-          .map((c, i) => cell(c, columns[i]?.align ?? "left", lang))
-          .join("")}</tr>`,
-    )
-    .join("");
-  const footer = [model.footerNote, `${t.generated} ${formatDateTime(model.generatedAt, lang)}`]
-    .filter((x) => x !== null)
-    .join(" · ");
+        `<tr${row.tone === "deduction" ? ' class="deduct"' : ""}>${Arr.join(
+          Arr.map(row.cells, (c, i) => cell(c, columns[i]?.align ?? "left", lang)),
+          "",
+        )}</tr>`,
+    ),
+    "",
+  );
+  const footer = Arr.join(
+    Arr.filter(
+      [model.footerNote, `${t.generated} ${formatDateTime(model.generatedAt, lang)}`],
+      (x) => x !== null,
+    ),
+    " · ",
+  );
 
   const body = `<article class="sheet tnum" data-template="report">
 <div class="rail"></div>
@@ -53,22 +74,27 @@ export const renderReportHtml = (model: ReportRenderModel, lang: Locale): string
     <div class="big-num" style="font-size:21px;">${e(model.title)}</div>
   </div>
   <div class="issuer-top">
-    <div><div class="name">${e(model.workspace.name)}</div>${ids ? `<div class="mono ids">${e(ids)}</div>` : ""}</div>
+    <div><div class="name">${e(model.workspace.name)}</div>${ids !== "" ? `<div class="mono ids">${e(ids)}</div>` : ""}</div>
     ${brand.logo ?? `<span class="logo-pill">${e(brand.initials)}</span>`}
   </div>
 </header>
 ${
   model.kpis.length === 0
     ? ""
-    : `<div class="rep-kpis keep">${model.kpis
-        .map(
+    : `<div class="rep-kpis keep">${Arr.join(
+        Arr.map(
+          model.kpis,
           (k) =>
-            `<div class="rk"><div class="k-lbl">${e(k.label)}</div><div class="rk-v${k.emphasis ? " accent" : ""}">${e(formatMoney(k.value.amount, k.value.currency, lang))}</div></div>`,
-        )
-        .join("")}</div>`
+            `<div class="rk"><div class="k-lbl">${e(k.label)}</div><div class="rk-v${k.emphasis === true ? " accent" : ""}">${e(formatMoney(k.value.amount, k.value.currency, lang))}</div></div>`,
+        ),
+        "",
+      )}</div>`
 }
 <table class="mo-items">
-  <thead><tr>${columns.map((c) => `<th${c.align === "right" ? ' class="r"' : ""}>${e(c.label)}</th>`).join("")}</tr></thead>
+  <thead><tr>${Arr.join(
+    Arr.map(columns, (c) => `<th${c.align === "right" ? ' class="r"' : ""}>${e(c.label)}</th>`),
+    "",
+  )}</tr></thead>
   <tbody>${rows}</tbody>
 </table>
 ${
@@ -91,4 +117,4 @@ ${
     tint: brand.tint,
     body,
   });
-};
+});

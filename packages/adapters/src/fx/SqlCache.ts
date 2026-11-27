@@ -27,8 +27,13 @@
 
 import { CurrencyCode, type IsoDate } from "@kvitbit/domain/contract";
 import { type CnbFixing, ExchangeRates } from "@kvitbit/domain/ports";
-import { BigDecimal, Effect, Layer, Option, Schema } from "effect";
-import { SqlClient } from "effect/sql";
+import * as Arr from "effect/Array";
+import * as BigDecimal from "effect/BigDecimal";
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
+import * as SqlClient from "effect/sql/SqlClient";
 
 /**
  * A positive rate as `BigDecimal.format` writes it: plain digits, or exponent notation at 16+
@@ -53,9 +58,10 @@ const StoredRates = Schema.Array(
 
 const Row = Schema.Struct({ sequence: Schema.Int, rates: StoredRates });
 const decodeRow = Schema.decodeUnknownEffect(Row);
+const encodeRates = Schema.encodeEffect(Schema.fromJsonString(StoredRates));
 
 const toStored = (fixing: CnbFixing): typeof StoredRates.Type =>
-  fixing.rates.map(({ code, quantity, rate }) => ({
+  Arr.map(fixing.rates, ({ code, quantity, rate }) => ({
     code,
     quantity,
     rate: BigDecimal.format(rate),
@@ -94,7 +100,10 @@ export const make: Effect.Effect<
                   fixing: {
                     fixingDate: date,
                     sequence,
-                    rates: rates.map((r) => ({ ...r, rate: BigDecimal.fromStringUnsafe(r.rate) })),
+                    rates: Arr.map(rates, (r) => ({
+                      ...r,
+                      rate: BigDecimal.fromStringUnsafe(r.rate),
+                    })),
                   },
                 }),
               ),
@@ -107,21 +116,22 @@ export const make: Effect.Effect<
       ),
     );
 
-  const write = (fixing: CnbFixing, repair: boolean): Effect.Effect<void> =>
-    sql`
+  const write = Effect.fn("SqlCache.write")(
+    function* (fixing: CnbFixing, repair: boolean) {
+      const rates = yield* encodeRates(toStored(fixing));
+      yield* sql`
       insert into fx_fixings (fixing_date, sequence, rates, fetched_at)
-      values (${fixing.fixingDate}, ${fixing.sequence}, ${JSON.stringify(toStored(fixing))}::jsonb, now())
+      values (${fixing.fixingDate}, ${fixing.sequence}, ${rates}::jsonb, now())
       on conflict (fixing_date) ${
         repair
           ? sql`do update set sequence = excluded.sequence, rates = excluded.rates,
                 fetched_at = excluded.fetched_at`
           : sql`do nothing`
       }
-    `.pipe(
-      sql.withTransaction,
-      Effect.asVoid,
-      Effect.catch((cause) => Effect.logWarning("fx_fixings write failed", cause)),
-    );
+    `.pipe(sql.withTransaction, Effect.asVoid);
+    },
+    Effect.catch((cause) => Effect.logWarning("fx_fixings write failed", cause)),
+  );
 
   return {
     fixing: (date) =>

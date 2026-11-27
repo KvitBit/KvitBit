@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { Effect } from "effect";
-import { SqlClient } from "effect/sql";
+import * as Effect from "effect/Effect";
+import * as SqlClient from "effect/sql/SqlClient";
 import { layerFromPglite, layerMigrated, makeMigratedPglite } from "../../src/testing";
 
 const countAuthAndPublicTables = Effect.gen(function* () {

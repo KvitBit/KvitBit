@@ -5,6 +5,9 @@
  */
 import { brandColors } from "@kvitbit/brand";
 import type { Locale } from "@kvitbit/domain/contract";
+import * as Arr from "effect/Array";
+import * as Fn from "effect/Function";
+import * as Str from "effect/String";
 
 /** Inline text run. Plain strings are body text. */
 export type Inline =
@@ -13,7 +16,7 @@ export type Inline =
   | { readonly mono: string }
   | { readonly br: true };
 
-export interface SummaryItem {
+interface SummaryItem {
   readonly label: string;
   readonly value: string;
   /** Identifiers (document numbers, VS, bank accounts, dates) use the mono stack. */
@@ -114,35 +117,43 @@ const HTML_ESCAPES: Readonly<Record<string, string>> = {
  * Adapted from DeskoHub packages/email/backend/escaping.ts.
  */
 export const escapeHtml = (value: string): string =>
+  // @effect-diagnostics-next-line preferEffectString:off Effect's replace has no callback overload for a single-pass escape.
   value.replace(/[&<>"' ]/g, (c) => HTML_ESCAPES[c] ?? c);
+
+const CRLF_OR_CR = /\r\n?/g;
+const HTTP_URL = /^https?:\/\/[^\s]+$/i;
 
 /** Multi-line user text (a custom message): escaped, line breaks become `<br>`. */
 const escapeMultiline = (value: string): string =>
-  escapeHtml(value.replace(/\r\n?/g, "\n")).replaceAll("\n", "<br>");
+  Fn.pipe(value, Str.replace(CRLF_OR_CR, "\n"), escapeHtml, Str.replaceAll("\n", "<br>"));
 
 /** Only absolute http(s) links reach the email; anything else becomes "#". */
-export const safeUrl = (url: string): string => (/^https?:\/\/[^\s]+$/i.test(url) ? url : "#");
+const safeUrl = (url: string): string => (HTTP_URL.test(url) ? url : "#");
 
 // HTML ---------------------------------------------------------------------------------------
 
 /** Dark-mode hook classes for elements painted with the brand accent (brand ink only). */
-const accentClass = (brand: Brand): string => (brand.invertInDark ? ' class="kb-accent"' : "");
-const onAccentClass = (brand: Brand): string => (brand.invertInDark ? ' class="kb-on-accent"' : "");
+const accentClass = (brand: Brand): string =>
+  brand.invertInDark === true ? ' class="kb-accent"' : "";
+const onAccentClass = (brand: Brand): string =>
+  brand.invertInDark === true ? ' class="kb-on-accent"' : "";
 
 const inlineHtml = (parts: ReadonlyArray<Inline>): string =>
-  parts
-    .map((p) => {
-      if (typeof p === "string") return escapeMultiline(p);
+  Fn.pipe(
+    parts,
+    Arr.map((p) => {
+      if (Str.isString(p)) return escapeMultiline(p);
       if ("strong" in p) return `<strong>${escapeHtml(p.strong)}</strong>`;
       if ("mono" in p)
         return `<span style="font-family:${MONO};word-break:break-all;">${escapeHtml(p.mono)}</span>`;
       return "<br>";
-    })
-    .join("");
+    }),
+    Arr.join(""),
+  );
 
 const summaryCell = (item: SummaryItem): string => {
-  const family = item.mono ? `font-family:${MONO};` : "";
-  const size = item.emphasis ? "font-size:15px;" : "";
+  const family = item.mono === true ? `font-family:${MONO};` : "";
+  const size = item.emphasis === true ? "font-size:15px;" : "";
   return (
     `<td class="kb-col" valign="top" width="50%" style="padding:3px 7px;width:50%;">` +
     `<div class="kb-muted" style="font-size:10.5px;color:${palette.muted};">${escapeHtml(item.label)}</div>` +
@@ -182,7 +193,7 @@ const blockHtml = (block: Block, brand: Brand): string => {
       }
       return (
         `<table role="presentation" class="kb-sub" width="100%" cellpadding="0" cellspacing="0" border="0" ` +
-        `style="${boxStyle}margin:14px 0;padding:9px 7px;border-collapse:separate;"><tbody>${rows.join("")}</tbody></table>`
+        `style="${boxStyle}margin:14px 0;padding:9px 7px;border-collapse:separate;"><tbody>${Arr.join(rows, "")}</tbody></table>`
       );
     }
     case "Note":
@@ -235,7 +246,10 @@ const HEAD_STYLE =
 
 export const renderHtml = (content: EmailContent): string => {
   const { brand } = content;
-  const body = content.blocks.map((b) => blockHtml(b, brand)).join("");
+  const body = Arr.join(
+    Arr.map(content.blocks, (block) => blockHtml(block, brand)),
+    "",
+  );
   const brandRow =
     `<table role="presentation" class="kb-rule" width="100%" cellpadding="0" cellspacing="0" border="0" ` +
     `style="margin:0 0 16px;border-bottom:1px solid ${palette.border};"><tbody><tr>` +
@@ -263,7 +277,7 @@ export const renderHtml = (content: EmailContent): string => {
     `<tr><td${accentClass(brand)} height="4" style="height:4px;line-height:4px;font-size:0;background:${brand.accent};">&nbsp;</td></tr>` +
     `<tr><td class="kb-pad" style="padding:22px 24px 20px;font-size:13px;line-height:1.55;text-align:left;${WRAP}">${brandRow}${body}</td></tr>` +
     `<tr><td class="kb-foot kb-sub kb-muted kb-rule" style="padding:12px 24px;background:${palette.sub};border-top:1px solid ${palette.border};` +
-    `font-size:11px;line-height:1.45;color:${palette.muted};text-align:left;${WRAP}">${escapeHtml(content.footer.join(" · "))}</td></tr>` +
+    `font-size:11px;line-height:1.45;color:${palette.muted};text-align:left;${WRAP}">${escapeHtml(Arr.join(content.footer, " · "))}</td></tr>` +
     "</tbody></table></td></tr></tbody></table></body></html>"
   );
 };
@@ -271,14 +285,16 @@ export const renderHtml = (content: EmailContent): string => {
 // Plain text ---------------------------------------------------------------------------------
 
 const inlineText = (parts: ReadonlyArray<Inline>): string =>
-  parts
-    .map((p) => {
-      if (typeof p === "string") return p;
+  Fn.pipe(
+    parts,
+    Arr.map((p) => {
+      if (Str.isString(p)) return p;
       if ("strong" in p) return p.strong;
       if ("mono" in p) return p.mono;
       return "\n";
-    })
-    .join("");
+    }),
+    Arr.join(""),
+  );
 
 const blockText = (block: Block): string => {
   switch (block._tag) {
@@ -290,7 +306,10 @@ const blockText = (block: Block): string => {
     case "Muted":
       return inlineText(block.parts);
     case "Summary":
-      return block.items.map((i) => `${i.label}: ${i.value}`).join("\n");
+      return Arr.join(
+        Arr.map(block.items, (i) => `${i.label}: ${i.value}`),
+        "\n",
+      );
     case "Note":
       return `${block.label}:\n${block.text}`;
     case "Attachment":
@@ -302,6 +321,13 @@ const blockText = (block: Block): string => {
 };
 
 export const renderText = (content: EmailContent): string =>
-  [content.brand.name, ...content.blocks.map(blockText), "--", content.footer.join(" · ")]
-    .join("\n\n")
-    .replace(/\r\n?/g, "\n");
+  Fn.pipe(
+    [
+      content.brand.name,
+      ...Arr.map(content.blocks, blockText),
+      "--",
+      Arr.join(content.footer, " · "),
+    ],
+    Arr.join("\n\n"),
+    Str.replace(CRLF_OR_CR, "\n"),
+  );

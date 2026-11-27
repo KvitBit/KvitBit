@@ -2,10 +2,8 @@
  * Bot protection for the Better Auth endpoints that create accounts or send mail (ADR 0002,
  * core-ports section 6, http-mcp-contracts section 2.6).
  *
- * The spec places the `BotProtection` port in `apps/server/src/edge/BotProtection.ts`. That app
- * does not exist yet, so the port (tag `kvitbit/edge/BotProtection`) and its errors live here
- * next to the adapters; apps/server re-exports them. Port errors are internal
- * `Data.TaggedError`s: the edge maps `InvalidBotProof` to the HTTP `InvalidBotProof` (400) of
+ * The adapter exports the `BotProtection` port and its internal errors for `apps/server`.
+ * The edge maps `InvalidBotProof` to the HTTP `InvalidBotProof` (400) of
  * `@kvitbit/api-contract` and `BotProtectionUnavailable` to `503 Unavailable` (rules B3, B6).
  *
  * Adapters:
@@ -18,40 +16,54 @@
 import { ALTCHA_HEADER_MAX_LENGTH, type BotScope } from "@kvitbit/api-contract";
 import {
   type Challenge,
+  type CreateChallengeOptions,
   createChallenge,
   type DeriveKeyFunction,
-  type Payload,
   verifySolution,
 } from "altcha-lib";
 import { deriveKey as deriveArgon2id } from "altcha-lib/algorithms/argon2id";
 import { deriveKey as derivePbkdf2 } from "altcha-lib/algorithms/pbkdf2";
-import { Clock, Config, Context, Data, Effect, Layer, Redacted } from "effect";
-import { SqlClient } from "effect/sql";
+import * as Clock from "effect/Clock";
+import * as Config from "effect/Config";
+import * as Context from "effect/Context";
+import * as DateTime from "effect/DateTime";
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+import * as Redacted from "effect/Redacted";
+import * as Schema from "effect/Schema";
+import * as SqlClient from "effect/sql/SqlClient";
 
 export type { BotScope } from "@kvitbit/api-contract";
 
 /** What `issue` returns and the widget solves: an ALTCHA v2 challenge, JSON-serializable. */
 export type BotChallenge = Challenge;
 
+const InvalidBotProofReason = Schema.Literals([
+  "missing",
+  "malformed",
+  "wrong_scope",
+  "expired",
+  "invalid_signature",
+  "invalid_solution",
+  "replayed",
+]);
+
 /** Why a proof was refused. Logged by the edge; the HTTP answer carries only the tag (B3). */
-export type InvalidBotProofReason =
-  | "missing"
-  | "malformed"
-  | "wrong_scope"
-  | "expired"
-  | "invalid_signature"
-  | "invalid_solution"
-  | "replayed";
+export type InvalidBotProofReason = typeof InvalidBotProofReason.Type;
 
 /** The payload is missing, malformed, for another scope, expired, wrong, or already used. */
-export class InvalidBotProof extends Data.TaggedError("InvalidBotProof")<{
-  readonly reason: InvalidBotProofReason;
-}> {}
+export class InvalidBotProof extends Schema.TaggedError<
+  InvalidBotProof,
+  { readonly brand: unique symbol }
+>()("InvalidBotProof", {
+  reason: InvalidBotProofReason,
+}) {}
 
 /** The replay store (or challenge signing) failed. Never fails open (rule B6). */
-export class BotProtectionUnavailable extends Data.TaggedError("BotProtectionUnavailable")<{
-  readonly cause?: unknown;
-}> {}
+export class BotProtectionUnavailable extends Schema.TaggedError<
+  BotProtectionUnavailable,
+  { readonly brand: unique symbol }
+>()("BotProtectionUnavailable", { cause: Schema.optional(Schema.Unknown) }) {}
 
 /** Edge-only port. The route picks the scope; it is never read from client input. */
 export class BotProtection extends Context.Service<
@@ -67,7 +79,10 @@ export class BotProtection extends Context.Service<
       payload: string,
     ) => Effect.Effect<void, InvalidBotProof | BotProtectionUnavailable>;
   }
->()("kvitbit/edge/BotProtection") {}
+>()(
+  // @effect-diagnostics-next-line deterministicKeys:off Keep the documented edge port key.
+  "kvitbit/edge/BotProtection",
+) {}
 
 // --- Options ---------------------------------------------------------------------------------
 
@@ -126,7 +141,7 @@ export const consumeChallenge = (input: {
       on conflict (challenge_digest) do nothing
       returning challenge_digest`;
     return rows.length === 1;
-  }).pipe(Effect.mapError((cause) => new BotProtectionUnavailable({ cause })));
+  }).pipe(Effect.mapError((cause) => BotProtectionUnavailable.make({ cause })));
 
 /**
  * Housekeeping: deletes replay rows whose challenge has expired (an expired challenge fails
@@ -137,42 +152,42 @@ export const purgeExpiredChallenges = (
 ): Effect.Effect<number, BotProtectionUnavailable, SqlClient.SqlClient> =>
   Effect.gen(function* () {
     const sql = yield* SqlClient.SqlClient;
-    const cutoff = now ?? new Date(yield* Clock.currentTimeMillis);
+    const cutoff = now ?? (yield* DateTime.nowAsDate);
     const rows = yield* sql`
       delete from altcha_replays where expires_at < ${cutoff} returning challenge_digest`;
     return rows.length;
-  }).pipe(Effect.mapError((cause) => new BotProtectionUnavailable({ cause })));
+  }).pipe(Effect.mapError((cause) => BotProtectionUnavailable.make({ cause })));
 
 // --- Payload decoding ------------------------------------------------------------------------
 
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-  typeof value === "object" && value !== null && !Array.isArray(value);
+const ProofPayload = Schema.Struct({
+  challenge: Schema.Struct({
+    signature: Schema.String,
+    parameters: Schema.Struct({
+      algorithm: Schema.String,
+      nonce: Schema.String,
+      salt: Schema.String,
+      cost: Schema.Finite,
+      keyLength: Schema.Finite,
+      keyPrefix: Schema.String,
+      memoryCost: Schema.optionalKey(Schema.Finite),
+      parallelism: Schema.optionalKey(Schema.Finite),
+      expiresAt: Schema.Finite,
+      data: Schema.optionalKey(
+        Schema.Record(
+          Schema.String,
+          Schema.Union([Schema.String, Schema.Finite, Schema.Boolean, Schema.Null]),
+        ),
+      ),
+    }),
+  }),
+  solution: Schema.Struct({ counter: Schema.Finite, derivedKey: Schema.String }),
+});
 
-/** Base64 JSON `{ challenge, solution }` with the fields `verifySolution` reads. */
-const decodePayload = (raw: string): Payload | undefined => {
-  if (raw.length > ALTCHA_HEADER_MAX_LENGTH) return undefined;
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(Buffer.from(raw, "base64").toString("utf8"));
-  } catch {
-    return undefined;
-  }
-  if (!isRecord(parsed) || !isRecord(parsed.challenge) || !isRecord(parsed.solution)) {
-    return undefined;
-  }
-  const { challenge, solution } = parsed;
-  const parameters = challenge.parameters;
-  if (
-    !isRecord(parameters) ||
-    typeof challenge.signature !== "string" ||
-    typeof parameters.expiresAt !== "number" ||
-    typeof solution.counter !== "number" ||
-    typeof solution.derivedKey !== "string"
-  ) {
-    return undefined;
-  }
-  return parsed as unknown as Payload;
-};
+// Verify the original signed parameters. A struct decode would drop extra fields before the HMAC check.
+const decodePayload = Schema.decodeUnknownEffect(
+  Schema.fromJsonString(Schema.Unknown.pipe(Schema.refine(Schema.is(ProofPayload)))),
+);
 
 // --- Adapters --------------------------------------------------------------------------------
 
@@ -187,67 +202,72 @@ export const makeAltchaBotProtection = (
     const deriveKey = deriveKeyFor(settings.algorithm);
     const withSql = Effect.provideService(SqlClient.SqlClient, sql);
 
-    const issue = (scope: BotScope) =>
-      Effect.gen(function* () {
-        const nowMs = yield* Clock.currentTimeMillis;
-        return yield* Effect.tryPromise({
-          try: () =>
-            createChallenge({
-              algorithm: settings.algorithm,
-              cost: settings.cost,
-              ...(settings.algorithm === "ARGON2ID"
-                ? { memoryCost: settings.memoryCost, parallelism: settings.parallelism }
-                : {}),
-              keyPrefix: settings.keyPrefix,
-              deriveKey,
-              hmacSignatureSecret: secret,
-              expiresAt: Math.floor(nowMs / 1000) + settings.ttlSeconds,
-              data: { scope },
-            }),
-          catch: (cause) => new BotProtectionUnavailable({ cause }),
-        });
+    const issue = Effect.fn("BotProtection.issue")(function* (scope: BotScope) {
+      const nowMs = yield* Clock.currentTimeMillis;
+      const challengeOptions = {
+        algorithm: settings.algorithm,
+        cost: settings.cost,
+        keyPrefix: settings.keyPrefix,
+        deriveKey,
+        hmacSignatureSecret: secret,
+        expiresAt: Math.floor(nowMs / 1000) + settings.ttlSeconds,
+        data: { scope },
+      } satisfies CreateChallengeOptions;
+      const signedOptions =
+        settings.algorithm === "ARGON2ID"
+          ? {
+              ...challengeOptions,
+              memoryCost: settings.memoryCost,
+              parallelism: settings.parallelism,
+            }
+          : challengeOptions;
+      return yield* Effect.tryPromise({
+        try: () => createChallenge(signedOptions),
+        catch: (cause) => BotProtectionUnavailable.make({ cause }),
       });
+    });
 
-    const verify = (scope: BotScope, raw: string) =>
-      Effect.gen(function* () {
-        if (raw.length === 0) return yield* new InvalidBotProof({ reason: "missing" });
-        const payload = decodePayload(raw);
-        if (payload === undefined) return yield* new InvalidBotProof({ reason: "malformed" });
-        const { challenge, solution } = payload;
-        // The algorithm is signed, but only the configured one is accepted, so a stale
-        // challenge from a cheaper configuration cannot be replayed into a new one.
-        if (challenge.parameters.algorithm !== settings.algorithm) {
-          return yield* new InvalidBotProof({ reason: "malformed" });
-        }
-        const result = yield* Effect.tryPromise({
-          try: () =>
-            verifySolution({ challenge, solution, deriveKey, hmacSignatureSecret: secret }),
-          // altcha-lib throws on parameters its KDF rejects: a malformed proof, not an outage.
-          catch: () => new InvalidBotProof({ reason: "malformed" }),
-        });
-        if (result.expired) return yield* new InvalidBotProof({ reason: "expired" });
-        if (result.invalidSignature !== false) {
-          return yield* new InvalidBotProof({ reason: "invalid_signature" });
-        }
-        if (!result.verified) return yield* new InvalidBotProof({ reason: "invalid_solution" });
-        // Signature verified: the scope and expiry below are the server's own.
-        if (challenge.parameters.data?.scope !== scope) {
-          return yield* new InvalidBotProof({ reason: "wrong_scope" });
-        }
-        const expiresAtSeconds = challenge.parameters.expiresAt ?? 0;
-        const nowMs = yield* Clock.currentTimeMillis;
-        if (expiresAtSeconds * 1000 <= nowMs) {
-          return yield* new InvalidBotProof({ reason: "expired" });
-        }
-        const fresh = yield* consumeChallenge({
-          // The signature is an HMAC over parameters including a random nonce: unique per
-          // challenge and unforgeable, so it is the single-use key.
-          digest: challenge.signature ?? "",
-          scope,
-          expiresAt: new Date(expiresAtSeconds * 1000),
-        }).pipe(withSql);
-        if (!fresh) return yield* new InvalidBotProof({ reason: "replayed" });
+    const verify = Effect.fn("BotProtection.verify")(function* (scope: BotScope, raw: string) {
+      if (raw.length === 0) return yield* InvalidBotProof.make({ reason: "missing" });
+      if (raw.length > ALTCHA_HEADER_MAX_LENGTH) {
+        return yield* InvalidBotProof.make({ reason: "malformed" });
+      }
+      const { challenge, solution } = yield* decodePayload(
+        Buffer.from(raw, "base64").toString("utf8"),
+      ).pipe(Effect.mapError(() => InvalidBotProof.make({ reason: "malformed" })));
+      // The algorithm is signed, but only the configured one is accepted, so a stale
+      // challenge from a cheaper configuration cannot be replayed into a new one.
+      if (challenge.parameters.algorithm !== settings.algorithm) {
+        return yield* InvalidBotProof.make({ reason: "malformed" });
+      }
+      const result = yield* Effect.tryPromise({
+        try: () => verifySolution({ challenge, solution, deriveKey, hmacSignatureSecret: secret }),
+        // altcha-lib throws on parameters its KDF rejects: a malformed proof, not an outage.
+        catch: () => InvalidBotProof.make({ reason: "malformed" }),
       });
+      if (result.expired) return yield* InvalidBotProof.make({ reason: "expired" });
+      if (result.invalidSignature !== false) {
+        return yield* InvalidBotProof.make({ reason: "invalid_signature" });
+      }
+      if (!result.verified) return yield* InvalidBotProof.make({ reason: "invalid_solution" });
+      // Signature verified: the scope and expiry below are the server's own.
+      if (challenge.parameters.data?.scope !== scope) {
+        return yield* InvalidBotProof.make({ reason: "wrong_scope" });
+      }
+      const expiresAtSeconds = challenge.parameters.expiresAt;
+      const nowMs = yield* Clock.currentTimeMillis;
+      if (expiresAtSeconds * 1000 <= nowMs) {
+        return yield* InvalidBotProof.make({ reason: "expired" });
+      }
+      const fresh = yield* consumeChallenge({
+        // The signature is an HMAC over parameters including a random nonce: unique per
+        // challenge and unforgeable, so it is the single-use key.
+        digest: challenge.signature,
+        scope,
+        expiresAt: DateTime.toDateUtc(DateTime.fromEpochSeconds(expiresAtSeconds)),
+      }).pipe(withSql);
+      if (!fresh) return yield* InvalidBotProof.make({ reason: "replayed" });
+    });
 
     return BotProtection.of({ issue, verify });
   });
@@ -277,7 +297,7 @@ export const AltchaBotProtectionConfig = (
 export const NoopBotProtection: Layer.Layer<BotProtection> = Layer.succeed(
   BotProtection,
   BotProtection.of({
-    issue: () =>
+    issue: Effect.fn("BotProtection.issue")(() =>
       Effect.succeed({
         parameters: {
           algorithm: "NONE",
@@ -288,6 +308,7 @@ export const NoopBotProtection: Layer.Layer<BotProtection> = Layer.succeed(
           keyPrefix: "",
         },
       }),
-    verify: () => Effect.void,
+    ),
+    verify: Effect.fn("BotProtection.verify")(() => Effect.void),
   }),
 );

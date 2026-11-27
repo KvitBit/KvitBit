@@ -1,9 +1,13 @@
+import type { InputProps } from "alchemy";
 import { Unowned } from "alchemy/AdoptPolicy";
 import * as Provider from "alchemy/Provider";
 import { Resource } from "alchemy/Resource";
+import * as Arr from "effect/Array";
 import * as Effect from "effect/Effect";
-import { HttpClientRequest } from "effect/http";
+import * as HttpClientRequest from "effect/http/HttpClientRequest";
 import * as Option from "effect/Option";
+import * as Order from "effect/Order";
+import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 import {
   computeRoot,
@@ -80,7 +84,11 @@ export type EdgeSecurityPolicy = Resource<
   EdgeSecurityPolicyProps,
   EdgeSecurityPolicyAttributes
 >;
-export const EdgeSecurityPolicy = Resource<EdgeSecurityPolicy>("Kvitbit.EdgeSecurityPolicy");
+const EdgeSecurityPolicy = Resource<EdgeSecurityPolicy>("Kvitbit.EdgeSecurityPolicy");
+
+export const declareEdgeSecurityPolicy =
+  (id: string) => (props: InputProps<EdgeSecurityPolicyProps>) =>
+    EdgeSecurityPolicy(id, props);
 
 /** Rule sync passes; a pass ends early only on a lost answer. */
 const ruleSyncPasses = 3;
@@ -99,7 +107,7 @@ const LiveRule = Schema.Struct({
       versionedExpr: Schema.optional(Schema.String),
       config: Schema.optional(
         Schema.Struct({
-          srcIpRanges: Schema.optional(Schema.Array(Schema.String)),
+          srcIpRanges: Schema.String.pipe(Schema.Array, Schema.optional),
         }),
       ),
     }),
@@ -107,7 +115,7 @@ const LiveRule = Schema.Struct({
   /** Never declared by the edge; any live exclusion is drift. */
   preconfiguredWafConfig: Schema.optional(
     Schema.Struct({
-      exclusions: Schema.optional(Schema.Array(Schema.Unknown)),
+      exclusions: Schema.Unknown.pipe(Schema.Array, Schema.optional),
     }),
   ),
   rateLimitOptions: Schema.optional(
@@ -134,7 +142,7 @@ const LiveSecurityPolicy = Schema.Struct({
   description: Schema.optional(Schema.String),
   fingerprint: Schema.optional(Schema.String),
   type: Schema.optional(Schema.String),
-  rules: Schema.optional(Schema.Array(LiveRule)),
+  rules: LiveRule.pipe(Schema.Array, Schema.optional),
 });
 type LiveSecurityPolicy = typeof LiveSecurityPolicy.Type;
 /**
@@ -142,22 +150,20 @@ type LiveSecurityPolicy = typeof LiveSecurityPolicy.Type;
  * strings empty, so a live rule equals its declaration exactly when every
  * field the edge sets matches.
  */
-export const comparedRule = (rule: LiveRule | EdgeSecurityPolicyRule) => {
+const encodeRule = Schema.encodeResult(Schema.fromJsonString(Schema.Unknown));
+
+const comparedRule = (rule: LiveRule) => {
   const match = rule.match;
   const limit = rule.rateLimitOptions;
-  const wafExclusions =
-    "preconfiguredWafConfig" in rule ? (rule.preconfiguredWafConfig?.exclusions ?? []) : [];
-  return JSON.stringify({
+  const parts = {
     priority: rule.priority,
     action: rule.action ?? "",
     description: rule.description ?? "",
     preview: rule.preview === true,
-    expression: match !== undefined && "expr" in match ? (match.expr?.expression ?? "") : "",
-    versionedExpr:
-      match !== undefined && "versionedExpr" in match ? (match.versionedExpr ?? "") : "",
-    srcIpRanges:
-      match !== undefined && "config" in match ? [...(match.config?.srcIpRanges ?? [])].sort() : [],
-    wafExclusions,
+    expression: match?.expr?.expression ?? "",
+    versionedExpr: match?.versionedExpr ?? "",
+    srcIpRanges: Arr.sort(match?.config?.srcIpRanges ?? [], Order.String),
+    wafExclusions: rule.preconfiguredWafConfig?.exclusions ?? [],
     rateLimit:
       limit === undefined
         ? null
@@ -168,7 +174,8 @@ export const comparedRule = (rule: LiveRule | EdgeSecurityPolicyRule) => {
             count: limit.rateLimitThreshold?.count ?? 0,
             intervalSec: limit.rateLimitThreshold?.intervalSec ?? 0,
           },
-  });
+  };
+  return Result.getOrThrow(encodeRule(parts));
 };
 
 const toAttributes = (project: string, live: LiveSecurityPolicy): EdgeSecurityPolicyAttributes => ({
@@ -179,25 +186,26 @@ const toAttributes = (project: string, live: LiveSecurityPolicy): EdgeSecurityPo
   creationTimestamp: live.creationTimestamp ?? "",
   type: live.type ?? "",
   description: parseOwnedDescription(live.description).description,
-  rules: [...(live.rules ?? [])]
-    .sort((left, right) => (left.priority ?? 0) - (right.priority ?? 0))
-    .map(comparedRule),
+  rules: Arr.map(
+    [...(live.rules ?? [])].sort((left, right) => (left.priority ?? 0) - (right.priority ?? 0)),
+    comparedRule,
+  ),
 });
 
 /** The rule changes that bring the live rules to the declared ones. */
-export const ruleChanges = (
+const ruleChanges = (
   desired: ReadonlyArray<EdgeSecurityPolicyRule>,
   live: ReadonlyArray<LiveRule>,
 ) => {
-  const liveByPriority = new Map(live.map((rule) => [rule.priority, rule]));
-  const desiredPriorities = new Set(desired.map((rule) => rule.priority));
+  const liveByPriority = new Map(Arr.map(live, (rule) => [rule.priority, rule]));
+  const desiredPriorities = new Set(Arr.map(desired, (rule) => rule.priority));
   return {
-    add: desired.filter((rule) => !liveByPriority.has(rule.priority)),
-    patch: desired.filter((rule) => {
+    add: Arr.filter(desired, (rule) => !liveByPriority.has(rule.priority)),
+    patch: Arr.filter(desired, (rule) => {
       const current = liveByPriority.get(rule.priority);
       return current !== undefined && comparedRule(current) !== comparedRule(rule);
     }),
-    remove: live.flatMap((rule) =>
+    remove: Arr.flatMap(live, (rule) =>
       rule.priority === undefined ||
       rule.priority === defaultRulePriority ||
       desiredPriorities.has(rule.priority)
@@ -215,9 +223,9 @@ const policyDrift = (
   const changes = ruleChanges(props.rules, live.rules ?? []);
   return [
     ...((live.description ?? "") === description ? [] : ["description"]),
-    ...changes.add.map((rule) => `rule ${rule.priority} missing`),
-    ...changes.patch.map((rule) => `rule ${rule.priority} differs`),
-    ...changes.remove.map((priority) => `rule ${priority} undeclared`),
+    ...Arr.map(changes.add, (rule) => `rule ${rule.priority} missing`),
+    ...Arr.map(changes.patch, (rule) => `rule ${rule.priority} differs`),
+    ...Arr.map(changes.remove, (priority) => `rule ${priority} undeclared`),
   ];
 };
 
@@ -256,19 +264,17 @@ export const EdgeSecurityPolicyProvider = Provider.succeed(EdgeSecurityPolicy, {
   diff: Effect.fn(function* ({ news, olds, output }) {
     const previous = olds ?? output;
     if (previous === undefined) {
-      return undefined;
+      return;
     }
     // Identity fields are plain strings; an unresolved one cannot differ yet.
-    const changed = (key: "project" | "name" | "type") => {
-      return Option.exists(resolvedStringProp(key)(news), (next) => next !== previous[key]);
-    };
+    const changed = (key: "project" | "name" | "type") =>
+      Option.exists(resolvedStringProp(key)(news), (next) => next !== previous[key]);
     if (changed("project") || changed("name")) {
       return { action: "replace" as const, deleteFirst: false };
     }
     if (changed("type")) {
       return { action: "replace" as const, deleteFirst: true };
     }
-    return undefined;
   }),
 
   read: Effect.fn(function* ({ id, olds, output, previous }) {
@@ -281,11 +287,11 @@ export const EdgeSecurityPolicyProvider = Provider.succeed(EdgeSecurityPolicy, {
       LiveSecurityPolicy,
     );
     if (live === undefined) {
-      return undefined;
+      return;
     }
     const attributes = toAttributes(project, live);
     const owned =
-      (yield* isOwnedDescription(id, live.description)) ||
+      (yield* isOwnedDescription({ id, description: live.description })) ||
       (previous !== undefined && previous.selfLink === live.selfLink);
     return owned ? attributes : Unowned(attributes);
   }),
@@ -295,15 +301,15 @@ export const EdgeSecurityPolicyProvider = Provider.succeed(EdgeSecurityPolicy, {
     const { project, name } = news;
     const resource = `Security policy ${name}`;
     const url = `${policiesUrl(project)}/${name}`;
-    const description = yield* ownedDescription(id, news.description);
+    const description = yield* ownedDescription({ id, description: news.description });
     // Every readback must still be the object admitted below.
     let admittedId: string | undefined;
     const read = (operation: string) =>
       api.get(resource, url, LiveSecurityPolicy).pipe(
-        Effect.flatMap((live) => requirePresent(resource, operation, live)),
+        Effect.flatMap((candidate) => requirePresent({ resource, operation, live: candidate })),
         Effect.filterOrFail(
-          (live) => admittedId === undefined || live.id === admittedId,
-          () => new EdgeComputeResourceUnowned({ resource }),
+          (candidate) => admittedId === undefined || candidate.id === admittedId,
+          () => EdgeComputeResourceUnowned.make({ resource }),
         ),
       );
     // Each write first checks the policy is still the admitted one, and
@@ -312,17 +318,18 @@ export const EdgeSecurityPolicyProvider = Provider.succeed(EdgeSecurityPolicy, {
       read(operation).pipe(
         Effect.andThen(api.mutate(resource, operation, request)),
         Effect.flatMap((pending) => api.settle(resource, project, pending)),
-        Effect.flatMap((settled) => requireAdmittedTarget(resource, admittedId, settled)),
+        Effect.flatMap((settled) => requireAdmittedTarget({ resource, admittedId, settled })),
       );
 
     let live = yield* api.get(resource, url, LiveSecurityPolicy);
     if (live === undefined) {
-      const inserted = yield* api.insert(resource, policiesUrl(project), {
+      const body = {
         name,
         description,
         type: news.type,
-        rules: news.rules.map((rule) => ruleBody(rule)),
-      });
+        rules: Arr.map(news.rules, (rule) => ruleBody(rule)),
+      };
+      const inserted = yield* api.insert(resource, policiesUrl(project), body);
       // Admitted by the insert's own target ID, or else by the marker: a
       // conflict is ours only after a retried insert that went through.
       const insertedId =
@@ -330,17 +337,17 @@ export const EdgeSecurityPolicyProvider = Provider.succeed(EdgeSecurityPolicy, {
           ? undefined
           : (yield* api.settle(resource, project, inserted)).targetId;
       live = yield* read("insert");
-      if (!(yield* isAdmitted(id, insertedId, live))) {
-        return yield* new EdgeComputeResourceUnowned({ resource });
+      if (!(yield* isAdmitted({ id, admittedId: insertedId, live }))) {
+        return yield* EdgeComputeResourceUnowned.make({ resource });
       }
-    } else if (!(yield* isAdmitted(id, output?.id, live))) {
-      return yield* new EdgeComputeResourceUnowned({ resource });
+    } else if (!(yield* isAdmitted({ id, admittedId: output?.id, live }))) {
+      return yield* EdgeComputeResourceUnowned.make({ resource });
     }
 
     admittedId = live.id;
 
     if (live.type !== news.type) {
-      return yield* new EdgeComputeResourceNotConverged({
+      return yield* EdgeComputeResourceNotConverged.make({
         resource,
         fields: ["type"],
       });
@@ -365,7 +372,7 @@ export const EdgeSecurityPolicyProvider = Provider.succeed(EdgeSecurityPolicy, {
       read(operation).pipe(
         Effect.andThen(api.mutateOnce(resource, operation, request)),
         Effect.flatMap((pending) => api.settle(resource, project, pending)),
-        Effect.flatMap((settled) => requireAdmittedTarget(resource, admittedId, settled)),
+        Effect.flatMap((settled) => requireAdmittedTarget({ resource, admittedId, settled })),
       );
     const syncRules = Effect.gen(function* () {
       const current = yield* read("rules");
@@ -386,7 +393,12 @@ export const EdgeSecurityPolicyProvider = Provider.succeed(EdgeSecurityPolicy, {
             HttpClientRequest.bodyJsonUnsafe(
               ruleBody(
                 rule,
-                current.rules?.find((candidate) => candidate.priority === rule.priority),
+                Option.getOrUndefined(
+                  Arr.findFirst(
+                    current.rules ?? [],
+                    (candidate) => candidate.priority === rule.priority,
+                  ),
+                ),
               ),
             ),
           ),
@@ -417,7 +429,7 @@ export const EdgeSecurityPolicyProvider = Provider.succeed(EdgeSecurityPolicy, {
 
     const remaining = policyDrift(news, description, live);
     if (remaining.length > 0) {
-      return yield* new EdgeComputeResourceNotConverged({
+      return yield* EdgeComputeResourceNotConverged.make({
         resource,
         fields: remaining,
       });
@@ -431,7 +443,7 @@ export const EdgeSecurityPolicyProvider = Provider.succeed(EdgeSecurityPolicy, {
     const url = `${policiesUrl(output.project)}/${output.name}`;
     // A same-name object someone else recreated is not ours to delete.
     const live = yield* api.get(resource, url, LiveSecurityPolicy);
-    if (live === undefined || !(yield* isAdmitted(id, output.id, live))) {
+    if (live === undefined || !(yield* isAdmitted({ id, admittedId: output.id, live }))) {
       return;
     }
     const deleted = yield* api.delete(resource, url);

@@ -8,22 +8,34 @@ import {
   rmSync,
   symlinkSync,
   writeFileSync,
-} from "node:fs";
+  // @effect-diagnostics-next-line nodeBuiltinImport:off
+} from "node:fs"; // Direct fixture operations and independent filesystem assertions.
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import * as BunFileSystem from "@effect/platform-bun/BunFileSystem";
 import { BlobStorage } from "@kvitbit/domain/ports";
-import { Effect, Fiber, Stream } from "effect";
+import * as Arr from "effect/Array";
+import * as Deferred from "effect/Deferred";
+import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
+import * as FileSystem from "effect/FileSystem";
+import * as Option from "effect/Option";
+import * as Path from "effect/Path";
+import * as Stream from "effect/Stream";
+import * as Str from "effect/String";
 import { LocalDiskBlobStorage } from "../../src/blob/index";
+import { makeLocalDiskBlobStorage } from "../../src/blob/local-disk";
 import { chunked, describeBlobStorageContract, endless, key, meta } from "./contract";
 
+const { join } = Effect.runSync(Path.Path.pipe(Effect.provide(Path.layer)));
 const base = mkdtempSync(join(tmpdir(), "kvitbit-blob-"));
 afterAll(() => rmSync(base, { recursive: true, force: true }));
 let roots = 0;
 const freshRoot = () => join(base, `root-${roots++}`);
 
-describeBlobStorageContract("LocalDiskBlobStorage", () =>
-  LocalDiskBlobStorage.layer({ root: freshRoot() }),
-);
+describeBlobStorageContract({
+  name: "Local disk",
+  layer: () => LocalDiskBlobStorage.layer({ root: freshRoot() }),
+});
 
 describe("LocalDiskBlobStorage on disk", () => {
   const withStore = <A, E>(
@@ -32,7 +44,8 @@ describe("LocalDiskBlobStorage on disk", () => {
   ) =>
     Effect.runPromise(
       Effect.gen(function* () {
-        return yield* f(yield* BlobStorage);
+        const BlobStorage_1 = yield* BlobStorage;
+        return yield* f(BlobStorage_1);
       }).pipe(Effect.provide(LocalDiskBlobStorage.layer({ root }))),
     );
 
@@ -47,7 +60,7 @@ describe("LocalDiskBlobStorage on disk", () => {
 
   test("an oversized or failed put leaves no temp file and no target", async () => {
     const root = freshRoot();
-    await withStore(root, (store) => Effect.flip(store.put(key("ws/big"), endless(), meta(100))));
+    await withStore(root, (store) => Effect.flip(store.put(key("ws/big"), endless, meta(100))));
     await withStore(root, (store) =>
       Effect.exit(
         store.put(key("ws/broken"), Stream.concat(chunked("abc"), Stream.die("boom")), meta()),
@@ -55,6 +68,27 @@ describe("LocalDiskBlobStorage on disk", () => {
     );
     expect(existsSync(join(root, "ws/big"))).toBe(false);
     expect(existsSync(join(root, "ws/broken"))).toBe(false);
+    expect(readdirSync(join(root, ".partial"))).toEqual([]);
+  });
+
+  test("interrupting an overwrite preserves the existing object and clears staging", async () => {
+    const root = freshRoot();
+    const target = key("ws/object");
+    await withStore(root, (store) =>
+      Effect.gen(function* () {
+        yield* store.put(target, chunked("old"), meta());
+        const reading = yield* Deferred.make<void>();
+        const pause = Stream.fromEffectDrain(
+          Deferred.succeed(reading, undefined).pipe(Effect.andThen(Effect.never)),
+        );
+        const upload = yield* store
+          .put(target, Stream.concat(chunked("new"), pause), meta())
+          .pipe(Effect.forkChild);
+        yield* Deferred.await(reading);
+        yield* Fiber.interrupt(upload);
+      }),
+    );
+    expect(readFileSync(join(root, target), "utf8")).toBe("old");
     expect(readdirSync(join(root, ".partial"))).toEqual([]);
   });
 
@@ -69,7 +103,7 @@ describe("LocalDiskBlobStorage on disk", () => {
         ];
       }),
     );
-    expect(errors.map((error) => error._tag)).toEqual(["BlobMissing", "BlobMissing"]);
+    expect(Arr.map(errors, (error) => error._tag)).toEqual(["BlobMissing", "BlobMissing"]);
   });
 
   test("delete of a prefix that is only a directory is a no-op", async () => {
@@ -109,25 +143,26 @@ describe("LocalDiskBlobStorage on disk", () => {
   test("reads files placed by another writer, e.g. a restored backup", async () => {
     const root = freshRoot();
     await withStore(root, () => Effect.void);
-    writeFileSync(join(root, "restored"), "from backup");
+    const restored = Str.repeat(30_000)("from backup");
+    writeFileSync(join(root, "restored"), restored);
     const text = await withStore(root, (store) =>
       Effect.flatMap(store.get(key("restored")), (stream) =>
         Stream.runCollect(stream).pipe(Effect.map((chunks) => Buffer.concat(chunks).toString())),
       ),
     );
-    expect(text).toBe("from backup");
+    expect(text).toBe(restored);
   });
 
   test("a root that cannot be created fails the layer with BlobUnavailable", async () => {
     const file = join(base, "not-a-dir");
     writeFileSync(file, "");
-    const exit = await Effect.runPromise(
-      Effect.exit(
-        Effect.provide(Effect.asVoid(BlobStorage), LocalDiskBlobStorage.layer({ root: file })),
-      ),
+    const error = await BlobStorage.pipe(
+      Effect.asVoid,
+      Effect.provide(LocalDiskBlobStorage.layer({ root: file })),
+      Effect.flip,
+      Effect.runPromise,
     );
-    expect(exit._tag).toBe("Failure");
-    expect(JSON.stringify(exit)).toContain("BlobUnavailable");
+    expect(error._tag).toBe("BlobUnavailable");
   });
 
   describe("symlinks below root are never followed", () => {
@@ -154,7 +189,7 @@ describe("LocalDiskBlobStorage on disk", () => {
           ];
         }),
       );
-      expect(errors.map((error) => error._tag)).toEqual([
+      expect(Arr.map(errors, (error) => error._tag)).toEqual([
         "BlobUnavailable",
         "BlobUnavailable",
         "BlobUnavailable",
@@ -174,6 +209,18 @@ describe("LocalDiskBlobStorage on disk", () => {
       expect(readFileSync(join(outside, "secret"), "utf8")).toBe("outside");
     });
 
+    test("delete removes a dangling or directory symlink by name", async () => {
+      const { root, outside } = setup();
+      await withStore(root, (store) => store.delete(key("ws")));
+      expect(existsSync(join(root, "ws"))).toBe(false);
+      expect(readFileSync(join(outside, "secret"), "utf8")).toBe("outside");
+
+      const dangling = join(root, "dangling");
+      symlinkSync(join(outside, "absent"), dangling);
+      await withStore(root, (store) => store.delete(key("dangling")));
+      expect(readdirSync(root)).not.toContain("dangling");
+    });
+
     test("a put over a symlinked object replaces the link, not its target", async () => {
       const { root, outside } = setup();
       await withStore(root, (store) => store.put(key("link"), chunked("mine"), meta()));
@@ -187,10 +234,10 @@ describe("LocalDiskBlobStorage on disk", () => {
       mkdirSync(outside, { recursive: true });
       mkdirSync(root, { recursive: true });
       symlinkSync(outside, join(root, ".partial"));
-      const exit = await Effect.runPromise(
-        Effect.exit(
-          Effect.provide(Effect.asVoid(BlobStorage), LocalDiskBlobStorage.layer({ root })),
-        ),
+      const exit = await BlobStorage.pipe(
+        Effect.asVoid,
+        Effect.provide(LocalDiskBlobStorage.layer({ root })),
+        Effect.runPromiseExit,
       );
       expect(exit._tag).toBe("Failure");
     });
@@ -218,14 +265,64 @@ describe("LocalDiskBlobStorage on disk", () => {
     expect(readdirSync(join(root, ".partial"))).toEqual([]);
   });
 
+  test("download interruption waits for a pending read before releasing the file", async () => {
+    const root = freshRoot();
+    mkdirSync(root);
+    writeFileSync(join(root, "object"), "body");
+
+    const result = await Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const started = yield* Deferred.make<void>();
+      const resume = yield* Deferred.make<void>();
+      const readSettled = yield* Deferred.make<void>();
+      const releasing = yield* Deferred.make<void>();
+      const gatedFileSystem = {
+        ...fs,
+        open: (path, options) =>
+          Effect.gen(function* () {
+            const file = yield* fs.open(path, options);
+            // The finalizer runs just before the file descriptor is closed.
+            yield* Effect.addFinalizer(() => Deferred.succeed(releasing, undefined));
+            const readAlloc = file.readAlloc.bind(file);
+            return Object.assign(file, {
+              readAlloc: (size: number, readOptions?: FileSystem.File.ReadOptions) =>
+                Deferred.succeed(started, undefined).pipe(
+                  Effect.andThen(Deferred.await(resume)),
+                  Effect.andThen(readAlloc(size, readOptions)),
+                  Effect.tap(() => Deferred.succeed(readSettled, undefined)),
+                ),
+            });
+          }),
+      } satisfies FileSystem.FileSystem;
+
+      const store = yield* makeLocalDiskBlobStorage({ root }).pipe(
+        Effect.provideService(FileSystem.FileSystem, gatedFileSystem),
+      );
+      const stream = yield* store.get(key("object"));
+      const reader = yield* stream.pipe(Stream.runDrain, Effect.forkChild);
+      yield* Deferred.await(started);
+      const interrupt = yield* reader.pipe(Fiber.interrupt, Effect.forkChild);
+      const releasedWhileReading = yield* releasing.pipe(
+        Deferred.await,
+        Effect.timeoutOption("50 millis"),
+      );
+      yield* Deferred.succeed(resume, undefined);
+      yield* Fiber.join(interrupt);
+      const settled = yield* Deferred.isDone(readSettled);
+      const released = yield* Deferred.isDone(releasing);
+      return { releasedEarly: Option.isSome(releasedWhileReading), settled, released };
+    }).pipe(Effect.provide([BunFileSystem.layer, Path.layer]), Effect.runPromise);
+
+    expect(result).toEqual({ releasedEarly: false, settled: true, released: true });
+  });
+
   // Counts descriptors through procfs; hosts without it (macOS) skip this check.
-  test.skipIf(!existsSync("/proc/self/fd"))(
-    "a download cancelled before or while reading leaves no descriptor open",
-    async () => {
+  describe.skipIf(!existsSync("/proc/self/fd"))("open descriptors", () => {
+    test("a download cancelled before or while reading leaves no descriptor open", async () => {
       const root = freshRoot();
       const openFds = () => readdirSync("/proc/self/fd").length;
       await withStore(root, (store) =>
-        store.put(key("ws/f"), chunked("a".repeat(100_000)), meta(10 ** 6)),
+        store.put(key("ws/f"), chunked(Str.repeat(100_000)("a")), meta(10 ** 6)),
       );
       const before = openFds();
       await withStore(root, (store) =>
@@ -233,12 +330,12 @@ describe("LocalDiskBlobStorage on disk", () => {
           for (let i = 0; i < 20; i++) {
             const stream = yield* store.get(key("ws/f"));
             yield* Stream.runCollect(Stream.take(stream, 1));
-            const fiber = yield* Effect.forkChild(Stream.runDrain(stream));
+            const fiber = yield* stream.pipe(Stream.runDrain, Effect.forkChild);
             yield* Fiber.interrupt(fiber);
           }
         }),
       );
       expect(openFds()).toBeLessThanOrEqual(before);
-    },
-  );
+    });
+  });
 });

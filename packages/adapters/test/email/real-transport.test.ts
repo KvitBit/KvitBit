@@ -1,9 +1,14 @@
 import { describe, expect, test } from "bun:test";
 import { layerResend, layerSmtp } from "@kvitbit/adapters/email";
 import { EmailSender } from "@kvitbit/domain/ports";
-import { Effect, Exit, Layer, Redacted } from "effect";
-import { FetchHttpClient } from "effect/http";
-import { message } from "./fixtures";
+import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
+import * as FetchHttpClient from "effect/http/FetchHttpClient";
+import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
+import * as Redacted from "effect/Redacted";
+import * as Str from "effect/String";
+import { failureTags, message } from "./fixtures";
 import {
   clientOnlyCert,
   clientOnlyKey,
@@ -13,42 +18,36 @@ import {
 } from "./tls-fixture";
 
 /** A local port with nothing listening: the real clients fail before connecting. */
-const closedPort = async () => {
-  const server = Bun.listen({ hostname: "127.0.0.1", port: 0, socket: { data() {} } });
+const closedPort = () => {
+  const server = Bun.listen({ hostname: "127.0.0.1", port: 0, socket: { data: () => undefined } });
   const port = server.port;
   server.stop(true);
   return port;
 };
 
 const sendWith = (layer: Layer.Layer<EmailSender>) =>
-  Effect.runPromise(
-    Effect.exit(
-      Effect.gen(function* () {
-        const sender = yield* EmailSender;
-        return yield* sender.send(message(), { idempotencyKey: "k1" });
-      }).pipe(Effect.provide(layer)),
-    ),
+  Effect.runPromiseExit(
+    Effect.gen(function* () {
+      const sender = yield* EmailSender;
+      return yield* sender.send(message(), { idempotencyKey: "k1" });
+    }).pipe(Effect.provide(layer)),
   );
-
-const failureTags = (exit: Exit.Exit<unknown, { readonly _tag: string }>) =>
-  Exit.isFailure(exit)
-    ? exit.cause.reasons.map((r) => ("error" in r ? (r.error._tag as string) : r._tag))
-    : [];
 
 describe("real transports against a closed port", () => {
   test("nodemailer connection refusal is EmailNotAccepted", async () => {
-    const port = await closedPort();
+    const port = closedPort();
     const exit = await sendWith(
       layerSmtp(
         { host: "127.0.0.1", port, secure: false, connectionTimeout: 2000 },
         { from: "Kvitbit <noreply@kvitbit.cz>" },
       ),
     );
-    expect(failureTags(exit)).toEqual(["EmailNotAccepted"]);
+    const tags = failureTags(exit);
+    expect(tags).toEqual(["EmailNotAccepted"]);
   });
 
   test("fetch connection refusal is EmailNotAccepted", async () => {
-    const port = await closedPort();
+    const port = closedPort();
     const exit = await sendWith(
       layerResend({
         apiKey: Redacted.make("re_test"),
@@ -57,7 +56,8 @@ describe("real transports against a closed port", () => {
         timeout: "2 seconds",
       }).pipe(Layer.provide(FetchHttpClient.layer)),
     );
-    expect(failureTags(exit)).toEqual(["EmailNotAccepted"]);
+    const tags = failureTags(exit);
+    expect(tags).toEqual(["EmailNotAccepted"]);
   });
 
   test.each([
@@ -90,7 +90,8 @@ describe("real transports against a closed port", () => {
           { from: "Kvitbit <noreply@kvitbit.cz>" },
         ),
       );
-      expect(failureTags(exit)).toEqual(["EmailNotAccepted"]);
+      const tags = failureTags(exit);
+      expect(tags).toEqual(["EmailNotAccepted"]);
       expect(received).not.toContain("DATA");
     } finally {
       server.stop(true);
@@ -98,10 +99,10 @@ describe("real transports against a closed port", () => {
   });
 
   test.each([
-    ["accepts", "250 2.0.0 queued", "ok"],
-    ["never answers after DATA", undefined, "EmailOutcomeUnknown"],
-    ["refuses after DATA with 554", "554 5.7.1 rejected", "EmailRejected"],
-    ["defers after DATA with 451", "451 4.3.0 try later", "EmailNotAccepted"],
+    ["accepts", "250 2.0.0 queued", { provider: "smtp", providerMessageId: "<k1@kvitbit.cz>" }],
+    ["never answers after DATA", undefined, ["EmailOutcomeUnknown"]],
+    ["refuses after DATA with 554", "554 5.7.1 rejected", ["EmailRejected"]],
+    ["defers after DATA with 451", "451 4.3.0 try later", ["EmailNotAccepted"]],
   ])("nodemailer against an SMTP stub that %s", async (_name, finalReply, expected) => {
     const server = smtpStub(finalReply);
     try {
@@ -117,13 +118,8 @@ describe("real transports against a closed port", () => {
           { from: "Kvitbit <noreply@kvitbit.cz>" },
         ),
       );
-      if (expected === "ok") {
-        expect(exit).toEqual(
-          Exit.succeed({ provider: "smtp", providerMessageId: "<k1@kvitbit.cz>" }),
-        );
-      } else {
-        expect(failureTags(exit)).toEqual([expected]);
-      }
+      const actual = Exit.isSuccess(exit) ? exit.value : failureTags(exit);
+      expect(actual).toEqual(expected);
     } finally {
       server.stop(true);
     }
@@ -142,24 +138,24 @@ const smtpStub = (finalReply: string | undefined) =>
       },
       data(socket, chunk) {
         socket.data.buffer += new TextDecoder().decode(chunk);
-        while (true) {
+        while (socket.data.buffer.length > 0) {
           if (socket.data.inData) {
-            const end = socket.data.buffer.indexOf("\r\n.\r\n");
-            if (end < 0) return;
-            socket.data.buffer = socket.data.buffer.slice(end + 5);
+            const end = Str.indexOf("\r\n.\r\n")(socket.data.buffer);
+            if (Option.isNone(end)) return;
+            socket.data.buffer = Str.slice(end.value + 5)(socket.data.buffer);
             socket.data.inData = false;
             if (finalReply !== undefined) socket.write(`${finalReply}\r\n`);
             continue;
           }
-          const lineEnd = socket.data.buffer.indexOf("\r\n");
-          if (lineEnd < 0) return;
-          const line = socket.data.buffer.slice(0, lineEnd).toUpperCase();
-          socket.data.buffer = socket.data.buffer.slice(lineEnd + 2);
-          if (line.startsWith("EHLO")) socket.write("250-stub\r\n250 8BITMIME\r\n");
-          else if (line.startsWith("DATA")) {
+          const lineEnd = Str.indexOf("\r\n")(socket.data.buffer);
+          if (Option.isNone(lineEnd)) return;
+          const line = Str.toUpperCase(Str.slice(0, lineEnd.value)(socket.data.buffer));
+          socket.data.buffer = Str.slice(lineEnd.value + 2)(socket.data.buffer);
+          if (Str.startsWith("EHLO")(line)) socket.write("250-stub\r\n250 8BITMIME\r\n");
+          else if (Str.startsWith("DATA")(line)) {
             socket.data.inData = true;
             socket.write("354 go ahead\r\n");
-          } else if (line.startsWith("QUIT")) socket.write("221 bye\r\n");
+          } else if (Str.startsWith("QUIT")(line)) socket.write("221 bye\r\n");
           else socket.write("250 ok\r\n");
         }
       },

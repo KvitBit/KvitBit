@@ -1,4 +1,7 @@
 /** Modern Minimal template (D06-D10), after the approved mockup screen 24. */
+
+import * as Arr from "effect/Array";
+import * as Fn from "effect/Function";
 import { escapeHtml as e } from "./format";
 import type { DocumentRenderModel } from "./model";
 import type { Prepared } from "./prepare";
@@ -53,23 +56,40 @@ table.mo-vat td { text-align: right; padding: 3px 4px; white-space: nowrap; bord
 .doc-footer { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding-top: 10px; border-top: 1px solid #ECECEF; font-size: 8.5px; color: #71717A; break-inside: avoid; }
 `;
 
-export const renderModern = (model: DocumentRenderModel, p: Prepared): string => {
+export const renderModern: {
+  (p: Prepared): (model: DocumentRenderModel) => string;
+  (model: DocumentRenderModel, p: Prepared): string;
+} = Fn.dual(2, (model: DocumentRenderModel, p: Prepared): string => {
   const { t } = p;
   const issuer = model.issuer;
   const customer = model.customer;
   const sep = " ";
-  const idsCompact = [
-    issuer.companyId ? `${t.companyId}${sep}${issuer.companyId}` : null,
-    issuer.vatId ? `${t.vatId}${sep}${issuer.vatId}` : null,
-  ]
-    .filter((x) => x !== null)
-    .join(" · ");
-  const customerIds = [
-    customer.companyId ? `${t.companyId}${sep}${customer.companyId}` : null,
-    customer.vatId ? `${t.vatId}${sep}${customer.vatId}` : null,
-  ]
-    .filter((x) => x !== null)
-    .join(" · ");
+  const idsCompact = Arr.join(
+    Arr.filter(
+      [
+        issuer.companyId !== null && issuer.companyId !== ""
+          ? `${t.companyId}${sep}${issuer.companyId}`
+          : null,
+        issuer.vatId !== null && issuer.vatId !== "" ? `${t.vatId}${sep}${issuer.vatId}` : null,
+      ],
+      (x) => x !== null,
+    ),
+    " · ",
+  );
+  const customerIds = Arr.join(
+    Arr.filter(
+      [
+        customer.companyId !== null && customer.companyId !== ""
+          ? `${t.companyId}${sep}${customer.companyId}`
+          : null,
+        customer.vatId !== null && customer.vatId !== ""
+          ? `${t.vatId}${sep}${customer.vatId}`
+          : null,
+      ],
+      (x) => x !== null,
+    ),
+    " · ",
+  );
 
   const issuedLabel = p.meta.taxPoint === null ? t.issuedOn : t.issuedTaxPoint;
   const issuedValue =
@@ -78,12 +98,14 @@ export const renderModern = (model: DocumentRenderModel, p: Prepared): string =>
       : `${p.meta.issuedOn} / ${p.meta.taxPoint}`;
   const dueValue = model.kind === "payment_tax_document" ? t.paid : (p.meta.dueOn ?? "–");
 
-  const lineRows = p.lines
-    .map(
+  const lineRows = Arr.join(
+    Arr.map(
+      p.lines,
       (l) =>
         `<tr${l.deduction ? ' class="deduct"' : ""}><td>${e(l.description)}</td><td class="r">${e(l.quantity)}</td><td class="r">${e(l.unitPrice)}</td>${p.showVat ? `<td class="r">${e(l.vat)}</td>` : ""}<td class="r${l.negative ? " neg" : ""}"><strong>${e(l.total)}</strong></td></tr>`,
-    )
-    .join("");
+    ),
+    "",
+  );
 
   const sums: Array<string> = [];
   if (p.final) {
@@ -120,22 +142,31 @@ export const renderModern = (model: DocumentRenderModel, p: Prepared): string =>
   // or several rates get the per-rate recap.
   const recap =
     p.showRecap && (p.final || p.recap.length > 1)
-      ? `<table class="mo-vat" data-section="vat-recap"><thead><tr><th>${e(t.vatRate)}</th><th>${e(t.vatBase)}</th><th>${e(t.vat)}</th><th>${e(t.vatGross)}</th></tr></thead><tbody>${p.recap
-          .map(
+      ? `<table class="mo-vat" data-section="vat-recap"><thead><tr><th>${e(t.vatRate)}</th><th>${e(t.vatBase)}</th><th>${e(t.vat)}</th><th>${e(t.vatGross)}</th></tr></thead><tbody>${Arr.join(
+          Arr.map(
+            p.recap,
             (r) =>
               `<tr><td>${e(r.label)}</td><td>${e(r.base)}</td><td>${e(r.vat)}</td><td>${e(r.gross)}</td></tr>`,
-          )
-          .join("")}</tbody></table>`
+          ),
+          "",
+        )}</tbody></table>`
       : "";
 
-  const statText = p.notes
-    .map((n) => `<span data-note="${e(n.code)}">${e(n.text)}</span>`)
-    .join(" ");
-  const accountLines = [p.meta.accountNumber, p.meta.ibanBic].filter((x) => x !== null);
+  const statText = Arr.join(
+    Arr.map(p.notes, (n) => `<span data-note="${e(n.code)}">${e(n.text)}</span>`),
+    " ",
+  );
+  const accountLines = Arr.filter([p.meta.accountNumber, p.meta.ibanBic], (x) => x !== null);
   // The payment method always prints (core-ports 1, PaymentMethod), with or without QR or account.
   const payTitle =
     p.qrSvg === null ? p.meta.paymentMethod : `${p.qrCaption} · ${p.meta.paymentMethod}`;
-  const payCard = `<div class="pay-card"${p.qrSvg === null ? "" : ' data-section="qr"'}>${p.qrSvg === null ? "" : `<div class="qr">${p.qrSvg}</div>`}<div><div class="title" data-section="payment-method">${e(payTitle)}</div>${accountLines.map((a, i) => `<div class="mono"${i > 0 ? ' style="font-size:8px;"' : ""}>${e(a)}</div>`).join("")}</div></div>`;
+  const payCard = `<div class="pay-card"${p.qrSvg === null ? "" : ' data-section="qr"'}>${p.qrSvg === null ? "" : `<div class="qr">${p.qrSvg}</div>`}<div><div class="title" data-section="payment-method">${e(payTitle)}</div>${Arr.join(
+    Arr.map(
+      accountLines,
+      (a, i) => `<div class="mono"${i > 0 ? ' style="font-size:8px;"' : ""}>${e(a)}</div>`,
+    ),
+    "",
+  )}</div></div>`;
 
   const body = `${watermark(p.draft, t.watermark)}
 <article class="sheet tnum" data-template="modern_minimal" data-kind="${e(model.kind)}">
@@ -147,7 +178,7 @@ export const renderModern = (model: DocumentRenderModel, p: Prepared): string =>
     <div class="big-num">${e(p.number)}</div>
   </div>
   <div class="issuer-top">
-    <div><div class="name">${e(issuer.name)}</div>${idsCompact ? `<div class="mono ids">${e(idsCompact)}</div>` : ""}</div>
+    <div><div class="name">${e(issuer.name)}</div>${idsCompact !== "" ? `<div class="mono ids">${e(idsCompact)}</div>` : ""}</div>
     ${p.logo ?? `<span class="logo-pill">${e(p.initials)}</span>`}
   </div>
 </header>
@@ -162,14 +193,14 @@ ${p.referenceText === null ? "" : `<div class="ref-pill" data-section="reference
   <div>
     <div class="k-lbl">${e(t.from)}</div>
     <div class="p-name">${e(issuer.name)}</div>
-    <div class="p-addr">${e(issuer.addressLines.join(", "))}</div>
-    ${p.registerEntry ? `<div class="p-small" data-note="register_entry">${e(p.registerEntry)}</div>` : ""}
+    <div class="p-addr">${e(Arr.join(issuer.addressLines, ", "))}</div>
+    ${p.registerEntry !== null && p.registerEntry !== "" ? `<div class="p-small" data-note="register_entry">${e(p.registerEntry)}</div>` : ""}
   </div>
   <div>
     <div class="k-lbl">${e(t.billedTo)}</div>
     <div class="p-name">${e(customer.name)}</div>
-    <div class="p-addr">${e(customer.addressLines.join(", "))}</div>
-    ${customerIds ? `<div class="mono p-small">${e(customerIds)}</div>` : ""}
+    <div class="p-addr">${e(Arr.join(customer.addressLines, ", "))}</div>
+    ${customerIds !== "" ? `<div class="mono p-small">${e(customerIds)}</div>` : ""}
   </div>
 </section>
 <table class="mo-items">
@@ -182,11 +213,11 @@ ${p.referenceText === null ? "" : `<div class="ref-pill" data-section="reference
     ${recap}
     ${statText === "" ? "" : `<div class="stat" data-section="statutory">${statText}</div>`}
     ${p.fxNote === null ? "" : `<div class="stat" data-section="fx">${e(p.fxNote)}</div>`}
-    ${model.note ? `<div class="doc-note">${e(model.note)}</div>` : ""}
+    ${model.note !== null && model.note !== "" ? `<div class="doc-note">${e(model.note)}</div>` : ""}
     ${p.stamp ?? ""}
   </div>
   <div class="sum-lines">
-    ${sums.join("")}
+    ${Arr.join(sums, "")}
     <div class="sum-grand"><span class="lbl">${e(p.grandLabelShort)}</span><span class="hd val" data-section="grand-total">${e(p.grand)}</span></div>
     ${p.czkEquivalent === null ? "" : `<div class="mono czk-eq" data-section="czk-equivalent">${e(p.czkEquivalent)}</div>`}
   </div>
@@ -206,4 +237,4 @@ ${p.referenceText === null ? "" : `<div class="ref-pill" data-section="reference
     tint: p.tint,
     body,
   });
-};
+});

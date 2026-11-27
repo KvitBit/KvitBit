@@ -10,8 +10,13 @@
 
 import type { IsoDate } from "@kvitbit/domain/contract";
 import { type CnbFixing, ExchangeRates, RatesUnavailable } from "@kvitbit/domain/ports";
-import { Duration, Effect, Layer } from "effect";
-import { FetchHttpClient, HttpClient } from "effect/http";
+import * as Duration from "effect/Duration";
+import * as Effect from "effect/Effect";
+import * as FetchHttpClient from "effect/http/FetchHttpClient";
+import * as HttpClient from "effect/http/HttpClient";
+import * as Layer from "effect/Layer";
+import * as Schema from "effect/Schema";
+import * as Str from "effect/String";
 import { parseDailyTxt } from "./parse";
 
 export const DEFAULT_URL =
@@ -26,39 +31,38 @@ export interface Options {
 
 /** `2026-11-21` → `21.11.2026` */
 const czechDate = (date: IsoDate): string => {
-  const [year, month, day] = date.split("-");
+  const [year, month, day] = Str.split(date, "-");
   return `${day}.${month}.${year}`;
 };
 
-export class FixingAfterRequestedDate extends Error {
-  override readonly name = "FixingAfterRequestedDate";
-}
+export class FixingAfterRequestedDate extends Schema.TaggedError<
+  FixingAfterRequestedDate,
+  { readonly brand: unique symbol }
+>()("FixingAfterRequestedDate", { message: Schema.String }) {}
 
-export const make = (
-  options: Options = {},
-): Effect.Effect<ExchangeRates["Service"], never, HttpClient.HttpClient> =>
-  Effect.gen(function* () {
-    const client = (yield* HttpClient.HttpClient).pipe(HttpClient.filterStatusOk);
-    const url = options.url ?? DEFAULT_URL;
-    const timeout = options.timeout ?? Duration.seconds(10);
+export const make = Effect.fn("CnbDailyTxt.make")(function* (options: Options = {}) {
+  const client = (yield* HttpClient.HttpClient).pipe(HttpClient.filterStatusOk);
+  const url = options.url ?? DEFAULT_URL;
+  const timeout = options.timeout ?? Duration.seconds(10);
 
-    const fixing = (date: IsoDate): Effect.Effect<CnbFixing, RatesUnavailable> =>
-      client.get(url, { urlParams: { date: czechDate(date) } }).pipe(
-        Effect.flatMap((response) => response.text),
-        Effect.timeout(timeout),
-        Effect.flatMap((text) =>
-          Effect.try({ try: () => parseDailyTxt(text), catch: (error) => error }),
-        ),
-        Effect.filterOrFail(
-          (result) => result.fixingDate <= date,
-          (result) => new FixingAfterRequestedDate(`fixing ${result.fixingDate} is after ${date}`),
-        ),
-        Effect.mapError((cause) => new RatesUnavailable({ cause })),
-        Effect.withSpan("CnbDailyTxt.fixing", { attributes: { date } }),
-      );
+  const fixing = (date: IsoDate): Effect.Effect<CnbFixing, RatesUnavailable> =>
+    client.get(url, { urlParams: { date: czechDate(date) } }).pipe(
+      Effect.flatMap((response) => response.text),
+      Effect.timeout(timeout),
+      Effect.flatMap(parseDailyTxt),
+      Effect.filterOrFail(
+        (result) => result.fixingDate <= date,
+        (result) =>
+          FixingAfterRequestedDate.make({
+            message: `fixing ${result.fixingDate} is after ${date}`,
+          }),
+      ),
+      Effect.mapError((cause) => new RatesUnavailable({ cause })),
+      Effect.withSpan("CnbDailyTxt.fixing", { attributes: { date } }),
+    );
 
-    return { fixing };
-  });
+  return { fixing };
+});
 
 /** Needs an `HttpClient`; see `layerFetch` for the fetch-backed one. */
 export const layer = (

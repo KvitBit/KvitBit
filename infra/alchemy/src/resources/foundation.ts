@@ -8,7 +8,9 @@ import { ProjectService } from "@alchemy.run/gcp/ServiceUsage";
 import type { BucketProps } from "@alchemy.run/gcp/Storage";
 import * as Storage from "@alchemy.run/gcp/Storage";
 import * as Output from "alchemy/Output";
+import * as Arr from "effect/Array";
 import * as Effect from "effect/Effect";
+import * as Str from "effect/String";
 import type { KvitbitStackConfig, KvitbitWorkload } from "../config";
 import { resourceNames, secretResourceName, serviceAccountEmail, stackLabels } from "../config";
 
@@ -25,7 +27,7 @@ export const artifactRepositoryProps = (config: KvitbitStackConfig): RepositoryP
 
 export const blobsBucketProps = (config: KvitbitStackConfig): BucketProps => ({
   bucketName: config.blobsBucket,
-  location: config.region.toUpperCase(),
+  location: Str.toUpperCase(config.region),
   storageClass: "STANDARD",
   versioning: true,
   uniformBucketLevelAccess: true,
@@ -35,7 +37,7 @@ export const blobsBucketProps = (config: KvitbitStackConfig): BucketProps => ({
 
 export const mobileAssetsBucketProps = (config: KvitbitStackConfig): BucketProps => ({
   bucketName: config.mobileAssetsBucket,
-  location: config.region.toUpperCase(),
+  location: Str.toUpperCase(config.region),
   storageClass: "STANDARD",
   versioning: true,
   uniformBucketLevelAccess: true,
@@ -43,14 +45,14 @@ export const mobileAssetsBucketProps = (config: KvitbitStackConfig): BucketProps
   labels: stackLabels(config),
 });
 
-export const serverServiceAccountProps = (config: KvitbitStackConfig): ServiceAccountProps => ({
+const serverServiceAccountProps = (config: KvitbitStackConfig): ServiceAccountProps => ({
   project: config.projectId,
   accountId: resourceNames(config).serverServiceAccountId,
   displayName: `Kvitbit ${config.stage} Cloud Run server`,
   description: "Least-privilege runtime identity for the Kvitbit Cloud Run HTTP/MCP server.",
 });
 
-export const runnerServiceAccountProps = (config: KvitbitStackConfig): ServiceAccountProps => ({
+const runnerServiceAccountProps = (config: KvitbitStackConfig): ServiceAccountProps => ({
   project: config.projectId,
   accountId: resourceNames(config).runnerServiceAccountId,
   displayName: `Kvitbit ${config.stage} Effect Cluster runner`,
@@ -60,7 +62,7 @@ export const runnerServiceAccountProps = (config: KvitbitStackConfig): ServiceAc
 export const secretDeclarations = (
   config: KvitbitStackConfig,
 ): ReadonlyArray<{ readonly id: string; readonly secretId: string; readonly props: SecretProps }> =>
-  config.secrets.map((secret) => ({
+  Arr.map(config.secrets, (secret) => ({
     id: `Secret-${secret.secretId}`,
     secretId: secret.secretId,
     props: {
@@ -82,19 +84,20 @@ export const secretAccessorGrants = (
 ): ReadonlyArray<SecretAccessorGrant> => {
   const names = resourceNames(config);
   const saEmail = (workload: KvitbitWorkload) =>
-    serviceAccountEmail(
-      config.projectId,
-      workload === "server" ? names.serverServiceAccountId : names.runnerServiceAccountId,
-    );
+    serviceAccountEmail({
+      projectId: config.projectId,
+      accountId:
+        workload === "server" ? names.serverServiceAccountId : names.runnerServiceAccountId,
+    });
 
-  return config.secrets.flatMap((secret) =>
-    secret.consumers.map((workload) => ({
+  return Arr.flatMap(config.secrets, (secret) =>
+    Arr.map(secret.consumers, (workload) => ({
       id: `SecretAccess-${secret.secretId}-${workload}`,
       secretId: secret.secretId,
       workload,
       props: {
         kind: "secretmanager.secret" as const,
-        name: secretResourceName(config.projectId, secret.secretId),
+        name: secretResourceName({ projectId: config.projectId, secretId: secret.secretId }),
         role: "roles/secretmanager.secretAccessor",
         member: `serviceAccount:${saEmail(workload)}`,
       },
@@ -192,12 +195,12 @@ export const declareFoundation = Effect.fn("KvitbitStack.declareFoundation")(fun
     serverDependencies: [
       serverBlobsAdmin.member,
       serverMobileAssetsViewer.member,
-      ...serverSecretGrants.map((grant) => grant.member),
+      ...Arr.map(serverSecretGrants, (grant) => grant.member),
     ] as const,
     runnerDependencies: [
       runnerBlobsAdmin.member,
       runnerArtifactReader.member,
-      ...runnerSecretGrants.map((grant) => grant.member),
+      ...Arr.map(runnerSecretGrants, (grant) => grant.member),
     ] as const,
   };
 });

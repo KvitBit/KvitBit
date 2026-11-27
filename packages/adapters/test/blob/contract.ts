@@ -1,11 +1,17 @@
 /** BlobStorage behaviour every adapter must share, run against each adapter's test layer. */
+
 import { describe, expect, test } from "bun:test";
-import { createHash } from "node:crypto";
-import { type BlobKey, BlobStorage } from "@kvitbit/domain/ports";
-import { Effect, type Layer, Stream } from "effect";
+// @effect-diagnostics-next-line nodeBuiltinImport:off
+import { createHash } from "node:crypto"; // Independent SHA-256 implementation for the expected bytes.
+import { BlobKey, BlobStorage, BlobTooLarge, type BlobUnavailable } from "@kvitbit/domain/ports";
+import * as Arr from "effect/Array";
+import * as Effect from "effect/Effect";
+import type * as Layer from "effect/Layer";
+import * as Stream from "effect/Stream";
+import * as Str from "effect/String";
 import { InvalidBlobKey } from "../../src/blob/index";
 
-export const key = (value: string) => value as BlobKey;
+export const key = (value: string) => BlobKey.make(value);
 export const bytesOf = (text: string) => new TextEncoder().encode(text);
 export const sha256 = (data: Uint8Array) => createHash("sha256").update(data).digest("hex");
 export const meta = (maxBytes = 1024) => ({ contentType: "application/pdf", maxBytes });
@@ -14,20 +20,17 @@ export const readAll = (stream: Stream.Stream<Uint8Array>) =>
   Stream.runCollect(stream).pipe(Effect.map((chunks) => Buffer.concat(chunks)));
 
 /** Chunks of `body` one at a time, so limits are crossed mid-stream. */
-export const chunked = (...parts: ReadonlyArray<string>) => Stream.fromIterable(parts.map(bytesOf));
+export const chunked = (...parts: ReadonlyArray<string>) =>
+  Stream.fromIterable(Arr.map(parts, bytesOf));
 
 /** An endless stream: `put` only returns if it stops reading at the limit. */
-export const endless = () =>
-  Stream.fromIterable(
-    (function* () {
-      for (;;) yield new Uint8Array(4).fill(7);
-    })(),
-  );
+export const endless = Stream.fromEffectRepeat(Effect.sync(() => new Uint8Array(4).fill(7)));
 
 /** Runs `f` with the provided BlobStorage. */
 export const withStore = <A, E>(f: (store: BlobStorage["Service"]) => Effect.Effect<A, E>) =>
   Effect.gen(function* () {
-    return yield* f(yield* BlobStorage);
+    const BlobStorage_1 = yield* BlobStorage;
+    return yield* f(BlobStorage_1);
   });
 
 export const defectOf = <A, E>(effect: Effect.Effect<A, E>) =>
@@ -36,10 +39,13 @@ export const defectOf = <A, E>(effect: Effect.Effect<A, E>) =>
     Effect.catchDefect((defect) => Effect.succeed(defect)),
   );
 
-export const describeBlobStorageContract = (
-  name: string,
-  layer: () => Layer.Layer<BlobStorage, unknown>,
-) => {
+export const describeBlobStorageContract = ({
+  name,
+  layer,
+}: {
+  readonly name: string;
+  readonly layer: () => Layer.Layer<BlobStorage, BlobUnavailable>;
+}) => {
   const run = <A, E>(effect: Effect.Effect<A, E, BlobStorage>) =>
     Effect.runPromise(Effect.provide(effect, layer()));
 
@@ -52,7 +58,8 @@ export const describeBlobStorageContract = (
           const result = yield* store.put(k, chunked("hello ", "blob ", "world"), meta());
           const whole = bytesOf("hello blob world");
           expect(result).toEqual({ key: k, bytes: whole.byteLength, sha256: sha256(whole) });
-          const read = yield* readAll(yield* store.get(k));
+          const value_1 = yield* store.get(k);
+          const read = yield* readAll(value_1);
           expect(new Uint8Array(read)).toEqual(whole);
         }),
       ));
@@ -64,7 +71,8 @@ export const describeBlobStorageContract = (
           const result = yield* store.put(key("ws-1/empty"), Stream.empty, meta());
           expect(result.bytes).toBe(0);
           expect(result.sha256).toBe(sha256(new Uint8Array()));
-          expect((yield* readAll(yield* store.get(key("ws-1/empty")))).byteLength).toBe(0);
+          const value_2 = yield* store.get(key("ws-1/empty"));
+          expect((yield* readAll(value_2)).byteLength).toBe(0);
         }),
       ));
 
@@ -84,7 +92,7 @@ export const describeBlobStorageContract = (
           const error = yield* Effect.flip(
             store.put(key("ws-1/big"), chunked("abcd", "efgh", "i"), meta(8)),
           );
-          expect(error._tag).toBe("BlobTooLarge");
+          expect(error).toBeInstanceOf(BlobTooLarge);
           expect(error).toMatchObject({ maxBytes: 8 });
           const missing = yield* Effect.flip(store.get(key("ws-1/big")));
           expect(missing._tag).toBe("BlobMissing");
@@ -95,8 +103,8 @@ export const describeBlobStorageContract = (
       run(
         Effect.gen(function* () {
           const store = yield* BlobStorage;
-          const error = yield* Effect.flip(store.put(key("ws-1/endless"), endless(), meta(64)));
-          expect(error._tag).toBe("BlobTooLarge");
+          const error = yield* Effect.flip(store.put(key("ws-1/endless"), endless, meta(64)));
+          expect(error).toBeInstanceOf(BlobTooLarge);
         }),
       ));
 
@@ -107,7 +115,8 @@ export const describeBlobStorageContract = (
           const k = key("ws-1/keep");
           yield* store.put(k, chunked("old"), meta(8));
           yield* Effect.flip(store.put(k, chunked("much too long"), meta(8)));
-          expect((yield* readAll(yield* store.get(k))).toString()).toBe("old");
+          const value_3 = yield* store.get(k);
+          expect((yield* readAll(value_3)).toString()).toBe("old");
         }),
       ));
 
@@ -118,7 +127,8 @@ export const describeBlobStorageContract = (
           const k = key("ws-1/replace");
           yield* store.put(k, chunked("first"), meta());
           yield* store.put(k, chunked("second"), meta());
-          expect((yield* readAll(yield* store.get(k))).toString()).toBe("second");
+          const value_4 = yield* store.get(k);
+          expect((yield* readAll(value_4)).toString()).toBe("second");
         }),
       ));
 
@@ -135,7 +145,8 @@ export const describeBlobStorageContract = (
             }),
           );
           const result = yield* store.put(key("ws-1/reused"), body, meta());
-          const read = yield* readAll(yield* store.get(key("ws-1/reused")));
+          const value_5 = yield* store.get(key("ws-1/reused"));
+          const read = yield* readAll(value_5);
           expect(read.toString()).toBe("abcdzzzz");
           expect(result.sha256).toBe(sha256(read));
         }),
@@ -147,7 +158,8 @@ export const describeBlobStorageContract = (
           const store = yield* BlobStorage;
           const k = key("ws-1/..hidden/...x");
           yield* store.put(k, chunked("dots"), meta());
-          expect((yield* readAll(yield* store.get(k))).toString()).toBe("dots");
+          const value_6 = yield* store.get(k);
+          expect((yield* readAll(value_6)).toString()).toBe("dots");
         }),
       ));
 
@@ -160,7 +172,8 @@ export const describeBlobStorageContract = (
           yield* store.delete(key("ws-1/p/q/r"));
           yield* store.delete(key("ws-1/p/s"));
           yield* store.put(key("ws-1/p"), chunked("now a file"), meta());
-          expect((yield* readAll(yield* store.get(key("ws-1/p")))).toString()).toBe("now a file");
+          const value_7 = yield* store.get(key("ws-1/p"));
+          expect((yield* readAll(value_7)).toString()).toBe("now a file");
         }),
       ));
 
@@ -197,21 +210,22 @@ export const describeBlobStorageContract = (
       "ws-1\\a",
       "ws-1/a\u0000b",
       ".partial/x",
-      "x".repeat(1025),
-      "\u017e".repeat(513),
+      Str.repeat(1025)("x"),
+      Str.repeat(513)("\u017e"),
     ];
     for (const bad of badKeys) {
-      test(`rejects key ${JSON.stringify(bad.slice(0, 20))} as a defect on every operation`, () =>
+      test(`rejects key ${Str.slice(0, 20)(bad)} as a defect on every operation`, () =>
         run(
           Effect.gen(function* () {
             const store = yield* BlobStorage;
             const k = key(bad);
-            for (const op of [
-              store.put(k, chunked("x"), meta()),
-              store.get(k),
-              store.delete(k),
-            ] as ReadonlyArray<Effect.Effect<unknown, unknown>>) {
-              const defect = yield* defectOf(op);
+            const defects = [
+              defectOf(store.put(k, chunked("x"), meta())),
+              defectOf(store.get(k)),
+              defectOf(store.delete(k)),
+            ];
+            for (const operation of defects) {
+              const defect = yield* operation;
               expect(defect).toBeInstanceOf(InvalidBlobKey);
             }
           }),

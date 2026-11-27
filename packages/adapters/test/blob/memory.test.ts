@@ -1,10 +1,11 @@
 import { expect, test } from "bun:test";
 import { BlobStorage } from "@kvitbit/domain/ports";
-import { Effect, Stream } from "effect";
+import * as Effect from "effect/Effect";
+import * as Stream from "effect/Stream";
 import { MemoryBlobStorage } from "../../src/blob/index";
 import { describeBlobStorageContract, key, meta, readAll } from "./contract";
 
-describeBlobStorageContract("MemoryBlobStorage", () => MemoryBlobStorage.layer);
+describeBlobStorageContract({ name: "MemoryBlobStorage", layer: () => MemoryBlobStorage.layer });
 
 test("stored bytes are isolated from the producer's and the reader's buffers", () =>
   Effect.runPromise(
@@ -13,9 +14,11 @@ test("stored bytes are isolated from the producer's and the reader's buffers", (
       const chunk = new Uint8Array([1, 2, 3]);
       yield* store.put(key("ws/a"), Stream.make(chunk), meta());
       chunk[0] = 9;
-      const first = yield* readAll(yield* store.get(key("ws/a")));
+      const value = yield* store.get(key("ws/a"));
+      const first = yield* readAll(value);
       first[1] = 9;
-      const second = yield* readAll(yield* store.get(key("ws/a")));
+      const value_1 = yield* store.get(key("ws/a"));
+      const second = yield* readAll(value_1);
       expect([...second]).toEqual([1, 2, 3]);
     }).pipe(Effect.provide(MemoryBlobStorage.layer)),
   ));
@@ -33,6 +36,7 @@ test("rejects a key that would be both an object and a prefix, as LocalDisk does
         store.put(key("ws/c"), Stream.make(new Uint8Array([4])), meta()),
       );
       expect([under._tag, over._tag]).toEqual(["BlobUnavailable", "BlobUnavailable"]);
-      expect(yield* Effect.flip(store.get(key("ws/a/b")))).toMatchObject({ _tag: "BlobMissing" });
+      const value_2 = yield* Effect.flip(store.get(key("ws/a/b")));
+      expect(value_2).toMatchObject({ _tag: "BlobMissing" });
     }).pipe(Effect.provide(MemoryBlobStorage.layer)),
   ));
