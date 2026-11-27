@@ -8,19 +8,25 @@ import type { Html } from "@effect/ui/html";
 import {
   AccountPreferences,
   type AccountPreferencesPatch,
-  type ThemeContrast,
-  type ThemeMode,
-  type ThemePresetId,
   type ThemeSource,
-  type ThemeStyle,
 } from "@kvitbit/api-contract";
-import { Api, I18n, Theme, ViewModels } from "@kvitbit/ui-port";
-import { Effect, Option, Schema } from "effect";
+import { Api, I18n, Theme } from "@kvitbit/ui-port";
+import * as Arr from "effect/Array";
+import * as Effect from "effect/Effect";
+import * as Fn from "effect/Function";
+import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
+import * as Str from "effect/String";
 import { authFetch, Failure, failureFromUnknown, request } from "../../app/api";
-import { browserCommand, type PageCommand } from "../../app/commands";
+import { browserCommand, apiCommand as cmd, type PageCommand } from "../../app/commands";
 import { textOf, translator } from "../../app/i18n";
 import { Intent_ } from "../../app/intent";
-import type { MessageHandlers, PageContext, PageReturn, RouteOf } from "../../app/page";
+import {
+  type MessageHandlers,
+  type PageContext,
+  type PageReturn,
+  RouteCases,
+} from "../../app/page";
 import type { Locale, Prefs, ThemeChoice } from "../../app/prefs";
 import * as Remote from "../../app/remote";
 import { href } from "../../app/routing";
@@ -44,9 +50,10 @@ import {
   textField,
 } from "../../ui/kit";
 import { sCopy } from "./copy";
-import { cmd, PasskeyItem, SessionItem } from "./models";
+import { PasskeyItem, SessionItem } from "./models";
 
-export type Route = RouteOf<"Account">;
+export const Route = RouteCases.Account;
+export type Route = typeof Route.Type;
 export type AccountTab = Route["tab"];
 
 const ACCOUNT_TABS: ReadonlyArray<AccountTab> = [
@@ -73,7 +80,7 @@ const AppearanceState = Schema.Struct({
 });
 
 const SecurityState = Schema.Struct({
-  passkeys: Remote.remoteSchema(Schema.Array(PasskeyItem)),
+  passkeys: PasskeyItem.pipe(Schema.Array, Remote.remoteSchema),
   newPasskeyName: Schema.String,
   addingPasskey: Schema.Boolean,
   renamingId: Schema.NullOr(Schema.String),
@@ -90,7 +97,7 @@ const SecurityState = Schema.Struct({
 });
 
 const SessionsState = Schema.Struct({
-  list: Remote.remoteSchema(Schema.Array(SessionItem)),
+  list: SessionItem.pipe(Schema.Array, Remote.remoteSchema),
   revokingId: Schema.NullOr(Schema.String),
   revokingOthers: Schema.Boolean,
 });
@@ -101,7 +108,7 @@ const DangerState = Schema.Struct({
 });
 
 export const Model = Schema.Struct({
-  route: ViewModels.Route,
+  route: Route,
   preferences: Remote.remoteSchema(AccountPreferences),
   profile: ProfileForm,
   appearance: AppearanceState,
@@ -181,6 +188,7 @@ export type Message = typeof Message.Type;
 
 const cmdLoadPreferences = (seq: number) =>
   cmd(
+    Message,
     "Account.LoadPreferences",
     request(
       (c) => c.me.getPreferences(),
@@ -204,6 +212,7 @@ const cmdSavePreferences = (prefs: Prefs, revision: number) => {
     },
   };
   return cmd(
+    Message,
     "Account.SavePreferences",
     request(
       (c) => c.me.updatePreferences({ headers: Api.ifMatchHeaders(revision), payload }),
@@ -220,8 +229,8 @@ const decodePasskeys = Schema.decodeUnknownOption(
   Schema.Array(
     Schema.Struct({
       id: Schema.String,
-      name: Schema.optionalKey(Schema.NullOr(Schema.String)),
-      createdAt: Schema.optionalKey(Schema.NullOr(Schema.String)),
+      name: Schema.String.pipe(Schema.NullOr, Schema.optionalKey),
+      createdAt: Schema.String.pipe(Schema.NullOr, Schema.optionalKey),
       deviceType: Schema.String,
     }),
   ),
@@ -234,8 +243,8 @@ const decodeSessions = Schema.decodeUnknownOption(
     Schema.Struct({
       id: Schema.String,
       token: Schema.String,
-      userAgent: Schema.optionalKey(Schema.NullOr(Schema.String)),
-      ipAddress: Schema.optionalKey(Schema.NullOr(Schema.String)),
+      userAgent: Schema.String.pipe(Schema.NullOr, Schema.optionalKey),
+      ipAddress: Schema.String.pipe(Schema.NullOr, Schema.optionalKey),
       updatedAt: Schema.String,
     }),
   ),
@@ -243,11 +252,6 @@ const decodeSessions = Schema.decodeUnknownOption(
 
 const invalidAuthResponse = (path: string): Failure =>
   failureFromUnknown(new Error(`Unexpected response from ${path}`));
-
-const origin = (): string =>
-  typeof location === "undefined" || location.origin === "null"
-    ? "http://localhost"
-    : location.origin;
 
 const cmdLoadAccounts = (seq: number) =>
   browserCommand(
@@ -260,7 +264,10 @@ const cmdLoadAccounts = (seq: number) =>
         return Option.isSome(accounts)
           ? Message.GotAccounts({
               seq,
-              hasPassword: accounts.value.some((account) => account.providerId === "credential"),
+              hasPassword: Arr.some(
+                accounts.value,
+                (account) => account.providerId === "credential",
+              ),
             })
           : Message.FailedAccounts({ seq, failure: invalidAuthResponse("/list-accounts") });
       },
@@ -279,9 +286,10 @@ const cmdLoadPasskeys = (seq: number, locale: Locale) =>
         return Option.isSome(passkeys)
           ? Message.GotPasskeys({
               seq,
-              items: passkeys.value.map((passkey) => ({
+              items: Arr.map(passkeys.value, (passkey) => ({
                 ...passkey,
-                name: passkey.name?.trim() || sCopy(locale, "account.security.unnamedPasskey"),
+                name:
+                  Str.trim(passkey.name ?? "") || sCopy(locale, "account.security.unnamedPasskey"),
                 createdAt: passkey.createdAt ?? "",
               })),
             })
@@ -297,10 +305,7 @@ const cmdLoadPasskeys = (seq: number, locale: Locale) =>
 const cmdAddPasskey = (name: string) =>
   browserCommand(
     "Account.AddPasskey",
-    Effect.tryPromise({
-      try: () => performPasskeyRegistration(origin(), name),
-      catch: (e) => e,
-    }).pipe(
+    performPasskeyRegistration(name).pipe(
       Effect.map(
         (res): Message =>
           res.supported
@@ -326,6 +331,7 @@ const cmdAddPasskey = (name: string) =>
 
 const cmdRenamePasskey = (id: string, name: string) =>
   cmd(
+    Message,
     "Account.RenamePasskey",
     authFetch(
       "/passkey/update-passkey",
@@ -348,6 +354,7 @@ const cmdDeletePasskey = (id: string) =>
 
 const cmdUpdateProfile = (name: string) =>
   cmd(
+    Message,
     "Account.UpdateProfile",
     authFetch(
       "/update-user",
@@ -359,6 +366,7 @@ const cmdUpdateProfile = (name: string) =>
 
 const cmdChangeEmail = (newEmail: string) =>
   cmd(
+    Message,
     "Account.ChangeEmail",
     authFetch(
       "/change-email",
@@ -374,6 +382,7 @@ const cmdChangePassword = (
   revokeOtherSessions: boolean,
 ) =>
   cmd(
+    Message,
     "Account.ChangePassword",
     authFetch(
       "/change-password",
@@ -404,7 +413,7 @@ const cmdLoadSessions = (seq: number, unknownDevice: string) =>
           { method: "GET" },
           (json): Message => {
             const sessions = decodeSessions(json);
-            if (Option.isNone(sessions) || !sessions.value.some((s) => s.id === current.id)) {
+            if (Option.isNone(sessions) || !Arr.some(sessions.value, (s) => s.id === current.id)) {
               return Message.FailedSessions({
                 seq,
                 failure: invalidAuthResponse("/list-sessions"),
@@ -412,9 +421,9 @@ const cmdLoadSessions = (seq: number, unknownDevice: string) =>
             }
             return Message.GotSessions({
               seq,
-              items: sessions.value.map((session) => ({
+              items: Arr.map(sessions.value, (session) => ({
                 ...session,
-                userAgent: session.userAgent?.trim() || unknownDevice,
+                userAgent: Str.trim(session.userAgent ?? "") || unknownDevice,
                 ipAddress: session.ipAddress ?? null,
                 current: session.id === current.id,
               })),
@@ -439,6 +448,7 @@ const cmdRevokeSession = (id: string, token: string) =>
 
 const cmdRevokeOtherSessions = () =>
   cmd(
+    Message,
     "Account.RevokeOtherSessions",
     authFetch(
       "/revoke-other-sessions",
@@ -450,6 +460,7 @@ const cmdRevokeOtherSessions = () =>
 
 const cmdDeleteAccount = () =>
   cmd(
+    Message,
     "Account.DeleteAccount",
     authFetch(
       "/delete-user",
@@ -461,7 +472,10 @@ const cmdDeleteAccount = () =>
 
 // --- Init ---------------------------------------------------------------------------------------
 
-export const init = (route: Route, ctx: PageContext): PageReturn<Model, Message> => {
+export const init: {
+  (ctx: PageContext): (route: Route) => PageReturn<Model, Message>;
+  (route: Route, ctx: PageContext): PageReturn<Model, Message>;
+} = Fn.dual(2, (route: Route, ctx: PageContext): PageReturn<Model, Message> => {
   const userName = ctx.session._tag === "SignedIn" ? ctx.session.user.name : "";
   const seedInput = ctx.prefs.theme._tag === "Seed" ? ctx.prefs.theme.hex : "";
   const commands: Array<PageCommand<Message>> = [];
@@ -534,24 +548,23 @@ export const init = (route: Route, ctx: PageContext): PageReturn<Model, Message>
     },
     commands,
   };
-};
+});
 
 // --- Update -------------------------------------------------------------------------------------
 
 const canRemovePasskey = (security: Model["security"], id: string): boolean =>
   !security.removingPasskey &&
   security.passkeys._tag === "Loaded" &&
-  security.passkeys.data.some((passkey) => passkey.id === id) &&
+  Arr.some(security.passkeys.data, (passkey) => passkey.id === id) &&
   security.hasPassword._tag === "Loaded" &&
   (security.hasPassword.data || security.passkeys.data.length > 1);
 
 const currentRevision = (model: Model): number => Remote.dataOf(model.preferences)?.revision ?? 1;
 
-export const update = (
-  model: Model,
-  message: Message,
-  ctx: PageContext,
-): PageReturn<Model, Message> => {
+export const update: {
+  (message: Message, ctx: PageContext): (model: Model) => PageReturn<Model, Message>;
+  (model: Model, message: Message, ctx: PageContext): PageReturn<Model, Message>;
+} = Fn.dual(3, (model: Model, message: Message, ctx: PageContext): PageReturn<Model, Message> => {
   const t = translator(ctx.locale);
 
   return Message.match(message, {
@@ -598,7 +611,7 @@ export const update = (
       };
     },
     ClickedSaveProfile: () => {
-      const trimmed = model.profile.name.trim();
+      const trimmed = Str.trim(model.profile.name);
       if (trimmed === "") return { model };
       return {
         model: {
@@ -617,8 +630,8 @@ export const update = (
       model: { ...model, profile: { ...model.profile, newEmail: value } },
     }),
     ClickedChangeEmail: () => {
-      const trimmed = model.profile.newEmail.trim();
-      if (!trimmed.includes("@")) return { model };
+      const trimmed = Str.trim(model.profile.newEmail);
+      if (!Str.includes("@")(trimmed)) return { model };
       return {
         model: {
           ...model,
@@ -640,7 +653,7 @@ export const update = (
     SelectedPreset: ({ preset }) => {
       const nextPrefs: Prefs = {
         ...ctx.prefs,
-        theme: { _tag: "Preset", id: preset as ThemePresetId },
+        theme: { _tag: "Preset", id: preset },
       };
       return {
         model: {
@@ -657,8 +670,10 @@ export const update = (
       },
     }),
     ClickedApplySeed: () => {
-      const raw = model.appearance.seedInput.trim();
-      const normalized = raw.startsWith("#") ? raw.toUpperCase() : `#${raw.toUpperCase()}`;
+      const raw = Str.trim(model.appearance.seedInput);
+      const normalized = Str.startsWith("#")(raw)
+        ? Str.toUpperCase(raw)
+        : `#${Str.toUpperCase(raw)}`;
       if (!Theme.isHex(normalized)) {
         return {
           model: {
@@ -689,15 +704,15 @@ export const update = (
     },
     SelectedStyle: ({ style }) => ({
       model: { ...model, appearance: { ...model.appearance, dirty: true } },
-      outMessage: Intent_.setPrefs({ ...ctx.prefs, style: style as ThemeStyle }),
+      outMessage: Intent_.setPrefs({ ...ctx.prefs, style }),
     }),
     SelectedMode: ({ mode }) => ({
       model: { ...model, appearance: { ...model.appearance, dirty: true } },
-      outMessage: Intent_.setPrefs({ ...ctx.prefs, mode: mode as ThemeMode }),
+      outMessage: Intent_.setPrefs({ ...ctx.prefs, mode }),
     }),
     SelectedContrast: ({ contrast }) => ({
       model: { ...model, appearance: { ...model.appearance, dirty: true } },
-      outMessage: Intent_.setPrefs({ ...ctx.prefs, contrast: contrast as ThemeContrast }),
+      outMessage: Intent_.setPrefs({ ...ctx.prefs, contrast }),
     }),
 
     // Security: Passkeys
@@ -743,7 +758,7 @@ export const update = (
     ClickedAddPasskey: () => {
       if (model.security.addingPasskey) return { model };
       const name =
-        model.security.newPasskeyName.trim() ||
+        Str.trim(model.security.newPasskeyName) ||
         sCopy(ctx.locale, "account.security.unnamedPasskey");
       return {
         model: {
@@ -786,7 +801,7 @@ export const update = (
     }),
     ClickedConfirmRenamePasskey: () => {
       const id = model.security.renamingId;
-      const name = model.security.renameValue.trim();
+      const name = Str.trim(model.security.renameValue);
       if (id === null || name === "") return { model };
       return {
         model: { ...model, actionFailure: null },
@@ -806,7 +821,7 @@ export const update = (
             passkeys: {
               _tag: "Refreshing",
               seq,
-              data: existing.map((p) => (p.id === id ? { ...p, name } : p)),
+              data: Arr.map(existing, (p) => (p.id === id ? { ...p, name } : p)),
             },
           },
         },
@@ -850,7 +865,7 @@ export const update = (
             passkeys: {
               _tag: "Refreshing",
               seq,
-              data: existing.filter((p) => p.id !== id),
+              data: Arr.filter(existing, (p) => p.id !== id),
             },
           },
         },
@@ -965,7 +980,9 @@ export const update = (
     }),
     ClickedRevokeSession: ({ id }) => {
       if (model.sessions.revokingId !== null || model.sessions.revokingOthers) return { model };
-      const target = Remote.dataOf(model.sessions.list)?.find((s) => s.id === id);
+      const target = Option.getOrUndefined(
+        Arr.findFirst(Remote.dataOf(model.sessions.list) ?? [], (s) => s.id === id),
+      );
       if (target === undefined || target.current) return { model };
       return {
         model: {
@@ -987,7 +1004,7 @@ export const update = (
             list: {
               _tag: "Loaded",
               seq: Remote.seqOf(model.sessions.list) + 1,
-              data: existing.filter((s) => s.id !== id),
+              data: Arr.filter(existing, (s) => s.id !== id),
             },
           },
         },
@@ -998,7 +1015,7 @@ export const update = (
       if (
         model.sessions.revokingOthers ||
         model.sessions.revokingId !== null ||
-        !Remote.dataOf(model.sessions.list)?.some((s) => !s.current)
+        !Arr.some(Remote.dataOf(model.sessions.list) ?? [], (s) => !s.current)
       )
         return { model };
       return {
@@ -1021,7 +1038,7 @@ export const update = (
             list: {
               _tag: "Loaded",
               seq: Remote.seqOf(model.sessions.list) + 1,
-              data: existing.filter((s) => s.current),
+              data: Arr.filter(existing, (s) => s.current),
             },
           },
         },
@@ -1035,7 +1052,7 @@ export const update = (
     }),
     ClickedDeleteAccount: () => {
       const phrase = t.t("account.danger.confirmPhrase");
-      if (model.danger.confirmText.trim() !== phrase) return { model };
+      if (Str.trim(model.danger.confirmText) !== phrase) return { model };
       return {
         model: {
           ...model,
@@ -1077,15 +1094,18 @@ export const update = (
       return init(model.route, ctx);
     },
   } satisfies MessageHandlers<Message, PageReturn<Model, Message>>);
-};
+});
 
 // --- Title --------------------------------------------------------------------------------------
 
-export const title = (model: Model, ctx: PageContext): string => {
+export const title: {
+  (ctx: PageContext): (model: Model) => string;
+  (model: Model, ctx: PageContext): string;
+} = Fn.dual(2, (model: Model, ctx: PageContext): string => {
   const t = translator(ctx.locale);
   if (model.route._tag !== "Account") return t.t("account.title");
   return `${t.t("account.title")} · ${sCopy(ctx.locale, `account.nav.${model.route.tab}`)}`;
-};
+});
 
 // --- View ---------------------------------------------------------------------------------------
 
@@ -1178,7 +1198,7 @@ const viewAppearance = (model: Model, ctx: PageContext, h: Html.H<Message>): Mar
       h.div.class("kb-section").children([
         h.h3.children([t.t("account.appearance.presets")]),
         h.div.class("kb-preset-grid").children(
-          Theme.PRESET_IDS.map((id) => {
+          Arr.map(Theme.PRESET_IDS, (id) => {
             const def = Theme.PresetDefinitions[id];
             return h.button
               .attr("type", "button")
@@ -1218,7 +1238,7 @@ const viewAppearance = (model: Model, ctx: PageContext, h: Html.H<Message>): Mar
           segmented(h, {
             label: t.t("account.appearance.style"),
             selected: ctx.prefs.style,
-            items: (["elegant", "cozy"] as const).map((s) => ({
+            items: Arr.map(["elegant", "cozy"] as const, (s) => ({
               id: s,
               label: t.translate(Theme.styleNameText(s)),
             })),
@@ -1233,7 +1253,7 @@ const viewAppearance = (model: Model, ctx: PageContext, h: Html.H<Message>): Mar
           segmented(h, {
             label: t.t("account.appearance.mode"),
             selected: ctx.prefs.mode,
-            items: (["system", "light", "dark"] as const).map((m) => ({
+            items: Arr.map(["system", "light", "dark"] as const, (m) => ({
               id: m,
               label: t.translate(Theme.modeNameText(m)),
             })),
@@ -1248,7 +1268,7 @@ const viewAppearance = (model: Model, ctx: PageContext, h: Html.H<Message>): Mar
           segmented(h, {
             label: t.t("account.appearance.contrast"),
             selected: ctx.prefs.contrast,
-            items: (["standard", "medium", "high"] as const).map((c) => ({
+            items: Arr.map(["standard", "medium", "high"] as const, (c) => ({
               id: c,
               label: t.translate(Theme.contrastNameText(c)),
             })),
@@ -1295,7 +1315,9 @@ const viewSecurity = (model: Model, ctx: PageContext, h: Html.H<Message>): Marku
   const removing =
     model.security.removingId === null
       ? undefined
-      : passkeys?.find((p) => p.id === model.security.removingId);
+      : Option.getOrUndefined(
+          Arr.findFirst(passkeys ?? [], (p) => p.id === model.security.removingId),
+        );
 
   return h.div.class("kb-stack").children([
     card(h, [
@@ -1379,13 +1401,14 @@ const viewSecurity = (model: Model, ctx: PageContext, h: Html.H<Message>): Marku
                     },
                     {
                       header: t.t("common.field.created"),
-                      cell: (row) => h.span.class("kb-mono").children([row.createdAt.slice(0, 10)]),
+                      cell: (row) =>
+                        h.span.class("kb-mono").children([Str.slice(0, 10)(row.createdAt)]),
                     },
                     {
                       header: "",
                       align: "end",
-                      cell: (row) => {
-                        return h.div.class("kb-row").children([
+                      cell: (row) =>
+                        h.div.class("kb-row").children([
                           button(h, {
                             label: t.t("common.action.rename"),
                             small: true,
@@ -1402,8 +1425,7 @@ const viewSecurity = (model: Model, ctx: PageContext, h: Html.H<Message>): Marku
                             disabled: !canRemovePasskey(model.security, row.id),
                             onClick: Message.ClickedAskRemovePasskey({ id: row.id }),
                           }),
-                        ]);
-                      },
+                        ]),
                     },
                   ],
                 }),
@@ -1492,7 +1514,9 @@ const viewSessions = (model: Model, ctx: PageContext, h: Html.H<Message>): Marku
         label: t.t("account.security.signOutOthers"),
         small: true,
         busy: model.sessions.revokingOthers,
-        disabled: model.sessions.revokingId !== null || !rows?.some((session) => !session.current),
+        disabled:
+          model.sessions.revokingId !== null ||
+          !Arr.some(rows ?? [], (session) => !session.current),
         onClick: Message.ClickedRevokeOtherSessions(),
       }),
     ]),
@@ -1538,11 +1562,11 @@ const viewSessions = (model: Model, ctx: PageContext, h: Html.H<Message>): Marku
                   {
                     header: t.t("common.field.updated"),
                     cell: (s) =>
-                      h.span
-                        .class("kb-mono")
-                        .children([
-                          t.t("account.security.lastActive", { date: s.updatedAt.slice(0, 10) }),
-                        ]),
+                      h.span.class("kb-mono").children([
+                        t.t("account.security.lastActive", {
+                          date: Str.slice(0, 10)(s.updatedAt),
+                        }),
+                      ]),
                   },
                   {
                     header: "",
@@ -1571,17 +1595,20 @@ const viewDanger = (model: Model, ctx: PageContext, h: Html.H<Message>): Markup<
   const phrase = t.t("account.danger.confirmPhrase");
   const blockingWorkspaces =
     ctx.session._tag === "SignedIn"
-      ? ctx.session.workspaces.filter((w) => w.role === "owner" && w.memberCount === 1 && !w.closed)
+      ? Arr.filter(
+          ctx.session.workspaces,
+          (w) => w.role === "owner" && w.memberCount === 1 && !w.closed,
+        )
       : [];
   const blocked = blockingWorkspaces.length > 0;
-  const canSubmit = !blocked && model.danger.confirmText.trim() === phrase;
+  const canSubmit = !blocked && Str.trim(model.danger.confirmText) === phrase;
 
   return card(
     h,
     [
       cardTitle(h, t.t("account.danger.title")),
       h.p.children([t.t("account.danger.body")]),
-      ...blockingWorkspaces.map((w) =>
+      ...Arr.map(blockingWorkspaces, (w) =>
         banner(h, {
           tone: "error",
           text: t.t("account.danger.blocked", { workspace: w.name }),
@@ -1609,7 +1636,10 @@ const viewDanger = (model: Model, ctx: PageContext, h: Html.H<Message>): Markup<
   );
 };
 
-export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
+export const view: {
+  (ctx: PageContext, h: Html.H<Message>): (model: Model) => Markup<Message>;
+  (model: Model, ctx: PageContext, h: Html.H<Message>): Markup<Message>;
+} = Fn.dual(3, (model: Model, ctx: PageContext, h: Html.H<Message>): Markup<Message> => {
   const t = translator(ctx.locale);
   const activeTab: AccountTab = model.route._tag === "Account" ? model.route.tab : "profile";
 
@@ -1624,15 +1654,17 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
             ? viewSessions(model, ctx, h)
             : viewDanger(model, ctx, h);
 
+  const subtitle =
+    ctx.session._tag === "SignedIn" ? { subtitle: ctx.session.user.email } : undefined;
   return page(h, [
     pageHeader(h, {
       title: t.t("account.title"),
-      ...(ctx.session._tag === "SignedIn" ? { subtitle: ctx.session.user.email } : {}),
+      ...subtitle,
     }),
     tabs(h, {
       label: t.t("account.title"),
       selected: activeTab,
-      items: ACCOUNT_TABS.map((tab) => ({
+      items: Arr.map(ACCOUNT_TABS, (tab) => ({
         id: tab,
         label: tabLabel(ctx.locale, tab),
         href: href({ _tag: "Account", tab }),
@@ -1643,4 +1675,4 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
       : []),
     body,
   ]);
-};
+});

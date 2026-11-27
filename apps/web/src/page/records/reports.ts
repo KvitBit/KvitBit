@@ -6,14 +6,29 @@ import type { Html } from "@effect/ui/html";
  * hint), period selector, group-by switch, bar charts & tabular summary tables, Export
  * dialog (CSV / PDF).
  */
-import type { ReportKind, VatTreatment, WorkspaceId } from "@kvitbit/domain/contract";
+import {
+  DocumentId,
+  type ReportKind,
+  VatTreatment,
+  WorkspaceId,
+  WorkspaceSlug,
+} from "@kvitbit/domain/contract";
 import { Format, ViewModels } from "@kvitbit/ui-port";
-import { Schema } from "effect";
+import * as Arr from "effect/Array";
+import * as Fn from "effect/Function";
+import * as Schema from "effect/Schema";
+import * as Str from "effect/String";
+
 import { Failure, request } from "../../app/api";
 import type { PageCommand } from "../../app/commands";
 import { copy, textOf, translator } from "../../app/i18n";
 import { Intent_ } from "../../app/intent";
-import type { MessageHandlers, PageContext, PageReturn, RouteOf } from "../../app/page";
+import {
+  type MessageHandlers,
+  type PageContext,
+  type PageReturn,
+  RouteCases,
+} from "../../app/page";
 import * as Remote from "../../app/remote";
 import { href } from "../../app/routing";
 import { barChart } from "../../ui/bars";
@@ -57,7 +72,8 @@ import {
   type VatSummaryReportRecord,
 } from "./shared";
 
-export type Route = RouteOf<"Reports">;
+export const Route = RouteCases.Reports;
+export type Route = typeof Route.Type;
 
 const REPORT_TABS: ReadonlyArray<ReportKind> = [
   "revenue",
@@ -160,10 +176,9 @@ const GroupByLiteral = Schema.Literals(["month", "contact", "currency", "categor
 type GroupByLiteral = typeof GroupByLiteral.Type;
 
 const ExportFormatLiteral = Schema.Literals(["csv", "pdf"]);
-type ExportFormatLiteral = typeof ExportFormatLiteral.Type;
 
 export const Model = Schema.Struct({
-  route: ViewModels.Route,
+  route: Route,
   groupBy: GroupByLiteral,
   data: Remote.remoteSchema(ReportDataRecord),
   exportOpen: Schema.Boolean,
@@ -199,15 +214,16 @@ const loadReportCommand = (
   const needsGroup = report === "revenue" || report === "expenses";
   const effectiveGroup = report === "revenue" && groupBy === "category" ? "month" : groupBy;
   return apiCommand(
+    Message,
     "ReportsRun",
     request(
       (client) =>
         client.reports.run({
-          params: { workspaceId: workspaceId as WorkspaceId, report },
+          params: { workspaceId: WorkspaceId.make(workspaceId), report },
           query: {
             from,
             to,
-            ...(needsGroup ? { groupBy: effectiveGroup } : {}),
+            groupBy: needsGroup ? effectiveGroup : undefined,
           },
         }),
       (raw): Message => Message.LoadedReport({ seq, report: normalizeReport(raw, report) }),
@@ -216,7 +232,10 @@ const loadReportCommand = (
   );
 };
 
-export const init = (route: Route, ctx: PageContext): PageReturn<Model, Message> => {
+export const init: {
+  (ctx: PageContext): (route: Route) => PageReturn<Model, Message>;
+  (route: Route, ctx: PageContext): PageReturn<Model, Message>;
+} = Fn.dual(2, (route: Route, ctx: PageContext): PageReturn<Model, Message> => {
   const data = Remote.load<ReportDataRecord>(Remote.idle);
   const wsId = ctx.workspace?.id;
   return {
@@ -234,15 +253,14 @@ export const init = (route: Route, ctx: PageContext): PageReturn<Model, Message>
         ? []
         : [loadReportCommand(wsId, route.report, route.period, "month", Remote.seqOf(data))],
   };
-};
+});
 
-export const update = (
-  model: Model,
-  message: Message,
-  ctx: PageContext,
-): PageReturn<Model, Message> => {
+export const update: {
+  (message: Message, ctx: PageContext): (model: Model) => PageReturn<Model, Message>;
+  (model: Model, message: Message, ctx: PageContext): PageReturn<Model, Message>;
+} = Fn.dual(3, (model: Model, message: Message, ctx: PageContext): PageReturn<Model, Message> => {
   const tr = translator(ctx.locale);
-  const route = model.route as Route;
+  const route = model.route;
   const wsId = ctx.workspace?.id;
 
   return Message.match(message, {
@@ -259,7 +277,7 @@ export const update = (
         _tag: "Reports",
         ws: route.ws,
         report: route.report,
-        period: period as ViewModels.Period,
+        period: ViewModels.Period.make(period),
       };
       return {
         model,
@@ -324,10 +342,10 @@ export const update = (
         format: model.exportFormat,
         from,
         to,
-        ...(route.report === "revenue" || route.report === "expenses"
-          ? { groupBy: model.groupBy }
-          : {}),
       });
+      if (route.report === "revenue" || route.report === "expenses") {
+        query.set("groupBy", model.groupBy);
+      }
       const path = `/api/v1/workspaces/${encodeURIComponent(wsId)}/reports/${encodeURIComponent(route.report)}/export?${query.toString()}`;
       const filename = `kvitbit-${route.report}-${route.period}.${model.exportFormat}`;
       return {
@@ -353,17 +371,20 @@ export const update = (
       model: { ...model, exporting: false, exportError: textOf(tr, failure.text) },
     }),
   } satisfies MessageHandlers<Message, PageReturn<Model, Message>>);
-};
+});
 
-export const title = (model: Model, ctx: PageContext): string => {
+export const title: {
+  (ctx: PageContext): (model: Model) => string;
+  (model: Model, ctx: PageContext): string;
+} = Fn.dual(2, (model: Model, ctx: PageContext): string => {
   const tr = translator(ctx.locale);
-  const route = model.route as Route;
+  const route = model.route;
   return `${tr.t("reports.suite.title")} · ${enumLabel(tr, "reportKind", route.report)}`;
-};
+});
 
 // --- Report charts ------------------------
 
-export const reportBarChart = (
+const reportBarChart = (
   h: Html.H<Message>,
   chartTitle: string,
   items: ReadonlyArray<{
@@ -374,7 +395,7 @@ export const reportBarChart = (
   }>,
   legend?: ReadonlyArray<{ readonly label: string; readonly cls: string }>,
 ): Markup<Message> => {
-  const groups = items.map((item) => ({
+  const groups = Arr.map(items, (item) => ({
     label: item.label,
     bars: [
       {
@@ -401,7 +422,7 @@ export const reportBarChart = (
                   h.div
                     .class("kb-chart-legend")
                     .children(
-                      legend.map((l) =>
+                      Arr.map(legend, (l) =>
                         h.span
                           .class("kb-chart-legend__item")
                           .children([
@@ -451,7 +472,7 @@ const renderAmountReport = (
       : reportBarChart(
           h,
           tLocal(ctx.locale, isExpenses ? "chartTitleExpenses" : "chartTitleRevenue"),
-          data.rows.slice(0, 12).map((r) => ({
+          Arr.map(data.rows.slice(0, 12), (r) => ({
             label: r.label ?? r.key,
             value: parseUserDecimal(r.gross.amount) ?? 0,
             tone: isExpenses ? "secondary" : "primary",
@@ -470,7 +491,11 @@ const renderAmountReport = (
               header: tLocal(ctx.locale, "groupCol"),
               cell: (r) =>
                 r.label ??
-                (data.groupBy === "month" ? Format.formatMonth(ctx.locale, r.key) : r.key || "—"),
+                (data.groupBy === "month"
+                  ? Format.formatMonth(ctx.locale, r.key)
+                  : r.key === ""
+                    ? "—"
+                    : r.key),
             },
             {
               header: tLocal(ctx.locale, "count"),
@@ -554,7 +579,7 @@ const renderCashflowReport = (
       : reportBarChart(
           h,
           tLocal(ctx.locale, "chartTitleCashflow"),
-          data.points.map((pt) => ({
+          Arr.map(data.points, (pt) => ({
             label: pt.month,
             value: parseUserDecimal(pt.in.amount) ?? 0,
             secondary: parseUserDecimal(pt.out.amount) ?? 0,
@@ -605,7 +630,7 @@ const renderReceivablesReport = (
   wsSlug: string,
 ): Markup<Message> => {
   const tr = translator(ctx.locale);
-  const allDocs = data.buckets.flatMap((b) => b.documents);
+  const allDocs = Arr.flatMap(data.buckets, (b) => b.documents);
   const bucketLabel = (b: ReceivablesReportRecord["buckets"][number]["bucket"]): string =>
     tLocal(ctx.locale, `aging_${b}`);
 
@@ -626,7 +651,7 @@ const renderReceivablesReport = (
       : reportBarChart(
           h,
           tLocal(ctx.locale, "chartTitleReceivables"),
-          data.buckets.map((b) => ({
+          Arr.map(data.buckets, (b) => ({
             label: bucketLabel(b.bucket),
             value: parseUserDecimal(b.total.amount) ?? 0,
             tone: b.bucket === "not_due" ? "primary" : "overdue",
@@ -647,12 +672,12 @@ const renderReceivablesReport = (
                     "href",
                     href({
                       _tag: "Document",
-                      ws: wsSlug as Route["ws"],
-                      id: d.id as never,
+                      ws: WorkspaceSlug.make(wsSlug),
+                      id: DocumentId.make(d.id),
                       tab: "preview",
                     }),
                   )
-                  .children([mono(h, d.number ?? d.id.slice(0, 8))]),
+                  .children([mono(h, d.number ?? Str.slice(0, 8)(d.id))]),
             },
             {
               header: tLocal(ctx.locale, "customerCol"),
@@ -690,8 +715,8 @@ const renderReceivablesReport = (
                     d.daysOverdue > 0 ? tLocal(ctx.locale, "remind") : tLocal(ctx.locale, "pay"),
                   href: href({
                     _tag: "Document",
-                    ws: wsSlug as Route["ws"],
-                    id: d.id as never,
+                    ws: WorkspaceSlug.make(wsSlug),
+                    id: DocumentId.make(d.id),
                     tab: "payments",
                     dialog: d.daysOverdue > 0 ? "send" : "payment",
                   }),
@@ -710,9 +735,10 @@ const renderVatSummaryReport = (
 ): Markup<Message> => {
   const tr = translator(ctx.locale);
   const isNonVatPayer = ctx.workspace?.taxRegime === "non_vat_payer";
-  const outputBaseSum = data.output.reduce(
-    (acc, line) => acc + (parseUserDecimal(line.base.amount) ?? 0),
+  const outputBaseSum = Arr.reduce(
+    data.output,
     0,
+    (acc, line) => acc + (parseUserDecimal(line.base.amount) ?? 0),
   );
   const ratio = Math.min(100, Math.round((outputBaseSum / TURNOVER_THRESHOLD_CZK) * 100));
 
@@ -762,7 +788,7 @@ const renderVatSummaryReport = (
               {
                 header: tLocal(ctx.locale, "vatRateCol"),
                 cell: (l) =>
-                  `${enumLabel(tr, "vatTreatment", l.treatment as VatTreatment)} (${l.ratePercent} %)`,
+                  `${enumLabel(tr, "vatTreatment", Schema.is(VatTreatment)(l.treatment) ? l.treatment : "standard")} (${l.ratePercent} %)`,
               },
               {
                 header: tLocal(ctx.locale, "vatBaseCol"),
@@ -876,12 +902,15 @@ const renderProfitReport = (
   ]);
 };
 
-export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
+export const view: {
+  (ctx: PageContext, h: Html.H<Message>): (model: Model) => Markup<Message>;
+  (model: Model, ctx: PageContext, h: Html.H<Message>): Markup<Message>;
+} = Fn.dual(3, (model: Model, ctx: PageContext, h: Html.H<Message>): Markup<Message> => {
   const tr = translator(ctx.locale);
-  const route = model.route as Route;
+  const route = model.route;
   const loaded = Remote.dataOf(model.data);
 
-  const tabItems = REPORT_TABS.map((kind) => ({
+  const tabItems = Arr.map(REPORT_TABS, (kind) => ({
     id: kind,
     label: enumLabel(tr, "reportKind", kind),
     href: href({ _tag: "Reports", ws: route.ws, report: kind, period: route.period }),
@@ -908,11 +937,14 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
             segmented(h, {
               label: tr.t("reports.suite.groupBy"),
               selected: model.groupBy,
-              items: groupItems.map((g) => ({
+              items: Arr.map(groupItems, (g) => ({
                 id: g,
                 label: enumLabel(tr, "reportGroupBy", g),
               })),
-              onSelect: (id) => Message.ChangedGroupBy({ groupBy: id as GroupByLiteral }),
+              onSelect: (id) =>
+                Message.ChangedGroupBy({
+                  groupBy: Schema.is(GroupByLiteral)(id) ? id : model.groupBy,
+                }),
             }),
           ]
         : []),
@@ -998,7 +1030,10 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
                 { id: "csv", label: enumLabel(tr, "exportFormat", "csv") },
                 { id: "pdf", label: enumLabel(tr, "exportFormat", "pdf") },
               ],
-              onSelect: (id) => Message.SelectedExportFormat({ format: id as ExportFormatLiteral }),
+              onSelect: (id) =>
+                Message.SelectedExportFormat({
+                  format: Schema.is(ExportFormatLiteral)(id) ? id : model.exportFormat,
+                }),
             }),
           ]),
         ],
@@ -1031,4 +1066,4 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
     body,
     exportModal,
   ]);
-};
+});

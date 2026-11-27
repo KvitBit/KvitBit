@@ -2,8 +2,121 @@
  * Demo API handlers for the `records` page group (Expenses, Contacts, Price List, Reports, FX,
  * and Expense Payments). Returns encoded wire JSON matching @kvitbit/api-contract and core views.
  */
+
+import { ContactRole, FromIcoInput, RecordPaymentInput } from "@kvitbit/api-contract";
+import {
+  ContactDefaults,
+  ContactId,
+  CurrencyCode,
+  ExpenseStatus,
+  IsoDate,
+  Money,
+  type VatBreakdown,
+  type VatBucket,
+  VatTreatment,
+} from "@kvitbit/domain/contract";
+import * as Arr from "effect/Array";
+import * as BigDecimal from "effect/BigDecimal";
+import * as DateTime from "effect/DateTime";
+import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
+import * as Str from "effect/String";
 import { type DemoRoute, status } from "./router";
 import { demoId } from "./shell";
+
+const nowIso = () => DateTime.formatIso(DateTime.nowUnsafe());
+
+const NullableText = Schema.NullOr(Schema.String);
+const TextField = Schema.optionalKey(NullableText);
+const DecimalText = Schema.String.check(
+  Schema.makeFilter((value) => Option.isSome(BigDecimal.fromString(value)), {
+    expected: "a decimal string",
+  }),
+);
+
+// The domain contracts leave some record fields open. Check the fields the demo reads.
+const decodeContact = Schema.decodeUnknownResult(
+  Schema.Struct({
+    roles: ContactRole.pipe(Schema.Array, Schema.NullOr, Schema.optionalKey),
+    name: TextField,
+    ico: TextField,
+    dic: TextField,
+    legalForm: TextField,
+    address: Schema.Struct({
+      street: TextField,
+      city: TextField,
+      postalCode: TextField,
+      country: TextField,
+    }).pipe(Schema.NullOr, Schema.optionalKey),
+    billingEmails: Schema.String.pipe(Schema.Array, Schema.NullOr, Schema.optionalKey),
+    phone: TextField,
+    note: TextField,
+    defaults: ContactDefaults.pipe(Schema.NullOr, Schema.optionalKey),
+  }),
+);
+
+const decodeFromIco = Schema.decodeUnknownResult(FromIcoInput);
+
+const decodePriceListItem = Schema.decodeUnknownResult(
+  Schema.Struct({
+    name: TextField,
+    description: TextField,
+    unit: TextField,
+    unitPrice: Schema.optionalKey(DecimalText),
+    currency: CurrencyCode.pipe(Schema.NullOr, Schema.optionalKey),
+    vat: VatTreatment.pipe(Schema.NullOr, Schema.optionalKey),
+  }),
+);
+
+const ExpenseSupplierInput = Schema.Union([
+  Schema.Struct({ contact: ContactId }),
+  Schema.Struct({ ico: Schema.String }),
+  Schema.Struct({ manual: Schema.Struct({ name: TextField, ico: TextField, dic: TextField }) }),
+]);
+
+const ExpenseVatInput = Schema.Struct({
+  treatment: VatTreatment,
+  base: DecimalText,
+  vat: Schema.optionalKey(DecimalText),
+  selfAssessed: Schema.Literals(["standard", "reduced"]).pipe(Schema.NullOr, Schema.optionalKey),
+});
+
+const ExpenseDeductibility = Schema.Union([
+  Schema.Literals(["full", "none"]),
+  Schema.Struct({ partial: Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 99 })) }),
+]);
+
+const ExpenseDateField = IsoDate.pipe(Schema.NullOr, Schema.optionalKey);
+const decodeExpense = Schema.decodeUnknownResult(
+  Schema.Struct({
+    status: Schema.optionalKey(ExpenseStatus),
+    supplier: ExpenseSupplierInput.pipe(Schema.NullOr, Schema.optionalKey),
+    supplierDocumentNumber: TextField,
+    issuedOn: ExpenseDateField,
+    taxableSupplyOn: ExpenseDateField,
+    dueOn: ExpenseDateField,
+    currency: CurrencyCode.pipe(Schema.NullOr, Schema.optionalKey),
+    total: DecimalText.pipe(Schema.NullOr, Schema.optionalKey),
+    vat: ExpenseVatInput.pipe(Schema.Array, Schema.NullOr, Schema.optionalKey),
+    deductibility: Schema.optionalKey(ExpenseDeductibility),
+    category: TextField,
+    tags: Schema.String.pipe(Schema.Array, Schema.NullOr, Schema.optionalKey),
+    note: TextField,
+  }),
+);
+
+const decodePayment = Schema.decodeUnknownResult(
+  Schema.Struct({
+    ...RecordPaymentInput.fields,
+    amount: Schema.optionalKey(Schema.Struct({ ...Money.fields, amount: DecimalText })),
+  }),
+);
+
+const malformedBody = () =>
+  status(422, {
+    _tag: "Invalid",
+    issues: [{ path: [], code: "request.malformed" }],
+  });
 
 // --- Seeded demo fixtures ------------------------------------------------------------------------
 
@@ -12,7 +125,7 @@ const nextId = (): string => demoId(++nextSeq);
 
 interface DemoContact {
   id: string;
-  roles: Array<"customer" | "supplier">;
+  roles: ReadonlyArray<ContactRole>;
   name: string;
   ico: string | null;
   dic: string | null;
@@ -23,10 +136,10 @@ interface DemoContact {
     postalCode: string | null;
     country: string;
   };
-  billingEmails: Array<string>;
+  billingEmails: ReadonlyArray<string>;
   phone: string | null;
   note: string | null;
-  defaults: Record<string, unknown>;
+  defaults: ContactDefaults;
   registryFetchedAt: string | null;
   archived: boolean;
   revision: number;
@@ -45,7 +158,7 @@ const contacts: Array<DemoContact> = [
     phone: "+420 222 111 333",
     note: "Preferuje faktury v EUR pro zahraniční projekty.",
     defaults: {
-      currency: "EUR",
+      currency: CurrencyCode.make("EUR"),
       language: "en",
       dueDays: 21,
       paymentMethod: "bank_transfer",
@@ -88,6 +201,25 @@ const contacts: Array<DemoContact> = [
     revision: 1,
   },
 ];
+
+const expenseSupplier = (
+  supplier: typeof ExpenseSupplierInput.Type | null | undefined,
+): DemoExpense["supplier"] => {
+  if (supplier === null || supplier === undefined) return null;
+  if ("manual" in supplier) {
+    const { name = null, ico = null, dic = null } = supplier.manual;
+    return { contactId: null, name, ico, dic };
+  }
+  if ("contact" in supplier) {
+    const contact = Option.getOrUndefined(
+      Arr.findFirst(contacts, ({ id }) => id === supplier.contact),
+    );
+    if (contact !== undefined) {
+      return { contactId: contact.id, name: contact.name, ico: contact.ico, dic: contact.dic };
+    }
+  }
+  return null;
+};
 
 interface DemoPriceListItem {
   id: string;
@@ -159,8 +291,8 @@ interface DemoExpense {
     vat: string;
     selfAssessed: "standard" | "reduced" | null;
   }> | null;
-  totals: Record<string, unknown> | null;
-  selfAssessed: Array<Record<string, unknown>>;
+  totals: Schema.toCodecJson<typeof VatBreakdown>["Encoded"] | null;
+  selfAssessed: ReadonlyArray<Schema.toCodecJson<typeof VatBucket>["Encoded"]>;
   fx: {
     rate: string;
     quantity: number;
@@ -172,7 +304,7 @@ interface DemoExpense {
   deductibleVat: { amount: string; currency: string } | null;
   deductibleVatCzk: string | null;
   category: string | null;
-  tags: Array<string>;
+  tags: ReadonlyArray<string>;
   note: string | null;
   attachments: Array<{
     id: string;
@@ -369,8 +501,8 @@ const toExpenseSummary = (e: DemoExpense) => ({
 });
 
 const recomputeExpensePayment = (exp: DemoExpense): void => {
-  const pays = expensePayments.filter((p) => p.target.expense === exp.id);
-  const sum = pays.reduce((acc, p) => acc + Number(p.amount.amount), 0);
+  const pays = Arr.filter(expensePayments, (p) => p.target.expense === exp.id);
+  const sum = Arr.reduce(pays, 0, (acc, p) => acc + Number(p.amount.amount));
   const total = Number(exp.total ?? "0");
   exp.payment = {
     payments: pays.length,
@@ -422,7 +554,7 @@ const buildDemoReport = (report: string, from: string, to: string, groupBy?: str
           vat: { amount: "10920.00", currency: "CZK" },
           gross: { amount: "65944.00", currency: "CZK" },
         },
-        incomplete: expenses.filter((e) => e.status === "incomplete").length,
+        incomplete: Arr.filter(expenses, (e) => e.status === "incomplete").length,
       };
     case "cashflow":
       return {
@@ -643,15 +775,15 @@ export const routes: ReadonlyArray<DemoRoute> = [
     method: "GET",
     path: "/api/v1/workspaces/:workspaceId/contacts",
     respond: (req) => {
-      const text = (req.query.get("text") ?? "").trim().toLowerCase();
+      const text = Str.toLowerCase(Str.trim(req.query.get("text") ?? ""));
       const role = req.query.get("role");
-      const items = contacts.filter((c) => {
-        if (role !== null && !c.roles.includes(role as "customer" | "supplier")) return false;
+      const items = Arr.filter(contacts, (c) => {
+        if (role !== null && !Arr.some(c.roles, (value) => value === role)) return false;
         if (text === "") return true;
         return (
-          c.name.toLowerCase().includes(text) ||
-          (c.ico ?? "").includes(text) ||
-          c.billingEmails.some((e) => e.toLowerCase().includes(text))
+          Str.includes(text)(Str.toLowerCase(c.name)) ||
+          Str.includes(text)(c.ico ?? "") ||
+          Arr.some(c.billingEmails, (e) => Str.includes(text)(Str.toLowerCase(e)))
         );
       });
       return { items, nextCursor: null };
@@ -661,7 +793,9 @@ export const routes: ReadonlyArray<DemoRoute> = [
     method: "GET",
     path: "/api/v1/workspaces/:workspaceId/contacts/:contactId",
     respond: (req) => {
-      const found = contacts.find((c) => c.id === req.params.contactId);
+      const found = Option.getOrUndefined(
+        Arr.findFirst(contacts, (c) => c.id === req.params.contactId),
+      );
       return (
         found ?? status(404, { _tag: "NotFound", entity: "Contact", id: req.params.contactId })
       );
@@ -671,31 +805,26 @@ export const routes: ReadonlyArray<DemoRoute> = [
     method: "POST",
     path: "/api/v1/workspaces/:workspaceId/contacts",
     respond: (req) => {
-      const body = (req.body ?? {}) as Record<string, unknown>;
+      const decoded = decodeContact(req.body ?? {});
+      if (decoded._tag === "Failure") return malformedBody();
+      const body = decoded.success;
       const created: DemoContact = {
         id: nextId(),
-        roles: (body.roles as Array<"customer" | "supplier">) ?? ["customer"],
-        name: String(body.name ?? "Nový kontakt"),
-        ico: (body.ico as string | null) ?? null,
-        dic: (body.dic as string | null) ?? null,
-        legalForm: (body.legalForm as string | null) ?? null,
+        roles: body.roles ?? ["customer"],
+        name: body.name ?? "Nový kontakt",
+        ico: body.ico ?? null,
+        dic: body.dic ?? null,
+        legalForm: body.legalForm ?? null,
         address: {
-          street:
-            ((body.address as Record<string, unknown> | undefined)?.street as string | null) ??
-            null,
-          city:
-            ((body.address as Record<string, unknown> | undefined)?.city as string | null) ?? null,
-          postalCode:
-            ((body.address as Record<string, unknown> | undefined)?.postalCode as string | null) ??
-            null,
-          country: String((body.address as Record<string, unknown> | undefined)?.country ?? "CZ"),
+          street: body.address?.street ?? null,
+          city: body.address?.city ?? null,
+          postalCode: body.address?.postalCode ?? null,
+          country: body.address?.country ?? "CZ",
         },
-        billingEmails: Array.isArray(body.billingEmails)
-          ? (body.billingEmails as Array<string>)
-          : [],
-        phone: (body.phone as string | null) ?? null,
-        note: (body.note as string | null) ?? null,
-        defaults: (body.defaults as Record<string, unknown>) ?? {
+        billingEmails: body.billingEmails ?? [],
+        phone: body.phone ?? null,
+        note: body.note ?? null,
+        defaults: body.defaults ?? {
           reminderPolicy: { mode: "inherit" },
         },
         registryFetchedAt: null,
@@ -710,30 +839,44 @@ export const routes: ReadonlyArray<DemoRoute> = [
     method: "PUT",
     path: "/api/v1/workspaces/:workspaceId/contacts/:contactId",
     respond: (req) => {
-      const idx = contacts.findIndex((c) => c.id === req.params.contactId);
-      if (idx < 0)
+      const idx = Option.getOrElse(
+        Arr.findFirstIndex(contacts, (c) => c.id === req.params.contactId),
+        () => -1,
+      );
+      const existing = contacts[idx];
+      if (existing === undefined) {
         return status(404, { _tag: "NotFound", entity: "Contact", id: req.params.contactId });
-      // biome-ignore lint/style/noNonNullAssertion: idx checked above
-      const existing = contacts[idx]!;
-      const body = (req.body ?? {}) as Record<string, unknown>;
+      }
+      const decoded = decodeContact(req.body ?? {});
+      if (decoded._tag === "Failure") return malformedBody();
+      const {
+        roles,
+        name,
+        ico = existing.ico,
+        dic = existing.dic,
+        legalForm = existing.legalForm,
+        address,
+        billingEmails,
+        phone = existing.phone,
+        note = existing.note,
+        defaults,
+      } = decoded.success;
       const updated: DemoContact = {
         ...existing,
-        roles: (body.roles as Array<"customer" | "supplier">) ?? existing.roles,
-        name: typeof body.name === "string" ? body.name : existing.name,
-        ico: body.ico !== undefined ? (body.ico as string | null) : existing.ico,
-        dic: body.dic !== undefined ? (body.dic as string | null) : existing.dic,
-        legalForm:
-          body.legalForm !== undefined ? (body.legalForm as string | null) : existing.legalForm,
-        address:
-          typeof body.address === "object" && body.address !== null
-            ? { ...existing.address, ...(body.address as Partial<DemoContact["address"]>) }
-            : existing.address,
-        billingEmails: Array.isArray(body.billingEmails)
-          ? (body.billingEmails as Array<string>)
-          : existing.billingEmails,
-        phone: body.phone !== undefined ? (body.phone as string | null) : existing.phone,
-        note: body.note !== undefined ? (body.note as string | null) : existing.note,
-        defaults: (body.defaults as Record<string, unknown>) ?? existing.defaults,
+        roles: roles ?? existing.roles,
+        name: name ?? existing.name,
+        ico,
+        dic,
+        legalForm,
+        address: {
+          ...existing.address,
+          ...address,
+          country: address?.country ?? existing.address.country,
+        },
+        billingEmails: billingEmails ?? existing.billingEmails,
+        phone,
+        note,
+        defaults: defaults ?? existing.defaults,
         revision: existing.revision + 1,
       };
       contacts[idx] = updated;
@@ -744,16 +887,17 @@ export const routes: ReadonlyArray<DemoRoute> = [
     method: "POST",
     path: "/api/v1/workspaces/:workspaceId/contacts/from-ico",
     respond: (req) => {
-      const body = (req.body ?? {}) as Record<string, unknown>;
-      const ico = String(body.ico ?? "").replace(/\s/g, "");
-      const existing = contacts.find((c) => c.ico === ico);
+      const decoded = decodeFromIco(req.body);
+      if (decoded._tag === "Failure") return malformedBody();
+      const ico = Str.replace(/\s/g, "")(decoded.success.ico);
+      const existing = Option.getOrUndefined(Arr.findFirst(contacts, (c) => c.ico === ico));
       if (existing !== undefined) {
-        existing.registryFetchedAt = new Date().toISOString();
+        existing.registryFetchedAt = nowIso();
         return existing;
       }
       const created: DemoContact = {
         id: nextId(),
-        roles: [body.role === "supplier" ? "supplier" : "customer"],
+        roles: [decoded.success.role ?? "customer"],
         name: `ARES Společnost ${ico} s.r.o.`,
         ico,
         dic: `CZ${ico}`,
@@ -768,7 +912,7 @@ export const routes: ReadonlyArray<DemoRoute> = [
         phone: null,
         note: null,
         defaults: { reminderPolicy: { mode: "inherit" } },
-        registryFetchedAt: new Date().toISOString(),
+        registryFetchedAt: nowIso(),
         archived: false,
         revision: 1,
       };
@@ -780,12 +924,13 @@ export const routes: ReadonlyArray<DemoRoute> = [
     method: "POST",
     path: "/api/v1/workspaces/:workspaceId/contacts/:contactId/archive",
     respond: (req) => {
-      const found = contacts.find((c) => c.id === req.params.contactId);
+      const found = Option.getOrUndefined(
+        Arr.findFirst(contacts, (c) => c.id === req.params.contactId),
+      );
       if (found === undefined) {
         return status(404, { _tag: "NotFound", entity: "Contact", id: req.params.contactId });
       }
       found.archived = true;
-      return undefined;
     },
   },
 
@@ -794,14 +939,14 @@ export const routes: ReadonlyArray<DemoRoute> = [
     method: "GET",
     path: "/api/v1/workspaces/:workspaceId/price-list-items",
     respond: (req) => {
-      const text = (req.query.get("text") ?? "").trim().toLowerCase();
+      const text = Str.toLowerCase(Str.trim(req.query.get("text") ?? ""));
       const includeArchived = req.query.get("includeArchived") === "true";
-      return priceListItems.filter((item) => {
+      return Arr.filter(priceListItems, (item) => {
         if (!includeArchived && item.archived) return false;
         if (text === "") return true;
         return (
-          item.name.toLowerCase().includes(text) ||
-          (item.description ?? "").toLowerCase().includes(text)
+          Str.includes(text)(Str.toLowerCase(item.name)) ||
+          Str.includes(text)(Str.toLowerCase(item.description ?? ""))
         );
       });
     },
@@ -810,15 +955,17 @@ export const routes: ReadonlyArray<DemoRoute> = [
     method: "POST",
     path: "/api/v1/workspaces/:workspaceId/price-list-items",
     respond: (req) => {
-      const body = (req.body ?? {}) as Record<string, unknown>;
+      const decoded = decodePriceListItem(req.body ?? {});
+      if (decoded._tag === "Failure") return malformedBody();
+      const body = decoded.success;
       const created: DemoPriceListItem = {
         id: nextId(),
-        name: String(body.name ?? "Položka"),
-        description: (body.description as string | null) ?? null,
-        unit: (body.unit as string | null) ?? null,
-        unitPrice: String(body.unitPrice ?? "0.00"),
-        currency: String(body.currency ?? "CZK"),
-        vat: (body.vat as string | null) ?? null,
+        name: body.name ?? "Položka",
+        description: body.description ?? null,
+        unit: body.unit ?? null,
+        unitPrice: body.unitPrice ?? "0.00",
+        currency: body.currency ?? "CZK",
+        vat: body.vat ?? null,
         archived: false,
         revision: 1,
       };
@@ -830,23 +977,32 @@ export const routes: ReadonlyArray<DemoRoute> = [
     method: "PUT",
     path: "/api/v1/workspaces/:workspaceId/price-list-items/:itemId",
     respond: (req) => {
-      const idx = priceListItems.findIndex((i) => i.id === req.params.itemId);
-      if (idx < 0)
+      const idx = Option.getOrElse(
+        Arr.findFirstIndex(priceListItems, (i) => i.id === req.params.itemId),
+        () => -1,
+      );
+      const existing = priceListItems[idx];
+      if (existing === undefined) {
         return status(404, { _tag: "NotFound", entity: "PriceListItem", id: req.params.itemId });
-      // biome-ignore lint/style/noNonNullAssertion: idx checked above
-      const existing = priceListItems[idx]!;
-      const body = (req.body ?? {}) as Record<string, unknown>;
+      }
+      const decoded = decodePriceListItem(req.body ?? {});
+      if (decoded._tag === "Failure") return malformedBody();
+      const {
+        name,
+        description = existing.description,
+        unit = existing.unit,
+        unitPrice = existing.unitPrice,
+        currency,
+        vat = existing.vat,
+      } = decoded.success;
       const updated: DemoPriceListItem = {
         ...existing,
-        name: typeof body.name === "string" ? body.name : existing.name,
-        description:
-          body.description !== undefined
-            ? (body.description as string | null)
-            : existing.description,
-        unit: body.unit !== undefined ? (body.unit as string | null) : existing.unit,
-        unitPrice: body.unitPrice !== undefined ? String(body.unitPrice) : existing.unitPrice,
-        currency: typeof body.currency === "string" ? body.currency : existing.currency,
-        vat: body.vat !== undefined ? (body.vat as string | null) : existing.vat,
+        name: name ?? existing.name,
+        description,
+        unit,
+        unitPrice,
+        currency: currency ?? existing.currency,
+        vat,
         revision: existing.revision + 1,
       };
       priceListItems[idx] = updated;
@@ -857,12 +1013,13 @@ export const routes: ReadonlyArray<DemoRoute> = [
     method: "POST",
     path: "/api/v1/workspaces/:workspaceId/price-list-items/:itemId/archive",
     respond: (req) => {
-      const found = priceListItems.find((i) => i.id === req.params.itemId);
+      const found = Option.getOrUndefined(
+        Arr.findFirst(priceListItems, (i) => i.id === req.params.itemId),
+      );
       if (found === undefined) {
         return status(404, { _tag: "NotFound", entity: "PriceListItem", id: req.params.itemId });
       }
       found.archived = true;
-      return undefined;
     },
   },
 
@@ -872,9 +1029,10 @@ export const routes: ReadonlyArray<DemoRoute> = [
     path: "/api/v1/workspaces/:workspaceId/expenses",
     respond: (req) => {
       const incomplete = req.query.get("incomplete") === "true";
-      const items = expenses
-        .filter((e) => (!incomplete ? true : e.status === "incomplete"))
-        .map(toExpenseSummary);
+      const items = Arr.map(
+        Arr.filter(expenses, (e) => (!incomplete ? true : e.status === "incomplete")),
+        toExpenseSummary,
+      );
       return { items, nextCursor: null };
     },
   },
@@ -882,45 +1040,41 @@ export const routes: ReadonlyArray<DemoRoute> = [
     method: "POST",
     path: "/api/v1/workspaces/:workspaceId/expenses",
     respond: (req) => {
-      const body = (req.body ?? {}) as Record<string, unknown>;
-      const now = new Date().toISOString();
-      const supRaw = body.supplier as Record<string, unknown> | null | undefined;
-      const supplier =
-        supRaw && typeof supRaw === "object" && "manual" in supRaw
-          ? {
-              contactId: null,
-              name: ((supRaw.manual as Record<string, unknown>).name as string | null) ?? null,
-              ico: ((supRaw.manual as Record<string, unknown>).ico as string | null) ?? null,
-              dic: ((supRaw.manual as Record<string, unknown>).dic as string | null) ?? null,
-            }
-          : supRaw && typeof supRaw === "object" && "contact" in supRaw
-            ? (() => {
-                const c = contacts.find((x) => x.id === supRaw.contact);
-                return c ? { contactId: c.id, name: c.name, ico: c.ico, dic: c.dic } : null;
-              })()
-            : null;
+      const decoded = decodeExpense(req.body ?? {});
+      if (decoded._tag === "Failure") return malformedBody();
+      const body = decoded.success;
+      const now = nowIso();
+      const { total = null } = body;
       const created: DemoExpense = {
         id: nextId(),
         revision: 1,
-        status: body.status === "incomplete" ? "incomplete" : "complete",
-        supplier,
-        supplierDocumentNumber: (body.supplierDocumentNumber as string | null) ?? null,
-        issuedOn: (body.issuedOn as string | null) ?? null,
-        taxableSupplyOn: (body.taxableSupplyOn as string | null) ?? null,
-        dueOn: (body.dueOn as string | null) ?? null,
-        currency: (body.currency as string | null) ?? null,
-        total: body.total !== undefined && body.total !== null ? String(body.total) : null,
-        vat: (body.vat as DemoExpense["vat"]) ?? null,
+        status: body.status ?? "complete",
+        supplier: expenseSupplier(body.supplier),
+        supplierDocumentNumber: body.supplierDocumentNumber ?? null,
+        issuedOn: body.issuedOn ?? null,
+        taxableSupplyOn: body.taxableSupplyOn ?? null,
+        dueOn: body.dueOn ?? null,
+        currency: body.currency ?? null,
+        total,
+        vat:
+          body.vat === null || body.vat === undefined
+            ? null
+            : Arr.map(body.vat, ({ treatment, base, vat = "0.00", selfAssessed = null }) => ({
+                treatment,
+                base,
+                vat,
+                selfAssessed,
+              })),
         totals: null,
         selfAssessed: [],
         fx: null,
-        totalCzk: body.total !== undefined && body.total !== null ? String(body.total) : null,
-        deductibility: (body.deductibility as DemoExpense["deductibility"]) ?? "full",
+        totalCzk: total,
+        deductibility: body.deductibility ?? "full",
         deductibleVat: null,
         deductibleVatCzk: null,
-        category: (body.category as string | null) ?? null,
-        tags: Array.isArray(body.tags) ? (body.tags as Array<string>) : [],
-        note: (body.note as string | null) ?? null,
+        category: body.category ?? null,
+        tags: body.tags ?? [],
+        note: body.note ?? null,
         attachments: [],
         payment: { settlement: "unpaid", paid: null, payments: 0 },
         createdAt: now,
@@ -934,7 +1088,9 @@ export const routes: ReadonlyArray<DemoRoute> = [
     method: "GET",
     path: "/api/v1/workspaces/:workspaceId/expenses/:expenseId",
     respond: (req) => {
-      const found = expenses.find((e) => e.id === req.params.expenseId);
+      const found = Option.getOrUndefined(
+        Arr.findFirst(expenses, (e) => e.id === req.params.expenseId),
+      );
       return (
         found ?? status(404, { _tag: "NotFound", entity: "Expense", id: req.params.expenseId })
       );
@@ -944,43 +1100,42 @@ export const routes: ReadonlyArray<DemoRoute> = [
     method: "PATCH",
     path: "/api/v1/workspaces/:workspaceId/expenses/:expenseId",
     respond: (req) => {
-      const idx = expenses.findIndex((e) => e.id === req.params.expenseId);
-      if (idx < 0)
+      const idx = Option.getOrElse(
+        Arr.findFirstIndex(expenses, (e) => e.id === req.params.expenseId),
+        () => -1,
+      );
+      const existing = expenses[idx];
+      if (existing === undefined) {
         return status(404, { _tag: "NotFound", entity: "Expense", id: req.params.expenseId });
-      // biome-ignore lint/style/noNonNullAssertion: idx checked above
-      const existing = expenses[idx]!;
-      const body = (req.body ?? {}) as Record<string, unknown>;
+      }
+      const decoded = decodeExpense(req.body ?? {});
+      if (decoded._tag === "Failure") return malformedBody();
+      const {
+        status: expenseStatus = existing.status,
+        supplierDocumentNumber = existing.supplierDocumentNumber,
+        issuedOn = existing.issuedOn,
+        taxableSupplyOn = existing.taxableSupplyOn,
+        dueOn = existing.dueOn,
+        currency = existing.currency,
+        total = existing.total,
+        category = existing.category,
+        tags,
+        note = existing.note,
+      } = decoded.success;
       const updated: DemoExpense = {
         ...existing,
         revision: existing.revision + 1,
-        status:
-          body.status === "incomplete" || body.status === "complete"
-            ? body.status
-            : existing.status,
-        supplierDocumentNumber:
-          body.supplierDocumentNumber !== undefined
-            ? (body.supplierDocumentNumber as string | null)
-            : existing.supplierDocumentNumber,
-        issuedOn:
-          body.issuedOn !== undefined ? (body.issuedOn as string | null) : existing.issuedOn,
-        taxableSupplyOn:
-          body.taxableSupplyOn !== undefined
-            ? (body.taxableSupplyOn as string | null)
-            : existing.taxableSupplyOn,
-        dueOn: body.dueOn !== undefined ? (body.dueOn as string | null) : existing.dueOn,
-        currency:
-          body.currency !== undefined ? (body.currency as string | null) : existing.currency,
-        total:
-          body.total !== undefined
-            ? body.total === null
-              ? null
-              : String(body.total)
-            : existing.total,
-        category:
-          body.category !== undefined ? (body.category as string | null) : existing.category,
-        tags: Array.isArray(body.tags) ? (body.tags as Array<string>) : existing.tags,
-        note: body.note !== undefined ? (body.note as string | null) : existing.note,
-        updatedAt: new Date().toISOString(),
+        status: expenseStatus,
+        supplierDocumentNumber,
+        issuedOn,
+        taxableSupplyOn,
+        dueOn,
+        currency,
+        total,
+        category,
+        tags: tags ?? existing.tags,
+        note,
+        updatedAt: nowIso(),
       };
       expenses[idx] = updated;
       return updated;
@@ -990,18 +1145,22 @@ export const routes: ReadonlyArray<DemoRoute> = [
     method: "DELETE",
     path: "/api/v1/workspaces/:workspaceId/expenses/:expenseId",
     respond: (req) => {
-      const idx = expenses.findIndex((e) => e.id === req.params.expenseId);
+      const idx = Option.getOrElse(
+        Arr.findFirstIndex(expenses, (e) => e.id === req.params.expenseId),
+        () => -1,
+      );
       if (idx < 0)
         return status(404, { _tag: "NotFound", entity: "Expense", id: req.params.expenseId });
       expenses.splice(idx, 1);
-      return undefined;
     },
   },
   {
     method: "POST",
     path: "/api/v1/workspaces/:workspaceId/expenses/:expenseId/attachments",
     respond: (req) => {
-      const exp = expenses.find((e) => e.id === req.params.expenseId);
+      const exp = Option.getOrUndefined(
+        Arr.findFirst(expenses, (e) => e.id === req.params.expenseId),
+      );
       if (exp === undefined) {
         return status(404, { _tag: "NotFound", entity: "Expense", id: req.params.expenseId });
       }
@@ -1012,7 +1171,7 @@ export const routes: ReadonlyArray<DemoRoute> = [
         contentType: "application/pdf",
         bytes: 64200,
         sha256: "demo-sha256-upload",
-        createdAt: new Date().toISOString(),
+        createdAt: nowIso(),
       };
       exp.attachments.push(att);
       exp.revision += 1;
@@ -1028,12 +1187,13 @@ export const routes: ReadonlyArray<DemoRoute> = [
     method: "DELETE",
     path: "/api/v1/workspaces/:workspaceId/expenses/:expenseId/attachments/:attachmentId",
     respond: (req) => {
-      const exp = expenses.find((e) => e.id === req.params.expenseId);
+      const exp = Option.getOrUndefined(
+        Arr.findFirst(expenses, (e) => e.id === req.params.expenseId),
+      );
       if (exp === undefined) {
         return status(404, { _tag: "NotFound", entity: "Expense", id: req.params.expenseId });
       }
-      exp.attachments = exp.attachments.filter((a) => a.id !== req.params.attachmentId);
-      return undefined;
+      exp.attachments = Arr.filter(exp.attachments, (a) => a.id !== req.params.attachmentId);
     },
   },
 
@@ -1041,34 +1201,30 @@ export const routes: ReadonlyArray<DemoRoute> = [
   {
     method: "GET",
     path: "/api/v1/workspaces/:workspaceId/expenses/:expenseId/payments",
-    respond: (req) => expensePayments.filter((p) => p.target.expense === req.params.expenseId),
+    respond: (req) => Arr.filter(expensePayments, (p) => p.target.expense === req.params.expenseId),
   },
   {
     method: "POST",
     path: "/api/v1/workspaces/:workspaceId/payments",
     respond: (req) => {
-      const body = (req.body ?? {}) as Record<string, unknown>;
-      const target = (body.target ?? {}) as Record<string, unknown>;
-      const expenseId = typeof target.expense === "string" ? target.expense : "";
-      const exp = expenses.find((e) => e.id === expenseId);
+      const decoded = decodePayment(req.body);
+      if (decoded._tag === "Failure") return malformedBody();
+      const { target, amount, paidOn, method, note } = decoded.success;
+      const expenseId = "expense" in target ? target.expense : "";
+      const exp = Option.getOrUndefined(Arr.findFirst(expenses, (e) => e.id === expenseId));
       if (exp === undefined) {
         return status(404, { _tag: "NotFound", entity: "Expense", id: expenseId });
       }
-      const amtRaw = (body.amount ?? {}) as Record<string, unknown>;
       const payment: DemoPayment = {
         id: nextId(),
         revision: 1,
         target: { expense: exp.id },
-        amount: {
-          amount: amtRaw.amount !== undefined ? String(amtRaw.amount) : (exp.total ?? "0.00"),
-          currency: typeof amtRaw.currency === "string" ? amtRaw.currency : (exp.currency ?? "CZK"),
-        },
-        paidOn:
-          typeof body.paidOn === "string" ? body.paidOn : new Date().toISOString().slice(0, 10),
-        method: typeof body.method === "string" ? body.method : "bank_transfer",
-        note: typeof body.note === "string" ? body.note : null,
+        amount: amount ?? { amount: exp.total ?? "0.00", currency: exp.currency ?? "CZK" },
+        paidOn: paidOn ?? Str.slice(0, 10)(nowIso()),
+        method: method ?? "bank_transfer",
+        note: note ?? null,
         taxDocument: null,
-        createdAt: new Date().toISOString(),
+        createdAt: nowIso(),
       };
       expensePayments.unshift(payment);
       recomputeExpensePayment(exp);
@@ -1083,15 +1239,19 @@ export const routes: ReadonlyArray<DemoRoute> = [
     method: "POST",
     path: "/api/v1/workspaces/:workspaceId/payments/:paymentId/remove",
     respond: (req) => {
-      const idx = expensePayments.findIndex((p) => p.id === req.params.paymentId);
-      if (idx < 0)
+      const idx = Option.getOrElse(
+        Arr.findFirstIndex(expensePayments, (p) => p.id === req.params.paymentId),
+        () => -1,
+      );
+      const removed = expensePayments[idx];
+      if (removed === undefined) {
         return status(404, { _tag: "NotFound", entity: "Payment", id: req.params.paymentId });
-      // biome-ignore lint/style/noNonNullAssertion: idx checked above
-      const removed = expensePayments[idx]!;
+      }
       expensePayments.splice(idx, 1);
-      const exp = expenses.find((e) => e.id === removed.target.expense);
+      const exp = Option.getOrUndefined(
+        Arr.findFirst(expenses, (e) => e.id === removed.target.expense),
+      );
       if (exp !== undefined) recomputeExpensePayment(exp);
-      return undefined;
     },
   },
 
@@ -1121,16 +1281,16 @@ export const routes: ReadonlyArray<DemoRoute> = [
     path: "/api/v1/workspaces/:workspaceId/fx-rates/:currency",
     respond: (req) => {
       const currency = req.params.currency ?? "EUR";
-      const rates: Record<string, string> = {
-        EUR: "25.20",
-        USD: "23.45",
-        GBP: "29.80",
-        PLN: "5.85",
-        CHF: "26.90",
-      };
+      const rates = new Map([
+        ["EUR", "25.20"],
+        ["USD", "23.45"],
+        ["GBP", "29.80"],
+        ["PLN", "5.85"],
+        ["CHF", "26.90"],
+      ]);
       return {
         currency,
-        rate: rates[currency] ?? "25.00",
+        rate: rates.get(currency) ?? "25.00",
         quantity: 1,
         fixingDate: req.query.get("on") ?? "2026-11-24",
         source: "cnb",

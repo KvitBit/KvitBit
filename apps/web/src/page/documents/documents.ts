@@ -5,19 +5,29 @@ import type { Html } from "@effect/ui/html";
  * Kind/status/settlement/overdue/search filters, badges, cursor pagination, zero-CLS loading
  * skeleton, and empty state.
  */
-import type {
-  DocumentKind,
+import {
+  DocumentId,
+  type DocumentKind,
   DocumentSettlement,
   DocumentStatus,
-  WorkspaceId,
+  type WorkspaceId,
 } from "@kvitbit/domain";
-import { I18n, ViewModels } from "@kvitbit/ui-port";
-import { Schema } from "effect";
+import { I18n } from "@kvitbit/ui-port";
+import * as Fn from "effect/Function";
+import * as Option from "effect/Option";
+import * as EffectRecord from "effect/Record";
+import * as Schema from "effect/Schema";
+import * as Str from "effect/String";
 import { Failure } from "../../app/api";
 import type { PageCommand } from "../../app/commands";
 import { type Copy, copy, textOf, translator } from "../../app/i18n";
 import { Intent_ } from "../../app/intent";
-import type { MessageHandlers, PageContext, PageReturn, RouteOf } from "../../app/page";
+import {
+  type MessageHandlers,
+  type PageContext,
+  type PageReturn,
+  RouteCases,
+} from "../../app/page";
 import * as Remote from "../../app/remote";
 import { href } from "../../app/routing";
 import {
@@ -47,7 +57,8 @@ import {
   sharedCopy,
 } from "./shared";
 
-export type Route = RouteOf<"Documents">;
+export const Route = RouteCases.Documents;
+export type Route = typeof Route.Type;
 
 const CopyTable: Copy<
   | "title"
@@ -147,7 +158,7 @@ const DocumentsPageData = Schema.Struct({
 type DocumentsPageData = typeof DocumentsPageData.Type;
 
 export const Model = Schema.Struct({
-  route: ViewModels.Route,
+  route: Route,
   searchInput: Schema.String,
   list: Remote.remoteSchema(DocumentsPageData),
   loadingMore: Schema.Boolean,
@@ -177,22 +188,12 @@ const loadDocumentsCommand = (
   append: boolean,
 ): PageCommand<Message> =>
   apiCommand(
+    Message,
     "LoadDocuments",
     (c) =>
       c.documents.list({
         params: { workspaceId },
-        query: {
-          ...(query.kind === undefined ? {} : { kind: query.kind }),
-          ...(query.status === undefined ? {} : { status: query.status }),
-          ...(query.settlement === undefined ? {} : { settlement: query.settlement }),
-          ...(query.overdue === undefined ? {} : { overdue: query.overdue }),
-          ...(query.contact === undefined ? {} : { contact: query.contact }),
-          ...(query.from === undefined ? {} : { from: query.from }),
-          ...(query.to === undefined ? {} : { to: query.to }),
-          ...(query.text === undefined ? {} : { text: query.text }),
-          ...(cursor === undefined ? {} : { cursor }),
-          limit: 25,
-        },
+        query: cursor === undefined ? { ...query, limit: 25 } : { ...query, cursor, limit: 25 },
       }),
     (pageRes): Message =>
       Message.Loaded({
@@ -203,7 +204,7 @@ const loadDocumentsCommand = (
     (failure): Message => Message.Failed({ seq, failure }),
   );
 
-export const init = (route: Route, ctx: PageContext): PageReturn<Model, Message> => {
+const initImpl = (route: Route, ctx: PageContext): PageReturn<Model, Message> => {
   const ws = ctx.workspace;
   const searchInput = route.query.text ?? "";
   if (ws === null) {
@@ -216,6 +217,11 @@ export const init = (route: Route, ctx: PageContext): PageReturn<Model, Message>
   };
 };
 
+export const init: {
+  (ctx: PageContext): (route: Route) => PageReturn<Model, Message>;
+  (route: Route, ctx: PageContext): PageReturn<Model, Message>;
+} = Fn.dual(2, initImpl);
+
 const navigateWithQuery = (
   route: Route,
   patch: Partial<{
@@ -226,25 +232,24 @@ const navigateWithQuery = (
     overdue: boolean | undefined;
   }>,
 ) => {
-  const next: Record<string, unknown> = { ...route.query };
-  for (const [k, v] of Object.entries(patch)) {
-    if (v === undefined || v === "" || v === false) delete next[k];
-    else next[k] = v;
-  }
-  const nextRoute: Route = {
-    _tag: "Documents",
-    ws: route.ws,
-    query: next as Route["query"],
-  };
+  const filtered = EffectRecord.filter<string, string | boolean | undefined>(
+    { ...route.query, ...patch },
+    (value) => value !== undefined && value !== "" && value !== false,
+  );
+  const query = Option.getOrElse(
+    Schema.decodeOption(Route.fields.query)(filtered),
+    () => route.query,
+  );
+  const nextRoute: Route = { _tag: "Documents", ws: route.ws, query };
   return Intent_.navigate(href(nextRoute), true);
 };
 
-export const update = (
+const updateImpl = (
   model: Model,
   message: Message,
   ctx: PageContext,
 ): PageReturn<Model, Message> => {
-  const route = model.route as Route;
+  const route = model.route;
   return Message.match(message, {
     Loaded: ({ seq, data, append }) => {
       if (append) {
@@ -267,18 +272,18 @@ export const update = (
     ChangedSearch: ({ value }) => ({ model: { ...model, searchInput: value } }),
     SubmittedSearch: () => ({
       model,
-      outMessage: navigateWithQuery(route, { text: model.searchInput.trim() || undefined }),
+      outMessage: navigateWithQuery(route, { text: Str.trim(model.searchInput) || undefined }),
     }),
     SelectedStatus: ({ value }) => ({
       model,
       outMessage: navigateWithQuery(route, {
-        status: value === "" ? undefined : (value as DocumentStatus),
+        status: Option.getOrUndefined(Schema.decodeUnknownOption(DocumentStatus)(value)),
       }),
     }),
     SelectedSettlement: ({ value }) => ({
       model,
       outMessage: navigateWithQuery(route, {
-        settlement: value === "" ? undefined : (value as DocumentSettlement),
+        settlement: Option.getOrUndefined(Schema.decodeUnknownOption(DocumentSettlement)(value)),
       }),
     }),
     ToggledOverdue: ({ checked }) => ({
@@ -295,7 +300,7 @@ export const update = (
         href({
           _tag: "Document",
           ws: route.ws,
-          id: id as DocumentSummaryData["id"],
+          id: DocumentId.make(id),
           tab: "preview",
         }),
       ),
@@ -326,7 +331,17 @@ export const update = (
   } satisfies MessageHandlers<Message, PageReturn<Model, Message>>);
 };
 
-export const title = (_model: Model, ctx: PageContext): string => txt(ctx.locale, "title");
+export const update: {
+  (message: Message, ctx: PageContext): (model: Model) => PageReturn<Model, Message>;
+  (model: Model, message: Message, ctx: PageContext): PageReturn<Model, Message>;
+} = Fn.dual(3, updateImpl);
+
+const titleImpl = (_model: Model, ctx: PageContext): string => txt(ctx.locale, "title");
+
+export const title: {
+  (ctx: PageContext): (_model: Model) => string;
+  (_model: Model, ctx: PageContext): string;
+} = Fn.dual(2, titleImpl);
 
 const activeTabId = (q: Route["query"]): string => {
   if (q.status === "draft") return "drafts";
@@ -337,10 +352,10 @@ const activeTabId = (q: Route["query"]): string => {
   return "all";
 };
 
-export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
+const viewImpl = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
   const { locale } = ctx;
   const t = translator(locale);
-  const route = model.route as Route;
+  const route = model.route;
   const ws = ctx.workspace;
   if (ws === null) {
     return page(h, [banner(h, { text: sharedCopy(locale, "noWorkspace"), tone: "error" })]);
@@ -591,3 +606,8 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
     body,
   ]);
 };
+
+export const view: {
+  (ctx: PageContext, h: Html.H<Message>): (model: Model) => ReturnType<typeof viewImpl>;
+  (model: Model, ctx: PageContext, h: Html.H<Message>): ReturnType<typeof viewImpl>;
+} = Fn.dual(3, viewImpl);

@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it as test } from "bun:test";
 import type { View } from "@effect/ui";
 import { Html, HtmlServer } from "@effect/ui/html";
 import {
@@ -14,13 +14,17 @@ import {
   BankAccountId,
   CurrencyCode,
   InvitationId,
+  IsoDate,
   NumberingSeriesId,
   UserId,
   WorkspaceId,
   WorkspaceSlug,
 } from "@kvitbit/domain";
 import { ViewModels } from "@kvitbit/ui-port";
-import { Effect, Schema } from "effect";
+import * as Arr from "effect/Array";
+import * as Effect from "effect/Effect";
+import * as Schema from "effect/Schema";
+
 import {
   czechAccountFromIban,
   previewNumberingPattern,
@@ -63,8 +67,8 @@ const sampleWorkspace: WorkspaceDetail = {
   },
   taxRegime: "vat_payer",
   taxRegimeHistory: [
-    { regime: "non_vat_payer", effectiveFrom: "2024-01-01" as never },
-    { regime: "vat_payer", effectiveFrom: "2025-01-01" as never },
+    { regime: "non_vat_payer", effectiveFrom: IsoDate.make("2024-01-01") },
+    { regime: "vat_payer", effectiveFrom: IsoDate.make("2025-01-01") },
   ],
   defaults: {
     currency: CurrencyCode.make("CZK"),
@@ -92,20 +96,25 @@ const sampleWorkspace: WorkspaceDetail = {
 };
 
 describe("Settings page (Screens 18-21 & More hub)", () => {
-  it("initializes and renders every Settings section in cs and en", async () => {
-    for (const section of Settings.SETTINGS_SECTIONS) {
-      for (const locale of ["cs", "en"] as const) {
-        const route: Settings.Route = { _tag: "Settings", ws: WS, section };
-        const ctx = ctxFor(route, { locale });
-        const { model } = Settings.init(route, ctx);
-        const html = await renderText((h) => Settings.view(model, ctx, h));
-        expect(html.length).toBeGreaterThan(200);
-        expect(Settings.title(model, ctx).length).toBeGreaterThan(3);
-      }
+  test("initializes and renders every Settings section in cs and en", async () => {
+    const renders = await Promise.all(
+      Arr.flatMap(Settings.SETTINGS_SECTIONS, (section) =>
+        Arr.map(["cs", "en"] as const, async (locale) => {
+          const route: Settings.Route = { _tag: "Settings", ws: WS, section };
+          const ctx = ctxFor(route, { locale });
+          const { model } = Settings.init(route, ctx);
+          const html = await renderText((h) => Settings.view(model, ctx, h));
+          return { html, title: Settings.title(model, ctx) };
+        }),
+      ),
+    );
+    for (const { html, title } of renders) {
+      expect(html.length).toBeGreaterThan(200);
+      expect(title.length).toBeGreaterThan(3);
     }
   });
 
-  it("renders the Mobile More hub when route._tag === More", async () => {
+  test("renders the Mobile More hub when route._tag === More", async () => {
     const route: Settings.Route = { _tag: "More", ws: WS };
     const ctxCs = ctxFor(route, { locale: "cs" });
     const ctxEn = ctxFor(route, { locale: "en" });
@@ -118,7 +127,7 @@ describe("Settings page (Screens 18-21 & More hub)", () => {
     expect(html).toContain(`/w/${WS}/templates`);
   });
 
-  it("handles Issuing Entity edits and ARES lookup", () => {
+  test("handles Issuing Entity edits and ARES lookup", () => {
     const route: Settings.Route = { _tag: "Settings", ws: WS, section: "issuingEntity" };
     const ctx = ctxFor(route, { locale: "en" });
     let { model } = Settings.init(route, ctx);
@@ -159,7 +168,7 @@ describe("Settings page (Screens 18-21 & More hub)", () => {
     expect(populated.outMessage?._tag).toBe("Toast");
   });
 
-  it("handles Tax Regime history and scheduled change confirmation", async () => {
+  test("handles Tax Regime history and scheduled change confirmation", async () => {
     const route: Settings.Route = { _tag: "Settings", ws: WS, section: "taxRegime" };
     const ctx = ctxFor(route, { locale: "en" });
     let { model } = Settings.init(route, ctx);
@@ -189,7 +198,7 @@ describe("Settings page (Screens 18-21 & More hub)", () => {
     expect(confirmed.commands?.length).toBe(1);
   });
 
-  it("derives Czech domestic account number from CZ IBAN and manages Bank Accounts CRUD", async () => {
+  test("derives Czech domestic account number from CZ IBAN and manages Bank Accounts CRUD", async () => {
     expect(czechAccountFromIban("CZ6508000000192000145399")).toBe("19-2000145399/0800");
     expect(czechAccountFromIban("DE89370400440532013000")).toBeNull();
 
@@ -225,7 +234,7 @@ describe("Settings page (Screens 18-21 & More hub)", () => {
     expect(model.bankForm.removingId).toBe(accId);
   });
 
-  it("toggles distinct Classic Czech vs Modern Minimal miniature PDF preview layouts", async () => {
+  test("toggles distinct Classic Czech vs Modern Minimal miniature PDF preview layouts", async () => {
     const route: Settings.Route = { _tag: "Settings", ws: WS, section: "branding" };
     const ctx = ctxFor(route, { locale: "en" });
     let { model } = Settings.init(route, ctx);
@@ -252,7 +261,7 @@ describe("Settings page (Screens 18-21 & More hub)", () => {
     expect(saved.commands?.length).toBe(1);
   });
 
-  it("previews Numbering Series patterns live and rejects >20-char patterns", async () => {
+  test("previews Numbering Series patterns live and rejects >20-char patterns", async () => {
     const p1 = previewNumberingPattern("FV-YYYY-NNNN", 42, 2026, 11);
     expect(p1.valid).toBe(true);
     expect(p1.samples).toEqual(["FV-2026-0042", "FV-2026-0043", "FV-2026-0044"]);
@@ -274,7 +283,7 @@ describe("Settings page (Screens 18-21 & More hub)", () => {
     expect(html).toContain("2026-0001-11");
   });
 
-  it("updates Document Defaults and Overdue Reminders offsets + auto-send PTD", () => {
+  test("updates Document Defaults and Overdue Reminders offsets + auto-send PTD", () => {
     const route: Settings.Route = { _tag: "Settings", ws: WS, section: "reminders" };
     const ctx = ctxFor(route, { locale: "en" });
     let { model } = Settings.init(route, ctx);
@@ -303,7 +312,7 @@ describe("Settings page (Screens 18-21 & More hub)", () => {
     expect(saved.commands?.length).toBe(1);
   });
 
-  it("toggles granular Read/Write scopes across all 10 ScopeAreas and reveals one-time kvb_ secret", async () => {
+  test("toggles granular Read/Write scopes across all 10 ScopeAreas and reveals one-time kvb_ secret", async () => {
     const route: Settings.Route = { _tag: "Settings", ws: WS, section: "apiKeys" };
     const ctx = ctxFor(route, { locale: "en" });
     let { model } = Settings.init(route, ctx);
@@ -355,10 +364,12 @@ describe("Settings page (Screens 18-21 & More hub)", () => {
       workspace: { ...DEMO_WORKSPACE, role: "accountant" as const },
     };
     const capped = ViewModels.ScopePicker.rows(Settings.scopePickerFromModel(model, accountantCtx));
-    expect(capped.every((r) => !r.writeEnabled && r.readEnabled)).toBe(true);
+    expect(Arr.every(capped, (r) => !r.writeEnabled && r.readEnabled)).toBe(true);
 
     // One-time kvb_ secret reveal & dismissal
+    // biome-ignore lint/security/noSecrets: Fake API key identifier for the reveal test.
     const keyId = ApiKeyId.make("k9x4m2p8q1r7");
+    // biome-ignore lint/security/noSecrets: Fake API key token for the reveal test.
     const secret = ApiKeyToken.make("kvb_k9x4m2p8q1r7_9fK2mP7xQ4vL8nR1wT6yB3cH5jD0sA2eF4g");
     const createdKey: ApiKeyView = {
       id: keyId,
@@ -383,7 +394,7 @@ describe("Settings page (Screens 18-21 & More hub)", () => {
     expect(model.apiKeysForm.createdSecret).toBeNull();
   });
 
-  it("renders Connected MCP Apps with scope matrix and revokes grants", async () => {
+  test("renders Connected MCP Apps with scope matrix and revokes grants", async () => {
     const route: Settings.Route = { _tag: "Settings", ws: WS, section: "connectedApps" };
     const ctx = ctxFor(route, { locale: "en" });
     let { model } = Settings.init(route, ctx);
@@ -416,12 +427,11 @@ describe("Settings page (Screens 18-21 & More hub)", () => {
       ctx,
     );
     expect(revoked.model.connectedApps._tag).toBe("Loaded");
-    if (revoked.model.connectedApps._tag === "Loaded") {
-      expect(revoked.model.connectedApps.data).toHaveLength(0);
-    }
+    if (revoked.model.connectedApps._tag !== "Loaded") throw new Error("Expected Loaded");
+    expect(revoked.model.connectedApps.data).toHaveLength(0);
   });
 
-  it("guards Danger Zone workspace closure until exact workspace name is typed", () => {
+  test("guards Danger Zone workspace closure until exact workspace name is typed", () => {
     const route: Settings.Route = { _tag: "Settings", ws: WS, section: "dangerZone" };
     const ctx = ctxFor(route, { locale: "en" });
     let { model } = Settings.init(route, ctx);
@@ -447,7 +457,7 @@ describe("Settings page (Screens 18-21 & More hub)", () => {
     expect(res.model.dangerForm.closing).toBe(true);
   });
 
-  it("handles Team invitations and role changes", () => {
+  test("handles Team invitations and role changes", () => {
     const route: Settings.Route = { _tag: "Settings", ws: WS, section: "team" };
     const ctx = ctxFor(route, { locale: "cs" });
     let { model } = Settings.init(route, ctx);
@@ -470,7 +480,7 @@ describe("Settings page (Screens 18-21 & More hub)", () => {
     expect(seriesId).toBeTruthy();
   });
 
-  it("server-renders Settings and More routes cleanly via SSR", async () => {
+  test("server-renders Settings and More routes cleanly via SSR", async () => {
     const s1 = await renderPath(`/w/${WS}/settings/branding`, { locale: "cs", session: signedIn });
     expect(s1.html).toContain("kb-pdf-mini--classic");
     const s2 = await renderPath(`/w/${WS}/settings/api-keys`, { locale: "en", session: signedIn });

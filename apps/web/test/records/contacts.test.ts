@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import type { ContactId } from "@kvitbit/domain/contract";
+import { ContactId } from "@kvitbit/domain";
 import * as Contacts from "../../src/page/records/contacts";
 import type { ContactRecord } from "../../src/page/records/shared";
 import { ctxFor, renderPath, WS } from "../support";
@@ -60,10 +60,9 @@ describe("Contacts page TEA", () => {
       ctx,
     ).model;
     expect(model.list._tag).toBe("Loaded");
-    if (model.list._tag === "Loaded") {
-      expect(model.list.data).toHaveLength(1);
-      expect(model.list.data[0]?.name).toBe("Nordic Craft s.r.o.");
-    }
+    if (model.list._tag !== "Loaded") throw new Error("Expected Loaded");
+    expect(model.list.data).toHaveLength(1);
+    expect(model.list.data[0]?.name).toBe("Nordic Craft s.r.o.");
   });
 
   test("ARES IČO lookup validates checksum and populates contact editor", () => {
@@ -103,7 +102,7 @@ describe("Contacts page TEA", () => {
     const route: Contacts.Route = {
       _tag: "Contact",
       ws: WS,
-      id: SAMPLE_CONTACT.id as ContactId,
+      id: ContactId.make(SAMPLE_CONTACT.id),
       mode: "edit",
     };
     const ctx = ctxFor(route);

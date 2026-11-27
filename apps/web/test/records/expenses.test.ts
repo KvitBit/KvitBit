@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import type { ExpenseId } from "@kvitbit/domain/contract";
+import { ExpenseId } from "@kvitbit/domain";
 import * as Expenses from "../../src/page/records/expenses";
 import {
   computeExpensePreview,
@@ -103,10 +103,9 @@ describe("Expenses page TEA", () => {
       ctx,
     ).model;
     expect(model.list._tag).toBe("Loaded");
-    if (model.list._tag === "Loaded") {
-      expect(model.list.data).toHaveLength(1);
-      expect(model.list.data[0]?.status).toBe("incomplete");
-    }
+    if (model.list._tag !== "Loaded") throw new Error("Expected Loaded");
+    expect(model.list.data).toHaveLength(1);
+    expect(model.list.data[0]?.status).toBe("incomplete");
   });
 
   test("VAT & FX math preview computes partial deductibility and CNB CZK equivalent", () => {
@@ -226,7 +225,7 @@ describe("Expenses page TEA", () => {
     const route: Expenses.Route = {
       _tag: "Expense",
       ws: WS,
-      id: SAMPLE_VIEW.id as ExpenseId,
+      id: ExpenseId.make(SAMPLE_VIEW.id),
       mode: "view",
     };
     const ctx = ctxFor(route);

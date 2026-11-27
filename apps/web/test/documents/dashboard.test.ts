@@ -1,6 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import { DashboardView } from "@kvitbit/domain";
-import { BigDecimal, Schema } from "effect";
+import * as BigDecimal from "effect/BigDecimal";
+import * as Effect from "effect/Effect";
+import * as Schema from "effect/Schema";
+
 import * as Dashboard from "../../src/page/documents/dashboard";
 import { DocumentSummaryData } from "../../src/page/documents/shared";
 import { ctxFor, renderPath, WS } from "../support";
@@ -8,45 +11,49 @@ import { runCommand, sessionWithRole } from "./fixtures";
 
 const bd = (n: number) => BigDecimal.fromBigInt(BigInt(n));
 
-const sampleDashboard = Schema.decodeUnknownSync(DashboardView)({
-  period: { from: "2026-01-01", to: "2026-11-24" },
-  revenue: { amount: bd(500000), currency: "CZK" },
-  unpaid: { amount: bd(87120), currency: "CZK" },
-  overdue: { total: { amount: bd(87120), currency: "CZK" }, count: 1 },
-  expenses: { amount: bd(120000), currency: "CZK" },
-  incompleteExpenses: 2,
-  cashflow: [
-    {
-      month: "2026-10",
-      in: { amount: bd(70000), currency: "CZK" },
-      out: { amount: bd(20000), currency: "CZK" },
-      net: { amount: bd(50000), currency: "CZK" },
-    },
-    {
-      month: "2026-11",
-      in: { amount: bd(90000), currency: "CZK" },
-      out: { amount: bd(25000), currency: "CZK" },
-      net: { amount: bd(65000), currency: "CZK" },
-    },
-  ],
-});
+const sampleDashboard = Effect.runSync(
+  Schema.decodeEffect(DashboardView)({
+    period: { from: "2026-01-01", to: "2026-11-24" },
+    revenue: { amount: bd(500000), currency: "CZK" },
+    unpaid: { amount: bd(87120), currency: "CZK" },
+    overdue: { total: { amount: bd(87120), currency: "CZK" }, count: 1 },
+    expenses: { amount: bd(120000), currency: "CZK" },
+    incompleteExpenses: 2,
+    cashflow: [
+      {
+        month: "2026-10",
+        in: { amount: bd(70000), currency: "CZK" },
+        out: { amount: bd(20000), currency: "CZK" },
+        net: { amount: bd(50000), currency: "CZK" },
+      },
+      {
+        month: "2026-11",
+        in: { amount: bd(90000), currency: "CZK" },
+        out: { amount: bd(25000), currency: "CZK" },
+        net: { amount: bd(65000), currency: "CZK" },
+      },
+    ],
+  }),
+);
 
-const sampleRecent = Schema.decodeUnknownSync(Schema.Array(DocumentSummaryData))([
-  {
-    id: "0193a000-0000-7000-8000-000000000601",
-    kind: "invoice",
-    number: "2026-0041",
-    status: "issued",
-    locked: false,
-    settlement: "unpaid",
-    overdue: true,
-    revision: 1,
-    contact: { id: "0193a000-0000-7000-8000-000000000201", name: "Alza.cz a.s." },
-    issuedOn: "2026-10-15",
-    dueOn: "2026-10-29",
-    total: { amount: bd(87120), currency: "CZK" },
-  },
-]);
+const sampleRecent = Effect.runSync(
+  Schema.decodeEffect(Schema.Array(DocumentSummaryData))([
+    {
+      id: "0193a000-0000-7000-8000-000000000601",
+      kind: "invoice",
+      number: "2026-0041",
+      status: "issued",
+      locked: false,
+      settlement: "unpaid",
+      overdue: true,
+      revision: 1,
+      contact: { id: "0193a000-0000-7000-8000-000000000201", name: "Alza.cz a.s." },
+      issuedOn: "2026-10-15",
+      dueOn: "2026-10-29",
+      total: { amount: bd(87120), currency: "CZK" },
+    },
+  ]),
+);
 
 describe("Dashboard page (Screen 08)", () => {
   const route: Dashboard.Route = { _tag: "Dashboard", ws: WS };
@@ -121,15 +128,17 @@ describe("Dashboard page (Screen 08)", () => {
     const { model, commands } = Dashboard.init(route, ctx);
     const recentCommand = commands?.[1];
     if (recentCommand === undefined) throw new Error("Missing recent documents command");
-    const encode = Schema.encodeSync(Schema.toCodecJson(Schema.Array(DocumentSummaryData)));
+    const encode = Schema.encodeEffect(Schema.toCodecJson(Schema.Array(DocumentSummaryData)));
     const message = await runCommand([recentCommand], (request) => {
       expect(new URL(request.url).pathname).toEndWith("/documents");
-      return Response.json({ items: encode(sampleRecent), nextCursor: null });
+      return Response.json({ items: Effect.runSync(encode(sampleRecent)), nextCursor: null });
     });
     const recent = Dashboard.update(model, message, ctx).model.recent;
     expect(recent._tag).toBe("Loaded");
     if (recent._tag !== "Loaded") throw new Error("Recent documents were not loaded");
-    expect(encode(recent.data)).toEqual(encode(sampleRecent));
+    expect(encode(recent.data).pipe(Effect.runSync)).toEqual(
+      encode(sampleRecent).pipe(Effect.runSync),
+    );
   });
 
   test("accountants can read the dashboard without draft creation links", async () => {

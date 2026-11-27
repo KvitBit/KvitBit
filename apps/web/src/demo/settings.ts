@@ -4,7 +4,8 @@
  */
 import {
   AccountPreferences,
-  type ALL_SCOPES,
+  AccountPreferencesPatch,
+  ApiKeyCreate,
   ApiKeyCreated,
   ApiKeyId,
   ApiKeyToken,
@@ -13,12 +14,16 @@ import {
   ConnectedAppView,
   expandAccess,
   READ_SCOPES,
+  SeriesInput,
 } from "@kvitbit/api-contract";
 import {
   BankAccountId,
+  BrandingPatch,
   CurrencyCode,
   InvitationId,
+  InvitationRole,
   InvitationView,
+  IsoDate,
   MemberView,
   NumberingSeriesId,
   NumberingSeriesView,
@@ -27,12 +32,23 @@ import {
   WorkspaceId,
   WorkspaceSlug,
 } from "@kvitbit/domain";
-import { Schema } from "effect";
-import type {
+import * as Arr from "effect/Array";
+import * as DateTime from "effect/DateTime";
+import * as Effect from "effect/Effect";
+import * as Fn from "effect/Function";
+import * as Option from "effect/Option";
+import * as Order from "effect/Order";
+import * as Schema from "effect/Schema";
+import * as Str from "effect/String";
+import {
   BankAccount,
+  IssuingEntity,
   PasskeyItem,
+  ReminderSchedule,
   SessionItem,
-  WorkspaceDetail,
+  TaxRegimePeriod,
+  WorkspaceDefaults,
+  type WorkspaceDetail,
 } from "../page/settings/models";
 import { type DemoRoute, status } from "./router";
 import { DEMO_USER, DEMO_WORKSPACE, demoId } from "./shell";
@@ -41,6 +57,78 @@ const wsId = WorkspaceId.make(DEMO_WORKSPACE.id);
 const ownerId = UserId.make(DEMO_USER.id);
 const adminId = UserId.make(demoId(2));
 const accountantId = UserId.make(demoId(3));
+
+const IssuingEntityPatch = Schema.Struct({
+  name: Schema.optionalKey(IssuingEntity.fields.name),
+  ico: Schema.optionalKey(IssuingEntity.fields.ico),
+  dic: Schema.optionalKey(IssuingEntity.fields.dic),
+  address: Schema.optionalKey(IssuingEntity.fields.address),
+  legalForm: Schema.optionalKey(IssuingEntity.fields.legalForm),
+  registerEntry: Schema.optionalKey(IssuingEntity.fields.registerEntry),
+  email: Schema.optionalKey(IssuingEntity.fields.email),
+  phone: Schema.optionalKey(IssuingEntity.fields.phone),
+  web: Schema.optionalKey(IssuingEntity.fields.web),
+  taxRegime: Schema.optionalKey(TaxRegimePeriod),
+});
+const DefaultsPatch = Schema.Struct({
+  currency: Schema.optionalKey(WorkspaceDefaults.fields.currency),
+  language: Schema.optionalKey(WorkspaceDefaults.fields.language),
+  dueDays: Schema.optionalKey(WorkspaceDefaults.fields.dueDays),
+  paymentMethod: Schema.optionalKey(WorkspaceDefaults.fields.paymentMethod),
+  defaultNote: Schema.optionalKey(WorkspaceDefaults.fields.defaultNote),
+  paymentRounding: Schema.optionalKey(WorkspaceDefaults.fields.paymentRounding),
+  paymentTaxDocumentAutoSend: Schema.optionalKey(
+    WorkspaceDefaults.fields.paymentTaxDocumentAutoSend,
+  ),
+});
+const ReminderPatch = Schema.Struct({
+  enabled: Schema.optionalKey(ReminderSchedule.fields.enabled),
+  proformas: Schema.optionalKey(ReminderSchedule.fields.proformas),
+  offsetsDays: Schema.optionalKey(ReminderSchedule.fields.offsetsDays),
+});
+const SettingsPatch = Schema.Struct({
+  slug: Schema.optionalKey(WorkspaceSlug),
+  defaults: DefaultsPatch.pipe(Schema.NullOr, Schema.optionalKey),
+  reminderPolicy: ReminderPatch.pipe(Schema.NullOr, Schema.optionalKey),
+  branding: BrandingPatch.pipe(Schema.NullOr, Schema.optionalKey),
+});
+const BankAccountPatch = Schema.Struct({
+  name: Schema.optionalKey(BankAccount.fields.name),
+  iban: Schema.optionalKey(BankAccount.fields.iban),
+  bic: Schema.optionalKey(BankAccount.fields.bic),
+  currency: Schema.optionalKey(BankAccount.fields.currency),
+  isDefault: Schema.optionalKey(BankAccount.fields.isDefault),
+});
+const MemberRoleInput = Schema.Struct({ role: InvitationRole });
+const InvitationInput = Schema.Struct({ email: Schema.NonEmptyString, role: InvitationRole });
+const OwnershipInput = Schema.Struct({ to: UserId });
+const DemoApiKeyCreate = ApiKeyCreate.mapMembers(([preset, custom]) => [
+  preset,
+  custom.pipe(
+    Schema.fieldsAssign({
+      scopes: custom.fields.scopes.pipe(
+        Schema.withDecodingDefaultKey(Effect.succeed(["documents:read"])),
+      ),
+    }),
+  ),
+]);
+const applyBrandingPatch = (patch: BrandingPatch | null | undefined) => {
+  const current = workspaceState.branding;
+  return {
+    ...current,
+    pdfTemplate: patch?.pdfTemplate ?? current.pdfTemplate,
+    accentColor: patch?.accentColor ?? current.accentColor,
+    footerText: patch?.footerText === undefined ? current.footerText : patch.footerText,
+    theme: patch?.theme === undefined ? current.theme : patch.theme,
+  };
+};
+const PasskeyRegistration = Schema.Struct({
+  name: Schema.optionalKey(PasskeyItem.fields.name),
+  response: Schema.Unknown,
+});
+const PasskeyUpdate = Schema.Struct({ id: PasskeyItem.fields.id, name: PasskeyItem.fields.name });
+const PasskeyDelete = Schema.Struct({ id: PasskeyItem.fields.id });
+const SessionRevoke = Schema.Struct({ token: SessionItem.fields.token });
 
 let workspaceState: WorkspaceDetail = {
   id: wsId,
@@ -66,8 +154,8 @@ let workspaceState: WorkspaceDetail = {
   },
   taxRegime: "vat_payer",
   taxRegimeHistory: [
-    { regime: "non_vat_payer", effectiveFrom: "2024-01-01" as never },
-    { regime: "vat_payer", effectiveFrom: "2025-01-01" as never },
+    { regime: "non_vat_payer", effectiveFrom: IsoDate.make("2024-01-01") },
+    { regime: "vat_payer", effectiveFrom: IsoDate.make("2025-01-01") },
   ],
   defaults: {
     currency: CurrencyCode.make("CZK"),
@@ -194,6 +282,7 @@ let invitationsState: Array<InvitationView> = [
 
 let apiKeysState: Array<ApiKeyView> = [
   {
+    // biome-ignore lint/security/noSecrets: This is a public demo key ID.
     id: ApiKeyId.make("k9x4m2p8q1r7"),
     name: "Pohoda export script",
     prefix: "kvb_k9x4m2p8q1r7",
@@ -205,6 +294,7 @@ let apiKeysState: Array<ApiKeyView> = [
     expiresAt: null,
   },
   {
+    // biome-ignore lint/security/noSecrets: This is a public demo key ID.
     id: ApiKeyId.make("b3v7n5w2z8c4"),
     name: "E-shop webhook",
     prefix: "kvb_b3v7n5w2z8c4",
@@ -283,6 +373,38 @@ const brandingView = (): BrandingView => ({
   revision: workspaceState.revision,
 });
 
+const invalidBody = () => status(400, { message: "Invalid request body" });
+
+const wire = <S extends Schema.ConstraintEncoder<object>>(
+  schema: S,
+  value: S["Type"],
+  code?: number,
+) => {
+  const encoded = Schema.encodeOption(schema)(value);
+  if (Option.isNone(encoded)) return status(500, { message: "Invalid demo response" });
+  return code === undefined ? encoded.value : status(code, encoded.value);
+};
+
+const stripWhitespace = Str.replace(/\s+/g, "");
+const icoPattern = /^\d{8}$/;
+const normalizeIban = (iban: string) => Str.toUpperCase(stripWhitespace(iban));
+const nowIso = () => DateTime.formatIso(DateTime.nowUnsafe());
+
+const counterRun = /(N+)/;
+
+const demoSeriesNumber = (pattern: string, counter: number) =>
+  Fn.pipe(
+    pattern,
+    Str.replace(/YYYY/g, "2026"),
+    Str.replace(/YY/g, "26"),
+    Str.replace(/MM/g, "11"),
+    Str.split(counterRun),
+    Arr.map((part, index) =>
+      index % 2 === 0 ? part : Str.padStart(part.length, "0")(String(counter)),
+    ),
+    Arr.join(""),
+  );
+
 export const routes: ReadonlyArray<DemoRoute> = [
   {
     method: "GET",
@@ -293,41 +415,27 @@ export const routes: ReadonlyArray<DemoRoute> = [
     method: "PATCH",
     path: "/api/v1/workspaces/:workspaceId/issuing-entity",
     respond: ({ body }) => {
-      const patch = (body ?? {}) as Record<string, unknown>;
-      const nextEntity = {
-        ...workspaceState.issuingEntity,
-        ...(typeof patch.name === "string" ? { name: patch.name } : {}),
-        ...(patch.ico !== undefined ? { ico: patch.ico as string | null } : {}),
-        ...(patch.dic !== undefined ? { dic: patch.dic as string | null } : {}),
-        ...(patch.legalForm !== undefined ? { legalForm: patch.legalForm as string | null } : {}),
-        ...(patch.registerEntry !== undefined
-          ? { registerEntry: patch.registerEntry as string | null }
-          : {}),
-        ...(patch.email !== undefined ? { email: patch.email as string | null } : {}),
-        ...(patch.phone !== undefined ? { phone: patch.phone as string | null } : {}),
-        ...(patch.web !== undefined ? { web: patch.web as string | null } : {}),
-        ...(typeof patch.address === "object" && patch.address !== null
-          ? { address: patch.address as WorkspaceDetail["issuingEntity"]["address"] }
-          : {}),
-      };
-      let taxRegimeHistory = [...workspaceState.taxRegimeHistory];
-      let taxRegime = workspaceState.taxRegime;
-      if (typeof patch.taxRegime === "object" && patch.taxRegime !== null) {
-        const tr = patch.taxRegime as {
-          regime: WorkspaceDetail["taxRegime"];
-          effectiveFrom: string;
-        };
-        taxRegimeHistory = [
-          ...taxRegimeHistory.filter((p) => p.effectiveFrom !== tr.effectiveFrom),
-          { regime: tr.regime, effectiveFrom: tr.effectiveFrom as never },
-        ].sort((a, b) => a.effectiveFrom.localeCompare(b.effectiveFrom));
-        taxRegime = tr.regime;
+      const decoded = Schema.decodeOption(IssuingEntityPatch)(body ?? {});
+      if (Option.isNone(decoded)) return invalidBody();
+      const { taxRegime, ...entityPatch } = decoded.value;
+      const nextEntity = { ...workspaceState.issuingEntity, ...entityPatch };
+      let taxRegimeHistory = workspaceState.taxRegimeHistory;
+      if (taxRegime !== undefined) {
+        const otherPeriods = Arr.filter(
+          taxRegimeHistory,
+          (period) => period.effectiveFrom !== taxRegime.effectiveFrom,
+        );
+        taxRegimeHistory = Arr.sortWith(
+          [...otherPeriods, taxRegime],
+          (period) => period.effectiveFrom,
+          Order.String,
+        );
       }
       workspaceState = {
         ...workspaceState,
         name: nextEntity.name,
         issuingEntity: nextEntity,
-        taxRegime,
+        taxRegime: taxRegime?.regime ?? workspaceState.taxRegime,
         taxRegimeHistory,
         revision: workspaceState.revision + 1,
       };
@@ -338,16 +446,15 @@ export const routes: ReadonlyArray<DemoRoute> = [
     method: "PATCH",
     path: "/api/v1/workspaces/:workspaceId/settings",
     respond: ({ body }) => {
-      const patch = (body ?? {}) as Record<string, unknown>;
-      const defaultsPatch = (patch.defaults ?? {}) as Partial<WorkspaceDetail["defaults"]>;
-      const remPatch = (patch.reminderPolicy ?? {}) as Partial<WorkspaceDetail["reminderPolicy"]>;
-      const brandingPatch = (patch.branding ?? {}) as Partial<WorkspaceDetail["branding"]>;
+      const decoded = Schema.decodeOption(SettingsPatch)(body ?? {});
+      if (Option.isNone(decoded)) return invalidBody();
+      const patch = decoded.value;
       workspaceState = {
         ...workspaceState,
-        ...(typeof patch.slug === "string" ? { slug: WorkspaceSlug.make(patch.slug) } : {}),
-        defaults: { ...workspaceState.defaults, ...defaultsPatch },
-        reminderPolicy: { ...workspaceState.reminderPolicy, ...remPatch },
-        branding: { ...workspaceState.branding, ...brandingPatch },
+        slug: patch.slug ?? workspaceState.slug,
+        defaults: { ...workspaceState.defaults, ...patch.defaults },
+        reminderPolicy: { ...workspaceState.reminderPolicy, ...patch.reminderPolicy },
+        branding: applyBrandingPatch(patch.branding),
         revision: workspaceState.revision + 1,
       };
       return workspaceState;
@@ -357,8 +464,8 @@ export const routes: ReadonlyArray<DemoRoute> = [
     method: "GET",
     path: "/api/v1/registry/companies/:ico",
     respond: ({ params }) => {
-      const ico = (params.ico ?? "").replace(/\s+/g, "");
-      if (!/^\d{8}$/.test(ico)) {
+      const ico = stripWhitespace(params.ico ?? "");
+      if (!icoPattern.test(ico)) {
         return status(422, {
           _tag: "Invalid",
           issues: [{ path: ["ico"], code: "ico.checksum" }],
@@ -378,7 +485,7 @@ export const routes: ReadonlyArray<DemoRoute> = [
         registerEntry: "Spisová značka B 8573 vedená u Městského soudu v Praze",
         terminatedOn: null,
       };
-      return Schema.encodeSync(RegistryResult)(result);
+      return wire(RegistryResult, result);
     },
   },
   {
@@ -390,24 +497,24 @@ export const routes: ReadonlyArray<DemoRoute> = [
     method: "POST",
     path: "/api/v1/workspaces/:workspaceId/bank-accounts",
     respond: ({ body }) => {
-      const input = (body ?? {}) as Partial<BankAccount>;
+      const decoded = Schema.decodeOption(BankAccountPatch)(body ?? {});
+      if (Option.isNone(decoded)) return invalidBody();
+      const input = decoded.value;
       const currency = input.currency ?? CurrencyCode.make("CZK");
       const makeDefault =
         input.isDefault === true ||
-        !workspaceState.bankAccounts.some((b) => b.currency === currency);
+        !Arr.some(workspaceState.bankAccounts, (b) => b.currency === currency);
       const created: BankAccount = {
         id: BankAccountId.make(nextId()),
         name: input.name ?? null,
-        iban: String(input.iban ?? "")
-          .replace(/\s+/g, "")
-          .toUpperCase(),
+        iban: normalizeIban(input.iban ?? ""),
         bic: input.bic ?? null,
         currency,
         isDefault: makeDefault,
         revision: 1,
       };
       const others = makeDefault
-        ? workspaceState.bankAccounts.map((b) =>
+        ? Arr.map(workspaceState.bankAccounts, (b) =>
             b.currency === currency ? { ...b, isDefault: false } : b,
           )
         : workspaceState.bankAccounts;
@@ -419,20 +526,19 @@ export const routes: ReadonlyArray<DemoRoute> = [
     method: "PUT",
     path: "/api/v1/workspaces/:workspaceId/bank-accounts/:bankAccountId",
     respond: ({ params, body }) => {
-      const input = (body ?? {}) as Partial<BankAccount>;
       const id = params.bankAccountId ?? "";
-      const existing = workspaceState.bankAccounts.find((b) => b.id === id);
-      if (existing === undefined)
-        return status(404, { _tag: "NotFound", entity: "BankAccount", id });
+      const found = Arr.findFirst(workspaceState.bankAccounts, (b) => b.id === id);
+      if (Option.isNone(found)) return status(404, { _tag: "NotFound", entity: "BankAccount", id });
+      const decoded = Schema.decodeOption(BankAccountPatch)(body ?? {});
+      if (Option.isNone(decoded)) return invalidBody();
+      const existing = found.value;
+      const input = decoded.value;
       const currency = input.currency ?? existing.currency;
       const makeDefault = input.isDefault ?? existing.isDefault;
       const updated: BankAccount = {
         ...existing,
         name: input.name !== undefined ? input.name : existing.name,
-        iban:
-          input.iban !== undefined
-            ? String(input.iban).replace(/\s+/g, "").toUpperCase()
-            : existing.iban,
+        iban: input.iban === undefined ? existing.iban : normalizeIban(input.iban),
         bic: input.bic !== undefined ? input.bic : existing.bic,
         currency,
         isDefault: makeDefault,
@@ -440,7 +546,7 @@ export const routes: ReadonlyArray<DemoRoute> = [
       };
       workspaceState = {
         ...workspaceState,
-        bankAccounts: workspaceState.bankAccounts.map((b) => {
+        bankAccounts: Arr.map(workspaceState.bankAccounts, (b) => {
           if (b.id === id) return updated;
           if (makeDefault && b.currency === currency) return { ...b, isDefault: false };
           return b;
@@ -455,27 +561,27 @@ export const routes: ReadonlyArray<DemoRoute> = [
     respond: ({ params }) => {
       workspaceState = {
         ...workspaceState,
-        bankAccounts: workspaceState.bankAccounts.filter((b) => b.id !== params.bankAccountId),
+        bankAccounts: Arr.filter(workspaceState.bankAccounts, (b) => b.id !== params.bankAccountId),
       };
-      return undefined;
     },
   },
   {
     method: "GET",
     path: "/api/v1/workspaces/:workspaceId/branding",
-    respond: () => Schema.encodeSync(BrandingView)(brandingView()),
+    respond: () => wire(BrandingView, brandingView()),
   },
   {
     method: "PATCH",
     path: "/api/v1/workspaces/:workspaceId/branding",
     respond: ({ body }) => {
-      const patch = (body ?? {}) as Partial<WorkspaceDetail["branding"]>;
+      const decoded = Schema.decodeOption(BrandingPatch)(body ?? {});
+      if (Option.isNone(decoded)) return invalidBody();
       workspaceState = {
         ...workspaceState,
-        branding: { ...workspaceState.branding, ...patch },
+        branding: applyBrandingPatch(decoded.value),
         revision: workspaceState.revision + 1,
       };
-      return Schema.encodeSync(BrandingView)(brandingView());
+      return wire(BrandingView, brandingView());
     },
   },
   {
@@ -486,7 +592,7 @@ export const routes: ReadonlyArray<DemoRoute> = [
       const ref = {
         contentType: "image/png" as const,
         sizeBytes: 4096,
-        updatedAt: new Date().toISOString(),
+        updatedAt: nowIso(),
       };
       workspaceState = {
         ...workspaceState,
@@ -506,7 +612,6 @@ export const routes: ReadonlyArray<DemoRoute> = [
         branding: { ...workspaceState.branding, [kind]: null },
         revision: workspaceState.revision + 1,
       };
-      return undefined;
     },
   },
   {
@@ -517,21 +622,18 @@ export const routes: ReadonlyArray<DemoRoute> = [
   {
     method: "GET",
     path: "/api/v1/workspaces/:workspaceId/numbering-series",
-    respond: () => Schema.encodeSync(Schema.Array(NumberingSeriesView))(seriesState),
+    respond: () => wire(Schema.Array(NumberingSeriesView), seriesState),
   },
   {
     method: "POST",
     path: "/api/v1/workspaces/:workspaceId/numbering-series",
     respond: ({ body }) => {
-      const input = (body ?? {}) as {
-        kind: NumberingSeriesView["kind"];
-        name: string;
-        pattern: string;
-        nextNumber?: number;
-        isDefault?: boolean;
-      };
+      const decoded = Schema.decodeUnknownOption(SeriesInput)(body);
+      if (Option.isNone(decoded)) return invalidBody();
+      const input = decoded.value;
       const counter = input.nextNumber ?? 1;
-      const isDefault = input.isDefault === true || !seriesState.some((s) => s.kind === input.kind);
+      const isDefault =
+        input.isDefault === true || !Arr.some(seriesState, (s) => s.kind === input.kind);
       const created: NumberingSeriesView = {
         id: NumberingSeriesId.make(nextId()),
         kind: input.kind,
@@ -540,36 +642,29 @@ export const routes: ReadonlyArray<DemoRoute> = [
         isDefault,
         periodKey: "2026",
         nextCounter: counter,
-        nextNumber: `${input.pattern
-          .replace(/YYYY/g, "2026")
-          .replace(/YY/g, "26")
-          .replace(/MM/g, "11")
-          .replace(/N+/g, (m) => String(counter).padStart(m.length, "0"))}`,
+        nextNumber: demoSeriesNumber(input.pattern, counter),
       };
       if (isDefault) {
-        seriesState = seriesState.map((s) =>
+        seriesState = Arr.map(seriesState, (s) =>
           s.kind === input.kind ? { ...s, isDefault: false } : s,
         );
       }
       seriesState = [...seriesState, created];
-      return status(201, Schema.encodeSync(NumberingSeriesView)(created));
+      return wire(NumberingSeriesView, created, 201);
     },
   },
   {
     method: "PUT",
     path: "/api/v1/workspaces/:workspaceId/numbering-series/:seriesId",
     respond: ({ params, body }) => {
-      const input = (body ?? {}) as {
-        kind: NumberingSeriesView["kind"];
-        name: string;
-        pattern: string;
-        nextNumber?: number;
-        isDefault?: boolean;
-      };
-      const existing = seriesState.find((s) => s.id === params.seriesId);
-      if (existing === undefined) {
+      const found = Arr.findFirst(seriesState, (s) => s.id === params.seriesId);
+      if (Option.isNone(found)) {
         return status(404, { _tag: "NotFound", entity: "NumberingSeries", id: params.seriesId });
       }
+      const decoded = Schema.decodeUnknownOption(SeriesInput)(body);
+      if (Option.isNone(decoded)) return invalidBody();
+      const existing = found.value;
+      const input = decoded.value;
       const counter = input.nextNumber ?? existing.nextCounter;
       const isDefault = input.isDefault ?? existing.isDefault;
       const updated: NumberingSeriesView = {
@@ -578,42 +673,38 @@ export const routes: ReadonlyArray<DemoRoute> = [
         pattern: input.pattern,
         isDefault,
         nextCounter: counter,
-        nextNumber: `${input.pattern
-          .replace(/YYYY/g, "2026")
-          .replace(/YY/g, "26")
-          .replace(/MM/g, "11")
-          .replace(/N+/g, (m) => String(counter).padStart(m.length, "0"))}`,
+        nextNumber: demoSeriesNumber(input.pattern, counter),
       };
-      seriesState = seriesState.map((s) => {
+      seriesState = Arr.map(seriesState, (s) => {
         if (s.id === existing.id) return updated;
         if (isDefault && s.kind === existing.kind) return { ...s, isDefault: false };
         return s;
       });
-      return Schema.encodeSync(NumberingSeriesView)(updated);
+      return wire(NumberingSeriesView, updated);
     },
   },
   {
     method: "GET",
     path: "/api/v1/workspaces/:workspaceId/members",
-    respond: () => Schema.encodeSync(Schema.Array(MemberView))(membersState),
+    respond: () => wire(Schema.Array(MemberView), membersState),
   },
   {
     method: "PUT",
     path: "/api/v1/workspaces/:workspaceId/members/:userId/role",
     respond: ({ params, body }) => {
-      const role = (body as { role?: MemberView["role"] } | null)?.role;
-      if (role !== undefined) {
-        membersState = membersState.map((m) => (m.userId === params.userId ? { ...m, role } : m));
-      }
-      return undefined;
+      const decoded = Schema.decodeUnknownOption(MemberRoleInput)(body);
+      if (Option.isNone(decoded)) return invalidBody();
+      const { role } = decoded.value;
+      membersState = Arr.map(membersState, (m) =>
+        m.userId === params.userId ? { ...m, role } : m,
+      );
     },
   },
   {
     method: "DELETE",
     path: "/api/v1/workspaces/:workspaceId/members/:userId",
     respond: ({ params }) => {
-      membersState = membersState.filter((m) => m.userId !== params.userId);
-      return undefined;
+      membersState = Arr.filter(membersState, (m) => m.userId !== params.userId);
     },
   },
   {
@@ -624,32 +715,34 @@ export const routes: ReadonlyArray<DemoRoute> = [
   {
     method: "GET",
     path: "/api/v1/workspaces/:workspaceId/invitations",
-    respond: () => Schema.encodeSync(Schema.Array(InvitationView))(invitationsState),
+    respond: () => wire(Schema.Array(InvitationView), invitationsState),
   },
   {
     method: "POST",
     path: "/api/v1/workspaces/:workspaceId/invitations",
     respond: ({ body }) => {
-      const input = (body ?? {}) as { email: string; role: InvitationView["role"] };
+      const decoded = Schema.decodeUnknownOption(InvitationInput)(body);
+      if (Option.isNone(decoded)) return invalidBody();
+      const input = decoded.value;
+      const now = DateTime.nowUnsafe();
       const created: InvitationView = {
         id: InvitationId.make(nextId()),
         email: input.email,
         role: input.role,
         status: "pending",
         invitedBy: { userId: ownerId, name: DEMO_USER.name },
-        createdAt: new Date().toISOString(),
-        expiresAt: new Date(Date.now() + 7 * 86_400_000).toISOString(),
+        createdAt: DateTime.formatIso(now),
+        expiresAt: DateTime.formatIso(DateTime.add(now, { days: 7 })),
       };
       invitationsState = [created, ...invitationsState];
-      return status(201, Schema.encodeSync(InvitationView)(created));
+      return wire(InvitationView, created, 201);
     },
   },
   {
     method: "DELETE",
     path: "/api/v1/workspaces/:workspaceId/invitations/:invitationId",
     respond: ({ params }) => {
-      invitationsState = invitationsState.filter((i) => i.id !== params.invitationId);
-      return undefined;
+      invitationsState = Arr.filter(invitationsState, (i) => i.id !== params.invitationId);
     },
   },
   {
@@ -661,15 +754,14 @@ export const routes: ReadonlyArray<DemoRoute> = [
     method: "POST",
     path: "/api/v1/workspaces/:workspaceId/ownership-transfer",
     respond: ({ body }) => {
-      const to = (body as { to?: string } | null)?.to;
-      if (typeof to === "string") {
-        membersState = membersState.map((m) => {
-          if (m.userId === to) return { ...m, role: "owner" };
-          if (m.role === "owner") return { ...m, role: "admin" };
-          return m;
-        });
-      }
-      return undefined;
+      const decoded = Schema.decodeUnknownOption(OwnershipInput)(body);
+      if (Option.isNone(decoded)) return invalidBody();
+      const { to } = decoded.value;
+      membersState = Arr.map(membersState, (m) => {
+        if (m.userId === to) return { ...m, role: "owner" };
+        if (m.role === "owner") return { ...m, role: "admin" };
+        return m;
+      });
     },
   },
   {
@@ -677,7 +769,6 @@ export const routes: ReadonlyArray<DemoRoute> = [
     path: "/api/v1/workspaces/:workspaceId/close",
     respond: () => {
       workspaceState = { ...workspaceState, closed: true, revision: workspaceState.revision + 1 };
-      return undefined;
     },
   },
   {
@@ -687,35 +778,23 @@ export const routes: ReadonlyArray<DemoRoute> = [
       status(202, {
         id: nextId(),
         status: "running",
-        createdAt: new Date().toISOString(),
+        createdAt: nowIso(),
         downloadUrl: null,
       }),
   },
   {
     method: "GET",
     path: "/api/v1/workspaces/:workspaceId/api-keys",
-    respond: () => Schema.encodeSync(Schema.Array(ApiKeyView))(apiKeysState),
+    respond: () => wire(Schema.Array(ApiKeyView), apiKeysState),
   },
   {
     method: "POST",
     path: "/api/v1/workspaces/:workspaceId/api-keys",
     respond: ({ body }) => {
-      const input = (body ?? {}) as {
-        name: string;
-        access: "read" | "read_write" | "custom";
-        scopes?: ReadonlyArray<(typeof ALL_SCOPES)[number]>;
-        expiresOn?: string;
-      };
-      const expanded =
-        input.access === "custom"
-          ? expandAccess({
-              access: "custom",
-              scopes: (input.scopes ?? ["documents:read"]) as [
-                (typeof ALL_SCOPES)[number],
-                ...(typeof ALL_SCOPES)[number][],
-              ],
-            })
-          : expandAccess({ access: input.access });
+      const decoded = Schema.decodeUnknownOption(DemoApiKeyCreate)(body);
+      if (Option.isNone(decoded)) return invalidBody();
+      const input = decoded.value;
+      const expanded = expandAccess(input);
       const keyId = ApiKeyId.make(`demo${++seqCounter}abcd`);
       const secret = ApiKeyToken.make(`kvb_${keyId}_9fK2mP7xQ4vL8nR1wT6yB3cH5jD0sA2eF4g`);
       const key: ApiKeyView = {
@@ -725,52 +804,52 @@ export const routes: ReadonlyArray<DemoRoute> = [
         access: expanded.access,
         scopes: [...expanded.scopes],
         createdBy: { userId: ownerId, name: DEMO_USER.name },
-        createdAt: new Date().toISOString(),
+        createdAt: nowIso(),
         lastUsedAt: null,
-        expiresAt: input.expiresOn ? `${input.expiresOn}T00:00:00.000Z` : null,
+        expiresAt: input.expiresOn === undefined ? null : `${input.expiresOn}T00:00:00.000Z`,
       };
       apiKeysState = [key, ...apiKeysState];
-      return status(201, Schema.encodeSync(ApiKeyCreated)({ key, secret }));
+      return wire(ApiKeyCreated, { key, secret }, 201);
     },
   },
   {
     method: "DELETE",
     path: "/api/v1/workspaces/:workspaceId/api-keys/:keyId",
     respond: ({ params }) => {
-      apiKeysState = apiKeysState.filter((k) => k.id !== params.keyId);
-      return undefined;
+      apiKeysState = Arr.filter(apiKeysState, (k) => k.id !== params.keyId);
     },
   },
   {
     method: "GET",
     path: "/api/v1/workspaces/:workspaceId/connected-apps",
-    respond: () => Schema.encodeSync(Schema.Array(ConnectedAppView))(connectedAppsState),
+    respond: () => wire(Schema.Array(ConnectedAppView), connectedAppsState),
   },
   {
     method: "DELETE",
     path: "/api/v1/workspaces/:workspaceId/connected-apps/:grantId",
     respond: ({ params }) => {
-      connectedAppsState = connectedAppsState.filter((g) => g.grantId !== params.grantId);
-      return undefined;
+      connectedAppsState = Arr.filter(connectedAppsState, (g) => g.grantId !== params.grantId);
     },
   },
   {
     method: "GET",
     path: "/api/v1/me/preferences",
-    respond: () => Schema.encodeSync(AccountPreferences)(preferencesState),
+    respond: () => wire(AccountPreferences, preferencesState),
   },
   {
     method: "PATCH",
     path: "/api/v1/me/preferences",
     respond: ({ body }) => {
-      const patch = (body ?? {}) as Partial<AccountPreferences>;
+      const decoded = Schema.decodeOption(AccountPreferencesPatch)(body ?? {});
+      if (Option.isNone(decoded)) return invalidBody();
+      const patch = decoded.value;
       preferencesState = {
         ...preferencesState,
-        ...(patch.locale !== undefined ? { locale: patch.locale } : {}),
-        ...(patch.theme !== undefined ? { theme: patch.theme } : {}),
+        locale: patch.locale === undefined ? preferencesState.locale : patch.locale,
+        theme: patch.theme ?? preferencesState.theme,
         revision: preferencesState.revision + 1,
       };
-      return Schema.encodeSync(AccountPreferences)(preferencesState);
+      return wire(AccountPreferences, preferencesState);
     },
   },
   // Better Auth demo endpoints for Account & Security
@@ -791,9 +870,10 @@ export const routes: ReadonlyArray<DemoRoute> = [
     method: "GET",
     path: "/api/auth/passkey/generate-register-options",
     respond: () => ({
+      // biome-ignore lint/security/noSecrets: Public, fixed WebAuthn demo challenge.
       challenge: "ZGVtby1yZWdpc3Rlci1jaGFsbGVuZ2U",
       rp: { name: "Kvitbit", id: "localhost" },
-      user: { id: "ZGVtby11c2VyLWlk", name: "jana@novak.cz", displayName: "Jana Nováková" },
+      user: { id: btoa("demo-user-id"), name: "jana@novak.cz", displayName: "Jana Nováková" },
       pubKeyCredParams: [{ type: "public-key", alg: -7 }],
     }),
   },
@@ -801,13 +881,13 @@ export const routes: ReadonlyArray<DemoRoute> = [
     method: "POST",
     path: "/api/auth/passkey/verify-registration",
     respond: ({ body }) => {
-      const { name = "Passkey", response } = (body ?? {}) as { name?: string; response?: unknown };
-      if (response === undefined)
+      const input = Option.getOrUndefined(Schema.decodeUnknownOption(PasskeyRegistration)(body));
+      if (input?.response === undefined)
         return status(400, { message: "Registration response is required" });
       const created: PasskeyItem = {
         id: `pk-${++seqCounter}`,
-        name,
-        createdAt: new Date().toISOString(),
+        name: input.name ?? "Passkey",
+        createdAt: nowIso(),
         deviceType: "singleDevice",
       };
       passkeysState = [...passkeysState, created];
@@ -818,9 +898,10 @@ export const routes: ReadonlyArray<DemoRoute> = [
     method: "POST",
     path: "/api/auth/passkey/update-passkey",
     respond: ({ body }) => {
-      const { id, name } = (body ?? {}) as { id?: string; name?: string };
-      if (id !== undefined && name !== undefined) {
-        passkeysState = passkeysState.map((p) => (p.id === id ? { ...p, name } : p));
+      const input = Option.getOrUndefined(Schema.decodeUnknownOption(PasskeyUpdate)(body));
+      if (input !== undefined) {
+        const { id, name } = input;
+        passkeysState = Arr.map(passkeysState, (p) => (p.id === id ? { ...p, name } : p));
       }
       return { status: true };
     },
@@ -829,8 +910,8 @@ export const routes: ReadonlyArray<DemoRoute> = [
     method: "POST",
     path: "/api/auth/passkey/delete-passkey",
     respond: ({ body }) => {
-      const id = (body as { id?: string } | null)?.id;
-      if (id !== undefined) passkeysState = passkeysState.filter((p) => p.id !== id);
+      const id = Option.getOrUndefined(Schema.decodeUnknownOption(PasskeyDelete)(body))?.id;
+      if (id !== undefined) passkeysState = Arr.filter(passkeysState, (p) => p.id !== id);
       return { status: true };
     },
   },
@@ -839,9 +920,9 @@ export const routes: ReadonlyArray<DemoRoute> = [
     method: "POST",
     path: "/api/auth/revoke-session",
     respond: ({ body }) => {
-      const { token } = (body ?? {}) as { token?: string };
-      if (typeof token !== "string") return status(400, { message: "Session token is required" });
-      sessionsState = sessionsState.filter((s) => s.token !== token);
+      const token = Option.getOrUndefined(Schema.decodeUnknownOption(SessionRevoke)(body))?.token;
+      if (token === undefined) return status(400, { message: "Session token is required" });
+      sessionsState = Arr.filter(sessionsState, (s) => s.token !== token);
       return { status: true };
     },
   },
@@ -849,7 +930,7 @@ export const routes: ReadonlyArray<DemoRoute> = [
     method: "POST",
     path: "/api/auth/revoke-other-sessions",
     respond: () => {
-      sessionsState = sessionsState.filter((s) => s.id === demoCurrentSessionId);
+      sessionsState = Arr.filter(sessionsState, (s) => s.id === demoCurrentSessionId);
       return { status: true };
     },
   },

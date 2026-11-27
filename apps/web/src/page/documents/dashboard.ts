@@ -5,12 +5,20 @@ import type { Html } from "@effect/ui/html";
  * quick actions, and onboarding checklist (CTAs pinned right per screens.md #08).
  */
 import { DashboardView, type WorkspaceId } from "@kvitbit/domain";
-import { ViewModels } from "@kvitbit/ui-port";
-import { BigDecimal, Schema } from "effect";
+import * as Arr from "effect/Array";
+import * as BigDecimal from "effect/BigDecimal";
+import * as Fn from "effect/Function";
+import * as Schema from "effect/Schema";
+import * as Str from "effect/String";
 import { Failure } from "../../app/api";
 import type { PageCommand } from "../../app/commands";
 import { type Copy, copy, textOf, translator } from "../../app/i18n";
-import type { MessageHandlers, PageContext, PageReturn, RouteOf } from "../../app/page";
+import {
+  type MessageHandlers,
+  type PageContext,
+  type PageReturn,
+  RouteCases,
+} from "../../app/page";
 import * as Remote from "../../app/remote";
 import { href } from "../../app/routing";
 import { barChart } from "../../ui/bars";
@@ -45,7 +53,8 @@ import {
   yearPeriodOf,
 } from "./shared";
 
-export type Route = RouteOf<"Dashboard">;
+export const Route = RouteCases.Dashboard;
+export type Route = typeof Route.Type;
 
 const CopyTable: Copy<
   | "title"
@@ -169,9 +178,9 @@ const CopyTable: Copy<
 const txt = copy(CopyTable);
 
 export const Model = Schema.Struct({
-  route: ViewModels.Route,
+  route: Route,
   dashboard: Remote.remoteSchema(DashboardView),
-  recent: Remote.remoteSchema(Schema.Array(DocumentSummaryData)),
+  recent: DocumentSummaryData.pipe(Schema.Array, Remote.remoteSchema),
   checklistHidden: Schema.Boolean,
 });
 export type Model = typeof Model.Type;
@@ -189,6 +198,7 @@ export type Message = typeof Message.Type;
 const loadDashboardCommand = (workspaceId: WorkspaceId, seq: Remote.Seq): PageCommand<Message> => {
   const period = yearPeriodOf(todayPrague());
   return apiCommand(
+    Message,
     "LoadDashboard",
     (c) =>
       c.reports.dashboard({
@@ -202,13 +212,14 @@ const loadDashboardCommand = (workspaceId: WorkspaceId, seq: Remote.Seq): PageCo
 
 const loadRecentCommand = (workspaceId: WorkspaceId, seq: Remote.Seq): PageCommand<Message> =>
   apiCommand(
+    Message,
     "LoadRecentDocuments",
     (c) => c.documents.list({ params: { workspaceId }, query: { limit: 8 } }),
     (pageData): Message => Message.LoadedRecent({ seq, data: readSummaries(pageData.items) }),
     (failure): Message => Message.FailedRecent({ seq, failure }),
   );
 
-export const init = (route: Route, ctx: PageContext): PageReturn<Model, Message> => {
+const initImpl = (route: Route, ctx: PageContext): PageReturn<Model, Message> => {
   const ws = ctx.workspace;
   if (ws === null) {
     return {
@@ -231,11 +242,12 @@ export const init = (route: Route, ctx: PageContext): PageReturn<Model, Message>
   };
 };
 
-export const update = (
-  model: Model,
-  message: Message,
-  ctx: PageContext,
-): PageReturn<Model, Message> =>
+export const init: {
+  (ctx: PageContext): (route: Route) => PageReturn<Model, Message>;
+  (route: Route, ctx: PageContext): PageReturn<Model, Message>;
+} = Fn.dual(2, initImpl);
+
+const updateImpl = (model: Model, message: Message, ctx: PageContext): PageReturn<Model, Message> =>
   Message.match(message, {
     LoadedDashboard: ({ seq, data }) => ({
       model: { ...model, dashboard: Remote.succeed(model.dashboard, seq, data) },
@@ -267,7 +279,17 @@ export const update = (
     }),
   } satisfies MessageHandlers<Message, PageReturn<Model, Message>>);
 
-export const title = (_model: Model, ctx: PageContext): string => txt(ctx.locale, "title");
+export const update: {
+  (message: Message, ctx: PageContext): (model: Model) => PageReturn<Model, Message>;
+  (model: Model, message: Message, ctx: PageContext): PageReturn<Model, Message>;
+} = Fn.dual(3, updateImpl);
+
+const titleImpl = (_model: Model, ctx: PageContext): string => txt(ctx.locale, "title");
+
+export const title: {
+  (ctx: PageContext): (_model: Model) => string;
+  (_model: Model, ctx: PageContext): string;
+} = Fn.dual(2, titleImpl);
 
 const toNumber = (bd: BigDecimal.BigDecimal): number => {
   const n = Number(BigDecimal.format(bd));
@@ -282,8 +304,8 @@ const renderCashflowSvg = (
   if (points.length === 0) {
     return h.p.class("kb-muted kb-small").children([txt(locale, "cashflowEmpty")]);
   }
-  const groups = points.map((point) => ({
-    label: point.month.slice(5),
+  const groups = Arr.map(points, (point) => ({
+    label: Str.slice(5)(point.month),
     bars: [
       { value: toNumber(point.in.amount), tone: "primary" as const },
       { value: toNumber(point.out.amount), tone: "secondary" as const },
@@ -309,7 +331,7 @@ const renderCashflowSvg = (
     ]);
 };
 
-export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
+const viewImpl = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
   const { locale } = ctx;
   const t = translator(locale);
   const ws = ctx.workspace;
@@ -359,38 +381,37 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
           kpi(h, {
             label: txt(locale, "kpiOverdue"),
             value: fmtMoney(locale, dashData.overdue.total),
-            ...(dashData.overdue.count > 0
-              ? {
-                  note: badge(
+            note:
+              dashData.overdue.count > 0
+                ? badge(
                     h,
                     txt(locale, "kpiOverdueCount", { count: dashData.overdue.count }),
                     "overdue",
-                  ),
-                }
-              : {}),
+                  )
+                : undefined,
           }),
           kpi(h, {
             label: txt(locale, "kpiExpenses"),
             value: fmtMoney(locale, dashData.expenses),
-            ...(dashData.incompleteExpenses > 0
-              ? {
-                  note: badge(
+            note:
+              dashData.incompleteExpenses > 0
+                ? badge(
                     h,
                     txt(locale, "kpiIncomplete", { count: dashData.incompleteExpenses }),
                     "proforma",
-                  ),
-                }
-              : {}),
+                  )
+                : undefined,
           }),
         ]);
 
-  const queueItems = (recentData ?? []).filter(
+  const queueItems = Arr.filter(
+    recentData ?? [],
     (d) =>
       d.status === "issued" &&
       (d.overdue || d.settlement === "unpaid" || d.settlement === "partially_paid"),
   );
 
-  const hasIssuedDoc = (recentData ?? []).some((d) => d.status === "issued");
+  const hasIssuedDoc = Arr.some(recentData ?? [], (d) => d.status === "issued");
 
   const checklistCard = model.checklistHidden
     ? []
@@ -405,56 +426,58 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
             }),
           ]),
           h.ul.class("kb-checklist").children(
-            [
-              {
-                done: true,
-                title: txt(locale, "checkEntity"),
-                sub: txt(locale, "checkEntitySub"),
-                cta: txt(locale, "checkEntityCta"),
-                to: href({ _tag: "Settings", ws: slug, section: "issuingEntity" }),
-              },
-              {
-                done: true,
-                title: txt(locale, "checkBank"),
-                sub: txt(locale, "checkBankSub"),
-                cta: txt(locale, "checkBankCta"),
-                to: href({ _tag: "Settings", ws: slug, section: "bankAccounts" }),
-              },
-              ...(canCreateDraft
-                ? [
-                    {
-                      done: hasIssuedDoc,
-                      title: txt(locale, "checkInvoice"),
-                      sub: txt(locale, "checkInvoiceSub"),
-                      cta: txt(locale, "checkInvoiceCta"),
-                      to: href({ _tag: "DocumentNew", ws: slug, kind: "invoice" }),
-                    },
-                  ]
-                : []),
-              {
-                done: false,
-                title: txt(locale, "checkTemplate"),
-                sub: txt(locale, "checkTemplateSub"),
-                cta: txt(locale, "checkTemplateCta"),
-                to: href({ _tag: "Templates", ws: slug }),
-              },
-            ].map((item) =>
-              h.li
-                .class("kb-checklist__row")
-                .children([
-                  h.span
-                    .class(`kb-checklist__mark${item.done ? " kb-checklist__mark--done" : ""}`)
-                    .children(item.done ? [icon(h, "check", 14)] : []),
-                  h.div
-                    .class("kb-checklist__text")
-                    .children([
-                      h.strong.children([item.title]),
-                      h.span.class("kb-small kb-muted").children([item.sub]),
-                    ]),
-                  h.span
-                    .class("kb-checklist__cta")
-                    .children([linkButton(h, { label: item.cta, href: item.to, small: true })]),
-                ]),
+            Arr.map(
+              [
+                {
+                  done: true,
+                  title: txt(locale, "checkEntity"),
+                  sub: txt(locale, "checkEntitySub"),
+                  cta: txt(locale, "checkEntityCta"),
+                  to: href({ _tag: "Settings", ws: slug, section: "issuingEntity" }),
+                },
+                {
+                  done: true,
+                  title: txt(locale, "checkBank"),
+                  sub: txt(locale, "checkBankSub"),
+                  cta: txt(locale, "checkBankCta"),
+                  to: href({ _tag: "Settings", ws: slug, section: "bankAccounts" }),
+                },
+                ...(canCreateDraft
+                  ? [
+                      {
+                        done: hasIssuedDoc,
+                        title: txt(locale, "checkInvoice"),
+                        sub: txt(locale, "checkInvoiceSub"),
+                        cta: txt(locale, "checkInvoiceCta"),
+                        to: href({ _tag: "DocumentNew", ws: slug, kind: "invoice" }),
+                      },
+                    ]
+                  : []),
+                {
+                  done: false,
+                  title: txt(locale, "checkTemplate"),
+                  sub: txt(locale, "checkTemplateSub"),
+                  cta: txt(locale, "checkTemplateCta"),
+                  to: href({ _tag: "Templates", ws: slug }),
+                },
+              ],
+              (item) =>
+                h.li
+                  .class("kb-checklist__row")
+                  .children([
+                    h.span
+                      .class(`kb-checklist__mark${item.done ? " kb-checklist__mark--done" : ""}`)
+                      .children(item.done ? [icon(h, "check", 14)] : []),
+                    h.div
+                      .class("kb-checklist__text")
+                      .children([
+                        h.strong.children([item.title]),
+                        h.span.class("kb-small kb-muted").children([item.sub]),
+                      ]),
+                    h.span
+                      .class("kb-checklist__cta")
+                      .children([linkButton(h, { label: item.cta, href: item.to, small: true })]),
+                  ]),
             ),
           ),
         ]),
@@ -481,7 +504,7 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
       : queueItems.length === 0
         ? emptyState(h, { title: txt(locale, "queueEmpty") })
         : h.ul.class("kb-queue-list").children(
-            queueItems.slice(0, 5).map((doc) =>
+            Arr.map(queueItems.slice(0, 5), (doc) =>
               h.li
                 .key(doc.id)
                 .class("kb-queue-item")
@@ -537,18 +560,16 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
       : recentData.length === 0
         ? emptyState(h, {
             title: txt(locale, "recentEmpty"),
-            ...(canCreateDraft
-              ? {
-                  action: linkButton(h, {
-                    label: txt(locale, "newInvoice"),
-                    href: href({ _tag: "DocumentNew", ws: slug, kind: "invoice" }),
-                    variant: "primary",
-                  }),
-                }
-              : {}),
+            action: canCreateDraft
+              ? linkButton(h, {
+                  label: txt(locale, "newInvoice"),
+                  href: href({ _tag: "DocumentNew", ws: slug, kind: "invoice" }),
+                  variant: "primary",
+                })
+              : undefined,
           })
         : h.ul.class("kb-queue-list").children(
-            recentData.slice(0, 6).map((doc) =>
+            Arr.map(recentData.slice(0, 6), (doc) =>
               h.li
                 .key(doc.id)
                 .class("kb-queue-item")
@@ -623,3 +644,8 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
       ]),
   ]);
 };
+
+export const view: {
+  (ctx: PageContext, h: Html.H<Message>): (model: Model) => ReturnType<typeof viewImpl>;
+  (model: Model, ctx: PageContext, h: Html.H<Message>): ReturnType<typeof viewImpl>;
+} = Fn.dual(3, viewImpl);

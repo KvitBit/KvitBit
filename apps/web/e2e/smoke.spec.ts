@@ -1,17 +1,39 @@
-import { execFileSync } from "node:child_process";
-import { resolve } from "node:path";
+// @effect-diagnostics-next-line nodeBuiltinImport:off Playwright runs in Node and renders the fixture in Bun.
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { expect, type Page, test } from "@playwright/test";
-import type { RenderedPath } from "../test/support";
+import * as Arr from "effect/Array";
+import * as Effect from "effect/Effect";
+import * as Path from "effect/Path";
+import * as Schema from "effect/Schema";
+import * as Str from "effect/String";
+
+const appTitlePattern = /Kvitbit/;
+const privacyAnchorPattern = /\/legal\/privacy#main$/;
+const rootPathPattern = /\/$/;
+const priceListPathPattern = /\/price-list$/;
+const filteredPriceListPattern = /\/price-list\?text=UX&archived=1$/;
+const retryLabelPattern = /Try again|Retry|Zkusit znovu/i;
+const nonEmptyPattern = /.+/;
+const termsPathPattern = /\/legal\/terms$/;
+const currentInvoiceHeadingPattern = /Current invoice$/;
+const earlierInvoiceHeadingPattern = /Earlier invoice$/;
+const overdueLabelPattern = /^(Overdue|Po splatnosti)$/;
 
 const DEMO_WS = "novak-design";
-const WEB_ROOT = resolve(import.meta.dirname, "..");
-const renderForHydration = (path: string): RenderedPath =>
-  JSON.parse(
-    execFileSync("bun", [resolve(import.meta.dirname, "render.ts"), path], {
-      cwd: WEB_ROOT,
-      encoding: "utf8",
-    }),
+const paths = Effect.runSync(Path.Path.pipe(Effect.provide(Path.layer)));
+const renderFixture = promisify(execFile);
+const hydrationFixture = Schema.fromJsonString(
+  Schema.Struct({ html: Schema.String, hydration: Schema.String }),
+);
+const renderForHydration = async (path: string) => {
+  const { stdout } = await renderFixture(
+    "bun",
+    [paths.resolve(import.meta.dirname, "render.ts"), path],
+    { cwd: paths.resolve(import.meta.dirname, ".."), encoding: "utf8" },
   );
+  return Effect.runSync(Schema.decodeEffect(hydrationFixture)(stdout));
+};
 
 const attachErrorGuards = (page: Page) => {
   const consoleErrors: string[] = [];
@@ -24,15 +46,15 @@ const attachErrorGuards = (page: Page) => {
   });
   return {
     assertClean: () => {
-      expect(consoleErrors, `console errors: ${consoleErrors.join("; ")}`).toEqual([]);
-      expect(pageErrors, `page errors: ${pageErrors.join("; ")}`).toEqual([]);
+      expect(consoleErrors, `console errors: ${Arr.join(consoleErrors, "; ")}`).toEqual([]);
+      expect(pageErrors, `page errors: ${Arr.join(pageErrors, "; ")}`).toEqual([]);
     },
   };
 };
 
 // Guard so `bun test apps/web` (which scans *.spec.ts) does not invoke Playwright's test runner
 // outside Node/Playwright; `bun run --cwd apps/web e2e` executes under Node where `Bun` is absent.
-if (typeof Bun === "undefined") {
+if (!("Bun" in globalThis)) {
   test.describe("web smoke journeys (demo mode)", () => {
     test("navigates public routes with clean rendering and zero errors", async ({ page }) => {
       const errors = attachErrorGuards(page);
@@ -46,12 +68,13 @@ if (typeof Bun === "undefined") {
       ];
 
       for (const path of publicPaths) {
+        // biome-ignore lint/performance/noAwaitInLoops: Each assertion reads the current route in the same tab.
         await page.goto(path, { waitUntil: "domcontentloaded" });
         const root = page.locator(".kb-root");
         await expect(root).toBeVisible();
         await expect(page.locator("#kb-theme-vars")).toBeAttached();
         await expect(page.locator("#main")).toBeVisible();
-        await expect(page).toHaveTitle(/Kvitbit/);
+        await expect(page).toHaveTitle(appTitlePattern);
       }
 
       errors.assertClean();
@@ -73,17 +96,15 @@ if (typeof Bun === "undefined") {
       ];
 
       for (const path of workspacePaths) {
+        // biome-ignore lint/performance/noAwaitInLoops: Each assertion reads the current route in the same tab.
         await page.goto(path, { waitUntil: "domcontentloaded" });
         await expect(page.locator(".kb-root")).toBeVisible();
         await expect(page.locator("#kb-theme-vars")).toBeAttached();
         await expect(page.locator("#main")).toBeVisible();
-        await expect(page).toHaveTitle(/Kvitbit/);
+        await expect(page).toHaveTitle(appTitlePattern);
 
-        if (testInfo.project.name === "desktop") {
-          await expect(page.locator(".kb-sidebar")).toBeVisible();
-        } else {
-          await expect(page.locator(".kb-bottom-nav")).toBeVisible();
-        }
+        const chrome = testInfo.project.name === "desktop" ? ".kb-sidebar" : ".kb-bottom-nav";
+        await expect(page.locator(chrome)).toBeVisible();
       }
 
       errors.assertClean();
@@ -97,20 +118,20 @@ if (typeof Bun === "undefined") {
       const privacy = page.locator('footer a[href^="/legal/privacy"]');
       await privacy.evaluate((link) => {
         link.setAttribute("href", "/legal/privacy#main");
-        document.body.dataset.navigationProbe = "same-document";
+        globalThis.document.body.dataset.navigationProbe = "same-document";
       });
       await privacy.scrollIntoViewIfNeeded();
       const originalScroll = await page.evaluate(() => window.scrollY);
       expect(originalScroll).toBeGreaterThan(0);
       await privacy.click();
 
-      await expect(page).toHaveURL(/\/legal\/privacy#main$/);
+      await expect(page).toHaveURL(privacyAnchorPattern);
       await expect(page.locator("#main")).toBeFocused();
-      await expect(page.locator('body > div[aria-live="assertive"]')).toHaveText(/Kvitbit/);
+      await expect(page.locator('body > div[aria-live="assertive"]')).toHaveText(appTitlePattern);
       await expect(page.locator("body")).toHaveAttribute("data-navigation-probe", "same-document");
 
       await page.goBack();
-      await expect(page).toHaveURL(/\/$/);
+      await expect(page).toHaveURL(rootPathPattern);
       await expect.poll(() => page.evaluate(() => window.scrollY)).toBe(originalScroll);
       errors.assertClean();
     });
@@ -118,7 +139,7 @@ if (typeof Bun === "undefined") {
     test("applies a price-list search without remounting on input", async ({ page }) => {
       const errors = attachErrorGuards(page);
       await page.goto(`/w/${DEMO_WS}/price-list/`);
-      await expect(page).toHaveURL(/\/price-list$/);
+      await expect(page).toHaveURL(priceListPathPattern);
       const input = page.getByRole("searchbox");
       const archived = page.locator("#pricelist-include-archived");
       await archived.check();
@@ -126,10 +147,10 @@ if (typeof Bun === "undefined") {
       await expect(input).toBeFocused();
       await expect(input).toHaveValue("UX");
       await expect(archived).toBeChecked();
-      await expect(page).toHaveURL(/\/price-list$/);
+      await expect(page).toHaveURL(priceListPathPattern);
 
       await input.press("Enter");
-      await expect(page).toHaveURL(/\/price-list\?text=UX&archived=1$/);
+      await expect(page).toHaveURL(filteredPriceListPattern);
       await expect(page.getByRole("cell", { name: "UX & produktový design" })).toBeVisible();
       await expect(archived).toBeChecked();
 
@@ -188,7 +209,7 @@ if (typeof Bun === "undefined") {
         await page.goto(callback);
         await expect(page.getByRole("alert")).toBeVisible();
         await expect(page).toHaveURL(callback);
-        await page.getByRole("button", { name: /Try again|Retry|Zkusit znovu/i }).click();
+        await page.getByRole("button", { name: retryLabelPattern }).click();
         await expect(page).toHaveURL(destination);
         await expect(page.locator("#main h1")).toBeVisible();
         await expect(page.getByRole("alert")).toHaveCount(0);
@@ -211,7 +232,7 @@ if (typeof Bun === "undefined") {
       await expect(root).toHaveAttribute("data-theme", "light");
 
       await modeSelect.selectOption("system");
-      await expect(root).not.toHaveAttribute("data-theme", /.+/);
+      await expect(root).not.toHaveAttribute("data-theme", nonEmptyPattern);
 
       await expect(localeSelect).toBeVisible();
       await localeSelect.selectOption("en");
@@ -248,21 +269,18 @@ if (typeof Bun === "undefined") {
     }) => {
       const errors = attachErrorGuards(page);
       const path = `/w/${DEMO_WS}`;
-      const rendered = renderForHydration(path);
-      const state = JSON.stringify({ flags: rendered.flags, state: rendered.state }).replaceAll(
-        "<",
-        "\\u003c",
-      );
+      const rendered = await renderForHydration(path);
+      const state = Str.replaceAll("<", "\\u003c")(rendered.hydration);
       await page.route(
         (url) => url.pathname === path,
         async (route) => {
           const response = await route.fetch();
-          const html = (await response.text()).replace(
+          const html = Str.replace(
             '<div id="root"></div>',
             `<div id="root">${rendered.html}</div>
            <script type="application/json" id="kb-state">${state}</script>
-           <script>window.kbServerControl = document.querySelector("#kb-locale")</script>`,
-          );
+           <script>window.kbServerControl = globalThis.document.querySelector("#kb-locale")</script>`,
+          )(await response.text());
           await route.fulfill({ response, body: html });
         },
       );
@@ -272,7 +290,9 @@ if (typeof Bun === "undefined") {
       await expect
         .poll(() =>
           page.evaluate(
-            () => Reflect.get(window, "kbServerControl") === document.querySelector("#kb-locale"),
+            () =>
+              Reflect.get(globalThis, "kbServerControl") ===
+              globalThis.document.querySelector("#kb-locale"),
           ),
         )
         .toBe(true);
@@ -281,7 +301,9 @@ if (typeof Bun === "undefined") {
       await expect(page.locator("html")).toHaveAttribute("lang", "en");
       expect(
         await page.evaluate(
-          () => Reflect.get(window, "kbServerControl") === document.querySelector("#kb-locale"),
+          () =>
+            Reflect.get(globalThis, "kbServerControl") ===
+            globalThis.document.querySelector("#kb-locale"),
         ),
       ).toBe(true);
       errors.assertClean();
@@ -291,13 +313,13 @@ if (typeof Bun === "undefined") {
       const token = "demo-unpaid-czk";
       const sharePath = `/i/${token}`;
       await page.addInitScript(
-        ({ token }) => {
-          const transport = window.fetch.bind(window);
+        ({ shareToken }) => {
+          const transport = globalThis.fetch.bind(globalThis);
           let requests = 0;
-          window.fetch = Object.assign(
+          globalThis.fetch = Object.assign(
             async (input: RequestInfo | URL, init?: RequestInit) => {
               const request = input instanceof Request ? input : new Request(input, init);
-              if (new URL(request.url).pathname !== `/api/v1/share/${token}`) {
+              if (new URL(request.url).pathname !== `/api/v1/share/${shareToken}`) {
                 return transport(input, init);
               }
               const current = ++requests;
@@ -305,10 +327,11 @@ if (typeof Bun === "undefined") {
               const response = await transport(new Request(request, { signal: null }));
               const invoice = await response.json();
               if (current === 1) {
+                // @effect-diagnostics-next-line newPromise:off The browser callback is serialized and keeps its local resolver.
                 await new Promise<void>((release) =>
-                  Reflect.set(window, "kbReleaseOldShare", release),
+                  Reflect.set(globalThis, "kbReleaseOldShare", release),
                 );
-                Reflect.set(window, "kbOldShareReturned", true);
+                Reflect.set(globalThis, "kbOldShareReturned", true);
               }
               return Response.json({
                 ...invoice,
@@ -318,36 +341,36 @@ if (typeof Bun === "undefined") {
             { preconnect: () => undefined },
           );
         },
-        { token },
+        { shareToken: token },
       );
       await page.goto("/", { waitUntil: "domcontentloaded" });
       await expect(page.locator(".kb-landing")).toBeVisible();
 
-      await page.evaluate((sharePath) => {
+      await page.evaluate((targetPath) => {
         for (const [href, label] of [
-          [sharePath, "Open the share"],
+          [targetPath, "Open the share"],
           ["/legal/terms", "Open terms"],
         ] as const) {
-          const anchor = document.createElement("a");
+          const anchor = globalThis.document.createElement("a");
           anchor.href = href;
           anchor.textContent = label;
-          document.body.appendChild(anchor);
+          globalThis.document.body.appendChild(anchor);
         }
       }, sharePath);
 
       await page.getByRole("link", { name: "Open the share", exact: true }).click();
-      await page.waitForFunction(
-        () => typeof Reflect.get(window, "kbReleaseOldShare") === "function",
-      );
+      await page.waitForFunction(() => Reflect.has(globalThis, "kbReleaseOldShare"));
       await page.getByRole("link", { name: "Open terms", exact: true }).click();
-      await expect(page).toHaveURL(/\/legal\/terms$/);
+      await expect(page).toHaveURL(termsPathPattern);
       await page.getByRole("link", { name: "Open the share", exact: true }).click();
-      await expect(page.getByRole("heading", { name: /Current invoice$/ })).toBeVisible();
+      await expect(page.getByRole("heading", { name: currentInvoiceHeadingPattern })).toBeVisible();
 
-      await page.evaluate(() => Reflect.get(window, "kbReleaseOldShare")());
-      await page.waitForFunction(() => Reflect.get(window, "kbOldShareReturned") === true);
-      await expect(page.getByRole("heading", { name: /Current invoice$/ })).toBeVisible();
-      await expect(page.getByRole("heading", { name: /Earlier invoice$/ })).toHaveCount(0);
+      await page.evaluate(() => Reflect.get(globalThis, "kbReleaseOldShare")());
+      await page.waitForFunction(() => Reflect.get(globalThis, "kbOldShareReturned") === true);
+      await expect(page.getByRole("heading", { name: currentInvoiceHeadingPattern })).toBeVisible();
+      await expect(page.getByRole("heading", { name: earlierInvoiceHeadingPattern })).toHaveCount(
+        0,
+      );
     });
 
     test("follows the mobile app link as a native document navigation", async ({ page }) => {
@@ -379,10 +402,10 @@ if (typeof Bun === "undefined") {
       page.on("request", (request) => {
         if (request.resourceType() === "document") documentRequests += 1;
       });
-      await page.clock.install({ time: new Date("2026-11-24T23:59:30.000Z") });
+      await page.clock.install({ time: "2026-11-24T23:59:30.000Z" });
       await page.goto("/i/demo-unpaid-czk");
       await expect(page.locator('a[href*="/pdf?"]')).toBeVisible();
-      const overdue = page.locator("#main").getByText(/^(Overdue|Po splatnosti)$/);
+      const overdue = page.locator("#main").getByText(overdueLabelPattern);
       await expect(overdue).toHaveCount(0);
 
       await page.clock.fastForward(31_000);
@@ -394,19 +417,19 @@ if (typeof Bun === "undefined") {
     test("refreshes an open share on visibility change when the midnight timer has not run", async ({
       page,
     }) => {
-      await page.clock.install({ time: new Date("2026-11-24T23:59:30.000Z") });
+      await page.clock.install({ time: "2026-11-24T23:59:30.000Z" });
       await page.goto("/i/demo-unpaid-czk");
       await expect(page.locator('a[href*="/pdf?"]')).toBeVisible();
-      const overdue = page.locator("#main").getByText(/^(Overdue|Po splatnosti)$/);
+      const overdue = page.locator("#main").getByText(overdueLabelPattern);
       let reloaded = false;
       page.on("framenavigated", (frame) => {
         if (frame === page.mainFrame()) reloaded = true;
       });
 
       // Move wall time past midnight without advancing the pending timer.
-      await page.clock.setSystemTime(new Date("2026-11-25T00:00:01.000Z"));
+      await page.clock.setSystemTime("2026-11-25T00:00:01.000Z");
       await expect(overdue).toHaveCount(0);
-      await page.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
+      await page.evaluate(() => globalThis.document.dispatchEvent(new Event("visibilitychange")));
       await expect(overdue).toBeVisible();
       expect(reloaded).toBe(false);
     });

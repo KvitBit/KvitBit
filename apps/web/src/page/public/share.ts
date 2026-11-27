@@ -6,14 +6,24 @@ import type { Html } from "@effect/ui/html";
  * PDF download, paid/overdue/proforma/credit-note/cancelled/revoked states, and scoped
  * Workspace branding theme override when provided.
  */
-import { SharedDocumentView } from "@kvitbit/domain";
-import { Format, I18n, Theme, ViewModels } from "@kvitbit/ui-port";
-import { Result, Schema } from "effect";
+import { SharedDocumentView, ShareToken, ThemeSource } from "@kvitbit/domain";
+import { Format, I18n, Theme } from "@kvitbit/ui-port";
+import * as Arr from "effect/Array";
+import * as Fn from "effect/Function";
+import * as Option from "effect/Option";
+import * as Result from "effect/Result";
+import * as Schema from "effect/Schema";
+import * as Str from "effect/String";
 import { Failure } from "../../app/api";
 import { defineApiCommand } from "../../app/commands";
 import { copy, translator } from "../../app/i18n";
 import { Intent_ } from "../../app/intent";
-import type { MessageHandlers, PageContext, PageReturn, RouteOf } from "../../app/page";
+import {
+  type MessageHandlers,
+  type PageContext,
+  type PageReturn,
+  RouteCases,
+} from "../../app/page";
 import * as Remote from "../../app/remote";
 import { mark } from "../../ui/brand";
 import { attribute, withAttributes } from "../../ui/html";
@@ -43,12 +53,13 @@ import {
   statusTone,
 } from "./_shared";
 
-export type Route = RouteOf<"Share">;
+export const Route = RouteCases.Share;
+export type Route = typeof Route.Type;
 
 const ShareRemote = Remote.remoteSchema(SharedDocumentView);
 
 export const Model = Schema.Struct({
-  route: ViewModels.Route,
+  route: Route,
   token: Schema.String,
   doc: ShareRemote,
   pdfLanguage: Schema.Literals(["cs", "en"]),
@@ -100,22 +111,27 @@ const local = copy({
   },
 });
 
-const FetchShare = defineApiCommand("PublicShareFetch", {
+const FetchShare = defineApiCommand({
+  message: Message,
+  name: "PublicShareFetch",
   args: { token: Schema.String, seq: Remote.Seq },
   execute: ({ token, seq }) =>
     callApi(
-      (client) => client.publicShare.open({ params: { token: token as Route["token"] } }),
+      (client) => client.publicShare.open({ params: { token: ShareToken.make(token) } }),
       (doc) => Message.GotDocument({ seq, token, doc }),
       (failure) => Message.FailedDocument({ seq, token, failure }),
     ),
 });
 
-const CopyShare = defineApiCommand("PublicShareCopy", {
+const CopyShare = defineApiCommand({
+  message: Message,
+  // biome-ignore lint/security/noSecrets: This is a statically declared UI command or message name.
+  name: "PublicShareCopy",
   args: { value: Schema.String },
   execute: ({ value }) => copyToClipboard(value, (ok) => Message.CopiedValue({ ok })),
 });
 
-export const init = (route: Route, ctx: PageContext): PageReturn<Model, Message> => {
+const initImpl = (route: Route, ctx: PageContext): PageReturn<Model, Message> => {
   const doc = Remote.load(Remote.idle);
   const seq = Remote.seqOf(doc);
   return {
@@ -124,11 +140,12 @@ export const init = (route: Route, ctx: PageContext): PageReturn<Model, Message>
   };
 };
 
-export const update = (
-  model: Model,
-  message: Message,
-  ctx: PageContext,
-): PageReturn<Model, Message> =>
+export const init: {
+  (ctx: PageContext): (route: Route) => PageReturn<Model, Message>;
+  (route: Route, ctx: PageContext): PageReturn<Model, Message>;
+} = Fn.dual(2, initImpl);
+
+const updateImpl = (model: Model, message: Message, ctx: PageContext): PageReturn<Model, Message> =>
   Message.match(message, {
     GotDocument: ({ seq, token, doc }) => {
       if (token !== model.token) return { model };
@@ -163,11 +180,16 @@ export const update = (
     }),
     CopiedValue: ({ ok }) => ({
       model,
-      ...(ok ? { outMessage: Intent_.toast(translator(ctx.locale).t("common.toast.copied")) } : {}),
+      outMessage: ok ? Intent_.toast(translator(ctx.locale).t("common.toast.copied")) : undefined,
     }),
   } satisfies MessageHandlers<Message, PageReturn<Model, Message>>);
 
-export const title = (model: Model, ctx: PageContext): string => {
+export const update: {
+  (message: Message, ctx: PageContext): (model: Model) => PageReturn<Model, Message>;
+  (model: Model, message: Message, ctx: PageContext): PageReturn<Model, Message>;
+} = Fn.dual(3, updateImpl);
+
+const titleImpl = (model: Model, ctx: PageContext): string => {
   const doc = Remote.dataOf(model.doc);
   const t = translator(ctx.locale);
   if (doc === undefined) return t.t("share.view.gone.title");
@@ -175,12 +197,20 @@ export const title = (model: Model, ctx: PageContext): string => {
   return t.t("share.view.title", { kind, number: doc.number });
 };
 
+export const title: {
+  (ctx: PageContext): (model: Model) => string;
+  (model: Model, ctx: PageContext): string;
+} = Fn.dual(2, titleImpl);
+
 const shareThemeCache = new Map<string, string>();
+const encodeTheme = Schema.encodeOption(Schema.fromJsonString(ThemeSource));
 
 const SHARE_STYLE = "elegant" as const;
 
 const scopedBrandCss = (doc: SharedDocumentView): string => {
-  const key = doc.branding.theme === null ? "default" : JSON.stringify(doc.branding.theme);
+  const theme = doc.branding.theme;
+  const key = theme === null ? "default" : Option.getOrElse(encodeTheme(theme), () => "invalid");
+
   const hit = shareThemeCache.get(key);
   if (hit !== undefined) return hit;
   const resolved = doc.branding.theme === null ? null : Theme.resolveSource(doc.branding.theme);
@@ -192,9 +222,9 @@ const scopedBrandCss = (doc: SharedDocumentView): string => {
   return css;
 };
 
-const digitsOf = (value: string): string => value.replace(/\D/g, "").slice(0, 10);
+const digitsOf = (value: string): string => Str.slice(0, 10)(Str.replace(/\D/g, "")(value));
 
-export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
+const viewImpl = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
   const t = translator(ctx.locale);
 
   if (model.doc._tag === "Loading" || model.doc._tag === "Idle") {
@@ -247,7 +277,15 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
   const doc = model.doc.data;
   const issuer = parseIssuer(doc.issuer);
   const contact = parseContact(doc.contact);
-  const lines = doc.lines.map((raw, i) => ({ raw, parsed: parseLine(raw), key: `l-${i}` }));
+  const accountNumber = issuer?.bankAccount?.accountNumber ?? "";
+  const iban = issuer?.bankAccount?.iban ?? "";
+  const bic = issuer?.bankAccount?.bic ?? "";
+  const issuerIco = issuer?.ico ?? "";
+  const issuerDic = issuer?.dic ?? "";
+  const registerEntry = issuer?.registerEntry ?? "";
+  const contactIco = contact?.ico ?? "";
+  const contactDic = contact?.dic ?? "";
+  const lines = Arr.map(doc.lines, (raw, i) => ({ raw, parsed: parseLine(raw), key: `l-${i}` }));
   const kindLabel = t.translate(I18n.enumText("documentKind", doc.kind));
   const settlementLabel = t.translate(I18n.enumText("settlement", doc.settlement));
   const statusLabel = t.translate(I18n.enumText("documentStatus", doc.status));
@@ -276,7 +314,7 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
     doc.kind !== "credit_note" &&
     (doc.settlement === "unpaid" || doc.settlement === "partially_paid");
   const vs = digitsOf(doc.number);
-  const pdfHref = `${doc.pdfUrl}${doc.pdfUrl.includes("?") ? "&" : "?"}language=${model.pdfLanguage}`;
+  const pdfHref = `${doc.pdfUrl}${Str.includes("?")(doc.pdfUrl) ? "&" : "?"}language=${model.pdfLanguage}`;
   const brandCss = scopedBrandCss(doc);
 
   return withAttributes(h.div.class(), [
@@ -345,7 +383,7 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
               ? [
                   h.span.class("kb-footnote").children([
                     local(ctx.locale, "updatedOn", {
-                      date: Format.formatDate(ctx.locale, doc.updatedAt.slice(0, 10)),
+                      date: Format.formatDate(ctx.locale, Str.slice(0, 10)(doc.updatedAt)),
                     }),
                   ]),
                 ]
@@ -405,37 +443,25 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
                 h.div.class("kb-stack").children([
                   h.h2.children([t.t("share.view.bankDetails")]),
                   dl(h, [
-                    ...(issuer?.bankAccount?.accountNumber
-                      ? [
-                          [
-                            local(ctx.locale, "account"),
-                            mono(h, issuer.bankAccount.accountNumber),
-                          ] as const,
-                        ]
+                    ...(accountNumber !== ""
+                      ? [[local(ctx.locale, "account"), mono(h, accountNumber)] as const]
                       : []),
-                    ...(issuer?.bankAccount?.iban
-                      ? [
-                          [
-                            t.t("common.field.iban"),
-                            mono(h, Format.formatIban(issuer.bankAccount.iban)),
-                          ] as const,
-                        ]
+                    ...(iban !== ""
+                      ? [[t.t("common.field.iban"), mono(h, Format.formatIban(iban))] as const]
                       : []),
-                    ...(issuer?.bankAccount?.bic
-                      ? [[t.t("common.field.bic"), mono(h, issuer.bankAccount.bic)] as const]
-                      : []),
+                    ...(bic !== "" ? [[t.t("common.field.bic"), mono(h, bic)] as const] : []),
                     ...(vs !== ""
                       ? [[t.t("common.field.variableSymbol"), mono(h, vs)] as const]
                       : []),
                     [t.t("share.view.amountDue"), amount(h, amountDueDisplay.text)],
                   ]),
                   h.div.class("kb-row").children([
-                    ...(issuer?.bankAccount?.iban
+                    ...(iban !== ""
                       ? [
                           button(h, {
                             label: t.t("share.view.copyIban"),
                             onClick: Message.ClickedCopy({
-                              value: issuer.bankAccount.iban,
+                              value: iban,
                             }),
                             small: true,
                           }),
@@ -472,14 +498,14 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
             ...(issuer?.address !== undefined
               ? [h.span.class("kb-small").children([formatAddressLine(issuer.address)])]
               : []),
-            ...(issuer?.ico
-              ? [h.span.class("kb-small kb-muted").children([`IČO: ${issuer.ico}`])]
+            ...(issuerIco !== ""
+              ? [h.span.class("kb-small kb-muted").children([`IČO: ${issuerIco}`])]
               : []),
-            ...(issuer?.dic
-              ? [h.span.class("kb-small kb-muted").children([`DIČ: ${issuer.dic}`])]
+            ...(issuerDic !== ""
+              ? [h.span.class("kb-small kb-muted").children([`DIČ: ${issuerDic}`])]
               : []),
-            ...(issuer?.registerEntry
-              ? [h.span.class("kb-footnote").children([issuer.registerEntry])]
+            ...(registerEntry !== ""
+              ? [h.span.class("kb-footnote").children([registerEntry])]
               : []),
           ]),
         h.div
@@ -491,11 +517,11 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
             ...(contact?.address !== undefined
               ? [h.span.class("kb-small").children([formatAddressLine(contact.address)])]
               : []),
-            ...(contact?.ico
-              ? [h.span.class("kb-small kb-muted").children([`IČO: ${contact.ico}`])]
+            ...(contactIco !== ""
+              ? [h.span.class("kb-small kb-muted").children([`IČO: ${contactIco}`])]
               : []),
-            ...(contact?.dic
-              ? [h.span.class("kb-small kb-muted").children([`DIČ: ${contact.dic}`])]
+            ...(contactDic !== ""
+              ? [h.span.class("kb-small kb-muted").children([`DIČ: ${contactDic}`])]
               : []),
           ]),
       ]),
@@ -599,7 +625,7 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
               .style({ "--kb-gap": "6px" })
               .children([
                 ...(doc.note !== null ? [h.p.class("kb-small").children([doc.note])] : []),
-                ...doc.statutoryNotes.map((n) => h.p.class("kb-footnote").children([n.text])),
+                ...Arr.map(doc.statutoryNotes, (n) => h.p.class("kb-footnote").children([n.text])),
                 ...(doc.branding.footerText !== null
                   ? [h.p.class("kb-footnote").children([doc.branding.footerText])]
                   : []),
@@ -612,3 +638,8 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
       .children([mark(h, 14), h.span.children([t.t("share.view.poweredBy")])]),
   ]);
 };
+
+export const view: {
+  (ctx: PageContext, h: Html.H<Message>): (model: Model) => ReturnType<typeof viewImpl>;
+  (model: Model, ctx: PageContext, h: Html.H<Message>): ReturnType<typeof viewImpl>;
+} = Fn.dual(3, viewImpl);

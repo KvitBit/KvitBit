@@ -1,5 +1,10 @@
+// Vite provides native synchronous filesystem hooks to build-config plugins.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { cpSync, existsSync, readFileSync, statSync } from "node:fs";
+// Use native paths for the Vite host, including Windows.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { extname, join, resolve } from "node:path";
+import * as Str from "effect/String";
 import { defineConfig, type Plugin } from "vite";
 
 const brandRoot = resolve(import.meta.dirname, "../../assets/brand");
@@ -20,8 +25,8 @@ const brandAssets = (): Plugin => ({
   name: "kvitbit-brand-assets",
   configureServer(server) {
     server.middlewares.use("/assets/brand", (req, res, next) => {
-      const file = join(brandRoot, decodeURIComponent((req.url ?? "/").split("?")[0] ?? "/"));
-      if (!file.startsWith(brandRoot) || !existsSync(file) || !statSync(file).isFile()) {
+      const file = join(brandRoot, decodeURIComponent(Str.split(req.url ?? "/", "?")[0] ?? "/"));
+      if (!(Str.startsWith(brandRoot)(file) && existsSync(file) && statSync(file).isFile())) {
         next();
         return;
       }

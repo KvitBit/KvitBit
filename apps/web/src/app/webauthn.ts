@@ -1,202 +1,275 @@
+import * as Arr from "effect/Array";
+import * as Effect from "effect/Effect";
+import * as Fn from "effect/Function";
+import * as Option from "effect/Option";
+import * as EffectRecord from "effect/Record";
+import * as Schema from "effect/Schema";
+import * as Str from "effect/String";
+import { sendAuthRequest } from "./api";
+
 /** Browser ceremonies for the pinned Better Auth passkey endpoints. */
 
+const opt = Schema.optionalKey;
+const verification = Schema.Literals(["discouraged", "preferred", "required"]);
+const isBrowserTransport = Schema.is(Schema.Literals(["ble", "hybrid", "internal", "nfc", "usb"]));
+const descriptor = Schema.Struct({
+  id: Schema.String,
+  type: Schema.Literal("public-key"),
+  transports: Schema.String.pipe(Schema.Array, Schema.mutable, opt),
+});
+const prfValues = Schema.Struct({
+  first: Schema.String,
+  second: opt(Schema.String),
+});
+const ExtensionOptions = Schema.Struct({
+  appid: opt(Schema.String),
+  credProps: opt(Schema.Boolean),
+  largeBlob: opt(
+    Schema.Struct({
+      read: opt(Schema.Boolean),
+      support: opt(Schema.String),
+      write: opt(Schema.String),
+    }),
+  ),
+  prf: opt(
+    Schema.Struct({
+      eval: opt(prfValues),
+      evalByCredential: opt(Schema.Record(Schema.String, prfValues)),
+    }),
+  ),
+});
+const RequestOptions = Schema.Struct({
+  challenge: Schema.String,
+  timeout: opt(Schema.Finite),
+  rpId: opt(Schema.String),
+  userVerification: opt(verification),
+  allowCredentials: descriptor.pipe(Schema.Array, Schema.mutable, opt),
+  extensions: opt(ExtensionOptions),
+  hints: Schema.String.pipe(Schema.Array, Schema.mutable, opt),
+});
+const CreationOptions = Schema.Struct({
+  challenge: Schema.String,
+  timeout: opt(Schema.Finite),
+  user: Schema.Struct({ id: Schema.String, name: Schema.String, displayName: Schema.String }),
+  rp: Schema.Struct({ id: opt(Schema.String), name: Schema.String }),
+  pubKeyCredParams: Schema.Struct({
+    type: Schema.Literal("public-key"),
+    alg: Schema.Int,
+  }).pipe(Schema.Array, Schema.mutable),
+  attestation: opt(Schema.Literals(["direct", "enterprise", "indirect", "none"])),
+  authenticatorSelection: opt(
+    Schema.Struct({
+      authenticatorAttachment: opt(Schema.Literals(["platform", "cross-platform"])),
+      requireResidentKey: opt(Schema.Boolean),
+      residentKey: opt(verification),
+      userVerification: opt(verification),
+    }),
+  ),
+  excludeCredentials: descriptor.pipe(Schema.Array, Schema.mutable, opt),
+  extensions: opt(ExtensionOptions),
+  hints: Schema.String.pipe(Schema.Array, Schema.mutable, opt),
+});
+
+class PasskeyError extends Schema.TaggedError<PasskeyError, { readonly brand: unique symbol }>()(
+  "PasskeyError",
+  {
+    operation: Schema.String,
+  },
+) {}
+
 const decodeBase64Url = (value: string): ArrayBuffer => {
-  const binary = atob(value.replaceAll("-", "+").replaceAll("_", "/"));
-  return Uint8Array.from(binary, (character) => character.charCodeAt(0)).buffer;
+  const binary = globalThis.atob(Str.replaceAll("_", "/")(Str.replaceAll("-", "+")(value)));
+  return Uint8Array.from(binary, (character) =>
+    Option.getOrElse(Str.charCodeAt(character, 0), () => Number.NaN),
+  ).buffer;
 };
 
-const encodeBase64Url = (buffer: ArrayBuffer): string =>
-  btoa(Array.from(new Uint8Array(buffer), (byte) => String.fromCharCode(byte)).join(""))
-    .replaceAll("+", "-")
-    .replaceAll("/", "_")
-    .replace(/=+$/, "");
+const padding = /[=]+$/;
+const encodeBase64Url = (buffer: ArrayBuffer): string => {
+  const bytes = Array.from(new Uint8Array(buffer), (byte) => String.fromCharCode(byte));
+  return Fn.pipe(
+    globalThis.btoa(Arr.join(bytes, "")),
+    Str.replaceAll("+", "-"),
+    Str.replaceAll("/", "_"),
+    Str.replace(padding, ""),
+  );
+};
 
 const decodeDescriptor = ({
   id,
   transports,
-}: PublicKeyCredentialDescriptorJSON): PublicKeyCredentialDescriptor => ({
-  type: "public-key",
-  id: decodeBase64Url(id),
-  ...(transports === undefined ? {} : { transports: transports as Array<AuthenticatorTransport> }),
-});
+}: typeof descriptor.Type): PublicKeyCredentialDescriptor => {
+  const result: PublicKeyCredentialDescriptor = { type: "public-key", id: decodeBase64Url(id) };
+  if (transports !== undefined) result.transports = Arr.filter(transports, isBrowserTransport);
+  return result;
+};
 
-const decodePrfValues = ({ first, second }: AuthenticationExtensionsPRFValuesJSON) => ({
-  first: decodeBase64Url(first),
-  ...(second === undefined ? {} : { second: decodeBase64Url(second) }),
-});
+const decodePrfValues = ({ first, second }: typeof prfValues.Type) => {
+  const values: AuthenticationExtensionsPRFValues = { first: decodeBase64Url(first) };
+  if (second !== undefined) values.second = decodeBase64Url(second);
+  return values;
+};
 
 const decodeExtensions = ({
   largeBlob,
   prf,
   ...rest
-}: AuthenticationExtensionsClientInputsJSON): AuthenticationExtensionsClientInputs => ({
-  ...rest,
-  ...(largeBlob === undefined
-    ? {}
-    : {
-        largeBlob: {
-          ...(largeBlob.read === undefined ? {} : { read: largeBlob.read }),
-          ...(largeBlob.support === undefined ? {} : { support: largeBlob.support }),
-          ...(largeBlob.write === undefined ? {} : { write: decodeBase64Url(largeBlob.write) }),
-        },
-      }),
-  ...(prf === undefined
-    ? {}
-    : {
-        prf: {
-          ...(prf.eval === undefined ? {} : { eval: decodePrfValues(prf.eval) }),
-          ...(prf.evalByCredential === undefined
-            ? {}
-            : {
-                evalByCredential: Object.fromEntries(
-                  Object.entries(prf.evalByCredential).map(([id, values]) => [
-                    id,
-                    decodePrfValues(values),
-                  ]),
-                ),
-              }),
-        },
-      }),
-});
-
-const requestOptions = (options: PublicKeyCredentialRequestOptionsJSON) => {
-  if (typeof PublicKeyCredential.parseRequestOptionsFromJSON === "function") {
-    return PublicKeyCredential.parseRequestOptionsFromJSON(options);
+}: typeof ExtensionOptions.Type): AuthenticationExtensionsClientInputs => {
+  const decoded: AuthenticationExtensionsClientInputs = rest;
+  if (largeBlob !== undefined) {
+    const { write, ...other } = largeBlob;
+    decoded.largeBlob = other;
+    if (write !== undefined) decoded.largeBlob.write = decodeBase64Url(write);
   }
-  const { challenge, allowCredentials, extensions, userVerification, ...rest } = options;
-  return {
-    ...rest,
-    challenge: decodeBase64Url(challenge),
-    ...(extensions === undefined ? {} : { extensions: decodeExtensions(extensions) }),
-    ...(userVerification === undefined
-      ? {}
-      : { userVerification: userVerification as UserVerificationRequirement }),
-    ...(allowCredentials === undefined
-      ? {}
-      : { allowCredentials: allowCredentials.map(decodeDescriptor) }),
-  } as PublicKeyCredentialRequestOptions;
+  if (prf !== undefined) {
+    decoded.prf = {};
+    if (prf.eval !== undefined) decoded.prf.eval = decodePrfValues(prf.eval);
+    if (prf.evalByCredential !== undefined) {
+      decoded.prf.evalByCredential = EffectRecord.map(prf.evalByCredential, decodePrfValues);
+    }
+  }
+  return decoded;
 };
 
-const creationOptions = (options: PublicKeyCredentialCreationOptionsJSON) => {
-  if (typeof PublicKeyCredential.parseCreationOptionsFromJSON === "function") {
+const toRequestOptions = (
+  options: typeof RequestOptions.Type,
+): PublicKeyCredentialRequestOptions => {
+  if (PublicKeyCredential.parseRequestOptionsFromJSON !== undefined) {
+    return PublicKeyCredential.parseRequestOptionsFromJSON(options);
+  }
+  const { challenge, allowCredentials, extensions, ...rest } = options;
+  const decoded: PublicKeyCredentialRequestOptions = {
+    ...rest,
+    challenge: decodeBase64Url(challenge),
+  };
+  if (extensions !== undefined) decoded.extensions = decodeExtensions(extensions);
+  if (allowCredentials !== undefined)
+    decoded.allowCredentials = Arr.map(allowCredentials, decodeDescriptor);
+  return decoded;
+};
+
+const toCreationOptions = (
+  options: typeof CreationOptions.Type,
+): PublicKeyCredentialCreationOptions => {
+  if (PublicKeyCredential.parseCreationOptionsFromJSON !== undefined) {
     return PublicKeyCredential.parseCreationOptionsFromJSON(options);
   }
-  const { challenge, user, excludeCredentials, extensions, pubKeyCredParams, ...rest } = options;
-  return {
+  const { challenge, user, excludeCredentials, extensions, ...rest } = options;
+  const decoded: PublicKeyCredentialCreationOptions = {
     ...rest,
     challenge: decodeBase64Url(challenge),
     user: { ...user, id: decodeBase64Url(user.id) },
-    pubKeyCredParams: pubKeyCredParams.map(({ alg }) => ({ alg, type: "public-key" as const })),
-    ...(extensions === undefined ? {} : { extensions: decodeExtensions(extensions) }),
-    ...(excludeCredentials === undefined
-      ? {}
-      : { excludeCredentials: excludeCredentials.map(decodeDescriptor) }),
-  } as PublicKeyCredentialCreationOptions;
+  };
+  if (extensions !== undefined) decoded.extensions = decodeExtensions(extensions);
+  if (excludeCredentials !== undefined)
+    decoded.excludeCredentials = Arr.map(excludeCredentials, decodeDescriptor);
+  return decoded;
 };
+
+const encodeCredential = Schema.decodeUnknownEffect(Schema.JsonObject);
 
 const credentialJson = (
   credential: PublicKeyCredential,
-  encodeResponse: () => Record<string, unknown>,
-): Record<string, unknown> => {
-  if (typeof credential.toJSON === "function") {
+  encodeResponse: () => Schema.JsonObject,
+) => {
+  if (credential.toJSON !== undefined) {
     const { clientExtensionResults: _extensions, ...response } = credential.toJSON();
-    return response;
+    return encodeCredential(response);
   }
-  return {
+  const result = {
     id: credential.id,
     rawId: encodeBase64Url(credential.rawId),
     response: encodeResponse(),
     type: credential.type,
-    ...(credential.authenticatorAttachment === null
-      ? {}
-      : { authenticatorAttachment: credential.authenticatorAttachment }),
   };
+  return Effect.succeed(
+    credential.authenticatorAttachment === null
+      ? result
+      : { ...result, authenticatorAttachment: credential.authenticatorAttachment },
+  );
 };
 
-const authRequest = async (
-  baseOrigin: string,
-  path: string,
-  signal: AbortSignal | undefined,
-  body?: object,
-): Promise<unknown> => {
-  const res = await fetch(`${baseOrigin}/api/auth/passkey/${path}`, {
-    credentials: "same-origin",
-    ...(signal === undefined ? {} : { signal }),
-    ...(body === undefined
-      ? { method: "GET", headers: { accept: "application/json" } }
-      : {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify(body),
-        }),
-  });
-  const json: unknown = res.headers.get("content-type")?.includes("json") ? await res.json() : null;
-  if (!res.ok)
-    throw Object.assign(new Error(`passkey ${res.status}`), { status: res.status, json });
-  return json;
-};
+const decodeRequest = Schema.decodeUnknownEffect(RequestOptions);
+const decodeCreation = Schema.decodeUnknownEffect(CreationOptions);
 
-type PasskeyResult =
-  | { readonly supported: false }
-  | { readonly supported: true; readonly json: unknown };
-
-export const performPasskeyAuthentication = async (
-  baseOrigin: string,
-  signal?: AbortSignal,
-): Promise<PasskeyResult> => {
+export const performPasskeyAuthentication = Effect.gen(function* () {
   if (
-    typeof PublicKeyCredential === "undefined" ||
-    typeof navigator.credentials?.get !== "function"
+    globalThis.PublicKeyCredential === undefined ||
+    globalThis.navigator?.credentials === undefined
   ) {
-    return { supported: false };
+    return { supported: false } as const;
   }
-  const options = await authRequest(baseOrigin, "generate-authenticate-options", signal);
-  const credential = await navigator.credentials.get({
-    publicKey: requestOptions(options as PublicKeyCredentialRequestOptionsJSON),
-    ...(signal === undefined ? {} : { signal }),
+  const options = yield* sendAuthRequest({ path: "/passkey/generate-authenticate-options" }).pipe(
+    Effect.flatMap(decodeRequest),
+  );
+  const credential = yield* Effect.tryPromise({
+    try: (signal) => navigator.credentials.get({ publicKey: toRequestOptions(options), signal }),
+    catch: () => PasskeyError.make({ operation: "authenticate" }),
   });
-  if (!(credential instanceof PublicKeyCredential))
-    throw new Error("No passkey assertion returned");
-  const assertion = credential.response as AuthenticatorAssertionResponse;
-  const response = credentialJson(credential, () => ({
-    authenticatorData: encodeBase64Url(assertion.authenticatorData),
-    clientDataJSON: encodeBase64Url(assertion.clientDataJSON),
-    signature: encodeBase64Url(assertion.signature),
-    ...(assertion.userHandle === null ? {} : { userHandle: encodeBase64Url(assertion.userHandle) }),
-  }));
-  const json = await authRequest(baseOrigin, "verify-authentication", signal, { response });
-  return { supported: true, json };
-};
+  if (
+    !(
+      credential instanceof PublicKeyCredential &&
+      credential.response instanceof AuthenticatorAssertionResponse
+    )
+  ) {
+    return yield* PasskeyError.make({ operation: "read assertion" });
+  }
+  const assertion = credential.response;
+  const response = yield* credentialJson(credential, () => {
+    const result = {
+      authenticatorData: encodeBase64Url(assertion.authenticatorData),
+      clientDataJSON: encodeBase64Url(assertion.clientDataJSON),
+      signature: encodeBase64Url(assertion.signature),
+    };
+    return assertion.userHandle === null
+      ? result
+      : { ...result, userHandle: encodeBase64Url(assertion.userHandle) };
+  });
+  yield* sendAuthRequest({
+    path: "/passkey/verify-authentication",
+    method: "POST",
+    body: { response },
+  });
+  return { supported: true } as const;
+});
 
-export const performPasskeyRegistration = async (
-  baseOrigin: string,
+export const performPasskeyRegistration = Effect.fn("performPasskeyRegistration")(function* (
   name: string,
-  signal?: AbortSignal,
-): Promise<PasskeyResult> => {
+) {
   if (
-    typeof PublicKeyCredential === "undefined" ||
-    typeof navigator.credentials?.create !== "function"
+    globalThis.PublicKeyCredential === undefined ||
+    globalThis.navigator?.credentials === undefined
   ) {
-    return { supported: false };
+    return { supported: false } as const;
   }
-  const trimmedName = name.trim();
+  const trimmedName = Str.trim(name);
   const query = trimmedName === "" ? "" : `?${new URLSearchParams({ name: trimmedName })}`;
-  const options = await authRequest(baseOrigin, `generate-register-options${query}`, signal);
-  const credential = await navigator.credentials.create({
-    publicKey: creationOptions(options as PublicKeyCredentialCreationOptionsJSON),
-    ...(signal === undefined ? {} : { signal }),
+  const options = yield* sendAuthRequest({
+    path: `/passkey/generate-register-options${query}`,
+  }).pipe(Effect.flatMap(decodeCreation));
+  const credential = yield* Effect.tryPromise({
+    try: (signal) =>
+      navigator.credentials.create({ publicKey: toCreationOptions(options), signal }),
+    catch: () => PasskeyError.make({ operation: "register" }),
   });
-  if (!(credential instanceof PublicKeyCredential))
-    throw new Error("No passkey attestation returned");
-  const attestation = credential.response as AuthenticatorAttestationResponse;
-  const response = credentialJson(credential, () => ({
-    attestationObject: encodeBase64Url(attestation.attestationObject),
-    clientDataJSON: encodeBase64Url(attestation.clientDataJSON),
-    transports: attestation.getTransports?.(),
-  }));
-  const json = await authRequest(baseOrigin, "verify-registration", signal, {
-    response,
-    ...(trimmedName === "" ? {} : { name: trimmedName }),
+  if (
+    !(
+      credential instanceof PublicKeyCredential &&
+      credential.response instanceof AuthenticatorAttestationResponse
+    )
+  ) {
+    return yield* PasskeyError.make({ operation: "read attestation" });
+  }
+  const attestation = credential.response;
+  const response = yield* credentialJson(credential, () => {
+    const result = {
+      attestationObject: encodeBase64Url(attestation.attestationObject),
+      clientDataJSON: encodeBase64Url(attestation.clientDataJSON),
+    };
+    const transports = attestation.getTransports?.();
+    return transports === undefined ? result : { ...result, transports };
   });
-  return { supported: true, json };
-};
+  const body = trimmedName === "" ? { response } : { response, name: trimmedName };
+  yield* sendAuthRequest({ path: "/passkey/verify-registration", method: "POST", body });
+  return { supported: true } as const;
+});

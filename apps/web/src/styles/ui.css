@@ -142,6 +142,7 @@
 }
 .kb-textarea {
   min-height: 80px;
+  /* biome-ignore lint/suspicious/useBaseline: browsers without resize use the native textarea. */
   resize: vertical;
 }
 .kb-check {
@@ -151,6 +152,7 @@
   cursor: pointer;
 }
 .kb-check input {
+  /* biome-ignore lint/suspicious/useBaseline: native control styling remains available without accent-color. */
   accent-color: var(--md-sys-color-primary);
   width: 16px;
   height: 16px;
@@ -353,6 +355,7 @@
     transparent 59%
   );
   background-size: 100vw 100%;
+  /* biome-ignore lint/suspicious/useBaseline: the background remains visible where fixed attachment is unavailable. */
   background-attachment: fixed;
   animation: kb-shimmer 1.15s linear infinite;
 }

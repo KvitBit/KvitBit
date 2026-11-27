@@ -327,6 +327,7 @@
 .kb-scope-matrix input[type="checkbox"] {
   width: 16px;
   height: 16px;
+  /* biome-ignore lint/suspicious/useBaseline: native control styling remains available without accent-color. */
   accent-color: var(--md-sys-color-primary);
 }
 
@@ -344,6 +345,7 @@
   font-family: var(--kb-font-mono);
   font-size: 0.8125rem;
   word-break: break-all;
+  /* biome-ignore lint/suspicious/useBaseline: the action and its keyboard behavior work without text selection styling. */
   user-select: all;
 }
 

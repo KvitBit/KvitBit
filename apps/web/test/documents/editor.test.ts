@@ -1,9 +1,15 @@
 import { describe, expect, test } from "bun:test";
 import { Html, HtmlServer } from "@effect/ui/html";
-import { type DocumentView, LineView, StatutoryNote } from "@kvitbit/domain";
+import { CurrencyCode, type DocumentView, IsoDate, LineView, StatutoryNote } from "@kvitbit/domain";
 import { ViewModels } from "@kvitbit/ui-port";
-import { BigDecimal, Effect, Fiber, Result, Schema } from "effect";
-import { TestClock } from "effect/testing";
+import * as Arr from "effect/Array";
+import * as BigDecimal from "effect/BigDecimal";
+import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
+import * as Result from "effect/Result";
+import * as Schema from "effect/Schema";
+import * as TestClock from "effect/testing/TestClock";
+
 import { RunApi } from "../../src/app/commands";
 import * as Editor from "../../src/page/documents/editor";
 import { ContactOptionData } from "../../src/page/documents/shared";
@@ -17,21 +23,26 @@ import {
   sessionWithRole,
 } from "./fixtures";
 
-const sampleContact = Schema.decodeUnknownSync(ContactOptionData)({
-  id: "0193a000-0000-7000-8000-000000000201",
-  roles: ["customer"],
-  name: "Alza.cz a.s.",
-  ico: "27082440",
-  dic: "CZ27082440",
-  legalForm: "a.s.",
-  address: { street: "Jankovcova 53", city: "Praha 7", postalCode: "170 00", country: "CZ" },
-  billingEmails: ["fakturace@alza.example.cz"],
-  phone: null,
-  note: null,
-  defaults: { dueDays: 21, currency: "EUR", language: "en", paymentMethod: "bank_transfer" },
-  archived: false,
-  revision: 1,
-});
+const requestKeyPattern = /^[0-9a-f-]{36}$/;
+const disabledIssueButtonPattern = /<button[^>]*disabled[^>]*>Issue document<\/button>/;
+
+const sampleContact = Effect.runSync(
+  Schema.decodeEffect(ContactOptionData)({
+    id: "0193a000-0000-7000-8000-000000000201",
+    roles: ["customer"],
+    name: "Alza.cz a.s.",
+    ico: "27082440",
+    dic: "CZ27082440",
+    legalForm: "a.s.",
+    address: { street: "Jankovcova 53", city: "Praha 7", postalCode: "170 00", country: "CZ" },
+    billingEmails: ["fakturace@alza.example.cz"],
+    phone: null,
+    note: null,
+    defaults: { dueDays: 21, currency: "EUR", language: "en", paymentMethod: "bank_transfer" },
+    archived: false,
+    revision: 1,
+  }),
+);
 
 const newInvoiceRoute: Editor.Route = { _tag: "DocumentNew", ws: WS, kind: "invoice" };
 const editRoute: Editor.Route = { _tag: "DocumentEdit", ws: WS, id: DOC_ID };
@@ -41,18 +52,20 @@ const draft: DocumentView = {
   number: null,
   status: "draft",
   lines: [
-    Schema.decodeUnknownSync(LineView)({
-      id: "0193a000-0000-7000-8000-000000000651",
-      item: null,
-      description: "Saved line",
-      quantity: "1",
-      unit: "ks",
-      unitPrice: "12000",
-      treatment: "standard",
-      ratePercent: "21",
-      amount: "12000",
-      deducts: null,
-    }),
+    Effect.runSync(
+      Schema.decodeEffect(LineView)({
+        id: "0193a000-0000-7000-8000-000000000651",
+        item: null,
+        description: "Saved line",
+        quantity: "1",
+        unit: "ks",
+        unitPrice: "12000",
+        treatment: "standard",
+        ratePercent: "21",
+        amount: "12000",
+        deducts: null,
+      }),
+    ),
   ],
 };
 
@@ -61,8 +74,8 @@ const preparedEditor = (
   ctx = ctxFor(doc === null ? newInvoiceRoute : editRoute),
 ) => {
   const route = doc === null ? newInvoiceRoute : editRoute;
-  const update = (model: Editor.Model, message: Editor.Message) =>
-    Editor.update(model, message, ctx);
+  const update = (current: Editor.Model, message: Editor.Message) =>
+    Editor.update(current, message, ctx);
   const initial = Editor.init(route, ctx).model;
   const loaded = update(
     initial,
@@ -83,11 +96,11 @@ const preparedEditor = (
     doc === null
       ? update(loaded.model, Editor.Message.SelectedContact({ contactId: sampleContact.id })).model
       : loaded.model;
-  const describeLine = (model: Editor.Model, value: string) =>
+  const describeLine = (current: Editor.Model, value: string) =>
     update(
-      model,
+      current,
       Editor.Message.UpdatedLineField({
-        key: model.lines[0]?.key ?? "l1",
+        key: current.lines[0]?.key ?? "l1",
         field: "description",
         value,
       }),
@@ -103,7 +116,7 @@ const renderEditor = (model: Editor.Model, ctx: ReturnType<typeof ctxFor>) => {
   }).make({
     init: () => model,
     update: ($) => $.model,
-    view: (h, model) => Editor.view(model, ctx, h),
+    view: (h, current) => Editor.view(current, ctx, h),
   });
   return Effect.runPromise(HtmlServer.renderToHtml(component, {}));
 };
@@ -213,8 +226,8 @@ describe("DocumentEditor page (Screen 10)", () => {
           treatment: "standard",
         },
       ],
-      currency: "EUR" as never,
-      taxPoint: "2026-11-24" as never,
+      currency: CurrencyCode.make("EUR"),
+      taxPoint: IsoDate.make("2026-11-24"),
       pricesIncludeVat: false,
       fx: { rate: BigDecimal.fromBigInt(25n), quantity: 1 },
       paymentRounding: "none",
@@ -223,15 +236,13 @@ describe("DocumentEditor page (Screen 10)", () => {
       kind: "invoice",
     });
     expect(Result.isSuccess(calc)).toBe(true);
-    if (Result.isSuccess(calc)) {
-      expect(BigDecimal.format(calc.success.breakdown.net.amount)).toBe("2000");
-      expect(BigDecimal.format(calc.success.breakdown.vat.amount)).toBe("420");
-      expect(BigDecimal.format(calc.success.breakdown.gross.amount)).toBe("2420");
-      expect(calc.success.breakdown.vatCzk).not.toBeNull();
-      if (calc.success.breakdown.vatCzk !== null) {
-        expect(BigDecimal.format(calc.success.breakdown.vatCzk.amount)).toBe("10500");
-      }
-    }
+    if (Result.isFailure(calc)) throw new Error("Expected invoice totals");
+    expect(calc.success.breakdown.net.amount.pipe(BigDecimal.format)).toBe("2000");
+    expect(calc.success.breakdown.vat.amount.pipe(BigDecimal.format)).toBe("420");
+    expect(calc.success.breakdown.gross.amount.pipe(BigDecimal.format)).toBe("2420");
+    expect(calc.success.breakdown.vatCzk).not.toBeNull();
+    if (calc.success.breakdown.vatCzk === null) throw new Error("Expected VAT in CZK");
+    expect(calc.success.breakdown.vatCzk.amount.pipe(BigDecimal.format)).toBe("10500");
   });
 
   test("issues edited draft content at the revision returned by PATCH and replays only issue after a lost reply", async () => {
@@ -270,7 +281,7 @@ describe("DocumentEditor page (Screen 10)", () => {
     const retry = update(failed.model, Editor.Message.ClickedIssue());
     const done = update(retry.model, await runCommand(retry.commands, fetch));
 
-    expect(requests.map(({ method, revision }) => [method, revision])).toEqual([
+    expect(Arr.map(requests, ({ method, revision }) => [method, revision])).toEqual([
       ["PATCH", '"3"'],
       ["POST", '"11"'],
       ["POST", '"11"'],
@@ -287,7 +298,7 @@ describe("DocumentEditor page (Screen 10)", () => {
       ],
     });
     expect(requests[1]?.path).toEndWith(`/${DOC_ID}/issue`);
-    expect(requests[1]?.key).toMatch(/^[0-9a-f-]{36}$/);
+    expect(requests[1]?.key).toMatch(requestKeyPattern);
     expect(requests[2]).toEqual(requests[1]);
     expect(done.model.savedDoc?.status).toBe("issued");
     expect(done.outMessage?._tag).toBe("Navigate");
@@ -321,7 +332,7 @@ describe("DocumentEditor page (Screen 10)", () => {
     expect(update(cleared.model, Editor.Message.ClickedIssue()).commands).toBeUndefined();
     const rendered = await renderEditor(cleared.model, ctx);
     expect(rendered.html).toContain("777");
-    expect(rendered.html).toMatch(/<button[^>]*disabled[^>]*>Issue document<\/button>/);
+    expect(rendered.html).toMatch(disabledIssueButtonPattern);
 
     const replaced = update(cleared.model, Editor.Message.ChangedVariableSymbol({ value: "888" }));
     const savingForIssue = update(replaced.model, Editor.Message.ClickedIssue());
@@ -354,7 +365,7 @@ describe("DocumentEditor page (Screen 10)", () => {
     const retry = update(failed.model, Editor.Message.ClickedIssue());
     const done = update(retry.model, await runCommand(retry.commands, fetch));
     expect(requests[0]?.path).toEndWith("/documents/issue");
-    expect(requests[0]?.key).toMatch(/^[0-9a-f-]{36}$/);
+    expect(requests[0]?.key).toMatch(requestKeyPattern);
     expect(requests[0]?.body).toMatchObject({
       input: { lines: [{ description: "New invoice line" }] },
     });
@@ -381,7 +392,7 @@ describe("DocumentEditor page (Screen 10)", () => {
         expect(saveFiber.pollUnsafe()).toBeUndefined();
         yield* TestClock.adjust(1);
         return [preview, yield* Fiber.join(saveFiber)] as const;
-      }).pipe(Effect.provide(TestClock.layer()), Effect.provide(RunApi.layer)),
+      }).pipe(Effect.provide([TestClock.layer(), RunApi.layer])),
     );
     expect(
       update(edited.model, Editor.Message.DebouncedPreview({ seq: first.model.previewSeq }))
@@ -395,7 +406,9 @@ describe("DocumentEditor page (Screen 10)", () => {
     const canonical = {
       ...draft,
       statutoryNotes: [
-        Schema.decodeUnknownSync(StatutoryNote)({ code: "test", text: "Authoritative tax note" }),
+        Effect.runSync(
+          Schema.decodeEffect(StatutoryNote)({ code: "test", text: "Authoritative tax note" }),
+        ),
       ],
       paymentQr: { format: "spayd" as const, payload: "SPD*1.0*AM:14520*CC:CZK" },
     };
@@ -449,7 +462,7 @@ describe("DocumentEditor page (Screen 10)", () => {
     const patch = update(retry.model, await runCommand(retry.commands, fetch));
     const saved = update(patch.model, await runCommand(patch.commands, fetch));
 
-    expect(requests[0]?.key).toMatch(/^[0-9a-f-]{36}$/);
+    expect(requests[0]?.key).toMatch(requestKeyPattern);
     expect(requests[0]?.body).toMatchObject({ lines: [{ description: "First version" }] });
     expect(requests[1]).toEqual(requests[0]);
     expect(requests[2]).toMatchObject({

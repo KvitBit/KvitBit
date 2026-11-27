@@ -1,11 +1,17 @@
-import { resolve } from "node:path";
 import { defineConfig, devices } from "@playwright/test";
+import * as Config from "effect/Config";
+import * as Effect from "effect/Effect";
+import * as Path from "effect/Path";
 
-const PORT = Number(process.env.KVITBIT_WEB_E2E_PORT ?? 4173);
-const BASE_URL = `http://127.0.0.1:${PORT}`;
-const WEB_ROOT = resolve(import.meta.dirname, "..");
+const port = Effect.runSync(Config.Int("KVITBIT_WEB_E2E_PORT").pipe(Config.withDefault(4173)));
+const BASE_URL = `http://127.0.0.1:${port}`;
+const paths = Effect.runSync(Path.Path.pipe(Effect.provide(Path.layer)));
+const WEB_ROOT = paths.resolve(import.meta.dirname, "..");
 
-const CHROMIUM_EXECUTABLE = process.env.KVITBIT_CHROMIUM_PATH;
+const chromiumExecutable = Effect.runSync(
+  Config.String("KVITBIT_CHROMIUM_PATH").pipe(Config.withDefault("")),
+);
+const ci = Effect.runSync(Config.String("CI").pipe(Config.withDefault(""))) !== "";
 
 /**
  * Nightly Playwright E2E configuration for @kvitbit/web (ADR-0005 Tier 2).
@@ -15,13 +21,13 @@ export default defineConfig({
   testDir: ".",
   testMatch: "**/*.spec.ts",
   workers: 1,
-  forbidOnly: Boolean(process.env.CI),
-  retries: process.env.CI ? 2 : 0,
-  reporter: process.env.CI ? [["github"], ["list"]] : "list",
+  forbidOnly: ci,
+  retries: ci ? 2 : 0,
+  reporter: ci ? [["github"], ["list"]] : "list",
   use: {
     baseURL: BASE_URL,
     trace: "on-first-retry",
-    ...(CHROMIUM_EXECUTABLE ? { launchOptions: { executablePath: CHROMIUM_EXECUTABLE } } : {}),
+    launchOptions: chromiumExecutable === "" ? {} : { executablePath: chromiumExecutable },
   },
   projects: [
     {
@@ -43,7 +49,6 @@ export default defineConfig({
     command: "bun run build && bun e2e/server.ts",
     cwd: WEB_ROOT,
     env: {
-      ...process.env,
       VITE_KVITBIT_DEMO: "0",
     },
     url: BASE_URL,

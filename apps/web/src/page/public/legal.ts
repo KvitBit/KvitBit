@@ -4,17 +4,19 @@ import type { Html } from "@effect/ui/html";
  * Screen 01 — Legal pages (Terms of Service & Privacy Policy).
  * Route kind `terms | privacy`, full bilingual cs/en copy.
  */
-import { ViewModels } from "@kvitbit/ui-port";
-import { Schema } from "effect";
+import * as Arr from "effect/Array";
+import * as Fn from "effect/Function";
+import * as Schema from "effect/Schema";
 import { copy, translator } from "../../app/i18n";
-import type { PageContext, PageReturn, RouteOf } from "../../app/page";
+import { type PageContext, type PageReturn, RouteCases } from "../../app/page";
 import { href } from "../../app/routing";
 import { card, linkButton, pageHeader, tabs } from "../../ui/kit";
 
-export type Route = RouteOf<"Legal">;
+export const Route = RouteCases.Legal;
+export type Route = typeof Route.Type;
 
 export const Model = Schema.Struct({
-  route: ViewModels.Route,
+  route: Route,
   kind: Schema.Literals(["terms", "privacy"]),
 });
 export type Model = typeof Model.Type;
@@ -79,22 +81,37 @@ const local = copy({
   },
 });
 
-export const init = (route: Route, _ctx: PageContext): PageReturn<Model, Message> => ({
+const initImpl = (route: Route, _ctx: PageContext): PageReturn<Model, Message> => ({
   model: { route, kind: route.page },
 });
 
-export const update = (
+export const init: {
+  (_ctx: PageContext): (route: Route) => PageReturn<Model, Message>;
+  (route: Route, _ctx: PageContext): PageReturn<Model, Message>;
+} = Fn.dual(2, initImpl);
+
+const updateImpl = (
   model: Model,
   _message: Message,
   _ctx: PageContext,
 ): PageReturn<Model, Message> => ({ model });
 
-export const title = (model: Model, ctx: PageContext): string => {
+export const update: {
+  (_message: Message, _ctx: PageContext): (model: Model) => PageReturn<Model, Message>;
+  (model: Model, _message: Message, _ctx: PageContext): PageReturn<Model, Message>;
+} = Fn.dual(3, updateImpl);
+
+const titleImpl = (model: Model, ctx: PageContext): string => {
   const t = translator(ctx.locale);
   return model.kind === "terms" ? t.t("public.legal.terms") : t.t("public.legal.privacy");
 };
 
-export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
+export const title: {
+  (ctx: PageContext): (model: Model) => string;
+  (model: Model, ctx: PageContext): string;
+} = Fn.dual(2, titleImpl);
+
+const viewImpl = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
   const t = translator(ctx.locale);
   const heading = model.kind === "terms" ? t.t("public.legal.terms") : t.t("public.legal.privacy");
   const sections =
@@ -162,7 +179,7 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
         .class("kb-legal__article")
         .children([
           h.p.children([local(ctx.locale, model.kind === "terms" ? "termsIntro" : "privacyIntro")]),
-          ...sections.map((s) =>
+          ...Arr.map(sections, (s) =>
             h.section
               .class("kb-legal__section")
               .children([h.h2.children([s.title]), h.p.children([s.body])]),
@@ -171,3 +188,8 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
     ]),
   ]);
 };
+
+export const view: {
+  (ctx: PageContext, h: Html.H<Message>): (model: Model) => ReturnType<typeof viewImpl>;
+  (model: Model, ctx: PageContext, h: Html.H<Message>): ReturnType<typeof viewImpl>;
+} = Fn.dual(3, viewImpl);

@@ -5,14 +5,21 @@ import type { Html } from "@effect/ui/html";
  * Previews workspace, inviter, role, and invited email; supports accept/decline for signed-in
  * matching users, wrong-account guidance, and sign-in/sign-up redirects when anonymous.
  */
-import { InvitationPeek, WorkspaceSummary } from "@kvitbit/domain";
-import { Format, I18n, ViewModels } from "@kvitbit/ui-port";
-import { Schema } from "effect";
+import { InvitationPeek, InvitationToken, WorkspaceSummary } from "@kvitbit/domain";
+import { Format, I18n } from "@kvitbit/ui-port";
+import * as Fn from "effect/Function";
+import * as Schema from "effect/Schema";
+import * as Str from "effect/String";
 import { Failure } from "../../app/api";
 import { defineApiCommand } from "../../app/commands";
 import { copy, translator } from "../../app/i18n";
 import { Intent_ } from "../../app/intent";
-import type { MessageHandlers, PageContext, PageReturn, RouteOf } from "../../app/page";
+import {
+  type MessageHandlers,
+  type PageContext,
+  type PageReturn,
+  RouteCases,
+} from "../../app/page";
 import * as Remote from "../../app/remote";
 import { href } from "../../app/routing";
 import { attribute } from "../../ui/html";
@@ -20,12 +27,13 @@ import { icon } from "../../ui/icons";
 import { badge, banner, button, card, dl, linkButton, skeleton } from "../../ui/kit";
 import { callApi, failureMessage } from "./_shared";
 
-export type Route = RouteOf<"Invitation">;
+export const Route = RouteCases.Invitation;
+export type Route = typeof Route.Type;
 
 const InviteRemote = Remote.remoteSchema(InvitationPeek);
 
 export const Model = Schema.Struct({
-  route: ViewModels.Route,
+  route: Route,
   token: Schema.String,
   peek: InviteRemote,
   acceptSeq: Remote.Seq,
@@ -71,27 +79,31 @@ const local = copy({
   },
 });
 
-const FetchPeek = defineApiCommand("InvitationPeek", {
+const FetchPeek = defineApiCommand({
+  message: Message,
+  name: "InvitationPeek",
   args: { token: Schema.String, seq: Remote.Seq },
   execute: ({ token, seq }) =>
     callApi(
-      (client) => client.invitations.peek({ params: { token: token as never } }),
+      (client) => client.invitations.peek({ params: { token: InvitationToken.make(token) } }),
       (peek) => Message.GotPeek({ seq, peek }),
       (failure) => Message.FailedPeek({ seq, failure }),
     ),
 });
 
-const AcceptInvite = defineApiCommand("InvitationAccept", {
+const AcceptInvite = defineApiCommand({
+  message: Message,
+  name: "InvitationAccept",
   args: { token: Schema.String, seq: Remote.Seq },
   execute: ({ token, seq }) =>
     callApi(
-      (client) => client.invitations.accept({ params: { token: token as never } }),
+      (client) => client.invitations.accept({ params: { token: InvitationToken.make(token) } }),
       (workspace) => Message.CompletedAccept({ seq, workspace }),
       (failure) => Message.FailedAccept({ seq, failure }),
     ),
 });
 
-export const init = (route: Route, _ctx: PageContext): PageReturn<Model, Message> => {
+const initImpl = (route: Route, _ctx: PageContext): PageReturn<Model, Message> => {
   const peek = Remote.load(Remote.idle);
   const seq = Remote.seqOf(peek);
   return {
@@ -109,7 +121,12 @@ export const init = (route: Route, _ctx: PageContext): PageReturn<Model, Message
   };
 };
 
-export const update = (
+export const init: {
+  (_ctx: PageContext): (route: Route) => PageReturn<Model, Message>;
+  (route: Route, _ctx: PageContext): PageReturn<Model, Message>;
+} = Fn.dual(2, initImpl);
+
+const updateImpl = (
   model: Model,
   message: Message,
   _ctx: PageContext,
@@ -152,7 +169,12 @@ export const update = (
     },
   } satisfies MessageHandlers<Message, PageReturn<Model, Message>>);
 
-export const title = (model: Model, ctx: PageContext): string => {
+export const update: {
+  (message: Message, _ctx: PageContext): (model: Model) => PageReturn<Model, Message>;
+  (model: Model, message: Message, _ctx: PageContext): PageReturn<Model, Message>;
+} = Fn.dual(3, updateImpl);
+
+const titleImpl = (model: Model, ctx: PageContext): string => {
   const t = translator(ctx.locale);
   const peek = Remote.dataOf(model.peek);
   return peek !== undefined
@@ -160,7 +182,12 @@ export const title = (model: Model, ctx: PageContext): string => {
     : t.t("invitation.landing.notFound");
 };
 
-export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
+export const title: {
+  (ctx: PageContext): (model: Model) => string;
+  (model: Model, ctx: PageContext): string;
+} = Fn.dual(2, titleImpl);
+
+const viewImpl = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
   const t = translator(ctx.locale);
 
   if (model.peek._tag === "Loading" || model.peek._tag === "Idle") {
@@ -248,7 +275,7 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
 
   const wrongAccount =
     ctx.session._tag === "SignedIn" &&
-    ctx.session.user.email.toLowerCase() !== peek.email.toLowerCase();
+    Str.toLowerCase(ctx.session.user.email) !== Str.toLowerCase(peek.email);
 
   return h.div.class("kb-invite-shell").children([
     card(
@@ -272,7 +299,7 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
           [local(ctx.locale, "roleLabel"), roleLabel],
           [
             local(ctx.locale, "expiresLabel"),
-            Format.formatDate(ctx.locale, peek.expiresAt.slice(0, 10)),
+            Format.formatDate(ctx.locale, Str.slice(0, 10)(peek.expiresAt)),
           ],
         ]),
         ...(model.acceptFailure !== null
@@ -304,11 +331,13 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
                   ? [
                       h.div.class("kb-row").children([
                         linkButton(h, {
+                          // biome-ignore lint/security/noSecrets: This is static user-facing copy or a translation key.
                           label: t.t("invitation.landing.signUpToAccept"),
                           href: href({ _tag: "SignUp", invitation: model.token }),
                           variant: "primary",
                         }),
                         linkButton(h, {
+                          // biome-ignore lint/security/noSecrets: This is static user-facing copy or a translation key.
                           label: t.t("invitation.landing.signInToAccept"),
                           href: href({ _tag: "SignIn", returnTo: href(model.route) }),
                           variant: "secondary",
@@ -350,3 +379,8 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
     ),
   ]);
 };
+
+export const view: {
+  (ctx: PageContext, h: Html.H<Message>): (model: Model) => ReturnType<typeof viewImpl>;
+  (model: Model, ctx: PageContext, h: Html.H<Message>): ReturnType<typeof viewImpl>;
+} = Fn.dual(3, viewImpl);

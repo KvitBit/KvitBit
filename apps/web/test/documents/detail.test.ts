@@ -1,17 +1,20 @@
 import { describe, expect, test } from "bun:test";
 import { Html, HtmlServer } from "@effect/ui/html";
 import type { DocumentView } from "@kvitbit/domain";
-import { Effect } from "effect";
+import * as Effect from "effect/Effect";
+
 import * as Detail from "../../src/page/documents/detail";
 import { ctxFor, renderPath, WS } from "../support";
 import { DOC_ID, runCommand, sampleProforma, sessionWithRole } from "./fixtures";
+
+const requestKeyPattern = /^[0-9a-f-]{36}$/;
 
 describe("DocumentDetail page (Screen 11)", () => {
   const route: Detail.Route = { _tag: "Document", ws: WS, id: DOC_ID, tab: "preview" };
 
   const loadedDetail = (doc: DocumentView, ctx = ctxFor(route, { locale: "en" })) => {
-    const update = (model: Detail.Model, message: Detail.Message) =>
-      Detail.update(model, message, ctx);
+    const update = (current: Detail.Model, message: Detail.Message) =>
+      Detail.update(current, message, ctx);
     const initial = Detail.init(route, ctx).model;
     const { model } = update(
       initial,
@@ -31,7 +34,7 @@ describe("DocumentDetail page (Screen 11)", () => {
     }).make({
       init: () => model,
       update: ($) => $.model,
-      view: (h, model) => Detail.view(model, ctx, h),
+      view: (h, current) => Detail.view(current, ctx, h),
     });
     return Effect.runPromise(HtmlServer.renderToHtml(component, {}));
   };
@@ -159,7 +162,7 @@ describe("DocumentDetail page (Screen 11)", () => {
       target: { document: DOC_ID },
       amount: { amount: "300" },
     });
-    expect(requests[0]?.key).toMatch(/^[0-9a-f-]{36}$/);
+    expect(requests[0]?.key).toMatch(requestKeyPattern);
     expect(requests[1]).toEqual(requests[0]);
     expect(done.model.pendingRequestKey).toBeNull();
     expect(done.model.activeDialog).toBeNull();

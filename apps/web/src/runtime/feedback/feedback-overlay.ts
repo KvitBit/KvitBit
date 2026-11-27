@@ -4,7 +4,18 @@ import {
   type FeedbackSubmission,
   sanitizeFeedbackPageUrl,
 } from "@kvitbit/api-contract";
-import { Schema } from "effect";
+import * as Arr from "effect/Array";
+import * as Effect from "effect/Effect";
+import * as FetchHttpClient from "effect/http/FetchHttpClient";
+import * as HttpClient from "effect/http/HttpClient";
+import * as HttpClientRequest from "effect/http/HttpClientRequest";
+import * as HttpClientResponse from "effect/http/HttpClientResponse";
+import * as Option from "effect/Option";
+import * as Predicate from "effect/Predicate";
+import * as Queue from "effect/Queue";
+import * as Schema from "effect/Schema";
+import * as Stream from "effect/Stream";
+import * as Str from "effect/String";
 import { copy } from "../../app/i18n";
 import type { Locale, Prefs } from "../../app/prefs";
 import { captureDiagnostics, capturePin } from "./capture";
@@ -25,6 +36,7 @@ const text = copy({
     remove: "Odebrat pin",
     close: "Zavřít",
     submit: "Odeslat na GitHub",
+    // biome-ignore lint/security/noSecrets: This is static user-facing copy or a translation key.
     sending: "Odesílání…",
     failure: "Zpětnou vazbu se nepodařilo odeslat. Zkuste to znovu.",
     created: "Vytvořen požadavek #{number} na GitHubu",
@@ -48,11 +60,11 @@ const text = copy({
   },
 });
 
-type Pin = {
+interface Pin {
   readonly element: Element;
   readonly marker: HTMLButtonElement;
   readonly snapshot: FeedbackSubmission["pins"][number];
-};
+}
 
 const px = (value: number) => `${value}px`;
 const clamp = (value: number, min: number, max: number) => Math.max(min, Math.min(max, value));
@@ -83,25 +95,65 @@ const pageTarget = (event: Event): Element | undefined => {
     : undefined;
 };
 
-const decodeIssue = Schema.decodeUnknownSync(FeedbackIssue);
+class FeedbackError extends Schema.TaggedError<FeedbackError, { readonly brand: unique symbol }>()(
+  "FeedbackError",
+  {
+    operation: Schema.String,
+  },
+) {}
 
-const githubIssue = (body: unknown) => {
-  const { issueNumber, issueUrl, title } = decodeIssue(body);
-  const url = new URL(issueUrl);
+const issuePath = /^\/[\w.-]+\/[\w.-]+\/issues\/[1-9]\d*$/;
+const issueBody = HttpClientResponse.schemaBodyJson(FeedbackIssue);
+const githubIssue = Effect.fn("githubIssue")(function* ({
+  issueNumber,
+  issueUrl,
+  title,
+}: FeedbackIssue) {
+  const url = yield* Effect.try({
+    try: () => new URL(issueUrl),
+    catch: () => FeedbackError.make({ operation: "read issue URL" }),
+  });
   if (
     url.origin !== "https://github.com" ||
-    url.username ||
-    url.password ||
-    url.search ||
-    url.hash ||
-    !/^\/[\w.-]+\/[\w.-]+\/issues\/[1-9]\d*$/.test(url.pathname) ||
-    !url.pathname.endsWith(`/issues/${issueNumber}`)
-  )
-    throw new Error("Invalid feedback issue URL");
+    url.username !== "" ||
+    url.password !== "" ||
+    url.search !== "" ||
+    url.hash !== "" ||
+    !issuePath.test(url.pathname) ||
+    !Str.endsWith(`/issues/${issueNumber}`)(url.pathname)
+  ) {
+    return yield* FeedbackError.make({ operation: "read issue URL" });
+  }
   return { number: issueNumber, url: url.href, title };
-};
+});
 
-const installFeedback = (locale: Locale, mode: Prefs["mode"], signal: AbortSignal) => {
+const sendFeedback = Effect.fn("sendFeedback")(
+  function* (submission: FeedbackSubmission) {
+    const request = HttpClientRequest.post(new URL("/api/feedback", globalThis.location.origin));
+    return yield* HttpClientRequest.bodyJson(request, submission).pipe(
+      Effect.flatMap(HttpClient.execute),
+      Effect.flatMap(HttpClientResponse.filterStatusOk),
+      Effect.flatMap(issueBody),
+      Effect.flatMap(githubIssue),
+    );
+  },
+  Effect.provideService(FetchHttpClient.RequestInit, {
+    credentials: "same-origin",
+    redirect: "error",
+  }),
+  Effect.provide(FetchHttpClient.layer),
+  Effect.provideServiceEffect(
+    FetchHttpClient.Fetch,
+    Effect.sync(() => globalThis.fetch),
+  ),
+);
+
+const installFeedback = (
+  locale: Locale,
+  mode: Prefs["mode"],
+  signal: AbortSignal,
+  enqueue: (effect: Effect.Effect<void>) => void,
+) => {
   const host = document.createElement("div");
   host.dataset.kbVisualFeedback = "";
   host.dataset.mode = mode;
@@ -128,7 +180,7 @@ const installFeedback = (locale: Locale, mode: Prefs["mode"], signal: AbortSigna
     dismiss,
     announcement,
   } = renderFeedbackControls(host.attachShadow({ mode: "open" }));
-  const nativePopover = typeof composer.showPopover === "function";
+  const nativePopover = Predicate.isFunction(composer.showPopover);
   if (nativePopover) composer.setAttribute("popover", "manual");
 
   pick.textContent = text(locale, "pick");
@@ -169,7 +221,7 @@ const installFeedback = (locale: Locale, mode: Prefs["mode"], signal: AbortSigna
       }
     }
 
-    if (composer.hidden) return;
+    if (composer.hidden !== false) return;
     const anchor = (
       selected?.marker.hidden === false ? selected.marker : review
     ).getBoundingClientRect();
@@ -200,7 +252,7 @@ const installFeedback = (locale: Locale, mode: Prefs["mode"], signal: AbortSigna
     review.disabled = submitting;
     review.textContent = text(locale, "review", { total: pins.length });
     add.disabled = submitting || pins.length >= FEEDBACK_LIMITS.pins;
-    send.disabled = submitting || comment.value.trim() === "";
+    send.disabled = submitting || Str.trim(comment.value) === "";
     close.disabled = submitting;
     remove.disabled = submitting;
     comment.readOnly = submitting;
@@ -214,7 +266,7 @@ const installFeedback = (locale: Locale, mode: Prefs["mode"], signal: AbortSigna
   };
 
   const closeComposer = () => {
-    if (!composer.hidden && nativePopover) composer.hidePopover();
+    if (composer.hidden === false && nativePopover) composer.hidePopover();
     composer.hidden = true;
   };
 
@@ -239,7 +291,7 @@ const installFeedback = (locale: Locale, mode: Prefs["mode"], signal: AbortSigna
       total: pins.length,
     });
     selector.textContent = pin.snapshot.selector;
-    if (composer.hidden) {
+    if (composer.hidden !== false) {
       composer.hidden = false;
       if (nativePopover) composer.showPopover();
     }
@@ -255,7 +307,9 @@ const installFeedback = (locale: Locale, mode: Prefs["mode"], signal: AbortSigna
       : `${location.origin}/[redacted]`;
 
   const addPin = (element: Element) => {
-    const existing = pins.find((pin) => pin.element === element);
+    const existing = Option.getOrUndefined(
+      Arr.findFirst(pins, (currentPin) => currentPin.element === element),
+    );
     if (existing !== undefined) {
       showComposer(existing);
       return;
@@ -286,8 +340,8 @@ const installFeedback = (locale: Locale, mode: Prefs["mode"], signal: AbortSigna
     if (visibleRect(element) !== undefined) addPin(element);
   };
 
-  const submit = async () => {
-    const message = comment.value.trim();
+  const submit = () => {
+    const message = Str.trim(comment.value);
     if (submitting || message === "" || pins.length === 0 || location.pathname !== pagePath) return;
     submitting = true;
     error.hidden = true;
@@ -300,7 +354,7 @@ const installFeedback = (locale: Locale, mode: Prefs["mode"], signal: AbortSigna
         : mode;
     const submission: FeedbackSubmission = {
       comment: message,
-      pins: pins.map((pin) => pin.snapshot),
+      pins: Arr.map(pins, (pin) => pin.snapshot),
       page: {
         url,
         locale,
@@ -310,41 +364,40 @@ const installFeedback = (locale: Locale, mode: Prefs["mode"], signal: AbortSigna
       },
       diagnostics: diagnostics(),
     };
-    try {
-      const response = await fetch("/api/feedback", {
-        method: "POST",
-        credentials: "same-origin",
-        redirect: "error",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(submission),
-        signal,
-      });
-      if (!response.ok) throw new Error("Feedback submission failed");
-      const result = githubIssue(await response.json());
-      if (signal.aborted) return;
-
-      pins.length = 0;
-      markers.replaceChildren();
-      comment.value = "";
-      selected = undefined;
-      closeComposer();
-      issue.href = result.url;
-      issue.title = result.title;
-      issue.textContent = text(locale, "created", { number: result.number });
-      announcement.textContent = issue.textContent;
-      toast.hidden = false;
-      issue.focus({ preventScroll: true });
-    } catch {
-      if (signal.aborted) return;
-      error.textContent = text(locale, "failure");
-      error.hidden = false;
-      requestLayout();
-    } finally {
-      if (!signal.aborted) {
-        submitting = false;
-        refresh();
-      }
-    }
+    enqueue(
+      sendFeedback(submission).pipe(
+        Effect.match({
+          onSuccess: (result) => {
+            if (signal.aborted) return;
+            pins.length = 0;
+            markers.replaceChildren();
+            comment.value = "";
+            selected = undefined;
+            closeComposer();
+            issue.href = result.url;
+            issue.title = result.title;
+            issue.textContent = text(locale, "created", { number: result.number });
+            announcement.textContent = issue.textContent;
+            toast.hidden = false;
+            issue.focus({ preventScroll: true });
+          },
+          onFailure: () => {
+            if (signal.aborted) return;
+            error.textContent = text(locale, "failure");
+            error.hidden = false;
+            requestLayout();
+          },
+        }),
+        Effect.ensuring(
+          Effect.sync(() => {
+            if (!signal.aborted) {
+              submitting = false;
+              refresh();
+            }
+          }),
+        ),
+      ),
+    );
   };
 
   pick.addEventListener("click", () => setPicking(!picking), { signal });
@@ -402,37 +455,34 @@ const installFeedback = (locale: Locale, mode: Prefs["mode"], signal: AbortSigna
     "submit",
     (event) => {
       event.preventDefault();
-      void submit();
+      submit();
     },
     { signal },
   );
-  window.addEventListener("click", capture, { capture: true, signal });
-  for (const event of ["pointerover", "focusin"] as const) {
-    window.addEventListener(
-      event,
-      (event) => {
-        if (picking) {
-          hovered = pageTarget(event);
-          requestLayout();
-        }
-      },
-      { capture: true, signal },
-    );
-  }
-  window.addEventListener(
+  globalThis.addEventListener("click", capture, { capture: true, signal });
+  const updateHovered = (event: Event) => {
+    if (picking) {
+      hovered = pageTarget(event);
+      requestLayout();
+    }
+  };
+  globalThis.addEventListener("pointerover", updateHovered, { capture: true, signal });
+  globalThis.addEventListener("focusin", updateHovered, { capture: true, signal });
+  globalThis.addEventListener(
     "pointerout",
     (event) => {
-      if (picking && event.relatedTarget === null) {
+      if (picking && event instanceof PointerEvent && event.relatedTarget === null) {
         hovered = undefined;
         requestLayout();
       }
     },
     { signal },
   );
-  window.addEventListener(
+  globalThis.addEventListener(
     "keydown",
     (event) => {
-      if (event.key === "Escape" && (picking || (!composer.hidden && !submitting))) {
+      if (!(event instanceof KeyboardEvent)) return;
+      if (event.key === "Escape" && (picking || (composer.hidden === false && !submitting))) {
         event.preventDefault();
         event.stopImmediatePropagation();
         if (picking) {
@@ -448,8 +498,8 @@ const installFeedback = (locale: Locale, mode: Prefs["mode"], signal: AbortSigna
     },
     { capture: true, signal },
   );
-  window.addEventListener("scroll", requestLayout, { capture: true, passive: true, signal });
-  window.addEventListener("resize", requestLayout, { signal });
+  globalThis.addEventListener("scroll", requestLayout, { capture: true, passive: true, signal });
+  globalThis.addEventListener("resize", requestLayout, { signal });
   const diagnostics = captureDiagnostics(signal);
   document.body.append(host);
 
@@ -459,16 +509,27 @@ const installFeedback = (locale: Locale, mode: Prefs["mode"], signal: AbortSigna
   };
 };
 
-export const mountFeedback = (locale: Locale, mode: Prefs["mode"]): (() => void) => {
-  const controller = new AbortController();
-  try {
-    const dispose = installFeedback(locale, mode, controller.signal);
-    return () => {
-      controller.abort();
-      dispose();
-    };
-  } catch (error) {
-    controller.abort();
-    throw error;
-  }
-};
+export const mountFeedback = ({
+  locale,
+  mode,
+}: {
+  readonly locale: Locale;
+  readonly mode: Prefs["mode"];
+}) =>
+  Stream.callback<Effect.Effect<void>, FeedbackError>((submissions) => {
+    const controller = new AbortController();
+    return Effect.acquireRelease(
+      Effect.try({
+        try: () =>
+          installFeedback(locale, mode, controller.signal, (effect) => {
+            Queue.offerUnsafe(submissions, effect);
+          }),
+        catch: () => FeedbackError.make({ operation: "mount controls" }),
+      }).pipe(Effect.tapError(() => Effect.sync(() => controller.abort()))),
+      (dispose) =>
+        Effect.sync(() => {
+          controller.abort();
+          dispose();
+        }),
+    );
+  }).pipe(Stream.runForEach((submission) => submission));

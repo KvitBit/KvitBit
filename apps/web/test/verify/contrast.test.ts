@@ -18,8 +18,12 @@ import {
 } from "@kvitbit/api-contract";
 import type { Hex, ThemePresetId, ThemeStyle } from "@kvitbit/domain";
 import { Theme } from "@kvitbit/ui-port";
+import * as Arr from "effect/Array";
+import * as Str from "effect/String";
 import { defaultPrefs, type Prefs } from "../../src/app/prefs";
 import { resolveChoice, THEME_ROOT, themeCss } from "../../src/app/theme";
+
+const hexColorPattern = /^#[0-9a-fA-F]{6}$/;
 
 const EXPECTED_PRESETS: ReadonlyArray<ThemePresetId> = [
   "graphite_atelier",
@@ -68,8 +72,8 @@ const TEXT_PAIRS: ReadonlyArray<RolePair> = [
   ["onError", "error"],
   ["onErrorContainer", "errorContainer"],
   ["onBackground", "background"],
-  ...SURFACE_ROLES.map((role): RolePair => ["onSurface", role]),
-  ...SURFACE_ROLES.map((role): RolePair => ["onSurfaceVariant", role]),
+  ...Arr.map(SURFACE_ROLES, (role): RolePair => ["onSurface", role]),
+  ...Arr.map(SURFACE_ROLES, (role): RolePair => ["onSurfaceVariant", role]),
   ["onSurfaceVariant", "surfaceVariant"],
   ["inverseOnSurface", "inverseSurface"],
   ["inversePrimary", "inverseSurface"],
@@ -99,12 +103,12 @@ const wcagLinearChannel = (byte: number): number => {
 
 /** Independent WCAG 2.1 relative luminance in [0, 1] from a #RRGGBB hex string. */
 const wcagLuminance = (hex: string): number => {
-  if (!/^#[0-9a-fA-F]{6}$/.test(hex)) {
+  if (!hexColorPattern.test(hex)) {
     throw new Error(`Invalid #RRGGBB hex color: ${hex}`);
   }
-  const r = Number.parseInt(hex.slice(1, 3), 16);
-  const g = Number.parseInt(hex.slice(3, 5), 16);
-  const b = Number.parseInt(hex.slice(5, 7), 16);
+  const r = Number.parseInt(Str.slice(1, 3)(hex), 16);
+  const g = Number.parseInt(Str.slice(3, 5)(hex), 16);
+  const b = Number.parseInt(Str.slice(5, 7)(hex), 16);
   return (
     0.2126 * wcagLinearChannel(r) + 0.7152 * wcagLinearChannel(g) + 0.0722 * wcagLinearChannel(b)
   );
@@ -117,63 +121,59 @@ const wcagContrastRatio = (fgHex: string, bgHex: string): number => {
   return (Math.max(l1, l2) + 0.05) / (Math.min(l1, l2) + 0.05);
 };
 
-const assertPairContrast = (
-  label: string,
-  fgHex: string,
-  bgHex: string,
-  required: number,
-): void => {
+const measurePairContrast = (label: string, fgHex: string, bgHex: string, required: number) => {
   const ratio = wcagContrastRatio(fgHex, bgHex);
-  expect(
-    ratio,
-    `${label}: ${fgHex} on ${bgHex} has contrast ${ratio.toFixed(2)} < ${required}`,
-  ).toBeGreaterThanOrEqual(required);
   const engineRatio = Theme.contrastRatio(Theme.rgbFromHex(fgHex), Theme.rgbFromHex(bgHex));
-  expect(Math.abs(ratio - engineRatio)).toBeLessThan(0.02);
+  return {
+    label: `${label}: ${fgHex} on ${bgHex}`,
+    ratio,
+    required,
+    engineDifference: Math.abs(ratio - engineRatio),
+  };
 };
 
-const assertSchemeAccessible = (
+const measureSchemeContrast = (
   presetLabel: string,
   variant: Theme.SchemeVariant,
   scheme: ResolvedScheme,
-): number => {
-  let checked = 0;
+) => {
+  const readings: ReturnType<typeof measurePairContrast>[] = [];
 
   for (const [pairs, minimum] of [
     [TEXT_PAIRS, TEXT_AA],
     [NON_TEXT_PAIRS, NON_TEXT_AA],
   ] as const) {
     for (const [foreground, background] of pairs) {
-      assertPairContrast(
-        `${presetLabel}/${variant} ${foreground}/${background}`,
-        scheme.roles[foreground],
-        scheme.roles[background],
-        minimum,
+      readings.push(
+        measurePairContrast(
+          `${presetLabel}/${variant} ${foreground}/${background}`,
+          scheme.roles[foreground],
+          scheme.roles[background],
+          minimum,
+        ),
       );
-      checked += 1;
     }
   }
 
-  // All 4 extended financial status roles (paid, proforma, overdue, draft) × 2 pairs = 8 pairs
   for (const role of EXPECTED_EXTENDED) {
     const ext = scheme.extended[role];
-    assertPairContrast(
-      `${presetLabel}/${variant} ${role}.onColor/${role}.color`,
-      ext.onColor,
-      ext.color,
-      TEXT_AA,
+    readings.push(
+      measurePairContrast(
+        `${presetLabel}/${variant} ${role}.onColor/${role}.color`,
+        ext.onColor,
+        ext.color,
+        TEXT_AA,
+      ),
+      measurePairContrast(
+        `${presetLabel}/${variant} ${role}.onColorContainer/${role}.colorContainer`,
+        ext.onColorContainer,
+        ext.colorContainer,
+        TEXT_AA,
+      ),
     );
-    assertPairContrast(
-      `${presetLabel}/${variant} ${role}.onColorContainer/${role}.colorContainer`,
-      ext.onColorContainer,
-      ext.colorContainer,
-      TEXT_AA,
-    );
-    checked += 2;
   }
 
-  expect(Theme.auditScheme(scheme, variant)).toEqual([]);
-  return checked;
+  return readings;
 };
 
 describe("WCAG 2.1 AA contrast — exhaustive preset × mode × contrast matrix", () => {
@@ -183,14 +183,15 @@ describe("WCAG 2.1 AA contrast — exhaustive preset × mode × contrast matrix"
     expect([...EXTENDED_ROLES]).toEqual([...EXPECTED_EXTENDED]);
     expect(
       new Set(
-        Theme.CHECKED_ROLE_PAIRS.map(
+        Arr.map(
+          Theme.CHECKED_ROLE_PAIRS,
           ({ foreground, background, required }) => `${foreground}/${background}/${required}`,
         ),
       ),
     ).toEqual(
       new Set([
-        ...TEXT_PAIRS.map(([fg, bg]) => `${fg}/${bg}/${TEXT_AA}`),
-        ...NON_TEXT_PAIRS.map(([fg, bg]) => `${fg}/${bg}/${NON_TEXT_AA}`),
+        ...Arr.map(TEXT_PAIRS, ([fg, bg]) => `${fg}/${bg}/${TEXT_AA}`),
+        ...Arr.map(NON_TEXT_PAIRS, ([fg, bg]) => `${fg}/${bg}/${NON_TEXT_AA}`),
       ]),
     );
   });
@@ -201,12 +202,19 @@ describe("WCAG 2.1 AA contrast — exhaustive preset × mode × contrast matrix"
 
     for (const presetId of EXPECTED_PRESETS) {
       const resolved = resolveChoice({ _tag: "Preset", id: presetId });
-      expect((resolved.warnings ?? []).filter((w) => w === "theme.low_contrast")).toEqual([]);
+      expect(Arr.filter(resolved.warnings ?? [], (w) => w === "theme.low_contrast")).toEqual([]);
       expect(Theme.auditTheme(resolved.schemes)).toEqual([]);
 
       for (const variant of EXPECTED_VARIANTS) {
         totalSchemes += 1;
-        totalPairs += assertSchemeAccessible(presetId, variant, resolved.schemes[variant]);
+        const scheme = resolved.schemes[variant];
+        expect(Theme.auditScheme(scheme, variant)).toEqual([]);
+        const readings = measureSchemeContrast(presetId, variant, scheme);
+        totalPairs += readings.length;
+        for (const { label, ratio, required, engineDifference } of readings) {
+          expect(ratio, label).toBeGreaterThanOrEqual(required);
+          expect(engineDifference, label).toBeLessThan(0.02);
+        }
       }
     }
 
@@ -216,20 +224,29 @@ describe("WCAG 2.1 AA contrast — exhaustive preset × mode × contrast matrix"
 
   test("representative custom seeds across luminance extremes pass WCAG 2.1 AA", () => {
     const seeds: ReadonlyArray<Hex> = [
-      "#000000" as Hex,
-      "#FFFFFF" as Hex,
-      "#1D4ED8" as Hex,
-      "#0F5D42" as Hex,
-      "#DC2626" as Hex,
-      "#F59E0B" as Hex,
-      "#7C3AED" as Hex,
+      "#000000",
+      "#FFFFFF",
+      "#1D4ED8",
+      "#0F5D42",
+      "#DC2626",
+      "#F59E0B",
+      "#7C3AED",
     ];
 
     for (const hex of seeds) {
       const resolved = resolveChoice({ _tag: "Seed", hex });
       expect(Theme.auditTheme(resolved.schemes)).toEqual([]);
       for (const variant of EXPECTED_VARIANTS) {
-        assertSchemeAccessible(`seed(${hex})`, variant, resolved.schemes[variant]);
+        const scheme = resolved.schemes[variant];
+        expect(Theme.auditScheme(scheme, variant)).toEqual([]);
+        for (const { label, ratio, required, engineDifference } of measureSchemeContrast(
+          hex,
+          variant,
+          scheme,
+        )) {
+          expect(ratio, label).toBeGreaterThanOrEqual(required);
+          expect(engineDifference, label).toBeLessThan(0.02);
+        }
       }
     }
   });
