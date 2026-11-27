@@ -1172,9 +1172,13 @@ const viewAppearance = (model: Model, ctx: PageContext, h: Html.H<Message>): Mar
           onClick: Message.ClickedSaveAppearance(),
         }),
       ]),
-      ...(model.appearance.dirty
-        ? [banner(h, { tone: "info", text: t.t("account.appearance.unsaved") })]
-        : []),
+      h.div
+        .style({ display: "contents" })
+        .children(
+          model.appearance.dirty
+            ? [banner(h, { tone: "info", text: t.t("account.appearance.unsaved") })]
+            : [],
+        ),
       h.div.class("kb-section").children([
         h.h3.children([t.t("account.appearance.presets")]),
         h.div.class("kb-preset-grid").children(
@@ -1460,6 +1464,7 @@ const viewSecurity = (model: Model, ctx: PageContext, h: Html.H<Message>): Marku
           dialog(h, {
             id: "kb-remove-passkey-dialog",
             title: t.t("account.security.removePasskeyTitle", { name: removing.name }),
+            alert: true,
             body: [h.p.children([t.t("common.confirm.delete.body")])],
             actions: [
               button(h, {

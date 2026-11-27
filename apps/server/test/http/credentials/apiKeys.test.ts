@@ -6,6 +6,7 @@ import { CurrentCaller, type MemberCaller, Workspaces } from "@kvitbit/domain/co
 import { Effect } from "effect";
 import { SqlClient } from "effect/sql";
 import { TestClock } from "effect/testing";
+import { captureAnalytics } from "../../analytics-fixture";
 import { as, type Harness, json, makeHarness, TEST_NOW, type TestUser } from "../harness";
 import { createSeededWorkspace, joinMember } from "./seed";
 
@@ -16,9 +17,11 @@ let member: TestUser;
 let accountant: TestUser;
 let ownerCaller: MemberCaller;
 let base: string;
+let analytics: ReturnType<typeof captureAnalytics>;
 
 beforeEach(async () => {
-  h = makeHarness();
+  analytics = captureAnalytics();
+  h = makeHarness({ analytics: analytics.layer });
   await h.run(TestClock.setTime(TEST_NOW));
   owner = h.addUser("Olga");
   admin = h.addUser("Adam");
@@ -125,6 +128,22 @@ describe("apiKeys group", () => {
       }),
     );
     expect(auditActions).toEqual(["apiKey.create", "apiKey.revoke"]);
+    expect(analytics.capture.mock.calls).toEqual([
+      [
+        {
+          event: "api_key_created",
+          distinctId: owner.id,
+          properties: { workspaceId: ownerCaller.workspaceId, access: "read_write" },
+        },
+      ],
+      [
+        {
+          event: "api_key_revoked",
+          distinctId: owner.id,
+          properties: { workspaceId: ownerCaller.workspaceId, access: "read_write" },
+        },
+      ],
+    ]);
   });
 
   test("admin can create custom-scoped key (write implies read) and read preset key", async () => {

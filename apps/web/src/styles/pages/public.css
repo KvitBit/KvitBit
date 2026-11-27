@@ -180,7 +180,7 @@
   width: 100%;
 }
 
-.kb-auth-form--sign-in .kb-segmented button {
+.kb-auth-form--sign-in .kb-segmented .kb-segmented__item {
   flex: 1 1 auto;
   padding: 6px 10px;
 }
@@ -201,6 +201,18 @@
   background: var(--md-sys-color-outline-variant);
 }
 
+.kb-bot-proof-slot,
+.kb-bot-proof-status {
+  display: grid;
+}
+
+/* Every state contributes its wrapped height to the same grid cell. */
+.kb-bot-proof-slot > *,
+.kb-bot-proof-status > * {
+  grid-area: 1 / 1;
+  min-inline-size: 0;
+}
+
 .kb-bot-proof {
   display: flex;
   align-items: center;
@@ -211,6 +223,10 @@
   border: 1px solid var(--md-sys-color-outline-variant);
   background: var(--md-sys-color-surface-container-low);
   font-size: 0.8125rem;
+}
+
+.kb-bot-proof[data-active="false"] {
+  visibility: hidden;
 }
 
 .kb-bot-proof--verified {

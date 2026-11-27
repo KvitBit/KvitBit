@@ -30,6 +30,7 @@ import {
   mono,
   page,
   pageHeader,
+  searchInput,
   select,
   skeletonTable,
   table,
@@ -526,13 +527,14 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
         .class("kb-docs-filters")
         .on("submit", Message.SubmittedSearch(), { preventDefault: true })
         .children([
-          h.input
-            .class("kb-input kb-docs-search")
-            .attr("type", "search")
-            .attr("aria-label", txt(locale, "searchLabel"))
-            .attr("placeholder", txt(locale, "searchPlaceholder"))
-            .value(model.searchInput)
-            .on("input", ({ value }) => Message.ChangedSearch({ value })),
+          h.div.class("kb-docs-search").children([
+            searchInput(h, {
+              value: model.searchInput,
+              placeholder: txt(locale, "searchPlaceholder"),
+              ariaLabel: txt(locale, "searchLabel"),
+              onInput: (value) => Message.ChangedSearch({ value }),
+            }),
+          ]),
           select(h, {
             id: "docs-status",
             label: txt(locale, "statusLabel"),

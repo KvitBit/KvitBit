@@ -46,6 +46,7 @@ import {
   mono,
   page,
   pageHeader,
+  searchInput,
   segmented,
   selectField,
   skeleton,
@@ -53,6 +54,7 @@ import {
   table,
   textArea,
   textField,
+  toggleChip,
 } from "../../ui/kit";
 import {
   apiCommand,
@@ -1913,39 +1915,34 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
       h.div.class("kb-rec-toolbar").children([
         h.div.class("kb-rec-search").children([
           h.span.class("kb-rec-search__icon").children([icon(h, "search", 16)]),
-          h.input
-            .class("kb-input")
-            .attr("type", "search")
-            .attr("placeholder", tr.t("expenses.list.search"))
-            .attr("aria-label", tr.t("expenses.list.search"))
-            .value(model.search)
-            .on("input", ({ value }) => Message.ChangedSearch({ value })),
+          searchInput(h, {
+            value: model.search,
+            placeholder: tr.t("expenses.list.search"),
+            ariaLabel: tr.t("expenses.list.search"),
+            onInput: (value) => Message.ChangedSearch({ value }),
+          }),
         ]),
         h.div.class("kb-rec-chips").children([
-          h.button
-            .class("kb-chip")
-            .attr("type", "button")
-            .attr("aria-pressed", String(model.filter === "all" ? "true" : "false"))
-            .on("click", Message.SelectedFilter({ filter: "all" }))
-            .children([tLocal(ctx.locale, "filterAll", { count: allItems.length })]),
-          h.button
-            .class("kb-chip")
-            .attr("type", "button")
-            .attr("aria-pressed", String(model.filter === "incomplete" ? "true" : "false"))
-            .on("click", Message.SelectedFilter({ filter: "incomplete" }))
-            .children([tLocal(ctx.locale, "filterIncomplete", { count: incompleteCount })]),
-          h.button
-            .class("kb-chip")
-            .attr("type", "button")
-            .attr("aria-pressed", String(model.filter === "unpaid" ? "true" : "false"))
-            .on("click", Message.SelectedFilter({ filter: "unpaid" }))
-            .children([tLocal(ctx.locale, "filterUnpaid")]),
-          h.button
-            .class("kb-chip")
-            .attr("type", "button")
-            .attr("aria-pressed", String(model.filter === "paid" ? "true" : "false"))
-            .on("click", Message.SelectedFilter({ filter: "paid" }))
-            .children([tLocal(ctx.locale, "filterPaid")]),
+          toggleChip(h, {
+            label: tLocal(ctx.locale, "filterAll", { count: allItems.length }),
+            pressed: model.filter === "all",
+            onPress: Message.SelectedFilter({ filter: "all" }),
+          }),
+          toggleChip(h, {
+            label: tLocal(ctx.locale, "filterIncomplete", { count: incompleteCount }),
+            pressed: model.filter === "incomplete",
+            onPress: Message.SelectedFilter({ filter: "incomplete" }),
+          }),
+          toggleChip(h, {
+            label: tLocal(ctx.locale, "filterUnpaid"),
+            pressed: model.filter === "unpaid",
+            onPress: Message.SelectedFilter({ filter: "unpaid" }),
+          }),
+          toggleChip(h, {
+            label: tLocal(ctx.locale, "filterPaid"),
+            pressed: model.filter === "paid",
+            onPress: Message.SelectedFilter({ filter: "paid" }),
+          }),
         ]),
       ]),
       listBody,
@@ -2564,6 +2561,7 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
           id: "expense-detach-dialog",
           title: tr.t("expenses.attachmentViewer.detachTitle"),
           onClose: Message.CancelledDetach(),
+          alert: true,
           body: [h.p.children([tr.t("expenses.attachmentViewer.detach")])],
           actions: [
             button(h, { label: tr.t("common.action.cancel"), onClick: Message.CancelledDetach() }),
@@ -2581,6 +2579,7 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
           id: "expense-remove-dialog",
           title: tr.t("expenses.detail.removeTitle"),
           onClose: Message.CancelledRemove(),
+          alert: true,
           body: [h.p.children([tr.t("expenses.detail.removeBody")])],
           actions: [
             button(h, { label: tr.t("common.action.cancel"), onClick: Message.CancelledRemove() }),
@@ -2652,6 +2651,7 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
           id: "expense-remove-payment-dialog",
           title: tLocal(ctx.locale, "removePaymentTitle"),
           onClose: Message.CancelledRemovePayment(),
+          alert: true,
           body: [
             textField(h, {
               id: "pay-remove-reason",

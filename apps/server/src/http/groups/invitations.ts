@@ -4,6 +4,7 @@ import { Caller, CurrentCaller, Workspaces } from "@kvitbit/domain/contract";
 import { Effect } from "effect";
 import { HttpServerRequest } from "effect/http/HttpServerRequest";
 import { HttpApiBuilder } from "effect/http-api";
+import { Analytics } from "../../runtime/analytics";
 import { HttpConfig } from "../config";
 import { RATE_LIMITS, RateLimiter } from "../edge/RateLimiter";
 import { acceptLanguageLocale, clientIp } from "../edge/request";
@@ -13,6 +14,7 @@ export const InvitationsGroupLive = HttpApiBuilder.group(Api, "invitations", (ha
     const workspaces = yield* Workspaces;
     const limiter = yield* RateLimiter;
     const config = yield* HttpConfig;
+    const analytics = yield* Analytics;
 
     return handlers
       .handle("peek", ({ params }) =>
@@ -42,6 +44,11 @@ export const InvitationsGroupLive = HttpApiBuilder.group(Api, "invitations", (ha
               `accepted workspace ${member.workspaceId} missing from listMine`,
             );
           }
+          yield* analytics.capture({
+            event: "invitation_accepted",
+            userId: member.userId,
+            workspaceId: member.workspaceId,
+          });
           return summary;
         }),
       );

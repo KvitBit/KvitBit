@@ -1,5 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { resolve } from "node:path";
+import { gunzipSync } from "node:zlib";
 import { expect, type Locator, type Page, test } from "@playwright/test";
 import type { RenderedPath } from "../test/support";
 
@@ -30,6 +31,11 @@ const attachErrorGuards = (page: Page) => {
   };
 };
 
+const selectUiOption = async (selectRoot: Locator, value: string) => {
+  await selectRoot.locator("ui-select-trigger button").click();
+  await selectRoot.locator(`ui-select-item[value="${value}"]`).click();
+};
+
 const expectFilledSegments = async (
   group: Locator,
   placement: "stretched" | "inline",
@@ -40,14 +46,14 @@ const expectFilledSegments = async (
   const layout = await group.evaluate((control) => {
     const bounds = control.getBoundingClientRect();
     const container = control.closest(".kb-card__title") ?? control.parentElement;
-    const buttons = [...control.querySelectorAll("button")].map((button) => {
+    const buttons = [...control.querySelectorAll("ui-segmented-control-item")].map((button) => {
       const box = button.getBoundingClientRect();
       const label = document.createRange();
       label.selectNodeContents(button);
-      const text = label.getBoundingClientRect();
+      const text = label.getClientRects().length > 0 ? label.getBoundingClientRect() : box;
       return {
         width: box.width,
-        labelFits: text.left >= box.left && text.right <= box.right,
+        labelFits: text.left >= box.left - 0.5 && text.right <= box.right + 0.5,
         lineCount: label.getClientRects().length,
         horizontalOffset: (text.left + text.right - box.left - box.right) / 2,
         verticalOffset: (text.top + text.bottom - box.top - box.bottom) / 2,
@@ -143,8 +149,8 @@ if (typeof Bun === "undefined") {
 
     test("center wrapped Czech labels and keep single words intact", async ({ page }) => {
       await page.goto("/account/appearance");
-      const mode = page.getByRole("group", { name: "Režim", exact: true });
-      const contrast = page.getByRole("group", { name: "Kontrast", exact: true });
+      const mode = page.getByRole("radiogroup", { name: "Režim", exact: true });
+      const contrast = page.getByRole("radiogroup", { name: "Kontrast", exact: true });
       // Exercise the settings grid's minimum track width in both viewport profiles.
       const grid = page.locator(".kb-form-grid").filter({ has: mode });
       await grid.evaluate((element) => {
@@ -159,6 +165,80 @@ if (typeof Bun === "undefined") {
   });
 
   test.describe("web smoke journeys (demo mode)", () => {
+    test("sends only cookieless pageviews after a single startup config request", async ({
+      page,
+    }) => {
+      const host = "https://eu.i.posthog.com";
+      let configRequests = 0;
+      const uploads: { event: string; properties: Record<string, unknown> }[] = [];
+      // Exercise actual ingestion while keeping PostHog's bot filter enabled in production.
+      await page.addInitScript(() => {
+        Object.defineProperty(navigator, "webdriver", { get: () => false });
+        Object.defineProperty(navigator, "userAgentData", { get: () => undefined });
+      });
+      await page.route("**/api/v1/config", async (route) => {
+        configRequests += 1;
+        const response = await route.fetch();
+        await route.fulfill({
+          response,
+          json: {
+            ...(await response.json()),
+            analytics: { posthog: { apiKey: "phc_smoke", host } },
+          },
+        });
+      });
+      await page.route(`${host}/**`, async (route) => {
+        const request = route.request();
+        if (request.method() === "POST") {
+          const data = request.postDataBuffer();
+          if (data === null) throw new Error("PostHog request has no body");
+          const formData = new URLSearchParams(data.toString()).get("data");
+          const body =
+            data[0] === 0x1f
+              ? gunzipSync(data).toString()
+              : formData
+                ? Buffer.from(formData, "base64").toString()
+                : data.toString();
+          const payload = JSON.parse(body);
+          uploads.push(...(payload.batch ?? [payload]));
+        }
+        await route.fulfill({
+          json: { status: 1 },
+          headers: { "access-control-allow-origin": "*" },
+        });
+      });
+
+      await page.goto("/?email=private@example.test#private");
+      await expect.poll(() => uploads.length).toBe(1);
+      await page.locator('a[href="/legal/privacy"]').first().click();
+      await expect.poll(() => uploads.length).toBe(2);
+      expect(configRequests).toBe(1);
+
+      const origin = new URL(page.url()).origin;
+      expect(uploads.map(({ event, properties }) => ({ event, properties }))).toEqual(
+        ["/", "/legal/privacy"].map((path) => ({
+          event: "$pageview",
+          properties: {
+            $current_url: origin + path,
+            $pathname: path,
+            token: "phc_smoke",
+            distinct_id: "$posthog_cookieless",
+            $cookieless_mode: true,
+            $process_person_profile: false,
+            $geoip_disable: true,
+          },
+        })),
+      );
+      expect(await page.context().cookies()).toEqual([]);
+      expect(
+        await page.evaluate(() =>
+          [...Object.keys(localStorage), ...Object.keys(sessionStorage)].filter((key) =>
+            /posthog|^ph_/i.test(key),
+          ),
+        ),
+      ).toEqual([]);
+    });
+
     test("navigates public routes with clean rendering and zero errors", async ({ page }) => {
       const errors = attachErrorGuards(page);
       const publicPaths = [
@@ -224,12 +304,12 @@ if (typeof Bun === "undefined") {
           await expect(page.locator(".kb-root")).toHaveAttribute("data-style", style);
 
           const segmented = page.locator(".kb-auth-form .kb-segmented");
-          const buttons = segmented.locator("button");
+          const buttons = segmented.locator("ui-segmented-control-item");
           await expect(buttons).toHaveText([...labels]);
 
           const layout = await segmented.evaluate((el) => {
             const groupRect = el.getBoundingClientRect();
-            const btns = [...el.querySelectorAll("button")];
+            const btns = [...el.querySelectorAll("ui-segmented-control-item")];
             return {
               groupRight: groupRect.right,
               lastBtnRight: btns.at(-1)?.getBoundingClientRect().right ?? 0,
@@ -423,7 +503,9 @@ if (typeof Bun === "undefined") {
 
       await expect(page).toHaveURL(/\/legal\/privacy#main$/);
       await expect(page.locator("#main")).toBeFocused();
-      await expect(page.locator('body > div[aria-live="assertive"]')).toHaveText(/Kvitbit/);
+      await expect(
+        page.locator('body > div[aria-live="assertive"]:not([data-ui-sdk-announcer])'),
+      ).toHaveText(/Kvitbit/);
       await expect(page.locator("body")).toHaveAttribute("data-navigation-probe", "same-document");
 
       await page.goBack();
@@ -503,12 +585,12 @@ if (typeof Bun === "undefined") {
           },
         );
         await page.goto(callback);
-        await expect(page.getByRole("alert")).toBeVisible();
+        await expect(page.locator("#main").getByRole("alert")).toBeVisible();
         await expect(page).toHaveURL(callback);
         await page.getByRole("button", { name: /Try again|Retry|Zkusit znovu/i }).click();
         await expect(page).toHaveURL(destination);
         await expect(page.locator("#main h1")).toBeVisible();
-        await expect(page.getByRole("alert")).toHaveCount(0);
+        await expect(page.locator("#main").getByRole("alert")).toHaveCount(0);
       });
     }
 
@@ -521,20 +603,20 @@ if (typeof Bun === "undefined") {
       const localeSelect = page.locator("#kb-locale");
 
       await expect(modeSelect).toBeVisible();
-      await modeSelect.selectOption("dark");
+      await selectUiOption(modeSelect, "dark");
       await expect(root).toHaveAttribute("data-theme", "dark");
 
-      await modeSelect.selectOption("light");
+      await selectUiOption(modeSelect, "light");
       await expect(root).toHaveAttribute("data-theme", "light");
 
-      await modeSelect.selectOption("system");
+      await selectUiOption(modeSelect, "system");
       await expect(root).not.toHaveAttribute("data-theme", /.+/);
 
       await expect(localeSelect).toBeVisible();
-      await localeSelect.selectOption("en");
+      await selectUiOption(localeSelect, "en");
       await expect(root).toHaveAttribute("lang", "en");
 
-      await localeSelect.selectOption("cs");
+      await selectUiOption(localeSelect, "cs");
       await expect(root).toHaveAttribute("lang", "cs");
 
       errors.assertClean();
@@ -545,15 +627,15 @@ if (typeof Bun === "undefined") {
       await page.goto("/account/appearance", { waitUntil: "domcontentloaded" });
 
       const root = page.locator(".kb-root");
-      const cozy = page.getByRole("button", { name: "Cozy", exact: true });
-      const elegant = page.getByRole("button", { name: "Elegant", exact: true });
+      const cozy = page.getByRole("radio", { name: "Cozy", exact: true });
+      const elegant = page.getByRole("radio", { name: "Elegant", exact: true });
 
       await expect(cozy).toBeVisible();
       await cozy.click();
       await expect(root).toHaveAttribute("data-style", "cozy");
       await page.reload({ waitUntil: "domcontentloaded" });
       await expect(root).toHaveAttribute("data-style", "cozy");
-      await expect(cozy).toHaveAttribute("aria-pressed", "true");
+      await expect(cozy).toHaveAttribute("aria-checked", "true");
 
       await elegant.click();
       await expect(root).toHaveAttribute("data-style", "elegant");
@@ -593,7 +675,7 @@ if (typeof Bun === "undefined") {
           ),
         )
         .toBe(true);
-      await locale.selectOption("en");
+      await selectUiOption(locale, "en");
       await expect(page.locator(".kb-root")).toHaveAttribute("lang", "en");
       await expect(page.locator("html")).toHaveAttribute("lang", "en");
       expect(
@@ -601,6 +683,39 @@ if (typeof Bun === "undefined") {
           () => Reflect.get(window, "kbServerControl") === document.querySelector("#kb-locale"),
         ),
       ).toBe(true);
+      errors.assertClean();
+    });
+
+    test("supports keyboard navigation on ui-sdk segmented controls, dialogs, and workspace menu", async ({
+      page,
+    }, testInfo) => {
+      const errors = attachErrorGuards(page);
+      await page.goto("/account/appearance", { waitUntil: "domcontentloaded" });
+      const elegant = page.getByRole("radio", { name: "Elegant", exact: true });
+      await elegant.focus();
+      await page.keyboard.press("ArrowRight");
+      await expect(page.locator(".kb-root")).toHaveAttribute("data-style", "cozy");
+      await page.keyboard.press("ArrowLeft");
+      await expect(page.locator(".kb-root")).toHaveAttribute("data-style", "elegant");
+
+      await page.goto(`/w/${DEMO_WS}/reports/revenue?period=2026`, {
+        waitUntil: "domcontentloaded",
+      });
+      await page.getByRole("button", { name: /^(Export|Exportovat)$/ }).click();
+      const exportDialog = page.getByRole("dialog");
+      await expect(exportDialog).toBeVisible();
+      await page.keyboard.press("Escape");
+      await expect(exportDialog).toHaveCount(0);
+
+      if (testInfo.project.name === "desktop") {
+        const switcher = page.getByTestId("workspace-switcher");
+        await switcher.click();
+        await expect(switcher).toHaveAttribute("aria-expanded", "true");
+        await expect(page.getByRole("menu")).toBeVisible();
+        await page.keyboard.press("Escape");
+        await expect(switcher).toHaveAttribute("aria-expanded", "false");
+      }
+
       errors.assertClean();
     });
 

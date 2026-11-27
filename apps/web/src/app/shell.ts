@@ -1,3 +1,4 @@
+import { Mount } from "@effect/ui";
 import type { Html } from "@effect/ui/html";
 /**
  * Shell chrome (screen 06). Public and account routes get the public header and footer; workspace
@@ -12,6 +13,18 @@ import { type Markup, withAttributes } from "../ui/html";
 import { type IconName, icon } from "../ui/icons";
 import { button, linkButton, skeleton } from "../ui/kit";
 import { compactPrefs } from "../ui/prefs-controls";
+import {
+  ariaKeyshortcuts,
+  formatShortcut,
+  SyncToasts,
+  UiButton,
+  UiMenu,
+  UiMenuContent,
+  UiMenuItem,
+  UiMenuSeparator,
+  UiMenuTrigger,
+  UiToastRegion,
+} from "../ui/sdk";
 import type { RunApi } from "./commands";
 import { copy, type Translator, textOf, translator } from "./i18n";
 import type { PageContext } from "./page";
@@ -32,6 +45,7 @@ const text = copy({
     rights: "© {year} Kvitbit",
     mainNav: "Hlavní navigace",
     dismiss: "Zavřít",
+    notifications: "Oznámení",
   },
   en: {
     signIn: "Sign in",
@@ -44,6 +58,7 @@ const text = copy({
     rights: "© {year} Kvitbit",
     mainNav: "Main navigation",
     dismiss: "Dismiss",
+    notifications: "Notifications",
   },
 });
 
@@ -90,53 +105,82 @@ const navItems = (
 const switcher = (model: Model, ctx: PageContext, h: Html.H<Message>): Markup<Message, RunApi> => {
   const current = ctx.workspace ?? undefined;
   const workspaces = model.session._tag === "SignedIn" ? model.session.workspaces : [];
-  return h.div.class("kb-switcher").children([
-    h.button
-      .class("kb-switcher__button")
-      .attr("type", "button")
-      .attr("aria-expanded", String(model.switcherOpen))
-      .attr("aria-haspopup", "menu")
-      .on("click", Message.ToggledSwitcher())
-      .attr("data-testid", "workspace-switcher")
-      .children([
-        h.span
-          .class("kb-stack")
-          .style({ "--kb-gap": "0" })
+  return UiMenu(h)
+    .class("kb-switcher")
+    .open(model.switcherOpen)
+    .attr("open", model.switcherOpen ? "" : undefined)
+    .on("openchange", ({ value }) => {
+      if (value === model.switcherOpen) return undefined;
+      return value ? Message.ToggledSwitcher() : Message.ClosedSwitcher();
+    })
+    .children([
+      UiMenuTrigger(h).children([
+        h.button
+          .class("kb-switcher__button")
+          .attr("type", "button")
+          .attr("aria-expanded", String(model.switcherOpen))
+          .attr("aria-haspopup", "menu")
+          .attr("aria-keyshortcuts", ariaKeyshortcuts("mod+k"))
+          .attr("data-testid", "workspace-switcher")
           .children([
             h.span
-              .class("kb-small kb-muted")
-              .children([tr(ctx).t("shell.workspaceSwitcher.current")]),
-            h.strong.children([current?.name ?? "…"]),
-          ]),
-        icon(h, "chevron"),
-      ]),
-    model.switcherOpen
-      ? h.div
-          .class("kb-switcher__menu")
-          .attr("role", "menu")
-          .on("keydown", ({ key }) => (key === "Escape" ? Message.ClosedSwitcher() : undefined))
-          .children([
-            ...workspaces.map((w) =>
-              withAttributes(h.a.class(), [
-                (element) => element.class("kb-menu-item"),
-                (element) => element.attr("role", "menuitem"),
-                (element) =>
-                  element.attr("href", href(ViewModels.switchWorkspace(ctx.route, w.slug))),
-                (node) => (w.slug === current?.slug ? node.attr("aria-current", "true") : node),
-              ]).children([
-                h.span.style({ flex: "1" }).children([w.name]),
-                ...(w.slug === current?.slug ? [icon(h, "check")] : []),
+              .class("kb-stack")
+              .style({ "--kb-gap": "0" })
+              .children([
+                h.span
+                  .class("kb-small kb-muted")
+                  .children([tr(ctx).t("shell.workspaceSwitcher.current")]),
+                h.strong.children([current?.name ?? "…"]),
               ]),
-            ),
-            h.hr.class("kb-divider"),
-            h.a
-              .class("kb-menu-item")
-              .attr("role", "menuitem")
-              .attr("href", href({ _tag: "Onboarding" }))
-              .children([icon(h, "plus"), tr(ctx).t("shell.workspaceSwitcher.create")]),
-          ])
-      : h.text(""),
-  ]);
+            h.span
+              .class("kb-switcher__meta")
+              .children([
+                h.kbd.class("kb-kbd").children([formatShortcut("mod+k")]),
+                icon(h, "chevron"),
+              ]),
+          ]),
+      ]),
+      UiMenuContent(h)
+        .class("kb-switcher__menu")
+        .attr("side", "bottom")
+        .attr("align", "start")
+        .attr("side-offset", "4")
+        .attr("hidden", "")
+        .children([
+          ...workspaces.map((w) =>
+            UiMenuItem(h)
+              .key(w.slug)
+              .value(w.slug)
+              .label(w.name)
+              .attr("value", w.slug)
+              .attr("label", w.name)
+              .attr("as-child", "")
+              .children([
+                withAttributes(h.a.class(), [
+                  (element) => element.class("kb-menu-item"),
+                  (element) =>
+                    element.attr("href", href(ViewModels.switchWorkspace(ctx.route, w.slug))),
+                  (node) => (w.slug === current?.slug ? node.attr("aria-current", "true") : node),
+                ]).children([
+                  h.span.style({ flex: "1" }).children([w.name]),
+                  ...(w.slug === current?.slug ? [icon(h, "check")] : []),
+                ]),
+              ]),
+          ),
+          UiMenuSeparator(h).class("kb-divider"),
+          UiMenuItem(h)
+            .value("create-workspace")
+            .label(tr(ctx).t("shell.workspaceSwitcher.create"))
+            .attr("value", "create-workspace")
+            .attr("as-child", "")
+            .children([
+              h.a
+                .class("kb-menu-item")
+                .attr("href", href({ _tag: "Onboarding" }))
+                .children([icon(h, "plus"), tr(ctx).t("shell.workspaceSwitcher.create")]),
+            ]),
+        ]),
+    ]);
 };
 
 const toastRegion = (
@@ -144,25 +188,18 @@ const toastRegion = (
   h: Html.H<Message>,
   locale: PageContext["locale"],
 ): Markup<Message, RunApi> =>
-  h.div
+  UiToastRegion(h)
     .class("kb-toasts")
-    .attr("aria-live", "polite")
-    .children(
-      model.toasts.map((t) =>
-        h.div
-          .key(String(t.id))
-          .class(`kb-toast${t.tone === "error" ? " kb-toast--error" : ""}`)
-          .attr("role", t.tone === "error" ? "alert" : "status")
-          .children([
-            h.span.children([t.text]),
-            h.button
-              .class("kb-btn kb-btn--ghost kb-btn--small")
-              .attr("type", "button")
-              .attr("aria-label", text(locale, "dismiss"))
-              .on("click", Message.DismissedToast({ id: t.id }))
-              .children([icon(h, "close", 16)]),
-          ]),
-      ),
+    .maxVisible(3)
+    .attr("side", "bottom")
+    .attr("align", "end")
+    .attr("max-visible", "3")
+    .attr("aria-label", text(locale, "notifications"))
+    .onMount(
+      SyncToasts({
+        toasts: model.toasts,
+        dismissLabel: text(locale, "dismiss"),
+      }).pipe(Mount.map((id) => Message.DismissedToast({ id }))),
     );
 
 const pageOrSplash = (
@@ -210,11 +247,11 @@ const publicChrome = (
                 variant: "ghost",
                 small: true,
               }),
-              h.button
-                .class("kb-btn kb-btn--small")
-                .attr("type", "button")
-                .on("click", Message.ClickedSignOut())
-                .children([text(ctx.locale, "signOut")]),
+              button(h, {
+                label: text(ctx.locale, "signOut"),
+                onClick: Message.ClickedSignOut(),
+                small: true,
+              }),
             ]
           : [
               linkButton(h, {
@@ -288,12 +325,15 @@ const workspaceChrome = (
               ? model.session.user.name
               : text(ctx.locale, "account"),
           ]),
-        h.button
-          .class("kb-nav__item kb-btn--ghost")
-          .attr("type", "button")
-          .style({ border: "0", background: "transparent", cursor: "pointer" })
-          .on("click", Message.ClickedSignOut())
-          .children([icon(h, "logout"), text(ctx.locale, "signOut")]),
+        UiButton(h)
+          .on("action", Message.ClickedSignOut())
+          .children([
+            h.button
+              .class("kb-nav__item kb-btn--ghost")
+              .attr("type", "button")
+              .style({ border: "0", background: "transparent", cursor: "pointer" })
+              .children([icon(h, "logout"), text(ctx.locale, "signOut")]),
+          ]),
       ]),
     ]),
     h.div

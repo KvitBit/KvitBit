@@ -18,6 +18,7 @@ export const ConfigGroupLive = HttpApiBuilder.group(Api, "config", (handlers) =>
       Effect.succeed({
         version: config.version,
         botProtection: config.botProtection,
+        analytics: { posthog: config.posthog },
         uploads: {
           attachment: {
             maxBytes: ATTACHMENT_MAX_BYTES,

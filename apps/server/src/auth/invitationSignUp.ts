@@ -6,14 +6,15 @@ import {
   type BeforeHook,
 } from "@kvitbit/adapters/auth";
 import { Caller, CurrentCaller, InvitationToken, type Workspaces } from "@kvitbit/domain/contract";
-import { betterAuth } from "better-auth";
+import { type BetterAuthOptions, betterAuth } from "better-auth";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
 import { APIError, createAuthMiddleware } from "better-auth/api";
 import { Clock, Effect, Result } from "effect";
 import { acceptLanguageLocale } from "../http/edge/request";
+import type { SignUpMethod } from "../runtime/analytics";
 import type { AuthEffectRunner } from "./logging";
 
-const SIGN_UP_PATH = "/sign-up/email";
+export const SIGN_UP_PATH = "/sign-up/email";
 
 const isInvitationSignUp = (body: unknown): body is Record<string, unknown> =>
   typeof body === "object" &&
@@ -101,6 +102,10 @@ export const makeAuthWithInvitationSignUp = async (
   workspaces: Workspaces["Service"],
   clock: Clock.Clock,
   runAuthEffect: AuthEffectRunner,
+  observeSignUp: {
+    readonly databaseHooks: NonNullable<BetterAuthOptions["databaseHooks"]>;
+    readonly capture: (request: Request, method: SignUpMethod) => Promise<void>;
+  },
 ) => {
   // The normal OAuth provider initializes its resource rows before the invitation-only instance.
   await auth.$context;
@@ -131,6 +136,7 @@ export const makeAuthWithInvitationSignUp = async (
     databaseHooks: {
       user: {
         create: {
+          ...observeSignUp.databaseHooks.user?.create,
           before: async (user, ctx) => {
             if (ctx?.path !== SIGN_UP_PATH || ctx.request === undefined) return false;
             if (verifiedEmails.get(ctx.request) !== user.email) return false;
@@ -145,13 +151,16 @@ export const makeAuthWithInvitationSignUp = async (
   return {
     ...auth,
     handler: async (request: Request) => {
-      if (!(await usesInvitation(request))) return auth.handler(request);
-      try {
-        return await invitationAuth.handler(request);
-      } catch {
-        await runAuthEffect(Effect.logError("Invitation signup request failed"));
-        return Response.json({ code: "InvitationSignupFailed" }, { status: 500 });
-      }
+      const method = (await usesInvitation(request)) ? "invitation" : "email";
+      const response =
+        method === "email"
+          ? await auth.handler(request)
+          : await invitationAuth.handler(request).catch(async () => {
+              await runAuthEffect(Effect.logError("Invitation signup request failed"));
+              return Response.json({ code: "InvitationSignupFailed" }, { status: 500 });
+            });
+      if (response.ok) await observeSignUp.capture(request, method);
+      return response;
     },
   };
 };

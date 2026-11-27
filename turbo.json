@@ -69,6 +69,7 @@
         "!formal/.cache/**",
         "!formal/*.tsbuildinfo",
         "scripts/**",
+        "!scripts/**/*.tsbuildinfo",
         "!**/*.md"
       ],
       "outputs": []
@@ -92,7 +93,7 @@
         "scripts/issue-pool/tsconfig.json",
         "tsconfig.base.json"
       ],
-      "outputs": []
+      "outputs": ["scripts/issue-pool/*.tsbuildinfo"]
     },
     "//#typecheck:alert-inbox": {
       "inputs": [
@@ -104,7 +105,44 @@
       "outputs": []
     },
     "//#test:issue-pool": {
-      "inputs": ["scripts/issue-pool/**"],
+      "inputs": ["scripts/issue-pool/**", "!scripts/issue-pool/*.tsbuildinfo"],
+      "outputs": []
+    },
+    "//#typecheck:cache-graph": {
+      "inputs": [
+        "scripts/turbo-cache-guard/**/*.ts",
+        "scripts/turbo-cache-guard/tsconfig.json",
+        "tsconfig.base.json"
+      ],
+      "outputs": ["scripts/turbo-cache-guard/*.tsbuildinfo"]
+    },
+    "//#test:cache-graph": {
+      "inputs": [
+        "package.json",
+        "turbo.json",
+        "formal/manifest.json",
+        "scripts/turbo-cache-guard/**",
+        "!scripts/turbo-cache-guard/*.tsbuildinfo",
+        "packages/*/package.json",
+        "packages/*/turbo.json",
+        "apps/*/package.json",
+        "apps/*/turbo.json",
+        "infra/*/package.json",
+        "infra/*/turbo.json",
+        "packages/**/*.test.*",
+        "packages/**/*.spec.*",
+        "apps/**/*.test.*",
+        "apps/**/*.spec.*",
+        "infra/**/*.test.*",
+        "infra/**/*.spec.*",
+        "scripts/**/*.test.*",
+        "scripts/**/*.spec.*",
+        "!**/node_modules/**",
+        "!**/dist/**",
+        "!**/.turbo/**",
+        "!**/.expo/**",
+        "!**/.cache/**"
+      ],
       "outputs": []
     },
     "//#test:alert-inbox": {

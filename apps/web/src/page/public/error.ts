@@ -12,7 +12,7 @@ import type { MessageHandlers, PageContext, PageReturn, RouteOf } from "../../ap
 import { href } from "../../app/routing";
 import { attribute } from "../../ui/html";
 import { icon } from "../../ui/icons";
-import { button, card, linkButton } from "../../ui/kit";
+import { button, card, linkButton, separator } from "../../ui/kit";
 
 export type Route = RouteOf<"Error">;
 
@@ -108,7 +108,7 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
         h.p.class("kb-muted").children([body]),
         ...(model.kind === "no_access" && workspaces.length > 0
           ? [
-              h.hr.class("kb-divider"),
+              separator(h),
               h.span.class("kb-small kb-muted").children([local(ctx.locale, "workspacesTitle")]),
               h.div.class("kb-row").children(
                 workspaces.map((ws) =>

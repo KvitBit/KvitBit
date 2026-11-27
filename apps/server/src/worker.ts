@@ -13,6 +13,7 @@ import { runServerMain } from "./logging/logger";
 import { PersistenceLive, PgWorkerDatabaseLive } from "./persistence";
 import { ServerDocumentProjectionsLive } from "./projections/documents";
 import { ClusterWorkerRuntimeLive, CronsLive, WorkflowHandlersLive } from "./runtime";
+import { AnalyticsLive } from "./runtime/analytics";
 import { CoreExternalPortsLive } from "./wiring";
 
 const ServerCoreLive = ServerDocumentProjectionsLive.pipe(Layer.provideMerge(CoreLive));
@@ -33,6 +34,7 @@ export const WorkerLive = Layer.mergeAll(WorkflowHandlersLive, CronsLive).pipe(
   Layer.provideMerge(PersistenceLive),
   Layer.provideMerge(ClusterWorkerRuntimeLive),
   Layer.provide(PgWorkerDatabaseLive),
+  Layer.provide(AnalyticsLive),
 );
 
 export const workerProgram = Effect.logInfo("Starting Kvitbit cluster worker").pipe(
