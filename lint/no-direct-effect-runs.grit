@@ -5,6 +5,16 @@ pattern runner_name() {
   r"^[\x22']?run(?:Promise(?:Exit)?|Sync(?:Exit)?|Fork|Callback)(?:With)?[\x22']?$"
 }
 
+pattern transparent_expression() {
+  or {
+    JsParenthesizedExpression(),
+    TsSatisfiesExpression(),
+    TsAsExpression(),
+    TsTypeAssertionExpression(),
+    TsNonNullAssertionExpression()
+  }
+}
+
 pattern module_namespace($local, $source) {
   JsNamespaceImportSpecifier(local_name=$binding) as $specifier where {
     $binding <: $local,
@@ -13,77 +23,195 @@ pattern module_namespace($local, $source) {
   }
 }
 
-pattern effect_receiver($local) {
+pattern root_namespace() {
+  contains ( JsIdentifierExpression() as $local where {
+    not $local <: within shadow_scope($local),
+    $program <: contains module_namespace($local, $source) where {
+      $source <: r"^[\x22']effect[\x22']$"
+    }
+  }) until not transparent_expression()
+}
+
+pattern effect_key() {
   or {
+    r"^[\x22']?Effect[\x22']?$",
+    JsComputedMemberName(expression=r"^[\x22']Effect[\x22']$")
+  }
+}
+
+pattern effect_binding_fields($local) {
+  or {
+    JsObjectBindingPattern(properties=$properties),
+    JsObjectAssignmentPattern(properties=$properties)
+  } where {
+    $properties <: some or {
+      or {
+        JsObjectBindingPatternShorthandProperty(identifier=$binding),
+        JsObjectAssignmentPatternShorthandProperty(identifier=$binding)
+      } where { $binding <: r"^Effect$" },
+      or {
+        JsObjectBindingPatternProperty(member=effect_key()),
+        JsObjectAssignmentPatternProperty(member=effect_key())
+      } as $property where {
+        $property <: contains or {
+          JsIdentifierBinding(),
+          JsIdentifierAssignment()
+        } as $binding until or {
+          JsObjectBindingPattern(),
+          JsObjectAssignmentPattern(),
+          JsArrayBindingPattern(),
+          JsArrayAssignmentPattern(),
+          JsInitializerClause()
+        }
+      }
+    } where { $binding <: $local }
+  }
+}
+
+// Look for a direct extraction in the enclosing scopes, stopping at a closer binding.
+pattern destructured_effect($local) {
+  within ( or {
+    JsModule(items=$items),
+    JsBlockStatement(statements=$items),
+    JsFunctionBody(statements=$items)
+  } where {
+    $items <: some or {
+      or {
+        JsVariableStatement(declaration=$declaration),
+        JsExport(export_clause=JsVariableDeclarationClause(declaration=$declaration))
+      } where {
+        $declaration <: JsVariableDeclaration(declarators=$declarators),
+        $declarators <: some JsVariableDeclarator(id=effect_binding_fields($local), initializer=JsInitializerClause(expression=root_namespace()))
+      },
+      JsExpressionStatement(expression=$expression) where {
+        $expression <: contains JsAssignmentExpression(left=effect_binding_fields($local), right=root_namespace()) until not transparent_expression()
+      }
+    }
+  }) until shadow_scope($local)
+}
+
+pattern effect_receiver() {
+  contains (or {
     JsIdentifierExpression() as $local where {
-      $program <: contains or {
-        module_namespace($local, $source) where { $source <: r"^[\x22']effect/Effect[\x22']$" },
-        or {
-          JsNamedImportSpecifier(name=$name, local_name=$binding),
-          JsShorthandNamedImportSpecifier(local_name=$name) as $binding
-        } as $specifier where {
-          $name <: r"^[\x22']?Effect[\x22']?$",
-          $binding <: $local,
-          $specifier <: within JsImport() as $import,
-          $import <: contains JsModuleSource() as $source where {
-            $source <: r"^[\x22']effect[\x22']$"
+      or {
+        $local <: destructured_effect($local),
+        and {
+          not $local <: within shadow_scope($local),
+          $program <: contains or {
+            module_namespace($local, $source) where { $source <: r"^[\x22']effect/Effect[\x22']$" },
+            or {
+              JsNamedImportSpecifier(name=$name, local_name=$binding),
+              JsShorthandNamedImportSpecifier(local_name=$name) as $binding
+            } as $specifier where {
+              $name <: r"^[\x22']?Effect[\x22']?$",
+              $binding <: $local,
+              $specifier <: within JsImport() as $import,
+              $import <: contains JsModuleSource() as $source where {
+                $source <: r"^[\x22']effect[\x22']$"
+              }
+            }
           }
         }
       }
     },
     or {
-      JsStaticMemberExpression(object=$local, member=`Effect`),
-      JsComputedMemberExpression(object=$local, member=r"^[\x22']Effect[\x22']$")
+      JsStaticMemberExpression(object=$namespace, member=`Effect`),
+      JsComputedMemberExpression(object=$namespace, member=r"^[\x22']Effect[\x22']$")
+    } where { $namespace <: root_namespace() }
+  }) until not transparent_expression()
+}
+
+pattern binding_name($local) {
+  contains JsIdentifierBinding() as $binding where { $binding <: $local }
+}
+
+pattern declares_binding($local) {
+  or {
+    JsForVariableDeclaration(declarator=JsVariableDeclarator(id=binding_name($local))),
+    JsVariableDeclaration(declarators=$declarators) where {
+      $declarators <: some JsVariableDeclarator(id=binding_name($local))
+    }
+  }
+}
+
+pattern shadow_scope($local) {
+  or {
+    or {
+      JsFunctionDeclaration(parameters=$parameters),
+      JsFunctionExpression(parameters=$parameters),
+      JsArrowFunctionExpression(parameters=$parameters),
+      JsMethodClassMember(parameters=$parameters),
+      JsMethodObjectMember(parameters=$parameters),
+      JsConstructorClassMember(parameters=$parameters)
     } where {
-      $program <: contains module_namespace($local, $source) where {
-        $source <: r"^[\x22']effect[\x22']$"
+      $parameters <: or {
+        JsIdentifierBinding() as $binding where { $binding <: $local },
+        or {
+          JsParameters(items=$items),
+          JsConstructorParameters(parameters=$items)
+        } where {
+          $items <: some or {
+            JsFormalParameter(binding=binding_name($local)),
+            JsRestParameter(binding=binding_name($local)),
+            TsPropertyParameter(formal_parameter=JsFormalParameter(binding=binding_name($local)))
+          }
+        }
+      }
+    },
+    or {
+      JsFunctionExpression(id=$local),
+      JsClassExpression(id=$local)
+    },
+    JsCatchClause(declaration=JsCatchDeclaration(binding=binding_name($local))),
+    or {
+      JsForStatement(initializer=declares_binding($local)),
+      JsForInStatement(initializer=declares_binding($local)),
+      JsForOfStatement(initializer=declares_binding($local))
+    },
+    or {
+      JsBlockStatement(statements=$statements),
+      JsFunctionBody(statements=$statements)
+    } where {
+      $statements <: some or {
+        JsVariableStatement(declaration=declares_binding($local)),
+        JsFunctionDeclaration(id=$local),
+        JsClassDeclaration(id=$local)
       }
     }
   }
 }
 
-// GritQL sees syntax rather than resolved symbols. Check declarations in the
-// enclosing scopes so a shadowed alias does not hide another use of the import.
-pattern shadowed_import($local) {
+pattern runner_fields() {
   or {
-    within (or {
-      JsFunctionDeclaration(parameters=$parameters),
-      JsFunctionExpression(parameters=$parameters),
-      JsArrowFunctionExpression(parameters=$parameters),
-      JsMethodClassMember(parameters=$parameters),
-      JsMethodObjectMember(parameters=$parameters)
-    }) where {
-      or {
-        $parameters <: JsIdentifierBinding() as $shadow where { $shadow <: $local },
-        $parameters <: JsParameters(items=$items) where {
-          $items <: some or {
-            JsFormalParameter(binding=$binding),
-            JsRestParameter(binding=$binding)
-          } where {
-            $binding <: contains JsIdentifierBinding() as $shadow where { $shadow <: $local }
-          }
-        }
-      }
-    },
-    within (or {
-      JsFunctionExpression(id=$local),
-      JsClassExpression(id=$local)
-    }),
-    within JsCatchClause(declaration=$declaration) where {
-      $declaration <: contains JsIdentifierBinding() as $shadow where { $shadow <: $local }
-    },
-    within (or {
-      JsBlockStatement(statements=$statements),
-      JsFunctionBody(statements=$statements)
-    }) where {
-      $statements <: some or {
-        JsVariableStatement(declaration=JsVariableDeclaration(declarators=$declarators)) where {
-          $declarators <: some JsVariableDeclarator(id=$binding) where {
-            $binding <: contains JsIdentifierBinding() as $shadow where { $shadow <: $local }
-          }
-        },
-        JsFunctionDeclaration(id=$local),
-        JsClassDeclaration(id=$local)
+    JsObjectBindingPattern(properties=$properties),
+    JsObjectAssignmentPattern(properties=$properties)
+  } where {
+    $properties <: some or {
+      JsObjectBindingPatternShorthandProperty(identifier=$method),
+      JsObjectAssignmentPatternShorthandProperty(identifier=$method),
+      JsObjectBindingPatternProperty(member=$method),
+      JsObjectAssignmentPatternProperty(member=$method),
+      JsObjectBindingPatternProperty(member=JsComputedMemberName(expression=JsStringLiteralExpression() as $method)),
+      JsObjectAssignmentPatternProperty(member=JsComputedMemberName(expression=JsStringLiteralExpression() as $method))
+    } where { $method <: runner_name() }
+  }
+}
+
+pattern nested_runner_fields() {
+  or {
+    JsObjectBindingPattern(properties=$properties),
+    JsObjectAssignmentPattern(properties=$properties)
+  } where {
+    $properties <: some or {
+      JsObjectBindingPatternProperty(member=effect_key()),
+      JsObjectAssignmentPatternProperty(member=effect_key())
+    } as $property where {
+      $property <: contains runner_fields() until or {
+        JsObjectBindingPattern(),
+        JsObjectAssignmentPattern(),
+        JsArrayBindingPattern(),
+        JsArrayAssignmentPattern(),
+        JsInitializerClause()
       }
     }
   }
@@ -100,17 +228,17 @@ file($name, $body) where {
         JsComputedMemberExpression(object=$receiver, member=$method) as $use where {
           $method <: JsStringLiteralExpression(),
           $method <: runner_name()
-        },
-        JsVariableDeclarator(id=JsObjectBindingPattern(properties=$properties), initializer=JsInitializerClause(expression=$receiver)) as $use where {
-          $properties <: some or {
-            JsObjectBindingPatternShorthandProperty(identifier=$method),
-            JsObjectBindingPatternProperty(member=$method),
-            JsObjectBindingPatternProperty(member=JsComputedMemberName(expression=$method)) where {
-              $method <: JsStringLiteralExpression()
-            }
-          } where { $method <: runner_name() }
         }
-      } where { $receiver <: effect_receiver($local), not $use <: shadowed_import($local) },
+      } where { $receiver <: effect_receiver() },
+      or {
+        JsVariableDeclarator(id=$pattern, initializer=JsInitializerClause(expression=$receiver)) as $use,
+        JsAssignmentExpression(left=$pattern, right=$receiver) as $use
+      } where {
+        or {
+          and { $pattern <: runner_fields(), $receiver <: effect_receiver() },
+          and { $pattern <: nested_runner_fields(), $receiver <: root_namespace() }
+        }
+      },
       or {
         JsNamedImportSpecifier(name=$method) as $use,
         JsShorthandNamedImportSpecifier(local_name=$method) as $use

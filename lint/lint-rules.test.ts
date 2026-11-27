@@ -20,6 +20,8 @@ interface RuleCase {
 
 const effectImport = 'import * as Effect from "effect/Effect";';
 const runEffect = `${effectImport}\nEffect.runSync(work);`;
+const aliasedEffectImport = 'import * as Fx from "effect/Effect";';
+const rootEffectImport = 'import * as Lib from "effect";';
 
 const ruleCases: readonly RuleCase[] = [
   {
@@ -185,6 +187,91 @@ const scopeCases = [
     rules: ["no-direct-effect-runs"],
   },
   {
+    file: "apps/server/src/runner-namespace-binding.ts",
+    source: `${rootEffectImport}\nconst { Effect } = Lib;\nEffect.runSync(work);`,
+    rules: ["no-direct-effect-runs"],
+  },
+  {
+    file: "apps/server/src/runner-namespace-binding-alias.ts",
+    source: `${rootEffectImport}\nconst { Effect: Fx } = Lib;\nFx.runSync(work);`,
+    rules: ["no-direct-effect-runs"],
+  },
+  {
+    file: "apps/server/src/runner-namespace-binding-export.ts",
+    source: `${rootEffectImport}\nexport const { ["Effect"]: Fx } = Lib;\nFx.runSync(work);`,
+    rules: ["no-direct-effect-runs"],
+  },
+  {
+    file: "apps/server/src/runner-namespace-binding-valid.ts",
+    source: `${rootEffectImport}\nconst { Effect } = Lib;\nEffect.succeed(1);`,
+    rules: [],
+  },
+  {
+    file: "apps/server/src/runner-namespace-binding-local.ts",
+    source: `${rootEffectImport}\nfunction run() { const { Effect: Fx } = Lib; return Fx.runSync(work); }`,
+    rules: ["no-direct-effect-runs"],
+  },
+  {
+    file: "apps/server/src/runner-namespace-binding-shadow.ts",
+    source: `${rootEffectImport}\nconst { Effect: Fx } = Lib;\nfunction run(Fx: { runSync(): number }) { return Fx.runSync(); }`,
+    rules: [],
+  },
+  {
+    file: "apps/server/src/runner-namespace-source-shadow.ts",
+    source: `${rootEffectImport}\nfunction run(Lib: { Effect: { runSync(): number } }) { const { Effect } = Lib; return Effect.runSync(); }`,
+    rules: [],
+  },
+  {
+    file: "apps/server/src/runner-nested-extraction.ts",
+    source: `${rootEffectImport}\nconst { Effect: { runSync } } = Lib;\nrunSync(work);`,
+    rules: ["no-direct-effect-runs"],
+  },
+  {
+    file: "apps/server/src/runner-nested-assignment.ts",
+    source: `${rootEffectImport}\nlet run;\n({ Effect: { runSync: run } } = Lib);\nrun(work);`,
+    rules: ["no-direct-effect-runs"],
+  },
+  {
+    file: "apps/server/src/runner-destructure-assignment.ts",
+    source: `${aliasedEffectImport}\nlet runSync;\n({ runSync } = Fx);\nrunSync(work);`,
+    rules: ["no-direct-effect-runs"],
+  },
+  {
+    file: "apps/server/src/runner-namespace-assignment.ts",
+    source: `${rootEffectImport}\nlet Effect;\n({ Effect } = Lib);\nEffect.runSync(work);`,
+    rules: ["no-direct-effect-runs"],
+  },
+  {
+    file: "apps/server/src/runner-namespace-assignment-valid.ts",
+    source: `${rootEffectImport}\nlet Fx;\n({ Effect: Fx } = Lib);\nFx.succeed(1);`,
+    rules: [],
+  },
+  {
+    file: "apps/server/src/runner-namespace-assignment-alias.ts",
+    source: `${rootEffectImport}\nlet Fx;\n({ Effect: Fx } = Lib);\nFx.runSync(work);`,
+    rules: ["no-direct-effect-runs"],
+  },
+  {
+    file: "apps/server/src/runner-namespace-assignment-local.ts",
+    source: `${rootEffectImport}\nfunction run() { let Fx; ({ Effect: Fx } = Lib); return Fx.runSync(work); }`,
+    rules: ["no-direct-effect-runs"],
+  },
+  {
+    file: "apps/server/src/runner-parenthesized.ts",
+    source: `${aliasedEffectImport}\n(Fx).runSync(work);`,
+    rules: ["no-direct-effect-runs"],
+  },
+  {
+    file: "apps/server/src/runner-wrapped.ts",
+    source: `${effectImport}\n((Effect satisfies typeof Effect)).runSync(work);`,
+    rules: ["no-direct-effect-runs"],
+  },
+  {
+    file: "apps/server/src/runner-wrapped-unrelated.ts",
+    source: `${aliasedEffectImport}\n(makeMock(Fx)).runSync();`,
+    rules: [],
+  },
+  {
     file: "apps/server/src/runner-root-import.ts",
     source: 'import { Effect } from "effect";\nEffect.runFork(work);',
     rules: ["no-direct-effect-runs"],
@@ -204,6 +291,36 @@ const scopeCases = [
   {
     file: "apps/server/src/runner-block-shadow.ts",
     source: `${runEffect}\n{\nconst Effect = mock();\nEffect.runSync();\n}`,
+    rules: ["no-direct-effect-runs"],
+  },
+  {
+    file: "apps/server/src/runner-constructor-shadow.ts",
+    source: `${aliasedEffectImport}\nclass Demo { constructor(Fx: { runSync(): number }) { Fx.runSync(); } }`,
+    rules: [],
+  },
+  {
+    file: "apps/server/src/runner-constructor-property-shadow.ts",
+    source: `${aliasedEffectImport}\nclass Demo { constructor(private Fx: { runSync(): number }) { Fx.runSync(); } }`,
+    rules: [],
+  },
+  {
+    file: "apps/server/src/runner-for-of-shadow.ts",
+    source: `${aliasedEffectImport}\nfor (const Fx of items) { Fx.runSync(); }`,
+    rules: [],
+  },
+  {
+    file: "apps/server/src/runner-for-in-shadow.ts",
+    source: `${aliasedEffectImport}\nfor (const Fx in items) { Fx.runSync(); }`,
+    rules: [],
+  },
+  {
+    file: "apps/server/src/runner-for-shadow.ts",
+    source: `${aliasedEffectImport}\nfor (let Fx = mock(); keepGoing(); step()) { Fx.runSync(); }`,
+    rules: [],
+  },
+  {
+    file: "apps/server/src/runner-unshadowed-import.ts",
+    source: `${aliasedEffectImport}\nclass Demo { constructor(Fx: { runSync(): number }) { Fx.runSync(); } }\nfor (const Fx of items) { Fx.runSync(); }\nFx.runSync(work);`,
     rules: ["no-direct-effect-runs"],
   },
   {
