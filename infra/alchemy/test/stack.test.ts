@@ -14,8 +14,11 @@ import * as ConfigProvider from "effect/ConfigProvider";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import {
+  assertFeedbackSecretSelection,
   BootstrapPopulatedStateError,
+  BootstrapSelectionError,
   declareKvitbitStack,
+  feedbackSecretFqn,
   foundationResourceIds,
   KVITBIT_STACK_NAME,
 } from "../src/bootstrap";
@@ -146,7 +149,10 @@ describe("Kvitbit Alchemy stack config", () => {
       ["missing APP_ORIGIN", { KVITBIT_APP_ORIGIN: "" }],
       ["http APP_ORIGIN", { KVITBIT_APP_ORIGIN: "http://kvitbit.cz" }],
       ["localhost APP_ORIGIN", { KVITBIT_APP_ORIGIN: "https://localhost" }],
+      ["trailing-dot localhost APP_ORIGIN", { KVITBIT_APP_ORIGIN: "https://localhost." }],
+      ["trailing-dot sub.localhost APP_ORIGIN", { KVITBIT_APP_ORIGIN: "https://app.localhost." }],
       ["missing EMAIL_FROM", { KVITBIT_EMAIL_FROM: "" }],
+      ["malformed consecutive-dot EMAIL_FROM", { KVITBIT_EMAIL_FROM: "a..b@example.org" }],
       ["missing edge domains", { KVITBIT_EDGE_DOMAINS: "" }],
       [
         "no email secret",
@@ -157,6 +163,8 @@ describe("Kvitbit Alchemy stack config", () => {
       ["disabled email mode", { KVITBIT_EMAIL_MODE: "disabled" }],
       ["local blob driver", { KVITBIT_BLOB_DRIVER: "local" }],
       ["legacy disable flag", { KVITBIT_PREVIEW_DISABLE_EMAIL: "true" }],
+      ["dynamic disable blob flag", { KVITBIT_DISABLE_BLOB: "true" }],
+      ["dynamic custom disable flag", { KVITBIT_DISABLE_ANYTHING: "1" }],
     ] as const) {
       const provider = ConfigProvider.fromEnv({
         env: { ...PROD_REQUIRED_ENV, ...overrides },
@@ -418,8 +426,54 @@ describe("Bootstrap state safety guard", () => {
       delete: () => Effect.die("Unexpected secret deletion"),
     });
     const feedbackConfig = sampleProdConfig({
+      bootstrapFeedbackSecret: true,
+      appOrigin: undefined,
+      emailFrom: undefined,
+      edge: undefined,
       secrets: defaultSecretBindings("prod", { enableFeedbackGitHubToken: true }),
     });
+    // CLI selection guard enforces exact --include for feedback secret bootstrap.
+    expect(
+      await Effect.runPromise(
+        Effect.result(assertFeedbackSecretSelection(feedbackConfig, ["bun", "alchemy", "deploy"])),
+      ),
+    ).toMatchObject({ _tag: "Failure", failure: expect.any(BootstrapSelectionError) });
+    expect(
+      await Effect.runPromise(
+        Effect.result(
+          assertFeedbackSecretSelection(feedbackConfig, [
+            "bun",
+            "alchemy",
+            "deploy",
+            "--include",
+            fqn,
+            "--include",
+            "KvitbitServer",
+          ]),
+        ),
+      ),
+    ).toMatchObject({ _tag: "Failure", failure: expect.any(BootstrapSelectionError) });
+    expect(
+      await Effect.runPromise(
+        Effect.result(
+          assertFeedbackSecretSelection(feedbackConfig, [
+            "bun",
+            "alchemy",
+            "deploy",
+            "--include",
+            fqn,
+          ]),
+        ),
+      ),
+    ).toMatchObject({ _tag: "Success" });
+    expect(
+      await Effect.runPromise(
+        Effect.result(
+          assertFeedbackSecretSelection(feedbackConfig, [`--include=${feedbackSecretFqn("prod")}`]),
+        ),
+      ),
+    ).toMatchObject({ _tag: "Success" });
+
     await Effect.runPromise(
       Effect.gen(function* () {
         const compiled = yield* Stack.Stack(
@@ -427,6 +481,8 @@ describe("Bootstrap state safety guard", () => {
           { state, providers },
           declareKvitbitStack(feedbackConfig).pipe(Effect.orDie),
         );
+        // Feedback bootstrap never declares server, runner, VPC, or edge workloads.
+        expect(Object.keys(compiled.resources)).toEqual([fqn]);
         yield* Effect.gen(function* () {
           const plan = yield* Plan.make(compiled, { include: [fqn] });
           expect(Object.keys(plan.resources)).toEqual([fqn]);
@@ -1525,7 +1581,12 @@ describe("Pure-Alchemy Cloud DNS", () => {
       upstream[id] = { nameServers };
       expectedNameServers[domain] = nameServers;
     }
-    if (compiled.output.bootstrapFoundation) throw new Error("Expected a full stack");
+    if (
+      compiled.output.bootstrapFoundation ||
+      ("bootstrapFeedbackSecret" in compiled.output && compiled.output.bootstrapFeedbackSecret)
+    ) {
+      throw new Error("Expected a full stack");
+    }
     expect(await resolveOutputs(compiled.output.dnsNameServers, upstream)).toEqual(
       expectedNameServers,
     );

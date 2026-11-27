@@ -111,6 +111,35 @@ export const MobileConfigLive: Layer.Layer<MobileConfig, Config.ConfigError> = L
           "KVITBIT_MOBILE_STORAGE_BUCKET (or KVITBIT_BLOB_DRIVER=gcs with KVITBIT_BLOB_BUCKET) is required when KVITBIT_ENV=production",
         );
       }
+    } else if (env === "staging" || env === "preview") {
+      if (Option.isSome(blobDriver) && blobDriver.value !== "gcs" && blobDriver.value !== "local") {
+        return yield* configError(
+          `Unsupported KVITBIT_BLOB_DRIVER: ${JSON.stringify(blobDriver.value)}`,
+        );
+      }
+      if (Option.isSome(mobileBucket)) {
+        storage = { _tag: "gcs", bucket: mobileBucket.value, endpoint: gcsEndpoint };
+      } else if (Option.isSome(blobDriver)) {
+        if (blobDriver.value === "gcs") {
+          if (Option.isNone(blobBucket)) {
+            return yield* configError(
+              "KVITBIT_BLOB_BUCKET is required when KVITBIT_BLOB_DRIVER=gcs",
+            );
+          }
+          storage = { _tag: "gcs", bucket: blobBucket.value, endpoint: gcsEndpoint };
+        } else {
+          storage = {
+            _tag: "local",
+            dir: Option.getOrElse(mobileDir, () =>
+              Option.getOrElse(blobDir, () => DEFAULT_BLOB_DIR),
+            ),
+          };
+        }
+      } else {
+        return yield* configError(
+          `Mobile storage must be explicitly configured via KVITBIT_MOBILE_STORAGE_BUCKET or KVITBIT_BLOB_DRIVER ('gcs' or 'local') when KVITBIT_ENV=${env}`,
+        );
+      }
     } else if (Option.isSome(mobileBucket)) {
       storage = { _tag: "gcs", bucket: mobileBucket.value, endpoint: gcsEndpoint };
     } else if (Option.isSome(mobileDir)) {
@@ -133,10 +162,6 @@ export const MobileConfigLive: Layer.Layer<MobileConfig, Config.ConfigError> = L
       }
     } else if (Option.isSome(blobBucket)) {
       storage = { _tag: "gcs", bucket: blobBucket.value, endpoint: gcsEndpoint };
-    } else if (env === "staging" || env === "preview") {
-      return yield* configError(
-        `Mobile storage must be explicitly configured (KVITBIT_MOBILE_STORAGE_BUCKET, KVITBIT_MOBILE_STORAGE_DIR, or KVITBIT_BLOB_DRIVER) when KVITBIT_ENV=${env}`,
-      );
     } else {
       storage = {
         _tag: "local",

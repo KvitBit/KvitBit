@@ -359,6 +359,10 @@ describe("Self-hosting and CI deploy artifacts", () => {
     );
     expect(parsed.services.kvitbit.environment.DATABASE_URL).toContain("POSTGRES_APP_USER");
     expect(parsed.services.kvitbit.environment.DATABASE_URL_UNPOOLED).toBeUndefined();
+    // Preserve production fail-fast behavior on upgrade (never silently downgrade to development/capture).
+    expect(parsed.services.kvitbit.environment.NODE_ENV).toBe("production");
+    expect(parsed.services.kvitbit.environment.KVITBIT_ENV).toBe(`\${KVITBIT_ENV:-}`);
+    expect(parsed.services.kvitbit.environment.KVITBIT_ENV).not.toContain("development");
     expect(compose).toContain("postgres:17-alpine");
     expect(compose).toContain('command: ["migrate"]');
     expect(compose).toContain("condition: service_completed_successfully");
@@ -822,6 +826,11 @@ describe("Self-hosting and CI deploy artifacts", () => {
     expect(flake).toContain("migrationEnvironmentFile = lib.mkOption");
     expect(flake).toContain("cfg.migrationEnvironmentFile");
     expect(flake).toContain('KVITBIT_RUNNER_MODE = "single"');
+    expect(flake).toContain('default = "production";');
+    expect(flake).toContain(
+      "lib.optionalAttrs (cfg.blobDriver != null) { KVITBIT_BLOB_DRIVER = cfg.blobDriver; }",
+    );
+    expect(flake).not.toContain('KVITBIT_BLOB_DRIVER = "local"');
     expect(flake).toContain("systemd.services.kvitbit-migrate");
     expect(flake).toContain("services.nginx = lib.mkIf cfg.nginx.enable");
   });
@@ -1196,14 +1205,24 @@ printf '%s\\n' "$KVITBIT_ENABLE_FEEDBACK_GITHUB_TOKEN_SECRET" "$KVITBIT_IMAGE_DI
       });
       expect(normBad.exitCode).not.toBe(0);
 
-      // Prod preflight fails fast when email secrets, APP_ORIGIN, EMAIL_FROM, or edge domains are missing or non-prod modes are set.
+      // Prod preflight fails fast when email secrets, APP_ORIGIN, EMAIL_FROM, or edge domains are missing or non-prod modes/opt-outs are set.
       for (const badOverride of [
         { KVITBIT_ENABLE_RESEND_SECRET: "false", KVITBIT_ENABLE_SMTP_SECRET: "false" },
         { KVITBIT_ENABLE_RESEND_SECRET: "true", APP_ORIGIN: "http://localhost:8080" },
+        { KVITBIT_ENABLE_RESEND_SECRET: "true", APP_ORIGIN: "https://localhost." },
         { KVITBIT_ENABLE_RESEND_SECRET: "true", EMAIL_FROM: "" },
+        { KVITBIT_ENABLE_RESEND_SECRET: "true", EMAIL_FROM: "a..b@example.org" },
         { KVITBIT_ENABLE_RESEND_SECRET: "true", KVITBIT_EDGE_DOMAINS: "" },
         { KVITBIT_ENABLE_RESEND_SECRET: "true", KVITBIT_EMAIL_MODE: "capture" },
         { KVITBIT_ENABLE_RESEND_SECRET: "true", KVITBIT_BLOB_DRIVER: "local" },
+        {
+          KVITBIT_ENABLE_RESEND_SECRET: "true",
+          KVITBIT_REPO_VARS_JSON: JSON.stringify({ KVITBIT_PREVIEW_DISABLE_EMAIL: "true" }),
+        },
+        {
+          KVITBIT_ENABLE_RESEND_SECRET: "true",
+          KVITBIT_REPO_VARS_JSON: JSON.stringify({ KVITBIT_DISABLE_BLOB: "true" }),
+        },
       ]) {
         const rejected = Bun.spawnSync(["bash", "-c", validateStep?.run ?? ""], {
           cwd: repoRoot,

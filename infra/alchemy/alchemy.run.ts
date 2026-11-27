@@ -2,12 +2,19 @@ import * as GCP from "@alchemy.run/gcp";
 import * as Alchemy from "alchemy";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
-import { declareKvitbitStack, KVITBIT_STACK_NAME } from "./src/bootstrap";
+import {
+  assertFeedbackSecretSelection,
+  declareKvitbitStack,
+  KVITBIT_STACK_NAME,
+} from "./src/bootstrap";
 import { loadStackConfig } from "./src/config";
 import { EdgeBackendServiceProvider } from "./src/resources/edge-backend-service";
 import { EdgeSecurityPolicyProvider } from "./src/resources/edge-security-policy";
 
-const stackConfig = loadStackConfig.pipe(Effect.orDie);
+const stackConfig = loadStackConfig.pipe(
+  Effect.tap((config) => assertFeedbackSecretSelection(config, process.argv)),
+  Effect.orDie,
+);
 
 const gcsStateLayer = Layer.unwrap(
   stackConfig.pipe(Effect.map((config) => GCP.state({ bucketName: config.stateBucket }))),

@@ -1,3 +1,4 @@
+import * as SecretManager from "@alchemy.run/gcp/SecretManager";
 import { Stage } from "alchemy/Stage";
 import * as State from "alchemy/State";
 import * as Data from "effect/Data";
@@ -16,6 +17,66 @@ import { declareNetworkAndRunners } from "./resources/network";
 import { declareServerService } from "./resources/server";
 
 export const KVITBIT_STACK_NAME = "Kvitbit";
+
+export const feedbackSecretFqn = (stage: KvitbitStackConfig["stage"]): string =>
+  `Secret-kvitbit-${stage}-feedback-github-token`;
+
+export class BootstrapSelectionError extends Data.TaggedError("BootstrapSelectionError")<{
+  readonly expectedInclude: string;
+  readonly observedIncludes: ReadonlyArray<string>;
+}> {
+  override get message() {
+    return (
+      `Refusing KVITBIT_BOOTSTRAP_FEEDBACK_SECRET=true without exact resource selection: ` +
+      `expected --include ${this.expectedInclude} only (got [${this.observedIncludes.join(", ")}]).`
+    );
+  }
+}
+
+/** Extracts every `--include <value>` / `--include=<value>` selector from CLI arguments. */
+export const parseIncludeArgs = (argv: ReadonlyArray<string>): ReadonlyArray<string> => {
+  const includes: Array<string> = [];
+  for (let i = 0; i < argv.length; i += 1) {
+    const arg = argv[i];
+    if (arg === "--include") {
+      const next = argv[i + 1];
+      if (next !== undefined && next.length > 0) {
+        includes.push(next);
+        i += 1;
+      }
+    } else if (arg?.startsWith("--include=")) {
+      const value = arg.slice("--include=".length);
+      if (value.length > 0) {
+        includes.push(value);
+      }
+    }
+  }
+  return includes;
+};
+
+/**
+ * Enforces that a `bootstrapFeedbackSecret` CLI invocation explicitly selects ONLY the single
+ * feedback secret container (`--include Secret-kvitbit-<stage>-feedback-github-token`).
+ */
+export const assertFeedbackSecretSelection = (
+  config: KvitbitStackConfig,
+  argv: ReadonlyArray<string>,
+): Effect.Effect<void, BootstrapSelectionError> => {
+  if (!(config.bootstrapFeedbackSecret ?? false)) {
+    return Effect.void;
+  }
+  const expectedInclude = feedbackSecretFqn(config.stage);
+  const observedIncludes = parseIncludeArgs(argv);
+  if (observedIncludes.length !== 1 || observedIncludes[0] !== expectedInclude) {
+    return Effect.fail(
+      new BootstrapSelectionError({
+        expectedInclude,
+        observedIncludes,
+      }),
+    );
+  }
+  return Effect.void;
+};
 
 export class StackStageMismatchError extends Data.TaggedError("StackStageMismatchError")<{
   readonly alchemyStage: string;
@@ -120,6 +181,26 @@ export const declareKvitbitStack = (config: KvitbitStackConfig) =>
         alchemyStage: stage,
         configStage: config.stage,
       });
+    }
+
+    if (config.bootstrapFeedbackSecret ?? false) {
+      const targetId = feedbackSecretFqn(config.stage);
+      const feedbackDecl = secretDeclarations(config).find((decl) => decl.id === targetId);
+      if (feedbackDecl === undefined) {
+        return yield* new BootstrapSelectionError({
+          expectedInclude: targetId,
+          observedIncludes: [],
+        });
+      }
+      const secret = yield* SecretManager.Secret(feedbackDecl.id, feedbackDecl.props);
+      return {
+        stage: config.stage,
+        bootstrapFoundation: false as const,
+        bootstrapFeedbackSecret: true as const,
+        projectId: config.projectId,
+        region: config.region,
+        feedbackSecretId: secret.secretId,
+      };
     }
 
     if (config.bootstrapFoundation) {

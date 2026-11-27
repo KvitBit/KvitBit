@@ -55,6 +55,7 @@ export const FORBIDDEN_OPT_OUT_ENV_VARS = [
   "KVITBIT_PREVIEW_DISABLE_EMAIL",
   "KVITBIT_PREVIEW_DISABLE_BLOB",
   "KVITBIT_DISABLE_EMAIL",
+  "KVITBIT_DISABLE_BLOB",
   "KVITBIT_DISABLE_BLOBS",
   "KVITBIT_DISABLE_ORIGIN_CHECK",
   "KVITBIT_ALLOW_LOCAL_BLOBS",
@@ -63,8 +64,10 @@ export const FORBIDDEN_OPT_OUT_ENV_VARS = [
 const DOMAIN_PATTERN = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/;
 const IPV4_LOOPBACK_PATTERN =
   /^127\.(?:25[0-5]|2[0-4]\d|1?\d?\d)\.(?:25[0-5]|2[0-4]\d|1?\d?\d)\.(?:25[0-5]|2[0-4]\d|1?\d?\d)$/;
-const EMAIL_ADDR_PATTERN =
-  /^[^\s@<>]+@(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?\.)+(?:[a-zA-Z]{2,}|xn--[a-zA-Z0-9-]{2,})$/;
+const EMAIL_LOCAL_ATOM = "[a-zA-Z0-9!#$%&'*+/=?^_`{|}~-]+";
+const EMAIL_ADDR_PATTERN = new RegExp(
+  `^${EMAIL_LOCAL_ATOM}(?:\\.${EMAIL_LOCAL_ATOM})*@(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?\\.)+(?:[a-zA-Z]{2,}|xn--[a-zA-Z0-9-]{2,})$`,
+);
 const FORBIDDEN_OPT_OUT_PATTERN = /^KVITBIT_(?:PREVIEW_)?DISABLE_/;
 
 export const trimOptional = (raw: string | undefined): string | undefined => {
@@ -89,7 +92,8 @@ export const isLocalhostHostname = (hostname: string): boolean => {
   const normalized = hostname
     .replace(/^\[|\]$/g, "")
     .trim()
-    .toLowerCase();
+    .toLowerCase()
+    .replace(/\.+$/, "");
   return (
     normalized === "localhost" ||
     normalized.endsWith(".localhost") ||
@@ -151,6 +155,13 @@ export const isValidEmailFrom = (raw: string | undefined): boolean => {
   }
   const bracketMatch = /^[^<>]*<([^<>]+)>$/.exec(trimmed);
   const address = (bracketMatch?.[1] ?? trimmed).trim();
+  if (address.length > 254) {
+    return false;
+  }
+  const atIndex = address.indexOf("@");
+  if (atIndex <= 0 || atIndex > 64) {
+    return false;
+  }
   return EMAIL_ADDR_PATTERN.test(address);
 };
 
@@ -306,12 +317,44 @@ export const validateDeployPreflight = (
   }
 
   // Zero opt-outs or non-prod modes are allowed in production deploys (even during bootstrap).
+  // Inspect both process env and the full GitHub Actions repository `vars` JSON when provided.
   const forbiddenFlag = findForbiddenOptOutFlag(env);
   if (forbiddenFlag !== undefined) {
     return failPreflight(
       forbiddenFlag,
       `Opt-out flag ${forbiddenFlag} is forbidden in production deploys.`,
     );
+  }
+  const repoVarsJson = trimOptional(env.KVITBIT_REPO_VARS_JSON);
+  if (repoVarsJson !== undefined) {
+    let parsedVars: unknown;
+    try {
+      parsedVars = JSON.parse(repoVarsJson);
+    } catch {
+      return failPreflight(
+        "KVITBIT_REPO_VARS_JSON",
+        "KVITBIT_REPO_VARS_JSON must be a valid JSON object.",
+      );
+    }
+    if (typeof parsedVars !== "object" || parsedVars === null || Array.isArray(parsedVars)) {
+      return failPreflight(
+        "KVITBIT_REPO_VARS_JSON",
+        "KVITBIT_REPO_VARS_JSON must be a JSON object.",
+      );
+    }
+    const repoVarsMap: Record<string, string | undefined> = {};
+    for (const [k, v] of Object.entries(parsedVars as Record<string, unknown>)) {
+      if (v !== null && v !== undefined) {
+        repoVarsMap[k] = String(v);
+      }
+    }
+    const forbiddenRepoVar = findForbiddenOptOutFlag(repoVarsMap);
+    if (forbiddenRepoVar !== undefined) {
+      return failPreflight(
+        forbiddenRepoVar,
+        `Opt-out repository variable ${forbiddenRepoVar} is forbidden in production deploys.`,
+      );
+    }
   }
 
   const kvitbitEnv = trimOptional(env.KVITBIT_ENV);

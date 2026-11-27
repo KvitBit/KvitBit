@@ -1,4 +1,5 @@
 import * as Config from "effect/Config";
+import * as ConfigProvider from "effect/ConfigProvider";
 import * as Data from "effect/Data";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
@@ -6,6 +7,7 @@ import {
   type BlobDriver,
   type EmailMode,
   FORBIDDEN_OPT_OUT_ENV_VARS,
+  findForbiddenOptOutFlag,
   isBlobDriver,
   isEmailMode,
   isProdEmailMode,
@@ -497,6 +499,37 @@ const optionalInt = (
     return Number.parseInt(raw, 10);
   });
 
+const collectKvitbitProviderEnv = (
+  provider: ConfigProvider.ConfigProvider,
+  path: ReadonlyArray<string> = [],
+): Effect.Effect<Array<readonly [string, string]>, Config.ConfigError> =>
+  Effect.gen(function* () {
+    const node = yield* provider
+      .load(path)
+      .pipe(Effect.mapError((error) => new Config.ConfigError(error)));
+    if (node === undefined) return [];
+    const entries: Array<readonly [string, string]> = [];
+    if (node._tag === "Value") {
+      if (path.length > 0) {
+        entries.push([path.join("_"), node.value]);
+      }
+      return entries;
+    }
+    if (node._tag === "Record") {
+      if (node.value !== undefined && path.length > 0) {
+        entries.push([path.join("_"), node.value]);
+      }
+      for (const key of node.keys) {
+        if (path.length === 0 && key !== "KVITBIT" && !key.startsWith("KVITBIT_")) {
+          continue;
+        }
+        const nested = yield* collectKvitbitProviderEnv(provider, [...path, key]);
+        entries.push(...nested);
+      }
+    }
+    return entries;
+  });
+
 export const loadStackConfig: Effect.Effect<
   KvitbitStackConfig,
   Config.ConfigError | InvalidStackConfig
@@ -512,14 +545,20 @@ export const loadStackConfig: Effect.Effect<
   }
   const stage: KvitbitStage = stageRaw;
 
+  const provider = yield* ConfigProvider.ConfigProvider;
+  const kvitbitEntries = yield* collectKvitbitProviderEnv(provider);
+  const dynamicMap: Record<string, string | undefined> = Object.fromEntries(kvitbitEntries);
   for (const forbidden of FORBIDDEN_OPT_OUT_ENV_VARS) {
-    const value = yield* optionalNonEmptyString(forbidden);
-    if (value !== undefined) {
-      return yield* new InvalidStackConfig({
-        field: forbidden,
-        reason: `boolean opt-out flag ${forbidden} is forbidden; use typed mode variables in staging only`,
-      });
+    if (dynamicMap[forbidden] === undefined) {
+      dynamicMap[forbidden] = yield* optionalNonEmptyString(forbidden);
     }
+  }
+  const forbiddenFlag = findForbiddenOptOutFlag(dynamicMap);
+  if (forbiddenFlag !== undefined) {
+    return yield* new InvalidStackConfig({
+      field: forbiddenFlag,
+      reason: `boolean opt-out flag ${forbiddenFlag} is forbidden; use typed mode variables in staging only`,
+    });
   }
 
   const kvitbitEnvRaw = yield* optionalNonEmptyString("KVITBIT_ENV");

@@ -55,6 +55,7 @@ export const FORBIDDEN_OPT_OUT_ENV_VARS = [
   "KVITBIT_PREVIEW_DISABLE_EMAIL",
   "KVITBIT_PREVIEW_DISABLE_BLOB",
   "KVITBIT_DISABLE_EMAIL",
+  "KVITBIT_DISABLE_BLOB",
   "KVITBIT_DISABLE_BLOBS",
   "KVITBIT_DISABLE_ORIGIN_CHECK",
   "KVITBIT_ALLOW_LOCAL_BLOBS",
@@ -147,7 +148,8 @@ export const isLocalhostHostname = (hostname: string): boolean => {
   const normalized = hostname
     .replace(/^\[|\]$/g, "")
     .trim()
-    .toLowerCase();
+    .toLowerCase()
+    .replace(/\.+$/, "");
   return (
     normalized === "localhost" ||
     normalized.endsWith(".localhost") ||
@@ -213,8 +215,10 @@ export const validateAppOrigin = (
   return ok(parsed.origin);
 };
 
-const EMAIL_ADDR_PATTERN =
-  /^[^\s@<>]+@(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?\.)+(?:[a-zA-Z]{2,}|xn--[a-zA-Z0-9-]{2,})$/;
+const EMAIL_LOCAL_ATOM = "[a-zA-Z0-9!#$%&'*+/=?^_`{|}~-]+";
+const EMAIL_ADDR_PATTERN = new RegExp(
+  `^${EMAIL_LOCAL_ATOM}(?:\\.${EMAIL_LOCAL_ATOM})*@(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?\\.)+(?:[a-zA-Z]{2,}|xn--[a-zA-Z0-9-]{2,})$`,
+);
 
 /** Validates an explicit `EMAIL_FROM` header value (either `user@domain.tld` or `Name <user@domain.tld>`). */
 export const isValidEmailFrom = (raw: string | undefined): boolean => {
@@ -224,6 +228,13 @@ export const isValidEmailFrom = (raw: string | undefined): boolean => {
   }
   const bracketMatch = /^[^<>]*<([^<>]+)>$/.exec(trimmed);
   const address = (bracketMatch?.[1] ?? trimmed).trim();
+  if (address.length > 254) {
+    return false;
+  }
+  const atIndex = address.indexOf("@");
+  if (atIndex <= 0 || atIndex > 64) {
+    return false;
+  }
   return EMAIL_ADDR_PATTERN.test(address);
 };
 
@@ -534,6 +545,37 @@ export const loadValidatedAppOrigin: Effect.Effect<string, Config.ConfigError> =
   },
 );
 
+const collectKvitbitProviderEntries = (
+  provider: ConfigProvider.ConfigProvider,
+  path: ReadonlyArray<string> = [],
+): Effect.Effect<Array<readonly [string, string]>, Config.ConfigError> =>
+  Effect.gen(function* () {
+    const node = yield* provider
+      .load(path)
+      .pipe(Effect.mapError((error) => new Config.ConfigError(error)));
+    if (node === undefined) return [];
+    const entries: Array<readonly [string, string]> = [];
+    if (node._tag === "Value") {
+      if (path.length > 0) {
+        entries.push([path.join("_"), node.value]);
+      }
+      return entries;
+    }
+    if (node._tag === "Record") {
+      if (node.value !== undefined && path.length > 0) {
+        entries.push([path.join("_"), node.value]);
+      }
+      for (const key of node.keys) {
+        if (path.length === 0 && key !== "KVITBIT" && !key.startsWith("KVITBIT_")) {
+          continue;
+        }
+        const nested = yield* collectKvitbitProviderEntries(provider, [...path, key]);
+        entries.push(...nested);
+      }
+    }
+    return entries;
+  });
+
 /**
  * Loads and validates the complete boot-time runtime configuration from the active Effect
  * `ConfigProvider` before binding HTTP or starting Effect Cluster runners.
@@ -542,6 +584,9 @@ export const loadBootRuntimeConfig = (
   workload: ServerWorkload,
 ): Effect.Effect<ValidatedRuntimeEnv, Config.ConfigError> =>
   Effect.gen(function* () {
+    const provider = yield* ConfigProvider.ConfigProvider;
+    const dynamicKvitbitEntries = yield* collectKvitbitProviderEntries(provider);
+
     const envMap: Record<string, string | undefined> = {
       KVITBIT_ENV: yield* optionalEnvString("KVITBIT_ENV"),
       NODE_ENV: yield* optionalEnvString("NODE_ENV"),
@@ -558,8 +603,15 @@ export const loadBootRuntimeConfig = (
       KVITBIT_BLOB_DIR: yield* optionalEnvString("KVITBIT_BLOB_DIR"),
       KVITBIT_GCS_PROJECT: yield* optionalEnvString("KVITBIT_GCS_PROJECT"),
     };
+    for (const [key, value] of dynamicKvitbitEntries) {
+      if (!(key in envMap)) {
+        envMap[key] = value;
+      }
+    }
     for (const forbidden of FORBIDDEN_OPT_OUT_ENV_VARS) {
-      envMap[forbidden] = yield* optionalEnvString(forbidden);
+      if (envMap[forbidden] === undefined) {
+        envMap[forbidden] = yield* optionalEnvString(forbidden);
+      }
     }
     return yield* liftValidation(validateServerRuntimeEnv(envMap, workload));
   });

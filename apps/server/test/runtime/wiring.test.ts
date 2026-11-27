@@ -24,7 +24,8 @@ import type {
   WorkspaceId,
 } from "@kvitbit/domain/contract";
 import { BlobStorage, EmailSender } from "@kvitbit/domain/ports";
-import { BigDecimal, Effect, Layer, Option, Redacted, Stream } from "effect";
+import { BigDecimal, ConfigProvider, Effect, Layer, Option, Redacted, Stream } from "effect";
+import { loadBootRuntimeConfig } from "../../src/config-contract";
 import {
   deriveInvitationTokenKey,
   deriveShareLinkKey,
@@ -272,6 +273,51 @@ describe("wiring: email & SMTP URL parsing", () => {
       _tag: "Success",
       success: { provider: "console" },
     });
+  });
+
+  test("loadBootRuntimeConfig rejects arbitrary disable flags, trailing-dot localhost, malformed senders, and preserves production on upgrade", async () => {
+    const validProdEnv: Record<string, string> = {
+      NODE_ENV: "production",
+      KVITBIT_ENV: "",
+      DATABASE_URL: "postgres://app:pw@db.internal:5432/kvitbit",
+      BETTER_AUTH_SECRET: "synthetic-auth-secret",
+      APP_ORIGIN: "https://kvitbit.cz",
+      EMAIL_FROM: "Kvitbit <noreply@kvitbit.cz>",
+      RESEND_API_KEY: "re_synthetic_key",
+      KVITBIT_BLOB_DRIVER: "gcs",
+      KVITBIT_BLOB_BUCKET: "kvitbit-prod-blobs",
+    };
+
+    const loadWith = (env: Record<string, string>) =>
+      Effect.runPromise(
+        loadBootRuntimeConfig("server").pipe(
+          Effect.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env }))),
+          Effect.result,
+        ),
+      );
+
+    // Upgrade fixture (NODE_ENV=production, KVITBIT_ENV empty, Resend configured) stays in production with Resend (never capture).
+    const upgraded = await loadWith(validProdEnv);
+    expect(upgraded._tag).toBe("Success");
+    if (upgraded._tag === "Success") {
+      expect(upgraded.success.env).toBe("production");
+      expect(upgraded.success.email.mode).toBe("resend");
+      expect(upgraded.success.blob.driver).toBe("gcs");
+    }
+
+    for (const [label, overrides] of [
+      ["KVITBIT_DISABLE_BLOB", { KVITBIT_DISABLE_BLOB: "true" }],
+      ["KVITBIT_DISABLE_CUSTOM", { KVITBIT_DISABLE_CUSTOM: "1" }],
+      ["KVITBIT_PREVIEW_DISABLE_EMAIL", { KVITBIT_PREVIEW_DISABLE_EMAIL: "true" }],
+      ["trailing-dot localhost", { APP_ORIGIN: "https://localhost." }],
+      ["trailing-dot sub.localhost", { APP_ORIGIN: "https://sub.localhost." }],
+      ["consecutive dots in EMAIL_FROM", { EMAIL_FROM: "a..b@example.org" }],
+      ["leading dot in EMAIL_FROM", { EMAIL_FROM: ".a@example.org" }],
+      ["trailing dot in EMAIL_FROM", { EMAIL_FROM: "a.@example.org" }],
+    ] as const) {
+      const res = await loadWith({ ...validProdEnv, ...overrides });
+      expect(res._tag, `expected failure for ${label}`).toBe("Failure");
+    }
   });
 });
 

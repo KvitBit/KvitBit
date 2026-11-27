@@ -78,6 +78,8 @@ jobs:
           bun-version: 1.4.2
 
       - name: Validate GCP deployment variables
+        env:
+          KVITBIT_REPO_VARS_JSON: ${{ toJSON(vars) }}
         run: |
           set -euo pipefail
           bun infra/alchemy/src/preflight-cli.ts

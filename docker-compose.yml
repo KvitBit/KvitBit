@@ -78,10 +78,10 @@ services:
       - "${KVITBIT_PORT:-8080}:8080"
     environment:
       NODE_ENV: production
-      # Local self-hosted compose defaults to development DX; set KVITBIT_ENV=production (with
-      # real HTTPS APP_ORIGIN, EMAIL_FROM, email transport, and GCS blobs) or KVITBIT_ENV=preview
-      # with explicit typed modes (KVITBIT_EMAIL_MODE, KVITBIT_BLOB_DRIVER) for stricter deploys.
-      KVITBIT_ENV: ${KVITBIT_ENV:-development}
+      # Preserves production behavior on upgrade when KVITBIT_ENV is unset (fail-fast).
+      # For local evaluation without production email/GCS/HTTPS, explicitly set
+      # KVITBIT_ENV=development (or KVITBIT_ENV=preview with KVITBIT_EMAIL_MODE & KVITBIT_BLOB_DRIVER).
+      KVITBIT_ENV: ${KVITBIT_ENV:-}
       HOST: "0.0.0.0"
       PORT: "8080"
       # Runtime server uses the DML-only app role, never migration owner credentials (S5).

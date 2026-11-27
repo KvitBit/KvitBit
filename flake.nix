@@ -231,17 +231,19 @@
                   "preview"
                   "development"
                 ];
-                default = "development";
-                description = "Typed Kvitbit runtime environment (KVITBIT_ENV). Local self-hosted installs default to 'development'; set 'production' only with HTTPS APP_ORIGIN, real email transport, and GCS blob storage.";
+                default = "production";
+                description = "Typed Kvitbit runtime environment (KVITBIT_ENV). Defaults to 'production' to preserve fail-fast behavior on upgrade; explicitly set 'development' or 'preview' for non-production self-hosting.";
               };
 
               blobDriver = lib.mkOption {
-                type = lib.types.enum [
-                  "local"
-                  "gcs"
-                ];
-                default = "local";
-                description = "Blob storage driver (KVITBIT_BLOB_DRIVER). Must be 'gcs' when environment = \"production\".";
+                type = lib.types.nullOr (
+                  lib.types.enum [
+                    "local"
+                    "gcs"
+                  ]
+                );
+                default = null;
+                description = "Optional explicit blob storage driver (KVITBIT_BLOB_DRIVER). Must be 'gcs' in production and explicitly set ('gcs' or 'local') in staging/preview; omitted in development to use the server default.";
               };
 
               emailMode = lib.mkOption {
@@ -384,13 +386,13 @@
                     HOST = effectiveHost;
                     PORT = toString cfg.port;
                     KVITBIT_RUNNER_MODE = "single";
-                    KVITBIT_BLOB_DRIVER = cfg.blobDriver;
                     KVITBIT_BLOB_DIR = cfg.blobDir;
                     KVITBIT_MOBILE_STORAGE_DIR = cfg.mobileStorageDir;
                     KVITBIT_CHROMIUM_PATH = cfg.chromiumPath;
                     KVITBIT_TRUSTED_PROXY_HOPS = toString effectiveTrustedProxyHops;
                     KVITBIT_SHARE_KEY_VERSION = toString cfg.shareKeyVersion;
                   }
+                  // lib.optionalAttrs (cfg.blobDriver != null) { KVITBIT_BLOB_DRIVER = cfg.blobDriver; }
                   // lib.optionalAttrs (cfg.emailMode != null) { KVITBIT_EMAIL_MODE = cfg.emailMode; }
                   // lib.optionalAttrs (cfg.appOrigin != null) { APP_ORIGIN = cfg.appOrigin; }
                   // lib.optionalAttrs (cfg.emailFrom != null) { EMAIL_FROM = cfg.emailFrom; }
