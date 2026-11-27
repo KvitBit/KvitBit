@@ -55,7 +55,7 @@ const failingProdEmail = (status = 422, body = "private-provider-payload") => {
       smtpUrl: Option.none(),
     },
     "production",
-  ).pipe(Layer.provide(Layer.succeed(FetchHttpClient.Fetch, send)));
+  ).pipe(Layer.provide(Layer.succeed(FetchHttpClient.Fetch, send)), Layer.orDie);
 };
 
 const unconfiguredEmail = makeEmailSenderLayer(
@@ -432,7 +432,7 @@ describe("server logging", () => {
         smtpUrl: Option.none(),
       },
       "production",
-    ).pipe(Layer.provide(Layer.succeed(FetchHttpClient.Fetch, send)));
+    ).pipe(Layer.provide(Layer.succeed(FetchHttpClient.Fetch, send)), Layer.orDie);
     const app = makeHarness({ authEmailSender, logger: layer });
     const email = "private-configured-recipient@example.test";
     const password = "A private-strong password!";
