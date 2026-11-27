@@ -5,7 +5,7 @@ description: >-
   changes to apps/web/src, the web entry or build configuration, or
   packages/ui-port/src/theme.
 metadata:
-  sync_commit: "204841bb3f0dafd505530b8d4456947b134a3d5a"
+  sync_commit: "383766ac036a7dfe79ace530bcd508e3c32c3740"
   bun: "1.4.4"
   node: "24.18.0"
   effect: "4.1.4"
@@ -79,8 +79,17 @@ that record in a verification commit after the product changes.
 
 ## Verification record
 
-The recorded product commit passed the frozen install, root lint and
-typecheck, and the formal digest check. Targeted unit tests passed for
+The recorded product commit passed root lint and typecheck, all 183 web
+tests, and the formal digest check. The lockfile was unchanged. The static
+build contained `dist/index.html`, hashed JavaScript and CSS, brand assets,
+and fonts. All 56 smoke and feedback tests passed on port `34181` with one
+worker across desktop and mobile Chromium profiles. The smoke suite covers
+stretched and inline segmented controls in English and Czech, including
+equal-width sign-up options, single-line sign-in labels, and word fit in a
+220 px appearance field.
+
+At `204841bb3f0dafd505530b8d4456947b134a3d5a`, the frozen install, root lint
+and typecheck, and formal digest check passed. Targeted unit tests passed for
 `packages/ui-port`, `apps/web`, and `apps/mobile` auth screens
 (`apps/mobile/src/features/auth/auth-screens.test.tsx`). The static web
 build contains `dist/index.html`, hashed JavaScript and CSS, the ALTCHA
