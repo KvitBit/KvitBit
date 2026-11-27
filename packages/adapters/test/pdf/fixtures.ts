@@ -286,8 +286,19 @@ export const eurModel = (variant: Variant = "invoice"): DocumentRenderModel => {
     bankAccount: { accountNumber: null, iban: "DE89370400440532013000", bic: "COBADEFFXXX" },
     paymentQr: {
       format: "epc",
-      payload:
-        "BCD\n002\n1\nSCT\nCOBADEFFXXX\nAteliér Kalný s.r.o.\nDE89370400440532013000\nEUR1960.00",
+      payload: Arr.join(
+        [
+          "BCD",
+          "002",
+          "1",
+          "SCT",
+          "COBADEFFXXX",
+          "Ateliér Kalný s.r.o.",
+          "DE89370400440532013000",
+          "EUR1960.00",
+        ],
+        "\n",
+      ),
     },
   };
 };

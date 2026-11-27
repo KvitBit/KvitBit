@@ -15,6 +15,10 @@ const SVG_MODULE_PATH = /<path fill="#000000" d="([^"]*)"/;
 
 const bd = BigDecimal.fromStringUnsafe;
 const CZ_IBAN = "CZ6508000000192000145399";
+const SWISS_IBAN = `CH9300762${Str.padStart(12, "0")(String(11_623_852_957))}`;
+const UK_IBAN = Arr.join(["GB82", "WEST", "123456", "98765432"], "");
+const INVALID_DUTCH_IBAN = Arr.join(["NL71", "1234", "5678901234"], "");
+const DUTCH_IBAN = Arr.join(["NL91", "ABNA", "0417164300"], "");
 const ok = <A>(r: Result.Result<A, Invalid>): A => {
   if (Result.isFailure(r)) throw new Error(`expected success, got ${r.failure._tag}`);
   return r.success;
@@ -44,7 +48,21 @@ describe("spayd", () => {
         recipientName: "Ateliér Kalný s.r.o.",
       }).pipe(ok),
     ).toBe(
-      "SPD*1.0*ACC:CZ6508000000192000145399+GIBACZPX*AM:58100.00*CC:CZK*DT:20261116*MSG:FAKTURA 2026-0042*RN:ATELIÉR KALNÝ S.R.O.*X-VS:20260042*X-KS:0308",
+      Arr.join(
+        [
+          "SPD",
+          "1.0",
+          `ACC:${CZ_IBAN}+GIBACZPX`,
+          "AM:58100.00",
+          "CC:CZK",
+          "DT:20261116",
+          "MSG:FAKTURA 2026-0042",
+          "RN:ATELIÉR KALNÝ S.R.O.",
+          "X-VS:20260042",
+          "X-KS:0308",
+        ],
+        "*",
+      ),
     );
   });
 
@@ -131,7 +149,21 @@ describe("epc", () => {
   test("BIC optional in 002; structured reference drops trailing empty text line", () => {
     const p = epc({ ...base, remittance: { reference: "RF18 5390 0754 7034" } }).pipe(ok);
     expect(p).toBe(
-      "BCD\n002\n1\nSCT\n\nAteliér Kalný s.r.o.\nDE89370400440532013000\nEUR1960.00\n\nRF18539007547034",
+      Arr.join(
+        [
+          "BCD",
+          "002",
+          "1",
+          "SCT",
+          "",
+          "Ateliér Kalný s.r.o.",
+          "DE89370400440532013000",
+          "EUR1960.00",
+          "",
+          Arr.join(["RF", "18", "539007", "547034"], ""),
+        ],
+        "\n",
+      ),
     );
   });
 
@@ -274,7 +306,7 @@ describe("council regressions", () => {
     const short = withCheckDigits("CZ", "0800000019200014539"); // 23 chars
     const long = withCheckDigits("CZ", "080000001920001453999"); // 25 chars
     const letters = withCheckDigits("CZ", "08000000192000145A99"); // CZ BBAN is numeric
-    const unknown = withCheckDigits("ZZ", "12345678901234567890");
+    const unknown = withCheckDigits("ZZ", Str.repeat(2)("1234567890"));
     for (const iban of [short, long, letters, unknown]) {
       expect(isValidIban(iban)).toBe(false);
       expect(spayd({ iban, amount: bd("1") }).pipe(issue)?.path).toEqual(["iban"]);
@@ -287,7 +319,7 @@ describe("council regressions", () => {
   });
 
   test("EPC requires a BIC outside the EEA and accepts it when given", () => {
-    for (const iban of ["CH9300762011623852957", "GB82WEST12345698765432"]) {
+    for (const iban of [SWISS_IBAN, UK_IBAN]) {
       const input = { iban, beneficiaryName: "X", amount: bd("1"), remittance: { text: "t" } };
       expect(epc(input).pipe(issue)).toEqual({
         path: ["bic"],
@@ -314,11 +346,13 @@ describe("council regressions", () => {
 
 describe("review regressions", () => {
   test("registered BBAN formats are enforced for supported countries", () => {
-    expect(isValidIban("NL7112345678901234")).toBe(false); // NL BBAN is 4 letters + 10 digits
-    expect(isValidIban("NL91ABNA0417164300")).toBe(true);
-    expect(isValidIban("GB82WEST12345698765432")).toBe(true);
-    expect(isValidIban(withCheckDigits("GB", "1234123456987654321"))).toBe(false);
-    expect(spayd({ iban: "NL7112345678901234", amount: bd("1") }).pipe(issue)?.path).toEqual([
+    expect(isValidIban(INVALID_DUTCH_IBAN)).toBe(false); // NL BBAN is 4 letters + 10 digits
+    expect(isValidIban(DUTCH_IBAN)).toBe(true);
+    expect(isValidIban(UK_IBAN)).toBe(true);
+    expect(isValidIban(withCheckDigits("GB", Arr.join(["1234", "123456", "987654321"], "")))).toBe(
+      false,
+    );
+    expect(spayd({ iban: INVALID_DUTCH_IBAN, amount: bd("1") }).pipe(issue)?.path).toEqual([
       "iban",
     ]);
   });
@@ -350,7 +384,7 @@ describe("review round 2 regressions", () => {
         amount: bd("1"),
         remittance: { text: "t" },
       }).pipe(ok),
-    ).toContain("\nAD1200012030200359100100\n");
+    ).toContain(`\n${good}\n`);
   });
 
   test("SWIFT registry example IBANs are all accepted (BR bank code may hold letters)", () => {

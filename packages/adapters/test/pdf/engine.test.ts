@@ -23,7 +23,7 @@ const A4_MEDIA_BOX = /\/MediaBox \[0 0 59\d\.\d+ 84\d\.\d+\]/;
 const startsWithPdf = (bytes: Uint8Array) =>
   new TextDecoder().decode(bytes.slice(0, 5)) === "%PDF-";
 
-describe("FakePdfEngine", () => {
+describe("Fake PDF engine", () => {
   test("returns a valid one-page PDF and records the HTML it printed", async () => {
     const fake = makeFakePdfEngine();
     const bytes = await Effect.runPromise(
