@@ -27,6 +27,7 @@ import { enumKey } from "@kvitbit/ui-port/i18n";
 import { displayAmount } from "@kvitbit/ui-port/view-models";
 import { BigDecimal } from "effect";
 import { router } from "expo-router";
+import { posthog, posthogLog } from "../../config/posthog";
 import { BookOpen, Plus, Save, Send, Trash2, Users } from "lucide-react-native";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Modal, ScrollView, StyleSheet, View } from "react-native";
@@ -673,6 +674,28 @@ export function DocumentEditorScreen(props: DocumentEditorProps) {
     }
   };
 
+  const captureDocumentOutcome = (draft: EditorDraft, intent: "save" | "issue") => {
+    try {
+      posthog?.capture(intent === "issue" ? "document_issued" : "document_draft_saved", {
+        document_kind: draft.kind,
+        document_mode: props.mode,
+        currency: draft.currency,
+        payment_method: draft.paymentMethod,
+        line_count: draft.lines.length,
+      });
+      posthogLog.info("document operation completed", {
+        document_kind: draft.kind,
+        operation: intent,
+        document_mode: props.mode,
+        currency: draft.currency,
+        payment_method: draft.paymentMethod,
+        line_count: draft.lines.length,
+      });
+    } catch {
+      // Analytics must not affect document creation or editing.
+    }
+  };
+
   const saveOrIssue = async (draft: EditorDraft, intent: "save" | "issue") => {
     if (props.mode === "new") {
       const input = buildDocumentInput(draft);
@@ -698,6 +721,7 @@ export function DocumentEditorScreen(props: DocumentEditorProps) {
         setServerIssues(described.issues);
         return;
       }
+      captureDocumentOutcome(draft, intent);
       overlay.toast(
         intent === "issue"
           ? t("documents.issue.done", { number: res.value.number ?? "" })
@@ -770,6 +794,7 @@ export function DocumentEditorScreen(props: DocumentEditorProps) {
       if (!(await recordWrite(id, null, revision, finalDoc.revision))) return;
     }
 
+    captureDocumentOutcome(draft, intent);
     overlay.toast(
       intent === "issue"
         ? t("documents.issue.done", { number: finalDoc.number ?? "" })

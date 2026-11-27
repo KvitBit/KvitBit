@@ -6,3 +6,4 @@ ios/
 *.apk
 *.keystore
 /code-signing/private-key.pem
+.env

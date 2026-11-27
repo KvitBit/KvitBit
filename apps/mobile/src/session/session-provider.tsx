@@ -9,6 +9,7 @@ import {
   useState,
 } from "react";
 import { apiOrigin } from "../config/env";
+import { posthog, posthogLog } from "../config/posthog";
 import { type AuthFetch, makeAuthFetch } from "./auth-http";
 import { readSessionUser, type SessionUser } from "./session-user";
 import { tokenStore } from "./token-store";
@@ -39,21 +40,21 @@ export function SessionProvider(props: { readonly children: ReactNode; readonly 
   const tokenRef = useRef<string | null>(null);
   const auth = useMemo(() => makeAuthFetch(origin, () => tokenRef.current), [origin]);
 
-  const load = useCallback(async (): Promise<boolean> => {
+  const load = useCallback(async (): Promise<SessionUser | null> => {
     try {
       const response = await auth("/get-session");
       const user = response.ok ? readSessionUser(response.body) : null;
       if (user === null) {
         setState({ status: "signed-out" });
-        return false;
+        return null;
       }
       setState({ status: "signed-in", user, token: tokenRef.current });
-      return true;
+      return user;
     } catch {
       // Offline at launch with a stored token: stay signed out of the UI but keep the token,
       // so the next launch restores it.
       setState({ status: "signed-out" });
-      return false;
+      return null;
     }
   }, [auth]);
 
@@ -75,12 +76,31 @@ export function SessionProvider(props: { readonly children: ReactNode; readonly 
           tokenRef.current = token;
           await tokenStore.write(token);
         }
-        return load();
+        const user = await load();
+        if (user === null) return false;
+        try {
+          posthog?.identify(user.id, {
+            $set: {
+              email: user.email,
+              ...(user.name.length > 0 ? { name: user.name } : {}),
+              email_verified: user.emailVerified,
+            },
+          });
+          posthogLog.info("authenticated session established");
+        } catch {
+          // Analytics must not affect the successful authentication flow.
+        }
+        return true;
       },
       refresh: async () => {
         await load();
       },
       clear: async () => {
+        try {
+          posthog?.reset();
+        } catch {
+          // Analytics must not affect signing out.
+        }
         tokenRef.current = null;
         await tokenStore.clear();
         setState({ status: "signed-out" });

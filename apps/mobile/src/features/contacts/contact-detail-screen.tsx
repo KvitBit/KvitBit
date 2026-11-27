@@ -30,6 +30,7 @@ import { enumKey } from "@kvitbit/ui-port/i18n";
 import { OverrideForm, type Route } from "@kvitbit/ui-port/view-models";
 import { Effect, Option, Result } from "effect";
 import { useLocalSearchParams } from "expo-router";
+import { posthog } from "../../config/posthog";
 import {
   Archive,
   Building2,
@@ -1246,6 +1247,15 @@ function WorkspaceContactDetail({
 
     if (result._tag === "Ok") {
       const saved = parseContactView(result.value);
+      try {
+        posthog?.capture("contact_saved", {
+          contact_mode: isNew ? "created" : "updated",
+          role_count: form.roles.length,
+          has_billing_email: form.billingEmails.length > 0,
+        });
+      } catch {
+        // Analytics must not affect contact saves.
+      }
       overlay.toast(t("common.toast.saved"));
       if (isNew && saved !== null) {
         navigate(

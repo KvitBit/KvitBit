@@ -10,6 +10,7 @@ import {
 } from "lucide-react-native";
 import { useEffect, useRef, useState } from "react";
 import { StyleSheet, View } from "react-native";
+import { posthog } from "../../config/posthog";
 import { useI18n } from "../../i18n/i18n-provider";
 import { navigate } from "../../navigation/routes";
 import {
@@ -164,8 +165,19 @@ function CaptureForm(props: CaptureScreenProps & { readonly access: CaptureAcces
         setProgress({ key, percent: Math.round(value * 100) }),
       );
       if (result?.done === true && result.expenseId !== null && access.canWrite()) {
-        const rejected = result.files.some((receipt) => receipt.result?.kind === "rejected");
-        overlay.toast(t(rejected ? "error.invalid" : "common.toast.saved"));
+        const rejectedCount = result.files.filter(
+          (receipt) => receipt.result?.kind === "rejected",
+        ).length;
+        try {
+          posthog?.capture("expense_receipt_uploaded", {
+            receipt_count: result.files.length,
+            rejected_receipt_count: rejectedCount,
+            updates_existing_expense: targetExpenseId !== null,
+          });
+        } catch {
+          // Analytics must not affect receipt uploads.
+        }
+        overlay.toast(t(rejectedCount > 0 ? "error.invalid" : "common.toast.saved"));
         navigate(
           { _tag: "Expense", ws: access.scope.workspaceSlug, id: result.expenseId, mode: "edit" },
           { replace: true },

@@ -103,6 +103,11 @@ export default (
     name: config.name ?? "Kvitbit",
     slug: config.slug ?? "kvitbit",
     plugins,
+    extra: {
+      ...config.extra,
+      posthogProjectToken: env.EXPO_PUBLIC_POSTHOG_PROJECT_TOKEN,
+      posthogHost: env.EXPO_PUBLIC_POSTHOG_HOST,
+    },
     android: {
       ...config.android,
       package: config.android?.package ?? ANDROID_PACKAGE,

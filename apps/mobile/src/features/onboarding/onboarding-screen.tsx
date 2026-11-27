@@ -11,6 +11,7 @@ import { enumText, type Locale } from "@kvitbit/ui-port/i18n";
 import { Building2, Search } from "lucide-react-native";
 import { useEffect, useState } from "react";
 import { StyleSheet, View } from "react-native";
+import { posthog } from "../../config/posthog";
 import { useI18n } from "../../i18n/i18n-provider";
 import { navigate } from "../../navigation/routes";
 import { useApi } from "../../runtime/api-runtime";
@@ -274,6 +275,15 @@ export function OnboardingScreen(props: { readonly initialStep?: number }) {
       return;
     }
     const ws = saved.result.value;
+    try {
+      posthog?.capture("workspace_created", {
+        tax_regime: taxRegime,
+        currency,
+        has_bank_account: bank !== null,
+      });
+    } catch {
+      // Analytics must not affect workspace creation.
+    }
 
     await lastWorkspace.write(ws.slug);
     setBusy(false);

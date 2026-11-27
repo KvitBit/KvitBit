@@ -4,6 +4,7 @@ import { router } from "expo-router";
 import { MailPlus, RefreshCw, Trash2, UserMinus } from "lucide-react-native";
 import { useState } from "react";
 import { StyleSheet, View } from "react-native";
+import { posthog } from "../../config/posthog";
 import { useI18n } from "../../i18n/i18n-provider";
 import { useApi, useRemote } from "../../runtime/api-runtime";
 import { runRequestIntent } from "../../runtime/request-intent";
@@ -88,6 +89,11 @@ export function TeamSection() {
     );
     setInviting(false);
     if (result._tag === "Ok") {
+      try {
+        posthog?.capture("team_invitation_sent", { invited_role: inviteRole });
+      } catch {
+        // Analytics must not affect invitations.
+      }
       setInviteEmail("");
       invitationsRemote.reload();
       overlay.toast(t("settings.team.inviteSent", { email }));

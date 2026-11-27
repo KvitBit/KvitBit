@@ -13,6 +13,7 @@ import { Option } from "effect";
 import { Copy, KeyRound, Plus, Trash2 } from "lucide-react-native";
 import { useState } from "react";
 import { StyleSheet, View } from "react-native";
+import { posthog } from "../../config/posthog";
 import { useI18n } from "../../i18n/i18n-provider";
 import { useApi, useRemote } from "../../runtime/api-runtime";
 import {
@@ -119,6 +120,11 @@ export function ApiKeysSection() {
     );
     setSaving(false);
     if (result._tag === "Ok") {
+      try {
+        posthog?.capture("api_key_created", { access_mode: accessReq.access });
+      } catch {
+        // Analytics must not affect API key creation.
+      }
       setCreatedSecret(result.value);
       setCreatingOpen(false);
       setName("");
@@ -155,6 +161,11 @@ export function ApiKeysSection() {
     );
     setRevokingId(null);
     if (result._tag === "Ok") {
+      try {
+        posthog?.capture("api_key_revoked", { access_mode: key.access });
+      } catch {
+        // Analytics must not affect API key revocation.
+      }
       remote.reload();
       overlay.toast(t("common.toast.deleted"));
     } else {

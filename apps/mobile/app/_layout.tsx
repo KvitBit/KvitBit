@@ -1,8 +1,10 @@
 import { Stack } from "expo-router";
 import { StatusBar } from "expo-status-bar";
-import { useEffect } from "react";
+import { PostHogProvider } from "posthog-react-native";
+import { type ReactNode, useEffect } from "react";
 import { SafeAreaProvider } from "react-native-safe-area-context";
 import { I18nProvider } from "../src/i18n/i18n-provider";
+import { posthog, posthogLog } from "../src/config/posthog";
 import {
   registerBackgroundCaptureDrain,
   unregisterBackgroundCaptureDrain,
@@ -12,6 +14,11 @@ import { SessionProvider, useSession } from "../src/session/session-provider";
 import { ThemeProvider, useAppTheme } from "../src/theme/theme-provider";
 import { OverlayProvider } from "../src/ui/overlay";
 import { UpdateBanner } from "../src/updates";
+
+function PostHogBoundary({ children }: { readonly children: ReactNode }) {
+  if (posthog === null) return children;
+  return <PostHogProvider client={posthog}>{children}</PostHogProvider>;
+}
 
 function Navigator() {
   const session = useSession();
@@ -42,13 +49,19 @@ function Navigator() {
 }
 
 export default function RootLayout() {
+  useEffect(() => {
+    posthogLog.info("mobile application initialized");
+  }, []);
+
   return (
     <SafeAreaProvider>
       <I18nProvider>
         <ThemeProvider>
-          <SessionProvider>
-            <Navigator />
-          </SessionProvider>
+          <PostHogBoundary>
+            <SessionProvider>
+              <Navigator />
+            </SessionProvider>
+          </PostHogBoundary>
         </ThemeProvider>
       </I18nProvider>
     </SafeAreaProvider>

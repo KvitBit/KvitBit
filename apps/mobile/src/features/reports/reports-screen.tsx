@@ -6,6 +6,7 @@ import type { Period } from "@kvitbit/ui-port/view-models";
 import { ChevronLeft, ChevronRight, FileSpreadsheet, FileText } from "lucide-react-native";
 import { useCallback, useMemo, useState } from "react";
 import { StyleSheet, View } from "react-native";
+import { posthog } from "../../config/posthog";
 import { useI18n } from "../../i18n/i18n-provider";
 import { navigate } from "../../navigation/routes";
 import { useTransfer } from "../../platform/transfer";
@@ -113,6 +114,15 @@ export function ReportsScreen(props: {
       if (shared._tag === "Err") {
         setExportError(text(describeError(shared.error).text));
       } else {
+        try {
+          posthog?.capture("report_exported", {
+            report_kind: props.report,
+            export_format: format,
+            group_by: effectiveGroupBy ?? "none",
+          });
+        } catch {
+          // Analytics must not affect report exports.
+        }
         overlay.toast(t("reports.export.ready"));
       }
     },
