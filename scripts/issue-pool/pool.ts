@@ -119,14 +119,36 @@ export class IssuePool {
     );
   }
 
+  hasWorkerBinding(issue: number, threadId: string): boolean {
+    const bindings = this.db
+      .query<{ repoId: number; issue: number }, [string]>(
+        "SELECT repo_id AS repoId, issue FROM assignment WHERE thread_id = ?",
+      )
+      .all(threadId);
+    const [binding] = bindings;
+    if (!binding) return false;
+    if (bindings.length !== 1 || binding.repoId !== this.repoId || binding.issue !== issue) {
+      throw new PoolError(`T3 worker for issue ${issue} has a conflicting saved assignment`);
+    }
+    return true;
+  }
+
   recordThread(issue: number, threadId: string): void {
     this.db
-      .query(`
-        INSERT INTO assignment (repo_id, issue, phase, thread_id) VALUES (?, ?, 'assigned', ?)
-        ON CONFLICT (repo_id, issue) DO UPDATE SET phase = 'assigned', thread_id = excluded.thread_id
-        WHERE assignment.phase != 'assigned'
-      `)
-      .run(this.repoId, issue, threadId);
+      .transaction(() => {
+        this.hasWorkerBinding(issue, threadId);
+        this.db
+          .query(`
+          INSERT INTO assignment (repo_id, issue, phase, thread_id) VALUES (?, ?, 'assigned', ?)
+          ON CONFLICT (repo_id, issue) DO UPDATE SET phase = 'assigned', thread_id = excluded.thread_id
+          WHERE assignment.phase != 'assigned'
+        `)
+          .run(this.repoId, issue, threadId);
+        if (this.assignment(issue)?.threadId !== threadId) {
+          throw new PoolError(`Issue ${issue} has a different saved T3 worker`);
+        }
+      })
+      .immediate();
   }
 
   replyAccepted(commentId: number): boolean {

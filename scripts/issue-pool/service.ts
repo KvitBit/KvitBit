@@ -5,7 +5,6 @@ import { runCommand } from "./command";
 import {
   defaultRepository,
   githubIssueTracker,
-  matchesRepository,
   resolveRepository,
   verifyProjectOrigin,
 } from "./github";
@@ -47,10 +46,10 @@ async function main(): Promise<void> {
       maxWorkers,
       pool,
       runner: t3WorkerRunner({
-        repo: repo.full_name,
+        repo,
         project,
         run: runCommand,
-        matchesRepo: (slug) => matchesRepository(runCommand, repo, slug),
+        hasWorkerBinding: (issue, threadId) => pool.hasWorkerBinding(issue, threadId),
       }),
       tracker: githubIssueTracker(repo, runCommand),
       async fetchMain() {

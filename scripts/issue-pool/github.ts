@@ -60,7 +60,7 @@ export async function resolveRepository(run: Command, slug: string): Promise<Rep
   return repository;
 }
 
-export async function matchesRepository(
+async function matchesRepository(
   run: Command,
   repository: Repository,
   slug: string,

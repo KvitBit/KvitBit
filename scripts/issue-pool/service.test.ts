@@ -91,7 +91,11 @@ const issue = (number: number, ...labels: string[]) => ({
   labels: [feedbackLabel, ...labels].map((name) => ({ name })),
   assignees: [],
 });
-const thread = (number: number, title = `Kvitbit issue #${number}`) => ({
+const thread = (
+  number: number,
+  title = `Kvitbit issue #${number}`,
+  repoId: number | null = 100,
+) => ({
   threadId: `worker-${number}`,
   title,
   branch: `issue-pool/issue-${number}`,
@@ -100,7 +104,7 @@ const thread = (number: number, title = `Kvitbit issue #${number}`) => ({
   messages: [
     {
       role: "user",
-      text: `$full-send\n\nOwn https://github.com/totalolage/kvitbit/issues/${number} through investigation.`,
+      text: `$full-send\n\n${repoId === null ? "" : `<!-- issue-pool-repository-id:${repoId} -->\n\n`}Own https://github.com/totalolage/kvitbit/issues/${number} through investigation.`,
     },
   ],
 });
@@ -288,6 +292,7 @@ testCli(
     const brief = starts(pass.calls)[0]?.input;
     expect(brief).toStartWith("$full-send\n");
     for (const text of [
+      "<!-- issue-pool-repository-id:100 -->",
       "https://github.com/totalolage/kvitbit/issues/6",
       "Fixes #6",
       "AGENTS.md",
@@ -571,6 +576,79 @@ testCli(
 );
 
 testCli(
+  "a reused GitHub name cannot take over an older worker",
+  async ({ run, setFixture, state }) => {
+    const apply = ["--apply", "--state", state];
+    const worker = thread(4);
+    await setFixture({ issues: [issue(4, claimedLabel)], threads: [worker] });
+    expect((await run(...apply)).result?.adopted).toEqual([4]);
+
+    const reassignedName = {
+      repository: { id: 200, full_name: "other/new", owner: { id: 1, type: "User" } },
+      aliases: ["repos/totalolage/kvitbit"],
+      origin: "https://github.com/other/new.git",
+      threads: [worker],
+      issues: [issue(4, claimedLabel)],
+      comments: { 4: [comment(50, 1, humanNeeded), comment(51, 1, "Maintainer answer")] },
+    };
+    await setFixture(reassignedName);
+    const selection = ["--repo", "other/new", "--state", state];
+    const dry = await run(...selection);
+    expect(dry.result?.plannedReplies).toEqual([]);
+    expect(dry.status).toBe(1);
+    const pass = await run("--apply", ...selection);
+    expect(pass.status).toBe(1);
+    expect(pass.result?.adopted).toEqual([]);
+    expect(writes(dry.calls)).toEqual([]);
+    expect(writes(pass.calls)).toEqual([]);
+    const withoutSavedState = await run("--repo", "other/new");
+    expect(withoutSavedState.status).toBe(1);
+    expect(withoutSavedState.result?.plannedReplies).toEqual([]);
+
+    await setFixture({ ...reassignedName, threads: [thread(4, "Legacy worker", null)] });
+    const legacy = await run("--apply", ...selection);
+    expect(legacy.status).toBe(1);
+    expect(legacy.result?.failures[0]?.reason).toContain("conflicting saved assignment");
+    expect(writes(legacy.calls)).toEqual([]);
+  },
+);
+
+testCli(
+  "a legacy worker requires one matching saved assignment",
+  async ({ run, setFixture, state }) => {
+    const apply = ["--apply", "--state", state];
+    const fixture = {
+      issues: [issue(4, claimedLabel)],
+      threads: [thread(4, "Legacy worker", null)],
+      comments: { 4: [comment(50, 1, humanNeeded), comment(51, 1, "Maintainer answer")] },
+    };
+    await setFixture(fixture);
+    const unknown = await run(...apply);
+    expect(unknown.status).toBe(1);
+    expect(unknown.result?.failures[0]?.reason).toContain("no saved repository binding");
+    expect(writes(unknown.calls)).toEqual([]);
+
+    const db = new Database(state);
+    try {
+      const save = db.query("INSERT INTO assignment VALUES (?, ?, 'assigned', ?)");
+      save.run(100, 4, "worker-4");
+      const known = await run("--state", state);
+      expect(known.status).toBe(0);
+      expect(known.result?.plannedReplies).toEqual([51]);
+      expect(writes(known.calls)).toEqual([]);
+
+      save.run(200, 4, "worker-4");
+      const ambiguous = await run(...apply);
+      expect(ambiguous.status).toBe(1);
+      expect(ambiguous.result?.failures[0]?.reason).toContain("conflicting saved assignment");
+      expect(writes(ambiguous.calls)).toEqual([]);
+    } finally {
+      db.close();
+    }
+  },
+);
+
+testCli(
   "checks the initial brief before using a saved assignment for a reply",
   async ({ run, setFixture, state }) => {
     const apply = ["--apply", "--state", state];
@@ -589,7 +667,7 @@ testCli(
           messages: [
             ...worker.messages.map(({ role, text }) => ({
               role,
-              text: text.replace("totalolage/kvitbit", "another/feedback"),
+              text: text.replace("issue-pool-repository-id:100", "issue-pool-repository-id:101"),
             })),
             ...worker.messages,
           ],
