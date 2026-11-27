@@ -5,7 +5,14 @@ import * as Option from "effect/Option";
 
 export type KvitbitStage = "prod" | "staging";
 
-export type KvitbitWorkload = "server" | "runner";
+export type KvitbitWorkload = "server" | "runner" | "turbo-cache";
+
+export interface KvitbitTurboCacheConfig {
+  readonly bucket: string;
+  readonly image: string;
+  readonly ttlDays: number;
+  readonly maxInstances: number;
+}
 
 export interface KvitbitSecretBinding {
   readonly environmentVariable: string;
@@ -73,6 +80,7 @@ export interface KvitbitStackConfig {
   readonly dnsZones: ReadonlyArray<string>;
   readonly edge: KvitbitEdgeConfig | undefined;
   readonly mail?: KvitbitMailConfig | undefined;
+  readonly turboCache?: KvitbitTurboCacheConfig | undefined;
 }
 
 export class InvalidStackConfig extends Data.TaggedError("InvalidStackConfig")<{
@@ -108,6 +116,14 @@ export const KVITBIT_MAIL_DEFAULTS = {
   cidr: "10.42.16.0/28",
 } as const;
 
+export const KVITBIT_TURBO_CACHE_DEFAULTS = {
+  image: "ducktors/turborepo-remote-cache:2.14.4",
+  port: 3000,
+  ttlDays: 30,
+  maxInstances: 4,
+  bodyLimitBytes: 104_857_600,
+} as const;
+
 const DIGEST_PATTERN = /^sha256:[a-f0-9]{64}$/;
 const DOMAIN_PATTERN = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/;
 const EMAIL_PATTERN = /^[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9-]+(?:\.[a-z0-9-]+)+$/;
@@ -125,6 +141,7 @@ export const defaultSecretBindings = (
     readonly enableSmtp?: boolean;
     readonly enableMobileSigningKey?: boolean;
     readonly enableFeedbackGitHubToken?: boolean;
+    readonly enableTurboCache?: boolean;
   },
 ): ReadonlyArray<KvitbitSecretBinding> => {
   const prefix = `kvitbit-${stage}`;
@@ -192,6 +209,16 @@ export const defaultSecretBindings = (
     });
   }
 
+  if (options?.enableTurboCache ?? false) {
+    bindings.push({
+      environmentVariable: "TURBO_TOKEN",
+      secretId: `${prefix}-turbo-cache-token`,
+      version: "latest",
+      required: false,
+      consumers: ["turbo-cache"],
+    });
+  }
+
   return bindings;
 };
 
@@ -202,6 +229,8 @@ export const resourceNames = (config: KvitbitStackConfig) => {
     serverServiceId: `${prefix}-server`,
     serverServiceAccountId: `${prefix}-server`,
     runnerServiceAccountId: `${prefix}-runner`,
+    turboCacheServiceId: `${prefix}-turbo-cache`,
+    turboCacheServiceAccountId: `${prefix}-turbo-cache`,
     mailServiceAccountId: `${prefix}-mail-ingress`,
     networkName: `${prefix}-vpc`,
     subnetworkName: `${prefix}-runners`,
@@ -421,6 +450,47 @@ export const validateStackConfig = (
         });
       }
     }
+    if (config.turboCache !== undefined) {
+      const { turboCache } = config;
+      if (turboCache.bucket.trim().length === 0) {
+        return yield* new InvalidStackConfig({
+          field: "KVITBIT_TURBO_CACHE_BUCKET",
+          reason: "must be non-empty",
+        });
+      }
+      if (turboCache.image.trim().length === 0) {
+        return yield* new InvalidStackConfig({
+          field: "KVITBIT_TURBO_CACHE_IMAGE",
+          reason: "must be non-empty",
+        });
+      }
+      if (
+        !Number.isInteger(turboCache.ttlDays) ||
+        turboCache.ttlDays < 1 ||
+        turboCache.ttlDays > 365
+      ) {
+        return yield* new InvalidStackConfig({
+          field: "KVITBIT_TURBO_CACHE_TTL_DAYS",
+          reason: "must be an integer between 1 and 365",
+        });
+      }
+      if (
+        !Number.isInteger(turboCache.maxInstances) ||
+        turboCache.maxInstances < 1 ||
+        turboCache.maxInstances > 20
+      ) {
+        return yield* new InvalidStackConfig({
+          field: "KVITBIT_TURBO_CACHE_MAX_INSTANCES",
+          reason: "must be an integer between 1 and 20",
+        });
+      }
+      if (!config.secrets.some((secret) => secret.environmentVariable === "TURBO_TOKEN")) {
+        return yield* new InvalidStackConfig({
+          field: "turboCache",
+          reason: "requires the TURBO_TOKEN secret binding",
+        });
+      }
+    }
     return config;
   });
 
@@ -593,6 +663,7 @@ export const loadStackConfig: Effect.Effect<
     "KVITBIT_ENABLE_FEEDBACK_GITHUB_TOKEN_SECRET",
     false,
   );
+  const enableTurboCache = yield* optionalBoolean("KVITBIT_ENABLE_TURBO_CACHE", false);
 
   const blobsBucket = yield* Config.String("KVITBIT_BLOB_BUCKET").pipe(
     Config.withDefault(`${projectId}-blobs-${stage}`),
@@ -600,6 +671,24 @@ export const loadStackConfig: Effect.Effect<
   const mobileAssetsBucket = yield* Config.String("KVITBIT_MOBILE_STORAGE_BUCKET").pipe(
     Config.withDefault(`${projectId}-mobile-${stage}`),
   );
+  const turboCache: KvitbitTurboCacheConfig | undefined = enableTurboCache
+    ? {
+        bucket:
+          (yield* optionalNonEmptyString("KVITBIT_TURBO_CACHE_BUCKET")) ??
+          `${projectId}-turbo-cache-${stage}`,
+        image:
+          (yield* optionalNonEmptyString("KVITBIT_TURBO_CACHE_IMAGE")) ??
+          KVITBIT_TURBO_CACHE_DEFAULTS.image,
+        ttlDays: yield* optionalInt(
+          "KVITBIT_TURBO_CACHE_TTL_DAYS",
+          KVITBIT_TURBO_CACHE_DEFAULTS.ttlDays,
+        ),
+        maxInstances: yield* optionalInt(
+          "KVITBIT_TURBO_CACHE_MAX_INSTANCES",
+          KVITBIT_TURBO_CACHE_DEFAULTS.maxInstances,
+        ),
+      }
+    : undefined;
 
   const mailDomainRaw = yield* optionalNonEmptyString("KVITBIT_MAIL_DOMAIN");
   const mailDomain = mailDomainRaw?.toLowerCase().replace(/\.$/, "");
@@ -671,9 +760,11 @@ export const loadStackConfig: Effect.Effect<
       enableSmtp,
       enableMobileSigningKey,
       enableFeedbackGitHubToken,
+      enableTurboCache,
     }),
     dnsZones,
     edge,
     ...(mail === undefined ? {} : { mail }),
+    ...(turboCache === undefined ? {} : { turboCache }),
   });
 });

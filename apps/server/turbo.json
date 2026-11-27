@@ -1,0 +1,74 @@
+{
+  "$schema": "https://turborepo.com/schema.json",
+  "extends": ["//"],
+  "tasks": {
+    "test:suite": {
+      "dependsOn": ["test:persistence", "test:http", "test:mcp", "test:runtime"],
+      "cache": false
+    },
+    "test:persistence": {
+      "dependsOn": ["^transit"],
+      "inputs": [
+        "package.json",
+        "tsconfig.json",
+        "src/persistence/**",
+        "src/projections/**",
+        "src/http/groups/workspace/revokeCredentials.ts",
+        "test/persistence/**"
+      ],
+      "env": ["TZ"],
+      "passThroughEnv": ["CI"],
+      "outputs": []
+    },
+    "test:http": {
+      "dependsOn": ["^transit"],
+      "inputs": [
+        "package.json",
+        "tsconfig.json",
+        "src/**",
+        "!src/runtime/**",
+        "!src/wiring/**",
+        "!src/main.ts",
+        "!src/worker.ts",
+        "!src/migrate.ts",
+        "test/http/**",
+        "test/persistence/conformance/sqlCore.ts"
+      ],
+      "env": ["TZ"],
+      "passThroughEnv": ["CI"],
+      "outputs": []
+    },
+    "test:mcp": {
+      "dependsOn": ["^transit"],
+      "inputs": [
+        "package.json",
+        "tsconfig.json",
+        "src/**",
+        "!src/runtime/**",
+        "!src/wiring/**",
+        "!src/main.ts",
+        "!src/worker.ts",
+        "!src/migrate.ts",
+        "test/mcp/**",
+        "test/persistence/conformance/sqlCore.ts"
+      ],
+      "env": ["TZ"],
+      "passThroughEnv": ["CI"],
+      "outputs": []
+    },
+    "test:runtime": {
+      "dependsOn": ["^transit"],
+      "inputs": [
+        "package.json",
+        "tsconfig.json",
+        "src/**",
+        "test/runtime/**",
+        "test/http/**",
+        "test/persistence/**"
+      ],
+      "env": ["TZ"],
+      "passThroughEnv": ["CI"],
+      "outputs": []
+    }
+  }
+}

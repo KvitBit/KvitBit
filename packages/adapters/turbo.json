@@ -1,0 +1,139 @@
+{
+  "$schema": "https://turborepo.com/schema.json",
+  "extends": ["//"],
+  "tasks": {
+    "test:suite": {
+      "dependsOn": [
+        "test:altcha",
+        "test:auth",
+        "test:blob",
+        "test:email",
+        "test:fx",
+        "test:jobs",
+        "test:pdf",
+        "test:qr",
+        "test:registry",
+        "test:sql",
+        "test:templates",
+        "test:testing"
+      ],
+      "cache": false
+    },
+    "test:altcha": {
+      "dependsOn": ["^transit"],
+      "inputs": [
+        "package.json",
+        "tsconfig.json",
+        "src/altcha/**",
+        "src/testing/**",
+        "test/altcha/**"
+      ],
+      "env": ["TZ"],
+      "passThroughEnv": ["CI"],
+      "outputs": []
+    },
+    "test:auth": {
+      "dependsOn": ["^transit"],
+      "inputs": [
+        "package.json",
+        "tsconfig.json",
+        "src/altcha/**",
+        "src/auth/**",
+        "src/testing/**",
+        "test/auth/**"
+      ],
+      "env": ["TZ"],
+      "passThroughEnv": ["CI"],
+      "outputs": []
+    },
+    "test:blob": {
+      "dependsOn": ["^transit"],
+      "inputs": ["package.json", "tsconfig.json", "src/blob/**", "test/blob/**"],
+      "env": ["TZ"],
+      "passThroughEnv": ["CI"],
+      "outputs": []
+    },
+    "test:email": {
+      "dependsOn": ["^transit"],
+      "inputs": ["package.json", "tsconfig.json", "src/email/**", "test/email/**"],
+      "env": ["TZ"],
+      "passThroughEnv": ["CI"],
+      "outputs": []
+    },
+    "test:fx": {
+      "dependsOn": ["^transit"],
+      "inputs": [
+        "package.json",
+        "tsconfig.json",
+        "src/fx/**",
+        "test/fx/**",
+        "$TURBO_ROOT$/packages/db/drizzle/**"
+      ],
+      "env": ["TZ"],
+      "passThroughEnv": ["CI"],
+      "outputs": []
+    },
+    "test:jobs": {
+      "dependsOn": ["^transit"],
+      "inputs": ["package.json", "tsconfig.json", "src/jobs/**", "test/jobs/**"],
+      "env": ["TZ"],
+      "passThroughEnv": ["CI"],
+      "outputs": []
+    },
+    "test:pdf": {
+      "dependsOn": ["^transit"],
+      "inputs": [
+        "package.json",
+        "tsconfig.json",
+        "src/pdf/**",
+        "src/qr/**",
+        "test/pdf/**",
+        "$TURBO_ROOT$/assets/brand/lockup/**"
+      ],
+      "env": ["TZ", "CHROMIUM_PATH"],
+      "passThroughEnv": ["CI"],
+      "outputs": []
+    },
+    "test:qr": {
+      "dependsOn": ["^transit"],
+      "inputs": ["package.json", "tsconfig.json", "src/qr/**", "test/qr/**"],
+      "env": ["TZ"],
+      "passThroughEnv": ["CI"],
+      "outputs": []
+    },
+    "test:registry": {
+      "dependsOn": ["^transit"],
+      "inputs": ["package.json", "tsconfig.json", "src/registry/**", "test/registry/**"],
+      "env": ["TZ"],
+      "passThroughEnv": ["CI"],
+      "outputs": []
+    },
+    "test:sql": {
+      "dependsOn": ["^transit"],
+      "inputs": [
+        "package.json",
+        "tsconfig.json",
+        "src/sql/**",
+        "test/sql/**",
+        "$TURBO_ROOT$/packages/db/drizzle/**"
+      ],
+      "env": ["TZ", "DATABASE_URL"],
+      "passThroughEnv": ["CI"],
+      "outputs": []
+    },
+    "test:templates": {
+      "dependsOn": ["^transit"],
+      "inputs": ["package.json", "tsconfig.json", "src/templates/**", "test/templates/**"],
+      "env": ["TZ"],
+      "passThroughEnv": ["CI"],
+      "outputs": []
+    },
+    "test:testing": {
+      "dependsOn": ["^transit"],
+      "inputs": ["package.json", "tsconfig.json", "src/testing/**", "test/testing/**"],
+      "env": ["TZ"],
+      "passThroughEnv": ["CI"],
+      "outputs": []
+    }
+  }
+}

@@ -7,8 +7,14 @@
     "start": "bun src/main.ts",
     "worker": "bun src/worker.ts",
     "migrate": "bun src/migrate.ts",
+    "lint": "biome check --error-on-warnings .",
     "typecheck": "tsc -p tsconfig.json",
-    "test": "bun test --pass-with-no-tests"
+    "test": "bun test --pass-with-no-tests",
+    "test:suite": ":",
+    "test:persistence": "bun test test/persistence",
+    "test:http": "bun test test/http",
+    "test:mcp": "bun test test/mcp",
+    "test:runtime": "bun test test/runtime"
   },
   "dependencies": {
     "@better-auth/oauth-provider": "1.7.27",

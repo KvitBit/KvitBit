@@ -8,8 +8,14 @@
     "./schema": "./src/schema/index.ts"
   },
   "scripts": {
+    "lint": "biome check --error-on-warnings .",
     "typecheck": "tsc -p tsconfig.json",
     "test": "bun test --pass-with-no-tests",
+    "test:suite": ":",
+    "test:domain-parity": "bun test test/domain-parity.test.ts",
+    "test:migration": "bun test test/migration.test.ts",
+    "test:core-alignment": "bun test test/core-alignment.test.ts",
+    "test:server-alignment": "bun test test/server-persistence-alignment.test.ts",
     "db:generate": "drizzle-kit generate"
   },
   "dependencies": {

@@ -89,17 +89,19 @@ export const secretAccessorGrants = (
     );
 
   return config.secrets.flatMap((secret) =>
-    secret.consumers.map((workload) => ({
-      id: `SecretAccess-${secret.secretId}-${workload}`,
-      secretId: secret.secretId,
-      workload,
-      props: {
-        kind: "secretmanager.secret" as const,
-        name: secretResourceName(config.projectId, secret.secretId),
-        role: "roles/secretmanager.secretAccessor",
-        member: `serviceAccount:${saEmail(workload)}`,
-      },
-    })),
+    secret.consumers
+      .filter((workload) => workload === "server" || workload === "runner")
+      .map((workload) => ({
+        id: `SecretAccess-${secret.secretId}-${workload}`,
+        secretId: secret.secretId,
+        workload,
+        props: {
+          kind: "secretmanager.secret" as const,
+          name: secretResourceName(config.projectId, secret.secretId),
+          role: "roles/secretmanager.secretAccessor",
+          member: `serviceAccount:${saEmail(workload)}`,
+        },
+      })),
   );
 };
 
@@ -187,6 +189,9 @@ export const declareFoundation = Effect.fn("KvitbitStack.declareFoundation")(fun
   }
 
   const resendSecret = secretResources.get(`${resourceNames(config).prefix}-resend-api-key`);
+  const turboCacheTokenSecret = secretResources.get(
+    `${resourceNames(config).prefix}-turbo-cache-token`,
+  );
 
   return {
     dnsApi,
@@ -197,6 +202,7 @@ export const declareFoundation = Effect.fn("KvitbitStack.declareFoundation")(fun
     serverServiceAccountEmail: serverSa.email,
     runnerServiceAccountEmail: runnerSa.email,
     resendSecretName: resendSecret?.name,
+    turboCacheTokenSecretName: turboCacheTokenSecret?.name,
     secretGrants,
     serverDependencies: [
       serverBlobsAdmin.member,
