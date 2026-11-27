@@ -11,15 +11,19 @@ import {
   // @effect-diagnostics-next-line nodeBuiltinImport:off
 } from "node:fs"; // Direct fixture operations and independent filesystem assertions.
 import { tmpdir } from "node:os";
+import * as BunFileSystem from "@effect/platform-bun/BunFileSystem";
 import { BlobStorage } from "@kvitbit/domain/ports";
 import * as Arr from "effect/Array";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
+import * as FileSystem from "effect/FileSystem";
+import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Stream from "effect/Stream";
 import * as Str from "effect/String";
 import { LocalDiskBlobStorage } from "../../src/blob/index";
+import { makeLocalDiskBlobStorage } from "../../src/blob/local-disk";
 import { chunked, describeBlobStorageContract, endless, key, meta } from "./contract";
 
 const { join } = Effect.runSync(Path.Path.pipe(Effect.provide(Path.layer)));
@@ -259,6 +263,57 @@ describe("LocalDiskBlobStorage on disk", () => {
     expect(error._tag).toBe("BlobUnavailable");
     expect(readFileSync(join(root, "ws/a/b"), "utf8")).toBe("child");
     expect(readdirSync(join(root, ".partial"))).toEqual([]);
+  });
+
+  test("download interruption waits for a pending read before releasing the file", async () => {
+    const root = freshRoot();
+    mkdirSync(root);
+    writeFileSync(join(root, "object"), "body");
+
+    const result = await Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const started = yield* Deferred.make<void>();
+      const resume = yield* Deferred.make<void>();
+      const readSettled = yield* Deferred.make<void>();
+      const releasing = yield* Deferred.make<void>();
+      const gatedFileSystem = {
+        ...fs,
+        open: (path, options) =>
+          Effect.gen(function* () {
+            const file = yield* fs.open(path, options);
+            // The finalizer runs just before the file descriptor is closed.
+            yield* Effect.addFinalizer(() => Deferred.succeed(releasing, undefined));
+            const readAlloc = file.readAlloc.bind(file);
+            return Object.assign(file, {
+              readAlloc: (size: number, readOptions?: FileSystem.File.ReadOptions) =>
+                Deferred.succeed(started, undefined).pipe(
+                  Effect.andThen(Deferred.await(resume)),
+                  Effect.andThen(readAlloc(size, readOptions)),
+                  Effect.tap(() => Deferred.succeed(readSettled, undefined)),
+                ),
+            });
+          }),
+      } satisfies FileSystem.FileSystem;
+
+      const store = yield* makeLocalDiskBlobStorage({ root }).pipe(
+        Effect.provideService(FileSystem.FileSystem, gatedFileSystem),
+      );
+      const stream = yield* store.get(key("object"));
+      const reader = yield* stream.pipe(Stream.runDrain, Effect.forkChild);
+      yield* Deferred.await(started);
+      const interrupt = yield* reader.pipe(Fiber.interrupt, Effect.forkChild);
+      const releasedWhileReading = yield* releasing.pipe(
+        Deferred.await,
+        Effect.timeoutOption("50 millis"),
+      );
+      yield* Deferred.succeed(resume, undefined);
+      yield* Fiber.join(interrupt);
+      const settled = yield* Deferred.isDone(readSettled);
+      const released = yield* Deferred.isDone(releasing);
+      return { releasedEarly: Option.isSome(releasedWhileReading), settled, released };
+    }).pipe(Effect.provide([BunFileSystem.layer, Path.layer]), Effect.runPromise);
+
+    expect(result).toEqual({ releasedEarly: false, settled: true, released: true });
   });
 
   // Counts descriptors through procfs; hosts without it (macOS) skip this check.
