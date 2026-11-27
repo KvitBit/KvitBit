@@ -1,56 +1,56 @@
 /* Self-hosted UI fonts (DESIGN.md "Selectable Styles"); licenses in /fonts/LICENSES.txt. */
 @font-face {
   font-family: Erode;
-  src: url("/fonts/erode-600.woff2") format("woff2");
+  src: url("/fonts/erode-600.10a3d32636b6.ttf") format("truetype");
   font-weight: 600;
   font-style: normal;
   font-display: swap;
 }
 @font-face {
   font-family: Recia;
-  src: url("/fonts/recia-400.woff2") format("woff2");
+  src: url("/fonts/recia-400.6a7630dd0c35.ttf") format("truetype");
   font-weight: 400;
   font-style: normal;
   font-display: swap;
 }
 @font-face {
   font-family: Recia;
-  src: url("/fonts/recia-500.woff2") format("woff2");
+  src: url("/fonts/recia-500.87efc6a5c8df.ttf") format("truetype");
   font-weight: 500;
   font-style: normal;
   font-display: swap;
 }
 @font-face {
   font-family: Recia;
-  src: url("/fonts/recia-600.woff2") format("woff2");
+  src: url("/fonts/recia-600.ead411421b7b.ttf") format("truetype");
   font-weight: 600;
   font-style: normal;
   font-display: swap;
 }
 @font-face {
   font-family: Chillax;
-  src: url("/fonts/chillax-600.woff2") format("woff2");
+  src: url("/fonts/chillax-600.ea44f4823df8.ttf") format("truetype");
   font-weight: 600;
   font-style: normal;
   font-display: swap;
 }
 @font-face {
   font-family: Synonym;
-  src: url("/fonts/synonym-400.woff2") format("woff2");
+  src: url("/fonts/synonym-400.c341dc707a73.ttf") format("truetype");
   font-weight: 400;
   font-style: normal;
   font-display: swap;
 }
 @font-face {
   font-family: Synonym;
-  src: url("/fonts/synonym-500.woff2") format("woff2");
+  src: url("/fonts/synonym-500.2c3370a911a0.ttf") format("truetype");
   font-weight: 500;
   font-style: normal;
   font-display: swap;
 }
 @font-face {
   font-family: Synonym;
-  src: url("/fonts/synonym-600.woff2") format("woff2");
+  src: url("/fonts/synonym-600.c38a55f2fb73.ttf") format("truetype");
   font-weight: 600;
   font-style: normal;
   font-display: swap;
