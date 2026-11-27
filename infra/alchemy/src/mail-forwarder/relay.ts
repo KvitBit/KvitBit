@@ -94,33 +94,39 @@ const escapeHtml = (value: string): string =>
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&#39;");
 
-export const buildArchiveObjectName = (now: Date, suffixHex: string): string => {
-  const yyyy = String(now.getUTCFullYear()).padStart(4, "0");
-  const mm = String(now.getUTCMonth() + 1).padStart(2, "0");
-  const dd = String(now.getUTCDate()).padStart(2, "0");
-  return `inbound/${yyyy}/${mm}/${dd}/${now.getTime()}-${suffixHex}.eml`;
-};
+export const canonicalRecipients = (rcptTo: ReadonlyArray<string>): ReadonlyArray<string> =>
+  [...new Set(rcptTo.map((addr) => addr.trim().toLowerCase()).filter((a) => a.length > 0))].sort();
 
-const aliasTagForRecipients = (rcptTo: ReadonlyArray<string>): string => {
-  const locals = rcptTo
+export const computeDeliveryFingerprint = (message: InboundMessage): string =>
+  createHash("sha256")
+    .update(message.mailFrom.trim().toLowerCase())
+    .update("\0")
+    .update(canonicalRecipients(message.rcptTo).join(","))
+    .update("\0")
+    .update(message.rawBytes)
+    .digest("hex");
+
+export const buildArchivePrefix = (deliveryFingerprint: string): string =>
+  `inbound/by-hash/${deliveryFingerprint.slice(0, 32)}/`;
+
+export const buildArchiveObjectName = (
+  now: Date,
+  deliveryFingerprint: string,
+  suffixHex: string,
+): string => `${buildArchivePrefix(deliveryFingerprint)}${now.getTime()}-${suffixHex}.eml`;
+
+const aliasTagForRecipients = (recipients: ReadonlyArray<string>): string => {
+  const locals = recipients
     .map((addr) => addr.split("@")[0]?.trim())
     .filter((local): local is string => Boolean(local));
   return locals.length === 0 ? "mail" : locals.join(",");
 };
 
-const isSimpleEmail = (value: string | undefined): value is string =>
+/** Resend `reply_to` requires an ASCII address; internationalized addresses are preserved in the body instead. */
+const isAsciiResendEmail = (value: string | undefined): value is string =>
   typeof value === "string" &&
   value.length <= 254 &&
   /^[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+$/.test(value);
-
-export const computeDeliveryFingerprint = (message: InboundMessage): string =>
-  createHash("sha256")
-    .update(message.mailFrom)
-    .update("\0")
-    .update([...message.rcptTo].sort().join(","))
-    .update("\0")
-    .update(message.rawBytes)
-    .digest("hex");
 
 export const buildResendForwardPayload = (params: {
   readonly message: InboundMessage;
@@ -140,17 +146,18 @@ export const buildResendForwardPayload = (params: {
     forwardFrom,
     maxAttachmentBytes,
   } = params;
+  const recipients = canonicalRecipients(message.rcptTo);
+  const archivePrefixUri = `gs://${archiveBucket}/${buildArchivePrefix(deliveryFingerprint)}`;
   const senderLabel = sanitizeHeaderText(
     parsed.fromDisplayName || parsed.fromAddress || message.mailFrom || "External Sender",
     80,
   );
   const from = `"${senderLabel} via Kvitbit" <${forwardFrom}>`;
   const replyToCandidate = parsed.replyToAddress ?? parsed.fromAddress ?? message.mailFrom;
-  const replyTo = isSimpleEmail(replyToCandidate) ? replyToCandidate : undefined;
-  const aliasTag = sanitizeHeaderText(aliasTagForRecipients(message.rcptTo), 64);
+  const replyTo = isAsciiResendEmail(replyToCandidate) ? replyToCandidate : undefined;
+  const aliasTag = sanitizeHeaderText(aliasTagForRecipients(recipients), 64);
   const cleanSubject = sanitizeHeaderText(parsed.subject || "(no subject)", 200);
   const subject = `[${aliasTag}] ${cleanSubject}`;
-  const shortHash = deliveryFingerprint.slice(0, 16);
 
   const forwardedAttachments: Array<{
     filename: string;
@@ -173,18 +180,18 @@ export const buildResendForwardPayload = (params: {
     }
   }
 
-  const recipientList = message.rcptTo.join(", ");
+  const recipientList = recipients.join(", ");
   const originalFrom = parsed.fromHeader || message.mailFrom || "(empty reverse-path)";
   const skippedNotice =
     skippedAttachments.length > 0
-      ? `Omitted large attachment(s): ${skippedAttachments.join(", ")} (see gs://${archiveBucket})`
+      ? `Omitted large attachment(s): ${skippedAttachments.join(", ")} (see ${archivePrefixUri})`
       : undefined;
 
   const metaLines = [
     `Forwarded for: ${recipientList}`,
     `Original From: ${originalFrom}`,
     ...(parsed.date ? [`Date: ${parsed.date}`] : []),
-    `Archive Bucket: gs://${archiveBucket} (sha256:${shortHash})`,
+    `Archive: ${archivePrefixUri}`,
     ...(skippedNotice ? [skippedNotice] : []),
   ];
 
@@ -198,7 +205,7 @@ export const buildResendForwardPayload = (params: {
       `<strong>To:</strong> ${escapeHtml(recipientList)} &middot; ` +
       `<strong>From:</strong> ${escapeHtml(originalFrom)}` +
       (skippedAttachments.length > 0
-        ? ` &middot; <strong>Omitted attachments:</strong> ${escapeHtml(skippedAttachments.join(", "))}`
+        ? ` &middot; <strong>Omitted attachments:</strong> ${escapeHtml(skippedAttachments.join(", "))} (${escapeHtml(archivePrefixUri)})`
         : "") +
       `</div>`;
     htmlBody = `${banner}${parsed.html}`;
@@ -214,7 +221,7 @@ export const buildResendForwardPayload = (params: {
     ...(forwardedAttachments.length > 0 ? { attachments: forwardedAttachments } : {}),
     headers: {
       "X-Kvitbit-Original-To": sanitizeHeaderText(recipientList, 250),
-      "X-Kvitbit-Delivery-Hash": `sha256:${shortHash}`,
+      "X-Kvitbit-Archive-Prefix": sanitizeHeaderText(archivePrefixUri, 250),
     },
   };
 };
@@ -228,9 +235,10 @@ export const buildResendFallbackPayload = (params: {
   readonly forwardFrom: string;
   readonly rejectionStatus: number;
 }): Record<string, unknown> => {
-  const aliasTag = sanitizeHeaderText(aliasTagForRecipients(params.message.rcptTo), 64);
+  const recipients = canonicalRecipients(params.message.rcptTo);
+  const aliasTag = sanitizeHeaderText(aliasTagForRecipients(recipients), 64);
   const cleanSubject = sanitizeHeaderText(params.parsed.subject || "(no subject)", 180);
-  const shortHash = params.deliveryFingerprint.slice(0, 16);
+  const archivePrefixUri = `gs://${params.archiveBucket}/${buildArchivePrefix(params.deliveryFingerprint)}`;
   return {
     from: `"Kvitbit Mail Forwarder" <${params.forwardFrom}>`,
     to: [params.forwardTo],
@@ -238,9 +246,9 @@ export const buildResendFallbackPayload = (params: {
     text: [
       "An inbound email was archived in GCS but Resend rejected verbatim forwarding.",
       `Status: HTTP ${params.rejectionStatus}`,
-      `Original To: ${params.message.rcptTo.join(", ")}`,
+      `Original To: ${recipients.join(", ")}`,
       `Original From: ${params.parsed.fromHeader || params.message.mailFrom || "(unknown)"}`,
-      `Archive Bucket: gs://${params.archiveBucket} (sha256:${shortHash})`,
+      `Archive Prefix: ${archivePrefixUri}`,
     ].join("\n"),
   };
 };
@@ -321,6 +329,7 @@ export const makeMailRelay = (
 
     const archiveToGcs = (
       rawBytes: Uint8Array,
+      deliveryFingerprint: string,
     ): Effect.Effect<{ readonly objectName: string; readonly uri: string }, ArchiveUploadError> =>
       Effect.gen(function* () {
         const token = yield* getAccessToken.pipe(
@@ -328,7 +337,7 @@ export const makeMailRelay = (
         );
         const nowMs = yield* Clock.currentTimeMillis;
         const suffixHex = yield* Effect.sync(() => randomBytes(6).toString("hex"));
-        const objectName = buildArchiveObjectName(new Date(nowMs), suffixHex);
+        const objectName = buildArchiveObjectName(new Date(nowMs), deliveryFingerprint, suffixHex);
         const uploadUrl =
           `${gcsBase}/upload/storage/v1/b/${encodeURIComponent(config.archiveBucket)}` +
           `/o?uploadType=media&name=${encodeURIComponent(objectName)}`;
@@ -417,7 +426,10 @@ export const makeMailRelay = (
     const handleMessage: MailRelayService["handleMessage"] = (message) =>
       Effect.gen(function* () {
         const parsed = parseEmail(message.rawBytes);
-        const archiveResult = yield* Effect.result(archiveToGcs(message.rawBytes));
+        const deliveryFingerprint = computeDeliveryFingerprint(message);
+        const archiveResult = yield* Effect.result(
+          archiveToGcs(message.rawBytes, deliveryFingerprint),
+        );
         if (archiveResult._tag === "Failure") {
           yield* Effect.logError("mail_archive_failed", {
             remoteIp: message.remoteIp,
@@ -444,7 +456,6 @@ export const makeMailRelay = (
           };
         }
 
-        const deliveryFingerprint = computeDeliveryFingerprint(message);
         const payload = buildResendForwardPayload({
           message,
           parsed,

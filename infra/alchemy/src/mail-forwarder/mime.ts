@@ -262,7 +262,62 @@ const splitMultipart = (body: Uint8Array, boundary: string): Array<Uint8Array> =
   return parts;
 };
 
-const SIMPLE_EMAIL_RE = /[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+/;
+const isValidDomainLabel = (label: string): boolean => {
+  if (label.length === 0 || label.length > 63 || label.startsWith("-") || label.endsWith("-")) {
+    return false;
+  }
+  for (const ch of label) {
+    const code = ch.charCodeAt(0);
+    if (code <= 0x7f) {
+      const isAsciiAlnumOrHyphen =
+        (code >= 0x30 && code <= 0x39) ||
+        (code >= 0x41 && code <= 0x5a) ||
+        (code >= 0x61 && code <= 0x7a) ||
+        code === 0x2d;
+      if (!isAsciiAlnumOrHyphen) return false;
+    } else if (/\s/.test(ch)) {
+      return false;
+    }
+  }
+  return true;
+};
+
+const hasDisallowedLocalChar = (local: string): boolean => {
+  for (const ch of local) {
+    const code = ch.charCodeAt(0);
+    if (
+      code <= 0x20 ||
+      code === 0x7f ||
+      ch === "<" ||
+      ch === ">" ||
+      ch === "@" ||
+      ch === "\\" ||
+      ch === '"' ||
+      ch === "," ||
+      ch === ";" ||
+      /\s/.test(ch)
+    ) {
+      return true;
+    }
+  }
+  return false;
+};
+
+/** Validates a full RFC 5321 / RFC 6531 (`SMTPUTF8`) mailbox without substring matching. */
+export const isValidMailbox = (address: string): boolean => {
+  if (address.length === 0 || address.length > 254) return false;
+  const atIdx = address.lastIndexOf("@");
+  if (atIdx <= 0 || atIdx === address.length - 1) return false;
+  const local = address.slice(0, atIdx);
+  const domain = address.slice(atIdx + 1);
+  if (local.length > 64 || hasDisallowedLocalChar(local)) return false;
+  const labels = domain.split(".");
+  if (labels.length < 2) return false;
+  if (!labels.every(isValidDomainLabel)) return false;
+  const tld = labels[labels.length - 1] ?? "";
+  if (/^\d+$/.test(tld)) return false;
+  return true;
+};
 
 export const extractAddress = (
   headerValue: string | undefined,
@@ -271,7 +326,7 @@ export const extractAddress = (
   const raw = headerValue.trim();
   // Parse RFC 5322 angle-addr before RFC 2047 decoding so an encoded display-name
   // containing CRLF or angle brackets cannot spoof the extracted address.
-  const angleMatch = raw.match(/^([\s\S]*?)<\s*([^<>\s]+@[^<>\s]+)\s*>\s*$/);
+  const angleMatch = raw.match(/^([\s\S]*?)<\s*([^<>]+?)\s*>\s*$/);
   if (angleMatch) {
     const rawName = decodeRfc2047(angleMatch[1] ?? "")
       .trim()
@@ -279,29 +334,57 @@ export const extractAddress = (
       .trim();
     const addr = (angleMatch[2] ?? "").trim();
     return {
-      address: SIMPLE_EMAIL_RE.test(addr) ? addr : undefined,
+      address: isValidMailbox(addr) ? addr : undefined,
       displayName: rawName.length > 0 ? rawName : undefined,
     };
   }
-  const bareMatch = raw.match(SIMPLE_EMAIL_RE);
+  // Bare header: validate the entire address token rather than matching an ASCII substring
+  // inside an internationalized mailbox like `žan@example.net`.
+  const stripped = raw.replace(/\([^)]*\)/g, "").trim();
   return {
-    address: bareMatch ? bareMatch[0] : undefined,
+    address: isValidMailbox(stripped) ? stripped : undefined,
     displayName: undefined,
   };
 };
 
+interface BodySegment {
+  readonly text?: string;
+  readonly html?: string;
+}
+
 interface CollectedParts {
-  readonly textParts: Array<string>;
-  readonly htmlParts: Array<string>;
+  readonly segments: Array<BodySegment>;
   readonly attachments: Array<ParsedAttachment>;
 }
 
-const walkEntity = (
-  raw: Uint8Array,
-  out: CollectedParts,
-  depth: number,
-  inAlternative: boolean,
-): void => {
+const escapeHtmlText = (value: string): string =>
+  value
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
+
+const plainTextToHtml = (text: string): string =>
+  `<div style="white-space:pre-wrap;font-family:inherit;">${escapeHtmlText(text)}</div>`;
+
+const stripHtmlToText = (html: string): string =>
+  html
+    .replace(/<style[\s\S]*?<\/style>/gi, " ")
+    .replace(/<script[\s\S]*?<\/script>/gi, " ")
+    .replace(/<(?:br|\/p|\/div|\/li|\/tr|\/h[1-6])\b[^>]*>/gi, "\n")
+    .replace(/<[^>]+>/g, "")
+    .replaceAll("&nbsp;", " ")
+    .replaceAll("&amp;", "&")
+    .replaceAll("&lt;", "<")
+    .replaceAll("&gt;", ">")
+    .replaceAll("&quot;", '"')
+    .replaceAll("&#39;", "'")
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+
+const walkEntity = (raw: Uint8Array, out: CollectedParts, depth: number): void => {
   if (depth > MAX_MIME_DEPTH) return;
   const { headers: headerBlock, body } = splitHeaderAndBody(raw);
   const headers = parseHeaders(headerBlock);
@@ -311,23 +394,30 @@ const walkEntity = (
   const transferEncoding = firstHeader(headers, "content-transfer-encoding");
 
   if (mimeType.startsWith("multipart/") && contentType.params.boundary) {
-    const isAlt = mimeType === "multipart/alternative";
-    if (isAlt) {
-      const altBucket: CollectedParts = { textParts: [], htmlParts: [], attachments: [] };
+    if (mimeType === "multipart/alternative") {
+      const altBucket: CollectedParts = { segments: [], attachments: [] };
       for (const child of splitMultipart(body, contentType.params.boundary)) {
-        walkEntity(child, altBucket, depth + 1, true);
+        walkEntity(child, altBucket, depth + 1);
       }
-      if (altBucket.textParts.length > 0) {
-        out.textParts.push(altBucket.textParts.join("\n\n"));
+      // Collapse alternative representations into one logical segment.
+      let altText: string | undefined;
+      let altHtml: string | undefined;
+      for (const seg of altBucket.segments) {
+        if (seg.text !== undefined && altText === undefined) altText = seg.text;
+        if (seg.html !== undefined && altHtml === undefined) altHtml = seg.html;
       }
-      if (altBucket.htmlParts.length > 0) {
-        out.htmlParts.push(altBucket.htmlParts.join("<hr>"));
+      if (altText !== undefined || altHtml !== undefined) {
+        out.segments.push({
+          ...(altText !== undefined ? { text: altText } : {}),
+          ...(altHtml !== undefined ? { html: altHtml } : {}),
+        });
       }
       out.attachments.push(...altBucket.attachments);
       return;
     }
+    // multipart/mixed, multipart/related, etc.: preserve every independent child in order.
     for (const child of splitMultipart(body, contentType.params.boundary)) {
-      walkEntity(child, out, depth + 1, false);
+      walkEntity(child, out, depth + 1);
     }
     return;
   }
@@ -354,15 +444,11 @@ const walkEntity = (
   }
 
   if (mimeType === "text/plain") {
-    if (!inAlternative || out.textParts.length === 0) {
-      out.textParts.push(decodeCharset(decodedBytes, contentType.params.charset));
-    }
+    out.segments.push({ text: decodeCharset(decodedBytes, contentType.params.charset) });
     return;
   }
   if (mimeType === "text/html") {
-    if (!inAlternative || out.htmlParts.length === 0) {
-      out.htmlParts.push(decodeCharset(decodedBytes, contentType.params.charset));
-    }
+    out.segments.push({ html: decodeCharset(decodedBytes, contentType.params.charset) });
     return;
   }
   if (decodedBytes.byteLength > 0) {
@@ -387,11 +473,31 @@ export const parseEmail = (raw: Uint8Array): ParsedEmail => {
   const date = firstHeader(headers, "date")?.trim();
 
   const collected: CollectedParts = {
-    textParts: [],
-    htmlParts: [],
+    segments: [],
     attachments: [],
   };
-  walkEntity(raw, collected, 0, false);
+  walkEntity(raw, collected, 0);
+
+  const hasAnyHtml = collected.segments.some((seg) => seg.html !== undefined);
+  const renderedTextParts: Array<string> = [];
+  const renderedHtmlParts: Array<string> = [];
+
+  for (const seg of collected.segments) {
+    if (seg.text !== undefined) {
+      renderedTextParts.push(seg.text);
+    } else if (seg.html !== undefined) {
+      const stripped = stripHtmlToText(seg.html);
+      if (stripped.length > 0) renderedTextParts.push(stripped);
+    }
+
+    if (hasAnyHtml) {
+      if (seg.html !== undefined) {
+        renderedHtmlParts.push(seg.html);
+      } else if (seg.text !== undefined) {
+        renderedHtmlParts.push(plainTextToHtml(seg.text));
+      }
+    }
+  }
 
   return {
     subject,
@@ -401,8 +507,8 @@ export const parseEmail = (raw: Uint8Array): ParsedEmail => {
     replyToAddress: replyToParsed.address,
     messageId,
     date,
-    text: collected.textParts.length > 0 ? collected.textParts.join("\n\n") : undefined,
-    html: collected.htmlParts.length > 0 ? collected.htmlParts.join("<hr>") : undefined,
+    text: renderedTextParts.length > 0 ? renderedTextParts.join("\n\n") : undefined,
+    html: renderedHtmlParts.length > 0 ? renderedHtmlParts.join("<hr>") : undefined,
     attachments: collected.attachments,
   };
 };

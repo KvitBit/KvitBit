@@ -17,6 +17,8 @@ import {
 } from "../src/mail-forwarder/mime";
 import {
   buildArchiveObjectName,
+  buildArchivePrefix,
+  buildResendFallbackPayload,
   buildResendForwardPayload,
   computeDeliveryFingerprint,
   type InboundMessage,
@@ -131,7 +133,7 @@ describe("MIME parser", () => {
     expect(parsedUtf8.fromAddress).toBe("jan@example.cz");
   });
 
-  test("preserves independent sibling parts in multipart/mixed per RFC 2046 §5.1.3", () => {
+  test("preserves independent interleaved plain and HTML sibling parts in multipart/mixed per RFC 2046 §5.1.3", () => {
     const raw = [
       "From: notes@example.com",
       "To: ops@kvitbit.com",
@@ -141,17 +143,65 @@ describe("MIME parser", () => {
       "--mix-b",
       'Content-Type: text/plain; charset="utf-8"',
       "",
-      "Meeting notes",
+      "FIRST",
+      "--mix-b",
+      'Content-Type: text/html; charset="utf-8"',
+      "",
+      "<p><b>SECOND</b></p>",
       "--mix-b",
       'Content-Type: text/plain; charset="utf-8"',
       "",
-      "Page two",
+      "THIRD",
       "--mix-b--",
       "",
     ].join("\r\n");
 
     const parsed = parseEmail(Buffer.from(raw, "utf8"));
-    expect(parsed.text).toBe("Meeting notes\n\nPage two");
+    expect(parsed.text).toBe("FIRST\n\nSECOND\n\nTHIRD");
+    expect(parsed.html).toBeDefined();
+    const html = parsed.html ?? "";
+    expect(html.indexOf("FIRST")).toBeGreaterThanOrEqual(0);
+    expect(html.indexOf("<b>SECOND</b>")).toBeGreaterThan(html.indexOf("FIRST"));
+    expect(html.indexOf("THIRD")).toBeGreaterThan(html.indexOf("<b>SECOND</b>"));
+  });
+
+  test("extracts full UTF-8 bare mailbox without ASCII substring truncation and omits non-ASCII reply_to", () => {
+    expect(extractAddress("žan@example.net")).toEqual({
+      address: "žan@example.net",
+      displayName: undefined,
+    });
+    const raw = Buffer.from(
+      [
+        "From: žan@example.net",
+        "To: ops@kvitbit.com",
+        "Subject: Příliš žlutý",
+        'Content-Type: text/plain; charset="utf-8"',
+        "",
+        "Ahoj",
+      ].join("\r\n"),
+      "utf8",
+    );
+    const msg: InboundMessage = {
+      remoteIp: "203.0.113.10",
+      tls: true,
+      helo: "mail.example.net",
+      mailFrom: "žan@example.net",
+      rcptTo: ["ops@kvitbit.com"],
+      rawBytes: raw,
+    };
+    const parsed = parseEmail(raw);
+    expect(parsed.fromAddress).toBe("žan@example.net");
+    const payload = buildResendForwardPayload({
+      message: msg,
+      parsed,
+      deliveryFingerprint: computeDeliveryFingerprint(msg),
+      archiveBucket: "kvitbit-prod-mail-archive-prod",
+      forwardTo: "filkalny@gmail.com",
+      forwardFrom: "forwarder@kvitbit.com",
+      maxAttachmentBytes: 7 * 1024 * 1024,
+    });
+    expect(payload.reply_to).toBeUndefined();
+    expect(String(payload.text)).toContain("Original From: žan@example.net");
   });
 
   test("decodes quoted-printable soft line breaks and parses multipart mixed + alternative + attachments", () => {
@@ -229,15 +279,22 @@ describe("Effect MailRelay (GCS archive + Resend HTTPS)", () => {
     ),
   };
 
-  test("builds date-partitioned GCS archive paths and sanitizes RFC 2047 CRLF injection", () => {
-    const objectName = buildArchiveObjectName(new Date("2026-11-27T12:34:56.789Z"), "abcdef123456");
-    expect(objectName).toMatch(/^inbound\/2026\/11\/27\/\d+-abcdef123456\.eml$/);
+  test("builds hash-prefixed searchable GCS archive paths and sanitizes RFC 2047 CRLF injection", () => {
+    const fp = computeDeliveryFingerprint(sampleMessage);
+    const prefix = buildArchivePrefix(fp);
+    const objectName = buildArchiveObjectName(
+      new Date("2026-11-27T12:34:56.789Z"),
+      fp,
+      "abcdef123456",
+    );
+    expect(objectName).toStartWith(prefix);
+    expect(objectName).toMatch(/^inbound\/by-hash\/[a-f0-9]{32}\/\d+-abcdef123456\.eml$/);
 
     const parsed = parseEmail(sampleMessage.rawBytes);
     const payload = buildResendForwardPayload({
       message: sampleMessage,
       parsed,
-      deliveryFingerprint: computeDeliveryFingerprint(sampleMessage),
+      deliveryFingerprint: fp,
       archiveBucket: "kvitbit-prod-mail-archive-prod",
       forwardTo: "filkalny@gmail.com",
       forwardFrom: "forwarder@kvitbit.com",
@@ -249,11 +306,32 @@ describe("Effect MailRelay (GCS archive + Resend HTTPS)", () => {
     expect(payload.to).toEqual(["filkalny@gmail.com"]);
     expect(payload.reply_to).toBe("verify@resend.com");
     expect(payload.subject).toBe("[ops] Verify your Resend account");
+    expect(String(payload.text)).toContain(`gs://kvitbit-prod-mail-archive-prod/${prefix}`);
+
+    const fallback = buildResendFallbackPayload({
+      message: sampleMessage,
+      parsed,
+      deliveryFingerprint: fp,
+      archiveBucket: "kvitbit-prod-mail-archive-prod",
+      forwardTo: "filkalny@gmail.com",
+      forwardFrom: "forwarder@kvitbit.com",
+      rejectionStatus: 422,
+    });
+    expect(String(fallback.text)).toContain(`gs://kvitbit-prod-mail-archive-prod/${prefix}`);
   });
 
-  test("reuses identical Idempotency-Key and JSON payload across retries after ambiguous Resend failure", async () => {
+  test("reuses identical Idempotency-Key, archive prefix, and JSON payload across retries even when recipients are reordered", async () => {
     const resendRequests: Array<{ key: string | undefined; body: string }> = [];
+    const uploadedNames: Array<string> = [];
     let attempt = 0;
+    const msgOrderA: InboundMessage = {
+      ...sampleMessage,
+      rcptTo: ["ops@kvitbit.com", "founder@kvitbit.com"],
+    };
+    const msgOrderB: InboundMessage = {
+      ...sampleMessage,
+      rcptTo: ["founder@kvitbit.com", "ops@kvitbit.com"],
+    };
     const layer = layerMailRelay({
       domain: "kvitbit.com",
       forwardTo: "filkalny@gmail.com",
@@ -271,6 +349,8 @@ describe("Effect MailRelay (GCS archive + Resend HTTPS)", () => {
             });
           }
           if (request.url.includes("storage.googleapis.com")) {
+            const nameParam = new URL(request.url).searchParams.get("name");
+            if (nameParam) uploadedNames.push(nameParam);
             return new Response(JSON.stringify({ name: "ok" }), {
               status: 200,
               headers: { "content-type": "application/json" },
@@ -299,8 +379,8 @@ describe("Effect MailRelay (GCS archive + Resend HTTPS)", () => {
     const { first, second } = await Effect.runPromise(
       Effect.gen(function* () {
         const relay = yield* MailRelay;
-        const firstRes = yield* relay.handleMessage(sampleMessage);
-        const secondRes = yield* relay.handleMessage(sampleMessage);
+        const firstRes = yield* relay.handleMessage(msgOrderA);
+        const secondRes = yield* relay.handleMessage(msgOrderB);
         return { first: firstRes, second: secondRes };
       }).pipe(Effect.provide(layer)),
     );
@@ -311,6 +391,13 @@ describe("Effect MailRelay (GCS archive + Resend HTTPS)", () => {
     expect(resendRequests[0]?.key).toBeDefined();
     expect(resendRequests[0]?.key).toBe(resendRequests[1]?.key);
     expect(resendRequests[0]?.body).toBe(resendRequests[1]?.body);
+    // Both uniquely named GCS objects live under the exact searchable hash prefix referenced in the payload.
+    const expectedPrefix = buildArchivePrefix(computeDeliveryFingerprint(msgOrderA));
+    expect(uploadedNames).toHaveLength(2);
+    expect(uploadedNames[0]).toStartWith(expectedPrefix);
+    expect(uploadedNames[1]).toStartWith(expectedPrefix);
+    expect(uploadedNames[0]).not.toBe(uploadedNames[1]);
+    expect(resendRequests[0]?.body).toContain(expectedPrefix);
   });
 
   test("archives to GCS and returns 250 without calling Resend in archive-only mode", async () => {
@@ -455,10 +542,16 @@ describe("Effect SMTP server (RFC 5321 + RFC 6531 SMTPUTF8 + STARTTLS)", () => {
     expect(parseEnvelopePath("<žan@example.net> SMTPUTF8", true)).toEqual({
       address: "žan@example.net",
     });
+    expect(parseEnvelopePath("<user@bücher.de>", true)).toEqual({
+      address: "user@bücher.de",
+    });
     expect(parseEnvelopePath("<Postmaster>", false, "kvitbit.com")).toEqual({
       address: "postmaster@kvitbit.com",
     });
     expect(parseEnvelopePath("<bad addr@example.net>", true)).toBeUndefined();
+    expect(parseEnvelopePath("<test@example_.com>", true)).toBeUndefined();
+    expect(parseEnvelopePath("<test@exam,ple.com>", true)).toBeUndefined();
+    expect(parseEnvelopePath("<test@192.0.2.1>", true)).toBeUndefined();
   });
 
   const runSmtpSession = (

@@ -15,6 +15,7 @@
 import net from "node:net";
 import tls from "node:tls";
 import { Data, Effect, type Scope } from "effect";
+import { isValidMailbox } from "./mime";
 import type { InboundMessage, RelayResult } from "./relay";
 
 export class SmtpBindError extends Data.TaggedError("SmtpBindError")<{
@@ -65,33 +66,6 @@ const normalizeIp = (raw: string | undefined): string => {
   return raw.startsWith("::ffff:") ? raw.slice(7) : raw;
 };
 
-const hasDisallowedAddrChar = (value: string): boolean => {
-  for (const ch of value) {
-    const code = ch.charCodeAt(0);
-    if (code <= 0x20 || code === 0x7f || ch === "<" || ch === ">" || ch === "\\" || ch === '"') {
-      return true;
-    }
-  }
-  return false;
-};
-
-const isValidSmtpMailbox = (address: string): boolean => {
-  if (address.length === 0 || address.length > 254 || hasDisallowedAddrChar(address)) {
-    return false;
-  }
-  const atIdx = address.lastIndexOf("@");
-  if (atIdx <= 0 || atIdx === address.length - 1) return false;
-  const local = address.slice(0, atIdx);
-  const domain = address.slice(atIdx + 1);
-  if (local.includes("@") || domain.includes("@")) return false;
-  const labels = domain.split(".");
-  if (labels.length < 2) return false;
-  return labels.every(
-    (label) =>
-      label.length > 0 && label.length <= 63 && !label.startsWith("-") && !label.endsWith("-"),
-  );
-};
-
 /**
  * Parses `MAIL FROM:<addr> [params...]` or `RCPT TO:<addr> [params...]`.
  * Supports RFC 6531 (`SMTPUTF8`) internationalized addresses and RFC 5321 §4.5.1
@@ -123,7 +97,7 @@ export const parseEnvelopePath = (
     address.toLowerCase() === "postmaster"
   ) {
     address = `postmaster@${barePostmasterDomain.toLowerCase()}`;
-  } else if (!isValidSmtpMailbox(address)) {
+  } else if (!isValidMailbox(address)) {
     return undefined;
   }
 
