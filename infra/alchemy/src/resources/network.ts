@@ -374,10 +374,31 @@ fi
 export DOCKER_CONFIG="/run/kvitbit/docker"
 install -d -m 0700 "$DOCKER_CONFIG"
 prune_unused_docker_storage() {
-  # Remove stopped containers (e.g. left behind after a hard reset) and unreferenced images
-  # without touching the currently running worker image so rollback stays intact if pull fails.
+  local extra_keep="\${1:-}"
+  local installed_ref=""
+  local installed_img=""
+  local running_img=""
+  local img_id=""
+  # Remove stopped containers (e.g. left behind after a hard reset) without touching a running worker.
   docker container prune -f >/dev/null 2>&1 || true
-  docker image prune -af >/dev/null 2>&1 || true
+  # Preserve the installed worker-target.env image even during systemd's 5s --rm restart window,
+  # plus any currently running worker image and optional newly verified image ID.
+  if [ -f "$TARGET_ENV_FILE" ]; then
+    installed_ref="$(sed -n 's/^KVITBIT_WORKER_IMAGE=//p' "$TARGET_ENV_FILE" | head -n 1)"
+    if [[ "$installed_ref" =~ ^sha256:[a-f0-9]{64}$ ]]; then
+      installed_img="$installed_ref"
+    elif [ -n "$installed_ref" ]; then
+      installed_img="$(docker image inspect --format='{{.Id}}' -- "$installed_ref" 2>/dev/null || printf '%s' "$installed_ref")"
+    fi
+  fi
+  running_img="$(docker inspect --type container --format='{{if .State.Running}}{{.Image}}{{end}}' kvitbit-worker 2>/dev/null || true)"
+  while IFS= read -r img_id; do
+    [ -n "$img_id" ] || continue
+    if [ "$img_id" = "$installed_img" ] || [ "$img_id" = "$running_img" ] || { [ -n "$extra_keep" ] && [ "$img_id" = "$extra_keep" ]; }; then
+      continue
+    fi
+    docker image rm -f -- "$img_id" >/dev/null 2>&1 || true
+  done < <({ docker image ls -q --no-trunc 2>/dev/null || true; docker image ls --filter dangling=true -q --no-trunc 2>/dev/null || true; } | sort -u)
 }
 docker_login() {
   printf '%s' "$ACCESS_TOKEN" | docker login -u oauth2accesstoken --password-stdin "https://$REGISTRY_HOST"
@@ -464,7 +485,7 @@ for _ in 1 2 3 4 5 6; do
   if worker_is_running "$VERIFIED_IMAGE_ID"; then
     publish_active_state "$TARGET_IMAGE_DIGEST" "$TARGET_CONFIG_SHA"
     # Reclaim the superseded image immediately after the new worker is verified running.
-    prune_unused_docker_storage
+    prune_unused_docker_storage "$VERIFIED_IMAGE_ID"
     exit 0
   fi
   sleep 2
