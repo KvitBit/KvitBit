@@ -7,12 +7,14 @@ import {
   BRANDING_IMAGE_TYPES,
   THEME_JSON_MAX_BYTES,
 } from "@kvitbit/api-contract";
-import { Effect } from "effect";
-import { HttpApiBuilder } from "effect/http-api";
+import * as Effect from "effect/Effect";
+import * as HttpApiBuilder from "effect/http-api/HttpApiBuilder";
 import { HttpConfig } from "../config";
 
-export const ConfigGroupLive = HttpApiBuilder.group(Api, "config", (handlers) =>
-  Effect.gen(function* () {
+export const ConfigGroupLive = HttpApiBuilder.group(
+  Api,
+  "config",
+  Effect.fnUntraced(function* (handlers) {
     const config = yield* HttpConfig;
     return handlers.handle("getConfig", () =>
       Effect.succeed({

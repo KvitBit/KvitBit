@@ -1,15 +1,17 @@
 /** `team` group handlers (http-mcp-contracts 3.5.3): members, invitations, roles and ownership transfer. */
 import { API_PREFIX, Api, CurrentPrincipal } from "@kvitbit/api-contract";
 import { Workspaces } from "@kvitbit/domain/contract";
-import { Effect } from "effect";
-import { HttpApiBuilder } from "effect/http-api";
-import { SqlClient } from "effect/sql";
+import * as Effect from "effect/Effect";
+import * as HttpApiBuilder from "effect/http-api/HttpApiBuilder";
+import * as SqlClient from "effect/sql/SqlClient";
 import { requestOptions, setLocation } from "../conventions";
 import { requireFreshSession } from "./workspace/freshSession";
 import { changeMembershipAndRevokeCredentials } from "./workspace/revokeCredentials";
 
-export const TeamGroupLive = HttpApiBuilder.group(Api, "team", (handlers) =>
-  Effect.gen(function* () {
+export const TeamGroupLive = HttpApiBuilder.group(
+  Api,
+  "team",
+  Effect.fnUntraced(function* (handlers) {
     const workspaces = yield* Workspaces;
     const sql = yield* SqlClient.SqlClient;
     return handlers
@@ -23,8 +25,9 @@ export const TeamGroupLive = HttpApiBuilder.group(Api, "team", (handlers) =>
           params.userId,
         ),
       )
-      .handle("leave", ({ params }) =>
-        Effect.gen(function* () {
+      .handle(
+        "leave",
+        Effect.fnUntraced(function* ({ params }) {
           const principal = yield* CurrentPrincipal;
           yield* changeMembershipAndRevokeCredentials(
             sql,

@@ -1,9 +1,58 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { M3_COLOR_ROLES, THEME_JSON_MAX_BYTES } from "@kvitbit/api-contract";
+import {
+  M3_COLOR_ROLES,
+  ResolvedScheme,
+  ResolvedTheme,
+  THEME_JSON_MAX_BYTES,
+} from "@kvitbit/api-contract";
+import { Invalid, WorkspaceId, WorkspaceSummary } from "@kvitbit/domain/contract";
+import * as Arr from "effect/Array";
+import * as Effect from "effect/Effect";
+import * as Fn from "effect/Function";
+import * as Order from "effect/Order";
+import * as Rec from "effect/Record";
+import * as Schema from "effect/Schema";
+import * as Str from "effect/String";
 import { as, type Harness, json, makeHarness, type TestUser } from "../harness";
 
 let h: Harness;
 let owner: TestUser;
+
+const decodeCreatedWorkspace = Fn.flow(
+  Schema.decodeUnknownEffect(
+    Schema.Struct({ id: WorkspaceId, name: Schema.String, revision: Schema.Int }),
+  ),
+  Effect.runSync,
+);
+const decodeWorkspaceList = Fn.flow(
+  Schema.decodeUnknownEffect(Schema.Array(WorkspaceSummary)),
+  Effect.runSync,
+);
+const decodeInvalid = Fn.flow(
+  Schema.decodeUnknownEffect(Schema.toEncoded(Invalid)),
+  Effect.runSync,
+);
+
+const COLOR_HEX = /^#[0-9A-F]{6}$/;
+const WireScheme = Schema.Struct({
+  ...ResolvedScheme.fields,
+  roles: Schema.Record(Schema.String, Schema.String),
+});
+const decodeTheme = Fn.flow(
+  Schema.decodeUnknownEffect(
+    Schema.toEncoded(
+      Schema.Struct({
+        ...ResolvedTheme.fields,
+        source: Schema.JsonObject,
+        schemes: Schema.StructWithRest(
+          Schema.Struct({ light: WireScheme, dark: WireScheme, lightHigh: WireScheme }),
+          [Schema.JsonObject],
+        ),
+      }),
+    ),
+  ),
+  Effect.runSync,
+);
 
 const SAMPLE_COMPANY = {
   ico: "25596641",
@@ -45,7 +94,8 @@ describe("myWorkspaces group", () => {
         },
       });
       expect(createRes.status).toBe(201);
-      const view = (await createRes.json()) as { id: string; name: string; revision: number };
+      const workspaceWire = await createRes.json();
+      const view = decodeCreatedWorkspace(workspaceWire);
       expect(view.name).toBe("Nová firma s.r.o.");
       expect(createRes.headers.get("location")).toBe(`/api/v1/workspaces/${view.id}`);
       expect(createRes.headers.get("etag")).toBe(`"${view.revision}"`);
@@ -63,12 +113,12 @@ describe("myWorkspaces group", () => {
       });
       expect(replay.status).toBe(201);
       expect(replay.headers.get("idempotent-replayed")).toBe("true");
-      expect(await replay.json()).toEqual(view);
+      expect(await replay.json()).toEqual(workspaceWire);
 
       // listMine includes the created workspace
       const listRes = await h.fetch("/api/v1/workspaces", { headers: as.mobile(owner) });
       expect(listRes.status).toBe(200);
-      const list = (await listRes.json()) as Array<{ id: string; role: string }>;
+      const list = decodeWorkspaceList(await listRes.json());
       expect(list).toHaveLength(1);
       expect(list[0]?.id).toBe(view.id);
       expect(list[0]?.role).toBe("owner");
@@ -118,7 +168,7 @@ describe("registry group", () => {
 });
 
 describe("themes group", () => {
-  const resolve = (body: unknown, headers: Record<string, string> = as.mobile(owner)) =>
+  const resolve = (body: Schema.Json, headers: Record<string, string> = as.mobile(owner)) =>
     h.fetch("/api/v1/themes/resolve", {
       ...json(body),
       method: "POST",
@@ -128,22 +178,12 @@ describe("themes group", () => {
   test("resolves built-in presets (including graphite_atelier exact DESIGN.md roles) and custom seeds", async () => {
     const presetRes = await resolve({ source: { _tag: "Preset", id: "graphite_atelier" } });
     expect(presetRes.status).toBe(200);
-    const preset = (await presetRes.json()) as {
-      source: unknown;
-      schemes: Record<
-        string,
-        {
-          roles: Record<string, string>;
-          extended: Record<string, { color: string; onColor: string }>;
-        }
-      >;
-      warnings?: string[];
-    };
+    const preset = decodeTheme(await presetRes.json());
     expect(preset.source).toEqual({ _tag: "Preset", id: "graphite_atelier" });
-    expect(preset.schemes.light?.roles.primary).toBe("#18181B");
-    expect(preset.schemes.dark?.roles.surface).toBe("#09090B");
-    expect(Object.keys(preset.schemes.light?.roles ?? {}).length).toBe(M3_COLOR_ROLES.length);
-    expect(preset.schemes.light?.extended.paid?.color).toMatch(/^#[0-9A-F]{6}$/);
+    expect(preset.schemes.light.roles.primary).toBe("#18181B");
+    expect(preset.schemes.dark.roles.surface).toBe("#09090B");
+    expect(Rec.keys(preset.schemes.light.roles).length).toBe(M3_COLOR_ROLES.length);
+    expect(preset.schemes.light.extended.paid.color).toMatch(COLOR_HEX);
     expect(preset.warnings).toBeUndefined();
 
     // Custom seed works for API key callers too
@@ -153,8 +193,8 @@ describe("themes group", () => {
       as.apiKey(owner, ws.workspaceId, ["workspace:read"]),
     );
     expect(seedRes.status).toBe(200);
-    const seed = (await seedRes.json()) as { schemes: Record<string, unknown> };
-    expect(Object.keys(seed.schemes).sort()).toEqual([
+    const seed = decodeTheme(await seedRes.json());
+    expect(Arr.sort(Rec.keys(seed.schemes), Order.String)).toEqual([
       "dark",
       "darkHigh",
       "darkMedium",
@@ -166,14 +206,9 @@ describe("themes group", () => {
 
   test("resolves MaterialThemeBuilder JSON, emits theme.low_contrast warning, and rejects invalid/oversized files", async () => {
     // Get valid light & dark role maps from a seed resolution
-    const baseTheme = (await (
-      await resolve({ source: { _tag: "Seed", seed: "#0F5D42" } })
-    ).json()) as {
-      schemes: {
-        light: { roles: Record<string, string> };
-        dark: { roles: Record<string, string> };
-      };
-    };
+    const baseTheme = decodeTheme(
+      await (await resolve({ source: { _tag: "Seed", seed: "#0F5D42" } })).json(),
+    );
 
     const mtbJson = {
       seed: "#0F5D42",
@@ -186,12 +221,9 @@ describe("themes group", () => {
     };
     const okRes = await resolve({ source: { _tag: "MaterialThemeBuilder", json: mtbJson } });
     expect(okRes.status).toBe(200);
-    const resolved = (await okRes.json()) as {
-      schemes: { lightHigh: { roles: Record<string, string> } };
-      warnings?: string[];
-    };
+    const resolved = decodeTheme(await okRes.json());
     // Missing contrast schemes generated from seed
-    expect(resolved.schemes.lightHigh.roles.primary).toMatch(/^#[0-9A-F]{6}$/);
+    expect(resolved.schemes.lightHigh.roles.primary).toMatch(COLOR_HEX);
     expect(resolved.warnings).toBeUndefined();
 
     // Low-contrast MTB JSON is accepted with theme.low_contrast warning (rule T2)
@@ -208,7 +240,7 @@ describe("themes group", () => {
       },
     });
     expect(lowContrastRes.status).toBe(200);
-    const lowContrast = (await lowContrastRes.json()) as { warnings?: string[] };
+    const lowContrast = decodeTheme(await lowContrastRes.json());
     expect(lowContrast.warnings).toEqual(["theme.low_contrast"]);
 
     // Invalid seed in MTB JSON -> 422 theme.seed_invalid
@@ -216,9 +248,7 @@ describe("themes group", () => {
       source: { _tag: "MaterialThemeBuilder", json: { ...mtbJson, seed: "not-hex" } },
     });
     expect(badSeed.status).toBe(422);
-    expect(((await badSeed.json()) as { issues: Array<{ code: string }> }).issues[0]?.code).toBe(
-      "theme.seed_invalid",
-    );
+    expect(decodeInvalid(await badSeed.json()).issues[0].code).toBe("theme.seed_invalid");
 
     // Missing required scheme role -> 422 theme.json_invalid
     const { primary: _dropped, ...incompleteLight } = mtbJson.schemes.light;
@@ -229,20 +259,16 @@ describe("themes group", () => {
       },
     });
     expect(missingRole.status).toBe(422);
-    expect(
-      ((await missingRole.json()) as { issues: Array<{ code: string }> }).issues[0]?.code,
-    ).toBe("theme.json_invalid");
+    expect(decodeInvalid(await missingRole.json()).issues[0].code).toBe("theme.json_invalid");
 
     // Over 64 KB MTB JSON -> 422 theme.too_large (EdgeGuard allows THEME_JSON_MAX_BYTES + 4 KB)
     const hugeRes = await resolve({
       source: {
         _tag: "MaterialThemeBuilder",
-        json: { ...mtbJson, description: "x".repeat(THEME_JSON_MAX_BYTES + 100) },
+        json: { ...mtbJson, description: Str.repeat(THEME_JSON_MAX_BYTES + 100)("x") },
       },
     });
     expect(hugeRes.status).toBe(422);
-    expect(((await hugeRes.json()) as { issues: Array<{ code: string }> }).issues[0]?.code).toBe(
-      "theme.too_large",
-    );
+    expect(decodeInvalid(await hugeRes.json()).issues[0].code).toBe("theme.too_large");
   });
 });

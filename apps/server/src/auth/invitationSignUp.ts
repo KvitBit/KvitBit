@@ -9,27 +9,37 @@ import { Caller, CurrentCaller, InvitationToken, type Workspaces } from "@kvitbi
 import { betterAuth } from "better-auth";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
 import { APIError, createAuthMiddleware } from "better-auth/api";
-import { Clock, Effect, Result } from "effect";
+import * as Clock from "effect/Clock";
+import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
+import * as Rec from "effect/Record";
+import * as Schema from "effect/Schema";
+import * as Str from "effect/String";
 import { acceptLanguageLocale } from "../http/edge/request";
+import { fromAuthPromise, runAuthEffect, withDrizzleSqlContext } from "./drizzleBridge";
 
 const SIGN_UP_PATH = "/sign-up/email";
 
 // Better Auth can log Drizzle errors with raw SQL parameters before returning a response.
 const logInvitationSignUpError = () =>
+  // biome-ignore lint/plugin/no-direct-effect-runs: Better Auth requires a synchronous logger callback.
   Effect.runSync(Effect.logError("Invitation signup request failed"));
 
-const isInvitationSignUp = (body: unknown): body is Record<string, unknown> =>
-  typeof body === "object" &&
-  body !== null &&
-  (Object.hasOwn(body, "invitationToken") || Object.hasOwn(body, "invitation"));
+const InvitationBody = Schema.Record(Schema.String, Schema.Unknown);
+const parseInvitationBody = Schema.decodeUnknownOption(InvitationBody);
+const isString = Schema.is(Schema.String);
+const isNonEmptyString = Schema.is(Schema.NonEmptyString);
+
+const includesInvitation = (body: typeof InvitationBody.Type) =>
+  Rec.has(body, "invitationToken") || Rec.has(body, "invitation");
 
 // Web sends invitationToken and the native client sends invitation. Both are explicit opt-ins.
-const readInvitationToken = (body: Record<string, unknown>) => {
-  const web = Object.hasOwn(body, "invitationToken");
-  const native = Object.hasOwn(body, "invitation");
-  if (web && native && body.invitationToken !== body.invitation) return undefined;
+const readInvitationToken = (body: typeof InvitationBody.Type) => {
+  const web = Rec.has(body, "invitationToken");
+  const native = Rec.has(body, "invitation");
+  if (web && native && body.invitationToken !== body.invitation) return;
   const token = web ? body.invitationToken : body.invitation;
-  return typeof token === "string" && token.length > 0 ? InvitationToken.make(token) : undefined;
+  return isNonEmptyString(token) ? InvitationToken.make(token) : undefined;
 };
 
 const invitationNotFound = () =>
@@ -39,72 +49,83 @@ const invitationSignUpHook = (
   workspaces: Workspaces["Service"],
   clock: Clock.Clock,
   verifiedEmails: WeakMap<Request, string>,
-): BeforeHook => ({
-  matcher: (ctx) => ctx.path === SIGN_UP_PATH,
-  handler: createAuthMiddleware(async (ctx) => {
-    const token = isInvitationSignUp(ctx.body) ? readInvitationToken(ctx.body) : undefined;
-    if (token === undefined || ctx.request === undefined) {
-      throw new APIError("BAD_REQUEST", { code: "InvalidInvitation" });
+): BeforeHook => {
+  const verifyInvitation = Effect.fn("verifyInvitationSignUp")(function* (
+    ctx: Parameters<BeforeHook["handler"]>[0],
+  ) {
+    const body = parseInvitationBody(ctx.body);
+    if (Option.isNone(body) || ctx.request === undefined) {
+      return yield* Effect.fail(new APIError("BAD_REQUEST", { code: "InvalidInvitation" }));
     }
-
-    const invitation = await Effect.runPromise(
-      Effect.result(
-        workspaces.peekInvitation.pipe(
-          Effect.provideService(
-            CurrentCaller,
-            Caller.invitationHolder({
-              token,
-              locale:
-                acceptLanguageLocale(ctx.headers?.get("accept-language") ?? undefined) ?? "cs",
-            }),
-          ),
-          Effect.provideService(Clock.Clock, clock),
-        ),
+    const token = readInvitationToken(body.value);
+    if (token === undefined) {
+      return yield* Effect.fail(new APIError("BAD_REQUEST", { code: "InvalidInvitation" }));
+    }
+    const invitation = yield* workspaces.peekInvitation.pipe(
+      Effect.provideService(
+        CurrentCaller,
+        Caller.invitationHolder({
+          token,
+          locale: acceptLanguageLocale(ctx.headers?.get("accept-language") ?? undefined) ?? "cs",
+        }),
+      ),
+      Effect.provideService(Clock.Clock, clock),
+      Effect.mapError((error) =>
+        error._tag === "Unavailable"
+          ? new APIError(
+              "SERVICE_UNAVAILABLE",
+              { _tag: "Unavailable", code: "Unavailable" },
+              { "Retry-After": "5" },
+            )
+          : invitationNotFound(),
       ),
     );
-    if (Result.isFailure(invitation)) {
-      if (invitation.failure._tag === "Unavailable") {
-        throw new APIError(
-          "SERVICE_UNAVAILABLE",
-          { _tag: "Unavailable", code: "Unavailable" },
-          { "Retry-After": "5" },
-        );
-      }
-      throw invitationNotFound();
-    }
-    if (invitation.success.status !== "pending") throw invitationNotFound();
-    const email = invitation.success.email.toLowerCase();
-    if (typeof ctx.body.email !== "string" || ctx.body.email.toLowerCase() !== email) {
-      throw new APIError("FORBIDDEN", { code: "InvitationEmailMismatch" });
+    if (invitation.status !== "pending") return yield* Effect.fail(invitationNotFound());
+    const email = Str.toLowerCase(invitation.email);
+    if (!isString(body.value.email) || Str.toLowerCase(body.value.email) !== email) {
+      return yield* Effect.fail(new APIError("FORBIDDEN", { code: "InvitationEmailMismatch" }));
     }
     verifiedEmails.set(ctx.request, email);
-  }),
-});
+  });
 
-const usesInvitation = async (request: Request): Promise<boolean> => {
+  return {
+    matcher: (ctx) => ctx.path === SIGN_UP_PATH,
+    handler: createAuthMiddleware((ctx) => runAuthEffect(verifyInvitation(ctx))),
+  };
+};
+
+const usesInvitation = Effect.fn("isInvitationSignUp")(function* (request: Request) {
   if (request.method !== "POST" || new URL(request.url).pathname !== `/api/auth${SIGN_UP_PATH}`) {
     return false;
   }
-  const mediaType = request.headers.get("content-type")?.split(";")[0]?.trim().toLowerCase();
-  const readBody = async () => {
-    if (mediaType === "application/json") return request.clone().json();
-    if (mediaType === "application/x-www-form-urlencoded") {
-      return Object.fromEntries(await request.clone().formData());
-    }
-    return undefined;
-  };
+  const contentType = request.headers.get("content-type");
+  if (contentType === null) return false;
+  const mediaType = Str.toLowerCase(Str.trim(Str.split(contentType, ";")[0]));
   // Better Auth handles malformed bodies and unsupported media types through its usual handler.
-  return isInvitationSignUp(await readBody().catch(() => undefined));
-};
+  if (mediaType === "application/json") {
+    return yield* fromAuthPromise(() => request.clone().text()).pipe(
+      Effect.flatMap(Schema.decodeEffect(Schema.fromJsonString(InvitationBody))),
+      Effect.map(includesInvitation),
+      Effect.orElseSucceed(() => false),
+    );
+  }
+  if (mediaType === "application/x-www-form-urlencoded") {
+    return yield* fromAuthPromise(() => request.clone().formData()).pipe(
+      Effect.map((form) => form.has("invitationToken") || form.has("invitation")),
+      Effect.orElseSucceed(() => false),
+    );
+  }
+  return false;
+});
 
-export const makeAuthWithInvitationSignUp = async (
+export const makeAuthWithInvitationSignUp = Effect.fn("auth.invitationSetup")(function* (
   auth: Auth,
   config: AuthConfig,
   workspaces: Workspaces["Service"],
   clock: Clock.Clock,
-) => {
+) {
   // The normal OAuth provider initializes its resource rows before the invitation-only instance.
-  await auth.$context;
+  yield* withDrizzleSqlContext(() => auth.$context);
   const verifiedEmails = new WeakMap<Request, string>();
   const options = authOptions({
     ...config,
@@ -132,27 +153,31 @@ export const makeAuthWithInvitationSignUp = async (
     databaseHooks: {
       user: {
         create: {
-          before: async (user, ctx) => {
-            if (ctx?.path !== SIGN_UP_PATH || ctx.request === undefined) return false;
-            if (verifiedEmails.get(ctx.request) !== user.email) return false;
-            return { data: { emailVerified: true } };
-          },
+          before: (user, ctx) =>
+            runAuthEffect(
+              Effect.sync(() => {
+                if (ctx?.path !== SIGN_UP_PATH || ctx.request === undefined) return false;
+                if (verifiedEmails.get(ctx.request) !== user.email) return false;
+                return { data: { emailVerified: true } };
+              }),
+            ),
         },
       },
     },
   });
 
-  await invitationAuth.$context;
-  return {
-    ...auth,
-    handler: async (request: Request) => {
-      if (!(await usesInvitation(request))) return auth.handler(request);
-      try {
-        return await invitationAuth.handler(request);
-      } catch {
-        logInvitationSignUpError();
-        return Response.json({ code: "InvitationSignupFailed" }, { status: 500 });
-      }
-    },
-  };
-};
+  yield* withDrizzleSqlContext(() => invitationAuth.$context);
+  const handleInvitationSignUp = Effect.fn("handleInvitationSignUp")(function* (request: Request) {
+    if (!(yield* usesInvitation(request))) {
+      return yield* withDrizzleSqlContext(() => auth.handler(request));
+    }
+    return yield* withDrizzleSqlContext(() => invitationAuth.handler(request)).pipe(
+      Effect.catch(() =>
+        Effect.logError("Invitation signup request failed").pipe(
+          Effect.as(Response.json({ code: "InvitationSignupFailed" }, { status: 500 })),
+        ),
+      ),
+    );
+  });
+  return { ...auth, handler: (request: Request) => runAuthEffect(handleInvitationSignUp(request)) };
+});

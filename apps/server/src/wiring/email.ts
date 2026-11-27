@@ -16,8 +16,15 @@ import {
   type SmtpTransportOptions,
 } from "@kvitbit/adapters/email";
 import { EmailRejected, EmailSender } from "@kvitbit/domain/ports";
-import { Config, Context, Effect, Layer, Option, Redacted } from "effect";
-import { FetchHttpClient } from "effect/http";
+import * as Config from "effect/Config";
+import * as Context from "effect/Context";
+import * as Effect from "effect/Effect";
+import * as Fn from "effect/Function";
+import * as FetchHttpClient from "effect/http/FetchHttpClient";
+import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
+import * as Predicate from "effect/Predicate";
+import * as Redacted from "effect/Redacted";
 import { type EmailWiringConfig, EmailWiringConfigSchema } from "./config";
 
 /** Parses `smtp://` or `smtps://` URL into nodemailer transport options. */
@@ -37,14 +44,9 @@ export const parseSmtpUrl = (
           pass: decodeURIComponent(url.password),
         }
       : undefined;
+  const transport = { ...SMTP_DEFAULT_TIMEOUTS, host: url.hostname, port, secure };
   return {
-    transport: {
-      ...SMTP_DEFAULT_TIMEOUTS,
-      host: url.hostname,
-      port,
-      secure,
-      ...(auth !== undefined ? { auth } : {}),
-    },
+    transport: auth === undefined ? transport : { ...transport, auth },
     domain: url.hostname || "kvitbit.local",
   };
 };
@@ -57,47 +59,52 @@ const acquireSmtpSender = (rawUrl: string, from: string) => {
 };
 
 /** Builds an `EmailSender` layer from explicit config (used by live wiring and tests). */
-export const makeEmailSenderLayer = (
-  config: EmailWiringConfig,
-  nodeEnv = "development",
-): Layer.Layer<EmailSender> =>
-  Layer.effect(
-    EmailSender,
-    Effect.gen(function* () {
-      const hasResend = Option.isSome(config.resendApiKey);
-      const hasSmtp = Option.isSome(config.smtpUrl);
+export const makeEmailSenderLayer: {
+  (nodeEnv?: string): (config: EmailWiringConfig) => Layer.Layer<EmailSender>;
+  (config: EmailWiringConfig, nodeEnv?: string): Layer.Layer<EmailSender>;
+} = Fn.dual(
+  (args) => Predicate.isObject(args[0]),
+  (config: EmailWiringConfig, nodeEnv = "development"): Layer.Layer<EmailSender> =>
+    Layer.effect(
+      EmailSender,
+      Effect.gen(function* () {
+        const hasResend = Option.isSome(config.resendApiKey);
+        const hasSmtp = Option.isSome(config.smtpUrl);
 
-      if (nodeEnv !== "production") {
-        return nodeEnv === "development" && !hasResend && !hasSmtp
-          ? makeConsoleEmailSender()
-          : yield* makeCaptureEmailSender;
-      }
+        if (nodeEnv !== "production") {
+          return nodeEnv === "development" && !hasResend && !hasSmtp
+            ? makeConsoleEmailSender()
+            : yield* makeCaptureEmailSender;
+        }
 
-      if (hasResend && hasSmtp) {
-        const resend = yield* makeResendEmailSender({
-          apiKey: config.resendApiKey.value,
-          from: config.from,
+        if (hasResend && hasSmtp) {
+          const resend = yield* makeResendEmailSender({
+            apiKey: config.resendApiKey.value,
+            from: config.from,
+          });
+          const smtp = yield* acquireSmtpSender(Redacted.value(config.smtpUrl.value), config.from);
+          return makeFallbackEmailSender(resend, smtp);
+        }
+
+        if (hasResend) {
+          return yield* makeResendEmailSender({
+            apiKey: config.resendApiKey.value,
+            from: config.from,
+          });
+        }
+
+        if (hasSmtp) {
+          return yield* acquireSmtpSender(Redacted.value(config.smtpUrl.value), config.from);
+        }
+
+        return EmailSender.of({
+          send: Effect.fn("EmailSender.send")(() =>
+            Effect.fail(new EmailRejected({ cause: "Email delivery is not configured" })),
+          ),
         });
-        const smtp = yield* acquireSmtpSender(Redacted.value(config.smtpUrl.value), config.from);
-        return makeFallbackEmailSender(resend, smtp);
-      }
-
-      if (hasResend) {
-        return yield* makeResendEmailSender({
-          apiKey: config.resendApiKey.value,
-          from: config.from,
-        });
-      }
-
-      if (hasSmtp) {
-        return yield* acquireSmtpSender(Redacted.value(config.smtpUrl.value), config.from);
-      }
-
-      return EmailSender.of({
-        send: () => Effect.fail(new EmailRejected({ cause: "Email delivery is not configured" })),
-      });
-    }),
-  ).pipe(Layer.provide(FetchHttpClient.layer));
+      }),
+    ).pipe(Layer.provide(FetchHttpClient.layer)),
+);
 
 /** Live `EmailSender` configured from `EMAIL_FROM`, `RESEND_API_KEY`, `KVITBIT_SMTP_URL`. */
 export const EmailSenderLive: Layer.Layer<EmailSender, Config.ConfigError> = Layer.unwrap(

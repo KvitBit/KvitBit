@@ -7,6 +7,7 @@
  *   `Documents.pdf` defaults to workspace `pdfTemplate`, and cached PDFs key on both document
  *   revision and workspace revision.
  */
+
 import { describe, expect, test } from "bun:test";
 import { PdfEngine } from "@kvitbit/adapters/pdf";
 import { toSvg } from "@kvitbit/adapters/qr";
@@ -35,28 +36,42 @@ import {
   UserDirectoryFake,
 } from "@kvitbit/core/testing";
 import {
+  BankAccountInput,
   Caller,
-  type ContactId,
+  ContactId,
+  ContactSnapshot,
   Contacts,
   CurrencyCode,
   CurrentCaller,
-  type DocumentId,
+  DocumentId,
   Documents,
   type DocumentView,
-  type IsoDate,
+  IsoDate,
+  IssuerSnapshot,
   Payments,
   PublicShareLinks,
-  type RequestKey,
-  type TemplateId,
+  RequestKey,
+  ShareToken,
+  TemplateId,
   Templates,
   UserId,
-  type VisitorHash,
-  type WorkspaceId,
+  VisitorHash,
+  WorkspaceId,
   Workspaces,
 } from "@kvitbit/domain/contract";
-import { type BlobKey, BlobStorage } from "@kvitbit/domain/ports";
-import { BigDecimal, Effect, Layer, Ref, Stream } from "effect";
-import { TestClock } from "effect/testing";
+import { BlobKey, BlobStorage } from "@kvitbit/domain/ports";
+import * as BigDecimal from "effect/BigDecimal";
+import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
+import * as Fn from "effect/Function";
+import * as Layer from "effect/Layer";
+import * as Ref from "effect/Ref";
+import * as Result from "effect/Result";
+import * as Schema from "effect/Schema";
+import * as SchemaIssue from "effect/SchemaIssue";
+import * as Stream from "effect/Stream";
+import * as Str from "effect/String";
+import * as TestClock from "effect/testing/TestClock";
 import { PersistenceLive, PgliteTestDatabase } from "../../src/persistence";
 import {
   documentPdfCacheKey,
@@ -112,8 +127,8 @@ const makeLivePdfCore = (
               ...repo,
               get: (workspaceId, id) =>
                 Effect.suspend(() =>
-                  rejectDocumentRead(id)
-                    ? Effect.fail(new StoreUnavailable({}))
+                  rejectDocumentRead(id) === true
+                    ? Effect.fail(StoreUnavailable.make({}))
                     : repo.get(workspaceId, id),
                 ),
             }),
@@ -150,17 +165,45 @@ const money = (n: string, currency: CurrencyCode = CurrencyCode.make("CZK")) => 
   currency,
 });
 
+const decode = <S extends Schema.ConstraintDecoder<unknown>>(schema: S) =>
+  Fn.flow(Schema.decodeUnknownResult(schema), Result.getOrThrow);
+
+const invoiceNumber = String(202612345678);
+const PaymentQrField = Schema.Struct({
+  paymentQr: Schema.NullOr(Schema.Struct({ format: Schema.String, payload: Schema.String })),
+});
+const decodeDocumentQr = decode(PaymentQrField);
+const decodeIssuedDocument = decode(Schema.Struct({ id: Schema.String, ...PaymentQrField.fields }));
+const decodeToolDocument = decode(
+  Schema.Struct({ structuredContent: Schema.Struct({ document: PaymentQrField }) }),
+);
+const decodeContactId = decode(ContactId);
+const decodeTemplateId = decode(TemplateId);
+const decodeContact = decode(Schema.Struct({ id: Schema.String }));
+const decodeShareLink = decode(Schema.Struct({ url: Schema.String }));
+const decodeResource = decode(
+  Schema.Struct({ contents: Schema.Array(Schema.Struct({ text: Schema.String })) }),
+);
+const decodeResourceDocument = decode(Schema.fromJsonString(PaymentQrField));
+const encodeJson = Fn.flow(
+  Schema.encodeResult(Schema.fromJsonString(Schema.Json)),
+  Result.getOrThrow,
+);
+const JsonObjectFromString = Schema.fromJsonString(Schema.JsonObject);
+const decodeRenderModel = decode(Schema.Union([JsonObjectFromString, Schema.JsonObject]));
+const decodeJsonObject = decode(Schema.JsonObject);
+
 const sampleDocumentView = (overrides: Partial<DocumentView> = {}): DocumentView => ({
-  id: "01950000-0000-7000-8000-000000000001" as DocumentId,
+  id: DocumentId.make("01950000-0000-7000-8000-000000000001"),
   kind: "invoice",
-  number: "202612345678",
+  number: invoiceNumber,
   status: "issued",
   locked: false,
   settlement: "unpaid",
   overdue: false,
   revision: 1,
   taxDocument: true,
-  contact: {
+  contact: ContactSnapshot.make({
     contactId: "01950000-0000-7000-8000-000000000002",
     name: "Odběratel a.s.",
     ico: "87654321",
@@ -168,9 +211,9 @@ const sampleDocumentView = (overrides: Partial<DocumentView> = {}): DocumentView
     legalForm: "a.s.",
     address: { street: "Václavské nám. 1", city: "Praha 1", postalCode: "110 00", country: "CZ" },
     billingEmails: ["billing@odberatel.cz"],
-  } as unknown as DocumentView["contact"],
-  issuer: {
-    workspaceId: "01950000-0000-7000-8000-000000000003" as WorkspaceId,
+  }),
+  issuer: IssuerSnapshot.make({
+    workspaceId: WorkspaceId.make("01950000-0000-7000-8000-000000000003"),
     name: "Ateliér Kalný s.r.o.",
     ico: "12345678",
     dic: "CZ12345678",
@@ -188,11 +231,11 @@ const sampleDocumentView = (overrides: Partial<DocumentView> = {}): DocumentView
       bic: "GIBACZPX",
       currency: CurrencyCode.make("CZK"),
     },
-  } as unknown as DocumentView["issuer"],
+  }),
   dates: {
-    issuedOn: "2026-11-20" as IsoDate,
-    taxableSupplyOn: "2026-11-20" as IsoDate,
-    dueOn: "2026-12-04" as IsoDate,
+    issuedOn: IsoDate.make("2026-11-20"),
+    taxableSupplyOn: IsoDate.make("2026-11-20"),
+    dueOn: IsoDate.make("2026-12-04"),
   },
   paymentMethod: "bank_transfer",
   lines: [],
@@ -215,10 +258,10 @@ const sampleDocumentView = (overrides: Partial<DocumentView> = {}): DocumentView
 
 describe("Phase 3A Round 1 fixes 6–8: PDF, branding, and document/share read projections", () => {
   test("Finding 7 unit: variableSymbol uses last 10 digits (Numbering.variableSymbol) and matches SPAYD QR", () => {
-    expect(resolveVariableSymbol(null, "202612345678")).toBe("2612345678");
-    expect(resolveVariableSymbol("998877", "202612345678")).toBe("998877");
+    expect(resolveVariableSymbol(null, invoiceNumber)).toBe("2612345678");
+    expect(resolveVariableSymbol("998877", invoiceNumber)).toBe("998877");
 
-    const model = documentViewToRenderModel(sampleDocumentView({ number: "202612345678" }));
+    const model = documentViewToRenderModel(sampleDocumentView({ number: invoiceNumber }));
     expect(model.variableSymbol).toBe("2612345678");
     expect(model.paymentQr?.format).toBe("spayd");
     expect(model.paymentQr?.payload).toContain("X-VS:2612345678");
@@ -272,14 +315,16 @@ describe("Phase 3A Round 1 fixes 6–8: PDF, branding, and document/share read p
 
         // Add CZK bank account with IBAN, upload logo & stamp, set modern_minimal + accent + footer
         yield* asMember(
-          workspaces.saveBankAccount({
-            name: "Hlavní CZK",
-            currency: CurrencyCode.make("CZK"),
-            accountNumber: "123456789/0100",
-            iban: "CZ6508000000192000145399",
-            bic: "GIBACZPX",
-            isDefault: true,
-          } as never),
+          workspaces.saveBankAccount(
+            BankAccountInput.make({
+              name: "Hlavní CZK",
+              currency: CurrencyCode.make("CZK"),
+              accountNumber: "123456789/0100",
+              iban: "CZ6508000000192000145399",
+              bic: "GIBACZPX",
+              isDefault: true,
+            }),
+          ),
         );
         yield* asMember(
           workspaces.setBrandingImage("logo", {
@@ -345,15 +390,15 @@ describe("Phase 3A Round 1 fixes 6–8: PDF, branding, and document/share read p
               country: "CZ",
             },
             billingEmails: ["billing@odberatel.cz"],
-          } as never),
+          }),
         );
         const invoice = yield* asMember(
           documents.issue({
             input: {
               kind: "invoice",
-              contact: contact.id as ContactId,
-              issuedOn: "2026-10-05" as IsoDate,
-              taxableSupplyOn: "2026-10-05" as IsoDate,
+              contact: decodeContactId(contact.id),
+              issuedOn: IsoDate.make("2026-10-05"),
+              taxableSupplyOn: IsoDate.make("2026-10-05"),
               variableSymbol: "2612345678",
               lines: [
                 {
@@ -403,10 +448,10 @@ describe("Phase 3A Round 1 fixes 6–8: PDF, branding, and document/share read p
 
         // Share link open returns exact same paymentQr; share PDF hits the same cache!
         const createdShare = yield* asMember(shareLinks.create(invoice.id));
-        const shareToken = createdShare.url.split("/").pop() ?? "";
+        const shareToken = Str.split(createdShare.url, "/").pop() ?? "";
         const visitorCaller = Caller.shareLinkVisitor({
-          token: shareToken as never,
-          visitor: "visitor-hash-1" as VisitorHash,
+          token: ShareToken.make(shareToken),
+          visitor: VisitorHash.make("visitor-hash-1"),
           locale: "cs",
         });
         const sharedView = yield* shareLinks.open.pipe(
@@ -456,7 +501,7 @@ describe("Phase 3A Round 1 fixes 6–8: PDF, branding, and document/share read p
         const cnPdf = yield* asMember(documents.pdf(creditNote.id));
         yield* Stream.runDrain(cnPdf.bytes);
         expect(capturedHtml).toHaveLength(beforeCreditPdf + 1);
-        const cnHtml = (capturedHtml.at(-1) ?? "").replace(/\u00a0/g, " ");
+        const cnHtml = Str.replace(/\u00a0/g, " ")(capturedHtml.at(-1) ?? "");
         // Czech date formatting: 05. 10. 2026 (original) vs 20. 11. 2026 (credit note)
         expect(cnHtml).toContain("Vrácení vadného zboží");
         expect(cnHtml).toContain(invoice.number ?? "");
@@ -485,33 +530,35 @@ describe("Phase 3A Round 1 fixes 6–8: PDF, branding, and document/share read p
       await http.run(
         Effect.gen(function* () {
           const ws = yield* Workspaces;
-          yield* ws.saveBankAccount({
-            name: "CZK",
-            currency: CurrencyCode.make("CZK"),
-            accountNumber: "123456789/0100",
-            iban: "CZ6508000000192000145399",
-            bic: "GIBACZPX",
-            isDefault: true,
-          } as never);
+          yield* ws.saveBankAccount(
+            BankAccountInput.make({
+              name: "CZK",
+              currency: CurrencyCode.make("CZK"),
+              accountNumber: "123456789/0100",
+              iban: "CZ6508000000192000145399",
+              bic: "GIBACZPX",
+              isDefault: true,
+            }),
+          );
         }).pipe(Effect.provideService(CurrentCaller, member)),
       );
 
       const contactRes = await http.fetch(`/api/v1/workspaces/${member.workspaceId}/contacts`, {
         method: "POST",
         headers: { ...authHeader, "content-type": "application/json" },
-        body: JSON.stringify({
+        body: encodeJson({
           name: "Klient s.r.o.",
           address: { street: "Ulice 1", city: "Praha", postalCode: "110 00", country: "CZ" },
         }),
       });
-      const contact = (await contactRes.json()) as { id: string };
+      const contact = decodeContact(await contactRes.json());
 
       const issueRes = await http.fetch(
         `/api/v1/workspaces/${member.workspaceId}/documents/issue`,
         {
           method: "POST",
           headers: { ...authHeader, "content-type": "application/json" },
-          body: JSON.stringify({
+          body: encodeJson({
             input: {
               kind: "invoice",
               contact: contact.id,
@@ -522,10 +569,7 @@ describe("Phase 3A Round 1 fixes 6–8: PDF, branding, and document/share read p
         },
       );
       expect(issueRes.status).toBe(201);
-      const issued = (await issueRes.json()) as {
-        id: string;
-        paymentQr: { format: string; payload: string } | null;
-      };
+      const issued = decodeIssuedDocument(await issueRes.json());
       expect(issued.paymentQr).not.toBeNull();
       expect(issued.paymentQr?.format).toBe("spayd");
       expect(issued.paymentQr?.payload).toContain("X-VS:2612345678");
@@ -535,9 +579,7 @@ describe("Phase 3A Round 1 fixes 6–8: PDF, branding, and document/share read p
         { headers: authHeader },
       );
       expect(getRes.status).toBe(200);
-      const fetched = (await getRes.json()) as {
-        paymentQr: { format: string; payload: string } | null;
-      };
+      const fetched = decodeDocumentQr(await getRes.json());
       expect(fetched.paymentQr).toEqual(issued.paymentQr);
 
       // Share link open returns exact same paymentQr
@@ -546,13 +588,11 @@ describe("Phase 3A Round 1 fixes 6–8: PDF, branding, and document/share read p
         { method: "PUT", headers: authHeader },
       );
       expect(shareRes.status).toBe(200);
-      const { url } = (await shareRes.json()) as { url: string };
-      const token = url.split("/").pop() ?? "";
+      const { url } = decodeShareLink(await shareRes.json());
+      const token = Str.split(url, "/").pop() ?? "";
       const openRes = await http.fetch(`/api/v1/share/${token}`);
       expect(openRes.status).toBe(200);
-      const shared = (await openRes.json()) as {
-        paymentQr: { format: string; payload: string } | null;
-      };
+      const shared = decodeDocumentQr(await openRes.json());
       expect(shared.paymentQr).toEqual(issued.paymentQr);
     } finally {
       await http.dispose();
@@ -580,22 +620,24 @@ describe("Phase 3A Round 1 fixes 6–8: PDF, branding, and document/share read p
           const ws = yield* Workspaces;
           const contacts = yield* Contacts;
           const docs = yield* Documents;
-          yield* ws.saveBankAccount({
-            name: "CZK",
-            currency: CurrencyCode.make("CZK"),
-            accountNumber: "123456789/0100",
-            iban: "CZ6508000000192000145399",
-            bic: "GIBACZPX",
-            isDefault: true,
-          } as never);
+          yield* ws.saveBankAccount(
+            BankAccountInput.make({
+              name: "CZK",
+              currency: CurrencyCode.make("CZK"),
+              accountNumber: "123456789/0100",
+              iban: "CZ6508000000192000145399",
+              bic: "GIBACZPX",
+              isDefault: true,
+            }),
+          );
           const contact = yield* contacts.save({
             name: "MCP Buyer s.r.o.",
             address: { street: "Ulice 2", city: "Brno", postalCode: "602 00", country: "CZ" },
-          } as never);
+          });
           const issued = yield* docs.issue({
             input: {
               kind: "invoice",
-              contact: contact.id as ContactId,
+              contact: decodeContactId(contact.id),
               variableSymbol: "2612345678",
               lines: [
                 {
@@ -611,13 +653,7 @@ describe("Phase 3A Round 1 fixes 6–8: PDF, branding, and document/share read p
       );
 
       const toolCall = await mcp.callTool(grant.token, "get_document", { documentId: docId });
-      const toolDoc = (
-        toolCall.result as unknown as {
-          structuredContent: {
-            document: { paymentQr: { format: string; payload: string } | null };
-          };
-        }
-      ).structuredContent.document;
+      const toolDoc = decodeToolDocument(toolCall.result).structuredContent.document;
       expect(toolDoc.paymentQr).not.toBeNull();
       expect(toolDoc.paymentQr?.format).toBe("spayd");
       expect(toolDoc.paymentQr?.payload).toContain("X-VS:2612345678");
@@ -625,11 +661,8 @@ describe("Phase 3A Round 1 fixes 6–8: PDF, branding, and document/share read p
       const resCall = await mcp.rpc(grant.token, "resources/read", {
         uri: `kvitbit://documents/${docId}`,
       });
-      const resText = (resCall.json.result as { contents: Array<{ text: string }> }).contents[0]
-        ?.text;
-      const resDoc = JSON.parse(resText ?? "{}") as {
-        paymentQr: { format: string; payload: string } | null;
-      };
+      const resText = decodeResource(resCall.json.result).contents[0]?.text;
+      const resDoc = decodeResourceDocument(resText);
       expect(resDoc.paymentQr).toEqual(toolDoc.paymentQr);
     } finally {
       await mcp.dispose();
@@ -680,14 +713,16 @@ describe("Phase 3A Round 1 fixes 6–8: PDF, branding, and document/share read p
           Effect.provideService(eff, CurrentCaller, memberCaller);
 
         yield* asMember(
-          workspaces.saveBankAccount({
-            name: "Hlavní CZK",
-            currency: CurrencyCode.make("CZK"),
-            accountNumber: "123456789/0100",
-            iban: "CZ6508000000192000145399",
-            bic: "GIBACZPX",
-            isDefault: true,
-          } as never),
+          workspaces.saveBankAccount(
+            BankAccountInput.make({
+              name: "Hlavní CZK",
+              currency: CurrencyCode.make("CZK"),
+              accountNumber: "123456789/0100",
+              iban: "CZ6508000000192000145399",
+              bic: "GIBACZPX",
+              isDefault: true,
+            }),
+          ),
         );
         const uploadedLogo = yield* asMember(
           workspaces.setBrandingImage("logo", {
@@ -707,17 +742,17 @@ describe("Phase 3A Round 1 fixes 6–8: PDF, branding, and document/share read p
           contacts.save({
             name: "Odběratel a.s.",
             address: { street: "Ulice 1", city: "Praha", postalCode: "110 00", country: "CZ" },
-          } as never),
+          }),
         );
 
         // 1. C3 request-key replay + J3 queued delivery snapshot
-        const issueReqKey = "rk-c3-issue-001" as RequestKey;
+        const issueReqKey = RequestKey.make("rk-c3-issue-001");
         const issued = yield* asMember(
           documents.issue(
             {
               input: {
                 kind: "invoice",
-                contact: contact.id as ContactId,
+                contact: decodeContactId(contact.id),
                 variableSymbol: "2612345678",
                 note: "Původní poznámka",
                 lines: [
@@ -752,7 +787,7 @@ describe("Phase 3A Round 1 fixes 6–8: PDF, branding, and document/share read p
             {
               input: {
                 kind: "invoice",
-                contact: contact.id as ContactId,
+                contact: decodeContactId(contact.id),
                 variableSymbol: "2612345678",
                 note: "Původní poznámka",
                 lines: [
@@ -786,7 +821,7 @@ describe("Phase 3A Round 1 fixes 6–8: PDF, branding, and document/share read p
           payments.record({
             target: { document: issued.id },
             amount: money("300"),
-            paidOn: "2026-10-06" as IsoDate,
+            paidOn: IsoDate.make("2026-10-06"),
             method: "bank_transfer",
           }),
         );
@@ -794,10 +829,10 @@ describe("Phase 3A Round 1 fixes 6–8: PDF, branding, and document/share read p
         expect(partialDoc.paymentQr?.payload).toContain("AM:700.00");
 
         const shareCreated = yield* asMember(shareLinks.create(issued.id));
-        const shareToken = shareCreated.url.split("/").pop() ?? "";
+        const shareToken = Str.split(shareCreated.url, "/").pop() ?? "";
         const visitorCaller = Caller.shareLinkVisitor({
-          token: shareToken as never,
-          visitor: "visitor-pay-1" as VisitorHash,
+          token: ShareToken.make(shareToken),
+          visitor: VisitorHash.make("visitor-pay-1"),
           locale: "cs",
         });
         const partialShare = yield* shareLinks.open.pipe(
@@ -809,7 +844,7 @@ describe("Phase 3A Round 1 fixes 6–8: PDF, branding, and document/share read p
           payments.record({
             target: { document: issued.id },
             amount: money("700"),
-            paidOn: "2026-10-07" as IsoDate,
+            paidOn: IsoDate.make("2026-10-07"),
             method: "bank_transfer",
           }),
         );
@@ -825,7 +860,7 @@ describe("Phase 3A Round 1 fixes 6–8: PDF, branding, and document/share read p
           templates.save({
             name: "Měsíční paušál",
             kind: "invoice",
-            contact: contact.id as ContactId,
+            contact: decodeContactId(contact.id),
             lines: [
               {
                 description: "Paušál",
@@ -833,17 +868,20 @@ describe("Phase 3A Round 1 fixes 6–8: PDF, branding, and document/share read p
                 unitPrice: BigDecimal.fromStringUnsafe("2000"),
               },
             ],
-          } as never),
+          }),
         );
-        const fromTemplate = yield* asMember(templates.use(tpl.id as TemplateId, { as: "issued" }));
+        const fromTemplate = yield* asMember(
+          templates.use(decodeTemplateId(tpl.id), { as: "issued" }),
+        );
         const fromGet = yield* asMember(documents.get(fromTemplate.id));
         expect(fromTemplate.paymentQr).not.toBeNull();
         expect(fromTemplate.paymentQr).toEqual(fromGet.paymentQr);
 
         // 4. Branding image temporarily unreadable -> incomplete PDF is NOT cached;
         // restoring bytes triggers a fresh render with the logo!
-        const logoKey =
-          `branding/${memberCaller.workspaceId}/logo/${uploadedLogo.sha256}` as BlobKey;
+        const logoKey = BlobKey.make(
+          `branding/${memberCaller.workspaceId}/logo/${uploadedLogo.sha256}`,
+        );
         const logoB64 = Buffer.from(LOGO_PNG).toString("base64");
         yield* blobs.delete(logoKey);
 
@@ -889,21 +927,23 @@ describe("Phase 3A Round 1 fixes 6–8: PDF, branding, and document/share read p
           const contacts = yield* Contacts;
           const docs = yield* Documents;
           const payments = yield* Payments;
-          yield* ws.saveBankAccount({
-            name: "EUR",
-            currency: CurrencyCode.make("EUR"),
-            iban: "CZ6508000000192000145399",
-            bic: "GIBACZPX",
-            isDefault: true,
-          } as never);
+          yield* ws.saveBankAccount(
+            BankAccountInput.make({
+              name: "EUR",
+              currency: CurrencyCode.make("EUR"),
+              iban: "CZ6508000000192000145399",
+              bic: "GIBACZPX",
+              isDefault: true,
+            }),
+          );
           const contact = yield* contacts.save({
             name: "EU Client GmbH",
             address: { street: "Strasse 1", city: "Berlin", postalCode: "10115", country: "DE" },
-          } as never);
+          });
           const issued = yield* docs.issue({
             input: {
               kind: "invoice",
-              contact: contact.id as ContactId,
+              contact: decodeContactId(contact.id),
               currency: CurrencyCode.make("EUR"),
               fx: { manual: { rate: BigDecimal.fromStringUnsafe("25"), quantity: 1 } },
               lines: [
@@ -918,7 +958,7 @@ describe("Phase 3A Round 1 fixes 6–8: PDF, branding, and document/share read p
           yield* payments.record({
             target: { document: issued.id },
             amount: money("250", CurrencyCode.make("EUR")),
-            paidOn: "2026-11-23" as IsoDate,
+            paidOn: IsoDate.make("2026-11-23"),
             method: "bank_transfer",
           });
           return issued.id;
@@ -930,9 +970,7 @@ describe("Phase 3A Round 1 fixes 6–8: PDF, branding, and document/share read p
         { headers: authHeader },
       );
       expect(httpDocRes.status).toBe(200);
-      const httpDoc = (await httpDocRes.json()) as {
-        paymentQr: { format: string; payload: string } | null;
-      };
+      const httpDoc = decodeDocumentQr(await httpDocRes.json());
       expect(httpDoc.paymentQr?.format).toBe("epc");
       expect(httpDoc.paymentQr?.payload).toContain("EUR750.00");
 
@@ -940,12 +978,10 @@ describe("Phase 3A Round 1 fixes 6–8: PDF, branding, and document/share read p
         `/api/v1/workspaces/${httpMember.workspaceId}/documents/${httpDocId}/share-link`,
         { method: "PUT", headers: authHeader },
       );
-      const { url } = (await shareRes.json()) as { url: string };
-      const token = url.split("/").pop() ?? "";
+      const { url } = decodeShareLink(await shareRes.json());
+      const token = Str.split(url, "/").pop() ?? "";
       const shareDocRes = await http.fetch(`/api/v1/share/${token}`);
-      const shareDoc = (await shareDocRes.json()) as {
-        paymentQr: { format: string; payload: string } | null;
-      };
+      const shareDoc = decodeDocumentQr(await shareDocRes.json());
       expect(shareDoc.paymentQr).toEqual(httpDoc.paymentQr);
 
       // MCP EUR parity with identical partial payment
@@ -968,21 +1004,23 @@ describe("Phase 3A Round 1 fixes 6–8: PDF, branding, and document/share read p
           const contacts = yield* Contacts;
           const docs = yield* Documents;
           const payments = yield* Payments;
-          yield* ws.saveBankAccount({
-            name: "EUR",
-            currency: CurrencyCode.make("EUR"),
-            iban: "CZ6508000000192000145399",
-            bic: "GIBACZPX",
-            isDefault: true,
-          } as never);
+          yield* ws.saveBankAccount(
+            BankAccountInput.make({
+              name: "EUR",
+              currency: CurrencyCode.make("EUR"),
+              iban: "CZ6508000000192000145399",
+              bic: "GIBACZPX",
+              isDefault: true,
+            }),
+          );
           const contact = yield* contacts.save({
             name: "EU Client GmbH",
             address: { street: "Strasse 1", city: "Berlin", postalCode: "10115", country: "DE" },
-          } as never);
+          });
           const issued = yield* docs.issue({
             input: {
               kind: "invoice",
-              contact: contact.id as ContactId,
+              contact: decodeContactId(contact.id),
               currency: CurrencyCode.make("EUR"),
               fx: { manual: { rate: BigDecimal.fromStringUnsafe("25"), quantity: 1 } },
               lines: [
@@ -997,7 +1035,7 @@ describe("Phase 3A Round 1 fixes 6–8: PDF, branding, and document/share read p
           yield* payments.record({
             target: { document: issued.id },
             amount: money("250", CurrencyCode.make("EUR")),
-            paidOn: "2026-11-23" as IsoDate,
+            paidOn: IsoDate.make("2026-11-23"),
             method: "bank_transfer",
           });
           return issued.id;
@@ -1005,13 +1043,7 @@ describe("Phase 3A Round 1 fixes 6–8: PDF, branding, and document/share read p
       );
 
       const toolCall = await mcp.callTool(grant.token, "get_document", { documentId: mcpDocId });
-      const toolDoc = (
-        toolCall.result as unknown as {
-          structuredContent: {
-            document: { paymentQr: { format: string; payload: string } | null };
-          };
-        }
-      ).structuredContent.document;
+      const toolDoc = decodeToolDocument(toolCall.result).structuredContent.document;
       expect(toolDoc.paymentQr?.format).toBe("epc");
       expect(toolDoc.paymentQr?.payload).toContain("EUR750.00");
       expect(toolDoc.paymentQr).toEqual(httpDoc.paymentQr);
@@ -1049,7 +1081,7 @@ describe("Phase 3A Round 1 fixes 6–8: PDF, branding, and document/share read p
               ...store.audit,
               history: (ws, subject) =>
                 failSqlAudit
-                  ? Effect.fail(new StoreUnavailable({}))
+                  ? Effect.fail(StoreUnavailable.make({}))
                   : store.audit.history(ws, subject),
             },
           }),
@@ -1113,23 +1145,27 @@ describe("Phase 3A Round 1 fixes 6–8: PDF, branding, and document/share read p
           Effect.provideService(eff, CurrentCaller, memberCaller);
 
         yield* asMember(
-          workspaces.saveBankAccount({
-            name: "CZK",
-            currency: CurrencyCode.make("CZK"),
-            accountNumber: "123456789/0100",
-            iban: "CZ6508000000192000145399",
-            bic: "GIBACZPX",
-            isDefault: true,
-          } as never),
+          workspaces.saveBankAccount(
+            BankAccountInput.make({
+              name: "CZK",
+              currency: CurrencyCode.make("CZK"),
+              accountNumber: "123456789/0100",
+              iban: "CZ6508000000192000145399",
+              bic: "GIBACZPX",
+              isDefault: true,
+            }),
+          ),
         );
         yield* asMember(
-          workspaces.saveBankAccount({
-            name: "EUR",
-            currency: CurrencyCode.make("EUR"),
-            iban: "CZ6508000000192000145399",
-            bic: "GIBACZPX",
-            isDefault: true,
-          } as never),
+          workspaces.saveBankAccount(
+            BankAccountInput.make({
+              name: "EUR",
+              currency: CurrencyCode.make("EUR"),
+              iban: "CZ6508000000192000145399",
+              bic: "GIBACZPX",
+              isDefault: true,
+            }),
+          ),
         );
         yield* asMember(
           workspaces.setBrandingImage("logo", {
@@ -1150,13 +1186,13 @@ describe("Phase 3A Round 1 fixes 6–8: PDF, branding, and document/share read p
             name: "Klient s.r.o.",
             address: { street: "Ulice 2", city: "Brno", postalCode: "602 00", country: "CZ" },
             billingEmails: ["klient@example.cz"],
-          } as never),
+          }),
         );
 
         // 1. Draft QR consistency: preview, createDraft, and replayed createDraft all return the same eligible QR
         const draftInput = {
           kind: "invoice" as const,
-          contact: contact.id as ContactId,
+          contact: decodeContactId(contact.id),
           note: "Draft poznámka",
           lines: [
             {
@@ -1169,7 +1205,7 @@ describe("Phase 3A Round 1 fixes 6–8: PDF, branding, and document/share read p
         const previewDraft = yield* asMember(documents.preview(draftInput));
         expect(previewDraft.paymentQr?.format).toBe("spayd");
         expect(previewDraft.paymentQr?.payload).toContain("AM:1000.00");
-        const draftReqKey = "rk-draft-001" as RequestKey;
+        const draftReqKey = RequestKey.make("rk-draft-001");
         const createdDraft = yield* asMember(
           documents.createDraft(draftInput, { requestKey: draftReqKey }),
         );
@@ -1189,7 +1225,7 @@ describe("Phase 3A Round 1 fixes 6–8: PDF, branding, and document/share read p
           documents.issue({
             input: {
               kind: "invoice",
-              contact: contact.id as ContactId,
+              contact: decodeContactId(contact.id),
               variableSymbol: "2612345678",
               note: "Frozen note",
               lines: [
@@ -1206,7 +1242,7 @@ describe("Phase 3A Round 1 fixes 6–8: PDF, branding, and document/share read p
           payments.record({
             target: { document: invoice.id },
             amount: money("300"),
-            paidOn: "2026-10-06" as IsoDate,
+            paidOn: IsoDate.make("2026-10-06"),
             method: "bank_transfer",
           }),
         );
@@ -1283,15 +1319,51 @@ describe("Phase 3A Round 1 fixes 6–8: PDF, branding, and document/share read p
         const rawRow = yield* sql<{ readonly render_model: unknown }>`
           select render_model from deliveries where id = ${sent.deliveryId}
         `;
-        const parsedModel =
-          typeof rawRow[0]?.render_model === "string"
-            ? (JSON.parse(rawRow[0].render_model) as Record<string, unknown>)
-            : { ...(rawRow[0]?.render_model as Record<string, unknown>) };
-        delete parsedModel.__snapshot;
-        parsedModel.paymentQr = null;
+        const { __snapshot, ...parsedModel } = decodeRenderModel(rawRow[0]?.render_model);
+        const snapshot = decodeJsonObject(__snapshot);
+        const branding = decodeJsonObject(snapshot.branding);
+        const { updatedAt: _updatedAt, ...malformedLogo } = decodeJsonObject(branding.logo);
+        const malformedSnapshot = {
+          ...snapshot,
+          branding: { ...branding, logo: malformedLogo },
+        };
         yield* sql`
           update deliveries
-          set render_model = ${JSON.stringify(parsedModel)}::jsonb,
+          set render_model = ${encodeJson({ ...parsedModel, __snapshot: malformedSnapshot })}::jsonb
+          where id = ${sent.deliveryId}
+        `;
+        const malformedRowExit = yield* deliveriesRepo
+          .get(memberCaller.workspaceId, sent.deliveryId)
+          .pipe(Effect.exit);
+        const malformedRowDefect = malformedRowExit.pipe(Exit.findDefect, Result.getOrThrow);
+        expect(Schema.isSchemaError(malformedRowDefect)).toBe(true);
+
+        // Exercise the renderer independently of SQL decoding with the live cache still warm.
+        const malformedView = Object.defineProperty(
+          { ...deliveryRow.view },
+          Symbol.for("kvitbit/server/DeliveryRenderSnapshot"),
+          { value: { ...malformedSnapshot, amountDue: money("700").amount } },
+        );
+        const malformedRenderExit = yield* renderer
+          .render(malformedView, {
+            template: deliveryRow.attachment.template,
+            language: deliveryRow.language,
+          })
+          .pipe(Effect.exit);
+        expect(malformedRenderExit._tag).toBe("Failure");
+        const malformedRenderDefect = malformedRenderExit.pipe(Exit.findDefect, Result.getOrThrow);
+        const { cause: brandingIssue } = decode(
+          Schema.Struct({ cause: Schema.declare(SchemaIssue.isIssue) }),
+        )(malformedRenderDefect);
+        const { issues } = SchemaIssue.makeFormatterStandardSchemaV1()(brandingIssue);
+        expect(issues).toContainEqual({
+          path: ["branding", "logo", "updatedAt"],
+          message: "Missing key",
+        });
+
+        yield* sql`
+          update deliveries
+          set render_model = ${encodeJson({ ...parsedModel, paymentQr: null })}::jsonb,
               status = 'queued',
               revision = 1,
               attempts = 0,
@@ -1337,7 +1409,7 @@ describe("Phase 3A Round 1 fixes 6–8: PDF, branding, and document/share read p
         // replayed directly without RequestOutcome returns paymentQr: null cleanly!
         const bigEurInput = {
           kind: "invoice" as const,
-          contact: contact.id as ContactId,
+          contact: decodeContactId(contact.id),
           currency: CurrencyCode.make("EUR"),
           fx: { manual: { rate: BigDecimal.fromStringUnsafe("25"), quantity: 1 } },
           lines: [
@@ -1348,7 +1420,7 @@ describe("Phase 3A Round 1 fixes 6–8: PDF, branding, and document/share read p
             },
           ] as const,
         };
-        const bigEurKey = "rk-epc-limit-sql-1" as RequestKey;
+        const bigEurKey = RequestKey.make("rk-epc-limit-sql-1");
         const bigEurInv = yield* asMember(
           documents.issue({ input: bigEurInput }, { requestKey: bigEurKey }),
         );
@@ -1376,7 +1448,7 @@ describe("Phase 3A Round 1 fixes 6–8: PDF, branding, and document/share read p
           documents.issue({
             input: {
               kind: "invoice",
-              contact: contact.id as ContactId,
+              contact: decodeContactId(contact.id),
               currency: CurrencyCode.make("EUR"),
               fx: { manual: { rate: BigDecimal.fromStringUnsafe("25"), quantity: 1 } },
               lines: [
@@ -1393,7 +1465,7 @@ describe("Phase 3A Round 1 fixes 6–8: PDF, branding, and document/share read p
           payments.record({
             target: { document: eurInvoice.id },
             amount: money("250", CurrencyCode.make("EUR")),
-            paidOn: "2026-10-06" as IsoDate,
+            paidOn: IsoDate.make("2026-10-06"),
             method: "bank_transfer",
           }),
         );
@@ -1442,7 +1514,7 @@ describe("Phase 3A Round 1 fixes 6–8: PDF, branding, and document/share read p
         DocumentsRepo.of({
           ...repo,
           getMany: (ws, ids) =>
-            failGetMany ? Effect.fail(new StoreUnavailable({})) : repo.getMany(ws, ids),
+            failGetMany ? Effect.fail(StoreUnavailable.make({})) : repo.getMany(ws, ids),
         }),
       ),
     ).pipe(Layer.provide(baseRepos));
@@ -1455,7 +1527,7 @@ describe("Phase 3A Round 1 fixes 6–8: PDF, branding, and document/share read p
           audit: {
             ...store.audit,
             history: (ws, subject) =>
-              failAudit ? Effect.fail(new StoreUnavailable({})) : store.audit.history(ws, subject),
+              failAudit ? Effect.fail(StoreUnavailable.make({})) : store.audit.history(ws, subject),
           },
         }),
       ),
@@ -1502,26 +1574,28 @@ describe("Phase 3A Round 1 fixes 6–8: PDF, branding, and document/share read p
         const asMember = <A, E, R>(eff: Effect.Effect<A, E, R>) =>
           Effect.provideService(eff, CurrentCaller, memberCaller);
         yield* asMember(
-          workspaces.saveBankAccount({
-            name: "CZK",
-            currency: CurrencyCode.make("CZK"),
-            iban: "CZ6508000000192000145399",
-            bic: "GIBACZPX",
-            isDefault: true,
-          } as never),
+          workspaces.saveBankAccount(
+            BankAccountInput.make({
+              name: "CZK",
+              currency: CurrencyCode.make("CZK"),
+              iban: "CZ6508000000192000145399",
+              bic: "GIBACZPX",
+              isDefault: true,
+            }),
+          ),
         );
         const contact = yield* asMember(
           contacts.save({
             name: "Buyer",
             address: { street: "A 1", city: "Praha", postalCode: "110 00", country: "CZ" },
-          } as never),
+          }),
         );
         const inv = yield* asMember(
           documents.issue(
             {
               input: {
                 kind: "invoice",
-                contact: contact.id as ContactId,
+                contact: decodeContactId(contact.id),
                 variableSymbol: "2612345678",
                 lines: [
                   {
@@ -1532,12 +1606,12 @@ describe("Phase 3A Round 1 fixes 6–8: PDF, branding, and document/share read p
                 ],
               },
             },
-            { requestKey: "rk-spy-1" as RequestKey },
+            { requestKey: RequestKey.make("rk-spy-1") },
           ),
         );
 
         // R1a: unauthorized caller fails with Forbidden with ZERO WorkspacesRepo reads
-        const limitedCaller = { ...memberCaller, scopes: ["contacts:read"] as never };
+        const limitedCaller = { ...memberCaller, scopes: ["contacts:read"] as const };
         const readsBeforeDenied = workspaceReads;
         const deniedExit = yield* Effect.exit(
           documents.pdf(inv.id).pipe(Effect.provideService(CurrentCaller, limitedCaller)),
@@ -1548,7 +1622,7 @@ describe("Phase 3A Round 1 fixes 6–8: PDF, branding, and document/share read p
         // Failed credit lookup (StoreUnavailable on getMany) must NOT return payable QR
         yield* asMember(documents.correct(inv.id, { reason: "Full credit", lines: "full" }));
         failGetMany = true;
-        const creditFailExit = yield* Effect.exit(asMember(documents.get(inv.id)));
+        const creditFailExit = yield* documents.get(inv.id).pipe(asMember, Effect.exit);
         failGetMany = false;
         expect(creditFailExit._tag).toBe("Failure");
 
@@ -1559,7 +1633,7 @@ describe("Phase 3A Round 1 fixes 6–8: PDF, branding, and document/share read p
             {
               input: {
                 kind: "invoice",
-                contact: contact.id as ContactId,
+                contact: decodeContactId(contact.id),
                 variableSymbol: "2612345678",
                 lines: [
                   {
@@ -1570,7 +1644,7 @@ describe("Phase 3A Round 1 fixes 6–8: PDF, branding, and document/share read p
                 ],
               },
             },
-            { requestKey: "rk-spy-2" as RequestKey },
+            { requestKey: RequestKey.make("rk-spy-2") },
           ),
         );
         yield* asMember(documents.edit(inv2.id, { variableSymbol: "777777" }, inv2.revision));
@@ -1580,7 +1654,7 @@ describe("Phase 3A Round 1 fixes 6–8: PDF, branding, and document/share read p
             {
               input: {
                 kind: "invoice",
-                contact: contact.id as ContactId,
+                contact: decodeContactId(contact.id),
                 variableSymbol: "2612345678",
                 lines: [
                   {
@@ -1591,28 +1665,23 @@ describe("Phase 3A Round 1 fixes 6–8: PDF, branding, and document/share read p
                 ],
               },
             },
-            { requestKey: "rk-spy-2" as RequestKey },
+            { requestKey: RequestKey.make("rk-spy-2") },
           ),
         );
         expect(replayedDuringAuditOutage.revision).toBe(inv2.revision);
         expect(replayedDuringAuditOutage.paymentQr).toEqual(inv2.paymentQr);
 
         const spyRenderer = yield* DocumentRenderer;
-        const auditFailExit = yield* Effect.exit(
-          asMember(
-            spyRenderer.render(
-              { ...inv2, paymentQr: null },
-              { template: "classic", language: "cs" },
-            ),
-          ),
-        );
+        const auditFailExit = yield* spyRenderer
+          .render({ ...inv2, paymentQr: null }, { template: "classic", language: "cs" })
+          .pipe(asMember, Effect.exit);
         failAudit = false;
         expect(auditFailExit._tag).toBe("Failure");
 
         // USD invoice (valid paymentQr: null) replayed after note edit succeeds even when audit is unavailable
         const usdInput = {
           kind: "invoice" as const,
-          contact: contact.id as ContactId,
+          contact: decodeContactId(contact.id),
           currency: CurrencyCode.make("USD"),
           fx: { manual: { rate: BigDecimal.fromStringUnsafe("23"), quantity: 1 } },
           lines: [
@@ -1623,7 +1692,7 @@ describe("Phase 3A Round 1 fixes 6–8: PDF, branding, and document/share read p
             },
           ] as const,
         };
-        const usdReqKey = "rk-spy-usd-1" as RequestKey;
+        const usdReqKey = RequestKey.make("rk-spy-usd-1");
         const usdInv = yield* asMember(
           documents.issue({ input: usdInput }, { requestKey: usdReqKey }),
         );
@@ -1640,7 +1709,7 @@ describe("Phase 3A Round 1 fixes 6–8: PDF, branding, and document/share read p
         // Zero-value CZK invoice with IBAN replayed on memory store after note edit + audit outage succeeds
         const zeroMemInput = {
           kind: "invoice" as const,
-          contact: contact.id as ContactId,
+          contact: decodeContactId(contact.id),
           lines: [
             {
               description: "Zero CZK",
@@ -1649,7 +1718,7 @@ describe("Phase 3A Round 1 fixes 6–8: PDF, branding, and document/share read p
             },
           ] as const,
         };
-        const zeroMemKey = "rk-spy-zero-1" as RequestKey;
+        const zeroMemKey = RequestKey.make("rk-spy-zero-1");
         const zeroMemInv = yield* asMember(
           documents.issue({ input: zeroMemInput }, { requestKey: zeroMemKey }),
         );
@@ -1667,17 +1736,19 @@ describe("Phase 3A Round 1 fixes 6–8: PDF, branding, and document/share read p
 
         // EUR 1,000,000,000 invoice (valid null QR due to EPC limit) replayed on memory store during audit outage
         yield* asMember(
-          workspaces.saveBankAccount({
-            name: "EUR",
-            currency: CurrencyCode.make("EUR"),
-            iban: "CZ6508000000192000145399",
-            bic: "GIBACZPX",
-            isDefault: true,
-          } as never),
+          workspaces.saveBankAccount(
+            BankAccountInput.make({
+              name: "EUR",
+              currency: CurrencyCode.make("EUR"),
+              iban: "CZ6508000000192000145399",
+              bic: "GIBACZPX",
+              isDefault: true,
+            }),
+          ),
         );
         const bigEurMemInput = {
           kind: "invoice" as const,
-          contact: contact.id as ContactId,
+          contact: decodeContactId(contact.id),
           currency: CurrencyCode.make("EUR"),
           fx: { manual: { rate: BigDecimal.fromStringUnsafe("25"), quantity: 1 } },
           lines: [
@@ -1688,7 +1759,7 @@ describe("Phase 3A Round 1 fixes 6–8: PDF, branding, and document/share read p
             },
           ] as const,
         };
-        const bigEurMemKey = "rk-spy-epc-limit-1" as RequestKey;
+        const bigEurMemKey = RequestKey.make("rk-spy-epc-limit-1");
         const bigEurMemInv = yield* asMember(
           documents.issue({ input: bigEurMemInput }, { requestKey: bigEurMemKey }),
         );
@@ -1705,13 +1776,13 @@ describe("Phase 3A Round 1 fixes 6–8: PDF, branding, and document/share read p
         expect(bigEurMemReplay.paymentQr).toBeNull();
 
         // Expired memory requestKey reused with new payload after 24h must NOT return predecessor invoice
-        const reuseKey = "rk-spy-expire-reuse" as RequestKey;
+        const reuseKey = RequestKey.make("rk-spy-expire-reuse");
         const firstReuse = yield* asMember(
           documents.issue(
             {
               input: {
                 kind: "invoice",
-                contact: contact.id as ContactId,
+                contact: decodeContactId(contact.id),
                 lines: [
                   {
                     description: "First invoice",
@@ -1727,7 +1798,7 @@ describe("Phase 3A Round 1 fixes 6–8: PDF, branding, and document/share read p
         yield* TestClock.adjust("25 hours");
         const secondPayload = {
           kind: "invoice" as const,
-          contact: contact.id as ContactId,
+          contact: decodeContactId(contact.id),
           lines: [
             {
               description: "Second invoice after expiry",

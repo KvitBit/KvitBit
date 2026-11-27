@@ -9,17 +9,26 @@
  * and the module may still decide what to do with it (Postgres would otherwise abort the whole
  * transaction).
  */
+
 import type { StoreUnavailable, UniqueViolation } from "@kvitbit/core/ports";
 import type { EntityKind, WorkspaceId } from "@kvitbit/domain/contract";
 import { Conflict, NotFound } from "@kvitbit/domain/contract";
-import { Effect, Option } from "effect";
-import { SqlClient } from "effect/sql";
-import type { SqlError } from "effect/sql/SqlError";
-import type { Fragment } from "effect/sql/Statement";
+import * as Arr from "effect/Array";
+import * as Effect from "effect/Effect";
+import * as Fn from "effect/Function";
+import * as Option from "effect/Option";
+import type * as Schema from "effect/Schema";
+import * as Str from "effect/String";
+import * as SqlClient from "effect/sql/SqlClient";
+import type * as SqlError from "effect/sql/SqlError";
+import type * as Statement from "effect/sql/Statement";
 import { unavailable, writeErrors } from "./errors";
 
+/** PostgreSQL driver values, with undefined for unselected columns. */
+export type DbValue = Schema.Json | Date | Uint8Array | bigint | undefined;
+
 /** A row as the driver returns it (column name -> value). */
-export type DbRow = Readonly<Record<string, unknown>>;
+export type DbRow = Readonly<Record<string, DbValue>>;
 
 /** Every stored aggregate: tenant-scoped and revisioned. */
 export interface StoredRow {
@@ -29,7 +38,7 @@ export interface StoredRow {
 }
 
 /** What a repository effect may require besides its own services. */
-export type Sql = SqlClient.SqlClient;
+type Sql = SqlClient.SqlClient;
 
 export interface TableSpec<A extends StoredRow> {
   /** Database table, e.g. `"price_list_items"`. */
@@ -47,14 +56,16 @@ export interface TableSpec<A extends StoredRow> {
    */
   readonly select: string;
   /** Main-table rows to core rows (in the same order); load child tables here, in one query. */
-  readonly decode: (rows: ReadonlyArray<DbRow>) => Effect.Effect<ReadonlyArray<A>, SqlError, Sql>;
+  readonly decode: (
+    rows: ReadonlyArray<DbRow>,
+  ) => Effect.Effect<ReadonlyArray<A>, SqlError.SqlError | StoreUnavailable, Sql>;
   /** A core row to its main-table columns. `revision` is ignored; the table manages it. */
   readonly encode: (row: A) => DbRow;
   /** Replaces the row's child-table rows after the main row is written. */
   readonly writeChildren?: (
     row: A,
     mode: "insert" | "update",
-  ) => Effect.Effect<void, SqlError, Sql>;
+  ) => Effect.Effect<void, SqlError.SqlError, Sql>;
   /** Database constraint name -> core constraint name, for names that differ. */
   readonly constraints?: Readonly<Record<string, string>>;
 }
@@ -70,13 +81,14 @@ export const col = {
   numeric: (name: string, as: string = name) => `${q(name)}::text as ${q(as)}`,
 } as const;
 
-const q = (name: string) => (name.includes(".") || name.includes("(") ? name : `"${name}"`);
+const q = (name: string) =>
+  Str.includes(".")(name) || Str.includes("(")(name) ? name : `"${name}"`;
 
 /** Pure per-row decoding lifted to `TableSpec.decode`. */
 export const decodeEach =
   <A>(f: (row: DbRow) => A) =>
   (rows: ReadonlyArray<DbRow>): Effect.Effect<ReadonlyArray<A>, never, never> =>
-    Effect.sync(() => rows.map(f));
+    Effect.sync(() => Arr.map(rows, f));
 
 export interface SqlTable<A extends StoredRow> {
   readonly spec: TableSpec<A>;
@@ -115,24 +127,24 @@ export interface SqlTable<A extends StoredRow> {
   /** `select <spec.select> from <table> where <scope> = ws and (<where>) <tail>`. */
   readonly select: (
     workspaceId: WorkspaceId,
-    where?: Fragment,
-    tail?: Fragment,
+    where?: Statement.Fragment,
+    tail?: Statement.Fragment,
   ) => Effect.Effect<ReadonlyArray<A>, StoreUnavailable, never>;
   /** Cross-tenant `select` (flows without a Workspace, maintenance scans). */
   readonly selectGlobal: (
-    where?: Fragment,
-    tail?: Fragment,
+    where?: Statement.Fragment,
+    tail?: Statement.Fragment,
   ) => Effect.Effect<ReadonlyArray<A>, StoreUnavailable, never>;
   /** The first row of `select`, if any. */
   readonly first: (
     workspaceId: WorkspaceId,
-    where?: Fragment,
-    tail?: Fragment,
+    where?: Statement.Fragment,
+    tail?: Statement.Fragment,
   ) => Effect.Effect<Option.Option<A>, StoreUnavailable, never>;
   /** The first row of `selectGlobal`, if any. */
   readonly firstGlobal: (
-    where?: Fragment,
-    tail?: Fragment,
+    where?: Statement.Fragment,
+    tail?: Statement.Fragment,
   ) => Effect.Effect<Option.Option<A>, StoreUnavailable, never>;
 }
 
@@ -140,10 +152,10 @@ export interface SqlTable<A extends StoredRow> {
  * The table's operations over `sql`. Build it once in the repository layer; the operations join
  * whatever transaction the calling fiber has open.
  */
-export const makeTable = <A extends StoredRow>(
-  sql: SqlClient.SqlClient,
-  spec: TableSpec<A>,
-): SqlTable<A> => {
+export const makeTable: {
+  <A extends StoredRow>(spec: TableSpec<A>): (sql: SqlClient.SqlClient) => SqlTable<A>;
+  <A extends StoredRow>(sql: SqlClient.SqlClient, spec: TableSpec<A>): SqlTable<A>;
+} = Fn.dual(2, <A extends StoredRow>(sql: SqlClient.SqlClient, spec: TableSpec<A>): SqlTable<A> => {
   const withSql = <X, E>(self: Effect.Effect<X, E, Sql>) =>
     Effect.provideService(self, SqlClient.SqlClient, sql);
   /** Runs `self` in a savepoint (or a transaction when none is open). */
@@ -151,10 +163,10 @@ export const makeTable = <A extends StoredRow>(
   const scope = spec.scope ?? "workspace_id";
   const rename = (constraint: string) => spec.constraints?.[constraint] ?? constraint;
   const writeFailure = writeErrors(spec.collection, rename);
-  const notFound = (id: string) => new NotFound({ entity: spec.entity, id });
+  const notFound = (id: string) => NotFound.make({ entity: spec.entity, id });
 
   const run = (
-    build: (sql: SqlClient.SqlClient) => Effect.Effect<ReadonlyArray<DbRow>, SqlError>,
+    build: (sql: SqlClient.SqlClient) => Effect.Effect<ReadonlyArray<DbRow>, SqlError.SqlError>,
   ): Effect.Effect<ReadonlyArray<A>, StoreUnavailable> =>
     unavailable(
       Effect.gen(function* () {
@@ -166,9 +178,9 @@ export const makeTable = <A extends StoredRow>(
   const byId = (workspaceId: WorkspaceId, id: string, lock: boolean) =>
     Effect.map(
       run(
-        (sql) =>
-          sql`select ${sql.unsafe(spec.select)} from ${sql(spec.table)}
-            where ${sql(scope)} = ${workspaceId} and id = ${id}${lock ? sql` for update` : sql``}`,
+        (client) =>
+          client`select ${client.unsafe(spec.select)} from ${client(spec.table)}
+            where ${client(scope)} = ${workspaceId} and id = ${id}${lock ? client` for update` : client``}`,
       ),
       (rows) => Option.fromUndefinedOr(rows[0]),
     );
@@ -179,13 +191,13 @@ export const makeTable = <A extends StoredRow>(
     lock: boolean,
   ): Effect.Effect<A, NotFound | StoreUnavailable> =>
     Effect.flatMap(byId(workspaceId, id, lock), (row) =>
-      Option.isSome(row) ? Effect.succeed(row.value) : Effect.fail(notFound(id)),
+      Effect.fromOption(row).pipe(Effect.mapError(() => notFound(id))),
     );
 
   const checked = (row: A, expectedRevision: number): Effect.Effect<A, Conflict> =>
     row.revision === expectedRevision
       ? Effect.succeed(row)
-      : Effect.fail(new Conflict({ reason: "revision_changed", currentRevision: row.revision }));
+      : Effect.fail(Conflict.make({ reason: "revision_changed", currentRevision: row.revision }));
 
   /** After a CAS that matched no row: the reason (missing row or stale revision). */
   const missedCas = (
@@ -197,29 +209,29 @@ export const makeTable = <A extends StoredRow>(
       (row): Effect.Effect<never, NotFound | Conflict> =>
         Option.isSome(row)
           ? Effect.fail(
-              new Conflict({ reason: "revision_changed", currentRevision: row.value.revision }),
+              Conflict.make({ reason: "revision_changed", currentRevision: row.value.revision }),
             )
           : Effect.fail(notFound(id)),
     );
 
   const columnsOf = (row: A) => {
-    const { revision: _ignored, ...columns } = spec.encode(row) as Record<string, unknown>;
+    const { revision: _ignored, ...columns } = spec.encode(row);
     return columns;
   };
 
   const select: SqlTable<A>["select"] = (workspaceId, where, tail) =>
     run(
-      (sql) =>
-        sql`select ${sql.unsafe(spec.select)} from ${sql(spec.table)}
-          where ${sql(scope)} = ${workspaceId}${where === undefined ? sql`` : sql` and (${where})`}
-          ${tail ?? sql``}`,
+      (client) =>
+        client`select ${client.unsafe(spec.select)} from ${client(spec.table)}
+          where ${client(scope)} = ${workspaceId}${where === undefined ? client`` : client` and (${where})`}
+          ${tail ?? client``}`,
     );
 
   const selectGlobal: SqlTable<A>["selectGlobal"] = (where, tail) =>
     run(
-      (sql) =>
-        sql`select ${sql.unsafe(spec.select)} from ${sql(spec.table)}
-          ${where === undefined ? sql`` : sql`where ${where}`} ${tail ?? sql``}`,
+      (client) =>
+        client`select ${client.unsafe(spec.select)} from ${client(spec.table)}
+          ${where === undefined ? client`` : client`where ${where}`} ${tail ?? client``}`,
     );
 
   return {
@@ -229,46 +241,43 @@ export const makeTable = <A extends StoredRow>(
     lock: (workspaceId, id) => required(workspaceId, id, true),
     getForUpdate: (workspaceId, id, expectedRevision) =>
       Effect.flatMap(required(workspaceId, id, true), (row) => checked(row, expectedRevision)),
-    insert: (row) =>
-      Effect.gen(function* () {
-        const stored = { ...row, revision: 1 };
-        yield* savepoint(
-          Effect.gen(function* () {
-            yield* sql`insert into ${sql(spec.table)} ${sql.insert({ ...columnsOf(stored), revision: 1 })}`;
-            if (spec.writeChildren !== undefined) yield* spec.writeChildren(stored, "insert");
-          }),
-        ).pipe(writeFailure);
-        return stored;
-      }),
-    update: (next, expectedRevision) =>
-      Effect.gen(function* () {
-        const stored = { ...next, revision: expectedRevision + 1 };
-        const { id: _id, [scope === "id" ? "id" : scope]: _scope, ...columns } = columnsOf(stored);
-        const updated = yield* savepoint(
-          Effect.gen(function* () {
-            const rows = yield* sql`update ${sql(spec.table)}
+    insert: Effect.fn("insert")(function* (row) {
+      const stored = { ...row, revision: 1 };
+      yield* savepoint(
+        Effect.gen(function* () {
+          yield* sql`insert into ${sql(spec.table)} ${sql.insert({ ...columnsOf(stored), revision: 1 })}`;
+          if (spec.writeChildren !== undefined) yield* spec.writeChildren(stored, "insert");
+        }),
+      ).pipe(writeFailure);
+      return stored;
+    }),
+    update: Effect.fn("update")(function* (next, expectedRevision) {
+      const stored = { ...next, revision: expectedRevision + 1 };
+      const { id: _id, [scope === "id" ? "id" : scope]: _scope, ...columns } = columnsOf(stored);
+      const updated = yield* savepoint(
+        Effect.gen(function* () {
+          const rows = yield* sql`update ${sql(spec.table)}
               set ${sql.update({ ...columns, revision: expectedRevision + 1 })}
               where ${sql(scope)} = ${next.workspaceId} and id = ${next.id}
                 and revision = ${expectedRevision}
               returning id`;
-            if (rows.length > 0 && spec.writeChildren !== undefined) {
-              yield* spec.writeChildren(stored, "update");
-            }
-            return rows.length;
-          }),
-        ).pipe(writeFailure);
-        if (updated === 0) return yield* missedCas(next.workspaceId, next.id);
-        return stored;
-      }),
-    remove: (workspaceId, id, expectedRevision) =>
-      Effect.gen(function* () {
-        const rows = yield* unavailable(
-          sql`delete from ${sql(spec.table)}
+          if (rows.length > 0 && spec.writeChildren !== undefined) {
+            yield* spec.writeChildren(stored, "update");
+          }
+          return rows.length;
+        }),
+      ).pipe(writeFailure);
+      if (updated === 0) return yield* missedCas(next.workspaceId, next.id);
+      return stored;
+    }),
+    remove: Effect.fn("remove")(function* (workspaceId, id, expectedRevision) {
+      const rows = yield* unavailable(
+        sql`delete from ${sql(spec.table)}
             where ${sql(scope)} = ${workspaceId} and id = ${id} and revision = ${expectedRevision}
             returning id`,
-        );
-        if (rows.length === 0) return yield* missedCas(workspaceId, id);
-      }),
+      );
+      if (rows.length === 0) return yield* missedCas(workspaceId, id);
+    }),
     select,
     selectGlobal,
     first: (workspaceId, where, tail) =>
@@ -276,4 +285,4 @@ export const makeTable = <A extends StoredRow>(
     firstGlobal: (where, tail) =>
       Effect.map(selectGlobal(where, tail), (rows) => Option.fromUndefinedOr(rows[0])),
   };
-};
+});

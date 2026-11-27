@@ -2,7 +2,13 @@
  * Settings for the remote MCP adapter (http-mcp-contracts section 6).
  * Reads shared settings from `ServerConfig`.
  */
-import { Config, Context, Effect, Layer } from "effect";
+
+import * as Arr from "effect/Array";
+import * as Config from "effect/Config";
+import * as Context from "effect/Context";
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+import * as Str from "effect/String";
 import { ServerConfig } from "../config";
 
 export interface McpConfigShape {
@@ -15,18 +21,20 @@ export interface McpConfigShape {
 }
 
 export class McpConfig extends Context.Service<McpConfig, McpConfigShape>()(
-  "kvitbit/server/mcp/McpConfig",
+  "@kvitbit/server/mcp/config/McpConfig",
 ) {}
 
 const originList = (name: string) =>
   Config.String(name).pipe(
     Config.withDefault(""),
     Config.map((raw) =>
-      raw
-        .split(",")
-        .map((entry) => entry.trim())
-        .filter((entry) => entry.length > 0)
-        .map((entry) => new URL(entry).origin),
+      Arr.map(
+        Arr.filter(
+          Arr.map(Str.split(raw, ","), (entry) => Str.trim(entry)),
+          (entry) => entry.length > 0,
+        ),
+        (entry) => new URL(entry).origin,
+      ),
     ),
   );
 

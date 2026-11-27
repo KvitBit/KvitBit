@@ -10,9 +10,44 @@ import {
   type MemberCaller,
   Payments,
 } from "@kvitbit/domain/contract";
-import { BigDecimal, Effect, Ref } from "effect";
-import { TestClock } from "effect/testing";
+import * as Arr from "effect/Array";
+import * as BigDecimal from "effect/BigDecimal";
+import * as Effect from "effect/Effect";
+import * as Fn from "effect/Function";
+import * as Ref from "effect/Ref";
+import * as Schema from "effect/Schema";
+import * as TestClock from "effect/testing/TestClock";
 import { as, type Harness, json, makeHarness, TEST_NOW, type TestUser } from "../harness";
+
+const decodeRevisionedId = Fn.flow(
+  Schema.decodeUnknownEffect(Schema.Struct({ id: Schema.String, revision: Schema.Finite })),
+  Effect.runSync,
+);
+const decodeLock = Fn.flow(
+  Schema.decodeUnknownEffect(Schema.Struct({ locked: Schema.Boolean, revision: Schema.Finite })),
+  Effect.runSync,
+);
+const decodeDocumentKind = Fn.flow(
+  Schema.decodeUnknownEffect(
+    Schema.Struct({ id: Schema.String, kind: Schema.String, revision: Schema.Finite }),
+  ),
+  Effect.runSync,
+);
+const decodeId = Fn.flow(
+  Schema.decodeUnknownEffect(Schema.Struct({ id: Schema.String })),
+  Effect.runSync,
+);
+const decodeIssuedDocument = Fn.flow(
+  Schema.decodeUnknownEffect(
+    Schema.Struct({
+      id: Schema.String,
+      status: Schema.String,
+      number: Schema.NullOr(Schema.String),
+      revision: Schema.Finite,
+    }),
+  ),
+  Effect.runSync,
+);
 
 let h: Harness;
 let owner: TestUser;
@@ -20,7 +55,7 @@ let member: MemberCaller;
 let contactId: ContactId;
 let base: string;
 
-const invoiceInput = (overrides: Record<string, unknown> = {}) => ({
+const invoiceInput = (overrides: { kind?: "proforma"; note?: string } = {}) => ({
   kind: "invoice",
   contact: contactId,
   lines: [
@@ -43,21 +78,21 @@ const req = (
     headers: { ...as.mobile(owner), ...(init.headers ?? {}) },
   });
 
-const postJson = (path: string, body: unknown, headers: Record<string, string> = {}) => {
+const postJson = (path: string, body: Schema.Json, headers: Record<string, string> = {}) => {
   const init = json(body);
   return req(path, {
     ...init,
     method: "POST",
-    headers: { ...(init.headers as Record<string, string>), ...headers },
+    headers: { "content-type": "application/json", ...headers },
   });
 };
 
-const patchJson = (path: string, body: unknown, headers: Record<string, string> = {}) => {
+const patchJson = (path: string, body: Schema.Json, headers: Record<string, string> = {}) => {
   const init = json(body);
   return req(path, {
     ...init,
     method: "PATCH",
-    headers: { ...(init.headers as Record<string, string>), ...headers },
+    headers: { "content-type": "application/json", ...headers },
   });
 };
 
@@ -78,7 +113,7 @@ beforeEach(async () => {
       }),
     ).pipe(Effect.provideService(CurrentCaller, member)),
   );
-  contactId = ContactId.make(contact.id as string);
+  contactId = Schema.decodeUnknownEffect(ContactId)(contact.id).pipe(Effect.runSync);
 });
 
 afterEach(async () => {
@@ -89,20 +124,29 @@ describe("documents group", () => {
   test("preview computes a DocumentView without persisting it", async () => {
     const res = await postJson(`${base}/preview`, invoiceInput());
     expect(res.status).toBe(200);
-    const view = (await res.json()) as { status: string; number: string | null };
+    const view = Schema.decodeUnknownEffect(
+      Schema.Struct({ status: Schema.String, number: Schema.NullOr(Schema.String) }),
+    )(await res.json()).pipe(Effect.runSync);
     expect(view.status).toBe("draft");
     expect(view.number).toBeNull();
 
     const list = await req(base);
     expect(list.status).toBe(200);
-    expect(((await list.json()) as { items: unknown[] }).items).toHaveLength(0);
+    expect(
+      Schema.decodeUnknownEffect(Schema.Struct({ items: Schema.Array(Schema.Unknown) }))(
+        await list.json(),
+      ).pipe(Effect.runSync).items,
+    ).toHaveLength(0);
   });
 
   test("createDraft answers 201 with Location and ETag; Idempotency-Key replays and rejects mismatches", async () => {
     const first = await postJson(base, invoiceInput(), { "idempotency-key": "draft-key-0001" });
     expect(first.status).toBe(201);
     expect(first.headers.get("idempotent-replayed")).toBeNull();
-    const view = (await first.json()) as { id: string; revision: number; status: string };
+    const firstBody = await first.json();
+    const view = Schema.decodeUnknownEffect(
+      Schema.Struct({ id: Schema.String, revision: Schema.Finite, status: Schema.String }),
+    )(firstBody).pipe(Effect.runSync);
     expect(view.status).toBe("draft");
     expect(first.headers.get("etag")).toBe(`"${view.revision}"`);
     expect(first.headers.get("location")).toBe(`${base}/${view.id}`);
@@ -111,7 +155,7 @@ describe("documents group", () => {
     expect(replay.status).toBe(201);
     expect(replay.headers.get("idempotent-replayed")).toBe("true");
     expect(replay.headers.get("location")).toBe(`${base}/${view.id}`);
-    expect(await replay.json()).toEqual(view);
+    expect(await replay.json()).toEqual(firstBody);
 
     const mismatch = await postJson(base, invoiceInput({ note: "Jiná poznámka" }), {
       "idempotency-key": "draft-key-0001",
@@ -124,10 +168,7 @@ describe("documents group", () => {
   });
 
   test("edit requires If-Match: 428 missing, 422 weak tag, 412 stale with ETag, 200 current", async () => {
-    const created = (await (await postJson(base, invoiceInput())).json()) as {
-      id: string;
-      revision: number;
-    };
+    const created = decodeRevisionedId(await (await postJson(base, invoiceInput())).json());
 
     const missing = await patchJson(`${base}/${created.id}`, { note: "Upraveno" });
     expect(missing.status).toBe(428);
@@ -158,16 +199,15 @@ describe("documents group", () => {
       { "if-match": `"${created.revision}"` },
     );
     expect(ok.status).toBe(200);
-    const updated = (await ok.json()) as { revision: number };
+    const updated = Schema.decodeUnknownEffect(Schema.Struct({ revision: Schema.Finite }))(
+      await ok.json(),
+    ).pipe(Effect.runSync);
     expect(updated.revision).toBe(created.revision + 1);
     expect(ok.headers.get("etag")).toBe(`"${updated.revision}"`);
   });
 
   test("discardDraft enforces If-Match and hard-deletes drafts", async () => {
-    const created = (await (await postJson(base, invoiceInput())).json()) as {
-      id: string;
-      revision: number;
-    };
+    const created = decodeRevisionedId(await (await postJson(base, invoiceInput())).json());
 
     const missing = await req(`${base}/${created.id}`, { method: "DELETE" });
     expect(missing.status).toBe(428);
@@ -189,10 +229,7 @@ describe("documents group", () => {
   });
 
   test("issueDraft enforces If-Match and supports Idempotency-Key replay", async () => {
-    const created = (await (await postJson(base, invoiceInput())).json()) as {
-      id: string;
-      revision: number;
-    };
+    const created = decodeRevisionedId(await (await postJson(base, invoiceInput())).json());
 
     const missing = await postJson(`${base}/${created.id}/issue`, {});
     expect(missing.status).toBe(428);
@@ -210,12 +247,8 @@ describe("documents group", () => {
       { "if-match": `"${created.revision}"`, "idempotency-key": "issue-draft-0001" },
     );
     expect(issued.status).toBe(200);
-    const view = (await issued.json()) as {
-      id: string;
-      status: string;
-      number: string | null;
-      revision: number;
-    };
+    const issuedBody = await issued.json();
+    const view = decodeIssuedDocument(issuedBody);
     expect(view.status).toBe("issued");
     expect(view.number).not.toBeNull();
     expect(issued.headers.get("etag")).toBe(`"${view.revision}"`);
@@ -227,7 +260,7 @@ describe("documents group", () => {
     );
     expect(replay.status).toBe(200);
     expect(replay.headers.get("idempotent-replayed")).toBe("true");
-    expect(await replay.json()).toEqual(view);
+    expect(await replay.json()).toEqual(issuedBody);
 
     // Issued document cannot be discarded
     const discardIssued = await req(`${base}/${created.id}`, {
@@ -243,12 +276,8 @@ describe("documents group", () => {
       "idempotency-key": "issue-direct-0001",
     });
     expect(res.status).toBe(201);
-    const view = (await res.json()) as {
-      id: string;
-      status: string;
-      number: string | null;
-      revision: number;
-    };
+    const issueBody = await res.json();
+    const view = decodeIssuedDocument(issueBody);
     expect(view.status).toBe("issued");
     expect(view.number).not.toBeNull();
     expect(res.headers.get("location")).toBe(`${base}/${view.id}`);
@@ -259,20 +288,18 @@ describe("documents group", () => {
     });
     expect(replay.status).toBe(201);
     expect(replay.headers.get("idempotent-replayed")).toBe("true");
-    expect(await replay.json()).toEqual(view);
+    expect(await replay.json()).toEqual(issueBody);
   });
 
   test("lock, unlock, cancel, correct, send, pdf, list, and history work end-to-end", async () => {
-    const issued = (await (await postJson(`${base}/issue`, { input: invoiceInput() })).json()) as {
-      id: string;
-      revision: number;
-      number: string;
-    };
+    const issued = decodeId(
+      await (await postJson(`${base}/issue`, { input: invoiceInput() })).json(),
+    );
 
     // Lock
     const lockedRes = await req(`${base}/${issued.id}/lock`, { method: "POST" });
     expect(lockedRes.status).toBe(200);
-    const locked = (await lockedRes.json()) as { locked: boolean; revision: number };
+    const locked = decodeLock(await lockedRes.json());
     expect(locked.locked).toBe(true);
     expect(lockedRes.headers.get("etag")).toBe(`"${locked.revision}"`);
 
@@ -289,7 +316,7 @@ describe("documents group", () => {
       reason: "Oprava poznámky",
     });
     expect(unlockedRes.status).toBe(200);
-    const unlocked = (await unlockedRes.json()) as { locked: boolean; revision: number };
+    const unlocked = decodeLock(await unlockedRes.json());
     expect(unlocked.locked).toBe(false);
     expect(unlockedRes.headers.get("etag")).toBe(`"${unlocked.revision}"`);
 
@@ -300,9 +327,11 @@ describe("documents group", () => {
       { "idempotency-key": "send-key-0001" },
     );
     expect(sendRes.status).toBe(202);
-    const queued = (await sendRes.json()) as { deliveryId: string; status: string };
+    const queuedBody = await sendRes.json();
+    const queued = Schema.decodeUnknownEffect(
+      Schema.Struct({ deliveryId: Schema.String, status: Schema.String }),
+    )(queuedBody).pipe(Effect.runSync);
     expect(queued.status).toBe("queued");
-    expect(typeof queued.deliveryId).toBe("string");
 
     const sendReplay = await postJson(
       `${base}/${issued.id}/deliveries`,
@@ -311,7 +340,7 @@ describe("documents group", () => {
     );
     expect(sendReplay.status).toBe(202);
     expect(sendReplay.headers.get("idempotent-replayed")).toBe("true");
-    expect(await sendReplay.json()).toEqual(queued);
+    expect(await sendReplay.json()).toEqual(queuedBody);
 
     // PDF download: attachment default + inline override + template/language forwarded
     const pdfDefault = await req(`${base}/${issued.id}/pdf`);
@@ -338,11 +367,8 @@ describe("documents group", () => {
       { "idempotency-key": "correct-key-0001" },
     );
     expect(cnRes.status).toBe(201);
-    const creditNote = (await cnRes.json()) as {
-      id: string;
-      kind: string;
-      revision: number;
-    };
+    const creditNoteBody = await cnRes.json();
+    const creditNote = decodeDocumentKind(creditNoteBody);
     expect(creditNote.kind).toBe("credit_note");
     expect(cnRes.headers.get("location")).toBe(`${base}/${creditNote.id}`);
     expect(cnRes.headers.get("etag")).toBe(`"${creditNote.revision}"`);
@@ -354,12 +380,14 @@ describe("documents group", () => {
     );
     expect(cnReplay.status).toBe(201);
     expect(cnReplay.headers.get("idempotent-replayed")).toBe("true");
-    expect(await cnReplay.json()).toEqual(creditNote);
+    expect(await cnReplay.json()).toEqual(creditNoteBody);
 
     // List with filters + paging
     const listRes = await req(`${base}?kind=credit_note&limit=10`);
     expect(listRes.status).toBe(200);
-    const page = (await listRes.json()) as { items: Array<{ id: string }> };
+    const page = Schema.decodeUnknownEffect(
+      Schema.Struct({ items: Schema.Array(Schema.Struct({ id: Schema.String })) }),
+    )(await listRes.json()).pipe(Effect.runSync);
     expect(page.items).toHaveLength(1);
     expect(page.items[0]?.id).toBe(creditNote.id);
 
@@ -369,24 +397,26 @@ describe("documents group", () => {
     // History
     const historyRes = await req(`${base}/${issued.id}/history`);
     expect(historyRes.status).toBe(200);
-    const entries = (await historyRes.json()) as Array<{ action: string }>;
-    expect(entries.some((e) => e.action === "document.lock")).toBe(true);
-    expect(entries.some((e) => e.action === "document.unlock")).toBe(true);
+    const entries = Schema.decodeUnknownEffect(
+      Schema.Array(Schema.Struct({ action: Schema.String })),
+    )(await historyRes.json()).pipe(Effect.runSync);
+    expect(Arr.some(entries, (e) => e.action === "document.lock")).toBe(true);
+    expect(Arr.some(entries, (e) => e.action === "document.unlock")).toBe(true);
 
     // Cancel a fresh issued invoice -> 200 CancelResult + Idempotency-Key replay
-    const second = (await (await postJson(`${base}/issue`, { input: invoiceInput() })).json()) as {
-      id: string;
-    };
+    const second = decodeId(
+      await (await postJson(`${base}/issue`, { input: invoiceInput() })).json(),
+    );
     const cancelRes = await postJson(
       `${base}/${second.id}/cancel`,
       { reason: "Omyl" },
       { "idempotency-key": "cancel-key-0001" },
     );
     expect(cancelRes.status).toBe(200);
-    const cancelled = (await cancelRes.json()) as {
-      document: { status: string };
-      creditNote: unknown;
-    };
+    const cancelBody = await cancelRes.json();
+    const cancelled = Schema.decodeUnknownEffect(
+      Schema.Struct({ document: Schema.Struct({ status: Schema.String }) }),
+    )(cancelBody).pipe(Effect.runSync);
     expect(cancelled.document.status).toBe("cancelled");
 
     const cancelReplay = await postJson(
@@ -396,7 +426,7 @@ describe("documents group", () => {
     );
     expect(cancelReplay.status).toBe(200);
     expect(cancelReplay.headers.get("idempotent-replayed")).toBe("true");
-    expect(await cancelReplay.json()).toEqual(cancelled);
+    expect(await cancelReplay.json()).toEqual(cancelBody);
   });
 
   test("issueFinalInvoice creates a 201 Final Invoice for a paid proforma with Location and replay", async () => {
@@ -404,7 +434,7 @@ describe("documents group", () => {
       input: invoiceInput({ kind: "proforma" }),
     });
     expect(proformaRes.status).toBe(201);
-    const proforma = (await proformaRes.json()) as { id: string };
+    const proforma = decodeId(await proformaRes.json());
 
     // Record payment against the proforma directly via core
     await h.run(
@@ -426,7 +456,8 @@ describe("documents group", () => {
       { "idempotency-key": "fi-key-0001" },
     );
     expect(fiRes.status).toBe(201);
-    const fi = (await fiRes.json()) as { id: string; kind: string; revision: number };
+    const finalInvoiceBody = await fiRes.json();
+    const fi = decodeDocumentKind(finalInvoiceBody);
     expect(fi.kind).toBe("invoice");
     expect(fiRes.headers.get("location")).toBe(`${base}/${fi.id}`);
     expect(fiRes.headers.get("etag")).toBe(`"${fi.revision}"`);
@@ -438,7 +469,7 @@ describe("documents group", () => {
     );
     expect(fiReplay.status).toBe(201);
     expect(fiReplay.headers.get("idempotent-replayed")).toBe("true");
-    expect(await fiReplay.json()).toEqual(fi);
+    expect(await fiReplay.json()).toEqual(finalInvoiceBody);
   });
 
   test("enforces workspace isolation and API key scopes", async () => {
@@ -446,12 +477,17 @@ describe("documents group", () => {
     const foreign = await h.fetch(base, { headers: as.mobile(stranger) });
     expect(foreign.status).toBe(404);
 
+    const readOnly = as.apiKey(owner, member.workspaceId, ["documents:read"]);
+    expect((await h.fetch(base, { headers: readOnly })).status).toBe(200);
+    const unrelatedScope = as.apiKey(owner, member.workspaceId, ["contacts:read"]);
+    expect((await h.fetch(base, { headers: unrelatedScope })).status).toBe(403);
+
     const readOnlyRes = await h.fetch(base, {
       ...json(invoiceInput()),
       method: "POST",
       headers: {
         "content-type": "application/json",
-        ...as.apiKey(owner, member.workspaceId, ["documents:read"]),
+        ...readOnly,
       },
     });
     expect(readOnlyRes.status).toBe(403);

@@ -3,10 +3,10 @@ import { inflateRawSync } from "node:zlib";
 import { exportJob, ReportsModule } from "@kvitbit/core";
 import {
   Caller,
-  type ContactId,
+  ContactId,
   Contacts,
   CurrencyCode,
-  type DocumentId,
+  DocumentId,
   Documents,
   ExpenseId,
   Expenses,
@@ -18,37 +18,47 @@ import {
   Workspaces,
 } from "@kvitbit/domain/contract";
 import { BlobStorage } from "@kvitbit/domain/ports";
-import { BigDecimal, Cause, Effect, Layer, Schema, Stream } from "effect";
-import { SqlClient } from "effect/sql";
+import * as Arr from "effect/Array";
+import * as BigDecimal from "effect/BigDecimal";
+import * as Cause from "effect/Cause";
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
+import * as EffectRecord from "effect/Record";
+import * as Schema from "effect/Schema";
+import * as Stream from "effect/Stream";
+import * as Str from "effect/String";
+import * as SqlClient from "effect/sql/SqlClient";
 import * as WorkflowEngine from "effect/workflow/WorkflowEngine";
 import { DataExportWorkflow, makeWorkflowHandlersLayer } from "../../src/runtime/workflows";
 import { asCaller, runSqlCore } from "../persistence/conformance/sqlCore";
 
-// This fixture fits in the classic central directory, even if entry headers reserve ZIP64 sizes.
-const unzip = (bytes: Uint8Array) => {
-  const archive = Buffer.from(bytes);
-  const end = archive.length - 22;
-  expect(archive.readUInt32LE(end)).toBe(0x06054b50);
-  const count = archive.readUInt16LE(end + 10);
-  let index = archive.readUInt32LE(end + 16);
-  const entries = new Map<string, Uint8Array>();
-  for (let entry = 0; entry < count; entry++) {
-    expect(archive.readUInt32LE(index)).toBe(0x02014b50);
-    const nameLength = archive.readUInt16LE(index + 28);
-    const extraLength = archive.readUInt16LE(index + 30);
-    const commentLength = archive.readUInt16LE(index + 32);
-    const name = archive.toString("utf8", index + 46, index + 46 + nameLength);
-    const local = archive.readUInt32LE(index + 42);
-    const start = local + 30 + archive.readUInt16LE(local + 26) + archive.readUInt16LE(local + 28);
-    const compressedLength = archive.readUInt32LE(index + 20);
-    const body = archive.subarray(start, start + compressedLength);
-    entries.set(name, inflateRawSync(body));
-    index += 46 + nameLength + extraLength + commentLength;
-  }
-  return entries;
-};
-
 test("exports canonical reporting bytes from bounded SQL pages after emitting its first ZIP header", async () => {
+  // This fixture fits in the classic central directory, even if entry headers reserve ZIP64 sizes.
+  const unzip = (bytes: Uint8Array) => {
+    const archive = Buffer.from(bytes);
+    const end = archive.length - 22;
+    expect(archive.readUInt32LE(end)).toBe(0x06054b50);
+    const count = archive.readUInt16LE(end + 10);
+    let index = archive.readUInt32LE(end + 16);
+    const entries = new Map<string, Uint8Array>();
+    for (let entry = 0; entry < count; entry++) {
+      expect(archive.readUInt32LE(index)).toBe(0x02014b50);
+      const nameLength = archive.readUInt16LE(index + 28);
+      const extraLength = archive.readUInt16LE(index + 30);
+      const commentLength = archive.readUInt16LE(index + 32);
+      const name = archive.toString("utf8", index + 46, index + 46 + nameLength);
+      const local = archive.readUInt32LE(index + 42);
+      const start =
+        local + 30 + archive.readUInt16LE(local + 26) + archive.readUInt16LE(local + 28);
+      const compressedLength = archive.readUInt32LE(index + 20);
+      const body = archive.subarray(start, start + compressedLength);
+      entries.set(name, inflateRawSync(body));
+      index += 46 + nameLength + extraLength + commentLength;
+    }
+    return entries;
+  };
+
   const owner = {
     userId: UserId.make("01950000-0000-7000-8000-000000000001"),
     name: "Owner",
@@ -88,9 +98,10 @@ test("exports canonical reporting bytes from bounded SQL pages after emitting it
             address: { city: "Brno", country: "CZ" },
             roles: ["customer", "supplier"],
           });
+          const contactId = yield* Schema.decodeUnknownEffect(ContactId)(contact.id);
           const input = {
             kind: "proforma",
-            contact: contact.id as ContactId,
+            contact: contactId,
             issuedOn: date,
             due: { inDays: 14 },
             currency: czk,
@@ -104,17 +115,17 @@ test("exports canonical reporting bytes from bounded SQL pages after emitting it
             ],
           } as const;
           const proforma = yield* documents.issue({ input });
-          const proformaId = proforma.id as DocumentId;
+          const issuedProformaId = DocumentId.make(proforma.id);
           const { payment } = yield* payments.record({
-            target: { document: proformaId },
+            target: { document: issuedProformaId },
             amount: { amount: BigDecimal.fromStringUnsafe("12100.01"), currency: czk },
             paidOn: date,
             method: "bank_transfer",
           });
-          const final = yield* documents.issueFinalInvoice(proformaId, {
+          const final = yield* documents.issueFinalInvoice(issuedProformaId, {
             patch: { issuedOn: date, taxableSupplyOn: date },
           });
-          yield* documents.correct(final.id as DocumentId, {
+          yield* documents.correct(DocumentId.make(final.id), {
             reason: "Sleva",
             lines: "full",
             correctedOn: date,
@@ -122,7 +133,7 @@ test("exports canonical reporting bytes from bounded SQL pages after emitting it
           yield* documents.createDraft({ ...input, kind: "invoice" });
           const expense = yield* expenses.record({
             status: "complete",
-            supplier: { contact: contact.id as ContactId },
+            supplier: { contact: contactId },
             supplierDocumentNumber: '@Číslo; "doklad"',
             issuedOn: date,
             taxableSupplyOn: date,
@@ -138,17 +149,21 @@ test("exports canonical reporting bytes from bounded SQL pages after emitting it
             tags: ["z", "á", "a"],
             deductibility: { partial: 73 },
           });
-          const expenseId = Schema.decodeUnknownSync(ExpenseId)(expense.id);
+          const recordedExpenseId = yield* Schema.decodeUnknownEffect(ExpenseId)(expense.id);
           yield* expenses.record({ status: "incomplete" });
-          yield* expenses.attach(expenseId, {
+          yield* expenses.attach(recordedExpenseId, {
             name: "receipt.pdf",
             contentType: "application/pdf",
             bytes: Stream.make(new TextEncoder().encode("%PDF-test receipt")),
           });
-          const { id: paymentId } = Schema.decodeUnknownSync(Schema.Struct({ id: PaymentId }))(
-            payment,
-          );
-          return { proformaId, paymentId, expenseId };
+          const { id: recordedPaymentId } = yield* Schema.decodeUnknownEffect(
+            Schema.Struct({ id: PaymentId }),
+          )(payment);
+          return {
+            proformaId: issuedProformaId,
+            paymentId: recordedPaymentId,
+            expenseId: recordedExpenseId,
+          };
         }),
       );
 
@@ -197,9 +212,9 @@ test("exports canonical reporting bytes from bounded SQL pages after emitting it
       const blobs = yield* BlobStorage;
       const archiveKey = ReportsModule.exportBlobKey(workspaceId, exportId);
       const pageRows = {
-        documents: [] as number[],
-        payments: [] as number[],
-        expenses: [] as number[],
+        documents: Arr.empty<number>(),
+        payments: Arr.empty<number>(),
+        expenses: Arr.empty<number>(),
       };
       const observe = <A, E, R>(read: Effect.Effect<ReadonlyArray<A>, E, R>, sizes: number[]) =>
         Effect.tap(read, (rows) =>
@@ -225,17 +240,18 @@ test("exports canonical reporting bytes from bounded SQL pages after emitting it
         }),
         Effect.provideService(BlobStorage, {
           ...blobs,
-          put: (key, body, meta) =>
+          put: (key, upload, meta) =>
             blobs.put(
               key,
-              body.pipe(
+              upload.pipe(
                 Stream.tap((chunk) =>
                   Effect.sync(() => {
                     if (key !== archiveKey || firstHeader !== undefined) return;
                     firstHeader = chunk.slice(0, 4);
-                    pagesAtFirstHeader = Object.values(pageRows).reduce(
-                      (sum, rows) => sum + rows.length,
+                    pagesAtFirstHeader = Arr.reduce(
+                      EffectRecord.values(pageRows),
                       0,
+                      (sum, rows) => sum + rows.length,
                     );
                   }),
                 ),
@@ -258,28 +274,33 @@ test("exports canonical reporting bytes from bounded SQL pages after emitting it
       expect(firstHeader).toEqual(Uint8Array.of(0x50, 0x4b, 0x03, 0x04));
       expect(pagesAtFirstHeader).toBe(0);
       expect(pageRows.expenses[0]).toBe(0);
-      for (const sizes of Object.values(pageRows)) {
+      for (const sizes of EffectRecord.values(pageRows)) {
         expect(sizes.length).toBeGreaterThan(1);
         expect(Math.max(...sizes)).toBeLessThanOrEqual(128);
-        expect(sizes.reduce((total, size) => total + size, 0)).toBeGreaterThan(128);
+        expect(Arr.reduce(sizes, 0, (total, size) => total + size)).toBeGreaterThan(128);
       }
 
       const body = yield* blobs.get(archiveKey);
-      const entries = unzip(Buffer.concat(yield* Stream.runCollect(body)));
+      const chunks = yield* Stream.runCollect(body);
+      const entries = unzip(Buffer.concat(chunks));
       for (const expected of expectedFiles) {
-        const bytes = Buffer.concat(yield* Stream.runCollect(expected.bytes));
+        const expectedChunks = yield* Stream.runCollect(expected.bytes);
+        const bytes = Buffer.concat(expectedChunks);
         expect(entries.get(expected.name)).toEqual(bytes);
       }
-      const attachment = [...entries].find(([name]) => name.endsWith("-receipt.pdf"));
+      const attachment = Option.getOrUndefined(
+        Arr.findFirst([...entries], ([name]) => Str.endsWith("-receipt.pdf")(name)),
+      );
       expect(attachment?.[1]).toEqual(Buffer.from("%PDF-test receipt"));
       expect(attachmentReads).toBe(1);
-      const pdfIds = [...entries.keys()]
-        .filter((name) => name.startsWith("pdfs/"))
-        .map((name) => name.slice(-40, -4));
+      const pdfIds = Arr.map(
+        Arr.filter([...entries.keys()], (name) => Str.startsWith("pdfs/")(name)),
+        (name) => Str.slice(-40, -4)(name),
+      );
       const documentIds = yield* sql<{ readonly id: string }>`
         select id from documents where workspace_id = ${workspaceId} order by id
       `;
-      expect(pdfIds).toEqual(documentIds.map(({ id }) => id));
+      expect(pdfIds).toEqual(Arr.map(documentIds, ({ id }) => id));
     }),
     {
       users: [owner],

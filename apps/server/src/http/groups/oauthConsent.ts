@@ -27,10 +27,18 @@ import {
   Unavailable,
   Workspaces,
 } from "@kvitbit/domain/contract";
-import { Clock, Effect, Schema } from "effect";
-import { HttpServerRequest } from "effect/http/HttpServerRequest";
-import { HttpApiBuilder } from "effect/http-api";
-import { SqlClient } from "effect/sql";
+import * as Arr from "effect/Array";
+import * as Clock from "effect/Clock";
+import * as DateTime from "effect/DateTime";
+import * as Effect from "effect/Effect";
+import * as Fn from "effect/Function";
+import * as HttpServerRequest from "effect/http/HttpServerRequest";
+import * as HttpApiBuilder from "effect/http-api/HttpApiBuilder";
+import * as Option from "effect/Option";
+import * as Predicate from "effect/Predicate";
+import * as Schema from "effect/Schema";
+import * as Str from "effect/String";
+import * as SqlClient from "effect/sql/SqlClient";
 import { AuthServer } from "../../auth/AuthServer";
 import { processWorkspaceConsent, verifyWorkspaceConsent } from "../../auth/oauthWorkspace";
 import { HttpConfig } from "../config";
@@ -62,12 +70,12 @@ const grantableScopesForRole = (role: Role): ReadonlyArray<Scope> => {
 const maxAccessForRole = (role: Role): "read" | "read_write" =>
   role === "accountant" ? "read" : "read_write";
 
-const toStringArray = (value: unknown): ReadonlyArray<string> => {
-  if (Array.isArray(value)) return value.filter((v): v is string => typeof v === "string");
-  if (typeof value === "string" && value.startsWith("{") && value.endsWith("}")) {
-    const inner = value.slice(1, -1);
+const toStringArray = (value: ReadonlyArray<string> | string | null): ReadonlyArray<string> => {
+  if (Arr.isArray(value)) return Arr.filter(value, Predicate.isString);
+  if (Predicate.isString(value) && Str.startsWith("{")(value) && Str.endsWith("}")(value)) {
+    const inner = Str.slice(1, -1)(value);
     if (inner.length === 0) return [];
-    return inner.split(",").map((item) => item.replace(/^"|"$/g, ""));
+    return Arr.map(Str.split(inner, ","), (item) => Str.replace(/^"|"$/g, "")(item));
   }
   return [];
 };
@@ -78,45 +86,54 @@ const isLoopbackHost = (hostname: string): boolean =>
   hostname === "[::1]" ||
   hostname === "::1";
 
+const parseUrl = Option.liftThrowable((value: string) => new URL(value));
+
 const redirectUriMatches = (registered: ReadonlyArray<string>, candidate: string): boolean => {
-  let candidateUrl: URL;
-  try {
-    candidateUrl = new URL(candidate);
-  } catch {
-    return false;
-  }
+  const candidateUrl = Option.getOrUndefined(parseUrl(candidate));
+  if (candidateUrl === undefined) return false;
   for (const uri of registered) {
     if (uri === candidate) return true;
-    try {
-      const regUrl = new URL(uri);
-      // RFC 8252 / 6.2 step 4: loopback redirects may use any port.
-      if (
-        isLoopbackHost(regUrl.hostname) &&
-        isLoopbackHost(candidateUrl.hostname) &&
-        regUrl.protocol === candidateUrl.protocol &&
-        regUrl.hostname === candidateUrl.hostname &&
-        regUrl.pathname === candidateUrl.pathname
-      ) {
-        return true;
-      }
-    } catch {
-      // Ignore malformed stored entry.
+    const regUrl = Option.getOrUndefined(parseUrl(uri));
+    // RFC 8252 / 6.2 step 4: loopback redirects may use any port.
+    if (
+      regUrl !== undefined &&
+      isLoopbackHost(regUrl.hostname) &&
+      isLoopbackHost(candidateUrl.hostname) &&
+      regUrl.protocol === candidateUrl.protocol &&
+      regUrl.hostname === candidateUrl.hostname &&
+      regUrl.pathname === candidateUrl.pathname
+    ) {
+      return true;
     }
   }
   return false;
 };
 
+const decodeConsentBase64 = Option.liftThrowable((input: string) =>
+  Buffer.from(input, "base64url").toString("utf8"),
+);
+
 /** Decodes `consentId` (either a raw query string or base64url-encoded query string). */
 const decodeConsentQuery = (consentId: string): string => {
-  if (consentId.includes("client_id=")) return consentId;
-  try {
-    const decoded = Buffer.from(consentId, "base64url").toString("utf8");
-    if (decoded.includes("client_id=")) return decoded;
-  } catch {
-    // Fall through to raw query.
-  }
-  return consentId;
+  if (Str.includes("client_id=")(consentId)) return consentId;
+  return decodeConsentBase64(consentId).pipe(
+    Option.filter(Str.includes("client_id=")),
+    Option.getOrElse(() => consentId),
+  );
 };
+
+const SCOPE_SEPARATOR = /\s+/;
+const encodeProviderConsent = Schema.encodeEffect(
+  Schema.fromJsonString(Schema.Struct({ accept: Schema.Boolean, oauth_query: Schema.String })),
+);
+const decodeProviderCallback = Schema.decodeUnknownEffect(
+  Schema.fromJsonString(Schema.Struct({ url: Schema.URLFromString })),
+);
+
+const forwardProviderDecision = Fn.flow(
+  processWorkspaceConsent<Response>,
+  Effect.mapError(() => Unavailable.make({ dependency: "database" })),
+);
 
 interface ParsedConsentRequest {
   readonly oauthQuery: string;
@@ -136,14 +153,15 @@ const parseConsentRequest = (
   const params = new URLSearchParams(oauthQuery);
   const clientId = params.get("client_id");
   const redirectUri = params.get("redirect_uri");
-  if (!clientId || !redirectUri) return undefined;
-
-  let redirectHost: string;
-  try {
-    redirectHost = new URL(redirectUri).host;
-  } catch {
+  if (
+    clientId === null ||
+    clientId.length === 0 ||
+    redirectUri === null ||
+    redirectUri.length === 0
+  )
     return undefined;
-  }
+  const redirect = Option.getOrUndefined(parseUrl(redirectUri));
+  if (redirect === undefined) return undefined;
 
   const expRaw = params.get("exp");
   if (expRaw !== null) {
@@ -151,11 +169,11 @@ const parseConsentRequest = (
     if (!Number.isFinite(expSec) || expSec * 1000 <= nowMs) return undefined;
   }
 
-  const rawScopes = (params.get("scope") ?? "")
-    .split(/\s+/)
-    .map((s) => s.trim())
-    .filter((s) => s.length > 0);
-  const validTokens = rawScopes.filter(isOAuthScopeToken);
+  const rawScopes = Arr.filter(
+    Arr.map(Str.split(params.get("scope") ?? "", SCOPE_SEPARATOR), Str.trim),
+    (s) => s.length > 0,
+  );
+  const validTokens = Arr.filter(rawScopes, isOAuthScopeToken);
   const parsed = accessFromOAuthScopes(validTokens);
   if (parsed === undefined) return undefined;
 
@@ -163,7 +181,7 @@ const parseConsentRequest = (
     oauthQuery,
     clientId,
     redirectUri,
-    redirectHost,
+    redirectHost: redirect.host,
     requestedAccess: parsed.access.access,
     requestedScopes: parsed.access.scopes,
     offlineAccess: parsed.offlineAccess,
@@ -180,11 +198,11 @@ const wireScopesForGrant = (
       ? ["kvitbit:read"]
       : access === "read_write"
         ? ["kvitbit:write"]
-        : scopes.map((s) => `kvitbit:${s}`);
+        : Arr.map(scopes, (s) => `kvitbit:${s}`);
   return offlineAccess ? [...base, OAUTH_OFFLINE_ACCESS] : base;
 };
 
-const forwardHeaders = (request: HttpServerRequest): Headers => {
+const forwardHeaders = (request: HttpServerRequest.HttpServerRequest): Headers => {
   const headers = new Headers();
   headers.set("content-type", "application/json");
   if (request.headers.cookie !== undefined) headers.set("cookie", request.headers.cookie);
@@ -195,60 +213,66 @@ const forwardHeaders = (request: HttpServerRequest): Headers => {
   return headers;
 };
 
-export const OauthConsentGroupLive = HttpApiBuilder.group(Api, "oauthConsent", (handlers) =>
-  Effect.gen(function* () {
+export const OauthConsentGroupLive = HttpApiBuilder.group(
+  Api,
+  "oauthConsent",
+  Effect.fnUntraced(function* (handlers) {
     const auth = yield* AuthServer;
     const sql = yield* SqlClient.SqlClient;
     const workspaces = yield* Workspaces;
     const config = yield* HttpConfig;
 
-    const loadConsent = (consentId: string) =>
-      Effect.gen(function* () {
-        const principal = yield* CurrentPrincipal;
-        const nowMs = yield* Clock.currentTimeMillis;
-        const parsed = parseConsentRequest(consentId, nowMs);
-        const notFound = new NotFound({ entity: "Workspace", id: consentId });
-        if (parsed === undefined || principal.credential._tag !== "Session") {
-          return yield* notFound;
-        }
-        const sessionId = principal.credential.sessionId;
-        const decision = yield* Effect.promise(() =>
-          verifyWorkspaceConsent(parsed.oauthQuery, config.visitorSecret, sessionId),
-        );
-        if (decision === undefined) return yield* notFound;
-        return { principal, sessionId, parsed, decision, notFound, nowMs };
-      });
+    const loadConsent = Effect.fnUntraced(function* (consentId: string) {
+      const principal = yield* CurrentPrincipal;
+      const nowMs = yield* Clock.currentTimeMillis;
+      const parsed = parseConsentRequest(consentId, nowMs);
+      const notFound = NotFound.make({ entity: "Workspace", id: consentId });
+      if (parsed === undefined || principal.credential._tag !== "Session") {
+        return yield* notFound;
+      }
+      const sessionId = principal.credential.sessionId;
+      const decision = yield* verifyWorkspaceConsent(
+        parsed.oauthQuery,
+        config.visitorSecret,
+        sessionId,
+      );
+      if (decision === undefined) return yield* notFound;
+      return { principal, sessionId, parsed, decision, notFound, nowMs };
+    });
 
-    const loadClient = (parsed: ParsedConsentRequest, consentId: string) =>
-      Effect.gen(function* () {
-        const rows = yield* sql<{
-          client_id: string;
-          name: string | null;
-          icon: string | null;
-          disabled: boolean | null;
-          redirect_uris: unknown;
-        }>`
+    const loadClient = Effect.fnUntraced(function* (
+      parsed: ParsedConsentRequest,
+      consentId: string,
+    ) {
+      const rows = yield* sql<{
+        client_id: string;
+        name: string | null;
+        icon: string | null;
+        disabled: boolean | null;
+        redirect_uris: ReadonlyArray<string> | string | null;
+      }>`
           select client_id, name, icon, disabled, redirect_uris
           from auth.oauth_client
           where client_id = ${parsed.clientId}
-          limit 1`.pipe(Effect.mapError(() => new Unavailable({ dependency: "database" })));
-        const client = rows[0];
-        if (
-          client === undefined ||
-          client.disabled === true ||
-          !redirectUriMatches(toStringArray(client.redirect_uris), parsed.redirectUri)
-        ) {
-          return yield* new NotFound({ entity: "Workspace", id: consentId });
-        }
-        return client;
-      });
+          limit 1`.pipe(Effect.mapError(() => Unavailable.make({ dependency: "database" })));
+      const client = rows[0];
+      if (
+        client === undefined ||
+        client.disabled === true ||
+        !redirectUriMatches(toStringArray(client.redirect_uris), parsed.redirectUri)
+      ) {
+        return yield* NotFound.make({ entity: "Workspace", id: consentId });
+      }
+      return client;
+    });
 
     return handlers
-      .handle("getConsent", ({ params }) =>
-        Effect.gen(function* () {
+      .handle(
+        "getConsent",
+        Effect.fnUntraced(function* ({ params }) {
           const { parsed, decision, notFound } = yield* loadConsent(params.consentId);
           const used = yield* sql`select id from auth.verification where id = ${decision.id}`.pipe(
-            Effect.mapError(() => new Unavailable({ dependency: "database" })),
+            Effect.mapError(() => Unavailable.make({ dependency: "database" })),
           );
           if (used.length > 0) return yield* notFound;
 
@@ -256,9 +280,9 @@ export const OauthConsentGroupLive = HttpApiBuilder.group(Api, "oauthConsent", (
           const mine = yield* workspaces.listMine;
 
           const requestedSet = new Set(parsed.requestedScopes);
-          const consentWorkspaces = mine.map((ws) => {
+          const consentWorkspaces = Arr.map(mine, (ws) => {
             const grantable = grantableScopesForRole(ws.role);
-            const offerable = grantable.filter((scope) => requestedSet.has(scope));
+            const offerable = Arr.filter(grantable, (scope) => requestedSet.has(scope));
             return {
               id: ws.id,
               name: ws.name,
@@ -282,9 +306,10 @@ export const OauthConsentGroupLive = HttpApiBuilder.group(Api, "oauthConsent", (
           };
         }),
       )
-      .handle("decide", ({ params, payload }) =>
-        Effect.gen(function* () {
-          const request = yield* HttpServerRequest;
+      .handle(
+        "decide",
+        Effect.fnUntraced(function* ({ params, payload }) {
+          const request = yield* HttpServerRequest.HttpServerRequest;
           const { principal, sessionId, parsed, decision, notFound, nowMs } = yield* loadConsent(
             params.consentId,
           );
@@ -317,14 +342,14 @@ export const OauthConsentGroupLive = HttpApiBuilder.group(Api, "oauthConsent", (
                 });
                 const expanded = expandAccess(payload.grant);
                 const requestedSet = new Set(parsed.requestedScopes);
-                const offerable = grantableScopesForRole(member.role).filter((scope) =>
+                const offerable = Arr.filter(grantableScopesForRole(member.role), (scope) =>
                   requestedSet.has(scope),
                 );
                 if (
                   expanded.scopes.length === 0 ||
-                  expanded.scopes.some((scope) => !offerable.includes(scope))
+                  Arr.some(expanded.scopes, (scope) => !offerable.includes(scope))
                 ) {
-                  return yield* new Forbidden({ action: "grant.create" });
+                  return yield* Forbidden.make({ action: "grant.create" });
                 }
 
                 const wireScopes = wireScopesForGrant(
@@ -333,12 +358,13 @@ export const OauthConsentGroupLive = HttpApiBuilder.group(Api, "oauthConsent", (
                   parsed.offlineAccess,
                 );
                 const referenceId = generateId();
+                const now = DateTime.toDateUtc(DateTime.makeUnsafe(nowMs));
                 const grants = yield* sql<{ id: string }>`
                 insert into auth.oauth_consent as existing
                   (id, reference_id, client_id, user_id, workspace_id, access, granted_scopes, scopes, created_at, updated_at)
                 select ${referenceId}, ${referenceId}, ${parsed.clientId}, ${principal.userId},
                   w.id, ${expanded.access}::access_mode, ${[...expanded.scopes]}::text[],
-                  ${[...wireScopes]}::text[], ${new Date(nowMs)}, ${new Date(nowMs)}
+                  ${[...wireScopes]}::text[], ${now}, ${now}
                 from workspaces w where w.id = ${payload.workspace}::uuid and w.closed_at is null
                 on conflict (client_id, user_id, workspace_id) do update set
                   reference_id = existing.id,
@@ -358,31 +384,36 @@ export const OauthConsentGroupLive = HttpApiBuilder.group(Api, "oauthConsent", (
                 };
               }
 
-              const response = yield* processWorkspaceConsent(providerDecision, () =>
+              const providerBody = yield* encodeProviderConsent({
+                accept,
+                oauth_query: parsed.oauthQuery,
+              }).pipe(Effect.orDie);
+              const response = yield* forwardProviderDecision(providerDecision, () =>
                 auth.handler(
                   new Request(`${config.appOrigin}/api/auth/oauth2/consent`, {
                     method: "POST",
                     headers: forwardHeaders(request),
-                    body: JSON.stringify({ accept, oauth_query: parsed.oauthQuery }),
+                    body: providerBody,
                   }),
                 ),
-              ).pipe(Effect.mapError(() => new Unavailable({ dependency: "database" })));
-              if (response.status >= 500) return yield* new Unavailable({ dependency: "database" });
+              );
+              if (response.status >= 500)
+                return yield* Unavailable.make({ dependency: "database" });
               if (!response.ok) return yield* notFound;
 
-              const callback = yield* Effect.tryPromise({
-                try: async () => {
-                  const body = (await response.json()) as { url: string };
-                  return new URL(body.url);
-                },
+              const { url: callback } = yield* Effect.tryPromise({
+                try: () => response.text(),
                 catch: () => notFound,
-              });
+              }).pipe(
+                Effect.flatMap(decodeProviderCallback),
+                Effect.mapError(() => notFound),
+              );
               if (
                 accept
                   ? !callback.searchParams.has("code")
                   : callback.searchParams.get("error") !== "access_denied"
               ) {
-                return yield* new Invalid({
+                return yield* Invalid.make({
                   issues: [{ path: ["consentId"], code: "request.malformed" }],
                 });
               }
@@ -390,7 +421,7 @@ export const OauthConsentGroupLive = HttpApiBuilder.group(Api, "oauthConsent", (
             }),
           ).pipe(
             Effect.provideService(SqlClient.SqlClient, sql),
-            Effect.catchTag("SqlError", () => new Unavailable({ dependency: "database" })),
+            Effect.catchTag("SqlError", () => Unavailable.make({ dependency: "database" })),
           );
         }),
       );

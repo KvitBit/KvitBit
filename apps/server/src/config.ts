@@ -3,9 +3,11 @@
  * agreed with phase3d-infra on board thread #871. Stream-specific settings live next to their
  * stream (`./<area>/config.ts`) and read their own variables.
  */
-import { Config, Effect, type Option, type Redacted } from "effect";
+import * as Config from "effect/Config";
+import type * as Option from "effect/Option";
+import type * as Redacted from "effect/Redacted";
 
-export type RunnerMode = "single" | "cluster";
+type RunnerMode = "single" | "cluster";
 
 export interface ServerConfigShape {
   readonly host: string;
@@ -35,8 +37,4 @@ export const ServerConfig: Config.Config<ServerConfigShape> = Config.all({
   webDir: Config.option(Config.String("KVITBIT_WEB_DIR")),
   pwaDir: Config.option(Config.String("KVITBIT_PWA_DIR")),
   trustedProxyHops: Config.Int("KVITBIT_TRUSTED_PROXY_HOPS").pipe(Config.withDefault(1)),
-});
-
-export const loadServerConfig = Effect.gen(function* () {
-  return yield* ServerConfig;
 });

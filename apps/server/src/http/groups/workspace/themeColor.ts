@@ -3,10 +3,13 @@
  * adapted from `packages/ui-port/src/theme/color/` (ported from Google's material-color-utilities,
  * Apache-2.0) so `apps/server` resolves themes without depending on `@kvitbit/ui-port`.
  */
+import * as Arr from "effect/Array";
+import * as Fn from "effect/Function";
+import * as Str from "effect/String";
 
 /** Opaque sRGB colour as 0xRRGGBB (no alpha channel). */
 export type Rgb = number;
-export type Vec3 = readonly [number, number, number];
+type Vec3 = readonly [number, number, number];
 
 const SRGB_TO_XYZ = [
   [0.41233895, 0.35762064, 0.18051042],
@@ -22,7 +25,10 @@ const XYZ_TO_SRGB = [
 
 const WHITE_POINT_D65: Vec3 = [95.047, 100.0, 108.883];
 
-export const clamp = (lo: number, hi: number, x: number): number => Math.min(hi, Math.max(lo, x));
+export const clamp: {
+  (hi: number, x: number): (lo: number) => number;
+  (lo: number, hi: number, x: number): number;
+} = Fn.dual(3, (lo: number, hi: number, x: number): number => Math.min(hi, Math.max(lo, x)));
 const lerp = (a: number, b: number, t: number): number => (1 - t) * a + t * b;
 const signum = (x: number): number => (x < 0 ? -1 : x > 0 ? 1 : 0);
 
@@ -96,9 +102,10 @@ const rgbFromLstar = (lstar: number): Rgb => {
 
 const HEX = /^#[0-9A-Fa-f]{6}$/;
 export const isHex = (s: string): boolean => HEX.test(s);
-export const rgbFromHex = (hex: string): Rgb => Number.parseInt(hex.slice(1, 7), 16) & 0xffffff;
+export const rgbFromHex = (hex: string): Rgb =>
+  Number.parseInt(Str.slice(1, 7)(hex), 16) & 0xffffff;
 export const hexFromRgb = (rgb: Rgb): string =>
-  `#${(rgb & 0xffffff).toString(16).padStart(6, "0").toUpperCase()}`;
+  `#${Str.toUpperCase(Str.padStart(6, "0")((rgb & 0xffffff).toString(16)))}`;
 
 // --- CAM16 & HCT -------------------------------------------------------------------------------
 
@@ -115,11 +122,10 @@ interface ViewingConditions {
 }
 
 const DEFAULT_VC: ViewingConditions = (() => {
-  const whitePoint = WHITE_POINT_D65;
   const adaptingLuminance = ((200 / Math.PI) * yFromLstar(50)) / 100;
   const backgroundLstar = 50;
   const surround = 2;
-  const [x, y, zw] = whitePoint;
+  const [x, y, zw] = WHITE_POINT_D65;
   const rW = x * 0.401288 + y * 0.650173 + zw * -0.051461;
   const gW = x * -0.250268 + y * 1.204414 + zw * 0.045854;
   const bW = x * -0.002079 + y * 0.048952 + zw * 0.953127;
@@ -131,7 +137,7 @@ const DEFAULT_VC: ViewingConditions = (() => {
   const k4 = k * k * k * k;
   const k4F = 1 - k4;
   const fl = k4 * adaptingLuminance + 0.1 * k4F * k4F * Math.cbrt(5 * adaptingLuminance);
-  const n = yFromLstar(backgroundLstar) / whitePoint[1];
+  const n = yFromLstar(backgroundLstar) / y;
   const z = 1.48 + Math.sqrt(n);
   const nbb = 0.725 / n ** 0.2;
   const adapt = (v: number) => {
@@ -147,42 +153,40 @@ const DEFAULT_VC: ViewingConditions = (() => {
 
 const cam16FromRgb = (rgb: Rgb) => {
   const [x, y, z] = xyzFromRgb(rgb);
-  const vc = DEFAULT_VC;
   const rC = 0.401288 * x + 0.650173 * y - 0.051461 * z;
   const gC = -0.250268 * x + 1.204414 * y + 0.045854 * z;
   const bC = -0.002079 * x + 0.048952 * y + 0.953127 * z;
   const adapt = (v: number) => {
-    const p = ((vc.fl * Math.abs(v)) / 100) ** 0.42;
+    const p = ((DEFAULT_VC.fl * Math.abs(v)) / 100) ** 0.42;
     return (signum(v) * 400 * p) / (p + 27.13);
   };
-  const rA = adapt(vc.rgbD[0] * rC);
-  const gA = adapt(vc.rgbD[1] * gC);
-  const bA = adapt(vc.rgbD[2] * bC);
+  const rA = adapt(DEFAULT_VC.rgbD[0] * rC);
+  const gA = adapt(DEFAULT_VC.rgbD[1] * gC);
+  const bA = adapt(DEFAULT_VC.rgbD[2] * bC);
   const a = (11 * rA + -12 * gA + bA) / 11;
   const b = (rA + gA - 2 * bA) / 9;
   const u = (20 * rA + 20 * gA + 21 * bA) / 20;
   const p2 = (40 * rA + 20 * gA + bA) / 20;
   const hue = sanitizeDegrees((Math.atan2(b, a) * 180) / Math.PI);
-  const ac = p2 * vc.nbb;
-  const j = 100 * (ac / vc.aw) ** (vc.c * vc.z);
+  const ac = p2 * DEFAULT_VC.nbb;
+  const j = 100 * (ac / DEFAULT_VC.aw) ** (DEFAULT_VC.c * DEFAULT_VC.z);
   const huePrime = hue < 20.14 ? hue + 360 : hue;
   const eHue = 0.25 * (Math.cos((huePrime * Math.PI) / 180 + 2) + 3.8);
-  const p1 = (50000 / 13) * eHue * vc.nc * vc.ncb;
+  const p1 = (50000 / 13) * eHue * DEFAULT_VC.nc * DEFAULT_VC.ncb;
   const t = (p1 * Math.hypot(a, b)) / (u + 0.305);
-  const alpha = t ** 0.9 * (1.64 - 0.29 ** vc.n) ** 0.73;
+  const alpha = t ** 0.9 * (1.64 - 0.29 ** DEFAULT_VC.n) ** 0.73;
   const chroma = alpha * Math.sqrt(j / 100);
   return { hue, chroma, j };
 };
 
 const xyzFromCam16 = (j: number, chroma: number, hue: number): Vec3 => {
-  const vc = DEFAULT_VC;
   const alpha = chroma === 0 || j === 0 ? 0 : chroma / Math.sqrt(j / 100);
-  const t = (alpha / (1.64 - 0.29 ** vc.n) ** 0.73) ** (1 / 0.9);
+  const t = (alpha / (1.64 - 0.29 ** DEFAULT_VC.n) ** 0.73) ** (1 / 0.9);
   const hRad = (hue * Math.PI) / 180;
   const eHue = 0.25 * (Math.cos(hRad + 2) + 3.8);
-  const ac = vc.aw * (j / 100) ** (1 / vc.c / vc.z);
-  const p1 = eHue * (50000 / 13) * vc.nc * vc.ncb;
-  const p2 = ac / vc.nbb;
+  const ac = DEFAULT_VC.aw * (j / 100) ** (1 / DEFAULT_VC.c / DEFAULT_VC.z);
+  const p1 = eHue * (50000 / 13) * DEFAULT_VC.nc * DEFAULT_VC.ncb;
+  const p2 = ac / DEFAULT_VC.nbb;
   const hSin = Math.sin(hRad);
   const hCos = Math.cos(hRad);
   const gamma = (23 * (p2 + 0.305) * t) / (23 * p1 + 11 * t * hCos + 108 * t * hSin);
@@ -193,11 +197,11 @@ const xyzFromCam16 = (j: number, chroma: number, hue: number): Vec3 => {
   const bA = (460 * p2 - 220 * a - 6300 * b) / 1403;
   const unadapt = (v: number) => {
     const base = Math.max(0, (27.13 * Math.abs(v)) / (400 - Math.abs(v)));
-    return signum(v) * (100 / vc.fl) * base ** (1 / 0.42);
+    return signum(v) * (100 / DEFAULT_VC.fl) * base ** (1 / 0.42);
   };
-  const rF = unadapt(rA) / vc.rgbD[0];
-  const gF = unadapt(gA) / vc.rgbD[1];
-  const bF = unadapt(bA) / vc.rgbD[2];
+  const rF = unadapt(rA) / DEFAULT_VC.rgbD[0];
+  const gF = unadapt(gA) / DEFAULT_VC.rgbD[1];
+  const bF = unadapt(bA) / DEFAULT_VC.rgbD[2];
   return [
     1.86206786 * rF - 1.01125463 * gF + 0.14918677 * bF,
     0.38752654 * rF + 0.62144744 * gF - 0.00897398 * bF,
@@ -213,9 +217,9 @@ const solveJ = (chroma: number, hue: number, tone: number, targetY: number): Vec
     const xyz = xyzFromCam16(j, chroma, hue);
     const fnj = xyz[1];
     if (Math.abs(fnj - targetY) < 0.002) return xyz;
-    if (!(fnj > 0) || !Number.isFinite(fnj)) break;
-    j = j - ((fnj - targetY) * j) / (2 * fnj);
-    if (!(j > 0) || !Number.isFinite(j)) break;
+    if (!Number.isFinite(fnj) || fnj <= 0) break;
+    j -= ((fnj - targetY) * j) / (2 * fnj);
+    if (!Number.isFinite(j) || j <= 0) break;
   }
   let lo = 0;
   let hi = 200;
@@ -230,7 +234,7 @@ const solveJ = (chroma: number, hue: number, tone: number, targetY: number): Vec
 };
 
 const linrgbInGamut = (lin: Vec3): boolean =>
-  lin.every((c) => c >= -GAMUT_EPSILON && c <= 100 + GAMUT_EPSILON);
+  Arr.every(lin, (c) => c >= -GAMUT_EPSILON && c <= 100 + GAMUT_EPSILON);
 
 const solveToRgb = (hue: number, chroma: number, rawTone: number): Rgb => {
   const tone = Number.isFinite(rawTone) ? clamp(0, 100, rawTone) : 0;
@@ -269,12 +273,17 @@ const solveToRgb = (hue: number, chroma: number, rawTone: number): Rgb => {
 };
 
 export class Hct {
-  private constructor(
-    readonly hue: number,
-    readonly chroma: number,
-    readonly tone: number,
-    readonly rgb: Rgb,
-  ) {}
+  readonly hue: number;
+  readonly chroma: number;
+  readonly tone: number;
+  readonly rgb: Rgb;
+
+  private constructor(hue: number, chroma: number, tone: number, rgb: Rgb) {
+    this.hue = hue;
+    this.chroma = chroma;
+    this.tone = tone;
+    this.rgb = rgb;
+  }
 
   static fromRgb(rgb: Rgb): Hct {
     const cam = cam16FromRgb(rgb);
@@ -288,11 +297,13 @@ export class Hct {
 
 export class TonalPalette {
   private readonly cache = new Map<number, Rgb>();
+  readonly hue: number;
+  readonly chroma: number;
 
-  private constructor(
-    readonly hue: number,
-    readonly chroma: number,
-  ) {}
+  private constructor(hue: number, chroma: number) {
+    this.hue = hue;
+    this.chroma = chroma;
+  }
 
   static fromHueAndChroma(hue: number, chroma: number): TonalPalette {
     return new TonalPalette(sanitizeDegrees(hue), Math.max(0, chroma));
@@ -316,13 +327,16 @@ export class TonalPalette {
 const rotationDirection = (from: number, to: number): 1 | -1 =>
   sanitizeDegrees(to - from) <= 180 ? 1 : -1;
 
-export const harmonize = (design: Rgb, source: Rgb): Rgb => {
+export const harmonize: {
+  (source: Rgb): (design: Rgb) => Rgb;
+  (design: Rgb, source: Rgb): Rgb;
+} = Fn.dual(2, (design: Rgb, source: Rgb): Rgb => {
   const from = Hct.fromRgb(design);
   const to = Hct.fromRgb(source);
   const rotation = Math.min(differenceDegrees(from.hue, to.hue) * 0.5, 15);
   const hue = sanitizeDegrees(from.hue + rotation * rotationDirection(from.hue, to.hue));
   return Hct.from(hue, from.chroma, from.tone).rgb;
-};
+});
 
 const relativeLuminance = (rgb: Rgb): number =>
   (0.2126 * linearized(redOf(rgb)) +
@@ -330,8 +344,11 @@ const relativeLuminance = (rgb: Rgb): number =>
     0.0722 * linearized(blueOf(rgb))) /
   100;
 
-export const contrastRatio = (a: Rgb, b: Rgb): number => {
+export const contrastRatio: {
+  (b: Rgb): (a: Rgb) => number;
+  (a: Rgb, b: Rgb): number;
+} = Fn.dual(2, (a: Rgb, b: Rgb): number => {
   const la = relativeLuminance(a);
   const lb = relativeLuminance(b);
   return (Math.max(la, lb) + 0.05) / (Math.min(la, lb) + 0.05);
-};
+});

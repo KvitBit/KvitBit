@@ -5,8 +5,8 @@
  */
 import type { CoreRepos, UserDirectory } from "@kvitbit/core";
 import type { CoreStore } from "@kvitbit/core/ports";
-import { Layer } from "effect";
-import type { SqlClient } from "effect/sql";
+import * as Layer from "effect/Layer";
+import type * as SqlClient from "effect/sql/SqlClient";
 import { CoreStoreSql } from "./CoreStoreSql";
 import { ContactsRepoSql } from "./repos/contacts";
 import { DeliveriesRepoSql } from "./repos/deliveries";
@@ -22,26 +22,10 @@ import { ShareLinksRepoSql } from "./repos/sharelinks";
 import { UserDirectorySql } from "./repos/userDirectory";
 import { WorkspacesRepoSql } from "./repos/workspaces";
 
-export { CoreStoreSql } from "./CoreStoreSql";
 export { PgDatabaseLive, PgliteTestDatabase, PgWorkerDatabaseLive } from "./database";
-export {
-  ContactsRepoSql,
-  DeliveriesRepoSql,
-  DocumentsRepoSql,
-  ExpensesRepoSql,
-  ExportsRepoSql,
-  FxFixingCacheSql,
-  NumberingSeriesRepoSql,
-  PaymentsRepoSql,
-  PriceListRepoSql,
-  RecurringRepoSql,
-  ShareLinksRepoSql,
-  UserDirectorySql,
-  WorkspacesRepoSql,
-};
 
 /** Every `CoreRepos` port over Postgres. */
-export const CoreReposSql: Layer.Layer<CoreRepos, never, SqlClient.SqlClient> = Layer.mergeAll(
+const CoreReposSql: Layer.Layer<CoreRepos, never, SqlClient.SqlClient> = Layer.mergeAll(
   WorkspacesRepoSql,
   ContactsRepoSql,
   PriceListRepoSql,

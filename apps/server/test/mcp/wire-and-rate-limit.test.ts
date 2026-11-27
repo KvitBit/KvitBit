@@ -1,16 +1,25 @@
 import { afterEach, describe, expect, setDefaultTimeout, test } from "bun:test";
 import {
-  type ContactId,
+  ContactId,
   Contacts,
   CurrencyCode,
   CurrentCaller,
-  type ExpenseId,
+  ExpenseId,
   IsoDate,
   PriceList,
+  PriceListItemInput,
   Templates,
 } from "@kvitbit/domain/contract";
-import { BigDecimal, Duration, Effect } from "effect";
-import { TestClock } from "effect/testing";
+import * as Arr from "effect/Array";
+import * as BigDecimal from "effect/BigDecimal";
+import * as Duration from "effect/Duration";
+import * as Effect from "effect/Effect";
+import * as Formatter from "effect/Formatter";
+import * as Predicate from "effect/Predicate";
+import * as EffectRecord from "effect/Record";
+import * as Schema from "effect/Schema";
+import * as Str from "effect/String";
+import * as TestClock from "effect/testing/TestClock";
 import { makeMcpHarness } from "./harness";
 
 setDefaultTimeout(30_000);
@@ -21,17 +30,48 @@ afterEach(async () => {
   cleanup = undefined;
 });
 
+const isJsonObject = (value: Schema.Json | undefined): value is Schema.JsonObject =>
+  Predicate.isObject(value);
+const isJsonArray = (value: Schema.Json | undefined): value is Schema.JsonArray =>
+  Arr.isArray(value);
+const decodeJson = Schema.decodeUnknownEffect(Schema.Json);
+const decodeResourceJson = Schema.decodeUnknownEffect(Schema.fromJsonString(Schema.Json));
+const decodeToolList = Schema.decodeUnknownEffect(
+  Schema.Struct({
+    tools: Schema.Array(
+      Schema.Struct({ name: Schema.String, outputSchema: Schema.optional(Schema.JsonObject) }),
+    ),
+  }),
+);
+const decodePriceListItems = Schema.decodeUnknownEffect(
+  Schema.Array(Schema.Struct({ unitPrice: Schema.String })),
+);
+const FxRate = Schema.NullOr(Schema.Struct({ rate: Schema.Json }));
+const decodeDraft = Schema.decodeUnknownEffect(
+  Schema.Struct({
+    id: Schema.String,
+    revision: Schema.Int,
+    fx: FxRate,
+    totals: Schema.Struct({ gross: Schema.Struct({ amount: Schema.Json }) }),
+    lines: Schema.Array(Schema.Struct({ unitPrice: Schema.Json })),
+  }),
+);
+const decodeDocumentFx = Schema.decodeUnknownEffect(Schema.Struct({ fx: FxRate }));
+const decodeConfirmation = Schema.decodeUnknownEffect(
+  Schema.Struct({ confirmationToken: Schema.String }),
+);
+const decodeExpense = Schema.decodeUnknownEffect(Schema.Struct({ id: ExpenseId }));
+
 /** Recursively verifies no internal Effect BigDecimal representation leaked into JSON output. */
-const findLeakedBigDecimalPaths = (value: unknown, path = "$"): Array<string> => {
-  if (value === null || value === undefined || typeof value !== "object") return [];
-  if (Array.isArray(value)) {
-    return value.flatMap((entry, idx) => findLeakedBigDecimalPaths(entry, `${path}[${idx}]`));
+const findLeakedBigDecimalPaths = (value: Schema.Json, path = "$"): Array<string> => {
+  if (isJsonArray(value)) {
+    return Arr.flatMap(value, (entry, idx) => findLeakedBigDecimalPaths(entry, `${path}[${idx}]`));
   }
-  const obj = value as Record<string, unknown>;
-  if (obj._id === "BigDecimal") {
+  if (!isJsonObject(value)) return [];
+  if (value._id === "BigDecimal") {
     return [path];
   }
-  return Object.entries(obj).flatMap(([key, entry]) =>
+  return Arr.flatMap(EffectRecord.toEntries(value), ([key, entry]) =>
     findLeakedBigDecimalPaths(entry, `${path}.${key}`),
   );
 };
@@ -42,18 +82,20 @@ const findLeakedBigDecimalPaths = (value: unknown, path = "$"): Array<string> =>
  * `additionalProperties`, `items`, `pattern`, `minimum`, `maximum`, `minLength`, `maxLength`).
  */
 const validateJsonSchema = (
-  value: unknown,
-  schema: Record<string, unknown>,
-  rootDefs: Record<string, Record<string, unknown>>,
+  value: Schema.Json,
+  schema: Schema.Json,
+  rootDefs: Schema.Json,
   path = "$",
 ): Array<string> => {
-  if (typeof schema.$ref === "string") {
+  if (!isJsonObject(schema)) return [`${path}: expected a schema object`];
+
+  if (Predicate.isString(schema.$ref)) {
     const refPrefix = "#/$defs/";
-    if (!schema.$ref.startsWith(refPrefix)) {
+    if (!Str.startsWith(refPrefix)(schema.$ref)) {
       return [`${path}: unsupported $ref ${schema.$ref}`];
     }
-    const targetName = schema.$ref.slice(refPrefix.length);
-    const target = rootDefs[targetName];
+    const targetName = Str.slice(refPrefix.length)(schema.$ref);
+    const target = isJsonObject(rootDefs) ? rootDefs[targetName] : undefined;
     if (target === undefined) {
       return [`${path}: missing $defs entry ${targetName}`];
     }
@@ -62,17 +104,17 @@ const validateJsonSchema = (
 
   if ("const" in schema && value !== schema.const) {
     return [
-      `${path}: expected const ${JSON.stringify(schema.const)}, got ${JSON.stringify(value)}`,
+      `${path}: expected const ${Formatter.formatJson(schema.const)}, got ${Formatter.formatJson(value)}`,
     ];
   }
 
-  if (Array.isArray(schema.enum) && !schema.enum.includes(value)) {
-    return [`${path}: value ${JSON.stringify(value)} not in enum`];
+  if (isJsonArray(schema.enum) && !Arr.some(schema.enum, (entry) => entry === value)) {
+    return [`${path}: value ${Formatter.formatJson(value)} not in enum`];
   }
 
-  if (Array.isArray(schema.anyOf)) {
-    const branches = schema.anyOf as ReadonlyArray<Record<string, unknown>>;
-    const matched = branches.some(
+  if (isJsonArray(schema.anyOf)) {
+    const matched = Arr.some(
+      schema.anyOf,
       (branch) => validateJsonSchema(value, branch, rootDefs, path).length === 0,
     );
     if (!matched) {
@@ -80,9 +122,9 @@ const validateJsonSchema = (
     }
   }
 
-  if (Array.isArray(schema.oneOf)) {
-    const branches = schema.oneOf as ReadonlyArray<Record<string, unknown>>;
-    const matches = branches.filter(
+  if (isJsonArray(schema.oneOf)) {
+    const matches = Arr.filter(
+      schema.oneOf,
       (branch) => validateJsonSchema(value, branch, rootDefs, path).length === 0,
     ).length;
     if (matches !== 1) {
@@ -90,98 +132,96 @@ const validateJsonSchema = (
     }
   }
 
-  if (Array.isArray(schema.allOf)) {
-    const branches = schema.allOf as ReadonlyArray<Record<string, unknown>>;
-    const errors = branches.flatMap((branch) => validateJsonSchema(value, branch, rootDefs, path));
+  if (isJsonArray(schema.allOf)) {
+    const errors = Arr.flatMap(schema.allOf, (branch) =>
+      validateJsonSchema(value, branch, rootDefs, path),
+    );
     if (errors.length > 0) return errors;
   }
 
   const schemaType = schema.type;
   if (schemaType !== undefined) {
-    const allowedTypes = Array.isArray(schemaType) ? schemaType : [schemaType];
-    const matchesType = allowedTypes.some((t) => {
+    const allowedTypes = isJsonArray(schemaType) ? schemaType : [schemaType];
+    const matchesType = Arr.some(allowedTypes, (t) => {
       switch (t) {
         case "null":
           return value === null;
         case "boolean":
-          return typeof value === "boolean";
+          return Predicate.isBoolean(value);
         case "string":
-          return typeof value === "string";
+          return Predicate.isString(value);
         case "number":
-          return typeof value === "number" && Number.isFinite(value);
+          return Predicate.isNumber(value) && Number.isFinite(value);
         case "integer":
-          return typeof value === "number" && Number.isInteger(value);
+          return Predicate.isNumber(value) && Number.isInteger(value);
         case "array":
-          return Array.isArray(value);
+          return isJsonArray(value);
         case "object":
-          return typeof value === "object" && value !== null && !Array.isArray(value);
+          return isJsonObject(value);
         default:
           return true;
       }
     });
     if (!matchesType) {
       return [
-        `${path}: expected type ${JSON.stringify(schemaType)}, got ${
-          value === null ? "null" : Array.isArray(value) ? "array" : typeof value
-        }`,
+        `${path}: expected type ${Formatter.formatJson(schemaType)}, got ${Formatter.formatJson(value)}`,
       ];
     }
   }
 
-  if (typeof value === "string") {
-    if (typeof schema.pattern === "string" && !new RegExp(schema.pattern).test(value)) {
-      return [`${path}: string ${JSON.stringify(value)} failed pattern ${schema.pattern}`];
+  if (Predicate.isString(value)) {
+    if (Predicate.isString(schema.pattern) && !new RegExp(schema.pattern).test(value)) {
+      return [`${path}: string ${Formatter.formatJson(value)} failed pattern ${schema.pattern}`];
     }
-    if (typeof schema.minLength === "number" && value.length < schema.minLength) {
+    if (Predicate.isNumber(schema.minLength) && value.length < schema.minLength) {
       return [`${path}: string shorter than minLength ${schema.minLength}`];
     }
-    if (typeof schema.maxLength === "number" && value.length > schema.maxLength) {
+    if (Predicate.isNumber(schema.maxLength) && value.length > schema.maxLength) {
       return [`${path}: string longer than maxLength ${schema.maxLength}`];
     }
   }
 
-  if (typeof value === "number") {
-    if (typeof schema.minimum === "number" && value < schema.minimum) {
+  if (Predicate.isNumber(value)) {
+    if (Predicate.isNumber(schema.minimum) && value < schema.minimum) {
       return [`${path}: number ${value} < minimum ${schema.minimum}`];
     }
-    if (typeof schema.maximum === "number" && value > schema.maximum) {
+    if (Predicate.isNumber(schema.maximum) && value > schema.maximum) {
       return [`${path}: number ${value} > maximum ${schema.maximum}`];
     }
   }
 
   const errors: Array<string> = [];
 
-  if (Array.isArray(value) && schema.items && typeof schema.items === "object") {
-    const itemSchema = schema.items as Record<string, unknown>;
-    for (let i = 0; i < value.length; i++) {
-      errors.push(...validateJsonSchema(value[i], itemSchema, rootDefs, `${path}[${i}]`));
+  const itemSchema = schema.items;
+  if (isJsonArray(value) && isJsonObject(itemSchema)) {
+    for (const [index, item] of value.entries()) {
+      errors.push(...validateJsonSchema(item, itemSchema, rootDefs, `${path}[${index}]`));
     }
   }
 
-  if (typeof value === "object" && value !== null && !Array.isArray(value)) {
-    const obj = value as Record<string, unknown>;
-    if (Array.isArray(schema.required)) {
+  if (isJsonObject(value)) {
+    if (isJsonArray(schema.required)) {
       for (const req of schema.required) {
-        if (typeof req === "string" && !(req in obj)) {
+        if (Predicate.isString(req) && !(req in value)) {
           errors.push(`${path}: missing required key ${req}`);
         }
       }
     }
-    const properties =
-      schema.properties && typeof schema.properties === "object"
-        ? (schema.properties as Record<string, Record<string, unknown>>)
-        : undefined;
-    if (properties !== undefined) {
-      for (const [key, propSchema] of Object.entries(properties)) {
-        if (key in obj) {
-          errors.push(...validateJsonSchema(obj[key], propSchema, rootDefs, `${path}.${key}`));
+    const properties = schema.properties;
+    if (isJsonObject(properties)) {
+      for (const [key, propSchema] of EffectRecord.toEntries(properties)) {
+        if (key in value) {
+          const property = value[key];
+          if (property !== undefined) {
+            errors.push(...validateJsonSchema(property, propSchema, rootDefs, `${path}.${key}`));
+          }
         }
       }
-    }
-    if (schema.additionalProperties === false && properties !== undefined) {
-      for (const key of Object.keys(obj)) {
-        if (!(key in properties)) {
-          errors.push(`${path}: unexpected additional property ${key}`);
+      if (schema.additionalProperties === false) {
+        for (const key of EffectRecord.keys<string, Schema.Json>(value)) {
+          if (!(key in properties)) {
+            errors.push(`${path}: unexpected additional property ${key}`);
+          }
         }
       }
     }
@@ -226,18 +266,21 @@ describe("MCP wire-codec output encoding and per-grant rate limiting", () => {
           address: { city: "Prague", country: "CZ" },
         });
         const priceList = yield* PriceList;
-        yield* priceList.save({
-          name: "Consulting Day",
-          unit: "day",
-          unitPrice: BigDecimal.fromStringUnsafe("2000"),
-          currency: CurrencyCode.make("CZK"),
-          vat: "standard",
-        } as never);
+        yield* priceList.save(
+          PriceListItemInput.make({
+            name: "Consulting Day",
+            unit: "day",
+            unitPrice: BigDecimal.fromStringUnsafe("2000"),
+            currency: CurrencyCode.make("CZK"),
+            vat: "standard",
+          }),
+        );
+        const id = yield* Schema.decodeUnknownEffect(ContactId)(created.id);
         const templates = yield* Templates;
         yield* templates.save({
           name: "Monthly Retainer",
           kind: "invoice",
-          contact: created.id,
+          contact: id,
           currency: CurrencyCode.make("CZK"),
           due: { inDays: 14 },
           lines: [
@@ -248,32 +291,36 @@ describe("MCP wire-codec output encoding and per-grant rate limiting", () => {
               vat: "standard",
             },
           ],
-        } as never);
-        return created.id as ContactId;
+        });
+        return id;
       }).pipe(Effect.provideService(CurrentCaller, ws)),
     );
 
     // Fetch declared outputSchemas from tools/list.
     const listed = await h.rpc(rw.token, "tools/list");
     expect(listed.res.status).toBe(200);
-    const tools = (
-      listed.json.result as {
-        readonly tools: ReadonlyArray<{
-          readonly name: string;
-          readonly outputSchema: Record<string, unknown>;
-        }>;
-      }
-    ).tools;
-    const schemaByTool = new Map(tools.map((t) => [t.name, t.outputSchema]));
+    const { tools } = await h.run(decodeToolList(listed.json.result));
+    const schemaByTool = new Map(Arr.map(tools, (t) => [t.name, t.outputSchema]));
 
-    const assertMatchesDeclaredSchema = (toolName: string, structured: unknown) => {
+    const assertMatchesDeclaredSchema = async (
+      toolName: string,
+      call: Awaited<ReturnType<typeof h.callTool>>,
+    ) => {
       const schema = schemaByTool.get(toolName);
       expect(schema).toBeDefined();
       if (schema === undefined) return;
-      const defs = (schema.$defs as Record<string, Record<string, unknown>> | undefined) ?? {};
-      const errors = validateJsonSchema(structured, schema, defs);
+      const structured = await h.run(decodeJson(call.result?.structuredContent));
+      const errors = validateJsonSchema(structured, schema, schema.$defs ?? {});
       expect(errors).toEqual([]);
       expect(findLeakedBigDecimalPaths(structured)).toEqual([]);
+    };
+
+    const readJsonResource = async (uri: string) => {
+      const res = await h.readResource(rw.token, uri);
+      expect(res.error).toBeUndefined();
+      const json = await h.run(decodeResourceJson(res.contents?.[0]?.text));
+      expect(findLeakedBigDecimalPaths(json)).toEqual([]);
+      return json;
     };
 
     // 1. get_fx_rate: rate must be string "25.35", matching declared outputSchema.
@@ -283,32 +330,24 @@ describe("MCP wire-codec output encoding and per-grant rate limiting", () => {
     });
     expect(fxCall.result?.isError).toBe(false);
     expect(fxCall.result?.structuredContent?.rate).toBe("25.35");
-    assertMatchesDeclaredSchema("get_fx_rate", fxCall.result?.structuredContent);
+    await assertMatchesDeclaredSchema("get_fx_rate", fxCall);
 
     // 2. list_price_list_items tool + kvitbit://price-list resource: unitPrice must be string "2000".
     const plCall = await h.callTool(rw.token, "list_price_list_items", {});
     expect(plCall.result?.isError).toBe(false);
-    assertMatchesDeclaredSchema("list_price_list_items", plCall.result?.structuredContent);
-    const plItems = plCall.result?.structuredContent?.items as ReadonlyArray<
-      Record<string, unknown>
-    >;
+    await assertMatchesDeclaredSchema("list_price_list_items", plCall);
+    const plItems = await h.run(decodePriceListItems(plCall.result?.structuredContent?.items));
     expect(plItems[0]?.unitPrice).toBe("2000");
 
-    const plRes = await h.readResource(rw.token, "kvitbit://price-list");
-    expect(plRes.error).toBeUndefined();
-    const plResJson = JSON.parse(plRes.contents?.[0]?.text as string) as ReadonlyArray<
-      Record<string, unknown>
-    >;
-    expect(plResJson[0]?.unitPrice).toBe("2000");
-    expect(findLeakedBigDecimalPaths(plResJson)).toEqual([]);
+    const plResJson = await readJsonResource("kvitbit://price-list");
+    const resourceItems = await h.run(decodePriceListItems(plResJson));
+    expect(resourceItems[0]?.unitPrice).toBe("2000");
 
     // 3. list_invoice_templates tool + kvitbit://templates resource.
     const tplCall = await h.callTool(rw.token, "list_invoice_templates", {});
     expect(tplCall.result?.isError).toBe(false);
-    assertMatchesDeclaredSchema("list_invoice_templates", tplCall.result?.structuredContent);
-    const tplRes = await h.readResource(rw.token, "kvitbit://templates");
-    expect(tplRes.error).toBeUndefined();
-    expect(findLeakedBigDecimalPaths(JSON.parse(tplRes.contents?.[0]?.text as string))).toEqual([]);
+    await assertMatchesDeclaredSchema("list_invoice_templates", tplCall);
+    await readJsonResource("kvitbit://templates");
 
     // 4. Foreign-currency draft + issue + get_document + list_documents + kvitbit://documents/{id}.
     const draftCall = await h.callTool(rw.token, "create_draft", {
@@ -319,22 +358,21 @@ describe("MCP wire-codec output encoding and per-grant rate limiting", () => {
       lines: [{ description: "Advisory", quantity: "2.5", unitPrice: "120.40", vat: "standard" }],
     });
     expect(draftCall.result?.isError).toBe(false);
-    assertMatchesDeclaredSchema("create_draft", draftCall.result?.structuredContent);
-    const draftDoc = draftCall.result?.structuredContent?.document as Record<string, unknown>;
-    const draftId = draftDoc.id as string;
-    const draftRev = draftDoc.revision as number;
-    expect((draftDoc.fx as { rate: unknown } | null)?.rate).toBe("25.35");
-    expect(typeof (draftDoc.totals as { gross: { amount: unknown } }).gross.amount).toBe("string");
-    expect(typeof (draftDoc.lines as ReadonlyArray<{ unitPrice: unknown }>)[0]?.unitPrice).toBe(
-      "string",
-    );
+    await assertMatchesDeclaredSchema("create_draft", draftCall);
+    const draftDoc = await h.run(decodeDraft(draftCall.result?.structuredContent?.document));
+    const { id: draftId, revision: draftRev } = draftDoc;
+    expect(draftDoc.fx?.rate).toBe("25.35");
+    expect(Predicate.isString(draftDoc.totals.gross.amount)).toBe(true);
+    expect(Predicate.isString(draftDoc.lines[0]?.unitPrice)).toBe(true);
 
     const issuePreview = await h.callTool(rw.token, "issue_document", {
       from: { draft: draftId, revision: draftRev },
     });
     expect(issuePreview.result?.isError).toBe(false);
-    assertMatchesDeclaredSchema("issue_document", issuePreview.result?.structuredContent);
-    const token = issuePreview.result?.structuredContent?.confirmationToken as string;
+    await assertMatchesDeclaredSchema("issue_document", issuePreview);
+    const { confirmationToken: token } = await h.run(
+      decodeConfirmation(issuePreview.result?.structuredContent),
+    );
 
     const issueConfirm = await h.callTool(rw.token, "issue_document", {
       from: { draft: draftId, revision: draftRev },
@@ -342,7 +380,7 @@ describe("MCP wire-codec output encoding and per-grant rate limiting", () => {
       confirmationToken: token,
     });
     expect(issueConfirm.result?.isError).toBe(false);
-    assertMatchesDeclaredSchema("issue_document", issueConfirm.result?.structuredContent);
+    await assertMatchesDeclaredSchema("issue_document", issueConfirm);
 
     // Replay returns identical encoded wire output.
     const issueReplay = await h.callTool(rw.token, "issue_document", {
@@ -354,17 +392,15 @@ describe("MCP wire-codec output encoding and per-grant rate limiting", () => {
 
     const getDocCall = await h.callTool(rw.token, "get_document", { documentId: draftId });
     expect(getDocCall.result?.isError).toBe(false);
-    assertMatchesDeclaredSchema("get_document", getDocCall.result?.structuredContent);
+    await assertMatchesDeclaredSchema("get_document", getDocCall);
 
-    const docRes = await h.readResource(rw.token, `kvitbit://documents/${draftId}`);
-    expect(docRes.error).toBeUndefined();
-    const docResJson = JSON.parse(docRes.contents?.[0]?.text as string) as Record<string, unknown>;
-    expect((docResJson.fx as { rate: unknown } | null)?.rate).toBe("25.35");
-    expect(findLeakedBigDecimalPaths(docResJson)).toEqual([]);
+    const docResJson = await readJsonResource(`kvitbit://documents/${draftId}`);
+    const resourceDocument = await h.run(decodeDocumentFx(docResJson));
+    expect(resourceDocument.fx?.rate).toBe("25.35");
 
     const listDocsCall = await h.callTool(rw.token, "list_documents", {});
     expect(listDocsCall.result?.isError).toBe(false);
-    assertMatchesDeclaredSchema("list_documents", listDocsCall.result?.structuredContent);
+    await assertMatchesDeclaredSchema("list_documents", listDocsCall);
 
     // 5. Payments + Expenses + Reports + Workspace + Contact resources.
     const payCall = await h.callTool(rw.token, "record_payment", {
@@ -373,13 +409,13 @@ describe("MCP wire-codec output encoding and per-grant rate limiting", () => {
       method: "bank_transfer",
     });
     expect(payCall.result?.isError).toBe(false);
-    assertMatchesDeclaredSchema("record_payment", payCall.result?.structuredContent);
+    await assertMatchesDeclaredSchema("record_payment", payCall);
 
     const listPayCall = await h.callTool(rw.token, "list_payments", {
       target: { document: draftId },
     });
     expect(listPayCall.result?.isError).toBe(false);
-    assertMatchesDeclaredSchema("list_payments", listPayCall.result?.structuredContent);
+    await assertMatchesDeclaredSchema("list_payments", listPayCall);
 
     const expCall = await h.callTool(rw.token, "record_expense", {
       expense: {
@@ -394,14 +430,13 @@ describe("MCP wire-codec output encoding and per-grant rate limiting", () => {
       },
     });
     expect(expCall.result?.isError).toBe(false);
-    assertMatchesDeclaredSchema("record_expense", expCall.result?.structuredContent);
-    const expenseId = (expCall.result?.structuredContent?.expense as { id: ExpenseId } | undefined)
-      ?.id;
+    await assertMatchesDeclaredSchema("record_expense", expCall);
+    const { id: expenseId } = await h.run(
+      decodeExpense(expCall.result?.structuredContent?.expense),
+    );
     expect(expenseId).toBeDefined();
 
-    const expRes = await h.readResource(rw.token, `kvitbit://expenses/${expenseId}`);
-    expect(expRes.error).toBeUndefined();
-    expect(findLeakedBigDecimalPaths(JSON.parse(expRes.contents?.[0]?.text as string))).toEqual([]);
+    await readJsonResource(`kvitbit://expenses/${expenseId}`);
 
     const reportCall = await h.callTool(rw.token, "get_report", {
       report: "vat",
@@ -409,17 +444,14 @@ describe("MCP wire-codec output encoding and per-grant rate limiting", () => {
       to: "2026-11-30",
     });
     expect(reportCall.result?.isError).toBe(false);
-    assertMatchesDeclaredSchema("get_report", reportCall.result?.structuredContent);
+    await assertMatchesDeclaredSchema("get_report", reportCall);
 
     const wsCall = await h.callTool(rw.token, "get_workspace", {});
     expect(wsCall.result?.isError).toBe(false);
-    assertMatchesDeclaredSchema("get_workspace", wsCall.result?.structuredContent);
+    await assertMatchesDeclaredSchema("get_workspace", wsCall);
 
-    for (const uri of ["kvitbit://workspace", `kvitbit://contacts/${contactId}`]) {
-      const res = await h.readResource(rw.token, uri);
-      expect(res.error).toBeUndefined();
-      expect(findLeakedBigDecimalPaths(JSON.parse(res.contents?.[0]?.text as string))).toEqual([]);
-    }
+    await readJsonResource("kvitbit://workspace");
+    await readJsonResource(`kvitbit://contacts/${contactId}`);
   });
 
   test("enforces 300/min per MCP grant with shared trailing sliding window before body decoding", async () => {
@@ -432,18 +464,24 @@ describe("MCP wire-codec output encoding and per-grant rate limiting", () => {
     const grantA = h.addReadWriteGrant(owner, ws.workspaceId);
     const grantB = h.addReadWriteGrant(owner, ws.workspaceId);
 
+    const admitRequests = (rpc: typeof h.rpc, firstId: number, count: number) =>
+      h.run(
+        Effect.forEach(
+          Arr.range(firstId, firstId + count - 1),
+          Effect.fnUntraced(function* (id) {
+            const { res } = yield* Effect.promise(() => rpc(grantA.token, "ping", undefined, id));
+            expect(res.status).toBe(200);
+          }),
+          { concurrency: 1, discard: true },
+        ),
+      );
+
     // 100 requests at t=0s on instance 1.
-    for (let i = 0; i < 100; i++) {
-      const { res } = await h.rpc(grantA.token, "ping", undefined, i + 1);
-      expect(res.status).toBe(200);
-    }
+    await admitRequests(h.rpc, 1, 100);
 
     // Advance 40s; send 200 more requests on instance 2 (shared RateLimiterSql counter reaches 300).
     await h.run(TestClock.adjust(Duration.seconds(40)));
-    for (let i = 0; i < 200; i++) {
-      const { res } = await peer.rpc(grantA.token, "ping", undefined, 1000 + i);
-      expect(res.status).toBe(200);
-    }
+    await admitRequests(peer.rpc, 1000, 200);
 
     // Advance 10s (t=50s): 301st request is denied with 429 and Retry-After: 10 BEFORE body decoding
     // (invalid JSON body still gets 429, not 400 Parse error).
@@ -459,10 +497,7 @@ describe("MCP wire-codec output encoding and per-grant rate limiting", () => {
 
     // Advance 10s (t=60s): only the 100 admissions from t=0s expire; the 200 from t=40s remain live.
     await h.run(TestClock.adjust(Duration.seconds(10)));
-    for (let i = 0; i < 100; i++) {
-      const { res } = await h.rpc(grantA.token, "ping", undefined, 2000 + i);
-      expect(res.status).toBe(200);
-    }
+    await admitRequests(h.rpc, 2000, 100);
 
     // 101st request at t=60s is denied with Retry-After: 40 (oldest remaining admission was at t=40s).
     const deniedAgain = await peer.postMcp(grantA.token, {

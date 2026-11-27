@@ -1,34 +1,38 @@
 /** `workspace` group handlers (http-mcp-contracts 3.5.3): Issuing Entity, settings, bank accounts, numbering series and close. */
+
 import { API_PREFIX, Api } from "@kvitbit/api-contract";
 import {
   type BankAccountId,
-  type BankAccountInput,
-  type BankAccountView,
+  BankAccountInput,
+  BankAccountView,
   Workspaces,
 } from "@kvitbit/domain/contract";
-import { Effect } from "effect";
-import { HttpApiBuilder } from "effect/http-api";
+import * as Arr from "effect/Array";
+import * as Effect from "effect/Effect";
+import * as HttpApiBuilder from "effect/http-api/HttpApiBuilder";
+import * as Predicate from "effect/Predicate";
 import { requestOptions, setLocation, withRevision } from "../conventions";
 import { requireFreshSession } from "./workspace/freshSession";
 
 const bankAccountIdOf = (view: BankAccountView): string | undefined =>
-  typeof view === "object" &&
-  view !== null &&
-  "id" in view &&
-  typeof (view as { readonly id?: unknown }).id === "string"
-    ? (view as { readonly id: string }).id
+  Predicate.isObjectOrArray(view) &&
+  Predicate.hasProperty(view, "id") &&
+  Predicate.isString(view.id)
+    ? view.id
     : undefined;
 
 const bankAccountWithId = (
   payload: BankAccountInput,
   id: BankAccountId,
-): BankAccountInput & { readonly id: BankAccountId } =>
-  (typeof payload === "object" && payload !== null && !Array.isArray(payload)
-    ? { ...(payload as unknown as Record<string, unknown>), id }
-    : { id }) as unknown as BankAccountInput & { readonly id: BankAccountId };
+): BankAccountInput & { readonly id: BankAccountId } => {
+  const fields = Predicate.isObject(payload) ? payload : {};
+  return { ...BankAccountInput.make(fields), id };
+};
 
-export const WorkspaceGroupLive = HttpApiBuilder.group(Api, "workspace", (handlers) =>
-  Effect.gen(function* () {
+export const WorkspaceGroupLive = HttpApiBuilder.group(
+  Api,
+  "workspace",
+  Effect.fnUntraced(function* (handlers) {
     const workspaces = yield* Workspaces;
     return handlers
       .handle("current", () => workspaces.current)
@@ -44,17 +48,16 @@ export const WorkspaceGroupLive = HttpApiBuilder.group(Api, "workspace", (handle
       )
       .handle("listBankAccounts", () =>
         Effect.map(workspaces.current, (view) =>
-          Array.isArray(view.bankAccounts)
-            ? (view.bankAccounts as ReadonlyArray<BankAccountView>)
+          Arr.isArray(view.bankAccounts)
+            ? Arr.map(view.bankAccounts, (account) => BankAccountView.make(account))
             : [],
         ),
       )
       .handle("createBankAccount", ({ params, headers, payload }) =>
         Effect.tap(workspaces.saveBankAccount(payload, requestOptions(headers)), (view) => {
           const id = bankAccountIdOf(view);
-          return id === undefined
-            ? Effect.void
-            : setLocation(`${API_PREFIX}/workspaces/${params.workspaceId}/bank-accounts/${id}`);
+          if (id === undefined) return Effect.void;
+          return setLocation(`${API_PREFIX}/workspaces/${params.workspaceId}/bank-accounts/${id}`);
         }),
       )
       .handle("updateBankAccount", ({ params, payload }) =>

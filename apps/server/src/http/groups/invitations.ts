@@ -1,27 +1,33 @@
 /** `invitations` group handlers (http-mcp-contracts 3.5.1): anonymous peek (rate-limited) + session accept. */
+
 import { Api, RateLimited } from "@kvitbit/api-contract";
 import { Caller, CurrentCaller, Workspaces } from "@kvitbit/domain/contract";
-import { Effect } from "effect";
-import { HttpServerRequest } from "effect/http/HttpServerRequest";
-import { HttpApiBuilder } from "effect/http-api";
+import * as Arr from "effect/Array";
+import * as Effect from "effect/Effect";
+import * as HttpServerRequest from "effect/http/HttpServerRequest";
+import * as HttpApiBuilder from "effect/http-api/HttpApiBuilder";
+import * as Option from "effect/Option";
 import { HttpConfig } from "../config";
 import { RATE_LIMITS, RateLimiter } from "../edge/RateLimiter";
 import { acceptLanguageLocale, clientIp } from "../edge/request";
 
-export const InvitationsGroupLive = HttpApiBuilder.group(Api, "invitations", (handlers) =>
-  Effect.gen(function* () {
+export const InvitationsGroupLive = HttpApiBuilder.group(
+  Api,
+  "invitations",
+  Effect.fnUntraced(function* (handlers) {
     const workspaces = yield* Workspaces;
     const limiter = yield* RateLimiter;
     const config = yield* HttpConfig;
 
     return handlers
-      .handle("peek", ({ params }) =>
-        Effect.gen(function* () {
-          const request = yield* HttpServerRequest;
+      .handle(
+        "peek",
+        Effect.fnUntraced(function* ({ params }) {
+          const request = yield* HttpServerRequest.HttpServerRequest;
           const ip = clientIp(request, config.trustedProxyHops);
           const decision = yield* limiter.consume(`invite-peek:${ip}`, RATE_LIMITS.invitationPeek);
           if (!decision.allowed) {
-            return yield* new RateLimited({ retryAfterSeconds: decision.retryAfterSeconds });
+            return yield* RateLimited.make({ retryAfterSeconds: decision.retryAfterSeconds });
           }
           const caller = Caller.invitationHolder({
             token: params.token,
@@ -32,11 +38,14 @@ export const InvitationsGroupLive = HttpApiBuilder.group(Api, "invitations", (ha
           );
         }),
       )
-      .handle("accept", ({ params }) =>
-        Effect.gen(function* () {
+      .handle(
+        "accept",
+        Effect.fnUntraced(function* ({ params }) {
           const member = yield* workspaces.acceptInvitation(params.token);
           const mine = yield* workspaces.listMine;
-          const summary = mine.find((ws) => ws.id === member.workspaceId);
+          const summary = Option.getOrUndefined(
+            Arr.findFirst(mine, (ws) => ws.id === member.workspaceId),
+          );
           if (summary === undefined) {
             return yield* Effect.die(
               `accepted workspace ${member.workspaceId} missing from listMine`,

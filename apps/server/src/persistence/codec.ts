@@ -2,38 +2,59 @@
  * Small serialization helpers shared by the SQL repositories: BigDecimal <-> text, JSONB parsing,
  * `VatBreakdown` JSON encoding/decoding, and diacritics-insensitive text folding matching core.
  */
-import type { IsoDate, VatBreakdown, VatBucket } from "@kvitbit/domain/contract";
-import {
-  VatBreakdown as VatBreakdownSchema,
-  VatBucket as VatBucketSchema,
-} from "@kvitbit/domain/contract";
-import { BigDecimal, Schema } from "effect";
+import { type IsoDate, VatBreakdown, VatBucket } from "@kvitbit/domain/contract";
+import * as Arr from "effect/Array";
+import * as BigDecimal from "effect/BigDecimal";
+import * as Fn from "effect/Function";
+import * as Result from "effect/Result";
+import * as Schema from "effect/Schema";
+import * as Str from "effect/String";
+import type { DbValue } from "./table";
 
-const vatBreakdownJson = Schema.toCodecJson(VatBreakdownSchema);
-const vatBucketJson = Schema.toCodecJson(VatBucketSchema);
+export const VatBreakdownJson = Schema.toCodecJson(VatBreakdown);
+export const VatBucketJson = Schema.toCodecJson(VatBucket);
 
-export const encodeVatBreakdown = Schema.encodeSync(vatBreakdownJson);
-export const decodeVatBreakdown = Schema.decodeUnknownSync(vatBreakdownJson);
-export const encodeVatBucket = Schema.encodeSync(vatBucketJson);
-export const decodeVatBucket = Schema.decodeUnknownSync(vatBucketJson);
+/** Some migrated rows store UUIDv4 keys. A read must preserve those keys. */
+export const StoredUuid = Schema.String.check(Schema.isUUID());
+
+/** The row codec runs inside the repository Effect. An invalid stored value is a defect. */
+export const decodeStored = <S extends Schema.ConstraintDecoder<unknown>>(schema: S) => {
+  const decode = Schema.decodeResult(schema);
+  return (value: DbValue | object): S["Type"] => Result.getOrThrow(decode(value));
+};
+
+const isString = Schema.is(Schema.String);
+const decodeJsonText = decodeStored(Schema.fromJsonString(Schema.Json));
+
+export const encodeStored = <S extends Schema.ConstraintEncoder<unknown>>(schema: S) => {
+  const encode = Schema.encodeResult(schema);
+  return (value: S["Type"]): S["Encoded"] => Result.getOrThrow(encode(value));
+};
+
+export const encodeVatBreakdown = encodeStored(VatBreakdownJson);
+export const encodeVatBucket = encodeStored(VatBucketJson);
 
 /** PostgreSQL calls ISO year zero `0001 BC`. The full export range starts in ISO year zero. */
 export const toPgDate = (value: IsoDate): string =>
-  value.startsWith("0000-") ? `0001-${value.slice(5)} BC` : value;
+  Str.startsWith("0000-")(value) ? `0001-${Str.slice(5)(value)} BC` : value;
 
 /** Parses a `jsonb` column whether the driver returned a parsed value or a JSON string. */
-export const parseJson = <A>(value: unknown): A =>
-  (typeof value === "string" ? JSON.parse(value) : value) as A;
+export const parseJson = <S extends Schema.ConstraintDecoder<unknown>>(schema: S) => {
+  const decode = decodeStored(schema);
+  return (value: DbValue): S["Type"] => decode(isString(value) ? decodeJsonText(value) : value);
+};
+
+export const encodeJson = encodeStored(Schema.fromJsonString(Schema.Unknown));
 
 /** Encodes a value for a `jsonb` parameter, returning `null` for `null`/`undefined`. */
-export const toJsonb = (value: unknown): string | null =>
-  value === null || value === undefined ? null : JSON.stringify(value);
+export const toJsonb = (value: object | null | undefined): string | null =>
+  value === null || value === undefined ? null : encodeJson(value);
 
 /** Postgres `numeric::text` -> `BigDecimal`. */
-export const parseDecimal = (value: unknown): BigDecimal.BigDecimal =>
+export const parseDecimal = (value: DbValue): BigDecimal.BigDecimal =>
   BigDecimal.fromStringUnsafe(String(value));
 
-export const parseNullableDecimal = (value: unknown): BigDecimal.BigDecimal | null =>
+export const parseNullableDecimal = (value: DbValue): BigDecimal.BigDecimal | null =>
   value === null || value === undefined ? null : parseDecimal(value);
 
 /** `BigDecimal` -> plain decimal string for Postgres `numeric` parameters. */
@@ -43,36 +64,40 @@ export const formatNullableDecimal = (value: BigDecimal.BigDecimal | null): stri
   value === null ? null : formatDecimal(value);
 
 /** Normalizes Postgres array columns (handles both driver arrays and `{a,b}` enum-array text). */
-export const asStringArray = (value: unknown): ReadonlyArray<string> => {
-  if (Array.isArray(value)) return value as ReadonlyArray<string>;
-  if (typeof value === "string" && value.startsWith("{") && value.endsWith("}")) {
-    const inner = value.slice(1, -1);
+const readStringArray = decodeStored(Schema.Array(Schema.String));
+export const asStringArray = (value: DbValue): ReadonlyArray<string> => {
+  if (Arr.isArray(value)) return readStringArray(value);
+  if (isString(value) && Str.startsWith("{")(value) && Str.endsWith("}")(value)) {
+    const inner = Str.slice(1, -1)(value);
     if (inner.length === 0) return [];
-    return inner.split(",").map((s) => s.replace(/^"|"$/g, ""));
+    return Arr.map(Str.split(inner, ","), (s) => Str.replace(/^"|"$/g, "")(s));
   }
   return [];
 };
 
-export const asNumberArray = (value: unknown): ReadonlyArray<number> => {
-  if (Array.isArray(value)) return (value as ReadonlyArray<unknown>).map(Number);
-  if (typeof value === "string" && value.startsWith("{") && value.endsWith("}")) {
-    const inner = value.slice(1, -1);
+export const asNumberArray = (value: DbValue): ReadonlyArray<number> => {
+  if (Arr.isArray(value)) return Arr.map(value, Number);
+  if (isString(value) && Str.startsWith("{")(value) && Str.endsWith("}")(value)) {
+    const inner = Str.slice(1, -1)(value);
     if (inner.length === 0) return [];
-    return inner.split(",").map(Number);
+    return Arr.map(Str.split(inner, ","), Number);
   }
   return [];
 };
 
 /** Formats a string array as a Postgres array literal (`{a,b}`) for custom enum array columns. */
 export const toPgArray = (values: ReadonlyArray<string>): string =>
-  `{${values.map((v) => `"${v.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`).join(",")}}`;
+  `{${Arr.join(
+    Arr.map(values, (v) => `"${Str.replace(/"/g, '\\"')(Str.replace(/\\/g, "\\\\")(v))}"`),
+    ",",
+  )}}`;
 
 /** Case- and diacritics-insensitive text folding (matches `packages/core/src/modules/contacts/input.ts`). */
 export const foldText = (text: string): string =>
-  text
-    .normalize("NFD")
-    .replace(/\p{Diacritic}/gu, "")
-    .toLowerCase()
-    .trim();
-
-export type { VatBreakdown, VatBucket };
+  Fn.pipe(
+    text,
+    Str.normalize("NFD"),
+    Str.replace(/\p{Diacritic}/gu, ""),
+    Str.toLowerCase,
+    Str.trim,
+  );

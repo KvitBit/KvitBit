@@ -3,6 +3,8 @@
  * HTTP stream's `AuthServerLive`. The MCP stream reads OAuth metadata through it.
  */
 import type { Auth } from "@kvitbit/adapters/auth";
-import { Context } from "effect";
+import * as Context from "effect/Context";
 
-export class AuthServer extends Context.Service<AuthServer, Auth>()("kvitbit/server/AuthServer") {}
+export class AuthServer extends Context.Service<AuthServer, Auth>()(
+  "@kvitbit/server/auth/AuthServer",
+) {}

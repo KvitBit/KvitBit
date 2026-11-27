@@ -1,10 +1,15 @@
 /**
  * Live `BlobStorage` port wiring: LocalDisk (`KVITBIT_BLOB_DRIVER=local`) or GCS (`gcs`).
  */
+
 import { GcsAccessTokens, GcsBlobStorage, LocalDiskBlobStorage } from "@kvitbit/adapters/blob";
 import { BlobStorage, BlobUnavailable } from "@kvitbit/domain/ports";
-import { type Config, Effect, Layer, Option } from "effect";
-import { FetchHttpClient } from "effect/http";
+import type * as Config from "effect/Config";
+import * as Effect from "effect/Effect";
+import * as FetchHttpClient from "effect/http/FetchHttpClient";
+import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
+import * as Str from "effect/String";
 import { type BlobWiringConfig, BlobWiringConfigSchema } from "./config";
 
 /** Builds a `BlobStorage` layer from explicit config (used by live wiring and tests). */
@@ -12,7 +17,7 @@ export const makeBlobStorageLayer = (
   config: BlobWiringConfig,
 ): Layer.Layer<BlobStorage, BlobUnavailable> => {
   if (config.driver === "gcs") {
-    if (Option.isNone(config.gcsBucket) || config.gcsBucket.value.trim() === "") {
+    if (Option.isNone(config.gcsBucket) || Str.trim(config.gcsBucket.value) === "") {
       return Layer.effect(
         BlobStorage,
         Effect.fail(
@@ -22,7 +27,7 @@ export const makeBlobStorageLayer = (
         ),
       );
     }
-    const bucket = config.gcsBucket.value.trim();
+    const bucket = Str.trim(config.gcsBucket.value);
     return GcsBlobStorage.layer({ bucket }).pipe(
       Layer.provide(GcsAccessTokens.metadataServer),
       Layer.provide(FetchHttpClient.layer),

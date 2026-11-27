@@ -1,16 +1,24 @@
 /** `documents` group handlers (http-mcp-contracts 3.4 & 3.5.4): one Documents method per endpoint. */
 import { API_PREFIX, Api } from "@kvitbit/api-contract";
 import { Documents } from "@kvitbit/domain/contract";
-import { Effect } from "effect";
-import { HttpApiBuilder } from "effect/http-api";
-import { compact, fileDownload, requestOptions, setLocation, withRevision } from "../conventions";
+import * as Effect from "effect/Effect";
+import * as HttpApiBuilder from "effect/http-api/HttpApiBuilder";
+import {
+  compact,
+  downloadResponse,
+  requestOptions,
+  setLocation,
+  withRevision,
+} from "../conventions";
 import { jsonizeAuditEntries, jsonizeDocumentPage, jsonizeDocumentView } from "./documents/jsonize";
 
 const documentLocation = (workspaceId: string, documentId: string) =>
   `${API_PREFIX}/workspaces/${workspaceId}/documents/${documentId}`;
 
-export const DocumentsGroupLive = HttpApiBuilder.group(Api, "documents", (handlers) =>
-  Effect.gen(function* () {
+export const DocumentsGroupLive = HttpApiBuilder.group(
+  Api,
+  "documents",
+  Effect.fnUntraced(function* (handlers) {
     const documents = yield* Documents;
     return handlers
       .handle("list", ({ query }) =>
@@ -31,7 +39,7 @@ export const DocumentsGroupLive = HttpApiBuilder.group(Api, "documents", (handle
             { input: payload.input },
             {
               ...requestOptions(headers),
-              ...(payload.send === undefined ? {} : { send: payload.send }),
+              ...compact({ send: payload.send }),
             },
           )
           .pipe(
@@ -58,7 +66,7 @@ export const DocumentsGroupLive = HttpApiBuilder.group(Api, "documents", (handle
             { draft: params.documentId, expectedRevision },
             {
               ...requestOptions(headers),
-              ...(payload.send === undefined ? {} : { send: payload.send }),
+              ...compact({ send: payload.send }),
             },
           ),
         ).pipe(Effect.map(jsonizeDocumentView)),
@@ -99,7 +107,7 @@ export const DocumentsGroupLive = HttpApiBuilder.group(Api, "documents", (handle
             params.documentId,
             compact({ template: query.template, language: query.language }),
           ),
-          (file) => fileDownload(file, { disposition: query.disposition }),
+          downloadResponse({ disposition: query.disposition }),
         ),
       )
       .handle("history", ({ params }) =>

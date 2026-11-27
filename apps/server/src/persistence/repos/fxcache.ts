@@ -5,34 +5,45 @@
  * directly to `fx_fixings.fixing_date = on` if a fixing was stored directly).
  * `put(on, fixing)` upserts `fx_fixings` and `fx_fixing_requests` idempotently.
  */
+
 import { FxFixingCache } from "@kvitbit/core";
-import type { CurrencyCode, IsoDate } from "@kvitbit/domain/contract";
+import { CurrencyCode, IsoDate } from "@kvitbit/domain/contract";
 import type { CnbFixing } from "@kvitbit/domain/ports";
-import { Effect, Layer, Option } from "effect";
-import { SqlClient } from "effect/sql";
-import { formatDecimal, parseDecimal, parseJson } from "../codec";
+import * as Arr from "effect/Array";
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
+import * as SqlClient from "effect/sql/SqlClient";
+import { decodeStored, encodeJson, formatDecimal, parseDecimal, parseJson } from "../codec";
 import { unavailable } from "../errors";
 import { col, type DbRow } from "../table";
 
-interface StoredRate {
-  readonly code: string;
-  readonly quantity: number;
-  readonly rate: string;
-}
+const readIsoDate = decodeStored(IsoDate);
+
+const readRates = parseJson(
+  Schema.Array(
+    Schema.Struct({
+      code: CurrencyCode,
+      quantity: Schema.Finite,
+      rate: Schema.String,
+    }),
+  ),
+);
 
 const decodeFixing = (row: DbRow): CnbFixing => ({
-  fixingDate: row.fixing_date as IsoDate,
+  fixingDate: readIsoDate(row.fixing_date),
   sequence: Number(row.sequence),
-  rates: parseJson<ReadonlyArray<StoredRate>>(row.rates).map((r) => ({
-    code: r.code as CurrencyCode,
+  rates: Arr.map(readRates(row.rates), (r) => ({
+    code: r.code,
     quantity: Number(r.quantity),
     rate: parseDecimal(r.rate),
   })),
 });
 
 const encodeRates = (rates: CnbFixing["rates"]): string =>
-  JSON.stringify(
-    rates.map((r) => ({
+  encodeJson(
+    Arr.map(rates, (r) => ({
       code: r.code,
       quantity: r.quantity,
       rate: formatDecimal(r.rate),
@@ -45,7 +56,7 @@ export const FxFixingCacheSql: Layer.Layer<FxFixingCache, never, SqlClient.SqlCl
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
       return FxFixingCache.of({
-        get: (on) =>
+        get: Effect.fn("FxFixingCache.get")((on) =>
           Effect.map(
             unavailable(
               sql<DbRow>`
@@ -63,7 +74,8 @@ export const FxFixingCacheSql: Layer.Layer<FxFixingCache, never, SqlClient.SqlCl
             ),
             (rows) => (rows[0] === undefined ? Option.none() : Option.some(decodeFixing(rows[0]))),
           ),
-        put: (on, fixing) =>
+        ),
+        put: Effect.fn("FxFixingCache.put")((on, fixing) =>
           unavailable(
             Effect.gen(function* () {
               const ratesJson = encodeRates(fixing.rates);
@@ -79,6 +91,7 @@ export const FxFixingCacheSql: Layer.Layer<FxFixingCache, never, SqlClient.SqlCl
               `;
             }),
           ).pipe(Effect.asVoid),
+        ),
       });
     }),
   );

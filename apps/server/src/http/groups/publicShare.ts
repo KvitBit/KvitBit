@@ -1,38 +1,42 @@
 /** `publicShare` group handlers (http-mcp-contracts 3.4 & 3.5.1): visitor side of PublicShareLinks. */
-import { createHash } from "node:crypto";
+
 import { Api } from "@kvitbit/api-contract";
 import { ShareVisitorDevice } from "@kvitbit/core";
 import { PublicShareLinks, Unavailable } from "@kvitbit/domain/contract";
-import { Effect, Stream } from "effect";
-import { HttpServerRequest } from "effect/http/HttpServerRequest";
-import { HttpApiBuilder } from "effect/http-api";
+import * as Effect from "effect/Effect";
+import * as HttpServerRequest from "effect/http/HttpServerRequest";
+import * as HttpApiBuilder from "effect/http-api/HttpApiBuilder";
+import * as Stream from "effect/Stream";
+import * as Str from "effect/String";
 import { compact, downloadResponse, fileDownload } from "../conventions";
 import { jsonizeSharedDocumentView } from "./documents/jsonize";
 
 type ShareDevice = "desktop" | "mobile" | "tablet" | "unknown";
+const TABLET_UA = /ipad|tablet|playbook|silk|kindle/i;
+const ANDROID_UA = /android/i;
+const MOBILE_MARKER = /mobile/i;
+const MOBILE_UA = /mobi|iphone|ipod|android.*mobile|windows phone|blackberry|opera mini|iemobile/i;
+const DESKTOP_UA = /windows nt|macintosh|mac os x|linux|x11|cros|ubuntu|fedora/i;
 
 /** Coarse device class from User-Agent for `ShareVisitorDevice` (no raw UA stored in core). */
 export const deviceFromUserAgent = (userAgent: string | undefined): ShareDevice => {
   if (userAgent === undefined) return "unknown";
-  const ua = userAgent.trim();
+  const ua = Str.trim(userAgent);
   if (ua.length === 0) return "unknown";
-  if (
-    /ipad|tablet|playbook|silk|kindle/i.test(ua) ||
-    (/android/i.test(ua) && !/mobile/i.test(ua))
-  ) {
+  if (TABLET_UA.test(ua) || (ANDROID_UA.test(ua) && !MOBILE_MARKER.test(ua))) {
     return "tablet";
   }
-  if (/mobi|iphone|ipod|android.*mobile|windows phone|blackberry|opera mini|iemobile/i.test(ua)) {
+  if (MOBILE_UA.test(ua)) {
     return "mobile";
   }
-  if (/windows nt|macintosh|mac os x|linux|x11|cros|ubuntu|fedora/i.test(ua)) {
+  if (DESKTOP_UA.test(ua)) {
     return "desktop";
   }
   return "unknown";
 };
 
 const withVisitorDevice = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
-  Effect.flatMap(HttpServerRequest, (request) =>
+  Effect.flatMap(HttpServerRequest.HttpServerRequest, (request) =>
     Effect.provideService(
       effect,
       ShareVisitorDevice,
@@ -52,8 +56,10 @@ const concatBytes = (chunks: ReadonlyArray<Uint8Array>): Uint8Array => {
   return out;
 };
 
-export const PublicShareGroupLive = HttpApiBuilder.group(Api, "publicShare", (handlers) =>
-  Effect.gen(function* () {
+export const PublicShareGroupLive = HttpApiBuilder.group(
+  Api,
+  "publicShare",
+  Effect.fnUntraced(function* (handlers) {
     const shareLinks = yield* PublicShareLinks;
     return handlers
       .handle("open", () =>
@@ -62,26 +68,21 @@ export const PublicShareGroupLive = HttpApiBuilder.group(Api, "publicShare", (ha
       .handle("pdf", ({ query }) =>
         withVisitorDevice(Effect.map(shareLinks.pdf(compact(query)), (file) => fileDownload(file))),
       )
-      .handle("logo", () =>
-        Effect.gen(function* () {
+      .handle(
+        "logo",
+        Effect.fnUntraced(function* () {
           const file = yield* shareLinks.logo;
           const chunks = yield* Stream.runCollect(file.bytes).pipe(
-            Effect.mapError(() => new Unavailable({ dependency: "blob_storage" })),
+            Effect.mapError(() => Unavailable.make({ dependency: "blob_storage" })),
           );
           const body = concatBytes(chunks);
-          const etag = `"${createHash("sha256").update(body).digest("hex")}"`;
-          return downloadResponse(
-            {
-              filename: file.filename,
-              contentType: file.contentType,
-              sizeBytes: body.byteLength,
-              bytes: Stream.make(body),
-            },
-            {
-              etag,
-              cacheControl: "private, max-age=300",
-            },
-          );
+          const hash = Bun.CryptoHasher.hash("sha256", body, "hex");
+          return downloadResponse({ etag: `"${hash}"`, cacheControl: "private, max-age=300" })({
+            filename: file.filename,
+            contentType: file.contentType,
+            sizeBytes: body.byteLength,
+            bytes: Stream.make(body),
+          });
         }),
       );
   }),

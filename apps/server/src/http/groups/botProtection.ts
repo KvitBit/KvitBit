@@ -2,34 +2,40 @@
 import { BotProtection } from "@kvitbit/adapters/altcha";
 import { AltchaChallenge, Api, RateLimited } from "@kvitbit/api-contract";
 import { Unavailable } from "@kvitbit/domain/contract";
-import { Effect } from "effect";
-import { HttpEffect, HttpServerResponse } from "effect/http";
-import { HttpServerRequest } from "effect/http/HttpServerRequest";
-import { HttpApiBuilder } from "effect/http-api";
+import * as Effect from "effect/Effect";
+import * as HttpEffect from "effect/http/HttpEffect";
+import * as HttpServerRequest from "effect/http/HttpServerRequest";
+import * as HttpServerResponse from "effect/http/HttpServerResponse";
+import * as HttpApiBuilder from "effect/http-api/HttpApiBuilder";
+import * as Schema from "effect/Schema";
 import { HttpConfig } from "../config";
+import { compact } from "../conventions";
 import { RATE_LIMITS, RateLimiter } from "../edge/RateLimiter";
 import { clientIp } from "../edge/request";
 
-export const BotProtectionGroupLive = HttpApiBuilder.group(Api, "botProtection", (handlers) =>
-  Effect.gen(function* () {
+export const BotProtectionGroupLive = HttpApiBuilder.group(
+  Api,
+  "botProtection",
+  Effect.fnUntraced(function* (handlers) {
     const botProtection = yield* BotProtection;
     const limiter = yield* RateLimiter;
     const config = yield* HttpConfig;
 
-    return handlers.handle("issueChallenge", ({ params }) =>
-      Effect.gen(function* () {
-        const request = yield* HttpServerRequest;
+    return handlers.handle(
+      "issueChallenge",
+      Effect.fnUntraced(function* ({ params }) {
+        const request = yield* HttpServerRequest.HttpServerRequest;
         const ip = clientIp(request, config.trustedProxyHops);
         const decision = yield* limiter.consume(`bot-challenge:${ip}`, RATE_LIMITS.botChallenge);
         if (!decision.allowed) {
-          return yield* new RateLimited({ retryAfterSeconds: decision.retryAfterSeconds });
+          return yield* RateLimited.make({ retryAfterSeconds: decision.retryAfterSeconds });
         }
 
         const challenge = yield* botProtection
           .issue(params.scope)
           .pipe(
-            Effect.mapError(
-              () => new Unavailable({ dependency: "database", retryAfterSeconds: 5 }),
+            Effect.mapError(() =>
+              Unavailable.make({ dependency: "database", retryAfterSeconds: 5 }),
             ),
           );
 
@@ -45,6 +51,12 @@ export const BotProtectionGroupLive = HttpApiBuilder.group(Api, "botProtection",
           });
         }
 
+        const data =
+          challenge.parameters.data === undefined
+            ? undefined
+            : yield* Schema.decodeEffect(Schema.JsonObject)(challenge.parameters.data).pipe(
+                Effect.orDie,
+              );
         return AltchaChallenge.make({
           parameters: {
             algorithm: challenge.parameters.algorithm,
@@ -53,20 +65,14 @@ export const BotProtectionGroupLive = HttpApiBuilder.group(Api, "botProtection",
             cost: challenge.parameters.cost,
             keyLength: challenge.parameters.keyLength,
             keyPrefix: challenge.parameters.keyPrefix,
-            ...(challenge.parameters.memoryCost === undefined
-              ? {}
-              : { memoryCost: challenge.parameters.memoryCost }),
-            ...(challenge.parameters.parallelism === undefined
-              ? {}
-              : { parallelism: challenge.parameters.parallelism }),
-            ...(challenge.parameters.expiresAt === undefined
-              ? {}
-              : { expiresAt: challenge.parameters.expiresAt }),
-            ...(challenge.parameters.data === undefined
-              ? {}
-              : { data: challenge.parameters.data as Record<string, string | number | boolean> }),
+            ...compact({
+              memoryCost: challenge.parameters.memoryCost,
+              parallelism: challenge.parameters.parallelism,
+              expiresAt: challenge.parameters.expiresAt,
+              data,
+            }),
           },
-          ...(challenge.signature === undefined ? {} : { signature: challenge.signature }),
+          ...compact({ signature: challenge.signature }),
         });
       }),
     );

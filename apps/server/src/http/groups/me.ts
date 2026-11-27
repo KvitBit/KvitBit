@@ -15,9 +15,12 @@ import {
   type ThemeStyle,
 } from "@kvitbit/api-contract";
 import { Conflict, type Invalid, type Locale } from "@kvitbit/domain/contract";
-import { Clock, Effect, Option, Schema } from "effect";
-import { HttpApiBuilder } from "effect/http-api";
-import { SqlClient } from "effect/sql";
+import * as DateTime from "effect/DateTime";
+import * as Effect from "effect/Effect";
+import * as HttpApiBuilder from "effect/http-api/HttpApiBuilder";
+import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
+import * as SqlClient from "effect/sql/SqlClient";
 import { withRevision } from "../conventions";
 import { resolveTheme } from "./workspace/themeResolver";
 
@@ -45,6 +48,8 @@ const DEFAULT_PREFERENCES: Omit<AccountPreferences, "resolvedTheme"> = {
   revision: 1,
 };
 
+const encodeStoredSource = Schema.encodeEffect(Schema.fromJsonString(ThemeSource));
+const isConflict = Schema.is(Conflict);
 const decodeStoredSource = Schema.decodeUnknownOption(Schema.NullOr(ThemeSource));
 
 const rowToStoredPreferences = (
@@ -75,8 +80,10 @@ const withResolvedTheme = (
         resolvedTheme,
       }));
 
-export const MeGroupLive = HttpApiBuilder.group(Api, "me", (handlers) =>
-  Effect.gen(function* () {
+export const MeGroupLive = HttpApiBuilder.group(
+  Api,
+  "me",
+  Effect.fnUntraced(function* (handlers) {
     const sql = yield* SqlClient.SqlClient;
 
     const readRow = (userId: string) =>
@@ -94,18 +101,20 @@ export const MeGroupLive = HttpApiBuilder.group(Api, "me", (handlers) =>
       `.pipe(Effect.map((rows) => rows[0]));
 
     return handlers
-      .handle("getPreferences", () =>
-        Effect.gen(function* () {
+      .handle(
+        "getPreferences",
+        Effect.fnUntraced(function* () {
           const principal = yield* CurrentPrincipal;
           const row = yield* readRow(principal.userId).pipe(Effect.orDie);
           return yield* withResolvedTheme(rowToStoredPreferences(row));
         }),
       )
       .handle("updatePreferences", ({ headers, payload }) =>
-        withRevision(headers["if-match"], (expectedRevision) =>
-          Effect.gen(function* () {
+        withRevision(
+          headers["if-match"],
+          Effect.fnUntraced(function* (expectedRevision) {
             const principal = yield* CurrentPrincipal;
-            const now = new Date(yield* Clock.currentTimeMillis);
+            const now = yield* DateTime.nowAsDate;
 
             // Validate and resolve the incoming theme source before writing to Postgres.
             const incomingResolved =
@@ -135,7 +144,7 @@ export const MeGroupLive = HttpApiBuilder.group(Api, "me", (handlers) =>
 
                   if (existing === undefined) {
                     if (expectedRevision !== 1) {
-                      return yield* new Conflict({
+                      return yield* Conflict.make({
                         reason: "revision_changed",
                         currentRevision: 1,
                       });
@@ -143,7 +152,9 @@ export const MeGroupLive = HttpApiBuilder.group(Api, "me", (handlers) =>
                     const nextLocale = payload.locale ?? null;
                     const nextTheme = payload.theme ?? DEFAULT_THEME_PREFERENCE;
                     const themeSourceJson =
-                      nextTheme.source === null ? null : JSON.stringify(nextTheme.source);
+                      nextTheme.source === null
+                        ? null
+                        : yield* encodeStoredSource(nextTheme.source).pipe(Effect.orDie);
                     const inserted = yield* sql<UserPreferencesRow>`
                       insert into user_preferences (
                         user_id,
@@ -179,7 +190,7 @@ export const MeGroupLive = HttpApiBuilder.group(Api, "me", (handlers) =>
                     const row = inserted[0];
                     if (row === undefined) {
                       const current = yield* readRow(principal.userId);
-                      return yield* new Conflict({
+                      return yield* Conflict.make({
                         reason: "revision_changed",
                         currentRevision: current?.revision ?? 1,
                       });
@@ -188,7 +199,7 @@ export const MeGroupLive = HttpApiBuilder.group(Api, "me", (handlers) =>
                   }
 
                   if (existing.revision !== expectedRevision) {
-                    return yield* new Conflict({
+                    return yield* Conflict.make({
                       reason: "revision_changed",
                       currentRevision: existing.revision,
                     });
@@ -198,7 +209,9 @@ export const MeGroupLive = HttpApiBuilder.group(Api, "me", (handlers) =>
                   const nextLocale = payload.locale === undefined ? current.locale : payload.locale;
                   const nextTheme = payload.theme ?? current.theme;
                   const themeSourceJson =
-                    nextTheme.source === null ? null : JSON.stringify(nextTheme.source);
+                    nextTheme.source === null
+                      ? null
+                      : yield* encodeStoredSource(nextTheme.source).pipe(Effect.orDie);
 
                   const updated = yield* sql<UserPreferencesRow>`
                     update user_preferences
@@ -225,7 +238,7 @@ export const MeGroupLive = HttpApiBuilder.group(Api, "me", (handlers) =>
                   const row = updated[0];
                   if (row === undefined) {
                     const latest = yield* readRow(principal.userId);
-                    return yield* new Conflict({
+                    return yield* Conflict.make({
                       reason: "revision_changed",
                       currentRevision: latest?.revision ?? existing.revision,
                     });
@@ -235,7 +248,7 @@ export const MeGroupLive = HttpApiBuilder.group(Api, "me", (handlers) =>
               )
               .pipe(
                 Effect.catchIf(
-                  (e) => !(e instanceof Conflict),
+                  (e) => !isConflict(e),
                   (e) => Effect.die(e),
                 ),
               );

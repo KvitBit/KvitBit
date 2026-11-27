@@ -3,6 +3,7 @@
  * `@kvitbit/adapters/pdf` (templates D01-D11), `@kvitbit/adapters/qr` (SPAYD/EPC QR), and
  * Chromium at `KVITBIT_CHROMIUM_PATH` (default `/usr/bin/chromium`).
  */
+
 import {
   type DocumentRenderModel,
   makeChromiumPdfEngine,
@@ -20,7 +21,7 @@ import {
   BrandingPreview,
   CoreStore,
   DocumentRenderer,
-  type DocumentsModule,
+  DocumentsModule,
   DocumentsRepo,
   ReportPdfRenderer,
   type ReportsModule,
@@ -29,17 +30,28 @@ import {
   WorkspacesRepo,
 } from "@kvitbit/core";
 import {
-  type CurrencyCode,
+  CurrencyCode,
   CurrentCaller,
   type DocumentView,
   type ImageRef,
-  type IsoDate,
+  IsoDate,
   type Money,
   type WorkspaceId,
 } from "@kvitbit/domain/contract";
-import { type BlobKey, BlobStorage } from "@kvitbit/domain/ports";
-import { BigDecimal, type Config, Effect, Layer, Option, Stream } from "effect";
-import { SqlClient } from "effect/sql";
+import { BlobKey, BlobStorage } from "@kvitbit/domain/ports";
+import * as Arr from "effect/Array";
+import * as BigDecimal from "effect/BigDecimal";
+import type * as Config from "effect/Config";
+import * as DateTime from "effect/DateTime";
+import * as Effect from "effect/Effect";
+import * as Fn from "effect/Function";
+import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
+import * as Predicate from "effect/Predicate";
+import * as Schema from "effect/Schema";
+import * as Stream from "effect/Stream";
+import * as Str from "effect/String";
+import * as SqlClient from "effect/sql/SqlClient";
 import {
   computeDocumentPaymentQr,
   documentPdfCacheKey,
@@ -54,12 +66,9 @@ import { PdfWiringConfigSchema } from "./config";
 
 const DEFAULT_ACCENT = "#18181B";
 const MAX_PDF_CACHE_BYTES = 25 * 1024 * 1024;
-const ALLOWED_IMAGE_TYPES = new Set<RenderImage["mediaType"]>([
-  "image/png",
-  "image/jpeg",
-  "image/webp",
-  "image/svg+xml",
-]);
+const isAllowedImageType = Schema.is(
+  Schema.Literals(["image/png", "image/jpeg", "image/webp", "image/svg+xml"]),
+);
 
 const concatBytes = (chunks: ReadonlyArray<Uint8Array>): Uint8Array => {
   let total = 0;
@@ -73,41 +82,41 @@ const concatBytes = (chunks: ReadonlyArray<Uint8Array>): Uint8Array => {
   return out;
 };
 
-const isAllowedImageType = (mediaType: string): mediaType is RenderImage["mediaType"] =>
-  ALLOWED_IMAGE_TYPES.has(mediaType as RenderImage["mediaType"]);
-
 interface LoadedBrandingImage {
   readonly image: RenderImage | null;
   /** False when a referenced image failed to load (e.g. transient storage error); blocks caching. */
   readonly complete: boolean;
 }
 
-const loadBrandingImage = (
-  blobs: BlobStorage["Service"],
-  workspaceId: WorkspaceId,
-  image: "logo" | "stamp",
-  ref: ImageRef | null,
-): Effect.Effect<LoadedBrandingImage> => {
-  if (ref === null || !isAllowedImageType(ref.contentType)) {
-    return Effect.succeed({ image: null, complete: true });
-  }
-  const key = `branding/${workspaceId}/${image}/${ref.sha256}` as BlobKey;
-  return blobs.get(key).pipe(
-    Effect.flatMap((stream) => Stream.runCollect(stream)),
-    Effect.map(
-      (chunks): LoadedBrandingImage => ({
-        image: {
-          mediaType: ref.contentType as RenderImage["mediaType"],
-          bytes: concatBytes(chunks),
-        },
-        complete: true,
-      }),
-    ),
-    Effect.catch(() => Effect.succeed({ image: null, complete: false })),
-  );
-};
+const loadBrandingImage = Effect.fn("loadBrandingImage")(
+  (
+    blobs: BlobStorage["Service"],
+    workspaceId: WorkspaceId,
+    image: "logo" | "stamp",
+    ref: ImageRef | null,
+  ): Effect.Effect<LoadedBrandingImage> => {
+    const mediaType = ref?.contentType;
+    if (ref === null || !isAllowedImageType(mediaType)) {
+      return Effect.succeed({ image: null, complete: true });
+    }
+    const key = BlobKey.make(`branding/${workspaceId}/${image}/${ref.sha256}`);
+    return blobs.get(key).pipe(
+      Effect.flatMap((stream) => Stream.runCollect(stream)),
+      Effect.map(
+        (chunks): LoadedBrandingImage => ({
+          image: {
+            mediaType,
+            bytes: concatBytes(chunks),
+          },
+          complete: true,
+        }),
+      ),
+      Effect.orElseSucceed(() => ({ image: null, complete: false })),
+    );
+  },
+);
 
-export interface DocumentRenderContext {
+interface DocumentRenderContext {
   readonly branding?: RenderBranding | undefined;
   readonly variableSymbol?: string | null | undefined;
   readonly orderNumber?: string | null | undefined;
@@ -123,7 +132,7 @@ export interface DocumentRenderContext {
     | undefined;
 }
 
-export interface ReportRenderContext {
+interface ReportRenderContext {
   readonly workspace?: ReportRenderModel["workspace"] | undefined;
   readonly branding?: RenderBranding | undefined;
 }
@@ -134,14 +143,16 @@ const formatAddressLines = (address: {
   readonly postalCode?: string | null;
   readonly country?: string | null;
 }): ReadonlyArray<string> => {
-  const lines: Array<string> = [];
-  if (address.street && address.street.trim() !== "") lines.push(address.street.trim());
-  const cityLine = [address.postalCode?.trim(), address.city?.trim()]
-    .filter((part): part is string => Boolean(part))
-    .join(" ");
-  if (cityLine !== "") lines.push(cityLine);
-  if (address.country && address.country.trim() !== "") lines.push(address.country.trim());
-  return lines;
+  const cityLine = Fn.pipe(
+    [address.postalCode ?? "", address.city ?? ""],
+    Arr.map(Str.trim),
+    Arr.filter(Str.isNonEmpty),
+    Arr.join(" "),
+  );
+  return Arr.filter(
+    [Str.trim(address.street ?? ""), cityLine, Str.trim(address.country ?? "")],
+    Str.isNonEmpty,
+  );
 };
 
 const buildReference = (
@@ -149,7 +160,9 @@ const buildReference = (
   context?: DocumentRenderContext,
 ): RenderReference | null => {
   if (view.kind === "payment_tax_document") {
-    const proforma = view.related.find((r) => r.relation === "advance_of");
+    const proforma = Option.getOrUndefined(
+      Arr.findFirst(view.related, (r) => r.relation === "advance_of"),
+    );
     return {
       kind: "payment",
       receivedOn: view.dates.taxableSupplyOn ?? view.dates.issuedOn,
@@ -160,10 +173,17 @@ const buildReference = (
     return { kind: "correction", ...context.correction };
   }
   if (view.kind === "invoice") {
-    const proformas = view.related
-      .filter((r) => r.relation === "advance_of" || r.relation === "final_invoice_for")
-      .map((r) => r.number);
-    const ptds = view.related.filter((r) => r.relation === "deducts").map((r) => r.number);
+    const proformas = Arr.map(
+      Arr.filter(
+        view.related,
+        (r) => r.relation === "advance_of" || r.relation === "final_invoice_for",
+      ),
+      (r) => r.number,
+    );
+    const ptds = Arr.map(
+      Arr.filter(view.related, (r) => r.relation === "deducts"),
+      (r) => r.number,
+    );
     if (proformas.length > 0 || ptds.length > 0) {
       return {
         kind: "settlement",
@@ -176,118 +196,125 @@ const buildReference = (
 };
 
 /** Maps a `DocumentView` to `@kvitbit/adapters/pdf`'s `DocumentRenderModel`. */
-export const documentViewToRenderModel = (
-  view: DocumentView,
-  context?: DocumentRenderContext,
-): DocumentRenderModel => {
-  const issuer = view.issuer as unknown as DocumentsModule.IssuerSnapshotRecord;
-  const contact = view.contact as unknown as DocumentsModule.ContactSnapshotRecord;
-  const rawLines = view.lines as unknown as ReadonlyArray<DocumentsModule.LineViewData>;
+export const documentViewToRenderModel: {
+  (context?: DocumentRenderContext): (view: DocumentView) => DocumentRenderModel;
+  (view: DocumentView, context?: DocumentRenderContext): DocumentRenderModel;
+} = Fn.dual(
+  (args) => Predicate.hasProperty(args[0], "issuer"),
+  (view: DocumentView, context?: DocumentRenderContext): DocumentRenderModel => {
+    const { issuer, contact, lines: rawLines } = view;
+    const { fields } = DocumentsModule.DocumentViewData;
+    Schema.asserts(fields.issuer, issuer);
+    Schema.asserts(fields.contact, contact);
+    Schema.asserts(fields.lines, rawLines);
 
-  const lines: ReadonlyArray<RenderLine> = rawLines.map((line) => ({
-    description: line.description,
-    quantity: line.quantity,
-    unit: line.unit,
-    unitPrice: line.unitPrice,
-    treatment: line.treatment,
-    ratePercent: line.ratePercent,
-    total: line.amount,
-    role: line.deducts !== null ? "deduction" : "item",
-  }));
+    const lines: ReadonlyArray<RenderLine> = Arr.map(rawLines, (line) => ({
+      description: line.description,
+      quantity: line.quantity,
+      unit: line.unit,
+      unitPrice: line.unitPrice,
+      treatment: line.treatment,
+      ratePercent: line.ratePercent,
+      total: line.amount,
+      role: line.deducts !== null ? "deduction" : "item",
+    }));
 
-  const branding: RenderBranding = context?.branding ?? {
-    accentColor: DEFAULT_ACCENT,
-    footerText: null,
-    logo: null,
-    stamp: null,
-  };
+    const branding: RenderBranding = context?.branding ?? {
+      accentColor: DEFAULT_ACCENT,
+      footerText: null,
+      logo: null,
+      stamp: null,
+    };
 
-  const variableSymbol = resolveVariableSymbol(context?.variableSymbol, view.number);
-  const qrAmount =
-    context?.amountDue !== undefined
-      ? context.amountDue
-      : view.settlement === "paid" ||
-          view.settlement === "overpaid" ||
-          view.settlement === "credited"
-        ? BigDecimal.fromStringUnsafe("0")
-        : view.totals.gross.amount;
-  const paymentQr =
-    context?.paymentQr !== undefined
-      ? context.paymentQr
-      : (view.paymentQr ??
-        computeDocumentPaymentQr({
-          kind: view.kind,
-          status: view.status,
-          number: view.number,
-          currency: view.totals.gross.currency,
-          amount: qrAmount,
-          issuer,
-          variableSymbol,
-          dueOn: view.dates.dueOn,
-        }));
+    const variableSymbol = resolveVariableSymbol(context?.variableSymbol, view.number);
+    const qrAmount =
+      context?.amountDue !== undefined
+        ? context.amountDue
+        : view.settlement === "paid" ||
+            view.settlement === "overpaid" ||
+            view.settlement === "credited"
+          ? BigDecimal.fromStringUnsafe("0")
+          : view.totals.gross.amount;
+    const paymentQr =
+      context?.paymentQr !== undefined
+        ? context.paymentQr
+        : (view.paymentQr ??
+          computeDocumentPaymentQr({
+            kind: view.kind,
+            status: view.status,
+            number: view.number,
+            currency: view.totals.gross.currency,
+            amount: qrAmount,
+            issuer,
+            variableSymbol,
+            dueOn: view.dates.dueOn,
+          }));
 
-  return {
-    kind: view.kind,
-    status: view.status,
-    number: view.number,
-    regime: issuer.regime,
-    taxDocument: view.taxDocument,
-    currency: view.totals.gross.currency,
-    issuer: {
-      name: issuer.name,
-      addressLines: formatAddressLines(issuer.address),
-      companyId: issuer.ico,
-      vatId: issuer.dic,
-      registerEntry: issuer.registerEntry,
-      email: issuer.email,
-      phone: issuer.phone,
-    },
-    customer: {
-      name: contact.name,
-      addressLines: formatAddressLines(contact.address),
-      companyId: contact.ico,
-      vatId: contact.dic,
-    },
-    dates: {
-      issuedOn: view.dates.issuedOn,
-      taxableSupplyOn: view.dates.taxableSupplyOn,
-      dueOn: view.dates.dueOn,
-    },
-    paymentMethod: view.paymentMethod,
-    bankAccount: issuer.bankAccount
-      ? {
-          accountNumber: issuer.bankAccount.accountNumber,
-          iban: issuer.bankAccount.iban,
-          bic: issuer.bankAccount.bic,
-        }
-      : null,
-    variableSymbol,
-    orderNumber: context?.orderNumber ?? null,
-    note: context?.note ?? null,
-    reference: buildReference(view, context),
-    lines,
-    totals: view.totals,
-    fx: view.fx,
-    ...(view.statutoryNotes.length > 0
-      ? {
-          statutoryNotes: view.statutoryNotes.map((n) => ({
-            code: String(n.code),
-            text: n.text,
+    const model: DocumentRenderModel = {
+      kind: view.kind,
+      status: view.status,
+      number: view.number,
+      regime: issuer.regime,
+      taxDocument: view.taxDocument,
+      currency: view.totals.gross.currency,
+      issuer: {
+        name: issuer.name,
+        addressLines: formatAddressLines(issuer.address),
+        companyId: issuer.ico,
+        vatId: issuer.dic,
+        registerEntry: issuer.registerEntry,
+        email: issuer.email,
+        phone: issuer.phone,
+      },
+      customer: {
+        name: contact.name,
+        addressLines: formatAddressLines(contact.address),
+        companyId: contact.ico,
+        vatId: contact.dic,
+      },
+      dates: {
+        issuedOn: view.dates.issuedOn,
+        taxableSupplyOn: view.dates.taxableSupplyOn,
+        dueOn: view.dates.dueOn,
+      },
+      paymentMethod: view.paymentMethod,
+      bankAccount:
+        issuer.bankAccount !== null
+          ? {
+              accountNumber: issuer.bankAccount.accountNumber,
+              iban: issuer.bankAccount.iban,
+              bic: issuer.bankAccount.bic,
+            }
+          : null,
+      variableSymbol,
+      orderNumber: context?.orderNumber ?? null,
+      note: context?.note ?? null,
+      reference: buildReference(view, context),
+      lines,
+      totals: view.totals,
+      fx: view.fx,
+      paymentQr,
+      branding,
+    };
+    return view.statutoryNotes.length === 0
+      ? model
+      : {
+          ...model,
+          statutoryNotes: Arr.map(view.statutoryNotes, (note) => ({
+            code: String(note.code),
+            text: note.text,
           })),
-        }
-      : {}),
-    paymentQr,
-    branding,
-  };
-};
+        };
+  },
+);
 
 const czk = (n: string): Money => ({
   amount: BigDecimal.fromStringUnsafe(n),
-  currency: "CZK" as CurrencyCode,
+  currency: CurrencyCode.make("CZK"),
 });
 
 /** Builds a deterministic sample `DocumentRenderModel` for `Workspaces.previewBranding`. */
-export const brandingPreviewToRenderModel = (
+const brandingPreviewToRenderModel = (
   input: WorkspacesModule.BrandingPreviewInput,
   images?: {
     readonly logo?: RenderImage | null | undefined;
@@ -307,7 +334,7 @@ export const brandingPreviewToRenderModel = (
     number: "2026-0001",
     regime: "vat_payer",
     taxDocument: input.kind !== "proforma",
-    currency: "CZK" as CurrencyCode,
+    currency: CurrencyCode.make("CZK"),
     issuer: {
       name: input.issuingEntity.name,
       addressLines: formatAddressLines(input.issuingEntity.address),
@@ -326,9 +353,9 @@ export const brandingPreviewToRenderModel = (
       vatId: "CZ12345678",
     },
     dates: {
-      issuedOn: "2026-01-15" as IsoDate,
-      taxableSupplyOn: input.kind === "proforma" ? null : ("2026-01-15" as IsoDate),
-      dueOn: "2026-01-29" as IsoDate,
+      issuedOn: IsoDate.make("2026-01-15"),
+      taxableSupplyOn: input.kind === "proforma" ? null : IsoDate.make("2026-01-15"),
+      dueOn: IsoDate.make("2026-01-29"),
     },
     paymentMethod: "bank_transfer",
     bankAccount: {
@@ -381,7 +408,7 @@ export const brandingPreviewToRenderModel = (
 };
 
 /** Maps `ReportPdfInput` (all 6 report kinds) to `ReportRenderModel` (D11). */
-export const reportPdfInputToRenderModel = (
+const reportPdfInputToRenderModel = (
   input: ReportsModule.ReportPdfInput,
   generatedAtIso: string,
   context?: ReportRenderContext,
@@ -420,7 +447,7 @@ export const reportPdfInputToRenderModel = (
             { label: isCs ? "DPH" : "VAT", align: "right" },
             { label: isCs ? "Celkem" : "Gross", align: "right" },
           ],
-          rows: view.rows.map((r) => ({
+          rows: Arr.map(view.rows, (r) => ({
             cells: [
               { text: r.label ?? r.key },
               { count: r.count },
@@ -450,7 +477,7 @@ export const reportPdfInputToRenderModel = (
             { label: isCs ? "DPH" : "VAT", align: "right" },
             { label: isCs ? "Celkem" : "Gross", align: "right" },
           ],
-          rows: view.rows.map((r) => ({
+          rows: Arr.map(view.rows, (r) => ({
             cells: [
               { text: r.label ?? r.key },
               { count: r.count },
@@ -479,7 +506,7 @@ export const reportPdfInputToRenderModel = (
             { label: isCs ? "Náklady" : "Expenses", align: "right" },
             { label: isCs ? "Zisk" : "Profit", align: "right" },
           ],
-          rows: view.rows.map((r) => ({
+          rows: Arr.map(view.rows, (r) => ({
             cells: [
               { text: r.month },
               { money: r.revenue },
@@ -507,7 +534,7 @@ export const reportPdfInputToRenderModel = (
             { label: isCs ? "Výdaje" : "Outflow", align: "right" },
             { label: isCs ? "Čistý tok" : "Net", align: "right" },
           ],
-          rows: view.points.map((p) => ({
+          rows: Arr.map(view.points, (p) => ({
             cells: [
               { text: p.month },
               { money: p.in },
@@ -533,7 +560,7 @@ export const reportPdfInputToRenderModel = (
             { label: isCs ? "Počet" : "Count", align: "right" },
             { label: isCs ? "Částka" : "Amount", align: "right" },
           ],
-          rows: view.buckets.map((b) => ({
+          rows: Arr.map(view.buckets, (b) => ({
             cells: [
               { text: b.bucket },
               { count: b.count },
@@ -562,7 +589,7 @@ export const reportPdfInputToRenderModel = (
             { label: isCs ? "DPH" : "VAT", align: "right" },
           ],
           rows: [
-            ...view.output.map((l) => ({
+            ...Arr.map(view.output, (l) => ({
               cells: [
                 { text: isCs ? "Výstup" : "Output" },
                 { text: l.month },
@@ -571,7 +598,7 @@ export const reportPdfInputToRenderModel = (
                 { money: l.vat },
               ] satisfies ReadonlyArray<ReportCell>,
             })),
-            ...view.input.map((l) => ({
+            ...Arr.map(view.input, (l) => ({
               cells: [
                 { text: isCs ? "Vstup" : "Input" },
                 { text: l.month },
@@ -589,14 +616,14 @@ export const reportPdfInputToRenderModel = (
 };
 
 /** Live `PdfEngine` using Chromium at `KVITBIT_CHROMIUM_PATH` (default `/usr/bin/chromium`). */
-export const PdfEngineLive: Layer.Layer<PdfEngine, Config.ConfigError> = Layer.effect(
+const PdfEngineLive: Layer.Layer<PdfEngine, Config.ConfigError> = Layer.effect(
   PdfEngine,
   Effect.flatMap(PdfWiringConfigSchema, ({ chromiumPath }) =>
     makeChromiumPdfEngine({ executablePath: chromiumPath }).pipe(Effect.orDie),
   ),
 );
 
-export const DocumentRendererLive: Layer.Layer<DocumentRenderer, never, PdfEngine> = Layer.effect(
+const DocumentRendererLive: Layer.Layer<DocumentRenderer, never, PdfEngine> = Layer.effect(
   DocumentRenderer,
   Effect.gen(function* () {
     const engine = yield* PdfEngine;
@@ -607,203 +634,203 @@ export const DocumentRendererLive: Layer.Layer<DocumentRenderer, never, PdfEngin
     const shareLinksRepoOpt = yield* Effect.serviceOption(ShareLinksRepo);
     const sqlOpt = yield* Effect.serviceOption(SqlClient.SqlClient);
 
-    const resolveWorkspaceId = (documentId: DocumentView["id"]) =>
-      Effect.gen(function* () {
-        const callerOpt = yield* Effect.serviceOption(CurrentCaller);
-        if (Option.isSome(callerOpt)) {
-          const caller = callerOpt.value;
-          if (caller._tag === "Member") return caller.workspaceId;
-          if (
-            caller._tag === "ShareLinkVisitor" &&
-            Option.isSome(shareLinksRepoOpt) &&
-            Option.isSome(coreStoreOpt)
-          ) {
-            const tokenHash = sha256HexSync(caller.token);
-            const linkOpt = yield* coreStoreOpt.value
-              .transaction(shareLinksRepoOpt.value.lockByTokenHash(tokenHash))
-              .pipe(Effect.catch(() => Effect.succeed(Option.none())));
-            if (Option.isSome(linkOpt)) return linkOpt.value.workspaceId;
-          }
+    const resolveWorkspaceId = Effect.fn("DocumentRenderer.resolveWorkspaceId")(function* (
+      documentId: DocumentView["id"],
+    ) {
+      const callerOpt = yield* Effect.serviceOption(CurrentCaller);
+      if (Option.isSome(callerOpt)) {
+        const caller = callerOpt.value;
+        if (caller._tag === "Member") return caller.workspaceId;
+        if (
+          caller._tag === "ShareLinkVisitor" &&
+          Option.isSome(shareLinksRepoOpt) &&
+          Option.isSome(coreStoreOpt)
+        ) {
+          const tokenHash = sha256HexSync(caller.token);
+          const linkOpt = yield* coreStoreOpt.value
+            .transaction(shareLinksRepoOpt.value.lockByTokenHash(tokenHash))
+            .pipe(Effect.orElseSucceed(() => Option.none()));
+          if (Option.isSome(linkOpt)) return linkOpt.value.workspaceId;
         }
-        if (Option.isSome(sqlOpt)) {
-          const rows = yield* sqlOpt.value<{ readonly workspace_id: WorkspaceId }>`
+      }
+      if (Option.isSome(sqlOpt)) {
+        const rows = yield* sqlOpt.value<{ readonly workspace_id: WorkspaceId }>`
             SELECT workspace_id FROM documents WHERE id = ${documentId} LIMIT 1
           `.pipe(
-            Effect.catch(() =>
-              Effect.succeed([] as ReadonlyArray<{ readonly workspace_id: WorkspaceId }>),
-            ),
-          );
-          if (rows[0] !== undefined) return rows[0].workspace_id;
-        }
-        return undefined;
-      });
+          Effect.orElseSucceed((): ReadonlyArray<{ readonly workspace_id: WorkspaceId }> => []),
+        );
+        if (rows[0] !== undefined) return rows[0].workspace_id;
+      }
+    });
 
     return DocumentRenderer.of({
-      render: (view, options) =>
-        Effect.gen(function* () {
-          // Legacy delivery rows without a frozen __snapshot cannot recover enqueue-time branding,
-          // template, or balance; refuse before consulting cache (J3).
-          const legacyDelivery = readLegacyDeliveryInfo(view);
-          if (legacyDelivery !== undefined) {
-            return yield* Effect.die(
-              new Error(
-                "delivery.snapshot_missing: legacy queued delivery missing frozen snapshot",
-              ),
-            );
+      render: Effect.fn("DocumentRenderer.render")(function* (view, options) {
+        // Legacy delivery rows without a frozen __snapshot cannot recover enqueue-time branding,
+        // template, or balance; refuse before consulting cache (J3).
+        const legacyDelivery = readLegacyDeliveryInfo(view);
+        if (legacyDelivery !== undefined) {
+          return yield* Effect.die(
+            new Error("delivery.snapshot_missing: legacy queued delivery missing frozen snapshot"),
+          );
+        }
+
+        const workspaceId = yield* resolveWorkspaceId(view.id);
+        const deliverySnapshot = readDeliverySnapshot(view);
+        const explicitOpt = yield* Effect.serviceOption(ExplicitPdfTemplate);
+        const isExplicitTemplate = Option.getOrElse(explicitOpt, () => false);
+        const workspace =
+          workspaceId !== undefined && Option.isSome(workspacesRepoOpt)
+            ? yield* workspacesRepoOpt.value
+                .getWorkspace(workspaceId)
+                .pipe(Effect.orElseSucceed(() => undefined))
+            : undefined;
+
+        const effectiveTemplate =
+          deliverySnapshot !== undefined
+            ? deliverySnapshot.template
+            : isExplicitTemplate || options.template !== "classic" || workspace === undefined
+              ? options.template
+              : workspace.branding.pdfTemplate;
+
+        const effectiveWorkspaceRevision =
+          deliverySnapshot?.branding?.workspaceRevision ?? workspace?.revision;
+
+        const loadRecord =
+          workspaceId !== undefined && Option.isSome(documentsRepoOpt)
+            ? documentsRepoOpt.value.get(workspaceId, view.id).pipe(
+                Effect.catchTag("NotFound", () => Effect.undefined),
+                Effect.orDie,
+              )
+            : Effect.undefined;
+        const creditRecord = view.kind === "credit_note" ? yield* loadRecord : undefined;
+        let correction: DocumentRenderContext["correction"];
+        if (view.kind === "credit_note") {
+          const originalLink = Arr.findFirst(
+            creditRecord?.links ?? [],
+            (link) => link.relation === "corrects",
+          );
+          const originalId = Option.getOrUndefined(originalLink)?.id;
+          if (
+            creditRecord === undefined ||
+            workspaceId === undefined ||
+            originalId === undefined ||
+            Option.isNone(documentsRepoOpt)
+          ) {
+            return yield* Effect.die(new Error("Credit Note correction reference is unavailable"));
           }
-
-          const workspaceId = yield* resolveWorkspaceId(view.id);
-          const deliverySnapshot = readDeliverySnapshot(view);
-          const explicitOpt = yield* Effect.serviceOption(ExplicitPdfTemplate);
-          const isExplicitTemplate = Option.getOrElse(explicitOpt, () => false);
-          const workspace =
-            workspaceId !== undefined && Option.isSome(workspacesRepoOpt)
-              ? yield* workspacesRepoOpt.value
-                  .getWorkspace(workspaceId)
-                  .pipe(Effect.catch(() => Effect.succeed(undefined)))
-              : undefined;
-
-          const effectiveTemplate =
-            deliverySnapshot !== undefined
-              ? deliverySnapshot.template
-              : isExplicitTemplate || options.template !== "classic" || workspace === undefined
-                ? options.template
-                : workspace.branding.pdfTemplate;
-
-          const effectiveWorkspaceRevision =
-            deliverySnapshot?.branding?.workspaceRevision ?? workspace?.revision;
-
-          const loadRecord =
-            workspaceId !== undefined && Option.isSome(documentsRepoOpt)
-              ? documentsRepoOpt.value.get(workspaceId, view.id).pipe(
-                  Effect.catchTag("NotFound", () => Effect.succeed(undefined)),
-                  Effect.orDie,
-                )
-              : Effect.succeed(undefined);
-          const creditRecord = view.kind === "credit_note" ? yield* loadRecord : undefined;
-          let correction: DocumentRenderContext["correction"];
-          if (view.kind === "credit_note") {
-            const originalId = creditRecord?.links.find((link) => link.relation === "corrects")?.id;
-            if (
-              creditRecord === undefined ||
-              workspaceId === undefined ||
-              originalId === undefined ||
-              Option.isNone(documentsRepoOpt)
-            ) {
-              return yield* Effect.die(
-                new Error("Credit Note correction reference is unavailable"),
-              );
-            }
-            // An unavailable original cannot be replaced by the Credit Note's own date.
-            const original = yield* documentsRepoOpt.value
-              .get(workspaceId, originalId)
-              .pipe(Effect.orDie);
-            const originalNumber = creditRecord.correctedNumber ?? original.number;
-            if (originalNumber === null) {
-              return yield* Effect.die(new Error("Credit Note original document has no number"));
-            }
-            correction = {
-              originalNumber,
-              originalIssuedOn: original.issuedOn,
-              reason: creditRecord.reason ?? "",
-            };
+          // An unavailable original cannot be replaced by the Credit Note's own date.
+          const original = yield* documentsRepoOpt.value
+            .get(workspaceId, originalId)
+            .pipe(Effect.orDie);
+          const originalNumber = creditRecord.correctedNumber ?? original.number;
+          if (originalNumber === null) {
+            return yield* Effect.die(new Error("Credit Note original document has no number"));
           }
+          correction = {
+            originalNumber,
+            originalIssuedOn: original.issuedOn,
+            reason: creditRecord.reason ?? "",
+          };
+        }
 
-          const cacheKey =
-            workspaceId !== undefined &&
-            effectiveWorkspaceRevision !== undefined &&
-            Option.isSome(blobsOpt)
-              ? documentPdfCacheKey({
+        const cacheKey =
+          workspaceId !== undefined &&
+          effectiveWorkspaceRevision !== undefined &&
+          Option.isSome(blobsOpt)
+            ? documentPdfCacheKey({
+                workspaceId,
+                documentId: view.id,
+                documentRevision: view.revision,
+                workspaceRevision: effectiveWorkspaceRevision,
+                template: effectiveTemplate,
+                language: options.language,
+                correctionReference: correction?.originalIssuedOn,
+              })
+            : undefined;
+
+        if (cacheKey !== undefined && Option.isSome(blobsOpt)) {
+          const cached = yield* blobsOpt.value.get(cacheKey).pipe(
+            Effect.flatMap((stream) => Stream.runCollect(stream)),
+            Effect.map((chunks) => Option.some(concatBytes(chunks))),
+            Effect.orElseSucceed(() => Option.none()),
+          );
+          if (Option.isSome(cached)) return cached.value;
+        }
+
+        const record = creditRecord ?? (yield* loadRecord);
+
+        const resolvedFields =
+          deliverySnapshot !== undefined
+            ? {
+                variableSymbol: deliverySnapshot.variableSymbol,
+                orderNumber: deliverySnapshot.orderNumber,
+                note: deliverySnapshot.note,
+                amountDue: deliverySnapshot.amountDue,
+              }
+            : workspaceId !== undefined && record !== undefined && Option.isSome(documentsRepoOpt)
+              ? yield* resolveDocumentFieldsAtRevision({
                   workspaceId,
-                  documentId: view.id,
-                  documentRevision: view.revision,
-                  workspaceRevision: effectiveWorkspaceRevision,
-                  template: effectiveTemplate,
-                  language: options.language,
-                  correctionReference: correction?.originalIssuedOn,
-                })
+                  view,
+                  record,
+                  documentsRepo: documentsRepoOpt.value,
+                  coreStore: Option.getOrUndefined(coreStoreOpt),
+                }).pipe(Effect.orDie)
               : undefined;
 
-          if (cacheKey !== undefined && Option.isSome(blobsOpt)) {
-            const cached = yield* blobsOpt.value.get(cacheKey).pipe(
-              Effect.flatMap((stream) => Stream.runCollect(stream)),
-              Effect.map((chunks) => Option.some(concatBytes(chunks))),
-              Effect.catch(() => Effect.succeed(Option.none<Uint8Array>())),
-            );
-            if (Option.isSome(cached)) return cached.value;
-          }
-
-          const record = creditRecord ?? (yield* loadRecord);
-
-          const resolvedFields =
-            deliverySnapshot !== undefined
-              ? {
-                  variableSymbol: deliverySnapshot.variableSymbol,
-                  orderNumber: deliverySnapshot.orderNumber,
-                  note: deliverySnapshot.note,
-                  amountDue: deliverySnapshot.amountDue,
-                }
-              : workspaceId !== undefined && record !== undefined && Option.isSome(documentsRepoOpt)
-                ? yield* resolveDocumentFieldsAtRevision({
-                    workspaceId,
-                    view,
-                    record,
-                    documentsRepo: documentsRepoOpt.value,
-                    coreStore: Option.getOrUndefined(coreStoreOpt),
-                  }).pipe(Effect.orDie)
-                : undefined;
-
-          let branding: RenderBranding | undefined;
-          let brandingComplete = true;
-          const brandingSource = deliverySnapshot?.branding ?? workspace?.branding;
-          if (workspaceId !== undefined && brandingSource !== undefined) {
-            const [logoResult, stampResult] = Option.isSome(blobsOpt)
-              ? yield* Effect.all([
+        let branding: RenderBranding | undefined;
+        let brandingComplete = true;
+        const brandingSource = deliverySnapshot?.branding ?? workspace?.branding;
+        if (workspaceId !== undefined && brandingSource !== undefined) {
+          const [logoResult, stampResult] = Option.isSome(blobsOpt)
+            ? yield* Effect.all(
+                [
                   loadBrandingImage(blobsOpt.value, workspaceId, "logo", brandingSource.logo),
                   loadBrandingImage(blobsOpt.value, workspaceId, "stamp", brandingSource.stamp),
-                ])
-              : ([
-                  { image: null, complete: brandingSource.logo === null },
-                  { image: null, complete: brandingSource.stamp === null },
-                ] as const);
-            brandingComplete = logoResult.complete && stampResult.complete;
-            branding = {
-              accentColor: brandingSource.accentColor,
-              footerText: brandingSource.footerText,
-              logo: logoResult.image,
-              stamp: stampResult.image,
-            };
-          }
+                ],
+                { concurrency: 1 },
+              )
+            : ([
+                { image: null, complete: brandingSource.logo === null },
+                { image: null, complete: brandingSource.stamp === null },
+              ] as const);
+          brandingComplete = logoResult.complete && stampResult.complete;
+          branding = {
+            accentColor: brandingSource.accentColor,
+            footerText: brandingSource.footerText,
+            logo: logoResult.image,
+            stamp: stampResult.image,
+          };
+        }
 
-          const model = documentViewToRenderModel(view, {
-            branding,
-            variableSymbol: resolvedFields?.variableSymbol,
-            orderNumber: resolvedFields?.orderNumber,
-            note: resolvedFields?.note,
-            amountDue: resolvedFields?.amountDue,
-            correction,
-          });
-          const bytes = yield* renderDocumentPdf(model, effectiveTemplate, options.language).pipe(
-            Effect.provideService(PdfEngine, engine),
-            Effect.orDie,
-          );
+        const model = documentViewToRenderModel(view, {
+          branding,
+          variableSymbol: resolvedFields?.variableSymbol,
+          orderNumber: resolvedFields?.orderNumber,
+          note: resolvedFields?.note,
+          amountDue: resolvedFields?.amountDue,
+          correction,
+        });
+        const bytes = yield* renderDocumentPdf(model, effectiveTemplate, options.language).pipe(
+          Effect.provideService(PdfEngine, engine),
+          Effect.orDie,
+        );
 
-          if (brandingComplete && cacheKey !== undefined && Option.isSome(blobsOpt)) {
-            yield* blobsOpt.value
-              .put(cacheKey, Stream.succeed(bytes), {
-                contentType: "application/pdf",
-                maxBytes: MAX_PDF_CACHE_BYTES,
-              })
-              .pipe(Effect.ignore);
-          }
+        if (brandingComplete && cacheKey !== undefined && Option.isSome(blobsOpt)) {
+          yield* blobsOpt.value
+            .put(cacheKey, Stream.succeed(bytes), {
+              contentType: "application/pdf",
+              maxBytes: MAX_PDF_CACHE_BYTES,
+            })
+            .pipe(Effect.ignore);
+        }
 
-          return bytes;
-        }),
+        return bytes;
+      }),
     });
   }),
 );
 
-export const ReportPdfRendererLive: Layer.Layer<ReportPdfRenderer, never, PdfEngine> = Layer.effect(
+const ReportPdfRendererLive: Layer.Layer<ReportPdfRenderer, never, PdfEngine> = Layer.effect(
   ReportPdfRenderer,
   Effect.gen(function* () {
     const engine = yield* PdfEngine;
@@ -811,18 +838,19 @@ export const ReportPdfRendererLive: Layer.Layer<ReportPdfRenderer, never, PdfEng
     const blobsOpt = yield* Effect.serviceOption(BlobStorage);
 
     return ReportPdfRenderer.of({
-      render: (input) =>
-        Effect.gen(function* () {
-          const nowIso = new Date().toISOString();
-          const workspace = Option.isSome(workspacesRepoOpt)
-            ? yield* workspacesRepoOpt.value
-                .getWorkspace(input.workspaceId)
-                .pipe(Effect.catch(() => Effect.succeed(undefined)))
-            : undefined;
-          let context: ReportRenderContext | undefined;
-          if (workspace !== undefined) {
-            const [logoResult, stampResult] = Option.isSome(blobsOpt)
-              ? yield* Effect.all([
+      render: Effect.fn("ReportPdfRenderer.render")(function* (input) {
+        const now = yield* DateTime.now;
+        const nowIso = DateTime.formatIso(now);
+        const workspace = Option.isSome(workspacesRepoOpt)
+          ? yield* workspacesRepoOpt.value
+              .getWorkspace(input.workspaceId)
+              .pipe(Effect.orElseSucceed(() => undefined))
+          : undefined;
+        let context: ReportRenderContext | undefined;
+        if (workspace !== undefined) {
+          const [logoResult, stampResult] = Option.isSome(blobsOpt)
+            ? yield* Effect.all(
+                [
                   loadBrandingImage(
                     blobsOpt.value,
                     input.workspaceId,
@@ -835,66 +863,70 @@ export const ReportPdfRendererLive: Layer.Layer<ReportPdfRenderer, never, PdfEng
                     "stamp",
                     workspace.branding.stamp,
                   ),
-                ])
-              : ([
-                  { image: null, complete: true },
-                  { image: null, complete: true },
-                ] as const);
-            context = {
-              workspace: {
-                name: workspace.issuingEntity.name,
-                companyId: workspace.issuingEntity.ico,
-                vatId: workspace.issuingEntity.dic,
-              },
-              branding: {
-                accentColor: workspace.branding.accentColor,
-                footerText: workspace.branding.footerText,
-                logo: logoResult.image,
-                stamp: stampResult.image,
-              },
-            };
-          }
-          return yield* renderReportPdf(
-            reportPdfInputToRenderModel(input, nowIso, context),
-            input.locale,
-          ).pipe(Effect.provideService(PdfEngine, engine), Effect.orDie);
-        }),
+                ],
+                { concurrency: 1 },
+              )
+            : ([
+                { image: null, complete: true },
+                { image: null, complete: true },
+              ] as const);
+          context = {
+            workspace: {
+              name: workspace.issuingEntity.name,
+              companyId: workspace.issuingEntity.ico,
+              vatId: workspace.issuingEntity.dic,
+            },
+            branding: {
+              accentColor: workspace.branding.accentColor,
+              footerText: workspace.branding.footerText,
+              logo: logoResult.image,
+              stamp: stampResult.image,
+            },
+          };
+        }
+        return yield* renderReportPdf(
+          reportPdfInputToRenderModel(input, nowIso, context),
+          input.locale,
+        ).pipe(Effect.provideService(PdfEngine, engine), Effect.orDie);
+      }),
     });
   }),
 );
 
-export const BrandingPreviewLive: Layer.Layer<BrandingPreview, never, PdfEngine> = Layer.effect(
+const BrandingPreviewLive: Layer.Layer<BrandingPreview, never, PdfEngine> = Layer.effect(
   BrandingPreview,
   Effect.gen(function* () {
     const engine = yield* PdfEngine;
     const blobsOpt = yield* Effect.serviceOption(BlobStorage);
 
     return BrandingPreview.of({
-      render: (input) =>
-        Effect.gen(function* () {
-          const [logoResult, stampResult] = Option.isSome(blobsOpt)
-            ? yield* Effect.all([
+      render: Effect.fn("BrandingPreview.render")(function* (input) {
+        const [logoResult, stampResult] = Option.isSome(blobsOpt)
+          ? yield* Effect.all(
+              [
                 loadBrandingImage(blobsOpt.value, input.workspaceId, "logo", input.branding.logo),
                 loadBrandingImage(blobsOpt.value, input.workspaceId, "stamp", input.branding.stamp),
-              ])
-            : ([
-                { image: null, complete: true },
-                { image: null, complete: true },
-              ] as const);
-          const bytes = yield* renderDocumentPdf(
-            brandingPreviewToRenderModel(input, {
-              logo: logoResult.image,
-              stamp: stampResult.image,
-            }),
-            input.branding.pdfTemplate,
-            input.language,
-          ).pipe(Effect.provideService(PdfEngine, engine), Effect.orDie);
-          return {
-            filename: `preview-${input.kind}.pdf`,
-            contentType: "application/pdf",
-            bytes: Stream.succeed(bytes),
-          };
-        }),
+              ],
+              { concurrency: 1 },
+            )
+          : ([
+              { image: null, complete: true },
+              { image: null, complete: true },
+            ] as const);
+        const bytes = yield* renderDocumentPdf(
+          brandingPreviewToRenderModel(input, {
+            logo: logoResult.image,
+            stamp: stampResult.image,
+          }),
+          input.branding.pdfTemplate,
+          input.language,
+        ).pipe(Effect.provideService(PdfEngine, engine), Effect.orDie);
+        return {
+          filename: `preview-${input.kind}.pdf`,
+          contentType: "application/pdf",
+          bytes: Stream.succeed(bytes),
+        };
+      }),
     });
   }),
 );

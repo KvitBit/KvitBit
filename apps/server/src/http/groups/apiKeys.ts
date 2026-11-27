@@ -2,6 +2,7 @@
  * `apiKeys` group handlers (http-mcp-contracts 2.2 & 3.5.3): list, create and revoke
  * Workspace `kvb_` API keys in `auth.apikey`.
  */
+
 import { generateApiKey } from "@kvitbit/adapters/auth";
 import { transactionWithRetry } from "@kvitbit/adapters/sql";
 import {
@@ -22,9 +23,13 @@ import {
   UserId,
   Workspaces,
 } from "@kvitbit/domain/contract";
-import { Clock, Effect } from "effect";
-import { HttpApiBuilder } from "effect/http-api";
-import { SqlClient } from "effect/sql";
+import * as Arr from "effect/Array";
+import * as Clock from "effect/Clock";
+import * as DateTime from "effect/DateTime";
+import * as Effect from "effect/Effect";
+import * as HttpApiBuilder from "effect/http-api/HttpApiBuilder";
+import * as Str from "effect/String";
+import * as SqlClient from "effect/sql/SqlClient";
 import { setLocation } from "../conventions";
 import {
   authorizeMember,
@@ -50,7 +55,7 @@ interface ApiKeyRow {
 
 const toApiKeyView = (row: ApiKeyRow): ApiKeyView => {
   const id = ApiKeyId.make(row.id);
-  const granted = normalizeStoredAccess(row.access, row.scopes);
+  const granted = normalizeStoredAccess({ access: row.access, scopes: row.scopes });
   return {
     id,
     name: row.name ?? "",
@@ -67,14 +72,17 @@ const toApiKeyView = (row: ApiKeyRow): ApiKeyView => {
   };
 };
 
-export const ApiKeysGroupLive = HttpApiBuilder.group(Api, "apiKeys", (handlers) =>
-  Effect.gen(function* () {
+export const ApiKeysGroupLive = HttpApiBuilder.group(
+  Api,
+  "apiKeys",
+  Effect.fnUntraced(function* (handlers) {
     const sql = yield* SqlClient.SqlClient;
     const workspaces = yield* Workspaces;
 
     return handlers
-      .handle("listApiKeys", () =>
-        Effect.gen(function* () {
+      .handle(
+        "listApiKeys",
+        Effect.fnUntraced(function* () {
           const caller = yield* authorizeMember("apiKey.manage");
           const rows = yield* dbUnavailable(
             sql<ApiKeyRow>`
@@ -96,26 +104,29 @@ export const ApiKeysGroupLive = HttpApiBuilder.group(Api, "apiKeys", (handlers) 
               order by k.created_at desc, k.id desc
             `,
           );
-          return rows.map(toApiKeyView);
+          return Arr.map(rows, toApiKeyView);
         }),
       )
-      .handle("createApiKey", ({ params, payload }) =>
-        Effect.gen(function* () {
+      .handle(
+        "createApiKey",
+        Effect.fnUntraced(function* ({ params, payload }) {
           const caller = yield* authorizeMember("apiKey.manage");
           const principal = yield* CurrentPrincipal;
-          const trimmedName = payload.name.trim();
+          const trimmedName = Str.trim(payload.name);
           if (trimmedName.length === 0) {
-            return yield* new Invalid({
+            return yield* Invalid.make({
               issues: [{ path: ["name"], code: "request.malformed" }],
             });
           }
 
           const nowMillis = yield* Clock.currentTimeMillis;
-          const now = new Date(nowMillis);
+          const now = DateTime.toDateUtc(DateTime.makeUnsafe(nowMillis));
           const expiresAt =
-            payload.expiresOn === undefined ? null : new Date(`${payload.expiresOn}T23:59:59.999Z`);
+            payload.expiresOn === undefined
+              ? null
+              : DateTime.toDateUtc(DateTime.makeUnsafe(`${payload.expiresOn}T23:59:59.999Z`));
           if (expiresAt !== null && (Number.isNaN(expiresAt.getTime()) || expiresAt <= now)) {
-            return yield* new Invalid({
+            return yield* Invalid.make({
               issues: [{ path: ["expiresOn"], code: "request.malformed" }],
             });
           }
@@ -124,30 +135,29 @@ export const ApiKeysGroupLive = HttpApiBuilder.group(Api, "apiKeys", (handlers) 
           const issued = generateApiKey();
 
           const creatorName = yield* dbUnavailable(
-            transactionWithRetry(
-              Effect.gen(function* () {
-                yield* sql`select id from workspaces where id = ${caller.workspaceId} for update`;
-                const current = yield* workspaces
-                  .enter(caller.workspaceId, {
-                    scopes: caller.scopes,
-                    channel: caller.channel,
-                  })
-                  .pipe(
-                    Effect.provideService(
-                      CurrentCaller,
-                      Caller.account({
-                        userId: principal.userId,
-                        email: principal.email,
-                        locale: principal.locale,
-                        channel: principal.channel,
-                      }),
-                    ),
-                  );
-                yield* authorizeMember("apiKey.manage").pipe(
-                  Effect.provideService(CurrentCaller, current),
+            Effect.gen(function* () {
+              yield* sql`select id from workspaces where id = ${caller.workspaceId} for update`;
+              const current = yield* workspaces
+                .enter(caller.workspaceId, {
+                  scopes: caller.scopes,
+                  channel: caller.channel,
+                })
+                .pipe(
+                  Effect.provideService(
+                    CurrentCaller,
+                    Caller.account({
+                      userId: principal.userId,
+                      email: principal.email,
+                      locale: principal.locale,
+                      channel: principal.channel,
+                    }),
+                  ),
                 );
-                yield* enforceRoleScopeCap(current.role, granted.scopes, "apiKey.manage");
-                const inserted = yield* sql<{ creator_name: string | null }>`
+              yield* authorizeMember("apiKey.manage").pipe(
+                Effect.provideService(CurrentCaller, current),
+              );
+              yield* enforceRoleScopeCap(current.role, granted.scopes, "apiKey.manage");
+              const inserted = yield* sql<{ creator_name: string | null }>`
                   with ins as (
                     insert into auth.apikey (
                       id,
@@ -192,13 +202,12 @@ export const ApiKeysGroupLive = HttpApiBuilder.group(Api, "apiKeys", (handlers) 
                   from ins
                   left join auth."user" u on u.id = ins.created_by
                 `;
-                yield* workspaces.recordAccessEvent({
-                  action: "apiKey.create",
-                  subject: { entity: "ApiKey", id: issued.keyId, name: trimmedName },
-                });
-                return inserted[0]?.creator_name ?? "";
-              }),
-            ).pipe(Effect.provideService(SqlClient.SqlClient, sql)),
+              yield* workspaces.recordAccessEvent({
+                action: "apiKey.create",
+                subject: { entity: "ApiKey", id: issued.keyId, name: trimmedName },
+              });
+              return inserted[0]?.creator_name ?? "";
+            }).pipe(transactionWithRetry, Effect.provideService(SqlClient.SqlClient, sql)),
           );
 
           yield* setLocation(
@@ -221,8 +230,9 @@ export const ApiKeysGroupLive = HttpApiBuilder.group(Api, "apiKeys", (handlers) 
           };
         }),
       )
-      .handle("revokeApiKey", ({ params }) =>
-        Effect.gen(function* () {
+      .handle(
+        "revokeApiKey",
+        Effect.fnUntraced(function* ({ params }) {
           const caller = yield* authorizeMember("apiKey.manage");
           yield* dbUnavailable(
             sql.withTransaction(
@@ -235,7 +245,7 @@ export const ApiKeysGroupLive = HttpApiBuilder.group(Api, "apiKeys", (handlers) 
                 `;
                 const row = deleted[0];
                 if (row === undefined) {
-                  return yield* new NotFound({ entity: "ApiKey", id: params.keyId });
+                  return yield* NotFound.make({ entity: "ApiKey", id: params.keyId });
                 }
                 yield* workspaces.recordAccessEvent({
                   action: "apiKey.revoke",

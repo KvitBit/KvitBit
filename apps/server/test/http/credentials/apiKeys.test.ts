@@ -1,11 +1,21 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { apiKeyMatches } from "@kvitbit/adapters/auth";
-import { ALL_SCOPES, READ_SCOPES } from "@kvitbit/api-contract";
+import { ALL_SCOPES, ApiKeyCreated, ApiKeyView, READ_SCOPES } from "@kvitbit/api-contract";
 import { CoreStore } from "@kvitbit/core/ports";
-import { CurrentCaller, type MemberCaller, Workspaces } from "@kvitbit/domain/contract";
-import { Effect } from "effect";
-import { SqlClient } from "effect/sql";
-import { TestClock } from "effect/testing";
+import {
+  CurrentCaller,
+  Invalid,
+  type MemberCaller,
+  OpenStruct,
+  Workspaces,
+} from "@kvitbit/domain/contract";
+import * as Arr from "effect/Array";
+import * as Effect from "effect/Effect";
+import * as Fn from "effect/Function";
+import * as Schema from "effect/Schema";
+import * as Str from "effect/String";
+import * as SqlClient from "effect/sql/SqlClient";
+import * as TestClock from "effect/testing/TestClock";
 import { as, type Harness, json, makeHarness, TEST_NOW, type TestUser } from "../harness";
 import { createSeededWorkspace, joinMember } from "./seed";
 
@@ -35,14 +45,31 @@ afterEach(async () => {
   await h.dispose();
 });
 
-const postKey = (user: TestUser, body: unknown, headers: Record<string, string> = {}) => {
-  const init = json(body);
-  return h.fetch(base, {
-    ...init,
+const decodeCreatedKey = Fn.flow(Schema.decodeUnknownEffect(ApiKeyCreated), Effect.runSync);
+// Preserve every creator field for wire equality.
+const decodeWireKeyCreator = Fn.flow(
+  Schema.decodeUnknownEffect(
+    Schema.Struct({ key: Schema.Struct({ createdBy: Schema.JsonObject }) }),
+  ),
+  Effect.runSync,
+  ({ key }) => key.createdBy,
+);
+// Keep any extra fields so the list assertion can detect a leaked secret.
+const decodeKeyList = Fn.flow(
+  Schema.decodeUnknownEffect(Schema.Array(OpenStruct({ id: ApiKeyView.fields.id }))),
+  Effect.runSync,
+);
+const decodeInvalid = Fn.flow(
+  Schema.decodeUnknownEffect(Schema.toEncoded(Invalid)),
+  Effect.runSync,
+);
+
+const postKey = (user: TestUser, body: Schema.Json, path = base) =>
+  h.fetch(path, {
+    ...json(body),
     method: "POST",
-    headers: { ...(init.headers as Record<string, string>), ...as.mobile(user), ...headers },
+    headers: { "content-type": "application/json", ...as.mobile(user) },
   });
-};
 
 describe("apiKeys group", () => {
   test("owner creates a read_write key (201, Location, secret hashed in auth.apikey), lists and revokes it", async () => {
@@ -52,30 +79,18 @@ describe("apiKeys group", () => {
       expiresOn: "2026-12-31",
     });
     expect(createRes.status).toBe(201);
-    const created = (await createRes.json()) as {
-      key: {
-        id: string;
-        name: string;
-        prefix: string;
-        access: string;
-        scopes: string[];
-        createdBy: { userId: string; name: string };
-        createdAt: string;
-        lastUsedAt: string | null;
-        expiresAt: string | null;
-      };
-      secret: string;
-    };
+    const wireCreated = await createRes.json();
+    const created = decodeCreatedKey(wireCreated);
 
     expect(createRes.headers.get("location")).toBe(`${base}/${created.key.id}`);
     expect(created.key.name).toBe("CI Integration");
     expect(created.key.prefix).toBe(`kvb_${created.key.id}`);
     expect(created.key.access).toBe("read_write");
     expect(created.key.scopes).toEqual([...ALL_SCOPES]);
-    expect(created.key.createdBy).toEqual({ userId: owner.id, name: owner.name });
+    expect(decodeWireKeyCreator(wireCreated)).toEqual({ userId: owner.id, name: owner.name });
     expect(created.key.lastUsedAt).toBeNull();
     expect(created.key.expiresAt).toBe("2026-12-31T23:59:59.999Z");
-    expect(created.secret.startsWith(`kvb_${created.key.id}_`)).toBe(true);
+    expect(Str.startsWith(`kvb_${created.key.id}_`)(created.secret)).toBe(true);
 
     // Stored row holds only the SHA-256 hash, never the raw secret.
     const stored = await h.run(
@@ -96,7 +111,11 @@ describe("apiKeys group", () => {
     // List returns the key without the secret.
     const listRes = await h.fetch(base, { headers: as.mobile(owner) });
     expect(listRes.status).toBe(200);
-    const listed = (await listRes.json()) as Array<Record<string, unknown>>;
+    const wireList = Fn.flow(
+      Schema.decodeUnknownEffect(Schema.Array(Schema.JsonObject)),
+      Effect.runSync,
+    )(await listRes.json());
+    const listed = decodeKeyList(wireList);
     expect(listed).toHaveLength(1);
     expect(listed[0]?.id).toBe(created.key.id);
     expect(listed[0]).not.toHaveProperty("secret");
@@ -108,9 +127,7 @@ describe("apiKeys group", () => {
     });
     expect(delRes.status).toBe(204);
 
-    const afterList = (await (await h.fetch(base, { headers: as.mobile(owner) })).json()) as Array<
-      Record<string, unknown>
-    >;
+    const afterList = await (await h.fetch(base, { headers: as.mobile(owner) })).json();
     expect(afterList).toEqual([]);
 
     // Core audit log captured both apiKey.create and apiKey.revoke.
@@ -121,7 +138,7 @@ describe("apiKeys group", () => {
           entity: "ApiKey",
           id: created.key.id,
         });
-        return entries.map((e) => e.action);
+        return Arr.map(entries, (e) => e.action);
       }),
     );
     expect(auditActions).toEqual(["apiKey.create", "apiKey.revoke"]);
@@ -134,28 +151,25 @@ describe("apiKeys group", () => {
       scopes: ["documents:write", "contacts:read"],
     });
     expect(customRes.status).toBe(201);
-    const customBody = (await customRes.json()) as {
-      key: { access: string; scopes: string[]; createdBy: { userId: string; name: string } };
-    };
+    const wireCustom = await customRes.json();
+    const customBody = decodeCreatedKey(wireCustom);
     expect(customBody.key.access).toBe("custom");
     expect(customBody.key.scopes).toEqual(["contacts:read", "documents:read", "documents:write"]);
-    expect(customBody.key.createdBy).toEqual({ userId: admin.id, name: admin.name });
+    expect(decodeWireKeyCreator(wireCustom)).toEqual({ userId: admin.id, name: admin.name });
 
     const readRes = await postKey(admin, { name: "Read-only Sync", access: "read" });
     expect(readRes.status).toBe(201);
-    const readBody = (await readRes.json()) as { key: { access: string; scopes: string[] } };
+    const readBody = decodeCreatedKey(await readRes.json());
     expect(readBody.key.access).toBe("read");
     expect(readBody.key.scopes).toEqual([...READ_SCOPES]);
   });
 
   test("member and accountant are forbidden (403 apiKey.manage) on list, create, and revoke", async () => {
-    const created = (await (
-      await postKey(owner, { name: "Owner Key", access: "read" })
-    ).json()) as {
-      key: { id: string };
-    };
+    const created = decodeCreatedKey(
+      await (await postKey(owner, { name: "Owner Key", access: "read" })).json(),
+    );
 
-    for (const nonManager of [member, accountant]) {
+    const expectForbidden = async (nonManager: TestUser) => {
       const listRes = await h.fetch(base, { headers: as.mobile(nonManager) });
       expect(listRes.status).toBe(403);
       expect(await listRes.json()).toEqual({ _tag: "Forbidden", action: "apiKey.manage" });
@@ -170,7 +184,9 @@ describe("apiKeys group", () => {
       });
       expect(delRes.status).toBe(403);
       expect(await delRes.json()).toEqual({ _tag: "Forbidden", action: "apiKey.manage" });
-    }
+    };
+    await expectForbidden(member);
+    await expectForbidden(accountant);
   });
 
   test("SessionOnly rejects API Key credentials with 401 credential_not_allowed", async () => {
@@ -184,9 +200,7 @@ describe("apiKeys group", () => {
   test("validation rejects blank name and past expiresOn with 422 Invalid", async () => {
     const blank = await postKey(owner, { name: "   ", access: "read" });
     expect(blank.status).toBe(422);
-    expect(((await blank.json()) as { issues: Array<{ path: unknown }> }).issues[0]?.path).toEqual([
-      "name",
-    ]);
+    expect(decodeInvalid(await blank.json()).issues[0].path).toEqual(["name"]);
 
     const past = await postKey(owner, {
       name: "Expired",
@@ -194,24 +208,17 @@ describe("apiKeys group", () => {
       expiresOn: "2026-11-22",
     });
     expect(past.status).toBe(422);
-    expect(((await past.json()) as { issues: Array<{ path: unknown }> }).issues[0]?.path).toEqual([
-      "expiresOn",
-    ]);
+    expect(decodeInvalid(await past.json()).issues[0].path).toEqual(["expiresOn"]);
   });
 
-  test("cross-workspace isolation: list is workspace-scoped and revoking foreign or missing key is 404 NotFound{ApiKey}", async () => {
+  test("lists workspace keys only and returns 404 for foreign or missing keys", async () => {
     const otherOwner = h.addUser("Petr");
     const otherWs = await createSeededWorkspace(h, otherOwner, "beta-sro", "Beta s.r.o.");
     const otherBase = `/api/v1/workspaces/${otherWs.workspaceId}/api-keys`;
 
-    const init = json({ name: "Beta Key", access: "read" });
-    const otherCreated = (await (
-      await h.fetch(otherBase, {
-        ...init,
-        method: "POST",
-        headers: { ...(init.headers as Record<string, string>), ...as.mobile(otherOwner) },
-      })
-    ).json()) as { key: { id: string } };
+    const otherCreated = decodeCreatedKey(
+      await (await postKey(otherOwner, { name: "Beta Key", access: "read" }, otherBase)).json(),
+    );
 
     // Not visible in owner's workspace
     const listRes = await h.fetch(base, { headers: as.mobile(owner) });

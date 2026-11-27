@@ -10,8 +10,15 @@
  *   GET /.well-known/assetlinks.json
  */
 import { ReleaseInfo } from "@kvitbit/api-contract";
-import { Effect, Option, Redacted, Schema } from "effect";
-import { HttpRouter, type HttpServerRequest, HttpServerResponse } from "effect/http";
+import * as Arr from "effect/Array";
+import * as Effect from "effect/Effect";
+import * as Headers from "effect/http/Headers";
+import * as HttpRouter from "effect/http/HttpRouter";
+import type * as HttpServerRequest from "effect/http/HttpServerRequest";
+import * as HttpServerResponse from "effect/http/HttpServerResponse";
+import * as Option from "effect/Option";
+import * as Redacted from "effect/Redacted";
+import * as Schema from "effect/Schema";
 import { MobileConfig, type MobileConfigShape } from "./config";
 import {
   androidPackage,
@@ -28,9 +35,9 @@ import {
   parseAssetMeta,
   parsePublication,
   publicationPrefix,
+  type ReadPublication,
   releaseApkKey,
   releasePrefix,
-  type StoredPublication,
 } from "./layout";
 import { buildManifestResponse, type HeaderReader, readManifestRequest } from "./manifest";
 import { MobileStorage, type MobileStorageShape } from "./storage";
@@ -40,10 +47,7 @@ const textEncoder = new TextEncoder();
 const noStoreHeaders = { "cache-control": "no-store" } as const;
 
 const headerReaderOf = (request: HttpServerRequest.HttpServerRequest): HeaderReader => ({
-  get: (name: string) => {
-    const value = request.headers[name.toLowerCase()];
-    return typeof value === "string" ? value : null;
-  },
+  get: (name) => Option.getOrNull(Headers.get(request.headers, name)),
 });
 
 const searchParamsOf = (request: HttpServerRequest.HttpServerRequest, origin: string) =>
@@ -51,88 +55,86 @@ const searchParamsOf = (request: HttpServerRequest.HttpServerRequest, origin: st
 
 const releaseInfoKeyPattern = /^mobile\/releases\/[^/]+\/release\.json$/;
 
-const decodeReleaseInfo = Schema.decodeUnknownEffect(ReleaseInfo);
+const decodeReleaseInfo = Schema.decodeEffect(Schema.fromJsonString(ReleaseInfo));
 
-const handleManifest =
-  (config: MobileConfigShape, storage: MobileStorageShape) =>
-  (request: HttpServerRequest.HttpServerRequest) =>
-    Effect.gen(function* () {
-      const parsed = readManifestRequest(
-        headerReaderOf(request),
-        searchParamsOf(request, config.appOrigin),
-      );
-      if (parsed._tag === "Rejected") {
-        return HttpServerResponse.text(parsed.message, {
-          status: parsed.status,
-          headers: noStoreHeaders,
-        });
-      }
-
-      const prefix = publicationPrefix({
-        channel: parsed.channel,
-        platform: parsed.platform,
-        runtimeVersion: parsed.runtimeVersion,
+const handleManifest = (config: MobileConfigShape, storage: MobileStorageShape) =>
+  Effect.fnUntraced(function* (request: HttpServerRequest.HttpServerRequest) {
+    const parsed = readManifestRequest({
+      headers: headerReaderOf(request),
+      query: searchParamsOf(request, config.appOrigin),
+    });
+    if (parsed._tag === "Rejected") {
+      return HttpServerResponse.text(parsed.message, {
+        status: parsed.status,
+        headers: noStoreHeaders,
       });
+    }
 
-      const keysResult = yield* Effect.result(storage.list(prefix));
-      if (keysResult._tag === "Failure") {
-        return HttpServerResponse.text("Mobile update storage is unavailable", {
-          status: 503,
-          headers: noStoreHeaders,
-        });
-      }
-
-      const latestKey = latestPublicationKey(keysResult.success);
-      let latest: StoredPublication | undefined;
-      if (latestKey !== undefined) {
-        const jsonResult = yield* Effect.result(storage.getText(latestKey));
-        if (jsonResult._tag === "Failure") {
-          if (jsonResult.failure._tag === "MobileStorageUnavailable") {
-            return HttpServerResponse.text("Mobile update storage is unavailable", {
-              status: 503,
-              headers: noStoreHeaders,
-            });
-          }
-          // Race where object disappeared between list and get: treat as no update.
-          latest = undefined;
-        } else {
-          try {
-            latest = parsePublication(jsonResult.success);
-          } catch {
-            return HttpServerResponse.text("Stored mobile update manifest is malformed", {
-              status: 500,
-              headers: noStoreHeaders,
-            });
-          }
-        }
-      }
-
-      const signingKeyPem = Option.getOrUndefined(
-        Option.map(config.signingKeyPem, (redacted) => Redacted.value(redacted)),
-      );
-      const built = buildManifestResponse({
-        request: parsed,
-        latest,
-        origin: config.appOrigin,
-        signingKeyPem,
-      });
-      if (built._tag === "SigningUnavailable") {
-        return HttpServerResponse.text(built.message, {
-          status: 503,
-          headers: noStoreHeaders,
-        });
-      }
-
-      const { "content-type": contentType, ...otherHeaders } = built.headers;
-      return HttpServerResponse.uint8Array(textEncoder.encode(built.body), {
-        status: 200,
-        contentType,
-        headers: otherHeaders,
-      });
+    const prefix = publicationPrefix({
+      channel: parsed.channel,
+      platform: parsed.platform,
+      runtimeVersion: parsed.runtimeVersion,
     });
 
-const handleUpdateAsset = (storage: MobileStorageShape) => () =>
-  Effect.gen(function* () {
+    const keysResult = yield* Effect.result(storage.list(prefix));
+    if (keysResult._tag === "Failure") {
+      return HttpServerResponse.text("Mobile update storage is unavailable", {
+        status: 503,
+        headers: noStoreHeaders,
+      });
+    }
+
+    const latestKey = latestPublicationKey(keysResult.success);
+    let latest: ReadPublication | undefined;
+    if (latestKey !== undefined) {
+      const jsonResult = yield* Effect.result(storage.getText(latestKey));
+      if (jsonResult._tag === "Failure") {
+        if (jsonResult.failure._tag === "MobileStorageUnavailable") {
+          return HttpServerResponse.text("Mobile update storage is unavailable", {
+            status: 503,
+            headers: noStoreHeaders,
+          });
+        }
+        // Race where object disappeared between list and get: treat as no update.
+        latest = undefined;
+      } else {
+        const publication = yield* Effect.result(parsePublication(jsonResult.success));
+        if (publication._tag === "Failure") {
+          return HttpServerResponse.text("Stored mobile update manifest is malformed", {
+            status: 500,
+            headers: noStoreHeaders,
+          });
+        }
+        latest = publication.success;
+      }
+    }
+
+    const signingKeyPem = Option.getOrUndefined(
+      Option.map(config.signingKeyPem, (redacted) => Redacted.value(redacted)),
+    );
+    const built = yield* buildManifestResponse({
+      request: parsed,
+      latest,
+      origin: config.appOrigin,
+      signingKeyPem,
+    });
+    if (built._tag === "SigningUnavailable") {
+      return HttpServerResponse.text(built.message, {
+        status: 503,
+        headers: noStoreHeaders,
+      });
+    }
+
+    const { "content-type": contentType, ...otherHeaders } = built.headers;
+    return HttpServerResponse.uint8Array(textEncoder.encode(built.body), {
+      status: 200,
+      contentType,
+      headers: otherHeaders,
+    });
+  });
+
+const handleUpdateAsset = (storage: MobileStorageShape) =>
+  Effect.fnUntraced(function* () {
     const params = yield* HttpRouter.params;
     const sha256 = params.sha256 ?? "";
     if (!isValidSha256(sha256)) {
@@ -159,19 +161,16 @@ const handleUpdateAsset = (storage: MobileStorageShape) => () =>
     const metaResult = yield* Effect.result(storage.getText(assetMetaKey(sha256)));
     let contentType = streamResult.success.contentType ?? "application/octet-stream";
     if (metaResult._tag === "Success") {
-      try {
-        contentType = parseAssetMeta(metaResult.success).contentType;
-      } catch {
-        // Fall back to stream content-type / octet-stream if sidecar is unreadable.
-      }
+      const metadata = yield* Effect.result(parseAssetMeta(metaResult.success));
+      if (metadata._tag === "Success") contentType = metadata.success.contentType;
     }
 
-    const headers: Record<string, string> = {
+    const headers = {
       "cache-control": immutableCacheControl,
       "x-content-type-options": "nosniff",
     };
     if (streamResult.success.size !== undefined) {
-      headers["content-length"] = String(streamResult.success.size);
+      Object.assign(headers, { "content-length": String(streamResult.success.size) });
     }
 
     return HttpServerResponse.stream(streamResult.success.stream, {
@@ -181,8 +180,8 @@ const handleUpdateAsset = (storage: MobileStorageShape) => () =>
     });
   });
 
-const handleLatestRelease = (config: MobileConfigShape, storage: MobileStorageShape) => () =>
-  Effect.gen(function* () {
+const handleLatestRelease = (config: MobileConfigShape, storage: MobileStorageShape) =>
+  Effect.fnUntraced(function* () {
     const keysResult = yield* Effect.result(storage.list(releasePrefix));
     if (keysResult._tag === "Failure") {
       return HttpServerResponse.text("Mobile release storage is unavailable", {
@@ -191,7 +190,7 @@ const handleLatestRelease = (config: MobileConfigShape, storage: MobileStorageSh
       });
     }
 
-    const releaseKeys = keysResult.success.filter((key) => releaseInfoKeyPattern.test(key));
+    const releaseKeys = Arr.filter(keysResult.success, (key) => releaseInfoKeyPattern.test(key));
     if (releaseKeys.length === 0) {
       return HttpServerResponse.jsonUnsafe(
         { error: "No Android release published" },
@@ -211,16 +210,7 @@ const handleLatestRelease = (config: MobileConfigShape, storage: MobileStorageSh
         }
         continue;
       }
-      let parsed: unknown;
-      try {
-        parsed = JSON.parse(jsonResult.success);
-      } catch {
-        return HttpServerResponse.text("Stored Android release metadata is malformed", {
-          status: 500,
-          headers: noStoreHeaders,
-        });
-      }
-      const decoded = yield* Effect.result(decodeReleaseInfo(parsed));
+      const decoded = yield* Effect.result(decodeReleaseInfo(jsonResult.success));
       if (decoded._tag === "Failure") {
         return HttpServerResponse.text("Stored Android release metadata is malformed", {
           status: 500,
@@ -249,8 +239,8 @@ const handleLatestRelease = (config: MobileConfigShape, storage: MobileStorageSh
     });
   });
 
-const handleReleaseApk = (storage: MobileStorageShape) => () =>
-  Effect.gen(function* () {
+const handleReleaseApk = (storage: MobileStorageShape) =>
+  Effect.fnUntraced(function* () {
     const params = yield* HttpRouter.params;
     const version = params.version ?? "";
     if (!isValidReleaseVersion(version)) {
@@ -274,13 +264,13 @@ const handleReleaseApk = (storage: MobileStorageShape) => () =>
       });
     }
 
-    const headers: Record<string, string> = {
+    const headers = {
       "content-disposition": `attachment; filename="${apkFileName(version)}"`,
       "cache-control": immutableCacheControl,
       "x-content-type-options": "nosniff",
     };
     if (streamResult.success.size !== undefined) {
-      headers["content-length"] = String(streamResult.success.size);
+      Object.assign(headers, { "content-length": String(streamResult.success.size) });
     }
 
     return HttpServerResponse.stream(streamResult.success.stream, {
@@ -313,8 +303,8 @@ const handleAssetLinks = (config: MobileConfigShape) => () =>
   );
 
 /** Registers all 5 mobile updates, Android release, and App Links routes on `HttpRouter`. */
-export const MobileRoutesLive = HttpRouter.use((router) =>
-  Effect.gen(function* () {
+export const MobileRoutesLive = HttpRouter.use(
+  Effect.fnUntraced(function* (router) {
     const config = yield* MobileConfig;
     const storage = yield* MobileStorage;
     yield* router.add("GET", "/api/mobile/updates/manifest", handleManifest(config, storage));

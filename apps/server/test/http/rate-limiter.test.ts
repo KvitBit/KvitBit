@@ -1,7 +1,9 @@
 import { afterEach, describe, expect, setDefaultTimeout, test } from "bun:test";
-import { Duration, Effect, Layer } from "effect";
-import { SqlClient } from "effect/sql";
-import { TestClock } from "effect/testing";
+import * as Duration from "effect/Duration";
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+import * as SqlClient from "effect/sql/SqlClient";
+import * as TestClock from "effect/testing/TestClock";
 import { RateLimiter, RateLimiterMemory, RateLimiterSql } from "../../src/http/edge/RateLimiter";
 import { SqlTestCore } from "../persistence/conformance/sqlCore";
 import { type Harness, makeHarness } from "./harness";
@@ -16,55 +18,60 @@ describe("Shared HTTP/MCP trailing sliding-window RateLimiter", () => {
     harness = undefined;
   });
 
-  const runTrailingWindowScenario = (layer: Layer.Layer<RateLimiter, never, never>) =>
-    Effect.gen(function* () {
+  const clockLayer = Layer.effectDiscard(
+    TestClock.setTime(Date.parse("2026-11-23T12:00:00Z")),
+  ).pipe(Layer.provideMerge(TestClock.layer()));
+
+  test("RateLimiterMemory enforces trailing sliding windows and isolates keys", async () => {
+    await Effect.gen(function* () {
       const limiter = yield* RateLimiter;
       const rule = { max: 3, windowSeconds: 60 };
 
       // t=0s: 1 admission.
-      expect(yield* limiter.consume("k1", rule)).toEqual({ allowed: true });
+      const initial = yield* limiter.consume("k1", rule);
+      expect(initial).toEqual({ allowed: true });
 
       // t=40s: 2 more admissions (total 3 in trailing 60s).
       yield* TestClock.adjust(Duration.seconds(40));
-      expect(yield* limiter.consume("k1", rule)).toEqual({ allowed: true });
-      expect(yield* limiter.consume("k1", rule)).toEqual({ allowed: true });
+      const firstAtForty = yield* limiter.consume("k1", rule);
+      expect(firstAtForty).toEqual({ allowed: true });
+      const secondAtForty = yield* limiter.consume("k1", rule);
+      expect(secondAtForty).toEqual({ allowed: true });
 
       // t=50s: 4th request denied; Retry-After is 10s (until t=0s leaves the 60s window).
       // Denied requests must not record an admission.
       yield* TestClock.adjust(Duration.seconds(10));
-      expect(yield* limiter.consume("k1", rule)).toEqual({ allowed: false, retryAfterSeconds: 10 });
-      expect(yield* limiter.consume("k1", rule)).toEqual({ allowed: false, retryAfterSeconds: 10 });
+      const deniedAtFifty = yield* limiter.consume("k1", rule);
+      expect(deniedAtFifty).toEqual({ allowed: false, retryAfterSeconds: 10 });
+      const deniedAgainAtFifty = yield* limiter.consume("k1", rule);
+      expect(deniedAgainAtFifty).toEqual({ allowed: false, retryAfterSeconds: 10 });
 
       // Different key is unaffected.
-      expect(yield* limiter.consume("k2", rule)).toEqual({ allowed: true });
+      const otherKey = yield* limiter.consume("k2", rule);
+      expect(otherKey).toEqual({ allowed: true });
 
       // t=60s: t=0s expires; t=40s admissions remain live -> only 1 slot opens (unlike a fixed window).
       yield* TestClock.adjust(Duration.seconds(10));
-      expect(yield* limiter.consume("k1", rule)).toEqual({ allowed: true });
-      expect(yield* limiter.consume("k1", rule)).toEqual({ allowed: false, retryAfterSeconds: 40 });
+      const admittedAtSixty = yield* limiter.consume("k1", rule);
+      expect(admittedAtSixty).toEqual({ allowed: true });
+      const deniedAtSixty = yield* limiter.consume("k1", rule);
+      expect(deniedAtSixty).toEqual({ allowed: false, retryAfterSeconds: 40 });
 
       // t=100s: both t=40s admissions expire -> 2 slots open.
       yield* TestClock.adjust(Duration.seconds(40));
-      expect(yield* limiter.consume("k1", rule)).toEqual({ allowed: true });
-      expect(yield* limiter.consume("k1", rule)).toEqual({ allowed: true });
-      expect(yield* limiter.consume("k1", rule)).toEqual({ allowed: false, retryAfterSeconds: 20 });
+      const firstAtHundred = yield* limiter.consume("k1", rule);
+      expect(firstAtHundred).toEqual({ allowed: true });
+      const secondAtHundred = yield* limiter.consume("k1", rule);
+      expect(secondAtHundred).toEqual({ allowed: true });
+      const deniedAtHundred = yield* limiter.consume("k1", rule);
+      expect(deniedAtHundred).toEqual({ allowed: false, retryAfterSeconds: 20 });
     }).pipe(
-      Effect.provide(layer),
-      Effect.provide(
-        Layer.effectDiscard(TestClock.setTime(Date.parse("2026-11-23T12:00:00Z"))).pipe(
-          Layer.provideMerge(TestClock.layer()),
-        ),
-      ),
+      Effect.provide(RateLimiterMemory.pipe(Layer.provideMerge(clockLayer))),
+      Effect.runPromise,
     );
-
-  test("RateLimiterMemory enforces trailing sliding windows and isolates keys", async () => {
-    await Effect.runPromise(runTrailingWindowScenario(RateLimiterMemory));
   });
 
   test("RateLimiterSql enforces shared trailing sliding windows in auth.rate_limit and prunes expired rows", async () => {
-    const clockLayer = Layer.effectDiscard(
-      TestClock.setTime(Date.parse("2026-11-23T12:00:00Z")),
-    ).pipe(Layer.provideMerge(TestClock.layer()));
     const coreLayer = SqlTestCore().pipe(Layer.provideMerge(clockLayer));
 
     await Effect.runPromise(
@@ -75,25 +82,32 @@ describe("Shared HTTP/MCP trailing sliding-window RateLimiter", () => {
         const rule = { max: 3, windowSeconds: 60 };
 
         // Split admissions across two independent RateLimiterSql instances sharing Postgres.
-        expect(yield* limiterA.consume("shared:1", rule)).toEqual({ allowed: true });
+        const initial = yield* limiterA.consume("shared:1", rule);
+        expect(initial).toEqual({ allowed: true });
         yield* TestClock.adjust(Duration.seconds(40));
-        expect(yield* limiterB.consume("shared:1", rule)).toEqual({ allowed: true });
-        expect(yield* limiterA.consume("shared:1", rule)).toEqual({ allowed: true });
+        const firstAtForty = yield* limiterB.consume("shared:1", rule);
+        expect(firstAtForty).toEqual({ allowed: true });
+        const secondAtForty = yield* limiterA.consume("shared:1", rule);
+        expect(secondAtForty).toEqual({ allowed: true });
 
         // Denied at t=50s with Retry-After: 10.
         yield* TestClock.adjust(Duration.seconds(10));
-        expect(yield* limiterB.consume("shared:1", rule)).toEqual({
+        const deniedAtFifty = yield* limiterB.consume("shared:1", rule);
+        expect(deniedAtFifty).toEqual({
           allowed: false,
           retryAfterSeconds: 10,
         });
 
         // Key prefix safety: `shared:1` must not collide with `shared:10`.
-        expect(yield* limiterA.consume("shared:10", rule)).toEqual({ allowed: true });
+        const prefixedKey = yield* limiterA.consume("shared:10", rule);
+        expect(prefixedKey).toEqual({ allowed: true });
 
         // At t=60s: t=0s row is pruned and 1 slot opens; next request sees Retry-After: 40.
         yield* TestClock.adjust(Duration.seconds(10));
-        expect(yield* limiterA.consume("shared:1", rule)).toEqual({ allowed: true });
-        expect(yield* limiterB.consume("shared:1", rule)).toEqual({
+        const admittedAtSixty = yield* limiterA.consume("shared:1", rule);
+        expect(admittedAtSixty).toEqual({ allowed: true });
+        const deniedAtSixty = yield* limiterB.consume("shared:1", rule);
+        expect(deniedAtSixty).toEqual({
           allowed: false,
           retryAfterSeconds: 40,
         });
@@ -111,7 +125,8 @@ describe("Shared HTTP/MCP trailing sliding-window RateLimiter", () => {
         // Idle key cleanup: after 2 minutes of inactivity, a request on another key reclaims
         // expired edge rows belonging to idle keys without touching Better Auth rows.
         yield* TestClock.adjust(Duration.minutes(2));
-        expect(yield* limiterA.consume("other:key", rule)).toEqual({ allowed: true });
+        const otherKey = yield* limiterA.consume("other:key", rule);
+        expect(otherKey).toEqual({ allowed: true });
         const staleRows = yield* sql<{ count: string }>`
           select count(*)::text as count from auth.rate_limit
           where starts_with(key, 'edge:shared:1#')`;
@@ -125,34 +140,32 @@ describe("Shared HTTP/MCP trailing sliding-window RateLimiter", () => {
   });
 
   test("HTTP edge routes return 429 with Retry-After over a trailing sliding window", async () => {
-    harness = makeHarness();
+    const app = makeHarness();
+    harness = app;
+    const challenge = () => app.fetch("/api/v1/bot-protection/challenges/sign_up");
+    const challengeStatuses = (length: number) =>
+      Array.fromAsync({ length }, async () => (await challenge()).status);
 
     // botChallenge limit is 30/min per IP. Send 10 at t=0s and 20 at t=40s.
-    for (let i = 0; i < 10; i++) {
-      const res = await harness.fetch("/api/v1/bot-protection/challenges/sign_up");
-      expect(res.status).toBe(204);
-    }
+    const initial = await challengeStatuses(10);
+    expect(initial).toEqual(Array.from({ length: 10 }, () => 204));
 
-    await harness.run(TestClock.adjust(Duration.seconds(40)));
-    for (let i = 0; i < 20; i++) {
-      const res = await harness.fetch("/api/v1/bot-protection/challenges/sign_up");
-      expect(res.status).toBe(204);
-    }
+    await app.run(TestClock.adjust(Duration.seconds(40)));
+    const atForty = await challengeStatuses(20);
+    expect(atForty).toEqual(Array.from({ length: 20 }, () => 204));
 
     // At t=50s: 31st request gets 429 with Retry-After: 10.
-    await harness.run(TestClock.adjust(Duration.seconds(10)));
-    const denied = await harness.fetch("/api/v1/bot-protection/challenges/sign_up");
+    await app.run(TestClock.adjust(Duration.seconds(10)));
+    const denied = await challenge();
     expect(denied.status).toBe(429);
     expect(denied.headers.get("retry-after")).toBe("10");
     expect(await denied.json()).toEqual({ _tag: "RateLimited", retryAfterSeconds: 10 });
 
     // At t=60s: only the 10 from t=0s expired; 10 succeed and the 11th gets 429 with Retry-After: 40.
-    await harness.run(TestClock.adjust(Duration.seconds(10)));
-    for (let i = 0; i < 10; i++) {
-      const res = await harness.fetch("/api/v1/bot-protection/challenges/sign_up");
-      expect(res.status).toBe(204);
-    }
-    const deniedAgain = await harness.fetch("/api/v1/bot-protection/challenges/sign_up");
+    await app.run(TestClock.adjust(Duration.seconds(10)));
+    const atSixty = await challengeStatuses(10);
+    expect(atSixty).toEqual(Array.from({ length: 10 }, () => 204));
+    const deniedAgain = await challenge();
     expect(deniedAgain.status).toBe(429);
     expect(deniedAgain.headers.get("retry-after")).toBe("40");
   });

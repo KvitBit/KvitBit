@@ -7,7 +7,8 @@
  *   + stale `running` exports + stale `pending` invitations
  * - `housekeeping`: expired rows and orphaned attachments, plus daily share-view rollups
  */
-import { type CronLayerOptions, cronsLayer } from "@kvitbit/adapters/jobs";
+
+import { cronsLayer } from "@kvitbit/adapters/jobs";
 import {
   deliveryJob,
   exportJob,
@@ -21,8 +22,17 @@ import {
 import { pragueDate } from "@kvitbit/core/engines";
 import type { ExportId, InvitationId, WorkspaceId } from "@kvitbit/domain/contract";
 import { BlobStorage } from "@kvitbit/domain/ports";
-import { Cause, Clock, Effect, Exit, Layer, Option, Stream } from "effect";
-import { SqlClient } from "effect/sql";
+import * as Arr from "effect/Array";
+import * as Cause from "effect/Cause";
+import * as Clock from "effect/Clock";
+import * as DateTime from "effect/DateTime";
+import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
+import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
+import * as Stream from "effect/Stream";
+import * as Str from "effect/String";
+import * as SqlClient from "effect/sql/SqlClient";
 import * as WorkflowEngine from "effect/workflow/WorkflowEngine";
 import { AttachmentInventory, AttachmentInventoryLive } from "../wiring/attachmentInventory";
 import {
@@ -32,13 +42,13 @@ import {
 } from "./workflows";
 
 /** Default staleness threshold for OutboxReconcile (2 minutes, rule J1a). */
-export const DEFAULT_RECONCILE_STALE_MS = 2 * 60 * 1000;
+const DEFAULT_RECONCILE_STALE_MS = 2 * 60 * 1000;
 
 /** Default retention window for `request_log` rows (24 hours, rule J3a). */
 export const DEFAULT_REQUEST_LOG_RETENTION_MS = 24 * 60 * 60 * 1000;
 const ATTACHMENT_STAGING_GRACE_MS = 24 * 60 * 60 * 1000;
 
-export interface CronHandlerOptions {
+interface CronHandlerOptions {
   readonly staleThresholdMs?: number | undefined;
   readonly requestLogRetentionMs?: number | undefined;
 }
@@ -70,7 +80,7 @@ export const makeCronHandlers = (options: CronHandlerOptions = {}) => {
     const rows = yield* sql<{ readonly id: WorkspaceId }>`
       SELECT id FROM workspaces WHERE closed_at IS NULL
     `;
-    const workspaceIds = rows.map((r) => r.id);
+    const workspaceIds = Arr.map(rows, (r) => r.id);
     if (workspaceIds.length === 0) return;
     yield* reminderJob.sweepWorkspaces(workspaceIds, today);
   });
@@ -93,7 +103,7 @@ export const makeCronHandlers = (options: CronHandlerOptions = {}) => {
   const outboxReconcile = Effect.gen(function* () {
     const sql = yield* SqlClient.SqlClient;
     const nowMs = yield* Clock.currentTimeMillis;
-    const cutoffIso = new Date(nowMs - staleThresholdMs).toISOString();
+    const cutoffIso = DateTime.formatIso(DateTime.makeUnsafe(nowMs - staleThresholdMs));
 
     // 1. Stale queued/sending deliveries
     yield* deliveryJob
@@ -136,7 +146,7 @@ export const makeCronHandlers = (options: CronHandlerOptions = {}) => {
           return;
         }
         if (result.value._tag === "Suspended") {
-          if (result.value.failed) yield* DataExportWorkflow.resume(executionId);
+          if (result.value.failed === true) yield* DataExportWorkflow.resume(executionId);
           return;
         }
         if (Exit.isSuccess(result.value.exit) && result.value.exit.value === "ready") {
@@ -174,7 +184,7 @@ export const makeCronHandlers = (options: CronHandlerOptions = {}) => {
       readonly send_epoch: number;
       readonly expired: boolean;
     }>`
-      SELECT id, workspace_id, send_epoch, expires_at <= ${new Date(nowMs)} AS expired
+      SELECT id, workspace_id, send_epoch, expires_at <= ${DateTime.toDateUtc(DateTime.makeUnsafe(nowMs))} AS expired
       FROM invitations
       WHERE status = 'pending'
         AND updated_at < ${cutoffIso}::timestamptz
@@ -193,14 +203,14 @@ export const makeCronHandlers = (options: CronHandlerOptions = {}) => {
           return;
         }
         if (result.value._tag === "Suspended") {
-          if (result.value.failed) yield* MemberInvitationWorkflow.resume(executionId);
+          if (result.value.failed === true) yield* MemberInvitationWorkflow.resume(executionId);
           return;
         }
         if (inv.expired) {
           yield* invitationJob.expirePending(
             payload.workspaceId,
             payload.invitationId,
-            new Date(nowMs).toISOString(),
+            DateTime.formatIso(DateTime.makeUnsafe(nowMs)),
           );
         } else if (Exit.isFailure(result.value.exit)) {
           // A prior completed failure cannot be resumed. The epoch keeps the provider key stable.
@@ -209,7 +219,10 @@ export const makeCronHandlers = (options: CronHandlerOptions = {}) => {
           const recoveryResult = yield* MemberInvitationWorkflow.poll(recoveryId);
           if (Option.isNone(recoveryResult)) {
             yield* MemberInvitationWorkflow.execute(recovery, { discard: true, detached: true });
-          } else if (recoveryResult.value._tag === "Suspended" && recoveryResult.value.failed) {
+          } else if (
+            recoveryResult.value._tag === "Suspended" &&
+            recoveryResult.value.failed === true
+          ) {
             yield* MemberInvitationWorkflow.resume(recoveryId);
           }
         }
@@ -226,8 +239,8 @@ export const makeCronHandlers = (options: CronHandlerOptions = {}) => {
   const housekeeping = Effect.gen(function* () {
     const sql = yield* SqlClient.SqlClient;
     const nowMs = yield* Clock.currentTimeMillis;
-    const nowIso = new Date(nowMs).toISOString();
-    const requestLogCutoff = new Date(nowMs - requestLogRetentionMs).toISOString();
+    const nowIso = DateTime.formatIso(DateTime.makeUnsafe(nowMs));
+    const requestLogCutoff = DateTime.formatIso(DateTime.makeUnsafe(nowMs - requestLogRetentionMs));
 
     // 1. Expired ready & old failed exports (ZIP blobs + rows)
     yield* exportJob.purgeExpired.pipe(
@@ -260,7 +273,7 @@ export const makeCronHandlers = (options: CronHandlerOptions = {}) => {
       SELECT workspace_id, share_link_id, (at AT TIME ZONE 'UTC')::date,
         count(*) FILTER (WHERE kind = 'view'), count(*) FILTER (WHERE kind = 'download')
       FROM share_view_events
-      WHERE at < ${`${nowIso.slice(0, 10)}T00:00:00.000Z`}::timestamptz
+      WHERE at < ${`${Str.slice(0, 10)(nowIso)}T00:00:00.000Z`}::timestamptz
       GROUP BY 1, 2, 3
       ON CONFLICT (workspace_id, share_link_id, day) DO UPDATE
       SET views = EXCLUDED.views, downloads = EXCLUDED.downloads
@@ -270,8 +283,8 @@ export const makeCronHandlers = (options: CronHandlerOptions = {}) => {
     const inventory = yield* AttachmentInventory;
     const blobs = yield* BlobStorage;
     yield* inventory.olderThan(nowMs - ATTACHMENT_STAGING_GRACE_MS).pipe(
-      Stream.runForEach((key) =>
-        Effect.gen(function* () {
+      Stream.runForEach(
+        Effect.fn("removeOrphanedAttachment")(function* (key) {
           const attached = yield* sql`SELECT id FROM attachments WHERE blob_key = ${key} LIMIT 1`;
           if (attached.length === 0) {
             yield* blobs
@@ -296,9 +309,7 @@ export const makeCronHandlers = (options: CronHandlerOptions = {}) => {
   } as const;
 };
 
-/** Registers all 5 Kvitbit ClusterCrons on the active `Sharding` layer. */
-export const makeCronsLayer = (options?: CronHandlerOptions & CronLayerOptions) =>
-  cronsLayer(makeCronHandlers(options), options);
-
 /** Live ClusterCrons layer with production defaults. */
-export const CronsLive = makeCronsLayer().pipe(Layer.provide(AttachmentInventoryLive));
+export const CronsLive = cronsLayer(makeCronHandlers()).pipe(
+  Layer.provide(AttachmentInventoryLive),
+);

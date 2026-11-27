@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { Caller, UserId, Workspaces } from "@kvitbit/domain/contract";
-import { Effect } from "effect";
-import { SqlClient } from "effect/sql";
+import * as Effect from "effect/Effect";
+import * as SqlClient from "effect/sql/SqlClient";
 import { changeMembershipAndRevokeCredentials } from "../../../src/http/groups/workspace/revokeCredentials";
 import { asCaller, runSqlCore } from "./sqlCore";
 

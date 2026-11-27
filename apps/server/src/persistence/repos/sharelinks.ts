@@ -2,70 +2,93 @@
  * `ShareLinksRepo` over `share_links` and `share_view_events`.
  * `share_links` has no revision column: `revoke` and `markViewed` are state-conditional updates.
  */
-import { ShareLinksRepo } from "@kvitbit/core";
-import type {
+import { ShareLinksModule, ShareLinksRepo } from "@kvitbit/core";
+import {
   DocumentId,
+  NotFound,
   ShareViewId,
   UserId,
   VisitorHash,
   WorkspaceId,
 } from "@kvitbit/domain/contract";
-import { NotFound } from "@kvitbit/domain/contract";
-import { Effect, Layer, Option } from "effect";
-import { SqlClient } from "effect/sql";
+import * as Arr from "effect/Array";
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
+import * as SqlClient from "effect/sql/SqlClient";
 import { unavailable, writeErrors } from "../errors";
-import { col, type DbRow } from "../table";
+import { col } from "../table";
 
-type ShareLink = Option.Option.Value<
-  Effect.Success<ReturnType<ShareLinksRepo["Service"]["activeFor"]>>
->;
-type ShareLinkId = ShareLink["id"];
-type ShareViewEventRow = Effect.Success<
-  ReturnType<ShareLinksRepo["Service"]["events"]>
->["rows"][number];
+interface ShareLinkSqlRow {
+  readonly id: string;
+  readonly workspace_id: string;
+  readonly document_id: string;
+  readonly token_hash: string;
+  readonly key_version: number;
+  readonly created_by: string | null;
+  readonly viewed_at: string | null;
+  readonly revoked_at: string | null;
+  readonly created_at: string;
+}
 
-const LINK_SELECT = [
-  "id",
-  "workspace_id",
-  "document_id",
-  "token_hash",
-  "key_version",
-  "created_by",
-  col.instant("viewed_at"),
-  col.instant("revoked_at"),
-  col.instant("created_at"),
-].join(", ");
+interface ShareViewEventSqlRow {
+  readonly id: string;
+  readonly workspace_id: string;
+  readonly share_link_id: string;
+  readonly kind: ShareLinksModule.ShareViewEventRow["kind"];
+  readonly device: ShareLinksModule.ShareViewEventRow["device"];
+  readonly visitor_hash: string;
+  readonly at: string;
+}
 
-const EVENT_SELECT = [
-  "e.id",
-  "e.workspace_id",
-  "e.share_link_id",
-  "e.kind",
-  "e.device",
-  "e.visitor_hash",
-  col.instant("e.at", "at"),
-].join(", ");
+const LINK_SELECT = Arr.join(
+  [
+    "id",
+    "workspace_id",
+    "document_id",
+    "token_hash",
+    "key_version",
+    "created_by",
+    col.instant("viewed_at"),
+    col.instant("revoked_at"),
+    col.instant("created_at"),
+  ],
+  ", ",
+);
 
-const decodeLink = (row: DbRow): ShareLink => ({
-  id: row.id as ShareLinkId,
-  workspaceId: row.workspace_id as WorkspaceId,
-  documentId: row.document_id as DocumentId,
-  tokenHash: row.token_hash as string,
+const EVENT_SELECT = Arr.join(
+  [
+    "e.id",
+    "e.workspace_id",
+    "e.share_link_id",
+    "e.kind",
+    "e.device",
+    "e.visitor_hash",
+    col.instant("e.at", "at"),
+  ],
+  ", ",
+);
+
+const decodeLink = (row: ShareLinkSqlRow): ShareLinksModule.ShareLink => ({
+  id: ShareLinksModule.ShareLinkId.make(row.id),
+  workspaceId: WorkspaceId.make(row.workspace_id),
+  documentId: DocumentId.make(row.document_id),
+  tokenHash: row.token_hash,
   keyVersion: Number(row.key_version),
-  createdBy: (row.created_by as UserId | null) ?? null,
-  viewedAt: (row.viewed_at as string | null) ?? null,
-  revokedAt: (row.revoked_at as string | null) ?? null,
-  createdAt: row.created_at as string,
+  createdBy: row.created_by === null ? null : UserId.make(row.created_by),
+  viewedAt: row.viewed_at,
+  revokedAt: row.revoked_at,
+  createdAt: row.created_at,
 });
 
-const decodeEvent = (row: DbRow): ShareViewEventRow => ({
-  id: row.id as ShareViewId,
-  workspaceId: row.workspace_id as WorkspaceId,
-  shareLinkId: row.share_link_id as ShareLinkId,
-  kind: row.kind as ShareViewEventRow["kind"],
-  device: row.device as ShareViewEventRow["device"],
-  visitorHash: row.visitor_hash as VisitorHash,
-  at: row.at as string,
+const decodeEvent = (row: ShareViewEventSqlRow): ShareLinksModule.ShareViewEventRow => ({
+  id: ShareViewId.make(row.id),
+  workspaceId: WorkspaceId.make(row.workspace_id),
+  shareLinkId: ShareLinksModule.ShareLinkId.make(row.share_link_id),
+  kind: row.kind,
+  device: row.device,
+  visitorHash: VisitorHash.make(row.visitor_hash),
+  at: row.at,
 });
 
 export const ShareLinksRepoSql: Layer.Layer<ShareLinksRepo, never, SqlClient.SqlClient> =
@@ -75,10 +98,10 @@ export const ShareLinksRepoSql: Layer.Layer<ShareLinksRepo, never, SqlClient.Sql
       const sql = yield* SqlClient.SqlClient;
       const linkWriteFailure = writeErrors("share_links");
       return ShareLinksRepo.of({
-        activeFor: (workspaceId, documentId) =>
+        activeFor: Effect.fn("ShareLinksRepo.activeFor")((workspaceId, documentId) =>
           Effect.map(
             unavailable(
-              sql<DbRow>`
+              sql<ShareLinkSqlRow>`
                 select ${sql.unsafe(LINK_SELECT)} from share_links
                 where workspace_id = ${workspaceId} and document_id = ${documentId}
                   and revoked_at is null
@@ -87,10 +110,11 @@ export const ShareLinksRepoSql: Layer.Layer<ShareLinksRepo, never, SqlClient.Sql
             ),
             (rows) => (rows[0] === undefined ? Option.none() : Option.some(decodeLink(rows[0]))),
           ),
-        lockByTokenHash: (tokenHash) =>
+        ),
+        lockByTokenHash: Effect.fn("ShareLinksRepo.lockByHash")((tokenHash) =>
           Effect.map(
             unavailable(
-              sql<DbRow>`
+              sql<ShareLinkSqlRow>`
                 select ${sql.unsafe(LINK_SELECT)} from share_links
                 where token_hash = ${tokenHash}
                 for update
@@ -98,7 +122,8 @@ export const ShareLinksRepoSql: Layer.Layer<ShareLinksRepo, never, SqlClient.Sql
             ),
             (rows) => (rows[0] === undefined ? Option.none() : Option.some(decodeLink(rows[0]))),
           ),
-        insert: (link) =>
+        ),
+        insert: Effect.fn("ShareLinksRepo.insert")((link) =>
           sql
             .withTransaction(
               sql`insert into share_links ${sql.insert({
@@ -114,47 +139,46 @@ export const ShareLinksRepoSql: Layer.Layer<ShareLinksRepo, never, SqlClient.Sql
               })}`,
             )
             .pipe(linkWriteFailure, Effect.asVoid),
-        revoke: (workspaceId, id, at) =>
-          Effect.gen(function* () {
-            const locked = yield* unavailable(
-              sql<{ id: string; revoked_at: string | null }>`
+        ),
+        revoke: Effect.fn("ShareLinksRepo.revoke")(function* (workspaceId, id, at) {
+          const locked = yield* unavailable(
+            sql<{ id: string; revoked_at: string | null }>`
                 select id, revoked_at from share_links
                 where workspace_id = ${workspaceId} and id = ${id}
                 for update
               `,
-            );
-            const row = locked[0];
-            if (row === undefined) {
-              return yield* Effect.fail(new NotFound({ entity: "ShareLink", id }));
-            }
-            if (row.revoked_at === null) {
-              yield* unavailable(
-                sql`update share_links set revoked_at = ${at}
+          );
+          const row = locked[0];
+          if (row === undefined) {
+            return yield* NotFound.make({ entity: "ShareLink", id });
+          }
+          if (row.revoked_at === null) {
+            yield* unavailable(
+              sql`update share_links set revoked_at = ${at}
                   where workspace_id = ${workspaceId} and id = ${id}`,
-              );
-            }
-          }),
-        markViewed: (workspaceId, id, at) =>
-          Effect.gen(function* () {
-            const locked = yield* unavailable(
-              sql<{ id: string; viewed_at: string | null }>`
+            );
+          }
+        }),
+        markViewed: Effect.fn("ShareLinksRepo.markViewed")(function* (workspaceId, id, at) {
+          const locked = yield* unavailable(
+            sql<{ id: string; viewed_at: string | null }>`
                 select id, viewed_at from share_links
                 where workspace_id = ${workspaceId} and id = ${id}
                 for update
               `,
-            );
-            const row = locked[0];
-            if (row === undefined) {
-              return yield* Effect.fail(new NotFound({ entity: "ShareLink", id }));
-            }
-            if (row.viewed_at === null) {
-              yield* unavailable(
-                sql`update share_links set viewed_at = ${at}
+          );
+          const row = locked[0];
+          if (row === undefined) {
+            return yield* NotFound.make({ entity: "ShareLink", id });
+          }
+          if (row.viewed_at === null) {
+            yield* unavailable(
+              sql`update share_links set viewed_at = ${at}
                   where workspace_id = ${workspaceId} and id = ${id}`,
-              );
-            }
-          }),
-        recordEvent: (event) =>
+            );
+          }
+        }),
+        recordEvent: Effect.fn("ShareLinksRepo.recordEvent")((event) =>
           unavailable(
             sql`insert into share_view_events ${sql.insert({
               id: event.id,
@@ -166,24 +190,27 @@ export const ShareLinksRepoSql: Layer.Layer<ShareLinksRepo, never, SqlClient.Sql
               at: event.at,
             })}`,
           ).pipe(Effect.asVoid),
-        hasEventSince: (workspaceId, link, visitor, kind, since) =>
-          Effect.map(
-            unavailable(
-              sql<{ ok: number }>`
+        ),
+        hasEventSince: Effect.fn("ShareLinksRepo.hasEventSince")(
+          (workspaceId, link, visitor, kind, since) =>
+            Effect.map(
+              unavailable(
+                sql<{ ok: number }>`
                 select 1 as ok from share_view_events
                 where workspace_id = ${workspaceId} and share_link_id = ${link}
                   and visitor_hash = ${visitor} and kind = ${kind}
                   and at > ${since}::timestamptz
                 limit 1
               `,
+              ),
+              (rows) => rows.length > 0,
             ),
-            (rows) => rows.length > 0,
-          ),
-        events: (workspaceId, documentId, page) =>
+        ),
+        events: Effect.fn("ShareLinksRepo.events")((workspaceId, documentId, page) =>
           Effect.map(
             unavailable(
               page.after === undefined
-                ? sql<DbRow>`
+                ? sql<ShareViewEventSqlRow>`
                     select ${sql.unsafe(EVENT_SELECT)}
                     from share_view_events e
                     join share_links l on l.workspace_id = e.workspace_id and l.id = e.share_link_id
@@ -191,7 +218,7 @@ export const ShareLinksRepoSql: Layer.Layer<ShareLinksRepo, never, SqlClient.Sql
                     order by e.at desc, e.id desc
                     limit ${page.limit + 1}
                   `
-                : sql<DbRow>`
+                : sql<ShareViewEventSqlRow>`
                     select ${sql.unsafe(EVENT_SELECT)}
                     from share_view_events e
                     join share_links l on l.workspace_id = e.workspace_id and l.id = e.share_link_id
@@ -203,11 +230,12 @@ export const ShareLinksRepoSql: Layer.Layer<ShareLinksRepo, never, SqlClient.Sql
                   `,
             ),
             (rows) => ({
-              rows: rows.slice(0, page.limit).map(decodeEvent),
+              rows: Arr.map(rows.slice(0, page.limit), decodeEvent),
               more: rows.length > page.limit,
             }),
           ),
-        viewStats: (workspaceId, link) =>
+        ),
+        viewStats: Effect.fn("ShareLinksRepo.viewStats")((workspaceId, link) =>
           Effect.map(
             unavailable(
               sql<{ views: string; last_viewed_at: string | null }>`
@@ -222,6 +250,7 @@ export const ShareLinksRepoSql: Layer.Layer<ShareLinksRepo, never, SqlClient.Sql
               lastViewedAt: rows[0]?.last_viewed_at ?? null,
             }),
           ),
+        ),
       });
     }),
   );

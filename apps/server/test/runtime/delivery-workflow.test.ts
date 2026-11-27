@@ -13,9 +13,17 @@ import {
   Workspaces,
 } from "@kvitbit/domain/contract";
 import { EmailNotAccepted, EmailSender } from "@kvitbit/domain/ports";
-import { BigDecimal, Cause, Duration, Effect, Layer, Option, Schedule, Schema } from "effect";
-import { SqlClient } from "effect/sql";
-import { TestClock } from "effect/testing";
+import * as Arr from "effect/Array";
+import * as BigDecimal from "effect/BigDecimal";
+import * as Cause from "effect/Cause";
+import * as Duration from "effect/Duration";
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
+import * as Schedule from "effect/Schedule";
+import * as Schema from "effect/Schema";
+import * as SqlClient from "effect/sql/SqlClient";
+import * as TestClock from "effect/testing/TestClock";
 import * as DurableClock from "effect/workflow/DurableClock";
 import * as WorkflowEngine from "effect/workflow/WorkflowEngine";
 import { PgliteTestDatabase } from "../../src/persistence";
@@ -63,10 +71,11 @@ test.each([
           caller,
           Effect.gen(function* () {
             const contact = yield* contacts.save({ name: "Buyer", roles: ["customer"] });
+            const contactId = yield* Schema.decodeUnknownEffect(ContactId)(contact.id);
             const doc = yield* documents.issue({
               input: {
                 kind: "invoice",
-                contact: Schema.decodeUnknownSync(ContactId)(contact.id),
+                contact: contactId,
                 issuedOn: IsoDate.make("2026-11-23"),
                 currency: CurrencyCode.make("CZK"),
                 due: { inDays: 14 },
@@ -97,7 +106,9 @@ test.each([
             return {
               id,
               outcome,
-              status: updated.deliveries.find((entry) => entry.id === id)?.status,
+              status: Option.getOrUndefined(
+                Arr.findFirst(updated.deliveries, (entry) => entry.id === id),
+              )?.status,
             };
           }),
         );
@@ -109,7 +120,7 @@ test.each([
       value: { outcome: terminal, status: terminal },
     });
     expect(attemptedKeys).toHaveLength(expectedAttempts);
-    if (!expired) expect(new Set(attemptedKeys).size).toBe(1);
+    expect(new Set(attemptedKeys).size).toBe(expired ? 0 : 1);
   },
   30_000,
 );
@@ -191,21 +202,22 @@ test("the default delivery retry policy caps spacing and total elapsed time", as
       const schedule = yield* Schedule.toStep(DEFAULT_DELIVERY_RETRY_SCHEDULE);
       const delays: number[] = [];
       let elapsed = 0;
-      for (;;) {
-        const next = yield* schedule(elapsed, undefined).pipe(
-          Effect.catchIf(Cause.isDone, () => Effect.succeed(null)),
-        );
-        if (next === null) return delays;
+      const nextStep = (time: number) =>
+        schedule(time, undefined).pipe(Effect.catchIf(Cause.isDone, () => Effect.succeed(null)));
+      let next = yield* nextStep(elapsed);
+      while (next !== null) {
         const delay = Duration.toMillis(next[1]);
         delays.push(delay);
         elapsed += delay;
+        next = yield* nextStep(elapsed);
       }
+      return delays;
     }),
   );
   expect(waits[0]).toBe(30_000);
   expect(waits[1]).toBe(60_000);
   expect(Math.max(...waits)).toBe(3_600_000);
-  const total = waits.reduce((sum, delay) => sum + delay, 0);
+  const total = Arr.reduce(waits, 0, (sum, delay) => sum + delay);
   expect(total).toBeLessThanOrEqual(86_400_000);
   expect(total).toBeGreaterThan(86_400_000 - 3_600_000);
 });

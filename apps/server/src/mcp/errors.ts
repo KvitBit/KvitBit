@@ -3,12 +3,21 @@
  * Core errors inside a tool become a tool result with `isError: true`,
  * `structuredContent: { error: <encoded tagged CoreError> }`, and localized text.
  */
+
 import { McpToolError } from "@kvitbit/api-contract";
 import { can } from "@kvitbit/core";
 import type { Action, CoreError, Locale, MemberCaller } from "@kvitbit/domain/contract";
-import { Schema } from "effect";
+import * as Arr from "effect/Array";
+import * as Effect from "effect/Effect";
+import * as Schema from "effect/Schema";
+import * as Str from "effect/String";
 
-export const encodeToolError = Schema.encodeUnknownSync(Schema.toCodecJson(McpToolError));
+const encodeError = Schema.encodeEffect(Schema.toCodecJson(McpToolError));
+export const encodeToolError = (error: CoreError) =>
+  encodeError({ error }).pipe(
+    Effect.flatMap(Schema.decodeUnknownEffect(Schema.JsonObject)),
+    Effect.orDie,
+  );
 
 const ACTION_LABELS_EN: Partial<Record<Action, string>> = {
   "workspace.read": "read Workspace details",
@@ -65,7 +74,7 @@ const actionLabel = (action: Action, locale: Locale): string =>
 
 const hasAnyWriteScope = (caller: MemberCaller): boolean => {
   if (caller.scopes === "all") return true;
-  return caller.scopes.some((scope) => scope.endsWith(":write"));
+  return Arr.some(caller.scopes, (scope) => Str.endsWith(":write")(scope));
 };
 
 /**
@@ -73,7 +82,7 @@ const hasAnyWriteScope = (caller: MemberCaller): boolean => {
  * - Role allows the action, grant does not -> explains read-only / reconnect with write access.
  * - Role does not allow the action -> names the role in this Workspace.
  */
-export const formatForbiddenText = (action: Action, caller: MemberCaller): string => {
+const formatForbiddenText = (action: Action, caller: MemberCaller): string => {
   const roleAllows = can({ ...caller, scopes: "all" }, action);
   const label = actionLabel(action, caller.locale);
   if (roleAllows) {
@@ -91,55 +100,60 @@ export const formatForbiddenText = (action: Action, caller: MemberCaller): strin
     : `Your role in this Workspace (${caller.role}) cannot ${label}.`;
 };
 
-export const formatCoreErrorText = (error: CoreError, caller: MemberCaller): string => {
-  const cs = caller.locale === "cs";
-  switch (error._tag) {
-    case "Forbidden":
-      return formatForbiddenText(error.action, caller);
-    case "NotFound":
-      return cs
-        ? `Záznam ${error.entity} (${error.id}) nebyl nalezen.`
-        : `${error.entity} (${error.id}) was not found.`;
-    case "Invalid": {
-      const details = error.issues
-        .map((issue) =>
-          issue.path.length > 0 ? `${issue.path.join(".")}: ${issue.code}` : issue.code,
-        )
-        .join("; ");
-      return cs ? `Neplatný požadavek: ${details}.` : `Invalid request: ${details}.`;
-    }
-    case "Conflict": {
-      switch (error.reason) {
-        case "revision_changed":
-          return cs
-            ? `Záznam byl mezitím změněn (aktuální revize ${error.currentRevision ?? "neznámá"}). Načtěte jej znovu.`
-            : `The record changed since you last read it (current revision ${error.currentRevision ?? "unknown"}). Read it again before retrying.`;
-        case "document_locked":
-          return cs
-            ? "Doklad je uzamčen a nelze jej upravit."
-            : "The document is locked and cannot be modified.";
-        case "illegal_transition":
-          return cs
-            ? `Operaci nelze v aktuálním stavu dokladu provést${error.detail ? ` (${error.detail})` : ""}.`
-            : `Operation is not allowed in the current state${error.detail ? ` (${error.detail})` : ""}.`;
-        case "duplicate":
-          return cs
-            ? `Duplicitní záznam${error.detail ? ` (${error.detail})` : ""}.`
-            : `Duplicate record${error.detail ? ` (${error.detail})` : ""}.`;
-        case "idempotency_mismatch":
-          return cs
-            ? "Stejný klíč idempotence byl již použit s jinými parametry."
-            : "The same idempotency key was already used with different arguments.";
-        default:
-          return cs ? "Konflikt." : "Conflict.";
+export const formatCoreErrorText =
+  (caller: MemberCaller) =>
+  (error: CoreError): string => {
+    const cs = caller.locale === "cs";
+    switch (error._tag) {
+      case "Forbidden":
+        return formatForbiddenText(error.action, caller);
+      case "NotFound":
+        return cs
+          ? `Záznam ${error.entity} (${error.id}) nebyl nalezen.`
+          : `${error.entity} (${error.id}) was not found.`;
+      case "Invalid": {
+        const details = Arr.join(
+          Arr.map(error.issues, (issue) =>
+            issue.path.length > 0
+              ? `${Arr.join(Arr.map(issue.path, String), ".")}: ${issue.code}`
+              : issue.code,
+          ),
+          "; ",
+        );
+        return cs ? `Neplatný požadavek: ${details}.` : `Invalid request: ${details}.`;
       }
+      case "Conflict": {
+        switch (error.reason) {
+          case "revision_changed":
+            return cs
+              ? `Záznam byl mezitím změněn (aktuální revize ${error.currentRevision ?? "neznámá"}). Načtěte jej znovu.`
+              : `The record changed since you last read it (current revision ${error.currentRevision ?? "unknown"}). Read it again before retrying.`;
+          case "document_locked":
+            return cs
+              ? "Doklad je uzamčen a nelze jej upravit."
+              : "The document is locked and cannot be modified.";
+          case "illegal_transition":
+            return cs
+              ? `Operaci nelze v aktuálním stavu dokladu provést${error.detail !== undefined ? ` (${error.detail})` : ""}.`
+              : `Operation is not allowed in the current state${error.detail !== undefined ? ` (${error.detail})` : ""}.`;
+          case "duplicate":
+            return cs
+              ? `Duplicitní záznam${error.detail !== undefined ? ` (${error.detail})` : ""}.`
+              : `Duplicate record${error.detail !== undefined ? ` (${error.detail})` : ""}.`;
+          case "idempotency_mismatch":
+            return cs
+              ? "Stejný klíč idempotence byl již použit s jinými parametry."
+              : "The same idempotency key was already used with different arguments.";
+          default:
+            return cs ? "Konflikt." : "Conflict.";
+        }
+      }
+      case "Unavailable":
+        return cs
+          ? `Služba ${error.dependency} je dočasně nedostupná. Zkuste to prosím později.`
+          : `Service ${error.dependency} is temporarily unavailable. Please try again later.`;
     }
-    case "Unavailable":
-      return cs
-        ? `Služba ${error.dependency} je dočasně nedostupná. Zkuste to prosím později.`
-        : `Service ${error.dependency} is temporarily unavailable. Please try again later.`;
-  }
-};
+  };
 
 export interface McpToolCallResult {
   readonly isError: boolean;
@@ -160,11 +174,16 @@ export interface McpToolCallResult {
         };
       }
   >;
-  readonly structuredContent?: Record<string, unknown>;
+  readonly structuredContent?: Schema.JsonObject;
 }
 
-export const coreErrorToolResult = (error: CoreError, caller: MemberCaller): McpToolCallResult => ({
-  isError: true,
-  content: [{ type: "text", text: formatCoreErrorText(error, caller) }],
-  structuredContent: encodeToolError({ error }) as Record<string, unknown>,
-});
+export const coreErrorToolResult = (caller: MemberCaller) => (error: CoreError) =>
+  encodeToolError(error).pipe(
+    Effect.map(
+      (structuredContent): McpToolCallResult => ({
+        isError: true,
+        content: [{ type: "text", text: formatCoreErrorText(caller)(error) }],
+        structuredContent,
+      }),
+    ),
+  );

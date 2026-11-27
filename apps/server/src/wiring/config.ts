@@ -2,9 +2,11 @@
  * Environment configuration for driven-port adapters (`apps/server/src/wiring/**`).
  * Variable names follow the Phase 3 runtime contract agreed on board threads #871/#908/#913.
  */
-import { Config, type Option, type Redacted } from "effect";
+import * as Config from "effect/Config";
+import type * as Option from "effect/Option";
+import type * as Redacted from "effect/Redacted";
 
-export type BlobDriver = "local" | "gcs";
+type BlobDriver = "local" | "gcs";
 
 export interface EmailWiringConfig {
   readonly from: string;

@@ -1,7 +1,8 @@
 /** The `Api` HttpApi at `/api/v1` with every group, its middleware and `openapi.json`. */
 import { Api } from "@kvitbit/api-contract";
-import { Layer } from "effect";
-import { HttpApiBuilder, HttpApiScalar } from "effect/http-api";
+import * as HttpApiBuilder from "effect/http-api/HttpApiBuilder";
+import * as HttpApiScalar from "effect/http-api/HttpApiScalar";
+import * as Layer from "effect/Layer";
 import { EdgeMiddlewareLive } from "./edge/middleware";
 import { SchemaErrorsLive } from "./edge/response";
 import { ApiKeysGroupLive } from "./groups/apiKeys";
@@ -27,7 +28,7 @@ import { TemplatesGroupLive } from "./groups/templates";
 import { ThemesGroupLive } from "./groups/themes";
 import { WorkspaceGroupLive } from "./groups/workspace";
 
-export const ApiGroupsLive = Layer.mergeAll(
+const ApiGroupsLive = Layer.mergeAll(
   ConfigGroupLive,
   BotProtectionGroupLive,
   PublicShareGroupLive,

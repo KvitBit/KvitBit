@@ -1,7 +1,9 @@
 import { expect, test } from "bun:test";
 import { Caller, ExportId, UserId, Workspaces } from "@kvitbit/domain/contract";
-import { Effect, Layer, Option } from "effect";
-import { SqlClient } from "effect/sql";
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
+import * as SqlClient from "effect/sql/SqlClient";
 import * as WorkflowEngine from "effect/workflow/WorkflowEngine";
 import { makeCronHandlers } from "../../src/runtime/crons";
 import { DataExportWorkflow, makeWorkflowHandlersLayer } from "../../src/runtime/workflows";
@@ -38,7 +40,11 @@ test("outbox reconciliation resumes a failed export finalizer under the original
         let suspended = false;
         for (let attempts = 0; attempts < 100; attempts++) {
           const result = yield* DataExportWorkflow.poll(executionId);
-          if (Option.isSome(result) && result.value._tag === "Suspended" && result.value.failed) {
+          if (
+            Option.isSome(result) &&
+            result.value._tag === "Suspended" &&
+            result.value.failed === true
+          ) {
             suspended = true;
             break;
           }

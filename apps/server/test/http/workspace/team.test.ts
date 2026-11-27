@@ -5,12 +5,21 @@ import {
   Caller,
   CurrentCaller,
   type InvitationId,
-  type InvitationToken,
+  InvitationToken,
+  InvitationView,
+  MemberView,
+  UserId,
   Workspaces,
 } from "@kvitbit/domain/contract";
-import { Effect, Ref } from "effect";
-import { SqlClient } from "effect/sql";
-import { TestClock } from "effect/testing";
+import * as Arr from "effect/Array";
+import * as Effect from "effect/Effect";
+import * as Fn from "effect/Function";
+import * as Option from "effect/Option";
+import * as Ref from "effect/Ref";
+import * as Schema from "effect/Schema";
+import * as Str from "effect/String";
+import * as SqlClient from "effect/sql/SqlClient";
+import * as TestClock from "effect/testing/TestClock";
 import { as, type Harness, json, makeHarness, TEST_NOW, type TestUser } from "../harness";
 
 let h: Harness;
@@ -19,11 +28,18 @@ let teammate: TestUser;
 let workspaceId: string;
 let base: string;
 
+const decodeInvitation = Fn.flow(Schema.decodeUnknownEffect(InvitationView), Effect.runSync);
+const decodeInvitations = Fn.flow(
+  Schema.decodeUnknownEffect(Schema.Array(InvitationView)),
+  Effect.runSync,
+);
+const decodeMembers = Fn.flow(Schema.decodeUnknownEffect(Schema.Array(MemberView)), Effect.runSync);
+
 const req = (
   user: TestUser,
   path: string,
   method: string,
-  body?: unknown,
+  body?: Schema.Json,
   headers: Record<string, string> = {},
 ) => {
   const init = body === undefined ? {} : json(body);
@@ -31,24 +47,21 @@ const req = (
     ...init,
     method,
     headers: {
-      ...((init.headers as Record<string, string> | undefined) ?? {}),
+      ...(body === undefined ? undefined : { "content-type": "application/json" }),
       ...as.mobile(user),
       ...headers,
     },
   });
 };
 
-/** Invites `user` via HTTP and accepts the invitation in core so they become a member. */
-const addMemberViaInvite = async (user: TestUser, role: "admin" | "member" | "accountant") => {
-  const res = await req(owner, "/invitations", "POST", { email: user.email, role });
-  expect(res.status).toBe(201);
-  const inv = (await res.json()) as { id: string };
-  await h.run(
+/** Accepts an HTTP-created invitation in core so the user becomes a member. */
+const acceptInvitation = (user: TestUser, invitationId: InvitationId) =>
+  h.run(
     Effect.gen(function* () {
       const ws = yield* Workspaces;
       const tokens = yield* InvitationTokens;
-      const token = (yield* tokens.token(inv.id as InvitationId, 0)) as InvitationToken;
-      yield* ws.acceptInvitation(token);
+      const token = yield* tokens.token(invitationId, 0);
+      yield* ws.acceptInvitation(InvitationToken.make(token));
     }).pipe(
       Effect.provideService(
         CurrentCaller,
@@ -56,8 +69,6 @@ const addMemberViaInvite = async (user: TestUser, role: "admin" | "member" | "ac
       ),
     ),
   );
-  return inv.id;
-};
 
 /** Seeds an API key and an OAuth grant (with access/refresh tokens) for `user` in PGlite. */
 const seedEdgeCredentials = async (user: TestUser) => {
@@ -71,7 +82,7 @@ const seedEdgeCredentials = async (user: TestUser) => {
       `;
       yield* sql`
         INSERT INTO public.workspaces (id, slug, name)
-        VALUES (${workspaceId}, ${`ws-${workspaceId.slice(-6)}`}, 'Alfa s.r.o.')
+        VALUES (${workspaceId}, ${`ws-${Str.slice(-6)(workspaceId)}`}, 'Alfa s.r.o.')
         ON CONFLICT (id) DO NOTHING
       `;
       yield* sql`
@@ -120,12 +131,12 @@ beforeEach(async () => {
   h = makeHarness({
     users: [
       {
-        userId: "01900000-0000-7000-8000-000000000001" as never,
+        userId: UserId.make("01900000-0000-7000-8000-000000000001"),
         name: "Olga",
         email: "olga@example.cz",
       },
       {
-        userId: "01900000-0000-7000-8000-000000000002" as never,
+        userId: UserId.make("01900000-0000-7000-8000-000000000002"),
         name: "Petr",
         email: "petr@example.cz",
       },
@@ -147,7 +158,7 @@ describe("team group", () => {
   test("listMembers returns current members", async () => {
     const res = await req(owner, "/members", "GET");
     expect(res.status).toBe(200);
-    const members = (await res.json()) as Array<{ userId: string; role: string }>;
+    const members = decodeMembers(await res.json());
     expect(members).toHaveLength(1);
     expect(members[0]?.userId).toBe(owner.id);
     expect(members[0]?.role).toBe("owner");
@@ -162,7 +173,8 @@ describe("team group", () => {
       { "idempotency-key": "invite-key-0001" },
     );
     expect(inviteRes.status).toBe(201);
-    const inv = (await inviteRes.json()) as { id: string; email: string; status: string };
+    const invitationWire = await inviteRes.json();
+    const inv = decodeInvitation(invitationWire);
     expect(inviteRes.headers.get("location")).toBe(`${base}/invitations/${inv.id}`);
     expect(inv.status).toBe("pending");
 
@@ -175,11 +187,11 @@ describe("team group", () => {
     );
     expect(replay.status).toBe(201);
     expect(replay.headers.get("idempotent-replayed")).toBe("true");
-    expect(await replay.json()).toEqual(inv);
+    expect(await replay.json()).toEqual(invitationWire);
 
     const listRes = await req(owner, "/invitations", "GET");
     expect(listRes.status).toBe(200);
-    expect(((await listRes.json()) as Array<{ id: string }>).map((i) => i.id)).toContain(inv.id);
+    expect(Arr.map(decodeInvitations(await listRes.json()), (i) => i.id)).toContain(inv.id);
 
     // Advance past resend cooldown (60s)
     await h.run(TestClock.setTime(TEST_NOW + 61_000));
@@ -194,18 +206,21 @@ describe("team group", () => {
   });
 
   test("setRole and removeMember revoke member API keys and OAuth grants", async () => {
-    await addMemberViaInvite(teammate, "member");
+    const invite = await req(owner, "/invitations", "POST", {
+      email: teammate.email,
+      role: "member",
+    });
+    expect(invite.status).toBe(201);
+    await acceptInvitation(teammate, decodeInvitation(await invite.json()).id);
     await seedEdgeCredentials(teammate);
     expect(await countEdgeCredentials(teammate)).toEqual({ keys: 1, consents: 1, tokens: 1 });
 
     const roleRes = await req(owner, `/members/${teammate.id}/role`, "PUT", { role: "accountant" });
     expect(roleRes.status).toBe(204);
 
-    const members = (await (await req(owner, "/members", "GET")).json()) as Array<{
-      userId: string;
-      role: string;
-    }>;
-    expect(members.find((m) => m.userId === teammate.id)?.role).toBe("accountant");
+    const members = decodeMembers(await (await req(owner, "/members", "GET")).json());
+    const updatedMember = Arr.findFirst(members, (m) => m.userId === teammate.id);
+    expect(Option.getOrUndefined(updatedMember)?.role).toBe("accountant");
 
     const removeRes = await req(owner, `/members/${teammate.id}`, "DELETE");
     expect(removeRes.status).toBe(204);
@@ -213,7 +228,12 @@ describe("team group", () => {
   });
 
   test("leave: owner cannot leave (409); member leaves (204) and credentials are revoked", async () => {
-    await addMemberViaInvite(teammate, "member");
+    const invite = await req(owner, "/invitations", "POST", {
+      email: teammate.email,
+      role: "member",
+    });
+    expect(invite.status).toBe(201);
+    await acceptInvitation(teammate, decodeInvitation(await invite.json()).id);
     await seedEdgeCredentials(teammate);
 
     const ownerLeave = await req(owner, "/members/me/leave", "POST");
@@ -225,7 +245,12 @@ describe("team group", () => {
   });
 
   test("transferOwnership enforces A6 fresh session and transfers ownership", async () => {
-    await addMemberViaInvite(teammate, "admin");
+    const invite = await req(owner, "/invitations", "POST", {
+      email: teammate.email,
+      role: "admin",
+    });
+    expect(invite.status).toBe(201);
+    await acceptInvitation(teammate, decodeInvitation(await invite.json()).id);
 
     // API key -> 401 credential_not_allowed
     const keyRes = await h.fetch(`${base}/ownership-transfer`, {
@@ -256,11 +281,10 @@ describe("team group", () => {
     const okRes = await req(owner, "/ownership-transfer", "POST", { to: teammate.id });
     expect(okRes.status).toBe(204);
 
-    const members = (await (await req(teammate, "/members", "GET")).json()) as Array<{
-      userId: string;
-      role: string;
-    }>;
-    expect(members.find((m) => m.userId === teammate.id)?.role).toBe("owner");
-    expect(members.find((m) => m.userId === owner.id)?.role).toBe("admin");
+    const members = decodeMembers(await (await req(teammate, "/members", "GET")).json());
+    const newOwner = Arr.findFirst(members, (m) => m.userId === teammate.id);
+    const formerOwner = Arr.findFirst(members, (m) => m.userId === owner.id);
+    expect(Option.getOrUndefined(newOwner)?.role).toBe("owner");
+    expect(Option.getOrUndefined(formerOwner)?.role).toBe("admin");
   });
 });

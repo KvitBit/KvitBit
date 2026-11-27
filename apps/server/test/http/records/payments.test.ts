@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { strictEqual } from "node:assert/strict";
 import {
-  type ContactId,
+  ContactId,
   Contacts,
   CurrentCaller,
   type DocumentId,
@@ -8,8 +9,23 @@ import {
   IsoDate,
   type MemberCaller,
 } from "@kvitbit/domain/contract";
-import { BigDecimal, Effect } from "effect";
+import * as Arr from "effect/Array";
+import * as BigDecimal from "effect/BigDecimal";
+import * as Effect from "effect/Effect";
+import * as Fn from "effect/Function";
+import * as Schema from "effect/Schema";
 import { as, type Harness, json, makeHarness, type TestUser } from "../harness";
+
+const decodeIds = Fn.flow(
+  Schema.decodeUnknownEffect(Schema.Array(Schema.Struct({ id: Schema.String }))),
+  Effect.runSync,
+);
+const decodeRecordedPayment = Fn.flow(
+  Schema.decodeUnknownEffect(
+    Schema.Struct({ payment: Schema.Struct({ id: Schema.String }), settlement: Schema.String }),
+  ),
+  Effect.runSync,
+);
 
 let h: Harness;
 let owner: TestUser;
@@ -34,7 +50,7 @@ beforeEach(async () => {
         address: { city: "Brno", country: "CZ" },
         roles: ["customer", "supplier"],
       });
-      const contactId = contact.id as ContactId;
+      const contactId = yield* Schema.decodeUnknownEffect(ContactId)(contact.id);
       const doc = yield* documents.issue({
         input: {
           kind: "invoice",
@@ -68,22 +84,24 @@ beforeEach(async () => {
   const expRes = await h.fetch(`${wsBase}/expenses`, {
     ...expInit,
     method: "POST",
-    headers: { ...(expInit.headers as Record<string, string>), ...as.mobile(owner) },
+    headers: { "content-type": "application/json", ...as.mobile(owner) },
   });
-  expect(expRes.status).toBe(201);
-  expenseId = ((await expRes.json()) as { id: string }).id;
+  strictEqual(expRes.status, 201);
+  expenseId = Schema.decodeUnknownEffect(Schema.Struct({ id: Schema.String }))(
+    await expRes.json(),
+  ).pipe(Effect.runSync).id;
 });
 
 afterEach(async () => {
   await h.dispose();
 });
 
-const postPayment = (body: unknown, headers: Record<string, string> = {}) => {
+const postPayment = (body: Schema.Json, headers: Record<string, string> = {}) => {
   const init = json(body);
   return h.fetch(`${wsBase}/payments`, {
     ...init,
     method: "POST",
-    headers: { ...(init.headers as Record<string, string>), ...as.mobile(owner), ...headers },
+    headers: { "content-type": "application/json", ...as.mobile(owner), ...headers },
   });
 };
 
@@ -100,11 +118,8 @@ describe("payments group", () => {
       { "idempotency-key": "pay-doc-0001" },
     );
     expect(first.status).toBe(201);
-    const body = (await first.json()) as {
-      payment: { id: string };
-      settlement: string;
-      issued: unknown[];
-    };
+    const firstBody = await first.json();
+    const body = decodeRecordedPayment(firstBody);
     expect(body.settlement).toBe("partially_paid");
     expect(first.headers.get("location")).toBe(`${wsBase}/payments/${body.payment.id}`);
 
@@ -120,14 +135,14 @@ describe("payments group", () => {
     );
     expect(replay.status).toBe(201);
     expect(replay.headers.get("idempotent-replayed")).toBe("true");
-    expect(await replay.json()).toEqual(body);
+    expect(await replay.json()).toEqual(firstBody);
 
     const listed = await h.fetch(`${wsBase}/documents/${documentId}/payments`, {
       headers: as.mobile(owner),
     });
     expect(listed.status).toBe(200);
-    const items = (await listed.json()) as Array<{ id: string }>;
-    expect(items.map((p) => p.id)).toEqual([body.payment.id]);
+    const items = decodeIds(await listed.json());
+    expect(Arr.map(items, (p) => p.id)).toEqual([body.payment.id]);
   });
 
   test("record for expense, listForExpense, and remove returns 204", async () => {
@@ -137,22 +152,21 @@ describe("payments group", () => {
       method: "card",
     });
     expect(res.status).toBe(201);
-    const recorded = (await res.json()) as { payment: { id: string }; settlement: string };
+    const recorded = decodeRecordedPayment(await res.json());
     expect(recorded.settlement).toBe("paid");
 
     const listed = await h.fetch(`${wsBase}/expenses/${expenseId}/payments`, {
       headers: as.mobile(owner),
     });
     expect(listed.status).toBe(200);
-    expect(((await listed.json()) as Array<{ id: string }>).map((p) => p.id)).toEqual([
-      recorded.payment.id,
-    ]);
+    const items = decodeIds(await listed.json());
+    expect(Arr.map(items, (p) => p.id)).toEqual([recorded.payment.id]);
 
     const removeInit = json({ reason: "Zadáno omylem" });
     const removed = await h.fetch(`${wsBase}/payments/${recorded.payment.id}/remove`, {
       ...removeInit,
       method: "POST",
-      headers: { ...(removeInit.headers as Record<string, string>), ...as.mobile(owner) },
+      headers: { "content-type": "application/json", ...as.mobile(owner) },
     });
     expect(removed.status).toBe(204);
 
@@ -170,7 +184,7 @@ describe("payments group", () => {
       {
         ...emptyInit,
         method: "POST",
-        headers: { ...(emptyInit.headers as Record<string, string>), ...as.mobile(owner) },
+        headers: { "content-type": "application/json", ...as.mobile(owner) },
       },
     );
     expect(emptyRes.status).toBe(422);
@@ -181,7 +195,7 @@ describe("payments group", () => {
       {
         ...validInit,
         method: "POST",
-        headers: { ...(validInit.headers as Record<string, string>), ...as.mobile(owner) },
+        headers: { "content-type": "application/json", ...as.mobile(owner) },
       },
     );
     expect(missing.status).toBe(404);

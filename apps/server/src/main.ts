@@ -9,11 +9,15 @@
  * - `KVITBIT_RUNNER_MODE=cluster`: runs `ClusterClientRuntimeLive` (client-only sharding over
  *   `SqlMessageStorage`) and serves HTTP only; workflows and crons execute on `worker.ts`.
  */
+// @effect-diagnostics-next-line nodeBuiltinImport:off NodeHttpServer.layer requires a Node HTTP server factory.
 import { createServer } from "node:http";
-import { NodeHttpServer, NodeRuntime } from "@effect/platform-node";
+import * as NodeHttpServer from "@effect/platform-node/NodeHttpServer";
+import * as NodeRuntime from "@effect/platform-node/NodeRuntime";
 import { CoreLive, IdGeneratorLive } from "@kvitbit/core";
-import { Effect, Layer } from "effect";
-import { HttpRouter } from "effect/http";
+import * as Effect from "effect/Effect";
+import * as HttpRouter from "effect/http/HttpRouter";
+import * as Layer from "effect/Layer";
+import * as Str from "effect/String";
 import { AllRoutesLive, EdgeServicesLive } from "./app";
 import { ServerConfig } from "./config";
 import { PersistenceLive, PgDatabaseLive } from "./persistence";
@@ -78,10 +82,10 @@ export const serverProgram = Effect.gen(function* () {
   return yield* Layer.launch(ServerRuntimeLive);
 });
 
+// Older Node versions lack import.meta.main.
+const entryPath = process.argv[1] ?? "";
 const isMain =
-  typeof import.meta.main === "boolean"
-    ? import.meta.main
-    : process.argv[1]?.endsWith("main.ts") || process.argv[1]?.endsWith("main.js");
+  import.meta.main ?? (Str.endsWith("main.ts")(entryPath) || Str.endsWith("main.js")(entryPath));
 
 if (isMain) {
   NodeRuntime.runMain(serverProgram);

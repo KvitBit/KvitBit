@@ -5,15 +5,15 @@
  * Material Theme Builder JSON identically to the offline client engine without depending on
  * `@kvitbit/ui-port`, plus a bounded content-hash cache (rule T3).
  */
-import { createHash } from "node:crypto";
 import {
   EXTENDED_ROLES,
   type ExtendedColor,
   type ExtendedRole,
+  ExtendedRole as ExtendedRoleSchema,
   type Hex,
   M3_COLOR_ROLES,
   type M3ColorRole,
-  type ResolvedScheme,
+  ResolvedScheme,
   type ResolvedTheme,
   THEME_JSON_MAX_BYTES,
   type ThemePresetId,
@@ -21,7 +21,14 @@ import {
   type ThemeWarning,
 } from "@kvitbit/api-contract";
 import { Hex as HexSchema, Invalid, type Issue } from "@kvitbit/domain/contract";
-import { Effect, Exit, Schema } from "effect";
+import * as Arr from "effect/Array";
+import * as Digest from "effect/crypto/Digest";
+import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
+import * as Predicate from "effect/Predicate";
+import * as Rec from "effect/Record";
+import * as Schema from "effect/Schema";
+import * as Str from "effect/String";
 import {
   clamp,
   contrastRatio,
@@ -46,9 +53,9 @@ const SCHEME_VARIANTS = [
 ] as const;
 type SchemeVariant = (typeof SCHEME_VARIANTS)[number];
 
-const isDarkVariant = (v: SchemeVariant): boolean => v.startsWith("dark");
+const isDarkVariant = Str.startsWith("dark");
 const contrastLevelOf = (v: SchemeVariant): 0 | 1 | 2 =>
-  v.endsWith("High") ? 2 : v.endsWith("Medium") ? 1 : 0;
+  Str.endsWith("High")(v) ? 2 : Str.endsWith("Medium")(v) ? 1 : 0;
 
 interface PaletteTuning {
   readonly hueShift?: number;
@@ -122,11 +129,13 @@ const accent = (
   onContainer: { palette, ...ACCENT_TONES.onContainer },
 });
 
-const fixed = (palette: RoleTone["palette"]) => ({
-  fixed: { palette, light: [90, 90, 90], dark: [90, 90, 90] } as RoleTone,
-  fixedDim: { palette, light: [80, 80, 80], dark: [80, 80, 80] } as RoleTone,
-  onFixed: { palette, light: [10, 5, 0], dark: [10, 5, 0] } as RoleTone,
-  onFixedVariant: { palette, light: [30, 25, 20], dark: [30, 25, 20] } as RoleTone,
+const fixed = (
+  palette: RoleTone["palette"],
+): Record<"fixed" | "fixedDim" | "onFixed" | "onFixedVariant", RoleTone> => ({
+  fixed: { palette, light: [90, 90, 90], dark: [90, 90, 90] },
+  fixedDim: { palette, light: [80, 80, 80], dark: [80, 80, 80] },
+  onFixed: { palette, light: [10, 5, 0], dark: [10, 5, 0] },
+  onFixedVariant: { palette, light: [30, 25, 20], dark: [30, 25, 20] },
 });
 
 const n = (light: Tones, dark: Tones): RoleTone => ({ palette: "neutral", light, dark });
@@ -142,7 +151,7 @@ const TF = fixed("tertiary");
 const SURFACE = n([98, 98, 99], [6, 5, 4]);
 const ON_SURFACE = n([10, 6, 0], [90, 96, 100]);
 
-const ROLE_TONES: Record<M3ColorRole, RoleTone> = {
+const ROLE_TONES = {
   primary: P.color,
   onPrimary: P.onColor,
   primaryContainer: P.container,
@@ -192,7 +201,7 @@ const ROLE_TONES: Record<M3ColorRole, RoleTone> = {
   outlineVariant: nv([80, 70, 55], [30, 40, 55]),
   shadow: n([0, 0, 0], [0, 0, 0]),
   scrim: n([0, 0, 0], [0, 0, 0]),
-};
+} satisfies Record<M3ColorRole, RoleTone>;
 
 const toneOf = (role: M3ColorRole, variant: SchemeVariant, p: SchemePalettes): number => {
   const spec = ROLE_TONES[role];
@@ -204,13 +213,8 @@ const toneOf = (role: M3ColorRole, variant: SchemeVariant, p: SchemePalettes): n
   return level === 0 ? p.primaryTone : Math.min(tone, p.primaryTone);
 };
 
-const generateRoles = (p: SchemePalettes, variant: SchemeVariant): RoleMap => {
-  const out = {} as Record<M3ColorRole, Hex>;
-  for (const role of M3_COLOR_ROLES) {
-    out[role] = hexFromRgb(p[ROLE_TONES[role].palette].tone(toneOf(role, variant, p)));
-  }
-  return out;
-};
+const generateRoles = (p: SchemePalettes, variant: SchemeVariant): RoleMap =>
+  Rec.map(ROLE_TONES, ({ palette }, role) => hexFromRgb(p[palette].tone(toneOf(role, variant, p))));
 
 const derivedOverrides = (
   recipe: ThemeRecipe,
@@ -222,7 +226,7 @@ const derivedOverrides = (
   const base: SchemeVariant = isDarkVariant(variant) ? "dark" : "light";
   const std = recipe.overrides?.[base] ?? {};
   const out: Partial<Record<M3ColorRole, Hex>> = {};
-  for (const role of Object.keys(std) as M3ColorRole[]) {
+  for (const role of M3_COLOR_ROLES) {
     const hex = std[role];
     if (hex === undefined) continue;
     const step = toneOf(role, variant, p) - toneOf(role, base, p);
@@ -286,13 +290,12 @@ const extendedScheme = (
       variant,
     );
   };
-  const [paid, proforma, overdue, draft] = EXTENDED_ROLES.map(one) as [
-    ExtendedColor,
-    ExtendedColor,
-    ExtendedColor,
-    ExtendedColor,
-  ];
-  return { paid, proforma, overdue, draft };
+  return {
+    paid: one("paid"),
+    proforma: one("proforma"),
+    overdue: one("overdue"),
+    draft: one("draft"),
+  };
 };
 
 // --- Built-in presets (matches packages/ui-port/src/theme/presets.ts) --------------------------
@@ -428,8 +431,12 @@ const CHECKED_ROLE_PAIRS: ReadonlyArray<{
   { foreground: "onError", background: "error", required: AA_TEXT },
   { foreground: "onErrorContainer", background: "errorContainer", required: AA_TEXT },
   { foreground: "onBackground", background: "background", required: AA_TEXT },
-  ...SURFACES.map((s) => ({ foreground: "onSurface" as const, background: s, required: AA_TEXT })),
-  ...SURFACES.map((s) => ({
+  ...Arr.map(SURFACES, (s) => ({
+    foreground: "onSurface" as const,
+    background: s,
+    required: AA_TEXT,
+  })),
+  ...Arr.map(SURFACES, (s) => ({
     foreground: "onSurfaceVariant" as const,
     background: s,
     required: AA_TEXT,
@@ -495,12 +502,10 @@ const schemesOf = (
   } = {},
 ): ResolvedTheme["schemes"] => {
   const palettes = palettesOf(recipe);
-  const out = {} as Record<SchemeVariant, ResolvedScheme>;
-  for (const variant of SCHEME_VARIANTS) {
+  return Rec.map(FILE_SCHEME_KEY, (_key, variant) => {
     const roles = options.rolesFor?.(variant) ?? schemeRoles(recipe, variant, palettes);
-    out[variant] = { roles, extended: extendedScheme(roles.primary, variant, options.extended) };
-  }
-  return out;
+    return { roles, extended: extendedScheme(roles.primary, variant, options.extended) };
+  });
 };
 
 // --- Material Theme Builder JSON validation (rules T1, T2) -------------------------------------
@@ -518,16 +523,12 @@ const MaterialThemeJson = Schema.Struct({
     neutral: Schema.optional(HexSchema),
     neutralVariant: Schema.optional(HexSchema),
   }),
-  extendedColors: Schema.optional(
-    Schema.Array(
-      Schema.Struct({
-        name: Schema.String,
-        color: HexSchema,
-        description: Schema.optional(Schema.String),
-        harmonized: Schema.Boolean,
-      }),
-    ),
-  ),
+  extendedColors: Schema.Struct({
+    name: Schema.String,
+    color: HexSchema,
+    description: Schema.optional(Schema.String),
+    harmonized: Schema.Boolean,
+  }).pipe(Schema.Array, Schema.optional),
   schemes: Schema.Struct({
     light: RoleScheme,
     dark: RoleScheme,
@@ -555,10 +556,12 @@ const issue = (
   params?: Record<string, string>,
 ): Issue => (params === undefined ? { path, code } : { path, code, params });
 
-const invalid = (first: Issue, ...rest: Issue[]) => new Invalid({ issues: [first, ...rest] });
+const invalid = (first: Issue, ...rest: Issue[]) => Invalid.make({ issues: [first, ...rest] });
 
-const isRecord = (u: unknown): u is Record<string, unknown> =>
-  typeof u === "object" && u !== null && !Array.isArray(u);
+const encodeJson = Schema.encodeUnknownExit(Schema.fromJsonString(Schema.Unknown));
+const isRoleMap = Schema.is(ResolvedScheme.fields.roles);
+const isExtendedRole = Schema.is(ExtendedRoleSchema);
+const isValidHex = Schema.is(HexSchema);
 
 const pickRoles = (
   scheme: Readonly<Record<string, string>>,
@@ -567,33 +570,28 @@ const pickRoles = (
   const missing: M3ColorRole[] = [];
   for (const role of M3_COLOR_ROLES) {
     const value = scheme[role];
-    if (value !== undefined && isHex(value)) roles[role] = value.toUpperCase() as Hex;
+    if (value !== undefined && isHex(value)) roles[role] = Str.toUpperCase(value);
     else missing.push(role);
   }
   return { roles, missing };
 };
 
 const resolveMaterialThemeBuilder = (
-  json: unknown,
-  source: ThemeSource,
+  source: Extract<ThemeSource, { _tag: "MaterialThemeBuilder" }>,
 ): Effect.Effect<ResolvedTheme, Invalid> => {
-  let encoded: string | undefined;
-  try {
-    encoded = JSON.stringify(json);
-  } catch {
+  const { json } = source;
+  const encoded = encodeJson(json);
+  if (Exit.isFailure(encoded)) {
     return Effect.fail(invalid(issue("theme.json_invalid", ["source", "json"])));
   }
-  if (encoded === undefined) {
-    return Effect.fail(invalid(issue("theme.json_invalid", ["source", "json"])));
-  }
-  if (Buffer.byteLength(encoded, "utf8") > THEME_JSON_MAX_BYTES) {
+  if (Buffer.byteLength(encoded.value, "utf8") > THEME_JSON_MAX_BYTES) {
     return Effect.fail(
       invalid(
         issue("theme.too_large", ["source", "json"], { maxBytes: String(THEME_JSON_MAX_BYTES) }),
       ),
     );
   }
-  if (isRecord(json) && "seed" in json && !(typeof json.seed === "string" && isHex(json.seed))) {
+  if (Predicate.isObject(json) && "seed" in json && !isValidHex(json.seed)) {
     return Effect.fail(invalid(issue("theme.seed_invalid", ["source", "json", "seed"])));
   }
   const exit = Schema.decodeUnknownExit(MaterialThemeJson)(json);
@@ -603,14 +601,13 @@ const resolveMaterialThemeBuilder = (
   const file = exit.value;
   const roles: Partial<Record<SchemeVariant, RoleMap>> = {};
   const missingIssues: Issue[] = [];
-  for (const [variant, key] of Object.entries(FILE_SCHEME_KEY) as [SchemeVariant, string][]) {
-    const scheme = (file.schemes as Readonly<Record<string, Readonly<Record<string, string>>>>)[
-      key
-    ];
+  for (const variant of SCHEME_VARIANTS) {
+    const key = FILE_SCHEME_KEY[variant];
+    const scheme = file.schemes[key];
     if (scheme === undefined) continue;
     const picked = pickRoles(scheme);
-    if (picked.missing.length === 0) {
-      roles[variant] = picked.roles as RoleMap;
+    if (isRoleMap(picked.roles)) {
+      roles[variant] = picked.roles;
     } else if (variant === "light" || variant === "dark") {
       for (const role of picked.missing) {
         missingIssues.push(
@@ -624,14 +621,13 @@ const resolveMaterialThemeBuilder = (
 
   const extended: Partial<Record<ExtendedRole, ExtendedInput>> = {};
   for (const entry of file.extendedColors ?? []) {
-    const name = entry.name.trim().toLowerCase();
-    const role = EXTENDED_ROLES.find((r) => r === name);
-    if (role !== undefined && extended[role] === undefined) {
-      extended[role] = { color: entry.color.toUpperCase() as Hex, harmonized: entry.harmonized };
+    const name = Str.toLowerCase(Str.trim(entry.name));
+    if (isExtendedRole(name) && extended[name] === undefined) {
+      extended[name] = { color: Str.toUpperCase(entry.color), harmonized: entry.harmonized };
     }
   }
 
-  const seed = file.seed.toUpperCase() as Hex;
+  const seed = Str.toUpperCase(file.seed);
   return Effect.succeed(
     withContrastWarnings(source, schemesOf({ seed }, { rolesFor: (v) => roles[v], extended })),
   );
@@ -642,13 +638,16 @@ const resolveMaterialThemeBuilder = (
 const CACHE_MAX_ENTRIES = 256;
 const resolvedCache = new Map<string, ResolvedTheme>();
 
-const cacheKey = (source: ThemeSource): string | undefined => {
-  try {
-    return createHash("sha256").update(JSON.stringify(source)).digest("hex");
-  } catch {
-    return undefined;
-  }
-};
+const cacheKey = Effect.fn("ThemeResolver.cacheKey")(
+  function* (source: ThemeSource) {
+    const encoded = encodeJson(source);
+    if (Exit.isFailure(encoded)) return;
+    const digest = yield* Digest.Digest;
+    return yield* digest.digestHex(Digest.sha256, new TextEncoder().encode(encoded.value));
+  },
+  Effect.provide(Digest.layerWebCrypto),
+  Effect.catchDefect(() => Effect.undefined),
+);
 
 const cacheGet = (key: string): ResolvedTheme | undefined => {
   const hit = resolvedCache.get(key);
@@ -668,11 +667,13 @@ const cacheSet = (key: string, value: ResolvedTheme): void => {
 };
 
 /** Resolves any `ThemeSource` into a six-scheme `ResolvedTheme`, cached by content hash (T1–T3). */
-export const resolveTheme = (source: ThemeSource): Effect.Effect<ResolvedTheme, Invalid> => {
-  const key = cacheKey(source);
+export const resolveTheme = Effect.fn("ThemeResolver.resolveTheme")(function* (
+  source: ThemeSource,
+) {
+  const key = yield* cacheKey(source);
   if (key !== undefined) {
     const hit = cacheGet(key);
-    if (hit !== undefined) return Effect.succeed(hit);
+    if (hit !== undefined) return hit;
   }
   const compute: Effect.Effect<ResolvedTheme, Invalid> = (() => {
     switch (source._tag) {
@@ -684,16 +685,14 @@ export const resolveTheme = (source: ThemeSource): Effect.Effect<ResolvedTheme, 
         if (!isHex(source.seed)) {
           return Effect.fail(invalid(issue("theme.seed_invalid", ["source", "seed"])));
         }
-        const seed = source.seed.toUpperCase() as Hex;
+        const seed = Str.toUpperCase(source.seed);
         return Effect.succeed(withContrastWarnings(source, schemesOf({ seed })));
       }
       case "MaterialThemeBuilder":
-        return resolveMaterialThemeBuilder(source.json, source);
+        return resolveMaterialThemeBuilder(source);
     }
   })();
-  return Effect.tap(compute, (resolved) =>
-    Effect.sync(() => {
-      if (key !== undefined) cacheSet(key, resolved);
-    }),
-  );
-};
+  const resolved = yield* compute;
+  if (key !== undefined) cacheSet(key, resolved);
+  return resolved;
+});

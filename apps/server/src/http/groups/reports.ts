@@ -1,13 +1,15 @@
 /** `reports` group handlers (http-mcp-contracts 3.5.4): dashboard, reports, FX rates, exports. */
 import { Api } from "@kvitbit/api-contract";
 import { Reports } from "@kvitbit/domain/contract";
-import { Effect } from "effect";
-import { HttpApiBuilder } from "effect/http-api";
-import { fileDownload, requestOptions } from "../conventions";
-import { jsonSafe } from "./records/json";
+import * as Effect from "effect/Effect";
+import * as HttpApiBuilder from "effect/http-api/HttpApiBuilder";
+import { compact, fileDownload, requestOptions } from "../conventions";
+import { jsonizeReport } from "./records/json";
 
-export const ReportsGroupLive = HttpApiBuilder.group(Api, "reports", (handlers) =>
-  Effect.gen(function* () {
+export const ReportsGroupLive = HttpApiBuilder.group(
+  Api,
+  "reports",
+  Effect.fnUntraced(function* (handlers) {
     const reports = yield* Reports;
     return handlers
       .handle("dashboard", ({ query }) => reports.dashboard({ from: query.from, to: query.to }))
@@ -16,9 +18,9 @@ export const ReportsGroupLive = HttpApiBuilder.group(Api, "reports", (handlers) 
           reports.run({
             report: params.report,
             period: { from: query.from, to: query.to },
-            ...(query.groupBy === undefined ? {} : { groupBy: query.groupBy }),
+            ...compact({ groupBy: query.groupBy }),
           }),
-          jsonSafe,
+          jsonizeReport,
         ),
       )
       .handle("export", ({ params, query }) =>
@@ -27,7 +29,7 @@ export const ReportsGroupLive = HttpApiBuilder.group(Api, "reports", (handlers) 
             {
               report: params.report,
               period: { from: query.from, to: query.to },
-              ...(query.groupBy === undefined ? {} : { groupBy: query.groupBy }),
+              ...compact({ groupBy: query.groupBy }),
             },
             query.format,
           ),

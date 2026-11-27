@@ -1,6 +1,7 @@
 /** `PaymentsRepo` over `payments`. */
+
 import { PaymentsRepo } from "@kvitbit/core";
-import type {
+import {
   CurrencyCode,
   DocumentId,
   ExpenseId,
@@ -9,52 +10,85 @@ import type {
   PaymentMethod,
   WorkspaceId,
 } from "@kvitbit/domain/contract";
-import { Effect, Layer } from "effect";
-import { SqlClient } from "effect/sql";
-import { formatDecimal, parseDecimal, toPgDate } from "../codec";
-import { col, type DbRow, decodeEach, makeTable, type TableSpec } from "../table";
+import * as Arr from "effect/Array";
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
+import * as Predicate from "effect/Predicate";
+import * as Schema from "effect/Schema";
+import * as SqlClient from "effect/sql/SqlClient";
+import { formatDecimal, parseDecimal, StoredUuid, toPgDate } from "../codec";
+import { col, decodeEach, makeTable, type TableSpec } from "../table";
 import { selectReportRows } from "./reportArchivePages";
 
 type PaymentRecord = Effect.Success<ReturnType<PaymentsRepo["Service"]["get"]>>;
+
+const OptionalText = Schema.String.pipe(Schema.NullOr, Schema.optional);
+const decodeRow = Schema.decodeUnknownOption(
+  Schema.Struct({
+    id: StoredUuid,
+    workspace_id: Schema.String,
+    document_id: OptionalText,
+    expense_id: OptionalText,
+    currency: Schema.String,
+    paid_on: Schema.String,
+    method: PaymentMethod,
+    note: OptionalText,
+    tax_document_id: OptionalText,
+    removed_at: OptionalText,
+    created_at: Schema.String,
+    updated_at: Schema.String,
+  }),
+);
 
 const spec: TableSpec<PaymentRecord> = {
   table: "payments",
   collection: "payments",
   entity: "Payment",
-  select: [
-    "id",
-    "workspace_id",
-    "revision",
-    "document_id",
-    "expense_id",
-    col.numeric("amount"),
-    "currency",
-    col.date("paid_on"),
-    "method",
-    "note",
-    "tax_document_id",
-    col.instant("removed_at"),
-    col.instant("created_at"),
-    col.instant("updated_at"),
-  ].join(", "),
-  decode: decodeEach(
-    (row: DbRow): PaymentRecord => ({
-      id: row.id as PaymentId,
-      workspaceId: row.workspace_id as WorkspaceId,
-      revision: Number(row.revision),
-      documentId: (row.document_id as DocumentId | null) ?? null,
-      expenseId: (row.expense_id as ExpenseId | null) ?? null,
-      amount: parseDecimal(row.amount),
-      currency: row.currency as CurrencyCode,
-      paidOn: row.paid_on as IsoDate,
-      method: row.method as PaymentMethod,
-      note: (row.note as string | null) ?? null,
-      taxDocumentId: (row.tax_document_id as DocumentId | null) ?? null,
-      removedAt: (row.removed_at as string | null) ?? null,
-      createdAt: row.created_at as string,
-      updatedAt: row.updated_at as string,
-    }),
+  select: Arr.join(
+    [
+      "id",
+      "workspace_id",
+      "revision",
+      "document_id",
+      "expense_id",
+      col.numeric("amount"),
+      "currency",
+      col.date("paid_on"),
+      "method",
+      "note",
+      "tax_document_id",
+      col.instant("removed_at"),
+      col.instant("created_at"),
+      col.instant("updated_at"),
+    ],
+    ", ",
   ),
+  decode: decodeEach((row): PaymentRecord => {
+    const stored = Option.getOrThrow(decodeRow(row));
+    return {
+      id: PaymentId.make(stored.id, { disableChecks: true }),
+      workspaceId: WorkspaceId.make(stored.workspace_id),
+      revision: Number(row.revision),
+      documentId: Predicate.isNotNullish(stored.document_id)
+        ? DocumentId.make(stored.document_id)
+        : null,
+      expenseId: Predicate.isNotNullish(stored.expense_id)
+        ? ExpenseId.make(stored.expense_id)
+        : null,
+      amount: parseDecimal(row.amount),
+      currency: CurrencyCode.make(stored.currency),
+      paidOn: IsoDate.make(stored.paid_on),
+      method: stored.method,
+      note: stored.note ?? null,
+      taxDocumentId: Predicate.isNotNullish(stored.tax_document_id)
+        ? DocumentId.make(stored.tax_document_id)
+        : null,
+      removedAt: stored.removed_at ?? null,
+      createdAt: stored.created_at,
+      updatedAt: stored.updated_at,
+    };
+  }),
   encode: (row) => ({
     id: row.id,
     workspace_id: row.workspaceId,
@@ -78,11 +112,11 @@ export const PaymentsRepoSql: Layer.Layer<PaymentsRepo, never, SqlClient.SqlClie
     const sql = yield* SqlClient.SqlClient;
     const table = makeTable(sql, spec);
     return PaymentsRepo.of({
-      get: (workspaceId, id) => table.get(workspaceId, id),
-      lock: (workspaceId, id) => table.lock(workspaceId, id),
+      get: Effect.fn("PaymentsRepo.get")((workspaceId, id) => table.get(workspaceId, id)),
+      lock: Effect.fn("PaymentsRepo.lock")((workspaceId, id) => table.lock(workspaceId, id)),
       insert: table.insert,
       update: table.update,
-      liveFor: (workspaceId, target) =>
+      liveFor: Effect.fn("PaymentsRepo.liveFor")((workspaceId, target) =>
         table.select(
           workspaceId,
           "document" in target
@@ -90,13 +124,15 @@ export const PaymentsRepoSql: Layer.Layer<PaymentsRepo, never, SqlClient.SqlClie
             : sql`expense_id = ${target.expense} and removed_at is null`,
           sql`order by paid_on asc, id asc`,
         ),
-      paidBetween: (workspaceId, range) =>
+      ),
+      paidBetween: Effect.fn("PaymentsRepo.paidBetween")((workspaceId, range) =>
         selectReportRows(
           sql,
           "payments",
           sql`removed_at is null and paid_on >= ${toPgDate(range.from)} and paid_on <= ${toPgDate(range.to)}`,
           (where) => table.select(workspaceId, where, sql`order by paid_on asc, id asc`),
         ),
+      ),
     });
   }),
 );

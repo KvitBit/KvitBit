@@ -4,6 +4,7 @@
  * serialization failure (S4). Counters, reservations and the request log delegate to the
  * primitives of `@kvitbit/adapters/sql`; `afterCommit` is `SqlClient.afterCommit`.
  */
+
 import {
   claimRequest,
   completeRequest,
@@ -12,22 +13,30 @@ import {
   setCounter,
   tryReserveNumber,
 } from "@kvitbit/adapters/sql";
-import type { DocumentsModule } from "@kvitbit/core";
+import { DocumentsModule } from "@kvitbit/core";
 import type { CoreStoreShape, RequestLogEntry, RequestScope } from "@kvitbit/core/ports";
 import { CoreStore, type StoreUnavailable } from "@kvitbit/core/ports";
-import type {
+import {
   AuditEntry,
+  AuditEntryId,
   CurrencyCode,
   DocumentId,
   DocumentKind,
-  DocumentStatus,
   IsoDate,
-  RequestKey,
-  WorkspaceId,
+  type RequestKey,
+  type WorkspaceId,
 } from "@kvitbit/domain/contract";
-import { Cause, Context, Effect, Layer, Option } from "effect";
-import { SqlClient } from "effect/sql";
+import * as Arr from "effect/Array";
+import * as Cause from "effect/Cause";
+import * as Context from "effect/Context";
+import * as DateTime from "effect/DateTime";
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
+import * as SqlClient from "effect/sql/SqlClient";
 import { projectDocumentFromSql } from "../projections/documents";
+import { decodeStored, encodeJson, parseJson, StoredUuid } from "./codec";
 import { isLockConflict, unavailable } from "./errors";
 import { col, type DbRow } from "./table";
 
@@ -45,7 +54,7 @@ export class RequestClaimCheck extends Context.Service<
     readonly workspaceId: WorkspaceId;
     readonly check: (replayed: boolean) => Effect.Effect<void, StoreUnavailable>;
   }
->()("kvitbit/server/persistence/RequestClaimCheck") {}
+>()("@kvitbit/server/persistence/CoreStoreSql/RequestClaimCheck") {}
 
 const adapterScope = (scope: RequestScope) =>
   scope._tag === "Workspace" ? { workspaceId: scope.workspaceId } : { userId: scope.userId };
@@ -68,14 +77,23 @@ const actorColumns = (actor: AuditEntry["actor"]) =>
         actor_client_id: null,
         actor_client_name: null,
         actor_system_job: actor.job._tag,
-        actor_job: JSON.stringify(actor.job),
+        actor_job: encodeJson(actor.job),
       };
 
-const parseJson = (value: unknown): unknown =>
-  typeof value === "string" ? JSON.parse(value) : value;
+// JSON omits undefined change values. Restore them on read, as in the memory store.
+const AuditChangeValue = Schema.Unknown.pipe(Schema.withDecodingDefaultKey(Effect.undefined));
+const StoredAudit = Schema.Struct({
+  ...AuditEntry.fields,
+  id: StoredUuid,
+  changes: Schema.Array(
+    Schema.Struct({ path: Schema.String, before: AuditChangeValue, after: AuditChangeValue }),
+  ),
+});
+const decodeAudit = decodeStored(StoredAudit);
+const readJson = parseJson(Schema.Unknown);
 
-const toAuditEntry = (row: DbRow): AuditEntry =>
-  ({
+const toAuditEntry = (row: DbRow): AuditEntry => {
+  const entry = decodeAudit({
     id: row.id,
     at: row.at,
     actor:
@@ -93,15 +111,32 @@ const toAuditEntry = (row: DbRow): AuditEntry =>
                     name: row.actor_client_name,
                   },
           }
-        : { _tag: "System", job: parseJson(row.actor_job) },
+        : { _tag: "System", job: readJson(row.actor_job) },
     subject: { entity: row.subject_entity, id: row.subject_id },
     action: row.action,
     revision: row.subject_revision === null ? null : Number(row.subject_revision),
-    changes: parseJson(row.changes),
+    changes: readJson(row.changes),
     reason: row.reason,
-  }) as AuditEntry;
+  });
+  return { ...entry, id: AuditEntryId.make(entry.id, { disableChecks: true }) };
+};
 
-export const makeCoreStoreSql = Effect.gen(function* () {
+const isRecord = Schema.is(Schema.Record(Schema.String, Schema.Unknown));
+const isString = Schema.is(Schema.String);
+const isIsoDate = Schema.is(IsoDate);
+const EncodedView = Schema.Struct({
+  id: DocumentId,
+  kind: DocumentKind,
+  status: Schema.Literals(["issued", "draft"]),
+  paymentQr: Schema.Null,
+  issuer: DocumentsModule.DocumentRecord.fields.issuer,
+  totals: Schema.Struct({ gross: Schema.Struct({ currency: CurrencyCode }) }),
+  dates: Schema.Struct({ dueOn: Schema.optional(Schema.Unknown) }),
+  number: Schema.optional(Schema.Unknown),
+});
+const isEncodedView = Schema.is(EncodedView);
+
+const makeCoreStoreSql = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
   /** The adapter primitives read `SqlClient` from context; they join the caller's transaction. */
   const db = <A, E>(self: Effect.Effect<A, E, SqlClient.SqlClient>) =>
@@ -156,99 +191,72 @@ export const makeCoreStoreSql = Effect.gen(function* () {
       set: (key, next) => db(setCounter(key, next)),
     },
     reservations: {
-      tryReserve: (reservation) =>
-        db(
-          tryReserveNumber({
-            workspaceId: reservation.workspaceId,
-            kind: reservation.kind,
-            number: reservation.number,
-            documentId: reservation.documentId,
-            ...(reservation.seriesId === null ? {} : { seriesId: reservation.seriesId }),
-          }),
-        ),
+      tryReserve: (reservation) => {
+        const { seriesId, ...required } = reservation;
+        return db(tryReserveNumber(seriesId === null ? required : { ...required, seriesId }));
+      },
     },
     requestLog: {
-      claim: (scope, key, now) =>
-        Effect.gen(function* () {
-          const outcome = yield* db(claimRequest(adapterScope(scope), key, { now }));
-          const hook = yield* Effect.serviceOption(RequestClaimCheck);
-          if (
-            Option.isSome(hook) &&
-            scope._tag === "Workspace" &&
-            hook.value.workspaceId === scope.workspaceId &&
-            hook.value.requestKey === key
+      claim: Effect.fn("claim")(function* (scope, key, now) {
+        const outcome = yield* db(claimRequest(adapterScope(scope), key, { now }));
+        const hook = yield* Effect.serviceOption(RequestClaimCheck);
+        if (
+          Option.isSome(hook) &&
+          scope._tag === "Workspace" &&
+          hook.value.workspaceId === scope.workspaceId &&
+          hook.value.requestKey === key
+        ) {
+          yield* hook.value.check(outcome._tag === "Existing");
+        }
+        if (outcome._tag === "Claimed") return outcome;
+        const createdAt = DateTime.makeUnsafe(outcome.entry.createdAt);
+        const entry: RequestLogEntry = {
+          scope,
+          key,
+          method: outcome.entry.method,
+          fingerprint: outcome.entry.payloadHash,
+          result: outcome.entry.result,
+          createdAt: DateTime.formatIso(createdAt),
+          expiresAt: DateTime.formatIso(DateTime.addDuration(createdAt, TTL_MS)),
+        };
+        return { _tag: "Existing" as const, entry };
+      }),
+      complete: Effect.fn("complete")(function* (entry) {
+        let result: unknown = entry.result === undefined ? null : entry.result;
+        if (entry.scope._tag === "Workspace" && isRecord(result)) {
+          const wsId = entry.scope.workspaceId;
+          const enrichEncodedView = Effect.fn("enrichEncodedView")(function* (
+            candidate: typeof EncodedView.Type,
           ) {
-            yield* hook.value.check(outcome._tag === "Existing");
-          }
-          if (outcome._tag === "Claimed") return outcome;
-          const createdAt = new Date(outcome.entry.createdAt).toISOString();
-          const entry: RequestLogEntry = {
-            scope,
-            key: key as RequestKey,
-            method: outcome.entry.method,
-            fingerprint: outcome.entry.payloadHash,
-            result: outcome.entry.result,
-            createdAt,
-            expiresAt: new Date(Date.parse(createdAt) + TTL_MS).toISOString(),
-          };
-          return { _tag: "Existing" as const, entry };
-        }),
-      complete: (entry) =>
-        Effect.gen(function* () {
-          let result: unknown = entry.result === undefined ? null : entry.result;
-          if (entry.scope._tag === "Workspace" && result !== null && typeof result === "object") {
-            const wsId = entry.scope.workspaceId;
-            const enrichEncodedView = (candidate: unknown) =>
-              Effect.gen(function* () {
-                if (candidate === null || typeof candidate !== "object") return candidate;
-                const obj = candidate as Record<string, unknown>;
-                if (
-                  typeof obj.id !== "string" ||
-                  (obj.status !== "issued" && obj.status !== "draft") ||
-                  obj.paymentQr !== null ||
-                  typeof obj.kind !== "string" ||
-                  obj.issuer === null ||
-                  typeof obj.issuer !== "object" ||
-                  obj.totals === null ||
-                  typeof obj.totals !== "object" ||
-                  obj.dates === null ||
-                  typeof obj.dates !== "object"
-                ) {
-                  return candidate;
-                }
-                const totals = obj.totals as { gross?: { currency?: unknown } };
-                const dates = obj.dates as { dueOn?: unknown };
-                if (typeof totals.gross?.currency !== "string") return candidate;
-                const projected = yield* projectDocumentFromSql(sql, wsId, obj.id as DocumentId, {
-                  kind: obj.kind as DocumentKind,
-                  status: obj.status as DocumentStatus,
-                  number: typeof obj.number === "string" ? obj.number : null,
-                  currency: totals.gross.currency as CurrencyCode,
-                  issuer: obj.issuer as DocumentsModule.IssuerSnapshotRecord,
-                  dueOn: typeof dates.dueOn === "string" ? (dates.dueOn as IsoDate) : null,
-                });
-                return projected === undefined || projected.paymentQr === null
-                  ? candidate
-                  : { ...obj, paymentQr: projected.paymentQr };
-              });
-
-            const rec = result as Record<string, unknown>;
-            if ("document" in rec && rec.document !== null && typeof rec.document === "object") {
-              result = {
-                ...rec,
-                document: yield* enrichEncodedView(rec.document),
-              };
-            } else {
-              result = yield* enrichEncodedView(result);
-            }
-          }
-          yield* completeRequest(adapterScope(entry.scope), {
-            requestKey: entry.key,
-            method: entry.method,
-            payloadHash: entry.fingerprint,
-            result: result as Record<string, unknown> | null,
+            const projected = yield* projectDocumentFromSql(sql, wsId, candidate.id, {
+              kind: candidate.kind,
+              status: candidate.status,
+              number: isString(candidate.number) ? candidate.number : null,
+              currency: candidate.totals.gross.currency,
+              issuer: candidate.issuer,
+              dueOn: isIsoDate(candidate.dates.dueOn) ? candidate.dates.dueOn : null,
+            });
+            return projected === undefined || projected.paymentQr === null
+              ? candidate
+              : { ...candidate, paymentQr: projected.paymentQr };
           });
-        }).pipe(db),
+
+          if (isEncodedView(result.document)) {
+            result = {
+              ...result,
+              document: yield* enrichEncodedView(result.document),
+            };
+          } else if (!isRecord(result.document) && isEncodedView(result)) {
+            result = yield* enrichEncodedView(result);
+          }
+        }
+        yield* completeRequest(adapterScope(entry.scope), {
+          requestKey: entry.key,
+          method: entry.method,
+          payloadHash: entry.fingerprint,
+          result,
+        });
+      }, db),
     },
     audit: {
       append: (workspaceId, entry) =>
@@ -264,7 +272,7 @@ export const makeCoreStoreSql = Effect.gen(function* () {
               subject_id: entry.subject.id,
               subject_revision: entry.revision,
               action: entry.action,
-              changes: JSON.stringify(entry.changes),
+              changes: encodeJson(entry.changes),
               reason: entry.reason,
             })}`,
           ),
@@ -280,7 +288,7 @@ export const makeCoreStoreSql = Effect.gen(function* () {
                 and subject_id = ${subject.id}
               order by at, id`,
           ),
-          (rows) => rows.map(toAuditEntry),
+          (rows) => Arr.map(rows, toAuditEntry),
         ),
     },
   };

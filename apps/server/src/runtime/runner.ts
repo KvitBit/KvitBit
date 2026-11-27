@@ -8,9 +8,9 @@
  *   message + runner storage, `RunnerAddress = HOST:PORT`, and listen address `0.0.0.0:PORT`.
  */
 import { BunClusterHttp } from "@effect/platform-bun";
-import { NodeClusterHttp } from "@effect/platform-node";
+import * as NodeClusterHttp from "@effect/platform-node/NodeClusterHttp";
 import { type RunnerServices, selfHostedRunnerLayer } from "@kvitbit/adapters/jobs";
-import { Config, Effect, Layer, Option } from "effect";
+import * as Config from "effect/Config";
 import * as ClusterWorkflowEngine from "effect/cluster/ClusterWorkflowEngine";
 import * as RunnerAddress from "effect/cluster/RunnerAddress";
 import * as RunnerStorage from "effect/cluster/RunnerStorage";
@@ -18,17 +18,19 @@ import * as ShardingConfig from "effect/cluster/ShardingConfig";
 import * as SqlMessageStorage from "effect/cluster/SqlMessageStorage";
 import * as SqlRunnerStorage from "effect/cluster/SqlRunnerStorage";
 import * as Digest from "effect/crypto/Digest";
-import type { ServeError } from "effect/http/HttpServerError";
-import type { SqlClient } from "effect/sql";
-import type { RunnerMode } from "../config";
+import * as Effect from "effect/Effect";
+import type * as HttpServerError from "effect/http/HttpServerError";
+import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
+import type * as SqlClient from "effect/sql/SqlClient";
 
 // Effect's Node HTTP layer uses Undici's Agent dispatcher, which Bun does not implement.
 const ClusterHttp = process.versions.bun === undefined ? NodeClusterHttp : BunClusterHttp;
 
 /** Default cluster worker RPC port (board #899/#908). */
-export const DEFAULT_WORKER_PORT = 34431;
+const DEFAULT_WORKER_PORT = 34431;
 
-export interface ClusterWorkerOptions {
+interface ClusterWorkerOptions {
   /** Advertised runner host (internal IP on GCE, e.g. `HOST`). */
   readonly host: string;
   /** Advertised and listen port (default 34431, e.g. `PORT`). */
@@ -73,9 +75,13 @@ export const ClusterClientRuntimeLive: Layer.Layer<
  * plain Effect Cluster runner over HTTP with DML-only SQL message + runner storage,
  * advertising `HOST:PORT` and listening on `0.0.0.0:PORT`.
  */
-export const makeClusterWorkerRuntimeLayer = (
+const makeClusterWorkerRuntimeLayer = (
   options: ClusterWorkerOptions,
-): Layer.Layer<RunnerServices, ServeError | Config.ConfigError, SqlClient.SqlClient> => {
+): Layer.Layer<
+  RunnerServices,
+  HttpServerError.ServeError | Config.ConfigError,
+  SqlClient.SqlClient
+> => {
   const listenHost = options.listenHost ?? "0.0.0.0";
   const shardingOverrides = {
     runnerAddress: Option.some(RunnerAddress.make(options.host, options.port)),
@@ -99,7 +105,7 @@ export const makeClusterWorkerRuntimeLayer = (
   );
 };
 
-export const WorkerAddressConfig = Config.all({
+const WorkerAddressConfig = Config.all({
   host: Config.String("HOST").pipe(Config.withDefault("127.0.0.1")),
   port: Config.Int("PORT").pipe(Config.withDefault(DEFAULT_WORKER_PORT)),
   listenHost: Config.String("LISTEN_HOST").pipe(Config.withDefault("0.0.0.0")),
@@ -108,16 +114,6 @@ export const WorkerAddressConfig = Config.all({
 /** Live cluster worker runtime reading `HOST`, `PORT` (default 34431), and `LISTEN_HOST` (`0.0.0.0`). */
 export const ClusterWorkerRuntimeLive: Layer.Layer<
   RunnerServices,
-  ServeError | Config.ConfigError,
+  HttpServerError.ServeError | Config.ConfigError,
   SqlClient.SqlClient
 > = Layer.unwrap(Effect.map(WorkerAddressConfig, makeClusterWorkerRuntimeLayer));
-
-/**
- * Selects the runner layer for `main.ts` based on `KVITBIT_RUNNER_MODE`:
- * - `"single"`: in-process `SingleRunnerRuntimeLive`
- * - `"cluster"`: `ClusterClientRuntimeLive` (client-only sharding)
- */
-export const makeServerRuntimeLayer = (
-  mode: RunnerMode,
-): Layer.Layer<RunnerServices, Config.ConfigError, SqlClient.SqlClient> =>
-  mode === "cluster" ? ClusterClientRuntimeLive : SingleRunnerRuntimeLive;

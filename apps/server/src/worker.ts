@@ -7,9 +7,11 @@
  * - Composes `PersistenceLive`, `CoreExternalPortsLive`, `CoreLive`, all 4 workflows, and all
  *   5 ClusterCrons. No `KvitbitRunner` entity or `entities.ts`.
  */
-import { NodeRuntime } from "@effect/platform-node";
+import * as NodeRuntime from "@effect/platform-node/NodeRuntime";
 import { CoreLive, IdGeneratorLive } from "@kvitbit/core";
-import { Effect, Layer } from "effect";
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+import * as Str from "effect/String";
 import { PersistenceLive, PgWorkerDatabaseLive } from "./persistence";
 import { ServerDocumentProjectionsLive } from "./projections/documents";
 import { ClusterWorkerRuntimeLive, CronsLive, WorkflowHandlersLive } from "./runtime";
@@ -39,10 +41,11 @@ export const workerProgram = Effect.logInfo("Starting Kvitbit cluster worker").p
   Effect.andThen(Layer.launch(WorkerLive)),
 );
 
+// Older Node versions lack import.meta.main.
+const entryPath = process.argv[1] ?? "";
 const isMain =
-  typeof import.meta.main === "boolean"
-    ? import.meta.main
-    : process.argv[1]?.endsWith("worker.ts") || process.argv[1]?.endsWith("worker.js");
+  import.meta.main ??
+  (Str.endsWith("worker.ts")(entryPath) || Str.endsWith("worker.js")(entryPath));
 
 if (isMain) {
   NodeRuntime.runMain(workerProgram);

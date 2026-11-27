@@ -2,9 +2,19 @@
  * Configuration for the mobile updates, Android releases, and App Links routes
  * (http-mcp-contracts section 5, board contract #929).
  */
-import { Config, ConfigProvider, Context, Effect, Layer, Option, Redacted } from "effect";
+import * as Arr from "effect/Array";
+import * as Config from "effect/Config";
+import * as ConfigProvider from "effect/ConfigProvider";
+import * as Context from "effect/Context";
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
+import * as Redacted from "effect/Redacted";
+import * as Result from "effect/Result";
+import * as Schema from "effect/Schema";
+import * as Str from "effect/String";
 
-export type MobileStorageConfig =
+type MobileStorageConfig =
   | { readonly _tag: "local"; readonly dir: string }
   | {
       readonly _tag: "gcs";
@@ -24,13 +34,17 @@ export interface MobileConfigShape {
 }
 
 export class MobileConfig extends Context.Service<MobileConfig, MobileConfigShape>()(
-  "kvitbit/server/http/MobileConfig",
+  "@kvitbit/server/http/mobile/config/MobileConfig",
 ) {}
 
 const DEFAULT_APP_ORIGIN = "http://localhost:8080";
 const DEFAULT_BLOB_DIR = "/var/lib/kvitbit/blobs";
 
 const hex64Pattern = /^[0-9a-fA-F]{64}$/;
+const escapedNewline = /\\n/g;
+const encodeString = Schema.encodeResult(Schema.fromJsonString(Schema.String));
+const quote = (value: string): string =>
+  Result.getOrThrowWith(encodeString(value), (error) => error);
 const colonHexPattern = /^([0-9a-fA-F]{2}:){31}[0-9a-fA-F]{2}$/;
 
 /**
@@ -38,15 +52,15 @@ const colonHexPattern = /^([0-9a-fA-F]{2}:){31}[0-9a-fA-F]{2}$/;
  * form expected by `/.well-known/assetlinks.json` (`AA:BB:...`), or returns `undefined` if invalid.
  */
 export const normalizeFingerprint = (raw: string): string | undefined => {
-  const trimmed = raw.trim();
-  if (colonHexPattern.test(trimmed)) return trimmed.toUpperCase();
+  const trimmed = Str.trim(raw);
+  if (colonHexPattern.test(trimmed)) return Str.toUpperCase(trimmed);
   if (hex64Pattern.test(trimmed)) {
-    const upper = trimmed.toUpperCase();
+    const upper = Str.toUpperCase(trimmed);
     const pairs: Array<string> = [];
     for (let i = 0; i < upper.length; i += 2) {
-      pairs.push(upper.slice(i, i + 2));
+      pairs.push(Str.slice(i, i + 2)(upper));
     }
-    return pairs.join(":");
+    return Arr.join(pairs, ":");
   }
   return undefined;
 };
@@ -55,19 +69,18 @@ const nonEmptyOption = (name: string) =>
   Config.option(Config.String(name)).pipe(
     Config.map((opt) =>
       Option.flatMap(opt, (value) => {
-        const trimmed = value.trim();
+        const trimmed = Str.trim(value);
         return trimmed.length > 0 ? Option.some(trimmed) : Option.none();
       }),
     ),
   );
 
-const normalizePem = (raw: string): string =>
-  raw.includes("\\n") ? raw.replace(/\\n/g, "\n") : raw;
+const normalizePem = Str.replace(escapedNewline, "\n");
 
 const configError = (message: string) =>
-  Effect.fail(new Config.ConfigError(new ConfigProvider.SourceError({ message })));
+  new Config.ConfigError(new ConfigProvider.SourceError({ message }));
 
-export const makeMobileConfig = (input: Partial<MobileConfigShape> = {}): MobileConfigShape => ({
+const makeMobileConfig = (input: Partial<MobileConfigShape> = {}): MobileConfigShape => ({
   appOrigin: new URL(input.appOrigin ?? "https://kvitbit.test").origin,
   signingKeyPem: input.signingKeyPem ?? Option.none(),
   storage: input.storage ?? { _tag: "local", dir: DEFAULT_BLOB_DIR },
@@ -81,12 +94,10 @@ export const MobileConfigLive: Layer.Layer<MobileConfig, Config.ConfigError> = L
     const rawOrigin = yield* Config.String("APP_ORIGIN").pipe(
       Config.withDefault(DEFAULT_APP_ORIGIN),
     );
-    let appOrigin: string;
-    try {
-      appOrigin = new URL(rawOrigin).origin;
-    } catch {
-      return yield* configError(`Invalid APP_ORIGIN URL: ${JSON.stringify(rawOrigin)}`);
-    }
+    const appOrigin = yield* Effect.try({
+      try: () => new URL(rawOrigin).origin,
+      catch: () => configError(`Invalid APP_ORIGIN URL: ${quote(rawOrigin)}`),
+    });
 
     const rawSigningKey = yield* nonEmptyOption("KVITBIT_MOBILE_UPDATES_SIGNING_KEY");
     const signingKeyPem = Option.map(rawSigningKey, (pem) => Redacted.make(normalizePem(pem)));
@@ -96,7 +107,8 @@ export const MobileConfigLive: Layer.Layer<MobileConfig, Config.ConfigError> = L
     const blobDriver = yield* nonEmptyOption("KVITBIT_BLOB_DRIVER");
     const blobBucket = yield* nonEmptyOption("KVITBIT_BLOB_BUCKET");
     const blobDir = yield* nonEmptyOption("KVITBIT_BLOB_DIR");
-    const gcsEndpoint = Option.getOrUndefined(yield* nonEmptyOption("KVITBIT_GCS_ENDPOINT"));
+    const rawEndpoint = yield* nonEmptyOption("KVITBIT_GCS_ENDPOINT");
+    const gcsEndpoint = Option.getOrUndefined(rawEndpoint);
 
     let storage: MobileStorageConfig;
     if (Option.isSome(mobileBucket)) {
@@ -106,7 +118,9 @@ export const MobileConfigLive: Layer.Layer<MobileConfig, Config.ConfigError> = L
     } else if (Option.isSome(blobDriver)) {
       if (blobDriver.value === "gcs") {
         if (Option.isNone(blobBucket)) {
-          return yield* configError("KVITBIT_BLOB_BUCKET is required when KVITBIT_BLOB_DRIVER=gcs");
+          return yield* Effect.fail(
+            configError("KVITBIT_BLOB_BUCKET is required when KVITBIT_BLOB_DRIVER=gcs"),
+          );
         }
         storage = { _tag: "gcs", bucket: blobBucket.value, endpoint: gcsEndpoint };
       } else if (blobDriver.value === "local") {
@@ -115,8 +129,8 @@ export const MobileConfigLive: Layer.Layer<MobileConfig, Config.ConfigError> = L
           dir: Option.getOrElse(blobDir, () => DEFAULT_BLOB_DIR),
         };
       } else {
-        return yield* configError(
-          `Unsupported KVITBIT_BLOB_DRIVER: ${JSON.stringify(blobDriver.value)}`,
+        return yield* Effect.fail(
+          configError(`Unsupported KVITBIT_BLOB_DRIVER: ${quote(blobDriver.value)}`),
         );
       }
     } else if (Option.isSome(blobBucket)) {
@@ -132,13 +146,15 @@ export const MobileConfigLive: Layer.Layer<MobileConfig, Config.ConfigError> = L
     const androidAssetLinksSha256: Array<string> = [];
     if (Option.isSome(rawFingerprints)) {
       const seen = new Set<string>();
-      for (const entry of rawFingerprints.value.split(",")) {
-        const trimmed = entry.trim();
+      for (const entry of Str.split(rawFingerprints.value, ",")) {
+        const trimmed = Str.trim(entry);
         if (trimmed.length === 0) continue;
         const normalized = normalizeFingerprint(trimmed);
         if (normalized === undefined) {
-          return yield* configError(
-            `Invalid SHA-256 fingerprint in KVITBIT_ANDROID_ASSETLINKS_SHA256: ${JSON.stringify(trimmed)}`,
+          return yield* Effect.fail(
+            configError(
+              `Invalid SHA-256 fingerprint in KVITBIT_ANDROID_ASSETLINKS_SHA256: ${quote(trimmed)}`,
+            ),
           );
         }
         if (!seen.has(normalized)) {

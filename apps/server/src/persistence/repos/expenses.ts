@@ -1,6 +1,7 @@
 /** `ExpensesRepo` over `expenses` and `attachments`. */
+
 import { ExpensesRepo } from "@kvitbit/core";
-import type {
+import {
   AttachmentId,
   ContactId,
   CurrencyCode,
@@ -10,12 +11,16 @@ import type {
   VatTreatment,
   WorkspaceId,
 } from "@kvitbit/domain/contract";
-import { Effect, Layer } from "effect";
-import { SqlClient } from "effect/sql";
+import * as Arr from "effect/Array";
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+import * as Predicate from "effect/Predicate";
+import * as Schema from "effect/Schema";
+import * as SqlClient from "effect/sql/SqlClient";
 import {
   asStringArray,
-  decodeVatBreakdown,
-  decodeVatBucket,
+  decodeStored,
+  encodeJson,
   encodeVatBreakdown,
   encodeVatBucket,
   formatDecimal,
@@ -24,56 +29,72 @@ import {
   parseJson,
   parseNullableDecimal,
   toPgDate,
+  VatBreakdownJson,
+  VatBucketJson,
 } from "../codec";
 import { unavailable } from "../errors";
-import { col, type DbRow, decodeEach, makeTable, type TableSpec } from "../table";
+import { col, type DbRow, type DbValue, decodeEach, makeTable, type TableSpec } from "../table";
 import { selectReportRows } from "./reportArchivePages";
+
+const readNullableContactId = decodeStored(Schema.NullOr(ContactId));
+const readNullableText = decodeStored(Schema.NullOr(Schema.String));
+const readNullableIsoDate = decodeStored(Schema.NullOr(IsoDate));
+const readNullableCurrencyCode = decodeStored(Schema.NullOr(CurrencyCode));
+const readExpenseId = decodeStored(ExpenseId);
+const readWorkspaceId = decodeStored(WorkspaceId);
+const readExpenseStatus = decodeStored(ExpenseStatus);
+const readText = decodeStored(Schema.String);
+const readAttachmentId = decodeStored(AttachmentId);
 
 type ExpenseRow = Effect.Success<ReturnType<ExpensesRepo["Service"]["get"]>>;
 type AttachmentRow = Effect.Success<ReturnType<ExpensesRepo["Service"]["getAttachment"]>>;
 type StoredVatLine = NonNullable<ExpenseRow["vatLines"]>[number];
 type ExpenseFigures = NonNullable<ExpenseRow["figures"]>;
 
-interface JsonVatLine {
-  readonly treatment: VatTreatment;
-  readonly base: string;
-  readonly vat: string;
-  readonly selfAssessed: "standard" | "reduced" | null;
-}
+const VatLineJson = Schema.Struct({
+  treatment: VatTreatment,
+  base: Schema.String,
+  vat: Schema.String,
+  selfAssessed: Schema.NullOr(Schema.Literals(["standard", "reduced"])),
+});
 
-interface JsonFigures {
-  readonly taxPoint: IsoDate;
-  readonly totals: unknown;
-  readonly selfAssessed: ReadonlyArray<unknown>;
-  readonly fx: {
-    readonly rate: string;
-    readonly quantity: number;
-    readonly fixingDate: IsoDate | null;
-    readonly source: "cnb" | "manual";
-  } | null;
-  readonly totalCzk: string;
-  readonly deductibleVat: string;
-  readonly deductibleVatCzk: string;
-}
+const readVatLines = parseJson(Schema.Array(VatLineJson));
+const readFigures = parseJson(
+  Schema.Struct({
+    taxPoint: IsoDate,
+    totals: VatBreakdownJson,
+    selfAssessed: Schema.Array(VatBucketJson),
+    fx: Schema.NullOr(
+      Schema.Struct({
+        rate: Schema.String,
+        quantity: Schema.Finite,
+        fixingDate: Schema.NullOr(IsoDate),
+        source: Schema.Literals(["cnb", "manual"]),
+      }),
+    ),
+    totalCzk: Schema.String,
+    deductibleVat: Schema.String,
+    deductibleVatCzk: Schema.String,
+  }),
+);
 
 const encodeVatLines = (lines: ExpenseRow["vatLines"]): string | null =>
   lines === null
     ? null
-    : JSON.stringify(
-        lines.map(
-          (l): JsonVatLine => ({
-            treatment: l.treatment,
-            base: formatDecimal(l.base),
-            vat: formatDecimal(l.vat),
-            selfAssessed: l.selfAssessed,
-          }),
-        ),
+    : encodeJson(
+        Arr.map(lines, (l): typeof VatLineJson.Type => ({
+          treatment: l.treatment,
+          base: formatDecimal(l.base),
+          vat: formatDecimal(l.vat),
+          selfAssessed: l.selfAssessed,
+        })),
       );
 
-const decodeVatLines = (raw: unknown): ExpenseRow["vatLines"] =>
-  raw === null || raw === undefined
+const decodeVatLines = (raw: DbValue): ExpenseRow["vatLines"] =>
+  Predicate.isNullish(raw)
     ? null
-    : parseJson<ReadonlyArray<JsonVatLine>>(raw).map(
+    : Arr.map(
+        readVatLines(raw),
         (l): StoredVatLine => ({
           treatment: l.treatment,
           base: parseDecimal(l.base),
@@ -85,10 +106,10 @@ const decodeVatLines = (raw: unknown): ExpenseRow["vatLines"] =>
 const encodeFigures = (figures: ExpenseRow["figures"]): string | null =>
   figures === null
     ? null
-    : JSON.stringify({
+    : encodeJson({
         taxPoint: figures.taxPoint,
         totals: encodeVatBreakdown(figures.totals),
-        selfAssessed: figures.selfAssessed.map((b) => encodeVatBucket(b)),
+        selfAssessed: Arr.map(figures.selfAssessed, (b) => encodeVatBucket(b)),
         fx:
           figures.fx === null
             ? null
@@ -101,15 +122,15 @@ const encodeFigures = (figures: ExpenseRow["figures"]): string | null =>
         totalCzk: formatDecimal(figures.totalCzk),
         deductibleVat: formatDecimal(figures.deductibleVat),
         deductibleVatCzk: formatDecimal(figures.deductibleVatCzk),
-      } satisfies JsonFigures);
+      });
 
-const decodeFigures = (raw: unknown): ExpenseRow["figures"] => {
-  if (raw === null || raw === undefined) return null;
-  const parsed = parseJson<JsonFigures>(raw);
+const decodeFigures = (raw: DbValue): ExpenseRow["figures"] => {
+  if (Predicate.isNullish(raw)) return null;
+  const parsed = readFigures(raw);
   return {
     taxPoint: parsed.taxPoint,
-    totals: decodeVatBreakdown(parsed.totals),
-    selfAssessed: parsed.selfAssessed.map((b) => decodeVatBucket(b)),
+    totals: parsed.totals,
+    selfAssessed: parsed.selfAssessed,
     fx:
       parsed.fx === null
         ? null
@@ -129,33 +150,36 @@ const expenseSpec: TableSpec<ExpenseRow> = {
   table: "expenses",
   collection: "expenses",
   entity: "Expense",
-  select: [
-    "id",
-    "workspace_id",
-    "revision",
-    "status",
-    "contact_id",
-    "supplier_name",
-    "supplier_ico",
-    "supplier_dic",
-    "supplier_document_number",
-    col.date("issued_on"),
-    col.date("taxable_supply_on"),
-    col.date("due_on"),
-    "currency",
-    col.numeric("total_gross"),
-    "vat_breakdown",
-    "figures",
-    "deductible_percent",
-    "category",
-    "tags",
-    "note",
-    col.numeric("paid"),
-    "payments",
-    col.instant("removed_at"),
-    col.instant("created_at"),
-    col.instant("updated_at"),
-  ].join(", "),
+  select: Arr.join(
+    [
+      "id",
+      "workspace_id",
+      "revision",
+      "status",
+      "contact_id",
+      "supplier_name",
+      "supplier_ico",
+      "supplier_dic",
+      "supplier_document_number",
+      col.date("issued_on"),
+      col.date("taxable_supply_on"),
+      col.date("due_on"),
+      "currency",
+      col.numeric("total_gross"),
+      "vat_breakdown",
+      "figures",
+      "deductible_percent",
+      "category",
+      "tags",
+      "note",
+      col.numeric("paid"),
+      "payments",
+      col.instant("removed_at"),
+      col.instant("created_at"),
+      col.instant("updated_at"),
+    ],
+    ", ",
+  ),
   decode: decodeEach((row: DbRow): ExpenseRow => {
     const hasSupplier =
       row.contact_id !== null ||
@@ -163,35 +187,35 @@ const expenseSpec: TableSpec<ExpenseRow> = {
       row.supplier_ico !== null ||
       row.supplier_dic !== null;
     return {
-      id: row.id as ExpenseId,
-      workspaceId: row.workspace_id as WorkspaceId,
+      id: readExpenseId(row.id),
+      workspaceId: readWorkspaceId(row.workspace_id),
       revision: Number(row.revision),
-      status: row.status as ExpenseStatus,
+      status: readExpenseStatus(row.status),
       supplier: hasSupplier
         ? {
-            contactId: (row.contact_id as ContactId | null) ?? null,
-            name: (row.supplier_name as string | null) ?? null,
-            ico: (row.supplier_ico as string | null) ?? null,
-            dic: (row.supplier_dic as string | null) ?? null,
+            contactId: readNullableContactId(row.contact_id ?? null),
+            name: readNullableText(row.supplier_name ?? null),
+            ico: readNullableText(row.supplier_ico ?? null),
+            dic: readNullableText(row.supplier_dic ?? null),
           }
         : null,
-      supplierDocumentNumber: (row.supplier_document_number as string | null) ?? null,
-      issuedOn: (row.issued_on as IsoDate | null) ?? null,
-      taxableSupplyOn: (row.taxable_supply_on as IsoDate | null) ?? null,
-      dueOn: (row.due_on as IsoDate | null) ?? null,
-      currency: (row.currency as CurrencyCode | null) ?? null,
+      supplierDocumentNumber: readNullableText(row.supplier_document_number ?? null),
+      issuedOn: readNullableIsoDate(row.issued_on ?? null),
+      taxableSupplyOn: readNullableIsoDate(row.taxable_supply_on ?? null),
+      dueOn: readNullableIsoDate(row.due_on ?? null),
+      currency: readNullableCurrencyCode(row.currency ?? null),
       total: parseNullableDecimal(row.total_gross),
       vatLines: decodeVatLines(row.vat_breakdown),
       deductiblePercent: Number(row.deductible_percent),
-      category: (row.category as string | null) ?? null,
+      category: readNullableText(row.category ?? null),
       tags: asStringArray(row.tags),
-      note: (row.note as string | null) ?? null,
+      note: readNullableText(row.note ?? null),
       figures: decodeFigures(row.figures),
       paid: parseDecimal(row.paid),
       payments: Number(row.payments),
-      removedAt: (row.removed_at as string | null) ?? null,
-      createdAt: row.created_at as string,
-      updatedAt: row.updated_at as string,
+      removedAt: readNullableText(row.removed_at ?? null),
+      createdAt: readText(row.created_at),
+      updatedAt: readText(row.updated_at),
     };
   }),
   encode: (row) => ({
@@ -210,7 +234,7 @@ const expenseSpec: TableSpec<ExpenseRow> = {
     total_gross: formatNullableDecimal(row.total),
     vat_breakdown: encodeVatLines(row.vatLines),
     figures: encodeFigures(row.figures),
-    fx_rate: row.figures?.fx ? formatDecimal(row.figures.fx.rate) : null,
+    fx_rate: formatNullableDecimal(row.figures?.fx?.rate ?? null),
     fx_quantity: row.figures?.fx?.quantity ?? null,
     fx_fixing_date: row.figures?.fx?.fixingDate ?? null,
     fx_source: row.figures?.fx?.source ?? null,
@@ -230,30 +254,33 @@ const attachmentSpec: TableSpec<AttachmentRow> = {
   table: "attachments",
   collection: "attachments",
   entity: "Attachment",
-  select: [
-    "id",
-    "workspace_id",
-    "revision",
-    "expense_id",
-    "blob_key",
-    "file_name",
-    "content_type",
-    "bytes",
-    "sha256",
-    col.instant("created_at"),
-  ].join(", "),
+  select: Arr.join(
+    [
+      "id",
+      "workspace_id",
+      "revision",
+      "expense_id",
+      "blob_key",
+      "file_name",
+      "content_type",
+      "bytes",
+      "sha256",
+      col.instant("created_at"),
+    ],
+    ", ",
+  ),
   decode: decodeEach(
     (row: DbRow): AttachmentRow => ({
-      id: row.id as AttachmentId,
-      workspaceId: row.workspace_id as WorkspaceId,
+      id: readAttachmentId(row.id),
+      workspaceId: readWorkspaceId(row.workspace_id),
       revision: Number(row.revision),
-      expenseId: row.expense_id as ExpenseId,
-      blobKey: row.blob_key as string,
-      name: (row.file_name as string | null) ?? "",
-      contentType: row.content_type as string,
+      expenseId: readExpenseId(row.expense_id),
+      blobKey: readText(row.blob_key),
+      name: readNullableText(row.file_name ?? null) ?? "",
+      contentType: readText(row.content_type),
       bytes: Number(row.bytes),
-      sha256: row.sha256 as string,
-      createdAt: row.created_at as string,
+      sha256: readText(row.sha256),
+      createdAt: readText(row.created_at),
     }),
   ),
   encode: (row) => ({
@@ -286,41 +313,39 @@ export const ExpensesRepoSql: Layer.Layer<ExpensesRepo, never, SqlClient.SqlClie
           );
 
     return ExpensesRepo.of({
-      get: (ws, id) => expenses.get(ws, id),
-      lock: (ws, id) => expenses.lock(ws, id),
+      get: Effect.fn("ExpensesRepo.get")((ws, id) => expenses.get(ws, id)),
+      lock: Effect.fn("ExpensesRepo.lock")((ws, id) => expenses.lock(ws, id)),
       insert: expenses.insert,
       update: expenses.update,
-      page: (ws, request) =>
-        Effect.gen(function* () {
-          const conditions = [sql`removed_at is null`];
-          if (request.status !== undefined) conditions.push(sql`status = ${request.status}`);
-          if (request.beforeId !== undefined) {
-            conditions.push(sql`id < ${request.beforeId}::uuid`);
-          }
-          const rows = yield* expenses.select(
-            ws,
-            sql.and(conditions),
-            sql`order by id desc limit ${request.limit}`,
-          );
-          if (rows.length === 0) return [];
-          const countRows = yield* unavailable(
-            sql<{ expense_id: string; n: string }>`
+      page: Effect.fn("ExpensesRepo.page")(function* (ws, request) {
+        const conditions = [sql`removed_at is null`];
+        if (request.status !== undefined) conditions.push(sql`status = ${request.status}`);
+        if (request.beforeId !== undefined) {
+          conditions.push(sql`id < ${request.beforeId}::uuid`);
+        }
+        const rows = yield* expenses.select(
+          ws,
+          sql.and(conditions),
+          sql`order by id desc limit ${request.limit}`,
+        );
+        if (rows.length === 0) return [];
+        const countRows = yield* unavailable(
+          sql<{ expense_id: string; n: string }>`
               select expense_id, count(*)::text as n
               from attachments
-              where workspace_id = ${ws} and expense_id in ${sql.in(rows.map((r) => r.id))}
+              where workspace_id = ${ws} and expense_id in ${sql.in(Arr.map(rows, (r) => r.id))}
               group by expense_id
             `,
-          );
-          const counts = new Map(countRows.map((c) => [c.expense_id, Number(c.n)] as const));
-          return rows.map((row) => ({ row, attachments: counts.get(row.id) ?? 0 }));
-        }),
-      detail: (ws, id) =>
-        Effect.gen(function* () {
-          const row = yield* expenses.get(ws, id);
-          const atts = yield* attachmentsOf(ws, [row.id]);
-          return { row, attachments: atts };
-        }),
-      completeIn: (ws, range) =>
+        );
+        const counts = new Map(Arr.map(countRows, (c) => [c.expense_id, Number(c.n)] as const));
+        return Arr.map(rows, (row) => ({ row, attachments: counts.get(row.id) ?? 0 }));
+      }),
+      detail: Effect.fn("ExpensesRepo.detail")(function* (ws, id) {
+        const row = yield* expenses.get(ws, id);
+        const atts = yield* attachmentsOf(ws, [row.id]);
+        return { row, attachments: atts };
+      }),
+      completeIn: Effect.fn("ExpensesRepo.completeIn")((ws, range) =>
         selectReportRows(
           sql,
           "expenses",
@@ -329,7 +354,8 @@ export const ExpensesRepoSql: Layer.Layer<ExpensesRepo, never, SqlClient.SqlClie
             : sql`status = 'complete' and removed_at is null and coalesce(taxable_supply_on, issued_on) >= ${toPgDate(range.from)} and coalesce(taxable_supply_on, issued_on) <= ${toPgDate(range.to)}`,
           (where) => expenses.select(ws, where),
         ),
-      countIncomplete: (ws) =>
+      ),
+      countIncomplete: Effect.fn("ExpensesRepo.countIncomplete")((ws) =>
         Effect.map(
           unavailable(
             sql<{ n: string }>`
@@ -339,12 +365,18 @@ export const ExpensesRepoSql: Layer.Layer<ExpensesRepo, never, SqlClient.SqlClie
           ),
           (rows) => Number(rows[0]?.n ?? 0),
         ),
-      getAttachment: (ws, id) => attachments.get(ws, id),
-      findAttachment: (ws, id) => attachments.find(ws, id),
-      findAttachmentBySha: (ws, expenseId, sha256) =>
+      ),
+      getAttachment: Effect.fn("ExpensesRepo.getAttachment")((ws, id) => attachments.get(ws, id)),
+      findAttachment: Effect.fn("ExpensesRepo.findAttachment")((ws, id) =>
+        attachments.find(ws, id),
+      ),
+      findAttachmentBySha: Effect.fn("ExpensesRepo.findAttachmentBySha")((ws, expenseId, sha256) =>
         attachments.first(ws, sql`expense_id = ${expenseId} and sha256 = ${sha256}`),
+      ),
       insertAttachment: attachments.insert,
-      removeAttachment: (ws, id, expectedRevision) => attachments.remove(ws, id, expectedRevision),
+      removeAttachment: Effect.fn("ExpensesRepo.removeAttachment")((ws, id, expectedRevision) =>
+        attachments.remove(ws, id, expectedRevision),
+      ),
       attachmentsOf,
     });
   }),

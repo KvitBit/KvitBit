@@ -1,13 +1,22 @@
 import { expect, test } from "bun:test";
-import { mkdir, mkdtemp, rm, stat, utimes, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import * as NodeFileSystem from "@effect/platform-node/NodeFileSystem";
+import * as NodePath from "@effect/platform-node/NodePath";
 import { GcsAccessToken, LocalDiskBlobStorage, MemoryBlobStorage } from "@kvitbit/adapters/blob";
 import { ReportsModule } from "@kvitbit/core";
 import { BlobKey } from "@kvitbit/domain/ports";
-import { Clock, Effect, Layer, Option, Stream } from "effect";
-import { HttpClient, HttpClientResponse, UrlParams } from "effect/http";
-import { SqlClient } from "effect/sql";
+import * as Arr from "effect/Array";
+import * as Clock from "effect/Clock";
+import * as DateTime from "effect/DateTime";
+import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
+import * as HttpClient from "effect/http/HttpClient";
+import * as HttpClientResponse from "effect/http/HttpClientResponse";
+import * as UrlParams from "effect/http/UrlParams";
+import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
+import * as Path from "effect/Path";
+import * as Stream from "effect/Stream";
+import * as SqlClient from "effect/sql/SqlClient";
 import { PgliteTestDatabase } from "../../src/persistence";
 import { DEFAULT_REQUEST_LOG_RETENTION_MS, makeCronHandlers } from "../../src/runtime/crons";
 import {
@@ -72,7 +81,7 @@ test("housekeeping retains consumed confirmations through the request-log replay
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
       const now = yield* Clock.currentTimeMillis;
-      const at = (offset: number) => new Date(now + offset).toISOString();
+      const at = (offset: number) => DateTime.formatIso(DateTime.makeUnsafe(now + offset));
       const workspaceId = "01950000-0000-7000-8000-000000000001";
       yield* sql`INSERT INTO workspaces (id, slug, name) VALUES (${workspaceId}, 'fixture', 'Fixture')`;
       yield* sql`INSERT INTO auth."user" (id, name, email) VALUES ('user', 'Test User', 'user@example.test')`;
@@ -100,7 +109,7 @@ test("housekeeping retains consumed confirmations through the request-log replay
       const rows = yield* sql<{
         readonly token_hash: string;
       }>`SELECT token_hash FROM mcp_confirmations ORDER BY id`;
-      return rows.map(({ token_hash }) => token_hash);
+      return Arr.map(rows, ({ token_hash }) => token_hash);
     }).pipe(
       Effect.provide([
         PgliteTestDatabase,
@@ -123,51 +132,57 @@ test("housekeeping collects only old uncommitted attachments and rolls up closed
   const contact = "01950000-0000-7000-8000-000000000007";
   const document = "01950000-0000-7000-8000-000000000008";
   const prefix = `workspaces/${workspace}/expenses/${expense}/attachments`;
-  const root = await mkdtemp(join(tmpdir(), "kvitbit-staged-attachments-"));
-  try {
-    await mkdir(join(root, prefix), { recursive: true });
+  const fixture = Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const root = yield* fs.makeTempDirectoryScoped({ prefix: "kvitbit-staged-attachments-" });
+    yield* fs.makeDirectory(path.join(root, prefix), { recursive: true });
     for (const id of [committed, orphan, recent]) {
-      const path = join(root, prefix, id);
-      await writeFile(path, "fixture");
-      if (id !== recent) await utimes(path, new Date(0), new Date(0));
+      const file = path.join(root, prefix, id);
+      yield* fs.writeFileString(file, "fixture");
+      if (id !== recent) yield* fs.utimes(file, 0, 0);
     }
 
-    const rollups = await Effect.runPromise(
-      Effect.gen(function* () {
-        const sql = yield* SqlClient.SqlClient;
-        const now = yield* Clock.currentTimeMillis;
-        yield* sql`INSERT INTO workspaces (id, slug, name) VALUES (${workspace}, 'fixture', 'Fixture')`;
-        yield* sql`INSERT INTO expenses (id, workspace_id, status)
+    const rollups = yield* Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const now = yield* Clock.currentTimeMillis;
+      yield* sql`INSERT INTO workspaces (id, slug, name) VALUES (${workspace}, 'fixture', 'Fixture')`;
+      yield* sql`INSERT INTO expenses (id, workspace_id, status)
           VALUES (${expense}, ${workspace}, 'incomplete')`;
-        yield* sql`INSERT INTO attachments (id, workspace_id, expense_id, blob_key, content_type, bytes, sha256)
+      yield* sql`INSERT INTO attachments (id, workspace_id, expense_id, blob_key, content_type, bytes, sha256)
           VALUES (${committed}, ${workspace}, ${expense}, ${`${prefix}/${committed}`}, 'image/png', 7, 'fixture')`;
-        yield* sql`INSERT INTO contacts (id, workspace_id, name) VALUES (${contact}, ${workspace}, 'Fixture')`;
-        yield* sql`INSERT INTO documents (id, workspace_id, kind, contact_id, currency, language, payment_method)
+      yield* sql`INSERT INTO contacts (id, workspace_id, name) VALUES (${contact}, ${workspace}, 'Fixture')`;
+      yield* sql`INSERT INTO documents (id, workspace_id, kind, contact_id, currency, language, payment_method)
           VALUES (${document}, ${workspace}, 'invoice', ${contact}, 'CZK', 'cs', 'bank_transfer')`;
-        yield* sql`INSERT INTO share_links (id, workspace_id, document_id, token_hash, key_version)
+      yield* sql`INSERT INTO share_links (id, workspace_id, document_id, token_hash, key_version)
           VALUES (${share}, ${workspace}, ${document}, 'fixture', 1)`;
-        yield* sql`INSERT INTO share_view_events (id, workspace_id, share_link_id, kind, device, visitor_hash, at)
+      yield* sql`INSERT INTO share_view_events (id, workspace_id, share_link_id, kind, device, visitor_hash, at)
           VALUES (gen_random_uuid(), ${workspace}, ${share}, 'view', 'desktop', 'day-1', '2020-01-01T14:00:00Z'),
                  (gen_random_uuid(), ${workspace}, ${share}, 'view', 'mobile', 'day-2', '2020-01-01T15:00:00Z'),
                  (gen_random_uuid(), ${workspace}, ${share}, 'download', 'desktop', 'day-1', '2020-01-01T16:00:00Z'),
-                 (gen_random_uuid(), ${workspace}, ${share}, 'view', 'desktop', 'today', ${new Date(now)})`;
-        yield* makeCronHandlers().housekeeping;
-        yield* makeCronHandlers().housekeeping;
-        return yield* sql`SELECT day::text, views::text, downloads::text FROM share_view_rollups`;
-      }).pipe(
-        Effect.provide([
-          PgliteTestDatabase,
-          ExportJobs,
-          LocalDiskBlobStorage.layer({ root }),
-          localAttachmentInventory(root),
-        ]),
-      ),
+                 (gen_random_uuid(), ${workspace}, ${share}, 'view', 'desktop', 'today', ${DateTime.toDateUtc(DateTime.makeUnsafe(now))})`;
+      yield* makeCronHandlers().housekeeping;
+      yield* makeCronHandlers().housekeeping;
+      return yield* sql`SELECT day::text, views::text, downloads::text FROM share_view_rollups`;
+    }).pipe(
+      Effect.provide([
+        PgliteTestDatabase,
+        ExportJobs,
+        LocalDiskBlobStorage.layer({ root }),
+        localAttachmentInventory(root),
+      ]),
     );
-    expect(rollups).toEqual([{ day: "2020-01-01", views: "2", downloads: "1" }]);
-    await expect(stat(join(root, prefix, orphan))).rejects.toHaveProperty("code", "ENOENT");
-    expect((await stat(join(root, prefix, committed))).isFile()).toBe(true);
-    expect((await stat(join(root, prefix, recent))).isFile()).toBe(true);
-  } finally {
-    await rm(root, { recursive: true, force: true });
-  }
+    const orphanExists = yield* fs.exists(path.join(root, prefix, orphan));
+    const committedFile = yield* fs.stat(path.join(root, prefix, committed));
+    const recentFile = yield* fs.stat(path.join(root, prefix, recent));
+    return { rollups, orphanExists, committedFile, recentFile };
+  });
+
+  const result = await Effect.runPromise(
+    fixture.pipe(Effect.scoped, Effect.provide([NodeFileSystem.layer, NodePath.layer])),
+  );
+  expect(result.rollups).toEqual([{ day: "2020-01-01", views: "2", downloads: "1" }]);
+  expect(result.orphanExists).toBe(false);
+  expect(result.committedFile.type).toBe("File");
+  expect(result.recentFile.type).toBe("File");
 }, 30_000);

@@ -6,7 +6,7 @@
 import { PgliteClient } from "@effect/sql-pglite";
 import type { PGlite } from "@electric-sql/pglite";
 import { makeMigratedPglite } from "@kvitbit/adapters/testing";
-import { Effect } from "effect";
+import * as Effect from "effect/Effect";
 
 let template: Promise<PGlite> | undefined;
 
@@ -17,7 +17,9 @@ const migratedTemplate = () => {
 
 export const TestDatabase = PgliteClient.layerFrom(
   Effect.acquireRelease(
-    Effect.promise(async () => (await (await migratedTemplate()).clone()) as PGlite),
+    Effect.promise(migratedTemplate).pipe(
+      Effect.flatMap((database) => Effect.promise(() => database.clone())),
+    ),
     (client) => Effect.promise(() => client.close()),
   ).pipe(Effect.flatMap((client) => PgliteClient.fromClient({ liveClient: client }))),
 );

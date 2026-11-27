@@ -5,9 +5,12 @@
 import { PgClient } from "@effect/sql-pg";
 import type { PgliteClient } from "@effect/sql-pglite";
 import { layerMigrated } from "@kvitbit/adapters/testing";
-import { Config, Effect, Layer, Option } from "effect";
-import type { SqlClient } from "effect/sql";
-import type { SqlError } from "effect/sql/SqlError";
+import * as Config from "effect/Config";
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
+import type * as SqlClient from "effect/sql/SqlClient";
+import type * as SqlError from "effect/sql/SqlError";
 
 /** Pool size per process unless `KVITBIT_DB_POOL_MAX` says otherwise. */
 const DEFAULT_POOL_MAX = 10;
@@ -18,7 +21,7 @@ const DEFAULT_POOL_MAX = 10;
  */
 export const PgDatabaseLive: Layer.Layer<
   PgClient.PgClient | SqlClient.SqlClient,
-  Config.ConfigError | SqlError
+  Config.ConfigError | SqlError.SqlError
 > = PgClient.layerConfig({
   url: Config.Redacted("DATABASE_URL"),
   maxConnections: Config.Int("KVITBIT_DB_POOL_MAX").pipe(Config.withDefault(DEFAULT_POOL_MAX)),
@@ -33,7 +36,7 @@ export const PgDatabaseLive: Layer.Layer<
  */
 export const PgWorkerDatabaseLive: Layer.Layer<
   PgClient.PgClient | SqlClient.SqlClient,
-  Config.ConfigError | SqlError
+  Config.ConfigError | SqlError.SqlError
 > = Layer.unwrap(
   Effect.gen(function* () {
     const unpooled = yield* Config.option(Config.Redacted("DATABASE_URL_UNPOOLED"));
@@ -57,5 +60,5 @@ export const PgWorkerDatabaseLive: Layer.Layer<
  */
 export const PgliteTestDatabase: Layer.Layer<
   PgliteClient.PgliteClient | SqlClient.SqlClient,
-  SqlError
+  SqlError.SqlError
 > = layerMigrated;

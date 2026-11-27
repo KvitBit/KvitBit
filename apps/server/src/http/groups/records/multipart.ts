@@ -4,8 +4,9 @@
  */
 import { PayloadTooLarge } from "@kvitbit/api-contract";
 import { Invalid } from "@kvitbit/domain/contract";
-import { Effect, Predicate, Stream } from "effect";
-import type { Multipart } from "effect/http";
+import * as Effect from "effect/Effect";
+import * as Multipart from "effect/http/Multipart";
+import * as Stream from "effect/Stream";
 
 export interface StreamedFile {
   readonly name: string;
@@ -14,25 +15,35 @@ export interface StreamedFile {
 }
 
 class MultipartStreamFailure {
-  constructor(readonly error: Multipart.MultipartError) {}
+  readonly error: Multipart.MultipartError;
+
+  constructor(error: Multipart.MultipartError) {
+    this.error = error;
+  }
 }
 
+export const multipartFailureKind = {
+  FileTooLarge: "size",
+  BodyTooLarge: "size",
+  FieldTooLarge: "size",
+  TooManyParts: "shape",
+  Parse: "shape",
+  InternalError: "internal",
+} as const satisfies Record<Multipart.MultipartErrorReason["_tag"], string>;
+
 const malformedFile = () =>
-  new Invalid({ issues: [{ path: ["file"], code: "request.malformed" }] });
+  Invalid.make({ issues: [{ path: ["file"], code: "request.malformed" }] });
 
 const mapMultipartError = (
   error: Multipart.MultipartError,
   limitBytes: number,
 ): Effect.Effect<never, Invalid | PayloadTooLarge> => {
-  switch (error.reason._tag) {
-    case "FileTooLarge":
-    case "BodyTooLarge":
-    case "FieldTooLarge":
-      return Effect.fail(new PayloadTooLarge({ limitBytes }));
-    case "TooManyParts":
-    case "Parse":
+  switch (multipartFailureKind[error.reason._tag]) {
+    case "size":
+      return Effect.fail(PayloadTooLarge.make({ limitBytes }));
+    case "shape":
       return Effect.fail(malformedFile());
-    case "InternalError":
+    case "internal":
       return Effect.die(error);
   }
 };
@@ -46,47 +57,41 @@ const mapMultipartError = (
  * `PayloadTooLarge` (413) for size limits or `Invalid{request.malformed}` (422) for shape/parse
  * errors.
  */
-export const streamSingleFile = <A, E, R>(
+export const streamSingleFile = Effect.fnUntraced(function* <A, E, R>(
   parts: Stream.Stream<Multipart.Part, Multipart.MultipartError>,
   limitBytes: number,
   consume: (file: StreamedFile) => Effect.Effect<A, E, R>,
-): Effect.Effect<A, E | Invalid | PayloadTooLarge, R> =>
-  Effect.gen(function* () {
-    let seen = false;
-    let result: A | undefined;
+) {
+  const state: { result?: { value: A } } = {};
 
-    yield* parts.pipe(
-      Stream.runForEach((part) =>
-        Effect.gen(function* () {
-          if (seen || part._tag !== "File" || part.key !== "file") {
-            return yield* malformedFile();
-          }
-          seen = true;
-          const bytes: Stream.Stream<Uint8Array> = part.content.pipe(
-            Stream.catch((error) => Stream.die(new MultipartStreamFailure(error))),
-          );
-          result = yield* consume({
-            name: part.name,
-            contentType: part.contentType,
-            bytes,
-          }).pipe(
-            Effect.catchDefect((defect) =>
-              defect instanceof MultipartStreamFailure
-                ? Effect.fail(defect.error)
-                : Effect.die(defect),
-            ),
-          );
-        }),
-      ),
-      Effect.catchIf(
-        (error): error is Multipart.MultipartError =>
-          Predicate.hasProperty(error, "_tag") && error._tag === "MultipartError",
-        (error) => mapMultipartError(error, limitBytes),
-      ),
-    );
+  yield* parts.pipe(
+    Stream.runForEach(
+      Effect.fnUntraced(function* (part) {
+        if (state.result !== undefined || part._tag !== "File" || part.key !== "file") {
+          return yield* malformedFile();
+        }
+        const bytes: Stream.Stream<Uint8Array> = part.content.pipe(
+          Stream.catch((error) => Stream.die(new MultipartStreamFailure(error))),
+        );
+        const value = yield* consume({
+          name: part.name,
+          contentType: part.contentType,
+          bytes,
+        }).pipe(
+          Effect.catchDefect((defect) =>
+            defect instanceof MultipartStreamFailure
+              ? Effect.fail(defect.error)
+              : Effect.die(defect),
+          ),
+        );
+        state.result = { value };
+      }),
+    ),
+    Effect.catchIf(Multipart.isMultipartError, (error) => mapMultipartError(error, limitBytes)),
+  );
 
-    if (!seen) {
-      return yield* malformedFile();
-    }
-    return result as A;
-  });
+  if (state.result === undefined) {
+    return yield* malformedFile();
+  }
+  return state.result.value;
+});

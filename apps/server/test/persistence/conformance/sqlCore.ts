@@ -23,13 +23,16 @@ import {
 } from "@kvitbit/core/testing";
 import type { Caller } from "@kvitbit/domain/contract";
 import { CurrentCaller } from "@kvitbit/domain/contract";
-import { Effect, type Exit, Layer } from "effect";
-import { SqlClient } from "effect/sql";
-import { TestClock } from "effect/testing";
+import * as Effect from "effect/Effect";
+import type * as Exit from "effect/Exit";
+import * as Fn from "effect/Function";
+import * as Layer from "effect/Layer";
+import * as SqlClient from "effect/sql/SqlClient";
+import * as TestClock from "effect/testing/TestClock";
 import { PersistenceLive, PgliteTestDatabase } from "../../../src/persistence";
 
 /** 2026-11-23T09:00:00Z, as core's `TEST_NOW`. */
-export const TEST_NOW = Date.UTC(2026, 10, 23, 9, 0, 0);
+const TEST_NOW = Date.UTC(2026, 10, 23, 9, 0, 0);
 
 const seedUsers = (users: NonNullable<TestCoreOptions["users"]>) =>
   Layer.effectDiscard(
@@ -74,21 +77,39 @@ export const SqlTestCore = (options: TestCoreOptions = {}) => {
 export type SqlTestCoreServices = Layer.Success<ReturnType<typeof SqlTestCore>>;
 
 /** Core's `runCore` on `SqlTestCore`. */
-export const runSqlCore = <A, E>(
-  caller: Caller,
-  effect: Effect.Effect<A, E, SqlTestCoreServices | CurrentCaller>,
-  options: TestCoreOptions = {},
-): Promise<Exit.Exit<A, E>> =>
-  Effect.runPromiseExit(
+export const runSqlCore: {
+  <A, E>(
+    effect: Effect.Effect<A, E, SqlTestCoreServices | CurrentCaller>,
+    options?: TestCoreOptions,
+  ): (caller: Caller) => Promise<Exit.Exit<A, E>>;
+  <A, E>(
+    caller: Caller,
+    effect: Effect.Effect<A, E, SqlTestCoreServices | CurrentCaller>,
+    options?: TestCoreOptions,
+  ): Promise<Exit.Exit<A, E>>;
+} = Fn.dual(
+  (args) => !Effect.isEffect(args[0]),
+  <A, E>(
+    caller: Caller,
+    effect: Effect.Effect<A, E, SqlTestCoreServices | CurrentCaller>,
+    options: TestCoreOptions = {},
+  ): Promise<Exit.Exit<A, E>> =>
     Effect.andThen(TestClock.setTime(TEST_NOW), effect).pipe(
       Effect.provideService(CurrentCaller, caller),
       Effect.provide(Layer.merge(SqlTestCore(options), TestClock.layer())),
+      Effect.runPromiseExit,
     ),
-  );
+);
 
 /** Runs `effect` as `caller` (switch callers inside with `asCaller`). */
-export const asCaller = <A, E, R>(
-  caller: Caller,
-  effect: Effect.Effect<A, E, R>,
-): Effect.Effect<A, E, Exclude<R, CurrentCaller>> =>
-  Effect.provideService(effect, CurrentCaller, caller);
+export const asCaller: {
+  <A, E, R>(
+    effect: Effect.Effect<A, E, R>,
+  ): (caller: Caller) => Effect.Effect<A, E, Exclude<R, CurrentCaller>>;
+  <A, E, R>(
+    caller: Caller,
+    effect: Effect.Effect<A, E, R>,
+  ): Effect.Effect<A, E, Exclude<R, CurrentCaller>>;
+} = Fn.dual(2, <A, E, R>(caller: Caller, effect: Effect.Effect<A, E, R>) =>
+  Effect.provideService(effect, CurrentCaller, caller),
+);

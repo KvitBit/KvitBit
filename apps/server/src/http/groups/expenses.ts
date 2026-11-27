@@ -4,22 +4,30 @@
  */
 import { API_PREFIX, Api, ATTACHMENT_MAX_BYTES } from "@kvitbit/api-contract";
 import { Expenses } from "@kvitbit/domain/contract";
-import { Effect, Predicate } from "effect";
-import { HttpApiBuilder } from "effect/http-api";
-import { compact, fileDownload, requestOptions, setLocation, withRevision } from "../conventions";
+import * as Effect from "effect/Effect";
+import * as HttpApiBuilder from "effect/http-api/HttpApiBuilder";
+import * as Predicate from "effect/Predicate";
+import {
+  compact,
+  downloadResponse,
+  requestOptions,
+  setLocation,
+  withRevision,
+} from "../conventions";
 import { streamSingleFile } from "./records/multipart";
 
-export const ExpensesGroupLive = HttpApiBuilder.group(Api, "expenses", (handlers) =>
-  Effect.gen(function* () {
+export const ExpensesGroupLive = HttpApiBuilder.group(
+  Api,
+  "expenses",
+  Effect.fnUntraced(function* (handlers) {
     const expenses = yield* Expenses;
     return handlers
       .handle("list", ({ query }) => expenses.list(compact(query)))
       .handle("record", ({ params, headers, payload }) =>
-        Effect.tap(expenses.record(payload, requestOptions(headers)), (view) =>
-          typeof view.id === "string"
-            ? setLocation(`${API_PREFIX}/workspaces/${params.workspaceId}/expenses/${view.id}`)
-            : Effect.void,
-        ),
+        Effect.tap(expenses.record(payload, requestOptions(headers)), (view) => {
+          if (!Predicate.isString(view.id)) return Effect.void;
+          return setLocation(`${API_PREFIX}/workspaces/${params.workspaceId}/expenses/${view.id}`);
+        }),
       )
       .handle("get", ({ params }) => expenses.get(params.expenseId))
       .handle("edit", ({ params, headers, payload }) =>
@@ -37,17 +45,19 @@ export const ExpensesGroupLive = HttpApiBuilder.group(Api, "expenses", (handlers
           streamSingleFile(payload, ATTACHMENT_MAX_BYTES, (file) =>
             expenses.attach(params.expenseId, file),
           ),
-          (view) =>
-            Predicate.hasProperty(view, "id") && typeof view.id === "string"
-              ? setLocation(
-                  `${API_PREFIX}/workspaces/${params.workspaceId}/expenses/${params.expenseId}/attachments/${view.id}`,
-                )
-              : Effect.void,
+          (view) => {
+            if (!(Predicate.hasProperty(view, "id") && Predicate.isString(view.id)))
+              return Effect.void;
+            return setLocation(
+              `${API_PREFIX}/workspaces/${params.workspaceId}/expenses/${params.expenseId}/attachments/${view.id}`,
+            );
+          },
         ),
       )
       .handle("attachment", ({ params, query }) =>
-        Effect.map(expenses.attachment(params.expenseId, params.attachmentId), (file) =>
-          fileDownload(file, { disposition: query.disposition }),
+        Effect.map(
+          expenses.attachment(params.expenseId, params.attachmentId),
+          downloadResponse({ disposition: query.disposition }),
         ),
       )
       .handle("detach", ({ params }) => expenses.detach(params.expenseId, params.attachmentId));

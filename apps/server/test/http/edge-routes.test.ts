@@ -1,13 +1,19 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import * as BunServices from "@effect/platform-bun/BunServices";
 import { generateId } from "@kvitbit/adapters/auth";
-import { Effect, Layer, Option } from "effect";
-import { HttpRouter } from "effect/http";
-import { SqlClient } from "effect/sql";
+import * as Clock from "effect/Clock";
+import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
+import * as HttpRouter from "effect/http/HttpRouter";
+import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
+import * as Path from "effect/Path";
+import * as EffectString from "effect/String";
+import * as SqlClient from "effect/sql/SqlClient";
 import { RequestIdsLive } from "../../src/http/edge/requestId";
 import { as, type Harness, json, makeHarness } from "./harness";
+
+const randomRequestId = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
 describe("Edge routes: health, config, botProtection, invitations, oauthConsent, static", () => {
   let harness: Harness | undefined;
@@ -16,9 +22,14 @@ describe("Edge routes: health, config, botProtection, invitations, oauthConsent,
   afterEach(async () => {
     await harness?.dispose();
     harness = undefined;
-    for (const dir of tempDirs.splice(0)) {
-      rmSync(dir, { recursive: true, force: true });
-    }
+    await Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      yield* Effect.forEach(
+        tempDirs.splice(0),
+        (dir) => fs.remove(dir, { recursive: true, force: true }),
+        { concurrency: 1 },
+      );
+    }).pipe(Effect.provide(BunServices.layer), Effect.runPromise);
   });
 
   test("GET /healthz and GET /readyz return 200 ok", async () => {
@@ -44,9 +55,7 @@ describe("Edge routes: health, config, botProtection, invitations, oauthConsent,
       headers: { "X-Request-Id": "untrusted" },
     });
     expect(missing.status).toBe(404);
-    expect(missing.headers.get("x-request-id")).toMatch(
-      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
-    );
+    expect(missing.headers.get("x-request-id")).toMatch(randomRequestId);
   });
 
   test("serves the public Scalar API reference", async () => {
@@ -60,7 +69,7 @@ describe("Edge routes: health, config, botProtection, invitations, oauthConsent,
   test("the Better Auth route bounds JSON bodies without Content-Length", async () => {
     harness = makeHarness();
     const response = await harness.fetch("/api/auth/sign-up/email", {
-      ...json({ name: "x".repeat(1024 * 1024) }),
+      ...json({ name: EffectString.repeat(1024 * 1024)("x") }),
       method: "POST",
     });
     expect(response.status).toBe(413);
@@ -114,8 +123,7 @@ describe("Edge routes: health, config, botProtection, invitations, oauthConsent,
 
     const res = await harness.fetch("/api/v1/config");
     expect(res.status).toBe(200);
-    const body = (await res.json()) as Record<string, unknown>;
-    expect(body).toMatchObject({
+    expect(await res.json()).toMatchObject({
       version: "1.2.3",
       botProtection: "none",
       features: { signUp: false, mcp: true, apiKeys: true },
@@ -144,12 +152,13 @@ describe("Edge routes: health, config, botProtection, invitations, oauthConsent,
       }),
     );
 
+    const now = Effect.runSync(Clock.currentTimeMillis);
     const rawQuery = new URLSearchParams({
       client_id: clientId,
       redirect_uri: redirectUri,
       scope: "kvitbit:read offline_access",
       state: "xyz",
-      exp: String(Math.floor(Date.now() / 1000) + 600),
+      exp: String(Math.floor(now / 1000) + 600),
     }).toString();
     const consentId = Buffer.from(rawQuery, "utf8").toString("base64url");
 
@@ -160,22 +169,37 @@ describe("Edge routes: health, config, botProtection, invitations, oauthConsent,
   });
 
   test("Static mounts serve web (/) and PWA (/app/) with SPA fallback and cache headers", async () => {
-    const webDir = mkdtempSync(join(tmpdir(), "kvitbit-web-"));
-    const pwaDir = mkdtempSync(join(tmpdir(), "kvitbit-pwa-"));
-    tempDirs.push(webDir, pwaDir);
+    const mounts = await Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const webDir = yield* fs.makeTempDirectory({ prefix: "kvitbit-web-" });
+      tempDirs.push(webDir);
+      const pwaDir = yield* fs.makeTempDirectory({ prefix: "kvitbit-pwa-" });
+      tempDirs.push(pwaDir);
 
-    mkdirSync(join(webDir, "assets"), { recursive: true });
-    writeFileSync(join(webDir, "index.html"), "<html>web-spa</html>");
-    writeFileSync(join(webDir, "assets", "main-deadbeef.js"), "console.log('web');");
+      yield* fs.makeDirectory(path.join(webDir, "assets"), { recursive: true });
+      yield* fs.writeFileString(path.join(webDir, "index.html"), "<html>web-spa</html>");
+      yield* fs.writeFileString(
+        path.join(webDir, "assets", "main-deadbeef.js"),
+        "console.log('web');",
+      );
 
-    mkdirSync(join(pwaDir, "assets"), { recursive: true });
-    writeFileSync(join(pwaDir, "index.html"), "<html>pwa-spa</html>");
-    writeFileSync(join(pwaDir, "sw.js"), "self.addEventListener('fetch', () => {});");
-    writeFileSync(join(pwaDir, "manifest.webmanifest"), '{"name":"Kvitbit"}');
-    writeFileSync(join(pwaDir, "assets", "bundle-cafebabe.js"), "console.log('pwa');");
+      yield* fs.makeDirectory(path.join(pwaDir, "assets"), { recursive: true });
+      yield* fs.writeFileString(path.join(pwaDir, "index.html"), "<html>pwa-spa</html>");
+      yield* fs.writeFileString(
+        path.join(pwaDir, "sw.js"),
+        "self.addEventListener('fetch', () => {});",
+      );
+      yield* fs.writeFileString(path.join(pwaDir, "manifest.webmanifest"), '{"name":"Kvitbit"}');
+      yield* fs.writeFileString(
+        path.join(pwaDir, "assets", "bundle-cafebabe.js"),
+        "console.log('pwa');",
+      );
+      return { webDir, pwaDir };
+    }).pipe(Effect.provide(BunServices.layer), Effect.runPromise);
 
     harness = makeHarness({
-      config: { webDir: Option.some(webDir), pwaDir: Option.some(pwaDir) },
+      config: { webDir: Option.some(mounts.webDir), pwaDir: Option.some(mounts.pwaDir) },
     });
 
     // Web SPA fallback on client route

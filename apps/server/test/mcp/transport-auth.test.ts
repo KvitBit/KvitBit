@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { MCP_PROTOCOL_VERSION, OAUTH_SCOPES_SUPPORTED } from "@kvitbit/api-contract";
+import * as Arr from "effect/Array";
+import * as Str from "effect/String";
 import { MCP_ORIGIN, makeMcpHarness } from "./harness";
 
 setDefaultTimeout(15_000);
@@ -15,33 +17,37 @@ describe("MCP Streamable HTTP transport, OAuth metadata, and authentication", ()
     const h = makeMcpHarness();
     cleanup = h.dispose;
 
-    for (const path of [
+    const paths = [
       "/.well-known/oauth-protected-resource",
       "/.well-known/oauth-protected-resource/mcp",
-    ]) {
-      const res = await h.fetch(path);
-      expect(res.status).toBe(200);
-      const body = (await res.json()) as Record<string, unknown>;
-      expect(body).toEqual({
-        resource: `${MCP_ORIGIN}/mcp`,
-        authorization_servers: [`${MCP_ORIGIN}/api/auth`],
-        scopes_supported: [...OAUTH_SCOPES_SUPPORTED],
-        bearer_methods_supported: ["header"],
-        resource_name: "kvitbit",
-        resource_documentation: `${MCP_ORIGIN}/docs/mcp`,
-      });
-    }
+    ];
+    await Promise.all(
+      Arr.map(paths, async (path) => {
+        const res = await h.fetch(path);
+        expect(res.status).toBe(200);
+        expect(await res.json()).toEqual({
+          resource: `${MCP_ORIGIN}/mcp`,
+          authorization_servers: [`${MCP_ORIGIN}/api/auth`],
+          scopes_supported: [...OAUTH_SCOPES_SUPPORTED],
+          bearer_methods_supported: ["header"],
+          resource_name: "kvitbit",
+          resource_documentation: `${MCP_ORIGIN}/docs/mcp`,
+        });
+      }),
+    );
   });
 
   test("GET /mcp and DELETE /mcp answer 405 with Allow: POST", async () => {
     const h = makeMcpHarness();
     cleanup = h.dispose;
 
-    for (const method of ["GET", "DELETE"]) {
-      const res = await h.fetch("/mcp", { method });
-      expect(res.status).toBe(405);
-      expect(res.headers.get("allow")).toBe("POST");
-    }
+    await Promise.all(
+      Arr.map(["GET", "DELETE"], async (method) => {
+        const res = await h.fetch("/mcp", { method });
+        expect(res.status).toBe(405);
+        expect(res.headers.get("allow")).toBe("POST");
+      }),
+    );
   });
 
   test("401 WWW-Authenticate distinguishes missing token vs invalid/expired/cookie/kvb_ key", async () => {
@@ -63,14 +69,11 @@ describe("MCP Streamable HTTP transport, OAuth metadata, and authentication", ()
     );
 
     // Cookie-only request (rule A1) -> rejected as missing
-    const cookieOnly = await h.fetch("/mcp", {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        cookie: "__Secure-kvitbit.session_token=session:123",
-      },
-      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "ping" }),
-    });
+    const cookieOnly = await h.postMcp(
+      null,
+      { jsonrpc: "2.0", id: 1, method: "ping" },
+      { cookie: "__Secure-kvitbit.session_token=session:123" },
+    );
     expect(cookieOnly.status).toBe(401);
 
     // kvb_ API key (rule A1) -> rejected as invalid_token
@@ -143,9 +146,9 @@ describe("MCP Streamable HTTP transport, OAuth metadata, and authentication", ()
       },
       serverInfo: { name: "kvitbit", version: "0.0.0-test" },
     });
-    expect((init.json.result as { readonly instructions: string }).instructions).toContain(
-      "kvitbit://guide",
-    );
+    expect(init.json.result).toMatchObject({
+      instructions: expect.stringContaining("kvitbit://guide"),
+    });
 
     // Notification (no id) -> 202 Accepted
     const notif = await h.postMcp(grant.token, {
@@ -157,19 +160,19 @@ describe("MCP Streamable HTTP transport, OAuth metadata, and authentication", ()
     // JSON-RPC batch -> 400 -32600
     const batch = await h.postMcp(grant.token, [{ jsonrpc: "2.0", id: 1, method: "ping" }]);
     expect(batch.status).toBe(400);
-    expect(((await batch.json()) as { error: { code: number } }).error.code).toBe(-32600);
+    expect(await batch.json()).toMatchObject({ error: { code: -32600 } });
 
     // Invalid JSON -> 400 -32700
     const badJson = await h.postMcp(grant.token, "{not-json");
     expect(badJson.status).toBe(400);
-    expect(((await badJson.json()) as { error: { code: number } }).error.code).toBe(-32700);
+    expect(await badJson.json()).toMatchObject({ error: { code: -32700 } });
 
     // > 1 MB body -> 413
-    const huge = await h.postMcp(grant.token, "x".repeat(1024 * 1024 + 10));
+    const huge = await h.postMcp(grant.token, Str.repeat(1024 * 1024 + 10)("x"));
     expect(huge.status).toBe(413);
 
     // Unknown method -> -32601
     const unknown = await h.rpc(grant.token, "prompts/list");
-    expect((unknown.json.error as { code: number }).code).toBe(-32601);
+    expect(unknown.json.error).toMatchObject({ code: -32601 });
   });
 });

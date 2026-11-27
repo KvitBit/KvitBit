@@ -4,7 +4,10 @@
  * MCP Streamable HTTP (`/mcp`, RFC 9728), Mobile OTA/APK/App Links (`/api/mobile/*`,
  * `/.well-known/assetlinks.json`), and static web/PWA mounts (`/app/*`, `/*`).
  */
-import { Config, Effect, Layer, Option } from "effect";
+import * as Config from "effect/Config";
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import {
   AltchaBotProtectionConfig,
   AuthServerLive,
@@ -19,7 +22,7 @@ import { McpConfigLive, McpRoutesLive } from "./mcp";
  * BotProtection from the environment: ALTCHA PoW v2 when `ALTCHA_HMAC_KEY` is configured,
  * otherwise `NoopBotProtection` (matching `HttpConfigLive.botProtection`).
  */
-export const BotProtectionLive = Layer.unwrap(
+const BotProtectionLive = Layer.unwrap(
   Effect.gen(function* () {
     const key = yield* Config.option(Config.Redacted("ALTCHA_HMAC_KEY"));
     return Option.isSome(key) ? AltchaBotProtectionConfig() : NoopBotProtection;
@@ -31,7 +34,6 @@ export const AllRoutesLive = Layer.mergeAll(McpRoutesLive, MobileRoutesLive, Htt
 
 /** All edge dependencies (config, auth, principal resolver, rate limiter, bot protection, mobile storage). */
 export const EdgeServicesLive = Layer.mergeAll(
-  HttpConfigLive,
   McpConfigLive,
   MobileConfigLive,
   MobileStorageLive.pipe(Layer.provide(MobileConfigLive)),
