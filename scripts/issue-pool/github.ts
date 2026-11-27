@@ -60,6 +60,26 @@ export async function resolveRepository(run: Command, slug: string): Promise<Rep
   return repository;
 }
 
+export async function verifyProjectOrigin(
+  run: Command,
+  project: string,
+  repository: Repository,
+): Promise<void> {
+  const origin = (await run("git", ["-C", project, "remote", "get-url", "origin"])).trim();
+  const sshPath = /^(?:[^@/:]+@)?github\.com:([^?#]+)$/i.exec(origin)?.[1];
+  const url = URL.parse(sshPath ? `ssh://github.com/${sshPath}` : origin);
+  const slug = url?.pathname.replace(/^\/|\/$/g, "").replace(/\.git$/i, "");
+  if (
+    !url ||
+    !["https:", "ssh:", "git:"].includes(url.protocol) ||
+    !["github.com", "ssh.github.com"].includes(url.hostname) ||
+    !slug ||
+    slug.toLowerCase() !== repository.full_name.toLowerCase()
+  ) {
+    throw new PoolError("The project origin does not match the resolved GitHub repository");
+  }
+}
+
 function isFeedbackIssue(issue: RestIssue): boolean {
   return (
     !issue.pull_request &&

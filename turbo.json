@@ -87,7 +87,11 @@
       "outputs": ["formal/*.tsbuildinfo"]
     },
     "//#typecheck:issue-pool": {
-      "inputs": ["scripts/issue-pool/**/*.ts", "scripts/issue-pool/tsconfig.json", "tsconfig.base.json"],
+      "inputs": [
+        "scripts/issue-pool/**/*.ts",
+        "scripts/issue-pool/tsconfig.json",
+        "tsconfig.base.json"
+      ],
       "outputs": []
     },
     "//#test:issue-pool": {

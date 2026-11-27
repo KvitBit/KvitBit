@@ -25,6 +25,7 @@ export interface IssueTracker {
 
 export interface WorkerRunner {
   find(number: number): Promise<string | null>;
+  verify(number: number, threadId: string): Promise<void>;
   start(number: number): Promise<string>;
   sendReply(threadId: string, reply: Reply): Promise<void>;
   receivedReply(threadId: string, commentId: number): Promise<boolean>;
@@ -195,6 +196,7 @@ async function recoverReplies(
     const { commentId, issue, threadId } = reservation;
     issues.add(issue);
     try {
+      await runner.verify(issue, threadId);
       if (!(await runner.receivedReply(threadId, commentId))) {
         throw new PoolError(`T3 has not confirmed delivery of GitHub comment ${commentId}`);
       }
@@ -221,6 +223,7 @@ async function relayReplies(
       ({ commentId }) => !pool.replyAccepted(commentId),
     );
     if (!reply) return;
+    await runner.verify(number, threadId);
     const { commentId, questionId } = reply;
     const reservation = { issue: number, threadId, questionId, commentId };
     result.plannedReplies.push(commentId);

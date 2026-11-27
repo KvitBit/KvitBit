@@ -2,7 +2,12 @@ import { mkdir } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { runCommand } from "./command";
-import { defaultRepository, githubIssueTracker, resolveRepository } from "./github";
+import {
+  defaultRepository,
+  githubIssueTracker,
+  resolveRepository,
+  verifyProjectOrigin,
+} from "./github";
 import { IssuePool, PoolError, runIssuePool } from "./pool";
 import { t3WorkerRunner } from "./t3";
 
@@ -25,6 +30,7 @@ async function main(): Promise<void> {
 
   const project = resolve(values.project);
   const repo = await resolveRepository(runCommand, values.repo);
+  await verifyProjectOrigin(runCommand, project, repo);
   if (apply && state) {
     process.umask(0o077);
     await mkdir(dirname(state), { recursive: true, mode: 0o700 });

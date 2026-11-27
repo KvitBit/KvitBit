@@ -52,7 +52,9 @@ switch (executable) {
     break;
   }
   case "git": {
-    if (args[2] === "fetch") {
+    if (args.slice(2).join(" ") === "remote get-url origin") {
+      process.stdout.write(fixture.origin ?? "git@github.com:totalolage/kvitbit.git");
+    } else if (args[2] === "fetch") {
       if (fixture.fetchFailure) process.exit(69);
     } else if (args[2] === "for-each-ref") {
       process.stdout.write((fixture.branches ?? []).map((branch) => "refs/heads/" + branch).join("\n"));
@@ -63,7 +65,9 @@ switch (executable) {
   }
   case "t3": {
     if (args[1] === "list") {
-      output((fixture.threads ?? []).map(({ threadId, title }) => ({ threadId, title })));
+      output((fixture.threads ?? []).map(({ threadId, title, projectId, parentThreadId }) => ({
+        threadId, title, projectId, parentThreadId,
+      })));
     } else if (args[1] === "show") {
       const thread = fixture.threads.find(({ threadId }) => threadId === args.at(-1));
       output({ thread, messages: args[3] === "0" ? [] : (thread.messages ?? []).slice(-Number(args[3])) });
@@ -92,6 +96,14 @@ const thread = (number: number, title = `Kvitbit issue #${number}`) => ({
   threadId: `worker-${number}`,
   title,
   branch: `issue-pool/issue-${number}`,
+  projectId: "test-project",
+  parentThreadId: null,
+  messages: [
+    {
+      role: "user",
+      text: `$full-send\n\nOwn https://github.com/totalolage/kvitbit/issues/${number} through investigation.`,
+    },
+  ],
 });
 const comment = (id: number, author: number, body: string, type = "User") => ({
   id,
@@ -281,7 +293,6 @@ testCli(
       linkedPRs: [2],
       branchPRs: [3],
       threads: [thread(4), thread(5, "Renamed worker")],
-      branches: [thread(5).branch],
     });
     const pass = await run("--apply", "--state", state);
     expect(pass.status).toBe(0);
@@ -363,7 +374,7 @@ testCli(
     await setFixture({
       ...waiting,
       comments: { 4: [comment(30, 1, humanNeeded), comment(31, 1, "New answer")] },
-      threads: [{ ...thread(4), messages: [{ role: "assistant", text }] }],
+      threads: [{ ...thread(4), messages: [...thread(4).messages, { role: "assistant", text }] }],
     });
     const ignored = await run(...apply);
     expect(ignored.status).toBe(1);
@@ -376,6 +387,7 @@ testCli(
         {
           ...thread(4),
           messages: [
+            ...thread(4).messages,
             { role: "user", text },
             ...Array.from({ length: 100 }, () => ({ role: "assistant", text: "Later message" })),
           ],
@@ -425,12 +437,11 @@ testCli(
 );
 
 testCli(
-  "multiple top-level threads on the same branch block launch and adoption",
+  "multiple top-level workers are ambiguous even after their Git branch is deleted",
   async ({ run, setFixture, state }) => {
     await setFixture({
       issues: [issue(4)],
       threads: [thread(4), { ...thread(4, "Renamed worker"), threadId: "old-worker-4" }],
-      branches: [thread(4).branch],
     });
     const pass = await run("--apply", "--state", state);
     expect(pass.status).toBe(1);
@@ -440,12 +451,91 @@ testCli(
   },
 );
 
+testCli("rejects cross-repository launch and relay", async ({ run, setFixture, state }) => {
+  const repository = { id: 101, full_name: "another/feedback", owner: { id: 1, type: "User" } };
+  const github = {
+    repository,
+    issues: [issue(4)],
+    threads: [thread(4)],
+    comments: { 4: [comment(50, 1, humanNeeded), comment(51, 1, "Private to the other repo")] },
+  };
+  const apply = ["--apply", "--state", state, "--repo", repository.full_name];
+  await setFixture(github);
+  const wrongProject = await run(...apply);
+  expect(wrongProject.status).toBe(1);
+  expect(wrongProject.stderr).toContain("The project origin does not match");
+  expect(wrongProject.calls.some(({ executable }) => executable === "t3")).toBe(false);
+  expect(await Bun.file(state).exists()).toBe(false);
+
+  // An old thread can outlive a change to the project's remote.
+  await setFixture({ ...github, origin: "ssh://git@ssh.github.com:443/another/feedback.git" });
+  const wrongWorker = await run(...apply);
+  expect(wrongWorker.status).toBe(1);
+  expect(wrongWorker.result?.failures).toMatchObject([
+    {
+      issue: 4,
+      operation: "assignment",
+      reason: expect.stringContaining("no matching issue brief"),
+    },
+  ]);
+  expect(wrongWorker.result?.adopted).toEqual([]);
+  expect(writes(wrongWorker.calls)).toEqual([]);
+});
+
+testCli(
+  "checks the initial brief before using a saved assignment for a reply",
+  async ({ run, setFixture, state }) => {
+    const apply = ["--apply", "--state", state];
+    const worker = thread(4);
+    const fixture = { issues: [issue(4, claimedLabel)], threads: [worker] };
+    await setFixture(fixture);
+    const initial = await run(...apply);
+    expect(initial.status).toBe(0);
+    expect(initial.result?.adopted).toEqual([4]);
+
+    await setFixture({
+      ...fixture,
+      threads: [
+        {
+          ...worker,
+          messages: [
+            ...worker.messages.map(({ role, text }) => ({
+              role,
+              text: text.replace("totalolage/kvitbit", "another/feedback"),
+            })),
+            ...worker.messages,
+          ],
+        },
+      ],
+      comments: { 4: [comment(50, 1, humanNeeded), comment(51, 1, "Maintainer answer")] },
+    });
+    const pass = await run(...apply);
+    expect(pass.status).toBe(1);
+    expect(pass.result?.failures).toMatchObject([
+      { issue: 4, operation: "reply", reason: expect.stringContaining("no matching issue brief") },
+    ]);
+    expect(pass.result?.plannedReplies).toEqual([]);
+    expect(writes(pass.calls)).toEqual([]);
+  },
+);
+
+testCli(
+  "a local worker branch without a T3 record blocks launch",
+  async ({ run, setFixture, state }) => {
+    await setFixture({ issues: [issue(4)], branches: [thread(4).branch] });
+    const pass = await run("--apply", "--state", state);
+    expect(pass.status).toBe(1);
+    expect(pass.result?.failures[0]?.reason).toContain("without a matching T3 thread");
+    expect(writes(pass.calls)).toEqual([]);
+  },
+);
+
 testCli("an idle apply pass never invokes T3 or fetches", async ({ run, setFixture, state }) => {
   await setFixture({ issues: [] });
   const pass = await run("--apply", "--state", state);
   expect(pass.status).toBe(0);
   expect(pass.result?.plannedAssignments).toEqual([]);
-  expect(pass.calls.map(({ executable }) => executable)).toEqual(["gh", "gh"]);
+  expect(pass.calls.map(({ executable }) => executable)).toEqual(["gh", "git", "gh"]);
   expect(writes(pass.calls)).toEqual([]);
 });
 
@@ -468,7 +558,11 @@ testCli(
     }
 
     const repository = { id: 101, full_name: "another/feedback", owner: { id: 1, type: "User" } };
-    await setFixture({ issues: [issue(4)], repository });
+    await setFixture({
+      issues: [issue(4)],
+      repository,
+      origin: "https://github.com/another/feedback.git",
+    });
     const successful = await run("--apply", "--state", state, "--repo", repository.full_name);
     expect(successful.status).toBe(0);
     expect(successful.result?.started).toEqual([4]);
