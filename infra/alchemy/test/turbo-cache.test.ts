@@ -111,6 +111,11 @@ describe("Self-hosted Turborepo remote cache on GCP", () => {
         },
       },
     ]);
+    // Cloud Run rejects tcpSocket liveness probes; startupProbe handles TCP readiness.
+    expect(container.startupProbe).toMatchObject({
+      tcpSocket: { port: KVITBIT_TURBO_CACHE_DEFAULTS.port },
+    });
+    expect(container.livenessProbe).toBeUndefined();
   });
 
   test("produces valid GCS lifecycle JSON for cache TTL expiration", () => {

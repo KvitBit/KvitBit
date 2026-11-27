@@ -118,12 +118,6 @@ export const turboCacheServiceProps = (
             timeoutSeconds: 3,
             failureThreshold: 12,
           },
-          livenessProbe: {
-            tcpSocket: { port: KVITBIT_TURBO_CACHE_DEFAULTS.port },
-            periodSeconds: 30,
-            timeoutSeconds: 5,
-            failureThreshold: 3,
-          },
         },
       ],
     },
