@@ -1,0 +1,4 @@
+{
+  "extends": "../tsconfig.effect.json",
+  "include": ["**/*.ts"]
+}
