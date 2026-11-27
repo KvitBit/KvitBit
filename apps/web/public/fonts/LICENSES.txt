@@ -1,3 +1,5 @@
 Erode, Recia, Chillax and Synonym: Indian Type Foundry, ITF Free Font License (Fontshare),
-free for commercial use, https://www.fontshare.com/terms. Downloaded from cdn.fontshare.com.
+free for commercial use, https://www.fontshare.com/terms.
+The TrueType files are from the official family downloads on Fontshare. Filenames include the
+first 12 hex digits of the file's SHA-256 for immutable caching.
 JetBrains Mono: SIL Open Font License 1.1, see JetBrainsMono-OFL.txt (via @fontsource/jetbrains-mono).
