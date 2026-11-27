@@ -2,7 +2,7 @@ import type { Command } from "./command";
 import { claimedLabel, feedbackLabel, humanNeeded, type IssueTracker, PoolError } from "./pool";
 import { workerBranch } from "./t3";
 
-export const defaultRepository = "totalolage/kvitbit";
+export const defaultRepository = "KvitBit/KvitBit";
 const repoSlug = /^[a-zA-Z0-9][a-zA-Z0-9-]{0,38}\/(?!\.{1,2}$)[a-zA-Z0-9_.-]{1,100}$/;
 
 interface User {
