@@ -9,7 +9,7 @@ import {
   type PaymentMethod,
   type TaxRegime,
 } from "@kvitbit/domain";
-import { I18n, Theme, ViewModels } from "@kvitbit/ui-port";
+import { Format, I18n, Theme, ViewModels } from "@kvitbit/ui-port";
 import { Option } from "effect";
 import { textOf, translator } from "../../app/i18n";
 import type { PageContext } from "../../app/page";
@@ -130,6 +130,17 @@ const viewIssuingEntity = (model: Model, ctx: PageContext, h: Html.H<Message>): 
     ]);
   }
 
+  const pasteAddress = (field: Format.AddressField) => (text: string) => {
+    if (!editable) return undefined;
+    const next = Format.applyAddressPaste(
+      { street: f.street, city: f.city, postalCode: f.postalCode, country: f.country },
+      field,
+      text,
+      { defaultCountry: "CZ" },
+    );
+    return next === undefined ? undefined : Message.PastedEntityAddress(next);
+  };
+
   return card(h, [
     cardTitle(h, t.t("settings.issuingEntity.title"), [
       ...(editable
@@ -209,6 +220,7 @@ const viewIssuingEntity = (model: Model, ctx: PageContext, h: Html.H<Message>): 
         value: f.street,
         disabled: !editable,
         onInput: (value) => Message.ChangedEntityField({ field: "street", value }),
+        onPaste: pasteAddress("street"),
       }),
       textField(h, {
         id: "kb-entity-city",
@@ -216,6 +228,7 @@ const viewIssuingEntity = (model: Model, ctx: PageContext, h: Html.H<Message>): 
         value: f.city,
         disabled: !editable,
         onInput: (value) => Message.ChangedEntityField({ field: "city", value }),
+        onPaste: pasteAddress("city"),
       }),
       textField(h, {
         id: "kb-entity-postal",
@@ -224,6 +237,7 @@ const viewIssuingEntity = (model: Model, ctx: PageContext, h: Html.H<Message>): 
         mono: true,
         disabled: !editable,
         onInput: (value) => Message.ChangedEntityField({ field: "postalCode", value }),
+        onPaste: pasteAddress("postalCode"),
       }),
       textField(h, {
         id: "kb-entity-country",
@@ -232,6 +246,7 @@ const viewIssuingEntity = (model: Model, ctx: PageContext, h: Html.H<Message>): 
         mono: true,
         disabled: !editable,
         onInput: (value) => Message.ChangedEntityField({ field: "country", value }),
+        onPaste: pasteAddress("country"),
       }),
       textField(h, {
         id: "kb-entity-email",

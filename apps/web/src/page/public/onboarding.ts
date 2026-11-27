@@ -152,6 +152,11 @@ export const Message = UiSchema.TaggedEnum({
     ]),
     value: Schema.String,
   },
+  PastedAddress: {
+    street: Schema.String,
+    city: Schema.String,
+    postalCode: Schema.String,
+  },
   SelectedTaxRegime: { regime: TaxRegime },
   SelectedBankCurrency: { currency: CurrencyCode },
   SelectedDefaultCurrency: { currency: CurrencyCode },
@@ -753,6 +758,13 @@ const updateWizard = (
       }
       return { model: next };
     },
+    PastedAddress: ({ street, city, postalCode }) => {
+      if (editingLocked(model)) return { model };
+      if (model.createdWorkspace !== null && model.setupDone.issuingEntity) return { model };
+      return {
+        model: { ...model, street, city, postalCode, stepError: null, submitFailure: null },
+      };
+    },
     SelectedTaxRegime: ({ regime }) => ({
       model:
         editingLocked(model) || model.createdWorkspace !== null
@@ -1022,6 +1034,27 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
     (model.step === 2 && workspaceCreated) ||
     (model.step === 3 && bankLocked(model));
 
+  const pasteAddress = (field: Format.AddressField) => (text: string) => {
+    const next = Format.applyAddressPaste(
+      {
+        street: model.street,
+        city: model.city,
+        postalCode: model.postalCode,
+        country: model.country,
+      },
+      field,
+      text,
+      { includeCountry: false },
+    );
+    return next === undefined
+      ? undefined
+      : Message.PastedAddress({
+          street: next.street,
+          city: next.city,
+          postalCode: next.postalCode,
+        });
+  };
+
   const stepContent = (() => {
     switch (model.step) {
       case 1:
@@ -1114,12 +1147,14 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
                 label: t.t("common.field.street"),
                 value: model.street,
                 onInput: (value) => Message.ChangedField({ field: "street", value }),
+                onPaste: pasteAddress("street"),
               }),
               textField(h, {
                 id: "onb-city",
                 label: t.t("common.field.city"),
                 value: model.city,
                 onInput: (value) => Message.ChangedField({ field: "city", value }),
+                onPaste: pasteAddress("city"),
               }),
               textField(h, {
                 id: "onb-postal",
@@ -1127,6 +1162,7 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
                 value: model.postalCode,
                 mono: true,
                 onInput: (value) => Message.ChangedField({ field: "postalCode", value }),
+                onPaste: pasteAddress("postalCode"),
               }),
               textField(h, {
                 id: "onb-legal-form",

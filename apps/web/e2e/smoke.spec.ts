@@ -613,5 +613,57 @@ if (typeof Bun === "undefined") {
       await expect(overdue).toBeVisible();
       expect(reloaded).toBe(false);
     });
+
+    test("pasting a full address on onboarding splits into empty address inputs", async ({
+      page,
+    }) => {
+      const errors = attachErrorGuards(page);
+      await page.goto("/onboarding", { waitUntil: "domcontentloaded" });
+
+      const street = page.locator("#onb-street");
+      const city = page.locator("#onb-city");
+      const postal = page.locator("#onb-postal");
+      await expect(street).toBeVisible();
+
+      const dispatchPaste = async (selector: string, text: string) =>
+        page.evaluate(
+          ({ sel, clip }) => {
+            const el = document.querySelector(sel);
+            if (!(el instanceof HTMLInputElement)) throw new Error(`missing input ${sel}`);
+            el.focus();
+            const data = new DataTransfer();
+            data.setData("text/plain", clip);
+            const event = new ClipboardEvent("paste", {
+              clipboardData: data,
+              bubbles: true,
+              cancelable: true,
+            });
+            el.dispatchEvent(event);
+            return event.defaultPrevented;
+          },
+          { sel: selector, clip: text },
+        );
+
+      // Single-line full address splits across Street, City, and Postal code.
+      expect(await dispatchPaste("#onb-street", "Jankovcova 1522/53, 170 00 Praha 7")).toBe(true);
+      await expect(street).toHaveValue("Jankovcova 1522/53");
+      await expect(city).toHaveValue("Praha 7");
+      await expect(postal).toHaveValue("170 00");
+
+      // Multiline address respects non-empty fields and fills only empty siblings.
+      await street.fill("");
+      await city.fill("Brno");
+      await postal.fill("");
+      expect(await dispatchPaste("#onb-street", "Na Florenci 2116/15\n110 00 Praha 1")).toBe(true);
+      await expect(street).toHaveValue("Na Florenci 2116/15");
+      await expect(city).toHaveValue("Brno");
+      await expect(postal).toHaveValue("110 00");
+
+      // Plain single-part street text is not intercepted.
+      await street.fill("");
+      expect(await dispatchPaste("#onb-street", "Korunní 810/104")).toBe(false);
+
+      errors.assertClean();
+    });
   });
 }
