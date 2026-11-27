@@ -15,57 +15,60 @@ export const UnauthorizedReason = Schema.Literals([
 ]);
 export type UnauthorizedReason = typeof UnauthorizedReason.Type;
 
-export class Unauthorized extends Schema.TaggedError<
-  Unauthorized,
-  { readonly brand: unique symbol }
->()("Unauthorized", {
-  reason: UnauthorizedReason,
-}) {
+// Keep the nominal brand outside the public error fields.
+declare const edgeErrorBrand: unique symbol;
+interface EdgeErrorBrand {
+  readonly [edgeErrorBrand]: true;
+}
+
+export class Unauthorized extends Schema.TaggedError<Unauthorized, EdgeErrorBrand>()(
+  "Unauthorized",
+  {
+    reason: UnauthorizedReason,
+  },
+) {
   static readonly schema = this.pipe(HttpApiSchema.status("Unauthorized")); // 401
 }
 
 /** ALTCHA payload missing, for the wrong scope, expired or replayed (section 2.6, rule B3). */
-export class InvalidBotProof extends Schema.TaggedError<
-  InvalidBotProof,
-  { readonly brand: unique symbol }
->()("InvalidBotProof", {}) {
+export class InvalidBotProof extends Schema.TaggedError<InvalidBotProof, EdgeErrorBrand>()(
+  "InvalidBotProof",
+  {},
+) {
   static readonly schema = this.pipe(HttpApiSchema.status("BadRequest")); // 400
 }
 
-export class OriginRejected extends Schema.TaggedError<
-  OriginRejected,
-  { readonly brand: unique symbol }
->()("OriginRejected", {}) {
+export class OriginRejected extends Schema.TaggedError<OriginRejected, EdgeErrorBrand>()(
+  "OriginRejected",
+  {},
+) {
   static readonly schema = this.pipe(HttpApiSchema.status("Forbidden")); // 403
 }
 
-export class PreconditionFailed extends Schema.TaggedError<
-  PreconditionFailed,
-  { readonly brand: unique symbol }
->()("PreconditionFailed", { currentRevision: Schema.NullOr(Schema.Int) }) {
+export class PreconditionFailed extends Schema.TaggedError<PreconditionFailed, EdgeErrorBrand>()(
+  "PreconditionFailed",
+  { currentRevision: Schema.NullOr(Schema.Int) },
+) {
   static readonly schema = this.pipe(HttpApiSchema.status("PreconditionFailed")); // 412
 }
 
-export class PayloadTooLarge extends Schema.TaggedError<
-  PayloadTooLarge,
-  { readonly brand: unique symbol }
->()("PayloadTooLarge", {
-  limitBytes: Schema.Int,
-}) {
+export class PayloadTooLarge extends Schema.TaggedError<PayloadTooLarge, EdgeErrorBrand>()(
+  "PayloadTooLarge",
+  {
+    limitBytes: Schema.Int,
+  },
+) {
   static readonly schema = this.pipe(HttpApiSchema.status("PayloadTooLarge")); // 413
 }
 
 export class PreconditionRequired extends Schema.TaggedError<
   PreconditionRequired,
-  { readonly brand: unique symbol }
+  EdgeErrorBrand
 >()("PreconditionRequired", {}) {
   static readonly schema = this.pipe(HttpApiSchema.status(428));
 }
 
-export class RateLimited extends Schema.TaggedError<
-  RateLimited,
-  { readonly brand: unique symbol }
->()("RateLimited", {
+export class RateLimited extends Schema.TaggedError<RateLimited, EdgeErrorBrand>()("RateLimited", {
   retryAfterSeconds: Schema.Int,
 }) {
   static readonly schema = this.pipe(HttpApiSchema.status("TooManyRequests")); // 429

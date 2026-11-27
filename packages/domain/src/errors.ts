@@ -8,22 +8,22 @@ import * as Schema from "effect/Schema";
 import { Action, IssueCode } from "./action";
 import { EntityKind } from "./vocabulary";
 
-export class NotFound extends Schema.TaggedError<NotFound, { readonly brand: unique symbol }>()(
-  "NotFound",
-  {
-    entity: EntityKind,
-    id: Schema.String,
-  },
-) {
+// Keep the nominal brand outside the public error fields.
+declare const coreErrorBrand: unique symbol;
+interface CoreErrorBrand {
+  readonly [coreErrorBrand]: true;
+}
+
+export class NotFound extends Schema.TaggedError<NotFound, CoreErrorBrand>()("NotFound", {
+  entity: EntityKind,
+  id: Schema.String,
+}) {
   static readonly schema = this.pipe(HttpApiSchema.status("NotFound")); // 404
 }
 
-export class Forbidden extends Schema.TaggedError<Forbidden, { readonly brand: unique symbol }>()(
-  "Forbidden",
-  {
-    action: Action,
-  },
-) {
+export class Forbidden extends Schema.TaggedError<Forbidden, CoreErrorBrand>()("Forbidden", {
+  action: Action,
+}) {
   static readonly schema = this.pipe(HttpApiSchema.status("Forbidden")); // 403
 }
 
@@ -35,12 +35,9 @@ export const Issue = Schema.Struct({
 });
 export type Issue = typeof Issue.Type;
 
-export class Invalid extends Schema.TaggedError<Invalid, { readonly brand: unique symbol }>()(
-  "Invalid",
-  {
-    issues: Schema.NonEmptyArray(Issue),
-  },
-) {
+export class Invalid extends Schema.TaggedError<Invalid, CoreErrorBrand>()("Invalid", {
+  issues: Schema.NonEmptyArray(Issue),
+}) {
   static readonly schema = this.pipe(HttpApiSchema.status("UnprocessableEntity")); // 422
 }
 
@@ -53,15 +50,12 @@ export const ConflictReason = Schema.Literals([
 ]);
 export type ConflictReason = typeof ConflictReason.Type;
 
-export class Conflict extends Schema.TaggedError<Conflict, { readonly brand: unique symbol }>()(
-  "Conflict",
-  {
-    reason: ConflictReason,
-    // @effect-diagnostics-next-line schemaNumber:off Preserve decoding of legacy JSON strings such as "Infinity".
-    currentRevision: Schema.optional(Schema.Number),
-    detail: Schema.optional(IssueCode),
-  },
-) {
+export class Conflict extends Schema.TaggedError<Conflict, CoreErrorBrand>()("Conflict", {
+  reason: ConflictReason,
+  // @effect-diagnostics-next-line schemaNumber:off Preserve decoding of legacy JSON strings such as "Infinity".
+  currentRevision: Schema.optional(Schema.Number),
+  detail: Schema.optional(IssueCode),
+}) {
   static readonly schema = this.pipe(HttpApiSchema.status("Conflict")); // 409
 }
 
@@ -73,10 +67,7 @@ export const UnavailableDependency = Schema.Literals([
 ]);
 export type UnavailableDependency = typeof UnavailableDependency.Type;
 
-export class Unavailable extends Schema.TaggedError<
-  Unavailable,
-  { readonly brand: unique symbol }
->()("Unavailable", {
+export class Unavailable extends Schema.TaggedError<Unavailable, CoreErrorBrand>()("Unavailable", {
   dependency: UnavailableDependency,
   // @effect-diagnostics-next-line schemaNumber:off Preserve decoding of legacy JSON strings such as "NaN".
   retryAfterSeconds: Schema.optional(Schema.Number),
