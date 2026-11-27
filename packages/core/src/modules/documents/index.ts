@@ -232,6 +232,7 @@ export type { RelatedDocument, ViewContext } from "./view";
 export {
   DocumentSummaryCodec,
   DocumentSummaryData,
+  DocumentViewData,
   LineViewData,
   toLineView,
   toSummary,

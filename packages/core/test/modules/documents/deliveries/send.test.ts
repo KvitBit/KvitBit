@@ -22,6 +22,7 @@ import * as Fiber from "effect/Fiber";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import * as EffectString from "effect/String";
+import { DocumentsModule } from "../../../../src/index";
 import { systemCaller } from "../../../../src/internal/system";
 import {
   claim,
@@ -30,7 +31,6 @@ import {
   DocumentsRepo,
   deliver,
   dispatch,
-  giveUp,
   StartedDeliveries,
 } from "../../../../src/modules/documents";
 import { CoreStore } from "../../../../src/store/CoreStore";
@@ -448,7 +448,7 @@ describe("DocumentDelivery job steps", () => {
           status: "sending",
           lastOutcome: "outcome_unknown",
         });
-        const result2 = yield* as(worker, giveUp(WORKSPACE_A, deliveryId));
+        const result2 = yield* as(worker, DocumentsModule.giveUp(WORKSPACE_A, deliveryId));
         expect(result2).toBe("failed");
         const result3 = yield* delivery(deliveryId);
         expect(result3).toMatchObject({
@@ -601,8 +601,13 @@ describe("council round: ordering, language, overlapping attempts", () => {
           ),
         );
         yield* Deferred.await(reached);
-        const result2 = yield* as(worker, giveUp(WORKSPACE_A, deliveryId));
+        const result2 = yield* as(
+          worker,
+          DocumentsModule.giveUp(WORKSPACE_A, deliveryId, "operator_cancelled"),
+        );
         expect(result2).toBe("failed");
+        const failed = yield* delivery(deliveryId);
+        expect(failed).toMatchObject({ failure: "operator_cancelled" });
         yield* Deferred.succeed(gate, undefined);
         const joinResult = yield* Fiber.join(inFlight);
         expect(joinResult).toBe("sent");

@@ -26,9 +26,9 @@ import type * as Layer from "effect/Layer";
 import * as Predicate from "effect/Predicate";
 import * as Schema from "effect/Schema";
 import * as EffectString from "effect/String";
+import { DocumentsModule } from "../../../src/index";
 import type { ContactForDocument, IssuerForDocument } from "../../../src/modules/documents";
 import { DocumentFixtures, DocumentsTestLayer } from "../../../src/modules/documents";
-import { DocumentViewCodec } from "../../../src/modules/documents/view";
 import type { InMemoryPortsLive } from "../../../src/testing";
 import { member, runTest, WORKSPACE_A, WORKSPACE_B } from "../../helpers";
 
@@ -41,8 +41,10 @@ export const present = <A>(value: A | null | undefined): A => {
   return value;
 };
 
-export const concreteView = (view: DocumentView): typeof DocumentViewCodec.Type => {
-  Schema.asserts(DocumentViewCodec, view);
+const { DocumentViewData } = DocumentsModule;
+
+export const concreteView = (view: DocumentView): typeof DocumentViewData.Type => {
+  Schema.asserts(DocumentViewData, view);
   return view;
 };
 
@@ -53,7 +55,7 @@ const EncodedViewFields = Schema.Struct({
 
 export const encodedView = (view: DocumentView) =>
   Effect.runPromise(
-    Schema.encodeEffect(Schema.toCodecJson(DocumentViewCodec))(concreteView(view)).pipe(
+    Schema.encodeEffect(Schema.toCodecJson(DocumentViewData))(concreteView(view)).pipe(
       Effect.map((encoded) => {
         Schema.asserts(EncodedViewFields, encoded);
         return encoded;

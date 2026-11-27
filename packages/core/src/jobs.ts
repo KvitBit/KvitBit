@@ -65,7 +65,7 @@ export const deliveryJob = {
   /** `sending -> failed` once retries are exhausted, run as `System{DocumentDelivery, deliveryId}`. */
   giveUp: (workspaceId: WorkspaceId, deliveryId: DeliveryId, reason = "retries_exhausted") =>
     deliveries
-      .giveUpWithReason(workspaceId, deliveryId, reason)
+      .giveUp(workspaceId, deliveryId, reason)
       .pipe(asDeliverySystem(workspaceId, deliveryId)),
 
   /** `claim`, then `dispatch` when claimed, run as `System{DocumentDelivery, deliveryId}`. */

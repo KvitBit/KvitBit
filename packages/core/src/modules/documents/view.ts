@@ -75,12 +75,19 @@ export const DocumentSummaryData = Schema.Struct({
 export type DocumentSummaryData = typeof DocumentSummaryData.Type;
 
 /** `DocumentView` with the placeholders made concrete. */
-export const DocumentViewCodec = Schema.Struct({
+export const DocumentViewData = Schema.Struct({
   ...DocumentViewSchema.fields,
-  contact: ContactSnapshotRecord.pipe(Schema.brand("ContactSnapshot")),
-  issuer: IssuerSnapshotRecord.pipe(Schema.brand("IssuerSnapshot")),
-  lines: Schema.Array(LineViewData.pipe(Schema.brand("LineView"))),
+  contact: ContactSnapshotRecord,
+  issuer: IssuerSnapshotRecord,
+  lines: Schema.Array(LineViewData),
 });
+
+export const DocumentViewCodec = DocumentViewData.mapFields((fields) => ({
+  ...fields,
+  contact: fields.contact.pipe(Schema.brand("ContactSnapshot")),
+  issuer: fields.issuer.pipe(Schema.brand("IssuerSnapshot")),
+  lines: Schema.Array(LineViewData.pipe(Schema.brand("LineView"))),
+}));
 
 export const DocumentSummaryCodec: Schema.Codec<DocumentSummary, unknown> =
   DocumentSummaryData.pipe(Schema.brand("DocumentSummary"));

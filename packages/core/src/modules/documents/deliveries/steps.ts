@@ -185,29 +185,19 @@ export const dispatch = Effect.fn("dispatch")(function* (workspaceId: WorkspaceI
 });
 
 /** sending -> failed after the workflow exhausted its retries. */
-const giveUpImpl = (workspaceId: WorkspaceId, id: DeliveryId, reason: string) =>
-  Effect.flatMap(CoreStore, (store) =>
-    store.transaction(
-      Effect.map(
-        transition(workspaceId, id, (row) =>
-          row.status === "sending" ? { status: "failed", failure: reason } : null,
-        ),
-        (row) => row.status,
-      ),
+export const giveUp = Effect.fnUntraced(function* (
+  workspaceId: WorkspaceId,
+  id: DeliveryId,
+  reason = "retries_exhausted",
+) {
+  const store = yield* CoreStore;
+  const updated = yield* store.transaction(
+    transition(workspaceId, id, (row) =>
+      row.status === "sending" ? { status: "failed", failure: reason } : null,
     ),
   );
-
-export const giveUpWithReason: {
-  (id: DeliveryId, reason: string): (workspaceId: WorkspaceId) => ReturnType<typeof giveUpImpl>;
-  (workspaceId: WorkspaceId, id: DeliveryId, reason: string): ReturnType<typeof giveUpImpl>;
-} = Fn.dual(3, giveUpImpl);
-
-export const giveUp: {
-  (id: DeliveryId): (workspaceId: WorkspaceId) => ReturnType<typeof giveUpImpl>;
-  (workspaceId: WorkspaceId, id: DeliveryId): ReturnType<typeof giveUpImpl>;
-} = Fn.dual(2, (workspaceId: WorkspaceId, id: DeliveryId) =>
-  giveUpWithReason(workspaceId, id, "retries_exhausted"),
-);
+  return updated.status;
+});
 
 /** claim, then dispatch when claimed: the delivery's terminal (or retryable) outcome. */
 const deliverImpl = (workspaceId: WorkspaceId, id: DeliveryId) =>
