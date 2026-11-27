@@ -5,7 +5,7 @@ description: >-
   changes to apps/web/src, the web entry or build configuration, or
   packages/ui-port/src/theme.
 metadata:
-  sync_commit: "b55265579619f921a6865aacaab5f8c49926ad5f"
+  sync_commit: "16a8204bb7124514093503be4fa2e4d3ce369bcc"
   bun: "1.4.4"
   node: "24.18.0"
   effect: "4.1.4"
@@ -77,6 +77,7 @@ checks, and the formal digest check. The smoke and visual feedback Playwright
 suites passed on port `34181` with one worker across desktop and mobile.
 The feedback suite checks that verified owners can pin elements, retry a
 submission, and receive its issue link. It also checks that non-owners skip the
-picker chunk, that a token-bearing page is redacted, and that signing out
-disposes the picker. The build includes the lazy feedback chunk, ALTCHA worker,
-hashed JavaScript and CSS, brand assets, and fonts.
+picker chunk, that pins omit private links and entered form values, and that
+signing out disposes the picker. A selector test declines a pin whose bounded
+path matches multiple elements. The build includes the lazy feedback chunk,
+ALTCHA worker, hashed JavaScript and CSS, brand assets, and fonts.
