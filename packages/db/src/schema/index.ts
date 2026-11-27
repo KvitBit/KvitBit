@@ -4,5 +4,6 @@ export * from "./documents";
 export * from "./enums";
 export * from "./expenses";
 export * from "./recurring";
+export * from "./schedule-runs";
 export * from "./system";
 export * from "./workspaces";

@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
-import { join, relative, resolve } from "node:path";
+import * as Arr from "effect/Array";
+import * as Fn from "effect/Function";
+import * as Str from "effect/String";
 import {
   brandAssetPaths,
   brandAssets,
@@ -14,12 +15,18 @@ import {
   t4PatternSvg,
 } from "../src/index";
 
-const repoRoot = resolve(import.meta.dir, "../../..");
-const read = (repoPath: string): string => readFileSync(join(repoRoot, repoPath), "utf8");
+const repoRoot = `${import.meta.dir}/../../..`;
+const assetFile = (repoPath: string) => Bun.file(`${repoRoot}/${repoPath}`);
 
-const pathData = (svg: string): string[] =>
-  [...svg.matchAll(/<path d="([^"]+)"/g)].map((match) => match[1] ?? "");
-const viewBox = (svg: string): string | undefined => /viewBox="([^"]+)"/.exec(svg)?.[1];
+const PATH_DATA_PATTERN = /<path d="(?<path>[^"]+)"/gu;
+const VIEW_BOX_PATTERN = /viewBox="(?<viewBox>[^"]+)"/u;
+const TILE_BODY_LINE_PATTERN = /^\s+<(?:path|g|rect|\/g)/u;
+
+const pathData = (svg: string): string[] => {
+  const matches = Arr.fromIterable(Str.matchAll(PATH_DATA_PATTERN)(svg));
+  return Arr.map(matches, (match) => match.groups?.path ?? "");
+};
+const viewBox = (svg: string): string | undefined => VIEW_BOX_PATTERN.exec(svg)?.groups?.viewBox;
 
 describe("N2 mark masters", () => {
   const files: ReadonlyArray<MarkSvgOptions & { readonly path: string }> = [
@@ -31,19 +38,19 @@ describe("N2 mark masters", () => {
     { master: "dark", fill: "currentColor", path: brandAssets.mark.currentDark },
   ];
 
-  test.each(files)("$path path data and viewBox match the $master master", (file) => {
-    const svg = read(file.path);
+  test.each(files)("$path path data and viewBox match the $master master", async (file) => {
+    const svg = await assetFile(file.path).text();
     expect(pathData(svg)).toEqual([...markMasters[file.master].paths]);
     expect(viewBox(svg)).toBe(MARK_VIEW_BOX);
   });
 
-  test.each(files)("markSvg reproduces $path byte for byte", (file) => {
-    expect(markSvg(file)).toBe(read(file.path));
+  test.each(files)("markSvg reproduces $path byte for byte", async (file) => {
+    expect(markSvg(file)).toBe(await assetFile(file.path).text());
   });
 
-  test("default fills are the brand inks", () => {
-    expect(markSvg({ master: "light" })).toBe(read(brandAssets.mark.light));
-    expect(markSvg({ master: "dark" })).toBe(read(brandAssets.mark.dark));
+  test("default fills are the brand inks", async () => {
+    expect(markSvg({ master: "light" })).toBe(await assetFile(brandAssets.mark.light).text());
+    expect(markSvg({ master: "dark" })).toBe(await assetFile(brandAssets.mark.dark).text());
   });
 
   test("masters differ only by gap: 10 units light, 14 units dark", () => {
@@ -67,33 +74,41 @@ describe("N2 mark masters", () => {
 });
 
 describe("T4 Micro-Glyph Graph pattern", () => {
-  test("default output is 96x96 and equals the committed currentColor tile", () => {
+  test("default output is 96x96 and equals the committed currentColor tile", async () => {
     const svg = t4PatternSvg();
     expect(PATTERN_TILE_SIZE).toBe(96);
     expect(viewBox(svg)).toBe("0 0 96 96");
     expect(svg).toContain('width="96" height="96"');
-    expect(svg).toBe(read(brandAssets.pattern.current));
+    expect(svg).toBe(await assetFile(brandAssets.pattern.current).text());
   });
 
-  test("brand inks reproduce the light and dark tiles", () => {
-    expect(t4PatternSvg({ ink: brandColors.inkOnLight })).toBe(read(brandAssets.pattern.light));
-    expect(t4PatternSvg({ ink: brandColors.inkOnDark })).toBe(read(brandAssets.pattern.dark));
+  test("brand inks reproduce the light and dark tiles", async () => {
+    expect(t4PatternSvg({ ink: brandColors.inkOnLight })).toBe(
+      await assetFile(brandAssets.pattern.light).text(),
+    );
+    expect(t4PatternSvg({ ink: brandColors.inkOnDark })).toBe(
+      await assetFile(brandAssets.pattern.dark).text(),
+    );
   });
 
-  test("pattern def carries the same geometry in a 96x96 userSpaceOnUse tile", () => {
+  test("pattern def carries the same geometry in a 96x96 userSpaceOnUse tile", async () => {
     const def = t4PatternDef({ id: "kb-t4", ink: "#123456" });
     expect(def).toStartWith(
       '<pattern id="kb-t4" patternUnits="userSpaceOnUse" width="96" height="96" viewBox="0 0 96 96">',
     );
     expect(def).toEndWith("</pattern>");
-    const committed = read(brandAssets.pattern.light).replaceAll("#111111", "#123456");
-    const body = (s: string): string =>
-      s
-        .split("\n")
-        .filter((line) => /^\s+<(?:path|g|rect|\/g)/.test(line))
-        .join("\n");
-    expect(body(def)).toBe(body(committed));
-    expect(body(def).length).toBeGreaterThan(0);
+    const committedSvg = await assetFile(brandAssets.pattern.light).text();
+    const committed = Str.replaceAll("#111111", "#123456")(committedSvg);
+    const body = (svg: string): string =>
+      Fn.pipe(
+        svg,
+        Str.split("\n"),
+        Arr.filter((line) => TILE_BODY_LINE_PATTERN.test(line)),
+        Arr.join("\n"),
+      );
+    const definitionBody = body(def);
+    expect(definitionBody).toBe(body(committed));
+    expect(definitionBody.length).toBeGreaterThan(0);
   });
 
   test("rejects unsafe inks and ids", () => {
@@ -114,29 +129,32 @@ describe("brand tokens", () => {
     });
   });
 
-  test("icon tile matches the committed adaptive background", () => {
-    expect(read(brandAssets.mobile.adaptiveBackground)).toContain(brandColors.iconTile);
+  test("icon tile matches the committed adaptive background", async () => {
+    const svg = await assetFile(brandAssets.mobile.adaptiveBackground).text();
+    expect(svg).toContain(brandColors.iconTile);
   });
 });
 
 describe("asset manifest", () => {
-  test.each([...brandAssetPaths])("%s exists", (path) => {
-    expect(path.startsWith("assets/brand/")).toBe(true);
-    expect(existsSync(join(repoRoot, path))).toBe(true);
+  test.each([...brandAssetPaths])("%s exists", async (path) => {
+    expect(Str.startsWith("assets/brand/")(path)).toBe(true);
+    expect(await assetFile(path).exists()).toBe(true);
   });
 
   test("covers every committed mark, pattern, web and mobile file", () => {
     // Lockups are listed by path only; they may change on main independently.
-    const walk = (dir: string): string[] =>
-      readdirSync(dir).flatMap((name) => {
-        const full = join(dir, name);
-        return statSync(full).isDirectory() ? walk(full) : [relative(repoRoot, full)];
-      });
-    const onDisk = walk(join(repoRoot, "assets/brand")).filter(
-      (path) => !path.startsWith("assets/brand/lockup/"),
-    );
+    const onDisk = new Bun.Glob("assets/brand/**/*").scanSync({
+      cwd: repoRoot,
+      dot: true,
+      followSymlinks: true,
+      throwErrorOnBrokenSymlink: true,
+    });
     const listed = new Set<string>(brandAssetPaths);
-    expect(onDisk.filter((path) => !listed.has(path))).toEqual([]);
+    const unlisted = Arr.filter(
+      onDisk,
+      (path) => !(Str.startsWith("assets/brand/lockup/")(path) || listed.has(path)),
+    );
+    expect(unlisted).toEqual([]);
   });
 
   test("paths are unique", () => {

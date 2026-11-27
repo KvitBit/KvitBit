@@ -4,7 +4,6 @@ import {
   check,
   date,
   foreignKey,
-  index,
   integer,
   jsonb,
   pgTable,
@@ -15,14 +14,7 @@ import {
 } from "drizzle-orm/pg-core";
 import { createdAt, decimal, id, instant, revision, updatedAt, workspaceIdColumn } from "./columns";
 import { contacts, priceListItems } from "./contacts";
-import { deliveries, documents } from "./documents";
-import {
-  cadenceUnit,
-  draftableKind,
-  recurringOutcome,
-  recurringSendState,
-  vatTreatment,
-} from "./enums";
+import { cadenceUnit, draftableKind, vatTreatment } from "./enums";
 import { bankAccounts, numberingSeries, workspaces } from "./workspaces";
 
 const isoDate = (name: string) => date(name, { mode: "string" });
@@ -157,57 +149,5 @@ export const schedules = pgTable(
       sql`${t.pausedAt} is not null or (${t.pausedReason} is null and ${t.pausedError} is null)`,
     ),
     check("schedules_end_after_start", sql`${t.endOn} is null or ${t.endOn} >= ${t.startOn}`),
-  ],
-);
-
-/** One row per processed occurrence; `Templates.runs` reads it (core-ports.md:953, :962-968). */
-export const scheduleRuns = pgTable(
-  "schedule_runs",
-  {
-    id: id(),
-    workspaceId: workspaceIdColumn(),
-    scheduleId: uuid("schedule_id").notNull(),
-    occurrence: isoDate("occurrence").notNull(),
-    outcome: recurringOutcome("outcome").notNull(),
-    at: createdAt("at"),
-    documentId: uuid("document_id"),
-    deliveryId: uuid("delivery_id"),
-    /**
-     * The send half of an issued run. `pending` (autoSend was on, delivery not queued yet) is not
-     * derivable from `delivery_id` and `failure`, so it is stored.
-     */
-    sendState: recurringSendState("send_state").notNull().default("none"),
-    failure: text("failure"),
-    revision: revision(),
-  },
-  (t) => [
-    unique("schedule_runs_schedule_occurrence_unique").on(t.scheduleId, t.occurrence),
-    // RecurringIssuance recovery (`pendingSendRuns`): issued runs whose send is not queued yet.
-    index("schedule_runs_pending_send_idx")
-      .on(t.at)
-      .where(sql`${t.outcome} = 'issued' and ${t.sendState} = 'pending'`),
-    check(
-      "schedule_runs_send_needs_issued",
-      sql`${t.sendState} = 'none' or ${t.outcome} = 'issued'`,
-    ),
-    check(
-      "schedule_runs_queued_has_delivery",
-      sql`${t.sendState} <> 'queued' or ${t.deliveryId} is not null`,
-    ),
-    foreignKey({
-      name: "schedule_runs_schedule_fk",
-      columns: [t.workspaceId, t.scheduleId],
-      foreignColumns: [schedules.workspaceId, schedules.id],
-    }).onDelete("cascade"),
-    foreignKey({
-      name: "schedule_runs_document_fk",
-      columns: [t.workspaceId, t.documentId],
-      foreignColumns: [documents.workspaceId, documents.id],
-    }),
-    foreignKey({
-      name: "schedule_runs_delivery_fk",
-      columns: [t.workspaceId, t.deliveryId],
-      foreignColumns: [deliveries.workspaceId, deliveries.id],
-    }),
   ],
 );

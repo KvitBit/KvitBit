@@ -1,15 +1,26 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+// Bun uses Node's synchronous filesystem APIs to stage the migration tree.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { cpSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { PGlite } from "@electric-sql/pglite";
 import { VatBreakdown } from "@kvitbit/domain/contract";
 import { drizzle } from "drizzle-orm/pglite";
 import { migrate } from "drizzle-orm/pglite/migrator";
-import { BigDecimal, Schema } from "effect";
+import * as Arr from "effect/Array";
+import * as BigDecimal from "effect/BigDecimal";
+import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
 
-const decodeVatBreakdown = Schema.decodeUnknownSync(Schema.toCodecJson(VatBreakdown));
+const vatBreakdownJson = Schema.toCodecJson(VatBreakdown);
+const decodeVatBreakdown = Schema.decodeUnknownEffect(
+  Schema.Union([vatBreakdownJson, Schema.fromJsonString(vatBreakdownJson)]),
+);
+const encodeJson = Schema.encodeEffect(Schema.fromJsonString(Schema.Json));
 
 // The server persistence alignment migration (20261124135932) must upgrade a populated database
 // from the prior schema without failing on existing delivery history (S5) or zeroing out
@@ -94,7 +105,7 @@ const lineDeduction = "0190a000-0000-7000-8000-000000000506";
 const lineHistorical15 = "0190a000-0000-7000-8000-000000000507";
 
 let client: PGlite;
-let preDir: string;
+let preDir: string | undefined;
 
 const rows = async <T>(sql: string, params: ReadonlyArray<unknown> = []): Promise<Array<T>> =>
   (await client.query<T>(sql, [...params])).rows;
@@ -118,7 +129,7 @@ const breakdown = (
   },
 ) => {
   const currency = totals.currency ?? "CZK";
-  return JSON.stringify({
+  return encodeJson({
     buckets,
     net: { amount: totals.net, currency },
     vat: { amount: totals.vat, currency },
@@ -128,7 +139,7 @@ const breakdown = (
       totals.vatCzk === undefined || totals.vatCzk === null
         ? null
         : { amount: totals.vatCzk, currency: "CZK" },
-  });
+  }).pipe(Effect.runSync);
 };
 
 beforeAll(async () => {
@@ -555,7 +566,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await client?.close();
-  if (preDir) rmSync(preDir, { recursive: true, force: true });
+  if (preDir !== undefined) rmSync(preDir, { recursive: true, force: true });
 });
 
 describe("server persistence alignment migration (populated upgrade)", () => {
@@ -580,7 +591,7 @@ describe("server persistence alignment migration (populated upgrade)", () => {
     ]);
 
     const others = await rows<{ id: string; sequence: number; attempts: number }>(
-      `select id, sequence, attempts from deliveries where id in ($1, $2) order by id asc`,
+      "select id, sequence, attempts from deliveries where id in ($1, $2) order by id asc",
       [delOtherDoc, delOtherWs],
     );
     expect(others).toEqual([
@@ -599,7 +610,7 @@ describe("server persistence alignment migration (populated upgrade)", () => {
          )`,
         [wsVat, docMultiDelivery],
       ),
-    ).rejects.toThrow(/deliveries_document_sequence/);
+    ).rejects.toThrow("deliveries_document_sequence");
   });
 
   test("backfills exact unrounded line amounts and VAT rate_percent including stored historical rates", async () => {
@@ -640,7 +651,7 @@ describe("server persistence alignment migration (populated upgrade)", () => {
       `select id, paid_amount::text as paid_amount, payments, settlement::text as settlement
        from documents`,
     );
-    const byId = new Map(docs.map((d) => [d.id, d]));
+    const byId = new Map(Arr.map(docs, (d) => [d.id, d]));
 
     expect(byId.get(docMultiDelivery)).toEqual({
       id: docMultiDelivery,
@@ -738,7 +749,7 @@ describe("server persistence alignment migration (populated upgrade)", () => {
               locked_at::text as locked_at, corrected_number, cancelled_on::text as cancelled_on
        from documents`,
     );
-    const byId = new Map(meta.map((m) => [m.id, m]));
+    const byId = new Map(Arr.map(meta, (m) => [m.id, m]));
 
     expect(byId.get(docMultiDelivery)?.tax_document).toBe(true);
     expect(byId.get(docMultiDelivery)?.locked_at).not.toBeNull();
@@ -777,95 +788,106 @@ describe("server persistence alignment migration (populated upgrade)", () => {
       total_vat: string | null;
       total_gross: string | null;
     }>(
-      `select id, vat_breakdown, total_net::text, total_vat::text, total_gross::text from documents`,
+      "select id, vat_breakdown, total_net::text, total_vat::text, total_gross::text from documents",
     );
     expect(allDocs.length).toBeGreaterThan(20);
 
-    const decoded = new Map<string, ReturnType<typeof decodeVatBreakdown>>();
+    const decoded = new Map<string, VatBreakdown>();
     for (const doc of allDocs) {
       expect(doc.vat_breakdown).not.toBeNull();
-      const parsed =
-        typeof doc.vat_breakdown === "string" ? JSON.parse(doc.vat_breakdown) : doc.vat_breakdown;
-      decoded.set(doc.id, decodeVatBreakdown(parsed));
+      decoded.set(doc.id, decodeVatBreakdown(doc.vat_breakdown).pipe(Effect.runSync));
     }
 
     const legacyPaid = decoded.get(docPaidNoTotal);
-    if (!legacyPaid) throw new Error("missing docPaidNoTotal");
-    expect(BigDecimal.format(legacyPaid.net.amount)).toBe("100");
-    expect(BigDecimal.format(legacyPaid.vat.amount)).toBe("0");
-    expect(BigDecimal.format(legacyPaid.gross.amount)).toBe("100");
+    if (legacyPaid === undefined) throw new Error("Missing paid document with no total");
+    expect(legacyPaid.net.amount.pipe(BigDecimal.format)).toBe("100");
+    expect(legacyPaid.vat.amount.pipe(BigDecimal.format)).toBe("0");
+    expect(legacyPaid.gross.amount.pipe(BigDecimal.format)).toBe("100");
     expect(legacyPaid.buckets).toHaveLength(1);
 
     const legacyFinal = decoded.get(finalLegacyNoTotal);
-    if (!legacyFinal) throw new Error("missing finalLegacyNoTotal");
-    expect(BigDecimal.format(legacyFinal.net.amount)).toBe("99.98");
-    expect(BigDecimal.format(legacyFinal.vat.amount)).toBe("20.99");
-    expect(BigDecimal.format(legacyFinal.gross.amount)).toBe("120.97");
+    if (legacyFinal === undefined) throw new Error("missing finalLegacyNoTotal");
+    expect(legacyFinal.net.amount.pipe(BigDecimal.format)).toBe("99.98");
+    expect(legacyFinal.vat.amount.pipe(BigDecimal.format)).toBe("20.99");
+    expect(legacyFinal.gross.amount.pipe(BigDecimal.format)).toBe("120.97");
     expect(legacyFinal.buckets).toHaveLength(1);
     const firstBucket = legacyFinal.buckets[0];
-    if (!firstBucket) throw new Error("missing finalLegacyNoTotal bucket");
-    expect(BigDecimal.format(firstBucket.gross)).toBe("120.97");
+    if (firstBucket === undefined) throw new Error("missing finalLegacyNoTotal bucket");
+    expect(firstBucket.gross.pipe(BigDecimal.format)).toBe("120.97");
 
     // Closing remainder credit note preserves leftover VAT (-0.01) with zero roundingAdjustment
     const closingCredit = decoded.get(cnRemainderClosing);
-    if (!closingCredit) throw new Error("missing cnRemainderClosing");
-    expect(BigDecimal.format(closingCredit.net.amount)).toBe("-0.01");
-    expect(BigDecimal.format(closingCredit.vat.amount)).toBe("-0.01");
-    expect(BigDecimal.format(closingCredit.roundingAdjustment.amount)).toBe("0");
-    expect(BigDecimal.format(closingCredit.gross.amount)).toBe("-0.02");
+    if (closingCredit === undefined) throw new Error("missing cnRemainderClosing");
+    expect(closingCredit.net.amount.pipe(BigDecimal.format)).toBe("-0.01");
+    expect(closingCredit.vat.amount.pipe(BigDecimal.format)).toBe("-0.01");
+    expect(closingCredit.roundingAdjustment.amount.pipe(BigDecimal.format)).toBe("0");
+    expect(closingCredit.gross.amount.pipe(BigDecimal.format)).toBe("-0.02");
     expect(closingCredit.buckets).toHaveLength(1);
     const closingBucket = closingCredit.buckets[0];
-    if (!closingBucket) throw new Error("missing cnRemainderClosing bucket");
-    expect(BigDecimal.format(closingBucket.vat)).toBe("-0.01");
+    if (closingBucket === undefined) throw new Error("missing cnRemainderClosing bucket");
+    expect(closingBucket.vat.pipe(BigDecimal.format)).toBe("-0.01");
 
     // Closing remainder credit note with NULL total_gross reconciles VAT (-0.01) and gross (-0.02)
     const closingNullGross = decoded.get(cnRemainderNullGrossClosing);
-    if (!closingNullGross) throw new Error("missing cnRemainderNullGrossClosing");
-    expect(BigDecimal.format(closingNullGross.net.amount)).toBe("-0.01");
-    expect(BigDecimal.format(closingNullGross.vat.amount)).toBe("-0.01");
-    expect(BigDecimal.format(closingNullGross.roundingAdjustment.amount)).toBe("0");
-    expect(BigDecimal.format(closingNullGross.gross.amount)).toBe("-0.02");
+    if (closingNullGross === undefined) throw new Error("missing cnRemainderNullGrossClosing");
+    expect(closingNullGross.net.amount.pipe(BigDecimal.format)).toBe("-0.01");
+    expect(closingNullGross.vat.amount.pipe(BigDecimal.format)).toBe("-0.01");
+    expect(closingNullGross.roundingAdjustment.amount.pipe(BigDecimal.format)).toBe("0");
+    expect(closingNullGross.gross.amount.pipe(BigDecimal.format)).toBe("-0.02");
 
     // Two EUR partial credits keep -0.25 CZK VAT each (never silently reassigned to -0.26)
     const eurPartial1 = decoded.get(cnEurPartial1);
     const eurPartial2 = decoded.get(cnEurPartial2);
-    if (!eurPartial1 || !eurPartial2) throw new Error("missing EUR partial credits");
+    if (eurPartial1 === undefined || eurPartial2 === undefined) {
+      throw new Error("missing EUR partial credits");
+    }
     expect(eurPartial1.vatCzk).not.toBeNull();
     expect(eurPartial2.vatCzk).not.toBeNull();
-    if (!eurPartial1.vatCzk || !eurPartial2.vatCzk) throw new Error("missing EUR vatCzk");
-    expect(BigDecimal.format(eurPartial1.vatCzk.amount)).toBe("-0.25");
-    expect(BigDecimal.format(eurPartial2.vatCzk.amount)).toBe("-0.25");
+    if (eurPartial1.vatCzk === null || eurPartial2.vatCzk === null) {
+      throw new Error("missing EUR vatCzk");
+    }
+    expect(eurPartial1.vatCzk.amount.pipe(BigDecimal.format)).toBe("-0.25");
+    expect(eurPartial2.vatCzk.amount.pipe(BigDecimal.format)).toBe("-0.25");
 
     // Line-less closing credit closes the 0.01 CZK VAT residual with exact bucket and total vatCzk
     const eurLineless = decoded.get(cnEurClosedLineless);
-    if (!eurLineless) throw new Error("missing cnEurClosedLineless");
-    expect(BigDecimal.format(eurLineless.net.amount)).toBe("0");
-    expect(BigDecimal.format(eurLineless.vat.amount)).toBe("0");
-    expect(BigDecimal.format(eurLineless.gross.amount)).toBe("0");
+    if (eurLineless === undefined) throw new Error("missing cnEurClosedLineless");
+    expect(eurLineless.net.amount.pipe(BigDecimal.format)).toBe("0");
+    expect(eurLineless.vat.amount.pipe(BigDecimal.format)).toBe("0");
+    expect(eurLineless.gross.amount.pipe(BigDecimal.format)).toBe("0");
     expect(eurLineless.vatCzk).not.toBeNull();
-    if (!eurLineless.vatCzk) throw new Error("missing cnEurClosedLineless vatCzk");
-    expect(BigDecimal.format(eurLineless.vatCzk.amount)).toBe("-0.01");
+    if (eurLineless.vatCzk === null) throw new Error("missing cnEurClosedLineless vatCzk");
+    expect(eurLineless.vatCzk.amount.pipe(BigDecimal.format)).toBe("-0.01");
     expect(eurLineless.buckets).toHaveLength(1);
     const eurLinelessBucket = eurLineless.buckets[0];
-    if (!eurLinelessBucket || eurLinelessBucket.vatCzk === null) {
+    if (eurLinelessBucket === undefined || eurLinelessBucket.vatCzk === null) {
       throw new Error("missing cnEurClosedLineless bucket vatCzk");
     }
     expect(eurLinelessBucket.treatment).toBe("standard");
-    expect(BigDecimal.format(eurLinelessBucket.vatCzk)).toBe("-0.01");
+    expect(eurLinelessBucket.vatCzk.pipe(BigDecimal.format)).toBe("-0.01");
 
     // Offsetting-bucket line-less closing credit preserves both signed buckets (-0.01, +0.01) and total 0 CZK
     const eurOffset = decoded.get(cnEurOffsetLineless);
-    if (!eurOffset) throw new Error("missing cnEurOffsetLineless");
+    if (eurOffset === undefined) throw new Error("missing cnEurOffsetLineless");
     expect(eurOffset.vatCzk).not.toBeNull();
-    if (!eurOffset.vatCzk) throw new Error("missing cnEurOffsetLineless vatCzk");
-    expect(BigDecimal.format(eurOffset.vatCzk.amount)).toBe("0");
+    if (eurOffset.vatCzk === null) throw new Error("missing cnEurOffsetLineless vatCzk");
+    expect(eurOffset.vatCzk.amount.pipe(BigDecimal.format)).toBe("0");
     expect(eurOffset.buckets).toHaveLength(2);
-    const stdBucket = eurOffset.buckets.find((b) => b.treatment === "standard");
-    const redBucket = eurOffset.buckets.find((b) => b.treatment === "reduced");
-    if (!stdBucket || stdBucket.vatCzk === null || !redBucket || redBucket.vatCzk === null) {
+    const stdBucket = Arr.findFirst(eurOffset.buckets, (b) => b.treatment === "standard").pipe(
+      Option.getOrUndefined,
+    );
+    const redBucket = Arr.findFirst(eurOffset.buckets, (b) => b.treatment === "reduced").pipe(
+      Option.getOrUndefined,
+    );
+    if (
+      stdBucket === undefined ||
+      redBucket === undefined ||
+      stdBucket.vatCzk === null ||
+      redBucket.vatCzk === null
+    ) {
       throw new Error("missing offsetting buckets");
     }
-    expect(BigDecimal.format(stdBucket.vatCzk)).toBe("-0.01");
-    expect(BigDecimal.format(redBucket.vatCzk)).toBe("0.01");
+    expect(stdBucket.vatCzk.pipe(BigDecimal.format)).toBe("-0.01");
+    expect(redBucket.vatCzk.pipe(BigDecimal.format)).toBe("0.01");
   });
 });

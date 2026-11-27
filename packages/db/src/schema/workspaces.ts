@@ -14,7 +14,7 @@ import {
   uniqueIndex,
   uuid,
 } from "drizzle-orm/pg-core";
-import { user } from "./auth";
+import { user } from "./auth-user";
 import {
   createdAt,
   currency,
@@ -24,7 +24,6 @@ import {
   updatedAt,
   workspaceIdColumn,
 } from "./columns";
-import { documents } from "./documents";
 import {
   documentKind,
   invitationRole,
@@ -261,35 +260,6 @@ export const numberingCounters = pgTable(
     }).onDelete("cascade"),
     check("numbering_counters_period_format", sql`${t.period} ~ '^([0-9]{4}(-[0-9]{2})?|all)$'`),
     check("numbering_counters_positive", sql`${t.nextCounter} >= 1`),
-  ],
-);
-
-/**
- * Permanent, insert-only reservation of every allocated or overridden number, so a number is
- * never reused within a Workspace and kind (core-ports.md S3, :805-808).
- */
-export const numberReservations = pgTable(
-  "number_reservations",
-  {
-    workspaceId: workspaceIdColumn().references(() => workspaces.id, { onDelete: "cascade" }),
-    kind: documentKind("kind").notNull(),
-    number: text("number").notNull(),
-    seriesId: uuid("series_id"),
-    documentId: uuid("document_id"),
-    reservedAt: createdAt("reserved_at"),
-  },
-  (t) => [
-    primaryKey({ columns: [t.workspaceId, t.kind, t.number] }),
-    foreignKey({
-      name: "number_reservations_series_fk",
-      columns: [t.workspaceId, t.seriesId],
-      foreignColumns: [numberingSeries.workspaceId, numberingSeries.id],
-    }),
-    foreignKey({
-      name: "number_reservations_document_fk",
-      columns: [t.workspaceId, t.documentId],
-      foreignColumns: [documents.workspaceId, documents.id],
-    }),
   ],
 );
 
