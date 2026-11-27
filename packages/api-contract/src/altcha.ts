@@ -12,7 +12,7 @@
  * sign-up alone can carry `sign_up` or `invitation_accept` (section 3.5.1), so no static path
  * map lives here.
  */
-import { Schema } from "effect";
+import * as Schema from "effect/Schema";
 
 /** The route picks the scope; it is signed into the challenge (rule B1). */
 export const BotScope = Schema.Literals([
@@ -32,8 +32,7 @@ export const AltchaChallenge = Schema.JsonObject.pipe(
 export type AltchaChallenge = typeof AltchaChallenge.Type;
 
 /** The solved challenge the widget produces, as a JSON object. */
-export const AltchaPayload = Schema.JsonObject.pipe(Schema.brand("AltchaPayload"));
-export type AltchaPayload = typeof AltchaPayload.Type;
+const AltchaPayload = Schema.JsonObject.pipe(Schema.brand("AltchaPayload"));
 
 /** Upper bound on the `X-Altcha` header value, in characters of base64. */
 export const ALTCHA_HEADER_MAX_LENGTH = 8 * 1024;

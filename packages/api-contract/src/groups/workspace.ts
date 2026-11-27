@@ -24,8 +24,10 @@ import {
   WorkspaceSettingsPatch,
   WorkspaceView,
 } from "@kvitbit/domain/contract";
-import { Schema } from "effect";
-import { HttpApiEndpoint, HttpApiGroup, OpenApi } from "effect/http-api";
+import * as HttpApiEndpoint from "effect/http-api/HttpApiEndpoint";
+import * as HttpApiGroup from "effect/http-api/HttpApiGroup";
+import * as OpenApi from "effect/http-api/OpenApi";
+import * as Schema from "effect/Schema";
 import { ApiKeyId } from "../api-key";
 import { ApiKeyCreate, ApiKeyCreated, ApiKeyView, BrandingView, ConnectedAppView } from "../edge";
 import { PayloadTooLarge, RateLimited, RevisionedEdgeErrors, Unauthorized } from "../edge-errors";
@@ -53,11 +55,11 @@ export const SeriesInput = Schema.Struct({
 });
 export type SeriesInput = typeof SeriesInput.Type;
 
-export const CloseWorkspaceInput = Schema.Struct({ confirmName: Schema.String });
-export const SetRoleInput = Schema.Struct({ role: InvitationRole });
-export const InviteInput = Schema.Struct({ email: Schema.NonEmptyString, role: InvitationRole });
-export const TransferOwnershipInput = Schema.Struct({ to: UserId });
-export const BrandingPreviewInput = Schema.Struct({
+const CloseWorkspaceInput = Schema.Struct({ confirmName: Schema.String });
+const SetRoleInput = Schema.Struct({ role: InvitationRole });
+const InviteInput = Schema.Struct({ email: Schema.NonEmptyString, role: InvitationRole });
+const TransferOwnershipInput = Schema.Struct({ to: UserId });
+const BrandingPreviewInput = Schema.Struct({
   branding: BrandingPatch,
   kind: DocumentKind,
   language: Locale,

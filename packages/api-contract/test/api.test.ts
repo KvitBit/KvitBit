@@ -1,7 +1,15 @@
 import { describe, expect, test } from "bun:test";
 import { Conflict, Forbidden, Invalid, NotFound, Unavailable } from "@kvitbit/domain/contract";
-import { Context, Schema } from "effect";
-import { HttpApi } from "effect/http-api";
+import * as Arr from "effect/Array";
+import * as Context from "effect/Context";
+import * as Effect from "effect/Effect";
+import * as Fn from "effect/Function";
+import * as HttpApi from "effect/http-api/HttpApi";
+import * as Option from "effect/Option";
+import * as Order from "effect/Order";
+import * as Schema from "effect/Schema";
+import * as SchemaAST from "effect/SchemaAST";
+import * as Str from "effect/String";
 import {
   Api,
   Authentication,
@@ -19,6 +27,7 @@ import {
   Unauthorized,
   WorkspaceMember,
 } from "../src/index";
+import { decodeReflectedSchema } from "./reflected-http-schema";
 
 /**
  * The endpoint tables of http-mcp-contracts section 3.5, one row per endpoint:
@@ -141,20 +150,20 @@ interface Row {
   readonly status: string;
   readonly flags: string;
 }
-const spec: ReadonlyArray<Row> = SPEC.trim()
-  .split("\n")
-  .map((line) => {
-    const [group = "", name = "", method = "", path = "", status = "", flags = ""] =
-      line.split(" ");
-    return {
-      group,
-      name,
-      method,
-      path: path.replace("{ws}", "/api/v1/workspaces/:workspaceId"),
-      status,
-      flags,
-    };
-  });
+const spec: ReadonlyArray<Row> = Arr.map(Str.split(Str.trim(SPEC), "\n"), (line) => {
+  const [group = "", name = "", method = "", path = "", status = "", flags = ""] = Str.split(
+    line,
+    " ",
+  );
+  return {
+    group,
+    name,
+    method,
+    path: Str.replace("{ws}", "/api/v1/workspaces/:workspaceId")(path),
+    status,
+    flags,
+  };
+});
 
 interface Reflected {
   readonly group: string;
@@ -171,23 +180,23 @@ interface Reflected {
 
 const keysOf = (schema: Schema.Top | undefined): ReadonlyArray<string> => {
   const ast = schema?.ast;
-  return ast !== undefined && "propertySignatures" in ast && Array.isArray(ast.propertySignatures)
-    ? ast.propertySignatures.map((p: { name: PropertyKey }) => String(p.name))
+  return ast !== undefined && SchemaAST.isObjects(ast)
+    ? Arr.map(ast.propertySignatures, (p) => String(p.name))
     : [];
 };
 
 const reflected: Array<Reflected> = [];
 HttpApi.reflect(Api, {
-  onGroup: () => {},
+  onGroup: Fn.constVoid,
   onEndpoint: ({ group, endpoint, errors, successes, middleware, mergedAnnotations }) => {
     reflected.push({
       group: group.identifier,
       name: endpoint.identifier,
       method: endpoint.method,
       path: endpoint.path,
-      successes: [...successes.keys()].sort(),
+      successes: Arr.sort(successes.keys(), Order.Number),
       errors,
-      middleware: [...middleware].map((m) => m.key),
+      middleware: Arr.map([...middleware], (m) => m.key),
       revisioned: Context.get(mergedAnnotations, Revisioned),
       params: keysOf(endpoint.params),
       headers: keysOf(endpoint.headers),
@@ -196,7 +205,9 @@ HttpApi.reflect(Api, {
 });
 
 const find = (group: string, name: string): Reflected => {
-  const hit = reflected.find((r) => r.group === group && r.name === name);
+  const hit = Option.getOrUndefined(
+    Arr.findFirst(reflected, (r) => r.group === group && r.name === name),
+  );
   if (hit === undefined) throw new Error(`missing ${group}.${name}`);
   return hit;
 };
@@ -205,7 +216,7 @@ const find = (group: string, name: string): Reflected => {
 const ownErrors = (group: string, name: string): ReadonlyArray<Schema.Top> => {
   let found: ReadonlyArray<Schema.Top> | undefined;
   HttpApi.reflect(Api, {
-    onGroup: () => {},
+    onGroup: Fn.constVoid,
     onEndpoint: ({ group: g, endpoint }) => {
       if (g.identifier === group && endpoint.identifier === name) found = [...endpoint.error];
     },
@@ -215,38 +226,41 @@ const ownErrors = (group: string, name: string): ReadonlyArray<Schema.Top> => {
 };
 
 const hasError = (r: Reflected, status: number, sample: unknown): boolean =>
-  (r.errors.get(status) ?? []).some((schema) => Schema.is(schema)(sample));
+  Arr.some(r.errors.get(status) ?? [], (schema) => Schema.is(schema)(sample));
 
 describe("Api definition integrity", () => {
   test("has exactly the spec's 22 groups and 104 endpoints", () => {
-    expect(new Set(reflected.map((r) => r.group)).size).toBe(22);
+    expect(new Set(Arr.map(reflected, (r) => r.group)).size).toBe(22);
     expect(reflected.length).toBe(104);
     expect(spec.length).toBe(104);
   });
 
-  test.each(spec.map((row) => [`${row.group}.${row.name}`, row] as const))(
+  test.each(Arr.map(spec, (row) => [`${row.group}.${row.name}`, row] as const))(
     "%s matches method, path and success status",
     (_, row) => {
       const r = find(row.group, row.name);
       expect(`${r.method} ${r.path}`).toBe(`${row.method} ${row.path}`);
-      const expected = row.status === "bin" ? [] : row.status.split(",").map(Number);
+      const expected = row.status === "bin" ? [] : Arr.map(Str.split(row.status, ","), Number);
       expect(r.successes).toEqual(expected);
     },
   );
 
   test("endpoint names are unique within a group and method+path is unique", () => {
-    const names = reflected.map((r) => `${r.group}.${r.name}`);
+    const names = Arr.map(reflected, (r) => `${r.group}.${r.name}`);
     expect(new Set(names).size).toBe(names.length);
-    const routes = reflected.map((r) => `${r.method} ${r.path}`);
+    const routes = Arr.map(reflected, (r) => `${r.method} ${r.path}`);
     expect(new Set(routes).size).toBe(routes.length);
   });
 
   test("every path parameter is declared, so HttpApiClient can fill the URL", () => {
     for (const r of reflected) {
-      const segments = [...r.path.matchAll(/:(\w+)/g)].map((m) => m[1] ?? "");
-      expect({ endpoint: `${r.group}.${r.name}`, params: [...r.params].sort() }).toEqual({
+      const segments = Arr.map([...Str.matchAll(/:(\w+)/g)(r.path)], (m) => m[1] ?? "");
+      expect({
         endpoint: `${r.group}.${r.name}`,
-        params: [...segments].sort(),
+        params: Arr.sort(r.params, Order.String),
+      }).toEqual({
+        endpoint: `${r.group}.${r.name}`,
+        params: Arr.sort(segments, Order.String),
       });
     }
   });
@@ -254,13 +268,13 @@ describe("Api definition integrity", () => {
   test("If-Match endpoints take the header and answer 412 and 428", () => {
     for (const row of spec) {
       const r = find(row.group, row.name);
-      const ifMatch = row.flags.includes("M");
+      const ifMatch = Str.includes("M")(row.flags);
       expect([`${row.group}.${row.name}`, r.headers.includes("if-match")]).toEqual([
         `${row.group}.${row.name}`,
         ifMatch,
       ]);
-      expect(hasError(r, 412, new PreconditionFailed({ currentRevision: 3 }))).toBe(ifMatch);
-      expect(hasError(r, 428, new PreconditionRequired({}))).toBe(ifMatch);
+      expect(hasError(r, 412, PreconditionFailed.make({ currentRevision: 3 }))).toBe(ifMatch);
+      expect(hasError(r, 428, PreconditionRequired.make({}))).toBe(ifMatch);
     }
   });
 
@@ -269,7 +283,7 @@ describe("Api definition integrity", () => {
       const r = find(row.group, row.name);
       expect([`${row.group}.${row.name}`, r.headers.includes("idempotency-key")]).toEqual([
         `${row.group}.${row.name}`,
-        row.flags.includes("I"),
+        Str.includes("I")(row.flags),
       ]);
     }
   });
@@ -278,7 +292,7 @@ describe("Api definition integrity", () => {
     for (const row of spec) {
       expect([`${row.group}.${row.name}`, find(row.group, row.name).revisioned]).toEqual([
         `${row.group}.${row.name}`,
-        row.flags.includes("E"),
+        Str.includes("E")(row.flags),
       ]);
     }
   });
@@ -318,7 +332,7 @@ describe("Api definition integrity", () => {
   });
 
   test("every endpoint answers 422 Invalid for malformed requests (SchemaErrors)", () => {
-    const malformed = new Invalid({ issues: [{ path: [], code: "request.malformed" }] });
+    const malformed = Invalid.make({ issues: [{ path: [], code: "request.malformed" }] });
     for (const r of reflected) {
       expect([`${r.group}.${r.name}`, hasError(r, 422, malformed)]).toEqual([
         `${r.group}.${r.name}`,
@@ -331,38 +345,37 @@ describe("Api definition integrity", () => {
     for (const r of reflected) {
       const authenticated = r.middleware.includes(Authentication.key);
       expect(r.middleware.includes(EdgeGuard.key)).toBe(authenticated);
-      expect(hasError(r, 401, new Unauthorized({ reason: "missing" }))).toBe(
+      expect(hasError(r, 401, Unauthorized.make({ reason: "missing" }))).toBe(
         authenticated || (r.group === "invitations" && r.name === "accept"),
       );
       if (!authenticated) continue;
-      expect(hasError(r, 403, new OriginRejected({}))).toBe(true);
-      expect(hasError(r, 429, new RateLimited({ retryAfterSeconds: 1 }))).toBe(true);
-      expect(hasError(r, 413, new PayloadTooLarge({ limitBytes: 1 }))).toBe(true);
-      if (r.middleware.includes(WorkspaceMember.key)) {
-        expect(hasError(r, 404, new NotFound({ entity: "Workspace", id: "w" }))).toBe(true);
-        expect(hasError(r, 403, new Forbidden({ action: "workspace.read" }))).toBe(true);
-        expect(hasError(r, 503, new Unavailable({ dependency: "database" }))).toBe(true);
-      }
+      expect(hasError(r, 403, OriginRejected.make({}))).toBe(true);
+      expect(hasError(r, 429, RateLimited.make({ retryAfterSeconds: 1 }))).toBe(true);
+      expect(hasError(r, 413, PayloadTooLarge.make({ limitBytes: 1 }))).toBe(true);
+      if (!r.middleware.includes(WorkspaceMember.key)) continue;
+      expect(hasError(r, 404, NotFound.make({ entity: "Workspace", id: "w" }))).toBe(true);
+      expect(hasError(r, 403, Forbidden.make({ action: "workspace.read" }))).toBe(true);
+      expect(hasError(r, 503, Unavailable.make({ dependency: "database" }))).toBe(true);
     }
   });
 
   test("Authentication fails only with Unauthorized; EdgeGuard owns the other edge checks", () => {
     const accepts = (errors: ReadonlySet<Schema.Top>, sample: unknown) =>
-      [...errors].some((schema) => Schema.is(schema)(sample));
+      Arr.some([...errors], (schema) => Schema.is(schema)(sample));
     const edge = [
-      new OriginRejected({}),
-      new RateLimited({ retryAfterSeconds: 1 }),
-      new PayloadTooLarge({ limitBytes: 1 }),
+      OriginRejected.make({}),
+      RateLimited.make({ retryAfterSeconds: 1 }),
+      PayloadTooLarge.make({ limitBytes: 1 }),
     ];
     expect(Authentication.error.size).toBe(1);
-    expect(accepts(Authentication.error, new Unauthorized({ reason: "missing" }))).toBe(true);
-    expect(edge.some((e) => accepts(Authentication.error, e))).toBe(false);
+    expect(accepts(Authentication.error, Unauthorized.make({ reason: "missing" }))).toBe(true);
+    expect(Arr.some(edge, (e) => accepts(Authentication.error, e))).toBe(false);
     expect(EdgeGuard.error.size).toBe(3);
-    expect(edge.every((e) => accepts(EdgeGuard.error, e))).toBe(true);
+    expect(Arr.every(edge, (e) => accepts(EdgeGuard.error, e))).toBe(true);
   });
 
   test("Idempotency-Key endpoints answer 409 idempotency_mismatch", () => {
-    const mismatch = new Conflict({ reason: "idempotency_mismatch" });
+    const mismatch = Conflict.make({ reason: "idempotency_mismatch" });
     for (const r of reflected) {
       if (!r.headers.includes("idempotency-key")) continue;
       expect([`${r.group}.${r.name}`, hasError(r, 409, mismatch)]).toEqual([
@@ -374,16 +387,16 @@ describe("Api definition integrity", () => {
 
   test("core and edge errors carry their statuses on representative endpoints", () => {
     const edit = find("documents", "edit");
-    expect(hasError(edit, 404, new NotFound({ entity: "Document", id: "d" }))).toBe(true);
+    expect(hasError(edit, 404, NotFound.make({ entity: "Document", id: "d" }))).toBe(true);
     expect(
-      hasError(edit, 422, new Invalid({ issues: [{ path: [], code: "request.malformed" }] })),
+      hasError(edit, 422, Invalid.make({ issues: [{ path: [], code: "request.malformed" }] })),
     ).toBe(true);
-    expect(hasError(edit, 409, new Conflict({ reason: "document_locked" }))).toBe(true);
-    expect(hasError(edit, 503, new Unavailable({ dependency: "database" }))).toBe(true);
+    expect(hasError(edit, 409, Conflict.make({ reason: "document_locked" }))).toBe(true);
+    expect(hasError(edit, 503, Unavailable.make({ dependency: "database" }))).toBe(true);
     const challenge = find("botProtection", "issueChallenge");
-    expect(hasError(challenge, 429, new RateLimited({ retryAfterSeconds: 5 }))).toBe(true);
-    expect(hasError(challenge, 503, new Unavailable({ dependency: "database" }))).toBe(true);
-    expect(hasError(challenge, 400, new InvalidBotProof({}))).toBe(false);
+    expect(hasError(challenge, 429, RateLimited.make({ retryAfterSeconds: 5 }))).toBe(true);
+    expect(hasError(challenge, 503, Unavailable.make({ dependency: "database" }))).toBe(true);
+    expect(hasError(challenge, 400, InvalidBotProof.make({}))).toBe(false);
   });
 });
 
@@ -501,27 +514,34 @@ reports.exportFile Reports.exportFile NotFound,Conflict,Unavailable,Forbidden
 
 describe("endpoints declare their core method's errors", () => {
   const samples: Record<string, readonly [number, unknown]> = {
-    NotFound: [404, new NotFound({ entity: "Document", id: "d" })],
-    Invalid: [422, new Invalid({ issues: [{ path: [], code: "request.malformed" }] })],
-    Conflict: [409, new Conflict({ reason: "illegal_transition" })],
-    Unavailable: [503, new Unavailable({ dependency: "database" })],
-    Forbidden: [403, new Forbidden({ action: "workspace.read" })],
+    NotFound: [404, NotFound.make({ entity: "Document", id: "d" })],
+    Invalid: [422, Invalid.make({ issues: [{ path: [], code: "request.malformed" }] })],
+    Conflict: [409, Conflict.make({ reason: "illegal_transition" })],
+    Unavailable: [503, Unavailable.make({ dependency: "database" })],
+    Forbidden: [403, Forbidden.make({ action: "workspace.read" })],
   };
-  const rows = CORE_ERRORS.trim()
-    .split("\n")
-    .map((line) => {
-      const [id = "", method = "", tags = ""] = line.split(" ");
-      return [id, method, tags === "" ? [] : tags.split(",")] as const;
-    });
+  const rows = Arr.map(Str.split(Str.trim(CORE_ERRORS), "\n"), (line) => {
+    const [id = "", method = "", tags = ""] = Str.split(line, " ");
+    const errorTags: ReadonlyArray<string> = tags === "" ? [] : Str.split(tags, ",");
+    return [id, method, errorTags] as const;
+  });
 
   test("the table covers every endpoint", () => {
-    expect(rows.map(([id]) => id).sort()).toEqual(
-      reflected.map((r) => `${r.group}.${r.name}`).sort(),
+    expect<ReadonlyArray<string>>(
+      Arr.sort(
+        Arr.map(rows, ([id]) => id),
+        Order.String,
+      ),
+    ).toEqual(
+      Arr.sort(
+        Arr.map(reflected, (r) => `${r.group}.${r.name}`),
+        Order.String,
+      ),
     );
   });
 
   test.each(rows)("%s (%s)", (id, _method, tags) => {
-    const [group = "", name = ""] = id.split(".");
+    const [group = "", name = ""] = Str.split(id, ".");
     const r = find(group, name);
     const member = r.middleware.includes(WorkspaceMember.key);
     const own = ownErrors(group, name);
@@ -530,7 +550,7 @@ describe("endpoints declare their core method's errors", () => {
       const sample = samples[tag];
       if (sample === undefined) throw new Error(`no sample for ${tag}`);
       const [status, value] = sample;
-      expect([tag, own.some((schema) => Schema.is(schema)(value))]).toEqual([tag, true]);
+      expect([tag, Arr.some(own, (schema) => Schema.is(schema)(value))]).toEqual([tag, true]);
       expect([tag, hasError(r, status, value)]).toEqual([tag, true]);
     }
   });
@@ -538,9 +558,9 @@ describe("endpoints declare their core method's errors", () => {
 
 describe("request codecs on endpoints", () => {
   const documents = Api.groups.documents.endpoints;
-  const decodeQuery = Schema.decodeUnknownSync(
-    documents.list.query as Schema.Top as Schema.Codec<unknown, unknown>,
-  );
+  const query = documents.list.query;
+  if (query === undefined) throw new Error("documents.list has no query schema");
+  const decodeQuery = Fn.flow(decodeReflectedSchema(query), Effect.runSync);
 
   test("list query decodes string-encoded filters and paging", () => {
     expect(decodeQuery({ overdue: "true", limit: "20", kind: "invoice" })).toEqual({
@@ -557,9 +577,9 @@ describe("request codecs on endpoints", () => {
   });
 
   test("If-Match header accepts only strong revision tags", () => {
-    const decodeHeaders = Schema.decodeUnknownSync(
-      documents.edit.headers as Schema.Top as Schema.Codec<unknown, unknown>,
-    );
+    const headers = documents.edit.headers;
+    if (headers === undefined) throw new Error("documents.edit has no headers schema");
+    const decodeHeaders = Fn.flow(decodeReflectedSchema(headers), Effect.runSync);
     expect(decodeHeaders({ "if-match": '"7"' })).toEqual({ "if-match": '"7"' });
     for (const tag of ['W/"7"', "*", "7", '"07"']) {
       expect(() => decodeHeaders({ "if-match": tag })).toThrow();

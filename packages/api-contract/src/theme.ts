@@ -12,7 +12,7 @@ import {
   type ThemePresetId,
   ThemeSource,
 } from "@kvitbit/domain/contract";
-import { Schema } from "effect";
+import * as Schema from "effect/Schema";
 
 export {
   DEFAULT_THEME_PRESET,
@@ -135,7 +135,7 @@ export const ResolvedTheme = Schema.Struct({
     darkMedium: ResolvedScheme,
     darkHigh: ResolvedScheme,
   }),
-  warnings: Schema.optional(Schema.Array(ThemeWarning)),
+  warnings: ThemeWarning.pipe(Schema.Array, Schema.optional),
 });
 export type ResolvedTheme = typeof ResolvedTheme.Type;
 
@@ -156,7 +156,7 @@ export type AccountPreferences = typeof AccountPreferences.Type;
 
 /** `PATCH /api/v1/me/preferences` body; `locale: null` falls back to Accept-Language. */
 export const AccountPreferencesPatch = Schema.Struct({
-  locale: Schema.optional(Schema.NullOr(Locale)),
+  locale: Locale.pipe(Schema.NullOr, Schema.optional),
   theme: Schema.optional(ThemePreference),
 });
 export type AccountPreferencesPatch = typeof AccountPreferencesPatch.Type;

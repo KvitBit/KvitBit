@@ -25,8 +25,15 @@ import {
   UserId,
   WorkspaceId,
 } from "@kvitbit/domain/contract";
-import { Context, Effect, Schema, SchemaIssue } from "effect";
-import { type HttpApiError, HttpApiMiddleware, HttpApiSecurity } from "effect/http-api";
+import * as Arr from "effect/Array";
+import * as Context from "effect/Context";
+import * as Effect from "effect/Effect";
+import type * as HttpApiError from "effect/http-api/HttpApiError";
+import * as HttpApiMiddleware from "effect/http-api/HttpApiMiddleware";
+import * as HttpApiSecurity from "effect/http-api/HttpApiSecurity";
+import * as Schema from "effect/Schema";
+import * as SchemaIssue from "effect/SchemaIssue";
+import * as Str from "effect/String";
 import { ApiKeyId } from "./api-key";
 import { OriginRejected, PayloadTooLarge, RateLimited, Unauthorized } from "./edge-errors";
 
@@ -62,6 +69,8 @@ export const Principal = Schema.Struct({
 export type Principal = typeof Principal.Type;
 
 export class CurrentPrincipal extends Context.Service<CurrentPrincipal, Principal>()(
+  // This key is part of the shared HTTP middleware contract.
+  // @effect-diagnostics-next-line deterministicKeys:off
   "kvitbit/edge/Principal",
 ) {}
 
@@ -77,7 +86,7 @@ export class SchemaErrors extends HttpApiMiddleware.Service<SchemaErrors>()(
 ) {}
 
 /** `HttpApiSchemaError` kinds raised while decoding the request; the others are response-side. */
-export const REQUEST_SCHEMA_ERROR_KINDS = ["Params", "Query", "Headers", "Payload"] as const;
+const REQUEST_SCHEMA_ERROR_KINDS = ["Params", "Query", "Headers", "Payload"] as const;
 
 const formatIssues = SchemaIssue.makeFormatterStandardSchemaV1();
 
@@ -93,25 +102,29 @@ const toPathSegment = (segment: PropertyKey | { readonly key: PropertyKey }): st
  * array indices (what a form maps to its fields); params, query and headers paths start with the
  * slot (`["query", "limit"]`). A failure at the root of a slot keeps the slot alone.
  */
-export const requestIssuePaths = (
+const requestIssuePaths = (
   error: HttpApiError.HttpApiSchemaError,
 ): readonly [IssuePath, ...Array<IssuePath>] => {
-  const slot = error.kind.toLowerCase();
-  const paths = formatIssues(error.cause.issue).issues.map((issue) =>
-    (issue.path ?? []).map(toPathSegment),
+  const slot = Str.toLowerCase(error.kind);
+  const paths = Arr.map(formatIssues(error.cause.issue).issues, (issue) =>
+    Arr.map(issue.path ?? [], toPathSegment),
   );
-  const prefixed = paths.map((path) =>
+  const prefixed = Arr.map(paths, (path) =>
     error.kind === "Payload" ? (path.length === 0 ? [slot] : path) : [slot, ...path],
   );
-  const [first = [slot], ...rest] = [
-    ...new Map(prefixed.map((path) => [JSON.stringify(path), path] as const)).values(),
-  ];
+  const keyed = Arr.map(
+    prefixed,
+    // Paths contain only strings and numbers, so JSON encoding cannot fail on a value.
+    // @effect-diagnostics-next-line globalJson:off
+    (path) => [JSON.stringify(path), path] as const,
+  );
+  const [first = [slot], ...rest] = new Map(keyed).values();
   return [first, ...rest];
 };
 
 const malformed = ([first, ...rest]: readonly [IssuePath, ...Array<IssuePath>]) => {
   const issue = (path: IssuePath) => ({ path, code: "request.malformed" as const });
-  return [issue(first), ...rest.map(issue)] as const;
+  return [issue(first), ...Arr.map(rest, issue)] as const;
 };
 
 /**
@@ -121,18 +134,23 @@ const malformed = ([first, ...rest]: readonly [IssuePath, ...Array<IssuePath>]) 
  */
 export const schemaErrorToInvalid = (
   error: HttpApiError.HttpApiSchemaError,
-): Effect.Effect<never, Invalid | HttpApiError.HttpApiSchemaError> =>
-  REQUEST_SCHEMA_ERROR_KINDS.some((kind) => kind === error.kind)
-    ? Effect.fail(
-        new Invalid({
-          issues: malformed(requestIssuePaths(error)),
-        }),
-      )
-    : Effect.fail(error);
+): Effect.Effect<never, Invalid | HttpApiError.HttpApiSchemaError> => {
+  if (Arr.some(REQUEST_SCHEMA_ERROR_KINDS, (kind) => kind === error.kind)) {
+    return error.pipe(
+      requestIssuePaths,
+      malformed,
+      (issues) => Invalid.make({ issues }),
+      Effect.fail,
+    );
+  }
+  return error.pipe(Effect.fail);
+};
 
 /**
  * Session (cookie or bearer) or API Key. Provides the principal and an Account caller. Fails
  * only with Unauthorized; the other edge checks are EdgeGuard's.
+ * HttpApiBuilder supplies these request services to authentication middleware.
+ * @effect-expect-leaking HttpServerRequest | ParsedSearchParams | RouteContext
  */
 export class Authentication extends HttpApiMiddleware.Service<
   Authentication,
