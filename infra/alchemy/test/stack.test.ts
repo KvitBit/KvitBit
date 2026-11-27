@@ -10,7 +10,6 @@ import * as ConfigProvider from "effect/ConfigProvider";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import {
-  assertBootstrapSafeState,
   BootstrapPopulatedStateError,
   declareKvitbitStack,
   foundationResourceIds,
@@ -231,6 +230,14 @@ describe("Kvitbit Alchemy stack config", () => {
 });
 
 describe("Bootstrap state safety guard", () => {
+  const config = sampleProdConfig({ bootstrapFoundation: true, imageDigest: "" });
+  const compileBootstrap = (state: Layer.Layer<State.State>) =>
+    Stack.Stack(
+      KVITBIT_STACK_NAME,
+      { state, providers: Layer.empty },
+      declareKvitbitStack(config).pipe(Effect.orDie),
+    ).pipe(Effect.provideService(Stage, "prod"));
+
   const makeFakeResourceState = (logicalId: string) =>
     ({
       kind: "resource",
@@ -243,7 +250,6 @@ describe("Bootstrap state safety guard", () => {
     }) as unknown as NonNullable<Parameters<typeof State.inMemoryState>[0]>[string][string][string];
 
   test("hard-fails bootstrapFoundation when state already contains non-foundation production workloads", async () => {
-    const config = sampleProdConfig({ bootstrapFoundation: true, imageDigest: "" });
     const populatedStateLayer = State.inMemoryState({
       [KVITBIT_STACK_NAME]: {
         prod: {
@@ -255,101 +261,75 @@ describe("Bootstrap state safety guard", () => {
       },
     });
 
-    const stateService = await Effect.runPromise(
+    const compiled = Effect.runPromise(Effect.scoped(compileBootstrap(populatedStateLayer)));
+    await expect(compiled).rejects.toBeInstanceOf(BootstrapPopulatedStateError);
+    await expect(compiled).rejects.toMatchObject({
+      stackName: KVITBIT_STACK_NAME,
+      stage: "prod",
+      unexpectedResources: ["KvitbitRunner0", "KvitbitServer", "KvitbitVpc"],
+    });
+  });
+
+  test.each([
+    ["empty", []],
+    ["foundation-only", ["KvitbitImages", "KvitbitBlobs", "EdgeTokenRouteExclusion"]],
+  ] as const)("lists %s state under the stack's active lease", async (_kind, existingFqns) => {
+    const lease = Symbol("stack state lease");
+    let activeLease: symbol | undefined;
+    const events: string[] = [];
+    const state = Layer.effect(
+      State.State,
       Effect.gen(function* () {
-        const stateEffect = yield* State.State;
-        return yield* stateEffect;
-      }).pipe(Effect.provide(populatedStateLayer)),
+        yield* Effect.acquireRelease(
+          Effect.sync(() => {
+            expect(activeLease).toBeUndefined();
+            activeLease = lease;
+            events.push("acquire");
+          }),
+          () =>
+            Effect.sync(() => {
+              activeLease = undefined;
+              events.push("release");
+            }),
+        );
+        const memory = yield* State.InMemoryService();
+        return Effect.succeed({
+          ...memory,
+          list: ({ stack, stage }) =>
+            Effect.sync(() => {
+              expect(activeLease).toBe(lease);
+              expect({ stack, stage }).toEqual({ stack: KVITBIT_STACK_NAME, stage: "prod" });
+              events.push("list");
+              return existingFqns;
+            }),
+        } satisfies State.StateService);
+      }),
     );
 
-    const err = await Effect.runPromise(
-      Effect.flip(
-        assertBootstrapSafeState({
-          stackName: KVITBIT_STACK_NAME,
-          stage: "prod",
-          allowedFoundationIds: foundationResourceIds(config),
-          state: stateService,
+    await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const compiled = yield* compileBootstrap(state);
+          expect(Object.keys(compiled.resources).sort()).toEqual(
+            [...foundationResourceIds(config)].sort(),
+          );
+          expect(activeLease).toBe(lease);
+          expect(events).toEqual(["acquire", "list"]);
         }),
       ),
     );
-    expect(err).toBeInstanceOf(BootstrapPopulatedStateError);
-    if (err instanceof BootstrapPopulatedStateError) {
-      expect(err.unexpectedResources).toEqual(["KvitbitRunner0", "KvitbitServer", "KvitbitVpc"]);
-    }
-
-    // Running the stack program itself fails BEFORE returning any foundation-only resource set
-    const makeStack = Stack.make({
-      name: KVITBIT_STACK_NAME,
-      state: populatedStateLayer,
-      providers: Layer.empty,
-    }) as <Out>(
-      eff: Effect.Effect<Out, unknown, unknown>,
-    ) => Effect.Effect<Stack.CompiledStack<Out, unknown>, unknown, unknown>;
-
-    const stackErr = await Effect.runPromise(
-      Effect.scoped(
-        Effect.flip(
-          makeStack(
-            declareKvitbitStack(config, {
-              stackName: KVITBIT_STACK_NAME,
-              inspectState: Effect.succeed(stateService),
-            }),
-          ),
-        ),
-      ).pipe(Effect.provide(Layer.succeed(Stage, "prod"))) as Effect.Effect<
-        unknown,
-        unknown,
-        never
-      >,
-    );
-    expect(stackErr).toBeInstanceOf(BootstrapPopulatedStateError);
+    expect(events).toEqual(["acquire", "list", "release"]);
+    expect(activeLease).toBeUndefined();
   });
 
-  test("allows bootstrapFoundation on empty or foundation-only state and declares exact foundation resource IDs", async () => {
-    const config = sampleProdConfig({ bootstrapFoundation: true, imageDigest: "" });
-    const foundationOnlyStateLayer = State.inMemoryState({
-      [KVITBIT_STACK_NAME]: {
-        prod: {
-          KvitbitImages: makeFakeResourceState("KvitbitImages"),
-          KvitbitBlobs: makeFakeResourceState("KvitbitBlobs"),
-          EdgeTokenRouteExclusion: makeFakeResourceState("EdgeTokenRouteExclusion"),
-        },
-      },
-    });
-    const stateService = await Effect.runPromise(
-      Effect.gen(function* () {
-        const stateEffect = yield* State.State;
-        return yield* stateEffect;
-      }).pipe(Effect.provide(foundationOnlyStateLayer)),
+  test("aborts bootstrap when listing state fails", async () => {
+    const listError = new State.StateStoreError({ message: "state listing failed" });
+    const state = Layer.succeed(
+      State.State,
+      State.InMemoryService().pipe(Effect.map((memory) => ({ ...memory, list: () => listError }))),
     );
 
-    const makeStack = Stack.make({
-      name: KVITBIT_STACK_NAME,
-      state: foundationOnlyStateLayer,
-      providers: Layer.empty,
-    }) as <Out>(
-      eff: Effect.Effect<Out, unknown, unknown>,
-    ) => Effect.Effect<Stack.CompiledStack<Out, unknown>, unknown, unknown>;
-
-    const compiled = await Effect.runPromise(
-      Effect.scoped(
-        makeStack(
-          declareKvitbitStack(config, {
-            stackName: KVITBIT_STACK_NAME,
-            inspectState: Effect.succeed(stateService),
-          }),
-        ),
-      ).pipe(Effect.provide(Layer.succeed(Stage, "prod"))) as Effect.Effect<
-        Stack.CompiledStack<unknown, unknown>,
-        unknown,
-        never
-      >,
-    );
-
-    const declaredIds = new Set(Object.keys(compiled.resources));
-    expect([...declaredIds].sort()).toEqual([...foundationResourceIds(config)].sort());
-    expect(declaredIds.has("KvitbitServer")).toBe(false);
-    expect(declaredIds.has("KvitbitRunner0")).toBe(false);
+    await expect(Effect.runPromise(Effect.scoped(compileBootstrap(state)))).rejects.toBe(listError);
   });
 });
 
