@@ -1411,7 +1411,7 @@
       "skill": "verify-deploy-config",
       "tier": 1,
       "kind": "exhaustive",
-      "syncCommit": "4ec465b3",
+      "syncCommit": "751971cf",
       "command": "bun test --cwd apps/server ./test/runtime/deploy-config.exhaustive.test.ts",
       "coveredFiles": [
         {
@@ -1424,19 +1424,19 @@
         },
         {
           "path": "apps/server/src/config.ts",
-          "sha256": "ca671cf9311eec3f5402ad9f216ddeb5b6b6ced5bb30098ad8409438d105cf6c"
+          "sha256": "cb77ea7ad3b1b3b27bc83245f3452124cbff1250c425b66e1364ed5ac5f83697"
         },
         {
           "path": "apps/server/src/http/config.ts",
-          "sha256": "e1ffa45ee354cb8b0822d76313ef3609f352f334435563153a67decc7fdd35db"
+          "sha256": "52be938fce2621ce469290e194b6ddbb98b7719ac83f148263b1fc233d499e35"
         },
         {
           "path": "apps/server/src/main.ts",
-          "sha256": "bb3a5dc0172a10b54e4bbed53c730a0091238c464cd02cfd2e4f95b68550d992"
+          "sha256": "3fd179ff2790ec7312ff34de39e39f75562dcee6391ff5c33465c92579546e4b"
         },
         {
           "path": "apps/server/src/worker.ts",
-          "sha256": "71e34e93e657a58decf7b8e161af5c95acd03a35d07c50ff6799584bb1823c5f"
+          "sha256": "30b46636aad40a4cf43f9d9c584680c79e73b070b6c253964eb694bca234590a"
         },
         {
           "path": "apps/server/src/wiring/config.ts",
@@ -1468,11 +1468,11 @@
         },
         {
           "path": "infra/alchemy/src/config.ts",
-          "sha256": "e79a1fa437275826a60c4f595e4431a9128f7ff388c1b12206353f6d9638d87b"
+          "sha256": "93da0ab71c3dced6e3235f1dca2af3c1d5ccdd555e6e3dc859282b7085054625"
         },
         {
           "path": "infra/alchemy/src/env.ts",
-          "sha256": "d47e0be85722e4023f57a1d14433ebcfb2a2c70820bdae4e9692bc19f744af2e"
+          "sha256": "b65d3ec820ee448426c65c7a6836247c3d6bb03ac40489894a8d9af7533f3d57"
         },
         {
           "path": "infra/alchemy/src/bootstrap.ts",
@@ -1484,7 +1484,7 @@
         },
         {
           "path": ".github/workflows/deploy.yml",
-          "sha256": "da1ff9987b827d01f64c59fac4147bf5ff2d910a6b379d2e948abc6184167d3c"
+          "sha256": "29ba6d83a22728ce3f65ebb1156733eec1925c3aeba78c8ae846887e1b2665d4"
         }
       ],
       "guardedSymbols": [

@@ -38,7 +38,7 @@ Covered files and guarded symbols:
 - `infra/alchemy/src/bootstrap.ts` & `infra/alchemy/alchemy.run.ts`: `declareKvitbitStack` (targeted feedback/ALTCHA/Resend/turbo-cache secret bootstraps declare only their single secret container), `assertTargetedSecretSelection`, `altchaSecretFqn`, `feedbackSecretFqn`, `resendSecretFqn`, `turboCacheSecretFqn`, `loadAlchemyStackConfig` (preserves Alchemy CLI `--env-file` / `.env` `ConfigProvider`)
 - `.github/workflows/deploy.yml`: `"Validate GCP deployment variables"` step (with `KVITBIT_REPO_VARS_JSON: ${{ toJSON(vars) }}`), Secret Manager preflight (including `kvitbit-prod-altcha-hmac-key` and `kvitbit-prod-turbo-cache-token`), targeted secret bootstraps (`bootstrap_feedback_secret`, `bootstrap_altcha_secret`, `bootstrap_resend_secret`, `bootstrap_turbo_cache_secret`), and Alchemy env pass-through
 
-If `git diff 4ec465b3 -- <those paths>` is non-empty, run the check.
+If `git diff 751971cf -- <those paths>` is non-empty, run the check.
 
 ## Run
 
@@ -79,7 +79,7 @@ The repo-wide coverage record is `formal/manifest.json`; this skill's entry is `
 
 ## Coverage record
 
-- Sync commit: `4ec465b3` (product contract confirmed at this commit after merging `origin/main`).
+- Sync commit: `751971cf` (product contract confirmed at this commit after merging `origin/main`).
 - Able-to-fail, recorded 2026-11-27, each reverted with `git checkout` and re-run green:
   - `apps/server/src/config-contract.ts`: disabled prod `driver !== "gcs"` guard -> fails (`server KVITBIT_ENV=production ... blob=local/absent: expected ok=false, got ok=true`).
   - `apps/server/src/config-contract.ts`: removed `"staging"` from strict email branch -> fails (`server KVITBIT_ENV=staging ... emailMode=absent secrets=none ...: expected ok=false, got ok=true`).
