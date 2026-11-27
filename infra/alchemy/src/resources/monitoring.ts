@@ -73,18 +73,21 @@ export const declareMonitoring = Effect.fn("KvitbitStack.declareMonitoring")(fun
   config: KvitbitStackConfig,
   monitoringApi: ProjectService,
   serverServiceId: Output.Output<string>,
+  edgeHttpsForwardingRule?: Output.Output<string | undefined>,
 ) {
   const target = uptimeTarget(config);
   if (target === null && config.alertEmail === undefined) return;
 
   // Delay the providers' first read until Service Usage has enabled the API.
-  const project = monitoringApi.state.pipe(Output.map(() => config.projectId));
+  const project = config.projectId;
+  const apiReady = monitoringApi.state;
   const { prefix } = resourceNames(config);
   const channel =
     config.alertEmail === undefined
       ? undefined
       : yield* NotificationChannel("MonitoringEmail", {
           project,
+          apiReady,
           displayName: `${prefix} operations email`,
           email: config.alertEmail,
         });
@@ -92,14 +95,20 @@ export const declareMonitoring = Effect.fn("KvitbitStack.declareMonitoring")(fun
 
   yield* AlertPolicy("MonitoringCloudRunErrors", {
     project,
+    apiReady,
     displayName: `${prefix} Cloud Run 5xx rate`,
     condition: serverServiceId.pipe(Output.map(errorRateCondition)),
     notificationChannels,
   });
 
   if (target !== null) {
+    const readinessDependencies =
+      edgeHttpsForwardingRule === undefined
+        ? [serverServiceId]
+        : [serverServiceId, edgeHttpsForwardingRule];
     const uptime = yield* UptimeCheck("MonitoringReadinessCheck", {
       project,
+      apiReady: Output.all(apiReady, ...readinessDependencies).pipe(Output.map(([state]) => state)),
       displayName: `${prefix} HTTPS readiness`,
       host: target.hostname,
       port: target.port === "" ? 443 : Number(target.port),
@@ -107,6 +116,7 @@ export const declareMonitoring = Effect.fn("KvitbitStack.declareMonitoring")(fun
     });
     yield* AlertPolicy("MonitoringReadinessFailure", {
       project,
+      apiReady,
       displayName: `${prefix} HTTPS readiness failure`,
       condition: uptime.resourceId.pipe(Output.map(uptimeFailureCondition)),
       notificationChannels,

@@ -1,3 +1,4 @@
+import { createInternalLabels, sanitizeLabelValue } from "@alchemy.run/gcp";
 import { Unowned } from "alchemy/AdoptPolicy";
 import { isResolved } from "alchemy/Diff";
 import type { Input } from "alchemy/Input";
@@ -15,6 +16,8 @@ type UptimePeriod = "60s" | "300s" | "600s" | "900s";
 interface MonitoringProps {
   readonly project: string;
   readonly displayName: string;
+  /** Upstream dependencies that must settle before the first Monitoring API call. */
+  readonly apiReady?: string;
 }
 
 export interface UptimeCheckProps extends MonitoringProps {
@@ -79,6 +82,7 @@ class MonitoringRequestFailed extends Data.TaggedError("MonitoringRequestFailed"
   readonly operation: string;
   readonly resource: string;
   readonly reason: string;
+  readonly serviceDisabled?: boolean;
 }> {
   override get message() {
     return `Cloud Monitoring ${this.operation} ${this.resource}: ${this.reason}`;
@@ -86,7 +90,7 @@ class MonitoringRequestFailed extends Data.TaggedError("MonitoringRequestFailed"
 }
 
 const root = "https://monitoring.googleapis.com/v3";
-const managedLabel = { managed_by: "kvitbit-alchemy" };
+const generationLabel = "alchemy-instance";
 const object = (value: unknown): JsonObject =>
   typeof value === "object" && value !== null && !Array.isArray(value) ? (value as JsonObject) : {};
 
@@ -97,11 +101,12 @@ const makeMonitoringApi = Effect.fnUntraced(function* () {
     request: HttpClientRequest.HttpClientRequest,
     resource: string,
   ): Effect.Effect<JsonObject | undefined, MonitoringRequestFailed> => {
-    const failed = (reason: string) =>
-      new MonitoringRequestFailed({ operation: request.method, resource, reason });
+    const failed = (reason: string, serviceDisabled = false) =>
+      new MonitoringRequestFailed({ operation: request.method, resource, reason, serviceDisabled });
 
     return api.call({
       request: request.pipe(HttpClientRequest.acceptJson),
+      tokenLookup: "once",
       // POST assigns a new ID every time. A later reconcile lists before creating.
       policy: {
         attemptTimeout: "20 seconds",
@@ -123,17 +128,24 @@ const makeMonitoringApi = Effect.fnUntraced(function* () {
         return response.json.pipe(
           Effect.orElseSucceed(() => ({})),
           Effect.flatMap((body) => {
-            const { message } = object(object(body).error);
+            const { message, details } = object(object(body).error);
+            const serviceDisabled =
+              request.method === "GET" &&
+              response.status === 403 &&
+              Array.isArray(details) &&
+              details.some((detail) => object(detail).reason === "SERVICE_DISABLED");
             return Effect.fail(
               failed(
                 typeof message === "string"
                   ? `HTTP ${response.status}: ${message}`
                   : `HTTP ${response.status}`,
+                serviceDisabled,
               ),
             );
           }),
         );
       },
+      retryHandledFailure: (failure) => failure.serviceDisabled === true,
       transientStatus: (status) => failed(`HTTP ${status}`),
       noAnswer: (cause) => failed(cause),
       credentialsUnavailable: () => failed("credentials unavailable"),
@@ -148,7 +160,13 @@ interface MonitoringDefinition<P extends MonitoringProps> {
   readonly mutable: (props: P, live?: JsonObject) => JsonObject;
   readonly createFields?: (props: P) => JsonObject;
   readonly immutableMatches?: (props: P, live: JsonObject) => boolean;
-  readonly immutableChanged?: (current: P, next: P) => boolean;
+  readonly immutableChanged?: (current: P, next: JsonObject) => boolean;
+  readonly verifyReadback?: boolean;
+}
+
+interface MonitoringIdentity {
+  readonly fqn: string;
+  readonly instanceId: string;
 }
 
 // Monitoring requires alert-policy writes and channel writes to be serialized per project.
@@ -175,12 +193,17 @@ function monitoringLifecycle<P extends MonitoringProps>(definition: MonitoringDe
     }
     return Effect.succeed({ project, name, resourceId: match[2], body });
   };
-  const owns = (body: JsonObject) => object(body.userLabels).managed_by === managedLabel.managed_by;
-
-  const find = Effect.fnUntraced(function* (props: P) {
+  const find = Effect.fnUntraced(function* (
+    props: P,
+    labels: Record<string, string>,
+    instanceId: string,
+    previous?: MonitoringAttributes,
+  ) {
     const api = yield* makeMonitoringApi();
     let pageToken: string | undefined;
-    let found: MonitoringAttributes | undefined;
+    const exact: MonitoringAttributes[] = [];
+    const owned: MonitoringAttributes[] = [];
+    const foreign: MonitoringAttributes[] = [];
     do {
       const request = HttpClientRequest.get(collectionUrl(props.project));
       const page: JsonObject | undefined = yield* api.send(
@@ -198,23 +221,36 @@ function monitoringLifecycle<P extends MonitoringProps>(definition: MonitoringDe
       for (const entry of Array.isArray(entries) ? entries : []) {
         const body = object(entry);
         if (
-          body.displayName !== props.displayName ||
+          (previous !== undefined && body.name === previous.name) ||
           (definition.immutableMatches && !definition.immutableMatches(props, body))
         ) {
           continue;
         }
-        if (found) {
-          return yield* new MonitoringRequestFailed({
-            operation: "list",
-            resource: props.displayName,
-            reason: "multiple resources match the desired identity",
-          });
+        const liveLabels = object(body.userLabels);
+        if (Object.entries(labels).every(([key, value]) => liveLabels[key] === value)) {
+          if (liveLabels[generationLabel] === instanceId) {
+            exact.push(yield* attributes(props.project, body));
+          } else if (previous === undefined) {
+            owned.push(yield* attributes(props.project, body));
+          }
+        } else if (body.displayName === props.displayName) {
+          foreign.push(yield* attributes(props.project, body));
         }
-        found = yield* attributes(props.project, body);
       }
       pageToken = typeof page.nextPageToken === "string" ? page.nextPageToken : undefined;
     } while (pageToken);
-    return found;
+    const matching = exact.length > 0 ? exact : [...owned, ...foreign];
+    if (matching.length > 1) {
+      return yield* new MonitoringRequestFailed({
+        operation: "list",
+        resource: props.displayName,
+        reason: "multiple resources match the desired identity",
+      });
+    }
+    const resource = matching[0];
+    return resource === undefined
+      ? undefined
+      : { resource, exact: exact.includes(resource), owned: !foreign.includes(resource) };
   });
 
   const readByName = Effect.fnUntraced(function* (output: MonitoringAttributes) {
@@ -230,18 +266,51 @@ function monitoringLifecycle<P extends MonitoringProps>(definition: MonitoringDe
   const drifted = (props: P, live: JsonObject) =>
     Object.entries(mutable(props, live)).filter(([field, value]) => !matches(value, live[field]));
 
+  const invalid = (body: JsonObject) =>
+    definition.verifyReadback === true &&
+    body.validity !== undefined &&
+    object(body.validity).code !== 0;
+
+  const verify = (
+    resource: MonitoringAttributes,
+    expected: JsonObject,
+  ): Effect.Effect<MonitoringAttributes, MonitoringRequestFailed> => {
+    const body = resource.body;
+    if (
+      definition.verifyReadback === true &&
+      (invalid(body) ||
+        !Object.entries(expected).every(([key, value]) => matches(value, body[key])))
+    ) {
+      return Effect.fail(
+        new MonitoringRequestFailed({
+          operation: "reconcile",
+          resource: resource.name,
+          reason:
+            "alert policy is invalid or its returned configuration differs from the requested policy",
+        }),
+      );
+    }
+    return Effect.succeed(resource);
+  };
+
   return {
     stables: ["project", "name", "resourceId"] satisfies Array<keyof MonitoringAttributes>,
     read: Effect.fnUntraced(function* ({
       olds,
       output,
-    }: {
+      previous,
+      fqn,
+      instanceId,
+    }: MonitoringIdentity & {
       olds: P;
       output: MonitoringAttributes | undefined;
+      previous?: MonitoringAttributes;
     }) {
       if (output !== undefined) return yield* readByName(output);
-      const found = yield* find(olds);
-      return found !== undefined && !owns(found.body) ? Unowned(found) : found;
+      const labels = yield* createInternalLabels(fqn);
+      const found = yield* find(olds, labels, sanitizeLabelValue(instanceId), previous);
+      if (found === undefined) return undefined;
+      return found.owned ? found.resource : Unowned(found.resource);
     }),
     diff: ({
       olds,
@@ -253,24 +322,38 @@ function monitoringLifecycle<P extends MonitoringProps>(definition: MonitoringDe
       output: MonitoringAttributes | undefined;
     }) =>
       Effect.sync(() => {
-        if (!isResolved(news)) return undefined;
+        const next = object(news);
         if (
-          news.project !== olds.project ||
-          definition.immutableChanged?.(olds, news) ||
-          (output !== undefined && definition.immutableMatches?.(news, output.body) === false)
+          (typeof next.project === "string" && next.project !== olds.project) ||
+          definition.immutableChanged?.(olds, next) ||
+          (isResolved(news) &&
+            output !== undefined &&
+            definition.immutableMatches?.(news, output.body) === false)
         ) {
           return { action: "replace" as const, deleteFirst: false };
         }
-        return output && drifted(news, output.body).length
+        if (!isResolved(news)) return undefined;
+        return output && (invalid(output.body) || drifted(news, output.body).length > 0)
           ? { action: "update" as const }
           : undefined;
       }),
-    reconcile: ({ news, output }: { news: P; output: MonitoringAttributes | undefined }) =>
+    reconcile: ({
+      fqn,
+      instanceId,
+      news,
+      output,
+    }: MonitoringIdentity & {
+      news: P;
+      output: MonitoringAttributes | undefined;
+    }) =>
       mutations.withPermit(
         Effect.gen(function* () {
           const api = yield* makeMonitoringApi();
+          const labels = yield* createInternalLabels(fqn);
+          const generation = sanitizeLabelValue(instanceId);
           const known = output === undefined ? undefined : yield* readByName(output);
-          const existing = known ?? (yield* find(news));
+          const found = known === undefined ? yield* find(news, labels, generation) : undefined;
+          const existing = known ?? found?.resource;
 
           if (existing === undefined) {
             const created = yield* api.send(
@@ -278,16 +361,17 @@ function monitoringLifecycle<P extends MonitoringProps>(definition: MonitoringDe
                 HttpClientRequest.bodyJsonUnsafe({
                   ...mutable(news),
                   ...definition.createFields?.(news),
-                  userLabels: managedLabel,
+                  userLabels: { ...labels, [generationLabel]: generation },
                 }),
               ),
               news.displayName,
             );
-            return yield* attributes(news.project, created ?? {});
+            const resource = yield* attributes(news.project, created ?? {});
+            return yield* verify(resource, mutable(news, resource.body));
           }
 
           if (
-            (known === undefined && !owns(existing.body)) ||
+            (found !== undefined && !found.exact) ||
             definition.immutableMatches?.(news, existing.body) === false
           ) {
             return yield* new MonitoringRequestFailed({
@@ -298,7 +382,8 @@ function monitoringLifecycle<P extends MonitoringProps>(definition: MonitoringDe
           }
 
           const changed = drifted(news, existing.body);
-          if (changed.length === 0) return existing;
+          const expected = mutable(news, existing.body);
+          if (changed.length === 0) return yield* verify(existing, expected);
           const patched = yield* api.send(
             HttpClientRequest.patch(`${root}/${existing.name}`).pipe(
               HttpClientRequest.setUrlParam(
@@ -312,7 +397,8 @@ function monitoringLifecycle<P extends MonitoringProps>(definition: MonitoringDe
             ),
             existing.name,
           );
-          return yield* attributes(news.project, patched ?? {});
+          const resource = yield* attributes(news.project, patched ?? {});
+          return yield* verify(resource, expected);
         }),
       ),
     delete: ({ output }: { output: MonitoringAttributes }) =>
@@ -325,7 +411,16 @@ function monitoringLifecycle<P extends MonitoringProps>(definition: MonitoringDe
   };
 }
 
-// Protobuf omits empty repeated fields and can return extra default fields.
+// Protobuf can omit empty repeated fields and emit optional defaults.
+const protobufDefault = (value: unknown) =>
+  value === undefined ||
+  value === "" ||
+  value === false ||
+  value === 0 ||
+  (typeof value === "string" && value.endsWith("_UNSPECIFIED")) ||
+  (Array.isArray(value) && value.length === 0) ||
+  (value !== null && typeof value === "object" && Object.keys(value).length === 0);
+
 const matches = (desired: unknown, live: unknown): boolean => {
   if (Array.isArray(desired)) {
     return Array.isArray(live)
@@ -333,8 +428,14 @@ const matches = (desired: unknown, live: unknown): boolean => {
       : desired.length === 0 && live === undefined;
   }
   if (desired !== null && typeof desired === "object") {
+    const expected = object(desired);
     const current = object(live);
-    return Object.entries(desired).every(([key, value]) => matches(value, current[key]));
+    return (
+      Object.entries(expected).every(([key, value]) => matches(value, current[key])) &&
+      Object.entries(current).every(
+        ([key, value]) => Object.hasOwn(expected, key) || protobufDefault(value),
+      )
+    );
   }
   return Object.is(desired, live);
 };
@@ -348,13 +449,14 @@ export const UptimeCheckProvider = Provider.succeed(
       period,
     }),
     immutableChanged: (current, next) =>
-      current.host !== next.host || current.period !== next.period,
+      (typeof next.host === "string" && current.host !== next.host) ||
+      (typeof next.period === "string" && current.period !== next.period),
     immutableMatches: ({ host, period }, live) => {
       const target = object(live.monitoredResource);
       return (
         target.type === "uptime_url" &&
         object(target.labels).host === host &&
-        live.period === period
+        (live.period ?? "60s") === period
       );
     },
     mutable: ({ port }) => ({
@@ -382,6 +484,7 @@ export const AlertPolicyProvider = Provider.succeed(
   AlertPolicy,
   monitoringLifecycle<AlertPolicyProps>({
     collection: "alertPolicies",
+    verifyReadback: true,
     mutable: ({ condition, notificationChannels }, live) => {
       // Each policy owns one condition. Its generated name preserves identity across edits.
       const conditions = live?.conditions;

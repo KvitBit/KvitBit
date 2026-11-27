@@ -183,7 +183,12 @@ export const declareKvitbitStack = (config: KvitbitStackConfig) =>
       foundation.dnsApi === undefined
         ? undefined
         : yield* declareKvitbitDns(config, foundation.dnsApi, edge?.edgeIpAddress);
-    yield* declareMonitoring(config, foundation.monitoringApi, server.serviceId);
+    yield* declareMonitoring(
+      config,
+      foundation.monitoringApi,
+      server.serviceId,
+      edge?.httpsForwardingRule,
+    );
 
     return {
       stage: config.stage,

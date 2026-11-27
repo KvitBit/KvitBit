@@ -17,6 +17,7 @@ import {
   NotificationChannel,
   NotificationChannelProvider,
   UptimeCheck,
+  type UptimeCheckProps,
   UptimeCheckProvider,
 } from "../src/resources/monitoring-provider";
 
@@ -25,11 +26,12 @@ const project = "example-project";
 const checkName = "example-staging HTTPS readiness";
 const emailName = "example-staging operations email";
 
-function monitoringApi(options: { loseFirstCreate?: boolean } = {}) {
+function monitoringApi(options: { loseFirstCreate?: boolean; disabledOnFirstRead?: boolean } = {}) {
   const resources = new Map<string, Body>();
   const requests: Array<{ method: string; path: string; mask: string | null; body: Body }> = [];
   let nextId = 0;
-  let loseAnswer = options.loseFirstCreate;
+  let disabled = options.disabledOnFirstRead;
+  const faults = { invalidPolicyPatch: false, loseNextCreate: options.loseFirstCreate === true };
   const client = HttpClient.make((request, url) =>
     Effect.sync(() => {
       expect(url.origin).toBe("https://monitoring.googleapis.com");
@@ -47,6 +49,10 @@ function monitoringApi(options: { loseFirstCreate?: boolean } = {}) {
       const current = resources.get(path);
 
       if (request.method === "GET" && collection) {
+        if (disabled) {
+          disabled = false;
+          return reply({ error: { details: [{ reason: "SERVICE_DISABLED" }] } }, 403);
+        }
         if (id) return current ? reply(current) : reply({}, 404);
         const candidates = [...resources.entries()]
           .filter(([name]) => name.startsWith(`${path}/`))
@@ -69,8 +75,8 @@ function monitoringApi(options: { loseFirstCreate?: boolean } = {}) {
           }));
         }
         resources.set(name, created);
-        if (loseAnswer) {
-          loseAnswer = false;
+        if (faults.loseNextCreate) {
+          faults.loseNextCreate = false;
           return reply({}, 503);
         }
         return reply(created);
@@ -90,6 +96,10 @@ function monitoringApi(options: { loseFirstCreate?: boolean } = {}) {
           ).toBe(true);
         }
         const patched = { ...current, ...body };
+        if (collection === "alertPolicies" && faults.invalidPolicyPatch) {
+          faults.invalidPolicyPatch = false;
+          return reply({ ...patched, validity: { code: 3 } });
+        }
         resources.set(path, patched);
         return reply(patched);
       }
@@ -109,7 +119,7 @@ function monitoringApi(options: { loseFirstCreate?: boolean } = {}) {
       return reply({}, 404);
     }),
   );
-  return { client, requests, resources };
+  return { client, requests, resources, faults };
 }
 
 const providers = Layer.mergeAll(
@@ -121,10 +131,12 @@ const providers = Layer.mergeAll(
 const declare = ({
   host,
   port = 443,
+  period = "60s",
   email,
 }: {
   readonly host: string;
   readonly port?: number;
+  readonly period?: UptimeCheckProps["period"];
   readonly email?: string;
 }) =>
   Effect.gen(function* () {
@@ -133,7 +145,7 @@ const declare = ({
       displayName: checkName,
       host,
       port,
-      period: "60s",
+      period,
     });
     const channel =
       email === undefined
@@ -207,6 +219,12 @@ test("Alchemy updates allowed fields, swaps check generations, detaches email, a
         ({ method, path }) => method === "POST" && path.endsWith("uptimeCheckConfigs"),
       );
       expect(created?.body).toMatchObject({
+        userLabels: {
+          "alchemy-stack": "monitoringtest",
+          "alchemy-stage": "test",
+          "alchemy-id": "readiness",
+          "alchemy-instance": expect.any(String),
+        },
         monitoredResource: {
           type: "uptime_url",
           labels: { host: "first.example.com", project_id: project },
@@ -274,14 +292,15 @@ test("Alchemy updates allowed fields, swaps check generations, detaches email, a
       const beforeNoop = api.requests.length;
       expect(yield* deploy({ host: "second.example.com" })).toBe("noop");
       expect(api.requests.slice(beforeNoop).every(({ method }) => method === "GET")).toBe(true);
+      expect(yield* deploy({ host: "second.example.com", period: "300s" })).toBe("replace");
       yield* deployWithState(Effect.void);
       expect([...api.resources.keys()]).toEqual([]);
     }),
   );
-});
+}, 60_000);
 
 test("Alchemy adopts a matching generated ID across list pages after a lost create answer", async () => {
-  const api = monitoringApi({ loseFirstCreate: true });
+  const api = monitoringApi({ loseFirstCreate: true, disabledOnFirstRead: true });
   const deploy = deployWithMonitoringApi(api);
   const declareEmail = NotificationChannel("Email", {
     project,
@@ -299,3 +318,69 @@ test("Alchemy adopts a matching generated ID across list pages after a lost crea
   await Effect.runPromise(deploy(Effect.void));
   expect([...api.resources.keys()]).toEqual([unrelated]);
 });
+
+test("Alchemy recovers a lost successor create and retains the predecessor until the alert is valid", async () => {
+  const api = monitoringApi();
+  const deploy = deployWithMonitoringApi(api);
+  await Effect.runPromise(deploy(declare({ host: "first.example.com" })));
+  const next = declare({ host: "second.example.com" });
+  const attemptsBeforeCutover = api.requests.length;
+  api.faults.loseNextCreate = true;
+  await expect(Effect.runPromise(deploy(next))).rejects.toThrow("HTTP 503");
+  api.faults.invalidPolicyPatch = true;
+  await expect(Effect.runPromise(deploy(next))).rejects.toThrow("alert policy is invalid");
+  const failedAttempt = api.requests.slice(attemptsBeforeCutover);
+  expect(failedAttempt.some(({ method }) => method === "DELETE")).toBe(false);
+  expect(
+    [...api.resources.keys()].filter((name) => name.includes("/uptimeCheckConfigs/")),
+  ).toHaveLength(2);
+
+  await Effect.runPromise(deploy(next));
+  const checkCreates = api.requests.filter(
+    ({ method, path }) => method === "POST" && path.endsWith("uptimeCheckConfigs"),
+  );
+  expect(checkCreates).toHaveLength(2);
+  expect(checkCreates[0]?.body.userLabels).not.toEqual(checkCreates[1]?.body.userLabels);
+  expect(
+    [...api.resources.keys()].filter((name) => name.includes("/uptimeCheckConfigs/")),
+  ).toHaveLength(1);
+}, 60_000);
+
+test("Alchemy refuses ambiguous display-name matches without issuing a POST", async () => {
+  const api = monitoringApi();
+  const deploy = deployWithMonitoringApi(api);
+  for (const id of ["foreign-one", "foreign-two"]) {
+    const name = `projects/${project}/notificationChannels/${id}`;
+    api.resources.set(name, { name, displayName: emailName, type: "email" });
+  }
+  const email = NotificationChannel("Email", {
+    project,
+    displayName: emailName,
+    email: "ops@example.com",
+  });
+  await expect(Effect.runPromise(deploy(email.pipe(Effect.asVoid)))).rejects.toThrow(
+    "multiple resources match",
+  );
+  expect(api.requests.every(({ method }) => method === "GET")).toBe(true);
+});
+
+test("fresh state adopts the readiness policy and clears per-location grouping without changing its condition ID", async () => {
+  const api = monitoringApi();
+  const resources = declare({ host: "first.example.com" });
+  await Effect.runPromise(deployWithMonitoringApi(api)(resources));
+  const policy = [...api.resources.values()].find((body) => Array.isArray(body.conditions));
+  if (!Array.isArray(policy?.conditions)) throw new Error("Expected a readiness alert policy");
+  const [condition] = policy.conditions;
+  condition.conditionThreshold.aggregations[0].groupByFields = ["metric.label.checker_location"];
+  const beforeAdoption = api.requests.length;
+
+  await Effect.runPromise(deployWithMonitoringApi(api)(resources));
+  const writes = api.requests.slice(beforeAdoption).filter(({ method }) => method !== "GET");
+  expect(writes).toHaveLength(1);
+  expect(writes[0]).toMatchObject({
+    method: "PATCH",
+    mask: "conditions",
+    body: { conditions: [{ name: condition.name }] },
+  });
+  expect(JSON.stringify(writes[0]?.body)).not.toContain("groupByFields");
+}, 60_000);

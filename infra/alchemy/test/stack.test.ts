@@ -1599,7 +1599,11 @@ describe("Cloud Monitoring", () => {
 
   test("uses the HTTPS origin or the first HTTPS edge domain and skips HTTP-only targets", async () => {
     const noEdge = { edge: undefined };
-    const upstream = { CloudMonitoringApi: { state: "ENABLED" } };
+    const upstream = {
+      CloudMonitoringApi: { state: "ENABLED" },
+      KvitbitServer: { serviceId: "kvitbit-prod-server" },
+      EdgeHttpsForwardingRule: { selfLink: "https://example.test/forwardingRule" },
+    };
     const http = await compile(sampleProdConfig({ ...noEdge, appOrigin: "http://example.com" }));
     expect(http.resources.MonitoringReadinessCheck).toBeUndefined();
     expect(http.resources.MonitoringReadinessFailure).toBeUndefined();
@@ -1615,6 +1619,9 @@ describe("Cloud Monitoring", () => {
     expect(emailOnly.resources.MonitoringCloudRunErrors).toBeDefined();
 
     const fallback = await compile(sampleProdConfig({ appOrigin: undefined }));
+    expect(
+      Object.keys(Output.upstreamAny(fallback.resources.MonitoringReadinessCheck?.Props)).sort(),
+    ).toEqual(["CloudMonitoringApi", "EdgeHttpsForwardingRule", "KvitbitServer"]);
     expect(
       await resolveOutputs(fallback.resources.MonitoringReadinessCheck?.Props, upstream),
     ).toMatchObject({ host: "kvitbit.cz", port: 443 });
