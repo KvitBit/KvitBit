@@ -3,8 +3,10 @@
  * Classic Czech and Modern Minimal documents and the report export, statutory text, and the
  * `PdfEngine` seam that prints HTML to PDF bytes. Core owns caching in BlobStorage.
  */
+
 import type { Locale, PdfTemplate } from "@kvitbit/domain";
-import { Effect } from "effect";
+import * as Effect from "effect/Effect";
+import * as Fn from "effect/Function";
 import { renderClassic } from "./classic";
 import { PdfEngine } from "./engine";
 import type { DocumentRenderModel, ReportRenderModel } from "./model";
@@ -37,29 +39,29 @@ export type { PrintedNote, StatutoryNoteCode } from "./statutory";
 export { statutoryNotes, statutoryTitle } from "./statutory";
 
 /** Self-contained A4 HTML for a document in the chosen template and language. */
-export const renderDocumentHtml = (
-  model: DocumentRenderModel,
-  template: PdfTemplate,
-  language: Locale,
-): string => {
+export const renderDocumentHtml: {
+  (template: PdfTemplate, language: Locale): (model: DocumentRenderModel) => string;
+  (model: DocumentRenderModel, template: PdfTemplate, language: Locale): string;
+} = Fn.dual(3, (model: DocumentRenderModel, template: PdfTemplate, language: Locale): string => {
   const prepared = prepare(model, language);
   return template === "modern_minimal"
     ? renderModern(model, prepared)
     : renderClassic(model, prepared);
-};
+});
 
-export const renderDocumentPdf = (
+export const renderDocumentPdf = Effect.fn("renderDocumentPdf")(function* (
   model: DocumentRenderModel,
   template: PdfTemplate,
   language: Locale,
-) =>
-  Effect.gen(function* () {
-    const engine = yield* PdfEngine;
-    return yield* engine.htmlToPdf(renderDocumentHtml(model, template, language));
-  });
+) {
+  const engine = yield* PdfEngine;
+  return yield* engine.htmlToPdf(renderDocumentHtml(model, template, language));
+});
 
-export const renderReportPdf = (model: ReportRenderModel, language: Locale) =>
-  Effect.gen(function* () {
-    const engine = yield* PdfEngine;
-    return yield* engine.htmlToPdf(renderReportHtml(model, language));
-  });
+export const renderReportPdf = Effect.fn("renderReportPdf")(function* (
+  model: ReportRenderModel,
+  language: Locale,
+) {
+  const engine = yield* PdfEngine;
+  return yield* engine.htmlToPdf(renderReportHtml(model, language));
+});

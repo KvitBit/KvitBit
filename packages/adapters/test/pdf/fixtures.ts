@@ -1,21 +1,23 @@
 /** Sample render models matching the approved mockups (screens 23 and 24). */
-import type {
+
+import {
   CurrencyCode,
-  DocumentKind,
+  type DocumentKind,
   IsoDate,
-  Money,
-  TaxRegime,
-  VatBucket,
-  VatTreatment,
+  type Money,
+  type VatBucket,
+  type VatTreatment,
 } from "@kvitbit/domain";
-import { BigDecimal } from "effect";
+import * as Arr from "effect/Array";
+import * as BigDecimal from "effect/BigDecimal";
+import * as Str from "effect/String";
 import type { DocumentRenderModel, RenderLine, ReportRenderModel } from "../../src/pdf";
 
 export const bd = BigDecimal.fromStringUnsafe;
-const d = (s: string) => s as IsoDate;
+const d = IsoDate.make;
 const money = (amount: string, currency = "CZK"): Money => ({
   amount: bd(amount),
-  currency: currency as CurrencyCode,
+  currency: CurrencyCode.make(currency),
 });
 
 const line = (
@@ -54,15 +56,21 @@ const bucket = (
 });
 
 export type Variant = "invoice" | "proforma" | "ptd" | "credit" | "final";
-export const VARIANTS: ReadonlyArray<Variant> = ["invoice", "proforma", "ptd", "credit", "final"];
+export const VARIANTS = [
+  "invoice",
+  "proforma",
+  "ptd",
+  "credit",
+  "final",
+] as const satisfies ReadonlyArray<Variant>;
 
-const KIND: Record<Variant, DocumentKind> = {
+const KIND = {
   invoice: "invoice",
   proforma: "proforma",
   ptd: "payment_tax_document",
   credit: "credit_note",
   final: "invoice",
-};
+} as const satisfies Record<Variant, DocumentKind>;
 
 /** A domestic CZK document from a VAT payer (Classic Czech mockup, "Plátce CZK"). */
 export const czkModel = (variant: Variant = "invoice"): DocumentRenderModel => {
@@ -146,7 +154,7 @@ export const czkModel = (variant: Variant = "invoice"): DocumentRenderModel => {
     number,
     regime: "vat_payer",
     taxDocument: kind !== "proforma",
-    currency: "CZK" as CurrencyCode,
+    currency: CurrencyCode.make("CZK"),
     issuer: {
       name: "Ateliér Kalný s.r.o.",
       addressLines: ["Křižíkova 185/35", "186 00 Praha 8, Česká republika"],
@@ -173,7 +181,7 @@ export const czkModel = (variant: Variant = "invoice"): DocumentRenderModel => {
       iban: "CZ6508000000192000145399",
       bic: "GIBACZPX",
     },
-    variableSymbol: number.replace(/\D/g, ""),
+    variableSymbol: Str.replace(/\D/g, "")(number),
     orderNumber: "PO-2026-118",
     note: null,
     reference:
@@ -207,7 +215,7 @@ export const czkModel = (variant: Variant = "invoice"): DocumentRenderModel => {
       variant === "invoice" || variant === "proforma" || variant === "final"
         ? {
             format: "spayd",
-            payload: `SPD*1.0*ACC:CZ6508000000192000145399+GIBACZPX*AM:${totals.gross}.00*CC:CZK*X-VS:${number.replace(/\D/g, "")}`,
+            payload: `SPD*1.0*ACC:CZ6508000000192000145399+GIBACZPX*AM:${totals.gross}.00*CC:CZK*X-VS:${Str.replace(/\D/g, "")(number)}`,
           }
         : null,
     branding: { accentColor: "#1D4ED8", footerText: null, logo: null, stamp: null },
@@ -217,13 +225,13 @@ export const czkModel = (variant: Variant = "invoice"): DocumentRenderModel => {
 /** The same document from a non-VAT payer: no VAT columns, recap or DIČ. */
 export const nonVatModel = (variant: Variant = "invoice"): DocumentRenderModel => {
   const m = czkModel(variant);
-  const lines = m.lines.map((l) => ({
+  const lines = Arr.map(m.lines, (l) => ({
     ...l,
     treatment: "outside_scope" as const,
     ratePercent: bd("0"),
     total: BigDecimal.multiply(l.quantity, l.unitPrice),
   }));
-  const gross = lines.reduce((a, l) => BigDecimal.sum(a, l.total), bd("0"));
+  const gross = Arr.reduce(lines, bd("0"), (a, l) => BigDecimal.sum(a, l.total));
   return {
     ...m,
     regime: "non_vat_payer",
@@ -234,10 +242,10 @@ export const nonVatModel = (variant: Variant = "invoice"): DocumentRenderModel =
       buckets: [
         bucket("outside_scope", "0", BigDecimal.format(gross), "0", BigDecimal.format(gross)),
       ],
-      net: money(BigDecimal.format(gross)),
+      net: gross.pipe(BigDecimal.format, money),
       vat: money("0"),
       roundingAdjustment: money("0"),
-      gross: money(BigDecimal.format(gross)),
+      gross: gross.pipe(BigDecimal.format, money),
       vatCzk: null,
     },
   };
@@ -246,7 +254,7 @@ export const nonVatModel = (variant: Variant = "invoice"): DocumentRenderModel =
 /** An identified person invoicing a domestic customer: outside the scope of VAT. */
 export const identifiedPersonModel = (): DocumentRenderModel => ({
   ...nonVatModel("invoice"),
-  regime: "identified_person" as TaxRegime,
+  regime: "identified_person",
   issuer: { ...czkModel().issuer },
 });
 
@@ -255,7 +263,7 @@ export const eurModel = (variant: Variant = "invoice"): DocumentRenderModel => {
   const m = czkModel(variant);
   return {
     ...m,
-    currency: "EUR" as CurrencyCode,
+    currency: CurrencyCode.make("EUR"),
     customer: {
       name: "Nordic Craft GmbH",
       addressLines: ["Torstraße 114", "10119 Berlin, Germany"],

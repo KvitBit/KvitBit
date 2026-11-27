@@ -3,7 +3,11 @@
  * `packages/qr-code` and CBA QR Platba 1.2 recommend); the SVG is written here as one path so the
  * output is synchronous and byte-for-byte deterministic for a given payload and options.
  */
-import QRCode from "qrcode";
+
+import * as Fn from "effect/Function";
+import * as Result from "effect/Result";
+import * as Str from "effect/String";
+import { create } from "qrcode";
 
 export interface QrSvgOptions {
   /** Quiet zone in modules. Default 4 (ISO/IEC 18004). */
@@ -14,32 +18,42 @@ export interface QrSvgOptions {
   readonly title?: string;
 }
 
-const escapeXml = (s: string): string =>
-  s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+const escapeXml = (text: string): string =>
+  Fn.pipe(
+    text,
+    Str.replaceAll("&", "&amp;"),
+    Str.replaceAll("<", "&lt;"),
+    Str.replaceAll(">", "&gt;"),
+    Str.replaceAll('"', "&quot;"),
+  );
 
-export const toSvg = (payload: string, options: QrSvgOptions = {}): string => {
-  if (payload === "") throw new RangeError("QR payload must not be empty");
+const HEX_COLOR = /^#(?:[0-9a-fA-F]{3}){1,2}$/;
+
+const buildSvg = (payload: string, options: QrSvgOptions): Result.Result<string, RangeError> => {
+  if (payload === "") return Result.fail(new RangeError("QR payload must not be empty"));
   const margin = options.margin ?? 4;
   if (!Number.isInteger(margin) || margin < 0) {
-    throw new RangeError(`Invalid QR margin ${margin}: expected a non-negative integer`);
+    return Result.fail(
+      new RangeError(`Invalid QR margin ${margin}: expected a non-negative integer`),
+    );
   }
   const color = options.color ?? "#000000";
-  if (!/^#(?:[0-9a-fA-F]{3}){1,2}$/.test(color)) {
-    throw new RangeError(`Invalid QR colour ${color}: expected #RGB or #RRGGBB`);
+  if (!HEX_COLOR.test(color)) {
+    return Result.fail(new RangeError(`Invalid QR colour ${color}: expected #RGB or #RRGGBB`));
   }
-  const { modules } = QRCode.create(payload, { errorCorrectionLevel: "M" });
+  const { modules } = create(payload, { errorCorrectionLevel: "M" });
   const size = modules.size;
   const full = size + margin * 2;
   let d = "";
   for (let row = 0; row < size; row++) {
     let col = 0;
     while (col < size) {
-      if (!modules.get(row, col)) {
+      if (modules.get(row, col) === 0) {
         col++;
         continue;
       }
       const start = col;
-      while (col < size && modules.get(row, col)) col++;
+      while (col < size && modules.get(row, col) !== 0) col++;
       d += `M${start + margin} ${row + margin}h${col - start}v1h-${col - start}z`;
     }
   }
@@ -47,5 +61,11 @@ export const toSvg = (payload: string, options: QrSvgOptions = {}): string => {
     options.title === undefined
       ? ' aria-hidden="true"'
       : ` role="img" aria-label="${escapeXml(options.title)}"`;
-  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${full} ${full}" shape-rendering="crispEdges"${label}><rect width="${full}" height="${full}" fill="#FFFFFF"/><path fill="${color}" d="${d}"/></svg>`;
+  return Result.succeed(
+    `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${full} ${full}" shape-rendering="crispEdges"${label}><rect width="${full}" height="${full}" fill="#FFFFFF"/><path fill="${color}" d="${d}"/></svg>`,
+  );
 };
+
+// @effect-diagnostics-next-line missingPipeableSignature:off A single payload argument renders with default options.
+export const toSvg = (payload: string, options: QrSvgOptions = {}): string =>
+  Result.getOrThrow(buildSvg(payload, options));

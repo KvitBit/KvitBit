@@ -1,4 +1,6 @@
 import type { OutboundEmail } from "@kvitbit/domain/ports";
+import * as Arr from "effect/Array";
+import * as Exit from "effect/Exit";
 
 export const message = (overrides: Partial<OutboundEmail> = {}): OutboundEmail => ({
   to: ["jana@klient.cz"],
@@ -13,3 +15,8 @@ export const message = (overrides: Partial<OutboundEmail> = {}): OutboundEmail =
   tags: { template: "E01", "workspace id": "ws_1" },
   ...overrides,
 });
+
+export const failureTags = (exit: Exit.Exit<unknown, { readonly _tag: string }>) =>
+  Exit.isFailure(exit)
+    ? Arr.map(exit.cause.reasons, (reason) => ("error" in reason ? reason.error._tag : reason._tag))
+    : [];

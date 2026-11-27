@@ -1,5 +1,9 @@
 import { EmailSender, type OutboundEmail } from "@kvitbit/domain/ports";
-import { Effect, Layer, Ref } from "effect";
+import * as Arr from "effect/Array";
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
+import * as Ref from "effect/Ref";
 import type { EmailSenderService } from "./shared";
 
 export interface CapturedEmail {
@@ -25,8 +29,8 @@ export const makeCaptureEmailSender: Effect.Effect<CaptureEmailSender> = Effect.
   const store = yield* Ref.make<ReadonlyArray<CapturedEmail>>([]);
   const send: EmailSenderService["send"] = (message, { idempotencyKey }) =>
     Ref.modify(store, (entries) => {
-      const previous = entries.find((entry) => entry.idempotencyKey === idempotencyKey);
-      if (previous !== undefined) return [previous.providerMessageId, entries];
+      const previous = Arr.findFirst(entries, (entry) => entry.idempotencyKey === idempotencyKey);
+      if (Option.isSome(previous)) return [previous.value.providerMessageId, entries];
       const providerMessageId = `${CAPTURE_PROVIDER}-${entries.length + 1}`;
       return [providerMessageId, [...entries, { message, idempotencyKey, providerMessageId }]];
     }).pipe(Effect.map((providerMessageId) => ({ provider: CAPTURE_PROVIDER, providerMessageId })));

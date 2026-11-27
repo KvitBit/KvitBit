@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { VatTreatment } from "@kvitbit/domain";
+import * as Arr from "effect/Array";
 import { statutoryNotes, statutoryTitle } from "../../src/pdf";
 
 const notes = (
@@ -7,13 +8,16 @@ const notes = (
     treatments?: Array<VatTreatment>;
   },
 ) =>
-  statutoryNotes({
-    kind: input.kind ?? "invoice",
-    regime: input.regime ?? "vat_payer",
-    treatments: new Set(input.treatments ?? ["standard"]),
-    issuerRegisterEntry: input.issuerRegisterEntry ?? null,
-    language: input.language ?? "cs",
-  }).map((n) => `${n.code}: ${n.text}`);
+  Arr.map(
+    statutoryNotes({
+      kind: input.kind ?? "invoice",
+      regime: input.regime ?? "vat_payer",
+      treatments: new Set(input.treatments ?? ["standard"]),
+      issuerRegisterEntry: input.issuerRegisterEntry ?? null,
+      language: input.language ?? "cs",
+    }),
+    (n) => `${n.code}: ${n.text}`,
+  );
 
 describe("statutoryTitle", () => {
   test("tax document flag selects the tax wording", () => {

@@ -4,14 +4,17 @@ import {
   RESEND_PROVIDER,
   resendIdempotencyKey,
 } from "@kvitbit/adapters/email";
-import { Effect, Exit, Layer, Redacted } from "effect";
-import {
-  HttpClient,
-  HttpClientError,
-  type HttpClientRequest,
-  HttpClientResponse,
-} from "effect/http";
-import { message } from "./fixtures";
+import * as Arr from "effect/Array";
+import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
+import * as HttpClient from "effect/http/HttpClient";
+import * as HttpClientError from "effect/http/HttpClientError";
+import type * as HttpClientRequest from "effect/http/HttpClientRequest";
+import * as HttpClientResponse from "effect/http/HttpClientResponse";
+import * as Redacted from "effect/Redacted";
+import * as Schema from "effect/Schema";
+import * as Str from "effect/String";
+import { failureTags, message } from "./fixtures";
 
 interface Seen {
   readonly url: string;
@@ -19,36 +22,41 @@ interface Seen {
   readonly body: unknown;
 }
 
+const json = Schema.fromJsonString(Schema.Unknown);
+const decodeJson = Schema.decodeUnknownEffect(json);
+const encodeJson = Schema.encodeEffect(json);
+const digestKey = /^sha256-[0-9a-f]{64}$/;
+
 type Reply =
   | { readonly status: number; readonly body?: unknown }
   | { readonly transport: unknown }
   | "hang";
 
 const fakeClient = (reply: Reply, seen: Array<Seen>) =>
-  HttpClient.make((request: HttpClientRequest.HttpClientRequest, url) => {
-    const body =
-      request.body._tag === "Uint8Array"
-        ? JSON.parse(new TextDecoder().decode(request.body.body))
-        : undefined;
-    seen.push({ url: url.toString(), headers: request.headers, body });
-    if (reply === "hang") return Effect.never;
-    if ("transport" in reply) {
-      return Effect.fail(
-        new HttpClientError.HttpClientError({
+  HttpClient.make(
+    Effect.fnUntraced(function* (request: HttpClientRequest.HttpClientRequest, url: URL) {
+      const body =
+        request.body._tag === "Uint8Array"
+          ? yield* decodeJson(new TextDecoder().decode(request.body.body)).pipe(Effect.orDie)
+          : undefined;
+      seen.push({ url: url.toString(), headers: request.headers, body });
+      if (reply === "hang") return yield* Effect.never;
+      if ("transport" in reply) {
+        return yield* new HttpClientError.HttpClientError({
           reason: new HttpClientError.TransportError({ request, cause: reply.transport }),
-        }),
-      );
-    }
-    return Effect.succeed(
-      HttpClientResponse.fromWeb(
+        });
+      }
+      const encoded =
+        reply.body === undefined ? null : yield* encodeJson(reply.body).pipe(Effect.orDie);
+      return HttpClientResponse.fromWeb(
         request,
-        new Response(reply.body === undefined ? null : JSON.stringify(reply.body), {
+        new Response(encoded, {
           status: reply.status,
           headers: { "content-type": "application/json" },
         }),
-      ),
-    );
-  });
+      );
+    }),
+  );
 
 const send = (reply: Reply, key = "delivery-1") => {
   const seen: Array<Seen> = [];
@@ -60,12 +68,9 @@ const send = (reply: Reply, key = "delivery-1") => {
       timeout: "50 millis",
     });
     return yield* sender.send(message(), { idempotencyKey: key });
-  }).pipe(Effect.provide(Layer.succeed(HttpClient.HttpClient, fakeClient(reply, seen))));
-  return Effect.runPromise(Effect.exit(program)).then((exit) => ({ exit, seen }));
+  }).pipe(Effect.provideService(HttpClient.HttpClient, fakeClient(reply, seen)));
+  return Effect.runPromiseExit(program).then((exit) => ({ exit, seen }));
 };
-
-const failureTag = (exit: Exit.Exit<unknown, { readonly _tag: string }>) =>
-  Exit.isFailure(exit) ? exit.cause.reasons.map((r) => ("error" in r ? r.error._tag : r._tag)) : [];
 
 describe("ResendEmailSender", () => {
   test("posts the message with the idempotency key and returns the Resend id", async () => {
@@ -93,8 +98,8 @@ describe("ResendEmailSender", () => {
   });
 
   test("bounds long idempotency keys to a stable digest", () => {
-    const long = "k".repeat(300);
-    expect(resendIdempotencyKey(long)).toMatch(/^sha256-[0-9a-f]{64}$/);
+    const long = Str.repeat(300)("k");
+    expect(resendIdempotencyKey(long)).toMatch(digestKey);
     expect(resendIdempotencyKey(long)).toBe(resendIdempotencyKey(long));
     expect(resendIdempotencyKey(`${long}x`)).not.toBe(resendIdempotencyKey(long));
     expect(resendIdempotencyKey("abc")).toBe("abc");
@@ -114,17 +119,20 @@ describe("ResendEmailSender", () => {
     [413, "EmailRejected"],
   ])("status %i fails with %s", async (status, tag) => {
     const { exit } = await send({ status, body: { name: "error" } });
-    expect(failureTag(exit)).toEqual([tag]);
+    const tags = failureTags(exit);
+    expect(tags).toEqual([tag]);
   });
 
   test("a 2xx answer without an id is an unknown outcome", async () => {
     const { exit } = await send({ status: 200, body: { ok: true } });
-    expect(failureTag(exit)).toEqual(["EmailOutcomeUnknown"]);
+    const tags = failureTags(exit);
+    expect(tags).toEqual(["EmailOutcomeUnknown"]);
   });
 
   test("a timeout is an unknown outcome", async () => {
     const { exit } = await send("hang");
-    expect(failureTag(exit)).toEqual(["EmailOutcomeUnknown"]);
+    const tags = failureTags(exit);
+    expect(tags).toEqual(["EmailOutcomeUnknown"]);
   });
 
   test("a refused connection is not accepted", async () => {
@@ -132,14 +140,16 @@ describe("ResendEmailSender", () => {
       cause: Object.assign(new Error("connect ECONNREFUSED"), { code: "ECONNREFUSED" }),
     });
     const { exit } = await send({ transport: cause });
-    expect(failureTag(exit)).toEqual(["EmailNotAccepted"]);
+    const tags = failureTags(exit);
+    expect(tags).toEqual(["EmailNotAccepted"]);
   });
 
   test("a dropped connection after sending is an unknown outcome", async () => {
     const { exit } = await send({
       transport: Object.assign(new Error("socket hang up"), { code: "ECONNRESET" }),
     });
-    expect(failureTag(exit)).toEqual(["EmailOutcomeUnknown"]);
+    const tags = failureTags(exit);
+    expect(tags).toEqual(["EmailOutcomeUnknown"]);
   });
 
   test("failure causes never retain the request or its Authorization header", async () => {
@@ -147,8 +157,12 @@ describe("ResendEmailSender", () => {
       transport: Object.assign(new Error("reset"), { code: "ECONNRESET" }),
     });
     expect(Exit.isFailure(exit)).toBe(true);
-    const serialized = JSON.stringify(
-      Exit.isFailure(exit) ? exit.cause.reasons.map((r) => ("error" in r ? r.error : r)) : [],
+    const serialized = Effect.runSync(
+      encodeJson(
+        Exit.isFailure(exit)
+          ? Arr.map(exit.cause.reasons, (r) => ("error" in r ? r.error : r))
+          : [],
+      ),
     );
     expect(serialized).not.toContain("re_test");
     expect(serialized).toContain("ECONNRESET");

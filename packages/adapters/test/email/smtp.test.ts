@@ -5,11 +5,21 @@ import {
   type SmtpMail,
   smtpMessageId,
 } from "@kvitbit/adapters/email";
-import { Effect, Exit } from "effect";
-import { message } from "./fixtures";
+import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
+import { failureTags, message } from "./fixtures";
 
-const smtpError = (fields: Record<string, unknown>) =>
-  Object.assign(new Error(String(fields.code ?? "smtp")), fields);
+interface SmtpErrorFields {
+  readonly code: string;
+  readonly originalCode?: string;
+  readonly responseCode?: number;
+  readonly command?: string;
+  readonly timeoutType?: string;
+}
+
+const digestMessageId = /^<sha256-[0-9a-f]{64}@kvitbit\.cz>$/;
+
+const smtpError = (fields: SmtpErrorFields) => Object.assign(new Error(fields.code), fields);
 
 const run = (
   outcome: "ok" | Error,
@@ -19,21 +29,20 @@ const run = (
   const sent: Array<SmtpMail> = [];
   const sender = makeSmtpEmailSender(
     {
-      sendMail: async (mail) => {
+      sendMail: (mail) => {
         sent.push(mail);
-        if (outcome !== "ok") throw outcome;
-        return { messageId: mail.messageId, ...recipients };
+        return outcome === "ok"
+          ? Promise.resolve({ messageId: mail.messageId, ...recipients })
+          : Promise.reject(outcome);
       },
     },
     { from: "Kvitbit <noreply@kvitbit.cz>" },
   );
-  return Effect.runPromise(Effect.exit(sender.send(message(), { idempotencyKey: key }))).then(
-    (exit) => ({ exit, sent }),
-  );
+  return Effect.runPromiseExit(sender.send(message(), { idempotencyKey: key })).then((exit) => ({
+    exit,
+    sent,
+  }));
 };
-
-const failureTag = (exit: Exit.Exit<unknown, { readonly _tag: string }>) =>
-  Exit.isFailure(exit) ? exit.cause.reasons.map((r) => ("error" in r ? r.error._tag : r._tag)) : [];
 
 describe("SmtpEmailSender", () => {
   test("sends the mapped mail and uses the idempotency key as Message-ID", async () => {
@@ -59,7 +68,7 @@ describe("SmtpEmailSender", () => {
   });
 
   test("Message-ID is stable per key and hashes keys it cannot carry", () => {
-    expect(smtpMessageId("a b<c>", "kvitbit.cz")).toMatch(/^<sha256-[0-9a-f]{64}@kvitbit\.cz>$/);
+    expect(smtpMessageId("a b<c>", "kvitbit.cz")).toMatch(digestMessageId);
     expect(smtpMessageId("a b<c>", "kvitbit.cz")).toBe(smtpMessageId("a b<c>", "kvitbit.cz"));
     expect(smtpMessageId("d-1", "kvitbit.cz")).toBe("<d-1@kvitbit.cz>");
   });
@@ -112,7 +121,8 @@ describe("SmtpEmailSender", () => {
     ["unrecognised failure", { code: "EWHATEVER" }, "EmailOutcomeUnknown"],
   ])("%s fails with the right error", async (_name, fields, tag) => {
     const { exit } = await run(smtpError(fields));
-    expect(failureTag(exit)).toEqual([tag]);
+    const tags = failureTags(exit);
+    expect(tags).toEqual([tag]);
   });
 
   test("a partial recipient refusal still succeeds: some recipients have the message", async () => {
@@ -125,6 +135,7 @@ describe("SmtpEmailSender", () => {
 
   test("a resolution with every recipient refused is a rejection", async () => {
     const { exit } = await run("ok", "delivery-1", { accepted: [], rejected: ["jana@klient.cz"] });
-    expect(failureTag(exit)).toEqual(["EmailRejected"]);
+    const tags = failureTags(exit);
+    expect(tags).toEqual(["EmailRejected"]);
   });
 });

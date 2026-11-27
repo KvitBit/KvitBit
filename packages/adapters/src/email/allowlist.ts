@@ -1,5 +1,7 @@
 import { EmailSender, type OutboundEmail } from "@kvitbit/domain/ports";
-import { Effect } from "effect";
+import * as Arr from "effect/Array";
+import * as Effect from "effect/Effect";
+import * as Str from "effect/String";
 import { type EmailSenderService, recipientDomain } from "./shared";
 
 export interface AllowlistConfig {
@@ -18,36 +20,40 @@ export interface AllowlistConfig {
  *   promoted to `to` when no `to` is allowed), and `capture` gets it addressed to the rest.
  * The result is the `inner` result whenever `inner` sent, else the capture result.
  */
-export const makeAllowlistEmailSender = (
+// @effect-diagnostics-next-line missingPipeableSignature:off Keep the published positional adapter API.
+export function makeAllowlistEmailSender(
   inner: EmailSenderService,
   config: AllowlistConfig,
-): EmailSenderService => {
-  const allowed = new Set(config.allow.map((domain) => domain.trim().toLowerCase()));
+): EmailSenderService {
+  const allowed = new Set<string>(
+    Arr.map(config.allow, (domain) => Str.toLowerCase(Str.trim(domain))),
+  );
   const isAllowed = (recipient: string) => {
     const domain = recipientDomain(recipient);
     return domain !== undefined && allowed.has(domain);
   };
   return EmailSender.of({
-    send: (message, opts) => {
-      const cc = message.cc ?? [];
-      const to = {
-        kept: message.to.filter(isAllowed),
-        held: message.to.filter((r) => !isAllowed(r)),
-      };
-      const copy = { kept: cc.filter(isAllowed), held: cc.filter((r) => !isAllowed(r)) };
-      const anyKept = to.kept.length + copy.kept.length > 0;
-      const anyHeld = to.held.length + copy.held.length > 0;
-      if (!anyKept) return config.capture.send(message, opts);
-      if (!anyHeld) return inner.send(message, opts);
-      const delivered: OutboundEmail =
-        to.kept.length > 0
-          ? { ...message, to: to.kept, cc: copy.kept }
-          : { ...message, to: copy.kept, cc: [] };
-      const held: OutboundEmail =
-        to.held.length > 0
-          ? { ...message, to: to.held, cc: copy.held }
-          : { ...message, to: copy.held, cc: [] };
-      return config.capture.send(held, opts).pipe(Effect.andThen(inner.send(delivered, opts)));
-    },
+    send: Effect.fn("AllowlistEmailSender.send")(
+      (message: OutboundEmail, opts: Parameters<EmailSenderService["send"]>[1]) => {
+        const cc = message.cc ?? [];
+        const keptTo = Arr.filter(message.to, isAllowed);
+        const heldTo = Arr.filter(message.to, (recipient) => !isAllowed(recipient));
+        const keptCc = Arr.filter(cc, isAllowed);
+        const heldCc = Arr.filter(cc, (recipient) => !isAllowed(recipient));
+        const anyKept = keptTo.length + keptCc.length > 0;
+        const anyHeld = heldTo.length + heldCc.length > 0;
+        if (!anyKept) return config.capture.send(message, opts);
+        if (!anyHeld) return inner.send(message, opts);
+        const delivered: OutboundEmail =
+          keptTo.length > 0
+            ? { ...message, to: keptTo, cc: keptCc }
+            : { ...message, to: keptCc, cc: [] };
+        const held: OutboundEmail =
+          heldTo.length > 0
+            ? { ...message, to: heldTo, cc: heldCc }
+            : { ...message, to: heldCc, cc: [] };
+        return config.capture.send(held, opts).pipe(Effect.andThen(inner.send(delivered, opts)));
+      },
+    ),
   });
-};
+}

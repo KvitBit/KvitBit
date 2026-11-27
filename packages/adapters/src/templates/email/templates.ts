@@ -3,6 +3,9 @@
  * approved mockup screen 25). Each builder maps typed input to the shared content model.
  */
 import type { DocumentKind, IsoDate, Locale, Money, Role } from "@kvitbit/domain/contract";
+import * as Arr from "effect/Array";
+import * as Fn from "effect/Function";
+import * as Str from "effect/String";
 import { formatDate, formatDays, formatDuration, formatFileSize, formatMoney } from "./format";
 import { type Block, type Brand, type EmailContent, type Inline, kvitbitBrand } from "./layout";
 
@@ -167,17 +170,24 @@ export type EmailTemplateId = EmailTemplate["id"];
 // Helpers ------------------------------------------------------------------------------------
 
 const HEX = /^#[0-9A-Fa-f]{6}$/;
+const WHITESPACE = /\s+/;
+const STARTS_WITH_LETTER = /^\p{L}/u;
+const BLANK_LINES = /\n{2,}/;
+const INDEFINITE_ARTICLE = /^an? /;
 
 /** Up to two initials from the name's words, skipping legal suffixes such as "s.r.o.". */
-export const initialsOf = (name: string): string => {
-  const words = name
-    .split(/\s+/)
-    .filter((w) => /^\p{L}/u.test(w) && !w.includes("."))
-    .slice(0, 2);
+const initialsOf = (name: string): string => {
   // Array.from splits by code point, so astral letters (𠮷) stay whole.
-  const first = (w: string): string => Array.from(w)[0] ?? "";
-  const initials = words.map((w) => first(w).toLocaleUpperCase()).join("");
-  return initials.length > 0 ? initials : (first(name.trim()) || "K").toLocaleUpperCase();
+  const first = (word: string): string | undefined => Arr.fromIterable(word)[0];
+  const uppercase = Str.toLocaleUpperCase();
+  const initials = Fn.pipe(
+    Str.split(name, WHITESPACE),
+    Arr.filter((word) => STARTS_WITH_LETTER.test(word) && !Str.includes(".")(word)),
+    Arr.take(2),
+    Arr.map((word) => uppercase(first(word) ?? "")),
+    Arr.join(""),
+  );
+  return initials.length > 0 ? initials : uppercase(first(Str.trim(name)) ?? "K");
 };
 
 const workspaceBrand = (ws: EmailWorkspace): Brand => {
@@ -193,7 +203,7 @@ const workspaceBrand = (ws: EmailWorkspace): Brand => {
 
 /** A caller override that is empty or whitespace counts as absent. */
 const nonBlank = (value: string | undefined): string | undefined =>
-  value === undefined || value.trim().length === 0 ? undefined : value;
+  value === undefined || Str.trim(value).length === 0 ? undefined : value;
 
 const by = <A>(locale: Locale, cs: A, en: A): A => (locale === "cs" ? cs : en);
 
@@ -207,12 +217,14 @@ const br: Inline = { br: true };
 
 /** A custom Workspace message as paragraphs separated by blank lines. */
 const messageBlocks = (message: string): ReadonlyArray<Block> =>
-  message
-    .replace(/\r\n?/g, "\n")
-    .split(/\n{2,}/)
-    .map((s) => s.trim())
-    .filter((s) => s.length > 0)
-    .map((s) => p(s));
+  Fn.pipe(
+    message,
+    Str.replace(/\r\n?/g, "\n"),
+    Str.split(BLANK_LINES),
+    Arr.map(Str.trim),
+    Arr.filter((part) => part.length > 0),
+    Arr.map((part) => p(part)),
+  );
 
 const sentBy = (locale: Locale): string =>
   by(locale, "Odesláno službou Kvitbit", "Sent by Kvitbit");
@@ -355,7 +367,7 @@ const roleLabel = (
   const r = ROLE_COPY[role];
   return locale === "cs"
     ? { name: r.cs, scope: r.csScope }
-    : { name: r.en.replace(/^an? /, ""), scope: r.enScope };
+    : { name: Str.replace(INDEFINITE_ARTICLE, "")(r.en), scope: r.enScope };
 };
 
 // Builders -----------------------------------------------------------------------------------
@@ -513,8 +525,8 @@ const e03 = (t: E03PasswordReset, locale: Locale): EmailContent => {
 
 const e04 = (t: E04Invitation, locale: Locale): EmailContent => {
   const role = roleLabel(t.role, locale);
-  const article = ROLE_COPY[t.role].en.split(" ")[0] ?? "a";
-  const days = formatDays(t.validForDays, locale);
+  const [article] = Str.split(ROLE_COPY[t.role].en, " ");
+  const days = formatDays(locale)(t.validForDays);
   const until = formatDate(t.expiresOn, locale);
   return {
     locale,
@@ -659,8 +671,8 @@ const e06 = (t: E06OverdueReminder, locale: Locale): EmailContent => {
   const amount = formatMoney(t.amountDue, locale);
   const overdue = by(
     locale,
-    `${formatDays(t.daysOverdue, locale)} po splatnosti`,
-    `${formatDays(t.daysOverdue, locale)} overdue`,
+    `${formatDays(locale)(t.daysOverdue)} po splatnosti`,
+    `${formatDays(locale)(t.daysOverdue)} overdue`,
   );
   const due = formatDate(t.dueDate, locale);
   const defaultMessage: Block = by(
@@ -848,23 +860,25 @@ const e08 = (t: E08NeedsAttention, locale: Locale): EmailContent => {
   };
 };
 
-export const emailContent = (template: EmailTemplate, locale: Locale): EmailContent => {
-  switch (template.id) {
-    case "E01":
-      return e01(template, locale);
-    case "E02":
-      return e02(template, locale);
-    case "E03":
-      return e03(template, locale);
-    case "E04":
-      return e04(template, locale);
-    case "E05":
-      return e05(template, locale);
-    case "E06":
-      return e06(template, locale);
-    case "E07":
-      return e07(template, locale);
-    case "E08":
-      return e08(template, locale);
-  }
-};
+export const emailContent =
+  (locale: Locale) =>
+  (template: EmailTemplate): EmailContent => {
+    switch (template.id) {
+      case "E01":
+        return e01(template, locale);
+      case "E02":
+        return e02(template, locale);
+      case "E03":
+        return e03(template, locale);
+      case "E04":
+        return e04(template, locale);
+      case "E05":
+        return e05(template, locale);
+      case "E06":
+        return e06(template, locale);
+      case "E07":
+        return e07(template, locale);
+      case "E08":
+        return e08(template, locale);
+    }
+  };

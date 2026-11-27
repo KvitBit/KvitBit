@@ -4,7 +4,12 @@ import {
   EmailSender,
   type OutboundEmail,
 } from "@kvitbit/domain/ports";
-import { Clock, Duration, Effect, Exit, Semaphore } from "effect";
+import * as Arr from "effect/Array";
+import * as Clock from "effect/Clock";
+import * as Duration from "effect/Duration";
+import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
+import * as Semaphore from "effect/Semaphore";
 import type { EmailSenderService } from "./shared";
 
 export interface FallbackOptions {
@@ -25,11 +30,11 @@ type Provider = "primary" | "secondary";
  * - `delivered`: `provider` accepted it.
  * A key with no entry is held by no provider, so either may be tried.
  */
-type Holder = {
+interface Holder {
   readonly provider: Provider;
   readonly state: "unknown" | "delivered";
   readonly at: number;
-};
+}
 
 /**
  * Sends through `primary` and fails over to `secondary`, with the same idempotency key, only
@@ -46,11 +51,12 @@ type Holder = {
  * restart starts again from `primary`; durable routing needs the delivery record to store the
  * provider.
  */
-export const makeFallbackEmailSender = (
+// @effect-diagnostics-next-line missingPipeableSignature:off Keep the published positional adapter API.
+export function makeFallbackEmailSender(
   primary: EmailSenderService,
   secondary: EmailSenderService,
   options: FallbackOptions = {},
-): EmailSenderService => {
+): EmailSenderService {
   const retentionMillis = Duration.toMillis(
     Duration.fromInputUnsafe(options.deliveredRetention ?? Duration.days(7)),
   );
@@ -100,10 +106,10 @@ export const makeFallbackEmailSender = (
           Effect.sync(() => {
             const key = opts.idempotencyKey;
             if (Exit.isSuccess(exit)) return record(key, { provider, state: "delivered", at });
-            const tags = exit.cause.reasons.map((reason) =>
+            const tags = Arr.map(exit.cause.reasons, (reason) =>
               "error" in reason ? reason.error._tag : reason._tag,
             );
-            if (tags.some((tag) => mayHaveSent.has(tag))) {
+            if (Arr.some(tags, (tag) => mayHaveSent.has(tag))) {
               // An attempt that may have sent pins the key with no expiry, even over an
               // earlier delivery whose retention is running out.
               record(key, { provider, state: "unknown", at });
@@ -120,28 +126,28 @@ export const makeFallbackEmailSender = (
     new EmailOutcomeUnknown({ cause: { retryRefused: cause, earlierAttemptMayHaveSent: true } });
 
   return EmailSender.of({
-    send: (message, opts) =>
+    send: Effect.fn("FallbackEmailSender.send")((message: OutboundEmail, opts: Opts) =>
       serialized(
         opts.idempotencyKey,
         Effect.suspend(() => {
           const held = holders.get(opts.idempotencyKey);
           if (held !== undefined) {
             return attempt(held.provider, message, opts).pipe(
-              Effect.catchTag("EmailNotAccepted", (error) => Effect.fail(stillUnknown(error))),
+              Effect.catchTag("EmailNotAccepted", (error) => error.pipe(stillUnknown, Effect.fail)),
               // Whatever made this send unknown, the caller will retry it: keep the key on its
               // provider with no expiry, replacing an expiring `delivered` entry.
-              Effect.tapError((error) =>
-                error._tag === "EmailOutcomeUnknown"
-                  ? Effect.flatMap(Clock.currentTimeMillis, (at) =>
-                      Effect.sync(() =>
-                        record(opts.idempotencyKey, {
-                          provider: held.provider,
-                          state: "unknown",
-                          at,
-                        }),
-                      ),
-                    )
-                  : Effect.void,
+              Effect.tapErrorTag("EmailOutcomeUnknown", () =>
+                Clock.currentTimeMillis.pipe(
+                  Effect.flatMap((at) =>
+                    Effect.sync(() =>
+                      record(opts.idempotencyKey, {
+                        provider: held.provider,
+                        state: "unknown",
+                        at,
+                      }),
+                    ),
+                  ),
+                ),
               ),
             );
           }
@@ -150,5 +156,6 @@ export const makeFallbackEmailSender = (
           );
         }),
       ),
+    ),
   });
-};
+}

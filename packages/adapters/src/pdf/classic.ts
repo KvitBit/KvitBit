@@ -1,4 +1,7 @@
 /** Classic Czech template (D01-D05), after the approved mockup screen 23. */
+
+import * as Arr from "effect/Array";
+import * as Fn from "effect/Function";
 import { escapeHtml as e } from "./format";
 import type { DocumentRenderModel } from "./model";
 import type { Prepared } from "./prepare";
@@ -60,24 +63,31 @@ const kv = (
 ) =>
   value === null
     ? ""
-    : `<div class="meta-kv"><span>${e(label)}</span><${opts.strong === false ? "span" : "strong"} class="${opts.mono === false ? "" : "mono"}${opts.accent ? " accent" : ""}">${e(value)}</${opts.strong === false ? "span" : "strong"}></div>`;
+    : `<div class="meta-kv"><span>${e(label)}</span><${opts.strong === false ? "span" : "strong"} class="${opts.mono === false ? "" : "mono"}${opts.accent === true ? " accent" : ""}">${e(value)}</${opts.strong === false ? "span" : "strong"}></div>`;
 
-export const renderClassic = (model: DocumentRenderModel, p: Prepared): string => {
+export const renderClassic: {
+  (p: Prepared): (model: DocumentRenderModel) => string;
+  (model: DocumentRenderModel, p: Prepared): string;
+} = Fn.dual(2, (model: DocumentRenderModel, p: Prepared): string => {
   const { t } = p;
-  const lineRows = p.lines
-    .map(
+  const lineRows = Arr.join(
+    Arr.map(
+      p.lines,
       (l) =>
         `<tr${l.deduction ? ' class="deduct"' : ""}><td>${e(l.description)}</td><td class="r">${e(l.quantity)}</td><td class="r">${e(l.unitPrice)}</td>${p.showVat ? `<td class="r">${e(l.vat)}</td>` : ""}<td class="r${l.negative ? " neg" : ""}"><strong>${e(l.total)}</strong></td></tr>`,
-    )
-    .join("");
+    ),
+    "",
+  );
 
   const recap = p.showRecap
-    ? `<table class="vat-tbl" data-section="vat-recap"><thead><tr><th>${e(t.vatRate)}</th><th>${e(t.vatBase)}</th><th>${e(t.vat)}</th><th>${e(t.vatGross)}</th></tr></thead><tbody>${p.recap
-        .map(
+    ? `<table class="vat-tbl" data-section="vat-recap"><thead><tr><th>${e(t.vatRate)}</th><th>${e(t.vatBase)}</th><th>${e(t.vat)}</th><th>${e(t.vatGross)}</th></tr></thead><tbody>${Arr.join(
+        Arr.map(
+          p.recap,
           (r) =>
             `<tr><td>${e(r.label)}</td><td>${e(r.base)}</td><td>${e(r.vat)}</td><td>${e(r.gross)}</td></tr>`,
-        )
-        .join("")}${
+        ),
+        "",
+      )}${
         p.recapTotal === null
           ? ""
           : `<tr class="sum"><td>${e(t.vatSum)}</td><td>${e(p.recapTotal.base)}</td><td>${e(p.recapTotal.vat)}</td><td>${e(p.recapTotal.gross)}</td></tr>`
@@ -87,14 +97,21 @@ export const renderClassic = (model: DocumentRenderModel, p: Prepared): string =
   const notes =
     p.notes.length === 0
       ? ""
-      : `<div class="stat-note" data-section="statutory">${p.notes.map((n) => `<span data-note="${e(n.code)}">${e(n.text)}</span>`).join(" ")}</div>`;
+      : `<div class="stat-note" data-section="statutory">${Arr.join(
+          Arr.map(p.notes, (n) => `<span data-note="${e(n.code)}">${e(n.text)}</span>`),
+          " ",
+        )}</div>`;
   const fx =
     p.fxNote === null ? "" : `<div class="stat-note" data-section="fx">${e(p.fxNote)}</div>`;
-  const note = model.note ? `<div class="doc-note">${e(model.note)}</div>` : "";
+  const note =
+    model.note !== null && model.note !== "" ? `<div class="doc-note">${e(model.note)}</div>` : "";
 
   const issuer = model.issuer;
   const customer = model.customer;
-  const contact = [issuer.email, issuer.phone].filter((x) => x).join(" · ");
+  const contact = Arr.join(
+    Arr.filter([issuer.email, issuer.phone], (x): x is string => x !== null && x !== ""),
+    " · ",
+  );
 
   const body = `${watermark(p.draft, t.watermark)}
 <article class="sheet tnum" data-template="classic" data-kind="${e(model.kind)}">
@@ -103,7 +120,7 @@ export const renderClassic = (model: DocumentRenderModel, p: Prepared): string =
     ${p.logo ?? `<span class="logo-box">${e(p.initials)}</span>`}
     <div>
       <div class="hd" style="font-size:14px;line-height:1.1;">${e(issuer.name)}</div>
-      ${contact ? `<div style="font-size:9px;color:#52525B;">${e(contact)}</div>` : ""}
+      ${contact !== "" ? `<div style="font-size:9px;color:#52525B;">${e(contact)}</div>` : ""}
     </div>
   </div>
   <div style="text-align:right;">
@@ -115,15 +132,21 @@ export const renderClassic = (model: DocumentRenderModel, p: Prepared): string =
   <div class="party">
     <div class="sec-k">${e(t.supplier)}</div>
     <div class="party-name">${e(issuer.name)}</div>
-    ${issuer.addressLines.map((a) => `<div>${e(a)}</div>`).join("")}
-    ${p.issuerIds ? `<div class="mono party-ids">${e(p.issuerIds)}</div>` : ""}
-    ${p.registerEntry ? `<div class="party-reg" data-note="register_entry">${e(p.registerEntry)}</div>` : ""}
+    ${Arr.join(
+      Arr.map(issuer.addressLines, (a) => `<div>${e(a)}</div>`),
+      "",
+    )}
+    ${p.issuerIds !== "" ? `<div class="mono party-ids">${e(p.issuerIds)}</div>` : ""}
+    ${p.registerEntry !== null && p.registerEntry !== "" ? `<div class="party-reg" data-note="register_entry">${e(p.registerEntry)}</div>` : ""}
   </div>
   <div class="party">
     <div class="sec-k">${e(t.customer)}</div>
     <div class="party-name">${e(customer.name)}</div>
-    ${customer.addressLines.map((a) => `<div>${e(a)}</div>`).join("")}
-    ${p.customerIds ? `<div class="mono party-ids">${e(p.customerIds)}</div>` : ""}
+    ${Arr.join(
+      Arr.map(customer.addressLines, (a) => `<div>${e(a)}</div>`),
+      "",
+    )}
+    ${p.customerIds !== "" ? `<div class="mono party-ids">${e(p.customerIds)}</div>` : ""}
   </div>
 </section>
 ${p.referenceText === null ? "" : `<div class="ref-banner" data-section="reference">${e(p.referenceText)}</div>`}
@@ -157,7 +180,14 @@ ${p.referenceText === null ? "" : `<div class="ref-banner" data-section="referen
     ${p.stamp ?? ""}
   </div>
   <div class="total-box">
-    ${p.subtotals.map((s) => `<div class="total-sub${s.tone === "deduction" ? " deduct" : ""}"><span>${e(s.label)}</span><span>${e(s.value)}</span></div>`).join("")}
+    ${Arr.join(
+      Arr.map(
+        p.subtotals,
+        (s) =>
+          `<div class="total-sub${s.tone === "deduction" ? " deduct" : ""}"><span>${e(s.label)}</span><span>${e(s.value)}</span></div>`,
+      ),
+      "",
+    )}
     <div class="total-grand"><span class="grand-lbl">${e(p.grandLabel)}</span><span class="hd grand-val" data-section="grand-total">${e(p.grand)}</span></div>
     ${p.czkEquivalent === null ? "" : `<div class="mono czk-eq" data-section="czk-equivalent">${e(p.czkEquivalent)}</div>`}
   </div>
@@ -176,4 +206,4 @@ ${p.referenceText === null ? "" : `<div class="ref-banner" data-section="referen
     tint: p.tint,
     body,
   });
-};
+});

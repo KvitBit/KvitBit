@@ -3,8 +3,13 @@
  * templates. Every string here is plain text: templates escape at interpolation.
  */
 
-import type { Locale, VatTreatment } from "@kvitbit/domain";
-import { BigDecimal } from "effect";
+import { CurrencyCode, type Locale, type VatTreatment } from "@kvitbit/domain";
+import * as Arr from "effect/Array";
+import * as BigDecimal from "effect/BigDecimal";
+import * as Base64 from "effect/encoding/Base64";
+import * as Fn from "effect/Function";
+import * as Option from "effect/Option";
+import * as Str from "effect/String";
 import { toSvg } from "../qr/svg";
 import {
   escapeHtml,
@@ -20,7 +25,7 @@ import { HORIZONTAL_LOCKUP_LIGHT_SVG } from "./lockup";
 import type { DocumentRenderModel, RenderBranding, RenderImage, RenderLine } from "./model";
 import { type PrintedNote, statutoryNotes, statutoryTitle } from "./statutory";
 
-export interface LineRow {
+interface LineRow {
   readonly description: string;
   readonly quantity: string;
   readonly unitPrice: string;
@@ -28,13 +33,6 @@ export interface LineRow {
   readonly total: string;
   readonly deduction: boolean;
   readonly negative: boolean;
-}
-
-export interface KeyValue {
-  readonly label: string;
-  readonly value: string;
-  readonly mono: boolean;
-  readonly accent?: boolean;
 }
 
 export interface Prepared {
@@ -98,37 +96,41 @@ export interface Prepared {
 }
 
 const DEFAULT_ACCENT = "#18181B";
+const ACCENT_COLOR = /^#[0-9a-fA-F]{6}$/;
+const WORD_SEPARATOR = /\s+/;
+const LEADING_LETTER = /^\p{L}/u;
+const CZK = CurrencyCode.make("CZK");
 
 /** Accent as `#RRGGBB`; anything else falls back so branding can never inject CSS. */
-export const safeAccent = (color: string): string =>
-  /^#[0-9a-fA-F]{6}$/.test(color) ? color.toUpperCase() : DEFAULT_ACCENT;
+const safeAccent = (color: string): string =>
+  ACCENT_COLOR.test(color) ? Str.toUpperCase(color) : DEFAULT_ACCENT;
 
 /** The accent mixed 7 % into white, matching the mockups' tint swatches. */
-export const tintOf = (accent: string): string => {
-  const n = Number.parseInt(accent.slice(1), 16);
-  const mix = (c: number) =>
-    Math.round(255 - (255 - c) * 0.07)
-      .toString(16)
-      .padStart(2, "0");
-  return `#${mix((n >> 16) & 255)}${mix((n >> 8) & 255)}${mix(n & 255)}`.toUpperCase();
+const tintOf = (accent: string): string => {
+  const n = Number.parseInt(Str.slice(1)(accent), 16);
+  const mix = (c: number) => Str.padStart(2, "0")(Math.round(255 - (255 - c) * 0.07).toString(16));
+  return Str.toUpperCase(`#${mix((n >> 16) & 255)}${mix((n >> 8) & 255)}${mix(n & 255)}`);
 };
 
 const IMAGE_TYPES = new Set(["image/png", "image/jpeg", "image/webp", "image/svg+xml"]);
 
 /** A data-URI `<img>`; other media types are dropped. */
-export const imageTag = (image: RenderImage | null, cls: string, alt: string): string | null => {
+const imageTag = (image: RenderImage | null, cls: string, alt: string): string | null => {
   if (image === null || !IMAGE_TYPES.has(image.mediaType)) return null;
-  const b64 = Buffer.from(image.bytes).toString("base64");
+  const b64 = Base64.encode(image.bytes);
   return `<img class="${cls}" alt="${escapeHtml(alt)}" src="data:${image.mediaType};base64,${b64}">`;
 };
 
-export const initialsOf = (name: string): string => {
-  const words = name
-    .split(/\s+/)
-    .filter((w) => /^\p{L}/u.test(w) && !w.includes("."))
-    .slice(0, 2);
-  const letters = words.map((w) => [...w][0]?.toUpperCase() ?? "").join("");
-  return letters === "" ? ([...name.trim()][0]?.toUpperCase() ?? "") : letters;
+const initialsOf = (name: string): string => {
+  const words = Arr.filter(
+    Str.split(name, WORD_SEPARATOR),
+    (w) => LEADING_LETTER.test(w) && !Str.includes(".")(w),
+  ).slice(0, 2);
+  const letters = Arr.join(
+    Arr.map(words, (w) => Str.toUpperCase(Array.from(w)[0] ?? "")),
+    "",
+  );
+  return letters === "" ? Str.toUpperCase(Array.from(Str.trim(name))[0] ?? "") : letters;
 };
 
 export interface BrandingView {
@@ -139,7 +141,10 @@ export interface BrandingView {
   readonly brandMark: string;
 }
 
-export const brandingView = (branding: RenderBranding, issuerName: string): BrandingView => {
+export const brandingView: {
+  (issuerName: string): (branding: RenderBranding) => BrandingView;
+  (branding: RenderBranding, issuerName: string): BrandingView;
+} = Fn.dual(2, (branding: RenderBranding, issuerName: string): BrandingView => {
   const accent = safeAccent(branding.accentColor);
   return {
     accent,
@@ -147,41 +152,44 @@ export const brandingView = (branding: RenderBranding, issuerName: string): Bran
     logo: imageTag(branding.logo, "logo-img", issuerName),
     initials: initialsOf(issuerName),
     // The title id is made unique so the artwork never collides with page ids.
-    brandMark: HORIZONTAL_LOCKUP_LIGHT_SVG.replace(/\s*\n\s*/g, "").replace(
-      /"title"/g,
-      '"kvitbit-lockup-title"',
+    brandMark: Fn.pipe(
+      HORIZONTAL_LOCKUP_LIGHT_SVG,
+      Str.replace(/\s*\n\s*/g, ""),
+      Str.replaceAll('"title"', '"kvitbit-lockup-title"'),
     ),
   };
-};
+});
 
-const RATED = new Set<VatTreatment>(["standard", "reduced"]);
+const isRated = (treatment: VatTreatment): treatment is "standard" | "reduced" =>
+  treatment === "standard" || treatment === "reduced";
 
 const treatmentShort = (line: RenderLine, lang: Locale, t: Labels): string =>
-  RATED.has(line.treatment)
-    ? formatPercent(line.ratePercent, lang)
-    : t.treatments[line.treatment as Exclude<VatTreatment, "standard" | "reduced">];
+  isRated(line.treatment) ? formatPercent(line.ratePercent, lang) : t.treatments[line.treatment];
 
 const sumOf = (xs: ReadonlyArray<BigDecimal.BigDecimal>): BigDecimal.BigDecimal =>
-  xs.reduce((a, b) => BigDecimal.sum(a, b), BigDecimal.fromBigInt(0n));
+  Arr.reduce(xs, BigDecimal.fromBigInt(0n), BigDecimal.sum);
 
-export const prepare = (model: DocumentRenderModel, lang: Locale): Prepared => {
+export const prepare: {
+  (lang: Locale): (model: DocumentRenderModel) => Prepared;
+  (model: DocumentRenderModel, lang: Locale): Prepared;
+} = Fn.dual(2, (model: DocumentRenderModel, lang: Locale): Prepared => {
   const t = LABELS[lang];
   const cur = model.currency;
   const money = (x: BigDecimal.BigDecimal) => formatMoney(x, cur, lang);
-  const czk = (x: BigDecimal.BigDecimal) => formatMoney(x, "CZK" as typeof cur, lang);
+  const czk = (x: BigDecimal.BigDecimal) => formatMoney(x, CZK, lang);
   const date = (d: Parameters<typeof formatDate>[0]) => formatDate(d, lang);
 
-  const deductions = model.lines.filter((l) => l.role === "deduction");
+  const deductions = Arr.filter(model.lines, (l) => l.role === "deduction");
   const final =
     model.kind === "invoice" && (model.reference?.kind === "settlement" || deductions.length > 0);
-  const treatments = new Set(model.lines.map((l) => l.treatment));
+  const treatments = new Set(Arr.map(model.lines, (l) => l.treatment));
   const showVat =
-    model.regime === "vat_payer" || [...treatments].some((tr) => tr !== "outside_scope");
+    model.regime === "vat_payer" || Arr.some([...treatments], (tr) => tr !== "outside_scope");
   const showRecap = showVat && model.taxDocument && model.totals.buckets.length > 0;
 
-  const lines: Array<LineRow> = model.lines.map((l) => ({
+  const lines: Array<LineRow> = Arr.map(model.lines, (l) => ({
     description: l.description,
-    quantity: `${formatQuantity(l.quantity, lang)}${l.unit ? ` ${l.unit}` : ""}`,
+    quantity: `${formatQuantity(l.quantity, lang)}${l.unit !== null && l.unit !== "" ? ` ${l.unit}` : ""}`,
     unitPrice: money(l.unitPrice),
     vat: treatmentShort(l, lang, t),
     total: money(l.total),
@@ -190,10 +198,8 @@ export const prepare = (model: DocumentRenderModel, lang: Locale): Prepared => {
   }));
 
   const bucketLabel = (b: (typeof model.totals.buckets)[number]) =>
-    RATED.has(b.treatment)
-      ? formatPercent(b.ratePercent, lang)
-      : t.treatmentsLong[b.treatment as Exclude<VatTreatment, "standard" | "reduced">];
-  const recap = model.totals.buckets.map((b) => ({
+    isRated(b.treatment) ? formatPercent(b.ratePercent, lang) : t.treatmentsLong[b.treatment];
+  const recap = Arr.map(model.totals.buckets, (b) => ({
     label: bucketLabel(b),
     base: money(b.base),
     vat: money(b.vat),
@@ -204,18 +210,19 @@ export const prepare = (model: DocumentRenderModel, lang: Locale): Prepared => {
       ? {
           base: money(model.totals.net.amount),
           vat: money(model.totals.vat.amount),
-          gross: money(sumOf(model.totals.buckets.map((b) => b.gross))),
+          gross: money(sumOf(Arr.map(model.totals.buckets, (b) => b.gross))),
         }
       : null;
-  const vatPerRate = model.totals.buckets
-    .filter((b) => RATED.has(b.treatment))
-    .map((b) => ({
+  const vatPerRate = Arr.map(
+    Arr.filter(model.totals.buckets, (b) => isRated(b.treatment)),
+    (b) => ({
       label: `${t.vatAt} ${formatPercent(b.ratePercent, lang)}`,
       value: money(b.vat),
-    }));
+    }),
+  );
 
   const subtotals: Array<{ label: string; value: string; tone?: "deduction" }> = [];
-  const deducted = sumOf(deductions.map((l) => l.total));
+  const deducted = sumOf(Arr.map(deductions, (l) => l.total));
   if (final && deductions.length > 0) {
     subtotals.push({
       label: t.suppliesTotal,
@@ -260,16 +267,17 @@ export const prepare = (model: DocumentRenderModel, lang: Locale): Prepared => {
     }`;
     // VAT-specific wording and CZK VAT only on VAT tax documents; others get the plain rate.
     const vatDisclosure = showVat && model.taxDocument;
-    const perBucket = model.totals.buckets
-      .filter((b) => b.vatCzk !== null)
-      .map((b) => `${bucketLabel(b)}: ${czk(b.vatCzk ?? BigDecimal.fromBigInt(0n))}`);
+    const perBucket = Arr.map(
+      Arr.filter(model.totals.buckets, (b) => b.vatCzk !== null),
+      (b) => `${bucketLabel(b)}: ${czk(b.vatCzk ?? BigDecimal.fromBigInt(0n))}`,
+    );
     const totalVatCzk = model.totals.vatCzk === null ? null : czk(model.totals.vatCzk.amount);
     const parts = [...perBucket];
     if (totalVatCzk !== null && perBucket.length !== 1) {
       parts.push(perBucket.length === 0 ? totalVatCzk : `${t.vatSum} ${totalVatCzk}`);
     }
     const vatLine =
-      !vatDisclosure || parts.length === 0 ? "" : ` ${t.vatInCzk}: ${parts.join("; ")}.`;
+      !vatDisclosure || parts.length === 0 ? "" : ` ${t.vatInCzk}: ${Arr.join(parts, "; ")}.`;
     const fixingDate =
       model.fx.source === "cnb" && model.fx.fixingDate !== null ? date(model.fx.fixingDate) : null;
     fxNote =
@@ -286,8 +294,10 @@ export const prepare = (model: DocumentRenderModel, lang: Locale): Prepared => {
       language: lang,
     });
   const registerEntry =
-    allNotes.find((n) => n.code === "register_entry")?.text ?? model.issuer.registerEntry ?? null;
-  const notes = allNotes.filter((n) => n.code !== "register_entry");
+    Option.getOrUndefined(Arr.findFirst(allNotes, (n) => n.code === "register_entry"))?.text ??
+    model.issuer.registerEntry ??
+    null;
+  const notes = Arr.filter(allNotes, (n) => n.code !== "register_entry");
 
   const ref = model.reference;
   const referenceText =
@@ -298,25 +308,29 @@ export const prepare = (model: DocumentRenderModel, lang: Locale): Prepared => {
         : ref.kind === "correction"
           ? t.refCorrection(ref.originalNumber, date(ref.originalIssuedOn), ref.reason)
           : t.refSettlement(
-              ref.proformaNumbers.join(", "),
-              ref.paymentTaxDocumentNumbers.join(", "),
+              Arr.join(ref.proformaNumbers, ", "),
+              Arr.join(ref.paymentTaxDocumentNumbers, ", "),
             );
 
   const bank = model.bankAccount;
   const ibanBic =
-    bank?.iban == null
+    bank === null || bank.iban === null
       ? null
-      : bank.bic
+      : bank.bic !== null && bank.bic !== ""
         ? `${groupIban(bank.iban)} / ${bank.bic}`
         : groupIban(bank.iban);
 
   const ids = (p: { companyId: string | null; vatId: string | null }, sep: string) =>
-    [
-      p.companyId ? `${t.companyId}${sep}${p.companyId}` : null,
-      p.vatId ? `${t.vatId}${sep}${p.vatId}` : null,
-    ]
-      .filter((x) => x !== null)
-      .join(" · ");
+    Arr.join(
+      Arr.filter(
+        [
+          p.companyId !== null && p.companyId !== "" ? `${t.companyId}${sep}${p.companyId}` : null,
+          p.vatId !== null && p.vatId !== "" ? `${t.vatId}${sep}${p.vatId}` : null,
+        ],
+        (x) => x !== null,
+      ),
+      " · ",
+    );
 
   const qr = model.paymentQr;
   const brand = brandingView(model.branding, model.issuer.name);
@@ -376,4 +390,4 @@ export const prepare = (model: DocumentRenderModel, lang: Locale): Prepared => {
     footer: model.branding.footerText ?? t.thanks,
     brandMark: brand.brandMark,
   };
-};
+});
