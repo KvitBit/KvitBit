@@ -3,11 +3,18 @@
  * (`/.well-known/oauth-authorization-server` and `/.well-known/oauth-authorization-server/api/auth`,
  * per http-mcp-contracts section 1 & 6.2 and board agreement #889).
  */
-import { ByteSize, Effect, Layer } from "effect";
+import { ByteSize, Effect, Layer, Schema } from "effect";
 import { HttpIncomingMessage, HttpRouter, HttpServerResponse } from "effect/http";
 import { HttpServerRequest } from "effect/http/HttpServerRequest";
+import { SqlClient } from "effect/sql";
 import { HttpConfig } from "../http/config";
 import { JSON_BODY_MAX_BYTES } from "../http/edge/middleware";
+import {
+  canSubmitFeedback,
+  type FeedbackConfig,
+  FeedbackSessionUser,
+  feedbackSessionCookie,
+} from "../http/feedback/access";
 import { AuthServer } from "./AuthServer";
 
 const METHODS_WITHOUT_BODY = new Set(["GET", "HEAD"]);
@@ -36,11 +43,23 @@ const oversized = HttpServerResponse.jsonUnsafe(
   { status: 413 },
 );
 
+const isSessionResponse = Schema.is(
+  Schema.Struct({
+    session: Schema.Record(Schema.String, Schema.Unknown),
+    user: FeedbackSessionUser,
+  }),
+);
+
 const fromWebResponse = (
   response: Response,
-): Effect.Effect<HttpServerResponse.HttpServerResponse> =>
-  Effect.promise(async () => {
-    const bytes = new Uint8Array(await response.arrayBuffer());
+  sessionRequest?: {
+    readonly hasCookie: boolean;
+    readonly feedback: FeedbackConfig | undefined;
+    readonly sql: SqlClient.SqlClient;
+  },
+) =>
+  Effect.gen(function* () {
+    const bytes = new Uint8Array(yield* Effect.promise(() => response.arrayBuffer()));
     const headers: Record<string, string | ReadonlyArray<string>> = {};
     const setCookies = response.headers.getSetCookie?.() ?? [];
     response.headers.forEach((value, key) => {
@@ -49,6 +68,22 @@ const fromWebResponse = (
     });
     if (setCookies.length > 0) {
       headers["set-cookie"] = setCookies;
+    }
+    if (sessionRequest !== undefined && response.ok) {
+      const session: unknown = yield* Effect.try(() =>
+        JSON.parse(new TextDecoder().decode(bytes)),
+      ).pipe(Effect.orElseSucceed(() => null));
+      if (isSessionResponse(session)) {
+        const feedbackEnabled =
+          sessionRequest.hasCookie &&
+          (yield* canSubmitFeedback(sessionRequest.sql, sessionRequest.feedback, session.user));
+        delete headers["content-length"];
+        headers["cache-control"] = "no-store";
+        return HttpServerResponse.jsonUnsafe(
+          { ...session, feedbackEnabled },
+          { status: response.status, headers },
+        );
+      }
     }
     return HttpServerResponse.uint8Array(bytes, {
       status: response.status,
@@ -61,13 +96,14 @@ export const AuthRoutesLive = HttpRouter.use((router) =>
   Effect.gen(function* () {
     const auth = yield* AuthServer;
     const config = yield* HttpConfig;
+    const sql = yield* SqlClient.SqlClient;
 
     const handleAuth = Effect.gen(function* () {
       const request = yield* HttpServerRequest;
       if (Number(request.headers["content-length"]) > JSON_BODY_MAX_BYTES) return oversized;
 
-      const url = new URL(request.url, config.appOrigin).toString();
-      const webReq = yield* toWebRequest(request, url).pipe(Effect.result);
+      const url = new URL(request.url, config.appOrigin);
+      const webReq = yield* toWebRequest(request, url.toString()).pipe(Effect.result);
       if (webReq._tag === "Failure") {
         const reason = webReq.failure.reason;
         return reason._tag === "RequestParseError" && reason.reason === "BodyTooLarge"
@@ -75,7 +111,16 @@ export const AuthRoutesLive = HttpRouter.use((router) =>
           : HttpServerResponse.empty({ status: 400 });
       }
       const webRes = yield* Effect.promise(() => auth.handler(webReq.success));
-      return yield* fromWebResponse(webRes);
+      return yield* fromWebResponse(
+        webRes,
+        request.method === "GET" && url.pathname === "/api/auth/get-session"
+          ? {
+              hasCookie: feedbackSessionCookie(request) !== undefined,
+              feedback: config.feedback,
+              sql,
+            }
+          : undefined,
+      );
     });
 
     const handleWellKnown = Effect.gen(function* () {

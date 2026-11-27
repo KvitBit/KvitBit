@@ -48,6 +48,8 @@ export interface KvitbitStackConfig {
   readonly trustedProxyHops: number;
   readonly shareKeyVersion: number;
   readonly androidAssetlinksSha256: string | undefined;
+  readonly feedbackGitHubRepo: string | undefined;
+  readonly feedbackOwnerEmails: string | undefined;
   readonly secrets: ReadonlyArray<KvitbitSecretBinding>;
   readonly dnsZones: ReadonlyArray<string>;
   readonly edge: KvitbitEdgeConfig | undefined;
@@ -89,6 +91,7 @@ export const defaultSecretBindings = (
     readonly enableResend?: boolean;
     readonly enableSmtp?: boolean;
     readonly enableMobileSigningKey?: boolean;
+    readonly enableFeedbackGitHubToken?: boolean;
   },
 ): ReadonlyArray<KvitbitSecretBinding> => {
   const prefix = `kvitbit-${stage}`;
@@ -140,6 +143,16 @@ export const defaultSecretBindings = (
     bindings.push({
       environmentVariable: "KVITBIT_MOBILE_UPDATES_SIGNING_KEY",
       secretId: `${prefix}-mobile-updates-signing-key`,
+      version: "latest",
+      required: false,
+      consumers: ["server"],
+    });
+  }
+
+  if (options?.enableFeedbackGitHubToken ?? false) {
+    bindings.push({
+      environmentVariable: "KVITBIT_FEEDBACK_GITHUB_TOKEN",
+      secretId: `${prefix}-feedback-github-token`,
       version: "latest",
       required: false,
       consumers: ["server"],
@@ -399,6 +412,8 @@ export const loadStackConfig: Effect.Effect<
   const androidAssetlinksSha256 = yield* optionalNonEmptyString(
     "KVITBIT_ANDROID_ASSETLINKS_SHA256",
   );
+  const feedbackGitHubRepo = yield* optionalNonEmptyString("KVITBIT_FEEDBACK_GITHUB_REPO");
+  const feedbackOwnerEmails = yield* optionalNonEmptyString("KVITBIT_FEEDBACK_OWNER_EMAILS");
   const shareKeyVersion = yield* optionalInt(
     "KVITBIT_SHARE_KEY_VERSION",
     KVITBIT_PROD_DEFAULTS.shareKeyVersion,
@@ -441,6 +456,10 @@ export const loadStackConfig: Effect.Effect<
     "KVITBIT_ENABLE_MOBILE_SIGNING_KEY_SECRET",
     false,
   );
+  const enableFeedbackGitHubToken = yield* optionalBoolean(
+    "KVITBIT_ENABLE_FEEDBACK_GITHUB_TOKEN_SECRET",
+    false,
+  );
 
   const blobsBucket = yield* Config.String("KVITBIT_BLOB_BUCKET").pipe(
     Config.withDefault(`${projectId}-blobs-${stage}`),
@@ -473,10 +492,13 @@ export const loadStackConfig: Effect.Effect<
     trustedProxyHops,
     shareKeyVersion,
     androidAssetlinksSha256,
+    feedbackGitHubRepo,
+    feedbackOwnerEmails,
     secrets: defaultSecretBindings(stage, {
       enableResend,
       enableSmtp,
       enableMobileSigningKey,
+      enableFeedbackGitHubToken,
     }),
     dnsZones,
     edge,

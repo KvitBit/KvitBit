@@ -2,7 +2,11 @@ import { describe, expect, test } from "bun:test";
 import { chmodSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { Secret } from "@alchemy.run/gcp/SecretManager";
+import * as Apply from "alchemy/Apply";
 import * as Output from "alchemy/Output";
+import * as Plan from "alchemy/Plan";
+import * as Provider from "alchemy/Provider";
 import * as Stack from "alchemy/Stack";
 import { Stage } from "alchemy/Stage";
 import * as State from "alchemy/State";
@@ -87,6 +91,8 @@ const sampleProdConfig = (overrides: Partial<KvitbitStackConfig> = {}): KvitbitS
   trustedProxyHops: 2,
   shareKeyVersion: 1,
   androidAssetlinksSha256: "AA:BB:CC",
+  feedbackGitHubRepo: undefined,
+  feedbackOwnerEmails: undefined,
   secrets: defaultSecretBindings("prod", {
     enableResend: true,
     enableSmtp: true,
@@ -198,6 +204,9 @@ describe("Kvitbit Alchemy stack config", () => {
         KVITBIT_ENABLE_RESEND_SECRET: "true",
         KVITBIT_ENABLE_SMTP_SECRET: "",
         KVITBIT_ENABLE_MOBILE_SIGNING_KEY_SECRET: "true",
+        KVITBIT_ENABLE_FEEDBACK_GITHUB_TOKEN_SECRET: " ",
+        KVITBIT_FEEDBACK_GITHUB_REPO: "",
+        KVITBIT_FEEDBACK_OWNER_EMAILS: " ",
       },
     });
     const config = await Effect.runPromise(
@@ -213,6 +222,9 @@ describe("Kvitbit Alchemy stack config", () => {
     expect(secretIds).toContain("kvitbit-prod-resend-api-key");
     expect(secretIds).toContain("kvitbit-prod-mobile-updates-signing-key");
     expect(secretIds).not.toContain("kvitbit-prod-smtp-url");
+    expect(secretIds).not.toContain("kvitbit-prod-feedback-github-token");
+    expect(config.feedbackGitHubRepo).toBeUndefined();
+    expect(config.feedbackOwnerEmails).toBeUndefined();
   });
 
   test("rejects mutable image tags, cross-region zones, and out-of-range runnerCount", async () => {
@@ -255,6 +267,7 @@ describe("Kvitbit Alchemy stack config", () => {
         KVITBIT_ENABLE_RESEND_SECRET: "OFF",
         KVITBIT_ENABLE_SMTP_SECRET: "0",
         KVITBIT_ENABLE_MOBILE_SIGNING_KEY_SECRET: "No",
+        KVITBIT_ENABLE_FEEDBACK_GITHUB_TOKEN_SECRET: "OFF",
       },
     });
     const disabledConfig = await Effect.runPromise(
@@ -264,17 +277,21 @@ describe("Kvitbit Alchemy stack config", () => {
     expect(disabledIds).not.toContain("kvitbit-prod-resend-api-key");
     expect(disabledIds).not.toContain("kvitbit-prod-smtp-url");
     expect(disabledIds).not.toContain("kvitbit-prod-mobile-updates-signing-key");
+    expect(disabledIds).not.toContain("kvitbit-prod-feedback-github-token");
 
     const invalidProvider = ConfigProvider.fromEnv({
       env: {
         KVITBIT_IMAGE_DIGEST: SAMPLE_DIGEST,
-        KVITBIT_ENABLE_RESEND_SECRET: "maybe",
+        KVITBIT_ENABLE_FEEDBACK_GITHUB_TOKEN_SECRET: "maybe",
       },
     });
     const invalidError = await Effect.runPromise(
       Effect.flip(loadStackConfig.pipe(Effect.provide(ConfigProvider.layer(invalidProvider)))),
     );
-    expect(invalidError._tag).toBe("InvalidStackConfig");
+    expect(invalidError).toMatchObject({
+      _tag: "InvalidStackConfig",
+      field: "KVITBIT_ENABLE_FEEDBACK_GITHUB_TOKEN_SECRET",
+    });
   });
 });
 
@@ -294,9 +311,14 @@ describe("Bootstrap state safety guard", () => {
       logicalId,
       fqn: logicalId,
       resourceType: "Test",
+      namespace: undefined,
+      instanceId: logicalId,
+      providerVersion: 0,
+      downstream: [],
+      bindings: [],
       props: {},
       attr: {},
-    }) as unknown as NonNullable<Parameters<typeof State.inMemoryState>[0]>[string][string][string];
+    }) satisfies State.CreatedResourceState;
 
   test("hard-fails bootstrapFoundation when state already contains non-foundation production workloads", async () => {
     const populatedStateLayer = State.inMemoryState({
@@ -317,6 +339,78 @@ describe("Bootstrap state safety guard", () => {
       stage: "prod",
       unexpectedResources: ["KvitbitRunner0", "KvitbitServer", "KvitbitVpc"],
     });
+  });
+
+  test("selected feedback secret bootstrap adds only the container to populated state", async () => {
+    const target = { stack: KVITBIT_STACK_NAME, stage: "prod" };
+    const secretId = "kvitbit-prod-feedback-github-token";
+    const fqn = `Secret-${secretId}`;
+    const existing = {
+      KvitbitImages: makeFakeResourceState("KvitbitImages"),
+      KvitbitVpc: makeFakeResourceState("KvitbitVpc"),
+      KvitbitRunner0: makeFakeResourceState("KvitbitRunner0"),
+      KvitbitServer: makeFakeResourceState("KvitbitServer"),
+    };
+    const existingOutput = { serverService: "kvitbit-prod-server", repository: "kvitbit" };
+    const state = State.inMemoryState(
+      { [target.stack]: { [target.stage]: { ...existing } } },
+      { [target.stack]: { [target.stage]: existingOutput } },
+    );
+    const providers = Provider.succeed(Secret, {
+      read: () => Effect.succeed(undefined),
+      reconcile: ({ news }) => {
+        expect(news.secretId).toBe(secretId);
+        return Effect.succeed({
+          name: `projects/kvitbit-prod/secrets/${secretId}`,
+          secretId,
+          project: "kvitbit-prod",
+          labels: {},
+          annotations: {},
+          replication: { automatic: {} },
+          expireTime: undefined,
+          createTime: undefined,
+          etag: undefined,
+          topics: [],
+          rotation: undefined,
+          versionAliases: {},
+          versionDestroyTtl: undefined,
+        });
+      },
+      delete: () => Effect.die("Unexpected secret deletion"),
+    });
+    const feedbackConfig = sampleProdConfig({
+      secrets: defaultSecretBindings("prod", { enableFeedbackGitHubToken: true }),
+    });
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const compiled = yield* Stack.Stack(
+          target.stack,
+          { state, providers },
+          declareKvitbitStack(feedbackConfig).pipe(Effect.orDie),
+        );
+        yield* Effect.gen(function* () {
+          const plan = yield* Plan.make(compiled, { include: [fqn] });
+          expect(Object.keys(plan.resources)).toEqual([fqn]);
+          expect(plan.resources[fqn]?.action).toBe("create");
+          expect(plan.deletions).toEqual({});
+          yield* Apply.apply(plan);
+
+          const store = yield* yield* State.State;
+          expect((yield* store.list(target)).toSorted()).toEqual(
+            [...Object.keys(existing), fqn].sort(),
+          );
+          expect(yield* store.get({ ...target, fqn })).toMatchObject({
+            status: "created",
+            resourceType: Secret.Type,
+            attr: { secretId },
+          });
+          for (const [fqn, row] of Object.entries(existing)) {
+            expect(yield* store.get({ ...target, fqn })).toEqual(row);
+          }
+          expect(yield* store.getOutput(target)).toEqual(existingOutput);
+        }).pipe(Effect.provideContext(compiled.services), Effect.provide(state));
+      }).pipe(Effect.provideService(Stage, target.stage), Effect.scoped),
+    );
   });
 
   test.each([
@@ -1143,6 +1237,61 @@ esac
 });
 
 describe("Cloud Run server service", () => {
+  test("wires configured feedback to Cloud Run with a server-only Secret Manager grant", async () => {
+    const provider = ConfigProvider.fromEnv({
+      env: {
+        KVITBIT_STAGE: "staging",
+        KVITBIT_GCP_PROJECT_ID: "kvitbit-staging",
+        KVITBIT_IMAGE_DIGEST: SAMPLE_DIGEST,
+        KVITBIT_ENABLE_FEEDBACK_GITHUB_TOKEN_SECRET: " YES ",
+        KVITBIT_FEEDBACK_GITHUB_REPO: " owner/feedback ",
+        KVITBIT_FEEDBACK_OWNER_EMAILS: " owner@example.com, admin@example.com ",
+      },
+    });
+    const config = await Effect.runPromise(
+      loadStackConfig.pipe(Effect.provide(ConfigProvider.layer(provider))),
+    );
+    const names = resourceNames(config);
+    const secretId = "kvitbit-staging-feedback-github-token";
+    const secret = `projects/kvitbit-staging/secrets/${secretId}`;
+    expect(secretDeclarations(config).map((entry) => entry.secretId)).toContain(secretId);
+    expect(secretAccessorGrants(config).filter((grant) => grant.secretId === secretId)).toEqual([
+      {
+        id: `SecretAccess-${secretId}-server`,
+        secretId,
+        workload: "server",
+        props: {
+          kind: "secretmanager.secret",
+          name: secret,
+          role: "roles/secretmanager.secretAccessor",
+          member: `serviceAccount:${names.serverServiceAccountId}@kvitbit-staging.iam.gserviceaccount.com`,
+        },
+      },
+    ]);
+
+    const service = serverServiceProps(config, {
+      networkName: names.networkName,
+      subnetworkName: names.subnetworkName,
+      blobsBucketName: config.blobsBucket,
+      mobileAssetsBucketName: config.mobileAssetsBucket,
+    });
+    const container = service.template?.containers?.[0];
+    const env = container && "env" in container ? container.env : undefined;
+    expect(env).toContainEqual({ name: "KVITBIT_FEEDBACK_GITHUB_REPO", value: "owner/feedback" });
+    expect(env).toContainEqual({
+      name: "KVITBIT_FEEDBACK_OWNER_EMAILS",
+      value: "owner@example.com, admin@example.com",
+    });
+    expect(env).toContainEqual({
+      name: "KVITBIT_FEEDBACK_GITHUB_TOKEN",
+      valueSource: { secretKeyRef: { secret, version: "latest" } },
+    });
+
+    const runner = buildRunnerWorkerConfig(config);
+    expect(runner.plainEnv.some((entry) => entry.name.startsWith("KVITBIT_FEEDBACK_"))).toBe(false);
+    expect(runner.secrets.map((entry) => entry.secretId)).not.toContain(secretId);
+  });
+
   test("wires Direct VPC egress, /healthz probes, cluster mode, and all shared env vars", () => {
     const config = sampleProdConfig();
     const names = resourceNames(config);
@@ -1177,6 +1326,9 @@ describe("Cloud Run server service", () => {
       mobileAssetsBucket: config.mobileAssetsBucket,
     }).map((e) => e.name);
     const secretNames = serverSecretEnv(config).map((e) => e.name);
+    expect(plainNames).not.toContain("KVITBIT_FEEDBACK_GITHUB_REPO");
+    expect(plainNames).not.toContain("KVITBIT_FEEDBACK_OWNER_EMAILS");
+    expect(secretNames).not.toContain("KVITBIT_FEEDBACK_GITHUB_TOKEN");
 
     for (const required of [
       "KVITBIT_RUNNER_MODE",

@@ -1,0 +1,235 @@
+:host {
+  color-scheme: light dark;
+  --surface: light-dark(#fffdf9, #252622);
+  --ink: light-dark(#1d251b, #f3f4ee);
+  --line: light-dark(#b8c5b2, #626a5d);
+  --accent: light-dark(#305d37, #adcf9f);
+  --on-accent: light-dark(#fff, #18341e);
+  --error: light-dark(#a32c1e, #ffb4a6);
+  --shadow: 0 6px 24px rgb(0 0 0 / 22%);
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  pointer-events: none;
+  font:
+    14px / 1.4 system-ui,
+    sans-serif;
+  color: var(--ink);
+}
+
+:host([data-mode="light"]) {
+  color-scheme: light;
+}
+:host([data-mode="dark"]) {
+  color-scheme: dark;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+:host [hidden] {
+  display: none;
+}
+
+button,
+textarea {
+  font: inherit;
+}
+
+button {
+  cursor: pointer;
+  color: var(--ink);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  padding: 6px 10px;
+  min-block-size: 36px;
+}
+
+button:hover:enabled {
+  border-color: var(--accent);
+}
+button:active:enabled {
+  background: color-mix(in srgb, var(--accent) 12%, var(--surface));
+}
+button:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.toolbar,
+.composer,
+.toast {
+  pointer-events: auto;
+  background: var(--surface);
+  color: var(--ink);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  box-shadow: var(--shadow);
+}
+
+.toolbar,
+.toast {
+  position: absolute;
+  inset-inline-end: 16px;
+  inset-block-end: calc(16px + env(safe-area-inset-bottom));
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px;
+  max-inline-size: calc(100% - 32px);
+}
+
+.toolbar {
+  flex-wrap: wrap;
+  justify-content: end;
+}
+
+.toast {
+  inset-block-end: calc(74px + env(safe-area-inset-bottom));
+  padding-inline-start: 12px;
+}
+
+.toast a {
+  color: var(--accent);
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 900px) {
+  .toolbar {
+    inset-block-end: calc(76px + env(safe-area-inset-bottom));
+  }
+  .toast {
+    inset-block-end: calc(134px + env(safe-area-inset-bottom));
+  }
+}
+
+.primary,
+#pick[aria-pressed="true"],
+.marker {
+  background: var(--accent);
+  color: var(--on-accent);
+  border-color: var(--accent);
+  font-weight: 650;
+}
+
+.primary:active:enabled,
+#pick[aria-pressed="true"]:active:enabled,
+.marker:active:enabled {
+  background: var(--accent);
+  opacity: 0.88;
+}
+
+#highlight,
+.marker {
+  position: fixed;
+}
+
+#highlight {
+  border: 2px solid var(--accent);
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+
+#highlight span {
+  display: inline-block;
+  max-inline-size: 16rem;
+  overflow: hidden;
+  margin: 2px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: var(--accent);
+  color: var(--on-accent);
+  font:
+    12px / 1.5 ui-monospace,
+    monospace;
+}
+
+.marker {
+  pointer-events: auto;
+  inline-size: 30px;
+  block-size: 30px;
+  min-block-size: 30px;
+  padding: 0;
+  border: 2px solid var(--surface);
+  border-radius: 50%;
+  box-shadow: 0 2px 6px rgb(0 0 0 / 30%);
+}
+
+.composer {
+  position: fixed;
+  inset: auto;
+  margin: 0;
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+  inline-size: min(360px, calc(100vw - 24px));
+  max-block-size: calc(100dvh - 24px);
+  overflow: auto;
+}
+
+.composer header,
+.actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.composer header {
+  justify-content: space-between;
+}
+:is(.composer header, .toast) > button {
+  min-inline-size: 36px;
+}
+.actions {
+  flex-wrap: wrap;
+}
+.actions .primary {
+  margin-inline-start: auto;
+}
+
+.composer code {
+  display: -webkit-box;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.composer label {
+  font-weight: 600;
+}
+
+.composer textarea {
+  background: var(--surface);
+  color: var(--ink);
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  padding: 8px;
+  resize: vertical;
+  inline-size: 100%;
+  min-block-size: 4rem;
+}
+
+.error {
+  color: var(--error);
+  margin: 0;
+}
+
+.picker-error {
+  flex-basis: 100%;
+  padding: 4px;
+}
+
+.announcement {
+  position: absolute;
+  inline-size: 1px;
+  block-size: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+}
