@@ -91,6 +91,29 @@ button:disabled {
   justify-content: end;
 }
 
+#pick {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+#pick kbd {
+  min-inline-size: 1.5em;
+  padding: 2px 3px;
+  border: 1px solid currentColor;
+  border-radius: 4px;
+  font:
+    600 0.75em / 1 ui-monospace,
+    monospace;
+  text-align: center;
+}
+
+@media (pointer: coarse) {
+  #pick kbd {
+    display: none;
+  }
+}
+
 .toast {
   inset-block-end: calc(74px + env(safe-area-inset-bottom));
   padding-inline-start: 12px;
