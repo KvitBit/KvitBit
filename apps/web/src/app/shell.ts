@@ -4,9 +4,12 @@ import type { Html } from "@effect/ui/html";
  * routes get the desktop sidebar with the workspace switcher, a top bar, and the mobile M3
  * navigation bar. The theme stylesheet is rendered here (app/theme.ts).
  */
-import type { WorkspaceSummary } from "@kvitbit/domain";
+import { WorkspaceSlug } from "@kvitbit/domain";
 import { ViewModels } from "@kvitbit/ui-port";
-import { Option } from "effect";
+import * as Arr from "effect/Array";
+import * as Fn from "effect/Function";
+import * as Option from "effect/Option";
+import * as Str from "effect/String";
 import { lockup, mark } from "../ui/brand";
 import { type Markup, withAttributes } from "../ui/html";
 import { type IconName, icon } from "../ui/icons";
@@ -62,8 +65,8 @@ const NAV_ICON: Readonly<Record<ViewModels.NavSection, IconName>> = {
 };
 
 const sectionHref = (section: ViewModels.NavSection, ws: string, ctx: PageContext): string =>
-  Option.match(ViewModels.sectionRoute(section, ws as WorkspaceSummary["slug"], ctx.route), {
-    onNone: () => href(defaultReportRoute(ws, Number(ctx.today.slice(0, 4)))),
+  Option.match(ViewModels.sectionRoute(section, WorkspaceSlug.make(ws), ctx.route), {
+    onNone: () => href(defaultReportRoute(ws, Number(Str.slice(0, 4)(ctx.today)))),
     onSome: href,
   });
 
@@ -75,7 +78,7 @@ const navItems = (
   platform: "web" | "mobile",
 ): ReadonlyArray<Markup<Message, RunApi>> => {
   const active = Option.getOrUndefined(ViewModels.activeSection(ctx.route, platform));
-  return sections.map((section) =>
+  return Arr.map(sections, (section) =>
     withAttributes(h.a.class(), [
       (element) => element.class("kb-nav__item"),
       (element) => element.attr("href", sectionHref(section, ws, ctx)),
@@ -116,7 +119,7 @@ const switcher = (model: Model, ctx: PageContext, h: Html.H<Message>): Markup<Me
           .attr("role", "menu")
           .on("keydown", ({ key }) => (key === "Escape" ? Message.ClosedSwitcher() : undefined))
           .children([
-            ...workspaces.map((w) =>
+            ...Arr.map(workspaces, (w) =>
               withAttributes(h.a.class(), [
                 (element) => element.class("kb-menu-item"),
                 (element) => element.attr("role", "menuitem"),
@@ -148,7 +151,7 @@ const toastRegion = (
     .class("kb-toasts")
     .attr("aria-live", "polite")
     .children(
-      model.toasts.map((t) =>
+      Arr.map(model.toasts, (t) =>
         h.div
           .key(String(t.id))
           .class(`kb-toast${t.tone === "error" ? " kb-toast--error" : ""}`)
@@ -238,7 +241,7 @@ const publicChrome = (
         .class("kb-row")
         .children([
           mark(h, 16),
-          text(ctx.locale, "rights", { year: Number(ctx.today.slice(0, 4)) }),
+          text(ctx.locale, "rights", { year: Number(Str.slice(0, 4)(ctx.today)) }),
         ]),
       h.nav
         .class("kb-row")
@@ -269,7 +272,7 @@ const workspaceChrome = (
     h.aside.class("kb-sidebar").children([
       h.div.class("kb-sidebar__brand").children([
         h.a
-          .attr("href", href({ _tag: "Dashboard", ws: ws as WorkspaceSummary["slug"] }))
+          .attr("href", href({ _tag: "Dashboard", ws: WorkspaceSlug.make(ws) }))
           .attr("aria-label", "Kvitbit")
           .children([lockup(h, "horizontal", 20)]),
       ]),
@@ -315,7 +318,7 @@ const workspaceChrome = (
       .children(navItems(h, ctx, ws, ViewModels.MOBILE_NAV, "mobile")),
   ]);
 
-export const shellView = (
+const shellViewImpl = (
   model: Model,
   ctx: PageContext,
   h: Html.H<Message>,
@@ -335,3 +338,8 @@ export const shellView = (
     toastRegion(model, h, ctx.locale),
   ]);
 };
+
+export const shellView: {
+  (ctx: PageContext, h: Html.H<Message>): (model: Model) => Markup<Message, RunApi>;
+  (model: Model, ctx: PageContext, h: Html.H<Message>): Markup<Message, RunApi>;
+} = Fn.dual(3, shellViewImpl);

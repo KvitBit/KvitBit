@@ -6,12 +6,19 @@ import type { Html } from "@effect/ui/html";
  * and CTAs to sign-up, sign-in, Android download, and `/app/` PWA.
  */
 import { ConfigView } from "@kvitbit/api-contract";
-import { Format, ViewModels } from "@kvitbit/ui-port";
-import { Schema } from "effect";
+import { Format } from "@kvitbit/ui-port";
+import * as Arr from "effect/Array";
+import * as Fn from "effect/Function";
+import * as Schema from "effect/Schema";
 import { Failure } from "../../app/api";
 import { defineApiCommand } from "../../app/commands";
 import { copy, translator } from "../../app/i18n";
-import type { MessageHandlers, PageContext, PageReturn, RouteOf } from "../../app/page";
+import {
+  type MessageHandlers,
+  type PageContext,
+  type PageReturn,
+  RouteCases,
+} from "../../app/page";
 import * as Remote from "../../app/remote";
 import { href } from "../../app/routing";
 import { lockup } from "../../ui/brand";
@@ -19,12 +26,13 @@ import { type IconName, icon } from "../../ui/icons";
 import { badge, banner, card, linkButton } from "../../ui/kit";
 import { callApi } from "./_shared";
 
-export type Route = RouteOf<"Landing">;
+export const Route = RouteCases.Landing;
+export type Route = typeof Route.Type;
 
 const ConfigRemote = Remote.remoteSchema(ConfigView);
 
 export const Model = Schema.Struct({
-  route: ViewModels.Route,
+  route: Route,
   config: ConfigRemote,
 });
 export type Model = typeof Model.Type;
@@ -113,7 +121,10 @@ const FEATURES: ReadonlyArray<{
   },
 ];
 
-const FetchConfig = defineApiCommand("PublicLandingFetchConfig", {
+const FetchConfig = defineApiCommand({
+  message: Message,
+  // biome-ignore lint/security/noSecrets: This is a statically declared UI command or message name.
+  name: "PublicLandingFetchConfig",
   args: { seq: Remote.Seq },
   execute: ({ seq }) =>
     callApi(
@@ -123,7 +134,7 @@ const FetchConfig = defineApiCommand("PublicLandingFetchConfig", {
     ),
 });
 
-export const init = (route: Route, _ctx: PageContext): PageReturn<Model, Message> => {
+const initImpl = (route: Route, _ctx: PageContext): PageReturn<Model, Message> => {
   const config = Remote.load(Remote.idle);
   const seq = Remote.seqOf(config);
   return {
@@ -132,7 +143,12 @@ export const init = (route: Route, _ctx: PageContext): PageReturn<Model, Message
   };
 };
 
-export const update = (
+export const init: {
+  (_ctx: PageContext): (route: Route) => PageReturn<Model, Message>;
+  (route: Route, _ctx: PageContext): PageReturn<Model, Message>;
+} = Fn.dual(2, initImpl);
+
+const updateImpl = (
   model: Model,
   message: Message,
   _ctx: PageContext,
@@ -146,10 +162,20 @@ export const update = (
     }),
   } satisfies MessageHandlers<Message, PageReturn<Model, Message>>);
 
-export const title = (_model: Model, ctx: PageContext): string =>
+export const update: {
+  (message: Message, _ctx: PageContext): (model: Model) => PageReturn<Model, Message>;
+  (model: Model, message: Message, _ctx: PageContext): PageReturn<Model, Message>;
+} = Fn.dual(3, updateImpl);
+
+const titleImpl = (_model: Model, ctx: PageContext): string =>
   translator(ctx.locale).t("public.landing.title");
 
-export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
+export const title: {
+  (ctx: PageContext): (_model: Model) => string;
+  (_model: Model, ctx: PageContext): string;
+} = Fn.dual(2, titleImpl);
+
+const viewImpl = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
   const t = translator(ctx.locale);
   const cfg = Remote.dataOf(model.config);
   const signUpEnabled = cfg?.features.signUp ?? true;
@@ -233,7 +259,7 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
         h.div
           .class("kb-feature-grid")
           .children(
-            FEATURES.map((f) =>
+            Arr.map(FEATURES, (f) =>
               card(h, [
                 h.div
                   .class("kb-feature-card")
@@ -270,3 +296,8 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
     ]),
   ]);
 };
+
+export const view: {
+  (ctx: PageContext, h: Html.H<Message>): (model: Model) => ReturnType<typeof viewImpl>;
+  (model: Model, ctx: PageContext, h: Html.H<Message>): ReturnType<typeof viewImpl>;
+} = Fn.dual(3, viewImpl);

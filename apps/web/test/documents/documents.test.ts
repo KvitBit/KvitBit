@@ -1,25 +1,30 @@
 import { describe, expect, test } from "bun:test";
-import { BigDecimal, Schema } from "effect";
+import * as BigDecimal from "effect/BigDecimal";
+import * as Effect from "effect/Effect";
+import * as Schema from "effect/Schema";
+
 import * as Documents from "../../src/page/documents/documents";
 import { DocumentSummaryData } from "../../src/page/documents/shared";
 import { ctxFor, renderPath, WS } from "../support";
 
-const items = Schema.decodeUnknownSync(Schema.Array(DocumentSummaryData))([
-  {
-    id: "0193a000-0000-7000-8000-000000000601",
-    kind: "invoice",
-    number: "2026-0041",
-    status: "issued",
-    locked: false,
-    settlement: "unpaid",
-    overdue: true,
-    revision: 1,
-    contact: { id: "0193a000-0000-7000-8000-000000000201", name: "Alza.cz a.s." },
-    issuedOn: "2026-10-15",
-    dueOn: "2026-10-29",
-    total: { amount: BigDecimal.fromBigInt(87120n), currency: "CZK" },
-  },
-]);
+const items = Effect.runSync(
+  Schema.decodeEffect(Schema.Array(DocumentSummaryData))([
+    {
+      id: "0193a000-0000-7000-8000-000000000601",
+      kind: "invoice",
+      number: "2026-0041",
+      status: "issued",
+      locked: false,
+      settlement: "unpaid",
+      overdue: true,
+      revision: 1,
+      contact: { id: "0193a000-0000-7000-8000-000000000201", name: "Alza.cz a.s." },
+      issuedOn: "2026-10-15",
+      dueOn: "2026-10-29",
+      total: { amount: BigDecimal.fromBigInt(87120n), currency: "CZK" },
+    },
+  ]),
+);
 
 describe("Documents list page (Screen 09)", () => {
   const route: Documents.Route = { _tag: "Documents", ws: WS, query: {} };
@@ -73,10 +78,10 @@ describe("Documents list page (Screen 09)", () => {
       ctx,
     );
     expect(appended.model.list._tag).toBe("Loaded");
-    if (appended.model.list._tag === "Loaded") {
-      expect(appended.model.list.data.items.length).toBe(2);
-      expect(appended.model.list.data.nextCursor).toBeNull();
-    }
+    if (appended.model.list._tag !== "Loaded")
+      throw new Error("Expected an appended document list");
+    expect(appended.model.list.data.items.length).toBe(2);
+    expect(appended.model.list.data.nextCursor).toBeNull();
   });
 
   test("filters emit navigation intents with updated query string", () => {
@@ -85,9 +90,8 @@ describe("Documents list page (Screen 09)", () => {
     const typed = Documents.update(model, Documents.Message.ChangedSearch({ value: "Alza" }), ctx);
     const submitted = Documents.update(typed.model, Documents.Message.SubmittedSearch(), ctx);
     expect(submitted.outMessage?._tag).toBe("Navigate");
-    if (submitted.outMessage?._tag === "Navigate") {
-      expect(submitted.outMessage.path).toContain("text=Alza");
-    }
+    if (submitted.outMessage?._tag !== "Navigate") throw new Error("Expected search navigation");
+    expect(submitted.outMessage.path).toContain("text=Alza");
 
     const overdue = Documents.update(
       model,
@@ -95,9 +99,8 @@ describe("Documents list page (Screen 09)", () => {
       ctx,
     );
     expect(overdue.outMessage?._tag).toBe("Navigate");
-    if (overdue.outMessage?._tag === "Navigate") {
-      expect(overdue.outMessage.path).toContain("overdue=true");
-    }
+    if (overdue.outMessage?._tag !== "Navigate") throw new Error("Expected overdue navigation");
+    expect(overdue.outMessage.path).toContain("overdue=true");
   });
 
   test("renders cs and en via SSR with zero-CLS skeleton table", async () => {

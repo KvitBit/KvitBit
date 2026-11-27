@@ -48,9 +48,8 @@ describe("PriceList page TEA", () => {
       ctxCs,
     ).model;
     expect(model.items._tag).toBe("Loaded");
-    if (model.items._tag === "Loaded") {
-      expect(model.items.data).toHaveLength(1);
-    }
+    if (model.items._tag !== "Loaded") throw new Error("Expected Loaded");
+    expect(model.items.data).toHaveLength(1);
   });
 
   test("create/edit validation and save flow updates list optimistically on success", () => {
@@ -93,9 +92,8 @@ describe("PriceList page TEA", () => {
     );
     expect(saved.model.editor).toBeNull();
     expect(saved.outMessage?._tag).toBe("Toast");
-    if (saved.model.items._tag === "Loaded") {
-      expect(saved.model.items.data).toHaveLength(1);
-    }
+    if (saved.model.items._tag !== "Loaded") throw new Error("Expected Loaded");
+    expect(saved.model.items.data).toHaveLength(1);
   });
 
   test("archive flow removes item when includeArchived is false", () => {
@@ -120,9 +118,8 @@ describe("PriceList page TEA", () => {
       ctx,
     );
     expect(archived.model.confirmArchive).toBeNull();
-    if (archived.model.items._tag === "Loaded") {
-      expect(archived.model.items.data).toHaveLength(0);
-    }
+    if (archived.model.items._tag !== "Loaded") throw new Error("Expected Loaded");
+    expect(archived.model.items.data).toHaveLength(0);
   });
 
   test("SSR renders price list with zero-CLS shimmer skeleton in cs and en", async () => {

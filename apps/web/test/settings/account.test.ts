@@ -1,11 +1,17 @@
-import { describe, expect, it, spyOn } from "bun:test";
+import { describe, expect, spyOn, it as test } from "bun:test";
 import type { View } from "@effect/ui";
 import { Html, HtmlServer } from "@effect/ui/html";
 import { Theme } from "@kvitbit/ui-port";
-import { Effect, Schema } from "effect";
+import * as Arr from "effect/Array";
+import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
+
 import { type PageCommand, RunApi } from "../../src/app/commands";
 import * as Account from "../../src/page/settings/account";
 import { ctxFor, DEMO_USER, DEMO_WORKSPACE, renderPath, signedIn } from "../support";
+
+const disabledRemoveButtonPattern = /<button[^>]*disabled[^>]*>Remove<\/button>/;
 
 const renderText = async (
   view: (h: Html.H<Account.Message>) => View.Content<Account.Message>,
@@ -26,16 +32,23 @@ const runCommand = (
   commands: ReadonlyArray<PageCommand<Account.Message>> | undefined,
   name: string,
 ) => {
-  const command = commands?.find((command) => command.name === `Account.${name}`);
+  const command = Option.getOrUndefined(
+    Arr.findFirst(commands ?? [], (candidate) => candidate.name === `Account.${name}`),
+  );
   if (command?._tag !== "Effect") throw new Error(`Missing Account.${name} command`);
   return Effect.runPromise(command.effect.pipe(Effect.provide(RunApi.layer)));
 };
 
-const mockFetch = (handle: (...args: Parameters<typeof fetch>) => Promise<Response>) =>
-  spyOn(globalThis, "fetch").mockImplementation(Object.assign(handle, { preconnect: () => {} }));
+const mockFetch = (handle: (...args: Parameters<typeof fetch>) => Response | Promise<Response>) =>
+  spyOn(globalThis, "fetch").mockImplementation(
+    Object.assign(
+      (...args: Parameters<typeof fetch>) => Promise.resolve().then(() => handle(...args)),
+      { preconnect: () => undefined },
+    ),
+  );
 
 describe("Account & Security page (Screen 22)", () => {
-  it("initializes and renders all 5 Account tabs in cs and en", async () => {
+  test("initializes and renders all 5 Account tabs in cs and en", async () => {
     const tabs: ReadonlyArray<Account.AccountTab> = [
       "profile",
       "appearance",
@@ -43,19 +56,24 @@ describe("Account & Security page (Screen 22)", () => {
       "sessions",
       "danger",
     ];
-    for (const tab of tabs) {
-      for (const locale of ["cs", "en"] as const) {
-        const route: Account.Route = { _tag: "Account", tab };
-        const ctx = ctxFor(route, { locale });
-        const { model } = Account.init(route, ctx);
-        const html = await renderText((h) => Account.view(model, ctx, h));
-        expect(html.length).toBeGreaterThan(200);
-        expect(Account.title(model, ctx).length).toBeGreaterThan(3);
-      }
+    const renders = await Promise.all(
+      Arr.flatMap(tabs, (tab) =>
+        Arr.map(["cs", "en"] as const, async (locale) => {
+          const route: Account.Route = { _tag: "Account", tab };
+          const ctx = ctxFor(route, { locale });
+          const { model } = Account.init(route, ctx);
+          const html = await renderText((h) => Account.view(model, ctx, h));
+          return { html, title: Account.title(model, ctx) };
+        }),
+      ),
+    );
+    for (const { html, title } of renders) {
+      expect(html.length).toBeGreaterThan(200);
+      expect(title.length).toBeGreaterThan(3);
     }
   });
 
-  it("emits Intent_.setPrefs live for all 6 theme presets, custom hex seed, style, mode, contrast and locale", () => {
+  test("emits Intent_.setPrefs live for all 6 theme presets, custom hex seed, style, mode, contrast and locale", () => {
     const route: Account.Route = { _tag: "Account", tab: "appearance" };
     const ctx = ctxFor(route, { locale: "en" });
     let { model } = Account.init(route, ctx);
@@ -129,7 +147,7 @@ describe("Account & Security page (Screen 22)", () => {
     });
   });
 
-  it("renames a passkey and validates a password change", async () => {
+  test("renames a passkey and validates a password change", async () => {
     const route: Account.Route = { _tag: "Account", tab: "security" };
     const ctx = ctxFor(route, { locale: "en" });
     let { model } = Account.init(route, ctx);
@@ -208,12 +226,12 @@ describe("Account & Security page (Screen 22)", () => {
     expect(ok.model.security.savingPassword).toBe(true);
   });
 
-  it("blocks removing the final passkey while password status is unknown or password is absent", async () => {
+  test("blocks removing the final passkey while password status is unknown or password is absent", async () => {
     const route: Account.Route = { _tag: "Account", tab: "security" };
     const ctx = ctxFor(route, { locale: "en" });
     const passkeys = [{ id: "key-1", name: null, deviceType: "singleDevice" }];
     let accounts: unknown = [];
-    const fetch = mockFetch(async (input) => {
+    const fetch = mockFetch((input) => {
       switch (new URL(String(input)).pathname) {
         case "/api/auth/list-accounts":
           return Response.json(accounts);
@@ -238,7 +256,7 @@ describe("Account & Security page (Screen 22)", () => {
       expect(model.security.hasPassword).toMatchObject({ _tag: "Loaded", data: false });
       expect(Account.update(model, ask, ctx).model.security.removingId).toBeNull();
       const rendered = await renderText((h) => Account.view(model, ctx, h));
-      expect(rendered).toMatch(/<button[^>]*disabled[^>]*>Remove<\/button>/);
+      expect(rendered).toMatch(disabledRemoveButtonPattern);
 
       accounts = [{ providerId: "credential" }];
       const retry = Account.update(model, Account.Message.ClickedRetry(), ctx);
@@ -253,7 +271,9 @@ describe("Account & Security page (Screen 22)", () => {
       const dialog = Account.update(model, ask, ctx).model;
       expect(dialog.security.removingId).toBe("key-1");
       const deletion = Account.update(dialog, confirm, ctx);
-      expect(deletion.commands?.map((command) => command.name)).toEqual(["Account.DeletePasskey"]);
+      expect(Arr.map(deletion.commands ?? [], (command) => command.name)).toEqual([
+        "Account.DeletePasskey",
+      ]);
       expect(Account.update(deletion.model, confirm, ctx).commands).toBeUndefined();
 
       const refresh = Account.update(dialog, Account.Message.ClickedRetry(), ctx);
@@ -263,46 +283,64 @@ describe("Account & Security page (Screen 22)", () => {
     }
   });
 
-  it("reloads the stored list after registering a passkey", async () => {
+  test("reloads the stored list after registering a passkey", async () => {
     const route: Account.Route = { _tag: "Account", tab: "security" };
     const ctx = ctxFor(route, { locale: "en" });
     const { model } = Account.init(route, ctx);
     const started = Account.update(model, Account.Message.ClickedAddPasskey(), ctx);
-    expect(started.commands?.map((command) => command.name)).toEqual(["Account.AddPasskey"]);
+    expect(Arr.map(started.commands ?? [], (command) => command.name)).toEqual([
+      "Account.AddPasskey",
+    ]);
     expect(
       Account.update(started.model, Account.Message.ClickedAddPasskey(), ctx).commands,
     ).toBeUndefined();
+    class AttestationFixture {
+      readonly attestationObject = Uint8Array.of(7, 8, 9).buffer;
+      readonly clientDataJSON = Uint8Array.of(10, 11, 12).buffer;
+    }
     class CredentialFixture {
       readonly id = "BAUG";
       readonly rawId = Uint8Array.of(4, 5, 6).buffer;
       readonly type = "public-key";
       readonly authenticatorAttachment = "platform";
-      readonly response = {
-        attestationObject: Uint8Array.of(7, 8, 9).buffer,
-        clientDataJSON: Uint8Array.of(10, 11, 12).buffer,
-      };
+      readonly response = new AttestationFixture();
     }
     const previousConstructor = Object.getOwnPropertyDescriptor(globalThis, "PublicKeyCredential");
+    const previousAttestation = Object.getOwnPropertyDescriptor(
+      globalThis,
+      "AuthenticatorAttestationResponse",
+    );
     const previousCredentials = Object.getOwnPropertyDescriptor(navigator, "credentials");
     Object.defineProperty(globalThis, "PublicKeyCredential", {
       configurable: true,
       value: CredentialFixture,
     });
+    Object.defineProperty(globalThis, "AuthenticatorAttestationResponse", {
+      configurable: true,
+      value: AttestationFixture,
+    });
+    let challenge: BufferSource | undefined;
     Object.defineProperty(navigator, "credentials", {
       configurable: true,
       value: {
-        create: async ({ publicKey }: CredentialCreationOptions) => {
-          expect(publicKey?.challenge).toEqual(Uint8Array.of(1, 2, 3).buffer);
-          return new CredentialFixture();
+        create: ({ publicKey }: CredentialCreationOptions) => {
+          challenge = publicKey?.challenge;
+          return Promise.resolve(new CredentialFixture());
         },
       },
     });
+    const requests: { path: string; method: string | undefined; name: string | null }[] = [];
+    let registration: Schema.Json | undefined;
+    const registrationJson = Schema.decodeEffect(Schema.fromJsonString(Schema.Json));
     const fetch = mockFetch(async (input, options) => {
       const url = new URL(String(input));
+      requests.push({
+        path: url.pathname,
+        method: options?.method,
+        name: url.searchParams.get("name"),
+      });
       switch (url.pathname) {
         case "/api/auth/passkey/generate-register-options":
-          expect(options?.method).toBe("GET");
-          expect(url.searchParams.get("name")).toBe("Passkey");
           return Response.json({
             challenge: "AQID",
             rp: { id: "localhost", name: "Kvitbit" },
@@ -310,17 +348,11 @@ describe("Account & Security page (Screen 22)", () => {
             pubKeyCredParams: [{ type: "public-key", alg: -7 }],
           });
         case "/api/auth/passkey/verify-registration":
-          expect(options?.method).toBe("POST");
-          expect(JSON.parse(String(options?.body))).toMatchObject({
-            name: "Passkey",
-            response: {
-              id: "BAUG",
-              response: { attestationObject: "BwgJ", clientDataJSON: "CgsM" },
-            },
-          });
+          registration = registrationJson(await new Request(input, options).text()).pipe(
+            Effect.runSync,
+          );
           return Response.json({ status: true });
         case "/api/auth/passkey/list-user-passkeys":
-          expect(options?.method).toBe("GET");
           return Response.json([{ id: "server-id", name: "Laptop", deviceType: "multiDevice" }]);
         default:
           throw new Error(`Unexpected account request: ${input}`);
@@ -333,6 +365,20 @@ describe("Account & Security page (Screen 22)", () => {
       expect(verified.model.security.passkeys).toEqual({ _tag: "Loading", seq: 2 });
       expect(verified.model.security.addingPasskey).toBe(false);
       const reply = await runCommand(verified.commands, "LoadPasskeys");
+      expect(requests).toEqual([
+        { path: "/api/auth/passkey/generate-register-options", method: "GET", name: "Passkey" },
+        { path: "/api/auth/passkey/verify-registration", method: "POST", name: null },
+        { path: "/api/auth/passkey/list-user-passkeys", method: "GET", name: null },
+      ]);
+      expect(challenge).toEqual(Uint8Array.of(1, 2, 3).buffer);
+      expect(registration).toMatchObject({
+        name: "Passkey",
+        response: {
+          id: "BAUG",
+          response: { attestationObject: "BwgJ", clientDataJSON: "CgsM" },
+        },
+      });
+
       const reloaded = Account.update(verified.model, reply, ctx).model;
       expect(reloaded.security.passkeys).toMatchObject({
         _tag: "Loaded",
@@ -342,13 +388,17 @@ describe("Account & Security page (Screen 22)", () => {
       fetch.mockRestore();
       if (previousCredentials === undefined) Reflect.deleteProperty(navigator, "credentials");
       else Object.defineProperty(navigator, "credentials", previousCredentials);
+      if (previousAttestation === undefined)
+        Reflect.deleteProperty(globalThis, "AuthenticatorAttestationResponse");
+      else
+        Object.defineProperty(globalThis, "AuthenticatorAttestationResponse", previousAttestation);
       if (previousConstructor === undefined)
         Reflect.deleteProperty(globalThis, "PublicKeyCredential");
       else Object.defineProperty(globalThis, "PublicKeyCredential", previousConstructor);
     }
   });
 
-  it("labels the active Better Auth session and revokes another session by token", async () => {
+  test("labels the active Better Auth session and revokes another session by token", async () => {
     const route: Account.Route = { _tag: "Account", tab: "sessions" };
     const ctx = ctxFor(route, { locale: "en" });
     const requests: Array<{ method: string | undefined; path: string; body: RequestInit["body"] }> =
@@ -369,7 +419,11 @@ describe("Account & Security page (Screen 22)", () => {
     ];
     const fetch = mockFetch(async (input, options) => {
       const path = new URL(String(input)).pathname;
-      requests.push({ method: options?.method, path, body: options?.body });
+      requests.push({
+        method: options?.method,
+        path,
+        body: options?.body === undefined ? undefined : await new Request(input, options).text(),
+      });
       switch (path) {
         case "/api/auth/get-session":
           return Response.json({ session: { id: "current-id" } });
@@ -412,7 +466,9 @@ describe("Account & Security page (Screen 22)", () => {
         {
           method: "POST",
           path: "/api/auth/revoke-session",
-          body: JSON.stringify({ token: "other-token" }),
+          body: Effect.runSync(
+            Schema.encodeEffect(Schema.fromJsonString(Schema.Unknown))({ token: "other-token" }),
+          ),
         },
       ]);
     } finally {
@@ -420,7 +476,7 @@ describe("Account & Security page (Screen 22)", () => {
     }
   });
 
-  it("blocks Account deletion while sole owner of an open workspace and requires confirm phrase", async () => {
+  test("blocks Account deletion while sole owner of an open workspace and requires confirm phrase", async () => {
     const route: Account.Route = { _tag: "Account", tab: "danger" };
     // Default signedIn session owns a 1-member workspace (jana-osvc) -> shows blocker
     const blockedCtx = ctxFor(route, { locale: "en" });
@@ -450,7 +506,7 @@ describe("Account & Security page (Screen 22)", () => {
     expect(done.outMessage).toEqual({ _tag: "SignedOut" });
   });
 
-  it("server-renders Account tabs cleanly via SSR", async () => {
+  test("server-renders Account tabs cleanly via SSR", async () => {
     const res = await renderPath("/account/appearance", { locale: "en", session: signedIn });
     expect(res.html).toContain("Graphite Atelier");
     expect(res.html).toContain("Banknote Emerald");

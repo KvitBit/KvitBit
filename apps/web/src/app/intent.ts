@@ -2,7 +2,7 @@
  * What a page asks the Shell to do (its OutMessage): navigate, toast, change viewer preferences,
  * reload the session after sign-in/out or a workspace change.
  */
-import { Schema } from "effect";
+import * as Schema from "effect/Schema";
 import { Prefs } from "./prefs";
 
 export const PendingNavigation = Schema.Union([

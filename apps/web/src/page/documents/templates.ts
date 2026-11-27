@@ -5,24 +5,35 @@ import type { Html } from "@effect/ui/html";
  * editor with cadence/issueAs/autoSend, pause/resume, Run history & failed-run attention.
  */
 import {
-  type ContactId,
-  type CurrencyCode,
+  ContactId,
+  CurrencyCode,
   DocumentId,
   type LineInput,
-  type PaymentMethod,
+  PaymentMethod,
   RecurringRunView,
   TemplateId,
   type TemplateInput,
   type VatTreatment,
   type WorkspaceId,
 } from "@kvitbit/domain";
-import { I18n, ViewModels } from "@kvitbit/ui-port";
-import { Effect, Schema } from "effect";
+import { I18n } from "@kvitbit/ui-port";
+import * as Arr from "effect/Array";
+import * as Effect from "effect/Effect";
+import * as Fn from "effect/Function";
+import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
+import * as Str from "effect/String";
+import type * as Types from "effect/Types";
 import { Failure } from "../../app/api";
 import type { PageCommand } from "../../app/commands";
 import { type Copy, copy, textOf, translator } from "../../app/i18n";
 import { Intent_ } from "../../app/intent";
-import type { MessageHandlers, PageContext, PageReturn, RouteOf } from "../../app/page";
+import {
+  type MessageHandlers,
+  type PageContext,
+  type PageReturn,
+  RouteCases,
+} from "../../app/page";
 import * as Remote from "../../app/remote";
 import { href } from "../../app/routing";
 import {
@@ -69,7 +80,8 @@ import {
   withIdempotencyKey,
 } from "./shared";
 
-export type Route = RouteOf<"Templates" | "Template">;
+export const Route = Schema.Union([RouteCases.Templates, RouteCases.Template]);
+export type Route = typeof Route.Type;
 
 const CopyTable: Copy<
   | "listTitle"
@@ -306,7 +318,7 @@ const TemplatesData = Schema.Struct({
 });
 
 export const Model = Schema.Struct({
-  route: ViewModels.Route,
+  route: Route,
   data: Remote.remoteSchema(TemplatesData),
   // Template form
   name: Schema.String,
@@ -396,25 +408,29 @@ const loadCommand = (
   seq: Remote.Seq,
 ): PageCommand<Message> =>
   apiCommand(
+    Message,
     "LoadTemplates",
     (c) =>
-      Effect.all({
-        templates: c.templates.list({ params: { workspaceId } }),
-        contacts: c.contacts.search({ params: { workspaceId }, query: { limit: 100 } }),
-        activeTemplate:
-          route._tag === "Template" && route.id !== "new"
-            ? c.templates.get({ params: { workspaceId, templateId: route.id } })
-            : Effect.succeed(null),
-        runs:
-          route._tag === "Template" && route.id !== "new"
-            ? c.templates
-                .runs({ params: { workspaceId, templateId: route.id }, query: { limit: 30 } })
-                .pipe(
-                  Effect.map((p) => p.items),
-                  Effect.catch(() => Effect.succeed([])),
-                )
-            : Effect.succeed([]),
-      }),
+      Effect.all(
+        {
+          templates: c.templates.list({ params: { workspaceId } }),
+          contacts: c.contacts.search({ params: { workspaceId }, query: { limit: 100 } }),
+          activeTemplate:
+            route._tag === "Template" && route.id !== "new"
+              ? c.templates.get({ params: { workspaceId, templateId: route.id } })
+              : Effect.succeed(null),
+          runs:
+            route._tag === "Template" && route.id !== "new"
+              ? c.templates
+                  .runs({ params: { workspaceId, templateId: route.id }, query: { limit: 30 } })
+                  .pipe(
+                    Effect.map((p) => p.items),
+                    Effect.orElseSucceed(() => []),
+                  )
+              : Effect.succeed([]),
+        },
+        { concurrency: 1 },
+      ),
     (res): Message =>
       Message.Loaded({
         seq,
@@ -438,7 +454,7 @@ const scheduleCadence = (
 };
 
 const hydrateTemplateForm = (model: Model, tpl: TemplateViewData): Model => {
-  const lines: Array<TemplateLineForm> = tpl.input.lines.map((l, idx) => ({
+  const lines: Array<TemplateLineForm> = Arr.map(tpl.input.lines, (l, idx) => ({
     key: `tl-${idx + 1}`,
     description: l.description ?? "",
     quantity: l.quantity !== undefined ? decimalToInput(l.quantity) : "1",
@@ -468,7 +484,7 @@ const hydrateTemplateForm = (model: Model, tpl: TemplateViewData): Model => {
   };
 };
 
-export const init = (route: Route, ctx: PageContext): PageReturn<Model, Message> => {
+const initImpl = (route: Route, ctx: PageContext): PageReturn<Model, Message> => {
   const today = todayPrague();
   const base: Model = {
     route,
@@ -502,35 +518,44 @@ export const init = (route: Route, ctx: PageContext): PageReturn<Model, Message>
   };
 };
 
+export const init: {
+  (ctx: PageContext): (route: Route) => PageReturn<Model, Message>;
+  (route: Route, ctx: PageContext): PageReturn<Model, Message>;
+} = Fn.dual(2, initImpl);
+
 const buildTemplateInput = (model: Model): TemplateInput | null => {
-  if (model.name.trim() === "" || model.contactId === "") return null;
+  if (Str.trim(model.name) === "" || model.contactId === "") return null;
   const lines: Array<LineInput> = [];
   for (const l of model.lines) {
-    if (l.description.trim() === "") continue;
+    if (Str.trim(l.description) === "") continue;
     const qty = parseDecimalText(l.quantity);
     const price = parseDecimalText(l.unitPrice);
     if (qty === undefined || price === undefined) continue;
-    lines.push({
-      description: l.description.trim(),
+    const entry: Types.Mutable<LineInput> = {
+      description: Str.trim(l.description),
       quantity: qty,
-      ...(l.unit.trim() === "" ? {} : { unit: l.unit.trim() }),
       unitPrice: price,
       vat: l.vat,
-    });
+    };
+    const unit = Str.trim(l.unit);
+    if (unit !== "") entry.unit = unit;
+    lines.push(entry);
   }
-  if (lines.length === 0) return null;
+  if (!Arr.isArrayNonEmpty(lines)) return null;
   const dueInt = Number.parseInt(model.dueDays, 10);
-  return {
-    name: model.name.trim(),
+  const input: Types.Mutable<TemplateInput> = {
+    name: Str.trim(model.name),
     kind: model.kind,
-    contact: model.contactId as ContactId,
-    lines: lines as [LineInput, ...Array<LineInput>],
-    currency: model.currency as CurrencyCode,
-    ...(Number.isInteger(dueInt) && dueInt >= 0 ? { due: { inDays: dueInt } } : {}),
-    paymentMethod: model.paymentMethod as PaymentMethod,
+    contact: ContactId.make(model.contactId),
+    lines,
+    currency: CurrencyCode.make(model.currency),
+    paymentMethod: PaymentMethod.make(model.paymentMethod),
     pricesIncludeVat: model.pricesIncludeVat,
-    ...(model.note.trim() === "" ? {} : { note: model.note.trim() }),
   };
+  if (Number.isInteger(dueInt) && dueInt >= 0) input.due = { inDays: dueInt };
+  const note = Str.trim(model.note);
+  if (note !== "") input.note = note;
+  return input;
 };
 
 const useTemplate = (
@@ -542,6 +567,7 @@ const useTemplate = (
   model: { ...model, busy: true, formError: null, pendingUse: { templateId, key } },
   commands: [
     apiCommand(
+      Message,
       "UseTemplate",
       (c) =>
         c.templates.use({
@@ -555,13 +581,13 @@ const useTemplate = (
   ],
 });
 
-export const update = (
+const updateImpl = (
   model: Model,
   message: Message,
   ctx: PageContext,
 ): PageReturn<Model, Message> => {
   const ws = ctx.workspace;
-  const route = model.route as Route;
+  const route = model.route;
   const loaded = Remote.dataOf(model.data);
 
   return Message.match(message, {
@@ -610,7 +636,7 @@ export const update = (
     UpdatedLine: ({ key, field, value }) => ({
       model: {
         ...model,
-        lines: model.lines.map((l) => (l.key === key ? { ...l, [field]: value } : l)),
+        lines: Arr.map(model.lines, (l) => (l.key === key ? { ...l, [field]: value } : l)),
       },
     }),
     RemovedLine: ({ key }) => ({
@@ -619,7 +645,7 @@ export const update = (
         lines:
           model.lines.length <= 1
             ? [emptyLine(model.nextLineKey)]
-            : model.lines.filter((l) => l.key !== key),
+            : Arr.filter(model.lines, (l) => l.key !== key),
         nextLineKey: model.lines.length <= 1 ? model.nextLineKey + 1 : model.nextLineKey,
       },
     }),
@@ -634,6 +660,7 @@ export const update = (
         model: { ...model, busy: true, formError: null },
         commands: [
           apiCommand(
+            Message,
             "SaveTemplate",
             (c) =>
               existing !== null
@@ -655,11 +682,10 @@ export const update = (
                 existing === null && saved !== undefined
                   ? href({ _tag: "Template", ws: route.ws, id: saved.id, tab: "template" })
                   : undefined;
-              return Message.MutationSucceeded({
-                toast: txt(ctx.locale, "toastSaved"),
-                ...(nav === undefined ? {} : { navigateTo: nav }),
-                reload: existing !== null,
-              });
+              const result = { toast: txt(ctx.locale, "toastSaved"), reload: existing !== null };
+              return Message.MutationSucceeded(
+                nav === undefined ? result : { ...result, navigateTo: nav },
+              );
             },
             (failure): Message => Message.MutationFailed({ failure }),
           ),
@@ -675,6 +701,7 @@ export const update = (
         model: { ...model, busy: true, archiveDialogOpen: false },
         commands: [
           apiCommand(
+            Message,
             "ArchiveTemplate",
             (c) => c.templates.archive({ params: { workspaceId: ws.id, templateId: existing.id } }),
             (): Message =>
@@ -717,19 +744,16 @@ export const update = (
         model: { ...model, busy: true, formError: null },
         commands: [
           apiCommand(
+            Message,
             "SaveSchedule",
-            (c) =>
-              c.templates.setSchedule({
+            (client) => {
+              const schedule = { every, startOn, issueAs: model.issueAs, autoSend: model.autoSend };
+              return client.templates.setSchedule({
                 params: { workspaceId: ws.id, templateId: existing.id },
                 headers: ifMatch(existing.revision),
-                payload: {
-                  every,
-                  startOn,
-                  ...(endOn === undefined ? {} : { endOn }),
-                  issueAs: model.issueAs,
-                  autoSend: model.autoSend,
-                },
-              }),
+                payload: endOn === undefined ? schedule : { ...schedule, endOn },
+              });
+            },
             (): Message =>
               Message.MutationSucceeded({
                 toast: txt(ctx.locale, "toastScheduleSaved"),
@@ -747,6 +771,7 @@ export const update = (
         model: { ...model, busy: true, formError: null },
         commands: [
           apiCommand(
+            Message,
             "RemoveSchedule",
             (c) =>
               c.templates.removeSchedule({
@@ -769,10 +794,11 @@ export const update = (
         model: { ...model, busy: true, formError: null },
         commands: [
           apiCommand(
+            Message,
             "ResumeSchedule",
             (c) =>
               c.templates.resume({
-                params: { workspaceId: ws.id, templateId: templateId as TemplateId },
+                params: { workspaceId: ws.id, templateId: TemplateId.make(templateId) },
               }),
             (): Message =>
               Message.MutationSucceeded({
@@ -792,8 +818,9 @@ export const update = (
         ? {
             model: { ...model, busy: true, formError: null, pendingUse: { templateId, key } },
             commands: [
-              mintRequestKeyCommand("MintTemplateUseKey", (key) =>
-                Message.GotTemplateUseKey({ key }),
+              // biome-ignore lint/security/noSecrets: This is a statically declared UI command or message name.
+              mintRequestKeyCommand("MintTemplateUseKey", (requestKey) =>
+                Message.GotTemplateUseKey({ key: requestKey }),
               ),
             ],
           }
@@ -844,19 +871,29 @@ export const update = (
   } satisfies MessageHandlers<Message, PageReturn<Model, Message>>);
 };
 
-export const title = (model: Model, ctx: PageContext): string => {
-  const route = model.route as Route;
+export const update: {
+  (message: Message, ctx: PageContext): (model: Model) => PageReturn<Model, Message>;
+  (model: Model, message: Message, ctx: PageContext): PageReturn<Model, Message>;
+} = Fn.dual(3, updateImpl);
+
+const titleImpl = (model: Model, ctx: PageContext): string => {
+  const route = model.route;
   if (route._tag === "Template") {
     return model.name || txt(ctx.locale, "newTemplate");
   }
   return txt(ctx.locale, "listTitle");
 };
 
-export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
+export const title: {
+  (ctx: PageContext): (model: Model) => string;
+  (model: Model, ctx: PageContext): string;
+} = Fn.dual(2, titleImpl);
+
+const viewImpl = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
   const { locale } = ctx;
   const t = translator(locale);
   const ws = ctx.workspace;
-  const route = model.route as Route;
+  const route = model.route;
   if (ws === null) {
     return page(h, [banner(h, { text: sharedCopy(locale, "noWorkspace"), tone: "error" })]);
   }
@@ -881,7 +918,7 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
   // --- List view (/w/:ws/templates) ---
   if (route._tag === "Templates") {
     const templates = loaded?.templates ?? [];
-    const pausedTemplates = templates.filter((tpl) => tpl.schedule?.paused === true);
+    const pausedTemplates = Arr.filter(templates, (tpl) => tpl.schedule?.paused === true);
 
     return page(h, [
       pageHeader(h, {
@@ -901,17 +938,16 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
             banner(h, {
               text: model.formError,
               tone: "error",
-              ...(model.pendingUse !== null && canRole(ws.role, "document.draft")
-                ? {
-                    action: button(h, {
+              action:
+                model.pendingUse !== null && canRole(ws.role, "document.draft")
+                  ? button(h, {
                       label: sharedCopy(locale, "retry"),
                       onClick: Message.ClickedUseTemplate({
                         templateId: model.pendingUse.templateId,
                       }),
                       small: true,
-                    }),
-                  }
-                : {}),
+                    })
+                  : undefined,
             }),
           ]),
       ...(pausedTemplates.length > 0
@@ -941,9 +977,11 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
               }),
             })
           : h.div.class("kb-templates-grid").children(
-              templates.map((tpl) => {
+              Arr.map(templates, (tpl) => {
                 const contactName =
-                  loaded.contacts.find((c) => c.id === tpl.input.contact)?.name ?? "—";
+                  Arr.findFirst(loaded.contacts, (c) => c.id === tpl.input.contact).pipe(
+                    Option.getOrUndefined,
+                  )?.name ?? "—";
                 const sched = tpl.schedule;
                 const schedBadge =
                   sched === null
@@ -1083,7 +1121,7 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
           onChange: (value) => Message.ChangedContact({ value }),
           options: [
             { value: "", label: txt(locale, "contactPlaceholder") },
-            ...(loaded?.contacts ?? []).map((c) => ({ value: c.id, label: c.name })),
+            ...Arr.map(loaded?.contacts ?? [], (c) => ({ value: c.id, label: c.name })),
           ],
         }),
         selectField(h, {
@@ -1131,7 +1169,7 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
       cardTitle(h, txt(locale, "linesTitle"), [
         button(h, { label: txt(locale, "addLine"), onClick: Message.AddedLine(), small: true }),
       ]),
-      ...model.lines.map((line) =>
+      ...Arr.map(model.lines, (line) =>
         h.div
           .key(line.key)
           .class("kb-line-row")
@@ -1366,7 +1404,11 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
 
   return page(h, [
     pageHeader(h, {
-      title: isNew ? txt(locale, "newTemplate") : model.name || txt(locale, "listTitle"),
+      title: isNew
+        ? txt(locale, "newTemplate")
+        : model.name === ""
+          ? txt(locale, "listTitle")
+          : model.name,
       actions: [
         linkButton(h, {
           label: txt(locale, "backToList"),
@@ -1402,3 +1444,8 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
       : []),
   ]);
 };
+
+export const view: {
+  (ctx: PageContext, h: Html.H<Message>): (model: Model) => ReturnType<typeof viewImpl>;
+  (model: Model, ctx: PageContext, h: Html.H<Message>): ReturnType<typeof viewImpl>;
+} = Fn.dual(3, viewImpl);

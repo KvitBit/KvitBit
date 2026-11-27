@@ -3,18 +3,23 @@
  * (myWorkspaces.listMine). `Unknown` until the first check returns, so the Shell can render a
  * skeleton instead of flashing the sign-in screen.
  */
+
 import { WorkspaceSummary } from "@kvitbit/domain";
-import { Effect, Option, Schema } from "effect";
+import * as Arr from "effect/Array";
+import * as Effect from "effect/Effect";
+import * as Fn from "effect/Function";
+import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
 import { authFetch, Failure, request, type WebServices } from "./api";
 
-export const SessionUser = Schema.Struct({
+const SessionUser = Schema.Struct({
   id: Schema.String,
   email: Schema.String,
   name: Schema.String,
   emailVerified: Schema.Boolean,
   feedbackEnabled: Schema.optionalKey(Schema.Boolean),
 });
-export type SessionUser = typeof SessionUser.Type;
+type SessionUser = typeof SessionUser.Type;
 
 export const SessionState = Schema.Union([
   Schema.TaggedStruct("Unknown", {}),
@@ -33,7 +38,7 @@ const BetterAuthSession = Schema.NullOr(
     user: Schema.Struct({
       id: Schema.String,
       email: Schema.String,
-      name: Schema.optionalKey(Schema.NullOr(Schema.String)),
+      name: Schema.String.pipe(Schema.NullOr, Schema.optionalKey),
       emailVerified: Schema.optionalKey(Schema.Boolean),
     }),
   }),
@@ -45,7 +50,7 @@ type Lookup =
   | { readonly _tag: "None" }
   | { readonly _tag: "Failed"; readonly failure: Failure };
 
-const toUser = (json: unknown): Lookup =>
+const toUser = (json: Schema.Json): Lookup =>
   Option.match(decodeSession(json).pipe(Option.flatMap(Option.fromNullishOr)), {
     onNone: (): Lookup => ({ _tag: "None" }),
     onSome: ({ feedbackEnabled, user: u }): Lookup => ({
@@ -90,10 +95,14 @@ export const fetchSession: Effect.Effect<SessionState, never, WebServices> = aut
   }),
 );
 
-export const workspaceBySlug = (
-  state: SessionState,
-  slug: string,
-): Option.Option<WorkspaceSummary> =>
+const workspaceBySlugImpl = (state: SessionState, slug: string): Option.Option<WorkspaceSummary> =>
   state._tag === "SignedIn"
-    ? Option.fromNullishOr(state.workspaces.find((w) => w.slug === slug))
+    ? Option.fromNullishOr(
+        Arr.findFirst(state.workspaces, (w) => w.slug === slug).pipe(Option.getOrUndefined),
+      )
     : Option.none();
+
+export const workspaceBySlug: {
+  (slug: string): (state: SessionState) => Option.Option<WorkspaceSummary>;
+  (state: SessionState, slug: string): Option.Option<WorkspaceSummary>;
+} = Fn.dual(2, workspaceBySlugImpl);

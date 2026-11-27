@@ -1,7 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import { ConsentResult, ConsentView, SCOPE_AREAS } from "@kvitbit/api-contract";
 import { InvitationPeek, RegistryResult, WorkspaceSummary, WorkspaceView } from "@kvitbit/domain";
-import { Schema } from "effect";
+import * as Arr from "effect/Array";
+import * as Effect from "effect/Effect";
+import * as Rec from "effect/Record";
+import * as Schema from "effect/Schema";
+import * as Str from "effect/String";
+
 import type { Failure } from "../../src/app/api";
 import { routes as publicDemoRoutes } from "../../src/demo/public";
 import { match } from "../../src/demo/router";
@@ -11,7 +16,10 @@ import * as Onboarding from "../../src/page/public/onboarding";
 import { anonymous, ctxFor, DEMO_WORKSPACE, renderPath, signedIn } from "../support";
 import { mockWire, run } from "./wire";
 
-const demoCall = (method: string, path: string, body: unknown = null): unknown => {
+const czechIbanPattern = /^CZ\d{22}$/;
+const requestKeyPattern = /^[\da-f]{8}-[\da-f]{4}-7[\da-f]{3}-[89ab][\da-f]{3}-[\da-f]{12}$/;
+
+const demoCall = (method: string, path: string, body: Schema.Json = null): unknown => {
   const hit = match(publicDemoRoutes, method, path);
   if (hit === undefined) throw new Error(`missing demo route ${method} ${path}`);
   return hit.route.respond({
@@ -41,8 +49,10 @@ describe("MCP OAuth 2.1 Consent page (Screen 05)", () => {
     const first = Consent.init(route, ctx);
     expect(first.model.consent._tag).toBe("Loading");
 
-    const consentView = Schema.decodeUnknownSync(ConsentView)(
-      demoCall("GET", "/api/v1/oauth/consents/demo-consent"),
+    const consentView = Effect.runSync(
+      Schema.decodeUnknownEffect(ConsentView)(
+        demoCall("GET", "/api/v1/oauth/consents/demo-consent"),
+      ),
     );
 
     // Stale seq=99 ignored
@@ -78,8 +88,10 @@ describe("MCP OAuth 2.1 Consent page (Screen 05)", () => {
     expect(approving.model.submitting).toBe(true);
     expect(approving.commands?.length).toBe(1);
 
-    const decision = Schema.decodeUnknownSync(ConsentResult)(
-      demoCall("POST", "/api/v1/oauth/consents/demo-consent", { _tag: "Approve" }),
+    const decision = Effect.runSync(
+      Schema.decodeUnknownEffect(ConsentResult)(
+        demoCall("POST", "/api/v1/oauth/consents/demo-consent", { _tag: "Approve" }),
+      ),
     );
     const done = Consent.update(
       approving.model,
@@ -94,8 +106,10 @@ describe("MCP OAuth 2.1 Consent page (Screen 05)", () => {
     const route: Consent.Route = { _tag: "McpConsent", consentId: "demo-accountant" };
     const ctx = ctxFor(route, { locale: "en", session: signedIn });
     const first = Consent.init(route, ctx);
-    const consentView = Schema.decodeUnknownSync(ConsentView)(
-      demoCall("GET", "/api/v1/oauth/consents/demo-accountant"),
+    const consentView = Effect.runSync(
+      Schema.decodeUnknownEffect(ConsentView)(
+        demoCall("GET", "/api/v1/oauth/consents/demo-accountant"),
+      ),
     );
     const loaded = Consent.update(
       first.model,
@@ -120,8 +134,10 @@ describe("Workspace Invitation Landing page (Screen 05)", () => {
     const first = Invitation.init(route, ctx);
     expect(first.model.peek._tag).toBe("Loading");
 
-    const peek = Schema.decodeUnknownSync(InvitationPeek)(
-      demoCall("GET", "/api/v1/invitations/demo-pending"),
+    const peek = Effect.runSync(
+      Schema.decodeUnknownEffect(InvitationPeek)(
+        demoCall("GET", "/api/v1/invitations/demo-pending"),
+      ),
     );
 
     // Stale seq ignored
@@ -143,8 +159,10 @@ describe("Workspace Invitation Landing page (Screen 05)", () => {
     // Accept triggers command and ReloadSession on completion
     const accepting = Invitation.update(loaded.model, Invitation.Message.ClickedAccept(), ctx);
     expect(accepting.model.accepting).toBe(true);
-    const ws = Schema.decodeUnknownSync(WorkspaceSummary)(
-      demoCall("POST", "/api/v1/invitations/demo-pending/accept"),
+    const ws = Effect.runSync(
+      Schema.decodeUnknownEffect(WorkspaceSummary)(
+        demoCall("POST", "/api/v1/invitations/demo-pending/accept"),
+      ),
     );
     const accepted = Invitation.update(
       accepting.model,
@@ -187,8 +205,10 @@ describe("Workspace Onboarding Wizard (Screen 07)", () => {
     expect(lookup.model.ares._tag).toBe("Loading");
     expect(lookup.commands?.length).toBe(1);
 
-    const aresRes = Schema.decodeUnknownSync(RegistryResult)(
-      demoCall("GET", "/api/v1/registry/companies/27082440"),
+    const aresRes = Effect.runSync(
+      Schema.decodeUnknownEffect(RegistryResult)(
+        demoCall("GET", "/api/v1/registry/companies/27082440"),
+      ),
     );
 
     // Stale ARES seq ignored
@@ -226,7 +246,7 @@ describe("Workspace Onboarding Wizard (Screen 07)", () => {
       Onboarding.Message.ChangedField({ field: "czechAccount", value: "2000145399/2010" }),
       ctx,
     ).model;
-    expect(m.iban.replace(/\s/g, "")).toMatch(/^CZ\d{22}$/);
+    expect(Str.replace(/\s/g, "")(m.iban)).toMatch(czechIbanPattern);
 
     // Step 3 -> Step 4 -> Step 5
     m = Onboarding.update(m, Onboarding.Message.ClickedNext(), ctx).model;
@@ -239,35 +259,41 @@ describe("Workspace Onboarding Wizard (Screen 07)", () => {
     const minting = Onboarding.update(m, submit, ctx);
     const replay = Onboarding.update(m, submit, ctx);
     expect(replay.model).toEqual(minting.model);
-    expect(replay.commands?.map((command) => command.name)).toEqual(["OnboardingRequestKeys"]);
+    expect(Arr.map(replay.commands ?? [], (command) => command.name)).toEqual([
+      // biome-ignore lint/security/noSecrets: This is a command name.
+      "OnboardingRequestKeys",
+    ]);
     expect(minting.model.createRequestKey).toBeNull();
     expect(minting.model.bankRequestKey).toBeNull();
     const creating = Onboarding.update(minting.model, await run(minting.commands?.[0]), ctx);
     expect(creating.model.submitting).toBe(true);
     expect(creating.commands?.length).toBe(1);
+    const seriesRequestKeys = creating.model.seriesRequestKeys;
+    if (seriesRequestKeys === undefined) throw new Error("Missing numbering series request keys");
     const keys = [
       creating.model.createRequestKey,
       creating.model.bankRequestKey,
-      ...Object.values(creating.model.seriesRequestKeys ?? {}),
+      ...Rec.values(seriesRequestKeys),
     ];
     expect(keys).toHaveLength(6);
     expect(new Set(keys).size).toBe(keys.length);
-    for (const key of keys)
-      expect(key).toMatch(/^[\da-f]{8}-[\da-f]{4}-7[\da-f]{3}-[89ab][\da-f]{3}-[\da-f]{12}$/);
+    for (const key of keys) expect(key).toMatch(requestKeyPattern);
 
-    const wsView = Schema.decodeUnknownSync(WorkspaceView)({
-      id: DEMO_WORKSPACE.id,
-      slug: "novak-design-s-r-o",
-      branding: {
-        pdfTemplate: "classic",
-        accentColor: "#111111",
-        footerText: null,
-        theme: null,
-        logo: null,
-        stamp: null,
-      },
-      revision: 1,
-    });
+    const wsView = Effect.runSync(
+      Schema.decodeEffect(WorkspaceView)({
+        id: DEMO_WORKSPACE.id,
+        slug: "novak-design-s-r-o",
+        branding: {
+          pdfTemplate: "classic",
+          accentColor: "#111111",
+          footerText: null,
+          theme: null,
+          logo: null,
+          stamp: null,
+        },
+        revision: 1,
+      }),
+    );
     const created = Onboarding.update(
       creating.model,
       Onboarding.Message.CompletedCreate({ seq: 1, workspace: wsView }),
@@ -302,6 +328,7 @@ describe("Workspace Onboarding Wizard (Screen 07)", () => {
     expect(cs.html).toContain("kb-onboarding");
     expect(cs.html).toContain("ARES");
 
+    // biome-ignore lint/security/noSecrets: This URL contains the wizard step number.
     const en = await renderPath("/onboarding?step=5", { locale: "en", session: signedIn });
     expect(en.html).toContain("Live miniature invoice preview");
   });
@@ -337,41 +364,35 @@ describe("Workspace Onboarding Wizard (Screen 07)", () => {
     const createKeys: Array<string | null> = [];
     const bankKeys: Array<string | null> = [];
     const seriesKeys: Record<string, string | null> = {};
+    const createBodies: Schema.Json[] = [];
+    const bankBodies: Schema.Json[] = [];
+    const seriesUpdates: Schema.Json[] = [];
+    const seriesKinds: string[] = [];
+    let issuerWrite: { revision: string | null; body: Schema.Json } | undefined;
+    const decodeBody = Schema.decodeUnknownEffect(Schema.Json);
+    const requestBody = (request: Request) =>
+      request.json().then((body) => decodeBody(body).pipe(Effect.runSync));
     const fetch = mockWire(async (request) => {
       const path = new URL(request.url).pathname;
       calls.push(`${request.method} ${path}`);
       if (path === "/api/v1/workspaces" && request.method === "POST") {
         createKeys.push(request.headers.get("idempotency-key"));
-        expect(await request.json()).toMatchObject({
-          name: "Test Workspace",
-          taxRegime: "non_vat_payer",
-          defaults: { currency: "CZK", language: "en" },
-        });
+        createBodies.push(await requestBody(request));
         if (createKeys.length === 1)
           throw new TypeError("Connection lost after workspace creation");
         return Response.json(workspace, { status: 201 });
       }
       if (path === base) return Response.json(workspace);
       if (path === `${base}/issuing-entity`) {
-        expect(request.headers.get("if-match")).toBe('"1"');
-        expect(await request.json()).toEqual({
-          name: "Manual Issuer",
-          ico: null,
-          dic: null,
-          address: { street: "Main 1", city: "Prague", postalCode: "100 00", country: "CZ" },
-          legalForm: null,
-          registerEntry: null,
-        });
+        issuerWrite = {
+          revision: request.headers.get("if-match"),
+          body: await requestBody(request),
+        };
         return Response.json({ ...workspace, revision: 2 });
       }
       if (path === `${base}/bank-accounts`) {
         bankKeys.push(request.headers.get("idempotency-key"));
-        expect(await request.json()).toEqual({
-          iban: "CZ9320100000002000145399",
-          bic: "FIOBCZPPXXX",
-          currency: "CZK",
-          isDefault: true,
-        });
+        bankBodies.push(await requestBody(request));
         return bankKeys.length === 1
           ? Response.json({ _tag: "Unavailable" }, { status: 503 })
           : Response.json({ id: "bank-created" }, { status: 201 });
@@ -380,13 +401,7 @@ describe("Workspace Onboarding Wizard (Screen 07)", () => {
         return Response.json([invoice]);
       }
       if (path === `${base}/numbering-series/${invoice.id}`) {
-        expect(await request.json()).toEqual({
-          kind: "invoice",
-          name: "Invoices",
-          pattern: "INV-YYYY-NNNN",
-          nextNumber: 42,
-          isDefault: true,
-        });
+        seriesUpdates.push(await requestBody(request));
         invoice = {
           ...invoice,
           pattern: "INV-YYYY-NNNN",
@@ -396,9 +411,13 @@ describe("Workspace Onboarding Wizard (Screen 07)", () => {
         return Response.json(invoice);
       }
       if (path === `${base}/numbering-series` && request.method === "POST") {
-        const body = (await request.json()) as { kind: string; name: string; pattern: string };
+        const body = Effect.runSync(
+          Schema.decodeUnknownEffect(
+            Schema.Struct({ kind: Schema.String, name: Schema.String, pattern: Schema.String }),
+          )(await request.json()),
+        );
         seriesKeys[body.kind] = request.headers.get("idempotency-key");
-        expect(body.kind).not.toBe("payment_tax_document");
+        seriesKinds.push(body.kind);
         return Response.json(
           { ...invoice, ...body, nextCounter: 1, nextNumber: "2026-0001" },
           { status: 201 },
@@ -492,6 +511,42 @@ describe("Workspace Onboarding Wizard (Screen 07)", () => {
         path: "/w/wire-setup",
         replace: true,
       });
+      expect(createBodies).toHaveLength(2);
+      for (const body of createBodies) {
+        expect(body).toMatchObject({
+          name: "Test Workspace",
+          taxRegime: "non_vat_payer",
+          defaults: { currency: "CZK", language: "en" },
+        });
+      }
+      expect(issuerWrite).toEqual({
+        revision: '"1"',
+        body: {
+          name: "Manual Issuer",
+          ico: null,
+          dic: null,
+          address: { street: "Main 1", city: "Prague", postalCode: "100 00", country: "CZ" },
+          legalForm: null,
+          registerEntry: null,
+        },
+      });
+      const bankBody = {
+        iban: "CZ9320100000002000145399",
+        bic: "FIOBCZPPXXX",
+        currency: "CZK",
+        isDefault: true,
+      };
+      expect(bankBodies).toEqual([bankBody, bankBody]);
+      expect(seriesUpdates).toEqual([
+        {
+          kind: "invoice",
+          name: "Invoices",
+          pattern: "INV-YYYY-NNNN",
+          nextNumber: 42,
+          isDefault: true,
+        },
+      ]);
+      expect(seriesKinds).not.toContain("payment_tax_document");
       expect(createKeys[0]).toBeTruthy();
       expect(createKeys[1]).toBe(createKeys[0]);
       expect(bankKeys[0]).toBeTruthy();

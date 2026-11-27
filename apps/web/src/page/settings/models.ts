@@ -1,5 +1,3 @@
-export { apiCommand as cmd } from "../../app/commands";
-
 /**
  * Concrete Schema models and pure helpers private to the Settings & Account page group.
  * Matches packages/core/src/modules/workspaces/model.ts wire shapes and api-contract views.
@@ -19,15 +17,17 @@ import {
   WorkspaceId,
   WorkspaceSlug,
 } from "@kvitbit/domain";
-import { Option, Schema } from "effect";
+import * as Arr from "effect/Array";
+import * as Fn from "effect/Function";
+import * as Schema from "effect/Schema";
+import * as Str from "effect/String";
 
-export const Address = Schema.Struct({
+const Address = Schema.Struct({
   street: Schema.String,
   city: Schema.String,
   postalCode: Schema.String,
   country: Schema.String,
 });
-export type Address = typeof Address.Type;
 
 export const IssuingEntity = Schema.Struct({
   name: Schema.String,
@@ -48,8 +48,7 @@ export const TaxRegimePeriod = Schema.Struct({
 });
 export type TaxRegimePeriod = typeof TaxRegimePeriod.Type;
 
-export const PaymentRounding = Schema.Literals(["none", "whole_unit"]);
-export type PaymentRounding = typeof PaymentRounding.Type;
+const PaymentRounding = Schema.Literals(["none", "whole_unit"]);
 
 export const WorkspaceDefaults = Schema.Struct({
   currency: CurrencyCode,
@@ -80,7 +79,7 @@ export const BankAccount = Schema.Struct({
 });
 export type BankAccount = typeof BankAccount.Type;
 
-export const BrandingData = Schema.Struct({
+const BrandingData = Schema.Struct({
   pdfTemplate: PdfTemplate,
   accentColor: Hex,
   footerText: Schema.NullOr(Schema.String),
@@ -88,7 +87,6 @@ export const BrandingData = Schema.Struct({
   logo: Schema.NullOr(ImageRef),
   stamp: Schema.NullOr(ImageRef),
 });
-export type BrandingData = typeof BrandingData.Type;
 
 export const WorkspaceDetail = Schema.Struct({
   id: WorkspaceId,
@@ -124,18 +122,6 @@ export const SessionItem = Schema.Struct({
 });
 export type SessionItem = typeof SessionItem.Type;
 
-const decodeDetail = Schema.decodeUnknownOption(WorkspaceDetail);
-const decodeBank = Schema.decodeUnknownOption(BankAccount);
-const decodeBankList = Schema.decodeUnknownOption(Schema.Array(BankAccount));
-
-export const parseWorkspaceDetail = (raw: unknown): Option.Option<WorkspaceDetail> =>
-  decodeDetail(raw);
-
-export const parseBankAccount = (raw: unknown): Option.Option<BankAccount> => decodeBank(raw);
-
-export const parseBankAccounts = (raw: unknown): ReadonlyArray<BankAccount> =>
-  Option.getOrElse(decodeBankList(raw), () => []);
-
 export const CURRENCY_OPTIONS: ReadonlyArray<CurrencyCode> = [
   CurrencyCode.make("CZK"),
   CurrencyCode.make("EUR"),
@@ -161,13 +147,17 @@ export const PAYMENT_METHODS: ReadonlyArray<PaymentMethod> = [
   "other",
 ];
 
+const ibanWhitespace = /\s+/g;
+const czechIban = /^CZ\d{22}$/;
+const leadingZeros = /^0+/;
+
 /** Derives a Czech domestic account number (`prefix-number/bank`) from a CZ IBAN, else null. */
 export const czechAccountFromIban = (iban: string): string | null => {
-  const clean = iban.replace(/\s+/g, "").toUpperCase();
-  if (!/^CZ\d{22}$/.test(clean)) return null;
-  const bank = clean.slice(4, 8);
-  const prefix = clean.slice(8, 14).replace(/^0+/, "");
-  const account = clean.slice(14, 24).replace(/^0+/, "") || "0";
+  const clean = Str.toUpperCase(Str.replace(ibanWhitespace, "")(iban));
+  if (!czechIban.test(clean)) return null;
+  const bank = Str.slice(4, 8)(clean);
+  const prefix = Str.replace(leadingZeros, "")(Str.slice(8, 14)(clean));
+  const account = Str.replace(leadingZeros, "")(Str.slice(14, 24)(clean)) || "0";
   return prefix === "" ? `${account}/${bank}` : `${prefix}-${account}/${bank}`;
 };
 
@@ -181,33 +171,45 @@ export interface NumberingPreview {
  * Pure live preview of a document numbering pattern (`YYYY`, `YY`, `MM`, `N…`), matching
  * @kvitbit/core's numbering grammar (word of only Y/M/N is tokens; other words are literals).
  */
-export const previewNumberingPattern = (
-  pattern: string,
-  nextCounter: number,
-  refYear = 2026,
-  refMonth = 11,
-): NumberingPreview => {
-  const trimmed = pattern.trim();
-  if (trimmed === "" || !/N+/.test(trimmed)) {
-    return { samples: [], valid: false, tooLong: false };
-  }
-  const yy = String(refYear).slice(-2);
-  const yyyy = String(refYear);
-  const mm = String(refMonth).padStart(2, "0");
-  const start = Math.max(1, Math.floor(nextCounter));
+const alphaRuns = /([A-Za-z]+)/;
+const numberingRun = /^[YMN]+$/;
+const numberingTokens = /(YYYY|YY|MM|N+)/;
+const counterToken = /N+/;
 
-  const formatOne = (counter: number): string =>
-    trimmed.replace(/[A-Za-z]+/g, (word) => {
-      if (!/^[YMN]+$/.test(word)) return word;
-      return word.replace(/YYYY|YY|MM|N+/g, (tok) => {
-        if (tok === "YYYY") return yyyy;
-        if (tok === "YY") return yy;
-        if (tok === "MM") return mm;
-        return String(counter).padStart(tok.length, "0");
-      });
-    });
+export const previewNumberingPattern: {
+  (nextCounter: number, refYear?: number, refMonth?: number): (pattern: string) => NumberingPreview;
+  (pattern: string, nextCounter: number, refYear?: number, refMonth?: number): NumberingPreview;
+} = Fn.dual(
+  (args) => Schema.is(Schema.String)(args[0]),
+  (pattern: string, nextCounter: number, refYear = 2026, refMonth = 11): NumberingPreview => {
+    const trimmed = Str.trim(pattern);
+    if (trimmed === "" || !counterToken.test(trimmed)) {
+      return { samples: [], valid: false, tooLong: false };
+    }
+    const yy = Str.slice(-2)(String(refYear));
+    const yyyy = String(refYear);
+    const mm = Str.padStart(2, "0")(String(refMonth));
+    const start = Math.max(1, Math.floor(nextCounter));
 
-  const samples = [formatOne(start), formatOne(start + 1), formatOne(start + 2)];
-  const tooLong = samples.some((s) => s.length > 20);
-  return { samples, valid: !tooLong, tooLong };
-};
+    const formatOne = (counter: number): string =>
+      Arr.join(
+        Arr.map(Str.split(trimmed, alphaRuns), (word, index) => {
+          if (index % 2 === 0 || !numberingRun.test(word)) return word;
+          return Arr.join(
+            Arr.map(Str.split(word, numberingTokens), (token, tokenIndex) => {
+              if (tokenIndex % 2 === 0) return token;
+              if (token === "YYYY") return yyyy;
+              if (token === "YY") return yy;
+              return token === "MM" ? mm : Str.padStart(token.length, "0")(String(counter));
+            }),
+            "",
+          );
+        }),
+        "",
+      );
+
+    const samples = [formatOne(start), formatOne(start + 1), formatOne(start + 2)];
+    const tooLong = Arr.some(samples, (s) => s.length > 20);
+    return { samples, valid: !tooLong, tooLong };
+  },
+);

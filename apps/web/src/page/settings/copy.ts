@@ -1,8 +1,10 @@
+import * as Fn from "effect/Function";
 /**
  * Web-only bilingual copy for Settings and Account screens (for labels not in @kvitbit/ui-port/i18n).
  * Everything that exists in the shared catalog is resolved via `translator(ctx.locale)`.
  */
 import { type Copy, copy } from "../../app/i18n";
+import type { Locale } from "../../app/prefs";
 
 const TABLE = {
   cs: {
@@ -253,5 +255,10 @@ const TABLE = {
   },
 } as const satisfies Copy<string>;
 
-export type SettingsCopyKey = keyof typeof TABLE.en;
-export const sCopy = copy(TABLE);
+type SettingsCopyKey = keyof typeof TABLE.en;
+type Params = Readonly<Record<string, string | number>>;
+
+export const sCopy: {
+  (key: SettingsCopyKey, params?: Params): (locale: Locale) => string;
+  (locale: Locale, key: SettingsCopyKey, params?: Params): string;
+} = Fn.dual((args) => args[0] === "cs" || args[0] === "en", copy(TABLE));

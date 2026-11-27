@@ -7,6 +7,9 @@ import type { Html } from "@effect/ui/html";
 import type { Scope, ScopeArea } from "@kvitbit/api-contract";
 import type { PdfTemplate } from "@kvitbit/domain";
 import { I18n, ViewModels } from "@kvitbit/ui-port";
+import * as Arr from "effect/Array";
+import * as Fn from "effect/Function";
+import * as Str from "effect/String";
 import type { Locale } from "../../app/prefs";
 import { type Markup, withAttributes } from "../../ui/html";
 import { badge, segmented } from "../../ui/kit";
@@ -29,12 +32,15 @@ export interface BrandingPreviewProps {
  * Renders a distinct miniature invoice preview for either `classic` (Classic Czech ledger grid)
  * or `modern_minimal` (Modern Minimal airy layout with accent stripe).
  */
-export const brandingMiniPreview = <M>(h: Html.H<M>, p: BrandingPreviewProps): Markup<M> => {
+export const brandingMiniPreview: {
+  (p: BrandingPreviewProps): <M>(h: Html.H<M>) => Markup<M>;
+  <M>(h: Html.H<M>, p: BrandingPreviewProps): Markup<M>;
+} = Fn.dual(2, <M>(h: Html.H<M>, p: BrandingPreviewProps): Markup<M> => {
   const loc = p.previewLocale;
-  const company = p.companyName.trim() || "Novák Design s.r.o.";
-  const ico = p.ico.trim() || "27082440";
-  const dic = p.dic.trim() || "CZ27082440";
-  const reg = p.registerEntry.trim() || "C 123456, Městský soud v Praze";
+  const company = Str.trim(p.companyName) || "Novák Design s.r.o.";
+  const ico = Str.trim(p.ico) || "27082440";
+  const dic = Str.trim(p.dic) || "CZ27082440";
+  const reg = Str.trim(p.registerEntry) || "C 123456, Městský soud v Praze";
   const isClassic = p.template === "classic";
 
   if (isClassic) {
@@ -124,8 +130,8 @@ export const brandingMiniPreview = <M>(h: Html.H<M>, p: BrandingPreviewProps): M
                   : []),
               ]),
           ]),
-        ...(p.footerText.trim() !== ""
-          ? [h.div.class("kb-pdf-mini__footer").children([p.footerText.trim()])]
+        ...(Str.trim(p.footerText) !== ""
+          ? [h.div.class("kb-pdf-mini__footer").children([Str.trim(p.footerText)])]
           : []),
       ]);
   }
@@ -202,9 +208,9 @@ export const brandingMiniPreview = <M>(h: Html.H<M>, p: BrandingPreviewProps): M
         ]),
       h.div
         .class("kb-pdf-mini__footer")
-        .children([p.footerText.trim() !== "" ? p.footerText.trim() : reg]),
+        .children([Str.trim(p.footerText) !== "" ? Str.trim(p.footerText) : reg]),
     ]);
-};
+});
 
 export interface ScopeMatrixProps<M> {
   readonly state: ViewModels.ScopePickerState;
@@ -215,7 +221,10 @@ export interface ScopeMatrixProps<M> {
 }
 
 /** Interactive 10-area Read/Write scope picker (API key creation). */
-export const scopeMatrixEditor = <M>(h: Html.H<M>, o: ScopeMatrixProps<M>): Markup<M> => {
+export const scopeMatrixEditor: {
+  <M>(o: ScopeMatrixProps<M>): (h: Html.H<M>) => Markup<M>;
+  <M>(h: Html.H<M>, o: ScopeMatrixProps<M>): Markup<M>;
+} = Fn.dual(2, <M>(h: Html.H<M>, o: ScopeMatrixProps<M>): Markup<M> => {
   const rows = ViewModels.ScopePicker.rows(o.state);
   const canRead = ViewModels.presetAvailable(o.state, "read");
   const canWrite = ViewModels.presetAvailable(o.state, "read_write");
@@ -248,7 +257,7 @@ export const scopeMatrixEditor = <M>(h: Html.H<M>, o: ScopeMatrixProps<M>): Mark
           ]),
         ]),
         h.tbody.children(
-          rows.map((row) => {
+          Arr.map(rows, (row) => {
             const readChecked = row.level === "read" || row.level === "write";
             const writeChecked = row.level === "write";
             const areaLabel = o.t.translate(I18n.enumText("scopeArea", row.area));
@@ -290,25 +299,38 @@ export const scopeMatrixEditor = <M>(h: Html.H<M>, o: ScopeMatrixProps<M>): Mark
       ]),
     ]),
   ]);
-};
+});
 
 /** Compact read-only scope badges for an existing API Key or Connected MCP App. */
-export const scopeSummaryBadges = <M>(
-  h: Html.H<M>,
-  t: I18n.Translator,
-  areas: ReadonlyArray<{ readonly area: ScopeArea; readonly level: ViewModels.AreaLevel }>,
-): Markup<M> => {
-  const active = areas.filter((a) => a.level !== "none");
-  if (active.length === 0) return badge(h, t.translate(I18n.enumText("scopeLevel", "none")));
-  return h.div
-    .class("kb-scope-pills")
-    .children(
-      active.map((a) =>
-        badge(
-          h,
-          `${t.translate(I18n.enumText("scopeArea", a.area))}: ${t.translate(I18n.enumText("scopeLevel", a.level))}`,
-          a.level === "write" ? "proforma" : "outline",
+export const scopeSummaryBadges: {
+  (
+    t: I18n.Translator,
+    areas: ReadonlyArray<{ readonly area: ScopeArea; readonly level: ViewModels.AreaLevel }>,
+  ): <M>(h: Html.H<M>) => Markup<M>;
+  <M>(
+    h: Html.H<M>,
+    t: I18n.Translator,
+    areas: ReadonlyArray<{ readonly area: ScopeArea; readonly level: ViewModels.AreaLevel }>,
+  ): Markup<M>;
+} = Fn.dual(
+  3,
+  <M>(
+    h: Html.H<M>,
+    t: I18n.Translator,
+    areas: ReadonlyArray<{ readonly area: ScopeArea; readonly level: ViewModels.AreaLevel }>,
+  ): Markup<M> => {
+    const active = Arr.filter(areas, (a) => a.level !== "none");
+    if (active.length === 0) return badge(h, t.translate(I18n.enumText("scopeLevel", "none")));
+    return h.div
+      .class("kb-scope-pills")
+      .children(
+        Arr.map(active, (a) =>
+          badge(
+            h,
+            `${t.translate(I18n.enumText("scopeArea", a.area))}: ${t.translate(I18n.enumText("scopeLevel", a.level))}`,
+            a.level === "write" ? "proforma" : "outline",
+          ),
         ),
-      ),
-    );
-};
+      );
+  },
+);

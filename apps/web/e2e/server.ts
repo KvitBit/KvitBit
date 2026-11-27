@@ -1,9 +1,15 @@
-import { resolve, sep } from "node:path";
+import * as Config from "effect/Config";
+import * as Effect from "effect/Effect";
+import * as Path from "effect/Path";
+import * as Str from "effect/String";
 import { demoRoutes } from "../src/demo";
 import { isStatus, match } from "../src/demo/router";
 
-const port = Number(process.env.KVITBIT_WEB_E2E_PORT ?? 4173);
-const dist = resolve(import.meta.dirname, "../dist");
+const sharePdfPathPattern = /^\/api\/v1\/share\/[^/]+\/pdf$/;
+
+const port = Effect.runSync(Config.Int("KVITBIT_WEB_E2E_PORT").pipe(Config.withDefault(4173)));
+const paths = Effect.runSync(Path.Path.pipe(Effect.provide(Path.layer)));
+const dist = paths.resolve(import.meta.dirname, "../dist");
 
 Bun.serve({
   hostname: "127.0.0.1",
@@ -15,7 +21,7 @@ Bun.serve({
         headers: { "content-type": "text/html" },
       });
     }
-    if (/^\/api\/v1\/share\/[^/]+\/pdf$/.test(url.pathname)) {
+    if (sharePdfPathPattern.test(url.pathname)) {
       return new Response("%PDF-1.4\n", {
         headers: {
           "content-type": "application/pdf",
@@ -23,7 +29,7 @@ Bun.serve({
         },
       });
     }
-    if (url.pathname.startsWith("/api/")) {
+    if (Str.startsWith("/api/")(url.pathname)) {
       const found = match(demoRoutes, request.method, url.pathname);
       if (found === undefined) {
         return Response.json(
@@ -46,14 +52,14 @@ Bun.serve({
       return result === undefined ? new Response(null, { status: 204 }) : Response.json(result);
     }
 
-    const path = resolve(dist, `.${url.pathname}`);
-    if (path.startsWith(dist + sep)) {
+    const path = paths.resolve(dist, `.${url.pathname}`);
+    if (Str.startsWith(dist + paths.sep)(path)) {
       const asset = Bun.file(path);
       if (await asset.exists()) return new Response(asset);
-      if (url.pathname.startsWith("/assets/") || url.pathname.startsWith("/fonts/")) {
+      if (Str.startsWith("/assets/")(url.pathname) || Str.startsWith("/fonts/")(url.pathname)) {
         return new Response(null, { status: 404 });
       }
     }
-    return new Response(Bun.file(resolve(dist, "index.html")));
+    return new Response(Bun.file(paths.resolve(dist, "index.html")));
   },
 });

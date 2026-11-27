@@ -2,7 +2,11 @@ import { describe, expect, test } from "bun:test";
 import { Window } from "happy-dom";
 import { elementPaths } from "../../src/runtime/feedback/selector";
 
-const pathsFor = (element: Element, includeIdentifiers: boolean, maxLength: number) => {
+const pathsFor = (
+  element: Parameters<typeof elementPaths>[0],
+  includeIdentifiers: boolean,
+  maxLength: number,
+) => {
   const paths = elementPaths(element, includeIdentifiers, maxLength);
   if (paths === undefined) throw new Error("Expected a unique selector for the fixture");
   return paths;
@@ -11,8 +15,12 @@ const pathsFor = (element: Element, includeIdentifiers: boolean, maxLength: numb
 const fixture = () => {
   const window = new Window();
   // Use the emulated DOM at the browser API boundary.
-  const document = window.document as unknown as Document;
-  const element = (tag: string, className = "", ...children: Element[]) => {
+  const document = window.document;
+  const element = (
+    tag: string,
+    className = "",
+    ...children: ReturnType<typeof document.createElement>[]
+  ) => {
     const node = document.createElement(tag);
     node.className = className;
     node.append(...children);
@@ -70,7 +78,7 @@ describe("feedback selectors", () => {
     const { document, element } = fixture();
     const first = element("button");
     const second = element("button");
-    const branch = (leaf: Element) => {
+    const branch = (leaf: ReturnType<typeof element>) => {
       let node = leaf;
       for (let level = 0; level < 70; level++) node = element("div", "", node);
       return node;

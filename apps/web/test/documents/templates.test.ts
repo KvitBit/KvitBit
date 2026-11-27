@@ -1,5 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { BigDecimal, Schema } from "effect";
+import { TemplateId } from "@kvitbit/domain";
+import * as BigDecimal from "effect/BigDecimal";
+import * as Effect from "effect/Effect";
+import * as Schema from "effect/Schema";
+
 import { routes as demoRoutes } from "../../src/demo/documents";
 import { match } from "../../src/demo/router";
 import { DEMO_WORKSPACE } from "../../src/demo/shell";
@@ -8,44 +12,48 @@ import * as Templates from "../../src/page/documents/templates";
 import { ctxFor, renderPath, WS } from "../support";
 import { jsonDocument, runCommand, sampleProforma, sessionWithRole } from "./fixtures";
 
-const TPL_ID = "0193a000-0000-7000-8000-000000000801" as TemplateViewData["id"];
+const requestKeyPattern = /^[0-9a-f-]{36}$/;
 
-const sampleTemplate = Schema.decodeUnknownSync(TemplateViewData)({
-  id: TPL_ID,
-  name: "Měsíční podpora webu",
-  revision: 2,
-  archived: false,
-  input: {
+const TPL_ID = TemplateId.make("0193a000-0000-7000-8000-000000000801");
+
+const sampleTemplate = Effect.runSync(
+  Schema.decodeEffect(TemplateViewData)({
+    id: TPL_ID,
     name: "Měsíční podpora webu",
-    kind: "invoice",
-    contact: "0193a000-0000-7000-8000-000000000201",
-    currency: "CZK",
-    due: { inDays: 14 },
-    paymentMethod: "bank_transfer",
-    pricesIncludeVat: false,
-    lines: [
-      {
-        description: "Podpora",
-        quantity: BigDecimal.fromBigInt(1n),
-        unit: "měs",
-        unitPrice: BigDecimal.fromBigInt(12000n),
-        vat: "standard",
-      },
-    ],
-  },
-  schedule: {
-    id: "0193a000-0000-7000-8000-000000000811",
-    every: { months: 1 },
-    startOn: "2026-01-01",
-    endOn: null,
-    issueAs: "invoice",
-    autoSend: true,
-    nextOccurrence: "2026-12-01",
-    paused: true,
-    pausedReason: "fx.rate_missing",
-    pausedError: null,
-  },
-});
+    revision: 2,
+    archived: false,
+    input: {
+      name: "Měsíční podpora webu",
+      kind: "invoice",
+      contact: "0193a000-0000-7000-8000-000000000201",
+      currency: "CZK",
+      due: { inDays: 14 },
+      paymentMethod: "bank_transfer",
+      pricesIncludeVat: false,
+      lines: [
+        {
+          description: "Podpora",
+          quantity: BigDecimal.fromBigInt(1n),
+          unit: "měs",
+          unitPrice: BigDecimal.fromBigInt(12000n),
+          vat: "standard",
+        },
+      ],
+    },
+    schedule: {
+      id: "0193a000-0000-7000-8000-000000000811",
+      every: { months: 1 },
+      startOn: "2026-01-01",
+      endOn: null,
+      issueAs: "invoice",
+      autoSend: true,
+      nextOccurrence: "2026-12-01",
+      paused: true,
+      pausedReason: "fx.rate_missing",
+      pausedError: null,
+    },
+  }),
+);
 
 describe("Templates & Recurring page (Screen 12)", () => {
   const listRoute: Templates.Route = { _tag: "Templates", ws: WS };
@@ -144,7 +152,7 @@ describe("Templates & Recurring page (Screen 12)", () => {
     const retry = Templates.update(failed.model, message, ctx);
     const done = Templates.update(retry.model, await runCommand(retry.commands, fetch), ctx);
     expect(requests[0]?.path).toEndWith(`/${TPL_ID}/documents`);
-    expect(requests[0]?.key).toMatch(/^[0-9a-f-]{36}$/);
+    expect(requests[0]?.key).toMatch(requestKeyPattern);
     expect(requests[0]?.body).toEqual({ as: "draft" });
     expect(requests[1]).toEqual(requests[0]);
     expect(done.outMessage?._tag).toBe("Navigate");

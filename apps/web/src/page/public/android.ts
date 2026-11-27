@@ -4,13 +4,24 @@ import type { Html } from "@effect/ui/html";
  * Screen 03 — /android download & Obtainium instructions + /app/ PWA link.
  */
 import { ReleaseInfo } from "@kvitbit/api-contract";
-import { Format, ViewModels } from "@kvitbit/ui-port";
-import { Effect, Schema } from "effect";
+import { Format } from "@kvitbit/ui-port";
+import * as Effect from "effect/Effect";
+import * as Fn from "effect/Function";
+import * as HttpClientRequest from "effect/http/HttpClientRequest";
+import * as HttpClientResponse from "effect/http/HttpClientResponse";
+import * as Schema from "effect/Schema";
+import * as Str from "effect/String";
 import { Failure, failureFromUnknown } from "../../app/api";
+import { browserOrigin, fetchBrowserOk } from "../../app/browser";
 import { defineApiCommand } from "../../app/commands";
 import { copy, translator } from "../../app/i18n";
 import { Intent_ } from "../../app/intent";
-import type { MessageHandlers, PageContext, PageReturn, RouteOf } from "../../app/page";
+import {
+  type MessageHandlers,
+  type PageContext,
+  type PageReturn,
+  RouteCases,
+} from "../../app/page";
 import * as Remote from "../../app/remote";
 import { svgImage } from "../../ui/html";
 import { icon } from "../../ui/icons";
@@ -27,12 +38,13 @@ import {
 } from "../../ui/kit";
 import { copyToClipboard, formatBytes } from "./_shared";
 
-export type Route = RouteOf<"AndroidDownload">;
+export const Route = RouteCases.AndroidDownload;
+export type Route = typeof Route.Type;
 
 const ReleaseRemote = Remote.remoteSchema(ReleaseInfo);
 
 export const Model = Schema.Struct({
-  route: ViewModels.Route,
+  route: Route,
   release: ReleaseRemote,
 });
 export type Model = typeof Model.Type;
@@ -85,43 +97,34 @@ const local = copy({
 });
 
 const OBTAINIUM_MARK_SVG =
+  // biome-ignore lint/security/noSecrets: This is the inline Android icon.
   '<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" focusable="false" aria-hidden="true"><path d="M12 3l8 4.5v9L12 21l-8-4.5v-9z"/><path d="M12 12l8-4.5M12 12v9M12 12L4 7.5"/><path d="M9 14l3 3 3-3"/></svg>';
 
-const origin = (): string =>
-  typeof location === "undefined" || location.origin === "null"
-    ? "http://localhost"
-    : location.origin;
-
-const decodeRelease = Schema.decodeUnknownSync(ReleaseInfo);
-
+const decodeRelease = HttpClientResponse.schemaBodyJson(ReleaseInfo);
 const fetchLatestRelease = (seq: Remote.Seq) =>
-  Effect.tryPromise({
-    try: async () => {
-      const res = await fetch(`${origin()}/api/mobile/releases/latest`, {
-        credentials: "same-origin",
-      });
-      if (!res.ok) throw Object.assign(new Error(`release ${res.status}`), { status: res.status });
-      return decodeRelease(await res.json());
-    },
-    catch: (e) => e,
-  }).pipe(
-    Effect.map((release) => Message.GotRelease({ seq, release })),
-    Effect.catch((e) =>
-      Effect.succeed(Message.FailedRelease({ seq, failure: failureFromUnknown(e) })),
-    ),
+  fetchBrowserOk(HttpClientRequest.get(`${browserOrigin()}/api/mobile/releases/latest`)).pipe(
+    Effect.flatMap(decodeRelease),
+    Effect.match({
+      onSuccess: (release) => Message.GotRelease({ seq, release }),
+      onFailure: (error) => Message.FailedRelease({ seq, failure: failureFromUnknown(error) }),
+    }),
   );
 
-const FetchRelease = defineApiCommand("AndroidFetchRelease", {
+const FetchRelease = defineApiCommand({
+  message: Message,
+  name: "AndroidFetchRelease",
   args: { seq: Remote.Seq },
   execute: ({ seq }) => fetchLatestRelease(seq),
 });
 
-const CopyCmd = defineApiCommand("AndroidCopy", {
+const CopyCmd = defineApiCommand({
+  message: Message,
+  name: "AndroidCopy",
   args: { value: Schema.String },
   execute: ({ value }) => copyToClipboard(value, (ok) => Message.CopiedValue({ ok })),
 });
 
-export const init = (route: Route, _ctx: PageContext): PageReturn<Model, Message> => {
+const initImpl = (route: Route, _ctx: PageContext): PageReturn<Model, Message> => {
   const release = Remote.load(Remote.idle);
   const seq = Remote.seqOf(release);
   return {
@@ -130,11 +133,12 @@ export const init = (route: Route, _ctx: PageContext): PageReturn<Model, Message
   };
 };
 
-export const update = (
-  model: Model,
-  message: Message,
-  ctx: PageContext,
-): PageReturn<Model, Message> =>
+export const init: {
+  (_ctx: PageContext): (route: Route) => PageReturn<Model, Message>;
+  (route: Route, _ctx: PageContext): PageReturn<Model, Message>;
+} = Fn.dual(2, initImpl);
+
+const updateImpl = (model: Model, message: Message, ctx: PageContext): PageReturn<Model, Message> =>
   Message.match(message, {
     GotRelease: ({ seq, release }) => ({
       model: { ...model, release: Remote.succeed(model.release, seq, release) },
@@ -156,14 +160,24 @@ export const update = (
     }),
     CopiedValue: ({ ok }) => ({
       model,
-      ...(ok ? { outMessage: Intent_.toast(translator(ctx.locale).t("common.toast.copied")) } : {}),
+      outMessage: ok ? Intent_.toast(translator(ctx.locale).t("common.toast.copied")) : undefined,
     }),
   } satisfies MessageHandlers<Message, PageReturn<Model, Message>>);
 
-export const title = (_model: Model, ctx: PageContext): string =>
+export const update: {
+  (message: Message, ctx: PageContext): (model: Model) => PageReturn<Model, Message>;
+  (model: Model, message: Message, ctx: PageContext): PageReturn<Model, Message>;
+} = Fn.dual(3, updateImpl);
+
+const titleImpl = (_model: Model, ctx: PageContext): string =>
   translator(ctx.locale).t("public.androidDownload.title");
 
-export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
+export const title: {
+  (ctx: PageContext): (_model: Model) => string;
+  (_model: Model, ctx: PageContext): string;
+} = Fn.dual(2, titleImpl);
+
+const viewImpl = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
   const t = translator(ctx.locale);
   const release = Remote.dataOf(model.release);
   const obtainiumHref = release?.obtainiumUrl ?? local(ctx.locale, "defaultObtainium");
@@ -209,16 +223,16 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
               ? [
                   dl(h, [
                     [
-                      t.t("public.androidDownload.version", { version: "" }).trim(),
+                      Str.trim(t.t("public.androidDownload.version", { version: "" })),
                       mono(h, `${release.version} (${release.versionCode})`),
                     ],
                     [
-                      t.t("public.androidDownload.size", { size: "" }).trim(),
+                      Str.trim(t.t("public.androidDownload.size", { size: "" })),
                       formatBytes(release.sizeBytes),
                     ],
                     [
                       local(ctx.locale, "releasedOn"),
-                      Format.formatDate(ctx.locale, release.releasedAt.slice(0, 10)),
+                      Format.formatDate(ctx.locale, Str.slice(0, 10)(release.releasedAt)),
                     ],
                     [local(ctx.locale, "minSdk"), `API ${release.minAndroidSdk}+`],
                   ]),
@@ -322,3 +336,8 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
     ),
   ]);
 };
+
+export const view: {
+  (ctx: PageContext, h: Html.H<Message>): (model: Model) => ReturnType<typeof viewImpl>;
+  (model: Model, ctx: PageContext, h: Html.H<Message>): ReturnType<typeof viewImpl>;
+} = Fn.dual(3, viewImpl);
