@@ -1,7 +1,9 @@
 import * as Config from "effect/Config";
 import * as ConfigProvider from "effect/ConfigProvider";
+import * as Context from "effect/Context";
 import * as Data from "effect/Data";
 import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import {
   type BlobDriver,
@@ -10,12 +12,13 @@ import {
   findForbiddenOptOutFlag,
   isBlobDriver,
   isEmailMode,
-  isForbiddenOptOutNamespaceKey,
+  isForbiddenOptOutPrefixKey,
   isProdEmailMode,
   isValidDomain,
   isValidEmailFrom,
   parseCsvDomainList,
   parseOptionalBoolean,
+  trimOptional,
   validateOriginUrl,
 } from "./deploy-preflight";
 
@@ -500,6 +503,72 @@ const optionalInt = (
     return Number.parseInt(raw, 10);
   });
 
+/**
+ * Lossless raw environment snapshot carried alongside Effect's `ConfigProvider` for Alchemy stack
+ * loading (`alchemy.run.ts`). Preserves exact key presence (including empty strings alongside
+ * longer variable names) and candidate keys across composed sources before Effect normalization.
+ */
+export class StackEnv extends Context.Service<
+  StackEnv,
+  Readonly<Record<string, string | undefined>>
+>()("kvitbit/alchemy/StackEnv") {}
+
+export const mergeStackEnvSources = (
+  primary: Readonly<Record<string, string | undefined>>,
+  fallback: Readonly<Record<string, string | undefined>>,
+): Record<string, string | undefined> => {
+  const merged: Record<string, string | undefined> = {};
+  const keys = new Set([...Object.keys(primary), ...Object.keys(fallback)]);
+  for (const key of keys) {
+    const primaryValue = primary[key];
+    const fallbackValue = fallback[key];
+    if (trimOptional(primaryValue) !== undefined) {
+      merged[key] = primaryValue;
+    } else if (trimOptional(fallbackValue) !== undefined) {
+      merged[key] = fallbackValue;
+    } else if (primaryValue !== undefined) {
+      merged[key] = primaryValue;
+    } else if (fallbackValue !== undefined) {
+      merged[key] = fallbackValue;
+    }
+  }
+  return merged;
+};
+
+const definedEnvRecord = (
+  env: Readonly<Record<string, string | undefined>>,
+): Record<string, string> => {
+  const out: Record<string, string> = {};
+  for (const [key, value] of Object.entries(env)) {
+    if (value !== undefined) {
+      out[key] = value;
+    }
+  }
+  return out;
+};
+
+export const makeStackEnvLayer = (
+  env: Readonly<Record<string, string | undefined>>,
+): Layer.Layer<StackEnv> =>
+  Layer.merge(
+    ConfigProvider.layer(ConfigProvider.fromEnv({ env: definedEnvRecord(env) })),
+    Layer.succeed(StackEnv, env),
+  );
+
+export const composeStackEnvLayers = (
+  primary: Readonly<Record<string, string | undefined>>,
+  fallback: Readonly<Record<string, string | undefined>>,
+): Layer.Layer<StackEnv> =>
+  Layer.merge(
+    ConfigProvider.layer(
+      ConfigProvider.orElse(
+        ConfigProvider.fromEnv({ env: definedEnvRecord(primary) }),
+        ConfigProvider.fromEnv({ env: definedEnvRecord(fallback) }),
+      ),
+    ),
+    Layer.succeed(StackEnv, mergeStackEnvSources(primary, fallback)),
+  );
+
 const MAX_ARRAY_DIRECT_SCAN = 4096;
 
 const FORBIDDEN_PROVIDER_PROBE_PATHS: ReadonlyArray<ReadonlyArray<string>> = [
@@ -507,6 +576,7 @@ const FORBIDDEN_PROVIDER_PROBE_PATHS: ReadonlyArray<ReadonlyArray<string>> = [
   ["KVITBIT", "DISABLE"],
   ["KVITBIT", "PREVIEW"],
   ["KVITBIT", "PREVIEW", "DISABLE"],
+  ["KVITBIT", "ALLOW", "LOCAL"],
   ["KVITBIT", "ALLOW", "LOCAL", "BLOBS"],
 ];
 
@@ -543,8 +613,15 @@ const collectKvitbitProviderSubtree = (
         const nested = yield* collectKvitbitProviderSubtree(provider, childPath, visited);
         entries.push(...nested);
         const childName = childPath.map(String).join("_");
-        if (nested.length === 0 && isForbiddenOptOutNamespaceKey(childName)) {
+        if (nested.length === 0 && isForbiddenOptOutPrefixKey(childName)) {
           entries.push([childName, ""]);
+        } else if (childName === "KVITBIT_ALLOW_LOCAL_BLOBS" && nested.length === 0) {
+          const childNode = yield* provider
+            .load(childPath)
+            .pipe(Effect.mapError((error) => new Config.ConfigError(error)));
+          if (childNode === undefined) {
+            entries.push([childName, ""]);
+          }
         }
       }
       return entries;
@@ -562,7 +639,7 @@ const collectKvitbitProviderSubtree = (
       entries.push(...arrayEntries);
       if (node.length > 0 && arrayEntries.length === 0) {
         const lastName = [...path, node.length - 1].map(String).join("_");
-        if (isForbiddenOptOutNamespaceKey(lastName)) {
+        if (isForbiddenOptOutPrefixKey(lastName)) {
           entries.push([lastName, ""]);
         }
       }
@@ -598,16 +675,22 @@ export const loadStackConfig: Effect.Effect<
   }
   const stage: KvitbitStage = stageRaw;
 
-  const provider = yield* ConfigProvider.ConfigProvider;
-  const kvitbitEntries = yield* collectKvitbitProviderEnv(provider);
-  const dynamicMap: Record<string, string | undefined> = Object.fromEntries(kvitbitEntries);
-  for (const forbidden of FORBIDDEN_OPT_OUT_ENV_VARS) {
-    const direct = yield* optionalNonEmptyString(forbidden);
-    if (direct !== undefined) {
-      dynamicMap[forbidden] = direct;
+  const rawEnv = yield* Effect.serviceOption(StackEnv);
+  let forbiddenFlag: string | undefined;
+  if (Option.isSome(rawEnv)) {
+    forbiddenFlag = findForbiddenOptOutFlag(rawEnv.value);
+  } else {
+    const provider = yield* ConfigProvider.ConfigProvider;
+    const kvitbitEntries = yield* collectKvitbitProviderEnv(provider);
+    const dynamicMap: Record<string, string | undefined> = Object.fromEntries(kvitbitEntries);
+    for (const forbidden of FORBIDDEN_OPT_OUT_ENV_VARS) {
+      const direct = yield* optionalNonEmptyString(forbidden);
+      if (direct !== undefined) {
+        dynamicMap[forbidden] = direct;
+      }
     }
+    forbiddenFlag = findForbiddenOptOutFlag(dynamicMap);
   }
-  const forbiddenFlag = findForbiddenOptOutFlag(dynamicMap);
   if (forbiddenFlag !== undefined) {
     return yield* new InvalidStackConfig({
       field: forbiddenFlag,

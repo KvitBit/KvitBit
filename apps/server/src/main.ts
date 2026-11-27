@@ -16,7 +16,7 @@ import { Effect, Layer } from "effect";
 import { HttpRouter } from "effect/http";
 import { AllRoutesLive, EdgeServicesLive } from "./app";
 import { ServerConfig } from "./config";
-import { loadBootRuntimeConfig } from "./config-contract";
+import { loadBootRuntimeConfig, makeRuntimeEnvLayer } from "./config-contract";
 import { PersistenceLive, PgDatabaseLive } from "./persistence";
 import { ServerDocumentProjectionsLive } from "./projections/documents";
 import {
@@ -89,5 +89,5 @@ const isMain =
     : process.argv[1]?.endsWith("main.ts") || process.argv[1]?.endsWith("main.js");
 
 if (isMain) {
-  NodeRuntime.runMain(serverProgram);
+  NodeRuntime.runMain(serverProgram.pipe(Effect.provide(makeRuntimeEnvLayer(process.env))));
 }

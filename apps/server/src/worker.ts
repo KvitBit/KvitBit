@@ -10,7 +10,7 @@
 import { NodeRuntime } from "@effect/platform-node";
 import { CoreLive, IdGeneratorLive } from "@kvitbit/core";
 import { Effect, Layer } from "effect";
-import { loadBootRuntimeConfig } from "./config-contract";
+import { loadBootRuntimeConfig, makeRuntimeEnvLayer } from "./config-contract";
 import { PersistenceLive, PgWorkerDatabaseLive } from "./persistence";
 import { ServerDocumentProjectionsLive } from "./projections/documents";
 import { ClusterWorkerRuntimeLive, CronsLive, WorkflowHandlersLive } from "./runtime";
@@ -53,5 +53,5 @@ const isMain =
     : process.argv[1]?.endsWith("worker.ts") || process.argv[1]?.endsWith("worker.js");
 
 if (isMain) {
-  NodeRuntime.runMain(workerProgram);
+  NodeRuntime.runMain(workerProgram.pipe(Effect.provide(makeRuntimeEnvLayer(process.env))));
 }

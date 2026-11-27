@@ -23,11 +23,13 @@ import {
   KVITBIT_STACK_NAME,
 } from "../src/bootstrap";
 import {
+  composeStackEnvLayers,
   defaultSecretBindings,
   imageReference,
   KVITBIT_PROD_DEFAULTS,
   type KvitbitStackConfig,
   loadStackConfig,
+  makeStackEnvLayer,
   resourceNames,
   validateStackConfig,
 } from "../src/config";
@@ -342,53 +344,37 @@ describe("Kvitbit Alchemy stack config", () => {
   });
 
   test("loadStackConfig rejects IPv4-mapped IPv6 loopback, >63-octet email labels, Array-node disable flags, and fallback provider opt-outs", async () => {
-    const loadWith = (provider: ConfigProvider.ConfigProvider) =>
-      Effect.runPromise(
-        loadStackConfig.pipe(Effect.provide(ConfigProvider.layer(provider)), Effect.result),
-      );
+    const loadWithLayer = <A>(layer: Layer.Layer<A>) =>
+      Effect.runPromise(loadStackConfig.pipe(Effect.provide(layer), Effect.result));
 
     // Valid boundary controls: 63-octet domain label, public IPv4-mapped IPv6 origin,
-    // and permitted longer/empty exact-key neighbors are accepted.
-    expect(
-      (
-        await loadWith(
-          ConfigProvider.fromEnv({
-            env: { ...PROD_REQUIRED_ENV, KVITBIT_EMAIL_FROM: `a@${"b".repeat(63)}.org` },
-          }),
-        )
-      )._tag,
-    ).toBe("Success");
-    expect(
-      (
-        await loadWith(
-          ConfigProvider.fromEnv({
-            env: { ...PROD_REQUIRED_ENV, KVITBIT_APP_ORIGIN: "https://[::ffff:192.0.2.1]" },
-          }),
-        )
-      )._tag,
-    ).toBe("Success");
-    expect(
-      (
-        await loadWith(
-          ConfigProvider.fromEnv({
-            env: { ...PROD_REQUIRED_ENV, KVITBIT_ALLOW_LOCAL_BLOBS_EXTRA: "" },
-          }),
-        )
-      )._tag,
-    ).toBe("Success");
-    expect(
-      (
-        await loadWith(
-          ConfigProvider.fromEnv({
-            env: {
-              ...PROD_REQUIRED_ENV,
-              KVITBIT_ALLOW_LOCAL_BLOBS: "",
-              KVITBIT_ALLOW_LOCAL_BLOBS_EXTRA: "metadata",
-            },
-          }),
-        )
-      )._tag,
-    ).toBe("Success");
+    // permitted scalar KVITBIT_DISABLE, and permitted longer exact-key neighbors are accepted.
+    for (const [label, extra] of [
+      ["63-octet email label", { KVITBIT_EMAIL_FROM: `a@${"b".repeat(63)}.org` }],
+      ["public IPv4-mapped IPv6", { KVITBIT_APP_ORIGIN: "https://[::ffff:192.0.2.1]" }],
+      ["permitted scalar KVITBIT_DISABLE=metadata", { KVITBIT_DISABLE: "metadata" }],
+      ["permitted empty KVITBIT_DISABLE", { KVITBIT_DISABLE: "" }],
+      ["permitted KVITBIT_ALLOW_LOCAL_BLOBS_EXTRA empty", { KVITBIT_ALLOW_LOCAL_BLOBS_EXTRA: "" }],
+      [
+        "permitted KVITBIT_ALLOW_LOCAL_BLOBS_EXTRA metadata",
+        { KVITBIT_ALLOW_LOCAL_BLOBS_EXTRA: "metadata" },
+      ],
+    ] as const) {
+      expect(
+        (await loadWithLayer(makeStackEnvLayer({ ...PROD_REQUIRED_ENV, ...extra })))._tag,
+        `makeStackEnvLayer ${label}`,
+      ).toBe("Success");
+      expect(
+        (
+          await loadWithLayer(
+            ConfigProvider.layer(
+              ConfigProvider.fromEnv({ env: { ...PROD_REQUIRED_ENV, ...extra } }),
+            ),
+          )
+        )._tag,
+        `bare ConfigProvider ${label}`,
+      ).toBe("Success");
+    }
 
     for (const [label, overrides, expectedField] of [
       [
@@ -420,27 +406,48 @@ describe("Kvitbit Alchemy stack config", () => {
       [
         "very sparse Array-node disable flag (5000=true + 10000 empty)",
         { KVITBIT_DISABLE_HTTP_5000: "true", KVITBIT_DISABLE_HTTP_10000: "" },
-        "KVITBIT_DISABLE_HTTP_10000",
+        "KVITBIT_DISABLE_HTTP_5000",
       ],
       [
         "empty forbidden key KVITBIT_DISABLE_OTHER",
         { KVITBIT_DISABLE_OTHER: "" },
         "KVITBIT_DISABLE_OTHER",
       ],
-      ["scalar KVITBIT_DISABLE", { KVITBIT_DISABLE: "metadata" }, "KVITBIT_DISABLE"],
+      [
+        "empty exact KVITBIT_ALLOW_LOCAL_BLOBS alone",
+        { KVITBIT_ALLOW_LOCAL_BLOBS: "" },
+        "KVITBIT_ALLOW_LOCAL_BLOBS",
+      ],
+      [
+        "empty exact KVITBIT_ALLOW_LOCAL_BLOBS alongside EXTRA",
+        { KVITBIT_ALLOW_LOCAL_BLOBS: "", KVITBIT_ALLOW_LOCAL_BLOBS_EXTRA: "metadata" },
+        "KVITBIT_ALLOW_LOCAL_BLOBS",
+      ],
       [
         "non-empty exact KVITBIT_ALLOW_LOCAL_BLOBS alongside EXTRA",
         { KVITBIT_ALLOW_LOCAL_BLOBS: "true", KVITBIT_ALLOW_LOCAL_BLOBS_EXTRA: "metadata" },
         "KVITBIT_ALLOW_LOCAL_BLOBS",
       ],
     ] as const) {
-      const res = await loadWith(
-        ConfigProvider.fromEnv({ env: { ...PROD_REQUIRED_ENV, ...overrides } }),
-      );
+      const res = await loadWithLayer(makeStackEnvLayer({ ...PROD_REQUIRED_ENV, ...overrides }));
       expect(res._tag, `expected InvalidStackConfig for ${label}`).toBe("Failure");
       if (res._tag === "Failure") {
         expect(res.failure).toMatchObject({ _tag: "InvalidStackConfig", field: expectedField });
       }
+    }
+
+    // Bare ConfigProvider.fromEnv also rejects empty exact KVITBIT_ALLOW_LOCAL_BLOBS alone.
+    const bareEmptyExact = await loadWithLayer(
+      ConfigProvider.layer(
+        ConfigProvider.fromEnv({ env: { ...PROD_REQUIRED_ENV, KVITBIT_ALLOW_LOCAL_BLOBS: "" } }),
+      ),
+    );
+    expect(bareEmptyExact._tag).toBe("Failure");
+    if (bareEmptyExact._tag === "Failure") {
+      expect(bareEmptyExact.failure).toMatchObject({
+        _tag: "InvalidStackConfig",
+        field: "KVITBIT_ALLOW_LOCAL_BLOBS",
+      });
     }
 
     for (const [label, primaryExtra, fallbackEnv, expectedField] of [
@@ -451,22 +458,22 @@ describe("Kvitbit Alchemy stack config", () => {
         "KVITBIT_DISABLE_CUSTOM",
       ],
       [
-        "scalar primary KVITBIT_DISABLE + fallback KVITBIT_DISABLE_CUSTOM",
+        "scalar primary KVITBIT_DISABLE=metadata + fallback KVITBIT_DISABLE_CUSTOM=true",
         { KVITBIT_DISABLE: "metadata" },
         { KVITBIT_DISABLE_CUSTOM: "true" },
-        "KVITBIT_DISABLE",
+        "KVITBIT_DISABLE_CUSTOM",
       ],
       [
-        "empty primary KVITBIT_DISABLE_OTHER + fallback KVITBIT_DISABLE_CUSTOM",
+        "empty primary KVITBIT_DISABLE_OTHER + fallback KVITBIT_DISABLE_CUSTOM=true",
         { KVITBIT_DISABLE_OTHER: "" },
         { KVITBIT_DISABLE_CUSTOM: "true" },
-        "KVITBIT_DISABLE_OTHER",
+        "KVITBIT_DISABLE_CUSTOM",
       ],
       [
-        "empty primary KVITBIT_PREVIEW_DISABLE_OTHER + fallback KVITBIT_PREVIEW_DISABLE_CUSTOM",
+        "empty primary KVITBIT_PREVIEW_DISABLE_OTHER + fallback KVITBIT_PREVIEW_DISABLE_CUSTOM=true",
         { KVITBIT_PREVIEW_DISABLE_OTHER: "" },
         { KVITBIT_PREVIEW_DISABLE_CUSTOM: "true" },
-        "KVITBIT_PREVIEW_DISABLE_OTHER",
+        "KVITBIT_PREVIEW_DISABLE_CUSTOM",
       ],
       [
         "empty primary KVITBIT_ALLOW_LOCAL_BLOBS + EXTRA + fallback KVITBIT_ALLOW_LOCAL_BLOBS=true",
@@ -487,11 +494,9 @@ describe("Kvitbit Alchemy stack config", () => {
         "KVITBIT_PREVIEW_DISABLE_CUSTOM",
       ],
     ] as const) {
-      const composed = ConfigProvider.orElse(
-        ConfigProvider.fromEnv({ env: { ...PROD_REQUIRED_ENV, ...primaryExtra } }),
-        ConfigProvider.fromEnv({ env: fallbackEnv }),
+      const res = await loadWithLayer(
+        composeStackEnvLayers({ ...PROD_REQUIRED_ENV, ...primaryExtra }, fallbackEnv),
       );
-      const res = await loadWith(composed);
       expect(res._tag, `expected InvalidStackConfig for ${label}`).toBe("Failure");
       if (res._tag === "Failure") {
         expect(res.failure).toMatchObject({ _tag: "InvalidStackConfig", field: expectedField });

@@ -15,7 +15,7 @@
  * - `development` & `test`: zero-config local DX (`console`/`capture` email, `local` blobs,
  *   `http://localhost:8080`).
  */
-import { Config, ConfigProvider, Data, Effect, Option } from "effect";
+import { Config, ConfigProvider, Context, Data, Effect, Layer, Option } from "effect";
 
 export const KVITBIT_ENVS = ["production", "staging", "preview", "development", "test"] as const;
 export type KvitbitEnv = (typeof KVITBIT_ENVS)[number];
@@ -530,19 +530,27 @@ export interface ValidatedRuntimeEnv {
   readonly blob: ResolvedBlobConfig;
 }
 
-const FORBIDDEN_OPT_OUT_NAMESPACE_PATTERN = /^KVITBIT_(?:PREVIEW_)?DISABLE(?:_|$)/;
+const FORBIDDEN_OPT_OUT_PATTERN = /^KVITBIT_(?:PREVIEW_)?DISABLE_/;
 
-const isForbiddenOptOutNamespaceKey = (key: string): boolean =>
-  FORBIDDEN_OPT_OUT_NAMESPACE_PATTERN.test(key);
+const isForbiddenOptOutKey = (key: string): boolean =>
+  FORBIDDEN_OPT_OUT_PATTERN.test(key) ||
+  (FORBIDDEN_OPT_OUT_ENV_VARS as ReadonlyArray<string>).includes(key);
 
-const isForbiddenOptOutEntry = (key: string, value: string | undefined): boolean => {
-  if (isForbiddenOptOutNamespaceKey(key)) {
-    return value !== undefined;
+const findForbiddenOptOutFlag = (
+  envMap: Readonly<Record<string, string | undefined>>,
+): string | undefined => {
+  // Prefer reporting an active (non-empty) forbidden flag before an explicitly empty one.
+  for (const [key, value] of Object.entries(envMap)) {
+    if (isForbiddenOptOutKey(key) && trimOptional(value) !== undefined) {
+      return key;
+    }
   }
-  if ((FORBIDDEN_OPT_OUT_ENV_VARS as ReadonlyArray<string>).includes(key)) {
-    return trimOptional(value) !== undefined;
+  for (const [key, value] of Object.entries(envMap)) {
+    if (isForbiddenOptOutKey(key) && value !== undefined) {
+      return key;
+    }
   }
-  return false;
+  return undefined;
 };
 
 /**
@@ -560,15 +568,14 @@ export const validateServerRuntimeEnv = (
   if (!envResult.ok) return envResult;
   const env = envResult.value;
 
-  for (const [key, value] of Object.entries(envMap)) {
-    if (isForbiddenOptOutEntry(key, value)) {
-      return fail(
-        key,
-        env === "production"
-          ? `opt-out flag ${key} is forbidden when KVITBIT_ENV=production`
-          : `boolean opt-out flag ${key} is not supported; declare typed modes (KVITBIT_EMAIL_MODE, KVITBIT_BLOB_DRIVER) instead`,
-      );
-    }
+  const forbiddenKey = findForbiddenOptOutFlag(envMap);
+  if (forbiddenKey !== undefined) {
+    return fail(
+      forbiddenKey,
+      env === "production"
+        ? `opt-out flag ${forbiddenKey} is forbidden when KVITBIT_ENV=production`
+        : `boolean opt-out flag ${forbiddenKey} is not supported; declare typed modes (KVITBIT_EMAIL_MODE, KVITBIT_BLOB_DRIVER) instead`,
+    );
   }
 
   const databaseUrl = trimOptional(envMap.DATABASE_URL);
@@ -634,6 +641,84 @@ export const loadValidatedAppOrigin: Effect.Effect<string, Config.ConfigError> =
   },
 );
 
+/**
+ * Lossless raw environment snapshot carried alongside Effect's `ConfigProvider`.
+ *
+ * Effect v4's `ConfigProvider.fromEnv` (default `preserveEmptyStrings: false`) erases empty
+ * strings when a longer key shares the same `_`-delimited prefix, and `ConfigProvider.orElse`
+ * masks fallback subtrees whenever the primary provider returns any node (`Value`, `Record`, or
+ * `Array`) at a prefix path. Providing `RuntimeEnv` via `makeRuntimeEnvLayer` or
+ * `composeRuntimeEnvLayers` (wired at process startup in `main.ts` and `worker.ts`) preserves
+ * exact key presence and effective values across composed sources before Effect normalization.
+ */
+export class RuntimeEnv extends Context.Service<
+  RuntimeEnv,
+  Readonly<Record<string, string | undefined>>
+>()("kvitbit/server/RuntimeEnv") {}
+
+/**
+ * Merges a primary and fallback environment map using Effect `ConfigProvider.orElse` value
+ * precedence while preserving every configured key name (including explicit empty strings) from
+ * both sources.
+ */
+export const mergeRuntimeEnvSources = (
+  primary: Readonly<Record<string, string | undefined>>,
+  fallback: Readonly<Record<string, string | undefined>>,
+): Record<string, string | undefined> => {
+  const merged: Record<string, string | undefined> = {};
+  const keys = new Set([...Object.keys(primary), ...Object.keys(fallback)]);
+  for (const key of keys) {
+    const primaryValue = primary[key];
+    const fallbackValue = fallback[key];
+    if (trimOptional(primaryValue) !== undefined) {
+      merged[key] = primaryValue;
+    } else if (trimOptional(fallbackValue) !== undefined) {
+      merged[key] = fallbackValue;
+    } else if (primaryValue !== undefined) {
+      merged[key] = primaryValue;
+    } else if (fallbackValue !== undefined) {
+      merged[key] = fallbackValue;
+    }
+  }
+  return merged;
+};
+
+const definedEnvRecord = (
+  env: Readonly<Record<string, string | undefined>>,
+): Record<string, string> => {
+  const out: Record<string, string> = {};
+  for (const [key, value] of Object.entries(env)) {
+    if (value !== undefined) {
+      out[key] = value;
+    }
+  }
+  return out;
+};
+
+/** Installs both an Effect `ConfigProvider` and a lossless `RuntimeEnv` snapshot for `env`. */
+export const makeRuntimeEnvLayer = (
+  env: Readonly<Record<string, string | undefined>>,
+): Layer.Layer<RuntimeEnv> =>
+  Layer.merge(
+    ConfigProvider.layer(ConfigProvider.fromEnv({ env: definedEnvRecord(env) })),
+    Layer.succeed(RuntimeEnv, env),
+  );
+
+/** Composes primary and fallback env sources while preserving exact keys from both sources. */
+export const composeRuntimeEnvLayers = (
+  primary: Readonly<Record<string, string | undefined>>,
+  fallback: Readonly<Record<string, string | undefined>>,
+): Layer.Layer<RuntimeEnv> =>
+  Layer.merge(
+    ConfigProvider.layer(
+      ConfigProvider.orElse(
+        ConfigProvider.fromEnv({ env: definedEnvRecord(primary) }),
+        ConfigProvider.fromEnv({ env: definedEnvRecord(fallback) }),
+      ),
+    ),
+    Layer.succeed(RuntimeEnv, mergeRuntimeEnvSources(primary, fallback)),
+  );
+
 const MAX_ARRAY_DIRECT_SCAN = 4096;
 
 const FORBIDDEN_PROVIDER_PROBE_PATHS: ReadonlyArray<ReadonlyArray<string>> = [
@@ -641,6 +726,7 @@ const FORBIDDEN_PROVIDER_PROBE_PATHS: ReadonlyArray<ReadonlyArray<string>> = [
   ["KVITBIT", "DISABLE"],
   ["KVITBIT", "PREVIEW"],
   ["KVITBIT", "PREVIEW", "DISABLE"],
+  ["KVITBIT", "ALLOW", "LOCAL"],
   ["KVITBIT", "ALLOW", "LOCAL", "BLOBS"],
 ];
 
@@ -677,8 +763,16 @@ const collectKvitbitProviderSubtree = (
         const nested = yield* collectKvitbitProviderSubtree(provider, childPath, visited);
         entries.push(...nested);
         const childName = childPath.map(String).join("_");
-        if (nested.length === 0 && isForbiddenOptOutNamespaceKey(childName)) {
+        if (nested.length === 0 && FORBIDDEN_OPT_OUT_PATTERN.test(childName)) {
           entries.push([childName, ""]);
+        } else if (childName === "KVITBIT_ALLOW_LOCAL_BLOBS" && nested.length === 0) {
+          // Only infer empty KVITBIT_ALLOW_LOCAL_BLOBS when the node itself is absent (not a container for longer keys like KVITBIT_ALLOW_LOCAL_BLOBS_EXTRA).
+          const childNode = yield* provider
+            .load(childPath)
+            .pipe(Effect.mapError((error) => new Config.ConfigError(error)));
+          if (childNode === undefined) {
+            entries.push([childName, ""]);
+          }
         }
       }
       return entries;
@@ -696,7 +790,7 @@ const collectKvitbitProviderSubtree = (
       entries.push(...arrayEntries);
       if (node.length > 0 && arrayEntries.length === 0) {
         const lastName = [...path, node.length - 1].map(String).join("_");
-        if (isForbiddenOptOutNamespaceKey(lastName)) {
+        if (FORBIDDEN_OPT_OUT_PATTERN.test(lastName)) {
           entries.push([lastName, ""]);
         }
       }
@@ -718,13 +812,19 @@ const collectKvitbitProviderEntries = (
   });
 
 /**
- * Loads and validates the complete boot-time runtime configuration from the active Effect
- * `ConfigProvider` before binding HTTP or starting Effect Cluster runners.
+ * Loads and validates the complete boot-time runtime configuration from `RuntimeEnv` (when
+ * provided via `makeRuntimeEnvLayer` / `composeRuntimeEnvLayers`, as in `main.ts` and `worker.ts`)
+ * or falls back to the active Effect `ConfigProvider` before binding HTTP or starting runners.
  */
 export const loadBootRuntimeConfig = (
   workload: ServerWorkload,
 ): Effect.Effect<ValidatedRuntimeEnv, Config.ConfigError> =>
   Effect.gen(function* () {
+    const rawEnv = yield* Effect.serviceOption(RuntimeEnv);
+    if (Option.isSome(rawEnv)) {
+      return yield* liftValidation(validateServerRuntimeEnv(rawEnv.value, workload));
+    }
+
     const provider = yield* ConfigProvider.ConfigProvider;
     const dynamicKvitbitEntries = yield* collectKvitbitProviderEntries(provider);
 

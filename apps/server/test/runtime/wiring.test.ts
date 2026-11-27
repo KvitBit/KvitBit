@@ -25,7 +25,11 @@ import type {
 } from "@kvitbit/domain/contract";
 import { BlobStorage, EmailSender } from "@kvitbit/domain/ports";
 import { BigDecimal, ConfigProvider, Effect, Layer, Option, Redacted, Stream } from "effect";
-import { loadBootRuntimeConfig } from "../../src/config-contract";
+import {
+  composeRuntimeEnvLayers,
+  loadBootRuntimeConfig,
+  makeRuntimeEnvLayer,
+} from "../../src/config-contract";
 import {
   deriveInvitationTokenKey,
   deriveShareLinkKey,
@@ -288,18 +292,10 @@ describe("wiring: email & SMTP URL parsing", () => {
       KVITBIT_BLOB_BUCKET: "kvitbit-prod-blobs",
     };
 
-    const loadWithProvider = (
-      workload: "server" | "worker",
-      provider: ConfigProvider.ConfigProvider,
-    ) =>
-      Effect.runPromise(
-        loadBootRuntimeConfig(workload).pipe(
-          Effect.provide(ConfigProvider.layer(provider)),
-          Effect.result,
-        ),
-      );
+    const loadWithLayer = <A>(workload: "server" | "worker", layer: Layer.Layer<A>) =>
+      Effect.runPromise(loadBootRuntimeConfig(workload).pipe(Effect.provide(layer), Effect.result));
     const loadWith = (env: Record<string, string>, workload: "server" | "worker" = "server") =>
-      loadWithProvider(workload, ConfigProvider.fromEnv({ env }));
+      loadWithLayer(workload, makeRuntimeEnvLayer(env));
 
     // Upgrade fixture (NODE_ENV=production, KVITBIT_ENV empty, Resend configured) stays in production with Resend (never capture).
     const upgraded = await loadWith(validProdEnv);
@@ -310,7 +306,8 @@ describe("wiring: email & SMTP URL parsing", () => {
       expect(upgraded.success.blob.driver).toBe("gcs");
     }
 
-    // Valid RFC 1035 63-octet label boundary, public IPv4-mapped IPv6 origin, and permitted longer/empty exact-key neighbors are accepted.
+    // Valid RFC 1035 63-octet label boundary, public IPv4-mapped IPv6 origin, permitted scalar KVITBIT_DISABLE,
+    // and permitted longer exact-key neighbors are accepted across both makeRuntimeEnvLayer and bare ConfigProvider.
     expect((await loadWith({ ...validProdEnv, EMAIL_FROM: `a@${"b".repeat(63)}.org` }))._tag).toBe(
       "Success",
     );
@@ -318,23 +315,32 @@ describe("wiring: email & SMTP URL parsing", () => {
       (await loadWith({ ...validProdEnv, APP_ORIGIN: "https://[::ffff:192.0.2.1]" }))._tag,
     ).toBe("Success");
     for (const workload of ["server", "worker"] as const) {
-      expect(
-        (await loadWith({ ...validProdEnv, KVITBIT_ALLOW_LOCAL_BLOBS_EXTRA: "" }, workload))._tag,
-        `${workload} permitted KVITBIT_ALLOW_LOCAL_BLOBS_EXTRA=""`,
-      ).toBe("Success");
-      expect(
-        (
-          await loadWith(
-            {
-              ...validProdEnv,
-              KVITBIT_ALLOW_LOCAL_BLOBS: "",
-              KVITBIT_ALLOW_LOCAL_BLOBS_EXTRA: "metadata",
-            },
-            workload,
-          )
-        )._tag,
-        `${workload} unset exact KVITBIT_ALLOW_LOCAL_BLOBS="" + KVITBIT_ALLOW_LOCAL_BLOBS_EXTRA`,
-      ).toBe("Success");
+      for (const [label, extra] of [
+        ["permitted scalar KVITBIT_DISABLE=metadata", { KVITBIT_DISABLE: "metadata" }],
+        ["permitted empty KVITBIT_DISABLE", { KVITBIT_DISABLE: "" }],
+        [
+          "permitted KVITBIT_ALLOW_LOCAL_BLOBS_EXTRA empty",
+          { KVITBIT_ALLOW_LOCAL_BLOBS_EXTRA: "" },
+        ],
+        [
+          "permitted KVITBIT_ALLOW_LOCAL_BLOBS_EXTRA metadata",
+          { KVITBIT_ALLOW_LOCAL_BLOBS_EXTRA: "metadata" },
+        ],
+      ] as const) {
+        expect(
+          (await loadWith({ ...validProdEnv, ...extra }, workload))._tag,
+          `makeRuntimeEnvLayer ${workload} ${label}`,
+        ).toBe("Success");
+        expect(
+          (
+            await loadWithLayer(
+              workload,
+              ConfigProvider.layer(ConfigProvider.fromEnv({ env: { ...validProdEnv, ...extra } })),
+            )
+          )._tag,
+          `bare ConfigProvider ${workload} ${label}`,
+        ).toBe("Success");
+      }
     }
 
     for (const workload of ["server", "worker"] as const) {
@@ -354,14 +360,23 @@ describe("wiring: email & SMTP URL parsing", () => {
         [
           "very sparse Array node (5000=true + 10000 empty)",
           { KVITBIT_DISABLE_HTTP_5000: "true", KVITBIT_DISABLE_HTTP_10000: "" },
-          "KVITBIT_DISABLE_HTTP_10000",
+          "KVITBIT_DISABLE_HTTP_5000",
         ],
         [
           "empty forbidden key KVITBIT_DISABLE_OTHER",
           { KVITBIT_DISABLE_OTHER: "" },
           "KVITBIT_DISABLE_OTHER",
         ],
-        ["scalar KVITBIT_DISABLE", { KVITBIT_DISABLE: "metadata" }, "KVITBIT_DISABLE"],
+        [
+          "empty exact KVITBIT_ALLOW_LOCAL_BLOBS alone",
+          { KVITBIT_ALLOW_LOCAL_BLOBS: "" },
+          "KVITBIT_ALLOW_LOCAL_BLOBS",
+        ],
+        [
+          "empty exact KVITBIT_ALLOW_LOCAL_BLOBS alongside EXTRA",
+          { KVITBIT_ALLOW_LOCAL_BLOBS: "", KVITBIT_ALLOW_LOCAL_BLOBS_EXTRA: "metadata" },
+          "KVITBIT_ALLOW_LOCAL_BLOBS",
+        ],
         [
           "non-empty exact KVITBIT_ALLOW_LOCAL_BLOBS alongside EXTRA",
           { KVITBIT_ALLOW_LOCAL_BLOBS: "true", KVITBIT_ALLOW_LOCAL_BLOBS_EXTRA: "metadata" },
@@ -395,13 +410,26 @@ describe("wiring: email & SMTP URL parsing", () => {
         if (res._tag === "Failure") {
           expect(
             String(res.failure),
-            `expected offending key ${expectedKey} for ${label}`,
-          ).toContain(expectedKey);
+            `expected exact marker Invalid runtime config (${expectedKey}): for ${label}`,
+          ).toContain(`Invalid runtime config (${expectedKey}):`);
         }
       }
 
-      // Composed fallback ConfigProvider (primary valid prod + fallback forbidden flag) must fail fast,
-      // even when the primary provider carries a scalar or empty forbidden key, or a longer exact-key neighbor.
+      // Bare ConfigProvider.fromEnv also rejects empty exact KVITBIT_ALLOW_LOCAL_BLOBS alone.
+      const bareEmptyExact = await loadWithLayer(
+        workload,
+        ConfigProvider.layer(
+          ConfigProvider.fromEnv({ env: { ...validProdEnv, KVITBIT_ALLOW_LOCAL_BLOBS: "" } }),
+        ),
+      );
+      expect(bareEmptyExact._tag).toBe("Failure");
+      if (bareEmptyExact._tag === "Failure") {
+        expect(String(bareEmptyExact.failure)).toContain(
+          "Invalid runtime config (KVITBIT_ALLOW_LOCAL_BLOBS):",
+        );
+      }
+
+      // Composed primary + fallback sources preserve key names from both sources and report the exact offending key.
       for (const [label, primaryExtra, fallbackEnv, expectedKey] of [
         [
           "fallback KVITBIT_DISABLE_CUSTOM",
@@ -410,22 +438,22 @@ describe("wiring: email & SMTP URL parsing", () => {
           "KVITBIT_DISABLE_CUSTOM",
         ],
         [
-          "scalar primary KVITBIT_DISABLE + fallback KVITBIT_DISABLE_CUSTOM",
+          "scalar primary KVITBIT_DISABLE=metadata + fallback KVITBIT_DISABLE_CUSTOM=true",
           { KVITBIT_DISABLE: "metadata" },
           { KVITBIT_DISABLE_CUSTOM: "true" },
-          "KVITBIT_DISABLE",
+          "KVITBIT_DISABLE_CUSTOM",
         ],
         [
-          "empty primary KVITBIT_DISABLE_OTHER + fallback KVITBIT_DISABLE_CUSTOM",
+          "empty primary KVITBIT_DISABLE_OTHER + fallback KVITBIT_DISABLE_CUSTOM=true",
           { KVITBIT_DISABLE_OTHER: "" },
           { KVITBIT_DISABLE_CUSTOM: "true" },
-          "KVITBIT_DISABLE_OTHER",
+          "KVITBIT_DISABLE_CUSTOM",
         ],
         [
-          "empty primary KVITBIT_PREVIEW_DISABLE_OTHER + fallback KVITBIT_PREVIEW_DISABLE_CUSTOM",
+          "empty primary KVITBIT_PREVIEW_DISABLE_OTHER + fallback KVITBIT_PREVIEW_DISABLE_CUSTOM=true",
           { KVITBIT_PREVIEW_DISABLE_OTHER: "" },
           { KVITBIT_PREVIEW_DISABLE_CUSTOM: "true" },
-          "KVITBIT_PREVIEW_DISABLE_OTHER",
+          "KVITBIT_PREVIEW_DISABLE_CUSTOM",
         ],
         [
           "empty primary KVITBIT_ALLOW_LOCAL_BLOBS + EXTRA + fallback KVITBIT_ALLOW_LOCAL_BLOBS=true",
@@ -446,17 +474,16 @@ describe("wiring: email & SMTP URL parsing", () => {
           "KVITBIT_PREVIEW_DISABLE_CUSTOM",
         ],
       ] as const) {
-        const composed = ConfigProvider.orElse(
-          ConfigProvider.fromEnv({ env: { ...validProdEnv, ...primaryExtra } }),
-          ConfigProvider.fromEnv({ env: fallbackEnv }),
+        const res = await loadWithLayer(
+          workload,
+          composeRuntimeEnvLayers({ ...validProdEnv, ...primaryExtra }, fallbackEnv),
         );
-        const res = await loadWithProvider(workload, composed);
         expect(res._tag, `expected failure for ${workload} ${label}`).toBe("Failure");
         if (res._tag === "Failure") {
           expect(
             String(res.failure),
-            `expected offending key ${expectedKey} for ${label}`,
-          ).toContain(expectedKey);
+            `expected exact marker Invalid runtime config (${expectedKey}): for ${label}`,
+          ).toContain(`Invalid runtime config (${expectedKey}):`);
         }
       }
     }

@@ -7,11 +7,12 @@ import {
   declareKvitbitStack,
   KVITBIT_STACK_NAME,
 } from "./src/bootstrap";
-import { loadStackConfig } from "./src/config";
+import { loadStackConfig, makeStackEnvLayer } from "./src/config";
 import { EdgeBackendServiceProvider } from "./src/resources/edge-backend-service";
 import { EdgeSecurityPolicyProvider } from "./src/resources/edge-security-policy";
 
 const stackConfig = loadStackConfig.pipe(
+  Effect.provide(makeStackEnvLayer(process.env)),
   Effect.tap((config) => assertFeedbackSecretSelection(config, process.argv)),
   Effect.orDie,
 );
