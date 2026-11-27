@@ -211,7 +211,7 @@
         },
         {
           "path": "packages/core/src/modules/documents/lifecycle.ts",
-          "sha256": "777c3eaa11a859c818ca96990005a6daf5a06b8569c7255f6d9082a744154998"
+          "sha256": "d465b3bb9d65e26a0e09d2671f93d8c80ca7d29ff8cbdd9b14e7e1db8f0fbdd3"
         },
         {
           "path": "packages/core/src/modules/documents/final.ts",
@@ -304,7 +304,7 @@
         },
         {
           "path": "packages/core/src/modules/documents/lifecycle.ts",
-          "sha256": "777c3eaa11a859c818ca96990005a6daf5a06b8569c7255f6d9082a744154998"
+          "sha256": "d465b3bb9d65e26a0e09d2671f93d8c80ca7d29ff8cbdd9b14e7e1db8f0fbdd3"
         },
         {
           "path": "packages/core/src/modules/documents/final.ts",
@@ -761,7 +761,7 @@
         },
         {
           "path": "packages/core/src/modules/documents/lifecycle.ts",
-          "sha256": "777c3eaa11a859c818ca96990005a6daf5a06b8569c7255f6d9082a744154998"
+          "sha256": "d465b3bb9d65e26a0e09d2671f93d8c80ca7d29ff8cbdd9b14e7e1db8f0fbdd3"
         },
         {
           "path": "packages/core/src/modules/documents/service.ts",
@@ -839,7 +839,7 @@
         },
         {
           "path": "packages/core/src/modules/documents/lifecycle.ts",
-          "sha256": "777c3eaa11a859c818ca96990005a6daf5a06b8569c7255f6d9082a744154998"
+          "sha256": "d465b3bb9d65e26a0e09d2671f93d8c80ca7d29ff8cbdd9b14e7e1db8f0fbdd3"
         },
         {
           "path": "packages/core/src/modules/documents/service.ts",
