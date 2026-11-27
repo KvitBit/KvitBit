@@ -16,6 +16,7 @@ import {
   feedbackSessionCookie,
 } from "../http/feedback/access";
 import { AuthServer } from "./AuthServer";
+import { bindAuthLogging } from "./logging";
 
 const METHODS_WITHOUT_BODY = new Set(["GET", "HEAD"]);
 
@@ -97,6 +98,10 @@ export const AuthRoutesLive = HttpRouter.use((router) =>
     const auth = yield* AuthServer;
     const config = yield* HttpConfig;
     const sql = yield* SqlClient.SqlClient;
+    const handleWebRequest = (request: Request) =>
+      Effect.flatMap(bindAuthLogging, (run) =>
+        Effect.promise(() => run(() => auth.handler(request))),
+      );
 
     const handleAuth = Effect.gen(function* () {
       const request = yield* HttpServerRequest;
@@ -110,7 +115,7 @@ export const AuthRoutesLive = HttpRouter.use((router) =>
           ? oversized
           : HttpServerResponse.empty({ status: 400 });
       }
-      const webRes = yield* Effect.promise(() => auth.handler(webReq.success));
+      const webRes = yield* handleWebRequest(webReq.success);
       return yield* fromWebResponse(
         webRes,
         request.method === "GET" && url.pathname === "/api/auth/get-session"
@@ -128,7 +133,7 @@ export const AuthRoutesLive = HttpRouter.use((router) =>
         `${config.appOrigin}/api/auth/.well-known/oauth-authorization-server`,
         { method: "GET" },
       );
-      const webRes = yield* Effect.promise(() => auth.handler(webReq));
+      const webRes = yield* handleWebRequest(webReq);
       return yield* fromWebResponse(webRes);
     });
 

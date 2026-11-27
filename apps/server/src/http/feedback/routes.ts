@@ -10,6 +10,7 @@ import {
 import { HttpServerRequest } from "effect/http/HttpServerRequest";
 import { SqlClient } from "effect/sql";
 import { AuthServer } from "../../auth/AuthServer";
+import { bindAuthLogging } from "../../auth/logging";
 import { HttpConfig } from "../config";
 import { RATE_LIMITS, RateLimiter } from "../edge/RateLimiter";
 import { canSubmitFeedback, feedbackSessionCookie } from "./access";
@@ -45,11 +46,14 @@ export const FeedbackRoutesLive = HttpRouter.use((router) =>
           return forbidden;
         }
 
+        const runAuth = yield* bindAuthLogging;
         const session = yield* Effect.tryPromise(() =>
-          auth.api.getSession({
-            headers: new Headers({ cookie }),
-            query: { disableCookieCache: true, disableRefresh: true },
-          }),
+          runAuth(() =>
+            auth.api.getSession({
+              headers: new Headers({ cookie }),
+              query: { disableCookieCache: true, disableRefresh: true },
+            }),
+          ),
         ).pipe(Effect.orElseSucceed(() => null));
         if (session == null || !(yield* canSubmitFeedback(sql, config.feedback, session.user)))
           return forbidden;

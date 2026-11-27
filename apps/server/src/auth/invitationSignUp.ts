@@ -11,12 +11,9 @@ import { drizzleAdapter } from "better-auth/adapters/drizzle";
 import { APIError, createAuthMiddleware } from "better-auth/api";
 import { Clock, Effect, Result } from "effect";
 import { acceptLanguageLocale } from "../http/edge/request";
+import type { AuthEffectRunner } from "./logging";
 
 const SIGN_UP_PATH = "/sign-up/email";
-
-// Better Auth can log Drizzle errors with raw SQL parameters before returning a response.
-const logInvitationSignUpError = () =>
-  Effect.runSync(Effect.logError("Invitation signup request failed"));
 
 const isInvitationSignUp = (body: unknown): body is Record<string, unknown> =>
   typeof body === "object" &&
@@ -39,6 +36,7 @@ const invitationSignUpHook = (
   workspaces: Workspaces["Service"],
   clock: Clock.Clock,
   verifiedEmails: WeakMap<Request, string>,
+  runAuthEffect: AuthEffectRunner,
 ): BeforeHook => ({
   matcher: (ctx) => ctx.path === SIGN_UP_PATH,
   handler: createAuthMiddleware(async (ctx) => {
@@ -47,7 +45,7 @@ const invitationSignUpHook = (
       throw new APIError("BAD_REQUEST", { code: "InvalidInvitation" });
     }
 
-    const invitation = await Effect.runPromise(
+    const invitation = await runAuthEffect(
       Effect.result(
         workspaces.peekInvitation.pipe(
           Effect.provideService(
@@ -102,6 +100,7 @@ export const makeAuthWithInvitationSignUp = async (
   config: AuthConfig,
   workspaces: Workspaces["Service"],
   clock: Clock.Clock,
+  runAuthEffect: AuthEffectRunner,
 ) => {
   // The normal OAuth provider initializes its resource rows before the invitation-only instance.
   await auth.$context;
@@ -114,7 +113,7 @@ export const makeAuthWithInvitationSignUp = async (
         config.botProtection.verify(scope === "sign_up" ? "invitation_accept" : scope, payload),
     },
     beforeHooks: [
-      invitationSignUpHook(workspaces, clock, verifiedEmails),
+      invitationSignUpHook(workspaces, clock, verifiedEmails, runAuthEffect),
       ...(config.beforeHooks ?? []),
     ],
   });
@@ -127,7 +126,7 @@ export const makeAuthWithInvitationSignUp = async (
     database: drizzleAdapter(config.db, { provider: "pg", schema: authTables, transaction: true }),
     emailAndPassword: { ...options.emailAndPassword, requireEmailVerification: false },
     emailVerification: { ...options.emailVerification, sendOnSignUp: false },
-    logger: { level: "error", log: logInvitationSignUpError },
+    logger: { disabled: true },
     onAPIError: { throw: true },
     databaseHooks: {
       user: {
@@ -150,7 +149,7 @@ export const makeAuthWithInvitationSignUp = async (
       try {
         return await invitationAuth.handler(request);
       } catch {
-        logInvitationSignUpError();
+        await runAuthEffect(Effect.logError("Invitation signup request failed"));
         return Response.json({ code: "InvitationSignupFailed" }, { status: 500 });
       }
     },
