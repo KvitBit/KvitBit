@@ -5,7 +5,7 @@ description: >-
   changes to apps/web/src, the web entry or build configuration, or
   packages/ui-port/src/theme.
 metadata:
-  sync_commit: "540c8ef4aff250f71ec6d7ffa172f9e7c8c3ff64"
+  sync_commit: "5cc565003a2dbaabb860d264f93c23eabaec8d00"
   bun: "1.4.4"
   node: "24.18.0"
   effect: "4.1.4"
@@ -80,6 +80,22 @@ that record in a verification commit after the product changes.
 [ADR-0005](../../../docs/adr/0005-formal-verification.md)
 
 ## Verification record
+
+At `5cc565003a2dbaabb860d264f93c23eabaec8d00`, the Tailwind CSS v4 + CVA + `cn`
+web migration and Uniwind mobile migration passed PR CI on `15f4d712` (`check`,
+`static-mounts`, `formal`, and `changes`), including `@kvitbit/ui-port`,
+`@kvitbit/web`, and `@kvitbit/mobile` lint, typecheck, unit tests, and
+production builds. The static web build contains `dist/index.html`, hashed
+JavaScript and Tailwind CSS v4 output, `dist/assets/brand`, and `dist/fonts`.
+
+The auth, smoke, and feedback Playwright suites (81 passed, 1 mobile-only skip)
+passed on port `34197` with one worker across desktop and mobile Chromium
+profiles. The suites verify Tailwind v4 + `@layer ui-sdk` layout parity across
+stretched and inline `ui-segmented-control` bars, single-line sign-in labels in
+English and Czech across Elegant and Cozy styles, onboarding step 4 series
+ledger alignment and inline validation, zero-CLS auth human-check transitions,
+SSR hydration reuse, theme mode/locale/style switching, and visual feedback
+redaction on `[data-slot="share-url"]` and `[data-slot="form-grid"]`.
 
 At `540c8ef4aff250f71ec6d7ffa172f9e7c8c3ff64`, the `@ui-sdk/core` and `@ui-sdk/web`
 migration passed `apps/web` Biome checks, `apps/web` TypeScript typecheck, and all
