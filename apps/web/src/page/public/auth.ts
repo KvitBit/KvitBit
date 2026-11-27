@@ -999,7 +999,7 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
       }
 
       case "SignIn": {
-        return h.div.class("kb-auth-form").children([
+        return h.div.class("kb-auth-form kb-auth-form--sign-in").children([
           h.div.class("kb-auth-header").children([h.h1.children([t.t("auth.signIn.title")])]),
           ...(errorText !== null ? [banner(h, { text: errorText, tone: "error" })] : []),
           segmented(h, {
