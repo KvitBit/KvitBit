@@ -55,6 +55,7 @@ export class Contacts extends Context.Service<
   // @effect-diagnostics-next-line deterministicKeys:off Preserve the service key specified in core-ports.
 >()("kvitbit/Contacts") {}
 
+// biome-ignore lint/security/noSecrets: This literal names the Price List Item Input brand.
 export const PriceListItemInput = Schema.Unknown.pipe(Schema.brand("PriceListItemInput"));
 export type PriceListItemInput = typeof PriceListItemInput.Type;
 /** Partly specified: only the revision used by save (existing) is fixed (open). */

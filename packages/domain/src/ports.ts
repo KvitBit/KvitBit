@@ -127,7 +127,10 @@ export const BlobKey = Schema.String.pipe(Schema.brand("BlobKey"));
 export type BlobKey = typeof BlobKey.Type;
 
 // @effect-diagnostics-next-line preferSchemaTaggedError:off Internal port error translated to a CoreError.
-export class BlobTooLarge extends Data.TaggedError("BlobTooLarge")<{
+export class BlobTooLarge extends Data.TaggedError(
+  // biome-ignore lint/security/noSecrets: This literal is the error's discriminant.
+  "BlobTooLarge",
+)<{
   readonly maxBytes: number;
 }> {}
 // @effect-diagnostics-next-line preferSchemaTaggedError:off Internal port error translated to a CoreError.
