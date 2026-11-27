@@ -1,8 +1,9 @@
 import { Command, type Component, Head, Router, Subscription } from "@effect/ui";
 import { Html, HtmlHead } from "@effect/ui/html";
 import { ViewModels } from "@kvitbit/ui-port";
-import { Array as Arr, Effect, Option, Schema, Stream } from "effect";
-import { authFetch } from "./app/api";
+import { Array as Arr, Effect, Layer, Option, Schema, Stream } from "effect";
+import { createPageviewTracker } from "./app/analytics";
+import { authFetch, StartupConfig } from "./app/api";
 import { apiCommand, browserCommand, type RunApi } from "./app/commands";
 import type { Intent, PendingNavigation } from "./app/intent";
 import type { PageContext } from "./app/page";
@@ -15,6 +16,22 @@ import { browserDates } from "./app/utc-date";
 import { feedbackSubscription } from "./runtime/feedback-subscription";
 
 export { Flags, Message, Model } from "./app/root";
+
+export const browserAnalytics = (origin: string) =>
+  Layer.effectDiscard(
+    Effect.gen(function* () {
+      const router = yield* Router.Router;
+      const config = yield* StartupConfig;
+      const track = createPageviewTracker(origin, async () => {
+        const value = await Effect.runPromise(config);
+        return value.analytics;
+      });
+      track(router.location().url);
+      yield* Stream.runForEach(router.changes, ({ url }) => Effect.sync(() => track(url))).pipe(
+        Effect.forkScoped,
+      );
+    }),
+  );
 
 export class Navigate extends Command.Service<Navigate>()("@kvitbit/web/Navigate", {
   args: { path: Schema.String, replace: Schema.Boolean },
