@@ -3,23 +3,32 @@
  * the server only through `KvitbitApi`; Better Auth routes under `/api/auth` go through the
  * AuthClient port instead.
  */
+
 import { Api } from "@kvitbit/api-contract";
 import type { WorkspaceId } from "@kvitbit/domain/contract";
-import { Context, Effect, Layer, Option, type Redacted } from "effect";
-import {
-  FetchHttpClient,
-  HttpClient,
-  HttpClientError,
-  HttpClientRequest,
-  type HttpClientResponse,
-} from "effect/http";
-import { HttpApiClient } from "effect/http-api";
+import * as Arr from "effect/Array";
+import * as Context from "effect/Context";
+import * as Effect from "effect/Effect";
+import * as Fn from "effect/Function";
+import * as FetchHttpClient from "effect/http/FetchHttpClient";
+import * as HttpClient from "effect/http/HttpClient";
+import * as HttpClientError from "effect/http/HttpClientError";
+import * as HttpClientRequest from "effect/http/HttpClientRequest";
+import type * as HttpClientResponse from "effect/http/HttpClientResponse";
+import * as HttpApiClient from "effect/http-api/HttpApiClient";
+import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
+import * as Rec from "effect/Record";
+import type * as Redacted from "effect/Redacted";
+
 import { annotateFailedResponse, isUiError } from "./errors";
+
+const STRONG_ETAG = /^"(0|[1-9]\d{0,9})"$/;
 
 export type KvitbitApiClient = HttpApiClient.ForApi<typeof Api>;
 
 export class KvitbitApi extends Context.Service<KvitbitApi, KvitbitApiClient>()(
-  "ui-port/KvitbitApi",
+  "@kvitbit/ui-port/api/client/KvitbitApi",
 ) {}
 
 /**
@@ -51,7 +60,7 @@ export interface KvitbitApiConfig {
 }
 
 /** What the last response of a call said, beyond its decoded body (ui-port-contracts 2.3). */
-export interface ObservedResponse {
+interface ObservedResponse {
   readonly status: number;
   readonly requestId: string | null;
   /** Parsed from a strong `ETag: "<revision>"`. */
@@ -71,7 +80,7 @@ export interface ResponseCell {
 }
 
 export class ResponseObserver extends Context.Service<ResponseObserver, ResponseCell>()(
-  "ui-port/ResponseObserver",
+  "@kvitbit/ui-port/api/client/ResponseObserver",
 ) {}
 
 export const emptyResponseCell = (): ResponseCell => ({ current: null });
@@ -81,16 +90,16 @@ interface ExchangeCell {
   response: ObservedResponse | null;
 }
 
-class Exchange extends Context.Service<Exchange, ExchangeCell>()("ui-port/Exchange") {}
+class Exchange extends Context.Service<Exchange, ExchangeCell>()(
+  "@kvitbit/ui-port/api/client/Exchange",
+) {}
 
 const parseEtag = (value: string | undefined): number | null => {
-  const match = value === undefined ? null : /^"(0|[1-9]\d{0,9})"$/.exec(value);
+  const match = value === undefined ? null : STRONG_ETAG.exec(value);
   return match?.[1] === undefined ? null : Number(match[1]);
 };
 
-export const observeResponse = (
-  response: HttpClientResponse.HttpClientResponse,
-): ObservedResponse => ({
+const observeResponse = (response: HttpClientResponse.HttpClientResponse): ObservedResponse => ({
   status: response.status,
   requestId: response.headers["x-request-id"] ?? null,
   etag: parseEtag(response.headers.etag),
@@ -123,7 +132,7 @@ const decodingResponse = <A, E, R>(decoded: Effect.Effect<A, E, R>): Effect.Effe
     return decoded.pipe(
       Effect.tapError((error) =>
         Effect.sync(() => {
-          if (!isUiError(error) && !HttpClientError.isHttpClientError(error)) {
+          if (!(isUiError(error) || HttpClientError.isHttpClientError(error))) {
             annotateFailedResponse(error, response);
           }
         }),
@@ -144,35 +153,42 @@ const publishResponse = (exchange: ExchangeCell) =>
   );
 
 /** Gives every endpoint call of a client its own exchange cell (groups are nested records). */
-const withExchanges = (client: object): object =>
-  Object.fromEntries(
-    Object.entries(client).map(([name, member]: [string, unknown]) => [
-      name,
-      typeof member === "function"
-        ? (...args: ReadonlyArray<unknown>) => {
-            const call: unknown = member(...args);
-            return Effect.isEffect(call)
-              ? Effect.suspend(() => {
-                  const exchange: ExchangeCell = { response: null };
-                  return Effect.provideService(call, Exchange, exchange).pipe(
-                    Effect.tap(() => publishResponse(exchange)),
-                  );
-                })
-              : call;
-          }
-        : typeof member === "object" && member !== null
-          ? withExchanges(member)
-          : member,
-    ]),
-  );
+const withExchanges = <Client extends object>(client: Client): Client => ({
+  ...client,
+  ...Rec.fromEntries(
+    Arr.map(
+      Rec.toEntries(client),
+      ([name, member]: [string, unknown]): readonly [string, unknown] => [
+        name,
+        typeof member === "function"
+          ? (...args: ReadonlyArray<unknown>) => {
+              const call: unknown = member(...args);
+              return Effect.isEffect(call)
+                ? Effect.suspend(() => {
+                    const exchange: ExchangeCell = { response: null };
+                    // The generated client is traversed as data, so this wrapper cannot inspect the endpoint's channels.
+                    // @effect-diagnostics-next-line anyUnknownInErrorContext:off
+                    return Effect.provideService(call, Exchange, exchange).pipe(
+                      Effect.tap(() => publishResponse(exchange)),
+                    );
+                  })
+                : call;
+            }
+          : typeof member === "object" && member !== null
+            ? withExchanges(member)
+            : member,
+      ],
+    ),
+  ),
+});
 
 /** The request pipeline every KvitbitApi call goes through. */
-export const configureClient =
+const configureClient =
   (config: KvitbitApiConfig) =>
   (client: HttpClient.HttpClient): HttpClient.HttpClient => {
-    const base = (config.transformClient ? config.transformClient(client) : client).pipe(
-      recordResponse,
-    );
+    const base = (
+      config.transformClient === undefined ? client : config.transformClient(client)
+    ).pipe(recordResponse);
     const credentials = config.credentials;
     // FetchHttpClient reads RequestInit from the requesting fiber, so set fetch credentials per
     // request, keeping any options the adapter already set. Bearer mode omits cookies so a
@@ -200,7 +216,7 @@ export const configureClient =
     );
   };
 
-export const make = (
+const make = (
   config: KvitbitApiConfig,
 ): Effect.Effect<KvitbitApiClient, never, HttpClient.HttpClient> =>
   Effect.map(
@@ -210,7 +226,7 @@ export const make = (
       transformResponse: decodingResponse,
     }),
     // same shape, each endpoint call now running in its own exchange
-    (client) => withExchanges(client) as KvitbitApiClient,
+    withExchanges,
   );
 
 /** KvitbitApi over the adapter's `HttpClient` (tests inject a mock transport here). */
@@ -226,8 +242,20 @@ export const layerFetch = (config: KvitbitApiConfig): Layer.Layer<KvitbitApi> =>
  * Workspace binding. Every Workspace endpoint takes `workspaceId` as a path parameter (the contract
  * declares no Workspace header); API calls always use the id, never the slug.
  */
-export const inWorkspace = <P extends object = Record<never, never>>(
-  workspaceId: WorkspaceId,
-  params?: P,
-): P & { readonly workspaceId: WorkspaceId } =>
-  ({ ...(params ?? {}), workspaceId }) as P & { readonly workspaceId: WorkspaceId };
+export const inWorkspace: {
+  <P extends object = Record<never, never>>(
+    workspaceId: WorkspaceId,
+    params?: P,
+  ): P & { readonly workspaceId: WorkspaceId };
+  <P extends object = Record<never, never>>(
+    params?: P,
+  ): (workspaceId: WorkspaceId) => P & { readonly workspaceId: WorkspaceId };
+} = Fn.dual(
+  (args) => typeof args[0] === "string",
+  <P extends object = Record<never, never>>(
+    workspaceId: WorkspaceId,
+    params?: P,
+  ): P & { readonly workspaceId: WorkspaceId } =>
+    // biome-ignore lint/nursery/noUnsafeTypeAssertion: When params is supplied, the spread retains all of its fields.
+    ({ ...params, workspaceId }) as P & { readonly workspaceId: WorkspaceId },
+);

@@ -1,8 +1,13 @@
 import { describe, expect, test } from "bun:test";
 import { RateLimited } from "@kvitbit/api-contract";
 import { Invalid, type Page } from "@kvitbit/domain/contract";
-import { Effect, Fiber, Option, Random } from "effect";
-import { TestClock } from "effect/testing";
+import * as Arr from "effect/Array";
+import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
+import * as Option from "effect/Option";
+import * as Random from "effect/Random";
+import * as TestClock from "effect/testing/TestClock";
+
 import {
   type ApiResult,
   Connectivity,
@@ -23,18 +28,20 @@ import {
   uuidV7,
 } from "../../src/api";
 
+const UUID_V7 = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+
 describe("query builders", () => {
   test("pageQuery cleans filters, adds limit 50 and the cursor", () => {
     expect(pageQuery({ text: " ", role: "customer", status: undefined })).toEqual({
       role: "customer",
       limit: 50,
-    } as never);
+    });
     expect(pageQuery({ text: "a" }, "c", 500)).toEqual({ text: "a", cursor: "c", limit: 100 });
   });
   test("filterHash ignores key order and empty values", () => {
     expect(filterHash({ a: 1, b: "x", c: "" })).toBe(filterHash({ b: "x", a: 1 }));
     expect(filterHash({ a: 1 })).not.toBe(filterHash({ a: 2 }));
-    expect(cleanFilters({ a: null, b: 0 })).toEqual({ b: 0 } as never);
+    expect(cleanFilters({ a: null, b: 0 })).toEqual({ b: 0 });
   });
 });
 
@@ -51,7 +58,9 @@ describe("Remote", () => {
   });
 });
 
-type Q = { readonly text?: string };
+interface Q {
+  readonly text?: string;
+}
 const page = (items: Array<number>, nextCursor: string | null): ApiResult<Page<number>> =>
   ok({ items, nextCursor });
 
@@ -79,7 +88,7 @@ describe("Paged", () => {
   test("cursor mismatch reloads silently; other errors fail", () => {
     const ready = Paged.receive(Paged.init<number, Q>({}).paged, 1, page([1], "c2")).paged;
     const more = Paged.loadMore(ready).paged;
-    const mismatch = new Invalid({ issues: [{ path: ["cursor"], code: "page.cursor_mismatch" }] });
+    const mismatch = Invalid.make({ issues: [{ path: ["cursor"], code: "page.cursor_mismatch" }] });
     const reloaded = Paged.receive(more, more.seq, err(mismatch));
     expect(reloaded.paged).toMatchObject({ status: "loading", error: Option.none(), seq: 3 });
     expect(reloaded.fetch?.query).toEqual({ limit: 50 });
@@ -93,9 +102,12 @@ describe("Paged", () => {
 });
 
 describe("optimistic updates", () => {
-  type Row = { readonly id: string; readonly locked: boolean };
+  interface Row {
+    readonly id: string;
+    readonly locked: boolean;
+  }
   const ops = optimisticList<Row>((row) => row.id);
-  const rows: ReadonlyArray<Row> = [
+  const rows: readonly [Row, Row, Row] = [
     { id: "a", locked: false },
     { id: "b", locked: false },
     { id: "c", locked: false },
@@ -107,12 +119,12 @@ describe("optimistic updates", () => {
       _tag: "Replace",
       item: { id: "c", locked: true },
     });
-    expect(locked.state.value.map((r) => r.id)).toEqual(["a", "c"]);
+    expect(Arr.map(locked.state.value, (r) => r.id)).toEqual(["a", "c"]);
     expect(ops.isPending(locked.state, "b")).toBe(true);
     expect(locked.state.pending[0]?.before).toBe(rows);
 
     const rolledBack = ops.rollback(locked.state, archived.seq);
-    expect(rolledBack.value).toEqual([rows[0], rows[1], { id: "c", locked: true }] as never);
+    expect(rolledBack.value).toEqual([rows[0], rows[1], { id: "c", locked: true }]);
     expect(ops.isPending(rolledBack, "b")).toBe(false);
   });
 
@@ -136,7 +148,7 @@ describe("optimistic updates", () => {
   test("confirm folds the op into the base; unknown seq is ignored", () => {
     const applied = ops.apply(ops.init(rows), "a", { _tag: "Remove", id: "a" });
     const confirmed = ops.confirm(applied.state, applied.seq);
-    expect(confirmed.base.map((r) => r.id)).toEqual(["b", "c"]);
+    expect(Arr.map(confirmed.base, (r) => r.id)).toEqual(["b", "c"]);
     expect(confirmed.pending).toEqual([]);
     expect(ops.rollback(confirmed, applied.seq)).toBe(confirmed);
     expect(ops.confirm(confirmed, 99)).toBe(confirmed);
@@ -151,7 +163,7 @@ describe("retry and connectivity", () => {
     expect(retryDelayMillis(UiError.offline, 5)).toBe(16_000);
     expect(retryDelayMillis(UiError.offline, 6)).toBeNull();
     expect(retryDelayMillis(UiError.cancelled, 1)).toBeNull();
-    expect(retryDelayMillis({ _tag: "RateLimited", retryAfterSeconds: 7 } as never, 1)).toBe(7_000);
+    expect(retryDelayMillis(RateLimited.make({ retryAfterSeconds: 7 }), 1)).toBe(7_000);
   });
 
   test("RetryState disables the control until notBefore", () => {
@@ -191,7 +203,7 @@ describe("retry and connectivity", () => {
       calls++;
       return Effect.fail(UiError.cancelled);
     });
-    await Effect.runPromise(Effect.exit(retryTransient(fatal, fast)));
+    await retryTransient(fatal, fast).pipe(Effect.runPromiseExit);
     expect(calls).toBe(1);
   });
 
@@ -200,11 +212,11 @@ describe("retry and connectivity", () => {
     const limited = Effect.suspend(() => {
       calls++;
       return calls === 1
-        ? Effect.fail(new RateLimited({ retryAfterSeconds: 30 }))
+        ? Effect.fail(RateLimited.make({ retryAfterSeconds: 30 }))
         : Effect.succeed("ok");
     });
     const program = Effect.gen(function* () {
-      const fiber = yield* Effect.forkChild(retryTransient(limited));
+      const fiber = yield* limited.pipe(retryTransient(), Effect.forkChild);
       yield* TestClock.adjust("29 seconds");
       const early = calls;
       yield* TestClock.adjust("1 second");
@@ -222,20 +234,20 @@ describe("retry and connectivity", () => {
 describe("request keys", () => {
   test("uuidV7 has version 7 and the RFC variant, and matches IdempotencyKey", async () => {
     const id = await Effect.runPromise(uuidV7.pipe(Random.withSeed("seed")));
-    expect(id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+    expect(id).toMatch(UUID_V7);
   });
 
   test("a key is reused until success, then cleared", async () => {
-    const key = await Effect.runPromise(ensureRequestKey(Option.none()));
+    const key = await Option.none().pipe(ensureRequestKey, Effect.runPromise);
     const kept = keyAfter(Option.some(key), { _tag: "Err", error: UiError.offline });
-    expect(await Effect.runPromise(ensureRequestKey(kept))).toBe(key);
+    expect(await kept.pipe(ensureRequestKey, Effect.runPromise)).toBe(key);
     expect(keyAfter(kept, { _tag: "Ok" })).toEqual(Option.none());
   });
 });
 
 describe("council follow-ups", () => {
   test("cleanFilters drops paging fields", () => {
-    expect(pageQuery({ text: "a", cursor: "x", limit: 3 } as { text: string }, null)).toEqual({
+    expect(pageQuery({ text: "a", cursor: "x", limit: 3 }, null)).toEqual({
       text: "a",
       limit: 50,
     });
@@ -243,7 +255,7 @@ describe("council follow-ups", () => {
 
   test("a first-page cursor mismatch fails instead of reloading forever", () => {
     const start = Paged.init<number, Q>({});
-    const mismatch = new Invalid({ issues: [{ path: ["cursor"], code: "page.cursor_mismatch" }] });
+    const mismatch = Invalid.make({ issues: [{ path: ["cursor"], code: "page.cursor_mismatch" }] });
     const step = Paged.receive(start.paged, start.paged.seq, err(mismatch));
     expect(step.fetch).toBeNull();
     expect(step.paged.status).toBe("failed");
@@ -277,21 +289,21 @@ describe("council follow-ups", () => {
       calls++;
       return Effect.fail(UiError.unexpected(201, null));
     });
-    await Effect.runPromise(Effect.exit(retryTransient(malformed, fast)));
+    await retryTransient(malformed, fast).pipe(Effect.runPromiseExit);
     expect(calls).toBe(1);
     calls = 0;
     const longWait = Effect.suspend(() => {
       calls++;
-      return Effect.fail(new RateLimited({ retryAfterSeconds: 60 }));
+      return Effect.fail(RateLimited.make({ retryAfterSeconds: 60 }));
     });
-    await Effect.runPromise(Effect.exit(retryTransient(longWait, fast)));
+    await retryTransient(longWait, fast).pipe(Effect.runPromiseExit);
     expect(calls).toBe(1);
   });
 });
 
 describe("cleaned filters are optional in the type too", () => {
   test("a blank required filter is absent at runtime and optional in the type", () => {
-    const query = pageQuery({ text: "  " as string });
+    const query = pageQuery({ text: "  " });
     const text: string | undefined = query.text;
     expect(text).toBeUndefined();
     expect("text" in query).toBe(false);

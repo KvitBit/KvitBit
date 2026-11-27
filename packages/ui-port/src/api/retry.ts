@@ -4,7 +4,12 @@
  * Effect-level retry for retryable failures, which keeps the same Idempotency-Key by construction
  * because it re-runs the same request.
  */
-import { Duration, Effect, Random } from "effect";
+
+import * as Duration from "effect/Duration";
+import * as Effect from "effect/Effect";
+import * as Fn from "effect/Function";
+import * as Random from "effect/Random";
+
 import { isAutoRetryable, isRetryable, retryAfterSeconds, toUiError, type UiError } from "./errors";
 
 export interface Backoff {
@@ -14,7 +19,7 @@ export interface Backoff {
   readonly maxAttempts: number;
 }
 
-export const DEFAULT_BACKOFF: Backoff = {
+const DEFAULT_BACKOFF: Backoff = {
   baseMillis: 1_000,
   factor: 2,
   maxMillis: 30_000,
@@ -26,21 +31,27 @@ export const DEFAULT_BACKOFF: Backoff = {
  * (RateLimited, Unavailable) wins over the exponential delay. `jitter` in [0, 1) spreads clients
  * between half and the full delay.
  */
-export const retryDelayMillis = (
-  error: UiError,
-  attempt: number,
-  jitter = 1,
-  backoff: Backoff = DEFAULT_BACKOFF,
-): number | null => {
-  if (!isRetryable(error) || attempt > backoff.maxAttempts) return null;
-  const after = retryAfterSeconds(error);
-  if (after !== null) return after * 1_000;
-  const exponential = Math.min(
-    backoff.maxMillis,
-    backoff.baseMillis * backoff.factor ** (attempt - 1),
-  );
-  return Math.round(exponential * (0.5 + 0.5 * Math.min(1, Math.max(0, jitter))));
-};
+export const retryDelayMillis: {
+  (attempt: number, jitter?: number, backoff?: Backoff): (error: UiError) => number | null;
+  (error: UiError, attempt: number, jitter?: number, backoff?: Backoff): number | null;
+} = Fn.dual(
+  (args) => typeof args[0] === "object",
+  (
+    error: UiError,
+    attempt: number,
+    jitter = 1,
+    backoff: Backoff = DEFAULT_BACKOFF,
+  ): number | null => {
+    if (!isRetryable(error) || attempt > backoff.maxAttempts) return null;
+    const after = retryAfterSeconds(error);
+    if (after !== null) return after * 1_000;
+    const exponential = Math.min(
+      backoff.maxMillis,
+      backoff.baseMillis * backoff.factor ** (attempt - 1),
+    );
+    return Math.round(exponential * (0.5 + 0.5 * Math.min(1, Math.max(0, jitter))));
+  },
+);
 
 /** Retry state of one control or queued job. */
 export interface RetryState {
@@ -79,26 +90,32 @@ const secondsLeft = (state: RetryState, now: number): number =>
  * countdown. The last failure propagates. Wrap it inside `attempt`: the call timeout then bounds all
  * attempts together, and each replay keeps the request's Idempotency-Key.
  */
-export const retryTransient = <A, E, R>(
-  effect: Effect.Effect<A, E, R>,
-  backoff: Backoff = DEFAULT_BACKOFF,
-): Effect.Effect<A, E, R> => {
-  const loop = (attempt: number): Effect.Effect<A, E, R> =>
-    effect.pipe(
-      Effect.catch((error: E) =>
-        Effect.flatMap(Random.next, (jitter) => {
-          const uiError = toUiError(error);
-          const delay = isAutoRetryable(uiError)
-            ? retryDelayMillis(uiError, attempt, jitter, backoff)
-            : null;
-          return delay === null || delay > backoff.maxMillis
-            ? Effect.fail(error)
-            : Effect.sleep(Duration.millis(delay)).pipe(Effect.andThen(loop(attempt + 1)));
-        }),
-      ),
-    );
-  return loop(1);
-};
+export const retryTransient: {
+  (backoff?: Backoff): <A, E, R>(effect: Effect.Effect<A, E, R>) => Effect.Effect<A, E, R>;
+  <A, E, R>(effect: Effect.Effect<A, E, R>, backoff?: Backoff): Effect.Effect<A, E, R>;
+} = Fn.dual(
+  (args) => Effect.isEffect(args[0]),
+  <A, E, R>(
+    effect: Effect.Effect<A, E, R>,
+    backoff: Backoff = DEFAULT_BACKOFF,
+  ): Effect.Effect<A, E, R> => {
+    const loop = (attempt: number): Effect.Effect<A, E, R> =>
+      effect.pipe(
+        Effect.catch((error: E) =>
+          Effect.flatMap(Random.next, (jitter) => {
+            const uiError = toUiError(error);
+            const delay = isAutoRetryable(uiError)
+              ? retryDelayMillis(uiError, attempt, jitter, backoff)
+              : null;
+            return delay === null || delay > backoff.maxMillis
+              ? Effect.fail(error)
+              : Effect.sleep(Duration.millis(delay)).pipe(Effect.andThen(loop(attempt + 1)));
+          }),
+        ),
+      );
+    return loop(1);
+  },
+);
 
 // --- connectivity -------------------------------------------------------------------------------
 

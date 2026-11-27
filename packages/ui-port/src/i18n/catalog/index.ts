@@ -1,3 +1,4 @@
+import * as Rec from "effect/Record";
 import type { Locale } from "../locale";
 import type { AnyMessage } from "../types";
 import { cs } from "./cs";
@@ -14,7 +15,7 @@ export const catalogs: Readonly<Record<Locale, Readonly<Record<MessageKey, AnyMe
   cs,
 };
 
-export const MESSAGE_KEYS = Object.keys(en) as ReadonlyArray<MessageKey>;
+export const MESSAGE_KEYS = Rec.keys(en);
 
 const keySet: ReadonlySet<string> = new Set(MESSAGE_KEYS);
 
