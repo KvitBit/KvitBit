@@ -5,7 +5,7 @@ description: >-
   changes to apps/web/src, the web entry or build configuration, or
   packages/ui-port/src/theme.
 metadata:
-  sync_commit: "383766ac036a7dfe79ace530bcd508e3c32c3740"
+  sync_commit: "9eebe90707afb70b0c6235683337de28f7f27c57"
   bun: "1.4.4"
   node: "24.18.0"
   effect: "4.1.4"
@@ -79,10 +79,11 @@ that record in a verification commit after the product changes.
 
 ## Verification record
 
-The recorded product commit passed root lint and typecheck, all 183 web
-tests, and the formal digest check. The lockfile was unchanged. The static
-build contained `dist/index.html`, hashed JavaScript and CSS, brand assets,
-and fonts. All 56 smoke and feedback tests passed on port `34181` with one
+At `383766ac036a7dfe79ace530bcd508e3c32c3740`, the segmented control change
+passed root lint and typecheck, all 183 web tests, and the formal digest
+check. The lockfile was unchanged. The static build contained
+`dist/index.html`, hashed JavaScript and CSS, brand assets, and fonts.
+All 56 smoke and feedback tests passed on port `34181` with one
 worker across desktop and mobile Chromium profiles. The smoke suite covers
 stretched and inline segmented controls in English and Czech, including
 equal-width sign-up options, single-line sign-in labels, and word fit in a
@@ -100,6 +101,25 @@ with one worker across desktop and mobile Chromium profiles. The smoke suite
 verifies that `/sign-in` renders concise method selector labels on a single
 line without overflow in both English and Czech across Elegant and Cozy
 styles while keeping the full passkey action label on the submit button.
+
+At `95fdee1c534309442ab9ab8923a4bab1dbf7e800`, the feedback shortcut passed the frozen
+install, root lint and typecheck, `bun test apps/web`, and the formal digest
+check. The static build contained the lazy feedback chunk, ALTCHA worker,
+hashed JavaScript and CSS, brand assets, and Fontshare TTFs.
+
+The smoke and feedback Playwright suites passed on port `47683` with one
+worker across desktop and mobile Chromium profiles. The feedback suite
+checks that verified owners can pin elements, retry a submission, and
+receive its issue link. It checks that non-owners skip the picker chunk,
+that pins omit private links and entered form values, and that signing
+out removes the picker. A failed mount restores browser diagnostics.
+The selector unit test declines a pin when its bounded path matches
+multiple elements.
+
+The shortcut tests exercise `k` toggling, editable fields including the
+shadow DOM composer, pending submission, the pin limit, pathname changes,
+and listener removal on sign-out. The desktop workspace switcher still
+responds to Ctrl+K and Cmd+K.
 
 At `c54559c3a9ab795c44f08d4584e6a28c88074466`, Chromium and Firefox
 loaded all bundled fonts without console warnings.
