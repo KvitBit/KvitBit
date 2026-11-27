@@ -1470,14 +1470,6 @@
     url = "https://registry.npmjs.org/@types/yargs/-/yargs-17.0.35.tgz";
     hash = "sha512-qUHkeCyQFxMXg79wQfTtfndEC+N9ZZg76HJftDJp+qH2tV7Gj4OJi7l+PiWwJ+pWtW8GwSmqsDj/oymhrTWXjg==";
   };
-  "@ui-sdk/core@0.1.0-beta.16" = fetchurl {
-    url = "https://registry.npmjs.org/@ui-sdk/core/-/core-0.1.0-beta.16.tgz";
-    hash = "sha512-I2GMqOviLS/lYfIj2lTqKLbae0V9uSnysK+bSdbhuw2De8zNvrLZiDTc0qzsPNiZvB/bMmUZJS5UDA5Q2Pq4Ng==";
-  };
-  "@ui-sdk/web@0.1.0-beta.16" = fetchurl {
-    url = "https://registry.npmjs.org/@ui-sdk/web/-/web-0.1.0-beta.16.tgz";
-    hash = "sha512-nnHnx06aEQ7CWjK3cNG8vIRhvKleAdrc3scxgIyLAMpDI+J0Zo0XqvN4xUwLq1rIEvLb1ZKikE5NCJuzgnWaBA==";
-  };
   "@ungap/structured-clone@1.4.0" = fetchurl {
     url = "https://registry.npmjs.org/@ungap/structured-clone/-/structured-clone-1.4.0.tgz";
     hash = "sha512-1mEZtMKPM09vDmQt5y7YvmN2+DFTP7Tg0EWXdic8/C6VRnpb33e4ghisCIE3WZjsE2N8mf+QV1Zqh7ZFYLWInQ==";
@@ -1565,10 +1557,6 @@
   "asn1js@3.1.0" = fetchurl {
     url = "https://registry.npmjs.org/asn1js/-/asn1js-3.1.0.tgz";
     hash = "sha512-HWYi1THkOqguCiO+vwj09ZkQFD2kKEsejYHAYCtX0D80WVdoDnvRc9IukXX/jeb0T9NRWJnRtqwdbHltnFjwXA==";
-  };
-  "await-lock@2.2.2" = fetchurl {
-    url = "https://registry.npmjs.org/await-lock/-/await-lock-2.2.2.tgz";
-    hash = "sha512-aDczADvlvTGajTDjcjpJMqRkOF6Qdz3YbPZm/PyW6tKPkx2hlYBzxMhEywM/tU72HrVZjgl5VCdRuMlA7pZ8Gw==";
   };
   "babel-plugin-polyfill-corejs2@0.4.17" = fetchurl {
     url = "https://registry.npmjs.org/babel-plugin-polyfill-corejs2/-/babel-plugin-polyfill-corejs2-0.4.17.tgz";
@@ -1938,10 +1926,6 @@
     url = "https://registry.npmjs.org/etag/-/etag-1.8.1.tgz";
     hash = "sha512-aIL5Fx7mawVa300al2BnEE4iNvo1qETxLrPI/o05L7z6go7fCw1J6EQmbK4FmJ2AS7kgVF/KEZWufBfdClMcPg==";
   };
-  "expo-application@58.1.2" = fetchurl {
-    url = "https://registry.npmjs.org/expo-application/-/expo-application-58.1.2.tgz";
-    hash = "sha512-WYFdNHGaxe/j69oYREhK0cKsKYszuIuz399WXYCP+M1grfO+FCWB/RbuMgaXJsLWlzqhNjA/zLgfJ+33FwrQvw==";
-  };
   "expo-asset@58.0.21" = fetchurl {
     url = "https://registry.npmjs.org/expo-asset/-/expo-asset-58.0.21.tgz";
     hash = "sha512-qaJmuTtswggXdBQfiUdpxrVGM7l+tH8iEDHwVDMuxyCF/kAau8sUGVuWrDKYNW4yAx7Z8ncgsT8s27pXjRH5GA==";
@@ -1985,10 +1969,6 @@
   "expo-glass-effect@58.0.6" = fetchurl {
     url = "https://registry.npmjs.org/expo-glass-effect/-/expo-glass-effect-58.0.6.tgz";
     hash = "sha512-2lkGh1LucDm9rG6jjXf1ZoqIqfsrVaSBYPyL5PT+MDmyZIp0iFxNb3kt6rxJRH8zsSoOvre2+yHoUbD/hxxAgg==";
-  };
-  "expo-haptics@58.0.8" = fetchurl {
-    url = "https://registry.npmjs.org/expo-haptics/-/expo-haptics-58.0.8.tgz";
-    hash = "sha512-hxW9LoJQhAJ4hRlGx0DZ10ncs2NFqC/0nfKSnGy1PcpH6e8dJ4/oJO9eOcAG/vFg8k5oonbZkWL7RK9G3729Tg==";
   };
   "expo-image-loader@58.0.3" = fetchurl {
     url = "https://registry.npmjs.org/expo-image-loader/-/expo-image-loader-58.0.3.tgz";
@@ -2062,10 +2042,6 @@
     url = "https://registry.npmjs.org/expo-splash-screen/-/expo-splash-screen-58.0.15.tgz";
     hash = "sha512-yPgRWGhmhdbvF7kVPOymQXtiB6l3yuDYaGM24wQY39QYPDXk004CZul2f0DWZxJwgKcmPKC65LbBrcosqnmmxQ==";
   };
-  "expo-sqlite@58.0.18" = fetchurl {
-    url = "https://registry.npmjs.org/expo-sqlite/-/expo-sqlite-58.0.18.tgz";
-    hash = "sha512-EbRG/tb4Q+M28sZUY+58TSRrj/bK3RBOoGG8xXeobOJnMuBCMhstoKZlTJpu79ydzqURO5TXdbVhqk9suh39rQ==";
-  };
   "expo-status-bar@58.0.5" = fetchurl {
     url = "https://registry.npmjs.org/expo-status-bar/-/expo-status-bar-58.0.5.tgz";
     hash = "sha512-Lq1h7QpNY2FY7+Dyrn15atrFZs1Yd4IfMfhwyyWb3TqWc+vwtYZH54W9VhhjqXtgitXe+RVAX7YZoCekjbLmug==";
@@ -2089,10 +2065,6 @@
   "expo-updates@58.0.23" = fetchurl {
     url = "https://registry.npmjs.org/expo-updates/-/expo-updates-58.0.23.tgz";
     hash = "sha512-fffmDGWbkxhGOLuqlNn1rW8Mh/fnyODUi4rA0kcgs2mOnHXAPa3w8Co/kaosX8DLF4QsON7fJt79ZUKgMxlk6w==";
-  };
-  "expo-web-browser@58.1.0" = fetchurl {
-    url = "https://registry.npmjs.org/expo-web-browser/-/expo-web-browser-58.1.0.tgz";
-    hash = "sha512-WNMMTyrXkKQt6Id7u4GnwrWO8UFw/cVl7oSUUwyo1X14lKdc7uE+1poW9VCuXzOog7QOjmQytBclWdeDW75K1A==";
   };
   "expo@58.0.26" = fetchurl {
     url = "https://registry.npmjs.org/expo/-/expo-58.0.26.tgz";
