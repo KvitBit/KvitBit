@@ -44,7 +44,9 @@ describe("Uniwind theme contract", () => {
       ),
     );
     syncUniwindTheme(lightTheme);
-    const expectedLight = uniwindThemeVariables(effectiveTheme(initialThemeState("light")));
+    const expectedLight = uniwindThemeVariables(
+      effectiveTheme(initialThemeState({ scheme: "light" })),
+    );
     expect(state?.currentTheme).toBe("light");
     expect(state?.vars.light?.["--color-primary"]).toBe(expectedLight["--color-primary"]);
     expect(state?.vars.light?.["--radius-panel"]).toBe("4px");

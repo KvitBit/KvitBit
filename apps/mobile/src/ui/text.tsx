@@ -58,7 +58,7 @@ export function Text({
   return (
     <RNText
       {...rest}
-      className={className}
+      {...(className === undefined ? {} : { className })}
       maxFontSizeMultiplier={2}
       style={[
         textStyle(font),
