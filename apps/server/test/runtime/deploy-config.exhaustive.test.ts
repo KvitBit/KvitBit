@@ -75,6 +75,7 @@ type OriginCase =
   | "https_sub_localhost_dot"
   | "https_127"
   | "https_ipv6_loopback"
+  | "https_ipv6_mapped_loopback"
   | "invalid_url";
 
 const ORIGIN_VALUES: Readonly<Record<OriginCase, string | undefined>> = {
@@ -87,6 +88,7 @@ const ORIGIN_VALUES: Readonly<Record<OriginCase, string | undefined>> = {
   https_sub_localhost_dot: "https://sub.localhost.",
   https_127: "https://127.0.0.1:8443",
   https_ipv6_loopback: "https://[::1]:8443",
+  https_ipv6_mapped_loopback: "https://[::ffff:127.0.0.1]",
   invalid_url: "not-a-url",
 };
 
@@ -115,17 +117,23 @@ type EmailSecretsCase =
   | "both_valid"
   | "both_smtp_invalid";
 
-type EmailFromCase = "absent" | "valid" | "invalid" | "invalid_double_dot";
+type EmailFromCase =
+  | "absent"
+  | "valid"
+  | "invalid"
+  | "invalid_double_dot"
+  | "invalid_overlong_label";
 
 const EMAIL_FROM_VALUES: Readonly<Record<EmailFromCase, string | undefined>> = {
   absent: undefined,
   valid: "Kvitbit <noreply@kvitbit.cz>",
   invalid: "invalid-from",
   invalid_double_dot: "a..b@example.org",
+  invalid_overlong_label: `a@${"b".repeat(64)}.org`,
 };
 
 const isInvalidFromCase = (from: EmailFromCase): boolean =>
-  from === "invalid" || from === "invalid_double_dot";
+  from === "invalid" || from === "invalid_double_dot" || from === "invalid_overlong_label";
 
 const oracleEmail = (
   env: KvitbitEnv,
@@ -291,7 +299,7 @@ describe("verify-deploy-config: apps/server runtime contract", () => {
     expect(checked).toBe(49);
   });
 
-  test("validateServerRuntimeEnv matches oracle across full 215,040-state Cartesian product", () => {
+  test("validateServerRuntimeEnv matches oracle across full 295,680-state Cartesian product", () => {
     const envInputs: ReadonlyArray<{
       readonly label: string;
       readonly kvitbitEnv?: string;
@@ -331,6 +339,7 @@ describe("verify-deploy-config: apps/server runtime contract", () => {
       "https_sub_localhost_dot",
       "https_127",
       "https_ipv6_loopback",
+      "https_ipv6_mapped_loopback",
       "invalid_url",
     ];
     const emailModes: ReadonlyArray<EmailModeCase> = [
@@ -356,6 +365,7 @@ describe("verify-deploy-config: apps/server runtime contract", () => {
       "valid",
       "invalid",
       "invalid_double_dot",
+      "invalid_overlong_label",
     ];
     const blobDrivers: ReadonlyArray<BlobDriverCase> = ["absent", "gcs", "local", "bogus"];
     const blobBuckets: ReadonlyArray<BlobBucketCase> = ["absent", "present"];
@@ -466,10 +476,10 @@ describe("verify-deploy-config: apps/server runtime contract", () => {
     }
 
     expect(failures).toEqual([]);
-    expect(total).toBe(215_040);
+    expect(total).toBe(295_680);
     expect(prodAccepted).toBeGreaterThan(0);
     expect(stagingPreviewExplicitNonProdAccepted).toBeGreaterThan(0);
-  });
+  }, 30_000);
 
   test("core DB/auth secrets and forbidden opt-out flags across pure validator AND live loadBootRuntimeConfig", async () => {
     const coreCases = [
@@ -510,14 +520,19 @@ describe("verify-deploy-config: apps/server runtime contract", () => {
     }
     expect(coreChecked).toBe(50);
 
-    const optOutKeys = [...FORBIDDEN_OPT_OUT_ENV_VARS, "KVITBIT_DISABLE_CUSTOM"] as const;
+    const optOutKeys = [
+      ...FORBIDDEN_OPT_OUT_ENV_VARS,
+      "KVITBIT_DISABLE_CUSTOM",
+      "KVITBIT_DISABLE_HTTP_2",
+    ] as const;
     let optOutChecked = 0;
     let liveOptOutChecked = 0;
+    let fallbackOptOutChecked = 0;
     for (const workload of SERVER_WORKLOADS) {
       for (const env of KVITBIT_ENVS) {
         for (const key of optOutKeys) {
           optOutChecked++;
-          const envMap: Record<string, string> = {
+          const baseEnvMap: Record<string, string> = {
             KVITBIT_ENV: env,
             DATABASE_URL: "postgres://a/b",
             BETTER_AUTH_SECRET: "secret",
@@ -526,12 +541,12 @@ describe("verify-deploy-config: apps/server runtime contract", () => {
             RESEND_API_KEY: "re_key",
             KVITBIT_BLOB_DRIVER: "gcs",
             KVITBIT_BLOB_BUCKET: "kvitbit-blobs",
-            [key]: "true",
           };
+          const envMap: Record<string, string> = { ...baseEnvMap, [key]: "true" };
           const res = validateServerRuntimeEnv(envMap, workload);
           expect(res.ok, `pure ${workload} ${env} ${key}`).toBe(false);
 
-          // Live Effect loader must also reject every dynamic forbidden flag.
+          // Live Effect loader must reject every dynamic forbidden flag (including Array nodes).
           liveOptOutChecked++;
           const live = await Effect.runPromise(
             loadBootRuntimeConfig(workload).pipe(
@@ -540,37 +555,69 @@ describe("verify-deploy-config: apps/server runtime contract", () => {
             ),
           );
           expect(live._tag, `live ${workload} ${env} ${key}`).toBe("Failure");
+
+          // Composed fallback ConfigProvider (primary valid env + fallback forbidden flag) must also fail.
+          fallbackOptOutChecked++;
+          const composed = ConfigProvider.orElse(
+            ConfigProvider.fromEnv({ env: baseEnvMap }),
+            ConfigProvider.fromEnv({ env: { [key]: "true" } }),
+          );
+          const liveFallback = await Effect.runPromise(
+            loadBootRuntimeConfig(workload).pipe(
+              Effect.provide(ConfigProvider.layer(composed)),
+              Effect.result,
+            ),
+          );
+          expect(liveFallback._tag, `fallback ${workload} ${env} ${key}`).toBe("Failure");
         }
       }
     }
-    expect(optOutChecked).toBe(80);
-    expect(liveOptOutChecked).toBe(80);
+    expect(optOutChecked).toBe(90);
+    expect(liveOptOutChecked).toBe(90);
+    expect(fallbackOptOutChecked).toBe(90);
 
     // Upgrade preservation: NODE_ENV=production with empty KVITBIT_ENV and configured Resend stays in production (never capture).
+    const upgradedEnv: Record<string, string> = {
+      NODE_ENV: "production",
+      KVITBIT_ENV: "",
+      DATABASE_URL: "postgres://a/b",
+      BETTER_AUTH_SECRET: "secret",
+      APP_ORIGIN: "https://kvitbit.cz",
+      EMAIL_FROM: "Kvitbit <noreply@kvitbit.cz>",
+      RESEND_API_KEY: "re_key",
+      KVITBIT_BLOB_DRIVER: "gcs",
+      KVITBIT_BLOB_BUCKET: "kvitbit-blobs",
+    };
     const upgraded = await Effect.runPromise(
       loadBootRuntimeConfig("server").pipe(
-        Effect.provide(
-          ConfigProvider.layer(
-            ConfigProvider.fromEnv({
-              env: {
-                NODE_ENV: "production",
-                KVITBIT_ENV: "",
-                DATABASE_URL: "postgres://a/b",
-                BETTER_AUTH_SECRET: "secret",
-                APP_ORIGIN: "https://kvitbit.cz",
-                EMAIL_FROM: "Kvitbit <noreply@kvitbit.cz>",
-                RESEND_API_KEY: "re_key",
-                KVITBIT_BLOB_DRIVER: "gcs",
-                KVITBIT_BLOB_BUCKET: "kvitbit-blobs",
-              },
-            }),
-          ),
-        ),
+        Effect.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env: upgradedEnv }))),
       ),
     );
     expect(upgraded.env).toBe("production");
     expect(upgraded.email.mode).toBe("resend");
-  });
+
+    // Boundary checks: RFC 1035 63-octet label & public IPv4-mapped IPv6 accepted; 64-octet TLD & [::ffff:0.0.0.0] rejected.
+    expect(
+      validateServerRuntimeEnv({ ...upgradedEnv, EMAIL_FROM: `a@${"b".repeat(63)}.org` }, "server")
+        .ok,
+    ).toBe(true);
+    expect(
+      validateServerRuntimeEnv(
+        { ...upgradedEnv, APP_ORIGIN: "https://[::ffff:192.0.2.1]" },
+        "server",
+      ).ok,
+    ).toBe(true);
+    expect(
+      validateServerRuntimeEnv(
+        { ...upgradedEnv, EMAIL_FROM: `a@example.${"c".repeat(64)}` },
+        "server",
+      ).ok,
+    ).toBe(false);
+    expect(
+      validateServerRuntimeEnv({ ...upgradedEnv, APP_ORIGIN: "https://[::ffff:0.0.0.0]" }, "server")
+        .ok,
+    ).toBe(false);
+  }, 30_000);
 
   test("real Effect layers (makeEmailSenderLayer, makeBlobStorageLayer, MobileConfigLive) match oracle", async () => {
     // 1. makeEmailSenderLayer: 5 envs x 7 modes x 4 secrets x 2 froms = 280 real layer builds
@@ -744,14 +791,14 @@ describe("verify-deploy-config: apps/server runtime contract", () => {
       }
     }
     expect(mobileChecked).toBe(480);
-  });
+  }, 30_000);
 });
 
 // -----------------------------------------------------------------------------
 // 3. infra/alchemy exhaustive checks + cross-layer soundness (Alchemy -> server)
 
 describe("verify-deploy-config: infra/alchemy stack validation & cross-layer soundness", () => {
-  test("validateStackConfigSync matches oracle across all 150,528 states and proves cross-layer soundness to apps/server", () => {
+  test("validateStackConfigSync matches oracle across all 215,040 states and proves cross-layer soundness to apps/server", () => {
     const deployModeCases = [
       { label: "normal", bootstrapFoundation: false, bootstrapFeedbackSecret: false },
       { label: "bootstrap_foundation", bootstrapFoundation: true, bootstrapFeedbackSecret: false },
@@ -768,6 +815,7 @@ describe("verify-deploy-config: infra/alchemy stack validation & cross-layer sou
       "http_public",
       "https_localhost",
       "https_localhost_dot",
+      "https_ipv6_mapped_loopback",
       "http_localhost",
       "invalid_url",
     ];
@@ -791,6 +839,7 @@ describe("verify-deploy-config: infra/alchemy stack validation & cross-layer sou
       "valid",
       "invalid",
       "invalid_double_dot",
+      "invalid_overlong_label",
     ];
     const edgeCases = [
       { label: "none", edge: undefined },
@@ -1023,11 +1072,11 @@ describe("verify-deploy-config: infra/alchemy stack validation & cross-layer sou
     }
 
     expect(failures).toEqual([]);
-    expect(total).toBe(150_528);
+    expect(total).toBe(215_040);
     expect(prodNormalAccepted).toBeGreaterThan(0);
     expect(stagingNormalAccepted).toBeGreaterThan(0);
     expect(crossLayerVerified).toBe(prodNormalAccepted + stagingNormalAccepted);
-  });
+  }, 30_000);
 
   test("rejects missing core secret consumers and dynamic forbidden flags in live loadStackConfig", async () => {
     const baseProd = (secrets: KvitbitStackConfig["secrets"]): KvitbitStackConfig => ({
@@ -1088,28 +1137,45 @@ describe("verify-deploy-config: infra/alchemy stack validation & cross-layer sou
       ).ok,
     ).toBe(false);
 
-    // Live Alchemy loader rejects every forbidden flag dynamically via ConfigProvider.
-    for (const key of [...FORBIDDEN_OPT_OUT_ENV_VARS, "KVITBIT_DISABLE_CUSTOM"] as const) {
+    // Live Alchemy loader rejects every forbidden flag dynamically (direct, Array node, and composed fallback ConfigProvider).
+    const baseStackEnv = {
+      KVITBIT_IMAGE_DIGEST: SAMPLE_DIGEST,
+      KVITBIT_APP_ORIGIN: "https://kvitbit.cz",
+      KVITBIT_EMAIL_FROM: "Kvitbit <noreply@kvitbit.cz>",
+      KVITBIT_EDGE_DOMAINS: "kvitbit.cz",
+      KVITBIT_ENABLE_RESEND_SECRET: "true",
+    };
+    for (const key of [
+      ...FORBIDDEN_OPT_OUT_ENV_VARS,
+      "KVITBIT_DISABLE_CUSTOM",
+      "KVITBIT_DISABLE_HTTP_2",
+    ] as const) {
       const live = await Effect.runPromise(
         loadStackConfig.pipe(
           Effect.provide(
             ConfigProvider.layer(
-              ConfigProvider.fromEnv({
-                env: {
-                  KVITBIT_IMAGE_DIGEST: SAMPLE_DIGEST,
-                  KVITBIT_APP_ORIGIN: "https://kvitbit.cz",
-                  KVITBIT_EMAIL_FROM: "Kvitbit <noreply@kvitbit.cz>",
-                  KVITBIT_EDGE_DOMAINS: "kvitbit.cz",
-                  KVITBIT_ENABLE_RESEND_SECRET: "true",
-                  [key]: "true",
-                },
-              }),
+              ConfigProvider.fromEnv({ env: { ...baseStackEnv, [key]: "true" } }),
             ),
           ),
           Effect.result,
         ),
       );
-      expect(live._tag, `loadStackConfig ${key}`).toBe("Failure");
+      expect(live._tag, `loadStackConfig direct ${key}`).toBe("Failure");
+
+      const fallback = await Effect.runPromise(
+        loadStackConfig.pipe(
+          Effect.provide(
+            ConfigProvider.layer(
+              ConfigProvider.orElse(
+                ConfigProvider.fromEnv({ env: baseStackEnv }),
+                ConfigProvider.fromEnv({ env: { [key]: "true" } }),
+              ),
+            ),
+          ),
+          Effect.result,
+        ),
+      );
+      expect(fallback._tag, `loadStackConfig fallback ${key}`).toBe("Failure");
     }
   });
 });
@@ -1129,7 +1195,7 @@ describe("verify-deploy-config: deploy.yml preflight & 3-layer soundness", () =>
     ALCHEMY_STATE_BUCKET: "alchemy-state-kvitbit-prod",
   } as const;
 
-  test("validateDeployPreflight matches oracle across all 290,304 states and proves 3-layer soundness", () => {
+  test("validateDeployPreflight matches oracle across all 423,360 states and proves 3-layer soundness", () => {
     const deployModes = [
       { label: "normal", foundation: "false", feedback: "false" },
       { label: "bootstrap_foundation", foundation: "true", feedback: "false" },
@@ -1142,6 +1208,7 @@ describe("verify-deploy-config: deploy.yml preflight & 3-layer soundness", () =>
       "http_public",
       "https_localhost",
       "https_localhost_dot",
+      "https_ipv6_mapped_loopback",
       "invalid_url",
     ];
     const emailModeCases: ReadonlyArray<DeployEmailMode | "absent"> = [
@@ -1164,6 +1231,7 @@ describe("verify-deploy-config: deploy.yml preflight & 3-layer soundness", () =>
       "valid",
       "invalid",
       "invalid_double_dot",
+      "invalid_overlong_label",
     ];
     const edgeCases = [
       { label: "absent", raw: undefined },
@@ -1347,9 +1415,9 @@ describe("verify-deploy-config: deploy.yml preflight & 3-layer soundness", () =>
     }
 
     expect(failures).toEqual([]);
-    expect(total).toBe(290_304);
+    expect(total).toBe(423_360);
     expect(prodNormalAccepted).toBeGreaterThan(0);
-  });
+  }, 30_000);
 
   test("preflight exhaustively verifies GCP repo vars, boolean normalization, and opt-out rejection", () => {
     const validNormal = {
@@ -1414,7 +1482,11 @@ describe("verify-deploy-config: deploy.yml preflight & 3-layer soundness", () =>
     expect(boolChecks).toBe(48);
 
     // Every forbidden opt-out flag fails in prod preflight — both directly and via KVITBIT_REPO_VARS_JSON.
-    for (const optOut of [...FORBIDDEN_OPT_OUT_ENV_VARS, "KVITBIT_PREVIEW_DISABLE_CUSTOM"]) {
+    for (const optOut of [
+      ...FORBIDDEN_OPT_OUT_ENV_VARS,
+      "KVITBIT_PREVIEW_DISABLE_CUSTOM",
+      "KVITBIT_DISABLE_HTTP_2",
+    ]) {
       expect(validateDeployPreflight({ ...validNormal, [optOut]: "true" }).ok, optOut).toBe(false);
       expect(
         validateDeployPreflight({
