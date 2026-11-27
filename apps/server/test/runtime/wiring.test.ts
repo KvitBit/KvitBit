@@ -288,13 +288,18 @@ describe("wiring: email & SMTP URL parsing", () => {
       KVITBIT_BLOB_BUCKET: "kvitbit-prod-blobs",
     };
 
-    const loadWith = (env: Record<string, string>) =>
+    const loadWithProvider = (
+      workload: "server" | "worker",
+      provider: ConfigProvider.ConfigProvider,
+    ) =>
       Effect.runPromise(
-        loadBootRuntimeConfig("server").pipe(
-          Effect.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env }))),
+        loadBootRuntimeConfig(workload).pipe(
+          Effect.provide(ConfigProvider.layer(provider)),
           Effect.result,
         ),
       );
+    const loadWith = (env: Record<string, string>, workload: "server" | "worker" = "server") =>
+      loadWithProvider(workload, ConfigProvider.fromEnv({ env }));
 
     // Upgrade fixture (NODE_ENV=production, KVITBIT_ENV empty, Resend configured) stays in production with Resend (never capture).
     const upgraded = await loadWith(validProdEnv);
@@ -305,18 +310,47 @@ describe("wiring: email & SMTP URL parsing", () => {
       expect(upgraded.success.blob.driver).toBe("gcs");
     }
 
-    for (const [label, overrides] of [
-      ["KVITBIT_DISABLE_BLOB", { KVITBIT_DISABLE_BLOB: "true" }],
-      ["KVITBIT_DISABLE_CUSTOM", { KVITBIT_DISABLE_CUSTOM: "1" }],
-      ["KVITBIT_PREVIEW_DISABLE_EMAIL", { KVITBIT_PREVIEW_DISABLE_EMAIL: "true" }],
-      ["trailing-dot localhost", { APP_ORIGIN: "https://localhost." }],
-      ["trailing-dot sub.localhost", { APP_ORIGIN: "https://sub.localhost." }],
-      ["consecutive dots in EMAIL_FROM", { EMAIL_FROM: "a..b@example.org" }],
-      ["leading dot in EMAIL_FROM", { EMAIL_FROM: ".a@example.org" }],
-      ["trailing dot in EMAIL_FROM", { EMAIL_FROM: "a.@example.org" }],
-    ] as const) {
-      const res = await loadWith({ ...validProdEnv, ...overrides });
-      expect(res._tag, `expected failure for ${label}`).toBe("Failure");
+    // Valid RFC 1035 63-octet label boundary and public IPv4-mapped IPv6 origin are accepted.
+    expect((await loadWith({ ...validProdEnv, EMAIL_FROM: `a@${"b".repeat(63)}.org` }))._tag).toBe(
+      "Success",
+    );
+    expect(
+      (await loadWith({ ...validProdEnv, APP_ORIGIN: "https://[::ffff:192.0.2.1]" }))._tag,
+    ).toBe("Success");
+
+    for (const workload of ["server", "worker"] as const) {
+      for (const [label, overrides] of [
+        ["KVITBIT_DISABLE_BLOB", { KVITBIT_DISABLE_BLOB: "true" }],
+        ["KVITBIT_DISABLE_CUSTOM", { KVITBIT_DISABLE_CUSTOM: "1" }],
+        ["KVITBIT_DISABLE_HTTP_2 (Array node)", { KVITBIT_DISABLE_HTTP_2: "true" }],
+        ["KVITBIT_PREVIEW_DISABLE_EMAIL", { KVITBIT_PREVIEW_DISABLE_EMAIL: "true" }],
+        ["trailing-dot localhost", { APP_ORIGIN: "https://localhost." }],
+        ["trailing-dot sub.localhost", { APP_ORIGIN: "https://sub.localhost." }],
+        ["IPv4-mapped IPv6 loopback", { APP_ORIGIN: "https://[::ffff:127.0.0.1]" }],
+        ["IPv4-mapped IPv6 unspecified", { APP_ORIGIN: "https://[::ffff:0.0.0.0]" }],
+        ["consecutive dots in EMAIL_FROM", { EMAIL_FROM: "a..b@example.org" }],
+        ["leading dot in EMAIL_FROM", { EMAIL_FROM: ".a@example.org" }],
+        ["trailing dot in EMAIL_FROM", { EMAIL_FROM: "a.@example.org" }],
+        ["64-char domain label in EMAIL_FROM", { EMAIL_FROM: `a@${"b".repeat(64)}.org` }],
+        ["64-char TLD label in EMAIL_FROM", { EMAIL_FROM: `a@example.${"c".repeat(64)}` }],
+      ] as const) {
+        const res = await loadWith({ ...validProdEnv, ...overrides }, workload);
+        expect(res._tag, `expected failure for ${workload} ${label}`).toBe("Failure");
+      }
+
+      // Composed fallback ConfigProvider (primary valid prod + fallback forbidden flag) must fail fast.
+      for (const [label, fallbackEnv] of [
+        ["fallback KVITBIT_DISABLE_CUSTOM", { KVITBIT_DISABLE_CUSTOM: "true" }],
+        ["fallback KVITBIT_DISABLE_HTTP_2", { KVITBIT_DISABLE_HTTP_2: "true" }],
+        ["fallback KVITBIT_PREVIEW_DISABLE_CUSTOM", { KVITBIT_PREVIEW_DISABLE_CUSTOM: "true" }],
+      ] as const) {
+        const composed = ConfigProvider.orElse(
+          ConfigProvider.fromEnv({ env: validProdEnv }),
+          ConfigProvider.fromEnv({ env: fallbackEnv }),
+        );
+        const res = await loadWithProvider(workload, composed);
+        expect(res._tag, `expected failure for ${workload} ${label}`).toBe("Failure");
+      }
     }
   });
 });

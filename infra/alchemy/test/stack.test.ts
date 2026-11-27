@@ -340,6 +340,59 @@ describe("Kvitbit Alchemy stack config", () => {
       field: "KVITBIT_ENABLE_FEEDBACK_GITHUB_TOKEN_SECRET",
     });
   });
+
+  test("loadStackConfig rejects IPv4-mapped IPv6 loopback, >63-octet email labels, Array-node disable flags, and fallback provider opt-outs", async () => {
+    const loadWith = (provider: ConfigProvider.ConfigProvider) =>
+      Effect.runPromise(
+        loadStackConfig.pipe(Effect.provide(ConfigProvider.layer(provider)), Effect.result),
+      );
+
+    // Valid boundary controls: 63-octet domain label and public IPv4-mapped IPv6 origin.
+    expect(
+      (
+        await loadWith(
+          ConfigProvider.fromEnv({
+            env: { ...PROD_REQUIRED_ENV, KVITBIT_EMAIL_FROM: `a@${"b".repeat(63)}.org` },
+          }),
+        )
+      )._tag,
+    ).toBe("Success");
+    expect(
+      (
+        await loadWith(
+          ConfigProvider.fromEnv({
+            env: { ...PROD_REQUIRED_ENV, KVITBIT_APP_ORIGIN: "https://[::ffff:192.0.2.1]" },
+          }),
+        )
+      )._tag,
+    ).toBe("Success");
+
+    for (const [label, overrides] of [
+      ["IPv4-mapped IPv6 loopback", { KVITBIT_APP_ORIGIN: "https://[::ffff:127.0.0.1]" }],
+      ["IPv4-mapped IPv6 unspecified", { KVITBIT_APP_ORIGIN: "https://[::ffff:0.0.0.0]" }],
+      ["64-char email domain label", { KVITBIT_EMAIL_FROM: `a@${"b".repeat(64)}.org` }],
+      ["64-char email TLD label", { KVITBIT_EMAIL_FROM: `a@example.${"c".repeat(64)}` }],
+      ["Array-node disable flag", { KVITBIT_DISABLE_HTTP_2: "true" }],
+    ] as const) {
+      const res = await loadWith(
+        ConfigProvider.fromEnv({ env: { ...PROD_REQUIRED_ENV, ...overrides } }),
+      );
+      expect(res._tag, `expected InvalidStackConfig for ${label}`).toBe("Failure");
+    }
+
+    for (const [label, fallbackEnv] of [
+      ["fallback KVITBIT_DISABLE_CUSTOM", { KVITBIT_DISABLE_CUSTOM: "true" }],
+      ["fallback KVITBIT_DISABLE_HTTP_2", { KVITBIT_DISABLE_HTTP_2: "true" }],
+      ["fallback KVITBIT_PREVIEW_DISABLE_CUSTOM", { KVITBIT_PREVIEW_DISABLE_CUSTOM: "true" }],
+    ] as const) {
+      const composed = ConfigProvider.orElse(
+        ConfigProvider.fromEnv({ env: PROD_REQUIRED_ENV }),
+        ConfigProvider.fromEnv({ env: fallbackEnv }),
+      );
+      const res = await loadWith(composed);
+      expect(res._tag, `expected InvalidStackConfig for ${label}`).toBe("Failure");
+    }
+  });
 });
 
 describe("Bootstrap state safety guard", () => {

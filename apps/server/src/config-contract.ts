@@ -142,6 +142,76 @@ export const resolveKvitbitEnv = (raw: {
 
 const IPV4_LOOPBACK_PATTERN =
   /^127\.(?:25[0-5]|2[0-4]\d|1?\d?\d)\.(?:25[0-5]|2[0-4]\d|1?\d?\d)\.(?:25[0-5]|2[0-4]\d|1?\d?\d)$/;
+const IPV4_ADDR_PATTERN = /^(?:25[0-5]|2[0-4]\d|1?\d?\d)(?:\.(?:25[0-5]|2[0-4]\d|1?\d?\d)){3}$/;
+const IPV6_HEXTET_PATTERN = /^[0-9a-f]{1,4}$/;
+
+const parseIpv6Words = (raw: string): ReadonlyArray<number> | undefined => {
+  const withoutZone = raw.split("%")[0] ?? raw;
+  if (!withoutZone.includes(":")) return undefined;
+  const halves = withoutZone.split("::");
+  if (halves.length > 2) return undefined;
+
+  const parseSide = (side: string, allowIpv4Tail: boolean): Array<number> | undefined => {
+    if (side === "") return [];
+    const parts = side.split(":");
+    const words: Array<number> = [];
+    for (let i = 0; i < parts.length; i++) {
+      const part = parts[i] ?? "";
+      if (part.includes(".")) {
+        if (!allowIpv4Tail || i !== parts.length - 1 || !IPV4_ADDR_PATTERN.test(part)) {
+          return undefined;
+        }
+        const octets = part.split(".").map((o) => Number.parseInt(o, 10));
+        words.push(((octets[0] ?? 0) << 8) | (octets[1] ?? 0));
+        words.push(((octets[2] ?? 0) << 8) | (octets[3] ?? 0));
+      } else {
+        if (!IPV6_HEXTET_PATTERN.test(part)) return undefined;
+        words.push(Number.parseInt(part, 16));
+      }
+    }
+    return words;
+  };
+
+  if (halves.length === 1) {
+    const words = parseSide(halves[0] ?? "", true);
+    return words !== undefined && words.length === 8 ? words : undefined;
+  }
+  const left = parseSide(halves[0] ?? "", false);
+  const right = parseSide(halves[1] ?? "", true);
+  if (left === undefined || right === undefined) return undefined;
+  const missing = 8 - (left.length + right.length);
+  if (missing < 1) return undefined;
+  return [...left, ...new Array<number>(missing).fill(0), ...right];
+};
+
+const isLoopbackOrUnspecifiedIpv6 = (words: ReadonlyArray<number>): boolean => {
+  const w0 = words[0] ?? 0;
+  const w1 = words[1] ?? 0;
+  const w2 = words[2] ?? 0;
+  const w3 = words[3] ?? 0;
+  const w4 = words[4] ?? 0;
+  const w5 = words[5] ?? 0;
+  const w6 = words[6] ?? 0;
+  const w7 = words[7] ?? 0;
+  // :: (unspecified) or ::1 (loopback)
+  if (w0 === 0 && w1 === 0 && w2 === 0 && w3 === 0 && w4 === 0 && w5 === 0 && w6 === 0) {
+    return w7 === 0 || w7 === 1;
+  }
+  const embeddedLoopbackOrUnspecified = w6 >> 8 === 127 || (w6 === 0 && w7 === 0);
+  // ::ffff:0:0/96 IPv4-mapped IPv6 (RFC 4291 §2.5.5.2)
+  if (w0 === 0 && w1 === 0 && w2 === 0 && w3 === 0 && w4 === 0 && w5 === 0xffff) {
+    return embeddedLoopbackOrUnspecified;
+  }
+  // ::/96 IPv4-compatible IPv6 (RFC 4291 §2.5.5.1)
+  if (w0 === 0 && w1 === 0 && w2 === 0 && w3 === 0 && w4 === 0 && w5 === 0) {
+    return embeddedLoopbackOrUnspecified;
+  }
+  // ::ffff:0:0:0/96 IPv4-translated IPv6 (RFC 2765)
+  if (w0 === 0 && w1 === 0 && w2 === 0 && w3 === 0 && w4 === 0xffff && w5 === 0) {
+    return embeddedLoopbackOrUnspecified;
+  }
+  return false;
+};
 
 /** Returns true if `hostname` points to localhost, loopback, or an unspecified bind address. */
 export const isLocalhostHostname = (hostname: string): boolean => {
@@ -150,16 +220,17 @@ export const isLocalhostHostname = (hostname: string): boolean => {
     .trim()
     .toLowerCase()
     .replace(/\.+$/, "");
-  return (
+  if (
     normalized === "localhost" ||
     normalized.endsWith(".localhost") ||
     normalized === "localhost.localdomain" ||
     normalized === "0.0.0.0" ||
-    normalized === "::" ||
-    normalized === "::1" ||
-    normalized === "0:0:0:0:0:0:0:1" ||
     IPV4_LOOPBACK_PATTERN.test(normalized)
-  );
+  ) {
+    return true;
+  }
+  const ipv6Words = parseIpv6Words(normalized);
+  return ipv6Words !== undefined && isLoopbackOrUnspecifiedIpv6(ipv6Words);
 };
 
 /**
@@ -217,7 +288,7 @@ export const validateAppOrigin = (
 
 const EMAIL_LOCAL_ATOM = "[a-zA-Z0-9!#$%&'*+/=?^_`{|}~-]+";
 const EMAIL_ADDR_PATTERN = new RegExp(
-  `^${EMAIL_LOCAL_ATOM}(?:\\.${EMAIL_LOCAL_ATOM})*@(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?\\.)+(?:[a-zA-Z]{2,}|xn--[a-zA-Z0-9-]{2,})$`,
+  `^${EMAIL_LOCAL_ATOM}(?:\\.${EMAIL_LOCAL_ATOM})*@(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?\\.)+(?:[a-zA-Z]{2,63}|xn--[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,57}[a-zA-Z0-9])?)$`,
 );
 
 /** Validates an explicit `EMAIL_FROM` header value (either `user@domain.tld` or `Name <user@domain.tld>`). */
@@ -233,6 +304,14 @@ export const isValidEmailFrom = (raw: string | undefined): boolean => {
   }
   const atIndex = address.indexOf("@");
   if (atIndex <= 0 || atIndex > 64) {
+    return false;
+  }
+  const domain = address.slice(atIndex + 1);
+  if (domain.length > 253) {
+    return false;
+  }
+  const labels = domain.split(".");
+  if (labels.length < 2 || labels.some((label) => label.length === 0 || label.length > 63)) {
     return false;
   }
   return EMAIL_ADDR_PATTERN.test(address);
@@ -545,11 +624,27 @@ export const loadValidatedAppOrigin: Effect.Effect<string, Config.ConfigError> =
   },
 );
 
-const collectKvitbitProviderEntries = (
+const MAX_ARRAY_EDGE_SCAN = 1024;
+
+const FORBIDDEN_PROVIDER_PROBE_PATHS: ReadonlyArray<ReadonlyArray<string>> = [
+  [],
+  ["KVITBIT", "DISABLE"],
+  ["KVITBIT", "PREVIEW"],
+  ["KVITBIT", "PREVIEW", "DISABLE"],
+  ["KVITBIT", "ALLOW"],
+  ["KVITBIT", "ALLOW", "LOCAL", "BLOBS"],
+];
+
+const collectKvitbitProviderSubtree = (
   provider: ConfigProvider.ConfigProvider,
-  path: ReadonlyArray<string> = [],
+  path: ReadonlyArray<string | number>,
+  visited: Set<string>,
 ): Effect.Effect<Array<readonly [string, string]>, Config.ConfigError> =>
   Effect.gen(function* () {
+    const pathKey = path.map(String).join("\0");
+    if (visited.has(pathKey)) return [];
+    visited.add(pathKey);
+
     const node = yield* provider
       .load(path)
       .pipe(Effect.mapError((error) => new Config.ConfigError(error)));
@@ -557,21 +652,57 @@ const collectKvitbitProviderEntries = (
     const entries: Array<readonly [string, string]> = [];
     if (node._tag === "Value") {
       if (path.length > 0) {
-        entries.push([path.join("_"), node.value]);
+        entries.push([path.map(String).join("_"), node.value]);
       }
       return entries;
     }
     if (node._tag === "Record") {
       if (node.value !== undefined && path.length > 0) {
-        entries.push([path.join("_"), node.value]);
+        entries.push([path.map(String).join("_"), node.value]);
       }
       for (const key of node.keys) {
         if (path.length === 0 && key !== "KVITBIT" && !key.startsWith("KVITBIT_")) {
           continue;
         }
-        const nested = yield* collectKvitbitProviderEntries(provider, [...path, key]);
+        const nested = yield* collectKvitbitProviderSubtree(provider, [...path, key], visited);
         entries.push(...nested);
       }
+      return entries;
+    }
+    if (node._tag === "Array") {
+      if (node.value !== undefined && path.length > 0) {
+        entries.push([path.map(String).join("_"), node.value]);
+      }
+      const indices: Array<number> = [];
+      if (node.length <= MAX_ARRAY_EDGE_SCAN * 2) {
+        for (let i = 0; i < node.length; i++) {
+          indices.push(i);
+        }
+      } else {
+        for (let i = 0; i < MAX_ARRAY_EDGE_SCAN; i++) {
+          indices.push(i);
+        }
+        for (let i = node.length - MAX_ARRAY_EDGE_SCAN; i < node.length; i++) {
+          indices.push(i);
+        }
+      }
+      for (const index of indices) {
+        const nested = yield* collectKvitbitProviderSubtree(provider, [...path, index], visited);
+        entries.push(...nested);
+      }
+    }
+    return entries;
+  });
+
+const collectKvitbitProviderEntries = (
+  provider: ConfigProvider.ConfigProvider,
+): Effect.Effect<Array<readonly [string, string]>, Config.ConfigError> =>
+  Effect.gen(function* () {
+    const visited = new Set<string>();
+    const entries: Array<readonly [string, string]> = [];
+    for (const rootPath of FORBIDDEN_PROVIDER_PROBE_PATHS) {
+      const found = yield* collectKvitbitProviderSubtree(provider, rootPath, visited);
+      entries.push(...found);
     }
     return entries;
   });
@@ -604,12 +735,12 @@ export const loadBootRuntimeConfig = (
       KVITBIT_GCS_PROJECT: yield* optionalEnvString("KVITBIT_GCS_PROJECT"),
     };
     for (const [key, value] of dynamicKvitbitEntries) {
-      if (!(key in envMap)) {
+      if (!(key in envMap) || trimOptional(envMap[key]) === undefined) {
         envMap[key] = value;
       }
     }
     for (const forbidden of FORBIDDEN_OPT_OUT_ENV_VARS) {
-      if (envMap[forbidden] === undefined) {
+      if (trimOptional(envMap[forbidden]) === undefined) {
         envMap[forbidden] = yield* optionalEnvString(forbidden);
       }
     }

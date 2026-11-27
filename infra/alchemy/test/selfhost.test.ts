@@ -826,10 +826,42 @@ describe("Self-hosting and CI deploy artifacts", () => {
     expect(flake).toContain("migrationEnvironmentFile = lib.mkOption");
     expect(flake).toContain("cfg.migrationEnvironmentFile");
     expect(flake).toContain('KVITBIT_RUNNER_MODE = "single"');
-    expect(flake).toContain('default = "production";');
-    expect(flake).toContain(
+
+    // Parse the exact option blocks so restoring `environment` or `blobDriver` defaults fails.
+    const environmentOption = flake.match(/environment\s*=\s*lib\.mkOption\s*\{[\s\S]*?\n\s*\};/);
+    expect(environmentOption?.[0]).toBeDefined();
+    expect(environmentOption?.[0]).toContain('default = "production";');
+
+    const blobDriverOption = flake.match(/blobDriver\s*=\s*lib\.mkOption\s*\{[\s\S]*?\n\s*\};/);
+    expect(blobDriverOption?.[0]).toBeDefined();
+    expect(blobDriverOption?.[0]).toContain("lib.types.nullOr");
+    expect(blobDriverOption?.[0]).toContain("default = null;");
+    expect(blobDriverOption?.[0]).not.toContain('default = "local"');
+
+    // Verify the evaluated staging systemd service environment omits KVITBIT_BLOB_DRIVER when blobDriver is omitted.
+    const kvitbitServiceBlock = flake.match(
+      /systemd\.services\.kvitbit\s*=\s*\{[\s\S]*?serviceConfig\s*=/,
+    );
+    expect(kvitbitServiceBlock?.[0]).toBeDefined();
+    const serviceText = kvitbitServiceBlock?.[0] ?? "";
+    const unconditionalEnvMatch = serviceText.match(/environment\s*=\s*\{([\s\S]*?)\}/);
+    expect(unconditionalEnvMatch?.[1]).toBeDefined();
+    expect(unconditionalEnvMatch?.[1]).not.toContain("KVITBIT_BLOB_DRIVER");
+    expect(serviceText).toContain(
       "lib.optionalAttrs (cfg.blobDriver != null) { KVITBIT_BLOB_DRIVER = cfg.blobDriver; }",
     );
+    const defaultBlobDriverMatch = blobDriverOption?.[0].match(/default\s*=\s*([^;]+);/);
+    const stagingBlobDriverDefault = defaultBlobDriverMatch?.[1]?.trim();
+    expect(stagingBlobDriverDefault).toBe("null");
+    const evaluatedStagingEnv: Record<string, string> = {
+      NODE_ENV: "production",
+      KVITBIT_ENV: "staging",
+      ...(stagingBlobDriverDefault !== "null"
+        ? { KVITBIT_BLOB_DRIVER: stagingBlobDriverDefault ?? "" }
+        : {}),
+    };
+    expect(evaluatedStagingEnv.KVITBIT_BLOB_DRIVER).toBeUndefined();
+
     expect(flake).not.toContain('KVITBIT_BLOB_DRIVER = "local"');
     expect(flake).toContain("systemd.services.kvitbit-migrate");
     expect(flake).toContain("services.nginx = lib.mkIf cfg.nginx.enable");
@@ -1137,7 +1169,7 @@ printf '%s\\n' "$KVITBIT_ENABLE_FEEDBACK_GITHUB_TOKEN_SECRET" "$KVITBIT_IMAGE_DI
     const parsed = Bun.YAML.parse(workflow) as {
       jobs: {
         deploy: {
-          steps: Array<{ name?: string; run?: string }>;
+          steps: Array<{ name?: string; run?: string; env?: Record<string, string> }>;
         };
       };
     };
@@ -1149,6 +1181,7 @@ printf '%s\\n' "$KVITBIT_ENABLE_FEEDBACK_GITHUB_TOKEN_SECRET" "$KVITBIT_IMAGE_DI
       (s) => s.name === "Verify runner pool reconciled target digest and config",
     );
     expect(validateStep?.run).toBeDefined();
+    expect(validateStep?.env?.KVITBIT_REPO_VARS_JSON).toBe(`\${{ toJSON(vars) }}`);
     expect(verifyStep?.run).toBeDefined();
 
     const sandbox = mkdtempSync(join(tmpdir(), "kvitbit-deploy-yml-"));
@@ -1210,8 +1243,11 @@ printf '%s\\n' "$KVITBIT_ENABLE_FEEDBACK_GITHUB_TOKEN_SECRET" "$KVITBIT_IMAGE_DI
         { KVITBIT_ENABLE_RESEND_SECRET: "false", KVITBIT_ENABLE_SMTP_SECRET: "false" },
         { KVITBIT_ENABLE_RESEND_SECRET: "true", APP_ORIGIN: "http://localhost:8080" },
         { KVITBIT_ENABLE_RESEND_SECRET: "true", APP_ORIGIN: "https://localhost." },
+        { KVITBIT_ENABLE_RESEND_SECRET: "true", APP_ORIGIN: "https://[::ffff:127.0.0.1]" },
         { KVITBIT_ENABLE_RESEND_SECRET: "true", EMAIL_FROM: "" },
         { KVITBIT_ENABLE_RESEND_SECRET: "true", EMAIL_FROM: "a..b@example.org" },
+        { KVITBIT_ENABLE_RESEND_SECRET: "true", EMAIL_FROM: `a@${"b".repeat(64)}.org` },
+        { KVITBIT_ENABLE_RESEND_SECRET: "true", EMAIL_FROM: `a@example.${"c".repeat(64)}` },
         { KVITBIT_ENABLE_RESEND_SECRET: "true", KVITBIT_EDGE_DOMAINS: "" },
         { KVITBIT_ENABLE_RESEND_SECRET: "true", KVITBIT_EMAIL_MODE: "capture" },
         { KVITBIT_ENABLE_RESEND_SECRET: "true", KVITBIT_BLOB_DRIVER: "local" },
@@ -1222,6 +1258,10 @@ printf '%s\\n' "$KVITBIT_ENABLE_FEEDBACK_GITHUB_TOKEN_SECRET" "$KVITBIT_IMAGE_DI
         {
           KVITBIT_ENABLE_RESEND_SECRET: "true",
           KVITBIT_REPO_VARS_JSON: JSON.stringify({ KVITBIT_DISABLE_BLOB: "true" }),
+        },
+        {
+          KVITBIT_ENABLE_RESEND_SECRET: "true",
+          KVITBIT_REPO_VARS_JSON: JSON.stringify({ KVITBIT_DISABLE_HTTP_2: "true" }),
         },
       ]) {
         const rejected = Bun.spawnSync(["bash", "-c", validateStep?.run ?? ""], {

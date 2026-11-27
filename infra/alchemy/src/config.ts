@@ -499,11 +499,27 @@ const optionalInt = (
     return Number.parseInt(raw, 10);
   });
 
-const collectKvitbitProviderEnv = (
+const MAX_ARRAY_EDGE_SCAN = 1024;
+
+const FORBIDDEN_PROVIDER_PROBE_PATHS: ReadonlyArray<ReadonlyArray<string>> = [
+  [],
+  ["KVITBIT", "DISABLE"],
+  ["KVITBIT", "PREVIEW"],
+  ["KVITBIT", "PREVIEW", "DISABLE"],
+  ["KVITBIT", "ALLOW"],
+  ["KVITBIT", "ALLOW", "LOCAL", "BLOBS"],
+];
+
+const collectKvitbitProviderSubtree = (
   provider: ConfigProvider.ConfigProvider,
-  path: ReadonlyArray<string> = [],
+  path: ReadonlyArray<string | number>,
+  visited: Set<string>,
 ): Effect.Effect<Array<readonly [string, string]>, Config.ConfigError> =>
   Effect.gen(function* () {
+    const pathKey = path.map(String).join("\0");
+    if (visited.has(pathKey)) return [];
+    visited.add(pathKey);
+
     const node = yield* provider
       .load(path)
       .pipe(Effect.mapError((error) => new Config.ConfigError(error)));
@@ -511,21 +527,57 @@ const collectKvitbitProviderEnv = (
     const entries: Array<readonly [string, string]> = [];
     if (node._tag === "Value") {
       if (path.length > 0) {
-        entries.push([path.join("_"), node.value]);
+        entries.push([path.map(String).join("_"), node.value]);
       }
       return entries;
     }
     if (node._tag === "Record") {
       if (node.value !== undefined && path.length > 0) {
-        entries.push([path.join("_"), node.value]);
+        entries.push([path.map(String).join("_"), node.value]);
       }
       for (const key of node.keys) {
         if (path.length === 0 && key !== "KVITBIT" && !key.startsWith("KVITBIT_")) {
           continue;
         }
-        const nested = yield* collectKvitbitProviderEnv(provider, [...path, key]);
+        const nested = yield* collectKvitbitProviderSubtree(provider, [...path, key], visited);
         entries.push(...nested);
       }
+      return entries;
+    }
+    if (node._tag === "Array") {
+      if (node.value !== undefined && path.length > 0) {
+        entries.push([path.map(String).join("_"), node.value]);
+      }
+      const indices: Array<number> = [];
+      if (node.length <= MAX_ARRAY_EDGE_SCAN * 2) {
+        for (let i = 0; i < node.length; i++) {
+          indices.push(i);
+        }
+      } else {
+        for (let i = 0; i < MAX_ARRAY_EDGE_SCAN; i++) {
+          indices.push(i);
+        }
+        for (let i = node.length - MAX_ARRAY_EDGE_SCAN; i < node.length; i++) {
+          indices.push(i);
+        }
+      }
+      for (const index of indices) {
+        const nested = yield* collectKvitbitProviderSubtree(provider, [...path, index], visited);
+        entries.push(...nested);
+      }
+    }
+    return entries;
+  });
+
+const collectKvitbitProviderEnv = (
+  provider: ConfigProvider.ConfigProvider,
+): Effect.Effect<Array<readonly [string, string]>, Config.ConfigError> =>
+  Effect.gen(function* () {
+    const visited = new Set<string>();
+    const entries: Array<readonly [string, string]> = [];
+    for (const rootPath of FORBIDDEN_PROVIDER_PROBE_PATHS) {
+      const found = yield* collectKvitbitProviderSubtree(provider, rootPath, visited);
+      entries.push(...found);
     }
     return entries;
   });

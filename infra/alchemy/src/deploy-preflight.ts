@@ -64,11 +64,77 @@ export const FORBIDDEN_OPT_OUT_ENV_VARS = [
 const DOMAIN_PATTERN = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/;
 const IPV4_LOOPBACK_PATTERN =
   /^127\.(?:25[0-5]|2[0-4]\d|1?\d?\d)\.(?:25[0-5]|2[0-4]\d|1?\d?\d)\.(?:25[0-5]|2[0-4]\d|1?\d?\d)$/;
+const IPV4_ADDR_PATTERN = /^(?:25[0-5]|2[0-4]\d|1?\d?\d)(?:\.(?:25[0-5]|2[0-4]\d|1?\d?\d)){3}$/;
+const IPV6_HEXTET_PATTERN = /^[0-9a-f]{1,4}$/;
 const EMAIL_LOCAL_ATOM = "[a-zA-Z0-9!#$%&'*+/=?^_`{|}~-]+";
 const EMAIL_ADDR_PATTERN = new RegExp(
-  `^${EMAIL_LOCAL_ATOM}(?:\\.${EMAIL_LOCAL_ATOM})*@(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?\\.)+(?:[a-zA-Z]{2,}|xn--[a-zA-Z0-9-]{2,})$`,
+  `^${EMAIL_LOCAL_ATOM}(?:\\.${EMAIL_LOCAL_ATOM})*@(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?\\.)+(?:[a-zA-Z]{2,63}|xn--[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,57}[a-zA-Z0-9])?)$`,
 );
 const FORBIDDEN_OPT_OUT_PATTERN = /^KVITBIT_(?:PREVIEW_)?DISABLE_/;
+
+const parseIpv6Words = (raw: string): ReadonlyArray<number> | undefined => {
+  const withoutZone = raw.split("%")[0] ?? raw;
+  if (!withoutZone.includes(":")) return undefined;
+  const halves = withoutZone.split("::");
+  if (halves.length > 2) return undefined;
+
+  const parseSide = (side: string, allowIpv4Tail: boolean): Array<number> | undefined => {
+    if (side === "") return [];
+    const parts = side.split(":");
+    const words: Array<number> = [];
+    for (let i = 0; i < parts.length; i++) {
+      const part = parts[i] ?? "";
+      if (part.includes(".")) {
+        if (!allowIpv4Tail || i !== parts.length - 1 || !IPV4_ADDR_PATTERN.test(part)) {
+          return undefined;
+        }
+        const octets = part.split(".").map((o) => Number.parseInt(o, 10));
+        words.push(((octets[0] ?? 0) << 8) | (octets[1] ?? 0));
+        words.push(((octets[2] ?? 0) << 8) | (octets[3] ?? 0));
+      } else {
+        if (!IPV6_HEXTET_PATTERN.test(part)) return undefined;
+        words.push(Number.parseInt(part, 16));
+      }
+    }
+    return words;
+  };
+
+  if (halves.length === 1) {
+    const words = parseSide(halves[0] ?? "", true);
+    return words !== undefined && words.length === 8 ? words : undefined;
+  }
+  const left = parseSide(halves[0] ?? "", false);
+  const right = parseSide(halves[1] ?? "", true);
+  if (left === undefined || right === undefined) return undefined;
+  const missing = 8 - (left.length + right.length);
+  if (missing < 1) return undefined;
+  return [...left, ...new Array<number>(missing).fill(0), ...right];
+};
+
+const isLoopbackOrUnspecifiedIpv6 = (words: ReadonlyArray<number>): boolean => {
+  const w0 = words[0] ?? 0;
+  const w1 = words[1] ?? 0;
+  const w2 = words[2] ?? 0;
+  const w3 = words[3] ?? 0;
+  const w4 = words[4] ?? 0;
+  const w5 = words[5] ?? 0;
+  const w6 = words[6] ?? 0;
+  const w7 = words[7] ?? 0;
+  if (w0 === 0 && w1 === 0 && w2 === 0 && w3 === 0 && w4 === 0 && w5 === 0 && w6 === 0) {
+    return w7 === 0 || w7 === 1;
+  }
+  const embeddedLoopbackOrUnspecified = w6 >> 8 === 127 || (w6 === 0 && w7 === 0);
+  if (w0 === 0 && w1 === 0 && w2 === 0 && w3 === 0 && w4 === 0 && w5 === 0xffff) {
+    return embeddedLoopbackOrUnspecified;
+  }
+  if (w0 === 0 && w1 === 0 && w2 === 0 && w3 === 0 && w4 === 0 && w5 === 0) {
+    return embeddedLoopbackOrUnspecified;
+  }
+  if (w0 === 0 && w1 === 0 && w2 === 0 && w3 === 0 && w4 === 0xffff && w5 === 0) {
+    return embeddedLoopbackOrUnspecified;
+  }
+  return false;
+};
 
 export const trimOptional = (raw: string | undefined): string | undefined => {
   if (raw === undefined) return undefined;
@@ -94,16 +160,17 @@ export const isLocalhostHostname = (hostname: string): boolean => {
     .trim()
     .toLowerCase()
     .replace(/\.+$/, "");
-  return (
+  if (
     normalized === "localhost" ||
     normalized.endsWith(".localhost") ||
     normalized === "localhost.localdomain" ||
     normalized === "0.0.0.0" ||
-    normalized === "::" ||
-    normalized === "::1" ||
-    normalized === "0:0:0:0:0:0:0:1" ||
     IPV4_LOOPBACK_PATTERN.test(normalized)
-  );
+  ) {
+    return true;
+  }
+  const ipv6Words = parseIpv6Words(normalized);
+  return ipv6Words !== undefined && isLoopbackOrUnspecifiedIpv6(ipv6Words);
 };
 
 export const validateOriginUrl = (
@@ -160,6 +227,14 @@ export const isValidEmailFrom = (raw: string | undefined): boolean => {
   }
   const atIndex = address.indexOf("@");
   if (atIndex <= 0 || atIndex > 64) {
+    return false;
+  }
+  const domain = address.slice(atIndex + 1);
+  if (domain.length > 253) {
+    return false;
+  }
+  const labels = domain.split(".");
+  if (labels.length < 2 || labels.some((label) => label.length === 0 || label.length > 63)) {
     return false;
   }
   return EMAIL_ADDR_PATTERN.test(address);
