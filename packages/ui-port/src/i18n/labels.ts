@@ -27,7 +27,6 @@ import type {
   ThemeStyle,
   VatTreatment,
 } from "@kvitbit/domain/contract";
-import * as Fn from "effect/Function";
 import type { Text } from "../text";
 import type { MessageKey } from "./catalog";
 
@@ -112,10 +111,6 @@ export type EnumKey<E extends EnumName = EnumName> = E extends EnumName
   ? `enum.${E}.${EnumLabels[E]}`
   : never;
 
-type EnumNameFor<Value extends EnumLabels[EnumName]> = {
-  [Name in EnumName]: [Value] extends [EnumLabels[Name]] ? Name : never;
-}[EnumName];
-
 // Compile-time seam: a new domain literal without a label fails type checking here.
 const enumKeysCovered: [Exclude<EnumKey, MessageKey>] extends [never]
   ? true
@@ -123,31 +118,15 @@ const enumKeysCovered: [Exclude<EnumKey, MessageKey>] extends [never]
 // biome-ignore lint/complexity/noVoid: Keep the compile-time catalog coverage check.
 void enumKeysCovered;
 
-// The reversed call must infer which enum names accept the supplied value.
+// Mobile translation calls rely on the original generic inference for the enum name.
 // @effect-diagnostics-next-line missingPipeableSignature:off
-export const enumKey: {
-  <Value extends EnumLabels[EnumName]>(
-    value: Value,
-  ): <E extends EnumNameFor<Value>>(name: E) => EnumKey<E>;
-  <E extends EnumName>(name: E, value: EnumLabels[E]): EnumKey<E>;
-} = Fn.dual(
-  2,
-  <E extends EnumName>(name: E, value: EnumLabels[E]): EnumKey<E> =>
-    // biome-ignore lint/nursery/noUnsafeTypeAssertion: The enum name and value are tied by EnumLabels[E].
-    `enum.${name}.${value}` as EnumKey<E>,
-);
+export const enumKey = <E extends EnumName>(name: E, value: EnumLabels[E]): EnumKey<E> =>
+  // biome-ignore lint/nursery/noUnsafeTypeAssertion: The enum name and value are tied by EnumLabels[E].
+  `enum.${name}.${value}` as EnumKey<E>;
 
 /** `Text` label for an enum value, e.g. `enumText("documentKind", "proforma")`. */
-// The reversed call uses the same value-to-name constraint as enumKey.
+// Match the original generic signature of enumKey.
 // @effect-diagnostics-next-line missingPipeableSignature:off
-export const enumText: {
-  <Value extends EnumLabels[EnumName]>(
-    value: Value,
-  ): <E extends EnumNameFor<Value>>(name: E) => Text<EnumKey<E>>;
-  <E extends EnumName>(name: E, value: EnumLabels[E]): Text<EnumKey<E>>;
-} = Fn.dual(
-  2,
-  <E extends EnumName>(name: E, value: EnumLabels[E]): Text<EnumKey<E>> => ({
-    key: enumKey(name, value),
-  }),
-);
+export const enumText = <E extends EnumName>(name: E, value: EnumLabels[E]): Text<EnumKey<E>> => ({
+  key: enumKey(name, value),
+});
