@@ -101,7 +101,7 @@ describe("Settings page (Screens 18-21 & More hub)", () => {
       Arr.flatMap(Settings.SETTINGS_SECTIONS, (section) =>
         Arr.map(["cs", "en"] as const, async (locale) => {
           const route: Settings.Route = { _tag: "Settings", ws: WS, section };
-          const ctx = ctxFor(route, { locale });
+          const ctx = ctxFor({ route, locale });
           const { model } = Settings.init(route, ctx);
           const html = await renderText((h) => Settings.view(model, ctx, h));
           return { html, title: Settings.title(model, ctx) };
@@ -116,8 +116,8 @@ describe("Settings page (Screens 18-21 & More hub)", () => {
 
   test("renders the Mobile More hub when route._tag === More", async () => {
     const route: Settings.Route = { _tag: "More", ws: WS };
-    const ctxCs = ctxFor(route, { locale: "cs" });
-    const ctxEn = ctxFor(route, { locale: "en" });
+    const ctxCs = ctxFor({ route, locale: "cs" });
+    const ctxEn = ctxFor({ route, locale: "en" });
     const { model } = Settings.init(route, ctxCs);
     expect(Settings.title(model, ctxCs)).toBe("Více");
     expect(Settings.title(model, ctxEn)).toBe("More");
@@ -129,7 +129,7 @@ describe("Settings page (Screens 18-21 & More hub)", () => {
 
   test("handles Issuing Entity edits and ARES lookup", () => {
     const route: Settings.Route = { _tag: "Settings", ws: WS, section: "issuingEntity" };
-    const ctx = ctxFor(route, { locale: "en" });
+    const ctx = ctxFor({ route, locale: "en" });
     let { model } = Settings.init(route, ctx);
     model = Settings.update(
       model,
@@ -170,7 +170,7 @@ describe("Settings page (Screens 18-21 & More hub)", () => {
 
   test("handles Tax Regime history and scheduled change confirmation", async () => {
     const route: Settings.Route = { _tag: "Settings", ws: WS, section: "taxRegime" };
-    const ctx = ctxFor(route, { locale: "en" });
+    const ctx = ctxFor({ route, locale: "en" });
     let { model } = Settings.init(route, ctx);
     model = Settings.update(
       model,
@@ -203,7 +203,7 @@ describe("Settings page (Screens 18-21 & More hub)", () => {
     expect(czechAccountFromIban("DE89370400440532013000")).toBeNull();
 
     const route: Settings.Route = { _tag: "Settings", ws: WS, section: "bankAccounts" };
-    const ctx = ctxFor(route, { locale: "en" });
+    const ctx = ctxFor({ route, locale: "en" });
     let { model } = Settings.init(route, ctx);
     const accId = BankAccountId.make("0193a000-0000-7000-8000-000000000201");
     model = Settings.update(
@@ -236,7 +236,7 @@ describe("Settings page (Screens 18-21 & More hub)", () => {
 
   test("toggles distinct Classic Czech vs Modern Minimal miniature PDF preview layouts", async () => {
     const route: Settings.Route = { _tag: "Settings", ws: WS, section: "branding" };
-    const ctx = ctxFor(route, { locale: "en" });
+    const ctx = ctxFor({ route, locale: "en" });
     let { model } = Settings.init(route, ctx);
 
     const classicHtml = await renderText((h) => Settings.view(model, ctx, h));
@@ -271,7 +271,7 @@ describe("Settings page (Screens 18-21 & More hub)", () => {
     expect(tooLong.valid).toBe(false);
 
     const route: Settings.Route = { _tag: "Settings", ws: WS, section: "numbering" };
-    const ctx = ctxFor(route, { locale: "cs" });
+    const ctx = ctxFor({ route, locale: "cs" });
     let { model } = Settings.init(route, ctx);
     model = Settings.update(
       model,
@@ -285,7 +285,7 @@ describe("Settings page (Screens 18-21 & More hub)", () => {
 
   test("updates Document Defaults and Overdue Reminders offsets + auto-send PTD", () => {
     const route: Settings.Route = { _tag: "Settings", ws: WS, section: "reminders" };
-    const ctx = ctxFor(route, { locale: "en" });
+    const ctx = ctxFor({ route, locale: "en" });
     let { model } = Settings.init(route, ctx);
     model = Settings.update(
       model,
@@ -314,7 +314,7 @@ describe("Settings page (Screens 18-21 & More hub)", () => {
 
   test("toggles granular Read/Write scopes across all 10 ScopeAreas and reveals one-time kvb_ secret", async () => {
     const route: Settings.Route = { _tag: "Settings", ws: WS, section: "apiKeys" };
-    const ctx = ctxFor(route, { locale: "en" });
+    const ctx = ctxFor({ route, locale: "en" });
     let { model } = Settings.init(route, ctx);
     model = Settings.update(model, Settings.Message.ClickedToggleCreateApiKey(), ctx).model;
     model = Settings.update(
@@ -396,7 +396,7 @@ describe("Settings page (Screens 18-21 & More hub)", () => {
 
   test("renders Connected MCP Apps with scope matrix and revokes grants", async () => {
     const route: Settings.Route = { _tag: "Settings", ws: WS, section: "connectedApps" };
-    const ctx = ctxFor(route, { locale: "en" });
+    const ctx = ctxFor({ route, locale: "en" });
     let { model } = Settings.init(route, ctx);
     const app: ConnectedAppView = {
       grantId: "grant-1",
@@ -433,7 +433,7 @@ describe("Settings page (Screens 18-21 & More hub)", () => {
 
   test("guards Danger Zone workspace closure until exact workspace name is typed", () => {
     const route: Settings.Route = { _tag: "Settings", ws: WS, section: "dangerZone" };
-    const ctx = ctxFor(route, { locale: "en" });
+    const ctx = ctxFor({ route, locale: "en" });
     let { model } = Settings.init(route, ctx);
 
     // Wrong name -> no command emitted
@@ -459,7 +459,7 @@ describe("Settings page (Screens 18-21 & More hub)", () => {
 
   test("handles Team invitations and role changes", () => {
     const route: Settings.Route = { _tag: "Settings", ws: WS, section: "team" };
-    const ctx = ctxFor(route, { locale: "cs" });
+    const ctx = ctxFor({ route, locale: "cs" });
     let { model } = Settings.init(route, ctx);
     model = Settings.update(
       model,

@@ -69,8 +69,8 @@ const SAMPLE_VIEW: ExpenseViewRecord = {
 describe("Expenses page TEA", () => {
   test("init loads expenses list and uses Czech term Náklady in cs", () => {
     const route: Expenses.Route = { _tag: "Expenses", ws: WS, query: {} };
-    const ctxCs = ctxFor(route, { locale: "cs" });
-    const ctxEn = ctxFor(route, { locale: "en" });
+    const ctxCs = ctxFor({ route, locale: "cs" });
+    const ctxEn = ctxFor({ route, locale: "en" });
     const res = Expenses.init(route, ctxCs);
     expect(res.model.list._tag).toBe("Loading");
     expect(res.commands?.length).toBe(1);
@@ -80,7 +80,7 @@ describe("Expenses page TEA", () => {
 
   test("stale-seq safety drops out-of-order list responses", () => {
     const route: Expenses.Route = { _tag: "Expenses", ws: WS, query: {} };
-    const ctx = ctxFor(route);
+    const ctx = ctxFor({ route });
     let { model } = Expenses.init(route, ctx);
     // Switch filter bumps seq to 2
     model = Expenses.update(
@@ -147,7 +147,7 @@ describe("Expenses page TEA", () => {
 
   test("editor validates supplier IČO before calling ARES and fills supplier on success", () => {
     const route: Expenses.Route = { _tag: "Expense", ws: WS, id: "new", mode: "edit" };
-    const ctx = ctxFor(route);
+    const ctx = ctxFor({ route });
     let { model } = Expenses.init(route, ctx);
     model = Expenses.update(
       model,
@@ -202,7 +202,7 @@ describe("Expenses page TEA", () => {
 
   test("currency change to EUR fetches CNB FX rate and updates preview", () => {
     const route: Expenses.Route = { _tag: "Expense", ws: WS, id: "new", mode: "edit" };
-    const ctx = ctxFor(route);
+    const ctx = ctxFor({ route });
     const { model } = Expenses.init(route, ctx);
     const changed = Expenses.update(
       model,
@@ -228,7 +228,7 @@ describe("Expenses page TEA", () => {
       id: ExpenseId.make(SAMPLE_VIEW.id),
       mode: "view",
     };
-    const ctx = ctxFor(route);
+    const ctx = ctxFor({ route });
     let { model } = Expenses.init(route, ctx);
     model = Expenses.update(
       model,

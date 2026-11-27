@@ -60,17 +60,17 @@ describe("Dashboard page (Screen 08)", () => {
 
   test("init loads dashboard and recent documents", () => {
     const options = { locale: "cs", _tag: "SignIn" } as const;
-    const ctx = ctxFor(route, options);
+    const ctx = ctxFor({ ...options, route });
     const res = Dashboard.init(route, ctx);
     expect(res.model.dashboard._tag).toBe("Loading");
     expect(res.model.recent._tag).toBe("Loading");
     expect(res.commands?.length).toBe(2);
     expect(Dashboard.title(res.model, ctx)).toBe("Přehled");
-    expect(Dashboard.title(res.model, ctxFor(route, { locale: "en" }))).toBe("Dashboard");
+    expect(Dashboard.title(res.model, ctxFor({ route, locale: "en" }))).toBe("Dashboard");
   });
 
   test("stale sequence replies are dropped", () => {
-    const ctx = ctxFor(route);
+    const ctx = ctxFor({ route });
     const { model } = Dashboard.init(route, ctx);
     // seq is 1; a reply for seq 99 must be ignored
     const stale = Dashboard.update(
@@ -90,7 +90,7 @@ describe("Dashboard page (Screen 08)", () => {
   });
 
   test("checklist dismissal and retry work cleanly", () => {
-    const ctx = ctxFor(route);
+    const ctx = ctxFor({ route });
     const { model } = Dashboard.init(route, ctx);
     const dismissed = Dashboard.update(model, Dashboard.Message.ClickedDismissChecklist(), ctx);
     expect(dismissed.model.checklistHidden).toBe(true);
@@ -101,7 +101,7 @@ describe("Dashboard page (Screen 08)", () => {
   });
 
   test("loaded state transitions with recent queue", () => {
-    const ctx = ctxFor(route);
+    const ctx = ctxFor({ route });
     const { model } = Dashboard.init(route, ctx);
     const step1 = Dashboard.update(
       model,
@@ -125,7 +125,7 @@ describe("Dashboard page (Screen 08)", () => {
     expect(en.html).toContain("Workspace setup");
   });
   test("recent documents load monetary values from the API response", async () => {
-    const ctx = ctxFor(route);
+    const ctx = ctxFor({ route });
     const { model, commands } = Dashboard.init(route, ctx);
     const recentCommand = commands?.[1];
     if (recentCommand === undefined) throw new Error("Missing recent documents command");

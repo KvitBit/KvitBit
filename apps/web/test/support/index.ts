@@ -35,8 +35,10 @@ interface FixtureOptions {
   readonly today?: string;
 }
 
-// @effect-diagnostics-next-line missingPipeableSignature:off A fixture options object can also contain a route tag.
-export const ctxFor = (route: Route, opts: FixtureOptions = {}): PageContext => {
+export const ctxFor = ({
+  route,
+  ...opts
+}: FixtureOptions & { readonly route: Route }): PageContext => {
   const session = opts.session ?? signedIn;
   return {
     route,

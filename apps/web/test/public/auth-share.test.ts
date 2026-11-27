@@ -47,7 +47,7 @@ const decodeDemoShare = (token: string): SharedDocumentView => {
 describe("Auth page (Screen 02)", () => {
   test("SignUp starts ALTCHA solve, drops stale botSeq, validates fields, and auto-re-solves on freshBotProof", () => {
     const route: Auth.Route = { _tag: "SignUp" };
-    const ctx = ctxFor(route, { locale: "en", session: anonymous });
+    const ctx = ctxFor({ route, locale: "en", session: anonymous });
     const first = Auth.init(route, ctx);
     expect(first.model.botProof._tag).toBe("Solving");
     expect(first.model.botSeq).toBe(1);
@@ -98,7 +98,7 @@ describe("Auth page (Screen 02)", () => {
 
   test("SignIn supports password, magic_link, and passkey unsupported state", () => {
     const route: Auth.Route = { _tag: "SignIn", returnTo: "/w/novak-design" };
-    const ctx = ctxFor(route, { locale: "en", session: anonymous });
+    const ctx = ctxFor({ route, locale: "en", session: anonymous });
     const first = Auth.init(route, ctx);
     expect(first.model.signInMethod).toBe("password");
 
@@ -139,7 +139,7 @@ describe("Auth page (Screen 02)", () => {
         routes,
         (route) =>
           Effect.promise(async () => {
-            const ctx = ctxFor(route, { locale: "en", session: anonymous });
+            const ctx = ctxFor({ route, locale: "en", session: anonymous });
             const { model } = Auth.init(route, ctx);
             const selected = Auth.update(
               model,
@@ -178,12 +178,15 @@ describe("Auth page (Screen 02)", () => {
 
   test("AuthLink reset redirects to ResetPassword; verify failure shows expired state", () => {
     const resetRoute: Auth.Route = { _tag: "AuthLink", kind: "reset", token: "tok-1" };
-    const ctx = ctxFor(resetRoute, { locale: "en", session: anonymous });
+    const ctx = ctxFor({ route: resetRoute, locale: "en", session: anonymous });
     const res = Auth.init(resetRoute, ctx);
     expect(res.outMessage?._tag).toBe("Navigate");
 
     const verifyRoute: Auth.Route = { _tag: "AuthLink", kind: "verify", token: "expired" };
-    const vInit = Auth.init(verifyRoute, ctxFor(verifyRoute, { locale: "en", session: anonymous }));
+    const vInit = Auth.init(
+      verifyRoute,
+      ctxFor({ route: verifyRoute, locale: "en", session: anonymous }),
+    );
     expect(vInit.model.linkState).toBe("verifying");
     const vFail = Auth.update(
       vInit.model,
@@ -216,7 +219,7 @@ describe("Auth page (Screen 02)", () => {
       expiresAt: "2099-01-01",
     };
     const route: Auth.Route = { _tag: "SignUp", invitation: token };
-    const ctx = ctxFor(route, { locale: "en", session: anonymous });
+    const ctx = ctxFor({ route, locale: "en", session: anonymous });
     const calls: Array<string> = [];
     let session = false;
     let signupCredentials: RequestCredentials | undefined;
@@ -328,7 +331,7 @@ describe("Auth page (Screen 02)", () => {
     ] as const) {
       const route: Auth.Route =
         returnTo === undefined ? { _tag: "SignIn" } : { _tag: "SignIn", returnTo };
-      const ctx = ctxFor(route, { locale: "en", session: anonymous });
+      const ctx = ctxFor({ route, locale: "en", session: anonymous });
       const initial = Auth.init(route, ctx);
       const ready = Auth.update(
         initial.model,
@@ -354,7 +357,7 @@ describe("Public Share Link page (Screen 04)", () => {
   test("loads unpaid CZK, EUR, paid, proforma, credit note, branded, and revoked states with stale-seq safety", () => {
     const token = ShareToken.make("demo-unpaid-czk");
     const route: Share.Route = { _tag: "Share", token };
-    const ctx = ctxFor(route, { locale: "en", session: anonymous });
+    const ctx = ctxFor({ route, locale: "en", session: anonymous });
 
     const first = Share.init(route, ctx);
     expect(first.model.doc._tag).toBe("Loading");
@@ -472,7 +475,7 @@ const renderLoadedShare = async (
   today = "2026-11-26",
 ) => {
   const route: Share.Route = { _tag: "Share", token: ShareToken.make(token) };
-  const base = ctxFor(route, { locale: "en", session: anonymous, today });
+  const base = ctxFor({ route, locale: "en", session: anonymous, today });
   const ctx = { ...base, prefs: { ...base.prefs, style } };
   const initial = Share.init(route, ctx);
   const { model } = Share.update(

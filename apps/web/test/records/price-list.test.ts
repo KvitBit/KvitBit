@@ -18,8 +18,8 @@ const SAMPLE_ITEM: PriceListItemRecord = {
 describe("PriceList page TEA", () => {
   test("init loads items, shows shimmer skeleton while loading, and enforces stale-seq safety", () => {
     const route: PriceList.Route = { _tag: "PriceList", ws: WS };
-    const ctxCs = ctxFor(route, { locale: "cs" });
-    const ctxEn = ctxFor(route, { locale: "en" });
+    const ctxCs = ctxFor({ route, locale: "cs" });
+    const ctxEn = ctxFor({ route, locale: "en" });
     let { model, commands } = PriceList.init(route, ctxCs);
     expect(model.items._tag).toBe("Loading");
     expect(commands?.length).toBe(1);
@@ -54,7 +54,7 @@ describe("PriceList page TEA", () => {
 
   test("create/edit validation and save flow updates list optimistically on success", () => {
     const route: PriceList.Route = { _tag: "PriceList", ws: WS };
-    const ctx = ctxFor(route);
+    const ctx = ctxFor({ route });
     let { model } = PriceList.init(route, ctx);
     model = PriceList.update(
       model,
@@ -98,7 +98,7 @@ describe("PriceList page TEA", () => {
 
   test("archive flow removes item when includeArchived is false", () => {
     const route: PriceList.Route = { _tag: "PriceList", ws: WS };
-    const ctx = ctxFor(route);
+    const ctx = ctxFor({ route });
     let { model } = PriceList.init(route, ctx);
     model = PriceList.update(
       model,

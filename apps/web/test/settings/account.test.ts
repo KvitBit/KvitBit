@@ -56,7 +56,7 @@ const mockFetch = (handle: (...args: Parameters<typeof fetch>) => Response | Pro
 describe("Account & Security page (Screen 22)", () => {
   test("reports an empty JSON profile response as a failed save", async () => {
     const route: Account.Route = { _tag: "Account", tab: "profile" };
-    const ctx = ctxFor(route, { locale: "en" });
+    const ctx = ctxFor({ route, locale: "en" });
     const { model } = Account.init(route, ctx);
     const named = Account.update(model, Account.Message.ChangedName({ value: "Jana" }), ctx);
     const saving = Account.update(named.model, Account.Message.ClickedSaveProfile(), ctx);
@@ -86,7 +86,7 @@ describe("Account & Security page (Screen 22)", () => {
       Arr.flatMap(tabs, (tab) =>
         Arr.map(["cs", "en"] as const, async (locale) => {
           const route: Account.Route = { _tag: "Account", tab };
-          const ctx = ctxFor(route, { locale });
+          const ctx = ctxFor({ route, locale });
           const { model } = Account.init(route, ctx);
           const html = await renderText((h) => Account.view(model, ctx, h));
           return { html, title: Account.title(model, ctx) };
@@ -101,7 +101,7 @@ describe("Account & Security page (Screen 22)", () => {
 
   test("emits Intent_.setPrefs live for all 6 theme presets, custom hex seed, style, mode, contrast and locale", () => {
     const route: Account.Route = { _tag: "Account", tab: "appearance" };
-    const ctx = ctxFor(route, { locale: "en" });
+    const ctx = ctxFor({ route, locale: "en" });
     let { model } = Account.init(route, ctx);
 
     // All 6 presets must be present and emit SetPrefs
@@ -175,7 +175,7 @@ describe("Account & Security page (Screen 22)", () => {
 
   test("renames a passkey and validates a password change", async () => {
     const route: Account.Route = { _tag: "Account", tab: "security" };
-    const ctx = ctxFor(route, { locale: "en" });
+    const ctx = ctxFor({ route, locale: "en" });
     let { model } = Account.init(route, ctx);
 
     model = Account.update(
@@ -254,7 +254,7 @@ describe("Account & Security page (Screen 22)", () => {
 
   test("blocks removing the final passkey while password status is unknown or password is absent", async () => {
     const route: Account.Route = { _tag: "Account", tab: "security" };
-    const ctx = ctxFor(route, { locale: "en" });
+    const ctx = ctxFor({ route, locale: "en" });
     const passkeys = [{ id: "key-1", name: null, deviceType: "singleDevice" }];
     let accounts: unknown = [];
     const fetch = mockFetch((input) => {
@@ -309,7 +309,7 @@ describe("Account & Security page (Screen 22)", () => {
 
   test("reloads the stored list after registering a passkey", async () => {
     const route: Account.Route = { _tag: "Account", tab: "security" };
-    const ctx = ctxFor(route, { locale: "en" });
+    const ctx = ctxFor({ route, locale: "en" });
     const { model } = Account.init(route, ctx);
     const started = Account.update(model, Account.Message.ClickedAddPasskey(), ctx);
     expect(Arr.map(started.commands ?? [], operationName)).toEqual(["Account.AddPasskey"]);
@@ -430,7 +430,7 @@ describe("Account & Security page (Screen 22)", () => {
 
   test("labels the active Better Auth session and revokes another session by token", async () => {
     const route: Account.Route = { _tag: "Account", tab: "sessions" };
-    const ctx = ctxFor(route, { locale: "en" });
+    const ctx = ctxFor({ route, locale: "en" });
     const requests: Array<{ method: string | undefined; path: string; body: RequestInit["body"] }> =
       [];
     const entries = [
@@ -509,13 +509,14 @@ describe("Account & Security page (Screen 22)", () => {
   test("blocks Account deletion while sole owner of an open workspace and requires confirm phrase", async () => {
     const route: Account.Route = { _tag: "Account", tab: "danger" };
     // Default signedIn session owns a 1-member workspace (jana-osvc) -> shows blocker
-    const blockedCtx = ctxFor(route, { locale: "en" });
+    const blockedCtx = ctxFor({ route, locale: "en" });
     const { model: blockedModel } = Account.init(route, blockedCtx);
     const blockedHtml = await renderText((h) => Account.view(blockedModel, blockedCtx, h));
     expect(blockedHtml).toContain("Jana Nováková (OSVČ)");
 
     // Session with no sole-owned open workspaces
-    const clearCtx = ctxFor(route, {
+    const clearCtx = ctxFor({
+      route,
       locale: "en",
       session: {
         _tag: "SignedIn",

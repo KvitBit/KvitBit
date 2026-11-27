@@ -45,7 +45,7 @@ const sampleFailure = (tag = "NotFound"): Failure => ({
 describe("MCP OAuth 2.1 Consent page (Screen 05)", () => {
   test("loads consent, switches workspace, toggles all 10 ScopeAreas, and approves/denies with stale-seq safety", () => {
     const route: Consent.Route = { _tag: "McpConsent", consentId: "demo-consent" };
-    const ctx = ctxFor(route, { locale: "en", session: signedIn });
+    const ctx = ctxFor({ route, locale: "en", session: signedIn });
     const first = Consent.init(route, ctx);
     expect(first.model.consent._tag).toBe("Loading");
 
@@ -104,7 +104,7 @@ describe("MCP OAuth 2.1 Consent page (Screen 05)", () => {
 
   test("accountant workspace caps offerable scopes to read-only", () => {
     const route: Consent.Route = { _tag: "McpConsent", consentId: "demo-accountant" };
-    const ctx = ctxFor(route, { locale: "en", session: signedIn });
+    const ctx = ctxFor({ route, locale: "en", session: signedIn });
     const first = Consent.init(route, ctx);
     const consentView = Effect.runSync(
       Schema.decodeUnknownEffect(ConsentView)(
@@ -130,7 +130,7 @@ describe("MCP OAuth 2.1 Consent page (Screen 05)", () => {
 describe("Workspace Invitation Landing page (Screen 05)", () => {
   test("peeks invitation, handles accept -> ReloadSession, decline, and stale-seq", () => {
     const route: Invitation.Route = { _tag: "Invitation", token: "demo-pending" };
-    const ctx = ctxFor(route, { locale: "en", session: signedIn });
+    const ctx = ctxFor({ route, locale: "en", session: signedIn });
     const first = Invitation.init(route, ctx);
     expect(first.model.peek._tag).toBe("Loading");
 
@@ -182,7 +182,7 @@ describe("Workspace Invitation Landing page (Screen 05)", () => {
 describe("Workspace Onboarding Wizard (Screen 07)", () => {
   test("walks 5 steps: ARES lookup, tax regime, Czech account -> IBAN, numbering, and create workspace", async () => {
     const route: Onboarding.Route = { _tag: "Onboarding" };
-    const ctx = ctxFor(route, { locale: "en", session: signedIn });
+    const ctx = ctxFor({ route, locale: "en", session: signedIn });
     const first = Onboarding.update(
       Onboarding.init(route, ctx).model,
       Onboarding.Message.RestoredDraft({ draft: null }),
@@ -335,7 +335,7 @@ describe("Workspace Onboarding Wizard (Screen 07)", () => {
 
   test("writes the issuer, bank and numbering through the typed API and resumes lost replies", async () => {
     const route: Onboarding.Route = { _tag: "Onboarding", step: 5 };
-    const ctx = ctxFor(route, { locale: "en", session: signedIn });
+    const ctx = ctxFor({ route, locale: "en", session: signedIn });
     const workspace = {
       id: DEMO_WORKSPACE.id,
       slug: "wire-setup",

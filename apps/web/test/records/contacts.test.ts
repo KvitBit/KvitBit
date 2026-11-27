@@ -30,7 +30,7 @@ const SAMPLE_CONTACT: ContactRecord = {
 describe("Contacts page TEA", () => {
   test("init loads contacts list and handles live search & role filters with stale-seq safety", () => {
     const route: Contacts.Route = { _tag: "Contacts", ws: WS, query: {} };
-    const ctx = ctxFor(route, { locale: "cs" });
+    const ctx = ctxFor({ route, locale: "cs" });
     let { model, commands } = Contacts.init(route, ctx);
     expect(model.list._tag).toBe("Loading");
     expect(commands?.length).toBe(1);
@@ -67,7 +67,7 @@ describe("Contacts page TEA", () => {
 
   test("ARES IČO lookup validates checksum and populates contact editor", () => {
     const route: Contacts.Route = { _tag: "Contact", ws: WS, id: "new", mode: "edit" };
-    const ctx = ctxFor(route, { locale: "en" });
+    const ctx = ctxFor({ route, locale: "en" });
     let { model } = Contacts.init(route, ctx);
 
     // Invalid IČO rejected client-side
@@ -105,7 +105,7 @@ describe("Contacts page TEA", () => {
       id: ContactId.make(SAMPLE_CONTACT.id),
       mode: "edit",
     };
-    const ctx = ctxFor(route);
+    const ctx = ctxFor({ route });
     let { model } = Contacts.init(route, ctx);
     model = Contacts.update(
       model,

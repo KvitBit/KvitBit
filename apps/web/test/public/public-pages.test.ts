@@ -52,7 +52,7 @@ const sampleRelease: ReleaseInfo = Effect.runSync(
 
 describe("Landing page (Screen 01)", () => {
   test("init loads config with seq=1 and ignores stale seq replies", () => {
-    const ctx = ctxFor({ _tag: "Landing" }, { locale: "en", session: anonymous });
+    const ctx = ctxFor({ route: { _tag: "Landing" }, locale: "en", session: anonymous });
     const first = Landing.init({ _tag: "Landing" }, ctx);
     expect(first.model.config._tag).toBe("Loading");
     expect(first.commands?.length).toBe(1);
@@ -110,7 +110,7 @@ describe("Legal page (Screen 01)", () => {
     expect(privacyCs.title).toContain("Ochrana osobních údajů");
     expect(privacyCs.html).toContain("GDPR");
 
-    const ctx = ctxFor({ _tag: "Legal", page: "terms" }, { locale: "en" });
+    const ctx = ctxFor({ route: { _tag: "Legal", page: "terms" }, locale: "en" });
     const init = Legal.init({ _tag: "Legal", page: "terms" }, ctx);
     expect(init.model.kind).toBe("terms");
   });
@@ -118,7 +118,7 @@ describe("Legal page (Screen 01)", () => {
 
 describe("Android Download page (Screen 03)", () => {
   test("init fetches release, handles failure/retry, stale-seq, and copy toast", () => {
-    const ctx = ctxFor({ _tag: "AndroidDownload" }, { locale: "en", session: anonymous });
+    const ctx = ctxFor({ route: { _tag: "AndroidDownload" }, locale: "en", session: anonymous });
     const first = Android.init({ _tag: "AndroidDownload" }, ctx);
     expect(first.model.release._tag).toBe("Loading");
 
@@ -176,7 +176,11 @@ describe("Error pages (Screen 03)", () => {
     expect(noAccess.html).toContain("No access");
     expect(noAccess.html).toContain("Novák Design");
 
-    const ctx = ctxFor({ _tag: "Error", kind: "server" }, { locale: "cs", session: anonymous });
+    const ctx = ctxFor({
+      route: { _tag: "Error", kind: "server" },
+      locale: "cs",
+      session: anonymous,
+    });
     const init = ErrorPage.init({ _tag: "Error", kind: "server" }, ctx);
     expect(ErrorPage.title(init.model, ctx)).toContain("Něco se pokazilo");
     const retried = ErrorPage.update(init.model, ErrorPage.Message.ClickedRetry(), ctx);

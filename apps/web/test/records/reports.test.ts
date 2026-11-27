@@ -111,7 +111,7 @@ describe("Reports Suite page TEA", () => {
       report: "revenue",
       period: "2026",
     };
-    const ctx = ctxFor(route, { locale: "cs" });
+    const ctx = ctxFor({ route, locale: "cs" });
     let { model } = Reports.init(route, ctx);
     expect(model.data._tag).toBe("Loading");
 
@@ -148,7 +148,7 @@ describe("Reports Suite page TEA", () => {
       report: "cashflow",
       period: "2026",
     };
-    const ctx = ctxFor(route);
+    const ctx = ctxFor({ route });
     const { model } = Reports.init(route, ctx);
     const next = Reports.update(model, Reports.Message.ChangedPeriod({ period: "2026-Q4" }), ctx);
     expect(next.outMessage).toEqual({
@@ -165,7 +165,7 @@ describe("Reports Suite page TEA", () => {
       report: "vat_summary",
       period: "2026-Q4",
     };
-    const ctx = ctxFor(route, { locale: "en" });
+    const ctx = ctxFor({ route, locale: "en" });
     let { model } = Reports.init(route, ctx);
     model = Reports.update(
       model,
@@ -202,7 +202,7 @@ describe("Reports Suite page TEA", () => {
       report: "revenue",
       period: "2026",
     };
-    const ctx = ctxFor(route, { locale: "en" });
+    const ctx = ctxFor({ route, locale: "en" });
     const { model } = Reports.init(route, ctx);
     const grouped = Reports.update(
       model,

@@ -71,7 +71,7 @@ const draft: DocumentView = {
 
 const preparedEditor = (
   doc: DocumentView | null,
-  ctx = ctxFor(doc === null ? newInvoiceRoute : editRoute),
+  ctx = ctxFor({ route: doc === null ? newInvoiceRoute : editRoute }),
 ) => {
   const route = doc === null ? newInvoiceRoute : editRoute;
   const update = (current: Editor.Model, message: Editor.Message) =>
@@ -123,8 +123,8 @@ const renderEditor = (model: Editor.Model, ctx: ReturnType<typeof ctxFor>) => {
 
 describe("DocumentEditor page (Screen 10)", () => {
   test("init loads lookups and starts with one line", () => {
-    const ctxCs = ctxFor(newInvoiceRoute, { locale: "cs" });
-    const ctxEn = ctxFor(newInvoiceRoute, { locale: "en" });
+    const ctxCs = ctxFor({ route: newInvoiceRoute, locale: "cs" });
+    const ctxEn = ctxFor({ route: newInvoiceRoute, locale: "en" });
     const res = Editor.init(newInvoiceRoute, ctxCs);
     expect(res.model.lookups._tag).toBe("Loading");
     expect(res.model.lines.length).toBe(1);
@@ -133,7 +133,7 @@ describe("DocumentEditor page (Screen 10)", () => {
   });
 
   test("line items add, update, move, and remove cleanly", () => {
-    const ctx = ctxFor(newInvoiceRoute);
+    const ctx = ctxFor({ route: newInvoiceRoute });
     const { model } = Editor.init(newInvoiceRoute, ctx);
     const s1 = Editor.update(
       model,
@@ -161,7 +161,7 @@ describe("DocumentEditor page (Screen 10)", () => {
   });
 
   test("ARES quick-add selects returned contact and stale lookup seq is dropped", () => {
-    const ctx = ctxFor(newInvoiceRoute);
+    const ctx = ctxFor({ route: newInvoiceRoute });
     const { model } = Editor.init(newInvoiceRoute, ctx);
     const stale = Editor.update(
       model,
@@ -210,7 +210,7 @@ describe("DocumentEditor page (Screen 10)", () => {
   });
 
   test("validation rejects missing contact before submitting", () => {
-    const ctx = ctxFor(newInvoiceRoute, { locale: "en" });
+    const ctx = ctxFor({ route: newInvoiceRoute, locale: "en" });
     const { model } = Editor.init(newInvoiceRoute, ctx);
     const res = Editor.update(model, Editor.Message.ClickedSaveDraft(), ctx);
     expect(res.model.submitError).toContain("customer");
@@ -305,7 +305,10 @@ describe("DocumentEditor page (Screen 10)", () => {
   });
 
   test("keeps the persisted symbol visible and blocks autosave and issue after it is cleared", async () => {
-    const { update, model, ctx } = preparedEditor(draft, ctxFor(editRoute, { locale: "en" }));
+    const { update, model, ctx } = preparedEditor(
+      draft,
+      ctxFor({ route: editRoute, locale: "en" }),
+    );
     const requests: Array<{ method: string; revision: string | null; body: unknown }> = [];
     const fetch = async (request: Request) => {
       requests.push({
@@ -564,7 +567,7 @@ describe("DocumentEditor page (Screen 10)", () => {
 
     const readOnly = preparedEditor(
       draft,
-      ctxFor(editRoute, { locale: "en", session: sessionWithRole("accountant") }),
+      ctxFor({ route: editRoute, locale: "en", session: sessionWithRole("accountant") }),
     );
     const rendered = await renderEditor(readOnly.model, readOnly.ctx);
     expect(rendered.html).toContain("This document cannot be edited here.");

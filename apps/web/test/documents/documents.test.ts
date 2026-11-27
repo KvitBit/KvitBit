@@ -30,8 +30,8 @@ describe("Documents list page (Screen 09)", () => {
   const route: Documents.Route = { _tag: "Documents", ws: WS, query: {} };
 
   test("init starts loading and computes localized titles", () => {
-    const ctxCs = ctxFor(route, { locale: "cs" });
-    const ctxEn = ctxFor(route, { locale: "en" });
+    const ctxCs = ctxFor({ route, locale: "cs" });
+    const ctxEn = ctxFor({ route, locale: "en" });
     const res = Documents.init(route, ctxCs);
     expect(res.model.list._tag).toBe("Loading");
     expect(res.commands?.length).toBe(1);
@@ -40,7 +40,7 @@ describe("Documents list page (Screen 09)", () => {
   });
 
   test("stale-seq safety and cursor pagination append", () => {
-    const ctx = ctxFor(route);
+    const ctx = ctxFor({ route });
     const { model } = Documents.init(route, ctx);
     const stale = Documents.update(
       model,
@@ -85,7 +85,7 @@ describe("Documents list page (Screen 09)", () => {
   });
 
   test("filters emit navigation intents with updated query string", () => {
-    const ctx = ctxFor(route);
+    const ctx = ctxFor({ route });
     const { model } = Documents.init(route, ctx);
     const typed = Documents.update(model, Documents.Message.ChangedSearch({ value: "Alza" }), ctx);
     const submitted = Documents.update(typed.model, Documents.Message.SubmittedSearch(), ctx);

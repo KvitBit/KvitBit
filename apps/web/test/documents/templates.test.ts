@@ -60,8 +60,8 @@ describe("Templates & Recurring page (Screen 12)", () => {
   const editRoute: Templates.Route = { _tag: "Template", ws: WS, id: TPL_ID, tab: "schedule" };
 
   test("init loads templates list and localizes titles", () => {
-    const ctxCs = ctxFor(listRoute, { locale: "cs" });
-    const ctxEn = ctxFor(listRoute, { locale: "en" });
+    const ctxCs = ctxFor({ route: listRoute, locale: "cs" });
+    const ctxEn = ctxFor({ route: listRoute, locale: "en" });
     const res = Templates.init(listRoute, ctxCs);
     expect(res.model.data._tag).toBe("Loading");
     expect(res.commands?.length).toBe(1);
@@ -70,7 +70,7 @@ describe("Templates & Recurring page (Screen 12)", () => {
   });
 
   test("stale-seq safety, template hydration, schedule update and resume", () => {
-    const ctx = ctxFor(editRoute, { locale: "en" });
+    const ctx = ctxFor({ route: editRoute, locale: "en" });
     const { model } = Templates.init(editRoute, ctx);
     const stale = Templates.update(
       model,
@@ -130,10 +130,10 @@ describe("Templates & Recurring page (Screen 12)", () => {
   });
 
   test("using a template as a draft preserves its request key when the first reply is lost", async () => {
-    const ctx = ctxFor(listRoute);
+    const ctx = ctxFor({ route: listRoute });
     const open = Templates.init(listRoute, ctx);
     const message = Templates.Message.ClickedUseTemplate({ templateId: TPL_ID });
-    const accountant = ctxFor(listRoute, { session: sessionWithRole("accountant") });
+    const accountant = ctxFor({ route: listRoute, session: sessionWithRole("accountant") });
     expect(Templates.update(open.model, message, accountant).commands).toBeUndefined();
 
     const mint = Templates.update(open.model, message, ctx);

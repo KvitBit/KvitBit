@@ -12,7 +12,7 @@ const requestKeyPattern = /^[0-9a-f-]{36}$/;
 describe("DocumentDetail page (Screen 11)", () => {
   const route: Detail.Route = { _tag: "Document", ws: WS, id: DOC_ID, tab: "preview" };
 
-  const loadedDetail = (doc: DocumentView, ctx = ctxFor(route, { locale: "en" })) => {
+  const loadedDetail = (doc: DocumentView, ctx = ctxFor({ route, locale: "en" })) => {
     const update = (current: Detail.Model, message: Detail.Message) =>
       Detail.update(current, message, ctx);
     const initial = Detail.init(route, ctx).model;
@@ -40,7 +40,7 @@ describe("DocumentDetail page (Screen 11)", () => {
   };
 
   test("init loads detail and honors route dialog param", () => {
-    const ctx = ctxFor(route, { locale: "cs" });
+    const ctx = ctxFor({ route, locale: "cs" });
     const res = Detail.init(route, ctx);
     expect(res.model.detail._tag).toBe("Loading");
     expect(res.model.activeDialog).toBeNull();
@@ -51,7 +51,7 @@ describe("DocumentDetail page (Screen 11)", () => {
   });
 
   test("stale-seq safety and prefill of send/payment dialogs on load", () => {
-    const ctx = ctxFor(route);
+    const ctx = ctxFor({ route });
     const { model } = Detail.init(route, ctx);
     const stale = Detail.update(
       model,
@@ -78,7 +78,7 @@ describe("DocumentDetail page (Screen 11)", () => {
   });
 
   test("a settled proforma can issue a Final Invoice and an invoice can issue a Credit Note", () => {
-    const ctx = ctxFor(route, { locale: "en" });
+    const ctx = ctxFor({ route, locale: "en" });
     const { model } = Detail.init(route, ctx);
     const loaded = Detail.update(
       model,
@@ -172,7 +172,7 @@ describe("DocumentDetail page (Screen 11)", () => {
   test("detail renders role and lifecycle permissions and enforces them in update", async () => {
     const accountant = loadedDetail(
       sampleProforma,
-      ctxFor(route, { locale: "en", session: sessionWithRole("accountant") }),
+      ctxFor({ route, locale: "en", session: sessionWithRole("accountant") }),
     );
     const accountantHtml = (await renderDetail(accountant.model, accountant.ctx)).html;
     expect(accountantHtml).toContain("Download PDF");
@@ -203,11 +203,11 @@ describe("DocumentDetail page (Screen 11)", () => {
     const locked = { ...sampleProforma, locked: true };
     const member = loadedDetail(
       locked,
-      ctxFor(route, { locale: "en", session: sessionWithRole("member") }),
+      ctxFor({ route, locale: "en", session: sessionWithRole("member") }),
     );
     const admin = loadedDetail(
       locked,
-      ctxFor(route, { locale: "en", session: sessionWithRole("admin") }),
+      ctxFor({ route, locale: "en", session: sessionWithRole("admin") }),
     );
     expect((await renderDetail(member.model, member.ctx)).html).not.toContain(">Unlock<");
     expect((await renderDetail(admin.model, admin.ctx)).html).toContain(">Unlock<");
