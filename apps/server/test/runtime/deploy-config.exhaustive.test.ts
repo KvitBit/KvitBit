@@ -617,6 +617,44 @@ describe("verify-deploy-config: apps/server runtime contract", () => {
       validateServerRuntimeEnv({ ...upgradedEnv, APP_ORIGIN: "https://[::ffff:0.0.0.0]" }, "server")
         .ok,
     ).toBe(false);
+
+    // Live-loader checks for empty primary sibling masking fallback and sparse Array gaps.
+    for (const workload of SERVER_WORKLOADS) {
+      const siblingMasked = await Effect.runPromise(
+        loadBootRuntimeConfig(workload).pipe(
+          Effect.provide(
+            ConfigProvider.layer(
+              ConfigProvider.orElse(
+                ConfigProvider.fromEnv({ env: { ...upgradedEnv, KVITBIT_DISABLE_OTHER: "" } }),
+                ConfigProvider.fromEnv({ env: { KVITBIT_DISABLE_CUSTOM: "true" } }),
+              ),
+            ),
+          ),
+          Effect.result,
+        ),
+      );
+      expect(siblingMasked._tag, `${workload} empty primary sibling + fallback`).toBe("Failure");
+
+      for (const [label, sparseExtra] of [
+        ["sparse 1200/3000", { KVITBIT_DISABLE_HTTP_1200: "true", KVITBIT_DISABLE_HTTP_3000: "" }],
+        [
+          "sparse 5000/10000",
+          { KVITBIT_DISABLE_HTTP_5000: "true", KVITBIT_DISABLE_HTTP_10000: "" },
+        ],
+      ] as const) {
+        const sparseRes = await Effect.runPromise(
+          loadBootRuntimeConfig(workload).pipe(
+            Effect.provide(
+              ConfigProvider.layer(
+                ConfigProvider.fromEnv({ env: { ...upgradedEnv, ...sparseExtra } }),
+              ),
+            ),
+            Effect.result,
+          ),
+        );
+        expect(sparseRes._tag, `${workload} ${label}`).toBe("Failure");
+      }
+    }
   }, 30_000);
 
   test("real Effect layers (makeEmailSenderLayer, makeBlobStorageLayer, MobileConfigLive) match oracle", async () => {
@@ -1176,6 +1214,41 @@ describe("verify-deploy-config: infra/alchemy stack validation & cross-layer sou
         ),
       );
       expect(fallback._tag, `loadStackConfig fallback ${key}`).toBe("Failure");
+    }
+
+    // Empty primary sibling masking fallback and sparse Array gaps must also fail in live loadStackConfig.
+    const stackSiblingMasked = await Effect.runPromise(
+      loadStackConfig.pipe(
+        Effect.provide(
+          ConfigProvider.layer(
+            ConfigProvider.orElse(
+              ConfigProvider.fromEnv({ env: { ...baseStackEnv, KVITBIT_DISABLE_OTHER: "" } }),
+              ConfigProvider.fromEnv({ env: { KVITBIT_DISABLE_CUSTOM: "true" } }),
+            ),
+          ),
+        ),
+        Effect.result,
+      ),
+    );
+    expect(stackSiblingMasked._tag, "loadStackConfig empty primary sibling + fallback").toBe(
+      "Failure",
+    );
+
+    for (const [label, sparseExtra] of [
+      ["sparse 1200/3000", { KVITBIT_DISABLE_HTTP_1200: "true", KVITBIT_DISABLE_HTTP_3000: "" }],
+      ["sparse 5000/10000", { KVITBIT_DISABLE_HTTP_5000: "true", KVITBIT_DISABLE_HTTP_10000: "" }],
+    ] as const) {
+      const sparseRes = await Effect.runPromise(
+        loadStackConfig.pipe(
+          Effect.provide(
+            ConfigProvider.layer(
+              ConfigProvider.fromEnv({ env: { ...baseStackEnv, ...sparseExtra } }),
+            ),
+          ),
+          Effect.result,
+        ),
+      );
+      expect(sparseRes._tag, `loadStackConfig ${label}`).toBe("Failure");
     }
   });
 });
