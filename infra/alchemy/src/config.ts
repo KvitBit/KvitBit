@@ -1,7 +1,13 @@
+import * as Arr from "effect/Array";
 import * as Config from "effect/Config";
-import * as Data from "effect/Data";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
+import * as Str from "effect/String";
+
+const NUMERIC_LABEL = /^\d+$/;
+const integer = /^-?\d+$/;
+const trailingDot = /\.$/;
 
 export type KvitbitStage = "prod" | "staging";
 
@@ -55,10 +61,13 @@ export interface KvitbitStackConfig {
   readonly edge: KvitbitEdgeConfig | undefined;
 }
 
-export class InvalidStackConfig extends Data.TaggedError("InvalidStackConfig")<{
-  readonly field: string;
-  readonly reason: string;
-}> {
+export class InvalidStackConfig extends Schema.TaggedError<
+  InvalidStackConfig,
+  { readonly brand: unique symbol }
+>()("InvalidStackConfig", {
+  field: Schema.String,
+  reason: Schema.String,
+}) {
   override get message() {
     return `Invalid stack config (${this.field}): ${this.reason}`;
   }
@@ -67,7 +76,7 @@ export class InvalidStackConfig extends Data.TaggedError("InvalidStackConfig")<{
 export const KVITBIT_PROD_DEFAULTS = {
   stage: "prod" as const,
   projectId: "kvitbit-prod",
-  projectNumber: "449188423567",
+  projectNumber: String(449_188_423_567),
   region: "europe-west3",
   zone: "europe-west3-a",
   stateBucket: "alchemy-state-kvitbit-prod",
@@ -85,15 +94,18 @@ export const KVITBIT_PROD_DEFAULTS = {
 const DIGEST_PATTERN = /^sha256:[a-f0-9]{64}$/;
 const DOMAIN_PATTERN = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/;
 
-export const defaultSecretBindings = (
-  stage: KvitbitStage,
-  options?: {
+export const defaultSecretBindings = ({
+  stage,
+  options,
+}: {
+  readonly stage: KvitbitStage;
+  readonly options?: {
     readonly enableResend?: boolean;
     readonly enableSmtp?: boolean;
     readonly enableMobileSigningKey?: boolean;
     readonly enableFeedbackGitHubToken?: boolean;
-  },
-): ReadonlyArray<KvitbitSecretBinding> => {
+  };
+}): ReadonlyArray<KvitbitSecretBinding> => {
   const prefix = `kvitbit-${stage}`;
   const bindings: Array<KvitbitSecretBinding> = [
     {
@@ -179,11 +191,21 @@ export const resourceNames = (config: KvitbitStackConfig) => {
   };
 };
 
-export const serviceAccountEmail = (projectId: string, accountId: string) =>
-  `${accountId}@${projectId}.iam.gserviceaccount.com`;
+export const serviceAccountEmail = ({
+  projectId,
+  accountId,
+}: {
+  readonly projectId: string;
+  readonly accountId: string;
+}) => `${accountId}@${projectId}.iam.gserviceaccount.com`;
 
-export const secretResourceName = (projectId: string, secretId: string) =>
-  `projects/${projectId}/secrets/${secretId}`;
+export const secretResourceName = ({
+  projectId,
+  secretId,
+}: {
+  readonly projectId: string;
+  readonly secretId: string;
+}) => `projects/${projectId}/secrets/${secretId}`;
 
 export const imageReference = (config: KvitbitStackConfig) =>
   `${config.region}-docker.pkg.dev/${config.projectId}/${config.artifactRepositoryId}/${config.imageName}@${config.imageDigest}`;
@@ -198,26 +220,26 @@ export const validateStackConfig = (
   config: KvitbitStackConfig,
 ): Effect.Effect<KvitbitStackConfig, InvalidStackConfig> =>
   Effect.gen(function* () {
-    if (config.projectId.trim().length === 0) {
-      return yield* new InvalidStackConfig({
+    if (Str.trim(config.projectId).length === 0) {
+      return yield* InvalidStackConfig.make({
         field: "projectId",
         reason: "must be non-empty",
       });
     }
-    if (!/^\d+$/.test(config.projectNumber)) {
-      return yield* new InvalidStackConfig({
+    if (!NUMERIC_LABEL.test(config.projectNumber)) {
+      return yield* InvalidStackConfig.make({
         field: "projectNumber",
         reason: "must be a numeric GCP project number",
       });
     }
-    if (!config.zone.startsWith(`${config.region}-`)) {
-      return yield* new InvalidStackConfig({
+    if (!Str.startsWith(`${config.region}-`)(config.zone)) {
+      return yield* InvalidStackConfig.make({
         field: "zone",
         reason: `zone '${config.zone}' must be inside region '${config.region}'`,
       });
     }
-    if (!config.bootstrapFoundation && !DIGEST_PATTERN.test(config.imageDigest)) {
-      return yield* new InvalidStackConfig({
+    if (!(config.bootstrapFoundation || DIGEST_PATTERN.test(config.imageDigest))) {
+      return yield* InvalidStackConfig.make({
         field: "imageDigest",
         reason: `must be an immutable sha256 digest (got '${config.imageDigest}')`,
       });
@@ -227,13 +249,13 @@ export const validateStackConfig = (
       config.runnerCount < 1 ||
       config.runnerCount > 10
     ) {
-      return yield* new InvalidStackConfig({
+      return yield* InvalidStackConfig.make({
         field: "runnerCount",
         reason: "must be an integer between 1 and 10",
       });
     }
     if (config.runnerPort !== 34431) {
-      return yield* new InvalidStackConfig({
+      return yield* InvalidStackConfig.make({
         field: "runnerPort",
         reason: "must be 34431 per settled Effect Cluster runner contract",
       });
@@ -244,20 +266,20 @@ export const validateStackConfig = (
       !Number.isInteger(config.serverMaxInstances) ||
       config.serverMaxInstances < Math.max(1, config.serverMinInstances)
     ) {
-      return yield* new InvalidStackConfig({
+      return yield* InvalidStackConfig.make({
         field: "serverMaxInstances",
         reason: "must be >= max(1, serverMinInstances)",
       });
     }
     for (const domain of config.dnsZones) {
-      const labels = domain.split(".");
+      const labels = Str.split(".")(domain);
       if (
         !DOMAIN_PATTERN.test(domain) ||
         domain.length > 253 ||
-        labels.some((label) => label.length > 63) ||
-        /^\d+$/.test(labels[labels.length - 1] ?? "")
+        NUMERIC_LABEL.test(labels.at(-1) ?? "") ||
+        Arr.some(labels, (label) => label.length > 63)
       ) {
-        return yield* new InvalidStackConfig({
+        return yield* InvalidStackConfig.make({
           field: "KVITBIT_DNS_ZONES",
           reason: `invalid domain '${domain}'`,
         });
@@ -267,7 +289,7 @@ export const validateStackConfig = (
         !config.bootstrapFoundation &&
         `www.${domain}`.length > 253
       ) {
-        return yield* new InvalidStackConfig({
+        return yield* InvalidStackConfig.make({
           field: "KVITBIT_DNS_ZONES",
           reason: `'www.${domain}' exceeds the DNS name length limit`,
         });
@@ -275,14 +297,14 @@ export const validateStackConfig = (
     }
     if (config.edge !== undefined) {
       if (config.edge.enableHttps && config.edge.domains.length === 0) {
-        return yield* new InvalidStackConfig({
+        return yield* InvalidStackConfig.make({
           field: "edge.domains",
           reason: "HTTPS edge requires at least one domain",
         });
       }
       for (const domain of config.edge.domains) {
         if (!DOMAIN_PATTERN.test(domain)) {
-          return yield* new InvalidStackConfig({
+          return yield* InvalidStackConfig.make({
             field: "edge.domains",
             reason: `invalid domain '${domain}'`,
           });
@@ -296,7 +318,7 @@ const optionalNonEmptyString = (name: string) =>
   Config.option(Config.String(name)).pipe(
     Config.map(
       Option.flatMap((value) => {
-        const trimmed = value.trim();
+        const trimmed = Str.trim(value);
         return trimmed.length > 0 ? Option.some(trimmed) : Option.none();
       }),
     ),
@@ -312,7 +334,7 @@ const optionalBoolean = (
     if (raw === undefined) {
       return defaultValue;
     }
-    const normalized = raw.toLowerCase();
+    const normalized = Str.toLowerCase(raw);
     if (
       normalized === "true" ||
       normalized === "1" ||
@@ -329,7 +351,7 @@ const optionalBoolean = (
     ) {
       return false;
     }
-    return yield* new InvalidStackConfig({
+    return yield* InvalidStackConfig.make({
       field: name,
       reason: `expected boolean ('true'/'1'/'yes'/'on' or 'false'/'0'/'no'/'off'), got '${raw}'`,
     });
@@ -344,8 +366,8 @@ const optionalInt = (
     if (raw === undefined) {
       return defaultValue;
     }
-    if (!/^-?\d+$/.test(raw)) {
-      return yield* new InvalidStackConfig({
+    if (!integer.test(raw)) {
+      return yield* InvalidStackConfig.make({
         field: name,
         reason: `expected integer, got '${raw}'`,
       });
@@ -356,10 +378,10 @@ const optionalInt = (
 const parseCsvList = (raw: string | undefined): ReadonlyArray<string> =>
   raw === undefined
     ? []
-    : raw
-        .split(",")
-        .map((part) => part.trim().toLowerCase())
-        .filter((part) => part.length > 0);
+    : Arr.filter(
+        Arr.map(Str.split(",")(raw), (part) => Str.toLowerCase(Str.trim(part))),
+        (part) => part.length > 0,
+      );
 
 export const loadStackConfig: Effect.Effect<
   KvitbitStackConfig,
@@ -369,7 +391,7 @@ export const loadStackConfig: Effect.Effect<
     Config.withDefault(KVITBIT_PROD_DEFAULTS.stage),
   );
   if (stageRaw !== "prod" && stageRaw !== "staging") {
-    return yield* new InvalidStackConfig({
+    return yield* InvalidStackConfig.make({
       field: "KVITBIT_STAGE",
       reason: `expected 'prod' or 'staging', got '${stageRaw}'`,
     });
@@ -423,7 +445,9 @@ export const loadStackConfig: Effect.Effect<
   const edgeDomains = parseCsvList(edgeDomainsRaw);
   const dnsZonesRaw = yield* optionalNonEmptyString("KVITBIT_DNS_ZONES");
   const dnsZones = [
-    ...new Set(parseCsvList(dnsZonesRaw).map((domain) => domain.replace(/\.$/, ""))),
+    ...new Set(
+      Arr.map(parseCsvList(dnsZonesRaw), (domain) => Str.replace(trailingDot, "")(domain)),
+    ),
   ];
   const edgeWafPreview = yield* optionalBoolean("KVITBIT_EDGE_WAF_PREVIEW", false);
   const edgeStaticCdnEnabled = yield* optionalBoolean("KVITBIT_EDGE_STATIC_CDN", true);
@@ -494,11 +518,14 @@ export const loadStackConfig: Effect.Effect<
     androidAssetlinksSha256,
     feedbackGitHubRepo,
     feedbackOwnerEmails,
-    secrets: defaultSecretBindings(stage, {
-      enableResend,
-      enableSmtp,
-      enableMobileSigningKey,
-      enableFeedbackGitHubToken,
+    secrets: defaultSecretBindings({
+      stage,
+      options: {
+        enableResend,
+        enableSmtp,
+        enableMobileSigningKey,
+        enableFeedbackGitHubToken,
+      },
     }),
     dnsZones,
     edge,

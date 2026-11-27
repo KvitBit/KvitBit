@@ -1,11 +1,13 @@
 import { Credentials } from "@alchemy.run/gcp";
 import * as Cause from "effect/Cause";
-import * as Data from "effect/Data";
 import type * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
-import { HttpClient, HttpClientRequest, type HttpClientResponse } from "effect/http";
+import * as HttpClient from "effect/http/HttpClient";
+import * as HttpClientRequest from "effect/http/HttpClientRequest";
+import type * as HttpClientResponse from "effect/http/HttpClientResponse";
 import * as Ref from "effect/Ref";
 import * as Schedule from "effect/Schedule";
+import * as Schema from "effect/Schema";
 
 /** How long one attempt may take and how a transient failure retries. */
 export interface GoogleApiRetryPolicy {
@@ -61,17 +63,14 @@ export interface GoogleApiCall<A, E> {
 }
 
 /** The token lookup failed; it ends the call without a retry. */
-class CredentialsUnavailable extends Data.TaggedError("CredentialsUnavailable") {}
+class CredentialsUnavailable extends Schema.TaggedError<
+  CredentialsUnavailable,
+  { readonly brand: unique symbol }
+>()("CredentialsUnavailable", {}) {}
 
-/** An attempt failure the helper itself classified as transient. */
-class TransientAttempt<E> extends Data.TaggedError("TransientAttempt")<{
-  readonly error: E;
-}> {}
-
-/** A failure from the caller's handler. */
-class HandledFailure<E> extends Data.TaggedError("HandledFailure")<{
-  readonly error: E;
-}> {}
+type RequestFailure<E> =
+  | { readonly _tag: "TransientAttempt"; readonly error: E }
+  | { readonly _tag: "HandledFailure"; readonly error: E };
 
 /**
  * Authorized access to Google REST APIs with the workspace GCP identity.
@@ -91,7 +90,9 @@ export const makeGoogleApi = Effect.fnUntraced(function* () {
   // caller's interruption becomes the same sanitized failure.
   const authorization = credentials.pipe(
     Effect.catchCause((cause) =>
-      Cause.hasInterruptsOnly(cause) ? Effect.interrupt : Effect.fail(new CredentialsUnavailable()),
+      Cause.hasInterruptsOnly(cause)
+        ? Effect.interrupt
+        : Effect.fail(CredentialsUnavailable.make()),
     ),
     Effect.map(
       ({ accessToken, quotaProject }) =>
@@ -99,7 +100,7 @@ export const makeGoogleApi = Effect.fnUntraced(function* () {
           request.pipe(
             HttpClientRequest.bearerToken(accessToken),
             // User credentials bill quota to an explicit project.
-            quotaProject
+            quotaProject !== undefined && quotaProject !== ""
               ? HttpClientRequest.setHeader("x-goog-user-project", quotaProject)
               : (unchanged) => unchanged,
           ),
@@ -111,7 +112,7 @@ export const makeGoogleApi = Effect.fnUntraced(function* () {
       ? authorization.pipe(
           Effect.timeoutOrElse({
             duration: options.policy.attemptTimeout,
-            orElse: () => Effect.fail(new CredentialsUnavailable()),
+            orElse: () => Effect.fail(CredentialsUnavailable.make()),
           }),
           Effect.mapError(() => options.credentialsUnavailable()),
           Effect.flatMap((authorize) => callWith(Effect.succeed(authorize), options)),
@@ -122,7 +123,7 @@ export const makeGoogleApi = Effect.fnUntraced(function* () {
     authorize: typeof authorization,
     options: GoogleApiCall<A, E>,
   ): Effect.Effect<A, E> => {
-    const transient = (error: E) => new TransientAttempt({ error });
+    const transient = (error: E) => ({ _tag: "TransientAttempt", error }) as const;
     const attempt = Ref.make(false).pipe(
       Effect.flatMap((dispatched) =>
         authorize.pipe(
@@ -133,12 +134,12 @@ export const makeGoogleApi = Effect.fnUntraced(function* () {
               .pipe(Effect.mapError(() => transient(options.noAnswer("unreachable")))),
           ),
           Effect.flatMap(
-            (response): Effect.Effect<A, TransientAttempt<E> | HandledFailure<E>> =>
+            (response): Effect.Effect<A, RequestFailure<E>> =>
               isTransientGoogleApiStatus(response.status)
                 ? Effect.fail(transient(options.transientStatus(response.status)))
                 : options
                     .handle(response)
-                    .pipe(Effect.mapError((error) => new HandledFailure({ error }))),
+                    .pipe(Effect.mapError((error) => ({ _tag: "HandledFailure", error }) as const)),
           ),
           Effect.scoped,
           Effect.timeoutOrElse({
@@ -153,15 +154,16 @@ export const makeGoogleApi = Effect.fnUntraced(function* () {
         ),
       ),
     );
-    const observed = options.onAttemptFailure
-      ? attempt.pipe(
-          Effect.tapError((failure) =>
-            failure._tag === "CredentialsUnavailable"
-              ? Effect.void
-              : (options.onAttemptFailure?.(failure.error) ?? Effect.void),
-          ),
-        )
-      : attempt;
+    const observed =
+      options.onAttemptFailure !== undefined
+        ? attempt.pipe(
+            Effect.tapError((failure) =>
+              failure._tag === "CredentialsUnavailable"
+                ? Effect.void
+                : (options.onAttemptFailure?.(failure.error) ?? Effect.void),
+            ),
+          )
+        : attempt;
     return observed.pipe(
       Effect.retry({
         schedule: Schedule.exponential(options.policy.backoff),
@@ -183,4 +185,3 @@ export const makeGoogleApi = Effect.fnUntraced(function* () {
 });
 
 /** Authorized, bounded access to Google REST APIs. */
-export type GoogleApi = Effect.Success<ReturnType<typeof makeGoogleApi>>;

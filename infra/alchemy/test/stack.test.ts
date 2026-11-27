@@ -1,7 +1,17 @@
 import { describe, expect, test } from "bun:test";
-import { chmodSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+  // @effect-diagnostics-next-line nodeBuiltinImport:off
+} from "node:fs"; // The shell fixtures require POSIX modes and direct filesystem assertions.
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { Credentials as GcpCredentials } from "@alchemy.run/gcp/Credentials";
+import { Providers as GcpProviders } from "@alchemy.run/gcp/Providers";
 import { Secret } from "@alchemy.run/gcp/SecretManager";
 import * as Apply from "alchemy/Apply";
 import * as Output from "alchemy/Output";
@@ -10,9 +20,16 @@ import * as Provider from "alchemy/Provider";
 import * as Stack from "alchemy/Stack";
 import { Stage } from "alchemy/Stage";
 import * as State from "alchemy/State";
+import * as Arr from "effect/Array";
 import * as ConfigProvider from "effect/ConfigProvider";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
+import * as Order from "effect/Order";
+import * as Path from "effect/Path";
+import * as Record from "effect/Record";
+import type * as Schema from "effect/Schema";
+import * as Str from "effect/String";
 import {
   BootstrapPopulatedStateError,
   declareKvitbitStack,
@@ -41,6 +58,8 @@ import {
   tokenRouteExclusionFilter,
   tokenRoutePatterns,
 } from "../src/resources/edge";
+import { EdgeBackendServiceProvider } from "../src/resources/edge-backend-service";
+import { EdgeSecurityPolicyProvider } from "../src/resources/edge-security-policy";
 import {
   artifactRepositoryProps,
   blobsBucketProps,
@@ -63,8 +82,16 @@ import {
   subnetworkProps,
 } from "../src/resources/network";
 import { declareServerService, serverServiceProps } from "../src/resources/server";
+import { parseDeployWorkflow } from "./deploy-workflow";
+import { runCommand, runSerial, systemPath } from "./process-fixture";
 
-const SAMPLE_DIGEST = `sha256:${"a".repeat(64)}`;
+const { join, resolve } = Path.Path.pipe(Effect.provide(Path.layer), Effect.runSync);
+const sha256Digest = /^sha256:[a-f0-9]{64}$/;
+const logFilterPattern = /httpRequest\.requestUrl=~"([^"]+)"/;
+const terraformFile = /\.(tf|tfvars)(\.json)?$/;
+const reconcileScriptPattern =
+  /cat <<'RECONCILE' > \/var\/lib\/kvitbit\/reconcile-worker\.sh\n([\s\S]*?)\nRECONCILE\n/;
+const SAMPLE_DIGEST = `sha256:${Str.repeat(64)("a")}`;
 const PROD_DNS_ZONES = ["kvitbit.cz", "kvitbit.app", "kvitbit.com", "kvitbit.eu", "kvitbit.dev"];
 
 const sampleProdConfig = (overrides: Partial<KvitbitStackConfig> = {}): KvitbitStackConfig => ({
@@ -93,10 +120,13 @@ const sampleProdConfig = (overrides: Partial<KvitbitStackConfig> = {}): KvitbitS
   androidAssetlinksSha256: "AA:BB:CC",
   feedbackGitHubRepo: undefined,
   feedbackOwnerEmails: undefined,
-  secrets: defaultSecretBindings("prod", {
-    enableResend: true,
-    enableSmtp: true,
-    enableMobileSigningKey: true,
+  secrets: defaultSecretBindings({
+    stage: "prod",
+    options: {
+      enableResend: true,
+      enableSmtp: true,
+      enableMobileSigningKey: true,
+    },
   }),
   dnsZones: [],
   edge: {
@@ -122,7 +152,7 @@ describe("Kvitbit Alchemy stack config", () => {
     );
     expect(config.stage).toBe("prod");
     expect(config.projectId).toBe("kvitbit-prod");
-    expect(config.projectNumber).toBe("449188423567");
+    expect(config.projectNumber).toBe(String(449_188_423_567));
     expect(config.region).toBe("europe-west3");
     expect(config.zone).toBe("europe-west3-a");
     expect(config.stateBucket).toBe("alchemy-state-kvitbit-prod");
@@ -158,22 +188,25 @@ describe("Kvitbit Alchemy stack config", () => {
     "single-label",
     "-kvitbit.cz",
     "192.0.2.1",
-    `${"x".repeat(64)}.cz`,
-    `${`${"x".repeat(63)}.`.repeat(4)}cz`,
+    `${Str.repeat(64)("x")}.cz`,
+    `${Str.repeat(4)(`${Str.repeat(63)("x")}.`)}cz`,
   ])("rejects invalid DNS zone %s", async (zone) => {
     const provider = ConfigProvider.fromEnv({
       env: { KVITBIT_IMAGE_DIGEST: SAMPLE_DIGEST, KVITBIT_DNS_ZONES: zone },
     });
-    const error = await Effect.runPromise(
-      Effect.flip(loadStackConfig.pipe(Effect.provide(ConfigProvider.layer(provider)))),
+    const error = await loadStackConfig.pipe(
+      Effect.provide(ConfigProvider.layer(provider)),
+      Effect.flip,
+      Effect.runPromise,
     );
     expect(error).toMatchObject({ _tag: "InvalidStackConfig", field: "KVITBIT_DNS_ZONES" });
   });
 
   test("rejects DNS zones that leave no room for www when the edge is enabled", async () => {
-    const domain = `${`${"x".repeat(63)}.`.repeat(3)}${"y".repeat(58)}.cz`;
-    const error = await Effect.runPromise(
-      Effect.flip(validateStackConfig(sampleProdConfig({ dnsZones: [domain] }))),
+    const domain = `${Str.repeat(3)(`${Str.repeat(63)("x")}.`)}${Str.repeat(58)("y")}.cz`;
+    const error = await validateStackConfig(sampleProdConfig({ dnsZones: [domain] })).pipe(
+      Effect.flip,
+      Effect.runPromise,
     );
     expect(error.field).toBe("KVITBIT_DNS_ZONES");
     expect(error.reason).toContain("www");
@@ -216,7 +249,7 @@ describe("Kvitbit Alchemy stack config", () => {
     expect(config.imageDigest).toBe("");
     expect(config.dnsZones).toEqual([]);
     expect(config.runnerCount).toBe(KVITBIT_PROD_DEFAULTS.runnerCount);
-    const secretIds = config.secrets.map((s) => s.secretId);
+    const secretIds = Arr.map(config.secrets, (s) => s.secretId);
     expect(secretIds).toContain("kvitbit-prod-database-url");
     expect(secretIds).toContain("kvitbit-prod-runner-database-url-unpooled");
     expect(secretIds).toContain("kvitbit-prod-resend-api-key");
@@ -228,18 +261,21 @@ describe("Kvitbit Alchemy stack config", () => {
   });
 
   test("rejects mutable image tags, cross-region zones, and out-of-range runnerCount", async () => {
-    const badDigest = await Effect.runPromise(
-      Effect.flip(validateStackConfig(sampleProdConfig({ imageDigest: "latest" }))),
+    const badDigest = await validateStackConfig(sampleProdConfig({ imageDigest: "latest" })).pipe(
+      Effect.flip,
+      Effect.runPromise,
     );
     expect(badDigest.field).toBe("imageDigest");
 
-    const badZone = await Effect.runPromise(
-      Effect.flip(validateStackConfig(sampleProdConfig({ zone: "us-central1-a" }))),
+    const badZone = await validateStackConfig(sampleProdConfig({ zone: "us-central1-a" })).pipe(
+      Effect.flip,
+      Effect.runPromise,
     );
     expect(badZone.field).toBe("zone");
 
-    const badRunners = await Effect.runPromise(
-      Effect.flip(validateStackConfig(sampleProdConfig({ runnerCount: 0 }))),
+    const badRunners = await validateStackConfig(sampleProdConfig({ runnerCount: 0 })).pipe(
+      Effect.flip,
+      Effect.runPromise,
     );
     expect(badRunners.field).toBe("runnerCount");
   });
@@ -256,7 +292,7 @@ describe("Kvitbit Alchemy stack config", () => {
     const enabledConfig = await Effect.runPromise(
       loadStackConfig.pipe(Effect.provide(ConfigProvider.layer(enabledProvider))),
     );
-    const enabledIds = enabledConfig.secrets.map((s) => s.secretId);
+    const enabledIds = Arr.map(enabledConfig.secrets, (s) => s.secretId);
     expect(enabledIds).toContain("kvitbit-prod-resend-api-key");
     expect(enabledIds).toContain("kvitbit-prod-smtp-url");
     expect(enabledIds).toContain("kvitbit-prod-mobile-updates-signing-key");
@@ -273,7 +309,7 @@ describe("Kvitbit Alchemy stack config", () => {
     const disabledConfig = await Effect.runPromise(
       loadStackConfig.pipe(Effect.provide(ConfigProvider.layer(disabledProvider))),
     );
-    const disabledIds = disabledConfig.secrets.map((s) => s.secretId);
+    const disabledIds = Arr.map(disabledConfig.secrets, (s) => s.secretId);
     expect(disabledIds).not.toContain("kvitbit-prod-resend-api-key");
     expect(disabledIds).not.toContain("kvitbit-prod-smtp-url");
     expect(disabledIds).not.toContain("kvitbit-prod-mobile-updates-signing-key");
@@ -285,8 +321,10 @@ describe("Kvitbit Alchemy stack config", () => {
         KVITBIT_ENABLE_FEEDBACK_GITHUB_TOKEN_SECRET: "maybe",
       },
     });
-    const invalidError = await Effect.runPromise(
-      Effect.flip(loadStackConfig.pipe(Effect.provide(ConfigProvider.layer(invalidProvider)))),
+    const invalidError = await loadStackConfig.pipe(
+      Effect.provide(ConfigProvider.layer(invalidProvider)),
+      Effect.flip,
+      Effect.runPromise,
     );
     expect(invalidError).toMatchObject({
       _tag: "InvalidStackConfig",
@@ -332,7 +370,7 @@ describe("Bootstrap state safety guard", () => {
       },
     });
 
-    const compiled = Effect.runPromise(Effect.scoped(compileBootstrap(populatedStateLayer)));
+    const compiled = populatedStateLayer.pipe(compileBootstrap, Effect.scoped, Effect.runPromise);
     await expect(compiled).rejects.toBeInstanceOf(BootstrapPopulatedStateError);
     await expect(compiled).rejects.toMatchObject({
       stackName: KVITBIT_STACK_NAME,
@@ -357,7 +395,7 @@ describe("Bootstrap state safety guard", () => {
       { [target.stack]: { [target.stage]: existingOutput } },
     );
     const providers = Provider.succeed(Secret, {
-      read: () => Effect.succeed(undefined),
+      read: () => Effect.undefined,
       reconcile: ({ news }) => {
         expect(news.secretId).toBe(secretId);
         return Effect.succeed({
@@ -379,7 +417,10 @@ describe("Bootstrap state safety guard", () => {
       delete: () => Effect.die("Unexpected secret deletion"),
     });
     const feedbackConfig = sampleProdConfig({
-      secrets: defaultSecretBindings("prod", { enableFeedbackGitHubToken: true }),
+      secrets: defaultSecretBindings({
+        stage: "prod",
+        options: { enableFeedbackGitHubToken: true },
+      }),
     });
     await Effect.runPromise(
       Effect.gen(function* () {
@@ -390,24 +431,28 @@ describe("Bootstrap state safety guard", () => {
         );
         yield* Effect.gen(function* () {
           const plan = yield* Plan.make(compiled, { include: [fqn] });
-          expect(Object.keys(plan.resources)).toEqual([fqn]);
+          expect(Record.keys(plan.resources)).toEqual([fqn]);
           expect(plan.resources[fqn]?.action).toBe("create");
           expect(plan.deletions).toEqual({});
           yield* Apply.apply(plan);
 
           const store = yield* yield* State.State;
-          expect((yield* store.list(target)).toSorted()).toEqual(
-            [...Object.keys(existing), fqn].sort(),
+          const value_1 = yield* store.list(target);
+          expect(Arr.sort(value_1, Order.String)).toEqual(
+            Arr.sort([...Record.keys(existing), fqn], Order.String),
           );
-          expect(yield* store.get({ ...target, fqn })).toMatchObject({
+          const value_2 = yield* store.get({ ...target, fqn });
+          expect(value_2).toMatchObject({
             status: "created",
             resourceType: Secret.Type,
             attr: { secretId },
           });
-          for (const [fqn, row] of Object.entries(existing)) {
-            expect(yield* store.get({ ...target, fqn })).toEqual(row);
+          for (const [existingFqn, row] of Record.toEntries(existing)) {
+            const value_3 = yield* store.get({ ...target, fqn: existingFqn });
+            expect(value_3).toEqual(row);
           }
-          expect(yield* store.getOutput(target)).toEqual(existingOutput);
+          const value_4 = yield* store.getOutput(target);
+          expect(value_4).toEqual(existingOutput);
         }).pipe(Effect.provideContext(compiled.services), Effect.provide(state));
       }).pipe(Effect.provideService(Stage, target.stage), Effect.scoped),
     );
@@ -422,45 +467,42 @@ describe("Bootstrap state safety guard", () => {
     const events: string[] = [];
     const state = Layer.effect(
       State.State,
-      Effect.gen(function* () {
-        yield* Effect.acquireRelease(
-          Effect.sync(() => {
-            expect(activeLease).toBeUndefined();
-            activeLease = lease;
-            events.push("acquire");
-          }),
-          () =>
-            Effect.sync(() => {
-              activeLease = undefined;
-              events.push("release");
-            }),
-        );
-        const memory = yield* State.InMemoryService();
-        return Effect.succeed({
-          ...memory,
-          list: ({ stack, stage }) =>
-            Effect.sync(() => {
-              expect(activeLease).toBe(lease);
-              expect({ stack, stage }).toEqual({ stack: KVITBIT_STACK_NAME, stage: "prod" });
-              events.push("list");
-              return existingFqns;
-            }),
-        } satisfies State.StateService);
-      }),
-    );
-
-    await Effect.runPromise(
-      Effect.scoped(
-        Effect.gen(function* () {
-          const compiled = yield* compileBootstrap(state);
-          expect(Object.keys(compiled.resources).sort()).toEqual(
-            [...foundationResourceIds(config)].sort(),
-          );
-          expect(activeLease).toBe(lease);
-          expect(events).toEqual(["acquire", "list"]);
+      Effect.acquireRelease(
+        Effect.sync(() => {
+          expect(activeLease).toBeUndefined();
+          activeLease = lease;
+          events.push("acquire");
         }),
+        () =>
+          Effect.sync(() => {
+            activeLease = undefined;
+            events.push("release");
+          }),
+      ).pipe(
+        Effect.andThen(State.InMemoryService()),
+        Effect.map((memory) =>
+          Effect.succeed({
+            ...memory,
+            list: ({ stack, stage }) =>
+              Effect.sync(() => {
+                expect(activeLease).toBe(lease);
+                expect({ stack, stage }).toEqual({ stack: KVITBIT_STACK_NAME, stage: "prod" });
+                events.push("list");
+                return existingFqns;
+              }),
+          } satisfies State.StateService),
+        ),
       ),
     );
+
+    await Effect.gen(function* () {
+      const compiled = yield* compileBootstrap(state);
+      expect(Arr.sort(Record.keys(compiled.resources), Order.String)).toEqual(
+        Arr.sort(foundationResourceIds(config), Order.String),
+      );
+      expect(activeLease).toBe(lease);
+      expect(events).toEqual(["acquire", "list"]);
+    }).pipe(Effect.scoped, Effect.runPromise);
     expect(events).toEqual(["acquire", "list", "release"]);
     expect(activeLease).toBeUndefined();
   });
@@ -472,7 +514,8 @@ describe("Bootstrap state safety guard", () => {
       State.InMemoryService().pipe(Effect.map((memory) => ({ ...memory, list: () => listError }))),
     );
 
-    await expect(Effect.runPromise(Effect.scoped(compileBootstrap(state)))).rejects.toBe(listError);
+    const result = state.pipe(compileBootstrap, Effect.scoped, Effect.runPromise);
+    await expect(result).rejects.toBe(listError);
   });
 
   test("bootstraps the Cloud DNS API without declaring zones, including on retry", async () => {
@@ -485,17 +528,21 @@ describe("Bootstrap state safety guard", () => {
       { state, providers: Layer.empty },
       declareKvitbitStack(dnsConfig).pipe(Effect.orDie),
     );
-    const compiled = await Effect.runPromise(
-      Effect.scoped(stack).pipe(Effect.provideService(Stage, "prod")),
+    const compiled = await stack.pipe(
+      Effect.scoped,
+      Effect.provideService(Stage, "prod"),
+      Effect.runPromise,
     );
-    expect(Object.keys(compiled.resources).sort()).toEqual(
-      [...foundationResourceIds(dnsConfig)].sort(),
+    expect(Arr.sort(Record.keys(compiled.resources), Order.String)).toEqual(
+      Arr.sort(foundationResourceIds(dnsConfig), Order.String),
     );
     expect(compiled.resources.CloudDnsApi?.Props).toEqual({
       project: "kvitbit-prod",
       service: "dns.googleapis.com",
     });
-    expect(Object.keys(compiled.resources).some((id) => id.startsWith("DnsZone-"))).toBe(false);
+    expect(Arr.some(Record.keys(compiled.resources), (id) => Str.startsWith("DnsZone-")(id))).toBe(
+      false,
+    );
   });
 });
 
@@ -518,47 +565,43 @@ describe("Foundation resources", () => {
     expect(mobile.forceDestroy).toBe(false);
 
     const secrets = secretDeclarations(config);
-    expect(secrets.map((s) => s.secretId)).toContain("kvitbit-prod-database-url");
-    expect(secrets.map((s) => s.secretId)).toContain("kvitbit-prod-runner-database-url-unpooled");
-    expect(secrets.map((s) => s.secretId)).toContain("kvitbit-prod-better-auth-secret");
+    expect(Arr.map(secrets, (s) => s.secretId)).toContain("kvitbit-prod-database-url");
+    expect(Arr.map(secrets, (s) => s.secretId)).toContain(
+      "kvitbit-prod-runner-database-url-unpooled",
+    );
+    expect(Arr.map(secrets, (s) => s.secretId)).toContain("kvitbit-prod-better-auth-secret");
 
     const grants = secretAccessorGrants(config);
-    const mobileSigningGrants = grants.filter(
+    const mobileSigningGrants = Arr.filter(
+      grants,
       (g) => g.secretId === "kvitbit-prod-mobile-updates-signing-key",
     );
-    expect(mobileSigningGrants.map((g) => g.workload)).toEqual(["server"]);
-    const dbGrants = grants.filter((g) => g.secretId === "kvitbit-prod-database-url");
-    expect(dbGrants.map((g) => g.workload).sort()).toEqual(["runner", "server"]);
-    const runnerUnpooledGrants = grants.filter(
+    expect(Arr.map(mobileSigningGrants, (g) => g.workload)).toEqual(["server"]);
+    const dbGrants = Arr.filter(grants, (g) => g.secretId === "kvitbit-prod-database-url");
+    expect(
+      Arr.sort(
+        Arr.map(dbGrants, (g) => g.workload),
+        Order.String,
+      ),
+    ).toEqual(["runner", "server"]);
+    const runnerUnpooledGrants = Arr.filter(
+      grants,
       (g) => g.secretId === "kvitbit-prod-runner-database-url-unpooled",
     );
-    expect(runnerUnpooledGrants.map((g) => g.workload)).toEqual(["runner"]);
+    expect(Arr.map(runnerUnpooledGrants, (g) => g.workload)).toEqual(["runner"]);
   });
 
   test("constructs the full Alchemy stack with real Output proxies without coercion errors and wires explicit DAG dependencies", async () => {
     const config = sampleProdConfig({ edge: undefined });
 
-    const compileHermetic = <A, E, R>(
-      name: string,
-      program: Effect.Effect<A, E, R>,
-    ): Promise<Stack.CompiledStack<A, unknown>> => {
-      const makeStack = Stack.make({
-        name,
-        state: State.inMemoryState(),
-        providers: Layer.empty,
-      }) as <Out>(
-        eff: Effect.Effect<Out, E, R>,
-      ) => Effect.Effect<Stack.CompiledStack<Out, unknown>, E, unknown>;
-
-      return Effect.runPromise(
-        Effect.scoped(makeStack(program)).pipe(
-          Effect.provide(Layer.succeed(Stage, "prod")),
-        ) as Effect.Effect<Stack.CompiledStack<A, unknown>, E, never>,
-      );
-    };
-
-    const compiled = await compileHermetic(
+    const gcpDeclarations = Layer.effect(GcpProviders, Provider.collection([]));
+    const rejectLiveCredentials = Layer.succeed(
+      GcpCredentials,
+      Effect.die("A declaration test must not use Google credentials"),
+    );
+    const compiled = await Stack.Stack(
       "KvitbitTest",
+      { state: State.inMemoryState(), providers: gcpDeclarations },
       Effect.gen(function* () {
         const foundation = yield* declareFoundation(config);
         const tokenRouteExclusion = yield* declareTokenRouteLogExclusion(config);
@@ -580,9 +623,9 @@ describe("Foundation resources", () => {
         });
         return { foundation, tokenRouteExclusion, network, server };
       }),
-    );
+    ).pipe(Effect.scoped, Effect.provideService(Stage, "prod"), Effect.runPromise);
 
-    const resourceIds = Object.keys(compiled.resources);
+    const resourceIds = Record.keys(compiled.resources);
     // Token-route log exclusion is installed unconditionally even when edge is disabled
     expect(resourceIds).toContain("EdgeTokenRouteExclusion");
 
@@ -591,7 +634,7 @@ describe("Foundation resources", () => {
     expect(runner0).toBeDefined();
     expect(serverRes).toBeDefined();
 
-    const runnerUpstreams = Object.keys(Output.upstreamAny(runner0?.Props));
+    const runnerUpstreams = Record.keys(Output.upstreamAny(runner0?.Props));
     expect(runnerUpstreams).toEqual(
       expect.arrayContaining([
         "KvitbitRunnerSubnet",
@@ -605,7 +648,7 @@ describe("Foundation resources", () => {
       ]),
     );
 
-    const serverUpstreams = Object.keys(Output.upstreamAny(serverRes?.Props));
+    const serverUpstreams = Record.keys(Output.upstreamAny(serverRes?.Props));
     expect(serverUpstreams).toEqual(
       expect.arrayContaining([
         "KvitbitRunnerSubnet",
@@ -623,8 +666,16 @@ describe("Foundation resources", () => {
 
     // Also verify edge construction with real Outputs produces zero coercion exceptions
     const edgeConfig = sampleProdConfig();
-    const compiledWithEdge = await compileHermetic(
+    const compiledWithEdge = await Stack.Stack(
       "KvitbitEdgeTest",
+      {
+        state: State.inMemoryState(),
+        providers: Layer.mergeAll(
+          gcpDeclarations,
+          EdgeBackendServiceProvider,
+          EdgeSecurityPolicyProvider,
+        ).pipe(Layer.provide(rejectLiveCredentials)),
+      },
       Effect.gen(function* () {
         const foundation = yield* declareFoundation(edgeConfig);
         const network = yield* declareNetworkAndRunners(edgeConfig, {
@@ -649,8 +700,8 @@ describe("Foundation resources", () => {
             : yield* declareKvitbitEdge(edgeConfig, edgeConfig.edge, server.serviceId);
         return { edge };
       }),
-    );
-    expect(Object.keys(compiledWithEdge.resources)).toContain("EdgeSecurityPolicy");
+    ).pipe(Effect.scoped, Effect.provideService(Stage, "prod"), Effect.runPromise);
+    expect(Record.keys(compiledWithEdge.resources)).toContain("EdgeSecurityPolicy");
   });
 });
 
@@ -662,22 +713,26 @@ describe("Pure-Alchemy Compute Engine runner pool (#908)", () => {
     const vpc = networkProps(config);
     expect(vpc.autoCreateSubnetworks).toBe(false);
 
-    const subnet = subnetworkProps(config, names.networkName);
+    const subnet = subnetworkProps({ config, network: names.networkName });
     expect(subnet.privateIpGoogleAccess).toBe(true);
     expect(subnet.ipCidrRange).toBe("10.42.0.0/20");
 
-    const router = routerProps(config, names.networkName);
+    const router = routerProps({ config, network: names.networkName });
     expect(router.nats?.[0]?.natIpAllocateOption).toBe("AUTO_ONLY");
 
-    const fw = runnerFirewallProps(config, names.networkName);
+    const fw = runnerFirewallProps({ config, network: names.networkName });
     expect(fw.direction).toBe("INGRESS");
     expect(fw.allowed).toEqual([{ protocol: "tcp", ports: ["34431"] }]);
     expect(fw.sourceRanges).toEqual(["10.42.0.0/20"]);
     expect(fw.targetTags).toEqual([names.runnerTag]);
 
-    const vm = runnerInstanceProps(config, 0, {
-      network: names.networkName,
-      subnetwork: names.subnetworkName,
+    const vm = runnerInstanceProps({
+      config,
+      index: 0,
+      deps: {
+        network: names.networkName,
+        subnetwork: names.subnetworkName,
+      },
     });
     expect(vm.sourceImage).toBe(COS_STABLE_IMAGE);
     expect(vm.associatePublicIp).toBe(false);
@@ -686,15 +741,14 @@ describe("Pure-Alchemy Compute Engine runner pool (#908)", () => {
     expect(vm.tags).toEqual([names.runnerTag]);
   });
 
-  test("startup script configures COS host iptables, /bin/bash reconciler invocation (noexec-safe), systemd digest+config reconciliation, backoff retries, and S5 runner DB secrets", () => {
+  test("startup script configures COS host iptables, /bin/bash reconciler invocation (noexec-safe), systemd digest+config reconciliation, backoff retries, and S5 runner DB secrets", async () => {
     const config = sampleProdConfig();
     const script = buildRunnerStartupScript();
 
     // Valid bash syntax
-    const syntaxCheck = Bun.spawnSync(["bash", "-n"], {
+    const syntaxCheck = await runCommand({
+      command: ["bash", "-n"],
       stdin: new TextEncoder().encode(script),
-      stdout: "pipe",
-      stderr: "pipe",
     });
     expect(syntaxCheck.exitCode).toBe(0);
 
@@ -719,10 +773,10 @@ describe("Pure-Alchemy Compute Engine runner pool (#908)", () => {
     expect(script).toContain("retry_with_backoff");
     expect(script).toContain("secretmanager.googleapis.com/v1/projects/");
 
-    const workerConfig = buildRunnerWorkerConfig(config);
+    const workerConfig = buildRunnerWorkerConfig({ config });
     const workerConfigSha = runnerWorkerConfigSha(workerConfig);
-    expect(workerConfigSha).toMatch(/^sha256:[a-f0-9]{64}$/);
-    expect(workerConfig.secrets.map((s) => s.secretId)).toEqual(
+    expect(workerConfigSha).toMatch(sha256Digest);
+    expect(Arr.map(workerConfig.secrets, (s) => s.secretId)).toEqual(
       expect.arrayContaining([
         "kvitbit-prod-database-url",
         "kvitbit-prod-runner-database-url-unpooled",
@@ -730,9 +784,13 @@ describe("Pure-Alchemy Compute Engine runner pool (#908)", () => {
       ]),
     );
 
-    const vm = runnerInstanceProps(config, 0, {
-      network: "vpc",
-      subnetwork: "subnet",
+    const vm = runnerInstanceProps({
+      config,
+      index: 0,
+      deps: {
+        network: "vpc",
+        subnetwork: "subnet",
+      },
     });
     expect(vm.metadata?.["kvitbit-image-ref"]).toBe(imageReference(config));
     expect(vm.metadata?.["kvitbit-image-digest"]).toBe(config.imageDigest);
@@ -740,7 +798,10 @@ describe("Pure-Alchemy Compute Engine runner pool (#908)", () => {
     expect(vm.metadata?.["kvitbit-worker-config-sha"]).toBe(workerConfigSha);
     expect(vm.metadata?.["enable-guest-attributes"]).toBe("TRUE");
 
-    const runnerEnvNames = runnerPlainEnv(config, config.blobsBucket).map((e) => e.name);
+    const runnerEnvNames = Arr.map(
+      runnerPlainEnv({ config, blobsBucket: config.blobsBucket }),
+      (e) => e.name,
+    );
     expect(runnerEnvNames).toEqual(
       expect.arrayContaining([
         "PORT",
@@ -759,50 +820,55 @@ describe("Pure-Alchemy Compute Engine runner pool (#908)", () => {
   const makeRunnerSandbox = (sandbox: string) => {
     const config1 = sampleProdConfig({
       emailFrom: "Kvitbit <no-reply@kvitbit.cz>",
-      secrets: defaultSecretBindings("prod", { enableResend: true, enableSmtp: false }),
+      secrets: defaultSecretBindings({
+        stage: "prod",
+        options: { enableResend: true, enableSmtp: false },
+      }),
     });
     const config2 = sampleProdConfig({
       emailFrom: "Billing <billing@kvitbit.cz>",
-      secrets: defaultSecretBindings("prod", { enableResend: true, enableSmtp: true }),
+      secrets: defaultSecretBindings({
+        stage: "prod",
+        options: { enableResend: true, enableSmtp: true },
+      }),
     });
 
-    const workerConfig1 = buildRunnerWorkerConfig(config1);
-    const workerConfig2 = buildRunnerWorkerConfig(config2);
+    const workerConfig1 = buildRunnerWorkerConfig({ config: config1 });
+    const workerConfig2 = buildRunnerWorkerConfig({ config: config2 });
     const configJson1 = serializeRunnerWorkerConfig(workerConfig1);
     const configJson2 = serializeRunnerWorkerConfig(workerConfig2);
     const configSha1 = runnerWorkerConfigSha(workerConfig1);
     const configSha2 = runnerWorkerConfigSha(workerConfig2);
-    expect(configSha1).not.toBe(configSha2);
+    if (configSha1 === configSha2) throw new Error("Runner config edits must change its digest");
 
     const startup = buildRunnerStartupScript();
-    const match = startup.match(
-      /cat <<'RECONCILE' > \/var\/lib\/kvitbit\/reconcile-worker\.sh\n([\s\S]*?)\nRECONCILE\n/,
-    );
-    expect(match?.[1]).toBeDefined();
+    const match = Option.getOrNull(Str.match(reconcileScriptPattern)(startup));
+    const source = match?.[1];
+    if (source === undefined) throw new Error("Missing runner reconciliation script");
 
     const binDir = join(sandbox, "bin");
     const runDir = join(sandbox, "run");
     const stateDir = join(sandbox, "state");
     const systemdDir = join(sandbox, "systemd");
-    Bun.spawnSync(["mkdir", "-p", binDir, runDir, stateDir, systemdDir]);
+    for (const dir of [binDir, runDir, stateDir, systemdDir]) mkdirSync(dir);
 
     // Rewrite /run/kvitbit and /etc/systemd/system to sandboxed dirs for hermetic execution
-    const reconcileScript = (match?.[1] ?? "")
-      .replaceAll("/run/kvitbit", runDir)
-      .replaceAll("/etc/systemd/system", systemdDir);
+    const reconcileScript = Str.replaceAll(
+      "/etc/systemd/system",
+      systemdDir,
+    )(Str.replaceAll("/run/kvitbit", runDir)(source));
     const scriptPath = join(sandbox, "reconcile-worker.sh");
     writeFileSync(scriptPath, reconcileScript);
     // Do NOT set +x: proves /bin/bash execution works even on noexec filesystems
     chmodSync(scriptPath, 0o600);
 
-    const digest1 = SAMPLE_DIGEST;
-    const digest2 = `sha256:${"b".repeat(64)}`;
-    const ref1 = `europe-west3-docker.pkg.dev/kvitbit-prod/kvitbit/kvitbit@${digest1}`;
+    const digest2 = `sha256:${Str.repeat(64)("b")}`;
+    const ref1 = `europe-west3-docker.pkg.dev/kvitbit-prod/kvitbit/kvitbit@${SAMPLE_DIGEST}`;
     const ref2 = `europe-west3-docker.pkg.dev/kvitbit-prod/kvitbit/kvitbit@${digest2}`;
-    const imageId1 = `sha256:${"c".repeat(64)}`;
-    const imageId2 = `sha256:${"d".repeat(64)}`;
+    const imageId1 = `sha256:${Str.repeat(64)("c")}`;
+    const imageId2 = `sha256:${Str.repeat(64)("d")}`;
     writeFileSync(join(stateDir, "target-ref"), ref1);
-    writeFileSync(join(stateDir, "target-digest"), digest1);
+    writeFileSync(join(stateDir, "target-digest"), SAMPLE_DIGEST);
     writeFileSync(join(stateDir, "target-config"), configJson1);
     writeFileSync(join(stateDir, "target-config-sha"), configSha1);
     writeFileSync(join(stateDir, "attributes-etag"), "initial");
@@ -978,16 +1044,15 @@ fi
     );
     chmodSync(join(binDir, "systemctl"), 0o755);
 
-    const env = { PATH: `${binDir}:${process.env.PATH ?? "/usr/bin:/bin"}` };
-    const reconcile = () =>
-      Bun.spawnSync(["/bin/bash", scriptPath], { env, stdout: "pipe", stderr: "pipe" });
+    const env = { PATH: `${binDir}:${systemPath}` };
+    const reconcile = () => runCommand({ command: ["/bin/bash", scriptPath], env });
 
     return {
       binDir,
       reconcile,
       runDir,
       stateDir,
-      digest1,
+      digest1: SAMPLE_DIGEST,
       digest2,
       ref1,
       ref2,
@@ -999,18 +1064,20 @@ fi
     };
   };
 
-  const withRunnerSandbox = (run: (fixture: ReturnType<typeof makeRunnerSandbox>) => void) => {
+  const withRunnerSandbox = async (
+    run: (fixture: ReturnType<typeof makeRunnerSandbox>) => Promise<void>,
+  ) => {
     const sandbox = mkdtempSync(join(tmpdir(), "kvitbit-reconcile-"));
     try {
-      run(makeRunnerSandbox(sandbox));
+      await run(makeRunnerSandbox(sandbox));
     } finally {
       rmSync(sandbox, { recursive: true, force: true });
     }
   };
 
-  test("reconcile replaces legacy workers, rolls out config and digest changes, and skips no-op ticks", () => {
-    withRunnerSandbox(
-      ({
+  test("reconcile replaces legacy workers, rolls out config and digest changes, and skips no-op ticks", async () => {
+    await withRunnerSandbox(
+      async ({
         reconcile,
         runDir,
         stateDir,
@@ -1035,7 +1102,7 @@ fi
         writeFileSync(join(runDir, "worker.env"), "EMAIL_FROM=stale@example.invalid\n");
 
         // The initial reconcile survives a transient request failure and replaces the legacy worker.
-        expect(reconcile().exitCode).toBe(0);
+        expect((await reconcile()).exitCode).toBe(0);
         expect(readFileSync(join(stateDir, "running-image-id"), "utf8")).toBe(imageId1);
         expect(readFileSync(join(stateDir, "guest-active-digest"), "utf8")).toBe(digest1);
         expect(readFileSync(join(stateDir, "guest-active-config-sha"), "utf8")).toBe(configSha1);
@@ -1052,12 +1119,12 @@ fi
         expect(logAfterFirst).toContain("systemctl:start kvitbit-worker.service");
 
         // 2. Second reconcile with same digest AND same config is a no-op
-        expect(reconcile().exitCode).toBe(0);
+        expect((await reconcile()).exitCode).toBe(0);
         expect(readFileSync(join(stateDir, "log"), "utf8")).toBe(logAfterFirst);
 
         writeFileSync(join(stateDir, "target-config-sha"), configSha2);
         writeFileSync(join(stateDir, "target-config"), configJson2);
-        expect(reconcile().exitCode).toBe(0);
+        expect((await reconcile()).exitCode).toBe(0);
         const env2 = readFileSync(join(runDir, "worker.env"), "utf8");
         expect(env2).toContain("EMAIL_FROM=Billing <billing@kvitbit.cz>");
         expect(env2).toContain("KVITBIT_SMTP_URL=smtps://mailer.example:465");
@@ -1067,13 +1134,13 @@ fi
         const guestWritesAfterConfigUpdate = readFileSync(join(stateDir, "guest-writes"), "utf8");
         const targetEnv2 = readFileSync(join(runDir, "worker-target.env"), "utf8");
         writeFileSync(join(stateDir, "target-ref"), ref2);
-        expect(reconcile().exitCode).toBe(1);
+        expect((await reconcile()).exitCode).toBe(1);
         expect(readFileSync(join(stateDir, "log"), "utf8")).toBe(logAfterConfigUpdate);
 
         // A successful pull still needs to report the requested registry digest.
         writeFileSync(join(stateDir, "target-digest"), digest2);
         writeFileSync(join(stateDir, "registry-image-id"), imageId2);
-        expect(reconcile().exitCode).toBe(1);
+        expect((await reconcile()).exitCode).toBe(1);
         expect(readFileSync(join(stateDir, "running-digest"), "utf8")).toBe(digest1);
         expect(readFileSync(join(stateDir, "running-image-id"), "utf8")).toBe(imageId1);
         expect(readFileSync(join(stateDir, "guest-writes"), "utf8")).toBe(
@@ -1083,7 +1150,7 @@ fi
         expect(readFileSync(join(runDir, "worker-target.env"), "utf8")).toBe(targetEnv2);
 
         writeFileSync(join(stateDir, "registry-ref"), ref2);
-        expect(reconcile().exitCode).toBe(0);
+        expect((await reconcile()).exitCode).toBe(0);
         expect(readFileSync(join(stateDir, "running-image-id"), "utf8")).toBe(imageId2);
         expect(readFileSync(join(stateDir, "guest-active-digest"), "utf8")).toBe(digest2);
         expect(readFileSync(join(stateDir, "guest-active-config-sha"), "utf8")).toBe(configSha2);
@@ -1093,17 +1160,19 @@ fi
         const logAfterFourth = readFileSync(join(stateDir, "log"), "utf8");
         expect(logAfterFourth).toContain(`docker:pull:${ref2}`);
         expect(
-          logAfterFourth.split("\n").filter((l) => l === "systemctl:start kvitbit-worker.service")
-            .length,
+          Arr.filter(
+            Str.split("\n")(logAfterFourth),
+            (l) => l === "systemctl:start kvitbit-worker.service",
+          ).length,
         ).toBe(3);
       },
     );
-  });
+  }, 30_000);
 
-  test("reconcile retries unavailable config without changing the running target, then converges on recovery", () => {
-    withRunnerSandbox(
-      ({ reconcile, runDir, stateDir, digest1, configSha1, configSha2, configJson2 }) => {
-        expect(reconcile().exitCode).toBe(0);
+  test("reconcile retries unavailable config without changing the running target, then converges on recovery", async () => {
+    await withRunnerSandbox(
+      async ({ reconcile, runDir, stateDir, digest1, configSha1, configSha2, configJson2 }) => {
+        expect((await reconcile()).exitCode).toBe(0);
         const env1 = readFileSync(join(runDir, "worker.env"), "utf8");
         const logAfterFirst = readFileSync(join(stateDir, "log"), "utf8");
 
@@ -1113,14 +1182,14 @@ fi
         const targetEnv1 = readFileSync(join(runDir, "worker-target.env"), "utf8");
         writeFileSync(join(stateDir, "target-config-sha"), configSha2);
         rmSync(join(stateDir, "target-config"));
-        expect(reconcile().exitCode).toBe(1);
+        expect((await reconcile()).exitCode).toBe(1);
         expect(readFileSync(join(stateDir, "config-reads"), "utf8")).toBe(
-          configReads + "config fetch\n".repeat(6),
+          configReads + Str.repeat(6)("config fetch\n"),
         );
 
         // The expected SHA covers every response byte, including any trailing newline.
         writeFileSync(join(stateDir, "target-config"), `${configJson2}\n`);
-        expect(reconcile().exitCode).toBe(1);
+        expect((await reconcile()).exitCode).toBe(1);
         expect(readFileSync(join(stateDir, "running-config-sha"), "utf8")).toBe(configSha1);
         expect(readFileSync(join(stateDir, "guest-active-config-sha"), "utf8")).toBe(configSha1);
         expect(readFileSync(join(stateDir, "guest-writes"), "utf8")).toBe(guestWrites);
@@ -1132,9 +1201,9 @@ fi
         writeFileSync(join(stateDir, "target-config"), configJson2);
         writeFileSync(join(stateDir, "next-attributes-etag"), "changed-during-fetch");
         const readsBeforeRecovery = readFileSync(join(stateDir, "config-reads"), "utf8");
-        expect(reconcile().exitCode).toBe(0);
+        expect((await reconcile()).exitCode).toBe(0);
         expect(readFileSync(join(stateDir, "config-reads"), "utf8")).toBe(
-          readsBeforeRecovery + "config fetch\n".repeat(2),
+          readsBeforeRecovery + Str.repeat(2)("config fetch\n"),
         );
         expect(readFileSync(join(stateDir, "guest-active-digest"), "utf8")).toBe(digest1);
         expect(readFileSync(join(stateDir, "guest-active-config-sha"), "utf8")).toBe(configSha2);
@@ -1142,28 +1211,32 @@ fi
         expect(env2).toContain("EMAIL_FROM=Billing <billing@kvitbit.cz>");
         expect(env2).toContain("KVITBIT_SMTP_URL=smtps://mailer.example:465");
         expect(
-          readFileSync(join(stateDir, "log"), "utf8")
-            .split("\n")
-            .filter((l) => l === "systemctl:start kvitbit-worker.service").length,
+          Arr.filter(
+            Str.split("\n")(readFileSync(join(stateDir, "log"), "utf8")),
+            (l) => l === "systemctl:start kvitbit-worker.service",
+          ).length,
         ).toBe(2);
         const logAfterConfigUpdate = readFileSync(join(stateDir, "log"), "utf8");
-        expect(reconcile().exitCode).toBe(0);
+        expect((await reconcile()).exitCode).toBe(0);
         expect(readFileSync(join(stateDir, "log"), "utf8")).toBe(logAfterConfigUpdate);
         expect(readFileSync(join(stateDir, "guest-active-target"), "utf8")).toBe(
           `${digest1}|${configSha2}`,
         );
       },
     );
-  });
+  }, 30_000);
 
-  test("deploy waits for the verified rollback after a worker acknowledgement fails", () => {
-    withRunnerSandbox(
-      ({ binDir, reconcile, stateDir, digest1, configSha1, configSha2, configJson2 }) => {
-        const workflow = Bun.YAML.parse(
+  test("deploy waits for the verified rollback after a worker acknowledgement fails", async () => {
+    await withRunnerSandbox(
+      async ({ binDir, reconcile, stateDir, digest1, configSha1, configSha2, configJson2 }) => {
+        const workflow = parseDeployWorkflow(
           readFileSync(resolve(import.meta.dir, "../../../.github/workflows/deploy.yml"), "utf8"),
-        ) as { jobs: { deploy: { steps: { name?: string; run?: string }[] } } };
-        const verify = workflow.jobs.deploy.steps.find(
-          (step) => step.name === "Verify runner pool reconciled target digest and config",
+        );
+        const verify = Option.getOrUndefined(
+          Arr.findFirst(
+            workflow.jobs.deploy.steps,
+            (step) => step.name === "Verify runner pool reconciled target digest and config",
+          ),
         )?.run;
         if (verify === undefined) throw new Error("Expected the runner verification step");
         const gcloud = join(binDir, "gcloud");
@@ -1184,40 +1257,39 @@ esac
         );
         chmodSync(gcloud, 0o755);
         const verifyRollout = () =>
-          Bun.spawnSync(["bash", "-c", verify], {
+          runCommand({
+            command: ["bash", "-c", verify],
             env: {
-              PATH: `${binDir}:${process.env.PATH ?? "/usr/bin:/bin"}`,
+              PATH: `${binDir}:${systemPath}`,
               GCP_PROJECT_ID: "kvitbit-prod",
               GCP_ZONE: "europe-west3-a",
               KVITBIT_STAGE: "prod",
               TARGET_DIGEST: digest1,
             },
-            stdout: "pipe",
-            stderr: "pipe",
           });
 
-        expect(reconcile().exitCode).toBe(0);
+        expect((await reconcile()).exitCode).toBe(0);
         const configJson1 = readFileSync(join(stateDir, "target-config"), "utf8");
         writeFileSync(join(stateDir, "target-config"), configJson2);
         writeFileSync(join(stateDir, "target-config-sha"), configSha2);
         writeFileSync(join(stateDir, "fail-active-target-once"), "");
-        const changed = reconcile();
+        const changed = await reconcile();
         expect(readFileSync(join(stateDir, "running-config-sha"), "utf8")).toBe(configSha2);
 
         writeFileSync(join(stateDir, "target-config"), configJson1);
         writeFileSync(join(stateDir, "target-config-sha"), configSha1);
-        expect(verifyRollout().exitCode).toBe(1);
+        expect((await verifyRollout()).exitCode).toBe(1);
         expect(changed.exitCode).toBe(1);
         expect(readFileSync(join(stateDir, "guest-active-target"), "utf8")).toBe("pending");
-        expect(reconcile().exitCode).toBe(0);
+        expect((await reconcile()).exitCode).toBe(0);
         expect(readFileSync(join(stateDir, "running-config-sha"), "utf8")).toBe(configSha1);
-        expect(verifyRollout().exitCode).toBe(0);
+        expect((await verifyRollout()).exitCode).toBe(0);
 
         // If invalidation fails, the current worker must remain running and acknowledged.
         writeFileSync(join(stateDir, "target-config"), configJson2);
         writeFileSync(join(stateDir, "target-config-sha"), configSha2);
         writeFileSync(join(stateDir, "fail-invalidation"), "");
-        expect(reconcile().exitCode).toBe(1);
+        expect((await reconcile()).exitCode).toBe(1);
         expect(readFileSync(join(stateDir, "running-config-sha"), "utf8")).toBe(configSha1);
         expect(readFileSync(join(stateDir, "guest-active-target"), "utf8")).toBe(
           `${digest1}|${configSha1}`,
@@ -1226,14 +1298,14 @@ esac
         // A later tick can confirm a running target after an acknowledgement write failure.
         rmSync(join(stateDir, "fail-invalidation"));
         writeFileSync(join(stateDir, "fail-active-target-once"), "");
-        expect(reconcile().exitCode).toBe(1);
+        expect((await reconcile()).exitCode).toBe(1);
         const log = readFileSync(join(stateDir, "log"), "utf8");
-        expect(reconcile().exitCode).toBe(0);
+        expect((await reconcile()).exitCode).toBe(0);
         expect(readFileSync(join(stateDir, "log"), "utf8")).toBe(log);
-        expect(verifyRollout().exitCode).toBe(0);
+        expect((await verifyRollout()).exitCode).toBe(0);
       },
     );
-  });
+  }, 30_000);
 });
 
 describe("Cloud Run server service", () => {
@@ -1254,8 +1326,10 @@ describe("Cloud Run server service", () => {
     const names = resourceNames(config);
     const secretId = "kvitbit-staging-feedback-github-token";
     const secret = `projects/kvitbit-staging/secrets/${secretId}`;
-    expect(secretDeclarations(config).map((entry) => entry.secretId)).toContain(secretId);
-    expect(secretAccessorGrants(config).filter((grant) => grant.secretId === secretId)).toEqual([
+    expect(Arr.map(secretDeclarations(config), (entry) => entry.secretId)).toContain(secretId);
+    expect(
+      Arr.filter(secretAccessorGrants(config), (grant) => grant.secretId === secretId),
+    ).toEqual([
       {
         id: `SecretAccess-${secretId}-server`,
         secretId,
@@ -1269,14 +1343,17 @@ describe("Cloud Run server service", () => {
       },
     ]);
 
-    const service = serverServiceProps(config, {
-      networkName: names.networkName,
-      subnetworkName: names.subnetworkName,
-      blobsBucketName: config.blobsBucket,
-      mobileAssetsBucketName: config.mobileAssetsBucket,
+    const service = serverServiceProps({
+      config,
+      deps: {
+        networkName: names.networkName,
+        subnetworkName: names.subnetworkName,
+        blobsBucketName: config.blobsBucket,
+        mobileAssetsBucketName: config.mobileAssetsBucket,
+      },
     });
     const container = service.template?.containers?.[0];
-    const env = container && "env" in container ? container.env : undefined;
+    const env = container !== undefined && "env" in container ? container.env : undefined;
     expect(env).toContainEqual({ name: "KVITBIT_FEEDBACK_GITHUB_REPO", value: "owner/feedback" });
     expect(env).toContainEqual({
       name: "KVITBIT_FEEDBACK_OWNER_EMAILS",
@@ -1287,19 +1364,24 @@ describe("Cloud Run server service", () => {
       valueSource: { secretKeyRef: { secret, version: "latest" } },
     });
 
-    const runner = buildRunnerWorkerConfig(config);
-    expect(runner.plainEnv.some((entry) => entry.name.startsWith("KVITBIT_FEEDBACK_"))).toBe(false);
-    expect(runner.secrets.map((entry) => entry.secretId)).not.toContain(secretId);
+    const runner = buildRunnerWorkerConfig({ config });
+    expect(
+      Arr.some(runner.plainEnv, (entry) => Str.startsWith("KVITBIT_FEEDBACK_")(entry.name)),
+    ).toBe(false);
+    expect(Arr.map(runner.secrets, (entry) => entry.secretId)).not.toContain(secretId);
   });
 
   test("wires Direct VPC egress, /healthz probes, cluster mode, and all shared env vars", () => {
     const config = sampleProdConfig();
     const names = resourceNames(config);
-    const props = serverServiceProps(config, {
-      networkName: names.networkName,
-      subnetworkName: names.subnetworkName,
-      blobsBucketName: config.blobsBucket,
-      mobileAssetsBucketName: config.mobileAssetsBucket,
+    const props = serverServiceProps({
+      config,
+      deps: {
+        networkName: names.networkName,
+        subnetworkName: names.subnetworkName,
+        blobsBucketName: config.blobsBucket,
+        mobileAssetsBucketName: config.mobileAssetsBucket,
+      },
     });
 
     expect(props.location).toBe("europe-west3");
@@ -1311,21 +1393,31 @@ describe("Cloud Run server service", () => {
     });
 
     const container = props.template?.containers?.[0];
-    expect(container && "image" in container ? container.image : undefined).toBe(
+    expect(container !== undefined && "image" in container ? container.image : undefined).toBe(
       imageReference(config),
     );
     expect(
-      container && "startupProbe" in container ? container.startupProbe?.httpGet?.path : null,
+      container !== undefined && "startupProbe" in container
+        ? container.startupProbe?.httpGet?.path
+        : null,
     ).toBe("/healthz");
     expect(
-      container && "livenessProbe" in container ? container.livenessProbe?.httpGet?.path : null,
+      container !== undefined && "livenessProbe" in container
+        ? container.livenessProbe?.httpGet?.path
+        : null,
     ).toBe("/healthz");
 
-    const plainNames = serverPlainEnv(config, {
-      blobsBucket: config.blobsBucket,
-      mobileAssetsBucket: config.mobileAssetsBucket,
-    }).map((e) => e.name);
-    const secretNames = serverSecretEnv(config).map((e) => e.name);
+    const plainNames = Arr.map(
+      serverPlainEnv({
+        config,
+        buckets: {
+          blobsBucket: config.blobsBucket,
+          mobileAssetsBucket: config.mobileAssetsBucket,
+        },
+      }),
+      (e) => e.name,
+    );
+    const secretNames = Arr.map(serverSecretEnv(config), (e) => e.name);
     expect(plainNames).not.toContain("KVITBIT_FEEDBACK_GITHUB_REPO");
     expect(plainNames).not.toContain("KVITBIT_FEEDBACK_OWNER_EMAILS");
     expect(secretNames).not.toContain("KVITBIT_FEEDBACK_GITHUB_TOKEN");
@@ -1375,19 +1467,21 @@ describe("Pure-Alchemy Edge (Cloud Armor + Cloud CDN + Token Log Exclusion)", ()
     const names = edgeObjectNames(config);
     expect(names.securityPolicy).toBe("kvitbit-prod-edge-armor");
 
-    const policy = edgeSecurityPolicyProps(config, edge);
+    const policy = edgeSecurityPolicyProps({ config, edge });
     expect(policy.type).toBe("CLOUD_ARMOR");
-    expect(policy.rules.some((r) => r.action === "throttle")).toBe(true);
-    expect(policy.rules.some((r) => r.priority === 2147483647 && r.action === "allow")).toBe(true);
+    expect(Arr.some(policy.rules, (r) => r.action === "throttle")).toBe(true);
+    expect(Arr.some(policy.rules, (r) => r.priority === 2147483647 && r.action === "allow")).toBe(
+      true,
+    );
 
     const links = { backendGroup: "neg-link", securityPolicy: "policy-link" };
-    const dyn = edgeDynamicBackendProps(config, links);
+    const dyn = edgeDynamicBackendProps({ config, links });
     expect(dyn.logConfig.enable).toBe(false);
 
-    const stat = edgeStaticBackendProps(config, edge, links);
-    expect("cdnPolicy" in stat && stat.cdnPolicy?.cacheMode).toBe("USE_ORIGIN_HEADERS");
+    const stat = edgeStaticBackendProps({ config, edge, links });
+    expect("cdnPolicy" in stat && stat.cdnPolicy.cacheMode).toBe("USE_ORIGIN_HEADERS");
 
-    const urlMap = edgeUrlMapProps(config, edge, { dynamic: "dyn", static: "stat" });
+    const urlMap = edgeUrlMapProps({ config, edge, backends: { dynamic: "dyn", static: "stat" } });
     expect(urlMap.hostRules[0]?.hosts).toEqual(["kvitbit.cz", "kvitbit.app"]);
     expect(urlMap.pathMatchers[0]?.pathRules[0]?.paths).toEqual([...edgeStaticAssetPaths]);
 
@@ -1398,13 +1492,14 @@ describe("Pure-Alchemy Edge (Cloud Armor + Cloud CDN + Token Log Exclusion)", ()
     expect(tokenRouteExclusionFilter).toContain("/api/auth/magic-link/verify");
 
     // Behavioral regex check against real token-bearing and non-token URLs
-    const regexMatch = tokenRouteExclusionFilter.match(/httpRequest\.requestUrl=~"([^"]+)"/);
+    const regexMatch = Option.getOrNull(Str.match(logFilterPattern)(tokenRouteExclusionFilter));
     expect(regexMatch?.[1]).toBeDefined();
     const pattern = new RegExp(regexMatch?.[1] ?? "");
 
+    const invoiceLink = "https://kvitbit.cz/i/tok123";
     for (const url of [
-      "https://kvitbit.cz/i/tok123",
-      "https://kvitbit.cz/i/tok123?download=1",
+      invoiceLink,
+      `${invoiceLink}?download=1`,
       "https://kvitbit.cz/invite/inv456",
       "https://kvitbit.cz/api/v1/share/tok123",
       "https://kvitbit.cz/api/v1/share/tok123/pdf",
@@ -1432,18 +1527,19 @@ describe("Pure-Alchemy Edge (Cloud Armor + Cloud CDN + Token Log Exclusion)", ()
 
 describe("Pure-Alchemy Cloud DNS", () => {
   const compile = (config: KvitbitStackConfig) =>
-    Effect.runPromise(
-      Effect.scoped(
-        Stack.Stack(
-          KVITBIT_STACK_NAME,
-          { state: State.inMemoryState(), providers: Layer.empty },
-          declareKvitbitStack(config).pipe(Effect.orDie),
-        ),
-      ).pipe(Effect.provideService(Stage, config.stage)),
-    );
+    Stack.Stack(
+      KVITBIT_STACK_NAME,
+      { state: State.inMemoryState(), providers: Layer.empty },
+      declareKvitbitStack(config).pipe(Effect.orDie),
+    ).pipe(Effect.scoped, Effect.provideService(Stage, config.stage), Effect.runPromise);
 
-  const resolveOutputs = (value: unknown, upstream: Record<string, unknown>) =>
-    Effect.runPromise(Output.evaluate(value, upstream).pipe(Effect.provide(State.inMemoryState())));
+  const resolveOutputs = <A>(
+    value: Output.Output<A, never> | A,
+    upstream: Record<string, Schema.Json>,
+  ) =>
+    Effect.runPromise(
+      Output.evaluate<A>(value, upstream).pipe(Effect.provide(State.inMemoryState())),
+    );
 
   test.each(["prod", "staging"] as const)(
     "keeps DNS opt-in for %s even when the edge is configured",
@@ -1451,7 +1547,9 @@ describe("Pure-Alchemy Cloud DNS", () => {
       const compiled = await compile(sampleProdConfig({ stage }));
       expect(compiled.resources.EdgeAddress).toBeDefined();
       expect(compiled.resources.CloudDnsApi).toBeUndefined();
-      expect(Object.keys(compiled.resources).some((id) => id.startsWith("DnsZone-"))).toBe(false);
+      expect(
+        Arr.some(Record.keys(compiled.resources), (id) => Str.startsWith("DnsZone-")(id)),
+      ).toBe(false);
       expect(compiled.output).not.toHaveProperty("dnsNameServers");
     },
   );
@@ -1461,20 +1559,21 @@ describe("Pure-Alchemy Cloud DNS", () => {
     const api = compiled.resources.CloudDnsApi;
     expect(api?.Type).toBe("GCP.ServiceUsage.ProjectService");
     expect(api?.Props).toEqual({ project: "kvitbit-prod", service: "dns.googleapis.com" });
-    expect(Object.keys(compiled.resources).filter((id) => id.startsWith("DnsZone-"))).toEqual(
-      PROD_DNS_ZONES.map((domain) => `DnsZone-${domain}`),
-    );
+    expect(
+      Arr.filter(Record.keys(compiled.resources), (id) => Str.startsWith("DnsZone-")(id)),
+    ).toEqual(Arr.map(PROD_DNS_ZONES, (domain) => `DnsZone-${domain}`));
 
-    const upstream: Record<string, unknown> = { CloudDnsApi: { state: "ENABLED" } };
+    const upstream: Record<string, Schema.Json> = {};
+    upstream.CloudDnsApi = { state: "ENABLED" };
     const expectedNameServers: Record<string, string[]> = {};
-    for (const [index, domain] of PROD_DNS_ZONES.entries()) {
+    await runSerial(PROD_DNS_ZONES.entries())(async ([index, domain]) => {
       const id = `DnsZone-${domain}`;
       const resource = compiled.resources[id];
       expect(resource?.Type).toBe("GCP.DNS.ManagedZone");
-      expect(Object.keys(Output.upstreamAny(resource?.Props))).toEqual(["CloudDnsApi"]);
+      expect(Record.keys(Output.upstreamAny(resource?.Props))).toEqual(["CloudDnsApi"]);
       expect(await resolveOutputs(resource?.Props, upstream)).toMatchObject({
         zoneName: expect.stringMatching(
-          new RegExp(`^kvitbit-prod-${domain.replace(".", "-")}-[0-9a-f]{12}$`),
+          new RegExp(`^kvitbit-prod-${Str.replace(".", "-")(domain)}-[0-9a-f]{12}$`),
         ),
         dnsName: `${domain}.`,
         visibility: "public",
@@ -1483,17 +1582,22 @@ describe("Pure-Alchemy Cloud DNS", () => {
       const nameServers = [`ns-cloud-a${index + 1}.googledomains.com.`];
       upstream[id] = { nameServers };
       expectedNameServers[domain] = nameServers;
-    }
-    if (compiled.output.bootstrapFoundation) throw new Error("Expected a full stack");
-    expect(await resolveOutputs(compiled.output.dnsNameServers, upstream)).toEqual(
-      expectedNameServers,
+    });
+    if (!("dnsNameServers" in compiled.output)) throw new Error("Expected DNS outputs");
+    const resolvedNameServers = await Promise.all(
+      Arr.map(
+        Record.toEntries(compiled.output.dnsNameServers),
+        async ([domain, output]) =>
+          [domain, await resolveOutputs<ReadonlyArray<string>>(output, upstream)] as const,
+      ),
     );
+    expect(Record.fromEntries(resolvedNameServers)).toEqual(expectedNameServers);
   });
 
   test("points each apex and www at the reserved edge IP and configures CAA", async () => {
     const compiled = await compile(sampleProdConfig({ dnsZones: PROD_DNS_ZONES }));
     expect(compiled.resources.EdgeAddress).toBeDefined();
-    for (const domain of PROD_DNS_ZONES) {
+    await runSerial(PROD_DNS_ZONES)(async (domain) => {
       const id = `DnsZone-${domain}`;
       const upstream = {
         [id]: { zoneName: "resolved-zone" },
@@ -1509,10 +1613,10 @@ describe("Pure-Alchemy Cloud DNS", () => {
           rrdatas: ['0 issue "pki.goog"', '0 issue "letsencrypt.org"'],
         },
       ];
-      for (const { suffix, ...record } of expectedRecords) {
+      await runSerial(expectedRecords)(async ({ suffix, ...record }) => {
         const resource = compiled.resources[`${id}-${suffix}`];
         expect(resource?.Type).toBe("GCP.DNS.ResourceRecordSet");
-        expect(Object.keys(Output.upstreamAny(resource?.Props))).toEqual(
+        expect(Record.keys(Output.upstreamAny(resource?.Props))).toEqual(
           record.type === "A" ? [id, "EdgeAddress"] : [id],
         );
         expect(await resolveOutputs(resource?.Props, upstream)).toEqual({
@@ -1520,8 +1624,8 @@ describe("Pure-Alchemy Cloud DNS", () => {
           ttl: 300,
           ...record,
         });
-      }
-    }
+      });
+    });
   });
 });
 
@@ -1546,11 +1650,11 @@ describe("Zero-Terraform enforcement", () => {
 
   test("contains zero .tf/.tfvars files and zero terraform CLI usage in infra/deploy artifacts", () => {
     const infraFiles = collectFiles(join(repoRoot, "infra"));
-    const tfFiles = infraFiles.filter((file) => /\.(tf|tfvars)(\.json)?$/.test(file));
+    const tfFiles = Arr.filter(infraFiles, (file) => terraformFile.test(file));
     expect(tfFiles).toEqual([]);
 
     const deployWorkflow = readFileSync(join(repoRoot, ".github/workflows/deploy.yml"), "utf8");
-    expect(deployWorkflow.toLowerCase()).not.toContain("terraform");
-    expect(deployWorkflow.toLowerCase()).not.toContain("opentofu");
+    expect(Str.toLowerCase(deployWorkflow)).not.toContain("terraform");
+    expect(Str.toLowerCase(deployWorkflow)).not.toContain("opentofu");
   });
 });

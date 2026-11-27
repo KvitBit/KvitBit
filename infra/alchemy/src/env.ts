@@ -1,3 +1,4 @@
+import * as Arr from "effect/Array";
 import type { KvitbitSecretBinding, KvitbitStackConfig, KvitbitWorkload } from "./config";
 import { secretResourceName } from "./config";
 
@@ -16,9 +17,7 @@ export interface SecretEnvVar {
   };
 }
 
-export type CloudRunEnvVar = PlainEnvVar | SecretEnvVar;
-
-export const KVITBIT_IMAGE_PATHS = {
+const KVITBIT_IMAGE_PATHS = {
   webDir: "/app/public/web",
   pwaDir: "/app/public/app",
   blobDir: "/var/lib/kvitbit/blobs",
@@ -26,19 +25,25 @@ export const KVITBIT_IMAGE_PATHS = {
   chromiumPath: "/usr/bin/chromium",
 } as const;
 
-export const secretBindingsForWorkload = (
-  config: KvitbitStackConfig,
-  workload: KvitbitWorkload,
-): ReadonlyArray<KvitbitSecretBinding> =>
-  config.secrets.filter((secret) => secret.consumers.includes(workload));
+export const secretBindingsForWorkload = ({
+  config,
+  workload,
+}: {
+  readonly config: KvitbitStackConfig;
+  readonly workload: KvitbitWorkload;
+}): ReadonlyArray<KvitbitSecretBinding> =>
+  Arr.filter(config.secrets, (secret) => secret.consumers.includes(workload));
 
-export const serverPlainEnv = (
-  config: KvitbitStackConfig,
-  buckets: {
+export const serverPlainEnv = ({
+  config,
+  buckets,
+}: {
+  readonly config: KvitbitStackConfig;
+  readonly buckets: {
     readonly blobsBucket: string;
     readonly mobileAssetsBucket: string;
-  },
-): ReadonlyArray<PlainEnvVar> => {
+  };
+}): ReadonlyArray<PlainEnvVar> => {
   const vars: Array<PlainEnvVar> = [
     { name: "NODE_ENV", value: "production" },
     { name: "HOST", value: "0.0.0.0" },
@@ -79,20 +84,23 @@ export const serverPlainEnv = (
 };
 
 export const serverSecretEnv = (config: KvitbitStackConfig): ReadonlyArray<SecretEnvVar> =>
-  secretBindingsForWorkload(config, "server").map((secret) => ({
+  Arr.map(secretBindingsForWorkload({ config, workload: "server" }), (secret) => ({
     name: secret.environmentVariable,
     valueSource: {
       secretKeyRef: {
-        secret: secretResourceName(config.projectId, secret.secretId),
+        secret: secretResourceName({ projectId: config.projectId, secretId: secret.secretId }),
         version: secret.version,
       },
     },
   }));
 
-export const runnerPlainEnv = (
-  config: KvitbitStackConfig,
-  blobsBucket: string,
-): ReadonlyArray<PlainEnvVar> => {
+export const runnerPlainEnv = ({
+  config,
+  blobsBucket,
+}: {
+  readonly config: KvitbitStackConfig;
+  readonly blobsBucket: string;
+}): ReadonlyArray<PlainEnvVar> => {
   const vars: Array<PlainEnvVar> = [
     { name: "NODE_ENV", value: "production" },
     { name: "PORT", value: String(config.runnerPort) },
