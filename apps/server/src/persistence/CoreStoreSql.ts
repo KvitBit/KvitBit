@@ -94,29 +94,29 @@ const readJson = parseJson(Schema.Unknown);
 
 const toAuditEntry = (row: DbRow): AuditEntry => {
   const entry = decodeAudit({
-    id: row.id,
-    at: row.at,
+    id: row["id"],
+    at: row["at"],
     actor:
-      row.actor_system_job === null
+      row["actor_system_job"] === null
         ? {
             _tag: "Member",
-            userId: row.actor_user_id,
-            channel: row.actor_channel,
+            userId: row["actor_user_id"],
+            channel: row["actor_channel"],
             client:
-              row.actor_client_kind === null
+              row["actor_client_kind"] === null
                 ? null
                 : {
-                    kind: row.actor_client_kind,
-                    id: row.actor_client_id,
-                    name: row.actor_client_name,
+                    kind: row["actor_client_kind"],
+                    id: row["actor_client_id"],
+                    name: row["actor_client_name"],
                   },
           }
-        : { _tag: "System", job: readJson(row.actor_job) },
-    subject: { entity: row.subject_entity, id: row.subject_id },
-    action: row.action,
-    revision: row.subject_revision === null ? null : Number(row.subject_revision),
-    changes: readJson(row.changes),
-    reason: row.reason,
+        : { _tag: "System", job: readJson(row["actor_job"]) },
+    subject: { entity: row["subject_entity"], id: row["subject_id"] },
+    action: row["action"],
+    revision: row["subject_revision"] === null ? null : Number(row["subject_revision"]),
+    changes: readJson(row["changes"]),
+    reason: row["reason"],
   });
   return { ...entry, id: AuditEntryId.make(entry.id, { disableChecks: true }) };
 };
@@ -241,12 +241,12 @@ const makeCoreStoreSql = Effect.gen(function* () {
               : { ...candidate, paymentQr: projected.paymentQr };
           });
 
-          if (isEncodedView(result.document)) {
+          if (isEncodedView(result["document"])) {
             result = {
               ...result,
-              document: yield* enrichEncodedView(result.document),
+              document: yield* enrichEncodedView(result["document"]),
             };
-          } else if (!isRecord(result.document) && isEncodedView(result)) {
+          } else if (!isRecord(result["document"]) && isEncodedView(result)) {
             result = yield* enrichEncodedView(result);
           }
         }

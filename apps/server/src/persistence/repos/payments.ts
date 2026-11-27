@@ -68,14 +68,14 @@ const spec: TableSpec<PaymentRecord> = {
     return {
       id: PaymentId.make(stored.id, { disableChecks: true }),
       workspaceId: decodeWorkspaceId(stored.workspace_id),
-      revision: Number(row.revision),
+      revision: Number(row["revision"]),
       documentId: Predicate.isNotNullish(stored.document_id)
         ? DocumentId.make(stored.document_id)
         : null,
       expenseId: Predicate.isNotNullish(stored.expense_id)
         ? ExpenseId.make(stored.expense_id)
         : null,
-      amount: parseDecimal(row.amount),
+      amount: parseDecimal(row["amount"]),
       currency: CurrencyCode.make(stored.currency),
       paidOn: IsoDate.make(stored.paid_on),
       method: stored.method,

@@ -39,26 +39,32 @@ const toBytesOrUtf8 = (value: string): Uint8Array =>
   hexToBytes(value) ?? new TextEncoder().encode(value);
 
 const parseParameters = (challenge: AltchaChallenge): ParsedParameters | AltchaSolveError => {
-  const nested = isRecord(challenge.parameters) ? challenge.parameters : challenge;
-  const rawAlgo = isString(nested.algorithm) ? nested.algorithm : "ARGON2ID";
+  const nested = isRecord(challenge["parameters"]) ? challenge["parameters"] : challenge;
+  const rawAlgo = isString(nested["algorithm"]) ? nested["algorithm"] : "ARGON2ID";
   if (!isAlgorithm(rawAlgo)) {
     return AltchaSolveError.make({ reason: `Unsupported ALTCHA algorithm: ${rawAlgo}` });
   }
-  const nonceStr = isString(nested.nonce) ? nested.nonce : "";
-  const saltStr = isString(nested.salt) ? nested.salt : nonceStr;
+  const nonceStr = isString(nested["nonce"]) ? nested["nonce"] : "";
+  const saltStr = isString(nested["salt"]) ? nested["salt"] : nonceStr;
   if (nonceStr === "" || saltStr === "") {
     return AltchaSolveError.make({ reason: "Malformed ALTCHA challenge: missing nonce or salt" });
   }
   const nonce = toBytesOrUtf8(nonceStr);
   const salt = toBytesOrUtf8(saltStr);
-  const cost = isNumber(nested.cost) && nested.cost >= 1 ? Math.trunc(nested.cost) : 1;
+  const cost = isNumber(nested["cost"]) && nested["cost"] >= 1 ? Math.trunc(nested["cost"]) : 1;
   const keyLength =
-    isNumber(nested.keyLength) && nested.keyLength >= 1 ? Math.trunc(nested.keyLength) : 32;
+    isNumber(nested["keyLength"]) && nested["keyLength"] >= 1
+      ? Math.trunc(nested["keyLength"])
+      : 32;
   const memoryCost =
-    isNumber(nested.memoryCost) && nested.memoryCost >= 8 ? Math.trunc(nested.memoryCost) : 19_456;
+    isNumber(nested["memoryCost"]) && nested["memoryCost"] >= 8
+      ? Math.trunc(nested["memoryCost"])
+      : 19_456;
   const parallelism =
-    isNumber(nested.parallelism) && nested.parallelism >= 1 ? Math.trunc(nested.parallelism) : 1;
-  const keyPrefix = Str.toLowerCase(isString(nested.keyPrefix) ? nested.keyPrefix : "0");
+    isNumber(nested["parallelism"]) && nested["parallelism"] >= 1
+      ? Math.trunc(nested["parallelism"])
+      : 1;
+  const keyPrefix = Str.toLowerCase(isString(nested["keyPrefix"]) ? nested["keyPrefix"] : "0");
   return {
     algorithm: rawAlgo,
     nonce,

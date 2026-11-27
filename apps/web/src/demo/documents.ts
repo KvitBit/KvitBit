@@ -667,8 +667,9 @@ export const routes: ReadonlyArray<DemoRoute> = [
     method: "GET",
     path: "/api/v1/workspaces/:workspaceId/fx-rates/:currency",
     respond: ({ params, query }) => ({
-      currency: params.currency ?? "EUR",
-      rate: params.currency === "USD" ? "23.45" : params.currency === "GBP" ? "29.80" : "25.15",
+      currency: params["currency"] ?? "EUR",
+      rate:
+        params["currency"] === "USD" ? "23.45" : params["currency"] === "GBP" ? "29.80" : "25.15",
       quantity: 1,
       fixingDate: query.get("on") ?? "2026-11-24",
       source: "cnb",
@@ -850,9 +851,11 @@ export const routes: ReadonlyArray<DemoRoute> = [
     path: "/api/v1/workspaces/:workspaceId/documents/:documentId",
     respond: ({ params }) => {
       const found = Option.getOrUndefined(
-        Arr.findFirst(documents, (d) => d.id === params.documentId),
+        Arr.findFirst(documents, (d) => d.id === params["documentId"]),
       );
-      return found ?? status(404, { _tag: "NotFound", entity: "Document", id: params.documentId });
+      return (
+        found ?? status(404, { _tag: "NotFound", entity: "Document", id: params["documentId"] })
+      );
     },
   },
   {
@@ -860,10 +863,10 @@ export const routes: ReadonlyArray<DemoRoute> = [
     path: "/api/v1/workspaces/:workspaceId/documents/:documentId",
     respond: ({ params, body }) => {
       const found = Option.getOrUndefined(
-        Arr.findFirst(documents, (d) => d.id === params.documentId),
+        Arr.findFirst(documents, (d) => d.id === params["documentId"]),
       );
       if (found === undefined) {
-        return status(404, { _tag: "NotFound", entity: "Document", id: params.documentId });
+        return status(404, { _tag: "NotFound", entity: "Document", id: params["documentId"] });
       }
       const patch = Option.getOrUndefined(decodeDocumentPatch(body));
       if (patch?.number !== undefined) found.number = patch.number;
@@ -876,7 +879,7 @@ export const routes: ReadonlyArray<DemoRoute> = [
     path: "/api/v1/workspaces/:workspaceId/documents/:documentId",
     respond: ({ params }) => {
       const idx = Option.getOrUndefined(
-        Arr.findFirstIndex(documents, (d) => d.id === params.documentId),
+        Arr.findFirstIndex(documents, (d) => d.id === params["documentId"]),
       );
       if (idx !== undefined) documents.splice(idx, 1);
     },
@@ -886,10 +889,10 @@ export const routes: ReadonlyArray<DemoRoute> = [
     path: "/api/v1/workspaces/:workspaceId/documents/:documentId/issue",
     respond: ({ params }) => {
       const found = Option.getOrUndefined(
-        Arr.findFirst(documents, (d) => d.id === params.documentId),
+        Arr.findFirst(documents, (d) => d.id === params["documentId"]),
       );
       if (found === undefined) {
-        return status(404, { _tag: "NotFound", entity: "Document", id: params.documentId });
+        return status(404, { _tag: "NotFound", entity: "Document", id: params["documentId"] });
       }
       found.status = "issued";
       found.number = found.kind === "proforma" ? `ZF-2026-00${++nextSeq}` : `2026-00${++nextSeq}`;
@@ -902,10 +905,10 @@ export const routes: ReadonlyArray<DemoRoute> = [
     path: "/api/v1/workspaces/:workspaceId/documents/:documentId/lock",
     respond: ({ params }) => {
       const found = Option.getOrUndefined(
-        Arr.findFirst(documents, (d) => d.id === params.documentId),
+        Arr.findFirst(documents, (d) => d.id === params["documentId"]),
       );
       if (found === undefined) {
-        return status(404, { _tag: "NotFound", entity: "Document", id: params.documentId });
+        return status(404, { _tag: "NotFound", entity: "Document", id: params["documentId"] });
       }
       found.locked = true;
       found.revision += 1;
@@ -917,10 +920,10 @@ export const routes: ReadonlyArray<DemoRoute> = [
     path: "/api/v1/workspaces/:workspaceId/documents/:documentId/unlock",
     respond: ({ params }) => {
       const found = Option.getOrUndefined(
-        Arr.findFirst(documents, (d) => d.id === params.documentId),
+        Arr.findFirst(documents, (d) => d.id === params["documentId"]),
       );
       if (found === undefined) {
-        return status(404, { _tag: "NotFound", entity: "Document", id: params.documentId });
+        return status(404, { _tag: "NotFound", entity: "Document", id: params["documentId"] });
       }
       found.locked = false;
       found.revision += 1;
@@ -932,10 +935,10 @@ export const routes: ReadonlyArray<DemoRoute> = [
     path: "/api/v1/workspaces/:workspaceId/documents/:documentId/cancel",
     respond: ({ params }) => {
       const found = Option.getOrUndefined(
-        Arr.findFirst(documents, (d) => d.id === params.documentId),
+        Arr.findFirst(documents, (d) => d.id === params["documentId"]),
       );
       if (found === undefined) {
-        return status(404, { _tag: "NotFound", entity: "Document", id: params.documentId });
+        return status(404, { _tag: "NotFound", entity: "Document", id: params["documentId"] });
       }
       found.status = "cancelled";
       found.revision += 1;
@@ -947,10 +950,10 @@ export const routes: ReadonlyArray<DemoRoute> = [
     path: "/api/v1/workspaces/:workspaceId/documents/:documentId/credit-notes",
     respond: ({ params }) => {
       const orig = Option.getOrUndefined(
-        Arr.findFirst(documents, (d) => d.id === params.documentId),
+        Arr.findFirst(documents, (d) => d.id === params["documentId"]),
       );
       if (orig === undefined) {
-        return status(404, { _tag: "NotFound", entity: "Document", id: params.documentId });
+        return status(404, { _tag: "NotFound", entity: "Document", id: params["documentId"] });
       }
       const id = nextId();
       const number = `OD-2026-00${++nextSeq}`;
@@ -981,10 +984,10 @@ export const routes: ReadonlyArray<DemoRoute> = [
     path: "/api/v1/workspaces/:workspaceId/documents/:documentId/final-invoice",
     respond: ({ params }) => {
       const proforma = Option.getOrUndefined(
-        Arr.findFirst(documents, (d) => d.id === params.documentId),
+        Arr.findFirst(documents, (d) => d.id === params["documentId"]),
       );
       if (proforma === undefined) {
-        return status(404, { _tag: "NotFound", entity: "Document", id: params.documentId });
+        return status(404, { _tag: "NotFound", entity: "Document", id: params["documentId"] });
       }
       const id = nextId();
       const number = `2026-00${++nextSeq}`;
@@ -1021,7 +1024,7 @@ export const routes: ReadonlyArray<DemoRoute> = [
     path: "/api/v1/workspaces/:workspaceId/documents/:documentId/deliveries",
     respond: ({ params, body }) => {
       const found = Option.getOrUndefined(
-        Arr.findFirst(documents, (d) => d.id === params.documentId),
+        Arr.findFirst(documents, (d) => d.id === params["documentId"]),
       );
       const deliveryId = nextId();
       if (found !== undefined) {
@@ -1048,7 +1051,7 @@ export const routes: ReadonlyArray<DemoRoute> = [
         id: demoId(910),
         at: "2026-10-15T09:00:00Z",
         actor: { _tag: "Member", userId: demoId(1), channel: "web", client: null },
-        subject: { entity: "Document", id: params.documentId ?? DOC_1_ID },
+        subject: { entity: "Document", id: params["documentId"] ?? DOC_1_ID },
         action: "document.issue",
         revision: 1,
         changes: [],
@@ -1062,9 +1065,9 @@ export const routes: ReadonlyArray<DemoRoute> = [
     path: "/api/v1/workspaces/:workspaceId/documents/:documentId/share-link",
     respond: ({ params }) => {
       const found = Option.getOrUndefined(
-        Arr.findFirst(documents, (d) => d.id === params.documentId),
+        Arr.findFirst(documents, (d) => d.id === params["documentId"]),
       );
-      const url = `https://app.kvitbit.cz/i/demo-${params.documentId}`;
+      const url = `https://app.kvitbit.cz/i/demo-${params["documentId"]}`;
       if (found !== undefined) found.share = { url, views: 0, lastViewedAt: null };
       return { url };
     },
@@ -1074,7 +1077,7 @@ export const routes: ReadonlyArray<DemoRoute> = [
     path: "/api/v1/workspaces/:workspaceId/documents/:documentId/share-link",
     respond: ({ params }) => {
       const found = Option.getOrUndefined(
-        Arr.findFirst(documents, (d) => d.id === params.documentId),
+        Arr.findFirst(documents, (d) => d.id === params["documentId"]),
       );
       if (found !== undefined) found.share = null;
     },
@@ -1094,7 +1097,8 @@ export const routes: ReadonlyArray<DemoRoute> = [
   {
     method: "GET",
     path: "/api/v1/workspaces/:workspaceId/documents/:documentId/payments",
-    respond: ({ params }) => Arr.filter(payments, (p) => p.target.document === params.documentId),
+    respond: ({ params }) =>
+      Arr.filter(payments, (p) => p.target.document === params["documentId"]),
   },
   {
     method: "POST",
@@ -1149,7 +1153,7 @@ export const routes: ReadonlyArray<DemoRoute> = [
     path: "/api/v1/workspaces/:workspaceId/payments/:paymentId/remove",
     respond: ({ params }) => {
       const idx = Option.getOrUndefined(
-        Arr.findFirstIndex(payments, (p) => p.id === params.paymentId),
+        Arr.findFirstIndex(payments, (p) => p.id === params["paymentId"]),
       );
       if (idx !== undefined) payments.splice(idx, 1);
     },
@@ -1165,9 +1169,11 @@ export const routes: ReadonlyArray<DemoRoute> = [
     path: "/api/v1/workspaces/:workspaceId/templates/:templateId",
     respond: ({ params }) => {
       const found = Option.getOrUndefined(
-        Arr.findFirst(templates, (t) => t.id === params.templateId),
+        Arr.findFirst(templates, (t) => t.id === params["templateId"]),
       );
-      return found ?? status(404, { _tag: "NotFound", entity: "Template", id: params.templateId });
+      return (
+        found ?? status(404, { _tag: "NotFound", entity: "Template", id: params["templateId"] })
+      );
     },
   },
   {
@@ -1192,10 +1198,10 @@ export const routes: ReadonlyArray<DemoRoute> = [
     path: "/api/v1/workspaces/:workspaceId/templates/:templateId",
     respond: ({ params, body }) => {
       const found = Option.getOrUndefined(
-        Arr.findFirst(templates, (t) => t.id === params.templateId),
+        Arr.findFirst(templates, (t) => t.id === params["templateId"]),
       );
       if (found === undefined) {
-        return status(404, { _tag: "NotFound", entity: "Template", id: params.templateId });
+        return status(404, { _tag: "NotFound", entity: "Template", id: params["templateId"] });
       }
       const input = Option.getOrUndefined(decodeTemplate(body));
       found.name = input?.name ?? found.name;
@@ -1209,7 +1215,7 @@ export const routes: ReadonlyArray<DemoRoute> = [
     path: "/api/v1/workspaces/:workspaceId/templates/:templateId/archive",
     respond: ({ params }) => {
       const found = Option.getOrUndefined(
-        Arr.findFirst(templates, (t) => t.id === params.templateId),
+        Arr.findFirst(templates, (t) => t.id === params["templateId"]),
       );
       if (found !== undefined) found.archived = true;
     },
@@ -1219,10 +1225,10 @@ export const routes: ReadonlyArray<DemoRoute> = [
     path: "/api/v1/workspaces/:workspaceId/templates/:templateId/schedule",
     respond: ({ params, body }) => {
       const found = Option.getOrUndefined(
-        Arr.findFirst(templates, (t) => t.id === params.templateId),
+        Arr.findFirst(templates, (t) => t.id === params["templateId"]),
       );
       if (found === undefined) {
-        return status(404, { _tag: "NotFound", entity: "Template", id: params.templateId });
+        return status(404, { _tag: "NotFound", entity: "Template", id: params["templateId"] });
       }
       const input = Option.getOrUndefined(decodeSchedule(body));
       found.schedule = {
@@ -1246,10 +1252,10 @@ export const routes: ReadonlyArray<DemoRoute> = [
     path: "/api/v1/workspaces/:workspaceId/templates/:templateId/schedule",
     respond: ({ params }) => {
       const found = Option.getOrUndefined(
-        Arr.findFirst(templates, (t) => t.id === params.templateId),
+        Arr.findFirst(templates, (t) => t.id === params["templateId"]),
       );
       if (found === undefined) {
-        return status(404, { _tag: "NotFound", entity: "Template", id: params.templateId });
+        return status(404, { _tag: "NotFound", entity: "Template", id: params["templateId"] });
       }
       found.schedule = null;
       found.revision += 1;
@@ -1261,10 +1267,10 @@ export const routes: ReadonlyArray<DemoRoute> = [
     path: "/api/v1/workspaces/:workspaceId/templates/:templateId/resume",
     respond: ({ params }) => {
       const found = Option.getOrUndefined(
-        Arr.findFirst(templates, (t) => t.id === params.templateId),
+        Arr.findFirst(templates, (t) => t.id === params["templateId"]),
       );
       if (found === undefined) {
-        return status(404, { _tag: "NotFound", entity: "Template", id: params.templateId });
+        return status(404, { _tag: "NotFound", entity: "Template", id: params["templateId"] });
       }
       if (found.schedule !== null) {
         found.schedule.paused = false;
@@ -1279,7 +1285,7 @@ export const routes: ReadonlyArray<DemoRoute> = [
     method: "GET",
     path: "/api/v1/workspaces/:workspaceId/templates/:templateId/runs",
     respond: ({ params }) => ({
-      items: runsByTemplate.get(params.templateId ?? "") ?? [],
+      items: runsByTemplate.get(params["templateId"] ?? "") ?? [],
       nextCursor: null,
     }),
   },

@@ -55,7 +55,7 @@ const isNativePaletteSource = Schema.is(
 const decodePalette = Schema.decodeUnknownOption(nativePalette);
 
 const readDefaultAndroidDynamicColorEnv = (): AndroidDynamicColorEnv => {
-  const nativeModule = NativeModules.KvitbitDynamicColor;
+  const nativeModule = NativeModules["KvitbitDynamicColor"];
   const device = { os: Platform.OS, version: Platform.Version };
   if (!isNativePaletteSource(nativeModule)) return device;
   return {

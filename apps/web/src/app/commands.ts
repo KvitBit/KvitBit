@@ -1,7 +1,9 @@
 import { Command } from "@effect/ui";
 import { Api } from "@kvitbit/ui-port";
+import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Fn from "effect/Function";
+import * as HttpClient from "effect/http/HttpClient";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
@@ -22,8 +24,10 @@ export class RunApi extends Command.Service<RunApi>()("@kvitbit/web/RunApi", {
 }) {
   static readonly layer = this.toLayer(
     Effect.gen(function* () {
-      const client = yield* Api.KvitbitApi;
-      return ({ operation }) => Effect.provideService(operation.effect, Api.KvitbitApi, client);
+      const services = yield* Effect.context<WebServices>().pipe(
+        Effect.map(Context.pick(Api.KvitbitApi, HttpClient.HttpClient)),
+      );
+      return ({ operation }) => Effect.provideContext(operation.effect, services);
     }),
   ).pipe(Layer.provide(WebServicesLive));
 }

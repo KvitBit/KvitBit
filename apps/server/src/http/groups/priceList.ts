@@ -22,9 +22,9 @@ export const PriceListGroupLive = HttpApiBuilder.group(
         priceList.save(payload, requestOptions(headers)).pipe(
           Effect.map(jsonizePriceListItem),
           Effect.tap((view) => {
-            if (!Predicate.isString(view.id)) return Effect.void;
+            if (!Predicate.isString(view["id"])) return Effect.void;
             return setLocation(
-              `${API_PREFIX}/workspaces/${params.workspaceId}/price-list-items/${view.id}`,
+              `${API_PREFIX}/workspaces/${params.workspaceId}/price-list-items/${view["id"]}`,
             );
           }),
         ),

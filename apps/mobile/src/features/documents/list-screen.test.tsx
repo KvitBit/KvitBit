@@ -277,7 +277,7 @@ describe("DocumentsListScreen", () => {
       "/",
     );
     mockParams = EffectRecord.fromEntries(new URL(href, server.url).searchParams);
-    mockParams.contact = [SECOND_CONTACT_ID, "ignored-duplicate"];
+    mockParams["contact"] = [SECOND_CONTACT_ID, "ignored-duplicate"];
 
     await renderScreen();
     await waitFor(() => row(SECOND_ROW_ID) !== null, "scoped document list");

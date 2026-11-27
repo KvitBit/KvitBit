@@ -93,7 +93,7 @@ describe("AltchaBotProtection", () => {
     const exit = await run(
       Effect.gen(function* () {
         const { challenge, solution } = yield* issueAndSolve("sign_up");
-        expect(challenge.parameters.data?.scope).toBe("sign_up");
+        expect(challenge.parameters.data?.["scope"]).toBe("sign_up");
         const payload = yield* encode(challenge, solution);
         yield* verifyWith("sign_up", payload);
         const sql = yield* SqlClient.SqlClient;

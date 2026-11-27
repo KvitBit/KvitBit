@@ -536,7 +536,7 @@ describe("Bootstrap state safety guard", () => {
     expect(Arr.sort(Record.keys(compiled.resources), Order.String)).toEqual(
       Arr.sort(foundationResourceIds(dnsConfig), Order.String),
     );
-    expect(compiled.resources.CloudDnsApi?.Props).toEqual({
+    expect(compiled.resources["CloudDnsApi"]?.Props).toEqual({
       project: "kvitbit-prod",
       service: "dns.googleapis.com",
     });
@@ -629,8 +629,8 @@ describe("Foundation resources", () => {
     // Token-route log exclusion is installed unconditionally even when edge is disabled
     expect(resourceIds).toContain("EdgeTokenRouteExclusion");
 
-    const runner0 = compiled.resources.KvitbitRunner0;
-    const serverRes = compiled.resources.KvitbitServer;
+    const runner0 = compiled.resources["KvitbitRunner0"];
+    const serverRes = compiled.resources["KvitbitServer"];
     expect(runner0).toBeDefined();
     expect(serverRes).toBeDefined();
 
@@ -1545,8 +1545,8 @@ describe("Pure-Alchemy Cloud DNS", () => {
     "keeps DNS opt-in for %s even when the edge is configured",
     async (stage) => {
       const compiled = await compile(sampleProdConfig({ stage }));
-      expect(compiled.resources.EdgeAddress).toBeDefined();
-      expect(compiled.resources.CloudDnsApi).toBeUndefined();
+      expect(compiled.resources["EdgeAddress"]).toBeDefined();
+      expect(compiled.resources["CloudDnsApi"]).toBeUndefined();
       expect(
         Arr.some(Record.keys(compiled.resources), (id) => Str.startsWith("DnsZone-")(id)),
       ).toBe(false);
@@ -1556,7 +1556,7 @@ describe("Pure-Alchemy Cloud DNS", () => {
 
   test("declares public zones and exports each zone's nameservers before edge setup", async () => {
     const compiled = await compile(sampleProdConfig({ dnsZones: PROD_DNS_ZONES, edge: undefined }));
-    const api = compiled.resources.CloudDnsApi;
+    const api = compiled.resources["CloudDnsApi"];
     expect(api?.Type).toBe("GCP.ServiceUsage.ProjectService");
     expect(api?.Props).toEqual({ project: "kvitbit-prod", service: "dns.googleapis.com" });
     expect(
@@ -1564,7 +1564,7 @@ describe("Pure-Alchemy Cloud DNS", () => {
     ).toEqual(Arr.map(PROD_DNS_ZONES, (domain) => `DnsZone-${domain}`));
 
     const upstream: Record<string, Schema.Json> = {};
-    upstream.CloudDnsApi = { state: "ENABLED" };
+    upstream["CloudDnsApi"] = { state: "ENABLED" };
     const expectedNameServers: Record<string, string[]> = {};
     await runSerial(PROD_DNS_ZONES.entries())(async ([index, domain]) => {
       const id = `DnsZone-${domain}`;
@@ -1596,7 +1596,7 @@ describe("Pure-Alchemy Cloud DNS", () => {
 
   test("points each apex and www at the reserved edge IP and configures CAA", async () => {
     const compiled = await compile(sampleProdConfig({ dnsZones: PROD_DNS_ZONES }));
-    expect(compiled.resources.EdgeAddress).toBeDefined();
+    expect(compiled.resources["EdgeAddress"]).toBeDefined();
     await runSerial(PROD_DNS_ZONES)(async (domain) => {
       const id = `DnsZone-${domain}`;
       const upstream = {

@@ -794,10 +794,10 @@ export const routes: ReadonlyArray<DemoRoute> = [
     path: "/api/v1/workspaces/:workspaceId/contacts/:contactId",
     respond: (req) => {
       const found = Option.getOrUndefined(
-        Arr.findFirst(contacts, (c) => c.id === req.params.contactId),
+        Arr.findFirst(contacts, (c) => c.id === req.params["contactId"]),
       );
       return (
-        found ?? status(404, { _tag: "NotFound", entity: "Contact", id: req.params.contactId })
+        found ?? status(404, { _tag: "NotFound", entity: "Contact", id: req.params["contactId"] })
       );
     },
   },
@@ -840,12 +840,12 @@ export const routes: ReadonlyArray<DemoRoute> = [
     path: "/api/v1/workspaces/:workspaceId/contacts/:contactId",
     respond: (req) => {
       const idx = Option.getOrElse(
-        Arr.findFirstIndex(contacts, (c) => c.id === req.params.contactId),
+        Arr.findFirstIndex(contacts, (c) => c.id === req.params["contactId"]),
         () => -1,
       );
       const existing = contacts[idx];
       if (existing === undefined) {
-        return status(404, { _tag: "NotFound", entity: "Contact", id: req.params.contactId });
+        return status(404, { _tag: "NotFound", entity: "Contact", id: req.params["contactId"] });
       }
       const decoded = decodeContact(req.body ?? {});
       if (decoded._tag === "Failure") return malformedBody();
@@ -925,10 +925,10 @@ export const routes: ReadonlyArray<DemoRoute> = [
     path: "/api/v1/workspaces/:workspaceId/contacts/:contactId/archive",
     respond: (req) => {
       const found = Option.getOrUndefined(
-        Arr.findFirst(contacts, (c) => c.id === req.params.contactId),
+        Arr.findFirst(contacts, (c) => c.id === req.params["contactId"]),
       );
       if (found === undefined) {
-        return status(404, { _tag: "NotFound", entity: "Contact", id: req.params.contactId });
+        return status(404, { _tag: "NotFound", entity: "Contact", id: req.params["contactId"] });
       }
       found.archived = true;
     },
@@ -978,12 +978,12 @@ export const routes: ReadonlyArray<DemoRoute> = [
     path: "/api/v1/workspaces/:workspaceId/price-list-items/:itemId",
     respond: (req) => {
       const idx = Option.getOrElse(
-        Arr.findFirstIndex(priceListItems, (i) => i.id === req.params.itemId),
+        Arr.findFirstIndex(priceListItems, (i) => i.id === req.params["itemId"]),
         () => -1,
       );
       const existing = priceListItems[idx];
       if (existing === undefined) {
-        return status(404, { _tag: "NotFound", entity: "PriceListItem", id: req.params.itemId });
+        return status(404, { _tag: "NotFound", entity: "PriceListItem", id: req.params["itemId"] });
       }
       const decoded = decodePriceListItem(req.body ?? {});
       if (decoded._tag === "Failure") return malformedBody();
@@ -1014,10 +1014,10 @@ export const routes: ReadonlyArray<DemoRoute> = [
     path: "/api/v1/workspaces/:workspaceId/price-list-items/:itemId/archive",
     respond: (req) => {
       const found = Option.getOrUndefined(
-        Arr.findFirst(priceListItems, (i) => i.id === req.params.itemId),
+        Arr.findFirst(priceListItems, (i) => i.id === req.params["itemId"]),
       );
       if (found === undefined) {
-        return status(404, { _tag: "NotFound", entity: "PriceListItem", id: req.params.itemId });
+        return status(404, { _tag: "NotFound", entity: "PriceListItem", id: req.params["itemId"] });
       }
       found.archived = true;
     },
@@ -1089,10 +1089,10 @@ export const routes: ReadonlyArray<DemoRoute> = [
     path: "/api/v1/workspaces/:workspaceId/expenses/:expenseId",
     respond: (req) => {
       const found = Option.getOrUndefined(
-        Arr.findFirst(expenses, (e) => e.id === req.params.expenseId),
+        Arr.findFirst(expenses, (e) => e.id === req.params["expenseId"]),
       );
       return (
-        found ?? status(404, { _tag: "NotFound", entity: "Expense", id: req.params.expenseId })
+        found ?? status(404, { _tag: "NotFound", entity: "Expense", id: req.params["expenseId"] })
       );
     },
   },
@@ -1101,12 +1101,12 @@ export const routes: ReadonlyArray<DemoRoute> = [
     path: "/api/v1/workspaces/:workspaceId/expenses/:expenseId",
     respond: (req) => {
       const idx = Option.getOrElse(
-        Arr.findFirstIndex(expenses, (e) => e.id === req.params.expenseId),
+        Arr.findFirstIndex(expenses, (e) => e.id === req.params["expenseId"]),
         () => -1,
       );
       const existing = expenses[idx];
       if (existing === undefined) {
-        return status(404, { _tag: "NotFound", entity: "Expense", id: req.params.expenseId });
+        return status(404, { _tag: "NotFound", entity: "Expense", id: req.params["expenseId"] });
       }
       const decoded = decodeExpense(req.body ?? {});
       if (decoded._tag === "Failure") return malformedBody();
@@ -1146,11 +1146,11 @@ export const routes: ReadonlyArray<DemoRoute> = [
     path: "/api/v1/workspaces/:workspaceId/expenses/:expenseId",
     respond: (req) => {
       const idx = Option.getOrElse(
-        Arr.findFirstIndex(expenses, (e) => e.id === req.params.expenseId),
+        Arr.findFirstIndex(expenses, (e) => e.id === req.params["expenseId"]),
         () => -1,
       );
       if (idx < 0)
-        return status(404, { _tag: "NotFound", entity: "Expense", id: req.params.expenseId });
+        return status(404, { _tag: "NotFound", entity: "Expense", id: req.params["expenseId"] });
       expenses.splice(idx, 1);
     },
   },
@@ -1159,10 +1159,10 @@ export const routes: ReadonlyArray<DemoRoute> = [
     path: "/api/v1/workspaces/:workspaceId/expenses/:expenseId/attachments",
     respond: (req) => {
       const exp = Option.getOrUndefined(
-        Arr.findFirst(expenses, (e) => e.id === req.params.expenseId),
+        Arr.findFirst(expenses, (e) => e.id === req.params["expenseId"]),
       );
       if (exp === undefined) {
-        return status(404, { _tag: "NotFound", entity: "Expense", id: req.params.expenseId });
+        return status(404, { _tag: "NotFound", entity: "Expense", id: req.params["expenseId"] });
       }
       const att = {
         id: nextId(),
@@ -1188,12 +1188,12 @@ export const routes: ReadonlyArray<DemoRoute> = [
     path: "/api/v1/workspaces/:workspaceId/expenses/:expenseId/attachments/:attachmentId",
     respond: (req) => {
       const exp = Option.getOrUndefined(
-        Arr.findFirst(expenses, (e) => e.id === req.params.expenseId),
+        Arr.findFirst(expenses, (e) => e.id === req.params["expenseId"]),
       );
       if (exp === undefined) {
-        return status(404, { _tag: "NotFound", entity: "Expense", id: req.params.expenseId });
+        return status(404, { _tag: "NotFound", entity: "Expense", id: req.params["expenseId"] });
       }
-      exp.attachments = Arr.filter(exp.attachments, (a) => a.id !== req.params.attachmentId);
+      exp.attachments = Arr.filter(exp.attachments, (a) => a.id !== req.params["attachmentId"]);
     },
   },
 
@@ -1201,7 +1201,8 @@ export const routes: ReadonlyArray<DemoRoute> = [
   {
     method: "GET",
     path: "/api/v1/workspaces/:workspaceId/expenses/:expenseId/payments",
-    respond: (req) => Arr.filter(expensePayments, (p) => p.target.expense === req.params.expenseId),
+    respond: (req) =>
+      Arr.filter(expensePayments, (p) => p.target.expense === req.params["expenseId"]),
   },
   {
     method: "POST",
@@ -1240,12 +1241,12 @@ export const routes: ReadonlyArray<DemoRoute> = [
     path: "/api/v1/workspaces/:workspaceId/payments/:paymentId/remove",
     respond: (req) => {
       const idx = Option.getOrElse(
-        Arr.findFirstIndex(expensePayments, (p) => p.id === req.params.paymentId),
+        Arr.findFirstIndex(expensePayments, (p) => p.id === req.params["paymentId"]),
         () => -1,
       );
       const removed = expensePayments[idx];
       if (removed === undefined) {
-        return status(404, { _tag: "NotFound", entity: "Payment", id: req.params.paymentId });
+        return status(404, { _tag: "NotFound", entity: "Payment", id: req.params["paymentId"] });
       }
       expensePayments.splice(idx, 1);
       const exp = Option.getOrUndefined(
@@ -1261,7 +1262,7 @@ export const routes: ReadonlyArray<DemoRoute> = [
     path: "/api/v1/workspaces/:workspaceId/reports/:report",
     respond: (req) =>
       buildDemoReport(
-        req.params.report ?? "revenue",
+        req.params["report"] ?? "revenue",
         req.query.get("from") ?? "2026-01-01",
         req.query.get("to") ?? "2026-12-31",
         req.query.get("groupBy") ?? undefined,
@@ -1271,7 +1272,7 @@ export const routes: ReadonlyArray<DemoRoute> = [
     method: "GET",
     path: "/api/v1/workspaces/:workspaceId/reports/:report/export",
     respond: (req) => ({
-      report: req.params.report ?? "revenue",
+      report: req.params["report"] ?? "revenue",
       format: req.query.get("format") ?? "csv",
       exported: true,
     }),
@@ -1280,7 +1281,7 @@ export const routes: ReadonlyArray<DemoRoute> = [
     method: "GET",
     path: "/api/v1/workspaces/:workspaceId/fx-rates/:currency",
     respond: (req) => {
-      const currency = req.params.currency ?? "EUR";
+      const currency = req.params["currency"] ?? "EUR";
       const rates = new Map([
         ["EUR", "25.20"],
         ["USD", "23.45"],

@@ -72,7 +72,7 @@ const setup = () => {
       Effect.gen(function* () {
         const capture = yield* CaptureEmailSender;
         const sent = yield* Ref.get(capture.sent);
-        return EffectArray.filter(sent, ({ message }) => message.tags?.template === "E01");
+        return EffectArray.filter(sent, ({ message }) => message.tags?.["template"] === "E01");
       }),
     );
   return { app, workspace, invite, signUp, accept, verificationEmails };

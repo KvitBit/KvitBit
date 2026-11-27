@@ -96,68 +96,68 @@ const asDecimalString = Fn.flow(
 );
 
 const decodeEvery = Fn.flow(asRecord, (r): ScheduleEvery => {
-  const weeks = asNumber(r.weeks);
+  const weeks = asNumber(r["weeks"]);
   if (weeks !== null && weeks >= 1) return { weeks: Math.round(weeks) };
-  const years = asNumber(r.years);
+  const years = asNumber(r["years"]);
   if (years !== null && years >= 1) return { years: Math.round(years) };
-  const months = asNumber(r.months);
+  const months = asNumber(r["months"]);
   return { months: months !== null && months >= 1 ? Math.round(months) : 1 };
 });
 
 const decodeSchedule = Fn.flow(asRecord, (r): ScheduleViewData | null => {
-  const startOn = asDate(r.startOn);
-  const id = asScheduleId(r.id);
+  const startOn = asDate(r["startOn"]);
+  const id = asScheduleId(r["id"]);
   if (startOn === null || id === null) return null;
   return {
     id,
-    every: decodeEvery(r.every),
+    every: decodeEvery(r["every"]),
     startOn,
-    endOn: asDate(r.endOn),
-    issueAs: r.issueAs === "proforma" ? "proforma" : "invoice",
-    autoSend: r.autoSend === true,
-    nextOccurrence: asDate(r.nextOccurrence),
-    paused: r.paused === true || r.pausedReason !== null,
-    pausedReason: asString(r.pausedReason),
-    pausedError: asString(r.pausedError),
+    endOn: asDate(r["endOn"]),
+    issueAs: r["issueAs"] === "proforma" ? "proforma" : "invoice",
+    autoSend: r["autoSend"] === true,
+    nextOccurrence: asDate(r["nextOccurrence"]),
+    paused: r["paused"] === true || r["pausedReason"] !== null,
+    pausedReason: asString(r["pausedReason"]),
+    pausedError: asString(r["pausedError"]),
   };
 });
 
 export const decodeTemplate = (view: TemplateView): TemplateViewData | null => {
   const r = asRecord(view);
-  const id = asTemplateId(r.id);
+  const id = asTemplateId(r["id"]);
   if (id === null) return null;
-  const input = asRecord(r.input);
-  const due = asRecord(input.due);
-  const rawLines = Arr.isArray(input.lines) ? input.lines : [];
+  const input = asRecord(r["input"]);
+  const due = asRecord(input["due"]);
+  const rawLines = Arr.isArray(input["lines"]) ? input["lines"] : [];
   return {
     id,
-    name: asString(r.name) ?? asString(input.name) ?? "",
-    revision: asNumber(r.revision) ?? 1,
-    archived: r.archived === true,
-    kind: input.kind === "proforma" ? "proforma" : "invoice",
-    contact: asContactId(input.contact),
-    currency: asCurrency(input.currency),
-    language: input.language === "cs" || input.language === "en" ? input.language : null,
-    dueInDays: asNumber(due.inDays),
+    name: asString(r["name"]) ?? asString(input["name"]) ?? "",
+    revision: asNumber(r["revision"]) ?? 1,
+    archived: r["archived"] === true,
+    kind: input["kind"] === "proforma" ? "proforma" : "invoice",
+    contact: asContactId(input["contact"]),
+    currency: asCurrency(input["currency"]),
+    language: input["language"] === "cs" || input["language"] === "en" ? input["language"] : null,
+    dueInDays: asNumber(due["inDays"]),
     paymentMethod:
-      input.paymentMethod === "bank_transfer" ||
-      input.paymentMethod === "card" ||
-      input.paymentMethod === "cash" ||
-      input.paymentMethod === "other"
-        ? input.paymentMethod
+      input["paymentMethod"] === "bank_transfer" ||
+      input["paymentMethod"] === "card" ||
+      input["paymentMethod"] === "cash" ||
+      input["paymentMethod"] === "other"
+        ? input["paymentMethod"]
         : null,
-    note: asString(input.note),
+    note: asString(input["note"]),
     lines: Arr.map(rawLines, (entry) => {
       const line = asRecord(entry);
       return {
-        description: asString(line.description) ?? "",
-        quantity: asDecimalString(line.quantity ?? "1"),
-        unit: asString(line.unit) ?? "",
-        unitPrice: asDecimalString(line.unitPrice ?? "0"),
-        vat: asVatTreatment(line.vat),
+        description: asString(line["description"]) ?? "",
+        quantity: asDecimalString(line["quantity"] ?? "1"),
+        unit: asString(line["unit"]) ?? "",
+        unitPrice: asDecimalString(line["unitPrice"] ?? "0"),
+        vat: asVatTreatment(line["vat"]),
       };
     }),
-    schedule: decodeSchedule(r.schedule),
+    schedule: decodeSchedule(r["schedule"]),
   };
 };
 
@@ -334,17 +334,17 @@ export const buildTemplateInput = (
 ): { readonly input: TemplateInput | null; readonly errors: Readonly<Record<string, string>> } => {
   const errors: Record<string, string> = {};
   const name = Str.trim(form.name);
-  if (name === "") errors.name = "required";
+  if (name === "") errors["name"] = "required";
   const contact = asContactId(Str.trim(form.contact));
-  if (contact === null) errors.contact = "required";
+  if (contact === null) errors["contact"] = "required";
   const currencyCode = Str.toUpperCase(Str.trim(form.currency));
   const currency = asCurrency(currencyCode);
-  if (currencyCode !== "" && currency === null) errors.currency = "invalid_currency";
+  if (currencyCode !== "" && currency === null) errors["currency"] = "invalid_currency";
 
   const dueDays =
     Str.trim(form.dueInDays) === "" ? null : Number.parseInt(Str.trim(form.dueInDays), 10);
   if (dueDays !== null && (!Number.isInteger(dueDays) || dueDays < 0 || dueDays > 365)) {
-    errors.dueInDays = "invalid_days";
+    errors["dueInDays"] = "invalid_days";
   }
 
   const builtLines: Array<{
@@ -356,7 +356,7 @@ export const buildTemplateInput = (
   }> = [];
 
   if (form.lines.length === 0) {
-    errors.lines = "required";
+    errors["lines"] = "required";
   } else {
     Arr.forEach(form.lines, (line, i) => {
       const desc = Str.trim(line.description);

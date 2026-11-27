@@ -6,8 +6,7 @@ import {
 } from "@kvitbit/api-contract";
 import * as Arr from "effect/Array";
 import * as Effect from "effect/Effect";
-import * as FetchHttpClient from "effect/http/FetchHttpClient";
-import * as HttpClient from "effect/http/HttpClient";
+import type * as HttpClient from "effect/http/HttpClient";
 import * as HttpClientRequest from "effect/http/HttpClientRequest";
 import * as HttpClientResponse from "effect/http/HttpClientResponse";
 import * as Option from "effect/Option";
@@ -16,6 +15,7 @@ import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import * as Str from "effect/String";
+import { fetchBrowser } from "../../app/browser";
 import { copy } from "../../app/i18n";
 import type { Locale, Prefs } from "../../app/prefs";
 import { captureDiagnostics, capturePin } from "./capture";
@@ -127,36 +127,27 @@ const githubIssue = Effect.fn("githubIssue")(function* ({
   return { number: issueNumber, url: url.href, title };
 });
 
-const sendFeedback = Effect.fn("sendFeedback")(
-  function* (submission: FeedbackSubmission) {
-    const request = HttpClientRequest.post(new URL("/api/feedback", globalThis.location.origin));
-    return yield* HttpClientRequest.bodyJson(request, submission).pipe(
-      Effect.flatMap(HttpClient.execute),
-      Effect.flatMap(HttpClientResponse.filterStatusOk),
-      Effect.flatMap(issueBody),
-      Effect.flatMap(githubIssue),
-    );
-  },
-  Effect.provideService(FetchHttpClient.RequestInit, {
-    credentials: "same-origin",
-    redirect: "error",
-  }),
-  Effect.provide(FetchHttpClient.layer),
-  Effect.provideServiceEffect(
-    FetchHttpClient.Fetch,
-    Effect.sync(() => globalThis.fetch),
-  ),
-);
+const sendFeedback = Effect.fn("sendFeedback")(function* (submission: FeedbackSubmission) {
+  const request = HttpClientRequest.post(new URL("/api/feedback", globalThis.location.origin));
+  return yield* HttpClientRequest.bodyJson(request, submission).pipe(
+    Effect.flatMap((prepared) =>
+      fetchBrowser({ request: prepared, options: { redirect: "error" } }),
+    ),
+    Effect.flatMap(HttpClientResponse.filterStatusOk),
+    Effect.flatMap(issueBody),
+    Effect.flatMap(githubIssue),
+  );
+});
 
 const installFeedback = (
   locale: Locale,
   mode: Prefs["mode"],
   signal: AbortSignal,
-  enqueue: (effect: Effect.Effect<void>) => void,
+  enqueue: (effect: Effect.Effect<void, never, HttpClient.HttpClient>) => void,
 ) => {
   const host = document.createElement("div");
-  host.dataset.kbVisualFeedback = "";
-  host.dataset.mode = mode;
+  host.dataset["kbVisualFeedback"] = "";
+  host.dataset["mode"] = mode;
   host.lang = locale;
   const {
     highlight,
@@ -516,20 +507,22 @@ export const mountFeedback = ({
   readonly locale: Locale;
   readonly mode: Prefs["mode"];
 }) =>
-  Stream.callback<Effect.Effect<void>, FeedbackError>((submissions) => {
-    const controller = new AbortController();
-    return Effect.acquireRelease(
-      Effect.try({
-        try: () =>
-          installFeedback(locale, mode, controller.signal, (effect) => {
-            Queue.offerUnsafe(submissions, effect);
+  Stream.callback<Effect.Effect<void, never, HttpClient.HttpClient>, FeedbackError>(
+    (submissions) => {
+      const controller = new AbortController();
+      return Effect.acquireRelease(
+        Effect.try({
+          try: () =>
+            installFeedback(locale, mode, controller.signal, (effect) => {
+              Queue.offerUnsafe(submissions, effect);
+            }),
+          catch: () => FeedbackError.make({ operation: "mount controls" }),
+        }).pipe(Effect.tapError(() => Effect.sync(() => controller.abort()))),
+        (dispose) =>
+          Effect.sync(() => {
+            controller.abort();
+            dispose();
           }),
-        catch: () => FeedbackError.make({ operation: "mount controls" }),
-      }).pipe(Effect.tapError(() => Effect.sync(() => controller.abort()))),
-      (dispose) =>
-        Effect.sync(() => {
-          controller.abort();
-          dispose();
-        }),
-    );
-  }).pipe(Stream.runForEach((submission) => submission));
+      );
+    },
+  ).pipe(Stream.runForEach((submission) => submission));

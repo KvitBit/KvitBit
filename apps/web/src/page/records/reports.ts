@@ -57,7 +57,7 @@ import {
 import {
   apiCommand,
   type CashflowReportRecord,
-  downloadUrlCommand,
+  downloadUrl,
   type ExpensesReportRecord,
   enumLabel,
   moneyText,
@@ -351,12 +351,15 @@ export const update: {
       return {
         model: { ...model, exporting: true, exportError: null },
         commands: [
-          downloadUrlCommand(
+          apiCommand(
+            Message,
             "ReportsExport",
-            path,
-            filename,
-            () => Message.CompletedExport(),
-            (failure) => Message.FailedExport({ failure }),
+            downloadUrl({
+              path,
+              filename,
+              onSuccess: () => Message.CompletedExport(),
+              onFailure: (failure) => Message.FailedExport({ failure }),
+            }),
           ),
         ],
       };

@@ -8,7 +8,6 @@ import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as Signature from "effect/crypto/Signature";
 import * as Effect from "effect/Effect";
 import * as Base64 from "effect/encoding/Base64";
-import * as Layer from "effect/Layer";
 import * as Record from "effect/Record";
 import * as Schema from "effect/Schema";
 import * as Str from "effect/String";
@@ -46,10 +45,7 @@ const privateKeyStart = /^-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----/m;
 const rsaPrivateKeyBlock =
   /^-----BEGIN (RSA PRIVATE KEY|PRIVATE KEY)-----[ \t]*\n([A-Za-z0-9+/= \t\n]+)\n-----END \1-----[ \t]*(?=\n|$)/;
 const trailingSlashes = /\/+$/;
-const signingLayer = Signature.layerWebCrypto.pipe(Layer.provide(SecureRandom.layerWebCrypto));
-const randomBoundary = SecureRandom.SecureRandom.use((random) => random.uuidV4()).pipe(
-  Effect.provide(SecureRandom.layerWebCrypto),
-);
+const randomBoundary = SecureRandom.SecureRandom.use((random) => random.uuidV4());
 
 const isUpdatePlatform = Schema.is(UpdatePlatform);
 const encodeJson = Schema.encodeEffect(Schema.fromJsonString(Schema.Unknown));
@@ -235,7 +231,7 @@ const signPartBody = Effect.fnUntraced(function* (body: string, pem: string) {
     .pipe(Effect.mapError(signingFailure));
   const sig = Base64.encode(signature);
   return `sig="${sig}", keyid="${signingKeyId}", alg="${signingAlgorithm}"`;
-}, Effect.provide(signingLayer));
+});
 
 /**
  * The full response to an update check. A request that expects a signature without a configured

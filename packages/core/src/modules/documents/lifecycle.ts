@@ -299,8 +299,8 @@ const jsonString = (value: Schema.Json | undefined) =>
 const diffRecordsImpl = (before: DocumentRecord, after: DocumentRecord) => {
   const a = jsonRecord(before);
   const b = jsonRecord(after);
-  const ga = isJsonObject(a.given) ? a.given : {};
-  const gb = isJsonObject(b.given) ? b.given : {};
+  const ga = isJsonObject(a["given"]) ? a["given"] : {};
+  const gb = isJsonObject(b["given"]) ? b["given"] : {};
   const same = (x: Schema.Json | undefined, y: Schema.Json | undefined) =>
     jsonString(x) === jsonString(y);
   return [

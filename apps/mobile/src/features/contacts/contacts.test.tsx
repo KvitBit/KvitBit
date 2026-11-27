@@ -404,7 +404,7 @@ describe("contacts model", () => {
 
   test("validates contact form (name, CZ ICO checksum, dueDays, custom reminder offsets)", () => {
     const emptyErrors = validateContactForm(emptyContactForm());
-    expect(emptyErrors.name).toBe("name_required");
+    expect(emptyErrors["name"]).toBe("name_required");
 
     const badIco = validateContactForm({
       ...emptyContactForm(),
@@ -412,7 +412,7 @@ describe("contacts model", () => {
       ico: "27074359", // wrong check digit
       country: "CZ",
     });
-    expect(badIco.ico).toBe("ico_checksum");
+    expect(badIco["ico"]).toBe("ico_checksum");
 
     const foreign = {
       ...emptyContactForm(),
@@ -427,7 +427,7 @@ describe("contacts model", () => {
       dic: "DE123456789",
       address: { country: "DE", street: "Musterstraße 12\n10115 Berlin" },
     });
-    expect(validateContactForm({ ...foreign, ico: "HRB12345" }).ico).toBe("ico_format");
+    expect(validateContactForm({ ...foreign, ico: "HRB12345" })["ico"]).toBe("ico_format");
 
     const badReminders = validateContactForm({
       ...emptyContactForm(),
@@ -449,7 +449,7 @@ describe("contacts model", () => {
       dueDaysText: "21",
       reminderOffsetsText: "5, 15",
     });
-    expect(input.dic).toBe("CZ27074358");
+    expect(input["dic"]).toBe("CZ27074358");
     expect(input.defaults?.dueDays).toBe(21);
     expect(input.defaults?.reminderPolicy).toEqual({
       mode: "custom",

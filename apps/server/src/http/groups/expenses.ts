@@ -25,8 +25,10 @@ export const ExpensesGroupLive = HttpApiBuilder.group(
       .handle("list", ({ query }) => expenses.list(compact(query)))
       .handle("record", ({ params, headers, payload }) =>
         Effect.tap(expenses.record(payload, requestOptions(headers)), (view) => {
-          if (!Predicate.isString(view.id)) return Effect.void;
-          return setLocation(`${API_PREFIX}/workspaces/${params.workspaceId}/expenses/${view.id}`);
+          if (!Predicate.isString(view["id"])) return Effect.void;
+          return setLocation(
+            `${API_PREFIX}/workspaces/${params.workspaceId}/expenses/${view["id"]}`,
+          );
         }),
       )
       .handle("get", ({ params }) => expenses.get(params.expenseId))

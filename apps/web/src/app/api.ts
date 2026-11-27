@@ -9,6 +9,8 @@ import { Api } from "@kvitbit/ui-port";
 import * as Arr from "effect/Array";
 import * as Effect from "effect/Effect";
 import * as Fn from "effect/Function";
+import * as FetchHttpClient from "effect/http/FetchHttpClient";
+import type * as HttpClient from "effect/http/HttpClient";
 import * as HttpClientRequest from "effect/http/HttpClientRequest";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
@@ -61,14 +63,14 @@ const currentLanguage = (): string => {
   );
 };
 
-export type WebServices = Api.KvitbitApi;
+export type WebServices = Api.KvitbitApi | HttpClient.HttpClient;
 
 export const WebServicesLive: Layer.Layer<WebServices> = Layer.suspend(() =>
-  Api.layerFetch({
+  Api.layer({
     baseUrl: browserOrigin(),
     credentials: Api.sessionCookie,
     acceptLanguage: currentLanguage,
-  }),
+  }).pipe(Layer.provideMerge(FetchHttpClient.layer)),
 );
 
 export type Client = Api.KvitbitApiClient;
@@ -134,7 +136,7 @@ export const sendAuthRequest = Effect.fn("sendAuthRequest")(function* (init: Aut
     init.body === undefined
       ? requestWithProof
       : yield* HttpClientRequest.bodyJson(requestWithProof, init.body);
-  const response = yield* fetchBrowser(prepared);
+  const response = yield* fetchBrowser({ request: prepared });
   const type = response.headers["content-type"] ?? "";
   const json = Str.includes("json")(type)
     ? yield* response.text.pipe(Effect.flatMap(decodeAuthJson))
@@ -151,7 +153,7 @@ const authFetchImpl = <M, F = M>(
   init: AuthRequest,
   onSuccess: (json: Schema.Json) => M,
   onFailure: (failure: Failure) => F,
-): Effect.Effect<M | F> =>
+): Effect.Effect<M | F, never, HttpClient.HttpClient> =>
   sendAuthRequest({ ...init, path }).pipe(
     Effect.match({ onSuccess, onFailure: (error) => onFailure(failureFromUnknown(error)) }),
   );
@@ -161,11 +163,11 @@ export const authFetch: {
     init: AuthRequest,
     onSuccess: (json: Schema.Json) => M,
     onFailure: (failure: Failure) => F,
-  ): (path: string) => Effect.Effect<M | F>;
+  ): (path: string) => Effect.Effect<M | F, never, HttpClient.HttpClient>;
   <M, F = M>(
     path: string,
     init: AuthRequest,
     onSuccess: (json: Schema.Json) => M,
     onFailure: (failure: Failure) => F,
-  ): Effect.Effect<M | F>;
+  ): Effect.Effect<M | F, never, HttpClient.HttpClient>;
 } = Fn.dual(4, authFetchImpl);

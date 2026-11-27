@@ -1,5 +1,7 @@
 /** The `Api` HttpApi at `/api/v1` with every group, its middleware and `openapi.json`. */
 import { Api } from "@kvitbit/api-contract";
+import * as Digest from "effect/crypto/Digest";
+import * as HttpRouter from "effect/http/HttpRouter";
 import * as HttpApiBuilder from "effect/http-api/HttpApiBuilder";
 import * as HttpApiScalar from "effect/http-api/HttpApiScalar";
 import * as Layer from "effect/Layer";
@@ -59,4 +61,4 @@ export const ApiRoutesLive = Layer.merge(
     Layer.provide(ApiGroupsLive),
   ),
   HttpApiScalar.layer(Api, { path: "/api/v1/docs" }),
-);
+).pipe(HttpRouter.provideRequest(Digest.layerWebCrypto));

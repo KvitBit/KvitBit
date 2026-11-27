@@ -105,7 +105,7 @@ export const SchemaErrorsLive = Layer.succeed(
             ),
         ),
         Effect.tapError((error) =>
-          errorHeaders(error, request.headers.authorization !== undefined),
+          errorHeaders(error, request.headers["authorization"] !== undefined),
         ),
       );
       if (yield* outcome.replayed) {

@@ -193,7 +193,7 @@ describe("expenses model", () => {
 
   test("validates complete expense form and builds strict ExpenseFields payload", () => {
     const invalid = buildExpensePayload(emptyExpenseForm());
-    expect(invalid.errors.total).toBe("required");
+    expect(invalid.errors["total"]).toBe("required");
 
     const valid = buildExpensePayload({
       ...emptyExpenseForm(),

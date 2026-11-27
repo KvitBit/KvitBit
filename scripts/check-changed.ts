@@ -227,7 +227,7 @@ export const planChecks = (input: {
   }
   const testsByWorkspace = Arr.groupBy(
     input.tests,
-    (file) => workspacePath.exec(file)?.groups?.workspace ?? ".",
+    (file) => workspacePath.exec(file)?.groups?.["workspace"] ?? ".",
   );
   for (const cwd of Rec.keys(testsByWorkspace)) {
     const files = testsByWorkspace[cwd] ?? [];

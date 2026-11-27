@@ -55,8 +55,8 @@ test("every workload-identity release job can request a GitHub OIDC token", () =
 test("release mode validates dispatch values loaded through the step environment", async () => {
   const prepare = Rec.get(workflow.jobs, "prepare").pipe(Option.getOrThrow);
   const mode = Arr.findFirst(prepare.steps, ({ id }) => id === "mode").pipe(Option.getOrThrow);
-  expect(mode.env?.INPUT_CHANNEL).toMatch(channelInput);
-  expect(mode.env?.INPUT_RUNTIME_VERSION).toMatch(runtimeInput);
+  expect(mode.env?.["INPUT_CHANNEL"]).toMatch(channelInput);
+  expect(mode.env?.["INPUT_RUNTIME_VERSION"]).toMatch(runtimeInput);
   for (const job of Rec.values(workflow.jobs)) {
     for (const step of job.steps) {
       expect(step.run ?? "").not.toMatch(shellInterpolation);

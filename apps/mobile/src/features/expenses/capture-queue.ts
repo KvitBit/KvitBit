@@ -110,9 +110,9 @@ function capturePayload(fields: CaptureFields): ExpenseInput {
     status: "incomplete",
     currency: Str.toUpperCase(Str.trim(fields.currency)) || "CZK",
   };
-  if (supplier !== "") payload.supplier = { manual: { name: supplier } };
-  if (decimalInput.test(total)) payload.total = total;
-  if (note !== "") payload.note = note;
+  if (supplier !== "") payload["supplier"] = { manual: { name: supplier } };
+  if (decimalInput.test(total)) payload["total"] = total;
+  if (note !== "") payload["note"] = note;
   return payload;
 }
 

@@ -110,8 +110,8 @@ describe("PersistenceLive SQL conformance (all 12 CoreRepos over PGlite)", () =>
               (id, workspace_id, label, currency, account_number, bank_code, archived_at)
               values (${archivedBankId}, ${member.workspaceId}, 'Old bank', 'CZK', '123', '0800', now())`;
             const current = yield* workspaces.current;
-            expect(current.name).toBe("Kvitbit SQL Test s.r.o.");
-            expect(current.bankAccounts).toEqual([bank]);
+            expect(current["name"]).toBe("Kvitbit SQL Test s.r.o.");
+            expect(current["bankAccounts"]).toEqual([bank]);
             const series = yield* workspaces.listSeries;
 
             // 2. Contacts + PriceList
@@ -123,7 +123,7 @@ describe("PersistenceLive SQL conformance (all 12 CoreRepos over PGlite)", () =>
               roles: ["customer", "supplier"],
               billingEmails: ["fakturace@odberatel.cz"],
             });
-            const contactId = yield* readContactId(customer.id);
+            const contactId = yield* readContactId(customer["id"]);
             const item = yield* priceList.save(
               PriceListItemInput.make({
                 name: "Vývoj SW",
@@ -193,7 +193,7 @@ describe("PersistenceLive SQL conformance (all 12 CoreRepos over PGlite)", () =>
               vat: [{ treatment: "standard", base: "2000.00", vat: "420.00" }],
               category: "office",
             });
-            const expenseId = yield* readExpenseId(expense.id);
+            const expenseId = yield* readExpenseId(expense["id"]);
             const attachment = yield* expenses.attach(expenseId, {
               name: "uctenka.pdf",
               contentType: "application/pdf",
@@ -216,7 +216,7 @@ describe("PersistenceLive SQL conformance (all 12 CoreRepos over PGlite)", () =>
                 },
               ],
             });
-            const templateId = yield* readTemplateId(tpl.id);
+            const templateId = yield* readTemplateId(tpl["id"]);
             const scheduled = yield* templates.schedule(
               templateId,
               {
@@ -335,7 +335,7 @@ describe("PersistenceLive SQL conformance (all 12 CoreRepos over PGlite)", () =>
             return {
               bankId: (yield* readBank(bank)).id,
               seriesCount: series.length,
-              customerId: customer.id,
+              customerId: customer["id"],
               itemId: (yield* readItem(item)).id,
               proformaNumber: proforma.number,
               ptdNumber: paymentRes.issued[0]?.number ?? null,

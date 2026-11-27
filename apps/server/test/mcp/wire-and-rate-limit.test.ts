@@ -68,7 +68,7 @@ const findLeakedBigDecimalPaths = (value: Schema.Json, path = "$"): Array<string
     return Arr.flatMap(value, (entry, idx) => findLeakedBigDecimalPaths(entry, `${path}[${idx}]`));
   }
   if (!isJsonObject(value)) return [];
-  if (value._id === "BigDecimal") {
+  if (value["_id"] === "BigDecimal") {
     return [path];
   }
   return Arr.flatMap(EffectRecord.toEntries(value), ([key, entry]) =>
@@ -89,12 +89,12 @@ const validateJsonSchema = (
 ): Array<string> => {
   if (!isJsonObject(schema)) return [`${path}: expected a schema object`];
 
-  if (Predicate.isString(schema.$ref)) {
+  if (Predicate.isString(schema["$ref"])) {
     const refPrefix = "#/$defs/";
-    if (!Str.startsWith(refPrefix)(schema.$ref)) {
-      return [`${path}: unsupported $ref ${schema.$ref}`];
+    if (!Str.startsWith(refPrefix)(schema["$ref"])) {
+      return [`${path}: unsupported $ref ${schema["$ref"]}`];
     }
-    const targetName = Str.slice(refPrefix.length)(schema.$ref);
+    const targetName = Str.slice(refPrefix.length)(schema["$ref"]);
     const target = isJsonObject(rootDefs) ? rootDefs[targetName] : undefined;
     if (target === undefined) {
       return [`${path}: missing $defs entry ${targetName}`];
@@ -102,19 +102,19 @@ const validateJsonSchema = (
     return validateJsonSchema(value, target, rootDefs, path);
   }
 
-  if ("const" in schema && value !== schema.const) {
+  if ("const" in schema && value !== schema["const"]) {
     return [
-      `${path}: expected const ${Formatter.formatJson(schema.const)}, got ${Formatter.formatJson(value)}`,
+      `${path}: expected const ${Formatter.formatJson(schema["const"])}, got ${Formatter.formatJson(value)}`,
     ];
   }
 
-  if (isJsonArray(schema.enum) && !Arr.some(schema.enum, (entry) => entry === value)) {
+  if (isJsonArray(schema["enum"]) && !Arr.some(schema["enum"], (entry) => entry === value)) {
     return [`${path}: value ${Formatter.formatJson(value)} not in enum`];
   }
 
-  if (isJsonArray(schema.anyOf)) {
+  if (isJsonArray(schema["anyOf"])) {
     const matched = Arr.some(
-      schema.anyOf,
+      schema["anyOf"],
       (branch) => validateJsonSchema(value, branch, rootDefs, path).length === 0,
     );
     if (!matched) {
@@ -122,9 +122,9 @@ const validateJsonSchema = (
     }
   }
 
-  if (isJsonArray(schema.oneOf)) {
+  if (isJsonArray(schema["oneOf"])) {
     const matches = Arr.filter(
-      schema.oneOf,
+      schema["oneOf"],
       (branch) => validateJsonSchema(value, branch, rootDefs, path).length === 0,
     ).length;
     if (matches !== 1) {
@@ -132,14 +132,14 @@ const validateJsonSchema = (
     }
   }
 
-  if (isJsonArray(schema.allOf)) {
-    const errors = Arr.flatMap(schema.allOf, (branch) =>
+  if (isJsonArray(schema["allOf"])) {
+    const errors = Arr.flatMap(schema["allOf"], (branch) =>
       validateJsonSchema(value, branch, rootDefs, path),
     );
     if (errors.length > 0) return errors;
   }
 
-  const schemaType = schema.type;
+  const schemaType = schema["type"];
   if (schemaType !== undefined) {
     const allowedTypes = isJsonArray(schemaType) ? schemaType : [schemaType];
     const matchesType = Arr.some(allowedTypes, (t) => {
@@ -170,29 +170,29 @@ const validateJsonSchema = (
   }
 
   if (Predicate.isString(value)) {
-    if (Predicate.isString(schema.pattern) && !new RegExp(schema.pattern).test(value)) {
-      return [`${path}: string ${Formatter.formatJson(value)} failed pattern ${schema.pattern}`];
+    if (Predicate.isString(schema["pattern"]) && !new RegExp(schema["pattern"]).test(value)) {
+      return [`${path}: string ${Formatter.formatJson(value)} failed pattern ${schema["pattern"]}`];
     }
-    if (Predicate.isNumber(schema.minLength) && value.length < schema.minLength) {
-      return [`${path}: string shorter than minLength ${schema.minLength}`];
+    if (Predicate.isNumber(schema["minLength"]) && value.length < schema["minLength"]) {
+      return [`${path}: string shorter than minLength ${schema["minLength"]}`];
     }
-    if (Predicate.isNumber(schema.maxLength) && value.length > schema.maxLength) {
-      return [`${path}: string longer than maxLength ${schema.maxLength}`];
+    if (Predicate.isNumber(schema["maxLength"]) && value.length > schema["maxLength"]) {
+      return [`${path}: string longer than maxLength ${schema["maxLength"]}`];
     }
   }
 
   if (Predicate.isNumber(value)) {
-    if (Predicate.isNumber(schema.minimum) && value < schema.minimum) {
-      return [`${path}: number ${value} < minimum ${schema.minimum}`];
+    if (Predicate.isNumber(schema["minimum"]) && value < schema["minimum"]) {
+      return [`${path}: number ${value} < minimum ${schema["minimum"]}`];
     }
-    if (Predicate.isNumber(schema.maximum) && value > schema.maximum) {
-      return [`${path}: number ${value} > maximum ${schema.maximum}`];
+    if (Predicate.isNumber(schema["maximum"]) && value > schema["maximum"]) {
+      return [`${path}: number ${value} > maximum ${schema["maximum"]}`];
     }
   }
 
   const errors: Array<string> = [];
 
-  const itemSchema = schema.items;
+  const itemSchema = schema["items"];
   if (isJsonArray(value) && isJsonObject(itemSchema)) {
     for (const [index, item] of value.entries()) {
       errors.push(...validateJsonSchema(item, itemSchema, rootDefs, `${path}[${index}]`));
@@ -200,14 +200,14 @@ const validateJsonSchema = (
   }
 
   if (isJsonObject(value)) {
-    if (isJsonArray(schema.required)) {
-      for (const req of schema.required) {
+    if (isJsonArray(schema["required"])) {
+      for (const req of schema["required"]) {
         if (Predicate.isString(req) && !(req in value)) {
           errors.push(`${path}: missing required key ${req}`);
         }
       }
     }
-    const properties = schema.properties;
+    const properties = schema["properties"];
     if (isJsonObject(properties)) {
       for (const [key, propSchema] of EffectRecord.toEntries(properties)) {
         if (key in value) {
@@ -217,7 +217,7 @@ const validateJsonSchema = (
           }
         }
       }
-      if (schema.additionalProperties === false) {
+      if (schema["additionalProperties"] === false) {
         for (const key of EffectRecord.keys<string, Schema.Json>(value)) {
           if (!(key in properties)) {
             errors.push(`${path}: unexpected additional property ${key}`);
@@ -275,7 +275,7 @@ describe("MCP wire-codec output encoding and per-grant rate limiting", () => {
             vat: "standard",
           }),
         );
-        const id = yield* Schema.decodeUnknownEffect(ContactId)(created.id);
+        const id = yield* Schema.decodeUnknownEffect(ContactId)(created["id"]);
         const templates = yield* Templates;
         yield* templates.save({
           name: "Monthly Retainer",
@@ -299,7 +299,7 @@ describe("MCP wire-codec output encoding and per-grant rate limiting", () => {
     // Fetch declared outputSchemas from tools/list.
     const listed = await h.rpc(rw.token, "tools/list");
     expect(listed.res.status).toBe(200);
-    const { tools } = await h.run(decodeToolList(listed.json.result));
+    const { tools } = await h.run(decodeToolList(listed.json["result"]));
     const schemaByTool = new Map(Arr.map(tools, (t) => [t.name, t.outputSchema]));
 
     const assertMatchesDeclaredSchema = async (
@@ -310,7 +310,7 @@ describe("MCP wire-codec output encoding and per-grant rate limiting", () => {
       expect(schema).toBeDefined();
       if (schema === undefined) return;
       const structured = await h.run(decodeJson(call.result?.structuredContent));
-      const errors = validateJsonSchema(structured, schema, schema.$defs ?? {});
+      const errors = validateJsonSchema(structured, schema, schema["$defs"] ?? {});
       expect(errors).toEqual([]);
       expect(findLeakedBigDecimalPaths(structured)).toEqual([]);
     };
@@ -318,7 +318,7 @@ describe("MCP wire-codec output encoding and per-grant rate limiting", () => {
     const readJsonResource = async (uri: string) => {
       const res = await h.readResource(rw.token, uri);
       expect(res.error).toBeUndefined();
-      const json = await h.run(decodeResourceJson(res.contents?.[0]?.text));
+      const json = await h.run(decodeResourceJson(res.contents?.[0]?.["text"]));
       expect(findLeakedBigDecimalPaths(json)).toEqual([]);
       return json;
     };
@@ -329,14 +329,14 @@ describe("MCP wire-codec output encoding and per-grant rate limiting", () => {
       on: "2026-11-23",
     });
     expect(fxCall.result?.isError).toBe(false);
-    expect(fxCall.result?.structuredContent?.rate).toBe("25.35");
+    expect(fxCall.result?.structuredContent?.["rate"]).toBe("25.35");
     await assertMatchesDeclaredSchema("get_fx_rate", fxCall);
 
     // 2. list_price_list_items tool + kvitbit://price-list resource: unitPrice must be string "2000".
     const plCall = await h.callTool(rw.token, "list_price_list_items", {});
     expect(plCall.result?.isError).toBe(false);
     await assertMatchesDeclaredSchema("list_price_list_items", plCall);
-    const plItems = await h.run(decodePriceListItems(plCall.result?.structuredContent?.items));
+    const plItems = await h.run(decodePriceListItems(plCall.result?.structuredContent?.["items"]));
     expect(plItems[0]?.unitPrice).toBe("2000");
 
     const plResJson = await readJsonResource("kvitbit://price-list");
@@ -359,7 +359,7 @@ describe("MCP wire-codec output encoding and per-grant rate limiting", () => {
     });
     expect(draftCall.result?.isError).toBe(false);
     await assertMatchesDeclaredSchema("create_draft", draftCall);
-    const draftDoc = await h.run(decodeDraft(draftCall.result?.structuredContent?.document));
+    const draftDoc = await h.run(decodeDraft(draftCall.result?.structuredContent?.["document"]));
     const { id: draftId, revision: draftRev } = draftDoc;
     expect(draftDoc.fx?.rate).toBe("25.35");
     expect(Predicate.isString(draftDoc.totals.gross.amount)).toBe(true);
@@ -432,7 +432,7 @@ describe("MCP wire-codec output encoding and per-grant rate limiting", () => {
     expect(expCall.result?.isError).toBe(false);
     await assertMatchesDeclaredSchema("record_expense", expCall);
     const { id: expenseId } = await h.run(
-      decodeExpense(expCall.result?.structuredContent?.expense),
+      decodeExpense(expCall.result?.structuredContent?.["expense"]),
     );
     expect(expenseId).toBeDefined();
 

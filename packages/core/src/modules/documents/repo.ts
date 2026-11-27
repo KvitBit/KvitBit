@@ -211,8 +211,8 @@ export const DocumentsRepoMemory: Layer.Layer<DocumentsRepo, never, MemoryTables
         if (search.settlement !== undefined) where.settlement = search.settlement;
         if (search.contactId !== undefined) where.contactId = search.contactId;
         const issuedOn = EffectRecord.empty<"gte" | "lte", IsoDate>();
-        if (search.from !== undefined) issuedOn.gte = search.from;
-        if (search.to !== undefined) issuedOn.lte = search.to;
+        if (search.from !== undefined) issuedOn["gte"] = search.from;
+        if (search.to !== undefined) issuedOn["lte"] = search.to;
         return Effect.map(table.list(workspaceId, { where, range: { issuedOn } }), (rows) => {
           const after = page.after;
           const sorted = EffectArray.filter(

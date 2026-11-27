@@ -56,11 +56,11 @@ const spec: TableSpec<PriceListItemRow> = {
     return {
       id: PriceListItemId.make(stored.id),
       workspaceId: decodeWorkspaceId(stored.workspace_id),
-      revision: Number(row.revision),
+      revision: Number(row["revision"]),
       name: stored.name,
       description: stored.description ?? null,
       unit: stored.unit ?? null,
-      unitPrice: parseDecimal(row.unit_price),
+      unitPrice: parseDecimal(row["unit_price"]),
       currency: CurrencyCode.make(stored.currency),
       vat: stored.vat ?? null,
       archivedAt: stored.archived_at ?? null,

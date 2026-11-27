@@ -24,9 +24,10 @@ const TILE_BODY_LINE_PATTERN = /^\s+<(?:path|g|rect|\/g)/u;
 
 const pathData = (svg: string): string[] => {
   const matches = Arr.fromIterable(Str.matchAll(PATH_DATA_PATTERN)(svg));
-  return Arr.map(matches, (match) => match.groups?.path ?? "");
+  return Arr.map(matches, (match) => match.groups?.["path"] ?? "");
 };
-const viewBox = (svg: string): string | undefined => VIEW_BOX_PATTERN.exec(svg)?.groups?.viewBox;
+const viewBox = (svg: string): string | undefined =>
+  VIEW_BOX_PATTERN.exec(svg)?.groups?.["viewBox"];
 
 describe("N2 mark masters", () => {
   const files: ReadonlyArray<MarkSvgOptions & { readonly path: string }> = [

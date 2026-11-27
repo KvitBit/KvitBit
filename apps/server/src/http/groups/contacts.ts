@@ -16,8 +16,10 @@ export const ContactsGroupLive = HttpApiBuilder.group(
       .handle("get", ({ params }) => contacts.get(params.contactId))
       .handle("create", ({ params, headers, payload }) =>
         Effect.tap(contacts.save(payload, requestOptions(headers)), (view) => {
-          if (!Predicate.isString(view.id)) return Effect.void;
-          return setLocation(`${API_PREFIX}/workspaces/${params.workspaceId}/contacts/${view.id}`);
+          if (!Predicate.isString(view["id"])) return Effect.void;
+          return setLocation(
+            `${API_PREFIX}/workspaces/${params.workspaceId}/contacts/${view["id"]}`,
+          );
         }),
       )
       .handle("update", ({ params, headers, payload }) =>

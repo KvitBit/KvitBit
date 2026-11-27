@@ -107,7 +107,7 @@ const parseEtag = (value: string | undefined): number | null => {
 const observeResponse = (response: HttpClientResponse.HttpClientResponse): ObservedResponse => ({
   status: response.status,
   requestId: response.headers["x-request-id"] ?? null,
-  etag: parseEtag(response.headers.etag),
+  etag: parseEtag(response.headers["etag"]),
   replayed: response.headers["idempotent-replayed"] === "true",
 });
 

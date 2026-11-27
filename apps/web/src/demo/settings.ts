@@ -464,7 +464,7 @@ export const routes: ReadonlyArray<DemoRoute> = [
     method: "GET",
     path: "/api/v1/registry/companies/:ico",
     respond: ({ params }) => {
-      const ico = stripWhitespace(params.ico ?? "");
+      const ico = stripWhitespace(params["ico"] ?? "");
       if (!icoPattern.test(ico)) {
         return status(422, {
           _tag: "Invalid",
@@ -526,7 +526,7 @@ export const routes: ReadonlyArray<DemoRoute> = [
     method: "PUT",
     path: "/api/v1/workspaces/:workspaceId/bank-accounts/:bankAccountId",
     respond: ({ params, body }) => {
-      const id = params.bankAccountId ?? "";
+      const id = params["bankAccountId"] ?? "";
       const found = Arr.findFirst(workspaceState.bankAccounts, (b) => b.id === id);
       if (Option.isNone(found)) return status(404, { _tag: "NotFound", entity: "BankAccount", id });
       const decoded = Schema.decodeOption(BankAccountPatch)(body ?? {});
@@ -561,7 +561,10 @@ export const routes: ReadonlyArray<DemoRoute> = [
     respond: ({ params }) => {
       workspaceState = {
         ...workspaceState,
-        bankAccounts: Arr.filter(workspaceState.bankAccounts, (b) => b.id !== params.bankAccountId),
+        bankAccounts: Arr.filter(
+          workspaceState.bankAccounts,
+          (b) => b.id !== params["bankAccountId"],
+        ),
       };
     },
   },
@@ -588,7 +591,7 @@ export const routes: ReadonlyArray<DemoRoute> = [
     method: "PUT",
     path: "/api/v1/workspaces/:workspaceId/branding/:image",
     respond: ({ params }) => {
-      const kind = params.image === "stamp" ? "stamp" : "logo";
+      const kind = params["image"] === "stamp" ? "stamp" : "logo";
       const ref = {
         contentType: "image/png" as const,
         sizeBytes: 4096,
@@ -606,7 +609,7 @@ export const routes: ReadonlyArray<DemoRoute> = [
     method: "DELETE",
     path: "/api/v1/workspaces/:workspaceId/branding/:image",
     respond: ({ params }) => {
-      const kind = params.image === "stamp" ? "stamp" : "logo";
+      const kind = params["image"] === "stamp" ? "stamp" : "logo";
       workspaceState = {
         ...workspaceState,
         branding: { ...workspaceState.branding, [kind]: null },
@@ -657,9 +660,9 @@ export const routes: ReadonlyArray<DemoRoute> = [
     method: "PUT",
     path: "/api/v1/workspaces/:workspaceId/numbering-series/:seriesId",
     respond: ({ params, body }) => {
-      const found = Arr.findFirst(seriesState, (s) => s.id === params.seriesId);
+      const found = Arr.findFirst(seriesState, (s) => s.id === params["seriesId"]);
       if (Option.isNone(found)) {
-        return status(404, { _tag: "NotFound", entity: "NumberingSeries", id: params.seriesId });
+        return status(404, { _tag: "NotFound", entity: "NumberingSeries", id: params["seriesId"] });
       }
       const decoded = Schema.decodeUnknownOption(SeriesInput)(body);
       if (Option.isNone(decoded)) return invalidBody();
@@ -696,7 +699,7 @@ export const routes: ReadonlyArray<DemoRoute> = [
       if (Option.isNone(decoded)) return invalidBody();
       const { role } = decoded.value;
       membersState = Arr.map(membersState, (m) =>
-        m.userId === params.userId ? { ...m, role } : m,
+        m.userId === params["userId"] ? { ...m, role } : m,
       );
     },
   },
@@ -704,7 +707,7 @@ export const routes: ReadonlyArray<DemoRoute> = [
     method: "DELETE",
     path: "/api/v1/workspaces/:workspaceId/members/:userId",
     respond: ({ params }) => {
-      membersState = Arr.filter(membersState, (m) => m.userId !== params.userId);
+      membersState = Arr.filter(membersState, (m) => m.userId !== params["userId"]);
     },
   },
   {
@@ -742,7 +745,7 @@ export const routes: ReadonlyArray<DemoRoute> = [
     method: "DELETE",
     path: "/api/v1/workspaces/:workspaceId/invitations/:invitationId",
     respond: ({ params }) => {
-      invitationsState = Arr.filter(invitationsState, (i) => i.id !== params.invitationId);
+      invitationsState = Arr.filter(invitationsState, (i) => i.id !== params["invitationId"]);
     },
   },
   {
@@ -816,7 +819,7 @@ export const routes: ReadonlyArray<DemoRoute> = [
     method: "DELETE",
     path: "/api/v1/workspaces/:workspaceId/api-keys/:keyId",
     respond: ({ params }) => {
-      apiKeysState = Arr.filter(apiKeysState, (k) => k.id !== params.keyId);
+      apiKeysState = Arr.filter(apiKeysState, (k) => k.id !== params["keyId"]);
     },
   },
   {
@@ -828,7 +831,7 @@ export const routes: ReadonlyArray<DemoRoute> = [
     method: "DELETE",
     path: "/api/v1/workspaces/:workspaceId/connected-apps/:grantId",
     respond: ({ params }) => {
-      connectedAppsState = Arr.filter(connectedAppsState, (g) => g.grantId !== params.grantId);
+      connectedAppsState = Arr.filter(connectedAppsState, (g) => g.grantId !== params["grantId"]);
     },
   },
   {

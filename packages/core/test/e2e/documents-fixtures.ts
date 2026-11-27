@@ -80,7 +80,7 @@ export const onboard = (regime: TaxRegime) =>
         );
         const contacts = yield* Contacts;
         const fromAres = yield* contacts.fromIco(BUYER_ICO);
-        const id = yield* Schema.decodeUnknownEffect(ContactId)(fromAres.id);
+        const id = yield* Schema.decodeUnknownEffect(ContactId)(fromAres["id"]);
         return yield* contacts.save({
           id,
           expectedRevision: fromAres.revision,
@@ -88,7 +88,7 @@ export const onboard = (regime: TaxRegime) =>
         });
       }),
     );
-    const id = yield* Schema.decodeUnknownEffect(ContactId)(buyer.id);
+    const id = yield* Schema.decodeUnknownEffect(ContactId)(buyer["id"]);
     return { owner, buyer: id };
   });
 

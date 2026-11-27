@@ -18,7 +18,7 @@ import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as Str from "effect/String";
 import { authFetch, Failure, failureFromUnknown, request } from "../../app/api";
-import { browserCommand, apiCommand as cmd, type PageCommand } from "../../app/commands";
+import { apiCommand as cmd, type PageCommand } from "../../app/commands";
 import { textOf, translator } from "../../app/i18n";
 import { Intent_ } from "../../app/intent";
 import {
@@ -254,7 +254,8 @@ const invalidAuthResponse = (path: string): Failure =>
   failureFromUnknown(new Error(`Unexpected response from ${path}`));
 
 const cmdLoadAccounts = (seq: number) =>
-  browserCommand(
+  cmd(
+    Message,
     "Account.LoadAccounts",
     authFetch(
       "/list-accounts",
@@ -276,7 +277,8 @@ const cmdLoadAccounts = (seq: number) =>
   );
 
 const cmdLoadPasskeys = (seq: number, locale: Locale) =>
-  browserCommand(
+  cmd(
+    Message,
     "Account.LoadPasskeys",
     authFetch(
       "/passkey/list-user-passkeys",
@@ -303,7 +305,8 @@ const cmdLoadPasskeys = (seq: number, locale: Locale) =>
   );
 
 const cmdAddPasskey = (name: string) =>
-  browserCommand(
+  cmd(
+    Message,
     "Account.AddPasskey",
     performPasskeyRegistration(name).pipe(
       Effect.map(
@@ -342,7 +345,8 @@ const cmdRenamePasskey = (id: string, name: string) =>
   );
 
 const cmdDeletePasskey = (id: string) =>
-  browserCommand(
+  cmd(
+    Message,
     "Account.DeletePasskey",
     authFetch(
       "/passkey/delete-passkey",
@@ -393,7 +397,8 @@ const cmdChangePassword = (
   );
 
 const cmdLoadSessions = (seq: number, unknownDevice: string) =>
-  browserCommand(
+  cmd(
+    Message,
     "Account.LoadSessions",
     authFetch(
       "/get-session",
@@ -406,7 +411,7 @@ const cmdLoadSessions = (seq: number, unknownDevice: string) =>
       },
       (failure) => Message.FailedSessions({ seq, failure }),
     ).pipe(
-      Effect.andThen((current): Effect.Effect<Message> => {
+      Effect.andThen((current) => {
         if (current._tag === "FailedSessions") return Effect.succeed(current);
         return authFetch(
           "/list-sessions",
@@ -436,7 +441,8 @@ const cmdLoadSessions = (seq: number, unknownDevice: string) =>
   );
 
 const cmdRevokeSession = (id: string, token: string) =>
-  browserCommand(
+  cmd(
+    Message,
     "Account.RevokeSession",
     authFetch(
       "/revoke-session",

@@ -75,8 +75,8 @@ describe("row locking", () => {
         return yield* transaction(lockRowForUpdate("numbering_series", workspaceId, seriesId));
       }),
     );
-    expect(row.name).toBe("Invoices");
-    expect(row.revision).toBe(1);
+    expect(row["name"]).toBe("Invoices");
+    expect(row["revision"]).toBe(1);
   });
 
   test("a row of another Workspace is RowNotFound", async () => {
@@ -102,7 +102,7 @@ describe("row locking", () => {
         return [ownedRow, foreignRow] as const;
       }),
     );
-    expect(own.id).toBeDefined();
+    expect(own["id"]).toBeDefined();
     expect(other).toMatchObject({ _tag: "RowNotFound" });
   });
 
@@ -173,8 +173,8 @@ describe("updateWithRevision", () => {
         });
       }),
     );
-    expect(row.name).toBe("Renamed");
-    expect(row.revision).toBe(2);
+    expect(row["name"]).toBe("Renamed");
+    expect(row["revision"]).toBe(2);
   });
 
   test("an empty patch still bumps revision", async () => {
@@ -184,7 +184,7 @@ describe("updateWithRevision", () => {
         return yield* updateWithRevision("workspaces", workspaceId, workspaceId, 1, {});
       }),
     );
-    expect(row.revision).toBe(2);
+    expect(row["revision"]).toBe(2);
   });
 
   test("a stale revision is RevisionConflict with the current revision, and changes nothing", async () => {
@@ -760,7 +760,7 @@ describe("transactionWithRetry", () => {
                 "numbering_series",
                 workspaceId,
                 seriesId,
-                Number(lockedRow.revision),
+                Number(lockedRow["revision"]),
                 {
                   name: "Locked then updated",
                 },

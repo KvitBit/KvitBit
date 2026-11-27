@@ -139,11 +139,11 @@ export const validatePriceListForm = (
   form: PriceListFormState,
 ): Readonly<Partial<Record<string, PriceListFormErrorCode>>> => {
   const errors: Partial<Record<string, PriceListFormErrorCode>> = {};
-  if (Str.trim(form.name) === "") errors.name = "name_required";
+  if (Str.trim(form.name) === "") errors["name"] = "name_required";
   const normalizedPrice = normalizeDecimalInput(form.unitPrice);
-  if (!DECIMAL_RE.test(normalizedPrice)) errors.unitPrice = "price_invalid";
+  if (!DECIMAL_RE.test(normalizedPrice)) errors["unitPrice"] = "price_invalid";
   if (!CURRENCY_RE.test(Str.toUpperCase(Str.trim(form.currency))))
-    errors.currency = "currency_invalid";
+    errors["currency"] = "currency_invalid";
   return errors;
 };
 

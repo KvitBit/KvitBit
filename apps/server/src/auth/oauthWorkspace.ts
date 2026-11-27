@@ -148,11 +148,11 @@ const exposeConsentId = Effect.fn("exposeOAuthConsentId")(function* (
 const scopeAliasesForGrant = <T>(client: T): T => {
   if (decisionContext.getStore()?.accept !== true && tokenContext.getStore() === undefined)
     return client;
-  if (!(Predicate.isObject(client) && "scopes" in client && Arr.isArray(client.scopes))) {
+  if (!(Predicate.isObject(client) && "scopes" in client && Arr.isArray(client["scopes"]))) {
     return client;
   }
 
-  const raw = Arr.filter(client.scopes, isOAuthScope);
+  const raw = Arr.filter(client["scopes"], isOAuthScope);
   const expanded = accessFromOAuthScopes(raw)?.access.scopes ?? [];
   const scopes = new Set<string>(raw);
   for (const scope of expanded) scopes.add(`kvitbit:${scope}`);

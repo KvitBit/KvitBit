@@ -804,8 +804,8 @@ describe("Contacts.search paging edges", () => {
       }),
     );
     const { one, rest, bad } = successOf(exit);
-    expect(EffectArray.map(one.items, (c) => c.name)).toEqual(["A"]);
-    expect(EffectArray.map(rest.items, (c) => c.name)).toEqual(["B", "C"]);
+    expect(EffectArray.map(one.items, (c) => c["name"])).toEqual(["A"]);
+    expect(EffectArray.map(rest.items, (c) => c["name"])).toEqual(["B", "C"]);
     expect(rest.nextCursor).toBeNull();
     for (const error of bad) {
       expect(error).toMatchObject({ issues: [{ path: ["limit"], code: "request.malformed" }] });

@@ -69,7 +69,7 @@ describe("onboarding", () => {
                 }),
               );
               const unitPrice = yield* Schema.decodeUnknownEffect(Schema.toType(Schema.BigDecimal))(
-                item.unitPrice,
+                item["unitPrice"],
               );
               const items = yield* priceList.list();
               const found = yield* Effect.flatMap(Contacts, (c) => c.search({ text: "Odběratel" }));
@@ -81,7 +81,7 @@ describe("onboarding", () => {
       ),
     );
     expect(result.owner).toMatchObject({ _tag: "Member", role: "owner" });
-    expect(result.current.name).toBe("Kvitbit s.r.o.");
+    expect(result.current["name"]).toBe("Kvitbit s.r.o.");
     const { contact } = result;
     expect(contact).toMatchObject({
       ico: BUYER_ICO,
@@ -89,11 +89,11 @@ describe("onboarding", () => {
       dic: buyerRecord.dic,
       address: buyerRecord.address,
     });
-    expect(EffectArray.map(result.found.items, (c) => c.id)).toEqual([contact.id]);
+    expect(EffectArray.map(result.found.items, (c) => c["id"])).toEqual([contact["id"]]);
     expect(result.item).toMatchObject({ name: "Konzultace", unit: "h", vat: "standard" });
     const price = str(result.unitPrice);
     expect(price).toBe("1500");
-    expect(EffectArray.map(result.items, (i) => i.id)).toEqual([result.item.id]);
+    expect(EffectArray.map(result.items, (i) => i["id"])).toEqual([result.item["id"]]);
   });
 });
 

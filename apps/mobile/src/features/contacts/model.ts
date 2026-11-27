@@ -343,8 +343,8 @@ export const validateContactForm = (
   form: ContactFormState,
 ): Readonly<Partial<Record<string, ContactFormErrorCode>>> => {
   const errors: Partial<Record<string, ContactFormErrorCode>> = {};
-  if (Str.trim(form.name) === "") errors.name = "name_required";
-  if (form.roles.length === 0) errors.roles = "roles_required";
+  if (Str.trim(form.name) === "") errors["name"] = "name_required";
+  if (form.roles.length === 0) errors["roles"] = "roles_required";
 
   const country = Str.toUpperCase(Str.trim(form.country));
   if (!COUNTRY_RE.test(country)) errors["address.country"] = "country_invalid";
@@ -353,7 +353,7 @@ export const validateContactForm = (
   if (icoTrimmed !== "") {
     const check = validateIco(icoTrimmed);
     if (Result.isFailure(check)) {
-      errors.ico = check.failure.code === "ico.checksum" ? "ico_checksum" : "ico_format";
+      errors["ico"] = check.failure.code === "ico.checksum" ? "ico_checksum" : "ico_format";
     }
   }
 

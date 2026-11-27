@@ -274,7 +274,7 @@ const withOtaCodeSigningEnv = async <T>(
   env: Record<string, string | undefined>,
   fn: (resolvedEnv: Record<string, string | undefined>) => Promise<T>,
 ): Promise<T> => {
-  const pemContent = Str.trim(env.MOBILE_UPDATES_CODE_SIGNING_CERTIFICATE_PEM ?? "");
+  const pemContent = Str.trim(env["MOBILE_UPDATES_CODE_SIGNING_CERTIFICATE_PEM"] ?? "");
   if (!hasText(pemContent)) {
     return fn(env);
   }
@@ -318,7 +318,7 @@ const isExpoAppConfig = Schema.is(
 const readAppMeta = async (projectDir: string, tag?: string) => {
   const path = join(projectDir, "app.json");
   const parsed: unknown = JSON.parse(await readFile(path, "utf8"));
-  const expo = Predicate.isObject(parsed) ? parsed.expo : undefined;
+  const expo = Predicate.isObject(parsed) ? parsed["expo"] : undefined;
   if (!isExpoAppConfig(expo)) {
     throw new Error(`Missing expo.version in ${path}`);
   }
@@ -331,7 +331,7 @@ const readAppMeta = async (projectDir: string, tag?: string) => {
       throw new Error(`Release tag ${tag} (${tagVer}) does not match app.json version ${version}.`);
     }
   }
-  const androidPackage = Predicate.isObject(expo.android) ? expo.android.package : undefined;
+  const androidPackage = Predicate.isObject(expo.android) ? expo.android["package"] : undefined;
   const packageName = Predicate.isString(androidPackage) ? androidPackage : KVITBIT_ANDROID_PACKAGE;
   let minAndroidSdk = DEFAULT_MIN_ANDROID_SDK;
   if (Arr.isArray(expo.plugins)) {
@@ -341,9 +341,9 @@ const readAppMeta = async (projectDir: string, tag?: string) => {
       if (
         name === "expo-build-properties" &&
         Predicate.isObject(config) &&
-        Predicate.isObject(config.android)
+        Predicate.isObject(config["android"])
       ) {
-        const { minSdkVersion } = config.android;
+        const { minSdkVersion } = config["android"];
         if (Predicate.isNumber(minSdkVersion)) minAndroidSdk = minSdkVersion;
       }
     }
@@ -549,7 +549,7 @@ const readExpoExport = async (
 }> => {
   const metaRaw = await readFile(join(exportDir, "metadata.json"), "utf8");
   const parsed: unknown = JSON.parse(metaRaw);
-  const fileMetadata = Predicate.isObject(parsed) ? parsed.fileMetadata : undefined;
+  const fileMetadata = Predicate.isObject(parsed) ? parsed["fileMetadata"] : undefined;
   const platformFiles = Predicate.isObject(fileMetadata) ? fileMetadata[platform] : undefined;
   if (!isExpoPlatformExport(platformFiles)) {
     throw new Error(`Export directory ${exportDir} has no ${platform} bundle in metadata.json`);

@@ -57,7 +57,7 @@ const setupWorkspaceAndContact = () =>
       c.save({ name: "Buyer s.r.o.", billingEmails: ["billing@buyer.cz"] }),
     ).pipe(Effect.provideService(CurrentCaller, ownerCaller));
 
-    const contactId = yield* Schema.decodeUnknownEffect(ContactId)(contact.id);
+    const contactId = yield* Schema.decodeUnknownEffect(ContactId)(contact["id"]);
     return {
       workspaceId,
       ownerCaller,
@@ -132,7 +132,7 @@ describe("CoreJobs System-caller entry points (#894)", () => {
           t.save(templateInput({ contact: contactId })),
         ).pipe(Effect.provideService(CurrentCaller, ownerCaller));
 
-        const templateId = yield* Schema.decodeUnknownEffect(TemplateId)(tpl.id);
+        const templateId = yield* Schema.decodeUnknownEffect(TemplateId)(tpl["id"]);
         const scheduled = yield* Effect.flatMap(Templates, (t) =>
           t.schedule(
             templateId,

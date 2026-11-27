@@ -23,7 +23,7 @@ const encodePath = Schema.encodeOption(
 const DIACRITICS = /\p{Diacritic}/gu;
 
 const pathSegment = <A>(segment: A): string | number => {
-  const key = Predicate.isObject(segment) && "key" in segment ? segment.key : segment;
+  const key = Predicate.isObject(segment) && "key" in segment ? segment["key"] : segment;
   return Predicate.isNumber(key) ? key : String(key);
 };
 

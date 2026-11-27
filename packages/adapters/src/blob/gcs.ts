@@ -64,7 +64,7 @@ const isTransientStatus = (status: number) => status === 408 || status === 429 |
 
 /** `bytes=0-N` from a 308: the persisted byte count, N + 1; none persisted without a header. */
 const persistedBytes = (response: HttpClientResponse.HttpClientResponse) => {
-  const match = persistedRange.exec(response.headers.range ?? "");
+  const match = persistedRange.exec(response.headers["range"] ?? "");
   return match?.[1] === undefined ? 0 : Number(match[1]) + 1;
 };
 
@@ -194,7 +194,7 @@ const make = (
           HttpClientRequest.setHeader("X-Upload-Content-Type", contentType),
         ),
       );
-      const location = response.headers.location;
+      const location = response.headers["location"];
       if (response.status !== 200 || location === undefined) {
         return yield* refused("put", response);
       }

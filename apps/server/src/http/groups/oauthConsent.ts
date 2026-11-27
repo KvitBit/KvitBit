@@ -205,11 +205,11 @@ const wireScopesForGrant = (
 const forwardHeaders = (request: HttpServerRequest.HttpServerRequest): Headers => {
   const headers = new Headers();
   headers.set("content-type", "application/json");
-  if (request.headers.cookie !== undefined) headers.set("cookie", request.headers.cookie);
-  if (request.headers.authorization !== undefined) {
-    headers.set("authorization", request.headers.authorization);
+  if (request.headers["cookie"] !== undefined) headers.set("cookie", request.headers["cookie"]);
+  if (request.headers["authorization"] !== undefined) {
+    headers.set("authorization", request.headers["authorization"]);
   }
-  if (request.headers.origin !== undefined) headers.set("origin", request.headers.origin);
+  if (request.headers["origin"] !== undefined) headers.set("origin", request.headers["origin"]);
   return headers;
 };
 

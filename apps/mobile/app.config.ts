@@ -75,14 +75,14 @@ const updatesCodeSigning = (
   env: Readonly<Record<string, string | undefined>>,
   projectRoot: string,
 ): UpdatesCodeSigning => {
-  const setting = env.MOBILE_UPDATES_CODE_SIGNING;
+  const setting = env["MOBILE_UPDATES_CODE_SIGNING"];
   if (setting === undefined || setting === "") return {};
   if (setting !== "required") {
     throw new Error(
       `MOBILE_UPDATES_CODE_SIGNING must be "required" or unset, got ${showString(setting)}.`,
     );
   }
-  const configuredPath = EffectString.trim(env.MOBILE_UPDATES_CODE_SIGNING_CERTIFICATE ?? "");
+  const configuredPath = EffectString.trim(env["MOBILE_UPDATES_CODE_SIGNING_CERTIFICATE"] ?? "");
   const certPath =
     configuredPath === "" ? "./code-signing/code-signing-certificate.pem" : configuredPath;
   const resolvedCertPath = resolve(projectRoot, certPath);
@@ -130,7 +130,7 @@ export const buildAppConfig = ({
     updates: {
       ...config.updates,
       enabled: true,
-      url: updatesManifestUrl(env.EXPO_PUBLIC_API_ORIGIN),
+      url: updatesManifestUrl(env["EXPO_PUBLIC_API_ORIGIN"]),
       checkAutomatically: "ON_LOAD",
       fallbackToCacheTimeout: 15_000,
       ...updatesCodeSigning(env, projectRoot),

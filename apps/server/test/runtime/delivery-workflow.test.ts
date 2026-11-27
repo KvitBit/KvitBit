@@ -71,7 +71,7 @@ test.each([
           caller,
           Effect.gen(function* () {
             const contact = yield* contacts.save({ name: "Buyer", roles: ["customer"] });
-            const contactId = yield* Schema.decodeUnknownEffect(ContactId)(contact.id);
+            const contactId = yield* Schema.decodeUnknownEffect(ContactId)(contact["id"]);
             const doc = yield* documents.issue({
               input: {
                 kind: "invoice",

@@ -109,63 +109,63 @@ const isPositive = Schema.is(Schema.Finite.check(Schema.isGreaterThan(0)));
 
 /** Safely extracts the concrete core fields from an open `WorkspaceView`. */
 export const parseWorkspaceView = (raw: WorkspaceView): ParsedWorkspace => {
-  const entity = toRecord(raw.issuingEntity);
-  const addr = toRecord(entity.address);
-  const defaults = toRecord(raw.defaults);
-  const reminder = toRecord(raw.reminderPolicy);
-  const rawHistory = Option.getOrElse(toList(raw.taxRegimeHistory), () => []);
+  const entity = toRecord(raw["issuingEntity"]);
+  const addr = toRecord(entity["address"]);
+  const defaults = toRecord(raw["defaults"]);
+  const reminder = toRecord(raw["reminderPolicy"]);
+  const rawHistory = Option.getOrElse(toList(raw["taxRegimeHistory"]), () => []);
   const taxRegimeHistory = Arr.filterMap(rawHistory, (item) => {
     const period = toRecord(item);
-    return Schema.decodeUnknownResult(Schema.String)(period.effectiveFrom).pipe(
+    return Schema.decodeUnknownResult(Schema.String)(period["effectiveFrom"]).pipe(
       Result.map(
         (effectiveFrom): TaxRegimePeriodData => ({
-          regime: Option.getOrElse(regime(period.regime), () => "non_vat_payer"),
+          regime: Option.getOrElse(regime(period["regime"]), () => "non_vat_payer"),
           effectiveFrom,
         }),
       ),
     );
   });
-  const rawOffsets = Option.getOrElse(toList(reminder.offsetsDays), () => [3, 10, 30]);
+  const rawOffsets = Option.getOrElse(toList(reminder["offsetsDays"]), () => [3, 10, 30]);
   const offsetsDays = Arr.filter(rawOffsets, isPositive);
 
   return {
     slug: raw.slug,
-    name: Option.getOrElse(text(raw.name), () => raw.slug),
-    closed: Option.getOrElse(boolean(raw.closed), () => false),
+    name: Option.getOrElse(text(raw["name"]), () => raw.slug),
+    closed: Option.getOrElse(boolean(raw["closed"]), () => false),
     revision: raw.revision,
     issuingEntity: {
-      name: Option.getOrElse(text(entity.name), () => ""),
-      ico: optText(entity.ico),
-      dic: optText(entity.dic),
+      name: Option.getOrElse(text(entity["name"]), () => ""),
+      ico: optText(entity["ico"]),
+      dic: optText(entity["dic"]),
       address: {
-        street: Option.getOrElse(text(addr.street), () => ""),
-        city: Option.getOrElse(text(addr.city), () => ""),
-        postalCode: Option.getOrElse(text(addr.postalCode), () => ""),
-        country: Option.getOrElse(text(addr.country), () => "CZ"),
+        street: Option.getOrElse(text(addr["street"]), () => ""),
+        city: Option.getOrElse(text(addr["city"]), () => ""),
+        postalCode: Option.getOrElse(text(addr["postalCode"]), () => ""),
+        country: Option.getOrElse(text(addr["country"]), () => "CZ"),
       },
-      legalForm: optText(entity.legalForm),
-      registerEntry: optText(entity.registerEntry),
-      email: optText(entity.email),
-      phone: optText(entity.phone),
-      web: optText(entity.web),
+      legalForm: optText(entity["legalForm"]),
+      registerEntry: optText(entity["registerEntry"]),
+      email: optText(entity["email"]),
+      phone: optText(entity["phone"]),
+      web: optText(entity["web"]),
     },
-    taxRegime: Option.getOrElse(regime(raw.taxRegime), () => "non_vat_payer"),
+    taxRegime: Option.getOrElse(regime(raw["taxRegime"]), () => "non_vat_payer"),
     taxRegimeHistory,
     defaults: {
-      currency: Option.getOrElse(currency(defaults.currency), () => czk),
-      language: Option.getOrElse(locale(defaults.language), () => "cs"),
-      dueDays: Option.getOrElse(integer(defaults.dueDays), () => 14),
-      paymentMethod: Option.getOrElse(method(defaults.paymentMethod), () => "bank_transfer"),
-      defaultNote: optText(defaults.defaultNote),
-      paymentRounding: Option.getOrElse(rounding(defaults.paymentRounding), () => "none"),
+      currency: Option.getOrElse(currency(defaults["currency"]), () => czk),
+      language: Option.getOrElse(locale(defaults["language"]), () => "cs"),
+      dueDays: Option.getOrElse(integer(defaults["dueDays"]), () => 14),
+      paymentMethod: Option.getOrElse(method(defaults["paymentMethod"]), () => "bank_transfer"),
+      defaultNote: optText(defaults["defaultNote"]),
+      paymentRounding: Option.getOrElse(rounding(defaults["paymentRounding"]), () => "none"),
       paymentTaxDocumentAutoSend: Option.getOrElse(
-        boolean(defaults.paymentTaxDocumentAutoSend),
+        boolean(defaults["paymentTaxDocumentAutoSend"]),
         () => true,
       ),
     },
     reminderPolicy: {
-      enabled: Option.getOrElse(boolean(reminder.enabled), () => true),
-      proformas: Option.getOrElse(boolean(reminder.proformas), () => false),
+      enabled: Option.getOrElse(boolean(reminder["enabled"]), () => true),
+      proformas: Option.getOrElse(boolean(reminder["proformas"]), () => false),
       offsetsDays,
     },
     branding: raw.branding,
@@ -175,16 +175,16 @@ export const parseWorkspaceView = (raw: WorkspaceView): ParsedWorkspace => {
 /** Safely extracts the concrete fields from an opaque `BankAccountView`. */
 export const parseBankAccountView = (raw: BankAccountView) => {
   const r = toRecord(raw);
-  return bankAccountId(r.id).pipe(
+  return bankAccountId(r["id"]).pipe(
     Result.map(
       (id): BankAccountData => ({
         id,
-        name: optText(r.name),
-        iban: Option.getOrElse(text(r.iban), () => ""),
-        bic: optText(r.bic),
-        currency: Option.getOrElse(currency(r.currency), () => czk),
-        isDefault: Option.getOrElse(boolean(r.isDefault), () => false),
-        revision: Option.getOrElse(integer(r.revision), () => 1),
+        name: optText(r["name"]),
+        iban: Option.getOrElse(text(r["iban"]), () => ""),
+        bic: optText(r["bic"]),
+        currency: Option.getOrElse(currency(r["currency"]), () => czk),
+        isDefault: Option.getOrElse(boolean(r["isDefault"]), () => false),
+        revision: Option.getOrElse(integer(r["revision"]), () => 1),
       }),
     ),
   );

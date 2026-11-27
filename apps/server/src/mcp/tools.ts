@@ -280,14 +280,14 @@ const templatePreviewInput = Effect.fn("templatePreviewInput")(function* (
   patch: DocumentPatch | undefined,
 ) {
   const { number, refreshParties, fx, ...fields } = patch ?? {};
-  if (template.archived === true || number !== undefined || refreshParties !== undefined) {
+  if (template["archived"] === true || number !== undefined || refreshParties !== undefined) {
     return yield* Conflict.make({ reason: "illegal_transition" });
   }
   const {
     name: _name,
     fx: templateFx,
     ...defaults
-  } = yield* Schema.decodeUnknownEffect(Schema.toType(TemplateInput))(template.input).pipe(
+  } = yield* Schema.decodeUnknownEffect(Schema.toType(TemplateInput))(template["input"]).pipe(
     Effect.orDie,
   );
   const resolvedFx = fx === undefined ? templateFx : fx;
@@ -407,7 +407,7 @@ export const callTool = Effect.fn("callTool")(function* (
           const series = yield* ws.listSeries;
           return yield* okResult(
             "get_workspace",
-            `Workspace ${workspace.name} (${series.length} numbering series).`,
+            `Workspace ${workspace["name"]} (${series.length} numbering series).`,
             {
               workspace: jsonizeOpenValue(workspace),
               series: jsonizeOpenValue(series),
@@ -820,7 +820,7 @@ export const callTool = Effect.fn("callTool")(function* (
             const previewDoc = yield* documents.preview(input);
             const summary = documentSummaryOf(previewDoc);
             const minted = yield* mint("create_from_template", template.revision);
-            const templateName = template.name;
+            const templateName = template["name"];
             const confirmation = buildConfirmationRequired({
               action: "create_from_template",
               token: minted.token,

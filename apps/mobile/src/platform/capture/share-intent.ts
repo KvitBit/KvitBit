@@ -22,7 +22,7 @@ const NativeShareIntent = Schema.Struct({
 });
 const decodeNative = Schema.decodeUnknownOption(NativeShareIntent);
 const nativeModule = tryPlatform(() => {
-  const raw: unknown = NativeModules.KvitbitShareIntent;
+  const raw: unknown = NativeModules["KvitbitShareIntent"];
   return { raw, methods: decodeNative(raw) };
 });
 

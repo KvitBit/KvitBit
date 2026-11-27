@@ -149,7 +149,8 @@ const EdgeGuardLive = Layer.effect(
 
         // A5: cookie writes need a trusted Origin, else Referer.
         if (!SAFE_METHODS.has(request.method) && isCookieSession(principal)) {
-          const origin = originOf(request.headers.origin) ?? originOf(request.headers.referer);
+          const origin =
+            originOf(request.headers["origin"]) ?? originOf(request.headers["referer"]);
           if (origin === undefined || !config.trustedOrigins.has(origin)) {
             return yield* OriginRejected.make();
           }
@@ -231,7 +232,7 @@ const WorkspaceMemberLive = Layer.effect(
       Effect.fnUntraced(function* (handler) {
         const principal = yield* CurrentPrincipal;
         const route = yield* HttpRouter.RouteContext;
-        const raw = route.params.workspaceId ?? "";
+        const raw = route.params["workspaceId"] ?? "";
         const workspaceId = decodeWorkspaceId(raw);
         if (Option.isNone(workspaceId)) {
           return yield* NotFound.make({ entity: "Workspace", id: raw });
@@ -288,7 +289,7 @@ const ShareLinkVisitorLive = Layer.effect(
         const now = yield* DateTime.now;
         const day = DateTime.formatIsoDateUtc(now);
         const hasCredential =
-          bearerToken(request.headers.authorization) !== undefined ||
+          bearerToken(request.headers["authorization"]) !== undefined ||
           Arr.some(EffectRecord.keys(request.cookies), (name) =>
             Str.endsWith("session_token")(name),
           );
@@ -298,7 +299,7 @@ const ShareLinkVisitorLive = Layer.effect(
               .pipe(Effect.option)
           : Option.none();
         const visitor = {
-          token: ShareToken.make(route.params.token ?? ""),
+          token: ShareToken.make(route.params["token"] ?? ""),
           visitor: visitorHash(secret, day, ip, request.headers["user-agent"] ?? ""),
           locale: acceptLanguageLocale(request.headers["accept-language"]) ?? "cs",
         };

@@ -72,7 +72,7 @@ import {
   canWrite,
   computeExpensePreview,
   dateText,
-  downloadUrlCommand,
+  downloadUrl,
   ExpenseAttachmentRecord,
   ExpenseSummaryRecord,
   ExpenseViewRecord,
@@ -90,7 +90,7 @@ import {
   parseUserDecimal,
   settlementTone,
   todayIso,
-  uploadAttachmentCommand,
+  uploadAttachment,
   VAT_TREATMENTS,
   vatRatePercent,
 } from "./shared";
@@ -1016,11 +1016,9 @@ export const update: {
         expenseId: null,
         error: null,
       }));
-      const cmds = Arr.map(realFiles, (f, idx) => {
-        // biome-ignore lint/style/noNonNullAssertion: aligned with realFiles length
-        const job = newJobs[idx]!;
-        return createCaptureExpenseCommand(wsId, job.id, f);
-      });
+      const cmds = Arr.map(Arr.zip(realFiles, newJobs), ([file, job]) =>
+        createCaptureExpenseCommand(wsId, job.id, file),
+      );
       return {
         model: {
           ...model,
@@ -1041,14 +1039,17 @@ export const update: {
       return {
         model: { ...model, captureJobs: jobs },
         commands: [
-          uploadAttachmentCommand(
+          apiCommand(
+            Message,
             "ExpensesCaptureUpload",
-            wsId,
-            expense.id,
-            file,
-            (attachment) =>
-              Message.CaptureUploadedFile({ jobId, expenseId: expense.id, attachment }),
-            (failure) => Message.CaptureFailed({ jobId, failure }),
+            uploadAttachment({
+              workspaceId: wsId,
+              expenseId: expense.id,
+              file,
+              onSuccess: (attachment) =>
+                Message.CaptureUploadedFile({ jobId, expenseId: expense.id, attachment }),
+              onFailure: (failure) => Message.CaptureFailed({ jobId, failure }),
+            }),
           ),
         ],
       };
@@ -1404,13 +1405,16 @@ export const update: {
       return {
         model: { ...model, uploadingAttachment: true },
         commands: [
-          uploadAttachmentCommand(
+          apiCommand(
+            Message,
             "ExpensesDetailUpload",
-            wsId,
-            expense.id,
-            first,
-            (attachment) => Message.UploadedAttachment({ attachment }),
-            (failure) => Message.FailedUploadAttachment({ failure }),
+            uploadAttachment({
+              workspaceId: wsId,
+              expenseId: expense.id,
+              file: first,
+              onSuccess: (attachment) => Message.UploadedAttachment({ attachment }),
+              onFailure: (failure) => Message.FailedUploadAttachment({ failure }),
+            }),
           ),
         ],
       };
@@ -1446,12 +1450,15 @@ export const update: {
       return {
         model,
         commands: [
-          downloadUrlCommand(
+          apiCommand(
+            Message,
             "Expenses.DownloadAttachment",
-            path,
-            attachment.name,
-            () => Message.CompletedDownload(),
-            (failure) => Message.FailedDownload({ failure }),
+            downloadUrl({
+              path,
+              filename: attachment.name,
+              onSuccess: () => Message.CompletedDownload(),
+              onFailure: (failure) => Message.FailedDownload({ failure }),
+            }),
           ),
         ],
       };

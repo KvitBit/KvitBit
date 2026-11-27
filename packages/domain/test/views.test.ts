@@ -118,7 +118,7 @@ describe("partly specified types expose their specified fields", () => {
       revision: 2,
     }).pipe(Effect.runSync);
     expect(view.defaults.dueDays).toBe(30);
-    expect(view.name).toBe("Buyer");
+    expect(view["name"]).toBe("Buyer");
     const etag: number = view.revision;
     expect(etag).toBe(2);
     expect(Schema.decodeUnknownExit(ContactView)({ defaults: {} }).pipe(Exit.isFailure)).toBe(true);

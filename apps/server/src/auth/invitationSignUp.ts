@@ -37,8 +37,8 @@ const includesInvitation = (body: typeof InvitationBody.Type) =>
 const readInvitationToken = (body: typeof InvitationBody.Type) => {
   const web = Rec.has(body, "invitationToken");
   const native = Rec.has(body, "invitation");
-  if (web && native && body.invitationToken !== body.invitation) return;
-  const token = web ? body.invitationToken : body.invitation;
+  if (web && native && body["invitationToken"] !== body["invitation"]) return;
+  const token = web ? body["invitationToken"] : body["invitation"];
   return isNonEmptyString(token) ? InvitationToken.make(token) : undefined;
 };
 
@@ -82,7 +82,7 @@ const invitationSignUpHook = (
     );
     if (invitation.status !== "pending") return yield* Effect.fail(invitationNotFound());
     const email = Str.toLowerCase(invitation.email);
-    if (!isString(body.value.email) || Str.toLowerCase(body.value.email) !== email) {
+    if (!isString(body.value["email"]) || Str.toLowerCase(body.value["email"]) !== email) {
       return yield* Effect.fail(new APIError("FORBIDDEN", { code: "InvitationEmailMismatch" }));
     }
     verifiedEmails.set(ctx.request, email);

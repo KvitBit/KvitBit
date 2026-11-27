@@ -41,7 +41,7 @@ import {
 const decodeWorkspaceId = Schema.decodeUnknownEffect(WorkspaceId);
 
 const toWorkspaceRef = Effect.fn("Onboarding.workspaceRef")(function* (workspace: WorkspaceView) {
-  const id = yield* decodeWorkspaceId(workspace.id);
+  const id = yield* decodeWorkspaceId(workspace["id"]);
   return { id, slug: workspace.slug, revision: workspace.revision };
 });
 
@@ -189,9 +189,9 @@ const save = Effect.fn("Onboarding.save")(function* (
       );
       if (
         current._tag === "Ok" &&
-        isJson(current.value.issuingEntity) &&
+        isJson(current.value["issuingEntity"]) &&
         isJson(issuingEntity) &&
-        includesPatch(current.value.issuingEntity, issuingEntity)
+        includesPatch(current.value["issuingEntity"], issuingEntity)
       ) {
         result = current;
       }

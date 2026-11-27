@@ -386,6 +386,8 @@ describe("service worker", () => {
 
 describe("decorateExport", () => {
   let dist: string;
+  const decorate = (iconSource: string) =>
+    decorateExport({ dist, iconSource }).pipe(Effect.provide(BunServices.layer), Effect.runPromise);
 
   beforeEach(() =>
     Effect.runPromise(
@@ -409,7 +411,7 @@ describe("decorateExport", () => {
   afterEach(() => Effect.runPromise(fs.remove(dist, { recursive: true, force: true })));
 
   test("writes the manifest, worker, icons and injected shell", async () => {
-    await decorateExport({ dist, iconSource: brandWebAssets });
+    await decorate(brandWebAssets);
 
     const entries = await Effect.runPromise(
       Effect.forEach(pwaEntryFiles, (file) => fs.exists(join(dist, file)), {
@@ -429,14 +431,12 @@ describe("decorateExport", () => {
       join(dist, "index.html"),
       EffectString.replace("/app/_expo", "/_expo")(expoShell),
     );
-    await expect(decorateExport({ dist, iconSource: brandWebAssets })).rejects.toThrow(
-      "outside /app/",
-    );
+    await expect(decorate(brandWebAssets)).rejects.toThrow("outside /app/");
   });
 
   test("fails when a brand icon is missing", async () => {
     const empty = join(dist, "no-icons");
     await Effect.runPromise(fs.makeDirectory(empty));
-    await expect(decorateExport({ dist, iconSource: empty })).rejects.toThrow();
+    await expect(decorate(empty)).rejects.toThrow();
   });
 });

@@ -53,8 +53,7 @@
           "runEffectInsideEffect": "error",
           "schemaSyncInEffect": "error",
           "scopeInLayerEffect": "error",
-          // Core operations require the per-request CurrentCaller (docs/design/core-ports.md).
-          "strictEffectProvide": "off",
+          "strictEffectProvide": "error",
           "tryCatchInEffectGen": "error",
           "unknownInEffectCatch": "error",
           "abortControllerInEffect": "error",
@@ -188,7 +187,8 @@
             "options": {
               "diagnosticSeverity": {
                 "effectFnOpportunity": "off",
-                "globalJsonInEffect": "off"
+                "globalJsonInEffect": "off",
+                "strictEffectProvide": "off"
               }
             }
           },

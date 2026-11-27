@@ -118,7 +118,7 @@ if (!("Bun" in globalThis)) {
       const privacy = page.locator('footer a[href^="/legal/privacy"]');
       await privacy.evaluate((link) => {
         link.setAttribute("href", "/legal/privacy#main");
-        globalThis.document.body.dataset.navigationProbe = "same-document";
+        globalThis.document.body.dataset["navigationProbe"] = "same-document";
       });
       await privacy.scrollIntoViewIfNeeded();
       const originalScroll = await page.evaluate(() => window.scrollY);

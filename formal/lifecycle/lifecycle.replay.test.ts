@@ -463,7 +463,7 @@ const replay = async <A>(regime: TaxRegime, body: (lab: Lab) => Fx<A>): Promise<
             billingEmails: ["fakturace@odberatel.cz"],
           }),
         );
-        const contactId = yield* Schema.decodeUnknownEffect(ContactId)(customer.id).pipe(
+        const contactId = yield* Schema.decodeUnknownEffect(ContactId)(customer["id"]).pipe(
           Effect.orDie,
         );
         const lab = new Lab(regime === "vat_payer", contactId);

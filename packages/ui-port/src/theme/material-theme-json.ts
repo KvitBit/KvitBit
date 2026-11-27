@@ -153,7 +153,7 @@ const decodeWithPreview = (json: unknown): Result.Result<DecodedThemeFileWithPre
   if (
     Predicate.isObject(json) &&
     "seed" in json &&
-    !(Predicate.isString(json.seed) && isHex(json.seed))
+    !(Predicate.isString(json["seed"]) && isHex(json["seed"]))
   )
     return Result.fail(invalid(issue("theme.seed_invalid", ["seed"])));
   const exit = Schema.decodeUnknownExit(MaterialThemeJson)(json);

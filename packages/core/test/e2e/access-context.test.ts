@@ -47,7 +47,7 @@ describe("Core built under caller X, called as caller Y", () => {
             return {
               series: series.length,
               revisionBumped: updated.revision > before,
-              contact: contact.name,
+              contact: contact["name"],
             };
           }),
         );

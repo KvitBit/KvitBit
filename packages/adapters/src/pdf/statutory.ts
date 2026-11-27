@@ -44,7 +44,7 @@ export const statutoryTitle = (input: {
 }): string => {
   const base = input.kind === "invoice" && input.final ? "final" : input.kind;
   const key = input.kind !== "proforma" && input.taxDocument ? `${base}_tax` : base;
-  const texts = TITLES[key] ?? TITLES[base] ?? TITLES.invoice;
+  const texts = TITLES[key] ?? TITLES[base] ?? TITLES["invoice"];
   return texts !== undefined ? texts[input.language] : "";
 };
 

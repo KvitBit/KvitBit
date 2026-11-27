@@ -127,7 +127,7 @@ describe("TestCore", () => {
               c.save({ name: "Acme s.r.o.", billingEmails: ["fakturace@acme.cz"] }),
             );
             const docs = yield* Documents;
-            const contactId = yield* Schema.decodeUnknownEffect(ContactId)(contact.id);
+            const contactId = yield* Schema.decodeUnknownEffect(ContactId)(contact["id"]);
             const input: DocumentInput = {
               kind: "invoice",
               contact: contactId,

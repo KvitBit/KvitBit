@@ -235,7 +235,7 @@ describe.skipIf(databaseUrl === undefined)("contention on Postgres", () => {
                 "workspaces",
                 second.workspaceId,
                 second.workspaceId,
-                Number(row.revision),
+                Number(row["revision"]),
                 { name },
               );
             }),
@@ -246,7 +246,7 @@ describe.skipIf(databaseUrl === undefined)("contention on Postgres", () => {
         return { rows, locks };
       }),
     );
-    expect(Arr.map(names.rows, (row) => row.name).sort()).toEqual(["from-a", "from-b"]);
+    expect(Arr.map(names.rows, (row) => row["name"]).sort()).toEqual(["from-a", "from-b"]);
     // Two first attempts plus at least one rerun of the deadlock victim's body.
     expect(names.locks).toBeGreaterThanOrEqual(3);
   }, 30_000);

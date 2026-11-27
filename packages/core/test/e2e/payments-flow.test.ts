@@ -293,12 +293,12 @@ describe("D16 reminders (f)", () => {
           yield* contacts.save({
             id: customer,
             expectedRevision: c.revision,
-            name: c.name,
-            ico: c.ico,
-            dic: c.dic,
-            address: c.address,
-            roles: c.roles,
-            billingEmails: c.billingEmails,
+            name: c["name"],
+            ico: c["ico"],
+            dic: c["dic"],
+            address: c["address"],
+            roles: c["roles"],
+            billingEmails: c["billingEmails"],
             defaults: { reminderPolicy: { mode: "disabled" } },
           });
 

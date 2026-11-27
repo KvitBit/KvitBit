@@ -244,19 +244,18 @@ export const makeLocalDiskBlobStorage = Effect.fn("LocalDiskBlobStorage.make")(f
   });
 });
 
-const make = (options: LocalDiskBlobStorageOptions) =>
-  makeLocalDiskBlobStorage(options).pipe(Effect.provide([BunFileSystem.layer, BunPath.layer]));
+const platform = Layer.merge(BunFileSystem.layer, BunPath.layer);
 
 export const LocalDiskBlobStorage = {
-  make,
+  make: makeLocalDiskBlobStorage,
   layer: (options: LocalDiskBlobStorageOptions): Layer.Layer<BlobStorage, BlobUnavailable> =>
-    Layer.effect(BlobStorage, make(options)),
+    Layer.effect(BlobStorage, makeLocalDiskBlobStorage(options)).pipe(Layer.provide(platform)),
   /** Reads the root from `BLOB_LOCAL_ROOT`. */
   layerConfig: (
     root: Config.Config<string> = Config.NonEmptyString("BLOB_LOCAL_ROOT"),
   ): Layer.Layer<BlobStorage, BlobUnavailable | Config.ConfigError> =>
     Layer.effect(
       BlobStorage,
-      Effect.flatMap(root, (dir) => make({ root: dir })),
-    ),
+      Effect.flatMap(root, (dir) => makeLocalDiskBlobStorage({ root: dir })),
+    ).pipe(Layer.provide(platform)),
 } as const;

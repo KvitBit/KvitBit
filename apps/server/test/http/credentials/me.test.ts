@@ -196,7 +196,7 @@ describe("me preferences group", () => {
     expect(clearLocale.headers.get("etag")).toBe('"3"');
     const clearLocaleBody = decodePreferences(await clearLocale.json());
     expect(clearLocaleBody.locale).toBeNull();
-    expect(clearLocaleBody.theme.source).toEqual({ _tag: "Preset", id: "forest" });
+    expect(clearLocaleBody.theme["source"]).toEqual({ _tag: "Preset", id: "forest" });
     expect(clearLocaleBody.resolvedTheme).not.toBeNull();
 
     // Setting theme.source to null clears resolvedTheme to null

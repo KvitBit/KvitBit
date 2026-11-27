@@ -183,8 +183,8 @@ const spec: TableSpec<DocumentRecord> = {
   ),
   decode: Effect.fn("decode")(function* (rows) {
     const sql = yield* SqlClient.SqlClient;
-    const ids = Arr.map(rows, (r) => readText(r.id));
-    const workspaceId = decodeWorkspaceId(rows[0]?.workspace_id);
+    const ids = Arr.map(rows, (r) => readText(r["id"]));
+    const workspaceId = decodeWorkspaceId(rows[0]?.["workspace_id"]);
 
     const lineRows = yield* sql<DbRow>`
         select
@@ -212,28 +212,28 @@ const spec: TableSpec<DocumentRecord> = {
 
     const linesByDoc = new Map<string, LineRecord[]>();
     for (const lr of lineRows) {
-      const docId = readText(lr.document_id);
+      const docId = readText(lr["document_id"]);
       let list = linesByDoc.get(docId);
       if (list === undefined) {
         list = [];
         linesByDoc.set(docId, list);
       }
       list.push({
-        id: LineId.make(readLineUuid(lr.id), { disableChecks: true }),
-        item: readNullablePriceListItemId(lr.price_list_item_id ?? null),
-        description: readText(lr.description),
-        quantity: parseDecimal(lr.quantity),
-        unit: readNullableText(lr.unit ?? null),
-        unitPrice: parseDecimal(lr.unit_price),
-        itemPrice: decodeItemPrice(lr.item_price),
-        vat: readNullableVatTreatment(lr.given_vat ?? null),
-        itemVat: readNullableVatTreatment(lr.item_vat ?? null),
-        treatment: readVatTreatment(lr.vat),
-        ratePercent: parseDecimal(lr.rate_percent),
-        amount: parseDecimal(lr.amount),
-        deducts: readNullableDocumentId(lr.deducts_document_id ?? null),
-        deductedVat: parseNullableDecimal(lr.deducted_vat),
-        deductedVatCzk: parseNullableDecimal(lr.deducted_vat_czk),
+        id: LineId.make(readLineUuid(lr["id"]), { disableChecks: true }),
+        item: readNullablePriceListItemId(lr["price_list_item_id"] ?? null),
+        description: readText(lr["description"]),
+        quantity: parseDecimal(lr["quantity"]),
+        unit: readNullableText(lr["unit"] ?? null),
+        unitPrice: parseDecimal(lr["unit_price"]),
+        itemPrice: decodeItemPrice(lr["item_price"]),
+        vat: readNullableVatTreatment(lr["given_vat"] ?? null),
+        itemVat: readNullableVatTreatment(lr["item_vat"] ?? null),
+        treatment: readVatTreatment(lr["vat"]),
+        ratePercent: parseDecimal(lr["rate_percent"]),
+        amount: parseDecimal(lr["amount"]),
+        deducts: readNullableDocumentId(lr["deducts_document_id"] ?? null),
+        deductedVat: parseNullableDecimal(lr["deducted_vat"]),
+        deductedVatCzk: parseNullableDecimal(lr["deducted_vat_czk"]),
       });
     }
 
@@ -249,9 +249,9 @@ const spec: TableSpec<DocumentRecord> = {
 
     const decoded: DocumentRecord[] = [];
     for (const row of rows) {
-      const docId = readDocumentId(row.id);
-      const contact = readContact(row.contact_snapshot ?? null);
-      const issuer = readIssuer(row.issuer_snapshot ?? null);
+      const docId = readDocumentId(row["id"]);
+      const contact = readContact(row["contact_snapshot"] ?? null);
+      const issuer = readIssuer(row["issuer_snapshot"] ?? null);
       if (contact === null || issuer === null) {
         // Current contact or issuer data cannot replace a missing historical snapshot.
         return yield* StoreUnavailable.make({
@@ -259,66 +259,66 @@ const spec: TableSpec<DocumentRecord> = {
         });
       }
       const fx =
-        row.fx_rate !== null &&
-        row.fx_rate !== undefined &&
-        row.fx_quantity !== null &&
-        row.fx_quantity !== undefined &&
-        row.fx_source !== null &&
-        row.fx_source !== undefined
+        row["fx_rate"] !== null &&
+        row["fx_rate"] !== undefined &&
+        row["fx_quantity"] !== null &&
+        row["fx_quantity"] !== undefined &&
+        row["fx_source"] !== null &&
+        row["fx_source"] !== undefined
           ? {
-              rate: parseDecimal(row.fx_rate),
-              quantity: Number(row.fx_quantity),
-              fixingDate: readNullableIsoDate(row.fx_fixing_date ?? null),
-              source: readFxSource(row.fx_source),
+              rate: parseDecimal(row["fx_rate"]),
+              quantity: Number(row["fx_quantity"]),
+              fixingDate: readNullableIsoDate(row["fx_fixing_date"] ?? null),
+              source: readFxSource(row["fx_source"]),
             }
           : null;
       decoded.push({
         id: docId,
-        workspaceId: decodeWorkspaceId(row.workspace_id),
-        revision: Number(row.revision),
-        kind: readDocumentKind(row.kind),
-        status: readDocumentStatus(row.status),
-        locked: Boolean(row.locked),
-        lockedAt: readNullableText(row.locked_at ?? null),
-        number: readNullableText(row.number ?? null),
-        seriesId: readNullableNumberingSeriesId(row.series_id ?? null),
-        contactId: readContactId(row.contact_id),
+        workspaceId: decodeWorkspaceId(row["workspace_id"]),
+        revision: Number(row["revision"]),
+        kind: readDocumentKind(row["kind"]),
+        status: readDocumentStatus(row["status"]),
+        locked: Boolean(row["locked"]),
+        lockedAt: readNullableText(row["locked_at"] ?? null),
+        number: readNullableText(row["number"] ?? null),
+        seriesId: readNullableNumberingSeriesId(row["series_id"] ?? null),
+        contactId: readContactId(row["contact_id"]),
         contact,
         issuer,
-        given: readGiven(row.given),
-        currency: readCurrencyCode(row.currency),
-        language: readLocale(row.language),
-        paymentMethod: readPaymentMethod(row.payment_method),
-        note: readNullableText(row.note ?? null),
-        issuedOn: readIsoDate(row.issued_on),
-        taxableSupplyOn: readNullableIsoDate(row.taxable_supply_on ?? null),
-        dueOn: readIsoDate(row.due_on),
-        pricesIncludeVat: Boolean(row.prices_include_vat),
-        variableSymbol: readNullableText(row.variable_symbol ?? null),
-        orderNumber: readNullableText(row.order_number ?? null),
+        given: readGiven(row["given"]),
+        currency: readCurrencyCode(row["currency"]),
+        language: readLocale(row["language"]),
+        paymentMethod: readPaymentMethod(row["payment_method"]),
+        note: readNullableText(row["note"] ?? null),
+        issuedOn: readIsoDate(row["issued_on"]),
+        taxableSupplyOn: readNullableIsoDate(row["taxable_supply_on"] ?? null),
+        dueOn: readIsoDate(row["due_on"]),
+        pricesIncludeVat: Boolean(row["prices_include_vat"]),
+        variableSymbol: readNullableText(row["variable_symbol"] ?? null),
+        orderNumber: readNullableText(row["order_number"] ?? null),
         lines: linesByDoc.get(docId) ?? [],
-        totals: readVatBreakdown(row.vat_breakdown),
+        totals: readVatBreakdown(row["vat_breakdown"]),
         fx,
-        fxOverride: decodeFxOverride(row.fx_override),
-        taxDocument: Boolean(row.tax_document),
-        paymentRounding: readPaymentRounding(row.payment_rounding),
-        remindersChoice: readRemindersChoice(row.reminders_choice),
-        remindersOn: Boolean(row.reminders_on),
+        fxOverride: decodeFxOverride(row["fx_override"]),
+        taxDocument: Boolean(row["tax_document"]),
+        paymentRounding: readPaymentRounding(row["payment_rounding"]),
+        remindersChoice: readRemindersChoice(row["reminders_choice"]),
+        remindersOn: Boolean(row["reminders_on"]),
         links: linksByDoc.get(docId) ?? [],
-        paidAmount: parseDecimal(row.paid_amount),
-        payments: Number(row.payments),
-        settlement: readDocumentSettlement(row.settlement),
-        scheduleId: readNullableScheduleId(row.schedule_id ?? null),
-        occurrence: readNullableIsoDate(row.occurrence ?? null),
-        cancelledOn: readNullableIsoDate(row.cancelled_on ?? null),
-        correctedNumber: readNullableText(row.corrected_number ?? null),
+        paidAmount: parseDecimal(row["paid_amount"]),
+        payments: Number(row["payments"]),
+        settlement: readDocumentSettlement(row["settlement"]),
+        scheduleId: readNullableScheduleId(row["schedule_id"] ?? null),
+        occurrence: readNullableIsoDate(row["occurrence"] ?? null),
+        cancelledOn: readNullableIsoDate(row["cancelled_on"] ?? null),
+        correctedNumber: readNullableText(row["corrected_number"] ?? null),
         reason:
-          readNullableText(row.correction_reason ?? null) ??
-          readNullableText(row.cancellation_reason ?? null) ??
+          readNullableText(row["correction_reason"] ?? null) ??
+          readNullableText(row["cancellation_reason"] ?? null) ??
           null,
-        createdAt: readText(row.created_at),
-        updatedAt: readText(row.updated_at),
-        issuedAt: readNullableText(row.issued_at ?? null),
+        createdAt: readText(row["created_at"]),
+        updatedAt: readText(row["updated_at"]),
+        issuedAt: readNullableText(row["issued_at"] ?? null),
       });
     }
     return decoded;

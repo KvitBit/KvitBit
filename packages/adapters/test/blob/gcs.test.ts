@@ -157,7 +157,7 @@ const fakeGcs = (overrides: Array<Override> = [], chunkFaults: Array<ChunkFault>
     const record: Seen = {
       method: request.method,
       url,
-      authorization: request.headers.authorization,
+      authorization: request.headers["authorization"],
       contentRange: request.headers["content-range"],
       contentType: request.body._tag === "Uint8Array" ? request.body.contentType : undefined,
       body: request.body._tag === "Uint8Array" ? request.body.body : undefined,

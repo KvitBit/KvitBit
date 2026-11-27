@@ -94,7 +94,7 @@ const currencyOrCzk = Fn.flow(
 
 const parseMoney = Fn.flow(
   asRecord,
-  (rec): Money => MoneyMath.make(toBigDecimal(rec.amount), currencyOrCzk(rec.currency)),
+  (rec): Money => MoneyMath.make(toBigDecimal(rec["amount"]), currencyOrCzk(rec["currency"])),
 );
 
 // --- Concrete view shapes -----------------------------------------------------------------------
@@ -109,10 +109,10 @@ export interface AddressView {
 const parseAddress = Fn.flow(
   asRecord,
   (rec): AddressView => ({
-    street: asNullableString(rec.street),
-    city: asNullableString(rec.city),
-    postalCode: asNullableString(rec.postalCode),
-    country: Option.getOrElse(readString(rec.country), () => "CZ"),
+    street: asNullableString(rec["street"]),
+    city: asNullableString(rec["city"]),
+    postalCode: asNullableString(rec["postalCode"]),
+    country: Option.getOrElse(readString(rec["country"]), () => "CZ"),
   }),
 );
 
@@ -150,26 +150,29 @@ export interface DocumentSummaryView {
 
 export const parseDocumentSummary = (raw: DocumentSummary): DocumentSummaryView => {
   const rec = asRecord(raw);
-  const contact = asRecord(rec.contact);
+  const contact = asRecord(rec["contact"]);
   return {
-    id: DocumentId.make(asNullableString(rec.id) ?? ""),
-    kind: Option.getOrElse(Schema.decodeUnknownOption(DocumentKind)(rec.kind), () => "invoice"),
-    number: asNullableString(rec.number),
-    status: Option.getOrElse(Schema.decodeUnknownOption(DocumentStatus)(rec.status), () => "draft"),
-    locked: Option.getOrElse(readBoolean(rec.locked), () => false),
+    id: DocumentId.make(asNullableString(rec["id"]) ?? ""),
+    kind: Option.getOrElse(Schema.decodeUnknownOption(DocumentKind)(rec["kind"]), () => "invoice"),
+    number: asNullableString(rec["number"]),
+    status: Option.getOrElse(
+      Schema.decodeUnknownOption(DocumentStatus)(rec["status"]),
+      () => "draft",
+    ),
+    locked: Option.getOrElse(readBoolean(rec["locked"]), () => false),
     settlement: Option.getOrElse(
-      Schema.decodeUnknownOption(DocumentSettlement)(rec.settlement),
+      Schema.decodeUnknownOption(DocumentSettlement)(rec["settlement"]),
       () => "unpaid",
     ),
-    overdue: Option.getOrElse(readBoolean(rec.overdue), () => false),
-    revision: Option.getOrElse(readNumber(rec.revision), () => 0),
+    overdue: Option.getOrElse(readBoolean(rec["overdue"]), () => false),
+    revision: Option.getOrElse(readNumber(rec["revision"]), () => 0),
     contact: {
-      id: ContactId.make(asNullableString(contact.id) ?? ""),
-      name: asNullableString(contact.name) ?? "",
+      id: ContactId.make(asNullableString(contact["id"]) ?? ""),
+      name: asNullableString(contact["name"]) ?? "",
     },
-    issuedOn: IsoDate.make(asNullableString(rec.issuedOn) ?? ""),
-    dueOn: IsoDate.make(asNullableString(rec.dueOn) ?? ""),
-    total: parseMoney(rec.total),
+    issuedOn: IsoDate.make(asNullableString(rec["issuedOn"]) ?? ""),
+    dueOn: IsoDate.make(asNullableString(rec["dueOn"]) ?? ""),
+    total: parseMoney(rec["total"]),
   };
 };
 
@@ -186,13 +189,13 @@ export interface ContactSnapshotView {
 export const parseContactSnapshot = (raw: ContactSnapshot): ContactSnapshotView => {
   const rec = asRecord(raw);
   return {
-    contactId: ContactId.make(asNullableString(rec.contactId) ?? ""),
-    name: asNullableString(rec.name) ?? "",
-    ico: asNullableString(rec.ico),
-    dic: asNullableString(rec.dic),
-    legalForm: asNullableString(rec.legalForm),
-    address: parseAddress(rec.address),
-    billingEmails: Option.getOrElse(readStrings(rec.billingEmails), () => []),
+    contactId: ContactId.make(asNullableString(rec["contactId"]) ?? ""),
+    name: asNullableString(rec["name"]) ?? "",
+    ico: asNullableString(rec["ico"]),
+    dic: asNullableString(rec["dic"]),
+    legalForm: asNullableString(rec["legalForm"]),
+    address: parseAddress(rec["address"]),
+    billingEmails: Option.getOrElse(readStrings(rec["billingEmails"]), () => []),
   };
 };
 
@@ -221,30 +224,32 @@ export interface IssuerSnapshotView {
 export const parseIssuerSnapshot = (raw: IssuerSnapshot): IssuerSnapshotView => {
   const rec = asRecord(raw);
   const bank =
-    rec.bankAccount === null || rec.bankAccount === undefined ? null : asRecord(rec.bankAccount);
+    rec["bankAccount"] === null || rec["bankAccount"] === undefined
+      ? null
+      : asRecord(rec["bankAccount"]);
   return {
-    name: asNullableString(rec.name) ?? "",
-    ico: asNullableString(rec.ico),
-    dic: asNullableString(rec.dic),
-    address: parseAddress(rec.address),
-    registerEntry: asNullableString(rec.registerEntry),
-    email: asNullableString(rec.email),
-    phone: asNullableString(rec.phone),
-    web: asNullableString(rec.web),
+    name: asNullableString(rec["name"]) ?? "",
+    ico: asNullableString(rec["ico"]),
+    dic: asNullableString(rec["dic"]),
+    address: parseAddress(rec["address"]),
+    registerEntry: asNullableString(rec["registerEntry"]),
+    email: asNullableString(rec["email"]),
+    phone: asNullableString(rec["phone"]),
+    web: asNullableString(rec["web"]),
     regime: Option.getOrElse(
-      Schema.decodeUnknownOption(TaxRegime)(rec.regime),
+      Schema.decodeUnknownOption(TaxRegime)(rec["regime"]),
       () => "non_vat_payer",
     ),
     bankAccount:
       bank === null
         ? null
         : {
-            id: BankAccountId.make(asNullableString(bank.id) ?? ""),
-            name: asNullableString(bank.name),
-            currency: currencyOrCzk(bank.currency),
-            accountNumber: asNullableString(bank.accountNumber),
-            iban: asNullableString(bank.iban),
-            bic: asNullableString(bank.bic),
+            id: BankAccountId.make(asNullableString(bank["id"]) ?? ""),
+            name: asNullableString(bank["name"]),
+            currency: currencyOrCzk(bank["currency"]),
+            accountNumber: asNullableString(bank["accountNumber"]),
+            iban: asNullableString(bank["iban"]),
+            bic: asNullableString(bank["bic"]),
           },
   };
 };
@@ -265,19 +270,19 @@ export interface LineItemView {
 export const parseLineView = (raw: LineView): LineItemView => {
   const rec = asRecord(raw);
   return {
-    id: LineId.make(asNullableString(rec.id) ?? ""),
-    item: Option.getOrNull(Schema.decodeUnknownOption(PriceListItemId)(rec.item)),
-    description: asNullableString(rec.description) ?? "",
-    quantity: toBigDecimal(rec.quantity, "1"),
-    unit: asNullableString(rec.unit),
-    unitPrice: toBigDecimal(rec.unitPrice, "0"),
+    id: LineId.make(asNullableString(rec["id"]) ?? ""),
+    item: Option.getOrNull(Schema.decodeUnknownOption(PriceListItemId)(rec["item"])),
+    description: asNullableString(rec["description"]) ?? "",
+    quantity: toBigDecimal(rec["quantity"], "1"),
+    unit: asNullableString(rec["unit"]),
+    unitPrice: toBigDecimal(rec["unitPrice"], "0"),
     treatment: Option.getOrElse(
-      Schema.decodeUnknownOption(VatTreatment)(rec.treatment),
+      Schema.decodeUnknownOption(VatTreatment)(rec["treatment"]),
       () => "standard",
     ),
-    ratePercent: toBigDecimal(rec.ratePercent, "0"),
-    amount: toBigDecimal(rec.amount, "0"),
-    deducts: Option.getOrNull(Schema.decodeUnknownOption(DocumentId)(rec.deducts)),
+    ratePercent: toBigDecimal(rec["ratePercent"], "0"),
+    amount: toBigDecimal(rec["amount"], "0"),
+    deducts: Option.getOrNull(Schema.decodeUnknownOption(DocumentId)(rec["deducts"])),
   };
 };
 
@@ -295,17 +300,17 @@ export interface PaymentRecordView {
 export const parsePaymentView = (raw: PaymentView): PaymentRecordView => {
   const rec = asRecord(raw);
   return {
-    id: PaymentId.make(asNullableString(rec.id) ?? ""),
-    revision: Option.getOrElse(readNumber(rec.revision), () => 0),
-    amount: parseMoney(rec.amount),
-    paidOn: IsoDate.make(asNullableString(rec.paidOn) ?? ""),
+    id: PaymentId.make(asNullableString(rec["id"]) ?? ""),
+    revision: Option.getOrElse(readNumber(rec["revision"]), () => 0),
+    amount: parseMoney(rec["amount"]),
+    paidOn: IsoDate.make(asNullableString(rec["paidOn"]) ?? ""),
     method: Option.getOrElse(
-      Schema.decodeUnknownOption(PaymentMethod)(rec.method),
+      Schema.decodeUnknownOption(PaymentMethod)(rec["method"]),
       () => "bank_transfer",
     ),
-    note: asNullableString(rec.note),
-    taxDocument: Option.getOrNull(Schema.decodeUnknownOption(DocumentId)(rec.taxDocument)),
-    createdAt: asNullableString(rec.createdAt) ?? "",
+    note: asNullableString(rec["note"]),
+    taxDocument: Option.getOrNull(Schema.decodeUnknownOption(DocumentId)(rec["taxDocument"])),
+    createdAt: asNullableString(rec["createdAt"]) ?? "",
   };
 };
 
@@ -322,12 +327,12 @@ export interface ContactOption {
 export const parseContactOption = (raw: ContactView): ContactOption => {
   const rec = asRecord(raw);
   return {
-    id: ContactId.make(asNullableString(rec.id) ?? ""),
-    name: asNullableString(rec.name) ?? "",
-    ico: asNullableString(rec.ico),
-    dic: asNullableString(rec.dic),
-    billingEmails: Option.getOrElse(readStrings(rec.billingEmails), () => []),
-    archived: Option.getOrElse(readBoolean(rec.archived), () => false),
+    id: ContactId.make(asNullableString(rec["id"]) ?? ""),
+    name: asNullableString(rec["name"]) ?? "",
+    ico: asNullableString(rec["ico"]),
+    dic: asNullableString(rec["dic"]),
+    billingEmails: Option.getOrElse(readStrings(rec["billingEmails"]), () => []),
+    archived: Option.getOrElse(readBoolean(rec["archived"]), () => false),
     defaults: raw.defaults,
   };
 };
@@ -346,14 +351,14 @@ export interface PriceListOption {
 export const parsePriceListOption = (raw: PriceListItemView): PriceListOption => {
   const rec = asRecord(raw);
   return {
-    id: PriceListItemId.make(asNullableString(rec.id) ?? ""),
-    name: asNullableString(rec.name) ?? "",
-    description: asNullableString(rec.description),
-    unit: asNullableString(rec.unit),
-    unitPrice: toBigDecimal(rec.unitPrice, "0"),
-    currency: currencyOrCzk(rec.currency),
-    vat: Option.getOrNull(readVatTreatment(rec.vat)),
-    archived: Option.getOrElse(readBoolean(rec.archived), () => false),
+    id: PriceListItemId.make(asNullableString(rec["id"]) ?? ""),
+    name: asNullableString(rec["name"]) ?? "",
+    description: asNullableString(rec["description"]),
+    unit: asNullableString(rec["unit"]),
+    unitPrice: toBigDecimal(rec["unitPrice"], "0"),
+    currency: currencyOrCzk(rec["currency"]),
+    vat: Option.getOrNull(readVatTreatment(rec["vat"])),
+    archived: Option.getOrElse(readBoolean(rec["archived"]), () => false),
   };
 };
 
@@ -369,12 +374,12 @@ export interface BankAccountOption {
 export const parseBankAccountOption = (raw: BankAccountView): BankAccountOption => {
   const rec = asRecord(raw);
   return {
-    id: BankAccountId.make(asNullableString(rec.id) ?? ""),
-    name: asNullableString(rec.name),
-    iban: asNullableString(rec.iban) ?? "",
-    bic: asNullableString(rec.bic),
-    currency: currencyOrCzk(rec.currency),
-    isDefault: Option.getOrElse(readBoolean(rec.isDefault), () => false),
+    id: BankAccountId.make(asNullableString(rec["id"]) ?? ""),
+    name: asNullableString(rec["name"]),
+    iban: asNullableString(rec["iban"]) ?? "",
+    bic: asNullableString(rec["bic"]),
+    currency: currencyOrCzk(rec["currency"]),
+    isDefault: Option.getOrElse(readBoolean(rec["isDefault"]), () => false),
   };
 };
 
@@ -394,28 +399,28 @@ export const parseWorkspaceDefaults: {
   (fallbackRegime: TaxRegime): (raw: WorkspaceView | null) => WorkspaceDefaultsView;
 } = Fn.dual(2, (raw: WorkspaceView | null, fallbackRegime: TaxRegime): WorkspaceDefaultsView => {
   const rec = asRecord(raw);
-  const defaults = asRecord(rec.defaults);
-  const preferred = asRecord(defaults.preferredSeriesByKind);
+  const defaults = asRecord(rec["defaults"]);
+  const preferred = asRecord(defaults["preferredSeriesByKind"]);
   const preferredSeriesByKind: Partial<Record<DocumentKind, NumberingSeriesId>> = {};
   for (const kind of ["invoice", "proforma", "payment_tax_document", "credit_note"] as const) {
     const id = readSeriesId(preferred[kind]);
     if (Option.isSome(id)) preferredSeriesByKind[kind] = id.value;
   }
-  const rounding = defaults.paymentRounding === "whole_unit" ? "whole_unit" : "none";
+  const rounding = defaults["paymentRounding"] === "whole_unit" ? "whole_unit" : "none";
   return {
     taxRegime: Option.getOrElse(
-      Schema.decodeUnknownOption(TaxRegime)(rec.taxRegime),
+      Schema.decodeUnknownOption(TaxRegime)(rec["taxRegime"]),
       () => fallbackRegime,
     ),
-    currency: currencyOrCzk(defaults.currency),
-    language: defaults.language === "en" ? "en" : "cs",
-    dueDays: Option.getOrElse(readNumber(defaults.dueDays), () => 14),
+    currency: currencyOrCzk(defaults["currency"]),
+    language: defaults["language"] === "en" ? "en" : "cs",
+    dueDays: Option.getOrElse(readNumber(defaults["dueDays"]), () => 14),
     paymentMethod: Option.getOrElse(
-      Schema.decodeUnknownOption(PaymentMethod)(defaults.paymentMethod),
+      Schema.decodeUnknownOption(PaymentMethod)(defaults["paymentMethod"]),
       () => "bank_transfer",
     ),
     paymentRounding: rounding,
-    note: asNullableString(defaults.defaultNote) ?? asNullableString(defaults.note),
+    note: asNullableString(defaults["defaultNote"]) ?? asNullableString(defaults["note"]),
     preferredSeriesByKind,
   };
 });

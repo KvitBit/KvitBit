@@ -396,7 +396,7 @@ describe("Phase 3A Round 1 fixes 6–8: PDF, branding, and document/share read p
           documents.issue({
             input: {
               kind: "invoice",
-              contact: decodeContactId(contact.id),
+              contact: decodeContactId(contact["id"]),
               issuedOn: IsoDate.make("2026-10-05"),
               taxableSupplyOn: IsoDate.make("2026-10-05"),
               variableSymbol: "2612345678",
@@ -637,7 +637,7 @@ describe("Phase 3A Round 1 fixes 6–8: PDF, branding, and document/share read p
           const issued = yield* docs.issue({
             input: {
               kind: "invoice",
-              contact: decodeContactId(contact.id),
+              contact: decodeContactId(contact["id"]),
               variableSymbol: "2612345678",
               lines: [
                 {
@@ -661,7 +661,7 @@ describe("Phase 3A Round 1 fixes 6–8: PDF, branding, and document/share read p
       const resCall = await mcp.rpc(grant.token, "resources/read", {
         uri: `kvitbit://documents/${docId}`,
       });
-      const resText = decodeResource(resCall.json.result).contents[0]?.text;
+      const resText = decodeResource(resCall.json["result"]).contents[0]?.text;
       const resDoc = decodeResourceDocument(resText);
       expect(resDoc.paymentQr).toEqual(toolDoc.paymentQr);
     } finally {
@@ -752,7 +752,7 @@ describe("Phase 3A Round 1 fixes 6–8: PDF, branding, and document/share read p
             {
               input: {
                 kind: "invoice",
-                contact: decodeContactId(contact.id),
+                contact: decodeContactId(contact["id"]),
                 variableSymbol: "2612345678",
                 note: "Původní poznámka",
                 lines: [
@@ -787,7 +787,7 @@ describe("Phase 3A Round 1 fixes 6–8: PDF, branding, and document/share read p
             {
               input: {
                 kind: "invoice",
-                contact: decodeContactId(contact.id),
+                contact: decodeContactId(contact["id"]),
                 variableSymbol: "2612345678",
                 note: "Původní poznámka",
                 lines: [
@@ -860,7 +860,7 @@ describe("Phase 3A Round 1 fixes 6–8: PDF, branding, and document/share read p
           templates.save({
             name: "Měsíční paušál",
             kind: "invoice",
-            contact: decodeContactId(contact.id),
+            contact: decodeContactId(contact["id"]),
             lines: [
               {
                 description: "Paušál",
@@ -871,7 +871,7 @@ describe("Phase 3A Round 1 fixes 6–8: PDF, branding, and document/share read p
           }),
         );
         const fromTemplate = yield* asMember(
-          templates.use(decodeTemplateId(tpl.id), { as: "issued" }),
+          templates.use(decodeTemplateId(tpl["id"]), { as: "issued" }),
         );
         const fromGet = yield* asMember(documents.get(fromTemplate.id));
         expect(fromTemplate.paymentQr).not.toBeNull();
@@ -943,7 +943,7 @@ describe("Phase 3A Round 1 fixes 6–8: PDF, branding, and document/share read p
           const issued = yield* docs.issue({
             input: {
               kind: "invoice",
-              contact: decodeContactId(contact.id),
+              contact: decodeContactId(contact["id"]),
               currency: CurrencyCode.make("EUR"),
               fx: { manual: { rate: BigDecimal.fromStringUnsafe("25"), quantity: 1 } },
               lines: [
@@ -1020,7 +1020,7 @@ describe("Phase 3A Round 1 fixes 6–8: PDF, branding, and document/share read p
           const issued = yield* docs.issue({
             input: {
               kind: "invoice",
-              contact: decodeContactId(contact.id),
+              contact: decodeContactId(contact["id"]),
               currency: CurrencyCode.make("EUR"),
               fx: { manual: { rate: BigDecimal.fromStringUnsafe("25"), quantity: 1 } },
               lines: [
@@ -1192,7 +1192,7 @@ describe("Phase 3A Round 1 fixes 6–8: PDF, branding, and document/share read p
         // 1. Draft QR consistency: preview, createDraft, and replayed createDraft all return the same eligible QR
         const draftInput = {
           kind: "invoice" as const,
-          contact: decodeContactId(contact.id),
+          contact: decodeContactId(contact["id"]),
           note: "Draft poznámka",
           lines: [
             {
@@ -1225,7 +1225,7 @@ describe("Phase 3A Round 1 fixes 6–8: PDF, branding, and document/share read p
           documents.issue({
             input: {
               kind: "invoice",
-              contact: decodeContactId(contact.id),
+              contact: decodeContactId(contact["id"]),
               variableSymbol: "2612345678",
               note: "Frozen note",
               lines: [
@@ -1321,8 +1321,8 @@ describe("Phase 3A Round 1 fixes 6–8: PDF, branding, and document/share read p
         `;
         const { __snapshot, ...parsedModel } = decodeRenderModel(rawRow[0]?.render_model);
         const snapshot = decodeJsonObject(__snapshot);
-        const branding = decodeJsonObject(snapshot.branding);
-        const { updatedAt: _updatedAt, ...malformedLogo } = decodeJsonObject(branding.logo);
+        const branding = decodeJsonObject(snapshot["branding"]);
+        const { updatedAt: _updatedAt, ...malformedLogo } = decodeJsonObject(branding["logo"]);
         const malformedSnapshot = {
           ...snapshot,
           branding: { ...branding, logo: malformedLogo },
@@ -1409,7 +1409,7 @@ describe("Phase 3A Round 1 fixes 6–8: PDF, branding, and document/share read p
         // replayed directly without RequestOutcome returns paymentQr: null cleanly!
         const bigEurInput = {
           kind: "invoice" as const,
-          contact: decodeContactId(contact.id),
+          contact: decodeContactId(contact["id"]),
           currency: CurrencyCode.make("EUR"),
           fx: { manual: { rate: BigDecimal.fromStringUnsafe("25"), quantity: 1 } },
           lines: [
@@ -1448,7 +1448,7 @@ describe("Phase 3A Round 1 fixes 6–8: PDF, branding, and document/share read p
           documents.issue({
             input: {
               kind: "invoice",
-              contact: decodeContactId(contact.id),
+              contact: decodeContactId(contact["id"]),
               currency: CurrencyCode.make("EUR"),
               fx: { manual: { rate: BigDecimal.fromStringUnsafe("25"), quantity: 1 } },
               lines: [
@@ -1595,7 +1595,7 @@ describe("Phase 3A Round 1 fixes 6–8: PDF, branding, and document/share read p
             {
               input: {
                 kind: "invoice",
-                contact: decodeContactId(contact.id),
+                contact: decodeContactId(contact["id"]),
                 variableSymbol: "2612345678",
                 lines: [
                   {
@@ -1633,7 +1633,7 @@ describe("Phase 3A Round 1 fixes 6–8: PDF, branding, and document/share read p
             {
               input: {
                 kind: "invoice",
-                contact: decodeContactId(contact.id),
+                contact: decodeContactId(contact["id"]),
                 variableSymbol: "2612345678",
                 lines: [
                   {
@@ -1654,7 +1654,7 @@ describe("Phase 3A Round 1 fixes 6–8: PDF, branding, and document/share read p
             {
               input: {
                 kind: "invoice",
-                contact: decodeContactId(contact.id),
+                contact: decodeContactId(contact["id"]),
                 variableSymbol: "2612345678",
                 lines: [
                   {
@@ -1681,7 +1681,7 @@ describe("Phase 3A Round 1 fixes 6–8: PDF, branding, and document/share read p
         // USD invoice (valid paymentQr: null) replayed after note edit succeeds even when audit is unavailable
         const usdInput = {
           kind: "invoice" as const,
-          contact: decodeContactId(contact.id),
+          contact: decodeContactId(contact["id"]),
           currency: CurrencyCode.make("USD"),
           fx: { manual: { rate: BigDecimal.fromStringUnsafe("23"), quantity: 1 } },
           lines: [
@@ -1709,7 +1709,7 @@ describe("Phase 3A Round 1 fixes 6–8: PDF, branding, and document/share read p
         // Zero-value CZK invoice with IBAN replayed on memory store after note edit + audit outage succeeds
         const zeroMemInput = {
           kind: "invoice" as const,
-          contact: decodeContactId(contact.id),
+          contact: decodeContactId(contact["id"]),
           lines: [
             {
               description: "Zero CZK",
@@ -1748,7 +1748,7 @@ describe("Phase 3A Round 1 fixes 6–8: PDF, branding, and document/share read p
         );
         const bigEurMemInput = {
           kind: "invoice" as const,
-          contact: decodeContactId(contact.id),
+          contact: decodeContactId(contact["id"]),
           currency: CurrencyCode.make("EUR"),
           fx: { manual: { rate: BigDecimal.fromStringUnsafe("25"), quantity: 1 } },
           lines: [
@@ -1782,7 +1782,7 @@ describe("Phase 3A Round 1 fixes 6–8: PDF, branding, and document/share read p
             {
               input: {
                 kind: "invoice",
-                contact: decodeContactId(contact.id),
+                contact: decodeContactId(contact["id"]),
                 lines: [
                   {
                     description: "First invoice",
@@ -1798,7 +1798,7 @@ describe("Phase 3A Round 1 fixes 6–8: PDF, branding, and document/share read p
         yield* TestClock.adjust("25 hours");
         const secondPayload = {
           kind: "invoice" as const,
-          contact: decodeContactId(contact.id),
+          contact: decodeContactId(contact["id"]),
           lines: [
             {
               description: "Second invoice after expiry",

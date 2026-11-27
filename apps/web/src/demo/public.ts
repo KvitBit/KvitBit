@@ -361,7 +361,7 @@ export const routes: ReadonlyArray<DemoRoute> = [
     respond: ({ params }) => ({
       parameters: {
         algorithm: "SHA-256",
-        nonce: `demo-${params.scope ?? "sign_up"}-nonce`,
+        nonce: `demo-${params["scope"] ?? "sign_up"}-nonce`,
         keyPrefix: "0",
         cost: 1,
         keyLength: 32,
@@ -452,9 +452,9 @@ export const routes: ReadonlyArray<DemoRoute> = [
     method: "GET",
     path: "/api/v1/share/:token",
     respond: ({ params }) => {
-      const found = buildShareFixture(params.token ?? "demo-unpaid-czk");
+      const found = buildShareFixture(params["token"] ?? "demo-unpaid-czk");
       if (found === null) {
-        return status(404, { _tag: "NotFound", entity: "ShareLink", id: params.token ?? "" });
+        return status(404, { _tag: "NotFound", entity: "ShareLink", id: params["token"] ?? "" });
       }
       return found;
     },
@@ -464,9 +464,9 @@ export const routes: ReadonlyArray<DemoRoute> = [
     method: "GET",
     path: "/api/v1/invitations/:token",
     respond: ({ params }) => {
-      const found = buildInvitationFixture(params.token ?? "demo-pending");
+      const found = buildInvitationFixture(params["token"] ?? "demo-pending");
       if (found === null) {
-        return status(404, { _tag: "NotFound", entity: "Invitation", id: params.token ?? "" });
+        return status(404, { _tag: "NotFound", entity: "Invitation", id: params["token"] ?? "" });
       }
       return found;
     },
@@ -481,9 +481,9 @@ export const routes: ReadonlyArray<DemoRoute> = [
     method: "GET",
     path: "/api/v1/oauth/consents/:consentId",
     respond: ({ params }) => {
-      const found = buildConsentFixture(params.consentId ?? "demo-consent");
+      const found = buildConsentFixture(params["consentId"] ?? "demo-consent");
       if (found === null) {
-        return status(404, { _tag: "NotFound", entity: "McpGrant", id: params.consentId ?? "" });
+        return status(404, { _tag: "NotFound", entity: "McpGrant", id: params["consentId"] ?? "" });
       }
       return found;
     },
@@ -506,7 +506,7 @@ export const routes: ReadonlyArray<DemoRoute> = [
     method: "GET",
     path: "/api/v1/registry/companies/:ico",
     respond: ({ params }) => {
-      const ico = params.ico ?? "";
+      const ico = params["ico"] ?? "";
       if (ico === "99999999") {
         return status(503, { _tag: "Unavailable", dependency: "company_registry" });
       }

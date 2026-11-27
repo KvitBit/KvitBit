@@ -245,7 +245,7 @@ describe("MobileStorageGcs", () => {
     const fakeClient = HttpClient.make((request) =>
       Effect.sync(() => {
         const url = new URL(request.url);
-        const auth = request.headers.authorization;
+        const auth = request.headers["authorization"];
         if (url.pathname === "/storage/v1/b/my-bucket/o") {
           if (auth === "Bearer tok-1") {
             return HttpClientResponse.fromWeb(

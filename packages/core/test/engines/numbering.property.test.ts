@@ -175,7 +175,7 @@ const engineParse = (p: string): OracleResult => {
   const r = parsePattern(p);
   if (Result.isSuccess(r)) return { ok: true, tokens: r.success.tokens, reset: r.success.reset };
   const issue = r.failure.issues[0];
-  return { ok: false, reason: String(issue?.params?.reason) };
+  return { ok: false, reason: String(issue?.params?.["reason"]) };
 };
 
 const PIECES = [
@@ -421,7 +421,7 @@ describe("Numbering patterns (property: seeded)", () => {
         const parsed = parsePattern(source);
         expect([source, Result.isSuccess(parsed)]).toEqual([source, length <= SPEC_MAX_LENGTH]);
         if (Result.isFailure(parsed)) {
-          if (parsed.failure.issues[0]?.params?.reason !== "too_long") {
+          if (parsed.failure.issues[0]?.params?.["reason"] !== "too_long") {
             throw new Error(`${source}: expected the too_long rejection`, {
               cause: parsed.failure,
             });

@@ -42,7 +42,7 @@ export const FeedbackRoutesLive = HttpRouter.use(
         if (config.feedback === undefined) return HttpServerResponse.empty({ status: 404 });
 
         const request = yield* HttpServerRequest.HttpServerRequest;
-        const origin = request.headers.origin;
+        const origin = request.headers["origin"];
         const cookie = feedbackSessionCookie(request);
         // Require an exact trusted Origin for this browser-only write.
         if (origin === undefined || !config.trustedOrigins.has(origin) || cookie === undefined) {

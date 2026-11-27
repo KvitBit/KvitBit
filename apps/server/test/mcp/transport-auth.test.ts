@@ -115,7 +115,7 @@ describe("MCP Streamable HTTP transport, OAuth metadata, and authentication", ()
     // Trusted Origin -> 200
     const trusted = await h.rpc(grant.token, "ping", undefined, 1, { origin: MCP_ORIGIN });
     expect(trusted.res.status).toBe(200);
-    expect(trusted.json.result).toEqual({});
+    expect(trusted.json["result"]).toEqual({});
 
     // Unsupported MCP-Protocol-Version -> 400
     const badVersion = await h.postMcp(
@@ -138,7 +138,7 @@ describe("MCP Streamable HTTP transport, OAuth metadata, and authentication", ()
     );
     expect(init.res.status).toBe(200);
     expect(init.res.headers.get("mcp-protocol-version")).toBe(MCP_PROTOCOL_VERSION);
-    expect(init.json.result).toMatchObject({
+    expect(init.json["result"]).toMatchObject({
       protocolVersion: MCP_PROTOCOL_VERSION,
       capabilities: {
         tools: { listChanged: false },
@@ -146,7 +146,7 @@ describe("MCP Streamable HTTP transport, OAuth metadata, and authentication", ()
       },
       serverInfo: { name: "kvitbit", version: "0.0.0-test" },
     });
-    expect(init.json.result).toMatchObject({
+    expect(init.json["result"]).toMatchObject({
       instructions: expect.stringContaining("kvitbit://guide"),
     });
 
@@ -173,6 +173,6 @@ describe("MCP Streamable HTTP transport, OAuth metadata, and authentication", ()
 
     // Unknown method -> -32601
     const unknown = await h.rpc(grant.token, "prompts/list");
-    expect(unknown.json.error).toMatchObject({ code: -32601 });
+    expect(unknown.json["error"]).toMatchObject({ code: -32601 });
   });
 });

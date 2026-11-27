@@ -53,10 +53,10 @@ export const makeFeedbackConfig = Fn.dual<
 export const feedbackSessionCookie = (
   request: HttpServerRequest.HttpServerRequest,
 ): string | undefined =>
-  request.headers.authorization === undefined &&
+  request.headers["authorization"] === undefined &&
   ((request.cookies[SESSION_COOKIE] ?? "").length > 0 ||
     (request.cookies["kvitbit.session_token"] ?? "").length > 0)
-    ? request.headers.cookie
+    ? request.headers["cookie"]
     : undefined;
 
 export const FeedbackSessionUser = Schema.Struct({

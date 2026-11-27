@@ -101,8 +101,6 @@ export const UnpooledOwnerDatabaseLive = PgClient.layerConfig({
   applicationName: Config.succeed("kvitbit-migrate"),
 });
 
-export const migrateProgram = runMigrations().pipe(Effect.provide(UnpooledOwnerDatabaseLive));
-
 // Older Node versions lack import.meta.main.
 const entryPath = process.argv[1] ?? "";
 const isMain =
@@ -110,5 +108,5 @@ const isMain =
   (Str.endsWith("migrate.ts")(entryPath) || Str.endsWith("migrate.js")(entryPath));
 
 if (isMain) {
-  NodeRuntime.runMain(migrateProgram);
+  NodeRuntime.runMain(runMigrations().pipe(Effect.provide(UnpooledOwnerDatabaseLive)));
 }

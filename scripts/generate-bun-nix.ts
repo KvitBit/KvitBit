@@ -11,16 +11,16 @@ const lock = Bun.JSONC.parse(await Bun.file("bun.lock").text());
 if (!isLockObject(lock)) {
   throw new Error("Expected an object in bun.lock.");
 }
-if (lock.lockfileVersion !== 2) {
-  throw new Error(`Unsupported Bun lockfile version: ${String(lock.lockfileVersion)}`);
+if (lock["lockfileVersion"] !== 2) {
+  throw new Error(`Unsupported Bun lockfile version: ${String(lock["lockfileVersion"])}`);
 }
-if (!isLockObject(lock.packages)) {
+if (!isLockObject(lock["packages"])) {
   throw new Error("Expected a packages object in bun.lock.");
 }
 
 const nixString = (value: string) => JSON.stringify(value).replaceAll("${", "\\${");
 const entries = new Map<string, string>();
-for (const [name, entry] of Object.entries(lock.packages)) {
+for (const [name, entry] of Object.entries(lock["packages"])) {
   if (!Array.isArray(entry)) {
     throw new Error(`Expected a lockfile entry array for ${name}`);
   }

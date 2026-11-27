@@ -74,7 +74,7 @@ describe("AresV3 lookup", () => {
     expect(request?.url).toBe(
       "https://ares.gov.cz/ekonomicke-subjekty-v-be/rest/ekonomicke-subjekty/10047514",
     );
-    expect(request?.headers.accept).toBe("application/json");
+    expect(request?.headers["accept"]).toBe("application/json");
   });
 
   test("maps a full s.r.o. record", async () => {

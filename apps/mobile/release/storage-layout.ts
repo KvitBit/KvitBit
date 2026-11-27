@@ -295,7 +295,7 @@ const parseStoredAsset = (value: StoredFields, label: string): StoredUpdateAsset
   if (!CONTENT_TYPE_RE.test(contentType)) {
     throw new Error(`${label}.contentType is invalid: ${encodeJson(contentType)}`);
   }
-  const fileExtension = value.fileExtension;
+  const fileExtension = value["fileExtension"];
   if (fileExtension !== undefined) {
     if (!(Str.isString(fileExtension) && FILE_EXT_RE.test(fileExtension))) {
       throw new Error(`${label}.fileExtension is invalid: ${encodeJson(fileExtension)}`);
@@ -321,8 +321,8 @@ export const parseAssetMeta = (json: string): AssetMeta => {
   if (!isStoredFields(parsed)) {
     throw new Error("AssetMeta must be a JSON object");
   }
-  if (parsed.schema !== 1) {
-    throw new Error(`Unsupported AssetMeta schema: ${String(parsed.schema)}`);
+  if (parsed["schema"] !== 1) {
+    throw new Error(`Unsupported AssetMeta schema: ${String(parsed["schema"])}`);
   }
   const sha256 = assertSha256Hex(requireString(parsed, "sha256"));
   const contentType = requireString(parsed, "contentType");
@@ -338,17 +338,17 @@ export const parsePublication = (json: string): StoredPublication => {
   if (!isStoredFields(parsed)) {
     throw new Error("Publication must be a JSON object");
   }
-  if (parsed.schema !== 1) {
-    throw new Error(`Unsupported publication schema: ${String(parsed.schema)}`);
+  if (parsed["schema"] !== 1) {
+    throw new Error(`Unsupported publication schema: ${String(parsed["schema"])}`);
   }
-  const type = parsed.type;
+  const type = parsed["type"];
   const id = assertUuid(requireString(parsed, "id"));
   const createdAt = requireString(parsed, "createdAt");
   if (Number.isNaN(Date.parse(createdAt))) {
     throw new Error(`Invalid publication createdAt: ${encodeJson(createdAt)}`);
   }
   const channel = assertChannel(requireString(parsed, "channel"));
-  const platform = parsed.platform;
+  const platform = parsed["platform"];
   if (!isMobilePlatform(platform)) {
     throw new Error(`Invalid publication platform: ${encodeJson(platform)}`);
   }
@@ -367,26 +367,26 @@ export const parsePublication = (json: string): StoredPublication => {
   }
 
   if (type === "update") {
-    if (!isStoredFields(parsed.launchAsset)) {
+    if (!isStoredFields(parsed["launchAsset"])) {
       throw new Error("launchAsset must be an object");
     }
-    const launchAsset = parseStoredAsset(parsed.launchAsset, "launchAsset");
-    if (!Arr.isArray(parsed.assets)) {
+    const launchAsset = parseStoredAsset(parsed["launchAsset"], "launchAsset");
+    if (!Arr.isArray(parsed["assets"])) {
       throw new Error("Publication assets must be an array");
     }
-    const assets = Arr.map(parsed.assets, (item, idx) => {
+    const assets = Arr.map(parsed["assets"], (item, idx) => {
       const label = `assets[${idx}]`;
       if (!isStoredFields(item)) {
         throw new Error(`${label} must be an object`);
       }
       return parseStoredAsset(item, label);
     });
-    const rawMetadata = parsed.metadata ?? {};
+    const rawMetadata = parsed["metadata"] ?? {};
     if (!isStoredFields(rawMetadata)) {
       throw new Error("metadata must be an object");
     }
     const metadata = parseMetadata(rawMetadata);
-    const extra = isStoredFields(parsed.extra) ? parsed.extra : {};
+    const extra = isStoredFields(parsed["extra"]) ? parsed["extra"] : {};
     return {
       schema: 1,
       type: "update",

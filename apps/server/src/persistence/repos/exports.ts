@@ -48,12 +48,12 @@ const spec: TableSpec<ExportRow> = {
     return {
       id: ExportId.make(stored.id),
       workspaceId: decodeWorkspaceId(stored.workspace_id),
-      revision: Number(row.revision),
+      revision: Number(row["revision"]),
       status: stored.status,
       createdAt: stored.created_at,
       readyAt: stored.ready_at ?? null,
       expiresAt: stored.expires_at ?? null,
-      sizeBytes: Predicate.isNotNullish(row.size_bytes) ? Number(row.size_bytes) : null,
+      sizeBytes: Predicate.isNotNullish(row["size_bytes"]) ? Number(row["size_bytes"]) : null,
     };
   }),
   encode: (row) => ({

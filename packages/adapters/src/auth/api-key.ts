@@ -106,6 +106,6 @@ export const verifyApiKey: {
   (findHash: FindHash): (bearer: string) => Promise<ApiKeyVerification>;
   (bearer: string, findHash: FindHash): Promise<ApiKeyVerification>;
 } = Fn.dual(2, (bearer: string, findHash: FindHash) =>
-  // biome-ignore lint/plugin: Preserve the public Promise API at the Effect boundary.
+  // biome-ignore lint/plugin/no-direct-effect-runs: Preserve the public Promise API at the Effect boundary.
   Effect.runPromise(checkApiKey(bearer, findHash)),
 );

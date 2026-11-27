@@ -182,40 +182,40 @@ const expenseSpec: TableSpec<ExpenseRow> = {
   ),
   decode: decodeEach((row: DbRow): ExpenseRow => {
     const hasSupplier =
-      row.contact_id !== null ||
-      row.supplier_name !== null ||
-      row.supplier_ico !== null ||
-      row.supplier_dic !== null;
+      row["contact_id"] !== null ||
+      row["supplier_name"] !== null ||
+      row["supplier_ico"] !== null ||
+      row["supplier_dic"] !== null;
     return {
-      id: readExpenseId(row.id),
-      workspaceId: decodeWorkspaceId(row.workspace_id),
-      revision: Number(row.revision),
-      status: readExpenseStatus(row.status),
+      id: readExpenseId(row["id"]),
+      workspaceId: decodeWorkspaceId(row["workspace_id"]),
+      revision: Number(row["revision"]),
+      status: readExpenseStatus(row["status"]),
       supplier: hasSupplier
         ? {
-            contactId: readNullableContactId(row.contact_id ?? null),
-            name: readNullableText(row.supplier_name ?? null),
-            ico: readNullableText(row.supplier_ico ?? null),
-            dic: readNullableText(row.supplier_dic ?? null),
+            contactId: readNullableContactId(row["contact_id"] ?? null),
+            name: readNullableText(row["supplier_name"] ?? null),
+            ico: readNullableText(row["supplier_ico"] ?? null),
+            dic: readNullableText(row["supplier_dic"] ?? null),
           }
         : null,
-      supplierDocumentNumber: readNullableText(row.supplier_document_number ?? null),
-      issuedOn: readNullableIsoDate(row.issued_on ?? null),
-      taxableSupplyOn: readNullableIsoDate(row.taxable_supply_on ?? null),
-      dueOn: readNullableIsoDate(row.due_on ?? null),
-      currency: readNullableCurrencyCode(row.currency ?? null),
-      total: parseNullableDecimal(row.total_gross),
-      vatLines: decodeVatLines(row.vat_breakdown),
-      deductiblePercent: Number(row.deductible_percent),
-      category: readNullableText(row.category ?? null),
-      tags: asStringArray(row.tags),
-      note: readNullableText(row.note ?? null),
-      figures: decodeFigures(row.figures),
-      paid: parseDecimal(row.paid),
-      payments: Number(row.payments),
-      removedAt: readNullableText(row.removed_at ?? null),
-      createdAt: readText(row.created_at),
-      updatedAt: readText(row.updated_at),
+      supplierDocumentNumber: readNullableText(row["supplier_document_number"] ?? null),
+      issuedOn: readNullableIsoDate(row["issued_on"] ?? null),
+      taxableSupplyOn: readNullableIsoDate(row["taxable_supply_on"] ?? null),
+      dueOn: readNullableIsoDate(row["due_on"] ?? null),
+      currency: readNullableCurrencyCode(row["currency"] ?? null),
+      total: parseNullableDecimal(row["total_gross"]),
+      vatLines: decodeVatLines(row["vat_breakdown"]),
+      deductiblePercent: Number(row["deductible_percent"]),
+      category: readNullableText(row["category"] ?? null),
+      tags: asStringArray(row["tags"]),
+      note: readNullableText(row["note"] ?? null),
+      figures: decodeFigures(row["figures"]),
+      paid: parseDecimal(row["paid"]),
+      payments: Number(row["payments"]),
+      removedAt: readNullableText(row["removed_at"] ?? null),
+      createdAt: readText(row["created_at"]),
+      updatedAt: readText(row["updated_at"]),
     };
   }),
   encode: (row) => ({
@@ -271,16 +271,16 @@ const attachmentSpec: TableSpec<AttachmentRow> = {
   ),
   decode: decodeEach(
     (row: DbRow): AttachmentRow => ({
-      id: readAttachmentId(row.id),
-      workspaceId: decodeWorkspaceId(row.workspace_id),
-      revision: Number(row.revision),
-      expenseId: readExpenseId(row.expense_id),
-      blobKey: readText(row.blob_key),
-      name: readNullableText(row.file_name ?? null) ?? "",
-      contentType: readText(row.content_type),
-      bytes: Number(row.bytes),
-      sha256: readText(row.sha256),
-      createdAt: readText(row.created_at),
+      id: readAttachmentId(row["id"]),
+      workspaceId: decodeWorkspaceId(row["workspace_id"]),
+      revision: Number(row["revision"]),
+      expenseId: readExpenseId(row["expense_id"]),
+      blobKey: readText(row["blob_key"]),
+      name: readNullableText(row["file_name"] ?? null) ?? "",
+      contentType: readText(row["content_type"]),
+      bytes: Number(row["bytes"]),
+      sha256: readText(row["sha256"]),
+      createdAt: readText(row["created_at"]),
     }),
   ),
   encode: (row) => ({

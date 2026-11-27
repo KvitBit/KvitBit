@@ -193,7 +193,7 @@ const scenario = <A, E>(
               billingEmails: ["fakturace@odberatel.cz"],
             }),
           );
-          const contactId = yield* Schema.decodeUnknownEffect(ContactId)(customer.id).pipe(
+          const contactId = yield* Schema.decodeUnknownEffect(ContactId)(customer["id"]).pipe(
             Effect.orDie,
           );
           const t = yield* Templates;
@@ -210,7 +210,7 @@ const scenario = <A, E>(
             ],
             due: { inDays: 14 },
           });
-          const templateId = yield* Schema.decodeUnknownEffect(TemplateId)(created.id).pipe(
+          const templateId = yield* Schema.decodeUnknownEffect(TemplateId)(created["id"]).pipe(
             Effect.orDie,
           );
           const scheduled = yield* t.schedule(
@@ -221,7 +221,7 @@ const scenario = <A, E>(
           if (scheduled.schedule === null)
             return yield* Effect.die("expected a recurring schedule");
           const scheduleId = yield* Schema.decodeUnknownEffect(ScheduleId)(
-            scheduled.schedule.id,
+            scheduled.schedule["id"],
           ).pipe(Effect.orDie);
           const job = yield* captureJobCaller;
           return yield* body({ workspaceId: owner.workspaceId, templateId, scheduleId, job });
@@ -277,7 +277,7 @@ const nextOccurrence = (w: World) =>
     const view = yield* templates.get(w.templateId);
     if (view.schedule === null) return yield* Effect.die("expected a recurring schedule");
     return yield* Schema.decodeUnknownEffect(Schema.NullOr(IsoDate))(
-      view.schedule.nextOccurrence,
+      view.schedule["nextOccurrence"],
     ).pipe(Effect.orDie);
   });
 

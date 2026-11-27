@@ -211,7 +211,7 @@ const isBotProtected = (ctx: { readonly path?: string }) =>
 
 // Better Auth requires a Promise and handles rejected APIErrors itself.
 const runAuthPromise = <A, E>(effect: Effect.Effect<A, E>): Promise<A> =>
-  // biome-ignore lint/plugin: Better Auth's Promise middleware is a runtime boundary.
+  // biome-ignore lint/plugin/no-direct-effect-runs: Better Auth's Promise middleware is a runtime boundary.
   Effect.runPromise(effect);
 
 const isNonEmptyString = Schema.is(Schema.NonEmptyString);
@@ -472,7 +472,7 @@ export const guardClientMetadataFetch = (
     ...[input, init]: Parameters<ClientMetadataResourceFetch>
   ) {
     const response = yield* Effect.tryPromise({
-      // biome-ignore lint/plugin: Better Auth transports may return a Response or a Promise.
+      // biome-ignore lint/plugin/no-bare-promises: Better Auth transports may return a Response or a Promise.
       try: () => Promise.resolve(inner(input, init)),
       catch: (cause) => ({ cause }),
     }).pipe(Effect.catch(({ cause }) => Effect.die(cause)));

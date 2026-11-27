@@ -50,7 +50,7 @@ beforeEach(async () => {
         address: { city: "Brno", country: "CZ" },
         roles: ["customer", "supplier"],
       });
-      const contactId = yield* Schema.decodeUnknownEffect(ContactId)(contact.id);
+      const contactId = yield* Schema.decodeUnknownEffect(ContactId)(contact["id"]);
       const doc = yield* documents.issue({
         input: {
           kind: "invoice",

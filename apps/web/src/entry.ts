@@ -3,6 +3,7 @@ import { Router } from "@effect/ui";
 import { BrowserHost, BrowserRouter, HtmlHydrate } from "@effect/ui/html";
 import * as Clock from "effect/Clock";
 import * as Effect from "effect/Effect";
+import * as FetchHttpClient from "effect/http/FetchHttpClient";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
@@ -44,5 +45,9 @@ const host = Layer.unwrap(
 );
 
 const router = BrowserRouter.layer({ routes: BrowserRoutes });
-const layers = Layer.merge(RunApi.layer, Navigate.layer.pipe(Layer.provideMerge(router)));
+const layers = Layer.mergeAll(
+  RunApi.layer,
+  Navigate.layer.pipe(Layer.provideMerge(router)),
+  FetchHttpClient.layer,
+);
 host.pipe(Layer.provide(layers), Layer.launch, Effect.runFork);

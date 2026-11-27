@@ -87,7 +87,9 @@ describe("Expenses.record", () => {
   test("status defaults to complete and runs the required-field checks", async () => {
     const exit = await scenario(record({ note: "only a note" }));
     const issues = issuesOf(exit);
-    expect(EffectArray.map(issues, (i) => [i.code, issuePath(i.path), i.params?.reason])).toEqual([
+    expect(
+      EffectArray.map(issues, (i) => [i.code, issuePath(i.path), i.params?.["reason"]]),
+    ).toEqual([
       ["request.malformed", "issuedOn", "required"],
       ["request.malformed", "currency", "required"],
       ["request.malformed", "total", "required"],
@@ -129,7 +131,7 @@ describe("Expenses.record", () => {
       }),
     );
     const issues = issuesOf(exit);
-    expect(EffectArray.map(issues, (i) => [issuePath(i.path), i.params?.reason])).toEqual([
+    expect(EffectArray.map(issues, (i) => [issuePath(i.path), i.params?.["reason"]])).toEqual([
       ["total", "precision"],
       ["vat.0.base", "precision"],
       ["vat.0.vat", "vat_not_allowed"],
@@ -543,7 +545,7 @@ describe("deductibility, reverse charge and FX", () => {
       }),
     );
     const issues = issuesOf(exit);
-    expect(EffectArray.map(issues, (i) => [issuePath(i.path), i.params?.reason])).toEqual([
+    expect(EffectArray.map(issues, (i) => [issuePath(i.path), i.params?.["reason"]])).toEqual([
       ["vat.0.selfAssessed", "self_assessment_not_allowed"],
     ]);
   });

@@ -123,7 +123,7 @@ export const ok = <A, E>(exit: Exit.Exit<A, E>): A => {
 };
 
 const decodeContactId = Schema.decodeUnknownResult(ContactId);
-const contactId = (view: ContactView) => Result.getOrThrow(decodeContactId(view.id));
+const contactId = (view: ContactView) => Result.getOrThrow(decodeContactId(view["id"]));
 export const docId = (v: DocumentView) => v.id;
 
 /** 2 x 1000 standard + 1 x 500 reduced: base 2500, VAT 420 + 60, gross 2980 CZK. */

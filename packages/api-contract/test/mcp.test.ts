@@ -127,7 +127,7 @@ describe("MCP tool catalog", () => {
 
   test("input and output JSON Schemas are objects, as MCP requires", () => {
     for (const t of MCP_TOOLS) {
-      expect([t.name, toolJsonSchema(t.input).type, toolJsonSchema(t.output).type]).toEqual([
+      expect([t.name, toolJsonSchema(t.input)["type"], toolJsonSchema(t.output)["type"]]).toEqual([
         t.name,
         "object",
         "object",
@@ -150,7 +150,7 @@ describe("MCP tool catalog", () => {
   test("every $ref in a tool schema resolves inside its own $defs", () => {
     for (const t of MCP_TOOLS) {
       for (const schema of [toolJsonSchema(t.input), toolJsonSchema(t.output)]) {
-        const defs = Predicate.isObject(schema.$defs) ? schema.$defs : {};
+        const defs = Predicate.isObject(schema["$defs"]) ? schema["$defs"] : {};
         const encoded = encodeJson(schema);
         for (const match of Str.matchAll(LOCAL_REF)(encoded)) {
           expect([t.name, match[1] ?? "", (match[1] ?? "") in defs]).toEqual([
@@ -257,7 +257,7 @@ describe("two-step preview and confirm schemas", () => {
       result: { ok: true },
     });
     expect(() => output({ _tag: "Confirmed", result: {} })).toThrow();
-    expect(DocumentResult.pipe(twoStepOutput, toolJsonSchema).type).toBe("object");
+    expect(DocumentResult.pipe(twoStepOutput, toolJsonSchema)["type"]).toBe("object");
   });
 
   test("args decode for preview and confirm; confirm must be literally true", () => {
@@ -391,8 +391,8 @@ describe("upsert_contact argument forms", () => {
 
   test("the JSON Schema describes the valid forms and the Contact revision", () => {
     const schema = toolJsonSchema(UpsertContactArgs);
-    expect(String(schema.description)).toContain("{ contactId, revision, contact }");
-    const revision = encodeJson(schemaProperties(schema).revision);
+    expect(String(schema["description"])).toContain("{ contactId, revision, contact }");
+    const revision = encodeJson(schemaProperties(schema)["revision"]);
     expect(revision).toContain("Contact revision");
     expect(revision).not.toContain("document revision");
   });
@@ -443,7 +443,7 @@ describe("list_expenses arguments", () => {
   });
 
   test("the JSON Schema is closed", () => {
-    expect(toolJsonSchema(ListExpensesArgs).additionalProperties).toBe(false);
+    expect(toolJsonSchema(ListExpensesArgs)["additionalProperties"]).toBe(false);
   });
 
   test("only list_expenses is closed so far; other inputs still drop extras", () => {
@@ -464,6 +464,6 @@ describe("list_expenses arguments", () => {
     ).toEqual({
       text: "Ada",
     });
-    expect(toolJsonSchema(ListContactsArgs).additionalProperties).toBe(true);
+    expect(toolJsonSchema(ListContactsArgs)["additionalProperties"]).toBe(true);
   });
 });

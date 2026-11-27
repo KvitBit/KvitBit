@@ -48,8 +48,8 @@ export const WorkspaceGroupLive = HttpApiBuilder.group(
       )
       .handle("listBankAccounts", () =>
         Effect.map(workspaces.current, (view) =>
-          Arr.isArray(view.bankAccounts)
-            ? Arr.map(view.bankAccounts, (account) => BankAccountView.make(account))
+          Arr.isArray(view["bankAccounts"])
+            ? Arr.map(view["bankAccounts"], (account) => BankAccountView.make(account))
             : [],
         ),
       )

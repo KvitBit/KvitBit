@@ -150,8 +150,8 @@ export const formatDateTime: {
       (p) => [p.type, p.value],
     ),
   );
-  const day = formatDateParts(parts.year, parts.month, parts.day, lang);
-  return Str.trimEnd(`${day} ${parts.hour}:${parts.minute} ${parts.timeZoneName ?? ""}`);
+  const day = formatDateParts(parts["year"], parts["month"], parts["day"], lang);
+  return Str.trimEnd(`${day} ${parts["hour"]}:${parts["minute"]} ${parts["timeZoneName"] ?? ""}`);
 });
 
 /** "CZ65 2010 0000 0021 0148 2910". */

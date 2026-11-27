@@ -98,7 +98,7 @@ test("exports canonical reporting bytes from bounded SQL pages after emitting it
             address: { city: "Brno", country: "CZ" },
             roles: ["customer", "supplier"],
           });
-          const contactId = yield* Schema.decodeUnknownEffect(ContactId)(contact.id);
+          const contactId = yield* Schema.decodeUnknownEffect(ContactId)(contact["id"]);
           const input = {
             kind: "proforma",
             contact: contactId,
@@ -149,7 +149,7 @@ test("exports canonical reporting bytes from bounded SQL pages after emitting it
             tags: ["z", "á", "a"],
             deductibility: { partial: 73 },
           });
-          const recordedExpenseId = yield* Schema.decodeUnknownEffect(ExpenseId)(expense.id);
+          const recordedExpenseId = yield* Schema.decodeUnknownEffect(ExpenseId)(expense["id"]);
           yield* expenses.record({ status: "incomplete" });
           yield* expenses.attach(recordedExpenseId, {
             name: "receipt.pdf",

@@ -11,11 +11,14 @@
  */
 import { ReleaseInfo } from "@kvitbit/api-contract";
 import * as Arr from "effect/Array";
+import * as SecureRandom from "effect/crypto/SecureRandom";
+import * as Signature from "effect/crypto/Signature";
 import * as Effect from "effect/Effect";
 import * as Headers from "effect/http/Headers";
 import * as HttpRouter from "effect/http/HttpRouter";
 import type * as HttpServerRequest from "effect/http/HttpServerRequest";
 import * as HttpServerResponse from "effect/http/HttpServerResponse";
+import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Redacted from "effect/Redacted";
 import * as Schema from "effect/Schema";
@@ -136,7 +139,7 @@ const handleManifest = (config: MobileConfigShape, storage: MobileStorageShape) 
 const handleUpdateAsset = (storage: MobileStorageShape) =>
   Effect.fnUntraced(function* () {
     const params = yield* HttpRouter.params;
-    const sha256 = params.sha256 ?? "";
+    const sha256 = params["sha256"] ?? "";
     if (!isValidSha256(sha256)) {
       return HttpServerResponse.text("Update asset not found", {
         status: 404,
@@ -242,7 +245,7 @@ const handleLatestRelease = (config: MobileConfigShape, storage: MobileStorageSh
 const handleReleaseApk = (storage: MobileStorageShape) =>
   Effect.fnUntraced(function* () {
     const params = yield* HttpRouter.params;
-    const version = params.version ?? "";
+    const version = params["version"] ?? "";
     if (!isValidReleaseVersion(version)) {
       return HttpServerResponse.text("Release APK not found", {
         status: 404,
@@ -313,4 +316,8 @@ export const MobileRoutesLive = HttpRouter.use(
     yield* router.add("GET", "/api/mobile/releases/:version/apk", handleReleaseApk(storage));
     yield* router.add("GET", "/.well-known/assetlinks.json", handleAssetLinks(config));
   }),
+).pipe(
+  HttpRouter.provideRequest(
+    Signature.layerWebCrypto.pipe(Layer.provideMerge(SecureRandom.layerWebCrypto)),
+  ),
 );

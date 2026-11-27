@@ -17,7 +17,7 @@ import * as Fn from "effect/Function";
 import * as Schema from "effect/Schema";
 import * as Str from "effect/String";
 import { authFetch, Failure, failureFromUnknown } from "../../app/api";
-import { browserCommand, defineApiCommand, type PageCommand } from "../../app/commands";
+import { apiCommand, defineApiCommand, type PageCommand } from "../../app/commands";
 import { copy, translator } from "../../app/i18n";
 import { Intent_ } from "../../app/intent";
 import {
@@ -291,7 +291,8 @@ const AuthGetCmd = defineApiCommand({
 const startBotProof = (scope: BotScope, seq: Remote.Seq) => BotProofCmd({ scope, seq });
 
 const runPasskeyAuth = (seq: Remote.Seq) =>
-  browserCommand(
+  apiCommand(
+    Message,
     "AuthPasskey",
     performPasskeyAuthentication.pipe(
       Effect.map((out) =>

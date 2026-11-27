@@ -47,7 +47,7 @@ const mapMultipartError = (
 const toBrandingView = (
   view: WorkspaceView,
   preResolved?: ResolvedTheme | null,
-): Effect.Effect<BrandingView> =>
+): Effect.Effect<BrandingView, never, Effect.Services<ReturnType<typeof resolveTheme>>> =>
   Effect.gen(function* () {
     const b = view.branding;
     const resolvedTheme =

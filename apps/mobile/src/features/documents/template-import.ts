@@ -120,7 +120,7 @@ const resolveSeed = Effect.fn("TemplateImport.resolveSeed")(function* (
     run((api) => api.templates.get({ params: { ...scope, templateId } })),
   );
   if (template._tag === "Err") return template;
-  const decoded = Schema.decodeUnknownOption(Source)(template.value.input);
+  const decoded = Schema.decodeUnknownOption(Source)(template.value["input"]);
   if (Option.isNone(decoded)) return err(UiError.unexpected());
   const source = decoded.value;
   const [contact, workspaceView, series] = yield* Effect.all(

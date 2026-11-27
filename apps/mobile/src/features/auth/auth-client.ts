@@ -56,15 +56,16 @@ const mapAuthError = (
   context: { readonly notFoundOn400?: boolean } = {},
 ): UiError => {
   const body = jsonObject(response.body);
-  const code = jsonString(body?._tag) ?? jsonString(body?.code) ?? jsonString(body?.error) ?? "";
+  const code =
+    jsonString(body?.["_tag"]) ?? jsonString(body?.["code"]) ?? jsonString(body?.["error"]) ?? "";
   const upper = Str.toUpperCase(code);
-  const msg = Str.toLowerCase(jsonString(body?.message) ?? "");
+  const msg = Str.toLowerCase(jsonString(body?.["message"]) ?? "");
 
   if (code === "InvalidBotProof" || upper === "INVALID_BOT_PROOF") {
     return InvalidBotProof.make({});
   }
   if (response.status === 429 || code === "RateLimited" || upper === "TOO_MANY_REQUESTS") {
-    const retryAfter = jsonNumber(body?.retryAfterSeconds) ?? 60;
+    const retryAfter = jsonNumber(body?.["retryAfterSeconds"]) ?? 60;
     return RateLimited.make({ retryAfterSeconds: retryAfter });
   }
   if (response.status === 503 || code === "Unavailable") {
@@ -146,30 +147,30 @@ const parseDate = Fn.flow(
 );
 
 const parsePasskey = Fn.flow(jsonObject, (row) => {
-  const id = jsonString(row?.id);
+  const id = jsonString(row?.["id"]);
   if (id === null) return Option.none<PasskeyView>();
-  const name = jsonString(row?.name);
+  const name = jsonString(row?.["name"]);
   return Option.some<PasskeyView>({
     id,
     name: name === null || name.length === 0 ? id : name,
-    createdAt: parseDate(row?.createdAt),
-    deviceType: jsonString(row?.deviceType),
-    backedUp: row?.backedUp === true,
+    createdAt: parseDate(row?.["createdAt"]),
+    deviceType: jsonString(row?.["deviceType"]),
+    backedUp: row?.["backedUp"] === true,
   });
 });
 
 const parseSession = (currentSessionId: string) =>
   Fn.flow(jsonObject, (row): SessionView | null => {
-    const rowId = jsonString(row?.id);
-    const id = jsonString(row?.token) ?? rowId;
+    const rowId = jsonString(row?.["id"]);
+    const id = jsonString(row?.["token"]) ?? rowId;
     if (id === null) return null;
     return {
       id,
       current: rowId === currentSessionId,
-      userAgent: jsonString(row?.userAgent),
-      ipAddress: jsonString(row?.ipAddress),
-      createdAt: parseDate(row?.createdAt),
-      expiresAt: parseDate(row?.expiresAt),
+      userAgent: jsonString(row?.["userAgent"]),
+      ipAddress: jsonString(row?.["ipAddress"]),
+      createdAt: parseDate(row?.["createdAt"]),
+      expiresAt: parseDate(row?.["expiresAt"]),
     };
   });
 
@@ -270,8 +271,8 @@ export const makeAuthClient = (deps: AuthClientDeps): AuthClient => {
           const body = jsonObject(res.body);
           if (
             kind === "verify" &&
-            body?.status === true &&
-            body.user === null &&
+            body?.["status"] === true &&
+            body["user"] === null &&
             res.token === null
           ) {
             return ok(null);
@@ -423,7 +424,7 @@ export const makeAuthClient = (deps: AuthClientDeps): AuthClient => {
           );
           if (!verifyRes.ok) return err(mapAuthError(verifyRes));
           const body = jsonObject(verifyRes.body);
-          const parsed = parsePasskey(jsonObject(body?.passkey) ?? body);
+          const parsed = parsePasskey(jsonObject(body?.["passkey"]) ?? body);
           return Option.match(parsed, {
             onNone: () => err(UiError.unexpected(verifyRes.status, null)),
             onSome: ok,
@@ -438,7 +439,7 @@ export const makeAuthClient = (deps: AuthClientDeps): AuthClient => {
             deps.auth("/passkey/list-user-passkeys", { method: "GET" }),
           );
           if (!res.ok) return err(mapAuthError(res));
-          const list = jsonArray(res.body) ?? jsonArray(jsonObject(res.body)?.passkeys) ?? [];
+          const list = jsonArray(res.body) ?? jsonArray(jsonObject(res.body)?.["passkeys"]) ?? [];
           return ok(Arr.getSomes(Arr.map(list, (row) => parsePasskey(row))));
         }),
       ),
@@ -481,10 +482,10 @@ export const makeAuthClient = (deps: AuthClientDeps): AuthClient => {
           );
           if (!res.ok) return err(mapAuthError(res));
           if (!current.ok) return err(mapAuthError(current));
-          const session = jsonObject(jsonObject(current.body)?.session);
-          const currentSessionId = jsonString(session?.id);
+          const session = jsonObject(jsonObject(current.body)?.["session"]);
+          const currentSessionId = jsonString(session?.["id"]);
           if (currentSessionId === null) return err(UiError.unexpected(current.status, null));
-          const list = jsonArray(res.body) ?? jsonArray(jsonObject(res.body)?.sessions) ?? [];
+          const list = jsonArray(res.body) ?? jsonArray(jsonObject(res.body)?.["sessions"]) ?? [];
           return ok(
             Arr.filter(
               Arr.map(list, (row) => parseSession(currentSessionId)(row)),

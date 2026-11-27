@@ -247,8 +247,8 @@ export const makeMcpHarness = (options: McpHarnessOptions = {}) => {
       return {
         res,
         json,
-        result: yield* decodeToolResult(json.result),
-        error: yield* decodeRpcError(json.error),
+        result: yield* decodeToolResult(json["result"]),
+        error: yield* decodeRpcError(json["error"]),
       };
     });
 
@@ -258,12 +258,12 @@ export const makeMcpHarness = (options: McpHarnessOptions = {}) => {
       id: string | number = 1,
     ) {
       const { res, json } = yield* requestRpc(token, "resources/read", { uri }, id);
-      const result = yield* decodeResourceResult(json.result);
+      const result = yield* decodeResourceResult(json["result"]);
       return {
         res,
         json,
         contents: result?.contents,
-        error: yield* decodeRpcError(json.error),
+        error: yield* decodeRpcError(json["error"]),
       };
     });
 

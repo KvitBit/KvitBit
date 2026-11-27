@@ -438,7 +438,7 @@ const ApplyOnboardingSetupCmd = defineApiCommand({
     return callApi(
       Effect.fn("apply workspace setup")(function* (client: Client) {
         yield* storeDraft(args.draftKey, args.draft);
-        const workspaceId = yield* Schema.decodeUnknownEffect(WorkspaceId)(args.workspace.id);
+        const workspaceId = yield* Schema.decodeUnknownEffect(WorkspaceId)(args.workspace["id"]);
         if (!progress.issuingEntity) {
           const current = yield* client.workspace.current({ params: { workspaceId } });
           const address = {
@@ -454,7 +454,7 @@ const ApplyOnboardingSetupCmd = defineApiCommand({
             legalForm: Str.trim(args.legalForm) || null,
             registerEntry: Str.trim(args.registerEntry) || null,
           };
-          const stored = Option.getOrUndefined(readIssuingEntity(current.issuingEntity));
+          const stored = Option.getOrUndefined(readIssuingEntity(current["issuingEntity"]));
           const matches =
             stored !== undefined &&
             Arr.every(EffectRecord.toEntries(issuer), ([key, value]) => stored[key] === value) &&

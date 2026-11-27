@@ -21,9 +21,9 @@ export const TemplatesGroupLive = HttpApiBuilder.group(
         templates.save(payload, requestOptions(headers)).pipe(
           Effect.map(jsonizeTemplate),
           Effect.tap((view) => {
-            if (!Predicate.isString(view.id)) return Effect.void;
+            if (!Predicate.isString(view["id"])) return Effect.void;
             return setLocation(
-              `${API_PREFIX}/workspaces/${params.workspaceId}/templates/${view.id}`,
+              `${API_PREFIX}/workspaces/${params.workspaceId}/templates/${view["id"]}`,
             );
           }),
         ),

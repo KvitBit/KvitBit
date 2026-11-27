@@ -80,7 +80,7 @@ describe("ResendEmailSender", () => {
     const request = seen[0];
     expect(request?.url).toBe("https://resend.test/emails");
     expect(request?.headers["idempotency-key"]).toBe("delivery-1");
-    expect(request?.headers.authorization).toBe("Bearer re_test");
+    expect(request?.headers["authorization"]).toBe("Bearer re_test");
     expect(request?.body).toEqual({
       from: "Kvitbit <noreply@kvitbit.cz>",
       to: ["jana@klient.cz"],

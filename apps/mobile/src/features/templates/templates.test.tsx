@@ -177,8 +177,8 @@ describe("templates & recurring model", () => {
   test("validates and builds TemplateInput", () => {
     const invalid = buildTemplateInput(emptyTemplateForm());
     expect(invalid.input).toBeNull();
-    expect(invalid.errors.name).toBe("required");
-    expect(invalid.errors.contact).toBe("required");
+    expect(invalid.errors["name"]).toBe("required");
+    expect(invalid.errors["contact"]).toBe("required");
 
     const valid = buildTemplateInput({
       ...emptyTemplateForm(),

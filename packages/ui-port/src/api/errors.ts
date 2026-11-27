@@ -127,9 +127,9 @@ const isIssueCode = Schema.is(IssueCode);
 
 const isAuthIssue: Predicate.Refinement<unknown, AuthIssue> = (u): u is AuthIssue => {
   if (!Predicate.isObjectOrArray(u)) return false;
-  const path = "path" in u ? u.path : undefined;
-  const code = "code" in u ? u.code : undefined;
-  const params = "params" in u ? u.params : undefined;
+  const path = "path" in u ? u["path"] : undefined;
+  const code = "code" in u ? u["code"] : undefined;
+  const params = "params" in u ? u["params"] : undefined;
   return (
     Arr.isArray(path) &&
     Arr.every(path, (segment) => Predicate.isString(segment) || Predicate.isNumber(segment)) &&
@@ -152,7 +152,8 @@ const isPlainInvalid: Predicate.Refinement<object, AuthInvalid> = (u): u is Auth
 export const isUiError = (u: unknown): u is UiError =>
   isWireError(u) ||
   (Predicate.isObjectOrArray(u) &&
-    (("_tag" in u && Predicate.isString(u._tag) && LOCAL_TAGS.has(u._tag)) || isPlainInvalid(u)));
+    (("_tag" in u && Predicate.isString(u["_tag"]) && LOCAL_TAGS.has(u["_tag"])) ||
+      isPlainInvalid(u)));
 
 /** The exchange a failure came from, when the failure value does not carry its response. */
 export interface FailedResponse {

@@ -17,6 +17,7 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as FetchHttpClient from "effect/http/FetchHttpClient";
 import * as HttpClient from "effect/http/HttpClient";
+import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import * as ChildProcess from "effect/process/ChildProcess";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
@@ -26,6 +27,11 @@ import * as Str from "effect/String";
 import pinned from "./toolchain.json" with { type: "json" };
 
 export const CACHE_DIR = Bun.fileURLToPath(new URL("../.cache", import.meta.url));
+export const ToolchainServicesLive = Layer.mergeAll(
+  BunServices.layer,
+  Digest.layerWebCrypto,
+  FetchHttpClient.layer,
+);
 
 export interface Toolchain {
   readonly jar: string;
@@ -46,7 +52,7 @@ export const sha256Of = Effect.fn("Formal.sha256Of")(function* (file: string) {
   const digest = yield* Digest.Digest;
   const bytes = yield* fs.readFile(file);
   return yield* digest.digestHex(Digest.sha256, bytes);
-}, Effect.provide(Digest.layerWebCrypto));
+});
 
 const verify = Effect.fn("Formal.verifyJar")(function* (
   file: string,
@@ -61,42 +67,38 @@ const verify = Effect.fn("Formal.verifyJar")(function* (
 });
 
 /** Returns a checksum-verified tla2tools.jar, downloading it into the cache when absent. */
-export const ensureJar = Effect.fn("Formal.ensureJar")(
-  function* (
-    override: string | undefined,
-    pin: { version: string; url: string; sha256: string } = pinned.tla2tools,
-  ) {
-    const fs = yield* FileSystem.FileSystem;
-    const path = yield* Path.Path;
-    if (override !== undefined && override !== "") {
-      // TLC runs in the model directory, so Java must load the absolute path we verified.
-      const file = path.resolve(override);
-      if (!(yield* fs.exists(file)))
-        return yield* ToolchainError.make({ message: `TLA2TOOLS=${file} does not exist.` });
-      yield* verify(file, pin.sha256, "TLA2TOOLS");
-      return file;
-    }
-    const jar = path.join(CACHE_DIR, `tla2tools-${pin.version}.jar`);
-    if (yield* fs.exists(jar)) {
-      yield* verify(jar, pin.sha256, "the cached jar (delete it to re-download)");
-      return jar;
-    }
-    yield* fs.makeDirectory(CACHE_DIR, { recursive: true });
-    const response = yield* HttpClient.get(pin.url);
-    if (response.status < 200 || response.status >= 300)
-      return yield* ToolchainError.make({
-        message: `Downloading ${pin.url} failed: HTTP ${response.status}.`,
-      });
-    const partial = yield* fs.makeTempFileScoped({ directory: CACHE_DIR, suffix: ".partial" });
-    const content = yield* response.arrayBuffer;
-    yield* fs.writeFile(partial, new Uint8Array(content));
-    yield* verify(partial, pin.sha256, pin.url);
-    yield* fs.rename(partial, jar);
+export const ensureJar = Effect.fn("Formal.ensureJar")(function* (
+  override: string | undefined,
+  pin: { version: string; url: string; sha256: string } = pinned.tla2tools,
+) {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  if (override !== undefined && override !== "") {
+    // TLC runs in the model directory, so Java must load the absolute path we verified.
+    const file = path.resolve(override);
+    if (!(yield* fs.exists(file)))
+      return yield* ToolchainError.make({ message: `TLA2TOOLS=${file} does not exist.` });
+    yield* verify(file, pin.sha256, "TLA2TOOLS");
+    return file;
+  }
+  const jar = path.join(CACHE_DIR, `tla2tools-${pin.version}.jar`);
+  if (yield* fs.exists(jar)) {
+    yield* verify(jar, pin.sha256, "the cached jar (delete it to re-download)");
     return jar;
-  },
-  Effect.scoped,
-  Effect.provide(FetchHttpClient.layer),
-);
+  }
+  yield* fs.makeDirectory(CACHE_DIR, { recursive: true });
+  const response = yield* HttpClient.get(pin.url);
+  if (response.status < 200 || response.status >= 300)
+    return yield* ToolchainError.make({
+      message: `Downloading ${pin.url} failed: HTTP ${response.status}.`,
+    });
+  const partial = yield* fs.makeTempFileScoped({ directory: CACHE_DIR, suffix: ".partial" });
+  const content = yield* response.arrayBuffer;
+  yield* fs.writeFile(partial, new Uint8Array(content));
+  yield* verify(partial, pin.sha256, pin.url);
+  yield* fs.rename(partial, jar);
+  return jar;
+}, Effect.scoped);
 
 const JAVA_VERSION = /version "([^"]+)"/;
 const JAVA_VERSION_SEPARATOR = /[.+-]/;
@@ -152,7 +154,7 @@ if (import.meta.main) {
           return Console.error(error.message);
         },
       }),
-      Effect.provide(BunServices.layer),
+      Effect.provide(ToolchainServicesLive),
     ),
   );
 }

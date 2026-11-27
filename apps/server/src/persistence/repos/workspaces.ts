@@ -108,7 +108,7 @@ const workspaceSpec: TableSpec<WorkspaceRow> = {
   ),
   decode: Effect.fn("WorkspacesRepo.decodeWorkspaces")(function* (rows: ReadonlyArray<DbRow>) {
     const sql = yield* SqlClient.SqlClient;
-    const ids = Arr.map(rows, (r) => decodeString(r.id));
+    const ids = Arr.map(rows, (r) => decodeString(r["id"]));
     const [entities, regimes, defaults] = yield* Effect.all(
       [
         sql<DbRow>`
@@ -133,81 +133,83 @@ const workspaceSpec: TableSpec<WorkspaceRow> = {
     );
 
     const entityByWs = new Map<string, DbRow>(
-      Arr.map(entities, (e) => [decodeString(e.workspace_id), e] as const),
+      Arr.map(entities, (e) => [decodeString(e["workspace_id"]), e] as const),
     );
     const regimesByWs = new Map<string, Array<{ regime: TaxRegime; effectiveFrom: IsoDate }>>();
     for (const r of regimes) {
-      const ws = decodeString(r.workspace_id);
+      const ws = decodeString(r["workspace_id"]);
       const list = regimesByWs.get(ws) ?? [];
       list.push({
-        regime: decodeTaxRegime(r.regime),
-        effectiveFrom: IsoDate.make(decodeString(r.effective_from)),
+        regime: decodeTaxRegime(r["regime"]),
+        effectiveFrom: IsoDate.make(decodeString(r["effective_from"])),
       });
       regimesByWs.set(ws, list);
     }
     const bankByWs = new Map<string, Record<string, BankAccountId>>();
     for (const b of defaults) {
-      const ws = decodeString(b.workspace_id);
+      const ws = decodeString(b["workspace_id"]);
       const map = bankByWs.get(ws) ?? {};
-      map[CurrencyCode.make(decodeString(b.currency))] = BankAccountId.make(decodeString(b.id));
+      map[CurrencyCode.make(decodeString(b["currency"]))] = BankAccountId.make(
+        decodeString(b["id"]),
+      );
       bankByWs.set(ws, map);
     }
 
     return Arr.map(rows, (row): WorkspaceRow => {
-      const id = decodeWorkspaceId(row.id);
+      const id = decodeWorkspaceId(row["id"]);
       const ie = entityByWs.get(id) ?? {};
-      const closedAt = decodeNullableString(row.closed_at ?? null);
-      const name = decodeString(row.name);
+      const closedAt = decodeNullableString(row["closed_at"] ?? null);
+      const name = decodeString(row["name"]);
       return {
         id,
         workspaceId: id,
-        revision: Number(row.revision),
-        slug: WorkspaceSlug.make(decodeString(row.slug)),
+        revision: Number(row["revision"]),
+        slug: WorkspaceSlug.make(decodeString(row["slug"])),
         name,
         closed: closedAt !== null,
         closedAt,
-        createdAt: decodeString(row.created_at),
+        createdAt: decodeString(row["created_at"]),
         issuingEntity: {
-          name: decodeString(ie.legal_name ?? name),
-          ico: decodeNullableString(ie.ico ?? null),
-          dic: decodeNullableString(ie.dic ?? null),
+          name: decodeString(ie["legal_name"] ?? name),
+          ico: decodeNullableString(ie["ico"] ?? null),
+          dic: decodeNullableString(ie["dic"] ?? null),
           address: {
-            street: decodeString(ie.street ?? ""),
-            city: decodeString(ie.city ?? ""),
-            postalCode: decodeString(ie.postal_code ?? ""),
-            country: decodeString(ie.country ?? "CZ"),
+            street: decodeString(ie["street"] ?? ""),
+            city: decodeString(ie["city"] ?? ""),
+            postalCode: decodeString(ie["postal_code"] ?? ""),
+            country: decodeString(ie["country"] ?? "CZ"),
           },
-          legalForm: decodeNullableString(ie.legal_form ?? null),
-          registerEntry: decodeNullableString(ie.commercial_register ?? null),
-          email: decodeNullableString(ie.email ?? null),
-          phone: decodeNullableString(ie.phone ?? null),
-          web: decodeNullableString(ie.web ?? null),
+          legalForm: decodeNullableString(ie["legal_form"] ?? null),
+          registerEntry: decodeNullableString(ie["commercial_register"] ?? null),
+          email: decodeNullableString(ie["email"] ?? null),
+          phone: decodeNullableString(ie["phone"] ?? null),
+          web: decodeNullableString(ie["web"] ?? null),
         },
         taxRegimes: regimesByWs.get(id) ?? [],
         defaults: {
-          currency: CurrencyCode.make(decodeString(row.default_currency)),
-          language: decodeLocale(row.default_language),
-          dueDays: Number(row.default_due_days),
-          paymentMethod: decodePaymentMethod(row.default_payment_method),
-          defaultNote: decodeNullableString(row.default_note ?? null),
-          paymentRounding: decodePaymentRounding(row.payment_rounding),
-          paymentTaxDocumentAutoSend: Boolean(row.auto_send_payment_tax_document),
+          currency: CurrencyCode.make(decodeString(row["default_currency"])),
+          language: decodeLocale(row["default_language"]),
+          dueDays: Number(row["default_due_days"]),
+          paymentMethod: decodePaymentMethod(row["default_payment_method"]),
+          defaultNote: decodeNullableString(row["default_note"] ?? null),
+          paymentRounding: decodePaymentRounding(row["payment_rounding"]),
+          paymentTaxDocumentAutoSend: Boolean(row["auto_send_payment_tax_document"]),
         },
         bankAccountByCurrency: bankByWs.get(id) ?? {},
         reminders: {
-          enabled: Boolean(row.reminders_enabled),
-          proformas: Boolean(row.reminders_for_proformas),
-          offsetsDays: asNumberArray(row.reminder_offsets_days),
+          enabled: Boolean(row["reminders_enabled"]),
+          proformas: Boolean(row["reminders_for_proformas"]),
+          offsetsDays: asNumberArray(row["reminder_offsets_days"]),
         },
         branding: {
-          pdfTemplate: decodePdfTemplate(row.pdf_template),
+          pdfTemplate: decodePdfTemplate(row["pdf_template"]),
           accentColor: Hex.make(
-            decodeString(row.accent_color ?? WorkspacesModule.DEFAULT_BRANDING.accentColor),
+            decodeString(row["accent_color"] ?? WorkspacesModule.DEFAULT_BRANDING.accentColor),
           ),
-          footerText: decodeNullableString(row.footer_text ?? null),
-          theme: row.theme_source === null ? null : decodeTheme(row.theme_source),
-          logo: row.logo === null ? null : decodeImageRef(row.logo),
-          stamp: row.stamp === null ? null : decodeImageRef(row.stamp),
+          footerText: decodeNullableString(row["footer_text"] ?? null),
+          theme: row["theme_source"] === null ? null : decodeTheme(row["theme_source"]),
+          logo: row["logo"] === null ? null : decodeImageRef(row["logo"]),
+          stamp: row["stamp"] === null ? null : decodeImageRef(row["stamp"]),
         },
       };
     });
@@ -313,26 +315,26 @@ const invitationSpec: TableSpec<InvitationRow> = {
     ", ",
   ),
   decode: decodeEach((row): InvitationRow => {
-    const email = decodeString(row.email);
+    const email = decodeString(row["email"]);
     return {
-      id: InvitationId.make(decodeString(row.id)),
-      workspaceId: decodeWorkspaceId(row.workspace_id),
-      revision: Number(row.revision),
+      id: InvitationId.make(decodeString(row["id"])),
+      workspaceId: decodeWorkspaceId(row["workspace_id"]),
+      revision: Number(row["revision"]),
       email,
       emailLower: Str.toLowerCase(email),
-      role: decodeInvitationRole(row.role),
-      status: decodeInvitationStatus(row.status),
-      tokenHash: decodeString(row.token_hash),
-      sendEpoch: Number(row.send_epoch),
-      lastSentAt: decodeString(row.last_sent_at),
-      workflowStartedAt: decodeNullableString(row.workflow_started_at ?? null),
-      invitedBy: UserId.make(decodeString(row.invited_by)),
-      createdAt: decodeString(row.created_at),
-      expiresAt: decodeString(row.expires_at),
+      role: decodeInvitationRole(row["role"]),
+      status: decodeInvitationStatus(row["status"]),
+      tokenHash: decodeString(row["token_hash"]),
+      sendEpoch: Number(row["send_epoch"]),
+      lastSentAt: decodeString(row["last_sent_at"]),
+      workflowStartedAt: decodeNullableString(row["workflow_started_at"] ?? null),
+      invitedBy: UserId.make(decodeString(row["invited_by"])),
+      createdAt: decodeString(row["created_at"]),
+      expiresAt: decodeString(row["expires_at"]),
       acceptedBy:
-        row.accepted_by === null || row.accepted_by === undefined
+        row["accepted_by"] === null || row["accepted_by"] === undefined
           ? null
-          : UserId.make(decodeString(row.accepted_by)),
+          : UserId.make(decodeString(row["accepted_by"])),
     };
   }),
   encode: (row) => ({
@@ -373,8 +375,8 @@ const bankAccountSpec: TableSpec<BankAccountRow> = {
   decode: Effect.fn("WorkspacesRepo.decodeBankAccounts")(function* (rows) {
     const decoded: BankAccountRow[] = [];
     for (const row of rows) {
-      const id = BankAccountId.make(decodeString(row.id));
-      if (row.iban === null) {
+      const id = BankAccountId.make(decodeString(row["id"]));
+      if (row["iban"] === null) {
         // Core bank accounts require an IBAN. The domestic account number cannot stand in for it.
         return yield* StoreUnavailable.make({
           cause: new Error(`Bank account ${id} has no stored IBAN`),
@@ -382,14 +384,14 @@ const bankAccountSpec: TableSpec<BankAccountRow> = {
       }
       decoded.push({
         id,
-        workspaceId: decodeWorkspaceId(row.workspace_id),
-        revision: Number(row.revision),
-        name: decodeNullableString(row.label ?? null),
-        iban: decodeString(row.iban),
-        bic: decodeNullableString(row.bic ?? null),
-        currency: CurrencyCode.make(decodeString(row.currency)),
-        archived: row.archived_at !== null && row.archived_at !== undefined,
-        createdAt: decodeString(row.created_at),
+        workspaceId: decodeWorkspaceId(row["workspace_id"]),
+        revision: Number(row["revision"]),
+        name: decodeNullableString(row["label"] ?? null),
+        iban: decodeString(row["iban"]),
+        bic: decodeNullableString(row["bic"] ?? null),
+        currency: CurrencyCode.make(decodeString(row["currency"])),
+        archived: row["archived_at"] !== null && row["archived_at"] !== undefined,
+        createdAt: decodeString(row["created_at"]),
       });
     }
     return decoded;
@@ -419,27 +421,27 @@ const MEMBERSHIP_SELECT = Arr.join(
 );
 
 const decodeMembership = (row: DbRow): MembershipRow => {
-  const workspaceId = decodeWorkspaceId(row.workspace_id);
-  const userId = UserId.make(decodeString(row.user_id));
+  const workspaceId = decodeWorkspaceId(row["workspace_id"]);
+  const userId = UserId.make(decodeString(row["user_id"]));
   return {
     id: `${workspaceId}:${userId}`,
     workspaceId,
-    revision: Number(row.revision),
+    revision: Number(row["revision"]),
     userId,
-    role: decodeRole(row.role),
-    joinedAt: decodeString(row.joined_at),
-    removedAt: decodeNullableString(row.removed_at ?? null),
+    role: decodeRole(row["role"]),
+    joinedAt: decodeString(row["joined_at"]),
+    removedAt: decodeNullableString(row["removed_at"] ?? null),
   };
 };
 
 const decodeSlugAlias = (row: DbRow): SlugAliasRow => {
-  const slug = decodeString(row.slug);
+  const slug = decodeString(row["slug"]);
   return {
     id: slug,
-    workspaceId: decodeWorkspaceId(row.workspace_id),
+    workspaceId: decodeWorkspaceId(row["workspace_id"]),
     revision: 1,
     slug,
-    expiresAt: decodeString(row.expires_at),
+    expiresAt: decodeString(row["expires_at"]),
   };
 };
 

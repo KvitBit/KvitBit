@@ -180,8 +180,8 @@ describe("themes group", () => {
     expect(presetRes.status).toBe(200);
     const preset = decodeTheme(await presetRes.json());
     expect(preset.source).toEqual({ _tag: "Preset", id: "graphite_atelier" });
-    expect(preset.schemes.light.roles.primary).toBe("#18181B");
-    expect(preset.schemes.dark.roles.surface).toBe("#09090B");
+    expect(preset.schemes.light.roles["primary"]).toBe("#18181B");
+    expect(preset.schemes.dark.roles["surface"]).toBe("#09090B");
     expect(Rec.keys(preset.schemes.light.roles).length).toBe(M3_COLOR_ROLES.length);
     expect(preset.schemes.light.extended.paid.color).toMatch(COLOR_HEX);
     expect(preset.warnings).toBeUndefined();
@@ -223,7 +223,7 @@ describe("themes group", () => {
     expect(okRes.status).toBe(200);
     const resolved = decodeTheme(await okRes.json());
     // Missing contrast schemes generated from seed
-    expect(resolved.schemes.lightHigh.roles.primary).toMatch(COLOR_HEX);
+    expect(resolved.schemes.lightHigh.roles["primary"]).toMatch(COLOR_HEX);
     expect(resolved.warnings).toBeUndefined();
 
     // Low-contrast MTB JSON is accepted with theme.low_contrast warning (rule T2)

@@ -135,54 +135,54 @@ const encodeRenderModel = (view: DeliveryRecord["view"]): string => {
 
 const decodeRow = (row: DbRow): DeliveryRecord => {
   const reminder =
-    row.reminder_due_on !== null &&
-    row.reminder_due_on !== undefined &&
-    row.reminder_offset_days !== null &&
-    row.reminder_offset_days !== undefined &&
-    row.reminder_armed_by !== null &&
-    row.reminder_armed_by !== undefined
+    row["reminder_due_on"] !== null &&
+    row["reminder_due_on"] !== undefined &&
+    row["reminder_offset_days"] !== null &&
+    row["reminder_offset_days"] !== undefined &&
+    row["reminder_armed_by"] !== null &&
+    row["reminder_armed_by"] !== undefined
       ? {
-          dueOn: readIsoDate(row.reminder_due_on),
-          offsetDays: Number(row.reminder_offset_days),
-          armedBy: Number(row.reminder_armed_by),
+          dueOn: readIsoDate(row["reminder_due_on"]),
+          offsetDays: Number(row["reminder_offset_days"]),
+          armedBy: Number(row["reminder_armed_by"]),
         }
       : null;
 
-  const deliveryId = readDeliveryId(row.id);
-  const workspaceId = decodeWorkspaceId(row.workspace_id);
-  const view = decodeRenderModel(row.render_model, { deliveryId, workspaceId });
+  const deliveryId = readDeliveryId(row["id"]);
+  const workspaceId = decodeWorkspaceId(row["workspace_id"]);
+  const view = decodeRenderModel(row["render_model"], { deliveryId, workspaceId });
   const attachment =
-    (Predicate.isNullish(row.attachment) || row.attachment === "null") &&
+    (Predicate.isNullish(row["attachment"]) || row["attachment"] === "null") &&
     readLegacyDeliveryInfo(view) !== undefined
       ? missingLegacyAttachment
-      : readAttachment(row.attachment);
+      : readAttachment(row["attachment"]);
 
   return {
     id: deliveryId,
     workspaceId,
-    revision: Number(row.revision),
-    documentId: readDocumentId(row.document_id),
-    sequence: Number(row.sequence),
-    documentRevision: Number(row.document_revision),
-    purpose: readDeliveryPurpose(row.purpose),
-    status: readDeliveryStatus(row.status),
-    to: asStringArray(row.recipients),
-    replyTo: readNullableText(row.reply_to ?? null),
-    language: readLocale(row.language),
-    subject: readText(row.subject),
+    revision: Number(row["revision"]),
+    documentId: readDocumentId(row["document_id"]),
+    sequence: Number(row["sequence"]),
+    documentRevision: Number(row["document_revision"]),
+    purpose: readDeliveryPurpose(row["purpose"]),
+    status: readDeliveryStatus(row["status"]),
+    to: asStringArray(row["recipients"]),
+    replyTo: readNullableText(row["reply_to"] ?? null),
+    language: readLocale(row["language"]),
+    subject: readText(row["subject"]),
     view,
     attachment,
-    contactId: readContactId(row.contact_id),
-    arms: Boolean(row.arms),
-    dueOn: readIsoDate(row.due_on),
+    contactId: readContactId(row["contact_id"]),
+    arms: Boolean(row["arms"]),
+    dueOn: readIsoDate(row["due_on"]),
     reminder,
-    attempts: Number(row.attempts),
-    lastOutcome: readNullableLastOutcome(row.last_outcome ?? null),
-    failure: readNullableText(row.failure ?? null),
-    provider: readNullableText(row.provider ?? null),
-    providerMessageId: readNullableText(row.provider_message_id ?? null),
-    createdAt: readText(row.created_at),
-    updatedAt: readText(row.updated_at),
+    attempts: Number(row["attempts"]),
+    lastOutcome: readNullableLastOutcome(row["last_outcome"] ?? null),
+    failure: readNullableText(row["failure"] ?? null),
+    provider: readNullableText(row["provider"] ?? null),
+    providerMessageId: readNullableText(row["provider_message_id"] ?? null),
+    createdAt: readText(row["created_at"]),
+    updatedAt: readText(row["updated_at"]),
   };
 };
 

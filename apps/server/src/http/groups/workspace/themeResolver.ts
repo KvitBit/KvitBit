@@ -591,7 +591,7 @@ const resolveMaterialThemeBuilder = (
       ),
     );
   }
-  if (Predicate.isObject(json) && "seed" in json && !isValidHex(json.seed)) {
+  if (Predicate.isObject(json) && "seed" in json && !isValidHex(json["seed"])) {
     return Effect.fail(invalid(issue("theme.seed_invalid", ["source", "json", "seed"])));
   }
   const exit = Schema.decodeUnknownExit(MaterialThemeJson)(json);
@@ -645,7 +645,6 @@ const cacheKey = Effect.fn("ThemeResolver.cacheKey")(
     const digest = yield* Digest.Digest;
     return yield* digest.digestHex(Digest.sha256, new TextEncoder().encode(encoded.value));
   },
-  Effect.provide(Digest.layerWebCrypto),
   Effect.catchDefect(() => Effect.undefined),
 );
 

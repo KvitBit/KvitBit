@@ -253,7 +253,7 @@ describe("OpenAPI (section 3.7)", () => {
   const operations = Arr.flatMap(Record.toEntries(spec.paths), ([path, item]) =>
     Arr.map(Record.toEntries<string, unknown>(item), ([method, op]) => {
       const operation = Predicate.isObject(op) ? op : {};
-      return { path, method, operationId: operation.operationId, summary: operation.summary };
+      return { path, method, operationId: operation["operationId"], summary: operation["summary"] };
     }),
   );
 

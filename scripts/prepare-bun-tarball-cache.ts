@@ -15,11 +15,11 @@ if (cache.length === 0 || deps.length === 0) {
 }
 
 const lock = Bun.JSONC.parse(await Bun.file("bun.lock").text());
-if (!(isLockObject(lock) && isLockObject(lock.packages))) {
+if (!(isLockObject(lock) && isLockObject(lock["packages"]))) {
   throw new Error("Expected a packages object in bun.lock.");
 }
 
-for (const entry of Object.values(lock.packages)) {
+for (const entry of Object.values(lock["packages"])) {
   if (!Array.isArray(entry) || entry.length !== 3) continue;
   const parts: readonly unknown[] = entry;
   const [specifier, , integrity] = parts;

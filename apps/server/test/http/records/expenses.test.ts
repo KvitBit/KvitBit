@@ -67,7 +67,7 @@ beforeEach(async () => {
       });
     }).pipe(Effect.provideService(CurrentCaller, member)),
   );
-  supplierId = Schema.decodeUnknownEffect(Schema.String)(contact.id).pipe(Effect.runSync);
+  supplierId = Schema.decodeUnknownEffect(Schema.String)(contact["id"]).pipe(Effect.runSync);
 });
 
 afterEach(async () => {

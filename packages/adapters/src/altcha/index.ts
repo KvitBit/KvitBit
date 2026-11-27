@@ -251,7 +251,7 @@ export const makeAltchaBotProtection = (
       }
       if (!result.verified) return yield* InvalidBotProof.make({ reason: "invalid_solution" });
       // Signature verified: the scope and expiry below are the server's own.
-      if (challenge.parameters.data?.scope !== scope) {
+      if (challenge.parameters.data?.["scope"] !== scope) {
         return yield* InvalidBotProof.make({ reason: "wrong_scope" });
       }
       const expiresAtSeconds = challenge.parameters.expiresAt;

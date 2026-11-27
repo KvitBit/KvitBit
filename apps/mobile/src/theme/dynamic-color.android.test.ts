@@ -48,11 +48,11 @@ describe("dynamic-color.android", () => {
   test("production readDynamicColor resolves ARGB integers from NativeModules.KvitbitDynamicColor on API 31+", async () => {
     const origOs = Platform.OS;
     const origVersion = Reflect.get(Platform, "Version");
-    const origModule = NativeModules.KvitbitDynamicColor;
+    const origModule = NativeModules["KvitbitDynamicColor"];
     try {
       Reflect.set(Platform, "OS", "android");
       Reflect.set(Platform, "Version", 34);
-      NativeModules.KvitbitDynamicColor = {
+      NativeModules["KvitbitDynamicColor"] = {
         getDynamicPalette: async () => ({
           system_accent1_600: 0xff3b6939,
           system_accent1_200: 0xffa0d49b,
@@ -68,7 +68,7 @@ describe("dynamic-color.android", () => {
     } finally {
       Reflect.set(Platform, "OS", origOs);
       Reflect.set(Platform, "Version", origVersion);
-      NativeModules.KvitbitDynamicColor = origModule;
+      NativeModules["KvitbitDynamicColor"] = origModule;
     }
   });
 

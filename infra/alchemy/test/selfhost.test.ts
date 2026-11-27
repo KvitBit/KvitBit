@@ -333,13 +333,13 @@ describe("Self-hosting and CI deploy artifacts", () => {
     expect(parsed.services.postgres.volumes).toContain(
       "./docker/reconcile-app-role.sh:/usr/local/bin/reconcile-app-role.sh:ro",
     );
-    expect(parsed.services.migrate.environment.DATABASE_URL_UNPOOLED).toContain(
+    expect(parsed.services.migrate.environment["DATABASE_URL_UNPOOLED"]).toContain(
       "DATABASE_URL_UNPOOLED",
     );
-    expect(parsed.services.migrate.environment.KVITBIT_BUNDLED_MIGRATION_URL).toContain(
+    expect(parsed.services.migrate.environment["KVITBIT_BUNDLED_MIGRATION_URL"]).toContain(
       "POSTGRES_USER",
     );
-    expect(parsed.services["reconcile-roles"].depends_on.migrate?.condition).toBe(
+    expect(parsed.services["reconcile-roles"].depends_on["migrate"]?.condition).toBe(
       "service_completed_successfully",
     );
     expect(parsed.services["reconcile-roles"].volumes).toContain(
@@ -351,8 +351,8 @@ describe("Self-hosting and CI deploy artifacts", () => {
     expect(parsed.services.kvitbit.depends_on["reconcile-roles"]?.condition).toBe(
       "service_completed_successfully",
     );
-    expect(parsed.services.kvitbit.environment.DATABASE_URL).toContain("POSTGRES_APP_USER");
-    expect(parsed.services.kvitbit.environment.DATABASE_URL_UNPOOLED).toBeUndefined();
+    expect(parsed.services.kvitbit.environment["DATABASE_URL"]).toContain("POSTGRES_APP_USER");
+    expect(parsed.services.kvitbit.environment["DATABASE_URL_UNPOOLED"]).toBeUndefined();
     expect(compose).toContain("postgres:17-alpine");
     expect(compose).toContain('command: ["migrate"]');
     expect(compose).toContain("condition: service_completed_successfully");
@@ -827,8 +827,8 @@ describe("Self-hosting and CI deploy artifacts", () => {
     expect(parsed).toBeDefined();
 
     // Production-only: no staging option pointing at prod secrets
-    expect(parsed.on.workflow_dispatch.inputs.stage).toBeUndefined();
-    expect(parsed.on.workflow_dispatch.inputs.bootstrap_foundation).toBeDefined();
+    expect(parsed.on.workflow_dispatch.inputs["stage"]).toBeUndefined();
+    expect(parsed.on.workflow_dispatch.inputs["bootstrap_foundation"]).toBeDefined();
     expect(workflow).toContain("KVITBIT_STAGE: prod");
     expect(workflow).not.toContain("- staging");
 
@@ -914,7 +914,7 @@ describe("Self-hosting and CI deploy artifacts", () => {
     const steps = workflow.jobs.deploy.steps;
     const getStep = (name: string) =>
       Option.getOrUndefined(Arr.findFirst(steps, (step) => Str.startsWith(name)(step.name ?? "")));
-    expect(workflow.on.workflow_dispatch.inputs.bootstrap_feedback_secret).toEqual({
+    expect(workflow.on.workflow_dispatch.inputs["bootstrap_feedback_secret"]).toEqual({
       description: expect.any(String),
       type: "boolean",
       default: false,

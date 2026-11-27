@@ -754,8 +754,8 @@ export const toolJsonSchema = (schema: Schema.Top): JsonSchema.JsonSchema => {
       ? Schema.toJsonSchemaDocument(schema)
       : Schema.toJsonSchemaDocument(closed, { onExcessProperty: "error" });
   const root = { ...document.schema };
-  if (Rec.keys(document.definitions).length > 0) root.$defs = document.definitions;
-  if (root.type === undefined && root.anyOf !== undefined) root.type = "object";
+  if (Rec.keys(document.definitions).length > 0) root["$defs"] = document.definitions;
+  if (root["type"] === undefined && root["anyOf"] !== undefined) root["type"] = "object";
   return root;
 };
 

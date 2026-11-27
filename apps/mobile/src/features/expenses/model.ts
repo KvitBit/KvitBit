@@ -218,8 +218,8 @@ const asVatTreatment = Fn.flow(
 );
 
 const decodeMoney = (r: ReturnType<typeof asRecord>): ExpenseMoneyData | null => {
-  const amount = asDecimalString(r.amount);
-  const currency = asCurrency(r.currency);
+  const amount = asDecimalString(r["amount"]);
+  const currency = asCurrency(r["currency"]);
   if (amount === null || currency === null) return null;
   return { amount, currency };
 };
@@ -231,50 +231,50 @@ export const deductibilityPercent = (d: ExpenseDeductibility): number =>
   d === "full" ? 100 : d === "none" ? 0 : d.partial;
 
 const decodeAttachment = (r: ReturnType<typeof asRecord>): ExpenseAttachmentData | null => {
-  const id = asAttachmentId(r.id);
-  const expenseId = asExpenseId(r.expenseId);
-  const name = asString(r.name);
+  const id = asAttachmentId(r["id"]);
+  const expenseId = asExpenseId(r["expenseId"]);
+  const name = asString(r["name"]);
   if (id === null || expenseId === null || name === null) return null;
   return {
     id,
     expenseId,
     name,
-    contentType: asString(r.contentType) ?? "application/octet-stream",
-    bytes: asNumber(r.bytes) ?? 0,
-    sha256: asString(r.sha256) ?? "",
-    createdAt: asString(r.createdAt) ?? "",
+    contentType: asString(r["contentType"]) ?? "application/octet-stream",
+    bytes: asNumber(r["bytes"]) ?? 0,
+    sha256: asString(r["sha256"]) ?? "",
+    createdAt: asString(r["createdAt"]) ?? "",
   };
 };
 
 export const decodeExpenseSummary = (r: ExpenseSummary): ExpenseSummaryData | null => {
-  const id = asExpenseId(r.id);
+  const id = asExpenseId(r["id"]);
   if (id === null) return null;
   return {
     id,
-    revision: asNumber(r.revision) ?? 1,
+    revision: asNumber(r["revision"]) ?? 1,
     status: r.status,
-    supplierName: asString(r.supplierName),
-    supplierDocumentNumber: asString(r.supplierDocumentNumber),
-    issuedOn: asDate(r.issuedOn),
-    total: asDecimalString(r.total),
-    currency: asCurrency(r.currency),
-    category: asString(r.category),
-    tags: asTags(r.tags),
-    attachments: asNumber(r.attachments) ?? 0,
-    settlement: asSettlement(r.settlement),
+    supplierName: asString(r["supplierName"]),
+    supplierDocumentNumber: asString(r["supplierDocumentNumber"]),
+    issuedOn: asDate(r["issuedOn"]),
+    total: asDecimalString(r["total"]),
+    currency: asCurrency(r["currency"]),
+    category: asString(r["category"]),
+    tags: asTags(r["tags"]),
+    attachments: asNumber(r["attachments"]) ?? 0,
+    settlement: asSettlement(r["settlement"]),
   };
 };
 
 export const decodeExpenseDetail = (r: ExpenseView): ExpenseDetailData | null => {
-  const id = asExpenseId(r.id);
+  const id = asExpenseId(r["id"]);
   if (id === null) return null;
-  const supplierRec = Option.getOrNull(Schema.decodeUnknownOption(WireRecord)(r.supplier));
-  const paymentRec = asRecord(r.payment);
-  const totalsRec = asRecord(r.totals);
-  const fxRec = Option.getOrNull(Schema.decodeUnknownOption(WireRecord)(r.fx));
-  const rawVat = asList(r.vat);
-  const rawBuckets = asList(totalsRec.buckets) ?? [];
-  const rawAttachments = asList(r.attachments) ?? [];
+  const supplierRec = Option.getOrNull(Schema.decodeUnknownOption(WireRecord)(r["supplier"]));
+  const paymentRec = asRecord(r["payment"]);
+  const totalsRec = asRecord(r["totals"]);
+  const fxRec = Option.getOrNull(Schema.decodeUnknownOption(WireRecord)(r["fx"]));
+  const rawVat = asList(r["vat"]);
+  const rawBuckets = asList(totalsRec["buckets"]) ?? [];
+  const rawAttachments = asList(r["attachments"]) ?? [];
   return {
     id,
     revision: asNumber(r.revision) ?? 1,
@@ -283,90 +283,90 @@ export const decodeExpenseDetail = (r: ExpenseView): ExpenseDetailData | null =>
       supplierRec === null
         ? null
         : {
-            contactId: asContactId(supplierRec.contactId),
-            name: asString(supplierRec.name),
-            ico: asString(supplierRec.ico),
-            dic: asString(supplierRec.dic),
+            contactId: asContactId(supplierRec["contactId"]),
+            name: asString(supplierRec["name"]),
+            ico: asString(supplierRec["ico"]),
+            dic: asString(supplierRec["dic"]),
           },
-    supplierDocumentNumber: asString(r.supplierDocumentNumber),
-    issuedOn: asDate(r.issuedOn),
-    taxableSupplyOn: asDate(r.taxableSupplyOn),
-    dueOn: asDate(r.dueOn),
-    currency: asCurrency(r.currency),
-    total: asDecimalString(r.total),
+    supplierDocumentNumber: asString(r["supplierDocumentNumber"]),
+    issuedOn: asDate(r["issuedOn"]),
+    taxableSupplyOn: asDate(r["taxableSupplyOn"]),
+    dueOn: asDate(r["dueOn"]),
+    currency: asCurrency(r["currency"]),
+    total: asDecimalString(r["total"]),
     vat:
       rawVat === null
         ? null
         : Arr.map(rawVat, (entry) => {
             const line = asRecord(entry);
             return {
-              treatment: asVatTreatment(line.treatment),
-              base: asDecimalString(line.base) ?? "0",
-              vat: asDecimalString(line.vat) ?? "0",
+              treatment: asVatTreatment(line["treatment"]),
+              base: asDecimalString(line["base"]) ?? "0",
+              vat: asDecimalString(line["vat"]) ?? "0",
               selfAssessed:
-                line.selfAssessed === "standard" || line.selfAssessed === "reduced"
-                  ? line.selfAssessed
+                line["selfAssessed"] === "standard" || line["selfAssessed"] === "reduced"
+                  ? line["selfAssessed"]
                   : null,
             };
           }),
     buckets: Arr.map(rawBuckets, (entry) => {
       const b = asRecord(entry);
       return {
-        treatment: asVatTreatment(b.treatment),
-        ratePercent: asDecimalString(b.ratePercent) ?? "0",
-        base: asDecimalString(b.base) ?? "0",
-        vat: asDecimalString(b.vat) ?? "0",
-        gross: asDecimalString(b.gross) ?? "0",
-        vatCzk: asDecimalString(b.vatCzk),
+        treatment: asVatTreatment(b["treatment"]),
+        ratePercent: asDecimalString(b["ratePercent"]) ?? "0",
+        base: asDecimalString(b["base"]) ?? "0",
+        vat: asDecimalString(b["vat"]) ?? "0",
+        gross: asDecimalString(b["gross"]) ?? "0",
+        vatCzk: asDecimalString(b["vatCzk"]),
       };
     }),
     fx:
       fxRec === null
         ? null
         : {
-            rate: asDecimalString(fxRec.rate) ?? "1",
-            quantity: asNumber(fxRec.quantity) ?? 1,
-            fixingDate: asDate(fxRec.fixingDate),
-            source: fxRec.source === "manual" ? "manual" : "cnb",
+            rate: asDecimalString(fxRec["rate"]) ?? "1",
+            quantity: asNumber(fxRec["quantity"]) ?? 1,
+            fixingDate: asDate(fxRec["fixingDate"]),
+            source: fxRec["source"] === "manual" ? "manual" : "cnb",
           },
-    totalCzk: asDecimalString(r.totalCzk),
+    totalCzk: asDecimalString(r["totalCzk"]),
     deductibility: (() => {
-      const partial = asNumber(asRecord(r.deductibility).partial);
+      const partial = asNumber(asRecord(r["deductibility"])["partial"]);
       return partial !== null && partial >= 1 && partial <= 99
         ? { partial: Math.round(partial) }
-        : decodeDeductibility(asString(r.deductibility));
+        : decodeDeductibility(asString(r["deductibility"]));
     })(),
-    deductibleVat: decodeMoney(asRecord(r.deductibleVat)),
-    deductibleVatCzk: asDecimalString(r.deductibleVatCzk),
-    category: asString(r.category),
-    tags: asTags(r.tags),
-    note: asString(r.note),
+    deductibleVat: decodeMoney(asRecord(r["deductibleVat"])),
+    deductibleVatCzk: asDecimalString(r["deductibleVatCzk"]),
+    category: asString(r["category"]),
+    tags: asTags(r["tags"]),
+    note: asString(r["note"]),
     attachments: Arr.filter(
       Arr.map(rawAttachments, (raw) => decodeAttachment(asRecord(raw))),
       (a): a is ExpenseAttachmentData => a !== null,
     ),
     payment: {
-      settlement: asSettlement(paymentRec.settlement),
-      paid: decodeMoney(asRecord(paymentRec.paid)),
-      payments: asNumber(paymentRec.payments) ?? 0,
+      settlement: asSettlement(paymentRec["settlement"]),
+      paid: decodeMoney(asRecord(paymentRec["paid"])),
+      payments: asNumber(paymentRec["payments"]) ?? 0,
     },
-    createdAt: asString(r.createdAt) ?? "",
-    updatedAt: asString(r.updatedAt) ?? "",
+    createdAt: asString(r["createdAt"]) ?? "",
+    updatedAt: asString(r["updatedAt"]) ?? "",
   };
 };
 
 export const decodePayment = Fn.flow(asRecord, (r): ExpensePaymentData | null => {
-  const id = asPaymentId(r.id);
-  const amount = decodeMoney(asRecord(r.amount));
-  const paidOn = asDate(r.paidOn);
+  const id = asPaymentId(r["id"]);
+  const amount = decodeMoney(asRecord(r["amount"]));
+  const paidOn = asDate(r["paidOn"]);
   if (id === null || amount === null || paidOn === null) return null;
   return {
     id,
     amount,
     paidOn,
-    method: asPaymentMethod(r.method),
-    note: asString(r.note),
-    createdAt: asString(r.createdAt) ?? "",
+    method: asPaymentMethod(r["method"]),
+    note: asString(r["note"]),
+    createdAt: asString(r["createdAt"]) ?? "",
   };
 });
 
@@ -598,27 +598,27 @@ export const buildExpensePayload = (form: ExpenseFormState): BuiltExpensePayload
 
   const issuedOn = Str.trim(form.issuedOn);
   if (issuedOn === "") {
-    if (isComplete) errors.issuedOn = "required";
+    if (isComplete) errors["issuedOn"] = "required";
     payload.issuedOn = null;
   } else if (!datePattern.test(issuedOn)) {
-    errors.issuedOn = "invalid_date";
+    errors["issuedOn"] = "invalid_date";
   } else {
     payload.issuedOn = issuedOn;
   }
 
   const taxableSupplyOn = Str.trim(form.taxableSupplyOn);
   if (taxableSupplyOn === "") payload.taxableSupplyOn = null;
-  else if (!datePattern.test(taxableSupplyOn)) errors.taxableSupplyOn = "invalid_date";
+  else if (!datePattern.test(taxableSupplyOn)) errors["taxableSupplyOn"] = "invalid_date";
   else payload.taxableSupplyOn = taxableSupplyOn;
 
   const dueOn = Str.trim(form.dueOn);
   if (dueOn === "") payload.dueOn = null;
-  else if (!datePattern.test(dueOn)) errors.dueOn = "invalid_date";
+  else if (!datePattern.test(dueOn)) errors["dueOn"] = "invalid_date";
   else payload.dueOn = dueOn;
 
   const currency = Str.toUpperCase(Str.trim(form.currency));
   if (currency === "") {
-    if (isComplete) errors.currency = "required";
+    if (isComplete) errors["currency"] = "required";
     payload.currency = null;
   } else {
     payload.currency = currency;
@@ -626,11 +626,11 @@ export const buildExpensePayload = (form: ExpenseFormState): BuiltExpensePayload
 
   const totalRaw = Str.trim(form.total);
   if (totalRaw === "") {
-    if (isComplete) errors.total = "required";
+    if (isComplete) errors["total"] = "required";
     payload.total = null;
   } else {
     const normalized = normalizeDecimal(totalRaw);
-    if (normalized === null || Number(normalized) < 0) errors.total = "invalid_number";
+    if (normalized === null || Number(normalized) < 0) errors["total"] = "invalid_number";
     else payload.total = normalized;
   }
 
@@ -659,7 +659,7 @@ export const buildExpensePayload = (form: ExpenseFormState): BuiltExpensePayload
   } else {
     const pct = Number.parseInt(Str.trim(form.deductiblePercent), 10);
     if (!Number.isInteger(pct) || pct < 1 || pct > 99) {
-      errors.deductiblePercent = "invalid_percent";
+      errors["deductiblePercent"] = "invalid_percent";
     } else {
       payload.deductibility = { partial: pct };
     }

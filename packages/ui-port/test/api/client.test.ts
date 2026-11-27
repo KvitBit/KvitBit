@@ -103,7 +103,7 @@ describe("KvitbitApi round trips over a mock transport", () => {
     const page = await run(search, mock.fetch);
 
     expect(page.nextCursor).toBe("cur-2");
-    expect(page.items[0]?.name).toBe("Acme s.r.o.");
+    expect(page.items[0]?.["name"]).toBe("Acme s.r.o.");
     const [req] = mock.calls;
     expect(req?.method).toBe("GET");
     expect(req?.url.pathname).toBe(`/api/v1/workspaces/${ws}/contacts`);
@@ -299,7 +299,7 @@ describe("client configuration", () => {
   test("an injected HttpClient carries the request (no fetch)", async () => {
     const seen: Array<string> = [];
     const client = HttpClient.make((request) => {
-      seen.push(`${request.method} ${request.url} ${request.headers.authorization ?? ""}`);
+      seen.push(`${request.method} ${request.url} ${request.headers["authorization"] ?? ""}`);
       seen.push(stringifyJson(request.urlParams));
       return Effect.succeed(
         HttpClientResponse.fromWeb(

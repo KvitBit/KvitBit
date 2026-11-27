@@ -12,10 +12,15 @@ export const browserOrigin = () => {
     : location.origin;
 };
 
-export const fetchBrowser = (request: HttpClientRequest.HttpClientRequest) =>
+export const fetchBrowser = ({
+  request,
+  options,
+}: {
+  readonly request: HttpClientRequest.HttpClientRequest;
+  readonly options?: Pick<RequestInit, "redirect">;
+}) =>
   HttpClient.execute(request).pipe(
-    Effect.provideService(FetchHttpClient.RequestInit, { credentials: "same-origin" }),
-    Effect.provide(FetchHttpClient.layer),
+    Effect.provideService(FetchHttpClient.RequestInit, { credentials: "same-origin", ...options }),
     Effect.provideServiceEffect(
       FetchHttpClient.Fetch,
       Effect.sync(() => globalThis.fetch),
@@ -23,7 +28,7 @@ export const fetchBrowser = (request: HttpClientRequest.HttpClientRequest) =>
   );
 
 export const fetchBrowserOk = (request: HttpClientRequest.HttpClientRequest) =>
-  fetchBrowser(request).pipe(Effect.flatMap(HttpClientResponse.filterStatusOk));
+  fetchBrowser({ request }).pipe(Effect.flatMap(HttpClientResponse.filterStatusOk));
 
 export const writeClipboard = Effect.fn("writeClipboard")(function* (text: string) {
   const clipboard = globalThis.navigator?.clipboard;

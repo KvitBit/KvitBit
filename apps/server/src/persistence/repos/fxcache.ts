@@ -32,9 +32,9 @@ const readRates = parseJson(
 );
 
 const decodeFixing = (row: DbRow): CnbFixing => ({
-  fixingDate: readIsoDate(row.fixing_date),
-  sequence: Number(row.sequence),
-  rates: Arr.map(readRates(row.rates), (r) => ({
+  fixingDate: readIsoDate(row["fixing_date"]),
+  sequence: Number(row["sequence"]),
+  rates: Arr.map(readRates(row["rates"]), (r) => ({
     code: r.code,
     quantity: Number(r.quantity),
     rate: parseDecimal(r.rate),

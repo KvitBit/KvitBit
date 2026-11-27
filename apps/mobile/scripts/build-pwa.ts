@@ -1,6 +1,7 @@
 /**
  * Exports the installable web app and adds the files used by its /app/ mount.
  */
+import * as BunRuntime from "@effect/platform-bun/BunRuntime";
 import * as BunServices from "@effect/platform-bun/BunServices";
 import * as Arr from "effect/Array";
 import * as Console from "effect/Console";
@@ -50,7 +51,8 @@ interface ExportDirectories {
   readonly iconSource: string;
 }
 
-const decorateWeb = Effect.fn("MobilePwa.decorate")(function* ({
+/** Adds PWA assets to an existing Expo web export. */
+export const decorateExport = Effect.fn("MobilePwa.decorate")(function* ({
   dist,
   iconSource,
 }: ExportDirectories) {
@@ -122,10 +124,6 @@ const decorateWeb = Effect.fn("MobilePwa.decorate")(function* ({
   }
 });
 
-/** Adds PWA assets to an existing Expo web export. */
-export const decorateExport = (directories: ExportDirectories) =>
-  decorateWeb(directories).pipe(Effect.provide(BunServices.layer), Effect.runPromise);
-
 const build = Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
@@ -148,10 +146,10 @@ const build = Effect.gen(function* () {
     return yield* PwaBuildError.make({ reason: `expo export exited with ${code}` });
   }
 
-  yield* decorateWeb({ dist, iconSource });
+  yield* decorateExport({ dist, iconSource });
   yield* Console.log(`PWA ready in ${dist} (served at /app/)`);
 });
 
 if (import.meta.main) {
-  await build.pipe(Effect.scoped, Effect.provide(BunServices.layer), Effect.runPromise);
+  BunRuntime.runMain(build.pipe(Effect.scoped, Effect.provide(BunServices.layer)));
 }

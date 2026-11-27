@@ -31,11 +31,11 @@ const spec: TableSpec<SeriesRow> = {
     return {
       id: NumberingSeriesId.make(stored.id),
       workspaceId: decodeWorkspaceId(stored.workspace_id),
-      revision: Number(row.revision),
+      revision: Number(row["revision"]),
       kind: stored.kind,
       name: stored.name,
       pattern: stored.pattern,
-      isDefault: Boolean(row.is_default),
+      isDefault: Boolean(row["is_default"]),
     };
   }),
   encode: (row) => ({

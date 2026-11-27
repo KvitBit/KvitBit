@@ -35,11 +35,11 @@ export const checkRevision = Effect.fn("Sql.checkRevision")(function* (
   row: Row,
   expectedRevision: number,
 ) {
-  const currentRevision = Number(row.revision);
+  const currentRevision = Number(row["revision"]);
   if (currentRevision !== expectedRevision) {
     return yield* RevisionConflict.make({
       table,
-      id: String(row.id),
+      id: String(row["id"]),
       expectedRevision,
       currentRevision,
     });

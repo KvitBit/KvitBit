@@ -102,7 +102,7 @@ export const handleMcpPost = Effect.fn("handleMcpPost")(
 
     return Effect.gen(function* () {
       // 1. Origin validation when present (section 6.1).
-      const originHeader = request.headers.origin;
+      const originHeader = request.headers["origin"];
       if (originHeader !== undefined) {
         const normalized = URL.parse(originHeader)?.origin;
         if (normalized === undefined || !config.trustedOrigins.has(normalized)) {
@@ -240,8 +240,8 @@ export const handleMcpPost = Effect.fn("handleMcpPost")(
       // 6. Dispatch MCP methods.
       switch (method) {
         case "initialize": {
-          const clientVersion = isString(params.protocolVersion)
-            ? params.protocolVersion
+          const clientVersion = isString(params["protocolVersion"])
+            ? params["protocolVersion"]
             : undefined;
           const negotiatedVersion =
             clientVersion !== undefined && SUPPORTED_VERSIONS.has(clientVersion)
@@ -272,7 +272,7 @@ export const handleMcpPost = Effect.fn("handleMcpPost")(
           return jsonRpcSuccess(id, { tools: listTools(auth.caller) }, responseHeaders);
 
         case "tools/call": {
-          if (!isString(params.name) || params.name.length === 0) {
+          if (!isString(params["name"]) || params["name"].length === 0) {
             return jsonRpcError(
               id,
               -32602,
@@ -281,7 +281,7 @@ export const handleMcpPost = Effect.fn("handleMcpPost")(
               responseHeaders,
             );
           }
-          const result = yield* callTool(params.name, params.arguments, auth).pipe(
+          const result = yield* callTool(params["name"], params["arguments"], auth).pipe(
             Effect.provideService(CurrentCaller, auth.caller),
             Effect.result,
           );
@@ -314,7 +314,7 @@ export const handleMcpPost = Effect.fn("handleMcpPost")(
           );
 
         case "resources/read": {
-          if (!isString(params.uri) || params.uri.length === 0) {
+          if (!isString(params["uri"]) || params["uri"].length === 0) {
             return jsonRpcError(
               id,
               -32602,
@@ -323,7 +323,7 @@ export const handleMcpPost = Effect.fn("handleMcpPost")(
               responseHeaders,
             );
           }
-          const result = yield* readResource(params.uri, auth.caller).pipe(
+          const result = yield* readResource(params["uri"], auth.caller).pipe(
             Effect.provideService(CurrentCaller, auth.caller),
             Effect.result,
           );

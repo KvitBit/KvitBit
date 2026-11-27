@@ -240,7 +240,7 @@ if (!("Bun" in globalThis)) {
           const attached = browserConsole.warn !== warn && browserConsole.error !== error;
           Element.prototype.append = append;
           queueMicrotask(() => {
-            document.documentElement.dataset.feedbackMountCleaned = String(
+            document.documentElement.dataset["feedbackMountCleaned"] = String(
               attached && browserConsole.warn === warn && browserConsole.error === error,
             );
           });

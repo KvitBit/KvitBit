@@ -241,7 +241,8 @@ const updateImpl = (model: Model, message: Message): UpdateReturn => {
       return {
         model,
         commands: [
-          browserCommand(
+          apiCommand(
+            Message,
             "SignOut",
             authFetch(
               "/sign-out",

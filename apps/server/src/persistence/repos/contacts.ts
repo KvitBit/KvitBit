@@ -125,7 +125,7 @@ const spec: TableSpec<ContactRow> = {
   ),
   decode: Effect.fn("ContactsRepo.decode")(function* (rows: ReadonlyArray<DbRow>) {
     const stored = Arr.map(rows, (row) =>
-      Option.getOrThrow(decodeRow({ ...row, roles: asStringArray(row.roles) })),
+      Option.getOrThrow(decodeRow({ ...row, roles: asStringArray(row["roles"]) })),
     );
     if (!Arr.isArrayNonEmpty(stored)) return [];
     const sql = yield* SqlClient.SqlClient;

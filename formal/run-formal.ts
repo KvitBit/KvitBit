@@ -16,7 +16,6 @@
  */
 import { stripVTControlCharacters } from "node:util";
 import * as BunRuntime from "@effect/platform-bun/BunRuntime";
-import * as BunServices from "@effect/platform-bun/BunServices";
 import * as Arr from "effect/Array";
 import * as Console from "effect/Console";
 import * as Duration from "effect/Duration";
@@ -37,6 +36,7 @@ import {
   ensureToolchain,
   sha256Of,
   type Toolchain,
+  ToolchainServicesLive,
 } from "./toolchain/toolchain";
 import pinned from "./toolchain/toolchain.json" with { type: "json" };
 
@@ -274,7 +274,7 @@ const validateManifest = Effect.fn("Formal.validateManifest")(function* (manifes
       // A mutant may inherit the base or wide config.
       yield* checkDeadlock(where, check.config);
       yield* checkDeadlock(where, check.wideConfig);
-      if (check.toolVersions.tla2tools !== pinned.tla2tools.version)
+      if (check.toolVersions["tla2tools"] !== pinned.tla2tools.version)
         bad(
           where,
           `toolVersions.tla2tools must be ${pinned.tla2tools.version} (the pinned toolchain); rerun the check after a toolchain bump and update it`,
@@ -1222,7 +1222,7 @@ if (import.meta.main) {
           return Console.error(error.message);
         },
       }),
-      Effect.provide(BunServices.layer),
+      Effect.provide(ToolchainServicesLive),
     ),
   );
 }

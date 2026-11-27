@@ -128,8 +128,8 @@ describe("price list model", () => {
 
   test("validates price list form and builds wire payload", () => {
     const emptyErrors = validatePriceListForm(emptyPriceListForm());
-    expect(emptyErrors.name).toBe("name_required");
-    expect(emptyErrors.unitPrice).toBe("price_invalid");
+    expect(emptyErrors["name"]).toBe("name_required");
+    expect(emptyErrors["unitPrice"]).toBe("price_invalid");
 
     const form = priceListFormFromItem(sampleItem);
     expect(validatePriceListForm(form)).toEqual({});

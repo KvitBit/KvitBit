@@ -2,6 +2,7 @@ import { type Renderer, Router } from "@effect/ui";
 import { HtmlServer } from "@effect/ui/html";
 import * as Arr from "effect/Array";
 import * as Effect from "effect/Effect";
+import * as FetchHttpClient from "effect/http/FetchHttpClient";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 
@@ -68,7 +69,11 @@ export const renderPath = (
     session: opts.session ?? signedIn,
   };
   const router = Router.static({ routes: BrowserRoutes, url: path });
-  const layers = Layer.merge(RunApi.layer, Navigate.layer.pipe(Layer.provideMerge(router)));
+  const layers = Layer.mergeAll(
+    RunApi.layer,
+    Navigate.layer.pipe(Layer.provideMerge(router)),
+    FetchHttpClient.layer,
+  );
   return HtmlServer.renderToHtml(App, flags).pipe(
     Effect.provide(layers),
     Effect.map((rendered) => ({

@@ -72,7 +72,7 @@ const rowToStoredPreferences = (
 
 const withResolvedTheme = (
   prefs: Omit<AccountPreferences, "resolvedTheme">,
-): Effect.Effect<AccountPreferences, Invalid> =>
+): Effect.Effect<AccountPreferences, Invalid, Effect.Services<ReturnType<typeof resolveTheme>>> =>
   prefs.theme.source === null
     ? Effect.succeed({ ...prefs, resolvedTheme: null })
     : Effect.map(resolveTheme(prefs.theme.source), (resolvedTheme) => ({

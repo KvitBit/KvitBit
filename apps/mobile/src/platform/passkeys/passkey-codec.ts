@@ -122,18 +122,18 @@ export const normalizeRegistrationResponse = (raw: unknown): typeof JsonObject.T
     clientDataJSON: toBase64Url(response.clientDataJSON),
     attestationObject: toBase64Url(response.attestationObject),
   };
-  if (isNonEmptyText(response.authenticatorData))
+  if (isNonEmptyText(response["authenticatorData"]))
     Object.assign(output, {
-      authenticatorData: toBase64Url(response.authenticatorData),
+      authenticatorData: toBase64Url(response["authenticatorData"]),
     });
-  if (isJsonArray(response.transports))
+  if (isJsonArray(response["transports"]))
     Object.assign(output, {
-      transports: EffectArray.filter(response.transports, isTransport),
+      transports: EffectArray.filter(response["transports"], isTransport),
     });
-  if (isFiniteNumber(response.publicKeyAlgorithm))
-    Object.assign(output, { publicKeyAlgorithm: response.publicKeyAlgorithm });
-  if (isNonEmptyText(response.publicKey))
-    Object.assign(output, { publicKey: toBase64Url(response.publicKey) });
+  if (isFiniteNumber(response["publicKeyAlgorithm"]))
+    Object.assign(output, { publicKeyAlgorithm: response["publicKeyAlgorithm"] });
+  if (isNonEmptyText(response["publicKey"]))
+    Object.assign(output, { publicKey: toBase64Url(response["publicKey"]) });
   return normalize(decoded.value, output);
 };
 
@@ -151,8 +151,8 @@ export const normalizeAuthenticationResponse = (raw: unknown): typeof JsonObject
   };
   return normalize(
     decoded.value,
-    isNonEmptyText(response.userHandle)
-      ? { ...output, userHandle: toBase64Url(response.userHandle) }
+    isNonEmptyText(response["userHandle"])
+      ? { ...output, userHandle: toBase64Url(response["userHandle"]) }
       : output,
   );
 };

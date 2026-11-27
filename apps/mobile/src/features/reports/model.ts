@@ -343,51 +343,53 @@ const decodeVatSource = Schema.decodeUnknownOption(
 const decodeMoney = Fn.flow(
   asRecord,
   (row): ReportMoney => ({
-    amount: asDecimal(row.amount),
-    currency: asCurrency(row.currency),
+    amount: asDecimal(row["amount"]),
+    currency: asCurrency(row["currency"]),
   }),
 );
 
 const decodePeriod = Fn.flow(
   asRecord,
   (row): ReportPeriod => ({
-    from: asDate(row.from),
-    to: asDate(row.to),
+    from: asDate(row["from"]),
+    to: asDate(row["to"]),
   }),
 );
 
 const decodeAmountRow = Fn.flow(
   asRecord,
   (row): ReportAmountRow => ({
-    key: asString(row.key) ?? "",
-    label: asString(row.label),
-    count: asNumber(row.count),
-    net: decodeMoney(row.net),
-    vat: decodeMoney(row.vat),
-    gross: decodeMoney(row.gross),
+    key: asString(row["key"]) ?? "",
+    label: asString(row["label"]),
+    count: asNumber(row["count"]),
+    net: decodeMoney(row["net"]),
+    vat: decodeMoney(row["vat"]),
+    gross: decodeMoney(row["gross"]),
     original:
-      row.original === null || row.original === undefined ? null : decodeMoney(row.original),
+      row["original"] === null || row["original"] === undefined
+        ? null
+        : decodeMoney(row["original"]),
   }),
 );
 
 const decodeAmountTotals = Fn.flow(
   asRecord,
   (row): ReportAmountTotals => ({
-    count: asNumber(row.count),
-    net: decodeMoney(row.net),
-    vat: decodeMoney(row.vat),
-    gross: decodeMoney(row.gross),
+    count: asNumber(row["count"]),
+    net: decodeMoney(row["net"]),
+    vat: decodeMoney(row["vat"]),
+    gross: decodeMoney(row["gross"]),
   }),
 );
 
 const decodeVatLine = Fn.flow(asRecord, (row): VatLineData => {
-  const docs = Arr.isArray(row.documents) ? row.documents : [];
+  const docs = Arr.isArray(row["documents"]) ? row["documents"] : [];
   return {
-    month: asString(row.month) ?? "",
-    treatment: asVat(row.treatment),
-    ratePercent: asDecimal(row.ratePercent),
-    base: decodeMoney(row.base),
-    vat: decodeMoney(row.vat),
+    month: asString(row["month"]) ?? "",
+    treatment: asVat(row["treatment"]),
+    ratePercent: asDecimal(row["ratePercent"]),
+    base: decodeMoney(row["base"]),
+    vat: decodeMoney(row["vat"]),
     documents: Arr.flatMap(docs, (value) => {
       const decoded = decodeVatSource(value);
       return decoded._tag === "Some" ? [decoded.value] : [];
@@ -400,129 +402,129 @@ export const decodeReportView: {
   (value: ReportView, fallbackReport: ReportKind): DecodedReport;
 } = Fn.dual(2, (value: ReportView, fallbackReport: ReportKind): DecodedReport => {
   const r = asRecord(value);
-  const kind = Option.getOrElse(decodeReportKind(r.report), () => fallbackReport);
-  const period = decodePeriod(r.period);
+  const kind = Option.getOrElse(decodeReportKind(r["report"]), () => fallbackReport);
+  const period = decodePeriod(r["period"]);
   switch (kind) {
     case "revenue":
       return {
         report: "revenue",
         period,
-        groupBy: r.groupBy === "contact" || r.groupBy === "currency" ? r.groupBy : "month",
-        rows: Arr.isArray(r.rows) ? Arr.map(r.rows, (row) => decodeAmountRow(row)) : [],
-        totals: decodeAmountTotals(r.totals),
+        groupBy: r["groupBy"] === "contact" || r["groupBy"] === "currency" ? r["groupBy"] : "month",
+        rows: Arr.isArray(r["rows"]) ? Arr.map(r["rows"], (row) => decodeAmountRow(row)) : [],
+        totals: decodeAmountTotals(r["totals"]),
       };
     case "expenses":
       return {
         report: "expenses",
         period,
         groupBy:
-          r.groupBy === "contact" || r.groupBy === "currency" || r.groupBy === "category"
-            ? r.groupBy
+          r["groupBy"] === "contact" || r["groupBy"] === "currency" || r["groupBy"] === "category"
+            ? r["groupBy"]
             : "month",
-        rows: Arr.isArray(r.rows) ? Arr.map(r.rows, (row) => decodeAmountRow(row)) : [],
-        totals: decodeAmountTotals(r.totals),
-        incomplete: asNumber(r.incomplete),
+        rows: Arr.isArray(r["rows"]) ? Arr.map(r["rows"], (row) => decodeAmountRow(row)) : [],
+        totals: decodeAmountTotals(r["totals"]),
+        incomplete: asNumber(r["incomplete"]),
       };
     case "profit": {
-      const totals = asRecord(r.totals);
-      const rows = Arr.isArray(r.rows) ? r.rows : [];
+      const totals = asRecord(r["totals"]);
+      const rows = Arr.isArray(r["rows"]) ? r["rows"] : [];
       return {
         report: "profit",
         period,
         rows: Arr.map(rows, (entry) => {
           const row = asRecord(entry);
           return {
-            month: asString(row.month) ?? "",
-            revenue: decodeMoney(row.revenue),
-            expenses: decodeMoney(row.expenses),
-            profit: decodeMoney(row.profit),
+            month: asString(row["month"]) ?? "",
+            revenue: decodeMoney(row["revenue"]),
+            expenses: decodeMoney(row["expenses"]),
+            profit: decodeMoney(row["profit"]),
           };
         }),
         totals: {
-          revenue: decodeMoney(totals.revenue),
-          expenses: decodeMoney(totals.expenses),
-          profit: decodeMoney(totals.profit),
+          revenue: decodeMoney(totals["revenue"]),
+          expenses: decodeMoney(totals["expenses"]),
+          profit: decodeMoney(totals["profit"]),
         },
       };
     }
     case "cashflow": {
-      const totals = asRecord(r.totals);
-      const points = Arr.isArray(r.points) ? r.points : [];
+      const totals = asRecord(r["totals"]);
+      const points = Arr.isArray(r["points"]) ? r["points"] : [];
       return {
         report: "cashflow",
         period,
         points: Arr.map(points, (entry) => {
           const pt = asRecord(entry);
           return {
-            month: asString(pt.month) ?? "",
-            in: decodeMoney(pt.in),
-            out: decodeMoney(pt.out),
-            net: decodeMoney(pt.net),
+            month: asString(pt["month"]) ?? "",
+            in: decodeMoney(pt["in"]),
+            out: decodeMoney(pt["out"]),
+            net: decodeMoney(pt["net"]),
           };
         }),
         totals: {
-          in: decodeMoney(totals.in),
-          out: decodeMoney(totals.out),
-          net: decodeMoney(totals.net),
+          in: decodeMoney(totals["in"]),
+          out: decodeMoney(totals["out"]),
+          net: decodeMoney(totals["net"]),
         },
       };
     }
     case "receivables": {
-      const overdue = asRecord(r.overdue);
-      const buckets = Arr.isArray(r.buckets) ? r.buckets : [];
+      const overdue = asRecord(r["overdue"]);
+      const buckets = Arr.isArray(r["buckets"]) ? r["buckets"] : [];
       return {
         report: "receivables",
         period,
-        asOf: asDate(r.asOf) ?? period.to,
+        asOf: asDate(r["asOf"]) ?? period.to,
         buckets: Arr.map(buckets, (entry) => {
           const b = asRecord(entry);
-          const docs = Arr.isArray(b.documents) ? b.documents : [];
+          const docs = Arr.isArray(b["documents"]) ? b["documents"] : [];
           return {
-            bucket: Option.getOrElse(decodeAgingBucket(b.bucket), () => "not_due" as const),
-            count: asNumber(b.count),
-            total: decodeMoney(b.total),
+            bucket: Option.getOrElse(decodeAgingBucket(b["bucket"]), () => "not_due" as const),
+            count: asNumber(b["count"]),
+            total: decodeMoney(b["total"]),
             documents: Arr.flatMap(docs, (d) => {
               const doc = asRecord(d);
-              const id = asDocumentId(doc.id);
+              const id = asDocumentId(doc["id"]);
               if (id === null) return [];
-              const contact = asRecord(doc.contact);
+              const contact = asRecord(doc["contact"]);
               return [
                 {
                   id,
-                  kind: asDocumentKind(doc.kind),
-                  number: asString(doc.number),
+                  kind: asDocumentKind(doc["kind"]),
+                  number: asString(doc["number"]),
                   contact: {
-                    id: asContactId(contact.id),
-                    name: asString(contact.name) ?? "",
+                    id: asContactId(contact["id"]),
+                    name: asString(contact["name"]) ?? "",
                   },
-                  currency: asCurrency(doc.currency),
-                  dueOn: asDate(doc.dueOn),
-                  daysOverdue: asNumber(doc.daysOverdue),
-                  outstanding: decodeMoney(doc.outstanding),
-                  outstandingCzk: decodeMoney(doc.outstandingCzk),
+                  currency: asCurrency(doc["currency"]),
+                  dueOn: asDate(doc["dueOn"]),
+                  daysOverdue: asNumber(doc["daysOverdue"]),
+                  outstanding: decodeMoney(doc["outstanding"]),
+                  outstandingCzk: decodeMoney(doc["outstandingCzk"]),
                 },
               ];
             }),
           };
         }),
-        total: r.total !== undefined ? decodeMoney(r.total) : ZERO_CZK,
+        total: r["total"] !== undefined ? decodeMoney(r["total"]) : ZERO_CZK,
         overdue: {
-          total: overdue.total !== undefined ? decodeMoney(overdue.total) : ZERO_CZK,
-          count: asNumber(overdue.count),
+          total: overdue["total"] !== undefined ? decodeMoney(overdue["total"]) : ZERO_CZK,
+          count: asNumber(overdue["count"]),
         },
       };
     }
     case "vat_summary": {
-      const totals = asRecord(r.totals);
+      const totals = asRecord(r["totals"]);
       return {
         report: "vat_summary",
         period,
-        output: Arr.isArray(r.output) ? Arr.map(r.output, (row) => decodeVatLine(row)) : [],
-        input: Arr.isArray(r.input) ? Arr.map(r.input, (row) => decodeVatLine(row)) : [],
+        output: Arr.isArray(r["output"]) ? Arr.map(r["output"], (row) => decodeVatLine(row)) : [],
+        input: Arr.isArray(r["input"]) ? Arr.map(r["input"], (row) => decodeVatLine(row)) : [],
         totals: {
-          output: decodeMoney(totals.output),
-          input: decodeMoney(totals.input),
-          payable: decodeMoney(totals.payable),
+          output: decodeMoney(totals["output"]),
+          input: decodeMoney(totals["input"]),
+          payable: decodeMoney(totals["payable"]),
         },
       };
     }

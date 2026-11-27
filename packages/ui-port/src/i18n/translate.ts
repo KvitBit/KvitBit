@@ -96,7 +96,7 @@ const selectForm = (
   params?: Readonly<Record<string, TextParam>>,
 ): string => {
   if (Predicate.isString(entry)) return entry;
-  const n = Number(params?.count);
+  const n = Number(params?.["count"]);
   const category = Number.isFinite(n) ? pluralCategory(locale, n) : "other";
   return entry[category] ?? entry.other ?? "";
 };
