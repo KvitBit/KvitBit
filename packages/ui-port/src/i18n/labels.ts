@@ -33,7 +33,7 @@ import type { MessageKey } from "./catalog";
 type InvitationStatus = typeof InvitationStatusSchema.Type;
 
 /** Badge kinds of the spec's `BadgeVM` (section 2.12). */
-type BadgeKind =
+export type BadgeKind =
   | "draft"
   | "issued"
   | "sent"

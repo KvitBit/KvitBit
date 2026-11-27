@@ -177,3 +177,21 @@ export const call: {
     return options?.key === undefined ? command : { ...command, key: options.key };
   },
 );
+
+/** Match the outcome of an API call. */
+export const matchResult: {
+  <A, B>(cases: {
+    readonly onOk: (value: A) => B;
+    readonly onErr: (error: UiError) => B;
+  }): (result: ApiResult<A>) => B;
+  <A, B>(
+    result: ApiResult<A>,
+    cases: { readonly onOk: (value: A) => B; readonly onErr: (error: UiError) => B },
+  ): B;
+} = Fn.dual(
+  2,
+  <A, B>(
+    result: ApiResult<A>,
+    cases: { readonly onOk: (value: A) => B; readonly onErr: (error: UiError) => B },
+  ): B => (result._tag === "Ok" ? cases.onOk(result.value) : cases.onErr(result.error)),
+);

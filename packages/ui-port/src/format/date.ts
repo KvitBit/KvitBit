@@ -1,6 +1,5 @@
 import * as DateTime from "effect/DateTime";
 import * as Fn from "effect/Function";
-import * as Option from "effect/Option";
 import { INTL_TAG, type Locale } from "../i18n/locale";
 import { stringifyJson } from "../json";
 
@@ -84,9 +83,10 @@ export const formatDateTime = (
   instant: string | Date,
   timeZone: string = BUSINESS_TIME_ZONE,
 ): string => {
-  const parsed = DateTime.make(instant);
-  if (Option.isNone(parsed)) throw new RangeError(`Not a timestamp: ${String(instant)}`);
-  const d = DateTime.toEpochMillis(parsed.value);
+  // Offsetless timestamp strings use the device's local timezone.
+  // @effect-diagnostics-next-line globalDate:off
+  const d = typeof instant === "string" ? new Date(instant) : instant;
+  if (Number.isNaN(d.getTime())) throw new RangeError(`Not a timestamp: ${String(instant)}`);
   const date = dateFormat(locale, { ...optionsFor(locale, "default"), timeZone }).format(d);
   const time = dateFormat(locale, {
     hour: "2-digit",

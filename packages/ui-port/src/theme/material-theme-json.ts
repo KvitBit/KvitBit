@@ -31,7 +31,7 @@ import { type RoleMap, SCHEME_VARIANTS, type SchemeVariant } from "./scheme";
 /** Theme Builder allows any role key; Kvitbit picks the `M3ColorRole` ones (rule M2). */
 const RoleScheme = Schema.Record(Schema.String, Schema.String);
 
-const MaterialThemeJson = Schema.Struct({
+export const MaterialThemeJson = Schema.Struct({
   description: Schema.optional(Schema.String),
   seed: HexSchema,
   coreColors: Schema.Struct({
@@ -58,12 +58,12 @@ const MaterialThemeJson = Schema.Struct({
   }),
   palettes: Schema.optional(Schema.Unknown),
 });
-type MaterialThemeJson = typeof MaterialThemeJson.Type;
+export type MaterialThemeJson = typeof MaterialThemeJson.Type;
 
 /** `uploads.themeJson.maxBytes` default (64 KB); callers pass the configured value. */
-const MATERIAL_THEME_MAX_BYTES = 64 * 1024;
+export const MATERIAL_THEME_MAX_BYTES = 64 * 1024;
 
-const MATERIAL_THEME_FILE_WARNINGS = [
+export const MATERIAL_THEME_FILE_WARNINGS = [
   "missing_contrast_schemes",
   "unknown_roles_ignored",
   "no_extended_colours",
@@ -136,7 +136,7 @@ const pickRoles = (
 const isCompleteRoleMap = (roles: Partial<RoleMap>): roles is RoleMap =>
   Arr.every(M3_COLOR_ROLES, (role) => roles[role] !== undefined);
 
-interface DecodedThemeFile {
+export interface DecodedThemeFile {
   readonly seed: Hex;
   /** Complete role maps for the variants the file defines completely. */
   readonly roles: Readonly<Record<"light" | "dark", RoleMap>> &
@@ -150,7 +150,7 @@ interface DecodedThemeFile {
  * Shape-check an already-parsed file. Light and dark must carry every `M3ColorRole` (rule M2);
  * an incomplete contrast scheme is regenerated from the seed with `missing_contrast_schemes`.
  */
-const decodeMaterialTheme = (json: unknown): Result.Result<DecodedThemeFile, Invalid> => {
+export const decodeMaterialTheme = (json: unknown): Result.Result<DecodedThemeFile, Invalid> => {
   if (isRecord(json) && "seed" in json && !(typeof json.seed === "string" && isHex(json.seed)))
     return Result.fail(invalid(issue("theme.seed_invalid", ["seed"])));
   const exit = Schema.decodeUnknownExit(MaterialThemeJson)(json);
@@ -210,8 +210,8 @@ const decodeMaterialTheme = (json: unknown): Result.Result<DecodedThemeFile, Inv
  * `JSON.parse` (rule M1).
  */
 export const parseMaterialThemeFile: {
-  (source: string, maxBytes: number): Result.Result<ParsedThemeFile, Invalid>;
   (maxBytes: number): (source: string) => Result.Result<ParsedThemeFile, Invalid>;
+  (source: string, maxBytes: number): Result.Result<ParsedThemeFile, Invalid>;
 } = Fn.dual(2, (source: string, maxBytes: number): Result.Result<ParsedThemeFile, Invalid> => {
   if (utf8ByteLength(source) > maxBytes)
     return Result.fail(invalid(issue("theme.too_large", [], { maxBytes: String(maxBytes) })));
@@ -260,8 +260,8 @@ export const resolveMaterialTheme = (
 
 /** Copy for a file warning (`theme.warning.<code>`). */
 export const fileWarningText: {
-  (warning: MaterialThemeFileWarning, parsed?: Pick<ParsedThemeFile, "unknownRoles">): Text;
   (parsed?: Pick<ParsedThemeFile, "unknownRoles">): (warning: MaterialThemeFileWarning) => Text;
+  (warning: MaterialThemeFileWarning, parsed?: Pick<ParsedThemeFile, "unknownRoles">): Text;
 } = Fn.dual(
   (args) => typeof args[0] === "string",
   (warning: MaterialThemeFileWarning, parsed?: Pick<ParsedThemeFile, "unknownRoles">): Text =>

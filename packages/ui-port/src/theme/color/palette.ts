@@ -30,3 +30,9 @@ export class TonalPalette {
     return rgb;
   }
 }
+
+/** Tones used by the Material palette. */
+export const PALETTE_TONES = [
+  0, 4, 5, 6, 10, 12, 15, 17, 20, 22, 24, 25, 30, 35, 40, 50, 60, 70, 80, 87, 90, 92, 94, 95, 96,
+  98, 99, 100,
+] as const;

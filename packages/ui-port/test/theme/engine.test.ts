@@ -206,7 +206,7 @@ describe("dynamic colour hardening", () => {
           system: { scheme: "dark", dynamic: Option.some(roles) },
         }),
       );
-      const variant = variantOf("dark", contrast);
+      const variant: ReturnType<typeof variantOf> = variantOf("dark", contrast);
       expect({
         contrast,
         failing: auditScheme({ roles: e.roles, extended: e.extended }, variant),
@@ -448,6 +448,7 @@ describe("ThemeEngine seam", () => {
   });
 
   test("LocalThemeEngine resolves presets and seeds", () => {
+    expect(ThemeEngine.key).toBe("ui-port/ThemeEngine");
     const exit = run(withEngine((e) => e.resolve({ _tag: "Preset", id: "sand" }, "standard")));
     expect(Exit.isSuccess(exit) && exit.value).toEqual(resolvePreset("sand"));
   });

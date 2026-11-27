@@ -7,7 +7,7 @@ import { type EnCatalog, en } from "./en";
 export { cs } from "./cs";
 export { type EnCatalog, en, enSections } from "./en";
 
-/** Closed union of every catalog key; `en` is the source of truth. */
+/** Closed union of every catalog key. */
 export type MessageKey = keyof EnCatalog;
 
 export const catalogs: Readonly<Record<Locale, Readonly<Record<MessageKey, AnyMessage>>>> = {

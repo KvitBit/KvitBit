@@ -127,7 +127,7 @@ describe("catalog parity", () => {
 const ISSUE_CODE_LITERAL = /code: "([a-z_]+\.[a-z_]+)"/g;
 const apiContractIssueCodes = (): Promise<ReadonlyArray<string>> => {
   const root = new URL("../../../api-contract/src/", import.meta.url);
-  const files = [...new Bun.Glob("**/*.ts").scanSync({ cwd: root.pathname })];
+  const files = [...new Bun.Glob("**/*.ts").scanSync({ cwd: Bun.fileURLToPath(root) })];
   return Promise.all(Arr.map(files, (file) => Bun.file(new URL(file, root)).text())).then(
     (sources) =>
       Arr.flatMap(sources, (source) =>

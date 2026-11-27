@@ -50,7 +50,7 @@ export const validateCzechDic = (input: string): Result.Result<string, FormatIss
 };
 
 /** VIES number formats after the two-letter prefix (EU member states plus XI). */
-const EU_VAT_FORMATS: Readonly<Record<string, RegExp>> = {
+export const EU_VAT_FORMATS: Readonly<Record<string, RegExp>> = {
   AT: /^U\d{8}$/,
   BE: /^[01]\d{9}$/,
   BG: /^\d{9,10}$/,

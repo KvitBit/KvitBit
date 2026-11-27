@@ -30,8 +30,8 @@ export type ResolvedSchemes = ResolvedTheme["schemes"];
 
 /** Attach `theme.low_contrast` when any checked pair fails AA. */
 export const withContrastWarnings: {
-  (source: ThemeSource, schemes: ResolvedSchemes): ResolvedTheme;
   (schemes: ResolvedSchemes): (source: ThemeSource) => ResolvedTheme;
+  (source: ThemeSource, schemes: ResolvedSchemes): ResolvedTheme;
 } = Fn.dual(2, (source: ThemeSource, schemes: ResolvedSchemes): ResolvedTheme => {
   const warnings: ThemeWarning[] = auditTheme(schemes).length > 0 ? ["theme.low_contrast"] : [];
   return warnings.length > 0 ? { source, schemes, warnings } : { source, schemes };
@@ -43,6 +43,10 @@ export const withContrastWarnings: {
  * the active scheme's primary").
  */
 export const schemesOf: {
+  (options?: {
+    readonly rolesFor?: (variant: SchemeVariant) => RoleMap | undefined;
+    readonly extended?: Partial<Record<ExtendedRole, ExtendedInput>>;
+  }): (recipe: ThemeRecipe) => ResolvedSchemes;
   (
     recipe: ThemeRecipe,
     options?: {
@@ -50,10 +54,6 @@ export const schemesOf: {
       readonly extended?: Partial<Record<ExtendedRole, ExtendedInput>>;
     },
   ): ResolvedSchemes;
-  (options?: {
-    readonly rolesFor?: (variant: SchemeVariant) => RoleMap | undefined;
-    readonly extended?: Partial<Record<ExtendedRole, ExtendedInput>>;
-  }): (recipe: ThemeRecipe) => ResolvedSchemes;
 } = Fn.dual(
   (args) => typeof args[0] === "object" && args[0] !== null && "seed" in args[0],
   (
@@ -79,8 +79,14 @@ export const schemesOf: {
   },
 );
 
-const resolveRecipe = (recipe: ThemeRecipe, source: ThemeSource): ResolvedTheme =>
-  withContrastWarnings(source, schemesOf(recipe));
+export const resolveRecipe: {
+  (source: ThemeSource): (recipe: ThemeRecipe) => ResolvedTheme;
+  (recipe: ThemeRecipe, source: ThemeSource): ResolvedTheme;
+} = Fn.dual(
+  2,
+  (recipe: ThemeRecipe, source: ThemeSource): ResolvedTheme =>
+    withContrastWarnings(source, schemesOf(recipe)),
+);
 
 /** Default recipe for a user's custom seed (tonal-spot-like with seed fidelity). */
 export const seedRecipe = (seed: Hex): ThemeRecipe => ({ seed: Str.toUpperCase(seed) });

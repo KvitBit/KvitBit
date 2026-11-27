@@ -46,16 +46,20 @@ export const DocumentListQuery = Schema.Struct({
 });
 export type DocumentListQuery = typeof DocumentListQuery.Type;
 
-const ContactListQuery = Schema.Struct({
+export const ContactListQuery = Schema.Struct({
   text: Schema.optionalKey(Schema.String),
   role: Schema.optionalKey(Schema.Literals(["customer", "supplier"])),
   archived: Schema.optionalKey(Schema.Boolean),
 });
 
-const ExpenseListQuery = Schema.Struct({
+export type ContactListQuery = typeof ContactListQuery.Type;
+
+export const ExpenseListQuery = Schema.Struct({
   text: Schema.optionalKey(Schema.String),
   incomplete: Schema.optionalKey(Schema.Boolean),
 });
+
+export type ExpenseListQuery = typeof ExpenseListQuery.Type;
 
 export const ReportTab = ReportKind;
 export type ReportTab = typeof ReportTab.Type;
@@ -86,11 +90,11 @@ export type SettingsSection = typeof SettingsSection.Type;
 export const DocumentDialog = Schema.Literals(["issue", "payment", "send", "cancel", "correct"]);
 export type DocumentDialog = typeof DocumentDialog.Type;
 
-const ContactRef = Schema.TaggedStruct("Contact", { id: ContactId });
-const TemplateRef = Schema.TaggedStruct("Template", { id: TemplateId });
-const DuplicateRef = Schema.TaggedStruct("Duplicate", { id: DocumentId });
-const EditorSource = Schema.Union([ContactRef, TemplateRef, DuplicateRef]);
-type EditorSource = typeof EditorSource.Type;
+export const ContactRef = Schema.TaggedStruct("Contact", { id: ContactId });
+export const TemplateRef = Schema.TaggedStruct("Template", { id: TemplateId });
+export const DuplicateRef = Schema.TaggedStruct("Duplicate", { id: DocumentId });
+export const EditorSource = Schema.Union([ContactRef, TemplateRef, DuplicateRef]);
+export type EditorSource = typeof EditorSource.Type;
 
 // --- Route ---------------------------------------------------------------------------------------
 

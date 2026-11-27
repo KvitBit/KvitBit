@@ -49,6 +49,13 @@ const toDecimal = (value: DecimalInput): Decimal => {
   return value.pipe(BigDecimal.format, parseDecimal);
 };
 
+/** Plain decimal string with no exponent or trailing zeroes. */
+export const toDecimalString = (value: DecimalInput): string => {
+  const decimal = toDecimal(value);
+  const fraction = decimal.fraction === "" ? "" : `.${decimal.fraction}`;
+  return `${decimal.negative ? "-" : ""}${decimal.integer}${fraction}`;
+};
+
 export type Sign = "positive" | "negative" | "zero";
 
 export const signOf = (value: DecimalInput): Sign => {
@@ -209,7 +216,7 @@ export const formatPercent: {
     options?: { readonly maxFractionDigits?: number },
   ): string;
 } = Fn.dual(
-  (args) => typeof args[0] === "string",
+  (args) => args.length > 1 && (args[0] === "cs" || args[0] === "en"),
   (
     locale: Locale,
     percent: DecimalInput,

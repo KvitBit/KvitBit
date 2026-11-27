@@ -52,7 +52,7 @@ export const UI_ISSUE_CODES = [
   "auth.sole_owner",
   "auth.email_unchanged",
 ] as const;
-type UiIssueCode = (typeof UI_ISSUE_CODES)[number];
+export type UiIssueCode = (typeof UI_ISSUE_CODES)[number];
 
 /** Every code a field issue can carry: core's closed `IssueCode` plus the UI-only codes. */
 export type AnyIssueCode = IssueCode | UiIssueCode;

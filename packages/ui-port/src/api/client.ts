@@ -28,7 +28,9 @@ const STRONG_ETAG = /^"(0|[1-9]\d{0,9})"$/;
 export type KvitbitApiClient = HttpApiClient.ForApi<typeof Api>;
 
 export class KvitbitApi extends Context.Service<KvitbitApi, KvitbitApiClient>()(
-  "@kvitbit/ui-port/api/client/KvitbitApi",
+  // Keep the service identifier used by existing layers.
+  // @effect-diagnostics-next-line deterministicKeys:off
+  "ui-port/KvitbitApi",
 ) {}
 
 /**
@@ -80,7 +82,9 @@ export interface ResponseCell {
 }
 
 export class ResponseObserver extends Context.Service<ResponseObserver, ResponseCell>()(
-  "@kvitbit/ui-port/api/client/ResponseObserver",
+  // Keep the service identifier used by existing response observers.
+  // @effect-diagnostics-next-line deterministicKeys:off
+  "ui-port/ResponseObserver",
 ) {}
 
 export const emptyResponseCell = (): ResponseCell => ({ current: null });
@@ -243,13 +247,14 @@ export const layerFetch = (config: KvitbitApiConfig): Layer.Layer<KvitbitApi> =>
  * declares no Workspace header); API calls always use the id, never the slug.
  */
 export const inWorkspace: {
+  (workspaceId: WorkspaceId): { readonly workspaceId: WorkspaceId };
+  <P extends object = Record<never, never>>(
+    params?: P,
+  ): (workspaceId: WorkspaceId) => P & { readonly workspaceId: WorkspaceId };
   <P extends object = Record<never, never>>(
     workspaceId: WorkspaceId,
     params?: P,
   ): P & { readonly workspaceId: WorkspaceId };
-  <P extends object = Record<never, never>>(
-    params?: P,
-  ): (workspaceId: WorkspaceId) => P & { readonly workspaceId: WorkspaceId };
 } = Fn.dual(
   (args) => typeof args[0] === "string",
   <P extends object = Record<never, never>>(

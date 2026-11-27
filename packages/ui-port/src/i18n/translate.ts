@@ -6,7 +6,7 @@ import { FALLBACK_LOCALE, INTL_TAG, type Locale } from "./locale";
 import type { AnyMessage, ParamNames, ParamsOf } from "./types";
 
 /** Typed params of a key: `{ name: TextParam }` per placeholder, `count: number` for plurals. */
-type MessageParams<K extends MessageKey> = ParamsOf<EnCatalog[K]>;
+export type MessageParams<K extends MessageKey> = ParamsOf<EnCatalog[K]>;
 
 /** Rest-args form: keys without placeholders take no params, others require them. */
 export type ParamsArg<K extends MessageKey> = [ParamNames<EnCatalog[K]>] extends [never]

@@ -158,8 +158,8 @@ export const FONT_FALLBACKS: Readonly<Record<ThemeStyle, Readonly<Record<FontRol
 };
 
 export const familyOf: {
-  (tokens: StyleTokens, font: FontRole): string;
   (font: FontRole): (tokens: StyleTokens) => string;
+  (tokens: StyleTokens, font: FontRole): string;
 } = Fn.dual(2, (tokens: StyleTokens, font: FontRole): string =>
   font === "display"
     ? tokens.font.display.family

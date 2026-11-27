@@ -16,6 +16,7 @@ import {
   err,
   filterHash,
   keyAfter,
+  matchResult,
   ok,
   optimisticList,
   Paged,
@@ -29,6 +30,16 @@ import {
 } from "../../src/api";
 
 const UUID_V7 = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+
+test("matchResult handles both outcomes from the API entry", () => {
+  const cases = { onOk: (value: string) => value.length, onErr: () => 0 };
+  const success = ok("saved");
+  const failure = err(UiError.offline);
+  const matchedSuccess = matchResult(success, cases);
+  const matchedFailure = matchResult(failure, cases);
+  expect(matchedSuccess).toBe(5);
+  expect(matchedFailure).toBe(0);
+});
 
 describe("query builders", () => {
   test("pageQuery cleans filters, adds limit 50 and the cursor", () => {

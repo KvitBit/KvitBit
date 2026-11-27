@@ -14,6 +14,7 @@ import { EXTENDED_ROLES, M3_COLOR_ROLES } from "@kvitbit/api-contract";
 import * as Arr from "effect/Array";
 import * as Fn from "effect/Function";
 import * as Option from "effect/Option";
+import { type Text, text } from "../text";
 import { contrastRatio, relativeLuminance } from "./color/contrast";
 import { Hct } from "./color/hct";
 import {
@@ -28,8 +29,8 @@ import {
 import { SCHEME_VARIANTS, type SchemeVariant } from "./scheme";
 
 /** WCAG 2.x AA: 4.5:1 for body text, 3:1 for large text and UI components (1.4.11). */
-const AA_TEXT = 4.5;
-const AA_UI = 3;
+export const AA_TEXT = 4.5;
+export const AA_UI = 3;
 
 export interface RolePair {
   readonly foreground: M3ColorRole;
@@ -102,8 +103,8 @@ const ratioOf = (fg: string, bg: string) => contrastRatio(rgbFromHex(fg), rgbFro
 
 /** Failing pairs of one scheme, extended colours included. */
 export const auditScheme: {
-  (scheme: ResolvedScheme, variant: SchemeVariant): ContrastIssue[];
   (variant: SchemeVariant): (scheme: ResolvedScheme) => ContrastIssue[];
+  (scheme: ResolvedScheme, variant: SchemeVariant): ContrastIssue[];
 } = Fn.dual(2, (scheme: ResolvedScheme, variant: SchemeVariant): ContrastIssue[] => {
   const issues: ContrastIssue[] = [];
   for (const pair of CHECKED_ROLE_PAIRS) {
@@ -138,35 +139,46 @@ export const auditTheme = (schemes: ResolvedTheme["schemes"]): ContrastIssue[] =
  * `color` that reaches each requirement against its partner. When no candidate satisfies all of
  * them, the one with the best worst-case margin.
  */
-const nearestPassing = (
-  color: string,
-  partners: ReadonlyArray<{ readonly color: string; readonly required: number }>,
-): string => {
-  const margin = (c: string) =>
-    Math.min(...Arr.map(partners, (p) => ratioOf(c, p.color) / p.required));
-  if (partners.length === 0 || margin(color) >= 1) return color;
-  const own = Hct.fromRgb(rgbFromHex(color));
-  const candidates: Array<{ hex: string; distance: number }> = [
-    { hex: "#000000", distance: own.tone },
-    { hex: "#FFFFFF", distance: 100 - own.tone },
-  ];
-  for (let tone = 0; tone <= 100; tone++)
-    candidates.push({
-      hex: hexFromRgb(Hct.from(own.hue, own.chroma, tone).rgb),
-      distance: Math.abs(tone - own.tone),
-    });
-  let best: { hex: string; distance: number; margin: number } | undefined;
-  for (const c of candidates) {
-    const m = margin(c.hex);
-    const better =
-      best === undefined ||
-      (m >= 1 && (best.margin < 1 || c.distance < best.distance)) ||
-      (m < 1 && best.margin < 1 && m > best.margin);
-    if (better) best = { ...c, margin: m };
-  }
-  if (best !== undefined && best.margin >= 1) return best.hex;
-  return feasibleColor(own, partners) ?? best?.hex ?? color;
-};
+export const nearestPassing: {
+  (
+    partners: ReadonlyArray<{ readonly color: string; readonly required: number }>,
+  ): (color: string) => string;
+  (
+    color: string,
+    partners: ReadonlyArray<{ readonly color: string; readonly required: number }>,
+  ): string;
+} = Fn.dual(
+  2,
+  (
+    color: string,
+    partners: ReadonlyArray<{ readonly color: string; readonly required: number }>,
+  ): string => {
+    const margin = (c: string) =>
+      Math.min(...Arr.map(partners, (p) => ratioOf(c, p.color) / p.required));
+    if (partners.length === 0 || margin(color) >= 1) return color;
+    const own = Hct.fromRgb(rgbFromHex(color));
+    const candidates: Array<{ hex: string; distance: number }> = [
+      { hex: "#000000", distance: own.tone },
+      { hex: "#FFFFFF", distance: 100 - own.tone },
+    ];
+    for (let tone = 0; tone <= 100; tone++)
+      candidates.push({
+        hex: hexFromRgb(Hct.from(own.hue, own.chroma, tone).rgb),
+        distance: Math.abs(tone - own.tone),
+      });
+    let best: { hex: string; distance: number; margin: number } | undefined;
+    for (const c of candidates) {
+      const m = margin(c.hex);
+      const better =
+        best === undefined ||
+        (m >= 1 && (best.margin < 1 || c.distance < best.distance)) ||
+        (m < 1 && best.margin < 1 && m > best.margin);
+      if (better) best = { ...c, margin: m };
+    }
+    if (best !== undefined && best.margin >= 1) return best.hex;
+    return feasibleColor(own, partners) ?? best?.hex ?? color;
+  },
+);
 
 type Interval = readonly [number, number];
 
@@ -241,14 +253,14 @@ const LINEAR = Array.from({ length: 256 }, (_, v) => linearized(v) / 100);
  */
 export const exhaustiveColor: {
   (
+    partners: ReadonlyArray<{ readonly color: string; readonly required: number }>,
+    probe?: { visited: number },
+  ): (own: Hct) => string | undefined;
+  (
     own: Hct,
     partners: ReadonlyArray<{ readonly color: string; readonly required: number }>,
     probe?: { visited: number },
   ): string | undefined;
-  (
-    partners: ReadonlyArray<{ readonly color: string; readonly required: number }>,
-    probe?: { visited: number },
-  ): (own: Hct) => string | undefined;
 } = Fn.dual(
   (args) => args.length > 0 && !Arr.isArray(args[0]),
   (
@@ -422,12 +434,12 @@ const repairable = (
  */
 export const repairContrast: {
   (
+    fixed?: ReadonlySet<M3ColorRole>,
+  ): (roles: Readonly<Record<M3ColorRole, string>>) => Record<M3ColorRole, string>;
+  (
     roles: Readonly<Record<M3ColorRole, string>>,
     fixed?: ReadonlySet<M3ColorRole>,
   ): Record<M3ColorRole, string>;
-  (
-    fixed?: ReadonlySet<M3ColorRole>,
-  ): (roles: Readonly<Record<M3ColorRole, string>>) => Record<M3ColorRole, string>;
 } = Fn.dual(
   (args) => typeof args[0] === "object" && args[0] !== null && "primary" in args[0],
   (
@@ -451,3 +463,20 @@ export const failingPairs = (roles: Readonly<Record<M3ColorRole, string>>): Role
     CHECKED_ROLE_PAIRS,
     (p) => ratioOf(roles[p.foreground], roles[p.background]) < p.required,
   );
+
+/** Render-ready descriptor for a failing contrast pair. */
+export const contrastIssueText = (issue: ContrastIssue): Text =>
+  text("theme.warning.low_contrast_pair", {
+    foreground: issue.foreground,
+    background: issue.background,
+    ratio: issue.ratio.toFixed(2),
+    required: issue.required.toFixed(1),
+  });
+
+/** Finds a foreground colour that contrasts with one background. */
+export const withContrast: {
+  (background: string, required: number): (foreground: string) => string;
+  (foreground: string, background: string, required: number): string;
+} = Fn.dual(3, (foreground: string, background: string, required: number): string =>
+  nearestPassing(foreground, [{ color: background, required }]),
+);

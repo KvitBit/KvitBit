@@ -71,7 +71,7 @@ const NUMERIC_BBAN: ReadonlySet<string> = new Set([
 ]);
 
 /** Uppercases and removes every whitespace character. */
-const normalizeIban = (input: string): string =>
+export const normalizeIban = (input: string): string =>
   Str.toUpperCase(Fn.pipe(input, Str.replace(/\s/g, "")));
 
 /** ISO 13616 mod-97 of the rearranged IBAN, computed in chunks (no bigint needed). */

@@ -69,14 +69,14 @@ export interface ExtendedInput {
  */
 export const extendedScheme: {
   (
+    variant: SchemeVariant,
+    inputs?: Partial<Record<ExtendedRole, ExtendedInput>>,
+  ): (primary: Hex) => ExtendedScheme;
+  (
     primary: Hex,
     variant: SchemeVariant,
     inputs?: Partial<Record<ExtendedRole, ExtendedInput>>,
   ): ExtendedScheme;
-  (
-    variant: SchemeVariant,
-    inputs?: Partial<Record<ExtendedRole, ExtendedInput>>,
-  ): (primary: Hex) => ExtendedScheme;
 } = Fn.dual(
   (args) => typeof args[1] === "string",
   (

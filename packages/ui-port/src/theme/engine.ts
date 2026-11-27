@@ -63,8 +63,8 @@ export interface ExtendedPair {
 
 /** Extended colours harmonized toward an arbitrary primary pair, e.g. the dynamic system primary. */
 export const harmonizeExtended: {
-  (primary: { readonly light: Hex; readonly dark: Hex }, contrast: ThemeContrast): ExtendedPair;
   (contrast: ThemeContrast): (primary: { readonly light: Hex; readonly dark: Hex }) => ExtendedPair;
+  (primary: { readonly light: Hex; readonly dark: Hex }, contrast: ThemeContrast): ExtendedPair;
 } = Fn.dual(
   2,
   (
@@ -149,8 +149,8 @@ export const dynamicRoles = (input: DynamicColorInput): Result.Result<DynamicRol
  * (completed) maps: a pair whose colours the platform supplied both stays as supplied.
  */
 export const dynamicSchemeRoles: {
-  (dynamic: DynamicRoles, variant: SchemeVariant): RoleMap;
   (variant: SchemeVariant): (dynamic: DynamicRoles) => RoleMap;
+  (dynamic: DynamicRoles, variant: SchemeVariant): RoleMap;
 } = Fn.dual(2, (dynamic: DynamicRoles, variant: SchemeVariant): RoleMap => {
   const roles = schemeRoles(
     { seed: dynamic.light.primary, overrides: { light: dynamic.light, dark: dynamic.dark } },
@@ -188,7 +188,11 @@ export class ThemeEngine extends Context.Service<
       contrast: ThemeContrast,
     ) => Effect.Effect<ExtendedPair, ThemeEngineError>;
   }
->()("@kvitbit/ui-port/theme/engine/ThemeEngine") {}
+>()(
+  // Keep the identifier specified by ui-port-contracts 4.4.
+  // @effect-diagnostics-next-line deterministicKeys:off
+  "ui-port/ThemeEngine",
+) {}
 
 /**
  * The pure engine as a layer. `contrast` does not change `resolve`'s result: a `ResolvedTheme`
@@ -210,7 +214,7 @@ export const LocalThemeEngine: Layer.Layer<ThemeEngine> = Layer.succeed(ThemeEng
  * An editor preview. Appearance previews an account theme and/or a style; Branding previews a
  * Workspace theme and never carries a style (Workspace branding has none).
  */
-type ThemeDraft =
+export type ThemeDraft =
   | {
       readonly _tag: "Appearance";
       /** None previews only the style over the current colour source. */
@@ -241,7 +245,7 @@ export interface ThemeState {
   readonly draft: Option.Option<ThemeDraft>;
 }
 
-type ThemeOrigin = "dynamic" | "account" | "workspace" | "default" | "draft";
+export type ThemeOrigin = "dynamic" | "account" | "workspace" | "default" | "draft";
 
 export interface EffectiveTheme {
   readonly scheme: "light" | "dark";
@@ -258,11 +262,17 @@ export interface EffectiveTheme {
 const CONTRAST_RANK: Readonly<Record<ThemeContrast, number>> = { standard: 0, medium: 1, high: 2 };
 
 /** `preference.contrast`, raised to at least `medium` when the OS asks for more contrast. */
-const effectiveContrast = (preferred: ThemeContrast, systemHighContrast: boolean): ThemeContrast =>
-  systemHighContrast && CONTRAST_RANK[preferred] < CONTRAST_RANK.medium ? "medium" : preferred;
+export const effectiveContrast: {
+  (systemHighContrast: boolean): (preferred: ThemeContrast) => ThemeContrast;
+  (preferred: ThemeContrast, systemHighContrast: boolean): ThemeContrast;
+} = Fn.dual(
+  2,
+  (preferred: ThemeContrast, systemHighContrast: boolean): ThemeContrast =>
+    systemHighContrast && CONTRAST_RANK[preferred] < CONTRAST_RANK.medium ? "medium" : preferred,
+);
 
 /** Which source wins: draft > dynamic colour (when on and available) > account > workspace > default. */
-const pickThemeSource = (
+export const pickThemeSource = (
   state: ThemeState,
 ):
   | { readonly origin: "dynamic"; readonly dynamic: DynamicRoles }

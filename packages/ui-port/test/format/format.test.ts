@@ -105,6 +105,7 @@ describe("numbers, quantities, percent", () => {
     expect(formatPercent("en", 21)).toBe("21%");
     expect(formatVatRate("cs", 12)).toBe(`12${NBSP}%`);
     expect(formatPercent("cs", "12.5")).toBe(`12,5${NBSP}%`);
+    expect(formatPercent("12.5")("cs")).toBe(`12,5${NBSP}%`);
   });
 });
 
@@ -124,6 +125,10 @@ describe("dates", () => {
   test("timestamps in Europe/Prague", () => {
     expect(spaces(formatDateTime("cs", "2026-11-23T13:05:00Z"))).toBe("23. 11. 2026 14:05");
     expect(formatDateTime("en", "2026-07-01T22:30:00Z")).toBe("2 Jul 2026, 00:30");
+    // Native parsing of an offsetless timestamp uses the local timezone.
+    // @effect-diagnostics-next-line globalDate:off
+    const native = new Date("2026-07-01T12:30:00");
+    expect(formatDateTime("en", "2026-07-01T12:30:00")).toBe(formatDateTime("en", native));
   });
 
   test("ranges", () => {

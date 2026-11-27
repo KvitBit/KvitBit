@@ -31,8 +31,8 @@ export const SCHEME_VARIANTS = [
 export type SchemeVariant = (typeof SCHEME_VARIANTS)[number];
 
 export const variantOf: {
-  (scheme: "light" | "dark", contrast: "standard" | "medium" | "high"): SchemeVariant;
   (contrast: "standard" | "medium" | "high"): (scheme: "light" | "dark") => SchemeVariant;
+  (scheme: "light" | "dark", contrast: "standard" | "medium" | "high"): SchemeVariant;
 } = Fn.dual(
   2,
   (scheme: "light" | "dark", contrast: "standard" | "medium" | "high"): SchemeVariant =>
@@ -45,7 +45,7 @@ export const isDarkVariant = (v: SchemeVariant): boolean => Str.startsWith("dark
 export const contrastLevelOf = (v: SchemeVariant): 0 | 1 | 2 =>
   Str.endsWith("High")(v) ? 2 : Str.endsWith("Medium")(v) ? 1 : 0;
 
-interface PaletteTuning {
+export interface PaletteTuning {
   /** Hue offset from the seed hue, degrees. */
   readonly hueShift?: number;
   /** Absolute hue, wins over `hueShift` (used to give achromatic seeds a chosen undertone). */
@@ -249,8 +249,8 @@ const derivedOverrides = (
 
 /** Generated roles with the recipe's exact overrides applied (derived ones for contrast variants). */
 export const schemeRoles: {
-  (recipe: ThemeRecipe, variant: SchemeVariant, palettes?: SchemePalettes): RoleMap;
   (variant: SchemeVariant, palettes?: SchemePalettes): (recipe: ThemeRecipe) => RoleMap;
+  (recipe: ThemeRecipe, variant: SchemeVariant, palettes?: SchemePalettes): RoleMap;
 } = Fn.dual(
   (args) => typeof args[0] === "object",
   (

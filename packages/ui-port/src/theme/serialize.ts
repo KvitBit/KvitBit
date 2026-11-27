@@ -38,14 +38,14 @@ const kebab = (s: string): string => {
 };
 
 /** `--md-sys-color-<role-kebab>` for every M3 role (spec 4.6, DESIGN.md). */
-const roleVariables = (roles: RoleMap): CssVariables => {
+export const roleVariables = (roles: RoleMap): CssVariables => {
   const out: Record<`--${string}`, string> = {};
   for (const role of M3_COLOR_ROLES) out[`--md-sys-color-${kebab(role)}`] = roles[role];
   return out;
 };
 
 /** `--kb-color-paid`, `--kb-color-on-paid`, `--kb-color-paid-container`, `--kb-color-on-paid-container`, ... */
-const extendedVariables = (extended: ExtendedScheme): CssVariables => {
+export const extendedVariables = (extended: ExtendedScheme): CssVariables => {
   const out: Record<`--${string}`, string> = {};
   for (const role of EXTENDED_ROLES) {
     const e = extended[role];
@@ -57,7 +57,7 @@ const extendedVariables = (extended: ExtendedScheme): CssVariables => {
   return out;
 };
 
-const colorVariables = (scheme: {
+export const colorVariables = (scheme: {
   readonly roles: RoleMap;
   readonly extended: ExtendedScheme;
 }): CssVariables => ({ ...roleVariables(scheme.roles), ...extendedVariables(scheme.extended) });
@@ -69,8 +69,8 @@ const quoted = (family: string): string => (WHITESPACE.test(family) ? `"${family
 
 /** Fonts, numerals, shape and both type scales as `--kb-*` variables. */
 export const styleVariables: {
-  (style: ThemeStyle, tokens?: StyleTokens): CssVariables;
   (tokens?: StyleTokens): (style: ThemeStyle) => CssVariables;
+  (style: ThemeStyle, tokens?: StyleTokens): CssVariables;
 } = Fn.dual(
   (args) => typeof args[0] === "string",
   (style: ThemeStyle, tokens: StyleTokens = StyleTokensByStyle[style]): CssVariables => {
@@ -109,11 +109,17 @@ export const cssVariables = (theme: EffectiveTheme): CssVariables => ({
   ...styleVariables(theme.style, theme.tokens),
 });
 
-const cssDeclarations = (vars: CssVariables, indent = "  "): string =>
-  Arr.join(
-    Arr.map(Rec.toEntries(vars), ([k, v]) => `${indent}${k}: ${v};`),
-    "\n",
-  );
+export const cssDeclarations: {
+  (indent?: string): (vars: CssVariables) => string;
+  (vars: CssVariables, indent?: string): string;
+} = Fn.dual(
+  (args) => typeof args[0] === "object",
+  (vars: CssVariables, indent = "  "): string =>
+    Arr.join(
+      Arr.map(Rec.toEntries(vars), ([k, v]) => `${indent}${k}: ${v};`),
+      "\n",
+    ),
+);
 
 const rule = (selector: string, vars: CssVariables, indent = ""): string =>
   `${indent}${selector} {\n${cssDeclarations(vars, `${indent}  `)}\n${indent}}`;
@@ -125,19 +131,20 @@ const rule = (selector: string, vars: CssVariables, indent = ""): string =>
  * standard to medium. Selectors are ordered and weighted so the most specific choice wins.
  */
 export const themeStylesheet: {
-  (theme: ResolvedTheme, style: ThemeStyle, root?: string): string;
   (style: ThemeStyle, root?: string): (theme: ResolvedTheme) => string;
+  (theme: ResolvedTheme, style: ThemeStyle, root?: string): string;
 } = Fn.dual(
   (args) => typeof args[0] === "object",
   (theme: ResolvedTheme, style: ThemeStyle, root = ":root"): string => {
     const c = (v: SchemeVariant) => colorVariables(theme.schemes[v]);
+    const styleVars: CssVariables = styleVariables(style);
     const sysDark = `${root}:not([data-theme="light"])`;
     const dark = `${root}[data-theme="dark"]`;
     // biome-ignore lint/security/noSecrets: This is a CSS selector.
     const notHigh = ':not([data-contrast="high"])';
     return Arr.join(
       [
-        rule(root, { ...c("light"), ...styleVariables(style) }),
+        rule(root, { ...c("light"), ...styleVars }),
         rule(`${root}[data-contrast="medium"]`, c("lightMedium")),
         rule(`${root}[data-contrast="high"]`, c("lightHigh")),
         rule(dark, c("dark")),

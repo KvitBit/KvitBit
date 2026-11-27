@@ -11,8 +11,8 @@ export const relativeLuminance = (rgb: Rgb): number =>
 
 /** WCAG contrast ratio, 1..21, order-independent. */
 export const contrastRatio: {
-  (a: Rgb, b: Rgb): number;
   (b: Rgb): (a: Rgb) => number;
+  (a: Rgb, b: Rgb): number;
 } = Fn.dual(2, (a: Rgb, b: Rgb): number => {
   const la = relativeLuminance(a);
   const lb = relativeLuminance(b);

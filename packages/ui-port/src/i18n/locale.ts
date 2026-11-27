@@ -20,6 +20,8 @@ export const FALLBACK_LOCALE: Locale = "en";
 /** BCP 47 tag each locale formats with (en-GB: day-first dates, as on Czech invoices). */
 export const INTL_TAG: Readonly<Record<Locale, string>> = { cs: "cs-CZ", en: "en-GB" };
 
+export const isLocale = (value: unknown): value is Locale => value === "cs" || value === "en";
+
 const fromTag = (tag: string): Locale | undefined => {
   const language = Str.split(Str.toLowerCase(Str.trim(tag)), LANGUAGE_SUBTAG_SEPARATOR)[0];
   if (language === "cs" || language === "sk") return "cs"; // Slovak readers get Czech copy

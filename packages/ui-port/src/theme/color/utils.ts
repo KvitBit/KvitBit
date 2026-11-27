@@ -26,13 +26,13 @@ export const WHITE_POINT_D65 = [95.047, 100.0, 108.883] as const;
 export type Vec3 = readonly [number, number, number];
 
 export const clamp: {
-  (lo: number, hi: number, x: number): number;
   (hi: number, x: number): (lo: number) => number;
+  (lo: number, hi: number, x: number): number;
 } = Fn.dual(3, (lo: number, hi: number, x: number): number => Math.min(hi, Math.max(lo, x)));
 
 export const lerp: {
-  (a: number, b: number, t: number): number;
   (b: number, t: number): (a: number) => number;
+  (a: number, b: number, t: number): number;
 } = Fn.dual(3, (a: number, b: number, t: number): number => (1 - t) * a + t * b);
 
 export const signum = (x: number): number => (x < 0 ? -1 : x > 0 ? 1 : 0);
@@ -44,13 +44,13 @@ export const sanitizeDegrees = (deg: number): number => {
 
 /** Shortest angular distance between two hues, 0..180. */
 export const differenceDegrees: {
-  (a: number, b: number): number;
   (b: number): (a: number) => number;
+  (a: number, b: number): number;
 } = Fn.dual(2, (a: number, b: number): number => 180 - Math.abs(Math.abs(a - b) - 180));
 
 export const matrixMultiply: {
-  (v: Vec3, m: readonly (readonly number[])[]): Vec3;
   (m: readonly (readonly number[])[]): (v: Vec3) => Vec3;
+  (v: Vec3, m: readonly (readonly number[])[]): Vec3;
 } = Fn.dual(2, (v: Vec3, m: readonly (readonly number[])[]): Vec3 => {
   const r0 = m[0] ?? [];
   const r1 = m[1] ?? [];
@@ -68,8 +68,8 @@ export const greenOf = (rgb: Rgb): number => (rgb >> 8) & 0xff;
 export const blueOf = (rgb: Rgb): number => rgb & 0xff;
 
 export const rgbFromComponents: {
-  (r: number, g: number, b: number): Rgb;
   (g: number, b: number): (r: number) => Rgb;
+  (r: number, g: number, b: number): Rgb;
 } = Fn.dual(
   3,
   (r: number, g: number, b: number): Rgb => ((r & 0xff) << 16) | ((g & 0xff) << 8) | (b & 0xff),

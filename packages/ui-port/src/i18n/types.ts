@@ -1,20 +1,21 @@
 import type { TextParam } from "../text";
 
 /** English plural message: forms selected by `Intl.PluralRules("en")`. */
-interface EnPlural {
+export interface EnPlural {
   readonly one: string;
   readonly other: string;
 }
 
 /** Czech plural message: 1 one, 2-4 few, fractions many, otherwise other. */
-interface CsPlural {
+export interface CsPlural {
   readonly one: string;
   readonly few: string;
   readonly many: string;
   readonly other: string;
 }
 
-type EnMessage = string | EnPlural;
+export type EnMessage = string | EnPlural;
+export type CsMessage = string | CsPlural;
 export type AnyMessage = string | Partial<Record<Intl.LDMLPluralRule, string>>;
 
 /** Shape every `en` catalog section satisfies. */
@@ -28,7 +29,9 @@ export type CsSection<E extends EnSection> = {
 };
 
 /** `{name}` placeholder names in a template literal type. */
-type Placeholders<S> = S extends `${string}{${infer P}}${infer R}` ? P | Placeholders<R> : never;
+export type Placeholders<S> = S extends `${string}{${infer P}}${infer R}`
+  ? P | Placeholders<R>
+  : never;
 
 /** Placeholder names of a message; plurals also take `count`. */
 export type ParamNames<M> = M extends string

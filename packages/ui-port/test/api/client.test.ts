@@ -27,6 +27,7 @@ import {
   keyAfter,
   layerFetch,
   pageQuery,
+  ResponseObserver,
   runCommand,
   sessionCookie,
   toUiError,
@@ -266,6 +267,10 @@ describe("typed error decoding into UiError", () => {
 });
 
 describe("client configuration", () => {
+  test("keeps the existing API and observer service keys", () => {
+    expect(KvitbitApi.key).toBe("ui-port/KvitbitApi");
+    expect(ResponseObserver.key).toBe("ui-port/ResponseObserver");
+  });
   test("Accept-Language follows a locale switch between requests", async () => {
     let locale = "cs";
     const mock = mockFetch(() => json(200, { items: [], nextCursor: null }));

@@ -11,8 +11,8 @@ const rotationDirection = (from: number, to: number): 1 | -1 =>
  * its chroma and tone, so status colours sit in the same family as the theme's primary.
  */
 export const harmonize: {
-  (design: Rgb, source: Rgb): Rgb;
   (source: Rgb): (design: Rgb) => Rgb;
+  (design: Rgb, source: Rgb): Rgb;
 } = Fn.dual(2, (design: Rgb, source: Rgb): Rgb => {
   const from = Hct.fromRgb(design);
   const to = Hct.fromRgb(source);
