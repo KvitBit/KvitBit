@@ -1558,6 +1558,10 @@ describe("Pure-Alchemy Cloud DNS", () => {
       addressType: "EXTERNAL",
       networkTier: "PREMIUM",
     });
+    expect(
+      (archiveCompiled.resources.KvitbitMailAddress?.Props as Record<string, unknown> | undefined)
+        ?.ipVersion,
+    ).toBeUndefined();
     expect(archiveCompiled.resources.KvitbitMailIngress?.Props).toMatchObject({
       zone: "us-east1-b",
       machineType: "e2-micro",
