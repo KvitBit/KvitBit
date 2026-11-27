@@ -3,7 +3,7 @@ import type { common as en } from "../en/common";
 
 export const common = {
   "app.name": "Kvitbit",
-  "app.tagline": "Fakturace po česku, bez papírování",
+  "app.tagline": "Buď si kvit",
 
   "common.action.save": "Uložit",
   "common.action.saveChanges": "Uložit změny",

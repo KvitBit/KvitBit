@@ -37,7 +37,6 @@ export type Message = typeof Message.Type;
 
 const local = copy({
   cs: {
-    eyebrow: "Fakturace pro české OSVČ a firmy",
     androidCta: "Aplikace pro Android",
     pwaCta: "Otevřít mobilní web (/app/)",
     openDashboard: "Přejít do přehledu",
@@ -51,7 +50,6 @@ const local = copy({
     selfHostAction: "Stáhnout Android aplikaci",
   },
   en: {
-    eyebrow: "Invoicing for Czech freelancers and companies",
     androidCta: "Android app",
     pwaCta: "Open mobile web (/app/)",
     openDashboard: "Open dashboard",
@@ -163,7 +161,7 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
       h.div.class("kb-landing-hero__inner").children([
         h.div.class("kb-landing-hero__copy").children([
           h.div.class("kb-row").children([lockup(h, "horizontal", 32)]),
-          h.span.class("kb-small kb-muted").children([local(ctx.locale, "eyebrow")]),
+          h.span.class("kb-small kb-muted").children([t.t("app.tagline")]),
           h.h1.class("kb-landing-hero__title").children([t.t("public.landing.title")]),
           h.p.class("kb-landing-hero__subtitle").children([t.t("public.landing.subtitle")]),
           ...(!signUpEnabled

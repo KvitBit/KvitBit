@@ -3,7 +3,7 @@ import type { EnSection } from "../../types";
 /** Shared actions, states, field labels, confirmations and units used across screens. */
 export const common = {
   "app.name": "Kvitbit",
-  "app.tagline": "Czech invoicing without the paperwork",
+  "app.tagline": "Stay square",
 
   "common.action.save": "Save",
   "common.action.saveChanges": "Save changes",
