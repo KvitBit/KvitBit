@@ -8,6 +8,7 @@ import { Schema } from "effect";
 import { copy } from "../../app/i18n";
 import type { Locale, Prefs } from "../../app/prefs";
 import { captureDiagnostics, capturePin } from "./capture";
+import { isFeedbackShortcut } from "./shortcut";
 import { renderFeedbackControls } from "./view";
 
 const text = copy({
@@ -111,6 +112,7 @@ const installFeedback = (locale: Locale, mode: Prefs["mode"], signal: AbortSigna
     highlightTag,
     markers,
     pick,
+    pickLabel,
     pickError,
     review,
     composer,
@@ -131,7 +133,7 @@ const installFeedback = (locale: Locale, mode: Prefs["mode"], signal: AbortSigna
   const nativePopover = typeof composer.showPopover === "function";
   if (nativePopover) composer.setAttribute("popover", "manual");
 
-  pick.textContent = text(locale, "pick");
+  pickLabel.textContent = text(locale, "pick");
   commentLabel.textContent = text(locale, "comment");
   close.setAttribute("aria-label", text(locale, "close"));
   dismiss.setAttribute("aria-label", text(locale, "close"));
@@ -193,7 +195,7 @@ const installFeedback = (locale: Locale, mode: Prefs["mode"], signal: AbortSigna
   };
 
   const refresh = () => {
-    pick.textContent = text(locale, picking ? "stop" : "pick");
+    pickLabel.textContent = text(locale, picking ? "stop" : "pick");
     pick.setAttribute("aria-pressed", String(picking));
     pick.disabled = submitting || (!picking && pins.length >= FEEDBACK_LIMITS.pins);
     review.hidden = pins.length === 0;
@@ -229,6 +231,11 @@ const installFeedback = (locale: Locale, mode: Prefs["mode"], signal: AbortSigna
     announcement.textContent = active ? text(locale, "instructions") : "";
     refresh();
     requestLayout();
+  };
+
+  const stopPicking = () => {
+    setPicking(false);
+    pick.focus({ preventScroll: true });
   };
 
   const showComposer = (pin: Pin) => {
@@ -436,8 +443,7 @@ const installFeedback = (locale: Locale, mode: Prefs["mode"], signal: AbortSigna
         event.preventDefault();
         event.stopImmediatePropagation();
         if (picking) {
-          setPicking(false);
-          pick.focus({ preventScroll: true });
+          stopPicking();
         } else {
           closeComposer();
           review.focus({ preventScroll: true });
@@ -447,6 +453,19 @@ const installFeedback = (locale: Locale, mode: Prefs["mode"], signal: AbortSigna
       }
     },
     { capture: true, signal },
+  );
+  window.addEventListener(
+    "keydown",
+    (event) => {
+      if (location.pathname !== pagePath || pick.disabled || !isFeedbackShortcut(event, document)) {
+        return;
+      }
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      if (picking) stopPicking();
+      else setPicking(true);
+    },
+    { signal },
   );
   window.addEventListener("scroll", requestLayout, { capture: true, passive: true, signal });
   window.addEventListener("resize", requestLayout, { signal });
