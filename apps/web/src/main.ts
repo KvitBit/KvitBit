@@ -12,6 +12,7 @@ import { BrowserRoutes, gate, href, magicSignInCallback, routeFromPath } from ".
 import { fetchSession, workspaceBySlug } from "./app/session";
 import { shellView } from "./app/shell";
 import { browserDates } from "./app/utc-date";
+import { feedbackSubscription } from "./runtime/feedback-subscription";
 
 export { Flags, Message, Model } from "./app/root";
 
@@ -290,6 +291,7 @@ export const App = Html.component({
     ),
     shortcut,
     changedDate,
+    ...feedbackSubscription(model),
   ],
   view: (h, model) => shellView(model, contextOf(model), h),
   head: ({ model }) => [Head.title("Kvitbit"), HtmlHead.lang(model.prefs.locale)],
