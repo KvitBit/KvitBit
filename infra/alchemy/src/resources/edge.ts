@@ -255,6 +255,7 @@ export const declareKvitbitEdge = Effect.fn("KvitbitStack.declareKvitbitEdge")(f
   const urlMapLink = urlMap.selfLink.pipe(declaredLink("EdgeUrlMap"));
 
   let httpTarget: Input<string>;
+  let httpsForwardingRule: Output.Output<string | undefined> | undefined;
   if (edge.enableHttps) {
     const certificate = yield* Compute.SslCertificate("EdgeCertificate", {
       sslCertificateName: edgeResourceName(config, "edge-cert"),
@@ -266,13 +267,14 @@ export const declareKvitbitEdge = Effect.fn("KvitbitStack.declareKvitbitEdge")(f
       urlMap: urlMapLink,
       sslCertificates: [certificate.selfLink.pipe(declaredLink("EdgeCertificate"))],
     });
-    yield* Compute.GlobalForwardingRule("EdgeHttpsForwardingRule", {
+    const https = yield* Compute.GlobalForwardingRule("EdgeHttpsForwardingRule", {
       forwardingRuleName: names.httpsForwardingRule,
       loadBalancingScheme: "EXTERNAL_MANAGED" as const,
       ipAddress: addressLink,
       portRange: "443",
       target: httpsProxy.selfLink.pipe(declaredLink("EdgeHttpsProxy")),
     });
+    httpsForwardingRule = https.selfLink;
     const redirectMap = yield* Compute.UrlMap(
       "EdgeHttpsRedirectUrlMap",
       edgeHttpsRedirectUrlMapProps(config),
@@ -300,6 +302,7 @@ export const declareKvitbitEdge = Effect.fn("KvitbitStack.declareKvitbitEdge")(f
 
   return {
     edgeIpAddress: address.address,
+    httpsForwardingRule,
     edgeProtocol: edge.enableHttps ? ("https" as const) : ("http" as const),
     securityPolicy: policy.selfLink,
     backendServices: [dynamicBackend.selfLink, staticBackend.selfLink] as const,

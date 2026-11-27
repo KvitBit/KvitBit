@@ -151,8 +151,8 @@ export function SignInScreen(props: {
             if (next === "magic_link") void magicBot.start();
           }}
           choices={[
-            { value: "password", label: t("auth.signIn.withPassword") },
-            { value: "magic_link", label: t("auth.signIn.withMagicLink") },
+            { value: "password", label: t("auth.signIn.methodPassword") },
+            { value: "magic_link", label: t("auth.signIn.methodMagicLink") },
           ]}
         />
 

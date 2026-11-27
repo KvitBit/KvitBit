@@ -12,8 +12,14 @@
     "build": "bun run build:pwa",
     "build:pwa": "bun scripts/build-pwa.ts",
     "export:web": "expo export --platform web --output-dir dist",
+    "lint": "biome check --error-on-warnings .",
     "typecheck": "tsc -p tsconfig.json",
     "test": "bun test",
+    "test:suite": ":",
+    "test:release": "bun test release",
+    "test:pwa": "bun test scripts",
+    "test:core": "bun test src/config src/platform src/runtime src/session src/theme src/ui src/updates",
+    "test:features": "bun test src/features",
     "release:apk": "bun ../../scripts/release/mobile-release.ts build"
   },
   "dependencies": {

@@ -37,6 +37,8 @@ export const DEPLOY_MODES = [
   "bootstrap_foundation",
   "bootstrap_feedback_secret",
   "bootstrap_altcha_secret",
+  "bootstrap_resend_secret",
+  "bootstrap_turbo_cache_secret",
 ] as const;
 export type DeployMode = (typeof DEPLOY_MODES)[number];
 
@@ -46,6 +48,7 @@ export const SECRET_FLAG_ENV_VARS = [
   "KVITBIT_ENABLE_MOBILE_SIGNING_KEY_SECRET",
   "KVITBIT_ENABLE_FEEDBACK_GITHUB_TOKEN_SECRET",
   "KVITBIT_ENABLE_ALTCHA_HMAC_KEY_SECRET",
+  "KVITBIT_ENABLE_TURBO_CACHE",
 ] as const;
 export type SecretFlagEnvVar = (typeof SECRET_FLAG_ENV_VARS)[number];
 
@@ -377,19 +380,43 @@ export const validateDeployPreflight = (
       `Invalid boolean value for BOOTSTRAP_ALTCHA_SECRET: ${bootstrapAltchaParsed.reason}`,
     );
   }
+  const bootstrapResendParsed = parseOptionalBoolean(env.BOOTSTRAP_RESEND_SECRET, false);
+  if (!bootstrapResendParsed.ok) {
+    return failPreflight(
+      "BOOTSTRAP_RESEND_SECRET",
+      `Invalid boolean value for BOOTSTRAP_RESEND_SECRET: ${bootstrapResendParsed.reason}`,
+    );
+  }
+  const bootstrapTurboCacheParsed = parseOptionalBoolean(env.BOOTSTRAP_TURBO_CACHE_SECRET, false);
+  if (!bootstrapTurboCacheParsed.ok) {
+    return failPreflight(
+      "BOOTSTRAP_TURBO_CACHE_SECRET",
+      `Invalid boolean value for BOOTSTRAP_TURBO_CACHE_SECRET: ${bootstrapTurboCacheParsed.reason}`,
+    );
+  }
 
   const bootstrapFoundation = bootstrapFoundationParsed.value;
   const bootstrapFeedbackSecret = bootstrapFeedbackParsed.value;
   const bootstrapAltchaSecret = bootstrapAltchaParsed.value;
+  const bootstrapResendSecret = bootstrapResendParsed.value;
+  const bootstrapTurboCacheSecret = bootstrapTurboCacheParsed.value;
   const activeBootstraps = [
     bootstrapFoundation,
     bootstrapFeedbackSecret,
     bootstrapAltchaSecret,
+    bootstrapResendSecret,
+    bootstrapTurboCacheSecret,
   ].filter(Boolean).length;
   if (activeBootstraps > 1) {
     return failPreflight(
-      bootstrapAltchaSecret ? "BOOTSTRAP_ALTCHA_SECRET" : "BOOTSTRAP_FEEDBACK_SECRET",
-      "Select only one of bootstrap_foundation, bootstrap_feedback_secret, and bootstrap_altcha_secret.",
+      bootstrapTurboCacheSecret
+        ? "BOOTSTRAP_TURBO_CACHE_SECRET"
+        : bootstrapResendSecret
+          ? "BOOTSTRAP_RESEND_SECRET"
+          : bootstrapAltchaSecret
+            ? "BOOTSTRAP_ALTCHA_SECRET"
+            : "BOOTSTRAP_FEEDBACK_SECRET",
+      "Select only one of bootstrap_foundation, bootstrap_feedback_secret, bootstrap_altcha_secret, bootstrap_resend_secret, and bootstrap_turbo_cache_secret.",
     );
   }
 
@@ -527,6 +554,34 @@ export const validateDeployPreflight = (
     return {
       ok: true,
       deployMode: "bootstrap_altcha_secret",
+      normalizedBooleans,
+    };
+  }
+
+  if (bootstrapResendSecret) {
+    if (!normalizedBooleans.KVITBIT_ENABLE_RESEND_SECRET) {
+      return failPreflight(
+        "KVITBIT_ENABLE_RESEND_SECRET",
+        "Set the KVITBIT_ENABLE_RESEND_SECRET repository variable to true before bootstrapping the Resend API key container.",
+      );
+    }
+    return {
+      ok: true,
+      deployMode: "bootstrap_resend_secret",
+      normalizedBooleans,
+    };
+  }
+
+  if (bootstrapTurboCacheSecret) {
+    if (!normalizedBooleans.KVITBIT_ENABLE_TURBO_CACHE) {
+      return failPreflight(
+        "KVITBIT_ENABLE_TURBO_CACHE",
+        "Set the KVITBIT_ENABLE_TURBO_CACHE repository variable to true before bootstrapping the Turborepo cache token container.",
+      );
+    }
+    return {
+      ok: true,
+      deployMode: "bootstrap_turbo_cache_secret",
       normalizedBooleans,
     };
   }

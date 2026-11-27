@@ -12,8 +12,14 @@
     "./view-models": "./src/view-models/index.ts"
   },
   "scripts": {
+    "lint": "biome check --error-on-warnings .",
     "typecheck": "tsc -p tsconfig.json",
-    "test": "bun test --pass-with-no-tests"
+    "test": "bun test --pass-with-no-tests",
+    "test:suite": ":",
+    "test:api": "bun test test/api",
+    "test:i18n": "bun test test/format test/i18n",
+    "test:theme": "bun test test/theme",
+    "test:view-models": "bun test test/view-models"
   },
   "dependencies": {
     "@kvitbit/api-contract": "workspace:*",

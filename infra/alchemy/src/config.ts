@@ -30,7 +30,14 @@ export type { BlobDriver, BotProtectionMode, EmailMode };
 
 export type KvitbitStage = "prod" | "staging";
 
-export type KvitbitWorkload = "server" | "runner";
+export type KvitbitWorkload = "server" | "runner" | "turbo-cache";
+
+export interface KvitbitTurboCacheConfig {
+  readonly bucket: string;
+  readonly image: string;
+  readonly ttlDays: number;
+  readonly maxInstances: number;
+}
 
 export interface KvitbitSecretBinding {
   readonly environmentVariable: string;
@@ -49,11 +56,31 @@ export interface KvitbitEdgeConfig {
   readonly restrictDirectIngress: boolean;
 }
 
+export interface KvitbitMailConfig {
+  readonly domain: string;
+  readonly mxHost: string;
+  readonly forwardTo: string;
+  readonly forwardFrom: string;
+  readonly aliases: ReadonlyArray<string>;
+  readonly region: string;
+  readonly zone: string;
+  readonly cidr: string;
+  readonly archiveBucket: string;
+  readonly relayMode: "archive-only" | "resend";
+  readonly resendDkimTxt: string | undefined;
+  readonly resendSendMx: string | undefined;
+  readonly resendSendSpfTxt: string | undefined;
+  readonly apexSpfTxt: string | undefined;
+  readonly dmarcTxt: string | undefined;
+}
+
 export interface KvitbitStackConfig {
   readonly stage: KvitbitStage;
   readonly bootstrapFoundation: boolean;
   readonly bootstrapFeedbackSecret?: boolean | undefined;
   readonly bootstrapAltchaSecret?: boolean | undefined;
+  readonly bootstrapResendSecret?: boolean | undefined;
+  readonly bootstrapTurboCacheSecret?: boolean | undefined;
   readonly projectId: string;
   readonly projectNumber: string;
   readonly region: string;
@@ -75,6 +102,7 @@ export interface KvitbitStackConfig {
   readonly emailMode?: EmailMode | undefined;
   readonly emailFrom: string | undefined;
   readonly botProtectionMode?: BotProtectionMode | undefined;
+  readonly alertEmail?: string | undefined;
   readonly trustedProxyHops: number;
   readonly shareKeyVersion: number;
   readonly androidAssetlinksSha256: string | undefined;
@@ -83,6 +111,8 @@ export interface KvitbitStackConfig {
   readonly secrets: ReadonlyArray<KvitbitSecretBinding>;
   readonly dnsZones: ReadonlyArray<string>;
   readonly edge: KvitbitEdgeConfig | undefined;
+  readonly mail?: KvitbitMailConfig | undefined;
+  readonly turboCache?: KvitbitTurboCacheConfig | undefined;
 }
 
 export class InvalidStackConfig extends Data.TaggedError("InvalidStackConfig")<{
@@ -112,7 +142,30 @@ export const KVITBIT_PROD_DEFAULTS = {
   shareKeyVersion: 1,
 } as const;
 
+export const KVITBIT_MAIL_DEFAULTS = {
+  region: "us-east1",
+  zone: "us-east1-b",
+  cidr: "10.42.16.0/28",
+} as const;
+
+export const KVITBIT_TURBO_CACHE_DEFAULTS = {
+  image: "ducktors/turborepo-remote-cache:2.14.4",
+  port: 3000,
+  ttlDays: 30,
+  maxInstances: 4,
+  bodyLimitBytes: 104_857_600,
+} as const;
+
 const DIGEST_PATTERN = /^sha256:[a-f0-9]{64}$/;
+const DOMAIN_PATTERN = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/;
+const EMAIL_PATTERN = /^[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9-]+(?:\.[a-z0-9-]+)+$/;
+const EMAIL_ADDRESS_PATTERN =
+  /^[a-z\d!#$%&'*+/=?^_`{|}~-]+(?:\.[a-z\d!#$%&'*+/=?^_`{|}~-]+)*@[a-z\d](?:[a-z\d-]*[a-z\d])?(?:\.[a-z\d](?:[a-z\d-]*[a-z\d])?)+$/i;
+const ALIAS_LOCAL_PATTERN = /^[a-z0-9][a-z0-9._+-]{0,62}$/;
+const CIDR_PATTERN = /^(\d{1,3}\.){3}\d{1,3}\/\d{1,2}$/;
+const MX_RRDATA_PATTERN =
+  /^(\d{1,5})\s+([a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+)\.?$/i;
+const parseCsvList = parseCsvDomainList;
 
 export const defaultSecretBindings = (
   stage: KvitbitStage,
@@ -122,6 +175,7 @@ export const defaultSecretBindings = (
     readonly enableMobileSigningKey?: boolean;
     readonly enableFeedbackGitHubToken?: boolean;
     readonly enableAltchaHmacKey?: boolean;
+    readonly enableTurboCache?: boolean;
   },
 ): ReadonlyArray<KvitbitSecretBinding> => {
   const prefix = `kvitbit-${stage}`;
@@ -199,6 +253,16 @@ export const defaultSecretBindings = (
     });
   }
 
+  if (options?.enableTurboCache ?? false) {
+    bindings.push({
+      environmentVariable: "TURBO_TOKEN",
+      secretId: `${prefix}-turbo-cache-token`,
+      version: "latest",
+      required: false,
+      consumers: ["turbo-cache"],
+    });
+  }
+
   return bindings;
 };
 
@@ -209,8 +273,16 @@ export const resourceNames = (config: KvitbitStackConfig) => {
     serverServiceId: `${prefix}-server`,
     serverServiceAccountId: `${prefix}-server`,
     runnerServiceAccountId: `${prefix}-runner`,
+    turboCacheServiceId: `${prefix}-turbo-cache`,
+    turboCacheServiceAccountId: `${prefix}-turbo-cache`,
+    mailServiceAccountId: `${prefix}-mail-ingress`,
     networkName: `${prefix}-vpc`,
     subnetworkName: `${prefix}-runners`,
+    mailSubnetworkName: `${prefix}-mail-ingress`,
+    mailAddressName: `${prefix}-mail-ingress`,
+    mailFirewallName: `${prefix}-allow-mail-smtp`,
+    mailTag: `${prefix}-mail-ingress`,
+    mailInstanceName: `${prefix}-mail-ingress`,
     routerName: `${prefix}-router`,
     natName: `${prefix}-nat`,
     runnerFirewallName: `${prefix}-allow-runner-cluster`,
@@ -261,6 +333,8 @@ export const validateStackConfigSync = (
 ): StackConfigValidationResult => {
   const bootstrapFeedbackSecret = config.bootstrapFeedbackSecret ?? false;
   const bootstrapAltchaSecret = config.bootstrapAltchaSecret ?? false;
+  const bootstrapResendSecret = config.bootstrapResendSecret ?? false;
+  const bootstrapTurboCacheSecret = config.bootstrapTurboCacheSecret ?? false;
   const blobDriver: BlobDriver = config.blobDriver ?? "gcs";
 
   if (config.projectId.trim().length === 0) {
@@ -276,11 +350,19 @@ export const validateStackConfigSync = (
     config.bootstrapFoundation,
     bootstrapFeedbackSecret,
     bootstrapAltchaSecret,
+    bootstrapResendSecret,
+    bootstrapTurboCacheSecret,
   ].filter(Boolean).length;
   if (activeBootstraps > 1) {
     return failStack(
-      bootstrapAltchaSecret ? "bootstrapAltchaSecret" : "bootstrapFeedbackSecret",
-      "cannot combine bootstrapFoundation, bootstrapFeedbackSecret, and bootstrapAltchaSecret",
+      bootstrapTurboCacheSecret
+        ? "bootstrapTurboCacheSecret"
+        : bootstrapResendSecret
+          ? "bootstrapResendSecret"
+          : bootstrapAltchaSecret
+            ? "bootstrapAltchaSecret"
+            : "bootstrapFeedbackSecret",
+      "cannot combine bootstrapFoundation, bootstrapFeedbackSecret, bootstrapAltchaSecret, bootstrapResendSecret, and bootstrapTurboCacheSecret",
     );
   }
   if (!config.bootstrapFoundation && !DIGEST_PATTERN.test(config.imageDigest)) {
@@ -303,6 +385,9 @@ export const validateStackConfigSync = (
   ) {
     return failStack("serverMaxInstances", "must be >= max(1, serverMinInstances)");
   }
+  if (config.alertEmail !== undefined && !EMAIL_ADDRESS_PATTERN.test(config.alertEmail)) {
+    return failStack("KVITBIT_ALERT_EMAIL", "must be a single email address");
+  }
 
   for (const domain of config.dnsZones) {
     if (!isValidDomain(domain)) {
@@ -321,6 +406,109 @@ export const validateStackConfigSync = (
       if (!isValidDomain(domain)) {
         return failStack("edge.domains", `invalid domain '${domain}'`);
       }
+    }
+  }
+
+  if (config.mail !== undefined) {
+    const { mail } = config;
+    if (!DOMAIN_PATTERN.test(mail.domain)) {
+      return failStack("KVITBIT_MAIL_DOMAIN", `invalid domain '${mail.domain}'`);
+    }
+    if (!config.dnsZones.includes(mail.domain)) {
+      return failStack(
+        "KVITBIT_MAIL_DOMAIN",
+        `domain '${mail.domain}' must be included in KVITBIT_DNS_ZONES`,
+      );
+    }
+    if (!DOMAIN_PATTERN.test(mail.mxHost) || !mail.mxHost.endsWith(`.${mail.domain}`)) {
+      return failStack(
+        "KVITBIT_MAIL_MX_HOST",
+        `MX host '${mail.mxHost}' must be a subdomain of '${mail.domain}'`,
+      );
+    }
+    if (!EMAIL_PATTERN.test(mail.forwardTo)) {
+      return failStack("KVITBIT_MAIL_FORWARD_TO", `invalid forwarding email '${mail.forwardTo}'`);
+    }
+    if (mail.forwardTo.endsWith(`@${mail.domain}`)) {
+      return failStack(
+        "KVITBIT_MAIL_FORWARD_TO",
+        `forwarding target '${mail.forwardTo}' must not be on '${mail.domain}' (prevents forwarding loop)`,
+      );
+    }
+    if (!EMAIL_PATTERN.test(mail.forwardFrom) || !mail.forwardFrom.endsWith(`@${mail.domain}`)) {
+      return failStack(
+        "KVITBIT_MAIL_FORWARD_FROM",
+        `forwardFrom '${mail.forwardFrom}' must be an address on '${mail.domain}'`,
+      );
+    }
+    if (mail.aliases.length === 0) {
+      return failStack(
+        "KVITBIT_MAIL_ALIASES",
+        "must list at least one explicit local-part alias (catch-all is not allowed)",
+      );
+    }
+    const forwardFromLocal = mail.forwardFrom.slice(0, mail.forwardFrom.indexOf("@"));
+    for (const alias of mail.aliases) {
+      if (!ALIAS_LOCAL_PATTERN.test(alias)) {
+        return failStack("KVITBIT_MAIL_ALIASES", `invalid alias local-part '${alias}'`);
+      }
+      if (alias === forwardFromLocal) {
+        return failStack(
+          "KVITBIT_MAIL_ALIASES",
+          `alias '${alias}' must not match forwardFrom local-part '${forwardFromLocal}'`,
+        );
+      }
+    }
+    if (!mail.zone.startsWith(`${mail.region}-`)) {
+      return failStack(
+        "KVITBIT_MAIL_ZONE",
+        `zone '${mail.zone}' must be inside region '${mail.region}'`,
+      );
+    }
+    if (!CIDR_PATTERN.test(mail.cidr) || mail.cidr === config.runnerCidr) {
+      return failStack("KVITBIT_MAIL_CIDR", `invalid or conflicting CIDR '${mail.cidr}'`);
+    }
+    if (mail.resendSendMx !== undefined && !MX_RRDATA_PATTERN.test(mail.resendSendMx)) {
+      return failStack(
+        "KVITBIT_MAIL_RESEND_SEND_MX",
+        `expected '<priority> <hostname>' (got '${mail.resendSendMx}')`,
+      );
+    }
+    if (
+      mail.relayMode === "resend" &&
+      !config.secrets.some((secret) => secret.environmentVariable === "RESEND_API_KEY")
+    ) {
+      return failStack(
+        "mail.relayMode",
+        "relayMode 'resend' requires KVITBIT_ENABLE_RESEND_SECRET=true",
+      );
+    }
+  }
+
+  if (config.turboCache !== undefined) {
+    const { turboCache } = config;
+    if (turboCache.bucket.trim().length === 0) {
+      return failStack("KVITBIT_TURBO_CACHE_BUCKET", "must be non-empty");
+    }
+    if (turboCache.image.trim().length === 0) {
+      return failStack("KVITBIT_TURBO_CACHE_IMAGE", "must be non-empty");
+    }
+    if (
+      !Number.isInteger(turboCache.ttlDays) ||
+      turboCache.ttlDays < 1 ||
+      turboCache.ttlDays > 365
+    ) {
+      return failStack("KVITBIT_TURBO_CACHE_TTL_DAYS", "must be an integer between 1 and 365");
+    }
+    if (
+      !Number.isInteger(turboCache.maxInstances) ||
+      turboCache.maxInstances < 1 ||
+      turboCache.maxInstances > 20
+    ) {
+      return failStack("KVITBIT_TURBO_CACHE_MAX_INSTANCES", "must be an integer between 1 and 20");
+    }
+    if (!config.secrets.some((secret) => secret.environmentVariable === "TURBO_TOKEN")) {
+      return failStack("turboCache", "requires the TURBO_TOKEN secret binding");
     }
   }
 
@@ -387,6 +575,26 @@ export const validateStackConfigSync = (
       return failStack(
         "KVITBIT_ENABLE_ALTCHA_HMAC_KEY_SECRET",
         "bootstrapAltchaSecret requires the ALTCHA_HMAC_KEY secret binding",
+      );
+    }
+    return { ok: true, value: config };
+  }
+
+  if (bootstrapResendSecret) {
+    if (!hasSecret(config, "RESEND_API_KEY")) {
+      return failStack(
+        "KVITBIT_ENABLE_RESEND_SECRET",
+        "bootstrapResendSecret requires the RESEND_API_KEY secret binding",
+      );
+    }
+    return { ok: true, value: config };
+  }
+
+  if (bootstrapTurboCacheSecret) {
+    if (!hasSecret(config, "TURBO_TOKEN")) {
+      return failStack(
+        "KVITBIT_ENABLE_TURBO_CACHE",
+        "bootstrapTurboCacheSecret requires the TURBO_TOKEN secret binding",
       );
     }
     return { ok: true, value: config };
@@ -833,6 +1041,11 @@ export const loadStackConfig: Effect.Effect<
     false,
   );
   const bootstrapAltchaSecret = yield* optionalBoolean("KVITBIT_BOOTSTRAP_ALTCHA_SECRET", false);
+  const bootstrapResendSecret = yield* optionalBoolean("KVITBIT_BOOTSTRAP_RESEND_SECRET", false);
+  const bootstrapTurboCacheSecret = yield* optionalBoolean(
+    "KVITBIT_BOOTSTRAP_TURBO_CACHE_SECRET",
+    false,
+  );
 
   const projectId = yield* Config.String("KVITBIT_GCP_PROJECT_ID").pipe(
     Config.withDefault(KVITBIT_PROD_DEFAULTS.projectId),
@@ -893,7 +1106,7 @@ export const loadStackConfig: Effect.Effect<
     });
   }
   const botProtectionMode: BotProtectionMode | undefined = botProtectionModeRaw;
-
+  const alertEmail = yield* optionalNonEmptyString("KVITBIT_ALERT_EMAIL");
   const androidAssetlinksSha256 = yield* optionalNonEmptyString(
     "KVITBIT_ANDROID_ASSETLINKS_SHA256",
   );
@@ -949,6 +1162,7 @@ export const loadStackConfig: Effect.Effect<
     "KVITBIT_ENABLE_ALTCHA_HMAC_KEY_SECRET",
     false,
   );
+  const enableTurboCache = yield* optionalBoolean("KVITBIT_ENABLE_TURBO_CACHE", false);
 
   const blobsBucket = yield* Config.String("KVITBIT_BLOB_BUCKET").pipe(
     Config.withDefault(`${projectId}-blobs-${stage}`),
@@ -956,12 +1170,70 @@ export const loadStackConfig: Effect.Effect<
   const mobileAssetsBucket = yield* Config.String("KVITBIT_MOBILE_STORAGE_BUCKET").pipe(
     Config.withDefault(`${projectId}-mobile-${stage}`),
   );
+  const turboCache: KvitbitTurboCacheConfig | undefined = enableTurboCache
+    ? {
+        bucket:
+          (yield* optionalNonEmptyString("KVITBIT_TURBO_CACHE_BUCKET")) ??
+          `${projectId}-turbo-cache-${stage}`,
+        image:
+          (yield* optionalNonEmptyString("KVITBIT_TURBO_CACHE_IMAGE")) ??
+          KVITBIT_TURBO_CACHE_DEFAULTS.image,
+        ttlDays: yield* optionalInt(
+          "KVITBIT_TURBO_CACHE_TTL_DAYS",
+          KVITBIT_TURBO_CACHE_DEFAULTS.ttlDays,
+        ),
+        maxInstances: yield* optionalInt(
+          "KVITBIT_TURBO_CACHE_MAX_INSTANCES",
+          KVITBIT_TURBO_CACHE_DEFAULTS.maxInstances,
+        ),
+      }
+    : undefined;
+
+  const mailDomainRaw = yield* optionalNonEmptyString("KVITBIT_MAIL_DOMAIN");
+  const mailDomain = mailDomainRaw?.toLowerCase().replace(/\.$/, "");
+  const mail: KvitbitMailConfig | undefined =
+    mailDomain !== undefined
+      ? {
+          domain: mailDomain,
+          mxHost: ((yield* optionalNonEmptyString("KVITBIT_MAIL_MX_HOST")) ?? `mx.${mailDomain}`)
+            .toLowerCase()
+            .replace(/\.$/, ""),
+          forwardTo: (
+            (yield* optionalNonEmptyString("KVITBIT_MAIL_FORWARD_TO")) ?? ""
+          ).toLowerCase(),
+          forwardFrom: (
+            (yield* optionalNonEmptyString("KVITBIT_MAIL_FORWARD_FROM")) ??
+            `forwarder@${mailDomain}`
+          ).toLowerCase(),
+          aliases: [
+            ...new Set(parseCsvList(yield* optionalNonEmptyString("KVITBIT_MAIL_ALIASES"))),
+          ],
+          region: (
+            (yield* optionalNonEmptyString("KVITBIT_MAIL_REGION")) ?? KVITBIT_MAIL_DEFAULTS.region
+          ).toLowerCase(),
+          zone: (
+            (yield* optionalNonEmptyString("KVITBIT_MAIL_ZONE")) ?? KVITBIT_MAIL_DEFAULTS.zone
+          ).toLowerCase(),
+          cidr: (yield* optionalNonEmptyString("KVITBIT_MAIL_CIDR")) ?? KVITBIT_MAIL_DEFAULTS.cidr,
+          archiveBucket:
+            (yield* optionalNonEmptyString("KVITBIT_MAIL_ARCHIVE_BUCKET")) ??
+            `${projectId}-mail-archive-${stage}`,
+          relayMode: enableResend ? "resend" : "archive-only",
+          resendDkimTxt: yield* optionalNonEmptyString("KVITBIT_MAIL_RESEND_DKIM_TXT"),
+          resendSendMx: yield* optionalNonEmptyString("KVITBIT_MAIL_RESEND_SEND_MX"),
+          resendSendSpfTxt: yield* optionalNonEmptyString("KVITBIT_MAIL_RESEND_SEND_SPF_TXT"),
+          apexSpfTxt: yield* optionalNonEmptyString("KVITBIT_MAIL_APEX_SPF_TXT"),
+          dmarcTxt: yield* optionalNonEmptyString("KVITBIT_MAIL_DMARC_TXT"),
+        }
+      : undefined;
 
   return yield* validateStackConfig({
     stage,
     bootstrapFoundation,
     bootstrapFeedbackSecret,
     bootstrapAltchaSecret,
+    bootstrapResendSecret,
+    bootstrapTurboCacheSecret,
     projectId,
     projectNumber,
     region,
@@ -983,6 +1255,7 @@ export const loadStackConfig: Effect.Effect<
     emailMode,
     emailFrom,
     botProtectionMode,
+    alertEmail,
     trustedProxyHops,
     shareKeyVersion,
     androidAssetlinksSha256,
@@ -994,8 +1267,11 @@ export const loadStackConfig: Effect.Effect<
       enableMobileSigningKey,
       enableFeedbackGitHubToken,
       enableAltchaHmacKey,
+      enableTurboCache,
     }),
     dnsZones,
     edge,
+    ...(mail === undefined ? {} : { mail }),
+    ...(turboCache === undefined ? {} : { turboCache }),
   });
 });

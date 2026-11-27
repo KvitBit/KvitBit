@@ -1,0 +1,55 @@
+{
+  "$schema": "https://turborepo.com/schema.json",
+  "extends": ["//"],
+  "tasks": {
+    "test:suite": {
+      "dependsOn": [
+        "test:domain-parity",
+        "test:migration",
+        "test:core-alignment",
+        "test:server-alignment"
+      ],
+      "cache": false
+    },
+    "test:domain-parity": {
+      "dependsOn": ["^transit"],
+      "inputs": ["package.json", "tsconfig.json", "src/**", "test/domain-parity.test.ts"],
+      "env": ["TZ"],
+      "passThroughEnv": ["CI"],
+      "outputs": []
+    },
+    "test:migration": {
+      "dependsOn": ["^transit"],
+      "inputs": [
+        "package.json",
+        "tsconfig.json",
+        "drizzle.config.ts",
+        "src/**",
+        "drizzle/**",
+        "test/migration.test.ts"
+      ],
+      "env": ["TZ"],
+      "passThroughEnv": ["CI"],
+      "outputs": []
+    },
+    "test:core-alignment": {
+      "dependsOn": ["^transit"],
+      "inputs": ["package.json", "tsconfig.json", "drizzle/**", "test/core-alignment.test.ts"],
+      "env": ["TZ"],
+      "passThroughEnv": ["CI"],
+      "outputs": []
+    },
+    "test:server-alignment": {
+      "dependsOn": ["^transit"],
+      "inputs": [
+        "package.json",
+        "tsconfig.json",
+        "drizzle/**",
+        "test/server-persistence-alignment.test.ts"
+      ],
+      "env": ["TZ"],
+      "passThroughEnv": ["CI"],
+      "outputs": []
+    }
+  }
+}

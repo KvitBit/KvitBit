@@ -5,7 +5,7 @@ description: >-
   changes to apps/web/src, the web entry or build configuration, or
   packages/ui-port/src/theme.
 metadata:
-  sync_commit: "468e37f6bd62d2a82778d7eb8487a4a03a30cd2f"
+  sync_commit: "9eebe90707afb70b0c6235683337de28f7f27c57"
   bun: "1.4.4"
   node: "24.18.0"
   effect: "4.1.4"
@@ -54,17 +54,24 @@ The typed API and server integrations have their own checks.
 
 ## Run
 
-1. Run `bun install --frozen-lockfile`, `bun run lint`, and `bun run typecheck`.
-2. Run `bun test apps/web`. Inspect any failing case by route, preset, or generated seed.
-3. Run `bun run --cwd apps/web build`. Confirm `dist/index.html` and its hashed
+PR CI in `.github/workflows/ci.yml` already runs `bun install --frozen-lockfile`,
+`lint`, `typecheck`, `test`, `build`, `test:static-mounts`, and `verify:formal`.
+Rely on CI for those checks instead of running them locally.
+
+Run the steps below locally only when debugging a web failure or recording a
+Tier 2 verification commit for browser checks that PR CI does not run, since
+Playwright runs in `.github/workflows/nightly.yml`:
+
+1. Run the single failing test file under `apps/web` with `bun test <file>`, or
+   `bun test apps/web` when a full Tier 2 run was requested.
+2. If you need to verify the static bundle locally, run
+   `bun run --cwd apps/web build` and confirm `dist/index.html` with its hashed
    assets, `dist/assets/brand`, and `dist/fonts`.
-4. Run the browser suite on an unused local port with one worker.
+3. Run the browser suite on an unused local port with one worker.
 
    ```sh
    KVITBIT_WEB_E2E_PORT=34181 bun run --cwd apps/web e2e smoke.spec.ts feedback.spec.ts --workers=1
    ```
-
-5. Run `bun run verify:formal --check-digests` for coverage maintained by ADR-0005.
 
 Record the product commit and tool versions after the suite passes. Keep
 that record in a verification commit after the product changes.
@@ -72,13 +79,35 @@ that record in a verification commit after the product changes.
 
 ## Verification record
 
-The recorded product commit passed the frozen install, root lint and
-typecheck, and the formal digest check. The targeted test run passed with
-`bun test infra/alchemy packages/api-contract apps/server/test/http/feedback.test.ts apps/web`.
-The static build contains the lazy feedback chunk, ALTCHA worker, hashed
-JavaScript and CSS, brand assets, and Fontshare TTFs.
+At `383766ac036a7dfe79ace530bcd508e3c32c3740`, the segmented control change
+passed root lint and typecheck, all 183 web tests, and the formal digest
+check. The lockfile was unchanged. The static build contained
+`dist/index.html`, hashed JavaScript and CSS, brand assets, and fonts.
+All 56 smoke and feedback tests passed on port `34181` with one
+worker across desktop and mobile Chromium profiles. The smoke suite covers
+stretched and inline segmented controls in English and Czech, including
+equal-width sign-up options, single-line sign-in labels, and word fit in a
+220 px appearance field.
 
-The smoke and feedback Playwright suites passed on port `35655` with one
+At `204841bb3f0dafd505530b8d4456947b134a3d5a`, the frozen install, root lint
+and typecheck, and formal digest check passed. Targeted unit tests passed for
+`packages/ui-port`, `apps/web`, and `apps/mobile` auth screens
+(`apps/mobile/src/features/auth/auth-screens.test.tsx`). The static web
+build contains `dist/index.html`, hashed JavaScript and CSS, the ALTCHA
+worker, `dist/assets/brand`, and `dist/fonts`.
+
+The smoke and feedback Playwright suites (46 tests) passed on port `34191`
+with one worker across desktop and mobile Chromium profiles. The smoke suite
+verifies that `/sign-in` renders concise method selector labels on a single
+line without overflow in both English and Czech across Elegant and Cozy
+styles while keeping the full passkey action label on the submit button.
+
+At `95fdee1c534309442ab9ab8923a4bab1dbf7e800`, the feedback shortcut passed the frozen
+install, root lint and typecheck, `bun test apps/web`, and the formal digest
+check. The static build contained the lazy feedback chunk, ALTCHA worker,
+hashed JavaScript and CSS, brand assets, and Fontshare TTFs.
+
+The smoke and feedback Playwright suites passed on port `47683` with one
 worker across desktop and mobile Chromium profiles. The feedback suite
 checks that verified owners can pin elements, retry a submission, and
 receive its issue link. It checks that non-owners skip the picker chunk,
@@ -86,6 +115,11 @@ that pins omit private links and entered form values, and that signing
 out removes the picker. A failed mount restores browser diagnostics.
 The selector unit test declines a pin when its bounded path matches
 multiple elements.
+
+The shortcut tests exercise `k` toggling, editable fields including the
+shadow DOM composer, pending submission, the pin limit, pathname changes,
+and listener removal on sign-out. The desktop workspace switcher still
+responds to Ctrl+K and Cmd+K.
 
 At `c54559c3a9ab795c44f08d4584e6a28c88074466`, Chromium and Firefox
 loaded all bundled fonts without console warnings.

@@ -13,6 +13,7 @@ import type { KvitbitStackConfig, KvitbitWorkload } from "../config";
 import { resourceNames, secretResourceName, serviceAccountEmail, stackLabels } from "../config";
 
 export const CLOUD_DNS_API_ID = "CloudDnsApi";
+export const CLOUD_MONITORING_API_ID = "CloudMonitoringApi";
 
 export const artifactRepositoryProps = (config: KvitbitStackConfig): RepositoryProps => ({
   repositoryId: config.artifactRepositoryId,
@@ -88,23 +89,29 @@ export const secretAccessorGrants = (
     );
 
   return config.secrets.flatMap((secret) =>
-    secret.consumers.map((workload) => ({
-      id: `SecretAccess-${secret.secretId}-${workload}`,
-      secretId: secret.secretId,
-      workload,
-      props: {
-        kind: "secretmanager.secret" as const,
-        name: secretResourceName(config.projectId, secret.secretId),
-        role: "roles/secretmanager.secretAccessor",
-        member: `serviceAccount:${saEmail(workload)}`,
-      },
-    })),
+    secret.consumers
+      .filter((workload) => workload === "server" || workload === "runner")
+      .map((workload) => ({
+        id: `SecretAccess-${secret.secretId}-${workload}`,
+        secretId: secret.secretId,
+        workload,
+        props: {
+          kind: "secretmanager.secret" as const,
+          name: secretResourceName(config.projectId, secret.secretId),
+          role: "roles/secretmanager.secretAccessor",
+          member: `serviceAccount:${saEmail(workload)}`,
+        },
+      })),
   );
 };
 
 export const declareFoundation = Effect.fn("KvitbitStack.declareFoundation")(function* (
   config: KvitbitStackConfig,
 ) {
+  const monitoringApi = yield* ProjectService(CLOUD_MONITORING_API_ID, {
+    project: config.projectId,
+    service: "monitoring.googleapis.com",
+  });
   const dnsApi =
     config.dnsZones.length === 0
       ? undefined
@@ -181,13 +188,21 @@ export const declareFoundation = Effect.fn("KvitbitStack.declareFoundation")(fun
     }
   }
 
+  const resendSecret = secretResources.get(`${resourceNames(config).prefix}-resend-api-key`);
+  const turboCacheTokenSecret = secretResources.get(
+    `${resourceNames(config).prefix}-turbo-cache-token`,
+  );
+
   return {
     dnsApi,
+    monitoringApi,
     repositoryName: repository.name,
     blobsBucketName: blobsBucket.bucketName,
     mobileAssetsBucketName: mobileAssetsBucket.bucketName,
     serverServiceAccountEmail: serverSa.email,
     runnerServiceAccountEmail: runnerSa.email,
+    resendSecretName: resendSecret?.name,
+    turboCacheTokenSecretName: turboCacheTokenSecret?.name,
     secretGrants,
     serverDependencies: [
       serverBlobsAdmin.member,

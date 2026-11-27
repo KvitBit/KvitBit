@@ -65,6 +65,7 @@ export const serverPlainEnv = (
     { name: "NODE_ENV", value: "production" },
     { name: "KVITBIT_ENV", value: kvitbitEnvForStage(config.stage) },
     { name: "HOST", value: "0.0.0.0" },
+    { name: "GOOGLE_CLOUD_PROJECT", value: config.projectId },
     { name: "KVITBIT_RUNNER_MODE", value: "cluster" },
     { name: "KVITBIT_BLOB_DRIVER", value: blobDriver },
     { name: "KVITBIT_BLOB_DIR", value: KVITBIT_IMAGE_PATHS.blobDir },

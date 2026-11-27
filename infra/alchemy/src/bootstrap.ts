@@ -9,12 +9,16 @@ import { declareKvitbitDns } from "./resources/dns";
 import { declareKvitbitEdge, declareTokenRouteLogExclusion } from "./resources/edge";
 import {
   CLOUD_DNS_API_ID,
+  CLOUD_MONITORING_API_ID,
   declareFoundation,
   secretAccessorGrants,
   secretDeclarations,
 } from "./resources/foundation";
+import { declareMailForwarder } from "./resources/mail";
+import { declareMonitoring } from "./resources/monitoring";
 import { declareNetworkAndRunners } from "./resources/network";
 import { declareServerService } from "./resources/server";
+import { declareTurboCache } from "./resources/turbo-cache";
 
 export const KVITBIT_STACK_NAME = "Kvitbit";
 
@@ -23,6 +27,12 @@ export const feedbackSecretFqn = (stage: KvitbitStackConfig["stage"]): string =>
 
 export const altchaSecretFqn = (stage: KvitbitStackConfig["stage"]): string =>
   `Secret-kvitbit-${stage}-altcha-hmac-key`;
+
+export const resendSecretFqn = (stage: KvitbitStackConfig["stage"]): string =>
+  `Secret-kvitbit-${stage}-resend-api-key`;
+
+export const turboCacheSecretFqn = (stage: KvitbitStackConfig["stage"]): string =>
+  `Secret-kvitbit-${stage}-turbo-cache-token`;
 
 export class BootstrapSelectionError extends Data.TaggedError("BootstrapSelectionError")<{
   readonly flagName: string;
@@ -60,8 +70,7 @@ export const parseIncludeArgs = (argv: ReadonlyArray<string>): ReadonlyArray<str
 
 /**
  * Enforces that a targeted secret-bootstrap CLI invocation explicitly selects ONLY the single
- * target secret container (`--include Secret-kvitbit-<stage>-feedback-github-token` or
- * `--include Secret-kvitbit-<stage>-altcha-hmac-key`).
+ * target secret container.
  */
 export const assertTargetedSecretSelection = (
   config: KvitbitStackConfig,
@@ -78,7 +87,17 @@ export const assertTargetedSecretSelection = (
             flagName: "KVITBIT_BOOTSTRAP_ALTCHA_SECRET",
             expectedInclude: altchaSecretFqn(config.stage),
           }
-        : undefined;
+        : (config.bootstrapResendSecret ?? false)
+          ? {
+              flagName: "KVITBIT_BOOTSTRAP_RESEND_SECRET",
+              expectedInclude: resendSecretFqn(config.stage),
+            }
+          : (config.bootstrapTurboCacheSecret ?? false)
+            ? {
+                flagName: "KVITBIT_BOOTSTRAP_TURBO_CACHE_SECRET",
+                expectedInclude: turboCacheSecretFqn(config.stage),
+              }
+            : undefined;
   if (target === undefined) {
     return Effect.void;
   }
@@ -94,8 +113,6 @@ export const assertTargetedSecretSelection = (
   }
   return Effect.void;
 };
-
-export const assertFeedbackSecretSelection = assertTargetedSecretSelection;
 
 export class StackStageMismatchError extends Data.TaggedError("StackStageMismatchError")<{
   readonly alchemyStage: string;
@@ -138,6 +155,7 @@ export const foundationResourceIds = (config: KvitbitStackConfig): ReadonlySet<s
     "ServerMobileAssetsViewer",
     "RunnerArtifactReader",
     "EdgeTokenRouteExclusion",
+    CLOUD_MONITORING_API_ID,
   ]);
 
   if (config.dnsZones.length > 0) {
@@ -244,6 +262,48 @@ export const declareKvitbitStack = (config: KvitbitStackConfig) =>
       };
     }
 
+    if (config.bootstrapResendSecret ?? false) {
+      const targetId = resendSecretFqn(config.stage);
+      const resendDecl = secretDeclarations(config).find((decl) => decl.id === targetId);
+      if (resendDecl === undefined) {
+        return yield* new BootstrapSelectionError({
+          flagName: "KVITBIT_BOOTSTRAP_RESEND_SECRET",
+          expectedInclude: targetId,
+          observedIncludes: [],
+        });
+      }
+      const secret = yield* SecretManager.Secret(resendDecl.id, resendDecl.props);
+      return {
+        stage: config.stage,
+        bootstrapFoundation: false as const,
+        bootstrapResendSecret: true as const,
+        projectId: config.projectId,
+        region: config.region,
+        resendSecretId: secret.secretId,
+      };
+    }
+
+    if (config.bootstrapTurboCacheSecret ?? false) {
+      const targetId = turboCacheSecretFqn(config.stage);
+      const turboDecl = secretDeclarations(config).find((decl) => decl.id === targetId);
+      if (turboDecl === undefined) {
+        return yield* new BootstrapSelectionError({
+          flagName: "KVITBIT_BOOTSTRAP_TURBO_CACHE_SECRET",
+          expectedInclude: targetId,
+          observedIncludes: [],
+        });
+      }
+      const secret = yield* SecretManager.Secret(turboDecl.id, turboDecl.props);
+      return {
+        stage: config.stage,
+        bootstrapFoundation: false as const,
+        bootstrapTurboCacheSecret: true as const,
+        projectId: config.projectId,
+        region: config.region,
+        turboCacheSecretId: secret.secretId,
+      };
+    }
+
     if (config.bootstrapFoundation) {
       // Stack.build supplies State at runtime even though StackServices omits it.
       // Reuse that service so inspection shares the deploy's lease.
@@ -298,10 +358,34 @@ export const declareKvitbitStack = (config: KvitbitStackConfig) =>
       config.edge === undefined
         ? undefined
         : yield* declareKvitbitEdge(config, config.edge, server.serviceId);
+    const mail =
+      config.mail === undefined
+        ? undefined
+        : yield* declareMailForwarder(config, config.mail, {
+            networkSelfLink: network.networkSelfLink,
+            resendSecretName: foundation.resendSecretName,
+          });
+    const turboCache =
+      config.turboCache === undefined
+        ? undefined
+        : yield* declareTurboCache(config, config.turboCache, {
+            tokenSecretName: foundation.turboCacheTokenSecretName,
+          });
     const dnsNameServers =
       foundation.dnsApi === undefined
         ? undefined
-        : yield* declareKvitbitDns(config, foundation.dnsApi, edge?.edgeIpAddress);
+        : yield* declareKvitbitDns(
+            config,
+            foundation.dnsApi,
+            edge?.edgeIpAddress,
+            mail?.mailIpAddress,
+          );
+    yield* declareMonitoring(
+      config,
+      foundation.monitoringApi,
+      server.serviceId,
+      edge?.httpsForwardingRule,
+    );
 
     return {
       stage: config.stage,
@@ -319,6 +403,8 @@ export const declareKvitbitStack = (config: KvitbitStackConfig) =>
       serverUri: server.serviceUri,
       tokenRouteExclusion,
       edge,
+      ...(mail === undefined ? {} : { mail }),
+      ...(turboCache === undefined ? {} : { turboCache }),
       ...(dnsNameServers === undefined ? {} : { dnsNameServers }),
     };
   });

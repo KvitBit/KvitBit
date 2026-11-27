@@ -7,6 +7,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { drizzle } from "drizzle-orm/pg-proxy";
 import { type Context, Effect } from "effect";
 import type { SqlClient } from "effect/sql";
+import { currentAuthLogContext } from "./logging";
 
 const sqlContext = new AsyncLocalStorage<Context.Context<never>>();
 
@@ -20,7 +21,7 @@ export const withDrizzleSqlContext = <A>(callback: () => Promise<A>) =>
   );
 
 export const runDrizzleEffect = <A, E>(effect: Effect.Effect<A, E>): Promise<A> => {
-  const context = sqlContext.getStore();
+  const context = sqlContext.getStore() ?? currentAuthLogContext();
   return context === undefined ? Effect.runPromise(effect) : Effect.runPromiseWith(context)(effect);
 };
 

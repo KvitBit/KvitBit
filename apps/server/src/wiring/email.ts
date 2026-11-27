@@ -1,22 +1,23 @@
 /**
  * Live `EmailSender` port wiring under the typed-mode contract:
  * - `production`: real transport (`resend`, `smtp`, or `resend+smtp`) + explicit `EMAIL_FROM`
- *   required at boot. Non-prod modes (`capture`, `console`, `disabled`) and missing config fail
- *   fast at layer construction — there is no runtime reject-stub.
+ *   required at boot, wrapped with structured delivery-failure logging. Non-prod modes (`capture`,
+ *   `console`, `disabled`) and missing config fail fast at layer construction — there is no
+ *   runtime reject-stub.
  * - `staging` / `preview`: real transport + explicit `EMAIL_FROM` required unless
  *   `KVITBIT_EMAIL_MODE=capture` or `KVITBIT_EMAIL_MODE=console` is explicitly declared.
  * - `development` / `test`: zero-config local DX (`console`/`capture`).
  */
 import {
+  CONSOLE_PROVIDER,
   layerSmtp,
   makeCaptureEmailSender,
-  makeConsoleEmailSender,
   makeFallbackEmailSender,
   makeResendEmailSender,
   SMTP_DEFAULT_TIMEOUTS,
   type SmtpTransportOptions,
 } from "@kvitbit/adapters/email";
-import { EmailSender } from "@kvitbit/domain/ports";
+import { EmailRejected, EmailSender } from "@kvitbit/domain/ports";
 import { type Config, Context, Effect, Layer, Option, Redacted } from "effect";
 import { FetchHttpClient } from "effect/http";
 import {
@@ -27,6 +28,48 @@ import {
   resolveKvitbitEnv,
 } from "../config-contract";
 import { type EmailWiringConfig, EmailWiringConfigSchema } from "./config";
+
+const emailKinds: Readonly<Record<string, string>> = {
+  E01: "verification",
+  E02: "magic-link",
+  E03: "password-reset",
+  E04: "invitation",
+  E07: "change-email",
+};
+
+const authEmailKind = (template: string | undefined): string | undefined =>
+  template !== undefined && Object.hasOwn(emailKinds, template) ? emailKinds[template] : undefined;
+
+const makeConsoleEmailSender = (): EmailSender["Service"] =>
+  EmailSender.of({
+    send: (message, { idempotencyKey }) =>
+      Effect.logInfo("Email (not sent)").pipe(
+        Effect.annotateLogs({
+          emailKind: authEmailKind(message.tags.template) ?? "other",
+        }),
+        Effect.as({ provider: CONSOLE_PROVIDER, providerMessageId: idempotencyKey }),
+      ),
+  });
+
+const logDeliveryFailures = (sender: EmailSender["Service"]): EmailSender["Service"] =>
+  EmailSender.of({
+    send: (message, options) =>
+      sender.send(message, options).pipe(
+        Effect.tapError((error) => {
+          const emailKind = authEmailKind(message.tags.template);
+          if (emailKind === undefined) return Effect.void;
+          return Effect.logError(
+            error instanceof EmailRejected ? "Email delivery rejected" : "Email delivery failed",
+          ).pipe(
+            Effect.annotateLogs({
+              event: error._tag,
+              emailKind,
+              reason: "Email provider failed to deliver",
+            }),
+          );
+        }),
+      ),
+  });
 
 /** Parses `smtp://` or `smtps://` URL into nodemailer transport options. */
 export const parseSmtpUrl = (
@@ -87,25 +130,30 @@ export const makeEmailSenderLayer = (
         }),
       );
 
+      const wrap = (sender: EmailSender["Service"]) =>
+        env === "production" ? logDeliveryFailures(sender) : sender;
+
       switch (resolved.mode) {
         case "console":
           return makeConsoleEmailSender();
         case "capture":
           return yield* makeCaptureEmailSender;
         case "resend":
-          return yield* makeResendEmailSender({
-            apiKey: Redacted.make(resolved.resendApiKey ?? ""),
-            from: resolved.from,
-          });
+          return wrap(
+            yield* makeResendEmailSender({
+              apiKey: Redacted.make(resolved.resendApiKey ?? ""),
+              from: resolved.from,
+            }),
+          );
         case "smtp":
-          return yield* acquireSmtpSender(resolved.smtpUrl ?? "", resolved.from);
+          return wrap(yield* acquireSmtpSender(resolved.smtpUrl ?? "", resolved.from));
         case "resend+smtp": {
           const resend = yield* makeResendEmailSender({
             apiKey: Redacted.make(resolved.resendApiKey ?? ""),
             from: resolved.from,
           });
           const smtp = yield* acquireSmtpSender(resolved.smtpUrl ?? "", resolved.from);
-          return makeFallbackEmailSender(resend, smtp);
+          return wrap(makeFallbackEmailSender(resend, smtp));
         }
       }
     }),

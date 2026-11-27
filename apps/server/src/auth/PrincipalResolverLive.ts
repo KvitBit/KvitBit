@@ -21,6 +21,7 @@ import { SqlClient } from "effect/sql";
 import { HttpConfig } from "../http/config";
 import { bearerToken, resolveLocale } from "../http/edge/request";
 import { AuthServer } from "./AuthServer";
+import { bindAuthLogging } from "./logging";
 import { PrincipalResolver } from "./PrincipalResolver";
 
 const isOAuthScopeToken = Schema.is(OAuthScopeToken);
@@ -162,8 +163,9 @@ export const PrincipalResolverLive = Layer.effect(
           return yield* resolveApiKey(bearer, acceptLanguage);
         }
 
+        const runAuth = yield* bindAuthLogging;
         const sessionResult = yield* Effect.tryPromise({
-          try: () => auth.api.getSession({ headers: request.headers }),
+          try: () => runAuth(() => auth.api.getSession({ headers: request.headers })),
           catch: () => new Unauthorized({ reason: "invalid" }),
         });
 

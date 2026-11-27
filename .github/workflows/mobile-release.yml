@@ -84,6 +84,13 @@ jobs:
         with:
           bun-version: 1.4.2
 
+      - uses: actions/cache@v4
+        with:
+          path: ~/.bun/install/cache
+          key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-bun-
+
       - run: bun install --frozen-lockfile
 
       - name: Test release modules and CLI
@@ -238,6 +245,13 @@ jobs:
         with:
           node-version: "22"
 
+      - uses: actions/cache@v4
+        with:
+          path: ~/.bun/install/cache
+          key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-bun-
+
       - run: bun install --frozen-lockfile
 
       - name: Authenticate to Google Cloud
@@ -319,6 +333,13 @@ jobs:
         with:
           node-version: "22"
 
+      - uses: actions/cache@v4
+        with:
+          path: ~/.bun/install/cache
+          key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-bun-
+
       - run: bun install --frozen-lockfile
 
       - name: Authenticate to Google Cloud
@@ -377,6 +398,13 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.4.2
+
+      - uses: actions/cache@v4
+        with:
+          path: ~/.bun/install/cache
+          key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-bun-
 
       - run: bun install --frozen-lockfile
 

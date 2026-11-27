@@ -910,6 +910,7 @@ describe("Self-hosting and CI deploy artifacts", () => {
       "KVITBIT_ENABLE_MOBILE_SIGNING_KEY_SECRET",
       "KVITBIT_ENABLE_FEEDBACK_GITHUB_TOKEN_SECRET",
       "KVITBIT_ENABLE_ALTCHA_HMAC_KEY_SECRET",
+      "KVITBIT_ENABLE_TURBO_CACHE",
       "KVITBIT_BOT_PROTECTION_MODE",
     ]) {
       expect(workflow).toContain(`vars.${varName}`);
@@ -982,6 +983,16 @@ describe("Self-hosting and CI deploy artifacts", () => {
       type: "boolean",
       default: false,
     });
+    expect(workflow.on.workflow_dispatch.inputs.bootstrap_resend_secret).toEqual({
+      description: expect.any(String),
+      type: "boolean",
+      default: false,
+    });
+    expect(workflow.on.workflow_dispatch.inputs.bootstrap_turbo_cache_secret).toEqual({
+      description: expect.any(String),
+      type: "boolean",
+      default: false,
+    });
     expect(getStep("Guard bootstrap against populated production workloads")?.if).toBe(
       "env.BOOTSTRAP_FOUNDATION == 'true'",
     );
@@ -997,6 +1008,8 @@ describe("Self-hosting and CI deploy artifacts", () => {
     ]) {
       expect(getStep(name)?.if).toContain("env.BOOTSTRAP_FEEDBACK_SECRET != 'true'");
       expect(getStep(name)?.if).toContain("env.BOOTSTRAP_ALTCHA_SECRET != 'true'");
+      expect(getStep(name)?.if).toContain("env.BOOTSTRAP_RESEND_SECRET != 'true'");
+      expect(getStep(name)?.if).toContain("env.BOOTSTRAP_TURBO_CACHE_SECRET != 'true'");
     }
 
     const sandbox = mkdtempSync(join(tmpdir(), "kvitbit-feedback-bootstrap-"));

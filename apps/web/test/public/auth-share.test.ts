@@ -189,6 +189,17 @@ describe("Auth page (Screen 02)", () => {
 
     const signIn = await renderPath("/sign-in", { locale: "cs", session: anonymous });
     expect(signIn.html).toContain("Přihlásit se");
+    expect(signIn.html).toContain(">Heslo<");
+    expect(signIn.html).toContain(">Odkaz e-mailem<");
+    expect(signIn.html).toContain(">Přístupový klíč<");
+    expect(signIn.html).not.toContain("Poslat přihlašovací odkaz e-mailem");
+
+    const signInEn = await renderPath("/sign-in", { locale: "en", session: anonymous });
+    expect(signInEn.html).toContain(">Password<");
+    expect(signInEn.html).toContain(">Email link<");
+    expect(signInEn.html).toContain(">Passkey<");
+    expect(signInEn.html).not.toContain("Sign in with a password");
+    expect(signInEn.html).not.toContain("Email me a sign-in link");
   });
 
   test("invited signup uses the peeked address and invitation proof, then accepts with the verified session", async () => {

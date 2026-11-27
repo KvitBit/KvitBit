@@ -1,0 +1,77 @@
+{
+  "$schema": "https://turborepo.com/schema.json",
+  "extends": ["//"],
+  "tasks": {
+    "build": {
+      "dependsOn": ["^transit", "^build"],
+      "env": ["EXPO_PUBLIC_*"],
+      "passThroughEnv": ["CI", "EXPO_NO_TELEMETRY"],
+      "inputs": [
+        "$TURBO_DEFAULT$",
+        "$TURBO_ROOT$/assets/brand/web/**",
+        "!release/**",
+        "!**/*.test.*",
+        "!**/*.spec.*",
+        "!**/*.md"
+      ],
+      "outputs": ["dist/**"]
+    },
+    "test:suite": {
+      "dependsOn": ["test:release", "test:pwa", "test:core", "test:features"],
+      "cache": false
+    },
+    "test:release": {
+      "dependsOn": ["^transit"],
+      "inputs": [
+        "package.json",
+        "tsconfig.json",
+        "bunfig.toml",
+        "app.config.ts",
+        "app.json",
+        "plugins/**",
+        "release/**",
+        "$TURBO_ROOT$/.github/workflows/mobile-release.yml",
+        "$TURBO_ROOT$/scripts/release/mobile-release.ts"
+      ],
+      "env": ["TZ", "ANDROID_HOME", "ANDROID_SDK_ROOT"],
+      "passThroughEnv": ["CI"],
+      "outputs": []
+    },
+    "test:pwa": {
+      "dependsOn": ["^transit"],
+      "inputs": [
+        "package.json",
+        "tsconfig.json",
+        "bunfig.toml",
+        "app.json",
+        "scripts/**",
+        "$TURBO_ROOT$/assets/brand/web/**"
+      ],
+      "env": ["TZ"],
+      "passThroughEnv": ["CI"],
+      "outputs": []
+    },
+    "test:core": {
+      "dependsOn": ["^transit"],
+      "inputs": ["package.json", "tsconfig.json", "bunfig.toml", "src/**", "!src/features/**"],
+      "env": ["TZ"],
+      "passThroughEnv": ["CI"],
+      "outputs": []
+    },
+    "test:features": {
+      "dependsOn": ["^transit"],
+      "inputs": [
+        "package.json",
+        "tsconfig.json",
+        "bunfig.toml",
+        "app.config.ts",
+        "app.json",
+        "app/**",
+        "src/**"
+      ],
+      "env": ["TZ"],
+      "passThroughEnv": ["CI"],
+      "outputs": []
+    }
+  }
+}

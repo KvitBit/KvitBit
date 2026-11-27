@@ -10,13 +10,15 @@
  *   `SqlMessageStorage`) and serves HTTP only; workflows and crons execute on `worker.ts`.
  */
 import { createServer } from "node:http";
-import { NodeHttpServer, NodeRuntime } from "@effect/platform-node";
+import { NodeHttpServer } from "@effect/platform-node";
 import { CoreLive, IdGeneratorLive } from "@kvitbit/core";
 import { Effect, Layer } from "effect";
-import { HttpRouter } from "effect/http";
+import { HttpMiddleware, HttpRouter } from "effect/http";
 import { AllRoutesLive, EdgeServicesLive } from "./app";
 import { ServerConfig } from "./config";
 import { loadBootRuntimeConfig, makeRuntimeEnvLayer } from "./config-contract";
+import { withRequestLogging } from "./http/edge/requestId";
+import { runServerMain } from "./logging/logger";
 import { PersistenceLive, PgDatabaseLive } from "./persistence";
 import { ServerDocumentProjectionsLive } from "./projections/documents";
 import {
@@ -35,6 +37,8 @@ const ServerRuntimeLive = Layer.unwrap(
 
     const httpLayer = HttpRouter.serve(AllRoutesLive, {
       routerConfig: { maxParamLength: 2048 },
+      disableLogger: true,
+      middleware: (handle) => withRequestLogging(HttpMiddleware.logger(handle)),
     }).pipe(
       Layer.provide(EdgeServicesLive),
       Layer.provide(
@@ -89,5 +93,5 @@ const isMain =
     : process.argv[1]?.endsWith("main.ts") || process.argv[1]?.endsWith("main.js");
 
 if (isMain) {
-  NodeRuntime.runMain(serverProgram.pipe(Effect.provide(makeRuntimeEnvLayer(process.env))));
+  runServerMain(serverProgram.pipe(Effect.provide(makeRuntimeEnvLayer(process.env))));
 }

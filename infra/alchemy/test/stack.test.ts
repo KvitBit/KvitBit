@@ -16,7 +16,6 @@ import * as Layer from "effect/Layer";
 import { loadAlchemyStackConfig } from "../alchemy.run";
 import {
   altchaSecretFqn,
-  assertFeedbackSecretSelection,
   assertTargetedSecretSelection,
   BootstrapPopulatedStateError,
   BootstrapSelectionError,
@@ -98,6 +97,7 @@ const sampleProdConfig = (overrides: Partial<KvitbitStackConfig> = {}): KvitbitS
   serverMaxInstances: 10,
   appOrigin: "https://kvitbit.cz",
   emailFrom: "Kvitbit <no-reply@kvitbit.cz>",
+  alertEmail: undefined,
   trustedProxyHops: 2,
   shareKeyVersion: 1,
   androidAssetlinksSha256: "AA:BB:CC",
@@ -731,13 +731,13 @@ describe("Bootstrap state safety guard", () => {
     // CLI selection guard enforces exact --include for feedback secret bootstrap.
     expect(
       await Effect.runPromise(
-        Effect.result(assertFeedbackSecretSelection(feedbackConfig, ["bun", "alchemy", "deploy"])),
+        Effect.result(assertTargetedSecretSelection(feedbackConfig, ["bun", "alchemy", "deploy"])),
       ),
     ).toMatchObject({ _tag: "Failure", failure: expect.any(BootstrapSelectionError) });
     expect(
       await Effect.runPromise(
         Effect.result(
-          assertFeedbackSecretSelection(feedbackConfig, [
+          assertTargetedSecretSelection(feedbackConfig, [
             "bun",
             "alchemy",
             "deploy",
@@ -752,7 +752,7 @@ describe("Bootstrap state safety guard", () => {
     expect(
       await Effect.runPromise(
         Effect.result(
-          assertFeedbackSecretSelection(feedbackConfig, [
+          assertTargetedSecretSelection(feedbackConfig, [
             "bun",
             "alchemy",
             "deploy",
@@ -765,7 +765,7 @@ describe("Bootstrap state safety guard", () => {
     expect(
       await Effect.runPromise(
         Effect.result(
-          assertFeedbackSecretSelection(feedbackConfig, [`--include=${feedbackSecretFqn("prod")}`]),
+          assertTargetedSecretSelection(feedbackConfig, [`--include=${feedbackSecretFqn("prod")}`]),
         ),
       ),
     ).toMatchObject({ _tag: "Success" });
@@ -1412,7 +1412,7 @@ esac
     );
     chmodSync(join(binDir, "curl"), 0o755);
 
-    // Stub docker
+    // Stub docker with a local image store enforcing --pull=never restart semantics.
     writeFileSync(
       join(binDir, "docker"),
       `#!/bin/sh
@@ -1421,6 +1421,10 @@ case "$1" in
   inspect)
     [ -f "${stateDir}/running-image-id" ] || exit 1
     image_id="$(cat "${stateDir}/running-image-id")"
+    if printf '%s' "$*" | grep -Fq 'if .State.Running'; then
+      printf '%s' "$image_id"
+      exit 0
+    fi
     configured_image="$image_id"
     if [ -f "${stateDir}/legacy-image-ref" ]; then
       configured_image="$(cat "${stateDir}/legacy-image-ref")"
@@ -1434,11 +1438,41 @@ case "$1" in
   pull)
     [ "$2" = "--" ] || exit 1
     echo "docker:pull:$3" >> "${stateDir}/log"
+    if [ -f "${stateDir}/fail-pull" ]; then
+      exit 1
+    fi
     printf '%s' "$3" > "${stateDir}/pulled-ref"
     cp "${stateDir}/registry-image-id" "${stateDir}/pulled-image-id"
     cp "${stateDir}/registry-ref" "${stateDir}/pulled-repo-digest"
+    cat "${stateDir}/registry-image-id" >> "${stateDir}/images"
+    printf '\\n' >> "${stateDir}/images"
+    ;;
+  container)
+    if [ "$2" = "prune" ]; then
+      echo "docker:prune:containers" >> "${stateDir}/log"
+      exit 0
+    fi
+    exit 1
     ;;
   image)
+    if [ "$2" = "ls" ]; then
+      if [ -f "${stateDir}/images" ]; then
+        cat "${stateDir}/images"
+      fi
+      exit 0
+    fi
+    if [ "$2" = "rm" ]; then
+      target_id=""
+      for arg in "$@"; do
+        target_id="$arg"
+      done
+      echo "docker:rmi:$target_id" >> "${stateDir}/log"
+      if [ -f "${stateDir}/images" ]; then
+        grep -Fxv -- "$target_id" "${stateDir}/images" > "${stateDir}/images.tmp" || true
+        mv -f "${stateDir}/images.tmp" "${stateDir}/images"
+      fi
+      exit 0
+    fi
     [ "$2" = "inspect" ] && [ -f "${stateDir}/pulled-ref" ] || exit 1
     [ "$5" = "$(cat "${stateDir}/pulled-ref")" ] || exit 1
     printf '%s\\n%s\\n' "$(cat "${stateDir}/pulled-image-id")" "$(cat "${stateDir}/pulled-repo-digest")"
@@ -1449,7 +1483,7 @@ esac
     );
     chmodSync(join(binDir, "docker"), 0o755);
 
-    // Stub systemctl (activates target digest + config sha as running)
+    // Stub systemctl (activates target digest + config sha as running; enforces --pull=never)
     writeFileSync(
       join(binDir, "systemctl"),
       `#!/bin/sh
@@ -1461,7 +1495,7 @@ fi
 if [ "$1" = "start" ]; then
   . "${runDir}/worker-target.env"
   grep -Fq 'docker run --pull=never ' "${systemdDir}/kvitbit-worker.service"
-  [ "$KVITBIT_WORKER_IMAGE" = "$(cat "${stateDir}/pulled-image-id")" ]
+  grep -Fxq -- "$KVITBIT_WORKER_IMAGE" "${stateDir}/images"
   printf '%s' "$KVITBIT_WORKER_IMAGE" > "${stateDir}/running-image-id"
   printf '%s' "$KVITBIT_WORKER_DIGEST" > "${stateDir}/running-digest"
   printf '%s' "$KVITBIT_WORKER_CONFIG_SHA" > "${stateDir}/running-config-sha"
@@ -1503,6 +1537,7 @@ fi
   test("reconcile replaces legacy workers, rolls out config and digest changes, and skips no-op ticks", () => {
     withRunnerSandbox(
       ({
+        binDir,
         reconcile,
         runDir,
         stateDir,
@@ -1574,7 +1609,44 @@ fi
         expect(readFileSync(join(runDir, "worker.env"), "utf8")).toBe(env2);
         expect(readFileSync(join(runDir, "worker-target.env"), "utf8")).toBe(targetEnv2);
 
+        // Simulate --rm worker exiting (5s systemd RestartSec window, no running container)
+        // while a stale image is on disk and the replacement pull fails: stale image must be
+        // pruned before pull, while worker-target.env's installed imageId1 survives so systemd
+        // can restart kvitbit-worker with --pull=never.
+        const staleImageId = `sha256:${"9".repeat(64)}`;
+        writeFileSync(join(stateDir, "images"), `${staleImageId}\n${imageId1}\n`);
+        rmSync(join(stateDir, "running-image-id"));
+        writeFileSync(join(stateDir, "fail-pull"), "1");
+        const logBeforeFailedPull = readFileSync(join(stateDir, "log"), "utf8");
+        expect(reconcile().exitCode).toBe(1);
+        const failedPullDelta = readFileSync(join(stateDir, "log"), "utf8")
+          .slice(logBeforeFailedPull.length)
+          .trim()
+          .split("\n");
+        const staleRmiIdx = failedPullDelta.indexOf(`docker:rmi:${staleImageId}`);
+        const failedPullIdx = failedPullDelta.indexOf(`docker:pull:${ref2}`);
+        expect(staleRmiIdx).toBeGreaterThanOrEqual(0);
+        expect(failedPullIdx).toBeGreaterThan(staleRmiIdx);
+        expect(failedPullDelta).not.toContain(`docker:rmi:${imageId1}`);
+        const imagesAfterFailedPull = readFileSync(join(stateDir, "images"), "utf8")
+          .trim()
+          .split("\n")
+          .filter(Boolean);
+        expect(imagesAfterFailedPull).toEqual([imageId1]);
+        // Confirm systemd can still restart the installed worker with --pull=never.
+        const restartCheck = Bun.spawnSync([
+          join(binDir, "systemctl"),
+          "start",
+          "kvitbit-worker.service",
+        ]);
+        expect(restartCheck.exitCode).toBe(0);
+        expect(readFileSync(join(stateDir, "running-image-id"), "utf8")).toBe(imageId1);
+        rmSync(join(stateDir, "fail-pull"));
+
+        // Now allow the verified pull to succeed and inspect ONLY this reconcile's delta log.
         writeFileSync(join(stateDir, "registry-ref"), ref2);
+        writeFileSync(join(stateDir, "images"), `${staleImageId}\n${imageId1}\n`);
+        const logBeforeRollout = readFileSync(join(stateDir, "log"), "utf8");
         expect(reconcile().exitCode).toBe(0);
         expect(readFileSync(join(stateDir, "running-image-id"), "utf8")).toBe(imageId2);
         expect(readFileSync(join(stateDir, "guest-active-digest"), "utf8")).toBe(digest2);
@@ -1582,12 +1654,32 @@ fi
         expect(readFileSync(join(stateDir, "guest-active-target"), "utf8")).toBe(
           `${digest2}|${configSha2}`,
         );
-        const logAfterFourth = readFileSync(join(stateDir, "log"), "utf8");
-        expect(logAfterFourth).toContain(`docker:pull:${ref2}`);
+        const rolloutDelta = readFileSync(join(stateDir, "log"), "utf8")
+          .slice(logBeforeRollout.length)
+          .trim()
+          .split("\n");
+        const prePullContainerPruneIdx = rolloutDelta.indexOf("docker:prune:containers");
+        const prePullRmiIdx = rolloutDelta.indexOf(`docker:rmi:${staleImageId}`);
+        const pullRef2Idx = rolloutDelta.indexOf(`docker:pull:${ref2}`);
+        const startIdx = rolloutDelta.indexOf("systemctl:start kvitbit-worker.service");
+        const postSwitchRmiOldIdx = rolloutDelta.indexOf(`docker:rmi:${imageId1}`, startIdx);
+        expect(prePullContainerPruneIdx).toBeGreaterThanOrEqual(0);
+        expect(prePullRmiIdx).toBeGreaterThan(prePullContainerPruneIdx);
+        expect(pullRef2Idx).toBeGreaterThan(prePullRmiIdx);
+        expect(startIdx).toBeGreaterThan(pullRef2Idx);
+        expect(postSwitchRmiOldIdx).toBeGreaterThan(startIdx);
+        expect(rolloutDelta).not.toContain(`docker:rmi:${imageId2}`);
+        const imagesAfterRollout = readFileSync(join(stateDir, "images"), "utf8")
+          .trim()
+          .split("\n")
+          .filter(Boolean);
+        expect(imagesAfterRollout).toEqual([imageId2]);
         expect(
-          logAfterFourth.split("\n").filter((l) => l === "systemctl:start kvitbit-worker.service")
-            .length,
-        ).toBe(3);
+          readFileSync(join(stateDir, "log"), "utf8")
+            .trim()
+            .split("\n")
+            .filter((l) => l === "systemctl:start kvitbit-worker.service").length,
+        ).toBe(4);
       },
     );
   });
@@ -1982,7 +2074,9 @@ describe("Pure-Alchemy Cloud DNS", () => {
     if (
       compiled.output.bootstrapFoundation ||
       ("bootstrapFeedbackSecret" in compiled.output && compiled.output.bootstrapFeedbackSecret) ||
-      ("bootstrapAltchaSecret" in compiled.output && compiled.output.bootstrapAltchaSecret)
+      ("bootstrapAltchaSecret" in compiled.output && compiled.output.bootstrapAltchaSecret) ||
+      ("bootstrapResendSecret" in compiled.output && compiled.output.bootstrapResendSecret) ||
+      ("bootstrapTurboCacheSecret" in compiled.output && compiled.output.bootstrapTurboCacheSecret)
     ) {
       throw new Error("Expected a full stack");
     }
@@ -2022,6 +2116,415 @@ describe("Pure-Alchemy Cloud DNS", () => {
           ...record,
         });
       }
+    }
+  });
+
+  test("wires Always-Free US inbound mail forwarder, write-only archive bucket, and kvitbit.com email DNS records", async () => {
+    const mailEnv = {
+      ...PROD_REQUIRED_ENV,
+      KVITBIT_ENABLE_RESEND_SECRET: "false",
+      KVITBIT_ENABLE_SMTP_SECRET: "true",
+      KVITBIT_DNS_ZONES: PROD_DNS_ZONES.join(","),
+      KVITBIT_EDGE_DOMAINS: "kvitbit.cz,kvitbit.com",
+      KVITBIT_MAIL_DOMAIN: "kvitbit.com",
+      KVITBIT_MAIL_FORWARD_TO: "filkalny@gmail.com",
+      KVITBIT_MAIL_ALIASES: "founder,ops,hello,support,billing,privacy,security,postmaster,abuse",
+    };
+
+    // Bootstrap (archive-only) mode before Resend secret is enabled
+    const archiveOnlyConfig = await Effect.runPromise(
+      loadStackConfig.pipe(
+        Effect.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env: mailEnv }))),
+      ),
+    );
+    expect(archiveOnlyConfig.mail?.relayMode).toBe("archive-only");
+    expect(archiveOnlyConfig.mail?.region).toBe("us-east1");
+    expect(archiveOnlyConfig.mail?.zone).toBe("us-east1-b");
+    expect(archiveOnlyConfig.mail?.aliases).toHaveLength(9);
+
+    const archiveCompiled = await compile(archiveOnlyConfig);
+    expect(archiveCompiled.resources.KvitbitMailIngressSa?.Type).toBe("GCP.IAM.ServiceAccount");
+    expect(archiveCompiled.resources.KvitbitMailArchive?.Type).toBe("GCP.Storage.Bucket");
+    expect(archiveCompiled.resources.MailIngressArchiveWriter?.Props).toMatchObject({
+      role: "roles/storage.objectCreator",
+    });
+    expect(archiveCompiled.resources.MailIngressResendSecretAccessor).toBeUndefined();
+    expect(archiveCompiled.resources.KvitbitMailAddress?.Props).toMatchObject({
+      region: "us-east1",
+      addressType: "EXTERNAL",
+      networkTier: "PREMIUM",
+    });
+    expect(
+      (archiveCompiled.resources.KvitbitMailAddress?.Props as Record<string, unknown> | undefined)
+        ?.ipVersion,
+    ).toBeUndefined();
+    expect(archiveCompiled.resources.KvitbitMailIngress?.Props).toMatchObject({
+      zone: "us-east1-b",
+      machineType: "e2-micro",
+      bootDiskType: "pd-standard",
+      diskSizeGb: 20,
+      preemptible: false,
+    });
+    expect(archiveCompiled.resources["DnsZone-kvitbit.com-MailMxA"]?.Type).toBe(
+      "GCP.DNS.ResourceRecordSet",
+    );
+    expect(archiveCompiled.resources["DnsZone-kvitbit.com-ApexMx"]?.Type).toBe(
+      "GCP.DNS.ResourceRecordSet",
+    );
+    expect(archiveCompiled.resources["DnsZone-kvitbit.cz-ApexMx"]).toBeUndefined();
+
+    // Steady-state Resend mode with DKIM/MX/SPF/DMARC DNS records
+    const longDkim = `v=DKIM1; k=rsa; p=${"B".repeat(360)}`;
+    const resendConfig = await Effect.runPromise(
+      loadStackConfig.pipe(
+        Effect.provide(
+          ConfigProvider.layer(
+            ConfigProvider.fromEnv({
+              env: {
+                ...mailEnv,
+                KVITBIT_ENABLE_RESEND_SECRET: "true",
+                KVITBIT_MAIL_RESEND_DKIM_TXT: longDkim,
+                KVITBIT_MAIL_RESEND_SEND_MX: "10 feedback-smtp.eu-west-1.amazonses.com",
+                KVITBIT_MAIL_RESEND_SEND_SPF_TXT: "v=spf1 include:amazonses.com ~all",
+                KVITBIT_MAIL_APEX_SPF_TXT: "v=spf1 -all",
+                KVITBIT_MAIL_DMARC_TXT: "v=DMARC1; p=quarantine; rua=mailto:postmaster@kvitbit.com",
+              },
+            }),
+          ),
+        ),
+      ),
+    );
+    expect(resendConfig.mail?.relayMode).toBe("resend");
+
+    const resendCompiled = await compile(resendConfig);
+    expect(resendCompiled.resources.MailIngressResendSecretAccessor?.Type).toBe("GCP.IAM.Member");
+    expect(resendCompiled.resources.MailIngressResendSecretAccessor?.Props).toMatchObject({
+      role: "roles/secretmanager.secretAccessor",
+    });
+
+    const upstream = {
+      "DnsZone-kvitbit.com": { zoneName: "kvitbit-com-zone" },
+      KvitbitMailAddress: { address: "34.138.1.2" },
+    };
+    expect(
+      await resolveOutputs(
+        resendCompiled.resources["DnsZone-kvitbit.com-MailMxA"]?.Props,
+        upstream,
+      ),
+    ).toEqual({
+      managedZone: "kvitbit-com-zone",
+      name: "mx.kvitbit.com.",
+      type: "A",
+      ttl: 300,
+      rrdatas: ["34.138.1.2"],
+    });
+    expect(
+      await resolveOutputs(resendCompiled.resources["DnsZone-kvitbit.com-ApexMx"]?.Props, upstream),
+    ).toEqual({
+      managedZone: "kvitbit-com-zone",
+      name: "kvitbit.com.",
+      type: "MX",
+      ttl: 300,
+      rrdatas: ["10 mx.kvitbit.com."],
+    });
+    expect(
+      await resolveOutputs(
+        resendCompiled.resources["DnsZone-kvitbit.com-ResendSendMx"]?.Props,
+        upstream,
+      ),
+    ).toEqual({
+      managedZone: "kvitbit-com-zone",
+      name: "send.kvitbit.com.",
+      type: "MX",
+      ttl: 300,
+      rrdatas: ["10 feedback-smtp.eu-west-1.amazonses.com."],
+    });
+    const dkimResolved = (await resolveOutputs(
+      resendCompiled.resources["DnsZone-kvitbit.com-ResendDkimTxt"]?.Props,
+      upstream,
+    )) as { name: string; type: string; rrdatas: string[] };
+    expect(dkimResolved.name).toBe("resend._domainkey.kvitbit.com.");
+    expect(dkimResolved.type).toBe("TXT");
+    expect(dkimResolved.rrdatas[0]).toContain('" "');
+  });
+
+  test("rejects unsafe mail forwarder configurations (forwarding loops, catch-all aliases, missing zone)", async () => {
+    const badLoop = await Effect.runPromise(
+      Effect.flip(
+        loadStackConfig.pipe(
+          Effect.provide(
+            ConfigProvider.layer(
+              ConfigProvider.fromEnv({
+                env: {
+                  ...PROD_REQUIRED_ENV,
+                  KVITBIT_DNS_ZONES: "kvitbit.com",
+                  KVITBIT_MAIL_DOMAIN: "kvitbit.com",
+                  KVITBIT_MAIL_FORWARD_TO: "ops@kvitbit.com",
+                  KVITBIT_MAIL_ALIASES: "ops",
+                },
+              }),
+            ),
+          ),
+        ),
+      ),
+    );
+    expect(badLoop).toMatchObject({ _tag: "InvalidStackConfig", field: "KVITBIT_MAIL_FORWARD_TO" });
+
+    const badWildcard = await Effect.runPromise(
+      Effect.flip(
+        loadStackConfig.pipe(
+          Effect.provide(
+            ConfigProvider.layer(
+              ConfigProvider.fromEnv({
+                env: {
+                  ...PROD_REQUIRED_ENV,
+                  KVITBIT_DNS_ZONES: "kvitbit.com",
+                  KVITBIT_MAIL_DOMAIN: "kvitbit.com",
+                  KVITBIT_MAIL_FORWARD_TO: "filkalny@gmail.com",
+                  KVITBIT_MAIL_ALIASES: "*",
+                },
+              }),
+            ),
+          ),
+        ),
+      ),
+    );
+    expect(badWildcard).toMatchObject({
+      _tag: "InvalidStackConfig",
+      field: "KVITBIT_MAIL_ALIASES",
+    });
+
+    const badSelfAlias = await Effect.runPromise(
+      Effect.flip(
+        loadStackConfig.pipe(
+          Effect.provide(
+            ConfigProvider.layer(
+              ConfigProvider.fromEnv({
+                env: {
+                  ...PROD_REQUIRED_ENV,
+                  KVITBIT_DNS_ZONES: "kvitbit.com",
+                  KVITBIT_MAIL_DOMAIN: "kvitbit.com",
+                  KVITBIT_MAIL_FORWARD_TO: "filkalny@gmail.com",
+                  KVITBIT_MAIL_ALIASES: "ops,forwarder",
+                },
+              }),
+            ),
+          ),
+        ),
+      ),
+    );
+    expect(badSelfAlias).toMatchObject({
+      _tag: "InvalidStackConfig",
+      field: "KVITBIT_MAIL_ALIASES",
+    });
+
+    const missingZone = await Effect.runPromise(
+      Effect.flip(
+        loadStackConfig.pipe(
+          Effect.provide(
+            ConfigProvider.layer(
+              ConfigProvider.fromEnv({
+                env: {
+                  ...PROD_REQUIRED_ENV,
+                  KVITBIT_DNS_ZONES: "kvitbit.cz",
+                  KVITBIT_MAIL_DOMAIN: "kvitbit.com",
+                  KVITBIT_MAIL_FORWARD_TO: "filkalny@gmail.com",
+                  KVITBIT_MAIL_ALIASES: "ops",
+                },
+              }),
+            ),
+          ),
+        ),
+      ),
+    );
+    expect(missingZone).toMatchObject({ _tag: "InvalidStackConfig", field: "KVITBIT_MAIL_DOMAIN" });
+
+    const emptyZones = await Effect.runPromise(
+      Effect.flip(
+        loadStackConfig.pipe(
+          Effect.provide(
+            ConfigProvider.layer(
+              ConfigProvider.fromEnv({
+                env: {
+                  ...PROD_REQUIRED_ENV,
+                  KVITBIT_MAIL_DOMAIN: "kvitbit.com",
+                  KVITBIT_MAIL_FORWARD_TO: "filkalny@gmail.com",
+                  KVITBIT_MAIL_ALIASES: "ops",
+                },
+              }),
+            ),
+          ),
+        ),
+      ),
+    );
+    expect(emptyZones).toMatchObject({ _tag: "InvalidStackConfig", field: "KVITBIT_MAIL_DOMAIN" });
+  });
+});
+
+describe("Cloud Monitoring", () => {
+  const compile = (config: KvitbitStackConfig) =>
+    Effect.runPromise(
+      Effect.scoped(
+        Stack.Stack(
+          KVITBIT_STACK_NAME,
+          { state: State.inMemoryState(), providers: Layer.empty },
+          declareKvitbitStack(config).pipe(Effect.orDie),
+        ),
+      ).pipe(Effect.provideService(Stage, config.stage)),
+    );
+
+  const load = (alertEmail?: string) =>
+    loadStackConfig.pipe(
+      Effect.provide(
+        ConfigProvider.layer(
+          ConfigProvider.fromEnv({
+            env: {
+              ...PROD_REQUIRED_ENV,
+              ...(alertEmail === undefined ? {} : { KVITBIT_ALERT_EMAIL: alertEmail }),
+            },
+          }),
+        ),
+      ),
+    );
+
+  const resolveOutputs = (props: unknown, upstream: Record<string, unknown>) =>
+    Effect.runPromise(Output.evaluate(props, upstream).pipe(Effect.provide(State.inMemoryState())));
+
+  test("loads a single alert recipient and treats unset or blank values as absent", async () => {
+    expect((await Effect.runPromise(load())).alertEmail).toBeUndefined();
+    expect((await Effect.runPromise(load("  "))).alertEmail).toBeUndefined();
+    expect((await Effect.runPromise(load("  ops@kvitbit.com  "))).alertEmail).toBe(
+      "ops@kvitbit.com",
+    );
+    for (const invalid of [
+      "ops",
+      "ops@no-domain",
+      "Kvitbit <ops@kvitbit.com>",
+      "ops@one.test,ops@two.test",
+    ]) {
+      expect(await Effect.runPromise(Effect.flip(load(invalid)))).toMatchObject({
+        _tag: "InvalidStackConfig",
+        field: "KVITBIT_ALERT_EMAIL",
+      });
+    }
+  });
+
+  test("enables the Monitoring API during foundation bootstrap and passes project and email through deployment", async () => {
+    const config = sampleProdConfig({ bootstrapFoundation: true, imageDigest: "" });
+    const { resources } = await compile(config);
+    expect(resources.CloudMonitoringApi?.Type).toBe("GCP.ServiceUsage.ProjectService");
+    expect(resources.CloudMonitoringApi?.Props).toEqual({
+      project: config.projectId,
+      service: "monitoring.googleapis.com",
+    });
+    expect(foundationResourceIds(config)).toContain("CloudMonitoringApi");
+    expect(resources.MonitoringCloudRunErrors).toBeUndefined();
+    expect(resources.MonitoringReadinessCheck).toBeUndefined();
+    const server = serverPlainEnv(sampleProdConfig({ projectId: "custom-project" }), {
+      blobsBucket: "blobs",
+      mobileAssetsBucket: "mobile",
+    });
+    expect(server).toContainEqual({ name: "GOOGLE_CLOUD_PROJECT", value: "custom-project" });
+    const workflow = readFileSync(
+      new URL("../../../.github/workflows/deploy.yml", import.meta.url),
+      "utf8",
+    );
+    expect(workflow).toMatch(/KVITBIT_ALERT_EMAIL: \$\{\{ vars\.KVITBIT_ALERT_EMAIL \}\}/);
+  });
+
+  test("uses the HTTPS origin or the first HTTPS edge domain and skips HTTP-only targets", async () => {
+    const noEdge = { edge: undefined };
+    const upstream = {
+      CloudMonitoringApi: { state: "ENABLED" },
+      KvitbitServer: { serviceId: "kvitbit-prod-server" },
+      EdgeHttpsForwardingRule: { selfLink: "https://example.test/forwardingRule" },
+    };
+    const http = await compile(sampleProdConfig({ ...noEdge, appOrigin: "http://example.com" }));
+    expect(http.resources.MonitoringReadinessCheck).toBeUndefined();
+    expect(http.resources.MonitoringReadinessFailure).toBeUndefined();
+    expect(http.resources.MonitoringCloudRunErrors).toBeUndefined();
+    const emailOnly = await compile(
+      sampleProdConfig({
+        ...noEdge,
+        appOrigin: "http://example.com",
+        alertEmail: "ops@kvitbit.com",
+      }),
+    );
+    expect(emailOnly.resources.MonitoringReadinessCheck).toBeUndefined();
+    expect(emailOnly.resources.MonitoringCloudRunErrors).toBeDefined();
+
+    const fallback = await compile(sampleProdConfig({ appOrigin: undefined }));
+    expect(
+      Object.keys(Output.upstreamAny(fallback.resources.MonitoringReadinessCheck?.Props)).sort(),
+    ).toEqual(["CloudMonitoringApi", "EdgeHttpsForwardingRule", "KvitbitServer"]);
+    expect(
+      await resolveOutputs(fallback.resources.MonitoringReadinessCheck?.Props, upstream),
+    ).toMatchObject({ host: "kvitbit.cz", port: 443 });
+
+    const direct = await compile(
+      sampleProdConfig({ ...noEdge, appOrigin: "https://example.com:8443" }),
+    );
+    expect(
+      await resolveOutputs(direct.resources.MonitoringReadinessCheck?.Props, upstream),
+    ).toMatchObject({ project: "kvitbit-prod", host: "example.com", port: 8443, period: "60s" });
+  });
+
+  test("builds matching numerator and denominator aggregations and links the actual check and channel", async () => {
+    const configured = await compile(sampleProdConfig({ alertEmail: "ops@kvitbit.com" }));
+    const channel = "projects/kvitbit-prod/notificationChannels/123";
+    const upstream = {
+      CloudMonitoringApi: { state: "ENABLED" },
+      KvitbitServer: { serviceId: "kvitbit-prod-server" },
+      MonitoringEmail: { name: channel },
+      MonitoringReadinessCheck: { resourceId: "kvitbit-ready-123" },
+    };
+    const denominatorFilter =
+      'metric.type="run.googleapis.com/request_count" AND resource.type="cloud_run_revision" AND resource.label.service_name="kvitbit-prod-server"';
+    const aggregations = [
+      {
+        alignmentPeriod: "300s",
+        perSeriesAligner: "ALIGN_DELTA",
+        crossSeriesReducer: "REDUCE_SUM",
+      },
+    ];
+    expect(
+      await resolveOutputs(configured.resources.MonitoringCloudRunErrors?.Props, upstream),
+    ).toMatchObject({
+      condition: {
+        conditionThreshold: {
+          denominatorFilter,
+          filter: `${denominatorFilter} AND metric.label.response_code_class="5xx"`,
+          aggregations,
+          denominatorAggregations: aggregations,
+          comparison: "COMPARISON_GT",
+          thresholdValue: 0.05,
+          duration: "0s",
+        },
+      },
+      notificationChannels: [channel],
+    });
+    expect(
+      Object.keys(
+        Output.upstreamAny(configured.resources.MonitoringReadinessFailure?.Props),
+      ).sort(),
+    ).toEqual(["CloudMonitoringApi", "MonitoringEmail", "MonitoringReadinessCheck"]);
+    expect(
+      await resolveOutputs(configured.resources.MonitoringReadinessFailure?.Props, upstream),
+    ).toMatchObject({
+      condition: {
+        conditionThreshold: {
+          filter:
+            'metric.type="monitoring.googleapis.com/uptime_check/check_passed" AND resource.type="uptime_url" AND metric.label.check_id="kvitbit-ready-123"',
+        },
+      },
+      notificationChannels: [channel],
+    });
+    const unconfigured = await compile(sampleProdConfig());
+    expect(unconfigured.resources.MonitoringEmail).toBeUndefined();
+    for (const policy of ["MonitoringCloudRunErrors", "MonitoringReadinessFailure"]) {
+      expect(await resolveOutputs(unconfigured.resources[policy]?.Props, upstream)).toMatchObject({
+        notificationChannels: [],
+      });
     }
   });
 });

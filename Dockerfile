@@ -9,13 +9,27 @@ FROM oven/bun:${BUN_VERSION}-debian AS builder
 
 WORKDIR /app
 
-COPY package.json bun.lock tsconfig.base.json turbo.json ./
+# Copy only manifests and lockfile first so source edits reuse the install layer.
+COPY package.json bun.lock ./
+COPY packages/adapters/package.json ./packages/adapters/package.json
+COPY packages/api-contract/package.json ./packages/api-contract/package.json
+COPY packages/brand/package.json ./packages/brand/package.json
+COPY packages/core/package.json ./packages/core/package.json
+COPY packages/db/package.json ./packages/db/package.json
+COPY packages/domain/package.json ./packages/domain/package.json
+COPY packages/ui-port/package.json ./packages/ui-port/package.json
+COPY apps/mobile/package.json ./apps/mobile/package.json
+COPY apps/server/package.json ./apps/server/package.json
+COPY apps/web/package.json ./apps/web/package.json
+COPY infra/alchemy/package.json ./infra/alchemy/package.json
+
+RUN --mount=type=cache,target=/root/.bun/install/cache \
+    bun install --frozen-lockfile
+
+COPY tsconfig.base.json turbo.json ./
 COPY assets ./assets
 COPY packages ./packages
-COPY infra/alchemy/package.json ./infra/alchemy/package.json
 COPY apps ./apps
-
-RUN bun install --frozen-lockfile
 
 RUN mkdir -p /app/public/web /app/public/app \
   && if [ -f apps/web/package.json ]; then \
@@ -33,11 +47,23 @@ FROM oven/bun:${BUN_VERSION}-debian AS prod-deps
 WORKDIR /app
 
 COPY package.json bun.lock ./
-COPY packages ./packages
+COPY packages/adapters/package.json ./packages/adapters/package.json
+COPY packages/api-contract/package.json ./packages/api-contract/package.json
+COPY packages/brand/package.json ./packages/brand/package.json
+COPY packages/core/package.json ./packages/core/package.json
+COPY packages/db/package.json ./packages/db/package.json
+COPY packages/domain/package.json ./packages/domain/package.json
+COPY packages/ui-port/package.json ./packages/ui-port/package.json
+COPY apps/mobile/package.json ./apps/mobile/package.json
+COPY apps/server/package.json ./apps/server/package.json
+COPY apps/web/package.json ./apps/web/package.json
 COPY infra/alchemy/package.json ./infra/alchemy/package.json
-COPY apps ./apps
 
-RUN bun install --frozen-lockfile --production
+RUN --mount=type=cache,target=/root/.bun/install/cache \
+    bun install --frozen-lockfile --production
+
+COPY packages ./packages
+COPY apps ./apps
 
 # -----------------------------------------------------------------------------
 # Stage 3: Hardened Debian runtime with Bun, Chromium, Czech PDF fonts, and tini

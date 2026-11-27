@@ -14,6 +14,9 @@ export const auth = {
 
   "auth.signIn.title": "Sign in to Kvitbit",
   "auth.signIn.submit": "Sign in",
+  "auth.signIn.methodPassword": "Password",
+  "auth.signIn.methodMagicLink": "Email link",
+  "auth.signIn.methodPasskey": "Passkey",
   "auth.signIn.withPasskey": "Sign in with a passkey",
   "auth.signIn.withMagicLink": "Email me a sign-in link",
   "auth.signIn.withPassword": "Sign in with a password",
