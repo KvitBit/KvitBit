@@ -2,6 +2,7 @@
  * Theme sources to effective app theme (spec 4.1, 4.2, 4.4): the `ThemeEngine` seam with its
  * pure local default, Android 12+ dynamic colour input, `ThemeState` and `effectiveTheme`.
  */
+
 import {
   type Hex,
   M3_COLOR_ROLES,
@@ -13,7 +14,14 @@ import {
   type ThemeStyle,
 } from "@kvitbit/api-contract";
 import { Invalid } from "@kvitbit/domain/contract";
-import { Context, Effect, Layer, Option, Result } from "effect";
+import * as Arr from "effect/Array";
+import * as Context from "effect/Context";
+import * as Effect from "effect/Effect";
+import * as Fn from "effect/Function";
+import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
+import * as Result from "effect/Result";
+import * as Str from "effect/String";
 import type { UiError } from "../api/errors";
 import { isHex } from "./color/utils";
 import { failingPairs, repairContrast } from "./contrast-check";
@@ -31,7 +39,8 @@ import { StyleTokens } from "./style-tokens";
 
 // Resolution ---------------------------------------------------------------------------------
 
-const seedInvalid = () => new Invalid({ issues: [{ path: ["seed"], code: "theme.seed_invalid" }] });
+const seedInvalid = () =>
+  Invalid.make({ issues: [{ path: ["seed"], code: "theme.seed_invalid" }] });
 
 /** Any source to a `ResolvedTheme`; a malformed seed or Theme Builder file fails with `Invalid`. */
 export const resolveSource = (source: ThemeSource): Result.Result<ResolvedTheme, Invalid> => {
@@ -53,13 +62,19 @@ export interface ExtendedPair {
 }
 
 /** Extended colours harmonized toward an arbitrary primary pair, e.g. the dynamic system primary. */
-export const harmonizeExtended = (
-  primary: { readonly light: Hex; readonly dark: Hex },
-  contrast: ThemeContrast,
-): ExtendedPair => ({
-  light: extendedScheme(primary.light, variantOf("light", contrast)),
-  dark: extendedScheme(primary.dark, variantOf("dark", contrast)),
-});
+export const harmonizeExtended: {
+  (primary: { readonly light: Hex; readonly dark: Hex }, contrast: ThemeContrast): ExtendedPair;
+  (contrast: ThemeContrast): (primary: { readonly light: Hex; readonly dark: Hex }) => ExtendedPair;
+} = Fn.dual(
+  2,
+  (
+    primary: { readonly light: Hex; readonly dark: Hex },
+    contrast: ThemeContrast,
+  ): ExtendedPair => ({
+    light: extendedScheme(primary.light, variantOf("light", contrast)),
+    dark: extendedScheme(primary.dark, variantOf("dark", contrast)),
+  }),
+);
 
 // Android dynamic colour -----------------------------------------------------------------------
 
@@ -84,7 +99,7 @@ const pickValid = (m: Partial<Record<M3ColorRole, string>>): Partial<Record<M3Co
   const out: Partial<Record<M3ColorRole, Hex>> = {};
   for (const role of M3_COLOR_ROLES) {
     const v = m[role];
-    if (v !== undefined && isHex(v)) out[role] = v.toUpperCase() as Hex;
+    if (v !== undefined && isHex(v)) out[role] = Str.toUpperCase(v);
   }
   return out;
 };
@@ -113,12 +128,13 @@ export const dynamicRoles = (input: DynamicColorInput): Result.Result<DynamicRol
   // scale (dark surfaces in a light map) is only satisfiable that way. The repaired map with the
   // fewest failures wins, the same mode on ties.
   const complete = (variant: "light" | "dark", system: Partial<Record<M3ColorRole, Hex>>) => {
-    const fixed = new Set(Object.keys(system) as M3ColorRole[]);
+    const fixed = new Set(Arr.filter(M3_COLOR_ROLES, (role) => system[role] !== undefined));
     const from = (mode: "light" | "dark") =>
-      repairContrast({ ...schemeRoles(recipe, mode), ...system }, fixed) as RoleMap;
+      repairContrast({ ...schemeRoles(recipe, mode), ...system }, fixed);
     const same = from(variant);
     const open = (m: RoleMap) =>
-      failingPairs(m).filter((p) => !(fixed.has(p.foreground) && fixed.has(p.background))).length;
+      Arr.filter(failingPairs(m), (p) => !(fixed.has(p.foreground) && fixed.has(p.background)))
+        .length;
     if (open(same) === 0) return same;
     const flipped = from(variant === "light" ? "dark" : "light");
     return open(flipped) < open(same) ? flipped : same;
@@ -132,19 +148,22 @@ export const dynamicRoles = (input: DynamicColorInput): Result.Result<DynamicRol
  * and chroma, then repair any pair the shift left below AA. Standard variants are the system's own
  * (completed) maps: a pair whose colours the platform supplied both stays as supplied.
  */
-export const dynamicSchemeRoles = (dynamic: DynamicRoles, variant: SchemeVariant): RoleMap => {
+export const dynamicSchemeRoles: {
+  (dynamic: DynamicRoles, variant: SchemeVariant): RoleMap;
+  (variant: SchemeVariant): (dynamic: DynamicRoles) => RoleMap;
+} = Fn.dual(2, (dynamic: DynamicRoles, variant: SchemeVariant): RoleMap => {
   const roles = schemeRoles(
     { seed: dynamic.light.primary, overrides: { light: dynamic.light, dark: dynamic.dark } },
     variant,
   );
   if (contrastLevelOf(variant) === 0) return roles;
-  const repaired = repairContrast(roles) as RoleMap;
+  const repaired = repairContrast(roles);
   // A contrast variant must never read worse than its generated counterpart: if the system's
   // colours cannot be shifted into a passing map, use the scheme generated from its primary.
   return failingPairs(repaired).length === 0
     ? repaired
     : schemeRoles(seedRecipe(dynamic.light.primary), variant);
-};
+});
 
 // ThemeEngine seam -----------------------------------------------------------------------------
 
@@ -169,16 +188,20 @@ export class ThemeEngine extends Context.Service<
       contrast: ThemeContrast,
     ) => Effect.Effect<ExtendedPair, ThemeEngineError>;
   }
->()("ui-port/ThemeEngine") {}
+>()("@kvitbit/ui-port/theme/engine/ThemeEngine") {}
 
 /**
  * The pure engine as a layer. `contrast` does not change `resolve`'s result: a `ResolvedTheme`
  * always carries all six schemes, and `effectiveTheme` picks the variant.
  */
 export const LocalThemeEngine: Layer.Layer<ThemeEngine> = Layer.succeed(ThemeEngine, {
-  resolve: (source) =>
-    Result.match(resolveSource(source), { onSuccess: Effect.succeed, onFailure: Effect.fail }),
-  harmonizeExtended: (primary, contrast) => Effect.sync(() => harmonizeExtended(primary, contrast)),
+  resolve: Effect.fn("ThemeEngine.resolve")(function* (source: ThemeSource) {
+    return yield* Effect.fromResult(resolveSource(source));
+  }),
+  harmonizeExtended: Effect.fn("ThemeEngine.harmonizeExtended")(
+    (primary: { readonly light: Hex; readonly dark: Hex }, contrast: ThemeContrast) =>
+      Effect.sync(() => harmonizeExtended(primary, contrast)),
+  ),
 });
 
 // ThemeState and effectiveTheme -----------------------------------------------------------------
@@ -187,7 +210,7 @@ export const LocalThemeEngine: Layer.Layer<ThemeEngine> = Layer.succeed(ThemeEng
  * An editor preview. Appearance previews an account theme and/or a style; Branding previews a
  * Workspace theme and never carries a style (Workspace branding has none).
  */
-export type ThemeDraft =
+type ThemeDraft =
   | {
       readonly _tag: "Appearance";
       /** None previews only the style over the current colour source. */
@@ -218,7 +241,7 @@ export interface ThemeState {
   readonly draft: Option.Option<ThemeDraft>;
 }
 
-export type ThemeOrigin = "dynamic" | "account" | "workspace" | "default" | "draft";
+type ThemeOrigin = "dynamic" | "account" | "workspace" | "default" | "draft";
 
 export interface EffectiveTheme {
   readonly scheme: "light" | "dark";
@@ -235,14 +258,11 @@ export interface EffectiveTheme {
 const CONTRAST_RANK: Readonly<Record<ThemeContrast, number>> = { standard: 0, medium: 1, high: 2 };
 
 /** `preference.contrast`, raised to at least `medium` when the OS asks for more contrast. */
-export const effectiveContrast = (
-  preferred: ThemeContrast,
-  systemHighContrast: boolean,
-): ThemeContrast =>
+const effectiveContrast = (preferred: ThemeContrast, systemHighContrast: boolean): ThemeContrast =>
   systemHighContrast && CONTRAST_RANK[preferred] < CONTRAST_RANK.medium ? "medium" : preferred;
 
 /** Which source wins: draft > dynamic colour (when on and available) > account > workspace > default. */
-export const pickThemeSource = (
+const pickThemeSource = (
   state: ThemeState,
 ):
   | { readonly origin: "dynamic"; readonly dynamic: DynamicRoles }

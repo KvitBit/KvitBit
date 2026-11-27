@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import * as Arr from "effect/Array";
 import {
   enumText,
   fallbackPluralCategory,
@@ -17,7 +18,7 @@ import { text } from "../../src/text";
 
 describe("plural rules", () => {
   test("Czech one/few/many/other", () => {
-    expect([1, 2, 4, 5, 0, 22, 1.5].map((n) => pluralCategory("cs", n))).toEqual([
+    expect(Arr.map([1, 2, 4, 5, 0, 22, 1.5], (n) => pluralCategory("cs", n))).toEqual([
       "one",
       "few",
       "few",

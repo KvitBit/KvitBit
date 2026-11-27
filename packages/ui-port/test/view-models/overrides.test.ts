@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import type { CurrencyCode, NumberingSeriesId } from "@kvitbit/domain/contract";
+import { CurrencyCode, NumberingSeriesId } from "@kvitbit/domain/contract";
 import {
   OverrideForm,
   PRODUCT_DEFAULTS,
@@ -8,10 +8,10 @@ import {
   resolveSetting,
 } from "../../src/view-models";
 
-const S1 = "0193a1b2-c3d4-7e5f-8a6b-1c2d3e4f5a61" as NumberingSeriesId;
-const S2 = "0193a1b2-c3d4-7e5f-8a6b-1c2d3e4f5a62" as NumberingSeriesId;
-const EUR = "EUR" as CurrencyCode;
-const USD = "USD" as CurrencyCode;
+const S1 = NumberingSeriesId.make("0193a1b2-c3d4-7e5f-8a6b-1c2d3e4f5a61");
+const S2 = NumberingSeriesId.make("0193a1b2-c3d4-7e5f-8a6b-1c2d3e4f5a62");
+const EUR = CurrencyCode.make("EUR");
+const USD = CurrencyCode.make("USD");
 
 describe("resolveSetting", () => {
   test("each layer wins over the ones below it", () => {

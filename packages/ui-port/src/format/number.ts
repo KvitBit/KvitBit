@@ -1,5 +1,14 @@
-import { BigDecimal } from "effect";
+import * as Arr from "effect/Array";
+import * as BigDecimal from "effect/BigDecimal";
+import * as Fn from "effect/Function";
+import * as Option from "effect/Option";
+import * as Str from "effect/String";
 import { INTL_TAG, type Locale } from "../i18n/locale";
+import { stringifyJson } from "../json";
+
+const LEADING_ZEROES = /^0+(?=\d)/;
+const TRAILING_ZEROES = /0+$/;
+const ZERO_DIGITS = /^0*$/;
 
 /** A decimal value as the server sends it (string), a BigDecimal, or a JS number. */
 export type DecimalInput = BigDecimal.BigDecimal | string | number | bigint;
@@ -15,15 +24,18 @@ const DECIMAL = /^([-+]?)(\d+)(?:\.(\d*))?(?:[eE]([-+]?\d+))?$/;
 
 /** Parses plain or exponent notation (`1.5e3`, `1e-7`) exactly, without going through floats. */
 const parseDecimal = (input: string): Decimal => {
-  const m = DECIMAL.exec(input.trim());
+  const m = DECIMAL.exec(Str.trim(input));
   if (m === null) throw new RangeError(`Not a decimal: ${input}`);
   const digits = (m[2] ?? "") + (m[3] ?? "");
   const point = (m[2] ?? "").length + Number(m[4] ?? "0");
-  const padded = point <= 0 ? "0".repeat(1 - point) + digits : digits.padEnd(point, "0");
+  const padded =
+    point <= 0
+      ? Fn.pipe("0", Str.repeat(1 - point)) + digits
+      : Fn.pipe(digits, Str.padEnd(point, "0"));
   const at = point <= 0 ? 1 : point;
-  const integer = padded.slice(0, at).replace(/^0+(?=\d)/, "");
-  const fraction = padded.slice(at).replace(/0+$/, "");
-  const zero = /^0*$/.test(integer + fraction);
+  const integer = Fn.pipe(padded, Str.slice(0, at), Str.replace(LEADING_ZEROES, ""));
+  const fraction = Fn.pipe(padded, Str.slice(at), Str.replace(TRAILING_ZEROES, ""));
+  const zero = ZERO_DIGITS.test(integer + fraction);
   return { negative: m[1] === "-" && !zero, integer, fraction };
 };
 
@@ -34,20 +46,14 @@ const toDecimal = (value: DecimalInput): Decimal => {
   }
   if (typeof value === "bigint") return parseDecimal(value.toString());
   if (typeof value === "string") return parseDecimal(value);
-  return parseDecimal(BigDecimal.format(value));
-};
-
-/** Plain decimal string (no exponent, no trailing zeros); `-0` becomes `0`. */
-export const toDecimalString = (value: DecimalInput): string => {
-  const d = toDecimal(value);
-  return `${d.negative ? "-" : ""}${d.integer}${d.fraction === "" ? "" : `.${d.fraction}`}`;
+  return value.pipe(BigDecimal.format, parseDecimal);
 };
 
 export type Sign = "positive" | "negative" | "zero";
 
 export const signOf = (value: DecimalInput): Sign => {
   const d = toDecimal(value);
-  if (/^0*$/.test(d.integer + d.fraction)) return "zero";
+  if (ZERO_DIGITS.test(d.integer + d.fraction)) return "zero";
   return d.negative ? "negative" : "positive";
 };
 
@@ -57,44 +63,50 @@ const roundTo = (d: Decimal, min: number, max: number): Decimal => {
   let fraction = d.fraction;
   if (fraction.length > max) {
     const up = Number(fraction[max]) >= 5;
-    fraction = fraction.slice(0, max);
+    fraction = Fn.pipe(fraction, Str.slice(0, max));
     if (up) {
-      const all = (BigInt(integer + fraction) + 1n).toString().padStart(integer.length + max, "0");
-      integer = all.slice(0, all.length - max) || "0";
-      fraction = all.slice(all.length - max);
+      const all = Fn.pipe(
+        (BigInt(integer + fraction) + 1n).toString(),
+        Str.padStart(integer.length + max, "0"),
+      );
+      integer = Fn.pipe(all, Str.slice(0, all.length - max)) || "0";
+      fraction = Fn.pipe(all, Str.slice(all.length - max));
     }
   }
-  fraction = fraction.replace(/0+$/, "").padEnd(min, "0");
-  const zero = /^0*$/.test(integer + fraction);
+  fraction = Fn.pipe(fraction, Str.replace(TRAILING_ZEROES, ""), Str.padEnd(min, "0"));
+  const zero = ZERO_DIGITS.test(integer + fraction);
   return { negative: d.negative && !zero, integer, fraction };
 };
 
 /** The value as displayed with `min`..`max` fraction digits, as a plain decimal string. */
-export const roundedDecimal = (value: DecimalInput, min: number, max: number): string => {
+export const roundedDecimal: {
+  (min: number, max: number): (value: DecimalInput) => string;
+  (value: DecimalInput, min: number, max: number): string;
+} = Fn.dual(3, (value: DecimalInput, min: number, max: number): string => {
   const d = roundTo(toDecimal(value), min, Math.max(min, max));
   return `${d.negative ? "-" : ""}${d.integer}${d.fraction === "" ? "" : `.${d.fraction}`}`;
-};
+});
 
 const cache = new Map<string, Intl.NumberFormat>();
 
 /** Memoised `Intl.NumberFormat` (formatters are costly to build on Hermes). */
-export const numberFormat = (
-  locale: Locale,
-  options: Intl.NumberFormatOptions,
-): Intl.NumberFormat => {
-  const id = `${locale}|${JSON.stringify(options)}`;
+const numberFormat: {
+  (options: Intl.NumberFormatOptions): (locale: Locale) => Intl.NumberFormat;
+  (locale: Locale, options: Intl.NumberFormatOptions): Intl.NumberFormat;
+} = Fn.dual(2, (locale: Locale, options: Intl.NumberFormatOptions): Intl.NumberFormat => {
+  const id = `${locale}|${stringifyJson(options)}`;
   let format = cache.get(id);
   if (format === undefined) {
     format = new Intl.NumberFormat(INTL_TAG[locale], options);
     cache.set(id, format);
   }
   return format;
-};
+});
 
 const groupDigits = (integer: string, separator: string, minGroupDigits: number): string =>
   integer.length < 3 + minGroupDigits
     ? integer
-    : integer.replace(/\B(?=(\d{3})+(?!\d))/g, separator);
+    : Fn.pipe(integer, Str.replace(/\B(?=(\d{3})+(?!\d))/g, separator));
 
 /**
  * Exact locale formatting. `Intl` supplies only the layout (separators, currency symbol, sign
@@ -102,45 +114,59 @@ const groupDigits = (integer: string, separator: string, minGroupDigits: number)
  * Intl string input is not exact on every engine (Hermes coerces to double), so this never
  * passes the value itself to Intl.
  */
-export const formatExact = (
-  locale: Locale,
-  value: DecimalInput,
-  options: Intl.NumberFormatOptions & { readonly minGroupDigits?: number },
-): string => {
-  const { minGroupDigits = 1, ...intl } = options;
-  const min = intl.minimumFractionDigits ?? 0;
-  const max = Math.max(min, intl.maximumFractionDigits ?? 3);
-  const d = roundTo(toDecimal(value), min, max);
-  const zero = /^0*$/.test(d.integer + d.fraction);
-  // A value that rounds to zero is shown unsigned, whatever signDisplay asked for.
-  const signDisplay = zero && intl.signDisplay !== "never" ? "auto" : intl.signDisplay;
-  const format = numberFormat(locale, {
-    ...intl,
-    ...(signDisplay === undefined ? {} : { signDisplay }),
-    minimumFractionDigits: 1,
-    maximumFractionDigits: 1,
-  });
-  const sample = format.formatToParts(d.negative ? -1234567.5 : zero ? 0.5 : 1234567.5);
-  const group = sample.find((p) => p.type === "group")?.value ?? "";
-  let out = "";
-  let integerDone = false;
-  for (const part of sample) {
-    if (part.type === "integer") {
-      if (!integerDone)
-        out += groupDigits(d.integer, intl.useGrouping === false ? "" : group, minGroupDigits);
-      integerDone = true;
-    } else if (part.type === "group") {
-      // emitted with the integer digits
-    } else if (part.type === "decimal") {
-      if (d.fraction !== "") out += part.value;
-    } else if (part.type === "fraction") {
-      out += d.fraction;
-    } else {
-      out += part.value;
+export const formatExact: {
+  (
+    value: DecimalInput,
+    options: Intl.NumberFormatOptions & { readonly minGroupDigits?: number },
+  ): (locale: Locale) => string;
+  (
+    locale: Locale,
+    value: DecimalInput,
+    options: Intl.NumberFormatOptions & { readonly minGroupDigits?: number },
+  ): string;
+} = Fn.dual(
+  3,
+  (
+    locale: Locale,
+    value: DecimalInput,
+    options: Intl.NumberFormatOptions & { readonly minGroupDigits?: number },
+  ): string => {
+    const { minGroupDigits = 1, ...intl } = options;
+    const min = intl.minimumFractionDigits ?? 0;
+    const max = Math.max(min, intl.maximumFractionDigits ?? 3);
+    const d = roundTo(toDecimal(value), min, max);
+    const zero = ZERO_DIGITS.test(d.integer + d.fraction);
+    // A value that rounds to zero is shown unsigned, whatever signDisplay asked for.
+    const signDisplay = zero && intl.signDisplay !== "never" ? "auto" : intl.signDisplay;
+    const format = numberFormat(locale, {
+      ...intl,
+      ...(signDisplay === undefined ? {} : { signDisplay }),
+      minimumFractionDigits: 1,
+      maximumFractionDigits: 1,
+    });
+    const sample = format.formatToParts(d.negative ? -1234567.5 : zero ? 0.5 : 1234567.5);
+    const group =
+      Option.getOrUndefined(Arr.findFirst(sample, (p) => p.type === "group"))?.value ?? "";
+    let out = "";
+    let integerDone = false;
+    for (const part of sample) {
+      if (part.type === "integer") {
+        if (!integerDone)
+          out += groupDigits(d.integer, intl.useGrouping === false ? "" : group, minGroupDigits);
+        integerDone = true;
+      } else if (part.type === "group") {
+        // emitted with the integer digits
+      } else if (part.type === "decimal") {
+        if (d.fraction !== "") out += part.value;
+      } else if (part.type === "fraction") {
+        out += d.fraction;
+      } else {
+        out += part.value;
+      }
     }
-  }
-  return out;
-};
+    return out;
+  },
+);
 
 export interface NumberOptions {
   readonly minFractionDigits?: number;
@@ -150,6 +176,8 @@ export interface NumberOptions {
 }
 
 /** Locale number: cs `1 234,5` (NBSP grouping), en `1,234.5`. Exact for any decimal input. */
+// A decimal input is a string and can overlap the locale at the call boundary.
+// @effect-diagnostics-next-line missingPipeableSignature:off
 export const formatNumber = (
   locale: Locale,
   value: DecimalInput,
@@ -162,24 +190,41 @@ export const formatNumber = (
   });
 
 /** Quantity with an optional unit: cs `1,5 h`, en `1.5 h`. Up to 4 decimals, no padding. */
+// The value and optional unit accept strings, which overlap the locale.
+// @effect-diagnostics-next-line missingPipeableSignature:off
 export const formatQuantity = (locale: Locale, value: DecimalInput, unit?: string): string => {
   const n = formatNumber(locale, value, { maxFractionDigits: 4 });
   return unit === undefined || unit === "" ? n : `${n} ${unit}`;
 };
 
 /** Percentage given in percent units (21 means 21 %): cs `21 %`, en `21%`. */
-export const formatPercent = (
-  locale: Locale,
-  percent: DecimalInput,
-  options: { readonly maxFractionDigits?: number } = {},
-): string => {
-  const n = formatNumber(locale, percent, {
-    maxFractionDigits: options.maxFractionDigits ?? 2,
-    grouping: false,
-  });
-  return locale === "cs" ? `${n} %` : `${n}%`;
-};
+export const formatPercent: {
+  (
+    percent: DecimalInput,
+    options?: { readonly maxFractionDigits?: number },
+  ): (locale: Locale) => string;
+  (
+    locale: Locale,
+    percent: DecimalInput,
+    options?: { readonly maxFractionDigits?: number },
+  ): string;
+} = Fn.dual(
+  (args) => typeof args[0] === "string",
+  (
+    locale: Locale,
+    percent: DecimalInput,
+    options: { readonly maxFractionDigits?: number } = {},
+  ): string => {
+    const n = formatNumber(locale, percent, {
+      maxFractionDigits: options.maxFractionDigits ?? 2,
+      grouping: false,
+    });
+    return locale === "cs" ? `${n} %` : `${n}%`;
+  },
+);
 
 /** VAT rate label: cs `21 %`, en `21%`. Zero-rated treatments pass 0. */
-export const formatVatRate = (locale: Locale, ratePercent: number): string =>
-  formatPercent(locale, ratePercent);
+export const formatVatRate: {
+  (ratePercent: number): (locale: Locale) => string;
+  (locale: Locale, ratePercent: number): string;
+} = Fn.dual(2, (locale: Locale, ratePercent: number): string => formatPercent(locale, ratePercent));

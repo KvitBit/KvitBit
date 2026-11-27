@@ -10,18 +10,24 @@
  * (100 + rate)), base = gross − VAT; half away from zero to 2 decimals (round2, whatever the currency's minor unit); CZK VAT per
  * bucket = round2(VAT × fx.rate / fx.quantity); `whole_unit` rounding only touches the amount to pay.
  */
+
 import {
-  type CurrencyCode,
+  CurrencyCode,
   type DocumentKind,
-  type IsoDate,
+  IsoDate,
   type Money,
   MoneyMath,
   type TaxRegime,
   type VatBreakdown,
   type VatBucket,
-  type VatTreatment,
+  VatTreatment,
 } from "@kvitbit/domain/contract";
-import { BigDecimal, Data, Option, Result } from "effect";
+import * as Arr from "effect/Array";
+import * as BigDecimal from "effect/BigDecimal";
+import * as Fn from "effect/Function";
+import * as Option from "effect/Option";
+import * as Result from "effect/Result";
+import * as Schema from "effect/Schema";
 
 const ZERO = BigDecimal.fromBigInt(0n);
 const HUNDRED = BigDecimal.fromBigInt(100n);
@@ -38,10 +44,10 @@ const divide = (a: BigDecimal.BigDecimal, b: BigDecimal.BigDecimal): BigDecimal.
 // --- Rates ---------------------------------------------------------------------------------------
 
 /** A tax point before the rate table starts: a defect, not a user error (core-ports 5.1 rule 8). */
-export class VatRateUnavailable extends Data.TaggedError("VatRateUnavailable")<{
-  readonly treatment: VatTreatment;
-  readonly taxPoint: IsoDate;
-}> {}
+export class VatRateUnavailable extends Schema.TaggedError<
+  VatRateUnavailable,
+  { readonly brand: unique symbol }
+>()("VatRateUnavailable", { treatment: VatTreatment, taxPoint: IsoDate }) {}
 
 interface RateTableEntry {
   readonly from: string;
@@ -55,23 +61,34 @@ const RATE_TABLE: ReadonlyArray<RateTableEntry> = [
 ];
 
 /** Non-rated treatments always carry 0 %. */
-export const isRatedTreatment = (treatment: VatTreatment): boolean =>
+const isRatedTreatment = (treatment: VatTreatment): boolean =>
   treatment === "standard" || treatment === "reduced";
 
 /** `VatMath.rateFor`: the percentage in force on the tax point. */
-export const rateFor = (
-  treatment: VatTreatment,
-  taxPoint: IsoDate,
-): Result.Result<BigDecimal.BigDecimal, VatRateUnavailable> => {
-  let entry: RateTableEntry | undefined;
-  for (const candidate of RATE_TABLE) if (candidate.from <= taxPoint) entry = candidate;
-  // Coverage first: core rejects a tax point before the table for every treatment.
-  if (entry === undefined) return Result.fail(new VatRateUnavailable({ treatment, taxPoint }));
-  if (!isRatedTreatment(treatment)) return Result.succeed(ZERO);
-  return Result.succeed(
-    BigDecimal.fromBigInt(BigInt(treatment === "standard" ? entry.standard : entry.reduced)),
-  );
-};
+export const rateFor: {
+  (
+    taxPoint: IsoDate,
+  ): (treatment: VatTreatment) => Result.Result<BigDecimal.BigDecimal, VatRateUnavailable>;
+  (
+    treatment: VatTreatment,
+    taxPoint: IsoDate,
+  ): Result.Result<BigDecimal.BigDecimal, VatRateUnavailable>;
+} = Fn.dual(
+  2,
+  (
+    treatment: VatTreatment,
+    taxPoint: IsoDate,
+  ): Result.Result<BigDecimal.BigDecimal, VatRateUnavailable> => {
+    let entry: RateTableEntry | undefined;
+    for (const candidate of RATE_TABLE) if (candidate.from <= taxPoint) entry = candidate;
+    // Coverage first: core rejects a tax point before the table for every treatment.
+    if (entry === undefined) return Result.fail(VatRateUnavailable.make({ treatment, taxPoint }));
+    if (!isRatedTreatment(treatment)) return Result.succeed(ZERO);
+    return Result.succeed(
+      BigDecimal.fromBigInt(BigInt(treatment === "standard" ? entry.standard : entry.reduced)),
+    );
+  },
+);
 
 /**
  * The treatment the math uses for the Issuing Entity's Tax Regime: a `non_vat_payer` charges no
@@ -79,11 +96,11 @@ export const rateFor = (
  * treatments become `outside_scope` for both. Non-rated treatments are kept. Outgoing documents
  * only: an expense keeps the supplier's treatment whatever the receiver's regime.
  */
-export const effectiveTreatment = (regime: TaxRegime, treatment: VatTreatment): VatTreatment =>
+const effectiveTreatment = (regime: TaxRegime, treatment: VatTreatment): VatTreatment =>
   regime !== "vat_payer" && isRatedTreatment(treatment) ? "outside_scope" : treatment;
 
 /** core-ports 5.1 bucket order. */
-export const TREATMENT_ORDER: ReadonlyArray<VatTreatment> = [
+const TREATMENT_ORDER: ReadonlyArray<VatTreatment> = [
   "standard",
   "reduced",
   "exempt_intra_eu_goods",
@@ -131,7 +148,7 @@ export interface PreviewInput {
 }
 
 /** One line at full precision; round for display only (rule 1). */
-export interface LineAmounts {
+interface LineAmounts {
   readonly treatment: VatTreatment;
   readonly ratePercent: BigDecimal.BigDecimal;
   readonly net: BigDecimal.BigDecimal;
@@ -176,7 +193,7 @@ const isCzk = (currency: CurrencyCode): boolean => currency === "CZK";
 export const calculate = (input: PreviewInput): Result.Result<LivePreview, VatRateUnavailable> => {
   const fx = isCzk(input.currency) ? null : input.fx;
   const lines: Array<LineAmounts> = [];
-  const groups = new Map<VatTreatment, Array<LineAmounts>>();
+  const groups = new Map<VatTreatment, [LineAmounts, ...Array<LineAmounts>]>();
   for (const line of input.lines) {
     const treatment =
       input.direction === "outgoing"
@@ -195,17 +212,17 @@ export const calculate = (input: PreviewInput): Result.Result<LivePreview, VatRa
   for (const treatment of TREATMENT_ORDER) {
     const group = groups.get(treatment);
     if (group === undefined) continue;
-    const first = group[0] as LineAmounts;
+    const [first] = group;
     const rate = first.ratePercent;
     let base: BigDecimal.BigDecimal;
     let vat: BigDecimal.BigDecimal;
     let gross: BigDecimal.BigDecimal;
     if (input.pricesIncludeVat) {
-      gross = roundAt(BigDecimal.sumAll(group.map((l) => l.gross)), SCALE);
+      gross = roundAt(BigDecimal.sumAll(Arr.map(group, (l) => l.gross)), SCALE);
       vat = roundAt(divide(BigDecimal.multiply(gross, rate), BigDecimal.sum(HUNDRED, rate)), SCALE);
       base = BigDecimal.subtract(gross, vat);
     } else {
-      base = roundAt(BigDecimal.sumAll(group.map((l) => l.net)), SCALE);
+      base = roundAt(BigDecimal.sumAll(Arr.map(group, (l) => l.net)), SCALE);
       vat = roundAt(divide(BigDecimal.multiply(base, rate), HUNDRED), SCALE);
       gross = BigDecimal.sum(base, vat);
     }
@@ -228,16 +245,16 @@ export const calculate = (input: PreviewInput): Result.Result<LivePreview, VatRa
 
   const money = (amount: BigDecimal.BigDecimal): Money =>
     MoneyMath.make(BigDecimal.normalize(amount), input.currency);
-  const net = BigDecimal.sumAll(buckets.map((b) => b.base));
-  const vat = BigDecimal.sumAll(buckets.map((b) => b.vat));
+  const net = BigDecimal.sumAll(Arr.map(buckets, (b) => b.base));
+  const vat = BigDecimal.sumAll(Arr.map(buckets, (b) => b.vat));
   const exact = BigDecimal.sum(net, vat);
   const toPay = input.paymentRounding === "whole_unit" ? roundAt(exact, 0) : exact;
   const vatCzk =
     fx === null
       ? null
       : MoneyMath.make(
-          BigDecimal.normalize(BigDecimal.sumAll(buckets.map((b) => b.vatCzk ?? ZERO))),
-          "CZK" as CurrencyCode,
+          BigDecimal.normalize(BigDecimal.sumAll(Arr.map(buckets, (b) => b.vatCzk ?? ZERO))),
+          CurrencyCode.make("CZK"),
         );
   return Result.succeed({
     lines,
@@ -285,14 +302,20 @@ const sameNullableMoney = (a: Money | null, b: Money | null): boolean =>
   a === null ? b === null : b !== null && MoneyMath.equals(a, b);
 
 /** Same totals and buckets (bucket order ignored). */
-export const sameBreakdown = (a: VatBreakdown, b: VatBreakdown): boolean =>
-  MoneyMath.equals(a.net, b.net) &&
-  MoneyMath.equals(a.vat, b.vat) &&
-  MoneyMath.equals(a.gross, b.gross) &&
-  MoneyMath.equals(a.roundingAdjustment, b.roundingAdjustment) &&
-  sameNullableMoney(a.vatCzk, b.vatCzk) &&
-  a.buckets.length === b.buckets.length &&
-  a.buckets.every((bucket) => b.buckets.some((other) => sameBucket(bucket, other)));
+export const sameBreakdown: {
+  (b: VatBreakdown): (a: VatBreakdown) => boolean;
+  (a: VatBreakdown, b: VatBreakdown): boolean;
+} = Fn.dual(
+  2,
+  (a: VatBreakdown, b: VatBreakdown): boolean =>
+    MoneyMath.equals(a.net, b.net) &&
+    MoneyMath.equals(a.vat, b.vat) &&
+    MoneyMath.equals(a.gross, b.gross) &&
+    MoneyMath.equals(a.roundingAdjustment, b.roundingAdjustment) &&
+    sameNullableMoney(a.vatCzk, b.vatCzk) &&
+    a.buckets.length === b.buckets.length &&
+    Arr.every(a.buckets, (bucket) => Arr.some(b.buckets, (other) => sameBucket(bucket, other))),
+);
 
 export const PreviewSync = {
   init: (local: VatBreakdown): PreviewSync => ({

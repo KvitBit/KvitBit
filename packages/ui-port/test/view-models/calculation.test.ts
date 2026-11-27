@@ -1,6 +1,14 @@
 import { describe, expect, test } from "bun:test";
-import type { CurrencyCode, IsoDate, VatBreakdown, VatTreatment } from "@kvitbit/domain/contract";
-import { BigDecimal, Result } from "effect";
+import {
+  CurrencyCode,
+  IsoDate,
+  type VatBreakdown,
+  type VatTreatment,
+} from "@kvitbit/domain/contract";
+import * as Arr from "effect/Array";
+import * as BigDecimal from "effect/BigDecimal";
+import * as Result from "effect/Result";
+
 import {
   calculate,
   type LivePreview,
@@ -10,7 +18,7 @@ import {
 } from "../../src/view-models";
 
 const d = (s: string) => BigDecimal.fromStringUnsafe(s);
-const str = (n: BigDecimal.BigDecimal) => BigDecimal.format(BigDecimal.normalize(n));
+const str = (n: BigDecimal.BigDecimal) => n.pipe(BigDecimal.normalize, BigDecimal.format);
 const line = (
   quantity: string,
   unitPrice: string,
@@ -25,8 +33,8 @@ const line = (
 
 const base: PreviewInput = {
   lines: [],
-  currency: "CZK" as CurrencyCode,
-  taxPoint: "2026-11-23" as IsoDate,
+  currency: CurrencyCode.make("CZK"),
+  taxPoint: IsoDate.make("2026-11-23"),
   pricesIncludeVat: false,
   fx: null,
   paymentRounding: "none",
@@ -49,7 +57,7 @@ const totals = (b: VatBreakdown) => ({
 });
 
 const buckets = (b: VatBreakdown) =>
-  b.buckets.map((x) => ({
+  Arr.map(b.buckets, (x) => ({
     treatment: x.treatment,
     rate: str(x.ratePercent),
     base: str(x.base),
@@ -60,40 +68,37 @@ const buckets = (b: VatBreakdown) =>
 
 describe("rateFor", () => {
   test("21 and 12 since 2024-01-01, 0 for non-rated treatments", () => {
-    expect(Result.map(rateFor("standard", "2024-01-01" as IsoDate), str)).toEqual(
+    expect(Result.map(rateFor("standard", IsoDate.make("2024-01-01")), str)).toEqual(
       Result.succeed("21"),
     );
-    expect(Result.map(rateFor("reduced", "2026-06-30" as IsoDate), str)).toEqual(
+    expect(Result.map(rateFor("reduced", IsoDate.make("2026-06-30")), str)).toEqual(
       Result.succeed("12"),
     );
-    expect(Result.map(rateFor("reverse_charge", "2026-06-30" as IsoDate), str)).toEqual(
+    expect(Result.map(rateFor("reverse_charge", IsoDate.make("2026-06-30")), str)).toEqual(
       Result.succeed("0"),
     );
   });
   test("a tax point before the table is a defect", () => {
-    const r = rateFor("standard", "2023-12-31" as IsoDate);
+    const r = rateFor("standard", IsoDate.make("2023-12-31"));
     expect(Result.isFailure(r)).toBe(true);
-    expect(
-      Result.isFailure(
-        calculate({ ...base, taxPoint: "2023-12-31" as IsoDate, lines: [line("1", "1")] }),
-      ),
-    ).toBe(true);
+    calculate({ ...base, taxPoint: IsoDate.make("2023-12-31"), lines: [line("1", "1")] })
+      .pipe(Result.isFailure, expect)
+      .toBe(true);
   });
   test("coverage is checked before the treatment: non-rated treatments fail before the table too", () => {
     for (const treatment of ["outside_scope", "reverse_charge", "exempt_intra_eu_goods"] as const) {
-      expect(Result.isFailure(rateFor(treatment, "2023-12-31" as IsoDate))).toBe(true);
+      const failed = rateFor(treatment, IsoDate.make("2023-12-31")).pipe(Result.isFailure);
+      expect(failed).toBe(true);
     }
     // a non_vat_payer's document (every line outside_scope) is no exception
-    expect(
-      Result.isFailure(
-        calculate({
-          ...base,
-          taxRegime: "non_vat_payer",
-          taxPoint: "2023-12-31" as IsoDate,
-          lines: [line("1", "1", "outside_scope")],
-        }),
-      ),
-    ).toBe(true);
+    calculate({
+      ...base,
+      taxRegime: "non_vat_payer",
+      taxPoint: IsoDate.make("2023-12-31"),
+      lines: [line("1", "1", "outside_scope")],
+    })
+      .pipe(Result.isFailure, expect)
+      .toBe(true);
   });
 });
 
@@ -104,8 +109,8 @@ describe("calculate: bottom-up (prices excl. VAT)", () => {
       { treatment: "standard", rate: "21", base: "0.13", vat: "0.03", gross: "0.16", vatCzk: null },
     ]);
     // line amounts keep full precision
-    expect(str(p.lines[0]?.net ?? d("0"))).toBe("0.125");
-    expect(str(p.lines[0]?.vat ?? d("0"))).toBe("0.02625");
+    (p.lines[0]?.net ?? d("0")).pipe(str, expect).toBe("0.125");
+    (p.lines[0]?.vat ?? d("0")).pipe(str, expect).toBe("0.02625");
   });
 
   test("bucket rounding, not line rounding: two 0.004 lines make 0.01", () => {
@@ -135,7 +140,7 @@ describe("calculate: bottom-up (prices excl. VAT)", () => {
         line("1", "100"),
       ],
     });
-    expect(buckets(p.breakdown).map((b) => b.treatment)).toEqual([
+    expect(Arr.map(buckets(p.breakdown), (b) => b.treatment)).toEqual([
       "standard",
       "reduced",
       "exempt_intra_eu_goods",
@@ -144,7 +149,10 @@ describe("calculate: bottom-up (prices excl. VAT)", () => {
     ]);
     // outside_scope entered before standard (the reviewer's case)
     const two = run({ lines: [line("1", "5", "outside_scope"), line("1", "100")] });
-    expect(buckets(two.breakdown).map((b) => b.treatment)).toEqual(["standard", "outside_scope"]);
+    expect(Arr.map(buckets(two.breakdown), (b) => b.treatment)).toEqual([
+      "standard",
+      "outside_scope",
+    ]);
   });
 
   test("multiple rates make one bucket each", () => {
@@ -215,18 +223,18 @@ describe("calculate: top-down (prices incl. VAT)", () => {
 describe("calculate: FX, credit notes, regimes, payment rounding", () => {
   test("CZK VAT per bucket = round2(VAT × rate / quantity)", () => {
     const p = run({
-      currency: "EUR" as CurrencyCode,
+      currency: CurrencyCode.make("EUR"),
       fx: { rate: d("25.125"), quantity: 1 },
       lines: [line("1", "100"), line("1", "100", "reduced")],
     });
-    expect(buckets(p.breakdown).map((b) => b.vatCzk)).toEqual(["527.63", "301.5"]);
+    expect(Arr.map(buckets(p.breakdown), (b) => b.vatCzk)).toEqual(["527.63", "301.5"]);
     expect(totals(p.breakdown).vatCzk).toBe("829.13");
-    expect(p.breakdown.net.currency).toBe("EUR" as CurrencyCode);
-    expect(p.breakdown.vatCzk?.currency).toBe("CZK" as CurrencyCode);
+    expect(p.breakdown.net.currency).toBe(CurrencyCode.make("EUR"));
+    expect(p.breakdown.vatCzk?.currency).toBe(CurrencyCode.make("CZK"));
   });
   test("fx quantity divides (100 HUF = 6.5 CZK)", () => {
     const p = run({
-      currency: "HUF" as CurrencyCode,
+      currency: CurrencyCode.make("HUF"),
       fx: { rate: d("6.5"), quantity: 100 },
       lines: [line("1", "10000")],
     });
@@ -237,7 +245,7 @@ describe("calculate: FX, credit notes, regimes, payment rounding", () => {
       run({ fx: { rate: d("2"), quantity: 1 }, lines: [line("1", "1")] }).breakdown.vatCzk,
     ).toBeNull();
     expect(
-      run({ currency: "EUR" as CurrencyCode, lines: [line("1", "1")] }).breakdown.vatCzk,
+      run({ currency: CurrencyCode.make("EUR"), lines: [line("1", "1")] }).breakdown.vatCzk,
     ).toBeNull();
   });
 
@@ -298,7 +306,7 @@ describe("calculate: FX, credit notes, regimes, payment rounding", () => {
       taxRegime: "identified_person",
       lines: [line("1", "100"), line("1", "40", "reverse_charge")],
     });
-    expect(buckets(p.breakdown).map((b) => [b.treatment, b.rate, b.vat])).toEqual([
+    expect(Arr.map(buckets(p.breakdown), (b) => [b.treatment, b.rate, b.vat])).toEqual([
       ["reverse_charge", "0", "0"],
       ["outside_scope", "0", "0"],
     ]);
@@ -320,12 +328,12 @@ describe("calculate: FX, credit notes, regimes, payment rounding", () => {
     });
     expect(totals(half.breakdown).gross).toBe("121");
     expect(totals(half.breakdown).adj).toBe("0.5");
-    expect(str(half.breakdown.buckets[0]?.gross ?? d("0"))).toBe("120.5");
+    (half.breakdown.buckets[0]?.gross ?? d("0")).pipe(str, expect).toBe("120.5");
   });
 
   test("round2 for every currency (core-ports 5.1), not the ISO minor unit", () => {
     const jpy = run({
-      currency: "JPY" as CurrencyCode,
+      currency: CurrencyCode.make("JPY"),
       fx: { rate: d("16.5"), quantity: 100 },
       lines: [line("1", "100.125")],
     });
@@ -336,7 +344,7 @@ describe("calculate: FX, credit notes, regimes, payment rounding", () => {
       adj: "0",
       vatCzk: "3.47",
     });
-    const kwd = run({ currency: "KWD" as CurrencyCode, lines: [line("1", "1.2345")] });
+    const kwd = run({ currency: CurrencyCode.make("KWD"), lines: [line("1", "1.2345")] });
     expect(totals(kwd.breakdown).net).toBe("1.23");
   });
 

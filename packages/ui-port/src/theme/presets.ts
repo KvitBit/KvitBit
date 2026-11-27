@@ -4,6 +4,7 @@
  * `ThemePresets` table carries the same seeds (the preset test keeps them equal).
  */
 import type { Hex, ThemePresetId } from "@kvitbit/api-contract";
+import * as Rec from "effect/Record";
 import type { RoleMap, ThemeRecipe } from "./scheme";
 
 export interface PresetDefinition extends ThemeRecipe {
@@ -145,4 +146,4 @@ export const PresetDefinitions: Readonly<Record<ThemePresetId, PresetDefinition>
   },
 };
 
-export const PRESET_IDS = Object.keys(PresetDefinitions) as ReadonlyArray<ThemePresetId>;
+export const PRESET_IDS: ReadonlyArray<ThemePresetId> = Rec.keys(PresetDefinitions);

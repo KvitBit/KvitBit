@@ -6,7 +6,9 @@
  * earlier op has resolved; a rollback drops its op and replays the rest. Unknown or already
  * resolved `seq`s are ignored (T3).
  */
-export interface PendingOp<S, Op> {
+import * as Arr from "effect/Array";
+
+interface PendingOp<S, Op> {
   readonly seq: number;
   /** What the op touches (an entity id), for the "Saving" marker. */
   readonly key: string;
@@ -17,7 +19,7 @@ export interface PendingOp<S, Op> {
   readonly confirmed: boolean;
 }
 
-export interface Optimistic<S, Op> {
+interface Optimistic<S, Op> {
   readonly base: S;
   readonly value: S;
   readonly pending: ReadonlyArray<PendingOp<S, Op>>;
@@ -42,7 +44,7 @@ export interface OptimisticOps<S, Op> {
   readonly rebase: (state: Optimistic<S, Op>, base: S) => Optimistic<S, Op>;
 }
 
-export const makeOptimistic = <S, Op>(step: (state: S, op: Op) => S): OptimisticOps<S, Op> => {
+const makeOptimistic = <S, Op>(step: (state: S, op: Op) => S): OptimisticOps<S, Op> => {
   const settle = (
     state: Optimistic<S, Op>,
     pendingIn: ReadonlyArray<PendingOp<S, Op>>,
@@ -53,7 +55,12 @@ export const makeOptimistic = <S, Op>(step: (state: S, op: Op) => S): Optimistic
       base = step(base, pending[0].op);
       pending = pending.slice(1);
     }
-    return { ...state, base, pending, value: pending.reduce((acc, p) => step(acc, p.op), base) };
+    return {
+      ...state,
+      base,
+      pending,
+      value: Arr.reduce(pending, base, (acc, p) => step(acc, p.op)),
+    };
   };
   return {
     init: (value) => ({ base: value, value, pending: [], nextSeq: 1 }),
@@ -70,22 +77,22 @@ export const makeOptimistic = <S, Op>(step: (state: S, op: Op) => S): Optimistic
       };
     },
     confirm: (state, seq, serverOp) =>
-      state.pending.some((p) => p.seq === seq && !p.confirmed)
+      Arr.some(state.pending, (p) => p.seq === seq && !p.confirmed)
         ? settle(
             state,
-            state.pending.map((p) =>
+            Arr.map(state.pending, (p) =>
               p.seq === seq ? { ...p, op: serverOp ?? p.op, confirmed: true } : p,
             ),
           )
         : state,
     rollback: (state, seq) =>
-      state.pending.some((p) => p.seq === seq && !p.confirmed)
+      Arr.some(state.pending, (p) => p.seq === seq && !p.confirmed)
         ? settle(
             state,
-            state.pending.filter((p) => p.seq !== seq),
+            Arr.filter(state.pending, (p) => p.seq !== seq),
           )
         : state,
-    isPending: (state, key) => state.pending.some((p) => p.key === key && !p.confirmed),
+    isPending: (state, key) => Arr.some(state.pending, (p) => p.key === key && !p.confirmed),
     rebase: (state, base) => settle({ ...state, base }, state.pending),
   };
 };
@@ -95,12 +102,12 @@ export type ListOp<A> =
   | { readonly _tag: "Remove"; readonly id: string }
   | { readonly _tag: "Replace"; readonly item: A };
 
-export const listStep =
+const listStep =
   <A>(idOf: (item: A) => string) =>
   (items: ReadonlyArray<A>, op: ListOp<A>): ReadonlyArray<A> =>
     op._tag === "Remove"
-      ? items.filter((item) => idOf(item) !== op.id)
-      : items.map((item) => (idOf(item) === idOf(op.item) ? op.item : item));
+      ? Arr.filter(items, (item) => idOf(item) !== op.id)
+      : Arr.map(items, (item) => (idOf(item) === idOf(op.item) ? op.item : item));
 
 /** Optimistic list: removal and replacement; rollback reinserts at the old index by replay. */
 export const optimisticList = <A>(

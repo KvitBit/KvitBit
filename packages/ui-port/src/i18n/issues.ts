@@ -52,7 +52,7 @@ export const UI_ISSUE_CODES = [
   "auth.sole_owner",
   "auth.email_unchanged",
 ] as const;
-export type UiIssueCode = (typeof UI_ISSUE_CODES)[number];
+type UiIssueCode = (typeof UI_ISSUE_CODES)[number];
 
 /** Every code a field issue can carry: core's closed `IssueCode` plus the UI-only codes. */
 export type AnyIssueCode = IssueCode | UiIssueCode;
@@ -71,7 +71,9 @@ const errorKeysCovered: Covered<
   | `error.unauthorized.${UnauthorizedReason}`
   | `issue.${ThemeWarning}`
 > = true;
+// biome-ignore lint/complexity/noVoid: Keep the compile-time issue coverage check.
 void issueKeysCovered;
+// biome-ignore lint/complexity/noVoid: Keep the compile-time error coverage check.
 void errorKeysCovered;
 
 export const issueKey = <C extends AnyIssueCode>(code: C): IssueKey<C> => `issue.${code}`;

@@ -1,7 +1,17 @@
 import { describe, expect, test } from "bun:test";
 import { ContactId, WorkspaceId } from "@kvitbit/domain/contract";
-import { Effect, Exit, Fiber, Option, Scheduler, Schema, Scope } from "effect";
-import { FetchHttpClient, HttpClient, HttpClientResponse } from "effect/http";
+import * as Arr from "effect/Array";
+import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
+import * as Fiber from "effect/Fiber";
+import * as FetchHttpClient from "effect/http/FetchHttpClient";
+import * as HttpClient from "effect/http/HttpClient";
+import * as HttpClientResponse from "effect/http/HttpClientResponse";
+import * as Option from "effect/Option";
+import * as Rec from "effect/Record";
+import * as Scheduler from "effect/Scheduler";
+import * as Schema from "effect/Schema";
+import * as Scope from "effect/Scope";
 import {
   layer as apiLayer,
   attempt,
@@ -13,7 +23,6 @@ import {
   ifMatchHeaders,
   inWorkspace,
   KvitbitApi,
-  type KvitbitApiClient,
   type KvitbitApiConfig,
   keyAfter,
   layerFetch,
@@ -22,10 +31,14 @@ import {
   sessionCookie,
   toUiError,
 } from "../../src/api";
+import { stringifyJson } from "../../src/json";
 import { hangingFetch, json, mockFetch } from "./mock-fetch";
 
-const ws = Schema.decodeUnknownSync(WorkspaceId)("01932f5e-7b6a-7c3d-8e9f-0a1b2c3d4e5f");
-const contactId = Schema.decodeUnknownSync(ContactId)("01932f5e-7b6a-7c3d-8e9f-0a1b2c3d4e60");
+const decodeJson = Schema.decodeEffect(Schema.fromJsonString(Schema.Unknown));
+const parseJson = (source: string): unknown => Effect.runSync(decodeJson(source));
+
+const ws = WorkspaceId.make("01932f5e-7b6a-7c3d-8e9f-0a1b2c3d4e5f");
+const contactId = ContactId.make("01932f5e-7b6a-7c3d-8e9f-0a1b2c3d4e60");
 const contact = { id: "c1", name: "Acme s.r.o.", defaults: {}, revision: 3 };
 const base = "https://app.kvitbit.test";
 
@@ -88,7 +101,7 @@ describe("KvitbitApi round trips over a mock transport", () => {
     const [req] = mock.calls;
     expect(req?.method).toBe("GET");
     expect(req?.url.pathname).toBe(`/api/v1/workspaces/${ws}/contacts`);
-    expect(Object.fromEntries(req?.url.searchParams ?? [])).toEqual({
+    expect(Rec.fromEntries(req?.url.searchParams ?? [])).toEqual({
       text: "acme",
       role: "customer",
       cursor: "cur-1",
@@ -113,7 +126,7 @@ describe("KvitbitApi round trips over a mock transport", () => {
     expect(req?.headers.get("idempotency-key")).toBe("0193aaaa-bbbb-7ccc-8ddd-eeeeffff0000");
     expect(req?.headers.get("authorization")).toBe("Bearer kvb_key1_secret");
     expect(req?.credentials).toBe("omit"); // no same-origin session cookie beside the bearer
-    expect(JSON.parse(req?.body ?? "{}")).toEqual({ name: "Acme s.r.o." });
+    expect(parseJson(req?.body ?? "{}")).toEqual({ name: "Acme s.r.o." });
   });
 
   test("ApiResult meta carries ETag revision and Idempotent-Replayed", async () => {
@@ -239,15 +252,15 @@ describe("typed error decoding into UiError", () => {
   test("interruption -> Cancelled", async () => {
     const exit = await run(
       Effect.gen(function* () {
-        const fiber = yield* Effect.forkChild(attempt(search));
+        const fiber = yield* search.pipe(attempt(), Effect.forkChild);
         yield* Effect.sleep("10 millis");
         return yield* Fiber.interrupt(fiber).pipe(Effect.as(fiber), Effect.flatMap(Fiber.await));
       }),
       hangingFetch(),
     );
     expect(Exit.isFailure(exit)).toBe(true);
-    expect(fromExit(exit)).toEqual(Option.some({ _tag: "Cancelled" }));
-    const inner = await Effect.runPromise(attempt(Effect.interrupt));
+    exit.pipe(fromExit, expect).toEqual(Option.some({ _tag: "Cancelled" }));
+    const inner = await Effect.interrupt.pipe(attempt(), Effect.runPromise);
     expect(inner).toEqual({ _tag: "Err", error: { _tag: "Cancelled" } });
   });
 });
@@ -260,7 +273,7 @@ describe("client configuration", () => {
     await run(search, mock.fetch, config);
     locale = "en";
     await run(search, mock.fetch, config);
-    expect(mock.calls.map((c) => c.headers.get("accept-language"))).toEqual(["cs", "en"]);
+    expect(Arr.map(mock.calls, (c) => c.headers.get("accept-language"))).toEqual(["cs", "en"]);
   });
 
   test("cookie mode keeps the adapter's RequestInit options", async () => {
@@ -277,11 +290,11 @@ describe("client configuration", () => {
     const seen: Array<string> = [];
     const client = HttpClient.make((request) => {
       seen.push(`${request.method} ${request.url} ${request.headers.authorization ?? ""}`);
-      seen.push(JSON.stringify(request.urlParams));
+      seen.push(stringifyJson(request.urlParams));
       return Effect.succeed(
         HttpClientResponse.fromWeb(
           request,
-          new Response(JSON.stringify({ items: [], nextCursor: null }), {
+          new Response(stringifyJson({ items: [], nextCursor: null }), {
             status: 200,
             headers: { "content-type": "application/json" },
           }),
@@ -374,7 +387,7 @@ describe("review round 1 regressions", () => {
       ),
       hangingFetch(),
     );
-    await new Promise((resolve) => setTimeout(resolve, 5));
+    await Bun.sleep(5);
     expect(delivered).toEqual([cancelledMsg]);
   });
 
@@ -398,7 +411,7 @@ describe("review round 1 regressions", () => {
       }),
       hangingFetch(),
     );
-    await new Promise((resolve) => setTimeout(resolve, 5));
+    await Bun.sleep(5);
     expect(early).toEqual([cancelledMsg]);
     expect(closed).toEqual([cancelledMsg]);
   });
@@ -419,8 +432,10 @@ describe("review round 1 regressions", () => {
     await run(
       Effect.scoped(
         Effect.gen(function* () {
-          yield* Fiber.await(yield* runCommand(command, (msg) => delivered.push(msg)));
-          yield* Fiber.await(yield* runCommand(failing, (msg) => delivered.push(msg)));
+          const success = yield* runCommand(command, (msg) => delivered.push(msg));
+          yield* Fiber.await(success);
+          const failure = yield* runCommand(failing, (msg) => delivered.push(msg));
+          yield* Fiber.await(failure);
           yield* Effect.sleep("5 millis");
         }),
       ),
@@ -437,7 +452,12 @@ describe("review round 1 regressions", () => {
     expect(error._tag).toBe("Invalid");
     if (error._tag !== "Invalid") return;
     // compiles: the auth variant is part of UiError's type
-    expect(error.issues.some((issue) => issue.code === "auth.bot_proof_required")).toBe(true);
+    expect(
+      Arr.some(
+        error.issues,
+        ({ code }: { readonly code: string }) => code === "auth.bot_proof_required",
+      ),
+    ).toBe(true);
     expect(describeError(error).freshBotProof).toBe(true);
     for (const bad of [
       { _tag: "Invalid", issues: [{ path: [{}], code: "auth.x" }] },
@@ -457,7 +477,7 @@ describe("review round 2 regressions", () => {
     );
     // the 401 is handled; "x" is no UUID, so the second request fails before anything is sent
     const result = await run(
-      attempt(Effect.andThen(Effect.ignore(search), create("x"))),
+      search.pipe(Effect.ignore, Effect.andThen(create("x")), attempt()),
       mock.fetch,
     );
     expect(mock.calls).toHaveLength(1);
@@ -470,9 +490,10 @@ describe("review round 2 regressions", () => {
   test("runCommand: a runner interrupted between fork and observer still delivers the Message", async () => {
     // The command interrupts its runner as it runs; with a small op budget the interrupt lands
     // right after the fork. Every budget must still dispatch the command's own Message.
+    const client = await run(KvitbitApi, hangingFetch());
     for (let budget = 2; budget <= 16; budget++) {
       const delivered: Array<unknown> = [];
-      let onDelivered: () => void = () => {};
+      let onDelivered: () => void = () => undefined;
       const firstDelivery = new Promise<"delivered">((resolve) => {
         onDelivered = () => resolve("delivered");
       });
@@ -496,20 +517,21 @@ describe("review round 2 regressions", () => {
           ),
         ).pipe(
           // the command never calls the API
-          Effect.provideService(KvitbitApi, {} as KvitbitApiClient),
+          Effect.provideService(KvitbitApi, client),
           Effect.provideService(Scope.Scope, scope),
           Effect.provideService(Scheduler.MaxOpsBeforeYield, budget),
         ),
       );
       // Close the scope only once the command ran and dispatched, so cleanup cannot cancel it
       // first; a delivery that never comes fails at the deadline instead of hanging.
+      // biome-ignore lint/performance/noAwaitInLoops: Each op budget finishes its interruption and scope cleanup before the next one.
       const outcome = await Promise.race([
         firstDelivery,
-        new Promise<"missing">((resolve) => setTimeout(() => resolve("missing"), 2_000)),
+        Bun.sleep(2_000).then(() => "missing" as const),
       ]);
       await Effect.runPromise(Scope.close(scope, Exit.void));
       // a duplicate dispatch would land after cleanup; give it a turn of the event loop
-      await new Promise((resolve) => setTimeout(resolve, 0));
+      await Bun.sleep(0);
       expect({ budget, outcome, delivered }).toEqual({
         budget,
         outcome: "delivered",
@@ -655,17 +677,23 @@ describe("review round 4 regressions", () => {
   });
 
   test("an uncaught decode failure still maps to Unexpected with its exchange", async () => {
-    const failure = await Effect.runPromise(
-      Effect.flip(search).pipe(
-        Effect.provide(layerFetch(cookieConfig)),
-        Effect.provideService(
-          FetchHttpClient.Fetch,
-          mockFetch(() => json(200, { nope: true }, { "x-request-id": "broken" })).fetch,
-        ),
+    const failure = await search.pipe(
+      Effect.flip,
+      Effect.provide(layerFetch(cookieConfig)),
+      Effect.provideService(
+        FetchHttpClient.Fetch,
+        mockFetch(() => json(200, { nope: true }, { "x-request-id": "broken" })).fetch,
       ),
+      Effect.runPromise,
     );
-    expect((failure as { _tag?: unknown })._tag).toBe("SchemaError");
-    expect(toUiError(failure)).toEqual({ _tag: "Unexpected", status: 200, requestId: "broken" });
+    expect(
+      typeof failure === "object" && failure !== null && "_tag" in failure
+        ? failure._tag
+        : undefined,
+    ).toBe("SchemaError");
+    failure
+      .pipe(toUiError, expect)
+      .toEqual({ _tag: "Unexpected", status: 200, requestId: "broken" });
   });
 
   test("response-only mode keeps the success response's ETag and Idempotent-Replayed", async () => {

@@ -1,5 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import { BigDecimal } from "effect";
+import * as BigDecimal from "effect/BigDecimal";
+import * as Fn from "effect/Function";
+import * as Str from "effect/String";
+
 import {
   formatDate,
   formatDateRange,
@@ -15,7 +18,7 @@ import {
 } from "../../src/format";
 
 const NBSP = " ";
-const spaces = (s: string) => s.replace(/[  ]/g, " ");
+const spaces = (s: string) => Fn.pipe(s, Str.replace(/[  ]/g, " "));
 
 describe("money", () => {
   test("cs: NBSP grouping, comma decimals, Kč suffix", () => {
@@ -34,6 +37,7 @@ describe("money", () => {
   });
 
   test("accepts BigDecimal without float loss and never prints -0", () => {
+    // biome-ignore lint/security/noSecrets: The literal is public fixture data.
     const amount = BigDecimal.fromStringUnsafe("12345678901234567.25");
     expect(spaces(formatMoney("cs", { amount, currency: "CZK" }))).toBe(
       "12 345 678 901 234 567,25 Kč",

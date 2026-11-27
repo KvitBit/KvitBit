@@ -3,8 +3,10 @@
  * transitions also return the page fetch to issue, tagged with `seq` so results of an older query
  * are ignored (T3).
  */
+
 import type { Page } from "@kvitbit/domain/contract";
-import { Option } from "effect";
+import * as Option from "effect/Option";
+
 import { isCursorMismatch, type UiError } from "./errors";
 import { filterHash, PAGE_LIMIT, type PageQuery, pageQuery } from "./query";
 import type { ApiResult } from "./result";
@@ -17,8 +19,12 @@ export type Remote<A, E = UiError> =
   | { readonly _tag: "Ready"; readonly value: A; readonly refreshing: boolean }
   | { readonly _tag: "Failed"; readonly error: E; readonly stale: Option.Option<A> };
 
-export const idle: Remote<never, never> = { _tag: "Idle" };
-const ready = <A>(value: A): Remote<A, never> => ({ _tag: "Ready", value, refreshing: false });
+const idle: Remote<never, never> = { _tag: "Idle" };
+const ready = <A>(initial: A): Remote<A, never> => ({
+  _tag: "Ready",
+  value: initial,
+  refreshing: false,
+});
 
 /** Latest known value, ready or stale. */
 const value = <A, E>(remote: Remote<A, E>): Option.Option<A> => {
@@ -54,7 +60,7 @@ const isBusy = <A, E>(remote: Remote<A, E>): boolean =>
 
 // --- Paged --------------------------------------------------------------------------------------
 
-export type PagedStatus = "loading" | "ready" | "loading_more" | "refreshing" | "failed";
+type PagedStatus = "loading" | "ready" | "loading_more" | "refreshing" | "failed";
 
 export interface Paged<A, Q> {
   readonly query: Q;
@@ -66,7 +72,7 @@ export interface Paged<A, Q> {
 }
 
 /** A page request to send; the result goes back through `receive` with the same `seq`. */
-export interface PageFetch<Q> {
+interface PageFetch<Q> {
   readonly seq: number;
   readonly query: PageQuery<Q>;
 }

@@ -2,7 +2,9 @@
  * Typography and shape tokens per style (DESIGN.md "Selectable Styles"; spec 4.2 `StyleTokens`).
  * Style is orthogonal to colour: it never changes a role.
  */
+
 import type { ThemeStyle } from "@kvitbit/api-contract";
+import * as Fn from "effect/Function";
 
 export const TYPE_SCALE_NAMES = [
   "displayLarge",
@@ -155,9 +157,13 @@ export const FONT_FALLBACKS: Readonly<Record<ThemeStyle, Readonly<Record<FontRol
   cozy: { display: SANS, body: SANS, mono: MONO_STACK },
 };
 
-export const familyOf = (tokens: StyleTokens, font: FontRole): string =>
+export const familyOf: {
+  (tokens: StyleTokens, font: FontRole): string;
+  (font: FontRole): (tokens: StyleTokens) => string;
+} = Fn.dual(2, (tokens: StyleTokens, font: FontRole): string =>
   font === "display"
     ? tokens.font.display.family
     : font === "body"
       ? tokens.font.body.family
-      : tokens.font.mono.family;
+      : tokens.font.mono.family,
+);

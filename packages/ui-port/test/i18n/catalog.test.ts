@@ -1,6 +1,4 @@
 import { describe, expect, test } from "bun:test";
-import { readdirSync, readFileSync } from "node:fs";
-import { join } from "node:path";
 import { ThemeWarning, UnauthorizedReason } from "@kvitbit/api-contract";
 import {
   ConflictReason,
@@ -28,41 +26,57 @@ import {
   UnavailableDependency,
   VatTreatment,
 } from "@kvitbit/domain/contract";
+import * as Arr from "effect/Array";
+import * as Fn from "effect/Function";
+import * as Order from "effect/Order";
+import * as Rec from "effect/Record";
+import * as Str from "effect/String";
 import { cs, en, enSections, isMessageKey, MESSAGE_KEYS, UI_ISSUE_CODES } from "../../src/i18n";
 import type { AnyMessage } from "../../src/i18n/types";
 
+const REMAINING_BRACE = /[{}]/;
+const PLACEHOLDER = /\{([A-Za-z][A-Za-z0-9_]*)\}/g;
+const DOTTED_KEY = /^[a-z][A-Za-z0-9_]*(\.[A-Za-z0-9_]+)+$/;
+
 const forms = (m: AnyMessage): ReadonlyArray<string> =>
-  typeof m === "string" ? [m] : Object.values(m).filter((v): v is string => v !== undefined);
+  typeof m === "string"
+    ? [m]
+    : Arr.filter(Rec.values<string, string | undefined>(m), (v): v is string => v !== undefined);
 
 const placeholders = (m: AnyMessage): ReadonlyArray<string> =>
   [
     ...new Set(
-      forms(m).flatMap((f) =>
-        [...f.matchAll(/\{([A-Za-z][A-Za-z0-9_]*)\}/g)].map((x) => x[1] ?? ""),
-      ),
+      Arr.flatMap(forms(m), (f) => Arr.map([...Str.matchAll(PLACEHOLDER)(f)], (x) => x[1] ?? "")),
     ),
-  ].sort();
+  ].sort(Order.String);
 
 const csRecord: Readonly<Record<string, AnyMessage>> = cs;
 const enRecord: Readonly<Record<string, AnyMessage>> = en;
 
 describe("catalog parity", () => {
   test("cs and en have exactly the same keys", () => {
-    const enKeys = Object.keys(en);
-    const csKeys = Object.keys(cs);
-    expect(csKeys.filter((k) => !(k in en))).toEqual([]);
-    expect(enKeys.filter((k) => !(k in cs))).toEqual([]);
+    const enKeys = Rec.keys(en);
+    const csKeys = Rec.keys(cs);
+    expect(Arr.filter(csKeys, (k) => !(k in en))).toEqual([]);
+    expect(Arr.filter(enKeys, (k) => !(k in cs))).toEqual([]);
     expect(enKeys.length).toBeGreaterThan(900);
   });
 
   test("no key is defined in two sections (spread would hide it)", () => {
-    const total = Object.values(enSections).reduce((n, s) => n + Object.keys(s).length, 0);
+    const total = Arr.reduce(
+      Rec.values(enSections),
+      0,
+      (n, s) => n + Rec.keys<string, AnyMessage>(s).length,
+    );
     expect(total).toBe(MESSAGE_KEYS.length);
   });
 
   test("every key has identical placeholders in cs and en", () => {
-    const mismatches = MESSAGE_KEYS.filter(
-      (k) => placeholders(enRecord[k] ?? "").join() !== placeholders(csRecord[k] ?? "").join(),
+    const mismatches = Arr.filter(
+      MESSAGE_KEYS,
+      (k) =>
+        Arr.join(placeholders(enRecord[k] ?? ""), ",") !==
+        Arr.join(placeholders(csRecord[k] ?? ""), ","),
     );
     expect(mismatches).toEqual([]);
   });
@@ -71,20 +85,23 @@ describe("catalog parity", () => {
     for (const key of MESSAGE_KEYS) {
       const e = enRecord[key];
       const c = csRecord[key];
-      if (typeof e === "string") {
-        expect(typeof c).toBe("string");
-        continue;
-      }
-      expect(Object.keys(e ?? {}).sort()).toEqual(["one", "other"]);
-      expect(Object.keys(c ?? {}).sort()).toEqual(["few", "many", "one", "other"]);
+      expect(typeof c).toBe(typeof e);
+      if (typeof e === "string") continue;
+      expect(Rec.keys<string, string | undefined>(e ?? {}).sort(Order.String)).toEqual([
+        "one",
+        "other",
+      ]);
+      expect(
+        Rec.keys<string, string | undefined>(typeof c === "object" ? c : {}).sort(Order.String),
+      ).toEqual(["few", "many", "one", "other"]);
       for (const f of [...forms(e ?? ""), ...forms(c ?? "")]) expect(f).toContain("{count}");
     }
   });
 
   test("braces only appear as well-formed placeholders (types and runtime parse the same)", () => {
-    const stray = MESSAGE_KEYS.filter((k) =>
-      [...forms(enRecord[k] ?? ""), ...forms(csRecord[k] ?? "")].some((f) =>
-        /[{}]/.test(f.replace(/\{[A-Za-z][A-Za-z0-9_]*\}/g, "")),
+    const stray = Arr.filter(MESSAGE_KEYS, (k) =>
+      Arr.some([...forms(enRecord[k] ?? ""), ...forms(csRecord[k] ?? "")], (f) =>
+        REMAINING_BRACE.test(Str.replace(PLACEHOLDER, "")(f)),
       ),
     );
     expect(stray).toEqual([]);
@@ -92,60 +109,62 @@ describe("catalog parity", () => {
 
   test("no empty copy and keys are dotted", () => {
     for (const key of MESSAGE_KEYS) {
-      expect(key).toMatch(/^[a-z][A-Za-z0-9_]*(\.[A-Za-z0-9_]+)+$/);
+      expect(key).toMatch(DOTTED_KEY);
       for (const f of [...forms(enRecord[key] ?? ""), ...forms(csRecord[key] ?? "")]) {
-        expect(f.trim().length).toBeGreaterThan(0);
+        expect(Str.trim(f).length).toBeGreaterThan(0);
       }
     }
   });
 
   test("Czech copy is actually Czech: diacritics present across the catalog", () => {
-    const text = Object.values(csRecord).flatMap(forms).join(" ");
+    const text = Arr.join(Arr.flatMap(Rec.values(csRecord), forms), " ");
+    // biome-ignore lint/security/noSecrets: The literal is public fixture data.
     for (const ch of "áčďéěíňóřšťúůýž") expect(text).toContain(ch);
   });
 });
 
 /** Issue codes the api-contract package emits literally (`code: "x.y"`), read from its source. */
-const apiContractIssueCodes = (): ReadonlyArray<string> => {
-  const root = join(import.meta.dir, "../../../api-contract/src");
-  const files = readdirSync(root, { recursive: true, encoding: "utf8" }).filter((f) =>
-    f.endsWith(".ts"),
-  );
-  return files.flatMap((f) =>
-    [...readFileSync(join(root, f), "utf8").matchAll(/code: "([a-z_]+\.[a-z_]+)"/g)].map(
-      (m) => m[1] ?? "",
-    ),
+const ISSUE_CODE_LITERAL = /code: "([a-z_]+\.[a-z_]+)"/g;
+const apiContractIssueCodes = (): Promise<ReadonlyArray<string>> => {
+  const root = new URL("../../../api-contract/src/", import.meta.url);
+  const files = [...new Bun.Glob("**/*.ts").scanSync({ cwd: root.pathname })];
+  return Promise.all(Arr.map(files, (file) => Bun.file(new URL(file, root)).text())).then(
+    (sources) =>
+      Arr.flatMap(sources, (source) =>
+        Arr.map([...Str.matchAll(ISSUE_CODE_LITERAL)(source)], (match) => match[1] ?? ""),
+      ),
   );
 };
 
 describe("issue and error coverage", () => {
   test("every domain IssueCode has issue.<code>", () => {
-    const missing = IssueCode.literals.filter((c) => !isMessageKey(`issue.${c}`));
+    const missing = Arr.filter(IssueCode.literals, (c) => !isMessageKey(`issue.${c}`));
     expect(IssueCode.literals.length).toBeGreaterThan(30);
     expect(missing).toEqual([]);
   });
 
-  test("every api-contract issue code (ThemeWarning, literal codes) has issue.<code>", () => {
-    const codes = [...ThemeWarning.literals, ...apiContractIssueCodes()];
+  test("every api-contract issue code (ThemeWarning, literal codes) has issue.<code>", async () => {
+    const codes = [...ThemeWarning.literals, ...(await apiContractIssueCodes())];
     expect(codes).toContain("request.malformed");
-    expect(codes.filter((c) => !isMessageKey(`issue.${c}`))).toEqual([]);
+    expect(Arr.filter(codes, (c) => !isMessageKey(`issue.${c}`))).toEqual([]);
   });
 
   test("every UI-only issue code has issue.<code> and every issue.* key is a known code", () => {
-    expect(UI_ISSUE_CODES.filter((c) => !isMessageKey(`issue.${c}`))).toEqual([]);
+    expect(Arr.filter(UI_ISSUE_CODES, (c) => !isMessageKey(`issue.${c}`))).toEqual([]);
     const known = new Set<string>([...IssueCode.literals, ...UI_ISSUE_CODES]);
-    const orphans = MESSAGE_KEYS.filter((k) => k.startsWith("issue.")).filter(
-      (k) => !known.has(k.slice("issue.".length)),
+    const orphans = Arr.filter(
+      Arr.filter(MESSAGE_KEYS, (k) => Fn.pipe(k, Str.startsWith("issue."))),
+      (k) => !known.has(Fn.pipe(k, Str.slice("issue.".length))),
     );
     expect(orphans).toEqual([]);
   });
 
   test("error copy exists for every edge and core error variant", () => {
     const keys = [
-      ...UnauthorizedReason.literals.map((r) => `error.unauthorized.${r}`),
-      ...ConflictReason.literals.map((r) => `error.conflict.${r}`),
-      ...UnavailableDependency.literals.map((d) => `error.unavailable.${d}`),
-      ...EntityKind.literals.map((e) => `enum.entity.${e}`),
+      ...Arr.map(UnauthorizedReason.literals, (r) => `error.unauthorized.${r}`),
+      ...Arr.map(ConflictReason.literals, (r) => `error.conflict.${r}`),
+      ...Arr.map(UnavailableDependency.literals, (d) => `error.unavailable.${d}`),
+      ...Arr.map(EntityKind.literals, (e) => `enum.entity.${e}`),
       "error.invalidBotProof",
       "error.originRejected",
       "error.preconditionFailed",
@@ -161,7 +180,7 @@ describe("issue and error coverage", () => {
       "error.cancelled",
       "error.unknown",
     ];
-    expect(keys.filter((k) => !isMessageKey(k))).toEqual([]);
+    expect(Arr.filter(keys, (k) => !isMessageKey(k))).toEqual([]);
   });
 });
 
@@ -193,7 +212,7 @@ describe("enum labels follow the domain unions", () => {
   ];
   for (const [name, values] of unions) {
     test(`enum.${name}.* covers every value`, () => {
-      expect(values.filter((v) => !isMessageKey(`enum.${name}.${v}`))).toEqual([]);
+      expect(Arr.filter(values, (v) => !isMessageKey(`enum.${name}.${v}`))).toEqual([]);
     });
   }
 

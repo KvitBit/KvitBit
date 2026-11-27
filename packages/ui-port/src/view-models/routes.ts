@@ -6,6 +6,7 @@
  * The spec leaves the list-query, report, settings and dialog vocabularies unnamed; they are
  * defined here from screens 09-21 and can move to `@kvitbit/api-contract` unchanged.
  */
+
 import {
   AttachmentId,
   ContactId,
@@ -20,7 +21,15 @@ import {
   TemplateId,
   WorkspaceSlug,
 } from "@kvitbit/domain/contract";
-import { Option, Schema } from "effect";
+import * as Arr from "effect/Array";
+import * as Fn from "effect/Function";
+import * as Option from "effect/Option";
+import * as Rec from "effect/Record";
+import * as Schema from "effect/Schema";
+import * as Str from "effect/String";
+
+const INTEGER_PARAM = /^-?\d+$/;
+const URL_AUTHORITY_END = /[/?#]|$/;
 
 // --- Vocabularies --------------------------------------------------------------------------------
 
@@ -37,18 +46,16 @@ export const DocumentListQuery = Schema.Struct({
 });
 export type DocumentListQuery = typeof DocumentListQuery.Type;
 
-export const ContactListQuery = Schema.Struct({
+const ContactListQuery = Schema.Struct({
   text: Schema.optionalKey(Schema.String),
   role: Schema.optionalKey(Schema.Literals(["customer", "supplier"])),
   archived: Schema.optionalKey(Schema.Boolean),
 });
-export type ContactListQuery = typeof ContactListQuery.Type;
 
-export const ExpenseListQuery = Schema.Struct({
+const ExpenseListQuery = Schema.Struct({
   text: Schema.optionalKey(Schema.String),
   incomplete: Schema.optionalKey(Schema.Boolean),
 });
-export type ExpenseListQuery = typeof ExpenseListQuery.Type;
 
 export const ReportTab = ReportKind;
 export type ReportTab = typeof ReportTab.Type;
@@ -79,11 +86,11 @@ export type SettingsSection = typeof SettingsSection.Type;
 export const DocumentDialog = Schema.Literals(["issue", "payment", "send", "cancel", "correct"]);
 export type DocumentDialog = typeof DocumentDialog.Type;
 
-export const ContactRef = Schema.TaggedStruct("Contact", { id: ContactId });
-export const TemplateRef = Schema.TaggedStruct("Template", { id: TemplateId });
-export const DuplicateRef = Schema.TaggedStruct("Duplicate", { id: DocumentId });
-export const EditorSource = Schema.Union([ContactRef, TemplateRef, DuplicateRef]);
-export type EditorSource = typeof EditorSource.Type;
+const ContactRef = Schema.TaggedStruct("Contact", { id: ContactId });
+const TemplateRef = Schema.TaggedStruct("Template", { id: TemplateId });
+const DuplicateRef = Schema.TaggedStruct("Duplicate", { id: DocumentId });
+const EditorSource = Schema.Union([ContactRef, TemplateRef, DuplicateRef]);
+type EditorSource = typeof EditorSource.Type;
 
 // --- Route ---------------------------------------------------------------------------------------
 
@@ -166,9 +173,11 @@ export type RouteBase = "/" | "/app/";
 
 /** camelCase or snake_case literal -> kebab-case path segment. */
 const kebab = (value: string): string =>
-  value.replace(/_/g, "-").replace(/[A-Z]/g, (c) => `-${c.toLowerCase()}`);
+  // Native replace supports callback replacements for each matched capital.
+  // @effect-diagnostics-next-line preferEffectString:off
+  Fn.pipe(value, Str.replace(/_/g, "-")).replace(/[A-Z]/g, (c) => `-${Str.toLowerCase(c)}`);
 const unkebab = (segment: string, values: ReadonlyArray<string>): string | undefined =>
-  values.find((v) => kebab(v) === segment);
+  Option.getOrUndefined(Arr.findFirst(values, (v) => kebab(v) === segment));
 
 const SETTINGS_SECTIONS = SettingsSection.literals;
 const ERROR_KINDS = ["not_found", "no_access", "server", "offline"] as const;
@@ -179,15 +188,15 @@ type Query = ReadonlyArray<readonly [string, string | undefined]>;
 const enc = (value: string): string => encodeURIComponent(value);
 const dec = (value: string): string | undefined => {
   try {
-    return decodeURIComponent(value.replace(/\+/g, " "));
+    return decodeURIComponent(Fn.pipe(value, Str.replace(/\+/g, " ")));
   } catch {
     return undefined;
   }
 };
 
 const withQuery = (path: string, query: Query): string => {
-  const parts = query.flatMap(([k, v]) => (v === undefined ? [] : [`${k}=${enc(v)}`]));
-  return parts.length === 0 ? path : `${path}?${parts.join("&")}`;
+  const parts = Arr.flatMap(query, ([k, v]) => (v === undefined ? [] : [`${k}=${enc(v)}`]));
+  return parts.length === 0 ? path : `${path}?${Arr.join(parts, "&")}`;
 };
 
 const bool = (value: boolean | undefined): string | undefined =>
@@ -304,11 +313,11 @@ const pathOf = (r: Route): string => {
 const parseQuery = (search: string): Map<string, string> | undefined => {
   const out = new Map<string, string>();
   if (search === "") return out;
-  for (const part of search.split("&")) {
+  for (const part of Str.split(search, "&")) {
     if (part === "") continue;
-    const eq = part.indexOf("=");
-    const key = dec(eq < 0 ? part : part.slice(0, eq));
-    const value = dec(eq < 0 ? "" : part.slice(eq + 1));
+    const eq = Option.getOrElse(Fn.pipe(part, Str.indexOf("=")), () => -1);
+    const key = dec(eq < 0 ? part : Fn.pipe(part, Str.slice(0, eq)));
+    const value = dec(eq < 0 ? "" : Fn.pipe(part, Str.slice(eq + 1)));
     if (key === undefined || value === undefined) return undefined;
     out.set(key, value);
   }
@@ -329,11 +338,11 @@ const parseBool = (value: string | undefined): boolean | string | undefined =>
   value === "true" ? true : value === "false" ? false : value;
 
 const parseIntParam = (value: string | undefined): number | string | undefined =>
-  value !== undefined && /^-?\d+$/.test(value) ? Number(value) : value;
+  value !== undefined && INTEGER_PARAM.test(value) ? Number(value) : value;
 
 const withDefined = (record: Record<string, unknown>): Record<string, unknown> => {
   const out: Record<string, unknown> = {};
-  for (const [k, v] of Object.entries(record)) if (v !== undefined) out[k] = v;
+  for (const [k, v] of Rec.toEntries(record)) if (v !== undefined) out[k] = v;
   return out;
 };
 
@@ -488,21 +497,21 @@ const DEEP_LINK_TAGS: ReadonlySet<RouteTag> = new Set<RouteTag>([
 ]);
 
 const fromPath = (path: string, base: RouteBase): Option.Option<Route> => {
-  const hash = path.indexOf("#");
-  const noHash = hash < 0 ? path : path.slice(0, hash);
-  const qi = noHash.indexOf("?");
-  const pathname = qi < 0 ? noHash : noHash.slice(0, qi);
-  const search = qi < 0 ? "" : noHash.slice(qi + 1);
+  const hash = Option.getOrElse(Fn.pipe(path, Str.indexOf("#")), () => -1);
+  const noHash = hash < 0 ? path : Fn.pipe(path, Str.slice(0, hash));
+  const qi = Option.getOrElse(Fn.pipe(noHash, Str.indexOf("?")), () => -1);
+  const pathname = qi < 0 ? noHash : Fn.pipe(noHash, Str.slice(0, qi));
+  const search = qi < 0 ? "" : Fn.pipe(noHash, Str.slice(qi + 1));
   let rel: string;
   if (base === "/") {
-    if (!pathname.startsWith("/")) return Option.none();
+    if (!Fn.pipe(pathname, Str.startsWith("/"))) return Option.none();
     rel = pathname;
-  } else if (pathname === "/app" || pathname.startsWith("/app/")) {
-    rel = pathname.slice("/app".length) || "/";
+  } else if (pathname === "/app" || Fn.pipe(pathname, Str.startsWith("/app/"))) {
+    rel = Fn.pipe(pathname, Str.slice("/app".length)) || "/";
   } else {
     return Option.none();
   }
-  const raw = rel.split("/").filter((s) => s !== "");
+  const raw = Arr.filter(Str.split(rel, "/"), (s) => s !== "");
   const segments: Array<string> = [];
   for (const s of raw) {
     const decoded = dec(s);
@@ -528,16 +537,19 @@ export const Routes = {
    * Anything else opens the app without a target (None).
    */
   fromDeepLink: (url: string): Option.Option<Route> => {
-    const scheme = url.indexOf("://");
+    const scheme = Option.getOrElse(Fn.pipe(url, Str.indexOf("://")), () => -1);
     if (scheme < 0) return Option.none();
-    const protocol = url.slice(0, scheme).toLowerCase();
-    const afterScheme = url.slice(scheme + 3);
+    const protocol = Str.toLowerCase(Fn.pipe(url, Str.slice(0, scheme)));
+    const afterScheme = Fn.pipe(url, Str.slice(scheme + 3));
     // https://host/path keeps the path; kvitbit://path treats the host part as the first segment.
     const path =
       protocol === "http" || protocol === "https"
-        ? afterScheme.slice(afterScheme.search(/[/?#]|$/))
+        ? Fn.pipe(
+            afterScheme,
+            Str.slice(Option.getOrElse(Str.search(afterScheme, URL_AUTHORITY_END), () => -1)),
+          )
         : `/${afterScheme}`;
-    const normalized = path === "" || path.startsWith("?") ? `/${path}` : path;
+    const normalized = path === "" || Fn.pipe(path, Str.startsWith("?")) ? `/${path}` : path;
     const route = Option.orElse(fromPath(normalized, "/"), () => fromPath(normalized, "/app/"));
     return Option.filter(route, (r) => DEEP_LINK_TAGS.has(r._tag));
   },
@@ -559,7 +571,7 @@ export type NavSection =
   | "more";
 
 /** The section a route belongs to; None outside the Workspace scope. */
-export const sectionOf = (r: Route): Option.Option<NavSection> => {
+const sectionOf = (r: Route): Option.Option<NavSection> => {
   switch (r._tag) {
     case "Dashboard":
       return Option.some("dashboard");
@@ -617,62 +629,76 @@ export const navLabelKey = (section: NavSection): `shell.nav.${NavSection}` =>
   `shell.nav.${section}`;
 
 /** The highlighted navigation item: sections without their own mobile tab live under More. */
-export const activeSection = (r: Route, platform: "web" | "mobile"): Option.Option<NavSection> =>
-  Option.map(sectionOf(r), (section) => {
-    if (platform === "mobile") return MOBILE_NAV.includes(section) ? section : "more";
-    return section === "more" ? "settings" : section;
-  });
+export const activeSection: {
+  (platform: "web" | "mobile"): (r: Route) => Option.Option<NavSection>;
+  (r: Route, platform: "web" | "mobile"): Option.Option<NavSection>;
+} = Fn.dual(
+  2,
+  (r: Route, platform: "web" | "mobile"): Option.Option<NavSection> =>
+    Option.map(sectionOf(r), (section) => {
+      if (platform === "mobile") return MOBILE_NAV.includes(section) ? section : "more";
+      return section === "more" ? "settings" : section;
+    }),
+);
 
 const DEFAULT_SETTINGS: SettingsSection = "issuingEntity";
 
 /** The entry route of a section in a Workspace. `current` keeps report and settings context. */
-export const sectionRoute = (
-  section: NavSection,
-  slug: WorkspaceSlug,
-  current?: Route,
-): Option.Option<WorkspaceRoute> => {
-  switch (section) {
-    case "dashboard":
-      return Option.some({ _tag: "Dashboard", ws: slug });
-    case "documents":
-      return Option.some({ _tag: "Documents", ws: slug, query: {} });
-    case "templates":
-      return Option.some({ _tag: "Templates", ws: slug });
-    case "expenses":
-      return Option.some({ _tag: "Expenses", ws: slug, query: {} });
-    case "contacts":
-      return Option.some({ _tag: "Contacts", ws: slug, query: {} });
-    case "priceList":
-      return Option.some({ _tag: "PriceList", ws: slug });
-    case "reports":
-      return current?._tag === "Reports" ? Option.some({ ...current, ws: slug }) : Option.none(); // a period is required; callers pick one
-    case "settings":
-      return Option.some({
-        _tag: "Settings",
-        ws: slug,
-        section: current?._tag === "Settings" ? current.section : DEFAULT_SETTINGS,
-      });
-    case "more":
-      return Option.some({ _tag: "More", ws: slug });
-  }
-};
+export const sectionRoute: {
+  (slug: WorkspaceSlug, current?: Route): (section: NavSection) => Option.Option<WorkspaceRoute>;
+  (section: NavSection, slug: WorkspaceSlug, current?: Route): Option.Option<WorkspaceRoute>;
+} = Fn.dual(
+  (args) => typeof args[1] === "string",
+  (section: NavSection, slug: WorkspaceSlug, current?: Route): Option.Option<WorkspaceRoute> => {
+    switch (section) {
+      case "dashboard":
+        return Option.some({ _tag: "Dashboard", ws: slug });
+      case "documents":
+        return Option.some({ _tag: "Documents", ws: slug, query: {} });
+      case "templates":
+        return Option.some({ _tag: "Templates", ws: slug });
+      case "expenses":
+        return Option.some({ _tag: "Expenses", ws: slug, query: {} });
+      case "contacts":
+        return Option.some({ _tag: "Contacts", ws: slug, query: {} });
+      case "priceList":
+        return Option.some({ _tag: "PriceList", ws: slug });
+      case "reports":
+        return current?._tag === "Reports" ? Option.some({ ...current, ws: slug }) : Option.none(); // a period is required; callers pick one
+      case "settings":
+        return Option.some({
+          _tag: "Settings",
+          ws: slug,
+          section: current?._tag === "Settings" ? current.section : DEFAULT_SETTINGS,
+        });
+      case "more":
+        return Option.some({ _tag: "More", ws: slug });
+    }
+  },
+);
 
 /**
  * Workspace switch (screen 06): the same section in the new Workspace when it exists (Documents
  * stays Documents, ids and filters are dropped), else its Dashboard. Non-Workspace routes go to
  * the new Workspace's Dashboard.
  */
-export const switchWorkspace = (r: Route, slug: WorkspaceSlug): WorkspaceRoute =>
-  Option.getOrElse(
-    Option.flatMap(sectionOf(r), (section) => sectionRoute(section, slug, r)),
-    (): WorkspaceRoute => ({ _tag: "Dashboard", ws: slug }),
-  );
+export const switchWorkspace: {
+  (slug: WorkspaceSlug): (r: Route) => WorkspaceRoute;
+  (r: Route, slug: WorkspaceSlug): WorkspaceRoute;
+} = Fn.dual(
+  2,
+  (r: Route, slug: WorkspaceSlug): WorkspaceRoute =>
+    Option.getOrElse(
+      Option.flatMap(sectionOf(r), (section) => sectionRoute(section, slug, r)),
+      (): WorkspaceRoute => ({ _tag: "Dashboard", ws: slug }),
+    ),
+);
 
 // --- Keyboard shortcuts (web) ---------------------------------------------------------------------
 
 export type ShortcutAction = "openWorkspaceSwitcher";
 
-export interface Shortcut {
+interface Shortcut {
   /** Ctrl on Windows/Linux, Cmd on macOS. */
   readonly mod: boolean;
   readonly shift: boolean;
@@ -681,7 +707,7 @@ export interface Shortcut {
 }
 
 /** Spec 8.6 and user-flows 2.3 name one shortcut: Ctrl/Cmd+K opens the Workspace switcher. */
-export const SHORTCUTS: ReadonlyArray<Shortcut> = [
+const SHORTCUTS: ReadonlyArray<Shortcut> = [
   { mod: true, shift: false, key: "k", action: "openWorkspaceSwitcher" },
 ];
 
@@ -694,14 +720,20 @@ export interface KeyChord {
 }
 
 /** Matches a key event against `SHORTCUTS`; `mac` picks Cmd instead of Ctrl as the modifier. */
-export const matchShortcut = (chord: KeyChord, mac: boolean): Option.Option<ShortcutAction> => {
+export const matchShortcut: {
+  (mac: boolean): (chord: KeyChord) => Option.Option<ShortcutAction>;
+  (chord: KeyChord, mac: boolean): Option.Option<ShortcutAction>;
+} = Fn.dual(2, (chord: KeyChord, mac: boolean): Option.Option<ShortcutAction> => {
   const mod = mac ? chord.metaKey && !chord.ctrlKey : chord.ctrlKey && !chord.metaKey;
-  const found = SHORTCUTS.find(
-    (s) =>
-      s.key === chord.key.toLowerCase() &&
-      s.mod === mod &&
-      s.shift === chord.shiftKey &&
-      !chord.altKey,
+  const found = Option.getOrUndefined(
+    Arr.findFirst(
+      SHORTCUTS,
+      (s) =>
+        s.key === Str.toLowerCase(chord.key) &&
+        s.mod === mod &&
+        s.shift === chord.shiftKey &&
+        !chord.altKey,
+    ),
   );
   return Option.fromNullishOr(found?.action);
-};
+});
