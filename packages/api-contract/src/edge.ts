@@ -13,7 +13,7 @@ import {
   UserId,
   WorkspaceId,
 } from "@kvitbit/domain/contract";
-import { Schema } from "effect";
+import * as Schema from "effect/Schema";
 import {
   AccessMode,
   AccessPreset,

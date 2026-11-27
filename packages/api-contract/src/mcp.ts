@@ -10,7 +10,6 @@
 
 import {
   type Action,
-  type AttachmentId,
   AuditEntry,
   ContactId,
   ContactInput,
@@ -47,7 +46,12 @@ import {
   TemplateView,
   WorkspaceView,
 } from "@kvitbit/domain/contract";
-import { Schema, SchemaTransformation } from "effect";
+import * as Arr from "effect/Array";
+import * as Fn from "effect/Function";
+import * as Option from "effect/Option";
+import * as Rec from "effect/Record";
+import * as Schema from "effect/Schema";
+import * as SchemaTransformation from "effect/SchemaTransformation";
 import { CorrectionLines, DeliveryQueued, SendInput } from "./groups/documents";
 import {
   ContactRole,
@@ -68,13 +72,13 @@ export const MCP_PATH = "/mcp";
 
 // --- Shared argument pieces --------------------------------------------------------------------
 
-export const Revision = Schema.Int.annotate({
+const Revision = Schema.Int.annotate({
   description:
     "The document revision you last read. A stale value fails with Conflict revision_changed.",
 });
 
 /** Optional retry key on single-call writes; becomes `mcp:<grantId>:<idempotencyKey>`. */
-export const IdempotencyArg = Schema.optional(IdempotencyKey);
+const IdempotencyArg = Schema.optional(IdempotencyKey);
 
 /** `mcpc_` plus an opaque base64url secret. Only its hash is stored. */
 export const ConfirmationToken = Schema.String.pipe(
@@ -84,26 +88,24 @@ export const ConfirmationToken = Schema.String.pipe(
 export type ConfirmationToken = typeof ConfirmationToken.Type;
 
 /** Two-step tools: absent on the preview call, both present on the confirm call. */
-export const ConfirmArgs = {
+const ConfirmArgs = {
   confirm: Schema.optional(Schema.Literal(true)),
   confirmationToken: Schema.optional(ConfirmationToken),
 };
 
 /** Args left out of the confirmation `args_hash` (section 6.6 step 3). */
-export const CONFIRMATION_HASH_EXCLUDED_ARGS = [
+const CONFIRMATION_HASH_EXCLUDED_ARGS: ReadonlyArray<string> = [
   "confirm",
   "confirmationToken",
   "idempotencyKey",
-] as const;
+];
 
 /** The arguments a confirmation token is bound to. */
 export const confirmationBoundArgs = (
   args: Readonly<Record<string, unknown>>,
 ): Readonly<Record<string, unknown>> =>
-  Object.fromEntries(
-    Object.entries(args).filter(
-      ([key]) => !(CONFIRMATION_HASH_EXCLUDED_ARGS as ReadonlyArray<string>).includes(key),
-    ),
+  Rec.fromEntries(
+    Arr.filter(Rec.toEntries(args), ([key]) => !CONFIRMATION_HASH_EXCLUDED_ARGS.includes(key)),
   );
 
 /** Which call of a two-step tool this is; `Invalid{mcp.confirmation_required}` when mixed. */
@@ -115,15 +117,21 @@ export const confirmStep = (args: {
   const hasConfirm = args.confirm === true;
   const hasToken = args.confirmationToken !== undefined;
   if (hasConfirm && hasToken) return "confirm";
-  if (!hasConfirm && !hasToken) return "preview";
+  if (!(hasConfirm || hasToken)) return "preview";
   return "malformed";
 };
 
 /** Retry keys (section 6.4). MCP never derives them from JSON-RPC ids. */
 export const mcpConfirmRequestKey = (confirmationId: string): RequestKey =>
   RequestKey.make(`mcp-confirm:${confirmationId}`);
-export const mcpRequestKey = (grantId: string, idempotencyKey: IdempotencyKey): RequestKey =>
-  RequestKey.make(`mcp:${grantId}:${idempotencyKey}`);
+export const mcpRequestKey: {
+  (idempotencyKey: IdempotencyKey): (grantId: string) => RequestKey;
+  (grantId: string, idempotencyKey: IdempotencyKey): RequestKey;
+} = Fn.dual(
+  2,
+  (grantId: string, idempotencyKey: IdempotencyKey): RequestKey =>
+    RequestKey.make(`mcp:${grantId}:${idempotencyKey}`),
+);
 
 // --- Two-step results --------------------------------------------------------------------------
 
@@ -170,8 +178,7 @@ export type ConfirmationRequired = typeof ConfirmationRequired.Type;
 export const CONFIRMATION_TTL_SECONDS = 10 * 60;
 
 /** Second call of a two-step tool: core ran with `requestKey = mcp-confirm:<id>`. */
-export const Confirmed = <S extends Schema.Top>(result: S) =>
-  Schema.TaggedStruct("Confirmed", { result });
+const Confirmed = <S extends Schema.Top>(result: S) => Schema.TaggedStruct("Confirmed", { result });
 
 export const twoStepOutput = <S extends Schema.Top>(result: S) =>
   Schema.Union([ConfirmationRequired, Confirmed(result)]);
@@ -217,7 +224,7 @@ const CLOSED_ARGS = new WeakMap<Schema.Top, Schema.Top>();
  * together then.
  */
 const ListExpensesFields = Schema.Struct(ExpenseListQuery);
-const LIST_EXPENSES_KEYS: ReadonlySet<string> = new Set(Object.keys(ExpenseListQuery));
+const LIST_EXPENSES_KEYS: ReadonlySet<string> = new Set(Rec.keys(ExpenseListQuery));
 /** Keeps unmodeled keys (typed `unknown`) so the check below can see and reject them. */
 const ListExpensesWire = Schema.StructWithRest(ListExpensesFields, [
   Schema.Record(Schema.String, Schema.Unknown),
@@ -225,10 +232,10 @@ const ListExpensesWire = Schema.StructWithRest(ListExpensesFields, [
   Schema.check(
     Schema.makeFilter(
       (args) => {
-        const unmodeled = Object.keys(args).filter((key) => !LIST_EXPENSES_KEYS.has(key));
-        return unmodeled.length === 0 || `unsupported argument: ${unmodeled.join(", ")}`;
+        const unmodeled = Arr.filter(Rec.keys(args), (key) => !LIST_EXPENSES_KEYS.has(key));
+        return unmodeled.length === 0 || `unsupported argument: ${Arr.join(unmodeled, ", ")}`;
       },
-      { expected: `only ${[...LIST_EXPENSES_KEYS].join(", ")}` },
+      { expected: `only ${Arr.join([...LIST_EXPENSES_KEYS], ", ")}` },
     ),
   ),
 );
@@ -335,7 +342,7 @@ export const SettleProformaArgs = Schema.Struct({
   method: Schema.optional(PaymentMethod),
   idempotencyKey: IdempotencyArg,
 });
-export const LockDocumentArgs = DocumentIdArgs;
+export const LockDocumentArgs = Schema.Struct(DocumentArg);
 export const CreateFromTemplateArgs = Schema.Struct({
   templateId: TemplateId,
   as: Schema.optional(Schema.Literals(["draft", "issued"])),
@@ -359,7 +366,7 @@ export const SendDocumentArgs = Schema.Struct({
 });
 export const SendReminderArgs = Schema.Struct({
   ...DocumentArg,
-  to: Schema.optional(Schema.Array(Schema.String)),
+  to: Schema.String.pipe(Schema.Array, Schema.optional),
   ...ConfirmArgs,
 });
 export const CreateFinalInvoiceArgs = Schema.Struct({
@@ -377,37 +384,37 @@ export const CreateCreditNoteArgs = Schema.Struct({
 
 // --- Tool results ------------------------------------------------------------------------------
 
-export const GetWorkspaceResult = Schema.Struct({
+const GetWorkspaceResult = Schema.Struct({
   workspace: WorkspaceView,
   series: Schema.Array(NumberingSeriesView),
 });
 export const DocumentResult = Schema.Struct({ document: DocumentView });
 /** A `resource_link` to `kvitbit://documents/{id}/pdf`; embedded as a blob when under 1 MB. */
-export const DocumentPdfResult = Schema.Struct({
+const DocumentPdfResult = Schema.Struct({
   uri: Schema.String,
   mimeType: Schema.Literal("application/pdf"),
   filename: Schema.String,
   embedded: Schema.Boolean,
 });
-export const ShareLinkResult = Schema.Struct({
+const ShareLinkResult = Schema.Struct({
   documentId: DocumentId,
   share: DocumentView.fields.share,
 });
-export const ReportResult = Schema.Struct({
+const ReportResult = Schema.Struct({
   report: ReportKind,
   from: IsoDate,
   to: IsoDate,
   data: ReportView,
 });
-export const ContactResult = Schema.Struct({ contact: ContactView });
-export const ExpenseResult = Schema.Struct({ expense: ExpenseView });
+const ContactResult = Schema.Struct({ contact: ContactView });
+const ExpenseResult = Schema.Struct({ expense: ExpenseView });
 
 // --- Catalog -----------------------------------------------------------------------------------
 
 /** "single" is one call; "two_step" previews then confirms; "two_step_when_issued" only for `as: "issued"`. */
-export type ToolMode = "single" | "two_step" | "two_step_when_issued";
+type ToolMode = "single" | "two_step" | "two_step_when_issued";
 
-export interface ToolAnnotations {
+interface ToolAnnotations {
   readonly readOnlyHint: boolean;
   readonly destructiveHint: boolean;
   readonly idempotentHint: boolean;
@@ -704,26 +711,33 @@ export const MCP_TOOLS = [
 ] as const;
 
 export type McpToolName = (typeof MCP_TOOLS)[number]["name"];
-export const McpToolName = Schema.Literals(MCP_TOOLS.map((t) => t.name));
+export const McpToolName = Schema.Literals(Arr.map(MCP_TOOLS, (t) => t.name));
 
 /**
  * Actions a call actually needs, for the preview's up-front `can` check (section 6.6 step 1):
  * `issue_document` adds `document.send` only with `send`, `create_from_template` adds
  * `document.issue` only for `as: "issued"`.
  */
-export const requiredActions = (
-  name: McpToolName,
-  args: { readonly send?: unknown; readonly as?: "draft" | "issued" },
-): ReadonlyArray<Action> => {
+export const requiredActions: {
+  (args: RequestedActionArgs): (name: McpToolName) => ReadonlyArray<Action>;
+  (name: McpToolName, args: RequestedActionArgs): ReadonlyArray<Action>;
+} = Fn.dual(2, (name: McpToolName, args: RequestedActionArgs): ReadonlyArray<Action> => {
   switch (name) {
     case "issue_document":
       return args.send === undefined ? ["document.issue"] : ["document.issue", "document.send"];
     case "create_from_template":
       return args.as === "issued" ? ["document.draft", "document.issue"] : ["document.draft"];
     default:
-      return MCP_TOOLS.find((t) => t.name === name)?.actions ?? [];
+      return Arr.findFirst(MCP_TOOLS, (definition) => definition.name === name).pipe(
+        Option.match({ onNone: () => [], onSome: (definition) => definition.actions }),
+      );
   }
-};
+});
+
+interface RequestedActionArgs {
+  readonly send?: unknown;
+  readonly as?: "draft" | "issued";
+}
 
 /**
  * JSON Schema for a tool's `inputSchema` or `outputSchema`. MCP needs `type: "object"` at the
@@ -737,7 +751,7 @@ export const toolJsonSchema = (schema: Schema.Top): Record<string, unknown> => {
       ? Schema.toJsonSchemaDocument(schema)
       : Schema.toJsonSchemaDocument(closed, { onExcessProperty: "error" });
   const root: Record<string, unknown> = { ...document.schema };
-  if (Object.keys(document.definitions).length > 0) root.$defs = document.definitions;
+  if (Rec.keys(document.definitions).length > 0) root.$defs = document.definitions;
   if (root.type === undefined && root.anyOf !== undefined) root.type = "object";
   return root;
 };
@@ -810,5 +824,3 @@ export const MCP_RESOURCE_BLOB_MAX_BYTES = 5 * 1024 * 1024;
 
 export const documentPdfUri = (documentId: DocumentId): string =>
   `kvitbit://documents/${documentId}/pdf`;
-export const attachmentUri = (expenseId: ExpenseId, attachmentId: AttachmentId): string =>
-  `kvitbit://expenses/${expenseId}/attachments/${attachmentId}`;

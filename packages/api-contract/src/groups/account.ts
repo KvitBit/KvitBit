@@ -11,8 +11,10 @@ import {
   WorkspaceSummary,
   WorkspaceView,
 } from "@kvitbit/domain/contract";
-import { Schema } from "effect";
-import { HttpApiEndpoint, HttpApiGroup, OpenApi } from "effect/http-api";
+import * as HttpApiEndpoint from "effect/http-api/HttpApiEndpoint";
+import * as HttpApiGroup from "effect/http-api/HttpApiGroup";
+import * as OpenApi from "effect/http-api/OpenApi";
+import * as Schema from "effect/Schema";
 import { ConsentDecision, ConsentResult, ConsentView } from "../edge";
 import { RateLimited, RevisionedEdgeErrors } from "../edge-errors";
 import { Created, IdempotencyHeaders, IfMatchHeaders, Revisioned } from "../http";
