@@ -1,5 +1,5 @@
 import type { KvitbitSecretBinding, KvitbitStackConfig, KvitbitWorkload } from "./config";
-import { secretResourceName } from "./config";
+import { DEFAULT_POSTHOG_HOST, secretResourceName } from "./config";
 
 export interface PlainEnvVar {
   readonly name: string;
@@ -32,6 +32,14 @@ export const secretBindingsForWorkload = (
 ): ReadonlyArray<KvitbitSecretBinding> =>
   config.secrets.filter((secret) => secret.consumers.includes(workload));
 
+const posthogPlainEnv = (config: KvitbitStackConfig): ReadonlyArray<PlainEnvVar> =>
+  config.posthogKey === undefined
+    ? []
+    : [
+        { name: "KVITBIT_POSTHOG_KEY", value: config.posthogKey },
+        { name: "KVITBIT_POSTHOG_HOST", value: config.posthogHost ?? DEFAULT_POSTHOG_HOST },
+      ];
+
 export const serverPlainEnv = (
   config: KvitbitStackConfig,
   buckets: {
@@ -55,6 +63,7 @@ export const serverPlainEnv = (
     { name: "KVITBIT_SHARE_KEY_VERSION", value: String(config.shareKeyVersion) },
     { name: "KVITBIT_MOBILE_STORAGE_BUCKET", value: buckets.mobileAssetsBucket },
     { name: "KVITBIT_MOBILE_STORAGE_DIR", value: KVITBIT_IMAGE_PATHS.mobileStorageDir },
+    ...posthogPlainEnv(config),
   ];
 
   if (config.appOrigin !== undefined) {
@@ -105,6 +114,7 @@ export const runnerPlainEnv = (
     { name: "KVITBIT_GCS_PROJECT", value: config.projectId },
     { name: "KVITBIT_CHROMIUM_PATH", value: KVITBIT_IMAGE_PATHS.chromiumPath },
     { name: "KVITBIT_SHARE_KEY_VERSION", value: String(config.shareKeyVersion) },
+    ...posthogPlainEnv(config),
   ];
 
   if (config.appOrigin !== undefined) {
