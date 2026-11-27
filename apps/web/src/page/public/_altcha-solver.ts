@@ -1,12 +1,17 @@
 import type { AltchaChallenge } from "@kvitbit/api-contract";
 import {
-  argon2id,
   bytesToHex,
+  createArgon2id,
   hexToBytes,
   pbkdf2Sha256,
   sha256,
   utf8ToBase64,
 } from "./_altcha_kdf";
+
+export type AltchaWorkerMessage =
+  | { readonly _tag: "Ready" }
+  | { readonly _tag: "Solved"; readonly header: string }
+  | { readonly _tag: "Failed"; readonly reason: string };
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
@@ -84,12 +89,36 @@ const yieldToEventLoop = (): Promise<void> =>
     setTimeout(resolve, 0);
   });
 
+const makeArgon2id = async (params: ParsedParameters, signal?: AbortSignal) => {
+  // Keep the Wasm implementation out of the initial auth bundle.
+  let wasm = await import("./_altcha-wasm").catch(() => undefined);
+  let fallback: ReturnType<typeof createArgon2id> | undefined;
+  return async (password: Uint8Array) => {
+    signal?.throwIfAborted();
+    if (wasm !== undefined) {
+      try {
+        return await wasm.deriveArgon2id(password, params.salt, params);
+      } catch {
+        wasm = undefined;
+        signal?.throwIfAborted();
+      }
+    }
+    fallback ??= createArgon2id(params);
+    return fallback(password, params.salt);
+  };
+};
+
 /**
  * Solves an ALTCHA PoW v2 challenge on-device and returns the base64 `X-Altcha` header value.
  * Matches `altcha-lib` for ARGON2ID, PBKDF2/SHA-256, and SHA-256.
  */
-export const solveAltchaChallenge = async (challenge: AltchaChallenge): Promise<string> => {
+export const solveAltchaChallenge = async (
+  challenge: AltchaChallenge,
+  signal?: AbortSignal,
+): Promise<string> => {
   const params = parseParameters(challenge);
+  const deriveArgon2id =
+    params.algorithm === "ARGON2ID" ? await makeArgon2id(params, signal) : undefined;
   const password = new Uint8Array(params.nonce.length + 4);
   password.set(params.nonce, 0);
   const passwordView = new DataView(password.buffer);
@@ -98,18 +127,15 @@ export const solveAltchaChallenge = async (challenge: AltchaChallenge): Promise<
   const started = Date.now();
 
   for (let counter = 0; counter < maxAttempts; counter++) {
+    signal?.throwIfAborted();
     passwordView.setUint32(params.nonce.length, counter, false);
     const derived =
-      params.algorithm === "ARGON2ID"
-        ? argon2id(password, params.salt, {
-            memoryCost: params.memoryCost,
-            cost: params.cost,
-            parallelism: params.parallelism,
-            keyLength: params.keyLength,
-          })
+      deriveArgon2id !== undefined
+        ? await deriveArgon2id(password)
         : params.algorithm === "PBKDF2/SHA-256"
           ? await pbkdf2Sha256(password, params.salt, params.cost, params.keyLength)
           : deriveSha256(params.salt, password, params.cost, params.keyLength);
+    signal?.throwIfAborted();
 
     const derivedKey = bytesToHex(derived);
     if (derivedKey.startsWith(params.keyPrefix)) {

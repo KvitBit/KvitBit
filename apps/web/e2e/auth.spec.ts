@@ -18,6 +18,56 @@ const holdChallenge = async (page: Page, scope: string, status: number) => {
 
 const submitTop = (submit: Locator) => submit.evaluate((node) => node.getBoundingClientRect().top);
 
+const mockChallenge = (page: Page) =>
+  page.route(`${challenge}*`, (route) =>
+    route.fulfill({
+      json: { parameters: { algorithm: "SHA-256", nonce: "00112233", keyPrefix: "0" } },
+    }),
+  );
+
+const mockWorker = (
+  page: Page,
+  mode: "constructor-error" | "load-error" | "message-error" | "silent" | "stuck",
+) =>
+  page.addInitScript((mode) => {
+    let activeWorkers = 0;
+    let startedWorkers = 0;
+    Object.defineProperty(globalThis, "altchaWorkers", {
+      get: () => ({ active: activeWorkers, started: startedWorkers }),
+    });
+    Object.defineProperty(globalThis, "Worker", {
+      value: class {
+        onmessage?: (message: MessageEvent) => void;
+        onerror?: (event: ErrorEvent) => void;
+        onmessageerror?: () => void;
+
+        constructor() {
+          if (mode === "constructor-error") throw new Error("Worker unavailable");
+          activeWorkers++;
+          startedWorkers++;
+        }
+
+        postMessage() {
+          queueMicrotask(() => {
+            if (mode === "silent") return;
+            if (mode === "load-error") {
+              this.onerror?.(new ErrorEvent("error"));
+              return;
+            }
+            this.onmessage?.(new MessageEvent("message", { data: { _tag: "Ready" } }));
+            if (mode === "message-error") this.onmessageerror?.();
+          });
+        }
+
+        terminate() {
+          activeWorkers--;
+        }
+      },
+    });
+  }, mode);
+
+const workerCounts = (page: Page) => page.evaluate(() => Reflect.get(globalThis, "altchaWorkers"));
+
 // Bun also discovers *.spec.ts, so register these tests only under Playwright.
 if (typeof Bun === "undefined") {
   for (const { path, scope } of [
@@ -101,5 +151,76 @@ if (typeof Bun === "undefined") {
     await expect(submit).toBeEnabled();
     await expect(retry).toBeHidden();
     expect(await submitTop(submit)).toBeCloseTo(top, 0);
+  });
+
+  for (const mode of ["constructor-error", "load-error", "message-error", "silent"] as const) {
+    test(`sign-up falls back when the verification worker is ${mode}`, async ({ page }) => {
+      if (mode === "silent") await page.clock.install();
+      await mockWorker(page, mode);
+      await mockChallenge(page);
+      await page.goto("/sign-up");
+
+      if (mode === "silent") {
+        await expect.poll(() => workerCounts(page)).toEqual({ started: 1, active: 1 });
+        await page.clock.fastForward(3_100);
+      }
+      await expect(page.getByTestId("auth-signup-submit")).toBeEnabled();
+      await expect(page.getByRole("status").getByText(/Verified|Ověřeno/)).toBeVisible();
+      expect(await workerCounts(page)).toMatchObject({ active: 0 });
+    });
+  }
+
+  test("sign-in times out a stuck solve, terminates its worker, and allows retry", async ({
+    page,
+  }) => {
+    await page.clock.install();
+    await mockWorker(page, "stuck");
+    await mockChallenge(page);
+    await page.goto("/sign-in");
+    const submit = page.getByTestId("auth-signin-submit");
+    await expect.poll(() => workerCounts(page)).toEqual({ started: 1, active: 1 });
+    await expect(submit).toBeDisabled();
+    await page.clock.fastForward(30_100);
+
+    const retry = page.getByRole("button", { name: /Retry|Zkusit znovu/ });
+    await expect(retry).toBeVisible();
+    await expect.poll(() => workerCounts(page)).toEqual({ started: 1, active: 0 });
+    await page.route(`${challenge}sign_in`, (route) => route.fulfill({ status: 204 }));
+    await retry.click();
+    await expect(submit).toBeEnabled();
+  });
+
+  test("reset password offers retry when fetching a challenge stalls", async ({ page }) => {
+    await page.clock.install();
+    const requested = Promise.withResolvers<void>();
+    page.on("request", (request) => {
+      if (request.url().endsWith("/bot-protection/challenges/password_reset")) requested.resolve();
+    });
+    const release = await holdChallenge(page, "password_reset", 204);
+    await page.goto("/reset-password");
+    await requested.promise;
+    await page.clock.fastForward(10_100);
+    await expect(page.getByRole("button", { name: /Retry|Zkusit znovu/ })).toBeVisible();
+    release();
+  });
+
+  test("an auth method switch or route change terminates superseded workers", async ({ page }) => {
+    await mockWorker(page, "stuck");
+    await mockChallenge(page);
+    await page.goto("/sign-in");
+    await expect.poll(() => workerCounts(page)).toEqual({ started: 1, active: 1 });
+
+    const methods = page.locator(".kb-auth-form").getByRole("group");
+    await methods.getByRole("button", { name: /^(Email link|Odkaz e-mailem)$/ }).click();
+    await expect.poll(() => workerCounts(page)).toEqual({ started: 2, active: 1 });
+    await methods.getByRole("button", { name: /^(Passkey|Přístupový klíč)$/ }).click();
+    await expect.poll(() => workerCounts(page)).toEqual({ started: 2, active: 0 });
+
+    await methods.getByRole("button", { name: /^(Password|Heslo)$/ }).click();
+    await expect.poll(() => workerCounts(page)).toEqual({ started: 3, active: 1 });
+    await page.route(`${challenge}sign_up`, (route) => route.fulfill({ status: 204 }));
+    await page.locator('.kb-auth-footer a[href="/sign-up"]').click();
+    await expect(page.getByTestId("auth-signup-submit")).toBeEnabled();
+    await expect.poll(() => workerCounts(page)).toEqual({ started: 3, active: 0 });
   });
 }

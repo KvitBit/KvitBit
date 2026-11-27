@@ -10,6 +10,7 @@ class ApiOperation {
 /** Runs page API effects with the client supplied by the app's transport layer. */
 export class RunApi extends Command.Service<RunApi>()("@kvitbit/web/RunApi", {
   args: { name: Schema.String, operation: Schema.instanceOf(ApiOperation) },
+  group: ["name"],
   success: Schema.Unknown,
 }) {
   static readonly fromClient = this.toLayer(

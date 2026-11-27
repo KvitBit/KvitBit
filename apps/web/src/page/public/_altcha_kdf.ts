@@ -316,30 +316,29 @@ const blake2bLong = (input: Uint8Array, outLen: number): Uint8Array => {
   return out;
 };
 
+/** High word of an unsigned 32-bit product, using exact 16-bit partial products. */
+const mulHighU32 = (a: number, b: number): number => {
+  const aLo = a & 0xffff;
+  const aHi = a >>> 16;
+  const bLo = b & 0xffff;
+  const bHi = b >>> 16;
+  const middle = Math.imul(aHi, bLo) + (Math.imul(aLo, bLo) >>> 16);
+  const carry = ((middle & 0xffff) + Math.imul(aLo, bHi)) >>> 16;
+  return (Math.imul(aHi, bHi) + (middle >>> 16) + carry) >>> 0;
+};
+
+/** 64-bit: a = a + b + 2 * lo32(a) * lo32(b) */
 const argonAddMul = (w: Uint32Array, a: number, b: number): void => {
   const aLo = w[a] ?? 0;
   const aHi = w[a + 1] ?? 0;
   const bLo = w[b] ?? 0;
   const bHi = w[b + 1] ?? 0;
-  const a0 = aLo & 0xffff;
-  const a1 = aLo >>> 16;
-  const b0 = bLo & 0xffff;
-  const b1 = bLo >>> 16;
-  const p0 = a0 * b0;
-  const p1 = a0 * b1 + a1 * b0;
-  const p2 = a1 * b1;
-  const lowSum = p0 + (p1 & 0xffff) * 0x10000;
-  let mulLo = lowSum >>> 0;
-  let mulHi = (p2 + Math.floor(p1 / 0x10000) + Math.floor(lowSum / 0x100000000)) >>> 0;
-  mulHi = ((mulHi << 1) | (mulLo >>> 31)) >>> 0;
-  mulLo = (mulLo << 1) >>> 0;
-
-  let lo = aLo + bLo;
-  let hi = aHi + bHi + (lo > 0xffffffff ? 1 : 0);
-  lo = (lo >>> 0) + mulLo;
-  hi = hi + mulHi + (lo > 0xffffffff ? 1 : 0);
-  w[a] = lo >>> 0;
-  w[a + 1] = hi >>> 0;
+  const mulLo = Math.imul(aLo, bLo);
+  const mulHi = (mulHighU32(aLo, bLo) << 1) | (mulLo >>> 31);
+  const sumLo = aLo + bLo;
+  const lo = (sumLo >>> 0) + ((mulLo << 1) >>> 0);
+  w[a] = lo;
+  w[a + 1] = aHi + bHi + mulHi + (sumLo > 0xffffffff ? 1 : 0) + (lo > 0xffffffff ? 1 : 0);
 };
 
 const argonGB = (w: Uint32Array, a: number, b: number, c: number, d: number): void => {
@@ -352,20 +351,20 @@ const argonGB = (w: Uint32Array, a: number, b: number, c: number, d: number): vo
   argonAddMul(w, c, d);
   xLo = (w[b] ?? 0) ^ (w[c] ?? 0);
   xHi = (w[b + 1] ?? 0) ^ (w[c + 1] ?? 0);
-  w[b] = ((xLo >>> 24) | (xHi << 8)) >>> 0;
-  w[b + 1] = ((xHi >>> 24) | (xLo << 8)) >>> 0;
+  w[b] = (xLo >>> 24) | (xHi << 8);
+  w[b + 1] = (xHi >>> 24) | (xLo << 8);
 
   argonAddMul(w, a, b);
   xLo = (w[d] ?? 0) ^ (w[a] ?? 0);
   xHi = (w[d + 1] ?? 0) ^ (w[a + 1] ?? 0);
-  w[d] = ((xLo >>> 16) | (xHi << 16)) >>> 0;
-  w[d + 1] = ((xHi >>> 16) | (xLo << 16)) >>> 0;
+  w[d] = (xLo >>> 16) | (xHi << 16);
+  w[d + 1] = (xHi >>> 16) | (xLo << 16);
 
   argonAddMul(w, c, d);
   xLo = (w[b] ?? 0) ^ (w[c] ?? 0);
   xHi = (w[b + 1] ?? 0) ^ (w[c + 1] ?? 0);
-  w[b] = ((xLo << 1) | (xHi >>> 31)) >>> 0;
-  w[b + 1] = ((xHi << 1) | (xLo >>> 31)) >>> 0;
+  w[b] = (xLo << 1) | (xHi >>> 31);
+  w[b + 1] = (xHi << 1) | (xLo >>> 31);
 };
 
 const permute16 = (
@@ -413,6 +412,7 @@ const fillBlock = (
     tmpR[i] = r;
     tmpZ[i] = r;
   }
+  // 8 rows of 16 uint64 words (each row = 32 uint32)
   for (let r = 0; r < 8; r++) {
     const b = r * 32;
     permute16(
@@ -435,6 +435,7 @@ const fillBlock = (
       b + 30,
     );
   }
+  // 8 columns of 16 uint64 words (2 words per row, stride 32 uint32)
   for (let c = 0; c < 8; c++) {
     const b = c * 4;
     permute16(
@@ -472,52 +473,25 @@ export interface Argon2idParams {
   readonly keyLength: number;
 }
 
-export const argon2id = (
-  password: Uint8Array,
-  salt: Uint8Array,
-  params: Argon2idParams,
-): Uint8Array => {
+/** Create a workspace for serial derivations with the same challenge parameters. */
+export const createArgon2id = (params: Argon2idParams) => {
   const p = Math.max(1, params.parallelism);
   const t = Math.max(1, params.cost);
   const tagLen = Math.max(4, params.keyLength);
   const m = Math.max(8 * p, params.memoryCost);
-
-  const h0Input = new Uint8Array(40 + password.length + salt.length);
-  const h0View = new DataView(h0Input.buffer);
-  let pos = 0;
-  h0View.setUint32(pos, p, true);
-  pos += 4;
-  h0View.setUint32(pos, tagLen, true);
-  pos += 4;
-  h0View.setUint32(pos, m, true);
-  pos += 4;
-  h0View.setUint32(pos, t, true);
-  pos += 4;
-  h0View.setUint32(pos, ARGON2_VERSION, true);
-  pos += 4;
-  h0View.setUint32(pos, ARGON2_TYPE_ID, true);
-  pos += 4;
-  h0View.setUint32(pos, password.length, true);
-  pos += 4;
-  h0Input.set(password, pos);
-  pos += password.length;
-  h0View.setUint32(pos, salt.length, true);
-  pos += 4;
-  h0Input.set(salt, pos);
-  pos += salt.length;
-  h0View.setUint32(pos, 0, true);
-  pos += 4;
-  h0View.setUint32(pos, 0, true);
-
-  const h0 = blake2b(h0Input, 64);
-
   const segmentLength = Math.floor(m / (p * ARGON2_SYNC_POINTS));
   const laneLength = segmentLength * ARGON2_SYNC_POINTS;
   const totalBlocks = laneLength * p;
   const mem = new Uint32Array(totalBlocks * BLOCK_U32);
+  const zeroBlock = new Uint32Array(BLOCK_U32);
+  const inputBlock = new Uint32Array(BLOCK_U32);
+  const addrBlock = new Uint32Array(BLOCK_U32);
+  const tmpR = new Uint32Array(BLOCK_U32);
+  const tmpZ = new Uint32Array(BLOCK_U32);
   const seedBuf = new Uint8Array(72);
-  seedBuf.set(h0, 0);
   const seedView = new DataView(seedBuf.buffer);
+  const finalBytes = new Uint8Array(1024);
+  const finalView = new DataView(finalBytes.buffer);
 
   const writeBytesToBlock = (bytes: Uint8Array, blockIndex: number) => {
     const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
@@ -525,94 +499,121 @@ export const argon2id = (
     for (let i = 0; i < BLOCK_U32; i++) mem[base + i] = view.getUint32(i * 4, true);
   };
 
-  for (let lane = 0; lane < p; lane++) {
-    seedView.setUint32(64, 0, true);
-    seedView.setUint32(68, lane, true);
-    writeBytesToBlock(blake2bLong(seedBuf, 1024), lane * laneLength);
+  return (password: Uint8Array, salt: Uint8Array): Uint8Array => {
+    // H0
+    const h0Input = new Uint8Array(40 + password.length + salt.length);
+    const h0View = new DataView(h0Input.buffer);
+    let pos = 0;
+    h0View.setUint32(pos, p, true);
+    pos += 4;
+    h0View.setUint32(pos, tagLen, true);
+    pos += 4;
+    h0View.setUint32(pos, m, true);
+    pos += 4;
+    h0View.setUint32(pos, t, true);
+    pos += 4;
+    h0View.setUint32(pos, ARGON2_VERSION, true);
+    pos += 4;
+    h0View.setUint32(pos, ARGON2_TYPE_ID, true);
+    pos += 4;
+    h0View.setUint32(pos, password.length, true);
+    pos += 4;
+    h0Input.set(password, pos);
+    pos += password.length;
+    h0View.setUint32(pos, salt.length, true);
+    pos += 4;
+    h0Input.set(salt, pos);
+    pos += salt.length;
+    h0View.setUint32(pos, 0, true); // secret length
+    pos += 4;
+    h0View.setUint32(pos, 0, true); // associated data length
 
-    seedView.setUint32(64, 1, true);
-    seedView.setUint32(68, lane, true);
-    writeBytesToBlock(blake2bLong(seedBuf, 1024), lane * laneLength + 1);
-  }
+    seedBuf.set(blake2b(h0Input, 64));
 
-  const zeroBlock = new Uint32Array(BLOCK_U32);
-  const inputBlock = new Uint32Array(BLOCK_U32);
-  const addrBlock = new Uint32Array(BLOCK_U32);
-  const tmpR = new Uint32Array(BLOCK_U32);
-  const tmpZ = new Uint32Array(BLOCK_U32);
+    // The seeds and first pass overwrite every block before any previous-pass XOR.
+    for (let lane = 0; lane < p; lane++) {
+      seedView.setUint32(64, 0, true);
+      seedView.setUint32(68, lane, true);
+      writeBytesToBlock(blake2bLong(seedBuf, 1024), lane * laneLength);
 
-  for (let pass = 0; pass < t; pass++) {
-    for (let slice = 0; slice < ARGON2_SYNC_POINTS; slice++) {
-      for (let lane = 0; lane < p; lane++) {
-        const dataIndependent = pass === 0 && slice < 2;
-        let addrCounter = 0;
-        if (dataIndependent) {
-          inputBlock.fill(0);
-          inputBlock[0] = pass;
-          inputBlock[2] = lane;
-          inputBlock[4] = slice;
-          inputBlock[6] = totalBlocks;
-          inputBlock[8] = t;
-          inputBlock[10] = ARGON2_TYPE_ID;
-        }
-        const startIdx = pass === 0 && slice === 0 ? 2 : 0;
-        for (let idx = startIdx; idx < segmentLength; idx++) {
-          const currCol = slice * segmentLength + idx;
-          const prevCol = currCol === 0 ? laneLength - 1 : currCol - 1;
-          let j1: number;
-          let j2: number;
+      seedView.setUint32(64, 1, true);
+      seedView.setUint32(68, lane, true);
+      writeBytesToBlock(blake2bLong(seedBuf, 1024), lane * laneLength + 1);
+    }
+
+    for (let pass = 0; pass < t; pass++) {
+      for (let slice = 0; slice < ARGON2_SYNC_POINTS; slice++) {
+        for (let lane = 0; lane < p; lane++) {
+          const dataIndependent = pass === 0 && slice < 2;
+          let addrCounter = 0;
           if (dataIndependent) {
-            const addrPos = idx % 128;
-            if (addrPos === 0 || (idx === startIdx && startIdx === 2)) {
-              if (addrCounter === 0 || addrPos === 0) {
-                addrCounter++;
-                inputBlock[12] = addrCounter;
-                fillBlock(zeroBlock, 0, inputBlock, 0, addrBlock, 0, false, tmpR, tmpZ);
-                fillBlock(zeroBlock, 0, addrBlock, 0, addrBlock, 0, false, tmpR, tmpZ);
+            inputBlock.fill(0);
+            inputBlock[0] = pass;
+            inputBlock[2] = lane;
+            inputBlock[4] = slice;
+            inputBlock[6] = totalBlocks;
+            inputBlock[8] = t;
+            inputBlock[10] = ARGON2_TYPE_ID;
+          }
+          const startIdx = pass === 0 && slice === 0 ? 2 : 0;
+          for (let idx = startIdx; idx < segmentLength; idx++) {
+            const currCol = slice * segmentLength + idx;
+            const prevCol = currCol === 0 ? laneLength - 1 : currCol - 1;
+            let j1: number;
+            let j2: number;
+            if (dataIndependent) {
+              const addrPos = idx % 128;
+              if (addrPos === 0 || (idx === startIdx && startIdx === 2)) {
+                // Generate address block on 0, 128, ... (and first time at idx=2 for pass 0 slice 0)
+                if (addrCounter === 0 || addrPos === 0) {
+                  addrCounter++;
+                  inputBlock[12] = addrCounter;
+                  fillBlock(zeroBlock, 0, inputBlock, 0, addrBlock, 0, false, tmpR, tmpZ);
+                  fillBlock(zeroBlock, 0, addrBlock, 0, addrBlock, 0, false, tmpR, tmpZ);
+                }
               }
+              j1 = addrBlock[addrPos * 2] ?? 0;
+              j2 = addrBlock[addrPos * 2 + 1] ?? 0;
+            } else {
+              const prevOff = (lane * laneLength + prevCol) * BLOCK_U32;
+              j1 = mem[prevOff] ?? 0;
+              j2 = mem[prevOff + 1] ?? 0;
             }
-            j1 = addrBlock[addrPos * 2] ?? 0;
-            j2 = addrBlock[addrPos * 2 + 1] ?? 0;
-          } else {
+
+            const refLane = pass === 0 && slice === 0 ? lane : j2 % p;
+            let refAreaSize: number;
+            if (pass === 0) {
+              if (slice === 0) refAreaSize = idx - 1;
+              else if (refLane === lane) refAreaSize = slice * segmentLength + idx - 1;
+              else refAreaSize = slice * segmentLength - (idx === 0 ? 1 : 0);
+            } else if (refLane === lane) {
+              refAreaSize = laneLength - segmentLength + idx - 1;
+            } else {
+              refAreaSize = laneLength - segmentLength - (idx === 0 ? 1 : 0);
+            }
+
+            const x = mulHighU32(j1, j1);
+            const y = mulHighU32(refAreaSize, x);
+            const relPos = refAreaSize - 1 - y;
+            const startPos = pass === 0 || slice === 3 ? 0 : (slice + 1) * segmentLength;
+            const refCol = (startPos + relPos) % laneLength;
+
             const prevOff = (lane * laneLength + prevCol) * BLOCK_U32;
-            j1 = mem[prevOff] ?? 0;
-            j2 = mem[prevOff + 1] ?? 0;
+            const refOff = (refLane * laneLength + refCol) * BLOCK_U32;
+            const currOff = (lane * laneLength + currCol) * BLOCK_U32;
+            fillBlock(mem, prevOff, mem, refOff, mem, currOff, pass > 0, tmpR, tmpZ);
           }
-
-          const refLane = pass === 0 && slice === 0 ? lane : j2 % p;
-          let refAreaSize: number;
-          if (pass === 0) {
-            if (slice === 0) refAreaSize = idx - 1;
-            else if (refLane === lane) refAreaSize = slice * segmentLength + idx - 1;
-            else refAreaSize = slice * segmentLength - (idx === 0 ? 1 : 0);
-          } else if (refLane === lane) {
-            refAreaSize = laneLength - segmentLength + idx - 1;
-          } else {
-            refAreaSize = laneLength - segmentLength - (idx === 0 ? 1 : 0);
-          }
-
-          const x = Math.floor((j1 * j1) / 0x100000000);
-          const y = Math.floor((refAreaSize * x) / 0x100000000);
-          const relPos = refAreaSize - 1 - y;
-          const startPos = pass === 0 || slice === 3 ? 0 : (slice + 1) * segmentLength;
-          const refCol = (startPos + relPos) % laneLength;
-
-          const prevOff = (lane * laneLength + prevCol) * BLOCK_U32;
-          const refOff = (refLane * laneLength + refCol) * BLOCK_U32;
-          const currOff = (lane * laneLength + currCol) * BLOCK_U32;
-          fillBlock(mem, prevOff, mem, refOff, mem, currOff, pass > 0, tmpR, tmpZ);
         }
       }
     }
-  }
 
-  const finalWords = new Uint32Array(BLOCK_U32);
-  for (let lane = 0; lane < p; lane++) {
-    const off = (lane * laneLength + (laneLength - 1)) * BLOCK_U32;
-    for (let i = 0; i < BLOCK_U32; i++) finalWords[i] = (finalWords[i] ?? 0) ^ (mem[off + i] ?? 0);
-  }
-  const finalBytes = new Uint8Array(1024);
-  const finalView = new DataView(finalBytes.buffer);
-  for (let i = 0; i < BLOCK_U32; i++) finalView.setUint32(i * 4, finalWords[i] ?? 0, true);
-  return blake2bLong(finalBytes, tagLen);
+    // Final block C = XOR of last column across all lanes
+    tmpR.fill(0);
+    for (let lane = 0; lane < p; lane++) {
+      const off = (lane * laneLength + (laneLength - 1)) * BLOCK_U32;
+      for (let i = 0; i < BLOCK_U32; i++) tmpR[i] = (tmpR[i] ?? 0) ^ (mem[off + i] ?? 0);
+    }
+    for (let i = 0; i < BLOCK_U32; i++) finalView.setUint32(i * 4, tmpR[i] ?? 0, true);
+    return blake2bLong(finalBytes, tagLen);
+  };
 };
