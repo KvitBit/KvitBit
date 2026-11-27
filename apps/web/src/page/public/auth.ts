@@ -851,32 +851,38 @@ export const title = (model: Model, ctx: PageContext): string => {
 
 const botProofBar = (model: Model, ctx: PageContext, h: Html.H<Message>): Markup<Message> => {
   const t = translator(ctx.locale);
-  if (model.botProof._tag === "Idle" || model.botProof._tag === "NotRequired") return h.text("");
-  if (model.botProof._tag === "Solving") {
-    return h.div
-      .class(botProofVariants({ state: "idle" }))
-      .attr("role", "status")
-      .attr("aria-live", "polite")
-      .children([h.span.children([t.t("auth.botProof.verifying")])]);
-  }
-  if (model.botProof._tag === "Solved") {
-    return h.div
-      .class(botProofVariants({ state: "verified" }))
-      .attr("role", "status")
-      .children([
-        h.span.class(ui.row).children([icon(h, "check", 16), t.t("auth.botProof.verified")]),
-      ]);
-  }
+  const state = model.botProof._tag;
+  const stackedSlot = "grid [&>*]:[grid-area:1/1] [&>*]:min-w-0";
   return h.div
-    .class(botProofVariants({ state: "failed" }))
-    .attr("role", "alert")
+    .key("auth-bot-proof")
+    .class(stackedSlot)
     .children([
-      h.span.children([t.t("auth.botProof.failed")]),
-      button(h, {
-        label: local(ctx.locale, "retryCheck"),
-        onClick: Message.ClickedRetryBotProof(),
-        small: true,
-      }),
+      h.div
+        .class(stackedSlot)
+        .attr("role", "status")
+        .children([
+          h.div
+            .class(botProofVariants({ state: "idle" }))
+            .attr("data-active", String(state === "Solving"))
+            .children([t.t("auth.botProof.verifying")]),
+          h.div
+            .class(botProofVariants({ state: "verified" }))
+            .attr("data-active", String(state === "Solved"))
+            .children([
+              h.span.class(ui.row).children([icon(h, "check", 16), t.t("auth.botProof.verified")]),
+            ]),
+        ]),
+      h.div
+        .class(botProofVariants({ state: "failed" }))
+        .attr("data-active", String(state === "Failed"))
+        .children([
+          h.span.attr("role", "alert").children([t.t("auth.botProof.failed")]),
+          button(h, {
+            label: local(ctx.locale, "retryCheck"),
+            onClick: Message.ClickedRetryBotProof(),
+            small: true,
+          }),
+        ]),
     ]);
 };
 
@@ -1041,18 +1047,7 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
                 }),
             }),
             ...(model.signInMethod === "passkey"
-              ? [
-                  h.p.class(ui.muted).children([t.t("auth.passkey.prompt")]),
-                  button(h, {
-                    label: t.t("auth.signIn.withPasskey"),
-                    onClick: Message.ClickedPasskeySignIn(),
-                    variant: "primary",
-                    icon: icon(h, "key", 16),
-                    busy: model.submitting,
-                    disabled: model.submitting,
-                    testId: "auth-passkey-btn",
-                  }),
-                ]
+              ? [h.p.class(ui.muted).children([t.t("auth.passkey.prompt")])]
               : [
                   textField(h, {
                     id: "auth-signin-email",
@@ -1078,19 +1073,29 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
                         }),
                       ]
                     : []),
-                  botProofBar(model, ctx, h),
-                  button(h, {
-                    label:
-                      model.signInMethod === "magic_link"
-                        ? t.t("auth.signIn.sendLink")
-                        : t.t("auth.signIn.submit"),
-                    onClick: Message.SubmittedSignIn(),
-                    variant: "primary",
-                    busy: model.submitting,
-                    disabled: model.submitting || !isBotProofReady(model.botProof),
-                    testId: "auth-signin-submit",
-                  }),
                 ]),
+            botProofBar(model, ctx, h),
+            model.signInMethod === "passkey"
+              ? button(h, {
+                  label: t.t("auth.signIn.withPasskey"),
+                  onClick: Message.ClickedPasskeySignIn(),
+                  variant: "primary",
+                  icon: icon(h, "key", 16),
+                  busy: model.submitting,
+                  disabled: model.submitting,
+                  testId: "auth-passkey-btn",
+                })
+              : button(h, {
+                  label:
+                    model.signInMethod === "magic_link"
+                      ? t.t("auth.signIn.sendLink")
+                      : t.t("auth.signIn.submit"),
+                  onClick: Message.SubmittedSignIn(),
+                  variant: "primary",
+                  busy: model.submitting,
+                  disabled: model.submitting || !isBotProofReady(model.botProof),
+                  testId: "auth-signin-submit",
+                }),
             h.div
               .class(authFooterClass)
               .children([

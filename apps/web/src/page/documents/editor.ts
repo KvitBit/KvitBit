@@ -49,10 +49,12 @@ import {
   pageHeader,
   select,
   selectField,
+  separator,
   skeleton,
   textArea,
   textField,
 } from "../../ui/kit";
+import { UiInput } from "../../ui/sdk";
 import { cn, controlVariants, ui } from "../../ui/styles";
 import {
   addDaysIso,
@@ -1829,6 +1831,8 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
               id: "editor-contact",
               label: txt(locale, "customerLabel"),
               value: model.contactId,
+              searchable: true,
+              searchPlaceholder: txt(locale, "customerPlaceholder"),
               onChange: (contactId) => Message.SelectedContact({ contactId }),
               options: [
                 { value: "", label: txt(locale, "customerPlaceholder") },
@@ -1892,12 +1896,16 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
                     .children([txt(locale, "dueDays")]),
                   sourceBadge(h, locale, effective.dueDays.source),
                 ]),
-                h.input
-                  .class(cn(controlVariants({ kind: "input" }), ui.num))
-                  .id("editor-due-days")
-                  .attr("type", "number")
+                UiInput(h)
                   .value(model.dueDaysOverride ?? String(effective.dueDays.value))
-                  .on("input", ({ value }) => Message.ChangedDueDays({ value })),
+                  .on("valuechange", ({ value }) => Message.ChangedDueDays({ value }))
+                  .children([
+                    h.input
+                      .class(cn(controlVariants({ kind: "input" }), ui.num))
+                      .id("editor-due-days")
+                      .attr("type", "number")
+                      .value(model.dueDaysOverride ?? String(effective.dueDays.value)),
+                  ]),
                 h.span
                   .class(cn(ui.fieldHint, ui.num))
                   .children([txt(locale, "dueDateHint", { date: fmtDate(locale, computedDue) })]),
@@ -2105,7 +2113,7 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
             // FX section for non-CZK
             ...(effective.currency.value !== "CZK"
               ? [
-                  h.hr.class(ui.divider),
+                  separator(h),
                   h.div.class(ui.stack).children([
                     h.div.class(ui.spread).children([
                       h.strong.children([txt(locale, "fxSection")]),
@@ -2161,6 +2169,9 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
                       id: "editor-add-pricelist",
                       label: txt(locale, "addFromPriceList"),
                       value: "",
+                      className: "w-auto min-w-[150px]",
+                      searchable: true,
+                      searchPlaceholder: txt(locale, "addFromPriceList"),
                       onChange: (itemId) => Message.AddedPriceListItem({ itemId }),
                       options: [
                         { value: "", label: txt(locale, "addFromPriceList") },
@@ -2282,7 +2293,7 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
           mono(h, model.numberOverride || txt(locale, "draftPreviewNumber")),
           h.span.class(cn(ui.small, ui.muted, ui.num)).children([fmtDate(locale, issuedIso)]),
         ]),
-      h.hr.class(ui.divider),
+      separator(h),
       h.div
         .class(ui.stack)
         .children([
@@ -2302,7 +2313,7 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
               ]
             : []),
         ]),
-      h.hr.class(ui.divider),
+      separator(h),
       h.h3.children([txt(locale, "vatSummaryTitle")]),
       ...(displayTotals === null
         ? []

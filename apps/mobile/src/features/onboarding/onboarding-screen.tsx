@@ -7,6 +7,7 @@ import type {
   TaxRegime,
 } from "@kvitbit/domain/contract";
 import { describeError } from "@kvitbit/ui-port/api";
+import { type AddressField, applyAddressInputChange } from "@kvitbit/ui-port/format";
 import { enumText, type Locale } from "@kvitbit/ui-port/i18n";
 import { Building2, Search } from "lucide-react-native";
 import { useEffect, useState } from "react";
@@ -115,6 +116,21 @@ export function OnboardingScreen(props: { readonly initialStep?: number }) {
       cancelled = true;
     };
   }, [api.origin, userId, activeScope]);
+
+  const updateAddressField = (field: Exclude<AddressField, "country">, value: string) => {
+    const pasted = applyAddressInputChange({ street, city, postalCode, country }, field, value, {
+      includeCountry: false,
+    });
+    if (pasted !== undefined) {
+      setStreet(pasted.street);
+      setCity(pasted.city);
+      setPostalCode(pasted.postalCode);
+      return;
+    }
+    if (field === "street") setStreet(value);
+    else if (field === "city") setCity(value);
+    else setPostalCode(value);
+  };
 
   const applyAresResult = (result: RegistryResult) => {
     setIco(result.ico);
@@ -382,24 +398,27 @@ export function OnboardingScreen(props: { readonly initialStep?: number }) {
             <TextField
               label={t("common.field.street")}
               value={street}
-              onChangeText={setStreet}
+              onChangeText={(value) => updateAddressField("street", value)}
               disabled={busy}
+              testID="onboarding-street"
             />
             <View className="flex-row gap-2">
               <View className="flex-1">
                 <TextField
                   label={t("common.field.city")}
                   value={city}
-                  onChangeText={setCity}
+                  onChangeText={(value) => updateAddressField("city", value)}
                   disabled={busy}
+                  testID="onboarding-city"
                 />
               </View>
               <View className="w-[120px]">
                 <TextField
                   label={t("common.field.postalCode")}
                   value={postalCode}
-                  onChangeText={setPostalCode}
+                  onChangeText={(value) => updateAddressField("postalCode", value)}
                   disabled={busy}
+                  testID="onboarding-postal"
                 />
               </View>
             </View>

@@ -30,12 +30,13 @@ import {
   mono,
   page,
   pageHeader,
+  searchInput,
   select,
   skeletonTable,
   table,
   tabs,
 } from "../../ui/kit";
-import { cn, controlVariants, ui } from "../../ui/styles";
+import { cn, ui } from "../../ui/styles";
 import {
   apiCommand,
   canRole,
@@ -529,22 +530,19 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
         .class("flex flex-1 flex-wrap items-center gap-2")
         .on("submit", Message.SubmittedSearch(), { preventDefault: true })
         .children([
-          h.input
-            .class(
-              cn(
-                controlVariants({ kind: "input" }),
-                "min-w-[220px] max-w-[360px] flex-[1_1_240px]",
-              ),
-            )
-            .attr("type", "search")
-            .attr("aria-label", txt(locale, "searchLabel"))
-            .attr("placeholder", txt(locale, "searchPlaceholder"))
-            .value(model.searchInput)
-            .on("input", ({ value }) => Message.ChangedSearch({ value })),
+          h.div.class("min-w-[220px] max-w-[360px] flex-[1_1_240px]").children([
+            searchInput(h, {
+              value: model.searchInput,
+              placeholder: txt(locale, "searchPlaceholder"),
+              ariaLabel: txt(locale, "searchLabel"),
+              onInput: (value) => Message.ChangedSearch({ value }),
+            }),
+          ]),
           select(h, {
             id: "docs-status",
             label: txt(locale, "statusLabel"),
             value: q.status ?? "",
+            className: "w-auto min-w-[150px]",
             onChange: (value) => Message.SelectedStatus({ value }),
             options: [
               { value: "", label: txt(locale, "allStatuses") },
@@ -560,6 +558,7 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
             id: "docs-settlement",
             label: txt(locale, "settlementLabel"),
             value: q.settlement ?? "",
+            className: "w-auto min-w-[150px]",
             onChange: (value) => Message.SelectedSettlement({ value }),
             options: [
               { value: "", label: txt(locale, "allSettlements") },

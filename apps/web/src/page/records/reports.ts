@@ -913,6 +913,7 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
           id: "reports-period",
           label: tr.t("reports.suite.period"),
           value: route.period,
+          className: "w-auto min-w-[140px]",
           options: periodOptions(route.period, ctx.locale),
           onChange: (period) => Message.ChangedPeriod({ period }),
         }),

@@ -25,6 +25,7 @@ import {
 import { Clock, Effect } from "effect";
 import { HttpApiBuilder } from "effect/http-api";
 import { SqlClient } from "effect/sql";
+import { Analytics } from "../../runtime/analytics";
 import { setLocation } from "../conventions";
 import {
   authorizeMember,
@@ -71,6 +72,7 @@ export const ApiKeysGroupLive = HttpApiBuilder.group(Api, "apiKeys", (handlers) 
   Effect.gen(function* () {
     const sql = yield* SqlClient.SqlClient;
     const workspaces = yield* Workspaces;
+    const analytics = yield* Analytics;
 
     return handlers
       .handle("listApiKeys", () =>
@@ -204,6 +206,12 @@ export const ApiKeysGroupLive = HttpApiBuilder.group(Api, "apiKeys", (handlers) 
           yield* setLocation(
             `${API_PREFIX}/workspaces/${params.workspaceId}/api-keys/${issued.keyId}`,
           );
+          yield* analytics.capture({
+            event: "api_key_created",
+            userId: caller.userId,
+            workspaceId: caller.workspaceId,
+            access: granted.access,
+          });
 
           return {
             key: {
@@ -224,14 +232,18 @@ export const ApiKeysGroupLive = HttpApiBuilder.group(Api, "apiKeys", (handlers) 
       .handle("revokeApiKey", ({ params }) =>
         Effect.gen(function* () {
           const caller = yield* authorizeMember("apiKey.manage");
-          yield* dbUnavailable(
+          const revokedAccess = yield* dbUnavailable(
             sql.withTransaction(
               Effect.gen(function* () {
-                const deleted = yield* sql<{ id: string; name: string | null }>`
+                const deleted = yield* sql<{
+                  id: string;
+                  name: string | null;
+                  access: AccessMode;
+                }>`
                   delete from auth.apikey
                   where id = ${params.keyId}
                     and workspace_id = ${caller.workspaceId}
-                  returning id, name
+                  returning id, name, access
                 `;
                 const row = deleted[0];
                 if (row === undefined) {
@@ -241,9 +253,16 @@ export const ApiKeysGroupLive = HttpApiBuilder.group(Api, "apiKeys", (handlers) 
                   action: "apiKey.revoke",
                   subject: { entity: "ApiKey", id: row.id, name: row.name ?? "" },
                 });
+                return row.access;
               }),
             ),
           );
+          yield* analytics.capture({
+            event: "api_key_revoked",
+            userId: caller.userId,
+            workspaceId: caller.workspaceId,
+            access: revokedAccess,
+          });
         }),
       );
   }),

@@ -1,5 +1,9 @@
 import { describe, expect, test } from "bun:test";
+import { HtmlScene } from "@effect/ui/html/testing";
+import { Locator } from "@effect/ui/testing";
 import type { ContactId } from "@kvitbit/domain/contract";
+import { Effect } from "effect";
+import { definePage } from "../../src/app/page";
 import * as Contacts from "../../src/page/records/contacts";
 import type { ContactRecord } from "../../src/page/records/shared";
 import { ctxFor, renderPath, WS } from "../support";
@@ -130,5 +134,35 @@ describe("Contacts page TEA", () => {
     const enNew = await renderPath(`/w/${WS}/contacts/new?mode=edit`, { locale: "en" });
     expect(enNew.title).toContain("New contact");
     expect(enNew.html).toContain("ARES");
+  });
+
+  test("pasting a full address into the contact editor prefills empty address fields", async () => {
+    const route: Contacts.Route = { _tag: "Contact", ws: WS, id: "new", mode: "edit" };
+    const ctx = ctxFor(route, { locale: "en" });
+    const ContactsPage = definePage("Contacts", Contacts);
+    const streetInput = Locator.attr("id", "contact-street");
+    const cityInput = Locator.attr("id", "contact-city");
+    const postalInput = Locator.attr("id", "contact-postal");
+    const countryInput = Locator.attr("id", "contact-country");
+
+    await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const scene = yield* HtmlScene.make(ContactsPage, ctx);
+          scene.fire(streetInput, "paste", { text: "Jankovcova 1522/53" }).expectIgnored();
+          scene
+            .fire(streetInput, "paste", { text: "Štefánikova 12, 811 05 Bratislava, Slovensko" })
+            .expectDefaultPrevented()
+            .expect(streetInput)
+            .toHaveValue("Štefánikova 12")
+            .expect(cityInput)
+            .toHaveValue("Bratislava")
+            .expect(postalInput)
+            .toHaveValue("811 05")
+            .expect(countryInput)
+            .toHaveValue("SK");
+        }),
+      ),
+    );
   });
 });

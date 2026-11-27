@@ -1,5 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { resolve } from "node:path";
+import { gunzipSync } from "node:zlib";
 import { expect, type Locator, type Page, test } from "@playwright/test";
 import type { RenderedPath } from "../test/support";
 
@@ -30,6 +31,11 @@ const attachErrorGuards = (page: Page) => {
   };
 };
 
+const selectUiOption = async (selectRoot: Locator, value: string) => {
+  await selectRoot.locator("ui-select-trigger button").click();
+  await selectRoot.locator(`ui-select-item[value="${value}"]`).click();
+};
+
 const expectFilledSegments = async (
   group: Locator,
   placement: "stretched" | "inline",
@@ -40,14 +46,14 @@ const expectFilledSegments = async (
   const layout = await group.evaluate((control) => {
     const bounds = control.getBoundingClientRect();
     const container = control.closest('[data-slot="card-title"]') ?? control.parentElement;
-    const buttons = [...control.querySelectorAll("button")].map((button) => {
+    const buttons = [...control.querySelectorAll("ui-segmented-control-item")].map((button) => {
       const box = button.getBoundingClientRect();
       const label = document.createRange();
       label.selectNodeContents(button);
-      const text = label.getBoundingClientRect();
+      const text = label.getClientRects().length > 0 ? label.getBoundingClientRect() : box;
       return {
         width: box.width,
-        labelFits: text.left >= box.left && text.right <= box.right,
+        labelFits: text.left >= box.left - 0.5 && text.right <= box.right + 0.5,
         lineCount: label.getClientRects().length,
         horizontalOffset: (text.left + text.right - box.left - box.right) / 2,
         verticalOffset: (text.top + text.bottom - box.top - box.bottom) / 2,
@@ -155,8 +161,8 @@ if (typeof Bun === "undefined") {
 
     test("center wrapped Czech labels and keep single words intact", async ({ page }) => {
       await page.goto("/account/appearance");
-      const mode = page.getByRole("group", { name: "Režim", exact: true });
-      const contrast = page.getByRole("group", { name: "Kontrast", exact: true });
+      const mode = page.getByRole("radiogroup", { name: "Režim", exact: true });
+      const contrast = page.getByRole("radiogroup", { name: "Kontrast", exact: true });
       // Exercise the settings grid's minimum track width in both viewport profiles.
       const grid = page.locator('[data-slot="form-grid"]').filter({ has: mode });
       await grid.evaluate((element) => {
@@ -171,6 +177,80 @@ if (typeof Bun === "undefined") {
   });
 
   test.describe("web smoke journeys (demo mode)", () => {
+    test("sends only cookieless pageviews after a single startup config request", async ({
+      page,
+    }) => {
+      const host = "https://eu.i.posthog.com";
+      let configRequests = 0;
+      const uploads: { event: string; properties: Record<string, unknown> }[] = [];
+      // Exercise actual ingestion while keeping PostHog's bot filter enabled in production.
+      await page.addInitScript(() => {
+        Object.defineProperty(navigator, "webdriver", { get: () => false });
+        Object.defineProperty(navigator, "userAgentData", { get: () => undefined });
+      });
+      await page.route("**/api/v1/config", async (route) => {
+        configRequests += 1;
+        const response = await route.fetch();
+        await route.fulfill({
+          response,
+          json: {
+            ...(await response.json()),
+            analytics: { posthog: { apiKey: "phc_smoke", host } },
+          },
+        });
+      });
+      await page.route(`${host}/**`, async (route) => {
+        const request = route.request();
+        if (request.method() === "POST") {
+          const data = request.postDataBuffer();
+          if (data === null) throw new Error("PostHog request has no body");
+          const formData = new URLSearchParams(data.toString()).get("data");
+          const body =
+            data[0] === 0x1f
+              ? gunzipSync(data).toString()
+              : formData
+                ? Buffer.from(formData, "base64").toString()
+                : data.toString();
+          const payload = JSON.parse(body);
+          uploads.push(...(payload.batch ?? [payload]));
+        }
+        await route.fulfill({
+          json: { status: 1 },
+          headers: { "access-control-allow-origin": "*" },
+        });
+      });
+
+      await page.goto("/?email=private@example.test#private");
+      await expect.poll(() => uploads.length).toBe(1);
+      await page.locator('a[href="/legal/privacy"]').first().click();
+      await expect.poll(() => uploads.length).toBe(2);
+      expect(configRequests).toBe(1);
+
+      const origin = new URL(page.url()).origin;
+      expect(uploads.map(({ event, properties }) => ({ event, properties }))).toEqual(
+        ["/", "/legal/privacy"].map((path) => ({
+          event: "$pageview",
+          properties: {
+            $current_url: origin + path,
+            $pathname: path,
+            token: "phc_smoke",
+            distinct_id: "$posthog_cookieless",
+            $cookieless_mode: true,
+            $process_person_profile: false,
+            $geoip_disable: true,
+          },
+        })),
+      );
+      expect(await page.context().cookies()).toEqual([]);
+      expect(
+        await page.evaluate(() =>
+          [...Object.keys(localStorage), ...Object.keys(sessionStorage)].filter((key) =>
+            /posthog|^ph_/i.test(key),
+          ),
+        ),
+      ).toEqual([]);
+    });
+
     test("navigates public routes with clean rendering and zero errors", async ({ page }) => {
       const errors = attachErrorGuards(page);
       const publicPaths = [
@@ -236,12 +316,12 @@ if (typeof Bun === "undefined") {
           await expect(page.locator(".kb-root")).toHaveAttribute("data-style", style);
 
           const segmented = page.locator('[data-slot="auth-form"] [data-slot="segmented"]');
-          const buttons = segmented.locator("button");
+          const buttons = segmented.locator("ui-segmented-control-item");
           await expect(buttons).toHaveText([...labels]);
 
           const layout = await segmented.evaluate((el) => {
             const groupRect = el.getBoundingClientRect();
-            const btns = [...el.querySelectorAll("button")];
+            const btns = [...el.querySelectorAll("ui-segmented-control-item")];
             return {
               groupRight: groupRect.right,
               lastBtnRight: btns.at(-1)?.getBoundingClientRect().right ?? 0,
@@ -268,6 +348,126 @@ if (typeof Bun === "undefined") {
           await expect(page.getByTestId("auth-passkey-btn")).toHaveText(passkeyCta);
         }
       }
+
+      errors.assertClean();
+    });
+
+    test("onboarding numbering step groups each series with its pattern, starting number, and preview", async ({
+      page,
+    }, testInfo) => {
+      const errors = attachErrorGuards(page);
+
+      for (const locale of ["en", "cs"] as const) {
+        await page.goto("/onboarding?step=4", { waitUntil: "domcontentloaded" });
+        await page.evaluate((loc) => {
+          window.localStorage.setItem(
+            "kvitbit.prefs",
+            JSON.stringify({
+              locale: loc,
+              style: "elegant",
+              mode: "dark",
+              contrast: "standard",
+              theme: { _tag: "Preset", id: "graphite_atelier" },
+            }),
+          );
+        }, locale);
+        await page.reload({ waitUntil: "domcontentloaded" });
+        await page.evaluate(() => document.fonts.ready);
+        await expect(page.locator(".kb-root")).toHaveAttribute("lang", locale);
+
+        const ledger = page.locator('[data-slot="series-ledger"]');
+        const rows = ledger.locator('[data-slot="series-row"]');
+        await expect(rows).toHaveCount(3);
+
+        const geometry = await page.evaluate(() => {
+          const card = document.querySelector('[data-slot="onboarding"] [data-slot="card"]');
+          const defaults = document.querySelector('[data-slot="onboarding-defaults"]');
+          const rowEls = [...document.querySelectorAll('[data-slot="series-row"]')];
+          const cardBox = card?.getBoundingClientRect();
+          const defaultsBox = defaults?.getBoundingClientRect();
+          const ledgerBox = document
+            .querySelector('[data-slot="series-ledger"]')
+            ?.getBoundingClientRect();
+          return {
+            overflow: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+            defaultsBelowLedger:
+              defaultsBox !== undefined &&
+              ledgerBox !== undefined &&
+              defaultsBox.top >= ledgerBox.bottom,
+            rows: rowEls.map((row) => {
+              const title = row
+                .querySelector('[data-slot="series-row-title"]')
+                ?.getBoundingClientRect();
+              const pattern = row
+                .querySelector('input[id^="onb-pattern-"]')
+                ?.getBoundingClientRect();
+              const start = row.querySelector('input[id^="onb-start-"]')?.getBoundingClientRect();
+              const preview = row
+                .querySelector('[data-slot="series-row-preview"]')
+                ?.getBoundingClientRect();
+              const box = row.getBoundingClientRect();
+              return {
+                top: box.top,
+                bottom: box.bottom,
+                fitsCard:
+                  cardBox !== undefined &&
+                  box.left >= cardBox.left - 1 &&
+                  box.right <= cardBox.right + 1,
+                sameDesktopLine:
+                  title !== undefined &&
+                  pattern !== undefined &&
+                  start !== undefined &&
+                  preview !== undefined &&
+                  Math.abs(pattern.top - start.top) <= 2 &&
+                  Math.abs((title.top + title.bottom) / 2 - (pattern.top + pattern.bottom) / 2) <=
+                    16 &&
+                  Math.abs((preview.top + preview.bottom) / 2 - (start.top + start.bottom) / 2) <=
+                    16,
+                patternAndStartAligned:
+                  pattern !== undefined &&
+                  start !== undefined &&
+                  Math.abs(pattern.top - start.top) <= 2 &&
+                  start.left >= pattern.right,
+              };
+            }),
+          };
+        });
+
+        expect(geometry.overflow, `${locale} page overflow`).toBeLessThanOrEqual(1);
+        expect(geometry.defaultsBelowLedger, `${locale} defaults below series ledger`).toBe(true);
+        for (let i = 0; i < geometry.rows.length; i += 1) {
+          const row = geometry.rows[i];
+          if (row === undefined) throw new Error("Missing row geometry");
+          expect(row.fitsCard, `${locale} row ${i} fits card`).toBe(true);
+          expect(row.patternAndStartAligned, `${locale} row ${i} pattern and start paired`).toBe(
+            true,
+          );
+          if (testInfo.project.name === "desktop") {
+            expect(row.sameDesktopLine, `${locale} row ${i} single horizontal ledger row`).toBe(
+              true,
+            );
+          }
+          const prev = geometry.rows[i - 1];
+          if (prev !== undefined) {
+            expect(row.top, `${locale} row ${i} below previous row`).toBeGreaterThanOrEqual(
+              prev.bottom - 1,
+            );
+          }
+        }
+      }
+
+      // Live per-series preview updates independently and flags invalid entries inline.
+      await page.locator("#onb-pattern-proforma").fill("PRO-YY-NNN");
+      await page.locator("#onb-start-proforma").fill("15");
+      await expect(page.locator("#onb-series-preview-proforma")).toContainText("PRO-26-015");
+      await expect(page.locator("#onb-series-preview-proforma")).toContainText("PRO-26-016");
+      await expect(page.locator("#onb-series-preview-invoice")).toContainText("2026-0001");
+
+      await page.locator("#onb-start-credit_note").fill("0");
+      await expect(page.locator("#onb-start-credit_note")).toHaveAttribute("aria-invalid", "true");
+      await expect(
+        page.locator('#onb-series-preview-credit_note [data-slot="series-row-error"]'),
+      ).toBeVisible();
 
       errors.assertClean();
     });
@@ -321,7 +521,9 @@ if (typeof Bun === "undefined") {
 
       await expect(page).toHaveURL(/\/legal\/privacy#main$/);
       await expect(page.locator("#main")).toBeFocused();
-      await expect(page.locator('body > div[aria-live="assertive"]')).toHaveText(/Kvitbit/);
+      await expect(
+        page.locator('body > div[aria-live="assertive"]:not([data-ui-sdk-announcer])'),
+      ).toHaveText(/Kvitbit/);
       await expect(page.locator("body")).toHaveAttribute("data-navigation-probe", "same-document");
 
       await page.goBack();
@@ -401,12 +603,12 @@ if (typeof Bun === "undefined") {
           },
         );
         await page.goto(callback);
-        await expect(page.getByRole("alert")).toBeVisible();
+        await expect(page.locator("#main").getByRole("alert")).toBeVisible();
         await expect(page).toHaveURL(callback);
         await page.getByRole("button", { name: /Try again|Retry|Zkusit znovu/i }).click();
         await expect(page).toHaveURL(destination);
         await expect(page.locator("#main h1")).toBeVisible();
-        await expect(page.getByRole("alert")).toHaveCount(0);
+        await expect(page.locator("#main").getByRole("alert")).toHaveCount(0);
       });
     }
 
@@ -419,20 +621,20 @@ if (typeof Bun === "undefined") {
       const localeSelect = page.locator("#kb-locale");
 
       await expect(modeSelect).toBeVisible();
-      await modeSelect.selectOption("dark");
+      await selectUiOption(modeSelect, "dark");
       await expect(root).toHaveAttribute("data-theme", "dark");
 
-      await modeSelect.selectOption("light");
+      await selectUiOption(modeSelect, "light");
       await expect(root).toHaveAttribute("data-theme", "light");
 
-      await modeSelect.selectOption("system");
+      await selectUiOption(modeSelect, "system");
       await expect(root).not.toHaveAttribute("data-theme", /.+/);
 
       await expect(localeSelect).toBeVisible();
-      await localeSelect.selectOption("en");
+      await selectUiOption(localeSelect, "en");
       await expect(root).toHaveAttribute("lang", "en");
 
-      await localeSelect.selectOption("cs");
+      await selectUiOption(localeSelect, "cs");
       await expect(root).toHaveAttribute("lang", "cs");
 
       errors.assertClean();
@@ -443,15 +645,15 @@ if (typeof Bun === "undefined") {
       await page.goto("/account/appearance", { waitUntil: "domcontentloaded" });
 
       const root = page.locator(".kb-root");
-      const cozy = page.getByRole("button", { name: "Cozy", exact: true });
-      const elegant = page.getByRole("button", { name: "Elegant", exact: true });
+      const cozy = page.getByRole("radio", { name: "Cozy", exact: true });
+      const elegant = page.getByRole("radio", { name: "Elegant", exact: true });
 
       await expect(cozy).toBeVisible();
       await cozy.click();
       await expect(root).toHaveAttribute("data-style", "cozy");
       await page.reload({ waitUntil: "domcontentloaded" });
       await expect(root).toHaveAttribute("data-style", "cozy");
-      await expect(cozy).toHaveAttribute("aria-pressed", "true");
+      await expect(cozy).toHaveAttribute("aria-checked", "true");
 
       await elegant.click();
       await expect(root).toHaveAttribute("data-style", "elegant");
@@ -491,7 +693,7 @@ if (typeof Bun === "undefined") {
           ),
         )
         .toBe(true);
-      await locale.selectOption("en");
+      await selectUiOption(locale, "en");
       await expect(page.locator(".kb-root")).toHaveAttribute("lang", "en");
       await expect(page.locator("html")).toHaveAttribute("lang", "en");
       expect(
@@ -499,6 +701,39 @@ if (typeof Bun === "undefined") {
           () => Reflect.get(window, "kbServerControl") === document.querySelector("#kb-locale"),
         ),
       ).toBe(true);
+      errors.assertClean();
+    });
+
+    test("supports keyboard navigation on ui-sdk segmented controls, dialogs, and workspace menu", async ({
+      page,
+    }, testInfo) => {
+      const errors = attachErrorGuards(page);
+      await page.goto("/account/appearance", { waitUntil: "domcontentloaded" });
+      const elegant = page.getByRole("radio", { name: "Elegant", exact: true });
+      await elegant.focus();
+      await page.keyboard.press("ArrowRight");
+      await expect(page.locator(".kb-root")).toHaveAttribute("data-style", "cozy");
+      await page.keyboard.press("ArrowLeft");
+      await expect(page.locator(".kb-root")).toHaveAttribute("data-style", "elegant");
+
+      await page.goto(`/w/${DEMO_WS}/reports/revenue?period=2026`, {
+        waitUntil: "domcontentloaded",
+      });
+      await page.getByRole("button", { name: /^(Export|Exportovat)$/ }).click();
+      const exportDialog = page.getByRole("dialog");
+      await expect(exportDialog).toBeVisible();
+      await page.keyboard.press("Escape");
+      await expect(exportDialog).toHaveCount(0);
+
+      if (testInfo.project.name === "desktop") {
+        const switcher = page.getByTestId("workspace-switcher");
+        await switcher.click();
+        await expect(switcher).toHaveAttribute("aria-expanded", "true");
+        await expect(page.getByRole("menu")).toBeVisible();
+        await page.keyboard.press("Escape");
+        await expect(switcher).toHaveAttribute("aria-expanded", "false");
+      }
+
       errors.assertClean();
     });
 
@@ -624,6 +859,58 @@ if (typeof Bun === "undefined") {
       await page.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
       await expect(overdue).toBeVisible();
       expect(reloaded).toBe(false);
+    });
+
+    test("pasting a full address on onboarding splits into empty address inputs", async ({
+      page,
+    }) => {
+      const errors = attachErrorGuards(page);
+      await page.goto("/onboarding", { waitUntil: "domcontentloaded" });
+
+      const street = page.locator("#onb-street");
+      const city = page.locator("#onb-city");
+      const postal = page.locator("#onb-postal");
+      await expect(street).toBeVisible();
+
+      const dispatchPaste = async (selector: string, text: string) =>
+        page.evaluate(
+          ({ sel, clip }) => {
+            const el = document.querySelector(sel);
+            if (!(el instanceof HTMLInputElement)) throw new Error(`missing input ${sel}`);
+            el.focus();
+            const data = new DataTransfer();
+            data.setData("text/plain", clip);
+            const event = new ClipboardEvent("paste", {
+              clipboardData: data,
+              bubbles: true,
+              cancelable: true,
+            });
+            el.dispatchEvent(event);
+            return event.defaultPrevented;
+          },
+          { sel: selector, clip: text },
+        );
+
+      // Single-line full address splits across Street, City, and Postal code.
+      expect(await dispatchPaste("#onb-street", "Jankovcova 1522/53, 170 00 Praha 7")).toBe(true);
+      await expect(street).toHaveValue("Jankovcova 1522/53");
+      await expect(city).toHaveValue("Praha 7");
+      await expect(postal).toHaveValue("170 00");
+
+      // Multiline address respects non-empty fields and fills only empty siblings.
+      await street.fill("");
+      await city.fill("Brno");
+      await postal.fill("");
+      expect(await dispatchPaste("#onb-street", "Na Florenci 2116/15\n110 00 Praha 1")).toBe(true);
+      await expect(street).toHaveValue("Na Florenci 2116/15");
+      await expect(city).toHaveValue("Brno");
+      await expect(postal).toHaveValue("110 00");
+
+      // Plain single-part street text is not intercepted.
+      await street.fill("");
+      expect(await dispatchPaste("#onb-street", "Korunní 810/104")).toBe(false);
+
+      errors.assertClean();
     });
   });
 }

@@ -36,6 +36,37 @@ const decodeDemoShare = (token: string): SharedDocumentView => {
 };
 
 describe("Auth page (Screen 02)", () => {
+  test("keeps a live region mounted after a no-challenge response", async () => {
+    const route: Auth.Route = { _tag: "ResetPassword" };
+    const ctx = ctxFor(route, { locale: "en", session: anonymous });
+    const pending = Auth.init(route, ctx).model;
+    const ready = Auth.update(
+      pending,
+      Auth.Message.GotBotProof({
+        seq: pending.botSeq,
+        status: "not_required",
+        header: null,
+        reason: null,
+      }),
+      ctx,
+    ).model;
+    const component = Html.component({
+      name: "AuthProofStatus",
+      props: Auth.Model,
+      model: Auth.Model,
+      message: Auth.Message,
+    }).make({
+      init: ($) => $.set($.props),
+      update: ($) => $.set($.model),
+      view: (h, model) => Auth.view(model, ctx, h),
+    });
+
+    const pendingHtml = (await Effect.runPromise(HtmlServer.renderToHtml(component, pending))).html;
+    const readyHtml = (await Effect.runPromise(HtmlServer.renderToHtml(component, ready))).html;
+    expect(pendingHtml).toContain('role="status"');
+    expect(readyHtml).toContain('role="status"');
+  });
+
   test("SignUp starts ALTCHA solve, drops stale botSeq, validates fields, and auto-re-solves on freshBotProof", () => {
     const route: Auth.Route = { _tag: "SignUp" };
     const ctx = ctxFor(route, { locale: "en", session: anonymous });

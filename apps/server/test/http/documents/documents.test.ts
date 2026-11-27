@@ -12,6 +12,7 @@ import {
 } from "@kvitbit/domain/contract";
 import { BigDecimal, Effect, Ref } from "effect";
 import { TestClock } from "effect/testing";
+import { captureAnalytics } from "../../analytics-fixture";
 import { as, type Harness, json, makeHarness, TEST_NOW, type TestUser } from "../harness";
 
 let h: Harness;
@@ -19,6 +20,7 @@ let owner: TestUser;
 let member: MemberCaller;
 let contactId: ContactId;
 let base: string;
+let analytics: ReturnType<typeof captureAnalytics>;
 
 const invoiceInput = (overrides: Record<string, unknown> = {}) => ({
   kind: "invoice",
@@ -62,7 +64,8 @@ const patchJson = (path: string, body: unknown, headers: Record<string, string> 
 };
 
 beforeEach(async () => {
-  h = makeHarness();
+  analytics = captureAnalytics();
+  h = makeHarness({ analytics: analytics.layer });
   await h.run(TestClock.setTime(TEST_NOW));
   owner = h.addUser("Olga");
   member = await h.createWorkspace(owner);
@@ -86,6 +89,71 @@ afterEach(async () => {
 });
 
 describe("documents group", () => {
+  test("captures draft creation and both issue paths with only the document kind and source", async () => {
+    const created = await postJson(base, invoiceInput(), { "idempotency-key": "analytics-doc-1" });
+    expect(created.status).toBe(201);
+    const draft = (await created.json()) as { id: string; revision: number };
+    expect(
+      (await postJson(base, invoiceInput(), { "idempotency-key": "analytics-doc-1" })).headers.get(
+        "idempotent-replayed",
+      ),
+    ).toBe("true");
+    const edited = await patchJson(
+      `${base}/${draft.id}`,
+      { note: "Private draft note" },
+      { "if-match": `"${draft.revision}"` },
+    );
+    expect(edited.status).toBe(200);
+    expect(
+      (
+        await postJson(
+          `${base}/${draft.id}/issue`,
+          {},
+          { "if-match": edited.headers.get("etag") ?? "" },
+        )
+      ).status,
+    ).toBe(200);
+    expect((await postJson(`${base}/issue`, { input: invoiceInput() })).status).toBe(201);
+    const properties = { workspaceId: member.workspaceId, kind: "invoice" };
+    expect(analytics.capture.mock.calls).toEqual([
+      [
+        {
+          event: "document_created",
+          distinctId: owner.id,
+          properties: { ...properties, source: "draft" },
+        },
+      ],
+      [
+        {
+          event: "document_draft_saved",
+          distinctId: owner.id,
+          properties: { ...properties, mode: "created" },
+        },
+      ],
+      [
+        {
+          event: "document_draft_saved",
+          distinctId: owner.id,
+          properties: { ...properties, mode: "updated" },
+        },
+      ],
+      [
+        {
+          event: "document_issued",
+          distinctId: owner.id,
+          properties: { ...properties, source: "draft" },
+        },
+      ],
+      [
+        {
+          event: "document_issued",
+          distinctId: owner.id,
+          properties: { ...properties, source: "direct" },
+        },
+      ],
+    ]);
+  });
+
   test("preview computes a DocumentView without persisting it", async () => {
     const res = await postJson(`${base}/preview`, invoiceInput());
     expect(res.status).toBe(200);

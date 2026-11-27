@@ -5,7 +5,7 @@ description: >-
   changes to apps/web/src, the web entry or build configuration, or
   packages/ui-port/src/theme.
 metadata:
-  sync_commit: "383766ac036a7dfe79ace530bcd508e3c32c3740"
+  sync_commit: "540c8ef4aff250f71ec6d7ffa172f9e7c8c3ff64"
   bun: "1.4.4"
   node: "24.18.0"
   effect: "4.1.4"
@@ -49,7 +49,9 @@ sign-in from a filtered Price List URL, native mobile-app navigation,
 public PDF downloads, and appearance changes. It covers default and explicit
 magic-link callbacks that recover from a failed membership request, and
 open shares that update after UTC midnight via a timer or a visibility
-event. Both desktop and mobile profiles use demo responses.
+event. Auth coverage measures submit position across challenge outcomes and
+checks that edits, validation errors, and method changes retain the status
+node. Both desktop and mobile profiles use demo responses.
 The typed API and server integrations have their own checks.
 
 ## Run
@@ -70,7 +72,7 @@ Playwright runs in `.github/workflows/nightly.yml`:
 3. Run the browser suite on an unused local port with one worker.
 
    ```sh
-   KVITBIT_WEB_E2E_PORT=34181 bun run --cwd apps/web e2e smoke.spec.ts feedback.spec.ts --workers=1
+   KVITBIT_WEB_E2E_PORT=34181 bun run --cwd apps/web e2e auth.spec.ts smoke.spec.ts feedback.spec.ts --workers=1
    ```
 
 Record the product commit and tool versions after the suite passes. Keep
@@ -79,10 +81,63 @@ that record in a verification commit after the product changes.
 
 ## Verification record
 
-The recorded product commit passed root lint and typecheck, all 183 web
-tests, and the formal digest check. The lockfile was unchanged. The static
-build contained `dist/index.html`, hashed JavaScript and CSS, brand assets,
-and fonts. All 56 smoke and feedback tests passed on port `34181` with one
+At `540c8ef4aff250f71ec6d7ffa172f9e7c8c3ff64`, the `@ui-sdk/core` and `@ui-sdk/web`
+migration passed `apps/web` Biome checks, `apps/web` TypeScript typecheck, and all
+223 tests across 23 `apps/web/test` files (including SSR hydration upgrade without
+node replacement, `@ui-sdk/web/agent` discovery and control driving, and headless
+`HtmlScene` address-paste splitting). The static build contains `dist/index.html`,
+hashed JavaScript and CSS chunks for `@ui-sdk/web` primitives, the lazy feedback
+chunk, the ALTCHA worker, `dist/assets/brand`, and `dist/fonts`.
+
+The auth, smoke, and feedback Playwright suites (81 passed, 1 mobile-only skip)
+passed on port `34189` with one worker across desktop and mobile Chromium profiles.
+The suites verify `ui-select` locale/mode switching and SSR hydration reuse,
+`ui-checkbox` search filter preservation, `ui-segmented-control` container fill and
+arrow-key navigation without focus loss on `/account/appearance`, `ui-dialog` Escape
+dismissal, desktop `ui-menu` workspace switcher open/Escape/shortcut handling,
+address-paste splitting on onboarding, cookieless pageviews, and stable auth submit
+and status layout.
+
+At the recorded product commit, the Playwright auth tests kept the submit
+button in place when sign-in, sign-up, and password reset received a
+no-challenge response. The sign-up test also covered validation and retry.
+Before this change, the same measurements found 28 to 54 pixels of movement
+and the sign-up validation error replaced the status node.
+
+The auth, smoke, and feedback suites passed in desktop and mobile Chromium
+with one worker on port `36000`. Biome checks on the edited files, the web
+and mobile typechecks, the targeted web and mobile auth tests, and the formal
+digest check passed.
+
+At `0fd105ebb0533916112db09d3f035ae3d0ac476b` (rebased cleanly from `3372918b`
+onto `0f5643de`), the onboarding numbering overhaul passed Biome checks on the
+edited files, `apps/web/test/public/consent-invite-onboarding.test.ts`, and
+PR CI (`check`, `static-mounts`, `formal`, `changes` on `aeee3ec2`). The
+lockfile was unchanged. The static build contained `dist/index.html`, hashed
+JavaScript and CSS, `dist/assets/brand`, and `dist/fonts`. All 58 smoke and
+feedback Playwright tests passed on `3372918b` on port `34183` with one worker
+across desktop and mobile Chromium profiles. The smoke suite verifies the
+redesigned `/onboarding?step=4` numbering ledger and document defaults layout
+in English and Czech, including per-row alignment, independent live number
+previews, inline validation, and zero horizontal overflow.
+
+At `27555299dca87058231afdf2872b9c247091a1d9`, the address paste change passed
+Biome checks on all edited files and targeted unit tests for `packages/ui-port`
+(`address.test.ts`), `apps/web`
+(`consent-invite-onboarding.test.ts`, `settings.test.ts`, `contacts.test.ts`,
+`tea-invariants.test.ts`), and `apps/mobile` (`onboarding-screen.test.tsx`).
+The lockfile was unchanged. The static build contained `dist/index.html`,
+hashed JavaScript and CSS, the ALTCHA worker, `dist/assets/brand`, and
+`dist/fonts`. All 58 smoke and feedback Playwright tests passed on port
+`34187` with one worker across desktop and mobile Chromium profiles,
+covering single-line and multiline address paste splitting on `/onboarding`,
+preservation of non-empty fields, and pass-through of single-part pastes.
+
+At `383766ac036a7dfe79ace530bcd508e3c32c3740`, the segmented control change
+passed root lint and typecheck, all 183 web tests, and the formal digest
+check. The lockfile was unchanged. The static build contained
+`dist/index.html`, hashed JavaScript and CSS, brand assets, and fonts.
+All 56 smoke and feedback tests passed on port `34181` with one
 worker across desktop and mobile Chromium profiles. The smoke suite covers
 stretched and inline segmented controls in English and Czech, including
 equal-width sign-up options, single-line sign-in labels, and word fit in a
@@ -100,6 +155,25 @@ with one worker across desktop and mobile Chromium profiles. The smoke suite
 verifies that `/sign-in` renders concise method selector labels on a single
 line without overflow in both English and Czech across Elegant and Cozy
 styles while keeping the full passkey action label on the submit button.
+
+At `95fdee1c534309442ab9ab8923a4bab1dbf7e800`, the feedback shortcut passed the frozen
+install, root lint and typecheck, `bun test apps/web`, and the formal digest
+check. The static build contained the lazy feedback chunk, ALTCHA worker,
+hashed JavaScript and CSS, brand assets, and Fontshare TTFs.
+
+The smoke and feedback Playwright suites passed on port `47683` with one
+worker across desktop and mobile Chromium profiles. The feedback suite
+checks that verified owners can pin elements, retry a submission, and
+receive its issue link. It checks that non-owners skip the picker chunk,
+that pins omit private links and entered form values, and that signing
+out removes the picker. A failed mount restores browser diagnostics.
+The selector unit test declines a pin when its bounded path matches
+multiple elements.
+
+The shortcut tests exercise `k` toggling, editable fields including the
+shadow DOM composer, pending submission, the pin limit, pathname changes,
+and listener removal on sign-out. The desktop workspace switcher still
+responds to Ctrl+K and Cmd+K.
 
 At `c54559c3a9ab795c44f08d4584e6a28c88074466`, Chromium and Firefox
 loaded all bundled fonts without console warnings.

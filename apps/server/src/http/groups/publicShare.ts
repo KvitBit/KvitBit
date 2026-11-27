@@ -6,6 +6,7 @@ import { PublicShareLinks, Unavailable } from "@kvitbit/domain/contract";
 import { Effect, Stream } from "effect";
 import { HttpServerRequest } from "effect/http/HttpServerRequest";
 import { HttpApiBuilder } from "effect/http-api";
+import { Analytics } from "../../runtime/analytics";
 import { compact, downloadResponse, fileDownload } from "../conventions";
 import { jsonizeSharedDocumentView } from "./documents/jsonize";
 
@@ -55,9 +56,13 @@ const concatBytes = (chunks: ReadonlyArray<Uint8Array>): Uint8Array => {
 export const PublicShareGroupLive = HttpApiBuilder.group(Api, "publicShare", (handlers) =>
   Effect.gen(function* () {
     const shareLinks = yield* PublicShareLinks;
+    const analytics = yield* Analytics;
     return handlers
       .handle("open", () =>
-        withVisitorDevice(Effect.map(shareLinks.open, jsonizeSharedDocumentView)),
+        withVisitorDevice(shareLinks.open).pipe(
+          Effect.tap(() => analytics.capture({ event: "share_link_opened" })),
+          Effect.map(jsonizeSharedDocumentView),
+        ),
       )
       .handle("pdf", ({ query }) =>
         withVisitorDevice(Effect.map(shareLinks.pdf(compact(query)), (file) => fileDownload(file))),

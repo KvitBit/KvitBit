@@ -469,11 +469,18 @@ export const runTlc = async (
   const spec = path.resolve(REPO_ROOT, r.spec);
   const config = path.resolve(REPO_ROOT, r.config);
   const slug = r.label.replace(/[^\w.-]+/g, "_");
-  const metadir = path.join(CACHE_DIR, "tlc", slug);
+  const runKey = `${slug}.${process.pid}`;
+  const metadir = path.join(CACHE_DIR, "tlc", runKey);
+  // Isolate java.io.tmpdir per TLC process: SANY unpacks standard modules (e.g. Naturals.tla)
+  // into java.io.tmpdir without atomic rename, so parallel Turbo formal tasks race on /tmp.
+  const tmpdir = path.join(CACHE_DIR, "tmp", runKey);
   rmSync(metadir, { recursive: true, force: true });
+  rmSync(tmpdir, { recursive: true, force: true });
+  mkdirSync(tmpdir, { recursive: true });
   mkdirSync(logDir, { recursive: true });
   const args = [
     "-XX:+UseParallelGC",
+    `-Djava.io.tmpdir=${tmpdir}`,
     "-cp",
     tools.jar,
     "tlc2.TLC",
@@ -489,6 +496,7 @@ export const runTlc = async (
   const log = path.join(logDir, `${slug}.log`);
   writeFileSync(log, `$ ${tools.java} ${args.join(" ")}\n${res.output}`);
   rmSync(metadir, { recursive: true, force: true });
+  rmSync(tmpdir, { recursive: true, force: true });
   const outcome: TlcOutcome = res.timedOut
     ? { verdict: "timeout", seconds: r.timeoutSeconds }
     : classifyTlc(res.status, res.output);

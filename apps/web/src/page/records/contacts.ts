@@ -39,14 +39,16 @@ import {
   mono,
   page,
   pageHeader,
+  searchInput,
   selectField,
   skeleton,
   skeletonTable,
   table,
   textArea,
   textField,
+  toggleChip,
 } from "../../ui/kit";
-import { chipVariants, cn, controlVariants, ui } from "../../ui/styles";
+import { cn, ui } from "../../ui/styles";
 import {
   apiCommand,
   ContactRecord,
@@ -245,6 +247,12 @@ export const Message = UiSchema.TaggedEnum({
       "reminderOffsets",
     ]),
     value: Schema.String,
+  },
+  PastedEditorAddress: {
+    street: Schema.String,
+    city: Schema.String,
+    postalCode: Schema.String,
+    country: Schema.String,
   },
   ToggledRole: { role: Schema.Literals(["customer", "supplier"]), checked: Schema.Boolean },
   ChangedReminderMode: { mode: Schema.Literals(["inherit", "disabled", "custom"]) },
@@ -772,6 +780,24 @@ export const update = (
       };
     },
 
+    PastedEditorAddress: ({ street, city, postalCode, country }) => {
+      if (model.editor === null) return { model };
+      return {
+        model: {
+          ...model,
+          editor: {
+            ...model.editor,
+            street,
+            city,
+            postalCode,
+            country,
+            error: null,
+            aresError: null,
+          },
+        },
+      };
+    },
+
     ToggledRole: ({ role, checked }) => {
       if (model.editor === null) return { model };
       return {
@@ -1133,33 +1159,30 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
                 "pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-on-surface-variant",
               )
               .children([icon(h, "search", 16)]),
-            h.input
-              .class(cn(controlVariants({ kind: "input" }), "pl-[34px]"))
-              .attr("type", "search")
-              .attr("placeholder", tr.t("contacts.list.search"))
-              .attr("aria-label", tr.t("contacts.list.search"))
-              .value(model.search)
-              .on("input", ({ value }) => Message.ChangedSearch({ value })),
+            searchInput(h, {
+              value: model.search,
+              placeholder: tr.t("contacts.list.search"),
+              ariaLabel: tr.t("contacts.list.search"),
+              inputClassName: "pl-[34px]",
+              onInput: (value) => Message.ChangedSearch({ value }),
+            }),
           ]),
           h.div.class("flex flex-wrap items-center gap-1.5").children([
-            h.button
-              .class(chipVariants({ active: model.roleFilter === null }))
-              .attr("type", "button")
-              .attr("aria-pressed", String(model.roleFilter === null ? "true" : "false"))
-              .on("click", Message.SelectedRoleFilter({ role: null }))
-              .children([tLocal(ctx.locale, "allRoles")]),
-            h.button
-              .class(chipVariants({ active: model.roleFilter === "customer" }))
-              .attr("type", "button")
-              .attr("aria-pressed", String(model.roleFilter === "customer" ? "true" : "false"))
-              .on("click", Message.SelectedRoleFilter({ role: "customer" }))
-              .children([tLocal(ctx.locale, "customers")]),
-            h.button
-              .class(chipVariants({ active: model.roleFilter === "supplier" }))
-              .attr("type", "button")
-              .attr("aria-pressed", String(model.roleFilter === "supplier" ? "true" : "false"))
-              .on("click", Message.SelectedRoleFilter({ role: "supplier" }))
-              .children([tLocal(ctx.locale, "suppliers")]),
+            toggleChip(h, {
+              label: tLocal(ctx.locale, "allRoles"),
+              pressed: model.roleFilter === null,
+              onPress: Message.SelectedRoleFilter({ role: null }),
+            }),
+            toggleChip(h, {
+              label: tLocal(ctx.locale, "customers"),
+              pressed: model.roleFilter === "customer",
+              onPress: Message.SelectedRoleFilter({ role: "customer" }),
+            }),
+            toggleChip(h, {
+              label: tLocal(ctx.locale, "suppliers"),
+              pressed: model.roleFilter === "supplier",
+              onPress: Message.SelectedRoleFilter({ role: "supplier" }),
+            }),
             checkbox(h, {
               id: "contacts-show-archived",
               label: tr.t("contacts.list.showArchived"),
@@ -1185,6 +1208,15 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
       route.id === "new"
         ? href({ _tag: "Contacts", ws: route.ws, query: {} })
         : href({ _tag: "Contact", ws: route.ws, id: route.id, mode: "view" });
+    const pasteAddress = (field: Format.AddressField) => (text: string) => {
+      const next = Format.applyAddressPaste(
+        { street: ed.street, city: ed.city, postalCode: ed.postalCode, country: ed.country },
+        field,
+        text,
+        { defaultCountry: "CZ" },
+      );
+      return next === undefined ? undefined : Message.PastedEditorAddress(next);
+    };
 
     return page(h, [
       pageHeader(h, {
@@ -1291,12 +1323,14 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
                   label: tr.t("common.field.street"),
                   value: ed.street,
                   onInput: (value) => Message.ChangedEditorField({ field: "street", value }),
+                  onPaste: pasteAddress("street"),
                 }),
                 textField(h, {
                   id: "contact-city",
                   label: tr.t("common.field.city"),
                   value: ed.city,
                   onInput: (value) => Message.ChangedEditorField({ field: "city", value }),
+                  onPaste: pasteAddress("city"),
                 }),
                 textField(h, {
                   id: "contact-postal",
@@ -1304,6 +1338,7 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
                   value: ed.postalCode,
                   mono: true,
                   onInput: (value) => Message.ChangedEditorField({ field: "postalCode", value }),
+                  onPaste: pasteAddress("postalCode"),
                 }),
                 textField(h, {
                   id: "contact-country",
@@ -1311,6 +1346,7 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
                   value: ed.country,
                   mono: true,
                   onInput: (value) => Message.ChangedEditorField({ field: "country", value }),
+                  onPaste: pasteAddress("country"),
                 }),
               ]),
             h.div.class(ui.stack).children([
@@ -1868,6 +1904,7 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
       ? dialog(h, {
           id: "contact-archive-dialog",
           title: tLocal(ctx.locale, "archiveTitle"),
+          alert: true,
           onClose: Message.CancelledArchive(),
           body: [h.p.children([tLocal(ctx.locale, "archiveBody", { name: contact.name })])],
           actions: [

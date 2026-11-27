@@ -1183,9 +1183,13 @@ const viewAppearance = (model: Model, ctx: PageContext, h: Html.H<Message>): Mar
             onClick: Message.ClickedSaveAppearance(),
           }),
         ]),
-        ...(model.appearance.dirty
-          ? [banner(h, { tone: "info", text: t.t("account.appearance.unsaved") })]
-          : []),
+        h.div
+          .style({ display: "contents" })
+          .children(
+            model.appearance.dirty
+              ? [banner(h, { tone: "info", text: t.t("account.appearance.unsaved") })]
+              : [],
+          ),
         h.div.class("flex flex-col gap-3").children([
           h.h3.children([t.t("account.appearance.presets")]),
           h.div.class("grid grid-cols-[repeat(auto-fit,minmax(150px,1fr))] gap-2.5").children(
@@ -1239,6 +1243,7 @@ const viewAppearance = (model: Model, ctx: PageContext, h: Html.H<Message>): Mar
                 segmented(h, {
                   label: t.t("account.appearance.style"),
                   selected: ctx.prefs.style,
+                  fill: true,
                   items: (["elegant", "cozy"] as const).map((s) => ({
                     id: s,
                     label: t.translate(Theme.styleNameText(s)),
@@ -1258,6 +1263,7 @@ const viewAppearance = (model: Model, ctx: PageContext, h: Html.H<Message>): Mar
                 segmented(h, {
                   label: t.t("account.appearance.mode"),
                   selected: ctx.prefs.mode,
+                  fill: true,
                   items: (["system", "light", "dark"] as const).map((m) => ({
                     id: m,
                     label: t.translate(Theme.modeNameText(m)),
@@ -1276,6 +1282,7 @@ const viewAppearance = (model: Model, ctx: PageContext, h: Html.H<Message>): Mar
                 segmented(h, {
                   label: t.t("account.appearance.contrast"),
                   selected: ctx.prefs.contrast,
+                  fill: true,
                   items: (["standard", "medium", "high"] as const).map((c) => ({
                     id: c,
                     label: t.translate(Theme.contrastNameText(c)),
@@ -1496,6 +1503,7 @@ const viewSecurity = (model: Model, ctx: PageContext, h: Html.H<Message>): Marku
           dialog(h, {
             id: "kb-remove-passkey-dialog",
             title: t.t("account.security.removePasskeyTitle", { name: removing.name }),
+            alert: true,
             body: [h.p.children([t.t("common.confirm.delete.body")])],
             actions: [
               button(h, {

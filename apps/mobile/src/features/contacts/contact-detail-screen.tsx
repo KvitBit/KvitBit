@@ -19,6 +19,8 @@ import {
   Remote as RemoteOps,
 } from "@kvitbit/ui-port/api";
 import {
+  type AddressField,
+  applyAddressInputChange,
   formatDate,
   formatDateTime,
   formatMoney,
@@ -656,6 +658,23 @@ export function ContactEditorView(props: ContactEditorViewProps) {
   const country = form.country.trim().toUpperCase();
   const czech = country === "CZ";
 
+  const updateAddressField = (field: Exclude<AddressField, "country">, value: string) => {
+    onChangeForm((prev) => {
+      const pasted = applyAddressInputChange(
+        {
+          street: prev.street,
+          city: prev.city,
+          postalCode: prev.postalCode,
+          country: prev.country,
+        },
+        field,
+        value,
+        { defaultCountry: "CZ" },
+      );
+      return pasted === undefined ? { ...prev, [field]: value } : { ...prev, ...pasted };
+    });
+  };
+
   return (
     <View className="gap-4">
       {!props.isNew ? (
@@ -804,18 +823,18 @@ export function ContactEditorView(props: ContactEditorViewProps) {
           <TextField
             label={t(czech ? "common.field.street" : "common.field.address")}
             value={form.street}
-            onChangeText={(street) => onChangeForm((prev) => ({ ...prev, street }))}
+            onChangeText={(street) => updateAddressField("street", street)}
             multiline={!czech}
           />
           <TextField
             label={t("common.field.city")}
             value={form.city}
-            onChangeText={(city) => onChangeForm((prev) => ({ ...prev, city }))}
+            onChangeText={(city) => updateAddressField("city", city)}
           />
           <TextField
             label={t("common.field.postalCode")}
             value={form.postalCode}
-            onChangeText={(postalCode) => onChangeForm((prev) => ({ ...prev, postalCode }))}
+            onChangeText={(postalCode) => updateAddressField("postalCode", postalCode)}
           />
         </Card>
       </Section>

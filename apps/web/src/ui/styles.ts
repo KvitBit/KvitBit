@@ -8,7 +8,7 @@ import { cn, cva, type VariantProps } from "@kvitbit/ui-port/style";
 export { cn, cva, type VariantProps };
 
 export const buttonVariants = cva(
-  "inline-flex items-center justify-center gap-1.5 rounded-control border font-medium cursor-pointer no-underline whitespace-nowrap transition-[background-color,border-color,color] duration-150 ease-out disabled:opacity-45 disabled:cursor-not-allowed aria-disabled:opacity-45 aria-disabled:cursor-not-allowed aria-[busy=true]:cursor-progress aria-[busy=true]:opacity-80",
+  "inline-flex items-center justify-center gap-1.5 rounded-control border font-medium cursor-pointer no-underline whitespace-nowrap transition-[background-color,border-color,color] duration-150 ease-out disabled:opacity-45 disabled:cursor-not-allowed aria-disabled:opacity-45 aria-disabled:cursor-not-allowed data-[disabled]:opacity-45 data-[disabled]:cursor-not-allowed aria-[busy=true]:cursor-progress aria-[busy=true]:opacity-80 data-[pending]:cursor-progress data-[pending]:opacity-80",
   {
     variants: {
       variant: {
@@ -53,7 +53,7 @@ export const cardVariants = cva(
 );
 
 export const controlVariants = cva(
-  "w-full min-h-9 rounded-control border border-outline bg-surface-container-lowest px-2.5 py-[7px] text-on-surface transition-[border-color,box-shadow] duration-150 ease-out hover:border-on-surface-variant focus-visible:outline-none focus-visible:border-primary focus-visible:shadow-[0_0_0_1px_var(--md-sys-color-primary)] aria-[invalid=true]:border-error disabled:opacity-50",
+  "w-full min-h-9 rounded-control border border-outline bg-surface-container-lowest px-2.5 py-[7px] text-on-surface transition-[border-color,box-shadow] duration-150 ease-out hover:border-on-surface-variant focus-visible:outline-none focus-visible:border-primary focus-visible:shadow-[0_0_0_1px_var(--md-sys-color-primary)] aria-[invalid=true]:border-error [[data-invalid]_&]:border-error disabled:opacity-50 disabled:cursor-not-allowed data-[disabled]:opacity-50 data-[disabled]:cursor-not-allowed",
   {
     variants: {
       kind: {
@@ -124,12 +124,12 @@ export const barToneVariants = cva("w-[min(1rem,45%)] min-h-px rounded-t-[2px]",
 });
 
 export const chipVariants = cva(
-  "inline-flex min-h-[30px] cursor-pointer items-center gap-1.5 rounded-badge border px-3 text-[0.8125rem] font-medium transition-[background-color,border-color,color] duration-150 ease-out",
+  "inline-flex min-h-[30px] cursor-pointer items-center gap-1.5 rounded-badge border px-3 text-[0.8125rem] font-medium transition-[background-color,border-color,color] duration-150 ease-out disabled:cursor-not-allowed disabled:opacity-45",
   {
     variants: {
       active: {
         false:
-          "border-outline-variant bg-surface-container-lowest text-on-surface-variant hover:border-outline hover:text-on-surface",
+          "border-outline-variant bg-surface-container-lowest text-on-surface-variant hover:border-outline hover:text-on-surface aria-[pressed=true]:border-primary aria-[pressed=true]:bg-primary-container aria-[pressed=true]:text-on-primary-container",
         true: "border-primary bg-primary-container text-on-primary-container",
       },
     },
@@ -138,7 +138,7 @@ export const chipVariants = cva(
 );
 
 export const segmentedButtonVariants = cva(
-  "grid cursor-pointer place-items-center border-0 bg-transparent text-center text-[0.8125rem] text-on-surface-variant [&+&]:border-l [&+&]:border-outline-variant aria-[pressed=true]:bg-primary-container aria-[pressed=true]:text-on-primary-container",
+  "grid cursor-pointer select-none place-items-center border-0 bg-transparent text-center text-[0.8125rem] text-on-surface-variant [&+&]:border-l [&+&]:border-outline-variant data-[checked]:text-on-primary-container aria-[checked=true]:text-on-primary-container [&[aria-checked=true]:not([data-checked])]:bg-primary-container",
   {
     variants: {
       sizing: {
@@ -151,7 +151,7 @@ export const segmentedButtonVariants = cva(
 );
 
 export const botProofVariants = cva(
-  "flex items-center justify-between gap-2.5 rounded-control border px-3 py-2.5 text-[0.8125rem]",
+  "flex items-center justify-between gap-2.5 rounded-control border px-3 py-2.5 text-[0.8125rem] data-[active=false]:invisible",
   {
     variants: {
       state: {
@@ -205,18 +205,20 @@ export const ui = {
   footnote: "text-[0.6875rem] leading-[0.875rem] text-on-surface-variant",
   mono: "font-mono text-[0.8125rem] tracking-normal",
   num: "kb-num",
-  divider: "m-0 h-px border-0 bg-outline-variant",
+  divider:
+    "my-1 block h-px border-0 bg-outline-variant data-[orientation=vertical]:mx-1 data-[orientation=vertical]:my-0 data-[orientation=vertical]:h-auto data-[orientation=vertical]:w-px data-[orientation=vertical]:self-stretch",
   field: "flex min-w-0 flex-col gap-1",
-  fieldLabel: "text-[0.8125rem] font-medium text-on-surface",
-  fieldHint: "text-[0.75rem] text-on-surface-variant",
-  fieldError: "text-[0.75rem] text-error",
+  fieldLabel: "block text-[0.8125rem] font-medium text-on-surface",
+  fieldHint: "block text-[0.75rem] text-on-surface-variant",
+  fieldError: "block text-[0.75rem] text-error",
   formGrid: "grid grid-cols-1 gap-3 sm:grid-cols-2",
   formGrid3: "grid grid-cols-1 gap-3 sm:grid-cols-3",
   formGridAuto: "grid grid-cols-[repeat(auto-fit,minmax(220px,1fr))] gap-3.5",
   menuItem:
-    "flex w-full cursor-pointer items-center gap-2 rounded-control border-0 bg-transparent px-2.5 py-2 text-left text-inherit no-underline hover:bg-surface-container focus-visible:bg-surface-container",
+    "flex w-full cursor-pointer items-center gap-2 rounded-control border-0 bg-transparent px-2.5 py-2 text-left text-inherit no-underline hover:bg-surface-container focus-visible:bg-surface-container data-[highlighted]:bg-surface-container",
   navItem:
     "flex items-center gap-2.5 rounded-control px-2.5 py-2 font-medium text-on-surface-variant no-underline hover:bg-surface-container hover:text-on-surface aria-[current=page]:bg-primary-container aria-[current=page]:text-on-primary-container",
   navItemMobile:
     "flex min-h-12 flex-col items-center justify-center gap-0.5 rounded-control px-0.5 py-1.5 text-[0.6875rem] font-medium text-on-surface-variant no-underline hover:bg-surface-container hover:text-on-surface aria-[current=page]:bg-primary-container aria-[current=page]:text-on-primary-container",
+  kbd: "rounded-[4px] border border-outline-variant bg-surface-container-low px-[5px] py-0.5 font-mono text-[0.6875rem] leading-none text-on-surface-variant",
 } as const;

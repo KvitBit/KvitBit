@@ -1,3 +1,4 @@
+@layer ui-sdk;
 @import "tailwindcss";
 @import "./fonts.css";
 
@@ -155,6 +156,12 @@
   :focus-visible {
     outline: 2px solid var(--md-sys-color-primary);
     outline-offset: 2px;
+  }
+
+  ui-input,
+  ui-textarea {
+    display: block;
+    width: 100%;
   }
 
   @media (prefers-reduced-motion: reduce) {

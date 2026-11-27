@@ -8,7 +8,7 @@ import type { Html } from "@effect/ui/html";
 import { ConfigView } from "@kvitbit/api-contract";
 import { Format, ViewModels } from "@kvitbit/ui-port";
 import { Schema } from "effect";
-import { Failure } from "../../app/api";
+import { Failure, getPublicConfig } from "../../app/api";
 import { defineApiCommand } from "../../app/commands";
 import { copy, translator } from "../../app/i18n";
 import type { MessageHandlers, PageContext, PageReturn, RouteOf } from "../../app/page";
@@ -16,7 +16,7 @@ import * as Remote from "../../app/remote";
 import { href } from "../../app/routing";
 import { lockup } from "../../ui/brand";
 import { type IconName, icon } from "../../ui/icons";
-import { badge, banner, card, linkButton } from "../../ui/kit";
+import { badge, banner, card, linkButton, separator } from "../../ui/kit";
 import { buttonVariants, cn, ui } from "../../ui/styles";
 import { callApi } from "./_shared";
 
@@ -118,7 +118,7 @@ const FetchConfig = defineApiCommand("PublicLandingFetchConfig", {
   args: { seq: Remote.Seq },
   execute: ({ seq }) =>
     callApi(
-      (client) => client.config.getConfig(),
+      getPublicConfig,
       (cfg) => Message.GotConfig({ seq, config: cfg }),
       (failure) => Message.FailedConfig({ seq, failure }),
     ),
@@ -246,7 +246,7 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
                   h.span
                     .class(cn(ui.small, ui.muted))
                     .children([local(ctx.locale, "previewIssuer")]),
-                  h.hr.class(ui.divider),
+                  separator(h),
                   h.div
                     .class(ui.spread)
                     .children([

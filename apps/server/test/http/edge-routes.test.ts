@@ -7,6 +7,7 @@ import { Effect, Layer, Option } from "effect";
 import { HttpRouter } from "effect/http";
 import { SqlClient } from "effect/sql";
 import { RequestIdsLive } from "../../src/http/edge/requestId";
+import { captureAnalytics, posthogSettings } from "../analytics-fixture";
 import { as, type Harness, json, makeHarness } from "./harness";
 
 describe("Edge routes: health, config, botProtection, invitations, oauthConsent, static", () => {
@@ -118,8 +119,49 @@ describe("Edge routes: health, config, botProtection, invitations, oauthConsent,
     expect(body).toMatchObject({
       version: "1.2.3",
       botProtection: "none",
+      analytics: { posthog: null },
       features: { signUp: false, mcp: true, apiKeys: true },
     });
+  });
+
+  test("GET /api/v1/config exposes the configured PostHog project", async () => {
+    harness = makeHarness({ config: { posthog: posthogSettings } });
+    const response = await harness.fetch("/api/v1/config");
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ analytics: { posthog: posthogSettings } });
+  });
+
+  test("workspace creation succeeds when PostHog capture throws", async () => {
+    const analytics = captureAnalytics();
+    analytics.capture.mockImplementation(() => {
+      throw new Error("test SDK failure");
+    });
+    const app = makeHarness({ analytics: analytics.layer });
+    harness = app;
+    const owner = app.addUser("Private owner name");
+    const create = () =>
+      app.fetch("/api/v1/workspaces", {
+        ...json({ name: "Private workspace name" }),
+        method: "POST",
+        headers: {
+          ...as.mobile(owner),
+          "content-type": "application/json",
+          "idempotency-key": "analytics-ws-1",
+        },
+      });
+    const response = await create();
+    expect(response.status).toBe(201);
+    const workspace = (await response.json()) as { id: string };
+    expect((await create()).headers.get("idempotent-replayed")).toBe("true");
+    expect(analytics.capture.mock.calls).toEqual([
+      [
+        {
+          event: "workspace_created",
+          distinctId: owner.id,
+          properties: { workspaceId: workspace.id },
+        },
+      ],
+    ]);
   });
 
   test("GET /api/v1/bot-protection/challenges/sign_up returns 204 when NoopBotProtection is active", async () => {

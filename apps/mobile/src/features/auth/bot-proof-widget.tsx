@@ -5,7 +5,7 @@ import type { BotProofState } from "../../platform/altcha/bot-proof";
 import { useTheme } from "../../theme/theme-provider";
 import { Banner, Icon, Text } from "../../ui";
 
-/** Compact inline ALTCHA PoW status strip (renders nothing when `NotRequired`). */
+/** Inline ALTCHA status with space for the retry action before a check starts. */
 export function BotProofWidget(props: {
   readonly state: BotProofState;
   readonly onRetry: () => void;
@@ -14,15 +14,17 @@ export function BotProofWidget(props: {
   const theme = useTheme();
   const { state } = props;
 
-  if (state._tag === "NotRequired") return null;
+  if (state._tag === "NotRequired") return <View className="min-h-[72px] justify-center" />;
 
   if (state._tag === "Failed") {
     return (
-      <Banner
-        tone="error"
-        text={t("auth.botProof.failed")}
-        action={{ label: t("common.action.retry"), onPress: props.onRetry }}
-      />
+      <View className="min-h-[72px] justify-center">
+        <Banner
+          tone="error"
+          text={t("auth.botProof.failed")}
+          action={{ label: t("common.action.retry"), onPress: props.onRetry }}
+        />
+      </View>
     );
   }
 
@@ -34,25 +36,27 @@ export function BotProofWidget(props: {
         : t("auth.botProof.verified");
 
   return (
-    <View
-      accessibilityRole="text"
-      accessibilityLiveRegion="polite"
-      className="flex-row items-center gap-2 rounded-control border border-outline-variant bg-surface-container-low p-3"
-    >
-      {state._tag === "Solved" ? (
-        <Icon icon={CheckCircle2} size={18} color="primary" />
-      ) : (
-        <ActivityIndicator size="small" color={theme.colors.primary} />
-      )}
-      <View className="flex-1 gap-0.5">
-        <Text variant="bodyMedium">{label}</Text>
-        <Text variant="meta" color="onSurfaceVariant">
-          {t("auth.botProof.label")}
-        </Text>
+    <View className="min-h-[72px] justify-center">
+      <View
+        accessibilityRole="text"
+        accessibilityLiveRegion="polite"
+        className="flex-row items-center gap-2 rounded-control border border-outline-variant bg-surface-container-low p-3"
+      >
+        {state._tag === "Solved" ? (
+          <Icon icon={CheckCircle2} size={18} color="primary" />
+        ) : (
+          <ActivityIndicator size="small" color={theme.colors.primary} />
+        )}
+        <View className="flex-1 gap-0.5">
+          <Text variant="bodyMedium">{label}</Text>
+          <Text variant="meta" color="onSurfaceVariant">
+            {t("auth.botProof.label")}
+          </Text>
+        </View>
+        {state._tag === "Solved" ? null : (
+          <Icon icon={ShieldAlert} size={16} color="onSurfaceVariant" />
+        )}
       </View>
-      {state._tag === "Solved" ? null : (
-        <Icon icon={ShieldAlert} size={16} color="onSurfaceVariant" />
-      )}
     </View>
   );
 }

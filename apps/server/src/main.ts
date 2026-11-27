@@ -26,6 +26,7 @@ import {
   SingleRunnerRuntimeLive,
   WorkflowHandlersLive,
 } from "./runtime";
+import { AnalyticsLive } from "./runtime/analytics";
 import { CoreExternalPortsLive } from "./wiring";
 
 const ServerCoreLive = ServerDocumentProjectionsLive.pipe(Layer.provideMerge(CoreLive));
@@ -69,7 +70,7 @@ const ServerRuntimeLive = Layer.unwrap(
       Layer.provide(PgDatabaseLive),
     );
   }),
-);
+).pipe(Layer.provide(AnalyticsLive));
 
 export const serverProgram = Effect.gen(function* () {
   const config = yield* ServerConfig;

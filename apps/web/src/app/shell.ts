@@ -1,3 +1,4 @@
+import { Mount } from "@effect/ui";
 import type { Html } from "@effect/ui/html";
 /**
  * Shell chrome (screen 06). Public and account routes get the public header and footer; workspace
@@ -12,7 +13,19 @@ import { type Markup, withAttributes } from "../ui/html";
 import { type IconName, icon } from "../ui/icons";
 import { button, linkButton, skeleton } from "../ui/kit";
 import { compactPrefs } from "../ui/prefs-controls";
-import { buttonVariants, cn, toastVariants, ui } from "../ui/styles";
+import {
+  ariaKeyshortcuts,
+  formatShortcut,
+  SyncToasts,
+  UiButton,
+  UiMenu,
+  UiMenuContent,
+  UiMenuItem,
+  UiMenuSeparator,
+  UiMenuTrigger,
+  UiToastRegion,
+} from "../ui/sdk";
+import { cn, ui } from "../ui/styles";
 import type { RunApi } from "./commands";
 import { copy, type Translator, textOf, translator } from "./i18n";
 import type { PageContext } from "./page";
@@ -33,6 +46,7 @@ const text = copy({
     rights: "© {year} Kvitbit",
     mainNav: "Hlavní navigace",
     dismiss: "Zavřít",
+    notifications: "Oznámení",
   },
   en: {
     signIn: "Sign in",
@@ -45,6 +59,7 @@ const text = copy({
     rights: "© {year} Kvitbit",
     mainNav: "Main navigation",
     dismiss: "Dismiss",
+    notifications: "Notifications",
   },
 });
 
@@ -91,56 +106,85 @@ const navItems = (
 const switcher = (model: Model, ctx: PageContext, h: Html.H<Message>): Markup<Message, RunApi> => {
   const current = ctx.workspace ?? undefined;
   const workspaces = model.session._tag === "SignedIn" ? model.session.workspaces : [];
-  return h.div.class("relative").children([
-    h.button
-      .class(
-        "flex w-full cursor-pointer items-center justify-between gap-2 rounded-control border border-outline-variant bg-surface-container-lowest px-2.5 py-2 text-left",
-      )
-      .attr("type", "button")
-      .attr("aria-expanded", String(model.switcherOpen))
-      .attr("aria-haspopup", "menu")
-      .on("click", Message.ToggledSwitcher())
-      .attr("data-testid", "workspace-switcher")
-      .children([
-        h.span
-          .class("flex flex-col gap-0")
+  return UiMenu(h)
+    .class("relative block")
+    .open(model.switcherOpen)
+    .attr("open", model.switcherOpen ? "" : undefined)
+    .on("openchange", ({ value }) => {
+      if (value === model.switcherOpen) return undefined;
+      return value ? Message.ToggledSwitcher() : Message.ClosedSwitcher();
+    })
+    .children([
+      UiMenuTrigger(h).children([
+        h.button
+          .class(
+            "flex w-full cursor-pointer items-center justify-between gap-2 rounded-control border border-outline-variant bg-surface-container-lowest px-2.5 py-2 text-left",
+          )
+          .attr("type", "button")
+          .attr("aria-expanded", String(model.switcherOpen))
+          .attr("aria-haspopup", "menu")
+          .attr("aria-keyshortcuts", ariaKeyshortcuts("mod+k"))
+          .attr("data-testid", "workspace-switcher")
           .children([
             h.span
-              .class(cn(ui.small, ui.muted))
-              .children([tr(ctx).t("shell.workspaceSwitcher.current")]),
-            h.strong.children([current?.name ?? "…"]),
-          ]),
-        icon(h, "chevron"),
-      ]),
-    model.switcherOpen
-      ? h.div
-          .class(
-            "absolute top-[calc(100%+4px)] right-0 left-0 z-30 rounded-control border border-outline-variant bg-surface-container-lowest p-1 shadow-[0_8px_24px_-12px_color-mix(in_srgb,var(--md-sys-color-shadow)_40%,transparent)]",
-          )
-          .attr("role", "menu")
-          .on("keydown", ({ key }) => (key === "Escape" ? Message.ClosedSwitcher() : undefined))
-          .children([
-            ...workspaces.map((w) =>
-              withAttributes(h.a.class(), [
-                (element) => element.class(ui.menuItem),
-                (element) => element.attr("role", "menuitem"),
-                (element) =>
-                  element.attr("href", href(ViewModels.switchWorkspace(ctx.route, w.slug))),
-                (node) => (w.slug === current?.slug ? node.attr("aria-current", "true") : node),
-              ]).children([
-                h.span.class("flex-1").children([w.name]),
-                ...(w.slug === current?.slug ? [icon(h, "check")] : []),
+              .class("flex flex-col gap-0")
+              .children([
+                h.span
+                  .class(cn(ui.small, ui.muted))
+                  .children([tr(ctx).t("shell.workspaceSwitcher.current")]),
+                h.strong.children([current?.name ?? "…"]),
               ]),
-            ),
-            h.hr.class(ui.divider),
-            h.a
-              .class(ui.menuItem)
-              .attr("role", "menuitem")
-              .attr("href", href({ _tag: "Onboarding" }))
-              .children([icon(h, "plus"), tr(ctx).t("shell.workspaceSwitcher.create")]),
-          ])
-      : h.text(""),
-  ]);
+            h.span
+              .class("inline-flex flex-none items-center gap-1.5 text-on-surface-variant")
+              .children([
+                h.kbd.class(ui.kbd).children([formatShortcut("mod+k")]),
+                icon(h, "chevron"),
+              ]),
+          ]),
+      ]),
+      UiMenuContent(h)
+        .class(
+          "max-h-[var(--available-height,360px)] min-w-[var(--anchor-width,224px)] overflow-auto rounded-control border border-outline-variant bg-surface-container-lowest p-1 text-on-surface shadow-[0_8px_24px_-12px_color-mix(in_srgb,var(--md-sys-color-shadow)_40%,transparent)]",
+        )
+        .attr("side", "bottom")
+        .attr("align", "start")
+        .attr("side-offset", "4")
+        .attr("hidden", "")
+        .children([
+          ...workspaces.map((w) =>
+            UiMenuItem(h)
+              .key(w.slug)
+              .value(w.slug)
+              .label(w.name)
+              .attr("value", w.slug)
+              .attr("label", w.name)
+              .attr("as-child", "")
+              .children([
+                withAttributes(h.a.class(), [
+                  (element) => element.class(ui.menuItem),
+                  (element) =>
+                    element.attr("href", href(ViewModels.switchWorkspace(ctx.route, w.slug))),
+                  (node) => (w.slug === current?.slug ? node.attr("aria-current", "true") : node),
+                ]).children([
+                  h.span.class("flex-1").children([w.name]),
+                  ...(w.slug === current?.slug ? [icon(h, "check")] : []),
+                ]),
+              ]),
+          ),
+          UiMenuSeparator(h).class(ui.divider),
+          UiMenuItem(h)
+            .value("create-workspace")
+            .label(tr(ctx).t("shell.workspaceSwitcher.create"))
+            .attr("value", "create-workspace")
+            .attr("as-child", "")
+            .children([
+              h.a
+                .class(ui.menuItem)
+                .attr("href", href({ _tag: "Onboarding" }))
+                .children([icon(h, "plus"), tr(ctx).t("shell.workspaceSwitcher.create")]),
+            ]),
+        ]),
+    ]);
 };
 
 const toastRegion = (
@@ -148,25 +192,20 @@ const toastRegion = (
   h: Html.H<Message>,
   locale: PageContext["locale"],
 ): Markup<Message, RunApi> =>
-  h.div
-    .class("fixed right-4 bottom-4 z-[60] flex max-w-[min(420px,calc(100vw-32px))] flex-col gap-2")
-    .attr("aria-live", "polite")
-    .children(
-      model.toasts.map((t) =>
-        h.div
-          .key(String(t.id))
-          .class(toastVariants({ tone: t.tone === "error" ? "error" : "info" }))
-          .attr("role", t.tone === "error" ? "alert" : "status")
-          .children([
-            h.span.children([t.text]),
-            h.button
-              .class(buttonVariants({ variant: "ghost", size: "small" }))
-              .attr("type", "button")
-              .attr("aria-label", text(locale, "dismiss"))
-              .on("click", Message.DismissedToast({ id: t.id }))
-              .children([icon(h, "close", 16)]),
-          ]),
-      ),
+  UiToastRegion(h)
+    .class(
+      "fixed right-4 bottom-4 z-[60] flex max-w-[min(420px,calc(100vw-32px))] flex-col gap-2 [&_[data-slot=toast]]:flex [&_[data-slot=toast]]:items-center [&_[data-slot=toast]]:justify-between [&_[data-slot=toast]]:gap-3 [&_[data-slot=toast]]:rounded-control [&_[data-slot=toast]]:bg-inverse-surface [&_[data-slot=toast]]:px-3.5 [&_[data-slot=toast]]:py-2.5 [&_[data-slot=toast]]:text-[0.875rem] [&_[data-slot=toast]]:text-inverse-on-surface [&_[data-slot=toast]]:shadow-[0_8px_24px_-12px_color-mix(in_srgb,var(--md-sys-color-shadow)_40%,transparent)] [&_[data-slot=toast][data-type=error]]:bg-error [&_[data-slot=toast][data-type=error]]:text-on-error [&_[data-slot=toast-close]]:cursor-pointer [&_[data-slot=toast-close]]:rounded-control [&_[data-slot=toast-close]]:border-0 [&_[data-slot=toast-close]]:bg-transparent [&_[data-slot=toast-close]]:px-1.5 [&_[data-slot=toast-close]]:py-0.5 [&_[data-slot=toast-close]]:text-[0.8125rem] [&_[data-slot=toast-close]]:text-inherit [&_[data-slot=toast-close]]:opacity-85 hover:[&_[data-slot=toast-close]]:opacity-100",
+    )
+    .maxVisible(3)
+    .attr("side", "bottom")
+    .attr("align", "end")
+    .attr("max-visible", "3")
+    .attr("aria-label", text(locale, "notifications"))
+    .onMount(
+      SyncToasts({
+        toasts: model.toasts,
+        dismissLabel: text(locale, "dismiss"),
+      }).pipe(Mount.map((id) => Message.DismissedToast({ id }))),
     );
 
 const pageOrSplash = (
@@ -230,11 +269,11 @@ const publicChrome = (
                     variant: "ghost",
                     small: true,
                   }),
-                  h.button
-                    .class(buttonVariants({ variant: "secondary", size: "small" }))
-                    .attr("type", "button")
-                    .on("click", Message.ClickedSignOut())
-                    .children([text(ctx.locale, "signOut")]),
+                  button(h, {
+                    label: text(ctx.locale, "signOut"),
+                    onClick: Message.ClickedSignOut(),
+                    small: true,
+                  }),
                 ]
               : [
                   linkButton(h, {
@@ -320,11 +359,14 @@ const workspaceChrome = (
                   ? model.session.user.name
                   : text(ctx.locale, "account"),
               ]),
-            h.button
-              .class(cn(ui.navItem, "cursor-pointer border-0 bg-transparent"))
-              .attr("type", "button")
-              .on("click", Message.ClickedSignOut())
-              .children([icon(h, "logout"), text(ctx.locale, "signOut")]),
+            UiButton(h)
+              .on("action", Message.ClickedSignOut())
+              .children([
+                h.button
+                  .class(cn(ui.navItem, "cursor-pointer border-0 bg-transparent"))
+                  .attr("type", "button")
+                  .children([icon(h, "logout"), text(ctx.locale, "signOut")]),
+              ]),
           ]),
         ]),
       h.div

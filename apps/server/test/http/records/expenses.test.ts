@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { ATTACHMENT_MAX_BYTES } from "@kvitbit/api-contract";
 import { Contacts, CurrentCaller, type MemberCaller } from "@kvitbit/domain/contract";
 import { Effect } from "effect";
+import { captureAnalytics } from "../../analytics-fixture";
 import { as, type Harness, json, makeHarness, type TestUser } from "../harness";
 
 let h: Harness;
@@ -9,6 +10,7 @@ let owner: TestUser;
 let member: MemberCaller;
 let base: string;
 let supplierId: string;
+let analytics: ReturnType<typeof captureAnalytics>;
 
 const PDF_BYTES = new TextEncoder().encode("%PDF-1.4\n1 0 obj\n<<>>\nendobj\n%%EOF\n");
 
@@ -27,7 +29,8 @@ const makeExpense = (overrides: Record<string, unknown> = {}) => ({
 });
 
 beforeEach(async () => {
-  h = makeHarness();
+  analytics = captureAnalytics();
+  h = makeHarness({ analytics: analytics.layer });
   owner = h.addUser("Olga");
   member = await h.createWorkspace(owner);
   base = `/api/v1/workspaces/${member.workspaceId}/expenses`;
@@ -174,6 +177,15 @@ describe("expenses group", () => {
     expect(att.contentType).toBe("application/pdf");
     expect(att.bytes).toBe(PDF_BYTES.byteLength);
     expect(uploaded.headers.get("location")).toBe(`${base}/${created.id}/attachments/${att.id}`);
+    expect(analytics.capture.mock.calls).toEqual([
+      [
+        {
+          event: "expense_receipt_uploaded",
+          distinctId: owner.id,
+          properties: { workspaceId: member.workspaceId },
+        },
+      ],
+    ]);
 
     // Idempotent by content hash
     const formAgain = new FormData();
@@ -260,5 +272,6 @@ describe("expenses group", () => {
     });
     expect(tooLarge.status).toBe(413);
     expect(((await tooLarge.json()) as { _tag: string })._tag).toBe("PayloadTooLarge");
+    expect(analytics.capture).not.toHaveBeenCalled();
   });
 });

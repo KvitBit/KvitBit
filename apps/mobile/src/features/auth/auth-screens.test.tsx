@@ -75,7 +75,7 @@ describe("auth screens", () => {
     expect(safeReturnTo(undefined)).toBeNull();
   });
 
-  test("BotProofWidget renders nothing for NotRequired and progress/retry for active/failed", () => {
+  test("BotProofWidget reserves space before showing progress or retry", () => {
     const none = hostTree(
       <BotProofWidget state={{ _tag: "NotRequired" }} onRetry={() => undefined} />,
       withProviders(),
@@ -99,6 +99,10 @@ describe("auth screens", () => {
       withProviders(),
     );
     expect(allText(failed)).toContain("Try again");
+    const slot = findAll(none, "View")[0];
+    expect(slot?.props.className).toContain("min-h-[72px]");
+    expect(findAll(solving, "View")[0]?.props.className).toEqual(slot?.props.className);
+    expect(findAll(failed, "View")[0]?.props.className).toEqual(slot?.props.className);
     const retryBtn = findAll(failed, "Pressable")[0];
     (retryBtn?.props.onPress as (() => void) | undefined)?.();
     expect(retried).toBe(true);

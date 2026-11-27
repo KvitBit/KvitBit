@@ -4,7 +4,7 @@
  * every failure into a Schema-typed `Failure`, so Commands never fail and Messages stay codecs.
  */
 import { Api } from "@kvitbit/ui-port";
-import { Effect, Layer, Schema } from "effect";
+import { Context, Effect, Layer, Option, Schema } from "effect";
 
 export const TextSchema = Schema.Struct({
   key: Schema.String,
@@ -66,6 +66,23 @@ export const WebServicesLive: Layer.Layer<WebServices> = Layer.suspend(() =>
 );
 
 export type Client = Api.KvitbitApiClient;
+
+const fetchConfig = (client: Client) => client.config.getConfig();
+
+export class StartupConfig extends Context.Service<StartupConfig, ReturnType<typeof fetchConfig>>()(
+  "@kvitbit/web/StartupConfig",
+) {
+  static readonly layer = Layer.effect(this)(
+    Effect.flatMap(Api.KvitbitApi, (client) => Effect.cached(fetchConfig(client))),
+  );
+}
+
+/** Browser analytics and the landing page share the startup config request. */
+export const getPublicConfig = (client: Client) =>
+  Effect.flatMap(
+    Effect.serviceOption(StartupConfig),
+    Option.getOrElse(() => fetchConfig(client)),
+  );
 
 /**
  * One API call as a never-failing Effect: `onSuccess` and `onFailure` build the result Message.

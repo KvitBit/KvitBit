@@ -33,13 +33,14 @@ import {
   emptyState,
   page,
   pageHeader,
+  searchInput,
   selectField,
   skeletonTable,
   table,
   textArea,
   textField,
 } from "../../ui/kit";
-import { cn, controlVariants, ui } from "../../ui/styles";
+import { cn, ui } from "../../ui/styles";
 import {
   apiCommand,
   CURRENCIES,
@@ -489,14 +490,14 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
                   "pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-on-surface-variant",
                 )
                 .children([icon(h, "search", 16)]),
-              h.input
-                .class(cn(controlVariants({ kind: "input" }), "pl-[34px]"))
-                .attr("type", "search")
-                .attr("name", "text")
-                .attr("placeholder", tr.t("priceList.search"))
-                .attr("aria-label", tr.t("priceList.search"))
-                .value(model.search)
-                .on("input", ({ value }) => Message.ChangedSearch({ value })),
+              searchInput(h, {
+                name: "text",
+                value: model.search,
+                placeholder: tr.t("priceList.search"),
+                ariaLabel: tr.t("priceList.search"),
+                inputClassName: "pl-[34px]",
+                onInput: (value) => Message.ChangedSearch({ value }),
+              }),
             ]),
             button(h, { label: tr.t("common.action.search"), type: "submit" }),
           ]),
@@ -731,6 +732,7 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
           id: "pricelist-archive-dialog",
           title: tLocal(ctx.locale, "archiveTitle"),
           onClose: Message.CancelledArchive(),
+          alert: true,
           body: [
             h.p.children([tLocal(ctx.locale, "archiveBody", { name: model.confirmArchive.name })]),
           ],

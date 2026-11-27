@@ -1,13 +1,15 @@
 import "../global.css";
-import { Stack } from "expo-router";
+import { Stack, usePathname } from "expo-router";
 import { StatusBar } from "expo-status-bar";
 import { useEffect } from "react";
+import { Platform } from "react-native";
 import { SafeAreaProvider } from "react-native-safe-area-context";
 import { I18nProvider } from "../src/i18n/i18n-provider";
 import {
   registerBackgroundCaptureDrain,
   unregisterBackgroundCaptureDrain,
 } from "../src/platform/capture/background-drain";
+import { trackWebPageview } from "../src/runtime/analytics-platform";
 import { ApiProvider } from "../src/runtime/api-runtime";
 import { SessionProvider, useSession } from "../src/session/session-provider";
 import { ThemeProvider, useAppTheme } from "../src/theme/theme-provider";
@@ -42,12 +44,21 @@ function Navigator() {
   );
 }
 
+function WebPageviews() {
+  const pathname = usePathname();
+  useEffect(() => {
+    if (Platform.OS === "web") trackWebPageview(pathname);
+  }, [pathname]);
+  return null;
+}
+
 export default function RootLayout() {
   return (
     <SafeAreaProvider>
       <I18nProvider>
         <ThemeProvider>
           <SessionProvider>
+            {Platform.OS === "web" && <WebPageviews />}
             <Navigator />
           </SessionProvider>
         </ThemeProvider>

@@ -43,6 +43,7 @@ import {
   page,
   pageHeader,
   selectField,
+  separator,
   skeleton,
   table,
   tabs,
@@ -1308,6 +1309,7 @@ const renderActiveDialog = (
           id: "dlg-cancel",
           title: txt(locale, "dlgCancelTitle"),
           onClose: Message.ClosedDialog(),
+          alert: true,
           body: [
             ...err,
             textField(h, {
@@ -1395,6 +1397,7 @@ const renderActiveDialog = (
           id: "dlg-remove-pay",
           title: txt(locale, "dlgRemovePayTitle"),
           onClose: Message.ClosedDialog(),
+          alert: true,
           body: [
             ...err,
             textField(h, {
@@ -1828,7 +1831,7 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
             ]),
           ...(doc.statutoryNotes.length > 0
             ? [
-                h.hr.class(ui.divider),
+                separator(h),
                 h.div
                   .class(ui.stack)
                   .children([
@@ -1989,6 +1992,7 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
           })
         : h.div.class(ui.stack).children([
             h.div
+              .attr("data-slot", "share-url")
               .class(
                 "flex items-center gap-2 overflow-x-auto rounded-control border border-outline-variant bg-surface-container-low px-2.5 py-2",
               )
