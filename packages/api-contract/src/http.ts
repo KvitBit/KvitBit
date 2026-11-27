@@ -95,7 +95,8 @@ export const ReportExportBytes = HttpApiSchema.StreamUint8Array({
 export const ZipBytes = HttpApiSchema.StreamUint8Array({ contentType: "application/zip" });
 
 /** One multipart part named `file` (filename and content type), streamed to core. */
-const UploadedFile = Multipart.SingleFileSchema;
+/** @public Single-file payload used by the multipart upload contract. */
+export const UploadedFile = Multipart.SingleFileSchema;
 export const AttachPayload = Schema.Struct({ file: UploadedFile }).pipe(
   HttpApiSchema.asMultipartStream({ maxParts: 1, maxFileSize: ATTACHMENT_MAX_BYTES }),
 );

@@ -52,7 +52,8 @@ export const SendInput = Schema.Struct({
 });
 export type SendInput = typeof SendInput.Type;
 
-const PdfQuery = {
+/** @public Query fields for the document PDF endpoint. */
+export const PdfQuery = {
   template: Schema.optional(PdfTemplate),
   language: Schema.optional(Locale),
   disposition: Schema.optional(Disposition),
@@ -62,10 +63,12 @@ export const CancelInput = Schema.Struct({
   reason: Schema.NonEmptyString,
   on: Schema.optionalKey(IsoDate),
 });
-const CancelResult = Schema.Struct({
+/** @public Response schema for document cancellation. */
+export const CancelResult = Schema.Struct({
   document: DocumentView,
   creditNote: Schema.NullOr(DocumentView),
 });
+export type CancelResult = typeof CancelResult.Type;
 
 /** Core `CorrectionInput["lines"]`: the whole document, or selected lines. */
 export const CorrectionLines = Schema.Union([
