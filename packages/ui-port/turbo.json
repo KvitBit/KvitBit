@@ -3,7 +3,7 @@
   "extends": ["//"],
   "tasks": {
     "test:suite": {
-      "dependsOn": ["test:api", "test:i18n", "test:theme", "test:view-models"],
+      "dependsOn": ["test:api", "test:i18n", "test:style", "test:theme", "test:view-models"],
       "cache": false
     },
     "test:api": {
@@ -24,6 +24,13 @@
         "test/format/**",
         "test/i18n/**"
       ],
+      "env": ["TZ"],
+      "passThroughEnv": ["CI"],
+      "outputs": []
+    },
+    "test:style": {
+      "dependsOn": ["^transit"],
+      "inputs": ["package.json", "tsconfig.json", "src/style/**", "src/theme/**", "test/style/**"],
       "env": ["TZ"],
       "passThroughEnv": ["CI"],
       "outputs": []

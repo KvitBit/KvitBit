@@ -18,6 +18,7 @@ export interface TextProps extends Omit<RNTextProps, "style"> {
   readonly numeric?: boolean;
   readonly align?: TextStyle["textAlign"];
   readonly style?: TextStyle;
+  readonly className?: string;
   readonly children?: ReactNode;
 }
 
@@ -36,10 +37,11 @@ export const textStyle = (font: NativeTextStyle): TextStyle => ({
 
 export function Text({
   variant = "body",
-  color = "onSurface",
+  color,
   numeric,
   align,
   style,
+  className,
   ...rest
 }: TextProps) {
   const theme = useTheme();
@@ -47,14 +49,22 @@ export function Text({
     variant in theme.operateFonts
       ? theme.operateFonts[variant as OperateScaleName]
       : theme.fonts[variant as TypeScaleName];
+  const colorStyle =
+    color !== undefined
+      ? { color: theme.colors[color] }
+      : className?.includes("text-")
+        ? null
+        : { color: theme.colors.onSurface };
   return (
     <RNText
       {...rest}
+      {...(className === undefined ? {} : { className })}
       maxFontSizeMultiplier={2}
       style={[
         textStyle(font),
         numeric ? textStyle(theme.numeric) : null,
-        { color: theme.colors[color], textAlign: align },
+        colorStyle,
+        align === undefined ? null : { textAlign: align },
         style,
       ]}
     />

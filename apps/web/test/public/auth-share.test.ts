@@ -431,7 +431,7 @@ describe("Public Share Link page (Screen 04)", () => {
 
   test("SSR renders /i/:token loading skeleton cleanly in cs and en", async () => {
     const { html } = await renderPath("/i/demo-unpaid-czk", { locale: "cs", session: anonymous });
-    expect(html).toContain("kb-share-wrap");
+    expect(html).toContain('data-slot="share-wrap"');
   });
 
   test.each([

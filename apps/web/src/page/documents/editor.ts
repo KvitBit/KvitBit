@@ -55,6 +55,7 @@ import {
   textField,
 } from "../../ui/kit";
 import { UiInput } from "../../ui/sdk";
+import { cn, controlVariants, ui } from "../../ui/styles";
 import {
   addDaysIso,
   apiCommand,
@@ -1786,7 +1787,7 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
     data === undefined
       ? card(h, [
           h.div
-            .class("kb-stack")
+            .class(ui.stack)
             .attr("aria-busy", String(true))
             .children([
               skeleton(h, "40%", "1.2rem"),
@@ -1794,7 +1795,7 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
               skeleton(h, "100%", "6rem"),
             ]),
         ])
-      : h.div.class("kb-stack").children([
+      : h.div.class(ui.stack).children([
           // Quick template start (only for new documents)
           ...(route._tag === "DocumentNew" && data.templates.length > 0
             ? [
@@ -1843,32 +1844,36 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
             }),
             ...(model.aresOpen
               ? [
-                  h.div.class("kb-ares-box").children([
-                    h.div.class("kb-row").children([
-                      textField(h, {
-                        id: "editor-ares-ico",
-                        label: txt(locale, "aresIcoLabel"),
-                        value: model.aresIco,
-                        onInput: (value) => Message.ChangedAresIco({ value }),
-                        placeholder: txt(locale, "aresIcoPlaceholder"),
-                        mono: true,
-                        error: model.aresError ?? undefined,
-                      }),
-                      button(h, {
-                        label: txt(locale, "aresLookup"),
-                        onClick: Message.SubmittedAres(),
-                        variant: "primary",
-                        busy: model.aresBusy,
-                      }),
+                  h.div
+                    .class(
+                      "flex flex-col gap-2.5 rounded-control border border-outline-variant bg-surface-container-low p-3",
+                    )
+                    .children([
+                      h.div.class(ui.row).children([
+                        textField(h, {
+                          id: "editor-ares-ico",
+                          label: txt(locale, "aresIcoLabel"),
+                          value: model.aresIco,
+                          onInput: (value) => Message.ChangedAresIco({ value }),
+                          placeholder: txt(locale, "aresIcoPlaceholder"),
+                          mono: true,
+                          error: model.aresError ?? undefined,
+                        }),
+                        button(h, {
+                          label: txt(locale, "aresLookup"),
+                          onClick: Message.SubmittedAres(),
+                          variant: "primary",
+                          busy: model.aresBusy,
+                        }),
+                      ]),
                     ]),
-                  ]),
                 ]
               : []),
           ]),
           // Dates
           card(h, [
             cardTitle(h, txt(locale, "sectionDates")),
-            h.div.class("kb-editor-form-grid kb-editor-form-grid--3").children([
+            h.div.class(ui.formGrid3).children([
               textField(h, {
                 id: "editor-issued-on",
                 label: txt(locale, "issuedOn"),
@@ -1883,10 +1888,10 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
                 value: model.taxableSupplyOn,
                 onInput: (value) => Message.ChangedTaxableSupplyOn({ value }),
               }),
-              h.div.class("kb-stack").children([
-                h.div.class("kb-editor-field-head").children([
+              h.div.class(ui.stack).children([
+                h.div.class("flex items-center justify-between gap-1.5").children([
                   h.label
-                    .class("kb-field__label")
+                    .class(ui.fieldLabel)
                     .attr("for", "editor-due-days")
                     .children([txt(locale, "dueDays")]),
                   sourceBadge(h, locale, effective.dueDays.source),
@@ -1896,13 +1901,13 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
                   .on("valuechange", ({ value }) => Message.ChangedDueDays({ value }))
                   .children([
                     h.input
-                      .class("kb-input kb-num")
+                      .class(cn(controlVariants({ kind: "input" }), ui.num))
                       .id("editor-due-days")
                       .attr("type", "number")
                       .value(model.dueDaysOverride ?? String(effective.dueDays.value)),
                   ]),
                 h.span
-                  .class("kb-field__hint kb-num")
+                  .class(cn(ui.fieldHint, ui.num))
                   .children([txt(locale, "dueDateHint", { date: fmtDate(locale, computedDue) })]),
               ]),
             ]),
@@ -1910,95 +1915,104 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
           // Billing details with override source badges
           card(h, [
             cardTitle(h, txt(locale, "sectionBilling")),
-            h.div.class("kb-editor-form-grid").children([
+            h.div.class(ui.formGrid).children([
               // Currency
-              h.div.class("kb-field").children([
-                h.div.class("kb-editor-field-head").children([
-                  h.label
-                    .class("kb-field__label")
-                    .attr("for", "editor-currency")
-                    .children([txt(locale, "currency")]),
-                  h.div.class("kb-row").children([
-                    sourceBadge(h, locale, effective.currency.source),
-                    ...(effective.currency.overridden
-                      ? [
-                          button(h, {
-                            label: txt(locale, "clearOverride"),
-                            onClick: Message.ClearedCurrency(),
-                            variant: "ghost",
-                            small: true,
-                          }),
-                        ]
-                      : []),
+              h.div
+                .attr("data-slot", "field")
+                .class(ui.field)
+                .children([
+                  h.div.class("flex items-center justify-between gap-1.5").children([
+                    h.label
+                      .class(ui.fieldLabel)
+                      .attr("for", "editor-currency")
+                      .children([txt(locale, "currency")]),
+                    h.div.class(ui.row).children([
+                      sourceBadge(h, locale, effective.currency.source),
+                      ...(effective.currency.overridden
+                        ? [
+                            button(h, {
+                              label: txt(locale, "clearOverride"),
+                              onClick: Message.ClearedCurrency(),
+                              variant: "ghost",
+                              small: true,
+                            }),
+                          ]
+                        : []),
+                    ]),
                   ]),
+                  select(h, {
+                    id: "editor-currency",
+                    label: txt(locale, "currency"),
+                    value: effective.currency.value,
+                    onChange: (value) => Message.ChangedCurrency({ value }),
+                    options: [
+                      { value: "CZK", label: "CZK" },
+                      { value: "EUR", label: "EUR" },
+                      { value: "USD", label: "USD" },
+                      { value: "GBP", label: "GBP" },
+                    ],
+                  }),
                 ]),
-                select(h, {
-                  id: "editor-currency",
-                  label: txt(locale, "currency"),
-                  value: effective.currency.value,
-                  onChange: (value) => Message.ChangedCurrency({ value }),
-                  options: [
-                    { value: "CZK", label: "CZK" },
-                    { value: "EUR", label: "EUR" },
-                    { value: "USD", label: "USD" },
-                    { value: "GBP", label: "GBP" },
-                  ],
-                }),
-              ]),
               // Language
-              h.div.class("kb-field").children([
-                h.div.class("kb-editor-field-head").children([
-                  h.label
-                    .class("kb-field__label")
-                    .attr("for", "editor-language")
-                    .children([txt(locale, "language")]),
-                  sourceBadge(h, locale, effective.language.source),
+              h.div
+                .attr("data-slot", "field")
+                .class(ui.field)
+                .children([
+                  h.div.class("flex items-center justify-between gap-1.5").children([
+                    h.label
+                      .class(ui.fieldLabel)
+                      .attr("for", "editor-language")
+                      .children([txt(locale, "language")]),
+                    sourceBadge(h, locale, effective.language.source),
+                  ]),
+                  select(h, {
+                    id: "editor-language",
+                    label: txt(locale, "language"),
+                    value: effective.language.value,
+                    onChange: (value) => Message.ChangedLanguage({ value }),
+                    options: [
+                      { value: "cs", label: textOf(t, I18n.enumText("locale", "cs")) },
+                      { value: "en", label: textOf(t, I18n.enumText("locale", "en")) },
+                    ],
+                  }),
                 ]),
-                select(h, {
-                  id: "editor-language",
-                  label: txt(locale, "language"),
-                  value: effective.language.value,
-                  onChange: (value) => Message.ChangedLanguage({ value }),
-                  options: [
-                    { value: "cs", label: textOf(t, I18n.enumText("locale", "cs")) },
-                    { value: "en", label: textOf(t, I18n.enumText("locale", "en")) },
-                  ],
-                }),
-              ]),
               // Payment method
-              h.div.class("kb-field").children([
-                h.div.class("kb-editor-field-head").children([
-                  h.label
-                    .class("kb-field__label")
-                    .attr("for", "editor-pm")
-                    .children([txt(locale, "paymentMethod")]),
-                  sourceBadge(h, locale, effective.paymentMethod.source),
+              h.div
+                .attr("data-slot", "field")
+                .class(ui.field)
+                .children([
+                  h.div.class("flex items-center justify-between gap-1.5").children([
+                    h.label
+                      .class(ui.fieldLabel)
+                      .attr("for", "editor-pm")
+                      .children([txt(locale, "paymentMethod")]),
+                    sourceBadge(h, locale, effective.paymentMethod.source),
+                  ]),
+                  select(h, {
+                    id: "editor-pm",
+                    label: txt(locale, "paymentMethod"),
+                    value: effective.paymentMethod.value,
+                    onChange: (value) => Message.ChangedPaymentMethod({ value }),
+                    options: [
+                      {
+                        value: "bank_transfer",
+                        label: textOf(t, I18n.enumText("paymentMethod", "bank_transfer")),
+                      },
+                      {
+                        value: "cash",
+                        label: textOf(t, I18n.enumText("paymentMethod", "cash")),
+                      },
+                      {
+                        value: "card",
+                        label: textOf(t, I18n.enumText("paymentMethod", "card")),
+                      },
+                      {
+                        value: "other",
+                        label: textOf(t, I18n.enumText("paymentMethod", "other")),
+                      },
+                    ],
+                  }),
                 ]),
-                select(h, {
-                  id: "editor-pm",
-                  label: txt(locale, "paymentMethod"),
-                  value: effective.paymentMethod.value,
-                  onChange: (value) => Message.ChangedPaymentMethod({ value }),
-                  options: [
-                    {
-                      value: "bank_transfer",
-                      label: textOf(t, I18n.enumText("paymentMethod", "bank_transfer")),
-                    },
-                    {
-                      value: "cash",
-                      label: textOf(t, I18n.enumText("paymentMethod", "cash")),
-                    },
-                    {
-                      value: "card",
-                      label: textOf(t, I18n.enumText("paymentMethod", "card")),
-                    },
-                    {
-                      value: "other",
-                      label: textOf(t, I18n.enumText("paymentMethod", "other")),
-                    },
-                  ],
-                }),
-              ]),
               // Numbering series (drafts only)
               ...(isIssuedEdit
                 ? [
@@ -2012,30 +2026,33 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
                     }),
                   ]
                 : [
-                    h.div.class("kb-field").children([
-                      h.div.class("kb-editor-field-head").children([
-                        h.label
-                          .class("kb-field__label")
-                          .attr("for", "editor-series")
-                          .children([txt(locale, "series")]),
-                        sourceBadge(h, locale, effective.series.source),
+                    h.div
+                      .attr("data-slot", "field")
+                      .class(ui.field)
+                      .children([
+                        h.div.class("flex items-center justify-between gap-1.5").children([
+                          h.label
+                            .class(ui.fieldLabel)
+                            .attr("for", "editor-series")
+                            .children([txt(locale, "series")]),
+                          sourceBadge(h, locale, effective.series.source),
+                        ]),
+                        select(h, {
+                          id: "editor-series",
+                          label: txt(locale, "series"),
+                          value: effective.series.value ?? "",
+                          onChange: (value) => Message.ChangedSeries({ value }),
+                          options: [
+                            { value: "", label: txt(locale, "seriesDefault") },
+                            ...data.series
+                              .filter((s) => s.kind === model.kind)
+                              .map((s) => ({
+                                value: s.id,
+                                label: `${s.name} (${s.nextNumber})`,
+                              })),
+                          ],
+                        }),
                       ]),
-                      select(h, {
-                        id: "editor-series",
-                        label: txt(locale, "series"),
-                        value: effective.series.value ?? "",
-                        onChange: (value) => Message.ChangedSeries({ value }),
-                        options: [
-                          { value: "", label: txt(locale, "seriesDefault") },
-                          ...data.series
-                            .filter((s) => s.kind === model.kind)
-                            .map((s) => ({
-                              value: s.id,
-                              label: `${s.name} (${s.nextNumber})`,
-                            })),
-                        ],
-                      }),
-                    ]),
                   ]),
               // Bank account
               selectField(h, {
@@ -2071,7 +2088,7 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
                 mono: true,
               }),
             ]),
-            h.div.class("kb-row").children([
+            h.div.class(ui.row).children([
               ...(regime === "vat_payer"
                 ? [
                     checkbox(h, {
@@ -2097,8 +2114,8 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
             ...(effective.currency.value !== "CZK"
               ? [
                   separator(h),
-                  h.div.class("kb-stack").children([
-                    h.div.class("kb-spread").children([
+                  h.div.class(ui.stack).children([
+                    h.div.class(ui.spread).children([
                       h.strong.children([txt(locale, "fxSection")]),
                       checkbox(h, {
                         id: "editor-manual-fx",
@@ -2109,7 +2126,7 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
                     ]),
                     ...(model.manualFx
                       ? [
-                          h.div.class("kb-editor-form-grid").children([
+                          h.div.class(ui.formGrid).children([
                             textField(h, {
                               id: "editor-fx-rate",
                               label: txt(locale, "fxRate"),
@@ -2129,7 +2146,7 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
                         ]
                       : cnbFx !== undefined
                         ? [
-                            h.p.class("kb-small kb-muted kb-num").children([
+                            h.p.class(cn(ui.small, ui.muted, ui.num)).children([
                               txt(locale, "fxCnbNote", {
                                 date: fmtDate(locale, cnbFx.fixingDate),
                                 qty: cnbFx.quantity,
@@ -2152,6 +2169,7 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
                       id: "editor-add-pricelist",
                       label: txt(locale, "addFromPriceList"),
                       value: "",
+                      className: "w-auto min-w-[150px]",
                       searchable: true,
                       searchPlaceholder: txt(locale, "addFromPriceList"),
                       onChange: (itemId) => Message.AddedPriceListItem({ itemId }),
@@ -2174,7 +2192,9 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
             ...model.lines.map((line, index) =>
               h.div
                 .key(line.key)
-                .class("kb-line-row")
+                .class(
+                  "grid grid-cols-2 items-start gap-2 border-b border-outline-variant py-2.5 last:border-b-0 lg:grid-cols-[minmax(0,2.2fr)_76px_76px_110px_140px_auto]",
+                )
                 .children([
                   textField(h, {
                     id: `line-desc-${line.key}`,
@@ -2214,7 +2234,7 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
                       Message.UpdatedLineField({ key: line.key, field: "vat", value }),
                     options: vatOptions,
                   }),
-                  h.div.class("kb-line-actions").children([
+                  h.div.class("flex items-center gap-1 pt-[22px]").children([
                     button(h, {
                       label: "↑",
                       ariaLabel: txt(locale, "moveUp"),
@@ -2242,9 +2262,9 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
           ]),
           // Printed note
           card(h, [
-            h.div.class("kb-editor-field-head").children([
+            h.div.class("flex items-center justify-between gap-1.5").children([
               h.label
-                .class("kb-field__label")
+                .class(ui.fieldLabel)
                 .attr("for", "editor-note")
                 .children([txt(locale, "noteLabel")]),
               sourceBadge(h, locale, effective.note.source),
@@ -2258,7 +2278,7 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
           ]),
         ]);
 
-  const previewColumn = h.aside.class("kb-editor-preview-sticky").children([
+  const previewColumn = h.aside.class("flex flex-col gap-3 lg:sticky lg:top-4").children([
     card(h, [
       cardTitle(h, txt(locale, "previewTitle"), [
         badge(
@@ -2268,21 +2288,29 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
         ),
       ]),
       h.div
-        .class("kb-spread")
+        .class(ui.spread)
         .children([
           mono(h, model.numberOverride || txt(locale, "draftPreviewNumber")),
-          h.span.class("kb-small kb-muted kb-num").children([fmtDate(locale, issuedIso)]),
+          h.span.class(cn(ui.small, ui.muted, ui.num)).children([fmtDate(locale, issuedIso)]),
         ]),
       separator(h),
       h.div
-        .class("kb-stack")
+        .class(ui.stack)
         .children([
           h.strong.children([selectedContact?.name ?? txt(locale, "customerPlaceholder")]),
           ...(selectedContact?.ico !== null && selectedContact?.ico !== undefined
-            ? [h.span.class("kb-small kb-muted kb-mono").children([`IČO ${selectedContact.ico}`])]
+            ? [
+                h.span
+                  .class(cn(ui.small, ui.muted, ui.mono))
+                  .children([`IČO ${selectedContact.ico}`]),
+              ]
             : []),
           ...(selectedContact?.dic !== null && selectedContact?.dic !== undefined
-            ? [h.span.class("kb-small kb-muted kb-mono").children([`DIČ ${selectedContact.dic}`])]
+            ? [
+                h.span
+                  .class(cn(ui.small, ui.muted, ui.mono))
+                  .children([`DIČ ${selectedContact.dic}`]),
+              ]
             : []),
         ]),
       separator(h),
@@ -2293,23 +2321,25 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
             ...(regime === "vat_payer" && displayBuckets.length > 0
               ? [
                   h.table
-                    .class("kb-vat-table")
+                    .class(
+                      "w-full border-collapse text-[0.8125rem] kb-num [&_td]:border-b [&_td]:border-outline-variant [&_td]:px-2 [&_td]:py-1.5 [&_th]:border-b [&_th]:border-outline-variant [&_th]:px-2 [&_th]:py-1.5 [&_th]:text-[0.75rem] [&_th]:font-medium [&_th]:text-on-surface-variant",
+                    )
                     .children([
                       h.thead.children([
                         h.tr.children([
-                          h.th.children([txt(locale, "vatColRate")]),
-                          h.th.class("kb-end").children([txt(locale, "vatColBase")]),
-                          h.th.class("kb-end").children([txt(locale, "vatColVat")]),
-                          h.th.class("kb-end").children([txt(locale, "vatColTotal")]),
+                          h.th.class("text-left").children([txt(locale, "vatColRate")]),
+                          h.th.class("text-right").children([txt(locale, "vatColBase")]),
+                          h.th.class("text-right").children([txt(locale, "vatColVat")]),
+                          h.th.class("text-right").children([txt(locale, "vatColTotal")]),
                         ]),
                       ]),
                       h.tbody.children(
                         displayBuckets.map((b) =>
                           h.tr.children([
                             h.td.children([fmtVatRate(locale, b.ratePercent)]),
-                            h.td.class("kb-end").children([fmtNum(locale, b.base, 2)]),
-                            h.td.class("kb-end").children([fmtNum(locale, b.vat, 2)]),
-                            h.td.class("kb-end").children([fmtNum(locale, b.gross, 2)]),
+                            h.td.class("text-right").children([fmtNum(locale, b.base, 2)]),
+                            h.td.class("text-right").children([fmtNum(locale, b.vat, 2)]),
+                            h.td.class("text-right").children([fmtNum(locale, b.gross, 2)]),
                           ]),
                         ),
                       ),
@@ -2317,20 +2347,20 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
                 ]
               : []),
             h.div
-              .class("kb-stack")
+              .class(ui.stack)
               .children([
                 h.div
-                  .class("kb-vat-total-row")
+                  .class("flex items-baseline justify-between gap-3 py-1.5 kb-num")
                   .children([
-                    h.span.class("kb-muted").children([txt(locale, "netTotal")]),
+                    h.span.class(ui.muted).children([txt(locale, "netTotal")]),
                     amount(h, fmtMoney(locale, displayTotals.net)),
                   ]),
                 ...(regime === "vat_payer"
                   ? [
                       h.div
-                        .class("kb-vat-total-row")
+                        .class("flex items-baseline justify-between gap-3 py-1.5 kb-num")
                         .children([
-                          h.span.class("kb-muted").children([txt(locale, "vatTotal")]),
+                          h.span.class(ui.muted).children([txt(locale, "vatTotal")]),
                           amount(h, fmtMoney(locale, displayTotals.vat)),
                         ]),
                     ]
@@ -2339,15 +2369,17 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
                 !BigDecimal.isZero(displayTotals.roundingAdjustment.amount)
                   ? [
                       h.div
-                        .class("kb-vat-total-row")
+                        .class("flex items-baseline justify-between gap-3 py-1.5 kb-num")
                         .children([
-                          h.span.class("kb-muted").children([txt(locale, "roundingAdj")]),
+                          h.span.class(ui.muted).children([txt(locale, "roundingAdj")]),
                           amount(h, fmtMoney(locale, displayTotals.roundingAdjustment)),
                         ]),
                     ]
                   : []),
                 h.div
-                  .class("kb-vat-total-row kb-vat-total-row--grand")
+                  .class(
+                    "mt-1 flex items-baseline justify-between gap-3 border-t border-outline-variant pt-2.5 pb-1.5 font-display text-[1.125rem] [font-weight:var(--kb-font-display-weight)] kb-num",
+                  )
                   .children([
                     h.span.children([txt(locale, "grandTotal")]),
                     amount(h, fmtMoney(locale, displayTotals.gross)),
@@ -2355,7 +2387,13 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
                 ...(displayTotals.vatCzk !== null
                   ? [
                       h.div
-                        .class("kb-vat-total-row kb-small kb-muted")
+                        .class(
+                          cn(
+                            "flex items-baseline justify-between gap-3 py-1.5 kb-num",
+                            ui.small,
+                            ui.muted,
+                          ),
+                        )
                         .children([
                           h.span.children([txt(locale, "vatCzkTotal")]),
                           amount(h, fmtMoney(locale, displayTotals.vatCzk)),
@@ -2368,13 +2406,13 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
         ? []
         : [
             h.p
-              .class("kb-small kb-muted")
+              .class(cn(ui.small, ui.muted))
               .children([
                 `${txt(locale, "fxRate")} ${serverDoc.fx.quantity} ${serverDoc.totals.gross.currency} = ${fmtNum(locale, serverDoc.fx.rate, 3)} CZK`,
               ]),
           ]),
       ...(serverDoc?.statutoryNotes.map((note) =>
-        h.p.class("kb-small kb-muted").children([note.text]),
+        h.p.class(cn(ui.small, ui.muted)).children([note.text]),
       ) ?? []),
       ...(serverDoc?.paymentQr == null
         ? []
@@ -2409,14 +2447,18 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
       : []),
     ...(draftStatus === ""
       ? []
-      : [h.p.class("kb-small kb-muted").attr("role", "status").children([draftStatus])]),
+      : [h.p.class(cn(ui.small, ui.muted)).attr("role", "status").children([draftStatus])]),
     ...regimeBanner,
-    h.div.class("kb-editor-grid").children([
-      h.fieldset
-        .style({ border: "0", padding: "0", margin: "0", minInlineSize: "0" })
-        .disabled(!mayEdit || writeFreezesForm(model))
-        .children([formColumn]),
-      previewColumn,
-    ]),
+    h.div
+      .class(
+        "grid grid-cols-1 items-start gap-5 lg:grid-cols-[minmax(0,1.35fr)_minmax(320px,0.95fr)]",
+      )
+      .children([
+        h.fieldset
+          .style({ border: "0", padding: "0", margin: "0", minInlineSize: "0" })
+          .disabled(!mayEdit || writeFreezesForm(model))
+          .children([formColumn]),
+        previewColumn,
+      ]),
   ]);
 };

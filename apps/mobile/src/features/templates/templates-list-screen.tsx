@@ -2,7 +2,7 @@ import type { TemplateId } from "@kvitbit/domain/contract";
 import { formatDate } from "@kvitbit/ui-port/format";
 import { CalendarClock, FileText, Plus } from "lucide-react-native";
 import { useCallback, useMemo, useState } from "react";
-import { StyleSheet, View } from "react-native";
+import { View } from "react-native";
 import { useI18n } from "../../i18n/i18n-provider";
 import { navigate } from "../../navigation/routes";
 import { useRemote } from "../../runtime/api-runtime";
@@ -17,7 +17,6 @@ import {
   Screen,
   Section,
   SegmentedChoice,
-  space,
 } from "../../ui";
 import { useWorkspace } from "../../workspace/workspace-provider";
 import {
@@ -81,7 +80,7 @@ export function TemplatesListScreen() {
       refreshing={remote.state._tag === "Loading"}
       actions={<IconButton icon={Plus} label={t("templates.list.new")} onPress={openNew} />}
     >
-      <View style={styles.filters}>
+      <View className="gap-2">
         <SegmentedChoice value={filter} choices={filterChoices} onChange={setFilter} />
       </View>
 
@@ -153,7 +152,3 @@ export function TemplatesListScreen() {
     </Screen>
   );
 }
-
-const styles = StyleSheet.create({
-  filters: { gap: space.sm },
-});

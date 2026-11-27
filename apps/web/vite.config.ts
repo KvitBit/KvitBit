@@ -1,5 +1,6 @@
 import { cpSync, existsSync, readFileSync, statSync } from "node:fs";
 import { extname, join, resolve } from "node:path";
+import tailwindcss from "@tailwindcss/vite";
 import { defineConfig, type Plugin } from "vite";
 
 const brandRoot = resolve(import.meta.dirname, "../../assets/brand");
@@ -41,7 +42,7 @@ const brandAssets = (): Plugin => ({
 });
 
 export default defineConfig({
-  plugins: [brandAssets()],
+  plugins: [tailwindcss(), brandAssets()],
   build: {
     outDir: "dist",
     emptyOutDir: true,

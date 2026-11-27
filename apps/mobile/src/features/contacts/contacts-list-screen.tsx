@@ -5,7 +5,7 @@ import type { Route } from "@kvitbit/ui-port/view-models";
 import { Option } from "effect";
 import { Plus, User, X } from "lucide-react-native";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { StyleSheet, View } from "react-native";
+import { View } from "react-native";
 import { useI18n } from "../../i18n/i18n-provider";
 import { navigate } from "../../navigation/routes";
 import { useApi } from "../../runtime/api-runtime";
@@ -22,7 +22,6 @@ import {
   Screen,
   SegmentedChoice,
   SwitchRow,
-  space,
   TextField,
 } from "../../ui";
 import { useWorkspace } from "../../workspace/workspace-provider";
@@ -93,7 +92,7 @@ export function ContactsListContent(props: ContactsListContentProps) {
     : null;
 
   return (
-    <View style={styles.stack}>
+    <View className="gap-4">
       {props.workspace.closed ? <Banner tone="warning" text={t("shell.closedWorkspace")} /> : null}
 
       <TextField
@@ -155,7 +154,7 @@ export function ContactsListContent(props: ContactsListContentProps) {
           )}
         </Card>
       ) : (
-        <Card style={styles.listCard}>
+        <Card className="gap-0 p-1">
           {visible.map((contact) => {
             const sub = contactSubtitle(contact);
             return (
@@ -166,7 +165,7 @@ export function ContactsListContent(props: ContactsListContentProps) {
                 title={contact.name}
                 {...(sub !== "" ? { subtitle: sub } : {})}
                 badge={
-                  <View style={styles.badges}>
+                  <View className="flex-row flex-wrap justify-end gap-1">
                     {contact.roles.map((role) => (
                       <Badge
                         key={role}
@@ -322,9 +321,3 @@ function WorkspaceContactsList({ workspace }: { readonly workspace: WorkspaceSum
     </Screen>
   );
 }
-
-const styles = StyleSheet.create({
-  stack: { gap: space.lg },
-  listCard: { padding: space.xs, gap: 0 },
-  badges: { flexDirection: "row", flexWrap: "wrap", gap: space.xs, justifyContent: "flex-end" },
-});

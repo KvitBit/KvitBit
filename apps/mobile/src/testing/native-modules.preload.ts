@@ -150,6 +150,49 @@ mock.module("react-native-safe-area-context", () => ({
   useSafeAreaInsets: () => useContext(SafeAreaInsetsContext),
 }));
 
+// Uniwind runtime stand-in for Bun unit tests (records theme and CSS variable syncs).
+const uniwindState = {
+  currentTheme: "light",
+  themes: ["light", "dark"],
+  hasAdaptiveThemes: false,
+  vars: { light: {}, dark: {} } as Record<string, Record<string, string | number>>,
+};
+(globalThis as { __UNIWIND_TEST_STATE__?: typeof uniwindState }).__UNIWIND_TEST_STATE__ =
+  uniwindState;
+const uniwindPassThrough = ({ children }: { readonly children?: unknown }) => children ?? null;
+
+mock.module("uniwind", () => ({
+  Uniwind: {
+    get themes() {
+      return uniwindState.themes;
+    },
+    get hasAdaptiveThemes() {
+      return uniwindState.hasAdaptiveThemes;
+    },
+    get currentTheme() {
+      return uniwindState.currentTheme;
+    },
+    setTheme: (theme: string) => {
+      uniwindState.currentTheme = theme;
+    },
+    updateCSSVariables: (theme: string, vars: Record<string, string | number>) => {
+      uniwindState.vars[theme] = { ...(uniwindState.vars[theme] ?? {}), ...vars };
+    },
+    updateInsets: () => undefined,
+    getCSSVariable: (name: string) => uniwindState.vars[uniwindState.currentTheme]?.[name],
+  },
+  withUniwind: <T>(Component: T): T => Component,
+  useCSSVariable: (name: string) => uniwindState.vars[uniwindState.currentTheme]?.[name],
+  useResolveClassNames: () => ({}),
+  useUniwind: () => ({
+    theme: uniwindState.currentTheme,
+    hasAdaptiveThemes: uniwindState.hasAdaptiveThemes,
+  }),
+  ScopedTheme: uniwindPassThrough,
+  ScopedVariables: uniwindPassThrough,
+  LayoutDirection: uniwindPassThrough,
+}));
+
 // SVG elements stand in as their names, so a test can find the icon a
 // component draws (Lucide draws through react-native-svg).
 const svgElement = (name: string) => name;

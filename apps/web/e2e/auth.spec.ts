@@ -29,9 +29,9 @@ if (typeof Bun === "undefined") {
       const release = await holdChallenge(page, scope, 204);
       await page.goto(path);
 
-      const form = page.locator(".kb-auth-form");
+      const form = page.locator('[data-slot="auth-form"]');
       const status = form.getByRole("status");
-      const submit = form.locator("button.kb-btn--primary");
+      const submit = form.locator('button[data-variant="primary"]');
       await expect(status.getByText(verifying)).toBeVisible();
       await expect(submit).toBeDisabled();
       await page.evaluate(() => document.fonts.ready.then(() => undefined));
@@ -48,7 +48,7 @@ if (typeof Bun === "undefined") {
     const release = await holdChallenge(page, "magic_link", 204);
     await page.goto("/sign-in");
 
-    const form = page.locator(".kb-auth-form");
+    const form = page.locator('[data-slot="auth-form"]');
     const status = form.getByRole("status");
     const submit = page.getByTestId("auth-signin-submit");
     await expect(submit).toBeEnabled();
@@ -75,7 +75,7 @@ if (typeof Bun === "undefined") {
     const release = await holdChallenge(page, "magic_link", 503);
     await page.goto("/sign-up");
 
-    const form = page.locator(".kb-auth-form");
+    const form = page.locator('[data-slot="auth-form"]');
     const status = form.getByRole("status");
     const submit = page.getByTestId("auth-signup-submit");
     await expect(submit).toBeEnabled();

@@ -35,7 +35,9 @@ export const paymentQrView = <M>(
   sizePx = 168,
 ): Markup<M> =>
   h.div
-    .class("kb-qr-frame")
+    .class(
+      "inline-flex rounded-control border border-outline-variant bg-surface-container-lowest p-2.5 text-on-surface",
+    )
     .attr("role", "img")
     .attr("aria-label", ariaLabel)
     .children([h.img.attr("src", svgImage(qrSvgMarkup(payload, sizePx))).attr("alt", "")]);

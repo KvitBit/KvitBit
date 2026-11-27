@@ -3,7 +3,7 @@ import { idempotencyHeaders, inWorkspace } from "@kvitbit/ui-port/api";
 import { router } from "expo-router";
 import { MailPlus, RefreshCw, Trash2, UserMinus } from "lucide-react-native";
 import { useState } from "react";
-import { StyleSheet, View } from "react-native";
+import { View } from "react-native";
 import { useI18n } from "../../i18n/i18n-provider";
 import { useApi, useRemote } from "../../runtime/api-runtime";
 import { runRequestIntent } from "../../runtime/request-intent";
@@ -16,7 +16,6 @@ import {
   RemoteView,
   Section,
   SegmentedChoice,
-  space,
   Text,
   TextField,
   useOverlay,
@@ -199,7 +198,7 @@ export function TeamSection() {
   };
 
   return (
-    <View style={styles.stack}>
+    <View className="gap-4">
       {canInvite ? null : <Banner text={t("settings.readOnly")} tone="info" />}
       {errorState.banner === null ? null : <Banner text={errorState.banner} tone="error" />}
 
@@ -239,15 +238,15 @@ export function TeamSection() {
       <Section title={t("settings.team.members")}>
         <RemoteView state={membersRemote.state} onRetry={membersRemote.reload}>
           {(members) => (
-            <View style={styles.stack}>
+            <View className="gap-4">
               {members.map((member) => {
                 const isSelf = currentUserId !== null && member.userId === currentUserId;
                 const manageable =
                   !isSelf && canManageMember(workspace.role, member.role, workspace.closed);
                 return (
                   <Card key={member.userId}>
-                    <View style={styles.headerRow}>
-                      <View style={styles.flex}>
+                    <View className="flex-row flex-wrap items-center gap-2">
+                      <View className="flex-1">
                         <Text variant="titleSmall">{member.name}</Text>
                         <Text variant="meta" color="onSurfaceVariant">
                           {member.email}
@@ -257,7 +256,7 @@ export function TeamSection() {
                       <Badge label={t(`enum.role.${member.role}`)} tone="neutral" />
                     </View>
                     {manageable ? (
-                      <View style={styles.memberControls}>
+                      <View className="gap-2 pt-1">
                         <SegmentedChoice<InvitationRole>
                           label={t("settings.team.changeRole")}
                           value={member.role === "owner" ? null : member.role}
@@ -295,11 +294,11 @@ export function TeamSection() {
                   </Text>
                 </Card>
               ) : (
-                <View style={styles.stack}>
+                <View className="gap-4">
                   {invitations.map((inv) => (
                     <Card key={inv.id}>
-                      <View style={styles.headerRow}>
-                        <View style={styles.flex}>
+                      <View className="flex-row flex-wrap items-center gap-2">
+                        <View className="flex-1">
                           <Text variant="titleSmall">{inv.email}</Text>
                           <Text variant="meta" color="onSurfaceVariant">
                             {t("settings.team.invitedBy", { name: inv.invitedBy.name })} ·{" "}
@@ -313,7 +312,7 @@ export function TeamSection() {
                         />
                       </View>
                       {inv.status === "pending" ? (
-                        <View style={styles.row}>
+                        <View className="flex-row flex-wrap items-center gap-2">
                           <Button
                             kind="outlined"
                             icon={RefreshCw}
@@ -359,11 +358,3 @@ export function TeamSection() {
     </View>
   );
 }
-
-const styles = StyleSheet.create({
-  stack: { gap: space.lg },
-  flex: { flex: 1 },
-  headerRow: { flexDirection: "row", flexWrap: "wrap", alignItems: "center", gap: space.sm },
-  memberControls: { gap: space.sm, paddingTop: space.xs },
-  row: { flexDirection: "row", flexWrap: "wrap", gap: space.sm, alignItems: "center" },
-});

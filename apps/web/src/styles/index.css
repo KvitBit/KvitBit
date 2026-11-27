@@ -1,10 +1,255 @@
 @layer ui-sdk;
-
+@import "tailwindcss";
 @import "./fonts.css";
-@import "./base.css";
-@import "./ui.css";
-@import "./shell.css";
-@import "./pages/public.css";
-@import "./pages/documents.css";
-@import "./pages/records.css";
-@import "./pages/settings.css";
+
+/*
+ * Semantic Tailwind v4 tokens bound directly to Kvitbit's runtime Material 3 + Elegant/Cozy
+ * CSS custom properties (packages/ui-port/src/theme/serialize.ts).
+ * Clearing `--color-*` disables Tailwind's default palette so components can only reference
+ * semantic M3 and financial status roles.
+ */
+@theme inline {
+  --color-*: initial;
+
+  --color-primary: var(--md-sys-color-primary);
+  --color-on-primary: var(--md-sys-color-on-primary);
+  --color-primary-container: var(--md-sys-color-primary-container);
+  --color-on-primary-container: var(--md-sys-color-on-primary-container);
+  --color-primary-fixed: var(--md-sys-color-primary-fixed);
+  --color-primary-fixed-dim: var(--md-sys-color-primary-fixed-dim);
+  --color-on-primary-fixed: var(--md-sys-color-on-primary-fixed);
+  --color-on-primary-fixed-variant: var(--md-sys-color-on-primary-fixed-variant);
+  --color-inverse-primary: var(--md-sys-color-inverse-primary);
+
+  --color-secondary: var(--md-sys-color-secondary);
+  --color-on-secondary: var(--md-sys-color-on-secondary);
+  --color-secondary-container: var(--md-sys-color-secondary-container);
+  --color-on-secondary-container: var(--md-sys-color-on-secondary-container);
+  --color-secondary-fixed: var(--md-sys-color-secondary-fixed);
+  --color-secondary-fixed-dim: var(--md-sys-color-secondary-fixed-dim);
+  --color-on-secondary-fixed: var(--md-sys-color-on-secondary-fixed);
+  --color-on-secondary-fixed-variant: var(--md-sys-color-on-secondary-fixed-variant);
+
+  --color-tertiary: var(--md-sys-color-tertiary);
+  --color-on-tertiary: var(--md-sys-color-on-tertiary);
+  --color-tertiary-container: var(--md-sys-color-tertiary-container);
+  --color-on-tertiary-container: var(--md-sys-color-on-tertiary-container);
+  --color-tertiary-fixed: var(--md-sys-color-tertiary-fixed);
+  --color-tertiary-fixed-dim: var(--md-sys-color-tertiary-fixed-dim);
+  --color-on-tertiary-fixed: var(--md-sys-color-on-tertiary-fixed);
+  --color-on-tertiary-fixed-variant: var(--md-sys-color-on-tertiary-fixed-variant);
+
+  --color-error: var(--md-sys-color-error);
+  --color-on-error: var(--md-sys-color-on-error);
+  --color-error-container: var(--md-sys-color-error-container);
+  --color-on-error-container: var(--md-sys-color-on-error-container);
+
+  --color-background: var(--md-sys-color-background);
+  --color-on-background: var(--md-sys-color-on-background);
+  --color-surface: var(--md-sys-color-surface);
+  --color-on-surface: var(--md-sys-color-on-surface);
+  --color-surface-variant: var(--md-sys-color-surface-variant);
+  --color-on-surface-variant: var(--md-sys-color-on-surface-variant);
+  --color-surface-dim: var(--md-sys-color-surface-dim);
+  --color-surface-bright: var(--md-sys-color-surface-bright);
+  --color-surface-container-lowest: var(--md-sys-color-surface-container-lowest);
+  --color-surface-container-low: var(--md-sys-color-surface-container-low);
+  --color-surface-container: var(--md-sys-color-surface-container);
+  --color-surface-container-high: var(--md-sys-color-surface-container-high);
+  --color-surface-container-highest: var(--md-sys-color-surface-container-highest);
+  --color-surface-tint: var(--md-sys-color-surface-tint);
+  --color-inverse-surface: var(--md-sys-color-inverse-surface);
+  --color-inverse-on-surface: var(--md-sys-color-inverse-on-surface);
+
+  --color-outline: var(--md-sys-color-outline);
+  --color-outline-variant: var(--md-sys-color-outline-variant);
+  --color-shadow: var(--md-sys-color-shadow);
+  --color-scrim: var(--md-sys-color-scrim);
+
+  --color-paid: var(--kb-color-paid);
+  --color-on-paid: var(--kb-color-on-paid);
+  --color-paid-container: var(--kb-color-paid-container);
+  --color-on-paid-container: var(--kb-color-on-paid-container);
+
+  --color-proforma: var(--kb-color-proforma);
+  --color-on-proforma: var(--kb-color-on-proforma);
+  --color-proforma-container: var(--kb-color-proforma-container);
+  --color-on-proforma-container: var(--kb-color-on-proforma-container);
+
+  --color-overdue: var(--kb-color-overdue);
+  --color-on-overdue: var(--kb-color-on-overdue);
+  --color-overdue-container: var(--kb-color-overdue-container);
+  --color-on-overdue-container: var(--kb-color-on-overdue-container);
+
+  --color-draft: var(--kb-color-draft);
+  --color-on-draft: var(--kb-color-on-draft);
+  --color-draft-container: var(--kb-color-draft-container);
+  --color-on-draft-container: var(--kb-color-on-draft-container);
+
+  --radius-panel: var(--kb-shape-panel);
+  --radius-control: var(--kb-shape-control);
+  --radius-badge: var(--kb-shape-badge);
+
+  --font-display: var(--kb-font-display);
+  --font-body: var(--kb-font-body);
+  --font-mono: var(--kb-font-mono);
+}
+
+@layer base {
+  html {
+    -webkit-text-size-adjust: 100%;
+  }
+
+  .kb-root {
+    color-scheme: light dark;
+  }
+
+  .kb-root[data-theme="light"] {
+    color-scheme: light;
+  }
+
+  .kb-root[data-theme="dark"] {
+    color-scheme: dark;
+  }
+
+  body,
+  .kb-root {
+    min-height: 100dvh;
+    background: var(--md-sys-color-surface);
+    color: var(--md-sys-color-on-surface);
+    font-family: var(--kb-font-body);
+    font-size: var(--kb-operate-body-size, 0.875rem);
+    line-height: var(--kb-operate-body-line-height, 1.25rem);
+    font-feature-settings: var(--kb-font-numeric-settings);
+    -webkit-font-smoothing: antialiased;
+  }
+
+  h1,
+  h2,
+  h3,
+  h4 {
+    font-family: var(--kb-font-display);
+    font-weight: var(--kb-font-display-weight);
+    letter-spacing: -0.01em;
+  }
+
+  h1 {
+    font-size: 1.125rem;
+    line-height: 1.5rem;
+  }
+
+  h2 {
+    font-size: 0.9375rem;
+    line-height: 1.25rem;
+  }
+
+  h3 {
+    font-size: 0.875rem;
+    line-height: 1.25rem;
+  }
+
+  a {
+    color: inherit;
+    text-underline-offset: 0.18em;
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--md-sys-color-primary);
+    outline-offset: 2px;
+  }
+
+  ui-input,
+  ui-textarea {
+    display: block;
+    width: 100%;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      /* biome-ignore lint/complexity/noImportantStyles: reduced motion must win over component transitions */
+      animation-duration: 0.01ms !important;
+      /* biome-ignore lint/complexity/noImportantStyles: reduced motion must win over component transitions */
+      transition-duration: 0.01ms !important;
+    }
+  }
+}
+
+/* Tabular lining numerals driven by the active style profile (Recia requires explicit lnum+tnum). */
+@utility kb-num {
+  font-variant-numeric: var(--kb-font-numeric-variant);
+  font-feature-settings: var(--kb-font-numeric-settings);
+  white-space: nowrap;
+}
+
+/* Brand optical master switching (DESIGN.md "Brand Identity": light vs dark master follows surface). */
+.kb-root .kb-only-dark {
+  display: none;
+}
+.kb-root[data-theme="dark"] .kb-only-dark {
+  display: inline-flex;
+}
+.kb-root[data-theme="dark"] .kb-only-light {
+  display: none;
+}
+@media (prefers-color-scheme: dark) {
+  .kb-root:not([data-theme="light"]) .kb-only-dark {
+    display: inline-flex;
+  }
+  .kb-root:not([data-theme="light"]) .kb-only-light {
+    display: none;
+  }
+}
+
+/* Seamless T4 micro-glyph graph background tile. */
+.kb-pattern {
+  background-image: url("/assets/brand/pattern/kvitbit-pattern-t4-light.svg");
+  background-size: 96px 96px;
+}
+.kb-root[data-theme="dark"] .kb-pattern {
+  background-image: url("/assets/brand/pattern/kvitbit-pattern-t4-dark.svg");
+}
+@media (prefers-color-scheme: dark) {
+  .kb-root:not([data-theme="light"]) .kb-pattern {
+    background-image: url("/assets/brand/pattern/kvitbit-pattern-t4-dark.svg");
+  }
+}
+
+/* Viewport-synchronized zero-CLS skeleton shimmer (DESIGN.md). */
+.kb-skeleton {
+  position: relative;
+  overflow: hidden;
+  border-radius: var(--kb-shape-badge);
+  background: var(--md-sys-color-surface-container-high);
+  color: transparent;
+  min-height: 0.9em;
+}
+.kb-skeleton::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    90deg,
+    transparent 41%,
+    color-mix(in srgb, var(--md-sys-color-surface-container-lowest) 55%, transparent) 50%,
+    transparent 59%
+  );
+  background-size: 100vw 100%;
+  background-attachment: fixed;
+  animation: kb-shimmer 1.15s linear infinite;
+}
+@keyframes kb-shimmer {
+  from {
+    background-position: -100vw 0;
+  }
+  to {
+    background-position: 100vw 0;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .kb-skeleton::after {
+    animation: none;
+    background: none;
+  }
+}

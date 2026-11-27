@@ -300,8 +300,8 @@ describe("Settings page (Screens 18-21 & More hub)", () => {
     let { model } = Settings.init(route, ctx);
 
     const classicHtml = await renderText((h) => Settings.view(model, ctx, h));
-    expect(classicHtml).toContain("kb-pdf-mini--classic");
-    expect(classicHtml).not.toContain("kb-pdf-mini--modern");
+    expect(classicHtml).toContain('data-slot="pdf-mini-classic"');
+    expect(classicHtml).not.toContain('data-slot="pdf-mini-modern"');
 
     model = Settings.update(
       model,
@@ -309,8 +309,8 @@ describe("Settings page (Screens 18-21 & More hub)", () => {
       ctx,
     ).model;
     const modernHtml = await renderText((h) => Settings.view(model, ctx, h));
-    expect(modernHtml).toContain("kb-pdf-mini--modern");
-    expect(modernHtml).not.toContain("kb-pdf-mini--classic");
+    expect(modernHtml).toContain('data-slot="pdf-mini-modern"');
+    expect(modernHtml).not.toContain('data-slot="pdf-mini-classic"');
 
     model = Settings.update(
       model,
@@ -414,7 +414,7 @@ describe("Settings page (Screens 18-21 & More hub)", () => {
 
     // Verify all 10 areas appear in the rendered scope matrix
     const matrixHtml = await renderText((h) => Settings.view(model, ctx, h));
-    expect(matrixHtml).toContain("kb-scope-matrix");
+    expect(matrixHtml).toContain('data-slot="scope-matrix"');
     expect(matrixHtml).toContain("Documents");
     expect(matrixHtml).toContain("Share links");
 
@@ -541,7 +541,7 @@ describe("Settings page (Screens 18-21 & More hub)", () => {
 
   it("server-renders Settings and More routes cleanly via SSR", async () => {
     const s1 = await renderPath(`/w/${WS}/settings/branding`, { locale: "cs", session: signedIn });
-    expect(s1.html).toContain("kb-pdf-mini--classic");
+    expect(s1.html).toContain('data-slot="pdf-mini-classic"');
     const s2 = await renderPath(`/w/${WS}/settings/api-keys`, { locale: "en", session: signedIn });
     expect(s2.html).toContain("API keys");
     const s3 = await renderPath(`/w/${WS}/more`, { locale: "cs", session: signedIn });

@@ -1,37 +1,37 @@
 import { ChevronRight } from "lucide-react-native";
 import type { ReactNode } from "react";
-import { ActivityIndicator, Pressable, StyleSheet, View, type ViewStyle } from "react-native";
+import { ActivityIndicator, Pressable, View, type ViewStyle } from "react-native";
 import { useTheme } from "../theme/theme-provider";
 import { Button } from "./button";
 import { Icon, type IconComponent } from "./icon";
+import { badgeTextVariants, badgeVariants, bannerVariants, cardVariants, cn } from "./styles";
 import { Text } from "./text";
-import { space, touchTarget } from "./tokens";
 
 /** A panel: flat with an outline in the elegant style, a tonal step in cozy. */
 export function Card(props: {
   readonly children: ReactNode;
   readonly onPress?: () => void;
   readonly style?: ViewStyle;
+  readonly className?: string;
   readonly accessibilityLabel?: string;
 }) {
   const theme = useTheme();
-  const style: ViewStyle = {
-    borderRadius: theme.shape.panel,
-    borderWidth: theme.panelBorder,
-    borderColor: theme.colors.outlineVariant,
-    backgroundColor:
-      theme.surface === "tonal" ? theme.colors.surfaceContainerLow : theme.colors.surface,
-    padding: space.lg,
-    gap: space.sm,
-  };
-  if (props.onPress === undefined)
-    return <View style={[style, props.style]}>{props.children}</View>;
+  const surface = theme.surface === "tonal" ? "tonal" : "outlined";
+  const cardClass = cn(cardVariants({ surface }), props.className);
+  if (props.onPress === undefined) {
+    return (
+      <View className={cardClass} style={props.style}>
+        {props.children}
+      </View>
+    );
+  }
   return (
     <Pressable
       accessibilityRole="button"
       accessibilityLabel={props.accessibilityLabel}
       onPress={props.onPress}
-      style={({ pressed }) => [style, props.style, pressed ? { opacity: 0.85 } : null]}
+      className={cn(cardClass, "active:opacity-85")}
+      style={props.style}
     >
       {props.children}
     </Pressable>
@@ -44,14 +44,14 @@ export function Section(props: {
   readonly action?: ReactNode;
 }) {
   return (
-    <View style={styles.section}>
+    <View className="gap-2">
       {props.title === undefined && props.action === undefined ? null : (
-        <View style={styles.sectionHead}>
+        <View className="min-h-8 flex-row items-center">
           <Text
             variant="titleSmall"
             color="onSurfaceVariant"
             accessibilityRole="header"
-            style={styles.flex}
+            className="flex-1"
           >
             {props.title ?? ""}
           </Text>
@@ -77,11 +77,10 @@ export interface ListRowProps {
 }
 
 export function ListRow(props: ListRowProps) {
-  const theme = useTheme();
   const content = (
-    <View style={styles.row}>
+    <View className="min-h-16 flex-row items-center gap-3 px-1 py-2">
       {props.leading === undefined ? null : <Icon icon={props.leading} />}
-      <View style={styles.flex}>
+      <View className="flex-1">
         <Text variant="row" numberOfLines={1}>
           {props.title}
         </Text>
@@ -91,7 +90,7 @@ export function ListRow(props: ListRowProps) {
           </Text>
         )}
       </View>
-      <View style={styles.trailing}>
+      <View className="items-end gap-0.5">
         {props.trailing === undefined ? null : (
           <Text variant="row" numeric>
             {props.trailing}
@@ -109,20 +108,15 @@ export function ListRow(props: ListRowProps) {
       ) : null}
     </View>
   );
-  const divider = {
-    borderBottomColor: theme.colors.outlineVariant,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-  };
-  if (props.onPress === undefined) return <View style={divider}>{content}</View>;
+  if (props.onPress === undefined) {
+    return <View className="border-b border-outline-variant">{content}</View>;
+  }
   return (
     <Pressable
       testID={props.testID}
       accessibilityRole="button"
       onPress={props.onPress}
-      style={({ pressed }) => [
-        divider,
-        pressed ? { backgroundColor: theme.colors.surfaceContainerHigh } : null,
-      ]}
+      className="border-b border-outline-variant active:bg-surface-container-high"
     >
       {content}
     </Pressable>
@@ -139,22 +133,10 @@ export type BadgeTone =
   | "draft";
 
 export function Badge(props: { readonly label: string; readonly tone?: BadgeTone }) {
-  const theme = useTheme();
-  const c = theme.colors;
-  const x = theme.extended;
-  const tones = {
-    neutral: [c.surfaceContainerHighest, c.onSurfaceVariant],
-    info: [c.secondaryContainer, c.onSecondaryContainer],
-    success: [x.paid.colorContainer, x.paid.onColorContainer],
-    warning: [x.overdue.colorContainer, x.overdue.onColorContainer],
-    proforma: [x.proforma.colorContainer, x.proforma.onColorContainer],
-    draft: [x.draft.colorContainer, x.draft.onColorContainer],
-    danger: [c.errorContainer, c.onErrorContainer],
-  } as const;
-  const [bg, fg] = tones[props.tone ?? "neutral"];
+  const tone = props.tone ?? "neutral";
   return (
-    <View style={[styles.badge, { backgroundColor: bg, borderRadius: theme.shape.badge }]}>
-      <Text variant="labelSmall" style={{ color: fg }}>
+    <View className={badgeVariants({ tone })}>
+      <Text variant="labelSmall" className={badgeTextVariants({ tone })}>
         {props.label}
       </Text>
     </View>
@@ -164,7 +146,11 @@ export function Badge(props: { readonly label: string; readonly tone?: BadgeTone
 export function Loading(props: { readonly label?: string }) {
   const theme = useTheme();
   return (
-    <View style={styles.center} accessibilityLabel={props.label} accessibilityRole="progressbar">
+    <View
+      className="items-center justify-center gap-3 p-6"
+      accessibilityLabel={props.label}
+      accessibilityRole="progressbar"
+    >
       <ActivityIndicator color={theme.colors.primary} />
     </View>
   );
@@ -176,7 +162,7 @@ export function EmptyState(props: {
   readonly action?: { readonly label: string; readonly onPress: () => void };
 }) {
   return (
-    <View style={styles.center}>
+    <View className="items-center justify-center gap-3 p-6">
       <Text variant="titleMedium" align="center">
         {props.title}
       </Text>
@@ -196,42 +182,23 @@ export function Banner(props: {
   readonly tone?: "error" | "info" | "warning";
   readonly action?: { readonly label: string; readonly onPress: () => void };
 }) {
-  const theme = useTheme();
-  const c = theme.colors;
-  const [bg, fg] =
-    props.tone === "info"
-      ? [c.secondaryContainer, "onSecondaryContainer" as const]
-      : props.tone === "warning"
-        ? [theme.extended.overdue.colorContainer, "onSurface" as const]
-        : [c.errorContainer, "onErrorContainer" as const];
+  const tone = props.tone ?? "error";
+  const fg =
+    tone === "info"
+      ? ("onSecondaryContainer" as const)
+      : tone === "warning"
+        ? ("onSurface" as const)
+        : ("onErrorContainer" as const);
   return (
     <View
       accessibilityRole="alert"
       accessibilityLiveRegion="polite"
-      style={[styles.banner, { backgroundColor: bg, borderRadius: theme.shape.panel }]}
+      className={bannerVariants({ tone })}
     >
-      <Text variant="bodyMedium" color={fg} style={styles.flex}>
+      <Text variant="bodyMedium" color={fg} className="flex-1">
         {props.text}
       </Text>
       {props.action === undefined ? null : <Button kind="text" {...props.action} />}
     </View>
   );
 }
-
-const styles = StyleSheet.create({
-  flex: { flex: 1 },
-  section: { gap: space.sm },
-  sectionHead: { flexDirection: "row", alignItems: "center", minHeight: 32 },
-  row: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: space.md,
-    minHeight: touchTarget + 16,
-    paddingVertical: space.sm,
-    paddingHorizontal: space.xs,
-  },
-  trailing: { alignItems: "flex-end", gap: 2 },
-  badge: { paddingHorizontal: space.sm, paddingVertical: 2, alignSelf: "flex-start" },
-  center: { alignItems: "center", justifyContent: "center", padding: space.xl, gap: space.md },
-  banner: { flexDirection: "row", alignItems: "center", gap: space.sm, padding: space.md },
-});

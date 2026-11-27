@@ -3,7 +3,7 @@ import { describeError } from "@kvitbit/ui-port/api";
 import { enumText, type Locale } from "@kvitbit/ui-port/i18n";
 import { KeyRound, LogOut, MonitorSmartphone, ShieldAlert, Trash2 } from "lucide-react-native";
 import { useCallback, useEffect, useState } from "react";
-import { StyleSheet, View } from "react-native";
+import { View } from "react-native";
 import { useI18n } from "../../i18n/i18n-provider";
 import { navigate } from "../../navigation/routes";
 import { useRemote } from "../../runtime/api-runtime";
@@ -22,7 +22,6 @@ import {
   Section,
   SegmentedChoice,
   SwitchRow,
-  space,
   Text,
   TextField,
   useOverlay,
@@ -400,8 +399,8 @@ export function AccountScreen(props: {
         <>
           <Section title={t("account.security.passkeys")}>
             <Card>
-              <View style={styles.row}>
-                <View style={styles.flex}>
+              <View className="flex-row items-end gap-2">
+                <View className="flex-1">
                   <TextField
                     label={t("account.security.passkeyName")}
                     value={newPasskeyName}
@@ -426,10 +425,10 @@ export function AccountScreen(props: {
                 <EmptyState title={t("account.security.noPasskeys")} />
               ) : (
                 passkeys.map((pk) => (
-                  <View key={pk.id} style={styles.itemBlock}>
+                  <View key={pk.id} className="gap-1">
                     {renamingId === pk.id ? (
-                      <View style={styles.row}>
-                        <View style={styles.flex}>
+                      <View className="flex-row items-end gap-2">
+                        <View className="flex-1">
                           <TextField
                             label={t("account.security.passkeyName")}
                             value={renameText}
@@ -455,7 +454,7 @@ export function AccountScreen(props: {
                           title={pk.name}
                           subtitle={pk.createdAt.slice(0, 10)}
                         />
-                        <View style={styles.actionsRow}>
+                        <View className="flex-row justify-end gap-2">
                           <Button
                             kind="text"
                             label={t("common.action.rename")}
@@ -543,7 +542,7 @@ export function AccountScreen(props: {
               <EmptyState title={t("common.state.empty")} />
             ) : (
               sessions.map((s) => (
-                <View key={s.id} style={styles.itemBlock}>
+                <View key={s.id} className="gap-1">
                   <ListRow
                     leading={MonitorSmartphone}
                     title={s.userAgent ?? t("common.state.unknown")}
@@ -555,7 +554,7 @@ export function AccountScreen(props: {
                     }
                   />
                   {s.current ? null : (
-                    <View style={styles.actionsRow}>
+                    <View className="flex-row justify-end gap-2">
                       <Button
                         kind="text"
                         label={t("account.security.revokeSession")}
@@ -580,7 +579,7 @@ export function AccountScreen(props: {
       ) : (
         <Section title={t("account.danger.title")}>
           <Card>
-            <View style={styles.dangerHead}>
+            <View className="flex-row items-center gap-2">
               <ShieldAlert size={20} />
               <Text variant="bodyMedium">{t("account.danger.body")}</Text>
             </View>
@@ -633,11 +632,3 @@ export function AccountScreen(props: {
     </Screen>
   );
 }
-
-const styles = StyleSheet.create({
-  flex: { flex: 1 },
-  row: { flexDirection: "row", alignItems: "flex-end", gap: space.sm },
-  itemBlock: { gap: space.xs },
-  actionsRow: { flexDirection: "row", justifyContent: "flex-end", gap: space.sm },
-  dangerHead: { flexDirection: "row", alignItems: "center", gap: space.sm },
-});

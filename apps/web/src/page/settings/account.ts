@@ -43,6 +43,7 @@ import {
   tabs,
   textField,
 } from "../../ui/kit";
+import { cardVariants, cn, controlVariants, selectableCardVariants, ui } from "../../ui/styles";
 import { sCopy } from "./copy";
 import { cmd, PasskeyItem, SessionItem } from "./models";
 
@@ -1095,31 +1096,37 @@ const viewProfile = (model: Model, ctx: PageContext, h: Html.H<Message>): Markup
   const t = translator(ctx.locale);
   const currentEmail = ctx.session._tag === "SignedIn" ? ctx.session.user.email : "";
 
-  return h.div.class("kb-stack").children([
+  return h.div.class(ui.stack).children([
     card(h, [
       cardTitle(h, t.t("account.profile.title")),
-      h.div.class("kb-form-grid").children([
-        textField(h, {
-          id: "kb-account-name",
-          label: t.t("account.profile.name"),
-          value: model.profile.name,
-          onInput: (value) => Message.ChangedName({ value }),
-          autocomplete: "name",
-        }),
-        h.div.class("kb-field").children([
-          h.span.class("kb-field__label").children([t.t("account.profile.language")]),
-          segmented(h, {
-            label: t.t("account.profile.language"),
-            selected: ctx.prefs.locale,
-            items: [
-              { id: "cs", label: "Čeština" },
-              { id: "en", label: "English" },
-            ],
-            onSelect: (id) => Message.ChangedLocale({ locale: id === "en" ? "en" : "cs" }),
+      h.div
+        .attr("data-slot", "form-grid")
+        .class(ui.formGridAuto)
+        .children([
+          textField(h, {
+            id: "kb-account-name",
+            label: t.t("account.profile.name"),
+            value: model.profile.name,
+            onInput: (value) => Message.ChangedName({ value }),
+            autocomplete: "name",
           }),
+          h.div
+            .attr("data-slot", "field")
+            .class(ui.field)
+            .children([
+              h.span.class(ui.fieldLabel).children([t.t("account.profile.language")]),
+              segmented(h, {
+                label: t.t("account.profile.language"),
+                selected: ctx.prefs.locale,
+                items: [
+                  { id: "cs", label: "Čeština" },
+                  { id: "en", label: "English" },
+                ],
+                onSelect: (id) => Message.ChangedLocale({ locale: id === "en" ? "en" : "cs" }),
+              }),
+            ]),
         ]),
-      ]),
-      h.div.class("kb-row").children([
+      h.div.class(ui.row).children([
         button(h, {
           label: sCopy(ctx.locale, "account.profile.save"),
           variant: "primary",
@@ -1130,7 +1137,7 @@ const viewProfile = (model: Model, ctx: PageContext, h: Html.H<Message>): Markup
     ]),
     card(h, [
       cardTitle(h, t.t("account.profile.email")),
-      h.p.class("kb-muted").children([currentEmail]),
+      h.p.class(ui.muted).children([currentEmail]),
       ...(model.profile.emailSentTo !== null
         ? [
             banner(h, {
@@ -1139,21 +1146,23 @@ const viewProfile = (model: Model, ctx: PageContext, h: Html.H<Message>): Markup
             }),
           ]
         : []),
-      h.div.class("kb-ares-row").children([
-        textField(h, {
-          id: "kb-account-new-email",
-          label: sCopy(ctx.locale, "account.profile.newEmail"),
-          type: "email",
-          value: model.profile.newEmail,
-          onInput: (value) => Message.ChangedNewEmail({ value }),
-          autocomplete: "email",
-        }),
-        button(h, {
-          label: t.t("account.profile.changeEmail"),
-          busy: model.profile.savingEmail,
-          onClick: Message.ClickedChangeEmail(),
-        }),
-      ]),
+      h.div
+        .class("flex flex-wrap items-end gap-2.5 [&>[data-slot=field]]:flex-[1_1_200px]")
+        .children([
+          textField(h, {
+            id: "kb-account-new-email",
+            label: sCopy(ctx.locale, "account.profile.newEmail"),
+            type: "email",
+            value: model.profile.newEmail,
+            onInput: (value) => Message.ChangedNewEmail({ value }),
+            autocomplete: "email",
+          }),
+          button(h, {
+            label: t.t("account.profile.changeEmail"),
+            busy: model.profile.savingEmail,
+            onClick: Message.ClickedChangeEmail(),
+          }),
+        ]),
     ]),
   ]);
 };
@@ -1162,135 +1171,160 @@ const viewAppearance = (model: Model, ctx: PageContext, h: Html.H<Message>): Mar
   const t = translator(ctx.locale);
   const activePreset = ctx.prefs.theme._tag === "Preset" ? ctx.prefs.theme.id : null;
 
-  return h.div.class("kb-settings-grid").children([
-    card(h, [
-      cardTitle(h, t.t("account.appearance.title"), [
-        button(h, {
-          label: sCopy(ctx.locale, "account.appearance.savePrefs"),
-          variant: "primary",
-          busy: model.appearance.saving,
-          onClick: Message.ClickedSaveAppearance(),
-        }),
-      ]),
-      h.div
-        .style({ display: "contents" })
-        .children(
-          model.appearance.dirty
-            ? [banner(h, { tone: "info", text: t.t("account.appearance.unsaved") })]
-            : [],
-        ),
-      h.div.class("kb-section").children([
-        h.h3.children([t.t("account.appearance.presets")]),
-        h.div.class("kb-preset-grid").children(
-          Theme.PRESET_IDS.map((id) => {
-            const def = Theme.PresetDefinitions[id];
-            return h.button
-              .attr("type", "button")
-              .class("kb-preset-card")
-              .attr("aria-pressed", String(activePreset === id ? "true" : "false"))
-              .attr("data-preset", id)
-              .on("click", Message.SelectedPreset({ preset: id }))
+  return h.div
+    .class("grid grid-cols-1 items-start gap-5 lg:grid-cols-[minmax(0,1fr)_minmax(300px,420px)]")
+    .children([
+      card(h, [
+        cardTitle(h, t.t("account.appearance.title"), [
+          button(h, {
+            label: sCopy(ctx.locale, "account.appearance.savePrefs"),
+            variant: "primary",
+            busy: model.appearance.saving,
+            onClick: Message.ClickedSaveAppearance(),
+          }),
+        ]),
+        h.div
+          .style({ display: "contents" })
+          .children(
+            model.appearance.dirty
+              ? [banner(h, { tone: "info", text: t.t("account.appearance.unsaved") })]
+              : [],
+          ),
+        h.div.class("flex flex-col gap-3").children([
+          h.h3.children([t.t("account.appearance.presets")]),
+          h.div.class("grid grid-cols-[repeat(auto-fit,minmax(150px,1fr))] gap-2.5").children(
+            Theme.PRESET_IDS.map((id) => {
+              const def = Theme.PresetDefinitions[id];
+              return h.button
+                .attr("type", "button")
+                .class(selectableCardVariants({ layout: "row", selected: activePreset === id }))
+                .attr("aria-pressed", String(activePreset === id ? "true" : "false"))
+                .attr("data-preset", id)
+                .on("click", Message.SelectedPreset({ preset: id }))
+                .children([
+                  h.span
+                    .class(
+                      "h-[22px] w-[22px] flex-none rounded-badge border border-outline-variant bg-[var(--kb-swatch-color,var(--md-sys-color-primary))]",
+                    )
+                    .style({ "--kb-swatch-color": def.seed })
+                    .children([]),
+                  h.span.children([t.translate(Theme.presetNameText(id))]),
+                ]);
+            }),
+          ),
+        ]),
+        h.div
+          .class("flex flex-wrap items-end gap-2.5 [&>[data-slot=field]]:flex-[1_1_200px]")
+          .children([
+            textField(h, {
+              id: "kb-account-seed",
+              label: t.t("account.appearance.seed"),
+              hint: t.t("account.appearance.seedHint"),
+              placeholder: sCopy(ctx.locale, "account.appearance.seedPlaceholder"),
+              value: model.appearance.seedInput,
+              error: model.appearance.seedError ?? undefined,
+              mono: true,
+              onInput: (value) => Message.ChangedSeedInput({ value }),
+            }),
+            button(h, {
+              label: sCopy(ctx.locale, "account.appearance.applySeed"),
+              onClick: Message.ClickedApplySeed(),
+            }),
+          ]),
+        h.div
+          .attr("data-slot", "form-grid")
+          .class(ui.formGridAuto)
+          .children([
+            h.div
+              .attr("data-slot", "field")
+              .class(ui.field)
               .children([
+                h.span.class(ui.fieldLabel).children([t.t("account.appearance.style")]),
+                segmented(h, {
+                  label: t.t("account.appearance.style"),
+                  selected: ctx.prefs.style,
+                  fill: true,
+                  items: (["elegant", "cozy"] as const).map((s) => ({
+                    id: s,
+                    label: t.translate(Theme.styleNameText(s)),
+                  })),
+                  onSelect: (id) =>
+                    Message.SelectedStyle({ style: id === "cozy" ? "cozy" : "elegant" }),
+                }),
                 h.span
-                  .class("kb-preset-swatch")
-                  .style({ "--kb-swatch-color": def.seed })
-                  .children([]),
-                h.span.children([t.translate(Theme.presetNameText(id))]),
-              ]);
-          }),
-        ),
+                  .class(ui.fieldHint)
+                  .children([t.translate(I18n.enumText("themeStyleHint", ctx.prefs.style))]),
+              ]),
+            h.div
+              .attr("data-slot", "field")
+              .class(ui.field)
+              .children([
+                h.span.class(ui.fieldLabel).children([t.t("account.appearance.mode")]),
+                segmented(h, {
+                  label: t.t("account.appearance.mode"),
+                  selected: ctx.prefs.mode,
+                  fill: true,
+                  items: (["system", "light", "dark"] as const).map((m) => ({
+                    id: m,
+                    label: t.translate(Theme.modeNameText(m)),
+                  })),
+                  onSelect: (id) =>
+                    Message.SelectedMode({
+                      mode: id === "light" || id === "dark" ? id : "system",
+                    }),
+                }),
+              ]),
+            h.div
+              .attr("data-slot", "field")
+              .class(ui.field)
+              .children([
+                h.span.class(ui.fieldLabel).children([t.t("account.appearance.contrast")]),
+                segmented(h, {
+                  label: t.t("account.appearance.contrast"),
+                  selected: ctx.prefs.contrast,
+                  fill: true,
+                  items: (["standard", "medium", "high"] as const).map((c) => ({
+                    id: c,
+                    label: t.translate(Theme.contrastNameText(c)),
+                  })),
+                  onSelect: (id) =>
+                    Message.SelectedContrast({
+                      contrast: id === "medium" || id === "high" ? id : "standard",
+                    }),
+                }),
+              ]),
+          ]),
       ]),
-      h.div.class("kb-ares-row").children([
-        textField(h, {
-          id: "kb-account-seed",
-          label: t.t("account.appearance.seed"),
-          hint: t.t("account.appearance.seedHint"),
-          placeholder: sCopy(ctx.locale, "account.appearance.seedPlaceholder"),
-          value: model.appearance.seedInput,
-          error: model.appearance.seedError ?? undefined,
-          mono: true,
-          onInput: (value) => Message.ChangedSeedInput({ value }),
-        }),
-        button(h, {
-          label: sCopy(ctx.locale, "account.appearance.applySeed"),
-          onClick: Message.ClickedApplySeed(),
-        }),
+      card(h, [
+        cardTitle(h, t.t("account.appearance.preview")),
+        h.div
+          .class(
+            "flex flex-col gap-3 rounded-panel border border-outline-variant bg-surface-container-lowest p-4",
+          )
+          .children([
+            h.div
+              .attr("data-slot", "spread")
+              .class(ui.spread)
+              .children([
+                h.strong.children([t.t("account.appearance.sampleCard")]),
+                badge(h, t.translate(I18n.enumText("badge", "paid")), "paid"),
+              ]),
+            h.div
+              .class(ui.row)
+              .children([
+                badge(h, t.translate(I18n.enumText("badge", "proforma")), "proforma"),
+                badge(h, t.translate(I18n.enumText("badge", "overdue")), "overdue"),
+                badge(h, t.translate(I18n.enumText("badge", "draft")), "draft"),
+              ]),
+            h.div
+              .class(ui.row)
+              .children([
+                button(h, { label: t.t("account.appearance.sampleButton"), variant: "primary" }),
+              ]),
+            h.p.class(cn(ui.small, ui.muted)).children([t.t("account.appearance.contrastOk")]),
+          ]),
       ]),
-      h.div.class("kb-form-grid").children([
-        h.div.class("kb-field").children([
-          h.span.class("kb-field__label").children([t.t("account.appearance.style")]),
-          segmented(h, {
-            label: t.t("account.appearance.style"),
-            selected: ctx.prefs.style,
-            items: (["elegant", "cozy"] as const).map((s) => ({
-              id: s,
-              label: t.translate(Theme.styleNameText(s)),
-            })),
-            onSelect: (id) => Message.SelectedStyle({ style: id === "cozy" ? "cozy" : "elegant" }),
-          }),
-          h.span
-            .class("kb-field__hint")
-            .children([t.translate(I18n.enumText("themeStyleHint", ctx.prefs.style))]),
-        ]),
-        h.div.class("kb-field").children([
-          h.span.class("kb-field__label").children([t.t("account.appearance.mode")]),
-          segmented(h, {
-            label: t.t("account.appearance.mode"),
-            selected: ctx.prefs.mode,
-            items: (["system", "light", "dark"] as const).map((m) => ({
-              id: m,
-              label: t.translate(Theme.modeNameText(m)),
-            })),
-            onSelect: (id) =>
-              Message.SelectedMode({
-                mode: id === "light" || id === "dark" ? id : "system",
-              }),
-          }),
-        ]),
-        h.div.class("kb-field").children([
-          h.span.class("kb-field__label").children([t.t("account.appearance.contrast")]),
-          segmented(h, {
-            label: t.t("account.appearance.contrast"),
-            selected: ctx.prefs.contrast,
-            items: (["standard", "medium", "high"] as const).map((c) => ({
-              id: c,
-              label: t.translate(Theme.contrastNameText(c)),
-            })),
-            onSelect: (id) =>
-              Message.SelectedContrast({
-                contrast: id === "medium" || id === "high" ? id : "standard",
-              }),
-          }),
-        ]),
-      ]),
-    ]),
-    card(h, [
-      cardTitle(h, t.t("account.appearance.preview")),
-      h.div
-        .class("kb-appearance-sample")
-        .children([
-          h.div
-            .class("kb-spread")
-            .children([
-              h.strong.children([t.t("account.appearance.sampleCard")]),
-              badge(h, t.translate(I18n.enumText("badge", "paid")), "paid"),
-            ]),
-          h.div
-            .class("kb-row")
-            .children([
-              badge(h, t.translate(I18n.enumText("badge", "proforma")), "proforma"),
-              badge(h, t.translate(I18n.enumText("badge", "overdue")), "overdue"),
-              badge(h, t.translate(I18n.enumText("badge", "draft")), "draft"),
-            ]),
-          h.div
-            .class("kb-row")
-            .children([
-              button(h, { label: t.t("account.appearance.sampleButton"), variant: "primary" }),
-            ]),
-          h.p.class("kb-small kb-muted").children([t.t("account.appearance.contrastOk")]),
-        ]),
-    ]),
-  ]);
+    ]);
 };
 
 const viewSecurity = (model: Model, ctx: PageContext, h: Html.H<Message>): Markup<Message> => {
@@ -1301,24 +1335,26 @@ const viewSecurity = (model: Model, ctx: PageContext, h: Html.H<Message>): Marku
       ? undefined
       : passkeys?.find((p) => p.id === model.security.removingId);
 
-  return h.div.class("kb-stack").children([
+  return h.div.class(ui.stack).children([
     card(h, [
       cardTitle(h, t.t("account.security.passkeys")),
-      h.div.class("kb-ares-row").children([
-        textField(h, {
-          id: "kb-passkey-name",
-          label: t.t("account.security.passkeyName"),
-          placeholder: sCopy(ctx.locale, "account.security.passkeyPlaceholder"),
-          value: model.security.newPasskeyName,
-          onInput: (value) => Message.ChangedNewPasskeyName({ value }),
-        }),
-        button(h, {
-          label: t.t("account.security.addPasskey"),
-          variant: "primary",
-          busy: model.security.addingPasskey,
-          onClick: Message.ClickedAddPasskey(),
-        }),
-      ]),
+      h.div
+        .class("flex flex-wrap items-end gap-2.5 [&>[data-slot=field]]:flex-[1_1_200px]")
+        .children([
+          textField(h, {
+            id: "kb-passkey-name",
+            label: t.t("account.security.passkeyName"),
+            placeholder: sCopy(ctx.locale, "account.security.passkeyPlaceholder"),
+            value: model.security.newPasskeyName,
+            onInput: (value) => Message.ChangedNewPasskeyName({ value }),
+          }),
+          button(h, {
+            label: t.t("account.security.addPasskey"),
+            variant: "primary",
+            busy: model.security.addingPasskey,
+            onClick: Message.ClickedAddPasskey(),
+          }),
+        ]),
       ...(model.security.hasPassword._tag === "Failed" && model.security.passkeys._tag !== "Failed"
         ? [
             banner(h, {
@@ -1358,9 +1394,9 @@ const viewSecurity = (model: Model, ctx: PageContext, h: Html.H<Message>): Marku
                       header: t.t("common.field.name"),
                       cell: (row) =>
                         model.security.renamingId === row.id
-                          ? h.div.class("kb-row").children([
+                          ? h.div.class(ui.row).children([
                               h.input
-                                .class("kb-input")
+                                .class(controlVariants({ kind: "input" }))
                                 .value(model.security.renameValue)
                                 .attr("aria-label", t.t("account.security.passkeyName"))
                                 .on("input", ({ value }) =>
@@ -1383,13 +1419,13 @@ const viewSecurity = (model: Model, ctx: PageContext, h: Html.H<Message>): Marku
                     },
                     {
                       header: t.t("common.field.created"),
-                      cell: (row) => h.span.class("kb-mono").children([row.createdAt.slice(0, 10)]),
+                      cell: (row) => h.span.class(ui.mono).children([row.createdAt.slice(0, 10)]),
                     },
                     {
                       header: "",
                       align: "end",
                       cell: (row) => {
-                        return h.div.class("kb-row").children([
+                        return h.div.class(ui.row).children([
                           button(h, {
                             label: t.t("common.action.rename"),
                             small: true,
@@ -1418,39 +1454,42 @@ const viewSecurity = (model: Model, ctx: PageContext, h: Html.H<Message>): Marku
       ...(model.security.passwordError !== null
         ? [banner(h, { tone: "error", text: model.security.passwordError })]
         : []),
-      h.div.class("kb-form-grid").children([
-        textField(h, {
-          id: "kb-pw-current",
-          label: t.t("account.security.currentPassword"),
-          type: "password",
-          value: model.security.currentPassword,
-          autocomplete: "current-password",
-          onInput: (value) => Message.ChangedCurrentPassword({ value }),
-        }),
-        textField(h, {
-          id: "kb-pw-new",
-          label: t.t("account.security.newPassword"),
-          type: "password",
-          value: model.security.newPassword,
-          autocomplete: "new-password",
-          onInput: (value) => Message.ChangedNewPassword({ value }),
-        }),
-        textField(h, {
-          id: "kb-pw-confirm",
-          label: sCopy(ctx.locale, "account.security.confirmPassword"),
-          type: "password",
-          value: model.security.confirmPassword,
-          autocomplete: "new-password",
-          onInput: (value) => Message.ChangedConfirmPassword({ value }),
-        }),
-      ]),
+      h.div
+        .attr("data-slot", "form-grid")
+        .class(ui.formGridAuto)
+        .children([
+          textField(h, {
+            id: "kb-pw-current",
+            label: t.t("account.security.currentPassword"),
+            type: "password",
+            value: model.security.currentPassword,
+            autocomplete: "current-password",
+            onInput: (value) => Message.ChangedCurrentPassword({ value }),
+          }),
+          textField(h, {
+            id: "kb-pw-new",
+            label: t.t("account.security.newPassword"),
+            type: "password",
+            value: model.security.newPassword,
+            autocomplete: "new-password",
+            onInput: (value) => Message.ChangedNewPassword({ value }),
+          }),
+          textField(h, {
+            id: "kb-pw-confirm",
+            label: sCopy(ctx.locale, "account.security.confirmPassword"),
+            type: "password",
+            value: model.security.confirmPassword,
+            autocomplete: "new-password",
+            onInput: (value) => Message.ChangedConfirmPassword({ value }),
+          }),
+        ]),
       checkbox(h, {
         id: "kb-pw-signout-others",
         label: t.t("account.security.signOutOthers"),
         checked: model.security.signOutOthers,
         onToggle: (checked) => Message.ToggledSignOutOthers({ checked }),
       }),
-      h.div.class("kb-row").children([
+      h.div.class(ui.row).children([
         button(h, {
           label: t.t("account.security.changePassword"),
           variant: "primary",
@@ -1501,7 +1540,7 @@ const viewSessions = (model: Model, ctx: PageContext, h: Html.H<Message>): Marku
         onClick: Message.ClickedRevokeOtherSessions(),
       }),
     ]),
-    h.p.class("kb-muted").children([sCopy(ctx.locale, "account.sessions.subtitle")]),
+    h.p.class(ui.muted).children([sCopy(ctx.locale, "account.sessions.subtitle")]),
     ...(model.sessions.list._tag === "Loading"
       ? [skeleton(h, "100%", "48px"), skeleton(h, "100%", "48px")]
       : model.sessions.list._tag === "Failed"
@@ -1528,7 +1567,7 @@ const viewSessions = (model: Model, ctx: PageContext, h: Html.H<Message>): Marku
                     header: t.t("common.field.name"),
                     cell: (s) =>
                       h.div
-                        .class("kb-row")
+                        .class(ui.row)
                         .children([
                           h.span.children([s.userAgent]),
                           ...(s.current
@@ -1538,13 +1577,13 @@ const viewSessions = (model: Model, ctx: PageContext, h: Html.H<Message>): Marku
                   },
                   {
                     header: "IP",
-                    cell: (s) => h.span.class("kb-mono").children([s.ipAddress ?? "—"]),
+                    cell: (s) => h.span.class(ui.mono).children([s.ipAddress ?? "—"]),
                   },
                   {
                     header: t.t("common.field.updated"),
                     cell: (s) =>
                       h.span
-                        .class("kb-mono")
+                        .class(ui.mono)
                         .children([
                           t.t("account.security.lastActive", { date: s.updatedAt.slice(0, 10) }),
                         ]),
@@ -1600,7 +1639,7 @@ const viewDanger = (model: Model, ctx: PageContext, h: Html.H<Message>): Markup<
         mono: true,
         onInput: (value) => Message.ChangedDeleteConfirm({ value }),
       }),
-      h.div.class("kb-row").children([
+      h.div.class(ui.row).children([
         button(h, {
           label: t.t("account.danger.submit"),
           variant: "danger",
@@ -1610,7 +1649,7 @@ const viewDanger = (model: Model, ctx: PageContext, h: Html.H<Message>): Markup<
         }),
       ]),
     ],
-    [attribute("class", "kb-card kb-danger-card")],
+    [attribute("class", cn(cardVariants(), "border-error [&_h2]:text-error"))],
   );
 };
 

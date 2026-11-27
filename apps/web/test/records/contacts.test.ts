@@ -129,7 +129,7 @@ describe("Contacts page TEA", () => {
   test("SSR renders contacts list and new contact editor in cs and en", async () => {
     const csList = await renderPath(`/w/${WS}/contacts`, { locale: "cs" });
     expect(csList.title).toContain("Kontakty");
-    expect(csList.html).toContain("kb-rec-toolbar");
+    expect(csList.html).toContain('data-slot="rec-toolbar"');
 
     const enNew = await renderPath(`/w/${WS}/contacts/new?mode=edit`, { locale: "en" });
     expect(enNew.title).toContain("New contact");

@@ -45,7 +45,7 @@ const expectFilledSegments = async (
   await group.page().evaluate(() => document.fonts.ready.then(() => undefined));
   const layout = await group.evaluate((control) => {
     const bounds = control.getBoundingClientRect();
-    const container = control.closest(".kb-card__title") ?? control.parentElement;
+    const container = control.closest('[data-slot="card-title"]') ?? control.parentElement;
     const buttons = [...control.querySelectorAll("ui-segmented-control-item")].map((button) => {
       const box = button.getBoundingClientRect();
       const label = document.createRange();
@@ -111,7 +111,7 @@ if (typeof Bun === "undefined") {
           await test.step(path, async () => {
             await page.goto(path);
             await expect(page.locator(".kb-root")).toHaveAttribute("lang", locale);
-            const groups = page.locator(".kb-segmented");
+            const groups = page.locator("ui-segmented-control");
             await expect(groups).toHaveCount(count);
             for (const group of await groups.all()) {
               await expectFilledSegments(group, "stretched", path === "/sign-up");
@@ -121,25 +121,37 @@ if (typeof Bun === "undefined") {
 
         await page.goto(`/w/${DEMO_WS}/settings/api-keys`);
         await page.getByRole("button", { name: /^(Create API key|Vytvořit API klíč)$/ }).click();
-        await expectFilledSegments(page.locator(".kb-segmented"), "stretched");
+        await expectFilledSegments(page.locator("ui-segmented-control"), "stretched");
       });
 
       test("keep inline controls compact and fill the export dialog selector", async ({ page }) => {
         await page.goto("/i/demo-unpaid-czk");
         await expect(page.locator(".kb-root")).toHaveAttribute("lang", locale);
-        await expectFilledSegments(page.locator(".kb-segmented"), "inline");
+        await expectFilledSegments(page.locator("ui-segmented-control"), "inline");
 
         await page.goto(`/w/${DEMO_WS}/settings/branding`);
-        await expectFilledSegments(page.locator(".kb-segmented"), "inline");
+        await expectFilledSegments(page.locator("ui-segmented-control"), "inline");
 
         await page.goto(`/w/${DEMO_WS}/expenses/new?mode=edit`);
-        await expectFilledSegments(page.locator(".kb-field > .kb-segmented"), "stretched");
-        await expectFilledSegments(page.locator(".kb-spread > .kb-segmented"), "inline");
+        await expectFilledSegments(
+          page.locator('[data-slot="field"] > ui-segmented-control'),
+          "stretched",
+        );
+        await expectFilledSegments(
+          page.locator('[data-slot="spread"] > ui-segmented-control'),
+          "inline",
+        );
 
         await page.goto(`/w/${DEMO_WS}/reports/revenue?period=2026`);
-        await expectFilledSegments(page.locator(".kb-report-controls .kb-segmented"), "inline");
+        await expectFilledSegments(
+          page.locator('[data-slot="report-controls"] ui-segmented-control'),
+          "inline",
+        );
         await page.getByRole("button", { name: /^(Export|Exportovat)$/ }).click();
-        await expectFilledSegments(page.getByRole("dialog").locator(".kb-segmented"), "stretched");
+        await expectFilledSegments(
+          page.getByRole("dialog").locator("ui-segmented-control"),
+          "stretched",
+        );
       });
     });
   }
@@ -152,7 +164,7 @@ if (typeof Bun === "undefined") {
       const mode = page.getByRole("radiogroup", { name: "Režim", exact: true });
       const contrast = page.getByRole("radiogroup", { name: "Kontrast", exact: true });
       // Exercise the settings grid's minimum track width in both viewport profiles.
-      const grid = page.locator(".kb-form-grid").filter({ has: mode });
+      const grid = page.locator('[data-slot="form-grid"]').filter({ has: mode });
       await grid.evaluate((element) => {
         element.style.gridTemplateColumns = "repeat(auto-fit, 220px)";
       });
@@ -303,7 +315,7 @@ if (typeof Bun === "undefined") {
           await expect(page.locator(".kb-root")).toHaveAttribute("lang", locale);
           await expect(page.locator(".kb-root")).toHaveAttribute("data-style", style);
 
-          const segmented = page.locator(".kb-auth-form .kb-segmented");
+          const segmented = page.locator('[data-slot="auth-form"] ui-segmented-control');
           const buttons = segmented.locator("ui-segmented-control-item");
           await expect(buttons).toHaveText([...labels]);
 
@@ -363,17 +375,19 @@ if (typeof Bun === "undefined") {
         await page.evaluate(() => document.fonts.ready);
         await expect(page.locator(".kb-root")).toHaveAttribute("lang", locale);
 
-        const ledger = page.locator(".kb-series-ledger");
-        const rows = ledger.locator(".kb-series-row");
+        const ledger = page.locator('[data-slot="series-ledger"]');
+        const rows = ledger.locator('[data-slot="series-row"]');
         await expect(rows).toHaveCount(3);
 
         const geometry = await page.evaluate(() => {
-          const card = document.querySelector(".kb-onboarding .kb-card");
-          const defaults = document.querySelector(".kb-onboarding-defaults");
-          const rowEls = [...document.querySelectorAll(".kb-series-row")];
+          const card = document.querySelector('[data-slot="onboarding"] [data-slot="card"]');
+          const defaults = document.querySelector('[data-slot="onboarding-defaults"]');
+          const rowEls = [...document.querySelectorAll('[data-slot="series-row"]')];
           const cardBox = card?.getBoundingClientRect();
           const defaultsBox = defaults?.getBoundingClientRect();
-          const ledgerBox = document.querySelector(".kb-series-ledger")?.getBoundingClientRect();
+          const ledgerBox = document
+            .querySelector('[data-slot="series-ledger"]')
+            ?.getBoundingClientRect();
           return {
             overflow: document.documentElement.scrollWidth - document.documentElement.clientWidth,
             defaultsBelowLedger:
@@ -381,12 +395,16 @@ if (typeof Bun === "undefined") {
               ledgerBox !== undefined &&
               defaultsBox.top >= ledgerBox.bottom,
             rows: rowEls.map((row) => {
-              const title = row.querySelector(".kb-series-row__title")?.getBoundingClientRect();
+              const title = row
+                .querySelector('[data-slot="series-row-title"]')
+                ?.getBoundingClientRect();
               const pattern = row
                 .querySelector('input[id^="onb-pattern-"]')
                 ?.getBoundingClientRect();
               const start = row.querySelector('input[id^="onb-start-"]')?.getBoundingClientRect();
-              const preview = row.querySelector(".kb-series-row__preview")?.getBoundingClientRect();
+              const preview = row
+                .querySelector('[data-slot="series-row-preview"]')
+                ?.getBoundingClientRect();
               const box = row.getBoundingClientRect();
               return {
                 top: box.top,
@@ -448,7 +466,7 @@ if (typeof Bun === "undefined") {
       await page.locator("#onb-start-credit_note").fill("0");
       await expect(page.locator("#onb-start-credit_note")).toHaveAttribute("aria-invalid", "true");
       await expect(
-        page.locator("#onb-series-preview-credit_note .kb-series-row__error"),
+        page.locator('#onb-series-preview-credit_note [data-slot="series-row-error"]'),
       ).toBeVisible();
 
       errors.assertClean();
@@ -477,9 +495,9 @@ if (typeof Bun === "undefined") {
         await expect(page).toHaveTitle(/Kvitbit/);
 
         if (testInfo.project.name === "desktop") {
-          await expect(page.locator(".kb-sidebar")).toBeVisible();
+          await expect(page.locator('[data-slot="sidebar"]')).toBeVisible();
         } else {
-          await expect(page.locator(".kb-bottom-nav")).toBeVisible();
+          await expect(page.locator('[data-slot="bottom-nav"]')).toBeVisible();
         }
       }
 
@@ -753,7 +771,7 @@ if (typeof Bun === "undefined") {
         { token },
       );
       await page.goto("/", { waitUntil: "domcontentloaded" });
-      await expect(page.locator(".kb-landing")).toBeVisible();
+      await expect(page.locator('[data-slot="landing"]')).toBeVisible();
 
       await page.evaluate((sharePath) => {
         for (const [href, label] of [

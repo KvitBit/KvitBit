@@ -1,6 +1,8 @@
+import { uniwindThemeVariables } from "@kvitbit/ui-port/style";
 import type { NativeTheme } from "@kvitbit/ui-port/theme";
 import { createContext, type ReactNode, useContext, useEffect, useMemo, useState } from "react";
 import { AccessibilityInfo, AppState, useColorScheme } from "react-native";
+import { Uniwind } from "uniwind";
 import { readDynamicColor } from "./dynamic-color";
 import {
   type AppTheme,
@@ -56,6 +58,12 @@ const useDynamicColor = (): DeviceTheme["dynamic"] => {
   return dynamic;
 };
 
+export const syncUniwindTheme = (theme: AppTheme): void => {
+  const themeName = theme.native.dark ? "dark" : "light";
+  Uniwind.setTheme(themeName);
+  Uniwind.updateCSSVariables(themeName, uniwindThemeVariables(theme.effective));
+};
+
 export function ThemeProvider(props: {
   readonly children: ReactNode;
   readonly initialPreference?: ThemePreference;
@@ -78,6 +86,9 @@ export function ThemeProvider(props: {
       },
     };
   }, [scheme, highContrast, dynamic, preference, onPreferenceChange]);
+  useEffect(() => {
+    syncUniwindTheme(value);
+  }, [value]);
   return <ThemeContext.Provider value={value}>{props.children}</ThemeContext.Provider>;
 }
 

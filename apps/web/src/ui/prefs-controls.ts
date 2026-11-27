@@ -10,6 +10,7 @@ import type { Translator } from "../app/i18n";
 import type { Prefs } from "../app/prefs";
 import type { Markup } from "./html";
 import { select, selectField } from "./kit";
+import { ui } from "./styles";
 
 const LOCALE_LABEL = { cs: "Čeština", en: "English" } as const;
 
@@ -28,6 +29,7 @@ export const localeSelect = <M>(
       { value: "en", label: LOCALE_LABEL.en },
     ],
     onChange: (v) => onChange({ ...prefs, locale: v === "en" ? "en" : "cs" }),
+    compact: true,
   });
 
 export const modeSelect = <M>(
@@ -46,6 +48,7 @@ export const modeSelect = <M>(
       label: t.translate(Theme.modeNameText(m)),
     })),
     onChange: (v) => onChange({ ...prefs, mode: v === "light" || v === "dark" ? v : "system" }),
+    compact: true,
   });
 
 /** Top-bar cluster: language + mode. */
@@ -56,7 +59,7 @@ export const compactPrefs = <M>(
   onChange: (p: Prefs) => M,
 ): Markup<M> =>
   h.div
-    .class("kb-prefs")
+    .class("flex items-center gap-1.5")
     .children([localeSelect(h, prefs, onChange), modeSelect(h, t, prefs, onChange)]);
 
 /** Full appearance form: mode, style, contrast, preset. */
@@ -67,7 +70,7 @@ export const appearanceForm = <M>(
   onChange: (p: Prefs) => M,
 ): Markup<M> =>
   h.div
-    .class("kb-grid")
+    .class(ui.grid)
     .style({ "--kb-grid-min": "200px" })
     .children([
       selectField(h, {

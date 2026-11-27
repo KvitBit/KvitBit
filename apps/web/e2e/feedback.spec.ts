@@ -307,8 +307,8 @@ if (typeof Bun === "undefined") {
   }) => {
     await session(page, true);
     await page.goto(`${dashboard}/documents/0193a000-0000-7000-8000-000000000259?tab=share`);
-    const row = page.locator(".kb-share-url");
-    const link = row.locator("span.kb-mono");
+    const row = page.locator('[data-slot="share-url"]');
+    const link = row.locator("span[data-feedback-private]");
     await expect(link).toContainText("/i/demo-share-token-0041");
     const picker = page.locator(overlay);
     await picker.getByRole("button", { name: "Visual feedback" }).click();
@@ -330,7 +330,7 @@ if (typeof Bun === "undefined") {
     await page.goto(`${dashboard}/settings/issuing-entity`);
     const field = page.locator("#kb-entity-name");
     await field.fill("fixture-private-form-value");
-    const formGrid = page.locator(".kb-form-grid").filter({ has: field });
+    const formGrid = page.locator('[data-slot="form-grid"]').filter({ has: field });
     await page.locator(overlay).getByRole("button", { name: "Visual feedback" }).click();
     await formGrid.scrollIntoViewIfNeeded();
     await formGrid.dispatchEvent("click");

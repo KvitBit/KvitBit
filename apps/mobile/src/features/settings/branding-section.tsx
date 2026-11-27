@@ -19,7 +19,7 @@ import {
 } from "@kvitbit/ui-port/theme";
 import { Check, Trash2, Upload } from "lucide-react-native";
 import { useEffect, useState } from "react";
-import { Pressable, StyleSheet, View } from "react-native";
+import { Pressable, View } from "react-native";
 import { useI18n } from "../../i18n/i18n-provider";
 import { useApi, useRemote } from "../../runtime/api-runtime";
 import { useAppTheme, useTheme } from "../../theme/theme-provider";
@@ -28,14 +28,13 @@ import {
   Banner,
   Button,
   Card,
+  cn,
   RemoteView,
   Section,
   SegmentedChoice,
   SwitchRow,
-  space,
   Text,
   TextField,
-  touchTarget,
   useOverlay,
 } from "../../ui";
 import { useWorkspace } from "../../workspace/workspace-provider";
@@ -234,7 +233,7 @@ export function BrandingSection() {
   const selectedPreset = activePresetId(themeSource);
 
   return (
-    <View style={styles.stack}>
+    <View className="gap-4">
       <Section title={t("account.appearance.title")}>
         <Card>
           <SegmentedChoice<ThemeStyle>
@@ -297,8 +296,8 @@ export function BrandingSection() {
           <Text variant="labelMedium" color="onSurfaceVariant">
             {t("account.appearance.preview")}
           </Text>
-          <View style={styles.previewRow}>
-            <Text variant="titleSmall" style={styles.flex}>
+          <View className="flex-row flex-wrap items-center gap-1">
+            <Text variant="titleSmall" className="flex-1">
               {t("account.appearance.sampleCard")}
             </Text>
             <Badge label={t("enum.badge.paid")} tone="success" />
@@ -310,7 +309,7 @@ export function BrandingSection() {
 
       <RemoteView state={remote.state} onRetry={remote.reload}>
         {(branding) => (
-          <View style={styles.stack}>
+          <View className="gap-4">
             {editable ? null : <Banner text={t("settings.readOnly")} tone="info" />}
             {errorState.banner === null ? null : (
               <Banner
@@ -327,7 +326,7 @@ export function BrandingSection() {
                 <Text variant="meta" color="onSurfaceVariant">
                   {t("settings.branding.workspaceThemeHint")}
                 </Text>
-                <View accessibilityRole="radiogroup" style={styles.presetGrid}>
+                <View accessibilityRole="radiogroup" className="flex-row flex-wrap gap-2">
                   {PRESET_IDS.map((presetId) => {
                     const def = PresetDefinitions[presetId];
                     const selected = selectedPreset === presetId;
@@ -346,29 +345,17 @@ export function BrandingSection() {
                           );
                           setCustomSeed("");
                         }}
-                        style={[
-                          styles.presetChip,
-                          {
-                            borderRadius: theme.shape.control,
-                            borderColor: selected
-                              ? theme.colors.primary
-                              : theme.colors.outlineVariant,
-                            borderWidth: selected ? 2 : 1,
-                            backgroundColor: selected
-                              ? theme.colors.secondaryContainer
-                              : theme.colors.surface,
-                            opacity: editable ? 1 : 0.6,
-                          },
-                        ]}
+                        className={cn(
+                          "min-h-12 flex-row items-center gap-2 rounded-control px-3 py-1",
+                          selected
+                            ? "border-2 border-primary bg-secondary-container"
+                            : "border border-outline-variant bg-surface",
+                          !editable && "opacity-60",
+                        )}
                       >
                         <View
-                          style={[
-                            styles.swatch,
-                            {
-                              backgroundColor: def.swatch,
-                              borderColor: theme.colors.outlineVariant,
-                            },
-                          ]}
+                          className="h-[22px] w-[22px] items-center justify-center rounded-full border border-outline-variant"
+                          style={{ backgroundColor: def.swatch }}
                         >
                           {selected ? <Check size={14} color={theme.colors.onPrimary} /> : null}
                         </View>
@@ -404,8 +391,8 @@ export function BrandingSection() {
 
             <Section title={t("settings.branding.title")}>
               <Card>
-                <View style={styles.imageRow}>
-                  <View style={styles.flex}>
+                <View className="flex-row flex-wrap items-center gap-2 py-1">
+                  <View className="flex-1">
                     <Text variant="row">{t("settings.branding.logo")}</Text>
                     <Text variant="meta" color="onSurfaceVariant">
                       {branding.logo === null
@@ -414,7 +401,7 @@ export function BrandingSection() {
                     </Text>
                   </View>
                   {editable ? (
-                    <View style={styles.row}>
+                    <View className="flex-row flex-wrap items-center gap-2">
                       <Button
                         testID="branding-logo-upload"
                         kind="tonal"
@@ -436,8 +423,8 @@ export function BrandingSection() {
                   ) : null}
                 </View>
 
-                <View style={styles.imageRow}>
-                  <View style={styles.flex}>
+                <View className="flex-row flex-wrap items-center gap-2 py-1">
+                  <View className="flex-1">
                     <Text variant="row">{t("settings.branding.stamp")}</Text>
                     <Text variant="meta" color="onSurfaceVariant">
                       {branding.stamp === null
@@ -446,7 +433,7 @@ export function BrandingSection() {
                     </Text>
                   </View>
                   {editable ? (
-                    <View style={styles.row}>
+                    <View className="flex-row flex-wrap items-center gap-2">
                       <Button
                         testID="branding-stamp-upload"
                         kind="tonal"
@@ -524,34 +511,3 @@ export function BrandingSection() {
     </View>
   );
 }
-
-const styles = StyleSheet.create({
-  stack: { gap: space.lg },
-  flex: { flex: 1 },
-  row: { flexDirection: "row", flexWrap: "wrap", gap: space.sm, alignItems: "center" },
-  previewRow: { flexDirection: "row", flexWrap: "wrap", gap: space.xs, alignItems: "center" },
-  presetGrid: { flexDirection: "row", flexWrap: "wrap", gap: space.sm },
-  presetChip: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: space.sm,
-    minHeight: touchTarget,
-    paddingHorizontal: space.md,
-    paddingVertical: space.xs,
-  },
-  swatch: {
-    width: 22,
-    height: 22,
-    borderRadius: 11,
-    borderWidth: 1,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  imageRow: {
-    flexDirection: "row",
-    flexWrap: "wrap",
-    alignItems: "center",
-    gap: space.sm,
-    paddingVertical: space.xs,
-  },
-});

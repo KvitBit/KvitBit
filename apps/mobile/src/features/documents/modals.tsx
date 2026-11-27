@@ -16,10 +16,10 @@ import { formatMoney, parseIsoDate } from "@kvitbit/ui-port/format";
 import { enumKey } from "@kvitbit/ui-port/i18n";
 import { BigDecimal } from "effect";
 import { useEffect, useState } from "react";
-import { Modal, ScrollView, StyleSheet, View } from "react-native";
+import { Modal, ScrollView, View } from "react-native";
 import { useI18n } from "../../i18n/i18n-provider";
 import { useTheme } from "../../theme/theme-provider";
-import { Banner, Button, SegmentedChoice, SwitchRow, space, Text, TextField } from "../../ui";
+import { Banner, Button, SegmentedChoice, SwitchRow, Text, TextField } from "../../ui";
 import {
   decimalToInputString,
   type LineItemView,
@@ -39,18 +39,19 @@ function DialogShell(props: {
   const c = theme.colors;
   return (
     <Modal transparent visible={props.visible} animationType="fade" onRequestClose={props.onClose}>
-      <View style={[styles.scrim, { backgroundColor: `${c.scrim}66` }]}>
+      <View
+        className="flex-1 items-center justify-center p-4"
+        style={{ backgroundColor: `${c.scrim}66` }}
+      >
         <View
-          style={[
-            styles.dialog,
-            { backgroundColor: c.surfaceContainerHigh, borderRadius: theme.shape.panel + 12 },
-          ]}
+          className="max-h-[88%] w-full max-w-[560px] gap-3 bg-surface-container-high p-6"
+          style={{ borderRadius: theme.shape.panel + 12 }}
         >
           <Text variant="headlineSmall">{props.title}</Text>
-          <ScrollView keyboardShouldPersistTaps="handled" contentContainerStyle={styles.body}>
+          <ScrollView keyboardShouldPersistTaps="handled" contentContainerClassName="gap-3">
             {props.children}
           </ScrollView>
-          <View style={styles.actions}>{props.actions}</View>
+          <View className="flex-row justify-end gap-2">{props.actions}</View>
         </View>
       </View>
     </Modal>
@@ -548,7 +549,7 @@ export function CreditNoteModal(props: {
         placeholder="YYYY-MM-DD"
       />
       {mode === "partial" ? (
-        <View style={styles.partialLines}>
+        <View className="gap-2">
           <Text variant="labelMedium" color="onSurfaceVariant">
             {t("documents.creditNote.pickLines")}
           </Text>
@@ -629,11 +630,3 @@ export function UnlockDocumentModal(props: {
     </DialogShell>
   );
 }
-
-const styles = StyleSheet.create({
-  scrim: { flex: 1, alignItems: "center", justifyContent: "center", padding: space.lg },
-  dialog: { width: "100%", maxWidth: 560, maxHeight: "88%", padding: space.xl, gap: space.md },
-  body: { gap: space.md },
-  actions: { flexDirection: "row", justifyContent: "flex-end", gap: space.sm },
-  partialLines: { gap: space.sm },
-});

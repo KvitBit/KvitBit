@@ -16,7 +16,7 @@ import { Intent_ } from "../../app/intent";
 import type { MessageHandlers, PageContext, PageReturn, RouteOf } from "../../app/page";
 import * as Remote from "../../app/remote";
 import { mark } from "../../ui/brand";
-import { attribute, withAttributes } from "../../ui/html";
+import { withAttributes } from "../../ui/html";
 import { icon } from "../../ui/icons";
 import {
   amount,
@@ -31,6 +31,7 @@ import {
   skeleton,
   table,
 } from "../../ui/kit";
+import { buttonVariants, cn, ui } from "../../ui/styles";
 import { paymentQrView } from "./_qr";
 import {
   callApi,
@@ -198,13 +199,18 @@ const digitsOf = (value: string): string => value.replace(/\D/g, "").slice(0, 10
 export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
   const t = translator(ctx.locale);
 
+  const shareWrapClass = "mx-auto flex w-full max-w-[960px] flex-col gap-4 px-5 pt-6 pb-16";
+  const sharePaperClass =
+    "flex flex-col gap-6 rounded-panel border border-outline-variant bg-surface-container-lowest p-7";
+
   if (model.doc._tag === "Loading" || model.doc._tag === "Idle") {
     return h.div
-      .class("kb-share-wrap")
+      .class(shareWrapClass)
+      .attr("data-slot", "share-wrap")
       .attr("aria-busy", String(true))
       .children([
         h.div
-          .class("kb-share-paper")
+          .class(sharePaperClass)
           .children([
             skeleton(h, "45%", "1.75rem"),
             skeleton(h, "100%", "7rem"),
@@ -215,22 +221,22 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
 
   if (model.doc._tag === "Failed") {
     const gone = model.doc.failure.tag === "NotFound" || model.doc.failure.tag === "Forbidden";
-    return h.div.class("kb-error-shell").children([
+    return h.div.class("grid flex-1 place-items-center px-4 pt-10 pb-16").children([
       card(
         h,
         [
           h.div
-            .class("kb-row")
+            .class(ui.row)
             .children([
               icon(h, "alert", 20),
               h.h1.children([gone ? t.t("share.view.gone.title") : t.t("common.state.error")]),
             ]),
           h.p
-            .class("kb-muted")
+            .class(ui.muted)
             .children([gone ? t.t("share.view.gone.body") : failureMessage(t, model.doc.failure)]),
           ...(!gone
             ? [
-                h.div.class("kb-row").children([
+                h.div.class(ui.row).children([
                   button(h, {
                     label: t.t("common.action.retry"),
                     onClick: Message.ClickedRetry(),
@@ -240,7 +246,9 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
               ]
             : []),
         ],
-        [attribute("class", "kb-card kb-error-card")],
+        [],
+        false,
+        "flex w-[min(520px,100%)] flex-col gap-3.5 p-7",
       ),
     ]);
   }
@@ -281,7 +289,8 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
   const brandCss = scopedBrandCss(doc);
 
   return withAttributes(h.div.class(), [
-    (element) => element.class("kb-share-wrap kb-share-themed"),
+    (element) => element.class(cn("kb-share-themed", shareWrapClass)),
+    (element) => element.attr("data-slot", "share-wrap"),
     (element) => element.attr("data-style", SHARE_STYLE),
     (node) => (doc.branding.theme !== null ? node.attr("data-branded", "1") : node),
   ]).children([
@@ -306,14 +315,15 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
           }),
         ]
       : []),
-    h.article.class("kb-share-paper").children([
-      h.header.class("kb-share-hero").children([
-        h.div
-          .class("kb-stack")
-          .style({ "--kb-gap": "6px" })
-          .children([
+    h.article.class(sharePaperClass).children([
+      h.header
+        .class(
+          "flex flex-wrap items-start justify-between gap-5 border-b border-outline-variant pb-4.5",
+        )
+        .children([
+          h.div.class("flex flex-col gap-1.5").children([
             h.div
-              .class("kb-row")
+              .class(ui.row)
               .children([
                 h.h1.children([t.t("share.view.title", { kind: kindLabel, number: doc.number })]),
                 badge(h, settlementLabel, settlementTone(doc.settlement)),
@@ -321,9 +331,9 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
                 ...(isOverdue ? [badge(h, local(ctx.locale, "overdue"), "overdue")] : []),
               ]),
             ...(issuer !== undefined
-              ? [h.p.class("kb-muted").children([t.t("share.view.from", { issuer: issuer.name })])]
+              ? [h.p.class(ui.muted).children([t.t("share.view.from", { issuer: issuer.name })])]
               : []),
-            h.div.class("kb-row kb-small kb-muted").children([
+            h.div.class(cn(ui.row, ui.small, ui.muted)).children([
               h.span.children([
                 t.t("share.view.issuedOn", {
                   date: Format.formatDate(ctx.locale, doc.dates.issuedOn),
@@ -344,7 +354,7 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
             ]),
             ...(doc.updatedAt !== null
               ? [
-                  h.span.class("kb-footnote").children([
+                  h.span.class(ui.footnote).children([
                     local(ctx.locale, "updatedOn", {
                       date: Format.formatDate(ctx.locale, doc.updatedAt.slice(0, 10)),
                     }),
@@ -352,13 +362,12 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
                 ]
               : []),
           ]),
-        h.div.class("kb-share-due").children([
-          h.span.class("kb-small kb-muted").children([t.t("share.view.amountDue")]),
-          h.span.class("kb-share-due__amount kb-num").children([amountDueDisplay.text]),
-          h.div
-            .class("kb-row")
-            .style({ marginTop: "6px" })
-            .children([
+          h.div.class("flex flex-col items-start gap-1 min-[761px]:items-end").children([
+            h.span.class(cn(ui.small, ui.muted)).children([t.t("share.view.amountDue")]),
+            h.span
+              .class(cn("font-display text-[1.75rem] leading-[2.125rem]", ui.num))
+              .children([amountDueDisplay.text]),
+            h.div.class(cn(ui.row, "mt-1.5")).children([
               segmented(h, {
                 label: t.t("share.view.language"),
                 selected: model.pdfLanguage,
@@ -370,24 +379,25 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
                   Message.SelectedPdfLanguage({ language: id === "en" ? "en" : "cs" }),
               }),
               h.a
-                .class("kb-btn kb-btn--primary kb-btn--small")
+                .class(buttonVariants({ variant: "primary", size: "small" }))
                 .attr("href", pdfHref)
                 .attr("download", "")
                 .children([icon(h, "download", 16), t.t("common.action.downloadPdf")]),
             ]),
+          ]),
         ]),
-      ]),
       ...(showPayBlock
         ? [
             h.section
-              .class("kb-share-pay")
+              .class(
+                "grid grid-cols-[minmax(0,1fr)] items-center gap-6 rounded-panel border border-outline-variant bg-surface-container-low p-4.5 min-[761px]:grid-cols-[auto_minmax(0,1fr)]",
+              )
               .attr("aria-label", t.t("share.view.bankDetails"))
               .children([
                 ...(doc.paymentQr !== null
                   ? [
                       h.div
-                        .class("kb-stack")
-                        .style({ alignItems: "center", "--kb-gap": "6px" })
+                        .class("flex flex-col items-center gap-1.5")
                         .children([
                           paymentQrView(
                             h,
@@ -395,15 +405,15 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
                             t.translate(I18n.enumText("qrFormat", doc.paymentQr.format)),
                           ),
                           h.span
-                            .class("kb-small")
+                            .class(ui.small)
                             .children([
                               t.translate(I18n.enumText("qrFormat", doc.paymentQr.format)),
                             ]),
-                          h.span.class("kb-footnote").children([t.t("share.view.scanHint")]),
+                          h.span.class(ui.footnote).children([t.t("share.view.scanHint")]),
                         ]),
                     ]
                   : [h.text("")]),
-                h.div.class("kb-stack").children([
+                h.div.class(ui.stack).children([
                   h.h2.children([t.t("share.view.bankDetails")]),
                   dl(h, [
                     ...(issuer?.bankAccount?.accountNumber
@@ -430,7 +440,7 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
                       : []),
                     [t.t("share.view.amountDue"), amount(h, amountDueDisplay.text)],
                   ]),
-                  h.div.class("kb-row").children([
+                  h.div.class(ui.row).children([
                     ...(issuer?.bankAccount?.iban
                       ? [
                           button(h, {
@@ -463,43 +473,43 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
               ]),
           ]
         : []),
-      h.section.class("kb-share-parties").children([
-        h.div
-          .class("kb-stack")
-          .style({ "--kb-gap": "4px" })
-          .children([
-            h.span.class("kb-small kb-muted").children([local(ctx.locale, "issuer")]),
-            h.strong.children([issuer?.name ?? ""]),
-            ...(issuer?.address !== undefined
-              ? [h.span.class("kb-small").children([formatAddressLine(issuer.address)])]
-              : []),
-            ...(issuer?.ico
-              ? [h.span.class("kb-small kb-muted").children([`IČO: ${issuer.ico}`])]
-              : []),
-            ...(issuer?.dic
-              ? [h.span.class("kb-small kb-muted").children([`DIČ: ${issuer.dic}`])]
-              : []),
-            ...(issuer?.registerEntry
-              ? [h.span.class("kb-footnote").children([issuer.registerEntry])]
-              : []),
-          ]),
-        h.div
-          .class("kb-stack")
-          .style({ "--kb-gap": "4px" })
-          .children([
-            h.span.class("kb-small kb-muted").children([local(ctx.locale, "buyer")]),
-            h.strong.children([contact?.name ?? ""]),
-            ...(contact?.address !== undefined
-              ? [h.span.class("kb-small").children([formatAddressLine(contact.address)])]
-              : []),
-            ...(contact?.ico
-              ? [h.span.class("kb-small kb-muted").children([`IČO: ${contact.ico}`])]
-              : []),
-            ...(contact?.dic
-              ? [h.span.class("kb-small kb-muted").children([`DIČ: ${contact.dic}`])]
-              : []),
-          ]),
-      ]),
+      h.section
+        .class("grid grid-cols-[repeat(auto-fit,minmax(240px,1fr))] gap-5")
+        .children([
+          h.div
+            .class("flex flex-col gap-1")
+            .children([
+              h.span.class(cn(ui.small, ui.muted)).children([local(ctx.locale, "issuer")]),
+              h.strong.children([issuer?.name ?? ""]),
+              ...(issuer?.address !== undefined
+                ? [h.span.class(ui.small).children([formatAddressLine(issuer.address)])]
+                : []),
+              ...(issuer?.ico
+                ? [h.span.class(cn(ui.small, ui.muted)).children([`IČO: ${issuer.ico}`])]
+                : []),
+              ...(issuer?.dic
+                ? [h.span.class(cn(ui.small, ui.muted)).children([`DIČ: ${issuer.dic}`])]
+                : []),
+              ...(issuer?.registerEntry
+                ? [h.span.class(ui.footnote).children([issuer.registerEntry])]
+                : []),
+            ]),
+          h.div
+            .class("flex flex-col gap-1")
+            .children([
+              h.span.class(cn(ui.small, ui.muted)).children([local(ctx.locale, "buyer")]),
+              h.strong.children([contact?.name ?? ""]),
+              ...(contact?.address !== undefined
+                ? [h.span.class(ui.small).children([formatAddressLine(contact.address)])]
+                : []),
+              ...(contact?.ico
+                ? [h.span.class(cn(ui.small, ui.muted)).children([`IČO: ${contact.ico}`])]
+                : []),
+              ...(contact?.dic
+                ? [h.span.class(cn(ui.small, ui.muted)).children([`DIČ: ${contact.dic}`])]
+                : []),
+            ]),
+        ]),
       table(h, {
         caption: local(ctx.locale, "linesCaption"),
         rowKey: (row) => row.key,
@@ -557,27 +567,27 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
           },
         ],
       }),
-      h.div.class("kb-share-totals").children([
+      h.div.class("flex min-w-[min(320px,100%)] flex-col gap-1.5 self-end").children([
         h.div
-          .class("kb-share-totals__row")
+          .class("flex justify-between gap-6 text-[0.875rem]")
           .children([
-            h.span.class("kb-muted").children([t.t("common.field.subtotal")]),
+            h.span.class(ui.muted).children([t.t("common.field.subtotal")]),
             amount(h, netDisplay.text),
           ]),
         ...(doc.taxDocument
           ? [
               h.div
-                .class("kb-share-totals__row")
+                .class("flex justify-between gap-6 text-[0.875rem]")
                 .children([
-                  h.span.class("kb-muted").children([t.t("common.field.vat")]),
+                  h.span.class(ui.muted).children([t.t("common.field.vat")]),
                   amount(h, vatDisplay.text),
                 ]),
             ]
           : []),
         ...(doc.totals.vatCzk !== null
           ? [
-              h.div.class("kb-share-totals__row kb-small").children([
-                h.span.class("kb-muted").children([local(ctx.locale, "vatCzk")]),
+              h.div.class(cn("flex justify-between gap-6", ui.small)).children([
+                h.span.class(ui.muted).children([local(ctx.locale, "vatCzk")]),
                 amount(
                   h,
                   Format.moneyDisplay(ctx.locale, {
@@ -589,27 +599,28 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
             ]
           : []),
         h.div
-          .class("kb-share-totals__row kb-share-totals__grand")
+          .class(
+            "flex justify-between gap-6 border-t border-outline-variant pt-2 font-display text-[1.125rem]",
+          )
           .children([h.span.children([t.t("common.field.total")]), amount(h, grossDisplay.text)]),
       ]),
       ...(doc.note !== null || doc.statutoryNotes.length > 0 || doc.branding.footerText !== null
         ? [
             separator(h),
             h.div
-              .class("kb-stack")
-              .style({ "--kb-gap": "6px" })
+              .class("flex flex-col gap-1.5")
               .children([
-                ...(doc.note !== null ? [h.p.class("kb-small").children([doc.note])] : []),
-                ...doc.statutoryNotes.map((n) => h.p.class("kb-footnote").children([n.text])),
+                ...(doc.note !== null ? [h.p.class(ui.small).children([doc.note])] : []),
+                ...doc.statutoryNotes.map((n) => h.p.class(ui.footnote).children([n.text])),
                 ...(doc.branding.footerText !== null
-                  ? [h.p.class("kb-footnote").children([doc.branding.footerText])]
+                  ? [h.p.class(ui.footnote).children([doc.branding.footerText])]
                   : []),
               ]),
           ]
         : []),
     ]),
     h.div
-      .class("kb-share-powered")
+      .class("flex items-center justify-center gap-2 pt-2 text-[0.75rem] text-on-surface-variant")
       .children([mark(h, 14), h.span.children([t.t("share.view.poweredBy")])]),
   ]);
 };

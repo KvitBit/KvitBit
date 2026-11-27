@@ -2,7 +2,7 @@ import type { MemberView, UserId } from "@kvitbit/domain/contract";
 import { inWorkspace } from "@kvitbit/ui-port/api";
 import { router } from "expo-router";
 import { useState } from "react";
-import { StyleSheet, View } from "react-native";
+import { View } from "react-native";
 import { useI18n } from "../../i18n/i18n-provider";
 import { useApi, useRemote } from "../../runtime/api-runtime";
 import {
@@ -12,7 +12,6 @@ import {
   RemoteView,
   Section,
   SegmentedChoice,
-  space,
   Text,
   TextField,
   useOverlay,
@@ -44,7 +43,7 @@ export function DangerZoneSection() {
 
   if (!canTransfer && !canClose) {
     return (
-      <View style={styles.stack}>
+      <View className="gap-4">
         <Banner
           text={local({
             cs: "Tuto sekci může spravovat pouze vlastník workspace.",
@@ -113,7 +112,7 @@ export function DangerZoneSection() {
   };
 
   return (
-    <View style={styles.stack}>
+    <View className="gap-4">
       {errorState.banner === null ? null : <Banner text={errorState.banner} tone="error" />}
 
       <Section title={t("settings.dangerZone.transfer")}>
@@ -180,7 +179,3 @@ export function DangerZoneSection() {
     </View>
   );
 }
-
-const styles = StyleSheet.create({
-  stack: { gap: space.lg },
-});

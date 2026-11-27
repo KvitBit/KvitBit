@@ -1,11 +1,11 @@
 import { describeError } from "@kvitbit/ui-port/api";
 import { MailCheck } from "lucide-react-native";
 import { useEffect, useState } from "react";
-import { StyleSheet, View } from "react-native";
+import { View } from "react-native";
 import { useI18n } from "../../i18n/i18n-provider";
 import { safeReturnTo } from "../../navigation/return-to";
 import { navigate } from "../../navigation/routes";
-import { Banner, Button, Card, Icon, Screen, space, Text, useOverlay } from "../../ui";
+import { Banner, Button, Card, Icon, Screen, Text, useOverlay } from "../../ui";
 import type { AuthClient, AuthResult } from "./auth-port";
 import { useAuthClient } from "./use-auth-client";
 
@@ -58,7 +58,7 @@ export function CheckEmailScreen(props: {
     <Screen title={t("auth.checkEmail.title")} back>
       {errorBanner === null ? null : <Banner tone="error" text={errorBanner} />}
       <Card>
-        <View style={styles.iconRow}>
+        <View className="items-center py-2">
           <Icon icon={MailCheck} size={32} color="primary" />
         </View>
         <Text variant="bodyLarge" align="center">
@@ -85,7 +85,3 @@ export function CheckEmailScreen(props: {
     </Screen>
   );
 }
-
-const styles = StyleSheet.create({
-  iconRow: { alignItems: "center", paddingVertical: space.sm },
-});

@@ -39,11 +39,24 @@ import {
   UiTextarea,
   UiToggle,
 } from "./sdk";
+import {
+  badgeVariants,
+  bannerVariants,
+  buttonVariants,
+  cardVariants,
+  chipVariants,
+  cn,
+  controlVariants,
+  segmentedButtonVariants,
+  ui,
+} from "./styles";
 
 /**
  * Shared view helpers over Effect UI’s `h` builder and `@ui-sdk/web` custom elements. Pages
- * compose these instead of re-styling raw elements, so every control carries the same Graphite
- * Atelier roles, keyboard/focus behavior, ARIA attributes, and agent discoverability.
+ * compose these instead of re-styling raw elements, so every control carries the same Tailwind v4
+ * + CVA Material 3 roles, keyboard/focus behavior, ARIA attributes, and agent discoverability.
+ * Helpers take already-translated strings; money and dates come pre-formatted from
+ * @kvitbit/ui-port/format.
  */
 
 type Attrs = ReadonlyArray<Attribute>;
@@ -62,12 +75,11 @@ export interface ButtonOptions<M> {
   readonly icon?: Markup<M>;
   readonly ariaLabel?: string;
   readonly testId?: string;
+  readonly className?: string;
 }
 
-const variantClass = (v: ButtonVariant | undefined): string =>
-  v === undefined || v === "secondary" ? "" : ` kb-btn--${v}`;
-
 export const button = <M>(h: Html.H<M>, o: ButtonOptions<M>): Markup<M> => {
+  const variant = o.variant ?? "secondary";
   const inactive = o.disabled === true || o.busy === true;
   return withAttributes(
     UiButton(h)
@@ -83,8 +95,15 @@ export const button = <M>(h: Html.H<M>, o: ButtonOptions<M>): Markup<M> => {
     withAttributes(h.button.class(), [
       (element) =>
         element.class(
-          `kb-btn${variantClass(o.variant)}${o.small === true ? " kb-btn--small" : ""}`,
+          cn(
+            buttonVariants({
+              variant,
+              size: o.small === true ? "small" : "default",
+            }),
+            o.className,
+          ),
         ),
+      (element) => element.attr("data-variant", variant),
       (element) => element.attr("type", o.type ?? "button"),
       (node) => (o.disabled === true ? node.disabled(true) : node),
       (node) => (o.busy === true ? node.attr("aria-busy", String(true)) : node),
@@ -102,14 +121,26 @@ export const linkButton = <M>(
     readonly href: string;
     readonly variant?: ButtonVariant;
     readonly small?: boolean;
+    readonly className?: string;
   },
-): Markup<M> =>
-  UiButton(h).children([
+): Markup<M> => {
+  const variant = o.variant ?? "secondary";
+  return UiButton(h).children([
     h.a
-      .class(`kb-btn${variantClass(o.variant)}${o.small === true ? " kb-btn--small" : ""}`)
+      .class(
+        cn(
+          buttonVariants({
+            variant,
+            size: o.small === true ? "small" : "default",
+          }),
+          o.className,
+        ),
+      )
+      .attr("data-variant", variant)
       .attr("href", o.href)
       .children([o.label]),
   ]);
+};
 
 export interface FieldOptions<M> {
   readonly id: string;
@@ -141,7 +172,8 @@ const fieldShell = <M>(
 ): Markup<M> =>
   withAttributes(
     UiField(h)
-      .class("kb-field")
+      .class(ui.field)
+      .attr("data-slot", "field")
       .name(o.id)
       .attr("name", o.id)
       .disabled(o.disabled === true)
@@ -151,12 +183,12 @@ const fieldShell = <M>(
       (node) => (o.error !== undefined ? node.attr("invalid", "") : node),
     ],
   ).children([
-    UiFieldLabel(h).class("kb-field__label").children([o.label]),
+    UiFieldLabel(h).class(ui.fieldLabel).children([o.label]),
     control,
     ...(o.error !== undefined
       ? [
           UiFieldError(h)
-            .class("kb-field__error")
+            .class(ui.fieldError)
             .id(`${o.id}-error`)
             .match(true)
             .attr("match", "true")
@@ -164,7 +196,7 @@ const fieldShell = <M>(
             .children([o.error]),
         ]
       : o.hint !== undefined
-        ? [UiFieldDescription(h).class("kb-field__hint").id(`${o.id}-hint`).children([o.hint])]
+        ? [UiFieldDescription(h).class(ui.fieldHint).id(`${o.id}-hint`).children([o.hint])]
         : []),
   ]);
 
@@ -177,7 +209,8 @@ export const textField = <M>(h: Html.H<M>, o: FieldOptions<M>): Markup<M> =>
       .on("valuechange", ({ value }) => (value === o.value ? undefined : o.onInput(value)))
       .children([
         withAttributes(h.input.class(), [
-          (element) => element.class(`kb-input${o.mono === true ? " kb-mono" : ""}`),
+          (element) =>
+            element.class(cn(controlVariants({ kind: "input" }), o.mono === true && ui.mono)),
           (element) => element.id(o.id),
           (element) => element.attr("name", o.id),
           (element) => element.attr("type", o.type ?? "text"),
@@ -211,7 +244,7 @@ export const textArea = <M>(h: Html.H<M>, o: FieldOptions<M>): Markup<M> =>
       .on("valuechange", ({ value }) => (value === o.value ? undefined : o.onInput(value)))
       .children([
         withAttributes(h.textarea.class(), [
-          (element) => element.class("kb-textarea"),
+          (element) => element.class(controlVariants({ kind: "textarea" })),
           (element) => element.id(o.id),
           (element) => element.attr("name", o.id),
           (element) => element.value(o.value),
@@ -237,9 +270,11 @@ export interface SelectOptions<M> {
   readonly hint?: string;
   readonly error?: string | undefined;
   readonly disabled?: boolean;
+  readonly compact?: boolean;
   readonly searchable?: boolean;
   readonly searchPlaceholder?: string;
   readonly emptyText?: string;
+  readonly className?: string;
 }
 
 // @ui-sdk/web/select treats value="" as absent; encode empty-string options with a stable sentinel.
@@ -259,7 +294,9 @@ export const select = <M>(h: Html.H<M>, o: SelectOptions<M>): Markup<M> => {
     const itemValue = encodeSelectValue(option.value);
     return UiSelectItem(h)
       .key(itemValue)
-      .class("kb-select-item")
+      .class(
+        "flex cursor-pointer select-none items-center justify-between gap-2 rounded-[calc(var(--kb-shape-control)-2px)] px-2.5 py-[7px] text-[0.875rem] text-on-surface data-[disabled]:cursor-not-allowed data-[highlighted]:bg-surface-container data-[selected]:font-medium data-[selected]:text-primary data-[disabled]:opacity-45",
+      )
       .value(itemValue)
       .label(option.label)
       .attr("value", itemValue)
@@ -267,14 +304,15 @@ export const select = <M>(h: Html.H<M>, o: SelectOptions<M>): Markup<M> => {
       .children([
         UiSelectItemText(h).children([option.label]),
         UiSelectItemIndicator(h)
-          .class("kb-select-item__check")
+          .class("inline-flex flex-none text-primary")
           .children([icon(h, "check", 14)]),
       ]);
   });
 
   return withAttributes(
     UiSelect(h)
-      .class("kb-select-root")
+      .class(cn("block min-w-0", o.compact === true ? "w-auto" : "w-full", o.className))
+      .attr("data-slot", "select")
       .id(o.id)
       .name(o.id)
       .attr("name", o.id)
@@ -292,43 +330,53 @@ export const select = <M>(h: Html.H<M>, o: SelectOptions<M>): Markup<M> => {
   ).children([
     UiSelectTrigger(h).children([
       withAttributes(h.button.class(), [
-        (element) => element.class("kb-select kb-select-trigger"),
+        (element) =>
+          element.class(
+            cn(
+              controlVariants({ kind: "select", compact: o.compact === true }),
+              "group inline-flex cursor-pointer items-center justify-between gap-2 text-left",
+            ),
+          ),
         (element) => element.attr("type", "button"),
         (element) => element.attr("aria-label", o.label),
         (node) => (o.disabled === true ? node.disabled(true) : node),
         (node) => (o.error === undefined ? node : node.attr("aria-invalid", String(true))),
       ]).children([
         UiSelectValue(h)
-          .class("kb-select-value")
+          .class("overflow-hidden text-ellipsis whitespace-nowrap")
           .children([current?.label ?? ""]),
         h.span
-          .class("kb-select-chevron")
+          .class(
+            "inline-flex flex-none text-on-surface-variant transition-transform duration-150 ease-out group-data-[open]:rotate-180",
+          )
           .attr("aria-hidden", "true")
           .children([icon(h, "chevron", 14)]),
       ]),
     ]),
     UiSelectContent(h)
-      .class("kb-select-content")
+      .class(
+        "max-h-[min(320px,var(--available-height,320px))] min-w-[max(var(--anchor-width,160px),160px)] overflow-auto rounded-control border border-outline-variant bg-surface-container-lowest p-1 text-on-surface shadow-[0_8px_24px_-12px_color-mix(in_srgb,var(--md-sys-color-shadow)_40%,transparent)]",
+      )
       .attr("side-offset", "4")
       .attr("hidden", "")
       .children([
         ...(o.searchable === true
           ? [
               UiSelectInput(h)
-                .class("kb-select-search")
+                .class("block px-0.5 pt-0.5 pb-1.5")
                 .children([
                   h.input
-                    .class("kb-input kb-select-search__input")
+                    .class(controlVariants({ kind: "input", compact: true }))
                     .attr("type", "search")
                     .attr("aria-label", o.searchPlaceholder ?? o.label)
                     .attr("placeholder", o.searchPlaceholder ?? o.label),
                 ]),
               UiSelectEmpty(h)
-                .class("kb-select-empty")
+                .class("block px-2.5 py-2 text-center text-[0.8125rem] text-on-surface-variant")
                 .children([o.emptyText ?? "—"]),
             ]
           : []),
-        UiSelectList(h).class("kb-select-list").children(items),
+        UiSelectList(h).class("flex flex-col gap-px").children(items),
       ]),
   ]);
 };
@@ -343,10 +391,12 @@ export const checkbox = <M>(
     readonly disabled?: boolean;
   },
 ): Markup<M> =>
-  h.label.class("kb-check").children([
+  h.label.class("inline-flex cursor-pointer items-center gap-2").children([
     withAttributes(
       UiCheckbox(h)
-        .class("kb-checkbox")
+        .class(
+          "group inline-flex h-[18px] w-[18px] flex-none cursor-pointer items-center justify-center rounded-[4px] border-[1.5px] border-outline bg-surface-container-lowest text-on-primary transition-[background-color,border-color] duration-120 ease-out aria-[checked=true]:border-primary aria-[checked=true]:bg-primary data-[checked]:border-primary data-[checked]:bg-primary data-[disabled]:cursor-not-allowed data-[disabled]:opacity-45",
+        )
         .id(o.id)
         .checked(o.checked)
         .disabled(o.disabled === true)
@@ -364,7 +414,9 @@ export const checkbox = <M>(
       ],
     ).children([
       UiCheckboxIndicator(h)
-        .class("kb-checkbox__indicator")
+        .class(
+          "hidden items-center justify-center group-aria-[checked=true]:inline-flex group-data-[checked]:inline-flex",
+        )
         .children([icon(h, "check", 12)]),
     ]),
     h.span.id(`${o.id}-label`).children([o.label]),
@@ -373,16 +425,18 @@ export const checkbox = <M>(
 export type BadgeTone = "neutral" | "paid" | "proforma" | "overdue" | "draft" | "error" | "outline";
 
 export const badge = <M>(h: Html.H<M>, label: string, tone: BadgeTone = "neutral"): Markup<M> =>
-  h.span.class(`kb-badge${tone === "neutral" ? "" : ` kb-badge--${tone}`}`).children([label]);
+  h.span.class(badgeVariants({ tone })).children([label]);
 
 export const card = <M>(
   h: Html.H<M>,
   children: ReadonlyArray<Child<M>>,
   attrs: Attrs = [],
   flat = false,
+  className?: string,
 ): Markup<M> =>
   withAttributes(h.section.class(), [
-    (element) => element.class(`kb-card${flat ? " kb-card--flat" : ""}`),
+    (element) => element.class(cn(cardVariants({ flat }), className)),
+    (element) => element.attr("data-slot", "card"),
     ...attrs,
   ]).children(children);
 
@@ -392,10 +446,11 @@ export const cardTitle = <M>(
   actions: ReadonlyArray<Child<M>> = [],
 ): Markup<M> =>
   h.div
-    .class("kb-card__title")
+    .class("mb-3 flex items-center justify-between gap-2")
+    .attr("data-slot", "card-title")
     .children([
       h.h2.children([title]),
-      ...(actions.length === 0 ? [] : [h.div.class("kb-row").children(actions)]),
+      ...(actions.length === 0 ? [] : [h.div.class(ui.row).children(actions)]),
     ]);
 
 export const page = <M>(
@@ -403,9 +458,13 @@ export const page = <M>(
   children: ReadonlyArray<Child<M>>,
   attrs: Attrs = [],
 ): Markup<M> =>
-  withAttributes(h.div.class(), [(element) => element.class("kb-page"), ...attrs]).children(
-    children,
-  );
+  withAttributes(h.div.class(), [
+    (element) =>
+      element.class(
+        "mx-auto flex w-full max-w-[1280px] flex-col gap-5 px-4 pt-4 pb-24 md:px-7 md:pt-6 md:pb-12",
+      ),
+    ...attrs,
+  ]).children(children);
 
 export const pageHeader = <M>(
   h: Html.H<M>,
@@ -417,18 +476,18 @@ export const pageHeader = <M>(
   },
 ): Markup<M> =>
   h.header
-    .class("kb-page-header")
+    .class("flex flex-wrap items-end justify-between gap-3")
     .children([
       h.div
-        .class("kb-page-header__titles")
+        .class("flex flex-col gap-1")
         .children([
           ...(o.eyebrow === undefined ? [] : [o.eyebrow]),
           h.h1.children([o.title]),
-          ...(o.subtitle === undefined ? [] : [h.p.class("kb-muted").children([o.subtitle])]),
+          ...(o.subtitle === undefined ? [] : [h.p.class(ui.muted).children([o.subtitle])]),
         ]),
       ...(o.actions === undefined || o.actions.length === 0
         ? []
-        : [h.div.class("kb-page-header__actions").children(o.actions)]),
+        : [h.div.class("flex flex-wrap gap-2").children(o.actions)]),
     ]);
 
 export interface Column<Row, M> {
@@ -449,44 +508,60 @@ export const table = <Row, M>(
   },
 ): Markup<M> =>
   h.div
-    .class("kb-table-wrap")
+    .class(
+      "overflow-x-auto rounded-panel border border-outline-variant bg-surface-container-lowest",
+    )
     .children([
-      h.table
-        .class("kb-table")
-        .children([
-          h.caption.class("kb-visually-hidden").children([o.caption]),
-          h.thead.children([
-            h.tr.children(
-              o.columns.map((c) =>
-                withAttributes(h.th.class(), [
-                  (element) => element.attr("scope", "col"),
-                  (node) => (c.align === "end" ? node.class("kb-end") : node),
-                ]).children([c.header]),
-              ),
-            ),
-          ]),
-          h.tbody.children(
-            o.rows.map((row) =>
-              withAttributes(
-                h.tr.key(o.rowKey(row)),
-                o.onRowClick === undefined
-                  ? []
-                  : [
-                      (element) => element.on("click", () => o.onRowClick?.(row)),
-                      (element) => element.attr("data-href", "1"),
-                    ],
-              ).children(
-                o.columns.map((c) =>
-                  h.td
-                    .class(
-                      `${c.align === "end" ? "kb-end" : ""}${c.numeric === true ? " kb-num" : ""}`,
-                    )
-                    .children([c.cell(row)]),
-                ),
-              ),
+      h.table.class("w-full border-collapse text-[0.8125rem]").children([
+        h.caption.class("sr-only").children([o.caption]),
+        h.thead.children([
+          h.tr.children(
+            o.columns.map((c) =>
+              h.th
+                .class(
+                  cn(
+                    "whitespace-nowrap border-b border-outline-variant bg-surface-container-low px-3 py-2 text-left text-[0.75rem] font-medium text-on-surface-variant",
+                    c.align === "end" && "text-right",
+                  ),
+                )
+                .attr("scope", "col")
+                .children([c.header]),
             ),
           ),
         ]),
+        h.tbody.children(
+          o.rows.map((row) =>
+            withAttributes(
+              h.tr
+                .key(o.rowKey(row))
+                .class(
+                  cn(
+                    "hover:bg-surface-container-low [&:last-child>td]:border-b-0",
+                    o.onRowClick !== undefined && "cursor-pointer",
+                  ),
+                ),
+              o.onRowClick === undefined
+                ? []
+                : [
+                    (element) => element.on("click", () => o.onRowClick?.(row)),
+                    (element) => element.attr("data-href", "1"),
+                  ],
+            ).children(
+              o.columns.map((c) =>
+                h.td
+                  .class(
+                    cn(
+                      "h-11 border-b border-outline-variant px-3 py-2.5 align-middle",
+                      c.align === "end" && "text-right",
+                      c.numeric === true && ui.num,
+                    ),
+                  )
+                  .children([c.cell(row)]),
+              ),
+            ),
+          ),
+        ),
+      ]),
     ]);
 
 /** A loading table that mirrors the loaded chrome (zero-CLS): same headers, same row height. */
@@ -496,40 +571,47 @@ export const skeletonTable = <M>(
   rows = 6,
 ): Markup<M> =>
   h.div
-    .class("kb-table-wrap")
+    .class(
+      "overflow-x-auto rounded-panel border border-outline-variant bg-surface-container-lowest",
+    )
     .attr("aria-busy", String(true))
     .children([
-      h.table
-        .class("kb-table")
-        .children([
-          h.thead.children([
-            h.tr.children(headers.map((x) => h.th.attr("scope", "col").children([x]))),
-          ]),
-          h.tbody.children(
-            Array.from({ length: rows }, (_, i) =>
-              h.tr
-                .key(`s${i}`)
-                .children(
-                  headers.map(() =>
-                    h.td.children([
-                      h.span
-                        .class("kb-skeleton")
-                        .style({ display: "block", width: "70%" })
-                        .children([" "]),
-                    ]),
-                  ),
-                ),
+      h.table.class("w-full border-collapse text-[0.8125rem]").children([
+        h.thead.children([
+          h.tr.children(
+            headers.map((x) =>
+              h.th
+                .class(
+                  "whitespace-nowrap border-b border-outline-variant bg-surface-container-low px-3 py-2 text-left text-[0.75rem] font-medium text-on-surface-variant",
+                )
+                .attr("scope", "col")
+                .children([x]),
             ),
           ),
         ]),
+        h.tbody.children(
+          Array.from({ length: rows }, (_, i) =>
+            h.tr
+              .key(`s${i}`)
+              .class("[&:last-child>td]:border-b-0")
+              .children(
+                headers.map(() =>
+                  h.td
+                    .class("h-11 border-b border-outline-variant px-3 py-2.5 align-middle")
+                    .children([h.span.class("kb-skeleton block w-[70%]").children(["\u00A0"])]),
+                ),
+              ),
+          ),
+        ),
+      ]),
     ]);
 
 export const skeleton = <M>(h: Html.H<M>, width = "100%", height = "1em"): Markup<M> =>
   h.span
-    .class("kb-skeleton")
-    .style({ display: "block", width, height })
+    .class("kb-skeleton block")
+    .style({ width, height })
     .attr("aria-hidden", String(true))
-    .children([" "]);
+    .children(["\u00A0"]);
 
 export const emptyState = <M>(
   h: Html.H<M>,
@@ -541,10 +623,10 @@ export const emptyState = <M>(
   },
 ): Markup<M> =>
   h.div
-    .class("kb-empty")
+    .class("flex flex-col items-center gap-2 px-4 py-12 text-center text-on-surface-variant")
     .children([
       ...(o.art === undefined ? [] : [o.art]),
-      h.p.class("kb-empty__title").children([o.title]),
+      h.p.class("font-semibold text-on-surface").children([o.title]),
       ...(o.body === undefined ? [] : [h.p.children([o.body])]),
       ...(o.action === undefined ? [] : [o.action]),
     ]);
@@ -558,12 +640,10 @@ export const banner = <M>(
   },
 ): Markup<M> =>
   h.div
-    .class(
-      `kb-banner${o.tone === undefined || o.tone === "neutral" ? "" : ` kb-banner--${o.tone}`}`,
-    )
+    .class(bannerVariants({ tone: o.tone ?? "neutral" }))
     .attr("role", o.tone === "error" ? "alert" : "status")
     .children([
-      h.span.style({ flex: "1" }).children([o.text]),
+      h.span.class("flex-1").children([o.text]),
       ...(o.action === undefined ? [] : [o.action]),
     ]);
 
@@ -580,12 +660,13 @@ export const tabs = <M>(
   },
 ): Markup<M> =>
   UiTabs(h)
-    .class("kb-tabs-root")
+    .class("block")
     .value(o.selected)
     .attr("value", o.selected)
     .children([
       UiTabsList(h)
-        .class("kb-tabs")
+        .class("relative flex gap-0.5 overflow-x-auto border-b border-outline-variant")
+        .attr("data-slot", "tabs")
         .attr("aria-label", o.label)
         .children([
           ...o.items.map((it) =>
@@ -595,14 +676,19 @@ export const tabs = <M>(
               .attr("value", it.id)
               .children([
                 withAttributes(h.a.class(), [
-                  (element) => element.class("kb-tab"),
+                  (element) =>
+                    element.class(
+                      "-mb-px cursor-pointer whitespace-nowrap border-0 border-b-2 border-transparent bg-transparent px-3.5 py-2.5 font-medium text-on-surface-variant no-underline hover:text-on-surface aria-[selected=true]:text-on-surface data-[selected]:text-on-surface [&[aria-selected=true]:not([data-selected])]:border-b-primary",
+                    ),
                   (element) => element.attr("href", it.href),
                   (element) => element.attr("aria-selected", String(it.id === o.selected)),
                   (node) => (it.id === o.selected ? node.attr("aria-current", "page") : node),
                 ]).children([it.label]),
               ]),
           ),
-          UiTabsIndicator(h).class("kb-tabs__indicator"),
+          UiTabsIndicator(h).class(
+            "pointer-events-none absolute bottom-0 left-[var(--active-tab-left,0)] h-0.5 w-[var(--active-tab-width,0)] bg-primary transition-[left,width] duration-[180ms] ease-out data-[activation-direction=none]:transition-none",
+          ),
         ]),
     ]);
 
@@ -613,10 +699,19 @@ export const segmented = <M>(
     readonly items: ReadonlyArray<{ readonly id: string; readonly label: string }>;
     readonly selected: string;
     readonly onSelect: (id: string) => M;
+    readonly fill?: boolean;
+    readonly sizing?: "equal" | "auto";
+    readonly className?: string;
   },
 ): Markup<M> =>
   UiSegmentedControl(h)
-    .class("kb-segmented")
+    .class(
+      cn(
+        "relative isolate inline-flex max-w-full overflow-hidden rounded-control border border-outline-variant bg-surface-container-lowest",
+        o.fill === true && "w-full",
+        o.className,
+      ),
+    )
     .attr("aria-label", o.label)
     .value(o.selected)
     .attr("value", o.selected)
@@ -624,11 +719,13 @@ export const segmented = <M>(
       value !== null && value !== o.selected ? o.onSelect(value) : undefined,
     )
     .children([
-      UiSegmentedControlIndicator(h).class("kb-segmented__indicator"),
+      UiSegmentedControlIndicator(h).class(
+        "pointer-events-none absolute top-[var(--segmented-control-indicator-top,0)] left-[var(--segmented-control-indicator-left,0)] -z-10 h-[var(--segmented-control-indicator-height,0)] w-[var(--segmented-control-indicator-width,0)] bg-primary-container transition-[top,left,width,height] duration-[180ms] ease-out data-[activation-direction=none]:transition-none",
+      ),
       ...o.items.map((it) =>
         UiSegmentedControlItem(h)
           .key(it.id)
-          .class("kb-segmented__item")
+          .class(segmentedButtonVariants({ sizing: o.sizing ?? "equal" }))
           .value(it.id)
           .attr("value", it.id)
           .attr("role", "radio")
@@ -657,7 +754,7 @@ export const toggleChip = <M>(
     ],
   ).children([
     withAttributes(h.button.class(), [
-      (element) => element.class("kb-chip"),
+      (element) => element.class(chipVariants({ active: o.pressed })),
       (element) => element.attr("type", "button"),
       (element) => element.attr("aria-pressed", String(o.pressed)),
       (node) => (o.disabled === true ? node.disabled(true) : node),
@@ -672,15 +769,17 @@ export const searchInput = <M>(
     readonly onInput: (value: string) => M;
     readonly name?: string;
     readonly ariaLabel?: string;
+    readonly className?: string;
+    readonly inputClassName?: string;
   },
 ): Markup<M> =>
   UiInput(h)
-    .class("kb-search-control")
+    .class(cn("block w-full", o.className))
     .value(o.value)
     .on("valuechange", ({ value }) => o.onInput(value))
     .children([
       withAttributes(h.input.class(), [
-        (element) => element.class("kb-input"),
+        (element) => element.class(cn(controlVariants({ kind: "input" }), o.inputClassName)),
         (element) => element.attr("type", "search"),
         (element) => element.attr("placeholder", o.placeholder),
         (element) => element.attr("aria-label", o.ariaLabel ?? o.placeholder),
@@ -693,7 +792,7 @@ export const separator = <M>(
   h: Html.H<M>,
   o: { readonly orientation?: "horizontal" | "vertical"; readonly decorative?: boolean } = {},
 ): Markup<M> =>
-  withAttributes(UiSeparator(h).class("kb-divider"), [
+  withAttributes(UiSeparator(h).class(ui.divider), [
     (node) =>
       o.orientation === undefined
         ? node
@@ -707,16 +806,30 @@ export const kpi = <M>(
 ): Markup<M> =>
   card(h, [
     h.div
-      .class("kb-kpi")
+      .class("flex flex-col gap-1.5")
       .children([
-        h.span.class("kb-kpi__label").children([o.label]),
-        h.span.class("kb-kpi__value kb-num").children([o.value]),
-        ...(o.note === undefined ? [] : [h.span.class("kb-small kb-muted").children([o.note])]),
+        h.span.class("text-[0.75rem] text-on-surface-variant").children([o.label]),
+        h.span.class(cn("font-display text-[1.375rem] leading-7", ui.num)).children([o.value]),
+        ...(o.note === undefined ? [] : [h.span.class(cn(ui.small, ui.muted)).children([o.note])]),
       ]),
   ]);
 
 export const dl = <M>(h: Html.H<M>, rows: ReadonlyArray<readonly [string, Child<M>]>): Markup<M> =>
-  h.dl.class("kb-dl").children(rows.flatMap(([k, v]) => [h.dt.children([k]), h.dd.children([v])]));
+  h.dl
+    .class("grid grid-cols-[minmax(120px,max-content)_1fr] gap-x-4 gap-y-1.5 text-[0.8125rem]")
+    .children(
+      rows.flatMap(([k, v]) => [
+        h.dt.class("text-on-surface-variant").children([k]),
+        h.dd.class("m-0").children([v]),
+      ]),
+    );
+
+const DIALOG_BACKDROP_CLASS =
+  "fixed inset-0 bg-[color-mix(in_srgb,var(--md-sys-color-scrim)_40%,transparent)] transition-opacity duration-160 ease-out data-[ending-style]:opacity-0 data-[starting-style]:opacity-0";
+const DIALOG_CONTENT_CLASS =
+  "fixed inset-0 m-auto h-fit max-h-[calc(100dvh-32px)] w-[min(520px,calc(100vw-32px))] overflow-auto rounded-panel border border-outline-variant bg-surface-container-lowest p-5 text-on-surface shadow-[0_12px_32px_-12px_color-mix(in_srgb,var(--md-sys-color-shadow)_35%,transparent)] transition-[opacity,translate] duration-160 ease-out data-[ending-style]:translate-y-1.5 data-[starting-style]:translate-y-1.5 data-[ending-style]:opacity-0 data-[starting-style]:opacity-0";
+const DIALOG_TITLE_CLASS =
+  "mb-3 block font-display text-[0.9375rem] leading-5 font-[var(--kb-font-display-weight)] tracking-[-0.01em]";
 
 /** A modal dialog powered by `@ui-sdk/web/dialog` (or `alert-dialog` when `alert` is true). */
 export const dialog = <M>(
@@ -737,17 +850,17 @@ export const dialog = <M>(
       .attr("open", "")
       .on("openchange", ({ value }) => (!value ? o.onClose : (undefined as unknown as M)))
       .children([
-        UiAlertDialogBackdrop(h).class("kb-dialog-backdrop"),
+        UiAlertDialogBackdrop(h).class(DIALOG_BACKDROP_CLASS),
         UiAlertDialogContent(h)
-          .class("kb-dialog")
+          .class(DIALOG_CONTENT_CLASS)
           .id(o.id)
           .attr("role", "alertdialog")
           .attr("aria-modal", String(true))
           .attr("aria-labelledby", `${o.id}-title`)
           .children([
-            UiAlertDialogTitle(h).class("kb-dialog__title").id(`${o.id}-title`).children([o.title]),
-            h.div.class("kb-stack").children(o.body),
-            h.div.class("kb-dialog__actions").children(o.actions),
+            UiAlertDialogTitle(h).class(DIALOG_TITLE_CLASS).id(`${o.id}-title`).children([o.title]),
+            h.div.class(ui.stack).children(o.body),
+            h.div.class("mt-4 flex justify-end gap-2").children(o.actions),
           ]),
       ]);
   }
@@ -757,22 +870,22 @@ export const dialog = <M>(
     .attr("open", "")
     .on("openchange", ({ value }) => (!value ? o.onClose : (undefined as unknown as M)))
     .children([
-      UiDialogBackdrop(h).class("kb-dialog-backdrop"),
+      UiDialogBackdrop(h).class(DIALOG_BACKDROP_CLASS),
       UiDialogContent(h)
-        .class("kb-dialog")
+        .class(DIALOG_CONTENT_CLASS)
         .id(o.id)
         .attr("role", "dialog")
         .attr("aria-modal", String(true))
         .attr("aria-labelledby", `${o.id}-title`)
         .children([
-          UiDialogTitle(h).class("kb-dialog__title").id(`${o.id}-title`).children([o.title]),
-          h.div.class("kb-stack").children(o.body),
-          h.div.class("kb-dialog__actions").children(o.actions),
+          UiDialogTitle(h).class(DIALOG_TITLE_CLASS).id(`${o.id}-title`).children([o.title]),
+          h.div.class(ui.stack).children(o.body),
+          h.div.class("mt-4 flex justify-end gap-2").children(o.actions),
         ]),
     ]);
 };
 
 export const mono = <M>(h: Html.H<M>, value: string): Markup<M> =>
-  h.span.class("kb-mono").children([value]);
+  h.span.class(ui.mono).children([value]);
 export const amount = <M>(h: Html.H<M>, value: string): Markup<M> =>
-  h.span.class("kb-amount").children([value]);
+  h.span.class(ui.num).children([value]);

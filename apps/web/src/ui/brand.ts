@@ -14,7 +14,7 @@ const MARK_DARK = "/assets/brand/kvitbit-mark-current-dark.svg";
 /** The mark alone (minimum 16px). `size` sets the rendered square in px. */
 export const mark = <M>(h: Html.H<M>, size = 28, label = "Kvitbit"): Markup<M> =>
   h.span
-    .class("kb-mark")
+    .class("inline-flex [&_img]:h-[var(--kb-mark-size,28px)] [&_img]:w-[var(--kb-mark-size,28px)]")
     .attr("role", "img")
     .attr("aria-label", label)
     .style({ "--kb-mark-size": `${size}px` })
@@ -36,7 +36,7 @@ export const lockup = <M>(
   height = layout === "horizontal" ? 22 : 64,
 ): Markup<M> =>
   h.span
-    .class(`kb-lockup kb-lockup--${layout}`)
+    .class("inline-flex items-center p-1 [&_img]:h-[var(--kb-lockup-height,22px)] [&_img]:w-auto")
     .style({ "--kb-lockup-height": `${height}px` })
     .children([
       h.img

@@ -12,7 +12,7 @@ import {
 import { Option } from "effect";
 import { Copy, KeyRound, Plus, Trash2 } from "lucide-react-native";
 import { useState } from "react";
-import { StyleSheet, View } from "react-native";
+import { View } from "react-native";
 import { useI18n } from "../../i18n/i18n-provider";
 import { useApi, useRemote } from "../../runtime/api-runtime";
 import {
@@ -24,7 +24,6 @@ import {
   RemoteView,
   Section,
   SegmentedChoice,
-  space,
   Text,
   TextField,
   useOverlay,
@@ -68,7 +67,7 @@ export function ApiKeysSection() {
 
   if (!editable) {
     return (
-      <View style={styles.stack}>
+      <View className="gap-4">
         <Banner text={t("settings.readOnly")} tone="info" />
       </View>
     );
@@ -163,7 +162,7 @@ export function ApiKeysSection() {
   };
 
   return (
-    <View style={styles.stack}>
+    <View className="gap-4">
       {errorState.banner === null ? null : <Banner text={errorState.banner} tone="error" />}
 
       <Text variant="bodyMedium" color="onSurfaceVariant">
@@ -179,7 +178,7 @@ export function ApiKeysSection() {
           <Text testID="api-key-secret-value" variant="row" numeric selectable>
             {createdSecret.secret}
           </Text>
-          <View style={styles.row}>
+          <View className="flex-row flex-wrap items-center gap-2">
             <Button
               testID="api-key-copy-secret"
               kind="filled"
@@ -225,12 +224,12 @@ export function ApiKeysSection() {
             </Text>
 
             {picker.mode === "custom" ? (
-              <View style={styles.matrix}>
+              <View className="gap-2 pt-1">
                 <Text variant="meta" color="onSurfaceVariant">
                   {t("scopePicker.writeImpliesRead")}
                 </Text>
                 {ScopePicker.rows(picker).map((row) => (
-                  <View key={row.area} style={styles.matrixRow}>
+                  <View key={row.area} className="py-0.5">
                     <SegmentedChoice<AreaLevel>
                       label={t(`enum.scopeArea.${row.area}`)}
                       value={row.level}
@@ -255,7 +254,7 @@ export function ApiKeysSection() {
               </View>
             ) : null}
 
-            <View style={styles.row}>
+            <View className="flex-row flex-wrap items-center gap-2">
               <Button
                 testID="api-key-create-submit"
                 kind="filled"
@@ -303,8 +302,8 @@ export function ApiKeysSection() {
             >
               {keys.map((key) => (
                 <Card key={key.id}>
-                  <View style={styles.headerRow}>
-                    <View style={styles.flex}>
+                  <View className="flex-row items-center gap-2">
+                    <View className="flex-1">
                       <Text variant="titleSmall">{key.name}</Text>
                       <Text variant="meta" color="onSurfaceVariant" numeric>
                         {key.prefix}… · {key.createdBy.name}
@@ -320,7 +319,7 @@ export function ApiKeysSection() {
                       ? ""
                       : ` · ${t("common.field.expires")}: ${key.expiresAt.slice(0, 10)}`}
                   </Text>
-                  <View style={styles.row}>
+                  <View className="flex-row flex-wrap items-center gap-2">
                     <Button
                       kind="text"
                       icon={Trash2}
@@ -338,12 +337,3 @@ export function ApiKeysSection() {
     </View>
   );
 }
-
-const styles = StyleSheet.create({
-  stack: { gap: space.lg },
-  flex: { flex: 1 },
-  headerRow: { flexDirection: "row", alignItems: "center", gap: space.sm },
-  row: { flexDirection: "row", flexWrap: "wrap", gap: space.sm, alignItems: "center" },
-  matrix: { gap: space.sm, paddingTop: space.xs },
-  matrixRow: { paddingVertical: 2 },
-});

@@ -100,9 +100,9 @@ describe("auth screens", () => {
     );
     expect(allText(failed)).toContain("Try again");
     const slot = findAll(none, "View")[0];
-    expect(slot?.props.style).toMatchObject({ minHeight: expect.any(Number) });
-    expect(findAll(solving, "View")[0]?.props.style).toEqual(slot?.props.style);
-    expect(findAll(failed, "View")[0]?.props.style).toEqual(slot?.props.style);
+    expect(slot?.props.className).toContain("min-h-[72px]");
+    expect(findAll(solving, "View")[0]?.props.className).toEqual(slot?.props.className);
+    expect(findAll(failed, "View")[0]?.props.className).toEqual(slot?.props.className);
     const retryBtn = findAll(failed, "Pressable")[0];
     (retryBtn?.props.onPress as (() => void) | undefined)?.();
     expect(retried).toBe(true);

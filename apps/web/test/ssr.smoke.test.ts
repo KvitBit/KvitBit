@@ -63,10 +63,10 @@ const assertCleanSsr = (
   expect(title.trim().length).toBeGreaterThan(0);
   expect(title).toContain("Kvitbit");
   if (chrome === "workspace") {
-    expect(html).toContain('class="kb-app"');
-    expect(html).toContain('class="kb-sidebar"');
+    expect(html).toContain('data-slot="app"');
+    expect(html).toContain('data-slot="sidebar"');
   } else {
-    expect(html).toContain('class="kb-public"');
+    expect(html).toContain('data-slot="public"');
   }
 };
 
@@ -109,7 +109,7 @@ describe("server render smoke (all route groups × cs/en)", () => {
         session: anonymous,
       });
       assertCleanSsr(html, title, locale, "public");
-      expect(html).not.toContain('class="kb-sidebar"');
+      expect(html).not.toContain('data-slot="sidebar"');
     }
   });
 
@@ -131,6 +131,6 @@ describe("server render smoke (all route groups × cs/en)", () => {
       },
     });
     assertCleanSsr(html, title, "cs", "public");
-    expect(html).not.toContain('class="kb-sidebar"');
+    expect(html).not.toContain('data-slot="sidebar"');
   });
 });
