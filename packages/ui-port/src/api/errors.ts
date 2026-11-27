@@ -29,6 +29,7 @@ import * as Exit from "effect/Exit";
 import * as Fn from "effect/Function";
 import * as HttpClientError from "effect/http/HttpClientError";
 import * as Option from "effect/Option";
+import * as Predicate from "effect/Predicate";
 import * as Rec from "effect/Record";
 import * as Schema from "effect/Schema";
 import * as Str from "effect/String";
@@ -112,7 +113,7 @@ const WIRE_ERRORS = [
 
 export const UiError = { offline, timeout, cancelled, unexpected } as const;
 
-const isWireError = (u: unknown): u is WireError =>
+const isWireError: Predicate.Refinement<unknown, WireError> = (u): u is WireError =>
   Arr.some(WIRE_ERRORS, (ErrorClass) => Schema.is(ErrorClass)(u));
 
 const LOCAL_TAGS = new Set(["Offline", "Timeout", "Cancelled", "Unexpected"]);
@@ -124,25 +125,22 @@ const LOCAL_TAGS = new Set(["Offline", "Timeout", "Cancelled", "Unexpected"]);
  */
 const isIssueCode = Schema.is(IssueCode);
 
-const isAuthIssue = (u: unknown): u is AuthIssue => {
-  if (typeof u !== "object" || u === null) return false;
+const isAuthIssue: Predicate.Refinement<unknown, AuthIssue> = (u): u is AuthIssue => {
+  if (!Predicate.isObjectOrArray(u)) return false;
   const path = "path" in u ? u.path : undefined;
   const code = "code" in u ? u.code : undefined;
   const params = "params" in u ? u.params : undefined;
   return (
     Arr.isArray(path) &&
-    Arr.every(path, (segment) => typeof segment === "string" || typeof segment === "number") &&
-    typeof code === "string" &&
+    Arr.every(path, (segment) => Predicate.isString(segment) || Predicate.isNumber(segment)) &&
+    Predicate.isString(code) &&
     (Fn.pipe(code, Str.startsWith("auth.")) || isIssueCode(code)) &&
     (params === undefined ||
-      (typeof params === "object" &&
-        params !== null &&
-        !Arr.isArray(params) &&
-        Arr.every(Rec.values(params), (value) => typeof value === "string")))
+      (Predicate.isObject(params) && Arr.every(Rec.values(params), Predicate.isString)))
   );
 };
 
-const isPlainInvalid = (u: object): u is AuthInvalid =>
+const isPlainInvalid: Predicate.Refinement<object, AuthInvalid> = (u): u is AuthInvalid =>
   "_tag" in u &&
   u._tag === "Invalid" &&
   "issues" in u &&
@@ -150,11 +148,11 @@ const isPlainInvalid = (u: object): u is AuthInvalid =>
   u.issues.length > 0 &&
   Arr.every(u.issues, isAuthIssue);
 
+// biome-ignore lint/plugin/no-unknown-parameters: This guard accepts arbitrary failure values.
 export const isUiError = (u: unknown): u is UiError =>
   isWireError(u) ||
-  (typeof u === "object" &&
-    u !== null &&
-    (("_tag" in u && typeof u._tag === "string" && LOCAL_TAGS.has(u._tag)) || isPlainInvalid(u)));
+  (Predicate.isObjectOrArray(u) &&
+    (("_tag" in u && Predicate.isString(u._tag) && LOCAL_TAGS.has(u._tag)) || isPlainInvalid(u)));
 
 /** The exchange a failure came from, when the failure value does not carry its response. */
 export interface FailedResponse {
@@ -171,16 +169,16 @@ const failedResponses = new WeakMap<object, FailedResponse>();
  * association. Keyed by the error object, so each failure keeps its own exchange.
  */
 export const annotateFailedResponse: {
+  // biome-ignore lint/plugin/no-unknown-parameters: Failure values can come from any Effect error channel.
   (response: FailedResponse): (error: unknown) => void;
+  // biome-ignore lint/plugin/no-unknown-parameters: Failure values can come from any Effect error channel.
   (error: unknown, response: FailedResponse): void;
+  // biome-ignore lint/plugin/no-unknown-parameters: Only object failures can carry response metadata.
 } = Fn.dual(2, (error: unknown, response: FailedResponse): void => {
-  if (typeof error === "object" && error !== null && !failedResponses.has(error)) {
+  if (Predicate.isObjectOrArray(error) && !failedResponses.has(error)) {
     failedResponses.set(error, { status: response.status, requestId: response.requestId });
   }
 });
-
-const failedResponseOf = (error: unknown): FailedResponse | undefined =>
-  typeof error === "object" && error !== null ? failedResponses.get(error) : undefined;
 
 const fromHttpClientError = (error: HttpClientError.HttpClientError): UiError => {
   const reason = error.reason;
@@ -197,10 +195,11 @@ const fromHttpClientError = (error: HttpClientError.HttpClientError): UiError =>
 };
 
 /** The one mapping from a failure value (the `E` channel of a KvitbitApi call) to UiError. */
+// biome-ignore lint/plugin/no-unknown-parameters: The mapper normalizes arbitrary failure values.
 export const toUiError = (error: unknown): UiError => {
   if (isUiError(error)) return error;
   if (HttpClientError.isHttpClientError(error)) return fromHttpClientError(error);
-  const failed = failedResponseOf(error);
+  const failed = Predicate.isObjectOrArray(error) ? failedResponses.get(error) : undefined;
   if (failed !== undefined) return unexpected(failed.status, failed.requestId);
   if (Cause.isTimeoutError(error)) return timeout;
   return unexpected();

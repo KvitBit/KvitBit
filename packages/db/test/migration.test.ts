@@ -4,6 +4,7 @@ import { PGlite } from "@electric-sql/pglite";
 import { drizzle } from "drizzle-orm/pglite";
 import { migrate } from "drizzle-orm/pglite/migrator";
 import * as Arr from "effect/Array";
+import * as Effect from "effect/Effect";
 import * as Fn from "effect/Function";
 
 const packageDir = fileURLToPath(new URL("..", import.meta.url));
@@ -24,15 +25,25 @@ afterAll(async () => {
 });
 
 describe("committed migration", () => {
-  test("matches the schema: drizzle-kit generate has nothing to generate", () => {
-    const result = Bun.spawnSync(
-      ["bunx", "drizzle-kit", "generate", "--explain", "--output", "json"],
-      { cwd: packageDir, env: { ...Bun.env, DATABASE_URL: "", DATABASE_URL_UNPOOLED: "" } },
-    );
-    const stdout = result.stdout.toString();
-    expect(result.exitCode).toBe(0);
-    expect(stdout).toContain('"status":"no_changes"');
-  }, 60_000);
+  test(
+    "matches the schema: drizzle-kit generate has nothing to generate",
+    () =>
+      Effect.gen(function* () {
+        const child = yield* Effect.sync(() =>
+          Bun.spawn(["bunx", "drizzle-kit", "generate", "--explain", "--output", "json"], {
+            cwd: packageDir,
+            env: { ...Bun.env, DATABASE_URL: "", DATABASE_URL_UNPOOLED: "" },
+            stdout: "pipe",
+            stderr: "inherit",
+          }),
+        );
+        const stdout = yield* Effect.promise(() => Bun.readableStreamToText(child.stdout));
+        const exitCode = yield* Effect.promise(() => child.exited);
+        expect(exitCode).toBe(0);
+        expect(stdout).toContain('"status":"no_changes"');
+      }).pipe(Effect.runPromise),
+    60_000,
+  );
 
   test("creates the public and auth tables", async () => {
     const tables = await rows<{ name: string }>(

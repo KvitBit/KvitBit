@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import * as Arr from "effect/Array";
-import * as Exit from "effect/Exit";
+import * as Effect from "effect/Effect";
 import * as Fn from "effect/Function";
 import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
@@ -12,6 +12,7 @@ import {
   extendedScheme,
   fileWarningText,
   Hct,
+  type MaterialThemeJson,
   parseMaterialThemeFile,
   type RoleMap,
   resolveMaterialTheme,
@@ -21,19 +22,20 @@ import {
   SCHEME_VARIANTS,
 } from "../../src/theme";
 
-const encodeJsonExit = Schema.encodeUnknownExit(Schema.fromJsonString(Schema.Unknown));
-const encodeJson = (input: unknown): string => {
-  const json = encodeJsonExit(input);
-  if (Exit.isFailure(json))
-    throw new Error("Could not encode theme fixture", { cause: json.cause });
-  return json.value;
-};
+const encodeJson = Fn.flow(
+  Schema.encodeUnknownEffect(Schema.fromJsonString(Schema.Unknown)),
+  Effect.runSync,
+);
 const UPPERCASE_HEX = /^#[0-9A-F]{6}$/;
 const MAX = 64 * 1024;
 const ocean = resolvePreset("ocean").schemes;
 
 /** A Theme Builder export shaped like the real file (lower-case keys, extra roles, palettes). */
-const exportFile = (overrides: Record<string, unknown> = {}) => ({
+const exportFile = (
+  overrides: Partial<
+    Pick<typeof MaterialThemeJson.Encoded, "description" | "seed" | "schemes">
+  > = {},
+) => ({
   description: "TYPE: CUSTOM\nMaterial Theme Builder export 2026-11-20",
   seed: "#0E6B8C",
   coreColors: { primary: "#0E6B8C" },

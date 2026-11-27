@@ -1,0 +1,9 @@
+engine biome(1.0)
+language js(typescript, jsx)
+
+or {
+  JsTryStatement() as $statement,
+  JsTryFinallyStatement() as $statement
+} where {
+  register_diagnostic(span=$statement, message="[no-try-catch] Use Effect.try or Effect.tryPromise at the foreign call and Effect operators for recovery or cleanup.", severity="error")
+}

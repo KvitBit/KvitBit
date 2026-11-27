@@ -4,6 +4,7 @@
  * Keys follow the catalog's dotted MessageKey spelling (`issue.<IssueCode>` for issues).
  */
 import * as Fn from "effect/Function";
+import * as Predicate from "effect/Predicate";
 export type TextParam = string | number;
 
 export interface Text<K extends string = string> {
@@ -15,7 +16,7 @@ export const text: {
   (params?: Readonly<Record<string, TextParam>>): <K extends string>(key: K) => Text<K>;
   <K extends string>(key: K, params?: Readonly<Record<string, TextParam>>): Text<K>;
 } = Fn.dual(
-  (args) => typeof args[0] === "string",
+  (args) => Predicate.isString(args[0]),
   <K extends string>(key: K, params?: Readonly<Record<string, TextParam>>): Text<K> =>
     params === undefined ? { key } : { key, params },
 );

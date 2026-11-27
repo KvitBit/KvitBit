@@ -8,6 +8,7 @@
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Fn from "effect/Function";
+import * as Predicate from "effect/Predicate";
 import * as Random from "effect/Random";
 
 import { isAutoRetryable, isRetryable, retryAfterSeconds, toUiError, type UiError } from "./errors";
@@ -35,7 +36,7 @@ export const retryDelayMillis: {
   (attempt: number, jitter?: number, backoff?: Backoff): (error: UiError) => number | null;
   (error: UiError, attempt: number, jitter?: number, backoff?: Backoff): number | null;
 } = Fn.dual(
-  (args) => typeof args[0] === "object",
+  (args) => Predicate.isNull(args[0]) || Predicate.isObjectOrArray(args[0]),
   (
     error: UiError,
     attempt: number,

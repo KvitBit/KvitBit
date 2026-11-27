@@ -1,7 +1,8 @@
-import type { Locale as DomainLocale } from "@kvitbit/domain/contract";
+import { Locale as DomainLocale } from "@kvitbit/domain/contract";
 import * as Arr from "effect/Array";
 import * as Fn from "effect/Function";
 import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
 import * as Str from "effect/String";
 
 const LANGUAGE_SUBTAG_SEPARATOR = /[-_]/;
@@ -20,7 +21,7 @@ export const FALLBACK_LOCALE: Locale = "en";
 /** BCP 47 tag each locale formats with (en-GB: day-first dates, as on Czech invoices). */
 export const INTL_TAG: Readonly<Record<Locale, string>> = { cs: "cs-CZ", en: "en-GB" };
 
-export const isLocale = (value: unknown): value is Locale => value === "cs" || value === "en";
+export const isLocale = Schema.is(DomainLocale);
 
 const fromTag = (tag: string): Locale | undefined => {
   const language = Str.split(Str.toLowerCase(Str.trim(tag)), LANGUAGE_SUBTAG_SEPARATOR)[0];

@@ -9,6 +9,7 @@ import * as Arr from "effect/Array";
 import * as BigDecimal from "effect/BigDecimal";
 import * as Data from "effect/Data";
 import * as Fn from "effect/Function";
+import * as Predicate from "effect/Predicate";
 import * as Result from "effect/Result";
 import type { CurrencyCode, Money } from "./vocabulary";
 
@@ -88,7 +89,7 @@ export const round: {
   (scale?: number): (money: Money) => Money;
   (money: Money, scale?: number): Money;
 } = Fn.dual(
-  (args) => typeof args[0] === "object",
+  (args) => Predicate.isObjectOrArray(args[0]) || args[0] === null,
   (money: Money, scale = minorUnitScale(money.currency)): Money =>
     make(
       BigDecimal.normalize(BigDecimal.round(money.amount, { scale, mode: "half-from-zero" })),

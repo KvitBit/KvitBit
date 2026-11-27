@@ -24,6 +24,160 @@
       }
     }
   },
+  "plugins": [
+    {
+      "path": "./lint/no-chained-type-assertions.grit",
+      "resolutionKind": "config",
+      "includes": ["**", "!**/generated/**"]
+    },
+    {
+      "path": "./lint/no-conditional-empty-object-spread.grit",
+      "resolutionKind": "config",
+      "includes": ["**", "!**/generated/**"]
+    },
+    {
+      "path": "./lint/no-known-value-widening.grit",
+      "resolutionKind": "config",
+      "includes": ["**", "!**/generated/**"]
+    },
+    {
+      "path": "./lint/no-object-parameters.grit",
+      "resolutionKind": "config",
+      "includes": ["**", "!**/generated/**"]
+    },
+    {
+      "path": "./lint/no-repeated-computed-conditional-operand.grit",
+      "resolutionKind": "config",
+      "includes": ["**", "!**/generated/**"]
+    },
+    {
+      "path": "./lint/no-runtime-typeof.grit",
+      "resolutionKind": "config",
+      "includes": ["**", "!**/generated/**"]
+    },
+    {
+      "path": "./lint/no-unknown-parameters.grit",
+      "resolutionKind": "config",
+      "includes": ["**", "!**/generated/**"]
+    },
+    {
+      "path": "./lint/no-unknown-type-aliases.grit",
+      "resolutionKind": "config",
+      "includes": ["**", "!**/generated/**"]
+    },
+    {
+      "path": "./lint/no-unsafe-dictionary-type.grit",
+      "resolutionKind": "config",
+      "includes": ["**", "!**/generated/**"]
+    },
+    {
+      "path": "./lint/no-useless-alias.grit",
+      "resolutionKind": "config",
+      "includes": ["**", "!**/generated/**"]
+    },
+    {
+      "path": "./lint/no-widen-then-assert.grit",
+      "resolutionKind": "config",
+      "includes": ["**", "!**/generated/**"]
+    },
+    {
+      "path": "./lint/no-synchronous-subprocess.grit",
+      "resolutionKind": "config",
+      "includes": ["**", "!**/generated/**"]
+    },
+    {
+      "path": "./lint/no-bare-promises.grit",
+      "resolutionKind": "config",
+      "includes": [
+        "{apps,packages,infra}/*/src/**",
+        "apps/mobile/app/**",
+        "src/**",
+        "!**/{test,tests,testing,__tests__,__fixtures__,generated}/**",
+        "!**/*.{test,spec,test-utils}.{ts,tsx,mts,cts,js,jsx,mjs,cjs}"
+      ]
+    },
+    {
+      "path": "./lint/no-direct-effect-runs.grit",
+      "resolutionKind": "config",
+      "includes": [
+        "{apps,packages,infra}/*/src/**",
+        "apps/mobile/app/**",
+        "src/**",
+        "!**/{test,tests,testing,__tests__,__fixtures__,generated}/**",
+        "!**/*.{test,spec,test-utils}.{ts,tsx,mts,cts,js,jsx,mjs,cjs}"
+      ]
+    },
+    {
+      "path": "./lint/no-direct-process-env.grit",
+      "resolutionKind": "config",
+      "includes": [
+        "{apps,packages,infra}/*/src/**",
+        "apps/mobile/app/**",
+        "src/**",
+        "!**/{test,tests,testing,__tests__,__fixtures__,generated}/**",
+        "!**/*.{test,spec,test-utils}.{ts,tsx,mts,cts,js,jsx,mjs,cjs}"
+      ]
+    },
+    {
+      "path": "./lint/no-throw-in-effect-modules.grit",
+      "resolutionKind": "config",
+      "includes": [
+        "{apps,packages,infra}/*/src/**",
+        "apps/mobile/app/**",
+        "src/**",
+        "!**/{test,tests,testing,__tests__,__fixtures__,generated}/**",
+        "!**/*.{test,spec,test-utils}.{ts,tsx,mts,cts,js,jsx,mjs,cjs}",
+        "!packages/brand/src/{mark,pattern,svg}.ts"
+      ]
+    },
+    {
+      "path": "./lint/no-try-catch.grit",
+      "resolutionKind": "config",
+      "includes": [
+        "{apps,packages,infra}/*/src/**",
+        "apps/mobile/app/**",
+        "src/**",
+        "!**/{test,tests,testing,__tests__,__fixtures__,generated}/**",
+        "!**/*.{test,spec,test-utils}.{ts,tsx,mts,cts,js,jsx,mjs,cjs}"
+      ]
+    },
+    {
+      "path": "./lint/prefer-effect-fn.grit",
+      "resolutionKind": "config",
+      "includes": [
+        "{apps,packages,infra}/*/src/**",
+        "apps/mobile/app/**",
+        "src/**",
+        "scripts/**",
+        "!**/{test,tests,testing,__tests__,__fixtures__,generated}/**",
+        "!**/*.{test,spec,test-utils}.{ts,tsx,mts,cts,js,jsx,mjs,cjs}"
+      ]
+    },
+    {
+      "path": "./lint/prefer-effect-value.grit",
+      "resolutionKind": "config",
+      "includes": [
+        "{apps,packages,infra}/*/src/**",
+        "apps/mobile/app/**",
+        "src/**",
+        "scripts/**",
+        "!**/{test,tests,testing,__tests__,__fixtures__,generated}/**",
+        "!**/*.{test,spec,test-utils}.{ts,tsx,mts,cts,js,jsx,mjs,cjs}"
+      ]
+    },
+    {
+      "path": "./lint/prefer-effect-when.grit",
+      "resolutionKind": "config",
+      "includes": [
+        "{apps,packages,infra}/*/src/**",
+        "apps/mobile/app/**",
+        "src/**",
+        "scripts/**",
+        "!**/{test,tests,testing,__tests__,__fixtures__,generated}/**",
+        "!**/*.{test,spec,test-utils}.{ts,tsx,mts,cts,js,jsx,mjs,cjs}"
+      ]
+    }
+  ],
   "linter": {
     "enabled": true,
     "rules": {

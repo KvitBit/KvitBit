@@ -30,6 +30,7 @@ import * as Option from "effect/Option";
 import * as Order from "effect/Order";
 import * as Predicate from "effect/Predicate";
 import * as Rec from "effect/Record";
+import * as Schema from "effect/Schema";
 import * as Str from "effect/String";
 import {
   buildManifestResponse,
@@ -68,6 +69,7 @@ import {
   type ReleaseInfo,
   releaseInfoObjectKey,
   releasePrefix,
+  type StoredPublication,
   type StoredRollback,
   type StoredUpdate,
   type StoredUpdateAsset,
@@ -80,14 +82,11 @@ const DEFAULT_MIN_ANDROID_SDK = 28;
 const RELEASE_TAG_PREFIX = "mobile-v";
 const TRAILING_SLASHES = /\/+$/u;
 
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-  typeof value === "object" && value !== null && !Arr.isArray(value);
-
 const hasText = (value: string | undefined): value is string =>
   value !== undefined && value.length > 0;
 
-const hasErrorCode = (error: unknown, code: string): boolean =>
-  typeof error === "object" && error !== null && "code" in error && error.code === code;
+const isFileExistsError = Schema.is(Schema.Struct({ code: Schema.Literal("EEXIST") }));
+const isFileMissingError = Schema.is(Schema.Struct({ code: Schema.Literal("ENOENT") }));
 
 const ASSET_CONTENT_TYPES: Readonly<Record<string, string>> = {
   png: "image/png",
@@ -308,20 +307,19 @@ const parseApkBadgingIdentity = (
   return { packageName, versionCode: Number(versionCode), versionName };
 };
 
-interface AppJsonMeta {
-  readonly version: string;
-  readonly versionCode: number;
-  readonly packageName: string;
-  readonly minAndroidSdk: number;
-  readonly apkName: string;
-  readonly expoConfig: Record<string, unknown>;
-}
+const isExpoAppConfig = Schema.is(
+  Schema.Struct({
+    version: Schema.String,
+    android: Schema.optional(Schema.Unknown),
+    plugins: Schema.optional(Schema.Unknown),
+  }),
+);
 
-const readAppMeta = async (projectDir: string, tag?: string): Promise<AppJsonMeta> => {
+const readAppMeta = async (projectDir: string, tag?: string) => {
   const path = join(projectDir, "app.json");
   const parsed: unknown = JSON.parse(await readFile(path, "utf8"));
-  const expo = isRecord(parsed) ? parsed.expo : undefined;
-  if (!isRecord(expo) || typeof expo.version !== "string") {
+  const expo = Predicate.isObject(parsed) ? parsed.expo : undefined;
+  if (!isExpoAppConfig(expo)) {
     throw new Error(`Missing expo.version in ${path}`);
   }
   const version = expo.version;
@@ -333,17 +331,20 @@ const readAppMeta = async (projectDir: string, tag?: string): Promise<AppJsonMet
       throw new Error(`Release tag ${tag} (${tagVer}) does not match app.json version ${version}.`);
     }
   }
-  const android = isRecord(expo.android) ? expo.android : {};
-  const packageName =
-    typeof android.package === "string" ? android.package : KVITBIT_ANDROID_PACKAGE;
+  const androidPackage = Predicate.isObject(expo.android) ? expo.android.package : undefined;
+  const packageName = Predicate.isString(androidPackage) ? androidPackage : KVITBIT_ANDROID_PACKAGE;
   let minAndroidSdk = DEFAULT_MIN_ANDROID_SDK;
   if (Arr.isArray(expo.plugins)) {
     for (const plugin of expo.plugins) {
       if (!Arr.isArray(plugin)) continue;
       const [name, config] = plugin;
-      if (name === "expo-build-properties" && isRecord(config) && isRecord(config.android)) {
+      if (
+        name === "expo-build-properties" &&
+        Predicate.isObject(config) &&
+        Predicate.isObject(config.android)
+      ) {
         const { minSdkVersion } = config.android;
-        if (typeof minSdkVersion === "number") minAndroidSdk = minSdkVersion;
+        if (Predicate.isNumber(minSdkVersion)) minAndroidSdk = minSdkVersion;
       }
     }
   }
@@ -363,13 +364,13 @@ const runProcess = async (
   cmd: readonly string[],
   options: { readonly cwd?: string; readonly env?: Record<string, string | undefined> } = {},
 ): Promise<{ readonly exitCode: number; readonly stdout: string; readonly stderr: string }> => {
-  const { cwd } = options;
-  const proc = Bun.spawn([...cmd], {
-    ...(cwd === undefined ? {} : { cwd }),
+  const spawnOptions: Bun.Spawn.SpawnOptions<"ignore", "pipe", "pipe"> = {
     env: options.env ?? Bun.env,
     stdout: "pipe",
     stderr: "pipe",
-  });
+  };
+  if (options.cwd !== undefined) spawnOptions.cwd = options.cwd;
+  const proc = Bun.spawn([...cmd], spawnOptions);
   const [stdout, stderr, exitCode] = await Promise.all([
     new Response(proc.stdout).text(),
     new Response(proc.stderr).text(),
@@ -436,7 +437,7 @@ const writeCreateOnly = async (
       await link(stagedPath, fullPath);
       return "written";
     } catch (err) {
-      if (!hasErrorCode(err, "EEXIST")) throw err;
+      if (!isFileExistsError(err)) throw err;
       if (options.allowExisting) return "exists";
       throw new Error(`Object ${key} already exists (create-only storage refuses overwrite).`, {
         cause: err,
@@ -534,6 +535,11 @@ const describeAssetBytes = (
   return { sha256: sha256Hex, bytes, asset, meta };
 };
 
+const isExpoPlatformExport = Schema.is(
+  Schema.Struct({ bundle: Schema.String, assets: Schema.optional(Schema.Unknown) }),
+);
+const isExpoAsset = Schema.is(Schema.Struct({ path: Schema.String, ext: Schema.String }));
+
 const readExpoExport = async (
   exportDir: string,
   platform: MobilePlatform,
@@ -543,9 +549,9 @@ const readExpoExport = async (
 }> => {
   const metaRaw = await readFile(join(exportDir, "metadata.json"), "utf8");
   const parsed: unknown = JSON.parse(metaRaw);
-  const fileMetadata = isRecord(parsed) ? parsed.fileMetadata : undefined;
-  const platformFiles = isRecord(fileMetadata) ? fileMetadata[platform] : undefined;
-  if (!isRecord(platformFiles) || typeof platformFiles.bundle !== "string") {
+  const fileMetadata = Predicate.isObject(parsed) ? parsed.fileMetadata : undefined;
+  const platformFiles = Predicate.isObject(fileMetadata) ? fileMetadata[platform] : undefined;
+  if (!isExpoPlatformExport(platformFiles)) {
     throw new Error(`Export directory ${exportDir} has no ${platform} bundle in metadata.json`);
   }
   const bundleBytes = new Uint8Array(await readFile(join(exportDir, platformFiles.bundle)));
@@ -557,7 +563,7 @@ const readExpoExport = async (
   }
   const assets: ExportedAssetFile[] = [];
   for (const item of platformFiles.assets) {
-    if (!isRecord(item) || typeof item.path !== "string" || typeof item.ext !== "string") {
+    if (!isExpoAsset(item)) {
       throw new Error(`Invalid ${platform} asset in ${exportDir}/metadata.json`);
     }
     // biome-ignore lint/performance/noAwaitInLoops: Keep file reads bounded for large Expo exports.
@@ -682,7 +688,7 @@ const cmdBuild = async (argv: readonly string[]): Promise<void> => {
       await chmod(resolvedKeystorePath, 0o600);
     }
 
-    const baseBuildEnv: Record<string, string | undefined> = {
+    const baseBuildEnv = {
       ...Bun.env,
       EXPO_PUBLIC_API_ORIGIN: values.origin,
       MOBILE_UPDATES_CODE_SIGNING: values.signing === "release" ? "required" : "",
@@ -932,6 +938,8 @@ const cmdPublishApk = async (argv: readonly string[]): Promise<void> => {
   );
 };
 
+const hasRuntimeVersion = Schema.is(Schema.Struct({ runtimeVersion: Schema.NonEmptyString }));
+
 const resolveRuntimeVersionFromExpo = async (
   projectDir: string,
   platform: MobilePlatform,
@@ -967,11 +975,7 @@ const resolveRuntimeVersionFromExpo = async (
         );
       }
       const parsed: unknown = JSON.parse(result.stdout);
-      if (
-        !isRecord(parsed) ||
-        typeof parsed.runtimeVersion !== "string" ||
-        parsed.runtimeVersion.length === 0
-      ) {
+      if (!hasRuntimeVersion(parsed)) {
         throw new Error(`Unexpected runtimeversion:resolve output: ${result.stdout}`);
       }
       return assertRuntimeVersion(parsed.runtimeVersion);
@@ -1231,11 +1235,23 @@ const listLocalKeys = async (root: string, prefix: string): Promise<string[]> =>
   try {
     entries = await readdir(dir);
   } catch (err) {
-    if (hasErrorCode(err, "ENOENT")) return [];
+    if (isFileMissingError(err)) return [];
     throw err;
   }
   return Arr.map(entries, (name) => `${prefix}${name}`);
 };
+
+interface LocalVerificationChecks {
+  readonly mode: "storage-dir";
+  readonly root: string;
+  readonly dryRun: boolean;
+  update?: {
+    readonly latestKey: string | null;
+    readonly publicationType: StoredPublication["type"] | "noUpdateAvailable";
+    readonly signatureVerified: boolean;
+  };
+  latestRelease?: ReleaseInfo | null;
+}
 
 const cmdVerify = async (argv: readonly string[]): Promise<void> => {
   const { values } = parseArgs({
@@ -1264,7 +1280,7 @@ const cmdVerify = async (argv: readonly string[]): Promise<void> => {
 
   if (storageDir !== undefined) {
     const root = resolve(storageDir);
-    const checks: Record<string, unknown> = { mode: "storage-dir", root, dryRun };
+    const checks: LocalVerificationChecks = { mode: "storage-dir", root, dryRun };
 
     if (hasText(values["runtime-version"])) {
       const runtimeVersion = assertRuntimeVersion(values["runtime-version"]);
@@ -1362,7 +1378,7 @@ const cmdVerify = async (argv: readonly string[]): Promise<void> => {
       try {
         versionDirs = await readdir(releaseDir);
       } catch (err) {
-        if (!hasErrorCode(err, "ENOENT")) throw err;
+        if (!isFileMissingError(err)) throw err;
       }
       const releases: ReleaseInfo[] = [];
       for (const ver of versionDirs) {
@@ -1414,15 +1430,15 @@ const cmdVerify = async (argv: readonly string[]): Promise<void> => {
         throw new Error("HTTP verify requires --runtime-version <version> (or --storage-dir).");
       })();
 
-  const headers: Record<string, string> = {
+  const headers = new Headers({
     "expo-protocol-version": "1",
     "expo-platform": platform,
     "expo-runtime-version": runtimeVersion,
     "expo-channel-name": channel,
     accept: "multipart/mixed",
-  };
+  });
   if (hasText(values.certificate)) {
-    headers["expo-expect-signature"] = 'sig, keyid="main", alg="rsa-v1_5-sha256"';
+    headers.set("expo-expect-signature", 'sig, keyid="main", alg="rsa-v1_5-sha256"');
   }
   const res = await fetch(manifestUrl, { headers });
   if (!res.ok) {
@@ -1511,12 +1527,11 @@ const main = async (argv: readonly string[]): Promise<number> => {
 };
 
 if (import.meta.main) {
-  main(process.argv.slice(2))
-    .then((code) => {
-      if (code !== 0) process.exit(code);
-    })
-    .catch((err: unknown) => {
-      writeStderr(err instanceof Error ? err.message : String(err));
-      process.exit(1);
-    });
+  try {
+    const code = await main(process.argv.slice(2));
+    if (code !== 0) process.exit(code);
+  } catch (err) {
+    writeStderr(err instanceof Error ? err.message : String(err));
+    process.exit(1);
+  }
 }

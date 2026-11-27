@@ -14,6 +14,7 @@ export type Responder = (request: RecordedRequest) => Response | Promise<Respons
 // @effect-diagnostics-next-line missingPipeableSignature:off
 export const json = (
   status: number,
+  // biome-ignore lint/plugin/no-unknown-parameters: Fixtures can send any response body through the real decoder.
   body: unknown,
   headers: Record<string, string> = {},
 ): Response =>

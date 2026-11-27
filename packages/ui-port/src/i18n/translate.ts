@@ -1,4 +1,5 @@
 import * as Fn from "effect/Function";
+import * as Predicate from "effect/Predicate";
 import { formatExact, roundedDecimal } from "../format/number";
 import type { Text, TextParam } from "../text";
 import { catalogs, type EnCatalog, isMessageKey, type MessageKey } from "./catalog";
@@ -26,7 +27,7 @@ const pluralRules = new Map<Locale, Intl.PluralRules | null>();
 const rulesFor = (locale: Locale): Intl.PluralRules | null => {
   let rules = pluralRules.get(locale);
   if (rules === undefined) {
-    rules = typeof Intl.PluralRules === "function" ? new Intl.PluralRules(INTL_TAG[locale]) : null;
+    rules = Predicate.isFunction(Intl.PluralRules) ? new Intl.PluralRules(INTL_TAG[locale]) : null;
     pluralRules.set(locale, rules);
   }
   return rules;
@@ -78,14 +79,14 @@ export const interpolate: {
   (template: string, params?: Readonly<Record<string, TextParam>>): (locale: Locale) => string;
   (locale: Locale, template: string, params?: Readonly<Record<string, TextParam>>): string;
 } = Fn.dual(
-  (args) => typeof args[1] === "string",
+  (args) => Predicate.isString(args[1]),
   (locale: Locale, template: string, params?: Readonly<Record<string, TextParam>>): string =>
     // Native replace supports callback replacements with capture groups.
     // @effect-diagnostics-next-line preferEffectString:off
     template.replace(PLACEHOLDER, (whole, name: string) => {
       const value = params?.[name];
       if (value === undefined) return whole;
-      return typeof value === "number" ? formatParam(locale, value) : value;
+      return Predicate.isNumber(value) ? formatParam(locale, value) : value;
     }),
 );
 
@@ -94,9 +95,8 @@ const selectForm = (
   entry: AnyMessage,
   params?: Readonly<Record<string, TextParam>>,
 ): string => {
-  if (typeof entry === "string") return entry;
-  const count = params?.count;
-  const n = typeof count === "number" ? count : Number(count);
+  if (Predicate.isString(entry)) return entry;
+  const n = Number(params?.count);
   const category = Number.isFinite(n) ? pluralCategory(locale, n) : "other";
   return entry[category] ?? entry.other ?? "";
 };

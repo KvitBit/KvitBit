@@ -11,6 +11,7 @@
 
 import { type Hex, M3_COLOR_ROLES, type M3ColorRole } from "@kvitbit/api-contract";
 import * as Fn from "effect/Function";
+import * as Predicate from "effect/Predicate";
 import * as Rec from "effect/Record";
 import * as Str from "effect/String";
 import { Hct } from "./color/hct";
@@ -151,7 +152,7 @@ const SURFACE = n([98, 98, 99], [6, 5, 4]);
 const ON_SURFACE = n([10, 6, 0], [90, 96, 100]);
 
 /** Tone of every role per variant. `primary` in light is replaced by the fidelity tone below. */
-const ROLE_TONES: Record<M3ColorRole, RoleTone> = {
+const ROLE_TONES = {
   primary: P.color,
   onPrimary: P.onColor,
   primaryContainer: P.container,
@@ -201,7 +202,7 @@ const ROLE_TONES: Record<M3ColorRole, RoleTone> = {
   outlineVariant: nv([80, 70, 55], [30, 40, 55]),
   shadow: n([0, 0, 0], [0, 0, 0]),
   scrim: n([0, 0, 0], [0, 0, 0]),
-};
+} satisfies Record<M3ColorRole, RoleTone>;
 
 /** The tone a role takes in a variant, honouring light `primary` fidelity. */
 const toneOf = (role: M3ColorRole, variant: SchemeVariant, p: SchemePalettes): number => {
@@ -252,7 +253,7 @@ export const schemeRoles: {
   (variant: SchemeVariant, palettes?: SchemePalettes): (recipe: ThemeRecipe) => RoleMap;
   (recipe: ThemeRecipe, variant: SchemeVariant, palettes?: SchemePalettes): RoleMap;
 } = Fn.dual(
-  (args) => typeof args[0] === "object",
+  (args) => Predicate.isObjectOrArray(args[0]),
   (
     recipe: ThemeRecipe,
     variant: SchemeVariant,

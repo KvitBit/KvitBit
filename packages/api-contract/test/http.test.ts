@@ -196,7 +196,7 @@ describe("SchemaErrors middleware", () => {
   const decodeFailure = (
     kind: HttpApiError.HttpApiSchemaError["kind"],
     schema: Schema.Top,
-    input: unknown,
+    input: Schema.Json,
   ) => {
     const cause = decodeReflectedSchema(schema)(input, { errors: "all" }).pipe(
       Effect.asVoid,
@@ -260,11 +260,11 @@ describe("OpenAPI (section 3.7)", () => {
   test("every endpoint is an operation with an English summary", () => {
     expect(operations.length).toBe(104);
     for (const op of operations) {
-      expect([op.operationId, typeof op.summary === "string" && op.summary.length > 0]).toEqual([
+      expect([op.operationId, Predicate.isString(op.summary) && op.summary.length > 0]).toEqual([
         op.operationId,
         true,
       ]);
-      expect(typeof op.summary === "string" ? op.summary : "").toMatch(ENGLISH_SUMMARY);
+      expect(Predicate.isString(op.summary) ? op.summary : "").toMatch(ENGLISH_SUMMARY);
     }
   });
 
@@ -277,7 +277,7 @@ describe("OpenAPI (section 3.7)", () => {
       },
     });
     const operationIds = Arr.map(operations, (op) =>
-      typeof op.operationId === "string" ? op.operationId : "",
+      Predicate.isString(op.operationId) ? op.operationId : "",
     );
     expect(Arr.sort(operationIds, Order.String)).toEqual(Arr.sort(expected, Order.String));
   });

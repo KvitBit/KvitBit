@@ -1,0 +1,19 @@
+engine biome(1.0)
+language js(typescript, jsx)
+
+// Matches the API names themselves, so calls, member reads, import
+// specifiers, and destructured aliases are all reported.
+file($name, $body) where {
+  $body <: r"(?s).*(?:spawnSync|execSync|execFileSync).*",
+  $body <: contains bubble {
+    or {
+      JsName() as $use,
+      JsReferenceIdentifier() as $use,
+      JsLiteralMemberName() as $use,
+      JsLiteralExportName() as $use
+    } where {
+      $use <: r"^(?:spawnSync|execSync|execFileSync)$",
+      register_diagnostic(span=$use, message="[no-synchronous-subprocess] Run subprocesses through Effect ChildProcess and ChildProcessSpawner.", severity="error")
+    }
+  }
+}

@@ -4,6 +4,7 @@
   "workspaces": {
     ".": {
       "entry": [
+        "lint/**/*.test.ts",
         "scripts/**/*.test.ts",
         "scripts/prepare-bun-tarball-cache.ts",
         "formal/**/*.replay.test.ts",

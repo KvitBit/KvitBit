@@ -13,6 +13,7 @@ import type {
   ThemeWarning,
 } from "@kvitbit/api-contract";
 import * as Fn from "effect/Function";
+import * as Predicate from "effect/Predicate";
 import * as Str from "effect/String";
 import { auditTheme } from "./contrast-check";
 import { DEFAULT_THEME_DATA } from "./default-theme.data";
@@ -55,7 +56,7 @@ export const schemesOf: {
     },
   ): ResolvedSchemes;
 } = Fn.dual(
-  (args) => typeof args[0] === "object" && args[0] !== null && "seed" in args[0],
+  (args) => Predicate.isObjectOrArray(args[0]) && "seed" in args[0],
   (
     recipe: ThemeRecipe,
     options: {

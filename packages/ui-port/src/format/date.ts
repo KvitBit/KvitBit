@@ -1,5 +1,6 @@
 import * as DateTime from "effect/DateTime";
 import * as Fn from "effect/Function";
+import * as Predicate from "effect/Predicate";
 import { INTL_TAG, type Locale } from "../i18n/locale";
 import { stringifyJson } from "../json";
 
@@ -35,9 +36,12 @@ const toUtc = (date: CalendarDate): DateTime.Utc =>
   );
 
 const asDate = (value: string | CalendarDate): CalendarDate => {
-  if (typeof value !== "string") return value;
+  if (!Predicate.isString(value)) return value;
   const parsed = parseIsoDate(value);
-  if (parsed === undefined) throw new RangeError(`Not an ISO calendar date: ${value}`);
+  if (parsed === undefined) {
+    // biome-ignore lint/plugin/no-throw-in-effect-modules: Calendar formatters report invalid date strings synchronously.
+    throw new RangeError(`Not an ISO calendar date: ${value}`);
+  }
   return parsed;
 };
 
@@ -85,8 +89,11 @@ export const formatDateTime = (
 ): string => {
   // Offsetless timestamp strings use the device's local timezone.
   // @effect-diagnostics-next-line globalDate:off
-  const d = typeof instant === "string" ? new Date(instant) : instant;
-  if (Number.isNaN(d.getTime())) throw new RangeError(`Not a timestamp: ${String(instant)}`);
+  const d = Predicate.isString(instant) ? new Date(instant) : instant;
+  if (Number.isNaN(d.getTime())) {
+    // biome-ignore lint/plugin/no-throw-in-effect-modules: The timestamp formatter reports invalid instants synchronously.
+    throw new RangeError(`Not a timestamp: ${String(instant)}`);
+  }
   const date = dateFormat(locale, { ...optionsFor(locale, "default"), timeZone }).format(d);
   const time = dateFormat(locale, {
     hour: "2-digit",
@@ -102,7 +109,7 @@ export const formatMonth: {
   (month: string | CalendarDate): (locale: Locale) => string;
   (locale: Locale, month: string | CalendarDate): string;
 } = Fn.dual(2, (locale: Locale, month: string | CalendarDate): string => {
-  const date = typeof month === "string" && ISO_MONTH.test(month) ? `${month}-01` : month;
+  const date = Predicate.isString(month) && ISO_MONTH.test(month) ? `${month}-01` : month;
   return dateFormat(locale, { month: "long", year: "numeric", timeZone: "UTC" }).format(
     DateTime.toEpochMillis(toUtc(asDate(date))),
   );

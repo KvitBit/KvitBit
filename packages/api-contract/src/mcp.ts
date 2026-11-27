@@ -48,6 +48,7 @@ import {
 } from "@kvitbit/domain/contract";
 import * as Arr from "effect/Array";
 import * as Fn from "effect/Function";
+import type * as JsonSchema from "effect/JsonSchema";
 import * as Option from "effect/Option";
 import * as Rec from "effect/Record";
 import * as Schema from "effect/Schema";
@@ -101,9 +102,9 @@ const CONFIRMATION_HASH_EXCLUDED_ARGS: ReadonlyArray<string> = [
 ];
 
 /** The arguments a confirmation token is bound to. */
-export const confirmationBoundArgs = (
-  args: Readonly<Record<string, unknown>>,
-): Readonly<Record<string, unknown>> =>
+export const confirmationBoundArgs = <Value>(
+  args: Readonly<Record<string, Value>>,
+): Readonly<Record<string, Value>> =>
   Rec.fromEntries(
     Arr.filter(Rec.toEntries(args), ([key]) => !CONFIRMATION_HASH_EXCLUDED_ARGS.includes(key)),
   );
@@ -343,7 +344,7 @@ export const SettleProformaArgs = Schema.Struct({
   idempotencyKey: IdempotencyArg,
 });
 /** @alias The lock tool uses the same document ID schema as other ID-only tools. */
-export const LockDocumentArgs = DocumentIdArgs;
+export { DocumentIdArgs as LockDocumentArgs };
 export const CreateFromTemplateArgs = Schema.Struct({
   templateId: TemplateId,
   as: Schema.optional(Schema.Literals(["draft", "issued"])),
@@ -652,7 +653,7 @@ export const MCP_TOOLS = [
     scope: "documents:write",
     mode: "single",
     hints: ["I"],
-    input: LockDocumentArgs,
+    input: DocumentIdArgs,
     output: DocumentResult,
   }),
   tool("create_from_template", {
@@ -745,13 +746,13 @@ interface RequestedActionArgs {
  * top, which a union of structs (`anyOf`) lacks, so it is added there. Closed argument schemas
  * (`ListExpensesArgs`) come out with `additionalProperties: false`.
  */
-export const toolJsonSchema = (schema: Schema.Top): Record<string, unknown> => {
+export const toolJsonSchema = (schema: Schema.Top): JsonSchema.JsonSchema => {
   const closed = CLOSED_ARGS.get(schema);
   const document =
     closed === undefined
       ? Schema.toJsonSchemaDocument(schema)
       : Schema.toJsonSchemaDocument(closed, { onExcessProperty: "error" });
-  const root: Record<string, unknown> = { ...document.schema };
+  const root = { ...document.schema };
   if (Rec.keys(document.definitions).length > 0) root.$defs = document.definitions;
   if (root.type === undefined && root.anyOf !== undefined) root.type = "object";
   return root;

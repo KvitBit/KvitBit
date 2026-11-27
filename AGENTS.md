@@ -28,8 +28,11 @@ A path in several rows needs every listed skill. `formal/manifest.json` is the e
 ## Taste
 
 - Keep business rules in the pure Effect core. Put protocol, storage, and framework complexity in adapters. UI renders state and sends intents.
+- Use Effect services and operators for asynchronous work, typed failures, recovery, and concurrency. Read environment variables through `Config` and wrap foreign calls with `Effect.try` or `Effect.tryPromise`.
+- `tsconfig.effect.json` and `lint/*.grit` enforce the production rules for native async functions, bare Promises, `throw`, and `try/catch`. Run Effects at the entry points listed in `lint/no-direct-effect-runs.grit` or in tests. The plugin scopes in `biome.json` preserve the synchronous SVG error contract and cover DB source relative to its nested Biome config.
 - Define service operations with `Effect.fn`. Transport handlers decode input, provide request context, call the core, and encode the result.
 - Prefer inferred types. Replace `any` and unsafe assertions with precise types, Schema decoding at boundaries, or domain brand constructors.
+- Biome's `nursery.noUnsafeTypeAssertion` rejects ordinary `as` and angle-bracket type assertions and permits const assertions.
 - Use comments for constraints, invariants, and external quirks. Keep them to one to four lines.
 
 ## Verifying

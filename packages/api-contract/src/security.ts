@@ -31,6 +31,7 @@ import * as Effect from "effect/Effect";
 import type * as HttpApiError from "effect/http-api/HttpApiError";
 import * as HttpApiMiddleware from "effect/http-api/HttpApiMiddleware";
 import * as HttpApiSecurity from "effect/http-api/HttpApiSecurity";
+import * as Predicate from "effect/Predicate";
 import * as Schema from "effect/Schema";
 import * as SchemaIssue from "effect/SchemaIssue";
 import * as Str from "effect/String";
@@ -93,8 +94,8 @@ const formatIssues = SchemaIssue.makeFormatterStandardSchemaV1();
 type IssuePath = ReadonlyArray<string | number>;
 
 const toPathSegment = (segment: PropertyKey | { readonly key: PropertyKey }): string | number => {
-  const key = typeof segment === "object" ? segment.key : segment;
-  return typeof key === "number" ? key : String(key);
+  const key = Predicate.isObjectOrArray(segment) ? segment.key : segment;
+  return Predicate.isNumber(key) ? key : String(key);
 };
 
 /**
@@ -132,19 +133,17 @@ const malformed = ([first, ...rest]: readonly [IssuePath, ...Array<IssuePath>]) 
  * `Invalid` with one `request.malformed` issue per failing path (422, section 3.3); response
  * encoding failures (`Body`, `ResponseHeaders`) pass through unchanged and stay 500 defects.
  */
-export const schemaErrorToInvalid = (
-  error: HttpApiError.HttpApiSchemaError,
-): Effect.Effect<never, Invalid | HttpApiError.HttpApiSchemaError> => {
+export const schemaErrorToInvalid = Effect.fn(function* (error: HttpApiError.HttpApiSchemaError) {
   if (Arr.some(REQUEST_SCHEMA_ERROR_KINDS, (kind) => kind === error.kind)) {
-    return error.pipe(
+    return yield* error.pipe(
       requestIssuePaths,
       malformed,
       (issues) => Invalid.make({ issues }),
       Effect.fail,
     );
   }
-  return error.pipe(Effect.fail);
-};
+  return yield* Effect.fail(error);
+});
 
 /**
  * Session (cookie or bearer) or API Key. Provides the principal and an Account caller. Fails

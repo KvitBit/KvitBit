@@ -29,6 +29,7 @@ import {
 import * as Arr from "effect/Array";
 import * as Fn from "effect/Function";
 import * as Order from "effect/Order";
+import * as Predicate from "effect/Predicate";
 import * as Rec from "effect/Record";
 import * as Str from "effect/String";
 import { cs, en, enSections, isMessageKey, MESSAGE_KEYS, UI_ISSUE_CODES } from "../../src/i18n";
@@ -39,9 +40,9 @@ const PLACEHOLDER = /\{([A-Za-z][A-Za-z0-9_]*)\}/g;
 const DOTTED_KEY = /^[a-z][A-Za-z0-9_]*(\.[A-Za-z0-9_]+)+$/;
 
 const forms = (m: AnyMessage): ReadonlyArray<string> =>
-  typeof m === "string"
+  Predicate.isString(m)
     ? [m]
-    : Arr.filter(Rec.values<string, string | undefined>(m), (v): v is string => v !== undefined);
+    : Arr.filter(Rec.values<string, string | undefined>(m), Predicate.isNotUndefined);
 
 const placeholders = (m: AnyMessage): ReadonlyArray<string> =>
   [
@@ -85,14 +86,14 @@ describe("catalog parity", () => {
     for (const key of MESSAGE_KEYS) {
       const e = enRecord[key];
       const c = csRecord[key];
-      expect(typeof c).toBe(typeof e);
-      if (typeof e === "string") continue;
+      expect(Predicate.isString(c)).toBe(Predicate.isString(e));
+      if (Predicate.isString(e)) continue;
       expect(Rec.keys<string, string | undefined>(e ?? {}).sort(Order.String)).toEqual([
         "one",
         "other",
       ]);
       expect(
-        Rec.keys<string, string | undefined>(typeof c === "object" ? c : {}).sort(Order.String),
+        Rec.keys<string, string | undefined>(Predicate.isObject(c) ? c : {}).sort(Order.String),
       ).toEqual(["few", "many", "one", "other"]);
       for (const f of [...forms(e ?? ""), ...forms(c ?? "")]) expect(f).toContain("{count}");
     }

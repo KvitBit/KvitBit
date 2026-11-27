@@ -1,4 +1,4 @@
 {
   "extends": "../tsconfig.effect.json",
-  "include": ["**/*.ts"]
+  "include": ["**/*.ts", "../lint/**/*.ts"]
 }

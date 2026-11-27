@@ -18,6 +18,7 @@ import type * as HttpClientResponse from "effect/http/HttpClientResponse";
 import * as HttpApiClient from "effect/http-api/HttpApiClient";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Predicate from "effect/Predicate";
 import * as Rec from "effect/Record";
 import type * as Redacted from "effect/Redacted";
 
@@ -114,11 +115,9 @@ const recordResponse = HttpClient.transformResponse(
   Effect.tap((response: HttpClientResponse.HttpClientResponse) =>
     Effect.serviceOption(Exchange).pipe(
       Effect.flatMap((cell) =>
-        Option.isSome(cell)
-          ? Effect.sync(() => {
-              cell.value.response = observeResponse(response);
-            })
-          : Effect.void,
+        Effect.sync(() => {
+          if (Option.isSome(cell)) cell.value.response = observeResponse(response);
+        }),
       ),
     ),
   ),
@@ -148,11 +147,11 @@ const decodingResponse = <A, E, R>(decoded: Effect.Effect<A, E, R>): Effect.Effe
 const publishResponse = (exchange: ExchangeCell) =>
   Effect.serviceOption(ResponseObserver).pipe(
     Effect.flatMap((cell) =>
-      Option.isSome(cell) && exchange.response !== null
-        ? Effect.sync(() => {
-            cell.value.current = exchange.response;
-          })
-        : Effect.void,
+      Effect.sync(() => {
+        if (Option.isSome(cell) && exchange.response !== null) {
+          cell.value.current = exchange.response;
+        }
+      }),
     ),
   );
 
@@ -164,21 +163,22 @@ const withExchanges = <Client extends object>(client: Client): Client => ({
       Rec.toEntries(client),
       ([name, member]: [string, unknown]): readonly [string, unknown] => [
         name,
-        typeof member === "function"
+        Predicate.isFunction(member)
           ? (...args: ReadonlyArray<unknown>) => {
               const call: unknown = member(...args);
               return Effect.isEffect(call)
                 ? Effect.suspend(() => {
                     const exchange: ExchangeCell = { response: null };
-                    // The generated client is traversed as data, so this wrapper cannot inspect the endpoint's channels.
-                    // @effect-diagnostics-next-line anyUnknownInErrorContext:off
-                    return Effect.provideService(call, Exchange, exchange).pipe(
-                      Effect.tap(() => publishResponse(exchange)),
+                    return Effect.tap(
+                      // The generated client is traversed as data, so this wrapper cannot inspect the endpoint's channels.
+                      // @effect-diagnostics-next-line anyUnknownInErrorContext:off
+                      Effect.provideService(call, Exchange, exchange),
+                      () => publishResponse(exchange),
                     );
                   })
                 : call;
             }
-          : typeof member === "object" && member !== null
+          : Predicate.isObjectOrArray(member)
             ? withExchanges(member)
             : member,
       ],
@@ -256,7 +256,7 @@ export const inWorkspace: {
     params?: P,
   ): P & { readonly workspaceId: WorkspaceId };
 } = Fn.dual(
-  (args) => typeof args[0] === "string",
+  (args) => Predicate.isString(args[0]),
   <P extends object = Record<never, never>>(
     workspaceId: WorkspaceId,
     params?: P,

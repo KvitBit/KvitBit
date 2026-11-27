@@ -6,7 +6,9 @@
 
 import { SCOPE_AREAS, Scope, ScopeArea, ScopeLevel } from "@kvitbit/domain/contract";
 import * as Arr from "effect/Array";
+import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
+import * as SchemaParser from "effect/SchemaParser";
 import * as SchemaTransformation from "effect/SchemaTransformation";
 import * as Str from "effect/String";
 
@@ -117,13 +119,17 @@ export const OAUTH_SCOPE_PREFIX = "kvitbit:";
 export const OAuthAreaScope = Schema.TemplateLiteral(["kvitbit:", ScopeArea, ":", ScopeLevel]);
 export type OAuthAreaScope = typeof OAuthAreaScope.Type;
 
+const decodeCoreScope = SchemaParser.decodeUnknownEffect(Scope);
+const coreScopeText = Str.slice(OAUTH_SCOPE_PREFIX.length);
+const wireScopeOf = (scope: Scope): OAuthAreaScope => `${OAUTH_SCOPE_PREFIX}${scope}`;
+
 /** Decodes `kvitbit:<area>:<level>` to the core `Scope` and encodes it back. */
 export const ScopeFromOAuth = OAuthAreaScope.pipe(
   Schema.decodeTo(
     Scope,
-    SchemaTransformation.transform<Scope, OAuthAreaScope>({
-      decode: (wire) => coreScopeOf(wire),
-      encode: (scope) => wireScopeOf(scope),
+    SchemaTransformation.transformEffect<Scope, OAuthAreaScope>({
+      decode: (wire) => decodeCoreScope(coreScopeText(wire)),
+      encode: (scope) => Effect.succeed(wireScopeOf(scope)),
     }),
   ),
 );
@@ -143,13 +149,7 @@ export const OAuthScopeToken = Schema.Union([OAuthAccessScope, OAuthOfflineAcces
 export type OAuthScopeToken = typeof OAuthScopeToken.Type;
 
 const isOAuthAreaScope = Schema.is(OAuthAreaScope);
-const isCoreScope = Schema.is(Scope);
-const coreScopeOf = (wire: OAuthAreaScope): Scope => {
-  const scope = Str.slice(OAUTH_SCOPE_PREFIX.length)(wire);
-  if (isCoreScope(scope)) return scope;
-  throw new Error("OAuth area scope did not match a core scope");
-};
-const wireScopeOf = (scope: Scope): OAuthAreaScope => `${OAUTH_SCOPE_PREFIX}${scope}`;
+const decodeOAuthAreaScope = Schema.decodeResult(ScopeFromOAuth);
 
 /** `scopes_supported` of the protected resource metadata (section 6.2), in that order. */
 export const OAUTH_SCOPES_SUPPORTED: ReadonlyArray<OAuthScopeToken> = [
@@ -180,7 +180,9 @@ export const accessFromOAuthScopes = (
     return { access: { access: "read_write", scopes: ALL_SCOPES }, offlineAccess };
   }
   const wantsReadPreset = tokens.includes("kvitbit:read");
-  const areaScopes = Arr.map(Arr.filter(tokens, isOAuthAreaScope), coreScopeOf);
+  const areaScopes = Arr.filterMap(Arr.filter(tokens, isOAuthAreaScope), (wire) =>
+    decodeOAuthAreaScope(wire),
+  );
   if (areaScopes.length > 0) {
     const scopes = normalizeScopes(wantsReadPreset ? [...READ_SCOPES, ...areaScopes] : areaScopes);
     return { access: { access: "custom", scopes }, offlineAccess };

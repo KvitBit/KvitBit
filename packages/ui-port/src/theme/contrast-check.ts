@@ -14,6 +14,7 @@ import { EXTENDED_ROLES, M3_COLOR_ROLES } from "@kvitbit/api-contract";
 import * as Arr from "effect/Array";
 import * as Fn from "effect/Function";
 import * as Option from "effect/Option";
+import * as Predicate from "effect/Predicate";
 import { type Text, text } from "../text";
 import { contrastRatio, relativeLuminance } from "./color/contrast";
 import { Hct } from "./color/hct";
@@ -315,7 +316,7 @@ const propagate = (
   roles: Readonly<Record<M3ColorRole, string>>,
   fixed: ReadonlySet<M3ColorRole> = new Set(),
 ): Record<M3ColorRole, string> => {
-  const out: Record<M3ColorRole, string> = { ...roles };
+  const out = { ...roles };
   const settled = new Set<M3ColorRole>(fixed);
   const pairsOf = new Map<M3ColorRole, RolePair[]>();
   for (const pair of CHECKED_ROLE_PAIRS)
@@ -373,7 +374,7 @@ const relax = (
   roles: Readonly<Record<M3ColorRole, string>>,
   fixed: ReadonlySet<M3ColorRole>,
 ): Record<M3ColorRole, string> => {
-  const out: Record<M3ColorRole, string> = { ...roles };
+  const out = { ...roles };
   const pairsOf = new Map<M3ColorRole, RolePair[]>();
   for (const pair of CHECKED_ROLE_PAIRS)
     for (const role of [pair.foreground, pair.background])
@@ -441,7 +442,7 @@ export const repairContrast: {
     fixed?: ReadonlySet<M3ColorRole>,
   ): Record<M3ColorRole, string>;
 } = Fn.dual(
-  (args) => typeof args[0] === "object" && args[0] !== null && "primary" in args[0],
+  (args) => Predicate.isObjectOrArray(args[0]) && "primary" in args[0],
   (
     roles: Readonly<Record<M3ColorRole, string>>,
     fixed: ReadonlySet<M3ColorRole> = new Set(),

@@ -29,7 +29,8 @@ jobs:
       - run: bun run knip:check
       - run: bun run typecheck
       - run: bun test ./scripts
-      - run: bun run test --concurrency=2
+      - name: Lint rule fixtures and workspace tests
+        run: bun run test --concurrency=2
 
   static-mounts:
     runs-on: ubuntu-latest

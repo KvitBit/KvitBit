@@ -18,6 +18,7 @@ import * as Arr from "effect/Array";
 import * as Exit from "effect/Exit";
 import * as Fn from "effect/Function";
 import * as Option from "effect/Option";
+import * as Predicate from "effect/Predicate";
 import * as Rec from "effect/Record";
 import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
@@ -115,9 +116,6 @@ const utf8ByteLength = (s: string): number => {
   return bytes;
 };
 
-const isRecord = (u: unknown): u is Record<string, unknown> =>
-  typeof u === "object" && u !== null && !Arr.isArray(u);
-
 /** Roles of one file scheme, or the roles that are missing / malformed. */
 const pickRoles = (
   scheme: Readonly<Record<string, string>>,
@@ -150,8 +148,13 @@ type DecodedThemeFileWithPreview = DecodedThemeFile & {
   readonly roles: Readonly<Record<"light" | "dark", RoleMap>>;
 };
 
+// biome-ignore lint/plugin/no-unknown-parameters: This Schema boundary accepts arbitrary imported JSON.
 const decodeWithPreview = (json: unknown): Result.Result<DecodedThemeFileWithPreview, Invalid> => {
-  if (isRecord(json) && "seed" in json && !(typeof json.seed === "string" && isHex(json.seed)))
+  if (
+    Predicate.isObject(json) &&
+    "seed" in json &&
+    !(Predicate.isString(json.seed) && isHex(json.seed))
+  )
     return Result.fail(invalid(issue("theme.seed_invalid", ["seed"])));
   const exit = Schema.decodeUnknownExit(MaterialThemeJson)(json);
   if (Exit.isFailure(exit)) return Result.fail(invalid(issue("theme.json_invalid")));
@@ -210,6 +213,7 @@ const decodeWithPreview = (json: unknown): Result.Result<DecodedThemeFileWithPre
  * Shape-check an already-parsed file. Light and dark must carry every `M3ColorRole` (rule M2);
  * an incomplete contrast scheme is regenerated from the seed with `missing_contrast_schemes`.
  */
+// biome-ignore lint/plugin/no-unknown-parameters: Callers pass unvalidated theme data to the decoder.
 export const decodeMaterialTheme = (json: unknown): Result.Result<DecodedThemeFile, Invalid> =>
   decodeWithPreview(json);
 
@@ -247,6 +251,7 @@ export const parseMaterialThemeFile: {
 // A numeric JSON value and a curried byte limit would have the same call shape.
 // @effect-diagnostics-next-line missingPipeableSignature:off
 export const resolveMaterialTheme = (
+  // biome-ignore lint/plugin/no-unknown-parameters: Check the size and shape of the unvalidated ThemeSource payload.
   json: unknown,
   maxBytes: number = MATERIAL_THEME_MAX_BYTES,
 ): Result.Result<ResolvedTheme, Invalid> => {
@@ -271,7 +276,7 @@ export const fileWarningText: {
   (parsed?: Pick<ParsedThemeFile, "unknownRoles">): (warning: MaterialThemeFileWarning) => Text;
   (warning: MaterialThemeFileWarning, parsed?: Pick<ParsedThemeFile, "unknownRoles">): Text;
 } = Fn.dual(
-  (args) => typeof args[0] === "string",
+  (args) => Predicate.isString(args[0]),
   (warning: MaterialThemeFileWarning, parsed?: Pick<ParsedThemeFile, "unknownRoles">): Text =>
     warning === "unknown_roles_ignored"
       ? text("theme.warning.unknown_roles_ignored", { count: parsed?.unknownRoles.length ?? 0 })

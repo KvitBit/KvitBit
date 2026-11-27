@@ -26,8 +26,8 @@ import {
 
 const accepts = <S extends Schema.Top & { readonly DecodingServices: never }>(
   schema: S,
-  input: unknown,
-) => Exit.isSuccess(Schema.decodeUnknownExit(schema)(input));
+  input: Schema.Json,
+) => Exit.isSuccess(Schema.decodeExit(schema)(input));
 
 describe("WorkspaceSlug", () => {
   test.each(["abc", "my-firm-2", Str.repeat(40)("a"), "0ab"])("accepts %p", (slug) => {

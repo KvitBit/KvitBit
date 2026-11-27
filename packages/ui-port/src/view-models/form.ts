@@ -14,6 +14,7 @@ import * as Effect from "effect/Effect";
 import * as Equal from "effect/Equal";
 import * as Fn from "effect/Function";
 import * as Option from "effect/Option";
+import * as Predicate from "effect/Predicate";
 import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 import type * as SchemaAST from "effect/SchemaAST";
@@ -81,7 +82,7 @@ const issueCode: SchemaIssue.LeafHook = (issue) => {
   const annotations = "annotations" in issue ? issue.annotations : issue.ast.annotations;
   const message: unknown =
     annotations?.[issue._tag === "MissingKey" ? "messageMissingKey" : "message"];
-  if (typeof message === "string") return message;
+  if (Predicate.isString(message)) return message;
   return issue._tag === "MissingKey" ? "form.required" : "form.invalid";
 };
 
@@ -97,7 +98,7 @@ const toFieldPath = (
   path: ReadonlyArray<PropertyKey | StandardSchema.StandardSchemaV1.PathSegment> | undefined,
 ): FieldPath =>
   Arr.join(
-    Arr.map(path ?? [], (segment) => String(typeof segment === "object" ? segment.key : segment)),
+    Arr.map(path ?? [], (segment) => String(Predicate.isObject(segment) ? segment.key : segment)),
     ".",
   );
 
@@ -145,6 +146,7 @@ export const FormSpec = {
     locale: Locale,
   ): Result.Result<Input, ReadonlyArray<FieldIssue>> => {
     const result = spec.standard(locale)["~standard"].validate(draft);
+    // biome-ignore lint/plugin/no-throw-in-effect-modules: Async validation violates the synchronous FormSpec contract.
     if (result instanceof Promise) throw new Error("FormSpec schemas must decode synchronously");
     if (result.issues === undefined) return Result.succeed(result.value);
     return Result.fail(
@@ -167,7 +169,7 @@ const fromServerIssue = (issue: ServerIssue): FieldIssue =>
     : { path: Arr.join(Arr.map(issue.path, String), "."), code: issue.code, params: issue.params };
 
 const isFieldIssue = (issue: ServerIssue | FieldIssue): issue is FieldIssue =>
-  typeof issue.path === "string";
+  Predicate.isString(issue.path);
 
 /** `path` equals `prefix` or lies below it ("lines.2.vat" is under "lines.2"). */
 const isUnder: {
@@ -179,6 +181,7 @@ const isUnder: {
     path === prefix || Fn.pipe(path, Str.startsWith(`${prefix}.`)),
 );
 
+// biome-ignore lint/plugin/no-unknown-parameters: Widget paths can traverse and replace values before draft validation.
 const setAt = (value: unknown, keys: ReadonlyArray<string>, next: unknown): unknown => {
   const [head, ...tail] = keys;
   if (head === undefined) return next;
@@ -188,24 +191,20 @@ const setAt = (value: unknown, keys: ReadonlyArray<string>, next: unknown): unkn
     copy[index] = setAt(copy[index], tail, next);
     return copy;
   }
-  const record = typeof value === "object" && value !== null ? value : {};
+  const record = Predicate.isObjectOrArray(value) ? value : {};
   const field: unknown = Reflect.get(record, head);
   return { ...record, [head]: setAt(field, tail, next) };
 };
 
 /** Reads a value at a dotted path, undefined when absent. */
-const getAt: {
-  (path: FieldPath): (value: unknown) => unknown;
-  (value: unknown, path: FieldPath): unknown;
-} = Fn.dual(2, (value: unknown, path: FieldPath): unknown =>
+// biome-ignore lint/plugin/no-unknown-parameters: Raw drafts can contain any value at a widget path.
+const getAt = (value: unknown, path: FieldPath): unknown =>
   path === ""
     ? value
     : Arr.reduce(Str.split(path, "."), value, (acc, key) => {
-        const field: unknown =
-          typeof acc === "object" && acc !== null ? Reflect.get(acc, key) : undefined;
+        const field: unknown = Predicate.isObjectOrArray(acc) ? Reflect.get(acc, key) : undefined;
         return field;
-      }),
-);
+      });
 
 const withoutKey = <E>(submit: SubmitState<E>): SubmitState<E> =>
   submit._tag === "Idle" ? submit : { ...submit, requestKey: Option.none() };
@@ -229,6 +228,7 @@ export const Form = {
    * same lines) keeps it for an unchanged retry. The key is dropped on the first real edit, so
    * while it is kept the draft equals the one submitted under it.
    */
+  // biome-ignore lint/plugin/no-unknown-parameters: Widget values are validated by the form's Schema after editing.
   change: <D, E>(form: Form<D, E>, path: FieldPath, value: unknown): Form<D, E> => {
     const edited = !Equal.equals(getAt(form.draft, path), value);
     const draft = edited

@@ -8,6 +8,7 @@ import * as FetchHttpClient from "effect/http/FetchHttpClient";
 import * as HttpClient from "effect/http/HttpClient";
 import * as HttpClientResponse from "effect/http/HttpClientResponse";
 import * as Option from "effect/Option";
+import * as Predicate from "effect/Predicate";
 import * as Rec from "effect/Record";
 import * as Scheduler from "effect/Scheduler";
 import * as Schema from "effect/Schema";
@@ -85,7 +86,11 @@ const create = (key: string) =>
   });
 
 /** One request against a scripted status/body, mapped through the one error mapping. */
-const failWith = async (status: number, body: unknown, headers: Record<string, string> = {}) => {
+const failWith = async (
+  status: number,
+  body: Schema.Json,
+  headers: Record<string, string> = {},
+) => {
   const mock = mockFetch(() => json(status, body, headers));
   const result = await run(attempt(create("key-00000001")), mock.fetch);
   if (result._tag !== "Err") throw new Error("expected Err");
@@ -696,11 +701,9 @@ describe("review round 4 regressions", () => {
       ),
       Effect.runPromise,
     );
-    expect(
-      typeof failure === "object" && failure !== null && "_tag" in failure
-        ? failure._tag
-        : undefined,
-    ).toBe("SchemaError");
+    expect(Predicate.isObjectOrArray(failure) && "_tag" in failure ? failure._tag : undefined).toBe(
+      "SchemaError",
+    );
     failure
       .pipe(toUiError, expect)
       .toEqual({ _tag: "Unexpected", status: 200, requestId: "broken" });

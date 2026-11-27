@@ -24,7 +24,9 @@ import {
 import * as Arr from "effect/Array";
 import * as Fn from "effect/Function";
 import * as Option from "effect/Option";
+import * as Predicate from "effect/Predicate";
 import * as Rec from "effect/Record";
+import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 import * as Str from "effect/String";
 
@@ -98,7 +100,6 @@ export type EditorSource = typeof EditorSource.Type;
 
 // --- Route ---------------------------------------------------------------------------------------
 
-const ws = WorkspaceSlug;
 const opt = Schema.optionalKey;
 
 export const Route = Schema.Union([
@@ -126,45 +127,45 @@ export const Route = Schema.Union([
     tab: Schema.Literals(["profile", "appearance", "security", "sessions", "danger"]),
   }),
   // Workspace scope
-  Schema.TaggedStruct("Dashboard", { ws }),
-  Schema.TaggedStruct("Documents", { ws, query: DocumentListQuery }),
+  Schema.TaggedStruct("Dashboard", { ws: WorkspaceSlug }),
+  Schema.TaggedStruct("Documents", { ws: WorkspaceSlug, query: DocumentListQuery }),
   Schema.TaggedStruct("DocumentNew", {
-    ws,
+    ws: WorkspaceSlug,
     kind: Schema.Literals(["invoice", "proforma"]),
     from: opt(EditorSource),
   }),
-  Schema.TaggedStruct("DocumentEdit", { ws, id: DocumentId }),
+  Schema.TaggedStruct("DocumentEdit", { ws: WorkspaceSlug, id: DocumentId }),
   Schema.TaggedStruct("Document", {
-    ws,
+    ws: WorkspaceSlug,
     id: DocumentId,
     tab: Schema.Literals(["preview", "payments", "share", "history"]),
     dialog: opt(DocumentDialog),
   }),
-  Schema.TaggedStruct("Templates", { ws }),
+  Schema.TaggedStruct("Templates", { ws: WorkspaceSlug }),
   Schema.TaggedStruct("Template", {
-    ws,
+    ws: WorkspaceSlug,
     id: Schema.Union([TemplateId, Schema.Literal("new")]),
     tab: Schema.Literals(["template", "schedule", "runs"]),
   }),
-  Schema.TaggedStruct("Expenses", { ws, query: ExpenseListQuery }),
-  Schema.TaggedStruct("ExpenseCapture", { ws }),
+  Schema.TaggedStruct("Expenses", { ws: WorkspaceSlug, query: ExpenseListQuery }),
+  Schema.TaggedStruct("ExpenseCapture", { ws: WorkspaceSlug }),
   Schema.TaggedStruct("Expense", {
-    ws,
+    ws: WorkspaceSlug,
     id: Schema.Union([ExpenseId, Schema.Literal("new")]),
     mode: Schema.Literals(["view", "edit"]),
     attachment: opt(AttachmentId),
     job: opt(Schema.String),
   }),
-  Schema.TaggedStruct("Contacts", { ws, query: ContactListQuery }),
+  Schema.TaggedStruct("Contacts", { ws: WorkspaceSlug, query: ContactListQuery }),
   Schema.TaggedStruct("Contact", {
-    ws,
+    ws: WorkspaceSlug,
     id: Schema.Union([ContactId, Schema.Literal("new")]),
     mode: Schema.Literals(["view", "edit"]),
   }),
-  Schema.TaggedStruct("PriceList", { ws, text: opt(Schema.String) }),
-  Schema.TaggedStruct("Reports", { ws, report: ReportTab, period: Period }),
-  Schema.TaggedStruct("Settings", { ws, section: SettingsSection }),
-  Schema.TaggedStruct("More", { ws }), // mobile navigation bar tab; web redirects to Settings
+  Schema.TaggedStruct("PriceList", { ws: WorkspaceSlug, text: opt(Schema.String) }),
+  Schema.TaggedStruct("Reports", { ws: WorkspaceSlug, report: ReportTab, period: Period }),
+  Schema.TaggedStruct("Settings", { ws: WorkspaceSlug, section: SettingsSection }),
+  Schema.TaggedStruct("More", { ws: WorkspaceSlug }), // mobile navigation bar tab; web redirects to Settings
 ]);
 export type Route = typeof Route.Type;
 export type RouteTag = Route["_tag"];
@@ -190,13 +191,10 @@ const REPORT_KINDS = ReportKind.literals;
 type Query = ReadonlyArray<readonly [string, string | undefined]>;
 
 const enc = (value: string): string => encodeURIComponent(value);
-const dec = (value: string): string | undefined => {
-  try {
-    return decodeURIComponent(Fn.pipe(value, Str.replace(/\+/g, " ")));
-  } catch {
-    return undefined;
-  }
-};
+const dec = (value: string): string | undefined =>
+  Result.try(() => decodeURIComponent(Fn.pipe(value, Str.replace(/\+/g, " ")))).pipe(
+    Result.getOrUndefined,
+  );
 
 const withQuery = (path: string, query: Query): string => {
   const parts = Arr.flatMap(query, ([k, v]) => (v === undefined ? [] : [`${k}=${enc(v)}`]));
@@ -344,11 +342,8 @@ const parseBool = (value: string | undefined): boolean | string | undefined =>
 const parseIntParam = (value: string | undefined): number | string | undefined =>
   value !== undefined && INTEGER_PARAM.test(value) ? Number(value) : value;
 
-const withDefined = (record: Record<string, unknown>): Record<string, unknown> => {
-  const out: Record<string, unknown> = {};
-  for (const [k, v] of Rec.toEntries(record)) if (v !== undefined) out[k] = v;
-  return out;
-};
+const withDefined = <A>(record: Record<string, A | undefined>): Record<string, A> =>
+  Rec.filter(record, Predicate.isNotUndefined);
 
 /** Raw route candidate from path segments; the Route schema validates ids, slugs and literals. */
 const rawRoute = (segments: ReadonlyArray<string>, q: Map<string, string>): unknown => {
@@ -652,7 +647,7 @@ export const sectionRoute: {
   (slug: WorkspaceSlug, current?: Route): (section: NavSection) => Option.Option<WorkspaceRoute>;
   (section: NavSection, slug: WorkspaceSlug, current?: Route): Option.Option<WorkspaceRoute>;
 } = Fn.dual(
-  (args) => typeof args[1] === "string",
+  (args) => Predicate.isString(args[1]),
   (section: NavSection, slug: WorkspaceSlug, current?: Route): Option.Option<WorkspaceRoute> => {
     switch (section) {
       case "dashboard":

@@ -352,7 +352,7 @@ describe("dynamic colour hardening", () => {
         if (bgA === undefined || bgB === undefined) continue;
         for (const a of colours)
           for (const b of colours) {
-            const supplied: Record<string, string> = { [bgA]: a, [bgB]: b };
+            const supplied = { [bgA]: a, [bgB]: b };
             const required = Arr.map(
               Arr.filter(
                 CHECKED_ROLE_PAIRS,

@@ -18,6 +18,7 @@ import {
 } from "@kvitbit/domain/contract";
 import * as Arr from "effect/Array";
 import * as Fn from "effect/Function";
+import * as Predicate from "effect/Predicate";
 import * as Rec from "effect/Record";
 
 /** Where an effective value came from. `default` is the product fallback below the Workspace. */
@@ -66,7 +67,7 @@ export const resolveSetting: {
   (at?: Level): <A>(layers: SettingLayers<A>) => Resolved<A>;
   <A>(layers: SettingLayers<A>, at?: Level): Resolved<A>;
 } = Fn.dual(
-  (args) => typeof args[0] === "object",
+  (args) => Predicate.isObjectOrArray(args[0]),
   <A>(layers: SettingLayers<A>, at: Level = "document"): Resolved<A> => {
     const index = ORDER.indexOf(at);
     const own = firstSet(layers, index);
@@ -237,12 +238,21 @@ const normalizeDefaults = (defaults: ContactDefaults): ContactDefaults => {
   return out;
 };
 
+const definedEntries = (value: Parameters<typeof Object.entries<unknown>>[0]) =>
+  Arr.filter(
+    // Arrays participate by enumerable keys too. Record.toEntries accepts only records.
+    // @effect-diagnostics-next-line preferEffectRecord:off
+    Object.entries<unknown>(value),
+    ([, entry]) => entry !== undefined,
+  );
+
+// biome-ignore lint/plugin/no-unknown-parameters: Recursive comparison visits values from arbitrary nested object keys.
 const deepEqual = (a: unknown, b: unknown): boolean => {
   if (a === b) return true;
-  if (typeof a !== "object" || typeof b !== "object" || a === null || b === null) return false;
+  if (!(Predicate.isObjectOrArray(a) && Predicate.isObjectOrArray(b))) return false;
   if (Arr.isArray(a) !== Arr.isArray(b)) return false;
-  const entriesA = Arr.filter(Rec.toEntries(a), ([, entry]) => entry !== undefined);
-  const entriesB = Arr.filter(Rec.toEntries(b), ([, entry]) => entry !== undefined);
+  const entriesA = definedEntries(a);
+  const entriesB = definedEntries(b);
   if (entriesA.length !== entriesB.length) return false;
   const bByKey = new Map(entriesB);
   return Arr.every(entriesA, ([key, value]) => deepEqual(value, bByKey.get(key)));

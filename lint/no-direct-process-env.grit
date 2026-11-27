@@ -1,0 +1,21 @@
+engine biome(1.0)
+language js(typescript, jsx)
+
+file($name, $body) where {
+  // Expo replaces literal process.env.EXPO_PUBLIC_* access while bundling.
+  not $name <: r".*apps/mobile/src/config/env\.ts$",
+  $body <: contains bubble {
+    or {
+      JsStaticMemberExpression(object=$process, member=`env`) as $access,
+      JsComputedMemberExpression(object=$process, member=$key) as $access where {
+        $key <: r"^[\x22']env[\x22']$"
+      }
+    } where {
+      $process <: or {
+        `process`,
+        `globalThis.process`
+      },
+      register_diagnostic(span=$access, message="[no-direct-process-env] Read configuration through Effect Config.", severity="error")
+    }
+  }
+}

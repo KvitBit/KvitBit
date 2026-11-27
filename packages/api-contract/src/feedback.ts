@@ -1,5 +1,6 @@
 import * as Arr from "effect/Array";
 import * as Fn from "effect/Function";
+import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 import * as Str from "effect/String";
 
@@ -122,6 +123,7 @@ const HTTP_PREFIX = /^https?/i;
 const HTTP_URL_PREFIX = /^https?:\/\//i;
 const QUERY_OR_FRAGMENT = /[?#]/;
 const PERCENT_ESCAPE = /%[\da-f]{2}/i;
+const decodePath = (path: string) => Result.try(() => decodeURIComponent(path));
 
 // Decode bytes individually so a malformed escape cannot hide an encoded route.
 const decodePercentBytes = (value: string) =>
@@ -141,13 +143,10 @@ const hasSensitivePath = (value: string) => {
     if (!HTTP_URL_PREFIX.test(candidate)) return true;
   }
 
-  let path: string;
-  try {
-    path = new URL(candidate, "https://feedback.invalid").pathname;
-  } catch {
-    return false;
-  }
+  const parsed = Result.try(() => new URL(candidate, "https://feedback.invalid"));
+  if (Result.isFailure(parsed)) return false;
 
+  let path = parsed.success.pathname;
   for (let depth = 0; depth < 8; depth++) {
     if (Arr.some(feedbackRoutes(path), sensitiveRoute)) return true;
     const decoded = decodePercentBytes(path);
@@ -165,12 +164,9 @@ export const redactFeedbackUrls = (value: string) =>
 
 /** Removes URL credentials, query, fragment and paths that may contain access tokens. */
 export const sanitizeFeedbackPageUrl = (value: string) => {
-  let url: URL;
-  try {
-    url = new URL(value);
-  } catch {
-    return;
-  }
+  const parsed = Result.try(() => new URL(value));
+  if (Result.isFailure(parsed)) return;
+  const url = parsed.success;
   if (url.protocol !== "https:" && url.protocol !== "http:") return;
 
   const redacted = { url: `${url.origin}${REDACTED_PATH}`, sensitive: true };
@@ -195,11 +191,9 @@ export const sanitizeFeedbackPageUrl = (value: string) => {
     if (!PERCENT_ESCAPE.test(path)) {
       return { url: sanitized, sensitive: false };
     }
-    try {
-      path = decodeURIComponent(path);
-    } catch {
-      return redacted;
-    }
+    const decoded = decodePath(path);
+    if (Result.isFailure(decoded)) return redacted;
+    path = decoded.success;
   }
   return redacted;
 };

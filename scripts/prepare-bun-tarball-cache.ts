@@ -7,16 +7,15 @@
 // @effect-diagnostics preferEffectString:off
 import { cp } from "node:fs/promises";
 import { join } from "node:path";
+import { isLockObject, isLockString } from "./bun-lock-boundary";
 
 const [, , cache = "", deps = ""] = Bun.argv;
 if (cache.length === 0 || deps.length === 0) {
   throw new Error("Run after bun2nix sets up the install cache.");
 }
 
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-  typeof value === "object" && value !== null && !Array.isArray(value);
-const lock: unknown = Bun.JSONC.parse(await Bun.file("bun.lock").text());
-if (!(isRecord(lock) && isRecord(lock.packages))) {
+const lock = Bun.JSONC.parse(await Bun.file("bun.lock").text());
+if (!(isLockObject(lock) && isLockObject(lock.packages))) {
   throw new Error("Expected a packages object in bun.lock.");
 }
 
@@ -24,10 +23,10 @@ for (const entry of Object.values(lock.packages)) {
   if (!Array.isArray(entry) || entry.length !== 3) continue;
   const parts: readonly unknown[] = entry;
   const [specifier, , integrity] = parts;
-  if (typeof specifier !== "string") continue;
+  if (!isLockString(specifier)) continue;
   const url = specifier.slice(specifier.indexOf("@", 1) + 1);
   if (!/^https?:\/\//u.test(url)) continue;
-  if (typeof integrity !== "string" || !integrity.startsWith("sha512-")) {
+  if (!(isLockString(integrity) && integrity.startsWith("sha512-"))) {
     throw new Error(`Expected SHA-512 integrity for ${specifier}`);
   }
   const hash = Buffer.from(integrity.slice("sha512-".length), "base64").subarray(0, 16);

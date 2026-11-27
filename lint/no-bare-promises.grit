@@ -1,0 +1,17 @@
+engine biome(1.0)
+language js(typescript, jsx)
+
+or {
+  JsStaticMemberExpression(object=$promise, member=$method) as $use where {
+    $method <: r"^(?:all|race|any|allSettled|resolve|reject|withResolvers)$"
+  },
+  JsComputedMemberExpression(object=$promise, member=$method) as $use where {
+    $method <: r"^[\x22'](?:all|race|any|allSettled|resolve|reject|withResolvers)[\x22']$"
+  }
+} where {
+  $promise <: or {
+    `Promise`,
+    `globalThis.Promise`
+  },
+  register_diagnostic(span=$use, message="[no-bare-promises] Compose concurrent work and failures with Effect or Deferred.", severity="error")
+}

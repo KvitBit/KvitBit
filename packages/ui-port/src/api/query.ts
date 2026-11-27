@@ -8,11 +8,12 @@ import { PAGE_LIMIT_DEFAULT, PAGE_LIMIT_MAX } from "@kvitbit/api-contract";
 import * as Arr from "effect/Array";
 import * as Fn from "effect/Function";
 import * as Order from "effect/Order";
+import * as Predicate from "effect/Predicate";
 import * as Rec from "effect/Record";
 import * as Str from "effect/String";
 import { stringifyJson } from "../json";
 
-export const PAGE_LIMIT = PAGE_LIMIT_DEFAULT;
+export { PAGE_LIMIT_DEFAULT as PAGE_LIMIT } from "@kvitbit/api-contract";
 
 /** Paging fields belong to the page request, never to the filters. */
 const PAGING_KEYS = new Set(["cursor", "limit"]);
@@ -27,18 +28,22 @@ export type CleanFilters<F> = {
 };
 
 export const cleanFilters = <F extends object>(filters: F): CleanFilters<F> => {
+  // biome-ignore lint/plugin/no-unsafe-dictionary-type: Filter values can have any type and keys are enumerated at runtime.
   const out: Record<string, unknown> = {};
   for (const [key, value] of Rec.toEntries(filters)) {
     if (PAGING_KEYS.has(key) || value === undefined || value === null) continue;
-    if (typeof value === "string" && Str.trim(value) === "") continue;
+    if (Predicate.isString(value) && Str.trim(value) === "") continue;
     out[key] = value;
   }
   // biome-ignore lint/nursery/noUnsafeTypeAssertion: The loop copies only values from F and skips nullish and paging keys.
+  // biome-ignore lint/plugin/no-widen-then-assert: The loop retains each copied key's value type.
   return out as CleanFilters<F>;
 };
 
 /** Stable identity of a filter set (key order and empty values do not matter). */
+// biome-ignore lint/plugin/no-object-parameters: Filters belong to the caller and have no shared shape.
 export const filterHash = (filters: object): string => {
+  // biome-ignore lint/plugin/no-unsafe-dictionary-type: The hash consumes arbitrary filter values as JSON.
   const clean: Readonly<Record<string, unknown>> = cleanFilters(filters);
   return stringifyJson(Arr.map(Rec.keys(clean).sort(Order.String), (key) => [key, clean[key]]));
 };
@@ -51,11 +56,11 @@ export const pageQuery: {
   (cursor?: string | null, limit?: number): <F extends object>(filters: F) => PageQuery<F>;
   <F extends object>(filters: F, cursor?: string | null, limit?: number): PageQuery<F>;
 } = Fn.dual(
-  (args) => args[0] !== undefined && args[0] !== null && typeof args[0] !== "string",
+  (args) => Predicate.isNotNullish(args[0]) && !Predicate.isString(args[0]),
   <F extends object>(
     filters: F,
     cursor: string | null = null,
-    limit: number = PAGE_LIMIT,
+    limit: number = PAGE_LIMIT_DEFAULT,
   ): PageQuery<F> => {
     const base = { ...cleanFilters(filters), limit: clampLimit(limit) };
     return cursor === null ? base : { ...base, cursor };

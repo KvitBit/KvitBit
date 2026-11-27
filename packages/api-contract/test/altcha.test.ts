@@ -18,13 +18,11 @@ const challenge = {
 };
 const solved = { challenge, solution: { counter: 4242, time: 812 } };
 const json = Schema.fromJsonString(Schema.Unknown);
-/** Drops the brand so decoded values compare against plain literals. */
-const plain = (value: unknown): unknown => value;
 
 describe("ALTCHA schemas", () => {
   test("challenge is a non-empty JSON object", () => {
     const decode = Fn.flow(Schema.decodeUnknownEffect(AltchaChallenge), Effect.runSync);
-    expect(plain(decode(challenge))).toEqual(challenge);
+    expect<Schema.Json>(decode(challenge)).toEqual(challenge);
     expect(() => decode({})).toThrow();
     expect(() => decode([challenge])).toThrow();
     expect(() => decode("challenge")).toThrow();
@@ -33,7 +31,7 @@ describe("ALTCHA schemas", () => {
 
   test("challenge values must be JSON values", () => {
     const decode = Fn.flow(Schema.decodeUnknownEffect(AltchaChallenge), Effect.runSync);
-    expect(plain(decode({ a: [1, true, null], b: { c: "d" } }))).toEqual({
+    expect<Schema.Json>(decode({ a: [1, true, null], b: { c: "d" } })).toEqual({
       a: [1, true, null],
       b: { c: "d" },
     });
@@ -47,13 +45,11 @@ describe("ALTCHA schemas", () => {
       '{"challenge":{"parameters":{"algorithm":"PBKDF2/SHA-256","nonce":"4d6f6f6e","expiresAt":1795000000},"signature":"abcdef0123"},"solution":{"counter":4242,"time":812}}',
     );
     const decoded = Schema.decodeEffect(AltchaPayloadFromHeader)(header).pipe(Effect.runSync);
-    expect(plain(decoded)).toEqual(solved);
+    expect<Schema.Json>(decoded).toEqual(solved);
     const encoded = Schema.encodeEffect(AltchaPayloadFromHeader)(decoded).pipe(Effect.runSync);
     expect(Schema.decodeEffect(json)(atob(encoded)).pipe(Effect.runSync)).toEqual(solved);
-    expect(
-      plain(
-        Schema.decodeEffect(AltchaHeaders)({ "x-altcha": header }).pipe(Effect.runSync)["x-altcha"],
-      ),
+    expect<Schema.Json>(
+      Schema.decodeEffect(AltchaHeaders)({ "x-altcha": header }).pipe(Effect.runSync)["x-altcha"],
     ).toEqual(solved);
   });
 
@@ -74,7 +70,7 @@ describe("ALTCHA schemas", () => {
     let n = 0;
     while (fits(n + 3).length <= ALTCHA_HEADER_MAX_LENGTH) n += 3;
     expect(fits(n).length).toBeLessThanOrEqual(ALTCHA_HEADER_MAX_LENGTH);
-    expect(plain(decode(fits(n)))).toEqual({ pad: Str.repeat(n)("x") });
+    expect<Schema.Json>(decode(fits(n))).toEqual({ pad: Str.repeat(n)("x") });
     expect(fits(n + 3).length).toBeGreaterThan(ALTCHA_HEADER_MAX_LENGTH);
     expect(() => decode(fits(n + 3))).toThrow();
   });

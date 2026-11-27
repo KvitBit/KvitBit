@@ -3,19 +3,18 @@
 // @effect-diagnostics preferEffectArray:off
 // @effect-diagnostics preferEffectRecord:off
 // @effect-diagnostics preferEffectString:off
+import { isLockObject, isLockString } from "./bun-lock-boundary";
+
 // Build the fetchBunDeps expression from a Bun v2 lockfile. Bun installs the
 // workspace links from source, so only external packages belong in the cache.
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-  typeof value === "object" && value !== null && !Array.isArray(value);
-
-const lock: unknown = Bun.JSONC.parse(await Bun.file("bun.lock").text());
-if (!isRecord(lock)) {
+const lock = Bun.JSONC.parse(await Bun.file("bun.lock").text());
+if (!isLockObject(lock)) {
   throw new Error("Expected an object in bun.lock.");
 }
 if (lock.lockfileVersion !== 2) {
   throw new Error(`Unsupported Bun lockfile version: ${String(lock.lockfileVersion)}`);
 }
-if (!isRecord(lock.packages)) {
+if (!isLockObject(lock.packages)) {
   throw new Error("Expected a packages object in bun.lock.");
 }
 
@@ -27,7 +26,7 @@ for (const [name, entry] of Object.entries(lock.packages)) {
   }
   const parts: readonly unknown[] = entry;
   const [specifier, registryUrl] = parts;
-  if (typeof specifier !== "string") throw new Error(`Missing specifier for ${name}`);
+  if (!isLockString(specifier)) throw new Error(`Missing specifier for ${name}`);
 
   const separator = specifier.indexOf("@", 1);
   const packageName = specifier.slice(0, separator);
@@ -35,14 +34,14 @@ for (const [name, entry] of Object.entries(lock.packages)) {
   if (entry.length === 1 && source.startsWith("workspace:")) continue;
 
   const hash = parts.at(-1);
-  if (separator < 1 || typeof hash !== "string" || !hash.startsWith("sha512-")) {
+  if (separator < 1 || !isLockString(hash) || !hash.startsWith("sha512-")) {
     throw new Error(`Unsupported lockfile entry for ${name}: ${specifier}`);
   }
 
   const basename = packageName.slice(packageName.lastIndexOf("/") + 1);
   const tarball = /^https?:\/\//u.test(source);
   const key = tarball ? `tarball:${source}` : specifier;
-  const hasRegistryUrl = typeof registryUrl === "string" && registryUrl.length > 0;
+  const hasRegistryUrl = isLockString(registryUrl) && registryUrl.length > 0;
   const url = tarball
     ? source
     : hasRegistryUrl

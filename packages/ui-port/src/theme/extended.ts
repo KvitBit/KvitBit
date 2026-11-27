@@ -6,6 +6,7 @@
 
 import type { ExtendedColor, ExtendedRole, Hex, ResolvedScheme } from "@kvitbit/api-contract";
 import * as Fn from "effect/Function";
+import * as Predicate from "effect/Predicate";
 import { harmonize } from "./color/blend";
 import { Hct } from "./color/hct";
 import { TonalPalette } from "./color/palette";
@@ -78,7 +79,7 @@ export const extendedScheme: {
     inputs?: Partial<Record<ExtendedRole, ExtendedInput>>,
   ): ExtendedScheme;
 } = Fn.dual(
-  (args) => typeof args[1] === "string",
+  (args) => Predicate.isString(args[1]),
   (
     primary: Hex,
     variant: SchemeVariant,

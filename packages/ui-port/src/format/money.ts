@@ -1,6 +1,7 @@
 import { CurrencyCode, MoneyMath } from "@kvitbit/domain/contract";
 import * as Fn from "effect/Function";
 import * as Option from "effect/Option";
+import * as Predicate from "effect/Predicate";
 import * as Str from "effect/String";
 import type { Locale } from "../i18n/locale";
 import { type DecimalInput, formatExact, roundedDecimal, type Sign, signOf } from "./number";
@@ -28,7 +29,7 @@ export const formatMoney: {
   (money: MoneyInput, options?: MoneyOptions): (locale: Locale) => string;
   (locale: Locale, money: MoneyInput, options?: MoneyOptions): string;
 } = Fn.dual(
-  (args) => typeof args[0] === "string",
+  (args) => Predicate.isString(args[0]),
   (locale: Locale, money: MoneyInput, options: MoneyOptions = {}): string => {
     const currency = Str.toUpperCase(money.currency);
     const scale = options.scale ?? currencyScale(currency);
@@ -70,7 +71,7 @@ export const moneyDisplay: {
   (money: MoneyInput, options?: MoneyOptions): (locale: Locale) => MoneyDisplay;
   (locale: Locale, money: MoneyInput, options?: MoneyOptions): MoneyDisplay;
 } = Fn.dual(
-  (args) => typeof args[0] === "string",
+  (args) => Predicate.isString(args[0]),
   (locale: Locale, money: MoneyInput, options: MoneyOptions = {}): MoneyDisplay => ({
     text: formatMoney(locale, money, options),
     sign: displayedSign(money, options),

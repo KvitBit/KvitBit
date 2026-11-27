@@ -215,8 +215,8 @@ describe("SharedDocumentView is a closed recipient projection", () => {
     pdfUrl: "https://kvitbit.example/s/v1.abc/pdf",
     viewerIsIssuer: false,
   };
-  const roundTrip = (input: unknown) =>
-    Schema.decodeUnknownEffect(json)(input).pipe(
+  const roundTrip = (input: Schema.Json) =>
+    Schema.decodeEffect(json)(input).pipe(
       Effect.flatMap(Schema.encodeEffect(json)),
       Effect.runSync,
     );

@@ -12,6 +12,7 @@ import {
 } from "@kvitbit/api-contract";
 import * as Arr from "effect/Array";
 import * as Fn from "effect/Function";
+import * as Predicate from "effect/Predicate";
 import * as Rec from "effect/Record";
 import * as Str from "effect/String";
 import type { EffectiveTheme } from "./engine";
@@ -72,9 +73,10 @@ export const styleVariables: {
   (tokens?: StyleTokens): (style: ThemeStyle) => CssVariables;
   (style: ThemeStyle, tokens?: StyleTokens): CssVariables;
 } = Fn.dual(
-  (args) => typeof args[0] === "string",
+  (args) => Predicate.isString(args[0]),
   (style: ThemeStyle, tokens: StyleTokens = StyleTokensByStyle[style]): CssVariables => {
     const fallback = FONT_FALLBACKS[style];
+    // biome-ignore lint/plugin/no-known-value-widening: The type scale loop adds generated CSS keys below.
     const out: Record<`--${string}`, string> = {
       "--kb-font-display": `${quoted(tokens.font.display.family)}, ${fallback.display}`,
       "--kb-font-body": `${quoted(tokens.font.body.family)}, ${fallback.body}`,
@@ -113,7 +115,7 @@ export const cssDeclarations: {
   (indent?: string): (vars: CssVariables) => string;
   (vars: CssVariables, indent?: string): string;
 } = Fn.dual(
-  (args) => typeof args[0] === "object",
+  (args) => Predicate.isObjectOrArray(args[0]),
   (vars: CssVariables, indent = "  "): string =>
     Arr.join(
       Arr.map(Rec.toEntries(vars), ([k, v]) => `${indent}${k}: ${v};`),
@@ -134,7 +136,7 @@ export const themeStylesheet: {
   (style: ThemeStyle, root?: string): (theme: ResolvedTheme) => string;
   (theme: ResolvedTheme, style: ThemeStyle, root?: string): string;
 } = Fn.dual(
-  (args) => typeof args[0] === "object",
+  (args) => Predicate.isObjectOrArray(args[0]),
   (theme: ResolvedTheme, style: ThemeStyle, root = ":root"): string => {
     const c = (v: SchemeVariant) => colorVariables(theme.schemes[v]);
     const styleVars: CssVariables = styleVariables(style);

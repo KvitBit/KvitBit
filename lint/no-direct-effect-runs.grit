@@ -1,0 +1,46 @@
+engine biome(1.0)
+language js(typescript, jsx)
+
+file($name, $body) where {
+  // Entry modules can execute their root program. Reusable modules return Effects.
+  not $name <: r".*(?:apps/server/src/(?:main|migrate|worker)\.ts|apps/web/src/entry\.ts|apps/mobile/src/runtime/request-intent\.ts)$",
+  $body <: r"(?s).*\brun(?:Promise|Sync|Fork|Callback).*",
+  $body <: contains bubble {
+    or {
+      or {
+        JsStaticMemberExpression(object=$namespace, member=$method) as $use where {
+          $method <: r"^run(?:Promise(?:Exit)?|Sync(?:Exit)?|Fork|Callback)(?:With)?$"
+        },
+        JsComputedMemberExpression(object=$namespace, member=$method) as $use where {
+          $method <: r"^[\x22']run(?:Promise(?:Exit)?|Sync(?:Exit)?|Fork|Callback)(?:With)?[\x22']$"
+        }
+      } where {
+        or {
+          $namespace <: `Effect`,
+          $program <: contains JsImport() as $import where {
+            $import <: r"(?s)^import\s*\*\s+as\s+([\w$]+)\s+from\s+[\x22']effect/Effect[\x22']\s*;?$"($binding),
+            $namespace <: $binding
+          },
+          $program <: contains JsImport() as $import where {
+            $import <: r"(?s)^import\s*\{(?:[^}]*,)?\s*Effect\s+as\s+([\w$]+)(?:\s*,[^}]*)?\s*\}\s*from\s+[\x22']effect[\x22']\s*;?$"($binding),
+            $namespace <: $binding
+          }
+        }
+      },
+      or {
+        JsNamedImportSpecifier() as $use where {
+          $use <: r"(?s)^([\w$]+)\s+as\s+[\w$]+$"($imported)
+        },
+        JsShorthandNamedImportSpecifier() as $use where { $use <: r"^([\w$]+)$"($imported) }
+      } where {
+        $imported <: r"^run(?:Promise(?:Exit)?|Sync(?:Exit)?|Fork|Callback)(?:With)?$",
+        $use <: within JsImport() as $parent,
+        $parent <: contains JsModuleSource() as $source where {
+          $source <: r"^[\x22']effect/Effect[\x22']$"
+        }
+      }
+    } where {
+      register_diagnostic(span=$use, message="[no-direct-effect-runs] Return the Effect and run it at the application runtime boundary.", severity="error")
+    }
+  }
+}

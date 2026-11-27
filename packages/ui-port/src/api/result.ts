@@ -8,6 +8,7 @@ import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as Fn from "effect/Function";
+import * as Predicate from "effect/Predicate";
 import type * as Scope from "effect/Scope";
 
 import { emptyResponseCell, KvitbitApi, type KvitbitApiClient, ResponseObserver } from "./client";
@@ -125,8 +126,8 @@ export const runCommand: {
     // Fork and observer registration are one uninterruptible step: interrupting the runner between
     // them would leave a forked command nobody dispatches for. Only the command itself is restored
     // to interruptible, so superseding or closing the scope still cancels it.
-    Effect.uninterruptibleMask((restore) =>
-      Effect.gen(function* () {
+    Effect.uninterruptibleMask(
+      Effect.fnUntraced(function* (restore) {
         const fiber = yield* Effect.forkScoped(restore(command.effect));
         // Detached and uninterruptible: the observer outlives the scope just long enough to see the
         // command's Exit, and it ends with it.
@@ -155,7 +156,7 @@ export const call: {
     options?: CallOptions,
   ): ApiCommand<Msg>;
 } = Fn.dual(
-  (args) => typeof args[0] === "string",
+  (args) => Predicate.isString(args[0]),
   <A, E, Msg>(
     name: string,
     run: (api: KvitbitApiClient) => Effect.Effect<A, E>,
@@ -164,13 +165,7 @@ export const call: {
   ): ApiCommand<Msg> => {
     const command = {
       name,
-      effect: attempt(
-        Effect.gen(function* () {
-          const client = yield* KvitbitApi;
-          return yield* run(client);
-        }),
-        options,
-      ).pipe(Effect.map(toMsg)),
+      effect: attempt(Effect.flatMap(KvitbitApi, run), options).pipe(Effect.map(toMsg)),
       cancelled: toMsg(err(UiError.cancelled)),
       failed: (error: UiError) => toMsg(err(error)),
     };

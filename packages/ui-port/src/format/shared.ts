@@ -1,4 +1,5 @@
 import * as Fn from "effect/Function";
+import * as Predicate from "effect/Predicate";
 import * as Str from "effect/String";
 import type { AnyIssueCode } from "../i18n/issues";
 
@@ -12,7 +13,7 @@ export const issue: {
   (params?: Readonly<Record<string, string>>): (code: AnyIssueCode) => FormatIssue;
   (code: AnyIssueCode, params?: Readonly<Record<string, string>>): FormatIssue;
 } = Fn.dual(
-  (args) => typeof args[0] === "string",
+  (args) => Predicate.isString(args[0]),
   (code: AnyIssueCode, params?: Readonly<Record<string, string>>): FormatIssue =>
     params === undefined ? { code } : { code, params },
 );

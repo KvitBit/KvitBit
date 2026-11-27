@@ -3,6 +3,7 @@ import { Action, Scope } from "@kvitbit/domain/contract";
 import * as Arr from "effect/Array";
 import * as Effect from "effect/Effect";
 import * as Fn from "effect/Function";
+import type * as JsonSchema from "effect/JsonSchema";
 import * as Option from "effect/Option";
 import * as Order from "effect/Order";
 import * as Predicate from "effect/Predicate";
@@ -93,7 +94,7 @@ const json = Schema.fromJsonString(Schema.Unknown);
 const encodeJson = Fn.flow(Schema.encodeEffect(json), Effect.runSync);
 const LOCAL_REF = /"\$ref":"#\/\$defs\/([^"]+)"/g;
 const EXTERNAL_REF = /"\$ref":"(?!#\/\$defs\/)/;
-const schemaProperties = ({ properties }: Readonly<Record<string, unknown>>) =>
+const schemaProperties = ({ properties }: JsonSchema.JsonSchema) =>
   Predicate.isObject(properties) ? properties : {};
 
 describe("MCP tool catalog", () => {

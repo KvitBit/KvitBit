@@ -2,6 +2,7 @@ import * as Arr from "effect/Array";
 import * as BigDecimal from "effect/BigDecimal";
 import * as Fn from "effect/Function";
 import * as Option from "effect/Option";
+import * as Predicate from "effect/Predicate";
 import * as Str from "effect/String";
 import { INTL_TAG, type Locale } from "../i18n/locale";
 import { stringifyJson } from "../json";
@@ -25,7 +26,10 @@ const DECIMAL = /^([-+]?)(\d+)(?:\.(\d*))?(?:[eE]([-+]?\d+))?$/;
 /** Parses plain or exponent notation (`1.5e3`, `1e-7`) exactly, without going through floats. */
 const parseDecimal = (input: string): Decimal => {
   const m = DECIMAL.exec(Str.trim(input));
-  if (m === null) throw new RangeError(`Not a decimal: ${input}`);
+  if (m === null) {
+    // biome-ignore lint/plugin/no-throw-in-effect-modules: Decimal formatters report malformed strings synchronously.
+    throw new RangeError(`Not a decimal: ${input}`);
+  }
   const digits = (m[2] ?? "") + (m[3] ?? "");
   const point = (m[2] ?? "").length + Number(m[4] ?? "0");
   const padded =
@@ -40,12 +44,15 @@ const parseDecimal = (input: string): Decimal => {
 };
 
 const toDecimal = (value: DecimalInput): Decimal => {
-  if (typeof value === "number") {
-    if (!Number.isFinite(value)) throw new RangeError(`Not a finite number: ${value}`);
+  if (Predicate.isNumber(value)) {
+    if (!Number.isFinite(value)) {
+      // biome-ignore lint/plugin/no-throw-in-effect-modules: Decimal formatters report non-finite numbers synchronously.
+      throw new RangeError(`Not a finite number: ${value}`);
+    }
     return parseDecimal(String(value));
   }
-  if (typeof value === "bigint") return parseDecimal(value.toString());
-  if (typeof value === "string") return parseDecimal(value);
+  if (Predicate.isBigInt(value)) return parseDecimal(value.toString());
+  if (Predicate.isString(value)) return parseDecimal(value);
   return value.pipe(BigDecimal.format, parseDecimal);
 };
 
@@ -147,7 +154,7 @@ export const formatExact: {
     const signDisplay = zero && intl.signDisplay !== "never" ? "auto" : intl.signDisplay;
     const format = numberFormat(locale, {
       ...intl,
-      ...(signDisplay === undefined ? {} : { signDisplay }),
+      signDisplay,
       minimumFractionDigits: 1,
       maximumFractionDigits: 1,
     });

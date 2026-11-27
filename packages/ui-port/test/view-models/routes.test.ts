@@ -3,6 +3,7 @@ import * as Arr from "effect/Array";
 import * as Effect from "effect/Effect";
 import * as Fn from "effect/Function";
 import * as Option from "effect/Option";
+import * as Predicate from "effect/Predicate";
 import * as Schema from "effect/Schema";
 import * as SchemaAST from "effect/SchemaAST";
 import * as Str from "effect/String";
@@ -17,8 +18,7 @@ import {
   switchWorkspace,
 } from "../../src/view-models";
 
-const decodeRoute = Schema.decodeUnknownEffect(Route);
-const decode = (input: unknown) => Effect.runSync(decodeRoute(input));
+const decode = Fn.flow(Schema.decodeUnknownEffect(Route), Effect.runSync);
 const ID = "0193a1b2-c3d4-7e5f-8a6b-1c2d3e4f5a6b";
 const ID2 = "0193a1b2-c3d4-7e5f-8a6b-1c2d3e4f5a6c";
 
@@ -98,7 +98,7 @@ const SAMPLES: ReadonlyArray<Route> = [
 
 const ALL_TAGS = Arr.map(Route.members, (member) => {
   const ast = member.fields._tag.ast;
-  if (!SchemaAST.isLiteral(ast) || typeof ast.literal !== "string") {
+  if (!(SchemaAST.isLiteral(ast) && Predicate.isString(ast.literal))) {
     throw new Error("expected literal route tag");
   }
   return ast.literal;
@@ -124,7 +124,7 @@ describe("Routes.toPath / fromPath", () => {
   }
 
   test("canonical spellings", () => {
-    const p = (r: unknown) => Routes.toPath(decode(r), "/");
+    const p = (r: typeof Route.Encoded) => Routes.toPath(decode(r), "/");
     expect(p({ _tag: "Document", ws: "acme", id: ID, tab: "payments" })).toBe(
       `/w/acme/documents/${ID}?tab=payments`,
     );

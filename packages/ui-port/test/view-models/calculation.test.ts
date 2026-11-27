@@ -24,12 +24,10 @@ const line = (
   unitPrice: string,
   treatment: VatTreatment = "standard",
   discount?: string,
-) => ({
-  quantity: d(quantity),
-  unitPrice: d(unitPrice),
-  treatment,
-  ...(discount === undefined ? {} : { discountPercent: d(discount) }),
-});
+) => {
+  const item = { quantity: d(quantity), unitPrice: d(unitPrice), treatment };
+  return discount === undefined ? item : { ...item, discountPercent: d(discount) };
+};
 
 const base: PreviewInput = {
   lines: [],

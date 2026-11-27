@@ -83,7 +83,7 @@ const maxLevel = (grantable: ReadonlySet<Scope>, area: ScopeArea): AreaLevel =>
       : "read"
     : "none";
 
-const RANK: Record<AreaLevel, number> = { none: 0, read: 1, write: 2 };
+const RANK = { none: 0, read: 1, write: 2 } satisfies Record<AreaLevel, number>;
 
 /** The scopes the state grants: the preset's expansion or the custom selection, canonical order. */
 export const effectiveScopes = (state: ScopePickerState): ReadonlyArray<Scope> =>

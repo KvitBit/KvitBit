@@ -225,7 +225,21 @@ const ownErrors = (group: string, name: string): ReadonlyArray<Schema.Top> => {
   return found;
 };
 
-const hasError = (r: Reflected, status: number, sample: unknown): boolean =>
+type ErrorSample =
+  | Conflict
+  | Forbidden
+  | Invalid
+  | NotFound
+  | Unavailable
+  | InvalidBotProof
+  | OriginRejected
+  | PayloadTooLarge
+  | PreconditionFailed
+  | PreconditionRequired
+  | RateLimited
+  | Unauthorized;
+
+const hasError = (r: Reflected, status: number, sample: ErrorSample): boolean =>
   Arr.some(r.errors.get(status) ?? [], (schema) => Schema.is(schema)(sample));
 
 describe("Api definition integrity", () => {
@@ -305,25 +319,25 @@ describe("Api definition integrity", () => {
     const guard = EdgeGuard.key;
     const member = WorkspaceMember.key;
     const session = SessionOnly.key;
-    const expectations: Record<string, ReadonlyArray<string>> = {
-      config: [schema],
-      botProtection: [schema],
-      publicShare: [schema, ShareLinkVisitor.key],
-      me: [schema, auth, guard, session],
-      myWorkspaces: [schema, auth, guard, session],
-      oauthConsent: [schema, auth, guard, session],
-      registry: [schema, auth, guard],
-      themes: [schema, auth, guard],
-      apiKeys: [schema, auth, guard, session, member],
-      connectedApps: [schema, auth, guard, session, member],
-    };
+    const expectations = new Map([
+      ["config", [schema]],
+      ["botProtection", [schema]],
+      ["publicShare", [schema, ShareLinkVisitor.key]],
+      ["me", [schema, auth, guard, session]],
+      ["myWorkspaces", [schema, auth, guard, session]],
+      ["oauthConsent", [schema, auth, guard, session]],
+      ["registry", [schema, auth, guard]],
+      ["themes", [schema, auth, guard]],
+      ["apiKeys", [schema, auth, guard, session, member]],
+      ["connectedApps", [schema, auth, guard, session, member]],
+    ]);
     for (const r of reflected) {
       const expected =
         r.group === "invitations"
           ? r.name === "accept"
             ? [schema, auth, guard, session]
             : [schema]
-          : (expectations[r.group] ?? [schema, auth, guard, member]);
+          : (expectations.get(r.group) ?? [schema, auth, guard, member]);
       expect([`${r.group}.${r.name}`, [...r.middleware].reverse()]).toEqual([
         `${r.group}.${r.name}`,
         [...expected],
@@ -360,7 +374,7 @@ describe("Api definition integrity", () => {
   });
 
   test("Authentication fails only with Unauthorized; EdgeGuard owns the other edge checks", () => {
-    const accepts = (errors: ReadonlySet<Schema.Top>, sample: unknown) =>
+    const accepts = (errors: ReadonlySet<Schema.Top>, sample: ErrorSample) =>
       Arr.some([...errors], (schema) => Schema.is(schema)(sample));
     const edge = [
       OriginRejected.make({}),
@@ -513,13 +527,13 @@ reports.exportFile Reports.exportFile NotFound,Conflict,Unavailable,Forbidden
 `;
 
 describe("endpoints declare their core method's errors", () => {
-  const samples: Record<string, readonly [number, unknown]> = {
-    NotFound: [404, NotFound.make({ entity: "Document", id: "d" })],
-    Invalid: [422, Invalid.make({ issues: [{ path: [], code: "request.malformed" }] })],
-    Conflict: [409, Conflict.make({ reason: "illegal_transition" })],
-    Unavailable: [503, Unavailable.make({ dependency: "database" })],
-    Forbidden: [403, Forbidden.make({ action: "workspace.read" })],
-  };
+  const samples = new Map<string, readonly [number, ErrorSample]>([
+    ["NotFound", [404, NotFound.make({ entity: "Document", id: "d" })]],
+    ["Invalid", [422, Invalid.make({ issues: [{ path: [], code: "request.malformed" }] })]],
+    ["Conflict", [409, Conflict.make({ reason: "illegal_transition" })]],
+    ["Unavailable", [503, Unavailable.make({ dependency: "database" })]],
+    ["Forbidden", [403, Forbidden.make({ action: "workspace.read" })]],
+  ]);
   const rows = Arr.map(Str.split(Str.trim(CORE_ERRORS), "\n"), (line) => {
     const [id = "", method = "", tags = ""] = Str.split(line, " ");
     const errorTags: ReadonlyArray<string> = tags === "" ? [] : Str.split(tags, ",");
@@ -547,7 +561,7 @@ describe("endpoints declare their core method's errors", () => {
     const own = ownErrors(group, name);
     for (const tag of tags) {
       if (tag === "Forbidden" && member) continue;
-      const sample = samples[tag];
+      const sample = samples.get(tag);
       if (sample === undefined) throw new Error(`no sample for ${tag}`);
       const [status, value] = sample;
       expect([tag, Arr.some(own, (schema) => Schema.is(schema)(value))]).toEqual([tag, true]);

@@ -32,7 +32,9 @@ const knipInput =
   /\.(?:jsonc?|sh)$|(?:^|\/)(?:\.gitignore|bunfig\.toml)$|^bun\.lock$|^\.github\/(?:workflows\/[^/]+\.ya?ml$|actions\/)/;
 const formalManifest = "formal/manifest.json";
 const formalDependencies = /^packages\/(?:api-contract|core|db|domain)\//;
-const scriptsDependencies = /^(?:scripts|apps\/mobile\/release)\//;
+const scriptsDependencies = /^(?:lint|scripts|apps\/mobile\/release)\//;
+const lintRuleInput = /(?:^|\/)biome\.jsonc?$|^lint\/.*\.grit$|^(?:bun\.lock|package\.json)$/;
+const lintRuleTest = "lint/lint-rules.test.ts";
 const directory = Str.replace(/\/?[^/]*$/, "");
 
 const decodeManifest = Schema.decodeEffect(
@@ -216,6 +218,12 @@ export const planChecks = (input: {
     )
   ) {
     checks.push({ name: "Formal typecheck", args: ["run", "typecheck:formal"] });
+  }
+  if (
+    !input.tests.includes(lintRuleTest) &&
+    Arr.some(input.files, (file) => lintRuleInput.test(file))
+  ) {
+    checks.push({ name: "Lint rule fixtures", args: ["run", "test:lint-rules"] });
   }
   const testsByWorkspace = Arr.groupBy(
     input.tests,
