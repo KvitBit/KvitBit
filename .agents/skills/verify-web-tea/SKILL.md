@@ -5,7 +5,7 @@ description: >-
   changes to apps/web/src, the web entry or build configuration, or
   packages/ui-port/src/theme.
 metadata:
-  sync_commit: "27555299dca87058231afdf2872b9c247091a1d9"
+  sync_commit: "0fd105ebb0533916112db09d3f035ae3d0ac476b"
   bun: "1.4.4"
   node: "24.18.0"
   effect: "4.1.4"
@@ -79,7 +79,19 @@ that record in a verification commit after the product changes.
 
 ## Verification record
 
-The recorded product commit passed Biome checks on all edited files and
+At `0fd105ebb0533916112db09d3f035ae3d0ac476b` (rebased cleanly from `3372918b`
+onto `0f5643de`), the onboarding numbering overhaul passed Biome checks on the
+edited files, `apps/web/test/public/consent-invite-onboarding.test.ts`, and
+PR CI (`check`, `static-mounts`, `formal`, `changes` on `aeee3ec2`). The
+lockfile was unchanged. The static build contained `dist/index.html`, hashed
+JavaScript and CSS, `dist/assets/brand`, and `dist/fonts`. All 58 smoke and
+feedback Playwright tests passed on `3372918b` on port `34183` with one worker
+across desktop and mobile Chromium profiles. The smoke suite verifies the
+redesigned `/onboarding?step=4` numbering ledger and document defaults layout
+in English and Czech, including per-row alignment, independent live number
+previews, inline validation, and zero horizontal overflow.
+
+At `27555299dca87058231afdf2872b9c247091a1d9`, the recorded product commit passed Biome checks on all edited files and
 targeted unit tests for `packages/ui-port` (`address.test.ts`), `apps/web`
 (`consent-invite-onboarding.test.ts`, `settings.test.ts`, `contacts.test.ts`,
 `tea-invariants.test.ts`), and `apps/mobile` (`onboarding-screen.test.tsx`).
