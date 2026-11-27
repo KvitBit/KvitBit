@@ -7,6 +7,7 @@ import { CurrentCaller, Workspaces } from "@kvitbit/domain/contract";
 import { Effect, Layer, Ref } from "effect";
 import { SqlClient } from "effect/sql";
 import { TestClock } from "effect/testing";
+import { captureAnalytics } from "../analytics-fixture";
 import { type Harness, makeHarness, ORIGIN } from "./harness";
 
 const password = "A test password for Better Auth";
@@ -31,7 +32,8 @@ const setup = () => {
       return Effect.void;
     },
   });
-  const app = makeHarness({ principalResolver: "live", botProtection });
+  const analytics = captureAnalytics();
+  const app = makeHarness({ principalResolver: "live", botProtection, analytics: analytics.layer });
   harness = app;
   const owner = app.addUser("Owner");
   const workspace = app.createWorkspace(owner);
@@ -67,7 +69,7 @@ const setup = () => {
         return sent.filter(({ message }) => message.tags?.template === "E01");
       }),
     );
-  return { app, workspace, invite, signUp, accept, verificationEmails };
+  return { app, workspace, invite, signUp, accept, verificationEmails, analytics };
 };
 
 const sessionCookie = (response: Response) =>
@@ -77,7 +79,7 @@ const sessionCookie = (response: Response) =>
     ?.split(";")[0];
 
 test("invitation signup verifies the invited address and creates a session that can accept through core", async () => {
-  const { app, workspace, invite, signUp, accept, verificationEmails } = setup();
+  const { app, workspace, invite, signUp, accept, verificationEmails, analytics } = setup();
   const email = "invitee@example.cz";
   const { token } = await invite(email);
   const other = await invite("other-invitee@example.cz");
@@ -87,7 +89,8 @@ test("invitation signup verifies the invited address and creates a session that 
     invitationToken: token,
   });
   expect(signup.status).toBe(200);
-  expect(await signup.json()).toMatchObject({ user: { email, emailVerified: true } });
+  const account = (await signup.json()) as { user: { id: string } };
+  expect(account).toMatchObject({ user: { email, emailVerified: true } });
   expect(await verificationEmails()).toEqual([]);
   const cookie = sessionCookie(signup);
   expect(cookie).toBeDefined();
@@ -102,6 +105,22 @@ test("invitation signup verifies the invited address and creates a session that 
     role: "accountant",
   });
   expect((await accept(token, cookie)).status).toBe(409);
+  expect(analytics.capture.mock.calls).toEqual([
+    [
+      {
+        event: "user_signed_up",
+        distinctId: account.user.id,
+        properties: { method: "invitation" },
+      },
+    ],
+    [
+      {
+        event: "invitation_accepted",
+        distinctId: account.user.id,
+        properties: { workspaceId: (await workspace).workspaceId },
+      },
+    ],
+  ]);
 
   // The same session can start the existing signed-in passkey registration flow.
   const optionsPath = "/api/auth/passkey/generate-register-options?name=Phone";
@@ -200,12 +219,18 @@ test("invalid invitation signup attempts leave accounts and memberships unchange
 });
 
 test("ordinary signup still verifies by email and an existing user can sign in to accept an invite", async () => {
-  const { app, invite, signUp, accept, verificationEmails } = setup();
+  const { app, invite, signUp, accept, verificationEmails, analytics } = setup();
   const email = "existing@example.cz";
   const ordinary = await signUp(email, "sign_up:ordinary", { emailVerified: true });
   expect(ordinary.status).toBe(200);
-  expect(await ordinary.json()).toMatchObject({ token: null, user: { emailVerified: false } });
+  const signup = (await ordinary.json()) as { user: { id: string } };
+  expect(signup).toMatchObject({ token: null, user: { emailVerified: false } });
   expect(sessionCookie(ordinary)).toBeUndefined();
+  // Better Auth returns a generic success response for an existing email.
+  expect((await signUp(email, "sign_up:duplicate")).status).toBe(200);
+  expect(analytics.capture.mock.calls).toEqual([
+    [{ event: "user_signed_up", distinctId: signup.user.id, properties: { method: "email" } }],
+  ]);
   const [verification] = await verificationEmails();
   const verificationLink = verification?.message.text.match(/https:\/\/\S+/)?.[0];
   expect(verificationLink).toBeDefined();

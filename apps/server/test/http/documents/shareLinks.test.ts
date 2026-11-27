@@ -11,6 +11,7 @@ import {
 import { Effect, Ref, Stream } from "effect";
 import { TestClock } from "effect/testing";
 import { deviceFromUserAgent } from "../../../src/http/groups/publicShare";
+import { captureAnalytics } from "../../analytics-fixture";
 import { as, type Harness, json, makeHarness, TEST_NOW, type TestUser } from "../harness";
 
 // Minimal valid 1x1 PNG (8-byte signature + IHDR + IDAT + IEND)
@@ -27,6 +28,7 @@ let owner: TestUser;
 let member: MemberCaller;
 let contactId: ContactId;
 let docsBase: string;
+let analytics: ReturnType<typeof captureAnalytics>;
 
 const invoiceInput = () => ({
   kind: "invoice",
@@ -91,7 +93,8 @@ describe("deviceFromUserAgent", () => {
 
 describe("shareLinks and publicShare groups", () => {
   beforeEach(async () => {
-    h = makeHarness();
+    analytics = captureAnalytics();
+    h = makeHarness({ analytics: analytics.layer });
     await h.run(TestClock.setTime(TEST_NOW));
     owner = h.addUser("Olga");
     member = await h.createWorkspace(owner);
@@ -166,6 +169,22 @@ describe("shareLinks and publicShare groups", () => {
     };
     expect(shared.number).toBe(doc.number);
     expect(shared.viewerIsIssuer).toBe(false);
+    expect(analytics.capture.mock.calls.slice(1)).toEqual([
+      [
+        {
+          event: "share_link_created",
+          distinctId: owner.id,
+          properties: { workspaceId: member.workspaceId },
+        },
+      ],
+      [
+        {
+          event: "share_link_opened",
+          distinctId: expect.stringMatching(/^[a-f\d-]{36}$/),
+          options: { process_person_profile: false },
+        },
+      ],
+    ]);
 
     // Anonymous desktop visitor downloads the PDF in English
     const desktopPdf = await h.fetch(`/api/v1/share/${token}/pdf?language=en`, {

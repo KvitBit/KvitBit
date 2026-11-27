@@ -3,6 +3,7 @@ import { Effect, Redacted } from "effect";
 import { SqlClient } from "effect/sql";
 import { TestClock } from "effect/testing";
 import { makeFeedbackConfig } from "../../src/http/feedback/access";
+import { captureAnalytics } from "../analytics-fixture";
 import { makeHarness, ORIGIN } from "./harness";
 
 const ownerEmail = "owner@example.cz";
@@ -16,7 +17,9 @@ const configured = makeFeedbackConfig(
 const issueResponse = async (..._args: Parameters<typeof fetch>) =>
   Response.json({ number: 42 }, { status: 201 });
 const upstream = mock(issueResponse);
+const analytics = captureAnalytics();
 const app = makeHarness({
+  analytics: analytics.layer,
   config: { feedback: configured },
   feedbackFetch: Object.assign(upstream, { preconnect: () => undefined }),
 });
@@ -40,6 +43,7 @@ const setVerified = (email: string, verified: boolean) =>
 const sessionFor = async (email: string) => {
   const signup = await authPost("sign-up/email", { name: email, email, password });
   expect(signup.status).toBe(200);
+  const { user } = (await signup.json()) as { user: { id: string } };
   await setVerified(email, true);
   const signin = await authPost("sign-in/email", { email, password });
   expect(signin.status).toBe(200);
@@ -49,7 +53,7 @@ const sessionFor = async (email: string) => {
     ?.split(";")[0];
   const bearer = signin.headers.get("set-auth-token");
   if (!cookie || !bearer) throw new Error("Better Auth did not return session credentials");
-  return { cookie, authorization: `Bearer ${bearer}` };
+  return { cookie, authorization: `Bearer ${bearer}`, userId: user.id };
 };
 
 const pin = {
@@ -109,6 +113,7 @@ afterAll(async () => app.dispose());
 beforeEach(async () => {
   await app.run(TestClock.adjust("1 minute"));
   upstream.mockReset().mockImplementation(issueResponse);
+  analytics.capture.mockClear();
 });
 
 const ownerHeaders = () => ({ origin: ORIGIN, cookie: owner.cookie });
@@ -195,6 +200,15 @@ test("submits one labeled issue with structured Markdown and no active user-supp
     title: "Visual feedback: The button wraps",
   });
   expect(upstream).toHaveBeenCalledTimes(1);
+  expect(analytics.capture.mock.calls).toEqual([
+    [
+      {
+        event: "feedback_submitted",
+        distinctId: owner.userId,
+        properties: { hasPin: true },
+      },
+    ],
+  ]);
   const outbound = upstreamRequest();
   expect(outbound.url).toBe("https://api.github.com/repos/example/kvitbit/issues");
   expect(outbound.method).toBe("POST");

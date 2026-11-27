@@ -39,6 +39,7 @@ import { PrincipalResolverLive } from "../../src/auth/PrincipalResolverLive";
 import { HttpConfigTest, HttpRoutesLive, RateLimiterMemory } from "../../src/http";
 import { acceptLanguageLocale, bearerToken } from "../../src/http/edge/request";
 import { ServerDocumentProjectionsLive } from "../../src/projections/documents";
+import { type Analytics, AnalyticsNoop } from "../../src/runtime/analytics";
 import { TestDatabase } from "./database";
 
 export const ORIGIN = "https://kvitbit.test";
@@ -117,6 +118,7 @@ export interface HarnessOptions extends TestCoreOptions {
   readonly authEmailSender?: Layer.Layer<EmailSender>;
   readonly logger?: Layer.Layer<never>;
   readonly config?: Parameters<typeof HttpConfigTest>[0];
+  readonly analytics?: Layer.Layer<Analytics>;
   readonly feedbackFetch?: typeof globalThis.fetch;
 }
 
@@ -130,9 +132,12 @@ export const makeHarness = (options: HarnessOptions = {}) => {
   const projectedTestCore = ServerDocumentProjectionsLive.pipe(
     Layer.provideMerge(TestCore(options)),
   );
-  const dbAndCore = Layer.mergeAll(projectedTestCore, TestDatabase, configLayer).pipe(
-    Layer.provideMerge(TestClock.layer()),
-  );
+  const dbAndCore = Layer.mergeAll(
+    projectedTestCore,
+    TestDatabase,
+    configLayer,
+    options.analytics ?? AnalyticsNoop,
+  ).pipe(Layer.provideMerge(TestClock.layer()));
   const botLayer = (options.botProtection ?? NoopBotProtection).pipe(Layer.provide(dbAndCore));
   const baseCore = Layer.merge(dbAndCore, botLayer);
   const authLayer = (

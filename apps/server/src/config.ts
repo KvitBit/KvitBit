@@ -3,9 +3,43 @@
  * agreed with phase3d-infra on board thread #871. Stream-specific settings live next to their
  * stream (`./<area>/config.ts`) and read their own variables.
  */
-import { Config, Effect, type Option, type Redacted } from "effect";
+import { Config, Effect, Option, type Redacted, Schema } from "effect";
 
 export type RunnerMode = "single" | "cluster";
+
+export interface PostHogSettings {
+  readonly apiKey: string;
+  readonly host: string;
+}
+
+const postHogKey = Config.schema(
+  Schema.Trim.check(Schema.isPattern(/^(?:phc_\S+)?$/)),
+  "KVITBIT_POSTHOG_KEY",
+).pipe(Config.withDefault(""));
+
+const postHogHost = Config.schema(
+  Schema.Trim.check(
+    Schema.makeFilter((value) => {
+      const url = URL.parse(value);
+      return (
+        (/^https:\/\//i.test(value) &&
+          url?.protocol === "https:" &&
+          !url.username &&
+          !url.password) ||
+        "Expected an HTTPS URL without credentials"
+      );
+    }),
+  ),
+  "KVITBIT_POSTHOG_HOST",
+).pipe(Config.option);
+
+export const PostHogConfig = Config.all({ apiKey: postHogKey, host: postHogHost }).pipe(
+  Config.map(({ apiKey, host }): PostHogSettings | null =>
+    apiKey === ""
+      ? null
+      : { apiKey, host: Option.getOrElse(host, () => "https://eu.i.posthog.com") },
+  ),
+);
 
 export interface ServerConfigShape {
   readonly host: string;

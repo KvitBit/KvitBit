@@ -8,14 +8,16 @@ import { type AuthConfig, generateId, makeEmailRateLimiter } from "@kvitbit/adap
 import { type EmailTemplate, renderEmail } from "@kvitbit/adapters/templates/email";
 import { Caller, CurrentCaller, type Locale, UserId, Workspaces } from "@kvitbit/domain/contract";
 import { EmailSender } from "@kvitbit/domain/ports";
+import type { BetterAuthOptions } from "better-auth";
 import { APIError } from "better-auth/api";
 import { Clock, Effect, Layer } from "effect";
 import { SqlClient } from "effect/sql";
 import { HttpConfig } from "../http/config";
 import { acceptLanguageLocale } from "../http/edge/request";
+import { Analytics } from "../runtime/analytics";
 import { AuthServer } from "./AuthServer";
 import { makeDrizzleOverSqlClient } from "./drizzleBridge";
-import { makeAuthWithInvitationSignUp } from "./invitationSignUp";
+import { makeAuthWithInvitationSignUp, SIGN_UP_PATH } from "./invitationSignUp";
 import { makeAuthEffectRunner } from "./logging";
 import { makeWorkspaceAuth } from "./oauthWorkspace";
 
@@ -36,6 +38,7 @@ export const makeAuthServerLayer = (overrides: AuthServerOverrides = {}) =>
     AuthServer,
     Effect.gen(function* () {
       const config = yield* HttpConfig;
+      const analytics = yield* Analytics;
       const sql = yield* SqlClient.SqlClient;
       const botProtection = yield* BotProtection;
       const emailSender = yield* EmailSender;
@@ -151,9 +154,32 @@ export const makeAuthServerLayer = (overrides: AuthServerOverrides = {}) =>
         },
       };
 
-      const auth = makeWorkspaceAuth(sql, authConfig, runAuthEffect);
+      // A duplicate email signup can return 200 with a synthetic user. The database
+      // hook marks real creations, and the handler confirms the request succeeded.
+      const signUps = new WeakMap<Request, string>();
+      const signupHooks = {
+        user: {
+          create: {
+            after: async (user, ctx) => {
+              if (ctx?.path === SIGN_UP_PATH && ctx.request !== undefined) {
+                signUps.set(ctx.request, user.id);
+              }
+            },
+          },
+        },
+      } satisfies NonNullable<BetterAuthOptions["databaseHooks"]>;
+
+      const auth = makeWorkspaceAuth(sql, authConfig, runAuthEffect, signupHooks);
       const withInvitations = yield* Effect.promise(() =>
-        makeAuthWithInvitationSignUp(auth, authConfig, workspaces, clock, runAuthEffect),
+        makeAuthWithInvitationSignUp(auth, authConfig, workspaces, clock, runAuthEffect, {
+          databaseHooks: signupHooks,
+          capture: async (request, method) => {
+            const userId = signUps.get(request);
+            if (userId !== undefined) {
+              await runAuthEffect(analytics.capture({ event: "user_signed_up", userId, method }));
+            }
+          },
+        }),
       );
       return AuthServer.of(withInvitations);
     }),
