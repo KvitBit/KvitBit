@@ -1006,9 +1006,9 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
             label: t.t("auth.signIn.title"),
             selected: model.signInMethod,
             items: [
-              { id: "password", label: t.t("auth.signIn.withPassword") },
-              { id: "magic_link", label: t.t("auth.signIn.withMagicLink") },
-              { id: "passkey", label: t.t("auth.signIn.withPasskey") },
+              { id: "password", label: t.t("auth.signIn.methodPassword") },
+              { id: "magic_link", label: t.t("auth.signIn.methodMagicLink") },
+              { id: "passkey", label: t.t("auth.signIn.methodPasskey") },
             ],
             onSelect: (id) =>
               Message.SelectedSignInMethod({

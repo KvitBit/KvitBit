@@ -57,6 +57,84 @@ if (typeof Bun === "undefined") {
       errors.assertClean();
     });
 
+    test("sign-in method selector stays single-line in English and Czech across styles", async ({
+      page,
+    }) => {
+      const errors = attachErrorGuards(page);
+      const cases = [
+        {
+          locale: "en",
+          labels: ["Password", "Email link", "Passkey"],
+          passkeyCta: "Sign in with a passkey",
+        },
+        {
+          locale: "cs",
+          labels: ["Heslo", "Odkaz e-mailem", "Přístupový klíč"],
+          passkeyCta: "Přihlásit se přístupovým klíčem",
+        },
+      ] as const;
+
+      await page.goto("/sign-in", { waitUntil: "domcontentloaded" });
+
+      for (const style of ["elegant", "cozy"] as const) {
+        for (const { locale, labels, passkeyCta } of cases) {
+          await page.evaluate(
+            ({ loc, sty }) => {
+              window.localStorage.setItem(
+                "kvitbit.prefs",
+                JSON.stringify({
+                  locale: loc,
+                  style: sty,
+                  mode: "system",
+                  contrast: "standard",
+                  theme: { _tag: "Preset", id: "graphite_atelier" },
+                }),
+              );
+            },
+            { loc: locale, sty: style },
+          );
+          await page.reload({ waitUntil: "domcontentloaded" });
+          await page.evaluate(() => document.fonts.ready);
+          await expect(page.locator(".kb-root")).toHaveAttribute("lang", locale);
+          await expect(page.locator(".kb-root")).toHaveAttribute("data-style", style);
+
+          const segmented = page.locator(".kb-auth-form .kb-segmented");
+          const buttons = segmented.locator("button");
+          await expect(buttons).toHaveText([...labels]);
+
+          const layout = await segmented.evaluate((el) => {
+            const groupRect = el.getBoundingClientRect();
+            const btns = [...el.querySelectorAll("button")];
+            return {
+              groupRight: groupRect.right,
+              lastBtnRight: btns.at(-1)?.getBoundingClientRect().right ?? 0,
+              items: btns.map((btn) => {
+                const range = document.createRange();
+                range.selectNodeContents(btn);
+                const lineCount = range.getClientRects().length;
+                return {
+                  text: btn.textContent?.trim() ?? "",
+                  lineCount,
+                  overflowX: btn.scrollWidth > btn.clientWidth + 1,
+                };
+              }),
+            };
+          });
+
+          for (const item of layout.items) {
+            expect(item.lineCount, `${style}/${locale} "${item.text}" wrapped`).toBe(1);
+            expect(item.overflowX, `${style}/${locale} "${item.text}" overflowed`).toBe(false);
+          }
+          expect(Math.abs(layout.groupRight - layout.lastBtnRight)).toBeLessThanOrEqual(2);
+
+          await buttons.nth(2).click();
+          await expect(page.getByTestId("auth-passkey-btn")).toHaveText(passkeyCta);
+        }
+      }
+
+      errors.assertClean();
+    });
+
     test("navigates workspace routes with responsive chrome and zero errors", async ({
       page,
     }, testInfo) => {

@@ -176,6 +176,15 @@
   gap: 14px;
 }
 
+.kb-auth-form .kb-segmented {
+  width: 100%;
+}
+
+.kb-auth-form .kb-segmented button {
+  flex: 1 1 auto;
+  padding: 6px 10px;
+}
+
 .kb-auth-divider {
   display: flex;
   align-items: center;
