@@ -61,6 +61,7 @@ import {
 import { declareServerService, serverServiceProps } from "../src/resources/server";
 
 const SAMPLE_DIGEST = `sha256:${"a".repeat(64)}`;
+const PROD_DNS_ZONES = ["kvitbit.cz", "kvitbit.app", "kvitbit.com", "kvitbit.eu", "kvitbit.dev"];
 
 const sampleProdConfig = (overrides: Partial<KvitbitStackConfig> = {}): KvitbitStackConfig => ({
   stage: "prod",
@@ -91,6 +92,7 @@ const sampleProdConfig = (overrides: Partial<KvitbitStackConfig> = {}): KvitbitS
     enableSmtp: true,
     enableMobileSigningKey: true,
   }),
+  dnsZones: [],
   edge: {
     domains: ["kvitbit.cz", "kvitbit.app"],
     enableHttps: true,
@@ -121,9 +123,54 @@ describe("Kvitbit Alchemy stack config", () => {
     expect(config.runnerPort).toBe(34431);
     expect(config.trustedProxyHops).toBe(1);
     expect(config.edge).toBeUndefined();
+    expect(config.dnsZones).toEqual([]);
     expect(imageReference(config)).toBe(
       `europe-west3-docker.pkg.dev/kvitbit-prod/kvitbit/kvitbit@${SAMPLE_DIGEST}`,
     );
+  });
+
+  test("loads and normalizes the configured DNS zone apexes without enabling the edge", async () => {
+    const provider = ConfigProvider.fromEnv({
+      env: {
+        KVITBIT_IMAGE_DIGEST: SAMPLE_DIGEST,
+        KVITBIT_DNS_ZONES:
+          " Kvitbit.cz., kvitbit.APP, kvitbit.com, kvitbit.eu, kvitbit.dev, kvitbit.cz ",
+      },
+    });
+    const config = await Effect.runPromise(
+      loadStackConfig.pipe(Effect.provide(ConfigProvider.layer(provider))),
+    );
+    expect(config.dnsZones).toEqual(PROD_DNS_ZONES);
+    expect(config.edge).toBeUndefined();
+  });
+
+  test.each([
+    "*.kvitbit.cz",
+    "https://kvitbit.cz",
+    "kvitbit.cz/path",
+    "kvitbit.cz..",
+    "single-label",
+    "-kvitbit.cz",
+    "192.0.2.1",
+    `${"x".repeat(64)}.cz`,
+    `${`${"x".repeat(63)}.`.repeat(4)}cz`,
+  ])("rejects invalid DNS zone %s", async (zone) => {
+    const provider = ConfigProvider.fromEnv({
+      env: { KVITBIT_IMAGE_DIGEST: SAMPLE_DIGEST, KVITBIT_DNS_ZONES: zone },
+    });
+    const error = await Effect.runPromise(
+      Effect.flip(loadStackConfig.pipe(Effect.provide(ConfigProvider.layer(provider)))),
+    );
+    expect(error).toMatchObject({ _tag: "InvalidStackConfig", field: "KVITBIT_DNS_ZONES" });
+  });
+
+  test("rejects DNS zones that leave no room for www when the edge is enabled", async () => {
+    const domain = `${`${"x".repeat(63)}.`.repeat(3)}${"y".repeat(58)}.cz`;
+    const error = await Effect.runPromise(
+      Effect.flip(validateStackConfig(sampleProdConfig({ dnsZones: [domain] }))),
+    );
+    expect(error.field).toBe("KVITBIT_DNS_ZONES");
+    expect(error.reason).toContain("www");
   });
 
   test("enables HTTPS edge, restricts direct Cloud Run ingress by default, and bumps trustedProxyHops when KVITBIT_EDGE_DOMAINS is set", async () => {
@@ -146,6 +193,7 @@ describe("Kvitbit Alchemy stack config", () => {
     const provider = ConfigProvider.fromEnv({
       env: {
         KVITBIT_BOOTSTRAP_FOUNDATION: "true",
+        KVITBIT_DNS_ZONES: "",
         KVITBIT_RUNNER_COUNT: "",
         KVITBIT_ENABLE_RESEND_SECRET: "true",
         KVITBIT_ENABLE_SMTP_SECRET: "",
@@ -157,6 +205,7 @@ describe("Kvitbit Alchemy stack config", () => {
     );
     expect(config.bootstrapFoundation).toBe(true);
     expect(config.imageDigest).toBe("");
+    expect(config.dnsZones).toEqual([]);
     expect(config.runnerCount).toBe(KVITBIT_PROD_DEFAULTS.runnerCount);
     const secretIds = config.secrets.map((s) => s.secretId);
     expect(secretIds).toContain("kvitbit-prod-database-url");
@@ -330,6 +379,29 @@ describe("Bootstrap state safety guard", () => {
     );
 
     await expect(Effect.runPromise(Effect.scoped(compileBootstrap(state)))).rejects.toBe(listError);
+  });
+
+  test("bootstraps the Cloud DNS API without declaring zones, including on retry", async () => {
+    const dnsConfig = { ...config, dnsZones: PROD_DNS_ZONES };
+    const state = State.inMemoryState({
+      [KVITBIT_STACK_NAME]: { prod: { CloudDnsApi: makeFakeResourceState("CloudDnsApi") } },
+    });
+    const stack = Stack.Stack(
+      KVITBIT_STACK_NAME,
+      { state, providers: Layer.empty },
+      declareKvitbitStack(dnsConfig).pipe(Effect.orDie),
+    );
+    const compiled = await Effect.runPromise(
+      Effect.scoped(stack).pipe(Effect.provideService(Stage, "prod")),
+    );
+    expect(Object.keys(compiled.resources).sort()).toEqual(
+      [...foundationResourceIds(dnsConfig)].sort(),
+    );
+    expect(compiled.resources.CloudDnsApi?.Props).toEqual({
+      project: "kvitbit-prod",
+      service: "dns.googleapis.com",
+    });
+    expect(Object.keys(compiled.resources).some((id) => id.startsWith("DnsZone-"))).toBe(false);
   });
 });
 
@@ -1203,6 +1275,101 @@ describe("Pure-Alchemy Edge (Cloud Armor + Cloud CDN + Token Log Exclusion)", ()
       expect(pattern.test(url)).toBe(false);
     }
     expect(tokenRoutePatterns.length).toBeGreaterThanOrEqual(7);
+  });
+});
+
+describe("Pure-Alchemy Cloud DNS", () => {
+  const compile = (config: KvitbitStackConfig) =>
+    Effect.runPromise(
+      Effect.scoped(
+        Stack.Stack(
+          KVITBIT_STACK_NAME,
+          { state: State.inMemoryState(), providers: Layer.empty },
+          declareKvitbitStack(config).pipe(Effect.orDie),
+        ),
+      ).pipe(Effect.provideService(Stage, config.stage)),
+    );
+
+  const resolveOutputs = (value: unknown, upstream: Record<string, unknown>) =>
+    Effect.runPromise(Output.evaluate(value, upstream).pipe(Effect.provide(State.inMemoryState())));
+
+  test.each(["prod", "staging"] as const)(
+    "keeps DNS opt-in for %s even when the edge is configured",
+    async (stage) => {
+      const compiled = await compile(sampleProdConfig({ stage }));
+      expect(compiled.resources.EdgeAddress).toBeDefined();
+      expect(compiled.resources.CloudDnsApi).toBeUndefined();
+      expect(Object.keys(compiled.resources).some((id) => id.startsWith("DnsZone-"))).toBe(false);
+      expect(compiled.output).not.toHaveProperty("dnsNameServers");
+    },
+  );
+
+  test("declares public zones and exports each zone's nameservers before edge setup", async () => {
+    const compiled = await compile(sampleProdConfig({ dnsZones: PROD_DNS_ZONES, edge: undefined }));
+    const api = compiled.resources.CloudDnsApi;
+    expect(api?.Type).toBe("GCP.ServiceUsage.ProjectService");
+    expect(api?.Props).toEqual({ project: "kvitbit-prod", service: "dns.googleapis.com" });
+    expect(Object.keys(compiled.resources).filter((id) => id.startsWith("DnsZone-"))).toEqual(
+      PROD_DNS_ZONES.map((domain) => `DnsZone-${domain}`),
+    );
+
+    const upstream: Record<string, unknown> = { CloudDnsApi: { state: "ENABLED" } };
+    const expectedNameServers: Record<string, string[]> = {};
+    for (const [index, domain] of PROD_DNS_ZONES.entries()) {
+      const id = `DnsZone-${domain}`;
+      const resource = compiled.resources[id];
+      expect(resource?.Type).toBe("GCP.DNS.ManagedZone");
+      expect(Object.keys(Output.upstreamAny(resource?.Props))).toEqual(["CloudDnsApi"]);
+      expect(await resolveOutputs(resource?.Props, upstream)).toMatchObject({
+        zoneName: expect.stringMatching(
+          new RegExp(`^kvitbit-prod-${domain.replace(".", "-")}-[0-9a-f]{12}$`),
+        ),
+        dnsName: `${domain}.`,
+        visibility: "public",
+        labels: { app: "kvitbit", stage: "prod", "managed-by": "alchemy" },
+      });
+      const nameServers = [`ns-cloud-a${index + 1}.googledomains.com.`];
+      upstream[id] = { nameServers };
+      expectedNameServers[domain] = nameServers;
+    }
+    if (compiled.output.bootstrapFoundation) throw new Error("Expected a full stack");
+    expect(await resolveOutputs(compiled.output.dnsNameServers, upstream)).toEqual(
+      expectedNameServers,
+    );
+  });
+
+  test("points each apex and www at the reserved edge IP and configures CAA", async () => {
+    const compiled = await compile(sampleProdConfig({ dnsZones: PROD_DNS_ZONES }));
+    expect(compiled.resources.EdgeAddress).toBeDefined();
+    for (const domain of PROD_DNS_ZONES) {
+      const id = `DnsZone-${domain}`;
+      const upstream = {
+        [id]: { zoneName: "resolved-zone" },
+        EdgeAddress: { address: "192.0.2.42" },
+      };
+      const expectedRecords = [
+        { suffix: "ApexA", name: `${domain}.`, type: "A", rrdatas: ["192.0.2.42"] },
+        { suffix: "WwwA", name: `www.${domain}.`, type: "A", rrdatas: ["192.0.2.42"] },
+        {
+          suffix: "ApexCaa",
+          name: `${domain}.`,
+          type: "CAA",
+          rrdatas: ['0 issue "pki.goog"', '0 issue "letsencrypt.org"'],
+        },
+      ];
+      for (const { suffix, ...record } of expectedRecords) {
+        const resource = compiled.resources[`${id}-${suffix}`];
+        expect(resource?.Type).toBe("GCP.DNS.ResourceRecordSet");
+        expect(Object.keys(Output.upstreamAny(resource?.Props))).toEqual(
+          record.type === "A" ? [id, "EdgeAddress"] : [id],
+        );
+        expect(await resolveOutputs(resource?.Props, upstream)).toEqual({
+          managedZone: "resolved-zone",
+          ttl: 300,
+          ...record,
+        });
+      }
+    }
   });
 });
 

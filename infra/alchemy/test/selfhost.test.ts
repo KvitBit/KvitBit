@@ -830,6 +830,7 @@ describe("Self-hosting and CI deploy artifacts", () => {
     const workflow = readFileSync(join(repoRoot, ".github/workflows/deploy.yml"), "utf8");
     const parsed = Bun.YAML.parse(workflow) as {
       on?: { workflow_dispatch?: { inputs?: Record<string, unknown> } };
+      jobs: { deploy: { steps: Array<{ run?: string; env?: Record<string, string> }> } };
     };
     expect(parsed).toBeDefined();
 
@@ -863,6 +864,10 @@ describe("Self-hosting and CI deploy artifacts", () => {
     expect(workflow).toContain(`sha-\${GITHUB_SHA}-run-\${GITHUB_RUN_ID}-\${GITHUB_RUN_ATTEMPT}`);
     expect(workflow).toContain("bun apps/server/src/migrate.ts");
     expect(workflow).toContain("bunx alchemy deploy --yes");
+    const alchemyStep = parsed.jobs.deploy.steps.find((step) =>
+      step.run?.includes("bunx alchemy deploy --yes"),
+    );
+    expect(alchemyStep?.env?.KVITBIT_DNS_ZONES).toBe(`\${{ vars.KVITBIT_DNS_ZONES }}`);
     expect(workflow).toContain("kvitbit/active-target");
     expect(workflow).toContain("--format='value(value)'");
     expect(workflow).not.toContain("--format='value(queryValue)'");
