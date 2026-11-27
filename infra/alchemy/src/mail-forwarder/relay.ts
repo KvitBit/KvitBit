@@ -182,6 +182,16 @@ export const buildResendForwardPayload = (params: {
 
   const recipientList = recipients.join(", ");
   const originalFrom = parsed.fromHeader || message.mailFrom || "(empty reverse-path)";
+  // Surface Reply-To explicitly whenever it differs from From OR was omitted from
+  // Resend's ASCII-only `reply_to` field (e.g. internationalized `žan@example.net`).
+  const visibleReplyTo =
+    replyToCandidate &&
+    replyToCandidate.trim().length > 0 &&
+    (replyTo === undefined ||
+      (parsed.replyToAddress !== undefined &&
+        parsed.replyToAddress.toLowerCase() !== (parsed.fromAddress ?? "").toLowerCase()))
+      ? replyToCandidate
+      : undefined;
   const skippedNotice =
     skippedAttachments.length > 0
       ? `Omitted large attachment(s): ${skippedAttachments.join(", ")} (see ${archivePrefixUri})`
@@ -190,6 +200,7 @@ export const buildResendForwardPayload = (params: {
   const metaLines = [
     `Forwarded for: ${recipientList}`,
     `Original From: ${originalFrom}`,
+    ...(visibleReplyTo ? [`Original Reply-To: ${visibleReplyTo}`] : []),
     ...(parsed.date ? [`Date: ${parsed.date}`] : []),
     `Archive: ${archivePrefixUri}`,
     ...(skippedNotice ? [skippedNotice] : []),
@@ -204,6 +215,7 @@ export const buildResendForwardPayload = (params: {
       `background:#f8fafc;border:1px solid #e2e8f0;border-radius:6px;padding:8px 12px;margin-bottom:14px;">` +
       `<strong>To:</strong> ${escapeHtml(recipientList)} &middot; ` +
       `<strong>From:</strong> ${escapeHtml(originalFrom)}` +
+      (visibleReplyTo ? ` &middot; <strong>Reply-To:</strong> ${escapeHtml(visibleReplyTo)}` : "") +
       (skippedAttachments.length > 0
         ? ` &middot; <strong>Omitted attachments:</strong> ${escapeHtml(skippedAttachments.join(", "))} (${escapeHtml(archivePrefixUri)})`
         : "") +

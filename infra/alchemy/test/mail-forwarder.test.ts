@@ -165,6 +165,113 @@ describe("MIME parser", () => {
     expect(html.indexOf("THIRD")).toBeGreaterThan(html.indexOf("<b>SECOND</b>"));
   });
 
+  test("preserves all children of multipart/mixed nested inside multipart/alternative per RFC 2046 §5.1.4", () => {
+    const raw = [
+      "From: notes@example.com",
+      "To: ops@kvitbit.com",
+      "Subject: Nested mixed in alternative",
+      'Content-Type: multipart/alternative; boundary="alt-b"',
+      "",
+      "--alt-b",
+      'Content-Type: text/plain; charset="utf-8"',
+      "",
+      "Plain summary",
+      "--alt-b",
+      'Content-Type: multipart/mixed; boundary="mix-inner"',
+      "",
+      "--mix-inner",
+      'Content-Type: text/html; charset="utf-8"',
+      "",
+      "<p>FIRST</p>",
+      "--mix-inner",
+      'Content-Type: text/html; charset="utf-8"',
+      "",
+      "<p>SECOND</p>",
+      "--mix-inner--",
+      "--alt-b--",
+      "",
+    ].join("\r\n");
+
+    const parsed = parseEmail(Buffer.from(raw, "utf8"));
+    expect(parsed.text).toBe("Plain summary");
+    expect(parsed.html).toBe("<p>FIRST</p><hr><p>SECOND</p>");
+  });
+
+  test("parses RFC 5322 trailing comments on From/Reply-To and visibly preserves distinct UTF-8 Reply-To in text and HTML", () => {
+    expect(extractAddress("Ana <ana@example.org> (Support)")).toEqual({
+      address: "ana@example.org",
+      displayName: "Ana",
+    });
+    expect(extractAddress("Ana <ana@example.org> (Support (EU))")).toEqual({
+      address: "ana@example.org",
+      displayName: "Ana",
+    });
+
+    const commentedRaw = Buffer.from(
+      [
+        "From: billing@example.org (Billing)",
+        "Reply-To: Ana <ana@example.org> (Support)",
+        "To: ops@kvitbit.com",
+        "Subject: Invoice question",
+        'Content-Type: text/plain; charset="utf-8"',
+        "",
+        "Hello",
+      ].join("\r\n"),
+      "utf8",
+    );
+    const commentedMsg: InboundMessage = {
+      remoteIp: "203.0.113.10",
+      tls: true,
+      helo: "mail.example.org",
+      mailFrom: "bounces@example.org",
+      rcptTo: ["ops@kvitbit.com"],
+      rawBytes: commentedRaw,
+    };
+    const commentedPayload = buildResendForwardPayload({
+      message: commentedMsg,
+      parsed: parseEmail(commentedRaw),
+      deliveryFingerprint: computeDeliveryFingerprint(commentedMsg),
+      archiveBucket: "kvitbit-prod-mail-archive-prod",
+      forwardTo: "filkalny@gmail.com",
+      forwardFrom: "forwarder@kvitbit.com",
+      maxAttachmentBytes: 7 * 1024 * 1024,
+    });
+    expect(commentedPayload.reply_to).toBe("ana@example.org");
+
+    const utf8ReplyRaw = Buffer.from(
+      [
+        "From: billing@example.org",
+        "Reply-To: žan@example.net",
+        "To: ops@kvitbit.com",
+        "Subject: Dotaz",
+        'Content-Type: text/html; charset="utf-8"',
+        "",
+        "<p>Dobrý den</p>",
+      ].join("\r\n"),
+      "utf8",
+    );
+    const utf8ReplyMsg: InboundMessage = {
+      remoteIp: "203.0.113.10",
+      tls: true,
+      helo: "mail.example.org",
+      mailFrom: "billing@example.org",
+      rcptTo: ["ops@kvitbit.com"],
+      rawBytes: utf8ReplyRaw,
+    };
+    const utf8ReplyPayload = buildResendForwardPayload({
+      message: utf8ReplyMsg,
+      parsed: parseEmail(utf8ReplyRaw),
+      deliveryFingerprint: computeDeliveryFingerprint(utf8ReplyMsg),
+      archiveBucket: "kvitbit-prod-mail-archive-prod",
+      forwardTo: "filkalny@gmail.com",
+      forwardFrom: "forwarder@kvitbit.com",
+      maxAttachmentBytes: 7 * 1024 * 1024,
+    });
+    expect(utf8ReplyPayload.reply_to).toBeUndefined();
+    expect(String(utf8ReplyPayload.text)).toContain("Original Reply-To: žan@example.net");
+    expect(String(utf8ReplyPayload.html)).toContain("<strong>Reply-To:</strong> žan@example.net");
+  });
+
   test("extracts full UTF-8 bare mailbox without ASCII substring truncation and omits non-ASCII reply_to", () => {
     expect(extractAddress("žan@example.net")).toEqual({
       address: "žan@example.net",
@@ -393,11 +500,61 @@ describe("Effect MailRelay (GCS archive + Resend HTTPS)", () => {
     expect(resendRequests[0]?.body).toBe(resendRequests[1]?.body);
     // Both uniquely named GCS objects live under the exact searchable hash prefix referenced in the payload.
     const expectedPrefix = buildArchivePrefix(computeDeliveryFingerprint(msgOrderA));
+    const expectedArchiveUri = `gs://kvitbit-prod-mail-archive-prod/${expectedPrefix}`;
     expect(uploadedNames).toHaveLength(2);
     expect(uploadedNames[0]).toStartWith(expectedPrefix);
     expect(uploadedNames[1]).toStartWith(expectedPrefix);
     expect(uploadedNames[0]).not.toBe(uploadedNames[1]);
-    expect(resendRequests[0]?.body).toContain(expectedPrefix);
+    const parsedReq = JSON.parse(resendRequests[0]?.body ?? "{}") as {
+      text?: string;
+      headers?: Record<string, string>;
+    };
+    expect(parsedReq.headers?.["X-Kvitbit-Archive-Prefix"]).toBe(expectedArchiveUri);
+    expect(parsedReq.text).toContain(expectedArchiveUri);
+
+    // Also verify HTML omitted-attachment banner includes the exact archive prefix URI.
+    const htmlWithBigAttachment = Buffer.from(
+      [
+        "From: vendor@example.org",
+        "To: ops@kvitbit.com",
+        "Subject: Huge PDF",
+        'Content-Type: multipart/mixed; boundary="big-b"',
+        "",
+        "--big-b",
+        'Content-Type: text/html; charset="utf-8"',
+        "",
+        "<p>See attachment</p>",
+        "--big-b",
+        'Content-Type: application/pdf; name="huge.pdf"',
+        'Content-Disposition: attachment; filename="huge.pdf"',
+        "Content-Transfer-Encoding: base64",
+        "",
+        Buffer.alloc(256, 65).toString("base64"),
+        "--big-b--",
+        "",
+      ].join("\r\n"),
+      "utf8",
+    );
+    const bigMsg: InboundMessage = {
+      ...sampleMessage,
+      rawBytes: htmlWithBigAttachment,
+    };
+    const bigFp = computeDeliveryFingerprint(bigMsg);
+    const bigExpectedUri = `gs://kvitbit-prod-mail-archive-prod/${buildArchivePrefix(bigFp)}`;
+    const bigPayload = buildResendForwardPayload({
+      message: bigMsg,
+      parsed: parseEmail(htmlWithBigAttachment),
+      deliveryFingerprint: bigFp,
+      archiveBucket: "kvitbit-prod-mail-archive-prod",
+      forwardTo: "filkalny@gmail.com",
+      forwardFrom: "forwarder@kvitbit.com",
+      maxAttachmentBytes: 100,
+    });
+    expect(String(bigPayload.html)).toContain(bigExpectedUri);
+    expect(String(bigPayload.text)).toContain(bigExpectedUri);
+    expect((bigPayload.headers as Record<string, string>)["X-Kvitbit-Archive-Prefix"]).toBe(
+      bigExpectedUri,
+    );
   });
 
   test("archives to GCS and returns 250 without calling Resend in archive-only mode", async () => {
@@ -552,6 +709,8 @@ describe("Effect SMTP server (RFC 5321 + RFC 6531 SMTPUTF8 + STARTTLS)", () => {
     expect(parseEnvelopePath("<test@example_.com>", true)).toBeUndefined();
     expect(parseEnvelopePath("<test@exam,ple.com>", true)).toBeUndefined();
     expect(parseEnvelopePath("<test@192.0.2.1>", true)).toBeUndefined();
+    // 60 'é' characters encode to a 66-octet punycode A-label (> 63-octet DNS limit per RFC 5890).
+    expect(parseEnvelopePath(`<test@${"é".repeat(60)}.com>`, true)).toBeUndefined();
   });
 
   const runSmtpSession = (

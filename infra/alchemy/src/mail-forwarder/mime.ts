@@ -6,6 +6,8 @@
  * forwarding while preserving raw `.eml` bytes separately in GCS.
  */
 
+import { domainToASCII } from "node:url";
+
 export interface ParsedAttachment {
   readonly filename: string;
   readonly contentType: string;
@@ -262,23 +264,25 @@ const splitMultipart = (body: Uint8Array, boundary: string): Array<Uint8Array> =
   return parts;
 };
 
-const isValidDomainLabel = (label: string): boolean => {
-  if (label.length === 0 || label.length > 63 || label.startsWith("-") || label.endsWith("-")) {
+const ASCII_LDH_LABEL_RE = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$/;
+
+const isValidDomain = (domain: string): boolean => {
+  if (domain.length === 0 || domain.length > 253) return false;
+  for (const ch of domain) {
+    const code = ch.charCodeAt(0);
+    if (code <= 0x20 || code === 0x7f || /\s/.test(ch)) return false;
+  }
+  const rawLabels = domain.split(".");
+  if (rawLabels.length < 2 || rawLabels.some((label) => label.length === 0)) {
     return false;
   }
-  for (const ch of label) {
-    const code = ch.charCodeAt(0);
-    if (code <= 0x7f) {
-      const isAsciiAlnumOrHyphen =
-        (code >= 0x30 && code <= 0x39) ||
-        (code >= 0x41 && code <= 0x5a) ||
-        (code >= 0x61 && code <= 0x7a) ||
-        code === 0x2d;
-      if (!isAsciiAlnumOrHyphen) return false;
-    } else if (/\s/.test(ch)) {
-      return false;
-    }
-  }
+  const asciiDomain = domainToASCII(domain);
+  if (asciiDomain.length === 0 || asciiDomain.length > 253) return false;
+  const asciiLabels = asciiDomain.split(".");
+  if (asciiLabels.length < 2) return false;
+  if (!asciiLabels.every((label) => ASCII_LDH_LABEL_RE.test(label))) return false;
+  const tld = asciiLabels[asciiLabels.length - 1] ?? "";
+  if (/^\d+$/.test(tld)) return false;
   return true;
 };
 
@@ -303,7 +307,7 @@ const hasDisallowedLocalChar = (local: string): boolean => {
   return false;
 };
 
-/** Validates a full RFC 5321 / RFC 6531 (`SMTPUTF8`) mailbox without substring matching. */
+/** Validates a full RFC 5321 / RFC 6531 (`SMTPUTF8`) + RFC 5890 IDNA mailbox without substring matching. */
 export const isValidMailbox = (address: string): boolean => {
   if (address.length === 0 || address.length > 254) return false;
   const atIdx = address.lastIndexOf("@");
@@ -311,22 +315,57 @@ export const isValidMailbox = (address: string): boolean => {
   const local = address.slice(0, atIdx);
   const domain = address.slice(atIdx + 1);
   if (local.length > 64 || hasDisallowedLocalChar(local)) return false;
-  const labels = domain.split(".");
-  if (labels.length < 2) return false;
-  if (!labels.every(isValidDomainLabel)) return false;
-  const tld = labels[labels.length - 1] ?? "";
-  if (/^\d+$/.test(tld)) return false;
-  return true;
+  return isValidDomain(domain);
+};
+
+/** Strips RFC 5322 §3.2.2 comments (including nested parentheses) outside quoted strings. */
+const stripRfc5322Comments = (input: string): string => {
+  let out = "";
+  let inQuotes = false;
+  let commentDepth = 0;
+  for (let i = 0; i < input.length; i += 1) {
+    const ch = input[i] ?? "";
+    if (commentDepth > 0) {
+      if (ch === "\\" && i + 1 < input.length) {
+        i += 1;
+      } else if (ch === "(") {
+        commentDepth += 1;
+      } else if (ch === ")") {
+        commentDepth -= 1;
+        if (commentDepth === 0) out += " ";
+      }
+      continue;
+    }
+    if (inQuotes) {
+      out += ch;
+      if (ch === "\\" && i + 1 < input.length) {
+        i += 1;
+        out += input[i] ?? "";
+      } else if (ch === '"') {
+        inQuotes = false;
+      }
+      continue;
+    }
+    if (ch === '"') {
+      inQuotes = true;
+      out += ch;
+    } else if (ch === "(") {
+      commentDepth = 1;
+    } else {
+      out += ch;
+    }
+  }
+  return out.trim();
 };
 
 export const extractAddress = (
   headerValue: string | undefined,
 ): { address: string | undefined; displayName: string | undefined } => {
   if (!headerValue) return { address: undefined, displayName: undefined };
-  const raw = headerValue.trim();
-  // Parse RFC 5322 angle-addr before RFC 2047 decoding so an encoded display-name
-  // containing CRLF or angle brackets cannot spoof the extracted address.
-  const angleMatch = raw.match(/^([\s\S]*?)<\s*([^<>]+?)\s*>\s*$/);
+  // Strip RFC 5322 comments (including trailing comments after `>`) before RFC 2047 decoding
+  // so neither comments nor encoded display-names can break or spoof angle-addr parsing.
+  const uncommented = stripRfc5322Comments(headerValue);
+  const angleMatch = uncommented.match(/^([\s\S]*?)<\s*([^<>]+?)\s*>\s*$/);
   if (angleMatch) {
     const rawName = decodeRfc2047(angleMatch[1] ?? "")
       .trim()
@@ -340,9 +379,8 @@ export const extractAddress = (
   }
   // Bare header: validate the entire address token rather than matching an ASCII substring
   // inside an internationalized mailbox like `žan@example.net`.
-  const stripped = raw.replace(/\([^)]*\)/g, "").trim();
   return {
-    address: isValidMailbox(stripped) ? stripped : undefined,
+    address: isValidMailbox(uncommented) ? uncommented : undefined,
     displayName: undefined,
   };
 };
@@ -384,6 +422,36 @@ const stripHtmlToText = (html: string): string =>
     .replace(/\n{3,}/g, "\n\n")
     .trim();
 
+const renderSegments = (
+  segments: ReadonlyArray<BodySegment>,
+): { readonly text: string | undefined; readonly html: string | undefined } => {
+  const hasAnyHtml = segments.some((seg) => seg.html !== undefined);
+  const renderedTextParts: Array<string> = [];
+  const renderedHtmlParts: Array<string> = [];
+
+  for (const seg of segments) {
+    if (seg.text !== undefined) {
+      renderedTextParts.push(seg.text);
+    } else if (seg.html !== undefined) {
+      const stripped = stripHtmlToText(seg.html);
+      if (stripped.length > 0) renderedTextParts.push(stripped);
+    }
+
+    if (hasAnyHtml) {
+      if (seg.html !== undefined) {
+        renderedHtmlParts.push(seg.html);
+      } else if (seg.text !== undefined) {
+        renderedHtmlParts.push(plainTextToHtml(seg.text));
+      }
+    }
+  }
+
+  return {
+    text: renderedTextParts.length > 0 ? renderedTextParts.join("\n\n") : undefined,
+    html: renderedHtmlParts.length > 0 ? renderedHtmlParts.join("<hr>") : undefined,
+  };
+};
+
 const walkEntity = (raw: Uint8Array, out: CollectedParts, depth: number): void => {
   if (depth > MAX_MIME_DEPTH) return;
   const { headers: headerBlock, body } = splitHeaderAndBody(raw);
@@ -395,24 +463,34 @@ const walkEntity = (raw: Uint8Array, out: CollectedParts, depth: number): void =
 
   if (mimeType.startsWith("multipart/") && contentType.params.boundary) {
     if (mimeType === "multipart/alternative") {
-      const altBucket: CollectedParts = { segments: [], attachments: [] };
+      // Per RFC 2046 §5.1.4, render each direct child completely (including nested
+      // multipart/mixed children) before selecting the preferred alternative representations.
+      let plainAltText: string | undefined;
+      let fallbackText: string | undefined;
+      let richestHtml: string | undefined;
+      const attachments: Array<ParsedAttachment> = [];
+
       for (const child of splitMultipart(body, contentType.params.boundary)) {
-        walkEntity(child, altBucket, depth + 1);
+        const childBucket: CollectedParts = { segments: [], attachments: [] };
+        walkEntity(child, childBucket, depth + 1);
+        const rendered = renderSegments(childBucket.segments);
+        if (rendered.html !== undefined) {
+          richestHtml = rendered.html;
+          if (rendered.text !== undefined) fallbackText = rendered.text;
+        } else if (rendered.text !== undefined) {
+          plainAltText = rendered.text;
+        }
+        attachments.push(...childBucket.attachments);
       }
-      // Collapse alternative representations into one logical segment.
-      let altText: string | undefined;
-      let altHtml: string | undefined;
-      for (const seg of altBucket.segments) {
-        if (seg.text !== undefined && altText === undefined) altText = seg.text;
-        if (seg.html !== undefined && altHtml === undefined) altHtml = seg.html;
-      }
-      if (altText !== undefined || altHtml !== undefined) {
+
+      const selectedText = plainAltText ?? fallbackText;
+      if (selectedText !== undefined || richestHtml !== undefined) {
         out.segments.push({
-          ...(altText !== undefined ? { text: altText } : {}),
-          ...(altHtml !== undefined ? { html: altHtml } : {}),
+          ...(selectedText !== undefined ? { text: selectedText } : {}),
+          ...(richestHtml !== undefined ? { html: richestHtml } : {}),
         });
       }
-      out.attachments.push(...altBucket.attachments);
+      out.attachments.push(...attachments);
       return;
     }
     // multipart/mixed, multipart/related, etc.: preserve every independent child in order.
@@ -477,27 +555,7 @@ export const parseEmail = (raw: Uint8Array): ParsedEmail => {
     attachments: [],
   };
   walkEntity(raw, collected, 0);
-
-  const hasAnyHtml = collected.segments.some((seg) => seg.html !== undefined);
-  const renderedTextParts: Array<string> = [];
-  const renderedHtmlParts: Array<string> = [];
-
-  for (const seg of collected.segments) {
-    if (seg.text !== undefined) {
-      renderedTextParts.push(seg.text);
-    } else if (seg.html !== undefined) {
-      const stripped = stripHtmlToText(seg.html);
-      if (stripped.length > 0) renderedTextParts.push(stripped);
-    }
-
-    if (hasAnyHtml) {
-      if (seg.html !== undefined) {
-        renderedHtmlParts.push(seg.html);
-      } else if (seg.text !== undefined) {
-        renderedHtmlParts.push(plainTextToHtml(seg.text));
-      }
-    }
-  }
+  const rendered = renderSegments(collected.segments);
 
   return {
     subject,
@@ -507,8 +565,8 @@ export const parseEmail = (raw: Uint8Array): ParsedEmail => {
     replyToAddress: replyToParsed.address,
     messageId,
     date,
-    text: renderedTextParts.length > 0 ? renderedTextParts.join("\n\n") : undefined,
-    html: renderedHtmlParts.length > 0 ? renderedHtmlParts.join("<hr>") : undefined,
+    text: rendered.text,
+    html: rendered.html,
     attachments: collected.attachments,
   };
 };
