@@ -181,6 +181,8 @@ export const declareFoundation = Effect.fn("KvitbitStack.declareFoundation")(fun
     }
   }
 
+  const resendSecret = secretResources.get(`${resourceNames(config).prefix}-resend-api-key`);
+
   return {
     dnsApi,
     repositoryName: repository.name,
@@ -188,6 +190,7 @@ export const declareFoundation = Effect.fn("KvitbitStack.declareFoundation")(fun
     mobileAssetsBucketName: mobileAssetsBucket.bucketName,
     serverServiceAccountEmail: serverSa.email,
     runnerServiceAccountEmail: runnerSa.email,
+    resendSecretName: resendSecret?.name,
     secretGrants,
     serverDependencies: [
       serverBlobsAdmin.member,
