@@ -947,7 +947,18 @@ case "$1" in
     cp "${stateDir}/registry-image-id" "${stateDir}/pulled-image-id"
     cp "${stateDir}/registry-ref" "${stateDir}/pulled-repo-digest"
     ;;
+  container)
+    if [ "$2" = "prune" ]; then
+      echo "docker:prune:containers" >> "${stateDir}/log"
+      exit 0
+    fi
+    exit 1
+    ;;
   image)
+    if [ "$2" = "prune" ]; then
+      echo "docker:prune:images" >> "${stateDir}/log"
+      exit 0
+    fi
     [ "$2" = "inspect" ] && [ -f "${stateDir}/pulled-ref" ] || exit 1
     [ "$5" = "$(cat "${stateDir}/pulled-ref")" ] || exit 1
     printf '%s\\n%s\\n' "$(cat "${stateDir}/pulled-image-id")" "$(cat "${stateDir}/pulled-repo-digest")"
@@ -1093,9 +1104,19 @@ fi
         );
         const logAfterFourth = readFileSync(join(stateDir, "log"), "utf8");
         expect(logAfterFourth).toContain(`docker:pull:${ref2}`);
+        expect(logAfterFourth).toContain("docker:prune:containers");
+        expect(logAfterFourth).toContain("docker:prune:images");
+        // Verify stale images are pruned both before pulling the new digest and after switching to it.
+        const linesAfterFourth = logAfterFourth.trim().split("\n");
+        const pullRef2Idx = linesAfterFourth.lastIndexOf(`docker:pull:${ref2}`);
+        const pruneBeforePullIdx = linesAfterFourth.lastIndexOf("docker:prune:images", pullRef2Idx);
+        const lastStartIdx = linesAfterFourth.lastIndexOf("systemctl:start kvitbit-worker.service");
+        const pruneAfterStartIdx = linesAfterFourth.indexOf("docker:prune:images", lastStartIdx);
+        expect(pruneBeforePullIdx).toBeGreaterThanOrEqual(0);
+        expect(pruneBeforePullIdx).toBeLessThan(pullRef2Idx);
+        expect(pruneAfterStartIdx).toBeGreaterThan(lastStartIdx);
         expect(
-          logAfterFourth.split("\n").filter((l) => l === "systemctl:start kvitbit-worker.service")
-            .length,
+          linesAfterFourth.filter((l) => l === "systemctl:start kvitbit-worker.service").length,
         ).toBe(3);
       },
     );

@@ -373,10 +373,17 @@ fi
 
 export DOCKER_CONFIG="/run/kvitbit/docker"
 install -d -m 0700 "$DOCKER_CONFIG"
+prune_unused_docker_storage() {
+  # Remove stopped containers (e.g. left behind after a hard reset) and unreferenced images
+  # without touching the currently running worker image so rollback stays intact if pull fails.
+  docker container prune -f >/dev/null 2>&1 || true
+  docker image prune -af >/dev/null 2>&1 || true
+}
 docker_login() {
   printf '%s' "$ACCESS_TOKEN" | docker login -u oauth2accesstoken --password-stdin "https://$REGISTRY_HOST"
 }
 pull_verified_image() {
+  prune_unused_docker_storage
   docker pull -- "$TARGET_IMAGE_REF" || return 1
   VERIFIED_IMAGE_ID="$(verified_image_id)"
 }
@@ -456,6 +463,8 @@ systemctl start kvitbit-worker.service
 for _ in 1 2 3 4 5 6; do
   if worker_is_running "$VERIFIED_IMAGE_ID"; then
     publish_active_state "$TARGET_IMAGE_DIGEST" "$TARGET_CONFIG_SHA"
+    # Reclaim the superseded image immediately after the new worker is verified running.
+    prune_unused_docker_storage
     exit 0
   fi
   sleep 2
@@ -494,6 +503,7 @@ Requires=docker.service
 
 [Service]
 Type=oneshot
+StandardError=journal+console
 ExecStart=/bin/bash /var/lib/kvitbit/reconcile-worker.sh
 RECONCILE_UNIT
 
