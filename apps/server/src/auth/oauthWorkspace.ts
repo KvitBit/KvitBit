@@ -11,11 +11,13 @@ import {
   OAuthScopeToken,
   READ_SCOPES,
 } from "@kvitbit/api-contract";
-import { betterAuth } from "better-auth";
+import { EmailNotAccepted, EmailOutcomeUnknown, EmailRejected } from "@kvitbit/domain/ports";
+import { type BetterAuthOptions, betterAuth } from "better-auth";
 import { APIError, createAuthMiddleware } from "better-auth/api";
 import { Effect, Redacted, Schema } from "effect";
 import { SqlClient } from "effect/sql";
 import { runDrizzleEffect, withDrizzleSqlContext } from "./drizzleBridge";
+import type { AuthEffectRunner } from "./logging";
 
 type ConsentDecision =
   | { readonly accept: false }
@@ -134,7 +136,11 @@ const scopeAliasesForGrant = <T>(client: T): T => {
   return { ...client, scopes: [...scopes] };
 };
 
-export const makeWorkspaceAuth = (sql: SqlClient.SqlClient) => (config: AuthConfig) => {
+export const makeWorkspaceAuth = (
+  sql: SqlClient.SqlClient,
+  config: AuthConfig,
+  runAuthEffect: AuthEffectRunner,
+) => {
   const options = authOptions({
     ...config,
     beforeHooks: [
@@ -225,8 +231,13 @@ export const makeWorkspaceAuth = (sql: SqlClient.SqlClient) => (config: AuthConf
       for share of c`.pipe(Effect.map((rows) => rows.length > 0));
   };
 
-  const auth = betterAuth({
+  const serverOptions: ReturnType<typeof authOptions> &
+    Pick<BetterAuthOptions, "logger" | "onAPIError"> = {
     ...options,
+    // Better Auth can pass raw SQL parameters and authentication material to its logger.
+    logger: { disabled: true },
+    // Better Call otherwise prints unexpected errors directly to stderr.
+    onAPIError: { throw: true },
     database: (initOptions) => {
       const adapter = options.database(initOptions);
       return {
@@ -301,18 +312,36 @@ export const makeWorkspaceAuth = (sql: SqlClient.SqlClient) => (config: AuthConf
         },
       };
     },
-  });
+  };
+  const auth = betterAuth<ReturnType<typeof authOptions>>(serverOptions);
+  const handle = async (request: Request) => {
+    try {
+      return await auth.handler(request);
+    } catch (error) {
+      if (
+        !(
+          error instanceof EmailRejected ||
+          error instanceof EmailNotAccepted ||
+          error instanceof EmailOutcomeUnknown
+        )
+      ) {
+        await runAuthEffect(Effect.logError("Authentication request failed"));
+      }
+      return new Response(null, { status: 500, statusText: "Internal Server Error" });
+    }
+  };
 
   const consentPage = new URL(config.oauthConsentPage, config.baseURL);
   return {
     ...auth,
+    fetch: handle,
     handler: async (request: Request) => {
       const path = new URL(request.url).pathname;
       if (
         request.method !== "POST" ||
         (path !== "/api/auth/oauth2/token" && path !== "/api/auth/oauth2/revoke")
       ) {
-        return exposeConsentId(await auth.handler(request), consentPage);
+        return exposeConsentId(await handle(request), consentPage);
       }
       const tokenRequest: TokenRequest = {};
       return runDrizzleEffect(
@@ -320,7 +349,7 @@ export const makeWorkspaceAuth = (sql: SqlClient.SqlClient) => (config: AuthConf
           .withTransaction(
             Effect.gen(function* () {
               const response = yield* withDrizzleSqlContext(() =>
-                tokenContext.run(tokenRequest, () => auth.handler(request)),
+                tokenContext.run(tokenRequest, () => handle(request)),
               );
               // Provider 4xx responses can intentionally revoke a token family.
               if (response.status >= 500) return yield* Effect.fail(response);

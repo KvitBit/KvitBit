@@ -25,6 +25,7 @@ import {
   WorkspaceId,
   Workspaces,
 } from "@kvitbit/domain/contract";
+import type { EmailSender } from "@kvitbit/domain/ports";
 import { Effect, Layer, ManagedRuntime } from "effect";
 import { FetchHttpClient, HttpRouter } from "effect/http";
 import { TestClock } from "effect/testing";
@@ -113,6 +114,8 @@ export interface HarnessOptions extends TestCoreOptions {
     | Layer.Layer<BotProtection>
     | Layer.Layer<BotProtection, never, import("effect/sql").SqlClient.SqlClient>;
   readonly authOverrides?: AuthServerOverrides;
+  readonly authEmailSender?: Layer.Layer<EmailSender>;
+  readonly logger?: Layer.Layer<never>;
   readonly config?: Parameters<typeof HttpConfigTest>[0];
   readonly feedbackFetch?: typeof globalThis.fetch;
 }
@@ -136,7 +139,7 @@ export const makeHarness = (options: HarnessOptions = {}) => {
     options.authOverrides === undefined
       ? AuthServerLive
       : makeAuthServerLayer(options.authOverrides)
-  ).pipe(Layer.provide(baseCore));
+  ).pipe(Layer.provide(options.authEmailSender ?? Layer.empty), Layer.provide(baseCore));
   const core = Layer.merge(baseCore, authLayer);
   const resolverLayer =
     options.principalResolver === "live"
@@ -152,6 +155,7 @@ export const makeHarness = (options: HarnessOptions = {}) => {
         ? Layer.empty
         : Layer.succeed(FetchHttpClient.Fetch, options.feedbackFetch),
     ]),
+    Layer.provideMerge(options.logger ?? Layer.empty),
   );
   const web = HttpRouter.toWebHandler(app, {
     memoMap,

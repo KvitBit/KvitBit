@@ -10,12 +10,12 @@
  * Migrations NEVER run at server or worker boot.
  */
 import { fileURLToPath } from "node:url";
-import { NodeRuntime } from "@effect/platform-node";
 import { PgClient } from "@effect/sql-pg";
 import { clusterStorageMigrationsLayer } from "@kvitbit/adapters/jobs";
 import { readMigrationFiles } from "drizzle-orm/migrator";
 import { Config, Effect, Layer } from "effect";
 import { SqlClient } from "effect/sql";
+import { runServerMain } from "./logging/logger";
 
 /** Resolves `packages/db/drizzle` via the `@kvitbit/db` workspace package. */
 export const defaultMigrationsFolder = (): string =>
@@ -100,5 +100,5 @@ const isMain =
     : process.argv[1]?.endsWith("migrate.ts") || process.argv[1]?.endsWith("migrate.js");
 
 if (isMain) {
-  NodeRuntime.runMain(migrateProgram);
+  runServerMain(migrateProgram);
 }
