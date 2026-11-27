@@ -1,3 +1,4 @@
+import { Database } from "bun:sqlite";
 import { expect, test } from "bun:test";
 import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -20,8 +21,10 @@ switch (executable) {
     const repo = fixture.repository ?? { id: 100, full_name: "totalolage/kvitbit", owner: { id: 1, type: "User" } };
     const base = "repos/" + repo.full_name;
     if (fixture.githubFailure) process.exit(67);
-    if (path === base) {
+    if (path === base || (fixture.aliases ?? []).includes(path)) {
       output(repo);
+    } else if (fixture.otherRepositories?.[path]) {
+      output(fixture.otherRepositories[path]);
     } else if (path.startsWith(base + "/issues?")) {
       output([fixture.issues, fixture.moreIssues ?? []]);
     } else if (path.startsWith(base + "/collaborators?")) {
@@ -53,7 +56,7 @@ switch (executable) {
   }
   case "git": {
     if (args.slice(2).join(" ") === "remote get-url origin") {
-      process.stdout.write(fixture.origin ?? "git@github.com:totalolage/kvitbit.git");
+      process.stdout.write(fixture.origins?.[args[1]] ?? fixture.origin ?? "git@github.com:totalolage/kvitbit.git");
     } else if (args[2] === "fetch") {
       if (fixture.fetchFailure) process.exit(69);
     } else if (args[2] === "for-each-ref") {
@@ -64,11 +67,7 @@ switch (executable) {
     break;
   }
   case "t3": {
-    if (args[1] === "list") {
-      output((fixture.threads ?? []).map(({ threadId, title, projectId, parentThreadId }) => ({
-        threadId, title, projectId, parentThreadId,
-      })));
-    } else if (args[1] === "show") {
+    if (args[1] === "show") {
       const thread = fixture.threads.find(({ threadId }) => threadId === args.at(-1));
       output({ thread, messages: args[3] === "0" ? [] : (thread.messages ?? []).slice(-Number(args[3])) });
     } else if (args[1] === "start") {
@@ -119,11 +118,16 @@ interface Call {
 
 type Output = Awaited<ReturnType<typeof runIssuePool>> & { apply: boolean; repo: string };
 
+interface Fixture {
+  threads?: (ReturnType<typeof thread> & { archived?: boolean })[];
+  [key: string]: unknown;
+}
+
 async function withCli(
   testCase: (cli: {
     project: string;
     state: string;
-    setFixture(fixture: object): Promise<void>;
+    setFixture(fixture: Fixture): Promise<void>;
     run(...args: string[]): Promise<{
       status: number;
       result: Output | null;
@@ -137,8 +141,24 @@ async function withCli(
   const fake = join(project, "fake.mjs");
   const bin = join(project, "bin");
   const state = join(project, "db", "pool.sqlite");
+  const t3Home = join(project, "t3");
+  const t3State = join(t3Home, "userdata");
+  await mkdir(t3State, { recursive: true });
+  const registry = new Database(join(t3State, "statev2.sqlite"));
   let runId = 0;
   try {
+    registry.exec(`
+      CREATE TABLE projection_projects (
+        project_id TEXT, workspace_root TEXT, deleted_at TEXT, archived_at TEXT
+      );
+      CREATE TABLE projection_threads (
+        thread_id TEXT, project_id TEXT, branch TEXT, deleted_at TEXT, archived_at TEXT
+      );
+    `);
+    registry.run("INSERT INTO projection_projects VALUES (?, ?, NULL, NULL)", [
+      "test-project",
+      project,
+    ]);
     await mkdir(bin);
     await writeFile(fake, fakeCommand);
     await Promise.all(
@@ -156,6 +176,15 @@ async function withCli(
       state,
       async setFixture(fixture) {
         await writeFile(fixturePath, JSON.stringify(fixture));
+        registry.exec("DELETE FROM projection_threads");
+        for (const { threadId, branch, archived } of fixture.threads ?? []) {
+          registry.run("INSERT INTO projection_threads VALUES (?, ?, ?, NULL, ?)", [
+            threadId,
+            "test-project",
+            branch,
+            archived ? "2026-11-27" : null,
+          ]);
+        }
       },
       async run(...args) {
         const log = join(project, `calls-${runId++}.jsonl`);
@@ -168,6 +197,7 @@ async function withCli(
             ISSUE_POOL_LOG: log,
             ISSUE_POOL_TEST_BUN: process.execPath,
             ISSUE_POOL_TEST_FAKE: fake,
+            T3CODE_HOME: t3Home,
           },
           stdout: "pipe",
           stderr: "pipe",
@@ -186,6 +216,7 @@ async function withCli(
       },
     });
   } finally {
+    registry.close();
     await rm(project, { recursive: true, force: true });
   }
 }
@@ -250,7 +281,7 @@ testCli(
         "--log-level",
         "none",
         "--json",
-        project,
+        "test-project",
         "-",
       ],
     });
@@ -437,11 +468,14 @@ testCli(
 );
 
 testCli(
-  "multiple top-level workers are ambiguous even after their Git branch is deleted",
+  "an archived worker still makes the assignment ambiguous after Git branch deletion",
   async ({ run, setFixture, state }) => {
     await setFixture({
       issues: [issue(4)],
-      threads: [thread(4), { ...thread(4, "Renamed worker"), threadId: "old-worker-4" }],
+      threads: [
+        thread(4),
+        { ...thread(4, "Renamed worker"), threadId: "old-worker-4", archived: true },
+      ],
     });
     const pass = await run("--apply", "--state", state);
     expect(pass.status).toBe(1);
@@ -455,6 +489,13 @@ testCli("rejects cross-repository launch and relay", async ({ run, setFixture, s
   const repository = { id: 101, full_name: "another/feedback", owner: { id: 1, type: "User" } };
   const github = {
     repository,
+    otherRepositories: {
+      "repos/totalolage/kvitbit": {
+        id: 100,
+        full_name: "totalolage/kvitbit",
+        owner: { id: 1, type: "User" },
+      },
+    },
     issues: [issue(4)],
     threads: [thread(4)],
     comments: { 4: [comment(50, 1, humanNeeded), comment(51, 1, "Private to the other repo")] },
@@ -481,6 +522,53 @@ testCli("rejects cross-repository launch and relay", async ({ run, setFixture, s
   expect(wrongWorker.result?.adopted).toEqual([]);
   expect(writes(wrongWorker.calls)).toEqual([]);
 });
+
+testCli(
+  "recognizes the same repository after a GitHub transfer",
+  async ({ run, setFixture, state }) => {
+    await setFixture({
+      repository: { id: 100, full_name: "KvitBit/KvitBit", owner: { id: 1, type: "User" } },
+      aliases: ["repos/totalolage/kvitbit"],
+      issues: [issue(4, claimedLabel)],
+      threads: [thread(4)],
+      comments: { 4: [comment(50, 1, humanNeeded), comment(51, 1, "Use Firefox")] },
+    });
+    const pass = await run("--apply", "--state", state);
+    expect(pass.status).toBe(0);
+    expect(pass.result).toMatchObject({ repo: "KvitBit/KvitBit", adopted: [4], replied: [51] });
+    expect(writes(pass.calls)).toEqual(sends(pass.calls));
+    expect(sends(pass.calls)[0]?.args).toContain("worker-4");
+  },
+);
+
+testCli(
+  "rejects a nested checkout that would resolve to a different T3 workspace root",
+  async ({ project, run, setFixture, state }) => {
+    const nested = join(project, "nested");
+    await mkdir(nested);
+    await setFixture({
+      repository: { id: 101, full_name: "another/feedback", owner: { id: 1, type: "User" } },
+      origins: {
+        [project]: "https://github.com/totalolage/kvitbit.git",
+        [nested]: "https://github.com/another/feedback.git",
+      },
+      issues: [issue(4)],
+    });
+    const pass = await run(
+      "--apply",
+      "--state",
+      state,
+      "--project",
+      nested,
+      "--repo",
+      "another/feedback",
+    );
+    expect(pass.status).toBe(1);
+    expect(pass.stderr).toContain("registered T3 workspace root");
+    expect(writes(pass.calls)).toEqual([]);
+    expect(await Bun.file(state).exists()).toBe(false);
+  },
+);
 
 testCli(
   "checks the initial brief before using a saved assignment for a reply",

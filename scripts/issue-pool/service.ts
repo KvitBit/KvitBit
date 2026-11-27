@@ -1,15 +1,16 @@
 import { mkdir } from "node:fs/promises";
-import { dirname, resolve } from "node:path";
+import { dirname } from "node:path";
 import { parseArgs } from "node:util";
 import { runCommand } from "./command";
 import {
   defaultRepository,
   githubIssueTracker,
+  matchesRepository,
   resolveRepository,
   verifyProjectOrigin,
 } from "./github";
 import { IssuePool, PoolError, runIssuePool } from "./pool";
-import { t3WorkerRunner } from "./t3";
+import { resolveT3Project, t3WorkerRunner } from "./t3";
 
 async function main(): Promise<void> {
   const { values } = parseArgs({
@@ -28,9 +29,9 @@ async function main(): Promise<void> {
     throw new PoolError("--max-workers must be a positive integer");
   }
 
-  const project = resolve(values.project);
+  const project = await resolveT3Project(values.project);
   const repo = await resolveRepository(runCommand, values.repo);
-  await verifyProjectOrigin(runCommand, project, repo);
+  await verifyProjectOrigin(runCommand, project.root, repo);
   if (apply && state) {
     process.umask(0o077);
     await mkdir(dirname(state), { recursive: true, mode: 0o700 });
@@ -45,10 +46,15 @@ async function main(): Promise<void> {
       apply,
       maxWorkers,
       pool,
-      runner: t3WorkerRunner({ repo: repo.full_name, project, run: runCommand }),
+      runner: t3WorkerRunner({
+        repo: repo.full_name,
+        project,
+        run: runCommand,
+        matchesRepo: (slug) => matchesRepository(runCommand, repo, slug),
+      }),
       tracker: githubIssueTracker(repo, runCommand),
       async fetchMain() {
-        await runCommand("git", ["-C", project, "fetch", "origin", "main"]);
+        await runCommand("git", ["-C", project.root, "fetch", "origin", "main"]);
       },
     });
     process.stdout.write(`${JSON.stringify({ apply, repo: repo.full_name, ...result })}\n`);

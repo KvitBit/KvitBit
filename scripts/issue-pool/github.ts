@@ -60,6 +60,20 @@ export async function resolveRepository(run: Command, slug: string): Promise<Rep
   return repository;
 }
 
+export async function matchesRepository(
+  run: Command,
+  repository: Repository,
+  slug: string,
+): Promise<boolean> {
+  if (!repoSlug.test(slug)) return false;
+  if (slug.toLowerCase() === repository.full_name.toLowerCase()) return true;
+  try {
+    return (await resolveRepository(run, slug)).id === repository.id;
+  } catch {
+    return false;
+  }
+}
+
 export async function verifyProjectOrigin(
   run: Command,
   project: string,
@@ -74,7 +88,7 @@ export async function verifyProjectOrigin(
     !["https:", "ssh:", "git:"].includes(url.protocol) ||
     !["github.com", "ssh.github.com"].includes(url.hostname) ||
     !slug ||
-    slug.toLowerCase() !== repository.full_name.toLowerCase()
+    !(await matchesRepository(run, repository, slug))
   ) {
     throw new PoolError("The project origin does not match the resolved GitHub repository");
   }
