@@ -76,16 +76,16 @@ const WORKSPACE_API_KEY = /kvb_[a-zA-Z\d-]{8,64}_[a-zA-Z\d_-]*/g;
 export const redactFeedbackApiKeys = (value: string) =>
   value.replaceAll(WORKSPACE_API_KEY, REDACTED_VALUE);
 
-const SHARE_PATHS = ["/i", "/s", "/api/v1/share"];
 const SENSITIVE_PATHS = [
-  REDACTED_PATH,
-  ...SHARE_PATHS,
+  "/i",
+  "/s",
   "/invite",
   "/auth",
   "/consent",
   "/oauth/consent",
   "/reset-password",
   "/check-email",
+  "/api/v1/share",
   "/api/v1/invitations",
   "/api/auth/callback",
   "/api/auth/magic-link",
@@ -104,16 +104,14 @@ const feedbackRoutes = (path: string) => {
   return [normalized, canonical].map((candidate) => candidate.replace(/^\/app(?=\/)/, ""));
 };
 
-const sensitivePath = (path: string) =>
-  feedbackRoutes(path).some(
-    (route) =>
-      WORKSPACE_API_KEYS_PATH.test(route) ||
-      SENSITIVE_PATHS.some((prefix) => route === prefix || route.startsWith(`${prefix}/`)),
-  );
+const sensitiveRoute = (route: string) =>
+  WORKSPACE_API_KEYS_PATH.test(route) ||
+  SENSITIVE_PATHS.some((prefix) => route === prefix || route.startsWith(`${prefix}/`));
 
-const EMBEDDED_URL = /(?:https?:\/\/|(?<![\w./%\\-])(?:\/|%(?:25)*2f))[^\s<>"'`()[\]{}]+/gi;
+const EMBEDDED_URL =
+  /(?:https?:\/\/(?:\[[\da-f:.]+\])?|(?<![\w./%\\-])(?:\/|%(?:25)*2f))[^\s<>"'`()[\]{}]+/gi;
 
-const hasSharePath = (value: string) => {
+const hasSensitivePath = (value: string) => {
   let path: string;
   try {
     path = new URL(value, "https://feedback.invalid").pathname;
@@ -122,8 +120,7 @@ const hasSharePath = (value: string) => {
   }
 
   for (let depth = 0; depth < 8; depth++) {
-    if (feedbackRoutes(path).some((route) => SHARE_PATHS.some((p) => route.startsWith(`${p}/`))))
-      return true;
+    if (feedbackRoutes(path).some(sensitiveRoute)) return true;
     // Decode path bytes individually so a malformed escape cannot hide an encoded route.
     const decoded = path.replaceAll(/%([\da-f]{2})/gi, (_, byte: string) =>
       String.fromCharCode(Number.parseInt(byte, 16)),
@@ -134,9 +131,9 @@ const hasSharePath = (value: string) => {
   return true;
 };
 
-/** Removes embedded document share URLs from feedback text, including root-relative links. */
-export const redactFeedbackShareUrls = (value: string) =>
-  value.replaceAll(EMBEDDED_URL, (url) => (hasSharePath(url) ? REDACTED_VALUE : url));
+/** Removes embedded URLs on sensitive routes, including root-relative links. */
+export const redactFeedbackUrls = (value: string) =>
+  value.replaceAll(EMBEDDED_URL, (url) => (hasSensitivePath(url) ? REDACTED_VALUE : url));
 
 /** Removes URL credentials, query, fragment and paths that may contain access tokens. */
 export const sanitizeFeedbackPageUrl = (value: string) => {
@@ -155,7 +152,14 @@ export const sanitizeFeedbackPageUrl = (value: string) => {
   let path = url.pathname;
   // Repeated encoding or ambiguous path delimiters must not disguise a sensitive route.
   for (let depth = 0; depth < 8; depth++) {
-    if (/[?#]/.test(path) || sensitivePath(path) || redactFeedbackApiKeys(path) !== path)
+    if (
+      /[?#]/.test(path) ||
+      feedbackRoutes(path).some(
+        (route) =>
+          route === REDACTED_PATH || route.startsWith(`${REDACTED_PATH}/`) || sensitiveRoute(route),
+      ) ||
+      redactFeedbackApiKeys(path) !== path
+    )
       return redacted;
     if (!/%[\da-f]{2}/i.test(path)) {
       return { url: sanitized, sensitive: false };
