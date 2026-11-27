@@ -1,7 +1,8 @@
 import { Stage } from "alchemy/Stage";
-import type * as State from "alchemy/State";
+import * as State from "alchemy/State";
 import * as Data from "effect/Data";
 import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
 import type { KvitbitStackConfig } from "./config";
 import { declareKvitbitEdge, declareTokenRouteLogExclusion } from "./resources/edge";
 import {
@@ -106,13 +107,7 @@ export const assertBootstrapSafeState = (params: {
  * When `config.bootstrapFoundation` is true, verifies the state store contains zero
  * non-foundation resources before returning foundation-only declarations.
  */
-export const declareKvitbitStack = <R = never>(
-  config: KvitbitStackConfig,
-  options?: {
-    readonly stackName?: string | undefined;
-    readonly inspectState?: Effect.Effect<State.StateService, State.StateStoreError, R> | undefined;
-  },
-) =>
+export const declareKvitbitStack = (config: KvitbitStackConfig) =>
   Effect.gen(function* () {
     const stage = yield* Stage;
     if (stage !== config.stage) {
@@ -122,22 +117,22 @@ export const declareKvitbitStack = <R = never>(
       });
     }
 
-    const stackName = options?.stackName ?? KVITBIT_STACK_NAME;
-
     if (config.bootstrapFoundation) {
-      if (options?.inspectState === undefined) {
+      // Stack.build supplies State at runtime even though StackServices omits it.
+      // Reuse that service so inspection shares the deploy's lease.
+      const state = yield* Effect.serviceOption(State.State);
+      if (Option.isNone(state)) {
         return yield* new BootstrapPopulatedStateError({
-          stackName,
+          stackName: KVITBIT_STACK_NAME,
           stage,
           unexpectedResources: ["<state-inspection-unavailable>"],
         });
       }
-      const stateService = yield* options.inspectState;
       yield* assertBootstrapSafeState({
-        stackName,
+        stackName: KVITBIT_STACK_NAME,
         stage,
         allowedFoundationIds: foundationResourceIds(config),
-        state: stateService,
+        state: yield* state.value,
       });
     }
 

@@ -1,6 +1,5 @@
 import * as GCP from "@alchemy.run/gcp";
 import * as Alchemy from "alchemy";
-import * as State from "alchemy/State";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import { declareKvitbitStack, KVITBIT_STACK_NAME } from "./src/bootstrap";
@@ -40,19 +39,5 @@ export default Alchemy.Stack(
     ),
     state: gcsStateLayer,
   },
-  Effect.gen(function* () {
-    const config = yield* stackConfig;
-
-    const inspectState = config.bootstrapFoundation
-      ? Effect.gen(function* () {
-          const stateEffect = yield* State.State;
-          return yield* stateEffect;
-        }).pipe(Effect.provide(GCP.state({ bucketName: config.stateBucket })))
-      : undefined;
-
-    return yield* declareKvitbitStack(config, {
-      stackName: KVITBIT_STACK_NAME,
-      inspectState,
-    }).pipe(Effect.orDie);
-  }),
+  stackConfig.pipe(Effect.flatMap(declareKvitbitStack), Effect.orDie),
 );
