@@ -42,6 +42,7 @@ beforeAll(async () => {
         KVITBIT_RUNNER_MODE: "single",
         KVITBIT_EMAIL_MODE: "capture",
         KVITBIT_BLOB_DRIVER: "local",
+        KVITBIT_BOT_PROTECTION_MODE: "none",
         KVITBIT_BLOB_DIR: blobDir,
         KVITBIT_CHROMIUM_PATH: process.env.KVITBIT_CHROMIUM_PATH ?? "/usr/bin/chromium",
         KVITBIT_WEB_DIR: join(root, "apps/web/dist"),

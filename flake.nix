@@ -209,7 +209,7 @@
               environmentFile = lib.mkOption {
                 type = lib.types.nullOr lib.types.path;
                 default = null;
-                description = "Path to an EnvironmentFile containing DML-only runtime secrets for the kvitbit server unit (DATABASE_URL with a dedicated NOSUPERUSER NOCREATEDB NOCREATEROLE app role distinct from the migration owner, granted USAGE and SELECT/INSERT/UPDATE/DELETE plus sequence USAGE/SELECT on both public and auth schemas, BETTER_AUTH_SECRET, RESEND_API_KEY, KVITBIT_SMTP_URL, KVITBIT_MOBILE_UPDATES_SIGNING_KEY). Never include migration owner credentials here.";
+                description = "Path to an EnvironmentFile containing DML-only runtime secrets for the kvitbit server unit (DATABASE_URL with a dedicated NOSUPERUSER NOCREATEDB NOCREATEROLE app role distinct from the migration owner, granted USAGE and SELECT/INSERT/UPDATE/DELETE plus sequence USAGE/SELECT on both public and auth schemas, BETTER_AUTH_SECRET, ALTCHA_HMAC_KEY, RESEND_API_KEY, KVITBIT_SMTP_URL, KVITBIT_MOBILE_UPDATES_SIGNING_KEY). Never include migration owner credentials here.";
               };
 
               migrationEnvironmentFile = lib.mkOption {
@@ -258,6 +258,17 @@
                 );
                 default = null;
                 description = "Optional explicit typed email mode (KVITBIT_EMAIL_MODE).";
+              };
+
+              botProtectionMode = lib.mkOption {
+                type = lib.types.nullOr (
+                  lib.types.enum [
+                    "altcha"
+                    "none"
+                  ]
+                );
+                default = null;
+                description = "Optional explicit typed bot protection mode (KVITBIT_BOT_PROTECTION_MODE). Must be 'altcha' (with ALTCHA_HMAC_KEY) in production; 'none' is only permitted in non-production.";
               };
 
               blobDir = lib.mkOption {
@@ -394,6 +405,9 @@
                   }
                   // lib.optionalAttrs (cfg.blobDriver != null) { KVITBIT_BLOB_DRIVER = cfg.blobDriver; }
                   // lib.optionalAttrs (cfg.emailMode != null) { KVITBIT_EMAIL_MODE = cfg.emailMode; }
+                  // lib.optionalAttrs (cfg.botProtectionMode != null) {
+                    KVITBIT_BOT_PROTECTION_MODE = cfg.botProtectionMode;
+                  }
                   // lib.optionalAttrs (cfg.appOrigin != null) { APP_ORIGIN = cfg.appOrigin; }
                   // lib.optionalAttrs (cfg.emailFrom != null) { EMAIL_FROM = cfg.emailFrom; }
                   // lib.optionalAttrs (cfg.androidAssetlinksSha256 != null) {

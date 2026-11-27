@@ -3,19 +3,25 @@ import * as Alchemy from "alchemy";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import {
-  assertFeedbackSecretSelection,
+  assertTargetedSecretSelection,
   declareKvitbitStack,
   KVITBIT_STACK_NAME,
 } from "./src/bootstrap";
-import { loadStackConfig, makeStackEnvLayer } from "./src/config";
+import { loadStackConfig, readAlchemyRawEnv, StackEnv } from "./src/config";
 import { EdgeBackendServiceProvider } from "./src/resources/edge-backend-service";
 import { EdgeSecurityPolicyProvider } from "./src/resources/edge-security-policy";
 
-const stackConfig = loadStackConfig.pipe(
-  Effect.provide(makeStackEnvLayer(process.env)),
-  Effect.tap((config) => assertFeedbackSecretSelection(config, process.argv)),
-  Effect.orDie,
+// Provide ONLY `StackEnv` (never overwriting Alchemy CLI's `ConfigProvider` from `--env-file` / `.env`)
+// so both CLI file overrides and exact shell key presence are preserved for state selection and stack declaration.
+export const loadAlchemyStackConfig = loadStackConfig.pipe(
+  Effect.provideServiceEffect(
+    StackEnv,
+    Effect.sync(() => readAlchemyRawEnv(process.argv, process.env)),
+  ),
+  Effect.tap((config) => assertTargetedSecretSelection(config, process.argv)),
 );
+
+export const stackConfig = loadAlchemyStackConfig.pipe(Effect.orDie);
 
 const gcsStateLayer = Layer.unwrap(
   stackConfig.pipe(Effect.map((config) => GCP.state({ bucketName: config.stateBucket }))),

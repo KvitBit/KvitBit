@@ -21,13 +21,17 @@ export const KVITBIT_STACK_NAME = "Kvitbit";
 export const feedbackSecretFqn = (stage: KvitbitStackConfig["stage"]): string =>
   `Secret-kvitbit-${stage}-feedback-github-token`;
 
+export const altchaSecretFqn = (stage: KvitbitStackConfig["stage"]): string =>
+  `Secret-kvitbit-${stage}-altcha-hmac-key`;
+
 export class BootstrapSelectionError extends Data.TaggedError("BootstrapSelectionError")<{
+  readonly flagName: string;
   readonly expectedInclude: string;
   readonly observedIncludes: ReadonlyArray<string>;
 }> {
   override get message() {
     return (
-      `Refusing KVITBIT_BOOTSTRAP_FEEDBACK_SECRET=true without exact resource selection: ` +
+      `Refusing ${this.flagName}=true without exact resource selection: ` +
       `expected --include ${this.expectedInclude} only (got [${this.observedIncludes.join(", ")}]).`
     );
   }
@@ -55,28 +59,43 @@ export const parseIncludeArgs = (argv: ReadonlyArray<string>): ReadonlyArray<str
 };
 
 /**
- * Enforces that a `bootstrapFeedbackSecret` CLI invocation explicitly selects ONLY the single
- * feedback secret container (`--include Secret-kvitbit-<stage>-feedback-github-token`).
+ * Enforces that a targeted secret-bootstrap CLI invocation explicitly selects ONLY the single
+ * target secret container (`--include Secret-kvitbit-<stage>-feedback-github-token` or
+ * `--include Secret-kvitbit-<stage>-altcha-hmac-key`).
  */
-export const assertFeedbackSecretSelection = (
+export const assertTargetedSecretSelection = (
   config: KvitbitStackConfig,
   argv: ReadonlyArray<string>,
 ): Effect.Effect<void, BootstrapSelectionError> => {
-  if (!(config.bootstrapFeedbackSecret ?? false)) {
+  const target =
+    (config.bootstrapFeedbackSecret ?? false)
+      ? {
+          flagName: "KVITBIT_BOOTSTRAP_FEEDBACK_SECRET",
+          expectedInclude: feedbackSecretFqn(config.stage),
+        }
+      : (config.bootstrapAltchaSecret ?? false)
+        ? {
+            flagName: "KVITBIT_BOOTSTRAP_ALTCHA_SECRET",
+            expectedInclude: altchaSecretFqn(config.stage),
+          }
+        : undefined;
+  if (target === undefined) {
     return Effect.void;
   }
-  const expectedInclude = feedbackSecretFqn(config.stage);
   const observedIncludes = parseIncludeArgs(argv);
-  if (observedIncludes.length !== 1 || observedIncludes[0] !== expectedInclude) {
+  if (observedIncludes.length !== 1 || observedIncludes[0] !== target.expectedInclude) {
     return Effect.fail(
       new BootstrapSelectionError({
-        expectedInclude,
+        flagName: target.flagName,
+        expectedInclude: target.expectedInclude,
         observedIncludes,
       }),
     );
   }
   return Effect.void;
 };
+
+export const assertFeedbackSecretSelection = assertTargetedSecretSelection;
 
 export class StackStageMismatchError extends Data.TaggedError("StackStageMismatchError")<{
   readonly alchemyStage: string;
@@ -188,6 +207,7 @@ export const declareKvitbitStack = (config: KvitbitStackConfig) =>
       const feedbackDecl = secretDeclarations(config).find((decl) => decl.id === targetId);
       if (feedbackDecl === undefined) {
         return yield* new BootstrapSelectionError({
+          flagName: "KVITBIT_BOOTSTRAP_FEEDBACK_SECRET",
           expectedInclude: targetId,
           observedIncludes: [],
         });
@@ -200,6 +220,27 @@ export const declareKvitbitStack = (config: KvitbitStackConfig) =>
         projectId: config.projectId,
         region: config.region,
         feedbackSecretId: secret.secretId,
+      };
+    }
+
+    if (config.bootstrapAltchaSecret ?? false) {
+      const targetId = altchaSecretFqn(config.stage);
+      const altchaDecl = secretDeclarations(config).find((decl) => decl.id === targetId);
+      if (altchaDecl === undefined) {
+        return yield* new BootstrapSelectionError({
+          flagName: "KVITBIT_BOOTSTRAP_ALTCHA_SECRET",
+          expectedInclude: targetId,
+          observedIncludes: [],
+        });
+      }
+      const secret = yield* SecretManager.Secret(altchaDecl.id, altchaDecl.props);
+      return {
+        stage: config.stage,
+        bootstrapFoundation: false as const,
+        bootstrapAltchaSecret: true as const,
+        projectId: config.projectId,
+        region: config.region,
+        altchaSecretId: secret.secretId,
       };
     }
 

@@ -25,16 +25,24 @@ import type {
 } from "@kvitbit/domain/contract";
 import { BlobStorage, EmailSender } from "@kvitbit/domain/ports";
 import { BigDecimal, ConfigProvider, Effect, Layer, Option, Redacted, Stream } from "effect";
+import { BotProtectionLive } from "../../src/app";
+import { BotProtection } from "../../src/auth";
 import {
   composeRuntimeEnvLayers,
   loadBootRuntimeConfig,
+  loadBotProtectionConfig,
+  loadKvitbitEnv,
   makeRuntimeEnvLayer,
+  resolveEmailConfig,
 } from "../../src/config-contract";
+import { HttpConfig, HttpConfigLive } from "../../src/http/config";
 import {
   deriveInvitationTokenKey,
   deriveShareLinkKey,
   documentViewToRenderModel,
+  EmailSenderLive,
   type EmailWiringConfig,
+  EmailWiringConfigSchema,
   makeBlobStorageLayer,
   makeEmailSenderLayer,
   makeInvitationTokensLayer,
@@ -285,6 +293,7 @@ describe("wiring: email & SMTP URL parsing", () => {
       KVITBIT_ENV: "",
       DATABASE_URL: "postgres://app:pw@db.internal:5432/kvitbit",
       BETTER_AUTH_SECRET: "synthetic-auth-secret",
+      ALTCHA_HMAC_KEY: "synthetic-altcha-hmac-key",
       APP_ORIGIN: "https://kvitbit.cz",
       EMAIL_FROM: "Kvitbit <noreply@kvitbit.cz>",
       RESEND_API_KEY: "re_synthetic_key",
@@ -304,6 +313,45 @@ describe("wiring: email & SMTP URL parsing", () => {
       expect(upgraded.success.env).toBe("production");
       expect(upgraded.success.email.mode).toBe("resend");
       expect(upgraded.success.blob.driver).toBe("gcs");
+      expect(upgraded.success.botProtection).toEqual({
+        mode: "altcha",
+        hmacKey: "synthetic-altcha-hmac-key",
+      });
+    }
+
+    // Worker does not serve HTTP/bot-protection routes and boots in production without ALTCHA_HMAC_KEY,
+    // while server fails fast when ALTCHA_HMAC_KEY is missing or whitespace-only.
+    const { ALTCHA_HMAC_KEY: _omittedAltcha, ...prodWithoutAltcha } = validProdEnv;
+    const workerNoAltcha = await loadWith(prodWithoutAltcha, "worker");
+    expect(workerNoAltcha._tag).toBe("Success");
+    if (workerNoAltcha._tag === "Success") {
+      expect(workerNoAltcha.success.botProtection).toBeUndefined();
+    }
+    for (const [label, overrides] of [
+      ["missing ALTCHA_HMAC_KEY", prodWithoutAltcha],
+      ["whitespace-only ALTCHA_HMAC_KEY", { ...validProdEnv, ALTCHA_HMAC_KEY: "   " }],
+    ] as const) {
+      const serverMissingAltcha = await loadWith(overrides, "server");
+      expect(serverMissingAltcha._tag, label).toBe("Failure");
+      if (serverMissingAltcha._tag === "Failure") {
+        expect(String(serverMissingAltcha.failure)).toContain(
+          "Invalid runtime config (ALTCHA_HMAC_KEY):",
+        );
+      }
+    }
+    for (const workload of ["server", "worker"] as const) {
+      for (const badMode of ["none", "disabled", "bogus"] as const) {
+        const res = await loadWith(
+          { ...validProdEnv, KVITBIT_BOT_PROTECTION_MODE: badMode },
+          workload,
+        );
+        expect(res._tag, `${workload} mode=${badMode}`).toBe("Failure");
+        if (res._tag === "Failure") {
+          expect(String(res.failure)).toContain(
+            "Invalid runtime config (KVITBIT_BOT_PROTECTION_MODE):",
+          );
+        }
+      }
     }
 
     // Valid RFC 1035 63-octet label boundary, public IPv4-mapped IPv6 origin, permitted scalar KVITBIT_DISABLE,
@@ -486,6 +534,186 @@ describe("wiring: email & SMTP URL parsing", () => {
           ).toContain(`Invalid runtime config (${expectedKey}):`);
         }
       }
+    }
+  });
+
+  test("loadBootRuntimeConfig and EmailSenderLive resolve identical effective env and email mode under composeRuntimeEnvLayers", async () => {
+    const baseWithoutEnv: Record<string, string> = {
+      DATABASE_URL: "postgres://app:pw@db.internal:5432/kvitbit",
+      BETTER_AUTH_SECRET: "synthetic-auth-secret",
+      ALTCHA_HMAC_KEY: "synthetic-altcha-hmac-key",
+      APP_ORIGIN: "https://kvitbit.cz",
+      EMAIL_FROM: "Kvitbit <noreply@kvitbit.cz>",
+      RESEND_API_KEY: "re_synthetic_key",
+      KVITBIT_BLOB_DRIVER: "gcs",
+      KVITBIT_BLOB_BUCKET: "kvitbit-prod-blobs",
+    };
+
+    // 1. Whitespace-only primary KVITBIT_ENV=" " with fallback "production":
+    // both boot and EmailSenderLive see the same primary value (" " -> trimmed undefined -> development/capture),
+    // never claiming production/resend at boot while selecting capture at runtime.
+    const spaceLayer = composeRuntimeEnvLayers(
+      { ...baseWithoutEnv, KVITBIT_ENV: " " },
+      { KVITBIT_ENV: "production" },
+    );
+    const spaceBoot = await Effect.runPromise(
+      loadBootRuntimeConfig("server").pipe(Effect.provide(spaceLayer)),
+    );
+    const spaceLiveSend = await Effect.runPromise(
+      Effect.flatMap(EmailSender, (sender) =>
+        sender.send(
+          {
+            to: ["test@example.cz"],
+            replyTo: "info@kvitbit.cz",
+            subject: "Parity",
+            html: "<p>Parity</p>",
+            text: "Parity",
+            attachments: [],
+            tags: { template: "parity" },
+          },
+          { idempotencyKey: "parity-space-1" },
+        ),
+      ).pipe(Effect.provide(EmailSenderLive), Effect.provide(spaceLayer)),
+    );
+    expect(spaceBoot.env).toBe("development");
+    expect(spaceBoot.email.mode).toBe("capture");
+    expect(spaceLiveSend.provider).toBe(spaceBoot.email.mode);
+
+    // 2. Empty primary KVITBIT_ENV="" falls through to fallback "production" in BOTH boot and live wiring.
+    const emptyLayer = composeRuntimeEnvLayers(
+      { ...baseWithoutEnv, KVITBIT_ENV: "" },
+      { KVITBIT_ENV: "production" },
+    );
+    const emptyBoot = await Effect.runPromise(
+      loadBootRuntimeConfig("server").pipe(Effect.provide(emptyLayer)),
+    );
+    const emptyLiveResolved = await Effect.runPromise(
+      Effect.gen(function* () {
+        const env = yield* loadKvitbitEnv;
+        const cfg = yield* EmailWiringConfigSchema;
+        const resolved = resolveEmailConfig(env, {
+          emailMode: cfg.mode,
+          emailFrom: cfg.from,
+          resendApiKey: Option.getOrUndefined(Option.map(cfg.resendApiKey, Redacted.value)),
+          smtpUrl: Option.getOrUndefined(Option.map(cfg.smtpUrl, Redacted.value)),
+        });
+        return { env, resolved };
+      }).pipe(Effect.provide(emptyLayer)),
+    );
+    expect(emptyBoot.env).toBe("production");
+    expect(emptyBoot.email.mode).toBe("resend");
+    expect(emptyLiveResolved.env).toBe(emptyBoot.env);
+    expect(emptyLiveResolved.resolved.ok).toBe(true);
+    if (emptyLiveResolved.resolved.ok) {
+      expect(emptyLiveResolved.resolved.value.mode).toBe(emptyBoot.email.mode);
+    }
+
+    // 3. Whitespace-only primary KVITBIT_ENV=" " + NODE_ENV="production" resolves production/resend in both.
+    const spaceWithProdNodeLayer = composeRuntimeEnvLayers(
+      { ...baseWithoutEnv, KVITBIT_ENV: " ", NODE_ENV: "production" },
+      { KVITBIT_ENV: "staging" },
+    );
+    const spaceWithProdBoot = await Effect.runPromise(
+      loadBootRuntimeConfig("server").pipe(Effect.provide(spaceWithProdNodeLayer)),
+    );
+    const spaceWithProdLiveEnv = await Effect.runPromise(
+      loadKvitbitEnv.pipe(Effect.provide(spaceWithProdNodeLayer)),
+    );
+    expect(spaceWithProdBoot.env).toBe("production");
+    expect(spaceWithProdBoot.email.mode).toBe("resend");
+    expect(spaceWithProdLiveEnv).toBe(spaceWithProdBoot.env);
+  });
+
+  test("BotProtectionLive and HttpConfigLive enforce fail-fast typed-mode bot protection and stay in parity", async () => {
+    const baseHttpEnv = {
+      DATABASE_URL: "postgres://app:pw@db.internal:5432/kvitbit",
+      BETTER_AUTH_SECRET: "synthetic-auth-secret",
+      APP_ORIGIN: "https://kvitbit.cz",
+    };
+    const loadHttpBotProtection = (env: Record<string, string>) =>
+      Effect.runPromise(
+        Effect.gen(function* () {
+          const cfg = yield* HttpConfig;
+          return cfg.botProtection;
+        }).pipe(
+          Effect.provide(HttpConfigLive),
+          Effect.provide(makeRuntimeEnvLayer(env)),
+          Effect.result,
+        ),
+      );
+    const loadLiveBotMode = (env: Record<string, string>) =>
+      Effect.runPromise(
+        loadBotProtectionConfig.pipe(Effect.provide(makeRuntimeEnvLayer(env)), Effect.result),
+      );
+    const buildNoopCheck = (env: Record<string, string>) =>
+      Effect.runPromise(
+        Effect.flatMap(BotProtection, (bp) => bp.issue("sign_up")).pipe(
+          Effect.provide(BotProtectionLive as Layer.Layer<BotProtection, unknown>),
+          Effect.provide(makeRuntimeEnvLayer(env)),
+          Effect.result,
+        ),
+      );
+
+    // Production without ALTCHA_HMAC_KEY or with whitespace-only key or mode=none fails in BOTH HttpConfigLive and BotProtectionLive.
+    for (const badEnv of [
+      { ...baseHttpEnv, KVITBIT_ENV: "production" },
+      { ...baseHttpEnv, KVITBIT_ENV: "production", ALTCHA_HMAC_KEY: "   " },
+      { ...baseHttpEnv, KVITBIT_ENV: "production", KVITBIT_BOT_PROTECTION_MODE: "none" },
+      { ...baseHttpEnv, KVITBIT_ENV: "staging" },
+      { ...baseHttpEnv, KVITBIT_ENV: "preview", ALTCHA_HMAC_KEY: "  " },
+    ]) {
+      expect((await loadHttpBotProtection(badEnv))._tag).toBe("Failure");
+      expect((await loadLiveBotMode(badEnv))._tag).toBe("Failure");
+      expect((await buildNoopCheck(badEnv))._tag).toBe("Failure");
+    }
+
+    // Production with non-empty ALTCHA_HMAC_KEY resolves "altcha" in HttpConfigLive and loadBotProtectionConfig.
+    const prodOk = {
+      ...baseHttpEnv,
+      KVITBIT_ENV: "production",
+      ALTCHA_HMAC_KEY: "  synthetic-key  ",
+    };
+    expect(await loadHttpBotProtection(prodOk)).toMatchObject({
+      _tag: "Success",
+      success: "altcha",
+    });
+    expect(await loadLiveBotMode(prodOk)).toMatchObject({
+      _tag: "Success",
+      success: { mode: "altcha", hmacKey: "synthetic-key" },
+    });
+
+    // Staging/preview with explicit KVITBIT_BOT_PROTECTION_MODE=none resolves NoopBotProtection & "none".
+    for (const envName of ["staging", "preview"] as const) {
+      const explicitNone = {
+        ...baseHttpEnv,
+        KVITBIT_ENV: envName,
+        KVITBIT_BOT_PROTECTION_MODE: "none",
+      };
+      expect(await loadHttpBotProtection(explicitNone)).toMatchObject({
+        _tag: "Success",
+        success: "none",
+      });
+      const noopChallenge = await buildNoopCheck(explicitNone);
+      expect(noopChallenge._tag).toBe("Success");
+      if (noopChallenge._tag === "Success") {
+        expect(noopChallenge.success.parameters.algorithm).toBe("NONE");
+      }
+    }
+
+    // Development with whitespace-only ALTCHA_HMAC_KEY resolves "none" in BOTH layers (never passing whitespace to ALTCHA).
+    const devWhitespace = {
+      ...baseHttpEnv,
+      KVITBIT_ENV: "development",
+      ALTCHA_HMAC_KEY: "   ",
+    };
+    expect(await loadHttpBotProtection(devWhitespace)).toMatchObject({
+      _tag: "Success",
+      success: "none",
+    });
+    const devNoop = await buildNoopCheck(devWhitespace);
+    expect(devNoop._tag).toBe("Success");
+    if (devNoop._tag === "Success") {
+      expect(devNoop.success.parameters.algorithm).toBe("NONE");
     }
   });
 });

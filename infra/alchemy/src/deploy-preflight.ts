@@ -26,10 +26,17 @@ export type ProdEmailMode = (typeof PROD_EMAIL_MODES)[number];
 export const BLOB_DRIVERS = ["gcs", "local"] as const;
 export type BlobDriver = (typeof BLOB_DRIVERS)[number];
 
+export const BOT_PROTECTION_MODES = ["altcha", "none", "disabled"] as const;
+export type BotProtectionMode = (typeof BOT_PROTECTION_MODES)[number];
+
+export const PROD_BOT_PROTECTION_MODES = ["altcha"] as const;
+export type ProdBotProtectionMode = (typeof PROD_BOT_PROTECTION_MODES)[number];
+
 export const DEPLOY_MODES = [
   "normal",
   "bootstrap_foundation",
   "bootstrap_feedback_secret",
+  "bootstrap_altcha_secret",
 ] as const;
 export type DeployMode = (typeof DEPLOY_MODES)[number];
 
@@ -38,6 +45,7 @@ export const SECRET_FLAG_ENV_VARS = [
   "KVITBIT_ENABLE_SMTP_SECRET",
   "KVITBIT_ENABLE_MOBILE_SIGNING_KEY_SECRET",
   "KVITBIT_ENABLE_FEEDBACK_GITHUB_TOKEN_SECRET",
+  "KVITBIT_ENABLE_ALTCHA_HMAC_KEY_SECRET",
 ] as const;
 export type SecretFlagEnvVar = (typeof SECRET_FLAG_ENV_VARS)[number];
 
@@ -54,9 +62,11 @@ export const REQUIRED_GCP_VARS = [
 export const FORBIDDEN_OPT_OUT_ENV_VARS = [
   "KVITBIT_PREVIEW_DISABLE_EMAIL",
   "KVITBIT_PREVIEW_DISABLE_BLOB",
+  "KVITBIT_PREVIEW_DISABLE_BOT_PROTECTION",
   "KVITBIT_DISABLE_EMAIL",
   "KVITBIT_DISABLE_BLOB",
   "KVITBIT_DISABLE_BLOBS",
+  "KVITBIT_DISABLE_BOT_PROTECTION",
   "KVITBIT_DISABLE_ORIGIN_CHECK",
   "KVITBIT_ALLOW_LOCAL_BLOBS",
 ] as const;
@@ -281,6 +291,12 @@ export const isProdEmailMode = (value: string): value is ProdEmailMode =>
 export const isBlobDriver = (value: string): value is BlobDriver =>
   (BLOB_DRIVERS as ReadonlyArray<string>).includes(value);
 
+export const isBotProtectionMode = (value: string): value is BotProtectionMode =>
+  (BOT_PROTECTION_MODES as ReadonlyArray<string>).includes(value);
+
+export const isProdBotProtectionMode = (value: string): value is ProdBotProtectionMode =>
+  (PROD_BOT_PROTECTION_MODES as ReadonlyArray<string>).includes(value);
+
 export const isForbiddenOptOutPrefixKey = (key: string): boolean =>
   FORBIDDEN_OPT_OUT_PATTERN.test(key);
 
@@ -354,13 +370,26 @@ export const validateDeployPreflight = (
       `Invalid boolean value for BOOTSTRAP_FEEDBACK_SECRET: ${bootstrapFeedbackParsed.reason}`,
     );
   }
+  const bootstrapAltchaParsed = parseOptionalBoolean(env.BOOTSTRAP_ALTCHA_SECRET, false);
+  if (!bootstrapAltchaParsed.ok) {
+    return failPreflight(
+      "BOOTSTRAP_ALTCHA_SECRET",
+      `Invalid boolean value for BOOTSTRAP_ALTCHA_SECRET: ${bootstrapAltchaParsed.reason}`,
+    );
+  }
 
   const bootstrapFoundation = bootstrapFoundationParsed.value;
   const bootstrapFeedbackSecret = bootstrapFeedbackParsed.value;
-  if (bootstrapFoundation && bootstrapFeedbackSecret) {
+  const bootstrapAltchaSecret = bootstrapAltchaParsed.value;
+  const activeBootstraps = [
+    bootstrapFoundation,
+    bootstrapFeedbackSecret,
+    bootstrapAltchaSecret,
+  ].filter(Boolean).length;
+  if (activeBootstraps > 1) {
     return failPreflight(
-      "BOOTSTRAP_FEEDBACK_SECRET",
-      "Select only one of bootstrap_foundation and bootstrap_feedback_secret.",
+      bootstrapAltchaSecret ? "BOOTSTRAP_ALTCHA_SECRET" : "BOOTSTRAP_FEEDBACK_SECRET",
+      "Select only one of bootstrap_foundation, bootstrap_feedback_secret, and bootstrap_altcha_secret.",
     );
   }
 
@@ -466,6 +495,14 @@ export const validateDeployPreflight = (
     );
   }
 
+  const botProtectionMode = trimOptional(env.KVITBIT_BOT_PROTECTION_MODE);
+  if (botProtectionMode !== undefined && !isProdBotProtectionMode(botProtectionMode)) {
+    return failPreflight(
+      "KVITBIT_BOT_PROTECTION_MODE",
+      `Non-production or invalid KVITBIT_BOT_PROTECTION_MODE='${botProtectionMode}' is forbidden in production deploys (expected altcha).`,
+    );
+  }
+
   if (bootstrapFeedbackSecret) {
     if (!normalizedBooleans.KVITBIT_ENABLE_FEEDBACK_GITHUB_TOKEN_SECRET) {
       return failPreflight(
@@ -476,6 +513,20 @@ export const validateDeployPreflight = (
     return {
       ok: true,
       deployMode: "bootstrap_feedback_secret",
+      normalizedBooleans,
+    };
+  }
+
+  if (bootstrapAltchaSecret) {
+    if (!normalizedBooleans.KVITBIT_ENABLE_ALTCHA_HMAC_KEY_SECRET) {
+      return failPreflight(
+        "KVITBIT_ENABLE_ALTCHA_HMAC_KEY_SECRET",
+        "Set the KVITBIT_ENABLE_ALTCHA_HMAC_KEY_SECRET repository variable to true before bootstrapping the ALTCHA HMAC key container.",
+      );
+    }
+    return {
+      ok: true,
+      deployMode: "bootstrap_altcha_secret",
       normalizedBooleans,
     };
   }
@@ -536,6 +587,12 @@ export const validateDeployPreflight = (
     return failPreflight(
       "KVITBIT_ENABLE_SMTP_SECRET",
       `KVITBIT_EMAIL_MODE=${emailMode} requires KVITBIT_ENABLE_SMTP_SECRET=true.`,
+    );
+  }
+  if (!normalizedBooleans.KVITBIT_ENABLE_ALTCHA_HMAC_KEY_SECRET) {
+    return failPreflight(
+      "KVITBIT_ENABLE_ALTCHA_HMAC_KEY_SECRET",
+      "Production deploys require KVITBIT_ENABLE_ALTCHA_HMAC_KEY_SECRET=true so Cloud Run receives ALTCHA_HMAC_KEY.",
     );
   }
 

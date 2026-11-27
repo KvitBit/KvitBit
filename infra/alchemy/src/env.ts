@@ -88,6 +88,9 @@ export const serverPlainEnv = (
   if (config.emailFrom !== undefined) {
     vars.push({ name: "EMAIL_FROM", value: config.emailFrom });
   }
+  if (config.botProtectionMode !== undefined) {
+    vars.push({ name: "KVITBIT_BOT_PROTECTION_MODE", value: config.botProtectionMode });
+  }
   if (config.androidAssetlinksSha256 !== undefined) {
     vars.push({
       name: "KVITBIT_ANDROID_ASSETLINKS_SHA256",

@@ -8,14 +8,15 @@
  *   absent, defaults to `development`.
  * - `production`: zero opt-outs allowed. Requires real email transport (`resend`, `smtp`, or
  *   `resend+smtp`) + explicit valid `EMAIL_FROM`, `KVITBIT_BLOB_DRIVER=gcs` + `KVITBIT_BLOB_BUCKET`,
- *   explicit HTTPS non-localhost `APP_ORIGIN`, and non-empty database/auth secrets.
+ *   explicit HTTPS non-localhost `APP_ORIGIN`, non-empty `ALTCHA_HMAC_KEY` (on `server`), and
+ *   non-empty database/auth secrets.
  * - `staging` & `preview`: fail fast by default if required service config is missing; non-prod
  *   modes are allowed only when explicitly declared (`KVITBIT_EMAIL_MODE=capture|console`,
- *   `KVITBIT_BLOB_DRIVER=local`), never via silent fallback.
+ *   `KVITBIT_BLOB_DRIVER=local`, `KVITBIT_BOT_PROTECTION_MODE=none`), never via silent fallback.
  * - `development` & `test`: zero-config local DX (`console`/`capture` email, `local` blobs,
- *   `http://localhost:8080`).
+ *   `none` bot protection when `ALTCHA_HMAC_KEY` is absent, `http://localhost:8080`).
  */
-import { Config, ConfigProvider, Context, Data, Effect, Layer, Option } from "effect";
+import { Config, ConfigProvider, Context, Data, Effect, Layer, Option, Redacted } from "effect";
 
 export const KVITBIT_ENVS = ["production", "staging", "preview", "development", "test"] as const;
 export type KvitbitEnv = (typeof KVITBIT_ENVS)[number];
@@ -48,15 +49,26 @@ export type ResolvedEmailMode = (typeof RESOLVED_EMAIL_MODES)[number];
 export const BLOB_DRIVERS = ["gcs", "local"] as const;
 export type BlobDriver = (typeof BLOB_DRIVERS)[number];
 
+export const BOT_PROTECTION_MODES = ["altcha", "none", "disabled"] as const;
+export type BotProtectionMode = (typeof BOT_PROTECTION_MODES)[number];
+
+export const PROD_BOT_PROTECTION_MODES = ["altcha"] as const;
+export type ProdBotProtectionMode = (typeof PROD_BOT_PROTECTION_MODES)[number];
+
+export const RESOLVED_BOT_PROTECTION_MODES = ["altcha", "none"] as const;
+export type ResolvedBotProtectionMode = (typeof RESOLVED_BOT_PROTECTION_MODES)[number];
+
 export const SERVER_WORKLOADS = ["server", "worker"] as const;
 export type ServerWorkload = (typeof SERVER_WORKLOADS)[number];
 
 export const FORBIDDEN_OPT_OUT_ENV_VARS = [
   "KVITBIT_PREVIEW_DISABLE_EMAIL",
   "KVITBIT_PREVIEW_DISABLE_BLOB",
+  "KVITBIT_PREVIEW_DISABLE_BOT_PROTECTION",
   "KVITBIT_DISABLE_EMAIL",
   "KVITBIT_DISABLE_BLOB",
   "KVITBIT_DISABLE_BLOBS",
+  "KVITBIT_DISABLE_BOT_PROTECTION",
   "KVITBIT_DISABLE_ORIGIN_CHECK",
   "KVITBIT_ALLOW_LOCAL_BLOBS",
 ] as const;
@@ -109,6 +121,12 @@ const isProdEmailMode = (value: string): value is ProdEmailMode =>
 
 const isBlobDriver = (value: string): value is BlobDriver =>
   (BLOB_DRIVERS as ReadonlyArray<string>).includes(value);
+
+const isBotProtectionMode = (value: string): value is BotProtectionMode =>
+  (BOT_PROTECTION_MODES as ReadonlyArray<string>).includes(value);
+
+const isProdBotProtectionMode = (value: string): value is ProdBotProtectionMode =>
+  (PROD_BOT_PROTECTION_MODES as ReadonlyArray<string>).includes(value);
 
 /** Resolves `KvitbitEnv` from `KVITBIT_ENV` (preferred) and `NODE_ENV` (fail-closed fallback). */
 export const resolveKvitbitEnv = (raw: {
@@ -522,12 +540,128 @@ export const resolveBlobConfig = (
   });
 };
 
+export interface ResolvedBotProtectionConfig {
+  readonly mode: ResolvedBotProtectionMode;
+  readonly hmacKey: string | undefined;
+}
+
+/**
+ * Resolves and validates HTTP bot-protection configuration (`KVITBIT_BOT_PROTECTION_MODE` +
+ * `ALTCHA_HMAC_KEY`):
+ * - `production`: non-empty `ALTCHA_HMAC_KEY` required; `none` / `disabled` are forbidden.
+ * - `staging` / `preview`: fail fast if `ALTCHA_HMAC_KEY` is missing/whitespace unless
+ *   `KVITBIT_BOT_PROTECTION_MODE=none` is explicitly declared; `disabled` is forbidden.
+ * - `development` / `test`: zero-config (`none` when `ALTCHA_HMAC_KEY` is absent/whitespace,
+ *   `altcha` when present unless `KVITBIT_BOT_PROTECTION_MODE=none`).
+ */
+export const resolveBotProtectionConfig = (
+  env: KvitbitEnv,
+  raw: {
+    readonly mode?: string | undefined;
+    readonly hmacKey?: string | undefined;
+  },
+): ValidationResult<ResolvedBotProtectionConfig> => {
+  const rawMode = trimOptional(raw.mode);
+  const hmacKey = trimOptional(raw.hmacKey);
+
+  if (rawMode !== undefined) {
+    if (!isBotProtectionMode(rawMode)) {
+      return fail(
+        "KVITBIT_BOT_PROTECTION_MODE",
+        `must be one of ${RESOLVED_BOT_PROTECTION_MODES.join(", ")} (got ${JSON.stringify(rawMode)})`,
+      );
+    }
+    if (rawMode === "disabled") {
+      return fail(
+        "KVITBIT_BOT_PROTECTION_MODE",
+        "KVITBIT_BOT_PROTECTION_MODE=disabled is forbidden; configure ALTCHA_HMAC_KEY or KVITBIT_BOT_PROTECTION_MODE=none in non-production",
+      );
+    }
+    if (env === "production" && !isProdBotProtectionMode(rawMode)) {
+      return fail(
+        "KVITBIT_BOT_PROTECTION_MODE",
+        `non-production bot protection mode '${rawMode}' is forbidden when KVITBIT_ENV=production`,
+      );
+    }
+  }
+
+  if (env === "production") {
+    if (hmacKey === undefined) {
+      return fail(
+        "ALTCHA_HMAC_KEY",
+        "ALTCHA_HMAC_KEY must be non-empty when KVITBIT_ENV=production",
+      );
+    }
+    return ok({ mode: "altcha", hmacKey });
+  }
+
+  if (env === "staging" || env === "preview") {
+    if (rawMode === "none") {
+      return ok({ mode: "none", hmacKey: undefined });
+    }
+    if (hmacKey === undefined) {
+      return fail(
+        "ALTCHA_HMAC_KEY",
+        rawMode === "altcha"
+          ? "ALTCHA_HMAC_KEY is required when KVITBIT_BOT_PROTECTION_MODE=altcha"
+          : `ALTCHA_HMAC_KEY must be non-empty when KVITBIT_ENV=${env} unless KVITBIT_BOT_PROTECTION_MODE=none is explicitly set`,
+      );
+    }
+    return ok({ mode: "altcha", hmacKey });
+  }
+
+  // development / test: zero-config local DX.
+  if (rawMode === "none") {
+    return ok({ mode: "none", hmacKey: undefined });
+  }
+  if (rawMode === "altcha") {
+    if (hmacKey === undefined) {
+      return fail(
+        "ALTCHA_HMAC_KEY",
+        "ALTCHA_HMAC_KEY is required when KVITBIT_BOT_PROTECTION_MODE=altcha",
+      );
+    }
+    return ok({ mode: "altcha", hmacKey });
+  }
+  return hmacKey !== undefined
+    ? ok({ mode: "altcha", hmacKey })
+    : ok({ mode: "none", hmacKey: undefined });
+};
+
+const validateWorkerBotProtectionMode = (
+  env: KvitbitEnv,
+  rawMode: string | undefined,
+): ValidationResult<undefined> => {
+  const trimmed = trimOptional(rawMode);
+  if (trimmed === undefined) return ok(undefined);
+  if (!isBotProtectionMode(trimmed)) {
+    return fail(
+      "KVITBIT_BOT_PROTECTION_MODE",
+      `must be one of ${RESOLVED_BOT_PROTECTION_MODES.join(", ")} (got ${JSON.stringify(trimmed)})`,
+    );
+  }
+  if (trimmed === "disabled") {
+    return fail(
+      "KVITBIT_BOT_PROTECTION_MODE",
+      "KVITBIT_BOT_PROTECTION_MODE=disabled is forbidden; configure ALTCHA_HMAC_KEY or KVITBIT_BOT_PROTECTION_MODE=none in non-production",
+    );
+  }
+  if (env === "production" && !isProdBotProtectionMode(trimmed)) {
+    return fail(
+      "KVITBIT_BOT_PROTECTION_MODE",
+      `non-production bot protection mode '${trimmed}' is forbidden when KVITBIT_ENV=production`,
+    );
+  }
+  return ok(undefined);
+};
+
 export interface ValidatedRuntimeEnv {
   readonly env: KvitbitEnv;
   readonly workload: ServerWorkload;
   readonly appOrigin: string;
   readonly email: ResolvedEmailConfig;
   readonly blob: ResolvedBlobConfig;
+  readonly botProtection: ResolvedBotProtectionConfig | undefined;
 }
 
 const FORBIDDEN_OPT_OUT_PATTERN = /^KVITBIT_(?:PREVIEW_)?DISABLE_/;
@@ -574,7 +708,7 @@ export const validateServerRuntimeEnv = (
       forbiddenKey,
       env === "production"
         ? `opt-out flag ${forbiddenKey} is forbidden when KVITBIT_ENV=production`
-        : `boolean opt-out flag ${forbiddenKey} is not supported; declare typed modes (KVITBIT_EMAIL_MODE, KVITBIT_BLOB_DRIVER) instead`,
+        : `boolean opt-out flag ${forbiddenKey} is not supported; declare typed modes (KVITBIT_EMAIL_MODE, KVITBIT_BLOB_DRIVER, KVITBIT_BOT_PROTECTION_MODE) instead`,
     );
   }
 
@@ -611,12 +745,26 @@ export const validateServerRuntimeEnv = (
   });
   if (!blob.ok) return blob;
 
+  let botProtection: ResolvedBotProtectionConfig | undefined;
+  if (workload === "server") {
+    const botProtectionRes = resolveBotProtectionConfig(env, {
+      mode: envMap.KVITBIT_BOT_PROTECTION_MODE,
+      hmacKey: envMap.ALTCHA_HMAC_KEY,
+    });
+    if (!botProtectionRes.ok) return botProtectionRes;
+    botProtection = botProtectionRes.value;
+  } else {
+    const workerModeRes = validateWorkerBotProtectionMode(env, envMap.KVITBIT_BOT_PROTECTION_MODE);
+    if (!workerModeRes.ok) return workerModeRes;
+  }
+
   return ok({
     env,
     workload,
     appOrigin: appOrigin.value,
     email: email.value,
     blob: blob.value,
+    botProtection,
   });
 };
 
@@ -641,6 +789,19 @@ export const loadValidatedAppOrigin: Effect.Effect<string, Config.ConfigError> =
   },
 );
 
+/** Reads and validates HTTP bot-protection settings from the active Effect `ConfigProvider`. */
+export const loadBotProtectionConfig: Effect.Effect<
+  ResolvedBotProtectionConfig,
+  Config.ConfigError
+> = Effect.gen(function* () {
+  const env = yield* loadKvitbitEnv;
+  const mode = yield* optionalEnvString("KVITBIT_BOT_PROTECTION_MODE");
+  const hmacKey = yield* Effect.map(Config.option(Config.Redacted("ALTCHA_HMAC_KEY")), (opt) =>
+    Option.getOrUndefined(Option.map(opt, Redacted.value)),
+  );
+  return yield* liftValidation(resolveBotProtectionConfig(env, { mode, hmacKey }));
+});
+
 /**
  * Lossless raw environment snapshot carried alongside Effect's `ConfigProvider`.
  *
@@ -658,8 +819,9 @@ export class RuntimeEnv extends Context.Service<
 
 /**
  * Merges a primary and fallback environment map using Effect `ConfigProvider.orElse` value
- * precedence while preserving every configured key name (including explicit empty strings) from
- * both sources.
+ * precedence (non-empty strings — including whitespace — stay primary; `""` and `undefined` fall
+ * through to fallback) while preserving every configured key name (including explicit empty
+ * strings) from both sources.
  */
 export const mergeRuntimeEnvSources = (
   primary: Readonly<Record<string, string | undefined>>,
@@ -670,9 +832,9 @@ export const mergeRuntimeEnvSources = (
   for (const key of keys) {
     const primaryValue = primary[key];
     const fallbackValue = fallback[key];
-    if (trimOptional(primaryValue) !== undefined) {
+    if (primaryValue !== undefined && primaryValue !== "") {
       merged[key] = primaryValue;
-    } else if (trimOptional(fallbackValue) !== undefined) {
+    } else if (fallbackValue !== undefined && fallbackValue !== "") {
       merged[key] = fallbackValue;
     } else if (primaryValue !== undefined) {
       merged[key] = primaryValue;
@@ -704,20 +866,17 @@ export const makeRuntimeEnvLayer = (
     Layer.succeed(RuntimeEnv, env),
   );
 
-/** Composes primary and fallback env sources while preserving exact keys from both sources. */
+/** Composes primary and fallback env sources while preserving exact keys and unified values. */
 export const composeRuntimeEnvLayers = (
   primary: Readonly<Record<string, string | undefined>>,
   fallback: Readonly<Record<string, string | undefined>>,
-): Layer.Layer<RuntimeEnv> =>
-  Layer.merge(
-    ConfigProvider.layer(
-      ConfigProvider.orElse(
-        ConfigProvider.fromEnv({ env: definedEnvRecord(primary) }),
-        ConfigProvider.fromEnv({ env: definedEnvRecord(fallback) }),
-      ),
-    ),
-    Layer.succeed(RuntimeEnv, mergeRuntimeEnvSources(primary, fallback)),
+): Layer.Layer<RuntimeEnv> => {
+  const merged = mergeRuntimeEnvSources(primary, fallback);
+  return Layer.merge(
+    ConfigProvider.layer(ConfigProvider.fromEnv({ env: definedEnvRecord(merged) })),
+    Layer.succeed(RuntimeEnv, merged),
   );
+};
 
 const MAX_ARRAY_DIRECT_SCAN = 4096;
 
@@ -843,6 +1002,8 @@ export const loadBootRuntimeConfig = (
       KVITBIT_BLOB_BUCKET: yield* optionalEnvString("KVITBIT_BLOB_BUCKET"),
       KVITBIT_BLOB_DIR: yield* optionalEnvString("KVITBIT_BLOB_DIR"),
       KVITBIT_GCS_PROJECT: yield* optionalEnvString("KVITBIT_GCS_PROJECT"),
+      KVITBIT_BOT_PROTECTION_MODE: yield* optionalEnvString("KVITBIT_BOT_PROTECTION_MODE"),
+      ALTCHA_HMAC_KEY: yield* optionalEnvString("ALTCHA_HMAC_KEY"),
     };
     for (const [key, value] of dynamicKvitbitEntries) {
       if (!(key in envMap) || trimOptional(envMap[key]) === undefined) {

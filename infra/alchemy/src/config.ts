@@ -1,3 +1,5 @@
+import { existsSync, readFileSync } from "node:fs";
+import { resolve as resolvePath } from "node:path";
 import * as Config from "effect/Config";
 import * as ConfigProvider from "effect/ConfigProvider";
 import * as Context from "effect/Context";
@@ -7,22 +9,24 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import {
   type BlobDriver,
+  type BotProtectionMode,
   type EmailMode,
   FORBIDDEN_OPT_OUT_ENV_VARS,
   findForbiddenOptOutFlag,
   isBlobDriver,
+  isBotProtectionMode,
   isEmailMode,
   isForbiddenOptOutPrefixKey,
+  isProdBotProtectionMode,
   isProdEmailMode,
   isValidDomain,
   isValidEmailFrom,
   parseCsvDomainList,
   parseOptionalBoolean,
-  trimOptional,
   validateOriginUrl,
 } from "./deploy-preflight";
 
-export type { BlobDriver, EmailMode };
+export type { BlobDriver, BotProtectionMode, EmailMode };
 
 export type KvitbitStage = "prod" | "staging";
 
@@ -49,6 +53,7 @@ export interface KvitbitStackConfig {
   readonly stage: KvitbitStage;
   readonly bootstrapFoundation: boolean;
   readonly bootstrapFeedbackSecret?: boolean | undefined;
+  readonly bootstrapAltchaSecret?: boolean | undefined;
   readonly projectId: string;
   readonly projectNumber: string;
   readonly region: string;
@@ -69,6 +74,7 @@ export interface KvitbitStackConfig {
   readonly appOrigin: string | undefined;
   readonly emailMode?: EmailMode | undefined;
   readonly emailFrom: string | undefined;
+  readonly botProtectionMode?: BotProtectionMode | undefined;
   readonly trustedProxyHops: number;
   readonly shareKeyVersion: number;
   readonly androidAssetlinksSha256: string | undefined;
@@ -115,6 +121,7 @@ export const defaultSecretBindings = (
     readonly enableSmtp?: boolean;
     readonly enableMobileSigningKey?: boolean;
     readonly enableFeedbackGitHubToken?: boolean;
+    readonly enableAltchaHmacKey?: boolean;
   },
 ): ReadonlyArray<KvitbitSecretBinding> => {
   const prefix = `kvitbit-${stage}`;
@@ -182,6 +189,16 @@ export const defaultSecretBindings = (
     });
   }
 
+  if (options?.enableAltchaHmacKey ?? false) {
+    bindings.push({
+      environmentVariable: "ALTCHA_HMAC_KEY",
+      secretId: `${prefix}-altcha-hmac-key`,
+      version: "latest",
+      required: true,
+      consumers: ["server"],
+    });
+  }
+
   return bindings;
 };
 
@@ -243,6 +260,7 @@ export const validateStackConfigSync = (
   config: KvitbitStackConfig,
 ): StackConfigValidationResult => {
   const bootstrapFeedbackSecret = config.bootstrapFeedbackSecret ?? false;
+  const bootstrapAltchaSecret = config.bootstrapAltchaSecret ?? false;
   const blobDriver: BlobDriver = config.blobDriver ?? "gcs";
 
   if (config.projectId.trim().length === 0) {
@@ -254,10 +272,15 @@ export const validateStackConfigSync = (
   if (!config.zone.startsWith(`${config.region}-`)) {
     return failStack("zone", `zone '${config.zone}' must be inside region '${config.region}'`);
   }
-  if (config.bootstrapFoundation && bootstrapFeedbackSecret) {
+  const activeBootstraps = [
+    config.bootstrapFoundation,
+    bootstrapFeedbackSecret,
+    bootstrapAltchaSecret,
+  ].filter(Boolean).length;
+  if (activeBootstraps > 1) {
     return failStack(
-      "bootstrapFeedbackSecret",
-      "cannot set both bootstrapFoundation and bootstrapFeedbackSecret",
+      bootstrapAltchaSecret ? "bootstrapAltchaSecret" : "bootstrapFeedbackSecret",
+      "cannot combine bootstrapFoundation, bootstrapFeedbackSecret, and bootstrapAltchaSecret",
     );
   }
   if (!config.bootstrapFoundation && !DIGEST_PATTERN.test(config.imageDigest)) {
@@ -328,12 +351,42 @@ export const validateStackConfigSync = (
       );
     }
   }
+  if (config.botProtectionMode !== undefined) {
+    if (!isBotProtectionMode(config.botProtectionMode)) {
+      return failStack(
+        "botProtectionMode",
+        `invalid bot protection mode '${String(config.botProtectionMode)}'`,
+      );
+    }
+    if (config.botProtectionMode === "disabled") {
+      return failStack(
+        "botProtectionMode",
+        "botProtectionMode='disabled' is forbidden; configure ALTCHA_HMAC_KEY or botProtectionMode='none' in staging",
+      );
+    }
+    if (config.stage === "prod" && !isProdBotProtectionMode(config.botProtectionMode)) {
+      return failStack(
+        "botProtectionMode",
+        `non-production bot protection mode '${config.botProtectionMode}' is forbidden when stage='prod'`,
+      );
+    }
+  }
 
   if (bootstrapFeedbackSecret) {
     if (!hasSecret(config, "KVITBIT_FEEDBACK_GITHUB_TOKEN")) {
       return failStack(
         "KVITBIT_ENABLE_FEEDBACK_GITHUB_TOKEN_SECRET",
         "bootstrapFeedbackSecret requires the KVITBIT_FEEDBACK_GITHUB_TOKEN secret binding",
+      );
+    }
+    return { ok: true, value: config };
+  }
+
+  if (bootstrapAltchaSecret) {
+    if (!hasSecret(config, "ALTCHA_HMAC_KEY", ["server"])) {
+      return failStack(
+        "KVITBIT_ENABLE_ALTCHA_HMAC_KEY_SECRET",
+        "bootstrapAltchaSecret requires the ALTCHA_HMAC_KEY secret binding",
       );
     }
     return { ok: true, value: config };
@@ -378,6 +431,7 @@ export const validateStackConfigSync = (
 
   const hasResend = hasSecret(config, "RESEND_API_KEY", ["server", "runner"]);
   const hasSmtp = hasSecret(config, "KVITBIT_SMTP_URL", ["server", "runner"]);
+  const hasAltcha = hasSecret(config, "ALTCHA_HMAC_KEY", ["server"]);
 
   if (config.stage === "prod") {
     if (config.edge === undefined || !config.edge.enableHttps || config.edge.domains.length === 0) {
@@ -410,10 +464,23 @@ export const validateStackConfigSync = (
         `emailMode='${config.emailMode}' requires the KVITBIT_SMTP_URL secret binding`,
       );
     }
+    if (!hasAltcha) {
+      return failStack(
+        "secrets",
+        "stage='prod' requires the ALTCHA_HMAC_KEY secret binding for server (KVITBIT_ENABLE_ALTCHA_HMAC_KEY_SECRET=true)",
+      );
+    }
     return { ok: true, value: config };
   }
 
-  // Staging normal deploy: fail fast unless explicit non-prod emailMode ('capture' | 'console').
+  // Staging normal deploy: require ALTCHA_HMAC_KEY unless botProtectionMode='none' is explicitly set,
+  // and fail fast unless explicit non-prod emailMode ('capture' | 'console').
+  if (config.botProtectionMode !== "none" && !hasAltcha) {
+    return failStack(
+      "secrets",
+      "stage='staging' requires the ALTCHA_HMAC_KEY secret binding for server unless KVITBIT_BOT_PROTECTION_MODE=none is explicitly set",
+    );
+  }
   const isNonProdEmailMode = config.emailMode === "capture" || config.emailMode === "console";
   if (isNonProdEmailMode) {
     if (config.emailFrom !== undefined && !isValidEmailFrom(config.emailFrom)) {
@@ -522,9 +589,9 @@ export const mergeStackEnvSources = (
   for (const key of keys) {
     const primaryValue = primary[key];
     const fallbackValue = fallback[key];
-    if (trimOptional(primaryValue) !== undefined) {
+    if (primaryValue !== undefined && primaryValue !== "") {
       merged[key] = primaryValue;
-    } else if (trimOptional(fallbackValue) !== undefined) {
+    } else if (fallbackValue !== undefined && fallbackValue !== "") {
       merged[key] = fallbackValue;
     } else if (primaryValue !== undefined) {
       merged[key] = primaryValue;
@@ -547,6 +614,64 @@ const definedEnvRecord = (
   return out;
 };
 
+const DOT_ENV_LINE =
+  /(?:^|^)\s*(?:export\s+)?([\w.-]+)(?:\s*=\s*?|:\s+?)(\s*'(?:\\'|[^'])*'|\s*"(?:\\"|[^"])*"|\s*`(?:\\`|[^`])*`|[^#\r\n]+)?\s*(?:#.*)?(?:$|$)/gm;
+
+const parseDotEnvRaw = (contents: string): Record<string, string> => {
+  const out: Record<string, string> = {};
+  const normalized = contents.replace(/\r\n?/gm, "\n");
+  for (const match of normalized.matchAll(DOT_ENV_LINE)) {
+    const key = match[1];
+    if (key === undefined) continue;
+    let value = (match[2] ?? "").trim();
+    const quote = value[0];
+    value = value.replace(/^(['"`])([\s\S]*)\1$/gm, "$2");
+    if (quote === '"') {
+      value = value.replace(/\\n/g, "\n").replace(/\\r/g, "\r");
+    }
+    out[key] = value;
+  }
+  return out;
+};
+
+const parseEnvFileFlag = (argv: ReadonlyArray<string>): string | undefined => {
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i];
+    if (arg === "--env-file") {
+      const next = argv[i + 1];
+      if (next !== undefined && next.length > 0) return next;
+    } else if (arg?.startsWith("--env-file=")) {
+      const value = arg.slice("--env-file=".length);
+      if (value.length > 0) return value;
+    }
+  }
+  return undefined;
+};
+
+/**
+ * Reads the raw environment keys matching Alchemy CLI's precedence (`--env-file` > shell, or
+ * shell > `.env`) without modifying Effect's `ConfigProvider`.
+ */
+export const readAlchemyRawEnv = (
+  argv: ReadonlyArray<string> = process.argv,
+  env: Readonly<Record<string, string | undefined>> = process.env,
+  cwd: string = process.cwd(),
+): Record<string, string | undefined> => {
+  const envFile = parseEnvFileFlag(argv);
+  if (envFile !== undefined) {
+    const fullPath = resolvePath(cwd, envFile);
+    if (existsSync(fullPath)) {
+      return mergeStackEnvSources(parseDotEnvRaw(readFileSync(fullPath, "utf8")), env);
+    }
+    return { ...env };
+  }
+  const defaultDotEnv = resolvePath(cwd, ".env");
+  if (existsSync(defaultDotEnv)) {
+    return mergeStackEnvSources(env, parseDotEnvRaw(readFileSync(defaultDotEnv, "utf8")));
+  }
+  return { ...env };
+};
+
 export const makeStackEnvLayer = (
   env: Readonly<Record<string, string | undefined>>,
 ): Layer.Layer<StackEnv> =>
@@ -558,16 +683,13 @@ export const makeStackEnvLayer = (
 export const composeStackEnvLayers = (
   primary: Readonly<Record<string, string | undefined>>,
   fallback: Readonly<Record<string, string | undefined>>,
-): Layer.Layer<StackEnv> =>
-  Layer.merge(
-    ConfigProvider.layer(
-      ConfigProvider.orElse(
-        ConfigProvider.fromEnv({ env: definedEnvRecord(primary) }),
-        ConfigProvider.fromEnv({ env: definedEnvRecord(fallback) }),
-      ),
-    ),
-    Layer.succeed(StackEnv, mergeStackEnvSources(primary, fallback)),
+): Layer.Layer<StackEnv> => {
+  const merged = mergeStackEnvSources(primary, fallback);
+  return Layer.merge(
+    ConfigProvider.layer(ConfigProvider.fromEnv({ env: definedEnvRecord(merged) })),
+    Layer.succeed(StackEnv, merged),
   );
+};
 
 const MAX_ARRAY_DIRECT_SCAN = 4096;
 
@@ -676,21 +798,19 @@ export const loadStackConfig: Effect.Effect<
   const stage: KvitbitStage = stageRaw;
 
   const rawEnv = yield* Effect.serviceOption(StackEnv);
-  let forbiddenFlag: string | undefined;
-  if (Option.isSome(rawEnv)) {
-    forbiddenFlag = findForbiddenOptOutFlag(rawEnv.value);
-  } else {
-    const provider = yield* ConfigProvider.ConfigProvider;
-    const kvitbitEntries = yield* collectKvitbitProviderEnv(provider);
-    const dynamicMap: Record<string, string | undefined> = Object.fromEntries(kvitbitEntries);
-    for (const forbidden of FORBIDDEN_OPT_OUT_ENV_VARS) {
-      const direct = yield* optionalNonEmptyString(forbidden);
-      if (direct !== undefined) {
-        dynamicMap[forbidden] = direct;
-      }
+  const provider = yield* ConfigProvider.ConfigProvider;
+  const kvitbitEntries = yield* collectKvitbitProviderEnv(provider);
+  const providerMap: Record<string, string | undefined> = Object.fromEntries(kvitbitEntries);
+  for (const forbidden of FORBIDDEN_OPT_OUT_ENV_VARS) {
+    const direct = yield* optionalNonEmptyString(forbidden);
+    if (direct !== undefined) {
+      providerMap[forbidden] = direct;
     }
-    forbiddenFlag = findForbiddenOptOutFlag(dynamicMap);
   }
+  const combinedForbiddenEnv = Option.isSome(rawEnv)
+    ? mergeStackEnvSources(providerMap, rawEnv.value)
+    : providerMap;
+  const forbiddenFlag = findForbiddenOptOutFlag(combinedForbiddenEnv);
   if (forbiddenFlag !== undefined) {
     return yield* new InvalidStackConfig({
       field: forbiddenFlag,
@@ -712,6 +832,7 @@ export const loadStackConfig: Effect.Effect<
     "KVITBIT_BOOTSTRAP_FEEDBACK_SECRET",
     false,
   );
+  const bootstrapAltchaSecret = yield* optionalBoolean("KVITBIT_BOOTSTRAP_ALTCHA_SECRET", false);
 
   const projectId = yield* Config.String("KVITBIT_GCP_PROJECT_ID").pipe(
     Config.withDefault(KVITBIT_PROD_DEFAULTS.projectId),
@@ -764,6 +885,15 @@ export const loadStackConfig: Effect.Effect<
   }
   const blobDriver: BlobDriver = blobDriverRaw ?? "gcs";
 
+  const botProtectionModeRaw = yield* optionalNonEmptyString("KVITBIT_BOT_PROTECTION_MODE");
+  if (botProtectionModeRaw !== undefined && !isBotProtectionMode(botProtectionModeRaw)) {
+    return yield* new InvalidStackConfig({
+      field: "KVITBIT_BOT_PROTECTION_MODE",
+      reason: `unsupported KVITBIT_BOT_PROTECTION_MODE '${botProtectionModeRaw}'`,
+    });
+  }
+  const botProtectionMode: BotProtectionMode | undefined = botProtectionModeRaw;
+
   const androidAssetlinksSha256 = yield* optionalNonEmptyString(
     "KVITBIT_ANDROID_ASSETLINKS_SHA256",
   );
@@ -815,6 +945,10 @@ export const loadStackConfig: Effect.Effect<
     "KVITBIT_ENABLE_FEEDBACK_GITHUB_TOKEN_SECRET",
     false,
   );
+  const enableAltchaHmacKey = yield* optionalBoolean(
+    "KVITBIT_ENABLE_ALTCHA_HMAC_KEY_SECRET",
+    false,
+  );
 
   const blobsBucket = yield* Config.String("KVITBIT_BLOB_BUCKET").pipe(
     Config.withDefault(`${projectId}-blobs-${stage}`),
@@ -827,6 +961,7 @@ export const loadStackConfig: Effect.Effect<
     stage,
     bootstrapFoundation,
     bootstrapFeedbackSecret,
+    bootstrapAltchaSecret,
     projectId,
     projectNumber,
     region,
@@ -847,6 +982,7 @@ export const loadStackConfig: Effect.Effect<
     appOrigin,
     emailMode,
     emailFrom,
+    botProtectionMode,
     trustedProxyHops,
     shareKeyVersion,
     androidAssetlinksSha256,
@@ -857,6 +993,7 @@ export const loadStackConfig: Effect.Effect<
       enableSmtp,
       enableMobileSigningKey,
       enableFeedbackGitHubToken,
+      enableAltchaHmacKey,
     }),
     dnsZones,
     edge,

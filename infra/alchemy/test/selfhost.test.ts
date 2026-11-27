@@ -363,6 +363,10 @@ describe("Self-hosting and CI deploy artifacts", () => {
     expect(parsed.services.kvitbit.environment.NODE_ENV).toBe("production");
     expect(parsed.services.kvitbit.environment.KVITBIT_ENV).toBe(`\${KVITBIT_ENV:-}`);
     expect(parsed.services.kvitbit.environment.KVITBIT_ENV).not.toContain("development");
+    expect(parsed.services.kvitbit.environment.KVITBIT_BOT_PROTECTION_MODE).toBe(
+      `\${KVITBIT_BOT_PROTECTION_MODE:-}`,
+    );
+    expect(parsed.services.kvitbit.environment.ALTCHA_HMAC_KEY).toBe(`\${ALTCHA_HMAC_KEY:-}`);
     expect(compose).toContain("postgres:17-alpine");
     expect(compose).toContain('command: ["migrate"]');
     expect(compose).toContain("condition: service_completed_successfully");
@@ -838,6 +842,14 @@ describe("Self-hosting and CI deploy artifacts", () => {
     expect(blobDriverOption?.[0]).toContain("default = null;");
     expect(blobDriverOption?.[0]).not.toContain('default = "local"');
 
+    const botProtectionOption = flake.match(
+      /botProtectionMode\s*=\s*lib\.mkOption\s*\{[\s\S]*?\n\s*\};/,
+    );
+    expect(botProtectionOption?.[0]).toBeDefined();
+    expect(botProtectionOption?.[0]).toContain("lib.types.nullOr");
+    expect(botProtectionOption?.[0]).toContain("default = null;");
+    expect(botProtectionOption?.[0]).not.toContain('default = "none"');
+
     // Verify the evaluated staging systemd service environment omits KVITBIT_BLOB_DRIVER when blobDriver is omitted.
     const kvitbitServiceBlock = flake.match(
       /systemd\.services\.kvitbit\s*=\s*\{[\s\S]*?serviceConfig\s*=/,
@@ -897,6 +909,8 @@ describe("Self-hosting and CI deploy artifacts", () => {
       "KVITBIT_ENABLE_SMTP_SECRET",
       "KVITBIT_ENABLE_MOBILE_SIGNING_KEY_SECRET",
       "KVITBIT_ENABLE_FEEDBACK_GITHUB_TOKEN_SECRET",
+      "KVITBIT_ENABLE_ALTCHA_HMAC_KEY_SECRET",
+      "KVITBIT_BOT_PROTECTION_MODE",
     ]) {
       expect(workflow).toContain(`vars.${varName}`);
     }
@@ -917,6 +931,9 @@ describe("Self-hosting and CI deploy artifacts", () => {
     expect(alchemyStep?.env).toMatchObject({
       KVITBIT_DNS_ZONES: `\${{ vars.KVITBIT_DNS_ZONES }}`,
       KVITBIT_ENABLE_FEEDBACK_GITHUB_TOKEN_SECRET: `\${{ env.KVITBIT_ENABLE_FEEDBACK_GITHUB_TOKEN_SECRET }}`,
+      KVITBIT_ENABLE_ALTCHA_HMAC_KEY_SECRET: `\${{ env.KVITBIT_ENABLE_ALTCHA_HMAC_KEY_SECRET }}`,
+      KVITBIT_BOT_PROTECTION_MODE: `\${{ env.KVITBIT_BOT_PROTECTION_MODE }}`,
+      KVITBIT_BOOTSTRAP_ALTCHA_SECRET: `\${{ env.BOOTSTRAP_ALTCHA_SECRET }}`,
       KVITBIT_FEEDBACK_GITHUB_REPO: `\${{ vars.KVITBIT_FEEDBACK_GITHUB_REPO }}`,
       KVITBIT_FEEDBACK_OWNER_EMAILS: `\${{ vars.KVITBIT_FEEDBACK_OWNER_EMAILS }}`,
     });
@@ -933,6 +950,7 @@ describe("Self-hosting and CI deploy artifacts", () => {
       `KVITBIT_ENABLE_MOBILE_SIGNING_KEY_SECRET: \${{ env.KVITBIT_ENABLE_MOBILE_SIGNING_KEY_SECRET }}`,
     );
     expect(workflow).toContain(`kvitbit-\${KVITBIT_STAGE}-feedback-github-token`);
+    expect(workflow).toContain(`kvitbit-\${KVITBIT_STAGE}-altcha-hmac-key`);
     expect(workflow).toContain(`if [ -n "\${KVITBIT_EDGE_DOMAINS:-}" ]; then`);
 
     const preflightPos = workflow.indexOf("gcloud artifacts repositories describe kvitbit");
@@ -959,6 +977,11 @@ describe("Self-hosting and CI deploy artifacts", () => {
       type: "boolean",
       default: false,
     });
+    expect(workflow.on.workflow_dispatch.inputs.bootstrap_altcha_secret).toEqual({
+      description: expect.any(String),
+      type: "boolean",
+      default: false,
+    });
     expect(getStep("Guard bootstrap against populated production workloads")?.if).toBe(
       "env.BOOTSTRAP_FOUNDATION == 'true'",
     );
@@ -973,6 +996,7 @@ describe("Self-hosting and CI deploy artifacts", () => {
       "Verify database readiness and static mounts",
     ]) {
       expect(getStep(name)?.if).toContain("env.BOOTSTRAP_FEEDBACK_SECRET != 'true'");
+      expect(getStep(name)?.if).toContain("env.BOOTSTRAP_ALTCHA_SECRET != 'true'");
     }
 
     const sandbox = mkdtempSync(join(tmpdir(), "kvitbit-feedback-bootstrap-"));
@@ -987,6 +1011,9 @@ case "$1 $2 $3" in
     if [ "$8" = 'kvitbit-prod-feedback-github-token' ]; then
       [ -n "$FEEDBACK_VERSION_STATE" ] || exit 1
       printf '%s\\n' "$FEEDBACK_VERSION_STATE"
+    elif [ "$8" = 'kvitbit-prod-altcha-hmac-key' ]; then
+      [ -n "$ALTCHA_VERSION_STATE" ] || exit 1
+      printf '%s\\n' "$ALTCHA_VERSION_STATE"
     else
       printf 'ENABLED\\n'
     fi ;;
@@ -1016,10 +1043,13 @@ printf '%s\\n' "$KVITBIT_ENABLE_FEEDBACK_GITHUB_TOKEN_SECRET" "$KVITBIT_IMAGE_DI
             KVITBIT_STAGE: "prod",
             KVITBIT_IMAGE_DIGEST: `sha256:${"b".repeat(64)}`,
             KVITBIT_ENABLE_FEEDBACK_GITHUB_TOKEN_SECRET: "false",
+            KVITBIT_ENABLE_ALTCHA_HMAC_KEY_SECRET: "false",
             BOOTSTRAP_FOUNDATION: "false",
             BOOTSTRAP_FEEDBACK_SECRET: "false",
+            BOOTSTRAP_ALTCHA_SECRET: "false",
             DRY_RUN: "false",
             FEEDBACK_VERSION_STATE: "",
+            ALTCHA_VERSION_STATE: "",
             ...env,
           },
           stdout: "pipe",
@@ -1062,12 +1092,49 @@ printf '%s\\n' "$KVITBIT_ENABLE_FEEDBACK_GITHUB_TOKEN_SECRET" "$KVITBIT_IMAGE_DI
       }
 
       expect(run(preflight, { ...enabled, FEEDBACK_VERSION_STATE: "ENABLED" }).exitCode).toBe(0);
+
+      // ALTCHA HMAC key secret bootstrap follows the same targeted single-secret path.
+      const altchaEnabled = { KVITBIT_ENABLE_ALTCHA_HMAC_KEY_SECRET: "true" };
+      for (const state of ["", "DISABLED", "DESTROYED"]) {
+        const failed = run(preflight, { ...altchaEnabled, ALTCHA_VERSION_STATE: state });
+        expect(failed.exitCode).toBe(1);
+        expect(failed.stdout.toString()).toContain("bootstrap_altcha_secret=true");
+      }
+      const altchaBootstrap = { BOOTSTRAP_ALTCHA_SECRET: "true", KVITBIT_IMAGE_DIGEST: "" };
+      const disabledAltchaBootstrap = run(deploy, altchaBootstrap);
+      expect(disabledAltchaBootstrap.exitCode).toBe(1);
+      expect(disabledAltchaBootstrap.stdout.toString()).toContain(
+        "Set the KVITBIT_ENABLE_ALTCHA_HMAC_KEY_SECRET repository variable to true",
+      );
+      for (const [dryRun, command] of [
+        ["false", "deploy --yes"],
+        ["true", "plan"],
+      ] as const) {
+        const result = run(deploy, { ...altchaBootstrap, ...altchaEnabled, DRY_RUN: dryRun });
+        expect(result.exitCode).toBe(0);
+        const [, digest, args] = result.stdout.toString().trim().split("\n");
+        expect(digest).toMatch(/^sha256:[a-f0-9]{64}$/);
+        expect(args).toBe(
+          `alchemy ${command} --stage prod --include Secret-kvitbit-prod-altcha-hmac-key`,
+        );
+      }
+      expect(run(preflight, { ...altchaEnabled, ALTCHA_VERSION_STATE: "ENABLED" }).exitCode).toBe(
+        0,
+      );
+
       const conflicting = run("Validate GCP deployment variables", {
         ...bootstrap,
         BOOTSTRAP_FOUNDATION: "true",
       });
       expect(conflicting.exitCode).toBe(1);
       expect(conflicting.stdout.toString()).toContain("Select only one");
+
+      const conflictingAltcha = run("Validate GCP deployment variables", {
+        ...altchaBootstrap,
+        BOOTSTRAP_FEEDBACK_SECRET: "true",
+      });
+      expect(conflictingAltcha.exitCode).toBe(1);
+      expect(conflictingAltcha.stdout.toString()).toContain("Select only one");
     } finally {
       rmSync(sandbox, { recursive: true, force: true });
     }
@@ -1193,6 +1260,7 @@ printf '%s\\n' "$KVITBIT_ENABLE_FEEDBACK_GITHUB_TOKEN_SECRET" "$KVITBIT_IMAGE_DI
         KVITBIT_STAGE: "prod",
         BOOTSTRAP_FOUNDATION: "false",
         BOOTSTRAP_FEEDBACK_SECRET: "false",
+        BOOTSTRAP_ALTCHA_SECRET: "false",
         GCP_PROJECT_ID: "kvitbit-prod",
         GCP_PROJECT_NUMBER: "449188423567",
         GCP_REGION: "europe-west3",
@@ -1204,6 +1272,7 @@ printf '%s\\n' "$KVITBIT_ENABLE_FEEDBACK_GITHUB_TOKEN_SECRET" "$KVITBIT_IMAGE_DI
         APP_ORIGIN: "https://kvitbit.cz",
         EMAIL_FROM: "Kvitbit <no-reply@kvitbit.cz>",
         KVITBIT_EDGE_DOMAINS: "kvitbit.cz,kvitbit.app",
+        KVITBIT_ENABLE_ALTCHA_HMAC_KEY_SECRET: "true",
         GITHUB_ENV: ghEnv,
       };
       const normOk = Bun.spawnSync(["bash", "-c", validateStep?.run ?? ""], {
@@ -1215,6 +1284,7 @@ printf '%s\\n' "$KVITBIT_ENABLE_FEEDBACK_GITHUB_TOKEN_SECRET" "$KVITBIT_IMAGE_DI
           KVITBIT_ENABLE_SMTP_SECRET: "1",
           KVITBIT_ENABLE_MOBILE_SIGNING_KEY_SECRET: "OFF",
           KVITBIT_ENABLE_FEEDBACK_GITHUB_TOKEN_SECRET: " On ",
+          KVITBIT_ENABLE_ALTCHA_HMAC_KEY_SECRET: "Yes",
         },
         stdout: "pipe",
         stderr: "pipe",
@@ -1225,6 +1295,7 @@ printf '%s\\n' "$KVITBIT_ENABLE_FEEDBACK_GITHUB_TOKEN_SECRET" "$KVITBIT_IMAGE_DI
       expect(exported).toContain("KVITBIT_ENABLE_SMTP_SECRET=true");
       expect(exported).toContain("KVITBIT_ENABLE_MOBILE_SIGNING_KEY_SECRET=false");
       expect(exported).toContain("KVITBIT_ENABLE_FEEDBACK_GITHUB_TOKEN_SECRET=true");
+      expect(exported).toContain("KVITBIT_ENABLE_ALTCHA_HMAC_KEY_SECRET=true");
 
       const normBad = Bun.spawnSync(["bash", "-c", validateStep?.run ?? ""], {
         cwd: repoRoot,
@@ -1251,6 +1322,13 @@ printf '%s\\n' "$KVITBIT_ENABLE_FEEDBACK_GITHUB_TOKEN_SECRET" "$KVITBIT_IMAGE_DI
         { KVITBIT_ENABLE_RESEND_SECRET: "true", KVITBIT_EDGE_DOMAINS: "" },
         { KVITBIT_ENABLE_RESEND_SECRET: "true", KVITBIT_EMAIL_MODE: "capture" },
         { KVITBIT_ENABLE_RESEND_SECRET: "true", KVITBIT_BLOB_DRIVER: "local" },
+        { KVITBIT_ENABLE_RESEND_SECRET: "true", KVITBIT_ENABLE_ALTCHA_HMAC_KEY_SECRET: "false" },
+        { KVITBIT_ENABLE_RESEND_SECRET: "true", KVITBIT_BOT_PROTECTION_MODE: "none" },
+        { KVITBIT_ENABLE_RESEND_SECRET: "true", KVITBIT_BOT_PROTECTION_MODE: "disabled" },
+        {
+          KVITBIT_ENABLE_RESEND_SECRET: "true",
+          KVITBIT_REPO_VARS_JSON: JSON.stringify({ KVITBIT_DISABLE_BOT_PROTECTION: "true" }),
+        },
         {
           KVITBIT_ENABLE_RESEND_SECRET: "true",
           KVITBIT_REPO_VARS_JSON: JSON.stringify({ KVITBIT_PREVIEW_DISABLE_EMAIL: "true" }),

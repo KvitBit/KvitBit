@@ -4,6 +4,7 @@
  */
 import { Config, Context, Effect, Layer, Option, Redacted } from "effect";
 import { ServerConfig } from "../config";
+import { loadBotProtectionConfig } from "../config-contract";
 import { type FeedbackConfig, makeFeedbackConfig } from "./feedback/access";
 
 export interface HttpConfigShape {
@@ -82,7 +83,7 @@ export const HttpConfigLive: Layer.Layer<HttpConfig, Config.ConfigError> = Layer
     const corsOrigins = yield* originList("KVITBIT_CORS_ORIGINS");
     const version = yield* Config.String("KVITBIT_VERSION").pipe(Config.withDefault("0.0.0"));
     const signUp = yield* Config.Boolean("KVITBIT_SIGN_UP").pipe(Config.withDefault(true));
-    const altchaKey = yield* Config.option(Config.Redacted("ALTCHA_HMAC_KEY"));
+    const botProtection = yield* loadBotProtectionConfig;
     const feedbackToken = yield* Config.option(Config.Redacted("KVITBIT_FEEDBACK_GITHUB_TOKEN"));
     const feedbackRepo = yield* Config.String("KVITBIT_FEEDBACK_GITHUB_REPO").pipe(
       Config.withDefault(""),
@@ -100,7 +101,7 @@ export const HttpConfigLive: Layer.Layer<HttpConfig, Config.ConfigError> = Layer
       corsOrigins,
       version,
       signUp,
-      botProtection: Option.isSome(altchaKey) ? "altcha" : "none",
+      botProtection: botProtection.mode,
       feedback: makeFeedbackConfig(
         Option.getOrUndefined(feedbackToken),
         feedbackRepo,
