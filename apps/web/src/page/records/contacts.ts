@@ -245,6 +245,12 @@ export const Message = UiSchema.TaggedEnum({
     ]),
     value: Schema.String,
   },
+  PastedEditorAddress: {
+    street: Schema.String,
+    city: Schema.String,
+    postalCode: Schema.String,
+    country: Schema.String,
+  },
   ToggledRole: { role: Schema.Literals(["customer", "supplier"]), checked: Schema.Boolean },
   ChangedReminderMode: { mode: Schema.Literals(["inherit", "disabled", "custom"]) },
   ChangedEmail: { index: Schema.Int, value: Schema.String },
@@ -771,6 +777,24 @@ export const update = (
       };
     },
 
+    PastedEditorAddress: ({ street, city, postalCode, country }) => {
+      if (model.editor === null) return { model };
+      return {
+        model: {
+          ...model,
+          editor: {
+            ...model.editor,
+            street,
+            city,
+            postalCode,
+            country,
+            error: null,
+            aresError: null,
+          },
+        },
+      };
+    },
+
     ToggledRole: ({ role, checked }) => {
       if (model.editor === null) return { model };
       return {
@@ -1177,6 +1201,15 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
       route.id === "new"
         ? href({ _tag: "Contacts", ws: route.ws, query: {} })
         : href({ _tag: "Contact", ws: route.ws, id: route.id, mode: "view" });
+    const pasteAddress = (field: Format.AddressField) => (text: string) => {
+      const next = Format.applyAddressPaste(
+        { street: ed.street, city: ed.city, postalCode: ed.postalCode, country: ed.country },
+        field,
+        text,
+        { defaultCountry: "CZ" },
+      );
+      return next === undefined ? undefined : Message.PastedEditorAddress(next);
+    };
 
     return page(h, [
       pageHeader(h, {
@@ -1280,12 +1313,14 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
                 label: tr.t("common.field.street"),
                 value: ed.street,
                 onInput: (value) => Message.ChangedEditorField({ field: "street", value }),
+                onPaste: pasteAddress("street"),
               }),
               textField(h, {
                 id: "contact-city",
                 label: tr.t("common.field.city"),
                 value: ed.city,
                 onInput: (value) => Message.ChangedEditorField({ field: "city", value }),
+                onPaste: pasteAddress("city"),
               }),
               textField(h, {
                 id: "contact-postal",
@@ -1293,6 +1328,7 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
                 value: ed.postalCode,
                 mono: true,
                 onInput: (value) => Message.ChangedEditorField({ field: "postalCode", value }),
+                onPaste: pasteAddress("postalCode"),
               }),
               textField(h, {
                 id: "contact-country",
@@ -1300,6 +1336,7 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
                 value: ed.country,
                 mono: true,
                 onInput: (value) => Message.ChangedEditorField({ field: "country", value }),
+                onPaste: pasteAddress("country"),
               }),
             ]),
             h.div.class("kb-stack").children([

@@ -11,6 +11,7 @@ import { HttpServerRequest } from "effect/http/HttpServerRequest";
 import { SqlClient } from "effect/sql";
 import { AuthServer } from "../../auth/AuthServer";
 import { bindAuthLogging } from "../../auth/logging";
+import { Analytics } from "../../runtime/analytics";
 import { HttpConfig } from "../config";
 import { RATE_LIMITS, RateLimiter } from "../edge/RateLimiter";
 import { canSubmitFeedback, feedbackSessionCookie } from "./access";
@@ -26,6 +27,7 @@ export const FeedbackRoutesLive = HttpRouter.use((router) =>
   Effect.gen(function* () {
     const config = yield* HttpConfig;
     const auth = yield* AuthServer;
+    const analytics = yield* Analytics;
     const sql = yield* SqlClient.SqlClient;
     const client = yield* HttpClient.HttpClient;
     const fetch = yield* FetchHttpClient.Fetch;
@@ -94,12 +96,16 @@ export const FeedbackRoutesLive = HttpRouter.use((router) =>
           submission.success,
           page,
         ).pipe(Effect.provideService(FetchHttpClient.Fetch, fetch));
-        return issue === undefined
-          ? HttpServerResponse.empty({ status: 502 })
-          : HttpServerResponse.jsonUnsafe(issue, {
-              status: 201,
-              headers: { "cache-control": "no-store" },
-            });
+        if (issue === undefined) return HttpServerResponse.empty({ status: 502 });
+        yield* analytics.capture({
+          event: "feedback_submitted",
+          userId: session.user.id,
+          hasPin: submission.success.pins.length > 0,
+        });
+        return HttpServerResponse.jsonUnsafe(issue, {
+          status: 201,
+          headers: { "cache-control": "no-store" },
+        });
       }),
     );
   }),

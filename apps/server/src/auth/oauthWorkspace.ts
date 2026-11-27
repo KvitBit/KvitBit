@@ -140,6 +140,7 @@ export const makeWorkspaceAuth = (
   sql: SqlClient.SqlClient,
   config: AuthConfig,
   runAuthEffect: AuthEffectRunner,
+  databaseHooks: NonNullable<BetterAuthOptions["databaseHooks"]>,
 ) => {
   const options = authOptions({
     ...config,
@@ -232,8 +233,9 @@ export const makeWorkspaceAuth = (
   };
 
   const serverOptions: ReturnType<typeof authOptions> &
-    Pick<BetterAuthOptions, "logger" | "onAPIError"> = {
+    Pick<BetterAuthOptions, "databaseHooks" | "logger" | "onAPIError"> = {
     ...options,
+    databaseHooks,
     // Better Auth can pass raw SQL parameters and authentication material to its logger.
     logger: { disabled: true },
     // Better Call otherwise prints unexpected errors directly to stderr.

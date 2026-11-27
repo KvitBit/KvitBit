@@ -39,7 +39,7 @@ import {
   StackEnv,
   validateStackConfig,
 } from "../src/config";
-import { runnerPlainEnv, serverPlainEnv, serverSecretEnv } from "../src/env";
+import { type PlainEnvVar, runnerPlainEnv, serverPlainEnv, serverSecretEnv } from "../src/env";
 import {
   declareKvitbitEdge,
   declareTokenRouteLogExclusion,
@@ -637,6 +637,132 @@ describe("Kvitbit Alchemy stack config", () => {
     } finally {
       rmSync(sandbox, { recursive: true, force: true });
     }
+  });
+});
+
+describe("PostHog deployment configuration", () => {
+  const load = (env: Record<string, string> = {}) =>
+    loadStackConfig.pipe(
+      Effect.provide(
+        ConfigProvider.layer(
+          ConfigProvider.fromEnv({
+            env: { ...PROD_REQUIRED_ENV, KVITBIT_IMAGE_DIGEST: SAMPLE_DIGEST, ...env },
+          }),
+        ),
+      ),
+    );
+
+  test.each([
+    {},
+    { KVITBIT_POSTHOG_KEY: "", KVITBIT_POSTHOG_HOST: "" },
+    { KVITBIT_POSTHOG_KEY: "  ", KVITBIT_POSTHOG_HOST: "\t" },
+  ])("treats absent or blank values as unset (%j)", async (env) => {
+    const config = await Effect.runPromise(load(env));
+    expect(config.posthogKey).toBeUndefined();
+    expect(config.posthogHost).toBeUndefined();
+  });
+
+  test("trims the project key and defaults a blank host to the EU endpoint", async () => {
+    const config = await Effect.runPromise(
+      load({ KVITBIT_POSTHOG_KEY: "  phc_test_key  ", KVITBIT_POSTHOG_HOST: " " }),
+    );
+    expect(config.posthogKey).toBe("phc_test_key");
+    expect(config.posthogHost).toBe("https://eu.i.posthog.com");
+  });
+
+  test("normalizes a custom HTTPS host, including when a key is absent", async () => {
+    const host = "https://analytics.example.test/proxy%20name/%7Btenant%7D";
+    const env = { KVITBIT_POSTHOG_HOST: `  ${host}///  ` };
+    const config = await Effect.runPromise(load(env));
+    expect(config.posthogKey).toBeUndefined();
+    expect(config.posthogHost).toBe(host);
+
+    const withKey = await Effect.runPromise(load({ ...env, KVITBIT_POSTHOG_KEY: "phc_test_key" }));
+    expect(withKey.posthogHost).toBe(host);
+  });
+
+  test.each([
+    "https://localhost",
+    "https://analytics.example.test.:8443/proxy",
+    "https://měření.example.test/čas",
+    "https://127.0.0.1:8443",
+    "https://[::1]:8443",
+  ])("accepts a valid HTTPS endpoint %s", async (host) => {
+    const config = await Effect.runPromise(load({ KVITBIT_POSTHOG_HOST: host }));
+    expect(config.posthogHost).toBe(host);
+  });
+
+  test.each(["personal_key", "phc_test key"])("rejects invalid project key %s", async (key) => {
+    expect(await Effect.runPromise(Effect.flip(load({ KVITBIT_POSTHOG_KEY: key })))).toMatchObject({
+      _tag: "InvalidStackConfig",
+      field: "KVITBIT_POSTHOG_KEY",
+    });
+  });
+
+  test.each([
+    "http://analytics.example.test",
+    "https:///analytics.example.test",
+    "https://{tenant}.example.test",
+    "https://-analytics.example.test",
+    "https://analytics..example.test",
+    "https://127.1",
+    "https://analytics.example.test:invalid",
+    "https://analytics.example.test/proxy%2",
+    "https://analytics.example.test/proxy%zz",
+    "https://analytics.example.test/{tenant}",
+    "https://analytics.example.test/[tenant]",
+    "https://analytics.example.test/proxy name",
+    "https://analytics.example.test/path\u0000segment",
+    "https://analytics.example.test/?source=test",
+    "https://analytics.example.test/?",
+    "https://analytics.example.test/#fragment",
+    "https://analytics.example.test/#",
+    "https://user:password@analytics.example.test",
+    "https://@analytics.example.test",
+  ])("rejects invalid host %s", async (host) => {
+    expect(
+      await Effect.runPromise(Effect.flip(load({ KVITBIT_POSTHOG_HOST: host }))),
+    ).toMatchObject({ _tag: "InvalidStackConfig", field: "KVITBIT_POSTHOG_HOST" });
+  });
+
+  test("supplies the PostHog pair to server and runner only when a key is set", () => {
+    const cases: ReadonlyArray<[Partial<KvitbitStackConfig>, PlainEnvVar[]]> = [
+      [{}, []],
+      [{ posthogHost: "https://analytics.example.test" }, []],
+      [
+        { posthogKey: "phc_test_key" },
+        [
+          { name: "KVITBIT_POSTHOG_KEY", value: "phc_test_key" },
+          { name: "KVITBIT_POSTHOG_HOST", value: "https://eu.i.posthog.com" },
+        ],
+      ],
+      [
+        { posthogKey: "phc_test_key", posthogHost: "https://analytics.example.test" },
+        [
+          { name: "KVITBIT_POSTHOG_KEY", value: "phc_test_key" },
+          { name: "KVITBIT_POSTHOG_HOST", value: "https://analytics.example.test" },
+        ],
+      ],
+    ];
+    for (const [overrides, expected] of cases) {
+      const config = sampleProdConfig(overrides);
+      const server = serverPlainEnv(config, { blobsBucket: "blobs", mobileAssetsBucket: "mobile" });
+      const runner = runnerPlainEnv(config, "blobs");
+      expect(server.filter(({ name }) => name.startsWith("KVITBIT_POSTHOG_"))).toEqual(expected);
+      expect(runner.filter(({ name }) => name.startsWith("KVITBIT_POSTHOG_"))).toEqual(expected);
+    }
+  });
+
+  test("passes the repository variables to the Alchemy deploy step", () => {
+    const workflow = readFileSync(
+      new URL("../../../.github/workflows/deploy.yml", import.meta.url),
+      "utf8",
+    );
+    const deployStep = workflow
+      .split("      - name: ")
+      .find((step) => step.startsWith("Run pure-Alchemy GCP stack"));
+    expect(deployStep).toMatch(/KVITBIT_POSTHOG_KEY: \$\{\{ vars\.KVITBIT_POSTHOG_KEY \}\}/);
+    expect(deployStep).toMatch(/KVITBIT_POSTHOG_HOST: \$\{\{ vars\.KVITBIT_POSTHOG_HOST \}\}/);
   });
 });
 

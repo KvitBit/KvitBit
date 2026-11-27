@@ -11,6 +11,7 @@ import {
 import { Effect, Ref } from "effect";
 import { SqlClient } from "effect/sql";
 import { TestClock } from "effect/testing";
+import { captureAnalytics } from "../../analytics-fixture";
 import { as, type Harness, json, makeHarness, TEST_NOW, type TestUser } from "../harness";
 
 let h: Harness;
@@ -18,6 +19,7 @@ let owner: TestUser;
 let teammate: TestUser;
 let workspaceId: string;
 let base: string;
+let analytics: ReturnType<typeof captureAnalytics>;
 
 const req = (
   user: TestUser,
@@ -117,7 +119,9 @@ const countEdgeCredentials = async (user: TestUser) =>
   );
 
 beforeEach(async () => {
+  analytics = captureAnalytics();
   h = makeHarness({
+    analytics: analytics.layer,
     users: [
       {
         userId: "01900000-0000-7000-8000-000000000001" as never,
@@ -176,6 +180,15 @@ describe("team group", () => {
     expect(replay.status).toBe(201);
     expect(replay.headers.get("idempotent-replayed")).toBe("true");
     expect(await replay.json()).toEqual(inv);
+    expect(analytics.capture.mock.calls).toEqual([
+      [
+        {
+          event: "team_invitation_sent",
+          distinctId: owner.id,
+          properties: { workspaceId, role: "member" },
+        },
+      ],
+    ]);
 
     const listRes = await req(owner, "/invitations", "GET");
     expect(listRes.status).toBe(200);

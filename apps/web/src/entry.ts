@@ -2,13 +2,14 @@ import "./styles/index.css";
 import { type Renderer, Router } from "@effect/ui";
 import { BrowserHost, BrowserRouter, HtmlHydrate } from "@effect/ui/html";
 import { Effect, Layer } from "effect";
+import { StartupConfig, WebServicesLive } from "./app/api";
 import { RunApi } from "./app/commands";
 import { loadBrowserPrefs } from "./app/prefs";
 import { BrowserRoutes } from "./app/routing";
 import { utcDateAt } from "./app/utc-date";
 import { demoEnabled, demoRoutes } from "./demo";
 import { installDemoFetch } from "./demo/router";
-import { App, type Flags, Navigate } from "./main";
+import { App, browserAnalytics, type Flags, Navigate } from "./main";
 
 if (demoEnabled()) installDemoFetch(demoRoutes);
 
@@ -41,5 +42,10 @@ const host =
     : HtmlHydrate.hydrate(App, state.flags, container, state.state);
 
 const router = BrowserRouter.layer({ routes: BrowserRoutes });
-const layers = Layer.merge(RunApi.layer, Navigate.layer.pipe(Layer.provideMerge(router)));
+const webServices = StartupConfig.layer.pipe(Layer.provideMerge(WebServicesLive));
+const layers = Layer.mergeAll(
+  RunApi.fromClient,
+  Navigate.layer,
+  browserAnalytics(location.origin),
+).pipe(Layer.provide(webServices), Layer.provideMerge(router));
 Effect.runFork(Layer.launch(host.pipe(Layer.provide(layers))));

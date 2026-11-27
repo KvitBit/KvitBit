@@ -254,6 +254,12 @@ export const Message = UiSchema.TaggedEnum({
     ]),
     value: Schema.String,
   },
+  PastedEntityAddress: {
+    street: Schema.String,
+    city: Schema.String,
+    postalCode: Schema.String,
+    country: Schema.String,
+  },
   ClickedAresLookup: {},
   GotAresResult: { result: RegistryResult },
   ClickedSaveEntity: {},
@@ -1258,6 +1264,15 @@ export const update = (
     ChangedEntityField: ({ field, value }) => ({
       model: { ...model, entityForm: { ...model.entityForm, [field]: value } },
     }),
+    PastedEntityAddress: ({ street, city, postalCode, country }) =>
+      canEditSettings(ctx)
+        ? {
+            model: {
+              ...model,
+              entityForm: { ...model.entityForm, street, city, postalCode, country },
+            },
+          }
+        : { model },
     ClickedAresLookup: () => {
       const ico = model.entityForm.ico.replace(/\s+/g, "");
       if (ico === "") return { model };

@@ -1,5 +1,6 @@
 import type { IssuingEntityPatch } from "@kvitbit/domain/contract";
 import { describeError, ifMatchHeaders, inWorkspace } from "@kvitbit/ui-port/api";
+import { applyAddressInputChange } from "@kvitbit/ui-port/format";
 import { RefreshCw } from "lucide-react-native";
 import { useEffect, useState } from "react";
 import { StyleSheet, View } from "react-native";
@@ -92,9 +93,14 @@ export function IssuingEntitySection() {
   };
 
   const updateAddress = (key: keyof IssuingEntityData["address"], value: string) => {
-    setDraft((prev) =>
-      prev === null ? prev : { ...prev, address: { ...prev.address, [key]: value } },
-    );
+    setDraft((prev) => {
+      if (prev === null) return prev;
+      const pasted = applyAddressInputChange(prev.address, key, value, { defaultCountry: "CZ" });
+      return {
+        ...prev,
+        address: pasted ?? { ...prev.address, [key]: value },
+      };
+    });
   };
 
   const handleAresLookup = async () => {

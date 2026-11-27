@@ -30,6 +30,7 @@
     "@kvitbit/domain": "workspace:*",
     "better-auth": "1.7.27",
     "drizzle-orm": "1.0.0-rc.5",
-    "effect": "4.1.4"
+    "effect": "4.1.4",
+    "posthog-node": "^6.2.0"
   }
 }

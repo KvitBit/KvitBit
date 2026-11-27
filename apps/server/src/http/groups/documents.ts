@@ -1,9 +1,22 @@
 /** `documents` group handlers (http-mcp-contracts 3.4 & 3.5.4): one Documents method per endpoint. */
 import { API_PREFIX, Api } from "@kvitbit/api-contract";
-import { Documents } from "@kvitbit/domain/contract";
+import {
+  CurrentCaller,
+  type DocumentKind,
+  Documents,
+  type WorkspaceId,
+} from "@kvitbit/domain/contract";
 import { Effect } from "effect";
 import { HttpApiBuilder } from "effect/http-api";
-import { compact, fileDownload, requestOptions, setLocation, withRevision } from "../conventions";
+import { Analytics } from "../../runtime/analytics";
+import {
+  compact,
+  fileDownload,
+  requestOptions,
+  requestWasReplayed,
+  setLocation,
+  withRevision,
+} from "../conventions";
 import { jsonizeAuditEntries, jsonizeDocumentPage, jsonizeDocumentView } from "./documents/jsonize";
 
 const documentLocation = (workspaceId: string, documentId: string) =>
@@ -12,6 +25,36 @@ const documentLocation = (workspaceId: string, documentId: string) =>
 export const DocumentsGroupLive = HttpApiBuilder.group(Api, "documents", (handlers) =>
   Effect.gen(function* () {
     const documents = yield* Documents;
+    const analytics = yield* Analytics;
+    const captureDocument = (
+      event: "document_created" | "document_issued",
+      workspaceId: WorkspaceId,
+      kind: DocumentKind,
+      source: "draft" | "direct",
+    ) =>
+      Effect.gen(function* () {
+        const caller = yield* CurrentCaller;
+        if (caller._tag === "Member" && !(yield* requestWasReplayed)) {
+          yield* analytics.capture({ event, userId: caller.userId, workspaceId, kind, source });
+        }
+      });
+    const captureDraftSaved = (
+      workspaceId: WorkspaceId,
+      kind: DocumentKind,
+      mode: "created" | "updated",
+    ) =>
+      Effect.gen(function* () {
+        const caller = yield* CurrentCaller;
+        if (caller._tag === "Member" && !(yield* requestWasReplayed)) {
+          yield* analytics.capture({
+            event: "document_draft_saved",
+            userId: caller.userId,
+            workspaceId,
+            kind,
+            mode,
+          });
+        }
+      });
     return handlers
       .handle("list", ({ query }) =>
         Effect.map(documents.list(compact(query)), jsonizeDocumentPage),
@@ -22,6 +65,12 @@ export const DocumentsGroupLive = HttpApiBuilder.group(Api, "documents", (handle
       .handle("createDraft", ({ params, headers, payload }) =>
         documents.createDraft(payload, requestOptions(headers)).pipe(
           Effect.tap((view) => setLocation(documentLocation(params.workspaceId, view.id))),
+          Effect.tap((view) =>
+            Effect.andThen(
+              captureDocument("document_created", params.workspaceId, view.kind, "draft"),
+              captureDraftSaved(params.workspaceId, view.kind, "created"),
+            ),
+          ),
           Effect.map(jsonizeDocumentView),
         ),
       )
@@ -36,6 +85,9 @@ export const DocumentsGroupLive = HttpApiBuilder.group(Api, "documents", (handle
           )
           .pipe(
             Effect.tap((view) => setLocation(documentLocation(params.workspaceId, view.id))),
+            Effect.tap((view) =>
+              captureDocument("document_issued", params.workspaceId, view.kind, "direct"),
+            ),
             Effect.map(jsonizeDocumentView),
           ),
       )
@@ -45,7 +97,14 @@ export const DocumentsGroupLive = HttpApiBuilder.group(Api, "documents", (handle
       .handle("edit", ({ params, headers, payload }) =>
         withRevision(headers["if-match"], (expectedRevision) =>
           documents.edit(params.documentId, payload, expectedRevision),
-        ).pipe(Effect.map(jsonizeDocumentView)),
+        ).pipe(
+          Effect.tap((view) =>
+            view.status === "draft"
+              ? captureDraftSaved(params.workspaceId, view.kind, "updated")
+              : Effect.void,
+          ),
+          Effect.map(jsonizeDocumentView),
+        ),
       )
       .handle("discardDraft", ({ params, headers }) =>
         withRevision(headers["if-match"], (expectedRevision) =>
@@ -61,7 +120,12 @@ export const DocumentsGroupLive = HttpApiBuilder.group(Api, "documents", (handle
               ...(payload.send === undefined ? {} : { send: payload.send }),
             },
           ),
-        ).pipe(Effect.map(jsonizeDocumentView)),
+        ).pipe(
+          Effect.tap((view) =>
+            captureDocument("document_issued", params.workspaceId, view.kind, "draft"),
+          ),
+          Effect.map(jsonizeDocumentView),
+        ),
       )
       .handle("lock", ({ params }) =>
         Effect.map(documents.lock(params.documentId), jsonizeDocumentView),

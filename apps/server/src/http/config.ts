@@ -3,7 +3,7 @@
  * from `ServerConfig`; the variables below are read only by this stream.
  */
 import { Config, Context, Effect, Layer, Option, Redacted } from "effect";
-import { ServerConfig } from "../config";
+import { PostHogConfig, type PostHogSettings, ServerConfig } from "../config";
 import { loadBotProtectionConfig } from "../config-contract";
 import { type FeedbackConfig, makeFeedbackConfig } from "./feedback/access";
 
@@ -28,6 +28,7 @@ export interface HttpConfigShape {
   readonly botProtection: "altcha" | "none";
   /** Keys the daily `VisitorHash` of share-link visitors (derived from BETTER_AUTH_SECRET). */
   readonly visitorSecret: Redacted.Redacted<string>;
+  readonly posthog: PostHogSettings | null;
   readonly feedback?: FeedbackConfig | undefined;
 }
 
@@ -53,7 +54,10 @@ export const makeHttpConfig = (
     "appOrigin" | "trustedProxyHops" | "webDir" | "pwaDir" | "visitorSecret"
   > &
     Partial<
-      Pick<HttpConfigShape, "corsOrigins" | "version" | "signUp" | "botProtection" | "feedback">
+      Pick<
+        HttpConfigShape,
+        "corsOrigins" | "version" | "signUp" | "botProtection" | "feedback" | "posthog"
+      >
     > & {
       readonly trustedOrigins?: ReadonlyArray<string>;
     },
@@ -70,6 +74,7 @@ export const makeHttpConfig = (
     signUp: base.signUp ?? true,
     botProtection: base.botProtection ?? "none",
     visitorSecret: base.visitorSecret,
+    posthog: base.posthog ?? null,
     feedback: base.feedback,
   };
 };
@@ -84,6 +89,7 @@ export const HttpConfigLive: Layer.Layer<HttpConfig, Config.ConfigError> = Layer
     const version = yield* Config.String("KVITBIT_VERSION").pipe(Config.withDefault("0.0.0"));
     const signUp = yield* Config.Boolean("KVITBIT_SIGN_UP").pipe(Config.withDefault(true));
     const botProtection = yield* loadBotProtectionConfig;
+    const posthog = yield* PostHogConfig;
     const feedbackToken = yield* Config.option(Config.Redacted("KVITBIT_FEEDBACK_GITHUB_TOKEN"));
     const feedbackRepo = yield* Config.String("KVITBIT_FEEDBACK_GITHUB_REPO").pipe(
       Config.withDefault(""),
@@ -102,6 +108,7 @@ export const HttpConfigLive: Layer.Layer<HttpConfig, Config.ConfigError> = Layer
       version,
       signUp,
       botProtection: botProtection.mode,
+      posthog,
       feedback: makeFeedbackConfig(
         Option.getOrUndefined(feedbackToken),
         feedbackRepo,

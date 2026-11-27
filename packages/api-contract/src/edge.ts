@@ -38,6 +38,16 @@ export const ConfigView = Schema.Struct({
     mcp: Schema.Boolean,
     apiKeys: Schema.Boolean,
   }),
+  analytics: Schema.optional(
+    Schema.Struct({
+      posthog: Schema.NullOr(
+        Schema.Struct({
+          apiKey: Schema.NonEmptyString,
+          host: Schema.NonEmptyString,
+        }),
+      ),
+    }),
+  ),
 });
 export type ConfigView = typeof ConfigView.Type;
 
