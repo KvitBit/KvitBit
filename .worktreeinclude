@@ -1,0 +1,4 @@
+# Gitignored files copied into new worktrees via `copy-gitignored --from-file .worktreeinclude`.
+.env
+.env.*
+.turbo/config.json
