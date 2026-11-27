@@ -137,20 +137,20 @@ const isCompleteRoleMap = (roles: Partial<RoleMap>): roles is RoleMap =>
   Arr.every(M3_COLOR_ROLES, (role) => roles[role] !== undefined);
 
 export interface DecodedThemeFile {
+  readonly file: MaterialThemeJson;
   readonly seed: Hex;
   /** Complete role maps for the variants the file defines completely. */
-  readonly roles: Readonly<Record<"light" | "dark", RoleMap>> &
-    Partial<Record<SchemeVariant, RoleMap>>;
+  readonly roles: Partial<Record<SchemeVariant, RoleMap>>;
   readonly extended: Partial<Record<ExtendedRole, ExtendedInput>>;
   readonly warnings: ReadonlyArray<MaterialThemeFileWarning>;
   readonly unknownRoles: ReadonlyArray<string>;
 }
 
-/**
- * Shape-check an already-parsed file. Light and dark must carry every `M3ColorRole` (rule M2);
- * an incomplete contrast scheme is regenerated from the seed with `missing_contrast_schemes`.
- */
-export const decodeMaterialTheme = (json: unknown): Result.Result<DecodedThemeFile, Invalid> => {
+type DecodedThemeFileWithPreview = DecodedThemeFile & {
+  readonly roles: Readonly<Record<"light" | "dark", RoleMap>>;
+};
+
+const decodeWithPreview = (json: unknown): Result.Result<DecodedThemeFileWithPreview, Invalid> => {
   if (isRecord(json) && "seed" in json && !(typeof json.seed === "string" && isHex(json.seed)))
     return Result.fail(invalid(issue("theme.seed_invalid", ["seed"])));
   const exit = Schema.decodeUnknownExit(MaterialThemeJson)(json);
@@ -197,6 +197,7 @@ export const decodeMaterialTheme = (json: unknown): Result.Result<DecodedThemeFi
   if (!Arr.some(EXTENDED_ROLES, (role) => extended[role] !== undefined))
     warnings.push("no_extended_colours");
   return Result.succeed({
+    file,
     seed: Str.toUpperCase(file.seed),
     roles: { ...roles, light, dark },
     extended,
@@ -204,6 +205,13 @@ export const decodeMaterialTheme = (json: unknown): Result.Result<DecodedThemeFi
     unknownRoles: [...unknown],
   });
 };
+
+/**
+ * Shape-check an already-parsed file. Light and dark must carry every `M3ColorRole` (rule M2);
+ * an incomplete contrast scheme is regenerated from the seed with `missing_contrast_schemes`.
+ */
+export const decodeMaterialTheme = (json: unknown): Result.Result<DecodedThemeFile, Invalid> =>
+  decodeWithPreview(json);
 
 /**
  * Parse an uploaded file's text. The byte limit (`uploads.themeJson.maxBytes`) is checked before
@@ -218,7 +226,7 @@ export const parseMaterialThemeFile: {
   const parsed = decodeJson(source);
   if (Exit.isFailure(parsed)) return Result.fail(invalid(issue("theme.json_invalid")));
   const json = parsed.value;
-  return Result.map(decodeMaterialTheme(json), (d) => {
+  return Result.map(decodeWithPreview(json), (d) => {
     const { light, dark } = d.roles;
     return {
       json,

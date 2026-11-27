@@ -8,6 +8,7 @@ import * as Str from "effect/String";
 
 import {
   auditTheme,
+  decodeMaterialTheme,
   extendedScheme,
   fileWarningText,
   Hct,
@@ -55,6 +56,14 @@ const exportFile = (overrides: Record<string, unknown> = {}) => ({
 
 const codes = (r: Result.Result<unknown, { issues: ReadonlyArray<{ code: string }> }>) =>
   Result.isFailure(r) ? Arr.map(r.failure.issues, (i) => i.code) : [];
+
+test("decodeMaterialTheme keeps the decoded file alongside the normalized seed", () => {
+  const r = decodeMaterialTheme(exportFile({ seed: "#0e6b8c" }));
+  if (Result.isFailure(r)) throw new Error("expected success");
+  expect(r.success.file.seed).toBe("#0e6b8c");
+  expect(r.success.file.palettes).toEqual({ primary: { "0": "#000000", "100": "#FFFFFF" } });
+  expect(r.success.seed).toBe("#0E6B8C");
+});
 
 describe("parseMaterialThemeFile", () => {
   test("accepts a complete export and previews its own schemes", () => {
