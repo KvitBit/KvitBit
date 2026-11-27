@@ -231,11 +231,13 @@ const local = copy({
     bicInvalid: "Zadejte platný BIC.",
     slugInvalid: "Adresa prostoru musí mít 3 až 40 znaků.",
     legalForm: "Právní forma",
-    invoiceSeries: "Řada faktur",
-    proformaSeries: "Řada zálohových faktur",
-    ptdSeries: "Řada daňových dokladů k platbě",
-    creditNoteSeries: "Řada opravných dokladů",
+    documentType: "Typ dokladu",
     startNumber: "Počáteční číslo",
+    firstNumbers: "První čísla",
+    invalidStart: "Zadejte 1 nebo více",
+    invalidPattern: "Uveďte N pro počítadlo",
+    patternTooLong: "Nejvýše 20 znaků",
+    defaultsIntro: "Použije se automaticky pro nové doklady.",
     seriesInvalid: "Zadejte vzor a kladné celé počáteční číslo pro každou řadu.",
     resume: "Dokončit nastavení",
     defaultCurrency: "Výchozí měna",
@@ -261,11 +263,13 @@ const local = copy({
     bicInvalid: "Enter a valid BIC.",
     slugInvalid: "Use 3 to 40 characters for the workspace address.",
     legalForm: "Legal form",
-    invoiceSeries: "Invoice series",
-    proformaSeries: "Proforma series",
-    ptdSeries: "Payment tax document series",
-    creditNoteSeries: "Credit note series",
+    documentType: "Document type",
     startNumber: "Starting number",
+    firstNumbers: "First numbers",
+    invalidStart: "Enter 1 or higher",
+    invalidPattern: "Include N for counter",
+    patternTooLong: "At most 20 characters",
+    defaultsIntro: "Applied automatically to new documents.",
     seriesInvalid: "Enter a pattern and a positive whole starting number for each series.",
     resume: "Finish workspace setup",
     defaultCurrency: "Default currency",
@@ -330,28 +334,24 @@ const CreateWorkspaceCmd = defineApiCommand("OnboardingCreateWorkspace", {
 const setupSeries = [
   {
     kind: "invoice",
-    label: "invoiceSeries",
     name: "Invoices",
     pattern: "invoicePattern",
     start: "invoiceStart",
   },
   {
     kind: "proforma",
-    label: "proformaSeries",
     name: "Proformas",
     pattern: "proformaPattern",
     start: "proformaStart",
   },
   {
     kind: "payment_tax_document",
-    label: "ptdSeries",
     name: "Payment tax documents",
     pattern: "ptdPattern",
     start: "ptdStart",
   },
   {
     kind: "credit_note",
-    label: "creditNoteSeries",
     name: "Credit notes",
     pattern: "creditNotePattern",
     start: "creditNoteStart",
@@ -561,15 +561,16 @@ const formatPatternSample = (pattern: string, counter: number, date: string): st
   );
 };
 
-const validSeries = (pattern: string, start: string): boolean => {
+type SeriesValidationIssue = "start" | "pattern" | "tooLong" | null;
+
+const validStartNumber = (start: string): boolean => {
   const counter = Number(start);
-  if (
-    !/^\d+$/.test(start) ||
-    !Number.isSafeInteger(counter) ||
-    counter < 1 ||
-    counter > 2_147_483_646
-  )
-    return false;
+  return (
+    /^\d+$/.test(start) && Number.isSafeInteger(counter) && counter >= 1 && counter <= 2_147_483_646
+  );
+};
+
+const validPatternSyntax = (pattern: string): boolean => {
   const runs = (pattern.match(/[A-Za-z]+/g) ?? [])
     .filter((word) => /^[YMN]+$/.test(word))
     .flatMap((word) => word.match(/Y+|M+|N+/g) ?? []);
@@ -583,9 +584,18 @@ const validSeries = (pattern: string, start: string): boolean => {
   )
     return false;
   // biome-ignore lint/suspicious/noControlCharactersInRegex: the numbering grammar disallows control characters.
-  const hasControlCharacter = /[\u0000-\u001f\u007f]/.test(pattern);
-  return !hasControlCharacter && formatPatternSample(pattern, counter, "2026-01-01").length <= 20;
+  return !/[\u0000-\u001f\u007f]/.test(pattern);
 };
+
+const seriesValidationIssue = (pattern: string, start: string): SeriesValidationIssue => {
+  if (!validStartNumber(start)) return "start";
+  if (!validPatternSyntax(pattern)) return "pattern";
+  if (formatPatternSample(pattern, Number(start), "2026-01-01").length > 20) return "tooLong";
+  return null;
+};
+
+const validSeries = (pattern: string, start: string): boolean =>
+  seriesValidationIssue(pattern, start) === null;
 
 export const init = (route: Route, ctx: PageContext): PageReturn<Model, Message> => ({
   model: {
@@ -1268,69 +1278,199 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
         ]);
 
       case 4: {
-        const previewList = [1, 2, 3]
-          .map((n) =>
-            formatPatternSample(
-              model.invoicePattern || "YYYY-NNNN",
-              n + (Number(model.invoiceStart) || 1) - 1,
-              ctx.today,
-            ),
-          )
-          .join(", ");
+        const series = eligibleSeries(model.taxRegime);
         return card(h, [
-          cardTitle(h, local(ctx.locale, "step4Title")),
-          h.div.class("kb-stack").children([
-            h.p.class("kb-muted").children([t.t("onboarding.wizard.numbering.intro")]),
-            banner(h, {
-              text: t.t("onboarding.wizard.numbering.preview", { numbers: previewList }),
-              tone: "info",
-            }),
-            h.div.class("kb-grid").children([
-              ...eligibleSeries(model.taxRegime).map(({ kind, label, pattern, start }) =>
-                h.div.class("kb-stack").children([
-                  textField(h, {
-                    id: `onb-pattern-${kind}`,
-                    label: local(ctx.locale, label),
-                    value: model[pattern],
-                    mono: true,
-                    onInput: (value) => Message.ChangedField({ field: pattern, value }),
-                  }),
-                  textField(h, {
-                    id: `onb-start-${kind}`,
-                    label: local(ctx.locale, "startNumber"),
-                    type: "number",
-                    value: model[start],
-                    onInput: (value) => Message.ChangedField({ field: start, value }),
+          h.div
+            .class("kb-onboarding-card-head")
+            .children([
+              cardTitle(h, local(ctx.locale, "step4Title")),
+              h.p.class("kb-muted").children([t.t("onboarding.wizard.numbering.intro")]),
+            ]),
+          h.div.class("kb-onboarding-sections").children([
+            h.section
+              .class("kb-onboarding-section")
+              .attr("aria-labelledby", "onb-series-heading")
+              .children([
+                h.div
+                  .class("kb-onboarding-section__head")
+                  .children([
+                    h.h3.id("onb-series-heading").children([t.t("settings.numbering.title")]),
+                    h.p
+                      .class("kb-small kb-muted")
+                      .children([t.t("settings.numbering.patternHint")]),
+                  ]),
+                h.div.class("kb-series-ledger").children([
+                  h.div
+                    .class("kb-series-ledger__head")
+                    .attr("aria-hidden", "true")
+                    .children([
+                      h.span.children([local(ctx.locale, "documentType")]),
+                      h.span.children([t.t("settings.numbering.pattern")]),
+                      h.span.children([local(ctx.locale, "startNumber")]),
+                      h.span.class("kb-end").children([local(ctx.locale, "firstNumbers")]),
+                    ]),
+                  ...series.map(({ kind, pattern, start }) => {
+                    const titleText = t.translate(I18n.enumText("documentKindPlural", kind));
+                    const patternValue = model[pattern];
+                    const startValue = model[start];
+                    const trimmedPattern = patternValue.trim();
+                    const issue = seriesValidationIssue(trimmedPattern, startValue);
+                    const startInvalid = !validStartNumber(startValue);
+                    const patternInvalid =
+                      !validPatternSyntax(trimmedPattern) || issue === "tooLong";
+                    const counter = Number(startValue);
+                    const firstSample =
+                      issue === null
+                        ? formatPatternSample(trimmedPattern, counter, ctx.today)
+                        : null;
+                    const secondSample =
+                      issue === null
+                        ? formatPatternSample(trimmedPattern, counter + 1, ctx.today)
+                        : null;
+                    const rowHeadingId = `onb-series-title-${kind}`;
+                    const rowPreviewId = `onb-series-preview-${kind}`;
+                    const issueMessage =
+                      issue === "start"
+                        ? local(ctx.locale, "invalidStart")
+                        : issue === "tooLong"
+                          ? local(ctx.locale, "patternTooLong")
+                          : issue === "pattern"
+                            ? local(ctx.locale, "invalidPattern")
+                            : null;
+
+                    return h.div
+                      .key(kind)
+                      .class(`kb-series-row${issue !== null ? " kb-series-row--invalid" : ""}`)
+                      .attr("role", "group")
+                      .attr("aria-labelledby", rowHeadingId)
+                      .attr("data-series-kind", kind)
+                      .children([
+                        h.div
+                          .class("kb-series-row__kind")
+                          .children([
+                            h.span
+                              .id(rowHeadingId)
+                              .class("kb-series-row__title")
+                              .children([titleText]),
+                          ]),
+                        h.div.class("kb-series-row__field kb-series-row__field--pattern").children([
+                          h.label
+                            .class("kb-series-row__label")
+                            .attr("for", `onb-pattern-${kind}`)
+                            .children([t.t("settings.numbering.pattern")]),
+                          withAttributes(h.input.class(), [
+                            (element) => element.class("kb-input kb-mono"),
+                            (element) => element.id(`onb-pattern-${kind}`),
+                            (element) => element.attr("name", `onb-pattern-${kind}`),
+                            (element) => element.attr("type", "text"),
+                            (element) => element.attr("spellcheck", "false"),
+                            (element) => element.attr("autocomplete", "off"),
+                            (element) => element.value(patternValue),
+                            (element) =>
+                              element.on("input", ({ value }) =>
+                                Message.ChangedField({ field: pattern, value }),
+                              ),
+                            (node) =>
+                              patternInvalid
+                                ? node
+                                    .attr("aria-invalid", "true")
+                                    .attr("aria-describedby", rowPreviewId)
+                                : node,
+                          ]),
+                        ]),
+                        h.div.class("kb-series-row__field kb-series-row__field--start").children([
+                          h.label
+                            .class("kb-series-row__label")
+                            .attr("for", `onb-start-${kind}`)
+                            .children([local(ctx.locale, "startNumber")]),
+                          withAttributes(h.input.class(), [
+                            (element) => element.class("kb-input kb-mono kb-series-row__start"),
+                            (element) => element.id(`onb-start-${kind}`),
+                            (element) => element.attr("name", `onb-start-${kind}`),
+                            (element) => element.attr("type", "number"),
+                            (element) => element.attr("inputmode", "numeric"),
+                            (element) => element.attr("min", "1"),
+                            (element) => element.attr("step", "1"),
+                            (element) => element.value(startValue),
+                            (element) =>
+                              element.on("input", ({ value }) =>
+                                Message.ChangedField({ field: start, value }),
+                              ),
+                            (node) =>
+                              startInvalid
+                                ? node
+                                    .attr("aria-invalid", "true")
+                                    .attr("aria-describedby", rowPreviewId)
+                                : node,
+                          ]),
+                        ]),
+                        h.div
+                          .id(rowPreviewId)
+                          .class("kb-series-row__preview")
+                          .attr("aria-live", "polite")
+                          .children(
+                            firstSample !== null && secondSample !== null
+                              ? [
+                                  h.span
+                                    .class("kb-series-row__sample kb-mono")
+                                    .children([firstSample]),
+                                  h.span
+                                    .class("kb-series-row__next kb-mono kb-muted")
+                                    .children([secondSample]),
+                                ]
+                              : [
+                                  h.span
+                                    .class("kb-series-row__error")
+                                    .attr("role", "alert")
+                                    .children([issueMessage ?? ""]),
+                                ],
+                          ),
+                      ]);
                   }),
                 ]),
-              ),
-              selectField(h, {
-                id: "onb-def-currency",
-                disabled: workspaceCreated,
-                label: local(ctx.locale, "defaultCurrency"),
-                value: model.defaultCurrency,
-                options: [
-                  { value: "CZK", label: "CZK" },
-                  { value: "EUR", label: "EUR" },
-                ],
-                onChange: (v) =>
-                  Message.SelectedDefaultCurrency({
-                    currency: (v === "EUR" ? "EUR" : "CZK") as CurrencyCode,
+              ]),
+            h.hr.class("kb-divider"),
+            h.section
+              .class("kb-onboarding-section")
+              .attr("aria-labelledby", "onb-defaults-heading")
+              .children([
+                h.div
+                  .class("kb-onboarding-section__head")
+                  .children([
+                    h.h3
+                      .id("onb-defaults-heading")
+                      .children([t.t("settings.documentDefaults.title")]),
+                    h.p.class("kb-small kb-muted").children([local(ctx.locale, "defaultsIntro")]),
+                  ]),
+                h.div.class("kb-onboarding-defaults").children([
+                  selectField(h, {
+                    id: "onb-def-currency",
+                    disabled: workspaceCreated,
+                    label: local(ctx.locale, "defaultCurrency"),
+                    value: model.defaultCurrency,
+                    options: [
+                      { value: "CZK", label: "CZK" },
+                      { value: "EUR", label: "EUR" },
+                    ],
+                    onChange: (v) =>
+                      Message.SelectedDefaultCurrency({
+                        currency: (v === "EUR" ? "EUR" : "CZK") as CurrencyCode,
+                      }),
                   }),
-              }),
-              selectField(h, {
-                id: "onb-def-lang",
-                disabled: workspaceCreated,
-                label: local(ctx.locale, "defaultLanguage"),
-                value: model.defaultLanguage,
-                options: [
-                  { value: "cs", label: "Čeština" },
-                  { value: "en", label: "English" },
-                ],
-                onChange: (v) =>
-                  Message.SelectedDefaultLanguage({ language: v === "en" ? "en" : "cs" }),
-              }),
-            ]),
+                  selectField(h, {
+                    id: "onb-def-lang",
+                    disabled: workspaceCreated,
+                    label: local(ctx.locale, "defaultLanguage"),
+                    value: model.defaultLanguage,
+                    options: [
+                      { value: "cs", label: "Čeština" },
+                      { value: "en", label: "English" },
+                    ],
+                    onChange: (v) =>
+                      Message.SelectedDefaultLanguage({ language: v === "en" ? "en" : "cs" }),
+                  }),
+                ]),
+              ]),
           ]),
         ]);
       }

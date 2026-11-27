@@ -305,6 +305,19 @@ describe("Workspace Onboarding Wizard (Screen 07)", () => {
     expect(cs.html).toContain("kb-onboarding");
     expect(cs.html).toContain("ARES");
 
+    const step4En = await renderPath("/onboarding?step=4", { locale: "en", session: signedIn });
+    expect(step4En.html).toContain("kb-series-ledger");
+    expect(step4En.html).toContain('data-series-kind="invoice"');
+    expect(step4En.html).toContain('data-series-kind="proforma"');
+    expect(step4En.html).toContain('data-series-kind="credit_note"');
+    expect(step4En.html).toContain("ZF-2026-0001");
+    expect(step4En.html).toContain("OD-2026-0001");
+    expect(step4En.html).toContain("kb-onboarding-defaults");
+
+    const step4Cs = await renderPath("/onboarding?step=4", { locale: "cs", session: signedIn });
+    expect(step4Cs.html).toContain("Číselné řady");
+    expect(step4Cs.html).toContain("Výchozí hodnoty dokladů");
+
     const en = await renderPath("/onboarding?step=5", { locale: "en", session: signedIn });
     expect(en.html).toContain("Live miniature invoice preview");
   });

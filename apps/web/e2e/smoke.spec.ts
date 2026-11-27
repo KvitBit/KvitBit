@@ -260,6 +260,120 @@ if (typeof Bun === "undefined") {
       errors.assertClean();
     });
 
+    test("onboarding numbering step groups each series with its pattern, starting number, and preview", async ({
+      page,
+    }, testInfo) => {
+      const errors = attachErrorGuards(page);
+
+      for (const locale of ["en", "cs"] as const) {
+        await page.goto("/onboarding?step=4", { waitUntil: "domcontentloaded" });
+        await page.evaluate((loc) => {
+          window.localStorage.setItem(
+            "kvitbit.prefs",
+            JSON.stringify({
+              locale: loc,
+              style: "elegant",
+              mode: "dark",
+              contrast: "standard",
+              theme: { _tag: "Preset", id: "graphite_atelier" },
+            }),
+          );
+        }, locale);
+        await page.reload({ waitUntil: "domcontentloaded" });
+        await page.evaluate(() => document.fonts.ready);
+        await expect(page.locator(".kb-root")).toHaveAttribute("lang", locale);
+
+        const ledger = page.locator(".kb-series-ledger");
+        const rows = ledger.locator(".kb-series-row");
+        await expect(rows).toHaveCount(3);
+
+        const geometry = await page.evaluate(() => {
+          const card = document.querySelector(".kb-onboarding .kb-card");
+          const defaults = document.querySelector(".kb-onboarding-defaults");
+          const rowEls = [...document.querySelectorAll(".kb-series-row")];
+          const cardBox = card?.getBoundingClientRect();
+          const defaultsBox = defaults?.getBoundingClientRect();
+          const ledgerBox = document.querySelector(".kb-series-ledger")?.getBoundingClientRect();
+          return {
+            overflow: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+            defaultsBelowLedger:
+              defaultsBox !== undefined &&
+              ledgerBox !== undefined &&
+              defaultsBox.top >= ledgerBox.bottom,
+            rows: rowEls.map((row) => {
+              const title = row.querySelector(".kb-series-row__title")?.getBoundingClientRect();
+              const pattern = row
+                .querySelector('input[id^="onb-pattern-"]')
+                ?.getBoundingClientRect();
+              const start = row.querySelector('input[id^="onb-start-"]')?.getBoundingClientRect();
+              const preview = row.querySelector(".kb-series-row__preview")?.getBoundingClientRect();
+              const box = row.getBoundingClientRect();
+              return {
+                top: box.top,
+                bottom: box.bottom,
+                fitsCard:
+                  cardBox !== undefined &&
+                  box.left >= cardBox.left - 1 &&
+                  box.right <= cardBox.right + 1,
+                sameDesktopLine:
+                  title !== undefined &&
+                  pattern !== undefined &&
+                  start !== undefined &&
+                  preview !== undefined &&
+                  Math.abs(pattern.top - start.top) <= 2 &&
+                  Math.abs((title.top + title.bottom) / 2 - (pattern.top + pattern.bottom) / 2) <=
+                    16 &&
+                  Math.abs((preview.top + preview.bottom) / 2 - (start.top + start.bottom) / 2) <=
+                    16,
+                patternAndStartAligned:
+                  pattern !== undefined &&
+                  start !== undefined &&
+                  Math.abs(pattern.top - start.top) <= 2 &&
+                  start.left >= pattern.right,
+              };
+            }),
+          };
+        });
+
+        expect(geometry.overflow, `${locale} page overflow`).toBeLessThanOrEqual(1);
+        expect(geometry.defaultsBelowLedger, `${locale} defaults below series ledger`).toBe(true);
+        for (let i = 0; i < geometry.rows.length; i += 1) {
+          const row = geometry.rows[i];
+          if (row === undefined) throw new Error("Missing row geometry");
+          expect(row.fitsCard, `${locale} row ${i} fits card`).toBe(true);
+          expect(row.patternAndStartAligned, `${locale} row ${i} pattern and start paired`).toBe(
+            true,
+          );
+          if (testInfo.project.name === "desktop") {
+            expect(row.sameDesktopLine, `${locale} row ${i} single horizontal ledger row`).toBe(
+              true,
+            );
+          }
+          const prev = geometry.rows[i - 1];
+          if (prev !== undefined) {
+            expect(row.top, `${locale} row ${i} below previous row`).toBeGreaterThanOrEqual(
+              prev.bottom - 1,
+            );
+          }
+        }
+      }
+
+      // Live per-series preview updates independently and flags invalid entries inline.
+      await page.locator("#onb-pattern-proforma").fill("PRO-YY-NNN");
+      await page.locator("#onb-start-proforma").fill("15");
+      await expect(page.locator("#onb-series-preview-proforma")).toContainText("PRO-26-015");
+      await expect(page.locator("#onb-series-preview-proforma")).toContainText("PRO-26-016");
+      await expect(page.locator("#onb-series-preview-invoice")).toContainText("2026-0001");
+
+      await page.locator("#onb-start-credit_note").fill("0");
+      await expect(page.locator("#onb-start-credit_note")).toHaveAttribute("aria-invalid", "true");
+      await expect(
+        page.locator("#onb-series-preview-credit_note .kb-series-row__error"),
+      ).toBeVisible();
+
+      errors.assertClean();
+    });
+
     test("navigates workspace routes with responsive chrome and zero errors", async ({
       page,
     }, testInfo) => {
