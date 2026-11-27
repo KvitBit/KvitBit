@@ -1098,7 +1098,7 @@
         },
         {
           "path": "packages/domain/src/caller.ts",
-          "sha256": "46d55a78dd6b494e2b2eed5f52df1fa5f9732e66239b6021a9a8f0c39da86980"
+          "sha256": "e6e9b890c4437d52c3f836bb3a89ac80b84b07f14bbf29d3cd38dd009259251a"
         },
         {
           "path": "packages/domain/src/vocabulary.ts",
@@ -1137,7 +1137,7 @@
       "coveredFiles": [
         {
           "path": "packages/domain/src/money.ts",
-          "sha256": "af9fa805f8588f57dbfd7b806593d43b99f2e06ef80bd5a9e50e9242c21ab846"
+          "sha256": "d29e00b55257ed8761c6a8bcf37a3dc8b48806f24f93a1b67a3b39a8dd682fbb"
         },
         {
           "path": "packages/domain/src/vocabulary.ts",
@@ -1182,7 +1182,7 @@
       "coveredFiles": [
         {
           "path": "packages/api-contract/src/access.ts",
-          "sha256": "e755368d04e6b5bd17f28283012070f0d7bcef7ff2c536c0e5c1efca4eac5ba1"
+          "sha256": "d2d3944c8d7b460cfceea381d56b30a108d01f9f134b0ed6f08d15a29029bb77"
         },
         {
           "path": "packages/domain/src/scope.ts",
