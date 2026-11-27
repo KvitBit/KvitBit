@@ -342,7 +342,8 @@ export const SettleProformaArgs = Schema.Struct({
   method: Schema.optional(PaymentMethod),
   idempotencyKey: IdempotencyArg,
 });
-export const LockDocumentArgs = Schema.Struct(DocumentArg);
+/** @alias The lock tool uses the same document ID schema as other ID-only tools. */
+export const LockDocumentArgs = DocumentIdArgs;
 export const CreateFromTemplateArgs = Schema.Struct({
   templateId: TemplateId,
   as: Schema.optional(Schema.Literals(["draft", "issued"])),
