@@ -347,7 +347,8 @@ describe("Kvitbit Alchemy stack config", () => {
         loadStackConfig.pipe(Effect.provide(ConfigProvider.layer(provider)), Effect.result),
       );
 
-    // Valid boundary controls: 63-octet domain label and public IPv4-mapped IPv6 origin.
+    // Valid boundary controls: 63-octet domain label, public IPv4-mapped IPv6 origin,
+    // and permitted longer/empty exact-key neighbors are accepted.
     expect(
       (
         await loadWith(
@@ -366,44 +367,125 @@ describe("Kvitbit Alchemy stack config", () => {
         )
       )._tag,
     ).toBe("Success");
+    expect(
+      (
+        await loadWith(
+          ConfigProvider.fromEnv({
+            env: { ...PROD_REQUIRED_ENV, KVITBIT_ALLOW_LOCAL_BLOBS_EXTRA: "" },
+          }),
+        )
+      )._tag,
+    ).toBe("Success");
+    expect(
+      (
+        await loadWith(
+          ConfigProvider.fromEnv({
+            env: {
+              ...PROD_REQUIRED_ENV,
+              KVITBIT_ALLOW_LOCAL_BLOBS: "",
+              KVITBIT_ALLOW_LOCAL_BLOBS_EXTRA: "metadata",
+            },
+          }),
+        )
+      )._tag,
+    ).toBe("Success");
 
-    for (const [label, overrides] of [
-      ["IPv4-mapped IPv6 loopback", { KVITBIT_APP_ORIGIN: "https://[::ffff:127.0.0.1]" }],
-      ["IPv4-mapped IPv6 unspecified", { KVITBIT_APP_ORIGIN: "https://[::ffff:0.0.0.0]" }],
-      ["64-char email domain label", { KVITBIT_EMAIL_FROM: `a@${"b".repeat(64)}.org` }],
-      ["64-char email TLD label", { KVITBIT_EMAIL_FROM: `a@example.${"c".repeat(64)}` }],
-      ["Array-node disable flag", { KVITBIT_DISABLE_HTTP_2: "true" }],
+    for (const [label, overrides, expectedField] of [
+      [
+        "IPv4-mapped IPv6 loopback",
+        { KVITBIT_APP_ORIGIN: "https://[::ffff:127.0.0.1]" },
+        "appOrigin",
+      ],
+      [
+        "IPv4-mapped IPv6 unspecified",
+        { KVITBIT_APP_ORIGIN: "https://[::ffff:0.0.0.0]" },
+        "appOrigin",
+      ],
+      [
+        "64-char email domain label",
+        { KVITBIT_EMAIL_FROM: `a@${"b".repeat(64)}.org` },
+        "emailFrom",
+      ],
+      [
+        "64-char email TLD label",
+        { KVITBIT_EMAIL_FROM: `a@example.${"c".repeat(64)}` },
+        "emailFrom",
+      ],
+      ["Array-node disable flag", { KVITBIT_DISABLE_HTTP_2: "true" }, "KVITBIT_DISABLE_HTTP_2"],
       [
         "sparse Array-node disable flag (1200=true + 3000 empty)",
         { KVITBIT_DISABLE_HTTP_1200: "true", KVITBIT_DISABLE_HTTP_3000: "" },
+        "KVITBIT_DISABLE_HTTP_1200",
       ],
       [
         "very sparse Array-node disable flag (5000=true + 10000 empty)",
         { KVITBIT_DISABLE_HTTP_5000: "true", KVITBIT_DISABLE_HTTP_10000: "" },
+        "KVITBIT_DISABLE_HTTP_10000",
       ],
-      ["empty forbidden key KVITBIT_DISABLE_OTHER", { KVITBIT_DISABLE_OTHER: "" }],
-      ["empty KVITBIT_ALLOW_LOCAL_BLOBS", { KVITBIT_ALLOW_LOCAL_BLOBS: "" }],
+      [
+        "empty forbidden key KVITBIT_DISABLE_OTHER",
+        { KVITBIT_DISABLE_OTHER: "" },
+        "KVITBIT_DISABLE_OTHER",
+      ],
+      ["scalar KVITBIT_DISABLE", { KVITBIT_DISABLE: "metadata" }, "KVITBIT_DISABLE"],
+      [
+        "non-empty exact KVITBIT_ALLOW_LOCAL_BLOBS alongside EXTRA",
+        { KVITBIT_ALLOW_LOCAL_BLOBS: "true", KVITBIT_ALLOW_LOCAL_BLOBS_EXTRA: "metadata" },
+        "KVITBIT_ALLOW_LOCAL_BLOBS",
+      ],
     ] as const) {
       const res = await loadWith(
         ConfigProvider.fromEnv({ env: { ...PROD_REQUIRED_ENV, ...overrides } }),
       );
       expect(res._tag, `expected InvalidStackConfig for ${label}`).toBe("Failure");
+      if (res._tag === "Failure") {
+        expect(res.failure).toMatchObject({ _tag: "InvalidStackConfig", field: expectedField });
+      }
     }
 
-    for (const [label, primaryExtra, fallbackEnv] of [
-      ["fallback KVITBIT_DISABLE_CUSTOM", {}, { KVITBIT_DISABLE_CUSTOM: "true" }],
+    for (const [label, primaryExtra, fallbackEnv, expectedField] of [
+      [
+        "fallback KVITBIT_DISABLE_CUSTOM",
+        {},
+        { KVITBIT_DISABLE_CUSTOM: "true" },
+        "KVITBIT_DISABLE_CUSTOM",
+      ],
+      [
+        "scalar primary KVITBIT_DISABLE + fallback KVITBIT_DISABLE_CUSTOM",
+        { KVITBIT_DISABLE: "metadata" },
+        { KVITBIT_DISABLE_CUSTOM: "true" },
+        "KVITBIT_DISABLE",
+      ],
       [
         "empty primary KVITBIT_DISABLE_OTHER + fallback KVITBIT_DISABLE_CUSTOM",
         { KVITBIT_DISABLE_OTHER: "" },
         { KVITBIT_DISABLE_CUSTOM: "true" },
+        "KVITBIT_DISABLE_OTHER",
       ],
       [
         "empty primary KVITBIT_PREVIEW_DISABLE_OTHER + fallback KVITBIT_PREVIEW_DISABLE_CUSTOM",
         { KVITBIT_PREVIEW_DISABLE_OTHER: "" },
         { KVITBIT_PREVIEW_DISABLE_CUSTOM: "true" },
+        "KVITBIT_PREVIEW_DISABLE_OTHER",
       ],
-      ["fallback KVITBIT_DISABLE_HTTP_2", {}, { KVITBIT_DISABLE_HTTP_2: "true" }],
-      ["fallback KVITBIT_PREVIEW_DISABLE_CUSTOM", {}, { KVITBIT_PREVIEW_DISABLE_CUSTOM: "true" }],
+      [
+        "empty primary KVITBIT_ALLOW_LOCAL_BLOBS + EXTRA + fallback KVITBIT_ALLOW_LOCAL_BLOBS=true",
+        { KVITBIT_ALLOW_LOCAL_BLOBS: "", KVITBIT_ALLOW_LOCAL_BLOBS_EXTRA: "metadata" },
+        { KVITBIT_ALLOW_LOCAL_BLOBS: "true" },
+        "KVITBIT_ALLOW_LOCAL_BLOBS",
+      ],
+      [
+        "fallback KVITBIT_DISABLE_HTTP_2",
+        {},
+        { KVITBIT_DISABLE_HTTP_2: "true" },
+        "KVITBIT_DISABLE_HTTP_2",
+      ],
+      [
+        "fallback KVITBIT_PREVIEW_DISABLE_CUSTOM",
+        {},
+        { KVITBIT_PREVIEW_DISABLE_CUSTOM: "true" },
+        "KVITBIT_PREVIEW_DISABLE_CUSTOM",
+      ],
     ] as const) {
       const composed = ConfigProvider.orElse(
         ConfigProvider.fromEnv({ env: { ...PROD_REQUIRED_ENV, ...primaryExtra } }),
@@ -411,6 +493,9 @@ describe("Kvitbit Alchemy stack config", () => {
       );
       const res = await loadWith(composed);
       expect(res._tag, `expected InvalidStackConfig for ${label}`).toBe("Failure");
+      if (res._tag === "Failure") {
+        expect(res.failure).toMatchObject({ _tag: "InvalidStackConfig", field: expectedField });
+      }
     }
   });
 });

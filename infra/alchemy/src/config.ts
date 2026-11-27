@@ -10,7 +10,7 @@ import {
   findForbiddenOptOutFlag,
   isBlobDriver,
   isEmailMode,
-  isForbiddenOptOutKey,
+  isForbiddenOptOutNamespaceKey,
   isProdEmailMode,
   isValidDomain,
   isValidEmailFrom,
@@ -507,8 +507,6 @@ const FORBIDDEN_PROVIDER_PROBE_PATHS: ReadonlyArray<ReadonlyArray<string>> = [
   ["KVITBIT", "DISABLE"],
   ["KVITBIT", "PREVIEW"],
   ["KVITBIT", "PREVIEW", "DISABLE"],
-  ["KVITBIT", "ALLOW"],
-  ["KVITBIT", "ALLOW", "LOCAL"],
   ["KVITBIT", "ALLOW", "LOCAL", "BLOBS"],
 ];
 
@@ -545,7 +543,7 @@ const collectKvitbitProviderSubtree = (
         const nested = yield* collectKvitbitProviderSubtree(provider, childPath, visited);
         entries.push(...nested);
         const childName = childPath.map(String).join("_");
-        if (nested.length === 0 && isForbiddenOptOutKey(childName)) {
+        if (nested.length === 0 && isForbiddenOptOutNamespaceKey(childName)) {
           entries.push([childName, ""]);
         }
       }
@@ -564,7 +562,7 @@ const collectKvitbitProviderSubtree = (
       entries.push(...arrayEntries);
       if (node.length > 0 && arrayEntries.length === 0) {
         const lastName = [...path, node.length - 1].map(String).join("_");
-        if (isForbiddenOptOutKey(lastName)) {
+        if (isForbiddenOptOutNamespaceKey(lastName)) {
           entries.push([lastName, ""]);
         }
       }

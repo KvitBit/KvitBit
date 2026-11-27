@@ -70,7 +70,7 @@ const EMAIL_LOCAL_ATOM = "[a-zA-Z0-9!#$%&'*+/=?^_`{|}~-]+";
 const EMAIL_ADDR_PATTERN = new RegExp(
   `^${EMAIL_LOCAL_ATOM}(?:\\.${EMAIL_LOCAL_ATOM})*@(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?\\.)+(?:[a-zA-Z]{2,63}|xn--[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,57}[a-zA-Z0-9])?)$`,
 );
-const FORBIDDEN_OPT_OUT_PATTERN = /^KVITBIT_(?:PREVIEW_)?DISABLE_/;
+const FORBIDDEN_OPT_OUT_NAMESPACE_PATTERN = /^KVITBIT_(?:PREVIEW_)?DISABLE(?:_|$)/;
 
 const parseIpv6Words = (raw: string): ReadonlyArray<number> | undefined => {
   const withoutZone = raw.split("%")[0] ?? raw;
@@ -281,15 +281,20 @@ export const isProdEmailMode = (value: string): value is ProdEmailMode =>
 export const isBlobDriver = (value: string): value is BlobDriver =>
   (BLOB_DRIVERS as ReadonlyArray<string>).includes(value);
 
-export const isForbiddenOptOutKey = (key: string): boolean =>
-  FORBIDDEN_OPT_OUT_PATTERN.test(key) ||
-  (FORBIDDEN_OPT_OUT_ENV_VARS as ReadonlyArray<string>).includes(key);
+export const isForbiddenOptOutNamespaceKey = (key: string): boolean =>
+  FORBIDDEN_OPT_OUT_NAMESPACE_PATTERN.test(key);
 
 export const findForbiddenOptOutFlag = (
   env: Readonly<Record<string, string | undefined>>,
 ): string | undefined => {
   for (const [key, value] of Object.entries(env)) {
-    if (isForbiddenOptOutKey(key) && value !== undefined) {
+    if (isForbiddenOptOutNamespaceKey(key) && value !== undefined) {
+      return key;
+    }
+    if (
+      (FORBIDDEN_OPT_OUT_ENV_VARS as ReadonlyArray<string>).includes(key) &&
+      trimOptional(value) !== undefined
+    ) {
       return key;
     }
   }

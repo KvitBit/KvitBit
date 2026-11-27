@@ -530,11 +530,20 @@ export interface ValidatedRuntimeEnv {
   readonly blob: ResolvedBlobConfig;
 }
 
-const FORBIDDEN_OPT_OUT_PATTERN = /^KVITBIT_(?:PREVIEW_)?DISABLE_/;
+const FORBIDDEN_OPT_OUT_NAMESPACE_PATTERN = /^KVITBIT_(?:PREVIEW_)?DISABLE(?:_|$)/;
 
-const isForbiddenOptOutKey = (key: string): boolean =>
-  FORBIDDEN_OPT_OUT_PATTERN.test(key) ||
-  (FORBIDDEN_OPT_OUT_ENV_VARS as ReadonlyArray<string>).includes(key);
+const isForbiddenOptOutNamespaceKey = (key: string): boolean =>
+  FORBIDDEN_OPT_OUT_NAMESPACE_PATTERN.test(key);
+
+const isForbiddenOptOutEntry = (key: string, value: string | undefined): boolean => {
+  if (isForbiddenOptOutNamespaceKey(key)) {
+    return value !== undefined;
+  }
+  if ((FORBIDDEN_OPT_OUT_ENV_VARS as ReadonlyArray<string>).includes(key)) {
+    return trimOptional(value) !== undefined;
+  }
+  return false;
+};
 
 /**
  * Pure boot-time validation of the full runtime environment map for `apps/server` (`server` or
@@ -552,7 +561,7 @@ export const validateServerRuntimeEnv = (
   const env = envResult.value;
 
   for (const [key, value] of Object.entries(envMap)) {
-    if (isForbiddenOptOutKey(key) && value !== undefined) {
+    if (isForbiddenOptOutEntry(key, value)) {
       return fail(
         key,
         env === "production"
@@ -632,8 +641,6 @@ const FORBIDDEN_PROVIDER_PROBE_PATHS: ReadonlyArray<ReadonlyArray<string>> = [
   ["KVITBIT", "DISABLE"],
   ["KVITBIT", "PREVIEW"],
   ["KVITBIT", "PREVIEW", "DISABLE"],
-  ["KVITBIT", "ALLOW"],
-  ["KVITBIT", "ALLOW", "LOCAL"],
   ["KVITBIT", "ALLOW", "LOCAL", "BLOBS"],
 ];
 
@@ -670,7 +677,7 @@ const collectKvitbitProviderSubtree = (
         const nested = yield* collectKvitbitProviderSubtree(provider, childPath, visited);
         entries.push(...nested);
         const childName = childPath.map(String).join("_");
-        if (nested.length === 0 && isForbiddenOptOutKey(childName)) {
+        if (nested.length === 0 && isForbiddenOptOutNamespaceKey(childName)) {
           entries.push([childName, ""]);
         }
       }
@@ -689,7 +696,7 @@ const collectKvitbitProviderSubtree = (
       entries.push(...arrayEntries);
       if (node.length > 0 && arrayEntries.length === 0) {
         const lastName = [...path, node.length - 1].map(String).join("_");
-        if (isForbiddenOptOutKey(lastName)) {
+        if (isForbiddenOptOutNamespaceKey(lastName)) {
           entries.push([lastName, ""]);
         }
       }

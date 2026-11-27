@@ -310,60 +310,141 @@ describe("wiring: email & SMTP URL parsing", () => {
       expect(upgraded.success.blob.driver).toBe("gcs");
     }
 
-    // Valid RFC 1035 63-octet label boundary and public IPv4-mapped IPv6 origin are accepted.
+    // Valid RFC 1035 63-octet label boundary, public IPv4-mapped IPv6 origin, and permitted longer/empty exact-key neighbors are accepted.
     expect((await loadWith({ ...validProdEnv, EMAIL_FROM: `a@${"b".repeat(63)}.org` }))._tag).toBe(
       "Success",
     );
     expect(
       (await loadWith({ ...validProdEnv, APP_ORIGIN: "https://[::ffff:192.0.2.1]" }))._tag,
     ).toBe("Success");
+    for (const workload of ["server", "worker"] as const) {
+      expect(
+        (await loadWith({ ...validProdEnv, KVITBIT_ALLOW_LOCAL_BLOBS_EXTRA: "" }, workload))._tag,
+        `${workload} permitted KVITBIT_ALLOW_LOCAL_BLOBS_EXTRA=""`,
+      ).toBe("Success");
+      expect(
+        (
+          await loadWith(
+            {
+              ...validProdEnv,
+              KVITBIT_ALLOW_LOCAL_BLOBS: "",
+              KVITBIT_ALLOW_LOCAL_BLOBS_EXTRA: "metadata",
+            },
+            workload,
+          )
+        )._tag,
+        `${workload} unset exact KVITBIT_ALLOW_LOCAL_BLOBS="" + KVITBIT_ALLOW_LOCAL_BLOBS_EXTRA`,
+      ).toBe("Success");
+    }
 
     for (const workload of ["server", "worker"] as const) {
-      for (const [label, overrides] of [
-        ["KVITBIT_DISABLE_BLOB", { KVITBIT_DISABLE_BLOB: "true" }],
-        ["KVITBIT_DISABLE_CUSTOM", { KVITBIT_DISABLE_CUSTOM: "1" }],
-        ["KVITBIT_DISABLE_HTTP_2 (Array node)", { KVITBIT_DISABLE_HTTP_2: "true" }],
+      for (const [label, overrides, expectedKey] of [
+        ["KVITBIT_DISABLE_BLOB", { KVITBIT_DISABLE_BLOB: "true" }, "KVITBIT_DISABLE_BLOB"],
+        ["KVITBIT_DISABLE_CUSTOM", { KVITBIT_DISABLE_CUSTOM: "1" }, "KVITBIT_DISABLE_CUSTOM"],
+        [
+          "KVITBIT_DISABLE_HTTP_2 (Array node)",
+          { KVITBIT_DISABLE_HTTP_2: "true" },
+          "KVITBIT_DISABLE_HTTP_2",
+        ],
         [
           "sparse Array node (1200=true + 3000 empty)",
           { KVITBIT_DISABLE_HTTP_1200: "true", KVITBIT_DISABLE_HTTP_3000: "" },
+          "KVITBIT_DISABLE_HTTP_1200",
         ],
         [
           "very sparse Array node (5000=true + 10000 empty)",
           { KVITBIT_DISABLE_HTTP_5000: "true", KVITBIT_DISABLE_HTTP_10000: "" },
+          "KVITBIT_DISABLE_HTTP_10000",
         ],
-        ["empty forbidden key KVITBIT_DISABLE_OTHER", { KVITBIT_DISABLE_OTHER: "" }],
-        ["empty KVITBIT_ALLOW_LOCAL_BLOBS", { KVITBIT_ALLOW_LOCAL_BLOBS: "" }],
-        ["KVITBIT_PREVIEW_DISABLE_EMAIL", { KVITBIT_PREVIEW_DISABLE_EMAIL: "true" }],
-        ["trailing-dot localhost", { APP_ORIGIN: "https://localhost." }],
-        ["trailing-dot sub.localhost", { APP_ORIGIN: "https://sub.localhost." }],
-        ["IPv4-mapped IPv6 loopback", { APP_ORIGIN: "https://[::ffff:127.0.0.1]" }],
-        ["IPv4-mapped IPv6 unspecified", { APP_ORIGIN: "https://[::ffff:0.0.0.0]" }],
-        ["consecutive dots in EMAIL_FROM", { EMAIL_FROM: "a..b@example.org" }],
-        ["leading dot in EMAIL_FROM", { EMAIL_FROM: ".a@example.org" }],
-        ["trailing dot in EMAIL_FROM", { EMAIL_FROM: "a.@example.org" }],
-        ["64-char domain label in EMAIL_FROM", { EMAIL_FROM: `a@${"b".repeat(64)}.org` }],
-        ["64-char TLD label in EMAIL_FROM", { EMAIL_FROM: `a@example.${"c".repeat(64)}` }],
+        [
+          "empty forbidden key KVITBIT_DISABLE_OTHER",
+          { KVITBIT_DISABLE_OTHER: "" },
+          "KVITBIT_DISABLE_OTHER",
+        ],
+        ["scalar KVITBIT_DISABLE", { KVITBIT_DISABLE: "metadata" }, "KVITBIT_DISABLE"],
+        [
+          "non-empty exact KVITBIT_ALLOW_LOCAL_BLOBS alongside EXTRA",
+          { KVITBIT_ALLOW_LOCAL_BLOBS: "true", KVITBIT_ALLOW_LOCAL_BLOBS_EXTRA: "metadata" },
+          "KVITBIT_ALLOW_LOCAL_BLOBS",
+        ],
+        [
+          "KVITBIT_PREVIEW_DISABLE_EMAIL",
+          { KVITBIT_PREVIEW_DISABLE_EMAIL: "true" },
+          "KVITBIT_PREVIEW_DISABLE_EMAIL",
+        ],
+        ["trailing-dot localhost", { APP_ORIGIN: "https://localhost." }, "APP_ORIGIN"],
+        ["trailing-dot sub.localhost", { APP_ORIGIN: "https://sub.localhost." }, "APP_ORIGIN"],
+        ["IPv4-mapped IPv6 loopback", { APP_ORIGIN: "https://[::ffff:127.0.0.1]" }, "APP_ORIGIN"],
+        ["IPv4-mapped IPv6 unspecified", { APP_ORIGIN: "https://[::ffff:0.0.0.0]" }, "APP_ORIGIN"],
+        ["consecutive dots in EMAIL_FROM", { EMAIL_FROM: "a..b@example.org" }, "EMAIL_FROM"],
+        ["leading dot in EMAIL_FROM", { EMAIL_FROM: ".a@example.org" }, "EMAIL_FROM"],
+        ["trailing dot in EMAIL_FROM", { EMAIL_FROM: "a.@example.org" }, "EMAIL_FROM"],
+        [
+          "64-char domain label in EMAIL_FROM",
+          { EMAIL_FROM: `a@${"b".repeat(64)}.org` },
+          "EMAIL_FROM",
+        ],
+        [
+          "64-char TLD label in EMAIL_FROM",
+          { EMAIL_FROM: `a@example.${"c".repeat(64)}` },
+          "EMAIL_FROM",
+        ],
       ] as const) {
         const res = await loadWith({ ...validProdEnv, ...overrides }, workload);
         expect(res._tag, `expected failure for ${workload} ${label}`).toBe("Failure");
+        if (res._tag === "Failure") {
+          expect(
+            String(res.failure),
+            `expected offending key ${expectedKey} for ${label}`,
+          ).toContain(expectedKey);
+        }
       }
 
       // Composed fallback ConfigProvider (primary valid prod + fallback forbidden flag) must fail fast,
-      // even when the primary provider carries an empty forbidden sibling key.
-      for (const [label, primaryExtra, fallbackEnv] of [
-        ["fallback KVITBIT_DISABLE_CUSTOM", {}, { KVITBIT_DISABLE_CUSTOM: "true" }],
+      // even when the primary provider carries a scalar or empty forbidden key, or a longer exact-key neighbor.
+      for (const [label, primaryExtra, fallbackEnv, expectedKey] of [
+        [
+          "fallback KVITBIT_DISABLE_CUSTOM",
+          {},
+          { KVITBIT_DISABLE_CUSTOM: "true" },
+          "KVITBIT_DISABLE_CUSTOM",
+        ],
+        [
+          "scalar primary KVITBIT_DISABLE + fallback KVITBIT_DISABLE_CUSTOM",
+          { KVITBIT_DISABLE: "metadata" },
+          { KVITBIT_DISABLE_CUSTOM: "true" },
+          "KVITBIT_DISABLE",
+        ],
         [
           "empty primary KVITBIT_DISABLE_OTHER + fallback KVITBIT_DISABLE_CUSTOM",
           { KVITBIT_DISABLE_OTHER: "" },
           { KVITBIT_DISABLE_CUSTOM: "true" },
+          "KVITBIT_DISABLE_OTHER",
         ],
         [
           "empty primary KVITBIT_PREVIEW_DISABLE_OTHER + fallback KVITBIT_PREVIEW_DISABLE_CUSTOM",
           { KVITBIT_PREVIEW_DISABLE_OTHER: "" },
           { KVITBIT_PREVIEW_DISABLE_CUSTOM: "true" },
+          "KVITBIT_PREVIEW_DISABLE_OTHER",
         ],
-        ["fallback KVITBIT_DISABLE_HTTP_2", {}, { KVITBIT_DISABLE_HTTP_2: "true" }],
-        ["fallback KVITBIT_PREVIEW_DISABLE_CUSTOM", {}, { KVITBIT_PREVIEW_DISABLE_CUSTOM: "true" }],
+        [
+          "empty primary KVITBIT_ALLOW_LOCAL_BLOBS + EXTRA + fallback KVITBIT_ALLOW_LOCAL_BLOBS=true",
+          { KVITBIT_ALLOW_LOCAL_BLOBS: "", KVITBIT_ALLOW_LOCAL_BLOBS_EXTRA: "metadata" },
+          { KVITBIT_ALLOW_LOCAL_BLOBS: "true" },
+          "KVITBIT_ALLOW_LOCAL_BLOBS",
+        ],
+        [
+          "fallback KVITBIT_DISABLE_HTTP_2",
+          {},
+          { KVITBIT_DISABLE_HTTP_2: "true" },
+          "KVITBIT_DISABLE_HTTP_2",
+        ],
+        [
+          "fallback KVITBIT_PREVIEW_DISABLE_CUSTOM",
+          {},
+          { KVITBIT_PREVIEW_DISABLE_CUSTOM: "true" },
+          "KVITBIT_PREVIEW_DISABLE_CUSTOM",
+        ],
       ] as const) {
         const composed = ConfigProvider.orElse(
           ConfigProvider.fromEnv({ env: { ...validProdEnv, ...primaryExtra } }),
@@ -371,6 +452,12 @@ describe("wiring: email & SMTP URL parsing", () => {
         );
         const res = await loadWithProvider(workload, composed);
         expect(res._tag, `expected failure for ${workload} ${label}`).toBe("Failure");
+        if (res._tag === "Failure") {
+          expect(
+            String(res.failure),
+            `expected offending key ${expectedKey} for ${label}`,
+          ).toContain(expectedKey);
+        }
       }
     }
   });
