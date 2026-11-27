@@ -13,7 +13,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { Clock, Context, Data, Duration, Effect, Layer, Option, type Redacted, Ref } from "effect";
 import { HttpBody, HttpClient, HttpClientRequest } from "effect/http";
 import type { MailRelayMode } from "./config";
-import { type ParsedEmail, parseEmail } from "./mime";
+import { type ParsedEmail, parseEmail, trimAsciiWsp } from "./mime";
 
 export interface InboundMessage {
   readonly remoteIp: string;
@@ -95,11 +95,13 @@ const escapeHtml = (value: string): string =>
     .replaceAll("'", "&#39;");
 
 export const canonicalRecipients = (rcptTo: ReadonlyArray<string>): ReadonlyArray<string> =>
-  [...new Set(rcptTo.map((addr) => addr.trim().toLowerCase()).filter((a) => a.length > 0))].sort();
+  [
+    ...new Set(rcptTo.map((addr) => trimAsciiWsp(addr).toLowerCase()).filter((a) => a.length > 0)),
+  ].sort();
 
 export const computeDeliveryFingerprint = (message: InboundMessage): string =>
   createHash("sha256")
-    .update(message.mailFrom.trim().toLowerCase())
+    .update(trimAsciiWsp(message.mailFrom).toLowerCase())
     .update("\0")
     .update(canonicalRecipients(message.rcptTo).join(","))
     .update("\0")
@@ -198,7 +200,7 @@ export const buildResendForwardPayload = (params: {
   // RFC 5321 §2.3.11) OR was omitted from Resend's ASCII-only `reply_to` field.
   const visibleReplyTo =
     replyToCandidate &&
-    replyToCandidate.trim().length > 0 &&
+    trimAsciiWsp(replyToCandidate).length > 0 &&
     (replyTo === undefined ||
       (parsed.replyToAddress !== undefined &&
         !isSameMailbox(parsed.replyToAddress, parsed.fromAddress)))

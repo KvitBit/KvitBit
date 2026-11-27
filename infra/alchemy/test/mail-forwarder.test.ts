@@ -455,6 +455,83 @@ describe("MIME parser", () => {
     });
     expect(nbspPayload.reply_to).toBeUndefined();
     expect(String(nbspPayload.text)).toContain(`Original From: ${nbspAddr}`);
+
+    // Leading U+00A0 in bare From, bare Reply-To, and folded Reply-To headers must never
+    // be stripped by header parsing or folding: omit reply_to and preserve verbatim in text & HTML.
+    const leadingNbspAddr = "\u00a0billing@example.org";
+    const leadingNbspFromRaw = Buffer.from(
+      [
+        `From: ${leadingNbspAddr}`,
+        "To: ops@kvitbit.com",
+        "Subject: Leading NBSP From",
+        'Content-Type: text/html; charset="utf-8"',
+        "",
+        "<p>Body</p>",
+      ].join("\r\n"),
+      "utf8",
+    );
+    const leadingNbspFromMsg: InboundMessage = {
+      ...commentedMsg,
+      mailFrom: leadingNbspAddr,
+      rawBytes: leadingNbspFromRaw,
+    };
+    const leadingNbspFromPayload = buildResendForwardPayload({
+      message: leadingNbspFromMsg,
+      parsed: parseEmail(leadingNbspFromRaw),
+      deliveryFingerprint: computeDeliveryFingerprint(leadingNbspFromMsg),
+      archiveBucket: "kvitbit-prod-mail-archive-prod",
+      forwardTo: "filkalny@gmail.com",
+      forwardFrom: "forwarder@kvitbit.com",
+      maxAttachmentBytes: 7 * 1024 * 1024,
+    });
+    expect(leadingNbspFromPayload.reply_to).toBeUndefined();
+    expect(String(leadingNbspFromPayload.text)).toContain(`Original From: ${leadingNbspAddr}`);
+    expect(String(leadingNbspFromPayload.text)).toContain(`Original Reply-To: ${leadingNbspAddr}`);
+    expect(String(leadingNbspFromPayload.html)).toContain(
+      `<strong>From:</strong> ${leadingNbspAddr}`,
+    );
+    expect(String(leadingNbspFromPayload.html)).toContain(
+      `<strong>Reply-To:</strong> ${leadingNbspAddr}`,
+    );
+
+    for (const replyToHeaderLine of [
+      `Reply-To: ${leadingNbspAddr}`,
+      `Reply-To:\r\n ${leadingNbspAddr}`,
+    ]) {
+      const leadingNbspReplyRaw = Buffer.from(
+        [
+          "From: sender@example.org",
+          replyToHeaderLine,
+          "To: ops@kvitbit.com",
+          "Subject: Leading NBSP Reply-To",
+          'Content-Type: text/html; charset="utf-8"',
+          "",
+          "<p>Body</p>",
+        ].join("\r\n"),
+        "utf8",
+      );
+      const leadingNbspReplyMsg: InboundMessage = {
+        ...commentedMsg,
+        mailFrom: "sender@example.org",
+        rawBytes: leadingNbspReplyRaw,
+      };
+      const leadingNbspReplyPayload = buildResendForwardPayload({
+        message: leadingNbspReplyMsg,
+        parsed: parseEmail(leadingNbspReplyRaw),
+        deliveryFingerprint: computeDeliveryFingerprint(leadingNbspReplyMsg),
+        archiveBucket: "kvitbit-prod-mail-archive-prod",
+        forwardTo: "filkalny@gmail.com",
+        forwardFrom: "forwarder@kvitbit.com",
+        maxAttachmentBytes: 7 * 1024 * 1024,
+      });
+      expect(leadingNbspReplyPayload.reply_to).toBeUndefined();
+      expect(String(leadingNbspReplyPayload.text)).toContain(
+        `Original Reply-To: ${leadingNbspAddr}`,
+      );
+      expect(String(leadingNbspReplyPayload.html)).toContain(
+        `<strong>Reply-To:</strong> ${leadingNbspAddr}`,
+      );
+    }
   });
 
   test("extracts full UTF-8 bare mailbox without ASCII substring truncation and omits non-ASCII reply_to", () => {
@@ -924,6 +1001,9 @@ describe("Effect SMTP server (RFC 5321 + RFC 6531 SMTPUTF8 + STARTTLS)", () => {
     });
     expect(parseEnvelopePath("<žan@example.net> SMTPUTF8", true)).toEqual({
       address: "žan@example.net",
+    });
+    expect(parseEnvelopePath("<\u00a0billing@example.org> SMTPUTF8", true)).toEqual({
+      address: "\u00a0billing@example.org",
     });
     expect(parseEnvelopePath("<user@bücher.de>", true)).toEqual({
       address: "user@bücher.de",

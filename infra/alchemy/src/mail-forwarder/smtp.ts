@@ -15,7 +15,7 @@
 import net from "node:net";
 import tls from "node:tls";
 import { Data, Effect, type Scope } from "effect";
-import { isValidMailbox } from "./mime";
+import { isValidMailbox, trimAsciiWsp } from "./mime";
 import type { InboundMessage, RelayResult } from "./relay";
 
 export class SmtpBindError extends Data.TaggedError("SmtpBindError")<{
@@ -76,17 +76,17 @@ export const parseEnvelopePath = (
   allowEmpty: boolean,
   barePostmasterDomain?: string,
 ): { address: string; sizeParam?: number } | undefined => {
-  const trimmed = args.trim();
-  const angleMatch = trimmed.match(/^<\s*([^<>]*?)\s*>(.*)$/);
+  const trimmed = trimAsciiWsp(args);
+  const angleMatch = trimmed.match(/^<[ \t]*([^<>]*?)[ \t]*>(.*)$/);
   let address: string;
   let rest: string;
   if (angleMatch) {
-    address = (angleMatch[1] ?? "").trim();
-    rest = (angleMatch[2] ?? "").trim();
+    address = trimAsciiWsp(angleMatch[1] ?? "");
+    rest = trimAsciiWsp(angleMatch[2] ?? "");
   } else {
-    const spaceIdx = trimmed.search(/\s/);
+    const spaceIdx = trimmed.search(/[ \t]/);
     address = spaceIdx === -1 ? trimmed : trimmed.slice(0, spaceIdx);
-    rest = spaceIdx === -1 ? "" : trimmed.slice(spaceIdx).trim();
+    rest = spaceIdx === -1 ? "" : trimAsciiWsp(trimmed.slice(spaceIdx));
   }
 
   if (address.length === 0) {
@@ -103,7 +103,7 @@ export const parseEnvelopePath = (
 
   let sizeParam: number | undefined;
   if (rest.length > 0) {
-    const sizeMatch = rest.match(/(?:^|\s)SIZE=(\d+)(?:\s|$)/i);
+    const sizeMatch = rest.match(/(?:^|[ \t])SIZE=(\d+)(?:[ \t]|$)/i);
     if (sizeMatch?.[1]) {
       const parsed = Number.parseInt(sizeMatch[1], 10);
       if (Number.isFinite(parsed) && parsed >= 0) {
@@ -273,7 +273,7 @@ const createRawSmtpServer = (
     const handleCommandLine = (line: string): "continue" | "stop" => {
       const spaceIdx = line.search(/[ \t]/);
       const verb = (spaceIdx === -1 ? line : line.slice(0, spaceIdx)).toUpperCase();
-      const args = spaceIdx === -1 ? "" : line.slice(spaceIdx).trim();
+      const args = spaceIdx === -1 ? "" : trimAsciiWsp(line.slice(spaceIdx));
 
       switch (verb) {
         case "EHLO": {

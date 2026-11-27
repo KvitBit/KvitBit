@@ -30,6 +30,9 @@ export interface ParsedEmail {
 
 const MAX_MIME_DEPTH = 8;
 
+/** Trims only RFC 5322 ASCII WSP (space/tab), preserving non-ASCII UTF-8 characters like U+00A0. */
+export const trimAsciiWsp = (value: string): string => value.replace(/^[ \t]+|[ \t]+$/g, "");
+
 const splitHeaderAndBody = (raw: Uint8Array): { headers: string; body: Uint8Array } => {
   for (let i = 0; i < raw.length; i += 1) {
     if (
@@ -68,7 +71,7 @@ export const parseHeaders = (headerBlock: string): Map<string, Array<string>> =>
   const flush = () => {
     if (currentName === undefined) return;
     const list = result.get(currentName) ?? [];
-    list.push(currentValue.trim());
+    list.push(trimAsciiWsp(currentValue));
     result.set(currentName, list);
     currentName = undefined;
     currentValue = "";
@@ -76,14 +79,14 @@ export const parseHeaders = (headerBlock: string): Map<string, Array<string>> =>
 
   for (const line of lines) {
     if ((line.startsWith(" ") || line.startsWith("\t")) && currentName !== undefined) {
-      currentValue += ` ${line.trim()}`;
+      currentValue += ` ${trimAsciiWsp(line)}`;
       continue;
     }
     flush();
     const colon = line.indexOf(":");
     if (colon <= 0) continue;
-    currentName = line.slice(0, colon).trim().toLowerCase();
-    currentValue = line.slice(colon + 1).trim();
+    currentName = trimAsciiWsp(line.slice(0, colon)).toLowerCase();
+    currentValue = trimAsciiWsp(line.slice(colon + 1));
   }
   flush();
   return result;
@@ -372,9 +375,6 @@ const stripRfc5322Comments = (input: string): string => {
   return trimAsciiWsp(out);
 };
 
-/** Trims only RFC 5322 ASCII WSP (space/tab), preserving non-ASCII UTF-8 characters like U+00A0. */
-const trimAsciiWsp = (value: string): string => value.replace(/^[ \t]+|[ \t]+$/g, "");
-
 /** Collapses RFC 5322 §3.2.2 ASCII WSP adjacent to `@` and dots in header addr-specs only. */
 const normalizeHeaderAddrSpec = (rawAddr: string): string =>
   trimAsciiWsp(rawAddr)
@@ -390,10 +390,9 @@ export const extractAddress = (
   const uncommented = stripRfc5322Comments(headerValue);
   const angleMatch = uncommented.match(/^([\s\S]*?)<[ \t]*([^<>]+?)[ \t]*>[ \t]*$/);
   if (angleMatch) {
-    const rawName = decodeRfc2047(angleMatch[1] ?? "")
-      .trim()
-      .replace(/^["']|["']$/g, "")
-      .trim();
+    const rawName = trimAsciiWsp(
+      trimAsciiWsp(decodeRfc2047(angleMatch[1] ?? "")).replace(/^["']|["']$/g, ""),
+    );
     const addr = normalizeHeaderAddrSpec(angleMatch[2] ?? "");
     return {
       address: isValidMailbox(addr) ? addr : undefined,
@@ -589,13 +588,15 @@ const walkEntity = (raw: Uint8Array, out: CollectedParts, depth: number): void =
 export const parseEmail = (raw: Uint8Array): ParsedEmail => {
   const { headers: headerBlock } = splitHeaderAndBody(raw);
   const headers = parseHeaders(headerBlock);
-  const subject = decodeRfc2047(firstHeader(headers, "subject") ?? "").trim();
+  const subject = trimAsciiWsp(decodeRfc2047(firstHeader(headers, "subject") ?? ""));
   const rawFrom = firstHeader(headers, "from");
-  const fromHeader = decodeRfc2047(rawFrom ?? "").trim();
+  const fromHeader = trimAsciiWsp(decodeRfc2047(rawFrom ?? ""));
   const fromParsed = extractAddress(rawFrom);
   const replyToParsed = extractAddress(firstHeader(headers, "reply-to"));
-  const messageId = firstHeader(headers, "message-id")?.trim();
-  const date = firstHeader(headers, "date")?.trim();
+  const rawMessageId = firstHeader(headers, "message-id");
+  const messageId = rawMessageId !== undefined ? trimAsciiWsp(rawMessageId) : undefined;
+  const rawDate = firstHeader(headers, "date");
+  const date = rawDate !== undefined ? trimAsciiWsp(rawDate) : undefined;
 
   const collected: CollectedParts = {
     segments: [],
