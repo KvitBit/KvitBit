@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import * as RN from "react-native";
+import { NativeModules, Platform } from "react-native";
 import {
   argbToHex,
   makeAndroidDynamicColorReader,
@@ -46,17 +46,13 @@ describe("dynamic-color.android", () => {
   });
 
   test("production readDynamicColor resolves ARGB integers from NativeModules.KvitbitDynamicColor on API 31+", async () => {
-    const rn = RN as unknown as {
-      Platform: { OS: string; Version: number };
-      NativeModules: Record<string, unknown>;
-    };
-    const origOs = rn.Platform.OS;
-    const origVersion = rn.Platform.Version;
-    const origModule = rn.NativeModules.KvitbitDynamicColor;
+    const origOs = Platform.OS;
+    const origVersion = Reflect.get(Platform, "Version");
+    const origModule = NativeModules.KvitbitDynamicColor;
     try {
-      rn.Platform.OS = "android";
-      rn.Platform.Version = 34;
-      rn.NativeModules.KvitbitDynamicColor = {
+      Reflect.set(Platform, "OS", "android");
+      Reflect.set(Platform, "Version", 34);
+      NativeModules.KvitbitDynamicColor = {
         getDynamicPalette: async () => ({
           system_accent1_600: 0xff3b6939,
           system_accent1_200: 0xffa0d49b,
@@ -70,9 +66,9 @@ describe("dynamic-color.android", () => {
         dark: { primary: "#A0D49B", surface: "#1A1C19" },
       });
     } finally {
-      rn.Platform.OS = origOs;
-      rn.Platform.Version = origVersion;
-      rn.NativeModules.KvitbitDynamicColor = origModule;
+      Reflect.set(Platform, "OS", origOs);
+      Reflect.set(Platform, "Version", origVersion);
+      NativeModules.KvitbitDynamicColor = origModule;
     }
   });
 
@@ -87,7 +83,7 @@ describe("dynamic-color.android", () => {
     const broken = makeAndroidDynamicColorReader(() => ({
       os: "android",
       version: 33,
-      getNativePalette: async () => {
+      getNativePalette: () => {
         throw new Error("unsupported");
       },
     }));

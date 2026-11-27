@@ -1,28 +1,46 @@
+import * as Effect from "effect/Effect";
+import { fromMobilePromise, runMobileEffect } from "../../runtime/request-intent";
+import { PlatformOperationFailed } from "../platform-effect";
 import type { CaptureStorage } from "./capture-storage-port";
 
-const storage = async () => (await import("@react-native-async-storage/async-storage")).default;
+const storage = fromMobilePromise(() => import("@react-native-async-storage/async-storage")).pipe(
+  Effect.map((module) => module.default),
+);
 const keyFor = (scope: string) => `expense-capture:v1:${scope}`;
 const locks = new Map<string, Promise<unknown>>();
 
+const save = Effect.fn("CaptureStorage.save")(function* (
+  scope: string,
+  value: string,
+  previous: string,
+) {
+  const store = yield* storage;
+  const key = keyFor(scope);
+  const latest = (yield* fromMobilePromise(() => store.getItem(key))) ?? "[]";
+  if (latest !== previous)
+    return yield* PlatformOperationFailed.make({ cause: "Receipt queue changed while saving" });
+  yield* fromMobilePromise(() => store.setItem(key, value));
+});
+
 export const captureStorage: CaptureStorage = {
-  load: async (scope) => (await storage()).getItem(keyFor(scope)),
-  save: async (scope, value, previous) => {
-    const store = await storage();
-    const key = keyFor(scope);
-    const latest = (await store.getItem(key)) ?? "[]";
-    if (latest !== previous) throw new Error("Receipt queue changed while saving");
-    await store.setItem(key, value);
-  },
-  lock: async (scope, work) => {
+  load: (scope) =>
+    runMobileEffect(
+      storage.pipe(
+        Effect.flatMap((store) => fromMobilePromise(() => store.getItem(keyFor(scope)))),
+      ),
+    ),
+  save: (scope, value, previous) => runMobileEffect(save(scope, value, previous)),
+  lock: (scope, work) => {
     const previous = locks.get(scope);
-    const next = Promise.resolve(previous)
-      .catch(() => undefined)
-      .then(work);
-    locks.set(scope, next);
-    const clear = () => {
+    const wait =
+      previous === undefined ? Effect.yieldNow : Effect.ignore(fromMobilePromise(() => previous));
+    const clear = Effect.sync(() => {
       if (locks.get(scope) === next) locks.delete(scope);
-    };
-    void next.then(clear, clear);
+    });
+    const next: ReturnType<typeof work> = runMobileEffect(
+      wait.pipe(Effect.andThen(fromMobilePromise(work)), Effect.ensuring(clear)),
+    );
+    locks.set(scope, next);
     return next;
   },
 };

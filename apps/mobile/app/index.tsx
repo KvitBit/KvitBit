@@ -1,6 +1,8 @@
+import * as Effect from "effect/Effect";
 import { Redirect } from "expo-router";
 import { useEffect, useState } from "react";
 import { onboardingStore } from "../src/features/onboarding/onboarding-persistence";
+import { forkFeatureEffect } from "../src/features/ui-effect";
 import { hrefOf } from "../src/navigation/routes";
 import { useRemote } from "../src/runtime/api-runtime";
 import { useSession } from "../src/session/session-provider";
@@ -25,7 +27,7 @@ export default function Index() {
   ]);
 
   useEffect(() => {
-    void lastWorkspace.read().then(setRemembered);
+    forkFeatureEffect(Effect.map(Effect.promise(lastWorkspace.read), setRemembered));
   }, []);
 
   useEffect(() => {
@@ -34,9 +36,15 @@ export default function Index() {
       return;
     }
     let cancelled = false;
-    void onboardingStore.read(session.origin, userId).then((record) => {
-      if (!cancelled) setPendingOnboarding({ key: onboardingScopeKey, pending: record !== null });
-    });
+    forkFeatureEffect(
+      Effect.map(
+        Effect.promise(() => onboardingStore.read(session.origin, userId)),
+        (record) => {
+          if (!cancelled)
+            setPendingOnboarding({ key: onboardingScopeKey, pending: record !== null });
+        },
+      ),
+    );
     return () => {
       cancelled = true;
     };
@@ -50,5 +58,5 @@ export default function Index() {
   if (workspaces.state._tag !== "Ready" || remembered === undefined) return <Loading />;
   const target = pickWorkspace(workspaces.state.value, remembered);
   if (target === null) return <Redirect href="/onboarding" />;
-  return <Redirect href={hrefOf({ _tag: "Dashboard", ws: target.slug }) as never} />;
+  return <Redirect href={hrefOf({ _tag: "Dashboard", ws: target.slug })} />;
 }

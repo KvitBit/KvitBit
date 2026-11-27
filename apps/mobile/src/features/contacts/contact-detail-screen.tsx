@@ -1,10 +1,10 @@
-import type {
+import {
   ContactId,
-  ContactRole,
-  CurrencyCode,
-  Locale,
-  PaymentMethod,
-  WorkspaceSummary,
+  type ContactRole,
+  type CurrencyCode,
+  type Locale,
+  type PaymentMethod,
+  type WorkspaceSummary,
 } from "@kvitbit/domain/contract";
 import {
   describeError,
@@ -28,7 +28,14 @@ import {
 } from "@kvitbit/ui-port/format";
 import { enumKey } from "@kvitbit/ui-port/i18n";
 import { OverrideForm, type Route } from "@kvitbit/ui-port/view-models";
-import { Effect, Option, Result } from "effect";
+import * as Arr from "effect/Array";
+import * as Cause from "effect/Cause";
+import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
+import * as Rec from "effect/Record";
+import * as Result from "effect/Result";
+import * as Schema from "effect/Schema";
+import * as Str from "effect/String";
 import { useLocalSearchParams } from "expo-router";
 import {
   Archive,
@@ -76,9 +83,12 @@ import {
   useOverlay,
 } from "../../ui";
 import { useWorkspace } from "../../workspace/workspace-provider";
+import { ErrorScreen } from "../auth/error-screen";
 import { type DashboardDocument, parseDocumentSummaries, pragueToday } from "../dashboard/model";
 import { usePagedFeed } from "../dashboard/paged-feed";
 import { decodeReportView } from "../reports/model";
+import { requestOwner } from "../request-owner";
+import { runFeatureEffect } from "../ui-effect";
 import { type ContactExpense, loadSupplierExpenses } from "./expense-history";
 import {
   applyRegistryPreview,
@@ -107,14 +117,18 @@ import {
 const INHERIT = "__inherit__";
 
 const formatAddress = (contact: ContactRecord): string =>
-  [
-    contact.address.street,
-    contact.address.postalCode,
-    contact.address.city,
-    contact.address.country,
-  ]
-    .filter((p): p is string => p !== null && p !== "")
-    .join(", ");
+  Arr.join(
+    Arr.filter(
+      [
+        contact.address.street,
+        contact.address.postalCode,
+        contact.address.city,
+        contact.address.country,
+      ],
+      (p): p is string => p !== null && p !== "",
+    ),
+    ", ",
+  );
 
 export interface ContactDetailViewProps {
   readonly workspace: WorkspaceSummary;
@@ -168,7 +182,7 @@ export function ContactDetailView(props: ContactDetailViewProps) {
       ? t("contacts.override.workspaceDefault")
       : defaults.reminderPolicy.mode === "disabled"
         ? t(enumKey("reminderMode", "disabled"))
-        : `${t(enumKey("reminderMode", "custom"))} (${defaults.reminderPolicy.offsetsDays.join(", ")})`;
+        : `${t(enumKey("reminderMode", "custom"))} (${Arr.join(Arr.map(defaults.reminderPolicy.offsetsDays, String), ", ")})`;
 
   return (
     <View style={styles.stack}>
@@ -189,7 +203,7 @@ export function ContactDetailView(props: ContactDetailViewProps) {
             {contact.name}
           </Text>
           <View style={styles.badges}>
-            {contact.roles.map((role) => (
+            {Arr.map(contact.roles, (role) => (
               <Badge
                 key={role}
                 tone={role === "customer" ? "info" : "neutral"}
@@ -256,7 +270,7 @@ export function ContactDetailView(props: ContactDetailViewProps) {
               })}
             />
           ) : null}
-          {props.aresDiff.items.map((item) => (
+          {Arr.map(props.aresDiff.items, (item) => (
             <ListRow
               key={item.field}
               title={fieldLabel(item.field)}
@@ -296,7 +310,7 @@ export function ContactDetailView(props: ContactDetailViewProps) {
             title={t("contacts.editor.invoicingEmails")}
             subtitle={
               contact.billingEmails.length > 0
-                ? contact.billingEmails.join(", ")
+                ? Arr.join(contact.billingEmails, ", ")
                 : t("common.state.notSet")
             }
           />
@@ -399,7 +413,7 @@ export function ContactDetailView(props: ContactDetailViewProps) {
               </Card>
             ) : (
               <Card style={styles.listCard}>
-                {docs.map((doc) => (
+                {Arr.map(docs, (doc) => (
                   <ListRow
                     key={doc.id}
                     leading={FileText}
@@ -436,7 +450,7 @@ export function ContactDetailView(props: ContactDetailViewProps) {
               </Card>
             ) : (
               <Card style={styles.listCard}>
-                {expenses.map((expense) => (
+                {Arr.map(expenses, (expense) => (
                   <ListRow
                     key={expense.id}
                     leading={Receipt}
@@ -539,7 +553,10 @@ export function ContactEditorView(props: ContactEditorViewProps) {
   );
 
   const partitioned = useMemo(
-    () => partitionIssues(props.serverIssues, (path) => ownedPaths.has(path.join("."))),
+    () =>
+      partitionIssues(props.serverIssues, (path) =>
+        ownedPaths.has(Arr.join(Arr.map(path, String), ".")),
+      ),
     [props.serverIssues, ownedPaths],
   );
 
@@ -573,7 +590,7 @@ export function ContactEditorView(props: ContactEditorViewProps) {
   };
 
   const fieldError = (path: ReadonlyArray<string>): string | null => {
-    const key = path.join(".");
+    const key = Arr.join(path, ".");
     const localMsg = clientErrorMessage(props.clientErrors[key]);
     if (localMsg !== null) return localMsg;
     const server = issuesAt(props.serverIssues, path)[0];
@@ -584,13 +601,13 @@ export function ContactEditorView(props: ContactEditorViewProps) {
     onChangeForm((prev) => {
       const next = enabled
         ? [...new Set([...prev.roles, role])]
-        : prev.roles.filter((r) => r !== role);
+        : Arr.filter(prev.roles, (r) => r !== role);
       return { ...prev, roles: next };
     });
   };
 
   const addEmail = () => {
-    const trimmed = newEmail.trim();
+    const trimmed = Str.trim(newEmail);
     if (!isValidEmail(trimmed)) {
       setEmailError(local({ cs: "Zadejte platný e-mail.", en: "Enter a valid email address." }));
       return;
@@ -608,30 +625,30 @@ export function ContactEditorView(props: ContactEditorViewProps) {
   const removeEmail = (email: string) => {
     onChangeForm((prev) => ({
       ...prev,
-      billingEmails: prev.billingEmails.filter((e) => e !== email),
+      billingEmails: Arr.filter(prev.billingEmails, (e) => e !== email),
     }));
   };
 
-  const currencyChoices: ReadonlyArray<Choice<string>> = useMemo(
+  const currencyChoices: ReadonlyArray<Choice<CurrencyCode | typeof INHERIT>> = useMemo(
     () => [
       { value: INHERIT, label: t("contacts.override.workspaceDefault") },
-      ...CONTACT_CURRENCIES.map((c) => ({ value: c, label: c })),
+      ...Arr.map(CONTACT_CURRENCIES, (c) => ({ value: c, label: c })),
     ],
     [t],
   );
 
-  const languageChoices: ReadonlyArray<Choice<string>> = useMemo(
+  const languageChoices: ReadonlyArray<Choice<Locale | typeof INHERIT>> = useMemo(
     () => [
       { value: INHERIT, label: t("contacts.override.workspaceDefault") },
-      ...CONTACT_LANGUAGES.map((lang) => ({ value: lang, label: t(enumKey("locale", lang)) })),
+      ...Arr.map(CONTACT_LANGUAGES, (lang) => ({ value: lang, label: t(enumKey("locale", lang)) })),
     ],
     [t],
   );
 
-  const paymentMethodChoices: ReadonlyArray<Choice<string>> = useMemo(
+  const paymentMethodChoices: ReadonlyArray<Choice<PaymentMethod | typeof INHERIT>> = useMemo(
     () => [
       { value: INHERIT, label: t("contacts.override.workspaceDefault") },
-      ...CONTACT_PAYMENT_METHODS.map((method) => ({
+      ...Arr.map(CONTACT_PAYMENT_METHODS, (method) => ({
         value: method,
         label: t(enumKey("paymentMethod", method)),
       })),
@@ -649,12 +666,12 @@ export function ContactEditorView(props: ContactEditorViewProps) {
   );
 
   const countryChoices: ReadonlyArray<Choice<string>> = useMemo(
-    () => COMMON_COUNTRIES.map((code) => ({ value: code, label: code })),
+    () => Arr.map(COMMON_COUNTRIES, (code) => ({ value: code, label: code })),
     [],
   );
 
   const currentReminderMode = form.overrides.current.reminderPolicy?.mode ?? "inherit";
-  const country = form.country.trim().toUpperCase();
+  const country = Str.toUpperCase(Str.trim(form.country));
   const czech = country === "CZ";
 
   return (
@@ -690,7 +707,13 @@ export function ContactEditorView(props: ContactEditorViewProps) {
       ) : null}
 
       {partitioned.summary.length > 0 ? (
-        <Banner tone="error" text={partitioned.summary.map((i) => text(i.text)).join(" ")} />
+        <Banner
+          tone="error"
+          text={Arr.join(
+            Arr.map(partitioned.summary, (i) => text(i.text)),
+            " ",
+          )}
+        />
       ) : null}
 
       <Card>
@@ -698,13 +721,18 @@ export function ContactEditorView(props: ContactEditorViewProps) {
           label={t("common.field.country")}
           value={country}
           choices={countryChoices}
-          onChange={(country) => onChangeForm((prev) => ({ ...prev, country }))}
+          onChange={(selectedCountry) =>
+            onChangeForm((prev) => ({ ...prev, country: selectedCountry }))
+          }
         />
         <TextField
           label={local({ cs: "Kód země", en: "Country code" })}
           value={form.country}
-          onChangeText={(country) =>
-            onChangeForm((prev) => ({ ...prev, country: country.toUpperCase().slice(0, 2) }))
+          onChangeText={(customCountry) =>
+            onChangeForm((prev) => ({
+              ...prev,
+              country: Str.slice(0, 2)(Str.toUpperCase(customCountry)),
+            }))
           }
           autoCapitalize="characters"
           maxLength={2}
@@ -823,7 +851,7 @@ export function ContactEditorView(props: ContactEditorViewProps) {
 
       <Section title={t("contacts.editor.invoicingEmails")}>
         <Card>
-          {form.billingEmails.map((email) => (
+          {Arr.map(form.billingEmails, (email) => (
             <View key={email} style={styles.emailRow}>
               <Text variant="bodyMedium" style={styles.flex}>
                 {email}
@@ -873,7 +901,7 @@ export function ContactEditorView(props: ContactEditorViewProps) {
                 overrides:
                   val === INHERIT
                     ? OverrideForm.clear(prev.overrides, "currency")
-                    : OverrideForm.set(prev.overrides, "currency", val as CurrencyCode),
+                    : OverrideForm.set(prev.overrides, "currency", val),
               }))
             }
           />
@@ -888,7 +916,7 @@ export function ContactEditorView(props: ContactEditorViewProps) {
                 overrides:
                   val === INHERIT
                     ? OverrideForm.clear(prev.overrides, "language")
-                    : OverrideForm.set(prev.overrides, "language", val as Locale),
+                    : OverrideForm.set(prev.overrides, "language", val),
               }))
             }
           />
@@ -912,7 +940,7 @@ export function ContactEditorView(props: ContactEditorViewProps) {
                 overrides:
                   val === INHERIT
                     ? OverrideForm.clear(prev.overrides, "paymentMethod")
-                    : OverrideForm.set(prev.overrides, "paymentMethod", val as PaymentMethod),
+                    : OverrideForm.set(prev.overrides, "paymentMethod", val),
               }))
             }
           />
@@ -924,7 +952,7 @@ export function ContactEditorView(props: ContactEditorViewProps) {
               onChangeForm((prev) => ({
                 ...prev,
                 overrides:
-                  val.trim() === ""
+                  Str.trim(val) === ""
                     ? OverrideForm.clear(prev.overrides, "defaultNote")
                     : OverrideForm.set(prev.overrides, "defaultNote", val),
               }))
@@ -950,7 +978,7 @@ export function ContactEditorView(props: ContactEditorViewProps) {
                           offsetsDays: [3, 7, 14],
                         }),
                 reminderOffsetsText:
-                  mode === "custom" && prev.reminderOffsetsText.trim() === ""
+                  mode === "custom" && Str.trim(prev.reminderOffsetsText) === ""
                     ? "3, 7, 14"
                     : prev.reminderOffsetsText,
               }))
@@ -994,12 +1022,15 @@ export function ContactDetailScreen() {
   const { workspace } = useWorkspace();
   const params = useLocalSearchParams<{ id?: string; mode?: string }>();
   const rawId = param(params.id) ?? "new";
+  const contactId =
+    rawId === "new" ? null : Option.getOrNull(Schema.decodeOption(ContactId)(rawId));
+  if (rawId !== "new" && contactId === null) return <ErrorScreen kind="not_found" />;
   const initialMode = param(params.mode) === "edit" || rawId === "new" ? "edit" : "view";
   return (
     <WorkspaceContactDetail
-      key={JSON.stringify([workspace.id, rawId, initialMode])}
+      key={`${workspace.id}/${rawId}/${initialMode}`}
       workspace={workspace}
-      rawId={rawId}
+      contactId={contactId}
       initialMode={initialMode}
     />
   );
@@ -1007,11 +1038,11 @@ export function ContactDetailScreen() {
 
 function WorkspaceContactDetail({
   workspace,
-  rawId,
+  contactId,
   initialMode,
 }: {
   readonly workspace: WorkspaceSummary;
-  readonly rawId: string;
+  readonly contactId: ContactId | null;
   readonly initialMode: "view" | "edit";
 }) {
   const api = useApi();
@@ -1020,10 +1051,9 @@ function WorkspaceContactDetail({
   const { t, text, locale, local } = useI18n();
   const owner =
     session.state.status === "signed-in"
-      ? JSON.stringify([api.origin, session.state.user.id, workspace.id])
+      ? requestOwner([api.origin, session.state.user.id, workspace.id])
       : null;
-  const isNew = rawId === "new";
-  const contactId = isNew ? null : (rawId as ContactId);
+  const isNew = contactId === null;
 
   const [mode, setMode] = useState<"view" | "edit">(initialMode);
   const [form, setForm] = useState<ContactFormState>(emptyContactForm);
@@ -1032,22 +1062,22 @@ function WorkspaceContactDetail({
   >({});
   const [serverIssues, setServerIssues] = useState<ReadonlyArray<FieldIssue>>([]);
   const [bannerError, setBannerError] = useState<string | null>(null);
-  const [staleRevision, setStaleRevision] = useState(false);
-  const [duplicateIco, setDuplicateIco] = useState(false);
-  const [saving, setSaving] = useState(false);
-  const [archiving, setArchiving] = useState(false);
-  const [lookingUpAres, setLookingUpAres] = useState(false);
+  const [staleRevision, setStaleRevision] = useState<boolean>(false);
+  const [duplicateIco, setDuplicateIco] = useState<boolean>(false);
+  const [saving, setSaving] = useState<boolean>(false);
+  const [archiving, setArchiving] = useState<boolean>(false);
+  const [lookingUpAres, setLookingUpAres] = useState<boolean>(false);
   const [aresNotice, setAresNotice] = useState<{
     readonly ico: string;
     readonly tone: "info" | "warning" | "error";
     readonly text: string;
   } | null>(null);
-  const [refreshingAres, setRefreshingAres] = useState(false);
-  const [applyingAres, setApplyingAres] = useState(false);
+  const [refreshingAres, setRefreshingAres] = useState<boolean>(false);
+  const [applyingAres, setApplyingAres] = useState<boolean>(false);
   const [aresDiff, setAresDiff] = useState<RegistryPreview | null>(null);
 
-  const savingRef = useRef(false);
-  const mounted = useRef(false);
+  const savingRef = useRef<boolean>(false);
+  const mounted = useRef<boolean>(false);
   const lookupSequence = useRef(0);
   useEffect(() => {
     mounted.current = true;
@@ -1100,7 +1130,7 @@ function WorkspaceContactDetail({
             (view) => {
               const report = decodeReportView(view, "receivables");
               return report.report === "receivables"
-                ? summarizeContactReceivables(report, contactId)
+                ? summarizeContactReceivables({ report, contactId })
                 : null;
             },
           ),
@@ -1113,7 +1143,11 @@ function WorkspaceContactDetail({
     (client: KvitbitApiClient) =>
       loadedContactId === null
         ? Effect.succeed([])
-        : loadSupplierExpenses(client, workspace.id, loadedContactId),
+        : loadSupplierExpenses({
+            api: client,
+            workspaceId: workspace.id,
+            contactId: loadedContactId,
+          }),
     [workspace.id, loadedContactId],
   );
   const expensesRemote = usePagedFeed(loadedContactId === null ? null : loadExpenses);
@@ -1139,158 +1173,182 @@ function WorkspaceContactDetail({
     [invalidateLookup],
   );
 
-  const handleLookupAres = useCallback(async () => {
-    if (!editable || savingRef.current || form.country.trim().toUpperCase() !== "CZ") return;
-    const check = validateIco(form.ico);
-    if (Result.isFailure(check)) {
-      setClientErrors({
-        ico: check.failure.code === "ico.checksum" ? "ico_checksum" : "ico_format",
-      });
-      return;
-    }
-    const ico = normalizeIco(check.success);
-    const sequence = ++lookupSequence.current;
-    setLookingUpAres(true);
-    setAresNotice(null);
-    setClientErrors({});
-    const res = await api.run((client) => client.registry.lookupCompany({ params: { ico } }));
-    if (lookupSequence.current !== sequence) return;
-    setLookingUpAres(false);
-    if (res._tag === "Ok") {
-      setForm((prev) =>
-        prev.country.trim().toUpperCase() === "CZ" && normalizeIco(prev.ico) === ico
-          ? applyRegistryToForm(prev, res.value)
-          : prev,
-      );
-      if (res.value.terminatedOn !== null) {
-        setAresNotice({
-          ico,
-          tone: "warning",
-          text: local({
-            cs: `Subjekt byl ukončen dne ${formatDate(locale, res.value.terminatedOn)}. Kontakt přesto můžete uložit.`,
-            en: `Entity was terminated on ${formatDate(locale, res.value.terminatedOn)}. You can still save.`,
-          }),
-        });
-      } else {
-        setAresNotice({ ico, tone: "info", text: t("onboarding.wizard.entity.found") });
-      }
-      return;
-    }
-    if (res.error._tag === "NotFound") {
-      setAresNotice({ ico, tone: "warning", text: t("onboarding.wizard.entity.notFound") });
-    } else if (res.error._tag === "Unavailable") {
-      setAresNotice({ ico, tone: "warning", text: t("onboarding.wizard.entity.aresDown") });
-    } else {
-      setAresNotice({ ico, tone: "error", text: text(describeError(res.error).text) });
-    }
-  }, [api, editable, form.country, form.ico, local, locale, t, text]);
-
-  const handleSave = useCallback(async () => {
-    if (!editable || savingRef.current || staleRevision) return;
-    const validation = validateContactForm(form);
-    if (Object.keys(validation).length > 0) {
-      setClientErrors(validation);
-      return;
-    }
-    savingRef.current = true;
-    invalidateLookup();
-    setSaving(true);
-    setBannerError(null);
-    setServerIssues([]);
-    setStaleRevision(false);
-    setDuplicateIco(false);
-
-    const payload = buildContactInput(form);
-    const result = await (async () => {
-      if (contactId !== null) {
-        const revision = form.editingRevision;
-        if (revision === null) return null;
-        return api.run((client) =>
-          client.contacts.update({
-            params: inWorkspace(workspace.id, { contactId }),
-            headers: ifMatchHeaders(revision),
-            payload,
-          }),
-        );
-      }
-      if (owner === null) return null;
-      const operation = "contacts.create";
-      const key = await acquireRequestKey(owner, operation, payload);
-      const created = await api.run((client) =>
-        client.contacts.create({
-          params: inWorkspace(workspace.id),
-          headers: idempotencyHeaders(key),
-          payload,
+  const handleLookupAres = useCallback(
+    () =>
+      runFeatureEffect(
+        Effect.gen(function* () {
+          if (!editable || savingRef.current || Str.toUpperCase(Str.trim(form.country)) !== "CZ")
+            return;
+          const check = validateIco(form.ico);
+          if (Result.isFailure(check)) {
+            setClientErrors({
+              ico: check.failure.code === "ico.checksum" ? "ico_checksum" : "ico_format",
+            });
+            return;
+          }
+          const ico = normalizeIco(check.success);
+          const sequence = ++lookupSequence.current;
+          setLookingUpAres(true);
+          setAresNotice(null);
+          setClientErrors({});
+          const res = yield* Effect.promise(() =>
+            api.run((client) => client.registry.lookupCompany({ params: { ico } })),
+          );
+          if (lookupSequence.current !== sequence) return;
+          setLookingUpAres(false);
+          if (res._tag === "Ok") {
+            setForm((prev) =>
+              Str.toUpperCase(Str.trim(prev.country)) === "CZ" && normalizeIco(prev.ico) === ico
+                ? applyRegistryToForm(prev, res.value)
+                : prev,
+            );
+            if (res.value.terminatedOn !== null) {
+              setAresNotice({
+                ico,
+                tone: "warning",
+                text: local({
+                  cs: `Subjekt byl ukončen dne ${formatDate(locale, res.value.terminatedOn)}. Kontakt přesto můžete uložit.`,
+                  en: `Entity was terminated on ${formatDate(locale, res.value.terminatedOn)}. You can still save.`,
+                }),
+              });
+            } else {
+              setAresNotice({ ico, tone: "info", text: t("onboarding.wizard.entity.found") });
+            }
+            return;
+          }
+          if (res.error._tag === "NotFound") {
+            setAresNotice({ ico, tone: "warning", text: t("onboarding.wizard.entity.notFound") });
+          } else if (res.error._tag === "Unavailable") {
+            setAresNotice({ ico, tone: "warning", text: t("onboarding.wizard.entity.aresDown") });
+          } else {
+            setAresNotice({ ico, tone: "error", text: text(describeError(res.error).text) });
+          }
         }),
-      );
-      if (settlesRequestIntent(created)) {
-        await completeRequestKey(owner, operation, key).catch(() => {
-          overlay.toast(t("error.unknown"));
-        });
-      }
-      return created;
-    })()
-      .catch((error) => {
-        setBannerError(
-          isRequestIntentExpired(requestIntentFailure(error))
-            ? local(requestIntentReconciliationCopy)
-            : t("error.unknown"),
-        );
-        return null;
-      })
-      .finally(() => {
-        savingRef.current = false;
-        setSaving(false);
-      });
-    if (!mounted.current || result === null) return;
+      ),
+    [api, editable, form.country, form.ico, local, locale, t, text],
+  );
 
-    if (result._tag === "Ok") {
-      const saved = parseContactView(result.value);
-      overlay.toast(t("common.toast.saved"));
-      if (isNew && saved !== null) {
-        navigate(
-          { _tag: "Contact", ws: workspace.slug, id: saved.id, mode: "view" },
-          { replace: true },
-        );
-      } else if (saved !== null) {
-        contactRemote.set(saved);
-        setForm(contactFormFromRecord(saved));
-        setMode("view");
-      }
-      return;
-    }
+  const handleSave = useCallback(
+    () =>
+      runFeatureEffect(
+        Effect.gen(function* () {
+          if (!editable || savingRef.current || staleRevision) return;
+          const validation = validateContactForm(form);
+          if (Rec.keys(validation).length > 0) {
+            setClientErrors(validation);
+            return;
+          }
+          savingRef.current = true;
+          invalidateLookup();
+          setSaving(true);
+          setBannerError(null);
+          setServerIssues([]);
+          setStaleRevision(false);
+          setDuplicateIco(false);
 
-    const view = describeError(result.error);
-    if (view.staleRevision) {
-      setStaleRevision(true);
-      return;
-    }
-    if (result.error._tag === "Conflict" && result.error.reason === "duplicate") {
-      setDuplicateIco(true);
-      return;
-    }
-    if (view.issues.length > 0) {
-      setServerIssues(view.issues);
-      return;
-    }
-    setBannerError(text(view.text));
-  }, [
-    api,
-    contactId,
-    contactRemote,
-    editable,
-    form,
-    invalidateLookup,
-    isNew,
-    local,
-    overlay,
-    owner,
-    staleRevision,
-    t,
-    text,
-    workspace.id,
-    workspace.slug,
-  ]);
+          const payload = buildContactInput(form);
+          const result = yield* Effect.gen(function* () {
+            if (contactId !== null) {
+              const revision = form.editingRevision;
+              if (revision === null) return null;
+              return yield* Effect.promise(() =>
+                api.run((client) =>
+                  client.contacts.update({
+                    params: inWorkspace(workspace.id, { contactId }),
+                    headers: ifMatchHeaders(revision),
+                    payload,
+                  }),
+                ),
+              );
+            }
+            if (owner === null) return null;
+            const operation = "contacts.create";
+            const key = yield* Effect.promise(() => acquireRequestKey(owner, operation, payload));
+            const created = yield* Effect.promise(() =>
+              api.run((client) =>
+                client.contacts.create({
+                  params: inWorkspace(workspace.id),
+                  headers: idempotencyHeaders(key),
+                  payload,
+                }),
+              ),
+            );
+            if (settlesRequestIntent(created)) {
+              yield* Effect.promise(() => completeRequestKey(owner, operation, key)).pipe(
+                Effect.catchCause(() => Effect.sync(() => overlay.toast(t("error.unknown")))),
+              );
+            }
+            return created;
+          }).pipe(
+            Effect.catchCause((cause) =>
+              Effect.sync(() => {
+                setBannerError(
+                  cause.pipe(Cause.squash, requestIntentFailure, isRequestIntentExpired)
+                    ? local(requestIntentReconciliationCopy)
+                    : t("error.unknown"),
+                );
+                return null;
+              }),
+            ),
+            Effect.ensuring(
+              Effect.sync(() => {
+                savingRef.current = false;
+                setSaving(false);
+              }),
+            ),
+          );
+          if (!mounted.current || result === null) return;
+
+          if (result._tag === "Ok") {
+            const saved = parseContactView(result.value);
+            overlay.toast(t("common.toast.saved"));
+            if (isNew && saved !== null) {
+              navigate(
+                { _tag: "Contact", ws: workspace.slug, id: saved.id, mode: "view" },
+                { replace: true },
+              );
+            } else if (saved !== null) {
+              contactRemote.set(saved);
+              setForm(contactFormFromRecord(saved));
+              setMode("view");
+            }
+            return;
+          }
+
+          const view = describeError(result.error);
+          if (view.staleRevision) {
+            setStaleRevision(true);
+            return;
+          }
+          if (result.error._tag === "Conflict" && result.error.reason === "duplicate") {
+            setDuplicateIco(true);
+            return;
+          }
+          if (view.issues.length > 0) {
+            setServerIssues(view.issues);
+            return;
+          }
+          setBannerError(text(view.text));
+        }),
+      ),
+    [
+      api,
+      contactId,
+      contactRemote,
+      editable,
+      form,
+      invalidateLookup,
+      isNew,
+      local,
+      overlay,
+      owner,
+      staleRevision,
+      t,
+      text,
+      workspace.id,
+      workspace.slug,
+    ],
+  );
 
   const handleReloadLatest = useCallback(() => {
     if (savingRef.current) return;
@@ -1302,131 +1360,179 @@ function WorkspaceContactDetail({
     contactRemote.reload();
   }, [contactRemote, invalidateLookup]);
 
-  const handleArchive = useCallback(async () => {
-    if (
-      !editable ||
-      savingRef.current ||
-      contactId === null ||
-      contactRemote.state._tag !== "Ready" ||
-      contactRemote.state.value === null
-    ) {
-      return;
-    }
-    const record = contactRemote.state.value;
-    const confirmed = await overlay.confirm({
-      title: `${t("common.action.archive")} ${record.name}?`,
-      body: local({
-        cs: "Kontakt se skryje z výběrů. Již vystavené doklady zůstanou zachovány.",
-        en: "The contact will be hidden from pickers. Existing documents stay intact.",
-      }),
-      confirmLabel: t("common.action.archive"),
-      cancelLabel: t("common.action.cancel"),
-      destructive: true,
-    });
-    if (!confirmed) return;
-    setArchiving(true);
-    const res = await api.run((client) =>
-      client.contacts.archive({ params: inWorkspace(workspace.id, { contactId }) }),
-    );
-    setArchiving(false);
-    if (res._tag === "Ok") {
-      overlay.toast(t("common.toast.archived", { name: record.name }));
-      navigate({ _tag: "Contacts", ws: workspace.slug, query: {} }, { replace: true });
-    } else {
-      overlay.toast(text(describeError(res.error).text));
-    }
-  }, [
-    api,
-    contactId,
-    contactRemote.state,
-    editable,
-    local,
-    overlay,
-    t,
-    text,
-    workspace.id,
-    workspace.slug,
-  ]);
-
-  const handleRefreshAres = useCallback(async () => {
-    if (
-      !editable ||
-      savingRef.current ||
-      contactRemote.state._tag !== "Ready" ||
-      contactRemote.state.value === null
-    )
-      return;
-    const record = contactRemote.state.value;
-    const ico = record.ico;
-    if (ico === null) return;
-    setRefreshingAres(true);
-    const res = await api.run((client) => client.registry.lookupCompany({ params: { ico } }));
-    setRefreshingAres(false);
-    if (res._tag === "Err") {
-      overlay.toast(text(describeError(res.error).text));
-      return;
-    }
-    const items = diffContactWithRegistry(record, res.value);
-    if (items.length === 0) {
-      overlay.toast(
-        local({
-          cs: "Údaje z ARES jsou aktuální.",
-          en: "Details are already up to date with ARES.",
-        }),
-      );
-      return;
-    }
-    setAresDiff({ result: res.value, items, contactId: record.id, revision: record.revision });
-  }, [api, contactRemote.state, editable, local, overlay, text]);
-
-  const handleApplyAresDiff = useCallback(async () => {
-    if (!editable || aresDiff === null || savingRef.current) return;
-    savingRef.current = true;
-    setApplyingAres(true);
-    const res = await api
-      .run((client) => applyRegistryPreview(client.contacts, workspace.id, aresDiff))
-      .finally(() => {
-        savingRef.current = false;
-        setApplyingAres(false);
-      });
-    if (res._tag === "Ok") {
-      const updated = parseContactView(res.value);
-      if (updated !== null) {
-        contactRemote.set(updated);
-        setForm(contactFormFromRecord(updated));
-      }
-      setAresDiff(null);
-      overlay.toast(t("contacts.detail.refreshed"));
-    } else {
-      const error = describeError(res.error);
-      overlay.toast(text(error.text));
-      if (error.staleRevision || res.error._tag === "NotFound") {
-        setAresDiff(null);
-        contactRemote.reload();
-      }
-    }
-  }, [api, aresDiff, contactRemote, editable, overlay, t, text, workspace.id]);
-
-  const handleOpenDuplicate = useCallback(async () => {
-    const ico = normalizeIco(form.ico);
-    if (ico === "") return;
-    const result = await api.run((client) =>
-      findActiveContactByIco(ico, contactId, (cursor) =>
-        client.contacts.search({
-          params: inWorkspace(workspace.id),
-          query: { text: ico, ...(cursor === null ? {} : { cursor }) },
+  const handleArchive = useCallback(
+    () =>
+      runFeatureEffect(
+        Effect.gen(function* () {
+          if (
+            !editable ||
+            savingRef.current ||
+            contactId === null ||
+            contactRemote.state._tag !== "Ready" ||
+            contactRemote.state.value === null
+          ) {
+            return;
+          }
+          const archivedContact = contactRemote.state.value;
+          const confirmed = yield* Effect.promise(() =>
+            overlay.confirm({
+              title: `${t("common.action.archive")} ${archivedContact.name}?`,
+              body: local({
+                cs: "Kontakt se skryje z výběrů. Již vystavené doklady zůstanou zachovány.",
+                en: "The contact will be hidden from pickers. Existing documents stay intact.",
+              }),
+              confirmLabel: t("common.action.archive"),
+              cancelLabel: t("common.action.cancel"),
+              destructive: true,
+            }),
+          );
+          if (!confirmed) return;
+          setArchiving(true);
+          const res = yield* Effect.promise(() =>
+            api.run((client) =>
+              client.contacts.archive({ params: inWorkspace(workspace.id, { contactId }) }),
+            ),
+          );
+          setArchiving(false);
+          if (res._tag === "Ok") {
+            overlay.toast(t("common.toast.archived", { name: archivedContact.name }));
+            navigate({ _tag: "Contacts", ws: workspace.slug, query: {} }, { replace: true });
+          } else {
+            overlay.toast(text(describeError(res.error).text));
+          }
         }),
       ),
-    );
-    if (!mounted.current) return;
-    if (result._tag === "Err") {
-      overlay.toast(text(describeError(result.error).text));
-    } else if (result.value === null) {
-      overlay.toast(t("error.notFound"));
-    } else {
-      navigate({ _tag: "Contact", ws: workspace.slug, id: result.value.id, mode: "view" });
-    }
-  }, [api, contactId, form.ico, overlay, t, text, workspace.id, workspace.slug]);
+    [
+      api,
+      contactId,
+      contactRemote.state,
+      editable,
+      local,
+      overlay,
+      t,
+      text,
+      workspace.id,
+      workspace.slug,
+    ],
+  );
+
+  const handleRefreshAres = useCallback(
+    () =>
+      runFeatureEffect(
+        Effect.gen(function* () {
+          if (
+            !editable ||
+            savingRef.current ||
+            contactRemote.state._tag !== "Ready" ||
+            contactRemote.state.value === null
+          )
+            return;
+          const currentContact = contactRemote.state.value;
+          const ico = currentContact.ico;
+          if (ico === null) return;
+          setRefreshingAres(true);
+          const res = yield* Effect.promise(() =>
+            api.run((client) => client.registry.lookupCompany({ params: { ico } })),
+          );
+          setRefreshingAres(false);
+          if (res._tag === "Err") {
+            overlay.toast(text(describeError(res.error).text));
+            return;
+          }
+          const items = diffContactWithRegistry(currentContact, res.value);
+          if (items.length === 0) {
+            overlay.toast(
+              local({
+                cs: "Údaje z ARES jsou aktuální.",
+                en: "Details are already up to date with ARES.",
+              }),
+            );
+            return;
+          }
+          setAresDiff({
+            result: res.value,
+            items,
+            contactId: currentContact.id,
+            revision: currentContact.revision,
+          });
+        }),
+      ),
+    [api, contactRemote.state, editable, local, overlay, text],
+  );
+
+  const handleApplyAresDiff = useCallback(
+    () =>
+      runFeatureEffect(
+        Effect.gen(function* () {
+          if (!editable || aresDiff === null || savingRef.current) return;
+          savingRef.current = true;
+          setApplyingAres(true);
+          const res = yield* Effect.promise(() =>
+            api
+              .run((client) =>
+                applyRegistryPreview({
+                  contacts: client.contacts,
+                  workspaceId: workspace.id,
+                  preview: aresDiff,
+                }),
+              )
+              .finally(() => {
+                savingRef.current = false;
+                setApplyingAres(false);
+              }),
+          );
+          if (res._tag === "Ok") {
+            const updated = parseContactView(res.value);
+            if (updated !== null) {
+              contactRemote.set(updated);
+              setForm(contactFormFromRecord(updated));
+            }
+            setAresDiff(null);
+            overlay.toast(t("contacts.detail.refreshed"));
+          } else {
+            const error = describeError(res.error);
+            overlay.toast(text(error.text));
+            if (error.staleRevision || res.error._tag === "NotFound") {
+              setAresDiff(null);
+              contactRemote.reload();
+            }
+          }
+        }),
+      ),
+    [api, aresDiff, contactRemote, editable, overlay, t, text, workspace.id],
+  );
+
+  const handleOpenDuplicate = useCallback(
+    () =>
+      runFeatureEffect(
+        Effect.gen(function* () {
+          const ico = normalizeIco(form.ico);
+          if (ico === "") return;
+          const result = yield* Effect.promise(() =>
+            api.run((client) =>
+              findActiveContactByIco({
+                ico,
+                excludedId: contactId,
+                loadPage: (cursor) =>
+                  client.contacts.search({
+                    params: inWorkspace(workspace.id),
+                    query: { text: ico, cursor: cursor ?? undefined },
+                  }),
+              }),
+            ),
+          );
+          if (!mounted.current) return;
+          if (result._tag === "Err") {
+            overlay.toast(text(describeError(result.error).text));
+          } else if (result.value === null) {
+            overlay.toast(t("error.notFound"));
+          } else {
+            navigate({ _tag: "Contact", ws: workspace.slug, id: result.value.id, mode: "view" });
+          }
+        }),
+      ),
+    [api, contactId, form.ico, overlay, t, text, workspace.id, workspace.slug],
+  );
 
   const visibleAresNotice = aresNotice?.ico === normalizeIco(form.ico) ? aresNotice : null;
   if (isNew) {
@@ -1479,8 +1585,8 @@ function WorkspaceContactDetail({
       refreshing={contactRemote.state._tag === "Loading"}
     >
       <RemoteView state={contactRemote.state} onRetry={contactRemote.reload}>
-        {(record) => {
-          if (record === null) {
+        {(viewedContact) => {
+          if (viewedContact === null) {
             return <EmptyState title={t("error.notFound")} />;
           }
           if (mode === "edit" && editable && form.editingRevision !== null) {
@@ -1504,7 +1610,7 @@ function WorkspaceContactDetail({
                   if (savingRef.current) return;
                   invalidateLookup();
                   setAresNotice(null);
-                  setForm(contactFormFromRecord(record));
+                  setForm(contactFormFromRecord(viewedContact));
                   setClientErrors({});
                   setServerIssues([]);
                   setBannerError(null);
@@ -1518,7 +1624,7 @@ function WorkspaceContactDetail({
           return (
             <ContactDetailView
               workspace={workspace}
-              contact={record}
+              contact={viewedContact}
               documents={documentsRemote.state}
               onRetryDocuments={documentsRemote.reload}
               receivables={receivablesRemote.state}
@@ -1527,7 +1633,7 @@ function WorkspaceContactDetail({
               onRetryExpenses={expensesRemote.reload}
               onEdit={() => {
                 if (savingRef.current) return;
-                setForm(contactFormFromRecord(record));
+                setForm(contactFormFromRecord(viewedContact));
                 setMode("edit");
               }}
               onArchive={handleArchive}

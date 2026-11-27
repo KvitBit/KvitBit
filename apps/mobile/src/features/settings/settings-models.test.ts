@@ -1,15 +1,18 @@
 import { describe, expect, test } from "bun:test";
 import { PreconditionFailed } from "@kvitbit/api-contract";
 import {
-  type BankAccountView,
+  BankAccountView,
   Conflict,
   Invalid,
   type RegistryResult,
-  type UserId,
-  type WorkspaceSlug,
-  type WorkspaceView,
+  UserId,
+  WorkspaceSlug,
+  WorkspaceView,
 } from "@kvitbit/domain/contract";
 import { SettingsSection } from "@kvitbit/ui-port/view-models";
+import * as Arr from "effect/Array";
+import * as DateTime from "effect/DateTime";
+import * as Result from "effect/Result";
 import { makeI18n } from "../../i18n/i18n-provider";
 import {
   applyAresResult,
@@ -75,8 +78,8 @@ describe("settings permissions", () => {
   });
 
   test("canRevokeConnectedApp allows owner/admin for all, others only for own grants", () => {
-    const alice = "user-alice" as UserId;
-    const bob = "user-bob" as UserId;
+    const alice = UserId.make("01950000-0000-7000-8000-000000000001");
+    const bob = UserId.make("01950000-0000-7000-8000-000000000002");
     expect(canRevokeConnectedApp("owner", bob, alice, false)).toBe(true);
     expect(canRevokeConnectedApp("admin", bob, alice, false)).toBe(true);
     expect(canRevokeConnectedApp("member", alice, alice, false)).toBe(true);
@@ -118,8 +121,8 @@ describe("workspace-data parsers", () => {
   });
 
   test("parseWorkspaceView extracts nested core fields with safe defaults", () => {
-    const raw = {
-      slug: "acme-sro" as WorkspaceSlug,
+    const raw = WorkspaceView.make({
+      slug: WorkspaceSlug.make("acme-sro"),
       name: "Acme s.r.o.",
       closed: false,
       revision: 4,
@@ -154,7 +157,7 @@ describe("workspace-data parsers", () => {
         logo: null,
         stamp: null,
       },
-    } as unknown as WorkspaceView;
+    });
 
     const parsed = parseWorkspaceView(raw);
     expect(parsed.revision).toBe(4);
@@ -168,22 +171,30 @@ describe("workspace-data parsers", () => {
   });
 
   test("parseBankAccountView extracts bank account fields", () => {
-    const parsed = parseBankAccountView({
-      id: "ba-1",
-      name: "Main CZK",
-      iban: "CZ6508000000192000145399",
-      bic: "GIBACZPX",
-      currency: "CZK",
-      isDefault: true,
-      revision: 2,
-    } as unknown as BankAccountView);
-    expect(String(parsed.id)).toBe("ba-1");
+    const bankAccountId = "01950000-0000-7000-8000-000000000001";
+    const parsed = Result.getOrThrow(
+      parseBankAccountView(
+        BankAccountView.make({
+          id: bankAccountId,
+          name: "Main CZK",
+          iban: "CZ6508000000192000145399",
+          bic: "GIBACZPX",
+          currency: "CZK",
+          isDefault: true,
+          revision: 2,
+        }),
+      ),
+    );
+    expect(String(parsed.id)).toBe(bankAccountId);
     expect(String(parsed.currency)).toBe("CZK");
     expect(parsed.isDefault).toBe(true);
   });
 
   test("todayIsoDate formats YYYY-MM-DD", () => {
-    expect(todayIsoDate(new Date(2026, 10, 5))).toBe("2026-11-05");
+    const date = DateTime.makeZonedUnsafe("2026-11-05T00:00:00", {
+      timeZone: DateTime.zoneMakeLocal(),
+    }).pipe(DateTime.toDateUtc);
+    expect(todayIsoDate(date)).toBe("2026-11-05");
   });
 });
 
@@ -214,7 +225,7 @@ describe("ares-lookup state machine", () => {
     expect(started).toEqual({ _tag: "LookingUp", ico: "27082440" });
 
     const diffs = computeAresDiffs(current, registry);
-    expect(diffs.map((d) => d.field)).toEqual([
+    expect(Arr.map(diffs, (d) => d.field)).toEqual([
       "name",
       "dic",
       "street",
@@ -239,7 +250,9 @@ describe("ares-lookup state machine", () => {
 });
 
 describe("numbering-preview", () => {
-  const fixedDate = new Date(2026, 10, 24); // 2026-11-24
+  const fixedDate = DateTime.toDate(
+    DateTime.makeZonedUnsafe("2026-11-24T00:00:00", { timeZone: DateTime.zoneMakeLocal() }),
+  ); // 2026-11-24
 
   test("validates N counter tokens and previews next 3 numbers", () => {
     expect(hasCounterToken("YYYY-NNNN")).toBe(true);
@@ -260,17 +273,17 @@ describe("settings-feedback", () => {
   const i18n = makeI18n("en", () => undefined);
 
   test("marks revision conflicts and 412 as staleRevision", () => {
-    const c = formErrorFrom(new Conflict({ reason: "revision_changed" }), i18n);
+    const c = formErrorFrom(Conflict.make({ reason: "revision_changed" }), i18n);
     expect(c.staleRevision).toBe(true);
     expect(c.banner).not.toBeNull();
 
-    const p = formErrorFrom(new PreconditionFailed({ currentRevision: 4 }), i18n);
+    const p = formErrorFrom(PreconditionFailed.make({ currentRevision: 4 }), i18n);
     expect(p.staleRevision).toBe(true);
   });
 
   test("maps field issues by path", () => {
     const err = formErrorFrom(
-      new Invalid({ issues: [{ path: ["ico"], code: "ico.checksum" }] }),
+      Invalid.make({ issues: [{ path: ["ico"], code: "ico.checksum" }] }),
       i18n,
     );
     expect(fieldErrorText(err, ["ico"], i18n)).not.toBeNull();

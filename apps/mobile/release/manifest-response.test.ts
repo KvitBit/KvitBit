@@ -1,5 +1,10 @@
 import { describe, expect, test } from "bun:test";
+// The signing tests generate PEM keys for the synchronous Node-compatible RSA adapter.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { generateKeyPairSync } from "node:crypto";
+import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
+import * as Str from "effect/String";
 import {
   buildManifestResponse,
   parseExpoSignature,
@@ -8,6 +13,21 @@ import {
   verifyManifestSignature,
 } from "./manifest-response";
 import type { StoredRollback, StoredUpdate } from "./storage-layout";
+
+const manifestJson = Schema.fromJsonString(
+  Schema.Struct({
+    id: Schema.String,
+    launchAsset: Schema.Struct({ url: Schema.String }),
+    assets: Schema.Array(
+      Schema.Struct({
+        url: Schema.String,
+        fileExtension: Schema.optional(Schema.String),
+      }),
+    ),
+  }),
+);
+const parseJson = (value: string) =>
+  Schema.decodeOption(Schema.fromJsonString(Schema.Unknown))(value).pipe(Option.getOrThrow);
 
 const { privateKey, publicKey } = generateKeyPairSync("rsa", {
   modulusLength: 2048,
@@ -24,16 +44,18 @@ const SAMPLE_UPDATE: StoredUpdate = {
   platform: "android",
   runtimeVersion: "fp-1234",
   launchAsset: {
-    sha256: "a".repeat(64),
-    hash: "A".repeat(43),
-    key: "0123456789abcdef0123456789abcdef",
+    sha256: Str.repeat(64)("a"),
+    hash: Str.repeat(43)("A"),
+    // biome-ignore lint/security/noSecrets: Deterministic Metro asset key for the fixture.
+    key: Str.repeat(2)("0123456789abcdef"),
     contentType: "application/javascript",
   },
   assets: [
     {
-      sha256: "b".repeat(64),
-      hash: "B".repeat(43),
-      key: "fedcba9876543210fedcba9876543210",
+      sha256: Str.repeat(64)("b"),
+      hash: Str.repeat(43)("B"),
+      // biome-ignore lint/security/noSecrets: Deterministic Metro asset key for the fixture.
+      key: Str.repeat(2)("fedcba9876543210"),
       contentType: "image/png",
       fileExtension: ".png",
     },
@@ -76,6 +98,7 @@ describe("readManifestRequest", () => {
   test("falls back to query parameters for platform, runtime-version, and channel-name", () => {
     const result = readManifestRequest(
       { "expo-protocol-version": "1" },
+      // biome-ignore lint/security/noSecrets: Public query parameter names and test values.
       new URLSearchParams("platform=ios&runtime-version=fp-9&channel-name=staging"),
     );
     expect(result).toEqual({
@@ -153,7 +176,7 @@ describe("buildManifestResponse", () => {
     expect(res.headers["cache-control"]).toBe("private, max-age=0");
     expect(res.headers["content-type"]).toBe("multipart/mixed; boundary=test-boundary");
 
-    const parts = parseMultipartMixed(res.headers["content-type"] ?? "", res.body);
+    const parts = parseMultipartMixed(res.headers["content-type"], res.body);
     expect(parts).toHaveLength(2);
     const manifestPart = parts?.[0];
     const extensionsPart = parts?.[1];
@@ -170,17 +193,15 @@ describe("buildManifestResponse", () => {
       false,
     );
 
-    const manifest = JSON.parse(manifestPart?.body ?? "{}") as {
-      id: string;
-      launchAsset: { url: string };
-      assets: Array<{ url: string; fileExtension?: string }>;
-    };
+    const manifest = Schema.decodeOption(manifestJson)(manifestPart?.body ?? "{}").pipe(
+      Option.getOrThrow,
+    );
     expect(manifest.id).toBe(SAMPLE_UPDATE.id);
     expect(manifest.launchAsset.url).toBe(
-      `https://kvitbit.cz/api/mobile/updates/assets/${"a".repeat(64)}`,
+      `https://kvitbit.cz/api/mobile/updates/assets/${Str.repeat(64)("a")}`,
     );
     expect(manifest.assets[0]?.url).toBe(
-      `https://kvitbit.cz/api/mobile/updates/assets/${"b".repeat(64)}`,
+      `https://kvitbit.cz/api/mobile/updates/assets/${Str.repeat(64)("b")}`,
     );
     expect(manifest.assets[0]?.fileExtension).toBe(".png");
   });
@@ -202,10 +223,10 @@ describe("buildManifestResponse", () => {
       });
       expect(res._tag).toBe("Response");
       if (res._tag !== "Response") continue;
-      const parts = parseMultipartMixed(res.headers["content-type"] ?? "", res.body);
+      const parts = parseMultipartMixed(res.headers["content-type"], res.body);
       expect(parts?.[0]?.headers.get("content-disposition")).toBe('form-data; name="directive"');
       expect(parts?.[0]?.headers.get("expo-signature")).toBeNull();
-      expect(JSON.parse(parts?.[0]?.body ?? "{}")).toEqual({ type: "noUpdateAvailable" });
+      expect(parseJson(parts?.[0]?.body ?? "{}")).toEqual({ type: "noUpdateAvailable" });
     }
   });
 
@@ -227,10 +248,10 @@ describe("buildManifestResponse", () => {
     expect(res._tag).toBe("Response");
     if (res._tag !== "Response") return;
 
-    const parts = parseMultipartMixed(res.headers["content-type"] ?? "", res.body);
+    const parts = parseMultipartMixed(res.headers["content-type"], res.body);
     const directivePart = parts?.[0];
     expect(directivePart?.headers.get("content-disposition")).toBe('form-data; name="directive"');
-    expect(JSON.parse(directivePart?.body ?? "{}")).toEqual({
+    expect(parseJson(directivePart?.body ?? "{}")).toEqual({
       type: "rollBackToEmbedded",
       parameters: { commitTime: SAMPLE_ROLLBACK.createdAt },
     });

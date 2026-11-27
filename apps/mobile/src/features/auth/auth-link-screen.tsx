@@ -1,10 +1,12 @@
 import { describeError } from "@kvitbit/ui-port/api";
+import * as Effect from "effect/Effect";
 import { router } from "expo-router";
 import { useEffect, useState } from "react";
 import { useI18n } from "../../i18n/i18n-provider";
 import { safeReturnTo } from "../../navigation/return-to";
 import { navigate } from "../../navigation/routes";
 import { Banner, Button, EmptyState, Loading, Screen } from "../../ui";
+import { forkFeatureEffect } from "../ui-effect";
 import { verifiedSignInHref } from "./auth-links";
 import type { AuthClient } from "./auth-port";
 import { useAuthClient } from "./use-auth-client";
@@ -25,37 +27,41 @@ export function AuthLinkScreen(props: {
   const [status, setStatus] = useState<"verifying" | "expired" | "error">("verifying");
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
+  const { kind, token } = props;
   useEffect(() => {
-    if (props.kind === "reset") {
-      navigate({ _tag: "ResetPassword", token: props.token }, { replace: true });
+    if (kind === "reset") {
+      navigate({ _tag: "ResetPassword", token }, { replace: true });
       return;
     }
-    if (props.token.length === 0) {
+    if (token.length === 0) {
       setStatus("expired");
       return;
     }
     let live = true;
-    void auth.verifyLink(props.kind, props.token).then((res) => {
-      if (!live) return;
-      if (res._tag === "Ok") {
-        router.replace(
-          (res.value === null ? verifiedSignInHref(returnTo) : (returnTo ?? "/")) as never,
-        );
-        return;
-      }
-      if (res._tag === "Err" && res.error._tag === "NotFound") {
-        setStatus("expired");
-        return;
-      }
-      if (res._tag === "Err") {
-        setStatus("error");
-        setErrorMessage(text(describeError(res.error).text));
-      }
-    });
+    forkFeatureEffect(
+      Effect.map(
+        Effect.promise(() => auth.verifyLink(kind, token)),
+        (res) => {
+          if (!live) return;
+          if (res._tag === "Ok") {
+            router.replace(res.value === null ? verifiedSignInHref(returnTo) : (returnTo ?? "/"));
+            return;
+          }
+          if (res._tag === "Err" && res.error._tag === "NotFound") {
+            setStatus("expired");
+            return;
+          }
+          if (res._tag === "Err") {
+            setStatus("error");
+            setErrorMessage(text(describeError(res.error).text));
+          }
+        },
+      ),
+    );
     return () => {
       live = false;
     };
-  }, [auth, props.kind, props.token, returnTo, text]);
+  }, [auth, kind, token, returnTo, text]);
 
   if (status === "verifying") {
     return (

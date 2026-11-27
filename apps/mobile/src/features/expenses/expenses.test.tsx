@@ -1,14 +1,17 @@
+// biome-ignore-all lint/style/useComponentExportOnlyModules: Test fixture components live with the assertions that render them.
+// biome-ignore-all lint/suspicious/noMisplacedAssertion: The screen helpers assert when a waited-for action or element is missing.
 import { afterAll, afterEach, beforeAll, describe, expect, mock, test } from "bun:test";
-import type {
+import {
   ExpenseId,
-  ExpenseInput,
-  ExpensePatch,
   WorkspaceId,
   WorkspaceSlug,
-  WorkspaceSummary,
+  type WorkspaceSummary,
 } from "@kvitbit/domain/contract";
 import { idempotencyHeaders, ifMatchHeaders, UiError, uuidV7 } from "@kvitbit/ui-port/api";
-import { Effect } from "effect";
+import * as Arr from "effect/Array";
+import * as Effect from "effect/Effect";
+import * as Rec from "effect/Record";
+import * as Str from "effect/String";
 import { act, type ReactElement } from "react";
 import {
   fakeTransfer,
@@ -17,7 +20,7 @@ import {
 import { ApiProvider, type ApiRunner, useApi, useRemote } from "../../runtime/api-runtime";
 import { SessionProvider, useSession } from "../../session/session-provider";
 import { tokenStore } from "../../session/token-store";
-import { clientRoot } from "../../testing/client-root";
+import { clientRoot, waitForRender } from "../../testing/client-root";
 import { allText, hostTree } from "../../testing/element-tree";
 import { eventually } from "../../testing/eventually";
 import { expoRouterStandIn } from "../../testing/expo-router-stand-in";
@@ -71,15 +74,15 @@ function SignedInFixture({ children }: { readonly children: ReactElement }) {
   return useSession().state.status === "signed-in" ? children : null;
 }
 
-const WS_ID = "01937c7a-0000-7000-8000-000000000001" as WorkspaceId;
-const EXP_1 = "01937c7a-0000-7000-8000-000000000101" as ExpenseId;
-const EXP_2 = "01937c7a-0000-7000-8000-000000000102" as ExpenseId;
+const WS_ID = WorkspaceId.make("01937c7a-0000-7000-8000-000000000001");
+const EXP_1 = ExpenseId.make("01937c7a-0000-7000-8000-000000000101");
+const EXP_2 = ExpenseId.make("01937c7a-0000-7000-8000-000000000102");
 const ATT_1 = "01937c7a-0000-7000-8000-000000000201";
 const PAY_1 = "01937c7a-0000-7000-8000-000000000301";
 
 const WORKSPACE: WorkspaceSummary = {
   id: WS_ID,
-  slug: "acme" as WorkspaceSlug,
+  slug: WorkspaceSlug.make("acme"),
   name: "Acme s.r.o.",
   role: "owner",
   memberCount: 1,
@@ -90,7 +93,7 @@ const WORKSPACE: WorkspaceSummary = {
 const sampleExpenseView = {
   id: EXP_1,
   revision: 3,
-  status: "complete",
+  status: "complete" as const,
   supplier: { contactId: null, name: "CloudHost s.r.o.", ico: "12345678", dic: "CZ12345678" },
   supplierDocumentNumber: "INV-2026-99",
   issuedOn: "2026-11-10",
@@ -142,36 +145,39 @@ const sampleExpenseView = {
 
 describe("expenses model", () => {
   test("filters by status, category and search text", () => {
-    const items = [
-      decodeExpenseSummary({
-        id: EXP_1,
-        revision: 1,
-        status: "complete",
-        supplierName: "CloudHost s.r.o.",
-        supplierDocumentNumber: "INV-99",
-        issuedOn: "2026-11-10",
-        total: "1210.00",
-        currency: "CZK",
-        category: "Hosting",
-        tags: ["infra"],
-        attachments: 1,
-        settlement: "unpaid",
-      }),
-      decodeExpenseSummary({
-        id: EXP_2,
-        revision: 1,
-        status: "incomplete",
-        supplierName: "Cafe Praha",
-        supplierDocumentNumber: null,
-        issuedOn: null,
-        total: "145.00",
-        currency: "CZK",
-        category: "Travel",
-        tags: [],
-        attachments: 1,
-        settlement: "unpaid",
-      }),
-    ];
+    const items = Arr.filter(
+      [
+        decodeExpenseSummary({
+          id: EXP_1,
+          revision: 1,
+          status: "complete",
+          supplierName: "CloudHost s.r.o.",
+          supplierDocumentNumber: "INV-99",
+          issuedOn: "2026-11-10",
+          total: "1210.00",
+          currency: "CZK",
+          category: "Hosting",
+          tags: ["infra"],
+          attachments: 1,
+          settlement: "unpaid",
+        }),
+        decodeExpenseSummary({
+          id: EXP_2,
+          revision: 1,
+          status: "incomplete",
+          supplierName: "Cafe Praha",
+          supplierDocumentNumber: null,
+          issuedOn: null,
+          total: "145.00",
+          currency: "CZK",
+          category: "Travel",
+          tags: [],
+          attachments: 1,
+          settlement: "unpaid",
+        }),
+      ],
+      (item) => item !== null,
+    );
 
     expect(extractCategories(items)).toEqual(["Hosting", "Travel"]);
     expect(
@@ -200,7 +206,7 @@ describe("expenses model", () => {
       vatRows: [{ id: "v1", treatment: "standard", base: "1000", vat: "210" }],
       tags: "infra, monthly",
     });
-    expect(Object.keys(valid.errors)).toHaveLength(0);
+    expect(Rec.keys(valid.errors)).toHaveLength(0);
     expect(valid.payload.total).toBe("1210.00");
     expect(valid.payload.deductibility).toEqual({ partial: 80 });
     expect(valid.payload.tags).toEqual(["infra", "monthly"]);
@@ -211,7 +217,7 @@ describe("expenses model", () => {
       issuedOn: "",
       total: "",
     });
-    expect(Object.keys(incomplete.errors)).toHaveLength(0);
+    expect(Rec.keys(incomplete.errors)).toHaveLength(0);
   });
 
   test("computes VAT breakdown difference, remaining amount, and attachment validation", () => {
@@ -220,7 +226,8 @@ describe("expenses model", () => {
         { id: "1", treatment: "standard", base: "1000", vat: "200" },
       ]),
     ).toBe(10);
-    expect(remainingAmount(decodeExpenseDetail(sampleExpenseView))).toBe("710.00");
+    const expense = decodeExpenseDetail(sampleExpenseView);
+    expect(expense === null ? null : remainingAmount(expense)).toBe("710.00");
     expect(validateAttachmentFile({ contentType: "application/pdf", size: 1024 })).toBeNull();
     expect(validateAttachmentFile({ contentType: "text/plain", size: 1024 })).toBe(
       "unsupported_type",
@@ -266,107 +273,103 @@ describe("expenses screens and API/transfer integration", () => {
     mock.module("../../ui", () => uiShim);
     server = Bun.serve({
       port: 0,
-      fetch: async (req) => {
-        const url = new URL(req.url);
-        requests.push({
-          method: req.method,
-          path: url.pathname + url.search,
-          idempotencyKey: req.headers.get("idempotency-key"),
-          ifMatch: req.headers.get("if-match"),
-        });
-        if (url.pathname.endsWith("/get-session")) {
-          return Response.json({
-            user: { id: "expenses-test-user", email: "expenses@example.test" },
+      fetch: (req) =>
+        Effect.sync(() => {
+          const url = new URL(req.url);
+          requests.push({
+            method: req.method,
+            path: url.pathname + url.search,
+            idempotencyKey: req.headers.get("idempotency-key"),
+            ifMatch: req.headers.get("if-match"),
           });
-        }
-        if (url.pathname.endsWith("/expenses") && req.method === "GET") {
-          return Response.json({
-            items: [
-              {
-                id: EXP_1,
-                revision: 3,
-                status: "complete",
-                supplierName: "CloudHost s.r.o.",
-                supplierDocumentNumber: "INV-2026-99",
-                issuedOn: "2026-11-10",
-                total: "1210.00",
-                currency: "CZK",
-                category: "Hosting",
-                tags: ["infra"],
-                attachments: 1,
-                settlement: "partially_paid",
-              },
-            ],
-            nextCursor: null,
-          });
-        }
-        if (url.pathname.endsWith("/expenses") && req.method === "POST") {
-          return Response.json({ ...sampleExpenseView, id: EXP_2 }, { status: 201 });
-        }
-        if (url.pathname.endsWith(`/expenses/${EXP_1}`) && req.method === "GET") {
-          return Response.json(
-            paymentConfirmed
-              ? {
-                  ...sampleExpenseView,
-                  supplier: { ...sampleExpenseView.supplier, name: "Refreshed supplier" },
-                }
-              : sampleExpenseView,
-          );
-        }
-        if (url.pathname.endsWith(`/expenses/${EXP_1}`) && req.method === "PATCH") {
-          return Response.json({ ...sampleExpenseView, revision: 4, note: "Updated note" });
-        }
-        if (url.pathname.endsWith(`/expenses/${EXP_1}/payments`) && req.method === "GET") {
-          return Response.json([
-            {
-              id: PAY_1,
-              revision: 1,
-              target: { expense: EXP_1 },
-              amount: { amount: "500.00", currency: "CZK" },
-              paidOn: "2026-11-12",
-              method: "bank_transfer",
-              note: paymentConfirmed ? "Refreshed payments" : "Deposit",
-              taxDocument: null,
-              createdAt: "2026-11-12T09:00:00Z",
-            },
-          ]);
-        }
-        if (url.pathname.endsWith("/payments") && req.method === "POST") {
-          if (losePaymentResponse) {
-            losePaymentResponse = false;
-            return new Response("{", {
-              status: 201,
-              headers: { "content-type": "application/json" },
+          if (Str.endsWith("/get-session")(url.pathname)) {
+            return Response.json({
+              user: { id: "expenses-test-user", email: "expenses@example.test" },
             });
           }
-          paymentConfirmed = true;
-          return Response.json(
-            {
-              payment: {
-                id: "01937c7a-0000-7000-8000-000000000302",
+          if (Str.endsWith("/expenses")(url.pathname) && req.method === "GET") {
+            return Response.json({
+              items: [
+                {
+                  id: EXP_1,
+                  revision: 3,
+                  status: "complete",
+                  supplierName: "CloudHost s.r.o.",
+                  supplierDocumentNumber: "INV-2026-99",
+                  issuedOn: "2026-11-10",
+                  total: "1210.00",
+                  currency: "CZK",
+                  category: "Hosting",
+                  tags: ["infra"],
+                  attachments: 1,
+                  settlement: "partially_paid",
+                },
+              ],
+              nextCursor: null,
+            });
+          }
+          if (Str.endsWith("/expenses")(url.pathname) && req.method === "POST") {
+            return Response.json({ ...sampleExpenseView, id: EXP_2 }, { status: 201 });
+          }
+          if (Str.endsWith(`/expenses/${EXP_1}`)(url.pathname) && req.method === "GET") {
+            return Response.json(
+              paymentConfirmed
+                ? {
+                    ...sampleExpenseView,
+                    supplier: { ...sampleExpenseView.supplier, name: "Refreshed supplier" },
+                  }
+                : sampleExpenseView,
+            );
+          }
+          if (Str.endsWith(`/expenses/${EXP_1}`)(url.pathname) && req.method === "PATCH") {
+            return Response.json({ ...sampleExpenseView, revision: 4, note: "Updated note" });
+          }
+          if (Str.endsWith(`/expenses/${EXP_1}/payments`)(url.pathname) && req.method === "GET") {
+            return Response.json([
+              {
+                id: PAY_1,
                 revision: 1,
                 target: { expense: EXP_1 },
-                amount: { amount: "710.00", currency: "CZK" },
-                paidOn: "2026-11-24",
+                amount: { amount: "500.00", currency: "CZK" },
+                paidOn: "2026-11-12",
                 method: "bank_transfer",
-                note: null,
+                note: paymentConfirmed ? "Refreshed payments" : "Deposit",
                 taxDocument: null,
-                createdAt: "2026-11-24T10:00:00Z",
+                createdAt: "2026-11-12T09:00:00Z",
               },
-              settlement: "paid",
-              issued: [],
-            },
-            { status: 201 },
-          );
-        }
-        return Response.json({ _tag: "NotFound", entity: "Expense" }, { status: 404 });
-      },
+            ]);
+          }
+          if (Str.endsWith("/payments")(url.pathname) && req.method === "POST") {
+            if (losePaymentResponse) {
+              losePaymentResponse = false;
+              return new Response("{", {
+                status: 201,
+                headers: { "content-type": "application/json" },
+              });
+            }
+            paymentConfirmed = true;
+            return Response.json(
+              {
+                payment: {
+                  id: "01937c7a-0000-7000-8000-000000000302",
+                  revision: 1,
+                  target: { expense: EXP_1 },
+                  amount: { amount: "710.00", currency: "CZK" },
+                  paidOn: "2026-11-24",
+                  method: "bank_transfer",
+                  note: null,
+                  taxDocument: null,
+                  createdAt: "2026-11-24T10:00:00Z",
+                },
+                settlement: "paid",
+                issued: [],
+              },
+              { status: 201 },
+            );
+          }
+          return Response.json({ _tag: "NotFound", entity: "Expense" }, { status: 404 });
+        }).pipe(Effect.runPromise),
     });
-  });
-
-  afterAll(() => {
-    server.stop(true);
-    mock.module("../../ui", () => realUi);
   });
 
   afterEach(async () => {
@@ -377,30 +380,31 @@ describe("expenses screens and API/transfer integration", () => {
     await tokenStore.clear();
   });
 
-  const within = (node: ReactElement, workspace = WORKSPACE, signIn = false) => (
-    <TestProviders overlay={recordedOverlay()}>
-      <SessionProvider origin={server.url.origin}>
-        <ApiProvider token="tok" origin={server.url.origin}>
-          <WorkspaceProvider
-            workspace={workspace}
-            workspaces={[workspace]}
-            reload={() => undefined}
-          >
-            {signIn ? <SignedInFixture>{node}</SignedInFixture> : node}
-          </WorkspaceProvider>
-        </ApiProvider>
-      </SessionProvider>
-    </TestProviders>
-  );
+  afterAll(() => {
+    server.stop(true);
+    mock.module("../../ui", () => realUi);
+  });
 
-  const waitForScreen = async (condition: () => boolean) => {
-    for (let attempt = 0; attempt < 100 && !condition(); attempt++) {
-      await act(async () => {
-        await Bun.sleep(5);
-      });
-    }
-    expect(condition()).toBe(true);
+  const within = (node: ReactElement, workspace = WORKSPACE, signIn = false) => {
+    const content = signIn ? <SignedInFixture>{node}</SignedInFixture> : node;
+    return (
+      <TestProviders overlay={recordedOverlay()}>
+        <SessionProvider origin={server.url.origin}>
+          <ApiProvider token="tok" origin={server.url.origin}>
+            <WorkspaceProvider
+              workspace={workspace}
+              workspaces={[workspace]}
+              reload={() => undefined}
+            >
+              {content}
+            </WorkspaceProvider>
+          </ApiProvider>
+        </SessionProvider>
+      </TestProviders>
+    );
   };
+
+  const waitForScreen = (check: () => boolean) => waitForRender({ check, attempts: 100 });
 
   const element = (id: string) =>
     root.container().querySelector<HTMLElement>(`[data-testid="${id}"]`);
@@ -418,6 +422,7 @@ describe("expenses screens and API/transfer integration", () => {
     expect(listText).toContain("Incomplete");
 
     const editorText = allText(
+      // biome-ignore lint/correctness/useUniqueElementIds: This prop selects the new-expense route.
       hostTree(<ExpenseDetailScreen id="new" initialMode="edit" />, within),
     );
     expect(editorText).toContain("New expense");
@@ -433,7 +438,7 @@ describe("expenses screens and API/transfer integration", () => {
     };
     await tokenStore.write("expenses-test-session");
     await root.render(within(<ExpenseCaptureScreen picker={fakePicker} />, WORKSPACE, true));
-    await waitForScreen(() => root.container().textContent?.includes("Choose file") === true);
+    await waitForScreen(() => Str.includes("Choose file")(root.container().textContent ?? ""));
     const captureText = root.container().textContent ?? "";
     expect(captureText).toContain("Capture receipt");
     expect(captureText).toContain("Take photo");
@@ -467,16 +472,19 @@ describe("expenses screens and API/transfer integration", () => {
     await waitForScreen(() => element("expense-record-payment-toggle") !== null);
     await press("expense-record-payment-toggle");
     await press("expense-record-payment-submit");
-    await waitForScreen(() => root.container().textContent?.includes("Please try again") === true);
+    await waitForScreen(() => Str.includes("Please try again")(root.container().textContent ?? ""));
     await press("expense-record-payment-submit");
     await waitForScreen(() => {
       const content = root.container().textContent ?? "";
-      return content.includes("Refreshed supplier") && content.includes("Refreshed payments");
+      return (
+        Str.includes("Refreshed supplier")(content) && Str.includes("Refreshed payments")(content)
+      );
     });
     expect(element("expense-record-payment-submit")).toBeNull();
 
-    const attempts = requests.filter(
-      ({ path, method }) => path.endsWith("/payments") && method === "POST",
+    const attempts = Arr.filter(
+      requests,
+      ({ path, method }) => Str.endsWith("/payments")(path) && method === "POST",
     );
     expect(attempts).toHaveLength(2);
     expect(attempts[0]?.idempotencyKey).toBeTruthy();
@@ -490,28 +498,27 @@ describe("expenses screens and API/transfer integration", () => {
     transferFake.opened.length = 0;
     requests.length = 0;
 
-    let apiRef: ApiRunner | null = null;
-    let transferRef: ReturnType<typeof useTransfer> | null = null;
+    interface ClientRefs {
+      current?: { readonly api: ApiRunner; readonly transfer: ReturnType<typeof useTransfer> };
+    }
+    const clients: ClientRefs = {};
     let loadedCount = 0;
 
     await root.render(
       within(
         <ExpensesProbe
           onReady={(a, tr, count) => {
-            apiRef = a;
-            transferRef = tr;
+            clients.current = { api: a, transfer: tr };
             loadedCount = count;
           }}
         />,
       ),
     );
-    await Effect.runPromise(
-      eventually(() => loadedCount === 1 && apiRef !== null && transferRef !== null),
-    );
+    await Effect.runPromise(eventually(() => loadedCount === 1 && clients.current !== undefined));
     expect(loadedCount).toBe(1);
 
-    const api = apiRef as unknown as ApiRunner;
-    const transfer = transferRef as unknown as ReturnType<typeof useTransfer>;
+    if (clients.current === undefined) throw new Error("Expense client did not mount");
+    const { api, transfer } = clients.current;
 
     // Edit with If-Match
     const editPayload = buildExpensePayload({
@@ -525,14 +532,12 @@ describe("expenses screens and API/transfer integration", () => {
       c.expenses.edit({
         params: { workspaceId: WS_ID, expenseId: EXP_1 },
         headers: ifMatchHeaders(3),
-        payload: editPayload.payload as ExpensePatch,
+        payload: editPayload.payload,
       }),
     );
     expect(edited._tag).toBe("Ok");
-    if (edited._tag === "Ok") {
-      expect(decodeExpenseDetail(edited.value).revision).toBe(4);
-    }
-    expect(requests.some((r) => r.method === "PATCH" && r.ifMatch === '"3"')).toBe(true);
+    expect(edited._tag === "Ok" ? decodeExpenseDetail(edited.value)?.revision : undefined).toBe(4);
+    expect(Arr.some(requests, (r) => r.method === "PATCH" && r.ifMatch === '"3"')).toBe(true);
 
     // Record expense & upload receipt via Transfer
     const key = await Effect.runPromise(uuidV7);
@@ -540,11 +545,11 @@ describe("expenses screens and API/transfer integration", () => {
       c.expenses.record({
         params: { workspaceId: WS_ID },
         headers: idempotencyHeaders(key),
-        payload: { status: "incomplete", currency: "CZK" } as ExpenseInput,
+        payload: { status: "incomplete", currency: "CZK" },
       }),
     );
     expect(created._tag).toBe("Ok");
-    expect(requests.some((r) => r.method === "POST" && r.idempotencyKey === key)).toBe(true);
+    expect(Arr.some(requests, (r) => r.method === "POST" && r.idempotencyKey === key)).toBe(true);
 
     const up = await transfer.upload({
       path: `/workspaces/${WS_ID}/expenses/${EXP_2}/attachments`,
@@ -577,9 +582,9 @@ describe("expenses screens and API/transfer integration", () => {
       c.payments.listForExpense({ params: { workspaceId: WS_ID, expenseId: EXP_1 } }),
     );
     expect(paymentsRes._tag).toBe("Ok");
-    if (paymentsRes._tag === "Ok") {
-      expect(decodePayment(paymentsRes.value[0])?.note).toBe("Deposit");
-    }
+    expect(paymentsRes._tag === "Ok" ? decodePayment(paymentsRes.value[0])?.note : undefined).toBe(
+      "Deposit",
+    );
 
     const failTransfer = fakeTransfer({
       upload: () => ({ _tag: "Err", error: UiError.offline }),

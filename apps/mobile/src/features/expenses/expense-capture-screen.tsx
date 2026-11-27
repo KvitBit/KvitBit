@@ -1,5 +1,8 @@
 import type { ExpenseId } from "@kvitbit/domain/contract";
 import { describeError } from "@kvitbit/ui-port/api";
+import * as Arr from "effect/Array";
+import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
 import {
   Camera,
   FileText,
@@ -12,6 +15,7 @@ import { useEffect, useRef, useState } from "react";
 import { StyleSheet, View } from "react-native";
 import { useI18n } from "../../i18n/i18n-provider";
 import { navigate } from "../../navigation/routes";
+import { fromMobilePromise } from "../../runtime/request-intent";
 import {
   Badge,
   Banner,
@@ -26,6 +30,8 @@ import {
   TextField,
   useOverlay,
 } from "../../ui";
+import { runFeatureEffect, runFeatureSync } from "../ui-effect";
+import { encodeCaptureJournal } from "./capture-journal";
 import { defaultReceiptPicker, type PickerOutcome, type ReceiptPicker } from "./capture-picker";
 import {
   type CaptureAccess,
@@ -33,8 +39,9 @@ import {
   type CaptureJob,
   canRetryCapture,
 } from "./capture-queue";
+import { captureQueue } from "./capture-queue-instance";
 import { COMMON_CURRENCIES, formatBytes } from "./model";
-import { captureQueue, useCaptureAccess, useCaptureNetwork } from "./use-expense-capture";
+import { useCaptureAccess, useCaptureNetwork } from "./use-expense-capture";
 
 interface CaptureScreenProps {
   readonly picker?: ReceiptPicker;
@@ -57,7 +64,14 @@ export function ExpenseCaptureScreen(props: CaptureScreenProps) {
   const { principalId, workspaceId } = current.scope;
   return (
     <CaptureForm
-      key={JSON.stringify([principalId, workspaceId, props.targetExpenseId, props.captureId])}
+      key={runFeatureSync(
+        encodeCaptureJournal([
+          principalId,
+          workspaceId,
+          props.targetExpenseId ?? null,
+          props.captureId ?? null,
+        ]),
+      )}
       {...props}
       access={current}
     />
@@ -77,11 +91,14 @@ function CaptureForm(props: CaptureScreenProps & { readonly access: CaptureAcces
   const [submitting, setSubmitting] = useState(false);
   const busy = useRef(false);
   const [progress, setProgress] = useState<{ key: string; percent: number } | null>(null);
-  const job = jobs.find(
-    (item) =>
-      item.targetExpenseId === targetExpenseId &&
-      item.done !== true &&
-      (captureId === undefined || item.key === captureId),
+  const job = Option.getOrUndefined(
+    Arr.findFirst(
+      jobs,
+      (item) =>
+        item.targetExpenseId === targetExpenseId &&
+        item.done !== true &&
+        (captureId === undefined || item.key === captureId),
+    ),
   );
   const staged = job?.files ?? [];
   const failure = job?.submission?.failure;
@@ -90,23 +107,28 @@ function CaptureForm(props: CaptureScreenProps & { readonly access: CaptureAcces
 
   useEffect(() => {
     let active = true;
-    async function refresh() {
-      try {
-        const loaded = await captureQueue.load(access.scope);
-        if (active) setJobs(loaded);
-      } catch {
-        if (active) setBannerError(t("error.unknown"));
-      }
-    }
+    const refresh = () =>
+      runFeatureEffect(
+        fromMobilePromise(() => captureQueue.load(access.scope)).pipe(
+          Effect.match({
+            onSuccess: (loaded) => {
+              if (active) setJobs(loaded);
+            },
+            onFailure: () => {
+              if (active) setBannerError(t("error.unknown"));
+            },
+          }),
+        ),
+      );
     const unsubscribe = captureQueue.subscribe((scope) => {
       if (
         scope.workspaceId === access.scope.workspaceId &&
         scope.principalId === access.scope.principalId
       ) {
-        void refresh();
+        refresh();
       }
     });
-    void refresh();
+    refresh();
     return () => {
       active = false;
       unsubscribe();
@@ -114,15 +136,15 @@ function CaptureForm(props: CaptureScreenProps & { readonly access: CaptureAcces
   }, [access, t]);
 
   function updateField(key: keyof CaptureFields, value: string) {
-    if (!submitted && !busy.current) setFields((previous) => ({ ...previous, [key]: value }));
+    if (!(submitted || busy.current)) setFields((previous) => ({ ...previous, [key]: value }));
   }
 
-  async function pick(open: () => Promise<PickerOutcome>) {
+  const pick = Effect.fn("ExpenseCapture.pick")(function* (open: () => Promise<PickerOutcome>) {
     if (!access.canWrite() || submitted || busy.current) return;
     busy.current = true;
     setBannerError(null);
-    try {
-      const outcome = await open();
+    yield* Effect.gen(function* () {
+      const outcome = yield* fromMobilePromise(open);
       if (!access.canWrite() || outcome._tag === "Cancelled") return;
       if (outcome._tag === "PermissionDenied") {
         setBannerError(t("expenses.capture.cameraDenied"));
@@ -132,7 +154,9 @@ function CaptureForm(props: CaptureScreenProps & { readonly access: CaptureAcces
         setBannerError(outcome.message);
         return;
       }
-      const result = await captureQueue.stage(access, targetExpenseId, outcome.files);
+      const result = yield* fromMobilePromise(() =>
+        captureQueue.stage(access, targetExpenseId, outcome.files),
+      );
       if (captureId !== undefined && result.job !== undefined) setCaptureId(result.job.key);
       for (const issue of result.issues) {
         if (issue === "too_large") {
@@ -147,60 +171,72 @@ function CaptureForm(props: CaptureScreenProps & { readonly access: CaptureAcces
           setBannerError(t("error.unknown"));
         }
       }
-    } catch {
-      setBannerError(t("error.unknown"));
-    } finally {
-      busy.current = false;
-    }
-  }
+    }).pipe(
+      Effect.orElseSucceed(() => setBannerError(t("error.unknown"))),
+      Effect.ensuring(
+        Effect.sync(() => {
+          busy.current = false;
+        }),
+      ),
+    );
+  }, runFeatureEffect);
 
-  async function uploadAll() {
+  const uploadAll = Effect.fn("ExpenseCapture.uploadAll")(function* () {
     if (!access.canWrite() || busy.current || job === undefined || !canRetryCapture(job)) return;
     busy.current = true;
     setBannerError(null);
     setSubmitting(true);
-    try {
-      const result = await captureQueue.submit(access, network, job.key, fields, (key, value) =>
-        setProgress({ key, percent: Math.round(value * 100) }),
+    yield* Effect.gen(function* () {
+      const result = yield* fromMobilePromise(() =>
+        captureQueue.submit(access, network, job.key, fields, (key, value) =>
+          setProgress({ key, percent: Math.round(value * 100) }),
+        ),
       );
       if (result?.done === true && result.expenseId !== null && access.canWrite()) {
-        const rejected = result.files.some((receipt) => receipt.result?.kind === "rejected");
+        const rejected = Arr.some(result.files, (receipt) => receipt.result?.kind === "rejected");
         overlay.toast(t(rejected ? "error.invalid" : "common.toast.saved"));
         navigate(
           { _tag: "Expense", ws: access.scope.workspaceSlug, id: result.expenseId, mode: "edit" },
           { replace: true },
         );
       }
-    } catch {
-      setBannerError(t("error.unknown"));
-    } finally {
-      setProgress(null);
-      setSubmitting(false);
-      busy.current = false;
-    }
-  }
+    }).pipe(
+      Effect.orElseSucceed(() => setBannerError(t("error.unknown"))),
+      Effect.ensuring(
+        Effect.sync(() => {
+          setProgress(null);
+          setSubmitting(false);
+          busy.current = false;
+        }),
+      ),
+    );
+  }, runFeatureEffect);
 
-  async function discardJob() {
+  const discardJob = Effect.fn("ExpenseCapture.discard")(function* () {
     if (!access.canWrite() || job === undefined || busy.current) return;
-    const confirmed = await overlay.confirm({
-      title: local({ cs: "Odstranit místní kopie?", en: "Discard local copies?" }),
-      body: local({
-        cs: "Přijaté účtenky budou z tohoto zařízení odstraněny.",
-        en: "The queued receipts will be removed from this device.",
+    const confirmed = yield* fromMobilePromise(() =>
+      overlay.confirm({
+        title: local({ cs: "Odstranit místní kopie?", en: "Discard local copies?" }),
+        body: local({
+          cs: "Přijaté účtenky budou z tohoto zařízení odstraněny.",
+          en: "The queued receipts will be removed from this device.",
+        }),
+        confirmLabel: t("common.action.discard"),
+        cancelLabel: t("common.action.cancel"),
+        destructive: true,
       }),
-      confirmLabel: t("common.action.discard"),
-      cancelLabel: t("common.action.cancel"),
-      destructive: true,
-    });
-    if (!confirmed || !access.canWrite()) return;
-    try {
-      await captureQueue.discard(access, job.key);
-      setCaptureId(undefined);
-      setBannerError(null);
-    } catch {
-      setBannerError(t("error.unknown"));
-    }
-  }
+    );
+    if (!(confirmed && access.canWrite())) return;
+    yield* fromMobilePromise(() => captureQueue.discard(access, job.key)).pipe(
+      Effect.match({
+        onFailure: () => setBannerError(t("error.unknown")),
+        onSuccess: () => {
+          setCaptureId(undefined);
+          setBannerError(null);
+        },
+      }),
+    );
+  }, runFeatureEffect);
 
   const shownError =
     bannerError ??
@@ -222,14 +258,14 @@ function CaptureForm(props: CaptureScreenProps & { readonly access: CaptureAcces
           label={failure === undefined ? t("common.action.upload") : t("common.action.retry")}
           busy={submitting}
           disabled={job === undefined || !canRetryCapture(job)}
-          onPress={() => void uploadAll()}
+          onPress={() => uploadAll()}
           testID="capture-upload-btn"
         />
       }
     >
       {shownError === null ? null : <Banner text={shownError} />}
       {failure?.kind === "blocked" || failure?.kind === "expired" ? (
-        <Button kind="text" label={t("common.action.discard")} onPress={() => void discardJob()} />
+        <Button kind="text" label={t("common.action.discard")} onPress={() => discardJob()} />
       ) : null}
 
       {submitted ? null : (
@@ -241,21 +277,21 @@ function CaptureForm(props: CaptureScreenProps & { readonly access: CaptureAcces
             <Button
               icon={Camera}
               label={t("expenses.capture.takePhoto")}
-              onPress={() => void pick(picker.takePhoto)}
+              onPress={() => pick(picker.takePhoto)}
               testID="capture-camera-btn"
             />
             <Button
               kind="tonal"
               icon={ImageIcon}
               label={t("expenses.capture.gallery")}
-              onPress={() => void pick(picker.pickFromGallery)}
+              onPress={() => pick(picker.pickFromGallery)}
               testID="capture-gallery-btn"
             />
             <Button
               kind="outlined"
               icon={FileText}
               label={t("expenses.capture.files")}
-              onPress={() => void pick(picker.pickDocument)}
+              onPress={() => pick(picker.pickDocument)}
               testID="capture-file-btn"
             />
           </View>
@@ -264,7 +300,7 @@ function CaptureForm(props: CaptureScreenProps & { readonly access: CaptureAcces
 
       {job === undefined ? null : (
         <Section title={t("expenses.capture.pages", { count: staged.length })}>
-          {staged.map((item) => {
+          {Arr.map(staged, (item) => {
             const active = progress?.key === item.key;
             const state =
               item.result?.kind === "uploaded"
@@ -296,7 +332,10 @@ function CaptureForm(props: CaptureScreenProps & { readonly access: CaptureAcces
                         {(() => {
                           const view = describeError(item.result.error);
                           return view.issues.length > 0
-                            ? view.issues.map((issue) => text(issue.text)).join(" · ")
+                            ? Arr.join(
+                                Arr.map(view.issues, (issue) => text(issue.text)),
+                                " · ",
+                              )
                             : text(view.text);
                         })()}
                       </Text>
@@ -312,7 +351,7 @@ function CaptureForm(props: CaptureScreenProps & { readonly access: CaptureAcces
                       label={t("common.action.remove")}
                       onPress={() => {
                         if (!access.canWrite() || busy.current) return;
-                        void captureQueue
+                        captureQueue
                           .remove(access, job.key, item.key)
                           .catch(() => setBannerError(t("error.unknown")));
                       }}
@@ -339,7 +378,7 @@ function CaptureForm(props: CaptureScreenProps & { readonly access: CaptureAcces
             <SegmentedChoice
               label={t("common.field.currency")}
               value={visibleFields.currency}
-              choices={COMMON_CURRENCIES.map((c) => ({ value: c, label: c }))}
+              choices={Arr.map(COMMON_CURRENCIES, (c) => ({ value: c, label: c }))}
               onChange={(value) => updateField("currency", value)}
             />
           )}

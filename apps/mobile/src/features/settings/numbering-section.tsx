@@ -4,6 +4,9 @@ import type {
   NumberingSeriesView,
 } from "@kvitbit/domain/contract";
 import { idempotencyHeaders, inWorkspace } from "@kvitbit/ui-port/api";
+import * as Arr from "effect/Array";
+import * as Effect from "effect/Effect";
+import * as Str from "effect/String";
 import { Plus } from "lucide-react-native";
 import { useState } from "react";
 import { StyleSheet, View } from "react-native";
@@ -26,6 +29,8 @@ import {
   useOverlay,
 } from "../../ui";
 import { useWorkspace } from "../../workspace/workspace-provider";
+import { requestOwner } from "../request-owner";
+import { forkFeatureEffect } from "../ui-effect";
 import { hasCounterToken, previewSeriesNumbers } from "./numbering-preview";
 import { canEditWorkspaceSettings } from "./permissions";
 import {
@@ -97,28 +102,35 @@ export function NumberingSection() {
     setErrorState(noFormError);
   };
 
-  const handleSave = async () => {
-    if (!editable || draft === null || session.status !== "signed-in" || saving) return;
+  const handleSave = Effect.fn("numbering-section.handleSave")(function* () {
+    if (!editable || draft === null || session.status !== "signed-in" || saving === true) return;
     if (!hasCounterToken(draft.pattern)) return;
-    const parsedNext = Number.parseInt(draft.nextNumber.trim(), 10);
+    const parsedNext = Number.parseInt(Str.trim(draft.nextNumber), 10);
+    const owner = requestOwner([api.origin, session.user.id, workspace.id]);
+    if (owner === null) return;
     setSaving(true);
     setErrorState(noFormError);
 
-    const payload = {
+    interface SeriesInput {
+      kind: DocumentKind;
+      name: string;
+      pattern: string;
+      nextNumber?: number;
+      isDefault: boolean;
+    }
+    const payload: SeriesInput = {
       kind: draft.kind,
-      name: draft.name.trim(),
-      pattern: draft.pattern.trim(),
-      ...(Number.isInteger(parsedNext) && parsedNext >= 1 ? { nextNumber: parsedNext } : {}),
+      name: Str.trim(draft.name),
+      pattern: Str.trim(draft.pattern),
       isDefault: draft.isDefault,
     };
 
+    if (Number.isInteger(parsedNext) && parsedNext >= 1) payload.nextNumber = parsedNext;
+    const seriesId = draft.id;
     const result =
-      draft.id === undefined
-        ? await runRequestIntent(
-            JSON.stringify([api.origin, session.user.id, workspace.id]),
-            "workspace/createSeries",
-            payload,
-            (key) =>
+      seriesId === undefined
+        ? yield* Effect.promise(() =>
+            runRequestIntent(owner, "workspace/createSeries", payload, (key) =>
               api.run((client) =>
                 client.workspace.createSeries({
                   params: inWorkspace(workspace.id),
@@ -126,12 +138,15 @@ export function NumberingSection() {
                   payload,
                 }),
               ),
+            ),
           )
-        : await api.run((client) =>
-            client.workspace.updateSeries({
-              params: inWorkspace(workspace.id, { seriesId: draft.id as NumberingSeriesId }),
-              payload,
-            }),
+        : yield* Effect.promise(() =>
+            api.run((client) =>
+              client.workspace.updateSeries({
+                params: inWorkspace(workspace.id, { seriesId }),
+                payload,
+              }),
+            ),
           );
     setSaving(false);
     if (result._tag === "Ok") {
@@ -141,14 +156,14 @@ export function NumberingSection() {
     } else {
       setErrorState(formErrorFrom(result.error, i18n));
     }
-  };
+  });
 
   const preview =
     draft === null
       ? null
       : previewSeriesNumbers(
-          draft.pattern.trim(),
-          Math.max(1, Number.parseInt(draft.nextNumber.trim(), 10) || 1),
+          Str.trim(draft.pattern),
+          Math.max(1, Number.parseInt(Str.trim(draft.nextNumber), 10) || 1),
         );
 
   return (
@@ -170,8 +185,8 @@ export function NumberingSection() {
             </View>
           ) : null}
 
-          {DOCUMENT_KINDS.map((kind) => {
-            const items = allSeries.filter((s) => s.kind === kind);
+          {Arr.map(DOCUMENT_KINDS, (kind) => {
+            const items = Arr.filter(allSeries, (s) => s.kind === kind);
             if (items.length === 0) return null;
             return (
               <Section
@@ -180,7 +195,7 @@ export function NumberingSection() {
                   kind: t(`enum.documentKindPlural.${kind}`),
                 })}
               >
-                {items.map((series) => (
+                {Arr.map(items, (series) => (
                   <Card key={series.id}>
                     <View style={styles.headerRow}>
                       <View style={styles.flex}>
@@ -216,7 +231,7 @@ export function NumberingSection() {
                 <SegmentedChoice<DocumentKind>
                   label={t("common.field.type")}
                   value={draft.kind}
-                  choices={DOCUMENT_KINDS.map((kind) => ({
+                  choices={Arr.map(DOCUMENT_KINDS, (kind) => ({
                     value: kind,
                     label: t(`enum.documentKind.${kind}`),
                   }))}
@@ -244,7 +259,7 @@ export function NumberingSection() {
                   onChangeText={(pattern) => setDraft({ ...draft, pattern })}
                 />
                 <View style={styles.row}>
-                  {PATTERN_TOKENS.map((tok) => (
+                  {Arr.map(PATTERN_TOKENS, (tok) => (
                     <Button
                       key={tok}
                       kind="outlined"
@@ -267,7 +282,7 @@ export function NumberingSection() {
                 />
                 {preview === null ? null : (
                   <Text variant="meta" color="onSurfaceVariant" numeric>
-                    {t("settings.numbering.nextNumbers", { numbers: preview.join(", ") })}
+                    {t("settings.numbering.nextNumbers", { numbers: Arr.join(preview, ", ") })}
                   </Text>
                 )}
                 <SwitchRow
@@ -281,8 +296,8 @@ export function NumberingSection() {
                     kind="filled"
                     label={t("common.action.save")}
                     busy={saving}
-                    disabled={draft.name.trim() === "" || !hasCounterToken(draft.pattern)}
-                    onPress={() => void handleSave()}
+                    disabled={Str.trim(draft.name) === "" || !hasCounterToken(draft.pattern)}
+                    onPress={() => forkFeatureEffect(handleSave())}
                   />
                   <Button
                     kind="text"

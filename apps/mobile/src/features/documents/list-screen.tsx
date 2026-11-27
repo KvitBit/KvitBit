@@ -2,6 +2,7 @@
  * Documents list screen (`app/w/[ws]/documents/index.tsx`): search, kind/status/settlement/overdue
  * filters, quick create (invoice, proforma, credit note), badges, and tabular currency amounts.
  */
+
 import type {
   DocumentKind,
   DocumentSettlement,
@@ -12,7 +13,10 @@ import { cleanFilters, describeError, filterHash } from "@kvitbit/ui-port/api";
 import { formatDate, formatMoney } from "@kvitbit/ui-port/format";
 import { enumKey } from "@kvitbit/ui-port/i18n";
 import { DocumentListQuery } from "@kvitbit/ui-port/view-models";
-import { Schema } from "effect";
+import * as Arr from "effect/Array";
+import * as EffectRecord from "effect/Record";
+import * as Schema from "effect/Schema";
+import * as Str from "effect/String";
 import { router, useLocalSearchParams } from "expo-router";
 import { FilePlus2, Lock, Plus, Search } from "lucide-react-native";
 import { useMemo, useState } from "react";
@@ -91,7 +95,7 @@ function DocumentsList({
   );
 
   const canWrite = workspace.role !== "accountant";
-  const trimmedSearch = search.trim();
+  const trimmedSearch = Str.trim(search);
 
   const query = useMemo<DocumentListQuery>(
     () =>
@@ -105,8 +109,9 @@ function DocumentsList({
       }),
     [routeFilters, trimmedSearch, kind, status, settlement, overdue],
   );
-  const list = useDocumentPages(workspace.id, query);
-  const hasFilters = Object.keys(query).length > 0;
+  const list = useDocumentPages({ workspaceId: workspace.id, query });
+  const hasFilters =
+    EffectRecord.keys<string, DocumentListQuery[keyof DocumentListQuery]>(query).length > 0;
 
   const clearFilters = () => {
     setSearch("");
@@ -146,7 +151,7 @@ function DocumentsList({
 
   const openNew = (newKind: "invoice" | "proforma" | "credit_note") => {
     if (newKind === "credit_note") {
-      router.push(`/w/${workspace.slug}/documents/new/credit_note` as never);
+      router.push(`/w/${workspace.slug}/documents/new/credit_note`);
       return;
     }
     navigate({ _tag: "DocumentNew", ws: workspace.slug, kind: newKind });
@@ -268,7 +273,7 @@ function DocumentsList({
           return (
             <View style={styles.list}>
               <Card style={styles.listCard}>
-                {items.map((doc) => {
+                {Arr.map(items, (doc) => {
                   const statusB = documentStatusBadge(doc.status, t);
                   const settleB = settlementBadge(doc.settlement, doc.overdue, t);
                   const kindB = kindBadge(doc.kind, t);

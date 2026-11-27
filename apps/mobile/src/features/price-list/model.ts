@@ -1,11 +1,19 @@
-import type {
+import type { WorkspaceId } from "@kvitbit/domain/contract";
+import {
   CurrencyCode,
   PriceListItemId,
   PriceListItemInput,
-  PriceListItemView,
+  type PriceListItemView,
   VatTreatment,
 } from "@kvitbit/domain/contract";
-import { BigDecimal, Option } from "effect";
+import { inWorkspace, type KvitbitApiClient } from "@kvitbit/ui-port/api";
+import * as Arr from "effect/Array";
+import * as BigDecimal from "effect/BigDecimal";
+import * as Effect from "effect/Effect";
+import * as Fn from "effect/Function";
+import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
+import * as Str from "effect/String";
 
 export interface PriceListItemRecord {
   readonly id: PriceListItemId;
@@ -33,10 +41,10 @@ export interface PriceListFormState {
 export type PriceListFormErrorCode = "name_required" | "price_invalid" | "currency_invalid";
 
 export const PRICE_LIST_CURRENCIES: ReadonlyArray<CurrencyCode> = [
-  "CZK" as CurrencyCode,
-  "EUR" as CurrencyCode,
-  "USD" as CurrencyCode,
-  "GBP" as CurrencyCode,
+  CurrencyCode.make("CZK"),
+  CurrencyCode.make("EUR"),
+  CurrencyCode.make("USD"),
+  CurrencyCode.make("GBP"),
 ];
 
 export const VAT_TREATMENTS: ReadonlyArray<VatTreatment> = [
@@ -47,81 +55,64 @@ export const VAT_TREATMENTS: ReadonlyArray<VatTreatment> = [
   "outside_scope",
 ];
 
-const VAT_SET = new Set<string>(VAT_TREATMENTS);
 const DECIMAL_RE = /^-?\d+(\.\d+)?$/;
 const CURRENCY_RE = /^[A-Z]{3}$/;
 
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-  typeof value === "object" && value !== null && !Array.isArray(value);
+const decodeItem = Schema.decodeUnknownOption(
+  Schema.Struct({
+    id: PriceListItemId,
+    name: Schema.String,
+    description: Schema.optional(Schema.Unknown),
+    unit: Schema.optional(Schema.Unknown),
+    unitPrice: Schema.Union([Schema.BigDecimal, Schema.BigDecimalFromString, Schema.Finite]),
+    currency: Schema.String.check(Schema.isPattern(/^[a-z]{3}$/i)),
+    vat: Schema.optional(Schema.Unknown),
+    archived: Schema.optional(Schema.Unknown),
+    revision: Schema.Finite,
+  }),
+);
+const decodeOptionalText = Fn.flow(
+  Schema.decodeUnknownOption(Schema.String),
+  Option.filter((value) => Str.trim(value) !== ""),
+  Option.getOrNull,
+);
+const decodeVat = Schema.decodeUnknownOption(VatTreatment);
 
-const asNullableString = (value: unknown): string | null =>
-  typeof value === "string" && value.trim() !== "" ? value : null;
-
-const toBigDecimal = (value: unknown): BigDecimal.BigDecimal | null => {
-  if (BigDecimal.isBigDecimal(value)) return value;
-  if (typeof value === "string") {
-    return Option.getOrNull(BigDecimal.fromString(value));
-  }
-  if (typeof value === "number" && Number.isFinite(value)) {
-    return BigDecimal.fromNumberUnsafe(value);
-  }
-  return null;
-};
-
-/** Parses the open `PriceListItemView` wire object into a concrete `PriceListItemRecord`. */
-export const parsePriceListItem = (
-  raw: PriceListItemView | unknown,
-): PriceListItemRecord | null => {
-  if (!isRecord(raw)) return null;
-  const id = typeof raw.id === "string" ? (raw.id as PriceListItemId) : null;
-  const name = typeof raw.name === "string" ? raw.name : null;
-  const unitPrice = toBigDecimal(raw.unitPrice);
-  const currency =
-    typeof raw.currency === "string" && CURRENCY_RE.test(raw.currency.toUpperCase())
-      ? (raw.currency.toUpperCase() as CurrencyCode)
-      : null;
-  const revision = typeof raw.revision === "number" ? raw.revision : null;
-  if (
-    id === null ||
-    name === null ||
-    unitPrice === null ||
-    currency === null ||
-    revision === null
-  ) {
-    return null;
-  }
-  const vat =
-    typeof raw.vat === "string" && VAT_SET.has(raw.vat) ? (raw.vat as VatTreatment) : null;
-  return {
-    id,
-    name,
-    description: asNullableString(raw.description),
-    unit: asNullableString(raw.unit),
-    unitPrice,
-    currency,
-    vat,
-    archived: raw.archived === true,
-    revision,
-  };
-};
+/** Parses the open Price List Item payload into the fields the screen uses. */
+export const parsePriceListItem = Fn.flow(
+  decodeItem,
+  Option.map(
+    (row): PriceListItemRecord => ({
+      id: row.id,
+      name: row.name,
+      description: decodeOptionalText(row.description),
+      unit: decodeOptionalText(row.unit),
+      unitPrice: BigDecimal.isBigDecimal(row.unitPrice)
+        ? row.unitPrice
+        : BigDecimal.fromNumberUnsafe(row.unitPrice),
+      currency: CurrencyCode.make(Str.toUpperCase(row.currency)),
+      vat: Option.getOrNull(decodeVat(row.vat)),
+      archived: row.archived === true,
+      revision: row.revision,
+    }),
+  ),
+  Option.getOrNull,
+);
 
 export const parsePriceListItems = (
-  items: ReadonlyArray<PriceListItemView | unknown>,
+  items: ReadonlyArray<PriceListItemView>,
 ): ReadonlyArray<PriceListItemRecord> =>
-  items.flatMap((item) => {
+  Arr.flatMap(items, (item) => {
     const parsed = parsePriceListItem(item);
     return parsed === null ? [] : [parsed];
   });
 
 /** Normalizes user decimal input (strips spaces/NBSP, converts Czech comma to dot). */
 export const normalizeDecimalInput = (raw: string): string =>
-  raw
-    .trim()
-    .replace(/[\s\u00a0]/g, "")
-    .replace(",", ".");
+  Str.replace(",", ".")(Str.replace(/[\s\u00a0]/g, "")(Str.trim(raw)));
 
 export const emptyPriceListForm = (
-  defaultCurrency: CurrencyCode = "CZK" as CurrencyCode,
+  defaultCurrency: CurrencyCode = CurrencyCode.make("CZK"),
 ): PriceListFormState => ({
   editingId: null,
   editingRevision: null,
@@ -148,25 +139,41 @@ export const validatePriceListForm = (
   form: PriceListFormState,
 ): Readonly<Partial<Record<string, PriceListFormErrorCode>>> => {
   const errors: Partial<Record<string, PriceListFormErrorCode>> = {};
-  if (form.name.trim() === "") errors.name = "name_required";
+  if (Str.trim(form.name) === "") errors.name = "name_required";
   const normalizedPrice = normalizeDecimalInput(form.unitPrice);
   if (!DECIMAL_RE.test(normalizedPrice)) errors.unitPrice = "price_invalid";
-  if (!CURRENCY_RE.test(form.currency.trim().toUpperCase())) errors.currency = "currency_invalid";
+  if (!CURRENCY_RE.test(Str.toUpperCase(Str.trim(form.currency))))
+    errors.currency = "currency_invalid";
   return errors;
 };
 
 const emptyToNull = (value: string): string | null => {
-  const trimmed = value.trim();
+  const trimmed = Str.trim(value);
   return trimmed === "" ? null : trimmed;
 };
 
 /** Builds the `PriceListItemInput` wire payload matching core's `PriceListItemSaveInput`. */
 export const buildPriceListInput = (form: PriceListFormState): PriceListItemInput =>
-  ({
-    name: form.name.trim(),
+  PriceListItemInput.make({
+    name: Str.trim(form.name),
     description: emptyToNull(form.description),
     unit: emptyToNull(form.unit),
     unitPrice: normalizeDecimalInput(form.unitPrice),
-    currency: form.currency.trim().toUpperCase(),
+    currency: Str.toUpperCase(Str.trim(form.currency)),
     vat: form.vat,
-  }) as unknown as PriceListItemInput;
+  });
+
+export const reloadPriceListItem = ({
+  priceList,
+  workspaceId,
+  editingId,
+}: {
+  readonly priceList: Pick<KvitbitApiClient["priceList"], "list">;
+  readonly workspaceId: WorkspaceId;
+  readonly editingId: PriceListItemId;
+}) =>
+  Effect.map(priceList.list({ params: inWorkspace(workspaceId), query: {} }), (items) =>
+    Option.getOrUndefined(
+      Arr.findFirst(parsePriceListItems(items), (item) => item.id === editingId && !item.archived),
+    ),
+  );

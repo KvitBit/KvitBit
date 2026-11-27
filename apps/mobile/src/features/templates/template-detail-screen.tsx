@@ -1,12 +1,20 @@
-import type {
+import {
+  ContactId,
   IsoDate,
-  Locale,
-  PaymentMethod,
-  TemplateId,
-  VatTreatment,
+  type Locale,
+  type PaymentMethod,
+  type TemplateId,
+  type VatTreatment,
 } from "@kvitbit/domain/contract";
 import { describeError, idempotencyHeaders, ifMatchHeaders } from "@kvitbit/ui-port/api";
 import { formatDate } from "@kvitbit/ui-port/format";
+import * as Arr from "effect/Array";
+import * as DateTime from "effect/DateTime";
+import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
+import * as Rec from "effect/Record";
+import * as Schema from "effect/Schema";
+import * as Str from "effect/String";
 import { Archive, Play, Plus, RefreshCw, Send, Trash2 } from "lucide-react-native";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { StyleSheet, View } from "react-native";
@@ -46,6 +54,8 @@ import {
   PAYMENT_METHODS,
   todayIsoDate,
 } from "../expenses/model";
+import { requestOwner } from "../request-owner";
+import { runFeatureEffect } from "../ui-effect";
 import {
   buildScheduleEvery,
   buildTemplateInput,
@@ -60,6 +70,10 @@ import {
   type TemplateViewData,
   templateFormFromView,
 } from "./model";
+
+const decodeContactChoice = Schema.decodeUnknownOption(
+  Schema.Struct({ id: ContactId, name: Schema.optional(Schema.String) }),
+);
 
 export type TemplateDetailTab = "template" | "schedule" | "runs";
 
@@ -82,7 +96,7 @@ export function TemplateDetailScreen(props: {
   const { state: session } = useSession();
   const owner =
     session.status === "signed-in"
-      ? JSON.stringify([api.origin, session.user.id, workspace.id])
+      ? requestOwner([api.origin, session.user.id, workspace.id])
       : null;
   const overlay = useOverlay();
 
@@ -132,232 +146,282 @@ export function TemplateDetailScreen(props: {
     }
   }, [loaded]);
 
-  const handleSaveTemplate = useCallback(async () => {
-    if (owner === null || saving) return;
-    setBannerError(null);
-    const { input, errors } = buildTemplateInput(form);
-    if (input === null || Object.keys(errors).length > 0) {
-      setFieldErrors(errors);
-      return;
-    }
-    setFieldErrors({});
-    setSaving(true);
-    if (isNew) {
-      const res = await runRequestIntent(owner, "templates/create", input, (key) =>
-        api.run((client) =>
-          client.templates.create({
-            params: { workspaceId: workspace.id },
-            headers: idempotencyHeaders(key),
-            payload: input,
-          }),
-        ),
-      );
-      setSaving(false);
-      if (res._tag === "Ok") {
-        const created = decodeTemplate(res.value);
-        overlay.toast(t("common.toast.saved"));
-        navigate(
-          { _tag: "Template", ws: workspace.slug, id: created.id, tab: "template" },
-          { replace: true },
-        );
-      } else {
-        setBannerError(
-          isRequestIntentExpired(res.error)
-            ? local(requestIntentReconciliationCopy)
-            : text(describeError(res.error).text),
-        );
-      }
-      return;
-    }
+  const handleSaveTemplate = useCallback(
+    () =>
+      runFeatureEffect(
+        Effect.gen(function* () {
+          if (owner === null || saving === true) return;
+          setBannerError(null);
+          const { input, errors } = buildTemplateInput(form);
+          if (input === null || Rec.keys(errors).length > 0) {
+            setFieldErrors(errors);
+            return;
+          }
+          setFieldErrors({});
+          setSaving(true);
+          if (isNew) {
+            const res = yield* Effect.promise(() =>
+              runRequestIntent(owner, "templates/create", input, (key) =>
+                api.run((client) =>
+                  client.templates.create({
+                    params: { workspaceId: workspace.id },
+                    headers: idempotencyHeaders(key),
+                    payload: input,
+                  }),
+                ),
+              ),
+            );
+            setSaving(false);
+            if (res._tag === "Ok") {
+              const created = decodeTemplate(res.value);
+              if (created === null) {
+                setBannerError(t("error.unknown"));
+                return;
+              }
+              overlay.toast(t("common.toast.saved"));
+              navigate(
+                { _tag: "Template", ws: workspace.slug, id: created.id, tab: "template" },
+                { replace: true },
+              );
+            } else {
+              setBannerError(
+                isRequestIntentExpired(res.error)
+                  ? local(requestIntentReconciliationCopy)
+                  : text(describeError(res.error).text),
+              );
+            }
+            return;
+          }
 
-    if (templateId === null || loaded === null) {
-      setSaving(false);
-      return;
-    }
-    const res = await api.run((client) =>
-      client.templates.update({
-        params: { workspaceId: workspace.id, templateId },
-        headers: ifMatchHeaders(loaded.revision),
-        payload: input,
-      }),
-    );
-    setSaving(false);
-    if (res._tag === "Ok") {
-      templateRemote.set(res.value);
-      overlay.toast(t("common.toast.saved"));
-    } else {
-      const view = describeError(res.error);
-      setBannerError(text(view.text));
-      if (view.staleRevision) templateRemote.reload();
-    }
-  }, [
-    api,
-    form,
-    isNew,
-    loaded,
-    local,
-    overlay,
-    owner,
-    saving,
-    t,
-    templateId,
-    templateRemote,
-    text,
-    workspace,
-  ]);
+          if (templateId === null || loaded === null) {
+            setSaving(false);
+            return;
+          }
+          const res = yield* Effect.promise(() =>
+            api.run((client) =>
+              client.templates.update({
+                params: { workspaceId: workspace.id, templateId },
+                headers: ifMatchHeaders(loaded.revision),
+                payload: input,
+              }),
+            ),
+          );
+          setSaving(false);
+          if (res._tag === "Ok") {
+            templateRemote.set(res.value);
+            overlay.toast(t("common.toast.saved"));
+          } else {
+            const view = describeError(res.error);
+            setBannerError(text(view.text));
+            if (view.staleRevision) templateRemote.reload();
+          }
+        }),
+      ),
+    [
+      api,
+      form,
+      isNew,
+      loaded,
+      local,
+      overlay,
+      owner,
+      saving,
+      t,
+      templateId,
+      templateRemote,
+      text,
+      workspace,
+    ],
+  );
 
   const handleUseTemplate = useCallback(
-    async (as: "draft" | "issued") => {
-      if (templateId === null || owner === null || actionBusy) return;
-      setBannerError(null);
-      setActionBusy(true);
-      const payload = { as };
-      const res = await runRequestIntent(owner, `templates/use/${templateId}`, payload, (key) =>
-        api.run((client) =>
-          client.templates.use({
-            params: { workspaceId: workspace.id, templateId },
-            headers: idempotencyHeaders(key),
-            payload,
-          }),
-        ),
-      );
-      setActionBusy(false);
-      if (res._tag === "Ok") {
-        overlay.toast(
-          as === "issued"
-            ? local({ cs: "Doklad vystaven", en: "Document issued" })
-            : local({ cs: "Koncept vytvořen", en: "Draft created" }),
-        );
-        navigate({
-          _tag: "Document",
-          ws: workspace.slug,
-          id: res.value.id,
-          tab: "preview",
-        });
-      } else {
-        setBannerError(
-          isRequestIntentExpired(res.error)
-            ? local(requestIntentReconciliationCopy)
-            : text(describeError(res.error).text),
-        );
-      }
-    },
+    (as: "draft" | "issued") =>
+      runFeatureEffect(
+        Effect.gen(function* () {
+          if (templateId === null || owner === null || actionBusy === true) return;
+          setBannerError(null);
+          setActionBusy(true);
+          const payload = { as };
+          const res = yield* Effect.promise(() =>
+            runRequestIntent(owner, `templates/use/${templateId}`, payload, (key) =>
+              api.run((client) =>
+                client.templates.use({
+                  params: { workspaceId: workspace.id, templateId },
+                  headers: idempotencyHeaders(key),
+                  payload,
+                }),
+              ),
+            ),
+          );
+          setActionBusy(false);
+          if (res._tag === "Ok") {
+            overlay.toast(
+              as === "issued"
+                ? local({ cs: "Doklad vystaven", en: "Document issued" })
+                : local({ cs: "Koncept vytvořen", en: "Draft created" }),
+            );
+            navigate({
+              _tag: "Document",
+              ws: workspace.slug,
+              id: res.value.id,
+              tab: "preview",
+            });
+          } else {
+            setBannerError(
+              isRequestIntentExpired(res.error)
+                ? local(requestIntentReconciliationCopy)
+                : text(describeError(res.error).text),
+            );
+          }
+        }),
+      ),
     [actionBusy, api, local, overlay, owner, templateId, text, workspace],
   );
 
-  const handleArchive = useCallback(async () => {
-    if (templateId === null || loaded === null) return;
-    const confirmed = await overlay.confirm({
-      title: `${t("common.action.archive")} ${loaded.name}?`,
-      confirmLabel: t("common.action.archive"),
-      cancelLabel: t("common.action.cancel"),
-      destructive: true,
-    });
-    if (!confirmed) return;
-    const res = await api.run((client) =>
-      client.templates.archive({ params: { workspaceId: workspace.id, templateId } }),
-    );
-    if (res._tag === "Ok") {
-      overlay.toast(t("common.toast.archived", { name: loaded.name }));
-      navigate({ _tag: "Templates", ws: workspace.slug }, { replace: true });
-    } else {
-      setBannerError(text(describeError(res.error).text));
-    }
-  }, [api, loaded, overlay, t, templateId, text, workspace]);
+  const handleArchive = useCallback(
+    () =>
+      runFeatureEffect(
+        Effect.gen(function* () {
+          if (templateId === null || loaded === null) return;
+          const confirmed = yield* Effect.promise(() =>
+            overlay.confirm({
+              title: `${t("common.action.archive")} ${loaded.name}?`,
+              confirmLabel: t("common.action.archive"),
+              cancelLabel: t("common.action.cancel"),
+              destructive: true,
+            }),
+          );
+          if (!confirmed) return;
+          const res = yield* Effect.promise(() =>
+            api.run((client) =>
+              client.templates.archive({ params: { workspaceId: workspace.id, templateId } }),
+            ),
+          );
+          if (res._tag === "Ok") {
+            overlay.toast(t("common.toast.archived", { name: loaded.name }));
+            navigate({ _tag: "Templates", ws: workspace.slug }, { replace: true });
+          } else {
+            setBannerError(text(describeError(res.error).text));
+          }
+        }),
+      ),
+    [api, loaded, overlay, t, templateId, text, workspace],
+  );
 
-  const handleSaveSchedule = useCallback(async () => {
-    if (templateId === null || loaded === null) return;
-    setBannerError(null);
-    const every = buildScheduleEvery(scheduleForm.unit, scheduleForm.count);
-    if (every === null) {
-      setBannerError(local({ cs: "Zadejte interval 1 až 99.", en: "Enter interval 1 to 99." }));
-      return;
-    }
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(scheduleForm.startOn.trim())) {
-      setBannerError(local({ cs: "Datum začátku: RRRR-MM-DD", en: "Start date: YYYY-MM-DD" }));
-      return;
-    }
-    const endRaw = scheduleForm.endOn.trim();
-    if (endRaw !== "" && !/^\d{4}-\d{2}-\d{2}$/.test(endRaw)) {
-      setBannerError(local({ cs: "Datum konce: RRRR-MM-DD", en: "End date: YYYY-MM-DD" }));
-      return;
-    }
+  const handleSaveSchedule = useCallback(
+    () =>
+      runFeatureEffect(
+        Effect.gen(function* () {
+          if (templateId === null || loaded === null) return;
+          setBannerError(null);
+          const every = buildScheduleEvery(scheduleForm.unit, scheduleForm.count);
+          if (every === null) {
+            setBannerError(
+              local({ cs: "Zadejte interval 1 až 99.", en: "Enter interval 1 to 99." }),
+            );
+            return;
+          }
+          const start = Schema.decodeOption(IsoDate)(Str.trim(scheduleForm.startOn));
+          if (start._tag === "None") {
+            setBannerError(
+              local({ cs: "Datum začátku: RRRR-MM-DD", en: "Start date: YYYY-MM-DD" }),
+            );
+            return;
+          }
+          const endRaw = Str.trim(scheduleForm.endOn);
+          const end = Schema.decodeOption(IsoDate)(endRaw);
+          if (endRaw !== "" && end._tag === "None") {
+            setBannerError(local({ cs: "Datum konce: RRRR-MM-DD", en: "End date: YYYY-MM-DD" }));
+            return;
+          }
 
-    setSaving(true);
-    const res = await api.run((client) =>
-      client.templates.setSchedule({
-        params: { workspaceId: workspace.id, templateId },
-        headers: ifMatchHeaders(loaded.revision),
-        payload: {
-          every,
-          startOn: scheduleForm.startOn.trim() as IsoDate,
-          ...(endRaw === "" ? {} : { endOn: endRaw as IsoDate }),
-          issueAs: scheduleForm.issueAs,
-          autoSend: scheduleForm.autoSend,
-        },
-      }),
-    );
-    setSaving(false);
-    if (res._tag === "Ok") {
-      templateRemote.set(res.value);
-      overlay.toast(t("common.toast.saved"));
-    } else {
-      const view = describeError(res.error);
-      setBannerError(text(view.text));
-      if (view.staleRevision) templateRemote.reload();
-    }
-  }, [
-    api,
-    loaded,
-    local,
-    overlay,
-    scheduleForm,
-    t,
-    templateId,
-    templateRemote,
-    text,
-    workspace.id,
-  ]);
+          setSaving(true);
+          const res = yield* Effect.promise(() =>
+            api.run((client) =>
+              client.templates.setSchedule({
+                params: { workspaceId: workspace.id, templateId },
+                headers: ifMatchHeaders(loaded.revision),
+                payload: {
+                  every,
+                  startOn: start.value,
+                  endOn: Option.getOrUndefined(end),
+                  issueAs: scheduleForm.issueAs,
+                  autoSend: scheduleForm.autoSend,
+                },
+              }),
+            ),
+          );
+          setSaving(false);
+          if (res._tag === "Ok") {
+            templateRemote.set(res.value);
+            overlay.toast(t("common.toast.saved"));
+          } else {
+            const view = describeError(res.error);
+            setBannerError(text(view.text));
+            if (view.staleRevision) templateRemote.reload();
+          }
+        }),
+      ),
+    [api, loaded, local, overlay, scheduleForm, t, templateId, templateRemote, text, workspace.id],
+  );
 
-  const handleRemoveSchedule = useCallback(async () => {
-    if (templateId === null || loaded === null) return;
-    const confirmed = await overlay.confirm({
-      title: t("templates.schedule.detach"),
-      confirmLabel: t("common.action.confirm"),
-      cancelLabel: t("common.action.cancel"),
-      destructive: true,
-    });
-    if (!confirmed) return;
-    setActionBusy(true);
-    const res = await api.run((client) =>
-      client.templates.removeSchedule({
-        params: { workspaceId: workspace.id, templateId },
-        headers: ifMatchHeaders(loaded.revision),
-      }),
-    );
-    setActionBusy(false);
-    if (res._tag === "Ok") {
-      templateRemote.set(res.value);
-      overlay.toast(t("common.toast.saved"));
-    } else {
-      setBannerError(text(describeError(res.error).text));
-    }
-  }, [api, loaded, overlay, t, templateId, templateRemote, text, workspace.id]);
+  const handleRemoveSchedule = useCallback(
+    () =>
+      runFeatureEffect(
+        Effect.gen(function* () {
+          if (templateId === null || loaded === null) return;
+          const confirmed = yield* Effect.promise(() =>
+            overlay.confirm({
+              title: t("templates.schedule.detach"),
+              confirmLabel: t("common.action.confirm"),
+              cancelLabel: t("common.action.cancel"),
+              destructive: true,
+            }),
+          );
+          if (!confirmed) return;
+          setActionBusy(true);
+          const res = yield* Effect.promise(() =>
+            api.run((client) =>
+              client.templates.removeSchedule({
+                params: { workspaceId: workspace.id, templateId },
+                headers: ifMatchHeaders(loaded.revision),
+              }),
+            ),
+          );
+          setActionBusy(false);
+          if (res._tag === "Ok") {
+            templateRemote.set(res.value);
+            overlay.toast(t("common.toast.saved"));
+          } else {
+            setBannerError(text(describeError(res.error).text));
+          }
+        }),
+      ),
+    [api, loaded, overlay, t, templateId, templateRemote, text, workspace.id],
+  );
 
-  const handleResumeSchedule = useCallback(async () => {
-    if (templateId === null) return;
-    setActionBusy(true);
-    const res = await api.run((client) =>
-      client.templates.resume({ params: { workspaceId: workspace.id, templateId } }),
-    );
-    setActionBusy(false);
-    if (res._tag === "Ok") {
-      templateRemote.set(res.value);
-      overlay.toast(t("templates.runs.resumed"));
-    } else {
-      setBannerError(text(describeError(res.error).text));
-    }
-  }, [api, overlay, t, templateId, templateRemote, text, workspace.id]);
+  const handleResumeSchedule = useCallback(
+    () =>
+      runFeatureEffect(
+        Effect.gen(function* () {
+          if (templateId === null) return;
+          setActionBusy(true);
+          const res = yield* Effect.promise(() =>
+            api.run((client) =>
+              client.templates.resume({ params: { workspaceId: workspace.id, templateId } }),
+            ),
+          );
+          setActionBusy(false);
+          if (res._tag === "Ok") {
+            templateRemote.set(res.value);
+            overlay.toast(t("templates.runs.resumed"));
+          } else {
+            setBannerError(text(describeError(res.error).text));
+          }
+        }),
+      ),
+    [api, overlay, t, templateId, templateRemote, text, workspace.id],
+  );
 
   const tabChoices: ReadonlyArray<Choice<TemplateDetailTab>> = useMemo(
     () => [
@@ -371,7 +435,12 @@ export function TemplateDetailScreen(props: {
   const previewDates = useMemo(() => {
     const every = buildScheduleEvery(scheduleForm.unit, scheduleForm.count);
     if (every === null) return [];
-    return previewOccurrences(scheduleForm.startOn.trim(), every, scheduleForm.endOn.trim(), 3);
+    return previewOccurrences({
+      startOn: Str.trim(scheduleForm.startOn),
+      every,
+      endOn: Str.trim(scheduleForm.endOn),
+      count: 3,
+    });
   }, [scheduleForm.count, scheduleForm.endOn, scheduleForm.startOn, scheduleForm.unit]);
 
   const errMsg = (key: string): string | null => {
@@ -385,9 +454,11 @@ export function TemplateDetailScreen(props: {
 
   const contactChoices: ReadonlyArray<Choice<string>> = useMemo(() => {
     if (contactsRemote.state._tag !== "Ready") return [];
-    return contactsRemote.state.value.items.map((c) => {
-      const rec = c as unknown as { id?: string; name?: string };
-      return { value: rec.id ?? "", label: rec.name ?? rec.id ?? "" };
+    return Arr.flatMap(contactsRemote.state.value.items, (contact) => {
+      const decoded = decodeContactChoice(contact);
+      if (decoded._tag === "None") return [];
+      const { id, name } = decoded.value;
+      return [{ value: id, label: name ?? id }];
     });
   }, [contactsRemote.state]);
 
@@ -401,7 +472,9 @@ export function TemplateDetailScreen(props: {
               icon={Send}
               label={local({ cs: "Vystavit nyní", en: "Issue now" })}
               busy={actionBusy}
-              onPress={() => void handleUseTemplate("issued")}
+              onPress={() => {
+                handleUseTemplate("issued");
+              }}
               testID="template-issue-now"
             />
             <Button
@@ -409,7 +482,9 @@ export function TemplateDetailScreen(props: {
               icon={Play}
               label={local({ cs: "Vytvořit koncept", en: "Create draft" })}
               disabled={actionBusy}
-              onPress={() => void handleUseTemplate("draft")}
+              onPress={() => {
+                handleUseTemplate("draft");
+              }}
               testID="template-create-draft"
             />
           </View>
@@ -452,7 +527,7 @@ export function TemplateDetailScreen(props: {
         <SegmentedChoice
           label={t("common.field.currency")}
           value={form.currency}
-          choices={COMMON_CURRENCIES.map((c) => ({ value: c, label: c }))}
+          choices={Arr.map(COMMON_CURRENCIES, (c) => ({ value: c, label: c }))}
           onChange={(currency) => setForm((f) => ({ ...f, currency }))}
         />
         <SegmentedChoice<Locale>
@@ -474,7 +549,10 @@ export function TemplateDetailScreen(props: {
         <SegmentedChoice<PaymentMethod>
           label={t("contacts.editor.defaults.paymentMethod")}
           value={form.paymentMethod}
-          choices={PAYMENT_METHODS.map((m) => ({ value: m, label: t(`enum.paymentMethod.${m}`) }))}
+          choices={Arr.map(PAYMENT_METHODS, (m) => ({
+            value: m,
+            label: t(`enum.paymentMethod.${m}`),
+          }))}
           onChange={(paymentMethod) => setForm((f) => ({ ...f, paymentMethod }))}
         />
         <TextField
@@ -498,7 +576,7 @@ export function TemplateDetailScreen(props: {
                 lines: [
                   ...f.lines,
                   {
-                    id: `line-${Date.now()}-${f.lines.length}`,
+                    id: `line-${DateTime.toEpochMillis(DateTime.nowUnsafe())}-${f.lines.length}`,
                     description: "",
                     quantity: "1",
                     unit: "ks",
@@ -511,7 +589,7 @@ export function TemplateDetailScreen(props: {
           />
         }
       >
-        {form.lines.map((line, idx) => (
+        {Arr.map(form.lines, (line, idx) => (
           <Card key={line.id}>
             <TextField
               label={t("common.field.description")}
@@ -519,7 +597,7 @@ export function TemplateDetailScreen(props: {
               onChangeText={(description) =>
                 setForm((f) => ({
                   ...f,
-                  lines: f.lines.map((l, i) => (i === idx ? { ...l, description } : l)),
+                  lines: Arr.map(f.lines, (l, i) => (i === idx ? { ...l, description } : l)),
                 }))
               }
               error={errMsg(`lines.${idx}.description`)}
@@ -533,7 +611,7 @@ export function TemplateDetailScreen(props: {
                   onChangeText={(quantity) =>
                     setForm((f) => ({
                       ...f,
-                      lines: f.lines.map((l, i) => (i === idx ? { ...l, quantity } : l)),
+                      lines: Arr.map(f.lines, (l, i) => (i === idx ? { ...l, quantity } : l)),
                     }))
                   }
                   error={errMsg(`lines.${idx}.quantity`)}
@@ -546,7 +624,7 @@ export function TemplateDetailScreen(props: {
                   onChangeText={(unit) =>
                     setForm((f) => ({
                       ...f,
-                      lines: f.lines.map((l, i) => (i === idx ? { ...l, unit } : l)),
+                      lines: Arr.map(f.lines, (l, i) => (i === idx ? { ...l, unit } : l)),
                     }))
                   }
                 />
@@ -559,7 +637,7 @@ export function TemplateDetailScreen(props: {
                   onChangeText={(unitPrice) =>
                     setForm((f) => ({
                       ...f,
-                      lines: f.lines.map((l, i) => (i === idx ? { ...l, unitPrice } : l)),
+                      lines: Arr.map(f.lines, (l, i) => (i === idx ? { ...l, unitPrice } : l)),
                     }))
                   }
                   error={errMsg(`lines.${idx}.unitPrice`)}
@@ -568,14 +646,14 @@ export function TemplateDetailScreen(props: {
             </View>
             <SegmentedChoice<VatTreatment>
               value={line.vat}
-              choices={EXPENSE_VAT_TREATMENTS.map((tr) => ({
+              choices={Arr.map(EXPENSE_VAT_TREATMENTS, (tr) => ({
                 value: tr,
                 label: t(`enum.vatTreatment.${tr}`),
               }))}
               onChange={(vat) =>
                 setForm((f) => ({
                   ...f,
-                  lines: f.lines.map((l, i) => (i === idx ? { ...l, vat } : l)),
+                  lines: Arr.map(f.lines, (l, i) => (i === idx ? { ...l, vat } : l)),
                 }))
               }
             />
@@ -585,7 +663,7 @@ export function TemplateDetailScreen(props: {
                 icon={Trash2}
                 label={t("common.action.remove")}
                 onPress={() =>
-                  setForm((f) => ({ ...f, lines: f.lines.filter((_, i) => i !== idx) }))
+                  setForm((f) => ({ ...f, lines: Arr.filter(f.lines, (_, i) => i !== idx) }))
                 }
               />
             )}
@@ -599,7 +677,7 @@ export function TemplateDetailScreen(props: {
     const state = scheduleStateOf(tpl.schedule);
     return (
       <>
-        {tpl.schedule?.paused ? (
+        {tpl.schedule?.paused === true ? (
           <Banner
             tone="warning"
             text={
@@ -609,7 +687,9 @@ export function TemplateDetailScreen(props: {
             }
             action={{
               label: t("templates.runs.resume"),
-              onPress: () => void handleResumeSchedule(),
+              onPress: () => {
+                handleResumeSchedule();
+              },
             }}
           />
         ) : null}
@@ -689,7 +769,7 @@ export function TemplateDetailScreen(props: {
             <Text variant="labelMedium" color="onSurfaceVariant">
               {t("templates.schedule.nextDates")}
             </Text>
-            {previewDates.map((d) => (
+            {Arr.map(previewDates, (d) => (
               <Text key={d} variant="bodyMedium" numeric>
                 {formatDate(locale, d)}
               </Text>
@@ -701,7 +781,9 @@ export function TemplateDetailScreen(props: {
           <Button
             label={t("common.action.save")}
             busy={saving}
-            onPress={() => void handleSaveSchedule()}
+            onPress={() => {
+              handleSaveSchedule();
+            }}
             testID="schedule-save"
           />
           {tpl.schedule === null ? null : (
@@ -709,7 +791,9 @@ export function TemplateDetailScreen(props: {
               kind="danger"
               label={t("templates.schedule.detach")}
               busy={actionBusy}
-              onPress={() => void handleRemoveSchedule()}
+              onPress={() => {
+                handleRemoveSchedule();
+              }}
               testID="schedule-detach"
             />
           )}
@@ -735,7 +819,7 @@ export function TemplateDetailScreen(props: {
               />
             }
           >
-            {page.items.map((run) => {
+            {Arr.map(page.items, (run) => {
               const doc = run.document;
               return (
                 <ListRow
@@ -783,7 +867,9 @@ export function TemplateDetailScreen(props: {
           <IconButton
             icon={Archive}
             label={t("common.action.archive")}
-            onPress={() => void handleArchive()}
+            onPress={() => {
+              handleArchive();
+            }}
           />
         )
       }
@@ -792,7 +878,9 @@ export function TemplateDetailScreen(props: {
           <Button
             label={t("common.action.save")}
             busy={saving}
-            onPress={() => void handleSaveTemplate()}
+            onPress={() => {
+              handleSaveTemplate();
+            }}
             testID="template-save"
           />
         ) : undefined
@@ -808,6 +896,7 @@ export function TemplateDetailScreen(props: {
         <RemoteView state={templateRemote.state} onRetry={templateRemote.reload}>
           {(raw) => {
             const tpl = decodeTemplate(raw);
+            if (tpl === null) return <Banner text={t("error.unknown")} />;
             if (tab === "schedule") return renderScheduleTab(tpl);
             if (tab === "runs") return renderRunsTab();
             return renderTemplateForm();

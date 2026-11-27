@@ -1,5 +1,5 @@
 import { describeError, type Remote, type UiError } from "@kvitbit/ui-port/api";
-import { Option } from "effect";
+import * as Option from "effect/Option";
 import type { ReactNode } from "react";
 import { useI18n } from "../i18n/i18n-provider";
 import { Banner, Loading } from "./surface";

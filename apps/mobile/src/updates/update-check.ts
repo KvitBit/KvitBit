@@ -1,3 +1,4 @@
+import * as Fn from "effect/Function";
 import type { AppStateStatus } from "react-native";
 
 /**
@@ -7,8 +8,14 @@ import type { AppStateStatus } from "react-native";
  */
 export const updateCheckIntervalMs = 15 * 60 * 1000;
 
-export const isUpdateCheckDue = (lastCheckStartedAt: number, now: number): boolean =>
-  now < lastCheckStartedAt || now - lastCheckStartedAt >= updateCheckIntervalMs;
+export const isUpdateCheckDue: {
+  (now: number): (lastCheckStartedAt: number) => boolean;
+  (lastCheckStartedAt: number, now: number): boolean;
+} = Fn.dual(
+  2,
+  (lastCheckStartedAt: number, now: number) =>
+    now < lastCheckStartedAt || now - lastCheckStartedAt >= updateCheckIntervalMs,
+);
 
 /**
  * Whether over-the-air updates apply to this build. The web build is served

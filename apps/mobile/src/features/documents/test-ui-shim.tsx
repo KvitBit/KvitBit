@@ -4,6 +4,7 @@
  * full screen components with `useEffect`/`useRemote`/`ApiProvider` to render in react-dom without
  * React Native array/function `style` prop errors.
  */
+import * as Arr from "effect/Array";
 import type { ReactNode } from "react";
 import { useOverlay } from "../../ui/overlay";
 import { RemoteView } from "../../ui/remote-view";
@@ -56,7 +57,7 @@ function SegmentedChoice<T extends string>(props: {
   return (
     <div>
       {props.label !== undefined ? <span>{props.label}</span> : null}
-      {props.choices.map((c) => (
+      {Arr.map(props.choices, (c) => (
         <button
           key={c.value}
           type="button"
@@ -113,8 +114,8 @@ function TextField(props: {
         onChange={(e) => props.onChangeText(e.target.value)}
       />
       {props.trailing}
-      {props.error ? <span>{props.error}</span> : null}
-      {props.supporting ? <span>{props.supporting}</span> : null}
+      {(props.error ?? "") !== "" ? <span>{props.error}</span> : null}
+      {(props.supporting ?? "") !== "" ? <span>{props.supporting}</span> : null}
     </div>
   );
 }

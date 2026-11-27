@@ -1,4 +1,5 @@
 import type { Locale } from "@kvitbit/ui-port/i18n";
+import * as Effect from "effect/Effect";
 import type { ReactNode } from "react";
 import { I18nProvider } from "../i18n/i18n-provider";
 import { ThemeProvider } from "../theme/theme-provider";
@@ -11,6 +12,7 @@ export interface RecordedOverlay extends Overlay {
   answer: boolean;
 }
 
+// biome-ignore lint/style/useComponentExportOnlyModules: Test helpers are outside the Fast Refresh module graph.
 export const recordedOverlay = (): RecordedOverlay => {
   const toasts: string[] = [];
   const overlay: RecordedOverlay = {
@@ -19,7 +21,7 @@ export const recordedOverlay = (): RecordedOverlay => {
     toast: (text) => {
       toasts.push(text);
     },
-    confirm: async () => overlay.answer,
+    confirm: () => Effect.runPromise(Effect.sync(() => overlay.answer)),
   };
   return overlay;
 };

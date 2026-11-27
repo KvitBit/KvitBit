@@ -1,9 +1,13 @@
 import { MOBILE_NAV, type NavSection, navLabelKey } from "@kvitbit/ui-port/view-models";
+import * as Arr from "effect/Array";
+import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
 import { Redirect, router, Tabs, useLocalSearchParams, useUnstableGlobalHref } from "expo-router";
 import { FileText, House, Menu, Receipt, Users } from "lucide-react-native";
 import { useEffect } from "react";
 import { ExpenseCaptureRuntime } from "../../../src/features/expenses/expense-capture-runtime";
 import { useCaptureQueueSummary } from "../../../src/features/expenses/use-expense-capture";
+import { forkFeatureEffect } from "../../../src/features/ui-effect";
 import { useI18n } from "../../../src/i18n/i18n-provider";
 import { safeReturnTo } from "../../../src/navigation/return-to";
 import { hrefOf, param } from "../../../src/navigation/routes";
@@ -53,7 +57,7 @@ function WorkspaceTabs() {
           },
         }}
       >
-        {MOBILE_NAV.map((section) => {
+        {Arr.map(MOBILE_NAV, (section) => {
           const name = TAB_ROUTE[section];
           const Glyph = TAB_ICON[section];
           if (name === undefined || Glyph === undefined) return null;
@@ -83,7 +87,7 @@ function WorkspaceTabs() {
             />
           );
         })}
-        {HIDDEN.map((name) => (
+        {Arr.map(HIDDEN, (name) => (
           <Tabs.Screen key={name} name={name} options={{ href: null }} />
         ))}
       </Tabs>
@@ -101,18 +105,20 @@ export default function WorkspaceLayout() {
   const isMember =
     signedIn &&
     workspaces.state._tag === "Ready" &&
-    workspaces.state.value.some((w) => w.slug === slug);
+    Arr.some(workspaces.state.value, (w) => w.slug === slug);
   useEffect(() => {
-    if (isMember) void lastWorkspace.write(slug);
+    if (isMember) forkFeatureEffect(Effect.promise(() => lastWorkspace.write(slug)));
   }, [isMember, slug]);
   if (!signedIn) {
-    const href = hrefOf({ _tag: "SignIn", ...(returnTo === null ? {} : { returnTo }) });
-    return <Redirect href={href as never} />;
+    const signInHref = hrefOf(
+      returnTo === null ? { _tag: "SignIn" } : { _tag: "SignIn", returnTo },
+    );
+    return <Redirect href={signInHref} />;
   }
   return (
     <RemoteView state={workspaces.state} onRetry={workspaces.reload}>
       {(all) => {
-        const workspace = all.find((w) => w.slug === slug);
+        const workspace = Option.getOrUndefined(Arr.findFirst(all, (w) => w.slug === slug));
         if (workspace === undefined)
           return (
             <Screen title={t("app.name")}>

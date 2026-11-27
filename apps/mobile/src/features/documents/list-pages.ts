@@ -1,15 +1,35 @@
 import type { WorkspaceId } from "@kvitbit/domain/contract";
 import { err, Paged, type PagedStep, Remote, UiError } from "@kvitbit/ui-port/api";
 import type { DocumentListQuery } from "@kvitbit/ui-port/view-models";
-import { Option } from "effect";
+import * as Arr from "effect/Array";
+import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
 import { useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useApi } from "../../runtime/api-runtime";
+import { fromMobilePromise } from "../../runtime/request-intent";
+import { runFeatureEffect } from "../ui-effect";
 import { type DocumentSummaryView, parseDocumentSummary } from "./codecs";
 
 type DocumentPageStep = PagedStep<DocumentSummaryView, DocumentListQuery>;
 type ReportError = (error: UiError) => void;
 
-export function useDocumentPages(workspaceId: WorkspaceId, query: DocumentListQuery) {
+interface PageActions {
+  readonly reload: () => void;
+  readonly loadMore: (reportError: ReportError) => void;
+}
+
+const idlePageActions: PageActions = {
+  reload: () => undefined,
+  loadMore: () => undefined,
+};
+
+export function useDocumentPages({
+  workspaceId,
+  query,
+}: {
+  readonly workspaceId: WorkspaceId;
+  readonly query: DocumentListQuery;
+}) {
   const { run } = useApi();
   const scope = useMemo(
     () => ({
@@ -20,9 +40,7 @@ export function useDocumentPages(workspaceId: WorkspaceId, query: DocumentListQu
     [run, workspaceId, query],
   );
   const [result, setResult] = useState(() => ({ scope, page: scope.initial.paged }));
-  const actions = useRef<{ reload: () => void; loadMore: (reportError: ReportError) => void }>(
-    null,
-  );
+  const actions = useRef(idlePageActions);
 
   useLayoutEffect(() => {
     let active = true;
@@ -31,16 +49,19 @@ export function useDocumentPages(workspaceId: WorkspaceId, query: DocumentListQu
       page = next;
       setResult({ scope, page });
     };
-    const request = async (step: DocumentPageStep, reportError?: ReportError) => {
+    const request = Effect.fn("request")(function* (
+      step: DocumentPageStep,
+      reportError?: ReportError,
+    ): Effect.fn.Return<void> {
       const { fetch } = step;
       if (fetch === null) return;
       if (step.paged !== page) publish(step.paged);
 
-      const response = await scope
-        .run((api) =>
+      const response = yield* fromMobilePromise(() =>
+        scope.run((api) =>
           api.documents.list({ params: { workspaceId: scope.workspaceId }, query: fetch.query }),
-        )
-        .catch(() => err(UiError.unexpected()));
+        ),
+      ).pipe(Effect.orElseSucceed(() => err(UiError.unexpected())));
       if (!active || fetch.seq !== page.seq) return;
 
       const received = Paged.receive(
@@ -50,27 +71,34 @@ export function useDocumentPages(workspaceId: WorkspaceId, query: DocumentListQu
           ? response
           : {
               ...response,
-              value: { ...response.value, items: response.value.items.map(parseDocumentSummary) },
+              value: {
+                ...response.value,
+                items: Arr.map(response.value.items, parseDocumentSummary),
+              },
             },
       );
       if (received.fetch !== null) {
-        void request(received);
+        yield* request(received);
       } else if (reportError !== undefined && Option.isSome(received.paged.error)) {
         publish({ ...received.paged, status: "ready", error: Option.none() });
         reportError(received.paged.error.value);
       } else {
         publish(received.paged);
       }
-    };
+    });
 
     actions.current = {
-      reload: () => void request(Paged.refresh(page)),
-      loadMore: (reportError) => void request(Paged.loadMore(page), reportError),
+      reload: () => {
+        runFeatureEffect(request(Paged.refresh(page)));
+      },
+      loadMore: (reportError) => {
+        runFeatureEffect(request(Paged.loadMore(page), reportError));
+      },
     };
-    void request(scope.initial);
+    runFeatureEffect(request(scope.initial));
     return () => {
       active = false;
-      actions.current = null;
+      actions.current = idlePageActions;
     };
   }, [scope]);
 
@@ -91,7 +119,7 @@ export function useDocumentPages(workspaceId: WorkspaceId, query: DocumentListQu
     refreshing: page.status === "refreshing",
     hasMore: page.status !== "failed" && Paged.hasMore(page),
     loadingMore: page.status === "loading_more",
-    reload: () => actions.current?.reload(),
-    loadMore: (reportError: ReportError) => actions.current?.loadMore(reportError),
+    reload: () => actions.current.reload(),
+    loadMore: (reportError: ReportError) => actions.current.loadMore(reportError),
   };
 }

@@ -1,12 +1,18 @@
+import * as EffectArray from "effect/Array";
+import * as Fn from "effect/Function";
+import * as EffectString from "effect/String";
+import { jsonLiteral } from "./json";
 import { APP_BASE, appleTouchIcon } from "./manifest";
 
+const closingHead = /<\/head>/i;
+const assetReference = /\s(?:src|href)\s*=\s*(?:"([^"]*)"|'([^']*)')/gi;
 const THEME_COLOR = /<meta\s+name=["']theme-color["'][^>]*>\s*/gi;
 
 /** Registers the worker only where it is served: the export under `/app/`, not `expo start`. */
-export const serviceWorkerRegistration = `<script>
-if ("serviceWorker" in navigator && location.pathname.startsWith(${JSON.stringify(APP_BASE)})) {
+const serviceWorkerRegistration = `<script>
+if ("serviceWorker" in navigator && location.pathname.startsWith(${jsonLiteral(APP_BASE)})) {
   addEventListener("load", () => {
-    navigator.serviceWorker.register(${JSON.stringify(`${APP_BASE}sw.js`)}, { scope: ${JSON.stringify(APP_BASE)} }).catch(() => {});
+    navigator.serviceWorker.register(${jsonLiteral(`${APP_BASE}sw.js`)}, { scope: ${jsonLiteral(APP_BASE)} }).catch(() => {});
   });
 }
 </script>`;
@@ -16,34 +22,50 @@ if ("serviceWorker" in navigator && location.pathname.startsWith(${JSON.stringif
  * apple-touch-icon and the worker registration to the exported shell.
  * Throws when the shell has no `</head>` or is already injected.
  */
-export const injectPwaHead = (
-  html: string,
-  { themeColor }: { readonly themeColor: string },
-): string => {
-  if (html.includes('rel="manifest"')) throw new Error("index.html already links a manifest");
-  const close = html.search(/<\/head>/i);
-  if (close < 0) throw new Error("index.html has no </head>");
-  const head = [
-    `<meta name="theme-color" content="${themeColor}">`,
-    `<link rel="manifest" href="${APP_BASE}manifest.webmanifest">`,
-    `<link rel="apple-touch-icon" href="${APP_BASE}icons/${appleTouchIcon}">`,
-    serviceWorkerRegistration,
-  ].join("\n");
-  const before = html.slice(0, close).replace(THEME_COLOR, "");
-  return `${before}${head}\n${html.slice(close)}`;
-};
+interface PwaHeadOptions {
+  readonly themeColor: string;
+}
+
+export const injectPwaHead: {
+  (options: PwaHeadOptions): (html: string) => string;
+  (html: string, options: PwaHeadOptions): string;
+} = Fn.dual(2, (html: string, { themeColor }: PwaHeadOptions): string => {
+  if (EffectString.includes('rel="manifest"')(html))
+    throw new Error("index.html already links a manifest");
+  const close = closingHead.exec(html)?.index;
+  if (close === undefined) throw new Error("index.html has no </head>");
+  const head = EffectArray.join(
+    [
+      `<meta name="theme-color" content="${themeColor}">`,
+      `<link rel="manifest" href="${APP_BASE}manifest.webmanifest">`,
+      `<link rel="apple-touch-icon" href="${APP_BASE}icons/${appleTouchIcon}">`,
+      serviceWorkerRegistration,
+    ],
+    "\n",
+  );
+  const before = EffectString.replace(THEME_COLOR, "")(EffectString.slice(0, close)(html));
+  return `${before}${head}\n${EffectString.slice(close)(html)}`;
+});
 
 /** Every `src=` / `href=` value in the document, in order. */
 export const assetUrls = (html: string): ReadonlyArray<string> =>
-  [...html.matchAll(/\s(?:src|href)\s*=\s*(?:"([^"]*)"|'([^']*)')/gi)].map(
+  EffectArray.map(
+    [...EffectString.matchAll(assetReference)(html)],
     (match) => match[1] ?? match[2] ?? "",
   );
 
 /** URLs that would not load from the `/app/` mount: anything outside it, including cross-origin ones. */
 export const urlsOutsideBase = (html: string): ReadonlyArray<string> =>
-  assetUrls(html).filter((url) => !url.startsWith(APP_BASE) && !url.startsWith("data:"));
+  EffectArray.filter(
+    assetUrls(html),
+    (url) => !(EffectString.startsWith(APP_BASE)(url) || EffectString.startsWith("data:")(url)),
+  );
 
 /** Hashed bundle URLs the shell loads, for the worker's precache list. */
 export const staticAssetUrls = (html: string): ReadonlyArray<string> => [
-  ...new Set(assetUrls(html).filter((url) => url.startsWith(`${APP_BASE}_expo/static/`))),
+  ...new Set(
+    EffectArray.filter(assetUrls(html), (url) =>
+      EffectString.startsWith(`${APP_BASE}_expo/static/`)(url),
+    ),
+  ),
 ];

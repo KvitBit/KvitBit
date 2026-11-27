@@ -1,4 +1,6 @@
 import { describe, expect, mock, test } from "bun:test";
+import * as Arr from "effect/Array";
+import * as Option from "effect/Option";
 import type { ReactElement } from "react";
 import { ApiProvider } from "../../runtime/api-runtime";
 import { SessionProvider } from "../../session/session-provider";
@@ -6,10 +8,11 @@ import { allText, findAll, hostTree } from "../../testing/element-tree";
 import { expoRouterStandIn } from "../../testing/expo-router-stand-in";
 import { TestProviders } from "../../testing/providers";
 import type { AuthClient } from "../auth/auth-port";
+import { parseAccountTab } from "./account-tab";
 
 mock.module("expo-router", () => expoRouterStandIn());
 
-const { AccountScreen, parseAccountTab } = await import("./account-screen");
+const { AccountScreen } = await import("./account-screen");
 
 const fakeAuth: AuthClient = {
   signUpEmail: async () => ({ _tag: "Ok", value: null }),
@@ -79,8 +82,11 @@ describe("AccountScreen", () => {
 
     const dangerTree = hostTree(<AccountScreen tab="danger" authClient={fakeAuth} />, within);
     expect(allText(dangerTree)).toContain("Delete my account");
-    const delBtn = findAll(dangerTree, "Pressable").find(
-      (el) => el.props.testID === "delete-account-submit",
+    const delBtn = Option.getOrUndefined(
+      Arr.findFirst(
+        findAll(dangerTree, "Pressable"),
+        (el) => el.props.testID === "delete-account-submit",
+      ),
     );
     expect(delBtn?.props.disabled).toBe(true);
   });

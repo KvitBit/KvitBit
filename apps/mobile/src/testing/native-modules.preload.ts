@@ -1,12 +1,19 @@
 import { mock } from "bun:test";
+// Run Node crypto as the oracle and native-module test stand-in.
+/* biome-ignore lint/correctness/noNodejsModules: Bun runs this test preload. */ // @effect-diagnostics-next-line nodeBuiltinImport:off
 import { createHash, randomBytes, randomUUID } from "node:crypto";
+import * as EffectArray from "effect/Array";
+import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
+import * as EffectString from "effect/String";
 import { createContext, useContext } from "react";
 import { TestWindowDimensions } from "./window-dimensions";
 
 // React Native defines `__DEV__` before any module runs, and Expo's modules
 // read it on import. Tests run as a release build; one that switches it on
 // puts `false` back when it ends, so no file depends on the order it runs in.
-(globalThis as { __DEV__?: boolean }).__DEV__ = false;
+Object.assign(globalThis, { __DEV__: false });
 
 /**
  * Bun can't load React Native or Expo's native modules, so tests get small
@@ -15,28 +22,35 @@ import { TestWindowDimensions } from "./window-dimensions";
  */
 // React Native's `StyleSheet.flatten`: nested arrays merged left to right,
 // falsy entries skipped.
-const flattenStyle = (style: unknown): Record<string, unknown> | undefined => {
-  if (!style) return undefined;
-  if (!Array.isArray(style)) return { ...(style as Record<string, unknown>) };
-  return style.reduce<Record<string, unknown>>(
-    (merged, entry) => Object.assign(merged, flattenStyle(entry)),
-    {},
-  );
-};
+const StyleFields = Schema.Record(Schema.String, Schema.Unknown);
+const decodeStyle = Schema.decodeUnknownOption(StyleFields);
+
+// biome-ignore lint/plugin/no-unknown-parameters: Native style props can include nested arrays and false placeholders.
+const flattenStyle = (style: unknown): typeof StyleFields.Type | undefined =>
+  EffectArray.isArray(style)
+    ? EffectArray.reduce(style, {}, (merged, entry) => Object.assign(merged, flattenStyle(entry)))
+    : Option.getOrUndefined(decodeStyle(style));
+
+const resolve = <A>(read: () => A) => Effect.runPromise(Effect.sync(read));
 
 class AnimatedValue {
-  constructor(private value: number) {}
+  private value: number;
+
+  constructor(value: number) {
+    this.value = value;
+  }
   setValue(value: number) {
     this.value = value;
   }
-  interpolate(config: { readonly outputRange: readonly unknown[] }) {
-    return config.outputRange[0];
-  }
-  addListener() {
-    return "";
-  }
-  removeAllListeners() {}
-  stopAnimation() {}
+  // biome-ignore lint/style/useThisInClassMethods: Native Animated tests use an inert instance method.
+  interpolate = <Value>(config: { readonly outputRange: readonly Value[] }) =>
+    config.outputRange[0];
+  // biome-ignore lint/style/useThisInClassMethods: Native Animated tests use an inert instance method.
+  addListener = () => "";
+  // biome-ignore lint/style/useThisInClassMethods: Native Animated tests use an inert instance method.
+  removeAllListeners = (): void => undefined;
+  // biome-ignore lint/style/useThisInClassMethods: Native Animated tests use an inert instance method.
+  stopAnimation = (): void => undefined;
   valueOf() {
     return this.value;
   }
@@ -72,13 +86,13 @@ mock.module("react-native", () => ({
   },
   AccessibilityInfo: {
     announceForAccessibility: () => undefined,
-    isReduceMotionEnabled: async () => false,
-    isHighTextContrastEnabled: async () => false,
+    isReduceMotionEnabled: () => resolve(() => false),
+    isHighTextContrastEnabled: () => resolve(() => false),
     addEventListener: () => ({ remove: () => undefined }),
   },
   Platform: {
     OS: "android",
-    select: (options: Record<string, unknown>) =>
+    select: <A>(options: { android?: A; native?: A; default?: A }) =>
       options.android ?? options.native ?? options.default,
   },
   NativeModules: {},
@@ -113,9 +127,9 @@ mock.module("react-native", () => ({
   Easing: {
     bezier: () => (t: number) => t,
     ease: (t: number) => t,
-    in: (easing: unknown) => easing,
-    out: (easing: unknown) => easing,
-    inOut: (easing: unknown) => easing,
+    in: <A>(easing: A) => easing,
+    out: <A>(easing: A) => easing,
+    inOut: <A>(easing: A) => easing,
     linear: (t: number) => t,
     quad: (t: number) => t,
     cubic: (t: number) => t,
@@ -127,7 +141,7 @@ mock.module("react-native", () => ({
     metrics: () => undefined,
   },
   Share: {
-    share: async () => ({ action: "sharedAction" }),
+    share: () => resolve(() => ({ action: "sharedAction" })),
     sharedAction: "sharedAction",
     dismissedAction: "dismissedAction",
   },
@@ -176,7 +190,9 @@ mock.module("expo-router/react-navigation", () => ({
     options: { readonly title?: string; readonly headerTitle?: unknown },
     fallback: string,
   ) =>
-    typeof options.headerTitle === "string" ? options.headerTitle : (options.title ?? fallback),
+    Schema.is(Schema.String)(options.headerTitle)
+      ? options.headerTitle
+      : (options.title ?? fallback),
   useHeaderHeight: () => 0,
 }));
 
@@ -190,21 +206,23 @@ mock.module("expo-constants", () => ({
   default: { expoConfig: { scheme: "kvitbit" } },
 }));
 
+const leadingSlash = /^\//;
 mock.module("expo-linking", () => ({
   createURL: (path: string, options?: { readonly scheme?: string }) =>
-    `${options?.scheme ?? "kvitbit"}://${path.replace(/^\//, "")}`,
+    `${options?.scheme ?? "kvitbit"}://${EffectString.replace(leadingSlash, "")(path)}`,
 }));
 
 mock.module("expo-crypto", () => ({
   CryptoDigestAlgorithm: { SHA256: "SHA-256" },
   randomUUID,
   getRandomBytes: (count: number) => new Uint8Array(randomBytes(count)),
-  digestStringAsync: async (_algorithm: string, value: string) =>
-    createHash("sha256").update(value).digest("hex"),
-  digest: async (_algorithm: string, data: Uint8Array) => {
-    const digest = createHash("sha256").update(data).digest();
-    return digest.buffer.slice(digest.byteOffset, digest.byteOffset + digest.byteLength);
-  },
+  digestStringAsync: (_algorithm: string, value: string) =>
+    resolve(() => createHash("sha256").update(value).digest("hex")),
+  digest: (_algorithm: string, data: Uint8Array) =>
+    resolve(() => {
+      const digest = createHash("sha256").update(data).digest();
+      return digest.buffer.slice(digest.byteOffset, digest.byteOffset + digest.byteLength);
+    }),
 }));
 
 // The native auth client keeps its session here; a screen that links the
@@ -216,33 +234,20 @@ mock.module("expo-secure-store", () => ({
   setItem: (key: string, value: string) => {
     secureItems.set(key, value);
   },
-  getItemAsync: async (key: string) => secureItems.get(key) ?? null,
-  setItemAsync: async (key: string, value: string) => {
-    secureItems.set(key, value);
-  },
-  deleteItemAsync: async (key: string) => {
-    secureItems.delete(key);
-  },
+  getItemAsync: (key: string) => resolve(() => secureItems.get(key) ?? null),
+  setItemAsync: (key: string, value: string) =>
+    resolve(() => {
+      secureItems.set(key, value);
+    }),
+  deleteItemAsync: (key: string) =>
+    resolve(() => {
+      secureItems.delete(key);
+    }),
 }));
 
 // Better Auth's Expo online manager loads this when a session atom mounts.
 mock.module("expo-network", () => ({
   addNetworkStateListener: () => ({ remove: () => undefined }),
-}));
-
-mock.module("expo-web-browser", () => ({
-  openAuthSessionAsync: async () => ({ type: "cancel" }),
-  openBrowserAsync: async () => ({ type: "opened" }),
-  warmUpAsync: async () => ({}),
-  coolDownAsync: async () => ({}),
-  getCustomTabsSupportingBrowsersAsync: async () => ({
-    browserPackages: [],
-    servicePackages: [],
-  }),
-  // Like Expo on Android, where a Custom Tab can't be closed.
-  dismissAuthSession: () => {
-    throw new Error("WebBrowser.dismissAuthSession is unavailable");
-  },
 }));
 
 // The app's consent answer loads from here and reads the device language.
@@ -256,16 +261,19 @@ mock.module("expo-localization", () => ({
 const asyncStorageItems = new Map<string, string>();
 mock.module("@react-native-async-storage/async-storage", () => ({
   default: {
-    getItem: async (key: string) => asyncStorageItems.get(key) ?? null,
-    setItem: async (key: string, value: string) => {
-      asyncStorageItems.set(key, value);
-    },
-    removeItem: async (key: string) => {
-      asyncStorageItems.delete(key);
-    },
-    multiRemove: async (keys: readonly string[]) => {
-      for (const key of keys) asyncStorageItems.delete(key);
-    },
+    getItem: (key: string) => resolve(() => asyncStorageItems.get(key) ?? null),
+    setItem: (key: string, value: string) =>
+      resolve(() => {
+        asyncStorageItems.set(key, value);
+      }),
+    removeItem: (key: string) =>
+      resolve(() => {
+        asyncStorageItems.delete(key);
+      }),
+    multiRemove: (keys: readonly string[]) =>
+      resolve(() => {
+        for (const key of keys) asyncStorageItems.delete(key);
+      }),
   },
 }));
 

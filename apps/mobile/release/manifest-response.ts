@@ -1,4 +1,13 @@
+// Effect's crypto APIs do not provide synchronous RSA signing or X.509 verification.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { createSign, type KeyObject, randomUUID, verify } from "node:crypto";
+import * as Arr from "effect/Array";
+import * as Fn from "effect/Function";
+import * as Option from "effect/Option";
+import * as Rec from "effect/Record";
+import * as Result from "effect/Result";
+import * as Schema from "effect/Schema";
+import * as Str from "effect/String";
 import {
   assertChannel,
   assertRuntimeVersion,
@@ -28,59 +37,77 @@ export interface ParsedMultipartPart {
 }
 
 const CRLF = "\r\n";
+const QUOTED_BOUNDARY_RE = /^"(.*)"$/;
+const TRAILING_SLASHES_RE = /\/+$/;
+const encodeJson = Schema.encodeUnknownResult(Schema.fromJsonString(Schema.Unknown));
 
-/**
- * Encodes text parts as a `multipart/mixed` body. Each part's body is framed
- * byte for byte so signatures over a part's body verify after parsing.
- */
-export const encodeMultipartMixed = (
-  parts: readonly MultipartPart[],
-  boundary: string = randomUUID(),
-): { readonly contentType: string; readonly body: string } => {
-  const encodedParts = parts.map(({ headers, body }) =>
-    [
-      `--${boundary}`,
-      ...Object.entries(headers).map(([name, value]) => `${name}: ${value}`),
-      "",
-      body,
-    ].join(CRLF),
-  );
+interface EncodedMultipart {
+  readonly contentType: string;
+  readonly body: string;
+}
 
-  return {
-    contentType: `multipart/mixed; boundary=${boundary}`,
-    body: [...encodedParts, `--${boundary}--`, ""].join(CRLF),
-  };
-};
+/** Frames each part byte for byte so its signature survives parsing. */
+export const encodeMultipartMixed: {
+  (boundary?: string): (parts: readonly MultipartPart[]) => EncodedMultipart;
+  (parts: readonly MultipartPart[], boundary?: string): EncodedMultipart;
+} = Fn.dual(
+  (args) => Arr.isArray(args[0]),
+  (parts: readonly MultipartPart[], boundary: string = randomUUID()): EncodedMultipart => {
+    const encodedParts = Arr.map(parts, ({ headers, body }) =>
+      Arr.join(
+        [
+          `--${boundary}`,
+          ...Arr.map(Rec.toEntries(headers), ([name, value]) => `${name}: ${value}`),
+          "",
+          body,
+        ],
+        CRLF,
+      ),
+    );
+
+    return {
+      contentType: `multipart/mixed; boundary=${boundary}`,
+      body: Arr.join([...encodedParts, `--${boundary}--`, ""], CRLF),
+    };
+  },
+);
 
 const boundaryOf = (contentType: string): string | undefined => {
-  const [mediaType = "", ...parameters] = contentType.split(";");
-  if (mediaType.trim().toLowerCase() !== "multipart/mixed") return undefined;
+  const [mediaType, ...parameters] = Str.split(";")(contentType);
+  if (Str.toLowerCase(Str.trim(mediaType)) !== "multipart/mixed") return undefined;
 
-  const boundary = parameters
-    .map((parameter) => parameter.trim())
-    .find((parameter) => parameter.toLowerCase().startsWith("boundary="))
-    ?.slice("boundary=".length);
-  return boundary?.replace(/^"(.*)"$/, "$1") || undefined;
+  const parameter = Arr.findFirst(Arr.map(parameters, Str.trim), (value) =>
+    Str.startsWith("boundary=")(Str.toLowerCase(value)),
+  );
+  if (Option.isNone(parameter)) return undefined;
+  const boundary = Str.replace(
+    QUOTED_BOUNDARY_RE,
+    "$1",
+  )(Str.slice("boundary=".length)(parameter.value));
+  return boundary === "" ? undefined : boundary;
 };
 
 const parsePart = (text: string): ParsedMultipartPart => {
-  if (text.startsWith(CRLF)) {
-    return { headers: new Headers(), body: text.slice(CRLF.length) };
+  if (Str.startsWith(CRLF)(text)) {
+    return { headers: new Headers(), body: Str.slice(CRLF.length)(text) };
   }
 
-  const headerEnd = text.indexOf(CRLF + CRLF);
-  const headerBlock = headerEnd === -1 ? text : text.slice(0, headerEnd);
+  const headerEnd = Str.indexOf(CRLF + CRLF)(text);
+  const headerBlock = Option.isNone(headerEnd) ? text : Str.slice(0, headerEnd.value)(text);
   const headers = new Headers();
-  for (const line of headerBlock.split(CRLF)) {
-    const separator = line.indexOf(":");
-    if (separator > 0) {
-      headers.append(line.slice(0, separator), line.slice(separator + 1).trim());
+  for (const line of Str.split(CRLF)(headerBlock)) {
+    const separator = Str.indexOf(":")(line);
+    if (Option.isSome(separator) && separator.value > 0) {
+      headers.append(
+        Str.slice(0, separator.value)(line),
+        Str.trim(Str.slice(separator.value + 1)(line)),
+      );
     }
   }
 
   return {
     headers,
-    body: headerEnd === -1 ? "" : text.slice(headerEnd + 2 * CRLF.length),
+    body: Option.isNone(headerEnd) ? "" : Str.slice(headerEnd.value + 2 * CRLF.length)(text),
   };
 };
 
@@ -89,38 +116,42 @@ const parsePart = (text: string): ParsedMultipartPart => {
  * epilogue. Returns `undefined` when the content type is not `multipart/mixed`
  * with a boundary or has no closing delimiter.
  */
-export const parseMultipartMixed = (
-  contentType: string,
-  body: string,
-): readonly ParsedMultipartPart[] | undefined => {
+export const parseMultipartMixed: {
+  (body: string): (contentType: string) => readonly ParsedMultipartPart[] | undefined;
+  (contentType: string, body: string): readonly ParsedMultipartPart[] | undefined;
+} = Fn.dual(2, (contentType: string, body: string): readonly ParsedMultipartPart[] | undefined => {
   const boundary = boundaryOf(contentType);
   if (boundary === undefined) return undefined;
 
-  const delimiter = `--${boundary}`;
+  const delimiter = `${CRLF}--${boundary}`;
   const framed = CRLF + body;
   const parts: ParsedMultipartPart[] = [];
-  let cursor = framed.indexOf(CRLF + delimiter);
+  let cursor = Option.getOrElse(Str.indexOf(delimiter)(framed), () => -1);
 
   while (cursor !== -1) {
-    const afterDelimiter = cursor + CRLF.length + delimiter.length;
-    if (framed.startsWith("--", afterDelimiter)) return parts;
+    const afterDelimiter = cursor + delimiter.length;
+    if (Str.startsWith("--", afterDelimiter)(framed)) return parts;
 
-    const next = framed.indexOf(CRLF + delimiter, afterDelimiter);
+    // Effect's indexOf has no start offset. Scan the framed body in place.
+    // @effect-diagnostics-next-line preferEffectString:off
+    const next = framed.indexOf(delimiter, afterDelimiter);
     if (next === -1) return undefined;
 
-    parts.push(parsePart(framed.slice(afterDelimiter + CRLF.length, next)));
+    parts.push(parsePart(Str.slice(afterDelimiter + CRLF.length, next)(framed)));
     cursor = next;
   }
 
   return undefined;
-};
+});
 
 // --- RFC 8941 SFV dictionary helpers for `expo-signature` ---
 
 const escapeSfvString = (value: string): string =>
-  value.replaceAll("\\", "\\\\").replaceAll('"', '\\"');
+  Str.replaceAll('"', '\\"')(Str.replaceAll("\\", "\\\\")(value));
 
 /** Formats `expo-signature` as an RFC 8941 SFV dictionary (`sig="...", keyid="main", alg="rsa-v1_5-sha256"`). */
+// The optional key ID and algorithm are positional protocol parameters.
+// @effect-diagnostics-next-line missingPipeableSignature:off
 export const formatExpoSignature = (
   signatureBase64: string,
   keyId: string = MANIFEST_SIGNING_KEY_ID,
@@ -135,26 +166,29 @@ export interface ParsedExpoSignature {
 }
 
 const SFV_MEMBER_RE = /([a-z][a-z0-9_.-]*)="((?:\\.|[^"\\])*)"/g;
+const SFV_ESCAPE_RE = /\\(.)/g;
 
 /** Parses an RFC 8941 SFV string-valued `expo-signature` header. */
 export const parseExpoSignature = (header: string | null): ParsedExpoSignature | undefined => {
-  if (!header) return undefined;
+  if (header === null || header === "") return undefined;
   const entries = new Map<string, string>();
-  for (const match of header.matchAll(SFV_MEMBER_RE)) {
+  for (const match of Str.matchAll(SFV_MEMBER_RE)(header)) {
     const key = match[1];
     const rawValue = match[2];
     if (key !== undefined && rawValue !== undefined) {
-      entries.set(key, rawValue.replace(/\\(.)/g, "$1"));
+      entries.set(key, Str.replace(SFV_ESCAPE_RE, "$1")(rawValue));
     }
   }
   const sig = entries.get("sig");
   const keyid = entries.get("keyid");
   const alg = entries.get("alg");
-  if (!sig || !keyid) return undefined;
+  if (sig === undefined || sig === "" || keyid === undefined || keyid === "") return undefined;
   return alg === undefined ? { sig, keyid } : { sig, keyid, alg };
 };
 
 /** Signs exact UTF-8 manifest/directive body bytes with RSA PKCS #1 v1.5 SHA-256. */
+// The signing key and optional key ID are positional protocol parameters.
+// @effect-diagnostics-next-line missingPipeableSignature:off
 export const signManifestBody = (
   body: string,
   signingKeyPem: string | KeyObject,
@@ -165,6 +199,8 @@ export const signManifestBody = (
 };
 
 /** Verifies an `expo-signature` header against exact part body bytes and a public key or X.509 cert PEM. */
+// The header, verification key, and optional key ID are positional protocol parameters.
+// @effect-diagnostics-next-line missingPipeableSignature:off
 export const verifyManifestSignature = (
   body: string,
   expoSignatureHeader: string | null,
@@ -212,9 +248,9 @@ const getHeader = (headers: HeaderInput, name: string): string | null => {
   if (headers instanceof Headers) {
     return headers.get(name);
   }
-  const lower = name.toLowerCase();
-  for (const [key, value] of Object.entries(headers)) {
-    if (key.toLowerCase() === lower) {
+  const lower = Str.toLowerCase(name);
+  for (const [key, value] of Rec.toEntries(headers)) {
+    if (Str.toLowerCase(key) === lower) {
       return value ?? null;
     }
   }
@@ -229,32 +265,39 @@ const hasHeader = (headers: HeaderInput, name: string): boolean => {
 };
 
 const acceptsMultipartMixed = (accept: string | null): boolean => {
-  if (accept === null || accept.trim() === "") return true;
-  for (const rawRange of accept.split(",")) {
-    const [rawType = "", ...params] = rawRange.split(";");
-    const type = rawType.trim().toLowerCase();
+  if (accept === null || Str.trim(accept) === "") return true;
+  for (const rawRange of Str.split(",")(accept)) {
+    const [rawType, ...params] = Str.split(";")(rawRange);
+    const type = Str.toLowerCase(Str.trim(rawType));
     if (type !== "multipart/mixed" && type !== "multipart/*" && type !== "*/*") {
       continue;
     }
-    const qParam = params
-      .map((p) => p.trim().toLowerCase())
-      .find((p) => p.startsWith("q="))
-      ?.slice(2);
-    const q = qParam === undefined ? 1 : Number(qParam);
+    const qParam = Arr.findFirst(
+      Arr.map(params, (param) => Str.toLowerCase(Str.trim(param))),
+      Str.startsWith("q="),
+    );
+    const q = Option.isNone(qParam) ? 1 : Number(Str.slice(2)(qParam.value));
     if (!Number.isNaN(q) && q > 0) return true;
   }
   return false;
+};
+
+const nonBlank = (value: string | null | undefined): string | undefined => {
+  const trimmed = Str.trim(value ?? "");
+  return trimmed === "" ? undefined : trimmed;
 };
 
 /**
  * Reads and validates an Expo Updates protocol v1 manifest request from HTTP
  * headers and optional URL search params.
  */
+// Headers and optional search params come directly from the request adapter.
+// @effect-diagnostics-next-line missingPipeableSignature:off
 export const readManifestRequest = (
   headers: HeaderInput,
   searchParams?: URLSearchParams,
 ): ReadManifestRequestResult => {
-  if (getHeader(headers, "expo-protocol-version")?.trim() !== "1") {
+  if (nonBlank(getHeader(headers, "expo-protocol-version")) !== "1") {
     return {
       _tag: "Rejected",
       status: 406,
@@ -271,7 +314,7 @@ export const readManifestRequest = (
   }
 
   const rawPlatform =
-    getHeader(headers, "expo-platform")?.trim() || searchParams?.get("platform")?.trim();
+    nonBlank(getHeader(headers, "expo-platform")) ?? nonBlank(searchParams?.get("platform"));
   if (!isMobilePlatform(rawPlatform)) {
     return {
       _tag: "Rejected",
@@ -281,9 +324,9 @@ export const readManifestRequest = (
   }
 
   const rawRuntimeVersion =
-    getHeader(headers, "expo-runtime-version")?.trim() ||
-    searchParams?.get("runtime-version")?.trim();
-  if (!rawRuntimeVersion) {
+    nonBlank(getHeader(headers, "expo-runtime-version")) ??
+    nonBlank(searchParams?.get("runtime-version"));
+  if (rawRuntimeVersion === undefined) {
     return {
       _tag: "Rejected",
       status: 400,
@@ -301,8 +344,8 @@ export const readManifestRequest = (
   }
 
   const rawChannel =
-    getHeader(headers, "expo-channel-name")?.trim() ||
-    searchParams?.get("channel-name")?.trim() ||
+    nonBlank(getHeader(headers, "expo-channel-name")) ??
+    nonBlank(searchParams?.get("channel-name")) ??
     DEFAULT_UPDATE_CHANNEL;
   try {
     assertChannel(rawChannel);
@@ -314,15 +357,12 @@ export const readManifestRequest = (
     };
   }
 
-  const rawCurrentId = getHeader(headers, "expo-current-update-id")?.trim();
-  const currentUpdateId = rawCurrentId && rawCurrentId.length > 0 ? rawCurrentId : null;
-
   return {
     _tag: "Request",
     platform: rawPlatform,
     runtimeVersion: rawRuntimeVersion,
     channel: rawChannel,
-    currentUpdateId,
+    currentUpdateId: nonBlank(getHeader(headers, "expo-current-update-id")) ?? null,
     expectsSignature: hasHeader(headers, "expo-expect-signature"),
   };
 };
@@ -338,7 +378,7 @@ export interface BuildManifestResponseInput {
 export interface ManifestResponseOk {
   readonly _tag: "Response";
   readonly status: 200;
-  readonly headers: Readonly<Record<string, string>>;
+  readonly headers: Readonly<Record<string, string>> & { readonly "content-type": string };
   readonly body: string;
 }
 
@@ -413,7 +453,7 @@ const selectReply = (
       createdAt: latest.createdAt,
       runtimeVersion: latest.runtimeVersion,
       launchAsset: toProtocolAsset(latest.launchAsset, origin),
-      assets: latest.assets.map((asset) => toProtocolAsset(asset, origin)),
+      assets: Arr.map(latest.assets, (asset) => toProtocolAsset(asset, origin)),
       metadata: latest.metadata,
       extra: latest.extra,
     },
@@ -437,17 +477,17 @@ export const buildManifestResponse = ({
   signingKeyPem,
   boundary,
 }: BuildManifestResponseInput): BuildManifestResponseResult => {
-  const parsedOrigin = URL.parse(origin.trim());
-  const normalizedOrigin = parsedOrigin ? parsedOrigin.origin : origin.replace(/\/+$/, "");
+  const parsedOrigin = URL.parse(Str.trim(origin));
+  const normalizedOrigin = parsedOrigin?.origin ?? Str.replace(TRAILING_SLASHES_RE, "")(origin);
 
   const reply = selectReply(request, latest, normalizedOrigin);
-  const partBody = JSON.stringify(reply.body);
+  const partBody = Result.getOrThrow(encodeJson(reply.body));
   const partHeaders = formDataPartHeaders(reply.part, "application/json; charset=utf-8");
 
   if (request.expectsSignature) {
     if (
       signingKeyPem === undefined ||
-      (typeof signingKeyPem === "string" && signingKeyPem.trim() === "")
+      (Str.isString(signingKeyPem) && Str.trim(signingKeyPem) === "")
     ) {
       return {
         _tag: "SigningUnavailable",
@@ -471,7 +511,7 @@ export const buildManifestResponse = ({
       { headers: partHeaders, body: partBody },
       {
         headers: formDataPartHeaders("extensions", "application/json"),
-        body: JSON.stringify({ assetRequestHeaders: {} }),
+        body: '{"assetRequestHeaders":{}}',
       },
     ],
     boundary,

@@ -1,5 +1,6 @@
 import type { TemplateId } from "@kvitbit/domain/contract";
 import { formatDate } from "@kvitbit/ui-port/format";
+import * as Arr from "effect/Array";
 import { CalendarClock, FileText, Plus } from "lucide-react-native";
 import { useCallback, useMemo, useState } from "react";
 import { StyleSheet, View } from "react-native";
@@ -87,7 +88,10 @@ export function TemplatesListScreen() {
 
       <RemoteView state={remote.state} onRetry={remote.reload}>
         {(rawItems) => {
-          const all = rawItems.map(decodeTemplate);
+          const all = Arr.flatMap(rawItems, (raw) => {
+            const template = decodeTemplate(raw);
+            return template === null ? [] : [template];
+          });
           if (all.length === 0) {
             return (
               <EmptyState
@@ -110,7 +114,7 @@ export function TemplatesListScreen() {
 
           return (
             <Section>
-              {visible.map((tpl) => {
+              {Arr.map(visible, (tpl) => {
                 const state = scheduleStateOf(tpl.schedule);
                 const metaParts: Array<string> = [t(`enum.documentKind.${tpl.kind}`)];
                 if (tpl.currency !== null) metaParts.push(tpl.currency);
@@ -140,7 +144,7 @@ export function TemplatesListScreen() {
                     testID={`template-row-${tpl.id}`}
                     leading={tpl.schedule !== null ? CalendarClock : FileText}
                     title={tpl.name}
-                    subtitle={metaParts.join(" · ")}
+                    subtitle={Arr.join(metaParts, " · ")}
                     badge={badge}
                     onPress={() => openDetail(tpl.id)}
                   />

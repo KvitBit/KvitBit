@@ -1,4 +1,7 @@
 import { describe, expect, test } from "bun:test";
+import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
+import * as Str from "effect/String";
 import {
   androidVersionCode,
   apkFileName,
@@ -22,8 +25,12 @@ import {
   type StoredUpdate,
 } from "./storage-layout";
 
-const SAMPLE_SHA256 = "a".repeat(64);
-const SAMPLE_HASH_B64URL = "A".repeat(43);
+const encodeJson = (
+  value: Readonly<Record<string, Schema.Json>> | StoredUpdate | StoredRollback | ReleaseInfo,
+) => Schema.encodeOption(Schema.fromJsonString(Schema.Unknown))(value).pipe(Option.getOrThrow);
+
+const SAMPLE_SHA256 = Str.repeat(64)("a");
+const SAMPLE_HASH_B64URL = Str.repeat(43)("A");
 const SAMPLE_UUID_1 = "11111111-1111-4111-8111-111111111111";
 const SAMPLE_UUID_2 = "22222222-2222-4222-8222-222222222222";
 
@@ -41,6 +48,7 @@ describe("storage-layout object keys", () => {
       }),
     ).toBe("mobile/updates/channels/production/android/fp-abc123/");
 
+    // biome-ignore lint/security/noSecrets: Public timestamp format example.
     expect(formatPublicationTimestamp("2026-11-24T09:05:03.007Z")).toBe("20261124T090503007Z");
 
     expect(
@@ -112,14 +120,16 @@ describe("selectors and parsers", () => {
       launchAsset: {
         sha256: SAMPLE_SHA256,
         hash: SAMPLE_HASH_B64URL,
-        key: "0123456789abcdef0123456789abcdef",
+        // biome-ignore lint/security/noSecrets: Deterministic Metro asset key for the fixture.
+        key: Str.repeat(2)("0123456789abcdef"),
         contentType: "application/javascript",
       },
       assets: [
         {
-          sha256: "b".repeat(64),
-          hash: "B".repeat(43),
-          key: "fedcba9876543210fedcba9876543210",
+          sha256: Str.repeat(64)("b"),
+          hash: Str.repeat(43)("B"),
+          // biome-ignore lint/security/noSecrets: Deterministic Metro asset key for the fixture.
+          key: Str.repeat(2)("fedcba9876543210"),
           contentType: "image/png",
           fileExtension: ".png",
         },
@@ -127,7 +137,7 @@ describe("selectors and parsers", () => {
       metadata: { gitSha: "d716dec" },
       extra: { expoClient: { name: "Kvitbit" } },
     };
-    expect(parsePublication(JSON.stringify(update))).toEqual(update);
+    expect(parsePublication(encodeJson(update))).toEqual(update);
 
     const rollback: StoredRollback = {
       schema: 1,
@@ -138,9 +148,9 @@ describe("selectors and parsers", () => {
       platform: "ios",
       runtimeVersion: "fp-1",
     };
-    expect(parsePublication(JSON.stringify(rollback))).toEqual(rollback);
+    expect(parsePublication(encodeJson(rollback))).toEqual(rollback);
 
-    expect(() => parsePublication(JSON.stringify({ ...rollback, schema: 2 }))).toThrow();
+    expect(() => parsePublication(encodeJson({ ...rollback, schema: 2 }))).toThrow();
   });
 
   test("parseAssetMeta validates schema 1 asset metadata", () => {
@@ -150,8 +160,8 @@ describe("selectors and parsers", () => {
       contentType: "image/png",
       size: 4096,
     };
-    expect(parseAssetMeta(JSON.stringify(meta))).toEqual(meta);
-    expect(() => parseAssetMeta(JSON.stringify({ ...meta, size: -1 }))).toThrow();
+    expect(parseAssetMeta(encodeJson(meta))).toEqual(meta);
+    expect(() => parseAssetMeta(encodeJson({ ...meta, size: -1 }))).toThrow();
   });
 
   test("parseReleaseInfo and latestRelease pick highest versionCode", () => {
@@ -172,7 +182,7 @@ describe("selectors and parsers", () => {
       versionCode: 2000,
       apkUrl: "/api/mobile/releases/0.2.0/apk",
     };
-    expect(parseReleaseInfo(JSON.stringify(r2))).toEqual(r2);
+    expect(parseReleaseInfo(encodeJson(r2))).toEqual(r2);
     expect(latestRelease([r1, r2])).toEqual(r2);
     expect(latestRelease([])).toBeUndefined();
   });

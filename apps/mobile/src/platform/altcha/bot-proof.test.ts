@@ -1,10 +1,25 @@
 import { describe, expect, test } from "bun:test";
+/* biome-ignore lint/correctness/noNodejsModules: Use Node crypto as an independent oracle for the mobile KDFs. */ // @effect-diagnostics-next-line nodeBuiltinImport:off
 import crypto, { createHash, pbkdf2Sync } from "node:crypto";
+// biome-ignore lint/correctness/noNodejsModules: Adapt the Node argon2 callback for the oracle test.
 import { promisify } from "node:util";
+import * as DateTime from "effect/DateTime";
+import * as Effect from "effect/Effect";
+import * as Schema from "effect/Schema";
+import * as EffectString from "effect/String";
 import { fetchChallenge, isExpired, solveChallenge } from "./bot-proof";
 import { argon2id, blake2b, bytesToHex, hexToBytes, pbkdf2Sha256, sha256 } from "./kdf";
 
 const argon2Async = promisify(crypto.argon2);
+const iso = (milliseconds: number) => DateTime.formatIso(DateTime.makeUnsafe(milliseconds));
+const encodeJson = Schema.encodeEffect(Schema.fromJsonString(Schema.Unknown));
+const Proof = Schema.Struct({
+  challenge: Schema.Unknown,
+  solution: Schema.Struct({ counter: Schema.Int, derivedKey: Schema.String, time: Schema.Finite }),
+});
+const parseProof = Schema.decodeEffect(Schema.fromJsonString(Proof));
+const decodePayload = (payload: string) =>
+  Effect.runPromise(parseProof(Buffer.from(payload, "base64").toString("utf8")));
 
 describe("kdf primitives", () => {
   test("sha256 matches node:crypto", () => {
@@ -15,7 +30,7 @@ describe("kdf primitives", () => {
 
   test("pbkdf2Sha256 matches node:crypto", async () => {
     const pwd = new TextEncoder().encode("password");
-    const salt = new TextEncoder().encode("salt123456789012");
+    const salt = new TextEncoder().encode("a fixed test salt");
     const derived = await pbkdf2Sha256(pwd, salt, 100, 32);
     const expected = pbkdf2Sync(pwd, salt, 100, 32, "sha256").toString("hex");
     expect(bytesToHex(derived)).toBe(expected);
@@ -24,7 +39,9 @@ describe("kdf primitives", () => {
   test("blake2b matches RFC 7693 test vector for 'abc'", () => {
     const out = blake2b(new TextEncoder().encode("abc"), 64);
     expect(bytesToHex(out)).toBe(
+      // biome-ignore lint/security/noSecrets: Public RFC 7693 digest fixture.
       "ba80a53f981c4d0d6a2797b69f12f6e94c212f14685ac4b74b12bb6fdbffa2d1" +
+        // biome-ignore lint/security/noSecrets: Second half of the RFC digest fixture.
         "7d87c5392aab792dc252d5de4533cc9518d38aa8dbf1925ab92386edd4009923",
     );
   });
@@ -47,10 +64,8 @@ describe("kdf primitives", () => {
 
 describe("fetchChallenge", () => {
   test("returns NotRequired on 204", async () => {
-    const result = await fetchChallenge(
-      "https://kvitbit.test",
-      "sign_up",
-      async () => new Response(null, { status: 204 }),
+    const result = await fetchChallenge("https://kvitbit.test", "sign_up", () =>
+      Promise.resolve(new Response(null, { status: 204 })),
     );
     expect(result).toEqual({ _tag: "NotRequired" });
   });
@@ -60,29 +75,25 @@ describe("fetchChallenge", () => {
       parameters: { algorithm: "PBKDF2/SHA-256", nonce: "aa", salt: "bb", cost: 1, keyPrefix: "0" },
       signature: "sig",
     };
+    const body = await Effect.runPromise(encodeJson(challenge));
     let requestedUrl = "";
-    const result = await fetchChallenge("https://kvitbit.test/", "magic_link", async (url) => {
+    const result = await fetchChallenge("https://kvitbit.test/", "magic_link", (url) => {
       requestedUrl = url;
-      return new Response(JSON.stringify(challenge), { status: 200 });
+      return Promise.resolve(new Response(body, { status: 200 }));
     });
     expect(requestedUrl).toBe("https://kvitbit.test/api/v1/bot-protection/challenges/magic_link");
     expect(result).toEqual({ _tag: "Challenge", challenge });
   });
 
   test("maps 429 to RateLimited and network errors to Offline", async () => {
-    const rate = await fetchChallenge(
-      "https://kvitbit.test",
-      "sign_in",
-      async () => new Response("{}", { status: 429, headers: { "retry-after": "12" } }),
+    const rate = await fetchChallenge("https://kvitbit.test", "sign_in", () =>
+      Promise.resolve(new Response("{}", { status: 429, headers: { "retry-after": "12" } })),
     );
-    expect(rate._tag).toBe("Err");
-    if (rate._tag === "Err") {
-      expect(rate.error._tag).toBe("RateLimited");
-    }
+    expect(rate).toMatchObject({ _tag: "Err", error: { _tag: "RateLimited" } });
 
-    const offline = await fetchChallenge("https://kvitbit.test", "sign_in", async () => {
-      throw new TypeError("network down");
-    });
+    const offline = await fetchChallenge("https://kvitbit.test", "sign_in", () =>
+      Promise.reject(new TypeError("network down")),
+    );
     expect(offline).toEqual({ _tag: "Err", error: { _tag: "Offline" } });
   });
 });
@@ -108,16 +119,13 @@ describe("solveChallenge", () => {
       onProgress: (p) => progressValues.push(p),
     });
     expect(outcome._tag).toBe("Solved");
-    if (outcome._tag !== "Solved") return;
-    expect(outcome.expiresAt).toBe(new Date(expiresSec * 1000).toISOString());
+    if (outcome._tag !== "Solved") throw new Error("Expected a solved challenge.");
+    expect(outcome.expiresAt).toBe(iso(expiresSec * 1000));
     expect(progressValues.at(-1)).toBe(1);
 
-    const decoded = JSON.parse(Buffer.from(outcome.payload, "base64").toString("utf8")) as {
-      challenge: typeof challenge;
-      solution: { counter: number; derivedKey: string; time: number };
-    };
+    const decoded = await decodePayload(outcome.payload);
     expect(decoded.challenge).toEqual(challenge);
-    expect(decoded.solution.derivedKey.startsWith("0")).toBe(true);
+    expect(EffectString.startsWith("0")(decoded.solution.derivedKey)).toBe(true);
 
     // Independently verify derivedKey with node:crypto pbkdf2Sync
     const nonceBytes = hexToBytes(challenge.parameters.nonce);
@@ -154,12 +162,10 @@ describe("solveChallenge", () => {
     };
     const outcome = await solveChallenge(challenge);
     expect(outcome._tag).toBe("Solved");
-    if (outcome._tag !== "Solved") return;
+    if (outcome._tag !== "Solved") throw new Error("Expected a solved challenge.");
     expect(outcome.expiresAt).toBeNull();
-    const decoded = JSON.parse(Buffer.from(outcome.payload, "base64").toString("utf8")) as {
-      solution: { derivedKey: string };
-    };
-    expect(decoded.solution.derivedKey.startsWith("0")).toBe(true);
+    const decoded = await decodePayload(outcome.payload);
+    expect(EffectString.startsWith("0")(decoded.solution.derivedKey)).toBe(true);
   });
 
   test("respects AbortSignal", async () => {
@@ -189,7 +195,7 @@ describe("solveChallenge", () => {
 describe("isExpired", () => {
   test("respects margin and null expiresAt", () => {
     expect(isExpired(null, 1_000_000)).toBe(false);
-    const exp = new Date(1_020_000).toISOString();
+    const exp = iso(1_020_000);
     expect(isExpired(exp, 1_005_000, 10_000)).toBe(false);
     expect(isExpired(exp, 1_010_000, 10_000)).toBe(true);
     expect(isExpired("not-a-date", 1_000_000)).toBe(true);

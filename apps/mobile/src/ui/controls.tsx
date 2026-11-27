@@ -1,3 +1,4 @@
+import * as EffectArray from "effect/Array";
 import { Pressable, Switch as RNSwitch, StyleSheet, View } from "react-native";
 import { useTheme } from "../theme/theme-provider";
 import { Text } from "./text";
@@ -25,7 +26,7 @@ export function SegmentedChoice<T extends string>(props: {
         </Text>
       )}
       <View accessibilityRole="radiogroup" style={styles.chips}>
-        {props.choices.map((choice) => {
+        {EffectArray.map(props.choices, (choice) => {
           const selected = choice.value === props.value;
           return (
             <Pressable
@@ -38,7 +39,7 @@ export function SegmentedChoice<T extends string>(props: {
                 {
                   borderRadius: theme.shape.control,
                   borderColor: selected ? c.secondaryContainer : c.outline,
-                  backgroundColor: selected ? c.secondaryContainer : "transparent",
+                  backgroundColor: selected ? c.secondaryContainer : undefined,
                 },
               ]}
             >

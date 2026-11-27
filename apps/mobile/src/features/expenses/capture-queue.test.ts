@@ -1,13 +1,19 @@
+// biome-ignore-all lint/suspicious/noMisplacedAssertion: The storage fixture checks every compare-and-set performed by the tests.
 import { describe, expect, test } from "bun:test";
 import { PayloadTooLarge } from "@kvitbit/api-contract";
 import {
-  type ExpenseId,
+  ExpenseId,
   Invalid,
+  WorkspaceId,
+  WorkspaceSlug,
   type WorkspaceSummary,
   WorkspaceSummary as WorkspaceSummarySchema,
 } from "@kvitbit/domain/contract";
 import { UiError } from "@kvitbit/ui-port/api";
-import { Schema } from "effect";
+import * as Arr from "effect/Array";
+import * as Effect from "effect/Effect";
+import * as Schema from "effect/Schema";
+import * as Str from "effect/String";
 import type { CaptureStorage } from "../../platform/capture/capture-storage-port";
 import { done, failed } from "../../platform/transfer/http";
 import {
@@ -21,7 +27,7 @@ import {
 import { importSharedReceipts } from "./capture-share";
 import { readReceipt } from "./receipt-file";
 
-const workspace: WorkspaceSummary = Schema.decodeUnknownSync(WorkspaceSummarySchema)({
+const workspace: WorkspaceSummary = Schema.decodeEffect(WorkspaceSummarySchema)({
   id: "01937c7a-0000-7000-8000-000000000001",
   slug: "test",
   role: "member",
@@ -29,8 +35,8 @@ const workspace: WorkspaceSummary = Schema.decodeUnknownSync(WorkspaceSummarySch
   name: "Test",
   memberCount: 1,
   taxRegime: "vat_payer",
-});
-const expenseId = "01937c7a-0000-7000-8000-000000000002" as ExpenseId;
+}).pipe(Effect.runSync);
+const expenseId = ExpenseId.make("01937c7a-0000-7000-8000-000000000002");
 const scope = { principalId: "account", workspaceId: workspace.id, workspaceSlug: workspace.slug };
 const access: CaptureAccess = { scope, canWrite: () => true };
 const first = { ref: "cache:first", name: "receipt.pdf", contentType: "application/pdf", size: 1 };
@@ -53,34 +59,39 @@ function fixture() {
     [first.ref, a],
     [second.ref, b],
   ]);
-  const writes = { beforeSave: (_value: string) => {} };
+  const writes = { beforeSave: (_value: string): void => undefined };
   const storage: CaptureStorage = {
     load: async (key) => journal.get(key) ?? null,
-    save: async (key, value, previous) => {
-      expect(journal.get(key) ?? "[]").toBe(previous);
-      writes.beforeSave(value);
-      journal.set(key, value);
-    },
+    save: (key, value, previous) =>
+      Effect.sync(() => {
+        expect(journal.get(key) ?? "[]").toBe(previous);
+        writes.beforeSave(value);
+        journal.set(key, value);
+      }).pipe(Effect.runPromise),
     lock: async (_key, run) => run(),
   };
   const start = () =>
     makeCaptureQueue({
       storage,
-      key: async () => `01937c7a-0000-7000-8000-${String(++nextKey).padStart(12, "0")}`,
+      key: async () => `01937c7a-0000-7000-8000-${Str.padStart(12, "0")(String(++nextKey))}`,
       read: (file) =>
-        readReceipt(file, async (ref) => {
-          const captured = bytes.get(ref);
-          if (captured === undefined) throw new Error("Missing file");
-          return captured.slice();
-        }),
-      saveBytes: async (key, _name, data) => {
-        const ref = `saved:${key}`;
-        bytes.set(ref, data.slice());
-        return ref;
-      },
-      removeBytes: async (ref) => {
-        bytes.delete(ref);
-      },
+        readReceipt(file, (ref) =>
+          Effect.sync(() => {
+            const captured = bytes.get(ref);
+            if (captured === undefined) throw new Error("Missing file");
+            return captured.slice();
+          }).pipe(Effect.runPromise),
+        ),
+      saveBytes: (key, _name, data) =>
+        Effect.sync(() => {
+          const ref = `saved:${key}`;
+          bytes.set(ref, data.slice());
+          return ref;
+        }).pipe(Effect.runPromise),
+      removeBytes: (ref) =>
+        Effect.sync(() => {
+          bytes.delete(ref);
+        }).pipe(Effect.runPromise),
       now: () => clock,
     });
   return {
@@ -103,6 +114,7 @@ describe("expense capture replay", () => {
     const [one, two] = job.files;
     if (one === undefined || two === undefined) throw new Error("Missing receipts");
     expect(one.file.sha256).toBe(
+      // biome-ignore lint/security/noSecrets: Known SHA-256 digest of the synthetic abc receipt.
       "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
     );
     expect(one.file.size).toBe(3);
@@ -157,13 +169,16 @@ describe("expense capture replay", () => {
       progress,
     );
     const [checkpoint] = await disk.start().load(scope);
-    expect(checkpoint?.files.map((file) => file.result?.kind)).toEqual(["uploaded", undefined]);
+    expect(Arr.map(checkpoint?.files ?? [], (file) => file.result?.kind)).toEqual([
+      "uploaded",
+      undefined,
+    ]);
 
     const secondRestart = disk.start();
     expect((await secondRestart.drain(access, network)).completed).toEqual([]);
     disk.advance(5_000);
     expect(
-      (await secondRestart.drain(access, network)).completed.map((item) => item.expenseId),
+      Arr.map((await secondRestart.drain(access, network)).completed, (item) => item.expenseId),
     ).toEqual([expenseId]);
     expect(createKeys).toEqual([job.key, job.key]);
     expect(sentKeys).toEqual([one.key, two.key, two.key]);
@@ -180,19 +195,20 @@ describe("expense capture replay", () => {
     if (job === undefined) throw new Error("Missing staged job");
     const requests: string[] = [];
     const network: CaptureNetwork = {
-      record: async (_scope, key) => {
-        requests.push(key);
-        return done(expenseId);
-      },
+      record: (_scope, key) =>
+        Effect.sync(() => {
+          requests.push(key);
+          return done(expenseId);
+        }).pipe(Effect.runPromise),
       upload: async () => done({}),
     };
     disk.writes.beforeSave = (value) => {
-      if (value.includes(`"expenseId":"${expenseId}"`)) throw new Error("Interrupted commit");
+      if (Str.includes(`"expenseId":"${expenseId}"`)(value)) throw new Error("Interrupted commit");
     };
     await expect(queue.submit(access, network, job.key, fields, progress)).rejects.toThrow(
       "Interrupted commit",
     );
-    disk.writes.beforeSave = () => {};
+    disk.writes.beforeSave = () => undefined;
     const result = await disk.start().drain(access, network);
     expect(result.completed[0]?.expenseId).toBe(expenseId);
     expect(requests).toEqual([job.key, job.key]);
@@ -207,13 +223,15 @@ describe("expense capture replay", () => {
     let calls = 0;
     const network: CaptureNetwork = {
       isOnline: async () => connected,
-      record: async () => {
-        calls++;
-        return failed(UiError.timeout);
-      },
-      upload: async () => {
-        throw new Error("No confirmed expense exists");
-      },
+      record: () =>
+        Effect.sync(() => {
+          calls++;
+          return failed(UiError.timeout);
+        }).pipe(Effect.runPromise),
+      upload: () =>
+        Effect.sync(() => {
+          throw new Error("No confirmed expense exists");
+        }).pipe(Effect.runPromise),
     };
     const offline = await queue.submit(access, network, job.key, fields, progress);
     expect(offline?.recordAttemptAt).toBeUndefined();
@@ -240,12 +258,14 @@ describe("expense capture replay", () => {
     if (job === undefined || receipt === undefined) throw new Error("Missing staged receipt");
     disk.bytes.set(receipt.file.ref, b);
     const network: CaptureNetwork = {
-      record: async () => {
-        throw new Error("Existing expenses cannot be created again");
-      },
-      upload: async () => {
-        throw new Error("Damaged file cannot be uploaded");
-      },
+      record: () =>
+        Effect.sync(() => {
+          throw new Error("Existing expenses cannot be created again");
+        }).pipe(Effect.runPromise),
+      upload: () =>
+        Effect.sync(() => {
+          throw new Error("Damaged file cannot be uploaded");
+        }).pipe(Effect.runPromise),
     };
     const blocked = await queue.submit(access, network, job.key, fields, progress);
     expect(blocked?.expenseId).toBe(expenseId);
@@ -261,13 +281,15 @@ describe("expense capture replay", () => {
     let allowed = true;
     const live = { scope, canWrite: () => allowed };
     const network: CaptureNetwork = {
-      record: async () => {
-        allowed = false;
-        return done(expenseId);
-      },
-      upload: async () => {
-        throw new Error("Revoked access cannot upload");
-      },
+      record: () =>
+        Effect.sync(() => {
+          allowed = false;
+          return done(expenseId);
+        }).pipe(Effect.runPromise),
+      upload: () =>
+        Effect.sync(() => {
+          throw new Error("Revoked access cannot upload");
+        }).pipe(Effect.runPromise),
     };
     await queue.submit(live, network, job.key, fields, progress);
     expect((await queue.load(scope))[0]?.expenseId).toBe(expenseId);
@@ -275,7 +297,7 @@ describe("expense capture replay", () => {
     expect(
       await queue.load({
         ...scope,
-        workspaceId: "01937c7a-0000-7000-8000-000000000003" as WorkspaceSummary["id"],
+        workspaceId: WorkspaceId.make("01937c7a-0000-7000-8000-000000000003"),
       }),
     ).toEqual([]);
     expect(await queue.submit(live, network, job.key, fields, progress)).toBeUndefined();
@@ -294,10 +316,10 @@ describe("expense capture replay", () => {
     const { job } = await queue.stage(access, null, [acceptedFile, rejectedFile]);
     if (job === undefined) throw new Error("Missing staged job");
 
-    const mimeMismatch = new Invalid({
+    const mimeMismatch = Invalid.make({
       issues: [{ path: ["file"], code: "attachment.type_rejected" }],
     });
-    const tooLarge = new PayloadTooLarge({ limitBytes: 20 * 1024 * 1024 });
+    const tooLarge = PayloadTooLarge.make({ limitBytes: 20 * 1024 * 1024 });
 
     const network: CaptureNetwork = {
       record: async () => done(expenseId),
@@ -308,7 +330,7 @@ describe("expense capture replay", () => {
     const completed = await queue.submit(access, network, job.key, fields, progress);
     expect(completed?.done).toBe(true);
     expect(await disk.start().load(scope)).toEqual([]);
-    expect([...disk.bytes.keys()].filter((key) => key.startsWith("saved:"))).toEqual([]);
+    expect(Arr.filter([...disk.bytes.keys()], (key) => Str.startsWith("saved:")(key))).toEqual([]);
 
     const reopened = disk.start();
     const persisted = await reopened.loadRejected(scope, expenseId);
@@ -334,13 +356,13 @@ describe("expense capture replay", () => {
     );
 
     const both = await disk.start().loadRejected(scope, expenseId);
-    expect(both.map((item) => item.name)).toEqual(["spoofed-receipt.pdf", "huge-scan.pdf"]);
+    expect(Arr.map(both, (item) => item.name)).toEqual(["spoofed-receipt.pdf", "huge-scan.pdf"]);
     expect(both[1]?.error._tag).toBe("PayloadTooLarge");
 
     const firstKey = both[0]?.key;
     if (firstKey === undefined) throw new Error("Missing rejected key");
     await disk.start().dismissRejected(access, expenseId, firstKey);
-    expect((await disk.start().loadRejected(scope, expenseId)).map((i) => i.name)).toEqual([
+    expect(Arr.map(await disk.start().loadRejected(scope, expenseId), (i) => i.name)).toEqual([
       "huge-scan.pdf",
     ]);
 
@@ -353,8 +375,8 @@ describe("expense capture replay", () => {
     const queue = disk.start();
     const secondWorkspaceScope = {
       principalId: scope.principalId,
-      workspaceId: "01937c7a-0000-7000-8000-000000000099" as WorkspaceSummary["id"],
-      workspaceSlug: "beta" as WorkspaceSummary["slug"],
+      workspaceId: WorkspaceId.make("01937c7a-0000-7000-8000-000000000099"),
+      workspaceSlug: WorkspaceSlug.make("beta"),
     };
     const secondAccess: CaptureAccess = { scope: secondWorkspaceScope, canWrite: () => true };
 
@@ -374,7 +396,7 @@ describe("expense capture replay", () => {
       secondAccess,
       {
         record: async () =>
-          failed(new Invalid({ issues: [{ path: ["total"], code: "expense.incomplete" }] })),
+          failed(Invalid.make({ issues: [{ path: ["total"], code: "expense.incomplete" }] })),
         upload: async () => done({}),
       },
       secondStage.job.key,
@@ -401,10 +423,11 @@ describe("Android receipt-share intake", () => {
       sizeBytes: first.size,
     };
     let reads = 0;
-    const list = async () => {
-      reads++;
-      return [share];
-    };
+    const list = () =>
+      Effect.sync(() => {
+        reads++;
+        return [share];
+      }).pipe(Effect.runPromise);
     let attempts = 0;
     const acknowledge = async (refs: readonly string[]) => {
       expect(refs).toEqual([share.uri]);
@@ -427,6 +450,8 @@ describe("Android receipt-share intake", () => {
     const imported = await importSharedReceipts(access, disk.start(), { list, acknowledge });
     expect(imported?.job?.files).toHaveLength(1);
     expect(attempts).toBe(2);
-    expect([...disk.bytes.keys()].filter((key) => key.startsWith("saved:"))).toHaveLength(1);
+    expect(Arr.filter([...disk.bytes.keys()], (key) => Str.startsWith("saved:")(key))).toHaveLength(
+      1,
+    );
   });
 });

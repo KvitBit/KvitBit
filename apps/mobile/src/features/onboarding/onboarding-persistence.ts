@@ -1,193 +1,112 @@
-import type { CurrencyCode, TaxRegime, WorkspaceId, WorkspaceSlug } from "@kvitbit/domain/contract";
-import type { Locale } from "@kvitbit/ui-port/i18n";
+import {
+  CurrencyCode,
+  Locale,
+  TaxRegime,
+  WorkspaceId,
+  WorkspaceSlug,
+} from "@kvitbit/domain/contract";
 import AsyncStorage from "@react-native-async-storage/async-storage";
+import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
+import { fromMobilePromise, runMobileEffect } from "../../runtime/request-intent";
 
-export type OnboardingStep = 1 | 2 | 3;
+const OnboardingStep = Schema.Literals([1, 2, 3]);
+export type OnboardingStep = typeof OnboardingStep.Type;
 
 export interface OnboardingScope {
   readonly origin: string;
   readonly userId: string;
 }
 
-export interface OnboardingWorkspaceRef {
-  readonly id: WorkspaceId;
-  readonly slug: WorkspaceSlug;
-  readonly revision: number;
-}
+const OnboardingWorkspaceRef = Schema.Struct({
+  id: WorkspaceId,
+  slug: WorkspaceSlug,
+  revision: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+});
+export type OnboardingWorkspaceRef = typeof OnboardingWorkspaceRef.Type;
 
-export interface OnboardingProgress {
-  readonly workspace: OnboardingWorkspaceRef;
-  readonly issuerSaved: boolean;
-}
+const OnboardingProgress = Schema.Struct({
+  workspace: OnboardingWorkspaceRef,
+  issuerSaved: Schema.Boolean,
+});
+export type OnboardingProgress = typeof OnboardingProgress.Type;
 
-export interface OnboardingFormFields {
-  readonly ico: string;
-  readonly name: string;
-  readonly slug: string;
-  readonly dic: string;
-  readonly street: string;
-  readonly city: string;
-  readonly postalCode: string;
-  readonly country: string;
-  readonly registerEntry: string;
-  readonly taxRegime: TaxRegime;
-  readonly currency: CurrencyCode;
-  readonly docLocale: Locale;
-  readonly iban: string;
-  readonly bic: string;
-}
+const OnboardingFormFields = Schema.Struct({
+  ico: Schema.String,
+  name: Schema.String,
+  slug: Schema.String,
+  dic: Schema.String,
+  street: Schema.String,
+  city: Schema.String,
+  postalCode: Schema.String,
+  country: Schema.String,
+  registerEntry: Schema.String,
+  taxRegime: TaxRegime,
+  currency: CurrencyCode,
+  docLocale: Locale,
+  iban: Schema.String,
+  bic: Schema.String,
+});
+export type OnboardingFormFields = typeof OnboardingFormFields.Type;
 
-export interface PersistedOnboarding {
-  readonly version: 1;
-  readonly origin: string;
-  readonly userId: string;
-  readonly step: OnboardingStep;
-  readonly progress: OnboardingProgress | null;
-  readonly fields: OnboardingFormFields;
-}
+const PersistedOnboarding = Schema.fromJsonString(
+  Schema.Struct({
+    version: Schema.Literal(1),
+    origin: Schema.String,
+    userId: Schema.String,
+    step: OnboardingStep,
+    progress: Schema.NullOr(OnboardingProgress),
+    fields: OnboardingFormFields,
+  }),
+);
+type PersistedOnboarding = typeof PersistedOnboarding.Type;
 
 export interface OnboardingStorage {
-  getItem(key: string): Promise<string | null>;
-  setItem(key: string, value: string): Promise<void>;
-  removeItem(key: string): Promise<void>;
+  readonly getItem: (key: string) => Promise<string | null>;
+  readonly setItem: (key: string, value: string) => Promise<void>;
+  readonly removeItem: (key: string) => Promise<void>;
 }
 
 export interface OnboardingStore {
-  read(origin: string, userId: string): Promise<PersistedOnboarding | null>;
-  write(state: PersistedOnboarding): Promise<void>;
-  clear(origin: string, userId: string): Promise<void>;
+  readonly read: (origin: string, userId: string) => Promise<PersistedOnboarding | null>;
+  readonly write: (state: PersistedOnboarding) => Promise<void>;
+  readonly clear: (origin: string, userId: string) => Promise<void>;
 }
 
-export const onboardingOwner = (origin: string, userId: string): string =>
-  JSON.stringify([origin, userId]);
+const OwnerTuple = Schema.fromJsonString(Schema.Tuple([Schema.String, Schema.String]));
+const encodeOwner = Schema.encodeOption(OwnerTuple);
+// Keep the v1 storage and request-intent key byte-for-byte compatible.
+export const onboardingOwner = ({ origin, userId }: OnboardingScope): string =>
+  Option.getOrThrow(encodeOwner([origin, userId]));
 
-export const onboardingStorageKey = (origin: string, userId: string): string =>
-  `kvitbit.onboarding-resume.v1.${onboardingOwner(origin, userId)}`;
+const onboardingStorageKey = (scope: OnboardingScope): string =>
+  `kvitbit.onboarding-resume.v1.${onboardingOwner(scope)}`;
 
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-  value !== null && typeof value === "object" && !Array.isArray(value);
-
-const isString = (value: unknown): value is string => typeof value === "string";
-
-const isStep = (value: unknown): value is OnboardingStep =>
-  value === 1 || value === 2 || value === 3;
-
-const isTaxRegime = (value: unknown): value is TaxRegime =>
-  value === "non_vat_payer" || value === "vat_payer" || value === "identified_person";
-
-const isLocale = (value: unknown): value is Locale => value === "cs" || value === "en";
-
-const parseWorkspaceRef = (value: unknown): OnboardingWorkspaceRef | null => {
-  if (!isRecord(value)) return null;
-  if (
-    !isString(value.id) ||
-    value.id.length === 0 ||
-    !isString(value.slug) ||
-    value.slug.length === 0 ||
-    typeof value.revision !== "number" ||
-    !Number.isInteger(value.revision) ||
-    value.revision < 0
-  ) {
-    return null;
-  }
-  return {
-    id: value.id as WorkspaceId,
-    slug: value.slug as WorkspaceSlug,
-    revision: value.revision,
-  };
-};
-
-const parseProgress = (value: unknown): OnboardingProgress | null | undefined => {
-  if (value === null) return null;
-  if (!isRecord(value) || typeof value.issuerSaved !== "boolean") return undefined;
-  const workspace = parseWorkspaceRef(value.workspace);
-  if (workspace === null) return undefined;
-  return { workspace, issuerSaved: value.issuerSaved };
-};
-
-const parseFields = (value: unknown): OnboardingFormFields | null => {
-  if (!isRecord(value)) return null;
-  if (
-    !isString(value.ico) ||
-    !isString(value.name) ||
-    !isString(value.slug) ||
-    !isString(value.dic) ||
-    !isString(value.street) ||
-    !isString(value.city) ||
-    !isString(value.postalCode) ||
-    !isString(value.country) ||
-    !isString(value.registerEntry) ||
-    !isTaxRegime(value.taxRegime) ||
-    !isString(value.currency) ||
-    value.currency.length === 0 ||
-    !isLocale(value.docLocale) ||
-    !isString(value.iban) ||
-    !isString(value.bic)
-  ) {
-    return null;
-  }
-  return {
-    ico: value.ico,
-    name: value.name,
-    slug: value.slug,
-    dic: value.dic,
-    street: value.street,
-    city: value.city,
-    postalCode: value.postalCode,
-    country: value.country,
-    registerEntry: value.registerEntry,
-    taxRegime: value.taxRegime,
-    currency: value.currency as CurrencyCode,
-    docLocale: value.docLocale,
-    iban: value.iban,
-    bic: value.bic,
-  };
-};
-
-const parsePersistedOnboarding = (
-  raw: string,
-  expectedOrigin: string,
-  expectedUserId: string,
-): PersistedOnboarding | null => {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    return null;
-  }
-  if (!isRecord(parsed)) return null;
-  if (parsed.version !== 1) return null;
-  if (parsed.origin !== expectedOrigin || parsed.userId !== expectedUserId) return null;
-  if (!isStep(parsed.step)) return null;
-  const progress = parseProgress(parsed.progress);
-  if (progress === undefined) return null;
-  const fields = parseFields(parsed.fields);
-  if (fields === null) return null;
-  return {
-    version: 1,
-    origin: parsed.origin,
-    userId: parsed.userId,
-    step: parsed.step,
-    progress,
-    fields,
-  };
-};
+const decodeOnboarding = Schema.decodeEffect(PersistedOnboarding);
+const encodeOnboarding = Schema.encodeEffect(PersistedOnboarding);
 
 export const makeOnboardingStore = (storage: OnboardingStorage): OnboardingStore => ({
-  read: async (origin, userId) => {
-    try {
-      const raw = await storage.getItem(onboardingStorageKey(origin, userId));
-      return raw === null ? null : parsePersistedOnboarding(raw, origin, userId);
-    } catch {
-      return null;
-    }
-  },
-  write: async (state) => {
-    await storage.setItem(onboardingStorageKey(state.origin, state.userId), JSON.stringify(state));
-  },
-  clear: async (origin, userId) => {
-    await storage.removeItem(onboardingStorageKey(origin, userId));
-  },
+  read: (origin, userId) =>
+    runMobileEffect(
+      fromMobilePromise(() => storage.getItem(onboardingStorageKey({ origin, userId }))).pipe(
+        Effect.flatMap((raw) => (raw === null ? Effect.succeed(null) : decodeOnboarding(raw))),
+        Effect.map((state) => (state?.origin === origin && state.userId === userId ? state : null)),
+        Effect.orElseSucceed(() => null),
+      ),
+    ),
+  write: (state) =>
+    runMobileEffect(
+      encodeOnboarding(state).pipe(
+        Effect.flatMap((raw) =>
+          fromMobilePromise(() => storage.setItem(onboardingStorageKey(state), raw)),
+        ),
+      ),
+    ),
+  clear: (origin, userId) =>
+    runMobileEffect(
+      fromMobilePromise(() => storage.removeItem(onboardingStorageKey({ origin, userId }))),
+    ),
 });
 
 export const onboardingStore = makeOnboardingStore(AsyncStorage);

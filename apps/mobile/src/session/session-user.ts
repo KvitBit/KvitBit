@@ -1,3 +1,7 @@
+import * as Option from "effect/Option";
+import * as Predicate from "effect/Predicate";
+import * as Schema from "effect/Schema";
+
 /** The signed-in user from Better Auth `get-session` (`{ session, user }` or null). */
 export interface SessionUser {
   readonly id: string;
@@ -6,16 +10,22 @@ export interface SessionUser {
   readonly emailVerified: boolean;
 }
 
-const isRecord = (u: unknown): u is Record<string, unknown> => typeof u === "object" && u !== null;
+const sessionResponse = Schema.Struct({
+  user: Schema.Struct({
+    id: Schema.String,
+    email: Schema.String,
+    name: Schema.optional(Schema.Unknown),
+    emailVerified: Schema.optional(Schema.Unknown),
+  }),
+});
 
-export const readSessionUser = (body: unknown): SessionUser | null => {
-  if (!isRecord(body) || !isRecord(body.user)) return null;
-  const { id, email, name, emailVerified } = body.user;
-  if (typeof id !== "string" || typeof email !== "string") return null;
-  return {
-    id,
-    email,
-    name: typeof name === "string" ? name : "",
-    emailVerified: emailVerified === true,
-  };
-};
+export const readSessionUser = <Body>(body: Body): SessionUser | null =>
+  Option.match(Schema.decodeUnknownOption(sessionResponse)(body), {
+    onNone: () => null,
+    onSome: ({ user }) => ({
+      id: user.id,
+      email: user.email,
+      name: Predicate.isString(user.name) ? user.name : "",
+      emailVerified: user.emailVerified === true,
+    }),
+  });

@@ -6,18 +6,27 @@
  * this stand-in: it sets the hooks it needs and the rest stay inert. It names
  * every export the app takes from expo-router, whichever file links it first.
  */
+import type { Href } from "expo-router";
+
+interface NavigationRoute {
+  readonly key: string;
+  readonly name: string;
+}
+
 const inertHooks = {
   useFocusEffect: (_effect: () => undefined | (() => void)) => undefined,
   useIsFocused: () => true,
-  useLocalSearchParams: () => ({}) as Record<string, string>,
-  useGlobalSearchParams: () => ({}) as Record<string, string>,
-  useNavigation: () => ({ getState: () => ({ routes: [] as unknown[] }) }),
+  useLocalSearchParams: (): Record<string, string> => ({}),
+  useGlobalSearchParams: (): Record<string, string> => ({}),
+  useNavigation: () => ({
+    getState: (): { routes: readonly NavigationRoute[] } => ({ routes: [] }),
+  }),
   usePathname: () => "/",
-  usePreventRemove: (_prevent: boolean, _blocked: (event: { repeat: () => void }) => void) =>
-    undefined as undefined | (() => void),
+  usePreventRemove: (_prevent: boolean, _blocked: (event: { repeat: () => void }) => void): void =>
+    undefined,
   useRoute: () => ({ key: "" }),
-  useRouter: () => ({ push: (_href: unknown) => undefined }),
-  useSegments: () => [] as string[],
+  useRouter: () => ({ push: (_href: Href) => undefined }),
+  useSegments: (): string[] => [],
   useUnstableGlobalHref: () => "/",
 };
 

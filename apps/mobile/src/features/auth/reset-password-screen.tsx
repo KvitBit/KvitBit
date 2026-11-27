@@ -1,8 +1,11 @@
 import { describeError } from "@kvitbit/ui-port/api";
+import * as Effect from "effect/Effect";
+import * as Str from "effect/String";
 import { useState } from "react";
 import { useI18n } from "../../i18n/i18n-provider";
 import { navigate } from "../../navigation/routes";
 import { Banner, Button, Card, EmptyState, Screen, Text, TextField } from "../../ui";
+import { runFeatureEffect } from "../ui-effect";
 import type { AuthClient } from "./auth-port";
 import { BotProofWidget } from "./bot-proof-widget";
 import { useAuthClient } from "./use-auth-client";
@@ -33,63 +36,69 @@ export function ResetPasswordScreen(props: {
   const [errorBanner, setErrorBanner] = useState<string | null>(null);
   const [fieldError, setFieldError] = useState<string | null>(null);
 
-  const bot = useBotProof("password_reset", { initial: hasToken ? "idle" : "auto" });
+  const bot = useBotProof({ scope: "password_reset", initial: hasToken ? "idle" : "auto" });
 
-  const handleRequest = async () => {
-    const trimmed = email.trim();
-    if (!trimmed.includes("@")) {
-      setFieldError(t("issue.form.email_invalid"));
-      return;
-    }
-    setFieldError(null);
-    setErrorBanner(null);
-    setBusy(true);
-    const fresh = await bot.ensureFresh();
-    if (fresh._tag === "Failed") {
-      setBusy(false);
-      setErrorBanner(t("auth.botProof.failed"));
-      return;
-    }
-    const proof = fresh._tag === "Solved" ? fresh.payload : null;
-    const res = await auth.requestPasswordReset(trimmed, proof);
-    setBusy(false);
-    if (res._tag === "Ok") {
-      setRequested(true);
-      return;
-    }
-    if (res._tag === "Cancelled") return;
-    if (res.error._tag === "InvalidBotProof") void bot.restart();
-    setErrorBanner(text(describeError(res.error).text));
-  };
+  const handleRequest = () =>
+    runFeatureEffect(
+      Effect.gen(function* () {
+        const trimmed = Str.trim(email);
+        if (!Str.includes("@")(trimmed)) {
+          setFieldError(t("issue.form.email_invalid"));
+          return;
+        }
+        setFieldError(null);
+        setErrorBanner(null);
+        setBusy(true);
+        const fresh = yield* Effect.promise(() => bot.ensureFresh());
+        if (fresh._tag === "Failed") {
+          setBusy(false);
+          setErrorBanner(t("auth.botProof.failed"));
+          return;
+        }
+        const proof = fresh._tag === "Solved" ? fresh.payload : null;
+        const res = yield* Effect.promise(() => auth.requestPasswordReset(trimmed, proof));
+        setBusy(false);
+        if (res._tag === "Ok") {
+          setRequested(true);
+          return;
+        }
+        if (res._tag === "Cancelled") return;
+        if (res.error._tag === "InvalidBotProof") bot.restart();
+        setErrorBanner(text(describeError(res.error).text));
+      }),
+    );
 
-  const handleReset = async () => {
-    if (password.length < MIN_PASSWORD_LENGTH) {
-      setFieldError(t("issue.form.password_too_short", { min: MIN_PASSWORD_LENGTH }));
-      return;
-    }
-    if (password !== confirmPassword) {
-      setFieldError(t("issue.form.password_mismatch"));
-      return;
-    }
-    setFieldError(null);
-    setErrorBanner(null);
-    setBusy(true);
-    const res = await auth.resetPassword(props.token ?? "", password);
-    setBusy(false);
+  const handleReset = () =>
+    runFeatureEffect(
+      Effect.gen(function* () {
+        if (password.length < MIN_PASSWORD_LENGTH) {
+          setFieldError(t("issue.form.password_too_short", { min: MIN_PASSWORD_LENGTH }));
+          return;
+        }
+        if (password !== confirmPassword) {
+          setFieldError(t("issue.form.password_mismatch"));
+          return;
+        }
+        setFieldError(null);
+        setErrorBanner(null);
+        setBusy(true);
+        const res = yield* Effect.promise(() => auth.resetPassword(props.token ?? "", password));
+        setBusy(false);
 
-    if (res._tag === "Ok") {
-      setDone(true);
-      return;
-    }
-    if (res._tag === "Cancelled") return;
-    if (res.error._tag === "NotFound") {
-      setExpired(true);
-      return;
-    }
-    setErrorBanner(text(describeError(res.error).text));
-  };
+        if (res._tag === "Ok") {
+          setDone(true);
+          return;
+        }
+        if (res._tag === "Cancelled") return;
+        if (res.error._tag === "NotFound") {
+          setExpired(true);
+          return;
+        }
+        setErrorBanner(text(describeError(res.error).text));
+      }),
+    );
 
-  if (expired) {
+  if (expired === true) {
     return (
       <Screen title={t("auth.resetPassword.title")} back>
         <EmptyState
@@ -104,7 +113,7 @@ export function ResetPasswordScreen(props: {
     );
   }
 
-  if (done) {
+  if (done === true) {
     return (
       <Screen title={t("auth.resetPassword.title")}>
         <Banner tone="info" text={t("auth.resetPassword.done")} />
@@ -142,14 +151,16 @@ export function ResetPasswordScreen(props: {
           />
           <Button
             label={t("auth.resetPassword.submit")}
-            onPress={() => void handleReset()}
+            onPress={() => {
+              handleReset();
+            }}
             busy={busy}
             testID="reset-password-submit"
           />
         </Card>
-      ) : requested ? (
+      ) : requested === true ? (
         <Card>
-          <Banner tone="info" text={t("auth.checkEmail.body", { email: email.trim() })} />
+          <Banner tone="info" text={t("auth.checkEmail.body", { email: Str.trim(email) })} />
           <Button
             kind="tonal"
             label={t("common.action.signIn")}
@@ -171,11 +182,18 @@ export function ResetPasswordScreen(props: {
             disabled={busy}
             testID="reset-password-email"
           />
-          <BotProofWidget state={bot.state} onRetry={() => void bot.restart()} />
+          <BotProofWidget
+            state={bot.state}
+            onRetry={() => {
+              bot.restart();
+            }}
+          />
           <Button
             label={t("auth.resetPassword.send")}
-            onPress={() => void handleRequest()}
-            busy={busy || bot.busy}
+            onPress={() => {
+              handleRequest();
+            }}
+            busy={busy === true || bot.busy}
             disabled={bot.state._tag === "Failed"}
             testID="reset-password-send"
           />

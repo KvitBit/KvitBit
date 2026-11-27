@@ -1,5 +1,6 @@
 import { afterAll, beforeAll } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
+import * as Effect from "effect/Effect";
 import { act } from "react";
 import type { Root } from "react-dom/client";
 
@@ -42,27 +43,53 @@ const ensureDom = () => {
 export const clientRoot = ({ keepFetch = false }: { readonly keepFetch?: boolean } = {}) => {
   let root: Root;
   let container: HTMLElement;
-  beforeAll(async () => {
-    ensureDom();
-    if (keepFetch) {
-      Object.assign(globalThis, bunFetchGlobals);
-    } else if (happyDomFetchGlobals !== null) {
-      Object.assign(globalThis, happyDomFetchGlobals);
-    }
-    // React reads the act environment flag only once a DOM exists.
-    (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
-    const { createRoot } = await import("react-dom/client");
-    container = document.createElement("div");
-    document.body.appendChild(container);
-    root = createRoot(container);
-  });
-  afterAll(async () => {
-    await act(async () => root.unmount());
-    container.remove();
-  });
+  beforeAll(() =>
+    Effect.runPromise(
+      Effect.gen(function* () {
+        ensureDom();
+        if (keepFetch === true) {
+          Object.assign(globalThis, bunFetchGlobals);
+        } else if (happyDomFetchGlobals !== null) {
+          Object.assign(globalThis, happyDomFetchGlobals);
+        }
+        // React reads the act environment flag only once a DOM exists.
+        Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
+        const { createRoot } = yield* Effect.promise(() => import("react-dom/client"));
+        container = document.createElement("div");
+        document.body.appendChild(container);
+        root = createRoot(container);
+      }),
+    ),
+  );
+  const unmount = () => act(() => Effect.runPromise(Effect.sync(() => root.unmount())));
+  afterAll(() =>
+    Effect.runPromise(
+      Effect.promise(() => Promise.resolve(unmount())).pipe(
+        Effect.andThen(Effect.sync(() => container.remove())),
+      ),
+    ),
+  );
   return {
-    render: (element: Parameters<Root["render"]>[0]) => act(async () => root.render(element)),
+    render: (element: Parameters<Root["render"]>[0]) =>
+      act(() => Effect.runPromise(Effect.sync(() => root.render(element)))),
     /** The element the root renders into. */
     container: () => container,
   };
 };
+
+interface RenderCheck {
+  readonly check: () => boolean;
+  readonly attempts: number;
+  readonly label?: string | undefined;
+}
+
+const flushRender = () => Promise.resolve(act(() => Effect.runPromise(Effect.sleep(5))));
+
+export const waitForRender = ({ check, attempts, label = "condition" }: RenderCheck) =>
+  Effect.gen(function* () {
+    for (let attempt = 0; attempt < attempts; attempt++) {
+      if (check()) return;
+      yield* Effect.promise(flushRender);
+    }
+    return yield* Effect.die(new Error(`Timed out waiting for ${label}`));
+  }).pipe(Effect.runPromise);

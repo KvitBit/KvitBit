@@ -1,29 +1,36 @@
 import { BRANDING_IMAGE_MAX_BYTES, BRANDING_IMAGE_TYPES } from "@kvitbit/api-contract";
-import type { BrandingImage, ImageRef, WorkspaceId } from "@kvitbit/domain/contract";
-import { type Credentials, type UiError, UiError as UiErrorFactory } from "@kvitbit/ui-port/api";
+import { type BrandingImage, ImageRef, type WorkspaceId } from "@kvitbit/domain/contract";
+import { type ApiResult, type Credentials, err, ok, UiError } from "@kvitbit/ui-port/api";
+import * as Arr from "effect/Array";
+import * as Effect from "effect/Effect";
+import * as FetchHttpClient from "effect/http/FetchHttpClient";
+import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
+import * as Str from "effect/String";
 import { Platform } from "react-native";
-import { apiUrl, authHeaders, errorFromResponse, parseJson } from "../../platform/transfer/http";
+import { apiUrl, authHeaders, errorFromResponse } from "../../platform/transfer/http";
+import { fromMobilePromise } from "../../runtime/request-intent";
 
-/** Copies text to clipboard using expo-clipboard on native and navigator.clipboard on web. */
-export const copyToClipboard = async (value: string): Promise<boolean> => {
-  try {
-    const clipboard = await import("expo-clipboard");
-    await clipboard.setStringAsync(value);
+/** Copies text to clipboard using expo-clipboard, with the browser API as a fallback. */
+export const copyToClipboard = Effect.fn("Settings.copyToClipboard")(
+  function* (value: string) {
+    const clipboard = yield* fromMobilePromise(() => import("expo-clipboard"));
+    yield* fromMobilePromise(() => clipboard.setStringAsync(value));
     return true;
-  } catch {
-    if (typeof navigator !== "undefined" && navigator.clipboard !== undefined) {
-      try {
-        await navigator.clipboard.writeText(value);
-        return true;
-      } catch {
-        return false;
-      }
-    }
-    return false;
-  }
-};
+  },
+  (effect, value) =>
+    Effect.catch(effect, () => {
+      const clipboard = globalThis.navigator?.clipboard;
+      return clipboard === undefined
+        ? Effect.succeed(false)
+        : fromMobilePromise(() => clipboard.writeText(value)).pipe(
+            Effect.as(true),
+            Effect.orElseSucceed(() => false),
+          );
+    }),
+);
 
-export interface PickedBrandingImage {
+interface PickedBrandingImage {
   readonly uri: string;
   readonly name: string;
   readonly mimeType: string;
@@ -31,98 +38,96 @@ export interface PickedBrandingImage {
   readonly file?: Blob;
 }
 
-export type PickImageOutcome =
+type PickImageOutcome =
   | { readonly _tag: "Picked"; readonly file: PickedBrandingImage }
   | { readonly _tag: "Cancelled" }
   | { readonly _tag: "Invalid"; readonly reason: "type" | "size" | "unavailable" };
 
-const isAcceptedBrandingType = (mimeType: string): boolean =>
-  (BRANDING_IMAGE_TYPES as ReadonlyArray<string>).includes(mimeType.toLowerCase());
-
 /** Picks a PNG or JPEG image (<= 2 MB) for workspace logo or stamp. */
-export const pickBrandingImage = async (): Promise<PickImageOutcome> => {
-  try {
-    const picker = await import("expo-image-picker");
-    const result = await picker.launchImageLibraryAsync({
-      mediaTypes: ["images"],
-      allowsMultipleSelection: false,
-      quality: 1,
-    });
-    if (result.canceled || result.assets.length === 0) return { _tag: "Cancelled" };
-    const asset = result.assets[0];
-    if (asset === undefined) return { _tag: "Cancelled" };
+export const pickBrandingImage = Effect.fn("Settings.pickBrandingImage")(
+  function* (): Effect.fn.Return<
+    PickImageOutcome,
+    Effect.Error<ReturnType<typeof fromMobilePromise>>
+  > {
+    const picker = yield* fromMobilePromise(() => import("expo-image-picker"));
+    const result = yield* fromMobilePromise(() =>
+      picker.launchImageLibraryAsync({
+        mediaTypes: ["images"],
+        allowsMultipleSelection: false,
+        quality: 1,
+      }),
+    );
+    const asset = result.assets?.[0];
+    if (result.canceled || asset === undefined) return { _tag: "Cancelled" };
     const mimeType =
-      asset.mimeType ?? (asset.uri.toLowerCase().endsWith(".png") ? "image/png" : "image/jpeg");
-    if (!isAcceptedBrandingType(mimeType)) return { _tag: "Invalid", reason: "type" };
+      asset.mimeType ??
+      (Str.endsWith(".png")(Str.toLowerCase(asset.uri)) ? "image/png" : "image/jpeg");
+    if (!Arr.some(BRANDING_IMAGE_TYPES, (accepted) => accepted === Str.toLowerCase(mimeType))) {
+      return { _tag: "Invalid", reason: "type" };
+    }
     if (asset.fileSize !== undefined && asset.fileSize > BRANDING_IMAGE_MAX_BYTES) {
       return { _tag: "Invalid", reason: "size" };
     }
-    const name = asset.fileName ?? `branding.${mimeType === "image/png" ? "png" : "jpg"}`;
-    const webFile = (asset as { readonly file?: Blob }).file;
+    const file = {
+      uri: asset.uri,
+      name: asset.fileName ?? `branding.${mimeType === "image/png" ? "png" : "jpg"}`,
+      mimeType,
+    };
     return {
       _tag: "Picked",
-      file: {
-        uri: asset.uri,
-        name,
-        mimeType,
-        ...(asset.fileSize === undefined ? {} : { sizeBytes: asset.fileSize }),
-        ...(webFile === undefined ? {} : { file: webFile }),
-      },
+      file: asset.file === undefined ? file : { ...file, file: asset.file },
     };
-  } catch {
-    return { _tag: "Invalid", reason: "unavailable" };
-  }
-};
+  },
+  Effect.orElseSucceed((): PickImageOutcome => ({ _tag: "Invalid", reason: "unavailable" })),
+);
 
-/**
- * Uploads a branding image via `PUT /api/v1/workspaces/:workspaceId/branding/:image`
- * (multipart field `file`, per BrandingImagePayload in @kvitbit/api-contract).
- */
-export const uploadBrandingImage = async (params: {
-  readonly origin: string;
-  readonly credentials: Credentials;
-  readonly workspaceId: WorkspaceId;
-  readonly image: BrandingImage;
-  readonly file: PickedBrandingImage;
-}): Promise<
-  | { readonly _tag: "Ok"; readonly value: ImageRef }
-  | { readonly _tag: "Err"; readonly error: UiError }
-> => {
-  try {
+const decodeImageRef = Schema.decodeOption(Schema.fromJsonString(ImageRef));
+
+/** Uploads a logo or stamp using the branding endpoint's multipart file field. */
+export const uploadBrandingImage = Effect.fn("Settings.uploadBrandingImage")(
+  function* (params: {
+    readonly origin: string;
+    readonly credentials: Credentials;
+    readonly workspaceId: WorkspaceId;
+    readonly image: BrandingImage;
+    readonly file: PickedBrandingImage;
+  }): Effect.fn.Return<ApiResult<ImageRef>, Effect.Error<ReturnType<typeof fromMobilePromise>>> {
     const url = apiUrl(params.origin, `/workspaces/${params.workspaceId}/branding/${params.image}`);
+    const fetch = yield* FetchHttpClient.Fetch;
     const body = new FormData();
     if (Platform.OS === "web") {
-      const blob = params.file.file ?? (await (await fetch(params.file.uri)).blob());
+      let blob = params.file.file;
+      if (blob === undefined) {
+        const response = yield* fromMobilePromise(() => fetch(params.file.uri));
+        blob = yield* fromMobilePromise(() => response.blob());
+      }
       body.append("file", blob, params.file.name);
     } else {
-      body.append("file", {
-        uri: params.file.uri,
-        name: params.file.name,
-        type: params.file.mimeType,
-      } as unknown as Blob);
+      // React Native FormData accepts URI parts in addition to browser Blob parts.
+      Reflect.apply(body.append, body, [
+        "file",
+        {
+          uri: params.file.uri,
+          name: params.file.name,
+          type: params.file.mimeType,
+        },
+      ]);
     }
-    const response = await fetch(url, {
-      method: "PUT",
-      headers: authHeaders(params.credentials),
-      credentials: params.credentials._tag === "Bearer" ? "omit" : "include",
-      body,
-    });
-    const text = await response.text();
-    if (!response.ok) {
-      return {
-        _tag: "Err",
-        error: errorFromResponse(response.status, text, response.headers.get("x-request-id")),
-      };
-    }
-    const parsed = parseJson(text);
-    if (parsed === undefined) {
-      return {
-        _tag: "Err",
-        error: UiErrorFactory.unexpected(response.status, response.headers.get("x-request-id")),
-      };
-    }
-    return { _tag: "Ok", value: parsed as ImageRef };
-  } catch {
-    return { _tag: "Err", error: UiErrorFactory.offline };
-  }
-};
+    const response = yield* fromMobilePromise(() =>
+      fetch(url, {
+        method: "PUT",
+        headers: authHeaders(params.credentials),
+        credentials: params.credentials._tag === "Bearer" ? "omit" : "include",
+        body,
+      }),
+    );
+    const text = yield* fromMobilePromise(() => response.text());
+    const requestId = response.headers.get("x-request-id");
+    if (!response.ok) return err(errorFromResponse(response.status, text, requestId));
+    const parsed = decodeImageRef(text);
+    return Option.isSome(parsed)
+      ? ok(parsed.value)
+      : err(UiError.unexpected(response.status, requestId));
+  },
+  Effect.orElseSucceed((): ApiResult<ImageRef> => err(UiError.offline)),
+);

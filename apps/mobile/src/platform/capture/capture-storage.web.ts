@@ -1,48 +1,55 @@
+import * as Effect from "effect/Effect";
+import * as Schema from "effect/Schema";
+import { fromMobilePromise, runMobileEffect } from "../../runtime/request-intent";
+import { PlatformOperationFailed } from "../platform-effect";
 import type { CaptureStorage } from "./capture-storage-port";
+import { inIndexedStore, openIndexedStore } from "./indexed-db.web";
 
 const STORE = "jobs";
-let opening: Promise<IDBDatabase> | undefined;
+const db = openIndexedStore(STORE)("kvitbit-expense-capture");
+const isStoredQueue = Schema.is(Schema.String);
 
-function open(): Promise<IDBDatabase> {
-  opening ??= new Promise((resolve, reject) => {
-    const request = indexedDB.open("kvitbit-expense-capture", 1);
-    request.onupgradeneeded = () => request.result.createObjectStore(STORE);
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error);
-  });
-  return opening.catch((error: unknown) => {
-    opening = undefined;
-    throw error;
-  });
-}
-
-async function transaction<A>(
+const transaction = <A>(
   mode: IDBTransactionMode,
   requestFor: (store: IDBObjectStore) => IDBRequest<A>,
-): Promise<A> {
-  const db = await open();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(STORE, mode, { durability: "strict" });
-    const request = requestFor(tx.objectStore(STORE));
-    tx.oncomplete = () => resolve(request.result);
-    tx.onabort = () => reject(tx.error ?? new Error("Receipt queue changed while saving"));
-  });
-}
+) =>
+  db.pipe(
+    Effect.flatMap((database) =>
+      inIndexedStore(STORE, mode, requestFor, { durability: "strict" })(database),
+    ),
+  );
 
 export const captureStorage: CaptureStorage = {
-  load: async (scope) => (await transaction("readonly", (store) => store.get(scope))) ?? null,
-  save: async (scope, value, previous) => {
-    await transaction("readwrite", (store) => {
-      const latest = store.get(scope);
-      latest.onsuccess = () => {
-        if ((latest.result ?? "[]") === previous) store.put(value, scope);
-        else store.transaction.abort();
-      };
-      return latest;
-    });
-  },
-  lock: async (scope, work) => {
-    if (navigator.locks === undefined) return work();
-    return navigator.locks.request(`kvitbit-expense-capture:${scope}`, work);
-  },
+  load: (scope) =>
+    runMobileEffect(
+      transaction<unknown>("readonly", (store) => store.get(scope)).pipe(
+        Effect.flatMap((value) => {
+          if (value === undefined || value === null) return Effect.succeed(null);
+          return isStoredQueue(value)
+            ? Effect.succeed(value)
+            : Effect.fail(
+                PlatformOperationFailed.make({ cause: "Invalid receipt queue in storage" }),
+              );
+        }),
+      ),
+    ),
+  save: (scope, value, previous) =>
+    runMobileEffect(
+      transaction<unknown>("readwrite", (store) => {
+        const latest = store.get(scope);
+        latest.onsuccess = () => {
+          if ((latest.result ?? "[]") === previous) store.put(value, scope);
+          else store.transaction.abort();
+        };
+        return latest;
+      }).pipe(Effect.asVoid),
+    ),
+  lock: (scope, work) =>
+    runMobileEffect(
+      fromMobilePromise(() =>
+        navigator.locks === undefined
+          ? work()
+          : navigator.locks.request(`kvitbit-expense-capture:${scope}`, work),
+      ),
+    ),
 };

@@ -1,3 +1,8 @@
+"use strict";
+
+const signingConfigsPattern = /(signingConfigs\s*\{[\s\S]*?debug\s*\{[\s\S]*?\})/;
+const releaseBuildTypePattern =
+  /(buildTypes\s*\{[\s\S]*?release\s*\{[\s\S]*?)signingConfig\s+signingConfigs\.debug/;
 // Expo config plugin: configures Android Gradle release signing from
 // environment variables (ANDROID_KEYSTORE_PATH / ANDROID_KEYSTORE_PASSWORD /
 // ANDROID_KEY_ALIAS / ANDROID_KEY_PASSWORD) or Gradle properties
@@ -37,7 +42,6 @@ function applyAndroidReleaseSigning(contents) {
   let updated = contents;
 
   if (!updated.includes(RELEASE_SIGNING_MARKER)) {
-    const signingConfigsPattern = /(signingConfigs\s*\{[\s\S]*?debug\s*\{[\s\S]*?\})/;
     if (!signingConfigsPattern.test(updated)) {
       throw new Error(
         "with-android-release-signing: could not find signingConfigs.debug block in android/app/build.gradle.",
@@ -47,8 +51,6 @@ function applyAndroidReleaseSigning(contents) {
   }
 
   if (!updated.includes(`${RELEASE_SIGNING_MARKER}-build-type`)) {
-    const releaseBuildTypePattern =
-      /(buildTypes\s*\{[\s\S]*?release\s*\{[\s\S]*?)signingConfig\s+signingConfigs\.debug/;
     if (!releaseBuildTypePattern.test(updated)) {
       throw new Error(
         "with-android-release-signing: could not find buildTypes.release signingConfig in android/app/build.gradle.",

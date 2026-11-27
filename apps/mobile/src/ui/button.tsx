@@ -86,7 +86,10 @@ export function IconButton(props: {
       disabled={props.disabled}
       onPress={props.onPress}
       hitSlop={4}
-      style={({ pressed }) => [styles.icon, { opacity: props.disabled ? 0.38 : pressed ? 0.6 : 1 }]}
+      style={({ pressed }) => [
+        styles.icon,
+        { opacity: props.disabled === true ? 0.38 : pressed ? 0.6 : 1 },
+      ]}
     >
       <Icon icon={props.icon} />
     </Pressable>

@@ -10,15 +10,23 @@ import {
 } from "@kvitbit/domain/contract";
 import { type ApiResult, err, idempotencyHeaders, ok, UiError, uuidV7 } from "@kvitbit/ui-port/api";
 import AsyncStorage from "@react-native-async-storage/async-storage";
-import { Effect, Option, Schema } from "effect";
+import * as Arr from "effect/Array";
+import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
+import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
+import * as Semaphore from "effect/Semaphore";
+import type * as Types from "effect/Types";
 import type { ApiRunner } from "../../runtime/api-runtime";
 import {
   acquireRequestKey,
   completeRequestKey,
+  fromMobilePromise,
   isRequestIntentExpired,
   requestIntentFailure,
   reuseRequestKey,
 } from "../../runtime/request-intent";
+import { runFeatureEffect } from "../ui-effect";
 import { parseWorkspaceDefaults } from "./codecs";
 
 const fields = TemplateInput.fields;
@@ -54,50 +62,77 @@ const Pending = Schema.Struct({
 });
 const StoredSeed = Schema.Struct({ seed: Seed, revision: Schema.Int, templateId: TemplateId });
 
+const encodeSlot = Schema.encodeEffect(
+  Schema.fromJsonString(Schema.Tuple([Schema.String, Schema.String])),
+);
+const PendingJson = Schema.fromJsonString(Pending);
+const StoredSeedJson = Schema.fromJsonString(StoredSeed);
+const decodePending = Schema.decodeEffect(PendingJson);
+const encodePending = Schema.encodeEffect(PendingJson);
+const decodeStored = Schema.decodeEffect(StoredSeedJson);
+const encodeStored = Schema.encodeEffect(StoredSeedJson);
+
 const pendingSlot = (owner: string, templateId: TemplateId) =>
-  `kvitbit.template-import.v1.${JSON.stringify([owner, templateId])}`;
+  Effect.map(encodeSlot([owner, templateId]), (slot) => `kvitbit.template-import.v1.${slot}`);
 const draftSlot = (owner: string, documentId: DocumentId) =>
-  `kvitbit.template-draft.v1.${JSON.stringify([owner, documentId])}`;
+  Effect.map(encodeSlot([owner, documentId]), (slot) => `kvitbit.template-draft.v1.${slot}`);
 
-const locks = new Map<string, Promise<void>>();
-const locked = async <A>(slot: string, work: () => Promise<A>): Promise<A> => {
-  if (typeof navigator !== "undefined" && typeof navigator.locks?.request === "function") {
-    return navigator.locks.request(slot, work);
+const locks = new Map<string, { readonly semaphore: Semaphore.Semaphore; users: number }>();
+const locked = <A, E>(slot: string, work: Effect.Effect<A, E>) => {
+  const webLocks = globalThis.navigator?.locks;
+  if (webLocks?.request !== undefined) {
+    return fromMobilePromise(() =>
+      webLocks.request(slot, () => work.pipe(Effect.exit, runFeatureEffect)),
+    ).pipe(
+      Effect.flatMap((exit) =>
+        Exit.isSuccess(exit) ? Effect.succeed(exit.value) : Effect.failCause(exit.cause),
+      ),
+    );
   }
-  const task = (locks.get(slot) ?? Promise.resolve()).then(work);
-  const done = task.then(
-    () => undefined,
-    () => undefined,
+  return Effect.acquireUseRelease(
+    Effect.sync(() => {
+      const lock = locks.get(slot) ?? { semaphore: Semaphore.makeUnsafe(1), users: 0 };
+      lock.users += 1;
+      locks.set(slot, lock);
+      return lock;
+    }),
+    (lock) => lock.semaphore.withPermits(1)(work),
+    (lock) =>
+      Effect.sync(() => {
+        lock.users -= 1;
+        if (lock.users === 0) locks.delete(slot);
+      }),
   );
-  locks.set(slot, done);
-  try {
-    return await task;
-  } finally {
-    if (locks.get(slot) === done) locks.delete(slot);
-  }
 };
 
-const readPending = async (slot: string): Promise<typeof Pending.Type | null> => {
-  const text = await AsyncStorage.getItem(slot);
-  return text === null ? null : Schema.decodeUnknownSync(Pending)(JSON.parse(text));
-};
+const readPending = Effect.fn("TemplateImport.readPending")(function* (slot: string) {
+  const text = yield* fromMobilePromise(() => AsyncStorage.getItem(slot));
+  return text === null ? null : yield* decodePending(text);
+});
 
-const resolveSeed = async (
+const resolveSeed = Effect.fn("TemplateImport.resolveSeed")(function* (
   run: ApiRunner["run"],
   workspace: WorkspaceSummary,
   templateId: TemplateId,
-): Promise<ApiResult<TemplateSeed>> => {
+): Effect.fn.Return<ApiResult<TemplateSeed>, Effect.Error<ReturnType<typeof fromMobilePromise>>> {
   const scope = { workspaceId: workspace.id };
-  const template = await run((api) => api.templates.get({ params: { ...scope, templateId } }));
+  const template = yield* fromMobilePromise(() =>
+    run((api) => api.templates.get({ params: { ...scope, templateId } })),
+  );
   if (template._tag === "Err") return template;
   const decoded = Schema.decodeUnknownOption(Source)(template.value.input);
   if (Option.isNone(decoded)) return err(UiError.unexpected());
   const source = decoded.value;
-  const [contact, workspaceView, series] = await Promise.all([
-    run((api) => api.contacts.get({ params: { ...scope, contactId: source.contact } })),
-    run((api) => api.workspace.current({ params: scope })),
-    run((api) => api.workspace.listSeries({ params: scope })),
-  ]);
+  const [contact, workspaceView, series] = yield* Effect.all(
+    [
+      fromMobilePromise(() =>
+        run((api) => api.contacts.get({ params: { ...scope, contactId: source.contact } })),
+      ),
+      fromMobilePromise(() => run((api) => api.workspace.current({ params: scope }))),
+      fromMobilePromise(() => run((api) => api.workspace.listSeries({ params: scope }))),
+    ],
+    { concurrency: "unbounded" },
+  );
   if (contact._tag === "Err") return contact;
   if (workspaceView._tag === "Err") return workspaceView;
   if (series._tag === "Err") return series;
@@ -105,139 +140,181 @@ const resolveSeed = async (
   const resolvedSeries =
     source.series ??
     contact.value.defaults.preferredSeriesByKind?.[source.kind] ??
-    series.value.find((row) => row.kind === source.kind && row.isDefault)?.id;
-  return ok({
+    Option.getOrUndefined(
+      Arr.findFirst(series.value, (row) => row.kind === source.kind && row.isDefault),
+    )?.id;
+  const seed: Types.Mutable<TemplateSeed> = {
     contact: source.contact,
     language: source.language ?? contact.value.defaults.language ?? defaults.language,
-    ...(resolvedSeries === undefined ? {} : { series: resolvedSeries }),
     pricesIncludeVat: source.pricesIncludeVat ?? false,
-    ...(source.bankAccount === undefined ? {} : { bankAccount: source.bankAccount }),
-    ...(source.variableSymbol === undefined ? {} : { variableSymbol: source.variableSymbol }),
-    ...(source.orderNumber === undefined ? {} : { orderNumber: source.orderNumber }),
     note: source.note ?? contact.value.defaults.defaultNote ?? defaults.note ?? "",
-  });
-};
+  };
+  if (resolvedSeries !== undefined) seed.series = resolvedSeries;
+  if (source.bankAccount !== undefined) seed.bankAccount = source.bankAccount;
+  if (source.variableSymbol !== undefined) seed.variableSymbol = source.variableSymbol;
+  if (source.orderNumber !== undefined) seed.orderNumber = source.orderNumber;
+  return ok(seed);
+});
 
 const payloadFor = (patch: TemplateSeed) => ({ as: "draft" as const, patch });
 
-export async function importTemplate(
-  owner: string,
-  workspace: WorkspaceSummary,
-  templateId: TemplateId,
-  run: ApiRunner["run"],
-): Promise<ApiResult<typeof Draft.Type>> {
-  const slot = pendingSlot(owner, templateId);
-  try {
-    return await locked(slot, async () => {
-      let pending = await readPending(slot);
-      if (pending?.document != null) return ok(pending.document);
-      if (pending === null) {
-        const resolved = await resolveSeed(run, workspace, templateId);
-        if (resolved._tag === "Err") return resolved;
-        const operation = `templates.use:${templateId}:${Effect.runSync(uuidV7)}`;
-        const key = await acquireRequestKey(owner, operation, payloadFor(resolved.value));
-        pending = { seed: resolved.value, key, operation, document: null };
-        await AsyncStorage.setItem(slot, JSON.stringify(pending));
-      } else {
-        // A stored import may already have created its draft. Resend it only within the replay window.
-        await reuseRequestKey(owner, pending.operation, payloadFor(pending.seed), pending.key);
-      }
-      const { seed, key, operation } = pending;
-      const result = await run((api) =>
-        api.templates.use({
-          params: { workspaceId: workspace.id, templateId },
-          headers: idempotencyHeaders(key),
-          payload: payloadFor(seed),
-        }),
-      );
-      if (result._tag === "Err") return result;
-      const { id, revision } = result.value;
-      await AsyncStorage.setItem(
-        draftSlot(owner, id),
-        JSON.stringify({ seed, revision, templateId }),
-      );
-      await AsyncStorage.setItem(slot, JSON.stringify({ ...pending, document: { id, revision } }));
-      await completeRequestKey(owner, operation, key).catch(() => undefined);
-      return ok({ id, revision });
-    });
-  } catch (error) {
-    return err(requestIntentFailure(error));
-  }
-}
+export const importTemplate = Effect.fn("TemplateImport.import")(
+  function* (
+    owner: string,
+    workspace: WorkspaceSummary,
+    templateId: TemplateId,
+    run: ApiRunner["run"],
+  ) {
+    const slot = yield* pendingSlot(owner, templateId);
+    return yield* locked(
+      slot,
+      Effect.gen(function* () {
+        let pending = yield* readPending(slot);
+        if (pending !== null && pending.document !== null) return ok(pending.document);
+        if (pending === null) {
+          const resolved = yield* resolveSeed(run, workspace, templateId);
+          if (resolved._tag === "Err") return resolved;
+          const requestId = yield* uuidV7;
+          const operation = `templates.use:${templateId}:${requestId}`;
+          const key = yield* fromMobilePromise(() =>
+            acquireRequestKey(owner, operation, payloadFor(resolved.value)),
+          );
+          pending = { seed: resolved.value, key, operation, document: null };
+          const serialized = yield* encodePending(pending);
+          yield* fromMobilePromise(() => AsyncStorage.setItem(slot, serialized));
+        } else {
+          // A stored import may already have created its draft. Retry only within the replay window.
+          const { operation, seed, key } = pending;
+          yield* fromMobilePromise(() => reuseRequestKey(owner, operation, payloadFor(seed), key));
+        }
+        const { seed, key, operation } = pending;
+        const result = yield* fromMobilePromise(() =>
+          run((api) =>
+            api.templates.use({
+              params: { workspaceId: workspace.id, templateId },
+              headers: idempotencyHeaders(key),
+              payload: payloadFor(seed),
+            }),
+          ),
+        );
+        if (result._tag === "Err") return result;
+        const { id, revision } = result.value;
+        const snapshotSlot = yield* draftSlot(owner, id);
+        const snapshot = yield* encodeStored({ seed, revision, templateId });
+        yield* fromMobilePromise(() => AsyncStorage.setItem(snapshotSlot, snapshot));
+        const completed = yield* encodePending({ ...pending, document: { id, revision } });
+        yield* fromMobilePromise(() => AsyncStorage.setItem(slot, completed));
+        yield* Effect.ignore(fromMobilePromise(() => completeRequestKey(owner, operation, key)));
+        return ok({ id, revision });
+      }),
+    );
+  },
+  Effect.catchTags({
+    MobileBridgeError: (error) => Effect.succeed(err(requestIntentFailure(error.cause))),
+    SchemaError: () => Effect.succeed(err(UiError.offline)),
+  }),
+);
 
-export async function discardExpiredTemplateImport(
+export const discardExpiredTemplateImport = Effect.fn("TemplateImport.discardExpired")(function* (
   owner: string,
   templateId: TemplateId,
-): Promise<void> {
-  const slot = pendingSlot(owner, templateId);
-  await locked(slot, async () => {
-    const pending = await readPending(slot);
-    if (pending === null || pending.document !== null) return;
-    try {
-      await reuseRequestKey(owner, pending.operation, payloadFor(pending.seed), pending.key);
-    } catch (error) {
-      if (!isRequestIntentExpired(requestIntentFailure(error))) throw error;
-      await AsyncStorage.removeItem(slot);
-      await completeRequestKey(owner, pending.operation, pending.key).catch(() => undefined);
-    }
-  });
-}
+) {
+  const slot = yield* pendingSlot(owner, templateId);
+  yield* locked(
+    slot,
+    Effect.gen(function* () {
+      const pending = yield* readPending(slot);
+      if (pending === null || pending.document !== null) return;
+      yield* fromMobilePromise(() =>
+        reuseRequestKey(owner, pending.operation, payloadFor(pending.seed), pending.key),
+      ).pipe(
+        Effect.asVoid,
+        Effect.catchIf(
+          (error) => isRequestIntentExpired(requestIntentFailure(error.cause)),
+          () =>
+            fromMobilePromise(() => AsyncStorage.removeItem(slot)).pipe(
+              Effect.andThen(
+                Effect.ignore(
+                  fromMobilePromise(() =>
+                    completeRequestKey(owner, pending.operation, pending.key),
+                  ),
+                ),
+              ),
+            ),
+        ),
+      );
+    }),
+  );
+});
 
-const readStored = async (key: string): Promise<typeof StoredSeed.Type | null> => {
-  const text = await AsyncStorage.getItem(key);
-  return text === null ? null : Schema.decodeUnknownSync(StoredSeed)(JSON.parse(text));
-};
+const readStored = Effect.fn("TemplateImport.readStored")(function* (key: string) {
+  const text = yield* fromMobilePromise(() => AsyncStorage.getItem(key));
+  return text === null ? null : yield* decodeStored(text);
+});
 
 // Keep acknowledged writes recoverable across editor remounts while local storage is unavailable.
 const unsavedSnapshots = new Map<string, typeof StoredSeed.Type>();
 
-async function saveSnapshot(key: string, snapshot: typeof StoredSeed.Type) {
+const saveSnapshot = Effect.fn("TemplateImport.saveSnapshot")(function* (
+  key: string,
+  snapshot: typeof StoredSeed.Type,
+) {
   unsavedSnapshots.set(key, snapshot);
-  await AsyncStorage.setItem(key, JSON.stringify(snapshot));
+  const serialized = yield* encodeStored(snapshot);
+  yield* fromMobilePromise(() => AsyncStorage.setItem(key, serialized));
   unsavedSnapshots.delete(key);
-}
+});
 
-export class ImportedDraftRevisionMismatch extends Error {}
+class StaleImportedDraft extends Schema.TaggedError<
+  StaleImportedDraft,
+  { readonly brand: unique symbol }
+>()("StaleImportedDraft", {}) {}
 
 // DocumentView does not carry the imported values, so this cache is their only record.
 // It applies only at the revision it was recorded for: a newer revision came from a write
 // this client did not record. Do not let the editor replace its unknown values with defaults.
-export async function openImportedDraft(
+export const openImportedDraft = Effect.fn("TemplateImport.openDraft")(function* (
   owner: string,
   documentId: DocumentId,
   revision: number,
-): Promise<TemplateSeed | null> {
-  const key = draftSlot(owner, documentId);
-  const cached = await readStored(key);
+) {
+  const key = yield* draftSlot(owner, documentId);
+  const cached = yield* readStored(key);
   if (cached === null) return null;
-  const slot = pendingSlot(owner, cached.templateId);
-  return locked(slot, async () => {
-    const pending = await readPending(slot);
-    if (pending?.document?.id === documentId) await AsyncStorage.removeItem(slot);
-    const latest = (await readStored(key)) ?? cached;
-    const unsaved = unsavedSnapshots.get(key);
-    if (unsaved?.revision === revision && latest.revision < revision) {
-      await saveSnapshot(key, unsaved);
-      return unsaved.seed;
-    }
-    if (unsaved !== undefined && latest.revision >= unsaved.revision) unsavedSnapshots.delete(key);
-    if (latest.revision !== revision) throw new ImportedDraftRevisionMismatch();
-    return latest.seed;
-  });
-}
+  const slot = yield* pendingSlot(owner, cached.templateId);
+  return yield* locked(
+    slot,
+    Effect.gen(function* () {
+      const pending = yield* readPending(slot);
+      if (pending?.document?.id === documentId)
+        yield* fromMobilePromise(() => AsyncStorage.removeItem(slot));
+      const latest = (yield* readStored(key)) ?? cached;
+      const unsaved = unsavedSnapshots.get(key);
+      if (unsaved?.revision === revision && latest.revision < revision) {
+        yield* saveSnapshot(key, unsaved);
+        return unsaved.seed;
+      }
+      if (unsaved !== undefined && latest.revision >= unsaved.revision)
+        unsavedSnapshots.delete(key);
+      if (latest.revision !== revision) return yield* StaleImportedDraft.make();
+      return latest.seed;
+    }),
+  );
+});
 
 // Mirrors the PATCH semantics: a field the patch omits keeps its stored value.
-const seedAfterPatch = (seed: TemplateSeed, patch: DocumentPatch): TemplateSeed => ({
-  ...seed,
-  ...(patch.contact === undefined ? {} : { contact: patch.contact }),
-  ...(patch.language === undefined ? {} : { language: patch.language }),
-  ...(patch.series === undefined ? {} : { series: patch.series }),
-  ...(patch.pricesIncludeVat === undefined ? {} : { pricesIncludeVat: patch.pricesIncludeVat }),
-  ...(patch.bankAccount === undefined ? {} : { bankAccount: patch.bankAccount }),
-  ...(patch.variableSymbol === undefined ? {} : { variableSymbol: patch.variableSymbol }),
-  ...(patch.orderNumber === undefined ? {} : { orderNumber: patch.orderNumber }),
-  ...(patch.note === undefined ? {} : { note: patch.note }),
-});
+const seedAfterPatch = (seed: TemplateSeed, patch: DocumentPatch): TemplateSeed => {
+  const updated = { ...seed };
+  if (patch.contact !== undefined) updated.contact = patch.contact;
+  if (patch.language !== undefined) updated.language = patch.language;
+  if (patch.series !== undefined) updated.series = patch.series;
+  if (patch.pricesIncludeVat !== undefined) updated.pricesIncludeVat = patch.pricesIncludeVat;
+  if (patch.bankAccount !== undefined) updated.bankAccount = patch.bankAccount;
+  if (patch.variableSymbol !== undefined) updated.variableSymbol = patch.variableSymbol;
+  if (patch.orderNumber !== undefined) updated.orderNumber = patch.orderNumber;
+  if (patch.note !== undefined) updated.note = patch.note;
+  return updated;
+};
 
 /**
  * Carries the imported values forward after the server accepted a write made at
@@ -245,25 +322,29 @@ const seedAfterPatch = (seed: TemplateSeed, patch: DocumentPatch): TemplateSeed 
  * changed no imported field (issuing). The cache moves only when it was recorded at
  * `baseRevision`, so a write the client cannot account for still invalidates it.
  */
-export async function recordImportedDraftWrite(
+export const recordImportedDraftWrite = Effect.fn("TemplateImport.recordWrite")(function* (
   owner: string,
   documentId: DocumentId,
   patch: DocumentPatch | null,
   baseRevision: number,
   revision: number,
-): Promise<void> {
-  const key = draftSlot(owner, documentId);
-  const cached = await readStored(key);
+) {
+  const key = yield* draftSlot(owner, documentId);
+  const cached = yield* readStored(key);
   if (cached === null) return;
-  await locked(pendingSlot(owner, cached.templateId), async () => {
-    const latest = await readStored(key);
-    if (latest === null) return;
-    if (latest.revision === revision) {
-      unsavedSnapshots.delete(key);
-      return;
-    }
-    if (latest.revision !== baseRevision) throw new ImportedDraftRevisionMismatch();
-    const seed = patch === null ? latest.seed : seedAfterPatch(latest.seed, patch);
-    await saveSnapshot(key, { ...latest, seed, revision });
-  });
-}
+  const slot = yield* pendingSlot(owner, cached.templateId);
+  yield* locked(
+    slot,
+    Effect.gen(function* () {
+      const latest = yield* readStored(key);
+      if (latest === null) return;
+      if (latest.revision === revision) {
+        unsavedSnapshots.delete(key);
+        return;
+      }
+      if (latest.revision !== baseRevision) return yield* StaleImportedDraft.make();
+      const seed = patch === null ? latest.seed : seedAfterPatch(latest.seed, patch);
+      yield* saveSnapshot(key, { ...latest, seed, revision });
+    }),
+  );
+});

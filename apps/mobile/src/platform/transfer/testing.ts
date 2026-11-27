@@ -3,6 +3,8 @@
  * the screen: `mock.module(".../platform/transfer/transfer", () => ({ makeTransfer: () => fake }))`.
  */
 import { mock } from "bun:test";
+import * as Effect from "effect/Effect";
+import { runMobileEffect } from "../../runtime/request-intent";
 import type { SavedFile, TransferResult } from "./http";
 import type { DownloadRequest, Transfer, UploadRequest } from "./port";
 
@@ -28,32 +30,44 @@ export const fakeTransfer = (
     downloads,
     shared,
     opened,
-    upload: async (req) => {
-      uploads.push(req);
-      return replies.upload?.(req) ?? { _tag: "Ok", value: {} };
-    },
-    download: async (req) => {
-      downloads.push(req);
-      return (
-        replies.download?.(req) ?? {
-          _tag: "Ok",
-          value: {
-            ref: `file:///cache/${req.filename}`,
-            name: req.filename,
-            contentType: req.contentType ?? "application/octet-stream",
-            size: 1,
-          },
-        }
-      );
-    },
-    open: async (file) => {
-      opened.push(file);
-      return { _tag: "Ok", value: undefined };
-    },
-    share: async (file) => {
-      shared.push(file);
-      return { _tag: "Ok", value: undefined };
-    },
+    upload: (req) =>
+      runMobileEffect(
+        Effect.sync(() => {
+          uploads.push(req);
+          return replies.upload?.(req) ?? { _tag: "Ok", value: {} };
+        }),
+      ),
+    download: (req) =>
+      runMobileEffect(
+        Effect.sync(() => {
+          downloads.push(req);
+          return (
+            replies.download?.(req) ?? {
+              _tag: "Ok",
+              value: {
+                ref: `file:///cache/${req.filename}`,
+                name: req.filename,
+                contentType: req.contentType ?? "application/octet-stream",
+                size: 1,
+              },
+            }
+          );
+        }),
+      ),
+    open: (file) =>
+      runMobileEffect(
+        Effect.sync(() => {
+          opened.push(file);
+          return { _tag: "Ok", value: undefined };
+        }),
+      ),
+    share: (file) =>
+      runMobileEffect(
+        Effect.sync(() => {
+          shared.push(file);
+          return { _tag: "Ok", value: undefined };
+        }),
+      ),
   };
 };
 

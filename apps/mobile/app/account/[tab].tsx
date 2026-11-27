@@ -1,5 +1,6 @@
 import { useLocalSearchParams } from "expo-router";
-import { AccountScreen, parseAccountTab } from "../../src/features/account/account-screen";
+import { AccountScreen } from "../../src/features/account/account-screen";
+import { parseAccountTab } from "../../src/features/account/account-tab";
 import { param } from "../../src/navigation/routes";
 
 export default function AccountRoute() {

@@ -11,10 +11,13 @@ describe("api origin", () => {
 
   test("the PWA uses its page origin", () => {
     expect(
-      apiOrigin({ EXPO_PUBLIC_API_ORIGIN: "https://other" }, { origin: "https://app.test" }),
+      apiOrigin({
+        env: { EXPO_PUBLIC_API_ORIGIN: "https://other" },
+        location: { origin: "https://app.test" },
+      }),
     ).toBe("https://app.test");
-    expect(apiOrigin({ EXPO_PUBLIC_API_ORIGIN: "https://api.test" }, undefined)).toBe(
-      "https://api.test",
-    );
+    expect(
+      apiOrigin({ env: { EXPO_PUBLIC_API_ORIGIN: "https://api.test" }, location: undefined }),
+    ).toBe("https://api.test");
   });
 });

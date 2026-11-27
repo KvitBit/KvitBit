@@ -1,6 +1,8 @@
+import * as Fn from "effect/Function";
 /**
  * Status/settlement badge mapping and role-aware lifecycle action gating for Documents.
  */
+
 import type {
   DeliveryStatus,
   DocumentKind,
@@ -10,6 +12,7 @@ import type {
   Role,
 } from "@kvitbit/domain/contract";
 import { enumKey, type Translator } from "@kvitbit/ui-port/i18n";
+import * as Arr from "effect/Array";
 import type { BadgeTone } from "../../ui";
 
 export interface BadgeDescriptor {
@@ -17,10 +20,10 @@ export interface BadgeDescriptor {
   readonly tone: BadgeTone;
 }
 
-export const documentStatusBadge = (
-  status: DocumentStatus,
-  t: Translator["t"],
-): BadgeDescriptor => {
+export const documentStatusBadge: {
+  (status: DocumentStatus, t: Translator["t"]): BadgeDescriptor;
+  (t: Translator["t"]): (status: DocumentStatus) => BadgeDescriptor;
+} = Fn.dual(2, (status: DocumentStatus, t: Translator["t"]): BadgeDescriptor => {
   switch (status) {
     case "draft":
       return { label: t(enumKey("documentStatus", "draft")), tone: "draft" };
@@ -29,34 +32,42 @@ export const documentStatusBadge = (
     case "cancelled":
       return { label: t(enumKey("documentStatus", "cancelled")), tone: "danger" };
   }
-};
-
-export const settlementBadge = (
-  settlement: DocumentSettlement,
-  overdue: boolean,
-  t: Translator["t"],
-): BadgeDescriptor => {
-  if (overdue && (settlement === "unpaid" || settlement === "partially_paid")) {
-    return { label: t("enum.badge.overdue"), tone: "warning" };
-  }
-  switch (settlement) {
-    case "paid":
-      return { label: t(enumKey("settlement", "paid")), tone: "success" };
-    case "partially_paid":
-      return { label: t(enumKey("settlement", "partially_paid")), tone: "info" };
-    case "overpaid":
-      return { label: t(enumKey("settlement", "overpaid")), tone: "warning" };
-    case "credited":
-      return { label: t(enumKey("settlement", "credited")), tone: "neutral" };
-    case "unpaid":
-      return { label: t(enumKey("settlement", "unpaid")), tone: "neutral" };
-  }
-};
-
-export const kindBadge = (kind: DocumentKind, t: Translator["t"]): BadgeDescriptor => ({
-  label: t(enumKey("documentKind", kind)),
-  tone: kind === "proforma" ? "proforma" : "neutral",
 });
+
+export const settlementBadge: {
+  (settlement: DocumentSettlement, overdue: boolean, t: Translator["t"]): BadgeDescriptor;
+  (overdue: boolean, t: Translator["t"]): (settlement: DocumentSettlement) => BadgeDescriptor;
+} = Fn.dual(
+  3,
+  (settlement: DocumentSettlement, overdue: boolean, t: Translator["t"]): BadgeDescriptor => {
+    if (overdue && (settlement === "unpaid" || settlement === "partially_paid")) {
+      return { label: t("enum.badge.overdue"), tone: "warning" };
+    }
+    switch (settlement) {
+      case "paid":
+        return { label: t(enumKey("settlement", "paid")), tone: "success" };
+      case "partially_paid":
+        return { label: t(enumKey("settlement", "partially_paid")), tone: "info" };
+      case "overpaid":
+        return { label: t(enumKey("settlement", "overpaid")), tone: "warning" };
+      case "credited":
+        return { label: t(enumKey("settlement", "credited")), tone: "neutral" };
+      case "unpaid":
+        return { label: t(enumKey("settlement", "unpaid")), tone: "neutral" };
+    }
+  },
+);
+
+export const kindBadge: {
+  (kind: DocumentKind, t: Translator["t"]): BadgeDescriptor;
+  (t: Translator["t"]): (kind: DocumentKind) => BadgeDescriptor;
+} = Fn.dual(
+  2,
+  (kind: DocumentKind, t: Translator["t"]): BadgeDescriptor => ({
+    label: t(enumKey("documentKind", kind)),
+    tone: kind === "proforma" ? "proforma" : "neutral",
+  }),
+);
 
 export const deliveryStatusTone = (status: DeliveryStatus): BadgeTone => {
   switch (status) {
@@ -95,7 +106,10 @@ export interface DocumentActionFlags {
  * Computes which lifecycle actions are valid for a document and caller role
  * (docs/design/user-flows.md section 4 & core-ports 2.3).
  */
-export const documentActions = (doc: DocumentView, role: Role): DocumentActionFlags => {
+export const documentActions: {
+  (doc: DocumentView, role: Role): DocumentActionFlags;
+  (role: Role): (doc: DocumentView) => DocumentActionFlags;
+} = Fn.dual(2, (doc: DocumentView, role: Role): DocumentActionFlags => {
   const canWrite = role !== "accountant";
   const canAdmin = role === "owner" || role === "admin";
   const isDraft = doc.status === "draft";
@@ -103,7 +117,8 @@ export const documentActions = (doc: DocumentView, role: Role): DocumentActionFl
   const isProforma = doc.kind === "proforma";
   const isPtd = doc.kind === "payment_tax_document";
   const isCreditNote = doc.kind === "credit_note";
-  const hasFinalInvoice = doc.related.some(
+  const hasFinalInvoice = Arr.some(
+    doc.related,
     (rel) => rel.relation === "advance_of" || rel.relation === "final_invoice_for",
   );
   const proformaHasPayment =
@@ -130,4 +145,4 @@ export const documentActions = (doc: DocumentView, role: Role): DocumentActionFl
     canDuplicate: canWrite && (doc.kind === "invoice" || doc.kind === "proforma"),
     canDownloadPdf: true,
   };
-};
+});
