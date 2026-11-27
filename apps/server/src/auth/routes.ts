@@ -78,6 +78,7 @@ const fromWebResponse = (
           sessionRequest.hasCookie &&
           (yield* canSubmitFeedback(sessionRequest.sql, sessionRequest.feedback, session.user));
         delete headers["content-length"];
+        headers["cache-control"] = "no-store";
         return HttpServerResponse.jsonUnsafe(
           { ...session, feedbackEnabled },
           { status: response.status, headers },
