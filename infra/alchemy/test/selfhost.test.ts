@@ -898,6 +898,133 @@ describe("Self-hosting and CI deploy artifacts", () => {
     expect(deployPos).toBeGreaterThan(migratePos);
   });
 
+  test("feedback secret bootstrap can precede the first enabled token version", () => {
+    const workflow = Bun.YAML.parse(
+      readFileSync(join(repoRoot, ".github/workflows/deploy.yml"), "utf8"),
+    ) as {
+      on: { workflow_dispatch: { inputs: Record<string, unknown> } };
+      jobs: { deploy: { steps: Array<{ name?: string; if?: string; run?: string }> } };
+    };
+    const steps = workflow.jobs.deploy.steps;
+    const getStep = (name: string) => steps.find((step) => step.name?.startsWith(name));
+    expect(workflow.on.workflow_dispatch.inputs.bootstrap_feedback_secret).toEqual({
+      description: expect.any(String),
+      type: "boolean",
+      default: false,
+    });
+    expect(getStep("Guard bootstrap against populated production workloads")?.if).toBe(
+      "env.BOOTSTRAP_FOUNDATION == 'true'",
+    );
+    for (const name of [
+      "Authenticate to Google Cloud",
+      "Set up gcloud",
+      "Preflight Artifact Registry and Secret Manager versions",
+      "Configure Docker for Artifact Registry",
+      "Build and push Kvitbit OCI image",
+      "Run database and cluster schema migrations",
+      "Verify runner pool reconciled target digest and config",
+      "Verify database readiness and static mounts",
+    ]) {
+      expect(getStep(name)?.if).toContain("env.BOOTSTRAP_FEEDBACK_SECRET != 'true'");
+    }
+
+    const sandbox = mkdtempSync(join(tmpdir(), "kvitbit-feedback-bootstrap-"));
+    try {
+      writeFileSync(
+        join(sandbox, "gcloud"),
+        `#!/bin/sh
+set -eu
+case "$1 $2 $3" in
+  'artifacts repositories describe') exit 0 ;;
+  'secrets versions describe')
+    if [ "$8" = 'kvitbit-prod-feedback-github-token' ]; then
+      [ -n "$FEEDBACK_VERSION_STATE" ] || exit 1
+      printf '%s\\n' "$FEEDBACK_VERSION_STATE"
+    else
+      printf 'ENABLED\\n'
+    fi ;;
+  *) exit 1 ;;
+esac
+`,
+        { mode: 0o755 },
+      );
+      writeFileSync(
+        join(sandbox, "bunx"),
+        `#!/bin/sh
+set -eu
+printf '%s\\n' "$KVITBIT_ENABLE_FEEDBACK_GITHUB_TOKEN_SECRET" "$KVITBIT_IMAGE_DIGEST" "$*"
+`,
+        { mode: 0o755 },
+      );
+      const run = (step: string, env: Record<string, string> = {}) => {
+        const script = getStep(step)?.run;
+        expect(script).toBeDefined();
+        return Bun.spawnSync(["bash", "-c", script ?? ""], {
+          env: {
+            PATH: `${sandbox}:${process.env.PATH ?? "/usr/bin:/bin"}`,
+            GITHUB_SHA: "test-revision",
+            GCP_PROJECT_ID: "kvitbit-prod",
+            GCP_REGION: "europe-west3",
+            KVITBIT_STAGE: "prod",
+            KVITBIT_IMAGE_DIGEST: `sha256:${"b".repeat(64)}`,
+            KVITBIT_ENABLE_FEEDBACK_GITHUB_TOKEN_SECRET: "false",
+            BOOTSTRAP_FOUNDATION: "false",
+            BOOTSTRAP_FEEDBACK_SECRET: "false",
+            DRY_RUN: "false",
+            FEEDBACK_VERSION_STATE: "",
+            ...env,
+          },
+          stdout: "pipe",
+          stderr: "pipe",
+        });
+      };
+      const deploy = "Run pure-Alchemy GCP stack";
+      const preflight = "Preflight Artifact Registry and Secret Manager versions";
+      const enabled = { KVITBIT_ENABLE_FEEDBACK_GITHUB_TOKEN_SECRET: "true" };
+      expect(run(preflight).exitCode).toBe(0);
+      expect(run(deploy).stdout.toString().trim().split("\n")).toEqual([
+        "false",
+        `sha256:${"b".repeat(64)}`,
+        "alchemy deploy --yes --stage prod",
+      ]);
+      for (const state of ["", "DISABLED", "DESTROYED"]) {
+        const failed = run(preflight, { ...enabled, FEEDBACK_VERSION_STATE: state });
+        expect(failed.exitCode).toBe(1);
+        expect(failed.stdout.toString()).toContain("bootstrap_feedback_secret=true");
+      }
+
+      const bootstrap = { BOOTSTRAP_FEEDBACK_SECRET: "true", KVITBIT_IMAGE_DIGEST: "" };
+      const disabledBootstrap = run(deploy, bootstrap);
+      expect(disabledBootstrap.exitCode).toBe(1);
+      expect(disabledBootstrap.stdout.toString()).toContain(
+        "Set the KVITBIT_ENABLE_FEEDBACK_GITHUB_TOKEN_SECRET repository variable to true",
+      );
+      for (const [dryRun, command] of [
+        ["false", "deploy --yes"],
+        ["true", "plan"],
+      ] as const) {
+        const result = run(deploy, { ...bootstrap, ...enabled, DRY_RUN: dryRun });
+        expect(result.exitCode).toBe(0);
+        const [flag, digest, args] = result.stdout.toString().trim().split("\n");
+        expect(flag).toBe("true");
+        expect(digest).toMatch(/^sha256:[a-f0-9]{64}$/);
+        expect(args).toBe(
+          `alchemy ${command} --stage prod --include Secret-kvitbit-prod-feedback-github-token`,
+        );
+      }
+
+      expect(run(preflight, { ...enabled, FEEDBACK_VERSION_STATE: "ENABLED" }).exitCode).toBe(0);
+      const conflicting = run("Validate GCP deployment variables", {
+        ...bootstrap,
+        BOOTSTRAP_FOUNDATION: "true",
+      });
+      expect(conflicting.exitCode).toBe(1);
+      expect(conflicting.stdout.toString()).toContain("Select only one");
+    } finally {
+      rmSync(sandbox, { recursive: true, force: true });
+    }
+  });
+
   test("deploy.yml verifies readiness and both static mounts through the public Cloud Run URL", async () => {
     const workflow = readFileSync(join(repoRoot, ".github/workflows/deploy.yml"), "utf8");
     const parsed = Bun.YAML.parse(workflow) as {
@@ -1015,6 +1142,8 @@ describe("Self-hosting and CI deploy artifacts", () => {
       writeFileSync(ghEnv, "");
       const baseVars = {
         KVITBIT_STAGE: "prod",
+        BOOTSTRAP_FOUNDATION: "false",
+        BOOTSTRAP_FEEDBACK_SECRET: "false",
         GCP_PROJECT_ID: "kvitbit-prod",
         GCP_PROJECT_NUMBER: "449188423567",
         GCP_REGION: "europe-west3",

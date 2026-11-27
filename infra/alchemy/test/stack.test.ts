@@ -2,7 +2,11 @@ import { describe, expect, test } from "bun:test";
 import { chmodSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { Secret } from "@alchemy.run/gcp/SecretManager";
+import * as Apply from "alchemy/Apply";
 import * as Output from "alchemy/Output";
+import * as Plan from "alchemy/Plan";
+import * as Provider from "alchemy/Provider";
 import * as Stack from "alchemy/Stack";
 import { Stage } from "alchemy/Stage";
 import * as State from "alchemy/State";
@@ -258,9 +262,14 @@ describe("Bootstrap state safety guard", () => {
       logicalId,
       fqn: logicalId,
       resourceType: "Test",
+      namespace: undefined,
+      instanceId: logicalId,
+      providerVersion: 0,
+      downstream: [],
+      bindings: [],
       props: {},
       attr: {},
-    }) as unknown as NonNullable<Parameters<typeof State.inMemoryState>[0]>[string][string][string];
+    }) satisfies State.CreatedResourceState;
 
   test("hard-fails bootstrapFoundation when state already contains non-foundation production workloads", async () => {
     const populatedStateLayer = State.inMemoryState({
@@ -281,6 +290,78 @@ describe("Bootstrap state safety guard", () => {
       stage: "prod",
       unexpectedResources: ["KvitbitRunner0", "KvitbitServer", "KvitbitVpc"],
     });
+  });
+
+  test("selected feedback secret bootstrap adds only the container to populated state", async () => {
+    const target = { stack: KVITBIT_STACK_NAME, stage: "prod" };
+    const secretId = "kvitbit-prod-feedback-github-token";
+    const fqn = `Secret-${secretId}`;
+    const existing = {
+      KvitbitImages: makeFakeResourceState("KvitbitImages"),
+      KvitbitVpc: makeFakeResourceState("KvitbitVpc"),
+      KvitbitRunner0: makeFakeResourceState("KvitbitRunner0"),
+      KvitbitServer: makeFakeResourceState("KvitbitServer"),
+    };
+    const existingOutput = { serverService: "kvitbit-prod-server", repository: "kvitbit" };
+    const state = State.inMemoryState(
+      { [target.stack]: { [target.stage]: { ...existing } } },
+      { [target.stack]: { [target.stage]: existingOutput } },
+    );
+    const providers = Provider.succeed(Secret, {
+      read: () => Effect.succeed(undefined),
+      reconcile: ({ news }) => {
+        expect(news.secretId).toBe(secretId);
+        return Effect.succeed({
+          name: `projects/kvitbit-prod/secrets/${secretId}`,
+          secretId,
+          project: "kvitbit-prod",
+          labels: {},
+          annotations: {},
+          replication: { automatic: {} },
+          expireTime: undefined,
+          createTime: undefined,
+          etag: undefined,
+          topics: [],
+          rotation: undefined,
+          versionAliases: {},
+          versionDestroyTtl: undefined,
+        });
+      },
+      delete: () => Effect.die("Unexpected secret deletion"),
+    });
+    const feedbackConfig = sampleProdConfig({
+      secrets: defaultSecretBindings("prod", { enableFeedbackGitHubToken: true }),
+    });
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const compiled = yield* Stack.Stack(
+          target.stack,
+          { state, providers },
+          declareKvitbitStack(feedbackConfig).pipe(Effect.orDie),
+        );
+        yield* Effect.gen(function* () {
+          const plan = yield* Plan.make(compiled, { include: [fqn] });
+          expect(Object.keys(plan.resources)).toEqual([fqn]);
+          expect(plan.resources[fqn]?.action).toBe("create");
+          expect(plan.deletions).toEqual({});
+          yield* Apply.apply(plan);
+
+          const store = yield* yield* State.State;
+          expect((yield* store.list(target)).toSorted()).toEqual(
+            [...Object.keys(existing), fqn].sort(),
+          );
+          expect(yield* store.get({ ...target, fqn })).toMatchObject({
+            status: "created",
+            resourceType: Secret.Type,
+            attr: { secretId },
+          });
+          for (const [fqn, row] of Object.entries(existing)) {
+            expect(yield* store.get({ ...target, fqn })).toEqual(row);
+          }
+          expect(yield* store.getOutput(target)).toEqual(existingOutput);
+        }).pipe(Effect.provideContext(compiled.services), Effect.provide(state));
+      }).pipe(Effect.provideService(Stage, target.stage), Effect.scoped),
+    );
   });
 
   test.each([
