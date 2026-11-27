@@ -31,8 +31,11 @@ import {
   validateStackConfigSync,
 } from "../../../../infra/alchemy/src/config";
 import {
+  BOT_PROTECTION_MODES as DEPLOY_BOT_PROTECTION_MODES,
   DEPLOY_MODES,
+  PROD_BOT_PROTECTION_MODES as DEPLOY_PROD_BOT_PROTECTION_MODES,
   DEPLOY_STAGES,
+  type BotProtectionMode as DeployBotProtectionMode,
   type EmailMode as DeployEmailMode,
   REQUIRED_GCP_VARS,
   SECRET_FLAG_ENV_VARS,
@@ -43,21 +46,29 @@ import {
   serverPlainEnv,
   serverSecretEnv,
 } from "../../../../infra/alchemy/src/env";
+import { BotProtectionLive } from "../../src/app";
+import { BotProtection } from "../../src/auth";
 import {
   BLOB_DRIVERS,
+  BOT_PROTECTION_MODES,
   composeRuntimeEnvLayers,
   EMAIL_MODES,
   FORBIDDEN_OPT_OUT_ENV_VARS,
   KVITBIT_ENVS,
   type KvitbitEnv,
   loadBootRuntimeConfig,
+  loadBotProtectionConfig,
   makeRuntimeEnvLayer,
+  PROD_BOT_PROTECTION_MODES,
   PROD_EMAIL_MODES,
+  RESOLVED_BOT_PROTECTION_MODES,
   RESOLVED_EMAIL_MODES,
+  resolveBotProtectionConfig,
   resolveKvitbitEnv,
   SERVER_WORKLOADS,
   validateServerRuntimeEnv,
 } from "../../src/config-contract";
+import { HttpConfig, HttpConfigLive } from "../../src/http/config";
 import { MobileConfig, MobileConfigLive } from "../../src/http/mobile/config";
 import { makeBlobStorageLayer } from "../../src/wiring/blob";
 import { makeEmailSenderLayer } from "../../src/wiring/email";
@@ -209,6 +220,39 @@ const oracleBlob = (
   return { ok: true, expectedDriver: driver };
 };
 
+type BotModeCase = "absent" | "altcha" | "none" | "disabled" | "bogus";
+type AltchaKeyCase = "absent" | "whitespace" | "present";
+
+const ALTCHA_KEY_VALUES: Readonly<Record<AltchaKeyCase, string | undefined>> = {
+  absent: undefined,
+  whitespace: "   ",
+  present: "synthetic-altcha-hmac-key",
+};
+
+const oracleBotProtection = (
+  env: KvitbitEnv,
+  workload: "server" | "worker",
+  modeCase: BotModeCase,
+  keyCase: AltchaKeyCase,
+): { readonly ok: boolean; readonly expectedMode?: "altcha" | "none" } => {
+  if (modeCase === "bogus" || modeCase === "disabled") return { ok: false };
+  if (env === "production" && modeCase === "none") return { ok: false };
+  if (workload === "worker") return { ok: true };
+
+  const hasKey = keyCase === "present";
+  if (env === "production") {
+    return hasKey ? { ok: true, expectedMode: "altcha" } : { ok: false };
+  }
+  if (env === "staging" || env === "preview") {
+    if (modeCase === "none") return { ok: true, expectedMode: "none" };
+    return hasKey ? { ok: true, expectedMode: "altcha" } : { ok: false };
+  }
+  // development / test
+  if (modeCase === "none") return { ok: true, expectedMode: "none" };
+  if (modeCase === "altcha") return hasKey ? { ok: true, expectedMode: "altcha" } : { ok: false };
+  return hasKey ? { ok: true, expectedMode: "altcha" } : { ok: true, expectedMode: "none" };
+};
+
 const SAMPLE_DIGEST = `sha256:${"a".repeat(64)}`;
 const VALID_EDGE: KvitbitEdgeConfig = {
   domains: ["kvitbit.cz", "kvitbit.app"],
@@ -235,6 +279,8 @@ const materializeSecretValue = (envVar: string): string => {
       return "re_synthetic_key_12345";
     case "KVITBIT_SMTP_URL":
       return "smtps://user:pass@smtp.example.cz:465";
+    case "ALTCHA_HMAC_KEY":
+      return "synthetic-altcha-hmac-key-32-chars";
     default:
       return "synthetic-secret-value";
   }
@@ -257,12 +303,22 @@ describe("verify-deploy-config: finite domain size guards", () => {
     expect(PROD_EMAIL_MODES).toEqual(["resend", "smtp", "resend+smtp"]);
     expect(RESOLVED_EMAIL_MODES).toEqual(["resend", "smtp", "resend+smtp", "capture", "console"]);
     expect(BLOB_DRIVERS).toEqual(["gcs", "local"]);
+    expect(BOT_PROTECTION_MODES).toEqual(["altcha", "none", "disabled"]);
+    expect(PROD_BOT_PROTECTION_MODES).toEqual(["altcha"]);
+    expect(RESOLVED_BOT_PROTECTION_MODES).toEqual(["altcha", "none"]);
+    expect(DEPLOY_BOT_PROTECTION_MODES).toEqual(["altcha", "none", "disabled"]);
+    expect(DEPLOY_PROD_BOT_PROTECTION_MODES).toEqual(["altcha"]);
     expect(SERVER_WORKLOADS).toEqual(["server", "worker"]);
     expect(DEPLOY_STAGES).toEqual(["prod", "staging"]);
-    expect(DEPLOY_MODES).toEqual(["normal", "bootstrap_foundation", "bootstrap_feedback_secret"]);
-    expect(SECRET_FLAG_ENV_VARS.length).toBe(4);
+    expect(DEPLOY_MODES).toEqual([
+      "normal",
+      "bootstrap_foundation",
+      "bootstrap_feedback_secret",
+      "bootstrap_altcha_secret",
+    ]);
+    expect(SECRET_FLAG_ENV_VARS.length).toBe(5);
     expect(REQUIRED_GCP_VARS.length).toBe(7);
-    expect(FORBIDDEN_OPT_OUT_ENV_VARS.length).toBe(7);
+    expect(FORBIDDEN_OPT_OUT_ENV_VARS.length).toBe(9);
   });
 });
 
@@ -393,6 +449,7 @@ describe("verify-deploy-config: apps/server runtime contract", () => {
                       NODE_ENV: envSpec.nodeEnv,
                       DATABASE_URL: "postgres://app:pw@db.internal:5432/kvitbit",
                       BETTER_AUTH_SECRET: "test-auth-secret",
+                      ALTCHA_HMAC_KEY: "synthetic-altcha-hmac-key",
                       APP_ORIGIN: ORIGIN_VALUES[origin],
                       KVITBIT_EMAIL_MODE: emailMode === "absent" ? undefined : emailMode,
                       EMAIL_FROM: EMAIL_FROM_VALUES[from],
@@ -449,7 +506,10 @@ describe("verify-deploy-config: apps/server runtime contract", () => {
                           !SPEC_PROD_EMAIL_MODES.has(actual.value.email.mode) ||
                           actual.value.blob.driver !== "gcs" ||
                           actual.value.blob.gcsBucket === undefined ||
-                          !actual.value.appOrigin.startsWith("https://")
+                          !actual.value.appOrigin.startsWith("https://") ||
+                          (workload === "server" &&
+                            actual.value.botProtection?.mode !== "altcha") ||
+                          (workload === "worker" && actual.value.botProtection !== undefined)
                         ) {
                           failures.push(`prod invariant violated: ${JSON.stringify(actual.value)}`);
                         }
@@ -485,6 +545,171 @@ describe("verify-deploy-config: apps/server runtime contract", () => {
     expect(stagingPreviewExplicitNonProdAccepted).toBeGreaterThan(0);
   }, 30_000);
 
+  test("bot protection (resolveBotProtectionConfig, validateServerRuntimeEnv, BotProtectionLive, HttpConfigLive) matches oracle across all 990 states", async () => {
+    const botModes: ReadonlyArray<BotModeCase> = ["absent", "altcha", "none", "disabled", "bogus"];
+    const keyCases: ReadonlyArray<AltchaKeyCase> = ["absent", "whitespace", "present"];
+
+    // 1. Direct resolveBotProtectionConfig: 5 envs x 5 modes x 3 key states = 75 states.
+    let directChecked = 0;
+    for (const env of KVITBIT_ENVS) {
+      for (const mode of botModes) {
+        for (const keyCase of keyCases) {
+          directChecked++;
+          const actual = resolveBotProtectionConfig(env, {
+            mode: mode === "absent" ? undefined : mode,
+            hmacKey: ALTCHA_KEY_VALUES[keyCase],
+          });
+          const expected = oracleBotProtection(env, "server", mode, keyCase);
+          expect(actual.ok, `resolveBotProtectionConfig ${env} ${mode} ${keyCase}`).toBe(
+            expected.ok,
+          );
+          if (actual.ok && expected.expectedMode !== undefined) {
+            expect(actual.value.mode).toBe(expected.expectedMode);
+          }
+        }
+      }
+    }
+    expect(directChecked).toBe(75);
+
+    // 2. Full validateServerRuntimeEnv bot-protection product:
+    // 2 workloads x 7 env inputs x 5 bot modes x 3 key states x 2 email configs x 2 blob configs = 840 states.
+    const envInputs: ReadonlyArray<{
+      readonly label: string;
+      readonly kvitbitEnv?: string;
+      readonly nodeEnv?: string;
+      readonly resolved: KvitbitEnv;
+    }> = [
+      { label: "KVITBIT_ENV=production", kvitbitEnv: "production", resolved: "production" },
+      { label: "NODE_ENV=production", nodeEnv: "production", resolved: "production" },
+      { label: "KVITBIT_ENV=staging", kvitbitEnv: "staging", resolved: "staging" },
+      { label: "KVITBIT_ENV=preview", kvitbitEnv: "preview", resolved: "preview" },
+      { label: "KVITBIT_ENV=development", kvitbitEnv: "development", resolved: "development" },
+      { label: "unset (development)", resolved: "development" },
+      { label: "KVITBIT_ENV=test", kvitbitEnv: "test", nodeEnv: "test", resolved: "test" },
+    ];
+    let runtimeChecked = 0;
+    for (const workload of SERVER_WORKLOADS) {
+      for (const envSpec of envInputs) {
+        for (const mode of botModes) {
+          for (const keyCase of keyCases) {
+            for (const emailProfile of ["prod_resend", "explicit_capture"] as const) {
+              for (const blobProfile of ["gcs", "local"] as const) {
+                runtimeChecked++;
+                const envMap: Record<string, string | undefined> = {
+                  KVITBIT_ENV: envSpec.kvitbitEnv,
+                  NODE_ENV: envSpec.nodeEnv,
+                  DATABASE_URL: "postgres://app:pw@db.internal:5432/kvitbit",
+                  BETTER_AUTH_SECRET: "test-auth-secret",
+                  APP_ORIGIN: "https://kvitbit.cz",
+                  EMAIL_FROM: "Kvitbit <noreply@kvitbit.cz>",
+                  RESEND_API_KEY: emailProfile === "prod_resend" ? "re_synthetic_key" : undefined,
+                  KVITBIT_EMAIL_MODE: emailProfile === "explicit_capture" ? "capture" : undefined,
+                  KVITBIT_BLOB_DRIVER: blobProfile,
+                  KVITBIT_BLOB_BUCKET: blobProfile === "gcs" ? "kvitbit-blobs" : undefined,
+                  KVITBIT_BOT_PROTECTION_MODE: mode === "absent" ? undefined : mode,
+                  ALTCHA_HMAC_KEY: ALTCHA_KEY_VALUES[keyCase],
+                };
+                const actual = validateServerRuntimeEnv(envMap, workload);
+                const expEmailOk =
+                  emailProfile === "prod_resend" || envSpec.resolved !== "production";
+                const expBlobOk = blobProfile === "gcs" || envSpec.resolved !== "production";
+                const expBot = oracleBotProtection(envSpec.resolved, workload, mode, keyCase);
+                const expOk = expEmailOk && expBlobOk && expBot.ok;
+                expect(
+                  actual.ok,
+                  `bot runtime ${workload} ${envSpec.label} mode=${mode} key=${keyCase} email=${emailProfile} blob=${blobProfile}`,
+                ).toBe(expOk);
+                if (actual.ok) {
+                  if (workload === "worker") {
+                    expect(actual.value.botProtection).toBeUndefined();
+                  } else {
+                    expect(actual.value.botProtection?.mode).toBe(expBot.expectedMode);
+                    if (envSpec.resolved === "production") {
+                      expect(actual.value.botProtection?.mode).toBe("altcha");
+                      expect(actual.value.botProtection?.hmacKey).toBe("synthetic-altcha-hmac-key");
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+    expect(runtimeChecked).toBe(840);
+
+    // 3. Live Effect layer parity (HttpConfigLive + loadBotProtectionConfig + BotProtectionLive):
+    // 5 envs x 5 modes x 3 key states = 75 live checks.
+    let liveChecked = 0;
+    for (const env of KVITBIT_ENVS) {
+      for (const mode of botModes) {
+        for (const keyCase of keyCases) {
+          liveChecked++;
+          const rawEnv: Record<string, string | undefined> = {
+            KVITBIT_ENV: env,
+            DATABASE_URL: "postgres://app:pw@db.internal:5432/kvitbit",
+            BETTER_AUTH_SECRET: "test-auth-secret",
+            APP_ORIGIN: "https://kvitbit.cz",
+            KVITBIT_BOT_PROTECTION_MODE: mode === "absent" ? undefined : mode,
+            ALTCHA_HMAC_KEY: ALTCHA_KEY_VALUES[keyCase],
+          };
+          const envLayer = makeRuntimeEnvLayer(rawEnv);
+          const expected = oracleBotProtection(env, "server", mode, keyCase);
+
+          const httpRes = await Effect.runPromise(
+            Effect.map(HttpConfig, (cfg) => cfg.botProtection).pipe(
+              Effect.provide(HttpConfigLive),
+              Effect.provide(envLayer),
+              Effect.result,
+            ),
+          );
+          const cfgRes = await Effect.runPromise(
+            loadBotProtectionConfig.pipe(Effect.provide(envLayer), Effect.result),
+          );
+          expect(httpRes._tag === "Success", `HttpConfigLive ${env} ${mode} ${keyCase}`).toBe(
+            expected.ok,
+          );
+          expect(
+            cfgRes._tag === "Success",
+            `loadBotProtectionConfig ${env} ${mode} ${keyCase}`,
+          ).toBe(expected.ok);
+          if (
+            httpRes._tag === "Success" &&
+            cfgRes._tag === "Success" &&
+            expected.expectedMode !== undefined
+          ) {
+            expect(httpRes.success).toBe(expected.expectedMode);
+            expect(cfgRes.success.mode).toBe(expected.expectedMode);
+            if (expected.expectedMode === "none") {
+              const noopRes = await Effect.runPromise(
+                Effect.flatMap(BotProtection, (bp) => bp.issue("sign_up")).pipe(
+                  Effect.provide(BotProtectionLive as Layer.Layer<BotProtection, unknown>),
+                  Effect.provide(envLayer),
+                  Effect.result,
+                ),
+              );
+              expect(noopRes._tag).toBe("Success");
+              if (noopRes._tag === "Success") {
+                expect(noopRes.success.parameters.algorithm).toBe("NONE");
+              }
+            }
+          } else {
+            // Failed states must also fail BotProtectionLive layer build.
+            const bpFail = await Effect.runPromise(
+              Effect.flatMap(BotProtection, (bp) => bp.issue("sign_up")).pipe(
+                Effect.provide(BotProtectionLive as Layer.Layer<BotProtection, unknown>),
+                Effect.provide(envLayer),
+                Effect.result,
+              ),
+            );
+            expect(bpFail._tag, `BotProtectionLive fail ${env} ${mode} ${keyCase}`).toBe("Failure");
+          }
+        }
+      }
+    }
+    expect(liveChecked).toBe(75);
+  }, 30_000);
+
   test("core DB/auth secrets and forbidden opt-out flags across pure validator AND live loadBootRuntimeConfig", async () => {
     const coreCases = [
       { label: "both", db: "postgres://a/b", unpooled: "postgres://a/b", auth: "secret" },
@@ -505,6 +730,7 @@ describe("verify-deploy-config: apps/server runtime contract", () => {
               DATABASE_URL: c.db,
               DATABASE_URL_UNPOOLED: c.unpooled,
               BETTER_AUTH_SECRET: c.auth,
+              ALTCHA_HMAC_KEY: "synthetic-altcha-hmac-key",
               APP_ORIGIN: "https://kvitbit.cz",
               EMAIL_FROM: "Kvitbit <noreply@kvitbit.cz>",
               RESEND_API_KEY: "re_key",
@@ -540,6 +766,7 @@ describe("verify-deploy-config: apps/server runtime contract", () => {
             KVITBIT_ENV: env,
             DATABASE_URL: "postgres://a/b",
             BETTER_AUTH_SECRET: "secret",
+            ALTCHA_HMAC_KEY: "synthetic-altcha-hmac-key",
             APP_ORIGIN: "https://kvitbit.cz",
             EMAIL_FROM: "Kvitbit <noreply@kvitbit.cz>",
             RESEND_API_KEY: "re_key",
@@ -576,9 +803,9 @@ describe("verify-deploy-config: apps/server runtime contract", () => {
         }
       }
     }
-    expect(optOutChecked).toBe(90);
-    expect(liveOptOutChecked).toBe(90);
-    expect(fallbackOptOutChecked).toBe(90);
+    expect(optOutChecked).toBe(110);
+    expect(liveOptOutChecked).toBe(110);
+    expect(fallbackOptOutChecked).toBe(110);
 
     // Upgrade preservation: NODE_ENV=production with empty KVITBIT_ENV and configured Resend stays in production (never capture).
     const upgradedEnv: Record<string, string> = {
@@ -586,6 +813,7 @@ describe("verify-deploy-config: apps/server runtime contract", () => {
       KVITBIT_ENV: "",
       DATABASE_URL: "postgres://a/b",
       BETTER_AUTH_SECRET: "secret",
+      ALTCHA_HMAC_KEY: "synthetic-altcha-hmac-key",
       APP_ORIGIN: "https://kvitbit.cz",
       EMAIL_FROM: "Kvitbit <noreply@kvitbit.cz>",
       RESEND_API_KEY: "re_key",
@@ -1013,6 +1241,7 @@ describe("verify-deploy-config: infra/alchemy stack validation & cross-layer sou
                             enableResend: secrets.enableResend,
                             enableSmtp: secrets.enableSmtp,
                             enableFeedbackGitHubToken: enableFeedback,
+                            enableAltchaHmacKey: true,
                           }),
                           dnsZones: [],
                           edge: edgeCase.edge,
@@ -1128,7 +1357,8 @@ describe("verify-deploy-config: infra/alchemy stack validation & cross-layer sou
                             if (
                               serverCheck.value.env !== "production" ||
                               !SPEC_PROD_EMAIL_MODES.has(serverCheck.value.email.mode) ||
-                              serverCheck.value.blob.driver !== "gcs"
+                              serverCheck.value.blob.driver !== "gcs" ||
+                              serverCheck.value.botProtection?.mode !== "altcha"
                             ) {
                               failures.push(
                                 `cross-layer prod server weakened: ${JSON.stringify(serverCheck.value)}`,
@@ -1194,6 +1424,214 @@ describe("verify-deploy-config: infra/alchemy stack validation & cross-layer sou
     expect(crossLayerVerified).toBe(prodNormalAccepted + stagingNormalAccepted);
   }, 30_000);
 
+  test("validateStackConfigSync exhaustively verifies bot protection & all bootstrap modes across 2,688 states with cross-layer server+worker soundness", () => {
+    const deployModeCases = [
+      {
+        label: "normal",
+        bootstrapFoundation: false,
+        bootstrapFeedbackSecret: false,
+        bootstrapAltchaSecret: false,
+      },
+      {
+        label: "bootstrap_foundation",
+        bootstrapFoundation: true,
+        bootstrapFeedbackSecret: false,
+        bootstrapAltchaSecret: false,
+      },
+      {
+        label: "bootstrap_feedback_secret",
+        bootstrapFoundation: false,
+        bootstrapFeedbackSecret: true,
+        bootstrapAltchaSecret: false,
+      },
+      {
+        label: "bootstrap_altcha_secret",
+        bootstrapFoundation: false,
+        bootstrapFeedbackSecret: false,
+        bootstrapAltchaSecret: true,
+      },
+      {
+        label: "conflict_foundation_feedback",
+        bootstrapFoundation: true,
+        bootstrapFeedbackSecret: true,
+        bootstrapAltchaSecret: false,
+      },
+      {
+        label: "conflict_foundation_altcha",
+        bootstrapFoundation: true,
+        bootstrapFeedbackSecret: false,
+        bootstrapAltchaSecret: true,
+      },
+      {
+        label: "conflict_feedback_altcha",
+        bootstrapFoundation: false,
+        bootstrapFeedbackSecret: true,
+        bootstrapAltchaSecret: true,
+      },
+    ] as const;
+    const botModes: ReadonlyArray<DeployBotProtectionMode | "absent"> = [
+      "absent",
+      "altcha",
+      "none",
+      "disabled",
+    ];
+    const emailModes: ReadonlyArray<DeployEmailMode | "absent"> = ["absent", "resend", "capture"];
+
+    let total = 0;
+    let normalVerified = 0;
+    const failures: string[] = [];
+
+    for (const stage of DEPLOY_STAGES) {
+      for (const deployMode of deployModeCases) {
+        for (const botMode of botModes) {
+          for (const enableAltcha of [false, true] as const) {
+            for (const enableFeedback of [false, true] as const) {
+              for (const emailMode of emailModes) {
+                for (const enableResend of [false, true] as const) {
+                  for (const blobDriver of BLOB_DRIVERS) {
+                    total++;
+                    const config: KvitbitStackConfig = {
+                      stage,
+                      bootstrapFoundation: deployMode.bootstrapFoundation,
+                      bootstrapFeedbackSecret: deployMode.bootstrapFeedbackSecret,
+                      bootstrapAltchaSecret: deployMode.bootstrapAltchaSecret,
+                      projectId: KVITBIT_PROD_DEFAULTS.projectId,
+                      projectNumber: KVITBIT_PROD_DEFAULTS.projectNumber,
+                      region: KVITBIT_PROD_DEFAULTS.region,
+                      zone: KVITBIT_PROD_DEFAULTS.zone,
+                      stateBucket: KVITBIT_PROD_DEFAULTS.stateBucket,
+                      artifactRepositoryId: KVITBIT_PROD_DEFAULTS.artifactRepositoryId,
+                      imageName: KVITBIT_PROD_DEFAULTS.imageName,
+                      imageDigest: deployMode.bootstrapFoundation ? "" : SAMPLE_DIGEST,
+                      blobDriver,
+                      blobsBucket: `kvitbit-${stage}-blobs`,
+                      mobileAssetsBucket: `kvitbit-${stage}-mobile`,
+                      runnerCount: 2,
+                      runnerMachineType: KVITBIT_PROD_DEFAULTS.runnerMachineType,
+                      runnerPort: KVITBIT_PROD_DEFAULTS.runnerPort,
+                      runnerCidr: KVITBIT_PROD_DEFAULTS.runnerCidr,
+                      serverMinInstances: 0,
+                      serverMaxInstances: 10,
+                      appOrigin: "https://kvitbit.cz",
+                      emailMode: emailMode === "absent" ? undefined : emailMode,
+                      emailFrom: "Kvitbit <noreply@kvitbit.cz>",
+                      botProtectionMode: botMode === "absent" ? undefined : botMode,
+                      trustedProxyHops: 2,
+                      shareKeyVersion: 1,
+                      androidAssetlinksSha256: undefined,
+                      feedbackGitHubRepo: undefined,
+                      feedbackOwnerEmails: undefined,
+                      secrets: defaultSecretBindings(stage, {
+                        enableResend,
+                        enableFeedbackGitHubToken: enableFeedback,
+                        enableAltchaHmacKey: enableAltcha,
+                      }),
+                      dnsZones: [],
+                      edge: VALID_EDGE,
+                    };
+
+                    // Independent oracle
+                    let expOk = true;
+                    const activeBootstraps = [
+                      deployMode.bootstrapFoundation,
+                      deployMode.bootstrapFeedbackSecret,
+                      deployMode.bootstrapAltchaSecret,
+                    ].filter(Boolean).length;
+                    if (activeBootstraps > 1) {
+                      expOk = false;
+                    } else if (botMode === "disabled") {
+                      expOk = false;
+                    } else if (
+                      stage === "prod" &&
+                      (blobDriver !== "gcs" ||
+                        emailMode === "capture" ||
+                        (botMode !== "absent" && botMode !== "altcha"))
+                    ) {
+                      expOk = false;
+                    } else if (deployMode.bootstrapFeedbackSecret) {
+                      expOk = enableFeedback;
+                    } else if (deployMode.bootstrapAltchaSecret) {
+                      expOk = enableAltcha;
+                    } else if (deployMode.bootstrapFoundation) {
+                      expOk = true;
+                    } else {
+                      // Normal deploy
+                      if (stage === "prod") {
+                        if (!enableResend || !enableAltcha) expOk = false;
+                      } else {
+                        if (botMode !== "none" && !enableAltcha) expOk = false;
+                        if (emailMode !== "capture" && !enableResend) expOk = false;
+                      }
+                    }
+
+                    const actual = validateStackConfigSync(config);
+                    if (actual.ok !== expOk) {
+                      if (failures.length < 10) {
+                        failures.push(
+                          `alchemy-bot ${stage} ${deployMode.label} bot=${botMode} altcha=${enableAltcha} fb=${enableFeedback} email=${emailMode} resend=${enableResend} blob=${blobDriver}: expected=${expOk}, got=${actual.ok}${actual.ok ? "" : ` (${actual.error.message})`}`,
+                        );
+                      }
+                      continue;
+                    }
+
+                    if (actual.ok && activeBootstraps === 0) {
+                      normalVerified++;
+                      const serverEnvMap: Record<string, string> = {};
+                      for (const v of serverPlainEnv(config, {
+                        blobsBucket: config.blobsBucket,
+                        mobileAssetsBucket: config.mobileAssetsBucket,
+                      })) {
+                        serverEnvMap[v.name] = v.value;
+                      }
+                      for (const s of serverSecretEnv(config)) {
+                        serverEnvMap[s.name] = materializeSecretValue(s.name);
+                      }
+                      const serverCheck = validateServerRuntimeEnv(serverEnvMap, "server");
+                      if (!serverCheck.ok) {
+                        failures.push(
+                          `alchemy-bot->server gap (${stage} bot=${botMode} altcha=${enableAltcha}): ${serverCheck.error.message}`,
+                        );
+                      } else if (
+                        stage === "prod" &&
+                        serverCheck.value.botProtection?.mode !== "altcha"
+                      ) {
+                        failures.push(`prod server botProtection not altcha`);
+                      }
+
+                      const runnerCfg = buildRunnerWorkerConfig(config);
+                      if (
+                        runnerCfg.secrets.some((s) => s.environmentVariable === "ALTCHA_HMAC_KEY")
+                      ) {
+                        failures.push(`ALTCHA_HMAC_KEY must not be injected into runner workload`);
+                      }
+                      const runnerEnvMap: Record<string, string> = {};
+                      for (const v of runnerCfg.plainEnv) runnerEnvMap[v.name] = v.value;
+                      for (const s of runnerCfg.secrets) {
+                        runnerEnvMap[s.environmentVariable] = materializeSecretValue(
+                          s.environmentVariable,
+                        );
+                      }
+                      const workerCheck = validateServerRuntimeEnv(runnerEnvMap, "worker");
+                      if (!workerCheck.ok) {
+                        failures.push(
+                          `alchemy-bot->worker gap (${stage} bot=${botMode} altcha=${enableAltcha}): ${workerCheck.error.message}`,
+                        );
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+
+    expect(failures).toEqual([]);
+    expect(total).toBe(2_688);
+    expect(normalVerified).toBeGreaterThan(0);
+  }, 30_000);
+
   test("rejects missing core secret consumers and dynamic forbidden flags in live loadStackConfig", async () => {
     const baseProd = (secrets: KvitbitStackConfig["secrets"]): KvitbitStackConfig => ({
       stage: "prod",
@@ -1229,10 +1667,10 @@ describe("verify-deploy-config: infra/alchemy stack validation & cross-layer sou
       edge: VALID_EDGE,
     });
 
-    const full = defaultSecretBindings("prod", { enableResend: true });
+    const full = defaultSecretBindings("prod", { enableResend: true, enableAltchaHmacKey: true });
     expect(validateStackConfigSync(baseProd(full)).ok).toBe(true);
 
-    // Dropping DATABASE_URL, BETTER_AUTH_SECRET, or runner-side RESEND_API_KEY must fail.
+    // Dropping DATABASE_URL, BETTER_AUTH_SECRET, ALTCHA_HMAC_KEY, or runner-side RESEND_API_KEY must fail.
     expect(
       validateStackConfigSync(
         baseProd(full.filter((s) => s.environmentVariable !== "DATABASE_URL")),
@@ -1241,6 +1679,20 @@ describe("verify-deploy-config: infra/alchemy stack validation & cross-layer sou
     expect(
       validateStackConfigSync(
         baseProd(full.filter((s) => s.environmentVariable !== "BETTER_AUTH_SECRET")),
+      ).ok,
+    ).toBe(false);
+    expect(
+      validateStackConfigSync(
+        baseProd(full.filter((s) => s.environmentVariable !== "ALTCHA_HMAC_KEY")),
+      ).ok,
+    ).toBe(false);
+    expect(
+      validateStackConfigSync(
+        baseProd(
+          full.map((s) =>
+            s.environmentVariable === "ALTCHA_HMAC_KEY" ? { ...s, consumers: ["runner"] } : s,
+          ),
+        ),
       ).ok,
     ).toBe(false);
     expect(
@@ -1260,6 +1712,7 @@ describe("verify-deploy-config: infra/alchemy stack validation & cross-layer sou
       KVITBIT_EMAIL_FROM: "Kvitbit <noreply@kvitbit.cz>",
       KVITBIT_EDGE_DOMAINS: "kvitbit.cz",
       KVITBIT_ENABLE_RESEND_SECRET: "true",
+      KVITBIT_ENABLE_ALTCHA_HMAC_KEY_SECRET: "true",
     };
     for (const key of [
       ...FORBIDDEN_OPT_OUT_ENV_VARS,
@@ -1497,6 +1950,7 @@ describe("verify-deploy-config: deploy.yml preflight & 3-layer soundness", () =>
                           KVITBIT_ENABLE_FEEDBACK_GITHUB_TOKEN_SECRET: feedbackEnabled
                             ? "true"
                             : "false",
+                          KVITBIT_ENABLE_ALTCHA_HMAC_KEY_SECRET: "true",
                           APP_ORIGIN: ORIGIN_VALUES[origin],
                           EMAIL_FROM: EMAIL_FROM_VALUES[from],
                           KVITBIT_EDGE_DOMAINS: edge.raw,
@@ -1588,6 +2042,8 @@ describe("verify-deploy-config: deploy.yml preflight & 3-layer soundness", () =>
                               enableFeedbackGitHubToken:
                                 actual.normalizedBooleans
                                   .KVITBIT_ENABLE_FEEDBACK_GITHUB_TOKEN_SECRET,
+                              enableAltchaHmacKey:
+                                actual.normalizedBooleans.KVITBIT_ENABLE_ALTCHA_HMAC_KEY_SECRET,
                             }),
                             dnsZones: [],
                             edge: VALID_EDGE,
@@ -1649,6 +2105,201 @@ describe("verify-deploy-config: deploy.yml preflight & 3-layer soundness", () =>
     expect(prodNormalAccepted).toBeGreaterThan(0);
   }, 30_000);
 
+  test("validateDeployPreflight exhaustively verifies bot protection & all bootstrap modes across 3,360 states with 3-layer soundness", () => {
+    const deployModes = [
+      { label: "normal", foundation: "false", feedback: "false", altcha: "false" },
+      { label: "bootstrap_foundation", foundation: "true", feedback: "false", altcha: "false" },
+      {
+        label: "bootstrap_feedback_secret",
+        foundation: "false",
+        feedback: "true",
+        altcha: "false",
+      },
+      { label: "bootstrap_altcha_secret", foundation: "false", feedback: "false", altcha: "true" },
+      {
+        label: "conflict_foundation_feedback",
+        foundation: "true",
+        feedback: "true",
+        altcha: "false",
+      },
+      {
+        label: "conflict_foundation_altcha",
+        foundation: "true",
+        feedback: "false",
+        altcha: "true",
+      },
+      {
+        label: "conflict_feedback_altcha",
+        foundation: "false",
+        feedback: "true",
+        altcha: "true",
+      },
+    ] as const;
+    const botModes: ReadonlyArray<BotModeCase> = ["absent", "altcha", "none", "disabled", "bogus"];
+    const emailModes: ReadonlyArray<DeployEmailMode | "absent"> = ["absent", "resend", "capture"];
+    const origins: ReadonlyArray<OriginCase> = ["https_public", "http_public"];
+
+    let total = 0;
+    let normalAccepted = 0;
+    const failures: string[] = [];
+
+    for (const stage of DEPLOY_STAGES) {
+      for (const mode of deployModes) {
+        for (const botMode of botModes) {
+          for (const altchaEnabled of [false, true] as const) {
+            for (const feedbackEnabled of [false, true] as const) {
+              for (const emailMode of emailModes) {
+                for (const resendEnabled of [false, true] as const) {
+                  for (const origin of origins) {
+                    total++;
+                    const env: Record<string, string | undefined> = {
+                      ...BASE_GCP_ENV,
+                      KVITBIT_STAGE: stage,
+                      BOOTSTRAP_FOUNDATION: mode.foundation,
+                      BOOTSTRAP_FEEDBACK_SECRET: mode.feedback,
+                      BOOTSTRAP_ALTCHA_SECRET: mode.altcha,
+                      KVITBIT_ENABLE_RESEND_SECRET: resendEnabled ? "true" : "false",
+                      KVITBIT_ENABLE_SMTP_SECRET: "false",
+                      KVITBIT_ENABLE_MOBILE_SIGNING_KEY_SECRET: "false",
+                      KVITBIT_ENABLE_FEEDBACK_GITHUB_TOKEN_SECRET: feedbackEnabled
+                        ? "true"
+                        : "false",
+                      KVITBIT_ENABLE_ALTCHA_HMAC_KEY_SECRET: altchaEnabled ? "true" : "false",
+                      APP_ORIGIN: ORIGIN_VALUES[origin],
+                      EMAIL_FROM: "Kvitbit <noreply@kvitbit.cz>",
+                      KVITBIT_EDGE_DOMAINS: "kvitbit.cz, kvitbit.app",
+                      KVITBIT_EMAIL_MODE: emailMode === "absent" ? undefined : emailMode,
+                      KVITBIT_BOT_PROTECTION_MODE: botMode === "absent" ? undefined : botMode,
+                    };
+
+                    const activeBootstraps = [
+                      mode.foundation === "true",
+                      mode.feedback === "true",
+                      mode.altcha === "true",
+                    ].filter(Boolean).length;
+
+                    let expOk = true;
+                    if (stage !== "prod") expOk = false;
+                    else if (activeBootstraps > 1) expOk = false;
+                    else if (emailMode === "capture") expOk = false;
+                    else if (botMode !== "absent" && botMode !== "altcha") expOk = false;
+                    else if (mode.label === "bootstrap_feedback_secret") expOk = feedbackEnabled;
+                    else if (mode.label === "bootstrap_altcha_secret") expOk = altchaEnabled;
+                    else if (mode.label === "bootstrap_foundation") expOk = true;
+                    else {
+                      if (origin !== "https_public") expOk = false;
+                      if (!resendEnabled || !altchaEnabled) expOk = false;
+                    }
+
+                    const actual = validateDeployPreflight(env);
+                    if (actual.ok !== expOk) {
+                      if (failures.length < 10) {
+                        failures.push(
+                          `preflight-bot ${stage} ${mode.label} bot=${botMode} altcha=${altchaEnabled} fb=${feedbackEnabled} email=${emailMode} resend=${resendEnabled} origin=${origin}: expected=${expOk}, got=${actual.ok}${actual.ok ? "" : ` (${actual.message})`}`,
+                        );
+                      }
+                      continue;
+                    }
+
+                    if (actual.ok && actual.deployMode === "normal") {
+                      normalAccepted++;
+                      const stackConfig: KvitbitStackConfig = {
+                        stage: "prod",
+                        bootstrapFoundation: false,
+                        bootstrapFeedbackSecret: false,
+                        bootstrapAltchaSecret: false,
+                        projectId: BASE_GCP_ENV.GCP_PROJECT_ID,
+                        projectNumber: BASE_GCP_ENV.GCP_PROJECT_NUMBER,
+                        region: BASE_GCP_ENV.GCP_REGION,
+                        zone: BASE_GCP_ENV.GCP_ZONE,
+                        stateBucket: BASE_GCP_ENV.ALCHEMY_STATE_BUCKET,
+                        artifactRepositoryId: KVITBIT_PROD_DEFAULTS.artifactRepositoryId,
+                        imageName: KVITBIT_PROD_DEFAULTS.imageName,
+                        imageDigest: SAMPLE_DIGEST,
+                        blobDriver: "gcs",
+                        blobsBucket: "kvitbit-prod-blobs-prod",
+                        mobileAssetsBucket: "kvitbit-prod-mobile-prod",
+                        runnerCount: 2,
+                        runnerMachineType: KVITBIT_PROD_DEFAULTS.runnerMachineType,
+                        runnerPort: KVITBIT_PROD_DEFAULTS.runnerPort,
+                        runnerCidr: KVITBIT_PROD_DEFAULTS.runnerCidr,
+                        serverMinInstances: 0,
+                        serverMaxInstances: 10,
+                        appOrigin: ORIGIN_VALUES[origin],
+                        emailMode: emailMode === "absent" ? undefined : emailMode,
+                        emailFrom: env.EMAIL_FROM,
+                        botProtectionMode:
+                          botMode === "absent" ? undefined : (botMode as DeployBotProtectionMode),
+                        trustedProxyHops: 2,
+                        shareKeyVersion: 1,
+                        androidAssetlinksSha256: undefined,
+                        feedbackGitHubRepo: undefined,
+                        feedbackOwnerEmails: undefined,
+                        secrets: defaultSecretBindings("prod", {
+                          enableResend: actual.normalizedBooleans.KVITBIT_ENABLE_RESEND_SECRET,
+                          enableSmtp: actual.normalizedBooleans.KVITBIT_ENABLE_SMTP_SECRET,
+                          enableMobileSigningKey:
+                            actual.normalizedBooleans.KVITBIT_ENABLE_MOBILE_SIGNING_KEY_SECRET,
+                          enableFeedbackGitHubToken:
+                            actual.normalizedBooleans.KVITBIT_ENABLE_FEEDBACK_GITHUB_TOKEN_SECRET,
+                          enableAltchaHmacKey:
+                            actual.normalizedBooleans.KVITBIT_ENABLE_ALTCHA_HMAC_KEY_SECRET,
+                        }),
+                        dnsZones: [],
+                        edge: VALID_EDGE,
+                      };
+                      const stackRes = validateStackConfigSync(stackConfig);
+                      if (!stackRes.ok) {
+                        failures.push(
+                          `3-layer bot gap (preflight->alchemy): ${stackRes.error.message}`,
+                        );
+                        continue;
+                      }
+                      const serverEnv: Record<string, string> = {};
+                      for (const v of serverPlainEnv(stackConfig, {
+                        blobsBucket: stackConfig.blobsBucket,
+                        mobileAssetsBucket: stackConfig.mobileAssetsBucket,
+                      })) {
+                        serverEnv[v.name] = v.value;
+                      }
+                      for (const s of serverSecretEnv(stackConfig)) {
+                        serverEnv[s.name] = materializeSecretValue(s.name);
+                      }
+                      const serverRes = validateServerRuntimeEnv(serverEnv, "server");
+                      if (!serverRes.ok || serverRes.value.botProtection?.mode !== "altcha") {
+                        failures.push(
+                          `3-layer bot gap (preflight->server): ${serverRes.ok ? serverRes.value.botProtection?.mode : serverRes.error.message}`,
+                        );
+                      }
+                      const workerCfg = buildRunnerWorkerConfig(stackConfig);
+                      const workerEnv: Record<string, string> = {};
+                      for (const v of workerCfg.plainEnv) workerEnv[v.name] = v.value;
+                      for (const s of workerCfg.secrets) {
+                        workerEnv[s.environmentVariable] = materializeSecretValue(
+                          s.environmentVariable,
+                        );
+                      }
+                      const workerRes = validateServerRuntimeEnv(workerEnv, "worker");
+                      if (!workerRes.ok) {
+                        failures.push(
+                          `3-layer bot gap (preflight->worker): ${workerRes.error.message}`,
+                        );
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+
+    expect(failures).toEqual([]);
+    expect(total).toBe(3_360);
+    expect(normalAccepted).toBeGreaterThan(0);
+  }, 30_000);
+
   test("preflight exhaustively verifies GCP repo vars, boolean normalization, and opt-out rejection", () => {
     const validNormal = {
       ...BASE_GCP_ENV,
@@ -1659,6 +2310,7 @@ describe("verify-deploy-config: deploy.yml preflight & 3-layer soundness", () =>
       EMAIL_FROM: "Kvitbit <noreply@kvitbit.cz>",
       KVITBIT_EDGE_DOMAINS: "kvitbit.cz",
       KVITBIT_ENABLE_RESEND_SECRET: "true",
+      KVITBIT_ENABLE_ALTCHA_HMAC_KEY_SECRET: "true",
     };
     expect(validateDeployPreflight(validNormal).ok).toBe(true);
 
@@ -1675,7 +2327,7 @@ describe("verify-deploy-config: deploy.yml preflight & 3-layer soundness", () =>
       }).ok,
     ).toBe(false);
 
-    // Boolean normalization for all 4 flags across all 12 test tokens = 48 checks.
+    // Boolean normalization for all 5 flags across all 12 test tokens = 60 checks.
     const boolTokens: ReadonlyArray<readonly [string, boolean | "invalid"]> = [
       ["", false],
       ["false", false],
@@ -1709,7 +2361,7 @@ describe("verify-deploy-config: deploy.yml preflight & 3-layer soundness", () =>
         }
       }
     }
-    expect(boolChecks).toBe(48);
+    expect(boolChecks).toBe(60);
 
     // Every forbidden opt-out flag fails in prod preflight — both directly and via KVITBIT_REPO_VARS_JSON.
     for (const optOut of [
