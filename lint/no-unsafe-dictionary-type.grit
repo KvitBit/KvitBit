@@ -14,7 +14,13 @@ file($name, $body) where {
       or {
         $unsafe_dictionary <: or {
           r"(?s)^Record\s*<.*,\s*(?:unknown|any|object|\{\})\s*>$",
-          r"(?s).*\]\s*:\s*(?:unknown|any|object|\{\})\s*;?$"
+          r"(?s).*\]\s*:\s*(?:unknown|any|object|\{\})\s*;?$",
+          TsMappedType(mapped_type=TsTypeAnnotation(ty=or {
+            TsUnknownType(),
+            TsAnyType(),
+            TsNonPrimitiveType(),
+            TsObjectType(members=[])
+          }))
         },
         and {
           $unsafe_dictionary <: or {

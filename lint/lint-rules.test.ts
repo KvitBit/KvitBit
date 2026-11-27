@@ -18,6 +18,9 @@ interface RuleCase {
   readonly additionalRules?: readonly string[];
 }
 
+const effectImport = 'import * as Effect from "effect/Effect";';
+const runEffect = `${effectImport}\nEffect.runSync(work);`;
+
 const ruleCases: readonly RuleCase[] = [
   {
     rule: "no-bare-promises",
@@ -38,7 +41,7 @@ const ruleCases: readonly RuleCase[] = [
   {
     rule: "no-direct-effect-runs",
     invalid: 'import * as Fx from "effect/Effect"; export const result = Fx.runSyncExit(work);',
-    valid: "export const result = Effect.map(work, (item) => item.id);",
+    valid: `${effectImport}\nexport const result = Effect.map(work, (item) => item.id);`,
   },
   {
     rule: "no-direct-process-env",
@@ -123,11 +126,28 @@ const ruleCases: readonly RuleCase[] = [
   },
 ];
 
+const serverEntryCases = Arr.map(["main", "migrate", "worker"], (entry) => ({
+  file: `apps/server/src/${entry}.ts`,
+  source: runEffect,
+  rules: [],
+}));
+
 const scopeCases = [
+  ...serverEntryCases,
   {
     file: "apps/web/src/entry.ts",
-    source: "Effect.runFork(work); Promise.resolve(1);",
+    source: `${runEffect}\nPromise.resolve(1);`,
     rules: ["no-bare-promises"],
+  },
+  {
+    file: "packages/domain/src/apps/web/src/entry.ts",
+    source: runEffect,
+    rules: ["no-direct-effect-runs"],
+  },
+  {
+    file: "packages/domain/src/apps/mobile/src/config/env.ts",
+    source: "export const origin = process.env.EXPO_PUBLIC_ORIGIN;",
+    rules: ["no-direct-process-env"],
   },
   {
     file: "apps/server/src/runner-import.ts",
@@ -145,14 +165,71 @@ const scopeCases = [
     rules: ["no-direct-effect-runs"],
   },
   {
+    file: "apps/server/src/runner-destructure.ts",
+    source: `${effectImport}\nconst { runSync } = Effect;\nrunSync(work);`,
+    rules: ["no-direct-effect-runs"],
+  },
+  {
+    file: "apps/server/src/runner-destructure-renamed.ts",
+    source: `${effectImport}\nconst { runFork: start } = Effect;\nstart(work);`,
+    rules: ["no-direct-effect-runs"],
+  },
+  {
+    file: "apps/server/src/runner-namespace.ts",
+    source: 'import * as Lib from "effect";\nLib.Effect.runSync(work);',
+    rules: ["no-direct-effect-runs"],
+  },
+  {
+    file: "apps/server/src/runner-namespace-computed.ts",
+    source: 'import * as Lib from "effect";\nLib [ "Effect" ] [ "runSync" ] (work);',
+    rules: ["no-direct-effect-runs"],
+  },
+  {
+    file: "apps/server/src/runner-root-import.ts",
+    source: 'import { Effect } from "effect";\nEffect.runFork(work);',
+    rules: ["no-direct-effect-runs"],
+  },
+  {
+    file: "apps/server/src/runner-shadow.ts",
+    source:
+      'import * as Fx from "effect/Effect";\nexport const mapped = Fx.map(work, f);\nexport const f = (Fx: { runSync(): number }) => Fx.runSync();',
+    rules: [],
+  },
+  {
+    file: "apps/server/src/runner-same-name.ts",
+    source:
+      'import * as Fx from "effect/Effect";\nFx.runSync(work);\nexport const f = (Fx: { runSync(): number }) => Fx.runSync();',
+    rules: ["no-direct-effect-runs"],
+  },
+  {
+    file: "apps/server/src/runner-block-shadow.ts",
+    source: `${runEffect}\n{\nconst Effect = mock();\nEffect.runSync();\n}`,
+    rules: ["no-direct-effect-runs"],
+  },
+  {
     file: "apps/mobile/src/runtime/request-intent.ts",
-    source: "Effect.runPromise(work);",
+    source: runEffect,
     rules: [],
   },
   {
     file: "apps/mobile/src/runtime/reusable.ts",
-    source: "Effect.runPromise(work);",
+    source: runEffect,
     rules: ["no-direct-effect-runs"],
+  },
+  {
+    file: "packages/domain/src/mapped-unknown.ts",
+    source: "export type Meta = { [K in string]: unknown };",
+    rules: ["no-unsafe-dictionary-type"],
+  },
+  {
+    file: "packages/domain/src/mapped-empty.ts",
+    source: "export type Meta = { readonly [K in string]?: {} };",
+    rules: ["no-unsafe-dictionary-type"],
+  },
+  {
+    file: "packages/domain/src/mapped-value.ts",
+    source: "export type Meta = { [K in string]: { count: number } };",
+    rules: [],
   },
   {
     file: "apps/mobile/src/config/env.ts",
@@ -201,27 +278,27 @@ const scopeCases = [
   },
   {
     file: "packages/core/src/probe.test.ts",
-    source: "Effect.runSync(work); Promise.resolve(1); throw new Error('fixture');",
+    source: `${runEffect}\nPromise.resolve(1); throw new Error('fixture');`,
     rules: [],
   },
   {
     file: "apps/mobile/src/testing/probe.ts",
-    source: "Effect.runSync(work); throw new Error('fixture');",
+    source: `${runEffect}\nthrow new Error('fixture');`,
     rules: [],
   },
   {
     file: "packages/core/src/test/fixture.ts",
-    source: "Effect.runSync(work); throw new Error('fixture');",
+    source: `${runEffect}\nthrow new Error('fixture');`,
     rules: [],
   },
   {
     file: "packages/core/src/generated/probe.ts",
-    source: "Effect.runSync(work); export type Value = unknown;",
+    source: `${runEffect}\nexport type Value = unknown;`,
     rules: [],
   },
   {
     file: "formal/probe.replay.test.ts",
-    source: "Effect.runSync(work); throw new Error('fixture');",
+    source: `${runEffect}\nthrow new Error('fixture');`,
     rules: [],
   },
 ];

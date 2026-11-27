@@ -104,7 +104,10 @@
         "apps/mobile/app/**",
         "src/**",
         "!**/{test,tests,testing,__tests__,__fixtures__,generated}/**",
-        "!**/*.{test,spec,test-utils}.{ts,tsx,mts,cts,js,jsx,mjs,cjs}"
+        "!**/*.{test,spec,test-utils}.{ts,tsx,mts,cts,js,jsx,mjs,cjs}",
+        "!apps/server/src/{main,migrate,worker}.ts",
+        "!apps/web/src/entry.ts",
+        "!apps/mobile/src/runtime/request-intent.ts"
       ]
     },
     {
@@ -115,7 +118,8 @@
         "apps/mobile/app/**",
         "src/**",
         "!**/{test,tests,testing,__tests__,__fixtures__,generated}/**",
-        "!**/*.{test,spec,test-utils}.{ts,tsx,mts,cts,js,jsx,mjs,cjs}"
+        "!**/*.{test,spec,test-utils}.{ts,tsx,mts,cts,js,jsx,mjs,cjs}",
+        "!apps/mobile/src/config/env.ts"
       ]
     },
     {

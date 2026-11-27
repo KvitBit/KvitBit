@@ -300,6 +300,13 @@ describe("two-step preview and confirm schemas", () => {
     ).toEqual({ documentId: DOC });
   });
 
+  test("the confirmation hash accepts unions of argument dictionaries", () => {
+    const bound = (fields: Record<string, string> | Record<string, number>) =>
+      confirmationBoundArgs(fields);
+    expect(bound({ documentId: DOC, confirmationToken: TOKEN })).toEqual({ documentId: DOC });
+    expect(bound({ revision: 4 })).toEqual({ revision: 4 });
+  });
+
   test("retry keys use the confirmation id or the grant plus idempotencyKey", () => {
     expect<string>(mcpConfirmRequestKey("0193")).toBe("mcp-confirm:0193");
     expect<string>(mcpRequestKey("grant-1", "abcdefgh")).toBe("mcp:grant-1:abcdefgh");

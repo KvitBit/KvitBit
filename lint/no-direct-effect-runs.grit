@@ -1,41 +1,125 @@
 engine biome(1.0)
 language js(typescript, jsx)
 
+pattern runner_name() {
+  r"^[\x22']?run(?:Promise(?:Exit)?|Sync(?:Exit)?|Fork|Callback)(?:With)?[\x22']?$"
+}
+
+pattern module_namespace($local, $source) {
+  JsNamespaceImportSpecifier(local_name=$binding) as $specifier where {
+    $binding <: $local,
+    $specifier <: within JsImport() as $import,
+    $import <: contains JsModuleSource() as $source
+  }
+}
+
+pattern effect_receiver($local) {
+  or {
+    JsIdentifierExpression() as $local where {
+      $program <: contains or {
+        module_namespace($local, $source) where { $source <: r"^[\x22']effect/Effect[\x22']$" },
+        or {
+          JsNamedImportSpecifier(name=$name, local_name=$binding),
+          JsShorthandNamedImportSpecifier(local_name=$name) as $binding
+        } as $specifier where {
+          $name <: r"^[\x22']?Effect[\x22']?$",
+          $binding <: $local,
+          $specifier <: within JsImport() as $import,
+          $import <: contains JsModuleSource() as $source where {
+            $source <: r"^[\x22']effect[\x22']$"
+          }
+        }
+      }
+    },
+    or {
+      JsStaticMemberExpression(object=$local, member=`Effect`),
+      JsComputedMemberExpression(object=$local, member=r"^[\x22']Effect[\x22']$")
+    } where {
+      $program <: contains module_namespace($local, $source) where {
+        $source <: r"^[\x22']effect[\x22']$"
+      }
+    }
+  }
+}
+
+// GritQL sees syntax rather than resolved symbols. Check declarations in the
+// enclosing scopes so a shadowed alias does not hide another use of the import.
+pattern shadowed_import($local) {
+  or {
+    within (or {
+      JsFunctionDeclaration(parameters=$parameters),
+      JsFunctionExpression(parameters=$parameters),
+      JsArrowFunctionExpression(parameters=$parameters),
+      JsMethodClassMember(parameters=$parameters),
+      JsMethodObjectMember(parameters=$parameters)
+    }) where {
+      or {
+        $parameters <: JsIdentifierBinding() as $shadow where { $shadow <: $local },
+        $parameters <: JsParameters(items=$items) where {
+          $items <: some or {
+            JsFormalParameter(binding=$binding),
+            JsRestParameter(binding=$binding)
+          } where {
+            $binding <: contains JsIdentifierBinding() as $shadow where { $shadow <: $local }
+          }
+        }
+      }
+    },
+    within (or {
+      JsFunctionExpression(id=$local),
+      JsClassExpression(id=$local)
+    }),
+    within JsCatchClause(declaration=$declaration) where {
+      $declaration <: contains JsIdentifierBinding() as $shadow where { $shadow <: $local }
+    },
+    within (or {
+      JsBlockStatement(statements=$statements),
+      JsFunctionBody(statements=$statements)
+    }) where {
+      $statements <: some or {
+        JsVariableStatement(declaration=JsVariableDeclaration(declarators=$declarators)) where {
+          $declarators <: some JsVariableDeclarator(id=$binding) where {
+            $binding <: contains JsIdentifierBinding() as $shadow where { $shadow <: $local }
+          }
+        },
+        JsFunctionDeclaration(id=$local),
+        JsClassDeclaration(id=$local)
+      }
+    }
+  }
+}
+
 file($name, $body) where {
-  // Entry modules can execute their root program. Reusable modules return Effects.
-  not $name <: r".*(?:apps/server/src/(?:main|migrate|worker)\.ts|apps/web/src/entry\.ts|apps/mobile/src/runtime/request-intent\.ts)$",
   $body <: r"(?s).*\brun(?:Promise|Sync|Fork|Callback).*",
   $body <: contains bubble {
     or {
       or {
-        JsStaticMemberExpression(object=$namespace, member=$method) as $use where {
-          $method <: r"^run(?:Promise(?:Exit)?|Sync(?:Exit)?|Fork|Callback)(?:With)?$"
+        JsStaticMemberExpression(object=$receiver, member=$method) as $use where {
+          $method <: runner_name()
         },
-        JsComputedMemberExpression(object=$namespace, member=$method) as $use where {
-          $method <: r"^[\x22']run(?:Promise(?:Exit)?|Sync(?:Exit)?|Fork|Callback)(?:With)?[\x22']$"
+        JsComputedMemberExpression(object=$receiver, member=$method) as $use where {
+          $method <: JsStringLiteralExpression(),
+          $method <: runner_name()
+        },
+        JsVariableDeclarator(id=JsObjectBindingPattern(properties=$properties), initializer=JsInitializerClause(expression=$receiver)) as $use where {
+          $properties <: some or {
+            JsObjectBindingPatternShorthandProperty(identifier=$method),
+            JsObjectBindingPatternProperty(member=$method),
+            JsObjectBindingPatternProperty(member=JsComputedMemberName(expression=$method)) where {
+              $method <: JsStringLiteralExpression()
+            }
+          } where { $method <: runner_name() }
         }
-      } where {
-        or {
-          $namespace <: `Effect`,
-          $program <: contains JsImport() as $import where {
-            $import <: r"(?s)^import\s*\*\s+as\s+([\w$]+)\s+from\s+[\x22']effect/Effect[\x22']\s*;?$"($binding),
-            $namespace <: $binding
-          },
-          $program <: contains JsImport() as $import where {
-            $import <: r"(?s)^import\s*\{(?:[^}]*,)?\s*Effect\s+as\s+([\w$]+)(?:\s*,[^}]*)?\s*\}\s*from\s+[\x22']effect[\x22']\s*;?$"($binding),
-            $namespace <: $binding
-          }
-        }
-      },
+      } where { $receiver <: effect_receiver($local), not $use <: shadowed_import($local) },
       or {
-        JsNamedImportSpecifier() as $use where {
-          $use <: r"(?s)^([\w$]+)\s+as\s+[\w$]+$"($imported)
-        },
-        JsShorthandNamedImportSpecifier() as $use where { $use <: r"^([\w$]+)$"($imported) }
+        JsNamedImportSpecifier(name=$method) as $use,
+        JsShorthandNamedImportSpecifier(local_name=$method) as $use
       } where {
-        $imported <: r"^run(?:Promise(?:Exit)?|Sync(?:Exit)?|Fork|Callback)(?:With)?$",
-        $use <: within JsImport() as $parent,
-        $parent <: contains JsModuleSource() as $source where {
+        $method <: runner_name(),
+        not $use <: r"(?s)^type\b.*",
+        $use <: within JsImport() as $import,
+        not $import <: r"(?s)^import\s+type\b.*",
+        $import <: contains JsModuleSource() as $source where {
           $source <: r"^[\x22']effect/Effect[\x22']$"
         }
       }
