@@ -1,6 +1,21 @@
 import type { ReleaseInfo } from "@kvitbit/api-contract";
+import * as Arr from "effect/Array";
+import * as DateTime from "effect/DateTime";
+import * as Num from "effect/Number";
+import * as Option from "effect/Option";
+import * as Rec from "effect/Record";
+import * as Result from "effect/Result";
+import * as Schema from "effect/Schema";
+import * as Str from "effect/String";
 
-export type { ReleaseInfo };
+export type { ReleaseInfo } from "@kvitbit/api-contract";
+
+const StoredFields = Schema.Record(Schema.String, Schema.Unknown);
+type StoredFields = typeof StoredFields.Type;
+const isStoredFields = Schema.is(StoredFields);
+const encodeJsonResult = Schema.encodeUnknownResult(Schema.fromJsonString(Schema.Unknown));
+const encodeJson = (value: StoredFields[string]): string =>
+  value === undefined ? "undefined" : Result.getOrThrow(encodeJsonResult(value));
 
 /** Native platforms supported by Kvitbit Expo Updates. */
 export type MobilePlatform = "android" | "ios";
@@ -44,7 +59,7 @@ export interface StoredUpdate {
   readonly launchAsset: StoredUpdateAsset;
   readonly assets: readonly StoredUpdateAsset[];
   readonly metadata: Readonly<Record<string, string>>;
-  readonly extra: Readonly<Record<string, unknown>>;
+  readonly extra: StoredFields;
 }
 
 /** Schema-1 rollback directive record stored in the same channel prefix as `StoredUpdate`. */
@@ -79,33 +94,32 @@ const PUBLICATION_FILENAME_RE = /^(\d{8}T\d{9}Z)-([0-9a-fA-F-]{36})\.json$/;
 const MAJOR_LIMIT = 2100;
 const COMPONENT_LIMIT = 1000;
 
-export const isMobilePlatform = (value: unknown): value is MobilePlatform =>
-  value === "android" || value === "ios";
+export const isMobilePlatform = Schema.is(Schema.Literals(MOBILE_PLATFORMS));
 
 export const assertSha256Hex = (sha256: string): string => {
   if (!SHA256_HEX_RE.test(sha256)) {
-    throw new Error(`Invalid sha256 hex digest: ${JSON.stringify(sha256)}`);
+    throw new Error(`Invalid sha256 hex digest: ${encodeJson(sha256)}`);
   }
   return sha256;
 };
 
 export const assertChannel = (channel: string): string => {
   if (!CHANNEL_RE.test(channel)) {
-    throw new Error(`Invalid update channel: ${JSON.stringify(channel)}`);
+    throw new Error(`Invalid update channel: ${encodeJson(channel)}`);
   }
   return channel;
 };
 
 export const assertRuntimeVersion = (runtimeVersion: string): string => {
   if (!SAFE_SEGMENT_RE.test(runtimeVersion) || runtimeVersion === "." || runtimeVersion === "..") {
-    throw new Error(`Invalid runtimeVersion: ${JSON.stringify(runtimeVersion)}`);
+    throw new Error(`Invalid runtimeVersion: ${encodeJson(runtimeVersion)}`);
   }
   return runtimeVersion;
 };
 
 export const assertUuid = (id: string): string => {
   if (!UUID_RE.test(id)) {
-    throw new Error(`Invalid publication UUID: ${JSON.stringify(id)}`);
+    throw new Error(`Invalid publication UUID: ${encodeJson(id)}`);
   }
   return id;
 };
@@ -115,7 +129,7 @@ export const parseAppVersion = (version: string): AppVersion => {
   const match = VERSION_RE.exec(version);
   if (match === null) {
     throw new Error(
-      `App version ${JSON.stringify(version)} must be MAJOR.MINOR.PATCH without a prefix, pre-release or build suffix.`,
+      `App version ${encodeJson(version)} must be MAJOR.MINOR.PATCH without a prefix, pre-release or build suffix.`,
     );
   }
   const major = Number(match[1]);
@@ -141,19 +155,15 @@ export const androidVersionCode = (version: string): number => {
 
 /** Formats an ISO timestamp or `Date` as compact UTC `yyyymmddThhmmssmmmZ` for lexicographic sort. */
 export const formatPublicationTimestamp = (value: Date | string): string => {
-  const date = typeof value === "string" ? new Date(value) : value;
-  if (Number.isNaN(date.getTime())) {
-    throw new Error(`Invalid publication timestamp: ${JSON.stringify(value)}`);
+  const date = DateTime.make(value instanceof Date ? value : Date.parse(value));
+  if (Option.isNone(date)) {
+    throw new Error(`Invalid publication timestamp: ${encodeJson(value)}`);
   }
-  const pad = (n: number, width: number) => String(n).padStart(width, "0");
+  const { year, month, day, hour, minute, second, millisecond } = DateTime.toPartsUtc(date.value);
+  const pad = (n: number, width: number) => Str.padStart(width, "0")(String(n));
   return (
-    `${pad(date.getUTCFullYear(), 4)}` +
-    `${pad(date.getUTCMonth() + 1, 2)}` +
-    `${pad(date.getUTCDate(), 2)}` +
-    `T${pad(date.getUTCHours(), 2)}` +
-    `${pad(date.getUTCMinutes(), 2)}` +
-    `${pad(date.getUTCSeconds(), 2)}` +
-    `${pad(date.getUTCMilliseconds(), 3)}Z`
+    `${pad(year, 4)}${pad(month, 2)}${pad(day, 2)}` +
+    `T${pad(hour, 2)}${pad(minute, 2)}${pad(second, 2)}${pad(millisecond, 3)}Z`
   );
 };
 
@@ -172,7 +182,7 @@ export const publicationPrefix = (target: {
 }): string => {
   const channel = assertChannel(target.channel);
   if (!isMobilePlatform(target.platform)) {
-    throw new Error(`Invalid platform: ${JSON.stringify(target.platform)}`);
+    throw new Error(`Invalid platform: ${encodeJson(target.platform)}`);
   }
   const runtimeVersion = assertRuntimeVersion(target.runtimeVersion);
   return `mobile/updates/channels/${channel}/${target.platform}/${runtimeVersion}/`;
@@ -221,8 +231,8 @@ export const apkRoutePath = (version: string): string => {
 // --- Selectors & parsers ---
 
 const isPublicationKey = (key: string): boolean => {
-  const slash = key.lastIndexOf("/");
-  const fileName = slash === -1 ? key : key.slice(slash + 1);
+  const slash = Str.lastIndexOf("/")(key);
+  const fileName = Option.isNone(slash) ? key : Str.slice(slash.value + 1)(key);
   return PUBLICATION_FILENAME_RE.test(fileName);
 };
 
@@ -253,29 +263,28 @@ export const latestRelease = (records: readonly ReleaseInfo[]): ReleaseInfo | un
   return latest;
 };
 
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-  typeof value === "object" && value !== null && !Array.isArray(value);
+// Preserve the SyntaxError and message exposed by the release CLI.
+const parseJson = (json: string): unknown =>
+  // @effect-diagnostics-next-line globalJson:off
+  JSON.parse(json);
 
-const requireString = (obj: Record<string, unknown>, field: string): string => {
+const requireString = (obj: StoredFields, field: string): string => {
   const value = obj[field];
-  if (typeof value !== "string" || value.length === 0) {
+  if (!Str.isString(value) || value.length === 0) {
     throw new Error(`Expected non-empty string for field ${field}`);
   }
   return value;
 };
 
-const requireNonNegativeInt = (obj: Record<string, unknown>, field: string): number => {
+const requireNonNegativeInt = (obj: StoredFields, field: string): number => {
   const value = obj[field];
-  if (typeof value !== "number" || !Number.isInteger(value) || value < 0) {
+  if (!(Num.isNumber(value) && Number.isInteger(value)) || value < 0) {
     throw new Error(`Expected non-negative integer for field ${field}`);
   }
   return value;
 };
 
-const parseStoredAsset = (value: unknown, label: string): StoredUpdateAsset => {
-  if (!isRecord(value)) {
-    throw new Error(`${label} must be an object`);
-  }
+const parseStoredAsset = (value: StoredFields, label: string): StoredUpdateAsset => {
   const sha256 = assertSha256Hex(requireString(value, "sha256"));
   const hash = requireString(value, "hash");
   if (!BASE64URL_SHA256_RE.test(hash)) {
@@ -284,26 +293,23 @@ const parseStoredAsset = (value: unknown, label: string): StoredUpdateAsset => {
   const key = requireString(value, "key");
   const contentType = requireString(value, "contentType");
   if (!CONTENT_TYPE_RE.test(contentType)) {
-    throw new Error(`${label}.contentType is invalid: ${JSON.stringify(contentType)}`);
+    throw new Error(`${label}.contentType is invalid: ${encodeJson(contentType)}`);
   }
   const fileExtension = value.fileExtension;
   if (fileExtension !== undefined) {
-    if (typeof fileExtension !== "string" || !FILE_EXT_RE.test(fileExtension)) {
-      throw new Error(`${label}.fileExtension is invalid: ${JSON.stringify(fileExtension)}`);
+    if (!(Str.isString(fileExtension) && FILE_EXT_RE.test(fileExtension))) {
+      throw new Error(`${label}.fileExtension is invalid: ${encodeJson(fileExtension)}`);
     }
     return { sha256, hash, key, contentType, fileExtension };
   }
   return { sha256, hash, key, contentType };
 };
 
-const parseStringRecord = (value: unknown, label: string): Readonly<Record<string, string>> => {
-  if (!isRecord(value)) {
-    throw new Error(`${label} must be an object`);
-  }
+const parseMetadata = (value: StoredFields): Readonly<Record<string, string>> => {
   const out: Record<string, string> = {};
-  for (const [k, v] of Object.entries(value)) {
-    if (typeof v !== "string") {
-      throw new Error(`${label}.${k} must be a string`);
+  for (const [k, v] of Rec.toEntries(value)) {
+    if (!Str.isString(v)) {
+      throw new Error(`metadata.${k} must be a string`);
     }
     out[k] = v;
   }
@@ -311,8 +317,8 @@ const parseStringRecord = (value: unknown, label: string): Readonly<Record<strin
 };
 
 export const parseAssetMeta = (json: string): AssetMeta => {
-  const parsed: unknown = JSON.parse(json);
-  if (!isRecord(parsed)) {
+  const parsed = parseJson(json);
+  if (!isStoredFields(parsed)) {
     throw new Error("AssetMeta must be a JSON object");
   }
   if (parsed.schema !== 1) {
@@ -321,15 +327,15 @@ export const parseAssetMeta = (json: string): AssetMeta => {
   const sha256 = assertSha256Hex(requireString(parsed, "sha256"));
   const contentType = requireString(parsed, "contentType");
   if (!CONTENT_TYPE_RE.test(contentType)) {
-    throw new Error(`Invalid AssetMeta contentType: ${JSON.stringify(contentType)}`);
+    throw new Error(`Invalid AssetMeta contentType: ${encodeJson(contentType)}`);
   }
   const size = requireNonNegativeInt(parsed, "size");
   return { schema: 1, sha256, contentType, size };
 };
 
 export const parsePublication = (json: string): StoredPublication => {
-  const parsed: unknown = JSON.parse(json);
-  if (!isRecord(parsed)) {
+  const parsed = parseJson(json);
+  if (!isStoredFields(parsed)) {
     throw new Error("Publication must be a JSON object");
   }
   if (parsed.schema !== 1) {
@@ -339,12 +345,12 @@ export const parsePublication = (json: string): StoredPublication => {
   const id = assertUuid(requireString(parsed, "id"));
   const createdAt = requireString(parsed, "createdAt");
   if (Number.isNaN(Date.parse(createdAt))) {
-    throw new Error(`Invalid publication createdAt: ${JSON.stringify(createdAt)}`);
+    throw new Error(`Invalid publication createdAt: ${encodeJson(createdAt)}`);
   }
   const channel = assertChannel(requireString(parsed, "channel"));
   const platform = parsed.platform;
   if (!isMobilePlatform(platform)) {
-    throw new Error(`Invalid publication platform: ${JSON.stringify(platform)}`);
+    throw new Error(`Invalid publication platform: ${encodeJson(platform)}`);
   }
   const runtimeVersion = assertRuntimeVersion(requireString(parsed, "runtimeVersion"));
 
@@ -361,13 +367,26 @@ export const parsePublication = (json: string): StoredPublication => {
   }
 
   if (type === "update") {
+    if (!isStoredFields(parsed.launchAsset)) {
+      throw new Error("launchAsset must be an object");
+    }
     const launchAsset = parseStoredAsset(parsed.launchAsset, "launchAsset");
-    if (!Array.isArray(parsed.assets)) {
+    if (!Arr.isArray(parsed.assets)) {
       throw new Error("Publication assets must be an array");
     }
-    const assets = parsed.assets.map((item, idx) => parseStoredAsset(item, `assets[${idx}]`));
-    const metadata = parseStringRecord(parsed.metadata ?? {}, "metadata");
-    const extra = isRecord(parsed.extra) ? parsed.extra : {};
+    const assets = Arr.map(parsed.assets, (item, idx) => {
+      const label = `assets[${idx}]`;
+      if (!isStoredFields(item)) {
+        throw new Error(`${label} must be an object`);
+      }
+      return parseStoredAsset(item, label);
+    });
+    const rawMetadata = parsed.metadata ?? {};
+    if (!isStoredFields(rawMetadata)) {
+      throw new Error("metadata must be an object");
+    }
+    const metadata = parseMetadata(rawMetadata);
+    const extra = isStoredFields(parsed.extra) ? parsed.extra : {};
     return {
       schema: 1,
       type: "update",
@@ -383,12 +402,12 @@ export const parsePublication = (json: string): StoredPublication => {
     };
   }
 
-  throw new Error(`Unsupported publication type: ${JSON.stringify(type)}`);
+  throw new Error(`Unsupported publication type: ${encodeJson(type)}`);
 };
 
 export const parseReleaseInfo = (json: string): ReleaseInfo => {
-  const parsed: unknown = JSON.parse(json);
-  if (!isRecord(parsed)) {
+  const parsed = parseJson(json);
+  if (!isStoredFields(parsed)) {
     throw new Error("ReleaseInfo must be a JSON object");
   }
   const version = requireString(parsed, "version");
@@ -399,11 +418,12 @@ export const parseReleaseInfo = (json: string): ReleaseInfo => {
   }
   const releasedAt = requireString(parsed, "releasedAt");
   if (Number.isNaN(Date.parse(releasedAt))) {
-    throw new Error(`Invalid ReleaseInfo.releasedAt: ${JSON.stringify(releasedAt)}`);
+    throw new Error(`Invalid ReleaseInfo.releasedAt: ${encodeJson(releasedAt)}`);
   }
   const apkUrl = requireString(parsed, "apkUrl");
   const apkSha256 = assertSha256Hex(requireString(parsed, "apkSha256"));
   const sizeBytes = requireNonNegativeInt(parsed, "sizeBytes");
+  // biome-ignore lint/security/noSecrets: This names a public signing certificate fingerprint field.
   const signingCertSha256 = requireString(parsed, "signingCertSha256");
   const minAndroidSdk = requireNonNegativeInt(parsed, "minAndroidSdk");
   const obtainiumUrl = requireString(parsed, "obtainiumUrl");

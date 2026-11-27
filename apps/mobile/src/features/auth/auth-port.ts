@@ -47,7 +47,7 @@ export interface AuthClient {
       readonly password: string;
       readonly name: string;
       readonly locale: Locale;
-      readonly invitation?: string;
+      readonly invitation?: string | undefined;
     },
     proof: BotProofPayload,
   ) => Promise<AuthResult<AuthSession | null>>; // invitation signup returns its verified session

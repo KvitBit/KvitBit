@@ -1,24 +1,16 @@
-import type { NativeTheme } from "@kvitbit/ui-port/theme";
-import { createContext, type ReactNode, useContext, useEffect, useMemo, useState } from "react";
+import * as Effect from "effect/Effect";
+import { type ReactNode, useEffect, useMemo, useState } from "react";
 import { AccessibilityInfo, AppState, useColorScheme } from "react-native";
+import { forkMobileEffect, fromMobilePromise } from "../runtime/request-intent";
 import { readDynamicColor } from "./dynamic-color";
+import { ThemeContext, type ThemeContextValue } from "./theme-context";
 import {
-  type AppTheme,
   appTheme,
   DEFAULT_PREFERENCE,
   type DeviceTheme,
   type ThemePreference,
   themeStateOf,
 } from "./theme-state";
-
-interface ThemeContextValue extends AppTheme {
-  readonly preference: ThemePreference;
-  readonly setPreference: (next: ThemePreference) => void;
-  /** Whether the device offers a dynamic palette (drives the Settings switch). */
-  readonly dynamicAvailable: boolean;
-}
-
-const ThemeContext = createContext<ThemeContextValue | null>(null);
 
 const useHighContrast = (): boolean => {
   const [high, setHigh] = useState(false);
@@ -43,11 +35,19 @@ const useDynamicColor = (): DeviceTheme["dynamic"] => {
   useEffect(() => {
     let live = true;
     const read = () =>
-      readDynamicColor()
-        .then((v) => live && setDynamic(v))
-        .catch(() => undefined);
-    void read();
-    const sub = AppState.addEventListener("change", (s) => s === "active" && void read());
+      fromMobilePromise(readDynamicColor).pipe(
+        Effect.tap((color) =>
+          Effect.sync(() => {
+            if (live) setDynamic(color);
+          }),
+        ),
+        Effect.ignore,
+        forkMobileEffect,
+      );
+    read();
+    const sub = AppState.addEventListener("change", (s) => {
+      if (s === "active") read();
+    });
     return () => {
       live = false;
       sub.remove();
@@ -80,12 +80,3 @@ export function ThemeProvider(props: {
   }, [scheme, highContrast, dynamic, preference, onPreferenceChange]);
   return <ThemeContext.Provider value={value}>{props.children}</ThemeContext.Provider>;
 }
-
-export const useAppTheme = (): ThemeContextValue => {
-  const value = useContext(ThemeContext);
-  if (value === null) throw new Error("useAppTheme needs a ThemeProvider");
-  return value;
-};
-
-/** The render-ready theme object (colour roles, fonts, shape). */
-export const useTheme = (): NativeTheme => useAppTheme().native;

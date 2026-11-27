@@ -3,6 +3,8 @@ import type { ReportKind } from "@kvitbit/domain/contract";
 import { describeError } from "@kvitbit/ui-port/api";
 import { formatDate, formatMoney } from "@kvitbit/ui-port/format";
 import type { Period } from "@kvitbit/ui-port/view-models";
+import * as Arr from "effect/Array";
+import * as Effect from "effect/Effect";
 import { ChevronLeft, ChevronRight, FileSpreadsheet, FileText } from "lucide-react-native";
 import { useCallback, useMemo, useState } from "react";
 import { StyleSheet, View } from "react-native";
@@ -29,6 +31,7 @@ import {
   useOverlay,
 } from "../../ui";
 import { useWorkspace } from "../../workspace/workspace-provider";
+import { runFeatureEffect } from "../ui-effect";
 import {
   type AgingBucketKey,
   buildReportExportRequest,
@@ -63,6 +66,8 @@ export function ReportsScreen(props: {
 
   const range = useMemo(() => periodToRange(period), [period]);
   const presets = useMemo(() => periodPresets(), []);
+  const previousPeriod = shiftPeriod(period, -1);
+  const nextPeriod = shiftPeriod(period, 1);
 
   const supportsGroupBy = props.report === "revenue" || props.report === "expenses";
   const effectiveGroupBy: ReportGroupBy | undefined = supportsGroupBy
@@ -78,7 +83,7 @@ export function ReportsScreen(props: {
         query: {
           from: range.from,
           to: range.to,
-          ...(effectiveGroupBy !== undefined ? { groupBy: effectiveGroupBy } : {}),
+          groupBy: effectiveGroupBy,
         },
       }),
     [workspace.id, props.report, range.from, range.to, effectiveGroupBy],
@@ -92,30 +97,33 @@ export function ReportsScreen(props: {
   );
 
   const handleExport = useCallback(
-    async (format: ExportFormat) => {
-      setExportError(null);
-      setExportBusy(format);
-      const req = buildReportExportRequest({
-        workspaceId: workspace.id,
-        report: props.report,
-        period,
-        format,
-        ...(effectiveGroupBy !== undefined ? { groupBy: effectiveGroupBy } : {}),
-      });
-      const dl = await transfer.download(req);
-      if (dl._tag === "Err") {
-        setExportBusy(null);
-        setExportError(text(describeError(dl.error).text));
-        return;
-      }
-      const shared = await transfer.share(dl.value);
-      setExportBusy(null);
-      if (shared._tag === "Err") {
-        setExportError(text(describeError(shared.error).text));
-      } else {
-        overlay.toast(t("reports.export.ready"));
-      }
-    },
+    (format: ExportFormat) =>
+      runFeatureEffect(
+        Effect.gen(function* () {
+          setExportError(null);
+          setExportBusy(format);
+          const req = buildReportExportRequest({
+            workspaceId: workspace.id,
+            report: props.report,
+            period,
+            format,
+            groupBy: effectiveGroupBy,
+          });
+          const dl = yield* Effect.promise(() => transfer.download(req));
+          if (dl._tag === "Err") {
+            setExportBusy(null);
+            setExportError(text(describeError(dl.error).text));
+            return;
+          }
+          const shared = yield* Effect.promise(() => transfer.share(dl.value));
+          setExportBusy(null);
+          if (shared._tag === "Err") {
+            setExportError(text(describeError(shared.error).text));
+          } else {
+            overlay.toast(t("reports.export.ready"));
+          }
+        }),
+      ),
     [effectiveGroupBy, overlay, period, props.report, t, text, transfer, workspace.id],
   );
 
@@ -135,14 +143,14 @@ export function ReportsScreen(props: {
   };
 
   const reportChoices: ReadonlyArray<Choice<ReportKind>> = useMemo(
-    () => REPORT_TABS.map((kind) => ({ value: kind, label: t(`enum.reportKind.${kind}`) })),
+    () => Arr.map(REPORT_TABS, (kind) => ({ value: kind, label: t(`enum.reportKind.${kind}`) })),
     [t],
   );
 
   const groupChoices: ReadonlyArray<Choice<ReportGroupBy>> = useMemo(() => {
     const base: Array<ReportGroupBy> = ["month", "contact", "currency"];
     if (props.report === "expenses") base.push("category");
-    return base.map((g) => ({ value: g, label: t(`enum.reportGroupBy.${g}`) }));
+    return Arr.map(base, (g) => ({ value: g, label: t(`enum.reportGroupBy.${g}`) }));
   }, [props.report, t]);
 
   const presetChoices: ReadonlyArray<Choice<Period>> = useMemo(
@@ -200,7 +208,7 @@ export function ReportsScreen(props: {
                   {t("reports.suite.empty")}
                 </Text>
               ) : (
-                data.output.map((line) => (
+                Arr.map(data.output, (line) => (
                   <ListRow
                     key={`out-${line.month}-${line.treatment}-${line.ratePercent}`}
                     title={`${line.month} · ${t(`enum.vatTreatment.${line.treatment}`)} (${line.ratePercent} %)`}
@@ -217,7 +225,7 @@ export function ReportsScreen(props: {
                   {t("reports.suite.empty")}
                 </Text>
               ) : (
-                data.input.map((line) => (
+                Arr.map(data.input, (line) => (
                   <ListRow
                     key={`in-${line.month}-${line.treatment}-${line.ratePercent}`}
                     title={`${line.month} · ${t(`enum.vatTreatment.${line.treatment}`)} (${line.ratePercent} %)`}
@@ -263,7 +271,7 @@ export function ReportsScreen(props: {
               <EmptyState title={t("reports.suite.empty")} />
             ) : (
               <Section title={t("enum.reportKind.profit")}>
-                {data.rows.map((row) => (
+                {Arr.map(data.rows, (row) => (
                   <ListRow
                     key={row.month}
                     title={row.month}
@@ -301,12 +309,12 @@ export function ReportsScreen(props: {
               </Card>
             </View>
 
-            {data.buckets.every((b) => b.documents.length === 0) ? (
+            {Arr.every(data.buckets, (b) => b.documents.length === 0) ? (
               <EmptyState title={t("reports.suite.empty")} />
             ) : (
-              data.buckets
-                .filter((b) => b.count > 0)
-                .map((b) => (
+              Arr.map(
+                Arr.filter(data.buckets, (b) => b.count > 0),
+                (b) => (
                   <Section
                     key={b.bucket}
                     title={`${agingLabel(b.bucket)} (${b.count})`}
@@ -314,7 +322,7 @@ export function ReportsScreen(props: {
                       <Badge label={formatMoney(locale, b.total)} tone={agingTone(b.bucket)} />
                     }
                   >
-                    {b.documents.map((doc) => (
+                    {Arr.map(b.documents, (doc) => (
                       <ListRow
                         key={doc.id}
                         title={doc.number ?? doc.id}
@@ -334,7 +342,8 @@ export function ReportsScreen(props: {
                       />
                     ))}
                   </Section>
-                ))
+                ),
+              )
             )}
           </>
         );
@@ -382,7 +391,7 @@ export function ReportsScreen(props: {
               <EmptyState title={t("reports.suite.empty")} />
             ) : (
               <Section title={t(`enum.reportKind.${data.report}`)}>
-                {data.rows.map((row) => (
+                {Arr.map(data.rows, (row) => (
                   <ListRow
                     key={row.key}
                     title={row.label ?? (row.key === "" ? t("common.state.none") : row.key)}
@@ -431,7 +440,7 @@ export function ReportsScreen(props: {
               <EmptyState title={t("reports.suite.empty")} />
             ) : (
               <Section title={t("enum.reportKind.cashflow")}>
-                {data.points.map((pt) => (
+                {Arr.map(data.points, (pt) => (
                   <ListRow
                     key={pt.month}
                     title={pt.month}
@@ -460,7 +469,8 @@ export function ReportsScreen(props: {
           <IconButton
             icon={ChevronLeft}
             label={t("common.action.back")}
-            onPress={() => setPeriod((p) => shiftPeriod(p, -1))}
+            disabled={previousPeriod === period}
+            onPress={() => setPeriod(previousPeriod)}
           />
           <View style={styles.periodCenter}>
             <Text variant="titleMedium" numeric>
@@ -473,7 +483,8 @@ export function ReportsScreen(props: {
           <IconButton
             icon={ChevronRight}
             label={t("common.action.next")}
-            onPress={() => setPeriod((p) => shiftPeriod(p, 1))}
+            disabled={nextPeriod === period}
+            onPress={() => setPeriod(nextPeriod)}
           />
         </View>
         <SegmentedChoice value={period} choices={presetChoices} onChange={setPeriod} />
@@ -496,7 +507,9 @@ export function ReportsScreen(props: {
           label={`${t("reports.suite.export")} ${t("enum.exportFormat.csv")}`}
           busy={exportBusy === "csv"}
           disabled={exportBusy !== null && exportBusy !== "csv"}
-          onPress={() => void handleExport("csv")}
+          onPress={() => {
+            handleExport("csv");
+          }}
           testID="report-export-csv"
         />
         <Button
@@ -505,7 +518,9 @@ export function ReportsScreen(props: {
           label={`${t("reports.suite.export")} ${t("enum.exportFormat.pdf")}`}
           busy={exportBusy === "pdf"}
           disabled={exportBusy !== null && exportBusy !== "pdf"}
-          onPress={() => void handleExport("pdf")}
+          onPress={() => {
+            handleExport("pdf");
+          }}
           testID="report-export-pdf"
         />
       </View>

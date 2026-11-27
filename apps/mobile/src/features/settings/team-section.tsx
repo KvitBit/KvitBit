@@ -1,5 +1,8 @@
-import type { InvitationId, InvitationView, MemberView } from "@kvitbit/domain/contract";
+import type { InvitationView, MemberView } from "@kvitbit/domain/contract";
 import { idempotencyHeaders, inWorkspace } from "@kvitbit/ui-port/api";
+import * as Arr from "effect/Array";
+import * as Effect from "effect/Effect";
+import * as Str from "effect/String";
 import { router } from "expo-router";
 import { MailPlus, RefreshCw, Trash2, UserMinus } from "lucide-react-native";
 import { useState } from "react";
@@ -22,6 +25,8 @@ import {
   useOverlay,
 } from "../../ui";
 import { useWorkspace } from "../../workspace/workspace-provider";
+import { requestOwner } from "../request-owner";
+import { forkFeatureEffect } from "../ui-effect";
 import {
   canLeaveWorkspace,
   canManageInvitations,
@@ -66,18 +71,17 @@ export function TeamSection() {
   const [busyId, setBusyId] = useState<string | null>(null);
   const [errorState, setErrorState] = useState<FormErrorState>(noFormError);
 
-  const handleInvite = async () => {
-    if (!canInvite || currentUserId === null || inviting) return;
-    const email = inviteEmail.trim();
+  const handleInvite = Effect.fn("team-section.handleInvite")(function* () {
+    if (!canInvite || currentUserId === null || inviting === true) return;
+    const email = Str.trim(inviteEmail);
     if (email === "") return;
+    const owner = requestOwner([api.origin, currentUserId, workspace.id]);
+    if (owner === null) return;
     setInviting(true);
     setErrorState(noFormError);
     const payload = { email, role: inviteRole };
-    const result = await runRequestIntent(
-      JSON.stringify([api.origin, currentUserId, workspace.id]),
-      "workspace/invite",
-      payload,
-      (key) =>
+    const result = yield* Effect.promise(() =>
+      runRequestIntent(owner, "workspace/invite", payload, (key) =>
         api.run((client) =>
           client.team.invite({
             params: inWorkspace(workspace.id),
@@ -85,6 +89,7 @@ export function TeamSection() {
             payload,
           }),
         ),
+      ),
     );
     setInviting(false);
     if (result._tag === "Ok") {
@@ -94,17 +99,22 @@ export function TeamSection() {
     } else {
       setErrorState(formErrorFrom(result.error, i18n));
     }
-  };
+  });
 
-  const handleSetRole = async (member: MemberView, role: InvitationRole) => {
+  const handleSetRole = Effect.fn("team-section.handleSetRole")(function* (
+    member: MemberView,
+    role: InvitationRole,
+  ) {
     if (member.role === role) return;
     setBusyId(member.userId);
     setErrorState(noFormError);
-    const result = await api.run((client) =>
-      client.team.setRole({
-        params: inWorkspace(workspace.id, { userId: member.userId }),
-        payload: { role },
-      }),
+    const result = yield* Effect.promise(() =>
+      api.run((client) =>
+        client.team.setRole({
+          params: inWorkspace(workspace.id, { userId: member.userId }),
+          payload: { role },
+        }),
+      ),
     );
     setBusyId(null);
     if (result._tag === "Ok") {
@@ -113,23 +123,29 @@ export function TeamSection() {
     } else {
       setErrorState(formErrorFrom(result.error, i18n));
     }
-  };
+  });
 
-  const handleRemoveMember = async (member: MemberView) => {
-    const confirmed = await overlay.confirm({
-      title: t("settings.team.removeTitle", { name: member.name }),
-      body: t("settings.team.removeBody"),
-      confirmLabel: t("settings.team.remove"),
-      cancelLabel: t("common.action.cancel"),
-      destructive: true,
-    });
+  const handleRemoveMember = Effect.fn("team-section.handleRemoveMember")(function* (
+    member: MemberView,
+  ) {
+    const confirmed = yield* Effect.promise(() =>
+      overlay.confirm({
+        title: t("settings.team.removeTitle", { name: member.name }),
+        body: t("settings.team.removeBody"),
+        confirmLabel: t("settings.team.remove"),
+        cancelLabel: t("common.action.cancel"),
+        destructive: true,
+      }),
+    );
     if (!confirmed) return;
     setBusyId(member.userId);
     setErrorState(noFormError);
-    const result = await api.run((client) =>
-      client.team.removeMember({
-        params: inWorkspace(workspace.id, { userId: member.userId }),
-      }),
+    const result = yield* Effect.promise(() =>
+      api.run((client) =>
+        client.team.removeMember({
+          params: inWorkspace(workspace.id, { userId: member.userId }),
+        }),
+      ),
     );
     setBusyId(null);
     if (result._tag === "Ok") {
@@ -138,15 +154,19 @@ export function TeamSection() {
     } else {
       setErrorState(formErrorFrom(result.error, i18n));
     }
-  };
+  });
 
-  const handleResendInvitation = async (inv: InvitationView) => {
+  const handleResendInvitation = Effect.fn("team-section.handleResendInvitation")(function* (
+    inv: InvitationView,
+  ) {
     setBusyId(inv.id);
     setErrorState(noFormError);
-    const result = await api.run((client) =>
-      client.team.resendInvitation({
-        params: inWorkspace(workspace.id, { invitationId: inv.id as InvitationId }),
-      }),
+    const result = yield* Effect.promise(() =>
+      api.run((client) =>
+        client.team.resendInvitation({
+          params: inWorkspace(workspace.id, { invitationId: inv.id }),
+        }),
+      ),
     );
     setBusyId(null);
     if (result._tag === "Ok") {
@@ -155,15 +175,19 @@ export function TeamSection() {
     } else {
       setErrorState(formErrorFrom(result.error, i18n));
     }
-  };
+  });
 
-  const handleRevokeInvitation = async (inv: InvitationView) => {
+  const handleRevokeInvitation = Effect.fn("team-section.handleRevokeInvitation")(function* (
+    inv: InvitationView,
+  ) {
     setBusyId(inv.id);
     setErrorState(noFormError);
-    const result = await api.run((client) =>
-      client.team.revokeInvitation({
-        params: inWorkspace(workspace.id, { invitationId: inv.id as InvitationId }),
-      }),
+    const result = yield* Effect.promise(() =>
+      api.run((client) =>
+        client.team.revokeInvitation({
+          params: inWorkspace(workspace.id, { invitationId: inv.id }),
+        }),
+      ),
     );
     setBusyId(null);
     if (result._tag === "Ok") {
@@ -172,22 +196,24 @@ export function TeamSection() {
     } else {
       setErrorState(formErrorFrom(result.error, i18n));
     }
-  };
+  });
 
-  const handleLeave = async () => {
+  const handleLeave = Effect.fn("team-section.handleLeave")(function* () {
     if (!canLeaveWorkspace(workspace.role)) return;
-    const confirmed = await overlay.confirm({
-      title: t("settings.team.leaveTitle", { workspace: workspace.name }),
-      body: t("settings.team.leaveBody"),
-      confirmLabel: t("settings.team.leave"),
-      cancelLabel: t("common.action.cancel"),
-      destructive: true,
-    });
+    const confirmed = yield* Effect.promise(() =>
+      overlay.confirm({
+        title: t("settings.team.leaveTitle", { workspace: workspace.name }),
+        body: t("settings.team.leaveBody"),
+        confirmLabel: t("settings.team.leave"),
+        cancelLabel: t("common.action.cancel"),
+        destructive: true,
+      }),
+    );
     if (!confirmed) return;
     setBusyId("leave");
     setErrorState(noFormError);
-    const result = await api.run((client) =>
-      client.team.leave({ params: inWorkspace(workspace.id) }),
+    const result = yield* Effect.promise(() =>
+      api.run((client) => client.team.leave({ params: inWorkspace(workspace.id) })),
     );
     setBusyId(null);
     if (result._tag === "Ok") {
@@ -196,7 +222,7 @@ export function TeamSection() {
     } else {
       setErrorState(formErrorFrom(result.error, i18n));
     }
-  };
+  });
 
   return (
     <View style={styles.stack}>
@@ -217,7 +243,7 @@ export function TeamSection() {
             <SegmentedChoice<InvitationRole>
               label={t("settings.team.inviteRole")}
               value={inviteRole}
-              choices={invitableRoles.map((r) => ({ value: r, label: t(`enum.role.${r}`) }))}
+              choices={Arr.map(invitableRoles, (r) => ({ value: r, label: t(`enum.role.${r}`) }))}
               onChange={setInviteRole}
             />
             <Text variant="meta" color="onSurfaceVariant">
@@ -229,8 +255,8 @@ export function TeamSection() {
               icon={MailPlus}
               label={t("settings.team.invite")}
               busy={inviting}
-              disabled={inviteEmail.trim() === ""}
-              onPress={() => void handleInvite()}
+              disabled={Str.trim(inviteEmail) === ""}
+              onPress={() => forkFeatureEffect(handleInvite())}
             />
           </Card>
         </Section>
@@ -240,7 +266,7 @@ export function TeamSection() {
         <RemoteView state={membersRemote.state} onRetry={membersRemote.reload}>
           {(members) => (
             <View style={styles.stack}>
-              {members.map((member) => {
+              {Arr.map(members, (member) => {
                 const isSelf = currentUserId !== null && member.userId === currentUserId;
                 const manageable =
                   !isSelf && canManageMember(workspace.role, member.role, workspace.closed);
@@ -261,18 +287,20 @@ export function TeamSection() {
                         <SegmentedChoice<InvitationRole>
                           label={t("settings.team.changeRole")}
                           value={member.role === "owner" ? null : member.role}
-                          choices={invitableRoles.map((r) => ({
+                          choices={Arr.map(invitableRoles, (r) => ({
                             value: r,
                             label: t(`enum.role.${r}`),
                           }))}
-                          onChange={(nextRole) => void handleSetRole(member, nextRole)}
+                          onChange={(nextRole) =>
+                            forkFeatureEffect(handleSetRole(member, nextRole))
+                          }
                         />
                         <Button
                           kind="text"
                           icon={UserMinus}
                           label={t("settings.team.remove")}
                           busy={busyId === member.userId}
-                          onPress={() => void handleRemoveMember(member)}
+                          onPress={() => forkFeatureEffect(handleRemoveMember(member))}
                         />
                       </View>
                     ) : null}
@@ -296,14 +324,16 @@ export function TeamSection() {
                 </Card>
               ) : (
                 <View style={styles.stack}>
-                  {invitations.map((inv) => (
+                  {Arr.map(invitations, (inv) => (
                     <Card key={inv.id}>
                       <View style={styles.headerRow}>
                         <View style={styles.flex}>
                           <Text variant="titleSmall">{inv.email}</Text>
                           <Text variant="meta" color="onSurfaceVariant">
                             {t("settings.team.invitedBy", { name: inv.invitedBy.name })} ·{" "}
-                            {t("settings.team.expiresOn", { date: inv.expiresAt.slice(0, 10) })}
+                            {t("settings.team.expiresOn", {
+                              date: Str.slice(0, 10)(inv.expiresAt),
+                            })}
                           </Text>
                         </View>
                         <Badge label={t(`enum.role.${inv.role}`)} tone="neutral" />
@@ -319,14 +349,14 @@ export function TeamSection() {
                             icon={RefreshCw}
                             label={t("settings.team.resend")}
                             busy={busyId === inv.id}
-                            onPress={() => void handleResendInvitation(inv)}
+                            onPress={() => forkFeatureEffect(handleResendInvitation(inv))}
                           />
                           <Button
                             kind="text"
                             icon={Trash2}
                             label={t("settings.team.revoke")}
                             busy={busyId === inv.id}
-                            onPress={() => void handleRevokeInvitation(inv)}
+                            onPress={() => forkFeatureEffect(handleRevokeInvitation(inv))}
                           />
                         </View>
                       ) : null}
@@ -347,7 +377,7 @@ export function TeamSection() {
               kind="danger"
               label={t("settings.team.leave")}
               busy={busyId === "leave"}
-              onPress={() => void handleLeave()}
+              onPress={() => forkFeatureEffect(handleLeave())}
             />
           ) : (
             <Text variant="meta" color="onSurfaceVariant">

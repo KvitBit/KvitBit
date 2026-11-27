@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { PayloadTooLarge, Unauthorized } from "@kvitbit/api-contract";
 import { Invalid, NotFound } from "@kvitbit/domain/contract";
 import { bearer, describeError, sessionCookie } from "@kvitbit/ui-port/api";
-import { Redacted } from "effect";
+import * as Redacted from "effect/Redacted";
 import { apiUrl, authHeaders, errorFromResponse, parseJson, safeFileName } from "./http";
 
 describe("transfer http helpers", () => {
@@ -16,12 +16,15 @@ describe("transfer http helpers", () => {
         groupBy: undefined,
         from: "2026-01-01",
       }),
-    ).toBe("https://a.cz/api/v1/reports/vat/export?format=csv&from=2026-01-01");
+    ).toBe(
+      // biome-ignore lint/security/noSecrets: URL for the test-only placeholder domain.
+      "https://a.cz/api/v1/reports/vat/export?format=csv&from=2026-01-01",
+    );
   });
 
   test("authHeaders sends the bearer on Android and nothing with the cookie", () => {
     expect(authHeaders(bearer("tok"))).toEqual({ authorization: "Bearer tok" });
-    expect(authHeaders(bearer(Redacted.make("sec")))).toEqual({ authorization: "Bearer sec" });
+    Redacted.make("sec").pipe(bearer, authHeaders, expect).toEqual({ authorization: "Bearer sec" });
     expect(authHeaders(sessionCookie)).toEqual({});
   });
 

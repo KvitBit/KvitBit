@@ -2,7 +2,10 @@ import type { ContactRole, WorkspaceSummary } from "@kvitbit/domain/contract";
 import { describeError, inWorkspace, Paged, type Paged as PagedState } from "@kvitbit/ui-port/api";
 import { enumKey } from "@kvitbit/ui-port/i18n";
 import type { Route } from "@kvitbit/ui-port/view-models";
-import { Option } from "effect";
+import * as Arr from "effect/Array";
+import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
+import * as Str from "effect/String";
 import { Plus, User, X } from "lucide-react-native";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { StyleSheet, View } from "react-native";
@@ -27,19 +30,17 @@ import {
 } from "../../ui";
 import { useWorkspace } from "../../workspace/workspace-provider";
 import { canWriteWorkspace } from "../dashboard/model";
+import { forkFeatureEffect } from "../ui-effect";
 import {
+  type ContactQuery,
   type ContactRecord,
   contactSubtitle,
   filterVisibleContacts,
+  loadContactsQuery,
   parseContactViews,
 } from "./model";
 
-export type RoleFilter = "all" | ContactRole;
-
-export interface ContactQuery {
-  readonly text?: string;
-  readonly role?: ContactRole;
-}
+type RoleFilter = "all" | ContactRole;
 
 export interface ContactsListContentProps {
   readonly workspace: WorkspaceSummary;
@@ -76,7 +77,7 @@ export function ContactsListContent(props: ContactsListContentProps) {
   );
 
   const hasFilters =
-    props.searchText.trim() !== "" || props.roleFilter !== "all" || props.showArchived;
+    Str.trim(props.searchText) !== "" || props.roleFilter !== "all" || props.showArchived;
 
   const errorBanner = Option.isSome(props.paged.error)
     ? (() => {
@@ -156,7 +157,7 @@ export function ContactsListContent(props: ContactsListContentProps) {
         </Card>
       ) : (
         <Card style={styles.listCard}>
-          {visible.map((contact) => {
+          {Arr.map(visible, (contact) => {
             const sub = contactSubtitle(contact);
             return (
               <ListRow
@@ -167,7 +168,7 @@ export function ContactsListContent(props: ContactsListContentProps) {
                 {...(sub !== "" ? { subtitle: sub } : {})}
                 badge={
                   <View style={styles.badges}>
-                    {contact.roles.map((role) => (
+                    {Arr.map(contact.roles, (role) => (
                       <Badge
                         key={role}
                         tone={role === "customer" ? "info" : "neutral"}
@@ -200,18 +201,11 @@ export function ContactsListContent(props: ContactsListContentProps) {
   );
 }
 
-const buildQuery = (text: string, roleFilter: RoleFilter): ContactQuery => ({
-  ...(text.trim() !== "" ? { text: text.trim() } : {}),
-  ...(roleFilter !== "all" ? { role: roleFilter } : {}),
-});
-
-export function loadContactsQuery(
-  current: PagedState<ContactRecord, ContactQuery>,
-  query: ContactQuery,
-) {
-  const step = Paged.setQuery(current, query);
-  return step.fetch === null && current.seq === 1 ? Paged.refresh(current) : step;
-}
+const buildQuery = (text: string, roleFilter: RoleFilter): ContactQuery => {
+  const trimmed = Str.trim(text);
+  if (trimmed === "") return roleFilter === "all" ? {} : { role: roleFilter };
+  return roleFilter === "all" ? { text: trimmed } : { text: trimmed, role: roleFilter };
+};
 
 export function ContactsListScreen() {
   const { workspace } = useWorkspace();
@@ -233,53 +227,60 @@ function WorkspaceContactsList({ workspace }: { readonly workspace: WorkspaceSum
   const pagedRef = useRef(paged);
 
   const runFetch = useCallback(
-    async (step: ReturnType<typeof Paged.init<ContactRecord, ContactQuery>>) => {
-      setPaged(step.paged);
-      pagedRef.current = step.paged;
-      if (step.fetch === null) return;
-      const { seq, query } = step.fetch;
-      const result = await api.run((client) =>
-        client.contacts.search({
-          params: inWorkspace(workspace.id),
-          query: {
-            ...(query.text !== undefined ? { text: query.text } : {}),
-            ...(query.role !== undefined ? { role: query.role } : {}),
-            ...(query.cursor !== undefined ? { cursor: query.cursor } : {}),
-            limit: query.limit,
-          },
+    (step: ReturnType<typeof Paged.init<ContactRecord, ContactQuery>>) =>
+      forkFeatureEffect(
+        Effect.gen(function* () {
+          setPaged(step.paged);
+          pagedRef.current = step.paged;
+          if (step.fetch === null) return;
+          const { seq, query } = step.fetch;
+          const result = yield* Effect.promise(() =>
+            api.run((client) =>
+              client.contacts.search({
+                params: inWorkspace(workspace.id),
+                query: {
+                  text: query.text,
+                  role: query.role,
+                  cursor: query.cursor,
+                  limit: query.limit,
+                },
+              }),
+            ),
+          );
+          const mapped =
+            result._tag === "Ok"
+              ? ({
+                  ...result,
+                  value: {
+                    items: parseContactViews(result.value.items),
+                    nextCursor: result.value.nextCursor,
+                  },
+                } as const)
+              : result;
+          const nextStep = Paged.receive(pagedRef.current, seq, mapped);
+          if (nextStep.fetch !== null) {
+            runFetch(nextStep);
+          } else {
+            setPaged(nextStep.paged);
+            pagedRef.current = nextStep.paged;
+          }
         }),
-      );
-      const mapped =
-        result._tag === "Ok"
-          ? ({
-              ...result,
-              value: {
-                items: parseContactViews(result.value.items),
-                nextCursor: result.value.nextCursor,
-              },
-            } as const)
-          : result;
-      const nextStep = Paged.receive(pagedRef.current, seq, mapped);
-      if (nextStep.fetch !== null) {
-        void runFetch(nextStep);
-      } else {
-        setPaged(nextStep.paged);
-        pagedRef.current = nextStep.paged;
-      }
-    },
+      ),
     [api, workspace.id],
   );
 
   useEffect(() => {
-    void runFetch(loadContactsQuery(pagedRef.current, buildQuery(searchText, roleFilter)));
+    runFetch(
+      loadContactsQuery({ current: pagedRef.current, query: buildQuery(searchText, roleFilter) }),
+    );
   }, [runFetch, searchText, roleFilter]);
 
   const onRefresh = useCallback(() => {
-    void runFetch(Paged.refresh(pagedRef.current));
+    runFetch(Paged.refresh(pagedRef.current));
   }, [runFetch]);
 
   const onLoadMore = useCallback(() => {
-    void runFetch(Paged.loadMore(pagedRef.current));
+    runFetch(Paged.loadMore(pagedRef.current));
   }, [runFetch]);
 
   const onClearFilters = useCallback(() => {

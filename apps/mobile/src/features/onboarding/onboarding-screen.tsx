@@ -1,13 +1,17 @@
-import type {
+import {
   BankAccountInput,
   CurrencyCode,
   IssuingEntityPatch,
   NewWorkspace,
-  RegistryResult,
-  TaxRegime,
+  type RegistryResult,
+  type TaxRegime,
+  WorkspaceSlug,
 } from "@kvitbit/domain/contract";
 import { describeError } from "@kvitbit/ui-port/api";
 import { enumText, type Locale } from "@kvitbit/ui-port/i18n";
+import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
+import * as Str from "effect/String";
 import { Building2, Search } from "lucide-react-native";
 import { useEffect, useState } from "react";
 import { StyleSheet, View } from "react-native";
@@ -31,6 +35,7 @@ import {
   TextField,
 } from "../../ui";
 import { lastWorkspace } from "../../workspace/last-workspace";
+import { forkFeatureEffect, runFeatureCallback } from "../ui-effect";
 import {
   type OnboardingFormFields,
   type OnboardingProgress,
@@ -78,7 +83,7 @@ export function OnboardingScreen(props: { readonly initialStep?: number }) {
 
   // Step 2: Tax regime & defaults
   const [taxRegime, setTaxRegime] = useState<TaxRegime>("non_vat_payer");
-  const [currency, setCurrency] = useState<CurrencyCode>("CZK" as CurrencyCode);
+  const [currency, setCurrency] = useState<CurrencyCode>(CurrencyCode.make("CZK"));
   const [docLocale, setDocLocale] = useState<Locale>(locale);
 
   // Step 3: Bank account (optional) & submit
@@ -98,32 +103,33 @@ export function OnboardingScreen(props: { readonly initialStep?: number }) {
       setHydratedScope(null);
       return;
     }
-    let cancelled = false;
-    void onboardingStore.read(api.origin, userId).then((saved) => {
-      if (cancelled) return;
-      if (saved !== null) {
-        setStep(saved.step);
-        setProgress(saved.progress);
-        setIco(saved.fields.ico);
-        setName(saved.fields.name);
-        setSlug(saved.fields.slug);
-        setDic(saved.fields.dic);
-        setStreet(saved.fields.street);
-        setCity(saved.fields.city);
-        setPostalCode(saved.fields.postalCode);
-        setCountry(saved.fields.country);
-        setRegisterEntry(saved.fields.registerEntry);
-        setTaxRegime(saved.fields.taxRegime);
-        setCurrency(saved.fields.currency);
-        setDocLocale(saved.fields.docLocale);
-        setIban(saved.fields.iban);
-        setBic(saved.fields.bic);
-      }
-      setHydratedScope(activeScope);
+    const interrupt = runFeatureCallback({
+      effect: Effect.promise(() => onboardingStore.read(api.origin, userId)),
+      onExit: (exit) => {
+        if (!Exit.isSuccess(exit)) return;
+        const saved = exit.value;
+        if (saved !== null) {
+          setStep(saved.step);
+          setProgress(saved.progress);
+          setIco(saved.fields.ico);
+          setName(saved.fields.name);
+          setSlug(saved.fields.slug);
+          setDic(saved.fields.dic);
+          setStreet(saved.fields.street);
+          setCity(saved.fields.city);
+          setPostalCode(saved.fields.postalCode);
+          setCountry(saved.fields.country);
+          setRegisterEntry(saved.fields.registerEntry);
+          setTaxRegime(saved.fields.taxRegime);
+          setCurrency(saved.fields.currency);
+          setDocLocale(saved.fields.docLocale);
+          setIban(saved.fields.iban);
+          setBic(saved.fields.bic);
+        }
+        setHydratedScope(activeScope);
+      },
     });
-    return () => {
-      cancelled = true;
-    };
+    return () => interrupt();
   }, [api.origin, userId, activeScope]);
 
   const applyAresResult = (result: RegistryResult) => {
@@ -138,13 +144,13 @@ export function OnboardingScreen(props: { readonly initialStep?: number }) {
     setAresStatus({ _tag: "found", terminatedOn: result.terminatedOn });
   };
 
-  const handleAresLookup = async () => {
-    const cleaned = ico.replace(/\s+/g, "");
+  const handleAresLookup = Effect.fn("onboarding-screen.handleAresLookup")(function* () {
+    const cleaned = Str.replace(/\s+/g, "")(ico);
     if (cleaned.length === 0) return;
     setAresStatus({ _tag: "loading" });
     setErrorBanner(null);
-    const res = await api.run((client) =>
-      client.registry.lookupCompany({ params: { ico: cleaned } }),
+    const res = yield* Effect.promise(() =>
+      api.run((client) => client.registry.lookupCompany({ params: { ico: cleaned } })),
     );
     if (res._tag === "Ok") {
       applyAresResult(res.value);
@@ -159,12 +165,12 @@ export function OnboardingScreen(props: { readonly initialStep?: number }) {
       return;
     }
     setAresStatus({ _tag: "error", message: text(describeError(res.error).text) });
-  };
+  });
 
   const handleNext = () => {
     setErrorBanner(null);
     if (step === 1) {
-      if (name.trim().length === 0) {
+      if (Str.trim(name).length === 0) {
         setNameError(t("issue.form.required"));
         return;
       }
@@ -177,9 +183,9 @@ export function OnboardingScreen(props: { readonly initialStep?: number }) {
     }
   };
 
-  const handleCreate = async () => {
-    if (session.status !== "signed-in" || busy || hydrating) return;
-    const trimmedName = name.trim();
+  const handleCreate = Effect.fn("onboarding-screen.handleCreate")(function* () {
+    if (session.status !== "signed-in" || busy === true || hydrating === true) return;
+    const trimmedName = Str.trim(name);
     if (trimmedName.length === 0) {
       setStep(1);
       setNameError(t("issue.form.required"));
@@ -205,63 +211,84 @@ export function OnboardingScreen(props: { readonly initialStep?: number }) {
       bic,
     };
 
-    const trimmedIco = ico.replace(/\s+/g, "");
-    const trimmedSlug = slug.trim();
-    const payload = {
+    const trimmedIco = Str.replace(/\s+/g, "")(ico);
+    const trimmedSlug = Str.trim(slug);
+    const workspace: {
+      name: string;
+      slug?: WorkspaceSlug;
+      ico?: string;
+      taxRegime: TaxRegime;
+      defaults: { currency: CurrencyCode; language: Locale };
+    } = {
       name: trimmedName,
-      ...(trimmedSlug.length > 0 ? { slug: trimmedSlug } : {}),
-      ...(trimmedIco.length > 0 ? { ico: trimmedIco } : {}),
       taxRegime,
       defaults: { currency, language: docLocale },
-    } as unknown as NewWorkspace;
+    };
+    // The server reports invalid user-entered slug and company ID as validation errors.
+    if (trimmedSlug !== "")
+      workspace.slug = WorkspaceSlug.make(trimmedSlug, { disableChecks: true });
+    if (trimmedIco !== "") workspace.ico = trimmedIco;
+    const payload = NewWorkspace.make(workspace, { disableChecks: true });
 
-    // Persist optional address/DIČ/registerEntry if user edited or loaded them
+    const entity: {
+      name: string;
+      ico?: string;
+      dic?: string;
+      address?: { street: string; city: string; postalCode: string; country: string };
+      registerEntry?: string;
+    } = { name: trimmedName };
+    const cleanDic = Str.trim(dic);
+    const cleanStreet = Str.trim(street);
+    const cleanCity = Str.trim(city);
+    const cleanPostalCode = Str.trim(postalCode);
+    const cleanRegisterEntry = Str.trim(registerEntry);
+    if (trimmedIco !== "") entity.ico = trimmedIco;
+    if (cleanDic !== "") entity.dic = cleanDic;
+    if (cleanStreet !== "" || cleanCity !== "") {
+      entity.address = {
+        street: cleanStreet,
+        city: cleanCity,
+        postalCode: cleanPostalCode,
+        country: Str.trim(country) || "CZ",
+      };
+    }
+    if (cleanRegisterEntry !== "") entity.registerEntry = cleanRegisterEntry;
     const hasEntityExtras =
-      dic.trim().length > 0 ||
-      street.trim().length > 0 ||
-      city.trim().length > 0 ||
-      postalCode.trim().length > 0 ||
-      registerEntry.trim().length > 0;
-    const issuingEntity = hasEntityExtras
-      ? ({
-          name: trimmedName,
-          ...(trimmedIco.length > 0 ? { ico: trimmedIco } : {}),
-          ...(dic.trim().length > 0 ? { dic: dic.trim() } : {}),
-          ...(street.trim().length > 0 || city.trim().length > 0
-            ? {
-                address: {
-                  street: street.trim(),
-                  city: city.trim(),
-                  postalCode: postalCode.trim(),
-                  country: country.trim() || "CZ",
-                },
-              }
-            : {}),
-          ...(registerEntry.trim().length > 0 ? { registerEntry: registerEntry.trim() } : {}),
-        } as unknown as IssuingEntityPatch)
-      : null;
+      cleanDic !== "" ||
+      cleanStreet !== "" ||
+      cleanCity !== "" ||
+      cleanPostalCode !== "" ||
+      cleanRegisterEntry !== "";
+    const issuingEntity = hasEntityExtras ? IssuingEntityPatch.make(entity) : null;
 
-    const trimmedIban = iban.replace(/\s+/g, "");
-    const bank =
-      trimmedIban.length > 0
-        ? ({
-            iban: trimmedIban,
-            ...(bic.trim().length > 0 ? { bic: bic.trim() } : {}),
-            currency,
-            isDefault: true,
-          } as unknown as BankAccountInput)
-        : null;
+    const trimmedIban = Str.replace(/\s+/g, "")(iban);
+    const cleanBic = Str.trim(bic);
+    interface BankInput {
+      iban: string;
+      bic?: string;
+      currency: CurrencyCode;
+      isDefault: boolean;
+    }
+    const bankInput: BankInput = {
+      iban: trimmedIban,
+      currency,
+      isDefault: true,
+    };
+    if (cleanBic !== "") bankInput.bic = cleanBic;
+    const bank = trimmedIban === "" ? null : BankAccountInput.make(bankInput);
 
-    const saved = await saveOnboarding(
-      api,
-      { workspace: payload, issuingEntity, bank },
-      {
-        scope: { origin: api.origin, userId: session.user.id },
-        fields,
-        step,
-        progress,
-        onProgress: setProgress,
-      },
+    const saved = yield* Effect.promise(() =>
+      saveOnboarding(
+        api,
+        { workspace: payload, issuingEntity, bank },
+        {
+          scope: { origin: api.origin, userId: session.user.id },
+          fields,
+          step,
+          progress,
+          onProgress: setProgress,
+        },
+      ),
     );
     if (saved.result._tag === "Err") {
       setBusy(false);
@@ -275,10 +302,10 @@ export function OnboardingScreen(props: { readonly initialStep?: number }) {
     }
     const ws = saved.result.value;
 
-    await lastWorkspace.write(ws.slug);
+    yield* Effect.promise(() => lastWorkspace.write(ws.slug));
     setBusy(false);
     navigate({ _tag: "Dashboard", ws: ws.slug }, { replace: true });
-  };
+  });
 
   return (
     <Screen
@@ -303,8 +330,10 @@ export function OnboardingScreen(props: { readonly initialStep?: number }) {
             />
           ) : (
             <Button
-              label={busy ? t("onboarding.wizard.creating") : t("onboarding.wizard.submit")}
-              onPress={() => void handleCreate()}
+              label={
+                busy === true ? t("onboarding.wizard.creating") : t("onboarding.wizard.submit")
+              }
+              onPress={() => forkFeatureEffect(handleCreate())}
               busy={busy}
               disabled={hydrating}
               testID="onboarding-submit"
@@ -331,7 +360,7 @@ export function OnboardingScreen(props: { readonly initialStep?: number }) {
                   value={ico}
                   onChangeText={setIco}
                   keyboardType="number-pad"
-                  disabled={busy || aresStatus._tag === "loading"}
+                  disabled={busy === true || aresStatus._tag === "loading"}
                   testID="onboarding-ico"
                 />
               </View>
@@ -343,9 +372,9 @@ export function OnboardingScreen(props: { readonly initialStep?: number }) {
                     ? t("onboarding.wizard.entity.lookingUp")
                     : t("onboarding.wizard.entity.lookup")
                 }
-                onPress={() => void handleAresLookup()}
+                onPress={() => forkFeatureEffect(handleAresLookup())}
                 busy={aresStatus._tag === "loading"}
-                disabled={ico.trim().length === 0 || busy}
+                disabled={Str.trim(ico).length === 0 || busy}
                 testID="onboarding-ares-lookup"
               />
             </View>
@@ -454,8 +483,8 @@ export function OnboardingScreen(props: { readonly initialStep?: number }) {
               value={currency}
               onChange={setCurrency}
               choices={[
-                { value: "CZK" as CurrencyCode, label: "CZK" },
-                { value: "EUR" as CurrencyCode, label: "EUR" },
+                { value: CurrencyCode.make("CZK"), label: "CZK" },
+                { value: CurrencyCode.make("EUR"), label: "EUR" },
               ]}
             />
             <SegmentedChoice<Locale>
@@ -493,7 +522,7 @@ export function OnboardingScreen(props: { readonly initialStep?: number }) {
                 supporting={t("common.state.optional")}
                 disabled={busy}
               />
-              {iban.trim().length === 0 ? (
+              {Str.trim(iban).length === 0 ? (
                 <Banner tone="warning" text={t("onboarding.wizard.bank.noQrWarning")} />
               ) : null}
             </Card>
@@ -522,7 +551,7 @@ export function OnboardingScreen(props: { readonly initialStep?: number }) {
       <View style={styles.hintRow}>
         <Building2 size={14} />
         <Text variant="meta" color="onSurfaceVariant">
-          {name.trim() || t("onboarding.wizard.entity.workspaceName")}
+          {Str.trim(name) || t("onboarding.wizard.entity.workspaceName")}
         </Text>
       </View>
     </Screen>

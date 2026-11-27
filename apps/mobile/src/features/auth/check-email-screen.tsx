@@ -1,4 +1,6 @@
 import { describeError } from "@kvitbit/ui-port/api";
+import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import { MailCheck } from "lucide-react-native";
 import { useEffect, useState } from "react";
 import { StyleSheet, View } from "react-native";
@@ -6,6 +8,7 @@ import { useI18n } from "../../i18n/i18n-provider";
 import { safeReturnTo } from "../../navigation/return-to";
 import { navigate } from "../../navigation/routes";
 import { Banner, Button, Card, Icon, Screen, space, Text, useOverlay } from "../../ui";
+import { runFeatureCallback, runFeatureEffect } from "../ui-effect";
 import type { AuthClient, AuthResult } from "./auth-port";
 import { useAuthClient } from "./use-auth-client";
 
@@ -30,29 +33,39 @@ export function CheckEmailScreen(props: {
 
   useEffect(() => {
     if (cooldown <= 0) return;
-    const timer = setInterval(() => {
-      setCooldown((prev) => (prev > 1 ? prev - 1 : 0));
-    }, 1000);
-    return () => clearInterval(timer);
+    const interrupt = runFeatureCallback({
+      effect: Effect.sleep("1 second"),
+      onExit: (exit) => {
+        if (Exit.isSuccess(exit)) setCooldown((prev) => Math.max(0, prev - 1));
+      },
+    });
+    return () => interrupt();
   }, [cooldown]);
 
-  const handleResend = async () => {
-    if (cooldown > 0 || props.email.length === 0) return;
-    setBusy(true);
-    setErrorBanner(null);
-    const res = props.resend
-      ? await props.resend()
-      : await auth.resendVerification(props.email, safeReturnTo(props.returnTo));
-    setBusy(false);
+  const handleResend = () =>
+    runFeatureEffect(
+      Effect.gen(function* () {
+        if (cooldown > 0 || props.email.length === 0) return;
+        setBusy(true);
+        setErrorBanner(null);
+        const { resend } = props;
+        const res =
+          resend === undefined
+            ? yield* Effect.promise(() =>
+                auth.resendVerification(props.email, safeReturnTo(props.returnTo)),
+              )
+            : yield* Effect.promise(resend);
+        setBusy(false);
 
-    if (res._tag === "Ok") {
-      setCooldown(RESEND_COOLDOWN_SECONDS);
-      overlay.toast(t("auth.checkEmail.resent"));
-      return;
-    }
-    if (res._tag === "Cancelled") return;
-    setErrorBanner(text(describeError(res.error).text));
-  };
+        if (res._tag === "Ok") {
+          setCooldown(RESEND_COOLDOWN_SECONDS);
+          overlay.toast(t("auth.checkEmail.resent"));
+          return;
+        }
+        if (res._tag === "Cancelled") return;
+        setErrorBanner(text(describeError(res.error).text));
+      }),
+    );
 
   return (
     <Screen title={t("auth.checkEmail.title")} back>
@@ -70,7 +83,9 @@ export function CheckEmailScreen(props: {
               ? t("auth.checkEmail.resendIn", { seconds: cooldown })
               : t("auth.checkEmail.resend")
           }
-          onPress={() => void handleResend()}
+          onPress={() => {
+            handleResend();
+          }}
           disabled={cooldown > 0 || props.email.length === 0}
           busy={busy}
           testID="check-email-resend"

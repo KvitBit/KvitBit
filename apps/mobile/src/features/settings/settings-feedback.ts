@@ -5,6 +5,7 @@ import {
   issuesAt,
   type UiError,
 } from "@kvitbit/ui-port/api";
+import * as Fn from "effect/Function";
 import type { I18n } from "../../i18n/i18n-provider";
 import {
   isRequestIntentExpired,
@@ -23,7 +24,10 @@ export const noFormError: FormErrorState = {
   issues: [],
 };
 
-export const formErrorFrom = (error: UiError, i18n: I18n): FormErrorState => {
+export const formErrorFrom: {
+  (i18n: I18n): (error: UiError) => FormErrorState;
+  (error: UiError, i18n: I18n): FormErrorState;
+} = Fn.dual(2, (error: UiError, i18n: I18n): FormErrorState => {
   if (isRequestIntentExpired(error)) {
     return { ...noFormError, banner: i18n.local(requestIntentReconciliationCopy) };
   }
@@ -33,13 +37,12 @@ export const formErrorFrom = (error: UiError, i18n: I18n): FormErrorState => {
     staleRevision: view.staleRevision,
     issues: view.issues,
   };
-};
+});
 
-export const fieldErrorText = (
-  state: FormErrorState,
-  path: IssuePath,
-  i18n: I18n,
-): string | null => {
+export const fieldErrorText: {
+  (path: IssuePath, i18n: I18n): (state: FormErrorState) => string | null;
+  (state: FormErrorState, path: IssuePath, i18n: I18n): string | null;
+} = Fn.dual(3, (state: FormErrorState, path: IssuePath, i18n: I18n): string | null => {
   const matched = issuesAt(state.issues, path)[0];
   return matched === undefined ? null : i18n.text(matched.text);
-};
+});

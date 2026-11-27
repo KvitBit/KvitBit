@@ -26,10 +26,10 @@ export function TextField({
   ...input
 }: TextFieldProps) {
   const theme = useTheme();
-  const [focused, setFocused] = useState(false);
+  const [focused, setFocused] = useState<boolean>(false);
   const c = theme.colors;
-  const hasError = error !== undefined && error !== null && error !== "";
-  const border = hasError ? c.error : focused ? c.primary : c.outline;
+  const hasError: boolean = (error ?? "").length > 0;
+  const border = hasError ? c.error : focused === true ? c.primary : c.outline;
   return (
     <View style={styles.wrap}>
       <Text variant="labelMedium" color={hasError ? "error" : "onSurfaceVariant"}>
@@ -40,9 +40,9 @@ export function TextField({
           styles.box,
           {
             borderColor: border,
-            borderWidth: focused || hasError ? 2 : 1,
+            borderWidth: focused === true || hasError ? 2 : 1,
             borderRadius: theme.shape.control,
-            backgroundColor: disabled ? c.surfaceContainerHighest : c.surface,
+            backgroundColor: disabled === true ? c.surfaceContainerHighest : c.surface,
           },
         ]}
       >

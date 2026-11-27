@@ -3,16 +3,28 @@
  * (app.json experiments.baseUrl), so hrefs use base "/".
  */
 import { type Route, Routes } from "@kvitbit/ui-port/view-models";
+import * as Fn from "effect/Function";
+import * as Predicate from "effect/Predicate";
 import { router } from "expo-router";
 
 export const hrefOf = (route: Route): string => Routes.toPath(route, "/");
 
-export const navigate = (route: Route, options: { readonly replace?: boolean } = {}): void => {
-  const href = hrefOf(route);
-  if (options.replace === true) router.replace(href as never);
-  else router.push(href as never);
-};
+interface NavigationOptions {
+  readonly replace?: boolean;
+}
+
+export const navigate: {
+  (options?: NavigationOptions): (route: Route) => void;
+  (route: Route, options?: NavigationOptions): void;
+} = Fn.dual(
+  (args) => Predicate.hasProperty(args[0], "_tag"),
+  (route: Route, options: NavigationOptions = {}) => {
+    const href = hrefOf(route);
+    if (options.replace === true) router.replace(href);
+    else router.push(href);
+  },
+);
 
 /** Expo Router search params can be arrays; ui-port wants the first value. */
 export const param = (value: string | ReadonlyArray<string> | undefined): string | undefined =>
-  typeof value === "string" ? value : value?.[0];
+  Predicate.isString(value) ? value : value?.[0];

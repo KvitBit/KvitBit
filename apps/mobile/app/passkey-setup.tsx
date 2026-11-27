@@ -1,7 +1,9 @@
 import { describeError } from "@kvitbit/ui-port/api";
+import * as Effect from "effect/Effect";
 import { Redirect, router } from "expo-router";
 import { useState } from "react";
 import { useAuthClient } from "../src/features/auth/use-auth-client";
+import { forkFeatureEffect } from "../src/features/ui-effect";
 import { useI18n } from "../src/i18n/i18n-provider";
 import { hrefOf } from "../src/navigation/routes";
 import { useSession } from "../src/session/session-provider";
@@ -15,17 +17,23 @@ export default function PasskeySetupRoute() {
   const [error, setError] = useState<string | null>(null);
 
   if (session.status !== "signed-in" || !session.user.emailVerified) {
-    return <Redirect href={hrefOf({ _tag: "SignIn", returnTo: "/passkey-setup" }) as never} />;
+    return <Redirect href={hrefOf({ _tag: "SignIn", returnTo: "/passkey-setup" })} />;
   }
 
-  const addPasskey = async () => {
-    if (busy) return;
+  const addPasskey = () => {
+    if (busy === true) return;
     setBusy(true);
     setError(null);
-    const result = await auth.passkeyAdd(t("app.name"));
-    setBusy(false);
-    if (result._tag === "Ok") router.replace("/" as never);
-    else if (result._tag === "Err") setError(text(describeError(result.error).text));
+    forkFeatureEffect(
+      Effect.map(
+        Effect.promise(() => auth.passkeyAdd(t("app.name"))),
+        (result) => {
+          setBusy(false);
+          if (result._tag === "Ok") router.replace("/");
+          else if (result._tag === "Err") setError(text(describeError(result.error).text));
+        },
+      ),
+    );
   };
 
   return (
@@ -34,11 +42,7 @@ export default function PasskeySetupRoute() {
       <Card>
         <Text variant="bodyMedium">{session.user.email}</Text>
         <Text variant="bodyMedium">{t("auth.passkey.prompt")}</Text>
-        <Button
-          label={t("account.security.addPasskey")}
-          onPress={() => void addPasskey()}
-          busy={busy}
-        />
+        <Button label={t("account.security.addPasskey")} onPress={addPasskey} busy={busy} />
       </Card>
     </Screen>
   );

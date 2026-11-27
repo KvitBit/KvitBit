@@ -1,6 +1,9 @@
-import type { InvitationToken } from "@kvitbit/domain/contract";
+import { InvitationToken } from "@kvitbit/domain/contract";
 import { describeError } from "@kvitbit/ui-port/api";
 import { enumText } from "@kvitbit/ui-port/i18n";
+import * as Effect from "effect/Effect";
+import * as Schema from "effect/Schema";
+import * as Str from "effect/String";
 import { useState } from "react";
 import { useI18n } from "../../i18n/i18n-provider";
 import { hrefOf, navigate } from "../../navigation/routes";
@@ -8,6 +11,7 @@ import { useApi, useRemote } from "../../runtime/api-runtime";
 import { useSession } from "../../session/session-provider";
 import { Banner, Button, Card, EmptyState, RemoteView, Screen, Text } from "../../ui";
 import { lastWorkspace } from "../../workspace/last-workspace";
+import { runFeatureEffect } from "../ui-effect";
 import type { AuthClient } from "./auth-port";
 import { useAuthClient } from "./use-auth-client";
 
@@ -18,9 +22,10 @@ export function InviteScreen(props: { readonly token: string; readonly authClien
   const contextAuth = useAuthClient();
   const auth = props.authClient ?? contextAuth;
 
+  const token = Schema.decodeOption(InvitationToken)(props.token);
   const invitation = useRemote(
-    props.token.length > 0
-      ? (client) => client.invitations.peek({ params: { token: props.token as InvitationToken } })
+    token._tag === "Some"
+      ? (client) => client.invitations.peek({ params: { token: token.value } })
       : null,
     [props.token],
   );
@@ -28,7 +33,7 @@ export function InviteScreen(props: { readonly token: string; readonly authClien
   const [busy, setBusy] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
 
-  if (props.token.length === 0) {
+  if (token._tag === "None") {
     return (
       <Screen title={t("invitation.landing.notFound")}>
         <EmptyState
@@ -42,26 +47,32 @@ export function InviteScreen(props: { readonly token: string; readonly authClien
     );
   }
 
-  const handleAccept = async () => {
-    setBusy(true);
-    setActionError(null);
-    const res = await api.run((client) =>
-      client.invitations.accept({ params: { token: props.token as InvitationToken } }),
+  const handleAccept = () =>
+    runFeatureEffect(
+      Effect.gen(function* () {
+        setBusy(true);
+        setActionError(null);
+        const res = yield* Effect.promise(() =>
+          api.run((client) => client.invitations.accept({ params: { token: token.value } })),
+        );
+        setBusy(false);
+        if (res._tag === "Ok") {
+          yield* Effect.promise(() => lastWorkspace.write(res.value.slug));
+          navigate({ _tag: "Dashboard", ws: res.value.slug }, { replace: true });
+          return;
+        }
+        setActionError(text(describeError(res.error).text));
+      }),
     );
-    setBusy(false);
-    if (res._tag === "Ok") {
-      await lastWorkspace.write(res.value.slug);
-      navigate({ _tag: "Dashboard", ws: res.value.slug }, { replace: true });
-      return;
-    }
-    setActionError(text(describeError(res.error).text));
-  };
 
-  const handleSignOutAndContinue = async () => {
-    setBusy(true);
-    await auth.signOut();
-    setBusy(false);
-  };
+  const handleSignOutAndContinue = () =>
+    runFeatureEffect(
+      Effect.gen(function* () {
+        setBusy(true);
+        yield* Effect.promise(() => auth.signOut());
+        setBusy(false);
+      }),
+    );
 
   return (
     <Screen title={t("app.name")}>
@@ -87,7 +98,8 @@ export function InviteScreen(props: { readonly token: string; readonly authClien
 
           const signedInUser = session.state.status === "signed-in" ? session.state.user : null;
           const emailMatches =
-            signedInUser !== null && signedInUser.email.toLowerCase() === peek.email.toLowerCase();
+            signedInUser !== null &&
+            Str.toLowerCase(signedInUser.email) === Str.toLowerCase(peek.email);
           const roleLabel = text(enumText("role", peek.role));
 
           return (
@@ -108,13 +120,19 @@ export function InviteScreen(props: { readonly token: string; readonly authClien
               {signedInUser === null ? (
                 <>
                   <Button
-                    label={t("invitation.landing.signUpToAccept")}
+                    label={t(
+                      // biome-ignore lint/security/noSecrets: This string is an invitation translation key.
+                      "invitation.landing.signUpToAccept",
+                    )}
                     onPress={() => navigate({ _tag: "SignUp", invitation: props.token })}
                     testID="invite-signup"
                   />
                   <Button
                     kind="tonal"
-                    label={t("invitation.landing.signInToAccept")}
+                    label={t(
+                      // biome-ignore lint/security/noSecrets: This string is an invitation translation key.
+                      "invitation.landing.signInToAccept",
+                    )}
                     onPress={() =>
                       navigate({
                         _tag: "SignIn",
@@ -127,7 +145,9 @@ export function InviteScreen(props: { readonly token: string; readonly authClien
               ) : emailMatches ? (
                 <Button
                   label={t("invitation.landing.accept")}
-                  onPress={() => void handleAccept()}
+                  onPress={() => {
+                    handleAccept();
+                  }}
                   busy={busy}
                   testID="invite-accept"
                 />
@@ -140,7 +160,9 @@ export function InviteScreen(props: { readonly token: string; readonly authClien
                   <Button
                     kind="tonal"
                     label={t("common.action.signOut")}
-                    onPress={() => void handleSignOutAndContinue()}
+                    onPress={() => {
+                      handleSignOutAndContinue();
+                    }}
                     busy={busy}
                     testID="invite-signout"
                   />

@@ -1,13 +1,21 @@
 import { afterAll, beforeAll, describe, expect, mock, test } from "bun:test";
-import type { Role, WorkspaceId, WorkspaceSlug, WorkspaceSummary } from "@kvitbit/domain/contract";
+import {
+  type Role,
+  WorkspaceId,
+  WorkspaceSlug,
+  type WorkspaceSummary,
+} from "@kvitbit/domain/contract";
 import { PRESET_IDS } from "@kvitbit/ui-port/theme";
-import { Effect } from "effect";
+import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
+import * as Str from "effect/String";
 import type { ReactElement } from "react";
 import { I18nProvider } from "../../i18n/i18n-provider";
 import { ApiProvider } from "../../runtime/api-runtime";
 import { SessionProvider } from "../../session/session-provider";
 import { clientRoot } from "../../testing/client-root";
-import { allText, type HostProps, hostTree } from "../../testing/element-tree";
+import { allText, hostTree } from "../../testing/element-tree";
 import { eventually } from "../../testing/eventually";
 import { expoRouterStandIn } from "../../testing/expo-router-stand-in";
 import { recordedOverlay, TestProviders } from "../../testing/providers";
@@ -35,11 +43,18 @@ const { DangerZoneSection } = await import("./danger-zone-section");
 const { IssuingEntitySection } = await import("./issuing-entity-section");
 const { SettingsScreen } = await import("./settings-screen");
 
-const WORKSPACE_ID = "0193a1a2-b3c4-7d5e-8f90-1234567890ab" as WorkspaceId;
+const TRAILING_SLASH = /\/$/;
+const decodePreferences = Schema.decodeUnknownOption(
+  Schema.Struct({
+    locale: Schema.String.pipe(Schema.NullOr, Schema.optional),
+    theme: Schema.optional(Schema.JsonObject),
+  }),
+);
+const WORKSPACE_ID = WorkspaceId.make("0193a1a2-b3c4-7d5e-8f90-1234567890ab");
 
 const makeWorkspace = (overrides: Partial<WorkspaceSummary> = {}): WorkspaceSummary => ({
   id: WORKSPACE_ID,
-  slug: "acme" as WorkspaceSlug,
+  slug: WorkspaceSlug.make("acme"),
   name: "Acme s.r.o.",
   role: "owner",
   memberCount: 2,
@@ -68,20 +83,17 @@ describe("SettingsScreen & static guards", () => {
     );
 
   test("renders not-found empty state for unknown settings section", () => {
-    const tree = hostTree(
-      <SettingsScreen sectionParam="does-not-exist" />,
-      wrap("owner"),
-    ) as ReactElement<HostProps>;
+    const tree = hostTree(<SettingsScreen sectionParam="does-not-exist" />, wrap("owner"));
     expect(allText(tree)).toContain("Settings section not found");
   });
 
   test("ApiKeysSection renders read-only banner for member role", () => {
-    const tree = hostTree(<ApiKeysSection />, wrap("member")) as ReactElement<HostProps>;
+    const tree = hostTree(<ApiKeysSection />, wrap("member"));
     expect(allText(tree)).toContain("Only owners and admins can change these settings.");
   });
 
   test("DangerZoneSection restricts non-owners", () => {
-    const tree = hostTree(<DangerZoneSection />, wrap("admin")) as ReactElement<HostProps>;
+    const tree = hostTree(<DangerZoneSection />, wrap("admin"));
     expect(allText(tree)).toContain("Only the workspace owner can manage these actions.");
   });
 });
@@ -99,7 +111,7 @@ describe("Settings sections wired to KvitbitApi", () => {
       port: 0,
       fetch: async (req) => {
         const url = new URL(req.url);
-        const path = url.pathname.replace(/\/$/, "");
+        const path = Str.replace(TRAILING_SLASH, "")(url.pathname);
         if (path === `/api/v1/workspaces/${WORKSPACE_ID}/branding` && req.method === "GET") {
           return Response.json({
             pdfTemplate: "classic",
@@ -128,10 +140,10 @@ describe("Settings sections wired to KvitbitApi", () => {
           });
         }
         if (path === "/api/v1/me/preferences" && req.method === "PATCH") {
-          const body = (await req.json()) as Record<string, unknown>;
+          const body = Option.getOrUndefined(decodePreferences(await req.json()));
           return Response.json({
-            locale: (body.locale as string | null | undefined) ?? "en",
-            theme: (body.theme as Record<string, unknown> | undefined) ?? {
+            locale: body?.locale ?? "en",
+            theme: body?.theme ?? {
               source: null,
               mode: "system",
               style: "elegant",
@@ -200,7 +212,9 @@ describe("Settings sections wired to KvitbitApi", () => {
           req.method === "PATCH"
         ) {
           lastIfMatch = req.headers.get("if-match");
-          const body = (await req.json()) as Record<string, unknown>;
+          const body = Option.getOrNull(
+            Schema.decodeUnknownOption(Schema.JsonObject)(await req.json()),
+          );
           return Response.json({
             id: WORKSPACE_ID,
             slug: "acme",
@@ -281,10 +295,10 @@ describe("Settings sections wired to KvitbitApi", () => {
       eventually(
         () => {
           const content = root.container().textContent ?? "";
-          return prefsRequested && content.includes("Graphite Atelier");
+          return prefsRequested && Str.includes("Graphite Atelier")(content);
         },
         () =>
-          `prefsRequested=${prefsRequested} text=${(root.container().textContent ?? "").slice(0, 200)}`,
+          `prefsRequested=${prefsRequested} text=${Str.slice(0, 200)(root.container().textContent ?? "")}`,
       ),
     );
     expect(prefsRequested).toBe(true);
@@ -298,7 +312,7 @@ describe("Settings sections wired to KvitbitApi", () => {
       expect(content).toContain("Pure Graphite");
     }
     // Let both initial useRemote responses finish decoding before unmounting ApiProvider.
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    await Effect.runPromise(Effect.sleep("50 millis"));
 
     expect(PRESET_IDS).toHaveLength(6);
     const content = root.container().textContent ?? "";
@@ -338,7 +352,7 @@ describe("Settings sections wired to KvitbitApi", () => {
     await Effect.runPromise(
       eventually(() => {
         const content = root.container().textContent ?? "";
-        return content.includes("Refresh from ARES") && content.includes("Save changes");
+        return Str.includes("Refresh from ARES")(content) && Str.includes("Save changes")(content);
       }),
     );
     {
@@ -346,7 +360,7 @@ describe("Settings sections wired to KvitbitApi", () => {
       expect(content).toContain("Refresh from ARES");
       expect(content).toContain("Save changes");
     }
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    await Effect.runPromise(Effect.sleep("50 millis"));
 
     expect(lastIfMatch).toBeNull();
   });

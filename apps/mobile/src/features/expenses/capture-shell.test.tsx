@@ -1,14 +1,16 @@
+// biome-ignore-all lint/style/useComponentExportOnlyModules: The router mocks are local test fixtures.
 import { afterAll, afterEach, beforeAll, describe, expect, mock, test } from "bun:test";
-import { createServer, type Server } from "node:http";
-import type { AddressInfo } from "node:net";
 import {
-  type ExpenseId,
+  ExpenseId,
   Invalid,
-  type WorkspaceId,
-  type WorkspaceSlug,
+  WorkspaceId,
+  WorkspaceSlug,
   type WorkspaceSummary,
 } from "@kvitbit/domain/contract";
-import { Effect } from "effect";
+import * as Effect from "effect/Effect";
+import * as Fn from "effect/Function";
+import * as Schema from "effect/Schema";
+import * as Str from "effect/String";
 import type { ReactElement, ReactNode } from "react";
 import {
   fakeTransfer,
@@ -24,7 +26,11 @@ import { TestProviders } from "../../testing/providers";
 import { WorkspaceProvider } from "../../workspace/workspace-provider";
 import { uiShim } from "../documents/test-ui-shim";
 
-const capturedTabOptions = new Map<string, Record<string, unknown>>();
+interface TabBadgeOptions {
+  readonly tabBarBadge?: number | string;
+  readonly tabBarBadgeStyle?: { readonly backgroundColor?: string };
+}
+const capturedTabOptions = new Map<string, TabBadgeOptions>();
 let layoutWsSlug = "acme";
 let activeUserId = "user-shell-1";
 
@@ -33,7 +39,7 @@ function TabsMock({ children }: { readonly children?: ReactNode }) {
 }
 TabsMock.Screen = function TabsScreenMock(props: {
   readonly name: string;
-  readonly options?: Record<string, unknown>;
+  readonly options?: TabBadgeOptions;
 }) {
   if (props.options !== undefined) capturedTabOptions.set(props.name, props.options);
   return null;
@@ -70,13 +76,13 @@ const realUi = { ...(await import("../../ui")) };
 const { ExpenseDetailScreen } = await import("./expense-detail-screen");
 const { default: WorkspaceLayout } = await import("../../../app/w/[ws]/_layout");
 
-const WS_1 = "01937c7a-0000-7000-8000-000000000011" as WorkspaceId;
-const WS_2 = "01937c7a-0000-7000-8000-000000000012" as WorkspaceId;
-const EXP_1 = "01937c7a-0000-7000-8000-000000000201" as ExpenseId;
+const WS_1 = WorkspaceId.make("01937c7a-0000-7000-8000-000000000011");
+const WS_2 = WorkspaceId.make("01937c7a-0000-7000-8000-000000000012");
+const EXP_1 = ExpenseId.make("01937c7a-0000-7000-8000-000000000201");
 
 const WORKSPACE_1: WorkspaceSummary = {
   id: WS_1,
-  slug: "acme" as WorkspaceSlug,
+  slug: WorkspaceSlug.make("acme"),
   name: "Acme s.r.o.",
   role: "owner",
   memberCount: 1,
@@ -85,7 +91,7 @@ const WORKSPACE_1: WorkspaceSummary = {
 };
 const WORKSPACE_2: WorkspaceSummary = {
   id: WS_2,
-  slug: "beta" as WorkspaceSlug,
+  slug: WorkspaceSlug.make("beta"),
   name: "Beta s.r.o.",
   role: "member",
   memberCount: 2,
@@ -125,64 +131,62 @@ const sampleExpenseView = {
   updatedAt: "2026-11-10T10:00:00Z",
 };
 
-let server: Server | null = null;
+const stringifyFixture = Fn.flow(
+  Schema.encodeEffect(Schema.fromJsonString(Schema.Unknown)),
+  Effect.runSync,
+);
+let server: ReturnType<typeof Bun.serve>;
 let origin = "";
 
-beforeAll(async () => {
+beforeAll(() => {
   mock.module("../../ui", () => uiShim);
-  server = createServer((req, res) => {
-    const reqOrigin = req.headers.origin ?? "*";
-    const corsHeaders = {
-      "access-control-allow-origin": reqOrigin,
-      "access-control-allow-credentials": "true",
-      "access-control-allow-headers":
-        "authorization, content-type, accept, accept-language, idempotency-key, if-match",
-      "access-control-allow-methods": "GET, POST, PATCH, DELETE, OPTIONS",
-    };
-    if (req.method === "OPTIONS") {
-      res.writeHead(204, corsHeaders);
-      res.end();
-      return;
-    }
-    const url = new URL(req.url ?? "/", "http://127.0.0.1");
-    let body: unknown = {};
-    if (url.pathname === "/api/auth/get-session") {
-      body = {
-        user: {
-          id: activeUserId,
-          email: `${activeUserId}@example.com`,
-          name: activeUserId,
-          emailVerified: true,
-        },
+  server = Bun.serve({
+    port: 0,
+    hostname: "127.0.0.1",
+    fetch(req) {
+      const reqOrigin = req.headers.get("origin") ?? "*";
+      const corsHeaders = {
+        "access-control-allow-origin": reqOrigin,
+        "access-control-allow-credentials": "true",
+        "access-control-allow-headers":
+          "authorization, content-type, accept, accept-language, idempotency-key, if-match",
+        "access-control-allow-methods": "GET, POST, PATCH, DELETE, OPTIONS",
       };
-    } else if (url.pathname === "/api/v1/workspaces") {
-      body = [WORKSPACE_1, WORKSPACE_2];
-    } else if (url.pathname.endsWith(`/expenses/${EXP_1}/payments`)) {
-      body = [];
-    } else if (url.pathname.endsWith(`/expenses/${EXP_1}`)) {
-      body = sampleExpenseView;
-    }
-    const json = JSON.stringify(body);
-    res.writeHead(200, {
-      ...corsHeaders,
-      "content-type": "application/json",
-      "content-length": Buffer.byteLength(json),
-    });
-    res.end(json);
+      if (req.method === "OPTIONS") {
+        return new Response(null, { status: 204, headers: corsHeaders });
+      }
+      const url = new URL(req.url);
+      let body: unknown = {};
+      if (url.pathname === "/api/auth/get-session") {
+        body = {
+          user: {
+            id: activeUserId,
+            email: `${activeUserId}@example.com`,
+            name: activeUserId,
+            emailVerified: true,
+          },
+        };
+      } else if (url.pathname === "/api/v1/workspaces") {
+        body = [WORKSPACE_1, WORKSPACE_2];
+      } else if (Str.endsWith(`/expenses/${EXP_1}/payments`)(url.pathname)) {
+        body = [];
+      } else if (Str.endsWith(`/expenses/${EXP_1}`)(url.pathname)) {
+        body = sampleExpenseView;
+      }
+      return Response.json(body, { headers: corsHeaders });
+    },
   });
-  await new Promise<void>((resolve) => server?.listen(0, "127.0.0.1", () => resolve()));
-  const address = server.address() as AddressInfo;
-  origin = `http://127.0.0.1:${address.port}`;
-});
-
-afterAll(async () => {
-  mock.module("../../ui", () => realUi);
-  await new Promise<void>((resolve) => (server ? server.close(() => resolve()) : resolve()));
+  origin = server.url.origin;
 });
 
 afterEach(async () => {
   capturedTabOptions.clear();
   await tokenStore.clear();
+});
+
+afterAll(() => {
+  mock.module("../../ui", () => realUi);
+  server.stop(true);
 });
 
 describe("receipt capture shell badge and rejected receipts UI", () => {
@@ -212,26 +216,26 @@ describe("receipt capture shell badge and rejected receipts UI", () => {
     };
 
     const AsyncStorage = (await import("@react-native-async-storage/async-storage")).default;
-    const key1 = `expense-capture:v1:${JSON.stringify([scope1.principalId, scope1.workspaceId])}`;
-    const key2 = `expense-capture:v1:${JSON.stringify([scope2.principalId, scope2.workspaceId])}`;
-    const keyOther = `expense-capture:v1:${JSON.stringify([otherUserScope.principalId, otherUserScope.workspaceId])}`;
+    const key1 = `expense-capture:v1:${stringifyFixture([scope1.principalId, scope1.workspaceId])}`;
+    const key2 = `expense-capture:v1:${stringifyFixture([scope2.principalId, scope2.workspaceId])}`;
+    const keyOther = `expense-capture:v1:${stringifyFixture([otherUserScope.principalId, otherUserScope.workspaceId])}`;
 
     await AsyncStorage.setItem(
       key1,
-      JSON.stringify([
+      stringifyFixture([
         { key: "job-1", scope: scope1, targetExpenseId: null, expenseId: null, files: [] },
       ]),
     );
     await AsyncStorage.setItem(
       key2,
-      JSON.stringify([
+      stringifyFixture([
         { key: "job-2", scope: scope2, targetExpenseId: null, expenseId: null, files: [] },
       ]),
     );
     // Another account's job must not be counted for user-shell-1.
     await AsyncStorage.setItem(
       keyOther,
-      JSON.stringify([
+      stringifyFixture([
         {
           key: "job-other",
           scope: otherUserScope,
@@ -259,15 +263,13 @@ describe("receipt capture shell badge and rejected receipts UI", () => {
       await Effect.runPromise(
         eventually(() => capturedTabOptions.get("expenses")?.tabBarBadge === 2),
       );
-      const nonBlockedStyle = capturedTabOptions.get("expenses")?.tabBarBadgeStyle as
-        | { backgroundColor?: string }
-        | undefined;
+      const nonBlockedStyle = capturedTabOptions.get("expenses")?.tabBarBadgeStyle;
       expect(nonBlockedStyle?.backgroundColor).toBeDefined();
 
       // Mark job-2 in workspace 2 as blocked, then remount cleanly to verify blocked error tone.
       await AsyncStorage.setItem(
         key2,
-        JSON.stringify([
+        stringifyFixture([
           {
             key: "job-2",
             scope: scope2,
@@ -279,7 +281,7 @@ describe("receipt capture shell badge and rejected receipts UI", () => {
               payload: { status: "incomplete", currency: "CZK" },
               failure: {
                 kind: "blocked",
-                error: new Invalid({ issues: [{ path: ["total"], code: "expense.incomplete" }] }),
+                error: Invalid.make({ issues: [{ path: ["total"], code: "expense.incomplete" }] }),
               },
             },
           },
@@ -293,7 +295,7 @@ describe("receipt capture shell badge and rejected receipts UI", () => {
       await Effect.runPromise(
         eventually(() => {
           const opts = capturedTabOptions.get("expenses");
-          const style = opts?.tabBarBadgeStyle as { backgroundColor?: string } | undefined;
+          const style = opts?.tabBarBadgeStyle;
           return (
             opts?.tabBarBadge === 2 &&
             style?.backgroundColor !== undefined &&
@@ -312,10 +314,10 @@ describe("receipt capture shell badge and rejected receipts UI", () => {
     activeUserId = "user-rejected-1";
     await tokenStore.write("token-user-rejected-1");
     const AsyncStorage = (await import("@react-native-async-storage/async-storage")).default;
-    const rejectedStorageKey = `expense-capture:v1:${JSON.stringify(["rejected", "user-rejected-1", WS_1, EXP_1])}`;
+    const rejectedStorageKey = `expense-capture:v1:${stringifyFixture(["rejected", "user-rejected-1", WS_1, EXP_1])}`;
     await AsyncStorage.setItem(
       rejectedStorageKey,
-      JSON.stringify([
+      stringifyFixture([
         {
           key: "rej-1",
           name: "bad-mime-receipt.pdf",
@@ -350,7 +352,7 @@ describe("receipt capture shell badge and rejected receipts UI", () => {
       await root.render(wrap(<ExpenseDetailScreen id={EXP_1} initialMode="edit" />));
       await Effect.runPromise(
         eventually(
-          () => (root.container().textContent ?? "").includes("bad-mime-receipt.pdf"),
+          () => Str.includes("bad-mime-receipt.pdf")(root.container().textContent ?? ""),
           () => `edit text: ${root.container().textContent ?? ""}`,
         ),
       );
@@ -360,10 +362,11 @@ describe("receipt capture shell badge and rejected receipts UI", () => {
       await root.render(wrap(<ExpenseDetailScreen id={EXP_1} initialMode="view" />));
       await Effect.runPromise(
         eventually(
-          () => (root.container().textContent ?? "").includes("bad-mime-receipt.pdf"),
+          () => Str.includes("bad-mime-receipt.pdf")(root.container().textContent ?? ""),
           () => `view text: ${root.container().textContent ?? ""}`,
         ),
       );
+      expect(root.container().textContent).toContain("bad-mime-receipt.pdf");
     } finally {
       await AsyncStorage.removeItem(rejectedStorageKey);
     }

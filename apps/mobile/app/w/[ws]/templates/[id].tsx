@@ -1,5 +1,7 @@
-import type { TemplateId } from "@kvitbit/domain/contract";
+import { TemplateId } from "@kvitbit/domain/contract";
+import * as Schema from "effect/Schema";
 import { useLocalSearchParams } from "expo-router";
+import { ErrorScreen } from "../../../../src/features/auth/error-screen";
 import {
   TemplateDetailScreen,
   type TemplateDetailTab,
@@ -12,10 +14,11 @@ export default function Route() {
   const rawTab = param(params.tab);
   const initialTab: TemplateDetailTab =
     rawTab === "schedule" || rawTab === "runs" ? rawTab : "template";
-  return (
-    <TemplateDetailScreen
-      id={rawId === "new" ? "new" : (rawId as TemplateId)}
-      initialTab={initialTab}
-    />
+  if (rawId === "new") return <TemplateDetailScreen id={rawId} initialTab={initialTab} />;
+  const id = Schema.decodeOption(TemplateId)(rawId);
+  return id._tag === "Some" ? (
+    <TemplateDetailScreen id={id.value} initialTab={initialTab} />
+  ) : (
+    <ErrorScreen kind="not_found" />
   );
 }

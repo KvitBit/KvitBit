@@ -8,14 +8,17 @@ test("native verification links keep the validated invitation after confirming e
   outer.searchParams.set("token", "verification-token");
   outer.searchParams.set("callbackURL", `/app${verifiedSignInHref("/invite/inv1")}`);
   expect(nativeAuthPath(outer.href, origin)).toBe(
+    // biome-ignore lint/security/noSecrets: This test URL contains fixture values.
     "/auth/verify/verification-token?returnTo=%2Finvite%2Finv1",
   );
 });
 
 test("native magic links preserve an app callback and discard external destinations", () => {
+  // biome-ignore lint/security/noSecrets: This test URL contains fixture values.
   const outer = new URL("/api/auth/magic-link/verify?token=magic-token", origin);
   outer.searchParams.set("callbackURL", "/app/w/acme/documents?tab=payments");
   expect(nativeAuthPath(outer.href, origin)).toBe(
+    // biome-ignore lint/security/noSecrets: This test URL contains fixture values.
     "/auth/magic/magic-token?returnTo=%2Fw%2Facme%2Fdocuments%3Ftab%3Dpayments",
   );
   outer.searchParams.set("callbackURL", "https://wrong.test/app/w/private");

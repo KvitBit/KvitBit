@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import * as Effect from "effect/Effect";
 import { makeAuthFetch } from "./auth-http";
 import { readSessionUser } from "./session-user";
 
@@ -15,22 +16,27 @@ describe("session", () => {
     });
   });
 
-  test("auth fetch sends the bearer and picks up a rotated token", async () => {
-    let seen = null as { url: string; auth: string | null } | null;
+  test("auth fetch sends the bearer and picks up a rotated token", () => {
+    const requests: { url: string; auth: string | null }[] = [];
     const auth = makeAuthFetch(
       "https://kvitbit.test",
       () => "tok",
-      async (url, init) => {
-        seen = { url: String(url), auth: new Headers(init.headers).get("authorization") };
-        return new Response(JSON.stringify({ ok: 1 }), { headers: { "set-auth-token": "next" } });
+      (url, init) => {
+        requests.push({ url: url.href, auth: new Headers(init.headers).get("authorization") });
+        return Effect.runPromise(
+          Effect.succeed(new Response('{"ok":1}', { headers: { "set-auth-token": "next" } })),
+        );
       },
     );
-    const response = await auth("/sign-in/email", { body: { email: "a" } });
-    expect(seen).toEqual({
-      url: "https://kvitbit.test/api/auth/sign-in/email",
-      auth: "Bearer tok",
+    return auth("/sign-in/email", { body: { email: "a" } }).then((response) => {
+      expect(requests).toEqual([
+        {
+          url: "https://kvitbit.test/api/auth/sign-in/email",
+          auth: "Bearer tok",
+        },
+      ]);
+      expect(response.token).toBe("next");
+      expect(response.body).toEqual({ ok: 1 });
     });
-    expect(response.token).toBe("next");
-    expect(response.body).toEqual({ ok: 1 });
   });
 });

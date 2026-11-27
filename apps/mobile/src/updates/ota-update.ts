@@ -1,8 +1,21 @@
-import { Effect } from "effect";
-import type * as Updates from "expo-updates";
+import * as Effect from "effect/Effect";
+import { fromMobilePromise } from "../runtime/request-intent";
 
-/** The part of `expo-updates` the foreground check uses. */
-export type OtaUpdateSource = Pick<typeof Updates, "checkForUpdateAsync" | "fetchUpdateAsync">;
+/** The update information the foreground check uses. */
+export interface OtaUpdateSource {
+  readonly checkForUpdateAsync: () => Promise<{
+    readonly isAvailable: boolean;
+    readonly isRollBackToEmbedded: boolean;
+  }>;
+  readonly fetchUpdateAsync: () => Promise<
+    | { readonly isNew: false; readonly isRollBackToEmbedded: boolean }
+    | {
+        readonly isNew: true;
+        readonly isRollBackToEmbedded: false;
+        readonly manifest: { readonly id: string };
+      }
+  >;
+}
 
 /**
  * What a restart launches once a check has fetched it: a downloaded update,
@@ -23,11 +36,11 @@ export type ReadyUpdate =
  */
 export const findReadyUpdate = (updates: OtaUpdateSource): Effect.Effect<ReadyUpdate | undefined> =>
   Effect.gen(function* () {
-    const check = yield* Effect.tryPromise(() => updates.checkForUpdateAsync());
+    const check = yield* fromMobilePromise(() => updates.checkForUpdateAsync());
     if (!(check.isAvailable || check.isRollBackToEmbedded)) {
-      return undefined;
+      return;
     }
-    const fetched = yield* Effect.tryPromise(() => updates.fetchUpdateAsync());
+    const fetched = yield* fromMobilePromise(() => updates.fetchUpdateAsync());
     if (fetched.isRollBackToEmbedded) {
       return { kind: "embedded" } as const;
     }

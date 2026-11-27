@@ -7,30 +7,34 @@ import {
   Remote as RemoteOps,
   UiError,
 } from "@kvitbit/ui-port/api";
-import { Effect, Exit } from "effect";
+import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import { useCallback, useEffect, useState } from "react";
 import { useApi } from "../../runtime/api-runtime";
+import { runFeatureCallback } from "../ui-effect";
 
 // A scan may take longer than a single request. Time out each read independently.
 export const feedRequest = Effect.timeout(DEFAULT_TIMEOUT);
 
-export const scanFeedPages = <A, E, F>(
-  fetchPage: (cursor: string | null) => Effect.Effect<Page<A>, E>,
-  visit: (items: ReadonlyArray<A>) => Effect.Effect<boolean, F>,
-) =>
-  Effect.gen(function* () {
-    const seenCursors = new Set<string>();
-    let cursor: string | null = null;
-    do {
-      const page: Page<A> = yield* feedRequest(fetchPage(cursor));
-      if ((yield* visit(page.items)) === false) return;
-      cursor = page.nextCursor;
-      if (cursor !== null) {
-        if (seenCursors.has(cursor)) return yield* Effect.fail(UiError.unexpected());
-        seenCursors.add(cursor);
-      }
-    } while (cursor !== null);
-  });
+export const scanFeedPages = Effect.fn("scanFeedPages")(function* <A, E, F>({
+  fetchPage,
+  visit,
+}: {
+  readonly fetchPage: (cursor: string | null) => Effect.Effect<Page<A>, E>;
+  readonly visit: (items: ReadonlyArray<A>) => Effect.Effect<boolean, F>;
+}) {
+  const seenCursors = new Set<string>();
+  let cursor: string | null = null;
+  do {
+    const page: Page<A> = yield* feedRequest(fetchPage(cursor));
+    if ((yield* visit(page.items)) === false) return;
+    cursor = page.nextCursor;
+    if (cursor !== null) {
+      if (seenCursors.has(cursor)) return yield* Effect.fail(UiError.unexpected());
+      seenCursors.add(cursor);
+    }
+  } while (cursor !== null);
+});
 
 export function usePagedFeed<A, E>(load: ((api: KvitbitApiClient) => Effect.Effect<A, E>) | null) {
   const { run } = useApi();
@@ -41,8 +45,7 @@ export function usePagedFeed<A, E>(load: ((api: KvitbitApiClient) => Effect.Effe
   // biome-ignore lint/correctness/useExhaustiveDependencies: revision restarts the scan on refresh.
   useEffect(() => {
     if (load === null) return;
-    const controller = new AbortController();
-    const { signal } = controller;
+    let cancelled = false;
     setState((current) => RemoteOps.load(current));
 
     const scan = Effect.gen(function* () {
@@ -50,16 +53,22 @@ export function usePagedFeed<A, E>(load: ((api: KvitbitApiClient) => Effect.Effe
       if (client._tag === "Err") return yield* Effect.fail(client.error);
       return yield* load(client.value);
     });
-    void Effect.runPromiseExit(scan, { signal }).then((exit) => {
-      if (signal.aborted) return;
-      setState((current) =>
-        Exit.isSuccess(exit)
-          ? RemoteOps.ready(exit.value)
-          : RemoteOps.fail(current, fromCause(exit.cause)),
-      );
+    const interrupt = runFeatureCallback({
+      effect: scan,
+      onExit: (exit) => {
+        if (cancelled) return;
+        setState((current) =>
+          Exit.isSuccess(exit)
+            ? RemoteOps.ready(exit.value)
+            : RemoteOps.fail(current, fromCause(exit.cause)),
+        );
+      },
     });
 
-    return () => controller.abort();
+    return () => {
+      cancelled = true;
+      interrupt();
+    };
   }, [load, revision, run]);
 
   return { state, reload };

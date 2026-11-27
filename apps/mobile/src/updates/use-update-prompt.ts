@@ -1,15 +1,16 @@
-import { Effect } from "effect";
+import * as Effect from "effect/Effect";
 import * as Updates from "expo-updates";
 import { useEffect, useState } from "react";
 import { AppState, Platform } from "react-native";
-import { findReadyUpdate, type ReadyUpdate } from "./ota-update";
+import { forkMobileEffect, fromMobilePromise } from "../runtime/request-intent";
+import { findReadyUpdate, type OtaUpdateSource, type ReadyUpdate } from "./ota-update";
 import { otaUpdatesApply, scheduleUpdateChecks } from "./update-check";
 import { nextReadyUpdate, selectUpdatePrompt, type UpdatePrompt } from "./update-prompt";
 
 // The one runtime edge for update work: it runs in the background and never
 // reports a failure to the user.
-const runInBackground = (effect: Effect.Effect<unknown, unknown>): void => {
-  Effect.runFork(
+const runInBackground = <A, E>(effect: Effect.Effect<A, E>): void => {
+  forkMobileEffect(
     effect.pipe(Effect.catchCause((cause) => Effect.logWarning("Update work failed", cause))),
   );
 };
@@ -30,7 +31,7 @@ export const startUpdateChecks = ({
   onCheck,
 }: {
   readonly platform: string;
-  readonly updates: Pick<typeof Updates, "isEnabled" | "checkForUpdateAsync" | "fetchUpdateAsync">;
+  readonly updates: OtaUpdateSource & { readonly isEnabled: boolean };
   readonly dev: boolean;
   readonly appState: Parameters<typeof scheduleUpdateChecks>[0]["appState"];
   readonly now: () => number;
@@ -64,7 +65,7 @@ export function useUpdatePrompt(): {
       startUpdateChecks({
         platform: Platform.OS,
         updates: Updates,
-        dev: typeof __DEV__ !== "undefined" && __DEV__,
+        dev: Reflect.get(globalThis, "__DEV__") === true,
         appState: AppState,
         now: Date.now,
         onCheck: (found) => setReadyUpdate((previous) => nextReadyUpdate(previous, found)),
@@ -74,6 +75,6 @@ export function useUpdatePrompt(): {
 
   return {
     prompt: selectUpdatePrompt({ readyUpdate, runsEmbeddedUpdate: Updates.isEmbeddedLaunch }),
-    reload: () => runInBackground(Effect.tryPromise(() => Updates.reloadAsync())),
+    reload: () => runInBackground(fromMobilePromise(() => Updates.reloadAsync())),
   };
 }

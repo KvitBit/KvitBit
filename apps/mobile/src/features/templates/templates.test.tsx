@@ -1,15 +1,17 @@
 import { afterAll, beforeAll, describe, expect, mock, test } from "bun:test";
-import type {
+import {
   IsoDate,
   TemplateId,
   WorkspaceId,
   WorkspaceSlug,
-  WorkspaceSummary,
+  type WorkspaceSummary,
 } from "@kvitbit/domain/contract";
 import { idempotencyHeaders, ifMatchHeaders, uuidV7 } from "@kvitbit/ui-port/api";
-import { Effect } from "effect";
+import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
+import * as Str from "effect/String";
 import type { ReactElement } from "react";
-import { ApiProvider, type ApiRunner, useApi, useRemote } from "../../runtime/api-runtime";
+import { ApiProvider, type ApiRunner } from "../../runtime/api-runtime";
 import { SessionProvider } from "../../session/session-provider";
 import { clientRoot } from "../../testing/client-root";
 import { allText, hostTree } from "../../testing/element-tree";
@@ -17,6 +19,7 @@ import { eventually } from "../../testing/eventually";
 import { expoRouterStandIn } from "../../testing/expo-router-stand-in";
 import { recordedOverlay, TestProviders } from "../../testing/providers";
 import { WorkspaceProvider } from "../../workspace/workspace-provider";
+import { TemplatesProbe } from "../test-probes";
 import {
   buildScheduleEvery,
   buildTemplateInput,
@@ -41,21 +44,23 @@ mock.module("expo-router", () => ({
 const { TemplatesListScreen } = await import("./templates-list-screen");
 const { TemplateDetailScreen } = await import("./template-detail-screen");
 
-const WS_ID = "01937c7a-0000-7000-8000-000000000001" as WorkspaceId;
-const TPL_1 = "01937c7a-0000-7000-8000-000000000401" as TemplateId;
-const TPL_2 = "01937c7a-0000-7000-8000-000000000402" as TemplateId;
+const WS_ID = WorkspaceId.make("01937c7a-0000-7000-8000-000000000001");
+const TPL_1 = TemplateId.make("01937c7a-0000-7000-8000-000000000401");
+const TPL_2 = TemplateId.make("01937c7a-0000-7000-8000-000000000402");
 const CONTACT_1 = "01937c7a-0000-7000-8000-000000000501";
 const DOC_1 = "01937c7a-0000-7000-8000-000000000601";
 
 const WORKSPACE: WorkspaceSummary = {
   id: WS_ID,
-  slug: "acme" as WorkspaceSlug,
+  slug: WorkspaceSlug.make("acme"),
   name: "Acme s.r.o.",
   role: "owner",
   memberCount: 1,
   taxRegime: "vat_payer",
   closed: false,
 };
+
+const TRAILING_SLASH_RE = /\/$/;
 
 const activeTemplateWire = {
   id: TPL_1,
@@ -104,7 +109,7 @@ const pausedTemplateWire = {
     id: "01937c7a-0000-7000-8000-000000000702",
     every: { months: 3 },
     paused: true,
-    pausedReason: "fx.rate_missing",
+    pausedReason: "fx.rate_missing" as const,
   },
 };
 
@@ -114,6 +119,9 @@ describe("templates & recurring model", () => {
     const paused = decodeTemplate(pausedTemplateWire);
     const oneOff = decodeTemplate({ ...activeTemplateWire, schedule: null });
 
+    if (active === null || paused === null || oneOff === null) {
+      throw new Error("Expected all template fixtures to decode");
+    }
     expect(scheduleStateOf(active.schedule)).toBe("active");
     expect(scheduleStateOf(paused.schedule)).toBe("paused");
     expect(scheduleStateOf(oneOff.schedule)).toBe("none");
@@ -123,15 +131,45 @@ describe("templates & recurring model", () => {
     expect(filterTemplates([active, paused, oneOff], "one_off")).toHaveLength(1);
   });
 
-  test("previews recurring dates with month-end clamping and endOn cutoff", () => {
-    expect(occurrenceAt("2026-01-31" as IsoDate, { months: 1 }, 1)).toBe("2026-02-28" as IsoDate);
-    expect(occurrenceAt("2024-01-31" as IsoDate, { months: 1 }, 1)).toBe("2024-02-29" as IsoDate);
-    expect(occurrenceAt("2026-11-01" as IsoDate, { weeks: 2 }, 2)).toBe("2026-11-29" as IsoDate);
+  test("previews only dates the schedule can represent", () => {
+    expect(
+      previewOccurrences({
+        startOn: "9999-12-01",
+        every: { months: 1 },
+        endOn: "9999-12-31",
+      }),
+    ).toEqual([IsoDate.make("9999-12-01")]);
+    expect(
+      previewOccurrences({
+        startOn: "9999-12-24",
+        every: { weeks: 1 },
+        endOn: "",
+      }),
+    ).toEqual([IsoDate.make("9999-12-24"), IsoDate.make("9999-12-31")]);
+    expect(occurrenceAt(IsoDate.make("0001-01-31"), { months: 1 }, 1)).toBe(
+      IsoDate.make("0001-02-28"),
+    );
+  });
 
-    expect(previewOccurrences("2026-01-31", { months: 1 }, "2026-03-15", 3)).toEqual([
-      "2026-01-31" as IsoDate,
-      "2026-02-28" as IsoDate,
-    ]);
+  test("previews recurring dates with month-end clamping and endOn cutoff", () => {
+    expect(occurrenceAt(IsoDate.make("2026-01-31"), { months: 1 }, 1)).toBe(
+      IsoDate.make("2026-02-28"),
+    );
+    expect(occurrenceAt(IsoDate.make("2024-01-31"), { months: 1 }, 1)).toBe(
+      IsoDate.make("2024-02-29"),
+    );
+    expect(occurrenceAt(IsoDate.make("2026-11-01"), { weeks: 2 }, 2)).toBe(
+      IsoDate.make("2026-11-29"),
+    );
+
+    expect(
+      previewOccurrences({
+        startOn: "2026-01-31",
+        every: { months: 1 },
+        endOn: "2026-03-15",
+        count: 3,
+      }),
+    ).toEqual([IsoDate.make("2026-01-31"), IsoDate.make("2026-02-28")]);
     expect(buildScheduleEvery("months", "3")).toEqual({ months: 3 });
     expect(buildScheduleEvery("weeks", "0")).toBeNull();
   });
@@ -163,13 +201,6 @@ describe("templates & recurring model", () => {
   });
 });
 
-function TemplatesProbe(props: { readonly onReady: (api: ApiRunner, count: number) => void }) {
-  const api = useApi();
-  const list = useRemote((c) => c.templates.list({ params: { workspaceId: WS_ID } }), []);
-  if (list.state._tag === "Ready") props.onReady(api, list.state.value.length);
-  return <span>{list.state._tag}</span>;
-}
-
 describe("templates screens and API integration", () => {
   const root = clientRoot({ keepFetch: true });
   let server: ReturnType<typeof Bun.serve>;
@@ -177,26 +208,26 @@ describe("templates screens and API integration", () => {
   beforeAll(() => {
     server = Bun.serve({
       port: 0,
-      fetch: async (req) => {
+      fetch: (req) => {
         const url = new URL(req.url);
-        const path = url.pathname.replace(/\/$/, "");
-        if (path.endsWith("/templates") && req.method === "GET") {
+        const path = Str.replace(TRAILING_SLASH_RE, "")(url.pathname);
+        if (Str.endsWith("/templates")(path) && req.method === "GET") {
           return Response.json([activeTemplateWire, pausedTemplateWire]);
         }
-        if (path.endsWith(`/templates/${TPL_2}`) && req.method === "GET") {
+        if (Str.endsWith(`/templates/${TPL_2}`)(path) && req.method === "GET") {
           return Response.json(pausedTemplateWire);
         }
-        if (path.endsWith(`/templates/${TPL_2}/schedule`) && req.method === "PUT") {
+        if (Str.endsWith(`/templates/${TPL_2}/schedule`)(path) && req.method === "PUT") {
           return Response.json({ ...pausedTemplateWire, revision: 3 });
         }
-        if (path.endsWith(`/templates/${TPL_2}/resume`) && req.method === "POST") {
+        if (Str.endsWith(`/templates/${TPL_2}/resume`)(path) && req.method === "POST") {
           return Response.json({
             ...pausedTemplateWire,
             revision: 4,
             schedule: { ...pausedTemplateWire.schedule, paused: false, pausedReason: null },
           });
         }
-        if (path.endsWith(`/templates/${TPL_2}/runs`) && req.method === "GET") {
+        if (Str.endsWith(`/templates/${TPL_2}/runs`)(path) && req.method === "GET") {
           return Response.json({
             items: [
               {
@@ -219,7 +250,7 @@ describe("templates screens and API integration", () => {
             nextCursor: null,
           });
         }
-        if (path.endsWith("/contacts") && req.method === "GET") {
+        if (Str.endsWith("/contacts")(path) && req.method === "GET") {
           return Response.json({
             items: [{ id: CONTACT_1, name: "Client A" }],
             nextCursor: null,
@@ -256,8 +287,9 @@ describe("templates screens and API integration", () => {
     expect(listText).toContain("Active");
     expect(listText).toContain("Paused after failure");
 
+    const newTemplateId = "new";
     const newText = allText(
-      hostTree(<TemplateDetailScreen id="new" initialTab="template" />, within),
+      hostTree(<TemplateDetailScreen id={newTemplateId} initialTab="template" />, within),
     );
     expect(newText).toContain("New template");
     expect(newText).toContain("Template name");
@@ -265,14 +297,15 @@ describe("templates screens and API integration", () => {
   });
 
   test("end-to-end API runtime lists templates, updates schedule, resumes, and reads runs", async () => {
-    let apiRef: ApiRunner | null = null;
+    const observed = { api: Option.none<ApiRunner>() };
     let count = 0;
 
     await root.render(
       within(
         <TemplatesProbe
+          workspaceId={WS_ID}
           onReady={(a, n) => {
-            apiRef = a;
+            observed.api = Option.some(a);
             count = n;
           }}
         />,
@@ -280,13 +313,14 @@ describe("templates screens and API integration", () => {
     );
     await Effect.runPromise(
       eventually(
-        () => count === 2 && apiRef !== null,
+        () => count === 2 && Option.isSome(observed.api),
         () => `count=${count} html=${root.container().innerHTML}`,
       ),
     );
     expect(count).toBe(2);
 
-    const api = apiRef as unknown as ApiRunner;
+    const api = Option.getOrNull(observed.api);
+    if (api === null) throw new Error("Templates API provider did not mount");
 
     // Set schedule with If-Match
     const scheduled = await api.run((c) =>
@@ -295,7 +329,7 @@ describe("templates screens and API integration", () => {
         headers: ifMatchHeaders(2),
         payload: {
           every: { months: 3 },
-          startOn: "2026-11-01" as IsoDate,
+          startOn: IsoDate.make("2026-11-01"),
           issueAs: "invoice",
           autoSend: true,
         },
@@ -307,21 +341,17 @@ describe("templates screens and API integration", () => {
     const resumed = await api.run((c) =>
       c.templates.resume({ params: { workspaceId: WS_ID, templateId: TPL_2 } }),
     );
-    expect(resumed._tag).toBe("Ok");
-    if (resumed._tag === "Ok") {
-      expect(decodeTemplate(resumed.value).schedule?.paused).toBe(false);
-    }
+    if (resumed._tag !== "Ok") throw new Error("Expected schedule resume to succeed");
+    expect(decodeTemplate(resumed.value)?.schedule?.paused).toBe(false);
 
     // Read run history
     const runs = await api.run((c) =>
       c.templates.runs({ params: { workspaceId: WS_ID, templateId: TPL_2 }, query: {} }),
     );
-    expect(runs._tag).toBe("Ok");
-    if (runs._tag === "Ok") {
-      expect(runs.value.items).toHaveLength(2);
-      expect(runs.value.items[0]?.document?.number).toBe("2026-0042");
-      expect(String(runs.value.items[1]?.failure)).toBe("fx.rate_missing");
-    }
+    if (runs._tag !== "Ok") throw new Error("Expected recurring run history");
+    expect(runs.value.items).toHaveLength(2);
+    expect(runs.value.items[0]?.document?.number).toBe("2026-0042");
+    expect(String(runs.value.items[1]?.failure)).toBe("fx.rate_missing");
 
     const key = await Effect.runPromise(uuidV7);
     expect(idempotencyHeaders(key)["idempotency-key"]).toBe(key);

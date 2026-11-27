@@ -1,5 +1,7 @@
-import type { ContactId, DocumentId, TemplateId } from "@kvitbit/domain/contract";
+import { ContactId, DocumentId, TemplateId } from "@kvitbit/domain/contract";
+import * as Schema from "effect/Schema";
 import { useLocalSearchParams } from "expo-router";
+import { ErrorScreen } from "../../../../../src/features/auth/error-screen";
 import {
   CreditNoteCreatorScreen,
   DocumentEditorScreen,
@@ -19,18 +21,30 @@ export default function DocumentNewRoute() {
     return <CreditNoteCreatorScreen />;
   }
   const kind = rawKind === "proforma" ? "proforma" : "invoice";
-  const contact = param(params.contact) as ContactId | undefined;
-  const duplicate = param(params.duplicate) as DocumentId | undefined;
-  const template = param(params.template) as TemplateId | undefined;
-  if (contact === undefined && template !== undefined) {
-    return <DocumentFromTemplateScreen key={template} templateId={template} />;
+  const rawContact = param(params.contact);
+  if (rawContact !== undefined) {
+    const contact = Schema.decodeOption(ContactId)(rawContact);
+    return contact._tag === "Some" ? (
+      <DocumentEditorScreen mode="new" kind={kind} contactId={contact.value} />
+    ) : (
+      <ErrorScreen kind="not_found" />
+    );
   }
-  return (
-    <DocumentEditorScreen
-      mode="new"
-      kind={kind}
-      {...(contact !== undefined ? { contactId: contact } : {})}
-      {...(contact === undefined && duplicate !== undefined ? { duplicateId: duplicate } : {})}
-    />
+  const rawTemplate = param(params.template);
+  if (rawTemplate !== undefined) {
+    const template = Schema.decodeOption(TemplateId)(rawTemplate);
+    return template._tag === "Some" ? (
+      <DocumentFromTemplateScreen key={template.value} templateId={template.value} />
+    ) : (
+      <ErrorScreen kind="not_found" />
+    );
+  }
+  const rawDuplicate = param(params.duplicate);
+  if (rawDuplicate === undefined) return <DocumentEditorScreen mode="new" kind={kind} />;
+  const duplicate = Schema.decodeOption(DocumentId)(rawDuplicate);
+  return duplicate._tag === "Some" ? (
+    <DocumentEditorScreen mode="new" kind={kind} duplicateId={duplicate.value} />
+  ) : (
+    <ErrorScreen kind="not_found" />
   );
 }

@@ -3,6 +3,7 @@
  * Android 12+ dynamic palette and the stored preference. Pure, so the provider only wires inputs.
  */
 import type { ThemeContrast, ThemeMode, ThemeStyle } from "@kvitbit/api-contract";
+import { Hex } from "@kvitbit/domain/contract";
 import {
   type DynamicColorInput,
   type DynamicRoles,
@@ -14,7 +15,11 @@ import {
   nativeTheme,
   type ThemeState,
 } from "@kvitbit/ui-port/theme";
-import { Option, Result } from "effect";
+import * as Fn from "effect/Function";
+import * as Option from "effect/Option";
+import * as Predicate from "effect/Predicate";
+import * as Result from "effect/Result";
+import * as Schema from "effect/Schema";
 
 export interface ThemePreference {
   readonly mode: ThemeMode;
@@ -37,30 +42,46 @@ export interface DeviceTheme {
   readonly dynamic: DynamicColorInput | null;
 }
 
+type DeviceColorReport =
+  | Extract<DynamicColorInput, { readonly _tag: "Roles" }>
+  | { readonly _tag: "Seed"; readonly seed: string };
+
 /** Dynamic roles from the platform report; a malformed report counts as none. */
 export const deviceDynamicRoles = (
-  input: DynamicColorInput | null,
+  input: DeviceColorReport | null,
 ): Option.Option<DynamicRoles> => {
   if (input === null) return Option.none();
-  const roles = dynamicRoles(input);
-  return Result.isSuccess(roles) ? Option.some(roles.success) : Option.none();
+  if (input._tag === "Seed") {
+    return Schema.decodeOption(Hex)(input.seed).pipe(
+      Option.flatMap((seed) => Result.getSuccess(dynamicRoles({ _tag: "Seed", seed }))),
+    );
+  }
+  return Result.getSuccess(dynamicRoles(input));
 };
 
-export const themeStateOf = (
-  device: DeviceTheme,
-  preference: ThemePreference,
-  base: Pick<ThemeState, "account" | "workspace" | "draft"> = initialThemeState(),
-): ThemeState => ({
-  preference: { ...preference, source: Option.none() },
-  system: {
-    scheme: device.scheme,
-    highContrast: device.highContrast,
-    dynamic: deviceDynamicRoles(device.dynamic),
-  },
-  account: base.account,
-  workspace: base.workspace,
-  draft: base.draft,
-});
+type ThemeOverrides = Pick<ThemeState, "account" | "workspace" | "draft">;
+
+export const themeStateOf: {
+  (preference: ThemePreference, base?: ThemeOverrides): (device: DeviceTheme) => ThemeState;
+  (device: DeviceTheme, preference: ThemePreference, base?: ThemeOverrides): ThemeState;
+} = Fn.dual(
+  (args) => Predicate.hasProperty(args[0], "scheme"),
+  (
+    device: DeviceTheme,
+    preference: ThemePreference,
+    base: ThemeOverrides = initialThemeState(),
+  ): ThemeState => ({
+    preference: { ...preference, source: Option.none() },
+    system: {
+      scheme: device.scheme,
+      highContrast: device.highContrast,
+      dynamic: deviceDynamicRoles(device.dynamic),
+    },
+    account: base.account,
+    workspace: base.workspace,
+    draft: base.draft,
+  }),
+);
 
 export interface AppTheme {
   readonly effective: EffectiveTheme;

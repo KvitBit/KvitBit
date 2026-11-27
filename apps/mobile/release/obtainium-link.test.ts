@@ -1,4 +1,7 @@
 import { describe, expect, test } from "bun:test";
+import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
+import * as Str from "effect/String";
 import {
   KVITBIT_ANDROID_PACKAGE,
   OBTAINIUM_APK_FILTER_REGEX,
@@ -7,6 +10,23 @@ import {
   obtainiumImportUrl,
 } from "./obtainium-link";
 import { apkRoutePath } from "./storage-layout";
+
+const deepLinkPrefix = "obtainium://app/";
+const payloadJson = Schema.fromJsonString(
+  Schema.Struct({
+    id: Schema.String,
+    url: Schema.String,
+    name: Schema.String,
+    additionalSettings: Schema.String,
+  }),
+);
+const settingsJson = Schema.fromJsonString(
+  Schema.Struct({
+    customLinkFilterRegex: Schema.String,
+    versionExtractionRegEx: Schema.String,
+    matchGroupToUse: Schema.String,
+  }),
+);
 
 describe("obtainium-link", () => {
   test("builds Obtainium redirect URL targeting cz.kvitbit.app and /android", () => {
@@ -17,24 +37,19 @@ describe("obtainium-link", () => {
 
     const r = parsed.searchParams.get("r");
     expect(r).toBe(obtainiumAppLink("https://kvitbit.cz"));
-    expect(r?.startsWith("obtainium://app/")).toBe(true);
+    expect(Str.startsWith(deepLinkPrefix)(r ?? "")).toBe(true);
 
-    const payload = JSON.parse(decodeURIComponent((r ?? "").slice("obtainium://app/".length))) as {
-      id: string;
-      url: string;
-      author: string;
-      name: string;
-      additionalSettings: string;
-    };
+    const encodedPayload = Str.slice(deepLinkPrefix.length)(r ?? "");
+    const payload = Schema.decodeOption(payloadJson)(decodeURIComponent(encodedPayload)).pipe(
+      Option.getOrThrow,
+    );
     expect(payload.id).toBe(KVITBIT_ANDROID_PACKAGE);
     expect(payload.url).toBe("https://kvitbit.cz/android");
     expect(payload.name).toBe("Kvitbit");
 
-    const settings = JSON.parse(payload.additionalSettings) as {
-      customLinkFilterRegex: string;
-      versionExtractionRegEx: string;
-      matchGroupToUse: string;
-    };
+    const settings = Schema.decodeOption(settingsJson)(payload.additionalSettings).pipe(
+      Option.getOrThrow,
+    );
     expect(settings.customLinkFilterRegex).toBe(OBTAINIUM_APK_FILTER_REGEX);
     expect(settings.versionExtractionRegEx).toBe(OBTAINIUM_VERSION_EXTRACTION_REGEX);
     expect(settings.matchGroupToUse).toBe("1");

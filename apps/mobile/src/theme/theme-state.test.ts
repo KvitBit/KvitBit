@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { KvitbitDefaultTheme } from "@kvitbit/ui-port/theme";
-import { Option } from "effect";
+import * as Option from "effect/Option";
 import { appTheme, DEFAULT_PREFERENCE, deviceDynamicRoles, themeStateOf } from "./theme-state";
 
 const device = { scheme: "light", highContrast: false, dynamic: null } as const;
@@ -24,7 +24,8 @@ describe("theme state", () => {
   });
 
   test("a malformed platform report counts as no dynamic colour", () => {
-    expect(Option.isNone(deviceDynamicRoles({ _tag: "Seed", seed: "nope" as never }))).toBe(true);
+    const roles = deviceDynamicRoles({ _tag: "Seed", seed: "nope" });
+    expect(Option.isNone(roles)).toBe(true);
   });
 
   test("system dark scheme and OS high contrast reach the effective theme", () => {

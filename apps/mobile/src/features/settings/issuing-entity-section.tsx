@@ -1,5 +1,8 @@
-import type { IssuingEntityPatch } from "@kvitbit/domain/contract";
+import { IssuingEntityPatch } from "@kvitbit/domain/contract";
 import { describeError, ifMatchHeaders, inWorkspace } from "@kvitbit/ui-port/api";
+import * as Arr from "effect/Array";
+import * as Effect from "effect/Effect";
+import * as Str from "effect/String";
 import { RefreshCw } from "lucide-react-native";
 import { useEffect, useState } from "react";
 import { StyleSheet, View } from "react-native";
@@ -17,6 +20,7 @@ import {
   useOverlay,
 } from "../../ui";
 import { useWorkspace } from "../../workspace/workspace-provider";
+import { forkFeatureEffect } from "../ui-effect";
 import {
   type AresFieldDiff,
   type AresLookupState,
@@ -97,17 +101,19 @@ export function IssuingEntitySection() {
     );
   };
 
-  const handleAresLookup = async () => {
+  const handleAresLookup = Effect.fn("issuing-entity-section.handleAresLookup")(function* () {
     if (draft === null) return;
-    const ico = (draft.ico ?? "").trim();
+    const ico = Str.trim(draft.ico ?? "");
     if (ico === "") return;
     setAres(aresStarted(ico));
-    const result = await api.run((client) => client.registry.lookupCompany({ params: { ico } }));
+    const result = yield* Effect.promise(() =>
+      api.run((client) => client.registry.lookupCompany({ params: { ico } })),
+    );
     setAres((current) => {
       if (current._tag !== "LookingUp" || current.ico !== ico) return current;
       return aresSettled(ico, draft, result);
     });
-  };
+  });
 
   const handleApplyAres = () => {
     if (draft === null || ares._tag !== "Found") return;
@@ -121,33 +127,35 @@ export function IssuingEntitySection() {
     );
   };
 
-  const handleSave = async () => {
+  const handleSave = Effect.fn("issuing-entity-section.handleSave")(function* () {
     if (!editable || draft === null) return;
     setSaving(true);
     setErrorState(noFormError);
-    const payload = {
-      name: draft.name.trim(),
-      ico: draft.ico?.trim() || null,
-      dic: draft.dic?.trim() || null,
+    const payload = IssuingEntityPatch.make({
+      name: Str.trim(draft.name),
+      ico: Str.trim(draft.ico ?? "") || null,
+      dic: Str.trim(draft.dic ?? "") || null,
       address: {
-        street: draft.address.street.trim(),
-        city: draft.address.city.trim(),
-        postalCode: draft.address.postalCode.trim(),
-        country: draft.address.country.trim() || "CZ",
+        street: Str.trim(draft.address.street),
+        city: Str.trim(draft.address.city),
+        postalCode: Str.trim(draft.address.postalCode),
+        country: Str.trim(draft.address.country) || "CZ",
       },
-      legalForm: draft.legalForm?.trim() || null,
-      registerEntry: draft.registerEntry?.trim() || null,
-      email: draft.email?.trim() || null,
-      phone: draft.phone?.trim() || null,
-      web: draft.web?.trim() || null,
-    } as unknown as IssuingEntityPatch;
+      legalForm: Str.trim(draft.legalForm ?? "") || null,
+      registerEntry: Str.trim(draft.registerEntry ?? "") || null,
+      email: Str.trim(draft.email ?? "") || null,
+      phone: Str.trim(draft.phone ?? "") || null,
+      web: Str.trim(draft.web ?? "") || null,
+    });
 
-    const result = await api.run((client) =>
-      client.workspace.updateIssuingEntity({
-        params: inWorkspace(workspace.id),
-        headers: ifMatchHeaders(revision),
-        payload,
-      }),
+    const result = yield* Effect.promise(() =>
+      api.run((client) =>
+        client.workspace.updateIssuingEntity({
+          params: inWorkspace(workspace.id),
+          headers: ifMatchHeaders(revision),
+          payload,
+        }),
+      ),
     );
     setSaving(false);
     if (result._tag === "Ok") {
@@ -161,7 +169,7 @@ export function IssuingEntitySection() {
     } else {
       setErrorState(formErrorFrom(result.error, i18n));
     }
-  };
+  });
 
   return (
     <RemoteView state={remote.state} onRetry={remote.reload}>
@@ -205,8 +213,8 @@ export function IssuingEntitySection() {
                       icon={RefreshCw}
                       label={t("settings.issuingEntity.refreshAres")}
                       busy={ares._tag === "LookingUp"}
-                      disabled={(draft.ico ?? "").trim() === ""}
-                      onPress={() => void handleAresLookup()}
+                      disabled={Str.trim(draft.ico ?? "") === ""}
+                      onPress={() => forkFeatureEffect(handleAresLookup())}
                     />
                   </View>
                 ) : null}
@@ -238,7 +246,7 @@ export function IssuingEntitySection() {
                         <Text variant="titleSmall">
                           {local({ cs: "Změny z ARES", en: "Changes from ARES" })}
                         </Text>
-                        {ares.diffs.map((diff) => (
+                        {Arr.map(ares.diffs, (diff) => (
                           <View key={diff.field} style={styles.diffRow}>
                             <Text variant="labelSmall" color="onSurfaceVariant">
                               {diffFieldLabel(diff.field, t)}
@@ -366,7 +374,7 @@ export function IssuingEntitySection() {
                 kind="filled"
                 label={t("common.action.saveChanges")}
                 busy={saving}
-                onPress={() => void handleSave()}
+                onPress={() => forkFeatureEffect(handleSave())}
               />
             ) : null}
           </View>

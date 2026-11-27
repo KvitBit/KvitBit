@@ -8,7 +8,8 @@ import {
 import { formatDate, formatDateTime, formatMoney, formatMonth } from "@kvitbit/ui-port/format";
 import { type EnumKey, enumKey } from "@kvitbit/ui-port/i18n";
 import type { Period, Route } from "@kvitbit/ui-port/view-models";
-import { Effect } from "effect";
+import * as Arr from "effect/Array";
+import * as Effect from "effect/Effect";
 import { useFocusEffect } from "expo-router";
 import { AlertCircle, Camera, FilePlus2, FileText, MailPlus, UserPlus } from "lucide-react-native";
 import { useCallback, useMemo, useRef, useState } from "react";
@@ -107,7 +108,7 @@ export function DashboardContent(props: DashboardContentProps) {
 
   const header = (
     <>
-      {props.userName ? (
+      {props.userName !== null && props.userName !== undefined && props.userName !== "" ? (
         <Text variant="titleMedium" color="onSurfaceVariant">
           {t("dashboard.greeting", { name: props.userName })}
         </Text>
@@ -335,7 +336,7 @@ export function DashboardContent(props: DashboardContentProps) {
                       </View>
                     </View>
                     <View style={styles.bars}>
-                      {data.cashflow.map((point) => {
+                      {Arr.map(data.cashflow, (point) => {
                         const inPct = Math.round(
                           cashflowBarRatio(point.in.amount, cashflowMax) * 100,
                         );
@@ -396,7 +397,7 @@ export function DashboardContent(props: DashboardContentProps) {
               </Card>
             ) : (
               <Card style={styles.listCard}>
-                {docs.map((doc) => (
+                {Arr.map(docs, (doc) => (
                   <ListRow
                     key={doc.id}
                     leading={FileText}
@@ -424,7 +425,7 @@ export function DashboardContent(props: DashboardContentProps) {
               </Card>
             ) : (
               <Card style={styles.listCard}>
-                {events.map(({ id, document, kind, at }) => (
+                {Arr.map(events, ({ id, document, kind, at }) => (
                   <ListRow
                     key={id}
                     leading={FileText}
@@ -469,7 +470,7 @@ export function DashboardContent(props: DashboardContentProps) {
               </Card>
             ) : (
               <Card style={styles.listCard}>
-                {docs.map((doc) => {
+                {Arr.map(docs, (doc) => {
                   const badge = badgeForDocument(doc);
                   return (
                     <ListRow
@@ -503,7 +504,7 @@ function WorkspaceDashboard({ workspace }: { readonly workspace: WorkspaceSummar
   const session = useSession();
   const { t } = useI18n();
   const [preset, setPreset] = useState<DashboardPeriodPreset>("this_month");
-  const visited = useRef(false);
+  const visited = useRef<boolean>(false);
   const today = useMemo(() => pragueToday(), []);
   const range = useMemo(() => periodRange(preset, today), [preset, today]);
 
@@ -517,14 +518,18 @@ function WorkspaceDashboard({ workspace }: { readonly workspace: WorkspaceSummar
   );
 
   const overdueDocs = useRemote(
-    (api) => loadOverdueDocuments(api, workspace.id, { from: today, to: today }),
+    (api) =>
+      loadOverdueDocuments({ api, workspaceId: workspace.id, query: { from: today, to: today } }),
     [workspace.id, today],
   );
 
-  const recentDocs = useRemote((api) => loadRecentDocuments(api, workspace.id), [workspace.id]);
+  const recentDocs = useRemote(
+    (api) => loadRecentDocuments({ api, workspaceId: workspace.id }),
+    [workspace.id],
+  );
 
   const loadActivity = useCallback(
-    (api: KvitbitApiClient) => loadWorkspaceActivity(api, workspace.id),
+    (api: KvitbitApiClient) => loadWorkspaceActivity({ api, workspaceId: workspace.id }),
     [workspace.id],
   );
   const activity = usePagedFeed(loadActivity);
@@ -540,7 +545,8 @@ function WorkspaceDashboard({ workspace }: { readonly workspace: WorkspaceSummar
     [workspace.id, workspace.role, workspace.closed],
   );
 
-  const refreshing = [dashboard.state, overdueDocs.state, recentDocs.state, hasExpenses.state].some(
+  const refreshing = Arr.some(
+    [dashboard.state, overdueDocs.state, recentDocs.state, hasExpenses.state],
     (state) => RemoteOps.isBusy<unknown, unknown>(state),
   );
 

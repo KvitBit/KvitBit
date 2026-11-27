@@ -3,6 +3,7 @@
  * (agreement #922/#925).
  */
 import type { BotScope } from "@kvitbit/api-contract";
+import * as Effect from "effect/Effect";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   type BotProofState,
@@ -10,6 +11,7 @@ import {
   solveChallenge,
 } from "../../platform/altcha/bot-proof";
 import { useSession } from "../../session/session-provider";
+import { forkFeatureEffect, runFeatureEffect } from "../ui-effect";
 import { type BotProofController, makeBotProof } from "./bot-proof-model";
 
 export interface UseBotProofOptions {
@@ -27,7 +29,10 @@ export interface BotProofHandle {
   readonly busy: boolean;
 }
 
-export const useBotProof = (scope: BotScope, options: UseBotProofOptions = {}): BotProofHandle => {
+export const useBotProof = (
+  options: UseBotProofOptions & { readonly scope: BotScope },
+): BotProofHandle => {
+  const { scope } = options;
   const { origin } = useSession();
   const initial = options.initial ?? "auto";
   const [state, setState] = useState<BotProofState>({ _tag: "NotRequired" });
@@ -43,7 +48,7 @@ export const useBotProof = (scope: BotScope, options: UseBotProofOptions = {}): 
     });
     controllerRef.current = controller;
     if (initial === "auto") {
-      void controller.start();
+      forkFeatureEffect(Effect.promise(controller.start));
     } else {
       setState({ _tag: "NotRequired" });
     }
@@ -53,24 +58,16 @@ export const useBotProof = (scope: BotScope, options: UseBotProofOptions = {}): 
     };
   }, [origin, scope, initial]);
 
-  const start = useCallback(
-    () => controllerRef.current?.start() ?? Promise.resolve<BotProofState>({ _tag: "NotRequired" }),
+  const idle = useCallback(
+    () => runFeatureEffect(Effect.succeed<BotProofState>({ _tag: "NotRequired" })),
     [],
   );
-  const restart = useCallback(
-    () =>
-      controllerRef.current?.restart() ?? Promise.resolve<BotProofState>({ _tag: "NotRequired" }),
-    [],
-  );
+  const start = useCallback(() => controllerRef.current?.start() ?? idle(), [idle]);
+  const restart = useCallback(() => controllerRef.current?.restart() ?? idle(), [idle]);
   const cancel = useCallback(() => {
     controllerRef.current?.cancel();
   }, []);
-  const ensureFresh = useCallback(
-    () =>
-      controllerRef.current?.ensureFresh() ??
-      Promise.resolve<BotProofState>({ _tag: "NotRequired" }),
-    [],
-  );
+  const ensureFresh = useCallback(() => controllerRef.current?.ensureFresh() ?? idle(), [idle]);
 
   return {
     state,

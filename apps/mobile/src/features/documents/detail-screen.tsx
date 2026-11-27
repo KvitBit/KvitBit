@@ -1,16 +1,15 @@
+import * as Effect from "effect/Effect";
+import { fromMobilePromise } from "../../runtime/request-intent";
+import { runFeatureEffect } from "../ui-effect";
 /**
  * Document detail screen (`app/w/[ws]/documents/[id]/index.tsx`): summary, parties, lines,
  * VAT breakdown & CZK conversion, chain links, payments (record/remove), lifecycle actions,
  * email delivery, public share link, PDF download/share via `useTransfer()`, and audit history.
  */
-import type {
-  DocumentId,
-  DocumentView,
-  Locale,
-  PaymentId,
-  PdfTemplate,
-} from "@kvitbit/domain/contract";
-import { MoneyMath } from "@kvitbit/domain/contract";
+
+import type { RecordPaymentInput } from "@kvitbit/api-contract";
+import type { DocumentView, Locale, PaymentId, PdfTemplate } from "@kvitbit/domain/contract";
+import { CurrencyCode, DocumentId, MoneyMath } from "@kvitbit/domain/contract";
 import { describeError, idempotencyHeaders, ifMatchHeaders } from "@kvitbit/ui-port/api";
 import {
   formatDate,
@@ -21,7 +20,12 @@ import {
 } from "@kvitbit/ui-port/format";
 import { enumKey } from "@kvitbit/ui-port/i18n";
 import type { DocumentDialog } from "@kvitbit/ui-port/view-models";
-import { BigDecimal } from "effect";
+import * as Arr from "effect/Array";
+import * as BigDecimal from "effect/BigDecimal";
+import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
+import * as Str from "effect/String";
+import type * as Types from "effect/Types";
 import { router, useLocalSearchParams } from "expo-router";
 import {
   Ban,
@@ -125,7 +129,7 @@ export function DocumentDetailScreen() {
     dialog?: string | string[];
   }>();
 
-  const documentId = (param(params.id) ?? "") as DocumentId;
+  const documentId = Option.getOrNull(Schema.decodeUnknownOption(DocumentId)(param(params.id)));
   const [tab, setTab] = useState<DetailTab>(() => parseTab(param(params.tab)));
   const [activeDialog, setActiveDialog] = useState<DocumentDialog | "unlock" | null>(() =>
     parseDialog(param(params.dialog)),
@@ -140,7 +144,7 @@ export function DocumentDetailScreen() {
   const [pdfLanguage, setPdfLanguage] = useState<Locale>(locale);
 
   const docRemote = useRemote(
-    documentId === ""
+    documentId === null
       ? null
       : (api) =>
           api.documents.get({
@@ -150,7 +154,7 @@ export function DocumentDetailScreen() {
   );
 
   const paymentsRemote = useRemote(
-    documentId === ""
+    documentId === null
       ? null
       : (api) =>
           api.payments.listForDocument({
@@ -160,7 +164,7 @@ export function DocumentDetailScreen() {
   );
 
   const historyRemote = useRemote(
-    documentId === "" || tab !== "history"
+    documentId === null || tab !== "history"
       ? null
       : (api) =>
           api.documents.history({
@@ -170,7 +174,7 @@ export function DocumentDetailScreen() {
   );
 
   const shareViewsRemote = useRemote(
-    documentId === "" || tab !== "share"
+    documentId === null || tab !== "share"
       ? null
       : (api) =>
           api.shareLinks.views({
@@ -205,25 +209,26 @@ export function DocumentDetailScreen() {
     [overlay],
   );
 
-  const handleIssue = async (doc: DocumentView) => {
-    const confirmed = await overlay.confirm({
-      title: t("documents.issue.title", { kind: t(enumKey("documentKind", doc.kind)) }),
-      body: t("documents.issue.irreversible"),
-      confirmLabel: t("documents.issue.confirm"),
-      cancelLabel: t("common.action.cancel"),
-    });
+  const handleIssue = Effect.fn("handleIssue")(function* (doc: DocumentView) {
+    const confirmed = yield* fromMobilePromise(() =>
+      overlay.confirm({
+        title: t("documents.issue.title", { kind: t(enumKey("documentKind", doc.kind)) }),
+        body: t("documents.issue.irreversible"),
+        confirmLabel: t("documents.issue.confirm"),
+        cancelLabel: t("common.action.cancel"),
+      }),
+    );
     if (!confirmed) return;
     setBusyAction("issue");
     setActionError(null);
-    const result = await runMutation(
-      `documents.issueDraft:${doc.id}`,
-      { revision: doc.revision },
-      (api, key) =>
+    const result = yield* fromMobilePromise(() =>
+      runMutation(`documents.issueDraft:${doc.id}`, { revision: doc.revision }, (api, key) =>
         api.documents.issueDraft({
           params: { workspaceId: workspace.id, documentId: doc.id },
           headers: { ...ifMatchHeaders(doc.revision), ...idempotencyHeaders(key) },
           payload: {},
         }),
+      ),
     );
     setBusyAction(null);
     if (result._tag === "Err") {
@@ -232,15 +237,17 @@ export function DocumentDetailScreen() {
     }
     docRemote.set(result.value);
     if (requestOwner !== null) {
-      try {
-        await recordImportedDraftWrite(
-          requestOwner,
-          doc.id,
-          null,
-          doc.revision,
-          result.value.revision,
-        );
-      } catch {
+      const checkpointSaved = yield* recordImportedDraftWrite(
+        requestOwner,
+        doc.id,
+        null,
+        doc.revision,
+        result.value.revision,
+      ).pipe(
+        Effect.as(true),
+        Effect.orElseSucceed(() => false),
+      );
+      if (!checkpointSaved) {
         reportError(
           local({
             cs: "Doklad byl vystaven, ale nastavení šablony se na tomto zařízení nepodařilo uložit.",
@@ -251,24 +258,28 @@ export function DocumentDetailScreen() {
       }
     }
     overlay.toast(t("documents.issue.done", { number: result.value.number ?? "" }));
-  };
+  }, runFeatureEffect);
 
-  const handleDiscard = async (doc: DocumentView) => {
-    const confirmed = await overlay.confirm({
-      title: t("documents.list.deleteDraft.title"),
-      body: t("documents.list.deleteDraft.body"),
-      confirmLabel: t("documents.list.deleteDraft.confirm"),
-      cancelLabel: t("common.action.cancel"),
-      destructive: true,
-    });
+  const handleDiscard = Effect.fn("handleDiscard")(function* (doc: DocumentView) {
+    const confirmed = yield* fromMobilePromise(() =>
+      overlay.confirm({
+        title: t("documents.list.deleteDraft.title"),
+        body: t("documents.list.deleteDraft.body"),
+        confirmLabel: t("documents.list.deleteDraft.confirm"),
+        cancelLabel: t("common.action.cancel"),
+        destructive: true,
+      }),
+    );
     if (!confirmed) return;
     setBusyAction("discard");
     setActionError(null);
-    const result = await run((api) =>
-      api.documents.discardDraft({
-        params: { workspaceId: workspace.id, documentId: doc.id },
-        headers: ifMatchHeaders(doc.revision),
-      }),
+    const result = yield* fromMobilePromise(() =>
+      run((api) =>
+        api.documents.discardDraft({
+          params: { workspaceId: workspace.id, documentId: doc.id },
+          headers: ifMatchHeaders(doc.revision),
+        }),
+      ),
     );
     setBusyAction(null);
     if (result._tag === "Err") {
@@ -277,22 +288,26 @@ export function DocumentDetailScreen() {
     }
     overlay.toast(t("common.toast.deleted"));
     navigate({ _tag: "Documents", ws: workspace.slug, query: {} }, { replace: true });
-  };
+  }, runFeatureEffect);
 
-  const handleLock = async (doc: DocumentView) => {
-    const confirmed = await overlay.confirm({
-      title: t("documents.detail.lock"),
-      body: t("documents.editor.locked"),
-      confirmLabel: t("documents.detail.lock"),
-      cancelLabel: t("common.action.cancel"),
-    });
+  const handleLock = Effect.fn("handleLock")(function* (doc: DocumentView) {
+    const confirmed = yield* fromMobilePromise(() =>
+      overlay.confirm({
+        title: t("documents.detail.lock"),
+        body: t("documents.editor.locked"),
+        confirmLabel: t("documents.detail.lock"),
+        cancelLabel: t("common.action.cancel"),
+      }),
+    );
     if (!confirmed) return;
     setBusyAction("lock");
     setActionError(null);
-    const result = await run((api) =>
-      api.documents.lock({
-        params: { workspaceId: workspace.id, documentId: doc.id },
-      }),
+    const result = yield* fromMobilePromise(() =>
+      run((api) =>
+        api.documents.lock({
+          params: { workspaceId: workspace.id, documentId: doc.id },
+        }),
+      ),
     );
     setBusyAction(null);
     if (result._tag === "Err") {
@@ -301,16 +316,18 @@ export function DocumentDetailScreen() {
     }
     docRemote.set(result.value);
     overlay.toast(t("documents.detail.locked"));
-  };
+  }, runFeatureEffect);
 
-  const handleUnlock = async (doc: DocumentView, reason: string) => {
+  const handleUnlock = Effect.fn("handleUnlock")(function* (doc: DocumentView, reason: string) {
     setBusyAction("unlock");
     setActionError(null);
-    const result = await run((api) =>
-      api.documents.unlock({
-        params: { workspaceId: workspace.id, documentId: doc.id },
-        payload: { reason },
-      }),
+    const result = yield* fromMobilePromise(() =>
+      run((api) =>
+        api.documents.unlock({
+          params: { workspaceId: workspace.id, documentId: doc.id },
+          payload: { reason },
+        }),
+      ),
     );
     setBusyAction(null);
     if (result._tag === "Err") {
@@ -320,24 +337,24 @@ export function DocumentDetailScreen() {
     setActiveDialog(null);
     docRemote.set(result.value);
     overlay.toast(t("documents.detail.unlock"));
-  };
+  }, runFeatureEffect);
 
-  const handleCancel = async (
+  const handleCancel = Effect.fn("handleCancel")(function* (
     doc: DocumentView,
     values: { readonly reason: string; readonly on?: DocumentView["dates"]["issuedOn"] },
-  ) => {
+  ) {
     setBusyAction("cancel");
     setActionError(null);
-    const payload = {
-      reason: values.reason,
-      ...(values.on !== undefined ? { on: values.on } : {}),
-    };
-    const result = await runMutation(`documents.cancel:${doc.id}`, payload, (api, key) =>
-      api.documents.cancel({
-        params: { workspaceId: workspace.id, documentId: doc.id },
-        headers: idempotencyHeaders(key),
-        payload,
-      }),
+    const reason = { reason: values.reason };
+    const payload = values.on === undefined ? reason : { ...reason, on: values.on };
+    const result = yield* fromMobilePromise(() =>
+      runMutation(`documents.cancel:${doc.id}`, payload, (api, key) =>
+        api.documents.cancel({
+          params: { workspaceId: workspace.id, documentId: doc.id },
+          headers: idempotencyHeaders(key),
+          payload,
+        }),
+      ),
     );
     setBusyAction(null);
     if (result._tag === "Err") {
@@ -355,27 +372,33 @@ export function DocumentDetailScreen() {
         tab: "preview",
       });
     }
-  };
+  }, runFeatureEffect);
 
-  const handleIssueFinalInvoice = async (doc: DocumentView) => {
-    const confirmed = await overlay.confirm({
-      title: t("documents.settlement.issueFinal"),
-      body: t("documents.settlement.deductionPreview", {
-        amount: formatMoney(locale, doc.totals.gross),
+  const handleIssueFinalInvoice = Effect.fn("handleIssueFinalInvoice")(function* (
+    doc: DocumentView,
+  ) {
+    const confirmed = yield* fromMobilePromise(() =>
+      overlay.confirm({
+        title: t("documents.settlement.issueFinal"),
+        body: t("documents.settlement.deductionPreview", {
+          amount: formatMoney(locale, doc.totals.gross),
+        }),
+        confirmLabel: t("documents.settlement.issueFinal"),
+        cancelLabel: t("common.action.cancel"),
       }),
-      confirmLabel: t("documents.settlement.issueFinal"),
-      cancelLabel: t("common.action.cancel"),
-    });
+    );
     if (!confirmed) return;
     setBusyAction("final");
     setActionError(null);
     const payload = {};
-    const result = await runMutation(`documents.issueFinalInvoice:${doc.id}`, payload, (api, key) =>
-      api.documents.issueFinalInvoice({
-        params: { workspaceId: workspace.id, documentId: doc.id },
-        headers: idempotencyHeaders(key),
-        payload,
-      }),
+    const result = yield* fromMobilePromise(() =>
+      runMutation(`documents.issueFinalInvoice:${doc.id}`, payload, (api, key) =>
+        api.documents.issueFinalInvoice({
+          params: { workspaceId: workspace.id, documentId: doc.id },
+          headers: idempotencyHeaders(key),
+          payload,
+        }),
+      ),
     );
     setBusyAction(null);
     if (result._tag === "Err") {
@@ -390,22 +413,27 @@ export function DocumentDetailScreen() {
       id: result.value.id,
       tab: "preview",
     });
-  };
+  }, runFeatureEffect);
 
-  const handleCreateCreditNote = async (doc: DocumentView, values: CreditNoteFormValues) => {
+  const handleCreateCreditNote = Effect.fn("handleCreateCreditNote")(function* (
+    doc: DocumentView,
+    values: CreditNoteFormValues,
+  ) {
     setBusyAction("creditNote");
     setActionError(null);
-    const payload = {
-      reason: values.reason,
-      lines: values.lines === "full" ? ("full" as const) : [...values.lines],
-      ...(values.correctedOn !== undefined ? { correctedOn: values.correctedOn } : {}),
-    };
-    const result = await runMutation(`documents.correct:${doc.id}`, payload, (api, key) =>
-      api.documents.correct({
-        params: { workspaceId: workspace.id, documentId: doc.id },
-        headers: idempotencyHeaders(key),
-        payload,
-      }),
+    const correction = { reason: values.reason, lines: values.lines };
+    const payload =
+      values.correctedOn === undefined
+        ? correction
+        : { ...correction, correctedOn: values.correctedOn };
+    const result = yield* fromMobilePromise(() =>
+      runMutation(`documents.correct:${doc.id}`, payload, (api, key) =>
+        api.documents.correct({
+          params: { workspaceId: workspace.id, documentId: doc.id },
+          headers: idempotencyHeaders(key),
+          payload,
+        }),
+      ),
     );
     setBusyAction(null);
     if (result._tag === "Err") {
@@ -421,24 +449,29 @@ export function DocumentDetailScreen() {
       id: result.value.id,
       tab: "preview",
     });
-  };
+  }, runFeatureEffect);
 
-  const handleRecordPayment = async (doc: DocumentView, values: RecordPaymentFormValues) => {
+  const handleRecordPayment = Effect.fn("handleRecordPayment")(function* (
+    doc: DocumentView,
+    values: RecordPaymentFormValues,
+  ) {
     setBusyAction("payment");
     setActionError(null);
-    const payload = {
+    const payload: Types.Mutable<RecordPaymentInput> = {
       target: { document: doc.id },
       amount: MoneyMath.make(values.amount, doc.totals.gross.currency),
       paidOn: values.paidOn,
       method: values.method,
-      ...(values.note !== "" ? { note: values.note } : {}),
     };
-    const result = await runPayment(`payments.record:document:${doc.id}`, payload, (api, key) =>
-      api.payments.record({
-        params: { workspaceId: workspace.id },
-        headers: idempotencyHeaders(key),
-        payload,
-      }),
+    if (values.note !== "") payload.note = values.note;
+    const result = yield* fromMobilePromise(() =>
+      runPayment(`payments.record:document:${doc.id}`, payload, (api, key) =>
+        api.payments.record({
+          params: { workspaceId: workspace.id },
+          headers: idempotencyHeaders(key),
+          payload,
+        }),
+      ),
     );
     setBusyAction(null);
     if (result._tag === "Err") {
@@ -454,16 +487,21 @@ export function DocumentDetailScreen() {
         ? `${t("documents.payment.recorded")} · ${issuedPtd.number ?? ""}`
         : t("documents.payment.recorded"),
     );
-  };
+  }, runFeatureEffect);
 
-  const handleRemovePayment = async (paymentId: PaymentId, reason: string) => {
+  const handleRemovePayment = Effect.fn("handleRemovePayment")(function* (
+    paymentId: PaymentId,
+    reason: string,
+  ) {
     setBusyAction("removePayment");
     setActionError(null);
-    const result = await run((api) =>
-      api.payments.remove({
-        params: { workspaceId: workspace.id, paymentId },
-        payload: { reason },
-      }),
+    const result = yield* fromMobilePromise(() =>
+      run((api) =>
+        api.payments.remove({
+          params: { workspaceId: workspace.id, paymentId },
+          payload: { reason },
+        }),
+      ),
     );
     setBusyAction(null);
     if (result._tag === "Err") {
@@ -474,23 +512,29 @@ export function DocumentDetailScreen() {
     docRemote.reload();
     paymentsRemote.reload();
     overlay.toast(t("common.toast.deleted"));
-  };
+  }, runFeatureEffect);
 
-  const handleSendEmail = async (doc: DocumentView, values: SendEmailFormValues) => {
+  const handleSendEmail = Effect.fn("handleSendEmail")(function* (
+    doc: DocumentView,
+    values: SendEmailFormValues,
+  ) {
     setBusyAction("send");
     setActionError(null);
-    const payload = {
+    const destination = {
       to: [...values.to],
       language: values.language,
       purpose: values.purpose,
-      ...(values.purpose === "document" ? { reminders: values.reminders } : {}),
     };
-    const result = await runMutation(`documents.send:${doc.id}`, payload, (api, key) =>
-      api.documents.send({
-        params: { workspaceId: workspace.id, documentId: doc.id },
-        headers: idempotencyHeaders(key),
-        payload,
-      }),
+    const payload =
+      values.purpose === "document" ? { ...destination, reminders: values.reminders } : destination;
+    const result = yield* fromMobilePromise(() =>
+      runMutation(`documents.send:${doc.id}`, payload, (api, key) =>
+        api.documents.send({
+          params: { workspaceId: workspace.id, documentId: doc.id },
+          headers: idempotencyHeaders(key),
+          payload,
+        }),
+      ),
     );
     setBusyAction(null);
     if (result._tag === "Err") {
@@ -499,16 +543,18 @@ export function DocumentDetailScreen() {
     }
     setActiveDialog(null);
     docRemote.reload();
-    overlay.toast(t("documents.send.sent", { email: values.to.join(", ") }));
-  };
+    overlay.toast(t("documents.send.sent", { email: Arr.join(values.to, ", ") }));
+  }, runFeatureEffect);
 
-  const handleCreateShareLink = async (doc: DocumentView) => {
+  const handleCreateShareLink = Effect.fn("handleCreateShareLink")(function* (doc: DocumentView) {
     setBusyAction("shareCreate");
     setActionError(null);
-    const result = await run((api) =>
-      api.shareLinks.create({
-        params: { workspaceId: workspace.id, documentId: doc.id },
-      }),
+    const result = yield* fromMobilePromise(() =>
+      run((api) =>
+        api.shareLinks.create({
+          params: { workspaceId: workspace.id, documentId: doc.id },
+        }),
+      ),
     );
     setBusyAction(null);
     if (result._tag === "Err") {
@@ -516,25 +562,29 @@ export function DocumentDetailScreen() {
       return;
     }
     docRemote.reload();
-    await copyText(result.value.url);
+    yield* fromMobilePromise(() => copyText(result.value.url));
     overlay.toast(t("common.toast.linkCopied"));
-  };
+  }, runFeatureEffect);
 
-  const handleRevokeShareLink = async (doc: DocumentView) => {
-    const confirmed = await overlay.confirm({
-      title: t("documents.share.revokeTitle"),
-      body: t("documents.share.revokeBody"),
-      confirmLabel: t("documents.share.revoke"),
-      cancelLabel: t("common.action.cancel"),
-      destructive: true,
-    });
+  const handleRevokeShareLink = Effect.fn("handleRevokeShareLink")(function* (doc: DocumentView) {
+    const confirmed = yield* fromMobilePromise(() =>
+      overlay.confirm({
+        title: t("documents.share.revokeTitle"),
+        body: t("documents.share.revokeBody"),
+        confirmLabel: t("documents.share.revoke"),
+        cancelLabel: t("common.action.cancel"),
+        destructive: true,
+      }),
+    );
     if (!confirmed) return;
     setBusyAction("shareRevoke");
     setActionError(null);
-    const result = await run((api) =>
-      api.shareLinks.revoke({
-        params: { workspaceId: workspace.id, documentId: doc.id },
-      }),
+    const result = yield* fromMobilePromise(() =>
+      run((api) =>
+        api.shareLinks.revoke({
+          params: { workspaceId: workspace.id, documentId: doc.id },
+        }),
+      ),
     );
     setBusyAction(null);
     if (result._tag === "Err") {
@@ -543,39 +593,41 @@ export function DocumentDetailScreen() {
     }
     docRemote.reload();
     overlay.toast(t("common.action.revoke"));
-  };
+  }, runFeatureEffect);
 
-  const handleCopyShareLink = async (url: string) => {
-    const copied = await copyText(url);
+  const handleCopyShareLink = Effect.fn("handleCopyShareLink")(function* (url: string) {
+    const copied = yield* fromMobilePromise(() => copyText(url));
     overlay.toast(
       copied
         ? t("common.toast.linkCopied")
         : local({ cs: "Odkaz se nepodařilo zkopírovat.", en: "Could not copy link." }),
     );
-  };
+  }, runFeatureEffect);
 
-  const handleShareLinkSheet = async (url: string, numberLabel: string) => {
-    try {
-      await Share.share({ message: url, url, title: numberLabel });
-    } catch {
-      await handleCopyShareLink(url);
-    }
-  };
+  const handleShareLinkSheet = (url: string, numberLabel: string) =>
+    runFeatureEffect(
+      fromMobilePromise(() => Share.share({ message: url, url, title: numberLabel })).pipe(
+        Effect.asVoid,
+        Effect.catch(() => fromMobilePromise(() => handleCopyShareLink(url))),
+      ),
+    );
 
-  const handlePdf = async (doc: DocumentView, mode: "open" | "share") => {
+  const handlePdf = Effect.fn("handlePdf")(function* (doc: DocumentView, mode: "open" | "share") {
     setBusyAction(`pdf-${mode}`);
     setActionError(null);
-    const filename = `${(doc.number ?? "draft").replace(/[^a-zA-Z0-9._-]+/g, "_")}.pdf`;
-    const downloaded = await transfer.download({
-      path: `/workspaces/${workspace.id}/documents/${doc.id}/pdf`,
-      query: {
-        template: pdfTemplate,
-        language: pdfLanguage,
-        disposition: mode === "open" ? "inline" : "attachment",
-      },
-      filename,
-      contentType: "application/pdf",
-    });
+    const filename = `${Str.replace(/[^a-zA-Z0-9._-]+/g, "_")(doc.number ?? "draft")}.pdf`;
+    const downloaded = yield* fromMobilePromise(() =>
+      transfer.download({
+        path: `/workspaces/${workspace.id}/documents/${doc.id}/pdf`,
+        query: {
+          template: pdfTemplate,
+          language: pdfLanguage,
+          disposition: mode === "open" ? "inline" : "attachment",
+        },
+        filename,
+        contentType: "application/pdf",
+      }),
+    );
     if (downloaded._tag === "Err") {
       setBusyAction(null);
       reportError(resolveText(describeError(downloaded.error).text));
@@ -583,8 +635,8 @@ export function DocumentDetailScreen() {
     }
     const delivered =
       mode === "open"
-        ? await transfer.open(downloaded.value)
-        : await transfer.share(downloaded.value);
+        ? yield* fromMobilePromise(() => transfer.open(downloaded.value))
+        : yield* fromMobilePromise(() => transfer.share(downloaded.value));
     setBusyAction(null);
     if (delivered._tag === "Err") {
       reportError(resolveText(describeError(delivered.error).text));
@@ -593,7 +645,7 @@ export function DocumentDetailScreen() {
     overlay.toast(
       mode === "open" ? t("documents.detail.actions.downloadPdf") : t("common.action.share"),
     );
-  };
+  }, runFeatureEffect);
 
   return (
     <Screen
@@ -616,18 +668,21 @@ export function DocumentDetailScreen() {
           const actions = documentActions(doc, workspace.role);
           const contact = parseContactSnapshot(doc.contact);
           const issuer = parseIssuerSnapshot(doc.issuer);
-          const lines = doc.lines.map(parseLineView);
+          const lines = Arr.map(doc.lines, parseLineView);
           const numberLabel = doc.number ?? t("documents.list.draftNumber");
           const statusB = documentStatusBadge(doc.status, t);
           const settleB = settlementBadge(doc.settlement, doc.overdue, t);
           const kindB = kindBadge(doc.kind, t);
           const payments =
             paymentsRemote.state._tag === "Ready"
-              ? paymentsRemote.state.value.map(parsePaymentView)
+              ? Arr.map(paymentsRemote.state.value, parsePaymentView)
               : [];
           const currency = doc.totals.gross.currency;
           const paidTotal = BigDecimal.sumAll(
-            payments.filter((p) => p.amount.currency === currency).map((p) => p.amount.amount),
+            Arr.map(
+              Arr.filter(payments, (p) => p.amount.currency === currency),
+              (p) => p.amount.amount,
+            ),
           );
           const remainingAmount = BigDecimal.subtract(doc.totals.gross.amount, paidTotal);
           const defaultPaymentAmount = BigDecimal.isGreaterThan(
@@ -715,7 +770,7 @@ export function DocumentDetailScreen() {
                             label={t("documents.detail.actions.issue")}
                             busy={busyAction === "issue"}
                             testID="detail-action-issue"
-                            onPress={() => void handleIssue(doc)}
+                            onPress={() => handleIssue(doc)}
                           />
                         ) : null}
                         {actions.canEdit ? (
@@ -754,7 +809,7 @@ export function DocumentDetailScreen() {
                             label={t("documents.detail.actions.finalInvoice")}
                             busy={busyAction === "final"}
                             testID="detail-action-final"
-                            onPress={() => void handleIssueFinalInvoice(doc)}
+                            onPress={() => handleIssueFinalInvoice(doc)}
                           />
                         ) : null}
                         {actions.canCreateCreditNote ? (
@@ -773,7 +828,7 @@ export function DocumentDetailScreen() {
                             label={t("documents.detail.lock")}
                             busy={busyAction === "lock"}
                             testID="detail-action-lock"
-                            onPress={() => void handleLock(doc)}
+                            onPress={() => handleLock(doc)}
                           />
                         ) : null}
                         {actions.canUnlock ? (
@@ -817,7 +872,7 @@ export function DocumentDetailScreen() {
                             label={t("documents.editor.discard")}
                             busy={busyAction === "discard"}
                             testID="detail-action-discard"
-                            onPress={() => void handleDiscard(doc)}
+                            onPress={() => handleDiscard(doc)}
                           />
                         ) : null}
                       </View>
@@ -855,7 +910,7 @@ export function DocumentDetailScreen() {
                           label={t("documents.detail.actions.downloadPdf")}
                           busy={busyAction === "pdf-open"}
                           testID="detail-pdf-download"
-                          onPress={() => void handlePdf(doc, "open")}
+                          onPress={() => handlePdf(doc, "open")}
                         />
                         <Button
                           kind="outlined"
@@ -863,7 +918,7 @@ export function DocumentDetailScreen() {
                           label={t("common.action.share")}
                           busy={busyAction === "pdf-share"}
                           testID="detail-pdf-share"
-                          onPress={() => void handlePdf(doc, "share")}
+                          onPress={() => handlePdf(doc, "share")}
                         />
                       </View>
                     </Card>
@@ -883,12 +938,16 @@ export function DocumentDetailScreen() {
                       ) : null}
                       {issuer.ico !== null || issuer.dic !== null ? (
                         <Text variant="meta" color="onSurfaceVariant" numeric>
-                          {[
-                            issuer.ico !== null ? `IČO ${issuer.ico}` : null,
-                            issuer.dic !== null ? `DIČ ${issuer.dic}` : null,
-                          ]
-                            .filter(Boolean)
-                            .join(" · ")}
+                          {Arr.join(
+                            Arr.filter(
+                              [
+                                issuer.ico !== null ? `IČO ${issuer.ico}` : null,
+                                issuer.dic !== null ? `DIČ ${issuer.dic}` : null,
+                              ],
+                              (part): part is string => part !== null && part !== "",
+                            ),
+                            " · ",
+                          )}
                         </Text>
                       ) : null}
                       {issuer.bankAccount !== null ? (
@@ -910,17 +969,21 @@ export function DocumentDetailScreen() {
                       ) : null}
                       {contact.ico !== null || contact.dic !== null ? (
                         <Text variant="meta" color="onSurfaceVariant" numeric>
-                          {[
-                            contact.ico !== null ? `IČO ${contact.ico}` : null,
-                            contact.dic !== null ? `DIČ ${contact.dic}` : null,
-                          ]
-                            .filter(Boolean)
-                            .join(" · ")}
+                          {Arr.join(
+                            Arr.filter(
+                              [
+                                contact.ico !== null ? `IČO ${contact.ico}` : null,
+                                contact.dic !== null ? `DIČ ${contact.dic}` : null,
+                              ],
+                              (part): part is string => part !== null && part !== "",
+                            ),
+                            " · ",
+                          )}
                         </Text>
                       ) : null}
                       {contact.billingEmails.length > 0 ? (
                         <Text variant="meta" color="onSurfaceVariant">
-                          {contact.billingEmails.join(", ")}
+                          {Arr.join(contact.billingEmails, ", ")}
                         </Text>
                       ) : null}
                     </Card>
@@ -929,11 +992,11 @@ export function DocumentDetailScreen() {
                   {/* Line items */}
                   <Section title={t("documents.editor.section.lines")}>
                     <Card style={styles.listCard}>
-                      {lines.map((line) => (
+                      {Arr.map(lines, (line) => (
                         <ListRow
                           key={line.id}
                           title={line.description}
-                          subtitle={`${formatQuantity(locale, line.quantity)}${line.unit ? ` ${line.unit}` : ""} × ${formatMoney(
+                          subtitle={`${formatQuantity(locale, line.quantity)}${(line.unit ?? "") !== "" ? ` ${line.unit}` : ""} × ${formatMoney(
                             locale,
                             MoneyMath.make(line.unitPrice, currency),
                           )} · ${t("common.field.vat")} ${formatVatRate(locale, Number(BigDecimal.format(line.ratePercent)))}`}
@@ -946,7 +1009,7 @@ export function DocumentDetailScreen() {
                   {/* VAT Breakdown & CZK conversion */}
                   <Section title={t("documents.editor.totals.total")}>
                     <Card>
-                      {doc.totals.buckets.map((bucket) => (
+                      {Arr.map(doc.totals.buckets, (bucket) => (
                         <View
                           key={`${bucket.treatment}-${String(bucket.ratePercent)}`}
                           style={styles.totalRow}
@@ -970,7 +1033,7 @@ export function DocumentDetailScreen() {
                               <Text variant="meta" color="onSurfaceVariant" numeric>
                                 {formatMoney(
                                   locale,
-                                  MoneyMath.make(bucket.vatCzk, "CZK" as typeof currency),
+                                  MoneyMath.make(bucket.vatCzk, CurrencyCode.make("CZK")),
                                 )}
                               </Text>
                             ) : null}
@@ -1022,7 +1085,7 @@ export function DocumentDetailScreen() {
                           </Text>
                         </View>
                       ) : null}
-                      {doc.statutoryNotes.map((note) => (
+                      {Arr.map(doc.statutoryNotes, (note) => (
                         <Text key={note.text} variant="meta" color="onSurfaceVariant">
                           {note.text}
                         </Text>
@@ -1034,7 +1097,7 @@ export function DocumentDetailScreen() {
                   {doc.related.length > 0 ? (
                     <Section title={t("documents.detail.related")}>
                       <Card style={styles.listCard}>
-                        {doc.related.map((rel) => (
+                        {Arr.map(doc.related, (rel) => (
                           <ListRow
                             key={`${rel.relation}-${rel.id}`}
                             testID={`related-doc-${rel.id}`}
@@ -1058,10 +1121,12 @@ export function DocumentDetailScreen() {
                   {doc.deliveries.length > 0 ? (
                     <Section title={t("documents.detail.deliveries")}>
                       <Card style={styles.listCard}>
-                        {doc.deliveries.map((del) => (
+                        {Arr.map(doc.deliveries, (del) => (
                           <ListRow
                             key={del.id}
-                            title={t("documents.detail.deliveryTo", { email: del.to.join(", ") })}
+                            title={t("documents.detail.deliveryTo", {
+                              email: Arr.join(del.to, ", "),
+                            })}
                             subtitle={`${t(enumKey("deliveryPurpose", del.purpose))} · ${formatDateTime(locale, del.at)}`}
                             badge={
                               <Badge
@@ -1100,7 +1165,7 @@ export function DocumentDetailScreen() {
                   ) : null}
                   <RemoteView state={paymentsRemote.state} onRetry={paymentsRemote.reload}>
                     {(rawPayments) => {
-                      const list = rawPayments.map(parsePaymentView);
+                      const list = Arr.map(rawPayments, parsePaymentView);
                       if (list.length === 0) {
                         return (
                           <EmptyState
@@ -1118,12 +1183,12 @@ export function DocumentDetailScreen() {
                       }
                       return (
                         <Card style={styles.listCard}>
-                          {list.map((payment) => (
+                          {Arr.map(list, (payment) => (
                             <View key={payment.id} style={styles.paymentItem}>
                               <ListRow
                                 title={formatMoney(locale, payment.amount)}
                                 subtitle={`${formatDate(locale, payment.paidOn)} · ${t(enumKey("paymentMethod", payment.method))}${
-                                  payment.note ? ` · ${payment.note}` : ""
+                                  (payment.note ?? "") !== "" ? ` · ${payment.note}` : ""
                                 }`}
                                 {...(payment.taxDocument !== null
                                   ? {
@@ -1133,13 +1198,15 @@ export function DocumentDetailScreen() {
                                           tone="info"
                                         />
                                       ),
-                                      onPress: () =>
+                                      onPress: () => {
+                                        if (payment.taxDocument === null) return;
                                         navigate({
                                           _tag: "Document",
                                           ws: workspace.slug,
-                                          id: payment.taxDocument as DocumentId,
+                                          id: payment.taxDocument,
                                           tab: "preview",
-                                        }),
+                                        });
+                                      },
                                     }
                                   : {})}
                               />
@@ -1197,14 +1264,14 @@ export function DocumentDetailScreen() {
                               icon={Copy}
                               label={t("documents.share.copy")}
                               testID="share-link-copy"
-                              onPress={() => void handleCopyShareLink(doc.share?.url ?? "")}
+                              onPress={() => handleCopyShareLink(doc.share?.url ?? "")}
                             />
                             <Button
                               kind="tonal"
                               icon={Share2}
                               label={t("documents.share.share")}
                               onPress={() =>
-                                void handleShareLinkSheet(doc.share?.url ?? "", numberLabel)
+                                handleShareLinkSheet(doc.share?.url ?? "", numberLabel)
                               }
                             />
                             {actions.canManageShareLink ? (
@@ -1214,14 +1281,14 @@ export function DocumentDetailScreen() {
                                   icon={Link2}
                                   label={t("documents.share.regenerate")}
                                   busy={busyAction === "shareCreate"}
-                                  onPress={() => void handleCreateShareLink(doc)}
+                                  onPress={() => handleCreateShareLink(doc)}
                                 />
                                 <Button
                                   kind="danger"
                                   label={t("documents.share.revoke")}
                                   busy={busyAction === "shareRevoke"}
                                   testID="share-link-revoke"
-                                  onPress={() => void handleRevokeShareLink(doc)}
+                                  onPress={() => handleRevokeShareLink(doc)}
                                 />
                               </>
                             ) : null}
@@ -1234,7 +1301,7 @@ export function DocumentDetailScreen() {
                           label={t("documents.share.create")}
                           busy={busyAction === "shareCreate"}
                           testID="share-link-create"
-                          onPress={() => void handleCreateShareLink(doc)}
+                          onPress={() => handleCreateShareLink(doc)}
                         />
                       ) : (
                         <Text variant="meta" color="onSurfaceVariant">
@@ -1255,7 +1322,7 @@ export function DocumentDetailScreen() {
                             <EmptyState title={t("documents.share.noViews")} />
                           ) : (
                             <Card style={styles.listCard}>
-                              {viewsPage.items.map((ev) => (
+                              {Arr.map(viewsPage.items, (ev) => (
                                 <ListRow
                                   key={ev.id}
                                   title={t(enumKey("shareEvent", ev.kind))}
@@ -1280,7 +1347,7 @@ export function DocumentDetailScreen() {
                         <EmptyState title={t("documents.history.empty")} />
                       ) : (
                         <Card style={styles.listCard}>
-                          {entries.map((entry) => {
+                          {Arr.map(entries, (entry) => {
                             const actorText =
                               entry.actor._tag === "System"
                                 ? t("documents.history.bySystem")
@@ -1290,28 +1357,32 @@ export function DocumentDetailScreen() {
                                       client: entry.actor.client.name,
                                     })
                                   : entry.actor.userId;
-                            const changesText = entry.changes
-                              .map((c) =>
+                            const changesText = Arr.join(
+                              Arr.map(entry.changes, (c) =>
                                 t("documents.history.changed", {
                                   field: c.path,
                                   before: String(c.before ?? "—"),
                                   after: String(c.after ?? "—"),
                                 }),
-                              )
-                              .join("; ");
-                            const parts = [
-                              formatDateTime(locale, entry.at),
-                              actorText,
-                              entry.reason !== null
-                                ? t("documents.history.unlockReason", { reason: entry.reason })
-                                : null,
-                              changesText !== "" ? changesText : null,
-                            ].filter(Boolean);
+                              ),
+                              "; ",
+                            );
+                            const parts = Arr.filter(
+                              [
+                                formatDateTime(locale, entry.at),
+                                actorText,
+                                entry.reason !== null
+                                  ? t("documents.history.unlockReason", { reason: entry.reason })
+                                  : null,
+                                changesText !== "" ? changesText : null,
+                              ],
+                              (part): part is string => part !== null && part !== "",
+                            );
                             return (
                               <ListRow
                                 key={entry.id}
                                 title={entry.action}
-                                subtitle={parts.join(" · ")}
+                                subtitle={Arr.join(parts, " · ")}
                               />
                             );
                           })}
@@ -1331,7 +1402,7 @@ export function DocumentDetailScreen() {
                 showPtdNotice={doc.kind === "proforma" && workspace.taxRegime === "vat_payer"}
                 busy={busyAction === "payment"}
                 onClose={() => setActiveDialog(null)}
-                onSubmit={(values) => void handleRecordPayment(doc, values)}
+                onSubmit={(values) => handleRecordPayment(doc, values)}
               />
 
               <RemovePaymentModal
@@ -1341,7 +1412,7 @@ export function DocumentDetailScreen() {
                 onClose={() => setRemovingPayment(null)}
                 onSubmit={(reason) => {
                   if (removingPayment !== null) {
-                    void handleRemovePayment(removingPayment.id, reason);
+                    handleRemovePayment(removingPayment.id, reason);
                   }
                 }}
               />
@@ -1353,7 +1424,7 @@ export function DocumentDetailScreen() {
                 defaultLanguage={locale}
                 busy={busyAction === "send"}
                 onClose={() => setActiveDialog(null)}
-                onSubmit={(values) => void handleSendEmail(doc, values)}
+                onSubmit={(values) => handleSendEmail(doc, values)}
               />
 
               <CancelDocumentModal
@@ -1362,7 +1433,7 @@ export function DocumentDetailScreen() {
                 isTaxDocument={doc.taxDocument}
                 busy={busyAction === "cancel"}
                 onClose={() => setActiveDialog(null)}
-                onSubmit={(values) => void handleCancel(doc, values)}
+                onSubmit={(values) => handleCancel(doc, values)}
               />
 
               <CreditNoteModal
@@ -1371,14 +1442,14 @@ export function DocumentDetailScreen() {
                 parsedLines={lines}
                 busy={busyAction === "creditNote"}
                 onClose={() => setActiveDialog(null)}
-                onSubmit={(values) => void handleCreateCreditNote(doc, values)}
+                onSubmit={(values) => handleCreateCreditNote(doc, values)}
               />
 
               <UnlockDocumentModal
                 visible={activeDialog === "unlock"}
                 busy={busyAction === "unlock"}
                 onClose={() => setActiveDialog(null)}
-                onSubmit={(reason) => void handleUnlock(doc, reason)}
+                onSubmit={(reason) => handleUnlock(doc, reason)}
               />
             </View>
           );

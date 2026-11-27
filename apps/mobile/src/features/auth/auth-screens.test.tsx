@@ -1,10 +1,13 @@
 import { describe, expect, mock, test } from "bun:test";
+import * as Arr from "effect/Array";
+import * as Option from "effect/Option";
 import type { ReactElement } from "react";
 import { SessionProvider } from "../../session/session-provider";
 import { clientRoot } from "../../testing/client-root";
 import { allText, findAll, hostTree } from "../../testing/element-tree";
 import { expoRouterStandIn } from "../../testing/expo-router-stand-in";
 import { recordedOverlay, TestProviders } from "../../testing/providers";
+import { parseErrorKind } from "./auth-links";
 import type { AuthClient } from "./auth-port";
 
 const replacements: string[] = [];
@@ -24,7 +27,7 @@ mock.module("expo-router", () => {
 const { AuthLinkScreen } = await import("./auth-link-screen");
 const { BotProofWidget } = await import("./bot-proof-widget");
 const { CheckEmailScreen } = await import("./check-email-screen");
-const { ErrorScreen, parseErrorKind } = await import("./error-screen");
+const { ErrorScreen } = await import("./error-screen");
 const { ResetPasswordScreen } = await import("./reset-password-screen");
 const { SignInScreen, safeReturnTo } = await import("./sign-in-screen");
 const { SignUpScreen } = await import("./sign-up-screen");
@@ -63,7 +66,9 @@ const withProviders =
 describe("auth screens", () => {
   test("safeReturnTo allows relative in-app paths and rejects external/protocol-relative URLs", () => {
     expect(safeReturnTo("/w/acme/documents")).toBe("/w/acme/documents");
+    // biome-ignore lint/security/noSecrets: This test URL contains fixture values.
     expect(safeReturnTo("/app/w/acme/documents/123?tab=payments#receipt")).toBe(
+      // biome-ignore lint/security/noSecrets: This test URL contains fixture values.
       "/w/acme/documents/123?tab=payments#receipt",
     );
     expect(safeReturnTo("/app//evil.example")).toBeNull();
@@ -99,8 +104,8 @@ describe("auth screens", () => {
       withProviders(),
     );
     expect(allText(failed)).toContain("Try again");
-    const retryBtn = findAll(failed, "Pressable")[0];
-    (retryBtn?.props.onPress as (() => void) | undefined)?.();
+    const retryBtn = findAll<{ onPress?: () => void }>(failed, "Pressable")[0];
+    retryBtn?.props.onPress?.();
     expect(retried).toBe(true);
   });
 
@@ -125,7 +130,9 @@ describe("auth screens", () => {
     const text = allText(tree);
     expect(text).toContain("Create your account");
     expect(text).toContain("You will join the workspace you were invited to.");
-    const emailInput = findAll(tree, "TextInput").find((el) => el.props.testID === "sign-up-email");
+    const emailInput = Option.getOrUndefined(
+      Arr.findFirst(findAll(tree, "TextInput"), (el) => el.props.testID === "sign-up-email"),
+    );
     expect(emailInput?.props.value).toBe("invited@kvitbit.cz");
     expect(emailInput?.props.editable).toBe(false);
   });
@@ -138,20 +145,26 @@ describe("auth screens", () => {
         email="jana@kvitbit.cz"
         initialCooldown={0}
         authClient={fakeAuthClient({
-          resendVerification: async (email) => {
+          resendVerification: (email) => {
             resentTo = email;
-            return { _tag: "Ok", value: undefined };
+            return Promise.resolve({ _tag: "Ok", value: undefined });
           },
         })}
       />,
       withProviders(overlay),
     );
     expect(allText(tree)).toContain("jana@kvitbit.cz");
-    const resendBtn = findAll(tree, "Pressable").find(
-      (el) => el.props.testID === "check-email-resend",
+    const resendBtn = Option.getOrUndefined(
+      Arr.findFirst(
+        findAll<{ testID?: string; disabled?: boolean; onPress?: () => Promise<void> }>(
+          tree,
+          "Pressable",
+        ),
+        (el) => el.props.testID === "check-email-resend",
+      ),
     );
     expect(resendBtn?.props.disabled).toBe(false);
-    await (resendBtn?.props.onPress as (() => Promise<void>) | undefined)?.();
+    await resendBtn?.props.onPress?.();
     expect(resentTo).toBe("jana@kvitbit.cz");
   });
 
@@ -200,6 +213,7 @@ describe("verification link continuation", () => {
         />,
       ),
     );
+    // biome-ignore lint/security/noSecrets: This test URL contains fixture values.
     expect(replacements).toEqual(["/sign-in?verified=1&returnTo=%2Finvite%2Finv1"]);
   });
 });
