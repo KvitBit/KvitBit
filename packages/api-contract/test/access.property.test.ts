@@ -5,8 +5,12 @@
  * Every domain is enumerated in full and its size is asserted. Guarded by
  * .agents/skills/verify-money-access.
  */
+
 import { describe, expect, test } from "bun:test";
-import { Schema } from "effect";
+import * as Arr from "effect/Array";
+import * as Effect from "effect/Effect";
+import * as Fn from "effect/Function";
+import * as Schema from "effect/Schema";
 import type { OAuthScopeToken } from "../src/index";
 import {
   ALL_SCOPES,
@@ -35,24 +39,32 @@ const AREAS = [
   "reports",
   "share",
 ] as const;
-const ORACLE_SCOPES: ReadonlyArray<Scope> = AREAS.flatMap((area) => [
+const ORACLE_SCOPES: ReadonlyArray<Scope> = Arr.flatMap(AREAS, (area) => [
   `${area}:read` as const,
   `${area}:write` as const,
 ]);
 const SUBSETS = 2 ** ORACLE_SCOPES.length;
 const READ_BITS = 0b01010101010101010101;
 const WRITE_BITS = READ_BITS << 1;
-const INDEX = new Map(ORACLE_SCOPES.map((scope, i) => [scope, i]));
+const INDEX = new Map<string, number>(Arr.map(ORACLE_SCOPES, (scope, i) => [scope, i]));
 
 /** Write adds read (http-mcp-contracts.md:89, :1277). */
 const closure = (mask: number): number => mask | ((mask & WRITE_BITS) >>> 1);
-const listOf = (mask: number): Array<Scope> => ORACLE_SCOPES.filter((_, i) => (mask >>> i) & 1);
+const listOf = (mask: number): Array<Scope> => {
+  const scopes: Array<Scope> = [];
+  let bit = 1;
+  for (const scope of ORACLE_SCOPES) {
+    if ((mask & bit) !== 0) scopes.push(scope);
+    bit <<= 1;
+  }
+  return scopes;
+};
 /** The mask of a list, or -1 when it has an unknown scope, a duplicate, or is out of order. */
 const canonicalMask = (list: ReadonlyArray<string>): number => {
   let mask = 0;
   let last = -1;
   for (const scope of list) {
-    const i = INDEX.get(scope as Scope);
+    const i = INDEX.get(scope);
     if (i === undefined || i <= last) return -1;
     last = i;
     mask |= 1 << i;
@@ -80,8 +92,8 @@ const HALVES: ReadonlyArray<number> = [
 
 const isGranted = Schema.is(GrantedAccess);
 const isScope = Schema.is(Scope);
-const decodeWire = Schema.decodeUnknownSync(ScopeFromOAuth);
-const encodeWire = Schema.encodeSync(ScopeFromOAuth);
+const decodeWire = Fn.flow(Schema.decodeUnknownEffect(ScopeFromOAuth), Effect.runSync);
+const encodeWire = Fn.flow(Schema.encodeEffect(ScopeFromOAuth), Effect.runSync);
 
 describe("scope set: every subset of the twenty scopes", () => {
   test("the domain has the expected size and the code's scope list is the spec's", () => {
@@ -99,7 +111,7 @@ describe("scope set: every subset of the twenty scopes", () => {
     for (let mask = 0; mask < SUBSETS; mask++) {
       checked++;
       if (canonicalMask(normalizeScopes(listOf(mask))) !== closure(mask)) {
-        wrong.push(listOf(mask).join(","));
+        wrong.push(Arr.join(listOf(mask), ","));
         if (wrong.length >= 5) break;
       }
     }
@@ -113,10 +125,11 @@ describe("scope set: every subset of the twenty scopes", () => {
     for (const mask of HALVES) {
       checked++;
       const list = listOf(mask);
-      const out = normalizeScopes(list).join();
-      if (normalizeScopes([...list].reverse().concat(list)).join() !== out)
-        wrong.push(list.join(","));
-      if (normalizeScopes(new Set(list)).join() !== out) wrong.push(`set ${list.join(",")}`);
+      const out = Arr.join(normalizeScopes(list), ",");
+      if (Arr.join(normalizeScopes([...list].reverse().concat(list)), ",") !== out)
+        wrong.push(Arr.join(list, ","));
+      if (Arr.join(normalizeScopes(new Set(list)), ",") !== out)
+        wrong.push(`set ${Arr.join(list, ",")}`);
     }
     expect(wrong).toEqual([]);
     expect(checked).toBe(2 * 2 ** 10 - 1);
@@ -129,13 +142,14 @@ describe("scope set: every subset of the twenty scopes", () => {
       if (mask === 0) continue;
       checked++;
       const list = listOf(mask);
-      const granted = expandAccess({ access: "custom", scopes: list as [Scope, ...Array<Scope>] });
+      if (!Arr.isArrayNonEmpty(list)) throw new Error(`no scopes for nonzero mask ${mask}`);
+      const granted = expandAccess({ access: "custom", scopes: list });
       if (granted.access !== "custom" || canonicalMask(granted.scopes) !== closure(mask)) {
-        wrong.push(`expand ${list.join(",")}`);
+        wrong.push(`expand ${Arr.join(list, ",")}`);
       }
       // A stored custom list is consistent exactly when it is already closed under write ⇒ read.
       if (isGranted({ access: "custom", scopes: list }) !== (closure(mask) === mask)) {
-        wrong.push(`consistent ${list.join(",")}`);
+        wrong.push(`consistent ${Arr.join(list, ",")}`);
       }
       if (wrong.length >= 5) break;
     }
@@ -159,14 +173,15 @@ describe("OAuth wire form (http-mcp-contracts 6.3)", () => {
     for (const area of [...AREAS, "invoices", ""]) {
       for (const level of ["read", "write", "admin", ""]) {
         const known =
-          (AREAS as ReadonlyArray<string>).includes(area) && /^(read|write)$/.test(level);
+          Arr.some(AREAS, (candidate) => candidate === area) &&
+          (level === "read" || level === "write");
         expect(isScope(`${area}:${level}`)).toBe(known);
       }
     }
     expect<ReadonlyArray<string>>(OAUTH_SCOPES_SUPPORTED).toEqual([
       "kvitbit:read",
       "kvitbit:write",
-      ...ORACLE_SCOPES.map((s) => `kvitbit:${s}`),
+      ...Arr.map(ORACLE_SCOPES, (s) => `kvitbit:${s}`),
       "offline_access",
     ]);
   });
@@ -175,7 +190,7 @@ describe("OAuth wire form (http-mcp-contracts 6.3)", () => {
     let checked = 0;
     const wrong: Array<string> = [];
     for (const mask of HALVES) {
-      const area = listOf(mask).map((s) => `kvitbit:${s}` as OAuthScopeToken);
+      const area = Arr.map(listOf(mask), (s): OAuthScopeToken => `kvitbit:${s}`);
       for (let c = 0; c < 8; c++) {
         checked++;
         const wantsRead = (c & 1) !== 0;
@@ -198,7 +213,7 @@ describe("OAuth wire form (http-mcp-contracts 6.3)", () => {
               ? { access: "read", mask: READ_BITS }
               : undefined;
         if (expected === undefined) {
-          if (got !== undefined) wrong.push(`undefined expected for ${tokens.join(" ")}`);
+          if (got !== undefined) wrong.push(`undefined expected for ${Arr.join(tokens, " ")}`);
         } else if (
           got === undefined ||
           got.offlineAccess !== offline ||
@@ -206,7 +221,7 @@ describe("OAuth wire form (http-mcp-contracts 6.3)", () => {
           canonicalMask(got.access.scopes) !== expected.mask ||
           !isGranted(got.access)
         ) {
-          wrong.push(`parse ${tokens.join(" ")}`);
+          wrong.push(`parse ${Arr.join(tokens, " ")}`);
         }
       }
       if (wrong.length >= 5) break;
@@ -217,12 +232,21 @@ describe("OAuth wire form (http-mcp-contracts 6.3)", () => {
       checked++;
       const grant = { access: "custom" as const, scopes: listOf(mask) };
       const wire = oauthScopesForGrant(grant);
-      if (wire.join() !== grant.scopes.map((s) => `kvitbit:${s}`).join()) {
-        wrong.push(`token scopes ${grant.scopes.join(",")}`);
+      if (
+        Arr.join(wire, ",") !==
+        Arr.join(
+          Arr.map(grant.scopes, (s) => `kvitbit:${s}`),
+          ",",
+        )
+      ) {
+        wrong.push(`token scopes ${Arr.join(grant.scopes, ",")}`);
       }
       const back = accessFromOAuthScopes(wire);
-      if (back?.access.access !== "custom" || back.access.scopes.join() !== grant.scopes.join()) {
-        wrong.push(`round trip ${grant.scopes.join(",")}`);
+      if (
+        back?.access.access !== "custom" ||
+        Arr.join(back.access.scopes, ",") !== Arr.join(grant.scopes, ",")
+      ) {
+        wrong.push(`round trip ${Arr.join(grant.scopes, ",")}`);
         if (wrong.length >= 5) break;
       }
     }

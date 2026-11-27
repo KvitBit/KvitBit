@@ -6,15 +6,22 @@ import {
   Invalid,
   WorkspaceId,
 } from "@kvitbit/domain/contract";
-import { Context, Effect, Option, Schema } from "effect";
-import {
-  HttpApi,
-  HttpApiClient,
-  type HttpApiEndpoint,
-  HttpApiError,
-  HttpApiMiddleware,
-  OpenApi,
-} from "effect/http-api";
+import * as Arr from "effect/Array";
+import * as Context from "effect/Context";
+import * as Effect from "effect/Effect";
+import * as Fn from "effect/Function";
+import * as HttpApi from "effect/http-api/HttpApi";
+import * as HttpApiClient from "effect/http-api/HttpApiClient";
+import type * as HttpApiEndpoint from "effect/http-api/HttpApiEndpoint";
+import * as HttpApiError from "effect/http-api/HttpApiError";
+import * as HttpApiMiddleware from "effect/http-api/HttpApiMiddleware";
+import * as OpenApi from "effect/http-api/OpenApi";
+import * as Option from "effect/Option";
+import * as Order from "effect/Order";
+import * as Predicate from "effect/Predicate";
+import * as Record from "effect/Record";
+import * as Schema from "effect/Schema";
+import * as Str from "effect/String";
 import {
   Api,
   ATTACHMENT_MAX_BYTES,
@@ -24,11 +31,20 @@ import {
   SchemaErrors,
   schemaErrorToInvalid,
 } from "../src/index";
+import { decodeReflectedSchema } from "./reflected-http-schema";
 
-const WS = Schema.decodeSync(WorkspaceId)("01890a5d-ac96-774b-bcce-b302099a8057");
-const DOC = Schema.decodeSync(DocumentId)("01890a5d-ac96-774b-bcce-b302099a8058");
-const EXP = Schema.decodeSync(ExpenseId)("01890a5d-ac96-774b-bcce-b302099a8059");
-const ATT = Schema.decodeSync(AttachmentId)("01890a5d-ac96-774b-bcce-b302099a805a");
+const WS = Schema.decodeEffect(WorkspaceId)("01890a5d-ac96-774b-bcce-b302099a8057").pipe(
+  Effect.runSync,
+);
+const DOC = Schema.decodeEffect(DocumentId)("01890a5d-ac96-774b-bcce-b302099a8058").pipe(
+  Effect.runSync,
+);
+const EXP = Schema.decodeEffect(ExpenseId)("01890a5d-ac96-774b-bcce-b302099a8059").pipe(
+  Effect.runSync,
+);
+const ATT = Schema.decodeEffect(AttachmentId)("01890a5d-ac96-774b-bcce-b302099a805a").pipe(
+  Effect.runSync,
+);
 
 describe("HttpApiClient URL builder fills nested Workspace routes", () => {
   const url = HttpApiClient.urlBuilder(Api);
@@ -64,9 +80,9 @@ describe("HttpApiClient URL builder fills nested Workspace routes", () => {
 type AnyEndpoint = HttpApiEndpoint.Top;
 
 const streamContentTypes = (endpoint: AnyEndpoint): ReadonlyArray<string> =>
-  [...endpoint.success].flatMap((schema) =>
-    "contentTypes" in schema && Array.isArray(schema.contentTypes)
-      ? schema.contentTypes.map(String)
+  Arr.flatMap([...endpoint.success], (schema) =>
+    "contentTypes" in schema && Arr.isArray(schema.contentTypes)
+      ? Arr.map(schema.contentTypes, String)
       : [],
   );
 
@@ -77,28 +93,32 @@ describe("binary bodies and uploads (section 3.4)", () => {
   const g = Api.groups;
 
   test("streamed successes declare their content types", () => {
-    expect(streamContentTypes(g.documents.endpoints.pdf)).toEqual(["application/pdf"]);
-    expect(streamContentTypes(g.publicShare.endpoints.pdf)).toEqual(["application/pdf"]);
-    expect(streamContentTypes(g.branding.endpoints.previewPdf)).toEqual(["application/pdf"]);
-    expect(streamContentTypes(g.publicShare.endpoints.logo)).toEqual([...BRANDING_IMAGE_TYPES]);
-    expect(streamContentTypes(g.branding.endpoints.getImage)).toEqual([...BRANDING_IMAGE_TYPES]);
-    expect(streamContentTypes(g.expenses.endpoints.attachment)).toEqual([...ATTACHMENT_TYPES]);
-    expect(streamContentTypes(g.reports.endpoints.export)).toEqual([
+    expect(g.documents.endpoints.pdf.pipe(streamContentTypes)).toEqual(["application/pdf"]);
+    expect(g.publicShare.endpoints.pdf.pipe(streamContentTypes)).toEqual(["application/pdf"]);
+    expect(g.branding.endpoints.previewPdf.pipe(streamContentTypes)).toEqual(["application/pdf"]);
+    expect(g.publicShare.endpoints.logo.pipe(streamContentTypes)).toEqual([
+      ...BRANDING_IMAGE_TYPES,
+    ]);
+    expect(g.branding.endpoints.getImage.pipe(streamContentTypes)).toEqual([
+      ...BRANDING_IMAGE_TYPES,
+    ]);
+    expect(g.expenses.endpoints.attachment.pipe(streamContentTypes)).toEqual([...ATTACHMENT_TYPES]);
+    expect(g.reports.endpoints.export.pipe(streamContentTypes)).toEqual([
       "text/csv; charset=utf-8",
       "application/pdf",
     ]);
-    expect(streamContentTypes(g.reports.endpoints.exportFile)).toEqual(["application/zip"]);
+    expect(g.reports.endpoints.exportFile.pipe(streamContentTypes)).toEqual(["application/zip"]);
   });
 
   test("uploads are streamed multipart with one part and the size limit", () => {
     expect(ATTACHMENT_MAX_BYTES).toBe(20 * 1024 * 1024);
     expect(BRANDING_IMAGE_MAX_BYTES).toBe(2 * 1024 * 1024);
-    expect(multipartLimits(g.expenses.endpoints.attach)).toMatchObject({
+    expect(g.expenses.endpoints.attach.pipe(multipartLimits)).toMatchObject({
       _tag: "Multipart",
       mode: "stream",
       limits: { maxParts: 1, maxFileSize: ATTACHMENT_MAX_BYTES },
     });
-    expect(multipartLimits(g.branding.endpoints.putImage)).toMatchObject({
+    expect(g.branding.endpoints.putImage.pipe(multipartLimits)).toMatchObject({
       _tag: "Multipart",
       mode: "stream",
       limits: { maxParts: 1, maxFileSize: BRANDING_IMAGE_MAX_BYTES },
@@ -110,7 +130,7 @@ describe("strict request parsing (section 3.2)", () => {
   const optionsOf = (group: string, name: string) => {
     let found: Context.Context<never> | undefined;
     HttpApi.reflect(Api, {
-      onGroup: () => {},
+      onGroup: Fn.constVoid,
       onEndpoint: ({ group: g, endpoint, mergedAnnotations }) => {
         if (g.identifier === group && endpoint.identifier === name) found = mergedAnnotations;
       },
@@ -126,12 +146,10 @@ describe("strict request parsing (section 3.2)", () => {
     };
   };
 
-  const asCodec = (schema: Schema.Top) => schema as Schema.Top as Schema.Codec<unknown, unknown>;
-
   test("payload and query reject excess properties; headers and responses keep defaults", () => {
     const options = optionsOf("contacts", "create");
-    expect(Option.getOrUndefined(options.payload)).toEqual({ onExcessProperty: "error" });
-    expect(Option.getOrUndefined(options.query)).toEqual({ onExcessProperty: "error" });
+    expect(options.payload.pipe(Option.getOrUndefined)).toEqual({ onExcessProperty: "error" });
+    expect(options.query.pipe(Option.getOrUndefined)).toEqual({ onExcessProperty: "error" });
     expect(Option.isNone(options.headers)).toBe(true);
     expect(Option.isNone(options.success)).toBe(true);
     expect(Option.isNone(options.all)).toBe(true);
@@ -142,35 +160,35 @@ describe("strict request parsing (section 3.2)", () => {
     const options = Option.getOrThrow(optionsOf("documents", "unlock").payload);
     const [schema] = endpoint.payload.get("application/json")?.schemas ?? [];
     if (schema === undefined) throw new Error("no JSON payload");
-    const decode = Schema.decodeUnknownSync(asCodec(schema), options);
-    expect(decode({ reason: "typo" })).toEqual({ reason: "typo" });
-    expect(() => decode({ reason: "typo", extra: 1 })).toThrow();
+    const decode = Fn.flow(decodeReflectedSchema(schema), Effect.runSync);
+    expect(decode({ reason: "typo" }, options)).toEqual({ reason: "typo" });
+    expect(() => decode({ reason: "typo", extra: 1 }, options)).toThrow();
   });
 
   test("an unknown query field is rejected", () => {
     const endpoint = Api.groups.expenses.endpoints.list;
     const options = Option.getOrThrow(optionsOf("expenses", "list").query);
     if (endpoint.query === undefined) throw new Error("no query");
-    const decode = Schema.decodeUnknownSync(asCodec(endpoint.query), options);
-    expect(decode({ incomplete: "true" })).toEqual({ incomplete: true });
-    expect(() => decode({ incomplete: "true", supplier: "x" })).toThrow();
+    const decode = Fn.flow(decodeReflectedSchema(endpoint.query), Effect.runSync);
+    expect(decode({ incomplete: "true" }, options)).toEqual({ incomplete: true });
+    expect(() => decode({ incomplete: "true", supplier: "x" }, options)).toThrow();
   });
 });
 
 describe("SchemaErrors middleware", () => {
   const schemaError = (kind: HttpApiError.HttpApiSchemaError["kind"]) => {
-    const cause = Effect.runSync(Effect.flip(Schema.decodeUnknownEffect(Schema.String)(42)));
+    const cause = Schema.decodeUnknownEffect(Schema.String)(42).pipe(Effect.flip, Effect.runSync);
     return new HttpApiError.HttpApiSchemaError({ kind, cause });
   };
   const run = (kind: HttpApiError.HttpApiSchemaError["kind"]) =>
-    Effect.runSync(Effect.flip(schemaErrorToInvalid(schemaError(kind))));
+    schemaError(kind).pipe(schemaErrorToInvalid, Effect.flip, Effect.runSync);
 
   test("a root-level request decode failure keeps the slot as its path", () => {
     for (const kind of ["Params", "Query", "Headers", "Payload"] as const) {
       const error = run(kind);
       expect(error).toBeInstanceOf(Invalid);
       expect(error).toMatchObject({
-        issues: [{ path: [kind.toLowerCase()], code: "request.malformed" }],
+        issues: [{ path: [Str.toLowerCase(kind)], code: "request.malformed" }],
       });
     }
   });
@@ -180,15 +198,15 @@ describe("SchemaErrors middleware", () => {
     schema: Schema.Top,
     input: unknown,
   ) => {
-    const cause = Effect.runSync(
-      Effect.flip(
-        Schema.decodeUnknownEffect(schema as Schema.Top as Schema.Codec<unknown, unknown>)(input, {
-          errors: "all",
-        }),
-      ),
+    const cause = decodeReflectedSchema(schema)(input, { errors: "all" }).pipe(
+      Effect.asVoid,
+      Effect.flip,
+      Effect.runSync,
     );
-    return Effect.runSync(
-      Effect.flip(schemaErrorToInvalid(new HttpApiError.HttpApiSchemaError({ kind, cause }))),
+    return new HttpApiError.HttpApiSchemaError({ kind, cause }).pipe(
+      schemaErrorToInvalid,
+      Effect.flip,
+      Effect.runSync,
     );
   };
 
@@ -207,11 +225,12 @@ describe("SchemaErrors middleware", () => {
     if (query === undefined) throw new Error("no query");
     const error = decodeFailure("Query", query, { limit: "0", overdue: "maybe" });
     expect(error).toBeInstanceOf(Invalid);
-    const paths = error instanceof Invalid ? error.issues.map((issue) => issue.path) : [];
+    const paths = Schema.is(Invalid)(error) ? Arr.map(error.issues, (issue) => issue.path) : [];
     expect(paths).toContainEqual(["query", "limit"]);
     expect(paths).toContainEqual(["query", "overdue"]);
   });
 
+  // biome-ignore lint/security/noSecrets: The test title names an Effect error type.
   test("response encoding failures pass through as HttpApiSchemaError", () => {
     for (const kind of ["Body", "ResponseHeaders"] as const) {
       const error = run(kind);
@@ -227,12 +246,15 @@ describe("SchemaErrors middleware", () => {
   });
 });
 
+const ENGLISH_SUMMARY = /^[A-Z][\w ’'Č-]+$/;
+
 describe("OpenAPI (section 3.7)", () => {
   const spec = OpenApi.fromApi(Api);
-  const operations = Object.entries(spec.paths).flatMap(([path, item]) =>
-    Object.entries(item as Record<string, { operationId?: string; summary?: string }>).map(
-      ([method, op]) => ({ path, method, operationId: op.operationId, summary: op.summary }),
-    ),
+  const operations = Arr.flatMap(Record.toEntries(spec.paths), ([path, item]) =>
+    Arr.map(Record.toEntries<string, unknown>(item), ([method, op]) => {
+      const operation = Predicate.isObject(op) ? op : {};
+      return { path, method, operationId: operation.operationId, summary: operation.summary };
+    }),
   );
 
   test("every endpoint is an operation with an English summary", () => {
@@ -242,18 +264,21 @@ describe("OpenAPI (section 3.7)", () => {
         op.operationId,
         true,
       ]);
-      expect(op.summary ?? "").toMatch(/^[A-Z][\w ’'Č-]+$/);
+      expect(typeof op.summary === "string" ? op.summary : "").toMatch(ENGLISH_SUMMARY);
     }
   });
 
   test("operationId is <group>.<endpoint>", () => {
     const expected: Array<string> = [];
     HttpApi.reflect(Api, {
-      onGroup: () => {},
+      onGroup: Fn.constVoid,
       onEndpoint: ({ group, endpoint }) => {
         expected.push(`${group.identifier}.${endpoint.identifier}`);
       },
     });
-    expect(operations.map((op) => op.operationId).sort()).toEqual(expected.sort());
+    const operationIds = Arr.map(operations, (op) =>
+      typeof op.operationId === "string" ? op.operationId : "",
+    );
+    expect(Arr.sort(operationIds, Order.String)).toEqual(Arr.sort(expected, Order.String));
   });
 });
