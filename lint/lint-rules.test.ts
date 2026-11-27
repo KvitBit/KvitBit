@@ -232,6 +232,26 @@ const scopeCases = [
     rules: ["no-direct-effect-runs"],
   },
   {
+    file: "apps/server/src/runner-nested-computed-extraction.ts",
+    source: `${rootEffectImport}\nconst { Effect: { succeed, ["runSync"]: run } } = Lib;`,
+    rules: ["no-direct-effect-runs"],
+  },
+  {
+    file: "apps/server/src/runner-nested-computed-assignment.ts",
+    source: `${rootEffectImport}\nlet run;\n({ Effect: { ["runSync"]: run } } = Lib);`,
+    rules: ["no-direct-effect-runs"],
+  },
+  {
+    file: "apps/server/src/runner-destructure-computed-assignment.ts",
+    source: `${aliasedEffectImport}\nlet run;\n({ ["runSync"]: run } = Fx);`,
+    rules: ["no-direct-effect-runs"],
+  },
+  {
+    file: "apps/server/src/runner-destructure-dynamic-key.ts",
+    source: `${aliasedEffectImport}\nconst runSync = "succeed";\nconst { [runSync]: make } = Fx;`,
+    rules: [],
+  },
+  {
     file: "apps/server/src/runner-destructure-assignment.ts",
     source: `${aliasedEffectImport}\nlet runSync;\n({ runSync } = Fx);\nrunSync(work);`,
     rules: ["no-direct-effect-runs"],

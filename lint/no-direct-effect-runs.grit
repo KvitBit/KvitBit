@@ -184,19 +184,26 @@ pattern shadow_scope($local) {
   }
 }
 
+pattern runner_key() {
+  or {
+    runner_name(),
+    JsComputedMemberName(expression=JsStringLiteralExpression() as $method) where {
+      $method <: runner_name()
+    }
+  }
+}
+
 pattern runner_fields() {
   or {
     JsObjectBindingPattern(properties=$properties),
     JsObjectAssignmentPattern(properties=$properties)
   } where {
     $properties <: some or {
-      JsObjectBindingPatternShorthandProperty(identifier=$method),
-      JsObjectAssignmentPatternShorthandProperty(identifier=$method),
-      JsObjectBindingPatternProperty(member=$method),
-      JsObjectAssignmentPatternProperty(member=$method),
-      JsObjectBindingPatternProperty(member=JsComputedMemberName(expression=JsStringLiteralExpression() as $method)),
-      JsObjectAssignmentPatternProperty(member=JsComputedMemberName(expression=JsStringLiteralExpression() as $method))
-    } where { $method <: runner_name() }
+      JsObjectBindingPatternShorthandProperty(identifier=runner_name()),
+      JsObjectAssignmentPatternShorthandProperty(identifier=runner_name()),
+      JsObjectBindingPatternProperty(member=runner_key()),
+      JsObjectAssignmentPatternProperty(member=runner_key())
+    }
   }
 }
 
