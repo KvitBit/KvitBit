@@ -54,8 +54,8 @@ if (typeof Bun === "undefined") {
     await expect(submit).toBeEnabled();
     const initialStatus = await status.elementHandle();
 
-    const methods = form.getByRole("group");
-    await methods.getByRole("button", { name: /^(Email link|Odkaz e-mailem)$/ }).click();
+    const methods = form.getByRole("radiogroup");
+    await methods.getByRole("radio", { name: /^(Email link|Odkaz e-mailem)$/ }).click();
     await expect(status.getByText(verifying)).toBeVisible();
     await expect(submit).toBeDisabled();
     const top = await submitTop(submit);
@@ -63,7 +63,7 @@ if (typeof Bun === "undefined") {
     await expect(submit).toBeEnabled();
     expect(await submitTop(submit)).toBeCloseTo(top, 0);
 
-    await methods.getByRole("button", { name: /^(Passkey|Přístupový klíč)$/ }).click();
+    await methods.getByRole("radio", { name: /^(Passkey|Přístupový klíč)$/ }).click();
     await expect(page.getByTestId("auth-passkey-btn")).toBeEnabled();
     await expect(status.getByText(verifying)).toBeHidden();
     expect(await status.evaluate((node, initial) => node === initial, initialStatus)).toBe(true);
@@ -88,7 +88,7 @@ if (typeof Bun === "undefined") {
     await expect(form.getByRole("alert")).toBeVisible();
     expect(await status.evaluate((node, initial) => node === initial, initialStatus)).toBe(true);
 
-    await form.getByRole("button", { name: /Use a passkey|Použít přístupový klíč/ }).click();
+    await form.getByRole("radio", { name: /Use a passkey|Použít přístupový klíč/ }).click();
     await expect(status.getByText(verifying)).toBeVisible();
     await expect(submit).toBeDisabled();
     const top = await submitTop(submit);

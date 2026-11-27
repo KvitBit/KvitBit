@@ -10,6 +10,7 @@ import { utcDateAt } from "./app/utc-date";
 import { demoEnabled, demoRoutes } from "./demo";
 import { installDemoFetch } from "./demo/router";
 import { App, browserAnalytics, type Flags, Navigate } from "./main";
+import { registerUiSdk } from "./ui/sdk";
 
 if (demoEnabled()) installDemoFetch(demoRoutes);
 
@@ -24,7 +25,9 @@ const state: { readonly flags: Flags; readonly state: Renderer.State } | undefin
 const host =
   state === undefined
     ? Layer.unwrap(
-        Effect.map(Router.Router, (router) => {
+        Effect.gen(function* () {
+          yield* Effect.promise(() => registerUiSdk());
+          const router = yield* Router.Router;
           const prefs = loadBrowserPrefs();
           document.documentElement.lang = prefs.locale;
           return BrowserHost.mount(
@@ -39,7 +42,14 @@ const host =
           );
         }),
       )
-    : HtmlHydrate.hydrate(App, state.flags, container, state.state);
+    : Layer.effectDiscard(
+        Effect.gen(function* () {
+          // Adopt server nodes first so HtmlHydrate does not strip attributes added on upgrade.
+          const root = yield* HtmlHydrate.hydrateEffect(App, state.flags, container, state.state);
+          yield* root.adopted;
+          yield* Effect.promise(() => registerUiSdk());
+        }),
+      );
 
 const router = BrowserRouter.layer({ routes: BrowserRoutes });
 const webServices = StartupConfig.layer.pipe(Layer.provideMerge(WebServicesLive));

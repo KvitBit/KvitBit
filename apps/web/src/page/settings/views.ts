@@ -29,6 +29,7 @@ import {
   pageHeader,
   segmented,
   selectField,
+  separator,
   skeleton,
   table,
   tabs,
@@ -549,6 +550,7 @@ const viewBankAccounts = (model: Model, ctx: PageContext, h: Html.H<Message>): M
           dialog(h, {
             id: "kb-remove-bank-dialog",
             title: t.t("settings.bankAccounts.removeTitle"),
+            alert: true,
             body: [
               h.p.children([
                 sCopy(ctx.locale, "bank.removeConfirm", {
@@ -1121,7 +1123,7 @@ const viewReminders = (model: Model, ctx: PageContext, h: Html.H<Message>): Mark
           ]
         : []),
     ]),
-    h.hr.class("kb-divider"),
+    separator(h),
     checkbox(h, {
       id: "kb-reminders-auto-ptd",
       label: sCopy(ctx.locale, "reminders.autoSendPtd"),
@@ -1321,6 +1323,7 @@ const viewTeam = (model: Model, ctx: PageContext, h: Html.H<Message>): Markup<Me
           dialog(h, {
             id: "kb-remove-member-dialog",
             title: t.t("settings.team.removeTitle", { name: removing.name }),
+            alert: true,
             body: [h.p.children([t.t("settings.team.removeBody")])],
             actions: [
               button(h, {
@@ -1342,6 +1345,7 @@ const viewTeam = (model: Model, ctx: PageContext, h: Html.H<Message>): Markup<Me
           dialog(h, {
             id: "kb-leave-workspace-dialog",
             title: t.t("settings.team.leaveTitle", { workspace: ctx.workspace?.name ?? "" }),
+            alert: true,
             body: [h.p.children([t.t("settings.team.leaveBody")])],
             actions: [
               button(h, {
@@ -1511,6 +1515,7 @@ const viewApiKeys = (model: Model, ctx: PageContext, h: Html.H<Message>): Markup
           dialog(h, {
             id: "kb-revoke-apikey-dialog",
             title: t.t("settings.apiKeys.revokeTitle", { name: revoking.name }),
+            alert: true,
             body: [h.p.children([t.t("settings.apiKeys.revokeBody")])],
             actions: [
               button(h, {
@@ -1615,6 +1620,7 @@ const viewConnectedApps = (model: Model, ctx: PageContext, h: Html.H<Message>): 
           dialog(h, {
             id: "kb-revoke-app-dialog",
             title: t.t("settings.connectedApps.revokeTitle", { name: revoking.client.name }),
+            alert: true,
             body: [h.p.children([t.t("settings.connectedApps.revokeBody")])],
             actions: [
               button(h, {
@@ -1726,6 +1732,7 @@ const viewDangerZone = (model: Model, ctx: PageContext, h: Html.H<Message>): Mar
           dialog(h, {
             id: "kb-transfer-confirm-dialog",
             title: t.t("settings.dangerZone.transferConfirm", { name: targetMember.name }),
+            alert: true,
             body: [h.p.children([t.t("settings.dangerZone.transferBody")])],
             actions: [
               button(h, {

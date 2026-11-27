@@ -129,6 +129,11 @@
   align-items: center;
   flex: 1;
 }
+.kb-docs-filters .kb-select-root,
+.kb-card__title .kb-row .kb-select-root {
+  width: auto;
+  min-width: 150px;
+}
 .kb-docs-search {
   min-width: 220px;
   flex: 1 1 240px;

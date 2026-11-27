@@ -5,7 +5,7 @@ description: >-
   changes to apps/web/src, the web entry or build configuration, or
   packages/ui-port/src/theme.
 metadata:
-  sync_commit: "d79521f1f5767ae8537baa093cf23d486a2e13cb"
+  sync_commit: "540c8ef4aff250f71ec6d7ffa172f9e7c8c3ff64"
   bun: "1.4.4"
   node: "24.18.0"
   effect: "4.1.4"
@@ -80,6 +80,23 @@ that record in a verification commit after the product changes.
 [ADR-0005](../../../docs/adr/0005-formal-verification.md)
 
 ## Verification record
+
+At `540c8ef4aff250f71ec6d7ffa172f9e7c8c3ff64`, the `@ui-sdk/core` and `@ui-sdk/web`
+migration passed `apps/web` Biome checks, `apps/web` TypeScript typecheck, and all
+223 tests across 23 `apps/web/test` files (including SSR hydration upgrade without
+node replacement, `@ui-sdk/web/agent` discovery and control driving, and headless
+`HtmlScene` address-paste splitting). The static build contains `dist/index.html`,
+hashed JavaScript and CSS chunks for `@ui-sdk/web` primitives, the lazy feedback
+chunk, the ALTCHA worker, `dist/assets/brand`, and `dist/fonts`.
+
+The auth, smoke, and feedback Playwright suites (81 passed, 1 mobile-only skip)
+passed on port `34189` with one worker across desktop and mobile Chromium profiles.
+The suites verify `ui-select` locale/mode switching and SSR hydration reuse,
+`ui-checkbox` search filter preservation, `ui-segmented-control` container fill and
+arrow-key navigation without focus loss on `/account/appearance`, `ui-dialog` Escape
+dismissal, desktop `ui-menu` workspace switcher open/Escape/shortcut handling,
+address-paste splitting on onboarding, cookieless pageviews, and stable auth submit
+and status layout.
 
 At the recorded product commit, the Playwright auth tests kept the submit
 button in place when sign-in, sign-up, and password reset received a

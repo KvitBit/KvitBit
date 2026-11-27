@@ -1,6 +1,5 @@
 import { Command, type Component, Head, Router, Subscription } from "@effect/ui";
 import { Html, HtmlHead } from "@effect/ui/html";
-import { ViewModels } from "@kvitbit/ui-port";
 import { Array as Arr, Effect, Layer, Option, Schema, Stream } from "effect";
 import { createPageviewTracker } from "./app/analytics";
 import { authFetch, StartupConfig } from "./app/api";
@@ -14,6 +13,7 @@ import { fetchSession, workspaceBySlug } from "./app/session";
 import { shellView } from "./app/shell";
 import { browserDates } from "./app/utc-date";
 import { feedbackSubscription } from "./runtime/feedback-subscription";
+import { matchesShortcut } from "./ui/sdk";
 
 export { Flags, Message, Model } from "./app/root";
 
@@ -265,13 +265,15 @@ export const update = (model: Model, message: Message): UpdateReturn => {
   }
 };
 
+const isApplePlatform = (): boolean =>
+  typeof navigator !== "undefined" &&
+  /Mac|iPhone|iPad|iPod/i.test(navigator.platform || navigator.userAgent);
+
 const shortcut = Subscription.make(
   "workspace-switcher",
   Stream.suspend(() =>
     Stream.fromEventListener<KeyboardEvent>(window, "keydown").pipe(
-      Stream.filter((event) =>
-        Option.isSome(ViewModels.matchShortcut(event, /Mac|iPhone|iPad/.test(navigator.platform))),
-      ),
+      Stream.filter((event) => !event.repeat && matchesShortcut(event, "mod+k", isApplePlatform())),
       Stream.tap((event) => Effect.sync(() => event.preventDefault())),
       Stream.map(() => Message.PressedSwitcherShortcut()),
     ),

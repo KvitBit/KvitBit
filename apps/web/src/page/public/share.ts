@@ -27,6 +27,7 @@ import {
   dl,
   mono,
   segmented,
+  separator,
   skeleton,
   table,
 } from "../../ui/kit";
@@ -593,7 +594,7 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
       ]),
       ...(doc.note !== null || doc.statutoryNotes.length > 0 || doc.branding.footerText !== null
         ? [
-            h.hr.class("kb-divider"),
+            separator(h),
             h.div
               .class("kb-stack")
               .style({ "--kb-gap": "6px" })

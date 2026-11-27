@@ -16,7 +16,7 @@ import * as Remote from "../../app/remote";
 import { href } from "../../app/routing";
 import { lockup } from "../../ui/brand";
 import { type IconName, icon } from "../../ui/icons";
-import { badge, banner, card, linkButton } from "../../ui/kit";
+import { badge, banner, card, linkButton, separator } from "../../ui/kit";
 import { callApi } from "./_shared";
 
 export type Route = RouteOf<"Landing">;
@@ -215,7 +215,7 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
                 badge(h, local(ctx.locale, "previewStatus"), "paid"),
               ]),
             h.span.class("kb-small kb-muted").children([local(ctx.locale, "previewIssuer")]),
-            h.hr.class("kb-divider"),
+            separator(h),
             h.div
               .class("kb-spread")
               .children([

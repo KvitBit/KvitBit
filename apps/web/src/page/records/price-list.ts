@@ -33,6 +33,7 @@ import {
   emptyState,
   page,
   pageHeader,
+  searchInput,
   selectField,
   skeletonTable,
   table,
@@ -481,14 +482,13 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
         .children([
           h.div.class("kb-rec-search").children([
             h.span.class("kb-rec-search__icon").children([icon(h, "search", 16)]),
-            h.input
-              .class("kb-input")
-              .attr("type", "search")
-              .attr("name", "text")
-              .attr("placeholder", tr.t("priceList.search"))
-              .attr("aria-label", tr.t("priceList.search"))
-              .value(model.search)
-              .on("input", ({ value }) => Message.ChangedSearch({ value })),
+            searchInput(h, {
+              name: "text",
+              value: model.search,
+              placeholder: tr.t("priceList.search"),
+              ariaLabel: tr.t("priceList.search"),
+              onInput: (value) => Message.ChangedSearch({ value }),
+            }),
           ]),
           button(h, { label: tr.t("common.action.search"), type: "submit" }),
         ]),
@@ -717,6 +717,7 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
           id: "pricelist-archive-dialog",
           title: tLocal(ctx.locale, "archiveTitle"),
           onClose: Message.CancelledArchive(),
+          alert: true,
           body: [
             h.p.children([tLocal(ctx.locale, "archiveBody", { name: model.confirmArchive.name })]),
           ],

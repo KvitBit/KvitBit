@@ -43,6 +43,7 @@ import {
   page,
   pageHeader,
   selectField,
+  separator,
   skeleton,
   table,
   tabs,
@@ -1307,6 +1308,7 @@ const renderActiveDialog = (
           id: "dlg-cancel",
           title: txt(locale, "dlgCancelTitle"),
           onClose: Message.ClosedDialog(),
+          alert: true,
           body: [
             ...err,
             textField(h, {
@@ -1394,6 +1396,7 @@ const renderActiveDialog = (
           id: "dlg-remove-pay",
           title: txt(locale, "dlgRemovePayTitle"),
           onClose: Message.ClosedDialog(),
+          alert: true,
           body: [
             ...err,
             textField(h, {
@@ -1800,7 +1803,7 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
         ]),
       ...(doc.statutoryNotes.length > 0
         ? [
-            h.hr.class("kb-divider"),
+            separator(h),
             h.div
               .class("kb-stack")
               .children([
