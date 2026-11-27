@@ -1,13 +1,13 @@
-import { Effect } from "effect";
-import { SqlClient } from "effect/sql";
-import type { SqlError } from "effect/sql/SqlError";
+import * as Effect from "effect/Effect";
+import * as SqlClient from "effect/sql/SqlClient";
+import type * as SqlError from "effect/sql/SqlError";
 import { NumberingExhausted, NumberTaken, RowNotFound } from "./errors";
 import type { DocumentKind } from "./tables";
 
 /** Runs `self` in a transaction, or in a savepoint when the caller already opened one. */
 const withSavepoint = <A, E, R>(
   self: Effect.Effect<A, E, R>,
-): Effect.Effect<A, E | SqlError, R | SqlClient.SqlClient> =>
+): Effect.Effect<A, E | SqlError.SqlError, R | SqlClient.SqlClient> =>
   Effect.gen(function* () {
     const sql = yield* SqlClient.SqlClient;
     return yield* sql.withTransaction(self);
@@ -30,14 +30,14 @@ const counterWhere = (sql: SqlClient.SqlClient, key: CounterKey) =>
  */
 export const lockCounter = (
   key: CounterKey,
-): Effect.Effect<number, RowNotFound | SqlError, SqlClient.SqlClient> =>
+): Effect.Effect<number, RowNotFound | SqlError.SqlError, SqlClient.SqlClient> =>
   Effect.gen(function* () {
     const sql = yield* SqlClient.SqlClient;
     const series = yield* sql`
       select 1 from numbering_series
       where workspace_id = ${key.workspaceId} and id = ${key.seriesId}`;
     if (series.length === 0) {
-      return yield* new RowNotFound({
+      return yield* RowNotFound.make({
         table: "numbering_series",
         workspaceId: key.workspaceId,
         id: key.seriesId,
@@ -61,7 +61,7 @@ export const lockCounter = (
 /** The next counter value without locking or creating the row (1 when the period is unused). */
 export const peekCounter = (
   key: CounterKey,
-): Effect.Effect<number, SqlError, SqlClient.SqlClient> =>
+): Effect.Effect<number, SqlError.SqlError, SqlClient.SqlClient> =>
   Effect.gen(function* () {
     const sql = yield* SqlClient.SqlClient;
     const rows = yield* sql<{ readonly next_counter: number }>`
@@ -73,24 +73,18 @@ export const peekCounter = (
  * Moves the counter to `next`. Counters only grow: a lower value, or a counter that does not
  * exist, is a defect. Call it after `lockCounter` in the same transaction.
  */
-export const setCounter = (
-  key: CounterKey,
-  next: number,
-): Effect.Effect<void, SqlError, SqlClient.SqlClient> =>
-  Effect.gen(function* () {
-    const sql = yield* SqlClient.SqlClient;
-    const updated = yield* sql`
+export const setCounter = Effect.fn("Sql.setCounter")(function* (key: CounterKey, next: number) {
+  const sql = yield* SqlClient.SqlClient;
+  const updated = yield* sql`
       update numbering_counters set next_counter = ${next}
       where ${counterWhere(sql, key)} and next_counter <= ${next}
       returning next_counter`;
-    if (updated.length === 0) {
-      return yield* Effect.die(
-        new Error(
-          `sql: numbering counter ${key.seriesId}/${key.period} is missing or above ${next}`,
-        ),
-      );
-    }
-  });
+  if (updated.length === 0) {
+    return yield* Effect.die(
+      new Error(`sql: numbering counter ${key.seriesId}/${key.period} is missing or above ${next}`),
+    );
+  }
+});
 
 export interface Reservation {
   readonly workspaceId: string;
@@ -108,7 +102,7 @@ export interface Reservation {
  */
 export const tryReserveNumber = (
   reservation: Reservation,
-): Effect.Effect<boolean, SqlError, SqlClient.SqlClient> =>
+): Effect.Effect<boolean, SqlError.SqlError, SqlClient.SqlClient> =>
   Effect.gen(function* () {
     const sql = yield* SqlClient.SqlClient;
     const { workspaceId, kind, number } = reservation;
@@ -124,12 +118,12 @@ export const tryReserveNumber = (
 /** `tryReserveNumber` for a hand-picked number (an override): a taken number is `NumberTaken`. */
 export const reserveNumber = (
   reservation: Reservation,
-): Effect.Effect<void, NumberTaken | SqlError, SqlClient.SqlClient> =>
+): Effect.Effect<void, NumberTaken | SqlError.SqlError, SqlClient.SqlClient> =>
   Effect.flatMap(tryReserveNumber(reservation), (reserved) =>
     reserved
       ? Effect.void
       : Effect.fail(
-          new NumberTaken({
+          NumberTaken.make({
             workspaceId: reservation.workspaceId,
             kind: reservation.kind,
             number: reservation.number,
@@ -185,7 +179,7 @@ export const allocateNumber = (
   input: AllocateNumberInput,
 ): Effect.Effect<
   AllocatedNumber,
-  RowNotFound | NumberingExhausted | SqlError,
+  RowNotFound | NumberingExhausted | SqlError.SqlError,
   SqlClient.SqlClient
 > =>
   Effect.gen(function* () {
@@ -199,7 +193,7 @@ export const allocateNumber = (
       for share`;
     const row = rows[0];
     if (row === undefined) {
-      return yield* new RowNotFound({ table: "numbering_series", workspaceId, id: seriesId });
+      return yield* RowNotFound.make({ table: "numbering_series", workspaceId, id: seriesId });
     }
     const series: SeriesSnapshot = { kind: row.kind, pattern: row.pattern };
     const period = input.period(series);
@@ -209,19 +203,17 @@ export const allocateNumber = (
     for (let attempt = 0; attempt <= maxSkips; attempt++) {
       const counter = firstCounter + attempt;
       const number = input.format({ ...series, period, counter });
-      const reserved = yield* tryReserveNumber({
-        workspaceId,
-        kind: series.kind,
-        number,
-        seriesId,
-        ...(input.documentId === undefined ? {} : { documentId: input.documentId }),
-      });
+      const reservation = { workspaceId, kind: series.kind, number, seriesId };
+      const { documentId } = input;
+      const reserved = yield* tryReserveNumber(
+        documentId === undefined ? reservation : { ...reservation, documentId },
+      );
       if (reserved) {
         yield* setCounter(key, counter + 1);
         return { number, counter, period, kind: series.kind };
       }
     }
-    return yield* new NumberingExhausted({
+    return yield* NumberingExhausted.make({
       seriesId,
       period,
       firstCounter,

@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { generateId } from "@kvitbit/adapters/auth";
 import {
   allocateNumber,
   checkRevision,
@@ -16,8 +17,11 @@ import {
   tryReserveNumber,
   updateWithRevision,
 } from "@kvitbit/adapters/sql";
-import { Effect, Option } from "effect";
-import { SqlClient } from "effect/sql";
+import * as Arr from "effect/Array";
+import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
+import * as Str from "effect/String";
+import * as SqlClient from "effect/sql/SqlClient";
 import { type MigratedPglite, migratedPglite, seedWorkspace } from "./pglite";
 
 let db: MigratedPglite;
@@ -30,8 +34,10 @@ afterAll(async () => {
   await db.close();
 });
 
+const INVALID_PATCH = /is not allowed|is undefined/;
+
 const format = ({ period, counter }: NumberCandidate) =>
-  `FV${period}${String(counter).padStart(4, "0")}`;
+  `FV${period}${Str.padStart(4, "0")(String(counter))}`;
 
 const failure = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
   effect.pipe(
@@ -58,10 +64,10 @@ const reservationsOf = (workspaceId: string) =>
     const sql = yield* SqlClient.SqlClient;
     const rows = yield* sql<{ number: string }>`
       select number from number_reservations where workspace_id = ${workspaceId} order by number`;
-    return rows.map((r) => r.number);
+    return Arr.map(rows, (row) => row.number);
   });
 
-describe("lockRowForUpdate", () => {
+describe("row locking", () => {
   test("returns the row in its own Workspace inside a transaction", async () => {
     const row = await db.run(
       Effect.gen(function* () {
@@ -89,9 +95,11 @@ describe("lockRowForUpdate", () => {
       Effect.gen(function* () {
         const a = yield* seedWorkspace;
         const b = yield* seedWorkspace;
-        const own = yield* lockRowForUpdate("workspaces", a.workspaceId, a.workspaceId);
-        const other = yield* failure(lockRowForUpdate("workspaces", b.workspaceId, a.workspaceId));
-        return [own, other] as const;
+        const ownedRow = yield* lockRowForUpdate("workspaces", a.workspaceId, a.workspaceId);
+        const foreignRow = yield* failure(
+          lockRowForUpdate("workspaces", b.workspaceId, a.workspaceId),
+        );
+        return [ownedRow, foreignRow] as const;
       }),
     );
     expect(own.id).toBeDefined();
@@ -103,9 +111,9 @@ describe("lockRowForUpdate", () => {
       Effect.gen(function* () {
         const { workspaceId, seriesId } = yield* seedWorkspace;
         const row = yield* lockRowForUpdate("numbering_series", workspaceId, seriesId);
-        const ok = yield* failure(checkRevision("numbering_series", row, 1));
-        const stale = yield* failure(checkRevision("numbering_series", row, 2));
-        return [ok, stale] as const;
+        const currentCheck = yield* failure(checkRevision("numbering_series", row, 1));
+        const staleCheck = yield* failure(checkRevision("numbering_series", row, 2));
+        return [currentCheck, staleCheck] as const;
       }),
     );
     expect(ok).toBe("succeeded");
@@ -118,7 +126,12 @@ describe("lockRowForUpdate", () => {
 
   test("a table outside the whitelist is a defect", async () => {
     const run = db.run(
-      lockRowForUpdate("users; drop table workspaces" as "documents", crypto.randomUUID(), "x"),
+      lockRowForUpdate(
+        // @ts-expect-error Exercise rejection when an untyped caller supplies a table name.
+        "invalid;sql",
+        generateId(),
+        "x",
+      ),
     );
     await expect(run).rejects.toThrow("not a revisioned table");
   });
@@ -129,12 +142,18 @@ describe("whitelist", () => {
     const errors = await db.run(
       Effect.gen(function* () {
         const { workspaceId } = yield* seedWorkspace;
-        const missing = crypto.randomUUID();
-        return yield* Effect.forEach(revisionedTableNames, (table) =>
-          Effect.all([
-            failure(lockRowForUpdate(table, workspaceId, missing)),
-            failure(updateWithRevision(table, workspaceId, missing, 1, {})),
-          ]),
+        const missing = generateId();
+        return yield* Effect.forEach(
+          revisionedTableNames,
+          (table) =>
+            Effect.all(
+              [
+                failure(lockRowForUpdate(table, workspaceId, missing)),
+                failure(updateWithRevision(table, workspaceId, missing, 1, {})),
+              ],
+              { concurrency: 1 },
+            ),
+          { concurrency: 1 },
         );
       }),
     );
@@ -173,11 +192,11 @@ describe("updateWithRevision", () => {
       Effect.gen(function* () {
         const { workspaceId, seriesId } = yield* seedWorkspace;
         yield* updateWithRevision("numbering_series", workspaceId, seriesId, 1, { name: "B" });
-        const error = yield* failure(
+        const conflict = yield* failure(
           updateWithRevision("numbering_series", workspaceId, seriesId, 1, { name: "C" }),
         );
-        const after = yield* lockRowForUpdate("numbering_series", workspaceId, seriesId);
-        return [error, after] as const;
+        const storedRow = yield* lockRowForUpdate("numbering_series", workspaceId, seriesId);
+        return [conflict, storedRow] as const;
       }),
     );
     expect(error).toMatchObject({
@@ -193,11 +212,11 @@ describe("updateWithRevision", () => {
       Effect.gen(function* () {
         const a = yield* seedWorkspace;
         const b = yield* seedWorkspace;
-        const error = yield* failure(
+        const conflict = yield* failure(
           updateWithRevision("numbering_series", b.workspaceId, a.seriesId, 1, { name: "X" }),
         );
-        const after = yield* lockRowForUpdate("numbering_series", a.workspaceId, a.seriesId);
-        return [error, after] as const;
+        const storedRow = yield* lockRowForUpdate("numbering_series", a.workspaceId, a.seriesId);
+        return [conflict, storedRow] as const;
       }),
     );
     expect(error).toMatchObject({ _tag: "RowNotFound" });
@@ -218,7 +237,8 @@ describe("updateWithRevision", () => {
           return yield* updateWithRevision("numbering_series", workspaceId, seriesId, 1, patch);
         }),
       );
-      await expect(run).rejects.toThrow(/is not allowed|is undefined/);
+      // biome-ignore lint/performance/noAwaitInLoops: Finish each query before reusing the client.
+      await expect(run).rejects.toThrow(INVALID_PATCH);
     }
   });
 });
@@ -230,16 +250,20 @@ describe("allocateNumber", () => {
         const { workspaceId, seriesId } = yield* seedWorkspace;
         const allocate = (period: string) =>
           transaction(allocateNumber({ workspaceId, seriesId, period: () => period, format }));
-        const numbers = [
+        const numbersResult = [
           yield* allocate("2026"),
           yield* allocate("2026"),
           yield* allocate("2027"),
           yield* allocate("2026"),
         ];
-        return [numbers, yield* counterOf(seriesId, "2026"), yield* counterOf(seriesId, "2027")];
+        return [
+          numbersResult,
+          yield* counterOf(seriesId, "2026"),
+          yield* counterOf(seriesId, "2027"),
+        ];
       }),
     );
-    expect(numbers.map((n) => n.number)).toEqual([
+    expect(Arr.map(numbers, (number) => number.number)).toEqual([
       "FV20260001",
       "FV20260002",
       "FV20270001",
@@ -254,17 +278,17 @@ describe("allocateNumber", () => {
     const seen = await db.run(
       Effect.gen(function* () {
         const { workspaceId, seriesId } = yield* seedWorkspace;
-        const seen: Array<NumberCandidate> = [];
+        const seenResult: Array<NumberCandidate> = [];
         yield* allocateNumber({
           workspaceId,
           seriesId,
           period: () => "all",
           format: (candidate) => {
-            seen.push(candidate);
+            seenResult.push(candidate);
             return format(candidate);
           },
         });
-        return seen;
+        return seenResult;
       }),
     );
     expect(seen).toEqual([
@@ -279,7 +303,7 @@ describe("allocateNumber", () => {
         return yield* allocateNumber({
           workspaceId,
           seriesId,
-          period: ({ pattern }) => (pattern.includes("{MM}") ? "2026-03" : "2026"),
+          period: ({ pattern }) => (Str.includes("{MM}")(pattern) ? "2026-03" : "2026"),
           format,
         });
       }),
@@ -311,13 +335,13 @@ describe("allocateNumber", () => {
         const { workspaceId, seriesId } = yield* seedWorkspace;
         yield* reserveNumber({ workspaceId, kind: "invoice", number: "FV20260001" });
         yield* reserveNumber({ workspaceId, kind: "invoice", number: "FV20260002" });
-        const allocated = yield* allocateNumber({
+        const allocation = yield* allocateNumber({
           workspaceId,
           seriesId,
           period: () => "2026",
           format,
         });
-        return [allocated, yield* reservationsOf(workspaceId), yield* counterOf(seriesId, "2026")];
+        return [allocation, yield* reservationsOf(workspaceId), yield* counterOf(seriesId, "2026")];
       }),
     );
     expect(allocated).toMatchObject({ number: "FV20260003", counter: 3 });
@@ -329,18 +353,17 @@ describe("allocateNumber", () => {
     const [rolledBack, reserved, retried] = await db.run(
       Effect.gen(function* () {
         const { workspaceId, seriesId } = yield* seedWorkspace;
-        const rolledBack = yield* failure(
-          transaction(
-            allocateNumber({ workspaceId, seriesId, period: () => "2026", format }).pipe(
-              Effect.andThen(Effect.fail("issue failed" as const)),
-            ),
-          ),
-        );
-        const reserved = yield* reservationsOf(workspaceId);
-        const retried = yield* transaction(
+        const rollbackOutcome = yield* allocateNumber({
+          workspaceId,
+          seriesId,
+          period: () => "2026",
+          format,
+        }).pipe(Effect.andThen(Effect.fail("issue failed" as const)), transaction, failure);
+        const reservations = yield* reservationsOf(workspaceId);
+        const retryOutcome = yield* transaction(
           allocateNumber({ workspaceId, seriesId, period: () => "2026", format }),
         );
-        return [rolledBack, reserved, retried] as const;
+        return [rollbackOutcome, reservations, retryOutcome] as const;
       }),
     );
     expect(rolledBack).toBe("issue failed");
@@ -371,7 +394,7 @@ describe("allocateNumber", () => {
       Effect.gen(function* () {
         const { workspaceId, seriesId } = yield* seedWorkspace;
         yield* reserveNumber({ workspaceId, kind: "invoice", number: "CONST" });
-        const error = yield* failure(
+        const conflict = yield* failure(
           allocateNumber({
             workspaceId,
             seriesId,
@@ -380,9 +403,10 @@ describe("allocateNumber", () => {
             maxSkips: 5,
           }),
         );
-        return [error, yield* counterOf(seriesId, "2026")] as const;
+        return [conflict, yield* counterOf(seriesId, "2026")] as const;
       }),
     );
+    // biome-ignore lint/security/noSecrets: Public SQL error tag.
     expect(error).toMatchObject({ _tag: "NumberingExhausted", firstCounter: 1, attempts: 6 });
     expect(counter).toBeUndefined();
   });
@@ -396,16 +420,16 @@ describe("reserveNumber", () => {
         const b = yield* seedWorkspace;
         const number = "FV20269999";
         yield* reserveNumber({ workspaceId: a.workspaceId, kind: "invoice", number });
-        const taken = yield* failure(
+        const takenReservation = yield* failure(
           reserveNumber({ workspaceId: a.workspaceId, kind: "invoice", number }),
         );
-        const otherKind = yield* failure(
+        const otherKindResult = yield* failure(
           reserveNumber({ workspaceId: a.workspaceId, kind: "proforma", number }),
         );
-        const otherWorkspace = yield* failure(
+        const otherWorkspaceResult = yield* failure(
           reserveNumber({ workspaceId: b.workspaceId, kind: "invoice", number }),
         );
-        return [taken, otherKind, otherWorkspace] as const;
+        return [takenReservation, otherKindResult, otherWorkspaceResult] as const;
       }),
     );
     expect(taken).toMatchObject({ _tag: "NumberTaken", kind: "invoice", number: "FV20269999" });
@@ -436,14 +460,14 @@ describe("counters and reservations", () => {
       Effect.gen(function* () {
         const { workspaceId, seriesId } = yield* seedWorkspace;
         const key = { workspaceId, seriesId, period: "2026-05" };
-        const unused = yield* peekCounter(key);
-        const created = yield* counterOf(seriesId, "2026-05");
-        const locked = yield* transaction(lockCounter(key));
+        const unusedResult = yield* peekCounter(key);
+        const createdResult = yield* counterOf(seriesId, "2026-05");
+        const lockedResult = yield* transaction(lockCounter(key));
         yield* setCounter(key, 7);
-        const grown = yield* peekCounter(key);
+        const grownResult = yield* peekCounter(key);
         yield* setCounter(key, 7);
-        const same = yield* peekCounter(key);
-        return [unused, locked, grown, same, created] as const;
+        const sameResult = yield* peekCounter(key);
+        return [unusedResult, lockedResult, grownResult, sameResult, createdResult] as const;
       }),
     );
     expect([unused, locked, grown, same]).toEqual([1, 1, 7, 7]);
@@ -475,10 +499,10 @@ describe("counters and reservations", () => {
         const a = yield* seedWorkspace;
         const b = yield* seedWorkspace;
         const foreign = { workspaceId: b.workspaceId, seriesId: a.seriesId, period: "2026" };
-        const before = yield* failure(lockCounter(foreign));
+        const beforeResult = yield* failure(lockCounter(foreign));
         yield* lockCounter({ ...foreign, workspaceId: a.workspaceId });
-        const after = yield* failure(lockCounter(foreign));
-        return [before, after] as const;
+        const storedRow = yield* failure(lockCounter(foreign));
+        return [beforeResult, storedRow] as const;
       }),
     );
     expect(before).toMatchObject({ _tag: "RowNotFound", table: "numbering_series" });
@@ -492,10 +516,10 @@ describe("counters and reservations", () => {
         const reservation = { workspaceId, kind: "invoice" as const, number: "X-1" };
         return yield* transaction(
           Effect.gen(function* () {
-            const first = yield* tryReserveNumber(reservation);
-            const second = yield* tryReserveNumber(reservation);
-            const afterwards = yield* tryReserveNumber({ ...reservation, number: "X-2" });
-            return [first, second, afterwards] as const;
+            const firstWriter = yield* tryReserveNumber(reservation);
+            const secondWriter = yield* tryReserveNumber(reservation);
+            const afterwardsResult = yield* tryReserveNumber({ ...reservation, number: "X-2" });
+            return [firstWriter, secondWriter, afterwardsResult] as const;
           }),
         );
       }),
@@ -514,18 +538,18 @@ describe("request log", () => {
       Effect.gen(function* () {
         const { workspaceId } = yield* seedWorkspace;
         const scope = { workspaceId };
-        const claimed = yield* transaction(
+        const claim = yield* transaction(
           claimRequest(scope, key, { now }).pipe(
             Effect.tap(() => completeRequest(scope, { ...done, result: { id: "doc-1" } })),
           ),
         );
-        const entry = yield* lookupRequest(scope, key);
-        const again = yield* transaction(claimRequest(scope, key, { now }));
-        return [claimed, entry, again] as const;
+        const storedEntry = yield* lookupRequest(scope, key);
+        const replay = yield* transaction(claimRequest(scope, key, { now }));
+        return [claim, storedEntry, replay] as const;
       }),
     );
     expect(claimed).toEqual({ _tag: "Claimed" });
-    expect(Option.getOrThrow(entry)).toMatchObject({ ...done, result: { id: "doc-1" } });
+    expect(entry.pipe(Option.getOrThrow)).toMatchObject({ ...done, result: { id: "doc-1" } });
     expect(Option.getOrThrow(entry).createdAt).toStartWith("2026-11-23T10:00:00");
     expect(again).toMatchObject({
       _tag: "Existing",
@@ -538,17 +562,15 @@ describe("request log", () => {
       Effect.gen(function* () {
         const { workspaceId } = yield* seedWorkspace;
         const scope = { workspaceId };
-        yield* failure(
-          transaction(
-            claimRequest(scope, key, { now }).pipe(
-              Effect.tap(() => completeRequest(scope, { ...done, result: "x" })),
-              Effect.andThen(Effect.fail("work failed" as const)),
-            ),
-          ),
+        yield* claimRequest(scope, key, { now }).pipe(
+          Effect.tap(() => completeRequest(scope, { ...done, result: "x" })),
+          Effect.andThen(Effect.fail("work failed" as const)),
+          transaction,
+          failure,
         );
-        const after = yield* lookupRequest(scope, key);
-        const reclaimed = yield* transaction(claimRequest(scope, key, { now }));
-        return [after, reclaimed] as const;
+        const storedRow = yield* lookupRequest(scope, key);
+        const newClaim = yield* transaction(claimRequest(scope, key, { now }));
+        return [storedRow, newClaim] as const;
       }),
     );
     expect(Option.isNone(after)).toBe(true);
@@ -566,12 +588,12 @@ describe("request log", () => {
             Effect.tap(() => completeRequest(old, { ...done, result: 1 })),
           ),
         );
-        const expired = yield* transaction(claimRequest(old, key, { now }));
+        const expiredResult = yield* transaction(claimRequest(old, key, { now }));
         const abandoned = { workspaceId: ws2.workspaceId };
         yield* transaction(claimRequest(abandoned, key, { now }));
-        const lookup = yield* lookupRequest(abandoned, key);
-        const pending = yield* transaction(claimRequest(abandoned, key, { now }));
-        return [expired, pending, lookup] as const;
+        const lookupResult = yield* lookupRequest(abandoned, key);
+        const pendingResult = yield* transaction(claimRequest(abandoned, key, { now }));
+        return [expiredResult, pendingResult, lookupResult] as const;
       }),
     );
     expect(expired._tag).toBe("Claimed");
@@ -601,7 +623,7 @@ describe("request log", () => {
         const sql = yield* SqlClient.SqlClient;
         const ws1 = yield* seedWorkspace;
         const ws2 = yield* seedWorkspace;
-        const userId = `user-${crypto.randomUUID()}`;
+        const userId = `user-${generateId()}`;
         yield* sql`insert into auth.user (id, name, email, email_verified)
           values (${userId}, 'U', ${`${userId}@example.test`}, true)`;
         const claimDone = (scope: { workspaceId: string } | { userId: string }) =>
@@ -618,7 +640,12 @@ describe("request log", () => {
         ];
       }),
     );
-    expect(outcomes.map((o) => o._tag)).toEqual(["Claimed", "Claimed", "Claimed", "Existing"]);
+    expect(Arr.map(outcomes, (outcome) => outcome._tag)).toEqual([
+      "Claimed",
+      "Claimed",
+      "Claimed",
+      "Existing",
+    ]);
   });
 
   test("a claim belongs to its outermost transaction", async () => {
@@ -636,7 +663,7 @@ describe("request log", () => {
     const nested = db.run(
       Effect.gen(function* () {
         const { workspaceId } = yield* seedWorkspace;
-        return yield* transaction(transaction(claimRequest({ workspaceId }, key, { now })));
+        return yield* claimRequest({ workspaceId }, key, { now }).pipe(transaction, transaction);
       }),
     );
     await expect(nested).rejects.toThrow("outermost transaction");
@@ -655,7 +682,7 @@ describe("request log", () => {
       Effect.gen(function* () {
         const sql = yield* SqlClient.SqlClient;
         const { workspaceId } = yield* seedWorkspace;
-        const userId = `user-${crypto.randomUUID()}`;
+        const userId = `user-${generateId()}`;
         yield* sql`insert into auth.user (id, name, email, email_verified)
           values (${userId}, 'U', ${`${userId}@example.test`}, true)`;
         yield* sql`insert into request_log
@@ -693,7 +720,7 @@ describe("request log", () => {
   });
 
   test("claim and complete outside a transaction, or completing an unclaimed key, are defects", async () => {
-    const scope = { workspaceId: crypto.randomUUID() };
+    const scope = { workspaceId: generateId() };
     await expect(db.run(claimRequest(scope, key, { now }))).rejects.toThrow(
       "must run inside a transaction",
     );
@@ -728,10 +755,16 @@ describe("transactionWithRetry", () => {
         const { workspaceId, seriesId } = yield* seedWorkspace;
         return yield* transactionWithRetry(
           lockRowForUpdate("numbering_series", workspaceId, seriesId).pipe(
-            Effect.andThen((row) =>
-              updateWithRevision("numbering_series", workspaceId, seriesId, Number(row.revision), {
-                name: "Locked then updated",
-              }),
+            Effect.andThen((lockedRow) =>
+              updateWithRevision(
+                "numbering_series",
+                workspaceId,
+                seriesId,
+                Number(lockedRow.revision),
+                {
+                  name: "Locked then updated",
+                },
+              ),
             ),
           ),
         );
@@ -743,6 +776,7 @@ describe("transactionWithRetry", () => {
   test("reruns the transaction after a deadlock or serialization failure", async () => {
     for (const code of ["40P01", "40001"]) {
       let attempts = 0;
+      // biome-ignore lint/performance/noAwaitInLoops: The cases share one SQL connection.
       const result = await db.run(
         transactionWithRetry(
           Effect.suspend(() => {
@@ -776,24 +810,19 @@ describe("transactionWithRetry", () => {
   test("does not retry domain failures or other SQL errors", async () => {
     let attempts = 0;
     const errors = await db.run(
-      Effect.all([
-        failure(
-          transactionWithRetry(
-            Effect.suspend(() => {
-              attempts += 1;
-              return Effect.fail("nope" as const);
-            }),
-          ),
-        ),
-        failure(
-          transactionWithRetry(
-            Effect.suspend(() => {
-              attempts += 1;
-              return raise("23505");
-            }),
-          ),
-        ),
-      ]),
+      Effect.all(
+        [
+          Effect.suspend(() => {
+            attempts += 1;
+            return Effect.fail("nope" as const);
+          }).pipe(transactionWithRetry, failure),
+          Effect.suspend(() => {
+            attempts += 1;
+            return raise("23505");
+          }).pipe(transactionWithRetry, failure),
+        ],
+        { concurrency: 1 },
+      ),
     );
     expect(errors[0]).toBe("nope");
     expect(errors[1]).toMatchObject({ _tag: "SqlError" });
@@ -815,7 +844,7 @@ describe("transactionWithRetry", () => {
   });
 
   test("inside another transaction it is a defect", async () => {
-    await expect(db.run(transaction(transactionWithRetry(Effect.void)))).rejects.toThrow(
+    await expect(db.run(Effect.void.pipe(transactionWithRetry, transaction))).rejects.toThrow(
       "outermost transaction",
     );
   });
