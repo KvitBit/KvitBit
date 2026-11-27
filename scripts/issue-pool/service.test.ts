@@ -18,7 +18,7 @@ const claimLabel = "visual-feedback:claimed";
 switch (executable) {
   case "gh": {
     const path = ["--paginate", "--method"].includes(args[3]) ? args[5] : args[3];
-    const repo = fixture.repository ?? { id: 100, full_name: "totalolage/kvitbit", owner: { id: 1, type: "User" } };
+    const repo = fixture.repository ?? { id: 100, full_name: "KvitBit/KvitBit", owner: { id: 1, type: "User" } };
     const base = "repos/" + repo.full_name;
     if (fixture.githubFailure) process.exit(67);
     if (path === base || (fixture.aliases ?? []).includes(path)) {
@@ -56,7 +56,7 @@ switch (executable) {
   }
   case "git": {
     if (args.slice(2).join(" ") === "remote get-url origin") {
-      process.stdout.write(fixture.origins?.[args[1]] ?? fixture.origin ?? "git@github.com:totalolage/kvitbit.git");
+      process.stdout.write(fixture.origins?.[args[1]] ?? fixture.origin ?? "git@github.com:KvitBit/KvitBit.git");
     } else if (args[2] === "fetch") {
       if (fixture.fetchFailure) process.exit(69);
     } else if (args[2] === "for-each-ref") {
@@ -104,7 +104,7 @@ const thread = (
   messages: [
     {
       role: "user",
-      text: `$full-send\n\n${repoId === null ? "" : `<!-- issue-pool-repository-id:${repoId} -->\n\n`}Own https://github.com/totalolage/kvitbit/issues/${number} through investigation.`,
+      text: `$full-send\n\n${repoId === null ? "" : `<!-- issue-pool-repository-id:${repoId} -->\n\n`}Own https://github.com/KvitBit/KvitBit/issues/${number} through investigation.`,
     },
   ],
 });
@@ -252,7 +252,7 @@ testCli(
     expect(pass.status).toBe(0);
     expect(pass.result).toMatchObject({
       apply: false,
-      repo: "totalolage/kvitbit",
+      repo: "KvitBit/KvitBit",
       plannedAssignments: [4, 7],
       started: [],
     });
@@ -271,7 +271,7 @@ testCli(
     const effects = writes(pass.calls);
     expect(effects.map(({ executable }) => executable)).toEqual(["git", "gh", "t3", "gh", "t3"]);
     expect(effects[0]?.args).toEqual(["-C", project, "fetch", "origin", "main"]);
-    expect(effects[1]?.args).toContain("repos/totalolage/kvitbit/issues/6/labels");
+    expect(effects[1]?.args).toContain("repos/KvitBit/KvitBit/issues/6/labels");
     expect(starts(pass.calls)[0]).toMatchObject({
       args: [
         "thread",
@@ -293,7 +293,7 @@ testCli(
     expect(brief).toStartWith("$full-send\n");
     for (const text of [
       "<!-- issue-pool-repository-id:100 -->",
-      "https://github.com/totalolage/kvitbit/issues/6",
+      "https://github.com/KvitBit/KvitBit/issues/6",
       "Fixes #6",
       "AGENTS.md",
       "verify-*",
@@ -495,9 +495,9 @@ testCli("rejects cross-repository launch and relay", async ({ run, setFixture, s
   const github = {
     repository,
     otherRepositories: {
-      "repos/totalolage/kvitbit": {
+      "repos/KvitBit/KvitBit": {
         id: 100,
-        full_name: "totalolage/kvitbit",
+        full_name: "KvitBit/KvitBit",
         owner: { id: 1, type: "User" },
       },
     },
@@ -534,11 +534,12 @@ testCli(
     await setFixture({
       repository: { id: 100, full_name: "KvitBit/KvitBit", owner: { id: 1, type: "User" } },
       aliases: ["repos/totalolage/kvitbit"],
+      origin: "git@github.com:totalolage/kvitbit.git",
       issues: [issue(4, claimedLabel)],
       threads: [thread(4)],
       comments: { 4: [comment(50, 1, humanNeeded), comment(51, 1, "Use Firefox")] },
     });
-    const pass = await run("--apply", "--state", state);
+    const pass = await run("--apply", "--state", state, "--repo", "totalolage/kvitbit");
     expect(pass.status).toBe(0);
     expect(pass.result).toMatchObject({ repo: "KvitBit/KvitBit", adopted: [4], replied: [51] });
     expect(writes(pass.calls)).toEqual(sends(pass.calls));
@@ -554,7 +555,7 @@ testCli(
     await setFixture({
       repository: { id: 101, full_name: "another/feedback", owner: { id: 1, type: "User" } },
       origins: {
-        [project]: "https://github.com/totalolage/kvitbit.git",
+        [project]: "https://github.com/KvitBit/KvitBit.git",
         [nested]: "https://github.com/another/feedback.git",
       },
       issues: [issue(4)],
@@ -585,7 +586,7 @@ testCli(
 
     const reassignedName = {
       repository: { id: 200, full_name: "other/new", owner: { id: 1, type: "User" } },
-      aliases: ["repos/totalolage/kvitbit"],
+      aliases: ["repos/KvitBit/KvitBit"],
       origin: "https://github.com/other/new.git",
       threads: [worker],
       issues: [issue(4, claimedLabel)],
