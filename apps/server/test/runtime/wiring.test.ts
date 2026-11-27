@@ -161,7 +161,11 @@ describe("wiring: secrets (HKDF ShareLinkKeys & InvitationTokens)", () => {
       ),
     );
 
-    expect(k1.length).toBe(32);
+    // These bytes were produced by the original Node HKDF implementation.
+    expect([...k1]).toEqual([
+      130, 54, 186, 217, 90, 29, 193, 3, 62, 20, 79, 104, 41, 111, 202, 186, 173, 251, 160, 225, 39,
+      211, 138, 188, 162, 224, 246, 48, 231, 109, 37, 202,
+    ]);
     expect(Buffer.from(k1).equals(Buffer.from(k1Again))).toBe(true);
     expect(Buffer.from(k1).equals(Buffer.from(k2))).toBe(false);
     expect(Buffer.from(k1).equals(Buffer.from(invKey))).toBe(false);
@@ -207,7 +211,11 @@ describe("wiring: secrets (HKDF ShareLinkKeys & InvitationTokens)", () => {
 
     expect(result.t0a).toBe(result.t0b);
     expect(result.t0a).not.toBe(result.t1);
-    expect(result.t0a.length).toBeGreaterThan(20);
+    // Preserve existing invitation tokens across changes to the HMAC implementation.
+    expect([...Buffer.from(result.t0a, "base64url")]).toEqual([
+      218, 205, 9, 3, 189, 15, 128, 237, 14, 32, 88, 182, 43, 170, 251, 45, 33, 1, 86, 220, 77, 248,
+      187, 68, 22, 237, 29, 92, 151, 75, 247, 184,
+    ]);
   });
 });
 

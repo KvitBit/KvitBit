@@ -9,7 +9,6 @@ import {
   Locale,
   NumberingSeriesId,
   PaymentMethod,
-  WorkspaceId,
 } from "@kvitbit/domain/contract";
 import * as Arr from "effect/Array";
 import * as Effect from "effect/Effect";
@@ -21,7 +20,7 @@ import * as Schema from "effect/Schema";
 import * as Str from "effect/String";
 import * as SqlClient from "effect/sql/SqlClient";
 import type * as Types from "effect/Types";
-import { asNumberArray, asStringArray, foldText, toPgArray } from "../codec";
+import { asNumberArray, asStringArray, decodeWorkspaceId, foldText, toPgArray } from "../codec";
 import { col, type DbRow, makeTable, type TableSpec } from "../table";
 
 type ContactRow = Effect.Success<ReturnType<ContactsRepo["Service"]["get"]>>;
@@ -154,7 +153,7 @@ const spec: TableSpec<ContactRow> = {
       stored,
       (row): ContactRow => ({
         id: ContactId.make(row.id),
-        workspaceId: WorkspaceId.make(row.workspace_id),
+        workspaceId: decodeWorkspaceId(row.workspace_id),
         revision: Number(row.revision),
         roles: row.roles,
         name: row.name,

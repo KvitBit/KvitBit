@@ -2,7 +2,7 @@
  * Small serialization helpers shared by the SQL repositories: BigDecimal <-> text, JSONB parsing,
  * `VatBreakdown` JSON encoding/decoding, and diacritics-insensitive text folding matching core.
  */
-import { type IsoDate, VatBreakdown, VatBucket } from "@kvitbit/domain/contract";
+import { type IsoDate, VatBreakdown, VatBucket, WorkspaceId } from "@kvitbit/domain/contract";
 import * as Arr from "effect/Array";
 import * as BigDecimal from "effect/BigDecimal";
 import * as Fn from "effect/Function";
@@ -22,6 +22,12 @@ export const decodeStored = <S extends Schema.ConstraintDecoder<unknown>>(schema
   const decode = Schema.decodeResult(schema);
   return (value: DbValue | object): S["Type"] => Result.getOrThrow(decode(value));
 };
+
+const decodeUuid = decodeStored(StoredUuid);
+
+/** Database workspace keys can predate the UUIDv7 rule for new IDs. */
+export const decodeWorkspaceId = (value: DbValue): WorkspaceId =>
+  WorkspaceId.make(decodeUuid(value), { disableChecks: true });
 
 const isString = Schema.is(Schema.String);
 const decodeJsonText = decodeStored(Schema.fromJsonString(Schema.Json));

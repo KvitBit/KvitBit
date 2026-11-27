@@ -1,11 +1,12 @@
 /** `NumberingSeriesRepo` over `numbering_series`. */
 import { NumberingSeriesRepo } from "@kvitbit/core";
-import { DocumentKind, NumberingSeriesId, WorkspaceId } from "@kvitbit/domain/contract";
+import { DocumentKind, NumberingSeriesId } from "@kvitbit/domain/contract";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
+import { decodeWorkspaceId } from "../codec";
 import { decodeEach, makeTable, type TableSpec } from "../table";
 
 type SeriesRow = Effect.Success<ReturnType<NumberingSeriesRepo["Service"]["get"]>>;
@@ -29,7 +30,7 @@ const spec: TableSpec<SeriesRow> = {
     const stored = Option.getOrThrow(decodeRow(row));
     return {
       id: NumberingSeriesId.make(stored.id),
-      workspaceId: WorkspaceId.make(stored.workspace_id),
+      workspaceId: decodeWorkspaceId(stored.workspace_id),
       revision: Number(row.revision),
       kind: stored.kind,
       name: stored.name,

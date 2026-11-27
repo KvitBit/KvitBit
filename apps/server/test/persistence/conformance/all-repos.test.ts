@@ -7,6 +7,7 @@
 
 import { describe, expect, test } from "bun:test";
 import {
+  ContactsRepo,
   DeliveriesRepo,
   DocumentsRepo,
   exportJob,
@@ -309,6 +310,20 @@ describe("PersistenceLive SQL conformance (all 12 CoreRepos over PGlite)", () =>
             const storedWorkspace = yield* workspacesRepo.findWorkspaceBySlug(legacySlug);
             const storedWorkspaceId = Option.getOrThrow(storedWorkspace).id;
             expect<string>(storedWorkspaceId).toBe(legacyWorkspaceId);
+
+            const legacyContactId = ContactId.make("01900000-0000-7000-8000-0000000000dd");
+            yield* sql`insert into contacts (id, workspace_id, name)
+              values (${legacyContactId}, ${storedWorkspaceId}, 'Legacy Customer')`;
+            const contactsRepo = yield* ContactsRepo;
+            const legacyContact = yield* contactsRepo.get(storedWorkspaceId, legacyContactId);
+            expect(legacyContact.workspaceId).toBe(storedWorkspaceId);
+            const foundContacts = yield* contactsRepo.search(storedWorkspaceId, {
+              text: "legacy customer",
+              limit: 10,
+            });
+            expect(foundContacts).toMatchObject([
+              { id: legacyContactId, workspaceId: storedWorkspaceId },
+            ]);
 
             yield* sql`insert into bank_accounts (id, workspace_id, label, currency, account_number, bank_code)
               values ('01900000-0000-7000-8000-0000000000ff', ${storedWorkspaceId}, 'Legacy bank', 'CZK', '123', '0800')`;

@@ -1,7 +1,7 @@
 /** `PriceListRepo` over `price_list_items`. */
 
 import { PriceListRepo } from "@kvitbit/core";
-import { CurrencyCode, PriceListItemId, VatTreatment, WorkspaceId } from "@kvitbit/domain/contract";
+import { CurrencyCode, PriceListItemId, VatTreatment } from "@kvitbit/domain/contract";
 import * as Arr from "effect/Array";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -9,7 +9,7 @@ import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as Str from "effect/String";
 import * as SqlClient from "effect/sql/SqlClient";
-import { foldText, formatDecimal, parseDecimal } from "../codec";
+import { decodeWorkspaceId, foldText, formatDecimal, parseDecimal } from "../codec";
 import { col, decodeEach, makeTable, type TableSpec } from "../table";
 
 type PriceListItemRow = Effect.Success<ReturnType<PriceListRepo["Service"]["get"]>>;
@@ -55,7 +55,7 @@ const spec: TableSpec<PriceListItemRow> = {
     const stored = Option.getOrThrow(decodeRow(row));
     return {
       id: PriceListItemId.make(stored.id),
-      workspaceId: WorkspaceId.make(stored.workspace_id),
+      workspaceId: decodeWorkspaceId(stored.workspace_id),
       revision: Number(row.revision),
       name: stored.name,
       description: stored.description ?? null,

@@ -22,7 +22,7 @@ import {
   TaxRegime,
   ThemeSource,
   UserId,
-  WorkspaceId,
+  type WorkspaceId,
   WorkspaceSlug,
 } from "@kvitbit/domain/contract";
 import * as Arr from "effect/Array";
@@ -34,7 +34,7 @@ import * as EffectRecord from "effect/Record";
 import * as Schema from "effect/Schema";
 import * as Str from "effect/String";
 import * as SqlClient from "effect/sql/SqlClient";
-import { asNumberArray, decodeStored, parseJson, StoredUuid, toJsonb } from "../codec";
+import { asNumberArray, decodeStored, decodeWorkspaceId, parseJson, toJsonb } from "../codec";
 import { unavailable, writeErrors } from "../errors";
 import { col, type DbRow, decodeEach, makeTable, type TableSpec } from "../table";
 
@@ -62,7 +62,6 @@ const decodeBranding = <S extends Schema.Constraint>(schema: S) => {
 };
 
 const decodeString = decodeStored(Schema.String);
-const decodeWorkspaceUuid = decodeStored(StoredUuid);
 const decodeNullableString = decodeStored(Schema.NullOr(Schema.String));
 const decodeTaxRegime = decodeStored(TaxRegime);
 const decodeLocale = decodeStored(Locale);
@@ -155,7 +154,7 @@ const workspaceSpec: TableSpec<WorkspaceRow> = {
     }
 
     return Arr.map(rows, (row): WorkspaceRow => {
-      const id = WorkspaceId.make(decodeWorkspaceUuid(row.id), { disableChecks: true });
+      const id = decodeWorkspaceId(row.id);
       const ie = entityByWs.get(id) ?? {};
       const closedAt = decodeNullableString(row.closed_at ?? null);
       const name = decodeString(row.name);
@@ -317,7 +316,7 @@ const invitationSpec: TableSpec<InvitationRow> = {
     const email = decodeString(row.email);
     return {
       id: InvitationId.make(decodeString(row.id)),
-      workspaceId: WorkspaceId.make(decodeWorkspaceUuid(row.workspace_id), { disableChecks: true }),
+      workspaceId: decodeWorkspaceId(row.workspace_id),
       revision: Number(row.revision),
       email,
       emailLower: Str.toLowerCase(email),
@@ -383,9 +382,7 @@ const bankAccountSpec: TableSpec<BankAccountRow> = {
       }
       decoded.push({
         id,
-        workspaceId: WorkspaceId.make(decodeWorkspaceUuid(row.workspace_id), {
-          disableChecks: true,
-        }),
+        workspaceId: decodeWorkspaceId(row.workspace_id),
         revision: Number(row.revision),
         name: decodeNullableString(row.label ?? null),
         iban: decodeString(row.iban),
@@ -422,9 +419,7 @@ const MEMBERSHIP_SELECT = Arr.join(
 );
 
 const decodeMembership = (row: DbRow): MembershipRow => {
-  const workspaceId = WorkspaceId.make(decodeWorkspaceUuid(row.workspace_id), {
-    disableChecks: true,
-  });
+  const workspaceId = decodeWorkspaceId(row.workspace_id);
   const userId = UserId.make(decodeString(row.user_id));
   return {
     id: `${workspaceId}:${userId}`,
@@ -441,7 +436,7 @@ const decodeSlugAlias = (row: DbRow): SlugAliasRow => {
   const slug = decodeString(row.slug);
   return {
     id: slug,
-    workspaceId: WorkspaceId.make(decodeWorkspaceUuid(row.workspace_id), { disableChecks: true }),
+    workspaceId: decodeWorkspaceId(row.workspace_id),
     revision: 1,
     slug,
     expiresAt: decodeString(row.expires_at),

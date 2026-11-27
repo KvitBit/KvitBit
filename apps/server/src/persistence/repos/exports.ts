@@ -1,7 +1,7 @@
 /** `ExportsRepo` over `exports`. */
 
 import { ExportsRepo } from "@kvitbit/core";
-import { ExportId, ExportJobView, WorkspaceId } from "@kvitbit/domain/contract";
+import { ExportId, ExportJobView } from "@kvitbit/domain/contract";
 import * as Arr from "effect/Array";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -9,6 +9,7 @@ import * as Option from "effect/Option";
 import * as Predicate from "effect/Predicate";
 import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
+import { decodeWorkspaceId } from "../codec";
 import { col, decodeEach, makeTable, type TableSpec } from "../table";
 
 type ExportRow = Effect.Success<ReturnType<ExportsRepo["Service"]["get"]>>;
@@ -46,7 +47,7 @@ const spec: TableSpec<ExportRow> = {
     const stored = Option.getOrThrow(decodeRow(row));
     return {
       id: ExportId.make(stored.id),
-      workspaceId: WorkspaceId.make(stored.workspace_id),
+      workspaceId: decodeWorkspaceId(stored.workspace_id),
       revision: Number(row.revision),
       status: stored.status,
       createdAt: stored.created_at,

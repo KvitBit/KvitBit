@@ -19,7 +19,6 @@ import {
   PriceListItemId,
   ScheduleId,
   VatTreatment,
-  WorkspaceId,
 } from "@kvitbit/domain/contract";
 import * as Arr from "effect/Array";
 import * as Effect from "effect/Effect";
@@ -31,6 +30,7 @@ import * as SqlClient from "effect/sql/SqlClient";
 import type * as Statement from "effect/sql/Statement";
 import {
   decodeStored,
+  decodeWorkspaceId,
   encodeJson,
   encodeVatBreakdown,
   formatDecimal,
@@ -55,7 +55,6 @@ const readNullableIsoDate = decodeStored(Schema.NullOr(IsoDate));
 const readNullableNumberingSeriesId = decodeStored(Schema.NullOr(NumberingSeriesId));
 const readNullableScheduleId = decodeStored(Schema.NullOr(ScheduleId));
 const readText = decodeStored(Schema.String);
-const readWorkspaceId = decodeStored(WorkspaceId);
 const readLineUuid = decodeStored(StoredUuid);
 const readVatTreatment = decodeStored(VatTreatment);
 const readDocumentId = decodeStored(DocumentId);
@@ -185,7 +184,7 @@ const spec: TableSpec<DocumentRecord> = {
   decode: Effect.fn("decode")(function* (rows) {
     const sql = yield* SqlClient.SqlClient;
     const ids = Arr.map(rows, (r) => readText(r.id));
-    const workspaceId = readWorkspaceId(rows[0]?.workspace_id);
+    const workspaceId = decodeWorkspaceId(rows[0]?.workspace_id);
 
     const lineRows = yield* sql<DbRow>`
         select
@@ -275,7 +274,7 @@ const spec: TableSpec<DocumentRecord> = {
           : null;
       decoded.push({
         id: docId,
-        workspaceId: readWorkspaceId(row.workspace_id),
+        workspaceId: decodeWorkspaceId(row.workspace_id),
         revision: Number(row.revision),
         kind: readDocumentKind(row.kind),
         status: readDocumentStatus(row.status),

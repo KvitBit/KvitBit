@@ -11,7 +11,7 @@ import {
   IsoDate,
   Locale,
   PdfTemplate,
-  WorkspaceId,
+  type WorkspaceId,
 } from "@kvitbit/domain/contract";
 import * as Arr from "effect/Array";
 import * as BigDecimal from "effect/BigDecimal";
@@ -33,6 +33,7 @@ import {
 import {
   asStringArray,
   decodeStored,
+  decodeWorkspaceId,
   encodeJson,
   encodeStored,
   parseJson,
@@ -47,7 +48,6 @@ const readNullableLastOutcome = decodeStored(
 );
 const readIsoDate = decodeStored(IsoDate);
 const readDeliveryId = decodeStored(DeliveryId);
-const readWorkspaceId = decodeStored(WorkspaceId);
 const readDocumentId = decodeStored(DocumentId);
 const readDeliveryPurpose = decodeStored(DeliveryPurpose);
 const readDeliveryStatus = decodeStored(DeliveryStatus);
@@ -149,7 +149,7 @@ const decodeRow = (row: DbRow): DeliveryRecord => {
       : null;
 
   const deliveryId = readDeliveryId(row.id);
-  const workspaceId = readWorkspaceId(row.workspace_id);
+  const workspaceId = decodeWorkspaceId(row.workspace_id);
   const view = decodeRenderModel(row.render_model, { deliveryId, workspaceId });
   const attachment =
     (Predicate.isNullish(row.attachment) || row.attachment === "null") &&

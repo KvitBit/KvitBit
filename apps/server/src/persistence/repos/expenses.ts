@@ -9,7 +9,7 @@ import {
   ExpenseStatus,
   IsoDate,
   VatTreatment,
-  WorkspaceId,
+  type WorkspaceId,
 } from "@kvitbit/domain/contract";
 import * as Arr from "effect/Array";
 import * as Effect from "effect/Effect";
@@ -20,6 +20,7 @@ import * as SqlClient from "effect/sql/SqlClient";
 import {
   asStringArray,
   decodeStored,
+  decodeWorkspaceId,
   encodeJson,
   encodeVatBreakdown,
   encodeVatBucket,
@@ -41,7 +42,6 @@ const readNullableText = decodeStored(Schema.NullOr(Schema.String));
 const readNullableIsoDate = decodeStored(Schema.NullOr(IsoDate));
 const readNullableCurrencyCode = decodeStored(Schema.NullOr(CurrencyCode));
 const readExpenseId = decodeStored(ExpenseId);
-const readWorkspaceId = decodeStored(WorkspaceId);
 const readExpenseStatus = decodeStored(ExpenseStatus);
 const readText = decodeStored(Schema.String);
 const readAttachmentId = decodeStored(AttachmentId);
@@ -188,7 +188,7 @@ const expenseSpec: TableSpec<ExpenseRow> = {
       row.supplier_dic !== null;
     return {
       id: readExpenseId(row.id),
-      workspaceId: readWorkspaceId(row.workspace_id),
+      workspaceId: decodeWorkspaceId(row.workspace_id),
       revision: Number(row.revision),
       status: readExpenseStatus(row.status),
       supplier: hasSupplier
@@ -272,7 +272,7 @@ const attachmentSpec: TableSpec<AttachmentRow> = {
   decode: decodeEach(
     (row: DbRow): AttachmentRow => ({
       id: readAttachmentId(row.id),
-      workspaceId: readWorkspaceId(row.workspace_id),
+      workspaceId: decodeWorkspaceId(row.workspace_id),
       revision: Number(row.revision),
       expenseId: readExpenseId(row.expense_id),
       blobKey: readText(row.blob_key),

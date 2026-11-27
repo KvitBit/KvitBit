@@ -9,7 +9,6 @@ import {
   ScheduleId,
   TemplateId,
   TemplateInput as TemplateInputSchema,
-  WorkspaceId,
 } from "@kvitbit/domain/contract";
 import * as Arr from "effect/Array";
 import * as SecureRandom from "effect/crypto/SecureRandom";
@@ -18,7 +17,14 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
-import { decodeStored, encodeJson, encodeStored, formatNullableDecimal, parseJson } from "../codec";
+import {
+  decodeStored,
+  decodeWorkspaceId,
+  encodeJson,
+  encodeStored,
+  formatNullableDecimal,
+  parseJson,
+} from "../codec";
 import { col, type DbRow, decodeEach, makeTable, type TableSpec } from "../table";
 
 const readNullableText = decodeStored(Schema.NullOr(Schema.String));
@@ -27,7 +33,6 @@ const readNullableIssueCode = decodeStored(Schema.NullOr(IssueCode));
 const readNullableDocumentId = decodeStored(Schema.NullOr(DocumentId));
 const readNullableDeliveryId = decodeStored(Schema.NullOr(DeliveryId));
 const readTemplateId = decodeStored(TemplateId);
-const readWorkspaceId = decodeStored(WorkspaceId);
 const readText = decodeStored(Schema.String);
 const readScheduleId = decodeStored(ScheduleId);
 const readCadenceUnit = decodeStored(Schema.Literals(["weeks", "months", "years"]));
@@ -64,7 +69,7 @@ const templateSpec: TableSpec<TemplateRow> = {
   decode: decodeEach(
     (row): TemplateRow => ({
       id: readTemplateId(row.id),
-      workspaceId: readWorkspaceId(row.workspace_id),
+      workspaceId: decodeWorkspaceId(row.workspace_id),
       revision: Number(row.revision),
       name: readText(row.name),
       input: decodeTemplateInput(row.body),
@@ -141,7 +146,7 @@ const scheduleSpec: TableSpec<ScheduleRow> = {
   decode: decodeEach(
     (row): ScheduleRow => ({
       id: readScheduleId(row.id),
-      workspaceId: readWorkspaceId(row.workspace_id),
+      workspaceId: decodeWorkspaceId(row.workspace_id),
       revision: Number(row.revision),
       templateId: readTemplateId(row.template_id),
       cadenceUnit: readCadenceUnit(row.cadence_unit),
@@ -203,7 +208,7 @@ const runSpec: TableSpec<RunRow> = {
   decode: decodeEach(
     (row: DbRow): RunRow => ({
       id: readText(row.id),
-      workspaceId: readWorkspaceId(row.workspace_id),
+      workspaceId: decodeWorkspaceId(row.workspace_id),
       revision: Number(row.revision),
       scheduleId: readScheduleId(row.schedule_id),
       occurrence: readIsoDate(row.occurrence),

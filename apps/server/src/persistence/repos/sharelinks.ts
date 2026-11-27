@@ -3,19 +3,13 @@
  * `share_links` has no revision column: `revoke` and `markViewed` are state-conditional updates.
  */
 import { ShareLinksModule, ShareLinksRepo } from "@kvitbit/core";
-import {
-  DocumentId,
-  NotFound,
-  ShareViewId,
-  UserId,
-  VisitorHash,
-  WorkspaceId,
-} from "@kvitbit/domain/contract";
+import { DocumentId, NotFound, ShareViewId, UserId, VisitorHash } from "@kvitbit/domain/contract";
 import * as Arr from "effect/Array";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as SqlClient from "effect/sql/SqlClient";
+import { decodeWorkspaceId } from "../codec";
 import { unavailable, writeErrors } from "../errors";
 import { col } from "../table";
 
@@ -71,7 +65,7 @@ const EVENT_SELECT = Arr.join(
 
 const decodeLink = (row: ShareLinkSqlRow): ShareLinksModule.ShareLink => ({
   id: ShareLinksModule.ShareLinkId.make(row.id),
-  workspaceId: WorkspaceId.make(row.workspace_id),
+  workspaceId: decodeWorkspaceId(row.workspace_id),
   documentId: DocumentId.make(row.document_id),
   tokenHash: row.token_hash,
   keyVersion: Number(row.key_version),
@@ -83,7 +77,7 @@ const decodeLink = (row: ShareLinkSqlRow): ShareLinksModule.ShareLink => ({
 
 const decodeEvent = (row: ShareViewEventSqlRow): ShareLinksModule.ShareViewEventRow => ({
   id: ShareViewId.make(row.id),
-  workspaceId: WorkspaceId.make(row.workspace_id),
+  workspaceId: decodeWorkspaceId(row.workspace_id),
   shareLinkId: ShareLinksModule.ShareLinkId.make(row.share_link_id),
   kind: row.kind,
   device: row.device,

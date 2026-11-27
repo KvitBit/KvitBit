@@ -8,7 +8,6 @@ import {
   IsoDate,
   PaymentId,
   PaymentMethod,
-  WorkspaceId,
 } from "@kvitbit/domain/contract";
 import * as Arr from "effect/Array";
 import * as Effect from "effect/Effect";
@@ -17,7 +16,7 @@ import * as Option from "effect/Option";
 import * as Predicate from "effect/Predicate";
 import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
-import { formatDecimal, parseDecimal, StoredUuid, toPgDate } from "../codec";
+import { decodeWorkspaceId, formatDecimal, parseDecimal, StoredUuid, toPgDate } from "../codec";
 import { col, decodeEach, makeTable, type TableSpec } from "../table";
 import { selectReportRows } from "./reportArchivePages";
 
@@ -68,7 +67,7 @@ const spec: TableSpec<PaymentRecord> = {
     const stored = Option.getOrThrow(decodeRow(row));
     return {
       id: PaymentId.make(stored.id, { disableChecks: true }),
-      workspaceId: WorkspaceId.make(stored.workspace_id),
+      workspaceId: decodeWorkspaceId(stored.workspace_id),
       revision: Number(row.revision),
       documentId: Predicate.isNotNullish(stored.document_id)
         ? DocumentId.make(stored.document_id)
