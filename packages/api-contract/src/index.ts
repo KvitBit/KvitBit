@@ -4,6 +4,7 @@ export * from "./api";
 export * from "./api-key";
 export * from "./edge";
 export * from "./edge-errors";
+export * from "./feedback";
 export * from "./groups";
 export * from "./http";
 export * from "./mcp";

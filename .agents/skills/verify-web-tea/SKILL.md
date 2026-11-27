@@ -5,7 +5,7 @@ description: >-
   changes to apps/web/src, the web entry or build configuration, or
   packages/ui-port/src/theme.
 metadata:
-  sync_commit: "c54559c3a9ab795c44f08d4584e6a28c88074466"
+  sync_commit: "468e37f6bd62d2a82778d7eb8487a4a03a30cd2f"
   bun: "1.4.4"
   node: "24.18.0"
   effect: "4.1.4"
@@ -61,7 +61,7 @@ The typed API and server integrations have their own checks.
 4. Run the browser suite on an unused local port with one worker.
 
    ```sh
-   KVITBIT_WEB_E2E_PORT=34181 bun run --cwd apps/web e2e smoke.spec.ts --workers=1
+   KVITBIT_WEB_E2E_PORT=34181 bun run --cwd apps/web e2e smoke.spec.ts feedback.spec.ts --workers=1
    ```
 
 5. Run `bun run verify:formal --check-digests` for coverage maintained by ADR-0005.
@@ -73,12 +73,22 @@ that record in a verification commit after the product changes.
 ## Verification record
 
 The recorded product commit passed the frozen install, root lint and
-typecheck, `bun test apps/web`, the static build and asset
-checks, and the formal digest check. Playwright passed both profiles on
-port `52119` with one worker. The build includes the ALTCHA worker, hashed
-JavaScript and CSS, brand assets, and fonts.
+typecheck, and the formal digest check. The targeted test run passed with
+`bun test infra/alchemy packages/api-contract apps/server/test/http/feedback.test.ts apps/web`.
+The static build contains the lazy feedback chunk, ALTCHA worker, hashed
+JavaScript and CSS, brand assets, and Fontshare TTFs.
 
-Chromium and Firefox loaded all bundled fonts without console warnings.
+The smoke and feedback Playwright suites passed on port `35655` with one
+worker across desktop and mobile Chromium profiles. The feedback suite
+checks that verified owners can pin elements, retry a submission, and
+receive its issue link. It checks that non-owners skip the picker chunk,
+that pins omit private links and entered form values, and that signing
+out removes the picker. A failed mount restores browser diagnostics.
+The selector unit test declines a pin when its bounded path matches
+multiple elements.
+
+At `c54559c3a9ab795c44f08d4584e6a28c88074466`, Chromium and Firefox
+loaded all bundled fonts without console warnings.
 The app's static router served the new font URLs as `font/ttf` with immutable
 cache headers. OpenType Sanitizer 9.2.0 reported zero warnings. FontTools
 4.69.1 confirmed the replacements preserve every character mapping and

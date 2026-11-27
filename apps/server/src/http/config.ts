@@ -4,6 +4,7 @@
  */
 import { Config, Context, Effect, Layer, Option, Redacted } from "effect";
 import { ServerConfig } from "../config";
+import { type FeedbackConfig, makeFeedbackConfig } from "./feedback/access";
 
 export interface HttpConfigShape {
   /** Public origin, no trailing slash (APP_ORIGIN). */
@@ -26,6 +27,7 @@ export interface HttpConfigShape {
   readonly botProtection: "altcha" | "none";
   /** Keys the daily `VisitorHash` of share-link visitors (derived from BETTER_AUTH_SECRET). */
   readonly visitorSecret: Redacted.Redacted<string>;
+  readonly feedback?: FeedbackConfig | undefined;
 }
 
 export class HttpConfig extends Context.Service<HttpConfig, HttpConfigShape>()(
@@ -49,7 +51,9 @@ export const makeHttpConfig = (
     HttpConfigShape,
     "appOrigin" | "trustedProxyHops" | "webDir" | "pwaDir" | "visitorSecret"
   > &
-    Partial<Pick<HttpConfigShape, "corsOrigins" | "version" | "signUp" | "botProtection">> & {
+    Partial<
+      Pick<HttpConfigShape, "corsOrigins" | "version" | "signUp" | "botProtection" | "feedback">
+    > & {
       readonly trustedOrigins?: ReadonlyArray<string>;
     },
 ): HttpConfigShape => {
@@ -65,6 +69,7 @@ export const makeHttpConfig = (
     signUp: base.signUp ?? true,
     botProtection: base.botProtection ?? "none",
     visitorSecret: base.visitorSecret,
+    feedback: base.feedback,
   };
 };
 
@@ -78,6 +83,13 @@ export const HttpConfigLive: Layer.Layer<HttpConfig, Config.ConfigError> = Layer
     const version = yield* Config.String("KVITBIT_VERSION").pipe(Config.withDefault("0.0.0"));
     const signUp = yield* Config.Boolean("KVITBIT_SIGN_UP").pipe(Config.withDefault(true));
     const altchaKey = yield* Config.option(Config.Redacted("ALTCHA_HMAC_KEY"));
+    const feedbackToken = yield* Config.option(Config.Redacted("KVITBIT_FEEDBACK_GITHUB_TOKEN"));
+    const feedbackRepo = yield* Config.String("KVITBIT_FEEDBACK_GITHUB_REPO").pipe(
+      Config.withDefault(""),
+    );
+    const feedbackOwners = yield* Config.String("KVITBIT_FEEDBACK_OWNER_EMAILS").pipe(
+      Config.withDefault(""),
+    );
     return makeHttpConfig({
       appOrigin: server.appOrigin,
       trustedProxyHops: server.trustedProxyHops,
@@ -89,6 +101,11 @@ export const HttpConfigLive: Layer.Layer<HttpConfig, Config.ConfigError> = Layer
       version,
       signUp,
       botProtection: Option.isSome(altchaKey) ? "altcha" : "none",
+      feedback: makeFeedbackConfig(
+        Option.getOrUndefined(feedbackToken),
+        feedbackRepo,
+        feedbackOwners,
+      ),
     });
   }),
 );

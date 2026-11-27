@@ -68,6 +68,12 @@ export const serverPlainEnv = (
       value: config.androidAssetlinksSha256,
     });
   }
+  if (config.feedbackGitHubRepo !== undefined) {
+    vars.push({ name: "KVITBIT_FEEDBACK_GITHUB_REPO", value: config.feedbackGitHubRepo });
+  }
+  if (config.feedbackOwnerEmails !== undefined) {
+    vars.push({ name: "KVITBIT_FEEDBACK_OWNER_EMAILS", value: config.feedbackOwnerEmails });
+  }
 
   return vars;
 };

@@ -12,6 +12,7 @@ export const SessionUser = Schema.Struct({
   email: Schema.String,
   name: Schema.String,
   emailVerified: Schema.Boolean,
+  feedbackEnabled: Schema.optionalKey(Schema.Boolean),
 });
 export type SessionUser = typeof SessionUser.Type;
 
@@ -28,6 +29,7 @@ export type SessionState = typeof SessionState.Type;
 
 const BetterAuthSession = Schema.NullOr(
   Schema.Struct({
+    feedbackEnabled: Schema.optionalKey(Schema.Boolean),
     user: Schema.Struct({
       id: Schema.String,
       email: Schema.String,
@@ -46,13 +48,14 @@ type Lookup =
 const toUser = (json: unknown): Lookup =>
   Option.match(decodeSession(json).pipe(Option.flatMap(Option.fromNullishOr)), {
     onNone: (): Lookup => ({ _tag: "None" }),
-    onSome: ({ user: u }): Lookup => ({
+    onSome: ({ feedbackEnabled, user: u }): Lookup => ({
       _tag: "User",
       user: {
         id: u.id,
         email: u.email,
         name: u.name ?? u.email,
         emailVerified: u.emailVerified ?? false,
+        feedbackEnabled: feedbackEnabled === true && u.emailVerified === true,
       },
     }),
   });

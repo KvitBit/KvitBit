@@ -1954,7 +1954,11 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
           })
         : h.div.class("kb-stack").children([
             h.div.class("kb-share-url").children([
-              h.span.class("kb-mono").style({ flex: "1" }).children([doc.share.url]),
+              h.span
+                .class("kb-mono")
+                .attr("data-feedback-private", "")
+                .style({ flex: "1" })
+                .children([doc.share.url]),
               button(h, {
                 label: txt(locale, "shareCopy"),
                 onClick: Message.ClickedCopyShare({ url: doc.share.url }),

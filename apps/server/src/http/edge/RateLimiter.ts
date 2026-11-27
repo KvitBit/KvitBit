@@ -41,6 +41,7 @@ export const RATE_LIMITS = {
   previewPdf: { max: 30, windowSeconds: 60 },
   shareLink: { max: 120, windowSeconds: 60 },
   invitationPeek: { max: 30, windowSeconds: 60 },
+  feedback: { max: 12, windowSeconds: 60 },
 } as const satisfies Record<string, RateRule>;
 
 const MAX_EDGE_WINDOW_MS =
