@@ -4,6 +4,7 @@
  * the sRGB colour with the requested hue and tone and the largest in-gamut chroma at or below
  * the requested chroma.
  */
+import * as Arr from "effect/Array";
 import {
   clamp,
   lerp,
@@ -71,7 +72,7 @@ const makeViewingConditions = (
   return { n, aw, nbb, ncb: nbb, c, nc: f, rgbD, fl, fLRoot: fl ** 0.25, z };
 };
 
-export const DEFAULT_VIEWING_CONDITIONS: ViewingConditions = makeViewingConditions();
+const DEFAULT_VIEWING_CONDITIONS: ViewingConditions = makeViewingConditions();
 
 export interface Cam16 {
   readonly hue: number;
@@ -79,7 +80,7 @@ export interface Cam16 {
   readonly j: number;
 }
 
-export const cam16FromXyz = (xyz: Vec3, vc: ViewingConditions = DEFAULT_VIEWING_CONDITIONS) => {
+const cam16FromXyz = (xyz: Vec3, vc: ViewingConditions = DEFAULT_VIEWING_CONDITIONS) => {
   const [x, y, z] = xyz;
   const rC = 0.401288 * x + 0.650173 * y - 0.051461 * z;
   const gC = -0.250268 * x + 1.204414 * y + 0.045854 * z;
@@ -110,7 +111,7 @@ export const cam16FromXyz = (xyz: Vec3, vc: ViewingConditions = DEFAULT_VIEWING_
 export const cam16FromRgb = (rgb: Rgb): Cam16 => cam16FromXyz(xyzFromRgb(rgb));
 
 /** CAM16 (J, C, h) to XYZ under `vc`. */
-export const xyzFromCam16 = (
+const xyzFromCam16 = (
   j: number,
   chroma: number,
   hue: number,
@@ -157,9 +158,9 @@ const solveJ = (chroma: number, hue: number, tone: number, targetY: number): Vec
     const xyz = xyzFromCam16(j, chroma, hue);
     const fnj = xyz[1];
     if (Math.abs(fnj - targetY) < 0.002) return xyz;
-    if (!(fnj > 0) || !Number.isFinite(fnj)) break;
-    j = j - ((fnj - targetY) * j) / (2 * fnj);
-    if (!(j > 0) || !Number.isFinite(j)) break;
+    if (!(fnj > 0 && Number.isFinite(fnj))) break;
+    j -= ((fnj - targetY) * j) / (2 * fnj);
+    if (!(j > 0 && Number.isFinite(j))) break;
   }
   let lo = 0;
   let hi = 200;
@@ -174,10 +175,10 @@ const solveJ = (chroma: number, hue: number, tone: number, targetY: number): Vec
 };
 
 const linrgbInGamut = (lin: Vec3): boolean =>
-  lin.every((c) => c >= -GAMUT_EPSILON && c <= 100 + GAMUT_EPSILON);
+  Arr.every(lin, (c) => c >= -GAMUT_EPSILON && c <= 100 + GAMUT_EPSILON);
 
 /** The sRGB colour with `hue` and `tone` and the largest in-gamut chroma at or below `chroma`. */
-export const solveToRgb = (hue: number, chroma: number, rawTone: number): Rgb => {
+const solveToRgb = (hue: number, chroma: number, rawTone: number): Rgb => {
   // Non-finite input never reaches the solver: NaN tone is black, NaN hue is 0, NaN chroma grey.
   const tone = Number.isFinite(rawTone) ? clamp(0, 100, rawTone) : 0;
   if (!(chroma >= 1e-4) || tone < 1e-4 || tone > 99.9999) return rgbFromLstar(tone);
@@ -219,12 +220,17 @@ export const solveToRgb = (hue: number, chroma: number, rawTone: number): Rgb =>
 
 /** A colour in HCT. Immutable; construct with `Hct.fromRgb` or `Hct.from`. */
 export class Hct {
-  private constructor(
-    readonly hue: number,
-    readonly chroma: number,
-    readonly tone: number,
-    readonly rgb: Rgb,
-  ) {}
+  readonly hue: number;
+  readonly chroma: number;
+  readonly tone: number;
+  readonly rgb: Rgb;
+
+  private constructor(hue: number, chroma: number, tone: number, rgb: Rgb) {
+    this.hue = hue;
+    this.chroma = chroma;
+    this.tone = tone;
+    this.rgb = rgb;
+  }
 
   static fromRgb(rgb: Rgb): Hct {
     const cam = cam16FromRgb(rgb);

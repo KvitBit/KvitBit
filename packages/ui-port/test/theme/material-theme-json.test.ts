@@ -1,5 +1,11 @@
 import { describe, expect, test } from "bun:test";
-import { Result } from "effect";
+import * as Arr from "effect/Array";
+import * as Exit from "effect/Exit";
+import * as Fn from "effect/Function";
+import * as Result from "effect/Result";
+import * as Schema from "effect/Schema";
+import * as Str from "effect/String";
+
 import {
   auditTheme,
   extendedScheme,
@@ -14,6 +20,14 @@ import {
   SCHEME_VARIANTS,
 } from "../../src/theme";
 
+const encodeJsonExit = Schema.encodeUnknownExit(Schema.fromJsonString(Schema.Unknown));
+const encodeJson = (input: unknown): string => {
+  const json = encodeJsonExit(input);
+  if (Exit.isFailure(json))
+    throw new Error("Could not encode theme fixture", { cause: json.cause });
+  return json.value;
+};
+const UPPERCASE_HEX = /^#[0-9A-F]{6}$/;
 const MAX = 64 * 1024;
 const ocean = resolvePreset("ocean").schemes;
 
@@ -40,11 +54,11 @@ const exportFile = (overrides: Record<string, unknown> = {}) => ({
 });
 
 const codes = (r: Result.Result<unknown, { issues: ReadonlyArray<{ code: string }> }>) =>
-  Result.isFailure(r) ? r.failure.issues.map((i) => i.code) : [];
+  Result.isFailure(r) ? Arr.map(r.failure.issues, (i) => i.code) : [];
 
 describe("parseMaterialThemeFile", () => {
   test("accepts a complete export and previews its own schemes", () => {
-    const r = parseMaterialThemeFile(JSON.stringify(exportFile()), MAX);
+    const r = parseMaterialThemeFile(encodeJson(exportFile()), MAX);
     if (!Result.isSuccess(r)) throw new Error("expected success");
     expect(r.success.seed).toBe("#0E6B8C");
     expect(r.success.preview.light).toEqual(ocean.light.roles);
@@ -59,11 +73,13 @@ describe("parseMaterialThemeFile", () => {
   });
 
   test("checks the byte limit before parsing (rule M1)", () => {
-    const r = parseMaterialThemeFile(`{${" ".repeat(MAX)}}`, MAX);
-    expect(codes(r)).toEqual(["theme.too_large"]);
+    const r = parseMaterialThemeFile(`{${Fn.pipe(" ", Str.repeat(MAX))}}`, MAX);
+    expect(r.pipe(codes)).toEqual(["theme.too_large"]);
     expect(Result.isFailure(r) && r.failure.issues[0]?.params).toEqual({ maxBytes: String(MAX) });
     // Multi-byte characters count as UTF-8 bytes, not UTF-16 units.
-    expect(codes(parseMaterialThemeFile(`"${"č".repeat(40)}"`, 60))).toEqual(["theme.too_large"]);
+    expect(parseMaterialThemeFile(`"${Fn.pipe("č", Str.repeat(40))}"`, 60).pipe(codes)).toEqual([
+      "theme.too_large",
+    ]);
   });
 
   test.each([
@@ -71,14 +87,14 @@ describe("parseMaterialThemeFile", () => {
     "[]",
     "null",
     '{"seed":"#0E6B8C"}',
-    JSON.stringify({ ...exportFile(), schemes: 1 }),
+    encodeJson({ ...exportFile(), schemes: 1 }),
   ])("rejects %p as theme.json_invalid", (source) =>
-    expect(codes(parseMaterialThemeFile(source, MAX))).toEqual(["theme.json_invalid"]),
+    expect(parseMaterialThemeFile(source, MAX).pipe(codes)).toEqual(["theme.json_invalid"]),
   );
 
   test("rejects a malformed seed as theme.seed_invalid", () => {
     expect(
-      codes(parseMaterialThemeFile(JSON.stringify(exportFile({ seed: "teal" })), MAX)),
+      parseMaterialThemeFile(encodeJson(exportFile({ seed: "teal" })), MAX).pipe(codes),
     ).toEqual(["theme.seed_invalid"]);
   });
 
@@ -86,12 +102,14 @@ describe("parseMaterialThemeFile", () => {
     const { primary: _p, onPrimary: _o, ...light } = ocean.light.roles;
     const file = exportFile();
     const r = parseMaterialThemeFile(
-      JSON.stringify({ ...file, schemes: { ...file.schemes, light } }),
+      encodeJson({ ...file, schemes: { ...file.schemes, light } }),
       MAX,
     );
     if (!Result.isFailure(r)) throw new Error("expected failure");
     expect(r.failure._tag).toBe("Invalid");
-    expect(r.failure.issues.map((i) => [i.code, i.path.join("/")])).toEqual([
+    expect(
+      Arr.map(r.failure.issues, (i) => [i.code, Arr.join(Arr.map(i.path, String), "/")]),
+    ).toEqual([
       ["theme.json_invalid", "schemes/light/primary"],
       ["theme.json_invalid", "schemes/light/onPrimary"],
     ]);
@@ -99,7 +117,7 @@ describe("parseMaterialThemeFile", () => {
 
   test("warns when contrast schemes or extended colours are absent", () => {
     const r = parseMaterialThemeFile(
-      JSON.stringify({
+      encodeJson({
         seed: "#0E6B8C",
         coreColors: { primary: "#0E6B8C" },
         schemes: { light: ocean.light.roles, dark: ocean.dark.roles },
@@ -139,7 +157,7 @@ describe("resolveMaterialTheme", () => {
       schemes: { light: ocean.light.roles, dark: ocean.dark.roles },
     });
     if (!Result.isSuccess(r)) throw new Error("expected success");
-    expect(r.success.schemes.darkHigh.roles.primary).toMatch(/^#[0-9A-F]{6}$/);
+    expect(r.success.schemes.darkHigh.roles.primary).toMatch(UPPERCASE_HEX);
     expect(auditTheme(r.success.schemes)).toEqual([]);
   });
 
@@ -150,12 +168,13 @@ describe("resolveMaterialTheme", () => {
     );
     if (!Result.isSuccess(r)) throw new Error("expected success");
     expect(r.success.warnings).toEqual(["theme.low_contrast"]);
-    const failing = auditTheme(r.success.schemes).map(
+    const failing = Arr.map(
+      auditTheme(r.success.schemes),
       (i) => `${i.variant}:${i.foreground}/${i.background}`,
     );
     expect(failing).toContain("light:onPrimary/primary");
     expect(failing).toContain("light:onSurface/surface");
-    expect(failing.every((f) => f.startsWith("light:"))).toBe(true);
+    expect(Arr.every(failing, Str.startsWith("light:"))).toBe(true);
   });
 
   test("flags invisible text on a fixed-dim background", () => {
@@ -166,9 +185,9 @@ describe("resolveMaterialTheme", () => {
     const r = resolveMaterialTheme(exportFile({ schemes: { ...exportFile().schemes, light } }));
     if (!Result.isSuccess(r)) throw new Error("expected success");
     expect(r.success.warnings).toEqual(["theme.low_contrast"]);
-    expect(auditTheme(r.success.schemes).map((i) => `${i.foreground}/${i.background}`)).toContain(
-      "onPrimaryFixed/primaryFixedDim",
-    );
+    expect(
+      Arr.map(auditTheme(r.success.schemes), (i) => `${i.foreground}/${i.background}`),
+    ).toContain("onPrimaryFixed/primaryFixedDim");
   });
 
   test("generated contrast schemes harmonize toward their own primary", () => {
@@ -186,19 +205,19 @@ describe("resolveMaterialTheme", () => {
   });
 
   test("the structured path enforces the byte limit too", () => {
-    const big = exportFile({ description: "x".repeat(70 * 1024) });
-    expect(codes(resolveMaterialTheme(big))).toEqual(["theme.too_large"]);
-    expect(codes(resolveSource({ _tag: "MaterialThemeBuilder", json: big }))).toEqual([
+    const big = exportFile({ description: Fn.pipe("x", Str.repeat(70 * 1024)) });
+    expect(resolveMaterialTheme(big).pipe(codes)).toEqual(["theme.too_large"]);
+    expect(resolveSource({ _tag: "MaterialThemeBuilder", json: big }).pipe(codes)).toEqual([
       "theme.too_large",
     ]);
-    expect(codes(resolveMaterialTheme({ seed: 1n }))).toEqual(["theme.json_invalid"]);
+    expect(resolveMaterialTheme({ seed: 1n }).pipe(codes)).toEqual(["theme.json_invalid"]);
   });
 
   test("resolveSource routes each source tag", () => {
-    expect(Result.isSuccess(resolveSource({ _tag: "Preset", id: "plum" }))).toBe(true);
-    expect(Result.isSuccess(resolveSource({ _tag: "Seed", seed: "#123456" }))).toBe(true);
-    expect(codes(resolveSource({ _tag: "MaterialThemeBuilder", json: { nope: true } }))).toEqual([
-      "theme.json_invalid",
-    ]);
+    expect(resolveSource({ _tag: "Preset", id: "plum" }).pipe(Result.isSuccess)).toBe(true);
+    expect(resolveSource({ _tag: "Seed", seed: "#123456" }).pipe(Result.isSuccess)).toBe(true);
+    expect(
+      resolveSource({ _tag: "MaterialThemeBuilder", json: { nope: true } }).pipe(codes),
+    ).toEqual(["theme.json_invalid"]);
   });
 });
