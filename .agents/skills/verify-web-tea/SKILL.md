@@ -54,17 +54,24 @@ The typed API and server integrations have their own checks.
 
 ## Run
 
-1. Run `bun install --frozen-lockfile`, `bun run lint`, and `bun run typecheck`.
-2. Run `bun test apps/web`. Inspect any failing case by route, preset, or generated seed.
-3. Run `bun run --cwd apps/web build`. Confirm `dist/index.html` and its hashed
+PR CI in `.github/workflows/ci.yml` already runs `bun install --frozen-lockfile`,
+`lint`, `typecheck`, `test`, `build`, `test:static-mounts`, and `verify:formal`.
+Rely on CI for those checks instead of running them locally.
+
+Run the steps below locally only when debugging a web failure or recording a
+Tier 2 verification commit for browser checks that PR CI does not run, since
+Playwright runs in `.github/workflows/nightly.yml`:
+
+1. Run the single failing test file under `apps/web` with `bun test <file>`, or
+   `bun test apps/web` when a full Tier 2 run was requested.
+2. If you need to verify the static bundle locally, run
+   `bun run --cwd apps/web build` and confirm `dist/index.html` with its hashed
    assets, `dist/assets/brand`, and `dist/fonts`.
-4. Run the browser suite on an unused local port with one worker.
+3. Run the browser suite on an unused local port with one worker.
 
    ```sh
    KVITBIT_WEB_E2E_PORT=34181 bun run --cwd apps/web e2e smoke.spec.ts feedback.spec.ts --workers=1
    ```
-
-5. Run `bun run verify:formal --check-digests` for coverage maintained by ADR-0005.
 
 Record the product commit and tool versions after the suite passes. Keep
 that record in a verification commit after the product changes.
