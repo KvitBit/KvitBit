@@ -5,7 +5,7 @@ description: >-
   changes to apps/web/src, the web entry or build configuration, or
   packages/ui-port/src/theme.
 metadata:
-  sync_commit: "16a8204bb7124514093503be4fa2e4d3ce369bcc"
+  sync_commit: "31dd685e830996450ed74d1021b3189a7292255d"
   bun: "1.4.4"
   node: "24.18.0"
   effect: "4.1.4"
@@ -78,6 +78,7 @@ suites passed on port `34181` with one worker across desktop and mobile.
 The feedback suite checks that verified owners can pin elements, retry a
 submission, and receive its issue link. It also checks that non-owners skip the
 picker chunk, that pins omit private links and entered form values, and that
-signing out disposes the picker. A selector test declines a pin whose bounded
-path matches multiple elements. The build includes the lazy feedback chunk,
-ALTCHA worker, hashed JavaScript and CSS, brand assets, and fonts.
+signing out removes the picker. A failed mount restores browser diagnostics, and
+the selector test declines a pin whose bounded path matches multiple elements.
+The build includes the lazy feedback chunk, ALTCHA worker, hashed JavaScript and
+CSS, brand assets, and fonts.
