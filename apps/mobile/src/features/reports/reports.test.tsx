@@ -67,6 +67,21 @@ const WORKSPACE: WorkspaceSummary = {
 };
 
 describe("reports model", () => {
+  test("keeps four-digit years and stops between the first and last supported periods", () => {
+    expect(periodToRange(Period.make("0999-01"))).toEqual({
+      from: IsoDate.make("0999-01-01"),
+      to: IsoDate.make("0999-01-31"),
+    });
+    expect(periodToRange(Period.make("0000-02"))).toEqual({
+      from: IsoDate.make("0000-02-01"),
+      to: IsoDate.make("0000-02-29"),
+    });
+    expect(shiftPeriod(Period.make("1000-01"), -1)).toBe("0999-12");
+    expect(shiftPeriod(Period.make("0000-01"), -1)).toBe("0000-01");
+    expect(shiftPeriod(Period.make("9999-Q4"), 1)).toBe("9999-Q4");
+    expect(shiftPeriod(Period.make("9999"), 1)).toBe("9999");
+  });
+
   test("parses report segments and computes inclusive period ranges", () => {
     expect(parseReportKind("vat-summary")).toBe("vat_summary");
     expect(parseReportKind("receivables")).toBe("receivables");

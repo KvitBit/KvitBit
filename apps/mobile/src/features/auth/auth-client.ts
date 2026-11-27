@@ -334,7 +334,12 @@ export const makeAuthClient = (deps: AuthClientDeps): AuthClient => {
               },
             }),
           );
-          return res.ok ? ok(undefined) : err(mapAuthError(res));
+          if (!res.ok) return err(mapAuthError(res));
+          if (res.token !== null) {
+            const token = res.token;
+            yield* Effect.promise(() => deps.signedIn(token));
+          }
+          return ok(undefined);
         }),
       ),
 

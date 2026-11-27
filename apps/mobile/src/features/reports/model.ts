@@ -186,6 +186,7 @@ export const parseReportKind = (segment: string | undefined): ReportKind =>
   (segment !== undefined ? REPORT_BY_SEGMENT[segment] : undefined) ?? "vat_summary";
 
 const pad2 = (n: number): string => Str.padStart(2, "0")(String(n));
+const yearText = (year: number): string => Str.padStart(4, "0")(String(year));
 
 const daysInMonth = (year: number, month1: number): number =>
   DateTime.toPartsUtc(DateTime.endOf(DateTime.makeUnsafe({ year, month: month1, day: 1 }), "month"))
@@ -194,7 +195,7 @@ const daysInMonth = (year: number, month1: number): number =>
 export const isValidPeriod = Schema.is(Period);
 
 export const currentMonthPeriod = (now: Date = DateTime.toDateUtc(DateTime.nowUnsafe())): Period =>
-  Period.make(`${now.getUTCFullYear()}-${pad2(now.getUTCMonth() + 1)}`);
+  Period.make(`${yearText(now.getUTCFullYear())}-${pad2(now.getUTCMonth() + 1)}`);
 
 export const periodPresets = (
   now: Date = DateTime.toDateUtc(DateTime.nowUnsafe()),
@@ -207,37 +208,39 @@ export const periodPresets = (
 } => {
   const y = now.getUTCFullYear();
   const m = now.getUTCMonth() + 1;
-  const prevY = m === 1 ? y - 1 : y;
-  const prevM = m === 1 ? 12 : m - 1;
+  const firstSupportedMonth = y === 0 && m === 1;
+  const prevY = m === 1 && !firstSupportedMonth ? y - 1 : y;
+  const prevM = firstSupportedMonth ? m : m === 1 ? 12 : m - 1;
   const q = Math.floor((m - 1) / 3) + 1;
   return {
-    thisMonth: Period.make(`${y}-${pad2(m)}`),
-    lastMonth: Period.make(`${prevY}-${pad2(prevM)}`),
-    thisQuarter: Period.make(`${y}-Q${q}`),
-    thisYear: Period.make(`${y}`),
-    lastYear: Period.make(`${y - 1}`),
+    thisMonth: Period.make(`${yearText(y)}-${pad2(m)}`),
+    lastMonth: Period.make(`${yearText(prevY)}-${pad2(prevM)}`),
+    thisQuarter: Period.make(`${yearText(y)}-Q${q}`),
+    thisYear: Period.make(yearText(y)),
+    lastYear: Period.make(yearText(Math.max(0, y - 1))),
   };
 };
 
 /** Converts a Period (`2026`, `2026-Q4`, `2026-11`) into inclusive `{ from, to }` IsoDates. */
 export const periodToRange = (period: Period): { readonly from: IsoDate; readonly to: IsoDate } => {
-  const year = Number.parseInt(Str.slice(0, 4)(period), 10);
+  const yearPart = Str.slice(0, 4)(period);
+  const year = Number.parseInt(yearPart, 10);
   if (period.length === 4) {
-    return { from: IsoDate.make(`${year}-01-01`), to: IsoDate.make(`${year}-12-31`) };
+    return { from: IsoDate.make(`${yearPart}-01-01`), to: IsoDate.make(`${yearPart}-12-31`) };
   }
   if (Str.includes("-Q")(period)) {
     const q = Number.parseInt(Str.slice(6)(period), 10);
     const startMonth = (q - 1) * 3 + 1;
     const endMonth = startMonth + 2;
     return {
-      from: IsoDate.make(`${year}-${pad2(startMonth)}-01`),
-      to: IsoDate.make(`${year}-${pad2(endMonth)}-${pad2(daysInMonth(year, endMonth))}`),
+      from: IsoDate.make(`${yearPart}-${pad2(startMonth)}-01`),
+      to: IsoDate.make(`${yearPart}-${pad2(endMonth)}-${pad2(daysInMonth(year, endMonth))}`),
     };
   }
   const month = Number.parseInt(Str.slice(5, 7)(period), 10);
   return {
-    from: IsoDate.make(`${year}-${pad2(month)}-01`),
-    to: IsoDate.make(`${year}-${pad2(month)}-${pad2(daysInMonth(year, month))}`),
+    from: IsoDate.make(`${yearPart}-${pad2(month)}-01`),
+    to: IsoDate.make(`${yearPart}-${pad2(month)}-${pad2(daysInMonth(year, month))}`),
   };
 };
 
@@ -247,19 +250,21 @@ export const shiftPeriod: {
   (period: Period, delta: -1 | 1): Period;
 } = Fn.dual(2, (period: Period, delta: -1 | 1): Period => {
   const year = Number.parseInt(Str.slice(0, 4)(period), 10);
-  if (period.length === 4) return Period.make(`${year + delta}`);
+  const inRange = (nextYear: number, suffix = "") =>
+    nextYear < 0 || nextYear > 9999 ? period : Period.make(`${yearText(nextYear)}${suffix}`);
+  if (period.length === 4) return inRange(year + delta);
   if (Str.includes("-Q")(period)) {
     const q = Number.parseInt(Str.slice(6)(period), 10);
     const total = year * 4 + (q - 1) + delta;
     const ny = Math.floor(total / 4);
     const nq = (total % 4) + 1;
-    return Period.make(`${ny}-Q${nq}`);
+    return inRange(ny, `-Q${nq}`);
   }
   const month = Number.parseInt(Str.slice(5, 7)(period), 10);
   const total = year * 12 + (month - 1) + delta;
   const ny = Math.floor(total / 12);
   const nm = (total % 12) + 1;
-  return Period.make(`${ny}-${pad2(nm)}`);
+  return inRange(ny, `-${pad2(nm)}`);
 });
 
 // --- Export request builder -----------------------------------------------------------------------

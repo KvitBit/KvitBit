@@ -204,29 +204,30 @@ const daysInMonth = (year: number, month1: number): number =>
   DateTime.toPartsUtc(DateTime.endOf(DateTime.makeUnsafe({ year, month: month1, day: 1 }), "month"))
     .day;
 
-/** Computes occurrence `k` (0-indexed) from `startOn + k * every`, clamping day to end of month. */
+const firstIsoDay = DateTime.toEpochMillis(DateTime.makeUnsafe("0000-01-01T00:00:00Z"));
+const lastIsoDay = DateTime.toEpochMillis(DateTime.makeUnsafe("9999-12-31T00:00:00Z"));
+const weekMs = 7 * 24 * 60 * 60 * 1000;
+
+/** Computes an occurrence within the date format, clamping the day at month end. */
 export const occurrenceAt: {
-  (every: ScheduleEvery, k: number): (startOn: IsoDate) => IsoDate;
-  (startOn: IsoDate, every: ScheduleEvery, k: number): IsoDate;
-} = Fn.dual(3, (startOn: IsoDate, every: ScheduleEvery, k: number): IsoDate => {
-  const parts = Arr.map(Str.split("-")(startOn), (p) => Number.parseInt(p, 10));
-  const y = parts[0] ?? 2026;
-  const m = parts[1] ?? 1;
-  const d = parts[2] ?? 1;
+  (every: ScheduleEvery, k: number): (startOn: IsoDate) => IsoDate | null;
+  (startOn: IsoDate, every: ScheduleEvery, k: number): IsoDate | null;
+} = Fn.dual(3, (startOn: IsoDate, every: ScheduleEvery, k: number): IsoDate | null => {
+  const start = DateTime.makeUnsafe(`${startOn}T00:00:00Z`);
   if ("weeks" in every) {
-    const dt = DateTime.toDateUtc(
-      DateTime.add(DateTime.makeUnsafe({ year: y, month: m, day: d }), { weeks: k * every.weeks }),
-    );
-    return IsoDate.make(
-      `${dt.getUTCFullYear()}-${pad2(dt.getUTCMonth() + 1)}-${pad2(dt.getUTCDate())}`,
-    );
+    const next = DateTime.toEpochMillis(start) + k * every.weeks * weekMs;
+    if (!Number.isFinite(next) || next < firstIsoDay || next > lastIsoDay) return null;
+    return IsoDate.make(DateTime.formatIsoDateUtc(DateTime.makeUnsafe(next)));
   }
+  const { year, month, day } = DateTime.toPartsUtc(start);
   const addMonths = "years" in every ? k * every.years * 12 : k * every.months;
-  const totalMonths = y * 12 + (m - 1) + addMonths;
-  const ny = Math.floor(totalMonths / 12);
-  const nm = (totalMonths % 12) + 1;
-  const nd = Math.min(d, daysInMonth(ny, nm));
-  return IsoDate.make(`${ny}-${pad2(nm)}-${pad2(nd)}`);
+  const totalMonths = year * 12 + (month - 1) + addMonths;
+  const nextYear = Math.floor(totalMonths / 12);
+  if (!Number.isInteger(nextYear) || nextYear < 0 || nextYear > 9999) return null;
+  const nextMonth = (totalMonths % 12) + 1;
+  const nextDay = Math.min(day, daysInMonth(nextYear, nextMonth));
+  const yearPart = Str.padStart(4, "0")(String(nextYear));
+  return IsoDate.make(`${yearPart}-${pad2(nextMonth)}-${pad2(nextDay)}`);
 });
 
 /** Previews up to `count` occurrences starting at `startOn` (stopping after `endOn`). */
@@ -247,7 +248,7 @@ export const previewOccurrences = ({
   const out: Array<IsoDate> = [];
   for (let k = 0; k < count; k++) {
     const next = occurrenceAt(start, every, k);
-    if (validEnd !== null && next > validEnd) break;
+    if (next === null || (validEnd !== null && next > validEnd)) break;
     out.push(next);
   }
   return out;

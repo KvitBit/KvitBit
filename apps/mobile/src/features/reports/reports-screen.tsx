@@ -66,6 +66,8 @@ export function ReportsScreen(props: {
 
   const range = useMemo(() => periodToRange(period), [period]);
   const presets = useMemo(() => periodPresets(), []);
+  const previousPeriod = shiftPeriod(period, -1);
+  const nextPeriod = shiftPeriod(period, 1);
 
   const supportsGroupBy = props.report === "revenue" || props.report === "expenses";
   const effectiveGroupBy: ReportGroupBy | undefined = supportsGroupBy
@@ -467,7 +469,8 @@ export function ReportsScreen(props: {
           <IconButton
             icon={ChevronLeft}
             label={t("common.action.back")}
-            onPress={() => setPeriod((p) => shiftPeriod(p, -1))}
+            disabled={previousPeriod === period}
+            onPress={() => setPeriod(previousPeriod)}
           />
           <View style={styles.periodCenter}>
             <Text variant="titleMedium" numeric>
@@ -480,7 +483,8 @@ export function ReportsScreen(props: {
           <IconButton
             icon={ChevronRight}
             label={t("common.action.next")}
-            onPress={() => setPeriod((p) => shiftPeriod(p, 1))}
+            disabled={nextPeriod === period}
+            onPress={() => setPeriod(nextPeriod)}
           />
         </View>
         <SegmentedChoice value={period} choices={presetChoices} onChange={setPeriod} />

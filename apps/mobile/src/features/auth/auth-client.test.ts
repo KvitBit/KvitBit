@@ -1,8 +1,16 @@
 import { describe, expect, test } from "bun:test";
 import { InvitationToken } from "@kvitbit/domain/contract";
 import * as Arr from "effect/Array";
-import type { PasskeyBridge } from "../../platform/passkeys/passkey-bridge";
-import type { AuthFetch, AuthRequest, AuthResponse } from "../../session/auth-http";
+import {
+  type PasskeyBridge,
+  passkeyBridge as unavailablePasskeys,
+} from "../../platform/passkeys/passkey-bridge";
+import {
+  type AuthFetch,
+  type AuthRequest,
+  type AuthResponse,
+  makeAuthFetch,
+} from "../../session/auth-http";
 import { acceptInvitedSignup } from "./accept-invited-signup";
 import { makeAuthClient } from "./auth-client";
 
@@ -58,6 +66,43 @@ const makeHarness = (
 };
 
 describe("AuthClient", () => {
+  test("persists the replacement bearer before the next request after a password change", async () => {
+    let bearer: string | null = "old-bearer";
+    const received: Array<string | null> = [];
+    const auth = makeAuthFetch(
+      "https://kvitbit.test",
+      () => bearer,
+      (url, init) => {
+        received.push(new Headers(init.headers).get("authorization"));
+        if (url.pathname === "/api/auth/change-password") {
+          return Promise.resolve(
+            new Response("{}", {
+              headers: { "set-auth-token": "replacement-bearer" },
+            }),
+          );
+        }
+        return Promise.resolve(new Response("[]"));
+      },
+    );
+    const client = makeAuthClient({
+      auth,
+      signedIn: (token) => {
+        bearer = token;
+        return Promise.resolve(true);
+      },
+      refresh: () => Promise.resolve(),
+      clear: () => Promise.resolve(),
+      passkeyBridge: unavailablePasskeys,
+    });
+
+    expect(await client.changePassword("password-before", "password-after", true)).toEqual({
+      _tag: "Ok",
+      value: undefined,
+    });
+    expect(await client.passkeys()).toEqual({ _tag: "Ok", value: [] });
+    expect(received).toEqual(["Bearer old-bearer", "Bearer replacement-bearer"]);
+  });
+
   test("signUpEmail sends x-altcha and accept-language", async () => {
     const h = makeHarness(() => ({ status: 200, ok: true, body: {}, token: null }));
     const res = await h.client.signUpEmail(

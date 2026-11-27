@@ -4,7 +4,13 @@ import { ok } from "@kvitbit/ui-port/api";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
-import { requestKeyReplayWindowOpen, runRequestIntent } from "./request-intent";
+import * as Semaphore from "effect/Semaphore";
+import {
+  acquireRequestKey,
+  completeRequestKey,
+  requestKeyReplayWindowOpen,
+  runRequestIntent,
+} from "./request-intent";
 import { makeRequestIntentStore, RequestIntentExpired } from "./request-intent-store";
 
 const digest = (text: string) =>
@@ -205,3 +211,35 @@ test("holds the slot until its pending native storage write finishes", () =>
       expect(secondKey).toBe(firstKey);
     }).pipe(Effect.scoped),
   ));
+
+test("concurrent page requests use one shared Web Locks slot and key", async () => {
+  const testNavigator = globalThis.navigator;
+  const previous = Object.getOwnPropertyDescriptor(testNavigator, "locks");
+  const slots: string[] = [];
+  const exclusive = Semaphore.makeUnsafe(1);
+  Object.defineProperty(testNavigator, "locks", {
+    configurable: true,
+    value: {
+      request: <A>(slot: string, _options: LockOptions, work: () => Promise<A>) => {
+        slots.push(slot);
+        return Effect.promise(work).pipe(exclusive.withPermits(1), Effect.runPromise);
+      },
+    },
+  });
+  try {
+    const owner = "web-lock-fixture";
+    const operation = "documents.issue";
+    const [first, second] = await Promise.all([
+      acquireRequestKey(owner, operation, { amount: "321" }),
+      acquireRequestKey(owner, operation, { amount: "321" }),
+    ]);
+    expect(first).toBe(second);
+    expect(slots).toHaveLength(2);
+    expect(new Set(slots).size).toBe(1);
+    expect(slots[0]).toStartWith("kvitbit.request-intent.v1.");
+    await completeRequestKey(owner, operation, first);
+  } finally {
+    if (previous === undefined) Reflect.deleteProperty(testNavigator, "locks");
+    else Object.defineProperty(testNavigator, "locks", previous);
+  }
+});

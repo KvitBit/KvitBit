@@ -131,6 +131,26 @@ describe("templates & recurring model", () => {
     expect(filterTemplates([active, paused, oneOff], "one_off")).toHaveLength(1);
   });
 
+  test("previews only dates the schedule can represent", () => {
+    expect(
+      previewOccurrences({
+        startOn: "9999-12-01",
+        every: { months: 1 },
+        endOn: "9999-12-31",
+      }),
+    ).toEqual([IsoDate.make("9999-12-01")]);
+    expect(
+      previewOccurrences({
+        startOn: "9999-12-24",
+        every: { weeks: 1 },
+        endOn: "",
+      }),
+    ).toEqual([IsoDate.make("9999-12-24"), IsoDate.make("9999-12-31")]);
+    expect(occurrenceAt(IsoDate.make("0001-01-31"), { months: 1 }, 1)).toBe(
+      IsoDate.make("0001-02-28"),
+    );
+  });
+
   test("previews recurring dates with month-end clamping and endOn cutoff", () => {
     expect(occurrenceAt(IsoDate.make("2026-01-31"), { months: 1 }, 1)).toBe(
       IsoDate.make("2026-02-28"),
