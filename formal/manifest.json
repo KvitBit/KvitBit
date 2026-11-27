@@ -1090,19 +1090,19 @@
         },
         {
           "path": "packages/domain/src/action.ts",
-          "sha256": "e941b7e0cf44c3d9a1e515453f3011630042f9bf141f984b316eb8100def6342"
+          "sha256": "c8538cdb349951e9bdd0475de3dc0afde994c365eb89d16dfead38f9918229e4"
         },
         {
           "path": "packages/domain/src/scope.ts",
-          "sha256": "c42a40e2e7f4ab181f770c16d73efca3fc213a012e6aa0e25240c0256bb8bd8e"
+          "sha256": "303d4964519f2e8403b0683df618e2a64d44fbd58a791c9bb9118dc65c2c9dfe"
         },
         {
           "path": "packages/domain/src/caller.ts",
-          "sha256": "ba38f3a8ad1339ac17123b0ed7c60b3bba6e10b1e4fa091a22fe18c27146fac5"
+          "sha256": "46d55a78dd6b494e2b2eed5f52df1fa5f9732e66239b6021a9a8f0c39da86980"
         },
         {
           "path": "packages/domain/src/vocabulary.ts",
-          "sha256": "874a5ac04149ea443ee3adfee546ea3a923e431dcf4dff41a1912b21acf7ab2c"
+          "sha256": "9080a09b07cbf37c7caf391afc397203fad5149824d1715a56768cc15d7a8eed"
         }
       ],
       "guardedSymbols": [
@@ -1137,11 +1137,11 @@
       "coveredFiles": [
         {
           "path": "packages/domain/src/money.ts",
-          "sha256": "30fbe9da53418e545689267d4485ca68161cecd031b6803ab7f77715990d1608"
+          "sha256": "af9fa805f8588f57dbfd7b806593d43b99f2e06ef80bd5a9e50e9242c21ab846"
         },
         {
           "path": "packages/domain/src/vocabulary.ts",
-          "sha256": "874a5ac04149ea443ee3adfee546ea3a923e431dcf4dff41a1912b21acf7ab2c"
+          "sha256": "9080a09b07cbf37c7caf391afc397203fad5149824d1715a56768cc15d7a8eed"
         }
       ],
       "guardedSymbols": [
@@ -1182,11 +1182,11 @@
       "coveredFiles": [
         {
           "path": "packages/api-contract/src/access.ts",
-          "sha256": "3b3f466ec8a382c5881e2dc0e6d5bd9466f98c73e1f416e70b4f783e27c0096f"
+          "sha256": "e755368d04e6b5bd17f28283012070f0d7bcef7ff2c536c0e5c1efca4eac5ba1"
         },
         {
           "path": "packages/domain/src/scope.ts",
-          "sha256": "c42a40e2e7f4ab181f770c16d73efca3fc213a012e6aa0e25240c0256bb8bd8e"
+          "sha256": "303d4964519f2e8403b0683df618e2a64d44fbd58a791c9bb9118dc65c2c9dfe"
         }
       ],
       "guardedSymbols": [
@@ -1266,7 +1266,7 @@
         },
         {
           "path": "packages/domain/src/vocabulary.ts",
-          "sha256": "874a5ac04149ea443ee3adfee546ea3a923e431dcf4dff41a1912b21acf7ab2c"
+          "sha256": "9080a09b07cbf37c7caf391afc397203fad5149824d1715a56768cc15d7a8eed"
         }
       ],
       "guardedSymbols": ["VatMath.calculate", "TREATMENTS", "rateFor", "toCzk"],
