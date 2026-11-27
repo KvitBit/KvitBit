@@ -35,10 +35,10 @@ Covered files and guarded symbols:
 - `infra/alchemy/src/preflight-cli.ts`: CLI wrapper invoked by `.github/workflows/deploy.yml`
 - `infra/alchemy/src/config.ts`: `StackEnv`, `mergeStackEnvSources`, `readAlchemyRawEnv`, `makeStackEnvLayer`, `composeStackEnvLayers`, `defaultSecretBindings`, `validateStackConfigSync`, `validateStackConfig`, `loadStackConfig`
 - `infra/alchemy/src/env.ts`: `serverPlainEnv`, `serverSecretEnv`, `runnerPlainEnv`, `buildRunnerWorkerConfig`
-- `infra/alchemy/src/bootstrap.ts` & `infra/alchemy/alchemy.run.ts`: `declareKvitbitStack` (targeted feedback/ALTCHA secret bootstraps declare only their single secret container), `assertTargetedSecretSelection`, `altchaSecretFqn`, `feedbackSecretFqn`, `loadAlchemyStackConfig` (preserves Alchemy CLI `--env-file` / `.env` `ConfigProvider`)
-- `.github/workflows/deploy.yml`: `"Validate GCP deployment variables"` step (with `KVITBIT_REPO_VARS_JSON: ${{ toJSON(vars) }}`), Secret Manager preflight (including `kvitbit-prod-altcha-hmac-key`), targeted secret bootstraps (`bootstrap_feedback_secret`, `bootstrap_altcha_secret`), and Alchemy env pass-through
+- `infra/alchemy/src/bootstrap.ts` & `infra/alchemy/alchemy.run.ts`: `declareKvitbitStack` (targeted feedback/ALTCHA/Resend/turbo-cache secret bootstraps declare only their single secret container), `assertTargetedSecretSelection`, `altchaSecretFqn`, `feedbackSecretFqn`, `resendSecretFqn`, `turboCacheSecretFqn`, `loadAlchemyStackConfig` (preserves Alchemy CLI `--env-file` / `.env` `ConfigProvider`)
+- `.github/workflows/deploy.yml`: `"Validate GCP deployment variables"` step (with `KVITBIT_REPO_VARS_JSON: ${{ toJSON(vars) }}`), Secret Manager preflight (including `kvitbit-prod-altcha-hmac-key` and `kvitbit-prod-turbo-cache-token`), targeted secret bootstraps (`bootstrap_feedback_secret`, `bootstrap_altcha_secret`, `bootstrap_resend_secret`, `bootstrap_turbo_cache_secret`), and Alchemy env pass-through
 
-If `git diff bc82ac43 -- <those paths>` is non-empty, run the check.
+If `git diff 4ec465b3 -- <those paths>` is non-empty, run the check.
 
 ## Run
 
@@ -46,7 +46,7 @@ If `git diff bc82ac43 -- <those paths>` is non-empty, run the check.
 bun test --cwd apps/server ./test/runtime/deploy-config.exhaustive.test.ts
 ```
 
-Passes in about 4–7 seconds (12 tests, 942,484 enumerated cases). `bun run test` runs it as part of `@kvitbit/server`.
+Passes in about 4–7 seconds (12 tests, 944,544 enumerated cases). `bun run test` runs it as part of `@kvitbit/server`.
 
 Tool: bun 1.4.2 (root `packageManager`; also confirmed on bun 1.4.4), effect 4.1.4.
 
@@ -54,14 +54,14 @@ The repo-wide coverage record is `formal/manifest.json`; this skill's entry is `
 
 ## Bounds (exact counts, asserted in the test)
 
-- Domain cardinality guards: 5 `KVITBIT_ENVS`, 6 `EMAIL_MODES`, 3 `PROD_EMAIL_MODES`, 5 `RESOLVED_EMAIL_MODES`, 2 `BLOB_DRIVERS`, 3 `BOT_PROTECTION_MODES`, 1 `PROD_BOT_PROTECTION_MODES`, 2 `RESOLVED_BOT_PROTECTION_MODES`, 2 `SERVER_WORKLOADS`, 2 `DEPLOY_STAGES`, 4 `DEPLOY_MODES`, 5 `SECRET_FLAG_ENV_VARS`, 7 `REQUIRED_GCP_VARS`, 9 `FORBIDDEN_OPT_OUT_ENV_VARS`.
+- Domain cardinality guards: 5 `KVITBIT_ENVS`, 6 `EMAIL_MODES`, 3 `PROD_EMAIL_MODES`, 5 `RESOLVED_EMAIL_MODES`, 2 `BLOB_DRIVERS`, 3 `BOT_PROTECTION_MODES`, 1 `PROD_BOT_PROTECTION_MODES`, 2 `RESOLVED_BOT_PROTECTION_MODES`, 2 `SERVER_WORKLOADS`, 2 `DEPLOY_STAGES`, 6 `DEPLOY_MODES`, 6 `SECRET_FLAG_ENV_VARS`, 7 `REQUIRED_GCP_VARS`, 9 `FORBIDDEN_OPT_OUT_ENV_VARS`.
 - `resolveKvitbitEnv`: 7 `KVITBIT_ENV` values x 7 `NODE_ENV` values = 49 pairs.
 - `validateServerRuntimeEnv` (email/blob/origin): 2 workloads x 7 env inputs (5 explicit `KVITBIT_ENV`, implicit `NODE_ENV=production`, unset default) x 11 origin classes (`absent`, `https_public`, `http_public`, `http_localhost`, `https_localhost`, `https_localhost_dot`, `https_sub_localhost_dot`, `https_127`, `https_ipv6_loopback`, `https_ipv6_mapped_loopback`, `invalid_url`) x 8 email modes x 6 email secret states x 5 `EMAIL_FROM` states (`absent`, `valid`, `invalid`, `invalid_double_dot`, `invalid_overlong_label`) x 4 blob driver states x 2 bucket states = 295,680 states.
 - Bot protection (`resolveBotProtectionConfig`, `validateServerRuntimeEnv`, `BotProtectionLive`, `HttpConfigLive`): 5 envs x 5 bot modes x 3 key states (`absent`, `whitespace`, `present`) = 75 direct checks; 2 workloads x 7 env inputs x 5 bot modes x 3 key states x 2 email profiles x 2 blob profiles = 840 runtime checks; 5 envs x 5 bot modes x 3 key states = 75 live `HttpConfigLive` + `loadBotProtectionConfig` + `BotProtectionLive` parity checks = 990 states.
 - Core secrets, dynamic/fallback opt-out flags, boundaries, and upgrade preservation: 2 workloads x 5 envs x 5 DB/auth states = 50 cases; 2 workloads x 5 envs x 11 opt-out flags (incl. `KVITBIT_DISABLE_BOT_PROTECTION`, `KVITBIT_PREVIEW_DISABLE_BOT_PROTECTION`, `KVITBIT_DISABLE_CUSTOM`, and `KVITBIT_DISABLE_HTTP_2` Array node) across pure `validateServerRuntimeEnv` (110), live `loadBootRuntimeConfig` direct `ConfigProvider.fromEnv` (110), and live `loadBootRuntimeConfig` composed fallback `ConfigProvider.orElse` (110) = 330 cases; plus 1 upgrade preservation check, 4 boundary checks, and 20 live-loader checks (`makeRuntimeEnvLayer` / `composeRuntimeEnvLayers`) asserting exact `Invalid runtime config (<key>):` markers across server and worker = 405 cases.
 - Real Effect layer construction: `makeEmailSenderLayer` over 5 envs x 7 modes x 4 secret states x 2 `EMAIL_FROM` states = 280 real layer builds (plus live `.send()` verification on every accepted `capture`/`console` layer); `makeBlobStorageLayer` over 5 envs x 2 drivers x 2 bucket states = 20 real layer builds; `MobileConfigLive` over 5 envs x 4 origins x 2 mobile bucket x 2 mobile dir x 3 blob driver x 2 blob bucket states = 480 real Effect runs (780 total).
-- `infra/alchemy` `validateStackConfigSync` and Alchemy-to-server cross-layer soundness: 215,040 email/blob/origin/edge states + 2,688 bot-protection & all-bootstrap states (2 stages x 7 deploy/conflict modes x 4 bot modes x 2 ALTCHA secret x 2 feedback secret x 3 email modes x 2 Resend secret x 2 blob drivers) + 38 core consumer & live `loadStackConfig` opt-out checks = 217,766 states. Every accepted normal deploy materializes both Cloud Run server and GCE runner env maps and verifies `validateServerRuntimeEnv` accepts both (and that `ALTCHA_HMAC_KEY` is server-only).
-- `deploy.yml` `validateDeployPreflight` and 3-layer soundness: 423,360 email/blob/origin/edge states + 3,360 bot-protection & all-bootstrap states (2 stages x 7 deploy/conflict modes x 5 bot modes x 2 ALTCHA secret x 2 feedback secret x 3 email modes x 2 Resend secret x 2 origins) + 94 GCP/bool/opt-out/repo-vars checks = 426,814 states. Every accepted normal `prod` preflight state is mapped into Alchemy and through to `apps/server` server and worker validation.
+- `infra/alchemy` `validateStackConfigSync` and Alchemy-to-server cross-layer soundness: 215,040 email/blob/origin/edge states + 2,688 bot-protection & bootstrap states (2 stages x 7 deploy/conflict modes x 4 bot modes x 2 ALTCHA secret x 2 feedback secret x 3 email modes x 2 Resend secret x 2 blob drivers) + 1,024 full 2^5 bootstrap-flag combination states (2 stages x 32 bootstrap bitmasks x 16 targeted secret flag combinations) + 38 core consumer & live `loadStackConfig` opt-out checks = 218,790 states. Every accepted normal deploy materializes both Cloud Run server and GCE runner env maps and verifies `validateServerRuntimeEnv` accepts both (and that `ALTCHA_HMAC_KEY` is server-only).
+- `deploy.yml` `validateDeployPreflight` and 3-layer soundness: 423,360 email/blob/origin/edge states + 3,360 bot-protection & bootstrap states (2 stages x 7 deploy/conflict modes x 5 bot modes x 2 ALTCHA secret x 2 feedback secret x 3 email modes x 2 Resend secret x 2 origins) + 1,024 full 2^5 bootstrap-flag combination states (2 stages x 32 bootstrap bitmasks x 16 targeted secret flag combinations) + 106 GCP/bool/opt-out/repo-vars checks = 427,850 states. Every accepted normal `prod` preflight state is mapped into Alchemy and through to `apps/server` server and worker validation.
 
 ## Assumptions and what is not covered
 
@@ -79,7 +79,7 @@ The repo-wide coverage record is `formal/manifest.json`; this skill's entry is `
 
 ## Coverage record
 
-- Sync commit: `bc82ac43` (product contract confirmed at this commit).
+- Sync commit: `4ec465b3` (product contract confirmed at this commit after merging `origin/main`).
 - Able-to-fail, recorded 2026-11-27, each reverted with `git checkout` and re-run green:
   - `apps/server/src/config-contract.ts`: disabled prod `driver !== "gcs"` guard -> fails (`server KVITBIT_ENV=production ... blob=local/absent: expected ok=false, got ok=true`).
   - `apps/server/src/config-contract.ts`: removed `"staging"` from strict email branch -> fails (`server KVITBIT_ENV=staging ... emailMode=absent secrets=none ...: expected ok=false, got ok=true`).

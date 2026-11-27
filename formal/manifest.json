@@ -1411,7 +1411,7 @@
       "skill": "verify-deploy-config",
       "tier": 1,
       "kind": "exhaustive",
-      "syncCommit": "bc82ac43",
+      "syncCommit": "4ec465b3",
       "command": "bun test --cwd apps/server ./test/runtime/deploy-config.exhaustive.test.ts",
       "coveredFiles": [
         {
@@ -1432,11 +1432,11 @@
         },
         {
           "path": "apps/server/src/main.ts",
-          "sha256": "e54fa6a28ca0ed3c89a0a309687b3753f5026b47fb3a789ad7d0035a2ff90ec8"
+          "sha256": "bb3a5dc0172a10b54e4bbed53c730a0091238c464cd02cfd2e4f95b68550d992"
         },
         {
           "path": "apps/server/src/worker.ts",
-          "sha256": "6116ad74e9f9946d3a4918ae67ea9c9c9e7bbca9bafeeef71bf1072a5a9193ee"
+          "sha256": "71e34e93e657a58decf7b8e161af5c95acd03a35d07c50ff6799584bb1823c5f"
         },
         {
           "path": "apps/server/src/wiring/config.ts",
@@ -1444,7 +1444,7 @@
         },
         {
           "path": "apps/server/src/wiring/email.ts",
-          "sha256": "35ca720f5dd74af761bbd206e01c8a75aaecd724f3d453988be6c8e381f61d7f"
+          "sha256": "ee8c2283fcebe16805e556738b980b7d227266831bf202ce91cbb3753cf05bf1"
         },
         {
           "path": "apps/server/src/wiring/blob.ts",
@@ -1460,7 +1460,7 @@
         },
         {
           "path": "infra/alchemy/src/deploy-preflight.ts",
-          "sha256": "3f25558abb493936d2343d64b4e1a6336ccf55e3e69563fdb1ba52438958a98e"
+          "sha256": "3465a4396e19511c5ca174f132cc739762e80596d9849a1d77e042a9ebc2c0e4"
         },
         {
           "path": "infra/alchemy/src/preflight-cli.ts",
@@ -1468,23 +1468,23 @@
         },
         {
           "path": "infra/alchemy/src/config.ts",
-          "sha256": "f82877098c5e4c792beaac020263580662bc455b667f57538c77bd937399b29d"
+          "sha256": "e79a1fa437275826a60c4f595e4431a9128f7ff388c1b12206353f6d9638d87b"
         },
         {
           "path": "infra/alchemy/src/env.ts",
-          "sha256": "63fcd74df7e79d24a827f82cf2abed7f671c2a937b0ecdbb43d2df6b73ed7cb5"
+          "sha256": "d47e0be85722e4023f57a1d14433ebcfb2a2c70820bdae4e9692bc19f744af2e"
         },
         {
           "path": "infra/alchemy/src/bootstrap.ts",
-          "sha256": "597c333014e3e844618f8da56664f5541942d03af851d4986c11cd83bb6f9892"
+          "sha256": "930caaf73e3d6755e54c5f4616df3a4cf07fdef23f8ded28f376d429e852b35b"
         },
         {
           "path": "infra/alchemy/alchemy.run.ts",
-          "sha256": "1ca666afaba73ec5fb893d087ecd2fd5f876766b8804c9bbbb94dfa1f4c040d3"
+          "sha256": "d77d366a9c111a945d32e6337a395c64c1008631629e161a21b0fbe6a209f8f4"
         },
         {
           "path": ".github/workflows/deploy.yml",
-          "sha256": "4711b4e1f5663f778007022342ba8bea5c5d509bd687cf33f3ef1f0aa49ee93b"
+          "sha256": "da1ff9987b827d01f64c59fac4147bf5ff2d910a6b379d2e948abc6184167d3c"
         }
       ],
       "guardedSymbols": [
@@ -1535,9 +1535,11 @@
         "assertTargetedSecretSelection",
         "altchaSecretFqn",
         "feedbackSecretFqn",
+        "resendSecretFqn",
+        "turboCacheSecretFqn",
         "loadAlchemyStackConfig"
       ],
-      "bounds": "49 (KVITBIT_ENV x NODE_ENV) pairs; 295,680 server/worker runtime env states + 990 bot protection states (75 direct, 840 runtime, 75 live HttpConfigLive/BotProtectionLive parity) + 405 core secret/dynamic & composed opt-out/exact-key/sparse-array/boundary/upgrade states; 780 real Effect layer builds (280 email, 20 blob, 480 mobile); 215,040 Alchemy stack states + 2,688 Alchemy bot-protection & all-bootstrap states + 38 core consumer & live loadStackConfig opt-out checks with cross-layer server+worker soundness; 423,360 deploy.yml preflight states + 3,360 preflight bot-protection & all-bootstrap states + 94 GCP/bool/opt-out/repo-vars checks with 3-layer soundness (942,484 total exhaustive cases)",
+      "bounds": "49 (KVITBIT_ENV x NODE_ENV) pairs; 295,680 server/worker runtime env states + 990 bot protection states (75 direct, 840 runtime, 75 live HttpConfigLive/BotProtectionLive parity) + 405 core secret/dynamic & composed opt-out/exact-key/sparse-array/boundary/upgrade states; 780 real Effect layer builds (280 email, 20 blob, 480 mobile); 215,040 Alchemy stack states + 2,688 Alchemy bot-protection & bootstrap states + 1,024 full 2^5 bootstrap-flag combinations + 38 core consumer & live loadStackConfig opt-out checks with cross-layer server+worker soundness; 423,360 deploy.yml preflight states + 3,360 preflight bot-protection & bootstrap states + 1,024 full 2^5 bootstrap-flag combinations + 106 GCP/bool/opt-out/repo-vars checks with 3-layer soundness (944,544 total exhaustive cases)",
       "assumptions": [
         "Representative values stand for each equivalence class (origin, EMAIL_FROM, SMTP URL, domain); live network/credential validity and Secret Manager ENABLED state are outside pure config verification",
         "Cross-layer soundness substitutes synthetic valid non-empty strings for Secret Manager refs",

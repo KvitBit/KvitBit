@@ -315,8 +315,10 @@ describe("verify-deploy-config: finite domain size guards", () => {
       "bootstrap_foundation",
       "bootstrap_feedback_secret",
       "bootstrap_altcha_secret",
+      "bootstrap_resend_secret",
+      "bootstrap_turbo_cache_secret",
     ]);
-    expect(SECRET_FLAG_ENV_VARS.length).toBe(5);
+    expect(SECRET_FLAG_ENV_VARS.length).toBe(6);
     expect(REQUIRED_GCP_VARS.length).toBe(7);
     expect(FORBIDDEN_OPT_OUT_ENV_VARS.length).toBe(9);
   });
@@ -1424,7 +1426,7 @@ describe("verify-deploy-config: infra/alchemy stack validation & cross-layer sou
     expect(crossLayerVerified).toBe(prodNormalAccepted + stagingNormalAccepted);
   }, 30_000);
 
-  test("validateStackConfigSync exhaustively verifies bot protection & all bootstrap modes across 2,688 states with cross-layer server+worker soundness", () => {
+  test("validateStackConfigSync exhaustively verifies bot protection & all bootstrap modes across 3,712 states with cross-layer server+worker soundness", () => {
     const deployModeCases = [
       {
         label: "normal",
@@ -1630,6 +1632,93 @@ describe("verify-deploy-config: infra/alchemy stack validation & cross-layer sou
     expect(failures).toEqual([]);
     expect(total).toBe(2_688);
     expect(normalVerified).toBeGreaterThan(0);
+
+    // Exhaustive 2^5 bootstrap-flag combinations x 2 stages x 2^4 targeted secret flags = 1,024 states.
+    let bootstrapMatrixChecked = 0;
+    const bootstrapFailures: string[] = [];
+    for (const stage of DEPLOY_STAGES) {
+      for (let mask = 0; mask < 32; mask++) {
+        const bootstrapFoundation = (mask & 1) !== 0;
+        const bootstrapFeedbackSecret = (mask & 2) !== 0;
+        const bootstrapAltchaSecret = (mask & 4) !== 0;
+        const bootstrapResendSecret = (mask & 8) !== 0;
+        const bootstrapTurboCacheSecret = (mask & 16) !== 0;
+        const activeCount =
+          Number(bootstrapFoundation) +
+          Number(bootstrapFeedbackSecret) +
+          Number(bootstrapAltchaSecret) +
+          Number(bootstrapResendSecret) +
+          Number(bootstrapTurboCacheSecret);
+
+        for (let secretMask = 0; secretMask < 16; secretMask++) {
+          const enableFeedback = (secretMask & 1) !== 0;
+          const enableAltcha = (secretMask & 2) !== 0;
+          const enableResend = (secretMask & 4) !== 0;
+          const enableTurboCache = (secretMask & 8) !== 0;
+          bootstrapMatrixChecked++;
+
+          const config: KvitbitStackConfig = {
+            stage,
+            bootstrapFoundation,
+            bootstrapFeedbackSecret,
+            bootstrapAltchaSecret,
+            bootstrapResendSecret,
+            bootstrapTurboCacheSecret,
+            projectId: KVITBIT_PROD_DEFAULTS.projectId,
+            projectNumber: KVITBIT_PROD_DEFAULTS.projectNumber,
+            region: KVITBIT_PROD_DEFAULTS.region,
+            zone: KVITBIT_PROD_DEFAULTS.zone,
+            stateBucket: KVITBIT_PROD_DEFAULTS.stateBucket,
+            artifactRepositoryId: KVITBIT_PROD_DEFAULTS.artifactRepositoryId,
+            imageName: KVITBIT_PROD_DEFAULTS.imageName,
+            imageDigest: bootstrapFoundation ? "" : SAMPLE_DIGEST,
+            blobDriver: "gcs",
+            blobsBucket: `kvitbit-${stage}-blobs`,
+            mobileAssetsBucket: `kvitbit-${stage}-mobile`,
+            runnerCount: 2,
+            runnerMachineType: KVITBIT_PROD_DEFAULTS.runnerMachineType,
+            runnerPort: KVITBIT_PROD_DEFAULTS.runnerPort,
+            runnerCidr: KVITBIT_PROD_DEFAULTS.runnerCidr,
+            serverMinInstances: 0,
+            serverMaxInstances: 10,
+            appOrigin: "https://kvitbit.cz",
+            emailMode: undefined,
+            emailFrom: "Kvitbit <noreply@kvitbit.cz>",
+            trustedProxyHops: 2,
+            shareKeyVersion: 1,
+            androidAssetlinksSha256: undefined,
+            feedbackGitHubRepo: undefined,
+            feedbackOwnerEmails: undefined,
+            secrets: defaultSecretBindings(stage, {
+              enableResend,
+              enableFeedbackGitHubToken: enableFeedback,
+              enableAltchaHmacKey: enableAltcha,
+              enableTurboCache,
+            }),
+            dnsZones: [],
+            edge: VALID_EDGE,
+          };
+
+          let expOk: boolean;
+          if (activeCount > 1) expOk = false;
+          else if (bootstrapFeedbackSecret) expOk = enableFeedback;
+          else if (bootstrapAltchaSecret) expOk = enableAltcha;
+          else if (bootstrapResendSecret) expOk = enableResend;
+          else if (bootstrapTurboCacheSecret) expOk = enableTurboCache;
+          else if (bootstrapFoundation) expOk = true;
+          else expOk = enableResend && enableAltcha;
+
+          const actual = validateStackConfigSync(config);
+          if (actual.ok !== expOk && bootstrapFailures.length < 10) {
+            bootstrapFailures.push(
+              `alchemy-bootstrap ${stage} mask=${mask} secretMask=${secretMask}: expected=${expOk}, got=${actual.ok}${actual.ok ? "" : ` (${actual.error.message})`}`,
+            );
+          }
+        }
+      }
+    }
+    expect(bootstrapFailures).toEqual([]);
+    expect(bootstrapMatrixChecked).toBe(1_024);
   }, 30_000);
 
   test("rejects missing core secret consumers and dynamic forbidden flags in live loadStackConfig", async () => {
@@ -2105,7 +2194,7 @@ describe("verify-deploy-config: deploy.yml preflight & 3-layer soundness", () =>
     expect(prodNormalAccepted).toBeGreaterThan(0);
   }, 30_000);
 
-  test("validateDeployPreflight exhaustively verifies bot protection & all bootstrap modes across 3,360 states with 3-layer soundness", () => {
+  test("validateDeployPreflight exhaustively verifies bot protection & all bootstrap modes across 4,384 states with 3-layer soundness", () => {
     const deployModes = [
       { label: "normal", foundation: "false", feedback: "false", altcha: "false" },
       { label: "bootstrap_foundation", foundation: "true", feedback: "false", altcha: "false" },
@@ -2298,6 +2387,71 @@ describe("verify-deploy-config: deploy.yml preflight & 3-layer soundness", () =>
     expect(failures).toEqual([]);
     expect(total).toBe(3_360);
     expect(normalAccepted).toBeGreaterThan(0);
+
+    // Exhaustive 2^5 bootstrap-flag combinations x 2 stages x 2^4 targeted secret flags = 1,024 states.
+    let bootstrapMatrixChecked = 0;
+    const bootstrapFailures: string[] = [];
+    for (const stage of DEPLOY_STAGES) {
+      for (let mask = 0; mask < 32; mask++) {
+        const bootstrapFoundation = (mask & 1) !== 0;
+        const bootstrapFeedbackSecret = (mask & 2) !== 0;
+        const bootstrapAltchaSecret = (mask & 4) !== 0;
+        const bootstrapResendSecret = (mask & 8) !== 0;
+        const bootstrapTurboCacheSecret = (mask & 16) !== 0;
+        const activeCount =
+          Number(bootstrapFoundation) +
+          Number(bootstrapFeedbackSecret) +
+          Number(bootstrapAltchaSecret) +
+          Number(bootstrapResendSecret) +
+          Number(bootstrapTurboCacheSecret);
+
+        for (let secretMask = 0; secretMask < 16; secretMask++) {
+          const enableFeedback = (secretMask & 1) !== 0;
+          const enableAltcha = (secretMask & 2) !== 0;
+          const enableResend = (secretMask & 4) !== 0;
+          const enableTurboCache = (secretMask & 8) !== 0;
+          bootstrapMatrixChecked++;
+
+          const env: Record<string, string | undefined> = {
+            ...BASE_GCP_ENV,
+            KVITBIT_STAGE: stage,
+            BOOTSTRAP_FOUNDATION: bootstrapFoundation ? "true" : "false",
+            BOOTSTRAP_FEEDBACK_SECRET: bootstrapFeedbackSecret ? "true" : "false",
+            BOOTSTRAP_ALTCHA_SECRET: bootstrapAltchaSecret ? "true" : "false",
+            BOOTSTRAP_RESEND_SECRET: bootstrapResendSecret ? "true" : "false",
+            BOOTSTRAP_TURBO_CACHE_SECRET: bootstrapTurboCacheSecret ? "true" : "false",
+            KVITBIT_ENABLE_RESEND_SECRET: enableResend ? "true" : "false",
+            KVITBIT_ENABLE_SMTP_SECRET: "false",
+            KVITBIT_ENABLE_MOBILE_SIGNING_KEY_SECRET: "false",
+            KVITBIT_ENABLE_FEEDBACK_GITHUB_TOKEN_SECRET: enableFeedback ? "true" : "false",
+            KVITBIT_ENABLE_ALTCHA_HMAC_KEY_SECRET: enableAltcha ? "true" : "false",
+            KVITBIT_ENABLE_TURBO_CACHE: enableTurboCache ? "true" : "false",
+            APP_ORIGIN: "https://kvitbit.cz",
+            EMAIL_FROM: "Kvitbit <noreply@kvitbit.cz>",
+            KVITBIT_EDGE_DOMAINS: "kvitbit.cz, kvitbit.app",
+          };
+
+          let expOk: boolean;
+          if (stage !== "prod") expOk = false;
+          else if (activeCount > 1) expOk = false;
+          else if (bootstrapFeedbackSecret) expOk = enableFeedback;
+          else if (bootstrapAltchaSecret) expOk = enableAltcha;
+          else if (bootstrapResendSecret) expOk = enableResend;
+          else if (bootstrapTurboCacheSecret) expOk = enableTurboCache;
+          else if (bootstrapFoundation) expOk = true;
+          else expOk = enableResend && enableAltcha;
+
+          const actual = validateDeployPreflight(env);
+          if (actual.ok !== expOk && bootstrapFailures.length < 10) {
+            bootstrapFailures.push(
+              `preflight-bootstrap ${stage} mask=${mask} secretMask=${secretMask}: expected=${expOk}, got=${actual.ok}${actual.ok ? "" : ` (${actual.message})`}`,
+            );
+          }
+        }
+      }
+    }
+    expect(bootstrapFailures).toEqual([]);
+    expect(bootstrapMatrixChecked).toBe(1_024);
   }, 30_000);
 
   test("preflight exhaustively verifies GCP repo vars, boolean normalization, and opt-out rejection", () => {
@@ -2327,7 +2481,7 @@ describe("verify-deploy-config: deploy.yml preflight & 3-layer soundness", () =>
       }).ok,
     ).toBe(false);
 
-    // Boolean normalization for all 5 flags across all 12 test tokens = 60 checks.
+    // Boolean normalization for all 6 flags across all 12 test tokens = 72 checks.
     const boolTokens: ReadonlyArray<readonly [string, boolean | "invalid"]> = [
       ["", false],
       ["false", false],
@@ -2361,7 +2515,7 @@ describe("verify-deploy-config: deploy.yml preflight & 3-layer soundness", () =>
         }
       }
     }
-    expect(boolChecks).toBe(60);
+    expect(boolChecks).toBe(72);
 
     // Every forbidden opt-out flag fails in prod preflight — both directly and via KVITBIT_REPO_VARS_JSON.
     for (const optOut of [
