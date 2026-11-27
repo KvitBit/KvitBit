@@ -42,7 +42,7 @@ Combines full Czech/EU statutory invoicing compliance (all three Czech tax regim
 ## Brand Commitments
 
 - Name: Kvitbit (package and identifier form `kvitbit`), from the Czech "jsme kvit" (we are square, nothing owed) plus binary "bit". Domains: `kvitbit.cz`, `kvitbit.app`.
-- Infra IDs bootstrapped before the rename stay unchanged: GitHub repo `totalolage/invoicarr`, GCP project `invoicarr-prod`, Neon project `hidden-hall-00717862` (see ADR 0003).
+- Provisioned infra IDs: GitHub repo `KvitBit/KvitBit` (transferred from `totalolage/kvitbit`, repository ID `1467990305`), GCP project `kvitbit-prod`, Neon project `hidden-hall-00717862` (display name `invoicarr`, kept; see ADR 0003).
 - Visual identity is locked: N2 Dual-Bit Notch mark, Clash Display Semibold wordmark, T4 Micro-Glyph Graph pattern. The full brand kit is in `assets/brand/`, `assets/icon.svg` is the N2 light mark, and the rules are in `DESIGN.md` (Brand Identity).
 - Full light and dark mode support required, with crisp tabular numerals for Czech/EU monetary values.
 - Full bilingual Czech and English copy.
