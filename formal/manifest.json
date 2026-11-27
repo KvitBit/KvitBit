@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "syncCommit": "95ef6f0",
+  "syncCommit": "7907157",
   "toolchain": {
     "tla2tools": "1.7.4",
     "java": 17
@@ -382,7 +382,7 @@
       "skill": "verify-outbox-recurring",
       "tier": 1,
       "kind": "tlc",
-      "syncCommit": "95ef6f0",
+      "syncCommit": "7907157",
       "spec": "formal/outbox/OutboxRecurring.tla",
       "config": "formal/outbox/OutboxRecurring.cfg",
       "wideConfig": "formal/outbox/OutboxRecurring_wide.cfg",
@@ -518,7 +518,7 @@
         },
         {
           "path": "packages/core/src/modules/documents/deliveries/steps.ts",
-          "sha256": "3277052023ab19ab93b067cc7546d525c245cd3d90068a9a5f093a3b265897e5"
+          "sha256": "05431fd423b72119422a1c161b0738feecb6cf68cc9a53c876128ea072464239"
         },
         {
           "path": "packages/core/src/modules/documents/deliveries/jobs.ts",
@@ -588,7 +588,7 @@
       "skill": "verify-outbox-recurring",
       "tier": 1,
       "kind": "replay",
-      "syncCommit": "95ef6f0",
+      "syncCommit": "7907157",
       "replay": ["formal/outbox/outbox.replay.test.ts"],
       "timeoutSeconds": 120,
       "coveredFiles": [
@@ -610,7 +610,7 @@
         },
         {
           "path": "packages/core/src/modules/documents/deliveries/steps.ts",
-          "sha256": "3277052023ab19ab93b067cc7546d525c245cd3d90068a9a5f093a3b265897e5"
+          "sha256": "05431fd423b72119422a1c161b0738feecb6cf68cc9a53c876128ea072464239"
         },
         {
           "path": "packages/core/src/modules/documents/deliveries/jobs.ts",
