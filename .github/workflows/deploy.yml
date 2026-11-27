@@ -55,6 +55,7 @@ jobs:
       KVITBIT_ENABLE_RESEND_SECRET: ${{ vars.KVITBIT_ENABLE_RESEND_SECRET }}
       KVITBIT_ENABLE_SMTP_SECRET: ${{ vars.KVITBIT_ENABLE_SMTP_SECRET }}
       KVITBIT_ENABLE_MOBILE_SIGNING_KEY_SECRET: ${{ vars.KVITBIT_ENABLE_MOBILE_SIGNING_KEY_SECRET }}
+      KVITBIT_ENABLE_FEEDBACK_GITHUB_TOKEN_SECRET: ${{ vars.KVITBIT_ENABLE_FEEDBACK_GITHUB_TOKEN_SECRET }}
 
     steps:
       - name: Validate GCP deployment variables
@@ -109,6 +110,7 @@ jobs:
           normalize_bool_var KVITBIT_ENABLE_RESEND_SECRET
           normalize_bool_var KVITBIT_ENABLE_SMTP_SECRET
           normalize_bool_var KVITBIT_ENABLE_MOBILE_SIGNING_KEY_SECRET
+          normalize_bool_var KVITBIT_ENABLE_FEEDBACK_GITHUB_TOKEN_SECRET
 
       - uses: actions/checkout@v4
         with:
@@ -192,6 +194,9 @@ jobs:
           if [ "${KVITBIT_ENABLE_MOBILE_SIGNING_KEY_SECRET:-false}" = "true" ]; then
             required_secrets="${required_secrets} kvitbit-${KVITBIT_STAGE}-mobile-updates-signing-key"
           fi
+          if [ "${KVITBIT_ENABLE_FEEDBACK_GITHUB_TOKEN_SECRET:-false}" = "true" ]; then
+            required_secrets="${required_secrets} kvitbit-${KVITBIT_STAGE}-feedback-github-token"
+          fi
 
           for secret_id in $required_secrets; do
             state="$(gcloud secrets versions describe latest \
@@ -273,6 +278,9 @@ jobs:
           KVITBIT_ENABLE_RESEND_SECRET: ${{ env.KVITBIT_ENABLE_RESEND_SECRET }}
           KVITBIT_ENABLE_SMTP_SECRET: ${{ env.KVITBIT_ENABLE_SMTP_SECRET }}
           KVITBIT_ENABLE_MOBILE_SIGNING_KEY_SECRET: ${{ env.KVITBIT_ENABLE_MOBILE_SIGNING_KEY_SECRET }}
+          KVITBIT_ENABLE_FEEDBACK_GITHUB_TOKEN_SECRET: ${{ env.KVITBIT_ENABLE_FEEDBACK_GITHUB_TOKEN_SECRET }}
+          KVITBIT_FEEDBACK_GITHUB_REPO: ${{ vars.KVITBIT_FEEDBACK_GITHUB_REPO }}
+          KVITBIT_FEEDBACK_OWNER_EMAILS: ${{ vars.KVITBIT_FEEDBACK_OWNER_EMAILS }}
         run: |
           set -euo pipefail
           if [ "$DRY_RUN" = "true" ]; then

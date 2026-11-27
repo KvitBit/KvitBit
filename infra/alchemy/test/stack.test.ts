@@ -86,6 +86,8 @@ const sampleProdConfig = (overrides: Partial<KvitbitStackConfig> = {}): KvitbitS
   trustedProxyHops: 2,
   shareKeyVersion: 1,
   androidAssetlinksSha256: "AA:BB:CC",
+  feedbackGitHubRepo: undefined,
+  feedbackOwnerEmails: undefined,
   secrets: defaultSecretBindings("prod", {
     enableResend: true,
     enableSmtp: true,
@@ -150,6 +152,9 @@ describe("Kvitbit Alchemy stack config", () => {
         KVITBIT_ENABLE_RESEND_SECRET: "true",
         KVITBIT_ENABLE_SMTP_SECRET: "",
         KVITBIT_ENABLE_MOBILE_SIGNING_KEY_SECRET: "true",
+        KVITBIT_ENABLE_FEEDBACK_GITHUB_TOKEN_SECRET: " ",
+        KVITBIT_FEEDBACK_GITHUB_REPO: "",
+        KVITBIT_FEEDBACK_OWNER_EMAILS: " ",
       },
     });
     const config = await Effect.runPromise(
@@ -164,6 +169,9 @@ describe("Kvitbit Alchemy stack config", () => {
     expect(secretIds).toContain("kvitbit-prod-resend-api-key");
     expect(secretIds).toContain("kvitbit-prod-mobile-updates-signing-key");
     expect(secretIds).not.toContain("kvitbit-prod-smtp-url");
+    expect(secretIds).not.toContain("kvitbit-prod-feedback-github-token");
+    expect(config.feedbackGitHubRepo).toBeUndefined();
+    expect(config.feedbackOwnerEmails).toBeUndefined();
   });
 
   test("rejects mutable image tags, cross-region zones, and out-of-range runnerCount", async () => {
@@ -206,6 +214,7 @@ describe("Kvitbit Alchemy stack config", () => {
         KVITBIT_ENABLE_RESEND_SECRET: "OFF",
         KVITBIT_ENABLE_SMTP_SECRET: "0",
         KVITBIT_ENABLE_MOBILE_SIGNING_KEY_SECRET: "No",
+        KVITBIT_ENABLE_FEEDBACK_GITHUB_TOKEN_SECRET: "OFF",
       },
     });
     const disabledConfig = await Effect.runPromise(
@@ -215,17 +224,21 @@ describe("Kvitbit Alchemy stack config", () => {
     expect(disabledIds).not.toContain("kvitbit-prod-resend-api-key");
     expect(disabledIds).not.toContain("kvitbit-prod-smtp-url");
     expect(disabledIds).not.toContain("kvitbit-prod-mobile-updates-signing-key");
+    expect(disabledIds).not.toContain("kvitbit-prod-feedback-github-token");
 
     const invalidProvider = ConfigProvider.fromEnv({
       env: {
         KVITBIT_IMAGE_DIGEST: SAMPLE_DIGEST,
-        KVITBIT_ENABLE_RESEND_SECRET: "maybe",
+        KVITBIT_ENABLE_FEEDBACK_GITHUB_TOKEN_SECRET: "maybe",
       },
     });
     const invalidError = await Effect.runPromise(
       Effect.flip(loadStackConfig.pipe(Effect.provide(ConfigProvider.layer(invalidProvider)))),
     );
-    expect(invalidError._tag).toBe("InvalidStackConfig");
+    expect(invalidError).toMatchObject({
+      _tag: "InvalidStackConfig",
+      field: "KVITBIT_ENABLE_FEEDBACK_GITHUB_TOKEN_SECRET",
+    });
   });
 });
 
@@ -1071,6 +1084,61 @@ esac
 });
 
 describe("Cloud Run server service", () => {
+  test("wires configured feedback to Cloud Run with a server-only Secret Manager grant", async () => {
+    const provider = ConfigProvider.fromEnv({
+      env: {
+        KVITBIT_STAGE: "staging",
+        KVITBIT_GCP_PROJECT_ID: "kvitbit-staging",
+        KVITBIT_IMAGE_DIGEST: SAMPLE_DIGEST,
+        KVITBIT_ENABLE_FEEDBACK_GITHUB_TOKEN_SECRET: " YES ",
+        KVITBIT_FEEDBACK_GITHUB_REPO: " owner/feedback ",
+        KVITBIT_FEEDBACK_OWNER_EMAILS: " owner@example.com, admin@example.com ",
+      },
+    });
+    const config = await Effect.runPromise(
+      loadStackConfig.pipe(Effect.provide(ConfigProvider.layer(provider))),
+    );
+    const names = resourceNames(config);
+    const secretId = "kvitbit-staging-feedback-github-token";
+    const secret = `projects/kvitbit-staging/secrets/${secretId}`;
+    expect(secretDeclarations(config).map((entry) => entry.secretId)).toContain(secretId);
+    expect(secretAccessorGrants(config).filter((grant) => grant.secretId === secretId)).toEqual([
+      {
+        id: `SecretAccess-${secretId}-server`,
+        secretId,
+        workload: "server",
+        props: {
+          kind: "secretmanager.secret",
+          name: secret,
+          role: "roles/secretmanager.secretAccessor",
+          member: `serviceAccount:${names.serverServiceAccountId}@kvitbit-staging.iam.gserviceaccount.com`,
+        },
+      },
+    ]);
+
+    const service = serverServiceProps(config, {
+      networkName: names.networkName,
+      subnetworkName: names.subnetworkName,
+      blobsBucketName: config.blobsBucket,
+      mobileAssetsBucketName: config.mobileAssetsBucket,
+    });
+    const container = service.template?.containers?.[0];
+    const env = container && "env" in container ? container.env : undefined;
+    expect(env).toContainEqual({ name: "KVITBIT_FEEDBACK_GITHUB_REPO", value: "owner/feedback" });
+    expect(env).toContainEqual({
+      name: "KVITBIT_FEEDBACK_OWNER_EMAILS",
+      value: "owner@example.com, admin@example.com",
+    });
+    expect(env).toContainEqual({
+      name: "KVITBIT_FEEDBACK_GITHUB_TOKEN",
+      valueSource: { secretKeyRef: { secret, version: "latest" } },
+    });
+
+    const runner = buildRunnerWorkerConfig(config);
+    expect(runner.plainEnv.some((entry) => entry.name.startsWith("KVITBIT_FEEDBACK_"))).toBe(false);
+    expect(runner.secrets.map((entry) => entry.secretId)).not.toContain(secretId);
+  });
+
   test("wires Direct VPC egress, /healthz probes, cluster mode, and all shared env vars", () => {
     const config = sampleProdConfig();
     const names = resourceNames(config);
@@ -1105,6 +1173,9 @@ describe("Cloud Run server service", () => {
       mobileAssetsBucket: config.mobileAssetsBucket,
     }).map((e) => e.name);
     const secretNames = serverSecretEnv(config).map((e) => e.name);
+    expect(plainNames).not.toContain("KVITBIT_FEEDBACK_GITHUB_REPO");
+    expect(plainNames).not.toContain("KVITBIT_FEEDBACK_OWNER_EMAILS");
+    expect(secretNames).not.toContain("KVITBIT_FEEDBACK_GITHUB_TOKEN");
 
     for (const required of [
       "KVITBIT_RUNNER_MODE",

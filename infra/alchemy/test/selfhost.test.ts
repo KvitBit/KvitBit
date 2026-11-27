@@ -830,6 +830,7 @@ describe("Self-hosting and CI deploy artifacts", () => {
     const workflow = readFileSync(join(repoRoot, ".github/workflows/deploy.yml"), "utf8");
     const parsed = Bun.YAML.parse(workflow) as {
       on?: { workflow_dispatch?: { inputs?: Record<string, unknown> } };
+      jobs: { deploy: { steps: Array<{ name?: string; env?: Record<string, string> }> } };
     };
     expect(parsed).toBeDefined();
 
@@ -850,6 +851,7 @@ describe("Self-hosting and CI deploy artifacts", () => {
       "KVITBIT_ENABLE_RESEND_SECRET",
       "KVITBIT_ENABLE_SMTP_SECRET",
       "KVITBIT_ENABLE_MOBILE_SIGNING_KEY_SECRET",
+      "KVITBIT_ENABLE_FEEDBACK_GITHUB_TOKEN_SECRET",
     ]) {
       expect(workflow).toContain(`vars.${varName}`);
     }
@@ -875,6 +877,15 @@ describe("Self-hosting and CI deploy artifacts", () => {
     expect(workflow).toContain(
       `KVITBIT_ENABLE_MOBILE_SIGNING_KEY_SECRET: \${{ env.KVITBIT_ENABLE_MOBILE_SIGNING_KEY_SECRET }}`,
     );
+    const alchemy = parsed.jobs.deploy.steps.find((step) =>
+      step.name?.startsWith("Run pure-Alchemy GCP stack"),
+    );
+    expect(alchemy?.env).toMatchObject({
+      KVITBIT_ENABLE_FEEDBACK_GITHUB_TOKEN_SECRET: `\${{ env.KVITBIT_ENABLE_FEEDBACK_GITHUB_TOKEN_SECRET }}`,
+      KVITBIT_FEEDBACK_GITHUB_REPO: `\${{ vars.KVITBIT_FEEDBACK_GITHUB_REPO }}`,
+      KVITBIT_FEEDBACK_OWNER_EMAILS: `\${{ vars.KVITBIT_FEEDBACK_OWNER_EMAILS }}`,
+    });
+    expect(workflow).toContain(`kvitbit-\${KVITBIT_STAGE}-feedback-github-token`);
     expect(workflow).toContain(`if [ -n "\${KVITBIT_EDGE_DOMAINS:-}" ]; then`);
 
     const preflightPos = workflow.indexOf("gcloud artifacts repositories describe kvitbit");
@@ -1021,6 +1032,7 @@ describe("Self-hosting and CI deploy artifacts", () => {
           KVITBIT_ENABLE_RESEND_SECRET: "YES",
           KVITBIT_ENABLE_SMTP_SECRET: "1",
           KVITBIT_ENABLE_MOBILE_SIGNING_KEY_SECRET: "OFF",
+          KVITBIT_ENABLE_FEEDBACK_GITHUB_TOKEN_SECRET: " On ",
         },
         stdout: "pipe",
         stderr: "pipe",
@@ -1030,6 +1042,7 @@ describe("Self-hosting and CI deploy artifacts", () => {
       expect(exported).toContain("KVITBIT_ENABLE_RESEND_SECRET=true");
       expect(exported).toContain("KVITBIT_ENABLE_SMTP_SECRET=true");
       expect(exported).toContain("KVITBIT_ENABLE_MOBILE_SIGNING_KEY_SECRET=false");
+      expect(exported).toContain("KVITBIT_ENABLE_FEEDBACK_GITHUB_TOKEN_SECRET=true");
 
       const normBad = Bun.spawnSync(["bash", "-c", validateStep?.run ?? ""], {
         env: {
