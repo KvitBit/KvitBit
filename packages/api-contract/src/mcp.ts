@@ -101,11 +101,8 @@ const CONFIRMATION_HASH_EXCLUDED_ARGS: ReadonlyArray<string> = [
   "idempotencyKey",
 ];
 
-// biome-ignore lint/plugin/no-unsafe-dictionary-type: Confirmation hashes arguments from every tool schema without changing their values.
-type ConfirmationArguments = Readonly<Record<string, unknown>>;
-
 /** The arguments a confirmation token is bound to. */
-export const confirmationBoundArgs = (args: ConfirmationArguments): ConfirmationArguments =>
+export const confirmationBoundArgs = (args: Schema.JsonObject): Schema.JsonObject =>
   Rec.fromEntries(
     Arr.filter(Rec.toEntries(args), ([key]) => !CONFIRMATION_HASH_EXCLUDED_ARGS.includes(key)),
   );

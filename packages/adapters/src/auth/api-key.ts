@@ -7,7 +7,7 @@
  * the whole token, base64url without padding), so a key stays verifiable by either side.
  */
 // The synchronous key API uses Node's cryptographic random bytes and constant-time comparison.
-// @effect-diagnostics-next-line nodeBuiltinImport:off
+// @effect-diagnostics-next-line nodeBuiltinImport:off The synchronous key API needs cryptographic entropy and constant-time comparison.
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import {
   API_KEY_PREFIX,

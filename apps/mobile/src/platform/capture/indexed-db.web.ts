@@ -29,14 +29,18 @@ export const openIndexedStore = (store: string) => (name: string) => {
   );
 };
 
-// @effect-diagnostics-next-line missingPipeableSignature:off The curried store operation is applied to its open database.
 export const inIndexedStore =
-  <A>(
-    name: string,
-    mode: IDBTransactionMode,
-    requestFor: (store: IDBObjectStore) => IDBRequest<A>,
-    options?: IDBTransactionOptions,
-  ) =>
+  <A>({
+    name,
+    mode,
+    requestFor,
+    options,
+  }: {
+    readonly name: string;
+    readonly mode: IDBTransactionMode;
+    readonly requestFor: (store: IDBObjectStore) => IDBRequest<A>;
+    readonly options?: IDBTransactionOptions;
+  }) =>
   (db: IDBDatabase) =>
     tryPlatform(() => {
       const transaction = db.transaction(name, mode, options);

@@ -76,8 +76,7 @@ export const styleVariables: {
   (args) => Predicate.isString(args[0]),
   (style: ThemeStyle, tokens: StyleTokens = StyleTokensByStyle[style]): CssVariables => {
     const fallback = FONT_FALLBACKS[style];
-    // biome-ignore lint/plugin/no-known-value-widening: The type scale loop adds generated CSS keys below.
-    const out: Record<`--${string}`, string> = {
+    const baseVariables = {
       "--kb-font-display": `${quoted(tokens.font.display.family)}, ${fallback.display}`,
       "--kb-font-body": `${quoted(tokens.font.body.family)}, ${fallback.body}`,
       "--kb-font-mono": `${quoted(tokens.font.mono.family)}, ${fallback.mono}`,
@@ -91,17 +90,18 @@ export const styleVariables: {
       "--kb-shape-badge": px(tokens.shape.badge),
       "--kb-panel-border-width": px(tokens.panelBorder),
     };
+    const typeVariables: Record<`--${string}`, string> = {};
     const typeVars = (prefix: string, name: string, s: TypeStyle) => {
       const base: `--${string}` = `--kb-${prefix}-${kebab(name)}`;
-      out[`${base}-font`] = `var(--kb-font-${s.font})`;
-      out[`${base}-weight`] = String(s.weight);
-      out[`${base}-size`] = rem(s.size);
-      out[`${base}-line-height`] = rem(s.lineHeight);
-      out[`${base}-tracking`] = px(s.letterSpacing);
+      typeVariables[`${base}-font`] = `var(--kb-font-${s.font})`;
+      typeVariables[`${base}-weight`] = String(s.weight);
+      typeVariables[`${base}-size`] = rem(s.size);
+      typeVariables[`${base}-line-height`] = rem(s.lineHeight);
+      typeVariables[`${base}-tracking`] = px(s.letterSpacing);
     };
     for (const name of TYPE_SCALE_NAMES) typeVars("type", name, tokens.typeScale[name]);
     for (const name of OPERATE_SCALE_NAMES) typeVars("operate", name, tokens.operateScale[name]);
-    return out;
+    return { ...baseVariables, ...typeVariables };
   },
 );
 

@@ -23,7 +23,8 @@ import { clientRoot } from "../../testing/client-root";
 import { allText, hostTree } from "../../testing/element-tree";
 import { eventually } from "../../testing/eventually";
 import { expoRouterStandIn } from "../../testing/expo-router-stand-in";
-import { recordedOverlay, TestProviders } from "../../testing/providers";
+import { TestProviders } from "../../testing/providers";
+import { recordedOverlay } from "../../testing/recorded-overlay";
 import { WorkspaceProvider } from "../../workspace/workspace-provider";
 import { loadOverdueDocuments } from "../dashboard/data";
 import {

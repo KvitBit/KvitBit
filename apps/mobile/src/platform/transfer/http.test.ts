@@ -29,31 +29,34 @@ describe("transfer http helpers", () => {
   });
 
   test("errorFromResponse decodes declared error bodies", () => {
-    const invalid = errorFromResponse(422, {
-      _tag: "Invalid",
-      issues: [{ path: ["file"], code: "attachment.type_rejected" }],
+    const invalid = errorFromResponse({
+      status: 422,
+      body: {
+        _tag: "Invalid",
+        issues: [{ path: ["file"], code: "attachment.type_rejected" }],
+      },
     });
     expect(invalid).toBeInstanceOf(Invalid);
-    expect(errorFromResponse(401, { _tag: "Unauthorized", reason: "expired" })).toBeInstanceOf(
-      Unauthorized,
-    );
-    expect(errorFromResponse(404, { _tag: "NotFound", entity: "Expense", id: "x" })).toBeInstanceOf(
-      NotFound,
-    );
-    expect(errorFromResponse(413, { _tag: "PayloadTooLarge", limitBytes: 10 })).toBeInstanceOf(
-      PayloadTooLarge,
-    );
+    expect(
+      errorFromResponse({ status: 401, body: { _tag: "Unauthorized", reason: "expired" } }),
+    ).toBeInstanceOf(Unauthorized);
+    expect(
+      errorFromResponse({ status: 404, body: { _tag: "NotFound", entity: "Expense", id: "x" } }),
+    ).toBeInstanceOf(NotFound);
+    expect(
+      errorFromResponse({ status: 413, body: { _tag: "PayloadTooLarge", limitBytes: 10 } }),
+    ).toBeInstanceOf(PayloadTooLarge);
   });
 
   test("errorFromResponse falls back by status", () => {
-    expect(errorFromResponse(0, null)._tag).toBe("Offline");
-    expect(errorFromResponse(413, "too big")).toBeInstanceOf(PayloadTooLarge);
-    expect(errorFromResponse(502, "<html>", "req-1")).toEqual({
+    expect(errorFromResponse({ status: 0, body: null })._tag).toBe("Offline");
+    expect(errorFromResponse({ status: 413, body: "too big" })).toBeInstanceOf(PayloadTooLarge);
+    expect(errorFromResponse({ status: 502, body: "<html>", requestId: "req-1" })).toEqual({
       _tag: "Unexpected",
       status: 502,
       requestId: "req-1",
     });
-    expect(describeError(errorFromResponse(500, null)).surface).toBe("banner");
+    expect(describeError(errorFromResponse({ status: 500, body: null })).surface).toBe("banner");
   });
 
   test("parseJson and safeFileName", () => {

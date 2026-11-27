@@ -10,10 +10,11 @@ export default function Route() {
   const rawId = param(params.id) ?? "new";
   const mode = param(params.mode) === "edit" ? "edit" : "view";
   const key = `${rawId}:${mode}`;
-  if (rawId === "new") return <ExpenseDetailScreen key={key} id={rawId} initialMode={mode} />;
+  if (rawId === "new")
+    return <ExpenseDetailScreen key={key} expenseId={rawId} initialMode={mode} />;
   const id = Schema.decodeOption(ExpenseId)(rawId);
   return id._tag === "Some" ? (
-    <ExpenseDetailScreen key={key} id={id.value} initialMode={mode} />
+    <ExpenseDetailScreen key={key} expenseId={id.value} initialMode={mode} />
   ) : (
     <ErrorScreen kind="not_found" />
   );

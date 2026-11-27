@@ -8,9 +8,11 @@ import { describe, expect, test } from "bun:test";
 import * as Arr from "effect/Array";
 import * as BigDecimal from "effect/BigDecimal";
 import * as Result from "effect/Result";
+import * as Schema from "effect/Schema";
 import { CurrencyCode, type Money, MoneyMath } from "../src/index";
 
 const code = CurrencyCode.make;
+const isCurrencyMismatch = Schema.is(Schema.instanceOf(MoneyMath.CurrencyMismatch));
 const CZK = code("CZK");
 const ok = <A, E>(r: Result.Result<A, E>): A => {
   if (Result.isFailure(r)) throw new Error("expected success");
@@ -294,7 +296,7 @@ describe("arithmetic laws over a bounded grid", () => {
         ];
         for (const r of results) {
           if (
-            !(Result.isFailure(r) && r.failure instanceof MoneyMath.CurrencyMismatch) ||
+            !(Result.isFailure(r) && isCurrencyMismatch(r.failure)) ||
             r.failure.expected !== x ||
             r.failure.actual !== y
           ) {

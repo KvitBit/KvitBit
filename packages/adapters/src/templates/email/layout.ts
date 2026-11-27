@@ -116,9 +116,11 @@ const HTML_ESCAPES: Readonly<Record<string, string>> = {
  * Escapes text for element content and double-quoted attributes. U+00A0 becomes `&nbsp;`.
  * Adapted from DeskoHub packages/email/backend/escaping.ts.
  */
-export const escapeHtml = (value: string): string =>
-  // @effect-diagnostics-next-line preferEffectString:off Effect's replace has no callback overload for a single-pass escape.
-  value.replace(/[&<>"' ]/g, (c) => HTML_ESCAPES[c] ?? c);
+export const escapeHtml = (value: string): string => {
+  let escaped = "";
+  for (const character of value) escaped += HTML_ESCAPES[character] ?? character;
+  return escaped;
+};
 
 const CRLF_OR_CR = /\r\n?/g;
 const HTTP_URL = /^https?:\/\/[^\s]+$/i;

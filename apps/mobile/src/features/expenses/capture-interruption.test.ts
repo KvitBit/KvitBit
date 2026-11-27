@@ -1,4 +1,3 @@
-// biome-ignore-all lint/suspicious/noMisplacedAssertion: The replay helper asserts invariants at every injected failure boundary.
 import { expect, test } from "bun:test";
 import { ExpenseId, Invalid, WorkspaceSummary } from "@kvitbit/domain/contract";
 import * as Arr from "effect/Array";
@@ -47,6 +46,7 @@ class Interrupted extends Schema.TaggedError<Interrupted, { readonly brand: uniq
     checkpoint: Schema.optionalKey(Schema.String),
   },
 ) {}
+const isInterrupted = Schema.is(Schema.instanceOf(Interrupted));
 const decodeScope = Fn.flow(
   Schema.decodeEffect(Schema.fromJsonString(Schema.Array(Schema.String))),
   Effect.runSync,
@@ -56,199 +56,217 @@ const encodePayload = Fn.flow(
   Effect.runSync,
 );
 
-async function exercise(
-  receipts: readonly (keyof typeof content)[],
-  cut?: number,
-  rejected?: keyof typeof content,
-) {
-  const journal = new Map<string, string>();
-  const localBytes = new Map<string, Uint8Array<ArrayBuffer>>();
-  const expenseWrites = new Map<string, string>();
-  const attachmentWrites = new Map<string, string>();
-  let nextKey = 0;
-  const tracing = MutableRef.make(false);
-  const interrupted = MutableRef.make(false);
-  const checkpoints: string[] = [];
+const checkpointLabels = [
+  "before job persist",
+  "after job persist",
+  "before create request",
+  "after create request",
+  "before upload request",
+  "after upload request",
+  "before file cleanup",
+  "after file cleanup",
+];
+const scenarios = [
+  {
+    name: "restarting at each side of every receipt request and persist creates each distinct object once",
+    cases: [["a"], ["a", "a", "b"], ["b", "a", "b"]],
+    rejected: undefined,
+    labels: checkpointLabels,
+  },
+  {
+    name: "restarting at each mixed upload boundary preserves one rejection beside the accepted receipts",
+    cases: [["a", "b", "a"]],
+    rejected: "b",
+    labels: [...checkpointLabels, "before rejection persist", "after rejection persist"],
+  },
+] as const;
 
-  function checkpoint(label: string) {
-    if (!MutableRef.get(tracing)) return;
-    if (MutableRef.get(interrupted)) throw Interrupted.make();
-    checkpoints.push(label);
-    if (checkpoints.length === cut) {
-      MutableRef.set(interrupted, true);
-      throw Interrupted.make({ checkpoint: label });
-    }
-  }
+for (const scenario of scenarios) {
+  test(scenario.name, () => {
+    async function exercise(
+      receipts: readonly (keyof typeof content)[],
+      cut?: number,
+      rejected?: keyof typeof content,
+    ) {
+      const journal = new Map<string, string>();
+      const localBytes = new Map<string, Uint8Array<ArrayBuffer>>();
+      const expenseWrites = new Map<string, string>();
+      const attachmentWrites = new Map<string, string>();
+      let nextKey = 0;
+      const tracing = MutableRef.make(false);
+      const interrupted = MutableRef.make(false);
+      const checkpoints: string[] = [];
 
-  function boundary<A>(label: string, work: () => A): A {
-    checkpoint(`before ${label}`);
-    const value = work();
-    checkpoint(`after ${label}`);
-    return value;
-  }
+      function checkpoint(label: string) {
+        if (!MutableRef.get(tracing)) return;
+        if (MutableRef.get(interrupted)) throw Interrupted.make();
+        checkpoints.push(label);
+        if (checkpoints.length === cut) {
+          MutableRef.set(interrupted, true);
+          throw Interrupted.make({ checkpoint: label });
+        }
+      }
 
-  const storage: CaptureStorage = {
-    load: async (scope) => journal.get(scope) ?? null,
-    save: (scope, value, previous) =>
-      Effect.sync(() => {
-        const label = decodeScope(scope).length === 2 ? "job persist" : "rejection persist";
-        boundary(label, () => {
-          expect(journal.get(scope) ?? "[]").toBe(previous);
-          journal.set(scope, value);
-        });
-      }).pipe(Effect.runPromise),
-    lock: async (_scope, run) => run(),
-  };
-  const start = () =>
-    makeCaptureQueue({
-      storage,
-      key: async () => `01937c7a-0000-7000-8000-${Str.padStart(12, "0")(String(++nextKey))}`,
-      read: (file) =>
-        readReceipt(file, (ref) =>
+      function boundary<A>(label: string, work: () => A): A {
+        checkpoint(`before ${label}`);
+        const value = work();
+        checkpoint(`after ${label}`);
+        return value;
+      }
+
+      const storage: CaptureStorage = {
+        load: async (scope) => journal.get(scope) ?? null,
+        save: (scope, value, previous) =>
           Effect.sync(() => {
-            const bytes = localBytes.get(ref);
-            if (bytes === undefined) throw new Error("Missing staged receipt");
-            return bytes.slice();
+            const label = decodeScope(scope).length === 2 ? "job persist" : "rejection persist";
+            boundary(label, () => {
+              if ((journal.get(scope) ?? "[]") !== previous) {
+                throw new Error("Compare-and-set used an outdated journal value");
+              }
+              journal.set(scope, value);
+            });
           }).pipe(Effect.runPromise),
-        ),
-      saveBytes: (key, _name, bytes) =>
-        Effect.sync(() => {
-          const ref = `staged:${key}`;
-          localBytes.set(ref, bytes.slice());
-          return ref;
-        }).pipe(Effect.runPromise),
-      removeBytes: (ref) =>
-        Effect.sync(() => {
-          boundary("file cleanup", () => localBytes.delete(ref));
-        }).pipe(Effect.runPromise),
-    });
-  const network: CaptureNetwork = {
-    record: async (_scope, key, input) =>
-      boundary("create request", () => {
-        const payload = encodePayload(input);
-        const prior = expenseWrites.get(key);
-        expect(prior ?? payload).toBe(payload);
-        if (prior === undefined) expenseWrites.set(key, payload);
-        return done(expenseId);
-      }),
-    upload: async ({ headers, path, file }) =>
-      boundary("upload request", () => {
-        expect(path).toEndWith(`/expenses/${expenseId}/attachments`);
-        const bytes = localBytes.get(file.ref);
-        if (bytes === undefined) throw new Error("Missing bytes for upload");
-        const sha = hash(bytes);
-        expect(file.sha256).toBe(sha);
-        if (rejected !== undefined && sha === hash(content[rejected])) return failed(rejectedFile);
-        const key = headers?.["idempotency-key"];
-        if (key === undefined) throw new Error("Missing upload key");
-        const prior = attachmentWrites.get(key);
-        expect(prior ?? sha).toBe(sha);
-        if (prior === undefined) attachmentWrites.set(key, sha);
-        return done(null);
-      }),
-  };
-
-  const queue = start();
-  const sources = Arr.map(receipts, (kind, index) => {
-    const bytes = content[kind];
-    const ref = `source:${index}`;
-    localBytes.set(ref, bytes);
-    return {
-      ref,
-      name: `receipt-${index}.pdf`,
-      contentType: "application/pdf",
-      size: bytes.length,
-    };
-  });
-  const { job } = await queue.stage(access, null, sources);
-  if (job === undefined) throw new Error("No capture was staged");
-
-  MutableRef.set(tracing, true);
-  if (cut === undefined) {
-    await queue.submit(access, network, job.key, fields, noProgress);
-  } else {
-    // biome-ignore lint/suspicious/noConditionalExpect: The injected interruption rejects while the uninterrupted baseline fulfills.
-    await expect(queue.submit(access, network, job.key, fields, noProgress)).rejects.toBeInstanceOf(
-      Interrupted,
-    );
-    // biome-ignore lint/suspicious/noConditionalExpect: Only cut runs have a specified checkpoint.
-    expect(checkpoints.length).toBe(cut);
-    MutableRef.set(tracing, false);
-
-    const restarted = start();
-    const pending = Option.getOrUndefined(
-      Arr.findFirst(await restarted.load(access.scope), (candidate) => candidate.key === job.key),
-    );
-    if (pending !== undefined && pending.submission === undefined) {
-      await restarted.submit(access, network, job.key, fields, noProgress);
-    }
-    await restarted.drain(access, network, { reconnect: true, signedIn: true });
-  }
-
-  const reopened = start();
-  expect(await reopened.load(access.scope)).toEqual([]);
-  expect(expenseWrites.size).toBe(1);
-  expect([...attachmentWrites.values()].sort(Order.String)).toEqual(
-    [
-      ...new Set(
-        Arr.map(
-          Arr.filter(receipts, (kind) => kind !== rejected),
-          (kind) => hash(content[kind]),
-        ),
-      ),
-    ].sort(Order.String),
-  );
-  const rejectedIndex = rejected === undefined ? -1 : receipts.indexOf(rejected);
-  expect(await reopened.loadRejected(access.scope, expenseId)).toEqual(
-    rejectedIndex === -1
-      ? []
-      : [
-          expect.objectContaining({
-            name: `receipt-${rejectedIndex}.pdf`,
-            error: expect.objectContaining({ _tag: "Invalid", issues: rejectedFile.issues }),
+        lock: async (_scope, run) => run(),
+      };
+      const start = () =>
+        makeCaptureQueue({
+          storage,
+          key: async () => `01937c7a-0000-7000-8000-${Str.padStart(12, "0")(String(++nextKey))}`,
+          read: (file) =>
+            readReceipt(file, (ref) =>
+              Effect.sync(() => {
+                const bytes = localBytes.get(ref);
+                if (bytes === undefined) throw new Error("Missing staged receipt");
+                return bytes.slice();
+              }).pipe(Effect.runPromise),
+            ),
+          saveBytes: (key, _name, bytes) =>
+            Effect.sync(() => {
+              const ref = `staged:${key}`;
+              localBytes.set(ref, bytes.slice());
+              return ref;
+            }).pipe(Effect.runPromise),
+          removeBytes: (ref) =>
+            Effect.sync(() => {
+              boundary("file cleanup", () => localBytes.delete(ref));
+            }).pipe(Effect.runPromise),
+        });
+      const network: CaptureNetwork = {
+        record: async (_scope, key, input) =>
+          boundary("create request", () => {
+            const payload = encodePayload(input);
+            const prior = expenseWrites.get(key);
+            expect(prior ?? payload).toBe(payload);
+            if (prior === undefined) expenseWrites.set(key, payload);
+            return done(expenseId);
           }),
-        ],
-  );
-  expect(Arr.filter([...localBytes.keys()], (ref) => Str.startsWith("staged:")(ref))).toEqual([]);
-  return checkpoints;
+        upload: async ({ headers, path, file }) =>
+          boundary("upload request", () => {
+            expect(path).toEndWith(`/expenses/${expenseId}/attachments`);
+            const bytes = localBytes.get(file.ref);
+            if (bytes === undefined) throw new Error("Missing bytes for upload");
+            const sha = hash(bytes);
+            expect(file.sha256).toBe(sha);
+            if (rejected !== undefined && sha === hash(content[rejected]))
+              return failed(rejectedFile);
+            const key = headers?.["idempotency-key"];
+            if (key === undefined) throw new Error("Missing upload key");
+            const prior = attachmentWrites.get(key);
+            expect(prior ?? sha).toBe(sha);
+            if (prior === undefined) attachmentWrites.set(key, sha);
+            return done(null);
+          }),
+      };
+
+      const queue = start();
+      const sources = Arr.map(receipts, (kind, index) => {
+        const bytes = content[kind];
+        const ref = `source:${index}`;
+        localBytes.set(ref, bytes);
+        return {
+          ref,
+          name: `receipt-${index}.pdf`,
+          contentType: "application/pdf",
+          size: bytes.length,
+        };
+      });
+      const { job } = await queue.stage(access, null, sources);
+      if (job === undefined) throw new Error("No capture was staged");
+
+      MutableRef.set(tracing, true);
+      if (cut === undefined) {
+        await queue.submit(access, network, job.key, fields, noProgress);
+      } else {
+        const failure = await queue.submit(access, network, job.key, fields, noProgress).then(
+          () => undefined,
+          (cause: unknown) => cause,
+        );
+        if (!isInterrupted(failure)) {
+          throw new Error(`Expected the interruption at checkpoint ${cut}`, { cause: failure });
+        }
+        MutableRef.set(tracing, false);
+
+        const restarted = start();
+        const pending = Option.getOrUndefined(
+          Arr.findFirst(
+            await restarted.load(access.scope),
+            (candidate) => candidate.key === job.key,
+          ),
+        );
+        if (pending !== undefined && pending.submission === undefined) {
+          await restarted.submit(access, network, job.key, fields, noProgress);
+        }
+        await restarted.drain(access, network, { reconnect: true, signedIn: true });
+      }
+
+      const reopened = start();
+      expect(await reopened.load(access.scope)).toEqual([]);
+      expect(expenseWrites.size).toBe(1);
+      expect([...attachmentWrites.values()].sort(Order.String)).toEqual(
+        [
+          ...new Set(
+            Arr.map(
+              Arr.filter(receipts, (kind) => kind !== rejected),
+              (kind) => hash(content[kind]),
+            ),
+          ),
+        ].sort(Order.String),
+      );
+      const rejectedIndex = rejected === undefined ? -1 : receipts.indexOf(rejected);
+      expect(await reopened.loadRejected(access.scope, expenseId)).toEqual(
+        rejectedIndex === -1
+          ? []
+          : [
+              expect.objectContaining({
+                name: `receipt-${rejectedIndex}.pdf`,
+                error: expect.objectContaining({ _tag: "Invalid", issues: rejectedFile.issues }),
+              }),
+            ],
+      );
+      expect(Arr.filter([...localBytes.keys()], (ref) => Str.startsWith("staged:")(ref))).toEqual(
+        [],
+      );
+      return checkpoints;
+    }
+
+    return Effect.forEach(
+      scenario.cases,
+      Effect.fnUntraced(function* (receipts) {
+        const checkpoints = yield* Effect.promise(() =>
+          exercise(receipts, undefined, scenario.rejected),
+        );
+        expect(new Set(checkpoints)).toEqual(new Set(scenario.labels));
+        yield* Effect.forEach(
+          checkpoints.keys(),
+          Effect.fnUntraced(function* (index) {
+            const cut = index + 1;
+            const reached = yield* Effect.promise(() => exercise(receipts, cut, scenario.rejected));
+            expect(reached).toHaveLength(cut);
+          }),
+          { concurrency: 1, discard: true },
+        );
+      }),
+      { concurrency: 1, discard: true },
+    ).pipe(Effect.runPromise);
+  });
 }
-
-test("restarting at each side of every receipt request and persist creates each distinct object once", () => {
-  const cases = [["a"], ["a", "a", "b"], ["b", "a", "b"]] as const;
-  return Effect.forEach(
-    cases,
-    Effect.fnUntraced(function* (receipts) {
-      const checkpoints = yield* Effect.promise(() => exercise(receipts));
-      expect(new Set(checkpoints)).toEqual(
-        new Set([
-          "before job persist",
-          "after job persist",
-          "before create request",
-          "after create request",
-          "before upload request",
-          "after upload request",
-          "before file cleanup",
-          "after file cleanup",
-        ]),
-      );
-      yield* Effect.forEach(
-        checkpoints.keys(),
-        (index) => Effect.promise(() => exercise(receipts, index + 1)),
-        { concurrency: 1, discard: true },
-      );
-    }),
-    { concurrency: 1, discard: true },
-  ).pipe(Effect.runPromise);
-});
-
-test("restarting at each mixed upload boundary preserves one rejection beside the accepted receipts", async () => {
-  const receipts = ["a", "b", "a"] as const;
-  const checkpoints = await exercise(receipts, undefined, "b");
-  expect(checkpoints).toContain("before rejection persist");
-  expect(checkpoints).toContain("after rejection persist");
-  await Effect.forEach(
-    checkpoints.keys(),
-    (index) => Effect.promise(() => exercise(receipts, index + 1, "b")),
-    { concurrency: 1, discard: true },
-  ).pipe(Effect.runPromise);
-});

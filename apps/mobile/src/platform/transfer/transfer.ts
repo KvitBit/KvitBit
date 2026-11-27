@@ -72,7 +72,11 @@ export const makeTransfer = (target: TransferTarget): Transfer => {
     const body = parseJson(response.body);
     if (isSuccess(response.status)) return done(body);
     return failed(
-      errorFromResponse(response.status, body, header(response.headers, "x-request-id")),
+      errorFromResponse({
+        status: response.status,
+        body,
+        requestId: header(response.headers, "x-request-id"),
+      }),
     );
   });
 
@@ -92,11 +96,11 @@ export const makeTransfer = (target: TransferTarget): Transfer => {
         fromMobilePromise(() => deleteAsync(response.uri, { idempotent: true })),
       );
       return failed(
-        errorFromResponse(
-          response.status,
-          parseJson(text),
-          header(response.headers, "x-request-id"),
-        ),
+        errorFromResponse({
+          status: response.status,
+          body: parseJson(text),
+          requestId: header(response.headers, "x-request-id"),
+        }),
       );
     }
     const info = yield* fromMobilePromise(() => getInfoAsync(response.uri));

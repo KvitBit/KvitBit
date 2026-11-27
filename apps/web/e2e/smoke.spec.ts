@@ -67,15 +67,19 @@ if (!("Bun" in globalThis)) {
         "/android",
       ];
 
-      for (const path of publicPaths) {
-        // biome-ignore lint/performance/noAwaitInLoops: Each assertion reads the current route in the same tab.
-        await page.goto(path, { waitUntil: "domcontentloaded" });
-        const root = page.locator(".kb-root");
-        await expect(root).toBeVisible();
-        await expect(page.locator("#kb-theme-vars")).toBeAttached();
-        await expect(page.locator("#main")).toBeVisible();
-        await expect(page).toHaveTitle(appTitlePattern);
-      }
+      await Effect.forEach(
+        publicPaths,
+        (path) =>
+          Effect.promise(async () => {
+            await page.goto(path, { waitUntil: "domcontentloaded" });
+            const root = page.locator(".kb-root");
+            await expect(root).toBeVisible();
+            await expect(page.locator("#kb-theme-vars")).toBeAttached();
+            await expect(page.locator("#main")).toBeVisible();
+            await expect(page).toHaveTitle(appTitlePattern);
+          }),
+        { concurrency: 1, discard: true },
+      ).pipe(Effect.runPromise);
 
       errors.assertClean();
     });
@@ -95,17 +99,21 @@ if (!("Bun" in globalThis)) {
         `/w/${DEMO_WS}/settings/issuing-entity`,
       ];
 
-      for (const path of workspacePaths) {
-        // biome-ignore lint/performance/noAwaitInLoops: Each assertion reads the current route in the same tab.
-        await page.goto(path, { waitUntil: "domcontentloaded" });
-        await expect(page.locator(".kb-root")).toBeVisible();
-        await expect(page.locator("#kb-theme-vars")).toBeAttached();
-        await expect(page.locator("#main")).toBeVisible();
-        await expect(page).toHaveTitle(appTitlePattern);
+      await Effect.forEach(
+        workspacePaths,
+        (path) =>
+          Effect.promise(async () => {
+            await page.goto(path, { waitUntil: "domcontentloaded" });
+            await expect(page.locator(".kb-root")).toBeVisible();
+            await expect(page.locator("#kb-theme-vars")).toBeAttached();
+            await expect(page.locator("#main")).toBeVisible();
+            await expect(page).toHaveTitle(appTitlePattern);
 
-        const chrome = testInfo.project.name === "desktop" ? ".kb-sidebar" : ".kb-bottom-nav";
-        await expect(page.locator(chrome)).toBeVisible();
-      }
+            const chrome = testInfo.project.name === "desktop" ? ".kb-sidebar" : ".kb-bottom-nav";
+            await expect(page.locator(chrome)).toBeVisible();
+          }),
+        { concurrency: 1, discard: true },
+      ).pipe(Effect.runPromise);
 
       errors.assertClean();
     });
@@ -327,10 +335,9 @@ if (!("Bun" in globalThis)) {
               const response = await transport(new Request(request, { signal: null }));
               const invoice = await response.json();
               if (current === 1) {
-                // @effect-diagnostics-next-line newPromise:off The browser callback is serialized and keeps its local resolver.
-                await new Promise<void>((release) =>
-                  Reflect.set(globalThis, "kbReleaseOldShare", release),
-                );
+                const gate = Promise.withResolvers<void>();
+                Reflect.set(globalThis, "kbReleaseOldShare", gate.resolve);
+                await gate.promise;
                 Reflect.set(globalThis, "kbOldShareReturned", true);
               }
               return Response.json({

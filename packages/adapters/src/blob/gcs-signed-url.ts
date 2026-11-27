@@ -4,7 +4,7 @@
  * a fixed `now` and key: RSASSA-PKCS1-v1_5 signatures have no randomness.
  */
 
-// @effect-diagnostics-next-line nodeBuiltinImport:off
+// @effect-diagnostics-next-line nodeBuiltinImport:off The synchronous GCS signing API needs Node RSA private keys.
 import { createHash, createSign } from "node:crypto"; // RSA accepts the PEM forms supported by Node's signer.
 import * as Arr from "effect/Array";
 import * as DateTime from "effect/DateTime";

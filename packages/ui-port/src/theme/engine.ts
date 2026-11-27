@@ -52,7 +52,7 @@ export const resolveSource = (source: ThemeSource): Result.Result<ResolvedTheme,
         ? Result.succeed(resolveSeed(source.seed))
         : Result.fail(seedInvalid());
     case "MaterialThemeBuilder":
-      return resolveMaterialTheme(source.json);
+      return resolveMaterialTheme({ json: source.json });
   }
 };
 
@@ -190,7 +190,7 @@ export class ThemeEngine extends Context.Service<
   }
 >()(
   // Keep the identifier specified by ui-port-contracts 4.4.
-  // @effect-diagnostics-next-line deterministicKeys:off
+  // @effect-diagnostics-next-line deterministicKeys:off Preserve the ThemeEngine service key in ui-port-contracts 4.4.
   "ui-port/ThemeEngine",
 ) {}
 

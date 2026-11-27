@@ -244,7 +244,6 @@ const save = Effect.fn("Onboarding.save")(function* (
   return { step: "workspace" as const, result: ok(progress.workspace) };
 });
 
-// @effect-diagnostics-next-line missingPipeableSignature: Preserve the Promise entry point used by mobile callers.
 export const saveOnboarding = (
   ...args: Parameters<typeof save>
 ): Promise<{

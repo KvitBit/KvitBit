@@ -1,8 +1,8 @@
 // This generator runs before dependency installation.
-// @effect-diagnostics globalJson:off
-// @effect-diagnostics preferEffectArray:off
-// @effect-diagnostics preferEffectRecord:off
-// @effect-diagnostics preferEffectString:off
+// @effect-diagnostics globalJson:off Encode Nix string literals before Effect is installed.
+// @effect-diagnostics preferEffectArray:off Read Bun lockfile arrays before Effect is installed.
+// @effect-diagnostics preferEffectRecord:off Enumerate Bun lockfile records before Effect is installed.
+// @effect-diagnostics preferEffectString:off Parse Bun lockfile specifiers before Effect is installed.
 import { isLockObject, isLockString } from "./bun-lock-boundary";
 
 // Build the fetchBunDeps expression from a Bun v2 lockfile. Bun installs the

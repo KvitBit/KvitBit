@@ -223,23 +223,20 @@ describe("updateWithRevision", () => {
     expect(after).toMatchObject({ name: "Invoices", revision: 1 });
   });
 
-  test("protected, malformed or undefined patch columns are a defect", async () => {
-    for (const patch of [
-      { revision: 9 },
-      { workspace_id: "x" },
-      { 'name" = 1; --': "x" },
-      { name: undefined },
-      { column_typo: 1 },
-    ]) {
-      const run = db.run(
-        Effect.gen(function* () {
-          const { workspaceId, seriesId } = yield* seedWorkspace;
-          return yield* updateWithRevision("numbering_series", workspaceId, seriesId, 1, patch);
-        }),
-      );
-      // biome-ignore lint/performance/noAwaitInLoops: Finish each query before reusing the client.
-      await expect(run).rejects.toThrow(INVALID_PATCH);
-    }
+  test.each([
+    { revision: 9 },
+    { workspace_id: "x" },
+    { 'name" = 1; --': "x" },
+    { name: undefined },
+    { column_typo: 1 },
+  ])("rejects protected, malformed or undefined patch column %p", async (patch) => {
+    const run = db.run(
+      Effect.gen(function* () {
+        const { workspaceId, seriesId } = yield* seedWorkspace;
+        return yield* updateWithRevision("numbering_series", workspaceId, seriesId, 1, patch);
+      }),
+    );
+    await expect(run).rejects.toThrow(INVALID_PATCH);
   });
 });
 
@@ -773,21 +770,18 @@ describe("transactionWithRetry", () => {
     expect(row).toMatchObject({ name: "Locked then updated", revision: 2 });
   });
 
-  test("reruns the transaction after a deadlock or serialization failure", async () => {
-    for (const code of ["40P01", "40001"]) {
-      let attempts = 0;
-      // biome-ignore lint/performance/noAwaitInLoops: The cases share one SQL connection.
-      const result = await db.run(
-        transactionWithRetry(
-          Effect.suspend(() => {
-            attempts += 1;
-            return attempts < 3 ? raise(code).pipe(Effect.as("raised")) : Effect.succeed("done");
-          }),
-        ),
-      );
-      expect(result).toBe("done");
-      expect(attempts).toBe(3);
-    }
+  test.each(["40P01", "40001"])("reruns the transaction after SQL error %s", async (code) => {
+    let attempts = 0;
+    const result = await db.run(
+      transactionWithRetry(
+        Effect.suspend(() => {
+          attempts += 1;
+          return attempts < 3 ? raise(code).pipe(Effect.as("raised")) : Effect.succeed("done");
+        }),
+      ),
+    );
+    expect(result).toBe("done");
+    expect(attempts).toBe(3);
   });
 
   test("gives up after the retry budget with the SqlError", async () => {

@@ -1,5 +1,6 @@
 import * as DateTime from "effect/DateTime";
 import * as Fn from "effect/Function";
+import * as Option from "effect/Option";
 import * as Predicate from "effect/Predicate";
 import { INTL_TAG, type Locale } from "../i18n/locale";
 import { stringifyJson } from "../json";
@@ -37,12 +38,10 @@ const toUtc = (date: CalendarDate): DateTime.Utc =>
 
 const asDate = (value: string | CalendarDate): CalendarDate => {
   if (!Predicate.isString(value)) return value;
-  const parsed = parseIsoDate(value);
-  if (parsed === undefined) {
-    // biome-ignore lint/plugin/no-throw-in-effect-modules: Calendar formatters report invalid date strings synchronously.
-    throw new RangeError(`Not an ISO calendar date: ${value}`);
-  }
-  return parsed;
+  return Option.getOrThrowWith(
+    Option.fromUndefinedOr(parseIsoDate(value)),
+    () => new RangeError(`Not an ISO calendar date: ${value}`),
+  );
 };
 
 const cache = new Map<string, Intl.DateTimeFormat>();
@@ -71,7 +70,7 @@ const optionsFor = (locale: Locale, style: DateStyle): Intl.DateTimeFormatOption
 
 /** Formats a calendar date (no time-zone shift: the date is the date). */
 // A calendar input is a string and can overlap the locale at the call boundary.
-// @effect-diagnostics-next-line missingPipeableSignature:off
+// @effect-diagnostics-next-line missingPipeableSignature:off The positional API accepts invalid date strings and reports them synchronously.
 export const formatDate = (
   locale: Locale,
   date: string | CalendarDate,
@@ -81,26 +80,26 @@ export const formatDate = (
 
 /** Formats an instant (ISO timestamp or Date) in Europe/Prague: cs `23. 11. 2026 14:05`. */
 // An instant can be a string and overlap the locale at the call boundary.
-// @effect-diagnostics-next-line missingPipeableSignature:off
+// @effect-diagnostics-next-line missingPipeableSignature:off The positional API accepts string instants and an optional string time zone.
 export const formatDateTime = (
   locale: Locale,
   instant: string | Date,
   timeZone: string = BUSINESS_TIME_ZONE,
 ): string => {
   // Offsetless timestamp strings use the device's local timezone.
-  // @effect-diagnostics-next-line globalDate:off
-  const d = Predicate.isString(instant) ? new Date(instant) : instant;
-  if (Number.isNaN(d.getTime())) {
-    // biome-ignore lint/plugin/no-throw-in-effect-modules: The timestamp formatter reports invalid instants synchronously.
-    throw new RangeError(`Not a timestamp: ${String(instant)}`);
-  }
-  const date = dateFormat(locale, { ...optionsFor(locale, "default"), timeZone }).format(d);
+  // @effect-diagnostics-next-line globalDate:off Native Date interprets offsetless timestamp strings in the device time zone.
+  const parsed = Predicate.isString(instant) ? new Date(instant) : instant;
+  const dateValue = Option.getOrThrowWith(
+    Option.liftPredicate((value: Date) => !Number.isNaN(value.getTime()))(parsed),
+    () => new RangeError(`Not a timestamp: ${String(instant)}`),
+  );
+  const date = dateFormat(locale, { ...optionsFor(locale, "default"), timeZone }).format(dateValue);
   const time = dateFormat(locale, {
     hour: "2-digit",
     minute: "2-digit",
     hourCycle: "h23",
     timeZone,
-  }).format(d);
+  }).format(dateValue);
   return locale === "cs" ? `${date} ${time}` : `${date}, ${time}`;
 };
 

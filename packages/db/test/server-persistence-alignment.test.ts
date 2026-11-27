@@ -1,9 +1,9 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 // Bun uses Node's synchronous filesystem APIs to stage the migration tree.
-// @effect-diagnostics-next-line nodeBuiltinImport:off
+// @effect-diagnostics-next-line nodeBuiltinImport:off Stage the historical migration directories synchronously before constructing PGlite.
 import { cpSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-// @effect-diagnostics-next-line nodeBuiltinImport:off
+// @effect-diagnostics-next-line nodeBuiltinImport:off Build native paths for the PGlite migrator.
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { PGlite } from "@electric-sql/pglite";

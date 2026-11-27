@@ -1,5 +1,3 @@
-// biome-ignore-all lint/style/useComponentExportOnlyModules: Test fixture components live with the assertions that render them.
-// biome-ignore-all lint/suspicious/noMisplacedAssertion: The screen helpers assert when a waited-for action or element is missing.
 import { afterAll, afterEach, beforeAll, describe, expect, mock, test } from "bun:test";
 import {
   ExpenseId,
@@ -17,14 +15,15 @@ import {
   fakeTransfer,
   useFakeTransfer as installFakeTransfer,
 } from "../../platform/transfer/testing";
-import { ApiProvider, type ApiRunner, useApi, useRemote } from "../../runtime/api-runtime";
-import { SessionProvider, useSession } from "../../session/session-provider";
+import { ApiProvider, type ApiRunner } from "../../runtime/api-runtime";
+import { SessionProvider } from "../../session/session-provider";
 import { tokenStore } from "../../session/token-store";
 import { clientRoot, waitForRender } from "../../testing/client-root";
 import { allText, hostTree } from "../../testing/element-tree";
 import { eventually } from "../../testing/eventually";
 import { expoRouterStandIn } from "../../testing/expo-router-stand-in";
-import { recordedOverlay, TestProviders } from "../../testing/providers";
+import { SignedInFixture, TestProviders } from "../../testing/providers";
+import { recordedOverlay } from "../../testing/recorded-overlay";
 import { WorkspaceProvider } from "../../workspace/workspace-provider";
 import { uiShim } from "../documents/test-ui-shim";
 import type { ReceiptPicker } from "./capture-picker";
@@ -68,11 +67,8 @@ const { ExpensesListScreen } = await import("./expenses-list-screen");
 const { ExpenseDetailScreen } = await import("./expense-detail-screen");
 const { ExpenseCaptureScreen } = await import("./expense-capture-screen");
 const { useTransfer } = await import("../../platform/transfer");
+const { ExpensesProbe } = await import("./expenses-probe");
 const { default: ExpenseRoute } = await import("../../../app/w/[ws]/expenses/[id]");
-
-function SignedInFixture({ children }: { readonly children: ReactElement }) {
-  return useSession().state.status === "signed-in" ? children : null;
-}
 
 const WS_ID = WorkspaceId.make("01937c7a-0000-7000-8000-000000000001");
 const EXP_1 = ExpenseId.make("01937c7a-0000-7000-8000-000000000101");
@@ -238,25 +234,6 @@ describe("expenses model", () => {
   });
 });
 
-function ExpensesProbe(props: {
-  readonly onReady: (
-    api: ApiRunner,
-    transfer: ReturnType<typeof useTransfer>,
-    count: number,
-  ) => void;
-}) {
-  const api = useApi();
-  const transfer = useTransfer();
-  const list = useRemote(
-    (client) => client.expenses.list({ params: { workspaceId: WS_ID }, query: {} }),
-    [],
-  );
-  if (list.state._tag === "Ready") {
-    props.onReady(api, transfer, list.state.value.items.length);
-  }
-  return <span>{list.state._tag}</span>;
-}
-
 describe("expenses screens and API/transfer integration", () => {
   const root = clientRoot({ keepFetch: true });
   let server: ReturnType<typeof Bun.serve>;
@@ -411,8 +388,8 @@ describe("expenses screens and API/transfer integration", () => {
 
   const press = async (id: string) => {
     const target = element(id);
-    expect(target).not.toBeNull();
-    await act(async () => target?.click());
+    if (target === null) throw new Error(`Missing interactive element ${id}`);
+    await act(async () => target.click());
   };
 
   test("screens render expected controls and copy via hostTree", () => {
@@ -422,8 +399,7 @@ describe("expenses screens and API/transfer integration", () => {
     expect(listText).toContain("Incomplete");
 
     const editorText = allText(
-      // biome-ignore lint/correctness/useUniqueElementIds: This prop selects the new-expense route.
-      hostTree(<ExpenseDetailScreen id="new" initialMode="edit" />, within),
+      hostTree(<ExpenseDetailScreen expenseId="new" initialMode="edit" />, within),
     );
     expect(editorText).toContain("New expense");
     expect(editorText).toContain("VAT deductibility");
@@ -468,7 +444,7 @@ describe("expenses screens and API/transfer integration", () => {
     requests.length = 0;
     losePaymentResponse = true;
     await tokenStore.write("expenses-test-session");
-    await root.render(within(<ExpenseDetailScreen id={EXP_1} />, WORKSPACE, true));
+    await root.render(within(<ExpenseDetailScreen expenseId={EXP_1} />, WORKSPACE, true));
     await waitForScreen(() => element("expense-record-payment-toggle") !== null);
     await press("expense-record-payment-toggle");
     await press("expense-record-payment-submit");
@@ -507,6 +483,7 @@ describe("expenses screens and API/transfer integration", () => {
     await root.render(
       within(
         <ExpensesProbe
+          workspaceId={WS_ID}
           onReady={(a, tr, count) => {
             clients.current = { api: a, transfer: tr };
             loadedCount = count;

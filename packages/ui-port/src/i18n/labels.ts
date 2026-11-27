@@ -107,26 +107,20 @@ export interface EnumLabels {
 
 export type EnumName = keyof EnumLabels;
 
-export type EnumKey<E extends EnumName = EnumName> = E extends EnumName
-  ? `enum.${E}.${EnumLabels[E]}`
-  : never;
+type KeysByEnum = { readonly [E in EnumName]: `enum.${E}.${EnumLabels[E]}` };
 
-// Compile-time seam: a new domain literal without a label fails type checking here.
-const enumKeysCovered: [Exclude<EnumKey, MessageKey>] extends [never]
-  ? true
-  : Exclude<EnumKey, MessageKey> = true;
-// biome-ignore lint/complexity/noVoid: Keep the compile-time catalog coverage check.
-void enumKeysCovered;
+// A new domain literal without a label fails the constraint here.
+type Covered<_Keys extends MessageKey, Key> = Key;
+export type EnumKey<E extends EnumName = EnumName> = Covered<KeysByEnum[EnumName], KeysByEnum[E]>;
 
-// Mobile translation calls rely on the original generic inference for the enum name.
-// @effect-diagnostics-next-line missingPipeableSignature:off
+// @effect-diagnostics-next-line missingPipeableSignature:off The enum name determines the allowed value.
 export const enumKey = <E extends EnumName>(name: E, value: EnumLabels[E]): EnumKey<E> =>
-  // biome-ignore lint/nursery/noUnsafeTypeAssertion: The enum name and value are tied by EnumLabels[E].
+  // biome-ignore lint/nursery/noUnsafeTypeAssertion: TypeScript cannot correlate both interpolations in the key indexed by this enum name.
   `enum.${name}.${value}` as EnumKey<E>;
 
 /** `Text` label for an enum value, e.g. `enumText("documentKind", "proforma")`. */
 // Match the original generic signature of enumKey.
-// @effect-diagnostics-next-line missingPipeableSignature:off
+// @effect-diagnostics-next-line missingPipeableSignature:off The enum name determines the value type at the two-argument call site.
 export const enumText = <E extends EnumName>(name: E, value: EnumLabels[E]): Text<EnumKey<E>> => ({
   key: enumKey(name, value),
 });

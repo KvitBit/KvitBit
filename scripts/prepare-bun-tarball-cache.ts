@@ -1,11 +1,11 @@
 // Bun 1.4.4 looks up lockfile v2 tarballs by the first 16 integrity bytes.
 // bun2nix creates URL-keyed entries, so copy the prefetched package under
 // the integrity key before Bun installs dependencies.
-// @effect-diagnostics nodeBuiltinImport:off
-// @effect-diagnostics preferEffectArray:off
-// @effect-diagnostics preferEffectRecord:off
-// @effect-diagnostics preferEffectString:off
-import { cp } from "node:fs/promises";
+// @effect-diagnostics nodeBuiltinImport:off Nix copies prefetched cache entries before installing dependencies.
+// @effect-diagnostics preferEffectArray:off Read Bun lockfile arrays before Effect is installed.
+// @effect-diagnostics preferEffectRecord:off Enumerate Bun lockfile entries before Effect is installed.
+// @effect-diagnostics preferEffectString:off Parse tarball specifiers before Effect is installed.
+import { cpSync } from "node:fs";
 import { join } from "node:path";
 import { isLockObject, isLockString } from "./bun-lock-boundary";
 
@@ -34,6 +34,5 @@ for (const entry of Object.values(lock["packages"])) {
   const target = join(deps, "share/bun-packages", `tarball:${url}`);
   // The combined Nix output contains symlinks; Bun only copies regular files
   // from this cache into node_modules.
-  // biome-ignore lint/performance/noAwaitInLoops: Entries with the same integrity share a cache destination.
-  await cp(target, join(cache, name), { recursive: true, dereference: true });
+  cpSync(target, join(cache, name), { recursive: true, dereference: true });
 }

@@ -17,6 +17,7 @@ import * as Str from "effect/String";
 import {
   EEA_COUNTRIES,
   invalid,
+  isAsciiControl,
   singleLine,
   truncateAtWord,
   validAmount,
@@ -37,8 +38,6 @@ export interface EpcInput {
 
 export const EPC_LIMITS = { name: 70, reference: 35, text: 140, payloadBytes: 331 } as const;
 
-// biome-ignore lint/suspicious/noControlCharactersInRegex: control characters are rejected
-const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f]/;
 const utf8Length = (s: string): number => new TextEncoder().encode(s).length;
 
 export const epc = (input: EpcInput): Result.Result<string, Invalid> =>
@@ -65,7 +64,7 @@ export const epc = (input: EpcInput): Result.Result<string, Invalid> =>
     let text = "";
     if ("reference" in input.remittance) {
       reference = Str.replace(/\s+/g, "")(input.remittance.reference);
-      if (reference === "" || CONTROL_CHARACTERS.test(reference)) {
+      if (reference === "" || Arr.some(Array.from(reference), isAsciiControl)) {
         return yield* Result.fail(
           invalid({ path: ["remittance", "reference"], code: "request.malformed" }),
         );

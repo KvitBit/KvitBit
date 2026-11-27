@@ -134,40 +134,42 @@ describe("Auth page (Screen 02)", () => {
       return Response.json({ status: true });
     });
     try {
-      for (const route of [
-        { _tag: "SignIn" },
-        { _tag: "SignIn", returnTo: "/w/novak-design" },
-      ] as const) {
-        const ctx = ctxFor(route, { locale: "en", session: anonymous });
-        const { model } = Auth.init(route, ctx);
-        const selected = Auth.update(
-          model,
-          Auth.Message.SelectedSignInMethod({ method: "magic_link" }),
-          ctx,
-        );
-        const solved = Auth.update(
-          selected.model,
-          Auth.Message.GotBotProof({
-            seq: selected.model.botSeq,
-            status: "solved",
-            header: "proof",
-            reason: null,
+      const routes = [{ _tag: "SignIn" }, { _tag: "SignIn", returnTo: "/w/novak-design" }] as const;
+      await Effect.forEach(
+        routes,
+        (route) =>
+          Effect.promise(async () => {
+            const ctx = ctxFor(route, { locale: "en", session: anonymous });
+            const { model } = Auth.init(route, ctx);
+            const selected = Auth.update(
+              model,
+              Auth.Message.SelectedSignInMethod({ method: "magic_link" }),
+              ctx,
+            );
+            const solved = Auth.update(
+              selected.model,
+              Auth.Message.GotBotProof({
+                seq: selected.model.botSeq,
+                status: "solved",
+                header: "proof",
+                reason: null,
+              }),
+              ctx,
+            );
+            const edited = Auth.update(
+              solved.model,
+              Auth.Message.ChangedEmail({ value: "demo@example.cz" }),
+              ctx,
+            );
+            const submit = Auth.update(edited.model, Auth.Message.SubmittedSignIn(), ctx);
+            const reply = await run(submit.commands?.[0]);
+            expect(reply).toMatchObject({
+              _tag: "CompletedSubmit",
+              action: "sign_in_magic",
+            });
           }),
-          ctx,
-        );
-        const edited = Auth.update(
-          solved.model,
-          Auth.Message.ChangedEmail({ value: "demo@example.cz" }),
-          ctx,
-        );
-        const submit = Auth.update(edited.model, Auth.Message.SubmittedSignIn(), ctx);
-        // biome-ignore lint/performance/noAwaitInLoops: Both cases use one fetch mock and record calls in order.
-        const reply = await run(submit.commands?.[0]);
-        expect(reply).toMatchObject({
-          _tag: "CompletedSubmit",
-          action: "sign_in_magic",
-        });
-      }
+        { concurrency: 1, discard: true },
+      ).pipe(Effect.runPromise);
     } finally {
       fetch.mockRestore();
     }

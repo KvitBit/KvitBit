@@ -6,7 +6,8 @@ import { SessionProvider } from "../../session/session-provider";
 import { clientRoot } from "../../testing/client-root";
 import { allText, findAll, hostTree } from "../../testing/element-tree";
 import { expoRouterStandIn } from "../../testing/expo-router-stand-in";
-import { recordedOverlay, TestProviders } from "../../testing/providers";
+import { TestProviders } from "../../testing/providers";
+import { recordedOverlay } from "../../testing/recorded-overlay";
 import { parseErrorKind } from "./auth-links";
 import type { AuthClient } from "./auth-port";
 

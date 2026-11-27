@@ -144,7 +144,7 @@ describe("parseMaterialThemeFile", () => {
 describe("resolveMaterialTheme", () => {
   test("uses the file's schemes and honours its extended colours", () => {
     const json = exportFile();
-    const r = resolveMaterialTheme(json);
+    const r = resolveMaterialTheme({ json });
     if (!Result.isSuccess(r)) throw new Error("expected success");
     const theme = r.success;
     expect(theme.source).toEqual({ _tag: "MaterialThemeBuilder", json });
@@ -163,9 +163,11 @@ describe("resolveMaterialTheme", () => {
 
   test("generates missing contrast schemes from the seed", () => {
     const r = resolveMaterialTheme({
-      seed: "#0E6B8C",
-      coreColors: { primary: "#0E6B8C" },
-      schemes: { light: ocean.light.roles, dark: ocean.dark.roles },
+      json: {
+        seed: "#0E6B8C",
+        coreColors: { primary: "#0E6B8C" },
+        schemes: { light: ocean.light.roles, dark: ocean.dark.roles },
+      },
     });
     if (!Result.isSuccess(r)) throw new Error("expected success");
     expect(r.success.schemes.darkHigh.roles.primary).toMatch(UPPERCASE_HEX);
@@ -174,9 +176,9 @@ describe("resolveMaterialTheme", () => {
 
   test("accepts a low-contrast file but flags it with theme.low_contrast", () => {
     const washed: RoleMap = { ...ocean.light.roles, onPrimary: "#3A87A8", onSurface: "#B0B0B0" };
-    const r = resolveMaterialTheme(
-      exportFile({ schemes: { light: washed, dark: ocean.dark.roles } }),
-    );
+    const r = resolveMaterialTheme({
+      json: exportFile({ schemes: { light: washed, dark: ocean.dark.roles } }),
+    });
     if (!Result.isSuccess(r)) throw new Error("expected success");
     expect(r.success.warnings).toEqual(["theme.low_contrast"]);
     const failing = Arr.map(
@@ -193,7 +195,9 @@ describe("resolveMaterialTheme", () => {
       ...ocean.light.roles,
       primaryFixedDim: ocean.light.roles.onPrimaryFixed,
     };
-    const r = resolveMaterialTheme(exportFile({ schemes: { ...exportFile().schemes, light } }));
+    const r = resolveMaterialTheme({
+      json: exportFile({ schemes: { ...exportFile().schemes, light } }),
+    });
     if (!Result.isSuccess(r)) throw new Error("expected success");
     expect(r.success.warnings).toEqual(["theme.low_contrast"]);
     expect(
@@ -204,9 +208,11 @@ describe("resolveMaterialTheme", () => {
   test("generated contrast schemes harmonize toward their own primary", () => {
     const blue = resolvePreset("sand").schemes;
     const r = resolveMaterialTheme({
-      seed: "#FF0000",
-      coreColors: { primary: "#FF0000" },
-      schemes: { light: blue.light.roles, dark: blue.dark.roles },
+      json: {
+        seed: "#FF0000",
+        coreColors: { primary: "#FF0000" },
+        schemes: { light: blue.light.roles, dark: blue.dark.roles },
+      },
     });
     if (!Result.isSuccess(r)) throw new Error("expected success");
     for (const v of SCHEME_VARIANTS) {
@@ -217,11 +223,13 @@ describe("resolveMaterialTheme", () => {
 
   test("the structured path enforces the byte limit too", () => {
     const big = exportFile({ description: Fn.pipe("x", Str.repeat(70 * 1024)) });
-    expect(resolveMaterialTheme(big).pipe(codes)).toEqual(["theme.too_large"]);
+    expect(resolveMaterialTheme({ json: big }).pipe(codes)).toEqual(["theme.too_large"]);
     expect(resolveSource({ _tag: "MaterialThemeBuilder", json: big }).pipe(codes)).toEqual([
       "theme.too_large",
     ]);
-    expect(resolveMaterialTheme({ seed: 1n }).pipe(codes)).toEqual(["theme.json_invalid"]);
+    expect(resolveMaterialTheme({ json: { seed: 1n } }).pipe(codes)).toEqual([
+      "theme.json_invalid",
+    ]);
   });
 
   test("resolveSource routes each source tag", () => {

@@ -16,7 +16,9 @@ import {
 import { Conflict, Forbidden, Invalid, NotFound, Unavailable } from "@kvitbit/domain/contract";
 import { type Credentials, UiError } from "@kvitbit/ui-port/api";
 import * as EffectArray from "effect/Array";
+import * as Fn from "effect/Function";
 import * as Option from "effect/Option";
+import * as Predicate from "effect/Predicate";
 import * as EffectRecord from "effect/Record";
 import * as Redacted from "effect/Redacted";
 import * as Schema from "effect/Schema";
@@ -52,23 +54,26 @@ export interface TransferTarget {
 const trailingSlashes = /\/+$/;
 const isTokenText = Schema.is(Schema.String);
 
-// @effect-diagnostics-next-line missingPipeableSignature:off Callers construct a URL from distinct request fields.
-export const apiUrl = (
-  origin: string,
-  path: string,
-  query: Readonly<Record<string, string | undefined>> = {},
-): string => {
-  const base = `${EffectString.replace(trailingSlashes, "")(origin)}/api/v1${EffectString.startsWith("/")(path) ? path : `/${path}`}`;
-  const pairs = EffectArray.filter(
-    EffectRecord.toEntries(query),
-    (entry): entry is [string, string] => entry[1] !== undefined,
-  );
-  if (pairs.length === 0) return base;
-  return `${base}?${EffectArray.join(
-    EffectArray.map(pairs, ([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`),
-    "&",
-  )}`;
-};
+type Query = Readonly<Record<string, string | undefined>>;
+
+export const apiUrl: {
+  (path: string, query?: Query): (origin: string) => string;
+  (origin: string, path: string, query?: Query): string;
+} = Fn.dual(
+  (args) => Predicate.isString(args[1]),
+  (origin: string, path: string, query: Query = {}): string => {
+    const base = `${EffectString.replace(trailingSlashes, "")(origin)}/api/v1${EffectString.startsWith("/")(path) ? path : `/${path}`}`;
+    const pairs = EffectArray.filter(
+      EffectRecord.toEntries(query),
+      (entry): entry is [string, string] => entry[1] !== undefined,
+    );
+    if (pairs.length === 0) return base;
+    return `${base}?${EffectArray.join(
+      EffectArray.map(pairs, ([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`),
+      "&",
+    )}`;
+  },
+);
 
 /** Bearer on Android; nothing on the web, where the session cookie rides along. */
 export const authHeaders = (credentials: Credentials): Record<string, string> =>
@@ -103,13 +108,15 @@ export const parseJson = (text: string): unknown =>
  * A non-2xx response to UiError: the declared error body when it decodes, else by status
  * (413 without a body still reads as too large; anything else is Unexpected with the request id).
  */
-// @effect-diagnostics-next-line missingPipeableSignature:off Callers supply response status, body, and optional request metadata.
-export const errorFromResponse = (
-  status: number,
-  // biome-ignore lint/plugin/no-unknown-parameters: The HTTP response body is unvalidated at this boundary.
-  body: unknown,
-  requestId: string | null = null,
-): UiError => {
+export const errorFromResponse = ({
+  status,
+  body,
+  requestId = null,
+}: {
+  readonly status: number;
+  readonly body: unknown;
+  readonly requestId?: string | null;
+}): UiError => {
   const decoded = decodeWire(body);
   if (Option.isSome(decoded)) return decoded.value;
   if (status === 0) return UiError.offline;

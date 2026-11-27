@@ -8,7 +8,7 @@ import {
   rmSync,
   symlinkSync,
   writeFileSync,
-  // @effect-diagnostics-next-line nodeBuiltinImport:off
+  // @effect-diagnostics-next-line nodeBuiltinImport:off The fixture checks Node filesystem metadata and symlink behavior.
 } from "node:fs"; // Direct fixture operations and independent filesystem assertions.
 import { tmpdir } from "node:os";
 import * as BunFileSystem from "@effect/platform-bun/BunFileSystem";

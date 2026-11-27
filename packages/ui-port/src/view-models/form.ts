@@ -232,7 +232,7 @@ export const Form = {
   change: <D, E>(form: Form<D, E>, path: FieldPath, value: unknown): Form<D, E> => {
     const edited = !Equal.equals(getAt(form.draft, path), value);
     const draft = edited
-      ? // biome-ignore lint/nursery/noUnsafeTypeAssertion: The form uses a dynamic widget path and validates the edited draft on decode.
+      ? // biome-ignore lint/nursery/noUnsafeTypeAssertion: The typed draft contract permits raw edits by path. The form validates them on decode.
         (setAt(form.draft, path === "" ? [] : Str.split(path, "."), value) as D)
       : form.draft;
     return {

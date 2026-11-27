@@ -1,6 +1,3 @@
-// Provider key helpers need a synchronous SHA-256 digest.
-// @effect-diagnostics-next-line nodeBuiltinImport:off
-import { createHash } from "node:crypto";
 import type { EmailSender } from "@kvitbit/domain/ports";
 
 import * as Option from "effect/Option";
@@ -42,7 +39,7 @@ export const bareAddress = (recipient: string): string => {
   return Str.trim(angle?.[1] ?? recipient);
 };
 
-const sha256Hex = (input: string): string => createHash("sha256").update(input).digest("hex");
+const sha256Hex = (input: string): string => Bun.CryptoHasher.hash("sha256", input, "hex");
 
 /**
  * The key itself when it is at most `maxLength` characters of `allowed`, else

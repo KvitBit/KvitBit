@@ -177,10 +177,18 @@ export type RouteBase = "/" | "/app/";
 // --- Path codec ----------------------------------------------------------------------------------
 
 /** camelCase or snake_case literal -> kebab-case path segment. */
-const kebab = (value: string): string =>
-  // Native replace supports callback replacements for each matched capital.
-  // @effect-diagnostics-next-line preferEffectString:off
-  Fn.pipe(value, Str.replace(/_/g, "-")).replace(/[A-Z]/g, (c) => `-${Str.toLowerCase(c)}`);
+const kebab = (value: string): string => {
+  let segment = "";
+  for (const character of value) {
+    segment +=
+      character >= "A" && character <= "Z"
+        ? `-${Str.toLowerCase(character)}`
+        : character === "_"
+          ? "-"
+          : character;
+  }
+  return segment;
+};
 const unkebab = (segment: string, values: ReadonlyArray<string>): string | undefined =>
   Option.getOrUndefined(Arr.findFirst(values, (v) => kebab(v) === segment));
 

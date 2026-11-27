@@ -1,5 +1,3 @@
-// biome-ignore-all lint/style/useComponentExportOnlyModules: Test fixture components live with the assertions that render them.
-// biome-ignore-all lint/suspicious/noMisplacedAssertion: The save helper checks the number of writes before returning the recorded request.
 import {
   afterAll,
   afterEach,
@@ -32,11 +30,12 @@ import {
   useFakeTransfer as registerFakeTransfer,
 } from "../../platform/transfer/testing";
 import { ApiProvider } from "../../runtime/api-runtime";
-import { SessionProvider, useSession } from "../../session/session-provider";
+import { SessionProvider } from "../../session/session-provider";
 import { tokenStore } from "../../session/token-store";
 import { clientRoot, waitForRender } from "../../testing/client-root";
 import { expoRouterStandIn } from "../../testing/expo-router-stand-in";
-import { recordedOverlay, TestProviders } from "../../testing/providers";
+import { SignedInFixture, TestProviders } from "../../testing/providers";
+import { recordedOverlay } from "../../testing/recorded-overlay";
 import { WorkspaceProvider } from "../../workspace/workspace-provider";
 import { reactEventHandler } from "./react-event.test-utils";
 import { uiShim } from "./test-ui-shim";
@@ -74,10 +73,6 @@ const { DocumentDetailScreen } = await import("./detail-screen");
 const { DocumentEditorScreen } = await import("./editor-screen");
 const { default: DocumentNewRoute } = await import("../../../app/w/[ws]/documents/new/[kind]");
 const { default: DocumentEditRoute } = await import("../../../app/w/[ws]/documents/[id]/edit");
-
-function SignedInFixture({ children }: { readonly children: ReactNode }) {
-  return useSession().state.status === "signed-in" ? children : null;
-}
 
 const waitFor = (check: () => boolean, label?: string): Promise<void> =>
   waitForRender({ check, label, attempts: 250 });
@@ -1079,8 +1074,11 @@ describe("DocumentDetailScreen and DocumentEditorScreen", () => {
     await change("editor-line-desc-0", description);
     await click("editor-save-button");
     await waitFor(() => replaced.length === 1, "saved");
-    expect(Arr.filter(calls, (call) => call.method === "PATCH")).toHaveLength(before + 1);
-    return Arr.filter(calls, (call) => call.method === "PATCH").at(-1);
+    const writes = Arr.filter(calls, (call) => call.method === "PATCH");
+    if (writes.length !== before + 1) {
+      throw new Error(`Expected one document write, got ${writes.length - before}`);
+    }
+    return writes.at(-1);
   };
 
   test("imported template fields survive saving and reopening the draft", async () => {

@@ -9,6 +9,8 @@ import * as Clock from "effect/Clock";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
+import * as Fn from "effect/Function";
+import * as Predicate from "effect/Predicate";
 import * as Semaphore from "effect/Semaphore";
 import type { EmailSenderService } from "./shared";
 
@@ -36,23 +38,7 @@ interface Holder {
   readonly at: number;
 }
 
-/**
- * Sends through `primary` and fails over to `secondary`, with the same idempotency key, only
- * when `primary` certainly did not take the message (EmailNotAccepted). EmailOutcomeUnknown
- * and EmailRejected pass through.
- *
- * Once a provider may hold a key (an unknown outcome, an interrupted send, or an accepted
- * send), every later send with that key goes to that provider only, and its EmailNotAccepted
- * is reported as EmailOutcomeUnknown: the retry was refused, but the earlier attempt may still
- * have been delivered, so failing over (by this sender or its caller) is not safe. Sends with
- * the same key run one at a time, so an overlapping send sees the first one's outcome.
- *
- * Limitation: this state lives in the process's memory. A retry in another process or after a
- * restart starts again from `primary`; durable routing needs the delivery record to store the
- * provider.
- */
-// @effect-diagnostics-next-line missingPipeableSignature:off Keep the published positional adapter API.
-export function makeFallbackEmailSender(
+function makeFallback(
   primary: EmailSenderService,
   secondary: EmailSenderService,
   options: FallbackOptions = {},
@@ -159,3 +145,30 @@ export function makeFallbackEmailSender(
     ),
   });
 }
+
+/**
+ * Sends through `primary` and fails over to `secondary`, with the same idempotency key, only
+ * when `primary` certainly did not take the message (EmailNotAccepted). EmailOutcomeUnknown
+ * and EmailRejected pass through.
+ *
+ * Once a provider may hold a key (an unknown outcome, an interrupted send, or an accepted
+ * send), every later send with that key goes to that provider only, and its EmailNotAccepted
+ * is reported as EmailOutcomeUnknown: the retry was refused, but the earlier attempt may still
+ * have been delivered, so failing over (by this sender or its caller) is not safe. Sends with
+ * the same key run one at a time, so an overlapping send sees the first one's outcome.
+ *
+ * Limitation: this state lives in the process's memory. A retry in another process or after a
+ * restart starts again from `primary`; durable routing needs the delivery record to store the
+ * provider.
+ */
+export const makeFallbackEmailSender: {
+  (
+    secondary: EmailSenderService,
+    options?: FallbackOptions,
+  ): (primary: EmailSenderService) => EmailSenderService;
+  (
+    primary: EmailSenderService,
+    secondary: EmailSenderService,
+    options?: FallbackOptions,
+  ): EmailSenderService;
+} = Fn.dual((args) => Predicate.hasProperty(args[1], "send"), makeFallback);

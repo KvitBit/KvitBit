@@ -8,8 +8,6 @@
  *      in `src/page/**` outside Command effects, zero raw hex literals in `src/styles/pages/**`).
  */
 import { describe, expect, test } from "bun:test";
-// @effect-diagnostics-next-line nodeBuiltinImport:off The filesystem scan runs synchronously in this Bun test.
-import { readdirSync, readFileSync } from "node:fs";
 import { Router } from "@effect/ui";
 import {
   AttachmentId,
@@ -790,18 +788,10 @@ describe("Shell update & prefs invariants", () => {
 
 // --- 4. Static architecture checks ---------------------------------------------------------------
 
-const walkFiles = (dir: string, ext: string): ReadonlyArray<string> => {
-  const results: string[] = [];
-  for (const entry of readdirSync(dir, { withFileTypes: true })) {
-    const full = join(dir, entry.name);
-    if (entry.isDirectory()) {
-      results.push(...walkFiles(full, ext));
-    } else if (entry.isFile() && Str.endsWith(ext)(entry.name)) {
-      results.push(full);
-    }
-  }
-  return Arr.sort(results, Order.String);
-};
+const walkFiles = (dir: string, ext: string): ReadonlyArray<string> =>
+  [...new Bun.Glob(`**/*${ext}`).scanSync({ cwd: dir, absolute: true, dot: true })].sort(
+    Order.String,
+  );
 
 const stripCssComments = (src: string): string => Str.replace(/\/\*[\s\S]*?\*\//g, "")(src);
 
@@ -940,15 +930,22 @@ describe("static architecture invariants", () => {
     ]);
   });
 
-  test("web source and tests use the Effect UI runtime and page effects own DOM access", () => {
+  test("web source and tests use the Effect UI runtime and page effects own DOM access", async () => {
     const webRoot = resolve(WEB_SRC, "..");
     const files = Arr.flatMap(["src", "test", "e2e"], (dir) =>
       Arr.flatMap([".ts", ".tsx"], (ext) => walkFiles(join(webRoot, dir), ext)),
     );
-    const violations = Arr.flatMap(files, (file) => {
-      const path = relative(webRoot, file);
-      return sourceViolations(path, readFileSync(file, "utf8"), Str.startsWith("src/page/")(path));
-    });
+    const violations = await Effect.forEach(
+      files,
+      (file) =>
+        Effect.promise(() => Bun.file(file).text()).pipe(
+          Effect.map((source) => {
+            const path = relative(webRoot, file);
+            return sourceViolations(path, source, Str.startsWith("src/page/")(path));
+          }),
+        ),
+      { concurrency: 4 },
+    ).pipe(Effect.map(Arr.flatten), Effect.runPromise);
     expect(violations).toEqual([]);
     const dependenciesSchema = Schema.Record(Schema.String, Schema.String);
     const manifestJson = Schema.fromJsonString(
@@ -958,27 +955,33 @@ describe("static architecture invariants", () => {
       }),
     );
     const manifest = Schema.decodeEffect(manifestJson)(
-      readFileSync(join(webRoot, "package.json"), "utf8"),
+      await Bun.file(join(webRoot, "package.json")).text(),
     ).pipe(Effect.runSync);
     const dependencies = Rec.keys({ ...manifest.dependencies, ...manifest.devDependencies });
     expect(Arr.filter(dependencies, forbiddenPackage)).toEqual([]);
   });
 
-  test("zero raw hex color literals in apps/web/src/styles/pages/**", () => {
+  test("zero raw hex color literals in apps/web/src/styles/pages/**", async () => {
     const stylesDir = join(WEB_SRC, "styles/pages");
     const cssFiles = walkFiles(stylesDir, ".css");
     expect(cssFiles.length).toBeGreaterThan(0);
 
     const hexValuePattern = /:\s*[^;{}]*#(?:[0-9a-fA-F]{3,4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})\b/g;
 
-    const violations: string[] = [];
-    for (const file of cssFiles) {
-      const clean = stripCssComments(readFileSync(file, "utf8"));
-      const matches = Str.match(hexValuePattern)(clean);
-      if (Option.isSome(matches)) {
-        violations.push(`${relative(WEB_SRC, file)}: ${Arr.join(matches.value, ", ")}`);
-      }
-    }
+    const violations = await Effect.forEach(
+      cssFiles,
+      (file) =>
+        Effect.promise(() => Bun.file(file).text()).pipe(
+          Effect.map((source) => {
+            const matches = Str.match(hexValuePattern)(stripCssComments(source));
+            return Option.map(
+              matches,
+              (values) => `${relative(WEB_SRC, file)}: ${Arr.join(values, ", ")}`,
+            );
+          }),
+        ),
+      { concurrency: 4 },
+    ).pipe(Effect.map(Arr.getSomes), Effect.runPromise);
     expect(violations).toEqual([]);
   });
 });

@@ -586,8 +586,12 @@ const numberingTokens = /(YYYY|YY|MM|N+)/;
 const numericCounter = /^N+$/;
 const alphaWords = /[A-Za-z]+/g;
 const numberingChunks = /Y+|M+|N+/g;
-// biome-ignore lint/suspicious/noControlCharactersInRegex: the numbering grammar disallows control characters.
-const controlCharacter = /[\u0000-\u001f\u007f]/;
+const containsAsciiControl = (value: string): boolean => {
+  for (const character of value) {
+    if (character < " " || character === "\u007f") return true;
+  }
+  return false;
+};
 const formatPatternSample = (pattern: string, counter: number, date: string): string => {
   const year = Str.slice(0, 4)(date);
   const month = Str.slice(5, 7)(date);
@@ -635,7 +639,7 @@ const validSeries = (pattern: string, start: string): boolean => {
     )
   )
     return false;
-  const hasControlCharacter = controlCharacter.test(pattern);
+  const hasControlCharacter = containsAsciiControl(pattern);
   return !hasControlCharacter && formatPatternSample(pattern, counter, "2026-01-01").length <= 20;
 };
 

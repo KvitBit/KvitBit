@@ -223,10 +223,15 @@ export const validAmount: {
   },
 );
 
+export const isAsciiControl = (character: string): boolean =>
+  (character >= "\u0000" && character < " ") || character === "\u007f";
+
 /** Collapses whitespace and control characters (including line breaks) to single spaces. */
-export const singleLine = (text: string): string =>
-  // biome-ignore lint/suspicious/noControlCharactersInRegex: control characters are what we strip
-  Str.trim(Str.replace(/[\u0000-\u001f\u007f\s]+/g, " ")(text));
+export const singleLine = (text: string): string => {
+  let normalized = "";
+  for (const character of text) normalized += isAsciiControl(character) ? " " : character;
+  return Str.trim(Str.replace(/\s+/g, " ")(normalized));
+};
 
 /**
  * Shortens `text` to the longest prefix whose `measure` fits `max`, preferring to cut at the

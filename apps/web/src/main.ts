@@ -284,7 +284,7 @@ const changedDate = Subscription.make(
 );
 
 // Effect UI defines the callable component and its additional runtime properties.
-// @effect-diagnostics-next-line missingPipeableSignature:off
+// @effect-diagnostics-next-line missingPipeableSignature:off Effect UI owns this component callable signature and its runtime properties.
 export const App = Html.component({
   name: "Kvitbit",
   props: Flags,

@@ -1,4 +1,3 @@
-// biome-ignore-all lint/suspicious/noMisplacedAssertion: The storage fixture checks every compare-and-set performed by the tests.
 import { describe, expect, test } from "bun:test";
 import { PayloadTooLarge } from "@kvitbit/api-contract";
 import {
@@ -64,7 +63,9 @@ function fixture() {
     load: async (key) => journal.get(key) ?? null,
     save: (key, value, previous) =>
       Effect.sync(() => {
-        expect(journal.get(key) ?? "[]").toBe(previous);
+        if ((journal.get(key) ?? "[]") !== previous) {
+          throw new Error("Compare-and-set used an outdated journal value");
+        }
         writes.beforeSave(value);
         journal.set(key, value);
       }).pipe(Effect.runPromise),

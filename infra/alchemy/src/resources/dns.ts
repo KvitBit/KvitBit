@@ -1,5 +1,5 @@
 // Alchemy resource names and instance props need a synchronous SHA-256. Effect Digest is asynchronous.
-// @effect-diagnostics-next-line nodeBuiltinImport:off
+// @effect-diagnostics-next-line nodeBuiltinImport:off Alchemy constructs resource names synchronously from a Node SHA-256 digest.
 import { createHash } from "node:crypto";
 import * as DNS from "@alchemy.run/gcp/DNS";
 import type { ProjectService } from "@alchemy.run/gcp/ServiceUsage";

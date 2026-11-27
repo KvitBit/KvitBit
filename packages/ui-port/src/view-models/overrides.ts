@@ -241,7 +241,7 @@ const normalizeDefaults = (defaults: ContactDefaults): ContactDefaults => {
 const definedEntries = (value: Parameters<typeof Object.entries<unknown>>[0]) =>
   Arr.filter(
     // Arrays participate by enumerable keys too. Record.toEntries accepts only records.
-    // @effect-diagnostics-next-line preferEffectRecord:off
+    // @effect-diagnostics-next-line preferEffectRecord:off The comparison must enumerate array keys, including sparse array entries.
     Object.entries<unknown>(value),
     ([, entry]) => entry !== undefined,
   );

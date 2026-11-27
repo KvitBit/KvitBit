@@ -64,7 +64,13 @@ export const makeTransfer = (target: TransferTarget): Transfer => {
         complete(
           isSuccess(xhr.status)
             ? done(body)
-            : failed(errorFromResponse(xhr.status, body, xhr.getResponseHeader("x-request-id"))),
+            : failed(
+                errorFromResponse({
+                  status: xhr.status,
+                  body,
+                  requestId: xhr.getResponseHeader("x-request-id"),
+                }),
+              ),
         );
       };
       xhr.onerror = () => complete(failed(UiError.offline));
@@ -90,7 +96,11 @@ export const makeTransfer = (target: TransferTarget): Transfer => {
         Effect.orElseSucceed(() => ""),
       );
       return failed(
-        errorFromResponse(response.status, parseJson(text), response.headers.get("x-request-id")),
+        errorFromResponse({
+          status: response.status,
+          body: parseJson(text),
+          requestId: response.headers.get("x-request-id"),
+        }),
       );
     }
     const blob = yield* fromMobilePromise(() => response.blob());

@@ -2,7 +2,9 @@ import { DocumentId, DocumentView, type Role } from "@kvitbit/domain";
 import * as Arr from "effect/Array";
 import * as BigDecimal from "effect/BigDecimal";
 import * as Effect from "effect/Effect";
+import * as Fn from "effect/Function";
 import * as FetchHttpClient from "effect/http/FetchHttpClient";
+import * as Predicate from "effect/Predicate";
 import * as Schema from "effect/Schema";
 
 import { type PageCommand, RunApi } from "../../src/app/commands";
@@ -68,12 +70,17 @@ export const sampleProforma = Effect.runSync(
 
 const encodeDocumentJson = Schema.encodeEffect(Schema.toCodecJson(DocumentView));
 
-// @effect-diagnostics-next-line missingPipeableSignature:off Route mocks return a response directly with an optional status.
-export const jsonDocument = (doc: DocumentView, status = 200) =>
-  Response.json(Effect.runSync(encodeDocumentJson(doc)), {
-    status,
-    headers: { etag: `"${doc.revision}"` },
-  });
+export const jsonDocument: {
+  (status?: number): (doc: DocumentView) => Response;
+  (doc: DocumentView, status?: number): Response;
+} = Fn.dual(
+  (args) => Predicate.isObject(args[0]),
+  (doc: DocumentView, status = 200) =>
+    Response.json(Effect.runSync(encodeDocumentJson(doc)), {
+      status,
+      headers: { etag: `"${doc.revision}"` },
+    }),
+);
 
 export const commandEffect = <Msg>(commands: ReadonlyArray<PageCommand<Msg>> | undefined) => {
   const command = commands?.[0];

@@ -3,6 +3,7 @@ import * as BigDecimal from "effect/BigDecimal";
 import * as Fn from "effect/Function";
 import * as Option from "effect/Option";
 import * as Predicate from "effect/Predicate";
+import * as Result from "effect/Result";
 import * as Str from "effect/String";
 import { INTL_TAG, type Locale } from "../i18n/locale";
 import { stringifyJson } from "../json";
@@ -24,12 +25,9 @@ interface Decimal {
 const DECIMAL = /^([-+]?)(\d+)(?:\.(\d*))?(?:[eE]([-+]?\d+))?$/;
 
 /** Parses plain or exponent notation (`1.5e3`, `1e-7`) exactly, without going through floats. */
-const parseDecimal = (input: string): Decimal => {
+const parseDecimal = (input: string): Result.Result<Decimal, RangeError> => {
   const m = DECIMAL.exec(Str.trim(input));
-  if (m === null) {
-    // biome-ignore lint/plugin/no-throw-in-effect-modules: Decimal formatters report malformed strings synchronously.
-    throw new RangeError(`Not a decimal: ${input}`);
-  }
+  if (m === null) return Result.fail(new RangeError(`Not a decimal: ${input}`));
   const digits = (m[2] ?? "") + (m[3] ?? "");
   const point = (m[2] ?? "").length + Number(m[4] ?? "0");
   const padded =
@@ -40,21 +38,17 @@ const parseDecimal = (input: string): Decimal => {
   const integer = Fn.pipe(padded, Str.slice(0, at), Str.replace(LEADING_ZEROES, ""));
   const fraction = Fn.pipe(padded, Str.slice(at), Str.replace(TRAILING_ZEROES, ""));
   const zero = ZERO_DIGITS.test(integer + fraction);
-  return { negative: m[1] === "-" && !zero, integer, fraction };
+  return Result.succeed({ negative: m[1] === "-" && !zero, integer, fraction });
 };
 
-const toDecimal = (value: DecimalInput): Decimal => {
-  if (Predicate.isNumber(value)) {
-    if (!Number.isFinite(value)) {
-      // biome-ignore lint/plugin/no-throw-in-effect-modules: Decimal formatters report non-finite numbers synchronously.
-      throw new RangeError(`Not a finite number: ${value}`);
-    }
-    return parseDecimal(String(value));
+const decimalResult = (value: DecimalInput): Result.Result<Decimal, RangeError> => {
+  if (Predicate.isNumber(value) && !Number.isFinite(value)) {
+    return Result.fail(new RangeError(`Not a finite number: ${value}`));
   }
-  if (Predicate.isBigInt(value)) return parseDecimal(value.toString());
-  if (Predicate.isString(value)) return parseDecimal(value);
-  return value.pipe(BigDecimal.format, parseDecimal);
+  return parseDecimal(BigDecimal.isBigDecimal(value) ? BigDecimal.format(value) : String(value));
 };
+
+const toDecimal = Fn.flow(decimalResult, Result.getOrThrow);
 
 /** Plain decimal string with no exponent or trailing zeroes. */
 export const toDecimalString = (value: DecimalInput): string => {
@@ -191,7 +185,7 @@ export interface NumberOptions {
 
 /** Locale number: cs `1 234,5` (NBSP grouping), en `1,234.5`. Exact for any decimal input. */
 // A decimal input is a string and can overlap the locale at the call boundary.
-// @effect-diagnostics-next-line missingPipeableSignature:off
+// @effect-diagnostics-next-line missingPipeableSignature:off The data-first API accepts any decimal text and has an optional options argument.
 export const formatNumber = (
   locale: Locale,
   value: DecimalInput,
@@ -205,7 +199,7 @@ export const formatNumber = (
 
 /** Quantity with an optional unit: cs `1,5 h`, en `1.5 h`. Up to 4 decimals, no padding. */
 // The value and optional unit accept strings, which overlap the locale.
-// @effect-diagnostics-next-line missingPipeableSignature:off
+// @effect-diagnostics-next-line missingPipeableSignature:off The value and optional unit can both be strings, overlapping the locale argument.
 export const formatQuantity = (locale: Locale, value: DecimalInput, unit?: string): string => {
   const n = formatNumber(locale, value, { maxFractionDigits: 4 });
   return unit === undefined || unit === "" ? n : `${n} ${unit}`;

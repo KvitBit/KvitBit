@@ -265,7 +265,7 @@ export const latestRelease = (records: readonly ReleaseInfo[]): ReleaseInfo | un
 
 // Preserve the SyntaxError and message exposed by the release CLI.
 const parseJson = (json: string): unknown =>
-  // @effect-diagnostics-next-line globalJson:off
+  // @effect-diagnostics-next-line globalJson:off The release CLI exposes the native SyntaxError message for malformed stored JSON.
   JSON.parse(json);
 
 const requireString = (obj: StoredFields, field: string): string => {

@@ -15,7 +15,9 @@ const transaction = <A>(
 ) =>
   db.pipe(
     Effect.flatMap((database) =>
-      inIndexedStore(STORE, mode, requestFor, { durability: "strict" })(database),
+      inIndexedStore({ name: STORE, mode, requestFor, options: { durability: "strict" } })(
+        database,
+      ),
     ),
   );
 

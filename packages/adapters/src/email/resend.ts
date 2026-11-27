@@ -14,6 +14,7 @@ import * as Arr from "effect/Array";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Base64 from "effect/encoding/Base64";
+import * as Fn from "effect/Function";
 import * as HttpClient from "effect/http/HttpClient";
 import type * as HttpClientError from "effect/http/HttpClientError";
 import * as HttpClientRequest from "effect/http/HttpClientRequest";
@@ -46,9 +47,7 @@ const tagPattern = /[^A-Za-z0-9_-]/g;
 /** Resend tag names and values allow ASCII letters, digits, `_` and `-`, at most 256 each. */
 const resendTag = (raw: string): string => Str.slice(0, 256)(Str.replace(tagPattern, "_")(raw));
 
-/** Resend's `POST /emails` body for a message. */
-// @effect-diagnostics-next-line missingPipeableSignature:off Keep the published positional adapter API.
-export const resendBody = (message: OutboundEmail, from: string) => ({
+const buildResendBody = (message: OutboundEmail, from: string) => ({
   from,
   to: message.to,
   ...(message.cc !== undefined && message.cc.length > 0 && { cc: message.cc }),
@@ -70,6 +69,12 @@ export const resendBody = (message: OutboundEmail, from: string) => ({
     })),
   }),
 });
+
+/** Resend's `POST /emails` body for a message. */
+export const resendBody: {
+  (from: string): (message: OutboundEmail) => ReturnType<typeof buildResendBody>;
+  (message: OutboundEmail, from: string): ReturnType<typeof buildResendBody>;
+} = Fn.dual(2, buildResendBody);
 
 /** Resend's Idempotency-Key for a delivery id; over 256 characters becomes a SHA-256 digest. */
 export const resendIdempotencyKey = (key: string): string =>

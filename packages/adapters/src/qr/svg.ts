@@ -5,6 +5,7 @@
  */
 
 import * as Fn from "effect/Function";
+import * as Predicate from "effect/Predicate";
 import * as Result from "effect/Result";
 import * as Str from "effect/String";
 import { create } from "qrcode";
@@ -66,6 +67,11 @@ const buildSvg = (payload: string, options: QrSvgOptions): Result.Result<string,
   );
 };
 
-// @effect-diagnostics-next-line missingPipeableSignature:off A single payload argument renders with default options.
-export const toSvg = (payload: string, options: QrSvgOptions = {}): string =>
-  Result.getOrThrow(buildSvg(payload, options));
+export const toSvg: {
+  (options?: QrSvgOptions): (payload: string) => string;
+  (payload: string, options?: QrSvgOptions): string;
+} = Fn.dual(
+  (args) => Predicate.isString(args[0]),
+  (payload: string, options: QrSvgOptions = {}): string =>
+    Result.getOrThrow(buildSvg(payload, options)),
+);

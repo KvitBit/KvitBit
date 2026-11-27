@@ -65,7 +65,7 @@ const canonicalJson: (value: Schema.Json) => Effect.Effect<string, Schema.Schema
 
 // JSON-RPC argument field order is immaterial, array order is bound.
 const hashBoundArgs = (args: Schema.JsonObject) =>
-  Schema.decodeUnknownEffect(Schema.JsonObject)(confirmationBoundArgs(args)).pipe(
+  Schema.decodeEffect(Schema.JsonObject)(confirmationBoundArgs(args)).pipe(
     Effect.flatMap(canonicalJson),
     Effect.map(sha256),
     Effect.orDie,

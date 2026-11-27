@@ -1,5 +1,7 @@
+import * as Arr from "effect/Array";
 import * as Fn from "effect/Function";
 import * as Predicate from "effect/Predicate";
+import * as Str from "effect/String";
 import { formatExact, roundedDecimal } from "../format/number";
 import type { Text, TextParam } from "../text";
 import { catalogs, type EnCatalog, isMessageKey, type MessageKey } from "./catalog";
@@ -81,13 +83,15 @@ export const interpolate: {
 } = Fn.dual(
   (args) => Predicate.isString(args[1]),
   (locale: Locale, template: string, params?: Readonly<Record<string, TextParam>>): string =>
-    // Native replace supports callback replacements with capture groups.
-    // @effect-diagnostics-next-line preferEffectString:off
-    template.replace(PLACEHOLDER, (whole, name: string) => {
-      const value = params?.[name];
-      if (value === undefined) return whole;
-      return Predicate.isNumber(value) ? formatParam(locale, value) : value;
-    }),
+    Arr.join(
+      Arr.map(Str.split(template, PLACEHOLDER), (part, index) => {
+        if (index % 2 === 0) return part;
+        const value = params?.[part];
+        if (value === undefined) return `{${part}}`;
+        return Predicate.isNumber(value) ? formatParam(locale, value) : value;
+      }),
+      "",
+    ),
 );
 
 const selectForm = (

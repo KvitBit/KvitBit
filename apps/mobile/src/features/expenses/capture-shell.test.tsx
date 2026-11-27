@@ -1,4 +1,3 @@
-// biome-ignore-all lint/style/useComponentExportOnlyModules: The router mocks are local test fixtures.
 import { afterAll, afterEach, beforeAll, describe, expect, mock, test } from "bun:test";
 import {
   ExpenseId,
@@ -11,7 +10,7 @@ import * as Effect from "effect/Effect";
 import * as Fn from "effect/Function";
 import * as Schema from "effect/Schema";
 import * as Str from "effect/String";
-import type { ReactElement, ReactNode } from "react";
+import type { ReactElement } from "react";
 import {
   fakeTransfer,
   useFakeTransfer as installFakeTransfer,
@@ -25,6 +24,7 @@ import { expoRouterStandIn } from "../../testing/expo-router-stand-in";
 import { TestProviders } from "../../testing/providers";
 import { WorkspaceProvider } from "../../workspace/workspace-provider";
 import { uiShim } from "../documents/test-ui-shim";
+import { RedirectMock, TabsMock } from "./capture-shell-fixture";
 
 interface TabBadgeOptions {
   readonly tabBarBadge?: number | string;
@@ -34,26 +34,16 @@ const capturedTabOptions = new Map<string, TabBadgeOptions>();
 let layoutWsSlug = "acme";
 let activeUserId = "user-shell-1";
 
-function TabsMock({ children }: { readonly children?: ReactNode }) {
-  return <>{children}</>;
-}
-TabsMock.Screen = function TabsScreenMock(props: {
-  readonly name: string;
-  readonly options?: TabBadgeOptions;
-}) {
+const recordTabOptions = (props: { readonly name: string; readonly options?: TabBadgeOptions }) => {
   if (props.options !== undefined) capturedTabOptions.set(props.name, props.options);
   return null;
 };
-
-function RedirectMock() {
-  return null;
-}
 
 mock.module("expo-router", () => ({
   ...expoRouterStandIn({
     useLocalSearchParams: () => ({ ws: layoutWsSlug }),
   }),
-  Tabs: TabsMock,
+  Tabs: Object.assign(TabsMock, { Screen: recordTabOptions }),
   Redirect: RedirectMock,
   router: {
     back: () => undefined,
@@ -349,7 +339,7 @@ describe("receipt capture shell badge and rejected receipts UI", () => {
 
     try {
       // Reopened in edit mode
-      await root.render(wrap(<ExpenseDetailScreen id={EXP_1} initialMode="edit" />));
+      await root.render(wrap(<ExpenseDetailScreen expenseId={EXP_1} initialMode="edit" />));
       await Effect.runPromise(
         eventually(
           () => Str.includes("bad-mime-receipt.pdf")(root.container().textContent ?? ""),
@@ -359,7 +349,7 @@ describe("receipt capture shell badge and rejected receipts UI", () => {
 
       // Reopened in view mode
       await root.render(null);
-      await root.render(wrap(<ExpenseDetailScreen id={EXP_1} initialMode="view" />));
+      await root.render(wrap(<ExpenseDetailScreen expenseId={EXP_1} initialMode="view" />));
       await Effect.runPromise(
         eventually(
           () => Str.includes("bad-mime-receipt.pdf")(root.container().textContent ?? ""),

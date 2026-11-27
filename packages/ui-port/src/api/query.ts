@@ -5,7 +5,6 @@
  */
 
 import { PAGE_LIMIT_DEFAULT, PAGE_LIMIT_MAX } from "@kvitbit/api-contract";
-import * as Arr from "effect/Array";
 import * as Fn from "effect/Function";
 import * as Order from "effect/Order";
 import * as Predicate from "effect/Predicate";
@@ -15,37 +14,32 @@ import { stringifyJson } from "../json";
 
 export { PAGE_LIMIT_DEFAULT as PAGE_LIMIT } from "@kvitbit/api-contract";
 
-/** Paging fields belong to the page request, never to the filters. */
-const PAGING_KEYS = new Set(["cursor", "limit"]);
+type PagingKey = "cursor" | "limit";
+const isFilterKey = <K extends string>(key: K): key is Exclude<K, PagingKey> =>
+  key !== "cursor" && key !== "limit";
 
-/**
- * Filters with empty values and paging fields removed: `undefined`, `null` and blank strings mean
- * "no filter"; `cursor` and `limit` come only from the page request.
- */
-/** Filters after cleaning: every key may be absent at runtime, and none is null or a paging field. */
-export type CleanFilters<F> = {
-  readonly [K in Exclude<keyof F, "cursor" | "limit">]?: Exclude<F[K], null | undefined>;
-};
+type FilterFields<F> = { [K in Exclude<keyof F, PagingKey>]?: NonNullable<F[K]> };
+
+/** Filters with empty values and paging fields removed. */
+export type CleanFilters<F> = Readonly<FilterFields<F>>;
 
 export const cleanFilters = <F extends object>(filters: F): CleanFilters<F> => {
-  // biome-ignore lint/plugin/no-unsafe-dictionary-type: Filter values can have any type and keys are enumerated at runtime.
-  const out: Record<string, unknown> = {};
-  for (const [key, value] of Rec.toEntries(filters)) {
-    if (PAGING_KEYS.has(key) || value === undefined || value === null) continue;
+  type Key = Extract<keyof F, string>;
+  const clean: FilterFields<F> = {};
+  for (const key of Rec.keys<Key, F[Key]>(filters)) {
+    if (!isFilterKey(key) || key === "__proto__") continue;
+    const value = filters[key];
+    if (value === undefined || value === null) continue;
     if (Predicate.isString(value) && Str.trim(value) === "") continue;
-    out[key] = value;
+    clean[key] = value;
   }
-  // biome-ignore lint/nursery/noUnsafeTypeAssertion: The loop copies only values from F and skips nullish and paging keys.
-  // biome-ignore lint/plugin/no-widen-then-assert: The loop retains each copied key's value type.
-  return out as CleanFilters<F>;
+  return clean;
 };
 
 /** Stable identity of a filter set (key order and empty values do not matter). */
-// biome-ignore lint/plugin/no-object-parameters: Filters belong to the caller and have no shared shape.
-export const filterHash = (filters: object): string => {
-  // biome-ignore lint/plugin/no-unsafe-dictionary-type: The hash consumes arbitrary filter values as JSON.
-  const clean: Readonly<Record<string, unknown>> = cleanFilters(filters);
-  return stringifyJson(Arr.map(Rec.keys(clean).sort(Order.String), (key) => [key, clean[key]]));
+export const filterHash = <F extends object>(filters: F): string => {
+  const entries = Rec.toEntries(cleanFilters(filters));
+  return stringifyJson(entries.sort(([first], [second]) => Order.String(first, second)));
 };
 
 const clampLimit = (limit: number): number =>

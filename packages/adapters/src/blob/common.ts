@@ -3,8 +3,6 @@
  * the `put` body.
  */
 
-// @effect-diagnostics-next-line nodeBuiltinImport:off
-import { createHash } from "node:crypto"; // Effect's digest API requires a complete buffer.
 import { type BlobKey, BlobTooLarge } from "@kvitbit/domain/ports";
 import * as Arr from "effect/Array";
 import * as Effect from "effect/Effect";
@@ -33,13 +31,15 @@ export const partialDir = ".partial";
  * backslashes and control characters. Every adapter applies the same rule, so a key that works
  * in tests works in production.
  */
-// biome-ignore lint/suspicious/noControlCharactersInRegex: Control characters are prohibited in blob keys.
-const prohibitedKeyCharacters = /[\u0000-\u001f\u007f\\]/;
 export const keyProblem = (key: string): string | undefined => {
   if (key.length === 0) return "empty";
   if (new TextEncoder().encode(key).byteLength > 1024) return "longer than 1024 UTF-8 bytes";
   if (Str.startsWith("/")(key)) return "absolute";
-  if (prohibitedKeyCharacters.test(key)) return "control character or backslash";
+  for (const character of key) {
+    if (character < " " || character === "\u007f" || character === "\\") {
+      return "control character or backslash";
+    }
+  }
   const segments = Str.split(key, "/");
   if (Arr.some(segments, (segment) => segment === "")) return "empty segment";
   if (Arr.some(segments, (segment) => segment === "." || segment === "..")) return "dot segment";
@@ -76,7 +76,7 @@ export const consumeBounded = Effect.fn("consumeBounded")(function* <E, R>(
   maxBytes: number,
   onChunk: (chunk: Uint8Array) => Effect.Effect<void, E, R>,
 ): Effect.fn.Return<Consumed, BlobTooLarge | E, R> {
-  const hash = createHash("sha256");
+  const hash = new Bun.CryptoHasher("sha256");
   let bytes = 0;
   yield* Stream.runForEach(body, (chunk): Effect.Effect<void, BlobTooLarge | E, R> => {
     bytes += chunk.byteLength;

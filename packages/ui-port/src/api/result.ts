@@ -28,7 +28,7 @@ export type ApiResult<A> =
   | { readonly _tag: "Err"; readonly error: UiError };
 
 // A successful value can itself have the ResponseMeta shape.
-// @effect-diagnostics-next-line missingPipeableSignature:off
+// @effect-diagnostics-next-line missingPipeableSignature:off A successful value can have the same shape as the optional response metadata.
 export const ok = <A>(value: A, meta: ResponseMeta = noMeta): ApiResult<A> => ({
   _tag: "Ok",
   value,

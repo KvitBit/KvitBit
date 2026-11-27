@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 // The signing tests generate PEM keys for the synchronous Node-compatible RSA adapter.
-// @effect-diagnostics-next-line nodeBuiltinImport:off
+// @effect-diagnostics-next-line nodeBuiltinImport:off Use Node-generated RSA keys to exercise Expo-compatible signatures.
 import { generateKeyPairSync } from "node:crypto";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
@@ -76,15 +76,15 @@ const SAMPLE_ROLLBACK: StoredRollback = {
 
 describe("readManifestRequest", () => {
   test("reads headers, defaults channel to production, and detects signature expectation", () => {
-    const result = readManifestRequest(
-      new Headers({
+    const result = readManifestRequest({
+      headers: new Headers({
         "expo-protocol-version": "1",
         "expo-platform": "android",
         "expo-runtime-version": "fp-1234",
         "expo-expect-signature": 'sig, keyid="main", alg="rsa-v1_5-sha256"',
         accept: "multipart/mixed",
       }),
-    );
+    });
     expect(result).toEqual({
       _tag: "Request",
       platform: "android",
@@ -96,11 +96,10 @@ describe("readManifestRequest", () => {
   });
 
   test("falls back to query parameters for platform, runtime-version, and channel-name", () => {
-    const result = readManifestRequest(
-      { "expo-protocol-version": "1" },
-      // biome-ignore lint/security/noSecrets: Public query parameter names and test values.
-      new URLSearchParams("platform=ios&runtime-version=fp-9&channel-name=staging"),
-    );
+    const result = readManifestRequest({
+      headers: { "expo-protocol-version": "1" },
+      searchParams: new URLSearchParams("platform=ios&runtime-version=fp-9&channel-name=staging"),
+    });
     expect(result).toEqual({
       _tag: "Request",
       platform: "ios",
@@ -114,18 +113,22 @@ describe("readManifestRequest", () => {
   test("rejects unsupported protocol version or unacceptable media type with 406", () => {
     expect(
       readManifestRequest({
-        "expo-protocol-version": "0",
-        "expo-platform": "android",
-        "expo-runtime-version": "1",
+        headers: {
+          "expo-protocol-version": "0",
+          "expo-platform": "android",
+          "expo-runtime-version": "1",
+        },
       }),
     ).toMatchObject({ _tag: "Rejected", status: 406 });
 
     expect(
       readManifestRequest({
-        "expo-protocol-version": "1",
-        "expo-platform": "android",
-        "expo-runtime-version": "1",
-        accept: "application/json",
+        headers: {
+          "expo-protocol-version": "1",
+          "expo-platform": "android",
+          "expo-runtime-version": "1",
+          accept: "application/json",
+        },
       }),
     ).toMatchObject({ _tag: "Rejected", status: 406 });
   });
@@ -133,16 +136,20 @@ describe("readManifestRequest", () => {
   test("rejects invalid platform or missing runtime version with 400", () => {
     expect(
       readManifestRequest({
-        "expo-protocol-version": "1",
-        "expo-platform": "web",
-        "expo-runtime-version": "1",
+        headers: {
+          "expo-protocol-version": "1",
+          "expo-platform": "web",
+          "expo-runtime-version": "1",
+        },
       }),
     ).toMatchObject({ _tag: "Rejected", status: 400 });
 
     expect(
       readManifestRequest({
-        "expo-protocol-version": "1",
-        "expo-platform": "android",
+        headers: {
+          "expo-protocol-version": "1",
+          "expo-platform": "android",
+        },
       }),
     ).toMatchObject({ _tag: "Rejected", status: 400 });
   });
@@ -151,10 +158,12 @@ describe("readManifestRequest", () => {
 describe("buildManifestResponse", () => {
   test("emits signed multipart/mixed manifest with s5 headers and asset URLs", () => {
     const req = readManifestRequest({
-      "expo-protocol-version": "1",
-      "expo-platform": "android",
-      "expo-runtime-version": "fp-1234",
-      "expo-expect-signature": 'sig, keyid="main", alg="rsa-v1_5-sha256"',
+      headers: {
+        "expo-protocol-version": "1",
+        "expo-platform": "android",
+        "expo-runtime-version": "fp-1234",
+        "expo-expect-signature": 'sig, keyid="main", alg="rsa-v1_5-sha256"',
+      },
     });
     expect(req._tag).toBe("Request");
     if (req._tag !== "Request") return;
@@ -188,10 +197,20 @@ describe("buildManifestResponse", () => {
       keyid: "main",
       alg: "rsa-v1_5-sha256",
     });
-    expect(verifyManifestSignature(manifestPart?.body ?? "", sigHeader, publicKey)).toBe(true);
-    expect(verifyManifestSignature(`${manifestPart?.body ?? ""}x`, sigHeader, publicKey)).toBe(
-      false,
-    );
+    expect(
+      verifyManifestSignature({
+        body: manifestPart?.body ?? "",
+        expoSignatureHeader: sigHeader,
+        publicKeyOrCert: publicKey,
+      }),
+    ).toBe(true);
+    expect(
+      verifyManifestSignature({
+        body: `${manifestPart?.body ?? ""}x`,
+        expoSignatureHeader: sigHeader,
+        publicKeyOrCert: publicKey,
+      }),
+    ).toBe(false);
 
     const manifest = Schema.decodeOption(manifestJson)(manifestPart?.body ?? "{}").pipe(
       Option.getOrThrow,
@@ -208,10 +227,12 @@ describe("buildManifestResponse", () => {
 
   test("returns noUpdateAvailable directive for unknown runtime version or matching currentUpdateId", () => {
     const baseReq = readManifestRequest({
-      "expo-protocol-version": "1",
-      "expo-platform": "android",
-      "expo-runtime-version": "fp-1234",
-      "expo-current-update-id": SAMPLE_UPDATE.id,
+      headers: {
+        "expo-protocol-version": "1",
+        "expo-platform": "android",
+        "expo-runtime-version": "fp-1234",
+        "expo-current-update-id": SAMPLE_UPDATE.id,
+      },
     });
     if (baseReq._tag !== "Request") throw new Error("expected Request");
 
@@ -232,10 +253,12 @@ describe("buildManifestResponse", () => {
 
   test("returns signed rollBackToEmbedded directive with commitTime", () => {
     const req = readManifestRequest({
-      "expo-protocol-version": "1",
-      "expo-platform": "android",
-      "expo-runtime-version": "fp-1234",
-      "expo-expect-signature": 'sig, keyid="main"',
+      headers: {
+        "expo-protocol-version": "1",
+        "expo-platform": "android",
+        "expo-runtime-version": "fp-1234",
+        "expo-expect-signature": 'sig, keyid="main"',
+      },
     });
     if (req._tag !== "Request") throw new Error("expected Request");
 
@@ -256,20 +279,22 @@ describe("buildManifestResponse", () => {
       parameters: { commitTime: SAMPLE_ROLLBACK.createdAt },
     });
     expect(
-      verifyManifestSignature(
-        directivePart?.body ?? "",
-        directivePart?.headers.get("expo-signature") ?? null,
-        publicKey,
-      ),
+      verifyManifestSignature({
+        body: directivePart?.body ?? "",
+        expoSignatureHeader: directivePart?.headers.get("expo-signature") ?? null,
+        publicKeyOrCert: publicKey,
+      }),
     ).toBe(true);
   });
 
   test("returns 503 SigningUnavailable when expo-expect-signature is set without a valid key", () => {
     const req = readManifestRequest({
-      "expo-protocol-version": "1",
-      "expo-platform": "android",
-      "expo-runtime-version": "fp-1234",
-      "expo-expect-signature": 'sig, keyid="main"',
+      headers: {
+        "expo-protocol-version": "1",
+        "expo-platform": "android",
+        "expo-runtime-version": "fp-1234",
+        "expo-expect-signature": 'sig, keyid="main"',
+      },
     });
     if (req._tag !== "Request") throw new Error("expected Request");
 

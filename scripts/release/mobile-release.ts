@@ -12,11 +12,9 @@
  */
 
 // The standalone Bun CLI uses native promises, subprocesses, and data formats.
-// @effect-diagnostics asyncFunction:off
-// @effect-diagnostics globalDate:off
-// @effect-diagnostics globalFetch:off
-// @effect-diagnostics globalJson:off
-// @effect-diagnostics nodeBuiltinImport:off
+// @effect-diagnostics asyncFunction:off The standalone release CLI composes native filesystem, Bun process, and fetch promises.
+// @effect-diagnostics globalFetch:off The release verifier reads the native Fetch response body and error status.
+// @effect-diagnostics nodeBuiltinImport:off The release CLI uses filesystem and POSIX path operations and Node RSA and X.509 APIs.
 import { createHash, generateKeyPairSync, randomUUID, X509Certificate } from "node:crypto";
 import { existsSync, readdirSync } from "node:fs";
 import { chmod, link, mkdir, mkdtemp, readdir, readFile, rm, stat } from "node:fs/promises";
@@ -25,11 +23,14 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import * as Arr from "effect/Array";
+import * as DateTime from "effect/DateTime";
+import * as Effect from "effect/Effect";
 import * as Fn from "effect/Function";
 import * as Option from "effect/Option";
 import * as Order from "effect/Order";
 import * as Predicate from "effect/Predicate";
 import * as Rec from "effect/Record";
+import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 import * as Str from "effect/String";
 import {
@@ -74,6 +75,19 @@ import {
   type StoredUpdate,
   type StoredUpdateAsset,
 } from "../../apps/mobile/release/storage-layout";
+
+const parseJson = (text: string): unknown =>
+  // @effect-diagnostics-next-line globalJson:off The CLI reports the native SyntaxError for malformed release input.
+  JSON.parse(text);
+
+const compactJson = Fn.flow(
+  Schema.encodeResult(Schema.fromJsonString(Schema.Unknown)),
+  Result.getOrThrow,
+);
+const prettyJson = Fn.flow(
+  Schema.encodeResult(Schema.fromJsonString(Schema.Unknown, { space: 2 })),
+  Result.getOrThrow,
+);
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const DEFAULT_MOBILE_DIR = join(REPO_ROOT, "apps/mobile");
@@ -147,7 +161,7 @@ Common options:
 
 const releaseTagVersion = (tag: string): string => {
   if (!Str.startsWith(RELEASE_TAG_PREFIX)(tag)) {
-    throw new Error(`Release tag ${JSON.stringify(tag)} must start with ${RELEASE_TAG_PREFIX}.`);
+    throw new Error(`Release tag ${compactJson(tag)} must start with ${RELEASE_TAG_PREFIX}.`);
   }
   const version = Str.slice(RELEASE_TAG_PREFIX.length)(tag);
   parseAppVersion(version);
@@ -161,7 +175,7 @@ const SIGNER_DIGEST_RE =
 const normalizeCertificateSha256 = (digest: string): string => {
   const hex = Str.toLowerCase(Str.replaceAll(":", "")(digest));
   if (!SHA256_HEX_RE.test(hex)) {
-    throw new Error(`${JSON.stringify(digest)} is not a SHA-256 digest.`);
+    throw new Error(`${compactJson(digest)} is not a SHA-256 digest.`);
   }
   return hex;
 };
@@ -317,7 +331,7 @@ const isExpoAppConfig = Schema.is(
 
 const readAppMeta = async (projectDir: string, tag?: string) => {
   const path = join(projectDir, "app.json");
-  const parsed: unknown = JSON.parse(await readFile(path, "utf8"));
+  const parsed: unknown = parseJson(await readFile(path, "utf8"));
   const expo = Predicate.isObject(parsed) ? parsed["expo"] : undefined;
   if (!isExpoAppConfig(expo)) {
     throw new Error(`Missing expo.version in ${path}`);
@@ -535,6 +549,12 @@ const describeAssetBytes = (
   return { sha256: sha256Hex, bytes, asset, meta };
 };
 
+const inOrder = <A>(items: Iterable<A>, run: (item: A) => Promise<void>): Promise<void> =>
+  Effect.forEach(items, (item) => Effect.promise(() => run(item)), {
+    concurrency: 1,
+    discard: true,
+  }).pipe(Effect.runPromise);
+
 const isExpoPlatformExport = Schema.is(
   Schema.Struct({ bundle: Schema.String, assets: Schema.optional(Schema.Unknown) }),
 );
@@ -548,7 +568,7 @@ const readExpoExport = async (
   readonly assets: readonly ExportedAssetFile[];
 }> => {
   const metaRaw = await readFile(join(exportDir, "metadata.json"), "utf8");
-  const parsed: unknown = JSON.parse(metaRaw);
+  const parsed: unknown = parseJson(metaRaw);
   const fileMetadata = Predicate.isObject(parsed) ? parsed["fileMetadata"] : undefined;
   const platformFiles = Predicate.isObject(fileMetadata) ? fileMetadata[platform] : undefined;
   if (!isExpoPlatformExport(platformFiles)) {
@@ -562,16 +582,15 @@ const readExpoExport = async (
     );
   }
   const assets: ExportedAssetFile[] = [];
-  for (const item of platformFiles.assets) {
+  await inOrder(platformFiles.assets, async (item) => {
     if (!isExpoAsset(item)) {
       throw new Error(`Invalid ${platform} asset in ${exportDir}/metadata.json`);
     }
-    // biome-ignore lint/performance/noAwaitInLoops: Keep file reads bounded for large Expo exports.
     const bytes = new Uint8Array(await readFile(join(exportDir, item.path)));
     const ext = Str.toLowerCase(item.ext);
     const contentType = ASSET_CONTENT_TYPES[ext] ?? "application/octet-stream";
     assets.push(describeAssetBytes(bytes, contentType, `.${item.ext}`));
-  }
+  });
   return { launchAsset, assets };
 };
 
@@ -589,17 +608,13 @@ const cmdMetadata = async (argv: readonly string[]): Promise<void> => {
   const meta = await readAppMeta(resolve(values.project), values.tag);
   if (values.json) {
     writeStdout(
-      JSON.stringify(
-        {
-          version: meta.version,
-          versionCode: meta.versionCode,
-          packageName: meta.packageName,
-          minAndroidSdk: meta.minAndroidSdk,
-          apkName: meta.apkName,
-        },
-        null,
-        2,
-      ),
+      prettyJson({
+        version: meta.version,
+        versionCode: meta.versionCode,
+        packageName: meta.packageName,
+        minAndroidSdk: meta.minAndroidSdk,
+        apkName: meta.apkName,
+      }),
     );
     return;
   }
@@ -622,9 +637,7 @@ const cmdBuild = async (argv: readonly string[]): Promise<void> => {
     },
   });
   if (values.signing !== "release" && values.signing !== "debug") {
-    throw new Error(
-      `--signing must be "release" or "debug", got ${JSON.stringify(values.signing)}`,
-    );
+    throw new Error(`--signing must be "release" or "debug", got ${compactJson(values.signing)}`);
   }
   const projectDir = resolve(values.project);
   const meta = await readAppMeta(projectDir, values.tag);
@@ -657,7 +670,7 @@ const cmdBuild = async (argv: readonly string[]): Promise<void> => {
         "apksigner verify --print-certs <apk> -> verify certificate SHA-256",
       ],
     };
-    writeStdout(JSON.stringify(plan, null, 2));
+    writeStdout(prettyJson(plan));
     return;
   }
 
@@ -758,19 +771,15 @@ const cmdBuild = async (argv: readonly string[]): Promise<void> => {
 
     const apkSha256 = createHash("sha256").update(apkBytes).digest("hex");
     writeStdout(
-      JSON.stringify(
-        {
-          command: "build",
-          version: meta.version,
-          versionCode: meta.versionCode,
-          apkPath: apkOutPath,
-          apkSha256,
-          signingCertSha256: verified.signingCertSha256,
-          sizeBytes: apkBytes.byteLength,
-        },
-        null,
-        2,
-      ),
+      prettyJson({
+        command: "build",
+        version: meta.version,
+        versionCode: meta.versionCode,
+        apkPath: apkOutPath,
+        apkSha256,
+        signingCertSha256: verified.signingCertSha256,
+        sizeBytes: apkBytes.byteLength,
+      }),
     );
   } finally {
     if (tempKeystoreDir !== undefined) {
@@ -801,7 +810,7 @@ const cmdPublishApk = async (argv: readonly string[]): Promise<void> => {
   const version = values.version ?? meta.version;
   const versionCode = androidVersionCode(version);
   const target = resolveStorageTarget(values["storage-dir"], values.bucket, dryRun);
-  const releasedAt = values["released-at"] ?? new Date().toISOString();
+  const releasedAt = values["released-at"] ?? DateTime.formatIso(DateTime.nowUnsafe());
 
   let apkPath: string | undefined;
   let apkBytes: Uint8Array | undefined;
@@ -864,17 +873,13 @@ const cmdPublishApk = async (argv: readonly string[]): Promise<void> => {
 
   if (dryRun) {
     writeStdout(
-      JSON.stringify(
-        {
-          dryRun: true,
-          command: "publish-apk",
-          target,
-          objects: [apkKey, infoKey],
-          releaseInfo,
-        },
-        null,
-        2,
-      ),
+      prettyJson({
+        dryRun: true,
+        command: "publish-apk",
+        target,
+        objects: [apkKey, infoKey],
+        releaseInfo,
+      }),
     );
     return;
   }
@@ -900,7 +905,7 @@ const cmdPublishApk = async (argv: readonly string[]): Promise<void> => {
   const infoOutcome = await writeCreateOnly(
     target,
     infoKey,
-    new TextEncoder().encode(`${JSON.stringify(releaseInfo, null, 2)}\n`),
+    new TextEncoder().encode(`${prettyJson(releaseInfo)}\n`),
     {
       contentType: "application/json; charset=utf-8",
       allowExisting: true,
@@ -924,17 +929,13 @@ const cmdPublishApk = async (argv: readonly string[]): Promise<void> => {
   }
 
   writeStdout(
-    JSON.stringify(
-      {
-        command: "publish-apk",
-        target,
-        apkKey,
-        infoKey,
-        releaseInfo: publishedReleaseInfo,
-      },
-      null,
-      2,
-    ),
+    prettyJson({
+      command: "publish-apk",
+      target,
+      apkKey,
+      infoKey,
+      releaseInfo: publishedReleaseInfo,
+    }),
   );
 };
 
@@ -974,7 +975,7 @@ const resolveRuntimeVersionFromExpo = async (
           `expo-updates runtimeversion:resolve failed for ${platform}:\n${result.stderr}`,
         );
       }
-      const parsed: unknown = JSON.parse(result.stdout);
+      const parsed: unknown = parseJson(result.stdout);
       if (!hasRuntimeVersion(parsed)) {
         throw new Error(`Unexpected runtimeversion:resolve output: ${result.stdout}`);
       }
@@ -993,7 +994,7 @@ const parsePlatforms = (raw: readonly string[] | undefined): readonly MobilePlat
       continue;
     }
     if (!isMobilePlatform(item)) {
-      throw new Error(`Invalid platform ${JSON.stringify(item)}; expected android, ios, or all.`);
+      throw new Error(`Invalid platform ${compactJson(item)}; expected android, ios, or all.`);
     }
     if (!out.includes(item)) out.push(item);
   }
@@ -1063,23 +1064,23 @@ const cmdPublishOta = async (argv: readonly string[]): Promise<void> => {
     const explicitRuntime = hasText(requestedRuntime)
       ? assertRuntimeVersion(requestedRuntime)
       : undefined;
-    for (const platform of platforms) {
+    await inOrder(platforms, async (platform) => {
       let runtimeVersion = explicitRuntime ?? `dry-run-${meta.version}`;
       if (explicitRuntime === undefined && !dryRun) {
-        // biome-ignore lint/performance/noAwaitInLoops: Expo resolves each platform in the same project directory.
         runtimeVersion = await resolveRuntimeVersionFromExpo(projectDir, platform, values.origin);
       }
 
       const id = randomUUID();
-      const createdAt = new Date().toISOString();
+      const createdAt = DateTime.formatIso(DateTime.nowUnsafe());
       const pubKey = publicationObjectKey({ channel, platform, runtimeVersion, createdAt, id });
 
-      if (exportDir === undefined) {
+      const platformExportDir = exportDir;
+      if (platformExportDir === undefined) {
         published.push({ platform, runtimeVersion, publicationKey: pubKey, id, assetCount: 0 });
-        continue;
+        return;
       }
 
-      const exported = await readExpoExport(exportDir, platform);
+      const exported = await readExpoExport(platformExportDir, platform);
       const allFiles = [exported.launchAsset, ...exported.assets];
       const record: StoredUpdate = {
         schema: 1,
@@ -1097,10 +1098,9 @@ const cmdPublishOta = async (argv: readonly string[]): Promise<void> => {
 
       if (!dryRun) {
         const seen = new Set<string>();
-        for (const file of allFiles) {
-          if (seen.has(file.sha256)) continue;
+        await inOrder(allFiles, async (file) => {
+          if (seen.has(file.sha256)) return;
           seen.add(file.sha256);
-          // biome-ignore lint/performance/noAwaitInLoops: Complete each asset upload before its metadata and publication.
           await writeCreateOnly(target, assetObjectKey(file.sha256), file.bytes, {
             contentType: file.meta.contentType,
             cacheControl: ASSET_CACHE_CONTROL,
@@ -1109,22 +1109,17 @@ const cmdPublishOta = async (argv: readonly string[]): Promise<void> => {
           await writeCreateOnly(
             target,
             assetMetaObjectKey(file.sha256),
-            new TextEncoder().encode(`${JSON.stringify(file.meta)}\n`),
+            new TextEncoder().encode(`${compactJson(file.meta)}\n`),
             {
               contentType: "application/json; charset=utf-8",
               allowExisting: true,
             },
           );
-        }
-        await writeCreateOnly(
-          target,
-          pubKey,
-          new TextEncoder().encode(`${JSON.stringify(record, null, 2)}\n`),
-          {
-            contentType: "application/json; charset=utf-8",
-            allowExisting: false,
-          },
-        );
+        });
+        await writeCreateOnly(target, pubKey, new TextEncoder().encode(`${prettyJson(record)}\n`), {
+          contentType: "application/json; charset=utf-8",
+          allowExisting: false,
+        });
       }
 
       published.push({
@@ -1134,20 +1129,16 @@ const cmdPublishOta = async (argv: readonly string[]): Promise<void> => {
         id,
         assetCount: allFiles.length,
       });
-    }
+    });
 
     writeStdout(
-      JSON.stringify(
-        {
-          dryRun,
-          command: "publish-ota",
-          channel,
-          target,
-          published,
-        },
-        null,
-        2,
-      ),
+      prettyJson({
+        dryRun,
+        command: "publish-ota",
+        channel,
+        target,
+        published,
+      }),
     );
   } finally {
     if (tempExportDir !== undefined) {
@@ -1185,9 +1176,9 @@ const cmdRollback = async (argv: readonly string[]): Promise<void> => {
     readonly record: StoredRollback;
   }> = [];
 
-  for (const platform of platforms) {
+  await inOrder(platforms, async (platform) => {
     const id = randomUUID();
-    const createdAt = new Date().toISOString();
+    const createdAt = DateTime.formatIso(DateTime.nowUnsafe());
     const record: StoredRollback = {
       schema: 1,
       type: "rollBackToEmbedded",
@@ -1199,33 +1190,23 @@ const cmdRollback = async (argv: readonly string[]): Promise<void> => {
     };
     const key = publicationObjectKey({ channel, platform, runtimeVersion, createdAt, id });
     if (!dryRun) {
-      // biome-ignore lint/performance/noAwaitInLoops: Keep the CLI's platform publication order and fail on the first write error.
-      await writeCreateOnly(
-        target,
-        key,
-        new TextEncoder().encode(`${JSON.stringify(record, null, 2)}\n`),
-        {
-          contentType: "application/json; charset=utf-8",
-          allowExisting: false,
-        },
-      );
+      await writeCreateOnly(target, key, new TextEncoder().encode(`${prettyJson(record)}\n`), {
+        contentType: "application/json; charset=utf-8",
+        allowExisting: false,
+      });
     }
     records.push({ platform, publicationKey: key, record });
-  }
+  });
 
   writeStdout(
-    JSON.stringify(
-      {
-        dryRun,
-        command: "rollback",
-        channel,
-        runtimeVersion,
-        target,
-        records,
-      },
-      null,
-      2,
-    ),
+    prettyJson({
+      dryRun,
+      command: "rollback",
+      channel,
+      runtimeVersion,
+      target,
+      records,
+    }),
   );
 };
 
@@ -1272,7 +1253,7 @@ const cmdVerify = async (argv: readonly string[]): Promise<void> => {
   const dryRun = values["dry-run"];
   const channel = assertChannel(values.channel);
   if (!isMobilePlatform(values.platform)) {
-    throw new Error(`Invalid platform: ${JSON.stringify(values.platform)}`);
+    throw new Error(`Invalid platform: ${compactJson(values.platform)}`);
   }
   const platform: MobilePlatform = values.platform;
   const storageDirArg = Str.trim(values["storage-dir"] ?? "");
@@ -1293,9 +1274,8 @@ const cmdVerify = async (argv: readonly string[]): Promise<void> => {
           : null;
 
       if (latest?.type === "update") {
-        for (const asset of [latest.launchAsset, ...latest.assets]) {
+        await inOrder([latest.launchAsset, ...latest.assets], async (asset) => {
           const assetBytes = new Uint8Array(
-            // biome-ignore lint/performance/noAwaitInLoops: Verify one asset at a time to bound file reads and memory use.
             await readFile(join(root, assetObjectKey(asset.sha256))),
           );
           const actualSha = createHash("sha256").update(assetBytes).digest("hex");
@@ -1308,16 +1288,18 @@ const cmdVerify = async (argv: readonly string[]): Promise<void> => {
           if (meta.sha256 !== asset.sha256 || meta.size !== assetBytes.byteLength) {
             throw new Error(`Asset metadata mismatch for ${asset.sha256}`);
           }
-        }
+        });
       }
 
       const req = readManifestRequest({
-        "expo-protocol-version": "1",
-        "expo-platform": platform,
-        "expo-runtime-version": runtimeVersion,
-        "expo-channel-name": channel,
-        "expo-expect-signature": 'sig, keyid="main", alg="rsa-v1_5-sha256"',
-        accept: "multipart/mixed",
+        headers: {
+          "expo-protocol-version": "1",
+          "expo-platform": platform,
+          "expo-runtime-version": runtimeVersion,
+          "expo-channel-name": channel,
+          "expo-expect-signature": 'sig, keyid="main", alg="rsa-v1_5-sha256"',
+          accept: "multipart/mixed",
+        },
       });
       if (req._tag !== "Request") {
         throw new Error(`Internal manifest request rejected: ${req.message}`);
@@ -1356,11 +1338,11 @@ const cmdVerify = async (argv: readonly string[]): Promise<void> => {
         throw new Error("Multipart response had no main part.");
       }
       if (hasText(verifyCertPem)) {
-        const sigOk = verifyManifestSignature(
-          mainPart.body,
-          mainPart.headers.get("expo-signature"),
-          verifyCertPem,
-        );
+        const sigOk = verifyManifestSignature({
+          body: mainPart.body,
+          expoSignatureHeader: mainPart.headers.get("expo-signature"),
+          publicKeyOrCert: verifyCertPem,
+        });
         if (!sigOk) {
           throw new Error("Manifest RSA-v1_5-SHA256 signature verification failed.");
         }
@@ -1381,11 +1363,10 @@ const cmdVerify = async (argv: readonly string[]): Promise<void> => {
         if (!isFileMissingError(err)) throw err;
       }
       const releases: ReleaseInfo[] = [];
-      for (const ver of versionDirs) {
+      await inOrder(versionDirs, async (ver) => {
         const infoPath = join(root, releaseInfoObjectKey(ver));
-        // biome-ignore lint/performance/noAwaitInLoops: Verify one release at a time to bound APK memory use.
         const infoStat = await stat(infoPath).catch(() => null);
-        if (infoStat?.isFile() !== true) continue;
+        if (infoStat?.isFile() !== true) return;
         const info = parseReleaseInfo(await readFile(infoPath, "utf8"));
         const apkPath = join(root, apkObjectKey(info.version));
         const apkBytes = new Uint8Array(await readFile(apkPath));
@@ -1394,11 +1375,11 @@ const cmdVerify = async (argv: readonly string[]): Promise<void> => {
           throw new Error(`APK integrity mismatch for ${info.version}`);
         }
         releases.push(info);
-      }
+      });
       checks.latestRelease = latestRelease(releases) ?? null;
     }
 
-    writeStdout(JSON.stringify({ ok: true, ...checks }, null, 2));
+    writeStdout(prettyJson({ ok: true, ...checks }));
     return;
   }
 
@@ -1406,20 +1387,16 @@ const cmdVerify = async (argv: readonly string[]): Promise<void> => {
   const manifestUrl = `${origin}/api/mobile/updates/manifest`;
   if (dryRun) {
     writeStdout(
-      JSON.stringify(
-        {
-          dryRun: true,
-          command: "verify",
-          mode: "http",
-          manifestUrl,
-          releaseUrl: values["check-release"] ? `${origin}/api/mobile/releases/latest` : null,
-          channel,
-          platform,
-          runtimeVersion: values["runtime-version"] ?? "<required>",
-        },
-        null,
-        2,
-      ),
+      prettyJson({
+        dryRun: true,
+        command: "verify",
+        mode: "http",
+        manifestUrl,
+        releaseUrl: values["check-release"] ? `${origin}/api/mobile/releases/latest` : null,
+        channel,
+        platform,
+        runtimeVersion: values["runtime-version"] ?? "<required>",
+      }),
     );
     return;
   }
@@ -1453,11 +1430,11 @@ const cmdVerify = async (argv: readonly string[]): Promise<void> => {
   }
   if (hasText(values.certificate)) {
     const certPem = await readFile(resolve(values.certificate), "utf8");
-    const ok = verifyManifestSignature(
-      mainPart.body,
-      mainPart.headers.get("expo-signature"),
-      certPem,
-    );
+    const ok = verifyManifestSignature({
+      body: mainPart.body,
+      expoSignatureHeader: mainPart.headers.get("expo-signature"),
+      publicKeyOrCert: certPem,
+    });
     if (!ok) {
       throw new Error("Live manifest signature failed verification against --certificate.");
     }
@@ -1472,18 +1449,14 @@ const cmdVerify = async (argv: readonly string[]): Promise<void> => {
   }
 
   writeStdout(
-    JSON.stringify(
-      {
-        ok: true,
-        mode: "http",
-        manifestUrl,
-        partDisposition: mainPart.headers.get("content-disposition"),
-        signatureVerified: values.certificate !== undefined,
-        latestRelease: latestReleaseInfo,
-      },
-      null,
-      2,
-    ),
+    prettyJson({
+      ok: true,
+      mode: "http",
+      manifestUrl,
+      partDisposition: mainPart.headers.get("content-disposition"),
+      signatureVerified: values.certificate !== undefined,
+      latestRelease: latestReleaseInfo,
+    }),
   );
 };
 

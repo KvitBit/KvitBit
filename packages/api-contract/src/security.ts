@@ -32,6 +32,7 @@ import type * as HttpApiError from "effect/http-api/HttpApiError";
 import * as HttpApiMiddleware from "effect/http-api/HttpApiMiddleware";
 import * as HttpApiSecurity from "effect/http-api/HttpApiSecurity";
 import * as Predicate from "effect/Predicate";
+import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 import * as SchemaIssue from "effect/SchemaIssue";
 import * as Str from "effect/String";
@@ -71,7 +72,7 @@ export type Principal = typeof Principal.Type;
 
 export class CurrentPrincipal extends Context.Service<CurrentPrincipal, Principal>()(
   // This key is part of the shared HTTP middleware contract.
-  // @effect-diagnostics-next-line deterministicKeys:off
+  // @effect-diagnostics-next-line deterministicKeys:off Preserve the shared HTTP middleware principal service key.
   "kvitbit/edge/Principal",
 ) {}
 
@@ -98,6 +99,8 @@ const toPathSegment = (segment: PropertyKey | { readonly key: PropertyKey }): st
   return Predicate.isNumber(key) ? key : String(key);
 };
 
+const encodeIssuePath = Schema.encodeResult(Schema.fromJsonString(Schema.Unknown));
+
 /**
  * The failing paths of a request decode error. Payload paths are the body's own field names and
  * array indices (what a form maps to its fields); params, query and headers paths start with the
@@ -115,9 +118,7 @@ const requestIssuePaths = (
   );
   const keyed = Arr.map(
     prefixed,
-    // Paths contain only strings and numbers, so JSON encoding cannot fail on a value.
-    // @effect-diagnostics-next-line globalJson:off
-    (path) => [JSON.stringify(path), path] as const,
+    (path) => [Result.getOrThrow(encodeIssuePath(path)), path] as const,
   );
   const [first = [slot], ...rest] = new Map(keyed).values();
   return [first, ...rest];

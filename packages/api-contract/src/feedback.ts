@@ -128,7 +128,7 @@ const decodePath = (path: string) => Result.try(() => decodeURIComponent(path));
 // Decode bytes individually so a malformed escape cannot hide an encoded route.
 const decodePercentBytes = (value: string) =>
   // Effect String.replaceAll accepts only a constant replacement.
-  // @effect-diagnostics-next-line preferEffectString:off
+  // @effect-diagnostics-next-line preferEffectString:off The replacer decodes each captured byte, and Effect replaceAll accepts only literal replacements.
   value.replaceAll(PERCENT_BYTE, (_, byte: string) =>
     String.fromCharCode(Number.parseInt(byte, 16)),
   );
@@ -159,7 +159,7 @@ const hasSensitivePath = (value: string) => {
 /** Removes embedded URLs on sensitive routes, including root-relative links. */
 export const redactFeedbackUrls = (value: string) =>
   // Effect String.replaceAll accepts only a constant replacement.
-  // @effect-diagnostics-next-line preferEffectString:off
+  // @effect-diagnostics-next-line preferEffectString:off The replacer classifies each URL independently, and Effect replaceAll accepts only literal replacements.
   value.replaceAll(EMBEDDED_URL, (url) => (hasSensitivePath(url) ? REDACTED_VALUE : url));
 
 /** Removes URL credentials, query, fragment and paths that may contain access tokens. */

@@ -7,18 +7,19 @@
  */
 import * as Arr from "effect/Array";
 import * as BigDecimal from "effect/BigDecimal";
-import * as Data from "effect/Data";
 import * as Fn from "effect/Function";
 import * as Predicate from "effect/Predicate";
 import * as Result from "effect/Result";
-import type { CurrencyCode, Money } from "./vocabulary";
+import * as Schema from "effect/Schema";
+import { CurrencyCode, type Money } from "./vocabulary";
 
-// Money arithmetic returns a local Result. The error has no encoded representation.
-// @effect-diagnostics-next-line preferSchemaTaggedError:off
-export class CurrencyMismatch extends Data.TaggedError("CurrencyMismatch")<{
-  readonly expected: CurrencyCode;
-  readonly actual: CurrencyCode;
-}> {}
+export class CurrencyMismatch extends Schema.TaggedError<
+  CurrencyMismatch,
+  { readonly brand: unique symbol }
+>()("CurrencyMismatch", {
+  expected: CurrencyCode,
+  actual: CurrencyCode,
+}) {}
 
 /**
  * ISO 4217 minor-unit exponents that differ from 2. Any other three-letter code uses 2
@@ -117,7 +118,7 @@ export const equals: {
 const sameCurrency = (a: Money, b: Money): Result.Result<CurrencyCode, CurrencyMismatch> =>
   a.currency === b.currency
     ? Result.succeed(a.currency)
-    : Result.fail(new CurrencyMismatch({ expected: a.currency, actual: b.currency }));
+    : Result.fail(CurrencyMismatch.make({ expected: a.currency, actual: b.currency }));
 
 export const add: {
   (b: Money): (a: Money) => Result.Result<Money, CurrencyMismatch>;
@@ -155,7 +156,7 @@ export const sum: {
     let total = BigDecimal.fromBigInt(0n);
     for (const item of items) {
       if (item.currency !== currency) {
-        return Result.fail(new CurrencyMismatch({ expected: currency, actual: item.currency }));
+        return Result.fail(CurrencyMismatch.make({ expected: currency, actual: item.currency }));
       }
       total = BigDecimal.sum(total, item.amount);
     }

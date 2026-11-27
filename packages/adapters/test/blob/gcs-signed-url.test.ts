@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-// @effect-diagnostics-next-line nodeBuiltinImport:off
+// @effect-diagnostics-next-line nodeBuiltinImport:off Verify the RSA signature independently with Node key and verification primitives.
 import { createHash, createVerify, generateKeyPairSync } from "node:crypto"; // Verify the output through the PEM and RSA boundary.
 import * as Arr from "effect/Array";
 import * as DateTime from "effect/DateTime";

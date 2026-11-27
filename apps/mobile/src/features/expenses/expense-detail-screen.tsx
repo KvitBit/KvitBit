@@ -79,12 +79,12 @@ const settlementTone = (s: ExpenseSettlement): BadgeTone => {
 };
 
 export function ExpenseDetailScreen(props: {
-  readonly id: ExpenseId | "new";
+  readonly expenseId: ExpenseId | "new";
   readonly initialMode?: "view" | "edit";
   readonly picker?: ReceiptPicker;
 }) {
-  const isNew = props.id === "new";
-  const expenseId = isNew ? null : props.id;
+  const isNew = props.expenseId === "new";
+  const expenseId = isNew ? null : props.expenseId;
   const picker = props.picker ?? defaultReceiptPicker;
 
   const { workspace } = useWorkspace();

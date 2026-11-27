@@ -14,7 +14,9 @@ const STORE = "blobs";
 const db = openIndexedStore(STORE)("kvitbit-capture");
 
 const run = <A>(mode: IDBTransactionMode, requestFor: (store: IDBObjectStore) => IDBRequest<A>) =>
-  db.pipe(Effect.flatMap((database) => inIndexedStore(STORE, mode, requestFor)(database)));
+  db.pipe(
+    Effect.flatMap((database) => inIndexedStore({ name: STORE, mode, requestFor })(database)),
+  );
 
 const read = Effect.fn("BlobStore.read")(function* (ref: string) {
   if (EffectString.startsWith("idb:")(ref)) {

@@ -10,7 +10,9 @@ import { UiError } from "@kvitbit/ui-port/api";
 import * as Clock from "effect/Clock";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
+import * as Fn from "effect/Function";
 import * as Option from "effect/Option";
+import * as Predicate from "effect/Predicate";
 import * as Schema from "effect/Schema";
 import * as EffectString from "effect/String";
 import { fromMobilePromise, runMobileEffect } from "../../runtime/request-intent";
@@ -62,12 +64,17 @@ const parseRetryAfter = (header: string | null, body: unknown): number => {
 };
 
 /** Returns true when `expiresAt` (ISO timestamp) is within `marginMs` of `now` (epoch ms). */
-// @effect-diagnostics-next-line missingPipeableSignature:off The expiry calculation takes independent time values.
-export const isExpired = (expiresAt: string | null, now: number, marginMs = 10_000): boolean => {
-  if (expiresAt === null) return false;
-  const time = DateTime.make(expiresAt);
-  return Option.isNone(time) || DateTime.toEpochMillis(time.value) - marginMs <= now;
-};
+export const isExpired: {
+  (now: number, marginMs?: number): (expiresAt: string | null) => boolean;
+  (expiresAt: string | null, now: number, marginMs?: number): boolean;
+} = Fn.dual(
+  (args) => !Predicate.isNumber(args[0]),
+  (expiresAt: string | null, now: number, marginMs = 10_000): boolean => {
+    if (expiresAt === null) return false;
+    const time = DateTime.make(expiresAt);
+    return Option.isNone(time) || DateTime.toEpochMillis(time.value) - marginMs <= now;
+  },
+);
 
 const trailingSlash = /\/$/;
 type Fetch = (input: string, init?: RequestInit) => Promise<Response>;
@@ -131,9 +138,14 @@ const readChallenge = Effect.fn("BotProof.readChallenge")(function* (
 });
 
 /** GET {origin}/api/v1/bot-protection/challenges/{scope}. */
-// @effect-diagnostics-next-line missingPipeableSignature:off Keep the injectable network boundary used by callers and tests.
-export const fetchChallenge = (origin: string, scope: BotScope, fetchImpl?: Fetch) =>
-  runMobileEffect(fetchProof(origin, scope, fetchImpl));
+export const fetchChallenge: {
+  (scope: BotScope, fetchImpl?: Fetch): (origin: string) => Promise<FetchedChallenge>;
+  (origin: string, scope: BotScope, fetchImpl?: Fetch): Promise<FetchedChallenge>;
+} = Fn.dual(
+  (args) => Predicate.isString(args[1]),
+  (origin: string, scope: BotScope, fetchImpl?: Fetch) =>
+    runMobileEffect(fetchProof(origin, scope, fetchImpl)),
+);
 
 interface ParsedParameters {
   readonly algorithm: "ARGON2ID" | "PBKDF2/SHA-256" | "SHA-256";
@@ -277,6 +289,10 @@ const derive = Effect.fn("BotProof.derive")(function* (
 });
 
 /** Solve a fetched ALTCHA PoW v2 challenge in pure TS, yielding between chunks. */
-// @effect-diagnostics-next-line missingPipeableSignature:off Preserve the Promise port with optional progress and abort handling.
-export const solveChallenge = (challenge: ChallengeJson, options?: SolveOptions) =>
-  runMobileEffect(solve(challenge, options));
+export const solveChallenge: {
+  (options?: SolveOptions): (challenge: ChallengeJson) => Promise<SolveOutcome>;
+  (challenge: ChallengeJson, options?: SolveOptions): Promise<SolveOutcome>;
+} = Fn.dual(
+  (args) => Predicate.hasProperty(args[0], "parameters"),
+  (challenge: ChallengeJson, options?: SolveOptions) => runMobileEffect(solve(challenge, options)),
+);

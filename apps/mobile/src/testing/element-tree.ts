@@ -15,6 +15,11 @@ type WrapElement = (component: React.ReactElement) => React.ReactElement;
 
 const keepElement: WrapElement = (node) => node;
 
+const Probe = ({ capture }: { readonly capture: () => void }) => {
+  capture();
+  return null;
+};
+
 /** Runs a single function component with its providers, without rendering its returned tree. */
 const elementTree = <Props>(
   component: (props: Props) => React.ReactNode,
@@ -22,12 +27,10 @@ const elementTree = <Props>(
   within: WrapElement,
 ): React.ReactNode => {
   let tree: React.ReactNode = null;
-  // biome-ignore lint/correctness/noComponentHookFactories: a probe that captures one render
-  const Probe = () => {
+  const capture = () => {
     tree = component(props);
-    return null;
   };
-  renderToStaticMarkup(within(React.createElement(Probe)));
+  renderToStaticMarkup(within(React.createElement(Probe, { capture })));
   return tree;
 };
 

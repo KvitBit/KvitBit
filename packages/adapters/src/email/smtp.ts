@@ -66,38 +66,44 @@ const headerNewlines = /[\r\n]+/g;
 const messageIdTokenPattern = /^[A-Za-z0-9._-]+$/;
 
 /** `<key@domain>`, the key hashed when it has characters a Message-ID cannot carry or is long. */
-// @effect-diagnostics-next-line missingPipeableSignature:off Keep the published positional adapter API.
-export const smtpMessageId = (idempotencyKey: string, domain: string): string =>
-  `<${boundedToken({ maxLength: 128, allowed: messageIdTokenPattern })(idempotencyKey)}@${domain}>`;
+export const smtpMessageId: {
+  (domain: string): (idempotencyKey: string) => string;
+  (idempotencyKey: string, domain: string): string;
+} = Fn.dual(
+  2,
+  (idempotencyKey: string, domain: string): string =>
+    `<${boundedToken({ maxLength: 128, allowed: messageIdTokenPattern })(idempotencyKey)}@${domain}>`,
+);
 
 const domainOf = (from: string): string => mailboxDomain(bareAddress(from)) || "localhost";
 
-// @effect-diagnostics-next-line missingPipeableSignature:off Keep the published positional adapter API.
-export const smtpMail = (
-  message: OutboundEmail,
-  config: SmtpConfig,
-  idempotencyKey: string,
-): SmtpMail => ({
-  from: config.from,
-  to: message.to,
-  ...(message.cc !== undefined && message.cc.length > 0 && { cc: message.cc }),
-  replyTo: message.replyTo,
-  subject: message.subject,
-  html: message.html,
-  text: message.text,
-  messageId: smtpMessageId(idempotencyKey, config.messageIdDomain ?? domainOf(config.from)),
-  attachments: Arr.map(message.attachments, (attachment) => ({
-    filename: attachment.filename,
-    contentType: attachment.contentType,
-    content: Buffer.from(attachment.bytes),
-  })),
-  headers: Rec.fromEntries(
-    Arr.map(Rec.toEntries(message.tags), ([name, value]) => [
-      `X-Kvitbit-Tag-${Str.replace(headerNamePattern, "-")(name)}`,
-      Str.replace(headerNewlines, " ")(value),
-    ]),
-  ),
-});
+export const smtpMail: {
+  (config: SmtpConfig, idempotencyKey: string): (message: OutboundEmail) => SmtpMail;
+  (message: OutboundEmail, config: SmtpConfig, idempotencyKey: string): SmtpMail;
+} = Fn.dual(
+  3,
+  (message: OutboundEmail, config: SmtpConfig, idempotencyKey: string): SmtpMail => ({
+    from: config.from,
+    to: message.to,
+    ...(message.cc !== undefined && message.cc.length > 0 && { cc: message.cc }),
+    replyTo: message.replyTo,
+    subject: message.subject,
+    html: message.html,
+    text: message.text,
+    messageId: smtpMessageId(idempotencyKey, config.messageIdDomain ?? domainOf(config.from)),
+    attachments: Arr.map(message.attachments, (attachment) => ({
+      filename: attachment.filename,
+      contentType: attachment.contentType,
+      content: Buffer.from(attachment.bytes),
+    })),
+    headers: Rec.fromEntries(
+      Arr.map(Rec.toEntries(message.tags), ([name, value]) => [
+        `X-Kvitbit-Tag-${Str.replace(headerNamePattern, "-")(name)}`,
+        Str.replace(headerNewlines, " ")(value),
+      ]),
+    ),
+  }),
+);
 
 type SendError = EmailRejected | EmailNotAccepted | EmailOutcomeUnknown;
 
@@ -241,23 +247,25 @@ const checkRecipients = Effect.fnUntraced(function* (info: SmtpSendInfo) {
   return info;
 });
 
-// @effect-diagnostics-next-line missingPipeableSignature:off Keep the published positional adapter API.
-export const makeSmtpEmailSender = (
-  transport: SmtpTransport,
-  config: SmtpConfig,
-): EmailSenderService =>
-  EmailSender.of({
-    send: Effect.fn("SmtpEmailSender.send")(
-      (message: OutboundEmail, { idempotencyKey }: Parameters<EmailSenderService["send"]>[1]) =>
-        Effect.tryPromise({
-          try: () => transport.sendMail(smtpMail(message, config, idempotencyKey)),
-          catch: classifySmtpError,
-        }).pipe(
-          Effect.flatMap(checkRecipients),
-          Effect.map((info) => ({ provider: SMTP_PROVIDER, providerMessageId: info.messageId })),
-        ),
-    ),
-  });
+export const makeSmtpEmailSender: {
+  (config: SmtpConfig): (transport: SmtpTransport) => EmailSenderService;
+  (transport: SmtpTransport, config: SmtpConfig): EmailSenderService;
+} = Fn.dual(
+  2,
+  (transport: SmtpTransport, config: SmtpConfig): EmailSenderService =>
+    EmailSender.of({
+      send: Effect.fn("SmtpEmailSender.send")(
+        (message: OutboundEmail, { idempotencyKey }: Parameters<EmailSenderService["send"]>[1]) =>
+          Effect.tryPromise({
+            try: () => transport.sendMail(smtpMail(message, config, idempotencyKey)),
+            catch: classifySmtpError,
+          }).pipe(
+            Effect.flatMap(checkRecipients),
+            Effect.map((info) => ({ provider: SMTP_PROVIDER, providerMessageId: info.messageId })),
+          ),
+      ),
+    }),
+);
 
 /** Bounds used when the options leave them unset (nodemailer's socket default is 10 minutes). */
 export const SMTP_DEFAULT_TIMEOUTS = {
@@ -273,31 +281,33 @@ export type SmtpTransportOptions = SMTPTransport.Options;
  * `EmailSender` over a nodemailer SMTP transport; closes the transport on release. Use a plain
  * (non-pooled) transport: one connection per message keeps each failure tied to its message.
  */
-// @effect-diagnostics-next-line missingPipeableSignature:off Keep the published positional adapter API.
-export const layerSmtp = (
-  options: SmtpTransportOptions,
-  config: SmtpConfig,
-): Layer.Layer<EmailSender> =>
-  Layer.effect(
-    EmailSender,
-    Effect.acquireRelease(
-      Effect.sync(() => nodemailer.createTransport({ ...SMTP_DEFAULT_TIMEOUTS, ...options })),
-      (transporter) => Effect.sync(() => transporter.close()),
-    ).pipe(
-      Effect.map((transporter) =>
-        makeSmtpEmailSender(
-          {
-            sendMail: ({ to, cc, attachments, headers, ...rest }) =>
-              transporter.sendMail({
-                ...rest,
-                to: [...to],
-                ...(cc !== undefined && { cc: [...cc] }),
-                attachments: Arr.map(attachments, (attachment) => ({ ...attachment })),
-                headers: { ...headers },
-              }),
-          },
-          config,
+export const layerSmtp: {
+  (config: SmtpConfig): (options: SmtpTransportOptions) => Layer.Layer<EmailSender>;
+  (options: SmtpTransportOptions, config: SmtpConfig): Layer.Layer<EmailSender>;
+} = Fn.dual(
+  2,
+  (options: SmtpTransportOptions, config: SmtpConfig): Layer.Layer<EmailSender> =>
+    Layer.effect(
+      EmailSender,
+      Effect.acquireRelease(
+        Effect.sync(() => nodemailer.createTransport({ ...SMTP_DEFAULT_TIMEOUTS, ...options })),
+        (transporter) => Effect.sync(() => transporter.close()),
+      ).pipe(
+        Effect.map((transporter) =>
+          makeSmtpEmailSender(
+            {
+              sendMail: ({ to, cc, attachments, headers, ...rest }) =>
+                transporter.sendMail({
+                  ...rest,
+                  to: [...to],
+                  ...(cc !== undefined && { cc: [...cc] }),
+                  attachments: Arr.map(attachments, (attachment) => ({ ...attachment })),
+                  headers: { ...headers },
+                }),
+            },
+            config,
+          ),
         ),
       ),
     ),
-  );
+);

@@ -7,7 +7,7 @@ import {
   readFileSync,
   rmSync,
   writeFileSync,
-  // @effect-diagnostics-next-line nodeBuiltinImport:off
+  // @effect-diagnostics-next-line nodeBuiltinImport:off The deployment fixtures stage and inspect shell files synchronously.
 } from "node:fs"; // The shell fixtures require POSIX modes and direct filesystem assertions.
 import { tmpdir } from "node:os";
 import { Credentials as GcpCredentials } from "@alchemy.run/gcp/Credentials";

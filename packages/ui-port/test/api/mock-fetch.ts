@@ -1,3 +1,6 @@
+import * as Effect from "effect/Effect";
+import type * as Schema from "effect/Schema";
+
 /** A recording `fetch` for FetchHttpClient: no network, one scripted response per call. */
 interface RecordedRequest {
   readonly url: URL;
@@ -10,45 +13,42 @@ interface RecordedRequest {
 
 export type Responder = (request: RecordedRequest) => Response | Promise<Response>;
 
-// Mock response bodies are arbitrary values, including numeric statuses.
-// @effect-diagnostics-next-line missingPipeableSignature:off
-export const json = (
-  status: number,
-  // biome-ignore lint/plugin/no-unknown-parameters: Fixtures can send any response body through the real decoder.
-  body: unknown,
-  headers: Record<string, string> = {},
-): Response =>
-  Response.json(body, {
-    status,
-    headers: { "content-type": "application/json", ...headers },
+export const json = (fixture: {
+  readonly status: number;
+  readonly body: Schema.Json;
+  readonly headers?: Record<string, string>;
+}): Response =>
+  Response.json(fixture.body, {
+    status: fixture.status,
+    headers: { "content-type": "application/json", ...fixture.headers },
   });
 
 export const mockFetch = (respond: Responder) => {
   const calls: Array<RecordedRequest> = [];
   const fetch: typeof globalThis.fetch = Object.assign(
     (input: string | URL | Request, init?: RequestInit) =>
-      // Capture synchronous responder failures as rejections without delaying request recording.
-      // @effect-diagnostics-next-line newPromise:off
-      new Promise<Response>((resolve) => {
-        const url = new URL(input instanceof Request ? input.url : String(input));
-        const record = (body: string | null): Response | Promise<Response> => {
-          const recorded: RecordedRequest = {
-            url,
-            method: init?.method ?? "GET",
-            headers: new Headers(init?.headers),
-            body,
-            credentials: init?.credentials,
-            cache: init?.cache,
+      Effect.runPromise(
+        Effect.promise(() => {
+          const url = new URL(input instanceof Request ? input.url : String(input));
+          const record = (body: string | null): Response | Promise<Response> => {
+            const recorded: RecordedRequest = {
+              url,
+              method: init?.method ?? "GET",
+              headers: new Headers(init?.headers),
+              body,
+              credentials: init?.credentials,
+              cache: init?.cache,
+            };
+            calls.push(recorded);
+            return respond(recorded);
           };
-          calls.push(recorded);
-          return respond(recorded);
-        };
-        resolve(
-          init?.body === undefined || init.body === null
-            ? record(null)
-            : new Response(init.body).text().then(record),
-        );
-      }),
+          return Promise.resolve(
+            init?.body === undefined || init.body === null
+              ? record(null)
+              : new Response(init.body).text().then(record),
+          );
+        }),
+      ),
     { preconnect: () => undefined },
   );
   return { calls, fetch };
@@ -57,10 +57,12 @@ export const mockFetch = (respond: Responder) => {
 /** A fetch that never answers until aborted (for timeout and interruption). */
 export const hangingFetch = (): typeof globalThis.fetch =>
   Object.assign(
-    (_input: string | URL | Request, init?: RequestInit) =>
-      // @effect-diagnostics-next-line newPromise:off
-      new Promise<Response>((_resolve, reject) => {
-        init?.signal?.addEventListener("abort", () => reject(new Error("aborted")));
-      }),
+    (_input: string | URL | Request, init?: RequestInit) => {
+      const pending = Promise.withResolvers<Response>();
+      init?.signal?.addEventListener("abort", () => pending.reject(new Error("aborted")), {
+        once: true,
+      });
+      return pending.promise;
+    },
     { preconnect: () => undefined },
   );

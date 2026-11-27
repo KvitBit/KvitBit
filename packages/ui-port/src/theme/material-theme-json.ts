@@ -248,13 +248,13 @@ export const parseMaterialThemeFile: {
  * schemes otherwise; extended colours from `extendedColors` (honouring `harmonized`) or the
  * built-in sources harmonized toward the file's seed.
  */
-// A numeric JSON value and a curried byte limit would have the same call shape.
-// @effect-diagnostics-next-line missingPipeableSignature:off
-export const resolveMaterialTheme = (
-  // biome-ignore lint/plugin/no-unknown-parameters: Check the size and shape of the unvalidated ThemeSource payload.
-  json: unknown,
-  maxBytes: number = MATERIAL_THEME_MAX_BYTES,
-): Result.Result<ResolvedTheme, Invalid> => {
+export const resolveMaterialTheme = ({
+  json,
+  maxBytes = MATERIAL_THEME_MAX_BYTES,
+}: {
+  readonly json: unknown;
+  readonly maxBytes?: number;
+}): Result.Result<ResolvedTheme, Invalid> => {
   // The structured path enforces the same encoded limit as the text parser (rule M1).
   const encoded = encodeJson(json);
   if (Exit.isFailure(encoded)) return Result.fail(invalid(issue("theme.json_invalid")));

@@ -1,5 +1,5 @@
 // Effect's crypto APIs do not provide synchronous RSA signing or X.509 verification.
-// @effect-diagnostics-next-line nodeBuiltinImport:off
+// @effect-diagnostics-next-line nodeBuiltinImport:off The synchronous Expo signing API accepts Node RSA keys and X.509 certificates.
 import { createSign, type KeyObject, randomUUID, verify } from "node:crypto";
 import * as Arr from "effect/Array";
 import * as Fn from "effect/Function";
@@ -132,8 +132,7 @@ export const parseMultipartMixed: {
     const afterDelimiter = cursor + delimiter.length;
     if (Str.startsWith("--", afterDelimiter)(framed)) return parts;
 
-    // Effect's indexOf has no start offset. Scan the framed body in place.
-    // @effect-diagnostics-next-line preferEffectString:off
+    // @effect-diagnostics-next-line preferEffectString:off Native indexOf accepts an offset, so each scan starts at the current delimiter.
     const next = framed.indexOf(delimiter, afterDelimiter);
     if (next === -1) return undefined;
 
@@ -150,13 +149,15 @@ const escapeSfvString = (value: string): string =>
   Str.replaceAll('"', '\\"')(Str.replaceAll("\\", "\\\\")(value));
 
 /** Formats `expo-signature` as an RFC 8941 SFV dictionary (`sig="...", keyid="main", alg="rsa-v1_5-sha256"`). */
-// The optional key ID and algorithm are positional protocol parameters.
-// @effect-diagnostics-next-line missingPipeableSignature:off
-export const formatExpoSignature = (
-  signatureBase64: string,
-  keyId: string = MANIFEST_SIGNING_KEY_ID,
-  algorithm: string = MANIFEST_SIGNING_ALGORITHM,
-): string =>
+export const formatExpoSignature = ({
+  signatureBase64,
+  keyId = MANIFEST_SIGNING_KEY_ID,
+  algorithm = MANIFEST_SIGNING_ALGORITHM,
+}: {
+  readonly signatureBase64: string;
+  readonly keyId?: string;
+  readonly algorithm?: string;
+}): string =>
   `sig="${escapeSfvString(signatureBase64)}", keyid="${escapeSfvString(keyId)}", alg="${escapeSfvString(algorithm)}"`;
 
 export interface ParsedExpoSignature {
@@ -187,26 +188,35 @@ export const parseExpoSignature = (header: string | null): ParsedExpoSignature |
 };
 
 /** Signs exact UTF-8 manifest/directive body bytes with RSA PKCS #1 v1.5 SHA-256. */
-// The signing key and optional key ID are positional protocol parameters.
-// @effect-diagnostics-next-line missingPipeableSignature:off
-export const signManifestBody = (
-  body: string,
-  signingKeyPem: string | KeyObject,
-  keyId: string = MANIFEST_SIGNING_KEY_ID,
-): string => {
+export const signManifestBody = ({
+  body,
+  signingKeyPem,
+  keyId = MANIFEST_SIGNING_KEY_ID,
+}: {
+  readonly body: string;
+  readonly signingKeyPem: string | KeyObject;
+  readonly keyId?: string;
+}): string => {
   const sig = createSign("RSA-SHA256").update(body, "utf8").sign(signingKeyPem, "base64");
-  return formatExpoSignature(sig, keyId, MANIFEST_SIGNING_ALGORITHM);
+  return formatExpoSignature({
+    signatureBase64: sig,
+    keyId,
+    algorithm: MANIFEST_SIGNING_ALGORITHM,
+  });
 };
 
 /** Verifies an `expo-signature` header against exact part body bytes and a public key or X.509 cert PEM. */
-// The header, verification key, and optional key ID are positional protocol parameters.
-// @effect-diagnostics-next-line missingPipeableSignature:off
-export const verifyManifestSignature = (
-  body: string,
-  expoSignatureHeader: string | null,
-  publicKeyOrCert: string | KeyObject,
-  expectedKeyId: string = MANIFEST_SIGNING_KEY_ID,
-): boolean => {
+export const verifyManifestSignature = ({
+  body,
+  expoSignatureHeader,
+  publicKeyOrCert,
+  expectedKeyId = MANIFEST_SIGNING_KEY_ID,
+}: {
+  readonly body: string;
+  readonly expoSignatureHeader: string | null;
+  readonly publicKeyOrCert: string | KeyObject;
+  readonly expectedKeyId?: string;
+}): boolean => {
   const parsed = parseExpoSignature(expoSignatureHeader);
   if (parsed === undefined) return false;
   if (parsed.keyid !== expectedKeyId) return false;
@@ -291,12 +301,13 @@ const nonBlank = (value: string | null | undefined): string | undefined => {
  * Reads and validates an Expo Updates protocol v1 manifest request from HTTP
  * headers and optional URL search params.
  */
-// Headers and optional search params come directly from the request adapter.
-// @effect-diagnostics-next-line missingPipeableSignature:off
-export const readManifestRequest = (
-  headers: HeaderInput,
-  searchParams?: URLSearchParams,
-): ReadManifestRequestResult => {
+export const readManifestRequest = ({
+  headers,
+  searchParams,
+}: {
+  readonly headers: HeaderInput;
+  readonly searchParams?: URLSearchParams;
+}): ReadManifestRequestResult => {
   if (nonBlank(getHeader(headers, "expo-protocol-version")) !== "1") {
     return {
       _tag: "Rejected",
@@ -496,7 +507,7 @@ export const buildManifestResponse = ({
       };
     }
     try {
-      partHeaders["expo-signature"] = signManifestBody(partBody, signingKeyPem);
+      partHeaders["expo-signature"] = signManifestBody({ body: partBody, signingKeyPem });
     } catch {
       return {
         _tag: "SigningUnavailable",

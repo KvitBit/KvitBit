@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-/* biome-ignore lint/correctness/noNodejsModules: Use Node crypto as an independent oracle for the mobile KDFs. */ // @effect-diagnostics-next-line nodeBuiltinImport:off
+/* biome-ignore lint/correctness/noNodejsModules: Use Node crypto as an independent oracle for the mobile KDFs. */ // @effect-diagnostics-next-line nodeBuiltinImport:off Node crypto provides an independent oracle for the TypeScript KDFs.
 import crypto, { createHash, pbkdf2Sync } from "node:crypto";
 // biome-ignore lint/correctness/noNodejsModules: Adapt the Node argon2 callback for the oracle test.
 import { promisify } from "node:util";

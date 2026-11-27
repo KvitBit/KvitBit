@@ -1,6 +1,7 @@
 import { EmailSender, type OutboundEmail } from "@kvitbit/domain/ports";
 import * as Arr from "effect/Array";
 import * as Effect from "effect/Effect";
+import * as Fn from "effect/Function";
 import * as Str from "effect/String";
 import { type EmailSenderService, recipientDomain } from "./shared";
 
@@ -20,11 +21,10 @@ export interface AllowlistConfig {
  *   promoted to `to` when no `to` is allowed), and `capture` gets it addressed to the rest.
  * The result is the `inner` result whenever `inner` sent, else the capture result.
  */
-// @effect-diagnostics-next-line missingPipeableSignature:off Keep the published positional adapter API.
-export function makeAllowlistEmailSender(
-  inner: EmailSenderService,
-  config: AllowlistConfig,
-): EmailSenderService {
+export const makeAllowlistEmailSender: {
+  (config: AllowlistConfig): (inner: EmailSenderService) => EmailSenderService;
+  (inner: EmailSenderService, config: AllowlistConfig): EmailSenderService;
+} = Fn.dual(2, (inner: EmailSenderService, config: AllowlistConfig): EmailSenderService => {
   const allowed = new Set<string>(
     Arr.map(config.allow, (domain) => Str.toLowerCase(Str.trim(domain))),
   );
@@ -56,4 +56,4 @@ export function makeAllowlistEmailSender(
       },
     ),
   });
-}
+});

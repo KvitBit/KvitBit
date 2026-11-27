@@ -123,7 +123,8 @@ export const uploadBrandingImage = Effect.fn("Settings.uploadBrandingImage")(
     );
     const text = yield* fromMobilePromise(() => response.text());
     const requestId = response.headers.get("x-request-id");
-    if (!response.ok) return err(errorFromResponse(response.status, text, requestId));
+    if (!response.ok)
+      return err(errorFromResponse({ status: response.status, body: text, requestId }));
     const parsed = decodeImageRef(text);
     return Option.isSome(parsed)
       ? ok(parsed.value)

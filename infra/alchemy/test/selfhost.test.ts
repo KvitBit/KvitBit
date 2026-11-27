@@ -7,7 +7,7 @@ import {
   readFileSync,
   rmSync,
   writeFileSync,
-  // @effect-diagnostics-next-line nodeBuiltinImport:off
+  // @effect-diagnostics-next-line nodeBuiltinImport:off The shell fixtures use synchronous POSIX file modes and cleanup.
 } from "node:fs"; // The shell fixtures require POSIX modes and direct filesystem assertions.
 import { tmpdir } from "node:os";
 import * as Arr from "effect/Array";

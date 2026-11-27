@@ -1,4 +1,3 @@
-// biome-ignore-all lint/suspicious/noUnnecessaryConditions: The lint resolver omits the tags inherited from Effect schema classes.
 /**
  * UiError and the one error mapping (ui-port-contracts section 2.6). `toUiError` normalizes
  * anything a KvitbitApi call can fail with; `describe` turns a UiError into the render-ready
@@ -148,8 +147,7 @@ const isPlainInvalid: Predicate.Refinement<object, AuthInvalid> = (u): u is Auth
   u.issues.length > 0 &&
   Arr.every(u.issues, isAuthIssue);
 
-// biome-ignore lint/plugin/no-unknown-parameters: This guard accepts arbitrary failure values.
-export const isUiError = (u: unknown): u is UiError =>
+export const isUiError: Predicate.Refinement<unknown, UiError> = (u): u is UiError =>
   isWireError(u) ||
   (Predicate.isObjectOrArray(u) &&
     (("_tag" in u && Predicate.isString(u["_tag"]) && LOCAL_TAGS.has(u["_tag"])) ||

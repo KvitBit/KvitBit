@@ -30,7 +30,7 @@ export type KvitbitApiClient = HttpApiClient.ForApi<typeof Api>;
 
 export class KvitbitApi extends Context.Service<KvitbitApi, KvitbitApiClient>()(
   // Keep the service identifier used by existing layers.
-  // @effect-diagnostics-next-line deterministicKeys:off
+  // @effect-diagnostics-next-line deterministicKeys:off Preserve the KvitbitApi service key in ui-port-contracts 2.3.
   "ui-port/KvitbitApi",
 ) {}
 
@@ -84,7 +84,7 @@ export interface ResponseCell {
 
 export class ResponseObserver extends Context.Service<ResponseObserver, ResponseCell>()(
   // Keep the service identifier used by existing response observers.
-  // @effect-diagnostics-next-line deterministicKeys:off
+  // @effect-diagnostics-next-line deterministicKeys:off Preserve the response observer key required by existing layers and tests.
   "ui-port/ResponseObserver",
 ) {}
 
@@ -171,7 +171,7 @@ const withExchanges = <Client extends object>(client: Client): Client => ({
                     const exchange: ExchangeCell = { response: null };
                     return Effect.tap(
                       // The generated client is traversed as data, so this wrapper cannot inspect the endpoint's channels.
-                      // @effect-diagnostics-next-line anyUnknownInErrorContext:off
+                      // @effect-diagnostics-next-line anyUnknownInErrorContext:off The generated client is traversed as data and the wrapper leaves its error channel intact.
                       Effect.provideService(call, Exchange, exchange),
                       () => publishResponse(exchange),
                     );
@@ -246,21 +246,34 @@ export const layerFetch = (config: KvitbitApiConfig): Layer.Layer<KvitbitApi> =>
  * Workspace binding. Every Workspace endpoint takes `workspaceId` as a path parameter (the contract
  * declares no Workspace header); API calls always use the id, never the slug.
  */
+interface WorkspaceParams {
+  readonly workspaceId: WorkspaceId;
+}
+
+function workspaceParams(workspaceId: WorkspaceId): WorkspaceParams;
+function workspaceParams<P extends object>(
+  workspaceId: WorkspaceId,
+  params: P,
+): P & WorkspaceParams;
+function workspaceParams<P extends object>(
+  workspaceId: WorkspaceId,
+  params: P | undefined,
+): Partial<P> & WorkspaceParams;
+function workspaceParams<P extends object>(
+  workspaceId: WorkspaceId,
+  params?: P,
+): Partial<P> & WorkspaceParams {
+  const extra: Partial<P> = params ?? {};
+  return { ...extra, workspaceId };
+}
+
 export const inWorkspace: {
-  (workspaceId: WorkspaceId): { readonly workspaceId: WorkspaceId };
-  <P extends object = Record<never, never>>(
-    params?: P,
-  ): (workspaceId: WorkspaceId) => P & { readonly workspaceId: WorkspaceId };
-  <P extends object = Record<never, never>>(
-    workspaceId: WorkspaceId,
-    params?: P,
-  ): P & { readonly workspaceId: WorkspaceId };
-} = Fn.dual(
-  (args) => Predicate.isString(args[0]),
-  <P extends object = Record<never, never>>(
-    workspaceId: WorkspaceId,
-    params?: P,
-  ): P & { readonly workspaceId: WorkspaceId } =>
-    // biome-ignore lint/nursery/noUnsafeTypeAssertion: When params is supplied, the spread retains all of its fields.
-    ({ ...params, workspaceId }) as P & { readonly workspaceId: WorkspaceId },
-);
+  (params?: undefined): (workspaceId: WorkspaceId) => WorkspaceParams;
+  (workspaceId: WorkspaceId, params?: undefined): WorkspaceParams;
+  <P extends object>(params: P): (workspaceId: WorkspaceId) => P & WorkspaceParams;
+  <P extends object>(workspaceId: WorkspaceId, params: P): P & WorkspaceParams;
+  <P extends object>(
+    params: P | undefined,
+  ): (workspaceId: WorkspaceId) => Partial<P> & WorkspaceParams;
+  <P extends object>(workspaceId: WorkspaceId, params: P | undefined): Partial<P> & WorkspaceParams;
+} = Fn.dual((args) => Predicate.isString(args[0]), workspaceParams);

@@ -1,6 +1,6 @@
 import { mock } from "bun:test";
 // Run Node crypto as the oracle and native-module test stand-in.
-/* biome-ignore lint/correctness/noNodejsModules: Bun runs this test preload. */ // @effect-diagnostics-next-line nodeBuiltinImport:off
+/* biome-ignore lint/correctness/noNodejsModules: Bun runs this test preload. */ // @effect-diagnostics-next-line nodeBuiltinImport:off The Bun preload supplies synchronous cryptography to native test mocks.
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import * as EffectArray from "effect/Array";
 import * as Effect from "effect/Effect";
@@ -33,6 +33,12 @@ const flattenStyle = (style: unknown): typeof StyleFields.Type | undefined =>
 
 const resolve = <A>(read: () => A) => Effect.runPromise(Effect.sync(read));
 
+const interpolate = <Value>(config: { readonly outputRange: readonly Value[] }) =>
+  config.outputRange[0];
+const emptyListener = () => "";
+const noop = (): void => undefined;
+const InertStatusBar = () => null;
+
 class AnimatedValue {
   private value: number;
 
@@ -42,15 +48,10 @@ class AnimatedValue {
   setValue(value: number) {
     this.value = value;
   }
-  // biome-ignore lint/style/useThisInClassMethods: Native Animated tests use an inert instance method.
-  interpolate = <Value>(config: { readonly outputRange: readonly Value[] }) =>
-    config.outputRange[0];
-  // biome-ignore lint/style/useThisInClassMethods: Native Animated tests use an inert instance method.
-  addListener = () => "";
-  // biome-ignore lint/style/useThisInClassMethods: Native Animated tests use an inert instance method.
-  removeAllListeners = (): void => undefined;
-  // biome-ignore lint/style/useThisInClassMethods: Native Animated tests use an inert instance method.
-  stopAnimation = (): void => undefined;
+  readonly interpolate = interpolate;
+  readonly addListener = emptyListener;
+  readonly removeAllListeners = noop;
+  readonly stopAnimation = noop;
   valueOf() {
     return this.value;
   }
@@ -197,8 +198,7 @@ mock.module("expo-router/react-navigation", () => ({
 }));
 
 mock.module("expo-status-bar", () => ({
-  // biome-ignore lint/correctness/noComponentHookFactories: an inert module stand-in
-  StatusBar: () => null,
+  StatusBar: InertStatusBar,
   setStatusBarStyle: () => undefined,
 }));
 

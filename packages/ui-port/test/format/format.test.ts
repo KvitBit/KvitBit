@@ -126,7 +126,7 @@ describe("dates", () => {
     expect(spaces(formatDateTime("cs", "2026-11-23T13:05:00Z"))).toBe("23. 11. 2026 14:05");
     expect(formatDateTime("en", "2026-07-01T22:30:00Z")).toBe("2 Jul 2026, 00:30");
     // Native parsing of an offsetless timestamp uses the local timezone.
-    // @effect-diagnostics-next-line globalDate:off
+    // @effect-diagnostics-next-line globalDate:off Native Date is the independent oracle for device-local timestamp parsing.
     const native = new Date("2026-07-01T12:30:00");
     expect(formatDateTime("en", "2026-07-01T12:30:00")).toBe(formatDateTime("en", native));
   });
