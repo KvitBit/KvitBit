@@ -28,7 +28,8 @@ export class Forbidden extends Schema.TaggedError<Forbidden, { readonly brand: u
 }
 
 export const Issue = Schema.Struct({
-  path: Schema.Array(Schema.Union([Schema.String, Schema.Finite])),
+  // @effect-diagnostics-next-line schemaNumber:off Preserve the JSON codec for numeric path segments.
+  path: Schema.Array(Schema.Union([Schema.String, Schema.Number])),
   code: IssueCode, // stable i18n key; presenters localize cs/en
   params: Schema.optional(Schema.Record(Schema.String, Schema.String)),
 });
@@ -56,7 +57,8 @@ export class Conflict extends Schema.TaggedError<Conflict, { readonly brand: uni
   "Conflict",
   {
     reason: ConflictReason,
-    currentRevision: Schema.optional(Schema.Finite),
+    // @effect-diagnostics-next-line schemaNumber:off Preserve decoding of legacy JSON strings such as "Infinity".
+    currentRevision: Schema.optional(Schema.Number),
     detail: Schema.optional(IssueCode),
   },
 ) {
@@ -76,7 +78,8 @@ export class Unavailable extends Schema.TaggedError<
   { readonly brand: unique symbol }
 >()("Unavailable", {
   dependency: UnavailableDependency,
-  retryAfterSeconds: Schema.optional(Schema.Finite),
+  // @effect-diagnostics-next-line schemaNumber:off Preserve decoding of legacy JSON strings such as "NaN".
+  retryAfterSeconds: Schema.optional(Schema.Number),
 }) {
   static readonly schema = this.pipe(HttpApiSchema.status("ServiceUnavailable")); // 503
 }

@@ -46,6 +46,15 @@ describe("error codecs", () => {
     });
   });
 
+  test("preserves the JSON encoding of a non-finite revision", () => {
+    const wire = { _tag: "Conflict", reason: "revision_changed", currentRevision: "Infinity" };
+    const decoded = Schema.decodeEffect(json)(wire).pipe(Effect.runSync);
+    expect(decoded).toEqual(
+      Conflict.make({ reason: "revision_changed", currentRevision: Number.POSITIVE_INFINITY }),
+    );
+    expect(decoded.pipe(Schema.encodeEffect(json), Effect.runSync)).toEqual(wire);
+  });
+
   test("errors are yieldable Error instances", () => {
     expect(Forbidden.make({ action: "workspace.close" })).toBeInstanceOf(Error);
   });
