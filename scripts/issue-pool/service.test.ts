@@ -3,7 +3,7 @@ import { expect, test } from "bun:test";
 import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { claimedLabel, feedbackLabel, humanNeeded, type runIssuePool } from "./pool";
+import { claimedLabel, feedbackLabel, type runIssuePool } from "./pool";
 
 // Run the real CLI and SQLite with deterministic stand-ins for the external processes.
 const fakeCommand = String.raw`
@@ -18,7 +18,7 @@ const claimLabel = "visual-feedback:claimed";
 switch (executable) {
   case "gh": {
     const path = ["--paginate", "--method"].includes(args[3]) ? args[5] : args[3];
-    const repo = fixture.repository ?? { id: 100, full_name: "totalolage/kvitbit", owner: { id: 1, type: "User" } };
+    const repo = fixture.repository ?? { id: 100, full_name: "KvitBit/KvitBit", owner: { id: 1 } };
     const base = "repos/" + repo.full_name;
     if (fixture.githubFailure) process.exit(67);
     if (path === base || (fixture.aliases ?? []).includes(path)) {
@@ -27,8 +27,6 @@ switch (executable) {
       output(fixture.otherRepositories[path]);
     } else if (path.startsWith(base + "/issues?")) {
       output([fixture.issues, fixture.moreIssues ?? []]);
-    } else if (path.startsWith(base + "/collaborators?")) {
-      output([fixture.collaborators ?? []]);
     } else if (path.startsWith(base + "/labels?")) {
       output([[{ name: claimLabel }]]);
     } else if (path.startsWith(base + "/pulls?")) {
@@ -40,9 +38,7 @@ switch (executable) {
       } } } } });
     } else {
       const [number, resource] = path.slice((base + "/issues/").length).split("/");
-      if (resource?.startsWith("comments?")) {
-        output([fixture.comments?.[number] ?? []]);
-      } else if (resource === "labels" && args[4] === "POST") {
+      if (resource === "labels" && args[4] === "POST") {
         if (fixture.claimFailure) process.exit(68);
         if (args.at(-1) !== "labels[]=" + claimLabel) process.exit(93);
         output([{ name: claimLabel }]);
@@ -56,7 +52,7 @@ switch (executable) {
   }
   case "git": {
     if (args.slice(2).join(" ") === "remote get-url origin") {
-      process.stdout.write(fixture.origins?.[args[1]] ?? fixture.origin ?? "git@github.com:totalolage/kvitbit.git");
+      process.stdout.write(fixture.origins?.[args[1]] ?? fixture.origin ?? "git@github.com:KvitBit/KvitBit.git");
     } else if (args[2] === "fetch") {
       if (fixture.fetchFailure) process.exit(69);
     } else if (args[2] === "for-each-ref") {
@@ -73,9 +69,6 @@ switch (executable) {
     } else if (args[1] === "start") {
       if (fixture.startFailure) process.exit(70);
       output({ threadId: "worker-" + args[7].split("-").at(-1) });
-    } else if (args[1] === "send") {
-      if (fixture.sendFailure) process.exit(71);
-      output({ queued: true });
     } else {
       process.exit(92);
     }
@@ -104,16 +97,10 @@ const thread = (
   messages: [
     {
       role: "user",
-      text: `$full-send\n\n${repoId === null ? "" : `<!-- issue-pool-repository-id:${repoId} -->\n\n`}Own https://github.com/totalolage/kvitbit/issues/${number} through investigation.`,
+      text: `$full-send\n\n${repoId === null ? "" : `<!-- issue-pool-repository-id:${repoId} -->\n\n`}Own https://github.com/KvitBit/KvitBit/issues/${number} through investigation.`,
     },
   ],
 });
-const comment = (id: number, author: number, body: string, type = "User") => ({
-  id,
-  body,
-  user: { id: author, type },
-});
-
 interface Call {
   executable: string;
   args: string[];
@@ -227,8 +214,6 @@ async function withCli(
 
 const starts = (calls: Call[]) =>
   calls.filter(({ executable, args }) => executable === "t3" && args[1] === "start");
-const sends = (calls: Call[]) =>
-  calls.filter(({ executable, args }) => executable === "t3" && args[1] === "send");
 const writes = (calls: Call[]) =>
   calls.filter(
     ({ executable, args }) =>
@@ -252,7 +237,7 @@ testCli(
     expect(pass.status).toBe(0);
     expect(pass.result).toMatchObject({
       apply: false,
-      repo: "totalolage/kvitbit",
+      repo: "KvitBit/KvitBit",
       plannedAssignments: [4, 7],
       started: [],
     });
@@ -271,7 +256,7 @@ testCli(
     const effects = writes(pass.calls);
     expect(effects.map(({ executable }) => executable)).toEqual(["git", "gh", "t3", "gh", "t3"]);
     expect(effects[0]?.args).toEqual(["-C", project, "fetch", "origin", "main"]);
-    expect(effects[1]?.args).toContain("repos/totalolage/kvitbit/issues/6/labels");
+    expect(effects[1]?.args).toContain("repos/KvitBit/KvitBit/issues/6/labels");
     expect(starts(pass.calls)[0]).toMatchObject({
       args: [
         "thread",
@@ -293,15 +278,21 @@ testCli(
     expect(brief).toStartWith("$full-send\n");
     for (const text of [
       "<!-- issue-pool-repository-id:100 -->",
-      "https://github.com/totalolage/kvitbit/issues/6",
+      "https://github.com/KvitBit/KvitBit/issues/6",
       "Fixes #6",
       "AGENTS.md",
       "verify-*",
-      humanNeeded,
+      "ask directly in this T3 Code session",
+      "interactive user input",
+      "ask in the thread so the user can reply here",
+      "request_secret",
+      "Leave this thread open and unsnoozed",
       "t3_thread_organize",
     ]) {
       expect(brief).toContain(text);
     }
+
+    expect(brief).not.toMatch(/human-needed|in a comment|pool to relay/i);
 
     const before = await Bun.file(state).bytes();
     const dry = await run("--state", state);
@@ -338,51 +329,56 @@ testCli(
 );
 
 testCli(
-  "relays later comments from authenticated maintainers and owners once",
+  "ignores existing reply reservations in dry-run and apply",
   async ({ run, setFixture, state }) => {
-    await setFixture({
-      issues: [issue(4, claimedLabel), issue(5, claimedLabel)],
-      threads: [thread(4), thread(5)],
-      collaborators: [
-        { id: 2, type: "User", permissions: { maintain: true } },
-        { id: 3, type: "User", permissions: { push: true } },
-      ],
-      comments: {
-        4: [
-          comment(14, 1, "Owner follow-up"),
-          comment(10, 1, `Which browser?\r\n${humanNeeded}`),
-          comment(15, 3, humanNeeded),
-          comment(11, 3, "Write collaborator is not a maintainer"),
-          comment(12, 2, "Bot impersonation", "Bot"),
-          comment(13, 2, "Firefox"),
-          comment(16, 1, "<!-- kvitbit-agent:completed -->"),
-          comment(9, 1, "Before the question"),
-        ],
-        5: [comment(21, 3, humanNeeded), comment(22, 1, "Do not relay this")],
-      },
-    });
-    const planned = await run();
-    expect(planned.status).toBe(0);
-    expect(planned.result?.plannedReplies).toEqual([13]);
-    expect(writes(planned.calls)).toEqual([]);
+    const worker = thread(4);
+    await setFixture({ issues: [issue(4, claimedLabel)], threads: [worker] });
+    const adopted = await run("--apply", "--state", state);
+    expect(adopted.status).toBe(0);
+    expect(adopted.result?.adopted).toEqual([4]);
+    expect(writes(adopted.calls)).toEqual([]);
 
-    const apply = ["--apply", "--state", state];
-    const first = await run(...apply);
-    expect(first.result?.replied).toEqual([13]);
-    expect(sends(first.calls)).toEqual([
-      {
-        executable: "t3",
-        args: ["thread", "send", "--log-level", "none", "--json", "worker-4", "-"],
-        input: "<!-- issue-pool-reply:13 -->\nMaintainer reply from GitHub comment 13\n\nFirefox",
-      },
-    ]);
-    expect((await run(...apply)).result?.replied).toEqual([14]);
-    expect(sends((await run(...apply)).calls)).toEqual([]);
+    const db = new Database(state);
+    try {
+      db.exec(`
+        CREATE TABLE worker_reply (
+          repo_id INTEGER NOT NULL,
+          comment_id INTEGER NOT NULL,
+          issue INTEGER NOT NULL,
+          question_id INTEGER NOT NULL,
+          thread_id TEXT NOT NULL,
+          accepted INTEGER NOT NULL DEFAULT 0 CHECK (accepted IN (0, 1)),
+          PRIMARY KEY (repo_id, comment_id)
+        ) STRICT;
+        INSERT INTO worker_reply VALUES (100, 22, 4, 21, 'worker-4', 0);
+      `);
+      const before = await Bun.file(state).bytes();
+      for (const apply of [false, true]) {
+        const pass = await run("--state", state, ...(apply ? ["--apply"] : []));
+        expect(pass.status).toBe(0);
+        expect(pass.result).toEqual({
+          apply,
+          repo: "KvitBit/KvitBit",
+          plannedAssignments: [],
+          started: [],
+          adopted: [],
+          failures: [],
+        });
+        expect(pass.calls.map(({ executable, args }) => [executable, args.at(-1)])).toEqual([
+          ["gh", "repos/KvitBit/KvitBit"],
+          ["git", "origin"],
+          ["gh", "repos/KvitBit/KvitBit/issues?state=open&labels=visual-feedback&per_page=100"],
+        ]);
+        expect(await Bun.file(state).bytes()).toEqual(before);
+      }
+    } finally {
+      db.close();
+    }
   },
 );
 
 testCli(
-  "reconciles lost T3 start and reply acknowledgments without reissuing them",
+  "reconciles a lost T3 start acknowledgment without starting another worker",
   async ({ run, setFixture, state }) => {
     const apply = ["--apply", "--state", state];
     await setFixture({ issues: [issue(4)], startFailure: true });
@@ -395,36 +391,14 @@ testCli(
     expect(awaiting.status).toBe(1);
     expect(starts(awaiting.calls)).toEqual([]);
 
-    const waiting = {
-      issues: [issue(4, claimedLabel)],
-      threads: [thread(4)],
-      comments: { 4: [comment(21, 1, humanNeeded), comment(22, 1, "Use Firefox")] },
-    };
-    await setFixture({ ...waiting, sendFailure: true });
-    const replyFailed = await run(...apply);
-    expect(replyFailed.status).toBe(1);
-    expect(replyFailed.result?.adopted).toEqual([4]);
-    expect(sends(replyFailed.calls)).toHaveLength(1);
-
-    const text = "<!-- issue-pool-reply:22 -->\nMaintainer reply";
+    const worker = thread(4);
     await setFixture({
-      ...waiting,
-      comments: { 4: [comment(30, 1, humanNeeded), comment(31, 1, "New answer")] },
-      threads: [{ ...thread(4), messages: [...thread(4).messages, { role: "assistant", text }] }],
-    });
-    const ignored = await run(...apply);
-    expect(ignored.status).toBe(1);
-    expect(sends(ignored.calls)).toEqual([]);
-
-    await setFixture({
-      ...waiting,
       issues: [],
       threads: [
         {
-          ...thread(4),
+          ...worker,
           messages: [
-            ...thread(4).messages,
-            { role: "user", text },
+            ...worker.messages,
             ...Array.from({ length: 100 }, () => ({ role: "assistant", text: "Later message" })),
           ],
         },
@@ -432,8 +406,13 @@ testCli(
     });
     const recovered = await run(...apply);
     expect(recovered.status).toBe(0);
-    expect(recovered.result?.recoveredReplies).toEqual([22]);
+    expect(recovered.result?.adopted).toEqual([4]);
     expect(writes(recovered.calls)).toEqual([]);
+
+    const next = await run(...apply);
+    expect(next.status).toBe(0);
+    expect(next.result?.adopted).toEqual([]);
+    expect(next.calls.some(({ executable }) => executable === "t3")).toBe(false);
   },
 );
 
@@ -490,43 +469,45 @@ testCli(
   },
 );
 
-testCli("rejects cross-repository launch and relay", async ({ run, setFixture, state }) => {
-  const repository = { id: 101, full_name: "another/feedback", owner: { id: 1, type: "User" } };
-  const github = {
-    repository,
-    otherRepositories: {
-      "repos/totalolage/kvitbit": {
-        id: 100,
-        full_name: "totalolage/kvitbit",
-        owner: { id: 1, type: "User" },
+testCli(
+  "rejects cross-repository launch and worker adoption",
+  async ({ run, setFixture, state }) => {
+    const repository = { id: 101, full_name: "another/feedback", owner: { id: 1, type: "User" } };
+    const github = {
+      repository,
+      otherRepositories: {
+        "repos/KvitBit/KvitBit": {
+          id: 100,
+          full_name: "KvitBit/KvitBit",
+          owner: { id: 1, type: "User" },
+        },
       },
-    },
-    issues: [issue(4)],
-    threads: [thread(4)],
-    comments: { 4: [comment(50, 1, humanNeeded), comment(51, 1, "Private to the other repo")] },
-  };
-  const apply = ["--apply", "--state", state, "--repo", repository.full_name];
-  await setFixture(github);
-  const wrongProject = await run(...apply);
-  expect(wrongProject.status).toBe(1);
-  expect(wrongProject.stderr).toContain("The project origin does not match");
-  expect(wrongProject.calls.some(({ executable }) => executable === "t3")).toBe(false);
-  expect(await Bun.file(state).exists()).toBe(false);
+      issues: [issue(4)],
+      threads: [thread(4)],
+    };
+    const apply = ["--apply", "--state", state, "--repo", repository.full_name];
+    await setFixture(github);
+    const wrongProject = await run(...apply);
+    expect(wrongProject.status).toBe(1);
+    expect(wrongProject.stderr).toContain("The project origin does not match");
+    expect(wrongProject.calls.some(({ executable }) => executable === "t3")).toBe(false);
+    expect(await Bun.file(state).exists()).toBe(false);
 
-  // An old thread can outlive a change to the project's remote.
-  await setFixture({ ...github, origin: "ssh://git@ssh.github.com:443/another/feedback.git" });
-  const wrongWorker = await run(...apply);
-  expect(wrongWorker.status).toBe(1);
-  expect(wrongWorker.result?.failures).toMatchObject([
-    {
-      issue: 4,
-      operation: "assignment",
-      reason: expect.stringContaining("no matching issue brief"),
-    },
-  ]);
-  expect(wrongWorker.result?.adopted).toEqual([]);
-  expect(writes(wrongWorker.calls)).toEqual([]);
-});
+    // An old thread can outlive a change to the project's remote.
+    await setFixture({ ...github, origin: "ssh://git@ssh.github.com:443/another/feedback.git" });
+    const wrongWorker = await run(...apply);
+    expect(wrongWorker.status).toBe(1);
+    expect(wrongWorker.result?.failures).toMatchObject([
+      {
+        issue: 4,
+        operation: "assignment",
+        reason: expect.stringContaining("no matching issue brief"),
+      },
+    ]);
+    expect(wrongWorker.result?.adopted).toEqual([]);
+    expect(writes(wrongWorker.calls)).toEqual([]);
+  },
+);
 
 testCli(
   "recognizes the same repository after a GitHub transfer",
@@ -534,15 +515,19 @@ testCli(
     await setFixture({
       repository: { id: 100, full_name: "KvitBit/KvitBit", owner: { id: 1, type: "User" } },
       aliases: ["repos/totalolage/kvitbit"],
+      origin: "git@github.com:totalolage/kvitbit.git",
       issues: [issue(4, claimedLabel)],
       threads: [thread(4)],
-      comments: { 4: [comment(50, 1, humanNeeded), comment(51, 1, "Use Firefox")] },
     });
-    const pass = await run("--apply", "--state", state);
+    const pass = await run("--apply", "--state", state, "--repo", "totalolage/kvitbit");
     expect(pass.status).toBe(0);
-    expect(pass.result).toMatchObject({ repo: "KvitBit/KvitBit", adopted: [4], replied: [51] });
-    expect(writes(pass.calls)).toEqual(sends(pass.calls));
-    expect(sends(pass.calls)[0]?.args).toContain("worker-4");
+    expect(pass.result).toMatchObject({ repo: "KvitBit/KvitBit", adopted: [4] });
+    expect(writes(pass.calls)).toEqual([]);
+    expect(
+      pass.calls.some(
+        ({ executable, args }) => executable === "gh" && args.at(-1) === "repos/totalolage/kvitbit",
+      ),
+    ).toBe(true);
   },
 );
 
@@ -554,7 +539,7 @@ testCli(
     await setFixture({
       repository: { id: 101, full_name: "another/feedback", owner: { id: 1, type: "User" } },
       origins: {
-        [project]: "https://github.com/totalolage/kvitbit.git",
+        [project]: "https://github.com/KvitBit/KvitBit.git",
         [nested]: "https://github.com/another/feedback.git",
       },
       issues: [issue(4)],
@@ -584,26 +569,23 @@ testCli(
     expect((await run(...apply)).result?.adopted).toEqual([4]);
 
     const reassignedName = {
-      repository: { id: 200, full_name: "other/new", owner: { id: 1, type: "User" } },
-      aliases: ["repos/totalolage/kvitbit"],
-      origin: "https://github.com/other/new.git",
+      repository: { id: 200, full_name: "KvitBit/KvitBit", owner: { id: 2 } },
       threads: [worker],
       issues: [issue(4, claimedLabel)],
-      comments: { 4: [comment(50, 1, humanNeeded), comment(51, 1, "Maintainer answer")] },
     };
     await setFixture(reassignedName);
-    const selection = ["--repo", "other/new", "--state", state];
+    const selection = ["--state", state];
     const dry = await run(...selection);
-    expect(dry.result?.plannedReplies).toEqual([]);
+    expect(dry.result?.plannedAssignments).toEqual([]);
     expect(dry.status).toBe(1);
     const pass = await run("--apply", ...selection);
     expect(pass.status).toBe(1);
     expect(pass.result?.adopted).toEqual([]);
     expect(writes(dry.calls)).toEqual([]);
     expect(writes(pass.calls)).toEqual([]);
-    const withoutSavedState = await run("--repo", "other/new");
+    const withoutSavedState = await run();
     expect(withoutSavedState.status).toBe(1);
-    expect(withoutSavedState.result?.plannedReplies).toEqual([]);
+    expect(withoutSavedState.result?.plannedAssignments).toEqual([]);
 
     await setFixture({ ...reassignedName, threads: [thread(4, "Legacy worker", null)] });
     const legacy = await run("--apply", ...selection);
@@ -620,7 +602,6 @@ testCli(
     const fixture = {
       issues: [issue(4, claimedLabel)],
       threads: [thread(4, "Legacy worker", null)],
-      comments: { 4: [comment(50, 1, humanNeeded), comment(51, 1, "Maintainer answer")] },
     };
     await setFixture(fixture);
     const unknown = await run(...apply);
@@ -634,7 +615,7 @@ testCli(
       save.run(100, 4, "worker-4");
       const known = await run("--state", state);
       expect(known.status).toBe(0);
-      expect(known.result?.plannedReplies).toEqual([51]);
+      expect(known.result?.plannedAssignments).toEqual([]);
       expect(writes(known.calls)).toEqual([]);
 
       save.run(200, 4, "worker-4");
@@ -649,16 +630,11 @@ testCli(
 );
 
 testCli(
-  "checks the initial brief before using a saved assignment for a reply",
+  "checks the initial brief before adopting a discovered worker",
   async ({ run, setFixture, state }) => {
     const apply = ["--apply", "--state", state];
     const worker = thread(4);
     const fixture = { issues: [issue(4, claimedLabel)], threads: [worker] };
-    await setFixture(fixture);
-    const initial = await run(...apply);
-    expect(initial.status).toBe(0);
-    expect(initial.result?.adopted).toEqual([4]);
-
     await setFixture({
       ...fixture,
       threads: [
@@ -673,14 +649,17 @@ testCli(
           ],
         },
       ],
-      comments: { 4: [comment(50, 1, humanNeeded), comment(51, 1, "Maintainer answer")] },
     });
     const pass = await run(...apply);
     expect(pass.status).toBe(1);
     expect(pass.result?.failures).toMatchObject([
-      { issue: 4, operation: "reply", reason: expect.stringContaining("no matching issue brief") },
+      {
+        issue: 4,
+        operation: "assignment",
+        reason: expect.stringContaining("no matching issue brief"),
+      },
     ]);
-    expect(pass.result?.plannedReplies).toEqual([]);
+    expect(pass.result?.adopted).toEqual([]);
     expect(writes(pass.calls)).toEqual([]);
   },
 );

@@ -1,6 +1,8 @@
 import { describe, expect, it } from "bun:test";
 import type { View } from "@effect/ui";
 import { Html, HtmlServer } from "@effect/ui/html";
+import { HtmlScene } from "@effect/ui/html/testing";
+import { Locator } from "@effect/ui/testing";
 import {
   ALL_SCOPES,
   ApiKeyId,
@@ -21,6 +23,7 @@ import {
 } from "@kvitbit/domain";
 import { ViewModels } from "@kvitbit/ui-port";
 import { Effect, Schema } from "effect";
+import { definePage } from "../../src/app/page";
 import {
   czechAccountFromIban,
   previewNumberingPattern,
@@ -157,6 +160,72 @@ describe("Settings page (Screens 18-21 & More hub)", () => {
     expect(populated.model.entityForm.name).toBe("Alza.cz a.s.");
     expect(populated.model.entityForm.registerEntry).toBe("B 8573, Městský soud v Praze");
     expect(populated.outMessage?._tag).toBe("Toast");
+  });
+
+  it("splits pasted full addresses across empty Issuing Entity address inputs", async () => {
+    const route: Settings.Route = { _tag: "Settings", ws: WS, section: "issuingEntity" };
+    const ctx = ctxFor(route, { locale: "en" });
+    const SettingsPage = definePage("Settings", Settings);
+    const streetInput = Locator.attr("id", "kb-entity-street");
+    const cityInput = Locator.attr("id", "kb-entity-city");
+    const postalInput = Locator.attr("id", "kb-entity-postal");
+    const countryInput = Locator.attr("id", "kb-entity-country");
+    const loadedModel = Settings.update(
+      Settings.init(route, ctx).model,
+      Settings.Message.GotWorkspace({
+        seq: 1,
+        data: {
+          ...sampleWorkspace,
+          issuingEntity: {
+            ...sampleWorkspace.issuingEntity,
+            address: { street: "", city: "", postalCode: "", country: "CZ" },
+          },
+        },
+      }),
+      ctx,
+    ).model;
+
+    await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const scene = yield* HtmlScene.make(SettingsPage, ctx);
+          scene
+            .given(loadedModel)
+            .fire(streetInput, "paste", { text: "Friedrichstraße 123, 10117 Berlin, Germany" })
+            .expectDefaultPrevented()
+            .expect(streetInput)
+            .toHaveValue("Friedrichstraße 123")
+            .expect(cityInput)
+            .toHaveValue("Berlin")
+            .expect(postalInput)
+            .toHaveValue("10117")
+            .expect(countryInput)
+            .toHaveValue("DE");
+        }),
+      ),
+    );
+
+    // Read-only members ignore PastedEntityAddress messages.
+    const readonlyCtx = ctxFor(route, {
+      locale: "en",
+      session: {
+        _tag: "SignedIn",
+        user: DEMO_USER,
+        workspaces: [{ ...DEMO_WORKSPACE, role: "accountant" }],
+      },
+    });
+    const init = Settings.init(route, readonlyCtx).model;
+    const after = Settings.update(
+      init,
+      Settings.Message.PastedEntityAddress({
+        street: "A 1",
+        city: "B",
+        postalCode: "110 00",
+        country: "CZ",
+      }),
+      readonlyCtx,
+    );
+    expect(after.model.entityForm.street).toBe("");
   });
 
   it("handles Tax Regime history and scheduled change confirmation", async () => {

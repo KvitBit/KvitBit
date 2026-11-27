@@ -1,8 +1,11 @@
 import { describe, expect, test } from "bun:test";
+import { HtmlScene } from "@effect/ui/html/testing";
+import { Locator } from "@effect/ui/testing";
 import { ConsentResult, ConsentView, SCOPE_AREAS } from "@kvitbit/api-contract";
 import { InvitationPeek, RegistryResult, WorkspaceSummary, WorkspaceView } from "@kvitbit/domain";
-import { Schema } from "effect";
+import { Effect, Schema } from "effect";
 import type { Failure } from "../../src/app/api";
+import { definePage } from "../../src/app/page";
 import { routes as publicDemoRoutes } from "../../src/demo/public";
 import { match } from "../../src/demo/router";
 import * as Consent from "../../src/page/public/consent";
@@ -302,6 +305,19 @@ describe("Workspace Onboarding Wizard (Screen 07)", () => {
     expect(cs.html).toContain("kb-onboarding");
     expect(cs.html).toContain("ARES");
 
+    const step4En = await renderPath("/onboarding?step=4", { locale: "en", session: signedIn });
+    expect(step4En.html).toContain("kb-series-ledger");
+    expect(step4En.html).toContain('data-series-kind="invoice"');
+    expect(step4En.html).toContain('data-series-kind="proforma"');
+    expect(step4En.html).toContain('data-series-kind="credit_note"');
+    expect(step4En.html).toContain("ZF-2026-0001");
+    expect(step4En.html).toContain("OD-2026-0001");
+    expect(step4En.html).toContain("kb-onboarding-defaults");
+
+    const step4Cs = await renderPath("/onboarding?step=4", { locale: "cs", session: signedIn });
+    expect(step4Cs.html).toContain("Číselné řady");
+    expect(step4Cs.html).toContain("Výchozí hodnoty dokladů");
+
     const en = await renderPath("/onboarding?step=5", { locale: "en", session: signedIn });
     expect(en.html).toContain("Live miniature invoice preview");
   });
@@ -518,6 +534,59 @@ describe("Workspace Onboarding Wizard (Screen 07)", () => {
     } finally {
       fetch.mockRestore();
     }
+  });
+
+  test("pasting a full address splits into empty onboarding inputs and leaves single-part pastes alone", async () => {
+    const route: Onboarding.Route = { _tag: "Onboarding" };
+    const ctx = ctxFor(route, { locale: "en", session: signedIn });
+    const OnboardingPage = definePage("Onboarding", Onboarding);
+    const streetInput = Locator.attr("id", "onb-street");
+    const cityInput = Locator.attr("id", "onb-city");
+    const postalInput = Locator.attr("id", "onb-postal");
+    const readyModel = Onboarding.update(
+      Onboarding.init(route, ctx).model,
+      Onboarding.Message.RestoredDraft({ draft: null }),
+      ctx,
+    ).model;
+
+    await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const scene = yield* HtmlScene.make(OnboardingPage, ctx);
+          scene.given(readyModel);
+
+          // Pasting a single street line is not intercepted, so the browser paste runs as normal.
+          scene.fire(streetInput, "paste", { text: "Jankovcova 1522/53" }).expectIgnored();
+
+          // Pasting a full address into Street prefills Street, City, and Postal code.
+          scene
+            .fire(streetInput, "paste", {
+              text: "Na Florenci 2116/15, Nové Město, 110 00 Praha 1, Česká republika",
+            })
+            .expectDefaultPrevented()
+            .expect(streetInput)
+            .toHaveValue("Na Florenci 2116/15")
+            .expect(cityInput)
+            .toHaveValue("Praha 1")
+            .expect(postalInput)
+            .toHaveValue("110 00");
+
+          // Pre-filled sibling fields stay untouched when pasting a multiline address into City.
+          scene
+            .type(streetInput, "Korunní 1")
+            .type(cityInput, "")
+            .type(postalInput, "")
+            .fire(cityInput, "paste", { text: "Jankovcova 1522/53\n170 00 Praha 7" })
+            .expectDefaultPrevented()
+            .expect(streetInput)
+            .toHaveValue("Korunní 1")
+            .expect(cityInput)
+            .toHaveValue("Praha 7")
+            .expect(postalInput)
+            .toHaveValue("170 00");
+        }),
+      ),
+    );
   });
 });
 

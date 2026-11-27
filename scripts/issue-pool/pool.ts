@@ -2,17 +2,10 @@ import { Database } from "bun:sqlite";
 
 export const feedbackLabel = "visual-feedback";
 export const claimedLabel = "visual-feedback:claimed";
-export const humanNeeded = "<!-- kvitbit-agent:human-needed -->";
 
 export interface Issue {
   number: number;
   claimed: boolean;
-}
-
-export interface Reply {
-  questionId: number;
-  commentId: number;
-  body: string;
 }
 
 export interface IssueTracker {
@@ -20,28 +13,17 @@ export interface IssueTracker {
   isAvailable(number: number): Promise<boolean>;
   ensureClaimLabel(): Promise<void>;
   claim(number: number): Promise<void>;
-  replies(number: number): Promise<readonly Reply[]>;
 }
 
 export interface WorkerRunner {
   find(number: number): Promise<string | null>;
-  verify(number: number, threadId: string): Promise<void>;
   start(number: number): Promise<string>;
-  sendReply(threadId: string, reply: Reply): Promise<void>;
-  receivedReply(threadId: string, commentId: number): Promise<boolean>;
 }
 
 interface Assignment {
   number: number;
   phase: "claiming" | "starting" | "assigned";
   threadId: string | null;
-}
-
-interface ReplyReservation {
-  issue: number;
-  threadId: string;
-  questionId: number;
-  commentId: number;
 }
 
 export class IssuePool {
@@ -63,15 +45,6 @@ export class IssuePool {
           thread_id TEXT,
           CHECK ((phase = 'assigned') = (thread_id IS NOT NULL)),
           PRIMARY KEY (repo_id, issue)
-        ) STRICT;
-        CREATE TABLE IF NOT EXISTS worker_reply (
-          repo_id INTEGER NOT NULL,
-          comment_id INTEGER NOT NULL,
-          issue INTEGER NOT NULL,
-          question_id INTEGER NOT NULL,
-          thread_id TEXT NOT NULL,
-          accepted INTEGER NOT NULL DEFAULT 0 CHECK (accepted IN (0, 1)),
-          PRIMARY KEY (repo_id, comment_id)
         ) STRICT;
       `);
     }
@@ -150,57 +123,13 @@ export class IssuePool {
       })
       .immediate();
   }
-
-  replyAccepted(commentId: number): boolean {
-    return (
-      this.db
-        .query<{ accepted: number }, [number, number]>(
-          "SELECT accepted FROM worker_reply WHERE repo_id = ? AND comment_id = ?",
-        )
-        .get(this.repoId, commentId)?.accepted === 1
-    );
-  }
-
-  pendingReplies(): ReplyReservation[] {
-    return this.db
-      .query<ReplyReservation, [number]>(`
-        SELECT issue, thread_id AS threadId, question_id AS questionId, comment_id AS commentId
-        FROM worker_reply WHERE repo_id = ? AND accepted = 0 ORDER BY comment_id
-      `)
-      .all(this.repoId);
-  }
-
-  reserveReply({ commentId, issue, questionId, threadId }: ReplyReservation): boolean {
-    return (
-      this.db
-        .query(`
-          INSERT INTO worker_reply (repo_id, comment_id, issue, question_id, thread_id)
-          VALUES (?, ?, ?, ?, ?) ON CONFLICT DO NOTHING
-        `)
-        .run(this.repoId, commentId, issue, questionId, threadId).changes === 1
-    );
-  }
-
-  acceptReply({ commentId, issue, questionId, threadId }: ReplyReservation): void {
-    this.db
-      .query(`
-        INSERT INTO worker_reply (repo_id, comment_id, issue, question_id, thread_id, accepted)
-        VALUES (?, ?, ?, ?, ?, 1)
-        ON CONFLICT (repo_id, comment_id) DO UPDATE SET accepted = 1
-        WHERE worker_reply.thread_id = excluded.thread_id
-      `)
-      .run(this.repoId, commentId, issue, questionId, threadId);
-  }
 }
 
 interface PassResult {
   plannedAssignments: number[];
   started: number[];
   adopted: number[];
-  plannedReplies: number[];
-  replied: number[];
-  recoveredReplies: number[];
-  failures: { issue: number; operation: "assignment" | "reply"; reason: string }[];
+  failures: { issue: number; operation: "assignment"; reason: string }[];
 }
 
 function failureReason(error: unknown): string {
@@ -208,63 +137,6 @@ function failureReason(error: unknown): string {
 }
 
 export class PoolError extends Error {}
-
-async function recoverReplies(
-  { apply, pool, runner }: PassOptions,
-  result: PassResult,
-): Promise<Set<number>> {
-  const issues = new Set<number>();
-  for (const reservation of pool.pendingReplies()) {
-    const { commentId, issue, threadId } = reservation;
-    issues.add(issue);
-    try {
-      await runner.verify(issue, threadId);
-      if (!(await runner.receivedReply(threadId, commentId))) {
-        throw new PoolError(`T3 has not confirmed delivery of GitHub comment ${commentId}`);
-      }
-      if (apply) {
-        pool.acceptReply(reservation);
-        result.recoveredReplies.push(commentId);
-      }
-    } catch (error) {
-      result.failures.push({ issue, operation: "reply", reason: failureReason(error) });
-    }
-  }
-  return issues;
-}
-
-async function relayReplies(
-  number: number,
-  threadId: string,
-  { apply, pool, runner, tracker }: PassOptions,
-  result: PassResult,
-): Promise<void> {
-  try {
-    // Relay one answer per issue per pass so the worker can ask a follow-up.
-    const reply = (await tracker.replies(number)).find(
-      ({ commentId }) => !pool.replyAccepted(commentId),
-    );
-    if (!reply) return;
-    await runner.verify(number, threadId);
-    const { commentId, questionId } = reply;
-    const reservation = { issue: number, threadId, questionId, commentId };
-    result.plannedReplies.push(commentId);
-    if (!apply) return;
-
-    if (await runner.receivedReply(threadId, commentId)) {
-      pool.acceptReply(reservation);
-      result.recoveredReplies.push(commentId);
-    } else if (pool.reserveReply(reservation)) {
-      await runner.sendReply(threadId, reply);
-      pool.acceptReply(reservation);
-      result.replied.push(commentId);
-    } else if (!pool.replyAccepted(commentId)) {
-      throw new PoolError(`T3 has not confirmed delivery of GitHub comment ${commentId}`);
-    }
-  } catch (error) {
-    result.failures.push({ issue: number, operation: "reply", reason: failureReason(error) });
-  }
-}
 
 interface PassOptions {
   apply: boolean;
@@ -275,20 +147,22 @@ interface PassOptions {
   fetchMain(): Promise<void>;
 }
 
-export async function runIssuePool(options: PassOptions): Promise<PassResult> {
-  const { apply, maxWorkers, pool, runner, tracker, fetchMain } = options;
+export async function runIssuePool({
+  apply,
+  maxWorkers,
+  pool,
+  runner,
+  tracker,
+  fetchMain,
+}: PassOptions): Promise<PassResult> {
   const result: PassResult = {
     plannedAssignments: [],
     started: [],
     adopted: [],
-    plannedReplies: [],
-    replied: [],
-    recoveredReplies: [],
     failures: [],
   };
   let fetched: Promise<void> | undefined;
   let attempts = 0;
-  const pendingReplyIssues = await recoverReplies(options, result);
   const issues = new Map((await tracker.list()).map((issue) => [issue.number, issue]));
   const numbers = new Set([
     ...pool.pendingAssignments().map(({ number }) => number),
@@ -298,14 +172,15 @@ export async function runIssuePool(options: PassOptions): Promise<PassResult> {
     try {
       const issue = issues.get(number);
       const assignment = pool.assignment(number);
-      const threadId = assignment?.threadId ?? (await runner.find(number));
+      if (assignment?.threadId) {
+        pool.hasWorkerBinding(number, assignment.threadId);
+        continue;
+      }
+      const threadId = await runner.find(number);
       if (threadId) {
-        if (apply && !assignment?.threadId) {
+        if (apply) {
           pool.recordThread(number, threadId);
           result.adopted.push(number);
-        }
-        if (issue && !pendingReplyIssues.has(number)) {
-          await relayReplies(number, threadId, options, result);
         }
         continue;
       }

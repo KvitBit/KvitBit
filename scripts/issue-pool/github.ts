@@ -1,19 +1,14 @@
 import type { Command } from "./command";
-import { claimedLabel, feedbackLabel, humanNeeded, type IssueTracker, PoolError } from "./pool";
+import { claimedLabel, feedbackLabel, type IssueTracker, PoolError } from "./pool";
 import { workerBranch } from "./t3";
 
-export const defaultRepository = "totalolage/kvitbit";
+export const defaultRepository = "KvitBit/KvitBit";
 const repoSlug = /^[a-zA-Z0-9][a-zA-Z0-9-]{0,38}\/(?!\.{1,2}$)[a-zA-Z0-9_.-]{1,100}$/;
-
-interface User {
-  id: number;
-  type: string;
-}
 
 interface Repository {
   id: number;
   full_name: string;
-  owner: User;
+  owner: { id: number };
 }
 
 interface RestIssue {
@@ -22,16 +17,6 @@ interface RestIssue {
   labels: { name: string }[];
   assignees: unknown[];
   pull_request?: object;
-}
-
-interface Comment {
-  id: number;
-  body: string | null;
-  user: User | null;
-}
-
-interface Collaborator extends User {
-  permissions: { admin: boolean; maintain: boolean };
 }
 
 const closingPullRequests = `query ($owner: String!, $name: String!, $number: Int!) {
@@ -106,19 +91,10 @@ function isClaimed(issue: RestIssue): boolean {
   return issue.labels.some(({ name }) => name === claimedLabel);
 }
 
-function hasHumanNeededMarker(body: string | null): boolean {
-  return body?.split(/\r?\n/).includes(humanNeeded) ?? false;
-}
-
-function isWorkerComment(body: string): boolean {
-  return /<!--\s*(?:kvitbit-agent:|issue-pool-|t3-worker-thread:)/.test(body);
-}
-
 export function githubIssueTracker(repository: Repository, run: Command): IssueTracker {
   const base = `repos/${repository.full_name}`;
   const [owner, name] = repository.full_name.split("/");
   let claimLabelReady: Promise<void> | undefined;
-  let maintainers: Promise<ReadonlySet<number>> | undefined;
 
   async function pages<T>(path: string): Promise<T[]> {
     const response = await api(run, "--paginate", "--slurp", path);
@@ -187,19 +163,6 @@ export function githubIssueTracker(repository: Repository, run: Command): IssueT
     return branchPRs.length === 0;
   }
 
-  async function maintainerIds(): Promise<ReadonlySet<number>> {
-    const rows = await pages<Collaborator>(`${base}/collaborators?affiliation=all&per_page=100`);
-    const ids = new Set(
-      rows
-        .filter(
-          ({ type, permissions }) => type === "User" && (permissions.admin || permissions.maintain),
-        )
-        .map(({ id }) => id),
-    );
-    if (repository.owner.type === "User") ids.add(repository.owner.id);
-    return ids;
-  }
-
   return {
     async list() {
       const issues = await pages<RestIssue>(
@@ -228,22 +191,6 @@ export function githubIssueTracker(repository: Repository, run: Command): IssueT
       if (!labels.some(({ name }) => name === claimedLabel)) {
         throw new PoolError("GitHub did not confirm the issue claim label");
       }
-    },
-    async replies(number) {
-      const comments = await pages<Comment>(`${base}/issues/${number}/comments?per_page=100`);
-      if (!comments.some(({ body }) => hasHumanNeededMarker(body))) return [];
-      maintainers ??= maintainerIds();
-      const ids = await maintainers;
-      const trusted = comments
-        .filter(({ user }) => user?.type === "User" && ids.has(user.id))
-        .toSorted((left, right) => left.id - right.id);
-      const question = trusted.findLast(({ body }) => hasHumanNeededMarker(body));
-      if (!question) return [];
-      return trusted.flatMap(({ id, body }) =>
-        id > question.id && body?.trim() && !isWorkerComment(body)
-          ? [{ questionId: question.id, commentId: id, body }]
-          : [],
-      );
     },
   };
 }

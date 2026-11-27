@@ -14,9 +14,9 @@ We deploy the hosted SaaS on **GCP via Alchemy** (`infra/alchemy`, Effect 4.1) u
 
 ## Provisioned bootstrap
 
-Re-bootstrapped on 2026-11-24 for GitHub repo `totalolage/invoicarr` (repository ID `1467990305`, owner ID `41711263`), with no static GCP service account keys. The earlier empty `invoicarr-prod` project was deleted and replaced with `kvitbit-prod`:
+Re-bootstrapped on 2026-11-24 and transferred on 2026-11-27 to GitHub org repo `KvitBit/KvitBit` (repository ID `1467990305`, owner ID `362044117`; previously `totalolage/invoicarr` → `totalolage/kvitbit`, owner ID `41711263`), with no static GCP service account keys. The earlier empty `invoicarr-prod` project was deleted and replaced with `kvitbit-prod`:
 
-- **GCP**: project `kvitbit-prod` (`449188423567`, display name `Kvitbit Prod`), region `europe-west3`, zone `europe-west3-a`, Alchemy state bucket `alchemy-state-kvitbit-prod` (uniform access, public access prevention, versioning), WIF provider `projects/449188423567/locations/global/workloadIdentityPools/github/providers/github` (bound to immutable `repository_id == '1467990305'` and `repository_owner_id == '41711263'`), deployer `kvitbit-deployer@kvitbit-prod.iam.gserviceaccount.com`.
+- **GCP**: project `kvitbit-prod` (`449188423567`, display name `Kvitbit Prod`), region `europe-west3`, zone `europe-west3-a`, Alchemy state bucket `alchemy-state-kvitbit-prod` (uniform access, public access prevention, versioning), WIF provider `projects/449188423567/locations/global/workloadIdentityPools/github/providers/github` (bound to immutable `repository_id == '1467990305'` and `repository_owner_id == '362044117'`), deployer `kvitbit-deployer@kvitbit-prod.iam.gserviceaccount.com`.
 - **Neon**: project `hidden-hall-00717862` (display name `invoicarr`; bootstrapped infra ID, kept) in `aws-eu-central-1`, PostgreSQL 17, default branch `main`.
 - **GitHub Actions variables set**: `GCP_PROJECT_ID`, `GCP_PROJECT_NUMBER`, `GCP_REGION`, `GCP_ZONE`, `GCP_WORKLOAD_IDENTITY_PROVIDER`, `GCP_DEPLOYER_SERVICE_ACCOUNT`, `ALCHEMY_STATE_BUCKET`.
 - **GitHub Actions secrets set**: `DATABASE_URL` (pooled), `DATABASE_DIRECT_URL` (direct).

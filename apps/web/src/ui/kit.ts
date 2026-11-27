@@ -64,6 +64,7 @@ export interface FieldOptions<M> {
   readonly label: string;
   readonly value: string;
   readonly onInput: (value: string) => M;
+  readonly onPaste?: (text: string) => M | undefined;
   readonly type?: string;
   readonly placeholder?: string;
   readonly hint?: string;
@@ -109,6 +110,10 @@ export const textField = <M>(h: Html.H<M>, o: FieldOptions<M>): Markup<M> =>
       (element) => element.attr("type", o.type ?? "text"),
       (element) => element.value(o.value),
       (element) => element.on("input", ({ value }) => o.onInput(value)),
+      (node) =>
+        o.onPaste === undefined
+          ? node
+          : node.on("paste", ({ text }) => o.onPaste?.(text), { preventDefault: true }),
       (node) => (o.placeholder === undefined ? node : node.attr("placeholder", o.placeholder)),
       (node) => (o.required === true ? node.attr("required", "") : node),
       (node) => (o.disabled === true ? node.disabled(true) : node),
@@ -130,6 +135,10 @@ export const textArea = <M>(h: Html.H<M>, o: FieldOptions<M>): Markup<M> =>
       (element) => element.attr("name", o.id),
       (element) => element.value(o.value),
       (element) => element.on("input", ({ value }) => o.onInput(value)),
+      (node) =>
+        o.onPaste === undefined
+          ? node
+          : node.on("paste", ({ text }) => o.onPaste?.(text), { preventDefault: true }),
       (node) => (o.placeholder === undefined ? node : node.attr("placeholder", o.placeholder)),
       (node) => (o.error === undefined ? node : node.attr("aria-invalid", String(true))),
     ]),
