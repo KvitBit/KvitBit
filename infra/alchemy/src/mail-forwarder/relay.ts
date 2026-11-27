@@ -122,6 +122,18 @@ const aliasTagForRecipients = (recipients: ReadonlyArray<string>): string => {
   return locals.length === 0 ? "mail" : locals.join(",");
 };
 
+/** Compares mailboxes per RFC 5321 §2.3.11: local-part case-sensitive, domain case-insensitive. */
+const isSameMailbox = (a: string | undefined, b: string | undefined): boolean => {
+  if (!a || !b) return false;
+  const atA = a.lastIndexOf("@");
+  const atB = b.lastIndexOf("@");
+  if (atA <= 0 || atB <= 0) return a === b;
+  return (
+    a.slice(0, atA) === b.slice(0, atB) &&
+    a.slice(atA + 1).toLowerCase() === b.slice(atB + 1).toLowerCase()
+  );
+};
+
 /** Resend `reply_to` requires an ASCII address; internationalized addresses are preserved in the body instead. */
 const isAsciiResendEmail = (value: string | undefined): value is string =>
   typeof value === "string" &&
@@ -182,14 +194,14 @@ export const buildResendForwardPayload = (params: {
 
   const recipientList = recipients.join(", ");
   const originalFrom = parsed.fromHeader || message.mailFrom || "(empty reverse-path)";
-  // Surface Reply-To explicitly whenever it differs from From OR was omitted from
-  // Resend's ASCII-only `reply_to` field (e.g. internationalized `žan@example.net`).
+  // Surface Reply-To explicitly whenever it differs from From (case-sensitive local-part per
+  // RFC 5321 §2.3.11) OR was omitted from Resend's ASCII-only `reply_to` field.
   const visibleReplyTo =
     replyToCandidate &&
     replyToCandidate.trim().length > 0 &&
     (replyTo === undefined ||
       (parsed.replyToAddress !== undefined &&
-        parsed.replyToAddress.toLowerCase() !== (parsed.fromAddress ?? "").toLowerCase()))
+        !isSameMailbox(parsed.replyToAddress, parsed.fromAddress)))
       ? replyToCandidate
       : undefined;
   const skippedNotice =

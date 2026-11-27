@@ -266,14 +266,28 @@ const splitMultipart = (body: Uint8Array, boundary: string): Array<Uint8Array> =
 
 const ASCII_LDH_LABEL_RE = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$/;
 
+const isValidRawDomainLabel = (label: string): boolean => {
+  if (label.length === 0 || label.startsWith("-") || label.endsWith("-")) return false;
+  for (const ch of label) {
+    const code = ch.charCodeAt(0);
+    if (code <= 0x7f) {
+      const isAsciiLdh =
+        (code >= 0x30 && code <= 0x39) ||
+        (code >= 0x41 && code <= 0x5a) ||
+        (code >= 0x61 && code <= 0x7a) ||
+        code === 0x2d;
+      if (!isAsciiLdh) return false;
+    } else if (/\s/.test(ch)) {
+      return false;
+    }
+  }
+  return true;
+};
+
 const isValidDomain = (domain: string): boolean => {
   if (domain.length === 0 || domain.length > 253) return false;
-  for (const ch of domain) {
-    const code = ch.charCodeAt(0);
-    if (code <= 0x20 || code === 0x7f || /\s/.test(ch)) return false;
-  }
   const rawLabels = domain.split(".");
-  if (rawLabels.length < 2 || rawLabels.some((label) => label.length === 0)) {
+  if (rawLabels.length < 2 || !rawLabels.every(isValidRawDomainLabel)) {
     return false;
   }
   const asciiDomain = domainToASCII(domain);
@@ -358,11 +372,18 @@ const stripRfc5322Comments = (input: string): string => {
   return out.trim();
 };
 
+/** Collapses RFC 5322 §3.4.1 legal CFWS adjacent to `@` and dots in header addr-specs only. */
+const normalizeHeaderAddrSpec = (rawAddr: string): string =>
+  rawAddr
+    .trim()
+    .replace(/\s*@\s*/g, "@")
+    .replace(/\s*\.\s*/g, ".");
+
 export const extractAddress = (
   headerValue: string | undefined,
 ): { address: string | undefined; displayName: string | undefined } => {
   if (!headerValue) return { address: undefined, displayName: undefined };
-  // Strip RFC 5322 comments (including trailing comments after `>`) before RFC 2047 decoding
+  // Strip RFC 5322 comments (including trailing/inline comments) before RFC 2047 decoding
   // so neither comments nor encoded display-names can break or spoof angle-addr parsing.
   const uncommented = stripRfc5322Comments(headerValue);
   const angleMatch = uncommented.match(/^([\s\S]*?)<\s*([^<>]+?)\s*>\s*$/);
@@ -371,16 +392,17 @@ export const extractAddress = (
       .trim()
       .replace(/^["']|["']$/g, "")
       .trim();
-    const addr = (angleMatch[2] ?? "").trim();
+    const addr = normalizeHeaderAddrSpec(angleMatch[2] ?? "");
     return {
       address: isValidMailbox(addr) ? addr : undefined,
       displayName: rawName.length > 0 ? rawName : undefined,
     };
   }
-  // Bare header: validate the entire address token rather than matching an ASCII substring
-  // inside an internationalized mailbox like `žan@example.net`.
+  // Bare header: collapse legal CFWS around `@` / `.`, then validate the full address token
+  // rather than matching an ASCII substring inside an internationalized mailbox.
+  const bareAddr = normalizeHeaderAddrSpec(uncommented);
   return {
-    address: isValidMailbox(uncommented) ? uncommented : undefined,
+    address: isValidMailbox(bareAddr) ? bareAddr : undefined,
     displayName: undefined,
   };
 };
@@ -424,8 +446,13 @@ const stripHtmlToText = (html: string): string =>
 
 const renderSegments = (
   segments: ReadonlyArray<BodySegment>,
-): { readonly text: string | undefined; readonly html: string | undefined } => {
+): {
+  readonly text: string | undefined;
+  readonly html: string | undefined;
+  readonly hasExplicitText: boolean;
+} => {
   const hasAnyHtml = segments.some((seg) => seg.html !== undefined);
+  const hasExplicitText = segments.some((seg) => seg.text !== undefined);
   const renderedTextParts: Array<string> = [];
   const renderedHtmlParts: Array<string> = [];
 
@@ -449,6 +476,7 @@ const renderSegments = (
   return {
     text: renderedTextParts.length > 0 ? renderedTextParts.join("\n\n") : undefined,
     html: renderedHtmlParts.length > 0 ? renderedHtmlParts.join("<hr>") : undefined,
+    hasExplicitText,
   };
 };
 
@@ -464,7 +492,9 @@ const walkEntity = (raw: Uint8Array, out: CollectedParts, depth: number): void =
   if (mimeType.startsWith("multipart/") && contentType.params.boundary) {
     if (mimeType === "multipart/alternative") {
       // Per RFC 2046 §5.1.4, render each direct child completely (including nested
-      // multipart/mixed children) before selecting the preferred alternative representations.
+      // multipart/mixed or multipart/alternative children) before selecting alternatives.
+      // Track explicit plain-text separately so a later HTML-only sibling replaces HTML
+      // without discarding an earlier explicit plain-text alternative.
       let plainAltText: string | undefined;
       let fallbackText: string | undefined;
       let richestHtml: string | undefined;
@@ -474,11 +504,14 @@ const walkEntity = (raw: Uint8Array, out: CollectedParts, depth: number): void =
         const childBucket: CollectedParts = { segments: [], attachments: [] };
         walkEntity(child, childBucket, depth + 1);
         const rendered = renderSegments(childBucket.segments);
+        if (rendered.hasExplicitText && rendered.text !== undefined) {
+          plainAltText = rendered.text;
+        }
         if (rendered.html !== undefined) {
           richestHtml = rendered.html;
-          if (rendered.text !== undefined) fallbackText = rendered.text;
-        } else if (rendered.text !== undefined) {
-          plainAltText = rendered.text;
+          if (!rendered.hasExplicitText && rendered.text !== undefined) {
+            fallbackText = rendered.text;
+          }
         }
         attachments.push(...childBucket.attachments);
       }
