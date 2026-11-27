@@ -5,7 +5,7 @@ description: >-
   changes to apps/web/src, the web entry or build configuration, or
   packages/ui-port/src/theme.
 metadata:
-  sync_commit: "d3f12350481d32c29a51a019bf2410b7994a8cfa"
+  sync_commit: "b55265579619f921a6865aacaab5f8c49926ad5f"
   bun: "1.4.4"
   node: "24.18.0"
   effect: "4.1.4"
@@ -73,6 +73,10 @@ that record in a verification commit after the product changes.
 
 The recorded product commit passed the frozen install, root lint and
 typecheck, `bun test packages/ui-port apps/web`, the static build and asset
-checks, and the formal digest check. Playwright passed both profiles on
-port `34189` with one worker. The build includes the ALTCHA worker, hashed
-JavaScript and CSS, brand assets, and fonts.
+checks, and the formal digest check. The smoke and visual feedback Playwright
+suites passed on port `34181` with one worker across desktop and mobile.
+The feedback suite checks that verified owners can pin elements, retry a
+submission, and receive its issue link. It also checks that non-owners skip the
+picker chunk, that a token-bearing page is redacted, and that signing out
+disposes the picker. The build includes the lazy feedback chunk, ALTCHA worker,
+hashed JavaScript and CSS, brand assets, and fonts.
