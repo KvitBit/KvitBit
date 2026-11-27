@@ -5,7 +5,7 @@ description: >-
   changes to apps/web/src, the web entry or build configuration, or
   packages/ui-port/src/theme.
 metadata:
-  sync_commit: "d3f12350481d32c29a51a019bf2410b7994a8cfa"
+  sync_commit: "c54559c3a9ab795c44f08d4584e6a28c88074466"
   bun: "1.4.4"
   node: "24.18.0"
   effect: "4.1.4"
@@ -16,6 +16,7 @@ metadata:
   vite: "8.3.8"
   playwright: "1.65.1"
   chromium: "159.0.8154.6"
+  firefox: "159.0"
 ---
 
 # Verify the Effect UI web adapter
@@ -72,7 +73,13 @@ that record in a verification commit after the product changes.
 ## Verification record
 
 The recorded product commit passed the frozen install, root lint and
-typecheck, `bun test packages/ui-port apps/web`, the static build and asset
+typecheck, `bun test apps/web`, the static build and asset
 checks, and the formal digest check. Playwright passed both profiles on
-port `34189` with one worker. The build includes the ALTCHA worker, hashed
+port `52119` with one worker. The build includes the ALTCHA worker, hashed
 JavaScript and CSS, brand assets, and fonts.
+
+Chromium and Firefox loaded all bundled fonts without console warnings.
+The app's static router served the new font URLs as `font/ttf` with immutable
+cache headers. OpenType Sanitizer 9.2.0 reported zero warnings. FontTools
+4.69.1 confirmed the replacements preserve every character mapping and
+glyph advance width.
