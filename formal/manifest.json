@@ -1405,6 +1405,110 @@
         "bun": "1.4.2",
         "effect": "4.1.4"
       }
+    },
+    {
+      "id": "deploy-config.contract",
+      "skill": "verify-deploy-config",
+      "tier": 1,
+      "kind": "exhaustive",
+      "syncCommit": "927e9dd",
+      "command": "bun test --cwd apps/server ./test/runtime/deploy-config.exhaustive.test.ts",
+      "coveredFiles": [
+        {
+          "path": "apps/server/src/config-contract.ts",
+          "sha256": "3e7f5be9639b1e6373c4933556087b6dacffbaa70b2a9350e513669af7505f0e"
+        },
+        {
+          "path": "apps/server/src/config.ts",
+          "sha256": "ca671cf9311eec3f5402ad9f216ddeb5b6b6ced5bb30098ad8409438d105cf6c"
+        },
+        {
+          "path": "apps/server/src/main.ts",
+          "sha256": "27dea6d39607960a195f215691c56765de74f5014de33186e6505347de6ec10c"
+        },
+        {
+          "path": "apps/server/src/worker.ts",
+          "sha256": "d3a7d6c06cf89a6a5f179d25dfb6c68b918f66d915ef715a34bfedcd2c651e23"
+        },
+        {
+          "path": "apps/server/src/wiring/config.ts",
+          "sha256": "f2c486af6b10530021a0911e8fb884baaffe5b49bd9da597fa4fb378b17303a7"
+        },
+        {
+          "path": "apps/server/src/wiring/email.ts",
+          "sha256": "35ca720f5dd74af761bbd206e01c8a75aaecd724f3d453988be6c8e381f61d7f"
+        },
+        {
+          "path": "apps/server/src/wiring/blob.ts",
+          "sha256": "a97109fadbf93ae8498270dcdb81c2ee0696f487fd27402f829a2c9f718d0d70"
+        },
+        {
+          "path": "apps/server/src/http/mobile/config.ts",
+          "sha256": "0619115ead795cadea074048c370df8622c0a93e6a8c8f63b6b92e60e26107af"
+        },
+        {
+          "path": "apps/server/src/runtime/workflows.ts",
+          "sha256": "01b2483084444c266604d28208696ca4b06f757ba645190a3acc94928a80d08f"
+        },
+        {
+          "path": "infra/alchemy/src/deploy-preflight.ts",
+          "sha256": "85e448d0dab06076cd454f8104a1aee4a668dac9dd5302a58ec156ed807261f7"
+        },
+        {
+          "path": "infra/alchemy/src/preflight-cli.ts",
+          "sha256": "c1958fd5385b1f0c72d891b17164b10c1512d10937ae3b02e11380eec43060c1"
+        },
+        {
+          "path": "infra/alchemy/src/config.ts",
+          "sha256": "1cdd289c73dba0ce6fa4b6dfadc03169a9602bdd1f524cea36047cdafb91268c"
+        },
+        {
+          "path": "infra/alchemy/src/env.ts",
+          "sha256": "3c200d7dcc6077b17519d9bd8c4ab3919c34493c54765b8ce558b1ae1707ff28"
+        },
+        {
+          "path": ".github/workflows/deploy.yml",
+          "sha256": "622aa1e18af45ec11a5fddb582b522109058aacf093f32c81fd6bf6b9aa1b1ab"
+        }
+      ],
+      "guardedSymbols": [
+        "KVITBIT_ENVS",
+        "EMAIL_MODES",
+        "PROD_EMAIL_MODES",
+        "RESOLVED_EMAIL_MODES",
+        "BLOB_DRIVERS",
+        "SERVER_WORKLOADS",
+        "FORBIDDEN_OPT_OUT_ENV_VARS",
+        "resolveKvitbitEnv",
+        "validateAppOrigin",
+        "resolveEmailConfig",
+        "resolveBlobConfig",
+        "validateServerRuntimeEnv",
+        "loadBootRuntimeConfig",
+        "ServerConfig",
+        "makeEmailSenderLayer",
+        "makeBlobStorageLayer",
+        "MobileConfigLive",
+        "WorkflowHandlersLive",
+        "validateDeployPreflight",
+        "validateStackConfigSync",
+        "validateStackConfig",
+        "defaultSecretBindings",
+        "serverPlainEnv",
+        "serverSecretEnv",
+        "runnerPlainEnv",
+        "buildRunnerWorkerConfig"
+      ],
+      "bounds": "49 (KVITBIT_ENV x NODE_ENV) pairs; 129,024 server/worker runtime env states + 120 core secret/opt-out states; 540 real Effect layer builds (280 email, 20 blob, 240 mobile); 96,768 Alchemy stack states (+4 core consumer checks) with cross-layer server+worker soundness; 181,440 deploy.yml preflight states (+65 GCP/bool/opt-out checks) with 3-layer soundness (408,010 total exhaustive cases)",
+      "assumptions": [
+        "Representative values stand for each equivalence class (origin, EMAIL_FROM, SMTP URL, domain); live network/credential validity and Secret Manager ENABLED state are outside pure config verification",
+        "Cross-layer soundness substitutes synthetic valid non-empty strings for Secret Manager refs",
+        "YAML step wiring in deploy.yml is verified by infra/alchemy/test/selfhost.test.ts"
+      ],
+      "toolVersions": {
+        "bun": "1.4.2",
+        "effect": "4.1.4"
+      }
     }
   ]
 }
