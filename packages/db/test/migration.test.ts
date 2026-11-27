@@ -45,6 +45,7 @@ describe("committed migration", () => {
       "public.numbering_counters",
       "public.altcha_replays",
       "public.audit_entries",
+      "public.mcp_confirmations",
       "public.user_preferences",
       "auth.user",
       "auth.session",
@@ -76,12 +77,15 @@ describe("schema invariants", () => {
       "contacts",
       "price_list_items",
       "documents",
+      "deliveries",
       "payments",
       "expenses",
+      "attachments",
       "templates",
       "schedules",
       "schedule_runs",
       "memberships",
+      "exports",
       "user_preferences",
     ]) {
       expect(names).toContain(table);

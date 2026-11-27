@@ -1,5 +1,7 @@
 # Use Foldkit (Effect 4.1 + TEA) for the web adapter
 
+Superseded by [ADR-0006](0006-effect-ui-web-adapter.md).
+
 We chose **Foldkit (`0.171.x`, Effect 4.1 + The Elm Architecture)** over TanStack Start for `apps/web` because the team explicitly accepts experimental/unstable packages in exchange for pure Effect 4.1 end-to-end and a Model/Message/Update state architecture that aligns directly with `packages/ui-port`.
 
 ## Considered Options

@@ -40,25 +40,67 @@ jobs:
         env:
           KVITBIT_FORMAL_WIDE: "1"
 
-  # E2E SKELETONS. Each job passes with a notice while its app is absent and fails once the app
-  # exists without a wired suite, so a Phase 3 app cannot land with its nightly E2E silently off.
-  e2e-web:
-    name: e2e-web (Playwright, SKELETON)
+  pg-contention:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: kvitbit
+          POSTGRES_PASSWORD: kvitbit
+          POSTGRES_DB: kvitbit_contention
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U kvitbit"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      KVITBIT_CONTENTION_PG_URL: postgres://kvitbit:kvitbit@localhost:5432/kvitbit_contention
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - name: Playwright web journeys and hydration
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
+      - run: bun install --frozen-lockfile
+      - name: Postgres 17 adapter contention tests
+        run: bun test ./packages/adapters/test/sql/contention.postgres.test.ts
+        env:
+          DATABASE_URL: ${{ env.KVITBIT_CONTENTION_PG_URL }}
+      - name: Additional Postgres 17 contention suites
         run: |
-          if [ ! -d apps/web ]; then
-            echo "::notice::apps/web does not exist yet; Playwright E2E is a skeleton (ADR-0005)."
+          mapfile -t files < <(git ls-files '*.contention.ts')
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "::notice::No additional *.contention.ts suites found."
             exit 0
           fi
-          echo "::error::apps/web exists; replace this step with the Playwright suite (ADR-0005)."
-          exit 1
+          bun test "${files[@]/#/./}"
 
+  e2e-web:
+    name: e2e-web (Playwright)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
+      - run: bun install --frozen-lockfile
+      - run: bunx --no-install playwright install --with-deps chromium
+        working-directory: apps/web
+      - name: Playwright web journeys and hydration
+        run: bun run --cwd apps/web e2e
+
+  # These guards fail when the app exists and its E2E suite has yet to be wired.
   e2e-mobile:
     name: e2e-mobile (Expo, SKELETON)
     runs-on: ubuntu-latest

@@ -1,0 +1,205 @@
+import type { WorkspaceSettingsPatch } from "@kvitbit/domain/contract";
+import { ifMatchHeaders, inWorkspace } from "@kvitbit/ui-port/api";
+import { Plus, X } from "lucide-react-native";
+import { useEffect, useState } from "react";
+import { StyleSheet, View } from "react-native";
+import { useI18n } from "../../i18n/i18n-provider";
+import { useApi, useRemote } from "../../runtime/api-runtime";
+import {
+  Banner,
+  Button,
+  Card,
+  RemoteView,
+  Section,
+  SwitchRow,
+  space,
+  Text,
+  TextField,
+  useOverlay,
+} from "../../ui";
+import { useWorkspace } from "../../workspace/workspace-provider";
+import { canEditWorkspaceSettings } from "./permissions";
+import {
+  type FormErrorState,
+  fieldErrorText,
+  formErrorFrom,
+  noFormError,
+} from "./settings-feedback";
+import { parseWorkspaceView } from "./workspace-data";
+
+/** Settings -> Reminders (flow 7.5): overdue reminder schedule with optimistic revision check. */
+export function RemindersSection() {
+  const { workspace } = useWorkspace();
+  const api = useApi();
+  const i18n = useI18n();
+  const { t, local } = i18n;
+  const overlay = useOverlay();
+
+  const editable = canEditWorkspaceSettings(workspace.role, workspace.closed);
+  const remote = useRemote(
+    (client) => client.workspace.current({ params: inWorkspace(workspace.id) }),
+    [workspace.id],
+  );
+
+  const [enabled, setEnabled] = useState(true);
+  const [proformas, setProformas] = useState(false);
+  const [offsets, setOffsets] = useState<ReadonlyArray<number>>([3, 10, 30]);
+  const [newOffset, setNewOffset] = useState("");
+  const [revision, setRevision] = useState(1);
+  const [saving, setSaving] = useState(false);
+  const [errorState, setErrorState] = useState<FormErrorState>(noFormError);
+
+  useEffect(() => {
+    if (remote.state._tag !== "Ready") return;
+    const parsed = parseWorkspaceView(remote.state.value);
+    setEnabled(parsed.reminderPolicy.enabled);
+    setProformas(parsed.reminderPolicy.proformas);
+    setOffsets(parsed.reminderPolicy.offsetsDays);
+    setRevision(parsed.revision);
+    setErrorState(noFormError);
+  }, [remote.state]);
+
+  const handleAddOffset = () => {
+    const parsed = Number.parseInt(newOffset.trim(), 10);
+    if (!Number.isInteger(parsed) || parsed < 1 || parsed > 365) return;
+    if (!offsets.includes(parsed)) {
+      setOffsets([...offsets, parsed].sort((a, b) => a - b));
+    }
+    setNewOffset("");
+  };
+
+  const handleRemoveOffset = (day: number) => {
+    setOffsets(offsets.filter((d) => d !== day));
+  };
+
+  const handleSave = async () => {
+    if (!editable) return;
+    setSaving(true);
+    setErrorState(noFormError);
+    const payload = {
+      reminderPolicy: {
+        enabled,
+        proformas,
+        offsetsDays: [...offsets],
+      },
+    } as unknown as WorkspaceSettingsPatch;
+
+    const result = await api.run((client) =>
+      client.workspace.updateSettings({
+        params: inWorkspace(workspace.id),
+        headers: ifMatchHeaders(revision),
+        payload,
+      }),
+    );
+    setSaving(false);
+    if (result._tag === "Ok") {
+      remote.set(result.value);
+      setRevision(result.value.revision);
+      overlay.toast(t("common.toast.saved"));
+    } else {
+      setErrorState(formErrorFrom(result.error, i18n));
+    }
+  };
+
+  return (
+    <RemoteView state={remote.state} onRetry={remote.reload}>
+      {() => (
+        <View style={styles.stack}>
+          {editable ? null : <Banner text={t("settings.readOnly")} tone="info" />}
+          {errorState.banner === null ? null : (
+            <Banner
+              text={errorState.banner}
+              tone="error"
+              {...(errorState.staleRevision
+                ? { action: { label: t("common.action.reload"), onPress: remote.reload } }
+                : {})}
+            />
+          )}
+
+          <Section title={t("settings.reminders.title")}>
+            <Card>
+              <SwitchRow
+                label={t("settings.reminders.enable")}
+                value={enabled}
+                disabled={!editable}
+                onChange={setEnabled}
+              />
+              <SwitchRow
+                label={local({
+                  cs: "Posílat upomínky i pro zálohové faktury",
+                  en: "Also send reminders for proforma invoices",
+                })}
+                value={proformas}
+                disabled={!editable || !enabled}
+                onChange={setProformas}
+              />
+            </Card>
+          </Section>
+
+          <Section title={t("settings.reminders.offsets")}>
+            <Card>
+              {offsets.length === 0 ? (
+                <Text variant="meta" color="onSurfaceVariant">
+                  {t("common.state.none")}
+                </Text>
+              ) : (
+                <View style={styles.chips}>
+                  {offsets.map((day) => (
+                    <Button
+                      key={day}
+                      kind="tonal"
+                      {...(editable ? { icon: X } : {})}
+                      label={t("settings.reminders.offset", { count: day })}
+                      disabled={!editable}
+                      onPress={() => handleRemoveOffset(day)}
+                    />
+                  ))}
+                </View>
+              )}
+
+              {editable ? (
+                <View style={styles.addRow}>
+                  <View style={styles.flex}>
+                    <TextField
+                      label={t("settings.reminders.addOffset")}
+                      value={newOffset}
+                      keyboardType="number-pad"
+                      placeholder="14"
+                      error={fieldErrorText(errorState, ["reminderPolicy", "offsetsDays"], i18n)}
+                      onChangeText={setNewOffset}
+                    />
+                  </View>
+                  <Button
+                    testID="reminder-add-offset"
+                    kind="outlined"
+                    icon={Plus}
+                    label={t("common.action.add")}
+                    disabled={!/^\d+$/.test(newOffset.trim())}
+                    onPress={handleAddOffset}
+                  />
+                </View>
+              ) : null}
+            </Card>
+          </Section>
+
+          {editable ? (
+            <Button
+              testID="reminders-save"
+              kind="filled"
+              label={t("common.action.saveChanges")}
+              busy={saving}
+              onPress={() => void handleSave()}
+            />
+          ) : null}
+        </View>
+      )}
+    </RemoteView>
+  );
+}
+
+const styles = StyleSheet.create({
+  stack: { gap: space.lg },
+  flex: { flex: 1 },
+  chips: { flexDirection: "row", flexWrap: "wrap", gap: space.sm },
+  addRow: { flexDirection: "row", alignItems: "flex-end", gap: space.sm },
+});

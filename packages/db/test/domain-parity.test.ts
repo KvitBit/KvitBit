@@ -15,6 +15,7 @@ const pairs: ReadonlyArray<readonly [string, ReadonlyArray<unknown>, ReadonlyArr
   ["Locale", Enums.localeValues, Domain.Locale.literals],
   ["DocumentKind", Enums.documentKindValues, Domain.DocumentKind.literals],
   ["DocumentStatus", Enums.documentStatusValues, Domain.DocumentStatus.literals],
+  ["DocumentSettlement", Enums.documentSettlementValues, Domain.DocumentSettlement.literals],
   ["PaymentMethod", Enums.paymentMethodValues, Domain.PaymentMethod.literals],
   ["VatTreatment", Enums.vatTreatmentValues, Domain.VatTreatment.literals],
   ["EntityKind", Enums.entityKindValues, Domain.EntityKind.literals],

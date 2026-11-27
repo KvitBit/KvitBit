@@ -1,0 +1,117 @@
+name: kvitbit
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-kvitbit}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-kvitbit}
+      POSTGRES_DB: ${POSTGRES_DB:-kvitbit}
+      POSTGRES_APP_USER: ${POSTGRES_APP_USER:-kvitbit_app}
+      POSTGRES_APP_PASSWORD: ${POSTGRES_APP_PASSWORD:-kvitbit_app}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./docker/postgres-init:/docker-entrypoint-initdb.d:ro
+      - ./docker/reconcile-app-role.sh:/usr/local/bin/reconcile-app-role.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-kvitbit} -d ${POSTGRES_DB:-kvitbit}"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  migrate:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["migrate"]
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      # Owner-role credentials are scoped strictly to the one-shot migrate container (S5).
+      # Prefer DATABASE_MIGRATION_URL, then DATABASE_URL_UNPOOLED. Bundled owner
+      # credentials require DATABASE_URL to match the bundled host, port and database.
+      DATABASE_URL_UNPOOLED: ${DATABASE_MIGRATION_URL:-${DATABASE_URL_UNPOOLED:-}}
+      KVITBIT_RUNTIME_DATABASE_URL: ${DATABASE_URL:-}
+      KVITBIT_BUNDLED_DATABASE_NAME: ${POSTGRES_DB:-kvitbit}
+      KVITBIT_BUNDLED_MIGRATION_URL: postgres://${POSTGRES_USER:-kvitbit}:${POSTGRES_PASSWORD:-kvitbit}@postgres:5432/${POSTGRES_DB:-kvitbit}
+
+  reconcile-roles:
+    image: postgres:17-alpine
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    entrypoint: ["/bin/sh", "/usr/local/bin/reconcile-app-role.sh"]
+    environment:
+      PGHOST: postgres
+      PGPORT: "5432"
+      PGPASSWORD: ${POSTGRES_PASSWORD:-kvitbit}
+      POSTGRES_USER: ${POSTGRES_USER:-kvitbit}
+      POSTGRES_DB: ${POSTGRES_DB:-kvitbit}
+      POSTGRES_APP_USER: ${POSTGRES_APP_USER:-kvitbit_app}
+      POSTGRES_APP_PASSWORD: ${POSTGRES_APP_PASSWORD:-kvitbit_app}
+      KVITBIT_RUNTIME_DATABASE_URL: ${DATABASE_URL:-}
+      DATABASE_URL_UNPOOLED: ${DATABASE_MIGRATION_URL:-${DATABASE_URL_UNPOOLED:-}}
+    volumes:
+      - ./docker/reconcile-app-role.sh:/usr/local/bin/reconcile-app-role.sh:ro
+      - ./docker/database-target.sh:/usr/local/bin/database-target.sh:ro
+
+  kvitbit:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["server"]
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      reconcile-roles:
+        condition: service_completed_successfully
+    ports:
+      - "${KVITBIT_PORT:-8080}:8080"
+    environment:
+      NODE_ENV: production
+      HOST: "0.0.0.0"
+      PORT: "8080"
+      # Runtime server uses the DML-only app role, never migration owner credentials (S5).
+      DATABASE_URL: ${DATABASE_URL:-postgres://${POSTGRES_APP_USER:-kvitbit_app}:${POSTGRES_APP_PASSWORD:-kvitbit_app}@postgres:5432/${POSTGRES_DB:-kvitbit}}
+      KVITBIT_RUNNER_MODE: single
+      KVITBIT_BLOB_DRIVER: ${KVITBIT_BLOB_DRIVER:-local}
+      KVITBIT_BLOB_DIR: /var/lib/kvitbit/blobs
+      KVITBIT_BLOB_BUCKET: ${KVITBIT_BLOB_BUCKET:-}
+      KVITBIT_GCS_PROJECT: ${KVITBIT_GCS_PROJECT:-}
+      KVITBIT_WEB_DIR: /app/public/web
+      KVITBIT_PWA_DIR: /app/public/app
+      KVITBIT_CHROMIUM_PATH: /usr/bin/chromium
+      APP_ORIGIN: ${APP_ORIGIN:-http://localhost:8080}
+      BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET:?Set BETTER_AUTH_SECRET before starting Kvitbit}
+      EMAIL_FROM: ${EMAIL_FROM:-Kvitbit <no-reply@localhost>}
+      RESEND_API_KEY: ${RESEND_API_KEY:-}
+      KVITBIT_SMTP_URL: ${KVITBIT_SMTP_URL:-}
+      KVITBIT_TRUSTED_PROXY_HOPS: ${KVITBIT_TRUSTED_PROXY_HOPS:-0}
+      KVITBIT_SHARE_KEY_VERSION: ${KVITBIT_SHARE_KEY_VERSION:-1}
+      KVITBIT_MOBILE_UPDATES_SIGNING_KEY: ${KVITBIT_MOBILE_UPDATES_SIGNING_KEY:-}
+      KVITBIT_MOBILE_STORAGE_BUCKET: ${KVITBIT_MOBILE_STORAGE_BUCKET:-}
+      KVITBIT_MOBILE_STORAGE_DIR: /var/lib/kvitbit/mobile
+      KVITBIT_ANDROID_ASSETLINKS_SHA256: ${KVITBIT_ANDROID_ASSETLINKS_SHA256:-}
+    volumes:
+      - kvitbit_blobs:/var/lib/kvitbit/blobs
+      - kvitbit_mobile:/var/lib/kvitbit/mobile
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/kvitbit", "healthcheck"]
+      interval: 15s
+      timeout: 5s
+      start_period: 15s
+      retries: 5
+
+volumes:
+  postgres_data:
+  kvitbit_blobs:
+  kvitbit_mobile:

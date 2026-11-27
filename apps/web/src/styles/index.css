@@ -1,0 +1,8 @@
+@import "./fonts.css";
+@import "./base.css";
+@import "./ui.css";
+@import "./shell.css";
+@import "./pages/public.css";
+@import "./pages/documents.css";
+@import "./pages/records.css";
+@import "./pages/settings.css";

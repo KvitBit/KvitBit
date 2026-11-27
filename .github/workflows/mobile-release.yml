@@ -1,0 +1,398 @@
+name: Mobile release
+
+# A `mobile-vX.Y.Z` tag on main builds the release-signed Android APK, publishes
+# it to self-hosted storage (for /android and Obtainium), and publishes the
+# Expo Updates OTA bundle. Manual `workflow_dispatch` runs support apk-and-ota,
+# ota-only, rollback, and dry-run modes. Pull requests that touch the release
+# pipeline run unit tests and CLI dry-runs with no release secrets.
+on:
+  push:
+    tags:
+      - "mobile-v*"
+  workflow_dispatch:
+    inputs:
+      action:
+        description: Release action to run
+        type: choice
+        default: dry-run
+        options:
+          - dry-run
+          - apk-and-ota
+          - ota-only
+          - rollback
+      channel:
+        description: Expo Updates channel
+        type: string
+        default: production
+      platform:
+        description: Target platform for OTA or rollback
+        type: choice
+        default: android
+        options:
+          - android
+          - ios
+          - all
+      runtime_version:
+        description: Explicit runtime version (required for rollback, optional for ota-only)
+        type: string
+        default: ""
+      dry_run:
+        description: Validate and print plan without writing to storage or using release secrets
+        type: boolean
+        default: true
+  pull_request:
+    paths:
+      - ".github/workflows/mobile-release.yml"
+      - "apps/mobile/release/**"
+      - "apps/mobile/app.config.ts"
+      - "apps/mobile/plugins/**"
+      - "apps/mobile/code-signing/**"
+      - "scripts/release/mobile-release.ts"
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+concurrency:
+  group: mobile-release-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  prepare:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    outputs:
+      version: ${{ steps.metadata.outputs.version }}
+      version-code: ${{ steps.metadata.outputs.version-code }}
+      apk-name: ${{ steps.metadata.outputs.apk-name }}
+      dry-run: ${{ steps.mode.outputs.dry-run }}
+      action: ${{ steps.mode.outputs.action }}
+      channel: ${{ steps.mode.outputs.channel }}
+      platform: ${{ steps.mode.outputs.platform }}
+      runtime-version: ${{ steps.mode.outputs.runtime-version }}
+    env:
+      RELEASE_TAG: ${{ github.event_name == 'push' && github.ref_name || '' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
+
+      - run: bun install --frozen-lockfile
+
+      - name: Test release modules and CLI
+        run: |
+          set -euo pipefail
+          (cd apps/mobile && bun test release)
+          bun run --filter @kvitbit/mobile typecheck
+          bun run scripts/release/mobile-release.ts --help > /dev/null
+
+      - name: Resolve and validate release mode
+        id: mode
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_ACTION: ${{ inputs.action }}
+          INPUT_DRY_RUN: ${{ inputs.dry_run }}
+          INPUT_CHANNEL: ${{ inputs.channel }}
+          INPUT_PLATFORM: ${{ inputs.platform }}
+          INPUT_RUNTIME_VERSION: ${{ inputs.runtime_version }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" = "push" ]; then
+            action="apk-and-ota"
+            dry_run="false"
+            channel="production"
+            platform="android"
+            runtime_version=""
+          elif [ "$EVENT_NAME" = "pull_request" ]; then
+            action="dry-run"
+            dry_run="true"
+            channel="production"
+            platform="android"
+            runtime_version=""
+          else
+            action="$INPUT_ACTION"
+            dry_run="$INPUT_DRY_RUN"
+            channel="$INPUT_CHANNEL"
+            platform="$INPUT_PLATFORM"
+            runtime_version="$INPUT_RUNTIME_VERSION"
+            if [ "$action" = "dry-run" ]; then
+              dry_run="true"
+            fi
+          fi
+
+          case "$action" in
+            dry-run | apk-and-ota | ota-only | rollback) ;;
+            *)
+              echo "Invalid action: $action" >&2
+              exit 1
+              ;;
+          esac
+          case "$dry_run" in
+            true | false) ;;
+            *)
+              echo "Invalid dry_run: $dry_run" >&2
+              exit 1
+              ;;
+          esac
+          case "$platform" in
+            android | ios | all) ;;
+            *)
+              echo "Invalid platform: $platform" >&2
+              exit 1
+              ;;
+          esac
+          if ! [[ "$channel" =~ ^[a-z0-9][a-z0-9_-]{0,63}$ ]]; then
+            echo "Invalid release channel" >&2
+            exit 1
+          fi
+          if [ -n "$runtime_version" ] && ! [[ "$runtime_version" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]]; then
+            echo "Invalid runtime version" >&2
+            exit 1
+          fi
+
+          {
+            printf 'action=%s\n' "$action"
+            printf 'dry-run=%s\n' "$dry_run"
+            printf 'channel=%s\n' "$channel"
+            printf 'platform=%s\n' "$platform"
+            printf 'runtime-version=%s\n' "$runtime_version"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Read release metadata
+        id: metadata
+        run: |
+          set -euo pipefail
+          if [ -n "$RELEASE_TAG" ]; then
+            bun run scripts/release/mobile-release.ts metadata --tag "$RELEASE_TAG" | tee -a "$GITHUB_OUTPUT"
+          else
+            bun run scripts/release/mobile-release.ts metadata | tee -a "$GITHUB_OUTPUT"
+          fi
+
+      - name: Require tagged commit on main
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          status="$(gh api "repos/${GITHUB_REPOSITORY}/compare/main...${GITHUB_SHA}" --jq .status)"
+          case "$status" in
+            identical | behind) ;;
+            *)
+              echo "Tag $RELEASE_TAG points at $GITHUB_SHA, which is not on main (compare status: $status)." >&2
+              exit 1
+              ;;
+          esac
+
+      - name: Run CLI dry-run validation
+        if: steps.mode.outputs.dry-run == 'true'
+        env:
+          MODE_CHANNEL: ${{ steps.mode.outputs.channel }}
+          MODE_PLATFORM: ${{ steps.mode.outputs.platform }}
+        run: |
+          set -euo pipefail
+          bun run scripts/release/mobile-release.ts build --dry-run
+          bun run scripts/release/mobile-release.ts publish-apk --dry-run
+          bun run scripts/release/mobile-release.ts publish-ota --dry-run --channel "$MODE_CHANNEL" --platform "$MODE_PLATFORM"
+          platforms=("$MODE_PLATFORM")
+          if [ "$MODE_PLATFORM" = "all" ]; then platforms=(android ios); fi
+          for platform in "${platforms[@]}"; do
+            bun run scripts/release/mobile-release.ts verify --dry-run --channel "$MODE_CHANNEL" --platform "$platform"
+          done
+
+  build-and-publish-apk:
+    needs: prepare
+    if: needs.prepare.outputs.dry-run == 'false' && needs.prepare.outputs.action == 'apk-and-ota'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      id-token: write
+    # Release keystore and storage credentials live only in the mobile-release environment.
+    environment: mobile-release
+    env:
+      RELEASE_TAG: ${{ github.event_name == 'push' && github.ref_name || '' }}
+      KVITBIT_ORIGIN: ${{ vars.KVITBIT_ORIGIN || 'https://kvitbit.cz' }}
+      APK_NAME: ${{ needs.prepare.outputs.apk-name }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - run: bun install --frozen-lockfile
+
+      - name: Authenticate to Google Cloud
+        if: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER != '' }}
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_RELEASE_SERVICE_ACCOUNT }}
+
+      - name: Build signed Android APK
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          KVITBIT_ANDROID_SIGNING_CERT_SHA256: ${{ vars.KVITBIT_ANDROID_SIGNING_CERT_SHA256 }}
+          MOBILE_UPDATES_CODE_SIGNING_CERTIFICATE_PEM: ${{ vars.MOBILE_UPDATES_CODE_SIGNING_CERTIFICATE_PEM }}
+          EXPO_PUBLIC_API_ORIGIN: ${{ env.KVITBIT_ORIGIN }}
+          MOBILE_UPDATES_CODE_SIGNING: required
+        run: |
+          set -euo pipefail
+          args=(build --signing release --origin "$KVITBIT_ORIGIN" --out-dir "$RUNNER_TEMP/mobile-release")
+          if [ -n "$RELEASE_TAG" ]; then
+            args+=(--tag "$RELEASE_TAG")
+          fi
+          bun run scripts/release/mobile-release.ts "${args[@]}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kvitbit-mobile-apk
+          path: ${{ runner.temp }}/mobile-release/${{ needs.prepare.outputs.apk-name }}
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Publish signed APK and release.json
+        env:
+          KVITBIT_MOBILE_STORAGE_BUCKET: ${{ vars.KVITBIT_MOBILE_STORAGE_BUCKET }}
+          KVITBIT_ANDROID_SIGNING_CERT_SHA256: ${{ vars.KVITBIT_ANDROID_SIGNING_CERT_SHA256 }}
+        run: |
+          set -euo pipefail
+          bun run scripts/release/mobile-release.ts publish-apk \
+            --apk "$RUNNER_TEMP/mobile-release/$APK_NAME" \
+            --origin "$KVITBIT_ORIGIN"
+
+  publish-ota:
+    needs: [prepare, build-and-publish-apk]
+    if: |
+      always() &&
+      needs.prepare.result == 'success' &&
+      needs.prepare.outputs.dry-run == 'false' &&
+      (
+        (needs.prepare.outputs.action == 'apk-and-ota' && needs.build-and-publish-apk.result == 'success') ||
+        needs.prepare.outputs.action == 'ota-only'
+      )
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write
+    environment: mobile-release
+    env:
+      KVITBIT_ORIGIN: ${{ vars.KVITBIT_ORIGIN || 'https://kvitbit.cz' }}
+      EXPO_PUBLIC_API_ORIGIN: ${{ vars.KVITBIT_ORIGIN || 'https://kvitbit.cz' }}
+      MOBILE_UPDATES_CODE_SIGNING: required
+      MOBILE_UPDATES_CODE_SIGNING_CERTIFICATE_PEM: ${{ vars.MOBILE_UPDATES_CODE_SIGNING_CERTIFICATE_PEM }}
+      RELEASE_CHANNEL: ${{ needs.prepare.outputs.channel }}
+      RELEASE_PLATFORM: ${{ needs.prepare.outputs.platform }}
+      RELEASE_RUNTIME_VERSION: ${{ needs.prepare.outputs.runtime-version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - run: bun install --frozen-lockfile
+
+      - name: Authenticate to Google Cloud
+        if: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER != '' }}
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_RELEASE_SERVICE_ACCOUNT }}
+
+      - name: Publish Expo Updates OTA bundle
+        env:
+          KVITBIT_MOBILE_STORAGE_BUCKET: ${{ vars.KVITBIT_MOBILE_STORAGE_BUCKET }}
+        run: |
+          set -euo pipefail
+          args=(
+            publish-ota
+            --channel "$RELEASE_CHANNEL"
+            --platform "$RELEASE_PLATFORM"
+            --origin "$KVITBIT_ORIGIN"
+          )
+          if [ -n "$RELEASE_RUNTIME_VERSION" ]; then
+            args+=(--runtime-version "$RELEASE_RUNTIME_VERSION")
+          fi
+          bun run scripts/release/mobile-release.ts "${args[@]}"
+
+      - name: Verify live manifest endpoint
+        if: ${{ needs.prepare.outputs.runtime-version != '' }}
+        run: |
+          set -euo pipefail
+          bun run scripts/release/mobile-release.ts verify \
+            --origin "$KVITBIT_ORIGIN" \
+            --channel "$RELEASE_CHANNEL" \
+            --platform android \
+            --runtime-version "$RELEASE_RUNTIME_VERSION" \
+            --check-release
+
+  rollback:
+    needs: prepare
+    if: needs.prepare.outputs.dry-run == 'false' && needs.prepare.outputs.action == 'rollback'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write
+    environment: mobile-release
+    env:
+      KVITBIT_ORIGIN: ${{ vars.KVITBIT_ORIGIN || 'https://kvitbit.cz' }}
+      RELEASE_CHANNEL: ${{ needs.prepare.outputs.channel }}
+      RELEASE_PLATFORM: ${{ needs.prepare.outputs.platform }}
+      RELEASE_RUNTIME_VERSION: ${{ needs.prepare.outputs.runtime-version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
+
+      - run: bun install --frozen-lockfile
+
+      - name: Authenticate to Google Cloud
+        if: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER != '' }}
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_RELEASE_SERVICE_ACCOUNT }}
+
+      - name: Publish rollBackToEmbedded directive
+        env:
+          KVITBIT_MOBILE_STORAGE_BUCKET: ${{ vars.KVITBIT_MOBILE_STORAGE_BUCKET }}
+        run: |
+          set -euo pipefail
+          bun run scripts/release/mobile-release.ts rollback \
+            --channel "$RELEASE_CHANNEL" \
+            --platform "$RELEASE_PLATFORM" \
+            --runtime-version "$RELEASE_RUNTIME_VERSION"
