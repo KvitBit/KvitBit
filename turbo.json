@@ -86,6 +86,18 @@
       ],
       "outputs": ["formal/*.tsbuildinfo"]
     },
+    "//#typecheck:issue-pool": {
+      "inputs": [
+        "scripts/issue-pool/**/*.ts",
+        "scripts/issue-pool/tsconfig.json",
+        "tsconfig.base.json"
+      ],
+      "outputs": []
+    },
+    "//#test:issue-pool": {
+      "inputs": ["scripts/issue-pool/**"],
+      "outputs": []
+    },
     "//#check:bun-nix": {
       "inputs": ["bun.lock", "bun.nix", "scripts/generate-bun-nix.ts"],
       "outputs": []

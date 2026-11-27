@@ -107,9 +107,14 @@ describe("auth screens", () => {
   test("SignInScreen renders password, magic link, and passkey controls", () => {
     const tree = hostTree(<SignInScreen authClient={fakeAuthClient()} />, withProviders());
     const text = allText(tree);
+    const radios = findAll(tree, "Pressable")
+      .filter((el) => el.props.accessibilityRole === "radio")
+      .map((el) => allText(el).trim());
+    expect(radios).toEqual(["Password", "Email link"]);
     expect(text).toContain("Sign in to Kvitbit");
     expect(text).toContain("Sign in with a passkey");
-    expect(text).toContain("Email me a sign-in link");
+    expect(text).not.toContain("Sign in with a password");
+    expect(text).not.toContain("Email me a sign-in link");
     expect(text).toContain("Forgot password?");
   });
 

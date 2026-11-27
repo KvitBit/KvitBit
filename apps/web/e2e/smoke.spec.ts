@@ -1,7 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { resolve } from "node:path";
 import { gunzipSync } from "node:zlib";
-import { expect, type Page, test } from "@playwright/test";
+import { expect, type Locator, type Page, test } from "@playwright/test";
 import type { RenderedPath } from "../test/support";
 
 const DEMO_WS = "novak-design";
@@ -31,9 +31,134 @@ const attachErrorGuards = (page: Page) => {
   };
 };
 
+const expectFilledSegments = async (
+  group: Locator,
+  placement: "stretched" | "inline",
+  equalWidths = false,
+) => {
+  await expect(group).toBeVisible();
+  await group.page().evaluate(() => document.fonts.ready.then(() => undefined));
+  const layout = await group.evaluate((control) => {
+    const bounds = control.getBoundingClientRect();
+    const container = control.closest(".kb-card__title") ?? control.parentElement;
+    const buttons = [...control.querySelectorAll("button")].map((button) => {
+      const box = button.getBoundingClientRect();
+      const label = document.createRange();
+      label.selectNodeContents(button);
+      const text = label.getBoundingClientRect();
+      return {
+        width: box.width,
+        labelFits: text.left >= box.left && text.right <= box.right,
+        lineCount: label.getClientRects().length,
+        horizontalOffset: (text.left + text.right - box.left - box.right) / 2,
+        verticalOffset: (text.top + text.bottom - box.top - box.bottom) / 2,
+      };
+    });
+    const buttonWidth = buttons.reduce((total, button) => total + button.width, 0);
+    return {
+      buttons,
+      containerSpace: (container?.clientWidth ?? 0) - bounds.width,
+      unfilledWidth: control.clientWidth - buttonWidth,
+      overflow: Math.max(
+        -bounds.left,
+        bounds.right - document.documentElement.clientWidth,
+        control.scrollWidth - control.clientWidth,
+      ),
+    };
+  });
+  expect(layout.buttons.length).toBeGreaterThan(1);
+  expect(Math.abs(layout.unfilledWidth), "unfilled width inside the selector").toBeLessThan(1);
+  expect(layout.overflow, "horizontal overflow").toBeLessThan(1);
+  if (placement === "stretched") {
+    expect(Math.abs(layout.containerSpace), "space in the container").toBeLessThan(1);
+  } else {
+    expect(layout.containerSpace, "space left for other row items").toBeGreaterThan(1);
+  }
+  if (equalWidths) {
+    const widths = layout.buttons.map((button) => button.width);
+    expect(Math.max(...widths) - Math.min(...widths), "option width difference").toBeLessThan(2);
+  }
+  for (const button of layout.buttons) {
+    expect(button.labelFits, "label fits inside its button").toBe(true);
+    expect(Math.abs(button.horizontalOffset), "horizontal label alignment").toBeLessThan(2);
+    expect(Math.abs(button.verticalOffset), "vertical label alignment").toBeLessThan(2);
+  }
+  return layout.buttons;
+};
+
 // Guard so `bun test apps/web` (which scans *.spec.ts) does not invoke Playwright's test runner
 // outside Node/Playwright; `bun run --cwd apps/web e2e` executes under Node where `Bun` is absent.
 if (typeof Bun === "undefined") {
+  for (const locale of ["en", "cs"]) {
+    test.describe(`segmented controls in ${locale}`, () => {
+      test.use({ locale });
+
+      test("fill their containers in forms", async ({ page }) => {
+        const forms = [
+          ["/sign-up", 1],
+          ["/sign-in", 1],
+          ["/account/profile", 1],
+          ["/account/appearance", 3],
+          ["/oauth/consent?consent_id=demo", 1],
+        ] as const;
+
+        for (const [path, count] of forms) {
+          await test.step(path, async () => {
+            await page.goto(path);
+            await expect(page.locator(".kb-root")).toHaveAttribute("lang", locale);
+            const groups = page.locator(".kb-segmented");
+            await expect(groups).toHaveCount(count);
+            for (const group of await groups.all()) {
+              await expectFilledSegments(group, "stretched", path === "/sign-up");
+            }
+          });
+        }
+
+        await page.goto(`/w/${DEMO_WS}/settings/api-keys`);
+        await page.getByRole("button", { name: /^(Create API key|Vytvořit API klíč)$/ }).click();
+        await expectFilledSegments(page.locator(".kb-segmented"), "stretched");
+      });
+
+      test("keep inline controls compact and fill the export dialog selector", async ({ page }) => {
+        await page.goto("/i/demo-unpaid-czk");
+        await expect(page.locator(".kb-root")).toHaveAttribute("lang", locale);
+        await expectFilledSegments(page.locator(".kb-segmented"), "inline");
+
+        await page.goto(`/w/${DEMO_WS}/settings/branding`);
+        await expectFilledSegments(page.locator(".kb-segmented"), "inline");
+
+        await page.goto(`/w/${DEMO_WS}/expenses/new?mode=edit`);
+        await expectFilledSegments(page.locator(".kb-field > .kb-segmented"), "stretched");
+        await expectFilledSegments(page.locator(".kb-spread > .kb-segmented"), "inline");
+
+        await page.goto(`/w/${DEMO_WS}/reports/revenue?period=2026`);
+        await expectFilledSegments(page.locator(".kb-report-controls .kb-segmented"), "inline");
+        await page.getByRole("button", { name: /^(Export|Exportovat)$/ }).click();
+        await expectFilledSegments(page.getByRole("dialog").locator(".kb-segmented"), "stretched");
+      });
+    });
+  }
+
+  test.describe("segmented controls in narrow appearance fields", () => {
+    test.use({ locale: "cs" });
+
+    test("center wrapped Czech labels and keep single words intact", async ({ page }) => {
+      await page.goto("/account/appearance");
+      const mode = page.getByRole("group", { name: "Režim", exact: true });
+      const contrast = page.getByRole("group", { name: "Kontrast", exact: true });
+      // Exercise the settings grid's minimum track width in both viewport profiles.
+      const grid = page.locator(".kb-form-grid").filter({ has: mode });
+      await grid.evaluate((element) => {
+        element.style.gridTemplateColumns = "repeat(auto-fit, 220px)";
+      });
+
+      const modes = await expectFilledSegments(mode, "stretched");
+      expect(modes.some((button) => button.lineCount > 1)).toBe(true);
+      const contrasts = await expectFilledSegments(contrast, "stretched");
+      expect(contrasts.every((button) => button.lineCount === 1)).toBe(true);
+    });
+  });
+
   test.describe("web smoke journeys (demo mode)", () => {
     test("sends only cookieless pageviews after a single startup config request", async ({
       page,
@@ -127,6 +252,84 @@ if (typeof Bun === "undefined") {
         await expect(page.locator("#kb-theme-vars")).toBeAttached();
         await expect(page.locator("#main")).toBeVisible();
         await expect(page).toHaveTitle(/Kvitbit/);
+      }
+
+      errors.assertClean();
+    });
+
+    test("sign-in method selector stays single-line in English and Czech across styles", async ({
+      page,
+    }) => {
+      const errors = attachErrorGuards(page);
+      const cases = [
+        {
+          locale: "en",
+          labels: ["Password", "Email link", "Passkey"],
+          passkeyCta: "Sign in with a passkey",
+        },
+        {
+          locale: "cs",
+          labels: ["Heslo", "Odkaz e-mailem", "Přístupový klíč"],
+          passkeyCta: "Přihlásit se přístupovým klíčem",
+        },
+      ] as const;
+
+      await page.goto("/sign-in", { waitUntil: "domcontentloaded" });
+
+      for (const style of ["elegant", "cozy"] as const) {
+        for (const { locale, labels, passkeyCta } of cases) {
+          await page.evaluate(
+            ({ loc, sty }) => {
+              window.localStorage.setItem(
+                "kvitbit.prefs",
+                JSON.stringify({
+                  locale: loc,
+                  style: sty,
+                  mode: "system",
+                  contrast: "standard",
+                  theme: { _tag: "Preset", id: "graphite_atelier" },
+                }),
+              );
+            },
+            { loc: locale, sty: style },
+          );
+          await page.reload({ waitUntil: "domcontentloaded" });
+          await page.evaluate(() => document.fonts.ready);
+          await expect(page.locator(".kb-root")).toHaveAttribute("lang", locale);
+          await expect(page.locator(".kb-root")).toHaveAttribute("data-style", style);
+
+          const segmented = page.locator(".kb-auth-form .kb-segmented");
+          const buttons = segmented.locator("button");
+          await expect(buttons).toHaveText([...labels]);
+
+          const layout = await segmented.evaluate((el) => {
+            const groupRect = el.getBoundingClientRect();
+            const btns = [...el.querySelectorAll("button")];
+            return {
+              groupRight: groupRect.right,
+              lastBtnRight: btns.at(-1)?.getBoundingClientRect().right ?? 0,
+              items: btns.map((btn) => {
+                const range = document.createRange();
+                range.selectNodeContents(btn);
+                const lineCount = range.getClientRects().length;
+                return {
+                  text: btn.textContent?.trim() ?? "",
+                  lineCount,
+                  overflowX: btn.scrollWidth > btn.clientWidth + 1,
+                };
+              }),
+            };
+          });
+
+          for (const item of layout.items) {
+            expect(item.lineCount, `${style}/${locale} "${item.text}" wrapped`).toBe(1);
+            expect(item.overflowX, `${style}/${locale} "${item.text}" overflowed`).toBe(false);
+          }
+          expect(Math.abs(layout.groupRight - layout.lastBtnRight)).toBeLessThanOrEqual(2);
+
+          await buttons.nth(2).click();
+          await expect(page.getByTestId("auth-passkey-btn")).toHaveText(passkeyCta);
+        }
       }
 
       errors.assertClean();
