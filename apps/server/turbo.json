@@ -32,6 +32,7 @@
         "!src/worker.ts",
         "!src/migrate.ts",
         "test/http/**",
+        "test/analytics-fixture.ts",
         "test/persistence/conformance/sqlCore.ts"
       ],
       "env": ["TZ"],
@@ -63,6 +64,8 @@
         "tsconfig.json",
         "src/**",
         "test/runtime/**",
+        "test/analytics.test.ts",
+        "test/analytics-fixture.ts",
         "test/http/**",
         "test/persistence/**"
       ],
