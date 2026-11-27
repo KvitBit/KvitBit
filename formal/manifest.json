@@ -1411,12 +1411,12 @@
       "skill": "verify-deploy-config",
       "tier": 1,
       "kind": "exhaustive",
-      "syncCommit": "927e9dd",
+      "syncCommit": "9f12a71",
       "command": "bun test --cwd apps/server ./test/runtime/deploy-config.exhaustive.test.ts",
       "coveredFiles": [
         {
           "path": "apps/server/src/config-contract.ts",
-          "sha256": "3e7f5be9639b1e6373c4933556087b6dacffbaa70b2a9350e513669af7505f0e"
+          "sha256": "0ba69134f5c530db1594da0708ae707ed6685c9ab14d1993c5d55112759ec5e7"
         },
         {
           "path": "apps/server/src/config.ts",
@@ -1444,7 +1444,7 @@
         },
         {
           "path": "apps/server/src/http/mobile/config.ts",
-          "sha256": "0619115ead795cadea074048c370df8622c0a93e6a8c8f63b6b92e60e26107af"
+          "sha256": "d089bc4397f046d7a9f52cdcd336e8f7abe961ab7059d495a98b92780c16ed24"
         },
         {
           "path": "apps/server/src/runtime/workflows.ts",
@@ -1452,7 +1452,7 @@
         },
         {
           "path": "infra/alchemy/src/deploy-preflight.ts",
-          "sha256": "85e448d0dab06076cd454f8104a1aee4a668dac9dd5302a58ec156ed807261f7"
+          "sha256": "14cd08376a81bfba7c3905e87804ddab4b4305f45a405361fde9d655b3b7a391"
         },
         {
           "path": "infra/alchemy/src/preflight-cli.ts",
@@ -1460,15 +1460,23 @@
         },
         {
           "path": "infra/alchemy/src/config.ts",
-          "sha256": "1cdd289c73dba0ce6fa4b6dfadc03169a9602bdd1f524cea36047cdafb91268c"
+          "sha256": "4e99d8ad37bfbc2347ed7cf6de06d8965a1a3f370741bfab84aba351e755b362"
         },
         {
           "path": "infra/alchemy/src/env.ts",
           "sha256": "3c200d7dcc6077b17519d9bd8c4ab3919c34493c54765b8ce558b1ae1707ff28"
         },
         {
+          "path": "infra/alchemy/src/bootstrap.ts",
+          "sha256": "c7ad714930fc08d8e79e0d17d4230b0edae7d23b968c6313ffc4f5a0b75db9cf"
+        },
+        {
+          "path": "infra/alchemy/alchemy.run.ts",
+          "sha256": "ca0bcfdbf3f5712d99f7aa9477b4ad483ff09995c93f497761e1d3c9cf451186"
+        },
+        {
           "path": ".github/workflows/deploy.yml",
-          "sha256": "622aa1e18af45ec11a5fddb582b522109058aacf093f32c81fd6bf6b9aa1b1ab"
+          "sha256": "09647acbbe5e894e05c9e845a512b4d09d60e397eb66d488e6d1e18e5d465c2c"
         }
       ],
       "guardedSymbols": [
@@ -1493,13 +1501,16 @@
         "validateDeployPreflight",
         "validateStackConfigSync",
         "validateStackConfig",
+        "loadStackConfig",
         "defaultSecretBindings",
         "serverPlainEnv",
         "serverSecretEnv",
         "runnerPlainEnv",
-        "buildRunnerWorkerConfig"
+        "buildRunnerWorkerConfig",
+        "declareKvitbitStack",
+        "assertFeedbackSecretSelection"
       ],
-      "bounds": "49 (KVITBIT_ENV x NODE_ENV) pairs; 129,024 server/worker runtime env states + 120 core secret/opt-out states; 540 real Effect layer builds (280 email, 20 blob, 240 mobile); 96,768 Alchemy stack states (+4 core consumer checks) with cross-layer server+worker soundness; 181,440 deploy.yml preflight states (+65 GCP/bool/opt-out checks) with 3-layer soundness (408,010 total exhaustive cases)",
+      "bounds": "49 (KVITBIT_ENV x NODE_ENV) pairs; 215,040 server/worker runtime env states + 211 core secret/dynamic opt-out/upgrade states; 780 real Effect layer builds (280 email, 20 blob, 480 mobile); 150,528 Alchemy stack states (+12 core consumer and live loadStackConfig opt-out checks) with cross-layer server+worker soundness; 290,304 deploy.yml preflight states (+76 GCP/bool/opt-out/repo-vars checks) with 3-layer soundness (657,000 total exhaustive cases)",
       "assumptions": [
         "Representative values stand for each equivalence class (origin, EMAIL_FROM, SMTP URL, domain); live network/credential validity and Secret Manager ENABLED state are outside pure config verification",
         "Cross-layer soundness substitutes synthetic valid non-empty strings for Secret Manager refs",

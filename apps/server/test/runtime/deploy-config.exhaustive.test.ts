@@ -25,6 +25,7 @@ import {
   KVITBIT_PROD_DEFAULTS,
   type KvitbitEdgeConfig,
   type KvitbitStackConfig,
+  loadStackConfig,
   validateStackConfigSync,
 } from "../../../../infra/alchemy/src/config";
 import {
@@ -46,6 +47,7 @@ import {
   FORBIDDEN_OPT_OUT_ENV_VARS,
   KVITBIT_ENVS,
   type KvitbitEnv,
+  loadBootRuntimeConfig,
   PROD_EMAIL_MODES,
   RESOLVED_EMAIL_MODES,
   resolveKvitbitEnv,
@@ -69,6 +71,8 @@ type OriginCase =
   | "http_public"
   | "http_localhost"
   | "https_localhost"
+  | "https_localhost_dot"
+  | "https_sub_localhost_dot"
   | "https_127"
   | "https_ipv6_loopback"
   | "invalid_url";
@@ -79,6 +83,8 @@ const ORIGIN_VALUES: Readonly<Record<OriginCase, string | undefined>> = {
   http_public: "http://kvitbit.cz",
   http_localhost: "http://localhost:8080",
   https_localhost: "https://localhost:8443",
+  https_localhost_dot: "https://localhost.",
+  https_sub_localhost_dot: "https://sub.localhost.",
   https_127: "https://127.0.0.1:8443",
   https_ipv6_loopback: "https://[::1]:8443",
   invalid_url: "not-a-url",
@@ -109,7 +115,17 @@ type EmailSecretsCase =
   | "both_valid"
   | "both_smtp_invalid";
 
-type EmailFromCase = "absent" | "valid" | "invalid";
+type EmailFromCase = "absent" | "valid" | "invalid" | "invalid_double_dot";
+
+const EMAIL_FROM_VALUES: Readonly<Record<EmailFromCase, string | undefined>> = {
+  absent: undefined,
+  valid: "Kvitbit <noreply@kvitbit.cz>",
+  invalid: "invalid-from",
+  invalid_double_dot: "a..b@example.org",
+};
+
+const isInvalidFromCase = (from: EmailFromCase): boolean =>
+  from === "invalid" || from === "invalid_double_dot";
 
 const oracleEmail = (
   env: KvitbitEnv,
@@ -144,7 +160,7 @@ const oracleEmail = (
   }
 
   if (effectiveMode === "capture" || effectiveMode === "console") {
-    return from === "invalid" ? { ok: false } : { ok: true, expectedMode: effectiveMode };
+    return isInvalidFromCase(from) ? { ok: false } : { ok: true, expectedMode: effectiveMode };
   }
 
   if ((effectiveMode === "resend" || effectiveMode === "resend+smtp") && !hasResend) {
@@ -154,7 +170,7 @@ const oracleEmail = (
     return { ok: false };
   }
 
-  if (from === "invalid") return { ok: false };
+  if (isInvalidFromCase(from)) return { ok: false };
   if (from === "absent" && env !== "development" && env !== "test") return { ok: false };
 
   return { ok: true, expectedMode: effectiveMode };
@@ -234,7 +250,7 @@ describe("verify-deploy-config: finite domain size guards", () => {
     expect(DEPLOY_MODES).toEqual(["normal", "bootstrap_foundation", "bootstrap_feedback_secret"]);
     expect(SECRET_FLAG_ENV_VARS.length).toBe(4);
     expect(REQUIRED_GCP_VARS.length).toBe(7);
-    expect(FORBIDDEN_OPT_OUT_ENV_VARS.length).toBe(6);
+    expect(FORBIDDEN_OPT_OUT_ENV_VARS.length).toBe(7);
   });
 });
 
@@ -275,7 +291,7 @@ describe("verify-deploy-config: apps/server runtime contract", () => {
     expect(checked).toBe(49);
   });
 
-  test("validateServerRuntimeEnv matches oracle across full 129,024-state Cartesian product", () => {
+  test("validateServerRuntimeEnv matches oracle across full 215,040-state Cartesian product", () => {
     const envInputs: ReadonlyArray<{
       readonly label: string;
       readonly kvitbitEnv?: string;
@@ -311,6 +327,8 @@ describe("verify-deploy-config: apps/server runtime contract", () => {
       "http_public",
       "http_localhost",
       "https_localhost",
+      "https_localhost_dot",
+      "https_sub_localhost_dot",
       "https_127",
       "https_ipv6_loopback",
       "invalid_url",
@@ -333,7 +351,12 @@ describe("verify-deploy-config: apps/server runtime contract", () => {
       "both_valid",
       "both_smtp_invalid",
     ];
-    const emailFroms: ReadonlyArray<EmailFromCase> = ["absent", "valid", "invalid"];
+    const emailFroms: ReadonlyArray<EmailFromCase> = [
+      "absent",
+      "valid",
+      "invalid",
+      "invalid_double_dot",
+    ];
     const blobDrivers: ReadonlyArray<BlobDriverCase> = ["absent", "gcs", "local", "bogus"];
     const blobBuckets: ReadonlyArray<BlobBucketCase> = ["absent", "present"];
 
@@ -358,12 +381,7 @@ describe("verify-deploy-config: apps/server runtime contract", () => {
                       BETTER_AUTH_SECRET: "test-auth-secret",
                       APP_ORIGIN: ORIGIN_VALUES[origin],
                       KVITBIT_EMAIL_MODE: emailMode === "absent" ? undefined : emailMode,
-                      EMAIL_FROM:
-                        from === "absent"
-                          ? undefined
-                          : from === "valid"
-                            ? "Kvitbit <noreply@kvitbit.cz>"
-                            : "invalid-from",
+                      EMAIL_FROM: EMAIL_FROM_VALUES[from],
                       RESEND_API_KEY:
                         secrets === "resend_only" ||
                         secrets === "both_valid" ||
@@ -448,12 +466,12 @@ describe("verify-deploy-config: apps/server runtime contract", () => {
     }
 
     expect(failures).toEqual([]);
-    expect(total).toBe(129_024);
+    expect(total).toBe(215_040);
     expect(prodAccepted).toBeGreaterThan(0);
     expect(stagingPreviewExplicitNonProdAccepted).toBeGreaterThan(0);
   });
 
-  test("core DB/auth secrets and forbidden opt-out flags across all workloads and environments", () => {
+  test("core DB/auth secrets and forbidden opt-out flags across pure validator AND live loadBootRuntimeConfig", async () => {
     const coreCases = [
       { label: "both", db: "postgres://a/b", unpooled: "postgres://a/b", auth: "secret" },
       { label: "db_only", db: "postgres://a/b", unpooled: undefined, auth: "secret" },
@@ -494,29 +512,64 @@ describe("verify-deploy-config: apps/server runtime contract", () => {
 
     const optOutKeys = [...FORBIDDEN_OPT_OUT_ENV_VARS, "KVITBIT_DISABLE_CUSTOM"] as const;
     let optOutChecked = 0;
+    let liveOptOutChecked = 0;
     for (const workload of SERVER_WORKLOADS) {
       for (const env of KVITBIT_ENVS) {
         for (const key of optOutKeys) {
           optOutChecked++;
-          const res = validateServerRuntimeEnv(
-            {
-              KVITBIT_ENV: env,
-              DATABASE_URL: "postgres://a/b",
-              BETTER_AUTH_SECRET: "secret",
-              APP_ORIGIN: "https://kvitbit.cz",
-              EMAIL_FROM: "Kvitbit <noreply@kvitbit.cz>",
-              RESEND_API_KEY: "re_key",
-              KVITBIT_BLOB_DRIVER: "gcs",
-              KVITBIT_BLOB_BUCKET: "kvitbit-blobs",
-              [key]: "true",
-            },
-            workload,
+          const envMap: Record<string, string> = {
+            KVITBIT_ENV: env,
+            DATABASE_URL: "postgres://a/b",
+            BETTER_AUTH_SECRET: "secret",
+            APP_ORIGIN: "https://kvitbit.cz",
+            EMAIL_FROM: "Kvitbit <noreply@kvitbit.cz>",
+            RESEND_API_KEY: "re_key",
+            KVITBIT_BLOB_DRIVER: "gcs",
+            KVITBIT_BLOB_BUCKET: "kvitbit-blobs",
+            [key]: "true",
+          };
+          const res = validateServerRuntimeEnv(envMap, workload);
+          expect(res.ok, `pure ${workload} ${env} ${key}`).toBe(false);
+
+          // Live Effect loader must also reject every dynamic forbidden flag.
+          liveOptOutChecked++;
+          const live = await Effect.runPromise(
+            loadBootRuntimeConfig(workload).pipe(
+              Effect.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env: envMap }))),
+              Effect.result,
+            ),
           );
-          expect(res.ok, `${workload} ${env} ${key}`).toBe(false);
+          expect(live._tag, `live ${workload} ${env} ${key}`).toBe("Failure");
         }
       }
     }
-    expect(optOutChecked).toBe(70);
+    expect(optOutChecked).toBe(80);
+    expect(liveOptOutChecked).toBe(80);
+
+    // Upgrade preservation: NODE_ENV=production with empty KVITBIT_ENV and configured Resend stays in production (never capture).
+    const upgraded = await Effect.runPromise(
+      loadBootRuntimeConfig("server").pipe(
+        Effect.provide(
+          ConfigProvider.layer(
+            ConfigProvider.fromEnv({
+              env: {
+                NODE_ENV: "production",
+                KVITBIT_ENV: "",
+                DATABASE_URL: "postgres://a/b",
+                BETTER_AUTH_SECRET: "secret",
+                APP_ORIGIN: "https://kvitbit.cz",
+                EMAIL_FROM: "Kvitbit <noreply@kvitbit.cz>",
+                RESEND_API_KEY: "re_key",
+                KVITBIT_BLOB_DRIVER: "gcs",
+                KVITBIT_BLOB_BUCKET: "kvitbit-blobs",
+              },
+            }),
+          ),
+        ),
+      ),
+    );
+    expect(upgraded.env).toBe("production");
+    expect(upgraded.email.mode).toBe("resend");
   });
 
   test("real Effect layers (makeEmailSenderLayer, makeBlobStorageLayer, MobileConfigLive) match oracle", async () => {
@@ -623,7 +676,7 @@ describe("verify-deploy-config: apps/server runtime contract", () => {
     }
     expect(blobLayersChecked).toBe(20);
 
-    // 3. MobileConfigLive: 5 envs x 4 origins x 2 mobileBucket x 3 blobDriver x 2 blobBucket = 240 runs
+    // 3. MobileConfigLive: 5 envs x 4 origins x 2 mobileBucket x 2 mobileDir (incl. image default) x 3 blobDriver x 2 blobBucket = 480 runs
     const mobileOrigins: ReadonlyArray<OriginCase> = [
       "absent",
       "https_public",
@@ -634,54 +687,63 @@ describe("verify-deploy-config: apps/server runtime contract", () => {
     for (const env of KVITBIT_ENVS) {
       for (const origin of mobileOrigins) {
         for (const hasMobileBucket of [false, true] as const) {
-          for (const blobDriver of ["absent", "gcs", "local"] as const) {
-            for (const hasBlobBucket of [false, true] as const) {
-              mobileChecked++;
-              const rawEnv: Record<string, string> = { KVITBIT_ENV: env };
-              const originVal = ORIGIN_VALUES[origin];
-              if (originVal !== undefined) rawEnv.APP_ORIGIN = originVal;
-              if (hasMobileBucket) rawEnv.KVITBIT_MOBILE_STORAGE_BUCKET = "mobile-bucket";
-              if (blobDriver !== "absent") rawEnv.KVITBIT_BLOB_DRIVER = blobDriver;
-              if (hasBlobBucket) rawEnv.KVITBIT_BLOB_BUCKET = "blob-bucket";
+          for (const hasMobileDir of [false, true] as const) {
+            for (const blobDriver of ["absent", "gcs", "local"] as const) {
+              for (const hasBlobBucket of [false, true] as const) {
+                mobileChecked++;
+                const rawEnv: Record<string, string> = { KVITBIT_ENV: env };
+                const originVal = ORIGIN_VALUES[origin];
+                if (originVal !== undefined) rawEnv.APP_ORIGIN = originVal;
+                if (hasMobileBucket) rawEnv.KVITBIT_MOBILE_STORAGE_BUCKET = "mobile-bucket";
+                if (hasMobileDir) rawEnv.KVITBIT_MOBILE_STORAGE_DIR = "/var/lib/kvitbit/mobile";
+                if (blobDriver !== "absent") rawEnv.KVITBIT_BLOB_DRIVER = blobDriver;
+                if (hasBlobBucket) rawEnv.KVITBIT_BLOB_BUCKET = "blob-bucket";
 
-              const res = await Effect.runPromise(
-                Effect.gen(function* () {
-                  return yield* MobileConfig;
-                }).pipe(
-                  Effect.provide(MobileConfigLive),
-                  Effect.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env: rawEnv }))),
-                  Effect.result,
-                ),
-              );
+                const res = await Effect.runPromise(
+                  Effect.gen(function* () {
+                    return yield* MobileConfig;
+                  }).pipe(
+                    Effect.provide(MobileConfigLive),
+                    Effect.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env: rawEnv }))),
+                    Effect.result,
+                  ),
+                );
 
-              const originOk = oracleOriginAccepted(env, origin);
-              let storageOk: boolean;
-              if (env === "production") {
-                if (blobDriver === "local") storageOk = false;
-                else if (hasMobileBucket) storageOk = true;
-                else storageOk = blobDriver === "gcs" && hasBlobBucket;
-              } else if (hasMobileBucket) {
-                storageOk = true;
-              } else if (blobDriver === "gcs") {
-                storageOk = hasBlobBucket;
-              } else if (blobDriver === "local") {
-                storageOk = true;
-              } else if (hasBlobBucket) {
-                storageOk = true;
-              } else {
-                storageOk = env === "development" || env === "test";
+                const originOk = oracleOriginAccepted(env, origin);
+                let expectedTag: "gcs" | "local" | undefined;
+                if (env === "production") {
+                  if (blobDriver === "local") expectedTag = undefined;
+                  else if (hasMobileBucket) expectedTag = "gcs";
+                  else expectedTag = blobDriver === "gcs" && hasBlobBucket ? "gcs" : undefined;
+                } else if (env === "staging" || env === "preview") {
+                  if (hasMobileBucket) expectedTag = "gcs";
+                  else if (blobDriver === "gcs") expectedTag = hasBlobBucket ? "gcs" : undefined;
+                  else if (blobDriver === "local") expectedTag = "local";
+                  else expectedTag = undefined;
+                } else {
+                  if (hasMobileBucket) expectedTag = "gcs";
+                  else if (hasMobileDir) expectedTag = "local";
+                  else if (blobDriver === "gcs") expectedTag = hasBlobBucket ? "gcs" : undefined;
+                  else if (blobDriver === "local") expectedTag = "local";
+                  else if (hasBlobBucket) expectedTag = "gcs";
+                  else expectedTag = "local";
+                }
+
+                const expOk = originOk && expectedTag !== undefined;
+                expect(
+                  res._tag === "Success",
+                  `MobileConfigLive ${env} origin=${origin} mobileBucket=${hasMobileBucket} mobileDir=${hasMobileDir} blob=${blobDriver}/${hasBlobBucket}`,
+                ).toBe(expOk);
+                if (res._tag === "Success" && expectedTag !== undefined) {
+                  expect(res.success.storage._tag).toBe(expectedTag);
+                }
               }
-
-              expect(
-                res._tag === "Success",
-                `MobileConfigLive ${env} origin=${origin} mobileBucket=${hasMobileBucket} blob=${blobDriver}/${hasBlobBucket}`,
-              ).toBe(originOk && storageOk);
             }
           }
         }
       }
     }
-    expect(mobileChecked).toBe(240);
+    expect(mobileChecked).toBe(480);
   });
 });
 
@@ -689,7 +751,7 @@ describe("verify-deploy-config: apps/server runtime contract", () => {
 // 3. infra/alchemy exhaustive checks + cross-layer soundness (Alchemy -> server)
 
 describe("verify-deploy-config: infra/alchemy stack validation & cross-layer soundness", () => {
-  test("validateStackConfigSync matches oracle across all 96,768 states and proves cross-layer soundness to apps/server", () => {
+  test("validateStackConfigSync matches oracle across all 150,528 states and proves cross-layer soundness to apps/server", () => {
     const deployModeCases = [
       { label: "normal", bootstrapFoundation: false, bootstrapFeedbackSecret: false },
       { label: "bootstrap_foundation", bootstrapFoundation: true, bootstrapFeedbackSecret: false },
@@ -705,6 +767,7 @@ describe("verify-deploy-config: infra/alchemy stack validation & cross-layer sou
       "https_public",
       "http_public",
       "https_localhost",
+      "https_localhost_dot",
       "http_localhost",
       "invalid_url",
     ];
@@ -723,7 +786,12 @@ describe("verify-deploy-config: infra/alchemy stack validation & cross-layer sou
       { label: "smtp", enableResend: false, enableSmtp: true },
       { label: "both", enableResend: true, enableSmtp: true },
     ] as const;
-    const fromCases: ReadonlyArray<EmailFromCase> = ["absent", "valid", "invalid"];
+    const fromCases: ReadonlyArray<EmailFromCase> = [
+      "absent",
+      "valid",
+      "invalid",
+      "invalid_double_dot",
+    ];
     const edgeCases = [
       { label: "none", edge: undefined },
       { label: "valid_https", edge: VALID_EDGE },
@@ -770,12 +838,7 @@ describe("verify-deploy-config: infra/alchemy stack validation & cross-layer sou
                           serverMaxInstances: 10,
                           appOrigin: ORIGIN_VALUES[origin],
                           emailMode: emailMode === "absent" ? undefined : emailMode,
-                          emailFrom:
-                            from === "absent"
-                              ? undefined
-                              : from === "valid"
-                                ? "Kvitbit <noreply@kvitbit.cz>"
-                                : "bad-from",
+                          emailFrom: EMAIL_FROM_VALUES[from],
                           trustedProxyHops: edgeCase.edge !== undefined ? 2 : 1,
                           shareKeyVersion: 1,
                           androidAssetlinksSha256: undefined,
@@ -832,7 +895,7 @@ describe("verify-deploy-config: infra/alchemy stack validation & cross-layer sou
                             const isNonProdEmail =
                               emailMode === "capture" || emailMode === "console";
                             if (isNonProdEmail) {
-                              if (from === "invalid") expOk = false;
+                              if (isInvalidFromCase(from)) expOk = false;
                             } else {
                               if (from !== "valid") expOk = false;
                               if (
@@ -960,13 +1023,13 @@ describe("verify-deploy-config: infra/alchemy stack validation & cross-layer sou
     }
 
     expect(failures).toEqual([]);
-    expect(total).toBe(96_768);
+    expect(total).toBe(150_528);
     expect(prodNormalAccepted).toBeGreaterThan(0);
     expect(stagingNormalAccepted).toBeGreaterThan(0);
     expect(crossLayerVerified).toBe(prodNormalAccepted + stagingNormalAccepted);
   });
 
-  test("rejects missing core secret consumers on server or runner workloads", () => {
+  test("rejects missing core secret consumers and dynamic forbidden flags in live loadStackConfig", async () => {
     const baseProd = (secrets: KvitbitStackConfig["secrets"]): KvitbitStackConfig => ({
       stage: "prod",
       bootstrapFoundation: false,
@@ -1024,6 +1087,30 @@ describe("verify-deploy-config: infra/alchemy stack validation & cross-layer sou
         ),
       ).ok,
     ).toBe(false);
+
+    // Live Alchemy loader rejects every forbidden flag dynamically via ConfigProvider.
+    for (const key of [...FORBIDDEN_OPT_OUT_ENV_VARS, "KVITBIT_DISABLE_CUSTOM"] as const) {
+      const live = await Effect.runPromise(
+        loadStackConfig.pipe(
+          Effect.provide(
+            ConfigProvider.layer(
+              ConfigProvider.fromEnv({
+                env: {
+                  KVITBIT_IMAGE_DIGEST: SAMPLE_DIGEST,
+                  KVITBIT_APP_ORIGIN: "https://kvitbit.cz",
+                  KVITBIT_EMAIL_FROM: "Kvitbit <noreply@kvitbit.cz>",
+                  KVITBIT_EDGE_DOMAINS: "kvitbit.cz",
+                  KVITBIT_ENABLE_RESEND_SECRET: "true",
+                  [key]: "true",
+                },
+              }),
+            ),
+          ),
+          Effect.result,
+        ),
+      );
+      expect(live._tag, `loadStackConfig ${key}`).toBe("Failure");
+    }
   });
 });
 
@@ -1042,7 +1129,7 @@ describe("verify-deploy-config: deploy.yml preflight & 3-layer soundness", () =>
     ALCHEMY_STATE_BUCKET: "alchemy-state-kvitbit-prod",
   } as const;
 
-  test("validateDeployPreflight matches oracle across all 181,440 states and proves 3-layer soundness", () => {
+  test("validateDeployPreflight matches oracle across all 290,304 states and proves 3-layer soundness", () => {
     const deployModes = [
       { label: "normal", foundation: "false", feedback: "false" },
       { label: "bootstrap_foundation", foundation: "true", feedback: "false" },
@@ -1054,6 +1141,7 @@ describe("verify-deploy-config: deploy.yml preflight & 3-layer soundness", () =>
       "https_public",
       "http_public",
       "https_localhost",
+      "https_localhost_dot",
       "invalid_url",
     ];
     const emailModeCases: ReadonlyArray<DeployEmailMode | "absent"> = [
@@ -1071,7 +1159,12 @@ describe("verify-deploy-config: deploy.yml preflight & 3-layer soundness", () =>
       { label: "smtp", resend: "false", smtp: "true" },
       { label: "both", resend: "true", smtp: "true" },
     ] as const;
-    const fromCases: ReadonlyArray<EmailFromCase> = ["absent", "valid", "invalid"];
+    const fromCases: ReadonlyArray<EmailFromCase> = [
+      "absent",
+      "valid",
+      "invalid",
+      "invalid_double_dot",
+    ];
     const edgeCases = [
       { label: "absent", raw: undefined },
       { label: "valid", raw: "kvitbit.cz, kvitbit.app" },
@@ -1107,12 +1200,7 @@ describe("verify-deploy-config: deploy.yml preflight & 3-layer soundness", () =>
                             ? "true"
                             : "false",
                           APP_ORIGIN: ORIGIN_VALUES[origin],
-                          EMAIL_FROM:
-                            from === "absent"
-                              ? undefined
-                              : from === "valid"
-                                ? "Kvitbit <noreply@kvitbit.cz>"
-                                : "bad-from",
+                          EMAIL_FROM: EMAIL_FROM_VALUES[from],
                           KVITBIT_EDGE_DOMAINS: edge.raw,
                           KVITBIT_EMAIL_MODE: emailMode === "absent" ? undefined : emailMode,
                           KVITBIT_BLOB_DRIVER: blobDriver === "absent" ? undefined : blobDriver,
@@ -1259,7 +1347,7 @@ describe("verify-deploy-config: deploy.yml preflight & 3-layer soundness", () =>
     }
 
     expect(failures).toEqual([]);
-    expect(total).toBe(181_440);
+    expect(total).toBe(290_304);
     expect(prodNormalAccepted).toBeGreaterThan(0);
   });
 
@@ -1325,9 +1413,22 @@ describe("verify-deploy-config: deploy.yml preflight & 3-layer soundness", () =>
     }
     expect(boolChecks).toBe(48);
 
-    // Every forbidden opt-out flag fails in prod preflight.
+    // Every forbidden opt-out flag fails in prod preflight — both directly and via KVITBIT_REPO_VARS_JSON.
     for (const optOut of [...FORBIDDEN_OPT_OUT_ENV_VARS, "KVITBIT_PREVIEW_DISABLE_CUSTOM"]) {
       expect(validateDeployPreflight({ ...validNormal, [optOut]: "true" }).ok, optOut).toBe(false);
+      expect(
+        validateDeployPreflight({
+          ...validNormal,
+          KVITBIT_REPO_VARS_JSON: JSON.stringify({ [optOut]: "true" }),
+        }).ok,
+        `repo_vars ${optOut}`,
+      ).toBe(false);
     }
+    expect(validateDeployPreflight({ ...validNormal, KVITBIT_REPO_VARS_JSON: "not-json" }).ok).toBe(
+      false,
+    );
+    expect(validateDeployPreflight({ ...validNormal, KVITBIT_REPO_VARS_JSON: "[]" }).ok).toBe(
+      false,
+    );
   });
 });
