@@ -4,12 +4,15 @@ import type { MemberProps, ServiceAccountProps } from "@alchemy.run/gcp/IAM";
 import * as IAM from "@alchemy.run/gcp/IAM";
 import type { SecretProps } from "@alchemy.run/gcp/SecretManager";
 import * as SecretManager from "@alchemy.run/gcp/SecretManager";
+import { ProjectService } from "@alchemy.run/gcp/ServiceUsage";
 import type { BucketProps } from "@alchemy.run/gcp/Storage";
 import * as Storage from "@alchemy.run/gcp/Storage";
 import * as Output from "alchemy/Output";
 import * as Effect from "effect/Effect";
 import type { KvitbitStackConfig, KvitbitWorkload } from "../config";
 import { resourceNames, secretResourceName, serviceAccountEmail, stackLabels } from "../config";
+
+export const CLOUD_DNS_API_ID = "CloudDnsApi";
 
 export const artifactRepositoryProps = (config: KvitbitStackConfig): RepositoryProps => ({
   repositoryId: config.artifactRepositoryId,
@@ -102,6 +105,14 @@ export const secretAccessorGrants = (
 export const declareFoundation = Effect.fn("KvitbitStack.declareFoundation")(function* (
   config: KvitbitStackConfig,
 ) {
+  const dnsApi =
+    config.dnsZones.length === 0
+      ? undefined
+      : yield* ProjectService(CLOUD_DNS_API_ID, {
+          project: config.projectId,
+          service: "dns.googleapis.com",
+        });
+
   const repository = yield* ArtifactRegistry.Repository(
     "KvitbitImages",
     artifactRepositoryProps(config),
@@ -171,6 +182,7 @@ export const declareFoundation = Effect.fn("KvitbitStack.declareFoundation")(fun
   }
 
   return {
+    dnsApi,
     repositoryName: repository.name,
     blobsBucketName: blobsBucket.bucketName,
     mobileAssetsBucketName: mobileAssetsBucket.bucketName,

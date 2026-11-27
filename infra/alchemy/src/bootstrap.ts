@@ -4,8 +4,10 @@ import * as Data from "effect/Data";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import type { KvitbitStackConfig } from "./config";
+import { declareKvitbitDns } from "./resources/dns";
 import { declareKvitbitEdge, declareTokenRouteLogExclusion } from "./resources/edge";
 import {
+  CLOUD_DNS_API_ID,
   declareFoundation,
   secretAccessorGrants,
   secretDeclarations,
@@ -58,6 +60,9 @@ export const foundationResourceIds = (config: KvitbitStackConfig): ReadonlySet<s
     "EdgeTokenRouteExclusion",
   ]);
 
+  if (config.dnsZones.length > 0) {
+    ids.add(CLOUD_DNS_API_ID);
+  }
   for (const decl of secretDeclarations(config)) {
     ids.add(decl.id);
   }
@@ -171,6 +176,10 @@ export const declareKvitbitStack = (config: KvitbitStackConfig) =>
       config.edge === undefined
         ? undefined
         : yield* declareKvitbitEdge(config, config.edge, server.serviceId);
+    const dnsNameServers =
+      foundation.dnsApi === undefined
+        ? undefined
+        : yield* declareKvitbitDns(config, foundation.dnsApi, edge?.edgeIpAddress);
 
     return {
       stage: config.stage,
@@ -188,5 +197,6 @@ export const declareKvitbitStack = (config: KvitbitStackConfig) =>
       serverUri: server.serviceUri,
       tokenRouteExclusion,
       edge,
+      ...(dnsNameServers === undefined ? {} : { dnsNameServers }),
     };
   });

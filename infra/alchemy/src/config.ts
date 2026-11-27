@@ -49,6 +49,7 @@ export interface KvitbitStackConfig {
   readonly shareKeyVersion: number;
   readonly androidAssetlinksSha256: string | undefined;
   readonly secrets: ReadonlyArray<KvitbitSecretBinding>;
+  readonly dnsZones: ReadonlyArray<string>;
   readonly edge: KvitbitEdgeConfig | undefined;
 }
 
@@ -235,6 +236,30 @@ export const validateStackConfig = (
         reason: "must be >= max(1, serverMinInstances)",
       });
     }
+    for (const domain of config.dnsZones) {
+      const labels = domain.split(".");
+      if (
+        !DOMAIN_PATTERN.test(domain) ||
+        domain.length > 253 ||
+        labels.some((label) => label.length > 63) ||
+        /^\d+$/.test(labels[labels.length - 1] ?? "")
+      ) {
+        return yield* new InvalidStackConfig({
+          field: "KVITBIT_DNS_ZONES",
+          reason: `invalid domain '${domain}'`,
+        });
+      }
+      if (
+        config.edge !== undefined &&
+        !config.bootstrapFoundation &&
+        `www.${domain}`.length > 253
+      ) {
+        return yield* new InvalidStackConfig({
+          field: "KVITBIT_DNS_ZONES",
+          reason: `'www.${domain}' exceeds the DNS name length limit`,
+        });
+      }
+    }
     if (config.edge !== undefined) {
       if (config.edge.enableHttps && config.edge.domains.length === 0) {
         return yield* new InvalidStackConfig({
@@ -381,6 +406,10 @@ export const loadStackConfig: Effect.Effect<
 
   const edgeDomainsRaw = yield* optionalNonEmptyString("KVITBIT_EDGE_DOMAINS");
   const edgeDomains = parseCsvList(edgeDomainsRaw);
+  const dnsZonesRaw = yield* optionalNonEmptyString("KVITBIT_DNS_ZONES");
+  const dnsZones = [
+    ...new Set(parseCsvList(dnsZonesRaw).map((domain) => domain.replace(/\.$/, ""))),
+  ];
   const edgeWafPreview = yield* optionalBoolean("KVITBIT_EDGE_WAF_PREVIEW", false);
   const edgeStaticCdnEnabled = yield* optionalBoolean("KVITBIT_EDGE_STATIC_CDN", true);
   // Default to restricting direct Cloud Run ingress when Cloud Armor edge is enabled.
@@ -449,6 +478,7 @@ export const loadStackConfig: Effect.Effect<
       enableSmtp,
       enableMobileSigningKey,
     }),
+    dnsZones,
     edge,
   });
 });
