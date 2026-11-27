@@ -4,11 +4,11 @@ import { brandColors } from "./tokens";
 
 /** N2 Dual-Bit Notch mark grid: 256×256 with 32 units of built-in padding. */
 export const MARK_VIEW_BOX = "0 0 256 256" as const;
-const MARK_GRID_SIZE = 256;
+export const MARK_GRID_SIZE = 256;
 
-type MarkMaster = "light" | "dark";
+export type MarkMaster = "light" | "dark";
 
-interface MarkMasterGeometry {
+export interface MarkMasterGeometry {
   /** Gap in grid units between the stem, chevron and bit. */
   readonly gap: number;
   /** Path data in draw order: notched stem, `<` chevron, square bit. */
@@ -41,7 +41,7 @@ export const markMasters: Readonly<Record<MarkMaster, MarkMasterGeometry>> = {
 };
 
 /** Default ink per master: `#111111` for the light master, `#FAFAFA` for the dark master. */
-const markDefaultFill: Readonly<Record<MarkMaster, string>> = {
+export const markDefaultFill: Readonly<Record<MarkMaster, string>> = {
   light: brandColors.inkOnLight,
   dark: brandColors.inkOnDark,
 };
@@ -50,12 +50,12 @@ const markDefaultFill: Readonly<Record<MarkMaster, string>> = {
  * Inks each master ships in (DESIGN.md: never recolour the mark). `currentColor` inherits the
  * surrounding text color for inline use.
  */
-const markFills = {
+export const markFills = {
   light: [brandColors.inkOnLight, brandColors.black, "currentColor"],
   dark: [brandColors.inkOnDark, brandColors.white, "currentColor"],
 } as const satisfies Record<MarkMaster, readonly string[]>;
 
-type MarkFill<M extends MarkMaster> = (typeof markFills)[M][number];
+export type MarkFill<M extends MarkMaster = MarkMaster> = (typeof markFills)[M][number];
 
 interface MarkSvgCommonOptions {
   /** Pixel width/height attributes. Defaults to 256. */

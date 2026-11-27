@@ -3,7 +3,7 @@ import { assertPaint } from "./svg";
 
 /** T4 Micro-Glyph Graph tile edge length; the tile is seamless at this period. */
 export const PATTERN_TILE_SIZE = 96 as const;
-const PATTERN_VIEW_BOX = "0 0 96 96";
+export const PATTERN_VIEW_BOX = "0 0 96 96";
 
 /** Tile body with `{ink}` placeholders, verbatim from `assets/brand/pattern/kvitbit-pattern-t4*.svg`. */
 const TILE_BODY = `  <path d="M0 0 H96 M0 48 H96 M0 96 H96 M0 0 V96 M48 0 V96 M96 0 V96" fill="none" stroke="{ink}" stroke-width="0.65" opacity="0.084"/>
@@ -25,7 +25,7 @@ const TILE_BODY = `  <path d="M0 0 H96 M0 48 H96 M0 96 H96 M0 0 V96 M48 0 V96 M9
 const TILE_COMMENT =
   "  <!-- Kvitbit T4 Micro-Glyph Graph: seamless 96x96 tile. Elements crossing an edge are repeated on the opposite edge. -->";
 
-interface PatternOptions {
+export interface PatternOptions {
   /** `currentColor` (default) or a hex color. Opacity is baked into the tile. */
   readonly ink?: string;
 }
@@ -41,7 +41,7 @@ ${tileBody(options.ink)}
 </svg>
 `;
 
-interface PatternDefOptions extends PatternOptions {
+export interface PatternDefOptions extends PatternOptions {
   /** `id` of the `<pattern>` element, referenced as `fill="url(#id)"`. */
   readonly id: string;
 }

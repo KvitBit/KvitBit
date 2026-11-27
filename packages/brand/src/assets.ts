@@ -49,7 +49,7 @@ export const brandAssets = {
 
 type Leaves<T> = T extends string ? T : { [K in keyof T]: Leaves<T[K]> }[keyof T];
 
-type BrandAssetPath = Leaves<typeof brandAssets>;
+export type BrandAssetPath = Leaves<typeof brandAssets>;
 
 /** Every manifest path, flattened. */
 export const brandAssetPaths: readonly BrandAssetPath[] = Arr.flatMap(

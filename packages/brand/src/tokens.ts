@@ -13,3 +13,5 @@ export const brandColors = {
   /** Light splash background that `splash-icon-1024.png` sits on. */
   splashBackground: "#F4F4F5",
 } as const;
+
+export type BrandColor = (typeof brandColors)[keyof typeof brandColors];
