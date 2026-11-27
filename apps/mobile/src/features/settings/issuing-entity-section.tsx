@@ -2,20 +2,10 @@ import type { IssuingEntityPatch } from "@kvitbit/domain/contract";
 import { describeError, ifMatchHeaders, inWorkspace } from "@kvitbit/ui-port/api";
 import { RefreshCw } from "lucide-react-native";
 import { useEffect, useState } from "react";
-import { StyleSheet, View } from "react-native";
+import { View } from "react-native";
 import { useI18n } from "../../i18n/i18n-provider";
 import { useApi, useRemote } from "../../runtime/api-runtime";
-import {
-  Banner,
-  Button,
-  Card,
-  RemoteView,
-  Section,
-  space,
-  Text,
-  TextField,
-  useOverlay,
-} from "../../ui";
+import { Banner, Button, Card, RemoteView, Section, Text, TextField, useOverlay } from "../../ui";
 import { useWorkspace } from "../../workspace/workspace-provider";
 import {
   type AresFieldDiff,
@@ -168,7 +158,7 @@ export function IssuingEntitySection() {
       {() => {
         if (draft === null) return null;
         return (
-          <View style={styles.stack}>
+          <View className="gap-4">
             {editable ? null : <Banner text={t("settings.readOnly")} tone="info" />}
             {errorState.banner === null ? null : (
               <Banner
@@ -198,7 +188,7 @@ export function IssuingEntitySection() {
                   }}
                 />
                 {editable ? (
-                  <View style={styles.row}>
+                  <View className="flex-row flex-wrap items-center gap-2">
                     <Button
                       testID="ares-refresh-button"
                       kind="tonal"
@@ -216,7 +206,7 @@ export function IssuingEntitySection() {
                 ) : null}
 
                 {ares._tag === "Found" ? (
-                  <View style={styles.diffBox}>
+                  <View className="gap-2 pt-2">
                     {ares.result.terminatedOn === null ? null : (
                       <Banner
                         tone="warning"
@@ -239,7 +229,7 @@ export function IssuingEntitySection() {
                           {local({ cs: "Změny z ARES", en: "Changes from ARES" })}
                         </Text>
                         {ares.diffs.map((diff) => (
-                          <View key={diff.field} style={styles.diffRow}>
+                          <View key={diff.field} className="gap-0.5">
                             <Text variant="labelSmall" color="onSurfaceVariant">
                               {diffFieldLabel(diff.field, t)}
                             </Text>
@@ -248,7 +238,7 @@ export function IssuingEntitySection() {
                             </Text>
                           </View>
                         ))}
-                        <View style={styles.row}>
+                        <View className="flex-row flex-wrap items-center gap-2">
                           <Button
                             testID="ares-apply-button"
                             kind="filled"
@@ -375,10 +365,3 @@ export function IssuingEntitySection() {
     </RemoteView>
   );
 }
-
-const styles = StyleSheet.create({
-  stack: { gap: space.lg },
-  row: { flexDirection: "row", flexWrap: "wrap", gap: space.sm, alignItems: "center" },
-  diffBox: { gap: space.sm, paddingTop: space.sm },
-  diffRow: { gap: 2 },
-});

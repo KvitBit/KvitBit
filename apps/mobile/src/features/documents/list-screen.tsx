@@ -16,7 +16,7 @@ import { Schema } from "effect";
 import { router, useLocalSearchParams } from "expo-router";
 import { FilePlus2, Lock, Plus, Search } from "lucide-react-native";
 import { useMemo, useState } from "react";
-import { StyleSheet, View } from "react-native";
+import { View } from "react-native";
 import { useI18n } from "../../i18n/i18n-provider";
 import { navigate, param } from "../../navigation/routes";
 import {
@@ -31,7 +31,6 @@ import {
   Screen,
   SegmentedChoice,
   SwitchRow,
-  space,
   TextField,
   useOverlay,
 } from "../../ui";
@@ -170,7 +169,7 @@ function DocumentsList({
       }
     >
       {canWrite ? (
-        <View style={styles.quickCreate}>
+        <View className="flex-row flex-wrap gap-2">
           <Button
             kind="tonal"
             icon={FilePlus2}
@@ -234,7 +233,7 @@ function DocumentsList({
           onChange={(checked) => setOverdue(checked ? true : undefined)}
         />
         {hasFilters ? (
-          <View style={styles.filterActions}>
+          <View className="items-end">
             <Button kind="text" label={t("common.action.clearFilters")} onPress={clearFilters} />
           </View>
         ) : null}
@@ -266,8 +265,8 @@ function DocumentsList({
           }
 
           return (
-            <View style={styles.list}>
-              <Card style={styles.listCard}>
+            <View className="gap-3">
+              <Card className="px-2 py-1">
                 {items.map((doc) => {
                   const statusB = documentStatusBadge(doc.status, t);
                   const settleB = settlementBadge(doc.settlement, doc.overdue, t);
@@ -283,7 +282,7 @@ function DocumentsList({
                       trailing={formatMoney(locale, doc.total)}
                       leading={doc.locked ? Lock : Search}
                       badge={
-                        <View style={styles.badges}>
+                        <View className="flex-row flex-wrap justify-end gap-1">
                           {doc.kind !== "invoice" ? (
                             <Badge label={kindB.label} tone={kindB.tone} />
                           ) : null}
@@ -326,11 +325,3 @@ function DocumentsList({
     </Screen>
   );
 }
-
-const styles = StyleSheet.create({
-  quickCreate: { flexDirection: "row", flexWrap: "wrap", gap: space.sm },
-  filterActions: { alignItems: "flex-end" },
-  list: { gap: space.md },
-  listCard: { paddingHorizontal: space.sm, paddingVertical: space.xs },
-  badges: { flexDirection: "row", flexWrap: "wrap", justifyContent: "flex-end", gap: space.xs },
-});

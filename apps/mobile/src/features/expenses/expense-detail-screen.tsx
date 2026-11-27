@@ -14,7 +14,7 @@ import { formatDate, formatMoney } from "@kvitbit/ui-port/format";
 import { BigDecimal, Option } from "effect";
 import { Download, Edit3, Paperclip, Plus, Share2, Trash2, Upload } from "lucide-react-native";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { StyleSheet, View } from "react-native";
+import { View } from "react-native";
 import { useI18n } from "../../i18n/i18n-provider";
 import { navigate } from "../../navigation/routes";
 import { useTransfer } from "../../platform/transfer";
@@ -31,7 +31,6 @@ import {
   Screen,
   Section,
   SegmentedChoice,
-  space,
   Text,
   TextField,
   useOverlay,
@@ -483,9 +482,9 @@ export function ExpenseDetailScreen(props: {
         : text(view.text);
     return (
       <Card key={item.key}>
-        <View style={styles.headerRow}>
+        <View className="flex-row items-center gap-2">
           <Paperclip size={18} />
-          <View style={styles.flex}>
+          <View className="flex-1">
             <Text variant="row" numberOfLines={1}>
               {item.name}
             </Text>
@@ -693,8 +692,8 @@ export function ExpenseDetailScreen(props: {
                   }))
                 }
               />
-              <View style={styles.rowFields}>
-                <View style={styles.flex}>
+              <View className="flex-row gap-2">
+                <View className="flex-1">
                   <TextField
                     label={t("expenses.editor.base")}
                     keyboardType="decimal-pad"
@@ -708,7 +707,7 @@ export function ExpenseDetailScreen(props: {
                     error={errMsg(`vat.${idx}.base`)}
                   />
                 </View>
-                <View style={styles.flex}>
+                <View className="flex-1">
                   <TextField
                     label={t("expenses.editor.vat")}
                     keyboardType="decimal-pad"
@@ -805,8 +804,8 @@ export function ExpenseDetailScreen(props: {
           return (
             <>
               <Card>
-                <View style={styles.headerRow}>
-                  <Text variant="headlineSmall" style={styles.flex}>
+                <View className="flex-row items-center gap-2">
+                  <Text variant="headlineSmall" className="flex-1">
                     {detail.supplier?.name ??
                       detail.supplierDocumentNumber ??
                       local({ cs: "Neúplný náklad", en: "Incomplete expense" })}
@@ -824,7 +823,7 @@ export function ExpenseDetailScreen(props: {
                     {t("expenses.editor.czkEquivalent", { amount: czkLabel })}
                   </Text>
                 )}
-                <View style={styles.badges}>
+                <View className="flex-row flex-wrap gap-2">
                   <Badge
                     label={t(`enum.settlement.${detail.payment.settlement}`)}
                     tone={settlementTone(detail.payment.settlement)}
@@ -921,7 +920,7 @@ export function ExpenseDetailScreen(props: {
                       value={payNote}
                       onChangeText={setPayNote}
                     />
-                    <View style={styles.rowActions}>
+                    <View className="flex-row flex-wrap justify-end gap-2">
                       <Button
                         kind="text"
                         label={t("common.action.cancel")}
@@ -953,8 +952,8 @@ export function ExpenseDetailScreen(props: {
                       <>
                         {payments.map((p) => (
                           <Card key={p.id}>
-                            <View style={styles.headerRow}>
-                              <View style={styles.flex}>
+                            <View className="flex-row items-center gap-2">
+                              <View className="flex-1">
                                 <Text variant="row" numeric>
                                   {formatMoney(locale, p.amount)}
                                 </Text>
@@ -1008,9 +1007,9 @@ export function ExpenseDetailScreen(props: {
                     {rejectedReceipts.rejected.map(renderRejectedReceipt)}
                     {detail.attachments.map((att) => (
                       <Card key={att.id}>
-                        <View style={styles.headerRow}>
+                        <View className="flex-row items-center gap-2">
                           <Paperclip size={18} />
-                          <View style={styles.flex}>
+                          <View className="flex-1">
                             <Text variant="row" numberOfLines={1}>
                               {att.name}
                             </Text>
@@ -1019,7 +1018,7 @@ export function ExpenseDetailScreen(props: {
                             </Text>
                           </View>
                         </View>
-                        <View style={styles.rowActions}>
+                        <View className="flex-row flex-wrap justify-end gap-2">
                           <Button
                             kind="tonal"
                             icon={Download}
@@ -1056,11 +1055,3 @@ export function ExpenseDetailScreen(props: {
     </Screen>
   );
 }
-
-const styles = StyleSheet.create({
-  flex: { flex: 1 },
-  headerRow: { flexDirection: "row", alignItems: "center", gap: space.sm },
-  badges: { flexDirection: "row", flexWrap: "wrap", gap: space.sm },
-  rowFields: { flexDirection: "row", gap: space.sm },
-  rowActions: { flexDirection: "row", flexWrap: "wrap", gap: space.sm, justifyContent: "flex-end" },
-});

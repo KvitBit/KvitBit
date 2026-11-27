@@ -40,7 +40,7 @@ import {
   Unlock,
 } from "lucide-react-native";
 import { useCallback, useMemo, useState } from "react";
-import { Share, StyleSheet, View } from "react-native";
+import { Share, View } from "react-native";
 import { useI18n } from "../../i18n/i18n-provider";
 import { navigate, param } from "../../navigation/routes";
 import { useTransfer } from "../../platform/transfer";
@@ -57,7 +57,6 @@ import {
   Screen,
   Section,
   SegmentedChoice,
-  space,
   Text,
   useOverlay,
 } from "../../ui";
@@ -638,17 +637,17 @@ export function DocumentDetailScreen() {
             : doc.totals.gross.amount;
 
           return (
-            <View style={styles.root}>
+            <View className="gap-4">
               {/* Summary header */}
               <Card>
-                <View style={styles.headerRow}>
-                  <View style={styles.flex}>
+                <View className="flex-row items-start gap-3">
+                  <View className="flex-1">
                     <Text variant="titleMedium">{numberLabel}</Text>
                     <Text variant="meta" color="onSurfaceVariant">
                       {contact.name}
                     </Text>
                   </View>
-                  <View style={styles.amountCol}>
+                  <View className="items-end gap-0.5">
                     <Text variant="titleLarge" numeric>
                       {formatMoney(locale, doc.totals.gross)}
                     </Text>
@@ -660,7 +659,7 @@ export function DocumentDetailScreen() {
                   </View>
                 </View>
 
-                <View style={styles.badges}>
+                <View className="flex-row flex-wrap gap-1">
                   <Badge label={kindB.label} tone={kindB.tone} />
                   <Badge label={statusB.label} tone={statusB.tone} />
                   {doc.status === "issued" ? (
@@ -669,7 +668,7 @@ export function DocumentDetailScreen() {
                   {doc.locked ? <Badge label={t("enum.badge.locked")} tone="neutral" /> : null}
                 </View>
 
-                <View style={styles.metaGrid}>
+                <View className="gap-1">
                   <Text variant="meta" color="onSurfaceVariant" numeric>
                     {`${t("documents.editor.issueDate")}: ${formatDate(locale, doc.dates.issuedOn)}`}
                   </Text>
@@ -703,11 +702,11 @@ export function DocumentDetailScreen() {
 
               {/* OVERVIEW TAB */}
               {tab === "preview" ? (
-                <View style={styles.root}>
+                <View className="gap-4">
                   {/* Lifecycle Actions */}
                   <Section title={local({ cs: "Akce", en: "Actions" })}>
                     <Card>
-                      <View style={styles.actionWrap}>
+                      <View className="flex-row flex-wrap gap-2">
                         {actions.canIssue ? (
                           <Button
                             kind="filled"
@@ -848,7 +847,7 @@ export function DocumentDetailScreen() {
                         ]}
                         onChange={setPdfLanguage}
                       />
-                      <View style={styles.actionWrap}>
+                      <View className="flex-row flex-wrap gap-2">
                         <Button
                           kind="tonal"
                           icon={Download}
@@ -897,7 +896,7 @@ export function DocumentDetailScreen() {
                         </Text>
                       ) : null}
 
-                      <View style={styles.dividerSpace} />
+                      <View className="h-2" />
 
                       <Text variant="labelMedium" color="onSurfaceVariant">
                         {t("documents.editor.contact")}
@@ -928,7 +927,7 @@ export function DocumentDetailScreen() {
 
                   {/* Line items */}
                   <Section title={t("documents.editor.section.lines")}>
-                    <Card style={styles.listCard}>
+                    <Card className="px-2 py-1">
                       {lines.map((line) => (
                         <ListRow
                           key={line.id}
@@ -949,9 +948,9 @@ export function DocumentDetailScreen() {
                       {doc.totals.buckets.map((bucket) => (
                         <View
                           key={`${bucket.treatment}-${String(bucket.ratePercent)}`}
-                          style={styles.totalRow}
+                          className="flex-row items-center justify-between gap-3"
                         >
-                          <View style={styles.flex}>
+                          <View className="flex-1">
                             <Text variant="bodyMedium">
                               {`${t(enumKey("vatTreatment", bucket.treatment))} (${formatVatRate(locale, Number(BigDecimal.format(bucket.ratePercent)))})`}
                             </Text>
@@ -962,7 +961,7 @@ export function DocumentDetailScreen() {
                               )}`}
                             </Text>
                           </View>
-                          <View style={styles.amountCol}>
+                          <View className="items-end gap-0.5">
                             <Text variant="bodyMedium" numeric>
                               {formatMoney(locale, MoneyMath.make(bucket.vat, currency))}
                             </Text>
@@ -978,9 +977,9 @@ export function DocumentDetailScreen() {
                         </View>
                       ))}
 
-                      <View style={styles.dividerSpace} />
+                      <View className="h-2" />
 
-                      <View style={styles.totalRow}>
+                      <View className="flex-row items-center justify-between gap-3">
                         <Text variant="bodyMedium" color="onSurfaceVariant">
                           {t("documents.editor.totals.base")}
                         </Text>
@@ -988,7 +987,7 @@ export function DocumentDetailScreen() {
                           {formatMoney(locale, doc.totals.net)}
                         </Text>
                       </View>
-                      <View style={styles.totalRow}>
+                      <View className="flex-row items-center justify-between gap-3">
                         <Text variant="bodyMedium" color="onSurfaceVariant">
                           {t("common.field.vat")}
                         </Text>
@@ -997,7 +996,7 @@ export function DocumentDetailScreen() {
                         </Text>
                       </View>
                       {!BigDecimal.isZero(doc.totals.roundingAdjustment.amount) ? (
-                        <View style={styles.totalRow}>
+                        <View className="flex-row items-center justify-between gap-3">
                           <Text variant="bodyMedium" color="onSurfaceVariant">
                             {t("documents.editor.totals.rounding")}
                           </Text>
@@ -1006,14 +1005,14 @@ export function DocumentDetailScreen() {
                           </Text>
                         </View>
                       ) : null}
-                      <View style={styles.totalRow}>
+                      <View className="flex-row items-center justify-between gap-3">
                         <Text variant="titleMedium">{t("documents.editor.totals.total")}</Text>
                         <Text variant="titleMedium" numeric>
                           {formatMoney(locale, doc.totals.gross)}
                         </Text>
                       </View>
                       {doc.totals.vatCzk !== null ? (
-                        <View style={styles.totalRow}>
+                        <View className="flex-row items-center justify-between gap-3">
                           <Text variant="meta" color="onSurfaceVariant">
                             {`${t("common.field.vat")} (CZK)`}
                           </Text>
@@ -1033,7 +1032,7 @@ export function DocumentDetailScreen() {
                   {/* Chain links */}
                   {doc.related.length > 0 ? (
                     <Section title={t("documents.detail.related")}>
-                      <Card style={styles.listCard}>
+                      <Card className="px-2 py-1">
                         {doc.related.map((rel) => (
                           <ListRow
                             key={`${rel.relation}-${rel.id}`}
@@ -1057,7 +1056,7 @@ export function DocumentDetailScreen() {
                   {/* Deliveries */}
                   {doc.deliveries.length > 0 ? (
                     <Section title={t("documents.detail.deliveries")}>
-                      <Card style={styles.listCard}>
+                      <Card className="px-2 py-1">
                         {doc.deliveries.map((del) => (
                           <ListRow
                             key={del.id}
@@ -1117,9 +1116,9 @@ export function DocumentDetailScreen() {
                         );
                       }
                       return (
-                        <Card style={styles.listCard}>
+                        <Card className="px-2 py-1">
                           {list.map((payment) => (
-                            <View key={payment.id} style={styles.paymentItem}>
+                            <View key={payment.id} className="gap-1">
                               <ListRow
                                 title={formatMoney(locale, payment.amount)}
                                 subtitle={`${formatDate(locale, payment.paidOn)} · ${t(enumKey("paymentMethod", payment.method))}${
@@ -1144,7 +1143,7 @@ export function DocumentDetailScreen() {
                                   : {})}
                               />
                               {actions.canRemovePayment ? (
-                                <View style={styles.paymentActions}>
+                                <View className="items-end pb-1">
                                   <Button
                                     kind="text"
                                     icon={Trash2}
@@ -1170,7 +1169,7 @@ export function DocumentDetailScreen() {
 
               {/* SHARE LINK TAB */}
               {tab === "share" ? (
-                <View style={styles.root}>
+                <View className="gap-4">
                   <Section title={t("documents.share.title")}>
                     <Card>
                       <Text variant="bodyMedium" color="onSurfaceVariant">
@@ -1191,7 +1190,7 @@ export function DocumentDetailScreen() {
                                 })}`
                               : ""}
                           </Text>
-                          <View style={styles.actionWrap}>
+                          <View className="flex-row flex-wrap gap-2">
                             <Button
                               kind="filled"
                               icon={Copy}
@@ -1254,7 +1253,7 @@ export function DocumentDetailScreen() {
                           viewsPage.items.length === 0 ? (
                             <EmptyState title={t("documents.share.noViews")} />
                           ) : (
-                            <Card style={styles.listCard}>
+                            <Card className="px-2 py-1">
                               {viewsPage.items.map((ev) => (
                                 <ListRow
                                   key={ev.id}
@@ -1279,7 +1278,7 @@ export function DocumentDetailScreen() {
                       entries.length === 0 ? (
                         <EmptyState title={t("documents.history.empty")} />
                       ) : (
-                        <Card style={styles.listCard}>
+                        <Card className="px-2 py-1">
                           {entries.map((entry) => {
                             const actorText =
                               entry.actor._tag === "System"
@@ -1387,23 +1386,3 @@ export function DocumentDetailScreen() {
     </Screen>
   );
 }
-
-const styles = StyleSheet.create({
-  root: { gap: space.lg },
-  flex: { flex: 1 },
-  headerRow: { flexDirection: "row", alignItems: "flex-start", gap: space.md },
-  amountCol: { alignItems: "flex-end", gap: 2 },
-  badges: { flexDirection: "row", flexWrap: "wrap", gap: space.xs },
-  metaGrid: { gap: space.xs },
-  actionWrap: { flexDirection: "row", flexWrap: "wrap", gap: space.sm },
-  listCard: { paddingHorizontal: space.sm, paddingVertical: space.xs },
-  dividerSpace: { height: space.sm },
-  totalRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-    gap: space.md,
-  },
-  paymentItem: { gap: space.xs },
-  paymentActions: { alignItems: "flex-end", paddingBottom: space.xs },
-});

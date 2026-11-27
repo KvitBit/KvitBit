@@ -29,7 +29,7 @@ import { BigDecimal } from "effect";
 import { router } from "expo-router";
 import { BookOpen, Plus, Save, Send, Trash2, Users } from "lucide-react-native";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Modal, ScrollView, StyleSheet, View } from "react-native";
+import { Modal, ScrollView, View } from "react-native";
 import { useI18n } from "../../i18n/i18n-provider";
 import { navigate } from "../../navigation/routes";
 import { useApi, useRemote } from "../../runtime/api-runtime";
@@ -47,7 +47,6 @@ import {
   Section,
   SegmentedChoice,
   SwitchRow,
-  space,
   Text,
   TextField,
   useOverlay,
@@ -222,15 +221,13 @@ function PickerModal<T>(props: {
 
   return (
     <Modal transparent visible={props.visible} animationType="fade" onRequestClose={props.onClose}>
-      <View style={[styles.scrim, { backgroundColor: `${theme.colors.scrim}66` }]}>
+      <View
+        className="flex-1 items-center justify-center p-4"
+        style={{ backgroundColor: `${theme.colors.scrim}66` }}
+      >
         <View
-          style={[
-            styles.pickerDialog,
-            {
-              backgroundColor: theme.colors.surfaceContainerHigh,
-              borderRadius: theme.shape.panel + 12,
-            },
-          ]}
+          className="max-h-[84%] w-full max-w-[560px] gap-3 bg-surface-container-high p-6"
+          style={{ borderRadius: theme.shape.panel + 12 }}
         >
           <Text variant="headlineSmall">{props.title}</Text>
           <TextField
@@ -239,7 +236,7 @@ function PickerModal<T>(props: {
             value={query}
             onChangeText={setQuery}
           />
-          <ScrollView keyboardShouldPersistTaps="handled" style={styles.pickerScroll}>
+          <ScrollView keyboardShouldPersistTaps="handled" className="max-h-[360px]">
             {filtered.length === 0 ? (
               <EmptyState title={t("common.state.noMatches")} />
             ) : (
@@ -254,7 +251,7 @@ function PickerModal<T>(props: {
               ))
             )}
           </ScrollView>
-          <View style={styles.pickerFooter}>
+          <View className="flex-row justify-end">
             <Button kind="text" label={t("common.action.close")} onPress={props.onClose} />
           </View>
         </View>
@@ -886,7 +883,7 @@ export function DocumentEditorScreen(props: DocumentEditorProps) {
       ) : draft === null ? (
         <Loading label={t("common.state.loading")} />
       ) : (
-        <View style={styles.root}>
+        <View className="gap-4">
           {isLocked ? <Banner tone="warning" text={t("documents.editor.locked")} /> : null}
           {isIssued && !isLocked ? (
             <Banner tone="warning" text={t("documents.editor.issuedWarning")} />
@@ -976,11 +973,11 @@ export function DocumentEditorScreen(props: DocumentEditorProps) {
               const lineError = validationShown ? validation?.lines[line.key] : undefined;
               return (
                 <Card key={line.key}>
-                  <View style={styles.lineHeader}>
+                  <View className="flex-row items-center justify-between">
                     <Text variant="labelMedium" color="onSurfaceVariant">
                       {`#${index + 1}`}
                     </Text>
-                    <View style={styles.lineHeaderActions}>
+                    <View className="flex-row items-center gap-1">
                       {!isLocked && priceList.length > 0 ? (
                         <Button
                           kind="text"
@@ -1010,8 +1007,8 @@ export function DocumentEditorScreen(props: DocumentEditorProps) {
                     testID={`editor-line-desc-${index}`}
                   />
 
-                  <View style={styles.rowFields}>
-                    <View style={styles.flex}>
+                  <View className="flex-row gap-2">
+                    <View className="flex-1">
                       <TextField
                         label={t("documents.editor.line.quantity")}
                         value={line.quantity}
@@ -1021,7 +1018,7 @@ export function DocumentEditorScreen(props: DocumentEditorProps) {
                         testID={`editor-line-qty-${index}`}
                       />
                     </View>
-                    <View style={styles.flex}>
+                    <View className="flex-1">
                       <TextField
                         label={t("documents.editor.line.unit")}
                         value={line.unit}
@@ -1029,7 +1026,7 @@ export function DocumentEditorScreen(props: DocumentEditorProps) {
                         disabled={isLocked}
                       />
                     </View>
-                    <View style={styles.flex}>
+                    <View className="flex-1">
                       <TextField
                         label={t("documents.editor.line.unitPrice")}
                         value={line.unitPrice}
@@ -1133,7 +1130,7 @@ export function DocumentEditorScreen(props: DocumentEditorProps) {
               />
 
               {draft.currency !== "CZK" ? (
-                <View style={styles.fxBox}>
+                <View className="gap-2">
                   <SegmentedChoice
                     label={t("documents.editor.fx.title")}
                     value={draft.fxMode}
@@ -1163,8 +1160,8 @@ export function DocumentEditorScreen(props: DocumentEditorProps) {
                       <Banner tone="warning" text={t("documents.editor.fx.unavailable")} />
                     ) : null
                   ) : (
-                    <View style={styles.rowFields}>
-                      <View style={styles.flex}>
+                    <View className="flex-row gap-2">
+                      <View className="flex-1">
                         <TextField
                           label={t("documents.editor.fx.rate")}
                           value={draft.manualFxRate}
@@ -1174,7 +1171,7 @@ export function DocumentEditorScreen(props: DocumentEditorProps) {
                           testID="editor-fx-rate"
                         />
                       </View>
-                      <View style={styles.flex}>
+                      <View className="flex-1">
                         <TextField
                           label={t("documents.editor.fx.quantity")}
                           value={draft.manualFxQuantity}
@@ -1304,8 +1301,8 @@ export function DocumentEditorScreen(props: DocumentEditorProps) {
                 )
               ) : null}
 
-              <View style={styles.rowFields}>
-                <View style={styles.flex}>
+              <View className="flex-row gap-2">
+                <View className="flex-1">
                   <TextField
                     label={t("documents.editor.variableSymbol")}
                     value={draft.variableSymbol}
@@ -1313,7 +1310,7 @@ export function DocumentEditorScreen(props: DocumentEditorProps) {
                     disabled={isLocked}
                   />
                 </View>
-                <View style={styles.flex}>
+                <View className="flex-1">
                   <TextField
                     label={t("documents.editor.orderNumber")}
                     value={draft.orderNumber}
@@ -1332,12 +1329,12 @@ export function DocumentEditorScreen(props: DocumentEditorProps) {
                 {preview.breakdown.buckets.map((bucket) => (
                   <View
                     key={`${bucket.treatment}-${String(bucket.ratePercent)}`}
-                    style={styles.totalRow}
+                    className="flex-row items-center justify-between gap-3"
                   >
-                    <Text variant="bodyMedium" style={styles.flex}>
+                    <Text variant="bodyMedium" className="flex-1">
                       {`${t(enumKey("vatTreatment", bucket.treatment))} (${formatVatRate(locale, Number(BigDecimal.format(bucket.ratePercent)))})`}
                     </Text>
-                    <View style={styles.amountCol}>
+                    <View className="items-end gap-0.5">
                       <Text variant="bodyMedium" numeric>
                         {`${t("documents.editor.totals.base")} ${formatMoney(
                           locale,
@@ -1358,7 +1355,7 @@ export function DocumentEditorScreen(props: DocumentEditorProps) {
                     </View>
                   </View>
                 ))}
-                <View style={styles.totalRow}>
+                <View className="flex-row items-center justify-between gap-3">
                   <Text variant="bodyMedium" color="onSurfaceVariant">
                     {t("documents.editor.totals.base")}
                   </Text>
@@ -1366,7 +1363,7 @@ export function DocumentEditorScreen(props: DocumentEditorProps) {
                     {formatMoney(locale, preview.breakdown.net)}
                   </Text>
                 </View>
-                <View style={styles.totalRow}>
+                <View className="flex-row items-center justify-between gap-3">
                   <Text variant="bodyMedium" color="onSurfaceVariant">
                     {t("common.field.vat")}
                   </Text>
@@ -1374,14 +1371,14 @@ export function DocumentEditorScreen(props: DocumentEditorProps) {
                     {formatMoney(locale, preview.breakdown.vat)}
                   </Text>
                 </View>
-                <View style={styles.totalRow}>
+                <View className="flex-row items-center justify-between gap-3">
                   <Text variant="titleMedium">{t("documents.editor.totals.total")}</Text>
                   <Text variant="titleMedium" numeric testID="editor-preview-total">
                     {formatMoney(locale, preview.breakdown.gross)}
                   </Text>
                 </View>
                 {preview.breakdown.vatCzk !== null ? (
-                  <View style={styles.totalRow}>
+                  <View className="flex-row items-center justify-between gap-3">
                     <Text variant="meta" color="onSurfaceVariant">
                       {`${t("common.field.vat")} (CZK)`}
                     </Text>
@@ -1622,7 +1619,7 @@ export function CreditNoteCreatorScreen() {
               );
             }
             return (
-              <Card style={styles.listCard}>
+              <Card className="px-2 py-1">
                 {eligible.map((doc) => (
                   <ListRow
                     key={doc.id}
@@ -1648,7 +1645,7 @@ export function CreditNoteCreatorScreen() {
 
       {selectedDocRemote.state._tag === "Ready" ? (
         <Section title={t("documents.editor.section.lines")}>
-          <Card style={styles.listCard}>
+          <Card className="px-2 py-1">
             {selectedDocRemote.state.value.lines.map((raw) => {
               const line = parseLineView(raw);
               return (
@@ -1689,30 +1686,3 @@ export function CreditNoteCreatorScreen() {
     </Screen>
   );
 }
-
-const styles = StyleSheet.create({
-  root: { gap: space.lg },
-  flex: { flex: 1 },
-  rowFields: { flexDirection: "row", gap: space.sm },
-  lineHeader: { flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
-  lineHeaderActions: { flexDirection: "row", alignItems: "center", gap: space.xs },
-  fxBox: { gap: space.sm },
-  totalRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-    gap: space.md,
-  },
-  amountCol: { alignItems: "flex-end", gap: 2 },
-  listCard: { paddingHorizontal: space.sm, paddingVertical: space.xs },
-  scrim: { flex: 1, alignItems: "center", justifyContent: "center", padding: space.lg },
-  pickerDialog: {
-    width: "100%",
-    maxWidth: 560,
-    maxHeight: "84%",
-    padding: space.xl,
-    gap: space.md,
-  },
-  pickerScroll: { maxHeight: 360 },
-  pickerFooter: { flexDirection: "row", justifyContent: "flex-end" },
-});

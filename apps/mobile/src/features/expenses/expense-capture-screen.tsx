@@ -9,7 +9,7 @@ import {
   Upload,
 } from "lucide-react-native";
 import { useEffect, useRef, useState } from "react";
-import { StyleSheet, View } from "react-native";
+import { View } from "react-native";
 import { useI18n } from "../../i18n/i18n-provider";
 import { navigate } from "../../navigation/routes";
 import {
@@ -21,7 +21,6 @@ import {
   Screen,
   Section,
   SegmentedChoice,
-  space,
   Text,
   TextField,
   useOverlay,
@@ -237,7 +236,7 @@ function CaptureForm(props: CaptureScreenProps & { readonly access: CaptureAcces
           <Text variant="bodyMedium" color="onSurfaceVariant">
             {t("expenses.capture.edgeHint")}
           </Text>
-          <View style={styles.captureButtons}>
+          <View className="flex-row flex-wrap gap-2">
             <Button
               icon={Camera}
               label={t("expenses.capture.takePhoto")}
@@ -278,8 +277,8 @@ function CaptureForm(props: CaptureScreenProps & { readonly access: CaptureAcces
                       : "blocked";
             return (
               <Card key={item.key}>
-                <View style={styles.fileRow}>
-                  <View style={styles.flex}>
+                <View className="flex-row items-center gap-2">
+                  <View className="flex-1">
                     <Text variant="row" numberOfLines={1}>
                       {item.file.name}
                     </Text>
@@ -361,9 +360,3 @@ function CaptureForm(props: CaptureScreenProps & { readonly access: CaptureAcces
     </Screen>
   );
 }
-
-const styles = StyleSheet.create({
-  flex: { flex: 1 },
-  captureButtons: { flexDirection: "row", flexWrap: "wrap", gap: space.sm },
-  fileRow: { flexDirection: "row", alignItems: "center", gap: space.sm },
-});

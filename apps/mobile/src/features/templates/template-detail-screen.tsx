@@ -9,7 +9,7 @@ import { describeError, idempotencyHeaders, ifMatchHeaders } from "@kvitbit/ui-p
 import { formatDate } from "@kvitbit/ui-port/format";
 import { Archive, Play, Plus, RefreshCw, Send, Trash2 } from "lucide-react-native";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { StyleSheet, View } from "react-native";
+import { View } from "react-native";
 import { useI18n } from "../../i18n/i18n-provider";
 import { navigate } from "../../navigation/routes";
 import { useApi, useRemote } from "../../runtime/api-runtime";
@@ -34,7 +34,6 @@ import {
   Section,
   SegmentedChoice,
   SwitchRow,
-  space,
   Text,
   TextField,
   useOverlay,
@@ -395,7 +394,7 @@ export function TemplateDetailScreen(props: {
     <>
       {isNew || loaded === null ? null : (
         <Card>
-          <View style={styles.quickActions}>
+          <View className="flex-row flex-wrap gap-2">
             <Button
               kind="tonal"
               icon={Send}
@@ -524,8 +523,8 @@ export function TemplateDetailScreen(props: {
               }
               error={errMsg(`lines.${idx}.description`)}
             />
-            <View style={styles.rowFields}>
-              <View style={styles.flex}>
+            <View className="flex-row items-end gap-2">
+              <View className="flex-1">
                 <TextField
                   label={t("common.field.quantity")}
                   keyboardType="decimal-pad"
@@ -539,7 +538,7 @@ export function TemplateDetailScreen(props: {
                   error={errMsg(`lines.${idx}.quantity`)}
                 />
               </View>
-              <View style={styles.flex}>
+              <View className="flex-1">
                 <TextField
                   label={t("common.field.unit")}
                   value={line.unit}
@@ -551,7 +550,7 @@ export function TemplateDetailScreen(props: {
                   }
                 />
               </View>
-              <View style={styles.flex}>
+              <View className="flex-1">
                 <TextField
                   label={t("common.field.unitPrice")}
                   keyboardType="decimal-pad"
@@ -615,8 +614,8 @@ export function TemplateDetailScreen(props: {
         ) : null}
 
         <Card>
-          <View style={styles.headerRow}>
-            <Text variant="titleMedium" style={styles.flex}>
+          <View className="flex-row items-center gap-2">
+            <Text variant="titleMedium" className="flex-1">
               {t("templates.schedule.title")}
             </Text>
             <Badge
@@ -634,8 +633,8 @@ export function TemplateDetailScreen(props: {
         </Card>
 
         <Section title={t("templates.schedule.every")}>
-          <View style={styles.rowFields}>
-            <View style={styles.countField}>
+          <View className="flex-row items-end gap-2">
+            <View className="w-[84px]">
               <TextField
                 label="#"
                 keyboardType="number-pad"
@@ -644,7 +643,7 @@ export function TemplateDetailScreen(props: {
                 testID="schedule-count"
               />
             </View>
-            <View style={styles.flex}>
+            <View className="flex-1">
               <SegmentedChoice<CadenceUnit>
                 value={scheduleForm.unit}
                 choices={[
@@ -697,7 +696,7 @@ export function TemplateDetailScreen(props: {
           </Card>
         )}
 
-        <View style={styles.quickActions}>
+        <View className="flex-row flex-wrap gap-2">
           <Button
             label={t("common.action.save")}
             busy={saving}
@@ -817,11 +816,3 @@ export function TemplateDetailScreen(props: {
     </Screen>
   );
 }
-
-const styles = StyleSheet.create({
-  flex: { flex: 1 },
-  headerRow: { flexDirection: "row", alignItems: "center", gap: space.sm },
-  rowFields: { flexDirection: "row", gap: space.sm, alignItems: "flex-end" },
-  countField: { width: 84 },
-  quickActions: { flexDirection: "row", flexWrap: "wrap", gap: space.sm },
-});

@@ -1,4 +1,4 @@
-import { StyleSheet, View } from "react-native";
+import { View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useI18n } from "../i18n/i18n-provider";
 import { Banner } from "../ui/surface";
@@ -26,14 +26,12 @@ export function UpdateBannerView(props: {
   if (props.prompt === undefined) return null;
   return (
     <View
-      style={[
-        styles.overlay,
-        {
-          bottom: insets.bottom + 88,
-          left: insets.left + space.lg,
-          right: insets.right + space.lg,
-        },
-      ]}
+      className="pointer-events-box-none absolute"
+      style={{
+        bottom: insets.bottom + 88,
+        left: insets.left + space.lg,
+        right: insets.right + space.lg,
+      }}
     >
       <Banner
         tone="info"
@@ -43,7 +41,3 @@ export function UpdateBannerView(props: {
     </View>
   );
 }
-
-const styles = StyleSheet.create({
-  overlay: { position: "absolute", pointerEvents: "box-none" },
-});

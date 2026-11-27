@@ -1,13 +1,14 @@
 import { router } from "expo-router";
 import { ArrowLeft } from "lucide-react-native";
 import type { ReactNode } from "react";
-import { RefreshControl, ScrollView, StyleSheet, View } from "react-native";
-import { SafeAreaView } from "react-native-safe-area-context";
+import { RefreshControl, ScrollView, View } from "react-native";
+import { SafeAreaView as RNSafeAreaView } from "react-native-safe-area-context";
+import { withUniwind } from "uniwind";
 import { useI18n } from "../i18n/i18n-provider";
-import { useTheme } from "../theme/theme-provider";
 import { IconButton } from "./button";
 import { Text } from "./text";
-import { contentMaxWidth, space } from "./tokens";
+
+const SafeAreaView = withUniwind(RNSafeAreaView);
 
 export interface ScreenProps {
   readonly title?: string;
@@ -29,7 +30,6 @@ export function AppBar(props: {
   readonly back?: ScreenProps["back"] | undefined;
   readonly actions?: ReactNode;
 }) {
-  const theme = useTheme();
   const { t } = useI18n();
   const onBack =
     props.back === undefined || props.back === false
@@ -38,71 +38,51 @@ export function AppBar(props: {
         ? () => (router.canGoBack() ? router.back() : router.replace("/"))
         : props.back;
   return (
-    <View style={[styles.bar, { backgroundColor: theme.colors.surface }]}>
+    <View className="min-h-16 flex-row items-center bg-surface px-1">
       {onBack === undefined ? null : (
         <IconButton icon={ArrowLeft} label={t("common.action.back")} onPress={onBack} />
       )}
-      <Text variant="titleLarge" accessibilityRole="header" numberOfLines={1} style={styles.title}>
+      <Text
+        variant="titleLarge"
+        accessibilityRole="header"
+        numberOfLines={1}
+        className="mx-3 flex-1"
+      >
         {props.title ?? ""}
       </Text>
-      <View style={styles.actions}>{props.actions}</View>
+      <View className="flex-row items-center">{props.actions}</View>
     </View>
   );
 }
 
 export function Screen(props: ScreenProps) {
-  const theme = useTheme();
   const body =
     props.scroll === false ? (
-      <View style={styles.fill}>{props.children}</View>
+      <View className="flex-1">{props.children}</View>
     ) : (
       <ScrollView
         keyboardShouldPersistTaps="handled"
-        contentContainerStyle={styles.content}
+        contentContainerClassName="items-center p-4 pb-8"
         refreshControl={
           props.onRefresh === undefined ? undefined : (
             <RefreshControl refreshing={props.refreshing === true} onRefresh={props.onRefresh} />
           )
         }
       >
-        <View style={styles.column}>{props.children}</View>
+        <View className="w-full max-w-[720px] gap-4">{props.children}</View>
       </ScrollView>
     );
   return (
-    <SafeAreaView
-      edges={["top", "left", "right"]}
-      style={[styles.fill, { backgroundColor: theme.colors.surface }]}
-    >
+    <SafeAreaView edges={["top", "left", "right"]} className="flex-1 bg-surface">
       {props.title === undefined && props.back === undefined ? null : (
         <AppBar title={props.title} back={props.back} actions={props.actions} />
       )}
       {body}
       {props.footer === undefined ? null : (
-        <View
-          style={[
-            styles.footer,
-            { borderTopColor: theme.colors.outlineVariant, backgroundColor: theme.colors.surface },
-          ]}
-        >
+        <View className="flex-row justify-end gap-2 border-t border-outline-variant bg-surface p-3">
           {props.footer}
         </View>
       )}
     </SafeAreaView>
   );
 }
-
-const styles = StyleSheet.create({
-  fill: { flex: 1 },
-  bar: { flexDirection: "row", alignItems: "center", minHeight: 64, paddingHorizontal: space.xs },
-  title: { flex: 1, marginHorizontal: space.md },
-  actions: { flexDirection: "row", alignItems: "center" },
-  content: { padding: space.lg, paddingBottom: space.xxl, alignItems: "center" },
-  column: { width: "100%", maxWidth: contentMaxWidth, gap: space.lg },
-  footer: {
-    flexDirection: "row",
-    gap: space.sm,
-    justifyContent: "flex-end",
-    padding: space.md,
-    borderTopWidth: StyleSheet.hairlineWidth,
-  },
-});

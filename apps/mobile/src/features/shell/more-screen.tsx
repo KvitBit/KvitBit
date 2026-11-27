@@ -24,7 +24,7 @@ import {
   Users,
 } from "lucide-react-native";
 import { useMemo, useState } from "react";
-import { StyleSheet, View } from "react-native";
+import { View } from "react-native";
 import { useI18n } from "../../i18n/i18n-provider";
 import { navigate } from "../../navigation/routes";
 import { useSession } from "../../session/session-provider";
@@ -38,7 +38,6 @@ import {
   Screen,
   Section,
   SegmentedChoice,
-  space,
   Text,
   TextField,
   useOverlay,
@@ -137,7 +136,7 @@ export function MoreScreen() {
             trailing={switcherOpen ? "▲" : "▼"}
           />
           {switcherOpen ? (
-            <View style={styles.switcherBody}>
+            <View className="gap-2 pt-2">
               {workspaces.length > 3 ? (
                 <TextField
                   label={t("shell.workspaceSwitcher.search")}
@@ -169,7 +168,7 @@ export function MoreScreen() {
                   );
                 })
               )}
-              <View style={styles.createAction}>
+              <View className="items-start pt-1">
                 <Button
                   testID="workspace-create-button"
                   kind="tonal"
@@ -184,7 +183,7 @@ export function MoreScreen() {
       </Section>
 
       <Section title={local({ cs: "Agenda", en: "Workspace" })}>
-        <Card style={styles.listCard}>
+        <Card className="gap-0 px-3 py-1">
           {hiddenTabs.map((item) => (
             <ListRow
               key={item.id}
@@ -203,7 +202,7 @@ export function MoreScreen() {
           isAdminOrOwner ? undefined : <Badge label={t("common.state.readOnly")} tone="neutral" />
         }
       >
-        <Card style={styles.listCard}>
+        <Card className="gap-0 px-3 py-1">
           {SETTINGS_NAV_ITEMS.map((item) => (
             <ListRow
               key={item.section}
@@ -219,7 +218,7 @@ export function MoreScreen() {
       </Section>
 
       <Section title={t("account.title")}>
-        <Card style={styles.listCard}>
+        <Card className="gap-0 px-3 py-1">
           <ListRow
             testID="more-account-profile"
             leading={User}
@@ -257,7 +256,7 @@ export function MoreScreen() {
         </Card>
       </Section>
 
-      <View style={styles.signOutWrap}>
+      <View className="pt-1">
         <Button
           testID="more-sign-out"
           kind="outlined"
@@ -274,10 +273,3 @@ export function MoreScreen() {
 // Keep unused icon imports referenced cleanly if needed later
 void ChevronDown;
 void ChevronUp;
-
-const styles = StyleSheet.create({
-  listCard: { paddingVertical: space.xs, paddingHorizontal: space.md, gap: 0 },
-  switcherBody: { gap: space.sm, paddingTop: space.sm },
-  createAction: { paddingTop: space.xs, alignItems: "flex-start" },
-  signOutWrap: { paddingTop: space.xs },
-});

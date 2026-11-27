@@ -1,9 +1,9 @@
 import { CheckCircle2, ShieldAlert } from "lucide-react-native";
-import { ActivityIndicator, StyleSheet, View } from "react-native";
+import { ActivityIndicator, View } from "react-native";
 import { useI18n } from "../../i18n/i18n-provider";
 import type { BotProofState } from "../../platform/altcha/bot-proof";
 import { useTheme } from "../../theme/theme-provider";
-import { Banner, Icon, space, Text } from "../../ui";
+import { Banner, Icon, Text } from "../../ui";
 
 /** Compact inline ALTCHA PoW status strip (renders nothing when `NotRequired`). */
 export function BotProofWidget(props: {
@@ -37,21 +37,14 @@ export function BotProofWidget(props: {
     <View
       accessibilityRole="text"
       accessibilityLiveRegion="polite"
-      style={[
-        styles.row,
-        {
-          borderColor: theme.colors.outlineVariant,
-          borderRadius: theme.shape.control,
-          backgroundColor: theme.colors.surfaceContainerLow,
-        },
-      ]}
+      className="flex-row items-center gap-2 rounded-control border border-outline-variant bg-surface-container-low p-3"
     >
       {state._tag === "Solved" ? (
         <Icon icon={CheckCircle2} size={18} color="primary" />
       ) : (
         <ActivityIndicator size="small" color={theme.colors.primary} />
       )}
-      <View style={styles.textWrap}>
+      <View className="flex-1 gap-0.5">
         <Text variant="bodyMedium">{label}</Text>
         <Text variant="meta" color="onSurfaceVariant">
           {t("auth.botProof.label")}
@@ -63,14 +56,3 @@ export function BotProofWidget(props: {
     </View>
   );
 }
-
-const styles = StyleSheet.create({
-  row: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: space.sm,
-    padding: space.md,
-    borderWidth: 1,
-  },
-  textWrap: { flex: 1, gap: 2 },
-});
