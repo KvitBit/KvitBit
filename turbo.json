@@ -94,8 +94,21 @@
       ],
       "outputs": []
     },
+    "//#typecheck:alert-inbox": {
+      "inputs": [
+        "scripts/alert-inbox/**/*.ts",
+        "scripts/alert-inbox/tsconfig.json",
+        "infra/alchemy/src/mail-forwarder/mime.ts",
+        "tsconfig.base.json"
+      ],
+      "outputs": []
+    },
     "//#test:issue-pool": {
       "inputs": ["scripts/issue-pool/**"],
+      "outputs": []
+    },
+    "//#test:alert-inbox": {
+      "inputs": ["scripts/alert-inbox/**", "infra/alchemy/src/mail-forwarder/mime.ts"],
       "outputs": []
     },
     "//#check:bun-nix": {

@@ -117,6 +117,15 @@ export const buildArchiveObjectName = (
   suffixHex: string,
 ): string => `${buildArchivePrefix(deliveryFingerprint)}${now.getTime()}-${suffixHex}.eml`;
 
+export const buildAlertArchivePrefix = (deliveryFingerprint: string): string =>
+  `inbound/alerts/by-hash/${deliveryFingerprint.slice(0, 32)}/`;
+
+export const buildAlertArchiveObjectName = (
+  now: Date,
+  deliveryFingerprint: string,
+  suffixHex: string,
+): string => `${buildAlertArchivePrefix(deliveryFingerprint)}${now.getTime()}-${suffixHex}.eml`;
+
 const aliasTagForRecipients = (recipients: ReadonlyArray<string>): string => {
   const locals = recipients
     .map((addr) => addr.split("@")[0]?.trim())
@@ -353,17 +362,14 @@ export const makeMailRelay = (
       return body.access_token;
     });
 
-    const archiveToGcs = (
+    const uploadRawToGcs = (
       rawBytes: Uint8Array,
-      deliveryFingerprint: string,
+      objectName: string,
     ): Effect.Effect<{ readonly objectName: string; readonly uri: string }, ArchiveUploadError> =>
       Effect.gen(function* () {
         const token = yield* getAccessToken.pipe(
           Effect.mapError((error) => new ArchiveUploadError({ reason: error.reason })),
         );
-        const nowMs = yield* Clock.currentTimeMillis;
-        const suffixHex = yield* Effect.sync(() => randomBytes(6).toString("hex"));
-        const objectName = buildArchiveObjectName(new Date(nowMs), deliveryFingerprint, suffixHex);
         const uploadUrl =
           `${gcsBase}/upload/storage/v1/b/${encodeURIComponent(config.archiveBucket)}` +
           `/o?uploadType=media&name=${encodeURIComponent(objectName)}`;
@@ -388,6 +394,28 @@ export const makeMailRelay = (
         }
         return { objectName, uri: `gs://${config.archiveBucket}/${objectName}` };
       }).pipe(Effect.withSpan("MailRelay.archiveToGcs"));
+
+    const archiveToGcs = (
+      rawBytes: Uint8Array,
+      deliveryFingerprint: string,
+      includeAlertsCopy: boolean,
+    ): Effect.Effect<{ readonly objectName: string; readonly uri: string }, ArchiveUploadError> =>
+      Effect.gen(function* () {
+        const nowMs = yield* Clock.currentTimeMillis;
+        const suffixHex = yield* Effect.sync(() => randomBytes(6).toString("hex"));
+        const now = new Date(nowMs);
+        const primary = yield* uploadRawToGcs(
+          rawBytes,
+          buildArchiveObjectName(now, deliveryFingerprint, suffixHex),
+        );
+        if (includeAlertsCopy) {
+          yield* uploadRawToGcs(
+            rawBytes,
+            buildAlertArchiveObjectName(now, deliveryFingerprint, suffixHex),
+          );
+        }
+        return primary;
+      });
 
     const postResend = (
       payload: Record<string, unknown>,
@@ -449,12 +477,15 @@ export const makeMailRelay = (
         });
       }).pipe(Effect.withSpan("MailRelay.postResend"));
 
+    const alertRecipient = `alerts@${config.domain.toLowerCase()}`;
+
     const handleMessage: MailRelayService["handleMessage"] = (message) =>
       Effect.gen(function* () {
         const parsed = parseEmail(message.rawBytes);
         const deliveryFingerprint = computeDeliveryFingerprint(message);
+        const includeAlertsCopy = canonicalRecipients(message.rcptTo).includes(alertRecipient);
         const archiveResult = yield* Effect.result(
-          archiveToGcs(message.rawBytes, deliveryFingerprint),
+          archiveToGcs(message.rawBytes, deliveryFingerprint, includeAlertsCopy),
         );
         if (archiveResult._tag === "Failure") {
           yield* Effect.logError("mail_archive_failed", {
