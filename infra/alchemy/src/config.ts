@@ -24,6 +24,24 @@ export interface KvitbitEdgeConfig {
   readonly restrictDirectIngress: boolean;
 }
 
+export interface KvitbitMailConfig {
+  readonly domain: string;
+  readonly mxHost: string;
+  readonly forwardTo: string;
+  readonly forwardFrom: string;
+  readonly aliases: ReadonlyArray<string>;
+  readonly region: string;
+  readonly zone: string;
+  readonly cidr: string;
+  readonly archiveBucket: string;
+  readonly relayMode: "archive-only" | "resend";
+  readonly resendDkimTxt: string | undefined;
+  readonly resendSendMx: string | undefined;
+  readonly resendSendSpfTxt: string | undefined;
+  readonly apexSpfTxt: string | undefined;
+  readonly dmarcTxt: string | undefined;
+}
+
 export interface KvitbitStackConfig {
   readonly stage: KvitbitStage;
   readonly bootstrapFoundation: boolean;
@@ -54,6 +72,7 @@ export interface KvitbitStackConfig {
   readonly secrets: ReadonlyArray<KvitbitSecretBinding>;
   readonly dnsZones: ReadonlyArray<string>;
   readonly edge: KvitbitEdgeConfig | undefined;
+  readonly mail?: KvitbitMailConfig | undefined;
 }
 
 export class InvalidStackConfig extends Data.TaggedError("InvalidStackConfig")<{
@@ -83,10 +102,21 @@ export const KVITBIT_PROD_DEFAULTS = {
   shareKeyVersion: 1,
 } as const;
 
+export const KVITBIT_MAIL_DEFAULTS = {
+  region: "us-east1",
+  zone: "us-east1-b",
+  cidr: "10.42.16.0/28",
+} as const;
+
 const DIGEST_PATTERN = /^sha256:[a-f0-9]{64}$/;
 const DOMAIN_PATTERN = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/;
+const EMAIL_PATTERN = /^[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9-]+(?:\.[a-z0-9-]+)+$/;
 const EMAIL_ADDRESS_PATTERN =
   /^[a-z\d!#$%&'*+/=?^_`{|}~-]+(?:\.[a-z\d!#$%&'*+/=?^_`{|}~-]+)*@[a-z\d](?:[a-z\d-]*[a-z\d])?(?:\.[a-z\d](?:[a-z\d-]*[a-z\d])?)+$/i;
+const ALIAS_LOCAL_PATTERN = /^[a-z0-9][a-z0-9._+-]{0,62}$/;
+const CIDR_PATTERN = /^(\d{1,3}\.){3}\d{1,3}\/\d{1,2}$/;
+const MX_RRDATA_PATTERN =
+  /^(\d{1,5})\s+([a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+)\.?$/i;
 
 export const defaultSecretBindings = (
   stage: KvitbitStage,
@@ -172,8 +202,14 @@ export const resourceNames = (config: KvitbitStackConfig) => {
     serverServiceId: `${prefix}-server`,
     serverServiceAccountId: `${prefix}-server`,
     runnerServiceAccountId: `${prefix}-runner`,
+    mailServiceAccountId: `${prefix}-mail-ingress`,
     networkName: `${prefix}-vpc`,
     subnetworkName: `${prefix}-runners`,
+    mailSubnetworkName: `${prefix}-mail-ingress`,
+    mailAddressName: `${prefix}-mail-ingress`,
+    mailFirewallName: `${prefix}-allow-mail-smtp`,
+    mailTag: `${prefix}-mail-ingress`,
+    mailInstanceName: `${prefix}-mail-ingress`,
     routerName: `${prefix}-router`,
     natName: `${prefix}-nat`,
     runnerFirewallName: `${prefix}-allow-runner-cluster`,
@@ -296,6 +332,93 @@ export const validateStackConfig = (
             reason: `invalid domain '${domain}'`,
           });
         }
+      }
+    }
+    if (config.mail !== undefined) {
+      const { mail } = config;
+      if (!DOMAIN_PATTERN.test(mail.domain)) {
+        return yield* new InvalidStackConfig({
+          field: "KVITBIT_MAIL_DOMAIN",
+          reason: `invalid domain '${mail.domain}'`,
+        });
+      }
+      if (!config.dnsZones.includes(mail.domain)) {
+        return yield* new InvalidStackConfig({
+          field: "KVITBIT_MAIL_DOMAIN",
+          reason: `domain '${mail.domain}' must be included in KVITBIT_DNS_ZONES`,
+        });
+      }
+      if (!DOMAIN_PATTERN.test(mail.mxHost) || !mail.mxHost.endsWith(`.${mail.domain}`)) {
+        return yield* new InvalidStackConfig({
+          field: "KVITBIT_MAIL_MX_HOST",
+          reason: `MX host '${mail.mxHost}' must be a subdomain of '${mail.domain}'`,
+        });
+      }
+      if (!EMAIL_PATTERN.test(mail.forwardTo)) {
+        return yield* new InvalidStackConfig({
+          field: "KVITBIT_MAIL_FORWARD_TO",
+          reason: `invalid forwarding email '${mail.forwardTo}'`,
+        });
+      }
+      if (mail.forwardTo.endsWith(`@${mail.domain}`)) {
+        return yield* new InvalidStackConfig({
+          field: "KVITBIT_MAIL_FORWARD_TO",
+          reason: `forwarding target '${mail.forwardTo}' must not be on '${mail.domain}' (prevents forwarding loop)`,
+        });
+      }
+      if (!EMAIL_PATTERN.test(mail.forwardFrom) || !mail.forwardFrom.endsWith(`@${mail.domain}`)) {
+        return yield* new InvalidStackConfig({
+          field: "KVITBIT_MAIL_FORWARD_FROM",
+          reason: `forwardFrom '${mail.forwardFrom}' must be an address on '${mail.domain}'`,
+        });
+      }
+      if (mail.aliases.length === 0) {
+        return yield* new InvalidStackConfig({
+          field: "KVITBIT_MAIL_ALIASES",
+          reason: "must list at least one explicit local-part alias (catch-all is not allowed)",
+        });
+      }
+      const forwardFromLocal = mail.forwardFrom.slice(0, mail.forwardFrom.indexOf("@"));
+      for (const alias of mail.aliases) {
+        if (!ALIAS_LOCAL_PATTERN.test(alias)) {
+          return yield* new InvalidStackConfig({
+            field: "KVITBIT_MAIL_ALIASES",
+            reason: `invalid alias local-part '${alias}'`,
+          });
+        }
+        if (alias === forwardFromLocal) {
+          return yield* new InvalidStackConfig({
+            field: "KVITBIT_MAIL_ALIASES",
+            reason: `alias '${alias}' must not match forwardFrom local-part '${forwardFromLocal}'`,
+          });
+        }
+      }
+      if (!mail.zone.startsWith(`${mail.region}-`)) {
+        return yield* new InvalidStackConfig({
+          field: "KVITBIT_MAIL_ZONE",
+          reason: `zone '${mail.zone}' must be inside region '${mail.region}'`,
+        });
+      }
+      if (!CIDR_PATTERN.test(mail.cidr) || mail.cidr === config.runnerCidr) {
+        return yield* new InvalidStackConfig({
+          field: "KVITBIT_MAIL_CIDR",
+          reason: `invalid or conflicting CIDR '${mail.cidr}'`,
+        });
+      }
+      if (mail.resendSendMx !== undefined && !MX_RRDATA_PATTERN.test(mail.resendSendMx)) {
+        return yield* new InvalidStackConfig({
+          field: "KVITBIT_MAIL_RESEND_SEND_MX",
+          reason: `expected '<priority> <hostname>' (got '${mail.resendSendMx}')`,
+        });
+      }
+      if (
+        mail.relayMode === "resend" &&
+        !config.secrets.some((secret) => secret.environmentVariable === "RESEND_API_KEY")
+      ) {
+        return yield* new InvalidStackConfig({
+          field: "mail.relayMode",
+          reason: "relayMode 'resend' requires KVITBIT_ENABLE_RESEND_SECRET=true",
+        });
       }
     }
     return config;
@@ -478,6 +601,44 @@ export const loadStackConfig: Effect.Effect<
     Config.withDefault(`${projectId}-mobile-${stage}`),
   );
 
+  const mailDomainRaw = yield* optionalNonEmptyString("KVITBIT_MAIL_DOMAIN");
+  const mailDomain = mailDomainRaw?.toLowerCase().replace(/\.$/, "");
+  const mail: KvitbitMailConfig | undefined =
+    mailDomain !== undefined
+      ? {
+          domain: mailDomain,
+          mxHost: ((yield* optionalNonEmptyString("KVITBIT_MAIL_MX_HOST")) ?? `mx.${mailDomain}`)
+            .toLowerCase()
+            .replace(/\.$/, ""),
+          forwardTo: (
+            (yield* optionalNonEmptyString("KVITBIT_MAIL_FORWARD_TO")) ?? ""
+          ).toLowerCase(),
+          forwardFrom: (
+            (yield* optionalNonEmptyString("KVITBIT_MAIL_FORWARD_FROM")) ??
+            `forwarder@${mailDomain}`
+          ).toLowerCase(),
+          aliases: [
+            ...new Set(parseCsvList(yield* optionalNonEmptyString("KVITBIT_MAIL_ALIASES"))),
+          ],
+          region: (
+            (yield* optionalNonEmptyString("KVITBIT_MAIL_REGION")) ?? KVITBIT_MAIL_DEFAULTS.region
+          ).toLowerCase(),
+          zone: (
+            (yield* optionalNonEmptyString("KVITBIT_MAIL_ZONE")) ?? KVITBIT_MAIL_DEFAULTS.zone
+          ).toLowerCase(),
+          cidr: (yield* optionalNonEmptyString("KVITBIT_MAIL_CIDR")) ?? KVITBIT_MAIL_DEFAULTS.cidr,
+          archiveBucket:
+            (yield* optionalNonEmptyString("KVITBIT_MAIL_ARCHIVE_BUCKET")) ??
+            `${projectId}-mail-archive-${stage}`,
+          relayMode: enableResend ? "resend" : "archive-only",
+          resendDkimTxt: yield* optionalNonEmptyString("KVITBIT_MAIL_RESEND_DKIM_TXT"),
+          resendSendMx: yield* optionalNonEmptyString("KVITBIT_MAIL_RESEND_SEND_MX"),
+          resendSendSpfTxt: yield* optionalNonEmptyString("KVITBIT_MAIL_RESEND_SEND_SPF_TXT"),
+          apexSpfTxt: yield* optionalNonEmptyString("KVITBIT_MAIL_APEX_SPF_TXT"),
+          dmarcTxt: yield* optionalNonEmptyString("KVITBIT_MAIL_DMARC_TXT"),
+        }
+      : undefined;
+
   return yield* validateStackConfig({
     stage,
     bootstrapFoundation,
@@ -513,5 +674,6 @@ export const loadStackConfig: Effect.Effect<
     }),
     dnsZones,
     edge,
+    ...(mail === undefined ? {} : { mail }),
   });
 });

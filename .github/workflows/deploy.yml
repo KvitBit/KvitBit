@@ -31,6 +31,10 @@ on:
         description: Create the feedback token container after enabling the feedback secret flag
         type: boolean
         default: false
+      bootstrap_resend_secret:
+        description: Create the Resend API key container after enabling the Resend secret flag
+        type: boolean
+        default: false
 
 # Never cancel an active production deployment or migration in progress.
 concurrency:
@@ -50,6 +54,7 @@ jobs:
       DRY_RUN: ${{ inputs.dry_run && 'true' || 'false' }}
       BOOTSTRAP_FOUNDATION: ${{ inputs.bootstrap_foundation && 'true' || 'false' }}
       BOOTSTRAP_FEEDBACK_SECRET: ${{ inputs.bootstrap_feedback_secret && 'true' || 'false' }}
+      BOOTSTRAP_RESEND_SECRET: ${{ inputs.bootstrap_resend_secret && 'true' || 'false' }}
       GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
       GCP_PROJECT_NUMBER: ${{ vars.GCP_PROJECT_NUMBER }}
       GCP_REGION: ${{ vars.GCP_REGION }}
@@ -70,8 +75,14 @@ jobs:
             echo "::error::deploy.yml is strictly production-only until an isolated staging environment exists (got KVITBIT_STAGE=${KVITBIT_STAGE})"
             exit 1
           fi
-          if [ "$BOOTSTRAP_FOUNDATION" = "true" ] && [ "$BOOTSTRAP_FEEDBACK_SECRET" = "true" ]; then
-            echo "::error::Select only one of bootstrap_foundation and bootstrap_feedback_secret."
+          bootstrap_modes=0
+          for flag in "${BOOTSTRAP_FOUNDATION:-false}" "${BOOTSTRAP_FEEDBACK_SECRET:-false}" "${BOOTSTRAP_RESEND_SECRET:-false}"; do
+            if [ "$flag" = "true" ]; then
+              bootstrap_modes=$((bootstrap_modes + 1))
+            fi
+          done
+          if [ "$bootstrap_modes" -gt 1 ]; then
+            echo "::error::Select only one of bootstrap_foundation, bootstrap_feedback_secret, and bootstrap_resend_secret."
             exit 1
           fi
           for name in \
@@ -134,7 +145,7 @@ jobs:
 
       # Step 1: Federated credentials file for gcloud and Artifact Registry Docker push.
       - name: Authenticate to Google Cloud (OIDC)
-        if: env.BOOTSTRAP_FEEDBACK_SECRET != 'true'
+        if: env.BOOTSTRAP_FEEDBACK_SECRET != 'true' && env.BOOTSTRAP_RESEND_SECRET != 'true'
         id: gcp-auth
         uses: google-github-actions/auth@v3
         with:
@@ -156,7 +167,7 @@ jobs:
           create_credentials_file: false
 
       - name: Set up gcloud
-        if: env.BOOTSTRAP_FEEDBACK_SECRET != 'true'
+        if: env.BOOTSTRAP_FEEDBACK_SECRET != 'true' && env.BOOTSTRAP_RESEND_SECRET != 'true'
         uses: google-github-actions/setup-gcloud@v3
 
       # Guard against accidentally running foundation-only bootstrap on a populated production
@@ -185,7 +196,7 @@ jobs:
       # Fail fast before pushing images or running migrations if foundation resources
       # or required Secret Manager versions have not been bootstrapped yet.
       - name: Preflight Artifact Registry and Secret Manager versions
-        if: env.DRY_RUN != 'true' && env.BOOTSTRAP_FOUNDATION != 'true' && env.BOOTSTRAP_FEEDBACK_SECRET != 'true'
+        if: env.DRY_RUN != 'true' && env.BOOTSTRAP_FOUNDATION != 'true' && env.BOOTSTRAP_FEEDBACK_SECRET != 'true' && env.BOOTSTRAP_RESEND_SECRET != 'true'
         run: |
           set -euo pipefail
           if ! gcloud artifacts repositories describe kvitbit \
@@ -196,8 +207,9 @@ jobs:
           fi
 
           required_secrets="kvitbit-${KVITBIT_STAGE}-database-url kvitbit-${KVITBIT_STAGE}-runner-database-url-unpooled kvitbit-${KVITBIT_STAGE}-better-auth-secret"
+          resend_secret="kvitbit-${KVITBIT_STAGE}-resend-api-key"
           if [ "${KVITBIT_ENABLE_RESEND_SECRET:-false}" = "true" ]; then
-            required_secrets="${required_secrets} kvitbit-${KVITBIT_STAGE}-resend-api-key"
+            required_secrets="${required_secrets} ${resend_secret}"
           fi
           if [ "${KVITBIT_ENABLE_SMTP_SECRET:-false}" = "true" ]; then
             required_secrets="${required_secrets} kvitbit-${KVITBIT_STAGE}-smtp-url"
@@ -218,6 +230,8 @@ jobs:
             if [ "$state" != "ENABLED" ]; then
               if [ "$secret_id" = "$feedback_secret" ]; then
                 echo "::error::Secret Manager secret '${secret_id}' does not have an ENABLED 'latest' version (got '${state:-missing}'). Run bootstrap_feedback_secret=true if the container is missing, then add an enabled token version before deploying."
+              elif [ "$secret_id" = "$resend_secret" ]; then
+                echo "::error::Secret Manager secret '${secret_id}' does not have an ENABLED 'latest' version (got '${state:-missing}'). Run bootstrap_resend_secret=true if the container is missing, then add an enabled API key version before deploying."
               else
                 echo "::error::Secret Manager secret '${secret_id}' does not have an ENABLED 'latest' version (got '${state:-missing}'). Run bootstrap_foundation=true if needed and populate secret versions before deploying."
               fi
@@ -226,12 +240,12 @@ jobs:
           done
 
       - name: Configure Docker for Artifact Registry
-        if: env.BOOTSTRAP_FOUNDATION != 'true' && env.BOOTSTRAP_FEEDBACK_SECRET != 'true'
+        if: env.BOOTSTRAP_FOUNDATION != 'true' && env.BOOTSTRAP_FEEDBACK_SECRET != 'true' && env.BOOTSTRAP_RESEND_SECRET != 'true'
         run: gcloud auth configure-docker "${GCP_REGION}-docker.pkg.dev" --quiet
 
       - name: Build and push Kvitbit OCI image
         id: image
-        if: env.BOOTSTRAP_FOUNDATION != 'true' && env.BOOTSTRAP_FEEDBACK_SECRET != 'true'
+        if: env.BOOTSTRAP_FOUNDATION != 'true' && env.BOOTSTRAP_FEEDBACK_SECRET != 'true' && env.BOOTSTRAP_RESEND_SECRET != 'true'
         run: |
           set -euo pipefail
           IMAGE_REPO="${GCP_REGION}-docker.pkg.dev/${GCP_PROJECT_ID}/kvitbit/kvitbit"
@@ -257,7 +271,7 @@ jobs:
 
       # Explicit migration step BEFORE Cloud Run / runner pool rollout (rule S5, #878).
       - name: Run database and cluster schema migrations
-        if: env.DRY_RUN != 'true' && env.BOOTSTRAP_FOUNDATION != 'true' && env.BOOTSTRAP_FEEDBACK_SECRET != 'true'
+        if: env.DRY_RUN != 'true' && env.BOOTSTRAP_FOUNDATION != 'true' && env.BOOTSTRAP_FEEDBACK_SECRET != 'true' && env.BOOTSTRAP_RESEND_SECRET != 'true'
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           DATABASE_URL_UNPOOLED: ${{ secrets.DATABASE_DIRECT_URL }}
@@ -273,7 +287,7 @@ jobs:
           fi
           bun apps/server/src/migrate.ts
 
-      - name: Run pure-Alchemy GCP stack (${{ inputs.dry_run && 'plan' || inputs.bootstrap_feedback_secret && 'feedback secret bootstrap' || inputs.bootstrap_foundation && 'foundation bootstrap' || 'deploy' }})
+      - name: Run pure-Alchemy GCP stack (${{ inputs.dry_run && 'plan' || inputs.bootstrap_feedback_secret && 'feedback secret bootstrap' || inputs.bootstrap_resend_secret && 'resend secret bootstrap' || inputs.bootstrap_foundation && 'foundation bootstrap' || 'deploy' }})
         working-directory: infra/alchemy
         env:
           GOOGLE_ACCESS_TOKEN: ${{ steps.alchemy-auth.outputs.access_token }}
@@ -299,11 +313,25 @@ jobs:
           KVITBIT_ENABLE_FEEDBACK_GITHUB_TOKEN_SECRET: ${{ env.KVITBIT_ENABLE_FEEDBACK_GITHUB_TOKEN_SECRET }}
           KVITBIT_FEEDBACK_GITHUB_REPO: ${{ vars.KVITBIT_FEEDBACK_GITHUB_REPO }}
           KVITBIT_FEEDBACK_OWNER_EMAILS: ${{ vars.KVITBIT_FEEDBACK_OWNER_EMAILS }}
+          KVITBIT_MAIL_DOMAIN: ${{ vars.KVITBIT_MAIL_DOMAIN }}
+          KVITBIT_MAIL_MX_HOST: ${{ vars.KVITBIT_MAIL_MX_HOST }}
+          KVITBIT_MAIL_FORWARD_TO: ${{ vars.KVITBIT_MAIL_FORWARD_TO }}
+          KVITBIT_MAIL_FORWARD_FROM: ${{ vars.KVITBIT_MAIL_FORWARD_FROM }}
+          KVITBIT_MAIL_ALIASES: ${{ vars.KVITBIT_MAIL_ALIASES }}
+          KVITBIT_MAIL_REGION: ${{ vars.KVITBIT_MAIL_REGION }}
+          KVITBIT_MAIL_ZONE: ${{ vars.KVITBIT_MAIL_ZONE }}
+          KVITBIT_MAIL_CIDR: ${{ vars.KVITBIT_MAIL_CIDR }}
+          KVITBIT_MAIL_ARCHIVE_BUCKET: ${{ vars.KVITBIT_MAIL_ARCHIVE_BUCKET }}
+          KVITBIT_MAIL_RESEND_DKIM_TXT: ${{ vars.KVITBIT_MAIL_RESEND_DKIM_TXT }}
+          KVITBIT_MAIL_RESEND_SEND_MX: ${{ vars.KVITBIT_MAIL_RESEND_SEND_MX }}
+          KVITBIT_MAIL_RESEND_SEND_SPF_TXT: ${{ vars.KVITBIT_MAIL_RESEND_SEND_SPF_TXT }}
+          KVITBIT_MAIL_APEX_SPF_TXT: ${{ vars.KVITBIT_MAIL_APEX_SPF_TXT }}
+          KVITBIT_MAIL_DMARC_TXT: ${{ vars.KVITBIT_MAIL_DMARC_TXT }}
         run: |
           set -euo pipefail
           selection=()
-          if [ "$BOOTSTRAP_FEEDBACK_SECRET" = "true" ]; then
-            if [ "$KVITBIT_ENABLE_FEEDBACK_GITHUB_TOKEN_SECRET" != "true" ]; then
+          if [ "${BOOTSTRAP_FEEDBACK_SECRET:-false}" = "true" ]; then
+            if [ "${KVITBIT_ENABLE_FEEDBACK_GITHUB_TOKEN_SECRET:-false}" != "true" ]; then
               echo "::error::Set the KVITBIT_ENABLE_FEEDBACK_GITHUB_TOKEN_SECRET repository variable to true before bootstrapping the feedback token container."
               exit 1
             fi
@@ -311,6 +339,14 @@ jobs:
             KVITBIT_IMAGE_DIGEST="sha256:$(printf '%s' "$GITHUB_SHA" | sha256sum | awk '{print $1}')"
             export KVITBIT_IMAGE_DIGEST
             selection=(--include "Secret-kvitbit-${KVITBIT_STAGE}-feedback-github-token")
+          elif [ "${BOOTSTRAP_RESEND_SECRET:-false}" = "true" ]; then
+            if [ "${KVITBIT_ENABLE_RESEND_SECRET:-false}" != "true" ]; then
+              echo "::error::Set the KVITBIT_ENABLE_RESEND_SECRET repository variable to true before bootstrapping the Resend API key container."
+              exit 1
+            fi
+            KVITBIT_IMAGE_DIGEST="sha256:$(printf '%s' "$GITHUB_SHA" | sha256sum | awk '{print $1}')"
+            export KVITBIT_IMAGE_DIGEST
+            selection=(--include "Secret-kvitbit-${KVITBIT_STAGE}-resend-api-key")
           fi
           if [ "$DRY_RUN" = "true" ]; then
             bunx alchemy plan --stage "$KVITBIT_STAGE" "${selection[@]}"
@@ -319,7 +355,7 @@ jobs:
           fi
 
       - name: Verify runner pool reconciled target digest and config
-        if: env.DRY_RUN != 'true' && env.BOOTSTRAP_FOUNDATION != 'true' && env.BOOTSTRAP_FEEDBACK_SECRET != 'true'
+        if: env.DRY_RUN != 'true' && env.BOOTSTRAP_FOUNDATION != 'true' && env.BOOTSTRAP_FEEDBACK_SECRET != 'true' && env.BOOTSTRAP_RESEND_SECRET != 'true'
         env:
           TARGET_DIGEST: ${{ steps.image.outputs.digest }}
         run: |
@@ -385,8 +421,49 @@ jobs:
             fi
           done
 
+      - name: Verify inbound mail forwarder reconciled target config and script
+        if: env.DRY_RUN != 'true' && env.BOOTSTRAP_FOUNDATION != 'true' && env.BOOTSTRAP_FEEDBACK_SECRET != 'true' && env.BOOTSTRAP_RESEND_SECRET != 'true' && vars.KVITBIT_MAIL_DOMAIN != ''
+        env:
+          KVITBIT_MAIL_ZONE: ${{ vars.KVITBIT_MAIL_ZONE }}
+        run: |
+          set -euo pipefail
+          MAIL_ZONE="${KVITBIT_MAIL_ZONE:-us-east1-b}"
+          MAIL_INSTANCE="kvitbit-${KVITBIT_STAGE}-mail-ingress"
+          metadata_json="$(gcloud compute instances describe "$MAIL_INSTANCE" \
+            --project "$GCP_PROJECT_ID" \
+            --zone "$MAIL_ZONE" \
+            --format='json(metadata.items)')"
+          expected_target="$(printf '%s' "$metadata_json" | bun -e '
+            const data = JSON.parse(await new Response(Bun.stdin.stream()).text());
+            const items = data?.metadata?.items ?? [];
+            const get = (k) => items.find((item) => item?.key === k)?.value ?? "";
+            const d = get("kvitbit-mail-image-digest");
+            const c = get("kvitbit-mail-config-sha");
+            const s = get("kvitbit-mail-script-sha");
+            if (d && c && s) process.stdout.write(`${d}|${c}|${s}`);
+          ')"
+          if [ -z "$expected_target" ]; then
+            echo "::error::Mail forwarder ${MAIL_INSTANCE} is missing expected metadata hashes"
+            exit 1
+          fi
+          for attempt in $(seq 1 18); do
+            active_target="$(gcloud compute instances get-guest-attributes "$MAIL_INSTANCE" \
+              --project "$GCP_PROJECT_ID" \
+              --zone "$MAIL_ZONE" \
+              --query-path="kvitbit/mail-active-target" \
+              --format='value(value)' 2>/dev/null || true)"
+            if [ "$active_target" = "$expected_target" ]; then
+              echo "Verified ${MAIL_INSTANCE} reconciled target ${expected_target}"
+              exit 0
+            fi
+            echo "Waiting for ${MAIL_INSTANCE} (attempt ${attempt}/18, observed=${active_target:-none})"
+            sleep 10
+          done
+          echo "::error::Mail forwarder ${MAIL_INSTANCE} did not reconcile target ${expected_target} in time"
+          exit 1
+
       - name: Verify database readiness and static mounts
-        if: env.DRY_RUN != 'true' && env.BOOTSTRAP_FOUNDATION != 'true' && env.BOOTSTRAP_FEEDBACK_SECRET != 'true'
+        if: env.DRY_RUN != 'true' && env.BOOTSTRAP_FOUNDATION != 'true' && env.BOOTSTRAP_FEEDBACK_SECRET != 'true' && env.BOOTSTRAP_RESEND_SECRET != 'true'
         env:
           KVITBIT_EDGE_DOMAINS: ${{ vars.KVITBIT_EDGE_DOMAINS }}
           APP_ORIGIN: ${{ vars.APP_ORIGIN }}

@@ -13,6 +13,7 @@ import {
   secretAccessorGrants,
   secretDeclarations,
 } from "./resources/foundation";
+import { declareMailForwarder } from "./resources/mail";
 import { declareMonitoring } from "./resources/monitoring";
 import { declareNetworkAndRunners } from "./resources/network";
 import { declareServerService } from "./resources/server";
@@ -179,10 +180,22 @@ export const declareKvitbitStack = (config: KvitbitStackConfig) =>
       config.edge === undefined
         ? undefined
         : yield* declareKvitbitEdge(config, config.edge, server.serviceId);
+    const mail =
+      config.mail === undefined
+        ? undefined
+        : yield* declareMailForwarder(config, config.mail, {
+            networkSelfLink: network.networkSelfLink,
+            resendSecretName: foundation.resendSecretName,
+          });
     const dnsNameServers =
       foundation.dnsApi === undefined
         ? undefined
-        : yield* declareKvitbitDns(config, foundation.dnsApi, edge?.edgeIpAddress);
+        : yield* declareKvitbitDns(
+            config,
+            foundation.dnsApi,
+            edge?.edgeIpAddress,
+            mail?.mailIpAddress,
+          );
     yield* declareMonitoring(
       config,
       foundation.monitoringApi,
@@ -206,6 +219,7 @@ export const declareKvitbitStack = (config: KvitbitStackConfig) =>
       serverUri: server.serviceUri,
       tokenRouteExclusion,
       edge,
+      ...(mail === undefined ? {} : { mail }),
       ...(dnsNameServers === undefined ? {} : { dnsNameServers }),
     };
   });

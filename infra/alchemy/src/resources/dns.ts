@@ -11,16 +11,63 @@ const zoneNameFor = (prefix: string, domain: string) => {
   return `${prefix}-${slug.slice(0, 63 - prefix.length - hash.length - 2)}-${hash}`;
 };
 
+/**
+ * Formats a raw TXT value for Google Cloud DNS `rrdatas`.
+ *
+ * Splits strings exceeding the RFC 1035 255-byte per-string limit (such as 2048-bit
+ * DKIM public keys) into adjacent quoted chunks separated by spaces, escaping embedded
+ * backslashes and double quotes.
+ */
+export const formatCloudDnsTxt = (raw: string): string => {
+  const chunks: Array<string> = [];
+  let current = "";
+  let currentBytes = 0;
+
+  for (const ch of raw) {
+    const escaped = ch === "\\" || ch === '"' ? `\\${ch}` : ch;
+    const charBytes = Buffer.byteLength(ch, "utf8");
+    if (currentBytes + charBytes > 255) {
+      chunks.push(`"${current}"`);
+      current = escaped;
+      currentBytes = charBytes;
+    } else {
+      current += escaped;
+      currentBytes += charBytes;
+    }
+  }
+  chunks.push(`"${current}"`);
+  return chunks.join(" ");
+};
+
+export const normalizeMxRrdata = (raw: string): string => {
+  const trimmed = raw.trim();
+  const match = trimmed.match(/^(\d+)\s+(\S+)$/);
+  if (!match) return trimmed;
+  const priority = match[1];
+  const host = (match[2] ?? "").toLowerCase();
+  const fqdn = host.endsWith(".") ? host : `${host}.`;
+  return `${priority} ${fqdn}`;
+};
+
 export const declareKvitbitDns = Effect.fn("KvitbitStack.declareDns")(function* (
   config: KvitbitStackConfig,
   dnsApi: ProjectService,
   edgeIpAddress: Output.Output<string | undefined> | undefined,
+  mailIpAddress?: Output.Output<string | undefined> | undefined,
 ) {
   const { prefix } = resourceNames(config);
   const nameServers: Record<string, Output.Output<ReadonlyArray<string>>> = {};
   const edgeAddressData = edgeIpAddress?.pipe(
     Output.map((address) => {
       if (!address) throw new Error("EdgeAddress has no IPv4 address for the Cloud DNS A records");
+      return [address];
+    }),
+  );
+  const mailAddressData = mailIpAddress?.pipe(
+    Output.map((address) => {
+      if (!address) {
+        throw new Error("KvitbitMailAddress has no IPv4 address for the Cloud DNS MX A record");
+      }
       return [address];
     }),
   );
@@ -60,6 +107,71 @@ export const declareKvitbitDns = Effect.fn("KvitbitStack.declareDns")(function* 
         ttl: 300,
         rrdatas: ['0 issue "pki.goog"', '0 issue "letsencrypt.org"'],
       });
+    }
+
+    if (config.mail !== undefined && domain === config.mail.domain) {
+      const { mail } = config;
+      if (mailAddressData !== undefined) {
+        yield* DNS.ResourceRecordSet(`${id}-MailMxA`, {
+          managedZone: zone.zoneName,
+          name: `${mail.mxHost}.`,
+          type: "A",
+          ttl: 300,
+          rrdatas: mailAddressData,
+        });
+        yield* DNS.ResourceRecordSet(`${id}-ApexMx`, {
+          managedZone: zone.zoneName,
+          name: dnsName,
+          type: "MX",
+          ttl: 300,
+          rrdatas: [`10 ${mail.mxHost}.`],
+        });
+      }
+      if (mail.resendDkimTxt !== undefined) {
+        yield* DNS.ResourceRecordSet(`${id}-ResendDkimTxt`, {
+          managedZone: zone.zoneName,
+          name: `resend._domainkey.${dnsName}`,
+          type: "TXT",
+          ttl: 300,
+          rrdatas: [formatCloudDnsTxt(mail.resendDkimTxt)],
+        });
+      }
+      if (mail.resendSendMx !== undefined) {
+        yield* DNS.ResourceRecordSet(`${id}-ResendSendMx`, {
+          managedZone: zone.zoneName,
+          name: `send.${dnsName}`,
+          type: "MX",
+          ttl: 300,
+          rrdatas: [normalizeMxRrdata(mail.resendSendMx)],
+        });
+      }
+      if (mail.resendSendSpfTxt !== undefined) {
+        yield* DNS.ResourceRecordSet(`${id}-ResendSendSpfTxt`, {
+          managedZone: zone.zoneName,
+          name: `send.${dnsName}`,
+          type: "TXT",
+          ttl: 300,
+          rrdatas: [formatCloudDnsTxt(mail.resendSendSpfTxt)],
+        });
+      }
+      if (mail.apexSpfTxt !== undefined) {
+        yield* DNS.ResourceRecordSet(`${id}-ApexSpfTxt`, {
+          managedZone: zone.zoneName,
+          name: dnsName,
+          type: "TXT",
+          ttl: 300,
+          rrdatas: [formatCloudDnsTxt(mail.apexSpfTxt)],
+        });
+      }
+      if (mail.dmarcTxt !== undefined) {
+        yield* DNS.ResourceRecordSet(`${id}-DmarcTxt`, {
+          managedZone: zone.zoneName,
+          name: `_dmarc.${dnsName}`,
+          type: "TXT",
+          ttl: 300,
+          rrdatas: [formatCloudDnsTxt(mail.dmarcTxt)],
+        });
+      }
     }
   }
 

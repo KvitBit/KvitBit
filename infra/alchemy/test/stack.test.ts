@@ -1524,6 +1524,241 @@ describe("Pure-Alchemy Cloud DNS", () => {
       }
     }
   });
+
+  test("wires Always-Free US inbound mail forwarder, write-only archive bucket, and kvitbit.com email DNS records", async () => {
+    const mailEnv = {
+      KVITBIT_IMAGE_DIGEST: SAMPLE_DIGEST,
+      KVITBIT_DNS_ZONES: PROD_DNS_ZONES.join(","),
+      KVITBIT_EDGE_DOMAINS: "kvitbit.cz,kvitbit.com",
+      KVITBIT_MAIL_DOMAIN: "kvitbit.com",
+      KVITBIT_MAIL_FORWARD_TO: "filkalny@gmail.com",
+      KVITBIT_MAIL_ALIASES: "founder,ops,hello,support,billing,privacy,security,postmaster,abuse",
+    };
+
+    // Bootstrap (archive-only) mode before Resend secret is enabled
+    const archiveOnlyConfig = await Effect.runPromise(
+      loadStackConfig.pipe(
+        Effect.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env: mailEnv }))),
+      ),
+    );
+    expect(archiveOnlyConfig.mail?.relayMode).toBe("archive-only");
+    expect(archiveOnlyConfig.mail?.region).toBe("us-east1");
+    expect(archiveOnlyConfig.mail?.zone).toBe("us-east1-b");
+    expect(archiveOnlyConfig.mail?.aliases).toHaveLength(9);
+
+    const archiveCompiled = await compile(archiveOnlyConfig);
+    expect(archiveCompiled.resources.KvitbitMailIngressSa?.Type).toBe("GCP.IAM.ServiceAccount");
+    expect(archiveCompiled.resources.KvitbitMailArchive?.Type).toBe("GCP.Storage.Bucket");
+    expect(archiveCompiled.resources.MailIngressArchiveWriter?.Props).toMatchObject({
+      role: "roles/storage.objectCreator",
+    });
+    expect(archiveCompiled.resources.MailIngressResendSecretAccessor).toBeUndefined();
+    expect(archiveCompiled.resources.KvitbitMailAddress?.Props).toMatchObject({
+      region: "us-east1",
+      addressType: "EXTERNAL",
+      networkTier: "PREMIUM",
+    });
+    expect(archiveCompiled.resources.KvitbitMailIngress?.Props).toMatchObject({
+      zone: "us-east1-b",
+      machineType: "e2-micro",
+      bootDiskType: "pd-standard",
+      diskSizeGb: 20,
+      preemptible: false,
+    });
+    expect(archiveCompiled.resources["DnsZone-kvitbit.com-MailMxA"]?.Type).toBe(
+      "GCP.DNS.ResourceRecordSet",
+    );
+    expect(archiveCompiled.resources["DnsZone-kvitbit.com-ApexMx"]?.Type).toBe(
+      "GCP.DNS.ResourceRecordSet",
+    );
+    expect(archiveCompiled.resources["DnsZone-kvitbit.cz-ApexMx"]).toBeUndefined();
+
+    // Steady-state Resend mode with DKIM/MX/SPF/DMARC DNS records
+    const longDkim = `v=DKIM1; k=rsa; p=${"B".repeat(360)}`;
+    const resendConfig = await Effect.runPromise(
+      loadStackConfig.pipe(
+        Effect.provide(
+          ConfigProvider.layer(
+            ConfigProvider.fromEnv({
+              env: {
+                ...mailEnv,
+                KVITBIT_ENABLE_RESEND_SECRET: "true",
+                KVITBIT_MAIL_RESEND_DKIM_TXT: longDkim,
+                KVITBIT_MAIL_RESEND_SEND_MX: "10 feedback-smtp.eu-west-1.amazonses.com",
+                KVITBIT_MAIL_RESEND_SEND_SPF_TXT: "v=spf1 include:amazonses.com ~all",
+                KVITBIT_MAIL_APEX_SPF_TXT: "v=spf1 -all",
+                KVITBIT_MAIL_DMARC_TXT: "v=DMARC1; p=quarantine; rua=mailto:postmaster@kvitbit.com",
+              },
+            }),
+          ),
+        ),
+      ),
+    );
+    expect(resendConfig.mail?.relayMode).toBe("resend");
+
+    const resendCompiled = await compile(resendConfig);
+    expect(resendCompiled.resources.MailIngressResendSecretAccessor?.Type).toBe("GCP.IAM.Member");
+    expect(resendCompiled.resources.MailIngressResendSecretAccessor?.Props).toMatchObject({
+      role: "roles/secretmanager.secretAccessor",
+    });
+
+    const upstream = {
+      "DnsZone-kvitbit.com": { zoneName: "kvitbit-com-zone" },
+      KvitbitMailAddress: { address: "34.138.1.2" },
+    };
+    expect(
+      await resolveOutputs(
+        resendCompiled.resources["DnsZone-kvitbit.com-MailMxA"]?.Props,
+        upstream,
+      ),
+    ).toEqual({
+      managedZone: "kvitbit-com-zone",
+      name: "mx.kvitbit.com.",
+      type: "A",
+      ttl: 300,
+      rrdatas: ["34.138.1.2"],
+    });
+    expect(
+      await resolveOutputs(resendCompiled.resources["DnsZone-kvitbit.com-ApexMx"]?.Props, upstream),
+    ).toEqual({
+      managedZone: "kvitbit-com-zone",
+      name: "kvitbit.com.",
+      type: "MX",
+      ttl: 300,
+      rrdatas: ["10 mx.kvitbit.com."],
+    });
+    expect(
+      await resolveOutputs(
+        resendCompiled.resources["DnsZone-kvitbit.com-ResendSendMx"]?.Props,
+        upstream,
+      ),
+    ).toEqual({
+      managedZone: "kvitbit-com-zone",
+      name: "send.kvitbit.com.",
+      type: "MX",
+      ttl: 300,
+      rrdatas: ["10 feedback-smtp.eu-west-1.amazonses.com."],
+    });
+    const dkimResolved = (await resolveOutputs(
+      resendCompiled.resources["DnsZone-kvitbit.com-ResendDkimTxt"]?.Props,
+      upstream,
+    )) as { name: string; type: string; rrdatas: string[] };
+    expect(dkimResolved.name).toBe("resend._domainkey.kvitbit.com.");
+    expect(dkimResolved.type).toBe("TXT");
+    expect(dkimResolved.rrdatas[0]).toContain('" "');
+  });
+
+  test("rejects unsafe mail forwarder configurations (forwarding loops, catch-all aliases, missing zone)", async () => {
+    const badLoop = await Effect.runPromise(
+      Effect.flip(
+        loadStackConfig.pipe(
+          Effect.provide(
+            ConfigProvider.layer(
+              ConfigProvider.fromEnv({
+                env: {
+                  KVITBIT_IMAGE_DIGEST: SAMPLE_DIGEST,
+                  KVITBIT_DNS_ZONES: "kvitbit.com",
+                  KVITBIT_MAIL_DOMAIN: "kvitbit.com",
+                  KVITBIT_MAIL_FORWARD_TO: "ops@kvitbit.com",
+                  KVITBIT_MAIL_ALIASES: "ops",
+                },
+              }),
+            ),
+          ),
+        ),
+      ),
+    );
+    expect(badLoop).toMatchObject({ _tag: "InvalidStackConfig", field: "KVITBIT_MAIL_FORWARD_TO" });
+
+    const badWildcard = await Effect.runPromise(
+      Effect.flip(
+        loadStackConfig.pipe(
+          Effect.provide(
+            ConfigProvider.layer(
+              ConfigProvider.fromEnv({
+                env: {
+                  KVITBIT_IMAGE_DIGEST: SAMPLE_DIGEST,
+                  KVITBIT_DNS_ZONES: "kvitbit.com",
+                  KVITBIT_MAIL_DOMAIN: "kvitbit.com",
+                  KVITBIT_MAIL_FORWARD_TO: "filkalny@gmail.com",
+                  KVITBIT_MAIL_ALIASES: "*",
+                },
+              }),
+            ),
+          ),
+        ),
+      ),
+    );
+    expect(badWildcard).toMatchObject({
+      _tag: "InvalidStackConfig",
+      field: "KVITBIT_MAIL_ALIASES",
+    });
+
+    const badSelfAlias = await Effect.runPromise(
+      Effect.flip(
+        loadStackConfig.pipe(
+          Effect.provide(
+            ConfigProvider.layer(
+              ConfigProvider.fromEnv({
+                env: {
+                  KVITBIT_IMAGE_DIGEST: SAMPLE_DIGEST,
+                  KVITBIT_DNS_ZONES: "kvitbit.com",
+                  KVITBIT_MAIL_DOMAIN: "kvitbit.com",
+                  KVITBIT_MAIL_FORWARD_TO: "filkalny@gmail.com",
+                  KVITBIT_MAIL_ALIASES: "ops,forwarder",
+                },
+              }),
+            ),
+          ),
+        ),
+      ),
+    );
+    expect(badSelfAlias).toMatchObject({
+      _tag: "InvalidStackConfig",
+      field: "KVITBIT_MAIL_ALIASES",
+    });
+
+    const missingZone = await Effect.runPromise(
+      Effect.flip(
+        loadStackConfig.pipe(
+          Effect.provide(
+            ConfigProvider.layer(
+              ConfigProvider.fromEnv({
+                env: {
+                  KVITBIT_IMAGE_DIGEST: SAMPLE_DIGEST,
+                  KVITBIT_DNS_ZONES: "kvitbit.cz",
+                  KVITBIT_MAIL_DOMAIN: "kvitbit.com",
+                  KVITBIT_MAIL_FORWARD_TO: "filkalny@gmail.com",
+                  KVITBIT_MAIL_ALIASES: "ops",
+                },
+              }),
+            ),
+          ),
+        ),
+      ),
+    );
+    expect(missingZone).toMatchObject({ _tag: "InvalidStackConfig", field: "KVITBIT_MAIL_DOMAIN" });
+
+    const emptyZones = await Effect.runPromise(
+      Effect.flip(
+        loadStackConfig.pipe(
+          Effect.provide(
+            ConfigProvider.layer(
+              ConfigProvider.fromEnv({
+                env: {
+                  KVITBIT_IMAGE_DIGEST: SAMPLE_DIGEST,
+                  KVITBIT_MAIL_DOMAIN: "kvitbit.com",
+                  KVITBIT_MAIL_FORWARD_TO: "filkalny@gmail.com",
+                  KVITBIT_MAIL_ALIASES: "ops",
+                },
+              }),
+            ),
+          ),
+        ),
+      ),
+    );
+    expect(emptyZones).toMatchObject({ _tag: "InvalidStackConfig", field: "KVITBIT_MAIL_DOMAIN" });
+  });
 });
 
 describe("Cloud Monitoring", () => {
