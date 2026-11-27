@@ -5,8 +5,8 @@ description: >-
   changes to apps/web/src, the web entry or build configuration, or
   packages/ui-port/src/theme.
 metadata:
-  sync_commit: "c194776af0c64cd1549c21c58aac75a4c1ac71af"
-  bun: "1.4.2"
+  sync_commit: "d3f12350481d32c29a51a019bf2410b7994a8cfa"
+  bun: "1.4.4"
   node: "24.18.0"
   effect: "4.1.4"
   effect_ui_snapshot: "5f8b3576288a5aa3e69eaa8def155b17c76f1776"
@@ -72,7 +72,7 @@ that record in a verification commit after the product changes.
 ## Verification record
 
 The recorded product commit passed the frozen install, root lint and
-typecheck, web tests, static build and asset checks, and formal digest check.
-Playwright passed both profiles on port `50889` with one worker. The
-build includes the ALTCHA worker, hashed JavaScript and CSS, brand assets,
-and fonts.
+typecheck, `bun test packages/ui-port apps/web`, the static build and asset
+checks, and the formal digest check. Playwright passed both profiles on
+port `34189` with one worker. The build includes the ALTCHA worker, hashed
+JavaScript and CSS, brand assets, and fonts.

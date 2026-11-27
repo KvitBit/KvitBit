@@ -80,8 +80,16 @@ describe("Landing page (Screen 01)", () => {
     expect(cs.html).toContain("/app/");
 
     const en = await renderPath("/", { locale: "en", session: anonymous });
-    expect(en.html).toContain("Invoicing for Czech freelancers and small companies");
     expect(en.html).toContain("Start for free");
+
+    for (const [html, tagline, heading] of [
+      [cs.html, "Buď si kvit", "Fakturace pro české živnostníky a malé firmy"],
+      [en.html, "Stay square", "Invoicing for Czech freelancers and small companies"],
+    ] as const) {
+      expect(html).toContain(`<span class="kb-small kb-muted">${tagline}</span>`);
+      expect(html).toContain(`<h1 class="kb-landing-hero__title">${heading}</h1>`);
+      expect(html.split(heading)).toHaveLength(2);
+    }
   });
 });
 
