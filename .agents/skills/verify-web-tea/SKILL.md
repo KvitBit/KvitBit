@@ -5,7 +5,7 @@ description: >-
   changes to apps/web/src, the web entry or build configuration, or
   packages/ui-port/src/theme.
 metadata:
-  sync_commit: "468e37f6bd62d2a82778d7eb8487a4a03a30cd2f"
+  sync_commit: "204841bb3f0dafd505530b8d4456947b134a3d5a"
   bun: "1.4.4"
   node: "24.18.0"
   effect: "4.1.4"
@@ -80,19 +80,17 @@ that record in a verification commit after the product changes.
 ## Verification record
 
 The recorded product commit passed the frozen install, root lint and
-typecheck, and the formal digest check. The targeted test run passed with
-`bun test infra/alchemy packages/api-contract apps/server/test/http/feedback.test.ts apps/web`.
-The static build contains the lazy feedback chunk, ALTCHA worker, hashed
-JavaScript and CSS, brand assets, and Fontshare TTFs.
+typecheck, and the formal digest check. Targeted unit tests passed for
+`packages/ui-port`, `apps/web`, and `apps/mobile` auth screens
+(`apps/mobile/src/features/auth/auth-screens.test.tsx`). The static web
+build contains `dist/index.html`, hashed JavaScript and CSS, the ALTCHA
+worker, `dist/assets/brand`, and `dist/fonts`.
 
-The smoke and feedback Playwright suites passed on port `35655` with one
-worker across desktop and mobile Chromium profiles. The feedback suite
-checks that verified owners can pin elements, retry a submission, and
-receive its issue link. It checks that non-owners skip the picker chunk,
-that pins omit private links and entered form values, and that signing
-out removes the picker. A failed mount restores browser diagnostics.
-The selector unit test declines a pin when its bounded path matches
-multiple elements.
+The smoke and feedback Playwright suites (46 tests) passed on port `34191`
+with one worker across desktop and mobile Chromium profiles. The smoke suite
+verifies that `/sign-in` renders concise method selector labels on a single
+line without overflow in both English and Czech across Elegant and Cozy
+styles while keeping the full passkey action label on the submit button.
 
 At `c54559c3a9ab795c44f08d4584e6a28c88074466`, Chromium and Firefox
 loaded all bundled fonts without console warnings.
