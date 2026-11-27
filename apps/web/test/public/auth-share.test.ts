@@ -115,7 +115,7 @@ describe("Auth page (Screen 02)", () => {
     expect(freshProof.model.submitting).toBe(false);
     expect(freshProof.model.botProof._tag).toBe("Solving");
     expect(freshProof.model.botSeq).toBe(2);
-    expect(freshProof.commands?.length).toBe(1);
+    expect(freshProof.commands?.map((command) => command._tag)).toEqual(["Interrupt", "Effect"]);
   });
 
   test("SignIn supports password, magic_link, and passkey unsupported state", () => {

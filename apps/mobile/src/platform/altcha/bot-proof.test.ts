@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import crypto, { createHash, pbkdf2Sync } from "node:crypto";
 import { promisify } from "node:util";
 import { fetchChallenge, isExpired, solveChallenge } from "./bot-proof";
-import { argon2id, blake2b, bytesToHex, hexToBytes, pbkdf2Sha256, sha256 } from "./kdf";
+import { blake2b, bytesToHex, createArgon2id, hexToBytes, pbkdf2Sha256, sha256 } from "./kdf";
 
 const argon2Async = promisify(crypto.argon2);
 
@@ -29,19 +29,26 @@ describe("kdf primitives", () => {
     );
   });
 
-  test("argon2id matches node:crypto.argon2 (server altcha-lib verifier)", async () => {
-    const pwd = new TextEncoder().encode("password");
+  test.each([
+    { memoryCost: 8, cost: 1, parallelism: 1, keyLength: 4 },
+    { memoryCost: 1041, cost: 3, parallelism: 2, keyLength: 80 },
+    { memoryCost: 19456, cost: 2, parallelism: 1, keyLength: 32 },
+  ])("reuses Argon2id workspace and matches node:crypto for %j", async (params) => {
+    const derive = createArgon2id(params);
     const salt = new TextEncoder().encode("somesalt");
-    const tag = argon2id(pwd, salt, { cost: 2, memoryCost: 64, parallelism: 1, keyLength: 32 });
-    const expected = await argon2Async("argon2id", {
-      message: pwd,
-      nonce: salt,
-      passes: 2,
-      memory: 64,
-      parallelism: 1,
-      tagLength: 32,
-    });
-    expect(bytesToHex(tag)).toBe(expected.toString("hex"));
+    for (const password of ["password", "another password"]) {
+      const message = new TextEncoder().encode(password);
+      const tag = derive(message, salt);
+      const expected = await argon2Async("argon2id", {
+        message,
+        nonce: salt,
+        passes: params.cost,
+        memory: params.memoryCost,
+        parallelism: params.parallelism,
+        tagLength: params.keyLength,
+      });
+      expect(bytesToHex(tag)).toBe(expected.toString("hex"));
+    }
   });
 });
 
@@ -138,7 +145,15 @@ describe("solveChallenge", () => {
     expect(decoded.solution.derivedKey).toBe(expected);
   });
 
-  test("solves an ARGON2ID challenge with null expiresAt when absent", async () => {
+  test("solves an ARGON2ID challenge after multiple attempts and yields for cancellation", async () => {
+    const expected = await argon2Async("argon2id", {
+      message: Buffer.from("010203040506070800000002", "hex"),
+      nonce: Buffer.from("1112131415161718", "hex"),
+      passes: 1,
+      memory: 16,
+      parallelism: 1,
+      tagLength: 32,
+    });
     const challenge = {
       parameters: {
         algorithm: "ARGON2ID",
@@ -148,7 +163,7 @@ describe("solveChallenge", () => {
         memoryCost: 16,
         parallelism: 1,
         keyLength: 32,
-        keyPrefix: "0",
+        keyPrefix: expected.toString("hex").slice(0, 8),
       },
       signature: "sig",
     };
@@ -157,9 +172,22 @@ describe("solveChallenge", () => {
     if (outcome._tag !== "Solved") return;
     expect(outcome.expiresAt).toBeNull();
     const decoded = JSON.parse(Buffer.from(outcome.payload, "base64").toString("utf8")) as {
-      solution: { derivedKey: string };
+      solution: { counter: number; derivedKey: string };
     };
-    expect(decoded.solution.derivedKey.startsWith("0")).toBe(true);
+    expect(decoded.solution.counter).toBe(2);
+    expect(decoded.solution.derivedKey).toBe(expected.toString("hex"));
+
+    const controller = new AbortController();
+    const progress: number[] = [];
+    const cancelled = await solveChallenge(challenge, {
+      signal: controller.signal,
+      onProgress: (value) => {
+        progress.push(value);
+        setTimeout(() => controller.abort(), 0);
+      },
+    });
+    expect(cancelled).toEqual({ _tag: "Aborted" });
+    expect(progress).toHaveLength(1);
   });
 
   test("respects AbortSignal", async () => {

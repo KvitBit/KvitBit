@@ -155,7 +155,11 @@ export const botProofVariants = cva(
   {
     variants: {
       state: {
-        idle: "border-outline-variant bg-surface-container-low text-on-surface",
+        idle: [
+          "border-outline-variant bg-surface-container-low text-on-surface",
+          "motion-safe:after:size-[1em] motion-safe:after:flex-none motion-safe:after:rounded-full motion-safe:after:border-2 motion-safe:after:border-outline-variant motion-safe:after:border-s-current",
+          "motion-safe:data-[active=true]:after:animate-spin motion-safe:data-[active=true]:after:[--animate-spin:spin_800ms_linear_infinite]",
+        ],
         verified: "border-paid bg-paid-container text-on-paid-container",
         failed: "border-error bg-error-container text-on-error-container",
       },

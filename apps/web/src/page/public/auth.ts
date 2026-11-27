@@ -1,4 +1,4 @@
-import { UiSchema } from "@effect/ui";
+import { Command, UiSchema } from "@effect/ui";
 import type { Html } from "@effect/ui/html";
 /**
  * Screen 02 — Authentication flows:
@@ -15,7 +15,7 @@ import { InvitationPeek, InvitationToken, WorkspaceSummary } from "@kvitbit/doma
 import { ViewModels } from "@kvitbit/ui-port";
 import { Effect, Schema } from "effect";
 import { authFetch, Failure, failureFromUnknown } from "../../app/api";
-import { browserCommand, defineApiCommand, type PageCommand } from "../../app/commands";
+import { browserCommand, defineApiCommand, type PageCommand, RunApi } from "../../app/commands";
 import { copy, translator } from "../../app/i18n";
 import { Intent_ } from "../../app/intent";
 import type { MessageHandlers, PageContext, PageReturn, RouteOf } from "../../app/page";
@@ -189,7 +189,8 @@ const mapBotResult = (seq: Remote.Seq, res: FetchAndSolveResult) => {
   }
 };
 
-const BotProofCmd = defineApiCommand("AuthBotProof", {
+const botProofCommandName = "AuthBotProof";
+const BotProofCmd = defineApiCommand(botProofCommandName, {
   args: { scope: BotScope, seq: Remote.Seq },
   execute: ({ scope, seq }) => fetchAndSolveBotProof(scope, (res) => mapBotResult(seq, res)),
 });
@@ -266,6 +267,11 @@ const AuthGetCmd = defineApiCommand("AuthGet", {
 });
 
 const startBotProof = (scope: BotScope, seq: Remote.Seq) => BotProofCmd({ scope, seq });
+const stopBotProof = () => Command.interrupt(RunApi, { name: botProofCommandName });
+const restartBotProof = (scope: BotScope, seq: Remote.Seq) => [
+  stopBotProof(),
+  startBotProof(scope, seq),
+];
 
 const origin = (): string =>
   typeof location === "undefined" || location.origin === "null"
@@ -423,7 +429,7 @@ export const update = (
           localError: null,
           submitFailure: null,
         },
-        commands: [startBotProof(scope, botSeq)],
+        commands: restartBotProof(scope, botSeq),
       };
     },
     SelectedSignInMethod: ({ method }) => {
@@ -440,6 +446,7 @@ export const update = (
             localError: null,
             submitFailure: null,
           },
+          commands: [stopBotProof()],
         };
       }
       const botSeq = model.botSeq + 1;
@@ -452,7 +459,7 @@ export const update = (
           localError: null,
           submitFailure: null,
         },
-        commands: [startBotProof(scope, botSeq)],
+        commands: restartBotProof(scope, botSeq),
       };
     },
     GotBotProof: ({ seq, status, header, reason }) => {
@@ -471,7 +478,7 @@ export const update = (
       const botSeq = model.botSeq + 1;
       return {
         model: { ...model, botSeq, botProof: { _tag: "Solving", seq: botSeq }, localError: null },
-        commands: [startBotProof(scope, botSeq)],
+        commands: restartBotProof(scope, botSeq),
       };
     },
     GotInvitation: ({ seq, peek }) => {
@@ -630,7 +637,7 @@ export const update = (
       const botSeq = model.botSeq + 1;
       return {
         model: { ...model, linkState: "idle", botSeq, botProof: { _tag: "Solving", seq: botSeq } },
-        commands: [startBotProof(scope, botSeq)],
+        commands: restartBotProof(scope, botSeq),
       };
     },
     ClickedResendEmail: () => {
@@ -810,7 +817,7 @@ export const update = (
             botSeq,
             botProof: { _tag: "Solving", seq: botSeq },
           },
-          commands: [startBotProof(scope, botSeq)],
+          commands: restartBotProof(scope, botSeq),
         };
       }
       return {

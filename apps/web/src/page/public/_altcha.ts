@@ -6,7 +6,7 @@
 import { ALTCHA_HEADER, type AltchaChallenge, type BotScope } from "@kvitbit/api-contract";
 import { Effect, Schema } from "effect";
 import { type Failure, failureFromUnknown, request, type WebServices } from "../../app/api";
-import { solveAltchaChallenge } from "./_altcha-solver";
+import { type AltchaWorkerMessage, solveAltchaChallenge } from "./_altcha-solver";
 
 export const BotProofState = Schema.Union([
   Schema.TaggedStruct("Idle", {}),
@@ -28,29 +28,58 @@ export type FetchAndSolveResult =
   | { readonly _tag: "Solved"; readonly header: string }
   | { readonly _tag: "Failed"; readonly reason: string };
 
-const solveInBrowser = (challenge: AltchaChallenge, signal: AbortSignal): Promise<string> => {
-  if (typeof window === "undefined" || typeof Worker === "undefined") {
-    return solveAltchaChallenge(challenge);
-  }
+const solveInWorker = async (challenge: AltchaChallenge, signal: AbortSignal): Promise<string> => {
+  signal.throwIfAborted();
   const worker = new Worker(new URL("./_altcha.worker.ts", import.meta.url), { type: "module" });
-  const proof = new Promise<string>((resolve, reject) => {
-    const abort = () => reject(signal.reason);
-    const finish = () => signal.removeEventListener("abort", abort);
-    signal.addEventListener("abort", abort, { once: true });
-    worker.onmessage = (event: MessageEvent<{ header: string } | { error: string }>) => {
-      finish();
-      if ("header" in event.data) resolve(event.data.header);
-      else reject(new Error(event.data.error));
-    };
-    worker.onerror = (event) => {
-      finish();
-      reject(new Error(event.message));
-    };
-    if (signal.aborted) abort();
-    else worker.postMessage(challenge);
-  });
-  return proof.finally(() => worker.terminate());
+  let abort: (() => void) | undefined;
+  let startup: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await new Promise<string>((resolve, reject) => {
+      abort = () => reject(signal.reason);
+      signal.addEventListener("abort", abort, { once: true });
+      startup = setTimeout(() => reject(new Error("Verification worker did not start")), 3_000);
+      worker.onmessage = ({ data }: MessageEvent<AltchaWorkerMessage>) => {
+        switch (data?._tag) {
+          case "Ready":
+            clearTimeout(startup);
+            break;
+          case "Solved":
+            resolve(data.header);
+            break;
+          case "Failed":
+            reject(new Error(data.reason));
+            break;
+          default:
+            reject(new Error("Invalid verification worker response"));
+        }
+      };
+      worker.onerror = (event) => {
+        event.preventDefault();
+        reject(new Error(event.message || "Verification worker failed to load"));
+      };
+      worker.onmessageerror = () => reject(new Error("Could not read verification worker message"));
+      signal.throwIfAborted();
+      worker.postMessage(challenge);
+    });
+  } finally {
+    clearTimeout(startup);
+    if (abort !== undefined) signal.removeEventListener("abort", abort);
+    worker.terminate();
+  }
 };
+
+const solveInBrowser = async (challenge: AltchaChallenge, signal: AbortSignal): Promise<string> => {
+  if (typeof window !== "undefined" && typeof Worker !== "undefined") {
+    try {
+      return await solveInWorker(challenge, signal);
+    } catch {
+      signal.throwIfAborted();
+    }
+  }
+  return solveAltchaChallenge(challenge, signal);
+};
+
+const failed = (reason: string): FetchAndSolveResult => ({ _tag: "Failed", reason });
 
 /**
  * Fetches a fresh ALTCHA challenge for `scope` and solves it in a single Effect UI Command Effect.
@@ -62,22 +91,29 @@ export const fetchAndSolveBotProof = <M>(
 ): Effect.Effect<M, never, WebServices> =>
   request(
     (client) => client.botProtection.issueChallenge({ params: { scope } }),
-    (challenge): FetchAndSolveResult | AltchaChallenge =>
-      challenge === undefined ? { _tag: "NotRequired" } : challenge,
-    (failure): FetchAndSolveResult => ({ _tag: "Failed", reason: failure.tag }),
+    (challenge): FetchAndSolveResult | { _tag: "Challenge"; challenge: AltchaChallenge } =>
+      challenge === undefined ? { _tag: "NotRequired" } : { _tag: "Challenge", challenge },
+    (failure) => failed(failure.tag),
   ).pipe(
-    Effect.andThen((out) => {
-      if (typeof out === "object" && out !== null && "_tag" in out) {
-        return Effect.succeed(onResult(out as FetchAndSolveResult));
-      }
+    Effect.timeoutOrElse({
+      duration: "10 seconds",
+      orElse: () => Effect.succeed(failed("challenge_timeout")),
+    }),
+    Effect.flatMap((out): Effect.Effect<FetchAndSolveResult> => {
+      if (out._tag !== "Challenge") return Effect.succeed(out);
       return Effect.tryPromise({
-        try: (signal) => solveInBrowser(out as AltchaChallenge, signal),
+        try: (signal) => solveInBrowser(out.challenge, signal),
         catch: (e) => (e instanceof Error ? e.message : String(e)),
       }).pipe(
-        Effect.map((header) => onResult({ _tag: "Solved", header })),
-        Effect.catch((reason) => Effect.succeed(onResult({ _tag: "Failed", reason }))),
+        Effect.map((header): FetchAndSolveResult => ({ _tag: "Solved", header })),
+        Effect.catch((reason) => Effect.succeed(failed(reason))),
+        Effect.timeoutOrElse({
+          duration: "30 seconds",
+          orElse: () => Effect.succeed(failed("solve_timeout")),
+        }),
       );
     }),
+    Effect.map(onResult),
   );
 
 const origin = (): string =>

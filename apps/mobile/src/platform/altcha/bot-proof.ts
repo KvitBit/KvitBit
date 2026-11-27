@@ -5,7 +5,7 @@
 import { type BotScope, RateLimited } from "@kvitbit/api-contract";
 import { Unavailable } from "@kvitbit/domain/contract";
 import { UiError } from "@kvitbit/ui-port/api";
-import { argon2id, bytesToHex, hexToBytes, pbkdf2Sha256, sha256, utf8ToBase64 } from "./kdf";
+import { bytesToHex, createArgon2id, hexToBytes, pbkdf2Sha256, sha256, utf8ToBase64 } from "./kdf";
 
 export type BotProofState =
   | { readonly _tag: "NotRequired" }
@@ -236,6 +236,7 @@ export const solveChallenge = async (
   const chunkSize = parsed.algorithm === "ARGON2ID" ? 1 : 8;
   const startedAt = Date.now();
   const maxCounter = 0xffffffff;
+  let deriveArgon2id: ReturnType<typeof createArgon2id> | undefined;
 
   for (let counter = 0; counter <= maxCounter; counter++) {
     if (signal?.aborted) return { _tag: "Aborted" };
@@ -244,12 +245,8 @@ export const solveChallenge = async (
     let derived: Uint8Array;
     try {
       if (parsed.algorithm === "ARGON2ID") {
-        derived = argon2id(password, parsed.salt, {
-          memoryCost: parsed.memoryCost,
-          cost: parsed.cost,
-          parallelism: parsed.parallelism,
-          keyLength: parsed.keyLength,
-        });
+        deriveArgon2id ??= createArgon2id(parsed);
+        derived = deriveArgon2id(password, parsed.salt);
       } else if (parsed.algorithm === "PBKDF2/SHA-256") {
         derived = await pbkdf2Sha256(password, parsed.salt, parsed.cost, parsed.keyLength);
       } else {
