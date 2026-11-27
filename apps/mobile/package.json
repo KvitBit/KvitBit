@@ -12,7 +12,7 @@
     "build": "bun run build:pwa",
     "build:pwa": "bun scripts/build-pwa.ts",
     "export:web": "expo export --platform web --output-dir dist",
-    "typecheck": "tsc -p tsconfig.json",
+    "typecheck": "effect-tsgo tsc -p tsconfig.json",
     "test": "bun test",
     "release:apk": "bun ../../scripts/release/mobile-release.ts build"
   },

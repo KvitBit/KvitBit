@@ -1,22 +1,167 @@
 {
   "$schema": "https://biomejs.dev/schemas/2.6.8/schema.json",
-  "vcs": { "enabled": true, "clientKind": "git", "useIgnoreFile": true },
+  "vcs": {
+    "enabled": true,
+    "clientKind": "git",
+    "useIgnoreFile": true,
+    "defaultBranch": "main"
+  },
   "files": {
     "ignoreUnknown": true,
     "includes": ["**", "!**/drizzle/meta", "!assets", "!**/*.md"]
   },
-  "formatter": { "enabled": true, "indentStyle": "space", "indentWidth": 2, "lineWidth": 100 },
-  "assist": { "enabled": true, "actions": { "source": { "organizeImports": "on" } } },
+  "formatter": {
+    "enabled": true,
+    "indentStyle": "space",
+    "indentWidth": 2,
+    "lineWidth": 100
+  },
+  "assist": {
+    "enabled": true,
+    "actions": {
+      "source": {
+        "organizeImports": "on"
+      }
+    }
+  },
   "linter": {
     "enabled": true,
     "rules": {
-      "preset": "recommended",
+      "preset": "all",
       "style": {
         "noNonNullAssertion": "error",
         "useImportType": "error",
-        "useExportType": "error"
+        "useExportType": "error",
+        "useConsistentTestIt": {
+          "level": "error",
+          "options": {
+            "function": "test",
+            "withinDescribe": "test"
+          }
+        },
+        "noContinue": "off",
+        "noDefaultExport": "off",
+        "noExcessiveClassesPerFile": "off",
+        "noExcessiveLinesPerFile": "off",
+        "noHexColors": "off",
+        "noImplicitBoolean": "off",
+        "noIncrementDecrement": "off",
+        "noJsxLiterals": "off",
+        "noMagicNumbers": "off",
+        "noNegationElse": "off",
+        "noNestedTernary": "off",
+        "noTernary": "off",
+        "useBlockStatements": "off",
+        "useConsistentArrayType": "off",
+        "useDefaultSwitchClause": "off",
+        "useDestructuring": "off",
+        "useExportsLast": "off",
+        "useFilenamingConvention": "off",
+        "useNamedCaptureGroup": "off",
+        "useNamingConvention": "off",
+        "useNumericSeparators": "off",
+        "useUnicodeRegex": "off"
       },
-      "suspicious": { "noExplicitAny": "error", "noConsole": "error" }
+      "suspicious": {
+        "noExplicitAny": "error",
+        "noConsole": "error",
+        "noBitwiseOperators": "off"
+      },
+      "nursery": {
+        "noUnsafeTypeAssertion": "error",
+        "noUselessTypeAssertion": "error",
+        "noMisusedPromises": "error",
+        "noUnsafeReturn": "error",
+        "noUnsafePlusOperands": "error",
+        "useStrictBooleanExpressions": "error",
+        "noFloatingPromises": "error",
+        "noUnsafeUnaryMinus": "error",
+        "noMisusedSpread": "error",
+        "noUselessAwait": "error",
+        "usePromiseRejectErrors": "error",
+        "noJsonUnsafeValues": "error"
+      },
+      "complexity": {
+        "noExcessiveCognitiveComplexity": "off",
+        "noExcessiveLinesPerFunction": "off",
+        "noExcessiveNestedCallbacks": "off",
+        "useMaxParams": "off"
+      },
+      "performance": {
+        "noJsxPropsBind": "off",
+        "noNamespaceImport": "off",
+        "noBarrelFile": "off",
+        "noReExportAll": "off"
+      },
+      "correctness": {
+        "useImportExtensions": "off"
+      }
+    },
+    "domains": {
+      "types": "all",
+      "project": "all",
+      "drizzle": "all",
+      "test": "all",
+      "turborepo": "all",
+      "playwright": "none",
+      "react": "none",
+      "reactNative": "none",
+      "qwik": "none",
+      "solid": "none"
     }
+  },
+  "overrides": [
+    {
+      "includes": ["apps/web/e2e/**"],
+      "linter": {
+        "domains": {
+          "playwright": "all"
+        }
+      }
+    },
+    {
+      "includes": ["apps/mobile/**"],
+      "linter": {
+        "domains": {
+          "react": "all",
+          "reactNative": "all"
+        }
+      },
+      "javascript": {
+        "globals": ["Bun", "__DEV__"]
+      }
+    },
+    {
+      "includes": [
+        "apps/server/**",
+        "apps/mobile/scripts/**",
+        "apps/mobile/release/**",
+        "apps/web/e2e/**",
+        "apps/web/*.config.*",
+        "infra/alchemy/**",
+        "packages/adapters/**",
+        "packages/db/**",
+        "**/test/**",
+        "formal/**",
+        "scripts/**"
+      ],
+      "linter": {
+        "rules": {
+          "correctness": {
+            "noNodejsModules": "off",
+            "noProcessGlobal": "off"
+          }
+        }
+      }
+    },
+    {
+      "includes": ["apps/mobile/src/config/env.ts"],
+      "linter": {
+        "rules": { "correctness": { "noProcessGlobal": "off" }, "style": { "noProcessEnv": "off" } }
+      }
+    }
+  ],
+  "javascript": {
+    "globals": ["Bun"]
   }
 }

@@ -1,0 +1,94 @@
+#!/usr/bin/env bash
+set -eo pipefail
+
+root=$(git rev-parse --show-toplevel)
+cd "$root"
+
+scratch=$(mktemp -d)
+trap 'rm -rf "$scratch"' EXIT
+git diff --cached --raw --no-renames --no-abbrev -z -- > "$scratch/changed"
+
+run_knip=false
+files=()
+modes=()
+originals=()
+while IFS= read -r -d '' change && IFS= read -r -d '' path; do
+  case "$path" in
+    *.ts|*.tsx|*.mts|*.cts|*.js|*.jsx|*.mjs|*.cjs|*.sh|package.json|*/package.json|bun.lock|knip.jsonc)
+      run_knip=true
+      ;;
+  esac
+
+  read -r _ mode _ original _ <<< "$change"
+  [[ "$mode" == 100* ]] || continue
+  case "$path" in
+    *.ts|*.tsx|*.mts|*.cts|*.js|*.jsx|*.mjs|*.cjs|*.json|*.jsonc|*.css|*.scss|*.html|*.graphql|*.gql|*.yml|*.yaml)
+      files+=("./$path")
+      modes+=("$mode")
+      originals+=("$original")
+      ;;
+  esac
+done < "$scratch/changed"
+
+if (( ${#files[@]} > 0 )) || "$run_knip"; then
+  # Check the version being committed and keep unstaged hunks in the working tree.
+  snapshot="$scratch/index"
+  mkdir "$snapshot"
+  git checkout-index --all --prefix="$snapshot/"
+  for modules in node_modules {apps,packages,infra}/*/node_modules; do
+    [[ -d "$modules" && -d "$snapshot/${modules%node_modules}" ]] || continue
+    [[ ! -e "$snapshot/$modules" && ! -L "$snapshot/$modules" ]] || continue
+    mkdir -p "$snapshot/$modules"
+    # Preserve relative Bun workspace links so imports resolve in the staged tree.
+    for entry in "$modules"/* "$modules"/@*/* "$modules"/.bin "$modules"/.bun; do
+      [[ -e "$entry" || -L "$entry" ]] || continue
+      [[ "${entry#"$modules/"}" == @* && "${entry#"$modules/"}" != */* && -d "$entry" ]] && continue
+      mkdir -p "$snapshot/${entry%/*}"
+      if [[ -L "$entry" ]]; then
+        cp -P "$entry" "$snapshot/$entry"
+      else
+        ln -s "$root/$entry" "$snapshot/$entry"
+      fi
+    done
+  done
+
+  if (( ${#files[@]} > 0 )); then
+    (
+      cd "$snapshot"
+      "$root/node_modules/.bin/biome" format --write --no-errors-on-unmatched "${files[@]}"
+      "$root/node_modules/.bin/biome" check --error-on-warnings --no-errors-on-unmatched "${files[@]}"
+    )
+  fi
+fi
+
+if "$run_knip"; then
+  (
+    while IFS= read -r name; do unset "$name"; done < <(git rev-parse --local-env-vars)
+    cd "$snapshot"
+    bun run knip:check
+  )
+fi
+
+if (( ${#files[@]} > 0 )); then
+  : > "$scratch/index-info"
+  : > "$scratch/refresh"
+  for i in "${!files[@]}"; do
+    path=${files[i]#./}
+    original=${originals[i]}
+    formatted=$(git hash-object -w --path="$path" -- "$snapshot/$path")
+    if [[ "$formatted" != "$original" ]]; then
+      printf '%s %s\t%s\0' "${modes[i]}" "$formatted" "$path" >> "$scratch/index-info"
+      printf '%s\0%s\0' "$original" "$path" >> "$scratch/refresh"
+    fi
+  done
+
+  if [[ -s "$scratch/index-info" ]]; then
+    git update-index -z --index-info < "$scratch/index-info"
+    while IFS= read -r -d '' original && IFS= read -r -d '' path; do
+      # Preserve unstaged hunks. Refresh only a file that still matches the old index.
+      if [[ -f "$path" && ! -L "$path" && "$(git hash-object -- "$path")" == "$original" ]]; then
+        git checkout-index --force -- "$path"
+      fi
+    done < "$scratch/refresh"
+  fi
+fi

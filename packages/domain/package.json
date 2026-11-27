@@ -9,7 +9,7 @@
     "./ports": "./src/ports.ts"
   },
   "scripts": {
-    "typecheck": "tsc -p tsconfig.json",
+    "typecheck": "effect-tsgo tsc -p tsconfig.json",
     "test": "bun test --pass-with-no-tests"
   },
   "dependencies": {

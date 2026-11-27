@@ -7,7 +7,7 @@
     "start": "bun src/main.ts",
     "worker": "bun src/worker.ts",
     "migrate": "bun src/migrate.ts",
-    "typecheck": "tsc -p tsconfig.json",
+    "typecheck": "effect-tsgo tsc -p tsconfig.json",
     "test": "bun test --pass-with-no-tests"
   },
   "dependencies": {
