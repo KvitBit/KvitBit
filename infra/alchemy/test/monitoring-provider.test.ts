@@ -64,8 +64,45 @@ function monitoringApi(options: { loseFirstCreate?: boolean; disabledOnFirstRead
           ...(index + 1 < candidates.length ? { nextPageToken: String(index + 1) } : {}),
         });
       }
+      const validateUptimeContentMatchers = (candidate: Body) => {
+        if (collection !== "uptimeCheckConfigs" || !Array.isArray(candidate.contentMatchers)) {
+          return null;
+        }
+        for (const matcher of candidate.contentMatchers) {
+          if (
+            typeof matcher === "object" &&
+            matcher !== null &&
+            "matcher" in matcher &&
+            matcher.matcher === "MATCHES_JSON_PATH" &&
+            "jsonPathMatcher" in matcher &&
+            typeof matcher.jsonPathMatcher === "object" &&
+            matcher.jsonPathMatcher !== null &&
+            "jsonMatcher" in matcher.jsonPathMatcher &&
+            matcher.jsonPathMatcher.jsonMatcher === "EXACT_MATCH"
+          ) {
+            try {
+              JSON.parse(String("content" in matcher ? matcher.content : ""));
+            } catch {
+              return reply(
+                {
+                  error: {
+                    code: 400,
+                    message:
+                      "Unable to parse 'required_content' as JSON value. Make sure to quote strings and property names.",
+                  },
+                },
+                400,
+              );
+            }
+          }
+        }
+        return null;
+      };
+
       if (request.method === "POST") {
         expect(body.name).toBeUndefined();
+        const invalid = validateUptimeContentMatchers(body);
+        if (invalid) return invalid;
         const name = `${path}/${++nextId}`;
         const created: Body = { ...body, name };
         if (Array.isArray(created.conditions)) {
@@ -83,6 +120,8 @@ function monitoringApi(options: { loseFirstCreate?: boolean; disabledOnFirstRead
       }
       if (request.method === "PATCH" && current) {
         expect(body.name).toBe(path);
+        const invalid = validateUptimeContentMatchers(body);
+        if (invalid) return invalid;
         expect(mask?.split(",").sort()).toEqual(
           Object.keys(body)
             .filter((key) => key !== "name")
@@ -240,7 +279,7 @@ test("Alchemy updates allowed fields, swaps check generations, detaches email, a
         contentMatchers: [
           {
             matcher: "MATCHES_JSON_PATH",
-            content: "ok",
+            content: JSON.stringify("ok"),
             jsonPathMatcher: { jsonPath: "$.status", jsonMatcher: "EXACT_MATCH" },
           },
         ],

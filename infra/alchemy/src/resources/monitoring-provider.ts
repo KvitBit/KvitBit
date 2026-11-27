@@ -472,7 +472,8 @@ export const UptimeCheckProvider = Provider.succeed(
       contentMatchers: [
         {
           matcher: "MATCHES_JSON_PATH",
-          content: "ok",
+          // Cloud Monitoring parses MATCHES_JSON_PATH + EXACT_MATCH content as a JSON value.
+          content: JSON.stringify("ok"),
           jsonPathMatcher: { jsonPath: "$.status", jsonMatcher: "EXACT_MATCH" },
         },
       ],
