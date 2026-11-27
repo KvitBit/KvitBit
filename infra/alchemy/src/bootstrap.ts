@@ -8,11 +8,13 @@ import { declareKvitbitDns } from "./resources/dns";
 import { declareKvitbitEdge, declareTokenRouteLogExclusion } from "./resources/edge";
 import {
   CLOUD_DNS_API_ID,
+  CLOUD_MONITORING_API_ID,
   declareFoundation,
   secretAccessorGrants,
   secretDeclarations,
 } from "./resources/foundation";
 import { declareMailForwarder } from "./resources/mail";
+import { declareMonitoring } from "./resources/monitoring";
 import { declareNetworkAndRunners } from "./resources/network";
 import { declareServerService } from "./resources/server";
 
@@ -59,6 +61,7 @@ export const foundationResourceIds = (config: KvitbitStackConfig): ReadonlySet<s
     "ServerMobileAssetsViewer",
     "RunnerArtifactReader",
     "EdgeTokenRouteExclusion",
+    CLOUD_MONITORING_API_ID,
   ]);
 
   if (config.dnsZones.length > 0) {
@@ -193,6 +196,12 @@ export const declareKvitbitStack = (config: KvitbitStackConfig) =>
             edge?.edgeIpAddress,
             mail?.mailIpAddress,
           );
+    yield* declareMonitoring(
+      config,
+      foundation.monitoringApi,
+      server.serviceId,
+      edge?.httpsForwardingRule,
+    );
 
     return {
       stage: config.stage,

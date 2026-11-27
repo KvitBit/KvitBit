@@ -302,6 +302,7 @@ jobs:
           KVITBIT_IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
           KVITBIT_APP_ORIGIN: ${{ vars.APP_ORIGIN }}
           KVITBIT_EMAIL_FROM: ${{ vars.EMAIL_FROM }}
+          KVITBIT_ALERT_EMAIL: ${{ vars.KVITBIT_ALERT_EMAIL }}
           KVITBIT_EDGE_DOMAINS: ${{ vars.KVITBIT_EDGE_DOMAINS }}
           KVITBIT_DNS_ZONES: ${{ vars.KVITBIT_DNS_ZONES }}
           KVITBIT_RUNNER_COUNT: ${{ vars.KVITBIT_RUNNER_COUNT }}

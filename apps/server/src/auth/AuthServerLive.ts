@@ -16,6 +16,7 @@ import { acceptLanguageLocale } from "../http/edge/request";
 import { AuthServer } from "./AuthServer";
 import { makeDrizzleOverSqlClient } from "./drizzleBridge";
 import { makeAuthWithInvitationSignUp } from "./invitationSignUp";
+import { makeAuthEffectRunner } from "./logging";
 import { makeWorkspaceAuth } from "./oauthWorkspace";
 
 const DEFAULT_LINK_VALID_MINUTES = 60;
@@ -41,6 +42,7 @@ export const makeAuthServerLayer = (overrides: AuthServerOverrides = {}) =>
       const workspaces = yield* Workspaces;
       const clock = yield* Clock.Clock;
       const emailRateLimiter = yield* makeEmailRateLimiter();
+      const runAuthEffect = yield* makeAuthEffectRunner;
 
       const db = makeDrizzleOverSqlClient(sql);
       const rpID = new URL(config.appOrigin).hostname;
@@ -52,7 +54,7 @@ export const makeAuthServerLayer = (overrides: AuthServerOverrides = {}) =>
       ): Promise<void> => {
         const locale = requestLocale(request);
         const rendered = renderEmail(template, locale);
-        await Effect.runPromise(
+        await runAuthEffect(
           emailSender.send(
             {
               to: [to],
@@ -137,7 +139,7 @@ export const makeAuthServerLayer = (overrides: AuthServerOverrides = {}) =>
             locale: requestLocale(request),
             channel: "web",
           });
-          const list = await Effect.runPromise(
+          const list = await runAuthEffect(
             workspaces.listMine.pipe(Effect.provideService(CurrentCaller, accountCaller)),
           );
           if (list.some((ws) => ws.role === "owner")) {
@@ -149,9 +151,9 @@ export const makeAuthServerLayer = (overrides: AuthServerOverrides = {}) =>
         },
       };
 
-      const auth = makeWorkspaceAuth(sql)(authConfig);
+      const auth = makeWorkspaceAuth(sql, authConfig, runAuthEffect);
       const withInvitations = yield* Effect.promise(() =>
-        makeAuthWithInvitationSignUp(auth, authConfig, workspaces, clock),
+        makeAuthWithInvitationSignUp(auth, authConfig, workspaces, clock, runAuthEffect),
       );
       return AuthServer.of(withInvitations);
     }),

@@ -42,6 +42,7 @@ export const serverPlainEnv = (
   const vars: Array<PlainEnvVar> = [
     { name: "NODE_ENV", value: "production" },
     { name: "HOST", value: "0.0.0.0" },
+    { name: "GOOGLE_CLOUD_PROJECT", value: config.projectId },
     { name: "KVITBIT_RUNNER_MODE", value: "cluster" },
     { name: "KVITBIT_BLOB_DRIVER", value: "gcs" },
     { name: "KVITBIT_BLOB_DIR", value: KVITBIT_IMAGE_PATHS.blobDir },

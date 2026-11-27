@@ -7,9 +7,9 @@
  * - Composes `PersistenceLive`, `CoreExternalPortsLive`, `CoreLive`, all 4 workflows, and all
  *   5 ClusterCrons. No `KvitbitRunner` entity or `entities.ts`.
  */
-import { NodeRuntime } from "@effect/platform-node";
 import { CoreLive, IdGeneratorLive } from "@kvitbit/core";
 import { Effect, Layer } from "effect";
+import { runServerMain } from "./logging/logger";
 import { PersistenceLive, PgWorkerDatabaseLive } from "./persistence";
 import { ServerDocumentProjectionsLive } from "./projections/documents";
 import { ClusterWorkerRuntimeLive, CronsLive, WorkflowHandlersLive } from "./runtime";
@@ -45,5 +45,5 @@ const isMain =
     : process.argv[1]?.endsWith("worker.ts") || process.argv[1]?.endsWith("worker.js");
 
 if (isMain) {
-  NodeRuntime.runMain(workerProgram);
+  runServerMain(workerProgram);
 }
