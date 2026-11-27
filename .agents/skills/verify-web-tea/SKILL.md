@@ -5,7 +5,7 @@ description: >-
   changes to apps/web/src, the web entry or build configuration, or
   packages/ui-port/src/theme.
 metadata:
-  sync_commit: "9eebe90707afb70b0c6235683337de28f7f27c57"
+  sync_commit: "27555299dca87058231afdf2872b9c247091a1d9"
   bun: "1.4.4"
   node: "24.18.0"
   effect: "4.1.4"
@@ -78,6 +78,17 @@ that record in a verification commit after the product changes.
 [ADR-0005](../../../docs/adr/0005-formal-verification.md)
 
 ## Verification record
+
+The recorded product commit passed Biome checks on all edited files and
+targeted unit tests for `packages/ui-port` (`address.test.ts`), `apps/web`
+(`consent-invite-onboarding.test.ts`, `settings.test.ts`, `contacts.test.ts`,
+`tea-invariants.test.ts`), and `apps/mobile` (`onboarding-screen.test.tsx`).
+The lockfile was unchanged. The static build contained `dist/index.html`,
+hashed JavaScript and CSS, the ALTCHA worker, `dist/assets/brand`, and
+`dist/fonts`. All 58 smoke and feedback Playwright tests passed on port
+`34187` with one worker across desktop and mobile Chromium profiles,
+covering single-line and multiline address paste splitting on `/onboarding`,
+preservation of non-empty fields, and pass-through of single-part pastes.
 
 At `383766ac036a7dfe79ace530bcd508e3c32c3740`, the segmented control change
 passed root lint and typecheck, all 183 web tests, and the formal digest
