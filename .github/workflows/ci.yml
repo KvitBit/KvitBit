@@ -27,7 +27,7 @@ jobs:
       - run: bun run generate:bun-nix --check
       - run: bunx biome ci --error-on-warnings .
       - run: bun run typecheck
-      - run: bun run test
+      - run: bun run test --concurrency=2
 
   static-mounts:
     runs-on: ubuntu-latest

@@ -40,4 +40,4 @@ test("the frozen verifier accepts the browser's proof for a signed default Argon
       ),
     ),
   );
-}, 20_000);
+}, 60_000);

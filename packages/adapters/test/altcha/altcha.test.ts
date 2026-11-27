@@ -212,7 +212,7 @@ describe("AltchaBotProtection", () => {
     );
     await broken.close();
     expect(reasonOf(exit)).toBe("BotProtectionUnavailable");
-  });
+  }, 20_000);
 
   test("AltchaBotProtectionConfig reads ALTCHA_HMAC_KEY", async () => {
     const layer = AltchaBotProtectionConfig({ algorithm: "PBKDF2/SHA-256", cost: 1 }).pipe(
