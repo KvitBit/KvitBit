@@ -1133,12 +1133,12 @@
       "skill": "verify-money-access",
       "tier": 1,
       "kind": "exhaustive",
-      "syncCommit": "77a5bb7",
+      "syncCommit": "1f06df0703ce723d563fa913a6ce35e437527b68",
       "command": "bun test --cwd packages/domain ./test/money.property.test.ts ./test/money.test.ts",
       "coveredFiles": [
         {
           "path": "packages/domain/src/money.ts",
-          "sha256": "d29e00b55257ed8761c6a8bcf37a3dc8b48806f24f93a1b67a3b39a8dd682fbb"
+          "sha256": "c1f45a526f4c1ba235476f68a996ac0cfef0efefa0c549f70350e8a13b0887dc"
         },
         {
           "path": "packages/domain/src/vocabulary.ts",

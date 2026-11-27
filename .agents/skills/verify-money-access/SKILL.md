@@ -75,7 +75,8 @@ Edit `ISO_SCALE`, `BY_SCALE`, `AREAS` or the 6.3 expectation in `packages/domain
 
 ## Coverage record
 
-- Sync commit: `77a5bb7` (verification confirmed to describe the covered files at this commit).
+- Money sync commit: `1f06df0703ce`. The error representation uses an Effect Schema class. The currency grid and arithmetic oracles retain their existing bounds.
+- Access sync commit: `77a5bb7`.
 - Able-to-fail, recorded 2026-11-24, each reverted with `git checkout` and re-run green:
   - `money.ts` rounding mode `half-even` → residue test fails (`JPY round(0.5)`, `JPY round(-0.5)`).
   - `money.ts` `ISK` removed from the 0-decimal list → both minor-unit tests fail.
