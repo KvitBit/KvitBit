@@ -13,6 +13,7 @@ import { href } from "../../app/routing";
 import { attribute } from "../../ui/html";
 import { icon } from "../../ui/icons";
 import { button, card, linkButton } from "../../ui/kit";
+import { cn, ui } from "../../ui/styles";
 
 export type Route = RouteOf<"Error">;
 
@@ -94,23 +95,25 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
   const workspaces = ctx.session._tag === "SignedIn" ? ctx.session.workspaces : [];
   const firstWs = workspaces[0];
 
-  return h.div.class("kb-error-shell").children([
+  return h.div.class("grid flex-1 place-items-center px-4 pt-10 pb-16").children([
     card(
       h,
       [
         h.div
-          .class("kb-row")
+          .class(ui.row)
           .children([
             icon(h, "alert", 20),
-            h.span.class("kb-error-code").children([CODE[model.kind]]),
+            h.span
+              .class("font-mono text-[0.75rem] uppercase tracking-[0.08em] text-on-surface-variant")
+              .children([CODE[model.kind]]),
           ]),
         h.h1.children([heading]),
-        h.p.class("kb-muted").children([body]),
+        h.p.class(ui.muted).children([body]),
         ...(model.kind === "no_access" && workspaces.length > 0
           ? [
-              h.hr.class("kb-divider"),
-              h.span.class("kb-small kb-muted").children([local(ctx.locale, "workspacesTitle")]),
-              h.div.class("kb-row").children(
+              h.hr.class(ui.divider),
+              h.span.class(cn(ui.small, ui.muted)).children([local(ctx.locale, "workspacesTitle")]),
+              h.div.class(ui.row).children(
                 workspaces.map((ws) =>
                   linkButton(h, {
                     label: ws.name,
@@ -122,55 +125,54 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
               ),
             ]
           : []),
-        h.div
-          .class("kb-row")
-          .style({ marginTop: "6px" })
-          .children([
-            ...(model.kind === "server" || model.kind === "offline"
-              ? [
-                  button(h, {
-                    label: t.t("common.action.retry"),
-                    onClick: Message.ClickedRetry(),
-                    variant: "primary",
-                  }),
-                ]
-              : []),
-            ...(firstWs !== undefined
-              ? [
-                  linkButton(h, {
-                    label: t.t("common.action.goHome"),
-                    href: href({ _tag: "Dashboard", ws: firstWs.slug }),
-                    variant: model.kind === "not_found" ? "primary" : "secondary",
-                  }),
-                ]
-              : [
-                  linkButton(h, {
-                    label: local(ctx.locale, "backHome"),
-                    href: href({ _tag: "Landing" }),
-                    variant: model.kind === "not_found" ? "primary" : "secondary",
-                  }),
-                ]),
-            ...(model.kind === "no_access" && ctx.session._tag === "Anonymous"
-              ? [
-                  linkButton(h, {
-                    label: local(ctx.locale, "signIn"),
-                    href: href({ _tag: "SignIn" }),
-                    variant: "primary",
-                  }),
-                ]
-              : []),
-            ...(model.kind === "no_access" && ctx.session._tag === "SignedIn"
-              ? [
-                  linkButton(h, {
-                    label: local(ctx.locale, "createWorkspace"),
-                    href: href({ _tag: "Onboarding" }),
-                    variant: "ghost",
-                  }),
-                ]
-              : []),
-          ]),
+        h.div.class(cn(ui.row, "mt-1.5")).children([
+          ...(model.kind === "server" || model.kind === "offline"
+            ? [
+                button(h, {
+                  label: t.t("common.action.retry"),
+                  onClick: Message.ClickedRetry(),
+                  variant: "primary",
+                }),
+              ]
+            : []),
+          ...(firstWs !== undefined
+            ? [
+                linkButton(h, {
+                  label: t.t("common.action.goHome"),
+                  href: href({ _tag: "Dashboard", ws: firstWs.slug }),
+                  variant: model.kind === "not_found" ? "primary" : "secondary",
+                }),
+              ]
+            : [
+                linkButton(h, {
+                  label: local(ctx.locale, "backHome"),
+                  href: href({ _tag: "Landing" }),
+                  variant: model.kind === "not_found" ? "primary" : "secondary",
+                }),
+              ]),
+          ...(model.kind === "no_access" && ctx.session._tag === "Anonymous"
+            ? [
+                linkButton(h, {
+                  label: local(ctx.locale, "signIn"),
+                  href: href({ _tag: "SignIn" }),
+                  variant: "primary",
+                }),
+              ]
+            : []),
+          ...(model.kind === "no_access" && ctx.session._tag === "SignedIn"
+            ? [
+                linkButton(h, {
+                  label: local(ctx.locale, "createWorkspace"),
+                  href: href({ _tag: "Onboarding" }),
+                  variant: "ghost",
+                }),
+              ]
+            : []),
+        ]),
       ],
-      [attribute("class", "kb-card kb-error-card"), attribute("data-error-kind", model.kind)],
+      [attribute("data-error-kind", model.kind)],
+      false,
+      "flex w-[min(520px,100%)] flex-col gap-3.5 p-7",
     ),
   ]);
 };

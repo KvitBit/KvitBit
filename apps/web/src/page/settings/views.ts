@@ -35,6 +35,14 @@ import {
   textArea,
   textField,
 } from "../../ui/kit";
+import {
+  bannerVariants,
+  buttonVariants,
+  cardVariants,
+  cn,
+  selectableCardVariants,
+  ui,
+} from "../../ui/styles";
 import { sCopy } from "./copy";
 import {
   CURRENCY_OPTIONS,
@@ -77,10 +85,12 @@ const viewMoreHub = (ctx: PageContext, h: Html.H<Message>): Markup<Message> => {
     }),
     card(h, [
       cardTitle(h, sCopy(ctx.locale, "more.workspace")),
-      h.div.class("kb-more-grid").children(
+      h.div.class("grid grid-cols-[repeat(auto-fit,minmax(220px,1fr))] gap-3").children(
         workspaceLinks.map((item) =>
           h.a
-            .class("kb-more-link")
+            .class(
+              "flex items-center justify-between rounded-panel border border-outline-variant bg-surface-container-lowest px-3.5 py-3 no-underline hover:bg-surface-container-low",
+            )
             .attr("href", item.to)
             .children([h.span.children([item.label]), h.span.children(["→"])]),
         ),
@@ -88,10 +98,12 @@ const viewMoreHub = (ctx: PageContext, h: Html.H<Message>): Markup<Message> => {
     ]),
     card(h, [
       cardTitle(h, sCopy(ctx.locale, "more.settings")),
-      h.div.class("kb-more-grid").children(
+      h.div.class("grid grid-cols-[repeat(auto-fit,minmax(220px,1fr))] gap-3").children(
         SETTINGS_SECTIONS.map((section) =>
           h.a
-            .class("kb-more-link")
+            .class(
+              "flex items-center justify-between rounded-panel border border-outline-variant bg-surface-container-lowest px-3.5 py-3 no-underline hover:bg-surface-container-low",
+            )
             .attr("href", href({ _tag: "Settings", ws, section }))
             .children([h.span.children([sectionLabel(t, section)]), h.span.children(["→"])]),
         ),
@@ -99,10 +111,12 @@ const viewMoreHub = (ctx: PageContext, h: Html.H<Message>): Markup<Message> => {
     ]),
     card(h, [
       cardTitle(h, sCopy(ctx.locale, "more.account")),
-      h.div.class("kb-more-grid").children(
+      h.div.class("grid grid-cols-[repeat(auto-fit,minmax(220px,1fr))] gap-3").children(
         (["profile", "appearance", "security", "sessions", "danger"] as const).map((tab) =>
           h.a
-            .class("kb-more-link")
+            .class(
+              "flex items-center justify-between rounded-panel border border-outline-variant bg-surface-container-lowest px-3.5 py-3 no-underline hover:bg-surface-container-low",
+            )
             .attr("href", href({ _tag: "Account", tab }))
             .children([
               h.span.children([sCopy(ctx.locale, `account.nav.${tab}`)]),
@@ -143,57 +157,62 @@ const viewIssuingEntity = (model: Model, ctx: PageContext, h: Html.H<Message>): 
           ]
         : []),
     ]),
-    h.p.class("kb-muted").children([t.t("settings.issuingEntity.intro")]),
-    h.div.class("kb-ares-row").children([
-      textField(h, {
-        id: "kb-entity-ico",
-        label: t.t("common.field.ico"),
-        placeholder: sCopy(ctx.locale, "entity.aresPlaceholder"),
-        value: f.ico,
-        mono: true,
-        disabled: !editable,
-        onInput: (value) => Message.ChangedEntityField({ field: "ico", value }),
-      }),
-      button(h, {
-        label: t.t("settings.issuingEntity.refreshAres"),
-        disabled: !editable || f.ico.trim() === "",
-        busy: f.lookingUpAres,
-        onClick: Message.ClickedAresLookup(),
-      }),
-    ]),
-    h.div.class("kb-form-grid").children([
-      textField(h, {
-        id: "kb-entity-name",
-        label: t.t("common.field.name"),
-        value: f.name,
-        required: true,
-        disabled: !editable,
-        onInput: (value) => Message.ChangedEntityField({ field: "name", value }),
-      }),
-      textField(h, {
-        id: "kb-entity-dic",
-        label: t.t("common.field.dic"),
-        value: f.dic,
-        mono: true,
-        disabled: !editable,
-        onInput: (value) => Message.ChangedEntityField({ field: "dic", value }),
-      }),
-      textField(h, {
-        id: "kb-entity-legal-form",
-        label: sCopy(ctx.locale, "entity.legalForm"),
-        value: f.legalForm,
-        disabled: !editable,
-        onInput: (value) => Message.ChangedEntityField({ field: "legalForm", value }),
-      }),
-      textField(h, {
-        id: "kb-entity-slug",
-        label: sCopy(ctx.locale, "entity.slug"),
-        value: f.slug,
-        mono: true,
-        disabled: true,
-        onInput: (value) => Message.ChangedEntityField({ field: "slug", value }),
-      }),
-    ]),
+    h.p.class(ui.muted).children([t.t("settings.issuingEntity.intro")]),
+    h.div
+      .class("flex flex-wrap items-end gap-2.5 [&>[data-slot=field]]:flex-[1_1_200px]")
+      .children([
+        textField(h, {
+          id: "kb-entity-ico",
+          label: t.t("common.field.ico"),
+          placeholder: sCopy(ctx.locale, "entity.aresPlaceholder"),
+          value: f.ico,
+          mono: true,
+          disabled: !editable,
+          onInput: (value) => Message.ChangedEntityField({ field: "ico", value }),
+        }),
+        button(h, {
+          label: t.t("settings.issuingEntity.refreshAres"),
+          disabled: !editable || f.ico.trim() === "",
+          busy: f.lookingUpAres,
+          onClick: Message.ClickedAresLookup(),
+        }),
+      ]),
+    h.div
+      .attr("data-slot", "form-grid")
+      .class(ui.formGridAuto)
+      .children([
+        textField(h, {
+          id: "kb-entity-name",
+          label: t.t("common.field.name"),
+          value: f.name,
+          required: true,
+          disabled: !editable,
+          onInput: (value) => Message.ChangedEntityField({ field: "name", value }),
+        }),
+        textField(h, {
+          id: "kb-entity-dic",
+          label: t.t("common.field.dic"),
+          value: f.dic,
+          mono: true,
+          disabled: !editable,
+          onInput: (value) => Message.ChangedEntityField({ field: "dic", value }),
+        }),
+        textField(h, {
+          id: "kb-entity-legal-form",
+          label: sCopy(ctx.locale, "entity.legalForm"),
+          value: f.legalForm,
+          disabled: !editable,
+          onInput: (value) => Message.ChangedEntityField({ field: "legalForm", value }),
+        }),
+        textField(h, {
+          id: "kb-entity-slug",
+          label: sCopy(ctx.locale, "entity.slug"),
+          value: f.slug,
+          mono: true,
+          disabled: true,
+          onInput: (value) => Message.ChangedEntityField({ field: "slug", value }),
+        }),
+      ]),
     textField(h, {
       id: "kb-entity-register",
       label: t.t("settings.issuingEntity.registerEntry"),
@@ -202,60 +221,63 @@ const viewIssuingEntity = (model: Model, ctx: PageContext, h: Html.H<Message>): 
       disabled: !editable,
       onInput: (value) => Message.ChangedEntityField({ field: "registerEntry", value }),
     }),
-    h.div.class("kb-form-grid").children([
-      textField(h, {
-        id: "kb-entity-street",
-        label: t.t("common.field.street"),
-        value: f.street,
-        disabled: !editable,
-        onInput: (value) => Message.ChangedEntityField({ field: "street", value }),
-      }),
-      textField(h, {
-        id: "kb-entity-city",
-        label: t.t("common.field.city"),
-        value: f.city,
-        disabled: !editable,
-        onInput: (value) => Message.ChangedEntityField({ field: "city", value }),
-      }),
-      textField(h, {
-        id: "kb-entity-postal",
-        label: t.t("common.field.postalCode"),
-        value: f.postalCode,
-        mono: true,
-        disabled: !editable,
-        onInput: (value) => Message.ChangedEntityField({ field: "postalCode", value }),
-      }),
-      textField(h, {
-        id: "kb-entity-country",
-        label: t.t("common.field.country"),
-        value: f.country,
-        mono: true,
-        disabled: !editable,
-        onInput: (value) => Message.ChangedEntityField({ field: "country", value }),
-      }),
-      textField(h, {
-        id: "kb-entity-email",
-        label: t.t("common.field.email"),
-        type: "email",
-        value: f.email,
-        disabled: !editable,
-        onInput: (value) => Message.ChangedEntityField({ field: "email", value }),
-      }),
-      textField(h, {
-        id: "kb-entity-phone",
-        label: t.t("common.field.phone"),
-        value: f.phone,
-        disabled: !editable,
-        onInput: (value) => Message.ChangedEntityField({ field: "phone", value }),
-      }),
-      textField(h, {
-        id: "kb-entity-web",
-        label: t.t("common.field.website"),
-        value: f.web,
-        disabled: !editable,
-        onInput: (value) => Message.ChangedEntityField({ field: "web", value }),
-      }),
-    ]),
+    h.div
+      .attr("data-slot", "form-grid")
+      .class(ui.formGridAuto)
+      .children([
+        textField(h, {
+          id: "kb-entity-street",
+          label: t.t("common.field.street"),
+          value: f.street,
+          disabled: !editable,
+          onInput: (value) => Message.ChangedEntityField({ field: "street", value }),
+        }),
+        textField(h, {
+          id: "kb-entity-city",
+          label: t.t("common.field.city"),
+          value: f.city,
+          disabled: !editable,
+          onInput: (value) => Message.ChangedEntityField({ field: "city", value }),
+        }),
+        textField(h, {
+          id: "kb-entity-postal",
+          label: t.t("common.field.postalCode"),
+          value: f.postalCode,
+          mono: true,
+          disabled: !editable,
+          onInput: (value) => Message.ChangedEntityField({ field: "postalCode", value }),
+        }),
+        textField(h, {
+          id: "kb-entity-country",
+          label: t.t("common.field.country"),
+          value: f.country,
+          mono: true,
+          disabled: !editable,
+          onInput: (value) => Message.ChangedEntityField({ field: "country", value }),
+        }),
+        textField(h, {
+          id: "kb-entity-email",
+          label: t.t("common.field.email"),
+          type: "email",
+          value: f.email,
+          disabled: !editable,
+          onInput: (value) => Message.ChangedEntityField({ field: "email", value }),
+        }),
+        textField(h, {
+          id: "kb-entity-phone",
+          label: t.t("common.field.phone"),
+          value: f.phone,
+          disabled: !editable,
+          onInput: (value) => Message.ChangedEntityField({ field: "phone", value }),
+        }),
+        textField(h, {
+          id: "kb-entity-web",
+          label: t.t("common.field.website"),
+          value: f.web,
+          disabled: !editable,
+          onInput: (value) => Message.ChangedEntityField({ field: "web", value }),
+        }),
+      ]),
   ]);
 };
 
@@ -268,36 +290,39 @@ const viewTaxRegime = (model: Model, ctx: PageContext, h: Html.H<Message>): Mark
   const currentRegime = ws?.taxRegime ?? ctx.workspace?.taxRegime ?? "vat_payer";
   const history = ws?.taxRegimeHistory ?? [];
 
-  return h.div.class("kb-stack").children([
+  return h.div.class(ui.stack).children([
     card(h, [
       cardTitle(h, t.t("settings.taxRegime.title"), [
         badge(h, t.translate(I18n.enumText("taxRegime", currentRegime)), "proforma"),
       ]),
-      h.p.class("kb-muted").children([t.translate(I18n.enumText("taxRegimeHint", currentRegime))]),
-      h.p.class("kb-small kb-muted").children([t.t("settings.taxRegime.keepsOld")]),
+      h.p.class(ui.muted).children([t.translate(I18n.enumText("taxRegimeHint", currentRegime))]),
+      h.p.class(cn(ui.small, ui.muted)).children([t.t("settings.taxRegime.keepsOld")]),
       ...(editable
         ? [
-            h.div.class("kb-form-grid").children([
-              selectField(h, {
-                id: "kb-tax-regime-select",
-                label: sCopy(ctx.locale, "tax.regime"),
-                value: model.taxForm.nextRegime,
-                options: TAX_REGIMES.map((r) => ({
-                  value: r,
-                  label: t.translate(I18n.enumText("taxRegime", r)),
-                })),
-                onChange: (value) => Message.ChangedTaxRegime({ regime: value as TaxRegime }),
-              }),
-              textField(h, {
-                id: "kb-tax-effective",
-                label: t.t("settings.taxRegime.effectiveFrom"),
-                type: "date",
-                mono: true,
-                value: model.taxForm.effectiveFrom,
-                onInput: (value) => Message.ChangedTaxEffectiveFrom({ value }),
-              }),
-            ]),
-            h.div.class("kb-row").children([
+            h.div
+              .attr("data-slot", "form-grid")
+              .class(ui.formGridAuto)
+              .children([
+                selectField(h, {
+                  id: "kb-tax-regime-select",
+                  label: sCopy(ctx.locale, "tax.regime"),
+                  value: model.taxForm.nextRegime,
+                  options: TAX_REGIMES.map((r) => ({
+                    value: r,
+                    label: t.translate(I18n.enumText("taxRegime", r)),
+                  })),
+                  onChange: (value) => Message.ChangedTaxRegime({ regime: value as TaxRegime }),
+                }),
+                textField(h, {
+                  id: "kb-tax-effective",
+                  label: t.t("settings.taxRegime.effectiveFrom"),
+                  type: "date",
+                  mono: true,
+                  value: model.taxForm.effectiveFrom,
+                  onInput: (value) => Message.ChangedTaxEffectiveFrom({ value }),
+                }),
+              ]),
+            h.div.class(ui.row).children([
               button(h, {
                 label: sCopy(ctx.locale, "tax.schedule"),
                 variant: "primary",
@@ -320,7 +345,7 @@ const viewTaxRegime = (model: Model, ctx: PageContext, h: Html.H<Message>): Mark
               columns: [
                 {
                   header: sCopy(ctx.locale, "tax.effective"),
-                  cell: (row) => h.span.class("kb-mono").children([row.effectiveFrom]),
+                  cell: (row) => h.span.class(ui.mono).children([row.effectiveFrom]),
                 },
                 {
                   header: sCopy(ctx.locale, "tax.regime"),
@@ -369,7 +394,7 @@ const viewBankAccounts = (model: Model, ctx: PageContext, h: Html.H<Message>): M
   const f = model.bankForm;
   const removing = f.removingId === null ? undefined : rows.find((b) => b.id === f.removingId);
 
-  return h.div.class("kb-stack").children([
+  return h.div.class(ui.stack).children([
     card(h, [
       cardTitle(h, t.t("settings.bankAccounts.title")),
       ...(model.bankAccounts._tag === "Loading"
@@ -391,24 +416,24 @@ const viewBankAccounts = (model: Model, ctx: PageContext, h: Html.H<Message>): M
                     cell: (b) => {
                       const cz = czechAccountFromIban(b.iban);
                       return h.div
-                        .class("kb-stack")
+                        .class(ui.stack)
                         .children([
-                          h.span.class("kb-mono").children([b.iban]),
+                          h.span.class(ui.mono).children([b.iban]),
                           ...(cz !== null
-                            ? [h.span.class("kb-small kb-muted kb-mono").children([cz])]
+                            ? [h.span.class(cn(ui.small, ui.muted, ui.mono)).children([cz])]
                             : []),
                         ]);
                     },
                   },
                   {
                     header: t.t("common.field.bic"),
-                    cell: (b) => h.span.class("kb-mono").children([b.bic ?? "—"]),
+                    cell: (b) => h.span.class(ui.mono).children([b.bic ?? "—"]),
                   },
                   {
                     header: t.t("common.field.currency"),
                     cell: (b) =>
                       h.div
-                        .class("kb-row")
+                        .class(ui.row)
                         .children([
                           badge(h, b.currency, "outline"),
                           ...(b.isDefault
@@ -427,7 +452,7 @@ const viewBankAccounts = (model: Model, ctx: PageContext, h: Html.H<Message>): M
                     align: "end",
                     cell: (b) =>
                       editable
-                        ? h.div.class("kb-row").children([
+                        ? h.div.class(ui.row).children([
                             ...(!b.isDefault
                               ? [
                                   button(h, {
@@ -476,46 +501,49 @@ const viewBankAccounts = (model: Model, ctx: PageContext, h: Html.H<Message>): M
                   ]
                 : [],
             ),
-            h.div.class("kb-form-grid").children([
-              textField(h, {
-                id: "kb-bank-name",
-                label: t.t("settings.bankAccounts.label"),
-                value: f.name,
-                onInput: (value) => Message.ChangedBankField({ field: "name", value }),
-              }),
-              textField(h, {
-                id: "kb-bank-iban",
-                label: t.t("common.field.iban"),
-                placeholder: sCopy(ctx.locale, "bank.ibanPlaceholder"),
-                value: f.iban,
-                mono: true,
-                required: true,
-                onInput: (value) => Message.ChangedBankField({ field: "iban", value }),
-              }),
-              textField(h, {
-                id: "kb-bank-bic",
-                label: t.t("common.field.bic"),
-                placeholder: sCopy(ctx.locale, "bank.bicPlaceholder"),
-                value: f.bic,
-                mono: true,
-                onInput: (value) => Message.ChangedBankField({ field: "bic", value }),
-              }),
-              selectField(h, {
-                id: "kb-bank-currency",
-                label: sCopy(ctx.locale, "bank.currency"),
-                value: f.currency,
-                options: CURRENCY_OPTIONS.map((c) => ({ value: c, label: c })),
-                onChange: (value) =>
-                  Message.ChangedBankCurrency({ currency: CurrencyCode.make(value) }),
-              }),
-            ]),
+            h.div
+              .attr("data-slot", "form-grid")
+              .class(ui.formGridAuto)
+              .children([
+                textField(h, {
+                  id: "kb-bank-name",
+                  label: t.t("settings.bankAccounts.label"),
+                  value: f.name,
+                  onInput: (value) => Message.ChangedBankField({ field: "name", value }),
+                }),
+                textField(h, {
+                  id: "kb-bank-iban",
+                  label: t.t("common.field.iban"),
+                  placeholder: sCopy(ctx.locale, "bank.ibanPlaceholder"),
+                  value: f.iban,
+                  mono: true,
+                  required: true,
+                  onInput: (value) => Message.ChangedBankField({ field: "iban", value }),
+                }),
+                textField(h, {
+                  id: "kb-bank-bic",
+                  label: t.t("common.field.bic"),
+                  placeholder: sCopy(ctx.locale, "bank.bicPlaceholder"),
+                  value: f.bic,
+                  mono: true,
+                  onInput: (value) => Message.ChangedBankField({ field: "bic", value }),
+                }),
+                selectField(h, {
+                  id: "kb-bank-currency",
+                  label: sCopy(ctx.locale, "bank.currency"),
+                  value: f.currency,
+                  options: CURRENCY_OPTIONS.map((c) => ({ value: c, label: c })),
+                  onChange: (value) =>
+                    Message.ChangedBankCurrency({ currency: CurrencyCode.make(value) }),
+                }),
+              ]),
             checkbox(h, {
               id: "kb-bank-default",
               label: sCopy(ctx.locale, "bank.defaultFor", { currency: f.currency }),
               checked: f.isDefault,
               onToggle: (checked) => Message.ToggledBankDefault({ checked }),
             }),
-            h.div.class("kb-row").children([
+            h.div.class(ui.row).children([
               button(h, {
                 label:
                   f.editingId === null
@@ -580,179 +608,191 @@ const viewBranding = (model: Model, ctx: PageContext, h: Html.H<Message>): Marku
   const brandingData = Remote.dataOf(model.branding);
   const ws = Remote.dataOf(model.workspace);
 
-  return h.div.class("kb-settings-grid").children([
-    h.div.class("kb-stack").children([
-      card(h, [
-        cardTitle(h, sCopy(ctx.locale, "branding.templateSection"), [
-          ...(editable
+  return h.div
+    .class("grid grid-cols-1 items-start gap-5 lg:grid-cols-[minmax(0,1fr)_minmax(300px,420px)]")
+    .children([
+      h.div.class(ui.stack).children([
+        card(h, [
+          cardTitle(h, sCopy(ctx.locale, "branding.templateSection"), [
+            ...(editable
+              ? [
+                  button(h, {
+                    label: t.t("common.action.saveChanges"),
+                    variant: "primary",
+                    busy: f.saving,
+                    onClick: Message.ClickedSaveBranding(),
+                  }),
+                ]
+              : []),
+          ]),
+          h.div
+            .class("grid grid-cols-[repeat(auto-fit,minmax(220px,1fr))] gap-3")
+            .children(
+              (["classic", "modern_minimal"] as const).map((tpl) =>
+                withAttributes(h.button.class(), [
+                  (element) => element.attr("type", "button"),
+                  (element) =>
+                    element.class(
+                      selectableCardVariants({ layout: "column", selected: f.pdfTemplate === tpl }),
+                    ),
+                  (element) =>
+                    element.attr("aria-pressed", String(f.pdfTemplate === tpl ? "true" : "false")),
+                  (element) => element.attr("data-template-option", tpl),
+                  (node) =>
+                    editable
+                      ? node.on("click", Message.SelectedPdfTemplate({ template: tpl }))
+                      : node.disabled(true),
+                ]).children([
+                  h.strong.children([t.translate(I18n.enumText("pdfTemplate", tpl))]),
+                  h.span
+                    .class(cn(ui.small, ui.muted))
+                    .children([
+                      sCopy(
+                        ctx.locale,
+                        tpl === "classic" ? "branding.classicDesc" : "branding.modernDesc",
+                      ),
+                    ]),
+                ]),
+              ),
+            ),
+          h.div
+            .attr("data-slot", "form-grid")
+            .class(ui.formGridAuto)
+            .children([
+              textField(h, {
+                id: "kb-branding-accent",
+                label: t.t("settings.branding.accent"),
+                value: f.accentColor,
+                mono: true,
+                disabled: !editable,
+                onInput: (value) => Message.ChangedAccentColor({ value }),
+              }),
+              selectField(h, {
+                id: "kb-branding-theme",
+                label: t.t("settings.branding.workspaceTheme"),
+                hint: t.t("settings.branding.workspaceThemeHint"),
+                value: f.themeChoice,
+                disabled: !editable,
+                options: [
+                  { value: "", label: sCopy(ctx.locale, "branding.themeNone") },
+                  ...Theme.PRESET_IDS.map((id) => ({
+                    value: id,
+                    label: t.translate(Theme.presetNameText(id)),
+                  })),
+                  { value: "seed", label: sCopy(ctx.locale, "branding.themeCustomSeed") },
+                ],
+                onChange: (choice) => Message.SelectedWorkspaceTheme({ choice }),
+              }),
+            ]),
+          ...(f.themeChoice === "seed"
             ? [
-                button(h, {
-                  label: t.t("common.action.saveChanges"),
-                  variant: "primary",
-                  busy: f.saving,
-                  onClick: Message.ClickedSaveBranding(),
+                textField(h, {
+                  id: "kb-branding-seed",
+                  label: sCopy(ctx.locale, "branding.themeCustomSeed"),
+                  value: f.themeSeed,
+                  mono: true,
+                  disabled: !editable,
+                  onInput: (value) => Message.ChangedWorkspaceThemeSeed({ value }),
                 }),
               ]
             : []),
+          textArea(h, {
+            id: "kb-branding-footer",
+            label: t.t("settings.branding.footer"),
+            value: f.footerText,
+            disabled: !editable,
+            onInput: (value) => Message.ChangedFooterText({ value }),
+          }),
         ]),
-        h.div
-          .class("kb-template-picker")
-          .children(
-            (["classic", "modern_minimal"] as const).map((tpl) =>
-              withAttributes(h.button.class(), [
-                (element) => element.attr("type", "button"),
-                (element) => element.class("kb-template-card"),
-                (element) =>
-                  element.attr("aria-pressed", String(f.pdfTemplate === tpl ? "true" : "false")),
-                (element) => element.attr("data-template-option", tpl),
-                (node) =>
-                  editable
-                    ? node.on("click", Message.SelectedPdfTemplate({ template: tpl }))
-                    : node.disabled(true),
-              ]).children([
-                h.strong.children([t.translate(I18n.enumText("pdfTemplate", tpl))]),
-                h.span
-                  .class("kb-small kb-muted")
+        card(h, [
+          cardTitle(h, sCopy(ctx.locale, "branding.images")),
+          h.p.class(cn(ui.small, ui.muted)).children([t.t("settings.branding.uploadHint")]),
+          ...(["logo", "stamp"] as const).map((kind) => {
+            const hasImg = (brandingData?.[kind] ?? ws?.branding[kind] ?? null) !== null;
+            return h.div
+              .class(
+                "flex flex-wrap items-center justify-between gap-3 rounded-panel border border-dashed border-outline-variant bg-surface-container-low p-3",
+              )
+              .children([
+                h.div
+                  .class(ui.stack)
                   .children([
-                    sCopy(
-                      ctx.locale,
-                      tpl === "classic" ? "branding.classicDesc" : "branding.modernDesc",
-                    ),
+                    h.strong.children([t.t(`settings.branding.${kind}`)]),
+                    h.span
+                      .class(cn(ui.small, ui.muted))
+                      .children([
+                        hasImg
+                          ? sCopy(
+                              ctx.locale,
+                              kind === "logo" ? "branding.logoUploaded" : "branding.stampUploaded",
+                            )
+                          : sCopy(ctx.locale, "branding.noImage"),
+                      ]),
                   ]),
-              ]),
-            ),
-          ),
-        h.div.class("kb-form-grid").children([
-          textField(h, {
-            id: "kb-branding-accent",
-            label: t.t("settings.branding.accent"),
-            value: f.accentColor,
-            mono: true,
-            disabled: !editable,
-            onInput: (value) => Message.ChangedAccentColor({ value }),
-          }),
-          selectField(h, {
-            id: "kb-branding-theme",
-            label: t.t("settings.branding.workspaceTheme"),
-            hint: t.t("settings.branding.workspaceThemeHint"),
-            value: f.themeChoice,
-            disabled: !editable,
-            options: [
-              { value: "", label: sCopy(ctx.locale, "branding.themeNone") },
-              ...Theme.PRESET_IDS.map((id) => ({
-                value: id,
-                label: t.translate(Theme.presetNameText(id)),
-              })),
-              { value: "seed", label: sCopy(ctx.locale, "branding.themeCustomSeed") },
-            ],
-            onChange: (choice) => Message.SelectedWorkspaceTheme({ choice }),
+                h.div.class(ui.row).children([
+                  ...(editable
+                    ? [
+                        h.label.class(buttonVariants({ size: "small" })).children([
+                          t.t("common.action.upload"),
+                          h.input
+                            .attr("type", "file")
+                            .attr("accept", "image/png,image/jpeg")
+                            .class("sr-only")
+                            .on("change", ({ files }) =>
+                              Message.SelectedBrandingImage({ kind, file: files[0] }),
+                            ),
+                        ]),
+                      ]
+                    : []),
+                  ...(editable && hasImg
+                    ? [
+                        button(h, {
+                          label: t.t("common.action.remove"),
+                          small: true,
+                          variant: "danger",
+                          onClick: Message.ClickedRemoveBrandingImage({ kind }),
+                        }),
+                      ]
+                    : []),
+                ]),
+              ]);
           }),
         ]),
-        ...(f.themeChoice === "seed"
-          ? [
-              textField(h, {
-                id: "kb-branding-seed",
-                label: sCopy(ctx.locale, "branding.themeCustomSeed"),
-                value: f.themeSeed,
-                mono: true,
-                disabled: !editable,
-                onInput: (value) => Message.ChangedWorkspaceThemeSeed({ value }),
-              }),
-            ]
-          : []),
-        textArea(h, {
-          id: "kb-branding-footer",
-          label: t.t("settings.branding.footer"),
-          value: f.footerText,
-          disabled: !editable,
-          onInput: (value) => Message.ChangedFooterText({ value }),
-        }),
       ]),
       card(h, [
-        cardTitle(h, sCopy(ctx.locale, "branding.images")),
-        h.p.class("kb-small kb-muted").children([t.t("settings.branding.uploadHint")]),
-        ...(["logo", "stamp"] as const).map((kind) => {
-          const hasImg = (brandingData?.[kind] ?? ws?.branding[kind] ?? null) !== null;
-          return h.div.class("kb-upload-slot").children([
-            h.div
-              .class("kb-stack")
-              .children([
-                h.strong.children([t.t(`settings.branding.${kind}`)]),
-                h.span
-                  .class("kb-small kb-muted")
-                  .children([
-                    hasImg
-                      ? sCopy(
-                          ctx.locale,
-                          kind === "logo" ? "branding.logoUploaded" : "branding.stampUploaded",
-                        )
-                      : sCopy(ctx.locale, "branding.noImage"),
-                  ]),
-              ]),
-            h.div.class("kb-row").children([
-              ...(editable
-                ? [
-                    h.label.class("kb-btn kb-btn--small").children([
-                      t.t("common.action.upload"),
-                      h.input
-                        .attr("type", "file")
-                        .attr("accept", "image/png,image/jpeg")
-                        .class("kb-visually-hidden")
-                        .on("change", ({ files }) =>
-                          Message.SelectedBrandingImage({ kind, file: files[0] }),
-                        ),
-                    ]),
-                  ]
-                : []),
-              ...(editable && hasImg
-                ? [
-                    button(h, {
-                      label: t.t("common.action.remove"),
-                      small: true,
-                      variant: "danger",
-                      onClick: Message.ClickedRemoveBrandingImage({ kind }),
-                    }),
-                  ]
-                : []),
-            ]),
-          ]);
+        cardTitle(h, t.t("settings.branding.pdfPreview"), [
+          segmented(h, {
+            label: sCopy(ctx.locale, "branding.previewLang"),
+            selected: f.previewLocale,
+            items: [
+              { id: "cs", label: "CS" },
+              { id: "en", label: "EN" },
+            ],
+            onSelect: (id) => Message.SelectedPreviewLocale({ locale: id === "en" ? "en" : "cs" }),
+          }),
+        ]),
+        brandingMiniPreview(h, {
+          template: f.pdfTemplate,
+          accentColor: Theme.isHex(f.accentColor.trim()) ? f.accentColor.trim() : "#111111",
+          companyName: model.entityForm.name || ws?.issuingEntity.name || "",
+          ico: model.entityForm.ico || ws?.issuingEntity.ico || "",
+          dic: model.entityForm.dic || ws?.issuingEntity.dic || "",
+          registerEntry: model.entityForm.registerEntry || ws?.issuingEntity.registerEntry || "",
+          footerText: f.footerText,
+          hasLogo: (brandingData?.logo ?? ws?.branding.logo ?? null) !== null,
+          hasStamp: (brandingData?.stamp ?? ws?.branding.stamp ?? null) !== null,
+          previewLocale: f.previewLocale,
         }),
+        h.div.class(ui.row).children([
+          button(h, {
+            label: sCopy(ctx.locale, "branding.previewPdf"),
+            small: true,
+            busy: f.previewingPdf,
+            onClick: Message.ClickedPreviewPdf(),
+          }),
+        ]),
       ]),
-    ]),
-    card(h, [
-      cardTitle(h, t.t("settings.branding.pdfPreview"), [
-        segmented(h, {
-          label: sCopy(ctx.locale, "branding.previewLang"),
-          selected: f.previewLocale,
-          items: [
-            { id: "cs", label: "CS" },
-            { id: "en", label: "EN" },
-          ],
-          onSelect: (id) => Message.SelectedPreviewLocale({ locale: id === "en" ? "en" : "cs" }),
-        }),
-      ]),
-      brandingMiniPreview(h, {
-        template: f.pdfTemplate,
-        accentColor: Theme.isHex(f.accentColor.trim()) ? f.accentColor.trim() : "#111111",
-        companyName: model.entityForm.name || ws?.issuingEntity.name || "",
-        ico: model.entityForm.ico || ws?.issuingEntity.ico || "",
-        dic: model.entityForm.dic || ws?.issuingEntity.dic || "",
-        registerEntry: model.entityForm.registerEntry || ws?.issuingEntity.registerEntry || "",
-        footerText: f.footerText,
-        hasLogo: (brandingData?.logo ?? ws?.branding.logo ?? null) !== null,
-        hasStamp: (brandingData?.stamp ?? ws?.branding.stamp ?? null) !== null,
-        previewLocale: f.previewLocale,
-      }),
-      h.div.class("kb-row").children([
-        button(h, {
-          label: sCopy(ctx.locale, "branding.previewPdf"),
-          small: true,
-          busy: f.previewingPdf,
-          onClick: Message.ClickedPreviewPdf(),
-        }),
-      ]),
-    ]),
-  ]);
+    ]);
 };
 
 // --- Section 5: Numbering Series ----------------------------------------------------------------
@@ -764,7 +804,7 @@ const viewNumbering = (model: Model, ctx: PageContext, h: Html.H<Message>): Mark
   const f = model.numberingForm;
   const preview = previewNumberingPattern(f.pattern, Number.parseInt(f.nextNumber, 10) || 1);
 
-  return h.div.class("kb-stack").children([
+  return h.div.class(ui.stack).children([
     card(h, [
       cardTitle(h, t.t("settings.numbering.title")),
       ...(model.series._tag === "Loading"
@@ -783,7 +823,7 @@ const viewNumbering = (model: Model, ctx: PageContext, h: Html.H<Message>): Mark
                   header: sCopy(ctx.locale, "numbering.name"),
                   cell: (s) =>
                     h.div
-                      .class("kb-row")
+                      .class(ui.row)
                       .children([
                         h.span.children([s.name]),
                         ...(s.isDefault
@@ -793,18 +833,18 @@ const viewNumbering = (model: Model, ctx: PageContext, h: Html.H<Message>): Mark
                 },
                 {
                   header: t.t("settings.numbering.pattern"),
-                  cell: (s) => h.span.class("kb-mono").children([s.pattern]),
+                  cell: (s) => h.span.class(ui.mono).children([s.pattern]),
                 },
                 {
                   header: sCopy(ctx.locale, "numbering.nextCounter"),
-                  cell: (s) => h.span.class("kb-mono").children([s.nextNumber]),
+                  cell: (s) => h.span.class(ui.mono).children([s.nextNumber]),
                 },
                 {
                   header: "",
                   align: "end",
                   cell: (s) =>
                     editable
-                      ? h.div.class("kb-row").children([
+                      ? h.div.class(ui.row).children([
                           ...(!s.isDefault
                             ? [
                                 button(h, {
@@ -845,47 +885,50 @@ const viewNumbering = (model: Model, ctx: PageContext, h: Html.H<Message>): Mark
                   ]
                 : [],
             ),
-            h.div.class("kb-form-grid").children([
-              selectField(h, {
-                id: "kb-series-kind",
-                label: sCopy(ctx.locale, "numbering.kind"),
-                value: f.kind,
-                disabled: f.editingId !== null,
-                options: DOCUMENT_KINDS.map((k) => ({
-                  value: k,
-                  label: t.translate(I18n.enumText("documentKind", k)),
-                })),
-                onChange: (value) => Message.ChangedSeriesKind({ kind: value as DocumentKind }),
-              }),
-              textField(h, {
-                id: "kb-series-name",
-                label: sCopy(ctx.locale, "numbering.name"),
-                value: f.name,
-                required: true,
-                onInput: (value) => Message.ChangedSeriesField({ field: "name", value }),
-              }),
-              textField(h, {
-                id: "kb-series-pattern",
-                label: t.t("settings.numbering.pattern"),
-                hint: t.t("settings.numbering.patternHint"),
-                error: preview.tooLong ? sCopy(ctx.locale, "numbering.tooLong") : undefined,
-                value: f.pattern,
-                mono: true,
-                required: true,
-                onInput: (value) => Message.ChangedSeriesField({ field: "pattern", value }),
-              }),
-              textField(h, {
-                id: "kb-series-next",
-                label: sCopy(ctx.locale, "numbering.nextCounter"),
-                type: "number",
-                mono: true,
-                value: f.nextNumber,
-                onInput: (value) => Message.ChangedSeriesField({ field: "nextNumber", value }),
-              }),
-            ]),
-            h.div.class("kb-chip-row").children([
+            h.div
+              .attr("data-slot", "form-grid")
+              .class(ui.formGridAuto)
+              .children([
+                selectField(h, {
+                  id: "kb-series-kind",
+                  label: sCopy(ctx.locale, "numbering.kind"),
+                  value: f.kind,
+                  disabled: f.editingId !== null,
+                  options: DOCUMENT_KINDS.map((k) => ({
+                    value: k,
+                    label: t.translate(I18n.enumText("documentKind", k)),
+                  })),
+                  onChange: (value) => Message.ChangedSeriesKind({ kind: value as DocumentKind }),
+                }),
+                textField(h, {
+                  id: "kb-series-name",
+                  label: sCopy(ctx.locale, "numbering.name"),
+                  value: f.name,
+                  required: true,
+                  onInput: (value) => Message.ChangedSeriesField({ field: "name", value }),
+                }),
+                textField(h, {
+                  id: "kb-series-pattern",
+                  label: t.t("settings.numbering.pattern"),
+                  hint: t.t("settings.numbering.patternHint"),
+                  error: preview.tooLong ? sCopy(ctx.locale, "numbering.tooLong") : undefined,
+                  value: f.pattern,
+                  mono: true,
+                  required: true,
+                  onInput: (value) => Message.ChangedSeriesField({ field: "pattern", value }),
+                }),
+                textField(h, {
+                  id: "kb-series-next",
+                  label: sCopy(ctx.locale, "numbering.nextCounter"),
+                  type: "number",
+                  mono: true,
+                  value: f.nextNumber,
+                  onInput: (value) => Message.ChangedSeriesField({ field: "nextNumber", value }),
+                }),
+              ]),
+            h.div.class("flex flex-wrap items-center gap-1.5").children([
               h.span
-                .class("kb-small kb-muted")
+                .class(cn(ui.small, ui.muted))
                 .children([`${sCopy(ctx.locale, "numbering.insertToken")}:`]),
               ...(["YYYY", "YY", "MM", "NNNN"] as const).map((token) =>
                 button(h, {
@@ -896,8 +939,8 @@ const viewNumbering = (model: Model, ctx: PageContext, h: Html.H<Message>): Mark
                 }),
               ),
             ]),
-            h.div.class("kb-banner kb-banner--info").children([
-              h.span.class("kb-mono").children([
+            h.div.class(bannerVariants({ tone: "info" })).children([
+              h.span.class(ui.mono).children([
                 preview.samples.length > 0
                   ? t.t("settings.numbering.nextNumbers", {
                       numbers: preview.samples.join(", "),
@@ -911,7 +954,7 @@ const viewNumbering = (model: Model, ctx: PageContext, h: Html.H<Message>): Mark
               checked: f.isDefault,
               onToggle: (checked) => Message.ToggledSeriesDefault({ checked }),
             }),
-            h.div.class("kb-row").children([
+            h.div.class(ui.row).children([
               button(h, {
                 label:
                   f.editingId === null
@@ -953,61 +996,66 @@ const viewDocumentDefaults = (
           ]
         : []),
     ]),
-    h.p.class("kb-muted").children([t.t("settings.documentDefaults.intro")]),
-    h.div.class("kb-form-grid").children([
-      selectField(h, {
-        id: "kb-defaults-currency",
-        label: sCopy(ctx.locale, "defaults.currency"),
-        value: f.currency,
-        disabled: !editable,
-        options: CURRENCY_OPTIONS.map((c) => ({ value: c, label: c })),
-        onChange: (value) => Message.ChangedDefaultCurrency({ currency: CurrencyCode.make(value) }),
-      }),
-      selectField(h, {
-        id: "kb-defaults-language",
-        label: t.t("settings.documentDefaults.language"),
-        value: f.language,
-        disabled: !editable,
-        options: [
-          { value: "cs", label: "Čeština" },
-          { value: "en", label: "English" },
-        ],
-        onChange: (value) =>
-          Message.ChangedDefaultLanguage({ language: value === "en" ? "en" : "cs" }),
-      }),
-      textField(h, {
-        id: "kb-defaults-due-days",
-        label: t.t("settings.documentDefaults.dueDays"),
-        type: "number",
-        mono: true,
-        value: f.dueDays,
-        disabled: !editable,
-        onInput: (value) => Message.ChangedDefaultDueDays({ value }),
-      }),
-      selectField(h, {
-        id: "kb-defaults-payment-method",
-        label: t.t("settings.documentDefaults.paymentMethod"),
-        value: f.paymentMethod,
-        disabled: !editable,
-        options: PAYMENT_METHODS.map((m) => ({
-          value: m,
-          label: t.translate(I18n.enumText("paymentMethod", m)),
-        })),
-        onChange: (value) =>
-          Message.ChangedDefaultPaymentMethod({ method: value as PaymentMethod }),
-      }),
-      selectField(h, {
-        id: "kb-defaults-rounding",
-        label: sCopy(ctx.locale, "defaults.rounding"),
-        value: f.paymentRounding,
-        disabled: !editable,
-        options: [
-          { value: "none", label: sCopy(ctx.locale, "defaults.roundingNone") },
-          { value: "whole_unit", label: sCopy(ctx.locale, "defaults.roundingWhole") },
-        ],
-        onChange: (value) => Message.ChangedDefaultRounding({ rounding: value as PaymentRounding }),
-      }),
-    ]),
+    h.p.class(ui.muted).children([t.t("settings.documentDefaults.intro")]),
+    h.div
+      .attr("data-slot", "form-grid")
+      .class(ui.formGridAuto)
+      .children([
+        selectField(h, {
+          id: "kb-defaults-currency",
+          label: sCopy(ctx.locale, "defaults.currency"),
+          value: f.currency,
+          disabled: !editable,
+          options: CURRENCY_OPTIONS.map((c) => ({ value: c, label: c })),
+          onChange: (value) =>
+            Message.ChangedDefaultCurrency({ currency: CurrencyCode.make(value) }),
+        }),
+        selectField(h, {
+          id: "kb-defaults-language",
+          label: t.t("settings.documentDefaults.language"),
+          value: f.language,
+          disabled: !editable,
+          options: [
+            { value: "cs", label: "Čeština" },
+            { value: "en", label: "English" },
+          ],
+          onChange: (value) =>
+            Message.ChangedDefaultLanguage({ language: value === "en" ? "en" : "cs" }),
+        }),
+        textField(h, {
+          id: "kb-defaults-due-days",
+          label: t.t("settings.documentDefaults.dueDays"),
+          type: "number",
+          mono: true,
+          value: f.dueDays,
+          disabled: !editable,
+          onInput: (value) => Message.ChangedDefaultDueDays({ value }),
+        }),
+        selectField(h, {
+          id: "kb-defaults-payment-method",
+          label: t.t("settings.documentDefaults.paymentMethod"),
+          value: f.paymentMethod,
+          disabled: !editable,
+          options: PAYMENT_METHODS.map((m) => ({
+            value: m,
+            label: t.translate(I18n.enumText("paymentMethod", m)),
+          })),
+          onChange: (value) =>
+            Message.ChangedDefaultPaymentMethod({ method: value as PaymentMethod }),
+        }),
+        selectField(h, {
+          id: "kb-defaults-rounding",
+          label: sCopy(ctx.locale, "defaults.rounding"),
+          value: f.paymentRounding,
+          disabled: !editable,
+          options: [
+            { value: "none", label: sCopy(ctx.locale, "defaults.roundingNone") },
+            { value: "whole_unit", label: sCopy(ctx.locale, "defaults.roundingWhole") },
+          ],
+          onChange: (value) =>
+            Message.ChangedDefaultRounding({ rounding: value as PaymentRounding }),
+        }),
+      ]),
     textArea(h, {
       id: "kb-defaults-note",
       label: sCopy(ctx.locale, "defaults.defaultNote"),
@@ -1059,54 +1107,60 @@ const viewReminders = (model: Model, ctx: PageContext, h: Html.H<Message>): Mark
       disabled: !editable || !f.enabled,
       onToggle: (checked) => Message.ToggledRemindersProformas({ checked }),
     }),
-    h.div.class("kb-section").children([
+    h.div.class("flex flex-col gap-3").children([
       h.h3.children([t.t("settings.reminders.offsets")]),
       h.p
-        .class("kb-small kb-muted")
+        .class(cn(ui.small, ui.muted))
         .children([
           sCopy(ctx.locale, "reminders.maxNote", { max: 10, count: f.offsetsDays.length }),
         ]),
-      h.div.class("kb-chip-row").children(
+      h.div.class("flex flex-wrap items-center gap-1.5").children(
         f.offsetsDays.map((day) =>
-          h.span.class("kb-chip").children([
-            h.span
-              .class("kb-mono")
-              .children([sCopy(ctx.locale, "reminders.daysAfter", { days: day })]),
-            ...(editable
-              ? [
-                  h.button
-                    .attr("type", "button")
-                    .attr("aria-label", `${t.t("common.action.remove")} +${day}`)
-                    .on("click", Message.ClickedRemoveReminderOffset({ day }))
-                    .children(["×"]),
-                ]
-              : []),
-          ]),
+          h.span
+            .class(
+              "inline-flex items-center gap-1.5 rounded-badge border border-outline-variant bg-surface-container-low px-2.5 py-1 text-[0.75rem] [&_button]:cursor-pointer [&_button]:border-0 [&_button]:bg-transparent [&_button]:px-0.5 [&_button]:py-0 [&_button]:text-on-surface-variant",
+            )
+            .children([
+              h.span
+                .class(ui.mono)
+                .children([sCopy(ctx.locale, "reminders.daysAfter", { days: day })]),
+              ...(editable
+                ? [
+                    h.button
+                      .attr("type", "button")
+                      .attr("aria-label", `${t.t("common.action.remove")} +${day}`)
+                      .on("click", Message.ClickedRemoveReminderOffset({ day }))
+                      .children(["×"]),
+                  ]
+                : []),
+            ]),
         ),
       ),
       ...(editable
         ? [
-            h.div.class("kb-ares-row").children([
-              textField(h, {
-                id: "kb-reminders-new-offset",
-                label: t.t("settings.reminders.addOffset"),
-                placeholder: sCopy(ctx.locale, "reminders.newOffsetPlaceholder"),
-                type: "number",
-                mono: true,
-                value: f.newOffset,
-                disabled: f.offsetsDays.length >= 10,
-                onInput: (value) => Message.ChangedNewReminderOffset({ value }),
-              }),
-              button(h, {
-                label: t.t("settings.reminders.addOffset"),
-                disabled: f.offsetsDays.length >= 10 || f.newOffset.trim() === "",
-                onClick: Message.ClickedAddReminderOffset(),
-              }),
-            ]),
+            h.div
+              .class("flex flex-wrap items-end gap-2.5 [&>[data-slot=field]]:flex-[1_1_200px]")
+              .children([
+                textField(h, {
+                  id: "kb-reminders-new-offset",
+                  label: t.t("settings.reminders.addOffset"),
+                  placeholder: sCopy(ctx.locale, "reminders.newOffsetPlaceholder"),
+                  type: "number",
+                  mono: true,
+                  value: f.newOffset,
+                  disabled: f.offsetsDays.length >= 10,
+                  onInput: (value) => Message.ChangedNewReminderOffset({ value }),
+                }),
+                button(h, {
+                  label: t.t("settings.reminders.addOffset"),
+                  disabled: f.offsetsDays.length >= 10 || f.newOffset.trim() === "",
+                  onClick: Message.ClickedAddReminderOffset(),
+                }),
+              ]),
           ]
         : []),
     ]),
-    h.hr.class("kb-divider"),
+    h.hr.class(ui.divider),
     checkbox(h, {
       id: "kb-reminders-auto-ptd",
       label: sCopy(ctx.locale, "reminders.autoSendPtd"),
@@ -1114,7 +1168,7 @@ const viewReminders = (model: Model, ctx: PageContext, h: Html.H<Message>): Mark
       disabled: !editable,
       onToggle: (checked) => Message.ToggledRemindersAutoSendPtd({ checked }),
     }),
-    h.p.class("kb-small kb-muted").children([sCopy(ctx.locale, "reminders.autoSendPtdHint")]),
+    h.p.class(cn(ui.small, ui.muted)).children([sCopy(ctx.locale, "reminders.autoSendPtdHint")]),
   ]);
 };
 
@@ -1132,7 +1186,7 @@ const viewTeam = (model: Model, ctx: PageContext, h: Html.H<Message>): Markup<Me
       : members.find((m) => m.userId === model.teamForm.removingUserId);
   const isOwner = ctx.workspace?.role === "owner";
 
-  return h.div.class("kb-stack").children([
+  return h.div.class(ui.stack).children([
     card(h, [
       cardTitle(h, t.t("settings.team.members"), [
         button(h, {
@@ -1144,7 +1198,7 @@ const viewTeam = (model: Model, ctx: PageContext, h: Html.H<Message>): Markup<Me
         }),
       ]),
       ...(isOwner
-        ? [h.p.class("kb-small kb-muted").children([t.t("settings.team.lastOwner")])]
+        ? [h.p.class(cn(ui.small, ui.muted)).children([t.t("settings.team.lastOwner")])]
         : []),
       ...(model.members._tag === "Loading"
         ? [skeleton(h, "100%", "48px"), skeleton(h, "100%", "48px")]
@@ -1158,7 +1212,7 @@ const viewTeam = (model: Model, ctx: PageContext, h: Html.H<Message>): Markup<Me
                   header: t.t("common.field.name"),
                   cell: (m) =>
                     h.div
-                      .class("kb-row")
+                      .class(ui.row)
                       .children([
                         h.span.children([m.name]),
                         ...(m.userId === currentUserId
@@ -1196,7 +1250,7 @@ const viewTeam = (model: Model, ctx: PageContext, h: Html.H<Message>): Markup<Me
                 },
                 {
                   header: sCopy(ctx.locale, "team.joined"),
-                  cell: (m) => h.span.class("kb-mono").children([m.joinedAt.slice(0, 10)]),
+                  cell: (m) => h.span.class(ui.mono).children([m.joinedAt.slice(0, 10)]),
                 },
                 {
                   header: "",
@@ -1219,29 +1273,32 @@ const viewTeam = (model: Model, ctx: PageContext, h: Html.H<Message>): Markup<Me
       ? [
           card(h, [
             cardTitle(h, t.t("settings.team.invite")),
-            h.div.class("kb-form-grid").children([
-              textField(h, {
-                id: "kb-invite-email",
-                label: t.t("settings.team.inviteEmail"),
-                type: "email",
-                value: model.teamForm.inviteEmail,
-                onInput: (value) => Message.ChangedInviteEmail({ value }),
-              }),
-              selectField(h, {
-                id: "kb-invite-role",
-                label: t.t("settings.team.inviteRole"),
-                value: model.teamForm.inviteRole,
-                options: (["admin", "member", "accountant"] as const).map((r) => ({
-                  value: r,
-                  label: t.translate(I18n.enumText("role", r)),
-                })),
-                onChange: (value) =>
-                  Message.ChangedInviteRole({
-                    role: value as "admin" | "member" | "accountant",
-                  }),
-              }),
-            ]),
-            h.div.class("kb-row").children([
+            h.div
+              .attr("data-slot", "form-grid")
+              .class(ui.formGridAuto)
+              .children([
+                textField(h, {
+                  id: "kb-invite-email",
+                  label: t.t("settings.team.inviteEmail"),
+                  type: "email",
+                  value: model.teamForm.inviteEmail,
+                  onInput: (value) => Message.ChangedInviteEmail({ value }),
+                }),
+                selectField(h, {
+                  id: "kb-invite-role",
+                  label: t.t("settings.team.inviteRole"),
+                  value: model.teamForm.inviteRole,
+                  options: (["admin", "member", "accountant"] as const).map((r) => ({
+                    value: r,
+                    label: t.translate(I18n.enumText("role", r)),
+                  })),
+                  onChange: (value) =>
+                    Message.ChangedInviteRole({
+                      role: value as "admin" | "member" | "accountant",
+                    }),
+                }),
+              ]),
+            h.div.class(ui.row).children([
               button(h, {
                 label: t.t("settings.team.invite"),
                 variant: "primary",
@@ -1274,14 +1331,14 @@ const viewTeam = (model: Model, ctx: PageContext, h: Html.H<Message>): Markup<Me
                 },
                 {
                   header: t.t("common.field.expires"),
-                  cell: (i) => h.span.class("kb-mono").children([i.expiresAt.slice(0, 10)]),
+                  cell: (i) => h.span.class(ui.mono).children([i.expiresAt.slice(0, 10)]),
                 },
                 {
                   header: "",
                   align: "end",
                   cell: (i) =>
                     editable
-                      ? h.div.class("kb-row").children([
+                      ? h.div.class(ui.row).children([
                           button(h, {
                             label: t.t("common.action.resend"),
                             small: true,
@@ -1356,7 +1413,7 @@ const viewApiKeys = (model: Model, ctx: PageContext, h: Html.H<Message>): Markup
   const picker = scopePickerFromModel(model, ctx);
   const revoking = f.revokingId === null ? undefined : rows.find((k) => k.id === f.revokingId);
 
-  return h.div.class("kb-stack").children([
+  return h.div.class(ui.stack).children([
     card(h, [
       cardTitle(h, t.t("settings.apiKeys.title"), [
         ...(editable
@@ -1369,7 +1426,7 @@ const viewApiKeys = (model: Model, ctx: PageContext, h: Html.H<Message>): Markup
             ]
           : []),
       ]),
-      h.p.class("kb-muted").children([t.t("settings.apiKeys.intro")]),
+      h.p.class(ui.muted).children([t.t("settings.apiKeys.intro")]),
       ...(model.apiKeys._tag === "Loading"
         ? [skeleton(h, "100%", "48px"), skeleton(h, "100%", "48px")]
         : rows.length === 0
@@ -1383,7 +1440,7 @@ const viewApiKeys = (model: Model, ctx: PageContext, h: Html.H<Message>): Markup
                   { header: t.t("common.field.name"), cell: (k) => k.name },
                   {
                     header: sCopy(ctx.locale, "api.prefix"),
-                    cell: (k) => h.span.class("kb-mono").children([`${k.prefix}…`]),
+                    cell: (k) => h.span.class(ui.mono).children([`${k.prefix}…`]),
                   },
                   {
                     header: sCopy(ctx.locale, "api.scopes"),
@@ -1398,7 +1455,7 @@ const viewApiKeys = (model: Model, ctx: PageContext, h: Html.H<Message>): Markup
                     header: t.t("common.field.expires"),
                     cell: (k) =>
                       h.span
-                        .class("kb-mono")
+                        .class(ui.mono)
                         .children([
                           k.expiresAt === null
                             ? t.t("settings.apiKeys.noExpiry")
@@ -1426,25 +1483,28 @@ const viewApiKeys = (model: Model, ctx: PageContext, h: Html.H<Message>): Markup
       ? [
           card(h, [
             cardTitle(h, t.t("settings.apiKeys.create")),
-            h.p.class("kb-small kb-muted").children([t.t("settings.apiKeys.cappedByRole")]),
-            h.div.class("kb-form-grid").children([
-              textField(h, {
-                id: "kb-apikey-name",
-                label: t.t("settings.apiKeys.name"),
-                value: f.name,
-                required: true,
-                onInput: (value) => Message.ChangedApiKeyName({ value }),
-              }),
-              textField(h, {
-                id: "kb-apikey-expires",
-                label: t.t("settings.apiKeys.expiry"),
-                placeholder: sCopy(ctx.locale, "api.expiresPlaceholder"),
-                type: "date",
-                mono: true,
-                value: f.expiresOn,
-                onInput: (value) => Message.ChangedApiKeyExpires({ value }),
-              }),
-            ]),
+            h.p.class(cn(ui.small, ui.muted)).children([t.t("settings.apiKeys.cappedByRole")]),
+            h.div
+              .attr("data-slot", "form-grid")
+              .class(ui.formGridAuto)
+              .children([
+                textField(h, {
+                  id: "kb-apikey-name",
+                  label: t.t("settings.apiKeys.name"),
+                  value: f.name,
+                  required: true,
+                  onInput: (value) => Message.ChangedApiKeyName({ value }),
+                }),
+                textField(h, {
+                  id: "kb-apikey-expires",
+                  label: t.t("settings.apiKeys.expiry"),
+                  placeholder: sCopy(ctx.locale, "api.expiresPlaceholder"),
+                  type: "date",
+                  mono: true,
+                  value: f.expiresOn,
+                  onInput: (value) => Message.ChangedApiKeyExpires({ value }),
+                }),
+              ]),
             scopeMatrixEditor(h, {
               state: picker,
               t,
@@ -1452,7 +1512,7 @@ const viewApiKeys = (model: Model, ctx: PageContext, h: Html.H<Message>): Markup
               onCustom: Message.SelectedApiKeyCustom(),
               onToggle: (scope) => Message.ToggledApiKeyScope({ scope }),
             }),
-            h.div.class("kb-row").children([
+            h.div.class(ui.row).children([
               button(h, {
                 label: t.t("settings.apiKeys.create"),
                 variant: "primary",
@@ -1472,8 +1532,11 @@ const viewApiKeys = (model: Model, ctx: PageContext, h: Html.H<Message>): Markup
             body: [
               h.p.children([t.t("settings.apiKeys.secretBody")]),
               h.div
-                .class("kb-secret-box")
+                .class(
+                  "select-all break-all rounded-panel border border-outline bg-surface-container-low p-3 font-mono text-[0.8125rem]",
+                )
                 .attr("data-testid", "api-key-secret")
+                .attr("data-feedback-private", "")
                 .children([f.createdSecret]),
             ],
             actions: [
@@ -1526,10 +1589,10 @@ const viewConnectedApps = (model: Model, ctx: PageContext, h: Html.H<Message>): 
       ? undefined
       : rows.find((g) => g.grantId === model.connectedAppsForm.revokingGrantId);
 
-  return h.div.class("kb-stack").children([
+  return h.div.class(ui.stack).children([
     card(h, [
       cardTitle(h, t.t("settings.connectedApps.title")),
-      h.p.class("kb-muted").children([t.t("settings.connectedApps.intro")]),
+      h.p.class(ui.muted).children([t.t("settings.connectedApps.intro")]),
       ...(model.connectedApps._tag === "Loading"
         ? [skeleton(h, "100%", "48px")]
         : rows.length === 0
@@ -1544,11 +1607,11 @@ const viewConnectedApps = (model: Model, ctx: PageContext, h: Html.H<Message>): 
                     header: sCopy(ctx.locale, "mcp.client"),
                     cell: (g) =>
                       h.div
-                        .class("kb-stack")
+                        .class(ui.stack)
                         .children([
                           h.strong.children([g.client.name]),
                           h.span
-                            .class("kb-small kb-muted")
+                            .class(cn(ui.small, ui.muted))
                             .children([
                               t.t("settings.connectedApps.member", { name: g.member.name }),
                             ]),
@@ -1556,7 +1619,7 @@ const viewConnectedApps = (model: Model, ctx: PageContext, h: Html.H<Message>): 
                   },
                   {
                     header: sCopy(ctx.locale, "mcp.host"),
-                    cell: (g) => h.span.class("kb-mono").children([g.client.redirectHost]),
+                    cell: (g) => h.span.class(ui.mono).children([g.client.redirectHost]),
                   },
                   {
                     header: sCopy(ctx.locale, "api.scopes"),
@@ -1571,7 +1634,7 @@ const viewConnectedApps = (model: Model, ctx: PageContext, h: Html.H<Message>): 
                     header: t.t("common.field.lastUsed"),
                     cell: (g) =>
                       h.span
-                        .class("kb-mono")
+                        .class(ui.mono)
                         .children([
                           g.lastUsedAt === null
                             ? sCopy(ctx.locale, "api.never")
@@ -1630,12 +1693,12 @@ const viewDangerZone = (model: Model, ctx: PageContext, h: Html.H<Message>): Mar
   const wsName = ctx.workspace?.name ?? "";
   const canClose = isOwner && model.dangerForm.closeConfirmName.trim() === wsName && wsName !== "";
 
-  return h.div.class("kb-stack").children([
+  return h.div.class(ui.stack).children([
     card(h, [
       cardTitle(h, t.t("settings.dangerZone.export")),
       h.p.children([t.t("settings.dangerZone.retention")]),
-      h.p.class("kb-small kb-muted").children([sCopy(ctx.locale, "danger.exportDesc")]),
-      h.div.class("kb-row").children([
+      h.p.class(cn(ui.small, ui.muted)).children([sCopy(ctx.locale, "danger.exportDesc")]),
+      h.div.class(ui.row).children([
         button(h, {
           label: t.t("settings.dangerZone.export"),
           busy: model.dangerForm.exporting,
@@ -1651,7 +1714,7 @@ const viewDangerZone = (model: Model, ctx: PageContext, h: Html.H<Message>): Mar
         ...(candidates.length === 0
           ? [
               h.p
-                .class("kb-small kb-muted")
+                .class(cn(ui.small, ui.muted))
                 .children([sCopy(ctx.locale, "danger.noTransferCandidates")]),
             ]
           : [
@@ -1669,7 +1732,7 @@ const viewDangerZone = (model: Model, ctx: PageContext, h: Html.H<Message>): Mar
                 ],
                 onChange: (userId) => Message.ChangedTransferTarget({ userId }),
               }),
-              h.div.class("kb-row").children([
+              h.div.class(ui.row).children([
                 button(h, {
                   label: t.t("settings.dangerZone.transfer"),
                   variant: "danger",
@@ -1680,7 +1743,7 @@ const viewDangerZone = (model: Model, ctx: PageContext, h: Html.H<Message>): Mar
               ]),
             ]),
       ],
-      [attribute("class", "kb-card kb-danger-card")],
+      [attribute("class", cn(cardVariants(), "border-error [&_h2]:text-error"))],
     ),
     card(
       h,
@@ -1694,7 +1757,7 @@ const viewDangerZone = (model: Model, ctx: PageContext, h: Html.H<Message>): Mar
           disabled: !isOwner,
           onInput: (value) => Message.ChangedCloseConfirm({ value }),
         }),
-        h.div.class("kb-row").children([
+        h.div.class(ui.row).children([
           button(h, {
             label: t.t("settings.dangerZone.close"),
             variant: "danger",
@@ -1704,7 +1767,7 @@ const viewDangerZone = (model: Model, ctx: PageContext, h: Html.H<Message>): Mar
           }),
         ]),
       ],
-      [attribute("class", "kb-card kb-danger-card")],
+      [attribute("class", cn(cardVariants(), "border-error [&_h2]:text-error"))],
     ),
     ...(model.dangerForm.confirmTransfer && targetMember !== undefined
       ? [

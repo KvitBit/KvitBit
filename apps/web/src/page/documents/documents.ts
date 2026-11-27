@@ -35,6 +35,7 @@ import {
   table,
   tabs,
 } from "../../ui/kit";
+import { cn, controlVariants, ui } from "../../ui/styles";
 import {
   apiCommand,
   canRole,
@@ -433,7 +434,7 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
                     }
                   : {}),
             })
-          : h.div.class("kb-stack").children([
+          : h.div.class(ui.stack).children([
               table(h, {
                 caption: txt(locale, "caption"),
                 rows: data.items,
@@ -448,7 +449,7 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
                           "href",
                           href({ _tag: "Document", ws: slug, id: row.id, tab: "preview" }),
                         )
-                        .class("kb-queue-item__link")
+                        .class("font-medium no-underline hover:underline")
                         .children([mono(h, row.number ?? txt(locale, "draftNumber"))]),
                   },
                   {
@@ -472,7 +473,9 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
                   {
                     header: txt(locale, "colStatus"),
                     cell: (row) =>
-                      h.span.class("kb-docs-badges").children(documentBadges(h, locale, row)),
+                      h.span
+                        .class("inline-flex flex-wrap items-center gap-1")
+                        .children(documentBadges(h, locale, row)),
                   },
                   {
                     header: txt(locale, "colTotal"),
@@ -482,9 +485,9 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
                   },
                 ],
               }),
-              h.div.class("kb-docs-pager").children([
+              h.div.class("flex items-center justify-between gap-3").children([
                 h.span
-                  .class("kb-small kb-muted kb-num")
+                  .class(cn(ui.small, ui.muted, ui.num))
                   .children([txt(locale, "showingCount", { count: data.items.length })]),
                 ...(data.nextCursor === null
                   ? []
@@ -521,13 +524,18 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
       items: tabItems,
       selected: activeTabId(q),
     }),
-    h.div.class("kb-docs-toolbar").children([
+    h.div.class("flex flex-wrap items-end justify-between gap-2.5").children([
       h.form
-        .class("kb-docs-filters")
+        .class("flex flex-1 flex-wrap items-center gap-2")
         .on("submit", Message.SubmittedSearch(), { preventDefault: true })
         .children([
           h.input
-            .class("kb-input kb-docs-search")
+            .class(
+              cn(
+                controlVariants({ kind: "input" }),
+                "min-w-[220px] max-w-[360px] flex-[1_1_240px]",
+              ),
+            )
             .attr("type", "search")
             .attr("aria-label", txt(locale, "searchLabel"))
             .attr("placeholder", txt(locale, "searchPlaceholder"))

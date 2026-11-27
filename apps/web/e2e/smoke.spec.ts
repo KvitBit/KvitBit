@@ -39,7 +39,7 @@ const expectFilledSegments = async (
   await group.page().evaluate(() => document.fonts.ready.then(() => undefined));
   const layout = await group.evaluate((control) => {
     const bounds = control.getBoundingClientRect();
-    const container = control.closest(".kb-card__title") ?? control.parentElement;
+    const container = control.closest('[data-slot="card-title"]') ?? control.parentElement;
     const buttons = [...control.querySelectorAll("button")].map((button) => {
       const box = button.getBoundingClientRect();
       const label = document.createRange();
@@ -105,7 +105,7 @@ if (typeof Bun === "undefined") {
           await test.step(path, async () => {
             await page.goto(path);
             await expect(page.locator(".kb-root")).toHaveAttribute("lang", locale);
-            const groups = page.locator(".kb-segmented");
+            const groups = page.locator('[data-slot="segmented"]');
             await expect(groups).toHaveCount(count);
             for (const group of await groups.all()) {
               await expectFilledSegments(group, "stretched", path === "/sign-up");
@@ -115,25 +115,37 @@ if (typeof Bun === "undefined") {
 
         await page.goto(`/w/${DEMO_WS}/settings/api-keys`);
         await page.getByRole("button", { name: /^(Create API key|Vytvořit API klíč)$/ }).click();
-        await expectFilledSegments(page.locator(".kb-segmented"), "stretched");
+        await expectFilledSegments(page.locator('[data-slot="segmented"]'), "stretched");
       });
 
       test("keep inline controls compact and fill the export dialog selector", async ({ page }) => {
         await page.goto("/i/demo-unpaid-czk");
         await expect(page.locator(".kb-root")).toHaveAttribute("lang", locale);
-        await expectFilledSegments(page.locator(".kb-segmented"), "inline");
+        await expectFilledSegments(page.locator('[data-slot="segmented"]'), "inline");
 
         await page.goto(`/w/${DEMO_WS}/settings/branding`);
-        await expectFilledSegments(page.locator(".kb-segmented"), "inline");
+        await expectFilledSegments(page.locator('[data-slot="segmented"]'), "inline");
 
         await page.goto(`/w/${DEMO_WS}/expenses/new?mode=edit`);
-        await expectFilledSegments(page.locator(".kb-field > .kb-segmented"), "stretched");
-        await expectFilledSegments(page.locator(".kb-spread > .kb-segmented"), "inline");
+        await expectFilledSegments(
+          page.locator('[data-slot="field"] > [data-slot="segmented"]'),
+          "stretched",
+        );
+        await expectFilledSegments(
+          page.locator('[data-slot="spread"] > [data-slot="segmented"]'),
+          "inline",
+        );
 
         await page.goto(`/w/${DEMO_WS}/reports/revenue?period=2026`);
-        await expectFilledSegments(page.locator(".kb-report-controls .kb-segmented"), "inline");
+        await expectFilledSegments(
+          page.locator('[data-slot="report-controls"] [data-slot="segmented"]'),
+          "inline",
+        );
         await page.getByRole("button", { name: /^(Export|Exportovat)$/ }).click();
-        await expectFilledSegments(page.getByRole("dialog").locator(".kb-segmented"), "stretched");
+        await expectFilledSegments(
+          page.getByRole("dialog").locator('[data-slot="segmented"]'),
+          "stretched",
+        );
       });
     });
   }
@@ -146,7 +158,7 @@ if (typeof Bun === "undefined") {
       const mode = page.getByRole("group", { name: "Režim", exact: true });
       const contrast = page.getByRole("group", { name: "Kontrast", exact: true });
       // Exercise the settings grid's minimum track width in both viewport profiles.
-      const grid = page.locator(".kb-form-grid").filter({ has: mode });
+      const grid = page.locator('[data-slot="form-grid"]').filter({ has: mode });
       await grid.evaluate((element) => {
         element.style.gridTemplateColumns = "repeat(auto-fit, 220px)";
       });
@@ -223,7 +235,7 @@ if (typeof Bun === "undefined") {
           await expect(page.locator(".kb-root")).toHaveAttribute("lang", locale);
           await expect(page.locator(".kb-root")).toHaveAttribute("data-style", style);
 
-          const segmented = page.locator(".kb-auth-form .kb-segmented");
+          const segmented = page.locator('[data-slot="auth-form"] [data-slot="segmented"]');
           const buttons = segmented.locator("button");
           await expect(buttons).toHaveText([...labels]);
 
@@ -283,9 +295,9 @@ if (typeof Bun === "undefined") {
         await expect(page).toHaveTitle(/Kvitbit/);
 
         if (testInfo.project.name === "desktop") {
-          await expect(page.locator(".kb-sidebar")).toBeVisible();
+          await expect(page.locator('[data-slot="sidebar"]')).toBeVisible();
         } else {
-          await expect(page.locator(".kb-bottom-nav")).toBeVisible();
+          await expect(page.locator('[data-slot="bottom-nav"]')).toBeVisible();
         }
       }
 
@@ -524,7 +536,7 @@ if (typeof Bun === "undefined") {
         { token },
       );
       await page.goto("/", { waitUntil: "domcontentloaded" });
-      await expect(page.locator(".kb-landing")).toBeVisible();
+      await expect(page.locator('[data-slot="landing"]')).toBeVisible();
 
       await page.evaluate((sharePath) => {
         for (const [href, label] of [

@@ -157,7 +157,7 @@ describe("Workspace Invitation Landing page (Screen 05)", () => {
 
   test("SSR renders /invite/:token for anonymous viewers", async () => {
     const { html } = await renderPath("/invite/demo-pending", { locale: "cs", session: anonymous });
-    expect(html).toContain("kb-invite-shell");
+    expect(html).toContain('data-slot="invite-shell"');
   });
 });
 
@@ -299,7 +299,7 @@ describe("Workspace Onboarding Wizard (Screen 07)", () => {
 
   test("SSR renders /onboarding wizard in cs and en", async () => {
     const cs = await renderPath("/onboarding", { locale: "cs", session: signedIn });
-    expect(cs.html).toContain("kb-onboarding");
+    expect(cs.html).toContain('data-slot="onboarding"');
     expect(cs.html).toContain("ARES");
 
     const en = await renderPath("/onboarding?step=5", { locale: "en", session: signedIn });

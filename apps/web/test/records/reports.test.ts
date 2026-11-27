@@ -203,7 +203,7 @@ describe("Reports Suite page TEA", () => {
     });
     const { html } = await Effect.runPromise(HtmlServer.renderToHtml(report, {}));
     expect(html).toMatch(
-      /kb-bar-chart__label[^>]*>&lt;contact-label[^>]*A &amp; B&lt;\/contact-label&gt;<\/span>/,
+      /data-slot="bar-chart-label"[^>]*>&lt;contact-label[^>]*A &amp; B&lt;\/contact-label&gt;<\/span>/,
     );
     expect(html).toContain(
       'title="&lt;contact-label class=&quot;vip&quot;&gt;A &amp; B&lt;/contact-label&gt;: 242000"',
@@ -216,7 +216,7 @@ describe("Reports Suite page TEA", () => {
     for (const tab of tabs) {
       const res = await renderPath(`/w/${WS}/reports/${tab}?period=2026`, { locale: "cs" });
       expect(res.title).toContain("Přehledy");
-      expect(res.html).toContain("kb-tabs");
+      expect(res.html).toContain('data-slot="tabs"');
     }
 
     const nonVatWs = DEMO_WORKSPACES[1]?.slug ?? WS;

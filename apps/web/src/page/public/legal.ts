@@ -128,7 +128,7 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
           },
         ];
 
-  return h.div.class("kb-legal").children([
+  return h.div.class("mx-auto flex w-full max-w-[780px] flex-col gap-5 px-6 pt-7 pb-16").children([
     pageHeader(h, {
       title: heading,
       subtitle: local(ctx.locale, "updated"),
@@ -159,13 +159,16 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
     }),
     card(h, [
       h.article
-        .class("kb-legal__article")
+        .class("flex flex-col gap-5")
         .children([
           h.p.children([local(ctx.locale, model.kind === "terms" ? "termsIntro" : "privacyIntro")]),
           ...sections.map((s) =>
             h.section
-              .class("kb-legal__section")
-              .children([h.h2.children([s.title]), h.p.children([s.body])]),
+              .class("flex flex-col gap-2")
+              .children([
+                h.h2.children([s.title]),
+                h.p.class("leading-relaxed text-on-surface-variant").children([s.body]),
+              ]),
           ),
         ]),
     ]),

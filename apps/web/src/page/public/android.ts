@@ -25,6 +25,7 @@ import {
   pageHeader,
   skeleton,
 } from "../../ui/kit";
+import { buttonVariants, cn, ui } from "../../ui/styles";
 import { copyToClipboard, formatBytes } from "./_shared";
 
 export type Route = RouteOf<"AndroidDownload">;
@@ -168,7 +169,7 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
   const release = Remote.dataOf(model.release);
   const obtainiumHref = release?.obtainiumUrl ?? local(ctx.locale, "defaultObtainium");
 
-  return h.div.class("kb-android").children([
+  return h.div.class("mx-auto flex w-full max-w-[920px] flex-col gap-5 px-6 pt-7 pb-16").children([
     pageHeader(h, {
       title: t.t("public.androidDownload.title"),
       subtitle: t.t("public.androidDownload.subtitle"),
@@ -186,7 +187,7 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
           }),
         ]
       : []),
-    h.div.class("kb-android-grid").children([
+    h.div.class("grid grid-cols-[repeat(auto-fit,minmax(280px,1fr))] gap-4").children([
       card(h, [
         cardTitle(
           h,
@@ -201,8 +202,8 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
               ]
             : [],
         ),
-        h.div.class("kb-stack").children([
-          h.p.class("kb-muted").children([local(ctx.locale, "directBody")]),
+        h.div.class(ui.stack).children([
+          h.p.class(ui.muted).children([local(ctx.locale, "directBody")]),
           ...(model.release._tag === "Loading"
             ? [skeleton(h, "60%", "1.25rem"), skeleton(h, "45%", "2.25rem")]
             : release !== undefined
@@ -222,9 +223,9 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
                     ],
                     [local(ctx.locale, "minSdk"), `API ${release.minAndroidSdk}+`],
                   ]),
-                  h.div.class("kb-row").children([
+                  h.div.class(ui.row).children([
                     h.a
-                      .class("kb-btn kb-btn--primary")
+                      .class(buttonVariants({ variant: "primary" }))
                       .attr("href", release.apkUrl)
                       .attr("download", `kvitbit-${release.version}.apk`)
                       .children([icon(h, "download", 16), t.t("public.androidDownload.download")]),
@@ -235,65 +236,69 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
       ]),
       card(h, [
         h.div
-          .class("kb-row")
+          .class(ui.row)
           .children([
             h.img
-              .class("kb-obtainium-mark")
+              .class(
+                "inline-flex h-9 w-9 flex-none items-center justify-center rounded-control bg-primary-container text-on-primary-container",
+              )
               .attr("src", svgImage(OBTAINIUM_MARK_SVG))
               .attr("alt", ""),
             h.h2.children([t.t("public.androidDownload.obtainium.title")]),
           ]),
-        h.div
-          .class("kb-stack")
-          .style({ marginTop: "12px" })
-          .children([
-            h.p.class("kb-muted").children([t.t("public.androidDownload.obtainium.body")]),
-            h.div
-              .class("kb-stack")
-              .style({ "--kb-gap": "4px" })
-              .children([
-                h.strong.class("kb-small").children([local(ctx.locale, "obtainiumStepsTitle")]),
-                h.span.class("kb-small kb-muted").children([local(ctx.locale, "obtainiumStep1")]),
-                h.span.class("kb-small kb-muted").children([local(ctx.locale, "obtainiumStep2")]),
-                h.span.class("kb-small kb-muted").children([local(ctx.locale, "obtainiumStep3")]),
-              ]),
-            h.div.class("kb-row").children([
-              h.a
-                .class("kb-btn kb-btn--primary")
-                .attr("href", obtainiumHref)
-                .children([t.t("public.androidDownload.obtainium.cta")]),
+        h.div.class(cn(ui.stack, "mt-3")).children([
+          h.p.class(ui.muted).children([t.t("public.androidDownload.obtainium.body")]),
+          h.div
+            .class("flex flex-col gap-1")
+            .children([
+              h.strong.class(ui.small).children([local(ctx.locale, "obtainiumStepsTitle")]),
+              h.span.class(cn(ui.small, ui.muted)).children([local(ctx.locale, "obtainiumStep1")]),
+              h.span.class(cn(ui.small, ui.muted)).children([local(ctx.locale, "obtainiumStep2")]),
+              h.span.class(cn(ui.small, ui.muted)).children([local(ctx.locale, "obtainiumStep3")]),
             ]),
+          h.div.class(ui.row).children([
+            h.a
+              .class(buttonVariants({ variant: "primary" }))
+              .attr("href", obtainiumHref)
+              .children([t.t("public.androidDownload.obtainium.cta")]),
           ]),
+        ]),
       ]),
     ]),
     ...(release !== undefined
       ? [
           card(h, [
             cardTitle(h, local(ctx.locale, "verifyTitle")),
-            h.div.class("kb-stack").children([
-              h.div.class("kb-field").children([
-                h.span.class("kb-field__label").children([t.t("public.androidDownload.checksum")]),
-                h.div.class("kb-checksum-row").children([
-                  mono(h, release.apkSha256),
-                  button(h, {
-                    label: t.t("public.androidDownload.copyChecksum"),
-                    onClick: Message.ClickedCopy({ value: release.apkSha256 }),
-                    small: true,
-                  }),
-                ]),
+            h.div.class(ui.stack).children([
+              h.div.class(ui.field).children([
+                h.span.class(ui.fieldLabel).children([t.t("public.androidDownload.checksum")]),
+                h.div
+                  .class(
+                    "flex items-center justify-between gap-2.5 break-all rounded-control border border-outline-variant bg-surface-container-low px-2.5 py-2",
+                  )
+                  .children([
+                    mono(h, release.apkSha256),
+                    button(h, {
+                      label: t.t("public.androidDownload.copyChecksum"),
+                      onClick: Message.ClickedCopy({ value: release.apkSha256 }),
+                      small: true,
+                    }),
+                  ]),
               ]),
-              h.div.class("kb-field").children([
-                h.span
-                  .class("kb-field__label")
-                  .children([t.t("public.androidDownload.signingCert")]),
-                h.div.class("kb-checksum-row").children([
-                  mono(h, release.signingCertSha256),
-                  button(h, {
-                    label: local(ctx.locale, "copyCert"),
-                    onClick: Message.ClickedCopy({ value: release.signingCertSha256 }),
-                    small: true,
-                  }),
-                ]),
+              h.div.class(ui.field).children([
+                h.span.class(ui.fieldLabel).children([t.t("public.androidDownload.signingCert")]),
+                h.div
+                  .class(
+                    "flex items-center justify-between gap-2.5 break-all rounded-control border border-outline-variant bg-surface-container-low px-2.5 py-2",
+                  )
+                  .children([
+                    mono(h, release.signingCertSha256),
+                    button(h, {
+                      label: local(ctx.locale, "copyCert"),
+                      onClick: Message.ClickedCopy({ value: release.signingCertSha256 }),
+                      small: true,
+                    }),
+                  ]),
               ]),
             ]),
           ]),
@@ -302,16 +307,15 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
     card(
       h,
       [
-        h.div.class("kb-spread").children([
+        h.div.class(ui.spread).children([
           h.div
-            .class("kb-stack")
-            .style({ "--kb-gap": "4px" })
+            .class("flex flex-col gap-1")
             .children([
               h.h2.children([local(ctx.locale, "pwaTitle")]),
-              h.p.class("kb-muted").children([local(ctx.locale, "pwaBody")]),
+              h.p.class(ui.muted).children([local(ctx.locale, "pwaBody")]),
             ]),
           h.a
-            .class("kb-btn kb-btn--secondary")
+            .class(buttonVariants({ variant: "secondary" }))
             .attr("href", "/app/")
             .attr("rel", "external")
             .children([local(ctx.locale, "pwaCta")]),

@@ -39,6 +39,7 @@ import {
   textArea,
   textField,
 } from "../../ui/kit";
+import { cn, controlVariants, ui } from "../../ui/styles";
 import {
   apiCommand,
   CURRENCIES,
@@ -472,43 +473,50 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
     "",
   ];
 
-  const toolbar = h.div.class("kb-rec-toolbar").children([
-    h.search.children([
-      h.form
-        .class("kb-row")
-        .attr("action", ctx.path.split("?", 1)[0] ?? ctx.path)
-        .on("submit", Message.SubmittedSearch(), { preventDefault: true })
-        .children([
-          h.div.class("kb-rec-search").children([
-            h.span.class("kb-rec-search__icon").children([icon(h, "search", 16)]),
-            h.input
-              .class("kb-input")
-              .attr("type", "search")
-              .attr("name", "text")
-              .attr("placeholder", tr.t("priceList.search"))
-              .attr("aria-label", tr.t("priceList.search"))
-              .value(model.search)
-              .on("input", ({ value }) => Message.ChangedSearch({ value })),
+  const toolbar = h.div
+    .attr("data-slot", "rec-toolbar")
+    .class("flex flex-wrap items-center justify-between gap-3")
+    .children([
+      h.search.children([
+        h.form
+          .class(ui.row)
+          .attr("action", ctx.path.split("?", 1)[0] ?? ctx.path)
+          .on("submit", Message.SubmittedSearch(), { preventDefault: true })
+          .children([
+            h.div.class("relative max-w-[380px] flex-[1_1_240px]").children([
+              h.span
+                .class(
+                  "pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-on-surface-variant",
+                )
+                .children([icon(h, "search", 16)]),
+              h.input
+                .class(cn(controlVariants({ kind: "input" }), "pl-[34px]"))
+                .attr("type", "search")
+                .attr("name", "text")
+                .attr("placeholder", tr.t("priceList.search"))
+                .attr("aria-label", tr.t("priceList.search"))
+                .value(model.search)
+                .on("input", ({ value }) => Message.ChangedSearch({ value })),
+            ]),
+            button(h, { label: tr.t("common.action.search"), type: "submit" }),
           ]),
-          button(h, { label: tr.t("common.action.search"), type: "submit" }),
-        ]),
-    ]),
-    h.div.class("kb-row").children([
-      checkbox(h, {
-        id: "pricelist-include-archived",
-        label: tr.t("priceList.showArchived"),
-        checked: model.includeArchived,
-        onToggle: (checked) => Message.ToggledIncludeArchived({ checked }),
-      }),
-      ...(items !== undefined
-        ? [
-            h.span
-              .class("kb-small kb-muted kb-num")
-              .children([tLocal(ctx.locale, "countLabel", { count: items.length })]),
-          ]
-        : []),
-    ]),
-  ]);
+      ]),
+      h.div.class(ui.row).children([
+        checkbox(h, {
+          id: "pricelist-include-archived",
+          label: tr.t("priceList.showArchived"),
+          checked: model.includeArchived,
+          onToggle: (checked) => Message.ToggledIncludeArchived({ checked }),
+        }),
+        ...(items !== undefined
+          ? [
+              h.span
+                .class(cn(ui.small, ui.muted, ui.num))
+                .children([tLocal(ctx.locale, "countLabel", { count: items.length })]),
+            ]
+          : []),
+      ]),
+    ]);
 
   const listBody = (() => {
     if (model.items._tag === "Loading" || model.items._tag === "Idle") {
@@ -551,18 +559,18 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
           header: tr.t("priceList.column.name"),
           cell: (item) =>
             h.div
-              .class(item.archived ? "kb-stack kb-row-archived" : "kb-stack")
+              .class(cn(ui.stack, item.archived && "opacity-65"))
               .style({ "--kb-gap": "2px" })
               .children([
                 h.strong.children([item.name]),
                 ...(item.description !== null && item.description !== ""
-                  ? [h.span.class("kb-small kb-muted").children([item.description])]
+                  ? [h.span.class(cn(ui.small, ui.muted)).children([item.description])]
                   : []),
               ]),
         },
         {
           header: tr.t("priceList.column.unit"),
-          cell: (item) => h.span.class("kb-muted").children([item.unit ?? "—"]),
+          cell: (item) => h.span.class(ui.muted).children([item.unit ?? "—"]),
         },
         {
           header: tr.t("priceList.column.price"),
@@ -617,7 +625,7 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
             ],
           ),
           h.form
-            .class("kb-stack")
+            .class(ui.stack)
             .on("submit", Message.SubmittedEditor(), { preventDefault: true })
             .children([
               ...(model.editor.error !== null
@@ -636,77 +644,83 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
                 value: model.editor.description,
                 onInput: (value) => Message.ChangedField({ field: "description", value }),
               }),
-              h.div.class("kb-form-grid").children([
-                textField(h, {
-                  id: "pli-price",
-                  label: tr.t("common.field.unitPrice"),
-                  value: model.editor.unitPrice,
-                  required: true,
-                  mono: true,
-                  onInput: (value) => Message.ChangedField({ field: "unitPrice", value }),
-                }),
-                selectField(h, {
-                  id: "pli-currency",
-                  label: tr.t("common.field.currency"),
-                  value: model.editor.currency,
-                  options: CURRENCIES.map((c) => ({ value: c, label: c })),
-                  onChange: (value) => Message.ChangedField({ field: "currency", value }),
-                }),
-                textField(h, {
-                  id: "pli-unit",
-                  label: tr.t("common.field.unit"),
-                  value: model.editor.unit,
-                  placeholder: tr.t("common.unit.hour"),
-                  onInput: (value) => Message.ChangedField({ field: "unit", value }),
-                }),
-                selectField(h, {
-                  id: "pli-vat",
-                  label: tr.t("common.field.vat"),
-                  value: model.editor.vat,
-                  options: [
-                    { value: "", label: tLocal(ctx.locale, "vatDefault") },
-                    ...VAT_TREATMENTS.map((v) => ({
-                      value: v,
-                      label: formatVatLabel(ctx.locale, v),
-                    })),
-                  ],
-                  onChange: (value) => Message.ChangedField({ field: "vat", value }),
-                }),
-              ]),
-              h.div.class("kb-spread").children([
-                model.editor.id !== null
-                  ? button(h, {
-                      label: tr.t("common.action.archive"),
-                      variant: "danger",
-                      small: true,
-                      onClick: Message.RequestedArchive({
-                        item: {
-                          id: model.editor.id,
-                          name: model.editor.name,
-                          description: model.editor.description || null,
-                          unit: model.editor.unit || null,
-                          unitPrice: model.editor.unitPrice,
-                          currency: model.editor.currency,
-                          vat: model.editor.vat || null,
-                          archived: false,
-                          revision: model.editor.revision ?? 1,
-                        },
-                      }),
-                    })
-                  : h.span.children([]),
-                h.div.class("kb-row").children([
-                  button(h, {
-                    label: tr.t("common.action.cancel"),
-                    onClick: Message.ClickedCloseEditor(),
+              h.div
+                .attr("data-slot", "form-grid")
+                .class(ui.formGrid)
+                .children([
+                  textField(h, {
+                    id: "pli-price",
+                    label: tr.t("common.field.unitPrice"),
+                    value: model.editor.unitPrice,
+                    required: true,
+                    mono: true,
+                    onInput: (value) => Message.ChangedField({ field: "unitPrice", value }),
                   }),
-                  button(h, {
-                    label: tr.t("common.action.save"),
-                    variant: "primary",
-                    type: "submit",
-                    busy: model.editor.saving,
+                  selectField(h, {
+                    id: "pli-currency",
+                    label: tr.t("common.field.currency"),
+                    value: model.editor.currency,
+                    options: CURRENCIES.map((c) => ({ value: c, label: c })),
+                    onChange: (value) => Message.ChangedField({ field: "currency", value }),
+                  }),
+                  textField(h, {
+                    id: "pli-unit",
+                    label: tr.t("common.field.unit"),
+                    value: model.editor.unit,
+                    placeholder: tr.t("common.unit.hour"),
+                    onInput: (value) => Message.ChangedField({ field: "unit", value }),
+                  }),
+                  selectField(h, {
+                    id: "pli-vat",
+                    label: tr.t("common.field.vat"),
+                    value: model.editor.vat,
+                    options: [
+                      { value: "", label: tLocal(ctx.locale, "vatDefault") },
+                      ...VAT_TREATMENTS.map((v) => ({
+                        value: v,
+                        label: formatVatLabel(ctx.locale, v),
+                      })),
+                    ],
+                    onChange: (value) => Message.ChangedField({ field: "vat", value }),
                   }),
                 ]),
-              ]),
+              h.div
+                .attr("data-slot", "spread")
+                .class(ui.spread)
+                .children([
+                  model.editor.id !== null
+                    ? button(h, {
+                        label: tr.t("common.action.archive"),
+                        variant: "danger",
+                        small: true,
+                        onClick: Message.RequestedArchive({
+                          item: {
+                            id: model.editor.id,
+                            name: model.editor.name,
+                            description: model.editor.description || null,
+                            unit: model.editor.unit || null,
+                            unitPrice: model.editor.unitPrice,
+                            currency: model.editor.currency,
+                            vat: model.editor.vat || null,
+                            archived: false,
+                            revision: model.editor.revision ?? 1,
+                          },
+                        }),
+                      })
+                    : h.span.children([]),
+                  h.div.class(ui.row).children([
+                    button(h, {
+                      label: tr.t("common.action.cancel"),
+                      onClick: Message.ClickedCloseEditor(),
+                    }),
+                    button(h, {
+                      label: tr.t("common.action.save"),
+                      variant: "primary",
+                      type: "submit",
+                      busy: model.editor.saving,
+                    }),
+                  ]),
+                ]),
             ]),
         ]);
 
@@ -753,8 +767,8 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
     h.div
       .class(
         model.editor === null
-          ? "kb-pricelist-layout"
-          : "kb-pricelist-layout kb-pricelist-layout--editing",
+          ? "grid grid-cols-1 gap-4"
+          : "grid grid-cols-1 items-start gap-4 lg:grid-cols-[minmax(0,1.4fr)_minmax(300px,0.9fr)]",
       )
       .children([listBody, editorPanel]),
     archiveModal,

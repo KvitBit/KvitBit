@@ -45,6 +45,7 @@ import {
   textArea,
   textField,
 } from "../../ui/kit";
+import { cn, ui } from "../../ui/styles";
 import {
   apiCommand,
   ContactOptionData,
@@ -924,7 +925,7 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
         : []),
       loaded === undefined
         ? h.div
-            .class("kb-templates-grid")
+            .class("grid grid-cols-[repeat(auto-fill,minmax(320px,1fr))] gap-4")
             .attr("aria-busy", String(true))
             .children([
               card(h, [skeleton(h, "60%", "1.2rem"), skeleton(h, "90%", "1rem")]),
@@ -940,7 +941,7 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
                 variant: "primary",
               }),
             })
-          : h.div.class("kb-templates-grid").children(
+          : h.div.class("grid grid-cols-[repeat(auto-fill,minmax(320px,1fr))] gap-4").children(
               templates.map((tpl) => {
                 const contactName =
                   loaded.contacts.find((c) => c.id === tpl.input.contact)?.name ?? "—";
@@ -955,19 +956,19 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
                         : badge(h, txt(locale, "scheduleActive"), "paid");
 
                 return card(h, [
-                  h.div.class("kb-template-card").children([
+                  h.div.class("flex flex-col gap-3").children([
                     h.div
-                      .class("kb-spread")
+                      .class(ui.spread)
                       .children([
                         h.strong.children([tpl.name]),
                         h.div
-                          .class("kb-row")
+                          .class(ui.row)
                           .children([kindBadge(h, locale, tpl.input.kind), schedBadge]),
                       ]),
-                    h.span.class("kb-small kb-muted").children([contactName]),
+                    h.span.class(cn(ui.small, ui.muted)).children([contactName]),
                     ...(sched !== null && sched.nextOccurrence !== null
                       ? [
-                          h.span.class("kb-small kb-num").children([
+                          h.span.class(cn(ui.small, ui.num)).children([
                             txt(locale, "nextRun", {
                               date: fmtDate(locale, sched.nextOccurrence),
                             }),
@@ -990,7 +991,7 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
                           }),
                         ]
                       : []),
-                    h.div.class("kb-row").children([
+                    h.div.class(ui.row).children([
                       button(h, {
                         label: txt(locale, "useDraft"),
                         onClick: Message.ClickedUseTemplate({ templateId: tpl.id }),
@@ -1057,8 +1058,8 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
       ];
 
   const templateTab = card(h, [
-    h.div.class("kb-stack").children([
-      h.div.class("kb-editor-form-grid").children([
+    h.div.class(ui.stack).children([
+      h.div.class(ui.formGrid).children([
         textField(h, {
           id: "tpl-name",
           label: txt(locale, "nameLabel"),
@@ -1127,14 +1128,16 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
         checked: model.pricesIncludeVat,
         onToggle: (checked) => Message.ToggledPricesIncludeVat({ checked }),
       }),
-      h.hr.class("kb-divider"),
+      h.hr.class(ui.divider),
       cardTitle(h, txt(locale, "linesTitle"), [
         button(h, { label: txt(locale, "addLine"), onClick: Message.AddedLine(), small: true }),
       ]),
       ...model.lines.map((line) =>
         h.div
           .key(line.key)
-          .class("kb-line-row")
+          .class(
+            "grid grid-cols-2 items-start gap-2 border-b border-outline-variant py-2.5 last:border-b-0 lg:grid-cols-[minmax(0,2.2fr)_76px_76px_110px_140px_auto]",
+          )
           .children([
             textField(h, {
               id: `tl-desc-${line.key}`,
@@ -1170,7 +1173,7 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
               onChange: (value) => Message.UpdatedLine({ key: line.key, field: "vat", value }),
               options: vatOptions,
             }),
-            h.div.class("kb-line-actions").children([
+            h.div.class("flex items-center gap-1 pt-[22px]").children([
               button(h, {
                 label: "×",
                 ariaLabel: txt(locale, "removeLine"),
@@ -1187,7 +1190,7 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
         value: model.note,
         onInput: (value) => Message.ChangedNote({ value }),
       }),
-      h.div.class("kb-spread").children([
+      h.div.class(ui.spread).children([
         isNew
           ? h.span.children([])
           : button(h, {
@@ -1228,8 +1231,8 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
                 }),
               ]
             : []),
-          h.div.class("kb-stack").children([
-            h.div.class("kb-schedule-cadence").children([
+          h.div.class(ui.stack).children([
+            h.div.class("grid grid-cols-[110px_1fr] items-end gap-2.5").children([
               textField(h, {
                 id: "sched-count",
                 label: txt(locale, "cadenceCount"),
@@ -1250,7 +1253,7 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
                 ],
               }),
             ]),
-            h.div.class("kb-editor-form-grid").children([
+            h.div.class(ui.formGrid).children([
               textField(h, {
                 id: "sched-start",
                 label: txt(locale, "startOn"),
@@ -1282,7 +1285,7 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
               checked: model.autoSend,
               onToggle: (checked) => Message.ToggledAutoSend({ checked }),
             }),
-            h.div.class("kb-spread").children([
+            h.div.class(ui.spread).children([
               existing.schedule !== null
                 ? button(h, {
                     label: txt(locale, "removeSchedule"),
@@ -1335,7 +1338,7 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
                 r.document === null
                   ? "—"
                   : h.a
-                      .class("kb-queue-item__link")
+                      .class("font-medium no-underline hover:underline")
                       .attr(
                         "href",
                         href({ _tag: "Document", ws: slug, id: r.document.id, tab: "preview" }),

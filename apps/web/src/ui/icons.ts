@@ -39,7 +39,7 @@ export const icon = <M>(h: Html.H<M>, name: IconName, size = 18): Markup<M> => {
     `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="black" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">${PATHS[name]}</svg>`,
   );
   return h.span
-    .class("kb-icon")
+    .class("inline-flex flex-none")
     .attr("aria-hidden", "true")
     .style({
       width: `${size}px`,
