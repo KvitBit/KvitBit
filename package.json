@@ -25,7 +25,7 @@
     "knip:check:files": "bun --bun knip --files --dependencies",
     "knip:check:exports": "bun --bun knip --exports",
     "knip:check": "bun run --parallel --no-exit-on-error knip:check:files knip:check:exports",
-    "prepare": "if command -v git >/dev/null && git rev-parse --is-inside-work-tree >/dev/null 2>&1 && test -f .githooks/pre-commit; then git config --local extensions.worktreeConfig true && git config --worktree core.hooksPath .githooks; fi"
+    "prepare": "if [ -f .githooks/install.sh ]; then sh .githooks/install.sh; fi"
   },
   "devDependencies": {
     "@biomejs/biome": "2.6.8",

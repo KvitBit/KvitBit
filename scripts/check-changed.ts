@@ -29,7 +29,7 @@ const workspaceManifest = /^(?:apps|infra|packages)\/[^/]+\/package\.json$/;
 const nestedWorkspaceSource = /^(?:apps|infra|packages)\/[^/]+\/src\/[^/]+\//;
 const sharedTypecheckInput = /^(?:package\.json|bun\.lock|tsconfig[^/]*\.json|turbo\.json)$/;
 const knipInput =
-  /(?:^|\/)(?:package|tsconfig[^/]*)\.json$|\.sh$|^(?:knip\.jsonc?|bun\.lock|apps\/mobile\/app\.json)$/;
+  /\.(?:jsonc?|sh)$|(?:^|\/)(?:\.gitignore|bunfig\.toml)$|^bun\.lock$|^\.github\/(?:workflows\/[^/]+\.ya?ml$|actions\/)/;
 const formalManifest = "formal/manifest.json";
 const formalDependencies = /^packages\/(?:api-contract|core|db|domain)\//;
 const scriptsDependencies = /^(?:scripts|apps\/mobile\/release)\//;

@@ -134,6 +134,8 @@
     {
       "includes": [
         "apps/server/**",
+        "apps/mobile/app.config.ts",
+        "apps/mobile/plugins/**",
         "apps/mobile/scripts/**",
         "apps/mobile/release/**",
         "apps/web/e2e/**",

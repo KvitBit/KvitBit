@@ -494,6 +494,8 @@ describe("review round 2 regressions", () => {
     for (let budget = 2; budget <= 16; budget++) {
       const delivered: Array<unknown> = [];
       let onDelivered: () => void = () => undefined;
+      // The observer callback releases the platform Promise after its first delivery.
+      // @effect-diagnostics-next-line newPromise:off
       const firstDelivery = new Promise<"delivered">((resolve) => {
         onDelivered = () => resolve("delivered");
       });
@@ -546,9 +548,12 @@ describe("review round 3 regressions", () => {
   const gatedMalformed = (requestId: string) => {
     let started!: () => void;
     let release!: () => void;
+    // The Response method signals when body decoding starts and awaits a separate release.
+    // @effect-diagnostics-next-line newPromise:off
     const decodingStarted = new Promise<void>((resolve) => {
       started = resolve;
     });
+    // @effect-diagnostics-next-line newPromise:off
     const gate = new Promise<void>((resolve) => {
       release = resolve;
     });

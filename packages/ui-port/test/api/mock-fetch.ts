@@ -26,6 +26,8 @@ export const mockFetch = (respond: Responder) => {
   const calls: Array<RecordedRequest> = [];
   const fetch: typeof globalThis.fetch = Object.assign(
     (input: string | URL | Request, init?: RequestInit) =>
+      // Capture synchronous responder failures as rejections without delaying request recording.
+      // @effect-diagnostics-next-line newPromise:off
       new Promise<Response>((resolve) => {
         const url = new URL(input instanceof Request ? input.url : String(input));
         const record = (body: string | null): Response | Promise<Response> => {
@@ -55,6 +57,7 @@ export const mockFetch = (respond: Responder) => {
 export const hangingFetch = (): typeof globalThis.fetch =>
   Object.assign(
     (_input: string | URL | Request, init?: RequestInit) =>
+      // @effect-diagnostics-next-line newPromise:off
       new Promise<Response>((_resolve, reject) => {
         init?.signal?.addEventListener("abort", () => reject(new Error("aborted")));
       }),

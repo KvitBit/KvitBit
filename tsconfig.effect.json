@@ -182,8 +182,6 @@
               "**/*.testkit.tsx",
               "**/test/**/*",
               "**/tests/**/*",
-              "**/testkit/**/*",
-              "**/testing/**/*",
               "**/fixtures/**/*",
               "**/*fixture*.ts"
             ],
@@ -207,18 +205,6 @@
             "options": {
               "diagnosticSeverity": {
                 "asyncFunction": "off"
-              }
-            }
-          },
-          // Fetch mocks control independent native Promise resolution and abort timing.
-          {
-            "include": [
-              "packages/ui-port/test/api/client.test.ts",
-              "packages/ui-port/test/api/mock-fetch.ts"
-            ],
-            "options": {
-              "diagnosticSeverity": {
-                "newPromise": "off"
               }
             }
           },

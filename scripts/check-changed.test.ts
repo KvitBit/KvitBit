@@ -216,8 +216,22 @@ test("a changed formal manifest checks digests, while documentation does not sch
   expect(
     Arr.map(planChecks({ ...input, files: ["formal/manifest.json"] }), (check) => check.args),
   ).toEqual([
+    ["run", "knip:check"],
     ["run", "typecheck:formal"],
     ["run", "verify:formal", "--check-digests"],
   ]);
   expect(planChecks({ ...input, files: ["docs/notes.md"] })).toEqual([]);
+});
+
+test("Knip checks changes to graph inputs referenced by its plugins", () => {
+  const input = { present: [], workspaces: [], tests: [], covered: new Set<string>() };
+  for (const file of [
+    ".github/workflows/ci.yml",
+    "apps/mobile/bunfig.toml",
+    "apps/mobile/src/metadata.json",
+    "packages/brand/.gitignore",
+  ]) {
+    const plan = planChecks({ ...input, files: [file] });
+    expect(plan).toContainEqual({ name: "Knip", args: ["run", "knip:check"] });
+  }
 });
