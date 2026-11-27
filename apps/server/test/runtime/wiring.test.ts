@@ -199,7 +199,7 @@ describe("wiring: email & SMTP URL parsing", () => {
     expect(tls.transport.auth).toBeUndefined();
   });
 
-  test("captures preview mail even with a production provider configured", async () => {
+  test("enforces typed-mode email contract: fails fast at boot in prod/preview without explicit mode, captures when explicitly configured", async () => {
     const send = Effect.flatMap(EmailSender, (sender) =>
       sender.send(
         {
@@ -214,26 +214,23 @@ describe("wiring: email & SMTP URL parsing", () => {
         { idempotencyKey: "k-1" },
       ),
     );
-    const config: EmailWiringConfig = {
+    const emptyConfig: EmailWiringConfig = {
       from: "Kvitbit <noreply@kvitbit.cz>",
       resendApiKey: Option.none(),
       smtpUrl: Option.none(),
     };
-    const sendWith = (nodeEnv: string, configuration = config) =>
+    const sendWith = (env: string, configuration = emptyConfig) =>
       Effect.runPromise(
-        send.pipe(Effect.provide(makeEmailSenderLayer(configuration, nodeEnv)), Effect.result),
+        send.pipe(Effect.provide(makeEmailSenderLayer(configuration, env)), Effect.result),
       );
 
+    // Development zero-config logs to console; with keys and no explicit mode captures safely.
     expect(await sendWith("development")).toMatchObject({
       _tag: "Success",
       success: { provider: "console" },
     });
-    expect(await sendWith("production")).toMatchObject({
-      _tag: "Failure",
-      failure: { _tag: "EmailRejected" },
-    });
     const configured = {
-      ...config,
+      ...emptyConfig,
       resendApiKey: Option.some(Redacted.make("synthetic-resend-key")),
       smtpUrl: Option.some(Redacted.make("invalid-test-smtp-url")),
     };
@@ -241,9 +238,39 @@ describe("wiring: email & SMTP URL parsing", () => {
       _tag: "Success",
       success: { provider: "capture" },
     });
-    expect(await sendWith("preview", configured)).toMatchObject({
+
+    // Production without a provider fails fast at layer construction (no runtime reject-stub).
+    const prodMissing = await Effect.runPromiseExit(
+      Layer.build(makeEmailSenderLayer(emptyConfig, "production")).pipe(Effect.scoped),
+    );
+    expect(prodMissing._tag).toBe("Failure");
+
+    // Production rejects explicit non-prod modes ('capture', 'console', 'disabled').
+    for (const mode of ["capture", "console", "disabled"] as const) {
+      const prodOptOut = await Effect.runPromiseExit(
+        Layer.build(makeEmailSenderLayer({ ...emptyConfig, mode }, "production")).pipe(
+          Effect.scoped,
+        ),
+      );
+      expect(prodOptOut._tag).toBe("Failure");
+    }
+
+    // Preview/staging without explicit mode or provider fails fast, catching secret typos.
+    for (const env of ["preview", "staging"] as const) {
+      const implicitMissing = await Effect.runPromiseExit(
+        Layer.build(makeEmailSenderLayer(emptyConfig, env)).pipe(Effect.scoped),
+      );
+      expect(implicitMissing._tag).toBe("Failure");
+    }
+
+    // Preview/staging with explicit KVITBIT_EMAIL_MODE=capture captures even when keys are present.
+    expect(await sendWith("preview", { ...configured, mode: "capture" })).toMatchObject({
       _tag: "Success",
       success: { provider: "capture" },
+    });
+    expect(await sendWith("staging", { ...emptyConfig, mode: "console" })).toMatchObject({
+      _tag: "Success",
+      success: { provider: "console" },
     });
   });
 });

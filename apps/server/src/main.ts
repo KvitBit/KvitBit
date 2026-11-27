@@ -16,6 +16,7 @@ import { Effect, Layer } from "effect";
 import { HttpRouter } from "effect/http";
 import { AllRoutesLive, EdgeServicesLive } from "./app";
 import { ServerConfig } from "./config";
+import { loadBootRuntimeConfig } from "./config-contract";
 import { PersistenceLive, PgDatabaseLive } from "./persistence";
 import { ServerDocumentProjectionsLive } from "./projections/documents";
 import {
@@ -68,12 +69,16 @@ const ServerRuntimeLive = Layer.unwrap(
 );
 
 export const serverProgram = Effect.gen(function* () {
+  const boot = yield* loadBootRuntimeConfig("server");
   const config = yield* ServerConfig;
   yield* Effect.logInfo("Starting Kvitbit server", {
+    env: boot.env,
     host: config.host,
     port: config.port,
     runnerMode: config.runnerMode,
     appOrigin: config.appOrigin,
+    emailMode: boot.email.mode,
+    blobDriver: boot.blob.driver,
   });
   return yield* Layer.launch(ServerRuntimeLive);
 });

@@ -4,7 +4,6 @@ set -eu
 export HOST="${HOST:-0.0.0.0}"
 export PORT="${PORT:-8080}"
 export KVITBIT_RUNNER_MODE="${KVITBIT_RUNNER_MODE:-single}"
-export KVITBIT_BLOB_DRIVER="${KVITBIT_BLOB_DRIVER:-local}"
 export KVITBIT_BLOB_DIR="${KVITBIT_BLOB_DIR:-/var/lib/kvitbit/blobs}"
 export KVITBIT_WEB_DIR="${KVITBIT_WEB_DIR:-/app/public/web}"
 export KVITBIT_PWA_DIR="${KVITBIT_PWA_DIR:-/app/public/app}"

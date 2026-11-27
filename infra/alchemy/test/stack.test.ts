@@ -110,12 +110,18 @@ const sampleProdConfig = (overrides: Partial<KvitbitStackConfig> = {}): KvitbitS
   ...overrides,
 });
 
+const PROD_REQUIRED_ENV = {
+  KVITBIT_IMAGE_DIGEST: SAMPLE_DIGEST,
+  KVITBIT_APP_ORIGIN: "https://kvitbit.cz",
+  KVITBIT_EMAIL_FROM: "Kvitbit <no-reply@kvitbit.cz>",
+  KVITBIT_EDGE_DOMAINS: "kvitbit.cz, kvitbit.app",
+  KVITBIT_ENABLE_RESEND_SECRET: "true",
+} as const;
+
 describe("Kvitbit Alchemy stack config", () => {
-  test("loads kvitbit-prod defaults from ConfigProvider", async () => {
+  test("loads kvitbit-prod defaults from ConfigProvider with required prod services", async () => {
     const provider = ConfigProvider.fromEnv({
-      env: {
-        KVITBIT_IMAGE_DIGEST: SAMPLE_DIGEST,
-      },
+      env: { ...PROD_REQUIRED_ENV },
     });
     const config = await Effect.runPromise(
       loadStackConfig.pipe(Effect.provide(ConfigProvider.layer(provider))),
@@ -127,18 +133,48 @@ describe("Kvitbit Alchemy stack config", () => {
     expect(config.zone).toBe("europe-west3-a");
     expect(config.stateBucket).toBe("alchemy-state-kvitbit-prod");
     expect(config.runnerPort).toBe(34431);
-    expect(config.trustedProxyHops).toBe(1);
-    expect(config.edge).toBeUndefined();
+    expect(config.trustedProxyHops).toBe(2);
+    expect(config.edge?.domains).toEqual(["kvitbit.cz", "kvitbit.app"]);
     expect(config.dnsZones).toEqual([]);
     expect(imageReference(config)).toBe(
       `europe-west3-docker.pkg.dev/kvitbit-prod/kvitbit/kvitbit@${SAMPLE_DIGEST}`,
     );
   });
 
-  test("loads and normalizes the configured DNS zone apexes without enabling the edge", async () => {
+  test("rejects incomplete prod configs and non-prod modes in prod", async () => {
+    for (const [label, overrides] of [
+      ["missing APP_ORIGIN", { KVITBIT_APP_ORIGIN: "" }],
+      ["http APP_ORIGIN", { KVITBIT_APP_ORIGIN: "http://kvitbit.cz" }],
+      ["localhost APP_ORIGIN", { KVITBIT_APP_ORIGIN: "https://localhost" }],
+      ["missing EMAIL_FROM", { KVITBIT_EMAIL_FROM: "" }],
+      ["missing edge domains", { KVITBIT_EDGE_DOMAINS: "" }],
+      [
+        "no email secret",
+        { KVITBIT_ENABLE_RESEND_SECRET: "false", KVITBIT_ENABLE_SMTP_SECRET: "false" },
+      ],
+      ["capture email mode", { KVITBIT_EMAIL_MODE: "capture" }],
+      ["console email mode", { KVITBIT_EMAIL_MODE: "console" }],
+      ["disabled email mode", { KVITBIT_EMAIL_MODE: "disabled" }],
+      ["local blob driver", { KVITBIT_BLOB_DRIVER: "local" }],
+      ["legacy disable flag", { KVITBIT_PREVIEW_DISABLE_EMAIL: "true" }],
+    ] as const) {
+      const provider = ConfigProvider.fromEnv({
+        env: { ...PROD_REQUIRED_ENV, ...overrides },
+      });
+      const error = await Effect.runPromise(
+        Effect.flip(loadStackConfig.pipe(Effect.provide(ConfigProvider.layer(provider)))),
+      );
+      expect(error, `expected failure for ${label}`).toMatchObject({ _tag: "InvalidStackConfig" });
+    }
+  });
+
+  test("loads and normalizes the configured DNS zone apexes without enabling the edge in staging", async () => {
     const provider = ConfigProvider.fromEnv({
       env: {
+        KVITBIT_STAGE: "staging",
         KVITBIT_IMAGE_DIGEST: SAMPLE_DIGEST,
+        KVITBIT_APP_ORIGIN: "https://staging.kvitbit.cz",
+        KVITBIT_EMAIL_MODE: "capture",
         KVITBIT_DNS_ZONES:
           " Kvitbit.cz., kvitbit.APP, kvitbit.com, kvitbit.eu, kvitbit.dev, kvitbit.cz ",
       },
@@ -162,7 +198,7 @@ describe("Kvitbit Alchemy stack config", () => {
     `${`${"x".repeat(63)}.`.repeat(4)}cz`,
   ])("rejects invalid DNS zone %s", async (zone) => {
     const provider = ConfigProvider.fromEnv({
-      env: { KVITBIT_IMAGE_DIGEST: SAMPLE_DIGEST, KVITBIT_DNS_ZONES: zone },
+      env: { ...PROD_REQUIRED_ENV, KVITBIT_DNS_ZONES: zone },
     });
     const error = await Effect.runPromise(
       Effect.flip(loadStackConfig.pipe(Effect.provide(ConfigProvider.layer(provider)))),
@@ -182,7 +218,7 @@ describe("Kvitbit Alchemy stack config", () => {
   test("enables HTTPS edge, restricts direct Cloud Run ingress by default, and bumps trustedProxyHops when KVITBIT_EDGE_DOMAINS is set", async () => {
     const provider = ConfigProvider.fromEnv({
       env: {
-        KVITBIT_IMAGE_DIGEST: SAMPLE_DIGEST,
+        ...PROD_REQUIRED_ENV,
         KVITBIT_EDGE_DOMAINS: "kvitbit.cz, kvitbit.app",
       },
     });
@@ -247,7 +283,7 @@ describe("Kvitbit Alchemy stack config", () => {
   test("normalizes optional secret boolean flags case-insensitively (true/1/yes/on, false/0/no/off) and rejects invalid values", async () => {
     const enabledProvider = ConfigProvider.fromEnv({
       env: {
-        KVITBIT_IMAGE_DIGEST: SAMPLE_DIGEST,
+        ...PROD_REQUIRED_ENV,
         KVITBIT_ENABLE_RESEND_SECRET: "YES",
         KVITBIT_ENABLE_SMTP_SECRET: "1",
         KVITBIT_ENABLE_MOBILE_SIGNING_KEY_SECRET: "On",
@@ -263,7 +299,10 @@ describe("Kvitbit Alchemy stack config", () => {
 
     const disabledProvider = ConfigProvider.fromEnv({
       env: {
+        KVITBIT_STAGE: "staging",
         KVITBIT_IMAGE_DIGEST: SAMPLE_DIGEST,
+        KVITBIT_APP_ORIGIN: "https://staging.kvitbit.cz",
+        KVITBIT_EMAIL_MODE: "capture",
         KVITBIT_ENABLE_RESEND_SECRET: "OFF",
         KVITBIT_ENABLE_SMTP_SECRET: "0",
         KVITBIT_ENABLE_MOBILE_SIGNING_KEY_SECRET: "No",
@@ -274,14 +313,14 @@ describe("Kvitbit Alchemy stack config", () => {
       loadStackConfig.pipe(Effect.provide(ConfigProvider.layer(disabledProvider))),
     );
     const disabledIds = disabledConfig.secrets.map((s) => s.secretId);
-    expect(disabledIds).not.toContain("kvitbit-prod-resend-api-key");
-    expect(disabledIds).not.toContain("kvitbit-prod-smtp-url");
-    expect(disabledIds).not.toContain("kvitbit-prod-mobile-updates-signing-key");
-    expect(disabledIds).not.toContain("kvitbit-prod-feedback-github-token");
+    expect(disabledIds).not.toContain("kvitbit-staging-resend-api-key");
+    expect(disabledIds).not.toContain("kvitbit-staging-smtp-url");
+    expect(disabledIds).not.toContain("kvitbit-staging-mobile-updates-signing-key");
+    expect(disabledIds).not.toContain("kvitbit-staging-feedback-github-token");
 
     const invalidProvider = ConfigProvider.fromEnv({
       env: {
-        KVITBIT_IMAGE_DIGEST: SAMPLE_DIGEST,
+        ...PROD_REQUIRED_ENV,
         KVITBIT_ENABLE_FEEDBACK_GITHUB_TOKEN_SECRET: "maybe",
       },
     });
@@ -1243,6 +1282,8 @@ describe("Cloud Run server service", () => {
         KVITBIT_STAGE: "staging",
         KVITBIT_GCP_PROJECT_ID: "kvitbit-staging",
         KVITBIT_IMAGE_DIGEST: SAMPLE_DIGEST,
+        KVITBIT_APP_ORIGIN: "https://staging.kvitbit.cz",
+        KVITBIT_EMAIL_MODE: "capture",
         KVITBIT_ENABLE_FEEDBACK_GITHUB_TOKEN_SECRET: " YES ",
         KVITBIT_FEEDBACK_GITHUB_REPO: " owner/feedback ",
         KVITBIT_FEEDBACK_OWNER_EMAILS: " owner@example.com, admin@example.com ",

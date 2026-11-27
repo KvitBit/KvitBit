@@ -10,6 +10,7 @@
 import { NodeRuntime } from "@effect/platform-node";
 import { CoreLive, IdGeneratorLive } from "@kvitbit/core";
 import { Effect, Layer } from "effect";
+import { loadBootRuntimeConfig } from "./config-contract";
 import { PersistenceLive, PgWorkerDatabaseLive } from "./persistence";
 import { ServerDocumentProjectionsLive } from "./projections/documents";
 import { ClusterWorkerRuntimeLive, CronsLive, WorkflowHandlersLive } from "./runtime";
@@ -35,9 +36,16 @@ export const WorkerLive = Layer.mergeAll(WorkflowHandlersLive, CronsLive).pipe(
   Layer.provide(PgWorkerDatabaseLive),
 );
 
-export const workerProgram = Effect.logInfo("Starting Kvitbit cluster worker").pipe(
-  Effect.andThen(Layer.launch(WorkerLive)),
-);
+export const workerProgram = Effect.gen(function* () {
+  const boot = yield* loadBootRuntimeConfig("worker");
+  yield* Effect.logInfo("Starting Kvitbit cluster worker", {
+    env: boot.env,
+    appOrigin: boot.appOrigin,
+    emailMode: boot.email.mode,
+    blobDriver: boot.blob.driver,
+  });
+  return yield* Layer.launch(WorkerLive);
+});
 
 const isMain =
   typeof import.meta.main === "boolean"

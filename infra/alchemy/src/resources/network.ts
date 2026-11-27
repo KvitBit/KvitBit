@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import type {
   FirewallProps,
   InstanceProps,
@@ -12,55 +11,18 @@ import * as Output from "alchemy/Output";
 import * as Effect from "effect/Effect";
 import type { KvitbitStackConfig } from "../config";
 import { imageReference, resourceNames, serviceAccountEmail, stackLabels } from "../config";
-import { type PlainEnvVar, runnerPlainEnv, secretBindingsForWorkload } from "../env";
+import {
+  buildRunnerWorkerConfig,
+  type RunnerWorkerConfig,
+  type RunnerWorkerSecretSpec,
+  runnerWorkerConfigSha,
+  serializeRunnerWorkerConfig,
+} from "../env";
+
+export type { RunnerWorkerConfig, RunnerWorkerSecretSpec };
+export { buildRunnerWorkerConfig, runnerWorkerConfigSha, serializeRunnerWorkerConfig };
 
 export const COS_STABLE_IMAGE = "projects/cos-cloud/global/images/family/cos-stable";
-
-export interface RunnerWorkerSecretSpec {
-  readonly environmentVariable: string;
-  readonly secretId: string;
-  readonly version: string;
-  readonly required: boolean;
-}
-
-export interface RunnerWorkerConfig {
-  readonly version: 1;
-  readonly projectId: string;
-  readonly registryHost: string;
-  readonly runnerCidr: string;
-  readonly runnerPort: number;
-  readonly plainEnv: ReadonlyArray<PlainEnvVar>;
-  readonly secrets: ReadonlyArray<RunnerWorkerSecretSpec>;
-}
-
-export const buildRunnerWorkerConfig = (
-  config: KvitbitStackConfig,
-  options?: { readonly blobsBucket?: string | undefined },
-): RunnerWorkerConfig => {
-  const blobsBucket = options?.blobsBucket ?? config.blobsBucket;
-  return {
-    version: 1,
-    projectId: config.projectId,
-    registryHost: `${config.region}-docker.pkg.dev`,
-    runnerCidr: config.runnerCidr,
-    runnerPort: config.runnerPort,
-    plainEnv: runnerPlainEnv(config, blobsBucket),
-    secrets: secretBindingsForWorkload(config, "runner").map((secret) => ({
-      environmentVariable: secret.environmentVariable,
-      secretId: secret.secretId,
-      version: secret.version,
-      required: secret.required,
-    })),
-  };
-};
-
-export const serializeRunnerWorkerConfig = (workerConfig: RunnerWorkerConfig): string =>
-  JSON.stringify(workerConfig, null, 2);
-
-export const runnerWorkerConfigSha = (workerConfig: RunnerWorkerConfig): string => {
-  const hash = createHash("sha256").update(serializeRunnerWorkerConfig(workerConfig)).digest("hex");
-  return `sha256:${hash}`;
-};
 
 export const networkProps = (config: KvitbitStackConfig): NetworkProps => ({
   networkName: resourceNames(config).networkName,

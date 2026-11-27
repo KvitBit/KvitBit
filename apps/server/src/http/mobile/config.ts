@@ -3,6 +3,7 @@
  * (http-mcp-contracts section 5, board contract #929).
  */
 import { Config, ConfigProvider, Context, Effect, Layer, Option, Redacted } from "effect";
+import { loadKvitbitEnv, loadValidatedAppOrigin } from "../../config-contract";
 
 export type MobileStorageConfig =
   | { readonly _tag: "local"; readonly dir: string }
@@ -27,7 +28,6 @@ export class MobileConfig extends Context.Service<MobileConfig, MobileConfigShap
   "kvitbit/server/http/MobileConfig",
 ) {}
 
-const DEFAULT_APP_ORIGIN = "http://localhost:8080";
 const DEFAULT_BLOB_DIR = "/var/lib/kvitbit/blobs";
 
 const hex64Pattern = /^[0-9a-fA-F]{64}$/;
@@ -78,15 +78,8 @@ export const makeMobileConfig = (input: Partial<MobileConfigShape> = {}): Mobile
 export const MobileConfigLive: Layer.Layer<MobileConfig, Config.ConfigError> = Layer.effect(
   MobileConfig,
   Effect.gen(function* () {
-    const rawOrigin = yield* Config.String("APP_ORIGIN").pipe(
-      Config.withDefault(DEFAULT_APP_ORIGIN),
-    );
-    let appOrigin: string;
-    try {
-      appOrigin = new URL(rawOrigin).origin;
-    } catch {
-      return yield* configError(`Invalid APP_ORIGIN URL: ${JSON.stringify(rawOrigin)}`);
-    }
+    const env = yield* loadKvitbitEnv;
+    const appOrigin = yield* loadValidatedAppOrigin;
 
     const rawSigningKey = yield* nonEmptyOption("KVITBIT_MOBILE_UPDATES_SIGNING_KEY");
     const signingKeyPem = Option.map(rawSigningKey, (pem) => Redacted.make(normalizePem(pem)));
@@ -99,7 +92,26 @@ export const MobileConfigLive: Layer.Layer<MobileConfig, Config.ConfigError> = L
     const gcsEndpoint = Option.getOrUndefined(yield* nonEmptyOption("KVITBIT_GCS_ENDPOINT"));
 
     let storage: MobileStorageConfig;
-    if (Option.isSome(mobileBucket)) {
+    if (env === "production") {
+      if (Option.isSome(blobDriver) && blobDriver.value !== "gcs") {
+        return yield* configError(
+          `Non-production KVITBIT_BLOB_DRIVER=${JSON.stringify(blobDriver.value)} is forbidden in production`,
+        );
+      }
+      if (Option.isSome(mobileBucket)) {
+        storage = { _tag: "gcs", bucket: mobileBucket.value, endpoint: gcsEndpoint };
+      } else if (
+        Option.isSome(blobDriver) &&
+        blobDriver.value === "gcs" &&
+        Option.isSome(blobBucket)
+      ) {
+        storage = { _tag: "gcs", bucket: blobBucket.value, endpoint: gcsEndpoint };
+      } else {
+        return yield* configError(
+          "KVITBIT_MOBILE_STORAGE_BUCKET (or KVITBIT_BLOB_DRIVER=gcs with KVITBIT_BLOB_BUCKET) is required when KVITBIT_ENV=production",
+        );
+      }
+    } else if (Option.isSome(mobileBucket)) {
       storage = { _tag: "gcs", bucket: mobileBucket.value, endpoint: gcsEndpoint };
     } else if (Option.isSome(mobileDir)) {
       storage = { _tag: "local", dir: mobileDir.value };
@@ -121,6 +133,10 @@ export const MobileConfigLive: Layer.Layer<MobileConfig, Config.ConfigError> = L
       }
     } else if (Option.isSome(blobBucket)) {
       storage = { _tag: "gcs", bucket: blobBucket.value, endpoint: gcsEndpoint };
+    } else if (env === "staging" || env === "preview") {
+      return yield* configError(
+        `Mobile storage must be explicitly configured (KVITBIT_MOBILE_STORAGE_BUCKET, KVITBIT_MOBILE_STORAGE_DIR, or KVITBIT_BLOB_DRIVER) when KVITBIT_ENV=${env}`,
+      );
     } else {
       storage = {
         _tag: "local",

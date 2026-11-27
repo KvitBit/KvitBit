@@ -2,6 +2,21 @@ import * as Config from "effect/Config";
 import * as Data from "effect/Data";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
+import {
+  type BlobDriver,
+  type EmailMode,
+  FORBIDDEN_OPT_OUT_ENV_VARS,
+  isBlobDriver,
+  isEmailMode,
+  isProdEmailMode,
+  isValidDomain,
+  isValidEmailFrom,
+  parseCsvDomainList,
+  parseOptionalBoolean,
+  validateOriginUrl,
+} from "./deploy-preflight";
+
+export type { BlobDriver, EmailMode };
 
 export type KvitbitStage = "prod" | "staging";
 
@@ -27,6 +42,7 @@ export interface KvitbitEdgeConfig {
 export interface KvitbitStackConfig {
   readonly stage: KvitbitStage;
   readonly bootstrapFoundation: boolean;
+  readonly bootstrapFeedbackSecret?: boolean | undefined;
   readonly projectId: string;
   readonly projectNumber: string;
   readonly region: string;
@@ -35,6 +51,7 @@ export interface KvitbitStackConfig {
   readonly artifactRepositoryId: string;
   readonly imageName: string;
   readonly imageDigest: string;
+  readonly blobDriver?: BlobDriver | undefined;
   readonly blobsBucket: string;
   readonly mobileAssetsBucket: string;
   readonly runnerCount: number;
@@ -44,6 +61,7 @@ export interface KvitbitStackConfig {
   readonly serverMinInstances: number;
   readonly serverMaxInstances: number;
   readonly appOrigin: string | undefined;
+  readonly emailMode?: EmailMode | undefined;
   readonly emailFrom: string | undefined;
   readonly trustedProxyHops: number;
   readonly shareKeyVersion: number;
@@ -83,7 +101,6 @@ export const KVITBIT_PROD_DEFAULTS = {
 } as const;
 
 const DIGEST_PATTERN = /^sha256:[a-f0-9]{64}$/;
-const DOMAIN_PATTERN = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/;
 
 export const defaultSecretBindings = (
   stage: KvitbitStage,
@@ -124,7 +141,7 @@ export const defaultSecretBindings = (
       environmentVariable: "RESEND_API_KEY",
       secretId: `${prefix}-resend-api-key`,
       version: "latest",
-      required: false,
+      required: true,
       consumers: ["server", "runner"],
     });
   }
@@ -134,7 +151,7 @@ export const defaultSecretBindings = (
       environmentVariable: "KVITBIT_SMTP_URL",
       secretId: `${prefix}-smtp-url`,
       version: "latest",
-      required: false,
+      required: true,
       consumers: ["server", "runner"],
     });
   }
@@ -194,102 +211,245 @@ export const stackLabels = (config: KvitbitStackConfig): Record<string, string> 
   "managed-by": "alchemy",
 });
 
+export type StackConfigValidationResult =
+  | { readonly ok: true; readonly value: KvitbitStackConfig }
+  | { readonly ok: false; readonly error: InvalidStackConfig };
+
+const hasSecret = (
+  config: KvitbitStackConfig,
+  environmentVariable: string,
+  requiredConsumers?: ReadonlyArray<KvitbitWorkload>,
+): boolean =>
+  config.secrets.some(
+    (secret) =>
+      secret.environmentVariable === environmentVariable &&
+      (requiredConsumers === undefined ||
+        requiredConsumers.every((workload) => secret.consumers.includes(workload))),
+  );
+
+const failStack = (field: string, reason: string): StackConfigValidationResult => ({
+  ok: false,
+  error: new InvalidStackConfig({ field, reason }),
+});
+
+/** Pure synchronous stack validator backing `validateStackConfig` and Tier 1 exhaustive checks. */
+export const validateStackConfigSync = (
+  config: KvitbitStackConfig,
+): StackConfigValidationResult => {
+  const bootstrapFeedbackSecret = config.bootstrapFeedbackSecret ?? false;
+  const blobDriver: BlobDriver = config.blobDriver ?? "gcs";
+
+  if (config.projectId.trim().length === 0) {
+    return failStack("projectId", "must be non-empty");
+  }
+  if (!/^\d+$/.test(config.projectNumber)) {
+    return failStack("projectNumber", "must be a numeric GCP project number");
+  }
+  if (!config.zone.startsWith(`${config.region}-`)) {
+    return failStack("zone", `zone '${config.zone}' must be inside region '${config.region}'`);
+  }
+  if (config.bootstrapFoundation && bootstrapFeedbackSecret) {
+    return failStack(
+      "bootstrapFeedbackSecret",
+      "cannot set both bootstrapFoundation and bootstrapFeedbackSecret",
+    );
+  }
+  if (!config.bootstrapFoundation && !DIGEST_PATTERN.test(config.imageDigest)) {
+    return failStack(
+      "imageDigest",
+      `must be an immutable sha256 digest (got '${config.imageDigest}')`,
+    );
+  }
+  if (!Number.isInteger(config.runnerCount) || config.runnerCount < 1 || config.runnerCount > 10) {
+    return failStack("runnerCount", "must be an integer between 1 and 10");
+  }
+  if (config.runnerPort !== 34431) {
+    return failStack("runnerPort", "must be 34431 per settled Effect Cluster runner contract");
+  }
+  if (
+    !Number.isInteger(config.serverMinInstances) ||
+    config.serverMinInstances < 0 ||
+    !Number.isInteger(config.serverMaxInstances) ||
+    config.serverMaxInstances < Math.max(1, config.serverMinInstances)
+  ) {
+    return failStack("serverMaxInstances", "must be >= max(1, serverMinInstances)");
+  }
+
+  for (const domain of config.dnsZones) {
+    if (!isValidDomain(domain)) {
+      return failStack("KVITBIT_DNS_ZONES", `invalid domain '${domain}'`);
+    }
+    if (config.edge !== undefined && !config.bootstrapFoundation && `www.${domain}`.length > 253) {
+      return failStack("KVITBIT_DNS_ZONES", `'www.${domain}' exceeds the DNS name length limit`);
+    }
+  }
+
+  if (config.edge !== undefined) {
+    if (config.edge.enableHttps && config.edge.domains.length === 0) {
+      return failStack("edge.domains", "HTTPS edge requires at least one domain");
+    }
+    for (const domain of config.edge.domains) {
+      if (!isValidDomain(domain)) {
+        return failStack("edge.domains", `invalid domain '${domain}'`);
+      }
+    }
+  }
+
+  // Typed-mode checks apply in all deploy modes (zero opt-outs allowed in prod, no disabled stub).
+  if (!isBlobDriver(blobDriver)) {
+    return failStack("blobDriver", `must be 'gcs' or 'local' (got '${String(blobDriver)}')`);
+  }
+  if (config.stage === "prod" && blobDriver !== "gcs") {
+    return failStack(
+      "blobDriver",
+      `non-production blob driver '${blobDriver}' is forbidden when stage='prod'`,
+    );
+  }
+  if (config.emailMode !== undefined) {
+    if (!isEmailMode(config.emailMode)) {
+      return failStack("emailMode", `invalid email mode '${String(config.emailMode)}'`);
+    }
+    if (config.emailMode === "disabled") {
+      return failStack(
+        "emailMode",
+        "emailMode='disabled' is forbidden; configure a real email provider or capture/console in staging",
+      );
+    }
+    if (config.stage === "prod" && !isProdEmailMode(config.emailMode)) {
+      return failStack(
+        "emailMode",
+        `non-production email mode '${config.emailMode}' is forbidden when stage='prod'`,
+      );
+    }
+  }
+
+  if (bootstrapFeedbackSecret) {
+    if (!hasSecret(config, "KVITBIT_FEEDBACK_GITHUB_TOKEN")) {
+      return failStack(
+        "KVITBIT_ENABLE_FEEDBACK_GITHUB_TOKEN_SECRET",
+        "bootstrapFeedbackSecret requires the KVITBIT_FEEDBACK_GITHUB_TOKEN secret binding",
+      );
+    }
+    return { ok: true, value: config };
+  }
+
+  if (config.bootstrapFoundation) {
+    return { ok: true, value: config };
+  }
+
+  // Workload deploy validation (skipping only during bootstrapFoundation / bootstrapFeedbackSecret).
+  if (!hasSecret(config, "DATABASE_URL", ["server"])) {
+    return failStack("secrets", "server workload requires DATABASE_URL secret binding");
+  }
+  if (
+    !hasSecret(config, "DATABASE_URL", ["runner"]) &&
+    !hasSecret(config, "DATABASE_URL_UNPOOLED", ["runner"])
+  ) {
+    return failStack(
+      "secrets",
+      "runner workload requires DATABASE_URL or DATABASE_URL_UNPOOLED secret binding",
+    );
+  }
+  if (!hasSecret(config, "BETTER_AUTH_SECRET", ["server", "runner"])) {
+    return failStack(
+      "secrets",
+      "server and runner workloads both require BETTER_AUTH_SECRET secret binding",
+    );
+  }
+  if (blobDriver === "gcs" && config.blobsBucket.trim().length === 0) {
+    return failStack("blobsBucket", "must be non-empty when blobDriver='gcs'");
+  }
+  if (config.stage === "prod" && config.mobileAssetsBucket.trim().length === 0) {
+    return failStack("mobileAssetsBucket", "must be non-empty when stage='prod'");
+  }
+
+  const originCheck = validateOriginUrl(config.appOrigin, {
+    requireHttpsNonLocalhost: config.stage === "prod",
+  });
+  if (!originCheck.ok) {
+    return failStack("appOrigin", originCheck.reason);
+  }
+
+  const hasResend = hasSecret(config, "RESEND_API_KEY", ["server", "runner"]);
+  const hasSmtp = hasSecret(config, "KVITBIT_SMTP_URL", ["server", "runner"]);
+
+  if (config.stage === "prod") {
+    if (config.edge === undefined || !config.edge.enableHttps || config.edge.domains.length === 0) {
+      return failStack(
+        "edge",
+        "stage='prod' requires HTTPS edge with at least one domain (KVITBIT_EDGE_DOMAINS)",
+      );
+    }
+    if (!isValidEmailFrom(config.emailFrom)) {
+      return failStack(
+        "emailFrom",
+        "stage='prod' requires an explicit valid emailFrom address (KVITBIT_EMAIL_FROM)",
+      );
+    }
+    if (!hasResend && !hasSmtp) {
+      return failStack(
+        "secrets",
+        "stage='prod' requires at least one email secret enabled (RESEND_API_KEY and/or KVITBIT_SMTP_URL)",
+      );
+    }
+    if ((config.emailMode === "resend" || config.emailMode === "resend+smtp") && !hasResend) {
+      return failStack(
+        "secrets",
+        `emailMode='${config.emailMode}' requires the RESEND_API_KEY secret binding`,
+      );
+    }
+    if ((config.emailMode === "smtp" || config.emailMode === "resend+smtp") && !hasSmtp) {
+      return failStack(
+        "secrets",
+        `emailMode='${config.emailMode}' requires the KVITBIT_SMTP_URL secret binding`,
+      );
+    }
+    return { ok: true, value: config };
+  }
+
+  // Staging normal deploy: fail fast unless explicit non-prod emailMode ('capture' | 'console').
+  const isNonProdEmailMode = config.emailMode === "capture" || config.emailMode === "console";
+  if (isNonProdEmailMode) {
+    if (config.emailFrom !== undefined && !isValidEmailFrom(config.emailFrom)) {
+      return failStack("emailFrom", `invalid emailFrom address '${config.emailFrom}'`);
+    }
+    return { ok: true, value: config };
+  }
+
+  if (!isValidEmailFrom(config.emailFrom)) {
+    return failStack(
+      "emailFrom",
+      "stage='staging' requires an explicit valid emailFrom unless emailMode is 'capture' or 'console'",
+    );
+  }
+  if (config.emailMode === undefined && !hasResend && !hasSmtp) {
+    return failStack(
+      "secrets",
+      "stage='staging' requires RESEND_API_KEY and/or KVITBIT_SMTP_URL unless KVITBIT_EMAIL_MODE=capture or console is explicitly set",
+    );
+  }
+  if ((config.emailMode === "resend" || config.emailMode === "resend+smtp") && !hasResend) {
+    return failStack(
+      "secrets",
+      `emailMode='${config.emailMode}' requires the RESEND_API_KEY secret binding`,
+    );
+  }
+  if ((config.emailMode === "smtp" || config.emailMode === "resend+smtp") && !hasSmtp) {
+    return failStack(
+      "secrets",
+      `emailMode='${config.emailMode}' requires the KVITBIT_SMTP_URL secret binding`,
+    );
+  }
+
+  return { ok: true, value: config };
+};
+
 export const validateStackConfig = (
   config: KvitbitStackConfig,
 ): Effect.Effect<KvitbitStackConfig, InvalidStackConfig> =>
-  Effect.gen(function* () {
-    if (config.projectId.trim().length === 0) {
-      return yield* new InvalidStackConfig({
-        field: "projectId",
-        reason: "must be non-empty",
-      });
-    }
-    if (!/^\d+$/.test(config.projectNumber)) {
-      return yield* new InvalidStackConfig({
-        field: "projectNumber",
-        reason: "must be a numeric GCP project number",
-      });
-    }
-    if (!config.zone.startsWith(`${config.region}-`)) {
-      return yield* new InvalidStackConfig({
-        field: "zone",
-        reason: `zone '${config.zone}' must be inside region '${config.region}'`,
-      });
-    }
-    if (!config.bootstrapFoundation && !DIGEST_PATTERN.test(config.imageDigest)) {
-      return yield* new InvalidStackConfig({
-        field: "imageDigest",
-        reason: `must be an immutable sha256 digest (got '${config.imageDigest}')`,
-      });
-    }
-    if (
-      !Number.isInteger(config.runnerCount) ||
-      config.runnerCount < 1 ||
-      config.runnerCount > 10
-    ) {
-      return yield* new InvalidStackConfig({
-        field: "runnerCount",
-        reason: "must be an integer between 1 and 10",
-      });
-    }
-    if (config.runnerPort !== 34431) {
-      return yield* new InvalidStackConfig({
-        field: "runnerPort",
-        reason: "must be 34431 per settled Effect Cluster runner contract",
-      });
-    }
-    if (
-      !Number.isInteger(config.serverMinInstances) ||
-      config.serverMinInstances < 0 ||
-      !Number.isInteger(config.serverMaxInstances) ||
-      config.serverMaxInstances < Math.max(1, config.serverMinInstances)
-    ) {
-      return yield* new InvalidStackConfig({
-        field: "serverMaxInstances",
-        reason: "must be >= max(1, serverMinInstances)",
-      });
-    }
-    for (const domain of config.dnsZones) {
-      const labels = domain.split(".");
-      if (
-        !DOMAIN_PATTERN.test(domain) ||
-        domain.length > 253 ||
-        labels.some((label) => label.length > 63) ||
-        /^\d+$/.test(labels[labels.length - 1] ?? "")
-      ) {
-        return yield* new InvalidStackConfig({
-          field: "KVITBIT_DNS_ZONES",
-          reason: `invalid domain '${domain}'`,
-        });
-      }
-      if (
-        config.edge !== undefined &&
-        !config.bootstrapFoundation &&
-        `www.${domain}`.length > 253
-      ) {
-        return yield* new InvalidStackConfig({
-          field: "KVITBIT_DNS_ZONES",
-          reason: `'www.${domain}' exceeds the DNS name length limit`,
-        });
-      }
-    }
-    if (config.edge !== undefined) {
-      if (config.edge.enableHttps && config.edge.domains.length === 0) {
-        return yield* new InvalidStackConfig({
-          field: "edge.domains",
-          reason: "HTTPS edge requires at least one domain",
-        });
-      }
-      for (const domain of config.edge.domains) {
-        if (!DOMAIN_PATTERN.test(domain)) {
-          return yield* new InvalidStackConfig({
-            field: "edge.domains",
-            reason: `invalid domain '${domain}'`,
-          });
-        }
-      }
-    }
-    return config;
+  Effect.suspend(() => {
+    const result = validateStackConfigSync(config);
+    return result.ok ? Effect.succeed(result.value) : Effect.fail(result.error);
   });
 
 const optionalNonEmptyString = (name: string) =>
@@ -309,30 +469,14 @@ const optionalBoolean = (
 ): Effect.Effect<boolean, Config.ConfigError | InvalidStackConfig> =>
   Effect.gen(function* () {
     const raw = yield* optionalNonEmptyString(name);
-    if (raw === undefined) {
-      return defaultValue;
+    const parsed = parseOptionalBoolean(raw, defaultValue);
+    if (!parsed.ok) {
+      return yield* new InvalidStackConfig({
+        field: name,
+        reason: parsed.reason,
+      });
     }
-    const normalized = raw.toLowerCase();
-    if (
-      normalized === "true" ||
-      normalized === "1" ||
-      normalized === "yes" ||
-      normalized === "on"
-    ) {
-      return true;
-    }
-    if (
-      normalized === "false" ||
-      normalized === "0" ||
-      normalized === "no" ||
-      normalized === "off"
-    ) {
-      return false;
-    }
-    return yield* new InvalidStackConfig({
-      field: name,
-      reason: `expected boolean ('true'/'1'/'yes'/'on' or 'false'/'0'/'no'/'off'), got '${raw}'`,
-    });
+    return parsed.value;
   });
 
 const optionalInt = (
@@ -353,14 +497,6 @@ const optionalInt = (
     return Number.parseInt(raw, 10);
   });
 
-const parseCsvList = (raw: string | undefined): ReadonlyArray<string> =>
-  raw === undefined
-    ? []
-    : raw
-        .split(",")
-        .map((part) => part.trim().toLowerCase())
-        .filter((part) => part.length > 0);
-
 export const loadStackConfig: Effect.Effect<
   KvitbitStackConfig,
   Config.ConfigError | InvalidStackConfig
@@ -375,7 +511,31 @@ export const loadStackConfig: Effect.Effect<
     });
   }
   const stage: KvitbitStage = stageRaw;
+
+  for (const forbidden of FORBIDDEN_OPT_OUT_ENV_VARS) {
+    const value = yield* optionalNonEmptyString(forbidden);
+    if (value !== undefined) {
+      return yield* new InvalidStackConfig({
+        field: forbidden,
+        reason: `boolean opt-out flag ${forbidden} is forbidden; use typed mode variables in staging only`,
+      });
+    }
+  }
+
+  const kvitbitEnvRaw = yield* optionalNonEmptyString("KVITBIT_ENV");
+  const expectedKvitbitEnv = stage === "prod" ? "production" : "staging";
+  if (kvitbitEnvRaw !== undefined && kvitbitEnvRaw !== expectedKvitbitEnv) {
+    return yield* new InvalidStackConfig({
+      field: "KVITBIT_ENV",
+      reason: `KVITBIT_ENV='${kvitbitEnvRaw}' conflicts with KVITBIT_STAGE='${stage}' (expected '${expectedKvitbitEnv}')`,
+    });
+  }
+
   const bootstrapFoundation = yield* optionalBoolean("KVITBIT_BOOTSTRAP_FOUNDATION", false);
+  const bootstrapFeedbackSecret = yield* optionalBoolean(
+    "KVITBIT_BOOTSTRAP_FEEDBACK_SECRET",
+    false,
+  );
 
   const projectId = yield* Config.String("KVITBIT_GCP_PROJECT_ID").pipe(
     Config.withDefault(KVITBIT_PROD_DEFAULTS.projectId),
@@ -409,6 +569,25 @@ export const loadStackConfig: Effect.Effect<
   );
   const appOrigin = yield* optionalNonEmptyString("KVITBIT_APP_ORIGIN");
   const emailFrom = yield* optionalNonEmptyString("KVITBIT_EMAIL_FROM");
+
+  const emailModeRaw = yield* optionalNonEmptyString("KVITBIT_EMAIL_MODE");
+  if (emailModeRaw !== undefined && !isEmailMode(emailModeRaw)) {
+    return yield* new InvalidStackConfig({
+      field: "KVITBIT_EMAIL_MODE",
+      reason: `unsupported KVITBIT_EMAIL_MODE '${emailModeRaw}'`,
+    });
+  }
+  const emailMode: EmailMode | undefined = emailModeRaw;
+
+  const blobDriverRaw = yield* optionalNonEmptyString("KVITBIT_BLOB_DRIVER");
+  if (blobDriverRaw !== undefined && !isBlobDriver(blobDriverRaw)) {
+    return yield* new InvalidStackConfig({
+      field: "KVITBIT_BLOB_DRIVER",
+      reason: `unsupported KVITBIT_BLOB_DRIVER '${blobDriverRaw}'`,
+    });
+  }
+  const blobDriver: BlobDriver = blobDriverRaw ?? "gcs";
+
   const androidAssetlinksSha256 = yield* optionalNonEmptyString(
     "KVITBIT_ANDROID_ASSETLINKS_SHA256",
   );
@@ -420,10 +599,10 @@ export const loadStackConfig: Effect.Effect<
   );
 
   const edgeDomainsRaw = yield* optionalNonEmptyString("KVITBIT_EDGE_DOMAINS");
-  const edgeDomains = parseCsvList(edgeDomainsRaw);
+  const edgeDomains = parseCsvDomainList(edgeDomainsRaw);
   const dnsZonesRaw = yield* optionalNonEmptyString("KVITBIT_DNS_ZONES");
   const dnsZones = [
-    ...new Set(parseCsvList(dnsZonesRaw).map((domain) => domain.replace(/\.$/, ""))),
+    ...new Set(parseCsvDomainList(dnsZonesRaw).map((domain) => domain.replace(/\.$/, ""))),
   ];
   const edgeWafPreview = yield* optionalBoolean("KVITBIT_EDGE_WAF_PREVIEW", false);
   const edgeStaticCdnEnabled = yield* optionalBoolean("KVITBIT_EDGE_STATIC_CDN", true);
@@ -471,6 +650,7 @@ export const loadStackConfig: Effect.Effect<
   return yield* validateStackConfig({
     stage,
     bootstrapFoundation,
+    bootstrapFeedbackSecret,
     projectId,
     projectNumber,
     region,
@@ -479,6 +659,7 @@ export const loadStackConfig: Effect.Effect<
     artifactRepositoryId: KVITBIT_PROD_DEFAULTS.artifactRepositoryId,
     imageName: KVITBIT_PROD_DEFAULTS.imageName,
     imageDigest,
+    blobDriver,
     blobsBucket,
     mobileAssetsBucket,
     runnerCount,
@@ -488,6 +669,7 @@ export const loadStackConfig: Effect.Effect<
     serverMinInstances,
     serverMaxInstances,
     appOrigin,
+    emailMode,
     emailFrom,
     trustedProxyHops,
     shareKeyVersion,

@@ -78,21 +78,26 @@ services:
       - "${KVITBIT_PORT:-8080}:8080"
     environment:
       NODE_ENV: production
+      # Local self-hosted compose defaults to development DX; set KVITBIT_ENV=production (with
+      # real HTTPS APP_ORIGIN, EMAIL_FROM, email transport, and GCS blobs) or KVITBIT_ENV=preview
+      # with explicit typed modes (KVITBIT_EMAIL_MODE, KVITBIT_BLOB_DRIVER) for stricter deploys.
+      KVITBIT_ENV: ${KVITBIT_ENV:-development}
       HOST: "0.0.0.0"
       PORT: "8080"
       # Runtime server uses the DML-only app role, never migration owner credentials (S5).
       DATABASE_URL: ${DATABASE_URL:-postgres://${POSTGRES_APP_USER:-kvitbit_app}:${POSTGRES_APP_PASSWORD:-kvitbit_app}@postgres:5432/${POSTGRES_DB:-kvitbit}}
       KVITBIT_RUNNER_MODE: single
-      KVITBIT_BLOB_DRIVER: ${KVITBIT_BLOB_DRIVER:-local}
+      KVITBIT_BLOB_DRIVER: ${KVITBIT_BLOB_DRIVER:-}
       KVITBIT_BLOB_DIR: /var/lib/kvitbit/blobs
       KVITBIT_BLOB_BUCKET: ${KVITBIT_BLOB_BUCKET:-}
       KVITBIT_GCS_PROJECT: ${KVITBIT_GCS_PROJECT:-}
       KVITBIT_WEB_DIR: /app/public/web
       KVITBIT_PWA_DIR: /app/public/app
       KVITBIT_CHROMIUM_PATH: /usr/bin/chromium
-      APP_ORIGIN: ${APP_ORIGIN:-http://localhost:8080}
+      APP_ORIGIN: ${APP_ORIGIN:-}
       BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET:?Set BETTER_AUTH_SECRET before starting Kvitbit}
-      EMAIL_FROM: ${EMAIL_FROM:-Kvitbit <no-reply@localhost>}
+      KVITBIT_EMAIL_MODE: ${KVITBIT_EMAIL_MODE:-}
+      EMAIL_FROM: ${EMAIL_FROM:-}
       RESEND_API_KEY: ${RESEND_API_KEY:-}
       KVITBIT_SMTP_URL: ${KVITBIT_SMTP_URL:-}
       KVITBIT_TRUSTED_PROXY_HOPS: ${KVITBIT_TRUSTED_PROXY_HOPS:-0}

@@ -61,66 +61,14 @@ jobs:
       KVITBIT_ENABLE_SMTP_SECRET: ${{ vars.KVITBIT_ENABLE_SMTP_SECRET }}
       KVITBIT_ENABLE_MOBILE_SIGNING_KEY_SECRET: ${{ vars.KVITBIT_ENABLE_MOBILE_SIGNING_KEY_SECRET }}
       KVITBIT_ENABLE_FEEDBACK_GITHUB_TOKEN_SECRET: ${{ vars.KVITBIT_ENABLE_FEEDBACK_GITHUB_TOKEN_SECRET }}
+      APP_ORIGIN: ${{ vars.APP_ORIGIN }}
+      EMAIL_FROM: ${{ vars.EMAIL_FROM }}
+      KVITBIT_EDGE_DOMAINS: ${{ vars.KVITBIT_EDGE_DOMAINS }}
+      KVITBIT_EMAIL_MODE: ${{ vars.KVITBIT_EMAIL_MODE }}
+      KVITBIT_BLOB_DRIVER: ${{ vars.KVITBIT_BLOB_DRIVER }}
+      KVITBIT_ENV: ${{ vars.KVITBIT_ENV }}
 
     steps:
-      - name: Validate GCP deployment variables
-        run: |
-          set -euo pipefail
-          if [ "$KVITBIT_STAGE" != "prod" ]; then
-            echo "::error::deploy.yml is strictly production-only until an isolated staging environment exists (got KVITBIT_STAGE=${KVITBIT_STAGE})"
-            exit 1
-          fi
-          if [ "$BOOTSTRAP_FOUNDATION" = "true" ] && [ "$BOOTSTRAP_FEEDBACK_SECRET" = "true" ]; then
-            echo "::error::Select only one of bootstrap_foundation and bootstrap_feedback_secret."
-            exit 1
-          fi
-          for name in \
-            GCP_PROJECT_ID \
-            GCP_PROJECT_NUMBER \
-            GCP_REGION \
-            GCP_ZONE \
-            GCP_WORKLOAD_IDENTITY_PROVIDER \
-            GCP_DEPLOYER_SERVICE_ACCOUNT \
-            ALCHEMY_STATE_BUCKET; do
-            if [ -z "${!name}" ]; then
-              echo "::error::Missing required repository variable: ${name}"
-              exit 1
-            fi
-          done
-          case "$GCP_DEPLOYER_SERVICE_ACCOUNT" in
-            *"@${GCP_PROJECT_ID}.iam.gserviceaccount.com") ;;
-            *)
-              echo "::error::GCP_DEPLOYER_SERVICE_ACCOUNT must belong to ${GCP_PROJECT_ID}"
-              exit 1
-              ;;
-          esac
-
-          # Normalize optional secret boolean switches ONCE so preflight and Alchemy
-          # agree on canonical true/false values (accepting true/1/yes/on, false/0/no/off).
-          normalize_bool_var() {
-            local var_name="$1"
-            local raw="${!var_name:-}"
-            local trimmed
-            trimmed="$(printf '%s' "$raw" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | tr '[:upper:]' '[:lower:]')"
-            case "$trimmed" in
-              ""|false|0|no|off)
-                printf '%s=false\n' "$var_name" >> "$GITHUB_ENV"
-                ;;
-              true|1|yes|on)
-                printf '%s=true\n' "$var_name" >> "$GITHUB_ENV"
-                ;;
-              *)
-                echo "::error::Invalid boolean value for ${var_name}: '${raw}' (expected true/1/yes/on or false/0/no/off)"
-                exit 1
-                ;;
-            esac
-          }
-
-          normalize_bool_var KVITBIT_ENABLE_RESEND_SECRET
-          normalize_bool_var KVITBIT_ENABLE_SMTP_SECRET
-          normalize_bool_var KVITBIT_ENABLE_MOBILE_SIGNING_KEY_SECRET
-          normalize_bool_var KVITBIT_ENABLE_FEEDBACK_GITHUB_TOKEN_SECRET
-
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
@@ -128,6 +76,11 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.4.2
+
+      - name: Validate GCP deployment variables
+        run: |
+          set -euo pipefail
+          bun infra/alchemy/src/preflight-cli.ts
 
       - name: Install dependencies
         run: bun install --frozen-lockfile
@@ -279,7 +232,9 @@ jobs:
           GOOGLE_ACCESS_TOKEN: ${{ steps.alchemy-auth.outputs.access_token }}
           GOOGLE_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
           KVITBIT_STAGE: ${{ env.KVITBIT_STAGE }}
+          KVITBIT_ENV: ${{ env.KVITBIT_ENV }}
           KVITBIT_BOOTSTRAP_FOUNDATION: ${{ env.BOOTSTRAP_FOUNDATION }}
+          KVITBIT_BOOTSTRAP_FEEDBACK_SECRET: ${{ env.BOOTSTRAP_FEEDBACK_SECRET }}
           KVITBIT_GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
           KVITBIT_GCP_PROJECT_NUMBER: ${{ vars.GCP_PROJECT_NUMBER }}
           KVITBIT_GCP_REGION: ${{ vars.GCP_REGION }}
@@ -287,7 +242,9 @@ jobs:
           KVITBIT_ALCHEMY_STATE_BUCKET: ${{ vars.ALCHEMY_STATE_BUCKET }}
           KVITBIT_IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
           KVITBIT_APP_ORIGIN: ${{ vars.APP_ORIGIN }}
+          KVITBIT_EMAIL_MODE: ${{ env.KVITBIT_EMAIL_MODE }}
           KVITBIT_EMAIL_FROM: ${{ vars.EMAIL_FROM }}
+          KVITBIT_BLOB_DRIVER: ${{ env.KVITBIT_BLOB_DRIVER }}
           KVITBIT_EDGE_DOMAINS: ${{ vars.KVITBIT_EDGE_DOMAINS }}
           KVITBIT_DNS_ZONES: ${{ vars.KVITBIT_DNS_ZONES }}
           KVITBIT_RUNNER_COUNT: ${{ vars.KVITBIT_RUNNER_COUNT }}

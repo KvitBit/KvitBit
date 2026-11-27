@@ -1,0 +1,419 @@
+/**
+ * Pure, zero-dependency preflight & shared config validation helpers for GCP Alchemy deploys
+ * (`.github/workflows/deploy.yml` and `infra/alchemy/src/config.ts`).
+ *
+ * Intentionally imports zero third-party packages so `.github/workflows/deploy.yml` can execute
+ * `bun infra/alchemy/src/preflight-cli.ts` immediately after checkout/setup-bun, before
+ * `bun install`, GCP OIDC auth, Docker build, or database migrations.
+ */
+
+export const DEPLOY_STAGES = ["prod", "staging"] as const;
+export type DeployStage = (typeof DEPLOY_STAGES)[number];
+
+export const EMAIL_MODES = [
+  "resend",
+  "smtp",
+  "resend+smtp",
+  "capture",
+  "console",
+  "disabled",
+] as const;
+export type EmailMode = (typeof EMAIL_MODES)[number];
+
+export const PROD_EMAIL_MODES = ["resend", "smtp", "resend+smtp"] as const;
+export type ProdEmailMode = (typeof PROD_EMAIL_MODES)[number];
+
+export const BLOB_DRIVERS = ["gcs", "local"] as const;
+export type BlobDriver = (typeof BLOB_DRIVERS)[number];
+
+export const DEPLOY_MODES = [
+  "normal",
+  "bootstrap_foundation",
+  "bootstrap_feedback_secret",
+] as const;
+export type DeployMode = (typeof DEPLOY_MODES)[number];
+
+export const SECRET_FLAG_ENV_VARS = [
+  "KVITBIT_ENABLE_RESEND_SECRET",
+  "KVITBIT_ENABLE_SMTP_SECRET",
+  "KVITBIT_ENABLE_MOBILE_SIGNING_KEY_SECRET",
+  "KVITBIT_ENABLE_FEEDBACK_GITHUB_TOKEN_SECRET",
+] as const;
+export type SecretFlagEnvVar = (typeof SECRET_FLAG_ENV_VARS)[number];
+
+export const REQUIRED_GCP_VARS = [
+  "GCP_PROJECT_ID",
+  "GCP_PROJECT_NUMBER",
+  "GCP_REGION",
+  "GCP_ZONE",
+  "GCP_WORKLOAD_IDENTITY_PROVIDER",
+  "GCP_DEPLOYER_SERVICE_ACCOUNT",
+  "ALCHEMY_STATE_BUCKET",
+] as const;
+
+export const FORBIDDEN_OPT_OUT_ENV_VARS = [
+  "KVITBIT_PREVIEW_DISABLE_EMAIL",
+  "KVITBIT_PREVIEW_DISABLE_BLOB",
+  "KVITBIT_DISABLE_EMAIL",
+  "KVITBIT_DISABLE_BLOBS",
+  "KVITBIT_DISABLE_ORIGIN_CHECK",
+  "KVITBIT_ALLOW_LOCAL_BLOBS",
+] as const;
+
+const DOMAIN_PATTERN = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/;
+const IPV4_LOOPBACK_PATTERN =
+  /^127\.(?:25[0-5]|2[0-4]\d|1?\d?\d)\.(?:25[0-5]|2[0-4]\d|1?\d?\d)\.(?:25[0-5]|2[0-4]\d|1?\d?\d)$/;
+const EMAIL_ADDR_PATTERN =
+  /^[^\s@<>]+@(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?\.)+(?:[a-zA-Z]{2,}|xn--[a-zA-Z0-9-]{2,})$/;
+const FORBIDDEN_OPT_OUT_PATTERN = /^KVITBIT_(?:PREVIEW_)?DISABLE_/;
+
+export const trimOptional = (raw: string | undefined): string | undefined => {
+  if (raw === undefined) return undefined;
+  const trimmed = raw.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+};
+
+export const isValidDomain = (domain: string): boolean => {
+  const normalized = domain.trim().toLowerCase();
+  if (!DOMAIN_PATTERN.test(normalized) || normalized.length > 253) {
+    return false;
+  }
+  const labels = normalized.split(".");
+  if (labels.some((label) => label.length > 63)) {
+    return false;
+  }
+  return !/^\d+$/.test(labels[labels.length - 1] ?? "");
+};
+
+export const isLocalhostHostname = (hostname: string): boolean => {
+  const normalized = hostname
+    .replace(/^\[|\]$/g, "")
+    .trim()
+    .toLowerCase();
+  return (
+    normalized === "localhost" ||
+    normalized.endsWith(".localhost") ||
+    normalized === "localhost.localdomain" ||
+    normalized === "0.0.0.0" ||
+    normalized === "::" ||
+    normalized === "::1" ||
+    normalized === "0:0:0:0:0:0:0:1" ||
+    IPV4_LOOPBACK_PATTERN.test(normalized)
+  );
+};
+
+export const validateOriginUrl = (
+  raw: string | undefined,
+  options: { readonly requireHttpsNonLocalhost: boolean },
+):
+  | { readonly ok: true; readonly origin: string }
+  | { readonly ok: false; readonly reason: string } => {
+  const trimmed = trimOptional(raw);
+  if (trimmed === undefined) {
+    return { ok: false, reason: "must be explicitly set" };
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(trimmed);
+  } catch {
+    return { ok: false, reason: `invalid URL '${trimmed}'` };
+  }
+  if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
+    return { ok: false, reason: `must use http or https protocol (got '${parsed.protocol}')` };
+  }
+  if (parsed.username !== "" || parsed.password !== "") {
+    return { ok: false, reason: "must not contain credentials" };
+  }
+  if (parsed.search !== "" || parsed.hash !== "" || !/^\/*$/.test(parsed.pathname)) {
+    return {
+      ok: false,
+      reason: `must be an origin without path, query, or fragment (got '${trimmed}')`,
+    };
+  }
+  if (options.requireHttpsNonLocalhost) {
+    if (parsed.protocol !== "https:") {
+      return { ok: false, reason: `production origin must use https (got '${parsed.origin}')` };
+    }
+    if (isLocalhostHostname(parsed.hostname)) {
+      return {
+        ok: false,
+        reason: `production origin must not point to localhost or loopback (got '${parsed.origin}')`,
+      };
+    }
+  }
+  return { ok: true, origin: parsed.origin };
+};
+
+export const isValidEmailFrom = (raw: string | undefined): boolean => {
+  const trimmed = trimOptional(raw);
+  if (trimmed === undefined || /[\r\n]/.test(trimmed)) {
+    return false;
+  }
+  const bracketMatch = /^[^<>]*<([^<>]+)>$/.exec(trimmed);
+  const address = (bracketMatch?.[1] ?? trimmed).trim();
+  return EMAIL_ADDR_PATTERN.test(address);
+};
+
+export const parseOptionalBoolean = (
+  raw: string | undefined,
+  defaultValue: boolean,
+):
+  | { readonly ok: true; readonly value: boolean }
+  | { readonly ok: false; readonly reason: string } => {
+  const trimmed = trimOptional(raw);
+  if (trimmed === undefined) {
+    return { ok: true, value: defaultValue };
+  }
+  const normalized = trimmed.toLowerCase();
+  if (normalized === "true" || normalized === "1" || normalized === "yes" || normalized === "on") {
+    return { ok: true, value: true };
+  }
+  if (normalized === "false" || normalized === "0" || normalized === "no" || normalized === "off") {
+    return { ok: true, value: false };
+  }
+  return {
+    ok: false,
+    reason: `expected boolean ('true'/'1'/'yes'/'on' or 'false'/'0'/'no'/'off'), got '${raw ?? ""}'`,
+  };
+};
+
+export const parseCsvDomainList = (raw: string | undefined): ReadonlyArray<string> => {
+  const trimmed = trimOptional(raw);
+  if (trimmed === undefined) return [];
+  return trimmed
+    .split(",")
+    .map((part) => part.trim().toLowerCase())
+    .filter((part) => part.length > 0);
+};
+
+export const isEmailMode = (value: string): value is EmailMode =>
+  (EMAIL_MODES as ReadonlyArray<string>).includes(value);
+
+export const isProdEmailMode = (value: string): value is ProdEmailMode =>
+  (PROD_EMAIL_MODES as ReadonlyArray<string>).includes(value);
+
+export const isBlobDriver = (value: string): value is BlobDriver =>
+  (BLOB_DRIVERS as ReadonlyArray<string>).includes(value);
+
+export const findForbiddenOptOutFlag = (
+  env: Readonly<Record<string, string | undefined>>,
+): string | undefined => {
+  for (const [key, value] of Object.entries(env)) {
+    const isForbidden =
+      FORBIDDEN_OPT_OUT_PATTERN.test(key) ||
+      (FORBIDDEN_OPT_OUT_ENV_VARS as ReadonlyArray<string>).includes(key);
+    if (isForbidden && trimOptional(value) !== undefined) {
+      return key;
+    }
+  }
+  return undefined;
+};
+
+export type DeployPreflightSuccess = {
+  readonly ok: true;
+  readonly deployMode: DeployMode;
+  readonly normalizedBooleans: Readonly<Record<SecretFlagEnvVar, boolean>>;
+};
+
+export type DeployPreflightFailure = {
+  readonly ok: false;
+  readonly field: string;
+  readonly message: string;
+};
+
+export type DeployPreflightResult = DeployPreflightSuccess | DeployPreflightFailure;
+
+const failPreflight = (field: string, message: string): DeployPreflightFailure => ({
+  ok: false,
+  field,
+  message,
+});
+
+/**
+ * Pure preflight validator executed by `.github/workflows/deploy.yml` before installing deps,
+ * authenticating to GCP, or building OCI images.
+ */
+export const validateDeployPreflight = (
+  env: Readonly<Record<string, string | undefined>>,
+): DeployPreflightResult => {
+  const stage = trimOptional(env.KVITBIT_STAGE);
+  if (stage !== "prod") {
+    return failPreflight(
+      "KVITBIT_STAGE",
+      `deploy.yml is strictly production-only until an isolated staging environment exists (got KVITBIT_STAGE=${env.KVITBIT_STAGE ?? ""})`,
+    );
+  }
+
+  const bootstrapFoundationParsed = parseOptionalBoolean(env.BOOTSTRAP_FOUNDATION, false);
+  if (!bootstrapFoundationParsed.ok) {
+    return failPreflight(
+      "BOOTSTRAP_FOUNDATION",
+      `Invalid boolean value for BOOTSTRAP_FOUNDATION: ${bootstrapFoundationParsed.reason}`,
+    );
+  }
+  const bootstrapFeedbackParsed = parseOptionalBoolean(env.BOOTSTRAP_FEEDBACK_SECRET, false);
+  if (!bootstrapFeedbackParsed.ok) {
+    return failPreflight(
+      "BOOTSTRAP_FEEDBACK_SECRET",
+      `Invalid boolean value for BOOTSTRAP_FEEDBACK_SECRET: ${bootstrapFeedbackParsed.reason}`,
+    );
+  }
+
+  const bootstrapFoundation = bootstrapFoundationParsed.value;
+  const bootstrapFeedbackSecret = bootstrapFeedbackParsed.value;
+  if (bootstrapFoundation && bootstrapFeedbackSecret) {
+    return failPreflight(
+      "BOOTSTRAP_FEEDBACK_SECRET",
+      "Select only one of bootstrap_foundation and bootstrap_feedback_secret.",
+    );
+  }
+
+  for (const name of REQUIRED_GCP_VARS) {
+    if (trimOptional(env[name]) === undefined) {
+      return failPreflight(name, `Missing required repository variable: ${name}`);
+    }
+  }
+
+  const projectId = trimOptional(env.GCP_PROJECT_ID) ?? "";
+  const projectNumber = trimOptional(env.GCP_PROJECT_NUMBER) ?? "";
+  const region = trimOptional(env.GCP_REGION) ?? "";
+  const zone = trimOptional(env.GCP_ZONE) ?? "";
+  const deployerSa = trimOptional(env.GCP_DEPLOYER_SERVICE_ACCOUNT) ?? "";
+
+  if (!/^\d+$/.test(projectNumber)) {
+    return failPreflight(
+      "GCP_PROJECT_NUMBER",
+      `GCP_PROJECT_NUMBER must be numeric (got '${projectNumber}')`,
+    );
+  }
+  if (!zone.startsWith(`${region}-`)) {
+    return failPreflight("GCP_ZONE", `GCP_ZONE '${zone}' must belong to GCP_REGION '${region}'`);
+  }
+  if (!deployerSa.endsWith(`@${projectId}.iam.gserviceaccount.com`)) {
+    return failPreflight(
+      "GCP_DEPLOYER_SERVICE_ACCOUNT",
+      `GCP_DEPLOYER_SERVICE_ACCOUNT must belong to ${projectId}`,
+    );
+  }
+
+  const normalizedBooleans = {} as Record<SecretFlagEnvVar, boolean>;
+  for (const flag of SECRET_FLAG_ENV_VARS) {
+    const parsed = parseOptionalBoolean(env[flag], false);
+    if (!parsed.ok) {
+      return failPreflight(flag, `Invalid boolean value for ${flag}: ${parsed.reason}`);
+    }
+    normalizedBooleans[flag] = parsed.value;
+  }
+
+  // Zero opt-outs or non-prod modes are allowed in production deploys (even during bootstrap).
+  const forbiddenFlag = findForbiddenOptOutFlag(env);
+  if (forbiddenFlag !== undefined) {
+    return failPreflight(
+      forbiddenFlag,
+      `Opt-out flag ${forbiddenFlag} is forbidden in production deploys.`,
+    );
+  }
+
+  const kvitbitEnv = trimOptional(env.KVITBIT_ENV);
+  if (kvitbitEnv !== undefined && kvitbitEnv !== "production") {
+    return failPreflight(
+      "KVITBIT_ENV",
+      `Non-production KVITBIT_ENV='${kvitbitEnv}' is forbidden in production deploys.`,
+    );
+  }
+
+  const emailMode = trimOptional(env.KVITBIT_EMAIL_MODE);
+  if (emailMode !== undefined && !isProdEmailMode(emailMode)) {
+    return failPreflight(
+      "KVITBIT_EMAIL_MODE",
+      `Non-production or invalid KVITBIT_EMAIL_MODE='${emailMode}' is forbidden in production deploys (expected resend, smtp, or resend+smtp).`,
+    );
+  }
+
+  const blobDriver = trimOptional(env.KVITBIT_BLOB_DRIVER);
+  if (blobDriver !== undefined && blobDriver !== "gcs") {
+    return failPreflight(
+      "KVITBIT_BLOB_DRIVER",
+      `Non-production or invalid KVITBIT_BLOB_DRIVER='${blobDriver}' is forbidden in production deploys (expected gcs).`,
+    );
+  }
+
+  if (bootstrapFeedbackSecret) {
+    if (!normalizedBooleans.KVITBIT_ENABLE_FEEDBACK_GITHUB_TOKEN_SECRET) {
+      return failPreflight(
+        "KVITBIT_ENABLE_FEEDBACK_GITHUB_TOKEN_SECRET",
+        "Set the KVITBIT_ENABLE_FEEDBACK_GITHUB_TOKEN_SECRET repository variable to true before bootstrapping the feedback token container.",
+      );
+    }
+    return {
+      ok: true,
+      deployMode: "bootstrap_feedback_secret",
+      normalizedBooleans,
+    };
+  }
+
+  if (bootstrapFoundation) {
+    return {
+      ok: true,
+      deployMode: "bootstrap_foundation",
+      normalizedBooleans,
+    };
+  }
+
+  // Normal production deploy: require APP_ORIGIN (HTTPS non-localhost), EMAIL_FROM,
+  // KVITBIT_EDGE_DOMAINS, and at least one real email secret matching KVITBIT_EMAIL_MODE.
+  const originCheck = validateOriginUrl(env.APP_ORIGIN, { requireHttpsNonLocalhost: true });
+  if (!originCheck.ok) {
+    return failPreflight("APP_ORIGIN", `Invalid production APP_ORIGIN: ${originCheck.reason}`);
+  }
+
+  if (!isValidEmailFrom(env.EMAIL_FROM)) {
+    return failPreflight(
+      "EMAIL_FROM",
+      `Production deploys require a valid EMAIL_FROM address (got '${env.EMAIL_FROM ?? ""}')`,
+    );
+  }
+
+  const edgeDomains = parseCsvDomainList(env.KVITBIT_EDGE_DOMAINS);
+  if (edgeDomains.length === 0) {
+    return failPreflight(
+      "KVITBIT_EDGE_DOMAINS",
+      "Production deploys require at least one domain in KVITBIT_EDGE_DOMAINS.",
+    );
+  }
+  for (const domain of edgeDomains) {
+    if (!isValidDomain(domain)) {
+      return failPreflight(
+        "KVITBIT_EDGE_DOMAINS",
+        `Invalid domain in KVITBIT_EDGE_DOMAINS: '${domain}'`,
+      );
+    }
+  }
+
+  const enableResend = normalizedBooleans.KVITBIT_ENABLE_RESEND_SECRET;
+  const enableSmtp = normalizedBooleans.KVITBIT_ENABLE_SMTP_SECRET;
+  if (!enableResend && !enableSmtp) {
+    return failPreflight(
+      "KVITBIT_ENABLE_RESEND_SECRET",
+      "Production deploys require at least one real email provider secret enabled (KVITBIT_ENABLE_RESEND_SECRET=true and/or KVITBIT_ENABLE_SMTP_SECRET=true).",
+    );
+  }
+  if ((emailMode === "resend" || emailMode === "resend+smtp") && !enableResend) {
+    return failPreflight(
+      "KVITBIT_ENABLE_RESEND_SECRET",
+      `KVITBIT_EMAIL_MODE=${emailMode} requires KVITBIT_ENABLE_RESEND_SECRET=true.`,
+    );
+  }
+  if ((emailMode === "smtp" || emailMode === "resend+smtp") && !enableSmtp) {
+    return failPreflight(
+      "KVITBIT_ENABLE_SMTP_SECRET",
+      `KVITBIT_EMAIL_MODE=${emailMode} requires KVITBIT_ENABLE_SMTP_SECRET=true.`,
+    );
+  }
+
+  return {
+    ok: true,
+    deployMode: "normal",
+    normalizedBooleans,
+  };
+};

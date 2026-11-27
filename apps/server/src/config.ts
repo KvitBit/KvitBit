@@ -3,11 +3,19 @@
  * agreed with phase3d-infra on board thread #871. Stream-specific settings live next to their
  * stream (`./<area>/config.ts`) and read their own variables.
  */
-import { Config, Effect, type Option, type Redacted } from "effect";
+import { Config, Effect, type Option, Redacted } from "effect";
+import {
+  InvalidRuntimeConfig,
+  type KvitbitEnv,
+  loadKvitbitEnv,
+  loadValidatedAppOrigin,
+  toConfigError,
+} from "./config-contract";
 
 export type RunnerMode = "single" | "cluster";
 
 export interface ServerConfigShape {
+  readonly env: KvitbitEnv;
   readonly host: string;
   readonly port: number;
   /** Public origin, e.g. `https://kvitbit.cz` (APP_ORIGIN). */
@@ -23,20 +31,51 @@ export interface ServerConfigShape {
   readonly trustedProxyHops: number;
 }
 
-export const ServerConfig: Config.Config<ServerConfigShape> = Config.all({
-  host: Config.String("HOST").pipe(Config.withDefault("0.0.0.0")),
-  port: Config.Int("PORT").pipe(Config.withDefault(8080)),
-  appOrigin: Config.String("APP_ORIGIN").pipe(Config.withDefault("http://localhost:8080")),
-  databaseUrl: Config.Redacted("DATABASE_URL"),
-  runnerMode: Config.Literals(["single", "cluster"] as const, "KVITBIT_RUNNER_MODE").pipe(
-    Config.withDefault("single" as const),
-  ),
-  authSecret: Config.Redacted("BETTER_AUTH_SECRET"),
-  webDir: Config.option(Config.String("KVITBIT_WEB_DIR")),
-  pwaDir: Config.option(Config.String("KVITBIT_PWA_DIR")),
-  trustedProxyHops: Config.Int("KVITBIT_TRUSTED_PROXY_HOPS").pipe(Config.withDefault(1)),
-});
+const requireNonEmptyRedacted = (
+  name: string,
+): Effect.Effect<Redacted.Redacted<string>, Config.ConfigError> =>
+  Effect.gen(function* () {
+    const value = yield* Config.Redacted(name);
+    if (Redacted.value(value).trim().length === 0) {
+      return yield* Effect.fail(
+        toConfigError(
+          new InvalidRuntimeConfig({ field: name, reason: `${name} must be non-empty` }),
+        ),
+      );
+    }
+    return value;
+  });
 
-export const loadServerConfig = Effect.gen(function* () {
-  return yield* ServerConfig;
-});
+export const ServerConfig: Effect.Effect<ServerConfigShape, Config.ConfigError> = Effect.gen(
+  function* () {
+    const env = yield* loadKvitbitEnv;
+    const host = yield* Config.String("HOST").pipe(Config.withDefault("0.0.0.0"));
+    const port = yield* Config.Int("PORT").pipe(Config.withDefault(8080));
+    const appOrigin = yield* loadValidatedAppOrigin;
+    const databaseUrl = yield* requireNonEmptyRedacted("DATABASE_URL");
+    const runnerMode = yield* Config.Literals(
+      ["single", "cluster"] as const,
+      "KVITBIT_RUNNER_MODE",
+    ).pipe(Config.withDefault("single" as const));
+    const authSecret = yield* requireNonEmptyRedacted("BETTER_AUTH_SECRET");
+    const webDir = yield* Config.option(Config.String("KVITBIT_WEB_DIR"));
+    const pwaDir = yield* Config.option(Config.String("KVITBIT_PWA_DIR"));
+    const trustedProxyHops = yield* Config.Int("KVITBIT_TRUSTED_PROXY_HOPS").pipe(
+      Config.withDefault(1),
+    );
+    return {
+      env,
+      host,
+      port,
+      appOrigin,
+      databaseUrl,
+      runnerMode,
+      authSecret,
+      webDir,
+      pwaDir,
+      trustedProxyHops,
+    } satisfies ServerConfigShape;
+  },
+);
+
+export const loadServerConfig = ServerConfig;

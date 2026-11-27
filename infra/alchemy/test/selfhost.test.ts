@@ -966,6 +966,7 @@ printf '%s\\n' "$KVITBIT_ENABLE_FEEDBACK_GITHUB_TOKEN_SECRET" "$KVITBIT_IMAGE_DI
         const script = getStep(step)?.run;
         expect(script).toBeDefined();
         return Bun.spawnSync(["bash", "-c", script ?? ""], {
+          cwd: repoRoot,
           env: {
             PATH: `${sandbox}:${process.env.PATH ?? "/usr/bin:/bin"}`,
             GITHUB_SHA: "test-revision",
@@ -1158,9 +1159,13 @@ printf '%s\\n' "$KVITBIT_ENABLE_FEEDBACK_GITHUB_TOKEN_SECRET" "$KVITBIT_IMAGE_DI
           "projects/1/locations/global/workloadIdentityPools/gh/providers/gh",
         GCP_DEPLOYER_SERVICE_ACCOUNT: "deployer@kvitbit-prod.iam.gserviceaccount.com",
         ALCHEMY_STATE_BUCKET: "alchemy-state-kvitbit-prod",
+        APP_ORIGIN: "https://kvitbit.cz",
+        EMAIL_FROM: "Kvitbit <no-reply@kvitbit.cz>",
+        KVITBIT_EDGE_DOMAINS: "kvitbit.cz,kvitbit.app",
         GITHUB_ENV: ghEnv,
       };
       const normOk = Bun.spawnSync(["bash", "-c", validateStep?.run ?? ""], {
+        cwd: repoRoot,
         env: {
           PATH: process.env.PATH ?? "/usr/bin:/bin",
           ...baseVars,
@@ -1180,6 +1185,7 @@ printf '%s\\n' "$KVITBIT_ENABLE_FEEDBACK_GITHUB_TOKEN_SECRET" "$KVITBIT_IMAGE_DI
       expect(exported).toContain("KVITBIT_ENABLE_FEEDBACK_GITHUB_TOKEN_SECRET=true");
 
       const normBad = Bun.spawnSync(["bash", "-c", validateStep?.run ?? ""], {
+        cwd: repoRoot,
         env: {
           PATH: process.env.PATH ?? "/usr/bin:/bin",
           ...baseVars,
@@ -1189,6 +1195,28 @@ printf '%s\\n' "$KVITBIT_ENABLE_FEEDBACK_GITHUB_TOKEN_SECRET" "$KVITBIT_IMAGE_DI
         stderr: "pipe",
       });
       expect(normBad.exitCode).not.toBe(0);
+
+      // Prod preflight fails fast when email secrets, APP_ORIGIN, EMAIL_FROM, or edge domains are missing or non-prod modes are set.
+      for (const badOverride of [
+        { KVITBIT_ENABLE_RESEND_SECRET: "false", KVITBIT_ENABLE_SMTP_SECRET: "false" },
+        { KVITBIT_ENABLE_RESEND_SECRET: "true", APP_ORIGIN: "http://localhost:8080" },
+        { KVITBIT_ENABLE_RESEND_SECRET: "true", EMAIL_FROM: "" },
+        { KVITBIT_ENABLE_RESEND_SECRET: "true", KVITBIT_EDGE_DOMAINS: "" },
+        { KVITBIT_ENABLE_RESEND_SECRET: "true", KVITBIT_EMAIL_MODE: "capture" },
+        { KVITBIT_ENABLE_RESEND_SECRET: "true", KVITBIT_BLOB_DRIVER: "local" },
+      ]) {
+        const rejected = Bun.spawnSync(["bash", "-c", validateStep?.run ?? ""], {
+          cwd: repoRoot,
+          env: {
+            PATH: process.env.PATH ?? "/usr/bin:/bin",
+            ...baseVars,
+            ...badOverride,
+          },
+          stdout: "pipe",
+          stderr: "pipe",
+        });
+        expect(rejected.exitCode).not.toBe(0);
+      }
 
       // 2. Verify the rollout step requires the combined acknowledgement from the current script.
       const binDir = join(sandbox, "bin");
