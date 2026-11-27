@@ -712,7 +712,6 @@ export const segmented = <M>(
         o.className,
       ),
     )
-    .attr("data-slot", "segmented")
     .attr("aria-label", o.label)
     .value(o.selected)
     .attr("value", o.selected)

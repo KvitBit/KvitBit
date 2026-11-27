@@ -111,7 +111,7 @@ if (typeof Bun === "undefined") {
           await test.step(path, async () => {
             await page.goto(path);
             await expect(page.locator(".kb-root")).toHaveAttribute("lang", locale);
-            const groups = page.locator('[data-slot="segmented"]');
+            const groups = page.locator("ui-segmented-control");
             await expect(groups).toHaveCount(count);
             for (const group of await groups.all()) {
               await expectFilledSegments(group, "stretched", path === "/sign-up");
@@ -121,35 +121,35 @@ if (typeof Bun === "undefined") {
 
         await page.goto(`/w/${DEMO_WS}/settings/api-keys`);
         await page.getByRole("button", { name: /^(Create API key|Vytvořit API klíč)$/ }).click();
-        await expectFilledSegments(page.locator('[data-slot="segmented"]'), "stretched");
+        await expectFilledSegments(page.locator("ui-segmented-control"), "stretched");
       });
 
       test("keep inline controls compact and fill the export dialog selector", async ({ page }) => {
         await page.goto("/i/demo-unpaid-czk");
         await expect(page.locator(".kb-root")).toHaveAttribute("lang", locale);
-        await expectFilledSegments(page.locator('[data-slot="segmented"]'), "inline");
+        await expectFilledSegments(page.locator("ui-segmented-control"), "inline");
 
         await page.goto(`/w/${DEMO_WS}/settings/branding`);
-        await expectFilledSegments(page.locator('[data-slot="segmented"]'), "inline");
+        await expectFilledSegments(page.locator("ui-segmented-control"), "inline");
 
         await page.goto(`/w/${DEMO_WS}/expenses/new?mode=edit`);
         await expectFilledSegments(
-          page.locator('[data-slot="field"] > [data-slot="segmented"]'),
+          page.locator('[data-slot="field"] > ui-segmented-control'),
           "stretched",
         );
         await expectFilledSegments(
-          page.locator('[data-slot="spread"] > [data-slot="segmented"]'),
+          page.locator('[data-slot="spread"] > ui-segmented-control'),
           "inline",
         );
 
         await page.goto(`/w/${DEMO_WS}/reports/revenue?period=2026`);
         await expectFilledSegments(
-          page.locator('[data-slot="report-controls"] [data-slot="segmented"]'),
+          page.locator('[data-slot="report-controls"] ui-segmented-control'),
           "inline",
         );
         await page.getByRole("button", { name: /^(Export|Exportovat)$/ }).click();
         await expectFilledSegments(
-          page.getByRole("dialog").locator('[data-slot="segmented"]'),
+          page.getByRole("dialog").locator("ui-segmented-control"),
           "stretched",
         );
       });
@@ -315,7 +315,7 @@ if (typeof Bun === "undefined") {
           await expect(page.locator(".kb-root")).toHaveAttribute("lang", locale);
           await expect(page.locator(".kb-root")).toHaveAttribute("data-style", style);
 
-          const segmented = page.locator('[data-slot="auth-form"] [data-slot="segmented"]');
+          const segmented = page.locator('[data-slot="auth-form"] ui-segmented-control');
           const buttons = segmented.locator("ui-segmented-control-item");
           await expect(buttons).toHaveText([...labels]);
 
