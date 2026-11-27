@@ -21,7 +21,8 @@ export const renderFeedbackControls = (root: ShadowRoot) => {
   const markers = create("div", {});
   const review = create("button", { type: "button", hidden: "" });
   const pick = create("button", { id: "pick", type: "button", "aria-pressed": "false" });
-  const toolbar = create("div", { class: "toolbar" }, review, pick);
+  const pickError = create("p", { class: "error picker-error", hidden: "" });
+  const toolbar = create("div", { class: "toolbar" }, pickError, review, pick);
   const position = create("strong", { id: "pin-position" });
   const close = create("button", { type: "button" }, "×");
   const selector = create("code", {});
@@ -52,6 +53,7 @@ export const renderFeedbackControls = (root: ShadowRoot) => {
     highlightTag,
     markers,
     pick,
+    pickError,
     review,
     composer,
     position,

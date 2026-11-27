@@ -17,6 +17,7 @@ const text = copy({
     review: "Zobrazit piny ({total})",
     instructions:
       "Vyberte prvek kliknutím nebo klávesami Tab a Enter. Výběr ukončíte klávesou Escape.",
+    unavailable: "Prvek nelze jednoznačně určit. Vyberte jiný prvek.",
     pin: "Pin {number}",
     position: "Pin {number} z {total}",
     comment: "Co bychom měli upravit?",
@@ -33,6 +34,7 @@ const text = copy({
     stop: "Stop picking",
     review: "Review pins ({total})",
     instructions: "Click an element, or use Tab and Enter to pick it. Press Escape to stop.",
+    unavailable: "This element cannot be identified uniquely. Pick another element.",
     pin: "Pin {number}",
     position: "Pin {number} of {total}",
     comment: "What should change?",
@@ -99,9 +101,7 @@ const githubIssue = (body: unknown) => {
   return { number: issueNumber, url: url.href, title };
 };
 
-export const mountFeedback = (locale: Locale, mode: Prefs["mode"]): (() => void) => {
-  const controller = new AbortController();
-  const { signal } = controller;
+const installFeedback = (locale: Locale, mode: Prefs["mode"], signal: AbortSignal) => {
   const host = document.createElement("div");
   host.dataset.kbVisualFeedback = "";
   host.dataset.mode = mode;
@@ -111,6 +111,7 @@ export const mountFeedback = (locale: Locale, mode: Prefs["mode"]): (() => void)
     highlightTag,
     markers,
     pick,
+    pickError,
     review,
     composer,
     position,
@@ -220,6 +221,7 @@ export const mountFeedback = (locale: Locale, mode: Prefs["mode"]): (() => void)
   const setPicking = (active: boolean) => {
     picking = active;
     hovered = undefined;
+    pickError.hidden = true;
     if (active) {
       closeComposer();
       error.hidden = true;
@@ -258,10 +260,17 @@ export const mountFeedback = (locale: Locale, mode: Prefs["mode"]): (() => void)
       showComposer(existing);
       return;
     }
+    const snapshot = capturePin(element, pageUrl?.sensitive !== false);
+    if (snapshot === undefined) {
+      pickError.textContent = text(locale, "unavailable");
+      pickError.hidden = false;
+      announcement.textContent = pickError.textContent;
+      return;
+    }
     const marker = document.createElement("button");
     marker.type = "button";
     marker.className = "marker";
-    const pin = { element, marker, snapshot: capturePin(element, pageUrl?.sensitive !== false) };
+    const pin = { element, marker, snapshot };
     pins.push(pin);
     marker.addEventListener("click", () => showComposer(pin), { signal });
     markers.append(marker);
@@ -445,8 +454,21 @@ export const mountFeedback = (locale: Locale, mode: Prefs["mode"]): (() => void)
   document.body.append(host);
 
   return () => {
-    controller.abort();
     cancelAnimationFrame(frame);
     host.remove();
   };
+};
+
+export const mountFeedback = (locale: Locale, mode: Prefs["mode"]): (() => void) => {
+  const controller = new AbortController();
+  try {
+    const dispose = installFeedback(locale, mode, controller.signal);
+    return () => {
+      controller.abort();
+      dispose();
+    };
+  } catch (error) {
+    controller.abort();
+    throw error;
+  }
 };

@@ -2,6 +2,7 @@ import {
   FEEDBACK_LIMITS,
   type FeedbackSubmission,
   redactFeedbackApiKeys,
+  redactFeedbackUrls,
 } from "@kvitbit/api-contract";
 import { elementPaths } from "./selector";
 
@@ -11,16 +12,20 @@ type Diagnostic = FeedbackSubmission["diagnostics"][number];
 const editable =
   "input, textarea, select, [contenteditable]:not([contenteditable=false]), [role=textbox]";
 const nonContent = "script, style, [hidden], [aria-hidden=true]";
-const credentialDisplay = ".kb-secret-box";
+const privateContent = ".kb-secret-box, [data-feedback-private]";
+
+const containsPrivateContent = (element: Element) =>
+  element.closest(privateContent) !== null || element.querySelector(privateContent) !== null;
 
 const excerpt = (value: string, limit: number) =>
-  redactFeedbackApiKeys(value).replace(/\s+/gu, " ").trim().slice(0, limit);
+  redactFeedbackUrls(redactFeedbackApiKeys(value)).replace(/\s+/gu, " ").trim().slice(0, limit);
 
 const visibleText = (element: Element, limit: number): string => {
   if (
     !(element instanceof HTMLElement || element instanceof SVGElement) ||
-    element.closest(`${editable}, ${nonContent}, ${credentialDisplay}`) !== null ||
-    element.querySelector(`${editable}, ${credentialDisplay}`) !== null
+    element.closest(`${editable}, ${nonContent}`) !== null ||
+    element.querySelector(editable) !== null ||
+    containsPrivateContent(element)
   ) {
     return "";
   }
@@ -104,19 +109,22 @@ const accessibleName = (element: Element, role: string): string => {
     : "";
 };
 
-export const capturePin = (element: Element, sensitive: boolean): Pin => {
+export const capturePin = (element: Element, sensitive: boolean): Pin | undefined => {
+  const omitMetadata = sensitive || containsPrivateContent(element);
+  const paths = elementPaths(element, !omitMetadata, FEEDBACK_LIMITS.selector);
+  if (paths === undefined) return undefined;
   const { x, y, width, height } = element.getBoundingClientRect();
   const style = getComputedStyle(element);
-  const role = sensitive
+  const role = omitMetadata
     ? implicitRole(element)
     : excerpt(element.getAttribute("role") ?? implicitRole(element), FEEDBACK_LIMITS.role);
   return {
-    ...elementPaths(element, !sensitive, FEEDBACK_LIMITS.selector),
+    ...paths,
     tag: element.localName.slice(0, FEEDBACK_LIMITS.tag),
-    accessibleName: sensitive ? "" : accessibleName(element, role),
+    accessibleName: omitMetadata ? "" : accessibleName(element, role),
     role,
     rect: { x, y, width, height },
-    text: sensitive ? "" : visibleText(element, FEEDBACK_LIMITS.text),
+    text: omitMetadata ? "" : visibleText(element, FEEDBACK_LIMITS.text),
     styles: {
       display: style.display,
       position: style.position,

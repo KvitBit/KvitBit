@@ -55,5 +55,6 @@ export const elementPaths = (element: Element, includeIdentifiers: boolean, maxL
     selector = qualify(distinctive ?? ordinal);
     uniqueSelector ??= unique(selector) ? selector : undefined;
   }
-  return { selector: uniqueSelector ?? domPath, domPath };
+  if (uniqueSelector !== undefined) return { selector: uniqueSelector, domPath };
+  return domPath !== "" && unique(domPath) ? { selector: domPath, domPath } : undefined;
 };

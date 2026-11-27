@@ -11,6 +11,20 @@ const session = (page: Page, feedbackEnabled: boolean) =>
     await route.fulfill({ response, json: { ...(await response.json()), feedbackEnabled } });
   });
 
+const captureSubmission = async (page: Page, comment: string): Promise<FeedbackSubmission> => {
+  const issueUrl = "https://github.com/example/kvitbit/issues/43";
+  await page.route("**/api/feedback", (route) =>
+    route.fulfill({ status: 201, json: { issueNumber: 43, issueUrl, title: "Visual feedback" } }),
+  );
+  const picker = page.locator(overlay);
+  await picker.getByRole("textbox", { name: "What should change?" }).fill(comment);
+  const requested = page.waitForRequest(
+    (request) => new URL(request.url()).pathname === "/api/feedback",
+  );
+  await picker.getByRole("button", { name: "Send to GitHub" }).click();
+  return (await requested).postDataJSON();
+};
+
 if (typeof Bun === "undefined") {
   test.use({ locale: "en-US" });
 
@@ -123,25 +137,53 @@ if (typeof Bun === "undefined") {
     page,
   }) => {
     await session(page, true);
-    const issueUrl = "https://github.com/example/kvitbit/issues/43";
-    await page.route("**/api/feedback", (route) =>
-      route.fulfill({ status: 201, json: { issueNumber: 43, issueUrl, title: "Share page" } }),
-    );
     await page.goto("/i/demo-unpaid-czk?fixture-secret=1#private-fragment");
     const picker = page.locator(overlay);
     await picker.getByRole("button", { name: "Visual feedback" }).click();
     await page.locator("#main h1").click();
-    await picker.getByRole("textbox", { name: "What should change?" }).fill("Adjust the title.");
-    const requested = page.waitForRequest(
-      (request) => new URL(request.url()).pathname === "/api/feedback",
-    );
-    await picker.getByRole("button", { name: "Send to GitHub" }).click();
-    const submission: FeedbackSubmission = (await requested).postDataJSON();
+    const submission = await captureSubmission(page, "Adjust the title.");
     expect(submission.page.url).toBe(`${new URL(page.url()).origin}/[redacted]`);
     expect(submission.pins[0]).toMatchObject({ tag: "h1", accessibleName: "", text: "" });
     expect(JSON.stringify(submission)).not.toMatch(
       /demo-unpaid-czk|fixture-secret|private-fragment/,
     );
+  });
+
+  test("omits an active private link and its enclosing text on the document Share tab", async ({
+    page,
+  }) => {
+    await session(page, true);
+    await page.goto(`${dashboard}/documents/0193a000-0000-7000-8000-000000000259?tab=share`);
+    const row = page.locator(".kb-share-url");
+    const link = row.locator("span.kb-mono");
+    await expect(link).toContainText("/i/demo-share-token-0041");
+    const picker = page.locator(overlay);
+    await picker.getByRole("button", { name: "Visual feedback" }).click();
+    await link.click();
+    await picker.getByRole("button", { name: "Add a pin" }).click();
+    await row.click({ position: { x: 2, y: 2 } });
+    const submission = await captureSubmission(page, "Adjust the share controls.");
+    expect(
+      submission.pins.map(({ tag, accessibleName, text }) => ({ tag, accessibleName, text })),
+    ).toEqual([
+      { tag: "span", accessibleName: "", text: "" },
+      { tag: "div", accessibleName: "", text: "" },
+    ]);
+    expect(JSON.stringify(submission)).not.toContain("demo-share-token-0041");
+  });
+
+  test("omits typed values when pinning an ordinary form container", async ({ page }) => {
+    await session(page, true);
+    await page.goto(`${dashboard}/settings/issuing-entity`);
+    const field = page.locator("#kb-entity-name");
+    await field.fill("fixture-private-form-value");
+    const formGrid = page.locator(".kb-form-grid").filter({ has: field });
+    await page.locator(overlay).getByRole("button", { name: "Visual feedback" }).click();
+    await formGrid.scrollIntoViewIfNeeded();
+    await formGrid.dispatchEvent("click");
+    const submission = await captureSubmission(page, "Adjust the form layout.");
+    expect(submission.pins[0]).toMatchObject({ tag: "div", accessibleName: "", text: "" });
+    expect(JSON.stringify(submission)).not.toContain("fixture-private-form-value");
   });
 
   test("disposes the picker when the app signs out", async ({ page }) => {

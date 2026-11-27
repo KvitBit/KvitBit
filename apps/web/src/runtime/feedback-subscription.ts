@@ -13,7 +13,7 @@ export const feedbackSubscription = ({ session, path, prefs }: Model) =>
               Effect.tryPromise(() => import("./feedback/feedback-overlay")).pipe(
                 Effect.flatMap(({ mountFeedback }) =>
                   Effect.acquireRelease(
-                    Effect.sync(() => mountFeedback(locale, mode)),
+                    Effect.try(() => mountFeedback(locale, mode)),
                     (dispose) => Effect.sync(dispose),
                   ),
                 ),
