@@ -180,7 +180,7 @@
   width: 100%;
 }
 
-.kb-auth-form .kb-segmented button {
+.kb-auth-form--sign-in .kb-segmented button {
   flex: 1 1 auto;
   padding: 6px 10px;
 }
