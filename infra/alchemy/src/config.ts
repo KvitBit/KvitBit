@@ -1,3 +1,4 @@
+import { isIPv4 } from "node:net";
 import * as Config from "effect/Config";
 import * as Data from "effect/Data";
 import * as Effect from "effect/Effect";
@@ -71,6 +72,8 @@ export interface KvitbitStackConfig {
   readonly appOrigin: string | undefined;
   readonly emailFrom: string | undefined;
   readonly alertEmail: string | undefined;
+  readonly posthogKey?: string | undefined;
+  readonly posthogHost?: string | undefined;
   readonly trustedProxyHops: number;
   readonly shareKeyVersion: number;
   readonly androidAssetlinksSha256: string | undefined;
@@ -116,6 +119,8 @@ export const KVITBIT_MAIL_DEFAULTS = {
   cidr: "10.42.16.0/28",
 } as const;
 
+export const DEFAULT_POSTHOG_HOST = "https://eu.i.posthog.com";
+
 export const KVITBIT_TURBO_CACHE_DEFAULTS = {
   image: "ducktors/turborepo-remote-cache:2.14.4",
   port: 3000,
@@ -125,6 +130,11 @@ export const KVITBIT_TURBO_CACHE_DEFAULTS = {
 } as const;
 
 const DIGEST_PATTERN = /^sha256:[a-f0-9]{64}$/;
+// The URL parser repairs some invalid input. Check the raw authority and path syntax first.
+const POSTHOG_URL_PATTERN =
+  /^https:\/\/(?<hostname>\[[a-f0-9:.]+\]|[a-z0-9.\u00a0-\u{10fffd}-]+)(?::[0-9]*)?(?:\/(?:[a-z0-9!$&'()*+,./:;=@_~-]|%[a-f0-9]{2}|[\u00a0-\u{10fffd}])*)?$/iu;
+const INVALID_URL_CODE_POINT = /[\p{Surrogate}\p{Noncharacter_Code_Point}]/u;
+const DNS_LABEL_PATTERN = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 const DOMAIN_PATTERN = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/;
 const EMAIL_PATTERN = /^[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9-]+(?:\.[a-z0-9-]+)+$/;
 const EMAIL_ADDRESS_PATTERN =
@@ -262,6 +272,19 @@ export const stackLabels = (config: KvitbitStackConfig): Record<string, string> 
   "managed-by": "alchemy",
 });
 
+const isValidPosthogHost = (value: string): boolean => {
+  const hostname = POSTHOG_URL_PATTERN.exec(value)?.groups?.hostname;
+  if (hostname === undefined || INVALID_URL_CODE_POINT.test(value)) return false;
+
+  const url = URL.parse(value);
+  if (url === null) return false;
+  if (hostname.startsWith("[")) return true;
+  if (isIPv4(url.hostname)) return hostname === url.hostname;
+
+  const domain = url.hostname.replace(/\.$/, "");
+  return domain.length <= 253 && domain.split(".").every((label) => DNS_LABEL_PATTERN.test(label));
+};
+
 export const validateStackConfig = (
   config: KvitbitStackConfig,
 ): Effect.Effect<KvitbitStackConfig, InvalidStackConfig> =>
@@ -321,6 +344,21 @@ export const validateStackConfig = (
       return yield* new InvalidStackConfig({
         field: "KVITBIT_ALERT_EMAIL",
         reason: "must be a single email address",
+      });
+    }
+    if (
+      config.posthogKey !== undefined &&
+      (!config.posthogKey.startsWith("phc_") || /\s/.test(config.posthogKey))
+    ) {
+      return yield* new InvalidStackConfig({
+        field: "KVITBIT_POSTHOG_KEY",
+        reason: "must start with phc_ and contain no whitespace",
+      });
+    }
+    if (config.posthogHost !== undefined && !isValidPosthogHost(config.posthogHost)) {
+      return yield* new InvalidStackConfig({
+        field: "KVITBIT_POSTHOG_HOST",
+        reason: "must be a valid HTTPS URL without a query, fragment, or credentials",
       });
     }
     for (const domain of config.dnsZones) {
@@ -491,7 +529,10 @@ export const validateStackConfig = (
         });
       }
     }
-    return config;
+    const posthogHost =
+      config.posthogHost?.replace(/\/+$/, "") ??
+      (config.posthogKey === undefined ? undefined : DEFAULT_POSTHOG_HOST);
+    return posthogHost === config.posthogHost ? config : { ...config, posthogHost };
   });
 
 const optionalNonEmptyString = (name: string) =>
@@ -612,6 +653,8 @@ export const loadStackConfig: Effect.Effect<
   const appOrigin = yield* optionalNonEmptyString("KVITBIT_APP_ORIGIN");
   const emailFrom = yield* optionalNonEmptyString("KVITBIT_EMAIL_FROM");
   const alertEmail = yield* optionalNonEmptyString("KVITBIT_ALERT_EMAIL");
+  const posthogKey = yield* optionalNonEmptyString("KVITBIT_POSTHOG_KEY");
+  const posthogHost = yield* optionalNonEmptyString("KVITBIT_POSTHOG_HOST");
   const androidAssetlinksSha256 = yield* optionalNonEmptyString(
     "KVITBIT_ANDROID_ASSETLINKS_SHA256",
   );
@@ -750,6 +793,8 @@ export const loadStackConfig: Effect.Effect<
     appOrigin,
     emailFrom,
     alertEmail,
+    posthogKey,
+    posthogHost,
     trustedProxyHops,
     shareKeyVersion,
     androidAssetlinksSha256,

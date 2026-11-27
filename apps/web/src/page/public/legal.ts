@@ -39,15 +39,18 @@ const local = copy({
     termsS3Body:
       "Své doklady, přílohy a přehledy můžete kdykoli exportovat ve formátech CSV a PDF. V případě vlastního hostingu (self-hosting) odpovídá za zálohy a provoz správce instalace.",
     privacyIntro:
-      "Ochrana osobních údajů podle nařízení (EU) 2016/679 (GDPR). Zpracováváme pouze údaje nezbytné pro provoz vašeho účtu a fakturace.",
+      "Ochrana osobních údajů podle nařízení (EU) 2016/679 (GDPR). Zpracováváme údaje pro provoz vašeho účtu, fakturaci a měření používání služby.",
     privacyS1Title: "1. Jaké údaje zpracováváme",
     privacyS1Body:
       "Identifikační a kontaktní údaje účtu (e-mail, jméno, přístupové klíče), údaje pracovního prostoru (IČO, DIČ, bankovní účty) a data dokladů a kontaktů, které do služby uložíte.",
     privacyS2Title: "2. Soubory cookie a místní úložiště",
     privacyS2Body:
-      "Používáme pouze technicky nezbytné soubory cookie pro přihlášenou relaci a uložení předvoleb rozhraní (jazyk, motiv, kontrast). Nepoužíváme reklamní ani sledovací soubory cookie třetích stran.",
-    privacyS3Title: "3. Veřejné odkazy a vaše práva",
+      "Používáme pouze technicky nezbytné soubory cookie pro přihlášenou relaci a uložení předvoleb rozhraní (jazyk, motiv, kontrast). Nepoužíváme reklamní ani sledovací soubory cookie.",
+    privacyS3Title: "3. Analytika bez souborů cookie",
     privacyS3Body:
+      "Na webu a v mobilní webové aplikaci měříme návštěvy stránek pomocí PostHog EU (Frankfurt nad Mohanem, Německo). Do analytiky posíláme jen zobecněné adresy stránek bez parametrů a přístupových tokenů. PostHog používá IP adresu a informace o prohlížeči k výpočtu denní statistiky návštěvnosti bez souborů cookie. Obsah faktur ani osobní údaje vašich zákazníků do PostHog neposíláme.",
+    privacyS4Title: "4. Veřejné odkazy a vaše práva",
+    privacyS4Body:
       "Veřejné odkazy na doklady (/i/:token) jsou neveřejné a neindexované vyhledávači. Máte právo na přístup ke svým údajům, jejich opravu, export a smazání účtu v sekci Účet.",
   },
   en: {
@@ -66,15 +69,18 @@ const local = copy({
     termsS3Body:
       "You can export your documents, attachments, and reports at any time in CSV and PDF formats. For self-hosted installations, the installation operator is responsible for backups and uptime.",
     privacyIntro:
-      "Privacy notice under Regulation (EU) 2016/679 (GDPR). We process only the data required to operate your account and invoicing workspaces.",
+      "Privacy notice under Regulation (EU) 2016/679 (GDPR). We process data to run your account and invoicing workspaces and measure how the service is used.",
     privacyS1Title: "1. Data we process",
     privacyS1Body:
       "Account details (email, name, passkey credentials), workspace business records (IČO, DIČ, bank accounts), and the documents, expenses, and contacts you store.",
     privacyS2Title: "2. Cookies and local storage",
     privacyS2Body:
-      "We use strictly necessary cookies for your authenticated session and UI preferences (language, theme, contrast). We do not use third-party advertising or tracking cookies.",
-    privacyS3Title: "3. Shared links and your rights",
+      "We use strictly necessary cookies for your authenticated session and UI preferences (language, theme, contrast). We do not use advertising or tracking cookies.",
+    privacyS3Title: "3. Cookieless analytics",
     privacyS3Body:
+      "We measure page visits on our website and mobile web app using PostHog EU (Frankfurt, Germany). We send only generalised page addresses with parameters and access tokens removed. PostHog uses IP addresses and browser information to calculate daily visit statistics without cookies. We do not send invoice contents or your customers' personal data to PostHog.",
+    privacyS4Title: "4. Shared links and your rights",
+    privacyS4Body:
       "Public document share links (/i/:token) are unindexed and revocable at any time. You have the right to access, correct, export, or delete your account data from Account settings.",
   },
 });
@@ -125,6 +131,10 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
           {
             title: local(ctx.locale, "privacyS3Title"),
             body: local(ctx.locale, "privacyS3Body"),
+          },
+          {
+            title: local(ctx.locale, "privacyS4Title"),
+            body: local(ctx.locale, "privacyS4Body"),
           },
         ];
 

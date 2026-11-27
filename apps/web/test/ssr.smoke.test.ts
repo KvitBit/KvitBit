@@ -71,6 +71,21 @@ const assertCleanSsr = (
 };
 
 describe("server render smoke (all route groups × cs/en)", () => {
+  test("discloses cookieless product analytics in Czech and English", async () => {
+    const { html: cs } = await renderPath("/legal/privacy", { locale: "cs", session: anonymous });
+    const { html: en } = await renderPath("/legal/privacy", { locale: "en", session: anonymous });
+
+    expect(cs).toContain("PostHog EU (Frankfurt nad Mohanem, Německo)");
+    expect(cs).toContain("Analytika bez souborů cookie");
+    expect(cs).toContain("Nepoužíváme reklamní ani sledovací soubory cookie.");
+    expect(cs).toContain("Obsah faktur ani osobní údaje vašich zákazníků");
+    expect(en).toContain("PostHog EU (Frankfurt, Germany)");
+    expect(en).toContain("Cookieless analytics");
+    expect(en).toContain("We do not use advertising or tracking cookies.");
+    expect(en).toContain("We do not send invoice contents");
+    expect(en).toContain("personal data to PostHog.");
+  });
+
   test("covers all 22 route cases across both locales", () => {
     expect(ROUTE_GROUPS.length).toBe(22);
     expect(LOCALES).toEqual(["cs", "en"]);
