@@ -76,17 +76,16 @@ const WORKSPACE_API_KEY = /kvb_[a-zA-Z\d-]{8,64}_[a-zA-Z\d_-]*/g;
 export const redactFeedbackApiKeys = (value: string) =>
   value.replaceAll(WORKSPACE_API_KEY, REDACTED_VALUE);
 
+const SHARE_PATHS = ["/i", "/s", "/api/v1/share"];
 const SENSITIVE_PATHS = [
   REDACTED_PATH,
-  "/i",
-  "/s",
+  ...SHARE_PATHS,
   "/invite",
   "/auth",
   "/consent",
   "/oauth/consent",
   "/reset-password",
   "/check-email",
-  "/api/v1/share",
   "/api/v1/invitations",
   "/api/auth/callback",
   "/api/auth/magic-link",
@@ -95,21 +94,49 @@ const SENSITIVE_PATHS = [
   "/api/auth/oauth2",
 ];
 
-const sensitivePath = (path: string) => {
+const feedbackRoutes = (path: string) => {
   const normalized = path
     .replaceAll("\\", "/")
     .replaceAll(/\/{2,}/g, "/")
     .toLowerCase();
   // The decode loop below can reveal dot segments that the first URL parse did not resolve.
   const canonical = new URL(`https://feedback.invalid${normalized}`).pathname;
-  return [normalized, canonical].some((candidate) => {
-    const route = candidate.replace(/^\/app(?=\/)/, "");
-    return (
-      WORKSPACE_API_KEYS_PATH.test(route) ||
-      SENSITIVE_PATHS.some((prefix) => route === prefix || route.startsWith(`${prefix}/`))
-    );
-  });
+  return [normalized, canonical].map((candidate) => candidate.replace(/^\/app(?=\/)/, ""));
 };
+
+const sensitivePath = (path: string) =>
+  feedbackRoutes(path).some(
+    (route) =>
+      WORKSPACE_API_KEYS_PATH.test(route) ||
+      SENSITIVE_PATHS.some((prefix) => route === prefix || route.startsWith(`${prefix}/`)),
+  );
+
+const EMBEDDED_URL = /(?:https?:\/\/|(?<![\w./%\\-])(?:\/|%(?:25)*2f))[^\s<>"'`()[\]{}]+/gi;
+
+const hasSharePath = (value: string) => {
+  let path: string;
+  try {
+    path = new URL(value, "https://feedback.invalid").pathname;
+  } catch {
+    return false;
+  }
+
+  for (let depth = 0; depth < 8; depth++) {
+    if (feedbackRoutes(path).some((route) => SHARE_PATHS.some((p) => route.startsWith(`${p}/`))))
+      return true;
+    // Decode path bytes individually so a malformed escape cannot hide an encoded route.
+    const decoded = path.replaceAll(/%([\da-f]{2})/gi, (_, byte: string) =>
+      String.fromCharCode(Number.parseInt(byte, 16)),
+    );
+    if (decoded === path) return false;
+    path = decoded;
+  }
+  return true;
+};
+
+/** Removes embedded document share URLs from feedback text, including root-relative links. */
+export const redactFeedbackShareUrls = (value: string) =>
+  value.replaceAll(EMBEDDED_URL, (url) => (hasSharePath(url) ? REDACTED_VALUE : url));
 
 /** Removes URL credentials, query, fragment and paths that may contain access tokens. */
 export const sanitizeFeedbackPageUrl = (value: string) => {
