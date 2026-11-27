@@ -303,6 +303,7 @@ const isValidDomain = (domain: string): boolean => {
 const hasDisallowedLocalChar = (local: string): boolean => {
   for (const ch of local) {
     const code = ch.charCodeAt(0);
+    // Reject ASCII controls/space and unquoted RFC 5322 specials; permit UTF8-non-ascii (>= 0x80) per RFC 6532 §3.2.
     if (
       code <= 0x20 ||
       code === 0x7f ||
@@ -312,8 +313,7 @@ const hasDisallowedLocalChar = (local: string): boolean => {
       ch === "\\" ||
       ch === '"' ||
       ch === "," ||
-      ch === ";" ||
-      /\s/.test(ch)
+      ch === ";"
     ) {
       return true;
     }
@@ -369,15 +369,17 @@ const stripRfc5322Comments = (input: string): string => {
       out += ch;
     }
   }
-  return out.trim();
+  return trimAsciiWsp(out);
 };
 
-/** Collapses RFC 5322 §3.4.1 legal CFWS adjacent to `@` and dots in header addr-specs only. */
+/** Trims only RFC 5322 ASCII WSP (space/tab), preserving non-ASCII UTF-8 characters like U+00A0. */
+const trimAsciiWsp = (value: string): string => value.replace(/^[ \t]+|[ \t]+$/g, "");
+
+/** Collapses RFC 5322 §3.2.2 ASCII WSP adjacent to `@` and dots in header addr-specs only. */
 const normalizeHeaderAddrSpec = (rawAddr: string): string =>
-  rawAddr
-    .trim()
-    .replace(/\s*@\s*/g, "@")
-    .replace(/\s*\.\s*/g, ".");
+  trimAsciiWsp(rawAddr)
+    .replace(/[ \t]*@[ \t]*/g, "@")
+    .replace(/[ \t]*\.[ \t]*/g, ".");
 
 export const extractAddress = (
   headerValue: string | undefined,
@@ -386,7 +388,7 @@ export const extractAddress = (
   // Strip RFC 5322 comments (including trailing/inline comments) before RFC 2047 decoding
   // so neither comments nor encoded display-names can break or spoof angle-addr parsing.
   const uncommented = stripRfc5322Comments(headerValue);
-  const angleMatch = uncommented.match(/^([\s\S]*?)<\s*([^<>]+?)\s*>\s*$/);
+  const angleMatch = uncommented.match(/^([\s\S]*?)<[ \t]*([^<>]+?)[ \t]*>[ \t]*$/);
   if (angleMatch) {
     const rawName = decodeRfc2047(angleMatch[1] ?? "")
       .trim()
@@ -398,8 +400,8 @@ export const extractAddress = (
       displayName: rawName.length > 0 ? rawName : undefined,
     };
   }
-  // Bare header: collapse legal CFWS around `@` / `.`, then validate the full address token
-  // rather than matching an ASCII substring inside an internationalized mailbox.
+  // Bare header: collapse ASCII WSP around `@` / `.` without stripping non-ASCII chars like U+00A0,
+  // then validate the full address token rather than matching an ASCII substring.
   const bareAddr = normalizeHeaderAddrSpec(uncommented);
   return {
     address: isValidMailbox(bareAddr) ? bareAddr : undefined,
@@ -409,6 +411,7 @@ export const extractAddress = (
 
 interface BodySegment {
   readonly text?: string;
+  readonly fallbackText?: string;
   readonly html?: string;
 }
 
@@ -449,16 +452,19 @@ const renderSegments = (
 ): {
   readonly text: string | undefined;
   readonly html: string | undefined;
-  readonly hasExplicitText: boolean;
+  readonly isFullyAuthoredText: boolean;
 } => {
   const hasAnyHtml = segments.some((seg) => seg.html !== undefined);
-  const hasExplicitText = segments.some((seg) => seg.text !== undefined);
+  const isFullyAuthoredText =
+    segments.length > 0 && segments.every((seg) => seg.text !== undefined);
   const renderedTextParts: Array<string> = [];
   const renderedHtmlParts: Array<string> = [];
 
   for (const seg of segments) {
     if (seg.text !== undefined) {
       renderedTextParts.push(seg.text);
+    } else if (seg.fallbackText !== undefined) {
+      renderedTextParts.push(seg.fallbackText);
     } else if (seg.html !== undefined) {
       const stripped = stripHtmlToText(seg.html);
       if (stripped.length > 0) renderedTextParts.push(stripped);
@@ -467,8 +473,11 @@ const renderSegments = (
     if (hasAnyHtml) {
       if (seg.html !== undefined) {
         renderedHtmlParts.push(seg.html);
-      } else if (seg.text !== undefined) {
-        renderedHtmlParts.push(plainTextToHtml(seg.text));
+      } else {
+        const plainSource = seg.text ?? seg.fallbackText;
+        if (plainSource !== undefined) {
+          renderedHtmlParts.push(plainTextToHtml(plainSource));
+        }
       }
     }
   }
@@ -476,7 +485,7 @@ const renderSegments = (
   return {
     text: renderedTextParts.length > 0 ? renderedTextParts.join("\n\n") : undefined,
     html: renderedHtmlParts.length > 0 ? renderedHtmlParts.join("<hr>") : undefined,
-    hasExplicitText,
+    isFullyAuthoredText,
   };
 };
 
@@ -491,13 +500,12 @@ const walkEntity = (raw: Uint8Array, out: CollectedParts, depth: number): void =
 
   if (mimeType.startsWith("multipart/") && contentType.params.boundary) {
     if (mimeType === "multipart/alternative") {
-      // Per RFC 2046 §5.1.4, render each direct child completely (including nested
-      // multipart/mixed or multipart/alternative children) before selecting alternatives.
-      // Only propagate authored plain text (`plainAltText`) in `segment.text`; HTML-only
-      // alternatives emit `{ html }` alone so an outer multipart/alternative never mistakes
-      // HTML-stripped fallback text for authored plain text (top-level renderSegments derives
-      // stripped text automatically when no authored plain text exists).
-      let plainAltText: string | undefined;
+      // Per RFC 2046 §5.1.4, render each direct child completely before selecting alternatives.
+      // Only children whose entire representation is authored plain text populate `segment.text`;
+      // HTML-derived or partially-HTML mixed children populate `segment.fallbackText` so they
+      // preserve `\n\n` part boundaries without overwriting an authored plain-text sibling.
+      let authoredPlainText: string | undefined;
+      let fallbackPlainText: string | undefined;
       let richestHtml: string | undefined;
       const attachments: Array<ParsedAttachment> = [];
 
@@ -505,8 +513,10 @@ const walkEntity = (raw: Uint8Array, out: CollectedParts, depth: number): void =
         const childBucket: CollectedParts = { segments: [], attachments: [] };
         walkEntity(child, childBucket, depth + 1);
         const rendered = renderSegments(childBucket.segments);
-        if (rendered.hasExplicitText && rendered.text !== undefined) {
-          plainAltText = rendered.text;
+        if (rendered.isFullyAuthoredText && rendered.text !== undefined) {
+          authoredPlainText = rendered.text;
+        } else if (rendered.text !== undefined) {
+          fallbackPlainText = rendered.text;
         }
         if (rendered.html !== undefined) {
           richestHtml = rendered.html;
@@ -514,9 +524,16 @@ const walkEntity = (raw: Uint8Array, out: CollectedParts, depth: number): void =
         attachments.push(...childBucket.attachments);
       }
 
-      if (plainAltText !== undefined || richestHtml !== undefined) {
+      if (
+        authoredPlainText !== undefined ||
+        fallbackPlainText !== undefined ||
+        richestHtml !== undefined
+      ) {
         out.segments.push({
-          ...(plainAltText !== undefined ? { text: plainAltText } : {}),
+          ...(authoredPlainText !== undefined ? { text: authoredPlainText } : {}),
+          ...(authoredPlainText === undefined && fallbackPlainText !== undefined
+            ? { fallbackText: fallbackPlainText }
+            : {}),
           ...(richestHtml !== undefined ? { html: richestHtml } : {}),
         });
       }

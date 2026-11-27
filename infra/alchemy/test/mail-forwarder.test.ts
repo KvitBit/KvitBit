@@ -253,6 +253,63 @@ describe("MIME parser", () => {
     const reverseNestedAltParsed = parseEmail(Buffer.from(reverseNestedAltRaw, "utf8"));
     expect(reverseNestedAltParsed.text).toBe("Authored 123");
     expect(reverseNestedAltParsed.html).toBe("<p>Latest HTML</p>");
+
+    // Mixed child with HTML + plain footer must NOT overwrite an outer authored plain sibling.
+    const mixedHtmlPlainChildRaw = [
+      "From: orders@example.com",
+      "To: ops@kvitbit.com",
+      "Subject: Order ref",
+      'Content-Type: multipart/alternative; boundary="outer-mix"',
+      "",
+      "--outer-mix",
+      'Content-Type: text/plain; charset="utf-8"',
+      "",
+      "Order reference 123",
+      "--outer-mix",
+      'Content-Type: multipart/mixed; boundary="inner-mix"',
+      "",
+      "--inner-mix",
+      'Content-Type: text/html; charset="utf-8"',
+      "",
+      "<p>Order details</p>",
+      "--inner-mix",
+      'Content-Type: text/plain; charset="utf-8"',
+      "",
+      "Footer",
+      "--inner-mix--",
+      "--outer-mix--",
+      "",
+    ].join("\r\n");
+    const mixedHtmlPlainParsed = parseEmail(Buffer.from(mixedHtmlPlainChildRaw, "utf8"));
+    expect(mixedHtmlPlainParsed.text).toBe("Order reference 123");
+    expect(mixedHtmlPlainParsed.html).toContain("<p>Order details</p>");
+    expect(mixedHtmlPlainParsed.html).toContain("Footer");
+
+    // Alternative containing only a mixed child of two HTML parts must keep `\n\n` part boundary in text.
+    const htmlOnlyMixedChildRaw = [
+      "From: orders@example.com",
+      "To: ops@kvitbit.com",
+      "Subject: Two HTML parts",
+      'Content-Type: multipart/alternative; boundary="outer-two"',
+      "",
+      "--outer-two",
+      'Content-Type: multipart/mixed; boundary="inner-two"',
+      "",
+      "--inner-two",
+      'Content-Type: text/html; charset="utf-8"',
+      "",
+      "<p>Order</p>",
+      "--inner-two",
+      'Content-Type: text/html; charset="utf-8"',
+      "",
+      "<p>123</p>",
+      "--inner-two--",
+      "--outer-two--",
+      "",
+    ].join("\r\n");
+    const htmlOnlyMixedParsed = parseEmail(Buffer.from(htmlOnlyMixedChildRaw, "utf8"));
+    expect(htmlOnlyMixedParsed.text).toBe("Order\n\n123");
+    expect(htmlOnlyMixedParsed.html).toBe("<p>Order</p><hr><p>123</p>");
   });
 
   test("parses RFC 5322 trailing/inline comments, case-distinct local-part Reply-To, and UTF-8 Reply-To", () => {
@@ -363,6 +420,41 @@ describe("MIME parser", () => {
     expect(utf8ReplyPayload.reply_to).toBeUndefined();
     expect(String(utf8ReplyPayload.text)).toContain("Original Reply-To: žan@example.net");
     expect(String(utf8ReplyPayload.html)).toContain("<strong>Reply-To:</strong> žan@example.net");
+
+    // Non-ASCII U+00A0 in local-part must not be stripped by ASCII WSP normalization:
+    // keep verbatim UTF-8 address in body and omit ASCII-only reply_to.
+    const nbspAddr = "billing\u00a0@example.org";
+    expect(extractAddress(nbspAddr)).toEqual({
+      address: nbspAddr,
+      displayName: undefined,
+    });
+    const nbspRaw = Buffer.from(
+      [
+        `From: ${nbspAddr}`,
+        "To: ops@kvitbit.com",
+        "Subject: NBSP local part",
+        'Content-Type: text/plain; charset="utf-8"',
+        "",
+        "Body",
+      ].join("\r\n"),
+      "utf8",
+    );
+    const nbspMsg: InboundMessage = {
+      ...commentedMsg,
+      mailFrom: nbspAddr,
+      rawBytes: nbspRaw,
+    };
+    const nbspPayload = buildResendForwardPayload({
+      message: nbspMsg,
+      parsed: parseEmail(nbspRaw),
+      deliveryFingerprint: computeDeliveryFingerprint(nbspMsg),
+      archiveBucket: "kvitbit-prod-mail-archive-prod",
+      forwardTo: "filkalny@gmail.com",
+      forwardFrom: "forwarder@kvitbit.com",
+      maxAttachmentBytes: 7 * 1024 * 1024,
+    });
+    expect(nbspPayload.reply_to).toBeUndefined();
+    expect(String(nbspPayload.text)).toContain(`Original From: ${nbspAddr}`);
   });
 
   test("extracts full UTF-8 bare mailbox without ASCII substring truncation and omits non-ASCII reply_to", () => {
@@ -685,7 +777,9 @@ describe("Effect MailRelay (GCS archive + Resend HTTPS)", () => {
       headers?: Record<string, string>;
     };
     expect(bigPayload.html).toContain(bigExpectedUri);
-    expect(bigPayload.text).toContain(bigExpectedUri);
+    expect(bigPayload.text).toContain(
+      `Omitted large attachment(s): huge.pdf (256 bytes) (see ${bigExpectedUri})`,
+    );
     expect(bigPayload.headers?.["X-Kvitbit-Archive-Prefix"]).toBe(bigExpectedUri);
   });
 
