@@ -39,6 +39,7 @@ import {
   page,
   pageHeader,
   selectField,
+  separator,
   skeleton,
   table,
   tabs,
@@ -1127,7 +1128,7 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
         checked: model.pricesIncludeVat,
         onToggle: (checked) => Message.ToggledPricesIncludeVat({ checked }),
       }),
-      h.hr.class("kb-divider"),
+      separator(h),
       cardTitle(h, txt(locale, "linesTitle"), [
         button(h, { label: txt(locale, "addLine"), onClick: Message.AddedLine(), small: true }),
       ]),
@@ -1383,6 +1384,7 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
           dialog(h, {
             id: "dlg-archive-template",
             title: txt(locale, "archiveDialogTitle"),
+            alert: true,
             onClose: Message.ClosedArchiveDialog(),
             body: [h.p.children([txt(locale, "archiveDialogBody")])],
             actions: [

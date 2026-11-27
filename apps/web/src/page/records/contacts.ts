@@ -39,12 +39,14 @@ import {
   mono,
   page,
   pageHeader,
+  searchInput,
   selectField,
   skeleton,
   skeletonTable,
   table,
   textArea,
   textField,
+  toggleChip,
 } from "../../ui/kit";
 import {
   apiCommand,
@@ -1149,33 +1151,29 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
       h.div.class("kb-rec-toolbar").children([
         h.div.class("kb-rec-search").children([
           h.span.class("kb-rec-search__icon").children([icon(h, "search", 16)]),
-          h.input
-            .class("kb-input")
-            .attr("type", "search")
-            .attr("placeholder", tr.t("contacts.list.search"))
-            .attr("aria-label", tr.t("contacts.list.search"))
-            .value(model.search)
-            .on("input", ({ value }) => Message.ChangedSearch({ value })),
+          searchInput(h, {
+            value: model.search,
+            placeholder: tr.t("contacts.list.search"),
+            ariaLabel: tr.t("contacts.list.search"),
+            onInput: (value) => Message.ChangedSearch({ value }),
+          }),
         ]),
         h.div.class("kb-rec-chips").children([
-          h.button
-            .class("kb-chip")
-            .attr("type", "button")
-            .attr("aria-pressed", String(model.roleFilter === null ? "true" : "false"))
-            .on("click", Message.SelectedRoleFilter({ role: null }))
-            .children([tLocal(ctx.locale, "allRoles")]),
-          h.button
-            .class("kb-chip")
-            .attr("type", "button")
-            .attr("aria-pressed", String(model.roleFilter === "customer" ? "true" : "false"))
-            .on("click", Message.SelectedRoleFilter({ role: "customer" }))
-            .children([tLocal(ctx.locale, "customers")]),
-          h.button
-            .class("kb-chip")
-            .attr("type", "button")
-            .attr("aria-pressed", String(model.roleFilter === "supplier" ? "true" : "false"))
-            .on("click", Message.SelectedRoleFilter({ role: "supplier" }))
-            .children([tLocal(ctx.locale, "suppliers")]),
+          toggleChip(h, {
+            label: tLocal(ctx.locale, "allRoles"),
+            pressed: model.roleFilter === null,
+            onPress: Message.SelectedRoleFilter({ role: null }),
+          }),
+          toggleChip(h, {
+            label: tLocal(ctx.locale, "customers"),
+            pressed: model.roleFilter === "customer",
+            onPress: Message.SelectedRoleFilter({ role: "customer" }),
+          }),
+          toggleChip(h, {
+            label: tLocal(ctx.locale, "suppliers"),
+            pressed: model.roleFilter === "supplier",
+            onPress: Message.SelectedRoleFilter({ role: "supplier" }),
+          }),
           checkbox(h, {
             id: "contacts-show-archived",
             label: tr.t("contacts.list.showArchived"),
@@ -1871,6 +1869,7 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
       ? dialog(h, {
           id: "contact-archive-dialog",
           title: tLocal(ctx.locale, "archiveTitle"),
+          alert: true,
           onClose: Message.CancelledArchive(),
           body: [h.p.children([tLocal(ctx.locale, "archiveBody", { name: contact.name })])],
           actions: [
