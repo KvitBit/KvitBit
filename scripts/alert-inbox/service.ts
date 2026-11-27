@@ -5,10 +5,13 @@
  *   missing `gcloud`, missing buckets, or permissions errors; only returning empty when the
  *   bucket is confirmed reachable).
  * - Cryptographically verifies RFC 6376 / RFC 8301 / RFC 8463 DKIM signatures against an
- *   explicit sender-domain allowlist (default: `google.com,posthog.com`).
- * - Deduplicates authenticated alerts in a scoped SQLite store with exponential retry backoff
- *   (preventing failing objects from starving fresh alerts) and claim + marker reconciliation
- *   (preventing duplicate GitHub issues when a create reply is lost).
+ *   explicit sender-domain allowlist (default: `google.com,posthog.com`), passing only verified
+ *   header instances (including top-level MIME headers) and verified body bytes to formatting.
+ * - Schedules fresh arrivals and due retries fairly (alternating turn persisted in SQLite so
+ *   neither queue starves even at `maxPerPass === 1`).
+ * - Acquires creation claims atomically in SQLite with leases so overlapping passes cannot
+ *   double-post, and reconciles outstanding authenticated claims against GitHub independently of
+ *   mutable labels BEFORE re-verifying DKIM (so key rotation cannot discard a committed issue).
  * - Always applies exclusively the `alert` label (never `visual-feedback`).
  */
 
@@ -17,7 +20,6 @@ import { mkdir } from "node:fs/promises";
 import { dirname } from "node:path";
 import { parseArgs } from "node:util";
 import { Clock, Context, Data, Effect, Layer } from "effect";
-import { parseEmail } from "../../infra/alchemy/src/mail-forwarder/mime";
 import { type DnsTxtResolver, DnsTxtResolverLive, verifyAlertDkim } from "./dkim";
 import {
   ALERT_ISSUE_LABEL,
@@ -30,6 +32,7 @@ import {
   type AlertStoreError,
   openAlertInboxStore,
   type ProcessedAlertRecord,
+  type SchedulerQueue,
 } from "./store";
 
 export const DEFAULT_ALERT_BUCKET = "kvitbit-prod-mail-archive-prod";
@@ -39,6 +42,7 @@ export const DEFAULT_ALLOWED_DOMAINS = ["google.com", "posthog.com"] as const;
 
 const BASE_RETRY_DELAY_MS = 5 * 60 * 1000;
 const MAX_RETRY_DELAY_MS = 60 * 60 * 1000;
+const CLAIM_LEASE_MS = 5 * 60 * 1000;
 
 export class AlertInboxError extends Data.TaggedError("AlertInboxError")<{
   readonly reason: string;
@@ -180,6 +184,8 @@ export const makeGhAlertIssueTracker = (run: SubprocessRunner): AlertIssueTracke
       ),
     ),
 
+  // Query all repository issues independent of mutable labels so relabeling/triage cannot defeat
+  // lost-reply reconciliation.
   findExistingIssueByMarker: (repo, marker) =>
     run([
       "gh",
@@ -188,7 +194,7 @@ export const makeGhAlertIssueTracker = (run: SubprocessRunner): AlertIssueTracke
       "github.com",
       "--paginate",
       "--slurp",
-      `repos/${repo}/issues?state=all&labels=${encodeURIComponent(ALERT_ISSUE_LABEL)}&per_page=100`,
+      `repos/${repo}/issues?state=all&per_page=100`,
     ]).pipe(
       Effect.flatMap((buf) =>
         Effect.try({
@@ -309,6 +315,55 @@ const computeNextRetryIso = (nowMs: number, priorAttempts: number): string => {
   return new Date(nowMs + delayMs).toISOString();
 };
 
+interface QueuedCandidate {
+  readonly objectKey: string;
+  readonly prior: ProcessedAlertRecord | null;
+  readonly queue: SchedulerQueue;
+}
+
+const selectFairBatch = (
+  fresh: ReadonlyArray<QueuedCandidate>,
+  dueRetries: ReadonlyArray<QueuedCandidate>,
+  lastScheduledQueue: SchedulerQueue | null,
+  maxPerPass: number,
+): {
+  readonly batch: ReadonlyArray<QueuedCandidate>;
+  readonly nextLastScheduledQueue: SchedulerQueue | null;
+} => {
+  if (fresh.length === 0 && dueRetries.length === 0) {
+    return { batch: [], nextLastScheduledQueue: null };
+  }
+  if (fresh.length === 0) {
+    return { batch: dueRetries.slice(0, maxPerPass), nextLastScheduledQueue: "retry" };
+  }
+  if (dueRetries.length === 0) {
+    return { batch: fresh.slice(0, maxPerPass), nextLastScheduledQueue: "fresh" };
+  }
+
+  // Alternate starting queue whenever both queues have ready work so neither fresh arrivals nor
+  // due retries can starve, even when maxPerPass === 1.
+  const startWith: SchedulerQueue = lastScheduledQueue === "fresh" ? "retry" : "fresh";
+  const primary = startWith === "fresh" ? fresh : dueRetries;
+  const secondary = startWith === "fresh" ? dueRetries : fresh;
+  const batch: Array<QueuedCandidate> = [];
+  let p = 0;
+  let s = 0;
+  while (batch.length < maxPerPass && (p < primary.length || s < secondary.length)) {
+    const primaryItem = primary[p];
+    if (primaryItem !== undefined) {
+      batch.push(primaryItem);
+      p += 1;
+    }
+    if (batch.length >= maxPerPass) break;
+    const secondaryItem = secondary[s];
+    if (secondaryItem !== undefined) {
+      batch.push(secondaryItem);
+      s += 1;
+    }
+  }
+  return { batch, nextLastScheduledQueue: startWith };
+};
+
 export interface AlertInboxPassOptions {
   readonly apply: boolean;
   readonly bucket: string;
@@ -357,17 +412,13 @@ export const runAlertInboxPass = (
     const nowIso = new Date(nowMs).toISOString();
     const allObjects = yield* bucketSvc.listObjects(options.bucket, options.prefix);
 
-    // Separate fresh unseen objects from due retries so a failing object never starves new alerts.
-    const fresh: Array<{ readonly objectKey: string; readonly prior: null }> = [];
-    const dueRetries: Array<{
-      readonly objectKey: string;
-      readonly prior: ProcessedAlertRecord;
-    }> = [];
+    const fresh: Array<QueuedCandidate> = [];
+    const dueRetries: Array<QueuedCandidate> = [];
 
     for (const objectKey of allObjects) {
       const prior = yield* options.store.getObject(objectKey);
       if (prior === null) {
-        fresh.push({ objectKey, prior: null });
+        fresh.push({ objectKey, prior: null, queue: "fresh" });
         continue;
       }
       if (
@@ -377,20 +428,36 @@ export const runAlertInboxPass = (
       ) {
         continue;
       }
+      // Skip items currently leased by another active pass or still in backoff.
+      if (prior.claimExpiresAt !== null && prior.claimExpiresAt > nowIso) {
+        continue;
+      }
       if (prior.nextRetryAt !== null && prior.nextRetryAt > nowIso) {
         continue;
       }
-      dueRetries.push({ objectKey, prior });
+      dueRetries.push({ objectKey, prior, queue: "retry" });
     }
 
     dueRetries.sort((a, b) => {
-      if (a.prior.attemptCount !== b.prior.attemptCount) {
-        return a.prior.attemptCount - b.prior.attemptCount;
-      }
+      const retryA = a.prior?.nextRetryAt ?? "";
+      const retryB = b.prior?.nextRetryAt ?? "";
+      if (retryA !== retryB) return retryA.localeCompare(retryB);
+      const attemptsA = a.prior?.attemptCount ?? 0;
+      const attemptsB = b.prior?.attemptCount ?? 0;
+      if (attemptsA !== attemptsB) return attemptsA - attemptsB;
       return a.objectKey.localeCompare(b.objectKey);
     });
 
-    const batch = [...fresh, ...dueRetries].slice(0, options.maxPerPass);
+    const lastScheduledQueue = yield* options.store.getLastScheduledQueue();
+    const { batch, nextLastScheduledQueue } = selectFairBatch(
+      fresh,
+      dueRetries,
+      lastScheduledQueue,
+      options.maxPerPass,
+    );
+    if (options.apply && nextLastScheduledQueue !== null) {
+      yield* options.store.setLastScheduledQueue(nextLastScheduledQueue);
+    }
 
     const created: Array<{
       readonly objectKey: string;
@@ -412,7 +479,82 @@ export const runAlertInboxPass = (
     for (const { objectKey, prior } of batch) {
       const itemNowMs = yield* Clock.currentTimeMillis;
       const itemNowIso = new Date(itemNowMs).toISOString();
+      const leaseUntilIso = new Date(itemNowMs + CLAIM_LEASE_MS).toISOString();
       const priorAttempts = prior?.attemptCount ?? 0;
+
+      // If this object already holds an authenticated `claiming` state (from a prior DKIM-verified
+      // attempt whose GitHub reply was lost), reconcile against GitHub BEFORE re-verifying DKIM
+      // so routine sender key rotation/retirement cannot discard an already-committed issue.
+      let claimAlreadyAcquired = false;
+      let acquiredHolderObjectKey = objectKey;
+      if (options.apply && prior?.status === "claiming" && prior.dedupKey !== null) {
+        const claim = yield* options.store.tryClaimForCreation({
+          objectKey,
+          deliveryHash: prior.deliveryHash,
+          dedupKey: prior.dedupKey,
+          messageId: prior.messageId,
+          nowIso: itemNowIso,
+          leaseUntilIso,
+        });
+        if (claim.outcome === "in_flight") {
+          continue;
+        }
+        if (claim.outcome === "already_created") {
+          if (claim.objectKey !== objectKey) {
+            yield* options.store.markDuplicate({
+              objectKey,
+              deliveryHash: prior.deliveryHash,
+              dedupKey: prior.dedupKey,
+              messageId: prior.messageId,
+              issueNumber: claim.issueNumber,
+              reason: "Duplicate of already-created claim",
+              nowIso: itemNowIso,
+            });
+            duplicates.push({
+              objectKey,
+              matchedBy: "dedup_key",
+              existingIssueNumber: claim.issueNumber,
+            });
+          }
+          continue;
+        }
+
+        claimAlreadyAcquired = true;
+        acquiredHolderObjectKey = claim.holderObjectKey ?? objectKey;
+        const lookupResult = yield* Effect.result(
+          tracker.findExistingIssueByMarker(options.repo, alertIssueMarker(prior.dedupKey)),
+        );
+        if (lookupResult._tag === "Failure") {
+          failures.push({ objectKey, reason: lookupResult.failure.reason });
+          yield* options.store.markRetry({
+            objectKey: acquiredHolderObjectKey,
+            deliveryHash: prior.deliveryHash,
+            dedupKey: prior.dedupKey,
+            messageId: prior.messageId,
+            keepClaiming: true,
+            reason: lookupResult.failure.reason,
+            nextRetryAt: computeNextRetryIso(itemNowMs, priorAttempts),
+            nowIso: itemNowIso,
+          });
+          continue;
+        }
+        if (lookupResult.success !== null) {
+          const reconciledNumber = lookupResult.success.number;
+          yield* options.store.markCreated({
+            objectKey: acquiredHolderObjectKey,
+            issueNumber: reconciledNumber,
+            nowIso: itemNowIso,
+          });
+          created.push({
+            objectKey,
+            issueNumber: reconciledNumber,
+            title: `Reconciled issue #${reconciledNumber}`,
+            signingDomain: "reconciled",
+            reconciled: true,
+          });
+          continue;
+        }
+      }
 
       const rawResult = yield* Effect.result(bucketSvc.downloadObject(options.bucket, objectKey));
       if (rawResult._tag === "Failure") {
@@ -489,7 +631,6 @@ export const runAlertInboxPass = (
         continue;
       }
 
-      const parsed = parseEmail(rawBytes);
       const dedupKey = computeAuthenticatedDedupKey(deliveryHash, dkim.signedMessageId);
       const marker = alertIssueMarker(dedupKey);
 
@@ -518,7 +659,6 @@ export const runAlertInboxPass = (
       }
 
       const formatted = formatAlertIssue({
-        parsed,
         verified: dkim,
         archiveUri: `gs://${options.bucket}/${objectKey}`,
         dedupKey,
@@ -534,9 +674,45 @@ export const runAlertInboxPass = (
         continue;
       }
 
-      // If this object or another object with the same authenticated dedupKey is in `claiming`
-      // state (e.g. from a lost GitHub reply), reconcile against GitHub before creating.
-      const needsReconcile = prior?.status === "claiming" || existingAuth?.status === "claiming";
+      // Atomically acquire the creation lease for this authenticated dedupKey so overlapping
+      // passes cannot both post to GitHub.
+      let holderObjectKey = acquiredHolderObjectKey;
+      let needsReconcile = false;
+      if (!claimAlreadyAcquired) {
+        const claim = yield* options.store.tryClaimForCreation({
+          objectKey,
+          deliveryHash,
+          dedupKey,
+          messageId: dkim.signedMessageId ?? null,
+          nowIso: itemNowIso,
+          leaseUntilIso,
+        });
+        if (claim.outcome === "in_flight") {
+          continue;
+        }
+        if (claim.outcome === "already_created") {
+          duplicates.push({
+            objectKey,
+            matchedBy: "dedup_key",
+            existingIssueNumber: claim.issueNumber,
+          });
+          if (claim.objectKey !== objectKey) {
+            yield* options.store.markDuplicate({
+              objectKey,
+              deliveryHash,
+              dedupKey,
+              messageId: dkim.signedMessageId ?? null,
+              issueNumber: claim.issueNumber,
+              reason: "Duplicate by dedup_key",
+              nowIso: itemNowIso,
+            });
+          }
+          continue;
+        }
+        holderObjectKey = claim.holderObjectKey ?? objectKey;
+        needsReconcile = claim.needsReconcile;
+      }
+
       if (needsReconcile) {
         const lookupResult = yield* Effect.result(
           tracker.findExistingIssueByMarker(options.repo, marker),
@@ -544,7 +720,7 @@ export const runAlertInboxPass = (
         if (lookupResult._tag === "Failure") {
           failures.push({ objectKey, reason: lookupResult.failure.reason });
           yield* options.store.markRetry({
-            objectKey,
+            objectKey: holderObjectKey,
             deliveryHash,
             dedupKey,
             messageId: dkim.signedMessageId ?? null,
@@ -557,12 +733,12 @@ export const runAlertInboxPass = (
         }
         if (lookupResult.success !== null) {
           const reconciledNumber = lookupResult.success.number;
-          if (prior?.status === "claiming") {
-            yield* options.store.markCreated({
-              objectKey,
-              issueNumber: reconciledNumber,
-              nowIso: itemNowIso,
-            });
+          yield* options.store.markCreated({
+            objectKey: holderObjectKey,
+            issueNumber: reconciledNumber,
+            nowIso: itemNowIso,
+          });
+          if (holderObjectKey === objectKey) {
             created.push({
               objectKey,
               issueNumber: reconciledNumber,
@@ -571,13 +747,6 @@ export const runAlertInboxPass = (
               reconciled: true,
             });
           } else {
-            if (existingAuth !== null) {
-              yield* options.store.markCreated({
-                objectKey: existingAuth.objectKey,
-                issueNumber: reconciledNumber,
-                nowIso: itemNowIso,
-              });
-            }
             yield* options.store.markDuplicate({
               objectKey,
               deliveryHash,
@@ -604,11 +773,11 @@ export const runAlertInboxPass = (
         if (ensureResult._tag === "Failure") {
           failures.push({ objectKey, reason: ensureResult.failure.reason });
           yield* options.store.markRetry({
-            objectKey,
+            objectKey: holderObjectKey,
             deliveryHash,
             dedupKey,
             messageId: dkim.signedMessageId ?? null,
-            keepClaiming: prior?.status === "claiming",
+            keepClaiming: true,
             reason: ensureResult.failure.reason,
             nextRetryAt: computeNextRetryIso(itemNowMs, priorAttempts),
             nowIso: itemNowIso,
@@ -618,20 +787,11 @@ export const runAlertInboxPass = (
         labelEnsured = true;
       }
 
-      // Persist claim BEFORE posting so a lost reply reconciles instead of creating a duplicate.
-      yield* options.store.claimForCreation({
-        objectKey,
-        deliveryHash,
-        dedupKey,
-        messageId: dkim.signedMessageId ?? null,
-        nowIso: itemNowIso,
-      });
-
       const createResult = yield* Effect.result(tracker.createIssue(options.repo, formatted));
       if (createResult._tag === "Failure") {
         failures.push({ objectKey, reason: createResult.failure.reason });
         yield* options.store.markRetry({
-          objectKey,
+          objectKey: holderObjectKey,
           deliveryHash,
           dedupKey,
           messageId: dkim.signedMessageId ?? null,
@@ -644,16 +804,33 @@ export const runAlertInboxPass = (
       }
 
       yield* options.store.markCreated({
-        objectKey,
+        objectKey: holderObjectKey,
         issueNumber: createResult.success.number,
         nowIso: itemNowIso,
       });
-      created.push({
-        objectKey,
-        issueNumber: createResult.success.number,
-        title: formatted.title,
-        signingDomain: dkim.signingDomain,
-      });
+      if (holderObjectKey !== objectKey) {
+        yield* options.store.markDuplicate({
+          objectKey,
+          deliveryHash,
+          dedupKey,
+          messageId: dkim.signedMessageId ?? null,
+          issueNumber: createResult.success.number,
+          reason: `Created under holder ${holderObjectKey}`,
+          nowIso: itemNowIso,
+        });
+        duplicates.push({
+          objectKey,
+          matchedBy: "dedup_key",
+          existingIssueNumber: createResult.success.number,
+        });
+      } else {
+        created.push({
+          objectKey,
+          issueNumber: createResult.success.number,
+          title: formatted.title,
+          signingDomain: dkim.signingDomain,
+        });
+      }
     }
 
     return {

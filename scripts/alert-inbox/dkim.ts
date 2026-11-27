@@ -5,15 +5,19 @@
  * - Verifies raw RFC 5322 wire bytes directly (`rsa-sha256` with >= 1024-bit modulus per RFC 8301
  *   §3.2, and `ed25519-sha256` verifying the SHA-256 digest of the canonicalized signing input per
  *   RFC 8463 §3.3; rejects SHA-1).
- * - Rejects duplicate DKIM tags (RFC 6376 §3.2), `l=` body-length tags, expired `x=` signatures,
- *   revoked keys (`p=`), non-email DNS key services (`s=` without `*` or `email`), and `t=s`
- *   identity mismatches (`i=` domain vs `d=` per RFC 6376 §3.6.1).
+ * - Preserves RFC 6376 §3.2 case-sensitive tag names (`ALPHA *(ALPHA / DIGIT / "_")`), ignoring
+ *   unknown extension tags (e.g. `V=custom`) while rejecting exact duplicate tags and invalid
+ *   tag-name grammar.
+ * - Rejects `l=` body-length tags, expired `x=` signatures, revoked keys (`p=`), non-email DNS key
+ *   services (`s=` without `*` or `email`), and `t=s` identity mismatches (`i=` domain vs `d=` per
+ *   RFC 6376 §3.6.1).
  * - Rejects missing or duplicate `From:` headers, requires `from` in `h=`, and enforces both
  *   signing-domain (`d=`) allowlist membership and `From:` domain alignment under the same
  *   allowed root domain.
- * - Returns the exact cryptographically verified header instances (`fromHeader`, `signedSubject`,
- *   `signedDate`, `signedMessageId`) so downstream formatting and deduplication never trust
- *   unsigned or prepended duplicate headers.
+ * - Returns the exact cryptographically verified header instances (including top-level MIME
+ *   headers `signedContentType`, `signedContentDisposition`, `signedContentTransferEncoding`) and
+ *   exact verified body bytes so downstream formatting and deduplication never trust unsigned or
+ *   prepended duplicate headers.
  */
 
 import {
@@ -70,6 +74,10 @@ export interface DkimVerified {
   readonly signedSubject: string | undefined;
   readonly signedDate: string | undefined;
   readonly signedMessageId: string | undefined;
+  readonly signedContentType: string | undefined;
+  readonly signedContentDisposition: string | undefined;
+  readonly signedContentTransferEncoding: string | undefined;
+  readonly verifiedBodyBytes: Uint8Array;
 }
 
 export interface DkimRejected {
@@ -93,6 +101,8 @@ interface RawHeaderField {
 
 const ED25519_SPKI_PREFIX = Buffer.from("302a300506032b6570032100", "hex");
 const MIN_RSA_MODULUS_BITS = 1024;
+// RFC 6376 §3.2: tag-name = ALPHA *ALNUMPUNC ; ALNUMPUNC = ALPHA / DIGIT / "_"
+const RFC6376_TAG_NAME = /^[A-Za-z][A-Za-z0-9_]*$/;
 
 const normalizeDomain = (domain: string): string => domain.trim().toLowerCase().replace(/\.$/, "");
 
@@ -175,9 +185,11 @@ const parseRawHeaderFields = (headerRaw: string): ReadonlyArray<RawHeaderField> 
 };
 
 /**
- * Parses an RFC 6376 §3.2 tag=value list, rejecting duplicate tag names and malformed entries.
+ * Parses an RFC 6376 §3.2 tag=value list, preserving case-sensitive tag names,
+ * validating tag-name grammar (`ALPHA *(ALPHA / DIGIT / "_")`), and rejecting
+ * exact duplicate tag names and malformed entries.
  */
-const parseTagList = (raw: string): Map<string, string> | undefined => {
+export const parseTagList = (raw: string): Map<string, string> | undefined => {
   const tags = new Map<string, string>();
   const parts = raw.split(";");
   for (let i = 0; i < parts.length; i += 1) {
@@ -190,9 +202,9 @@ const parseTagList = (raw: string): Map<string, string> | undefined => {
     }
     const eq = trimmed.indexOf("=");
     if (eq <= 0) return undefined;
-    const key = trimmed.slice(0, eq).trim().toLowerCase();
+    const key = trimmed.slice(0, eq).trim();
     const value = trimmed.slice(eq + 1).trim();
-    if (key.length === 0 || tags.has(key)) {
+    if (!RFC6376_TAG_NAME.test(key) || tags.has(key)) {
       return undefined;
     }
     tags.set(key, value);
@@ -254,8 +266,9 @@ const emptyDkimSignatureBTag = (rawHeader: string): string | undefined => {
   const namePart = rawHeader.slice(0, colon + 1);
   const valuePart = rawHeader.slice(colon + 1);
   let replaced = false;
+  // Tag names are case-sensitive per RFC 6376 §3.2: strip only lowercase `b=`, not extension `B=`.
   const updated = valuePart.replace(
-    /(^|;)([\r\n \t]*b[\r\n \t]*=)([^;]*)/i,
+    /(^|;)([\r\n \t]*b[\r\n \t]*=)([^;]*)/,
     (_match, sep: string, prefix: string) => {
       replaced = true;
       return `${sep}${prefix}`;
@@ -595,6 +608,11 @@ export const verifyAlertDkim = (
         const rawSignedSubject = verifiedHeaderValues.get("subject")?.[0];
         const rawSignedDate = verifiedHeaderValues.get("date")?.[0];
         const rawSignedMessageId = verifiedHeaderValues.get("message-id")?.[0];
+        const rawSignedContentType = verifiedHeaderValues.get("content-type")?.[0];
+        const rawSignedContentDisposition = verifiedHeaderValues.get("content-disposition")?.[0];
+        const rawSignedContentTransferEncoding = verifiedHeaderValues.get(
+          "content-transfer-encoding",
+        )?.[0];
         return {
           _tag: "DkimVerified",
           signingDomain,
@@ -611,6 +629,17 @@ export const verifyAlertDkim = (
           signedDate: rawSignedDate !== undefined ? trimAsciiWsp(rawSignedDate) : undefined,
           signedMessageId:
             rawSignedMessageId !== undefined ? trimAsciiWsp(rawSignedMessageId) : undefined,
+          signedContentType:
+            rawSignedContentType !== undefined ? trimAsciiWsp(rawSignedContentType) : undefined,
+          signedContentDisposition:
+            rawSignedContentDisposition !== undefined
+              ? trimAsciiWsp(rawSignedContentDisposition)
+              : undefined,
+          signedContentTransferEncoding:
+            rawSignedContentTransferEncoding !== undefined
+              ? trimAsciiWsp(rawSignedContentTransferEncoding)
+              : undefined,
+          verifiedBodyBytes: Uint8Array.from(bodyBytes),
         };
       }
       failureReasons.push(`Cryptographic signature verification failed for ${dnsHost}`);

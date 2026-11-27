@@ -1,23 +1,25 @@
+import { Database } from "bun:sqlite";
 import { describe, expect, test } from "bun:test";
 import { createHash, generateKeyPairSync, type KeyObject, sign } from "node:crypto";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Effect, Layer } from "effect";
-import { parseEmail } from "../../infra/alchemy/src/mail-forwarder/mime";
 import {
   canonicalizeBody,
   canonicalizeHeaderField,
   DnsLookupError,
   DnsTxtResolver,
+  parseTagList,
   verifyAlertDkim,
 } from "./dkim";
-import { ALERT_ISSUE_LABEL, formatAlertIssue, redactAlertText } from "./issue";
+import { ALERT_ISSUE_LABEL, alertIssueMarker, formatAlertIssue, redactAlertText } from "./issue";
 import {
   AlertBucket,
   AlertInboxError,
   AlertIssueTracker,
   makeGcloudAlertBucket,
+  makeGhAlertIssueTracker,
   runAlertInboxPass,
 } from "./service";
 import { openAlertInboxStore } from "./store";
@@ -34,6 +36,9 @@ const buildDkimSignedMessage = (params: {
   readonly fromHeader: string;
   readonly subject?: string;
   readonly messageId?: string;
+  readonly contentType?: string;
+  readonly contentDisposition?: string;
+  readonly contentTransferEncoding?: string;
   readonly body: string;
   readonly canon?: "relaxed/relaxed" | "simple/simple";
   readonly prependHeaders?: ReadonlyArray<string>;
@@ -75,7 +80,11 @@ const buildDkimSignedMessage = (params: {
     ...(params.subject !== undefined ? [`Subject: ${params.subject}`] : []),
     "Date: Fri, 27 Nov 2026 21:00:00 +0000",
     ...(params.messageId ? [`Message-ID: ${params.messageId}`] : []),
-    'Content-Type: text/plain; charset="utf-8"',
+    `Content-Type: ${params.contentType ?? 'text/plain; charset="utf-8"'}`,
+    ...(params.contentDisposition ? [`Content-Disposition: ${params.contentDisposition}`] : []),
+    ...(params.contentTransferEncoding
+      ? [`Content-Transfer-Encoding: ${params.contentTransferEncoding}`]
+      : []),
     ...(params.extraHeaders ?? []),
   ];
 
@@ -85,6 +94,9 @@ const buildDkimSignedMessage = (params: {
     ...(params.subject !== undefined ? ["subject"] : []),
     "date",
     ...(params.messageId ? ["message-id"] : []),
+    "content-type",
+    ...(params.contentDisposition ? ["content-disposition"] : []),
+    ...(params.contentTransferEncoding ? ["content-transfer-encoding"] : []),
   ];
   const bodyBuf = Buffer.from(params.body, "utf8");
   const bh = createHash("sha256").update(canonicalizeBody(bodyBuf, bodyCanon)).digest("base64");
@@ -213,7 +225,7 @@ const RFC_8463_RSA_TXT =
   "Ip3G+2kryOTIKT+l/K4w3QIDAQAB";
 
 describe("RFC 6376 / RFC 8301 / RFC 8463 DKIM verifier", () => {
-  test("interoperates independently with BOTH RSA-SHA256 and Ed25519-SHA256 on published RFC 8463 Appendix A vector", async () => {
+  test("interoperates independently with BOTH RSA-SHA256 and Ed25519-SHA256 on published RFC 8463 Appendix A vector and allows case-distinct extension tags like V=custom", async () => {
     const edOnly = await Effect.runPromise(
       verifyAlertDkim(RFC_8463_APPENDIX_A_MESSAGE, ["example.com"]).pipe(
         Effect.provide(
@@ -223,8 +235,20 @@ describe("RFC 6376 / RFC 8301 / RFC 8463 DKIM verifier", () => {
         ),
       ),
     );
-    expect(edOnly).toEqual({
-      _tag: "DkimVerified",
+    expect(edOnly._tag).toBe("DkimVerified");
+    if (edOnly._tag !== "DkimVerified") throw new Error("expected verified");
+    expect({
+      signingDomain: edOnly.signingDomain,
+      selector: edOnly.selector,
+      algorithm: edOnly.algorithm,
+      fromHeader: edOnly.fromHeader,
+      fromAddress: edOnly.fromAddress,
+      fromDomain: edOnly.fromDomain,
+      matchedAllowedDomain: edOnly.matchedAllowedDomain,
+      signedSubject: edOnly.signedSubject,
+      signedDate: edOnly.signedDate,
+      signedMessageId: edOnly.signedMessageId,
+    }).toEqual({
       signingDomain: "football.example.com",
       selector: "brisbane",
       algorithm: "ed25519-sha256",
@@ -237,33 +261,30 @@ describe("RFC 6376 / RFC 8301 / RFC 8463 DKIM verifier", () => {
       signedMessageId: "<20030712040037.46341.5F8J@football.example.com>",
     });
 
-    const rsaOnly = await Effect.runPromise(
+    // RFC 6376 §3.2: tag names are case-sensitive, so `V=custom` alongside `v=DKIM1` is valid.
+    const rsaWithExtension = await Effect.runPromise(
       verifyAlertDkim(RFC_8463_APPENDIX_A_MESSAGE, ["example.com"]).pipe(
         Effect.provide(
           mockDnsLayer({
-            "test._domainkey.football.example.com": [RFC_8463_RSA_TXT],
+            "test._domainkey.football.example.com": [`V=custom; ${RFC_8463_RSA_TXT}`],
           }),
         ),
       ),
     );
-    expect(rsaOnly).toEqual({
-      _tag: "DkimVerified",
-      signingDomain: "football.example.com",
-      selector: "test",
-      algorithm: "rsa-sha256",
-      fromHeader: "Joe SixPack <joe@football.example.com>",
-      fromAddress: "joe@football.example.com",
-      fromDomain: "football.example.com",
-      matchedAllowedDomain: "example.com",
-      signedSubject: "Is dinner ready?",
-      signedDate: "Fri, 11 Jul 2003 21:00:37 -0700 (PDT)",
-      signedMessageId: "<20030712040037.46341.5F8J@football.example.com>",
-    });
+    expect(rsaWithExtension._tag).toBe("DkimVerified");
+    if (rsaWithExtension._tag !== "DkimVerified") throw new Error("expected verified");
+    expect(rsaWithExtension.algorithm).toBe("rsa-sha256");
+    expect(rsaWithExtension.selector).toBe("test");
+
+    // Exact duplicate tag names and invalid tag-name grammar must be rejected.
+    expect(parseTagList("v=DKIM1; V=custom")).toBeDefined();
+    expect(parseTagList("v=DKIM1; v=DKIM1")).toBeUndefined();
+    expect(parseTagList("1bad=foo; v=DKIM1")).toBeUndefined();
+    expect(parseTagList("a-b=foo; v=DKIM1")).toBeUndefined();
+    expect(parseTagList("v=DKIM1; ext_1=ok;")).toBeDefined();
   });
 
   test("verifies valid RSA-SHA256 & Ed25519-SHA256 signatures and enforces RFC 6376 t=s against i=, s= service, RSA >= 1024b, and duplicate tags", async () => {
-    // Valid subdomain signing with t=s when i=@mg.posthog.com (matches d=mg.posthog.com!)
-    // while From: alerts@posthog.com aligns with allowed root domain posthog.com.
     const validStrictIdentity = buildDkimSignedMessage({
       algorithm: "ed25519-sha256",
       signingDomain: "mg.posthog.com",
@@ -283,7 +304,6 @@ describe("RFC 6376 / RFC 8301 / RFC 8463 DKIM verifier", () => {
     );
     expect(validStrictRes._tag).toBe("DkimVerified");
 
-    // t=s MUST reject when i= is a subdomain of d= (i=@sub.posthog.com vs d=posthog.com)
     const badStrictIdentity = buildDkimSignedMessage({
       algorithm: "rsa-sha256",
       signingDomain: "posthog.com",
@@ -301,7 +321,6 @@ describe("RFC 6376 / RFC 8301 / RFC 8463 DKIM verifier", () => {
     );
     expect(badStrictRes._tag).toBe("DkimRejected");
 
-    // Non-email DNS key service (`s=other`) must be rejected per RFC 6376 §3.6.1.
     const wrongService = buildDkimSignedMessage({
       algorithm: "rsa-sha256",
       signingDomain: "google.com",
@@ -318,7 +337,6 @@ describe("RFC 6376 / RFC 8301 / RFC 8463 DKIM verifier", () => {
     );
     expect(wrongServiceRes._tag).toBe("DkimRejected");
 
-    // Weak 512-bit RSA key must be rejected per RFC 8301 §3.2.
     const weakRsa = buildDkimSignedMessage({
       algorithm: "rsa-sha256",
       signingDomain: "google.com",
@@ -335,7 +353,6 @@ describe("RFC 6376 / RFC 8301 / RFC 8463 DKIM verifier", () => {
     );
     expect(weakRsaRes._tag).toBe("DkimRejected");
 
-    // Duplicate tag in DKIM-Signature must be rejected per RFC 6376 §3.2.
     const dupTag = buildDkimSignedMessage({
       algorithm: "rsa-sha256",
       signingDomain: "google.com",
@@ -434,82 +451,83 @@ describe("RFC 6376 / RFC 8301 / RFC 8463 DKIM verifier", () => {
     expect(transientRes._tag).toBe("DkimTransientError");
   });
 
-  test("uses only DKIM-verified header instances: neutral title when Subject is unsigned and ignores prepended unsigned duplicate Subject", async () => {
-    // 1. Only From is signed -> Subject is unsigned -> neutral title must be used.
-    const unsignedSubject = buildDkimSignedMessage({
+  test("renders title and MIME body strictly from DKIM-verified headers, ignoring unsigned or prepended duplicate Subject/MIME headers", async () => {
+    // 1. Only From is signed -> unsigned Subject uses neutral title; unsigned Content-Disposition: attachment cannot hide body.
+    const unsignedSubjectAndMime = buildDkimSignedMessage({
       algorithm: "rsa-sha256",
       signingDomain: "google.com",
       selector: "s1",
       fromHeader: "alerts-noreply@google.com",
       subject: "INJECTED UNSIGNED SUBJECT",
-      body: "Body\r\n",
+      contentDisposition: 'attachment; filename="hidden.bin"',
+      body: "Visible verified body text\r\n",
       signedHeaderNames: ["from"],
     });
     const verifiedUnsigned = await Effect.runPromise(
-      verifyAlertDkim(unsignedSubject.raw, ["google.com"]).pipe(
-        Effect.provide(mockDnsLayer(unsignedSubject.dnsRecords)),
+      verifyAlertDkim(unsignedSubjectAndMime.raw, ["google.com"]).pipe(
+        Effect.provide(mockDnsLayer(unsignedSubjectAndMime.dnsRecords)),
       ),
     );
     expect(verifiedUnsigned._tag).toBe("DkimVerified");
     if (verifiedUnsigned._tag !== "DkimVerified") throw new Error("expected verified");
     expect(verifiedUnsigned.signedSubject).toBeUndefined();
+    expect(verifiedUnsigned.signedContentDisposition).toBeUndefined();
     const neutralIssue = formatAlertIssue({
-      parsed: parseEmail(unsignedSubject.raw),
       verified: verifiedUnsigned,
       archiveUri: "gs://bucket/a.eml",
       dedupKey: "abc123",
     });
     expect(neutralIssue.title).toBe("Alert (google.com): Monitoring notification");
     expect(neutralIssue.title).not.toContain("INJECTED");
+    expect(neutralIssue.body).toContain("Visible verified body text");
 
-    // 2. Prepended unsigned duplicate Subject above a signed Subject -> verified Subject wins!
-    const prependedSubject = buildDkimSignedMessage({
+    // 2. Prepended unsigned Subject + Content-Type + Content-Disposition + Content-Transfer-Encoding
+    // above signed HTML/base64 headers: verified bottom headers MUST win!
+    const encodedHtml = Buffer.from("<p>Verified HTML incident body</p>", "utf8").toString(
+      "base64",
+    );
+    const prependedMime = buildDkimSignedMessage({
       algorithm: "rsa-sha256",
       signingDomain: "google.com",
-      selector: "s1",
+      selector: "s2",
       fromHeader: "alerts-noreply@google.com",
       subject: "Legit signed incident",
-      body: "Body\r\n",
-      signedHeaderNames: ["from", "subject"],
-      prependHeaders: ["Subject: SPOOFED TOP SUBJECT"],
+      contentType: 'text/html; charset="utf-8"',
+      contentTransferEncoding: "base64",
+      body: `${encodedHtml}\r\n`,
+      signedHeaderNames: ["from", "subject", "content-type", "content-transfer-encoding"],
+      prependHeaders: [
+        "Subject: SPOOFED TOP SUBJECT",
+        'Content-Type: text/plain; charset="utf-8"',
+        'Content-Disposition: attachment; filename="spoof.txt"',
+        "Content-Transfer-Encoding: 7bit",
+      ],
     });
     const verifiedPrepended = await Effect.runPromise(
-      verifyAlertDkim(prependedSubject.raw, ["google.com"]).pipe(
-        Effect.provide(mockDnsLayer(prependedSubject.dnsRecords)),
+      verifyAlertDkim(prependedMime.raw, ["google.com"]).pipe(
+        Effect.provide(mockDnsLayer(prependedMime.dnsRecords)),
       ),
     );
     expect(verifiedPrepended._tag).toBe("DkimVerified");
     if (verifiedPrepended._tag !== "DkimVerified") throw new Error("expected verified");
-    expect(verifiedPrepended.signedSubject).toBe("Legit signed incident");
     const prependedIssue = formatAlertIssue({
-      parsed: parseEmail(prependedSubject.raw),
       verified: verifiedPrepended,
       archiveUri: "gs://bucket/b.eml",
       dedupKey: "def456",
     });
     expect(prependedIssue.title).toBe("Alert (google.com): Legit signed incident");
+    expect(prependedIssue.body).toContain("Verified HTML incident body");
+    expect(prependedIssue.body).not.toContain(encodedHtml);
     expect(prependedIssue.labels).toEqual([ALERT_ISSUE_LABEL]);
   });
 });
 
-describe("Alert inbox operational invariants (GCS errors, lost replies, starvation, SQLite errors)", () => {
+describe("Alert inbox operational invariants (migration, concurrency, recovery, fairness, SQLite)", () => {
   test("redacts secrets and safely fences triple backticks", () => {
     expect(
       redactAlertText("key=re_1234567890abcdef token=secret123 Bearer abcdefghijklmnop1234"),
     ).toBe("key=[REDACTED] token=[REDACTED] [REDACTED]");
-    const raw = Buffer.from(
-      [
-        "From: Cloud Monitoring <alerts-noreply@google.com>",
-        "To: alerts@kvitbit.com",
-        "Subject: [ALERT] 5xx spike",
-        'Content-Type: text/plain; charset="utf-8"',
-        "",
-        "```markdown\r\nAttempted breakout with re_abcdefghijklmnop\r\n```",
-      ].join("\r\n"),
-      "utf8",
-    );
     const issue = formatAlertIssue({
-      parsed: parseEmail(raw),
       verified: {
         _tag: "DkimVerified",
         signingDomain: "google.com",
@@ -522,6 +540,13 @@ describe("Alert inbox operational invariants (GCS errors, lost replies, starvati
         signedSubject: "[ALERT] 5xx spike",
         signedDate: "Fri, 27 Nov 2026 21:00:00 +0000",
         signedMessageId: "<inc-1@google.com>",
+        signedContentType: 'text/plain; charset="utf-8"',
+        signedContentDisposition: undefined,
+        signedContentTransferEncoding: undefined,
+        verifiedBodyBytes: Buffer.from(
+          "```markdown\r\nAttempted breakout with re_abcdefghijklmnop\r\n```",
+          "utf8",
+        ),
       },
       archiveUri: "gs://kvitbit-prod-mail-archive-prod/inbound/alerts/by-hash/abc/1.eml",
       dedupKey: "deadbeef",
@@ -531,6 +556,441 @@ describe("Alert inbox operational invariants (GCS errors, lost replies, starvati
     expect(issue.body).toContain("[REDACTED]");
     expect(issue.body).toContain("~~~text\n```markdown");
     expect(issue.body).toContain("<!-- kvitbit-alert-key:deadbeef -->");
+  });
+
+  test("migrates populated Round 1 SQLite DB preserving issue numbers while clearing unverified historical Message-IDs, and rejects corrupt or wrong-schema readonly DBs", async () => {
+    const tmpDir = mkdtempSync(join(tmpdir(), "kvitbit-alert-migrate-"));
+    try {
+      // 1. Corrupt file surfaces AlertStoreError
+      const corruptPath = join(tmpDir, "corrupt.sqlite");
+      writeFileSync(corruptPath, "not a sqlite database");
+      const corruptErr = await Effect.runPromise(
+        Effect.flip(Effect.scoped(openAlertInboxStore(corruptPath, true))),
+      );
+      expect(corruptErr._tag).toBe("AlertStoreError");
+
+      // 2. Valid SQLite DB with only an unrelated table fails readonly open with AlertStoreError
+      const unrelatedPath = join(tmpDir, "unrelated.sqlite");
+      const unrelatedDb = new Database(unrelatedPath);
+      unrelatedDb.exec("CREATE TABLE unrelated (id INTEGER PRIMARY KEY, name TEXT);");
+      unrelatedDb.close();
+      const wrongSchemaErr = await Effect.runPromise(
+        Effect.flip(Effect.scoped(openAlertInboxStore(unrelatedPath, true))),
+      );
+      expect(wrongSchemaErr._tag).toBe("AlertStoreError");
+
+      // 3. Populated legacy Round 1 schema migrates cleanly on writable open
+      const legacyPath = join(tmpDir, "legacy-r1.sqlite");
+      const legacyDb = new Database(legacyPath);
+      legacyDb.exec(`
+        CREATE TABLE processed_alert (
+          object_key TEXT PRIMARY KEY,
+          delivery_hash TEXT NOT NULL,
+          message_id TEXT,
+          status TEXT NOT NULL CHECK (status IN ('created', 'duplicate', 'rejected')),
+          issue_number INTEGER,
+          reason TEXT,
+          processed_at TEXT NOT NULL
+        ) STRICT;
+        INSERT INTO processed_alert (
+          object_key, delivery_hash, message_id, status, issue_number, reason, processed_at
+        ) VALUES (
+          'inbound/alerts/by-hash/${"a".repeat(32)}/1000-old.eml',
+          '${"a".repeat(32)}',
+          '<unsigned-legacy@google.com>',
+          'created',
+          42,
+          NULL,
+          '2026-11-27T18:00:00.000Z'
+        );
+      `);
+      legacyDb.close();
+
+      await Effect.runPromise(
+        Effect.scoped(
+          Effect.gen(function* () {
+            const store = yield* openAlertInboxStore(legacyPath, false);
+            const rows = yield* store.listAll();
+            expect(rows).toHaveLength(1);
+            expect(rows[0]?.issueNumber).toBe(42);
+            expect(rows[0]?.deliveryHash).toBe("a".repeat(32));
+            // Historical Round 1 message_id was unverified -> cleared on migration.
+            expect(rows[0]?.messageId).toBeNull();
+            expect(rows[0]?.dedupKey).toBeNull();
+
+            // Delivery-hash lookup still preserves #42.
+            const byHash = yield* store.findByDeliveryHash("a".repeat(32));
+            expect(byHash?.issueNumber).toBe(42);
+
+            // Historical unverified Message-ID does NOT falsely match.
+            const byLegacyMsg = yield* store.findByDedupKeyOrMessageId(
+              "different-dedup",
+              "<unsigned-legacy@google.com>",
+            );
+            expect(byLegacyMsg).toBeNull();
+          }),
+        ),
+      );
+
+      // Migrated DB now opens cleanly in readonly mode too.
+      const roRows = await Effect.runPromise(
+        Effect.scoped(
+          Effect.gen(function* () {
+            const roStore = yield* openAlertInboxStore(legacyPath, true);
+            return yield* roStore.listAll();
+          }),
+        ),
+      );
+      expect(roRows[0]?.issueNumber).toBe(42);
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  test("prevents duplicate issue creation across overlapping concurrent passes on the same SQLite DB", async () => {
+    const tmpDir = mkdtempSync(join(tmpdir(), "kvitbit-alert-concurrent-"));
+    try {
+      const dbPath = join(tmpDir, "state.sqlite");
+      const alert = buildDkimSignedMessage({
+        algorithm: "rsa-sha256",
+        signingDomain: "google.com",
+        selector: "s1",
+        fromHeader: "Cloud Monitoring <alerts-noreply@google.com>",
+        subject: "Concurrent alert",
+        messageId: "<concurrent-1@google.com>",
+        body: "Alert body\r\n",
+      });
+      const objKey = `inbound/alerts/by-hash/${"e".repeat(32)}/1000-race.eml`;
+      const posted: Array<number> = [];
+
+      const sharedLayer = Layer.mergeAll(
+        Layer.succeed(AlertBucket, {
+          listObjects: () => Effect.succeed([objKey]),
+          downloadObject: () => Effect.succeed(alert.raw),
+        }),
+        Layer.succeed(AlertIssueTracker, {
+          ensureLabel: () => Effect.void,
+          findExistingIssueByMarker: () => Effect.succeed(null),
+          createIssue: () =>
+            Effect.promise(async () => {
+              // Simulate slow GitHub API round-trip so the second pass overlaps.
+              await Bun.sleep(40);
+              const number = 800 + posted.length + 1;
+              posted.push(number);
+              return { number, url: `https://github.com/KvitBit/KvitBit/issues/${number}` };
+            }),
+        }),
+        mockDnsLayer(alert.dnsRecords),
+      );
+
+      // Initialize schema once, then run two independent passes concurrently against the same DB file.
+      await Effect.runPromise(Effect.scoped(openAlertInboxStore(dbPath, false)));
+
+      const runOnePass = () =>
+        Effect.runPromise(
+          Effect.scoped(
+            Effect.gen(function* () {
+              const store = yield* openAlertInboxStore(dbPath, false);
+              return yield* runAlertInboxPass({
+                apply: true,
+                bucket: "kvitbit-prod-mail-archive-prod",
+                prefix: "inbound/alerts/",
+                repo: "KvitBit/KvitBit",
+                allowedDomains: ["google.com"],
+                maxPerPass: 5,
+                store,
+              });
+            }),
+          ).pipe(Effect.provide(sharedLayer)),
+        );
+
+      const [r1, r2] = await Promise.all([runOnePass(), runOnePass()]);
+      expect(posted).toEqual([801]);
+      expect(r1.created.length + r2.created.length).toBe(1);
+
+      const persisted = await Effect.runPromise(
+        Effect.scoped(
+          Effect.gen(function* () {
+            const store = yield* openAlertInboxStore(dbPath, true);
+            return yield* store.getObject(objKey);
+          }),
+        ),
+      );
+      expect(persisted?.status).toBe("created");
+      expect(persisted?.issueNumber).toBe(801);
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  test("reconciles lost GitHub replies even after relabeling AND after DKIM key retirement, and queries GitHub without label filters", async () => {
+    // 1. Verify makeGhAlertIssueTracker queries repos/<repo>/issues?state=all&per_page=100 WITHOUT labels=
+    const seenUrls: Array<string> = [];
+    const marker = alertIssueMarker("cafebabe");
+    const ghTracker = makeGhAlertIssueTracker((cmd) => {
+      seenUrls.push(cmd.join(" "));
+      return Effect.succeed(
+        Buffer.from(
+          JSON.stringify([
+            [
+              {
+                number: 901,
+                html_url: "https://github.com/KvitBit/KvitBit/issues/901",
+                labels: [{ name: "triaged" }], // `alert` label was replaced!
+                body: `Relabeled issue\n<!-- ${marker} -->`,
+              },
+            ],
+          ]),
+          "utf8",
+        ),
+      );
+    });
+    const relabeledMatch = await Effect.runPromise(
+      ghTracker.findExistingIssueByMarker("KvitBit/KvitBit", marker),
+    );
+    expect(relabeledMatch?.number).toBe(901);
+    expect(seenUrls[0]).toContain("repos/KvitBit/KvitBit/issues?state=all&per_page=100");
+    expect(seenUrls[0]).not.toContain("labels=");
+
+    // 2. Commit issue #902 with lost reply, then RETIRE the sender's DNS key (ENOTFOUND),
+    // and replace the `alert` label -> retry MUST reconcile #902 instead of marking rejected!
+    const alert = buildDkimSignedMessage({
+      algorithm: "rsa-sha256",
+      signingDomain: "google.com",
+      selector: "retired-key",
+      fromHeader: "Cloud Monitoring <alerts-noreply@google.com>",
+      subject: "Key rotation test",
+      messageId: "<key-rot-1@google.com>",
+      body: "Incident before key rotation\r\n",
+    });
+    const key1 = `inbound/alerts/by-hash/${"d".repeat(32)}/1000-rot.eml`;
+    const committedIssues: Array<{ number: number; body: string; labels: Array<string> }> = [];
+    let dnsActive = true;
+    let dropReply = true;
+
+    const layer = Layer.mergeAll(
+      Layer.succeed(AlertBucket, {
+        listObjects: () => Effect.succeed([key1]),
+        downloadObject: () => Effect.succeed(alert.raw),
+      }),
+      Layer.succeed(AlertIssueTracker, {
+        ensureLabel: () => Effect.void,
+        findExistingIssueByMarker: (_repo, m) =>
+          Effect.sync(() => {
+            // Search across all issues regardless of labels (matches live ghTracker behavior).
+            const hit = committedIssues.find((i) => i.body.includes(m));
+            return hit
+              ? {
+                  number: hit.number,
+                  url: `https://github.com/KvitBit/KvitBit/issues/${hit.number}`,
+                }
+              : null;
+          }),
+        createIssue: (_repo, issue) =>
+          Effect.gen(function* () {
+            const number = 902 + committedIssues.length;
+            committedIssues.push({ number, body: issue.body, labels: [...issue.labels] });
+            if (dropReply) {
+              dropReply = false;
+              return yield* new AlertInboxError({ reason: "connection reset after commit" });
+            }
+            return { number, url: `https://github.com/KvitBit/KvitBit/issues/${number}` };
+          }),
+      }),
+      Layer.succeed(DnsTxtResolver, {
+        resolveTxt: (hostname) => {
+          if (!dnsActive) {
+            return Effect.fail(new DnsLookupError({ hostname, reason: "ENOTFOUND" }));
+          }
+          const rec = alert.dnsRecords[hostname];
+          return rec
+            ? Effect.succeed(rec)
+            : Effect.fail(new DnsLookupError({ hostname, reason: "ENOTFOUND" }));
+        },
+      }),
+    );
+
+    await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const store = yield* openAlertInboxStore(":memory:", false);
+
+          // Pass 1: commits #902 on GitHub, then drops reply -> row stays `claiming` with dedupKey.
+          const pass1 = yield* runAlertInboxPass({
+            apply: true,
+            bucket: "kvitbit-prod-mail-archive-prod",
+            prefix: "inbound/alerts/",
+            repo: "KvitBit/KvitBit",
+            allowedDomains: ["google.com"],
+            maxPerPass: 5,
+            store,
+          });
+          expect(pass1.failures).toHaveLength(1);
+          expect(committedIssues).toHaveLength(1);
+
+          // Replace the issue's `alert` label with `triaged` AND retire the DKIM DNS key!
+          if (committedIssues[0]) {
+            committedIssues[0].labels = ["triaged"];
+          }
+          dnsActive = false;
+
+          // Make the retry due immediately.
+          const row = yield* store.getObject(key1);
+          expect(row?.status).toBe("claiming");
+          expect(row?.dedupKey).not.toBeNull();
+          yield* store.markRetry({
+            objectKey: key1,
+            deliveryHash: row?.deliveryHash ?? "d".repeat(32),
+            dedupKey: row?.dedupKey ?? null,
+            messageId: row?.messageId ?? null,
+            keepClaiming: true,
+            reason: "retry ready",
+            nextRetryAt: "2000-01-01T00:00:00.000Z",
+            nowIso: "2026-11-27T21:00:00.000Z",
+          });
+
+          // Pass 2: reconciles #902 BEFORE re-verifying DKIM -> marked created (#902), NOT rejected!
+          const pass2 = yield* runAlertInboxPass({
+            apply: true,
+            bucket: "kvitbit-prod-mail-archive-prod",
+            prefix: "inbound/alerts/",
+            repo: "KvitBit/KvitBit",
+            allowedDomains: ["google.com"],
+            maxPerPass: 5,
+            store,
+          });
+          expect(pass2.rejected).toHaveLength(0);
+          expect(pass2.created).toHaveLength(1);
+          expect(pass2.created[0]?.issueNumber).toBe(902);
+          expect(pass2.created[0]?.reconciled).toBe(true);
+          expect(committedIssues).toHaveLength(1);
+
+          const finalRow = yield* store.getObject(key1);
+          expect(finalRow?.status).toBe("created");
+          expect(finalRow?.issueNumber).toBe(902);
+        }),
+      ).pipe(Effect.provide(layer)),
+    );
+  });
+
+  test("schedules fresh arrivals and overdue retries fairly without starving either queue even at maxPerPass=1", async () => {
+    const mkAlert = (selector: string, idx: number) =>
+      buildDkimSignedMessage({
+        algorithm: "rsa-sha256",
+        signingDomain: "google.com",
+        selector,
+        fromHeader: "Cloud Monitoring <alerts-noreply@google.com>",
+        subject: `Fairness alert ${idx}`,
+        messageId: `<fair-${idx}@google.com>`,
+        body: `Body ${idx}\r\n`,
+      });
+
+    const retryAlert = mkAlert("s0", 0);
+    const fresh1 = mkAlert("s1", 1);
+    const fresh2 = mkAlert("s2", 2);
+    const retryKey = `inbound/alerts/by-hash/${"0".repeat(32)}/0001-retry.eml`;
+    const freshKey1 = `inbound/alerts/by-hash/${"1".repeat(32)}/0002-fresh1.eml`;
+    const freshKey2 = `inbound/alerts/by-hash/${"2".repeat(32)}/0003-fresh2.eml`;
+
+    let availableKeys: Array<string> = [retryKey];
+    let failRetryDownload = true;
+    const rawMap: Record<string, Uint8Array> = {
+      [retryKey]: retryAlert.raw,
+      [freshKey1]: fresh1.raw,
+      [freshKey2]: fresh2.raw,
+    };
+    const createdKeys: Array<string> = [];
+
+    const layer = Layer.mergeAll(
+      Layer.succeed(AlertBucket, {
+        listObjects: () => Effect.succeed([...availableKeys]),
+        downloadObject: (_bucket, key) => {
+          if (key === retryKey && failRetryDownload) {
+            return Effect.fail(new AlertInboxError({ reason: "transient read error" }));
+          }
+          const raw = rawMap[key];
+          return raw
+            ? Effect.succeed(raw)
+            : Effect.fail(new AlertInboxError({ reason: "not found" }));
+        },
+      }),
+      Layer.succeed(AlertIssueTracker, {
+        ensureLabel: () => Effect.void,
+        findExistingIssueByMarker: () => Effect.succeed(null),
+        createIssue: (_repo, issue) =>
+          Effect.sync(() => {
+            createdKeys.push(issue.title);
+            return {
+              number: 600 + createdKeys.length,
+              url: "https://github.com/KvitBit/KvitBit/issues/601",
+            };
+          }),
+      }),
+      mockDnsLayer({
+        ...retryAlert.dnsRecords,
+        ...fresh1.dnsRecords,
+        ...fresh2.dnsRecords,
+      }),
+    );
+
+    await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const store = yield* openAlertInboxStore(":memory:", false);
+
+          // Pass 1: retryKey fails download and enters retry queue.
+          const p1 = yield* runAlertInboxPass({
+            apply: true,
+            bucket: "kvitbit-prod-mail-archive-prod",
+            prefix: "inbound/alerts/",
+            repo: "KvitBit/KvitBit",
+            allowedDomains: ["google.com"],
+            maxPerPass: 1,
+            store,
+          });
+          expect(p1.failures.map((f) => f.objectKey)).toEqual([retryKey]);
+
+          // Now retryKey becomes overdue AND freshKey1 arrives.
+          failRetryDownload = false;
+          yield* store.markRetry({
+            objectKey: retryKey,
+            deliveryHash: "0".repeat(32),
+            dedupKey: null,
+            messageId: null,
+            keepClaiming: false,
+            reason: "overdue",
+            nextRetryAt: "2000-01-01T00:00:00.000Z",
+            nowIso: "2026-11-27T21:00:00.000Z",
+          });
+          availableKeys = [retryKey, freshKey1];
+
+          // Pass 2 (maxPerPass=1): lastScheduledQueue was "fresh" -> picks due retryKey (NO starvation!).
+          const p2 = yield* runAlertInboxPass({
+            apply: true,
+            bucket: "kvitbit-prod-mail-archive-prod",
+            prefix: "inbound/alerts/",
+            repo: "KvitBit/KvitBit",
+            allowedDomains: ["google.com"],
+            maxPerPass: 1,
+            store,
+          });
+          expect(p2.created.map((c) => c.objectKey)).toEqual([retryKey]);
+
+          // Pass 3 (maxPerPass=1): freshKey2 also arrives -> freshKey1 progresses immediately.
+          availableKeys = [retryKey, freshKey1, freshKey2];
+          const p3 = yield* runAlertInboxPass({
+            apply: true,
+            bucket: "kvitbit-prod-mail-archive-prod",
+            prefix: "inbound/alerts/",
+            repo: "KvitBit/KvitBit",
+            allowedDomains: ["google.com"],
+            maxPerPass: 1,
+            store,
+          });
+          expect(p3.created.map((c) => c.objectKey)).toEqual([freshKey1]);
+        }),
+      ).pipe(Effect.provide(layer)),
+    );
   });
 
   test("propagates missing gcloud or unavailable bucket errors while returning empty only for confirmed empty prefix", async () => {
@@ -567,164 +1027,6 @@ describe("Alert inbox operational invariants (GCS errors, lost replies, starvati
       confirmedEmpty.listObjects("kvitbit-prod-mail-archive-prod", "inbound/alerts/"),
     );
     expect(emptyList).toEqual([]);
-  });
-
-  test("reconciles lost GitHub replies without creating duplicate issues, advances past failing objects, and handles invalid SQLite in Effect error channel", async () => {
-    const alert1 = buildDkimSignedMessage({
-      algorithm: "rsa-sha256",
-      signingDomain: "google.com",
-      selector: "s1",
-      fromHeader: "Cloud Monitoring <alerts-noreply@google.com>",
-      subject: "Alert One",
-      messageId: "<inc-1@google.com>",
-      body: "First incident\r\n",
-    });
-    const alert2 = buildDkimSignedMessage({
-      algorithm: "rsa-sha256",
-      signingDomain: "google.com",
-      selector: "s2",
-      fromHeader: "Cloud Monitoring <alerts-noreply@google.com>",
-      subject: "Alert Two",
-      messageId: "<inc-2@google.com>",
-      body: "Second incident\r\n",
-    });
-
-    // 1. Corrupted SQLite file surfaces as typed AlertStoreError in Effect error channel.
-    const tmpDir = mkdtempSync(join(tmpdir(), "kvitbit-alert-store-"));
-    try {
-      const corruptPath = join(tmpDir, "corrupt.sqlite");
-      writeFileSync(corruptPath, "not a sqlite database");
-      const openErr = await Effect.runPromise(
-        Effect.flip(Effect.scoped(openAlertInboxStore(corruptPath, true))),
-      );
-      expect(openErr._tag).toBe("AlertStoreError");
-    } finally {
-      rmSync(tmpDir, { recursive: true, force: true });
-    }
-
-    // 2. Lost GitHub reply: createIssue commits on GitHub but returns error; next pass reconciles via marker.
-    const committedIssues: Array<{ number: number; body: string; title: string }> = [];
-    let dropFirstReply = true;
-    const key1 = `inbound/alerts/by-hash/${"1".repeat(32)}/1000-aaaaaa.eml`;
-    const key2 = `inbound/alerts/by-hash/${"2".repeat(32)}/2000-bbbbbb.eml`;
-    const badKey = `inbound/alerts/by-hash/${"0".repeat(32)}/0500-000000.eml`;
-
-    const lostReplyLayer = Layer.mergeAll(
-      Layer.succeed(AlertBucket, {
-        listObjects: () => Effect.succeed([badKey, key1, key2]),
-        downloadObject: (_bucket, key) => {
-          if (key === badKey) {
-            return Effect.fail(new AlertInboxError({ reason: "transient GCS read error" }));
-          }
-          if (key === key1) return Effect.succeed(alert1.raw);
-          if (key === key2) return Effect.succeed(alert2.raw);
-          return Effect.fail(new AlertInboxError({ reason: "not found" }));
-        },
-      }),
-      Layer.succeed(AlertIssueTracker, {
-        ensureLabel: () => Effect.void,
-        findExistingIssueByMarker: (_repo, marker) =>
-          Effect.sync(() => {
-            const hit = committedIssues.find((i) => i.body.includes(marker));
-            return hit
-              ? {
-                  number: hit.number,
-                  url: `https://github.com/KvitBit/KvitBit/issues/${hit.number}`,
-                }
-              : null;
-          }),
-        createIssue: (_repo, issue) =>
-          Effect.gen(function* () {
-            const number = 500 + committedIssues.length + 1;
-            committedIssues.push({ number, body: issue.body, title: issue.title });
-            if (dropFirstReply) {
-              dropFirstReply = false;
-              return yield* new AlertInboxError({ reason: "connection reset after commit" });
-            }
-            return { number, url: `https://github.com/KvitBit/KvitBit/issues/${number}` };
-          }),
-      }),
-      mockDnsLayer({ ...alert1.dnsRecords, ...alert2.dnsRecords }),
-    );
-
-    await Effect.runPromise(
-      Effect.scoped(
-        Effect.gen(function* () {
-          const store = yield* openAlertInboxStore(":memory:", false);
-
-          // Pass 1 (maxPerPass=1): badKey fails download and enters retry backoff.
-          const pass1 = yield* runAlertInboxPass({
-            apply: true,
-            bucket: "kvitbit-prod-mail-archive-prod",
-            prefix: "inbound/alerts/",
-            repo: "KvitBit/KvitBit",
-            allowedDomains: ["google.com"],
-            maxPerPass: 1,
-            store,
-          });
-          expect(pass1.failures).toHaveLength(1);
-          expect(pass1.failures[0]?.objectKey).toBe(badKey);
-
-          // Pass 2 (maxPerPass=1): badKey is backed off, so key1 gets its turn (no starvation!).
-          // key1 commits on GitHub (#501) then drops the reply -> recorded in `claiming` state.
-          const pass2 = yield* runAlertInboxPass({
-            apply: true,
-            bucket: "kvitbit-prod-mail-archive-prod",
-            prefix: "inbound/alerts/",
-            repo: "KvitBit/KvitBit",
-            allowedDomains: ["google.com"],
-            maxPerPass: 1,
-            store,
-          });
-          expect(pass2.failures).toHaveLength(1);
-          expect(pass2.failures[0]?.objectKey).toBe(key1);
-          expect(committedIssues).toHaveLength(1);
-
-          // Pass 3 (maxPerPass=1): fresh key2 runs ahead of backed-off retries and succeeds (#502).
-          const pass3 = yield* runAlertInboxPass({
-            apply: true,
-            bucket: "kvitbit-prod-mail-archive-prod",
-            prefix: "inbound/alerts/",
-            repo: "KvitBit/KvitBit",
-            allowedDomains: ["google.com"],
-            maxPerPass: 1,
-            store,
-          });
-          expect(pass3.created).toHaveLength(1);
-          expect(pass3.created[0]?.objectKey).toBe(key2);
-          expect(pass3.created[0]?.issueNumber).toBe(502);
-          expect(committedIssues).toHaveLength(2);
-
-          // Simulate retry window elapsing for key1 by resetting its nextRetryAt to past,
-          // then verify key1 reconciles existing #501 via marker WITHOUT creating a duplicate!
-          yield* store.markRetry({
-            objectKey: key1,
-            deliveryHash: "1".repeat(32),
-            dedupKey: null,
-            messageId: null,
-            keepClaiming: true,
-            reason: "retry ready",
-            nextRetryAt: "2000-01-01T00:00:00.000Z",
-            nowIso: "2026-11-27T21:00:00.000Z",
-          });
-          const pass4 = yield* runAlertInboxPass({
-            apply: true,
-            bucket: "kvitbit-prod-mail-archive-prod",
-            prefix: "inbound/alerts/",
-            repo: "KvitBit/KvitBit",
-            allowedDomains: ["google.com"],
-            maxPerPass: 1,
-            store,
-          });
-          expect(pass4.created).toHaveLength(1);
-          expect(pass4.created[0]?.objectKey).toBe(key1);
-          expect(pass4.created[0]?.issueNumber).toBe(501);
-          expect(pass4.created[0]?.reconciled).toBe(true);
-          // Total committed issues stayed at 2 (zero duplicate created for key1!).
-          expect(committedIssues).toHaveLength(2);
-        }),
-      ).pipe(Effect.provide(lostReplyLayer)),
-    );
   });
 
   test("dry-run mutates neither GitHub nor SQLite, unverified Message-ID does not poison dedup, and CLI rejects --label override", async () => {
@@ -794,7 +1096,6 @@ describe("Alert inbox operational invariants (GCS errors, lost replies, starvati
         Effect.gen(function* () {
           const store = yield* openAlertInboxStore(":memory:", false);
 
-          // 1. Dry-run creates 0 issues and writes 0 rows to SQLite.
           const dry = yield* runAlertInboxPass({
             apply: false,
             bucket: "kvitbit-prod-mail-archive-prod",
@@ -809,8 +1110,6 @@ describe("Alert inbox operational invariants (GCS errors, lost replies, starvati
           expect(createdIssues).toHaveLength(0);
           expect(yield* store.listAll()).toHaveLength(0);
 
-          // 2. Apply pass: spoofed Message-ID is rejected without poisoning dedup;
-          // legitKey1 creates #701 with label `alert`; legitKey2 deduplicates against signed Message-ID.
           const applied = yield* runAlertInboxPass({
             apply: true,
             bucket: "kvitbit-prod-mail-archive-prod",
@@ -832,7 +1131,6 @@ describe("Alert inbox operational invariants (GCS errors, lost replies, starvati
       ).pipe(Effect.provide(testLayer)),
     );
 
-    // 3. CLI rejects any --label override (cannot pass visual-feedback).
     const proc = Bun.spawn(
       ["bun", "scripts/alert-inbox/service.ts", "--label", "visual-feedback"],
       { stdout: "pipe", stderr: "pipe" },

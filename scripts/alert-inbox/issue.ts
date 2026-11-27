@@ -5,14 +5,17 @@
  * - Always applies exclusively the `alert` label (never `visual-feedback` or caller-overridden
  *   labels) so untrusted email text cannot route into `scripts/issue-pool` coding workers.
  * - Uses ONLY cryptographically verified DKIM header values (`fromHeader`, `signedSubject`,
- *   `signedDate`, `signedMessageId`), falling back to a neutral title when `Subject` is unsigned.
+ *   `signedDate`, `signedMessageId`, `signedContentType`, `signedContentDisposition`,
+ *   `signedContentTransferEncoding`) and the verified body bytes, falling back to safe defaults
+ *   when headers are unsigned (neutral title `"Monitoring notification"`, `text/plain; charset="utf-8"`,
+ *   inline disposition, identity transfer encoding).
  * - Embeds a stable deterministic marker (`kvitbit-alert-key:<dedupKey>`) for idempotent
  *   reconciliation after uncertain GitHub API replies.
  * - Redacts secret/token patterns and dynamically sizes markdown code fences so untrusted body
  *   content cannot break out of fenced blocks.
  */
 
-import type { ParsedEmail } from "../../infra/alchemy/src/mail-forwarder/mime";
+import { parseEmail } from "../../infra/alchemy/src/mail-forwarder/mime";
 import type { DkimVerified } from "./dkim";
 
 export const ALERT_ISSUE_LABEL = "alert" as const;
@@ -50,6 +53,39 @@ export const safeCodeBlock = (value: string): string => {
 
 export const alertIssueMarker = (dedupKey: string): string => `kvitbit-alert-key:${dedupKey}`;
 
+const sanitizeHeaderLineValue = (value: string): string => value.replace(/[\r\n]+/g, " ").trim();
+
+/**
+ * Renders the alert body using ONLY DKIM-verified top-level MIME headers and the verified body
+ * bytes. Unsigned top-level Content-Type, Content-Disposition, or Content-Transfer-Encoding
+ * headers are ignored in favor of safe defaults (`text/plain; charset="utf-8"`, inline, identity).
+ */
+export const renderVerifiedAlertBodyText = (verified: DkimVerified): string => {
+  const headers: Array<string> = [
+    `Content-Type: ${
+      verified.signedContentType
+        ? sanitizeHeaderLineValue(verified.signedContentType)
+        : 'text/plain; charset="utf-8"'
+    }`,
+  ];
+  if (verified.signedContentDisposition) {
+    headers.push(
+      `Content-Disposition: ${sanitizeHeaderLineValue(verified.signedContentDisposition)}`,
+    );
+  }
+  if (verified.signedContentTransferEncoding) {
+    headers.push(
+      `Content-Transfer-Encoding: ${sanitizeHeaderLineValue(verified.signedContentTransferEncoding)}`,
+    );
+  }
+  const syntheticRaw = Buffer.concat([
+    Buffer.from(`${headers.join("\r\n")}\r\n\r\n`, "utf8"),
+    Buffer.from(verified.verifiedBodyBytes),
+  ]);
+  const parsed = parseEmail(syntheticRaw);
+  return parsed.text?.trim() || "(empty body)";
+};
+
 export interface FormattedAlertIssue {
   readonly title: string;
   readonly body: string;
@@ -57,12 +93,11 @@ export interface FormattedAlertIssue {
 }
 
 export const formatAlertIssue = (params: {
-  readonly parsed: ParsedEmail;
   readonly verified: DkimVerified;
   readonly archiveUri: string;
   readonly dedupKey: string;
 }): FormattedAlertIssue => {
-  const { parsed, verified, archiveUri, dedupKey } = params;
+  const { verified, archiveUri, dedupKey } = params;
 
   // Never copy an unsigned Subject into the issue title.
   const verifiedSubject =
@@ -86,7 +121,7 @@ export const formatAlertIssue = (params: {
     ].join("\n"),
   );
 
-  const rawBody = redactAlertText(parsed.text?.trim() || "(empty body)");
+  const rawBody = redactAlertText(renderVerifiedAlertBodyText(verified));
   const truncatedBody =
     rawBody.length > MAX_BODY_CHARS
       ? `${rawBody.slice(0, MAX_BODY_CHARS)}\n\n[Truncated — inspect full raw message at ${archiveUri}]`
