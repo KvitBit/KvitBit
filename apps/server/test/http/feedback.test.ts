@@ -102,7 +102,7 @@ let other: typeof owner;
 beforeAll(async () => {
   owner = await sessionFor(ownerEmail);
   other = await sessionFor("other@example.cz");
-});
+}, 20_000);
 
 afterAll(async () => app.dispose());
 
@@ -270,10 +270,11 @@ test("removes workspace API keys from titles, comments and fields outside sensit
 test("removes embedded token-bearing links from the outgoing issue on an ordinary page", async () => {
   const shareUrl = `${ORIGIN}/i/v1.comment-secret?download=private-query`;
   const encoded = `${ORIGIN}/app/%2569%252Fv1.encoded-secret`;
+  const encodedUrl = encodeURIComponent(`${ORIGIN}/i/v1.encoded-absolute-secret`);
   const relative = "/s/v1.relative-secret/pdf";
   const response = await submit(ownerHeaders(), {
     ...feedback,
-    comment: `Check (${shareUrl})\nInvite: /invite/private-invite`,
+    comment: `Check (${shareUrl})\nEncoded: ${encodedUrl}\nInvite: /invite/private-invite`,
     pins: [{ ...pin, text: `Copied ${encoded}`, accessibleName: relative }],
     page: { ...feedback.page, theme: `/api/v1/share/v1.theme-secret/logo` },
   });
@@ -282,6 +283,7 @@ test("removes embedded token-bearing links from the outgoing issue on an ordinar
   const issue = (await upstreamRequest().json()) as { title: string; body: string };
   expect(issue.title).toBe("Visual feedback: Check redacted");
   expect(issue.body).toContain("Check ([redacted])");
+  expect(issue.body).toContain("Encoded: [redacted]");
   expect(issue.body).toContain("Invite: [redacted]");
   expect(issue.body).toContain('Text: "Copied [redacted]"');
   expect(issue.body).toContain('Accessible name: "[redacted]"');
@@ -366,6 +368,7 @@ test("accepts supported GitHub token formats and rejects incomplete configuratio
   expect(configFor(fineGrained)).toBeDefined();
   expect(configFor(fineGrained.slice(0, -1))).toBeUndefined();
   expect(configFor(token)).toBeDefined();
+  expect(configFor(`ghs_12345_${"a".repeat(8192)}.b.c`)).toBeUndefined();
   expect(configFor(token.slice(0, token.lastIndexOf(".")))).toBeUndefined();
   expect(configFor("ghp_X")).toBeUndefined();
   expect(configFor(`${token}\n`)).toBeUndefined();

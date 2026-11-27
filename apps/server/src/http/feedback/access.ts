@@ -11,6 +11,7 @@ export interface FeedbackConfig {
 
 const repositoryName = /^(?=[^/]{1,39}\/)[a-z\d]+(?:-[a-z\d]+)*\/([a-z\d_.-]{1,100})$/i;
 const githubToken = /^(?:github_pat_[a-zA-Z\d]{22}_[a-zA-Z\d]{59}|gh[opsu]_[a-zA-Z\d]{36})$/;
+const GITHUB_TOKEN_MAX_BYTES = 8 * 1024;
 // GitHub's stateless installation tokens are variable-length ghs_APPID_JWT values.
 const statelessInstallationToken = /^ghs_(?=.{36,}$)\d+_[a-zA-Z\d_-]+(?:\.[a-zA-Z\d_-]+){2}$/;
 const emailAddress =
@@ -26,6 +27,7 @@ export const makeFeedbackConfig = (
   const credential = Redacted.value(token);
   const ownerEmails = emails.split(",").map((email) => email.trim().toLowerCase());
   if (
+    Buffer.byteLength(credential, "utf8") > GITHUB_TOKEN_MAX_BYTES ||
     (!githubToken.test(credential) && !statelessInstallationToken.test(credential)) ||
     name === undefined ||
     name === "." ||

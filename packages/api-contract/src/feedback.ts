@@ -109,22 +109,34 @@ const sensitiveRoute = (route: string) =>
   SENSITIVE_PATHS.some((prefix) => route === prefix || route.startsWith(`${prefix}/`));
 
 const EMBEDDED_URL =
-  /(?:https?:\/\/(?:\[[\da-f:.]+\])?|(?<![\w./%\\-])(?:\/|%(?:25)*2f))[^\s<>"'`()[\]{}]+/gi;
+  /(?:https?(?::|%(?:25)*3a)(?:\/|%(?:25)*2f){2}(?:\[[\da-f:.]+\])?|(?<![\w./%\\-])(?:\/|%(?:25)*2f))[^\s<>"'`()[\]{}]+/gi;
+
+// Decode bytes individually so a malformed escape cannot hide an encoded route.
+const decodePercentBytes = (value: string) =>
+  value.replaceAll(/%([\da-f]{2})/gi, (_, byte: string) =>
+    String.fromCharCode(Number.parseInt(byte, 16)),
+  );
 
 const hasSensitivePath = (value: string) => {
+  let candidate = value;
+  if (/^https?/i.test(candidate)) {
+    // Decode the absolute URL's separators before URL parsing, which otherwise treats it as a path.
+    for (let depth = 0; depth < 8 && !/^https?:\/\//i.test(candidate); depth++) {
+      candidate = decodePercentBytes(candidate);
+    }
+    if (!/^https?:\/\//i.test(candidate)) return true;
+  }
+
   let path: string;
   try {
-    path = new URL(value, "https://feedback.invalid").pathname;
+    path = new URL(candidate, "https://feedback.invalid").pathname;
   } catch {
     return false;
   }
 
   for (let depth = 0; depth < 8; depth++) {
     if (feedbackRoutes(path).some(sensitiveRoute)) return true;
-    // Decode path bytes individually so a malformed escape cannot hide an encoded route.
-    const decoded = path.replaceAll(/%([\da-f]{2})/gi, (_, byte: string) =>
-      String.fromCharCode(Number.parseInt(byte, 16)),
-    );
+    const decoded = decodePercentBytes(path);
     if (decoded === path) return false;
     path = decoded;
   }

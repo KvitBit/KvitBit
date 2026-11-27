@@ -195,4 +195,35 @@ if (typeof Bun === "undefined") {
     await expect(page).toHaveURL(/\/sign-in$/);
     await expect(picker).toHaveCount(0);
   });
+
+  test("restores diagnostic handlers if the picker fails to mount", async ({ page }) => {
+    await session(page, true);
+    await page.addInitScript(() => {
+      const browserConsole = window.console;
+      const { warn, error } = browserConsole;
+      const append = Element.prototype.append;
+      Element.prototype.append = function (this: Element, ...nodes: Array<Node | string>) {
+        if (
+          this === document.body &&
+          nodes.some(
+            (node) => node instanceof HTMLElement && node.hasAttribute("data-kb-visual-feedback"),
+          )
+        ) {
+          const attached = browserConsole.warn !== warn && browserConsole.error !== error;
+          Element.prototype.append = append;
+          queueMicrotask(() => {
+            document.documentElement.dataset.feedbackMountCleaned = String(
+              attached && browserConsole.warn === warn && browserConsole.error === error,
+            );
+          });
+          throw new Error("Fixture picker mount failure");
+        }
+        append.apply(this, nodes);
+      };
+    });
+    await page.goto(dashboard);
+    await expect(page.locator("html")).toHaveAttribute("data-feedback-mount-cleaned", "true");
+    await expect(page.locator("#main h1")).toBeVisible();
+    await expect(page.locator(overlay)).toHaveCount(0);
+  });
 }
