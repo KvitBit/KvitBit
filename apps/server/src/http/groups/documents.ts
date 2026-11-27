@@ -38,6 +38,23 @@ export const DocumentsGroupLive = HttpApiBuilder.group(Api, "documents", (handle
           yield* analytics.capture({ event, userId: caller.userId, workspaceId, kind, source });
         }
       });
+    const captureDraftSaved = (
+      workspaceId: WorkspaceId,
+      kind: DocumentKind,
+      mode: "created" | "updated",
+    ) =>
+      Effect.gen(function* () {
+        const caller = yield* CurrentCaller;
+        if (caller._tag === "Member" && !(yield* requestWasReplayed)) {
+          yield* analytics.capture({
+            event: "document_draft_saved",
+            userId: caller.userId,
+            workspaceId,
+            kind,
+            mode,
+          });
+        }
+      });
     return handlers
       .handle("list", ({ query }) =>
         Effect.map(documents.list(compact(query)), jsonizeDocumentPage),
@@ -49,7 +66,10 @@ export const DocumentsGroupLive = HttpApiBuilder.group(Api, "documents", (handle
         documents.createDraft(payload, requestOptions(headers)).pipe(
           Effect.tap((view) => setLocation(documentLocation(params.workspaceId, view.id))),
           Effect.tap((view) =>
-            captureDocument("document_created", params.workspaceId, view.kind, "draft"),
+            Effect.andThen(
+              captureDocument("document_created", params.workspaceId, view.kind, "draft"),
+              captureDraftSaved(params.workspaceId, view.kind, "created"),
+            ),
           ),
           Effect.map(jsonizeDocumentView),
         ),
@@ -77,7 +97,14 @@ export const DocumentsGroupLive = HttpApiBuilder.group(Api, "documents", (handle
       .handle("edit", ({ params, headers, payload }) =>
         withRevision(headers["if-match"], (expectedRevision) =>
           documents.edit(params.documentId, payload, expectedRevision),
-        ).pipe(Effect.map(jsonizeDocumentView)),
+        ).pipe(
+          Effect.tap((view) =>
+            view.status === "draft"
+              ? captureDraftSaved(params.workspaceId, view.kind, "updated")
+              : Effect.void,
+          ),
+          Effect.map(jsonizeDocumentView),
+        ),
       )
       .handle("discardDraft", ({ params, headers }) =>
         withRevision(headers["if-match"], (expectedRevision) =>

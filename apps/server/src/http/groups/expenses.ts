@@ -3,15 +3,17 @@
  * attachment upload, download, and detach.
  */
 import { API_PREFIX, Api, ATTACHMENT_MAX_BYTES } from "@kvitbit/api-contract";
-import { Expenses } from "@kvitbit/domain/contract";
+import { CurrentCaller, Expenses } from "@kvitbit/domain/contract";
 import { Effect, Predicate } from "effect";
 import { HttpApiBuilder } from "effect/http-api";
+import { Analytics } from "../../runtime/analytics";
 import { compact, fileDownload, requestOptions, setLocation, withRevision } from "../conventions";
 import { streamSingleFile } from "./records/multipart";
 
 export const ExpensesGroupLive = HttpApiBuilder.group(Api, "expenses", (handlers) =>
   Effect.gen(function* () {
     const expenses = yield* Expenses;
+    const analytics = yield* Analytics;
     return handlers
       .handle("list", ({ query }) => expenses.list(compact(query)))
       .handle("record", ({ params, headers, payload }) =>
@@ -33,16 +35,28 @@ export const ExpensesGroupLive = HttpApiBuilder.group(Api, "expenses", (handlers
         ),
       )
       .handle("attach", ({ params, payload }) =>
-        Effect.tap(
-          streamSingleFile(payload, ATTACHMENT_MAX_BYTES, (file) =>
-            expenses.attach(params.expenseId, file),
-          ),
-          (view) =>
+        streamSingleFile(payload, ATTACHMENT_MAX_BYTES, (file) =>
+          expenses.attach(params.expenseId, file),
+        ).pipe(
+          Effect.tap((view) =>
             Predicate.hasProperty(view, "id") && typeof view.id === "string"
               ? setLocation(
                   `${API_PREFIX}/workspaces/${params.workspaceId}/expenses/${params.expenseId}/attachments/${view.id}`,
                 )
               : Effect.void,
+          ),
+          Effect.tap(() =>
+            Effect.gen(function* () {
+              const caller = yield* CurrentCaller;
+              if (caller._tag === "Member") {
+                yield* analytics.capture({
+                  event: "expense_receipt_uploaded",
+                  userId: caller.userId,
+                  workspaceId: params.workspaceId,
+                });
+              }
+            }),
+          ),
         ),
       )
       .handle("attachment", ({ params, query }) =>

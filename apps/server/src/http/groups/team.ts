@@ -1,10 +1,11 @@
 /** `team` group handlers (http-mcp-contracts 3.5.3): members, invitations, roles and ownership transfer. */
 import { API_PREFIX, Api, CurrentPrincipal } from "@kvitbit/api-contract";
-import { Workspaces } from "@kvitbit/domain/contract";
+import { CurrentCaller, Workspaces } from "@kvitbit/domain/contract";
 import { Effect } from "effect";
 import { HttpApiBuilder } from "effect/http-api";
 import { SqlClient } from "effect/sql";
-import { requestOptions, setLocation } from "../conventions";
+import { Analytics } from "../../runtime/analytics";
+import { requestOptions, requestWasReplayed, setLocation } from "../conventions";
 import { requireFreshSession } from "./workspace/freshSession";
 import { changeMembershipAndRevokeCredentials } from "./workspace/revokeCredentials";
 
@@ -12,6 +13,7 @@ export const TeamGroupLive = HttpApiBuilder.group(Api, "team", (handlers) =>
   Effect.gen(function* () {
     const workspaces = yield* Workspaces;
     const sql = yield* SqlClient.SqlClient;
+    const analytics = yield* Analytics;
     return handlers
       .handle("listMembers", () => workspaces.members)
       .handle("setRole", ({ params, payload }) => workspaces.setRole(params.userId, payload.role))
@@ -36,10 +38,23 @@ export const TeamGroupLive = HttpApiBuilder.group(Api, "team", (handlers) =>
       )
       .handle("listInvitations", () => workspaces.invitations)
       .handle("invite", ({ params, headers, payload }) =>
-        Effect.tap(
-          workspaces.invite(payload.email, payload.role, requestOptions(headers)),
-          (view) =>
+        workspaces.invite(payload.email, payload.role, requestOptions(headers)).pipe(
+          Effect.tap((view) =>
             setLocation(`${API_PREFIX}/workspaces/${params.workspaceId}/invitations/${view.id}`),
+          ),
+          Effect.tap((view) =>
+            Effect.gen(function* () {
+              const caller = yield* CurrentCaller;
+              if (caller._tag === "Member" && !(yield* requestWasReplayed)) {
+                yield* analytics.capture({
+                  event: "team_invitation_sent",
+                  userId: caller.userId,
+                  workspaceId: params.workspaceId,
+                  role: view.role,
+                });
+              }
+            }),
+          ),
         ),
       )
       .handle("revokeInvitation", ({ params }) => workspaces.revokeInvitation(params.invitationId))

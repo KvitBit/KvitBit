@@ -125,6 +125,20 @@ describe("documents group", () => {
       ],
       [
         {
+          event: "document_draft_saved",
+          distinctId: owner.id,
+          properties: { ...properties, mode: "created" },
+        },
+      ],
+      [
+        {
+          event: "document_draft_saved",
+          distinctId: owner.id,
+          properties: { ...properties, mode: "updated" },
+        },
+      ],
+      [
+        {
           event: "document_issued",
           distinctId: owner.id,
           properties: { ...properties, source: "draft" },

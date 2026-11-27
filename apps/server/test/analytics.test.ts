@@ -81,6 +81,56 @@ test("analytics allowlists event fields, validates IDs, and awaits the SDK flush
         userId: privateData.email,
         method: "email",
       });
+      yield* analytics.capture({
+        ...privateData,
+        event: "document_draft_saved",
+        userId,
+        workspaceId,
+        kind: "invoice",
+        mode: "created",
+      });
+      yield* analytics.capture({
+        ...privateData,
+        event: "expense_receipt_uploaded",
+        userId,
+        workspaceId,
+      });
+      yield* analytics.capture({
+        ...privateData,
+        event: "contact_saved",
+        userId,
+        workspaceId,
+        mode: "updated",
+      });
+      yield* analytics.capture({
+        ...privateData,
+        event: "api_key_created",
+        userId,
+        workspaceId,
+        access: "read_write",
+      });
+      yield* analytics.capture({
+        ...privateData,
+        event: "api_key_revoked",
+        userId,
+        workspaceId,
+        access: "custom",
+      });
+      yield* analytics.capture({
+        ...privateData,
+        event: "team_invitation_sent",
+        userId,
+        workspaceId,
+        role: "member",
+      });
+      yield* analytics.capture({
+        ...privateData,
+        event: "report_exported",
+        userId,
+        workspaceId,
+        report: "revenue",
+        format: "csv",
+      });
       yield* analytics.capture({ ...privateData, event: "share_link_opened" });
       expect(shutdown).not.toHaveBeenCalled();
     }).pipe(Effect.provide(layer)),
@@ -92,6 +142,55 @@ test("analytics allowlists event fields, validates IDs, and awaits the SDK flush
         event: "document_issued",
         distinctId: userId,
         properties: { workspaceId, kind: "invoice", source: "draft" },
+      },
+    ],
+    [
+      {
+        event: "document_draft_saved",
+        distinctId: userId,
+        properties: { workspaceId, kind: "invoice", mode: "created" },
+      },
+    ],
+    [
+      {
+        event: "expense_receipt_uploaded",
+        distinctId: userId,
+        properties: { workspaceId },
+      },
+    ],
+    [
+      {
+        event: "contact_saved",
+        distinctId: userId,
+        properties: { workspaceId, mode: "updated" },
+      },
+    ],
+    [
+      {
+        event: "api_key_created",
+        distinctId: userId,
+        properties: { workspaceId, access: "read_write" },
+      },
+    ],
+    [
+      {
+        event: "api_key_revoked",
+        distinctId: userId,
+        properties: { workspaceId, access: "custom" },
+      },
+    ],
+    [
+      {
+        event: "team_invitation_sent",
+        distinctId: userId,
+        properties: { workspaceId, role: "member" },
+      },
+    ],
+    [
+      {
+        event: "report_exported",
+        distinctId: userId,
+        properties: { workspaceId, report: "revenue", format: "csv" },
       },
     ],
     [

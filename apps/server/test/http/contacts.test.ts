@@ -1,9 +1,12 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { captureAnalytics } from "../analytics-fixture";
 import { as, type Harness, json, makeHarness, type TestUser } from "./harness";
 
 let h: Harness;
 let owner: TestUser;
+let workspaceId: string;
 let base: string;
+let analytics: ReturnType<typeof captureAnalytics>;
 
 const contact = {
   name: "Odběratel a.s.",
@@ -13,10 +16,12 @@ const contact = {
 };
 
 beforeEach(async () => {
-  h = makeHarness();
+  analytics = captureAnalytics();
+  h = makeHarness({ analytics: analytics.layer });
   owner = h.addUser("Olga");
   const member = await h.createWorkspace(owner);
-  base = `/api/v1/workspaces/${member.workspaceId}/contacts`;
+  workspaceId = member.workspaceId;
+  base = `/api/v1/workspaces/${workspaceId}/contacts`;
 });
 afterEach(async () => {
   await h.dispose();
@@ -59,6 +64,15 @@ describe("contacts group", () => {
     expect(await again.json()).toEqual(await first.json());
     const other = await post({ ...contact, name: "Jiný" }, { "idempotency-key": "key-00000001" });
     expect(other.status).toBe(409);
+    expect(analytics.capture.mock.calls).toEqual([
+      [
+        {
+          event: "contact_saved",
+          distinctId: owner.id,
+          properties: { workspaceId, mode: "created" },
+        },
+      ],
+    ]);
   });
 
   test("update needs If-Match: 428 without, 412 when stale, 200 when current", async () => {
@@ -84,6 +98,22 @@ describe("contacts group", () => {
     const ok = await put({ "if-match": `"${created.revision}"` });
     expect(ok.status).toBe(200);
     expect(ok.headers.get("etag")).toBe(`"${created.revision + 1}"`);
+    expect(analytics.capture.mock.calls).toEqual([
+      [
+        {
+          event: "contact_saved",
+          distinctId: owner.id,
+          properties: { workspaceId, mode: "created" },
+        },
+      ],
+      [
+        {
+          event: "contact_saved",
+          distinctId: owner.id,
+          properties: { workspaceId, mode: "updated" },
+        },
+      ],
+    ]);
   });
 
   test("malformed query is 422 request.malformed", async () => {
