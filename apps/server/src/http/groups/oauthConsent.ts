@@ -32,6 +32,7 @@ import { HttpServerRequest } from "effect/http/HttpServerRequest";
 import { HttpApiBuilder } from "effect/http-api";
 import { SqlClient } from "effect/sql";
 import { AuthServer } from "../../auth/AuthServer";
+import { bindAuthLogging } from "../../auth/logging";
 import { processWorkspaceConsent, verifyWorkspaceConsent } from "../../auth/oauthWorkspace";
 import { HttpConfig } from "../config";
 
@@ -358,13 +359,16 @@ export const OauthConsentGroupLive = HttpApiBuilder.group(Api, "oauthConsent", (
                 };
               }
 
+              const runAuth = yield* bindAuthLogging;
               const response = yield* processWorkspaceConsent(providerDecision, () =>
-                auth.handler(
-                  new Request(`${config.appOrigin}/api/auth/oauth2/consent`, {
-                    method: "POST",
-                    headers: forwardHeaders(request),
-                    body: JSON.stringify({ accept, oauth_query: parsed.oauthQuery }),
-                  }),
+                runAuth(() =>
+                  auth.handler(
+                    new Request(`${config.appOrigin}/api/auth/oauth2/consent`, {
+                      method: "POST",
+                      headers: forwardHeaders(request),
+                      body: JSON.stringify({ accept, oauth_query: parsed.oauthQuery }),
+                    }),
+                  ),
                 ),
               ).pipe(Effect.mapError(() => new Unavailable({ dependency: "database" })));
               if (response.status >= 500) return yield* new Unavailable({ dependency: "database" });

@@ -4,12 +4,12 @@
  * - Only `RESEND_API_KEY`: Resend.
  * - Only `KVITBIT_SMTP_URL`: SMTP (nodemailer via `@kvitbit/adapters/email`).
  * - Neither: Delivery rejection.
- * Non-production captures email locally. Development with no provider logs it to the console.
+ * Non-production captures email locally. Development with no provider logs delivery metadata.
  */
 import {
+  CONSOLE_PROVIDER,
   layerSmtp,
   makeCaptureEmailSender,
-  makeConsoleEmailSender,
   makeFallbackEmailSender,
   makeResendEmailSender,
   SMTP_DEFAULT_TIMEOUTS,
@@ -19,6 +19,40 @@ import { EmailRejected, EmailSender } from "@kvitbit/domain/ports";
 import { Config, Context, Effect, Layer, Option, Redacted } from "effect";
 import { FetchHttpClient } from "effect/http";
 import { type EmailWiringConfig, EmailWiringConfigSchema } from "./config";
+
+const emailKinds: Readonly<Record<string, string>> = {
+  E01: "verification",
+  E02: "magic-link",
+  E03: "password-reset",
+  E04: "invitation",
+  E07: "change-email",
+};
+const EMAIL_NOT_CONFIGURED = "Email delivery is not configured";
+
+const authEmailKind = (template: string | undefined): string | undefined =>
+  template !== undefined && Object.hasOwn(emailKinds, template) ? emailKinds[template] : undefined;
+
+const logDeliveryFailures = (sender: EmailSender["Service"]): EmailSender["Service"] =>
+  EmailSender.of({
+    send: (message, options) =>
+      sender.send(message, options).pipe(
+        Effect.tapError((error) => {
+          const emailKind = authEmailKind(message.tags.template);
+          const unconfigured =
+            error instanceof EmailRejected && error.cause === EMAIL_NOT_CONFIGURED;
+          if (!unconfigured && emailKind === undefined) return Effect.void;
+          return Effect.logError(
+            error instanceof EmailRejected ? "Email delivery rejected" : "Email delivery failed",
+          ).pipe(
+            Effect.annotateLogs({
+              event: error._tag,
+              emailKind: emailKind ?? "other",
+              reason: unconfigured ? EMAIL_NOT_CONFIGURED : "Email provider failed to deliver",
+            }),
+          );
+        }),
+      ),
+  });
 
 /** Parses `smtp://` or `smtps://` URL into nodemailer transport options. */
 export const parseSmtpUrl = (
@@ -69,7 +103,15 @@ export const makeEmailSenderLayer = (
 
       if (nodeEnv !== "production") {
         return nodeEnv === "development" && !hasResend && !hasSmtp
-          ? makeConsoleEmailSender()
+          ? EmailSender.of({
+              send: (message, { idempotencyKey }) =>
+                Effect.logInfo("Email (not sent)").pipe(
+                  Effect.annotateLogs({
+                    emailKind: authEmailKind(message.tags.template) ?? "other",
+                  }),
+                  Effect.as({ provider: CONSOLE_PROVIDER, providerMessageId: idempotencyKey }),
+                ),
+            })
           : yield* makeCaptureEmailSender;
       }
 
@@ -94,9 +136,11 @@ export const makeEmailSenderLayer = (
       }
 
       return EmailSender.of({
-        send: () => Effect.fail(new EmailRejected({ cause: "Email delivery is not configured" })),
+        send: () => Effect.fail(new EmailRejected({ cause: EMAIL_NOT_CONFIGURED })),
       });
-    }),
+    }).pipe(
+      Effect.map((sender) => (nodeEnv === "production" ? logDeliveryFailures(sender) : sender)),
+    ),
   ).pipe(Layer.provide(FetchHttpClient.layer));
 
 /** Live `EmailSender` configured from `EMAIL_FROM`, `RESEND_API_KEY`, `KVITBIT_SMTP_URL`. */
