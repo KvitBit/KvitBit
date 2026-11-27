@@ -30,9 +30,11 @@
   },
   "devDependencies": {
     "@playwright/test": "1.65.1",
+    "@tailwindcss/vite": "4.3.5",
     "fast-check": "4.11.0",
     "happy-dom": "20.14.6",
     "jsqr": "^1.4.0",
+    "tailwindcss": "4.3.5",
     "vite": "8.3.8"
   }
 }
