@@ -887,6 +887,97 @@ describe("Self-hosting and CI deploy artifacts", () => {
     expect(deployPos).toBeGreaterThan(migratePos);
   });
 
+  test("deploy.yml verifies readiness and both static mounts through the public Cloud Run URL", async () => {
+    const workflow = readFileSync(join(repoRoot, ".github/workflows/deploy.yml"), "utf8");
+    const parsed = Bun.YAML.parse(workflow) as {
+      jobs: { deploy: { steps: Array<{ name?: string; run?: string }> } };
+    };
+    const script = parsed.jobs.deploy.steps.find(
+      (step) => step.name === "Verify database readiness and static mounts",
+    )?.run;
+    if (script === undefined) throw new Error("Missing external deploy verification step");
+
+    const paths: string[] = [];
+    const webPage = () =>
+      new Response("<html>Web app</html>", { headers: { "Content-Type": "text/html" } });
+    const routes = new Map([
+      ["/readyz", () => Response.json({ status: "ok" })],
+      ["/", webPage],
+      [
+        "/app/manifest.webmanifest",
+        () =>
+          new Response('{"name":"Kvitbit"}', {
+            headers: { "Content-Type": "application/manifest+json; charset=utf-8" },
+          }),
+      ],
+    ]);
+    const server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch(request) {
+        const path = new URL(request.url).pathname;
+        paths.push(path);
+        // Cloud Run's frontend returns 404 for /healthz.
+        return routes.get(path)?.() ?? new Response("Not found", { status: 404 });
+      },
+    });
+    const runProbe = async () => {
+      paths.length = 0;
+      const child = Bun.spawn(
+        ["bash", "-c", `gcloud() { printf '%s\\n' "$TEST_ORIGIN"; }\n${script}`],
+        {
+          env: {
+            PATH: process.env.PATH ?? "/usr/bin:/bin",
+            TEST_ORIGIN: server.url.origin,
+            KVITBIT_STAGE: "prod",
+            GCP_PROJECT_ID: "test",
+            GCP_REGION: "europe-west3",
+          },
+          stdout: "pipe",
+          stderr: "pipe",
+        },
+      );
+      const [exitCode, stdout, stderr] = await Promise.all([
+        child.exited,
+        new Response(child.stdout).text(),
+        new Response(child.stderr).text(),
+      ]);
+      return { exitCode, output: stdout + stderr };
+    };
+    try {
+      expect((await runProbe()).exitCode).toBe(0);
+      expect(paths).toEqual(["/readyz", "/", "/app/manifest.webmanifest"]);
+
+      routes.set("/readyz", () => Response.json({ status: "down" }));
+      const notReady = await runProbe();
+      expect(notReady.exitCode).toBe(1);
+      expect(notReady.output).toContain("/readyz did not report status ok");
+      expect(paths).toEqual(["/readyz"]);
+
+      routes.set("/readyz", () => Response.json({ status: "ok" }));
+      routes.set(
+        "/",
+        () =>
+          new Response(null, {
+            status: 302,
+            headers: { "Content-Type": "text/html", Location: "/login" },
+          }),
+      );
+      const webRedirect = await runProbe();
+      expect(webRedirect.exitCode).toBe(1);
+      expect(webRedirect.output).toContain("/ returned '302 text/html'");
+      expect(paths).toEqual(["/readyz", "/"]);
+
+      routes.set("/", webPage);
+      routes.set("/app/manifest.webmanifest", webPage);
+      const manifestFallback = await runProbe();
+      expect(manifestFallback.exitCode).toBe(1);
+      expect(manifestFallback.output).toContain("expected HTTP 200 with application/manifest+json");
+    } finally {
+      server.stop();
+    }
+  });
+
   test("deploy.yml normalizes secret flags and resets legacy runners that cannot confirm a verified target", () => {
     const workflow = readFileSync(join(repoRoot, ".github/workflows/deploy.yml"), "utf8");
     const parsed = Bun.YAML.parse(workflow) as {

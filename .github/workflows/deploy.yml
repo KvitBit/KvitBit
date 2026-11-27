@@ -348,7 +348,7 @@ jobs:
             fi
           done
 
-      - name: Verify /healthz and /readyz
+      - name: Verify database readiness and static mounts
         if: env.DRY_RUN != 'true' && env.BOOTSTRAP_FOUNDATION != 'true'
         env:
           KVITBIT_EDGE_DOMAINS: ${{ vars.KVITBIT_EDGE_DOMAINS }}
@@ -373,6 +373,26 @@ jobs:
             echo "::error::Could not resolve probe URL"
             exit 1
           fi
-          curl -fsS --retry 6 --retry-delay 5 "${PROBE_URL}/healthz" > /dev/null
-          curl -fsS --retry 6 --retry-delay 5 "${PROBE_URL}/readyz" > /dev/null
-          echo "Verified ${PROBE_URL}/healthz and /readyz"
+
+          # The Cloud Run frontend intercepts /healthz on *.run.app.
+          # The container startup and liveness probes still use that path.
+          probe() {
+            local path="$1" content_type="$2" output="${3:-/dev/null}" response
+            response="$(curl -fsS --retry 6 --retry-delay 5 --output "$output" \
+              --write-out '%{http_code} %{content_type}' "${PROBE_URL}${path}")"
+            if [ "${response%%;*}" != "200 ${content_type}" ]; then
+              echo "::error::${path} returned '${response}', expected HTTP 200 with ${content_type}"
+              return 1
+            fi
+          }
+
+          readiness_body="$(mktemp)"
+          trap 'rm -f "$readiness_body"' EXIT
+          probe /readyz application/json "$readiness_body"
+          if ! jq -e '.status == "ok"' "$readiness_body" > /dev/null; then
+            echo "::error::/readyz did not report status ok"
+            exit 1
+          fi
+          probe / text/html
+          probe /app/manifest.webmanifest application/manifest+json
+          echo "Verified database readiness and static mounts at ${PROBE_URL}"
