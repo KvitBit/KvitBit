@@ -12,6 +12,12 @@ import * as Account from "../../src/page/settings/account";
 import { ctxFor, DEMO_USER, DEMO_WORKSPACE, renderPath, signedIn } from "../support";
 
 const disabledRemoveButtonPattern = /<button[^>]*disabled[^>]*>Remove<\/button>/;
+const isNamedOperation = Schema.is(Schema.Struct({ name: Schema.String }));
+
+const operationName = (command: PageCommand<Account.Message>) =>
+  command._tag === "Effect" && command.name === RunApi.key && isNamedOperation(command.args)
+    ? command.args.name
+    : command.name;
 
 const renderText = async (
   view: (h: Html.H<Account.Message>) => View.Content<Account.Message>,
@@ -33,7 +39,7 @@ const runCommand = (
   name: string,
 ) => {
   const command = Option.getOrUndefined(
-    Arr.findFirst(commands ?? [], (candidate) => candidate.name === `Account.${name}`),
+    Arr.findFirst(commands ?? [], (candidate) => operationName(candidate) === `Account.${name}`),
   );
   if (command?._tag !== "Effect") throw new Error(`Missing Account.${name} command`);
   return Effect.runPromise(command.effect.pipe(Effect.provide(RunApi.layer)));
@@ -291,9 +297,7 @@ describe("Account & Security page (Screen 22)", () => {
       const dialog = Account.update(model, ask, ctx).model;
       expect(dialog.security.removingId).toBe("key-1");
       const deletion = Account.update(dialog, confirm, ctx);
-      expect(Arr.map(deletion.commands ?? [], (command) => command.name)).toEqual([
-        "Account.DeletePasskey",
-      ]);
+      expect(Arr.map(deletion.commands ?? [], operationName)).toEqual(["Account.DeletePasskey"]);
       expect(Account.update(deletion.model, confirm, ctx).commands).toBeUndefined();
 
       const refresh = Account.update(dialog, Account.Message.ClickedRetry(), ctx);
@@ -308,9 +312,7 @@ describe("Account & Security page (Screen 22)", () => {
     const ctx = ctxFor(route, { locale: "en" });
     const { model } = Account.init(route, ctx);
     const started = Account.update(model, Account.Message.ClickedAddPasskey(), ctx);
-    expect(Arr.map(started.commands ?? [], (command) => command.name)).toEqual([
-      "Account.AddPasskey",
-    ]);
+    expect(Arr.map(started.commands ?? [], operationName)).toEqual(["Account.AddPasskey"]);
     expect(
       Account.update(started.model, Account.Message.ClickedAddPasskey(), ctx).commands,
     ).toBeUndefined();
