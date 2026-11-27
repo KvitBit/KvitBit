@@ -26,7 +26,7 @@ import {
   Workspaces,
 } from "@kvitbit/domain/contract";
 import { Effect, Layer, ManagedRuntime } from "effect";
-import { HttpRouter } from "effect/http";
+import { FetchHttpClient, HttpRouter } from "effect/http";
 import { TestClock } from "effect/testing";
 import {
   AuthServerLive,
@@ -114,6 +114,7 @@ export interface HarnessOptions extends TestCoreOptions {
     | Layer.Layer<BotProtection, never, import("effect/sql").SqlClient.SqlClient>;
   readonly authOverrides?: AuthServerOverrides;
   readonly config?: Parameters<typeof HttpConfigTest>[0];
+  readonly feedbackFetch?: typeof globalThis.fetch;
 }
 
 export const makeHarness = (options: HarnessOptions = {}) => {
@@ -142,7 +143,15 @@ export const makeHarness = (options: HarnessOptions = {}) => {
       ? PrincipalResolverLive.pipe(Layer.provide(core))
       : (options.principalResolver ?? FakePrincipalResolver(users));
   const app = HttpRoutesLive.pipe(
-    Layer.provide([core, resolverLayer, RateLimiterMemory, BunHttpServer.layerHttpServices]),
+    Layer.provide([
+      core,
+      resolverLayer,
+      RateLimiterMemory,
+      BunHttpServer.layerHttpServices,
+      options.feedbackFetch === undefined
+        ? Layer.empty
+        : Layer.succeed(FetchHttpClient.Fetch, options.feedbackFetch),
+    ]),
   );
   const web = HttpRouter.toWebHandler(app, {
     memoMap,

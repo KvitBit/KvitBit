@@ -1,0 +1,86 @@
+import { FeedbackSubmission, STRICT_REQUEST, sanitizeFeedbackPageUrl } from "@kvitbit/api-contract";
+import { ByteSize, Effect, Layer, Schema } from "effect";
+import {
+  FetchHttpClient,
+  HttpClient,
+  HttpIncomingMessage,
+  HttpRouter,
+  HttpServerResponse,
+} from "effect/http";
+import { HttpServerRequest } from "effect/http/HttpServerRequest";
+import { SqlClient } from "effect/sql";
+import { AuthServer } from "../../auth/AuthServer";
+import { HttpConfig } from "../config";
+import { canSubmitFeedback, feedbackSessionCookie } from "./access";
+import { createFeedbackIssue } from "./issue";
+
+const BODY_MAX_BYTES = 256 * 1024;
+const forbidden = HttpServerResponse.empty({ status: 403 });
+const malformed = HttpServerResponse.empty({ status: 400 });
+const oversized = HttpServerResponse.empty({ status: 413 });
+const decode = Schema.decodeUnknownEffect(FeedbackSubmission, STRICT_REQUEST);
+
+export const FeedbackRoutesLive = HttpRouter.use((router) =>
+  Effect.gen(function* () {
+    const config = yield* HttpConfig;
+    const auth = yield* AuthServer;
+    const sql = yield* SqlClient.SqlClient;
+    const client = yield* HttpClient.HttpClient;
+    const fetch = yield* FetchHttpClient.Fetch;
+
+    yield* router.add(
+      "POST",
+      "/api/feedback",
+      Effect.gen(function* () {
+        if (config.feedback === undefined) return HttpServerResponse.empty({ status: 404 });
+
+        const request = yield* HttpServerRequest;
+        const origin = request.headers.origin;
+        const cookie = feedbackSessionCookie(request);
+        // Require an exact trusted Origin for this browser-only write.
+        if (origin === undefined || !config.trustedOrigins.has(origin) || cookie === undefined) {
+          return forbidden;
+        }
+
+        const session = yield* Effect.tryPromise(() =>
+          auth.api.getSession({
+            headers: new Headers({ cookie }),
+            query: { disableCookieCache: true, disableRefresh: true },
+          }),
+        ).pipe(Effect.orElseSucceed(() => null));
+        if (session == null || !(yield* canSubmitFeedback(sql, config.feedback, session.user)))
+          return forbidden;
+
+        const contentType = request.headers["content-type"]?.split(";", 1)[0]?.trim().toLowerCase();
+        if (contentType !== "application/json") return malformed;
+        if (Number(request.headers["content-length"]) > BODY_MAX_BYTES) return oversized;
+
+        const json = yield* request.json.pipe(
+          Effect.provideService(HttpIncomingMessage.MaxBodySize, ByteSize.bytes(BODY_MAX_BYTES)),
+          Effect.result,
+        );
+        if (json._tag === "Failure") {
+          const reason = json.failure.reason;
+          return reason._tag === "RequestParseError" && reason.reason === "BodyTooLarge"
+            ? oversized
+            : malformed;
+        }
+
+        const submission = yield* decode(json.success).pipe(Effect.result);
+        if (submission._tag === "Failure") return malformed;
+        const page = sanitizeFeedbackPageUrl(submission.success.page.url);
+        if (page === undefined || new URL(page.url).origin !== origin) return malformed;
+
+        const issue = yield* createFeedbackIssue(
+          client,
+          config.feedback,
+          submission.success,
+          page,
+        ).pipe(Effect.provideService(FetchHttpClient.Fetch, fetch));
+        return issue === undefined
+          ? HttpServerResponse.empty({ status: 502 })
+          : HttpServerResponse.jsonUnsafe(issue, { status: 201 });
+      }),
+    );
+  }),
+).pipe(Layer.provide(FetchHttpClient.layer));
