@@ -1,10 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import * as Domain from "@kvitbit/domain/contract";
+import * as Arr from "effect/Array";
+import * as Order from "effect/Order";
 import * as Enums from "../src/schema/enums";
 
 // The db enum tuples are copied from the specs (see enums.ts); these checks keep
 // them equal to the @kvitbit/domain literals so the two cannot drift.
-const pairs: ReadonlyArray<readonly [string, ReadonlyArray<unknown>, ReadonlyArray<unknown>]> = [
+const pairs: ReadonlyArray<readonly [string, ReadonlyArray<string>, ReadonlyArray<string>]> = [
   ["Role", Enums.roleValues, Domain.Role.literals],
   ["InvitationRole", Enums.invitationRoleValues, Domain.InvitationRole.literals],
   ["InvitationStatus", Enums.invitationStatusValues, Domain.InvitationStatus.literals],
@@ -32,7 +34,7 @@ const pairs: ReadonlyArray<readonly [string, ReadonlyArray<unknown>, ReadonlyArr
 describe("db enums match @kvitbit/domain literals", () => {
   for (const [name, db, domain] of pairs) {
     test(name, () => {
-      expect([...db].sort()).toEqual([...domain].sort());
+      expect(Arr.sort(db, Order.String)).toEqual(Arr.sort(domain, Order.String));
     });
   }
 });
