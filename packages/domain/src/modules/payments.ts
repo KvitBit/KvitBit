@@ -1,6 +1,8 @@
 /** Payments (core-ports 4.5) and PublicShareLinks (core-ports 4.6). Interfaces only. */
-import type { Effect } from "effect";
-import { Context, Schema } from "effect";
+
+import * as Context from "effect/Context";
+import type * as Effect from "effect/Effect";
+import * as Schema from "effect/Schema";
 import type { CurrentCaller } from "../caller";
 import type { Conflict, CoreError, Forbidden, Invalid, NotFound, Unavailable } from "../errors";
 import type { DocumentId, ExpenseId, PaymentId } from "../ids";
@@ -25,6 +27,7 @@ export interface RecordPaymentInput {
   readonly note?: string;
 }
 
+// @effect-diagnostics-next-line leakingRequirements:off Resolve the caller at method invocation.
 export class Payments extends Context.Service<
   Payments,
   {
@@ -57,6 +60,7 @@ export class Payments extends Context.Service<
       CurrentCaller
     >;
   }
+  // @effect-diagnostics-next-line deterministicKeys:off Preserve the service key specified in core-ports.
 >()("kvitbit/Payments") {}
 
 export const ShareViewEvent = Schema.Struct({
@@ -100,6 +104,7 @@ export const SharedDocumentView = Schema.Struct({
 export type SharedDocumentView = typeof SharedDocumentView.Type;
 
 /** Serves both sides of a Public Share Link: Members manage it, visitors open it. */
+// @effect-diagnostics-next-line leakingRequirements:off Resolve the caller at method invocation.
 export class PublicShareLinks extends Context.Service<
   PublicShareLinks,
   {
@@ -138,4 +143,5 @@ export class PublicShareLinks extends Context.Service<
     /** The issuing Workspace's logo for the page header; NotFound when it has none. */
     readonly logo: Effect.Effect<FileDownload, NotFound | Unavailable | Forbidden, CurrentCaller>;
   }
+  // @effect-diagnostics-next-line deterministicKeys:off Preserve the service key specified in core-ports.
 >()("kvitbit/PublicShareLinks") {}

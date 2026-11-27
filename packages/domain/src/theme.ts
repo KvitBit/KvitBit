@@ -2,7 +2,7 @@
  * Theme types (core-ports section 1; http-mcp-contracts section 3.5.2 for the account
  * preference). Resolving a source into M3 schemes stays in apps/server (`ThemeResolver`).
  */
-import { Schema } from "effect";
+import * as Schema from "effect/Schema";
 
 export const Hex = Schema.String.pipe(Schema.check(Schema.isPattern(/^#[0-9A-Fa-f]{6}$/)));
 export type Hex = typeof Hex.Type;

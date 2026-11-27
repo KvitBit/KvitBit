@@ -4,11 +4,12 @@
  * All ids are UUIDv7 except InvitationToken, ShareToken and VisitorHash (and RequestKey, the
  * client-chosen retry key), so entity ids are checked as UUIDv7 before branding: a malformed
  * path parameter fails at decode.
+ * Construct a branded value from a string with its schema's `.make` method.
  * - InvitationToken: 32 random bytes, base64url; stored only as its SHA-256 hash.
  * - ShareToken: "v{keyVersion}." + base64url(HMAC-SHA256(shareKey[keyVersion], shareLinkId)).
  * - VisitorHash: HMAC of IP + user agent with a daily rotated key.
  */
-import { Schema } from "effect";
+import * as Schema from "effect/Schema";
 
 const UUID_V7 = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const Uuid7 = Schema.String.pipe(Schema.check(Schema.isPattern(UUID_V7)));
@@ -20,6 +21,7 @@ export const UserId = Uuid7.pipe(Schema.brand("UserId"));
 export type UserId = typeof UserId.Type;
 export const ContactId = Uuid7.pipe(Schema.brand("ContactId"));
 export type ContactId = typeof ContactId.Type;
+// biome-ignore lint/security/noSecrets: This literal names the Price List Item ID brand.
 export const PriceListItemId = Uuid7.pipe(Schema.brand("PriceListItemId"));
 export type PriceListItemId = typeof PriceListItemId.Type;
 export const DocumentId = Uuid7.pipe(Schema.brand("DocumentId"));
@@ -38,6 +40,7 @@ export const ScheduleId = Uuid7.pipe(Schema.brand("ScheduleId"));
 export type ScheduleId = typeof ScheduleId.Type;
 export const NumberingSeriesId = Uuid7.pipe(Schema.brand("NumberingSeriesId"));
 export type NumberingSeriesId = typeof NumberingSeriesId.Type;
+// biome-ignore lint/security/noSecrets: This literal names the Bank Account ID brand.
 export const BankAccountId = Uuid7.pipe(Schema.brand("BankAccountId"));
 export type BankAccountId = typeof BankAccountId.Type;
 export const InvitationId = Uuid7.pipe(Schema.brand("InvitationId"));
@@ -46,6 +49,7 @@ export const InvitationToken = NonEmpty.pipe(Schema.brand("InvitationToken"));
 export type InvitationToken = typeof InvitationToken.Type;
 export const DeliveryId = Uuid7.pipe(Schema.brand("DeliveryId"));
 export type DeliveryId = typeof DeliveryId.Type;
+// biome-ignore lint/security/noSecrets: This literal names the Audit Entry ID brand.
 export const AuditEntryId = Uuid7.pipe(Schema.brand("AuditEntryId"));
 export type AuditEntryId = typeof AuditEntryId.Type;
 export const ExportId = Uuid7.pipe(Schema.brand("ExportId"));

@@ -1,5 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { BigDecimal, Exit, Schema } from "effect";
+import * as BigDecimal from "effect/BigDecimal";
+import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
+import * as Schema from "effect/Schema";
+import * as Str from "effect/String";
 import {
   ContactDefaults,
   CurrencyCode,
@@ -26,12 +30,12 @@ const accepts = <S extends Schema.Top & { readonly DecodingServices: never }>(
 ) => Exit.isSuccess(Schema.decodeUnknownExit(schema)(input));
 
 describe("WorkspaceSlug", () => {
-  test.each(["abc", "my-firm-2", "a".repeat(40), "0ab"])("accepts %p", (slug) => {
+  test.each(["abc", "my-firm-2", Str.repeat(40)("a"), "0ab"])("accepts %p", (slug) => {
     expect(accepts(WorkspaceSlug, slug)).toBe(true);
   });
   test.each([
     "ab", // too short
-    "a".repeat(41), // too long
+    Str.repeat(41)("a"), // too long
     "-abc",
     "abc-",
     "Abc",
@@ -44,6 +48,16 @@ describe("WorkspaceSlug", () => {
 });
 
 describe("CurrencyCode and IsoDate", () => {
+  test("brand constructors validate strings and return the same value", () => {
+    const workspace = "0192f0c4-0000-7000-8000-000000000000";
+    expect(String(WorkspaceId.make(workspace))).toBe(workspace);
+    expect(String(CurrencyCode.make("CZK"))).toBe("CZK");
+    expect(String(IsoDate.make("0000-02-29"))).toBe("0000-02-29");
+    expect(() => WorkspaceId.make("not-an-id")).toThrow();
+    expect(() => CurrencyCode.make("czk")).toThrow();
+    expect(() => IsoDate.make("2026-02-29")).toThrow();
+    expect(() => RequestKey.make("")).toThrow();
+  });
   test("currency is three upper-case letters", () => {
     expect(accepts(CurrencyCode, "CZK")).toBe(true);
     expect(accepts(CurrencyCode, "czk")).toBe(false);
@@ -109,19 +123,19 @@ describe("PageRequest", () => {
 describe("Money on the wire", () => {
   const json = Schema.toCodecJson(Money);
   test("amounts encode as decimal strings and round-trip", () => {
-    const czk = Schema.decodeUnknownSync(CurrencyCode)("CZK");
-    const encoded = Schema.encodeSync(json)({
+    const czk = CurrencyCode.make("CZK");
+    const encoded = Schema.encodeEffect(json)({
       amount: BigDecimal.fromStringUnsafe("1210.50"),
       currency: czk,
-    });
+    }).pipe(Effect.runSync);
     expect(encoded).toEqual({ amount: "1210.5", currency: "CZK" });
-    const decoded = Schema.decodeUnknownSync(json)(encoded);
+    const decoded = Schema.decodeEffect(json)(encoded).pipe(Effect.runSync);
     expect(BigDecimal.equals(decoded.amount, BigDecimal.fromStringUnsafe("1210.5"))).toBe(true);
   });
   test("encoding fails for a value that is not a BigDecimal", () => {
-    expect(Exit.isFailure(Schema.encodeUnknownExit(json)({ amount: "1.5", currency: "CZK" }))).toBe(
-      true,
-    );
+    expect(
+      Schema.encodeUnknownExit(json)({ amount: "1.5", currency: "CZK" }).pipe(Exit.isFailure),
+    ).toBe(true);
   });
   test("rejects a non-decimal amount and a bad currency", () => {
     expect(accepts(json, { amount: "abc", currency: "CZK" })).toBe(false);
@@ -151,6 +165,7 @@ describe("Contact overrides", () => {
     expect(resolveDefault(undefined, undefined, "ws")).toBe("ws");
     // falsy values set on a level still win
     expect(resolveDefault(0, 14, 30)).toBe(0);
+    expect(resolveDefault(14, 30)(0)).toBe(0);
   });
 });
 

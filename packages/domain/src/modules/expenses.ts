@@ -1,6 +1,10 @@
 /** Expenses (core-ports 4.7) and Templates (core-ports 4.8). Interfaces only. */
-import type { Effect, Stream } from "effect";
-import { Context, Schema, Struct } from "effect";
+
+import * as Context from "effect/Context";
+import type * as Effect from "effect/Effect";
+import * as Schema from "effect/Schema";
+import type * as Stream from "effect/Stream";
+import * as Struct from "effect/Struct";
 import { IssueCode } from "../action";
 import type { CurrentCaller } from "../caller";
 import type { Conflict, CoreError, Forbidden, Invalid, NotFound, Unavailable } from "../errors";
@@ -46,6 +50,7 @@ export type ExpenseQuery = typeof ExpenseQuery.Type;
 export const AttachmentView = Schema.Unknown.pipe(Schema.brand("AttachmentView"));
 export type AttachmentView = typeof AttachmentView.Type;
 
+// @effect-diagnostics-next-line leakingRequirements:off Resolve the caller at method invocation.
 export class Expenses extends Context.Service<
   Expenses,
   {
@@ -94,6 +99,7 @@ export class Expenses extends Context.Service<
       q: ExpenseQuery,
     ) => Effect.Effect<Page<ExpenseSummary>, Invalid | Unavailable | Forbidden, CurrentCaller>;
   }
+  // @effect-diagnostics-next-line deterministicKeys:off Preserve the service key specified in core-ports.
 >()("kvitbit/Expenses") {}
 
 /** DocumentInput without issuedOn/taxableSupplyOn plus name and a relative due (inDays). */
@@ -137,6 +143,7 @@ export const RecurringRunView = Schema.Struct({
 export type RecurringRunView = typeof RecurringRunView.Type;
 
 /** Owns Invoice Templates and their Recurring Schedules. */
+// @effect-diagnostics-next-line leakingRequirements:off Resolve the caller at method invocation.
 export class Templates extends Context.Service<
   Templates,
   {
@@ -189,4 +196,5 @@ export class Templates extends Context.Service<
       CurrentCaller
     >;
   }
+  // @effect-diagnostics-next-line deterministicKeys:off Preserve the service key specified in core-ports.
 >()("kvitbit/Templates") {}

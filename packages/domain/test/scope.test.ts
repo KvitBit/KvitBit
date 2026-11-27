@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { Exit, Schema } from "effect";
+import * as Exit from "effect/Exit";
+import * as Schema from "effect/Schema";
 import { Action, SCOPE_AREAS, Scope, ScopeArea } from "../src/index";
 
 describe("scopes", () => {
@@ -28,7 +29,7 @@ describe("scopes", () => {
   test.each(["kvitbit:documents:read", "documents:admin", "invoices:read", "documents", ""])(
     "rejects %p",
     (s) => {
-      expect(Exit.isFailure(Schema.decodeUnknownExit(Scope)(s))).toBe(true);
+      expect(Schema.decodeUnknownExit(Scope)(s).pipe(Exit.isFailure)).toBe(true);
     },
   );
   test("Action is a closed union without duplicates", () => {
