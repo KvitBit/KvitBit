@@ -13,6 +13,7 @@ import type { KvitbitStackConfig, KvitbitWorkload } from "../config";
 import { resourceNames, secretResourceName, serviceAccountEmail, stackLabels } from "../config";
 
 export const CLOUD_DNS_API_ID = "CloudDnsApi";
+export const CLOUD_MONITORING_API_ID = "CloudMonitoringApi";
 
 export const artifactRepositoryProps = (config: KvitbitStackConfig): RepositoryProps => ({
   repositoryId: config.artifactRepositoryId,
@@ -105,6 +106,10 @@ export const secretAccessorGrants = (
 export const declareFoundation = Effect.fn("KvitbitStack.declareFoundation")(function* (
   config: KvitbitStackConfig,
 ) {
+  const monitoringApi = yield* ProjectService(CLOUD_MONITORING_API_ID, {
+    project: config.projectId,
+    service: "monitoring.googleapis.com",
+  });
   const dnsApi =
     config.dnsZones.length === 0
       ? undefined
@@ -183,6 +188,7 @@ export const declareFoundation = Effect.fn("KvitbitStack.declareFoundation")(fun
 
   return {
     dnsApi,
+    monitoringApi,
     repositoryName: repository.name,
     blobsBucketName: blobsBucket.bucketName,
     mobileAssetsBucketName: mobileAssetsBucket.bucketName,

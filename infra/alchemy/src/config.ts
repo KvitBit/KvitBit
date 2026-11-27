@@ -45,6 +45,7 @@ export interface KvitbitStackConfig {
   readonly serverMaxInstances: number;
   readonly appOrigin: string | undefined;
   readonly emailFrom: string | undefined;
+  readonly alertEmail: string | undefined;
   readonly trustedProxyHops: number;
   readonly shareKeyVersion: number;
   readonly androidAssetlinksSha256: string | undefined;
@@ -84,6 +85,8 @@ export const KVITBIT_PROD_DEFAULTS = {
 
 const DIGEST_PATTERN = /^sha256:[a-f0-9]{64}$/;
 const DOMAIN_PATTERN = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/;
+const EMAIL_ADDRESS_PATTERN =
+  /^[a-z\d!#$%&'*+/=?^_`{|}~-]+(?:\.[a-z\d!#$%&'*+/=?^_`{|}~-]+)*@[a-z\d](?:[a-z\d-]*[a-z\d])?(?:\.[a-z\d](?:[a-z\d-]*[a-z\d])?)+$/i;
 
 export const defaultSecretBindings = (
   stage: KvitbitStage,
@@ -249,6 +252,12 @@ export const validateStackConfig = (
         reason: "must be >= max(1, serverMinInstances)",
       });
     }
+    if (config.alertEmail !== undefined && !EMAIL_ADDRESS_PATTERN.test(config.alertEmail)) {
+      return yield* new InvalidStackConfig({
+        field: "KVITBIT_ALERT_EMAIL",
+        reason: "must be a single email address",
+      });
+    }
     for (const domain of config.dnsZones) {
       const labels = domain.split(".");
       if (
@@ -409,6 +418,7 @@ export const loadStackConfig: Effect.Effect<
   );
   const appOrigin = yield* optionalNonEmptyString("KVITBIT_APP_ORIGIN");
   const emailFrom = yield* optionalNonEmptyString("KVITBIT_EMAIL_FROM");
+  const alertEmail = yield* optionalNonEmptyString("KVITBIT_ALERT_EMAIL");
   const androidAssetlinksSha256 = yield* optionalNonEmptyString(
     "KVITBIT_ANDROID_ASSETLINKS_SHA256",
   );
@@ -489,6 +499,7 @@ export const loadStackConfig: Effect.Effect<
     serverMaxInstances,
     appOrigin,
     emailFrom,
+    alertEmail,
     trustedProxyHops,
     shareKeyVersion,
     androidAssetlinksSha256,

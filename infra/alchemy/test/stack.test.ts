@@ -88,6 +88,7 @@ const sampleProdConfig = (overrides: Partial<KvitbitStackConfig> = {}): KvitbitS
   serverMaxInstances: 10,
   appOrigin: "https://kvitbit.cz",
   emailFrom: "Kvitbit <no-reply@kvitbit.cz>",
+  alertEmail: undefined,
   trustedProxyHops: 2,
   shareKeyVersion: 1,
   androidAssetlinksSha256: "AA:BB:CC",
@@ -1521,6 +1522,167 @@ describe("Pure-Alchemy Cloud DNS", () => {
           ...record,
         });
       }
+    }
+  });
+});
+
+describe("Cloud Monitoring", () => {
+  const compile = (config: KvitbitStackConfig) =>
+    Effect.runPromise(
+      Effect.scoped(
+        Stack.Stack(
+          KVITBIT_STACK_NAME,
+          { state: State.inMemoryState(), providers: Layer.empty },
+          declareKvitbitStack(config).pipe(Effect.orDie),
+        ),
+      ).pipe(Effect.provideService(Stage, config.stage)),
+    );
+
+  const load = (alertEmail?: string) =>
+    loadStackConfig.pipe(
+      Effect.provide(
+        ConfigProvider.layer(
+          ConfigProvider.fromEnv({
+            env: {
+              KVITBIT_IMAGE_DIGEST: SAMPLE_DIGEST,
+              ...(alertEmail === undefined ? {} : { KVITBIT_ALERT_EMAIL: alertEmail }),
+            },
+          }),
+        ),
+      ),
+    );
+
+  const resolveOutputs = (props: unknown, upstream: Record<string, unknown>) =>
+    Effect.runPromise(Output.evaluate(props, upstream).pipe(Effect.provide(State.inMemoryState())));
+
+  test("loads a single alert recipient and treats unset or blank values as absent", async () => {
+    expect((await Effect.runPromise(load())).alertEmail).toBeUndefined();
+    expect((await Effect.runPromise(load("  "))).alertEmail).toBeUndefined();
+    expect((await Effect.runPromise(load("  ops@kvitbit.com  "))).alertEmail).toBe(
+      "ops@kvitbit.com",
+    );
+    for (const invalid of [
+      "ops",
+      "ops@no-domain",
+      "Kvitbit <ops@kvitbit.com>",
+      "ops@one.test,ops@two.test",
+    ]) {
+      expect(await Effect.runPromise(Effect.flip(load(invalid)))).toMatchObject({
+        _tag: "InvalidStackConfig",
+        field: "KVITBIT_ALERT_EMAIL",
+      });
+    }
+  });
+
+  test("enables the Monitoring API during foundation bootstrap and passes project and email through deployment", async () => {
+    const config = sampleProdConfig({ bootstrapFoundation: true, imageDigest: "" });
+    const { resources } = await compile(config);
+    expect(resources.CloudMonitoringApi?.Type).toBe("GCP.ServiceUsage.ProjectService");
+    expect(resources.CloudMonitoringApi?.Props).toEqual({
+      project: config.projectId,
+      service: "monitoring.googleapis.com",
+    });
+    expect(foundationResourceIds(config)).toContain("CloudMonitoringApi");
+    expect(resources.MonitoringCloudRunErrors).toBeUndefined();
+    expect(resources.MonitoringReadinessCheck).toBeUndefined();
+    const server = serverPlainEnv(sampleProdConfig({ projectId: "custom-project" }), {
+      blobsBucket: "blobs",
+      mobileAssetsBucket: "mobile",
+    });
+    expect(server).toContainEqual({ name: "GOOGLE_CLOUD_PROJECT", value: "custom-project" });
+    const workflow = readFileSync(
+      new URL("../../../.github/workflows/deploy.yml", import.meta.url),
+      "utf8",
+    );
+    expect(workflow).toMatch(/KVITBIT_ALERT_EMAIL: \$\{\{ vars\.KVITBIT_ALERT_EMAIL \}\}/);
+  });
+
+  test("uses the HTTPS origin or the first HTTPS edge domain and skips HTTP-only targets", async () => {
+    const noEdge = { edge: undefined };
+    const upstream = { CloudMonitoringApi: { state: "ENABLED" } };
+    const http = await compile(sampleProdConfig({ ...noEdge, appOrigin: "http://example.com" }));
+    expect(http.resources.MonitoringReadinessCheck).toBeUndefined();
+    expect(http.resources.MonitoringReadinessFailure).toBeUndefined();
+    expect(http.resources.MonitoringCloudRunErrors).toBeUndefined();
+    const emailOnly = await compile(
+      sampleProdConfig({
+        ...noEdge,
+        appOrigin: "http://example.com",
+        alertEmail: "ops@kvitbit.com",
+      }),
+    );
+    expect(emailOnly.resources.MonitoringReadinessCheck).toBeUndefined();
+    expect(emailOnly.resources.MonitoringCloudRunErrors).toBeDefined();
+
+    const fallback = await compile(sampleProdConfig({ appOrigin: undefined }));
+    expect(
+      await resolveOutputs(fallback.resources.MonitoringReadinessCheck?.Props, upstream),
+    ).toMatchObject({ host: "kvitbit.cz", port: 443 });
+
+    const direct = await compile(
+      sampleProdConfig({ ...noEdge, appOrigin: "https://example.com:8443" }),
+    );
+    expect(
+      await resolveOutputs(direct.resources.MonitoringReadinessCheck?.Props, upstream),
+    ).toMatchObject({ project: "kvitbit-prod", host: "example.com", port: 8443, period: "60s" });
+  });
+
+  test("builds matching numerator and denominator aggregations and links the actual check and channel", async () => {
+    const configured = await compile(sampleProdConfig({ alertEmail: "ops@kvitbit.com" }));
+    const channel = "projects/kvitbit-prod/notificationChannels/123";
+    const upstream = {
+      CloudMonitoringApi: { state: "ENABLED" },
+      KvitbitServer: { serviceId: "kvitbit-prod-server" },
+      MonitoringEmail: { name: channel },
+      MonitoringReadinessCheck: { resourceId: "kvitbit-ready-123" },
+    };
+    const denominatorFilter =
+      'metric.type="run.googleapis.com/request_count" AND resource.type="cloud_run_revision" AND resource.label.service_name="kvitbit-prod-server"';
+    const aggregations = [
+      {
+        alignmentPeriod: "300s",
+        perSeriesAligner: "ALIGN_DELTA",
+        crossSeriesReducer: "REDUCE_SUM",
+      },
+    ];
+    expect(
+      await resolveOutputs(configured.resources.MonitoringCloudRunErrors?.Props, upstream),
+    ).toMatchObject({
+      condition: {
+        conditionThreshold: {
+          denominatorFilter,
+          filter: `${denominatorFilter} AND metric.label.response_code_class="5xx"`,
+          aggregations,
+          denominatorAggregations: aggregations,
+          comparison: "COMPARISON_GT",
+          thresholdValue: 0.05,
+          duration: "0s",
+        },
+      },
+      notificationChannels: [channel],
+    });
+    expect(
+      Object.keys(
+        Output.upstreamAny(configured.resources.MonitoringReadinessFailure?.Props),
+      ).sort(),
+    ).toEqual(["CloudMonitoringApi", "MonitoringEmail", "MonitoringReadinessCheck"]);
+    expect(
+      await resolveOutputs(configured.resources.MonitoringReadinessFailure?.Props, upstream),
+    ).toMatchObject({
+      condition: {
+        conditionThreshold: {
+          filter:
+            'metric.type="monitoring.googleapis.com/uptime_check/check_passed" AND resource.type="uptime_url" AND metric.label.check_id="kvitbit-ready-123"',
+        },
+      },
+      notificationChannels: [channel],
+    });
+    const unconfigured = await compile(sampleProdConfig());
+    expect(unconfigured.resources.MonitoringEmail).toBeUndefined();
+    for (const policy of ["MonitoringCloudRunErrors", "MonitoringReadinessFailure"]) {
+      expect(await resolveOutputs(unconfigured.resources[policy]?.Props, upstream)).toMatchObject({
+        notificationChannels: [],
+      });
     }
   });
 });
