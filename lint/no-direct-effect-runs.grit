@@ -122,7 +122,10 @@ pattern effect_receiver() {
 }
 
 pattern binding_name($local) {
-  contains JsIdentifierBinding() as $binding where { $binding <: $local }
+  contains ( JsIdentifierBinding() as $binding where { $binding <: $local }) until or {
+    JsInitializerClause(),
+    JsComputedMemberName()
+  }
 }
 
 pattern declares_binding($local) {

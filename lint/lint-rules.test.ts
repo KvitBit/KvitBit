@@ -304,9 +304,29 @@ const scopeCases = [
     rules: [],
   },
   {
+    file: "apps/server/src/runner-constructor-default-callback.ts",
+    source: `${aliasedEffectImport}\ntype Options = { map?: (n: number) => number };\nclass Demo { constructor({ map = (Fx: number) => Fx }: Options = {}) { Fx.runSync(Fx.succeed(map(1))); } }`,
+    rules: ["no-direct-effect-runs"],
+  },
+  {
+    file: "apps/server/src/runner-constructor-nested-binding.ts",
+    source: `${aliasedEffectImport}\nclass Demo { constructor({ items: [Fx] }: { items: [{ runSync(): number }] }) { Fx.runSync(); } }`,
+    rules: [],
+  },
+  {
     file: "apps/server/src/runner-for-of-shadow.ts",
     source: `${aliasedEffectImport}\nfor (const Fx of items) { Fx.runSync(); }`,
     rules: [],
+  },
+  {
+    file: "apps/server/src/runner-for-of-default-callback.ts",
+    source: `${aliasedEffectImport}\ntype Options = { map?: (n: number) => number };\nfunction each(options: Options[]) { for (const { map = (Fx: number) => Fx } of options) { Fx.runSync(Fx.succeed(map(1))); } }`,
+    rules: ["no-direct-effect-runs"],
+  },
+  {
+    file: "apps/server/src/runner-for-of-computed-callback.ts",
+    source: `${aliasedEffectImport}\nconst key = (map: (key: "item") => "item") => map("item");\nfunction each(items: { item: number }[]) { for (const { [key((Fx) => Fx)]: item } of items) { Fx.runSync(Fx.succeed(item)); } }`,
+    rules: ["no-direct-effect-runs"],
   },
   {
     file: "apps/server/src/runner-for-in-shadow.ts",
